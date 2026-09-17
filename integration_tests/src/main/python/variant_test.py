@@ -18,9 +18,15 @@ from asserts import (assert_cpu_and_gpu_are_equal_collect_with_capture,
                      assert_gpu_and_cpu_are_equal_collect,
                      assert_gpu_fallback_write,
                      assert_gpu_fallback_collect)
+from conftest import is_databricks_runtime
 from data_gen import idfn
 from marks import allow_non_gpu, incompat
-from spark_session import is_before_spark_400, is_spark_411_or_later, with_cpu_session
+from spark_session import (is_before_spark_400, is_databricks173_or_later,
+                           is_spark_411_or_later, with_cpu_session)
+
+pytestmark = pytest.mark.skipif(
+    is_databricks_runtime() and not is_databricks173_or_later(),
+    reason='Variant extraction is supported for Databricks 17.3+')
 
 _variant_parquet_conf = {
     'spark.rapids.sql.format.parquet.enabled': 'true',
