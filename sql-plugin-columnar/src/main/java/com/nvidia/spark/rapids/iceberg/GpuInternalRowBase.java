@@ -31,7 +31,7 @@ import org.apache.spark.unsafe.types.UTF8String;
 import java.time.LocalDate;
 
 /**
- * A wrapper class of InternalRow.
+ * Root-safe base for the Spark-specific {@link InternalRow} wrappers.
  * This class is used to fix the issue of partition writer for Date type:
  * For date type, should return a local date instead of an integer.
  */
