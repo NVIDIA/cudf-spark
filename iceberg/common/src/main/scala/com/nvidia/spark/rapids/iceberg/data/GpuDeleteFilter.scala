@@ -118,19 +118,20 @@ object GpuDeleteFileInfo {
       isDeletedColIdx: Int,
       outputDataType: Array[DataType],
       dropMask: Array[Boolean] = Array.empty): ColumnarBatch = {
-    withResource(batch) { _ =>
+    val filtered = withResource(batch) { _ =>
       withResource(GpuColumnVector.from(batch)) { table =>
         withResource(table.getColumn(isDeletedColIdx).not()) { maskCv =>
-          withResource(table.filter(maskCv)) { newTable =>
-            if (dropMask.nonEmpty) {
-              withResource(GpuColumnVector.from(newTable, outputDataType)) { newBatch =>
-                GpuColumnVector.dropColumns(newBatch, dropMask)
-              }
-            } else {
-              GpuColumnVector.from(newTable, outputDataType)
-            }
-          }
+          table.filter(maskCv)
         }
+      }
+    }
+    withResource(filtered) { _ =>
+      if (dropMask.nonEmpty) {
+        withResource(GpuColumnVector.from(filtered, outputDataType)) { newBatch =>
+          GpuColumnVector.dropColumns(newBatch, dropMask)
+        }
+      } else {
+        GpuColumnVector.from(filtered, outputDataType)
       }
     }
   }
