@@ -41,6 +41,7 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
       case "4.0.0" | "4.0.1" => "Delta40xProvider"
       case "4.1.0" => "Delta41xProvider"
       case "4.2.0" => "Delta42xProvider"
+      case "4.3.0" => "Delta43xProvider"
       case _ => fail(s"Unexpected Delta Lake version: ${io.delta.VERSION}")
     }
     assert(provider.getClass.getSimpleName == s"$expectedProvider$$")
@@ -69,10 +70,36 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
     }
   }
 
+  test("Delta 4.3 runtime shim selection covers supported Spark versions") {
+    Seq("4.0.1", "4.1.1").foreach { sparkVersion =>
+      val shimClassName = DeltaRuntimeShim.getDelta43ShimClassName("4.3.0", sparkVersion)
+      assert(shimClassName.exists(_.contains("delta43x")))
+    }
+  }
+
+  test("Delta 4.3 runtime shim selection rejects unsupported combinations") {
+    val unsupported = Seq(
+      ("4.3.0", "4.0.0"),
+      ("4.3.0", "4.1.0"),
+      ("4.3.0", "4.1.2"),
+      ("4.3.1", "4.0.1"))
+
+    unsupported.foreach { case (deltaVersion, sparkVersion) =>
+      val error = intercept[IllegalStateException] {
+        DeltaRuntimeShim.getDelta43ShimClassName(deltaVersion, sparkVersion)
+      }
+      assert(error.getMessage.contains(deltaVersion))
+      assert(error.getMessage.contains(sparkVersion))
+    }
+  }
+
   test("existing Delta versions use the pre-4.2 runtime shim selection") {
     Seq("2.1.0", "3.3.3", "4.0.0", "4.1.0").foreach { deltaVersion =>
       assert(DeltaRuntimeShim.getDelta42ShimClassName(deltaVersion, "4.0.1").isEmpty)
+      assert(DeltaRuntimeShim.getDelta43ShimClassName(deltaVersion, "4.0.1").isEmpty)
     }
+    assert(DeltaRuntimeShim.getDelta42ShimClassName("4.3.0", "4.0.1").isEmpty)
+    assert(DeltaRuntimeShim.getDelta43ShimClassName("4.2.0", "4.0.1").isEmpty)
   }
 
   test("GPU write factory has no default implementation") {
@@ -81,8 +108,8 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
     assert(Modifier.isAbstract(method.getModifiers))
   }
 
-  test("Delta 4.2 GPU writes use the runtime-specific GPU implementation") {
-    assume(io.delta.VERSION == "4.2.0")
+  test("Delta 4.2 and 4.3 GPU writes use the runtime-specific GPU implementation") {
+    assume(Seq("4.2.0", "4.3.0").contains(io.delta.VERSION))
     val deltaLog = mock[DeltaLog]
     val cpuWrite = WriteIntoDelta(
       deltaLog,
@@ -94,12 +121,17 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
     val gpuWrite = DeltaRuntimeShim.createGpuWrite(
       new GpuDeltaLog(deltaLog, new RapidsConf(Map.empty[String, String])), cpuWrite)
 
-    assert(gpuWrite.getClass.getSimpleName == "GpuWriteIntoDelta42x")
+    val expectedClass = io.delta.VERSION match {
+      case "4.2.0" => "GpuWriteIntoDelta42x"
+      case "4.3.0" => "GpuWriteIntoDelta43x"
+      case version => fail(s"Unexpected Delta Lake version: $version")
+    }
+    assert(gpuWrite.getClass.getSimpleName == expectedClass)
     assert(gpuWrite.isInstanceOf[GpuWriteIntoDeltaBase])
     assert(gpuWrite.isInstanceOf[LeafRunnableCommand])
     assert(gpuWrite.isInstanceOf[ImplicitMetadataOperation])
     assert(gpuWrite.withNewWriterConfiguration(Map("key" -> "value"))
-      .getClass.getSimpleName == "GpuWriteIntoDelta42x")
+      .getClass.getSimpleName == expectedClass)
 
     val accessor = classOf[WriteIntoDeltaLike]
       .getMethod("ReplaceWhereExprsAndDataFilterPresenceInExprs")

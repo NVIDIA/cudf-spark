@@ -19,19 +19,23 @@ package org.apache.spark.sql.delta.rapids
 import com.nvidia.spark.rapids.RapidsConf
 import com.nvidia.spark.rapids.delta.{AcceptAllConfigChecker, DeltaConfigChecker, DeltaProvider}
 
-import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression}
 import org.apache.spark.sql.connector.catalog.StagingTableCatalog
 import org.apache.spark.sql.delta.{DeltaLog, DeltaUDF, Snapshot, TransactionExecutionObserver}
+import org.apache.spark.sql.delta.actions.AddFile
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
+import org.apache.spark.sql.delta.commands.{DeltaReorgOperation, UpdateCommand}
+import org.apache.spark.sql.delta.metering.DeltaLogging
 import org.apache.spark.sql.execution.datasources.FileFormat
 import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.util.Clock
 
 /**
- * Shared base for 3.3.x, 4.0.x, and 4.1.x runtime shims.
+ * Shared base for Delta 3.3 and later runtime shims.
  * Version-specific shims override provider, catalog, and transaction construction.
  */
-abstract class DeltaRuntimeShimBase extends DeltaRuntimeShim {
+abstract class DeltaRuntimeShimBase extends DeltaRuntimeShim33x with DeltaLogging {
   override def getDeltaConfigChecker: DeltaConfigChecker = AcceptAllConfigChecker
 
   // Provider is version-specific
@@ -44,6 +48,38 @@ abstract class DeltaRuntimeShimBase extends DeltaRuntimeShim {
   override def fileFormatFromLog(deltaLog: DeltaLog): FileFormat =
     deltaLog.fileFormat(deltaLog.unsafeVolatileSnapshot.protocol,
       deltaLog.unsafeVolatileSnapshot.metadata)
+
+  override def runDeltaOperation[A](
+      deltaLog: DeltaLog,
+      opType: String)(thunk: => A): A = {
+    recordDeltaOperation(deltaLog, opType)(thunk)
+  }
+
+  override def emitDeltaEvent(
+      deltaLog: DeltaLog,
+      opType: String,
+      data: AnyRef): Unit = {
+    recordDeltaEvent(deltaLog, opType, data = data)
+  }
+
+  override def assertRemovable(snapshot: Snapshot): Unit = DeltaLog.assertRemovable(snapshot)
+
+  override def filterFilesToReorg(
+      operation: DeltaReorgOperation,
+      spark: SparkSession,
+      snapshot: Snapshot,
+      candidates: Seq[AddFile]): Seq[AddFile] = {
+    operation.filterFilesToReorg(spark, snapshot, candidates)
+  }
+
+  override def preserveRowTrackingColumns(
+      targetDfWithoutRowTrackingColumns: DataFrame,
+      snapshot: Snapshot,
+      targetOutput: Seq[Attribute],
+      updateExpressions: Seq[Expression]): (DataFrame, Seq[Attribute], Seq[Expression]) = {
+    UpdateCommand.preserveRowTrackingColumns(
+      targetDfWithoutRowTrackingColumns, snapshot, targetOutput, updateExpressions)
+  }
 
   override def getTightBoundColumnOnFileInitDisabled(spark: SparkSession): Boolean = false
 

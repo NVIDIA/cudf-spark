@@ -25,7 +25,6 @@ import com.nvidia.spark.rapids.{GpuCreatableRelationProvider, RapidsConf}
 
 import org.apache.spark.sql.{DataFrame, SaveMode, SQLContext}
 import org.apache.spark.sql.delta.{DeltaConfigs, DeltaErrors, DeltaOptions}
-import org.apache.spark.sql.delta.commands.WriteIntoDelta
 import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShim, GpuDeltaLog}
 import org.apache.spark.sql.delta.sources.{DeltaDataSource, DeltaSourceUtils}
 import org.apache.spark.sql.sources.BaseRelation
@@ -47,14 +46,16 @@ class GpuDeltaDataSource(rapidsConf: RapidsConf) extends GpuCreatableRelationPro
     val gpuDeltaLog = GpuDeltaLog.forTable(sqlContext.sparkSession, path, parameters, rapidsConf)
     DeltaRuntimeShim.createGpuWrite(
       gpuDeltaLog,
-      WriteIntoDelta(
+      DeltaRuntimeShim.createCpuWrite(
         deltaLog = gpuDeltaLog.deltaLog,
         mode = mode,
         new DeltaOptions(parameters, sqlContext.sparkSession.sessionState.conf),
         partitionColumns = partitionColumns,
         configuration = DeltaConfigs.validateConfigurations(
           parameters.filterKeys(_.startsWith("delta.")).toMap),
-        data = data)).run(sqlContext.sparkSession)
+        data = data,
+        catalogTableOpt = None,
+        schemaInCatalog = None)).run(sqlContext.sparkSession)
 
     gpuDeltaLog.deltaLog.createRelation()
   }

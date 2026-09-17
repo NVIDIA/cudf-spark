@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import re
 
 import pyspark.sql.functions as f
@@ -146,6 +147,66 @@ def test_delta_merge_check_overflow_in_table_write_error(
             re.DOTALL))
 
 
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="MERGE record-count validation was added in OSS Delta 4.3")
+def test_delta_merge_num_records_validation(spark_tmp_path, spark_tmp_table_factory):
+    updates_view = spark_tmp_table_factory.get()
+
+    def set_num_records_to_zero(spark, target_path):
+        log_path = target_path + "/_delta_log/00000000000000000000.json"
+        log_files = spark.sparkContext.wholeTextFiles(log_path).collect()
+        assert len(log_files) == 1, f"Expected one Delta log file at {log_path}"
+
+        log_uri, contents = log_files[0]
+        actions = [json.loads(line) for line in contents.splitlines()]
+        add_actions = [action["add"] for action in actions if "add" in action]
+        assert len(add_actions) == 1, f"Expected one AddFile action in {log_path}"
+        stats = json.loads(add_actions[0]["stats"])
+        stats["numRecords"] = 0
+        add_actions[0]["stats"] = json.dumps(stats, separators=(",", ":"))
+        rewritten_contents = "\n".join(
+            json.dumps(action, separators=(",", ":")) for action in actions) + "\n"
+
+        jvm = spark.sparkContext._jvm
+        hadoop_path = jvm.org.apache.hadoop.fs.Path(log_uri)
+        fs = hadoop_path.getFileSystem(spark.sparkContext._jsc.hadoopConfiguration())
+        output = fs.create(hadoop_path, True)
+        try:
+            output.write(bytearray(rewritten_contents, "utf-8"))
+        finally:
+            output.close()
+        jvm.org.apache.spark.sql.delta.DeltaLog.clearCache()
+
+    def do_merge(spark):
+        gpu_enabled = str(spark.conf.get("spark.rapids.sql.enabled", "false")).lower() == "true"
+        target_path = spark_tmp_path + ("/GPU" if gpu_enabled else "/CPU")
+        spark.createDataFrame([(1, "old")], "id INT, value STRING") \
+            .coalesce(1) \
+            .write.format("delta") \
+            .option("delta.enableDeletionVectors", "false") \
+            .mode("overwrite") \
+            .save(target_path)
+        set_num_records_to_zero(spark, target_path)
+        spark.createDataFrame([(1, "new")], "id INT, value STRING") \
+            .createOrReplaceTempView(updates_view)
+        return spark.sql(f"""
+            MERGE INTO delta.`{target_path}` AS target
+            USING {updates_view} AS source
+            ON target.id = source.id
+            WHEN MATCHED THEN UPDATE SET value = source.value
+        """).collect()
+
+    conf = copy_and_update(delta_merge_no_cpu_bridge_conf, {
+        "spark.databricks.delta.numRecordsValidation.enabled": "true"
+    })
+    assert_gpu_and_cpu_error(
+        do_merge,
+        conf=conf,
+        error_message="DELTA_NUM_RECORDS_MISMATCH")
+
+
 @allow_non_gpu(delta_write_fallback_allow, *delta_meta_allow)
 @delta_lake
 @ignore_order
@@ -190,7 +251,7 @@ def test_delta_merge_fallback_with_deletion_vectors(spark_tmp_path, spark_tmp_ta
 @ignore_order
 @pytest.mark.skipif(is_databricks_runtime() and spark_version() < "3.3.2", reason="NOT MATCHED BY SOURCE added in DBR 12.2")
 @pytest.mark.skipif((not is_databricks_runtime()) and is_before_spark_340(), reason="NOT MATCHED BY SOURCE added in Delta Lake 2.4")
-@pytest.mark.skipif(is_oss_delta_lake_41_or_42(),
+@pytest.mark.skipif(is_oss_delta_lake_41_to_43(),
                     reason="NOT MATCHED BY SOURCE is supported on the GPU with OSS Delta 4.1+")
 @pytest.mark.skipif(is_databricks173_or_later(),
                     reason="NOT MATCHED BY SOURCE is supported on the GPU with Databricks 17.3+")
@@ -219,7 +280,7 @@ def test_delta_merge_not_matched_by_source_fallback(spark_tmp_path, spark_tmp_ta
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not (is_oss_delta_lake_41_or_42() or is_databricks173_or_later()),
+@pytest.mark.skipif(not (is_oss_delta_lake_41_to_43() or is_databricks173_or_later()),
                     reason="NOT MATCHED BY SOURCE is supported on the GPU with OSS Delta 4.1+ "
                     "and Databricks 17.3+")
 @pytest.mark.parametrize("use_cdf", [False, True], ids=idfn)
@@ -1218,7 +1279,7 @@ def test_delta_merge_nullable_matched_conditions(spark_tmp_path, spark_tmp_table
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not (is_oss_delta_lake_41_or_42() or is_databricks173_or_later()),
+@pytest.mark.skipif(not (is_oss_delta_lake_41_to_43() or is_databricks173_or_later()),
                     reason="NOT MATCHED BY SOURCE is supported on the GPU with OSS Delta 4.1+ "
                     "and Databricks 17.3+")
 @pytest.mark.parametrize("use_cdf", [False, True], ids=idfn)

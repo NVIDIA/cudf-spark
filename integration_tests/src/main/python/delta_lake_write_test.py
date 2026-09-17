@@ -1769,7 +1769,7 @@ def test_delta_write_partial_overwrite_replace_where(spark_tmp_path):
 @allow_non_gpu(*delta_meta_allow, delta_write_fallback_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_42(), reason="Delta 4.2 write option")
+@pytest.mark.skipif(not is_oss_delta_lake_42_or_43(), reason="Delta 4.2+ write option")
 @pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
 def test_delta_replace_on_or_using_fallback(spark_tmp_path, option_name):
     data_path = spark_tmp_path + "/DELTA_DATA"
@@ -1779,8 +1779,15 @@ def test_delta_replace_on_or_using_fallback(spark_tmp_path, option_name):
             spark.range(4).write.format("delta").save(path)
 
     def overwrite(spark, path):
-        (spark.range(2, 6).write.format("delta").mode("overwrite")
-         .option(option_name, "id").save(path))
+        replacement = spark.range(2, 6)
+        if option_name == "replaceOn":
+            (replacement.alias("source").write.format("delta").mode("overwrite")
+             .option("targetAlias", "target")
+             .option("replaceOn", "target.id = source.id")
+             .save(path))
+        else:
+            (replacement.write.format("delta").mode("overwrite")
+             .option("replaceUsing", "id").save(path))
 
     with_cpu_session(setup_tables, conf=_delta_confs)
     assert_gpu_fallback_write(
@@ -1790,7 +1797,7 @@ def test_delta_replace_on_or_using_fallback(spark_tmp_path, option_name):
 @allow_non_gpu(*delta_meta_allow, delta_write_fallback_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_42(), reason="Delta 4.2 write option")
+@pytest.mark.skipif(not is_oss_delta_lake_42_or_43(), reason="Delta 4.2+ write option")
 def test_delta_target_alias_fallback(spark_tmp_path):
     data_path = spark_tmp_path + "/DELTA_DATA"
 
@@ -1814,8 +1821,8 @@ def test_delta_target_alias_fallback(spark_tmp_path):
 @allow_non_gpu(*delta_meta_allow, delta_write_fallback_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_42(), reason="Delta 4.2 write option")
-def test_delta_42_null_intolerant_dpo_fallback(spark_tmp_path):
+@pytest.mark.skipif(not is_oss_delta_lake_42_or_43(), reason="Delta 4.2+ write option")
+def test_delta_42_or_43_null_intolerant_dpo_fallback(spark_tmp_path):
     data_path = spark_tmp_path + "/DELTA_DATA"
 
     def setup_tables(spark):
@@ -1838,7 +1845,7 @@ def test_delta_42_null_intolerant_dpo_fallback(spark_tmp_path):
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_41_or_42(),
+@pytest.mark.skipif(not is_oss_delta_lake_41_to_43(),
                     reason="Delta only evaluates DPO in the write commit metadata since 4.1")
 def test_delta_invalid_partition_overwrite_mode_non_partitioned(spark_tmp_path):
     data_path = spark_tmp_path + "/DELTA_DATA"

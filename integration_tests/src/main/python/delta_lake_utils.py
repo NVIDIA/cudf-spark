@@ -73,13 +73,19 @@ def _loaded_delta_lake_version():
         return None
 
 
-def is_oss_delta_lake_42():
-    return not is_databricks_runtime() and _loaded_delta_lake_version() == "4.2.0"
-
-
-def is_oss_delta_lake_41_or_42():
+def is_oss_delta_lake_42_or_43():
     return (not is_databricks_runtime()
-            and _loaded_delta_lake_version() in ("4.1.0", "4.2.0"))
+            and _loaded_delta_lake_version() in ("4.2.0", "4.3.0"))
+
+
+def is_oss_delta_lake_43():
+    return (not is_databricks_runtime()
+            and _loaded_delta_lake_version() == "4.3.0")
+
+
+def is_oss_delta_lake_41_to_43():
+    return (not is_databricks_runtime()
+            and _loaded_delta_lake_version() in ("4.1.0", "4.2.0", "4.3.0"))
 
 
 delta_reorg_xfail = pytest.mark.xfail(

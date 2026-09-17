@@ -48,17 +48,17 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.StructType
 
 /**
- * Shared implementation of the GPU WriteIntoDeltaLike contract for Delta 4.0 through 4.2.
+ * Shared implementation of the GPU WriteIntoDeltaLike contract for Delta 4.0 through 4.3.
  */
 abstract class GpuWriteIntoDeltaBase(
     val gpuDeltaLog: GpuDeltaLog,
     val cpuWrite: WriteIntoDelta)
     extends LeafRunnableCommand
       with ImplicitMetadataOperation {
-  
+
   // The self-type deliberately keeps the version-specific GpuWriteIntoDeltaLike contract off this
-  // base class's JVM interface list. Delta 4.1 and 4.2 adapters share this base class name in the
-  // aggregate JAR, while their WriteIntoDeltaLike interfaces are not binary compatible.
+  // base class's JVM interface list. Delta 4.1 through 4.3 adapters share this base class name in
+  // the aggregate JAR, while their WriteIntoDeltaLike interfaces are not binary compatible.
   self: GpuWriteIntoDeltaLike =>
 
   override protected val canMergeSchema: Boolean = cpuWrite.options.canMergeSchema
@@ -83,6 +83,21 @@ abstract class GpuWriteIntoDeltaBase(
    * concrete GPU subclass used by the current Delta runtime.
    */
   protected def copyWithCpuWrite(newCpuWrite: WriteIntoDelta): GpuWriteIntoDeltaLike
+
+  /** Select files removed by overwrite using the selected Delta runtime API. */
+  protected def getFilesToRemoveForOverwrite(
+      txn: OptimisticTransaction,
+      addFiles: Seq[AddFile],
+      useDynamicPartitionOverwriteMode: Boolean): Seq[Action]
+
+  /** Register write metrics using the APIs provided by the selected Delta runtime. */
+  protected def registerWriteOperationMetrics(
+      sparkSession: SqlSparkSession,
+      txn: OptimisticTransaction,
+      newFiles: Seq[FileAction],
+      deletedFiles: Seq[Action],
+      replaceWhere: Option[Seq[Expression]],
+      replaceOnDataColsEnabled: Boolean): Unit
 
   override def run(sparkSession: SqlSparkSession): Seq[Row] = {
     gpuDeltaLog.withNewTransaction(cpuWrite.catalogTableOpt) { txn =>
@@ -117,7 +132,7 @@ abstract class GpuWriteIntoDeltaBase(
       } else if (cpuWrite.mode == SaveMode.Ignore) {
         return TaggedCommitData.empty
       } else if (cpuWrite.mode == SaveMode.Overwrite) {
-        DeltaLog.assertRemovable(txn.snapshot)
+        DeltaRuntimeShim33x.assertRemovable(txn.snapshot)
       }
     }
     val isReplaceWhere = cpuWrite.mode == SaveMode.Overwrite &&
@@ -314,15 +329,8 @@ abstract class GpuWriteIntoDeltaBase(
           txn, data, cpuWrite.options
         )
         val addFiles = newFiles.collect { case a: AddFile => a }
-        val deletedFiles = if (useDynamicPartitionOverwriteMode) {
-          // with dynamic partition overwrite for any partition that is being written to all
-          // existing data in that partition will be deleted.
-          // the selection what to delete is on the next two lines
-          val updatePartitions = addFiles.map(_.partitionValues).toSet
-          txn.filterFiles(updatePartitions).map(_.remove)
-        } else {
-          txn.filterFiles().map(_.remove)
-        }
+        val deletedFiles = getFilesToRemoveForOverwrite(
+          txn, addFiles, useDynamicPartitionOverwriteMode)
         (newFiles, addFiles, deletedFiles)
       case _ =>
         val newFiles = writeFiles(
@@ -331,11 +339,8 @@ abstract class GpuWriteIntoDeltaBase(
         (newFiles, newFiles.collect { case a: AddFile => a }, Nil)
     }
 
-    // Need to handle replace where metrics separately.
-    if (replaceWhere.nonEmpty && replaceOnDataColsEnabled &&
-      sparkSession.conf.get(DeltaSQLConf.REPLACEWHERE_METRICS_ENABLED)) {
-      registerReplaceWhereMetrics(sparkSession, txn, newFiles, deletedFiles)
-    }
+    registerWriteOperationMetrics(
+      sparkSession, txn, newFiles, deletedFiles, replaceWhere, replaceOnDataColsEnabled)
 
     val fileActions = if (rearrangeOnly) {
       val changeFiles = newFiles.collect { case c: AddCDCFile => c }
@@ -399,7 +404,7 @@ abstract class GpuWriteIntoDeltaBase(
     val deleteActions = deleteResult._1
     val deleteMetrics = deleteResult._2
 
-    recordDeltaEvent(
+    DeltaRuntimeShim33x.emitDeltaEvent(
       deltaLog,
       "delta.dml.write.removeFiles.stats",
       data = deleteMetrics

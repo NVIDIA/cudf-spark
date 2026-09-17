@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,7 +35,7 @@ import org.apache.spark.sql.connector.expressions.{FieldReference, IdentityTrans
 import org.apache.spark.sql.connector.write.{LogicalWriteInfo, V1Write, WriteBuilder}
 import org.apache.spark.sql.delta.{DeltaErrors, DeltaLog, DeltaOptions}
 import org.apache.spark.sql.delta.catalog.{BucketTransform, DeltaCatalog}
-import org.apache.spark.sql.delta.commands.{TableCreationModes, WriteIntoDelta}
+import org.apache.spark.sql.delta.commands.TableCreationModes
 import org.apache.spark.sql.delta.sources.{DeltaSourceUtils, DeltaSQLConf}
 import org.apache.spark.sql.execution.command.LeafRunnableCommand
 import org.apache.spark.sql.execution.datasources.DataSource
@@ -159,13 +159,14 @@ trait GpuDeltaCatalogBase extends StagingTableCatalog {
     val withDb = verifyTableAndSolidify(tableDesc, None)
 
     val writer = sourceQuery.map { df =>
-      WriteIntoDelta(
+      DeltaRuntimeShim.createCpuWrite(
         DeltaLog.forTable(spark, new Path(loc)),
         operation.mode,
         new DeltaOptions(withDb.storage.properties, spark.sessionState.conf),
         withDb.partitionColumnNames,
         withDb.properties ++ commentOpt.map("comment" -> _),
         df,
+        catalogTableOpt = None,
         schemaInCatalog = if (newSchema != schema) Some(newSchema) else None)
     }
 

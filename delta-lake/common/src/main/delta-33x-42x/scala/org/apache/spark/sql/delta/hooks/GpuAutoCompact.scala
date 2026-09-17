@@ -29,8 +29,8 @@ import org.apache.spark.sql.delta.actions._
 import org.apache.spark.sql.delta.commands.DeltaOptimizeContext
 import org.apache.spark.sql.delta.commands.optimize._
 import org.apache.spark.sql.delta.logging.DeltaLogKeys
+import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShim33x, GpuOptimisticTransactionBase}
 import org.apache.spark.sql.delta.rapids.DeltaMdcShims.mdc
-import org.apache.spark.sql.delta.rapids.GpuOptimisticTransactionBase
 import org.apache.spark.sql.delta.rapids.commands.GpuOptimizeExecutor
 import org.apache.spark.sql.delta.sources.DeltaSQLConf
 import org.apache.spark.sql.delta.stats.AutoCompactPartitionStats
@@ -74,7 +74,7 @@ trait GpuAutoCompactBase extends AutoCompactBase {
       } catch {
         case e: Throwable =>
           logError(log"Auto Compaction failed with: ${mdc(DeltaLogKeys.ERROR, e.getMessage)}")
-          recordDeltaEvent(
+          DeltaRuntimeShim33x.emitDeltaEvent(
             deltaLog,
             opType = "delta.autoCompaction.error",
             data = getErrorData(e))
@@ -105,12 +105,12 @@ trait GpuAutoCompactBase extends AutoCompactBase {
       partitionPredicates: Seq[Expression] = Nil,
       opType: String = OP_TYPE,
       maxDeletedRowsRatio: Option[Double] = None)
-  : Seq[OptimizeMetrics] = recordDeltaOperation(deltaLog, opType) {
+  : Seq[OptimizeMetrics] = DeltaRuntimeShim33x.runDeltaOperation(deltaLog, opType) {
     val maxFileSize = spark.conf.get(DeltaSQLConf.DELTA_AUTO_COMPACT_MAX_FILE_SIZE)
     val minFileSizeOpt = Some(spark.conf.get(DeltaSQLConf.DELTA_AUTO_COMPACT_MIN_FILE_SIZE)
       .getOrElse(maxFileSize / 2))
     val maxFileSizeOpt = Some(maxFileSize)
-    recordDeltaOperation(deltaLog, s"$opType.execute") {
+    DeltaRuntimeShim33x.runDeltaOperation(deltaLog, s"$opType.execute") {
       val optimizeContext = DeltaOptimizeContext(
         reorg = None,
         minFileSizeOpt,
@@ -128,7 +128,7 @@ trait GpuAutoCompactBase extends AutoCompactBase {
       ).optimize()
       val metrics = rows.map(_.getAs[OptimizeMetrics](1))
       metrics.headOption.foreach { metric =>
-        recordDeltaEvent(deltaLog, s"$opType.execute.metrics", data = metric)
+        DeltaRuntimeShim33x.emitDeltaEvent(deltaLog, s"$opType.execute.metrics", data = metric)
       }
       metrics
     }
