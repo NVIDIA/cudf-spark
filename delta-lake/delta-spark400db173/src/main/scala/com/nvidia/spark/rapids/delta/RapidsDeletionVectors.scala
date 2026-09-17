@@ -130,7 +130,7 @@ object RapidsDeletionVectors extends Logging {
         val filterTypes = tahoeFileIndex.rowIndexFilters.getOrElse(Map.empty)
           .map(kv => kv._1 -> kv._2.getRowIndexFilterType)
         val matchingFiles = tahoeFileIndex
-          .matchingFiles(partitionFilters = Seq(TrueLiteral), dataFilters = Seq(TrueLiteral))
+          .matchingFiles(partitionFilters = Seq.empty, dataFilters = Seq(TrueLiteral))
 
         def fileKeys(relativePath: String): Seq[String] = {
           val absolute = absolutePath(tahoeFileIndex.path.toString, relativePath)
