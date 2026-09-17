@@ -29,6 +29,15 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
     .booleanConf
     .createWithDefault(true)
 
+  val RANGE_PARTITIONING_SAMPLE_KEYS_ONLY =
+    conf("spark.rapids.sql.rangePartitioning.sampleKeysOnly")
+      .doc("When enabled, range partitioning collects range boundaries from only the columns " +
+        "needed to compute the range keys when the input plan can be safely pruned. Disable " +
+        "this to collect boundaries from the original full-width GPU input.")
+      .internal()
+      .booleanConf
+      .createWithDefault(true)
+
   val SQL_MODE = conf("spark.rapids.sql.mode")
     .doc("Set the mode for the cuDF plugin. The supported modes are explainOnly and " +
          "executeOnGPU. This config can not be changed at runtime, you must restart the " +
