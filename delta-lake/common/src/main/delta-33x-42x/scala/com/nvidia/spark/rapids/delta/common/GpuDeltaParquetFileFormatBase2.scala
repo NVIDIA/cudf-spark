@@ -60,11 +60,12 @@ object GpuDeltaParquetFileFormatBase2 {
   val GPU_ROW_INDEX_STRUCT_FIELD: StructField = ROW_INDEX_STRUCT_FIELD.copy(
     metadata = new MetadataBuilder().putBoolean(GPU_ROW_INDEX_METADATA_KEY, true).build())
 
+  private[common] def isGpuRowIndexColumn(field: StructField): Boolean =
+    field.metadata.contains(GPU_ROW_INDEX_METADATA_KEY) &&
+      field.metadata.getBoolean(GPU_ROW_INDEX_METADATA_KEY)
+
   private[common] def findGpuRowIndexColumn(schema: StructType): Int =
-    schema.fields.indexWhere { field =>
-      field.metadata.contains(GPU_ROW_INDEX_METADATA_KEY) &&
-        field.metadata.getBoolean(GPU_ROW_INDEX_METADATA_KEY)
-    }
+    schema.fields.indexWhere(isGpuRowIndexColumn)
 }
 
 /**

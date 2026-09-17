@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids.delta.common
 
 import ai.rapids.cudf._
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.parquet._
 import org.apache.hadoop.conf.Configuration
@@ -41,7 +41,7 @@ import org.apache.spark.sql.execution.datasources.{FilePartition, PartitionedFil
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids._
 import org.apache.spark.sql.sources._
-import org.apache.spark.sql.types.{LongType, MetadataBuilder, StructType}
+import org.apache.spark.sql.types.{LongType, MetadataBuilder, StructField, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.util.SerializableConfiguration
 
@@ -88,13 +88,15 @@ class GpuDeltaParquetFileFormatBase(
    * key to remove from the metadata, which does not exist in earlier versions.
    */
   override def prepareSchema(inputSchema: StructType): StructType = {
-    val internalColumnNames = Set(IS_ROW_DELETED_COLUMN_NAME, ROW_INDEX_COLUMN_NAME)
+    def isInternalColumn(field: StructField): Boolean =
+      field.name == IS_ROW_DELETED_COLUMN_NAME ||
+        GpuDeltaParquetFileFormatBase2.isGpuRowIndexColumn(field)
     val dataSchema = StructType(inputSchema.fields.filterNot(
-      field => internalColumnNames.contains(field.name)))
+      isInternalColumn))
     val physicalDataFields = DeltaColumnMapping.createPhysicalSchema(
       dataSchema, referenceSchema, columnMappingMode).fields.iterator
     val schema = StructType(inputSchema.fields.map { field =>
-      if (internalColumnNames.contains(field.name)) field else physicalDataFields.next()
+      if (isInternalColumn(field)) field else physicalDataFields.next()
     })
     if (columnMappingMode == NameMapping) {
       SchemaMergingUtils.transformColumns(schema) { (_, field, _) =>
@@ -189,9 +191,9 @@ class GpuDeltaParquetFileFormatBase(
     }
 
     val isRowDeletedColumn = findColumn(IS_ROW_DELETED_COLUMN_NAME)
-    val rowIndexColumnName = ROW_INDEX_COLUMN_NAME
-
-    val rowIndexColumn = findColumn(rowIndexColumnName)
+    val rowIndexColumn = schemaWithIndices
+      .find(entry => GpuDeltaParquetFileFormatBase2.isGpuRowIndexColumn(entry._1))
+      .map(entry => ColumnMetadata(entry._2, entry._1))
 
     // We don't have any additional columns to generate, just return the original reader as is.
     if (isRowDeletedColumn.isEmpty && rowIndexColumn.isEmpty) return dataReader
@@ -247,7 +249,7 @@ class GpuDeltaParquetFileFormatBase(
       // Explicit row indices must restart at zero for each input file. Treat these scans as
       // input-file-sensitive so the multi-threaded reader does not combine files into a partition.
       queryUsesInputFile = hasTablePath ||
-        fileScan.requiredSchema.fieldNames.contains(ROW_INDEX_COLUMN_NAME) ||
+        GpuDeltaParquetFileFormatBase2.findGpuRowIndexColumn(fileScan.requiredSchema) >= 0 ||
         fileScan.queryUsesInputFile)
   }
 }
@@ -282,9 +284,9 @@ class DeltaMultiFileReaderFactory(
   }
 
   private val isRowDeletedColumn = findColumn(IS_ROW_DELETED_COLUMN_NAME)
-  private val rowIndexColumnName = ROW_INDEX_COLUMN_NAME
-
-  private val rowIndexColumn = findColumn(rowIndexColumnName)
+  private val rowIndexColumn = schemaWithIndices
+    .find(entry => GpuDeltaParquetFileFormatBase2.isGpuRowIndexColumn(entry._1))
+    .map(entry => ColumnMetadata(entry._2, entry._1))
 
   override def createColumnarReader(p: InputPartition): PartitionReader[ColumnarBatch] = {
     val files = p.asInstanceOf[FilePartition].files
@@ -546,7 +548,12 @@ object RapidsDeletionVectorUtils {
     metrics: Map[String, GpuMetric]): ColumnarBatch = {
 
     var startTime = System.nanoTime()
-    withResource(getRowIndexPosSimple(rowIndex, rowIndex + size)) { rowIndexGpuCol =>
+    val rowIndexGpuCol = closeOnExcept(batch) { _ =>
+      RmmRapidsRetryIterator.withRetryNoSplit[GpuColumnVector] {
+        getRowIndexPosSimple(rowIndex, rowIndex + size)
+      }
+    }
+    withResource(rowIndexGpuCol) { rowIndexGpuCol =>
       metrics("rowIndexColumnGenTime") += System.nanoTime() - startTime
       val indexVectorTuples = new ArrayBuffer[(Int, org.apache.spark.sql.vectorized.ColumnVector)]
       try {

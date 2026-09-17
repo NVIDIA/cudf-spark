@@ -1680,14 +1680,19 @@ def test_delta_dml_dv_internal_row_index_column_fallback(
 @ignore_order
 @pytest.mark.skipif(is_databricks_runtime() or is_before_spark_353(),
                     reason="OSS persistent-DV reads require Delta 3.3+")
-@pytest.mark.parametrize("use_chunked_reader", [False, True], ids=idfn)
+@pytest.mark.parametrize("dv_predicate_pushdown,use_chunked_reader", [
+    (True, False),
+    (True, True),
+    pytest.param(False, False, marks=inject_oom)
+], ids=idfn)
 def test_delta_dv_read_user_internal_row_index_column(
-        spark_tmp_path, use_chunked_reader):
+        spark_tmp_path, dv_predicate_pushdown, use_chunked_reader):
     data_path = spark_tmp_path + "/DELTA_DATA"
     conf = copy_and_update(delta_writes_enabled_conf, {
         "spark.databricks.delta.delete.deletionVectors.persistent": "true",
         "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
-        "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true",
+        "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled":
+            str(dv_predicate_pushdown).lower(),
         "spark.rapids.sql.reader.chunked": str(use_chunked_reader).lower()})
 
     def setup_table(spark):
