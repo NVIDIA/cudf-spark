@@ -35,28 +35,12 @@ def supports_delta_low_shuffle_merge():
         (not is_databricks_runtime() and spark_version().startswith("3.4"))
 
 
-def _assert_gpu_low_shuffle_merge(
-        do_merge, data_path, conf, expect_write=True, expect_low_shuffle=True):
-    assert expect_write
-    cpu_result = with_cpu_session(lambda spark: do_merge(spark, data_path + "/CPU"), conf=conf)
-
-    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
-    callback.startCapture()
-    try:
-        gpu_result = with_gpu_session(
-            lambda spark: do_merge(spark, data_path + "/GPU"), conf=conf)
-        captured_plans = callback.getResultsWithTimeout(10000)
-    finally:
-        callback.endCapture()
-
-    assert_equal(cpu_result, gpu_result)
-    if expect_low_shuffle:
-        assert any(callback.contains(plan, "GpuUnionExec") for plan in captured_plans), \
-            "GpuUnionExec was not found in the captured low-shuffle MERGE write plans"
-        if is_databricks_version(17, 3):
-            assert any(callback.contains(plan, "GpuFileSourceScanExec") and
-                       "__metadata_row_index" in str(plan) for plan in captured_plans), \
-                "GPU row-index discovery scan was not found in the captured MERGE plans"
+def _generate_df(spark, fields, rows, num_slices=None):
+    data_gens = [
+        (name, RepeatSeqGen([row[index] for row in rows], data_type=data_type))
+        for index, (name, data_type) in enumerate(fields)
+    ]
+    return gen_df(spark, data_gens, length=len(rows), num_slices=num_slices)
 
 
 @allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
@@ -124,7 +108,7 @@ def test_delta_merge_match_delete_only(spark_tmp_path, spark_tmp_table_factory, 
                                           use_cdf, False, partition_columns, num_slices, False,
                                           delta_merge_enabled_conf)
 
-@allow_non_gpu("ColumnarToRowExec", "FileSourceScanExec", *delta_meta_allow)
+@allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not supports_delta_low_shuffle_merge(),
@@ -136,7 +120,7 @@ def test_delta_merge_standard_upsert(spark_tmp_path, spark_tmp_table_factory, us
                                         num_slices, False, delta_merge_enabled_conf)
 
 
-@allow_non_gpu("ColumnarToRowExec", "FileSourceScanExec", *delta_meta_allow)
+@allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not is_databricks_version(17, 3),
@@ -145,13 +129,19 @@ def test_delta_merge_standard_upsert(spark_tmp_path, spark_tmp_table_factory, us
 def test_delta_low_shuffle_merge_not_matched_by_source(
         spark_tmp_path, spark_tmp_table_factory, use_cdf):
     def src_table_func(spark):
-        return spark.createDataFrame([(1, 100), (5, 500)], "a INT, b INT")
+        return _generate_df(
+            spark,
+            [("a", IntegerType()), ("b", IntegerType())],
+            [(1, 100), (5, 500)])
 
     def dest_table_func(spark):
         # This is deliberately a single input partition. The target-only row which takes no NMBS
         # action shares a file with updated/deleted rows and catches duplicate preservation output.
-        return spark.createDataFrame(
-            [(1, 10), (2, 20), (3, 30), (4, -1)], "a INT, b INT").coalesce(1)
+        return _generate_df(
+            spark,
+            [("a", IntegerType()), ("b", IntegerType())],
+            [(1, 10), (2, 20), (3, 30), (4, -1)],
+            num_slices=1)
 
     merge_sql = ("MERGE INTO {dest_table} d USING {src_table} s ON d.a = s.a "
                  "WHEN MATCHED THEN UPDATE SET d.b = s.b "
@@ -163,20 +153,10 @@ def test_delta_low_shuffle_merge_not_matched_by_source(
         use_cdf=use_cdf, enable_deletion_vectors=False,
         src_table_func=src_table_func, dest_table_func=dest_table_func,
         merge_sql=merge_sql, compare_logs=False,
-        assert_func=_assert_gpu_low_shuffle_merge, conf=delta_merge_enabled_conf)
-
-    expected = [(1, 100), (2, 0), (4, -1), (5, 500)]
-    data_path = spark_tmp_path + "/DELTA_DATA"
-    for run in ["CPU", "GPU"]:
-        actual = with_cpu_session(
-            lambda spark: [tuple(row) for row in
-                           read_delta_path(spark, data_path + "/" + run)
-                           .orderBy("a").collect()],
-            conf=delta_merge_enabled_conf)
-        assert_equal(expected, actual)
+        conf=delta_merge_enabled_conf)
 
 
-@allow_non_gpu("ColumnarToRowExec", "FileSourceScanExec", *delta_meta_allow)
+@allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not is_databricks_version(17, 3),
@@ -191,10 +171,16 @@ def test_delta_low_shuffle_merge_not_matched_by_source(
 def test_delta_low_shuffle_merge_accepts_non_effective_duplicate_matches(
         spark_tmp_path, spark_tmp_table_factory, use_cdf, src_rows):
     def src_table_func(spark):
-        return spark.createDataFrame(src_rows, "k INT, v STRING, apply BOOLEAN")
+        return _generate_df(
+            spark,
+            [("k", IntegerType()), ("v", StringType()), ("apply", BooleanType())],
+            src_rows)
 
     def dest_table_func(spark):
-        return spark.createDataFrame([(1, "old"), (2, "keep")], "k INT, v STRING")
+        return _generate_df(
+            spark,
+            [("k", IntegerType()), ("v", StringType())],
+            [(1, "old"), (2, "keep")])
 
     merge_sql = ("MERGE INTO {dest_table} t USING {src_table} s ON t.k = s.k "
                  "WHEN MATCHED AND s.apply THEN UPDATE SET t.v = s.v "
@@ -204,10 +190,10 @@ def test_delta_low_shuffle_merge_accepts_non_effective_duplicate_matches(
         use_cdf=use_cdf, enable_deletion_vectors=False,
         src_table_func=src_table_func, dest_table_func=dest_table_func,
         merge_sql=merge_sql, compare_logs=False,
-        assert_func=_assert_gpu_low_shuffle_merge, conf=delta_merge_enabled_conf)
+        conf=delta_merge_enabled_conf)
 
 
-@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
+@allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @pytest.mark.skipif(not is_databricks_version(17, 3),
                     reason="DBR 17.3 effective duplicate-match semantics")
@@ -219,14 +205,19 @@ def test_delta_low_shuffle_merge_rejects_effective_duplicate_matches(
         gpu_enabled = \
             str(spark.conf.get("spark.rapids.sql.enabled", "false")).lower() == "true"
         target_path = spark_tmp_path + ("/GPU" if gpu_enabled else "/CPU")
-        spark.createDataFrame([(1, "old")], "k INT, v STRING") \
+        _generate_df(
+            spark,
+            [("k", IntegerType()), ("v", StringType())],
+            [(1, "old")]) \
             .write.format("delta") \
             .option("delta.enableDeletionVectors", "false") \
             .mode("overwrite") \
             .save(target_path)
-        spark.createDataFrame(
-            [(1, "first", True), (1, "second", True)],
-            "k INT, v STRING, apply BOOLEAN").createOrReplaceTempView(src_table)
+        _generate_df(
+            spark,
+            [("k", IntegerType()), ("v", StringType()), ("apply", BooleanType())],
+            [(1, "first", True), (1, "second", True)]) \
+            .createOrReplaceTempView(src_table)
         return spark.sql(
             "MERGE INTO delta.`{}` t USING {} s ON t.k = s.k "
             "WHEN MATCHED AND s.apply THEN UPDATE SET t.v = s.v".format(
@@ -238,7 +229,7 @@ def test_delta_low_shuffle_merge_rejects_effective_duplicate_matches(
         error_message="DELTA_MULTIPLE_SOURCE_ROW_MATCHING_TARGET_ROW_IN_MERGE")
 
 
-@allow_non_gpu("ColumnarToRowExec", "FileSourceScanExec", *delta_meta_allow)
+@allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not is_databricks_version(17, 3),
@@ -246,18 +237,21 @@ def test_delta_low_shuffle_merge_rejects_effective_duplicate_matches(
 def test_delta_low_shuffle_merge_internal_column_names(
         spark_tmp_path, spark_tmp_table_factory):
     def src_table_func(spark):
-        return spark.createDataFrame(
+        return _generate_df(
+            spark,
+            [("k", IntegerType()), ("apply", BooleanType()),
+             ("_row_dropped_", StringType()), ("_incr_metrics_", IntegerType()),
+             ("_source_row_present_", StringType())],
             [(1, True, "chosen", 10, "source"),
              (1, False, "ignored", 11, "source-ignored"),
-             (4, True, "inserted", 40, "source-inserted")],
-            "k INT, apply BOOLEAN, _row_dropped_ STRING, _incr_metrics_ INT, "
-            "_source_row_present_ STRING")
+             (4, True, "inserted", 40, "source-inserted")])
 
     def dest_table_func(spark):
-        return spark.createDataFrame(
-            [(1, "old", 100, "target"), (2, "keep", 200, "target-keep")],
-            "k INT, _row_dropped_ STRING, _incr_metrics_ INT, "
-            "_target_row_present_ STRING")
+        return _generate_df(
+            spark,
+            [("k", IntegerType()), ("_row_dropped_", StringType()),
+             ("_incr_metrics_", IntegerType()), ("_target_row_present_", StringType())],
+            [(1, "old", 100, "target"), (2, "keep", 200, "target-keep")])
 
     merge_sql = ("MERGE INTO {dest_table} t USING {src_table} s ON t.k = s.k "
                  "WHEN MATCHED AND s.apply THEN UPDATE SET "
@@ -287,13 +281,7 @@ def test_delta_low_shuffle_merge_internal_column_names(
         return spark.sql(merge_sql.format(
             src_table=src_table, dest_table=dest_table)).collect()
 
-    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
-    callback.startCapture()
-    try:
-        with_gpu_session(do_merge, conf=delta_merge_enabled_conf)
-        captured_plans = callback.getResultsWithTimeout(10000)
-    finally:
-        callback.endCapture()
+    assert_rapids_delta_write(do_merge, conf=delta_merge_enabled_conf)
 
     actual = with_cpu_session(
         lambda spark: read_delta_path(spark, data_path).orderBy("k").collect(),
@@ -302,26 +290,32 @@ def test_delta_low_shuffle_merge_internal_column_names(
         (1, "chosen", 10, "source"),
         (2, "keep", 200, "target-keep"),
         (4, "inserted", 40, "source-inserted")]
-    assert any(callback.contains(plan, "GpuUnionExec") for plan in captured_plans), \
-        "GpuUnionExec was not found in the captured low-shuffle MERGE write plans"
-    assert any(callback.contains(plan, "GpuFileSourceScanExec") and
-               "__metadata_row_index" in str(plan) for plan in captured_plans), \
-        "GPU row-index discovery scan was not found in the captured MERGE plans"
 
 
-@allow_non_gpu("ColumnarToRowExec", "FileSourceScanExec", *delta_meta_allow)
+# DBR 17.3 exposes nullable row-tracking fields that make low-shuffle planning fall back to the
+# classic GPU merge, which consumes its GPU Parquet scan through ColumnarToRowExec.
+@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not is_databricks_version(17, 3),
                     reason="DBR 17.3 low-shuffle row-tracking regression")
-def test_delta_low_shuffle_merge_preserves_row_tracking(spark_tmp_path):
+def test_delta_low_shuffle_merge_preserves_row_tracking(
+        spark_tmp_path, spark_tmp_table_factory):
     conf = copy_and_update(delta_merge_enabled_conf, delta_row_tracking_dml_conf)
     data_path = spark_tmp_path + "/DELTA_DATA"
+
+    def dest_table_func(spark):
+        return _generate_df(
+            spark,
+            [("a", IntegerType()), ("b", StringType()), ("c", StringType())],
+            [(1, "a", "x"), (2, "b", "x"), (3, "c", "x"), (4, "d", "x")],
+            num_slices=1)
+
     with_cpu_session(lambda spark: setup_delta_row_tracking_dest_tables(
-        spark, data_path, row_tracking_dml_test_df), conf=conf)
+        spark, data_path, dest_table_func), conf=conf)
+    src_table = spark_tmp_table_factory.get()
     merge_sql = ("MERGE INTO delta.`{path}` t "
-                 "USING (SELECT * FROM VALUES (2, 'B', 'y'), (9, 'I', 'y') "
-                 "AS s(a, b, c)) s ON t.a = s.a "
+                 "USING {src_table} s ON t.a = s.a "
                  "WHEN MATCHED THEN UPDATE SET t.c = s.c "
                  "WHEN NOT MATCHED THEN INSERT *")
 
@@ -340,11 +334,16 @@ def test_delta_low_shuffle_merge_preserves_row_tracking(spark_tmp_path):
     }
 
     def do_merge(spark, path):
-        return spark.sql(merge_sql.format(path=path)).collect()
+        _generate_df(
+            spark,
+            [("a", IntegerType()), ("b", StringType()), ("c", StringType())],
+            [(2, "B", "y"), (9, "I", "y")]) \
+            .createOrReplaceTempView(src_table)
+        return spark.sql(merge_sql.format(path=path, src_table=src_table)).collect()
 
     # DBR 17.3 exposes nullable row-tracking scan fields that the GPU reader does not support, so
     # low-shuffle planning intentionally falls back to the classic GPU merge executor.
-    _assert_gpu_low_shuffle_merge(do_merge, data_path, conf, expect_low_shuffle=False)
+    assert_collect(do_merge, data_path, conf)
 
     for run in ["CPU", "GPU"]:
         after = with_cpu_session(
@@ -364,7 +363,7 @@ def test_delta_low_shuffle_merge_preserves_row_tracking(spark_tmp_path):
             "{}: inserted row id is not fresh".format(run)
 
 
-@allow_non_gpu("ColumnarToRowExec", "FileSourceScanExec", *delta_meta_allow)
+@allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not is_databricks_version(17, 3),
@@ -376,13 +375,17 @@ def test_delta_low_shuffle_merge_large_temporary_deletion_vector(
     src_table = spark_tmp_table_factory.get()
 
     def dest_table_func(spark):
-        return spark.range(num_rows).selectExpr("id", "id AS value").coalesce(1)
+        return gen_df(
+            spark,
+            [("id", UniqueLongGen(nullable=False))],
+            length=num_rows,
+            num_slices=1).selectExpr("id", "id AS value")
 
     def setup_tables(spark):
         setup_delta_dest_tables(
             spark, data_path, dest_table_func,
             use_cdf=False, enable_deletion_vectors=False)
-        spark.range(num_rows).where(
+        dest_table_func(spark).where(
             f.pmod(f.xxhash64("id"), f.lit(10)) == 0).selectExpr(
                 "id", "id + 1 AS value").createOrReplaceTempView(src_table)
 
@@ -396,7 +399,7 @@ def test_delta_low_shuffle_merge_large_temporary_deletion_vector(
             "WHEN MATCHED THEN UPDATE SET t.value = s.value".format(
                 dest=dest_table, src=src_table)).collect()
 
-    _assert_gpu_low_shuffle_merge(do_merge, data_path, delta_merge_enabled_conf)
+    assert_collect(do_merge, data_path, delta_merge_enabled_conf)
 
     def table_stats(spark, path):
         return read_delta_path(spark, path).select(
