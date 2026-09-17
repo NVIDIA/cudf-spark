@@ -239,7 +239,8 @@ run_iceberg_extra_classpath_tests() {
 
     # Loading Iceberg from extraClassPath creates the app/shim classloader split.
     echo "!!! Running targeted Iceberg extraClassPath tests for Iceberg $iceberg_version"
-    ICEBERG_EXTRA_CLASSPATH="${iceberg_runtime_jar}" \
+    EXPECTED_ICEBERG_VERSION="${iceberg_version}" \
+        ICEBERG_EXTRA_CLASSPATH="${iceberg_runtime_jar}" \
         PYSP_TEST_spark_sql_extensions="org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions" \
         PYSP_TEST_spark_sql_catalog_spark__catalog="org.apache.iceberg.spark.SparkSessionCatalog" \
         PYSP_TEST_spark_sql_catalog_spark__catalog_type="hadoop" \
