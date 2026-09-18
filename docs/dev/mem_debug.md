@@ -127,7 +127,7 @@ The leak/double free detection and debugging is great. But it does not give us v
 what is actually happening with memory allocation. It does not let us see leaks at the C++ level.
 These should be very rare, but we have found them in the past. It also does not let us see things
 like fragmentation when we are using a pooling allocator. RMM has logging that we can enable at
-startup to help us see at a very low level what is happening. `spark.rapids.memory.gpu.debug` can
+startup to help us see at a very low level what is happening. `spark.cudf.memory.gpu.debug` can
 be set to either `STDERR` or `STDOUT` to see everything that is happening with the allocation.
 
 ```

@@ -156,8 +156,8 @@ object RapidsShuffleInternalManagerBase extends Logging {
 
   // this is set by the executor on startup, when the MULTITHREADED
   // shuffle mode is utilized, as per these configs:
-  //   spark.rapids.shuffle.multiThreaded.writer.threads
-  //   spark.rapids.shuffle.multiThreaded.reader.threads
+  //   spark.cudf.shuffle.multiThreaded.writer.threads
+  //   spark.cudf.shuffle.multiThreaded.reader.threads
   private var writerPool: ExecutorService = _
   private var readerPool: ExecutorService = _
   private var mergerPool: ExecutorService = _
@@ -641,7 +641,7 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
    *
    * Data flow for each record:
    * 1. ColumnarBatch (already copied to host memory, may be split from GPU batches based on
-   *    spark.rapids.shuffle.partitioning.maxCpuBatchSize) -> Main thread acquires limiter quota
+   *    spark.cudf.shuffle.partitioning.maxCpuBatchSize) -> Main thread acquires limiter quota
    * 2. Writer thread: serialize + compress -> OpenByteArrayOutputStream (JVM heap)
    * 3. Writer thread: release excess quota (recordSize - compressedSize)
    * 4. Merger step: heap buffer -> ShuffleMapOutputWriter (via SpillablePartialFileHandle)

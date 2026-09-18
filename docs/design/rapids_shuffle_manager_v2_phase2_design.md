@@ -494,7 +494,7 @@ When a buffer needs to grow:
 
 **Why**: ESS runs in a separate JVM process. It cannot access our in-memory catalog. When ESS is enabled, remote shuffle fetches bypass executors entirely and go to the ESS process, which can only read disk files.
 
-**Default behavior**: `spark.rapids.shuffle.multithreaded.skipMerge` defaults to `false`, so the original merge behavior is used by default. Users must explicitly enable skip-merge after ensuring ESS is disabled.
+**Default behavior**: `spark.cudf.shuffle.multithreaded.skipMerge` defaults to `false`, so the original merge behavior is used by default. Users must explicitly enable skip-merge after ensuring ESS is disabled.
 
 ## 11. Configuration
 
@@ -502,13 +502,13 @@ When a buffer needs to grow:
 
 | Config | Default | Description |
 |--------|---------|-------------|
-| `spark.rapids.shuffle.multithreaded.skipMerge` | `false` | Skip merging partial files and serve data from catalog. Requires ESS disabled. Set to `true` for better performance when shuffle data is not reused across SQL queries. |
+| `spark.cudf.shuffle.multithreaded.skipMerge` | `false` | Skip merging partial files and serve data from catalog. Requires ESS disabled. Set to `true` for better performance when shuffle data is not reused across SQL queries. |
 
 ### Changed Defaults (Phase 2)
 
 | Config | Phase 1 Default | Phase 2 Default | Reason |
 |--------|-----------------|-----------------|--------|
-| `spark.rapids.memory.host.partialFileBufferInitialSize` | 1GB | **32MB** | Smaller initial size works better with predictive expansion |
+| `spark.cudf.memory.host.partialFileBufferInitialSize` | 1GB | **32MB** | Smaller initial size works better with predictive expansion |
 
 ## 12. Files Changed Summary (Phase 2 additions)
 

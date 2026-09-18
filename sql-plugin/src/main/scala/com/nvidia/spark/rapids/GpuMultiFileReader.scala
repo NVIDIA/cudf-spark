@@ -465,7 +465,8 @@ class ThreadPoolConfBuilder(
       val memCap: Long = if (memoryCapacityFromDriver > 0) {
         memoryCapacityFromDriver
       } else {
-        SparkEnv.get.conf.getOption(RapidsConf.MULTITHREAD_READ_MEMORY_LIMIT_SIZE.key) match {
+        RapidsConf.getOption(
+          SparkEnv.get.conf, RapidsConf.MULTITHREAD_READ_MEMORY_LIMIT_SIZE.key) match {
           case Some(v) if v.toLong > 0 =>
             v.toLong
           case _ =>

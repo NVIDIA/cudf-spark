@@ -19,7 +19,8 @@ from data_gen import *
 from marks import ignore_order
 
 # copied from sort_test and added explainOnly mode
-_explain_mode_conf = {'spark.rapids.sql.mode': 'explainOnly',
+_explain_mode_conf = {'spark.rapids.sql.mode': 'executeOnGpu',
+                      'spark.cudf.sql.mode': 'explainOnly',
                       'spark.sql.join.preferSortMergeJoin': 'True',
                       'spark.sql.shuffle.partitions': '2',
                       }
@@ -37,7 +38,8 @@ all_join_types = ['Left']
 # use a subset of types just to test explain only mode
 all_gen = [StringGen(), ByteGen()]
 
-# here we use the assert_gpu_fallback_collect to make sure explain only mode runs on the CPU
+# Use both aliases with conflicting values to verify the canonical setting wins and explain-only
+# mode runs on the CPU.
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', all_gen, ids=idfn)
 @pytest.mark.parametrize('join_type', all_join_types, ids=idfn)

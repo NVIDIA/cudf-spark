@@ -22,13 +22,15 @@ import scala.collection.JavaConverters._
 import scala.collection.mutable.{HashMap, ListBuffer}
 
 import ai.rapids.cudf.Cuda
+import com.nvidia.spark.rapids.internal.config.CudfConfKeys
 import com.nvidia.spark.rapids.jni.RmmSpark.OomInjectionType
 import com.nvidia.spark.rapids.jni.kudo.DumpOption
 import com.nvidia.spark.rapids.lore.{LoreId, OutputLoreId}
 
-import org.apache.spark.SparkConf
+import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.internal.Logging
 import org.apache.spark.network.util.{ByteUnit, JavaUtils}
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.analysis.FunctionRegistry
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.RapidsPrivateUtil
@@ -97,7 +99,7 @@ object ConfHelper {
   def makeConfAnchor(key: String, text: String = null): String = {
     val t = if (text != null) text else key
     // The anchor cannot be too long, so for now
-    val a = key.replaceFirst("spark.rapids.", "")
+    val a = CudfConfKeys.canonicalKey(key).stripPrefix(CudfConfKeys.CANONICAL_PREFIX)
     "<a name=\"" + s"$a" + "\"></a>" + t
   }
 
@@ -121,8 +123,20 @@ object ConfHelper {
   }
 }
 
-abstract class ConfEntry[T](val key: String, val converter: String => T, val doc: String,
+abstract class ConfEntry[T](rawKey: String, val converter: String => T, val doc: String,
     val isInternal: Boolean, val isStartUpOnly: Boolean, val isCommonlyUsed: Boolean) {
+
+  val key: String = CudfConfKeys.canonicalKey(rawKey)
+  val legacyKey: String = CudfConfKeys.legacyKey(key)
+
+  protected final def getRaw(conf: Map[String, String]): Option[String] = {
+    Option(CudfConfKeys.get(conf.asJava, key))
+  }
+
+  protected final def getRaw(conf: SQLConf): Option[String] = {
+    Option(conf.getConfString(key, null))
+      .orElse(Option(conf.getConfString(legacyKey, null)))
+  }
 
   def get(conf: Map[String, String]): T
   def get(conf: SQLConf): T
@@ -131,22 +145,17 @@ abstract class ConfEntry[T](val key: String, val converter: String => T, val doc
   override def toString: String = key
 }
 
-class ConfEntryWithDefault[T](key: String, converter: String => T, doc: String,
+class ConfEntryWithDefault[T](rawKey: String, converter: String => T, doc: String,
     isInternal: Boolean, isStartupOnly: Boolean, isCommonlyUsed: Boolean = false,
     val defaultValue: T)
-  extends ConfEntry[T](key, converter, doc, isInternal, isStartupOnly, isCommonlyUsed) {
+  extends ConfEntry[T](rawKey, converter, doc, isInternal, isStartupOnly, isCommonlyUsed) {
 
   override def get(conf: Map[String, String]): T = {
-    conf.get(key).map(converter).getOrElse(defaultValue)
+    getRaw(conf).map(converter).getOrElse(defaultValue)
   }
 
   override def get(conf: SQLConf): T = {
-    val tmp = conf.getConfString(key, null)
-    if (tmp == null) {
-      defaultValue
-    } else {
-      converter(tmp)
-    }
+    getRaw(conf).map(converter).getOrElse(defaultValue)
   }
 
   override def help(asTable: Boolean = false): Unit = {
@@ -166,22 +175,17 @@ class ConfEntryWithDefault[T](key: String, converter: String => T, doc: String,
   }
 }
 
-class OptionalConfEntry[T](key: String, val rawConverter: String => T, doc: String,
+class OptionalConfEntry[T](rawKey: String, val rawConverter: String => T, doc: String,
     isInternal: Boolean, isStartupOnly: Boolean, isCommonlyUsed: Boolean = false)
-  extends ConfEntry[Option[T]](key, s => Some(rawConverter(s)), doc, isInternal,
+  extends ConfEntry[Option[T]](rawKey, s => Some(rawConverter(s)), doc, isInternal,
   isStartupOnly, isCommonlyUsed) {
 
   override def get(conf: Map[String, String]): Option[T] = {
-    conf.get(key).map(rawConverter)
+    getRaw(conf).map(rawConverter)
   }
 
   override def get(conf: SQLConf): Option[T] = {
-    val tmp = conf.getConfString(key, null)
-    if (tmp == null) {
-      None
-    } else {
-      Some(rawConverter(tmp))
-    }
+    getRaw(conf).map(rawConverter)
   }
 
   override def help(asTable: Boolean = false): Unit = {
@@ -260,9 +264,11 @@ class TypedConfBuilder[T](
   }
 }
 
-class ConfBuilder(val key: String, val register: ConfEntry[_] => Unit) {
+class ConfBuilder(rawKey: String, val register: ConfEntry[_] => Unit) {
 
   import ConfHelper._
+
+  val key: String = CudfConfKeys.canonicalKey(rawKey)
 
   var doc: String = null
   var isInternal: Boolean = false
@@ -337,6 +343,8 @@ object RapidsConf extends Logging with RapidsConfEntries {
   }
 
   private lazy val registeredConfs = new ListBuffer[ConfEntry[_]]()
+  private val applicationsWarnedAboutLegacyConfs =
+    new util.WeakHashMap[SparkContext, java.lang.Boolean]()
 
   private def register(entry: ConfEntry[_]): Unit = {
     registeredConfs += entry
@@ -344,6 +352,42 @@ object RapidsConf extends Logging with RapidsConfEntries {
 
   def conf(key: String): ConfBuilder = {
     new ConfBuilder(key, register)
+  }
+
+  def getOption(conf: SparkConf, key: String): Option[String] = {
+    val canonicalKey = CudfConfKeys.canonicalKey(key)
+    conf.getOption(canonicalKey).orElse(conf.getOption(CudfConfKeys.legacyKey(canonicalKey)))
+  }
+
+  def contains(conf: SparkConf, key: String): Boolean = getOption(conf, key).isDefined
+
+  def getOption(conf: SQLConf, key: String): Option[String] = {
+    val canonicalKey = CudfConfKeys.canonicalKey(key)
+    Option(conf.getConfString(canonicalKey, null))
+      .orElse(Option(conf.getConfString(CudfConfKeys.legacyKey(canonicalKey), null)))
+  }
+
+  def contains(conf: SQLConf, key: String): Boolean = getOption(conf, key).isDefined
+
+  private[rapids] def warnIfLegacyConfs(
+      sparkContext: SparkContext,
+      keys: Iterable[String]): Unit = synchronized {
+    val legacyKeys = keys.filter(CudfConfKeys.isLegacy).toSeq.sorted
+    if (legacyKeys.nonEmpty && !applicationsWarnedAboutLegacyConfs.containsKey(sparkContext)) {
+      applicationsWarnedAboutLegacyConfs.put(sparkContext, java.lang.Boolean.TRUE)
+      val replacements = legacyKeys
+        .map(key => s"$key -> ${CudfConfKeys.canonicalKey(key)}")
+        .mkString(", ")
+      logWarning("The spark.rapids.* configuration namespace is deprecated. " +
+        "Use the corresponding spark.cudf.* names instead. " +
+        s"Detected: $replacements")
+    }
+  }
+
+  private[rapids] def warnIfLegacyConfs(keys: Iterable[String]): Unit = {
+    SparkSession.getActiveSession.foreach { session =>
+      warnIfLegacyConfs(session.sparkContext, keys)
+    }
   }
 
   // default value for the OOM injection logic (no injection, for regular operation)
@@ -458,19 +502,27 @@ object RapidsConf extends Logging with RapidsConfEntries {
         |```
         |${SPARK_HOME}/bin/spark-shell --jars rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar \
         |--conf spark.plugins=com.nvidia.spark.SQLPlugin \
-        |--conf spark.rapids.sql.concurrentGpuTasks=2
+        |--conf spark.cudf.sql.concurrentGpuTasks=2
         |```
         |
         |At runtime use: `spark.conf.set("[conf key]", [conf value])`. For example:
         |
         |```
-        |scala> spark.conf.set("spark.rapids.sql.concurrentGpuTasks", 2)
+        |scala> spark.conf.set("spark.cudf.sql.concurrentGpuTasks", 2)
         |```
         |
         | All configs can be set on startup, but some configs, especially for shuffle, will not
         | work if they are set at runtime. Please check the column of "Applicable at" to see
         | when the config can be set. "Startup" means only valid on startup, "Runtime" means
         | valid on both startup and runtime.
+        |
+        |## Configuration Namespace
+        |
+        |`spark.cudf.*` is the canonical namespace for cuDF plugin configuration. The corresponding
+        |`spark.rapids.*` names are deprecated compatibility aliases. When both names of the same
+        |configuration are set, the `spark.cudf.*` value takes precedence. Spark's generic
+        |`spark.conf.get` and `spark.conf.unset` APIs continue to operate on the literal name that
+        |was set; alias resolution occurs when the cuDF plugin reads the configuration.
         |""".stripMargin)
       // scalastyle:on line.size.limit
       ConsoleOutput.writeLine("\n## General Configuration\n")
@@ -533,11 +585,11 @@ object RapidsConf extends Logging with RapidsConfEntries {
         |expression is configured as disabled, the accelerator plugin will not attempt replacement,
         |and it will run on the CPU.
         |
-        |Please leverage the [`spark.rapids.sql.explain`](#sql.explain) setting to get
+        |Please leverage the [`spark.cudf.sql.explain`](#sql.explain) setting to get
         |feedback from the plugin as to why parts of a query may not be executing on the GPU.
         |
         |**NOTE:** Setting
-        |[`spark.rapids.sql.incompatibleOps.enabled=true`](#sql.incompatibleOps.enabled)
+        |[`spark.cudf.sql.incompatibleOps.enabled=true`](#sql.incompatibleOps.enabled)
         |will enable all the settings in the table below which are not enabled by default due to
         |incompatibilities.""".stripMargin)
       // scalastyle:on line.size.limit
@@ -605,10 +657,14 @@ object RapidsConf extends Logging with RapidsConfEntries {
   }
 }
 
-class RapidsConf(conf: Map[String, String]) extends Logging {
+class RapidsConf(rawConf: Map[String, String]) extends Logging {
 
   import ConfHelper._
   import RapidsConf._
+
+  warnIfLegacyConfs(rawConf.keys)
+
+  private val conf = CudfConfKeys.withAliases(rawConf.asJava).asScala.toMap
 
   def this(sqlConf: SQLConf) = {
     this(sqlConf.getAllConfs)
@@ -624,8 +680,9 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   def getStr(key: String): Option[String] = conf.get(key)
 
-  lazy val rapidsConfMap: util.Map[String, String] = conf.filterKeys(
-    _.startsWith("spark.rapids.")).toMap.asJava
+  lazy val rapidsConfMap: util.Map[String, String] = conf.filterKeys { key =>
+    CudfConfKeys.isCanonical(key) || CudfConfKeys.isLegacy(key)
+  }.toMap.asJava
 
   lazy val metricsLevel: String = get(METRICS_LEVEL)
 
@@ -1217,13 +1274,13 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
       case _ => {
         prefix match {
           case None => {
-            logWarning("spark.rapids.shuffle.kudo.serializer.debug.dump.path.prefix is not set, " +
+            logWarning("spark.cudf.shuffle.kudo.serializer.debug.dump.path.prefix is not set, " +
               "so Kudo serializer debug will not be enabled")
             None
           }
           case Some(p) => {
             if (p.isEmpty) {
-              logWarning("spark.rapids.shuffle.kudo.serializer.debug.dump.path.prefix is empty, " +
+              logWarning("spark.cudf.shuffle.kudo.serializer.debug.dump.path.prefix is empty, " +
                 "so Kudo serializer debug will not be enabled")
               Some("")
             } else {
@@ -1401,13 +1458,13 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
     // GpuProject cost is zero (in our cost model) and we don't want to encourage moving to
     // the GPU just to do a trivial projection, so we pretend the overhead of a
     // CPU projection (beyond evaluating the expressions) is also zero
-    "spark.rapids.sql.optimizer.cpu.exec.ProjectExec" -> "0",
+    "spark.cudf.sql.optimizer.cpu.exec.ProjectExec" -> "0",
     // The cost of a GPU projection is mostly the cost of evaluating the expressions
     // to produce the projected columns
-    "spark.rapids.sql.optimizer.gpu.exec.ProjectExec" -> "0",
+    "spark.cudf.sql.optimizer.gpu.exec.ProjectExec" -> "0",
     // union does not further process data produced by its children
-    "spark.rapids.sql.optimizer.cpu.exec.UnionExec" -> "0",
-    "spark.rapids.sql.optimizer.gpu.exec.UnionExec" -> "0"
+    "spark.cudf.sql.optimizer.cpu.exec.UnionExec" -> "0",
+    "spark.cudf.sql.optimizer.gpu.exec.UnionExec" -> "0"
   )
 
   def isOperatorEnabled(key: String, incompat: Boolean, isDisabledByDefault: Boolean): Boolean = {
@@ -1419,7 +1476,7 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
    * Get the GPU cost of an expression, for use in the cost-based optimizer.
    */
   def getGpuExpressionCost(operatorName: String): Option[Double] = {
-    val key = s"spark.rapids.sql.optimizer.gpu.expr.$operatorName"
+    val key = s"spark.cudf.sql.optimizer.gpu.expr.$operatorName"
     getOptionalCost(key)
   }
 
@@ -1427,7 +1484,7 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
    * Get the GPU cost of an operator, for use in the cost-based optimizer.
    */
   def getGpuOperatorCost(operatorName: String): Option[Double] = {
-    val key = s"spark.rapids.sql.optimizer.gpu.exec.$operatorName"
+    val key = s"spark.cudf.sql.optimizer.gpu.exec.$operatorName"
     getOptionalCost(key)
   }
 
@@ -1435,7 +1492,7 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
    * Get the CPU cost of an expression, for use in the cost-based optimizer.
    */
   def getCpuExpressionCost(operatorName: String): Option[Double] = {
-    val key = s"spark.rapids.sql.optimizer.cpu.expr.$operatorName"
+    val key = s"spark.cudf.sql.optimizer.cpu.expr.$operatorName"
     getOptionalCost(key)
   }
 
@@ -1443,7 +1500,7 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
    * Get the CPU cost of an operator, for use in the cost-based optimizer.
    */
   def getCpuOperatorCost(operatorName: String): Option[Double] = {
-    val key = s"spark.rapids.sql.optimizer.cpu.exec.$operatorName"
+    val key = s"spark.cudf.sql.optimizer.cpu.exec.$operatorName"
     getOptionalCost(key)
   }
 

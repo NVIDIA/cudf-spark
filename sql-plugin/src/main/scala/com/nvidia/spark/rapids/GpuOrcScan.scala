@@ -357,7 +357,7 @@ object GpuOrcScan {
 
       // float/double to string
       // When casting float/double to string, the result of GPU is different from CPU.
-      // We let a conf 'spark.rapids.sql.format.orc.floatTypesToString.enable' to control it's
+      // We let a conf 'spark.cudf.sql.format.orc.floatTypesToString.enable' to control it's
       // enable or not.
       case (DType.FLOAT32 | DType.FLOAT64, DType.STRING) =>
         CastStrings.fromFloat(col)
@@ -1693,7 +1693,7 @@ private case class GpuOrcFileFilterHandler(
         throw new IOException(
           s"ORC file has stripes with different writer timezones: " +
           s"${distinctTzs.mkString(", ")}. This is not supported on GPU. Set " +
-          s"spark.rapids.sql.format.orc.read.enabled=false to fall back to the CPU ORC reader.")
+          s"spark.cudf.sql.format.orc.read.enabled=false to fall back to the CPU ORC reader.")
       }
       (outputStripes, writerTz)
     }

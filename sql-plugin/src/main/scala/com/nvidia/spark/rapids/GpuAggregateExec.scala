@@ -980,7 +980,7 @@ class GpuMergeAggregateIterator(
       }
 
       // Handle the case of skipping second and third pass of aggregation
-      // This only work when spark.rapids.sql.agg.skipAggPassReductionRatio < 1
+      // This only work when spark.cudf.sql.agg.skipAggPassReductionRatio < 1
       if (!firstBatchChecked && firstPassIter.hasNext
         && allowNonFullyAggregatedOutput) {
         firstBatchChecked = true
@@ -1224,7 +1224,7 @@ abstract class GpuBaseAggregateMeta[INPUT <: SparkPlan](
   /**
    * Tagging checks tied to configs that control the aggregation modes that are replaced.
    *
-   * The rule of replacement is determined by `spark.rapids.sql.hashAgg.replaceMode`, which
+   * The rule of replacement is determined by `spark.cudf.sql.hashAgg.replaceMode`, which
    * is a string configuration consisting of AggregateMode names in lower cases connected by
    * &(AND) and |(OR). The default value of this config is `all`, which indicates replacing all
    * aggregates if possible.

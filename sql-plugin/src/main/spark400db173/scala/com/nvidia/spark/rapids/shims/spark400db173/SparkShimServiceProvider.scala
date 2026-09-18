@@ -20,6 +20,7 @@ spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims.spark400db173
 
 import com.nvidia.spark.rapids._
+import com.nvidia.spark.rapids.internal.config.CudfConfKeys
 
 import org.apache.spark.SparkEnv
 
@@ -34,9 +35,13 @@ class SparkShimServiceProvider extends com.nvidia.spark.rapids.SparkShimServiceP
   override def getShimVersion: ShimVersion = SparkShimServiceProvider.VERSION
 
   def matchesVersion(version: String): Boolean = {
-    val shimEnabledProp = "spark.rapids.shims.spark400db173" + ".enabled"
+    val shimEnabledProp = "spark.cudf.shims.spark400db173" + ".enabled"
     val shimEnabled = Option(SparkEnv.get)
-      .flatMap(_.conf.getOption(shimEnabledProp).map(_.toBoolean))
+      .flatMap { env =>
+        env.conf.getOption(shimEnabledProp)
+          .orElse(env.conf.getOption(CudfConfKeys.legacyKey(shimEnabledProp)))
+          .map(_.toBoolean)
+      }
       .getOrElse(true)
 
     DatabricksShimServiceProvider.matchesVersion(

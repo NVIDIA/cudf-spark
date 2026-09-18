@@ -10,7 +10,7 @@ To speedup the processing of user defined functions (UDFs), the NVIDIA cuDF plug
 introduces a UDF compiler extension to translate UDFs to Catalyst expressions.
 
 To enable this operation on the GPU, set
-[`spark.rapids.sql.udfCompiler.enabled`](../configs.md#sql.udfCompiler.enabled) to `true`.
+[`spark.cudf.sql.udfCompiler.enabled`](../configs.md#sql.udfCompiler.enabled) to `true`.
 
 Be aware Spark may produce different results for a compiled UDF vs. the non-compiled. For example: a
 UDF of `x/y` where `y` happens to be `0`, the compiled catalyst expressions will return `NULL` while

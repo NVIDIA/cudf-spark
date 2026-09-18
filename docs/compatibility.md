@@ -36,7 +36,7 @@ task/partition. The cuDF plugin does an unstable
 simply means that the sort algorithm allows for spilling parts of the data if it is larger than
 can fit in the GPU's memory, but it does not guarantee ordering of rows when the ordering of the
 keys is ambiguous. If you do rely on a stable sort in your processing you can request this by
-setting [spark.rapids.sql.stableSort.enabled](additional-functionality/advanced_configs.md#sql.stableSort.enabled) to `true` and
+setting [spark.cudf.sql.stableSort.enabled](additional-functionality/advanced_configs.md#sql.stableSort.enabled) to `true` and
 cuDF will try to sort all the data for a given task/partition at once on the GPU. This may change
 in the future to allow for a spillable stable sort.
 
@@ -68,7 +68,7 @@ run. This is inherent in how the plugin speeds up the calculations and cannot be
 joins on a floating point value, which is not wise to do anyways, and the value is the result of a
 floating point aggregation then the join may fail to work properly with the plugin but would have
 worked with plain Spark. This is behavior is enabled by default but can be disabled with the config
-[`spark.rapids.sql.variableFloatAgg.enabled`](additional-functionality/advanced_configs.md#sql.variableFloatAgg.enabled).
+[`spark.cudf.sql.variableFloatAgg.enabled`](additional-functionality/advanced_configs.md#sql.variableFloatAgg.enabled).
 This applies to scalar aggregations (`sum`, `avg`, etc.) and to array-level aggregations
 (the `aggregate` / `reduce` higher-order function with SUM or PRODUCT) — both delegate to cuDF
 parallel reductions and are governed by the same config.
@@ -335,9 +335,9 @@ some invalid JSON to be parsed. We have tried to provide JSON parsing that is co
 what Apache Spark does support. Note that Spark itself has changed through different releases, and we will
 try to call out which releases we offer different results for. JSON parsing is enabled by default
 except for date and timestamp types where we still have work to complete. If you wish to disable
-JSON Scan you can set `spark.rapids.sql.format.json.enabled` or
-`spark.rapids.sql.format.json.read.enabled` to false. To disable `from_json` you can set 
-`spark.rapids.sql.expression.JsonToStructs` to false.
+JSON Scan you can set `spark.cudf.sql.format.json.enabled` or
+`spark.cudf.sql.format.json.read.enabled` to false. To disable `from_json` you can set
+`spark.cudf.sql.expression.JsonToStructs` to false.
 
 ### Limits
 
@@ -382,7 +382,7 @@ see [issue 10532](https://github.com/NVIDIA/cudf-spark/issues/10532).
 
 Dates and timestamps are not supported by default in JSON parser, since the GPU implementation is not 100%
 compatible with Apache Spark.
-If needed, they can be turned on through the config `spark.rapids.sql.json.read.datetime.enabled`.
+If needed, they can be turned on through the config `spark.cudf.sql.json.read.datetime.enabled`.
 This config works for both JSON scan and `from_json`. Once enabled, the JSON parser still does
 not support the `TimestampNTZ` type and will fall back to CPU if `spark.sql.timestampType` is set
 to `TIMESTAMP_NTZ` or if an explicit schema is provided that contains the `TimestampNTZ` type.
@@ -459,8 +459,8 @@ Known issue:
 ## Avro
 
 The Avro format read is a very experimental feature which is expected to have some issues, so we disable
-it by default. If you would like to test it, you need to enable `spark.rapids.sql.format.avro.enabled` and
-`spark.rapids.sql.format.avro.read.enabled`.
+it by default. If you would like to test it, you need to enable `spark.cudf.sql.format.avro.enabled` and
+`spark.cudf.sql.format.avro.read.enabled`.
 
 Currently, the GPU accelerated Avro reader doesn't support reading the Avro version 1.2 files.
 
@@ -485,7 +485,7 @@ Regular expression evaluation on the GPU is enabled by default when the UTF-8 ch
 by the current locale. Execution will fall back to the CPU for regular expressions that are not yet
 supported on the GPU, and in environments where the locale does not use UTF-8. However, there are
 some edge cases that will still execute on the GPU and produce different results to the CPU. To
-disable regular expressions on the GPU, set `spark.rapids.sql.regexp.enabled=false`.
+disable regular expressions on the GPU, set `spark.cudf.sql.regexp.enabled=false`.
 
 These are the known edge cases where running on the GPU will produce different results to the CPU:
 
@@ -544,8 +544,8 @@ each:
 
 | Op       | Catalyst shape         | Element types                     |
 | -------- | ---------------------- | --------------------------------- |
-| SUM      | `Add(acc, g)`          | byte / short / int / long; float / double gated by `spark.rapids.sql.variableFloatAgg.enabled` |
-| PRODUCT  | `Multiply(acc, g)`     | byte / short / int / long; float / double gated by `spark.rapids.sql.variableFloatAgg.enabled` |
+| SUM      | `Add(acc, g)`          | byte / short / int / long; float / double gated by `spark.cudf.sql.variableFloatAgg.enabled` |
+| PRODUCT  | `Multiply(acc, g)`     | byte / short / int / long; float / double gated by `spark.cudf.sql.variableFloatAgg.enabled` |
 | MAX      | `Greatest(acc, g)` (2 children only) | byte / short / int / long  |
 | MIN      | `Least(acc, g)` (2 children only)    | byte / short / int / long  |
 | ALL      | `And(acc, g)`          | boolean                           |
@@ -585,7 +585,7 @@ The following shapes fall back to CPU:
   null, while Spark's 3VL short-circuits (`false AND null = false`,
   `true OR null = true`).
 - `SUM` / `PRODUCT` on `float` / `double` when
-  `spark.rapids.sql.variableFloatAgg.enabled=false`: cuDF's parallel tree-reduction sums in a
+  `spark.cudf.sql.variableFloatAgg.enabled=false`: cuDF's parallel tree-reduction sums in a
   different order than Spark's sequential left-fold.
 - `SUM` / `PRODUCT` on decimal types: Spark decimal arithmetic has overflow-specific behavior
   (`SUM` returns null on overflow in non-ANSI mode and raises in ANSI mode), while cuDF segmented
@@ -669,13 +669,13 @@ GPU: WrappedArray([0], [19], [19], [19], [19], [19], [19], [19], [19], [19], [19
 ```
 
 To enable byte-range windowing on the GPU, set
-[`spark.rapids.sql.window.range.byte.enabled`](additional-functionality/advanced_configs.md#sql.window.range.byte.enabled) to true.
+[`spark.cudf.sql.window.range.byte.enabled`](additional-functionality/advanced_configs.md#sql.window.range.byte.enabled) to true.
 
 We also provide configurations for other integral range types:
 
-- [`spark.rapids.sql.window.range.short.enabled`](additional-functionality/advanced_configs.md#sql.window.range.short.enabled)
-- [`spark.rapids.sql.window.range.int.enabled`](additional-functionality/advanced_configs.md#sql.window.range.int.enabled)
-- [`spark.rapids.sql.window.range.long.enabled`](additional-functionality/advanced_configs.md#sql.window.range.long.enabled)
+- [`spark.cudf.sql.window.range.short.enabled`](additional-functionality/advanced_configs.md#sql.window.range.short.enabled)
+- [`spark.cudf.sql.window.range.int.enabled`](additional-functionality/advanced_configs.md#sql.window.range.int.enabled)
+- [`spark.cudf.sql.window.range.long.enabled`](additional-functionality/advanced_configs.md#sql.window.range.long.enabled)
 
 The reason why we default the configurations to false for byte/short and to true for int/long is that
 we think the most real-world queries are based on int or long.
@@ -719,7 +719,7 @@ extensively tested and may produce different results compared to the CPU. Known 
   values on GPU where Spark would treat the data as invalid and return null
 
 To attempt to use other formats on the GPU, set
-[`spark.rapids.sql.incompatibleDateFormats.enabled`](additional-functionality/advanced_configs.md#sql.incompatibleDateFormats.enabled)
+[`spark.cudf.sql.incompatibleDateFormats.enabled`](additional-functionality/advanced_configs.md#sql.incompatibleDateFormats.enabled)
 to `true`.
 
 Formats that contain any of the following characters are unsupported and will fall back to CPU:
@@ -741,7 +741,7 @@ Formats that contain any of the following words are unsupported and will fall ba
 ### LEGACY timeParserPolicy
 
 With timeParserPolicy set to `LEGACY` and
-[`spark.rapids.sql.incompatibleDateFormats.enabled`](additional-functionality/advanced_configs.md#sql.incompatibleDateFormats.enabled)
+[`spark.cudf.sql.incompatibleDateFormats.enabled`](additional-functionality/advanced_configs.md#sql.incompatibleDateFormats.enabled)
 set to `true`, and `spark.sql.ansi.enabled` set to `false`, the following formats are supported but not
 guaranteed to produce the same results as the CPU:
 
@@ -774,7 +774,7 @@ subset of valid format strings are supported on the GPU.
 
 With timeParserPolicy set to `LEGACY`, `date_format` and `from_unixtime` additionally support
 `yyyy-MM-dd HH:mm:ss.SSS` when
-[`spark.rapids.sql.incompatibleDateFormats.enabled`](additional-functionality/advanced_configs.md#sql.incompatibleDateFormats.enabled)
+[`spark.cudf.sql.incompatibleDateFormats.enabled`](additional-functionality/advanced_configs.md#sql.incompatibleDateFormats.enabled)
 is set to `true`. Parsing strings with this format remains unsupported in `LEGACY` mode.
 
 Formats that contain any of the following characters are unsupported and will fall back to CPU:
@@ -811,7 +811,7 @@ leads to restrictions:
 * The results produced by GPU slightly differ from the default results of Spark.
 
 This configuration is enabled by default. To disable this operation on the GPU set
-[`spark.rapids.sql.castFloatToDecimal.enabled`](additional-functionality/advanced_configs.md#sql.castFloatToDecimal.enabled) to `false`
+[`spark.cudf.sql.castFloatToDecimal.enabled`](additional-functionality/advanced_configs.md#sql.castFloatToDecimal.enabled) to `false`
 
 ### Float to Integral Types
 
@@ -822,7 +822,7 @@ starting with 3.1.0 these are now integral types such as `Int.MaxValue` so this 
 affected the valid range of values and now differs slightly from the behavior on GPU in some cases.
 
 This configuration is enabled by default. To disable this operation on the GPU set
-[`spark.rapids.sql.castFloatToIntegralTypes.enabled`](additional-functionality/advanced_configs.md#sql.castFloatToIntegralTypes.enabled)
+[`spark.cudf.sql.castFloatToIntegralTypes.enabled`](additional-functionality/advanced_configs.md#sql.castFloatToIntegralTypes.enabled)
 to `false`.
 
 ### Float to String
@@ -830,11 +830,11 @@ to `false`.
 The cuDF plugin uses a method based on [ryu](https://github.com/ulfjack/ryu) when converting floating point data type to string. As a result the computed string can differ from the output of Spark in some cases: sometimes the output is shorter (which is arguably more accurate) and sometimes the output may differ in the precise digits output.
 
 This configuration is enabled by default. To disable this operation on the GPU set
-[`spark.rapids.sql.castFloatToString.enabled`](additional-functionality/advanced_configs.md#sql.castFloatToString.enabled) to `false`.
+[`spark.cudf.sql.castFloatToString.enabled`](additional-functionality/advanced_configs.md#sql.castFloatToString.enabled) to `false`.
 
 The `format_number` function also uses [ryu](https://github.com/ulfjack/ryu) as the solution when formatting floating-point data types to 
 strings, so results may differ from Spark in the same way. To disable this on the GPU, set 
-[`spark.rapids.sql.formatNumberFloat.enabled`](additional-functionality/advanced_configs.md#sql.formatNumberFloat.enabled) to `false`.
+[`spark.cudf.sql.formatNumberFloat.enabled`](additional-functionality/advanced_configs.md#sql.formatNumberFloat.enabled) to `false`.
 
 ### String to Float
 
@@ -852,7 +852,7 @@ truncates the values directly.
 Also, the GPU does not support casting from strings containing hex values to floating-point types.
 
 This configuration is enabled by default. To disable this operation on the GPU set
-[`spark.rapids.sql.castStringToFloat.enabled`](additional-functionality/advanced_configs.md#sql.castStringToFloat.enabled) to `false`.
+[`spark.cudf.sql.castStringToFloat.enabled`](additional-functionality/advanced_configs.md#sql.castStringToFloat.enabled) to `false`.
 
 ### String to Date
 
@@ -900,7 +900,7 @@ The GPU implementation of `approximate_percentile` uses
 [t-Digests](https://arxiv.org/abs/1902.04023) which have high accuracy, particularly near the tails of a
 distribution. The results are not bit-for-bit identical with the Apache Spark implementation of
 `approximate_percentile`. This feature is enabled by default and can be disabled by setting
-`spark.rapids.sql.expression.ApproximatePercentile=false`.
+`spark.cudf.sql.expression.ApproximatePercentile=false`.
 
 ## Conditionals and operations with side effects (ANSI mode)
 

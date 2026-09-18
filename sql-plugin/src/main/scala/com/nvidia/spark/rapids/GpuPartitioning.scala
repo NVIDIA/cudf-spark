@@ -221,7 +221,7 @@ trait GpuPartitioning extends Partitioning {
           require(data.getLength <= maxGpuSerializedSliceBytes,
             s"GPU-serialized shuffle batch is ${data.getLength} bytes, exceeding the " +
             s"$maxGpuSerializedSliceBytes-byte (2GB) limit addressable by the Int " +
-            s"serialized-slice offsets; reduce spark.rapids.sql.batchSizeBytes")
+            s"serialized-slice offsets; reduce spark.cudf.sql.batchSizeBytes")
           closeOnExcept(Seq(HostMemoryBuffer.allocate(data.getLength),
             HostMemoryBuffer.allocate(offsets.getLength))) { seq =>
             val dataHost = seq(0)

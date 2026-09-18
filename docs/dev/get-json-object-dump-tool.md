@@ -17,7 +17,7 @@ This assumes that the cuDF plugin has already been enabled.
 
 The `get_json_object` expression may be off by default so enable it first
 ```
-'spark.rapids.sql.expression.GetJsonObject': 'true'
+'spark.cudf.sql.expression.GetJsonObject': 'true'
 ```
 
 To enable debugging just set the path to dump the data to. Note that this
@@ -25,7 +25,7 @@ path is interpreted using the Hadoop FileSystem APIs. This means that
 a path with no schema will go to the default file system.
 
 ```
-'spark.rapids.sql.expression.GetJsonObject.debugPath': '/tmp/DEBUG_JSON_DUMP/'
+'spark.cudf.sql.expression.GetJsonObject.debugPath': '/tmp/DEBUG_JSON_DUMP/'
 ```
 
 This path should be a directory or someplace that we can create a directory to
@@ -37,7 +37,7 @@ You may also set the max number of rows for each file/batch. Each time a new
 batch of data comes into the `get_json_object` expression a new file is written
 and this controls the maximum number of rows that may be written out. 
 ```
-'spark.rapids.sql.test.get_json_object.saveRows': '1024'
+'spark.cudf.sql.test.get_json_object.saveRows': '1024'
 ```
 This config can be skipped, because default value works.
 

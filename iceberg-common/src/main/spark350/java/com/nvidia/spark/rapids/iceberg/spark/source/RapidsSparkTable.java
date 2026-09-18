@@ -44,6 +44,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
+import com.nvidia.spark.rapids.internal.config.CudfConfKeys;
 import org.apache.iceberg.spark.SparkReadOptions;
 import org.apache.iceberg.spark.source.SparkTable;
 
@@ -74,9 +75,9 @@ import scala.Option;
  * Spark session configuration entries. Session-conf overrides are recognized at
  * three scopes, with the following precedence (most specific wins):
  * <ol>
- *   <li>session-table: {@code spark.rapids.iceberg.table-setting.<catalog>.<namespace>.<table>.<suffix>}</li>
- *   <li>catalog:       {@code spark.rapids.iceberg.catalog-setting.<catalog>.<suffix>}</li>
- *   <li>global:        {@code spark.rapids.iceberg.global-setting.<suffix>}</li>
+ *   <li>session-table: {@code spark.cudf.iceberg.table-setting.<catalog>.<namespace>.<table>.<suffix>}</li>
+ *   <li>catalog:       {@code spark.cudf.iceberg.catalog-setting.<catalog>.<suffix>}</li>
+ *   <li>global:        {@code spark.cudf.iceberg.global-setting.<suffix>}</li>
  * </ol>
  * When no session conf is set at any scope, iceberg falls back to the table's
  * own {@code TBLPROPERTIES} (e.g. {@code read.split.target-size}) and then to
@@ -108,15 +109,15 @@ public class RapidsSparkTable implements Table,
    * the class javadoc for the table-setting / catalog-setting / global-setting
    * key shapes.
    */
-  public static final String CONF_PREFIX = "spark.rapids.iceberg.";
+  public static final String CONF_PREFIX = "spark.cudf.iceberg.";
 
-  /** Scope marker for {@code spark.rapids.iceberg.table-setting.<…>.<suffix>}. */
+  /** Scope marker for {@code spark.cudf.iceberg.table-setting.<…>.<suffix>}. */
   static final String TABLE_SETTING_PREFIX = CONF_PREFIX + "table-setting.";
 
-  /** Scope marker for {@code spark.rapids.iceberg.catalog-setting.<catalog>.<suffix>}. */
+  /** Scope marker for {@code spark.cudf.iceberg.catalog-setting.<catalog>.<suffix>}. */
   static final String CATALOG_SETTING_PREFIX = CONF_PREFIX + "catalog-setting.";
 
-  /** Scope marker for {@code spark.rapids.iceberg.global-setting.<suffix>}. */
+  /** Scope marker for {@code spark.cudf.iceberg.global-setting.<suffix>}. */
   static final String GLOBAL_SETTING_PREFIX = CONF_PREFIX + "global-setting.";
 
   /**
@@ -278,21 +279,22 @@ public class RapidsSparkTable implements Table,
         sparkOpt.get().conf().getAll().iterator();
     while (it.hasNext()) {
       scala.Tuple2<String, String> entry = it.next();
-      String key = entry._1();
+      String sourceKey = entry._1();
+      String key = CudfConfKeys.canonicalKey(sourceKey);
       if (key.startsWith(tableKeyPrefix)) {
-        tableConfs.put(key, entry._2());
+        CudfConfKeys.putCanonical(tableConfs, sourceKey, entry._2());
       } else if (key.startsWith(catalogKeyPrefix)) {
         // Catalog-scoped: the part after catalogKeyPrefix must be a single
         // token (no '.'); otherwise the key isn't a well-formed catalog
         // setting for this table's catalog (and isn't a table-setting key
         // either, since those have their own scope marker), so skip it.
         if (key.indexOf('.', catalogKeyPrefix.length()) < 0) {
-          catalogConfs.put(key, entry._2());
+          CudfConfKeys.putCanonical(catalogConfs, sourceKey, entry._2());
         }
       } else if (key.startsWith(GLOBAL_SETTING_PREFIX)) {
         // Global-scoped: same single-token rule applies.
         if (key.indexOf('.', GLOBAL_SETTING_PREFIX.length()) < 0) {
-          globalConfs.put(key, entry._2());
+          CudfConfKeys.putCanonical(globalConfs, sourceKey, entry._2());
         }
       }
     }

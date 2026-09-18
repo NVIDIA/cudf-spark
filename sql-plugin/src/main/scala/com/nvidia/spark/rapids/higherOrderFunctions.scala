@@ -1210,7 +1210,7 @@ case object SumOp extends AggOp {
     case a: Add => Some((a.left, a.right))
     case _ => None
   }
-  // Float/Double are gated behind `spark.rapids.sql.variableFloatAgg.enabled` (same conf
+  // Float/Double are gated behind `spark.cudf.sql.variableFloatAgg.enabled` (same conf
   // as scalar GpuSum/GpuAverage) — cuDF's parallel tree-reduction sums in a different
   // order than Spark's sequential left-fold, so the low-bit answer can differ even though
   // both are valid IEEE 754 results. The check happens in GpuArrayAggregateMeta.

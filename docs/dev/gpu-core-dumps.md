@@ -82,7 +82,7 @@ Spark-on-Kubernetes. In the future with a driver that is compatible with CUDA 12
 the cuDF plugin could leverage GPU driver APIs to programmatically configure GPU core dump
 support on executor startup.
 
-To enable the simplified core dump handling, set `spark.rapids.gpu.coreDump.dir` to a directory to
+To enable the simplified core dump handling, set `spark.cudf.gpu.coreDump.dir` to a directory to
 use for GPU core dumps. Distributed filesystem URIs are supported. This leverages named pipes and
 background threads to copy the GPU core dump data to the distributed filesystem. Note that anything
 that causes early, abrupt termination of the process such as throwing from a C++ destructor will

@@ -32,6 +32,7 @@ import java.nio.file.Files
 import java.util.{Collections, HashMap => JHashMap}
 
 import com.nvidia.spark.rapids.iceberg.spark.RapidsSparkSessionCatalog
+import com.nvidia.spark.rapids.internal.config.CudfConfKeys
 import org.apache.commons.io.FileUtils
 import org.apache.iceberg.spark.SparkReadOptions
 import org.apache.iceberg.spark.source.SparkTable
@@ -64,10 +65,10 @@ class RapidsSparkTableSuite
   private val ns = Array("default")
   private val tbl = "test_tbl"
   private val tablePrefix =
-    s"spark.rapids.iceberg.table-setting.spark_catalog.default.$tbl"
+    s"spark.cudf.iceberg.table-setting.spark_catalog.default.$tbl"
   private val catalogPrefix =
-    "spark.rapids.iceberg.catalog-setting.spark_catalog"
-  private val globalPrefix = "spark.rapids.iceberg.global-setting"
+    "spark.cudf.iceberg.catalog-setting.spark_catalog"
+  private val globalPrefix = "spark.cudf.iceberg.global-setting"
 
   // Non-default values, picked so a "merged from session conf" assertion can't
   // be satisfied by iceberg defaults or by an accidental fallback.
@@ -104,11 +105,12 @@ class RapidsSparkTableSuite
   }
 
   override def afterEach(): Unit = {
-    // Sweep any per-test spark.rapids.iceberg.* runtime confs. The baseline
+    // Sweep any per-test cuDF plugin Iceberg runtime confs. The baseline
     // catalog wiring lives in SparkConf (set in beforeAll) so nothing else
     // needs to be preserved.
     spark.conf.getAll.keys.toList
-        .filter(_.startsWith("spark.rapids.iceberg."))
+        .filter(key => key.startsWith("spark.cudf.iceberg.") ||
+          key.startsWith("spark.rapids.iceberg."))
         .foreach(spark.conf.unset)
   }
 
@@ -169,7 +171,7 @@ class RapidsSparkTableSuite
 
   test("session conf is a pure pass-through when no override is set") {
     val merged = captureMergedOptions()
-    // No spark.rapids.iceberg.* conf is set for this table, so the wrapper
+    // No spark.cudf.iceberg.* conf is set for this table, so the wrapper
     // must forward the original (empty) options unchanged.
     assert(merged.isEmpty)
   }
@@ -180,6 +182,16 @@ class RapidsSparkTableSuite
     assert(merged.get(SparkReadOptions.SPLIT_SIZE) == splitSize)
     assert(!merged.containsKey(SparkReadOptions.LOOKBACK))
     assert(!merged.containsKey(SparkReadOptions.FILE_OPEN_COST))
+  }
+
+  test("legacy prefix is accepted and canonical prefix wins conflicts") {
+    val canonicalKey = s"$tablePrefix.read-split-target-size"
+    val legacyKey = CudfConfKeys.legacyKey(canonicalKey)
+    spark.conf.set(legacyKey, "222222222")
+    assert(captureMergedOptions().get(SparkReadOptions.SPLIT_SIZE) === "222222222")
+
+    spark.conf.set(canonicalKey, splitSize)
+    assert(captureMergedOptions().get(SparkReadOptions.SPLIT_SIZE) === splitSize)
   }
 
   test("all three recognized suffixes are merged into the scan options") {

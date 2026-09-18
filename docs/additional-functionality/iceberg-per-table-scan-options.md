@@ -63,14 +63,14 @@ For a non-default Iceberg catalog (e.g. one you have configured under
 
 ## Setting options
 
-Overrides use the prefix `spark.rapids.iceberg.` followed by a scope marker
+Overrides use the prefix `spark.cudf.iceberg.` followed by a scope marker
 (`table-setting` / `catalog-setting` / `global-setting`):
 
 | Scope     | Key shape                                                                                 | Applies to                                  |
 | --------- | ----------------------------------------------------------------------------------------- | ------------------------------------------- |
-| table     | `spark.rapids.iceberg.table-setting.<catalog>.<namespace>.<table>.<suffix>`               | one specific table                          |
-| catalog   | `spark.rapids.iceberg.catalog-setting.<catalog>.<suffix>`                                 | every table under `<catalog>`               |
-| global    | `spark.rapids.iceberg.global-setting.<suffix>`                                            | every table the wrapper handles             |
+| table     | `spark.cudf.iceberg.table-setting.<catalog>.<namespace>.<table>.<suffix>`               | one specific table                          |
+| catalog   | `spark.cudf.iceberg.catalog-setting.<catalog>.<suffix>`                                 | every table under `<catalog>`               |
+| global    | `spark.cudf.iceberg.global-setting.<suffix>`                                            | every table the wrapper handles             |
 
 Three suffixes are recognized at every scope:
 
@@ -95,14 +95,14 @@ override it again for one specific hot table:
 
 ```
 # Global default for every table the wrapper handles.
---conf spark.rapids.iceberg.global-setting.read-split-target-size=536870912
+--conf spark.cudf.iceberg.global-setting.read-split-target-size=536870912
 
 # Catalog-scoped override for all tables in spark_catalog.
---conf spark.rapids.iceberg.catalog-setting.spark_catalog.read-split-target-size=1073741824
+--conf spark.cudf.iceberg.catalog-setting.spark_catalog.read-split-target-size=1073741824
 
 # Per-table override for one table in spark_catalog.default.
---conf spark.rapids.iceberg.table-setting.spark_catalog.default.store_sales.read-split-target-size=2147483648
---conf spark.rapids.iceberg.table-setting.spark_catalog.default.store_sales.read-split-planning-lookback=1000
+--conf spark.cudf.iceberg.table-setting.spark_catalog.default.store_sales.read-split-target-size=2147483648
+--conf spark.cudf.iceberg.table-setting.spark_catalog.default.store_sales.read-split-planning-lookback=1000
 ```
 
 ## Precedence
@@ -112,11 +112,11 @@ and picking the first value that is set. The four priorities are, from highest
 to lowest:
 
 1. **Session table** — per-table session conf
-   (`spark.rapids.iceberg.table-setting.<catalog>.<namespace>.<table>.<suffix>`)
+   (`spark.cudf.iceberg.table-setting.<catalog>.<namespace>.<table>.<suffix>`)
 2. **Catalog** — catalog-scoped session conf
-   (`spark.rapids.iceberg.catalog-setting.<catalog>.<suffix>`)
+   (`spark.cudf.iceberg.catalog-setting.<catalog>.<suffix>`)
 3. **Global** — global session conf
-   (`spark.rapids.iceberg.global-setting.<suffix>`)
+   (`spark.cudf.iceberg.global-setting.<suffix>`)
 4. **Table itself** — Iceberg `TBLPROPERTIES`
    (e.g. `read.split.target-size`, set via `ALTER TABLE … SET TBLPROPERTIES`)
 
@@ -129,7 +129,7 @@ spark.read.format("iceberg")
   .load("default.store_sales")
 ```
 
-Tables for which no `spark.rapids.iceberg.<…>.*` conf is set at any scope and
+Tables for which no `spark.cudf.iceberg.<…>.*` conf is set at any scope and
 no matching `TBLPROPERTIES` is configured behave exactly as if the cuDF plugin
 catalog wrapper were not in use.
 
@@ -145,7 +145,7 @@ catalog wrapper were not in use.
   (`catalog=hadoop.prod` + `namespace=[ns]` + `table=tbl` produces the same
   prefix as `catalog=hadoop` + `namespace=[prod, ns]` + `table=tbl`). Tables
   with such identifiers stay as a pure pass-through as long as no
-  table-scoped `spark.rapids.iceberg.table-setting.*` conf is set for them.
+  table-scoped `spark.cudf.iceberg.table-setting.*` conf is set for them.
   Catalog-scoped and global-scoped confs and `TBLPROPERTIES` still apply,
   since they don't span multiple identifier components. If a table-scoped
   conf is set against such an identifier, the wrapper throws an

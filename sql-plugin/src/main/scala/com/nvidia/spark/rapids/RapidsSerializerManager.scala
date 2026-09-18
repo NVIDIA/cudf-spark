@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,8 +35,8 @@ import org.apache.spark.storage.BlockId
 class RapidsSerializerManager (conf: SparkConf) {
   private lazy val compressSpill = TrampolineUtil.isCompressSpill(conf)
 
-  private lazy val serializerManager = if (conf
-    .getBoolean(RapidsConf.TEST_IO_ENCRYPTION.key,false)) {
+  private lazy val serializerManager = if (
+      new RapidsConf(conf).get(RapidsConf.TEST_IO_ENCRYPTION).getOrElse(false)) {
     TrampolineUtil.createSerializerManager(conf)
   } else {
     TrampolineUtil.getSerializerManager

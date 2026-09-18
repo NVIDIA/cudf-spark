@@ -35,7 +35,7 @@ Reference: [cudf partitioning API](https://docs.rapids.ai/api/libcudf/legacy/gro
 
 ### Important Nuance: Per-Batch Ordering, Not Global Ordering
 
-However, there's an important detail: due to `spark.rapids.shuffle.partitioning.maxCpuBatchSize`, 
+However, there's an important detail: due to `spark.cudf.shuffle.partitioning.maxCpuBatchSize`,
 a single map task may produce **multiple batches**. Each batch is independently ordered, 
 but partition IDs "wrap around" between batches:
 
@@ -432,7 +432,7 @@ pool, so waiting batches do not occupy executor threads and merger concurrency r
 
 **Multi-Batch Detection and Handling**:
 
-A single map task may produce multiple batches due to `spark.rapids.shuffle.partitioning.maxCpuBatchSize` 
+A single map task may produce multiple batches due to `spark.cudf.shuffle.partitioning.maxCpuBatchSize`
 limiting the size of each batch transferred from GPU to CPU. Each batch is independently 
 partition-ordered, but partition IDs "wrap around" between batches.
 
@@ -606,9 +606,9 @@ After all records processed:
 
 | Config | Default | Description |
 |--------|---------|-------------|
-| `spark.rapids.memory.host.partialFileBufferInitialSize` | 1GB | Initial buffer size for memory-based mode |
-| `spark.rapids.memory.host.partialFileBufferMaxSize` | 8GB | Maximum buffer size before forced spill |
-| `spark.rapids.memory.host.partialFileBufferMemoryThreshold` | 0.5 | Host memory usage threshold (0.0-1.0) for using memory mode |
+| `spark.cudf.memory.host.partialFileBufferInitialSize` | 1GB | Initial buffer size for memory-based mode |
+| `spark.cudf.memory.host.partialFileBufferMaxSize` | 8GB | Maximum buffer size before forced spill |
+| `spark.cudf.memory.host.partialFileBufferMemoryThreshold` | 0.5 | Host memory usage threshold (0.0-1.0) for using memory mode |
 
 All configs are `.startupOnly()` and `.internal()`.
 

@@ -48,7 +48,7 @@ All modules carry `@pytest.mark.private_optimizer`, so the whole area runs with:
 2. **Import the shared helpers** from `private_optimizer_common`:
    - `private_optimizer_conf(*rule_confs, extra_conf=None)` — builds the conf
      dict. It starts from `PRIVATE_OPTIMIZER_BASE_CONF` (which sets
-     `spark.rapids.sql.private.enabled=true`), merges each positional rule-conf
+     `spark.cudf.sql.private.enabled=true`), merges each positional rule-conf
      dict in order, then applies the optional `extra_conf` (query-shaping confs
      such as broadcast thresholds or AQE toggles).
    - `assert_rule_fires(fn, on_conf, off_conf, marker, physical=False)`
@@ -69,8 +69,8 @@ Each private rule has its own enable conf in the private `OptimizerConf`. Build
 `on`/`off` conf dicts that differ **only** in that one rule conf, e.g.:
 
 ```python
-on  = private_optimizer_conf({"spark.rapids.sql.optimizer.aggPushdownEnabled": "true"},  extra_conf=base)
-off = private_optimizer_conf({"spark.rapids.sql.optimizer.aggPushdownEnabled": "false"}, extra_conf=base)
+on  = private_optimizer_conf({"spark.cudf.sql.optimizer.aggPushdownEnabled": "true"},  extra_conf=base)
+off = private_optimizer_conf({"spark.cudf.sql.optimizer.aggPushdownEnabled": "false"}, extra_conf=base)
 ```
 
 If the rule's conf defaults to **on**, the OFF baseline must set it `false`

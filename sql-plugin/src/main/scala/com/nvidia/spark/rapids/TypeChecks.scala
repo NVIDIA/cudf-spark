@@ -1919,7 +1919,7 @@ object SupportedOpsDocs {
     ConsoleOutput.writeLine("Others are a part of Apache Spark itself and those are a bit harder to document.")
     ConsoleOutput.writeLine("The work of updating this to cover that support is still ongoing.")
     ConsoleOutput.writeLine()
-    ConsoleOutput.writeLine("For debugging, set `spark.rapids.sql.explain` to ALL to report why")
+    ConsoleOutput.writeLine("For debugging, set `spark.cudf.sql.explain` to ALL to report why")
     ConsoleOutput.writeLine("operators or expressions run on the CPU or GPU. ALL can generate")
     ConsoleOutput.writeLine("substantial driver log output for complex or high-volume workloads,")
     ConsoleOutput.writeLine("potentially degrading driver performance or making the driver")

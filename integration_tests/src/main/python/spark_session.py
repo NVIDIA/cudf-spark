@@ -36,6 +36,50 @@ _spark = get_spark_i_know_what_i_am_doing()
 _orig_conf = _from_scala_map(_spark.conf._jconf.getAll())
 _orig_conf_keys = _orig_conf.keys()
 
+_canonical_plugin_conf_prefix = 'spark.cudf.'
+_legacy_plugin_conf_prefix = 'spark.rapids.'
+
+
+def _canonical_plugin_conf_key(key):
+    if key.startswith(_legacy_plugin_conf_prefix):
+        return _canonical_plugin_conf_prefix + key[len(_legacy_plugin_conf_prefix):]
+    return key
+
+
+def _legacy_plugin_conf_key(key):
+    canonical = _canonical_plugin_conf_key(key)
+    if canonical.startswith(_canonical_plugin_conf_prefix):
+        return _legacy_plugin_conf_prefix + canonical[len(_canonical_plugin_conf_prefix):]
+    return canonical
+
+
+def _with_plugin_conf_aliases(conf):
+    canonical_values = {}
+    for key, value in conf.items():
+        if not (key.startswith(_canonical_plugin_conf_prefix) or
+                key.startswith(_legacy_plugin_conf_prefix)):
+            continue
+        canonical = _canonical_plugin_conf_key(key)
+        if key.startswith(_canonical_plugin_conf_prefix) or canonical not in canonical_values:
+            canonical_values[canonical] = value
+
+    resolved = dict(conf)
+    for canonical, value in canonical_values.items():
+        resolved[canonical] = value
+        resolved[_legacy_plugin_conf_key(canonical)] = value
+    return resolved
+
+
+def _set_plugin_conf(conf, key, value):
+    canonical = _canonical_plugin_conf_key(key)
+    conf[canonical] = value
+    conf[_legacy_plugin_conf_key(canonical)] = value
+
+
+def _get_plugin_conf(conf, key, default=None):
+    canonical = _canonical_plugin_conf_key(key)
+    return conf.get(canonical, conf.get(_legacy_plugin_conf_key(canonical), default))
+
 # Default settings that should apply to CPU and GPU sessions.
 # These settings can be overridden by specific tests if necessary.
 # Many of these are redundant with default settings for the configs but are set here explicitly
@@ -65,6 +109,7 @@ def _set_all_confs(conf):
         _spark.conf.set("spark.rapids.sql.test.injectRetryOOM",
                          inject_oom.args[0] if len(inject_oom.args) > 0 else True)
     newconf.update(conf)
+    newconf = _with_plugin_conf_aliases(newconf)
     for key, value in newconf.items():
         if _spark.conf.get(key, None) != value:
             _spark.conf.set(key, value)
@@ -136,7 +181,7 @@ def with_spark_session(func, conf={}):
 
 
 def _add_job_description(conf):
-    is_gpu_job = conf.get('spark.rapids.sql.enabled', False)
+    is_gpu_job = _get_plugin_conf(conf, 'spark.cudf.sql.enabled', False)
     job_type = 'GPU' if str(is_gpu_job).lower() == str(True).lower() else 'CPU'
     job_desc = '{}[{}]'.format(os.environ.get('PYTEST_CURRENT_TEST'), job_type)
     _spark.sparkContext.setJobDescription(job_desc)
@@ -145,7 +190,7 @@ def _add_job_description(conf):
 def with_cpu_session(func, conf={}):
     """Run func that takes a spark session as input with the given configs set on the CPU."""
     copy = dict(conf)
-    copy['spark.rapids.sql.enabled'] = 'false'
+    _set_plugin_conf(copy, 'spark.cudf.sql.enabled', 'false')
     return with_spark_session(func, conf=copy)
 
 def with_gpu_session(func, conf={}):
@@ -155,14 +200,16 @@ def with_gpu_session(func, conf={}):
     simplest for right now.
     """
     copy = dict(conf)
-    copy['spark.rapids.sql.enabled'] = 'true'
+    _set_plugin_conf(copy, 'spark.cudf.sql.enabled', 'true')
     if is_allowing_any_non_gpu():
-        copy['spark.rapids.sql.test.enabled'] = 'false'
+        _set_plugin_conf(copy, 'spark.cudf.sql.test.enabled', 'false')
     else:
-        copy['spark.rapids.sql.test.enabled'] = 'true'
-        copy['spark.rapids.sql.test.allowedNonGpu'] = ','.join(get_non_gpu_allowed())
+        _set_plugin_conf(copy, 'spark.cudf.sql.test.enabled', 'true')
+        _set_plugin_conf(
+            copy, 'spark.cudf.sql.test.allowedNonGpu', ','.join(get_non_gpu_allowed()))
 
-    copy['spark.rapids.sql.test.validateExecsInGpuPlan'] = ','.join(get_validate_execs_in_gpu_plan())
+    _set_plugin_conf(copy, 'spark.cudf.sql.test.validateExecsInGpuPlan',
+                     ','.join(get_validate_execs_in_gpu_plan()))
     return with_spark_session(func, conf=copy)
 
 def is_before_spark_312():

@@ -44,7 +44,7 @@ import org.apache.spark.util.SerializableConfiguration
 
 /** Limits the generic DBR V1 write rule to the native liquid OPTIMIZE call stack. */
 object GpuLiquidOptimizeWriteContext {
-  private val activeKey = "spark.rapids.sql.delta.liquidOptimizeWrite.active"
+  private val activeKey = "spark.cudf.sql.delta.liquidOptimizeWrite.active"
 
   def isActive: Boolean = SparkContext.getActive
     .exists(_.getLocalProperty(activeKey) == "true")
