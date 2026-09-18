@@ -21,6 +21,7 @@ package com.nvidia.spark.rapids.shims
 
 import org.apache.spark.sql.catalyst.expressions.{Expression, GetJsonObject, JsonToStructs,
   NamedLambdaVariable, RegExpExtract, RegExpExtractAll, StringTranslate}
+import org.apache.spark.sql.types.{DataType, DoubleType, FloatType}
 
 object SparkShimImpl extends Spark420PlusShims {
   override protected def isBridgeCloneSafeStatefulExpression(expr: Expression): Boolean =
@@ -36,5 +37,12 @@ object SparkShimImpl extends Spark420PlusShims {
     expr.transformUp {
       case variable: NamedLambdaVariable => variable.toAttribute
     }.canonicalized
+  }
+
+  // Spark 5 changed exact-percentile interpolation. With floating infinities, its new formula can
+  // produce NaN where the JNI implementation's earlier formula produces an infinity.
+  override def isExactPercentileInputTypeSupported(dataType: DataType): Boolean = dataType match {
+    case FloatType | DoubleType => false
+    case _ => true
   }
 }
