@@ -14,18 +14,19 @@
  * limitations under the License.
  */
 /*** spark-rapids-shim-json-lines
-{"spark": "411"}
-{"spark": "412"}
-{"spark": "413"}
+{"spark": "400"}
+{"spark": "401"}
+{"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.iceberg;
 
 import org.apache.spark.sql.catalyst.InternalRow;
-import org.apache.spark.unsafe.types.GeographyVal;
-import org.apache.spark.unsafe.types.GeometryVal;
 import org.apache.spark.unsafe.types.VariantVal;
 
+/** Spark 4.0 implementation of the Iceberg partition-value row wrapper. */
 public class GpuInternalRow extends GpuInternalRowBase {
   public GpuInternalRow(InternalRow row) {
     super(row);
@@ -34,15 +35,5 @@ public class GpuInternalRow extends GpuInternalRowBase {
   @Override
   public VariantVal getVariant(int ordinal) {
     return getWrapped().getVariant(ordinal);
-  }
-
-  @Override
-  public GeometryVal getGeometry(int ordinal) {
-    return getWrapped().getGeometry(ordinal);
-  }
-
-  @Override
-  public GeographyVal getGeography(int ordinal) {
-    return getWrapped().getGeography(ordinal);
   }
 }

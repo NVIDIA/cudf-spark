@@ -865,6 +865,20 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val maxReadBatchSizeBytes: Long = get(MAX_READER_BATCH_SIZE_BYTES)
 
+  /**
+   * Whether a reader should ignore the schema based GPU memory estimate when sizing a batch.
+   *
+   * @param chunkedReaderEnabled whether this reader has a chunked reader, which bounds its own
+   *                             GPU memory usage and so does not need the estimate. Pass false
+   *                             for formats that have no chunked reader.
+   */
+  def skipReadEstimate(chunkedReaderEnabled: Boolean): Boolean =
+    get(READER_USE_READ_ESTIMATE_FROM_SCHEMA) match {
+      case Some(true) => false
+      case Some(false) => true
+      case None => chunkedReaderEnabled
+    }
+
   lazy val maxGpuColumnSizeBytes: Long = get(MAX_GPU_COLUMN_SIZE_BYTES)
 
   lazy val outputDebugDumpPrefix: Option[String] = get(OUTPUT_DEBUG_DUMP_PREFIX)
