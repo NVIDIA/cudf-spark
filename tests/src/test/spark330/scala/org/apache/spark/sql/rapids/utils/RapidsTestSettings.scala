@@ -197,6 +197,10 @@ class RapidsTestSettings extends BackendTestSettings {
     .exclude("File source v2: support partition pruning", ADJUST_UT("Replaced by testRapids version that checks GpuBatchScanExec file filters and selected partitions."))
     .exclude("File source v2: support passing data filters to FileScan without partitionFilters", ADJUST_UT("Replaced by testRapids version that checks GpuBatchScanExec file filters and selected partitions."))
   enableSuite[RapidsCachedTableSuite]
+    .exclude("Ensure accumulators to be cleared after GC when uncacheTable",
+      ADJUST_UT("Replaced by testRapids version that checks both tables and retries GC after " +
+        "draining query listeners. https://github.com/NVIDIA/cudf-spark/issues/15928. " +
+        "Recovery trigger: upstream fixes the table lookup and cleanup wait; P1."))
     .exclude("InMemoryRelation statistics", ADJUST_UT("Replaced by testRapids version that checks cache statistics with RAPIDS cache serializer and GpuInMemoryTableScanExec."))
     .exclude("SPARK-19993 subquery with cached underlying relation", ADJUST_UT("Replaced by testRapids version that checks cached subquery reuse with recursive GpuInMemoryTableScanExec nodes."))
     .exclude("SPARK-36120: Support cache/uncache table with TimestampNTZ type", ADJUST_UT("Replaced by testRapids version that checks TimestampNTZ cache correctness with RAPIDS cache stats."))
