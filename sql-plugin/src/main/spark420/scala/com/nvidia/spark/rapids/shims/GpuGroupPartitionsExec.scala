@@ -116,7 +116,7 @@ case class GpuGroupPartitionsExec(
   // The ordinary path only changes RDD partition grouping, while the sorted-merge path also
   // produces batches and rows through the out-of-core sorter.
   override lazy val allMetrics: Map[String, GpuMetric] = Map(
-    OP_TIME_NEW -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_OP_TIME_NEW)) ++
+    OP_TIME_NEW -> createOpTimeMetric(DESCRIPTION_OP_TIME_NEW)) ++
       (if (needsSortedMerge) {
         Map(
           NUM_OUTPUT_ROWS -> createMetric(DEBUG_LEVEL, DESCRIPTION_NUM_OUTPUT_ROWS),

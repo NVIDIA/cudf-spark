@@ -20,7 +20,8 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
-import com.nvidia.spark.rapids.{GpuScan, SparkQueryCompareTestSuite}
+import com.nvidia.spark.rapids.{GpuMetric, GpuScan, SparkQueryCompareTestSuite}
+import com.nvidia.spark.rapids.GpuMetric.OP_TIME_NEW
 import org.scalatestplus.mockito.MockitoSugar
 
 import org.apache.spark.sql.connector.catalog.Table
@@ -56,6 +57,9 @@ class GpuBatchScanExecMetricsSuite extends SparkQueryCompareTestSuite with Mocki
         table = mock[Table])
       assert(plan.scanCustomSQLMetrics(TestCustomMetric.name()) eq
         plan.metrics(TestCustomMetric.name()))
+      val publishedMetrics = GpuMetric.unwrap(plan.allMetrics)
+      assert(publishedMetrics.keySet.contains(OP_TIME_NEW))
+      assert(publishedMetrics.keySet.contains(s"${OP_TIME_NEW}_exSemWait"))
     }
   }
 }

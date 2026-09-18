@@ -125,8 +125,7 @@ object GpuWriteJobStatsTracker {
         "GPU sort time"),
       WRITE_IO_TIME_KEY -> metricFactory.createNanoTiming(GpuMetric.DEBUG_LEVEL,
         "write I/O time"),
-      OP_TIME_NEW_KEY -> metricFactory.createNanoTiming(GpuMetric.MODERATE_LEVEL,
-        "op time"),
+      OP_TIME_NEW_KEY -> metricFactory.createOpTime("op time"),
       TASK_COMMIT_TIME -> basicMetrics(TASK_COMMIT_TIME),
       ASYNC_WRITE_TOTAL_THROTTLE_TIME_KEY -> metricFactory.createNanoTiming(
         GpuMetric.DEBUG_LEVEL, "total throttle time"),
