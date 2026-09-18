@@ -120,6 +120,11 @@ import org.apache.spark.sql.types.{BooleanType, LongType, StringType, StructFiel
  * @param notMatchedClauses All info related to not matched clause.
  * @param migratedSchema    The final schema of the target - may be changed by schema evolution.
  */
+object GpuLowShuffleMergeCommand {
+  private[rapids] val TEST_FAIL_ON_FALLBACK_CONF =
+    "spark.rapids.sql.test.delta.lowShuffleMerge.failOnFallback"
+}
+
 case class GpuLowShuffleMergeCommand(
     @transient source: LogicalPlan,
     @transient target: LogicalPlan,
@@ -281,6 +286,11 @@ case class GpuLowShuffleMergeCommand(
           val fallback = executor match {
             case lowShuffle: LowShuffleMergeExecutor => lowShuffle.shouldFallback()
             case _ => false
+          }
+          if (fallback && rapidsConf.isTestEnabled && spark.conf.getOption(
+              GpuLowShuffleMergeCommand.TEST_FAIL_ON_FALLBACK_CONF).exists(_.toBoolean)) {
+            throw new IllegalStateException(
+              "Low shuffle merge unexpectedly fell back to the classic GPU merge executor")
           }
           if (fallback) {
             None
@@ -607,7 +617,7 @@ class InsertOnlyMergeExecutor(override val context: MergeExecutorContext) extend
  *
  * The algorithm is as follows:
  * 1. Find touched target files in the target table by joining the source and target data, with
- * collecting joined row identifiers as (`__metadata_file_path`, `__metadata_row_idx`) pairs.
+ * collecting joined file-path and row-index pairs.
  * 2. Read the touched files again and write new files with updated and/or inserted rows
  * without coping unmodified data from target table, but filtering target table with collected
  * rows mentioned above.
@@ -615,6 +625,12 @@ class InsertOnlyMergeExecutor(override val context: MergeExecutorContext) extend
  * collected in first step, and saving them without shuffle.
  */
 class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extends MergeExecutor {
+
+  private case class TouchedFileDiscoveryPlan(
+      df: DataFrame,
+      filePathAttr: Attribute,
+      rowIndexAttr: Attribute,
+      sourceRowPresentAttr: Attribute)
 
   // We over-count numTargetRowsDeleted when there are multiple matches;
   // this is the amount of the overcount, so we can subtract it to get a correct final metric.
@@ -680,7 +696,7 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
           case scan if scan.isInstanceOf[FileSourceScanExecMeta] &&
               isLowShuffleTargetScan(scan.asInstanceOf[FileSourceScanExecMeta]) =>
             val fileScan = scan.asInstanceOf[FileSourceScanExecMeta]
-            fileScan.wrapped.schema.fieldNames.contains(METADATA_ROW_IDX_COL) &&
+            fileScan.wrapped.schema.fieldNames.contains(discoveryRowIndexCol) &&
               fileScan.canThisBeReplaced
           case m => m.childPlans.exists(check)
         }
@@ -793,37 +809,56 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
     }
   }
 
-  private lazy val dataSkippedTargetDF: DataFrame = {
-    addRowIndexMetaColumn(buildTargetDFWithFiles(dataSkippedFiles))
+  private lazy val discoverySourceDF = sourceDF
+  private lazy val dataSkippedTargetBaseDF = buildTargetDFWithFiles(dataSkippedFiles)
+  private lazy val discoveryInputColumns =
+    discoverySourceDF.columns.toSeq ++ dataSkippedTargetBaseDF.columns.toSeq
+  private lazy val discoveryFilePathCol = uniqueColumnName(FILE_PATH_COL, discoveryInputColumns)
+  private lazy val discoveryRowIndexCol = uniqueColumnName(
+    METADATA_ROW_IDX_COL, discoveryInputColumns :+ discoveryFilePathCol)
+  private lazy val discoverySourceRowPresentCol = uniqueColumnName(
+    SOURCE_ROW_PRESENT_COL,
+    discoveryInputColumns ++ Seq(discoveryFilePathCol, discoveryRowIndexCol))
+
+  private lazy val touchedFileDiscoveryPlan: TouchedFileDiscoveryPlan = {
+    val targetWithRowIndex = addRowIndexMetaColumn(
+      dataSkippedTargetBaseDF, discoveryRowIndexCol)
+    val targetDF = targetWithRowIndex.withColumn(discoveryFilePathCol, input_file_name())
+    val filePathAttr = targetDF.queryExecution.analyzed.output.last
+    val rowIndexAttr = targetDF.queryExecution.analyzed.output
+      .find(_.exprId == targetWithRowIndex.queryExecution.analyzed.output.last.exprId)
+      .get
+
+    val sourceWithMarker = discoverySourceDF.withColumn(discoverySourceRowPresentCol, lit(true))
+    val sourceRowPresentAttr = sourceWithMarker.queryExecution.analyzed.output.last
+    val joinType = if (context.cmd.notMatchedBySourceClauses.isEmpty) "inner" else "right_outer"
+    val joined = sourceWithMarker.join(
+      targetDF, DFUDFShims.exprToColumn(context.cmd.condition), joinType)
+    val filtered = if (context.cmd.notMatchedBySourceClauses.isEmpty) {
+      joined
+    } else {
+      joined.filter(
+        DFUDFShims.exprToColumn(sourceRowPresentAttr).isNotNull ||
+          DFUDFShims.exprToColumn(effectiveNotMatchedBySourcePredicate))
+    }
+    val filteredOutput = filtered.queryExecution.analyzed.output
+    def outputAttribute(attr: Attribute): Attribute =
+      filteredOutput.find(_.exprId == attr.exprId).get
+    TouchedFileDiscoveryPlan(
+      filtered,
+      outputAttribute(filePathAttr),
+      outputAttribute(rowIndexAttr),
+      outputAttribute(sourceRowPresentAttr))
   }
 
   private lazy val touchedFiles: Map[String, (Roaring64Bitmap, AddFile)] = this.findTouchedFiles()
 
-  private lazy val discoverySourceRowPresentCol: String = uniqueColumnName(
-    SOURCE_ROW_PRESENT_COL,
-    sourceDF.columns.toSeq ++ dataSkippedTargetDF.columns.toSeq :+ FILE_PATH_COL)
-
   private def planForFindingTouchedFiles(): DataFrame = {
-
     // Apply an inner join to find matched rows. With NOT MATCHED BY SOURCE clauses, preserve
-    // target-only rows as well and retain only those which take an NMBS action.
-    // In addition, we attach two columns
-    // - METADATA_ROW_IDX column to identify target row in file
-    // - FILE_PATH_COL the target file name the row is from to later identify the files touched
-    // by matched rows
-    val targetDF = dataSkippedTargetDF.withColumn(FILE_PATH_COL, input_file_name())
-
-    val sourceWithMarker = sourceDF.withColumn(discoverySourceRowPresentCol, lit(true))
-    val joinType = if (context.cmd.notMatchedBySourceClauses.isEmpty) "inner" else "right_outer"
-    val joined = sourceWithMarker.join(
-      targetDF, DFUDFShims.exprToColumn(context.cmd.condition), joinType)
-    if (context.cmd.notMatchedBySourceClauses.isEmpty) {
-      joined
-    } else {
-      joined.filter(
-        col(discoverySourceRowPresentCol).isNotNull ||
-          DFUDFShims.exprToColumn(effectiveNotMatchedBySourcePredicate))
-    }
+    // target-only rows as well and retain only those which take an NMBS action. The generated
+    // file-path, row-index, and source-presence attributes have collision-safe names and are
+    // retained by expression identity.
+    touchedFileDiscoveryPlan.df
   }
 
   private def planForMergeExecution(touchedFiles: Map[String, (Roaring64Bitmap, AddFile)])
@@ -840,11 +875,15 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
   private def findTouchedFiles(): Map[String, (Roaring64Bitmap, AddFile)] =
     context.cmd.recordMergeOperation(sqlMetricName = "scanTimeMs") {
       context.spark.udf.register("row_index_set", udaf(RoaringBitmapUDAF))
-      val matchedRows = planForFindingTouchedFiles()
+      val discoveryPlan = touchedFileDiscoveryPlan
+      val filePathCol = DFUDFShims.exprToColumn(discoveryPlan.filePathAttr)
+      val rowIndexCol = DFUDFShims.exprToColumn(discoveryPlan.rowIndexAttr)
+      val sourceRowPresentCol = DFUDFShims.exprToColumn(discoveryPlan.sourceRowPresentAttr)
+      val matchedRows = discoveryPlan.df
         .select(
-          col(FILE_PATH_COL),
-          col(METADATA_ROW_IDX_COL),
-          when(col(discoverySourceRowPresentCol).isNotNull &&
+          filePathCol,
+          rowIndexCol,
+          when(sourceRowPresentCol.isNotNull &&
               DFUDFShims.exprToColumn(effectiveMatchPredicate), lit(1L))
             .otherwise(lit(0L)).as("effective"))
 
@@ -854,25 +893,25 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
       val allMatchesAreEffective = context.cmd.matchedClauses.exists(_.condition.isEmpty)
       val collectedRows = if (allMatchesAreEffective) {
         matchedRows
-          .groupBy(FILE_PATH_COL)
+          .groupBy(filePathCol)
           .agg(
-            expr(s"row_index_set($METADATA_ROW_IDX_COL) as row_idxes"),
+            expr(s"row_index_set($discoveryRowIndexCol) as row_idxes"),
             count("*").as("matchCount"))
           .collect()
       } else {
         matchedRows
-          .groupBy(FILE_PATH_COL)
+          .groupBy(filePathCol)
           .agg(
-            expr(s"row_index_set($METADATA_ROW_IDX_COL) as row_idxes"),
+            expr(s"row_index_set($discoveryRowIndexCol) as row_idxes"),
             count("*").as("matchCount"),
-            expr(s"row_index_set($METADATA_ROW_IDX_COL) " +
+            expr(s"row_index_set($discoveryRowIndexCol) " +
               "FILTER (WHERE effective = 1) as effectiveRowIdxes"),
             sum("effective").as("effectiveMatchCount"))
           .collect()
       }
 
       val collectTouchedFiles = collectedRows.map { row =>
-        row.getAs[String](FILE_PATH_COL) ->
+        row.getAs[String](discoveryFilePathCol) ->
           row.getAs[RoaringBitmapWrapper]("row_idxes").inner
       }.toMap
       val duplicateMatchCount = collectedRows.map { row =>
@@ -933,7 +972,7 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
       // We need to scan the source table once to get the correct
       // metric here.
       if (context.cmd.metrics("numSourceRows").value == 0 &&
-        (dataSkippedFiles.isEmpty || dataSkippedTargetDF.take(1).isEmpty)) {
+        (dataSkippedFiles.isEmpty || dataSkippedTargetBaseDF.take(1).isEmpty)) {
         val numSourceRows = sourceDF.count()
         context.cmd.metrics("numSourceRows").set(numSourceRows)
       }
@@ -957,17 +996,18 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
 
 
   /** Add a file-relative row-index column that the GPU file reader populates. */
-  private def addRowIndexMetaColumn(baseDF: DataFrame): DataFrame = {
+  private def addRowIndexMetaColumn(baseDF: DataFrame, rowIndexColumnName: String): DataFrame = {
+    val rowIndexField = METADATA_ROW_IDX_FIELD.copy(name = rowIndexColumnName)
     val rowIdxAttr = AttributeReference(
-      METADATA_ROW_IDX_COL,
-      METADATA_ROW_IDX_FIELD.dataType,
-      METADATA_ROW_IDX_FIELD.nullable)()
+      rowIndexColumnName,
+      rowIndexField.dataType,
+      rowIndexField.nullable)()
 
     val newPlan = baseDF.queryExecution.analyzed.transformUp {
       case r: LogicalRelation if r.relation.isInstanceOf[HadoopFsRelation] =>
         val fs = r.relation.asInstanceOf[HadoopFsRelation]
-        val newSchema = StructType(fs.dataSchema.fields).add(METADATA_ROW_IDX_FIELD)
-        val newFs = lowShuffleScanRelation(fs, newSchema)
+        val newSchema = StructType(fs.dataSchema.fields).add(rowIndexField)
+        val newFs = lowShuffleScanRelation(fs, newSchema, rowIndexColumnName)
 
         r.copy(relation = newFs, output = r.output :+ rowIdxAttr)
       case p@Project(projectList, _) =>
@@ -979,14 +1019,17 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
 
   private def lowShuffleScanRelation(
       relation: HadoopFsRelation,
-      dataSchema: StructType): HadoopFsRelation = {
+      dataSchema: StructType,
+      rowIndexColumnName: String): HadoopFsRelation = {
     val fileFormat = relation.fileFormat.asInstanceOf[DeltaParquetFileFormat]
       .copy(optimizationsEnabled = false)
     relation.copy(
       dataSchema = dataSchema,
       fileFormat = fileFormat,
       options = relation.options +
-        (GpuDeltaParquetFileFormat.LOW_SHUFFLE_MERGE_SCAN_OPTION -> "true"))(
+        (GpuDeltaParquetFileFormat.LOW_SHUFFLE_MERGE_SCAN_OPTION -> "true") +
+        (GpuDeltaParquetFileFormat.LOW_SHUFFLE_MERGE_ROW_INDEX_COLUMN_OPTION ->
+          rowIndexColumnName))(
       context.spark)
   }
 

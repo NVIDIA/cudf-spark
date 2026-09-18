@@ -29,6 +29,10 @@ delta_merge_enabled_conf = copy_and_update(delta_writes_enabled_conf,
                             "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
                             "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled":
                                 "true"})
+delta_merge_require_low_shuffle_conf = copy_and_update(
+    delta_merge_enabled_conf,
+    {"spark.rapids.sql.test.delta.lowShuffleMerge.failOnFallback": "true"})
+
 
 def supports_delta_low_shuffle_merge():
     return is_databricks_version(17, 3) or \
@@ -150,7 +154,7 @@ def test_delta_low_shuffle_merge_not_matched_by_source(
         use_cdf=use_cdf, enable_deletion_vectors=False,
         src_table_func=src_table_func, dest_table_func=dest_table_func,
         merge_sql=merge_sql, compare_logs=False,
-        conf=delta_merge_enabled_conf)
+        conf=delta_merge_require_low_shuffle_conf)
 
 
 @allow_non_gpu(*delta_meta_allow)
@@ -247,7 +251,10 @@ def test_delta_low_shuffle_merge_internal_column_names(
              ("_incr_metrics_", IntegerGen(
                  min_val=-1000000, max_val=1000000, nullable=False, special_cases=[])),
              ("_target_row_present_", StringGen(
-                 pattern="[a-z]{1,20}", nullable=False))])
+                 pattern="[a-z]{1,20}", nullable=False)),
+             ("_metadata_file_path", StringGen(
+                 pattern="[a-z]{1,20}", nullable=False)),
+             ("__metadata_row_index", LongGen(nullable=False))])
 
     def source_parts(spark):
         generated = dest_table_func(spark)
@@ -257,18 +264,21 @@ def test_delta_low_shuffle_merge_internal_column_names(
             f.concat(f.lit("updated-"), "_row_dropped_").alias("_row_dropped_"),
             (f.col("_incr_metrics_") + 1).alias("_incr_metrics_"),
             f.concat(f.lit("source-"), "_target_row_present_").alias(
-                "_source_row_present_"))
+                "_source_row_present_"),
+            "_metadata_file_path", "__metadata_row_index")
         ignored = matched.select(
             "k", f.lit(False).alias("apply"),
             f.concat(f.lit("ignored-"), "_row_dropped_").alias("_row_dropped_"),
             (f.col("_incr_metrics_") + 2).alias("_incr_metrics_"),
             f.concat(f.lit("ignored-"), "_target_row_present_").alias(
-                "_source_row_present_"))
+                "_source_row_present_"),
+            "_metadata_file_path", "__metadata_row_index")
         inserted = generated.where(f.pmod("k", f.lit(4)) == 1).select(
             (f.col("k") + _INSERT_KEY_OFFSET).alias("k"),
             f.lit(True).alias("apply"),
             "_row_dropped_", "_incr_metrics_",
-            f.col("_target_row_present_").alias("_source_row_present_"))
+            f.col("_target_row_present_").alias("_source_row_present_"),
+            "_metadata_file_path", "__metadata_row_index")
         return effective, ignored, inserted
 
     def src_table_func(spark):
@@ -276,13 +286,17 @@ def test_delta_low_shuffle_merge_internal_column_names(
         return effective.unionByName(ignored).unionByName(inserted)
 
     merge_sql = ("MERGE INTO {dest_table} t USING {src_table} s ON t.k = s.k "
+                 "AND t._metadata_file_path = s._metadata_file_path "
+                 "AND t.__metadata_row_index = s.__metadata_row_index "
                  "WHEN MATCHED AND s.apply THEN UPDATE SET "
                  "t._row_dropped_ = s._row_dropped_, "
                  "t._incr_metrics_ = s._incr_metrics_, "
                  "t._target_row_present_ = s._source_row_present_ "
                  "WHEN NOT MATCHED THEN INSERT (k, _row_dropped_, _incr_metrics_, "
-                 "_target_row_present_) VALUES (s.k, s._row_dropped_, s._incr_metrics_, "
-                 "s._source_row_present_)")
+                 "_target_row_present_, _metadata_file_path, __metadata_row_index) "
+                 "VALUES (s.k, s._row_dropped_, s._incr_metrics_, "
+                 "s._source_row_present_, s._metadata_file_path, "
+                 "s.__metadata_row_index)")
     # DBR's CPU MERGE uses these same fixed helper names and fails during analysis, so there is no
     # valid CPU oracle for this regression. Run the GPU implementation and compare with the
     # result computed from the generated target and source data instead.
@@ -296,14 +310,14 @@ def test_delta_low_shuffle_merge_internal_column_names(
             enable_deletion_vectors=False)
         src_table_func(spark).createOrReplaceTempView(src_table)
 
-    with_cpu_session(setup_tables, conf=delta_merge_enabled_conf)
+    with_cpu_session(setup_tables, conf=delta_merge_require_low_shuffle_conf)
 
     def do_merge(spark):
         read_delta_path(spark, data_path).createOrReplaceTempView(dest_table)
         return spark.sql(merge_sql.format(
             src_table=src_table, dest_table=dest_table)).collect()
 
-    assert_rapids_delta_write(do_merge, conf=delta_merge_enabled_conf)
+    assert_rapids_delta_write(do_merge, conf=delta_merge_require_low_shuffle_conf)
 
     def expected_rows(spark):
         target = dest_table_func(spark)
@@ -311,16 +325,18 @@ def test_delta_low_shuffle_merge_internal_column_names(
         unchanged = target.where(f.pmod("k", f.lit(4)) != 0)
         updated = effective.select(
             "k", "_row_dropped_", "_incr_metrics_",
-            f.col("_source_row_present_").alias("_target_row_present_"))
+            f.col("_source_row_present_").alias("_target_row_present_"),
+            "_metadata_file_path", "__metadata_row_index")
         new_rows = inserted.select(
             "k", "_row_dropped_", "_incr_metrics_",
-            f.col("_source_row_present_").alias("_target_row_present_"))
+            f.col("_source_row_present_").alias("_target_row_present_"),
+            "_metadata_file_path", "__metadata_row_index")
         return unchanged.unionByName(updated).unionByName(new_rows).orderBy("k").collect()
 
     actual = with_cpu_session(
         lambda spark: read_delta_path(spark, data_path).orderBy("k").collect(),
-        conf=delta_merge_enabled_conf)
-    expected = with_cpu_session(expected_rows, conf=delta_merge_enabled_conf)
+        conf=delta_merge_require_low_shuffle_conf)
+    expected = with_cpu_session(expected_rows, conf=delta_merge_require_low_shuffle_conf)
     assert_equal(expected, actual)
 
 
@@ -432,7 +448,7 @@ def test_delta_low_shuffle_merge_temporary_deletion_vector(
         use_cdf=False, enable_deletion_vectors=False,
         src_table_func=src_table_func, dest_table_func=dest_table_func,
         merge_sql=merge_sql, compare_logs=False,
-        conf=delta_merge_enabled_conf)
+        conf=delta_merge_require_low_shuffle_conf)
 
 
 @allow_non_gpu(*delta_meta_allow)
