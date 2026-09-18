@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+
 import pytest
+from py4j.java_gateway import get_field, set_field
 
 from asserts import *
 from conftest import is_not_utc
@@ -121,6 +124,243 @@ def test_basic_read(std_input_path, name, read_func, v1_enabled_list, orc_impl, 
     assert_gpu_and_cpu_are_equal_collect(
             read_func(std_input_path + '/' + name),
             conf=all_confs)
+
+
+@pytest.mark.parametrize('v1_enabled_list', ['', 'orc'])
+@pytest.mark.parametrize('vectorized_reader', [False, True])
+@pytest.mark.parametrize('chunked_reader', [False, True])
+@pytest.mark.parametrize('session_timezone', ['UTC', 'Asia/Shanghai'])
+@inject_oom
+@tz_sensitive_test
+def test_orc_read_spark_2_4_legacy_timestamp(
+        std_input_path, v1_enabled_list, vectorized_reader, chunked_reader, session_timezone):
+    data_path = std_input_path + '/before_1582_ts_v2_4.snappy.orc'
+    all_confs = {
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        'spark.sql.orc.impl': 'native',
+        'spark.sql.orc.enableVectorizedReader': vectorized_reader,
+        'spark.rapids.sql.reader.chunked': chunked_reader,
+        'spark.sql.session.timeZone': session_timezone,
+    }
+    gpu_scan = 'GpuFileSourceScanExec' if v1_enabled_list == 'orc' else 'GpuBatchScanExec'
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        read_orc_df(data_path),
+        exist_classes=gpu_scan,
+        conf=all_confs,
+        require_non_empty=True)
+
+
+def _orc_timestamp_rebase_records(spark):
+    # Load the resource from the runtime Spark JAR, without calling private Scala methods.
+    stream = spark._jvm.java.lang.Thread.currentThread().getContextClassLoader() \
+        .getResourceAsStream("julian-gregorian-rebase-micros.json")
+    assert stream is not None
+    # A public wrapper keeps Py4J from reflecting into JDK-private JAR stream classes.
+    stream = spark._jvm.java.io.BufferedInputStream(stream)
+    try:
+        records = json.loads(spark._jvm.org.apache.commons.io.IOUtils.toString(stream, "UTF-8"))
+        return {record['tz']: record['switches'] for record in records}
+    finally:
+        stream.close()
+
+
+def _orc_timestamp_rebase_switches(spark, timezone):
+    # Records choose inputs only; the actual ORC CPU reader is the result oracle.
+    records = _orc_timestamp_rebase_records(spark)
+    zone = spark._jvm.java.util.TimeZone.getTimeZone(timezone).toZoneId()
+    for name in (timezone, zone.toString()):
+        if name in records:
+            return [value * 1000000 for value in records[name]]
+    normalized = zone.normalized().toString()
+    if normalized == 'Z' or normalized.startswith(('+', '-')):
+        offset = spark._jvm.java.time.ZoneOffset.of(normalized).getTotalSeconds()
+        return [(value - offset) * 1000000 for value in records['UTC']]
+    return None
+
+
+def _orc_timestamp_values(spark, timezone, sample, proleptic):
+    if sample == 'empty':
+        return []
+    if sample == 'all-null':
+        return [None, None]
+    if sample == 'modern':
+        return [0, 946684800123456, None]
+    if sample == 'boundaries' and not proleptic:
+        switches = _orc_timestamp_rebase_switches(spark, timezone)
+        if switches is None:
+            pytest.skip("The reader timezone has no Spark rebase map boundaries")
+        # Keep the scalar timestamp column free of null/BCE values to exercise GPU lookup.
+        return sorted({value + delta for value in switches for delta in (-1, 0, 1)
+                       if value + delta >= switches[0]})
+    if sample == 'bce' and not proleptic:
+        switches = _orc_timestamp_rebase_switches(spark, timezone)
+        first_boundary = [switches[0] - 1, switches[0], switches[0] + 1] if switches else []
+        # The first value catches normalized EST becoming GMT in Spark's Calendar fallback.
+        return [-65317950000000001, -100000000000000000,
+                0, None] + first_boundary
+    timestamp = spark._jvm.java.sql.Timestamp
+    values = [None, timestamp.valueOf("1001-01-01 01:02:03.123456").getTime() * 1000 + 456]
+    if not proleptic or sample == 'proleptic-cutover':
+        cutover = timestamp.valueOf("1582-10-15 00:00:00").getTime() * 1000
+        values += [cutover - 1, cutover, cutover + 1]
+    if sample in ('mixed-bce', 'missing-map'):
+        values.insert(0, -100000000000000000)
+    # The proleptic cross-timezone cutover remains #131, covered by the strict xfail below.
+    return values + [0, 946684800123456]
+
+
+def _write_orc_timestamp_calendar(spark, path, values, proleptic):
+    jvm = spark._jvm
+    orc = jvm.org.apache.orc
+    hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+    path = jvm.org.apache.hadoop.fs.Path(path)
+    schema = orc.TypeDescription.fromString(
+        "struct<id:int,ts:timestamp,modern_ts:timestamp,null_ts:timestamp,"
+        "nested:struct<value:timestamp>,timestamps:array<timestamp>>")
+    writer = orc.OrcFile.createWriter(path, orc.OrcFile.writerOptions(hadoop_conf)
+                                    .setSchema(schema).setProlepticGregorian(proleptic))
+
+    def set_timestamp(vector, row, micros):
+        # Supply hybrid-calendar input; ORC converts it when writing a proleptic file.
+        vector.setUsingProlepticCalendar(False)
+        if micros is None:
+            set_field(vector, 'noNulls', False)
+            get_field(vector, 'isNull')[row] = True
+        else:
+            value = jvm.java.sql.Timestamp(micros // 1000)
+            value.setNanos((micros % 1000000) * 1000)
+            vector.set(row, value)
+
+    try:
+        batch = schema.createRowBatch(max(1024, len(values)))
+        columns = get_field(batch, 'cols')
+        nested = columns[4]
+        timestamps = columns[5]
+        child = get_field(timestamps, 'child')
+        child.ensureSize(len(values) * 2, False)
+        for row, value in enumerate(values):
+            get_field(columns[0], 'vector')[row] = row * 2 + int(proleptic)
+            set_timestamp(columns[1], row, value)
+            set_timestamp(columns[2], row, 946684800123456)
+            set_timestamp(columns[3], row, None)
+            set_timestamp(get_field(nested, 'fields')[0], row, value)
+            set_field(nested, 'noNulls', False)
+            get_field(nested, 'isNull')[row] = row == len(values) - 1
+            get_field(timestamps, 'offsets')[row] = row * 2
+            get_field(timestamps, 'lengths')[row] = 2
+            set_timestamp(child, row * 2, value)
+            set_timestamp(child, row * 2 + 1, None)
+        set_field(timestamps, 'childCount', len(values) * 2)
+        set_field(batch, 'size', len(values))
+        writer.addRowBatch(batch)
+    finally:
+        writer.close()
+
+    reader = orc.OrcFile.createReader(path, orc.OrcFile.readerOptions(hadoop_conf))
+    try:
+        assert reader.writerUsedProlepticGregorian() == proleptic
+        rows = reader.rows()
+        try:
+            assert reader.getNumberOfRows() == len(values)
+            for stripe in reader.getStripes():
+                assert rows.readStripeFooter(stripe).getWriterTimezone() == \
+                    jvm.java.util.TimeZone.getDefault().getID()
+        finally:
+            rows.close()
+    finally:
+        reader.close()
+
+
+def _read_orc_timestamp_micros(spark, path, reader_zone, gpu_scan=None):
+    # The harness configures the reader JVM timezone for both driver and executors.
+    assert spark._jvm.java.util.TimeZone.getDefault().getID() == reader_zone
+    frame = spark.read.orc(path)
+    # Read Catalyst micros directly: Python datetime cannot represent BCE timestamps.
+    # Preserve parent/child null masks and microsecond precision, without a SQL cast.
+    def micros(row, ordinal):
+        return None if row.isNullAt(ordinal) else row.getLong(ordinal)
+
+    results = []
+    for row in frame._jdf.queryExecution().executedPlan().executeCollect():
+        nested = None if row.isNullAt(4) else [micros(row.getStruct(4, 1), 0)]
+        array = row.getArray(5)
+        results.append((row.getInt(0), micros(row, 1), micros(row, 2), micros(row, 3),
+                        nested, [micros(array, i) for i in range(array.numElements())]))
+    if gpu_scan:
+        spark._jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.assertContains(
+            frame._jdf, gpu_scan)
+    return sorted(results, key=lambda row: row[0])
+
+
+_legacy_orc_timezones = ['UTC', 'America/Los_Angeles', 'Asia/Shanghai', 'PST', 'EST',
+                       'GMT+05:30', 'GMT-03:30']
+_legacy_orc_reader_modes = [('PERFILE', False, 'orc', False), ('PERFILE', True, '', True),
+                           ('COALESCING', False, '', True), ('MULTITHREADED', True, 'orc', False)]
+
+
+@pytest.mark.parametrize('writer_zone,sample,reader_mode',
+    [(zone, 'mixed', mode) for zone in _legacy_orc_timezones for mode in _legacy_orc_reader_modes] +
+    [('reader', sample, _legacy_orc_reader_modes[0])
+     for sample in ['boundaries', 'bce', 'mixed-bce', 'empty', 'all-null', 'modern', 'missing-map']] +
+    [pytest.param('America/Los_Angeles', 'proleptic-cutover', _legacy_orc_reader_modes[0],
+                  marks=pytest.mark.xfail(strict=True, raises=AssertionError,
+                      reason='https://github.com/NVIDIA/cudf-spark/issues/131: '
+                             'proleptic cross-timezone cutover differs from CPU'))],
+    ids=lambda value: '-'.join(map(str, value)) if isinstance(value, tuple) else None)
+@tz_sensitive_test
+def test_orc_read_legacy_timestamp_calendars(spark_tmp_path, writer_zone, sample, reader_mode):
+    jvm = spark_jvm()
+    original_zone = jvm.java.util.TimeZone.getDefault()
+    reader_zone = original_zone.getID()
+    # Read in the harness's JVM timezone, including on distributed executors. The existing
+    # timezone CI matrix varies it independently of the writer and SQL session timezones.
+    if writer_zone == 'reader':
+        writer_zone = reader_zone
+    if sample == 'proleptic-cutover' and reader_zone != 'UTC':
+        pytest.skip("The preserved #131 reproducer requires a UTC reader JVM")
+    if sample == 'missing-map':
+        if with_cpu_session(lambda spark: _orc_timestamp_rebase_switches(spark, reader_zone)):
+            pytest.skip("The reader JVM timezone has a Spark rebase map")
+        print('Missing Spark rebase map:', reader_zone)
+    reader_type, chunked, v1_sources, vectorized = reader_mode
+    conf = {'spark.rapids.sql.format.orc.reader.type': reader_type,
+            'spark.rapids.sql.reader.chunked': chunked,
+            'spark.sql.sources.useV1SourceList': v1_sources,
+            'spark.sql.orc.impl': 'native',
+            'spark.sql.orc.enableVectorizedReader': vectorized,
+            'spark.sql.files.maxPartitionBytes': str(1 << 30)}
+    data_path = spark_tmp_path + '/legacy_timestamp_calendars'
+
+    def write(spark):
+        # Only fixture generation changes the driver's timezone; no Spark tasks run here.
+        jvm.java.util.TimeZone.setDefault(jvm.java.util.TimeZone.getTimeZone(writer_zone))
+        try:
+            count = 0
+            for proleptic in (False, True):
+                values = _orc_timestamp_values(spark, writer_zone, sample, proleptic)
+                _write_orc_timestamp_calendar(spark, data_path + '/{}.orc'.format(proleptic),
+                                              values, proleptic)
+                count += len(values)
+            return count
+        finally:
+            jvm.java.util.TimeZone.setDefault(original_zone)
+
+    row_count = with_cpu_session(write, conf)
+    gpu_scan = 'GpuFileSourceScanExec' if v1_sources == 'orc' else 'GpuBatchScanExec'
+    session_zones = [reader_zone, 'Asia/Shanghai' if reader_zone == 'UTC' else 'UTC']
+    results = []
+    for session_zone in session_zones:
+        read_conf = copy_and_update(conf, {'spark.sql.session.timeZone': session_zone})
+        cpu = with_cpu_session(
+            lambda spark: _read_orc_timestamp_micros(spark, data_path, reader_zone), read_conf)
+        gpu = with_gpu_session(
+            lambda spark: _read_orc_timestamp_micros(spark, data_path, reader_zone, gpu_scan),
+            read_conf)
+        assert len(cpu) == row_count
+        assert_equal(cpu, gpu)
+        results.append(gpu)
+    # Changing only the SQL session timezone must not change the timestamp microseconds.
+    assert_equal(results[0], results[1])
 
 # ORC does not support negative scale for decimal. So here is "decimal_gens_no_neg".
 # Otherwise it will get the below exception.
