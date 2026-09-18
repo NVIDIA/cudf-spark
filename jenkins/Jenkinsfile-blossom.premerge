@@ -24,7 +24,7 @@ import hudson.model.Result
 import hudson.model.Run
 import jenkins.model.CauseOfInterruption.UserInterruption
 
-@Library('blossom-lib')
+@Library('blossom-lib@yinqing/premerge_ci_blocker')
 @Library('blossom-github-lib@master')
 import ipp.blossom.*
 
@@ -120,7 +120,21 @@ pipeline {
                         skipped = true
                         return
                     }
+                    // TEMPORARY: Stop after testing the premerge check, regardless of its outcome.
+                    try {
+                        if (title ==~ /.*\[force ci\].*/) {
+                            echo "PR title contains [force ci]; skipping the premerge check."
+                        } else if (isPremergeBlocked(githubHelper)) {
+                            skipped = true
+                            return
+                        }
+                    } finally {
+                        skipped = true
+                        currentBuild.result = "ABORTED"
+                        echo "Temporary check-only run: skipping checkout and all build/test stages."
+                    }
                     githubHelper.updateCommitStatus("", "Running", GitHubCommitState.PENDING)
+                    return
                     checkoutCode(githubHelper.getCloneUrl(), githubHelper.getMergedSHA())
 
                     def changedFilesOutput = sh(returnStdout: true,
@@ -520,6 +534,32 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
     }
 
 } // end of pipeline
+
+boolean isPremergeBlocked(githubHelper) {
+    try {
+        def prUrl = githubHelper.getIssueUrl()
+        echo "Running premerge check for ${prUrl}"
+        def result = nvauto.checkPremerge(this, prUrl)
+        echo "Premerge check result: ${result}"
+        if (result?.allow_trigger == false) {
+            def blockers = (result.premerge_blockers ?: []).collect {
+                "- [${it.title}](${it.url})"
+            }.join('\n')
+            def comment = "Premerge CI is currently blocked by the following " +
+                "potential blockers:\n\n" +
+                (blockers ?: 'Blocker details are unavailable.') +
+                "\n\nTo force CI to run, add `[force ci]` to the PR title " +
+                "and retry by commenting `build`."
+            nvauto.addPrComment(this, prUrl, comment)
+            githubHelper.updateCommitStatus("", "Blocked by premerge issues", GitHubCommitState.FAILURE)
+            currentBuild.result = "ABORTED"
+            return true
+        }
+    } catch (Exception e) {
+        echo "Premerge check failed; continuing CI: ${e.message}"
+    }
+    return false
+}
 
 void uploadDocker(String IMAGE_NAME) {
     def DOCKER_CMD = "docker --config $WORKSPACE/.docker"
