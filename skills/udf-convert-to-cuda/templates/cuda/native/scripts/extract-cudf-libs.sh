@@ -20,10 +20,10 @@ mkdir -p "${NATIVE_DEPS_DIR}" "${CUDF_REPO_DIR}"
 
 choose_rapids_jar() {
   local candidates=(
-    "${RAPIDS_JAR_DIR}/cudf-spark_${SCALA_VERSION}-${RAPIDS4SPARK_VERSION}-${CUDA_VERSION}.jar"
-    "${RAPIDS_JAR_DIR}/cudf-spark_${SCALA_VERSION}-${RAPIDS4SPARK_VERSION}.jar"
-    "${HOME}/.m2/repository/com/nvidia/cudf-spark_${SCALA_VERSION}/${RAPIDS4SPARK_VERSION}/cudf-spark_${SCALA_VERSION}-${RAPIDS4SPARK_VERSION}-${CUDA_VERSION}.jar"
-    "${HOME}/.m2/repository/com/nvidia/cudf-spark_${SCALA_VERSION}/${RAPIDS4SPARK_VERSION}/cudf-spark_${SCALA_VERSION}-${RAPIDS4SPARK_VERSION}.jar"
+    "${RAPIDS_JAR_DIR}/rapids-4-spark_${SCALA_VERSION}-${RAPIDS4SPARK_VERSION}-${CUDA_VERSION}.jar"
+    "${RAPIDS_JAR_DIR}/rapids-4-spark_${SCALA_VERSION}-${RAPIDS4SPARK_VERSION}.jar"
+    "${HOME}/.m2/repository/com/nvidia/rapids-4-spark_${SCALA_VERSION}/${RAPIDS4SPARK_VERSION}/rapids-4-spark_${SCALA_VERSION}-${RAPIDS4SPARK_VERSION}-${CUDA_VERSION}.jar"
+    "${HOME}/.m2/repository/com/nvidia/rapids-4-spark_${SCALA_VERSION}/${RAPIDS4SPARK_VERSION}/rapids-4-spark_${SCALA_VERSION}-${RAPIDS4SPARK_VERSION}.jar"
   )
 
   for candidate in "${candidates[@]}"; do
@@ -33,7 +33,7 @@ choose_rapids_jar() {
     fi
   done
 
-  echo "ERROR: Could not find a cudf-spark jar." >&2
+  echo "ERROR: Could not find a rapids-4-spark jar." >&2
   echo "Tried target/rapids-jar and ~/.m2 for version ${RAPIDS4SPARK_VERSION} (${CUDA_VERSION})." >&2
   echo "Run the build through Maven with -Pcuda-native-udf so the profile can copy the RAPIDS dependency first." >&2
   return 1

@@ -64,7 +64,7 @@ while read -r MODULE || [[ -n "$MODULE" ]]; do
     case "$MODULE" in
         ''|\#*) continue ;;
     esac
-    DB_HELPER_JAR_PATH=./$MODULE/target/${DB_SHIM_NAME}/rapids-4-spark-${MODULE}_$SCALA_VERSION-$SPARK_PLUGIN_JAR_VERSION-${DB_SHIM_NAME}.jar
+    DB_HELPER_JAR_PATH=./$MODULE/target/${DB_SHIM_NAME}/cudf-spark-${MODULE}_$SCALA_VERSION-$SPARK_PLUGIN_JAR_VERSION-${DB_SHIM_NAME}.jar
     $MVN -B deploy:deploy-file $MVN_URM_MIRROR -Durl=$SERVER_URL -DrepositoryId=$SERVER_ID \
         -Dfile=$DB_HELPER_JAR_PATH -DpomFile=./$MODULE/pom.xml -Dclassifier=$DB_SHIM_NAME
 done < dist/root-safe-module-classes.txt
