@@ -58,6 +58,15 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .booleanConf
     .createWithDefault(false)
 
+  val TEST_DELTA_LOW_SHUFFLE_MERGE_FAIL_ON_FALLBACK =
+    conf("spark.rapids.sql.test.delta.lowShuffleMerge.failOnFallback")
+      .doc("Only for tests on Databricks Runtime 17.3. When true and " +
+        s"${TEST_CONF.key} is enabled, fail if low shuffle merge falls back to the classic " +
+        "GPU merge executor.")
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
+
   val TEST_ALLOWED_NONGPU = conf("spark.rapids.sql.test.allowedNonGpu")
     .doc("Comma separate string of exec or expression class names that are allowed " +
       "to not be GPU accelerated for testing.")

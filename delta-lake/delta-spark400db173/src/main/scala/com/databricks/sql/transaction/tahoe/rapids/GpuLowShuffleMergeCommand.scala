@@ -120,11 +120,6 @@ import org.apache.spark.sql.types.{BooleanType, LongType, StringType, StructFiel
  * @param notMatchedClauses All info related to not matched clause.
  * @param migratedSchema    The final schema of the target - may be changed by schema evolution.
  */
-object GpuLowShuffleMergeCommand {
-  private[rapids] val TEST_FAIL_ON_FALLBACK_CONF =
-    "spark.rapids.sql.test.delta.lowShuffleMerge.failOnFallback"
-}
-
 case class GpuLowShuffleMergeCommand(
     @transient source: LogicalPlan,
     @transient target: LogicalPlan,
@@ -287,8 +282,8 @@ case class GpuLowShuffleMergeCommand(
             case lowShuffle: LowShuffleMergeExecutor => lowShuffle.shouldFallback()
             case _ => false
           }
-          if (fallback && rapidsConf.isTestEnabled && spark.conf.getOption(
-              GpuLowShuffleMergeCommand.TEST_FAIL_ON_FALLBACK_CONF).exists(_.toBoolean)) {
+          if (fallback && rapidsConf.isTestEnabled &&
+              rapidsConf.testDeltaLowShuffleMergeFailOnFallback) {
             throw new IllegalStateException(
               "Low shuffle merge unexpectedly fell back to the classic GPU merge executor")
           }

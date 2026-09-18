@@ -25,13 +25,11 @@ delta_merge_enabled_conf = copy_and_update(delta_writes_enabled_conf,
                                            {"spark.rapids.sql.command.MergeIntoCommand": "true",
                             "spark.rapids.sql.command.MergeIntoCommandEdge": "true",
                             "spark.rapids.sql.delta.lowShuffleMerge.enabled": "true",
+                            "spark.rapids.sql.test.delta.lowShuffleMerge.failOnFallback": "true",
                             "spark.rapids.sql.format.parquet.reader.type": "PERFILE",
                             "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
                             "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled":
                                 "true"})
-delta_merge_require_low_shuffle_conf = copy_and_update(
-    delta_merge_enabled_conf,
-    {"spark.rapids.sql.test.delta.lowShuffleMerge.failOnFallback": "true"})
 
 
 def supports_delta_low_shuffle_merge():
@@ -61,6 +59,7 @@ def test_delta_low_shuffle_merge_when_gpu_file_scan_override_failed(spark_tmp_pa
     conf = copy_and_update(delta_merge_enabled_conf,
                            {
                                "spark.rapids.sql.exec.FileSourceScanExec": "false",
+                               "spark.rapids.sql.test.delta.lowShuffleMerge.failOnFallback": "false",
                                # Disable auto broadcast join due to this issue:
                                # https://github.com/NVIDIA/spark-rapids/issues/10973
                                "spark.sql.autoBroadcastJoinThreshold": "-1"
@@ -132,8 +131,7 @@ def test_delta_low_shuffle_merge_not_matched_by_source(
             spark,
             [("a", UniqueLongGen(nullable=False)),
              ("b", IntegerGen(
-                 min_val=-1000000, max_val=1000000, nullable=False, special_cases=[]))],
-            num_slices=1)
+                 min_val=-1000000, max_val=1000000, nullable=False, special_cases=[]))])
 
     def src_table_func(spark):
         generated = dest_table_func(spark)
@@ -154,7 +152,7 @@ def test_delta_low_shuffle_merge_not_matched_by_source(
         use_cdf=use_cdf, enable_deletion_vectors=False,
         src_table_func=src_table_func, dest_table_func=dest_table_func,
         merge_sql=merge_sql, compare_logs=False,
-        conf=delta_merge_require_low_shuffle_conf)
+        conf=delta_merge_enabled_conf)
 
 
 @allow_non_gpu(*delta_meta_allow)
@@ -310,14 +308,14 @@ def test_delta_low_shuffle_merge_internal_column_names(
             enable_deletion_vectors=False)
         src_table_func(spark).createOrReplaceTempView(src_table)
 
-    with_cpu_session(setup_tables, conf=delta_merge_require_low_shuffle_conf)
+    with_cpu_session(setup_tables, conf=delta_merge_enabled_conf)
 
     def do_merge(spark):
         read_delta_path(spark, data_path).createOrReplaceTempView(dest_table)
         return spark.sql(merge_sql.format(
             src_table=src_table, dest_table=dest_table)).collect()
 
-    assert_rapids_delta_write(do_merge, conf=delta_merge_require_low_shuffle_conf)
+    assert_rapids_delta_write(do_merge, conf=delta_merge_enabled_conf)
 
     def expected_rows(spark):
         target = dest_table_func(spark)
@@ -335,8 +333,8 @@ def test_delta_low_shuffle_merge_internal_column_names(
 
     actual = with_cpu_session(
         lambda spark: read_delta_path(spark, data_path).orderBy("k").collect(),
-        conf=delta_merge_require_low_shuffle_conf)
-    expected = with_cpu_session(expected_rows, conf=delta_merge_require_low_shuffle_conf)
+        conf=delta_merge_enabled_conf)
+    expected = with_cpu_session(expected_rows, conf=delta_merge_enabled_conf)
     assert_equal(expected, actual)
 
 
@@ -350,6 +348,7 @@ def test_delta_low_shuffle_merge_internal_column_names(
 def test_delta_low_shuffle_merge_preserves_row_tracking(
         spark_tmp_path, spark_tmp_table_factory):
     conf = copy_and_update(delta_merge_enabled_conf, delta_row_tracking_dml_conf)
+    conf["spark.rapids.sql.test.delta.lowShuffleMerge.failOnFallback"] = "false"
     data_path = spark_tmp_path + "/DELTA_DATA"
 
     def dest_table_func(spark):
@@ -448,7 +447,7 @@ def test_delta_low_shuffle_merge_temporary_deletion_vector(
         use_cdf=False, enable_deletion_vectors=False,
         src_table_func=src_table_func, dest_table_func=dest_table_func,
         merge_sql=merge_sql, compare_logs=False,
-        conf=delta_merge_require_low_shuffle_conf)
+        conf=delta_merge_enabled_conf)
 
 
 @allow_non_gpu(*delta_meta_allow)
