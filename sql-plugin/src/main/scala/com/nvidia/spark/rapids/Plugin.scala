@@ -19,7 +19,7 @@ package com.nvidia.spark.rapids
 import java.lang.reflect.InvocationTargetException
 import java.net.URL
 import java.time.ZoneId
-import java.util.Properties
+import java.util.{HashMap, Map => JavaMap, Properties}
 import java.util.concurrent.ConcurrentHashMap
 
 import scala.collection.JavaConverters._
@@ -482,6 +482,10 @@ object RapidsPluginUtils extends Logging {
 class RapidsDriverPlugin extends DriverPlugin with Logging {
   var rapidsShuffleHeartbeatManager: RapidsShuffleHeartbeatManager = null
   var shuffleCleanupListener: ShuffleCleanupListener = null
+  private val historyMetricsManager = new HistoryMetricsManager
+  private var historyMetricsSparkContext: SparkContext = _
+  private var historyMetricsConfiguration: JavaMap[String, String] = _
+  private var historyMetricsProviderName: String = _
   private lazy val extraDriverPlugins =
     RapidsPluginUtils.extraPlugins.map(_.driverPlugin()).filterNot(_ == null)
 
@@ -574,6 +578,12 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
     }
 
     FileCacheLocalityManager.init(sc)
+    historyMetricsSparkContext = sc
+    historyMetricsConfiguration =
+      new HashMap[String, String](sparkConf.getAll.toMap.asJava)
+    historyMetricsProviderName = conf.historyMetricsProvider
+    logInfo(s"History metrics: requested=$historyMetricsProviderName, " +
+      "activation deferred until Spark assigns the application ID")
 
     logDebug("Loading extra driver plugins: " +
       s"${extraDriverPlugins.map(_.getClass.getName).mkString(",")}")
@@ -583,12 +593,37 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
   }
 
   override def registerMetrics(appId: String, pluginContext: PluginContext): Unit = {
+    val sc = historyMetricsSparkContext
+    if (sc != null) {
+      try {
+        val producerVersion =
+          buildInfoEvent.sparkRapidsBuildInfo.getOrElse("version", "UNKNOWN")
+        historyMetricsManager.initialize(
+          historyMetricsConfiguration,
+          appId,
+          sc.applicationAttemptId.orNull,
+          producerVersion,
+          historyMetricsProviderName)
+      } catch {
+        case failure if HistoryMetricsManager.isContained(failure) =>
+          logError("History metrics activation failed; history-backed heuristics remain disabled",
+            failure)
+      } finally {
+        historyMetricsSparkContext = null
+        historyMetricsConfiguration = null
+        historyMetricsProviderName = null
+      }
+    }
     extraDriverPlugins.foreach(_.registerMetrics(appId, pluginContext))
   }
 
   override def shutdown(): Unit = {
+    historyMetricsSparkContext = null
+    historyMetricsConfiguration = null
+    historyMetricsProviderName = null
     RapidsPluginUtils.safeShutdown(
-      extraDriverPlugins.map(plugin => () => plugin.shutdown()) ++
+      Seq(() => historyMetricsManager.shutdown()) ++
+        extraDriverPlugins.map(plugin => () => plugin.shutdown()) ++
         Seq(
           () => FileCacheLocalityManager.shutdown(),
           // Shutdown listener first to trigger cleanup for any remaining jobs

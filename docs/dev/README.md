@@ -14,6 +14,7 @@ following topics:
 * [How the Plugin Works](#how-the-rapids-plugin-works)
   * [Plugin Replacement Rules](#plugin-replacement-rules)
   * [Working with Data Sources](#working-with-data-sources)
+* [History Metrics Integration](history-metrics.md)
 * [Guidelines for Replacing Catalyst Executors and Expressions](#guidelines-for-replacing-catalyst-executors-and-expressions)
   * [Setting Up the Class](#setting-up-the-class)
   * [Expressions](#expressions)
