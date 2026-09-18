@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import struct
+
 import pyspark.sql.functions as f
 import pytest
 
@@ -1371,8 +1374,6 @@ _to_json_datagens=[byte_gen,
     decimal_gen_32bit,
     decimal_gen_64bit,
     decimal_gen_128bit,
-    pytest.param(float_gen, marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/9350')),
-    pytest.param(double_gen, marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/9350')),
     date_gen,
     timestamp_gen,
     StringGen('[A-Za-z0-9\r\n\'"\\\\]{0,10}', nullable=True) \
@@ -1384,6 +1385,77 @@ _to_json_datagens=[byte_gen,
     pytest.param(StringGen('\u001a', nullable=True), marks=pytest.mark.xfail(
         reason='https://github.com/NVIDIA/spark-rapids/issues/9705'))
 ]
+
+
+def _canonicalize_floating_point_json(rows, pack_format):
+    """Decode JSON numeric tokens at Float/Double width before comparing."""
+    def number_as_source_bits(value):
+        return ('number_bits', struct.pack(pack_format, float(value)))
+
+    def freeze_json(value):
+        if isinstance(value, list):
+            return ('array', tuple(freeze_json(item) for item in value))
+        return value
+
+    def object_as_pairs(pairs):
+        # Preserve member order and duplicates so only number spelling is normalized.
+        return ('object', tuple((key, freeze_json(item)) for key, item in pairs))
+
+    def canonicalize_json_text(value):
+        if value is None:
+            return ('sql_null',)
+        return ('json', freeze_json(json.loads(
+                value,
+                object_pairs_hook=object_as_pairs,
+                parse_float=number_as_source_bits,
+                parse_int=number_as_source_bits)))
+
+    return [
+        tuple((field, canonicalize_json_text(row[field])) for field in row.__fields__)
+        for row in rows
+    ]
+
+
+def _canonicalize_floating_point_json_results(cpu_rows, gpu_rows, pack_format):
+    return (_canonicalize_floating_point_json(cpu_rows, pack_format),
+            _canonicalize_floating_point_json(gpu_rows, pack_format))
+
+
+@pytest.mark.parametrize('pack_format', ['>f', '>d'])
+@pytest.mark.parametrize('expected,actual', [
+    ('{"a":1}', '{"a":2,"a":1}'),
+    ('{"a":1}', '{"a":1,"a":1}'),
+    ('{"nested":{"a":1}}', '{"nested":{"a":2,"a":1}}'),
+    ('[{"a":1}]', '[{"a":2,"a":1}]'),
+    ('{"a":1,"a":2}', '{"a":2,"a":1}'),
+])
+def test_floating_point_json_comparison_preserves_duplicate_members(pack_format, expected, actual):
+    cpu, gpu = _canonicalize_floating_point_json_results(
+        [Row(value=expected)], [Row(value=actual)], pack_format)
+    with pytest.raises(AssertionError):
+        assert_equal(cpu, gpu)
+
+
+@pytest.mark.parametrize('pack_format,expected,actual,equivalent', [
+    pytest.param('>f', '1.0E-45', '1.4E-45', True, id='float-subnormal-spellings'),
+    pytest.param('>f', '1.1754944E-38', '1.17549435E-38', True,
+                 id='float-min-normal-spellings'),
+    pytest.param('>d', '5.0E-324', '4.9E-324', True, id='double-subnormal-spellings'),
+    pytest.param('>d', '1.0E23', '9.999999999999999E22', True, id='double-large-spellings'),
+    pytest.param('>f', '1.0', '1.0000001192092896', False, id='float-adjacent-values'),
+    pytest.param('>d', '1.0', '1.0000000000000002', False, id='double-adjacent-values'),
+    pytest.param('>f', '-0.0', '0.0', False, id='float-signed-zero'),
+    pytest.param('>d', '-0.0', '0.0', False, id='double-signed-zero'),
+])
+def test_floating_point_json_comparison_numeric_contract(pack_format, expected, actual, equivalent):
+    cpu, gpu = _canonicalize_floating_point_json_results(
+        [Row(value=expected)], [Row(value=actual)], pack_format)
+    if equivalent:
+        assert_equal(cpu, gpu)
+    else:
+        with pytest.raises(AssertionError):
+            assert_equal(cpu, gpu)
+
 
 # Spark 400 changed the default timestamp format to "yyyy-MM-dd'T'HH:mm:ss[.SSS][XXXXX]"
 # We need to explicitly specify the format for Spark 400
@@ -1497,6 +1569,67 @@ def test_maps_to_json(data_gen, ignore_null_fields, timezone):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark : struct_to_json(spark),
         conf=conf)
+
+
+@pytest.mark.parametrize('data_gen,pack_format,known_rounding_value', [
+    (FloatGen(no_nans=True), '>f',
+     struct.unpack('>f', struct.pack('>I', 0x4CA5A5A1))[0]),
+    (DoubleGen(no_nans=True), '>d',
+     struct.unpack('>d', struct.pack('>Q', 0xC39DDD7467AF36D9))[0])
+], ids=['Float', 'Double'])
+@pytest.mark.parametrize('ignore_null_fields', [True, False])
+@pytest.mark.parametrize('timezone', [
+    'UTC',
+    'Etc/UTC'
+])
+def test_to_json_floating_point_semantic_parity(
+        data_gen, pack_format, known_rounding_value, ignore_null_fields, timezone):
+    struct_gen = StructGen([
+        ('a', data_gen),
+        ('b', StructGen([('child', data_gen)], nullable=True)),
+        ('c', ArrayGen(StructGen([('child', data_gen)], nullable=True))),
+        ('d', MapGen(StringGen('[A-Za-z0-9]{0,10}', nullable=False), data_gen)),
+        ('e', ArrayGen(MapGen(StringGen('[A-Z]{5}', nullable=False), data_gen), nullable=True)),
+    ], nullable=False)
+    array_gen = ArrayGen(data_gen, nullable=True)
+    map_gen = MapGen(StringGen('[A-Z]{1,10}', nullable=False), data_gen, nullable=True)
+    gen = StructGen([
+        ('my_struct', struct_gen),
+        ('my_array', array_gen),
+        ('my_map', map_gen),
+    ], nullable=False)
+
+    options = {'ignoreNullFields': ignore_null_fields, 'timeZone': timezone}
+    options.update(_gpu_supported_timestamp_format_conf)
+
+    def floating_point_to_json(spark):
+        df = gen_df(spark, gen)
+        # Always include the Float/Double value from cudf-spark-jni#5118 whose
+        # CPU and GPU JSON spellings differ while decoding to the same value.
+        known_struct = (
+            known_rounding_value,
+            (known_rounding_value,),
+            [(known_rounding_value,)],
+            {'known': known_rounding_value},
+            [{'KNOWN': known_rounding_value}])
+        known_df = spark.createDataFrame(
+            [(known_struct, [known_rounding_value], {'KNOWN': known_rounding_value})],
+            schema=gen.data_type)
+        df = df.union(known_df)
+        return df.select(
+            f.to_json('my_struct', options).alias('struct_json'),
+            f.to_json('my_array', options).alias('array_json'),
+            f.to_json('my_map', options).alias('map_json'))
+
+    conf = copy_and_update(_enable_all_types_conf,
+        {'spark.rapids.sql.expression.StructsToJson': True})
+
+    assert_gpu_and_cpu_are_equal_collect(
+        floating_point_to_json,
+        conf=conf,
+        result_canonicalize_func_before_compare=lambda cpu, gpu:
+            _canonicalize_floating_point_json_results(cpu, gpu, pack_format))
+
 
 @pytest.mark.parametrize('data_type', [FloatType(), DoubleType()], ids=idfn)
 def test_to_json_non_finite_floating_point(data_type):
