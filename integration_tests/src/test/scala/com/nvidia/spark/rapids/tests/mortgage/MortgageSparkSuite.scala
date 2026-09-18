@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2024, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -44,13 +44,13 @@ class MortgageSparkSuite extends AnyFunSuite {
     val rapidsShuffle = ShimLoader.getRapidsShuffleManagerClass
     val prop = System.getProperty("rapids.shuffle.manager.override", "false")
     if (prop.equalsIgnoreCase("true")) {
-      println("RAPIDS SHUFFLE MANAGER ACTIVE")
+      info("RAPIDS SHUFFLE MANAGER ACTIVE")
       // configure the cache-only shuffle manager (disable transport)
       builder = builder
           .config("spark.shuffle.manager", rapidsShuffle)
           .config("spark.rapids.shuffle.mode", "CACHE_ONLY")
     } else {
-      println("RAPIDS SHUFFLE MANAGER INACTIVE")
+      info("RAPIDS SHUFFLE MANAGER INACTIVE")
     }
     builder.getOrCreate()
   }
@@ -114,4 +114,3 @@ class MortgageSparkSuite extends AnyFunSuite {
     assert(df.count() === 177)
   }
 }
-

@@ -108,7 +108,10 @@ trait Spark321PlusDBShims extends SparkShims
     }
   }
 
-  private val shimExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = {
+  // Keep this lazy to avoid a class-initialization cycle: building these rules calls
+  // GpuOverrides.exec, while GpuOverrides initialization calls SparkShimImpl.
+  // Eager evaluation can deadlock if the two singleton objects are initialized concurrently.
+  private lazy val shimExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = {
     Seq(
       GpuOverrides.exec[SubqueryBroadcastExec](
         "Plan to collect and transform the broadcast key values",

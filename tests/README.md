@@ -83,6 +83,44 @@ Apache Spark 3.3.0 on Scala 2.13 artifacts, issue:
 mvn package -f scala2.13 -pl tests -am -Dbuildver=330 -Dsuffixes='.*CastOpSuite' -Dtests=decimal
 ```
 
+### Parallel Unit Tests
+
+Premerge runs the Scala unit tests in parallel, using
+`ParallelUnitTestRunner` to run suites in separate worker JVMs. Add `[serial ut]` or `[serial-ut]`
+to the PR title to run them serially when debugging a concurrency-only failure, reading a linear
+ScalaTest log, or verifying a fix. Local runs are serial unless parallel execution is enabled
+explicitly:
+
+```bash
+mvn package -pl tests -am -Drapids.parallelUnitTests=true -DparallelForkCount=4
+```
+
+- Parallel unit tests currently support at most four concurrent worker JVMs. Setting
+  `parallelForkCount` higher than four does not increase concurrency. Further UT and IT
+  parallelism tuning is tracked in [#15344](https://github.com/NVIDIA/cudf-spark/issues/15344).
+- `-Dsuffixes` and `-Dtests` are not supported; the runner fails fast. Use
+  `-DwildcardSuites`, which matches fully qualified suite-name prefixes.
+- Before starting workers, the runner detects free GPU memory and reserves 1 GiB for headroom.
+  It budgets 4 GiB per worker and uses the smallest of the resulting memory limit,
+  `parallelForkCount`, four workers, and the number of suite batches. For example, 9 GiB free
+  permits two workers and 17 GiB permits four. One worker still runs all selected suites
+  sequentially; less than 5 GiB free fails before any worker starts.
+- The GPU is shared. Each worker gets
+  `rapids.test.gpu.allocFraction * 0.8 / workerCount`, using the actual worker count. The default
+  minimum pool fraction is also scaled by the startup free-to-total GPU memory ratio so memory
+  already occupied by other processes does not inflate the minimum. The 4 GiB budget controls
+  scheduling; suites that explicitly configure their own pools retain those settings.
+- Each suite has a watchdog controlled by `-DparallelSuiteTimeout`, which defaults to 1800 seconds.
+  On timeout, the runner captures a `jstack`, kills the worker, and fails the run.
+- The `RapidsDynamicPartitionPruningV1SuiteAEOff` and
+  `RapidsDynamicPartitionPruningV1SuiteAEOn` suites are assigned to the same worker so they execute
+  serially with each other because concurrent execution previously caused GPU broadcast
+  contention. The list is `DPP_SUITES` in `ParallelUnitTestRunner.scala`; the root cause remains
+  tracked in [#15401](https://github.com/NVIDIA/cudf-spark/issues/15401).
+- To debug a parallel failure, follow the `[wave-<run>-worker-<id>]` log prefix for the failing
+  suite. Re-run that suite alone with `-DwildcardSuites=<fully.qualified.Suite>`, both with and
+  without `-Drapids.parallelUnitTests=true`, to determine whether concurrency caused the failure.
+
 ## Integration Tests
 
 Please refer to the integration-tests [README](../integration_tests/README.md)

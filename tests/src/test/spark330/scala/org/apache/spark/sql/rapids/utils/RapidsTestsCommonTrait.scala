@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -46,11 +46,9 @@ trait RapidsTestsCommonTrait
     val status = super.runTest(testName, args)
     if (TestStats.offloadRapids) {
       TestStats.offloadRapidsTestNumber += 1
-      print("'" + testName + "'" + " offload to RAPIDS\n")
     } else {
       // you can find the keyword 'Validation failed for' in function doValidate() in log
       // to get the fallback reason
-      print("'" + testName + "'" + " NOT use RAPIDS\n")
       TestStats.addFallBackCase()
     }
 

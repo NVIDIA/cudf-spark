@@ -28,7 +28,7 @@ import ai.rapids.cudf.{ast, BinaryOp, BinaryOperable, CaptureGroups, ColumnVecto
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm._
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
-import com.nvidia.spark.rapids.jni.{Arithmetic, RoundMode}
+import com.nvidia.spark.rapids.jni.{Arithmetic, ExceptionWithRowIndex, RoundMode, StringUtils}
 import com.nvidia.spark.rapids.jni.CastStrings
 import com.nvidia.spark.rapids.jni.CharsetDecode
 import com.nvidia.spark.rapids.jni.GpuSubstringIndexUtils
@@ -37,7 +37,7 @@ import com.nvidia.spark.rapids.jni.RegexRewriteUtils
 import com.nvidia.spark.rapids.shims.{NullIntolerantShim, ShimExpression, SparkShimImpl}
 
 import org.apache.spark.sql.catalyst.expressions._
-import org.apache.spark.sql.catalyst.util.GenericArrayData
+import org.apache.spark.sql.catalyst.util.{GenericArrayData, StringUtils => CatalystStringUtils}
 import org.apache.spark.sql.errors.ConvUtils
 import org.apache.spark.sql.rapids.catalyst.expressions._
 import org.apache.spark.sql.types._
@@ -971,8 +971,8 @@ case class GpuStringTranslate(
   private def buildLists(fromExpr: GpuScalar, toExpr: GpuScalar): (List[String], List[String]) = {
     val fromString = fromExpr.getValue.asInstanceOf[UTF8String].toString
     val toString = toExpr.getValue.asInstanceOf[UTF8String].toString
-    var fromCharsArray = Array[String]()
-    var toCharsArray = Array[String]()
+    val fromCharsArray = ArrayBuffer[String]()
+    val toCharsArray = ArrayBuffer[String]()
     var i = 0
     var j = 0
     while (i < fromString.length) {
@@ -987,8 +987,8 @@ case class GpuStringTranslate(
       val matchCharCount = Character.charCount(fromString.codePointAt(i))
       val matchStr = fromString.substring(i, i + matchCharCount)
       i += matchCharCount
-      fromCharsArray :+= matchStr
-      toCharsArray :+= replaceStr
+      fromCharsArray += matchStr
+      toCharsArray += replaceStr
     }
     (fromCharsArray.toList, toCharsArray.toList)
   }
@@ -1040,7 +1040,7 @@ object CudfRegexp {
 }
 
 case class GpuLike(left: Expression, right: Expression, escapeChar: Char)
-  extends GpuBinaryExpressionArgsAnyScalar
+  extends GpuBinaryExpression
       with ImplicitCastInputTypes
       with NullIntolerantShim {
 
@@ -1054,6 +1054,26 @@ case class GpuLike(left: Expression, right: Expression, escapeChar: Char)
   override def doColumnar(lhs: GpuColumnVector, rhs: GpuScalar): ColumnVector = {
     withResource(Scalar.fromString(Character.toString(escapeChar))) { escapeScalar =>
       lhs.getBase.like(rhs.getBase, escapeScalar)
+    }
+  }
+
+  override def doColumnar(lhs: GpuColumnVector, rhs: GpuColumnVector): ColumnVector = {
+    withResource(Scalar.fromString(Character.toString(escapeChar))) { escapeScalar =>
+      try {
+        StringUtils.like(lhs.getBase, rhs.getBase, escapeScalar)
+      } catch {
+        case rowException: ExceptionWithRowIndex =>
+          withResource(rhs.getBase.getScalarElement(rowException.getRowIndex)) { pattern =>
+            CatalystStringUtils.escapeLikeRegex(pattern.getJavaString, escapeChar)
+          }
+          throw new IllegalStateException("JNI rejected a LIKE pattern that Spark accepted")
+      }
+    }
+  }
+
+  override def doColumnar(lhs: GpuScalar, rhs: GpuColumnVector): ColumnVector = {
+    withResource(GpuColumnVector.from(lhs, rhs.getRowCount.toInt)) { expandedLhs =>
+      doColumnar(expandedLhs, rhs)
     }
   }
 
@@ -1089,30 +1109,14 @@ object GpuRegExpUtils {
    * @param rep replacement string
    * @param numCaptureGroups number of capturing groups in the corresponding pattern; pass a
    *                         negative value to disable greedy-with-backoff
-   * @return A pair consists of a boolean indicating whether containing any backref and the
-   *         converted replacement.
+   * @return A pair containing a boolean that indicates whether a raw numbered `$N`
+   *         back-reference was converted, and the converted replacement.
    */
   def backrefConversion(rep: String, numCaptureGroups: Int): (Boolean, String) = {
     val b = new StringBuilder
     var i = 0
-    var hasBracedBackref = false
     while (i < rep.length) {
-      // Pass through already-braced `${N}` tokens unchanged. The replacement AST uses this
-      // form for backrefs that have already been resolved by the transpiler, so re-parsing
-      // them against the caller-provided group count could change their meaning.
-      if (rep.charAt(i) == '$' && i + 2 < rep.length && rep.charAt(i + 1) == '{') {
-        val close = rep.indexOf('}', i + 2)
-        val allDigits = close > i + 2 &&
-          (i + 2 until close).forall(k => rep.charAt(k).isDigit)
-        if (allDigits) {
-          b.append(rep.substring(i, close + 1))
-          hasBracedBackref = true
-          i = close + 1
-        } else {
-          b.append(rep.charAt(i))
-          i += 1
-        }
-      } else if (rep.charAt(i) == '$' && i + 1 < rep.length && rep.charAt(i + 1).isDigit) {
+      if (rep.charAt(i) == '$' && i + 1 < rep.length && rep.charAt(i + 1).isDigit) {
 
         // Consume digits one at a time. If the running group index would exceed the actual
         // capture-group count, stop and leave the remaining digits as literals. When no digit
@@ -1161,9 +1165,7 @@ object GpuRegExpUtils {
     }
 
     val converted = b.toString
-    // A pass-through `${N}` token does not modify the string, so equality alone would miss
-    // it; treat it as a backref so the caller routes through `stringReplaceWithBackrefs`.
-    (hasBracedBackref || !rep.equals(converted)) -> converted
+    !rep.equals(converted) -> converted
   }
 
   /**
@@ -1205,12 +1207,8 @@ object GpuRegExpUtils {
   def isEmptyRepetition(pattern: String): Boolean = {
     def isASTEmptyRepetition(regex: RegexAST): Boolean = {
       regex match {
-        case RegexRepetition(_, term) => term match {
-          case SimpleQuantifier('*') | SimpleQuantifier('?') => true
-          case QuantifierFixedLength(0) => true
-          case QuantifierVariableLength(0, _) => true
-          case _ => false
-        }
+        case RegexRepetition(_, quantifier) => quantifier.minLength == 0
+        case RegexInlineFlags(_) => true
         case RegexGroup(_, term) =>
           isASTEmptyRepetition(term)
         case RegexSequence(parts) =>
@@ -1370,7 +1368,7 @@ case class GpuContainsAny(input: Expression, targets: Seq[UTF8String])
 
   def multiOrsAst: ast.AstExpression = {
     (1 until targets.length)
-    .foldLeft(new ast.ColumnReference(0).asInstanceOf[ast.AstExpression]) { (acc, id) =>
+    .foldLeft[ast.AstExpression](new ast.ColumnReference(0)) { (acc, id) =>
       new ast.BinaryOperation(ast.BinaryOperator.NULL_LOGICAL_OR, acc, new ast.ColumnReference(id))
     }
   }
@@ -1864,11 +1862,7 @@ trait BasePad
   override def doColumnar(str: GpuColumnVector, len: GpuScalar, pad: GpuScalar): ColumnVector = {
     if (len.isValid && pad.isValid) {
       val l = math.max(0, len.getValue.asInstanceOf[Int])
-      val padStr = if (pad.isValid) {
-        pad.getValue.asInstanceOf[UTF8String].toString
-      } else {
-        null
-      }
+      val padStr = pad.getValue.asInstanceOf[UTF8String].toString
       withResource(str.getBase.pad(l, direction, padStr)) { padded =>
         padded.substring(0, l)
       }

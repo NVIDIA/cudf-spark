@@ -33,6 +33,7 @@ import org.apache.spark.util.{AccumulatorV2, TaskCompletionListener, TaskFailure
 abstract class MockTaskContextBase(taskAttemptId: Long, partitionId: Int) extends TaskContext {
 
   val listeners = new ListBuffer[TaskCompletionListener]
+  private val metrics = new TaskMetrics
 
   override def isCompleted(): Boolean = false
 
@@ -61,7 +62,7 @@ abstract class MockTaskContextBase(taskAttemptId: Long, partitionId: Int) extend
 
   override def resourcesJMap(): util.Map[String, ResourceInformation] = resources().asJava
 
-  override def taskMetrics(): TaskMetrics = new TaskMetrics
+  override def taskMetrics(): TaskMetrics = metrics
 
   override def getMetricsSources(sourceName: String): Seq[Source] = Seq.empty
 
@@ -85,7 +86,7 @@ abstract class MockTaskContextBase(taskAttemptId: Long, partitionId: Int) extend
 
   override private[spark] def getLocalProperties = new Properties()
 
-  def cpus(): Int = 2
+  override def cpus(): Int = 2
 
   def numPartitions(): Int = 2
 

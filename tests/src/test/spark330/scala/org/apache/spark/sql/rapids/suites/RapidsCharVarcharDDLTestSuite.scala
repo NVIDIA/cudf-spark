@@ -19,14 +19,42 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.suites
 
+import org.scalactic.source.Position
+import org.scalatest.Tag
+
 import org.apache.spark.sql.execution.command.{
   DSV2CharVarcharDDLTestSuite,
   FileSourceCharVarcharDDLTestSuite
 }
+import org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
 import org.apache.spark.sql.rapids.utils.RapidsSQLTestsTrait
 
 class RapidsFileSourceCharVarcharDDLTestSuite
-    extends FileSourceCharVarcharDDLTestSuite with RapidsSQLTestsTrait
+    extends FileSourceCharVarcharDDLTestSuite with RapidsSQLTestsTrait {
+
+  override protected def test(testName: String, testTags: Tag*)(testFun: => Any)(implicit
+      pos: Position): Unit = {
+    val isGpuCtasMetadataTest =
+      testName == "SPARK-33901: ctas should should not change table's schema" ||
+        testName == "SPARK-37160: CREATE TABLE AS SELECT with CHAR_AS_VARCHAR"
+    if (isGpuCtasMetadataTest) {
+      super.test(testName, testTags: _*) {
+        ExecutionPlanCaptureCallback.startCapture()
+        try {
+          testFun
+          val plans = ExecutionPlanCaptureCallback.getResultsWithTimeout()
+          assert(plans.exists(ExecutionPlanCaptureCallback.contains(
+            _, "GpuDataWritingCommandExec")),
+            s"Did not capture a GPU CTAS write plan:\n${plans.mkString("\n")}")
+        } finally {
+          ExecutionPlanCaptureCallback.endCapture()
+        }
+      }
+    } else {
+      super.test(testName, testTags: _*)(testFun)
+    }
+  }
+}
 
 class RapidsDSV2CharVarcharDDLTestSuite
     extends DSV2CharVarcharDDLTestSuite with RapidsSQLTestsTrait

@@ -17,7 +17,9 @@
 package com.nvidia.spark.rapids.delta.delta40x
 
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.delta.common.{DeleteCommandMeta, DeltaDynamicPartitionOverwriteCommandMeta, MergeIntoCommandMeta, OptimizeTableCommandMeta, UpdateCommandMeta}
+import com.nvidia.spark.rapids.delta.common.{DeleteCommandMeta,
+  DeltaCDFRelationStrategy, DeltaDynamicPartitionOverwriteCommandMeta,
+  DeltaReorgTableCommandMeta, MergeIntoCommandMeta, OptimizeTableCommandMeta, UpdateCommandMeta}
 import com.nvidia.spark.rapids.delta.common.{GpuDelta4xParquetFileFormat, GpuDeltaParquetFileFormat2}
 import com.nvidia.spark.rapids.delta.common.DeltaProviderBase
 
@@ -32,6 +34,8 @@ import org.apache.spark.sql.execution.datasources.FileFormat
 import org.apache.spark.sql.execution.datasources.v2.{AppendDataExecV1, OverwriteByExpressionExecV1}
 
 object Delta40xProvider extends DeltaProviderBase with Logging {
+
+  override protected def getCDFRelationStrategy = DeltaCDFRelationStrategy
 
   override def isSupportedWrite(write: Class[_ <: SupportsWrite]): Boolean = {
     write == classOf[DeltaTableV2] || write == classOf[GpuDeltaCatalog4x#GpuStagedDeltaTableV2]
@@ -85,6 +89,7 @@ object Delta40xProvider extends DeltaProviderBase with Logging {
       GpuOverrides.runnableCmd[OptimizeTableCommand](
           "Optimize a Delta Lake table",
           (a, conf, p, r) => new OptimizeTableCommandMeta(a, conf, p, r)),
+      DeltaReorgTableCommandMeta.rule,
       GpuOverrides.runnableCmd[DeltaDynamicPartitionOverwriteCommand](
         "Dynamic partition overwrite to a Delta Lake table",
         (a, conf, p, r) => new DeltaDynamicPartitionOverwriteCommandMeta(a, conf, p, r))

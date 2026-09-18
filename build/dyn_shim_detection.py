@@ -1,4 +1,4 @@
-# Copyright (c) 2024-2025, NVIDIA CORPORATION.
+# Copyright (c) 2024-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -35,4 +35,11 @@ from get_buildvers import _get_buildvers
 # versions, including the ones that have been asked to be ignored by the setting 
 # `dyn.shim.excluded.releases` in the POM.xml
 value = _get_buildvers(buildvers, "{}/pom.xml".format(multi_module_project_dir), _log, ignore_excluded_shims=True)
+active_buildver = project.getProperty("buildver")
+included_buildvers = [x.strip() for x in value.split(",") if x.strip()]
+if active_buildver and active_buildver not in included_buildvers:
+    # Opt-in profiles that intentionally do not use the release* naming convention
+    # still need their active shim version when shimplify generates source links.
+    included_buildvers.append(active_buildver)
+    value = ", ".join(included_buildvers)
 project.setProperty("included_buildvers", value)

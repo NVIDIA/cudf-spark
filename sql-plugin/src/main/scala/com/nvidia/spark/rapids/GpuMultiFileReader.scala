@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids
 
-import java.io.{File, IOException}
+import java.io.{File, FileNotFoundException, IOException}
 import java.net.{URI, URISyntaxException}
 import java.util.concurrent.{CompletionService, ConcurrentLinkedQueue, ExecutorCompletionService, Future, ThreadPoolExecutor, TimeUnit}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
@@ -282,6 +282,14 @@ object MultiFileReaderUtils {
       files: Array[String],
       cloudSchemes: Set[String]): Boolean =
     !coalescingEnabled || (multiThreadEnabled && hasPathInCloud(files, cloudSchemes))
+
+  private[rapids] def attachFilePathToMissingFile[T](runner: AsyncRunner[T], file: Path): Unit = {
+    runner.addFailureTransformer {
+      case error: FileNotFoundException =>
+        GpuFileNotFoundException(file.toUri.toString, error)
+      case error => error
+    }
+  }
 }
 
 /**
@@ -581,6 +589,11 @@ abstract class MultiFileCloudPartitionReaderBase(
     // An AsyncRunner wrapper used to update related metrics
     val newTaskRunner = (file: PartitionedFile) => {
       val runner = getBatchRunner(tc, file, conf, filters)
+      runner.addFailureTransformer {
+        case error: FileNotFoundException =>
+          GpuFileNotFoundException(file.filePath.toString, error)
+        case error => error
+      }
       val metrics = GpuTaskMetrics.get
       val taskId = tc.taskAttemptId()
       runner.addPreHook(() => {
@@ -1068,6 +1081,7 @@ class BatchContext(
  * @param maxReadBatchSizeRows  soft limit on the maximum number of rows the reader reads per batch
  * @param maxReadBatchSizeBytes soft limit on the maximum number of bytes the reader reads per batch
  * @param maxGpuColumnSizeBytes maximum number of bytes for a GPU column
+ * @param skipReadEstimate      whether to ignore the schema based GPU memory estimate for a batch
  * @param poolConf              the thread pool configuration
  * @param execMetrics           metrics
  */
@@ -1078,6 +1092,7 @@ abstract class MultiFileCoalescingPartitionReaderBase(
     maxReadBatchSizeRows: Integer,
     maxReadBatchSizeBytes: Long,
     maxGpuColumnSizeBytes: Long,
+    skipReadEstimate: Boolean,
     poolConf: ThreadPoolConf,
     execMetrics: Map[String, GpuMetric]) extends FilePartitionReaderBase(conf, execMetrics)
     with MultiFileReaderFunctions {
@@ -1472,8 +1487,9 @@ abstract class MultiFileCoalescingPartitionReaderBase(
             // use a single buffer and slice it up for different files if we need
             val outLocal = hmb.slice(offset, fileBlockSize)
             // Third, copy the blocks for each file in parallel using background threads
-            tasks.add(threadPool.submit(
-              getBatchRunner(tc, file, outLocal, blocks, offset, batchContext)))
+            val runner = getBatchRunner(tc, file, outLocal, blocks, offset, batchContext)
+            MultiFileReaderUtils.attachFilePathToMissingFile(runner, file)
+            tasks.add(threadPool.submit(runner))
             offset += fileBlockSize
           }
 
@@ -1579,7 +1595,11 @@ abstract class MultiFileCoalescingPartitionReaderBase(
         }
 
         if (numRows == 0 || numRows + peekedRowCount <= maxReadBatchSizeRows) {
-          val estimatedBytes = GpuBatchUtils.estimateGpuMemory(currentReadSchema, peekedRowCount)
+          val estimatedBytes = if (skipReadEstimate) {
+            0L
+          } else {
+            GpuBatchUtils.estimateGpuMemory(currentReadSchema, peekedRowCount)
+          }
           if (numBytes == 0 || numBytes + estimatedBytes <= maxReadBatchSizeBytes) {
             // only care to check if we are actually adding in the next chunk
             if (currentFile != blockIterator.head.filePath) {

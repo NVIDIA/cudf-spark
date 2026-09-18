@@ -30,6 +30,7 @@ import com.nvidia.spark.rapids.{ByteBufferInputStream, ColumnCastUtil, DecimalUt
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.GpuColumnVector.GpuColumnarBatchBuilder
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
+import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 import com.nvidia.spark.rapids.shims.{LegacyBehaviorPolicyShim, ParquetVariantShims, SparkShimImpl}
 import com.nvidia.spark.rapids.shims.parquet.{ParquetFieldIdShims, ParquetLegacyNanoAsLongShims, ParquetTimestampNTZShims}
@@ -453,38 +454,43 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
         GpuSemaphore.acquireIfNecessary(TaskContext.get())
         val parquetOptions = ParquetOptions.builder()
             .includeColumn(selectedAttributes.map(_.name).asJavaCollection).build()
-        val table = try {
-          Table.readParquet(parquetOptions, parquetCB.buffer, 0, parquetCB.sizeInBytes)
-        } catch {
-          case e: Exception =>
-            throw new IOException("Error when processing file " +
-                s"[range: 0-${parquetCB.sizeInBytes}]", e)
-        }
-        withResource(table) { table =>
-          withResource {
-            for (i <- 0 until table.getNumberOfColumns) yield {
-              ColumnCastUtil.ifTrueThenDeepConvertTypeAtoTypeB(table.getColumn(i),
-                originalSelectedAttributes(i).dataType,
-                (dataType, _) => dataType match {
-                  case d: DecimalType if d.scale < 0 => true
-                  case _ => false
-                },
-                (dataType, cv) => {
-                  dataType match {
-                    case d: DecimalType =>
-                      withResource(cv.bitCastTo(DecimalUtil.createCudfDecimal(d))) {
-                        _.copyToColumnVector()
-                      }
-                    case _ =>
-                      throw new IllegalStateException("We don't cast any type besides Decimal " +
-                          "with scale < 0")
+        withRetryNoSplit {
+          val table = try {
+            Table.readParquet(parquetOptions, parquetCB.buffer, 0, parquetCB.sizeInBytes)
+          } catch {
+            case e: Exception =>
+              throw new IOException("Error when processing file " +
+                  s"[range: 0-${parquetCB.sizeInBytes}]", e)
+          }
+          withResource(table) { table =>
+            withResource(new mutable.ArrayBuffer[ColumnVector]) { columns =>
+              for (i <- 0 until table.getNumberOfColumns) {
+                columns += ColumnCastUtil.ifTrueThenDeepConvertTypeAtoTypeB(table.getColumn(i),
+                  originalSelectedAttributes(i).dataType,
+                  (dataType, cv) => dataType match {
+                    case BinaryType if cv.getType == DType.STRING => true
+                    case d: DecimalType if d.scale < 0 => true
+                    case _ => false
+                  },
+                  (dataType, cv) => {
+                    dataType match {
+                      case BinaryType =>
+                        ParquetSchemaUtils.convertStringToBinary(cv)
+                      case d: DecimalType =>
+                        withResource(cv.bitCastTo(DecimalUtil.createCudfDecimal(d))) {
+                          _.copyToColumnVector()
+                        }
+                      case _ =>
+                        throw new IllegalStateException("We only cast STRING-backed BinaryType " +
+                            "and DecimalType with scale < 0")
+                    }
                   }
-                }
-              )
-            }
-          } { col =>
-            withResource(new Table(col: _*)) { t =>
-              GpuColumnVector.from(t, originalSelectedAttributes.map(_.dataType).toArray)
+                )
+              }
+              withResource(new Table(columns.toArray: _*)) { convertedTable =>
+                GpuColumnVector.from(convertedTable,
+                  originalSelectedAttributes.map(_.dataType).toArray)
+              }
             }
           }
         }

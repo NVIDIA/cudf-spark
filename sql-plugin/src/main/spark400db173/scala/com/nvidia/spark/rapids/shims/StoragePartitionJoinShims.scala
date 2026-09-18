@@ -22,6 +22,10 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.expressions.Expression
+import org.apache.spark.sql.catalyst.plans.physical.KeyGroupedShuffleSpec
+import org.apache.spark.sql.catalyst.util.InternalRowComparableWrapper
 // Spark 4.1.0+: StoragePartitionJoinParams moved to joins package
 import org.apache.spark.sql.execution.joins.StoragePartitionJoinParams
 
@@ -34,4 +38,17 @@ object StoragePartitionJoinShims {
   type SpjParams = StoragePartitionJoinParams
 
   def default(): SpjParams = StoragePartitionJoinParams()
+
+  /**
+   * Maps a scan partition key into the reduced key space that `outputPartitioning` reports when
+   * the join sides use compatible but unequal partition transforms (SPARK-47094). Absent when no
+   * reduction applies, in which case partition keys are already final.
+   */
+  def partitionValueReducer(
+      spjParams: SpjParams,
+      partExpressions: Seq[Expression]): Option[InternalRow => InternalRowComparableWrapper] =
+    spjParams.reducers.map { reducers =>
+      (row: InternalRow) =>
+        KeyGroupedShuffleSpec.reducePartitionValue(row, partExpressions, reducers)
+    }
 }

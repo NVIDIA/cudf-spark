@@ -45,7 +45,7 @@ When reviewing code, ensure that:
 * **User Experience (UX):** Does the change make sense from the user's perspective? Is it consistent with existing UX? Are new user-facing features adequately tested before being enabled?  
 * **Quality/Stability:** No new bugs or regressions are introduced.  
 * **Performance:** Are the benchmark scenarios and test settings representative of common use cases? Is performance acceptable within those results?  
-* **Testing:** Test coverage is sufficient for the modifications.  
+* **Testing:** Test coverage is sufficient for the modifications. If the PR uses `[reduced-it]`, confirm the change is not in a heavily parametrized area where a specific parameter combination could expose a regression.
 * **Follow-up:** Issues are filed for any concerns that are not blocking the current change.
 
 ---
@@ -68,6 +68,13 @@ When reviewing code, ensure that:
 * Make sure follow-up issues have been filed for non-blocking improvements and link them where helpful.  
 * Prefer a quick conversation (chat, call) over a long comment thread when it can resolve ambiguity faster.  
 * Use AI tools to improve review thoroughness and reduce the number of passes needed.
+* Common queries to filter PR queue:
+  ```
+  Real review queue:        is:pr is:open draft:false review:required sort:updated-asc
+  Excluding test refactors: is:pr is:open draft:false review:required -label:test sort:updated-asc
+  Parked drafts:            is:pr is:open draft:true sort:updated-asc
+  Overlap check:            is:pr is:open <path or filename>
+  ```
 
 ---
 
@@ -82,6 +89,8 @@ When reviewing code, ensure that:
 * Write clear, structured PR descriptions:  
   * A comprehensive overview of the change.  
   * Highlights of important areas that need extra attention.  
+  * Do not paste code diffs into the description. They duplicate the Files changed tab and go stale as soon as another commit is pushed.
+  * Describe intent and rationale, not line-level specifics that new commits invalidate. A description that disagrees with the diff is worse than no description.
   * Use AI tools to help draft the description, and review and refine it. Make them digestible and concise.
 
 ---
@@ -91,6 +100,9 @@ When reviewing code, ensure that:
 * Minimize code quality issues upfront. Code quality issues distract reviewers from more important concerns. Use linters and AI tools to clean these up before requesting review, so reviewers can focus on what matters most.  
 * Keep code easy to read — reviewability is a feature.  
 * Split large changes into smaller, focused PRs when possible.  
+* Splitting small is right, but do not open the whole batch at once. Open a few, and open the next only as earlier ones land or receive review.
+* The same applies when converting drafts to ready for review: convert in small batches. Moving twenty drafts into the review queue at once relocates the backlog rather than reducing it.
+* These pacing rules apply to independent PRs. Stacked PRs — where each change depends on the one below it — are not limited by the rule above, since the chain has to exist to be reviewable. Note the dependency in the description (`Stacked on #NNNN`) so reviewers can see the order.
 * For complex changes, write and review a design doc before implementation.
 
 ---
@@ -101,6 +113,8 @@ When reviewing code, ensure that:
 * Communicate the urgency and timeline of your PR upfront so reviewers can prioritize accordingly.  
 * Reach out to your reviewer directly when a quick discussion can save a round-trip.  
 * Use AI tools to self-review and catch issues before requesting review.
+* Review AI-generated changes yourself before opening the PR. The PR queue is not a staging area for work you have not read.
+* Note in the description that a change was AI-generated.
 
 ### **Recommended Readings**
 

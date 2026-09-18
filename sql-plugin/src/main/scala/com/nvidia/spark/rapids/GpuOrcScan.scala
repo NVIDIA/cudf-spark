@@ -385,22 +385,25 @@ object GpuOrcScan {
         // Math.round half up can be implemented in terms of floor
         // Math.round(x) = n iff x is in [n-0.5, n+0.5) iff x+0.5 is in [n,n+1) iff floor(x+0.5) = n
         //
-        val milliseconds = withResource(col.castTo(DType.FLOAT64)) { doubleSeconds =>
-          withResource(convertOrcFloatingPointSeconds(doubleSeconds)) { convertedSeconds =>
-            withResource(Scalar.fromDouble(DateTimeConstants.MILLIS_PER_SECOND)) { thousand =>
-              // ORC applies timezone conversion while the value is still in seconds.
-              withResource(convertedSeconds.mul(thousand, DType.FLOAT64)) { doubleMillis =>
-                withResource(Scalar.fromDouble(0.5)) { half =>
-                  withResource(doubleMillis.add(half)) { doubleMillisPlusHalf =>
-                    withResource(doubleMillisPlusHalf.floor()) { millis =>
-                      withResource(getOverflowFlags(doubleMillis, millis)) { overflowFlags =>
-                        withResource(Scalar.fromNull(millis.getType)) { nullVal =>
-                          overflowFlags.ifElse(millis, nullVal)
-                        }
-                      }
-                    }
-                  }
-                }
+        val convertedSeconds = withResource(col.castTo(DType.FLOAT64)) {
+          convertOrcFloatingPointSeconds
+        }
+        val doubleMillis = withResource(convertedSeconds) { convertedSeconds =>
+          withResource(Scalar.fromDouble(DateTimeConstants.MILLIS_PER_SECOND)) { thousand =>
+            // ORC applies timezone conversion while the value is still in seconds.
+            convertedSeconds.mul(thousand, DType.FLOAT64)
+          }
+        }
+        val milliseconds = withResource(doubleMillis) { doubleMillis =>
+          val millis = withResource(Scalar.fromDouble(0.5)) { half =>
+            withResource(doubleMillis.add(half)) { doubleMillisPlusHalf =>
+              doubleMillisPlusHalf.floor()
+            }
+          }
+          withResource(millis) { millis =>
+            withResource(getOverflowFlags(doubleMillis, millis)) { overflowFlags =>
+              withResource(Scalar.fromNull(millis.getType)) { nullVal =>
+                overflowFlags.ifElse(millis, nullVal)
               }
             }
           }
@@ -414,23 +417,26 @@ object GpuOrcScan {
         withResource(milliseconds) { _ =>
           // Test whether if there is long-overflow towards positive and negative infinity
           withResource(milliseconds.max()) { maxValue =>
-            withResource(milliseconds.min()) { minValue =>
-              Seq(maxValue, minValue).foreach { extremum =>
-                if (extremum.isValid) {
-                  testLongMultiplicationOverflow(extremum.getDouble.toLong,
-                    DateTimeConstants.MICROS_PER_MILLIS)
-                }
-              }
+            if (maxValue.isValid) {
+              testLongMultiplicationOverflow(maxValue.getDouble.toLong,
+                DateTimeConstants.MICROS_PER_MILLIS)
             }
           }
-          withResource(Scalar.fromDouble(DateTimeConstants.MICROS_PER_MILLIS)) { thousand =>
-            withResource(milliseconds.mul(thousand)) { microseconds =>
-              withResource(microseconds.castTo(DType.INT64)) { longVec =>
-                withResource(longVec.castTo(DType.TIMESTAMP_MICROSECONDS)) { timestamp =>
-                  timestamp.incRefCount()
-                }
-              }
+          withResource(milliseconds.min()) { minValue =>
+            if (minValue.isValid) {
+              testLongMultiplicationOverflow(minValue.getDouble.toLong,
+                DateTimeConstants.MICROS_PER_MILLIS)
             }
+          }
+          val microseconds = withResource(
+              Scalar.fromDouble(DateTimeConstants.MICROS_PER_MILLIS)) { thousand =>
+            milliseconds.mul(thousand)
+          }
+          val longVec = withResource(microseconds) { microseconds =>
+            microseconds.castTo(DType.INT64)
+          }
+          withResource(longVec) { longVec =>
+            longVec.castTo(DType.TIMESTAMP_MICROSECONDS)
           }
         }
 
@@ -459,46 +465,50 @@ object GpuOrcScan {
     if (GpuOverrides.isUTCTimezone(ZoneId.systemDefault())) {
       return seconds.incRefCount()
     }
-    withResource(Scalar.fromDouble(DateTimeConstants.MICROS_PER_SECOND)) { microsPerSecond =>
-      val localTimestamp = withResource(
-          Scalar.fromDouble(DateTimeConstants.MILLIS_PER_SECOND)) { millisPerSecond =>
-        withResource(seconds.mul(millisPerSecond, DType.FLOAT64)) { doubleMillis =>
-          withResource(doubleMillis.castTo(DType.INT64)) { localMillis =>
-            withResource(localMillis.bitCastTo(DType.TIMESTAMP_MILLISECONDS)) {
-              localMillisTimestamp =>
-              localMillisTimestamp.castTo(DType.TIMESTAMP_MICROSECONDS)
-            }
+    val doubleMillis = withResource(
+        Scalar.fromDouble(DateTimeConstants.MILLIS_PER_SECOND)) { millisPerSecond =>
+      seconds.mul(millisPerSecond, DType.FLOAT64)
+    }
+    val localMillis = withResource(doubleMillis) { doubleMillis =>
+      doubleMillis.castTo(DType.INT64)
+    }
+    val localTimestamp = withResource(localMillis) { localMillis =>
+      withResource(localMillis.bitCastTo(DType.TIMESTAMP_MILLISECONDS)) {
+        localMillisTimestamp =>
+          localMillisTimestamp.castTo(DType.TIMESTAMP_MICROSECONDS)
+      }
+    }
+    val offsetLookupMicros = withResource(localTimestamp) { localTimestamp =>
+      withResource(localTimestamp.bitCastTo(DType.INT64)) { localMicros =>
+        val rawOffsetMicros = TimeZone.getDefault.getRawOffset.toLong *
+          DateTimeConstants.MICROS_PER_MILLIS
+        withResource(Scalar.fromLong(rawOffsetMicros)) { rawOffset =>
+          localMicros.sub(rawOffset)
+        }
+      }
+    }
+    val offsetSeconds = withResource(offsetLookupMicros) { offsetLookupMicros =>
+      val localAtLookup = withResource(
+          offsetLookupMicros.castTo(DType.TIMESTAMP_MICROSECONDS)) { offsetLookupTimestamp =>
+        GpuTimeZoneDB.fromUtcTimestampToTimestamp(
+          offsetLookupTimestamp, ZoneId.systemDefault().normalized())
+      }
+      val offsetMicros = withResource(localAtLookup) { localAtLookup =>
+        withResource(localAtLookup.bitCastTo(DType.INT64)) { localAtLookupMicros =>
+          localAtLookupMicros.sub(offsetLookupMicros)
+        }
+      }
+      withResource(offsetMicros) { offsetMicros =>
+        withResource(offsetMicros.castTo(DType.FLOAT64)) { doubleOffsetMicros =>
+          withResource(Scalar.fromDouble(DateTimeConstants.MICROS_PER_SECOND)) {
+            microsPerSecond =>
+              doubleOffsetMicros.div(microsPerSecond, DType.FLOAT64)
           }
         }
       }
-      withResource(localTimestamp) { _ =>
-        withResource(localTimestamp.bitCastTo(DType.INT64)) { localMicros =>
-          val rawOffsetMicros = TimeZone.getDefault.getRawOffset.toLong *
-            DateTimeConstants.MICROS_PER_MILLIS
-          withResource(Scalar.fromLong(rawOffsetMicros)) { rawOffset =>
-            withResource(localMicros.sub(rawOffset)) { offsetLookupMicros =>
-              withResource(offsetLookupMicros.castTo(DType.TIMESTAMP_MICROSECONDS)) {
-                offsetLookupTimestamp =>
-                val localAtLookup = GpuTimeZoneDB.fromUtcTimestampToTimestamp(
-                  offsetLookupTimestamp, ZoneId.systemDefault().normalized())
-                withResource(localAtLookup) { _ =>
-                  withResource(localAtLookup.bitCastTo(DType.INT64)) { localAtLookupMicros =>
-                    val offsetSeconds = withResource(
-                        localAtLookupMicros.sub(offsetLookupMicros)) { offsetMicros =>
-                      withResource(offsetMicros.castTo(DType.FLOAT64)) { doubleOffsetMicros =>
-                        doubleOffsetMicros.div(microsPerSecond, DType.FLOAT64)
-                      }
-                    }
-                    withResource(offsetSeconds) { _ =>
-                      seconds.sub(offsetSeconds, DType.FLOAT64)
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
+    }
+    withResource(offsetSeconds) { offsetSeconds =>
+      seconds.sub(offsetSeconds, DType.FLOAT64)
     }
   }
 
@@ -650,6 +660,7 @@ case class GpuOrcMultiFilePartitionReaderFactory(
   private val combineThresholdSize = rapidsConf.getMultithreadedCombineThreshold
   private val combineWaitTime = rapidsConf.getMultithreadedCombineWaitTime
   private val keepReadsInOrder = rapidsConf.getMultithreadedReaderKeepOrder
+  private val skipReadEstimate = rapidsConf.skipReadEstimate(useChunkedReader)
 
   // we can't use the coalescing files reader when InputFileName, InputFileBlockStart,
   // or InputFileBlockLength because we are combining all the files into a single buffer
@@ -673,7 +684,7 @@ case class GpuOrcMultiFilePartitionReaderFactory(
     val reader = new MultiFileCloudOrcPartitionReader(
       conf, files, dataSchema, readDataSchema, partitionSchema,
       maxReadBatchSizeRows, maxReadBatchSizeBytes, targetBatchSizeBytes, maxGpuColumnSizeBytes,
-      useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes, poolConf,
+      useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes, skipReadEstimate, poolConf,
       maxNumFileProcessed,
       debugDumpPrefix, debugDumpAlways, filters, filterHandler, metrics, ignoreMissingFiles,
       ignoreCorruptFiles, queryUsesInputFile, keepReadsInOrder, combineConf)
@@ -718,11 +729,14 @@ case class GpuOrcMultiFilePartitionReaderFactory(
                     OrcSchemaWrapper(orcPartitionReaderContext.updatedReadSchema),
                     readDataSchema,
                     OrcExtraInfo(orcPartitionReaderContext.requestedMapping,
-                      orcPartitionReaderContext.writerTimezone)))
+                      orcPartitionReaderContext.writerTimezone,
+                      orcPartitionReaderContext.writerUsedProlepticGregorian)))
             }
           } catch {
             case e: FileNotFoundException if ignoreMissingFiles =>
               logWarning(s"Skipped missing file: ${file.filePath}", e)
+            case e: FileNotFoundException =>
+              throw GpuFileNotFoundException(file.filePath.toString, e)
           }
         }
       }
@@ -733,7 +747,7 @@ case class GpuOrcMultiFilePartitionReaderFactory(
     new MultiFileOrcPartitionReader(conf, files, clippedStripes, readDataSchema,
       debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows, maxReadBatchSizeBytes,
       targetBatchSizeBytes, maxGpuColumnSizeBytes, useChunkedReader,
-      maxChunkedReaderMemoryUsageSizeBytes,
+      maxChunkedReaderMemoryUsageSizeBytes, skipReadEstimate,
       metrics, partitionSchema, poolConf, filterHandler.isCaseSensitive)
   }
 
@@ -772,6 +786,7 @@ case class GpuOrcPartitionReaderFactory(
     } else {
       0L
     }
+  private val skipReadEstimate = rapidsConf.skipReadEstimate(useChunkedReader)
   private val filterHandler = GpuOrcFileFilterHandler(sqlConf, metrics, broadcastedConf,
     pushedFilters, rapidsConf.isOrcFloatTypesToStringEnable)
 
@@ -793,11 +808,11 @@ case class GpuOrcPartitionReaderFactory(
     } else {
       val conf = broadcastedConf.value.value
       OrcConf.IS_SCHEMA_EVOLUTION_CASE_SENSITIVE.setBoolean(conf, isCaseSensitive)
-      val reader = new PartitionReaderWithBytesRead(new GpuOrcPartitionReader(conf, partFile, ctx,
+      val reader = new GpuOrcPartitionReader(conf, partFile, ctx,
         readDataSchema, debugDumpPrefix, debugDumpAlways,  maxReadBatchSizeRows,
         maxReadBatchSizeBytes, targetBatchSizeBytes,
-        useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes,
-        metrics, filterHandler.isCaseSensitive))
+        useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes, skipReadEstimate,
+        metrics, filterHandler.isCaseSensitive)
       ColumnarPartitionReaderWithPartitionValues.newReader(partFile, reader, partitionSchema,
         maxGpuColumnSizeBytes)
     }
@@ -834,6 +849,7 @@ case class OrcOutputStripe(
  * @param blockIterator an iterator over the ORC output stripes
  * @param requestedMapping the optional requested column ids
  * @param writerTimezone the resolved writer timezone from ORC stripe footers
+ * @param writerUsedProlepticGregorian whether the writer used the proleptic Gregorian calendar
  */
 case class OrcPartitionReaderContext(
     filePath: Path,
@@ -847,14 +863,16 @@ case class OrcPartitionReaderContext(
     readerOpts: Reader.Options,
     blockIterator: BufferedIterator[OrcOutputStripe],
     requestedMapping: Option[Array[Int]],
-    writerTimezone: ZoneId = ZoneId.systemDefault())
+    writerTimezone: ZoneId,
+    writerUsedProlepticGregorian: Boolean)
 
 case class OrcBlockMetaForSplitCheck(
     filePath: Path,
     typeDescription: TypeDescription,
     compressionKind: CompressionKind,
     requestedMapping: Option[Array[Int]],
-    writerTimezone: ZoneId) {
+    writerTimezone: ZoneId,
+    writerUsedProlepticGregorian: Boolean) {
 }
 
 object OrcBlockMetaForSplitCheck {
@@ -864,15 +882,17 @@ object OrcBlockMetaForSplitCheck {
       singleBlockMeta.schema.schema,
       singleBlockMeta.dataBlock.stripeMeta.ctx.compressionKind,
       singleBlockMeta.extraInfo.requestedMapping,
-      singleBlockMeta.extraInfo.writerTimezone)
+      singleBlockMeta.extraInfo.writerTimezone,
+      singleBlockMeta.extraInfo.writerUsedProlepticGregorian)
   }
 
   def apply(filePathStr: String, typeDescription: TypeDescription,
       compressionKind: CompressionKind,
       requestedMapping: Option[Array[Int]],
-      writerTimezone: ZoneId): OrcBlockMetaForSplitCheck = {
+      writerTimezone: ZoneId,
+      writerUsedProlepticGregorian: Boolean): OrcBlockMetaForSplitCheck = {
     OrcBlockMetaForSplitCheck(new Path(new URI(filePathStr)), typeDescription,
-      compressionKind, requestedMapping, writerTimezone)
+      compressionKind, requestedMapping, writerTimezone, writerUsedProlepticGregorian)
   }
 }
 
@@ -1029,8 +1049,8 @@ trait OrcCommonFunctions extends OrcCodecWritingHelper { self: FilePartitionRead
       .includeColumn(includedColumns: _*)
       .decimal128Column(decimal128Fields: _*)
       // Read timestamps as UTC, ignoring the writer timezone in stripe footers.
-      // Timezone rebase is done externally via GpuOrcTimezoneUtils.rebaseOrcTimestamps,
-      // which handles both same-TZ and cross-TZ scenarios, including DST.
+      // Date/time rebase is done externally via GpuOrcTimezoneUtils.rebaseOrcDateTime,
+      // which handles legacy dates and both same-TZ and cross-TZ timestamps, including DST.
       .ignoreTimezoneInStripeFooter()
       .build()
     (parseOpts, tableSchema)
@@ -1064,6 +1084,12 @@ trait OrcCommonFunctions extends OrcCodecWritingHelper { self: FilePartitionRead
     if (!ret) {
       logInfo(s"ORC requested column ids for the next file ${nextMeta.filePath}" +
         s" doesn't match current ${curMeta.filePath}, splitting it into another batch!")
+      return true
+    }
+
+    if (nextMeta.writerUsedProlepticGregorian != curMeta.writerUsedProlepticGregorian) {
+      logInfo(s"ORC writer calendar for the next file ${nextMeta.filePath} " +
+        s"doesn't match current ${curMeta.filePath}, splitting it into another batch!")
       return true
     }
 
@@ -1124,7 +1150,8 @@ trait OrcPartitionReaderBase extends OrcCommonFunctions with Logging
   def populateCurrentBlockChunk(
       blockIterator: BufferedIterator[OrcOutputStripe],
       maxReadBatchSizeRows: Int,
-      maxReadBatchSizeBytes: Long): Seq[OrcOutputStripe] = {
+      maxReadBatchSizeBytes: Long,
+      skipReadEstimate: Boolean): Seq[OrcOutputStripe] = {
     val currentChunk = new ArrayBuffer[OrcOutputStripe]
 
     var numRows: Long = 0
@@ -1140,8 +1167,14 @@ trait OrcPartitionReaderBase extends OrcCommonFunctions with Logging
         }
         if (numRows == 0 ||
           numRows + peekedStripe.infoBuilder.getNumberOfRows <= maxReadBatchSizeRows) {
-          val estimatedBytes = GpuBatchUtils.estimateGpuMemory(readDataSchema,
-            peekedStripe.infoBuilder.getNumberOfRows)
+          // A chunked reader bounds its own GPU memory usage, so the estimate is redundant
+          // there. See spark.rapids.sql.reader.useReadEstimateFromSchema.
+          val estimatedBytes = if (skipReadEstimate) {
+            0L
+          } else {
+            GpuBatchUtils.estimateGpuMemory(readDataSchema,
+              peekedStripe.infoBuilder.getNumberOfRows)
+          }
           if (numBytes == 0 || numBytes + estimatedBytes <= maxReadBatchSizeBytes) {
             currentChunk += blockIterator.next()
             numRows += currentChunk.last.infoBuilder.getNumberOfRows
@@ -1274,6 +1307,7 @@ trait OrcPartitionReaderBase extends OrcCommonFunctions with Logging
  * @param useChunkedReader whether to read Parquet by chunks or read all at once
  * @param maxChunkedReaderMemoryUsageSizeBytes soft limit on the number of bytes of internal memory
  *                                             usage that the reader will use
+ * @param skipReadEstimate whether to ignore the schema based GPU memory estimate for a batch
  * @param execMetrics metrics to update during read
  * @param isCaseSensitive whether the name check should be case sensitive or not
  */
@@ -1289,6 +1323,7 @@ class GpuOrcPartitionReader(
     targetBatchSizeBytes: Long,
     useChunkedReader: Boolean,
     maxChunkedReaderMemoryUsageSizeBytes: Long,
+    skipReadEstimate: Boolean,
     execMetrics : Map[String, GpuMetric],
     isCaseSensitive: Boolean) extends FilePartitionReaderBase(conf, execMetrics)
   with OrcPartitionReaderBase {
@@ -1314,7 +1349,7 @@ class GpuOrcPartitionReader(
   private def readBatches(): Iterator[ColumnarBatch] = {
     NvtxRegistry.ORC_READ_BATCHES {
       val currentStripes = populateCurrentBlockChunk(ctx.blockIterator, maxReadBatchSizeRows,
-        maxReadBatchSizeBytes)
+        maxReadBatchSizeBytes, skipReadEstimate)
       if (ctx.updatedReadSchema.isEmpty) {
         // not reading any data, so return a degenerate ColumnarBatch with the row count
         val numRows = currentStripes.map(_.infoBuilder.getNumberOfRows).sum.toInt
@@ -1351,7 +1386,7 @@ class GpuOrcPartitionReader(
                 maxChunkedReaderMemoryUsageSizeBytes, conf, targetBatchSizeBytes, parseOpts,
                 dataBuf, 0, dataSize, metrics, isCaseSensitive, readDataSchema,
                 tableSchema, Array(partFile), debugDumpPrefix, debugDumpAlways,
-                ctx.writerTimezone)
+                ctx.writerTimezone, ctx.writerUsedProlepticGregorian)
               CachedGpuBatchIterator(producer, colTypes)
             }
           }
@@ -1548,9 +1583,10 @@ private case class GpuOrcFileFilterHandler(
       // specified by its read schema.
       readerOpts.include(null)
       val evolution = new SchemaEvolution(orcReader.getSchema, updatedReadSchema, readerOpts)
+      val writerUsedProlepticGregorian = orcReader.writerUsedProlepticGregorian()
       val (sargApp, sargColumns) = getSearchApplier(evolution,
         orcFileReaderOpts.getUseUTCTimestamp,
-        orcReader.writerUsedProlepticGregorian(), orcFileReaderOpts.getConvertToProlepticGregorian)
+        writerUsedProlepticGregorian, orcFileReaderOpts.getConvertToProlepticGregorian)
 
       val splitStripes = orcReader.getStripes.asScala.filter( s =>
         s.getOffset >= partFile.start && s.getOffset < partFile.start + partFile.length)
@@ -1560,7 +1596,8 @@ private case class GpuOrcFileFilterHandler(
         resolveMemFileIncluded(fileIncluded, requestedMapping))
       OrcPartitionReaderContext(filePath, conf, orcReader.getSchema, updatedReadSchema, evolution,
         orcReader.getFileTail, orcReader.getCompressionSize, orcReader.getCompressionKind,
-        readerOpts, stripes.iterator.buffered, requestedMapping, writerTz)
+        readerOpts, stripes.iterator.buffered, requestedMapping, writerTz,
+        writerUsedProlepticGregorian)
     }
 
     /**
@@ -2224,6 +2261,7 @@ private object GpuOrcFileFilterHandler {
  * @param useChunkedReader whether to read Parquet by chunks or read all at once
  * @param maxChunkedReaderMemoryUsageSizeBytes soft limit on the number of bytes of internal memory
  *                                             usage that the reader will use
+ * @param skipReadEstimate whether to ignore the schema based GPU memory estimate for a batch
  * @param poolConf thread pool configurations
  * @param maxNumFileProcessed threshold to control the maximum file number to be
  *                            submitted to threadpool
@@ -2247,6 +2285,7 @@ class MultiFileCloudOrcPartitionReader(
     maxGpuColumnSizeBytes: Long,
     useChunkedReader: Boolean,
     maxChunkedReaderMemoryUsageSizeBytes: Long,
+    skipReadEstimate: Boolean,
     poolConf: ThreadPoolConf,
     maxNumFileProcessed: Int,
     override val debugDumpPrefix: Option[String],
@@ -2283,7 +2322,8 @@ class MultiFileCloudOrcPartitionReader(
       updatedReadSchema: TypeDescription,
       compressionKind: CompressionKind,
       requestedMapping: Option[Array[Int]],
-      writerTimezone: ZoneId = ZoneId.systemDefault(),
+      writerTimezone: ZoneId,
+      writerUsedProlepticGregorian: Boolean,
       override val allPartValues: Option[Array[(Long, InternalRow)]] = None)
     extends HostMemoryBuffersWithMetaDataBase
 
@@ -2349,7 +2389,7 @@ class MultiFileCloudOrcPartitionReader(
             } else {
               while (blockChunkIter.hasNext) {
                 val blocksToRead = populateCurrentBlockChunk(blockChunkIter, maxReadBatchSizeRows,
-                  maxReadBatchSizeBytes)
+                  maxReadBatchSizeBytes, skipReadEstimate)
                 val (hostBuf, bufSize) = readPartFile(ctx, blocksToRead)
                 val numRows = blocksToRead.map(_.infoBuilder.getNumberOfRows).sum
                 val metas = blocksToRead.map(b => OrcDataStripe(OrcStripeWithMeta(b, ctx)))
@@ -2365,7 +2405,7 @@ class MultiFileCloudOrcPartitionReader(
               } else {
                 HostMemoryBuffersWithMetaData(partFile, hostBuffers.toArray, bytesRead,
                   ctx.updatedReadSchema, ctx.compressionKind, ctx.requestedMapping,
-                  ctx.writerTimezone)
+                  ctx.writerTimezone, ctx.writerUsedProlepticGregorian)
               }
             }
           }
@@ -2474,7 +2514,8 @@ class MultiFileCloudOrcPartitionReader(
         require(hmbInfo.hmbs.length == 1)
         val batchIter = readBufferToBatches(hmbInfo.hmbs.head, hmbInfo.bytes,
           buffer.updatedReadSchema, buffer.requestedMapping, filterHandler.isCaseSensitive,
-          buffer.partitionedFile, buffer.allPartValues, buffer.writerTimezone)
+          buffer.partitionedFile, buffer.allPartValues, buffer.writerTimezone,
+          buffer.writerUsedProlepticGregorian)
         if (memBuffersAndSize.length > 1) {
           val updatedBuffers = memBuffersAndSize.drop(1)
           currentFileHostBuffers = Some(buffer.copy(memBuffersAndSizes = updatedBuffers))
@@ -2495,7 +2536,8 @@ class MultiFileCloudOrcPartitionReader(
       isCaseSensitive: Boolean,
       partedFile: PartitionedFile,
       allPartValues: Option[Array[(Long, InternalRow)]],
-      writerTimezone: ZoneId) : Iterator[ColumnarBatch] = {
+      writerTimezone: ZoneId,
+      writerUsedProlepticGregorian: Boolean) : Iterator[ColumnarBatch] = {
     val (parseOpts, tableSchema) = closeOnExcept(hostBuffer) { _ =>
       getORCOptionsAndSchema(memFileSchema, requestedMapping, readDataSchema)
     }
@@ -2510,7 +2552,8 @@ class MultiFileCloudOrcPartitionReader(
       val producer = MakeOrcTableProducer(useChunkedReader,
         maxChunkedReaderMemoryUsageSizeBytes, conf, targetBatchSizeBytes, parseOpts,
         dataBuf, 0, bufferSize, metrics, isCaseSensitive, readDataSchema,
-        tableSchema, files, debugDumpPrefix, debugDumpAlways, writerTimezone)
+        tableSchema, files, debugDumpPrefix, debugDumpAlways, writerTimezone,
+        writerUsedProlepticGregorian)
       val batchIter = CachedGpuBatchIterator(producer, colTypes)
 
       if (allPartValues.isDefined) {
@@ -2645,10 +2688,10 @@ class MultiFileCloudOrcPartitionReader(
     isNeedToSplitDataBlock(
       OrcBlockMetaForSplitCheck(curMeta.partitionedFile.filePath.toString(),
         curMeta.updatedReadSchema, curMeta.compressionKind, curMeta.requestedMapping,
-        curMeta.writerTimezone),
+        curMeta.writerTimezone, curMeta.writerUsedProlepticGregorian),
       OrcBlockMetaForSplitCheck(nextMeta.partitionedFile.filePath.toString(),
         nextMeta.updatedReadSchema, nextMeta.compressionKind, nextMeta.requestedMapping,
-        nextMeta.writerTimezone))
+        nextMeta.writerTimezone, nextMeta.writerUsedProlepticGregorian))
   }
 
   private def computeCombinedHmbMeta(
@@ -2795,7 +2838,8 @@ private[rapids] case class OrcDataStripe(stripeMeta: OrcStripeWithMeta) extends 
 /** Orc extra information containing the requested column ids for the current coalescing stripes */
 case class OrcExtraInfo(
     requestedMapping: Option[Array[Int]],
-    writerTimezone: ZoneId = ZoneId.systemDefault()) extends ExtraInfo
+    writerTimezone: ZoneId,
+    writerUsedProlepticGregorian: Boolean) extends ExtraInfo
 
 // Contains meta about a single stripe of an ORC file
 private case class OrcSingleStripeMeta(
@@ -2823,6 +2867,7 @@ private case class OrcSingleStripeMeta(
  * @param useChunkedReader      whether to read Parquet by chunks or read all at once
  * @param maxChunkedReaderMemoryUsageSizeBytes soft limit on the number of bytes of internal memory
  *                                             usage that the reader will use
+ * @param skipReadEstimate      whether to ignore the schema based GPU memory estimate for a batch
  * @param execMetrics           metrics
  * @param partitionSchema       schema of partitions
  * @param poolConf              the thread pool configuration
@@ -2841,13 +2886,14 @@ class MultiFileOrcPartitionReader(
     maxGpuColumnSizeBytes: Long,
     useChunkedReader: Boolean,
     maxChunkedReaderMemoryUsageSizeBytes: Long,
+    skipReadEstimate: Boolean,
     execMetrics: Map[String, GpuMetric],
     partitionSchema: StructType,
     poolConf: ThreadPoolConf,
     isCaseSensitive: Boolean)
   extends MultiFileCoalescingPartitionReaderBase(conf, clippedStripes,
     partitionSchema, maxReadBatchSizeRows, maxReadBatchSizeBytes, maxGpuColumnSizeBytes,
-    poolConf, execMetrics)
+    skipReadEstimate, poolConf, execMetrics)
     with OrcCommonFunctions {
 
   // implicit to convert SchemaBase to Orc TypeDescription
@@ -3012,8 +3058,9 @@ class MultiFileOrcPartitionReader(
       clippedSchema: SchemaBase,
       readSchema: StructType,
       extraInfo: ExtraInfo): GpuDataProducer[Table] = {
+    val orcExtraInfo = extraInfo.asInstanceOf[OrcExtraInfo]
     val (parseOpts, tableSchema) = getORCOptionsAndSchema(clippedSchema,
-      extraInfo.requestedMapping, readDataSchema)
+      orcExtraInfo.requestedMapping, readDataSchema)
 
     // About to start using the GPU
     GpuSemaphore.acquireIfNecessary(TaskContext.get())
@@ -3022,7 +3069,7 @@ class MultiFileOrcPartitionReader(
       maxChunkedReaderMemoryUsageSizeBytes, conf, targetBatchSizeBytes, parseOpts,
       dataBuffer, 0, dataSize, metrics, isCaseSensitive, readDataSchema,
       tableSchema, files, debugDumpPrefix, debugDumpAlways,
-      extraInfo.asInstanceOf[OrcExtraInfo].writerTimezone)
+      orcExtraInfo.writerTimezone, orcExtraInfo.writerUsedProlepticGregorian)
   }
 
   /**
@@ -3087,7 +3134,8 @@ object MakeOrcTableProducer extends Logging {
       splits: Array[PartitionedFile],
       debugDumpPrefix: Option[String],
       debugDumpAlways: Boolean,
-      writerTimezone: ZoneId = ZoneId.systemDefault()
+      writerTimezone: ZoneId,
+      writerUsedProlepticGregorian: Boolean
   ): GpuDataProducer[Table] = {
     debugDumpPrefix.foreach { prefix =>
       if (debugDumpAlways) {
@@ -3098,7 +3146,8 @@ object MakeOrcTableProducer extends Logging {
     if (useChunkedReader) {
       OrcTableReader(conf, chunkSizeByteLimit, maxChunkedReaderMemoryUsageSizeBytes,
         parseOpts, buffer, offset, bufferSize, metrics,  isSchemaCaseSensitive, readDataSchema,
-        tableSchema, splits, debugDumpPrefix, debugDumpAlways, writerTimezone)
+        tableSchema, splits, debugDumpPrefix, debugDumpAlways, writerTimezone,
+        writerUsedProlepticGregorian)
     } else {
       val table = withResource(buffer) { _ =>
         try {
@@ -3127,9 +3176,11 @@ object MakeOrcTableProducer extends Logging {
         }
       }
       metrics(NUM_OUTPUT_BATCHES) += 1
-      val rebased = GpuOrcTimezoneUtils.rebaseOrcTimestamps(table, writerTimezone)
+      val rebased = GpuOrcTimezoneUtils.rebaseOrcDateTime(
+        table, writerTimezone, writerUsedProlepticGregorian)
       val evolvedSchemaTable = SchemaUtils.evolveSchemaIfNeededAndClose(rebased, tableSchema,
         readDataSchema, isSchemaCaseSensitive, Some(GpuOrcScan.castColumnTo))
+      GpuMetric.recordOutputBatchBytes(evolvedSchemaTable, metrics.get(GPU_OUTPUT_BATCH_BYTES))
       new SingleGpuDataProducer(evolvedSchemaTable)
     }
   }
@@ -3150,7 +3201,8 @@ case class OrcTableReader(
     splits: Array[PartitionedFile],
     debugDumpPrefix: Option[String],
     debugDumpAlways: Boolean,
-    writerTimezone: ZoneId = ZoneId.systemDefault()) extends GpuDataProducer[Table] with Logging {
+    writerTimezone: ZoneId,
+    writerUsedProlepticGregorian: Boolean) extends GpuDataProducer[Table] with Logging {
 
   private[this] val reader = new ORCChunkedReader(chunkSizeByteLimit,
     maxChunkedReaderMemoryUsageSizeBytes, parseOpts, buffer, offset, bufferSize)
@@ -3186,9 +3238,12 @@ case class OrcTableReader(
       }
     }
     metrics(NUM_OUTPUT_BATCHES) += 1
-    val rebased = GpuOrcTimezoneUtils.rebaseOrcTimestamps(table, writerTimezone)
-    SchemaUtils.evolveSchemaIfNeededAndClose(rebased, catalystTableSchema,
+    val rebased = GpuOrcTimezoneUtils.rebaseOrcDateTime(
+      table, writerTimezone, writerUsedProlepticGregorian)
+    val evolvedSchemaTable = SchemaUtils.evolveSchemaIfNeededAndClose(rebased, catalystTableSchema,
       readDataSchema, isSchemaCaseSensitive, Some(GpuOrcScan.castColumnTo))
+    GpuMetric.recordOutputBatchBytes(evolvedSchemaTable, metrics.get(GPU_OUTPUT_BATCH_BYTES))
+    evolvedSchemaTable
   }
 
   override def close(): Unit = {

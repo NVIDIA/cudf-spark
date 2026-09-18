@@ -34,17 +34,19 @@
 {"spark": "412"}
 {"spark": "413"}
 {"spark": "420"}
+{"spark": "500"}
 spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.rapids
 
-import com.nvidia.spark.rapids.FunSuiteWithTempDir
-import com.nvidia.spark.rapids.SparkQueryCompareTestSuite
+import com.nvidia.spark.rapids.{FunSuiteWithTempDir, RapidsConf, SparkQueryCompareTestSuite}
 
+import org.apache.spark.SparkConf
 import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.catalyst.expressions.FileSourceMetadataAttribute.FILE_SOURCE_METADATA_COL_ATTR_KEY
 import org.apache.spark.sql.connector.catalog.{Column, Identifier}
 import org.apache.spark.sql.connector.catalog.CatalogV2Implicits._
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 import org.apache.spark.util.Utils
 
@@ -83,6 +85,36 @@ class GpuCreateDataSourceTableAsSelectCommandSuite
         assert(firstColumn.metadataInJSON() == null, "Column metadata should be empty.")
       }
     }
+  }
+
+  test("CTAS preserves CHAR/VARCHAR metadata and honors CHAR_AS_VARCHAR") {
+    val sourceTable = "charVarcharSource"
+    val preserveTarget = "charVarcharPreserveTarget"
+    val convertTarget = "charVarcharConvertTarget"
+    // Spark's CHAR read-side padding remains a CPU Project on these shims.
+    val conf = new SparkConf(false)
+      .set(RapidsConf.TEST_ALLOWED_NONGPU.key, "ProjectExec")
+    withGpuSparkSession({ spark =>
+      withTable(spark, sourceTable, preserveTarget, convertTarget) {
+        spark.conf.set(SQLConf.CHAR_AS_VARCHAR.key, "false")
+        spark.sql(s"CREATE TABLE $sourceTable(c CHAR(5), v VARCHAR(4)) USING PARQUET")
+
+        Seq(
+          (false, preserveTarget, Seq("char(5)", "varchar(4)")),
+          (true, convertTarget, Seq("varchar(5)", "varchar(4)"))).foreach {
+          case (charAsVarchar, targetTable, expectedTypes) =>
+            spark.conf.set(SQLConf.CHAR_AS_VARCHAR.key, charAsVarchar.toString)
+            spark.sql(s"CREATE TABLE $targetTable USING PARQUET AS SELECT * FROM $sourceTable")
+            val actualTypes = spark.sql(s"DESC $targetTable")
+              .selectExpr("data_type")
+              .where("data_type like '%char%'")
+              .collect()
+              .map(_.getString(0))
+              .toSeq
+            assert(actualTypes == expectedTypes)
+        }
+      }
+    }, conf)
   }
 
   private def withTable(spark: SparkSession, tableNames: String*)(f: => Unit): Unit = {

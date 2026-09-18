@@ -26,10 +26,17 @@ _hive_write_conf = {
     "hive.exec.dynamic.partition": "true",
     "hive.exec.dynamic.partition.mode": "nonstrict"}
 
+# The shared bucket schema contains DATE columns, so only the ORC parameter expects the
+# CPU writer fallback. The PARQUET parameter remains subject to the original GPU assertion.
+_orc_date_write_allow = ['DataWritingCommandExec', 'ExecutedCommandExec', 'WriteFilesExec']
+_file_formats = [
+    'parquet',
+    pytest.param('orc', marks=allow_non_gpu_conditional(True, *_orc_date_write_allow))]
+
 
 @pytest.mark.skipif(not (is_hive_available() and is_spark_330_or_later()),
                     reason="Must have Hive on Spark 3.3+")
-@pytest.mark.parametrize('file_format', ['parquet', 'orc'])
+@pytest.mark.parametrize('file_format', _file_formats)
 @allow_non_gpu(*non_utc_allow)
 def test_write_hive_bucketed_table(spark_tmp_table_factory, file_format):
     num_rows = 2048
@@ -57,8 +64,11 @@ def test_write_hive_bucketed_table(spark_tmp_table_factory, file_format):
 
     cpu_table = spark_tmp_table_factory.get()
     gpu_table = spark_tmp_table_factory.get()
-    with_cpu_session(lambda spark: write_hive_table(spark, cpu_table), _hive_write_conf)
-    with_gpu_session(lambda spark: write_hive_table(spark, gpu_table), _hive_write_conf)
+    write_conf = dict(_hive_write_conf)
+    if file_format == 'orc':
+        write_conf['orc.proleptic.gregorian'] = 'true'
+    with_cpu_session(lambda spark: write_hive_table(spark, cpu_table), write_conf)
+    with_gpu_session(lambda spark: write_hive_table(spark, gpu_table), write_conf)
     cpu_rows, gpu_rows = 0, 0
     for cur_bucket_id in range(num_buckets):
         # Verify the result bucket by bucket

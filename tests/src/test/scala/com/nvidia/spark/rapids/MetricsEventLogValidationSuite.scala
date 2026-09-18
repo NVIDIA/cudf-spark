@@ -90,11 +90,9 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
 
         // Give a small amount of time for file system operations to complete
         Thread.sleep(10)
-
-        println("Spark session stopped to ensure event logs are flushed")
       } catch {
         case e: Exception =>
-          println(s"Warning: Error stopping Spark session: ${e.getMessage}")
+          info(s"Warning: Error stopping Spark session: ${e.getMessage}")
       }
     }
   }
@@ -109,19 +107,19 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
     try {
       // Determine compression codec name based on file extension
       val codecName: Option[String] = if (fileName.contains(".gz")) {
-        println(s"Reading GZip compressed file: ${file.getName}")
+        info(s"Reading GZip compressed file: ${file.getName}")
         Some("gzip")
       } else if (fileName.contains(".bz2")) {
-        println(s"Reading BZip2 compressed file: ${file.getName}")
+        info(s"Reading BZip2 compressed file: ${file.getName}")
         Some("bzip2")
       } else if (fileName.contains(".zst")) {
-        println(s"Reading Zstandard compressed file: ${file.getName}")
+        info(s"Reading Zstandard compressed file: ${file.getName}")
         Some("zstd")
       } else if (fileName.contains(".lz4")) {
-        println(s"Reading LZ4 compressed file: ${file.getName}")
+        info(s"Reading LZ4 compressed file: ${file.getName}")
         Some("lz4")
       } else if (fileName.contains(".snappy")) {
-        println(s"Reading Snappy compressed file: ${file.getName}")
+        info(s"Reading Snappy compressed file: ${file.getName}")
         Some("snappy")
       } else {
         None // Uncompressed file
@@ -152,7 +150,7 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
             }
           } catch {
             case e: Exception =>
-              println(s"Warning: Failed to create or use ${codecShortName} codec for " +
+              info(s"Warning: Failed to create or use ${codecShortName} codec for " +
                 s"${file.getName}: ${e.getMessage}")
               // Fall back to uncompressed reading
               Source.fromFile(file, "UTF-8").getLines().toList
@@ -165,13 +163,13 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
     } catch {
       case e: Exception =>
         // Fall back to regular file reading if compression handling fails
-        println(s"Warning: Failed to read file ${file.getName}, " +
+        info(s"Warning: Failed to read file ${file.getName}, " +
           s"trying uncompressed read: ${e.getMessage}")
         try {
           Source.fromFile(file, "UTF-8").getLines().toList
         } catch {
           case ex: Exception =>
-            println(s"Error: Cannot read file ${file.getName}: ${ex.getMessage}")
+            info(s"Error: Cannot read file ${file.getName}: ${ex.getMessage}")
             List.empty[String]
         }
     }
@@ -238,7 +236,7 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
         }
       } catch {
         case e: Exception =>
-          println(s"Warning: Could not parse event log ${file.getName}: ${e.getMessage}")
+          info(s"Warning: Could not parse event log ${file.getName}: ${e.getMessage}")
       }
     }
 
@@ -305,10 +303,10 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
         s"should be positive, got ${taskTime.executionTime}")
     }
 
-    println(s"Found ${operatorTimeMetrics.length} operator time metrics in event logs")
-    println(s"Found ${taskTimes.length} executor run time records in event logs")
-    println(f"Total operator time: ${totalOperatorTime / 1000000.0}%.2f ms")
-    println(f"Total executor run time: ${totalTaskExecutionTime / 1000000.0}%.2f ms")
+    info(s"Found ${operatorTimeMetrics.length} operator time metrics in event logs")
+    info(s"Found ${taskTimes.length} executor run time records in event logs")
+    info(f"Total operator time: ${totalOperatorTime / 1000000.0}%.2f ms")
+    info(f"Total executor run time: ${totalTaskExecutionTime / 1000000.0}%.2f ms")
 
     // Verify that operator time is within expected range of executor run time
     // Operator time should be between 50% and 100% of executor run time
@@ -316,8 +314,8 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
     val maxExpectedOperatorTime = totalTaskExecutionTime * 1.2 // allow some margin
     val operatorTimeRatio = totalOperatorTime.toDouble / totalTaskExecutionTime.toDouble
 
-    println(f"Operator time ratio: ${operatorTimeRatio * 100.0}%.1f%% of executor run time")
-    println(f"Expected range: 50.0%% - 100.0%% of executor run time")
+    info(f"Operator time ratio: ${operatorTimeRatio * 100.0}%.1f%% of executor run time")
+    info(f"Expected range: 50.0%% - 100.0%% of executor run time")
 
     assert(totalOperatorTime >= minExpectedOperatorTime,
       f"Total operator time (${totalOperatorTime / 1000000.0}%.2f ms) should be at least 50%% " +
@@ -329,9 +327,6 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
         f"total executor run time (${totalTaskExecutionTime / 1000000.0}%.2f ms), " +
         f"but was ${operatorTimeRatio * 100.0}%.1f%%")
 
-    operatorTimeMetrics.foreach { m =>
-      println(f"  ${m.name}: ${m.value / 1000000.0}%.2f ms (stage ${m.stage.getOrElse("unknown")})")
-    }
   }
 
   test("operator time metrics are less when c2r and r2c happened") {
@@ -396,10 +391,10 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
         s"should be positive, got ${taskTime.executionTime}")
     }
 
-    println(s"Found ${operatorTimeMetrics.length} operator time metrics in event logs")
-    println(s"Found ${taskTimes.length} executor run time records in event logs")
-    println(f"Total operator time: ${totalOperatorTime / 1000000.0}%.2f ms")
-    println(f"Total executor run time: ${totalTaskExecutionTime / 1000000.0}%.2f ms")
+    info(s"Found ${operatorTimeMetrics.length} operator time metrics in event logs")
+    info(s"Found ${taskTimes.length} executor run time records in event logs")
+    info(f"Total operator time: ${totalOperatorTime / 1000000.0}%.2f ms")
+    info(f"Total executor run time: ${totalTaskExecutionTime / 1000000.0}%.2f ms")
 
     // Verify that operator time is within expected range of executor run time
     // Operator time should be between 0% and 80% of executor run time
@@ -407,8 +402,8 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
     val maxExpectedOperatorTime = totalTaskExecutionTime * 0.8
     val operatorTimeRatio = totalOperatorTime.toDouble / totalTaskExecutionTime.toDouble
 
-    println(f"Operator time ratio: ${operatorTimeRatio * 100.0}%.1f%% of executor run time")
-    println(f"Expected range: 0.0%% - 80.0%% of executor run time")
+    info(f"Operator time ratio: ${operatorTimeRatio * 100.0}%.1f%% of executor run time")
+    info(f"Expected range: 0.0%% - 80.0%% of executor run time")
 
     assert(totalOperatorTime > minExpectedOperatorTime,
       f"Total operator time (${totalOperatorTime / 1000000.0}%.2f ms) should be at least >0%% " +
@@ -420,11 +415,6 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
         f"80%% of total executor run time (${totalTaskExecutionTime / 1000000.0}%.2f ms), " +
         f"but was ${operatorTimeRatio * 100.0}%.1f%%")
 
-    operatorTimeMetrics.foreach { m =>
-      println(f"  ${m.name}: ${m.value / 1000000.0}%.2f ms " +
-        f"(stage ${m.stage.getOrElse("unknown")})")
-    }
-    println("Test completed successfully.")
   }
 
   test("operator time metrics are reasonable for parquet write jobs") {
@@ -505,19 +495,19 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
           s"should have positive value, got ${metric.value}")
       }
 
-      println(s"Parquet write job: Found ${operatorTimeMetrics.length} operator time metrics")
-      println(s"Parquet write job: Found ${taskTimes.length} executor run time records")
-      println(f"Parquet write job: Total operator time: ${totalOperatorTime / 1000000.0}%.2f ms")
-      println(f"Parquet write job: Total executor run time: " +
+      info(s"Parquet write job: Found ${operatorTimeMetrics.length} operator time metrics")
+      info(s"Parquet write job: Found ${taskTimes.length} executor run time records")
+      info(f"Parquet write job: Total operator time: ${totalOperatorTime / 1000000.0}%.2f ms")
+      info(f"Parquet write job: Total executor run time: " +
         f"${totalTaskExecutionTime / 1000000.0}%.2f ms")
 
       val minExpectedOperatorTime = totalTaskExecutionTime * 0.3
       val maxExpectedOperatorTime = totalTaskExecutionTime * 1.2 // allow some margin
       val operatorTimeRatio = totalOperatorTime.toDouble / totalTaskExecutionTime.toDouble
 
-      println(f"Parquet write job: Operator time ratio: ${operatorTimeRatio * 100.0}%.1f%% " +
+      info(f"Parquet write job: Operator time ratio: ${operatorTimeRatio * 100.0}%.1f%% " +
         "of executor run time")
-      println(f"Parquet write job: Expected range: 30.0%% - 100.0%% of executor run time")
+      info(f"Parquet write job: Expected range: 30.0%% - 100.0%% of executor run time")
 
       assert(totalOperatorTime >= minExpectedOperatorTime,
         f"Parquet write job: Total operator time (${totalOperatorTime / 1000000.0}%.2f ms) " +
@@ -543,11 +533,11 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
         (TimeUnit.MILLISECONDS.toNanos(numWritePartitions * slowFsWriteDelayMs) *
           minExpectedStage5OperatorTimeFraction).toLong
 
-      println(f"Parquet write job: Stage 5 operator time: " +
+      info(f"Parquet write job: Stage 5 operator time: " +
         f"${stage5OperatorTime / 1000000.0}%.2f ms")
-      println(f"Parquet write job: Stage 5 ratio: ${stage5Ratio * 100.0}%.1f%% " +
+      info(f"Parquet write job: Stage 5 ratio: ${stage5Ratio * 100.0}%.1f%% " +
         "of total operator time")
-      println(f"Parquet write job: Stage 5 expected minimum operator time: " +
+      info(f"Parquet write job: Stage 5 expected minimum operator time: " +
         f"${minExpectedStage5OperatorTime / 1000000.0}%.2f ms")
 
       assert(stage5Metrics.nonEmpty,
@@ -559,12 +549,6 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
           f"${minExpectedStage5OperatorTimeFraction * 100.0}%.1f%% of " +
           f"$numWritePartitions write partitions and $slowFsWriteDelayMs ms slowfs delay, " +
           f"but was ${stage5OperatorTime / 1000000.0}%.2f ms")
-
-      operatorTimeMetrics.foreach { m =>
-        println(f"  ${m.name}: ${m.value / 1000000.0}%.2f ms " +
-          f"(stage ${m.stage.getOrElse("unknown")})")
-      }
-      println("Parquet write job: Test completed successfully.")
 
     } finally {
 
@@ -615,9 +599,9 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
     val (metrics, taskTimes) = parseEventLogs()
     val operatorTimeMetrics = metrics.filter(_.name.equals("op time"))
 
-    println(s"OpTimeTracking disabled: Found ${metrics.length} total metrics")
-    println(s"OpTimeTracking disabled: Found ${operatorTimeMetrics.length} operator time metrics")
-    println(s"OpTimeTracking disabled: Found ${taskTimes.length} executor run time records")
+    info(s"OpTimeTracking disabled: Found ${metrics.length} total metrics")
+    info(s"OpTimeTracking disabled: Found ${operatorTimeMetrics.length} operator time metrics")
+    info(s"OpTimeTracking disabled: Found ${taskTimes.length} executor run time records")
 
     // When OpTimeTracking is disabled, there should be no operator time metrics
     assert(operatorTimeMetrics.isEmpty,
@@ -637,7 +621,7 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
     }
 
     val totalTaskExecutionTime = taskTimes.map(_.executionTime).sum
-    println(f"OpTimeTracking disabled: Total executor run time: " +
+    info(f"OpTimeTracking disabled: Total executor run time: " +
       f"${totalTaskExecutionTime}%.2f ms")
 
     // Verify that we executed a meaningful workload (total execution time > 100ms)
