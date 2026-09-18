@@ -79,11 +79,11 @@ the dependency analyzer directly against the jar:
 
 ```bash
 VERSION=26.04.2
-curl -fL -o /tmp/cudf-spark_2.12-${VERSION}-cuda12.jar \
-  https://repo.maven.apache.org/maven2/com/nvidia/cudf-spark_2.12/${VERSION}/cudf-spark_2.12-${VERSION}-cuda12.jar
+curl -fL -o /tmp/rapids-4-spark_2.12-${VERSION}-cuda12.jar \
+  https://repo.maven.apache.org/maven2/com/nvidia/rapids-4-spark_2.12/${VERSION}/rapids-4-spark_2.12-${VERSION}-cuda12.jar
 
 python3 dist/scripts/analyze-parallel-world-deps.py \
-  /tmp/cudf-spark_2.12-${VERSION}-cuda12.jar \
+  /tmp/rapids-4-spark_2.12-${VERSION}-cuda12.jar \
   --show-topo
 ```
 
