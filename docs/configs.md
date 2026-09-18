@@ -32,10 +32,10 @@ scala> spark.conf.set("spark.rapids.sql.concurrentGpuTasks", 2)
  when the config can be set. "Startup" means only valid on startup, "Runtime" means
  valid on both startup and runtime.
 
-
 The "Since Version" column shows the first cuDF plugin release known to support
 the config. "Unreleased" means the config exists on this branch but is not in a tagged
 release yet. "Unknown" means the metadata has not been recorded yet.
+
 
 ## General Configuration
 
