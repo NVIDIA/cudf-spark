@@ -197,145 +197,60 @@ def test_delta_low_shuffle_merge_accepts_non_effective_duplicate_matches(
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
-@pytest.mark.skipif(not is_databricks_version(17, 3),
-                    reason="DBR 17.3 effective duplicate-match semantics")
-def test_delta_low_shuffle_merge_rejects_effective_duplicate_matches(
-        spark_tmp_path, spark_tmp_table_factory):
-    src_table = spark_tmp_table_factory.get()
-
-    def do_merge(spark):
-        gpu_enabled = \
-            str(spark.conf.get("spark.rapids.sql.enabled", "false")).lower() == "true"
-        target_path = spark_tmp_path + ("/GPU" if gpu_enabled else "/CPU")
-        target = gen_df(
-            spark,
-            [("k", UniqueLongGen(nullable=False)),
-             ("v", StringGen(pattern="[a-z]{1,20}", nullable=False))])
-        target.write.format("delta") \
-            .option("delta.enableDeletionVectors", "false") \
-            .mode("overwrite") \
-            .save(target_path)
-        matched = target.where(f.pmod("k", f.lit(4)) == 0)
-        first_match = matched.select(
-            "k", f.concat(f.lit("first-"), "v").alias("v"),
-            f.lit(True).alias("apply"))
-        second_match = matched.select(
-            "k", f.concat(f.lit("second-"), "v").alias("v"),
-            f.lit(True).alias("apply"))
-        first_match.unionByName(second_match).createOrReplaceTempView(src_table)
-        return spark.sql(
-            "MERGE INTO delta.`{}` t USING {} s ON t.k = s.k "
-            "WHEN MATCHED AND s.apply THEN UPDATE SET t.v = s.v".format(
-                target_path, src_table)).collect()
-
-    assert_gpu_and_cpu_error(
-        do_merge,
-        conf=delta_merge_enabled_conf,
-        error_message="DELTA_MULTIPLE_SOURCE_ROW_MATCHING_TARGET_ROW_IN_MERGE")
-
-
-@allow_non_gpu(*delta_meta_allow)
-@delta_lake
 @ignore_order
 @pytest.mark.skipif(not is_databricks_version(17, 3),
                     reason="DBR 17.3 low-shuffle helper-column regression")
+@pytest.mark.parametrize("use_cdf", [False, True], ids=idfn)
 def test_delta_low_shuffle_merge_internal_column_names(
-        spark_tmp_path, spark_tmp_table_factory):
+        spark_tmp_path, spark_tmp_table_factory, use_cdf):
+    # Use low-shuffle-specific helper names so the CPU MERGE remains a valid oracle.
+    # DBR's CPU command rejects _row_dropped_ and the row-presence flags as ambiguous.
     def dest_table_func(spark):
         return gen_df(
             spark,
             [("k", UniqueLongGen(nullable=False)),
-             ("_row_dropped_", StringGen(pattern="[a-z]{1,20}", nullable=False)),
+             ("v", StringGen(pattern="[a-z]{1,20}", nullable=False)),
              ("_incr_metrics_", IntegerGen(
                  min_val=-1000000, max_val=1000000, nullable=False, special_cases=[])),
-             ("_target_row_present_", StringGen(
-                 pattern="[a-z]{1,20}", nullable=False)),
              ("_metadata_file_path", StringGen(
                  pattern="[a-z]{1,20}", nullable=False)),
              ("__metadata_row_index", LongGen(nullable=False))])
 
-    def source_parts(spark):
+    def src_table_func(spark):
         generated = dest_table_func(spark)
         matched = generated.where(f.pmod("k", f.lit(4)) == 0)
         effective = matched.select(
             "k", f.lit(True).alias("apply"),
-            f.concat(f.lit("updated-"), "_row_dropped_").alias("_row_dropped_"),
+            f.concat(f.lit("updated-"), "v").alias("v"),
             (f.col("_incr_metrics_") + 1).alias("_incr_metrics_"),
-            f.concat(f.lit("source-"), "_target_row_present_").alias(
-                "_source_row_present_"),
             "_metadata_file_path", "__metadata_row_index")
         ignored = matched.select(
             "k", f.lit(False).alias("apply"),
-            f.concat(f.lit("ignored-"), "_row_dropped_").alias("_row_dropped_"),
+            f.concat(f.lit("ignored-"), "v").alias("v"),
             (f.col("_incr_metrics_") + 2).alias("_incr_metrics_"),
-            f.concat(f.lit("ignored-"), "_target_row_present_").alias(
-                "_source_row_present_"),
             "_metadata_file_path", "__metadata_row_index")
         inserted = generated.where(f.pmod("k", f.lit(4)) == 1).select(
             (f.col("k") + _INSERT_KEY_OFFSET).alias("k"),
             f.lit(True).alias("apply"),
-            "_row_dropped_", "_incr_metrics_",
-            f.col("_target_row_present_").alias("_source_row_present_"),
+            "v", "_incr_metrics_",
             "_metadata_file_path", "__metadata_row_index")
-        return effective, ignored, inserted
-
-    def src_table_func(spark):
-        effective, ignored, inserted = source_parts(spark)
         return effective.unionByName(ignored).unionByName(inserted)
 
     merge_sql = ("MERGE INTO {dest_table} t USING {src_table} s ON t.k = s.k "
                  "AND t._metadata_file_path = s._metadata_file_path "
                  "AND t.__metadata_row_index = s.__metadata_row_index "
                  "WHEN MATCHED AND s.apply THEN UPDATE SET "
-                 "t._row_dropped_ = s._row_dropped_, "
-                 "t._incr_metrics_ = s._incr_metrics_, "
-                 "t._target_row_present_ = s._source_row_present_ "
-                 "WHEN NOT MATCHED THEN INSERT (k, _row_dropped_, _incr_metrics_, "
-                 "_target_row_present_, _metadata_file_path, __metadata_row_index) "
-                 "VALUES (s.k, s._row_dropped_, s._incr_metrics_, "
-                 "s._source_row_present_, s._metadata_file_path, "
-                 "s.__metadata_row_index)")
-    # DBR's CPU MERGE uses these same fixed helper names and fails during analysis, so there is no
-    # valid CPU oracle for this regression. Run the GPU implementation and compare with the
-    # result computed from the generated target and source data instead.
-    data_path = spark_tmp_path + "/DELTA_DATA/GPU"
-    src_table = spark_tmp_table_factory.get()
-    dest_table = spark_tmp_table_factory.get()
-
-    def setup_tables(spark):
-        setup_delta_dest_table(
-            spark, data_path, dest_table_func, use_cdf=False,
-            enable_deletion_vectors=False)
-        src_table_func(spark).createOrReplaceTempView(src_table)
-
-    with_cpu_session(setup_tables, conf=delta_merge_enabled_conf)
-
-    def do_merge(spark):
-        read_delta_path(spark, data_path).createOrReplaceTempView(dest_table)
-        return spark.sql(merge_sql.format(
-            src_table=src_table, dest_table=dest_table)).collect()
-
-    assert_rapids_delta_write(do_merge, conf=delta_merge_enabled_conf)
-
-    def expected_rows(spark):
-        target = dest_table_func(spark)
-        effective, _, inserted = source_parts(spark)
-        unchanged = target.where(f.pmod("k", f.lit(4)) != 0)
-        updated = effective.select(
-            "k", "_row_dropped_", "_incr_metrics_",
-            f.col("_source_row_present_").alias("_target_row_present_"),
-            "_metadata_file_path", "__metadata_row_index")
-        new_rows = inserted.select(
-            "k", "_row_dropped_", "_incr_metrics_",
-            f.col("_source_row_present_").alias("_target_row_present_"),
-            "_metadata_file_path", "__metadata_row_index")
-        return unchanged.unionByName(updated).unionByName(new_rows).orderBy("k").collect()
-
-    actual = with_cpu_session(
-        lambda spark: read_delta_path(spark, data_path).orderBy("k").collect(),
+                 "t.v = s.v, t._incr_metrics_ = s._incr_metrics_ "
+                 "WHEN NOT MATCHED THEN INSERT (k, v, _incr_metrics_, "
+                 "_metadata_file_path, __metadata_row_index) "
+                 "VALUES (s.k, s.v, s._incr_metrics_, "
+                 "s._metadata_file_path, s.__metadata_row_index)")
+    assert_delta_sql_merge_collect(
+        spark_tmp_path, spark_tmp_table_factory,
+        use_cdf=use_cdf, enable_deletion_vectors=False,
+        src_table_func=src_table_func, dest_table_func=dest_table_func,
+        merge_sql=merge_sql, compare_logs=False,
         conf=delta_merge_enabled_conf)
-    expected = with_cpu_session(expected_rows, conf=delta_merge_enabled_conf)
-    assert_equal(expected, actual)
 
 
 # DBR 17.3 exposes nullable row-tracking fields that make low-shuffle planning fall back to the

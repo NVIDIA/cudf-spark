@@ -23,7 +23,7 @@ from pyspark.sql.types import *
 from spark_session import (is_before_spark_320, is_databricks_runtime, spark_version,
                            supports_delta_lake_deletion_vectors, is_before_spark_353,
                            is_spark_400_or_later, is_databricks143,
-                           is_databricks173_or_later, is_spark_41x,
+                           is_databricks173_or_later, is_databricks_version, is_spark_41x,
                            supports_delta_lake_row_tracking)
 
 delta_merge_enabled_conf = copy_and_update(delta_writes_enabled_conf,
@@ -849,8 +849,20 @@ def test_delta_merge_duplicate_source_rows_matched_conditions_db173(
 @pytest.mark.skipif(not is_databricks173_or_later(),
                     reason="Databricks 16.0+ applies WHEN MATCHED conditions when detecting multiple matches")
 @pytest.mark.parametrize("src_rows,merge_sql", _dup_match_rejected_cases)
+@pytest.mark.parametrize("use_low_shuffle", [False, pytest.param(
+    True, marks=pytest.mark.skipif(not is_databricks_version(17, 3),
+                                  reason="GPU low shuffle merge requires DBR 17.3"))], ids=idfn)
 def test_delta_merge_duplicate_source_rows_ambiguous_error_db173(
-        spark_tmp_path, spark_tmp_table_factory, src_rows, merge_sql):
+        spark_tmp_path, spark_tmp_table_factory, src_rows, merge_sql, use_low_shuffle):
+    conf = copy_and_update(delta_merge_no_cpu_bridge_conf,
+                          {"spark.rapids.sql.delta.lowShuffleMerge.enabled":
+                               str(use_low_shuffle).lower()})
+    if use_low_shuffle:
+        conf.update({
+            "spark.rapids.sql.test.delta.lowShuffleMerge.failOnFallback": "true",
+            "spark.rapids.sql.format.parquet.reader.type": "PERFILE",
+            "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
+            "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true"})
     src_table = spark_tmp_table_factory.get()
 
     def do_merge(spark):
@@ -868,7 +880,7 @@ def test_delta_merge_duplicate_source_rows_ambiguous_error_db173(
 
     assert_gpu_and_cpu_error(
         do_merge,
-        conf=delta_merge_no_cpu_bridge_conf,
+        conf=conf,
         error_message="DELTA_MULTIPLE_SOURCE_ROW_MATCHING_TARGET_ROW_IN_MERGE")
 
 
