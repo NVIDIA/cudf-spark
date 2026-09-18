@@ -326,6 +326,9 @@ case class InsertIntoHadoopFsRelationCommandMeta(
 
   private var fileFormat: Option[ColumnarFileFormat] = None
 
+  override def checkTimeZone(): Boolean =
+    !GpuOrcFileFormat.isSparkOrcFormat(cmd.fileFormat.getClass)
+
   override def tagSelfForGpuInternal(): Unit = {
     if (BucketingUtilsShim.isHiveHashBucketing(cmd.options)) {
       BucketingUtilsShim.tagForHiveBucketingWrite(this, cmd.bucketSpec, cmd.outputColumns,
