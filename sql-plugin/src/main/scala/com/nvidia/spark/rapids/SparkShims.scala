@@ -61,6 +61,8 @@ trait SparkShims {
     case _ => false
   }
 
+  def canonicalizeArraySortComparator(expr: Expression): Expression = expr.canonicalized
+
   def isExpressionStateful(expr: Expression): Boolean = false
 
   def getParquetFilters(

@@ -27,10 +27,13 @@ import com.nvidia.spark.rapids.BoolUtils.isAllValidTrue
 import com.nvidia.spark.rapids.GpuListUtils
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.jni.{GpuListSliceUtils, MapUtils, StringUtils}
-import com.nvidia.spark.rapids.shims.{GetSequenceSize, NullIntolerantShim, ShimExpression}
+import com.nvidia.spark.rapids.shims.{GetSequenceSize, NullIntolerantShim, ShimExpression,
+  SparkShimImpl}
 
 import org.apache.spark.sql.catalyst.analysis.{TypeCheckResult, TypeCoercion}
-import org.apache.spark.sql.catalyst.expressions.{ArraySort, ElementAt, ExpectsInputTypes, Expression, ImplicitCastInputTypes, LambdaFunction, NamedExpression, RowOrdering, Sequence, TimeZoneAwareExpression}
+import org.apache.spark.sql.catalyst.expressions.{ArraySort, ElementAt, ExpectsInputTypes, Expression,
+  ImplicitCastInputTypes, LambdaFunction, NamedExpression, RowOrdering, Sequence,
+  TimeZoneAwareExpression}
 import org.apache.spark.sql.catalyst.trees.{CurrentOrigin, Origin}
 import org.apache.spark.sql.catalyst.util.{GenericArrayData, TypeUtils}
 import org.apache.spark.sql.internal.SQLConf
@@ -899,7 +902,8 @@ object GpuArraySort {
   /** True iff the lambda is array_sort's default comparator (ascending, nulls last). */
   def isDefaultComparator(arraySort: ArraySort): Boolean = arraySort.function match {
     case LambdaFunction(body, Seq(left, right), _) =>
-      body.canonicalized == ArraySort.comparator(left, right).canonicalized
+      SparkShimImpl.canonicalizeArraySortComparator(body) ==
+        SparkShimImpl.canonicalizeArraySortComparator(ArraySort.comparator(left, right))
     case _ => false
   }
 }
