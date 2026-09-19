@@ -41,7 +41,7 @@ def write_jar(path, entries):
 
 
 def artifact_path(base_dir, artifact, buildver):
-    artifact_id = "rapids-4-spark-%s_2.13" % artifact
+    artifact_id = "cudf-spark-%s_2.13" % artifact
     return (base_dir / artifact / "target" / ("spark%s" % buildver) /
             ("%s-1.0-spark%s.jar" % (artifact_id, buildver)))
 

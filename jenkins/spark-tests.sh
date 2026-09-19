@@ -104,28 +104,28 @@ EOF
 }
 
 rm -rf $ARTF_ROOT && mkdir -p $ARTF_ROOT
-$WGET_CMD $PROJECT_TEST_REPO/com/nvidia/rapids-4-spark-integration-tests_$SCALA_BINARY_VER/$PROJECT_TEST_VER/rapids-4-spark-integration-tests_$SCALA_BINARY_VER-$PROJECT_TEST_VER-${SHUFFLE_SPARK_SHIM}.jar
+$WGET_CMD $PROJECT_TEST_REPO/com/nvidia/cudf-spark-integration-tests_$SCALA_BINARY_VER/$PROJECT_TEST_VER/cudf-spark-integration-tests_$SCALA_BINARY_VER-$PROJECT_TEST_VER-${SHUFFLE_SPARK_SHIM}.jar
 
 CLASSIFIER=${CLASSIFIER:-"$CUDA_CLASSIFIER"} # default as CUDA_CLASSIFIER for compatibility
 if [ "$CLASSIFIER"x == x ];then
-    $WGET_CMD $PROJECT_REPO/com/nvidia/rapids-4-spark_$SCALA_BINARY_VER/$PROJECT_VER/rapids-4-spark_$SCALA_BINARY_VER-${PROJECT_VER}.jar
-    export RAPIDS_PLUGIN_JAR=$ARTF_ROOT/rapids-4-spark_${SCALA_BINARY_VER}-${PROJECT_VER}.jar
+    $WGET_CMD $PROJECT_REPO/com/nvidia/cudf-spark_$SCALA_BINARY_VER/$PROJECT_VER/cudf-spark_$SCALA_BINARY_VER-${PROJECT_VER}.jar
+    export RAPIDS_PLUGIN_JAR=$ARTF_ROOT/cudf-spark_${SCALA_BINARY_VER}-${PROJECT_VER}.jar
 else
-    $WGET_CMD $PROJECT_REPO/com/nvidia/rapids-4-spark_$SCALA_BINARY_VER/$PROJECT_VER/rapids-4-spark_$SCALA_BINARY_VER-$PROJECT_VER-${CLASSIFIER}.jar
-    export RAPIDS_PLUGIN_JAR="$ARTF_ROOT/rapids-4-spark_${SCALA_BINARY_VER}-$PROJECT_VER-${CLASSIFIER}.jar"
+    $WGET_CMD $PROJECT_REPO/com/nvidia/cudf-spark_$SCALA_BINARY_VER/$PROJECT_VER/cudf-spark_$SCALA_BINARY_VER-$PROJECT_VER-${CLASSIFIER}.jar
+    export RAPIDS_PLUGIN_JAR="$ARTF_ROOT/cudf-spark_${SCALA_BINARY_VER}-$PROJECT_VER-${CLASSIFIER}.jar"
 fi
-RAPIDS_TEST_JAR="$ARTF_ROOT/rapids-4-spark-integration-tests_${SCALA_BINARY_VER}-$PROJECT_TEST_VER-$SHUFFLE_SPARK_SHIM.jar"
+RAPIDS_TEST_JAR="$ARTF_ROOT/cudf-spark-integration-tests_${SCALA_BINARY_VER}-$PROJECT_TEST_VER-$SHUFFLE_SPARK_SHIM.jar"
 
 export INCLUDE_SPARK_AVRO_JAR=${INCLUDE_SPARK_AVRO_JAR:-"true"}
 if [[ "${INCLUDE_SPARK_AVRO_JAR}" == "true" ]]; then
   $WGET_CMD $SPARK_REPO/org/apache/spark/spark-avro_$SCALA_BINARY_VER/$SPARK_VER/spark-avro_$SCALA_BINARY_VER-${SPARK_VER}.jar
 fi
 
-$WGET_CMD $PROJECT_TEST_REPO/com/nvidia/rapids-4-spark-integration-tests_$SCALA_BINARY_VER/$PROJECT_TEST_VER/rapids-4-spark-integration-tests_$SCALA_BINARY_VER-$PROJECT_TEST_VER-pytest.tar.gz
+$WGET_CMD $PROJECT_TEST_REPO/com/nvidia/cudf-spark-integration-tests_$SCALA_BINARY_VER/$PROJECT_TEST_VER/cudf-spark-integration-tests_$SCALA_BINARY_VER-$PROJECT_TEST_VER-pytest.tar.gz
 
 RAPIDS_INT_TESTS_HOME="$ARTF_ROOT/integration_tests/"
 # The version of pytest.tar.gz that is uploaded is the one built against spark330 but its being pushed without classifier for now
-RAPIDS_INT_TESTS_TGZ="$ARTF_ROOT/rapids-4-spark-integration-tests_${SCALA_BINARY_VER}-$PROJECT_TEST_VER-pytest.tar.gz"
+RAPIDS_INT_TESTS_TGZ="$ARTF_ROOT/cudf-spark-integration-tests_${SCALA_BINARY_VER}-$PROJECT_TEST_VER-pytest.tar.gz"
 
 tmp_info=${TMP_INFO_FILE:-'/tmp/artifacts-build.info'}
 rm -rf "$tmp_info"
@@ -146,11 +146,11 @@ getRevision() {
 
 set +x
 echo -e "\n==================== ARTIFACTS BUILD INFO ====================\n" >> "$tmp_info"
-echo "-------------------- rapids-4-spark BUILD INFO --------------------" >> "$tmp_info"
+echo "-------------------- cudf-spark BUILD INFO --------------------" >> "$tmp_info"
 p_ver=$(getRevision $RAPIDS_PLUGIN_JAR rapids4spark-version-info.properties)
-echo "-------------------- rapids-4-spark-integration-tests BUILD INFO --------------------" >> "$tmp_info"
+echo "-------------------- cudf-spark-integration-tests BUILD INFO --------------------" >> "$tmp_info"
 it_ver=$(getRevision $RAPIDS_TEST_JAR rapids4spark-version-info.properties)
-echo "-------------------- rapids-4-spark-integration-tests pytest BUILD INFO --------------------" >> "$tmp_info"
+echo "-------------------- cudf-spark-integration-tests pytest BUILD INFO --------------------" >> "$tmp_info"
 pt_ver=$(getRevision $RAPIDS_INT_TESTS_TGZ integration_tests/rapids4spark-version-info.properties)
 echo -e "\n==================== ARTIFACTS BUILD INFO ====================\n" >> "$tmp_info"
 set -x
@@ -626,7 +626,7 @@ if [[ $TEST_MODE == "DEFAULT" ]]; then
     # Add the ivysettings.xml file to support --packages downloads from Artifactory using credentials
     # Set the HOST_NAME variable for ivysettings.xml (e.g., from https://usr:psw@HOST_NAME/path/to/repo)
     SPARK_SHELL_SMOKE_TEST=1 HOST_NAME=$PROJECT_REPO_HOST \
-    PYSP_TEST_spark_jars_packages=com.nvidia:rapids-4-spark_${SCALA_BINARY_VER}:${PROJECT_VER} \
+    PYSP_TEST_spark_jars_packages=com.nvidia:cudf-spark_${SCALA_BINARY_VER}:${PROJECT_VER} \
     PYSP_TEST_spark_jars_repositories=${PROJECT_REPO} \
     PYSP_TEST_spark_jars_ivySettings=${WORKSPACE}/jenkins/ivysettings.xml \
       ./run_pyspark_from_build.sh

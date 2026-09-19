@@ -22,12 +22,12 @@
 
     <parent>
         <groupId>com.nvidia</groupId>
-        <artifactId>rapids-4-spark-parent_2.13</artifactId>
+        <artifactId>cudf-spark-parent_2.13</artifactId>
         <version>26.10.0-SNAPSHOT</version>
         <relativePath>../../pom.xml</relativePath>
     </parent>
 
-    <artifactId>rapids-4-spark-delta-40x_2.13</artifactId>
+    <artifactId>cudf-spark-delta-40x_2.13</artifactId>
     <name>RAPIDS Accelerator for Apache Spark Delta Lake 4.0.x Support</name>
     <version>26.10.0-SNAPSHOT</version>
 
@@ -45,7 +45,7 @@
         </dependency>
         <dependency>
             <groupId>com.nvidia</groupId>
-            <artifactId>rapids-4-spark-sql_${scala.binary.version}</artifactId>
+            <artifactId>cudf-spark-sql_${scala.binary.version}</artifactId>
             <classifier>${spark.version.classifier}</classifier>
         </dependency>
         <dependency>
