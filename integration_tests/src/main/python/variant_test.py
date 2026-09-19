@@ -63,6 +63,21 @@ def _write_variant_parquet(spark, path):
     """).write.mode('overwrite').parquet(path)
 
 
+def _write_array_variant_parquet(spark, path):
+    spark.sql("""
+      SELECT id, parse_json(json) AS v
+      FROM VALUES
+        (0, '{"items":[{"sku":"a","qty":1},{"sku":"b","qty":2}],"matrix":[[10,11],[20]]}'),
+        (1, '{"items":[],"matrix":[]}'),
+        (2, '{"items":[null],"matrix":[[30]]}'),
+        (3, '{"items":"wrong container","matrix":40}'),
+        (4, '[{"sku":"root"}]'),
+        (5, 'null'),
+        (6, NULL)
+      AS source(id, json)
+    """).write.mode('overwrite').parquet(path)
+
+
 def _write_heterogeneous_variant_parquet(spark, path):
     spark.sql("""
       SELECT id, parse_json(json) AS v
@@ -493,18 +508,27 @@ def test_parquet_variant_if(spark_tmp_path):
         conf=_variant_parquet_conf)
 
 
-@allow_non_gpu('ProjectExec', 'VariantGet')
 @incompat
+@pytest.mark.parametrize('v1_enabled_list', ['parquet', ''], ids=['v1', 'v2'])
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
-def test_variant_try_get_array_path_falls_back(spark_tmp_path):
-    data_path = spark_tmp_path + '/VARIANT_ARRAY_PATH_FALLBACK_PARQUET'
-    _with_cpu_variant_session(lambda spark: _write_variant_parquet(spark, data_path))
+def test_parquet_variant_try_get_array_paths(spark_tmp_path, v1_enabled_list):
+    data_path = spark_tmp_path + '/VARIANT_ARRAY_PATH_PARQUET'
+    read_conf = dict(_variant_parquet_conf)
+    read_conf['spark.sql.sources.useV1SourceList'] = v1_enabled_list
+    _with_cpu_variant_session(lambda spark: _write_array_variant_parquet(spark, data_path))
 
-    def do_it(spark):
-        return spark.read.parquet(data_path).selectExpr(
-            "try_variant_get(v, '$.arr[0]', 'int') AS first_value")
-
-    assert_gpu_fallback_collect(do_it, 'VariantGet', conf=_variant_parquet_conf)
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.read.parquet(data_path).selectExpr(
+            'id',
+            "try_variant_get(v, '$.items[0].sku', 'string') AS first_sku",
+            "try_variant_get(v, '$.items[1].qty', 'bigint') AS second_qty",
+            "try_variant_get(v, '$.matrix[0][1]', 'int') AS matrix_value",
+            "try_variant_get(v, '$[0].sku', 'string') AS root_sku",
+            "try_variant_get(v, '$.items[99].sku', 'string') AS out_of_bounds",
+            "try_variant_get(v, '$.items[0][0]', 'int') AS wrong_container")
+            .orderBy('id'),
+        exist_classes='GpuVariantGet',
+        conf=read_conf)
 
 
 @allow_non_gpu('ProjectExec', 'VariantGet')
