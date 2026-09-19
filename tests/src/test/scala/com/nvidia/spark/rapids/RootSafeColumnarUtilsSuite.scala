@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,23 +13,24 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package com.nvidia.spark.rapids
 
-import ai.rapids.cudf.ColumnView
+import ai.rapids.cudf.ColumnVector
 import com.nvidia.spark.rapids.Arm.withResource
+import org.scalatest.funsuite.AnyFunSuite
 
-object ColumnViewUtils {
-  /**
-   * Get the `toString` on the scalar element at the specified row index in a column view.
-   * E.g., returns: Scalar{type=INT32 value=-1250858453} (ID: 143 7149580cdd60)
-   */
-  def getElementStringFromColumnView(cv: ColumnView, rowIndex: Int): String = {
-    withResource(cv.getScalarElement(rowIndex)) { scalar =>
-      if (scalar.isValid) {
-        scalar.toString
-      } else {
-        "null"
-      }
+class RootSafeColumnarUtilsSuite extends AnyFunSuite {
+  test("BoolUtils rejects non-boolean columns") {
+    withResource(ColumnVector.fromInts(1)) { col =>
+      assertThrows[IllegalArgumentException](BoolUtils.isAllValidTrue(col))
+      assertThrows[IllegalArgumentException](BoolUtils.isAnyValidTrue(col))
+    }
+  }
+
+  test("GpuListUtils rejects non-list columns") {
+    withResource(ColumnVector.fromInts(1)) { col =>
+      assertThrows[IllegalArgumentException](GpuListUtils.replaceListDataColumnAsView(col, col))
     }
   }
 }
