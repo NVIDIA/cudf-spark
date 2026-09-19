@@ -15,50 +15,32 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "330"}
-{"spark": "330db"}
-{"spark": "331"}
-{"spark": "332"}
-{"spark": "332db"}
-{"spark": "333"}
-{"spark": "334"}
-{"spark": "340"}
-{"spark": "341"}
-{"spark": "342"}
-{"spark": "343"}
-{"spark": "344"}
-{"spark": "350"}
-{"spark": "350db143"}
-{"spark": "351"}
-{"spark": "352"}
-{"spark": "353"}
-{"spark": "354"}
-{"spark": "355"}
-{"spark": "356"}
-{"spark": "357"}
-{"spark": "358"}
-{"spark": "359"}
+{"spark": "400"}
+{"spark": "400db173"}
+{"spark": "401"}
+{"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
 
 import org.apache.hadoop.conf.Configuration
 
+import org.apache.spark.sql.execution.datasources.VariantMetadata
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.DataType
 
 /**
- * Shim for Parquet variant-related configurations.
- * In Spark <= 4.0.x, PARQUET_ANNOTATE_VARIANT_LOGICAL_TYPE doesn't exist.
- * In Spark 4.1.0+, we need to set this configuration for ParquetWriteSupport.
+ * Shim for Parquet variant-related configurations in Spark 4.0.x.
  */
 object ParquetVariantShims {
   def setupParquetVariantConfig(conf: Configuration, sqlConf: SQLConf): Unit = {
-    // No-op for Spark versions before 4.1.0
-    // PARQUET_ANNOTATE_VARIANT_LOGICAL_TYPE doesn't exist
+    // No-op because PARQUET_ANNOTATE_VARIANT_LOGICAL_TYPE does not exist in Spark 4.0.x.
   }
 
-  def isPushedVariantStruct(_dataType: DataType): Boolean = false
+  def isPushedVariantStruct(dataType: DataType): Boolean =
+    VariantMetadata.isVariantStruct(dataType)
 
   def isPotentiallyShreddedVariant(_dataType: DataType, _sqlConf: SQLConf): Boolean = false
 }

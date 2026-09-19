@@ -51,6 +51,8 @@ case class GpuVariantGetMeta(
     rule: DataFromReplacementRule)
   extends BinaryExprMeta[VariantGet](expr, conf, p, rule) {
 
+  override def isTimeZoneSupported: Boolean = true
+
   override def tagExprForGpu(): Unit = {
     if (!GpuColumnVector.isVariantType(expr.child.dataType)) {
       willNotWorkOnGpu(s"input type ${expr.child.dataType.simpleString} is not VariantType")
