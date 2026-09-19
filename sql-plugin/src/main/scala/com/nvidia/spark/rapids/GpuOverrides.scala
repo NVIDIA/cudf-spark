@@ -154,7 +154,7 @@ abstract class ReplacementRule[INPUT <: BASE, BASE, WRAP_TYPE <: RapidsMeta[INPU
 
   override def confKey: String = {
     if (confKeyCache == null) {
-      confKeyCache = "spark.rapids.sql." + confKeyPart + "." + tag.runtimeClass.getSimpleName
+      confKeyCache = "spark.cudf.sql." + confKeyPart + "." + tag.runtimeClass.getSimpleName
     }
     confKeyCache
   }
@@ -1135,7 +1135,7 @@ object GpuOverrides extends Logging {
 
   private final class SortDataFromReplacementRule extends DataFromReplacementRule {
     override val operationName: String = "Exec"
-    override def confKey = "spark.rapids.sql.exec.SortExec"
+    override def confKey = "spark.cudf.sql.exec.SortExec"
 
     override def getChecks: Option[TypeChecks[_]] = None
   }
@@ -1179,8 +1179,8 @@ object GpuOverrides extends Logging {
    * GPUs.
    */
   private def explainCatalystSQLPlan(updatedPlan: SparkPlan, conf: RapidsConf): Unit = {
-    // Since we set "NOT_ON_GPU" as the default value of spark.rapids.sql.explain, here we keep
-    // "ALL" as default value of "explainSetting", unless spark.rapids.sql.explain is changed
+    // Since we set "NOT_ON_GPU" as the default value of spark.cudf.sql.explain, here we keep
+    // "ALL" as default value of "explainSetting", unless spark.cudf.sql.explain is changed
     // by the user.
     val explainSetting = if (conf.shouldExplain &&
       conf.isConfExplicitlySet(RapidsConf.EXPLAIN.key)) {

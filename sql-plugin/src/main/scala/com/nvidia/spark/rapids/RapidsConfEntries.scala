@@ -23,7 +23,7 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
 
   // INTERNAL TEST AND DEBUG CONFIGS
 
-  val TEST_RETRY_OOM_INJECTION_MODE = conf("spark.rapids.sql.test.injectRetryOOM")
+  val TEST_RETRY_OOM_INJECTION_MODE = conf("spark.cudf.sql.test.injectRetryOOM")
     .doc("Only to be used in tests. If `true` the retry iterator will inject a GpuRetryOOM " +
          "or CpuRetryOOM once per invocation. Furthermore an extended config " +
          "`num_ooms=<int>,skip=<int>,type=CPU|GPU|CPU_OR_GPU,split=<bool>` can be provided to " +
@@ -35,14 +35,14 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .stringConf
     .createWithDefault(false.toString)
 
-  val FOLDABLE_NON_LIT_ALLOWED = conf("spark.rapids.sql.test.isFoldableNonLitAllowed")
+  val FOLDABLE_NON_LIT_ALLOWED = conf("spark.cudf.sql.test.isFoldableNonLitAllowed")
     .doc("Only to be used in tests. If `true` the foldable expressions that are not literals " +
       "will be allowed")
     .internal()
     .booleanConf
     .createWithDefault(false)
 
-  val TEST_RETRY_CONTEXT_CHECK_ENABLED = conf("spark.rapids.sql.test.retryContextCheck.enabled")
+  val TEST_RETRY_CONTEXT_CHECK_ENABLED = conf("spark.cudf.sql.test.retryContextCheck.enabled")
     .doc("Only to be used in tests. When set to true, enable the context check for " +
       "GPU nondeterministic expressions but declaring to be retryable. A GPU retryable " +
       "nondeterministic expression should run inside a checkpoint-restore context. And it " +
@@ -51,14 +51,14 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .booleanConf
     .createWithDefault(false)
 
-  val TEST_CONF = conf("spark.rapids.sql.test.enabled")
+  val TEST_CONF = conf("spark.cudf.sql.test.enabled")
     .doc("Intended to be used by unit tests, if enabled all operations must run on the " +
       "GPU or an error happens.")
     .internal()
     .booleanConf
     .createWithDefault(false)
 
-  val TEST_ALLOWED_NONGPU = conf("spark.rapids.sql.test.allowedNonGpu")
+  val TEST_ALLOWED_NONGPU = conf("spark.cudf.sql.test.allowedNonGpu")
     .doc("Comma separate string of exec or expression class names that are allowed " +
       "to not be GPU accelerated for testing.")
     .internal()
@@ -66,7 +66,7 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .toSequence
     .createWithDefault(Nil)
 
-  val TEST_VALIDATE_EXECS_ONGPU = conf("spark.rapids.sql.test.validateExecsInGpuPlan")
+  val TEST_VALIDATE_EXECS_ONGPU = conf("spark.cudf.sql.test.validateExecsInGpuPlan")
     .doc("Comma separate string of exec class names to validate they " +
       "are GPU accelerated. Used for testing.")
     .internal()
@@ -74,7 +74,7 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .toSequence
     .createWithDefault(Nil)
 
-  val HASH_SUB_PARTITION_TEST_ENABLED = conf("spark.rapids.sql.test.subPartitioning.enabled")
+  val HASH_SUB_PARTITION_TEST_ENABLED = conf("spark.cudf.sql.test.subPartitioning.enabled")
     .doc("Setting to true will force hash joins to use the sub-partitioning algorithm if " +
       s"${TEST_CONF.key} is also enabled, while false means always disabling it. This is " +
       "intended for tests. Do not set any value under production environments, since it " +
@@ -84,13 +84,13 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .booleanConf
     .createOptional
 
-  val LOG_TRANSFORMATIONS = conf("spark.rapids.sql.debug.logTransformations")
+  val LOG_TRANSFORMATIONS = conf("spark.cudf.sql.debug.logTransformations")
     .doc("When enabled, all query transformations will be logged.")
     .internal()
     .booleanConf
     .createWithDefault(false)
 
-  val OUTPUT_DEBUG_DUMP_PREFIX = conf("spark.rapids.sql.output.debug.dumpPrefix")
+  val OUTPUT_DEBUG_DUMP_PREFIX = conf("spark.cudf.sql.output.debug.dumpPrefix")
     .doc("A path prefix where data that is intended to be written out as the result " +
       "of a query should be dumped for debugging. The format of this is based on " +
       "JCudfSerialization and is trying to capture the underlying table so that if " +
@@ -99,46 +99,46 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .stringConf
     .createOptional
 
-  val PARQUET_DEBUG_DUMP_PREFIX = conf("spark.rapids.sql.parquet.debug.dumpPrefix")
+  val PARQUET_DEBUG_DUMP_PREFIX = conf("spark.cudf.sql.parquet.debug.dumpPrefix")
     .doc("A path prefix where Parquet split file data is dumped for debugging.")
     .internal()
     .stringConf
     .createOptional
 
-  val PARQUET_DEBUG_DUMP_ALWAYS = conf("spark.rapids.sql.parquet.debug.dumpAlways")
+  val PARQUET_DEBUG_DUMP_ALWAYS = conf("spark.cudf.sql.parquet.debug.dumpAlways")
     .doc(s"This only has an effect if $PARQUET_DEBUG_DUMP_PREFIX is set. If true then " +
       "Parquet data is dumped for every read operation otherwise only on a read error.")
     .internal()
     .booleanConf
     .createWithDefault(false)
 
-  val ORC_DEBUG_DUMP_PREFIX = conf("spark.rapids.sql.orc.debug.dumpPrefix")
+  val ORC_DEBUG_DUMP_PREFIX = conf("spark.cudf.sql.orc.debug.dumpPrefix")
     .doc("A path prefix where ORC split file data is dumped for debugging.")
     .internal()
     .stringConf
     .createOptional
 
-  val ORC_DEBUG_DUMP_ALWAYS = conf("spark.rapids.sql.orc.debug.dumpAlways")
+  val ORC_DEBUG_DUMP_ALWAYS = conf("spark.cudf.sql.orc.debug.dumpAlways")
     .doc(s"This only has an effect if $ORC_DEBUG_DUMP_PREFIX is set. If true then " +
       "ORC data is dumped for every read operation otherwise only on a read error.")
     .internal()
     .booleanConf
     .createWithDefault(false)
 
-  val AVRO_DEBUG_DUMP_PREFIX = conf("spark.rapids.sql.avro.debug.dumpPrefix")
+  val AVRO_DEBUG_DUMP_PREFIX = conf("spark.cudf.sql.avro.debug.dumpPrefix")
     .doc("A path prefix where AVRO split file data is dumped for debugging.")
     .internal()
     .stringConf
     .createOptional
 
-  val AVRO_DEBUG_DUMP_ALWAYS = conf("spark.rapids.sql.avro.debug.dumpAlways")
+  val AVRO_DEBUG_DUMP_ALWAYS = conf("spark.cudf.sql.avro.debug.dumpAlways")
     .doc(s"This only has an effect if $AVRO_DEBUG_DUMP_PREFIX is set. If true then " +
       "Avro data is dumped for every read operation otherwise only on a read error.")
     .internal()
     .booleanConf
     .createWithDefault(false)
 
-  val HASH_AGG_REPLACE_MODE = conf("spark.rapids.sql.hashAgg.replaceMode")
+  val HASH_AGG_REPLACE_MODE = conf("spark.cudf.sql.hashAgg.replaceMode")
     .doc("Only when hash aggregate exec has these modes (\"all\" by default): " +
       "\"all\" (try to replace all aggregates, default), " +
       "\"complete\" (exclusively replace complete aggregates), " +
@@ -149,13 +149,13 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .stringConf
     .createWithDefault("all")
 
-  val PARTIAL_MERGE_DISTINCT_ENABLED = conf("spark.rapids.sql.partialMerge.distinct.enabled")
+  val PARTIAL_MERGE_DISTINCT_ENABLED = conf("spark.cudf.sql.partialMerge.distinct.enabled")
     .doc("Enables aggregates that are in PartialMerge mode to run on the GPU if true")
     .internal()
     .booleanConf
     .createWithDefault(true)
 
-  val SHUFFLE_MANAGER_ENABLED = conf("spark.rapids.shuffle.enabled")
+  val SHUFFLE_MANAGER_ENABLED = conf("spark.cudf.shuffle.enabled")
     .doc("Enable or disable the RAPIDS Shuffle Manager implementation at runtime. On supported " +
       "Spark versions, including Spark 4.0.0 and later, the " +
       "[RAPIDS Shuffle Manager](https://docs.nvidia.com/spark-rapids/user-guide/latest" +
@@ -171,7 +171,7 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .booleanConf
     .createWithDefault(true)
 
-  val SHUFFLE_MANAGER_MODE = conf("spark.rapids.shuffle.mode")
+  val SHUFFLE_MANAGER_MODE = conf("spark.cudf.shuffle.mode")
     .doc("RAPIDS Shuffle Manager mode. " +
       "\"MULTITHREADED\": shuffle file writes and reads are parallelized using a thread pool. " +
       "\"UCX\": (requires UCX installation) uses accelerated transports for " +
@@ -183,11 +183,11 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .checkValues(Set("UCX", "CACHE_ONLY", "MULTITHREADED"))
     .createWithDefault("MULTITHREADED")
 
-  val MULTITHREADED_SHUFFLE_SKIP_MERGE = conf("spark.rapids.shuffle.multithreaded.skipMerge")
+  val MULTITHREADED_SHUFFLE_SKIP_MERGE = conf("spark.cudf.shuffle.multithreaded.skipMerge")
     .doc("When using MULTITHREADED shuffle mode, skip merging partial shuffle files and " +
       "instead serve data directly from the MultithreadedShuffleBufferCatalog. " +
       "This avoids I/O overhead from merging but requires: (1) External Shuffle Service (ESS) " +
-      "to be disabled, and (2) spark.rapids.memory.host.offHeapLimit.enabled=true (off-heap " +
+      "to be disabled, and (2) spark.cudf.memory.host.offHeapLimit.enabled=true (off-heap " +
       "memory limits enabled) to prevent OOM from unbounded buffer growth. " +
       "When set to false (default), partial files will be merged into a single " +
       "shuffle file per map task as in standard Spark shuffle. " +
@@ -197,14 +197,14 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .booleanConf
     .createWithDefault(false)
 
-  val SHUFFLE_TRANSPORT_EARLY_START = conf("spark.rapids.shuffle.transport.earlyStart")
+  val SHUFFLE_TRANSPORT_EARLY_START = conf("spark.cudf.shuffle.transport.earlyStart")
     .doc("Enable early connection establishment for RAPIDS Shuffle")
     .startupOnly()
     .booleanConf
     .createWithDefault(true)
 
   val SHUFFLE_TRANSPORT_EARLY_START_HEARTBEAT_INTERVAL =
-    conf("spark.rapids.shuffle.transport.earlyStart.heartbeatInterval")
+    conf("spark.cudf.shuffle.transport.earlyStart.heartbeatInterval")
       .doc("Shuffle early start heartbeat interval (milliseconds). " +
         "Executors will send a heartbeat RPC message to the driver at this interval")
       .startupOnly()
@@ -212,7 +212,7 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
       .createWithDefault(5000)
 
   val SHUFFLE_TRANSPORT_EARLY_START_HEARTBEAT_TIMEOUT =
-    conf("spark.rapids.shuffle.transport.earlyStart.heartbeatTimeout")
+    conf("spark.cudf.shuffle.transport.earlyStart.heartbeatTimeout")
       .doc(s"Shuffle early start heartbeat timeout (milliseconds). " +
         s"Executors that don't heartbeat within this timeout will be considered stale. " +
         s"This timeout must be higher than the value for " +
@@ -221,7 +221,7 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
       .integerConf
       .createWithDefault(10000)
 
-  val SHUFFLE_TRANSPORT_CLASS_NAME = conf("spark.rapids.shuffle.transport.class")
+  val SHUFFLE_TRANSPORT_CLASS_NAME = conf("spark.cudf.shuffle.transport.class")
     .doc("The class of the specific RapidsShuffleTransport to use during the shuffle.")
     .internal()
     .startupOnly()
@@ -229,7 +229,7 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .createWithDefault("com.nvidia.spark.rapids.shuffle.ucx.UCXShuffleTransport")
 
   val SHUFFLE_TRANSPORT_MAX_RECEIVE_INFLIGHT_BYTES =
-    conf("spark.rapids.shuffle.transport.maxReceiveInflightBytes")
+    conf("spark.cudf.shuffle.transport.maxReceiveInflightBytes")
       .doc("Maximum aggregate amount of bytes that be fetched at any given time from peers " +
         "during shuffle")
       .startupOnly()
@@ -237,7 +237,7 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
       .createWithDefault(1024 * 1024 * 1024)
 
   val SHUFFLE_UCX_ACTIVE_MESSAGES_FORCE_RNDV =
-    conf("spark.rapids.shuffle.ucx.activeMessages.forceRndv")
+    conf("spark.cudf.shuffle.ucx.activeMessages.forceRndv")
       .doc("Set to true to force 'rndv' mode for all UCX Active Messages. " +
         "This should only be required with UCX 1.10.x. UCX 1.11.x deployments should " +
         "set to false.")
@@ -245,35 +245,35 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
       .booleanConf
       .createWithDefault(false)
 
-  val SHUFFLE_UCX_USE_WAKEUP = conf("spark.rapids.shuffle.ucx.useWakeup")
+  val SHUFFLE_UCX_USE_WAKEUP = conf("spark.cudf.shuffle.ucx.useWakeup")
     .doc("When set to true, use UCX's event-based progress (epoll) in order to wake up " +
       "the progress thread when needed, instead of a hot loop.")
     .startupOnly()
     .booleanConf
     .createWithDefault(true)
 
-  val SHUFFLE_UCX_LISTENER_START_PORT = conf("spark.rapids.shuffle.ucx.listenerStartPort")
+  val SHUFFLE_UCX_LISTENER_START_PORT = conf("spark.cudf.shuffle.ucx.listenerStartPort")
     .doc("Starting port to try to bind the UCX listener.")
     .internal()
     .startupOnly()
     .integerConf
     .createWithDefault(0)
 
-  val SHUFFLE_UCX_MGMT_SERVER_HOST = conf("spark.rapids.shuffle.ucx.managementServerHost")
+  val SHUFFLE_UCX_MGMT_SERVER_HOST = conf("spark.cudf.shuffle.ucx.managementServerHost")
     .doc("The host to be used to start the management server")
     .startupOnly()
     .stringConf
     .createWithDefault(null)
 
   val SHUFFLE_UCX_MGMT_CONNECTION_TIMEOUT =
-    conf("spark.rapids.shuffle.ucx.managementConnectionTimeout")
+    conf("spark.cudf.shuffle.ucx.managementConnectionTimeout")
     .doc("The timeout for client connections to a remote peer")
     .internal()
     .startupOnly()
     .integerConf
     .createWithDefault(0)
 
-  val SHUFFLE_UCX_BOUNCE_BUFFERS_SIZE = conf("spark.rapids.shuffle.ucx.bounceBuffers.size")
+  val SHUFFLE_UCX_BOUNCE_BUFFERS_SIZE = conf("spark.cudf.shuffle.ucx.bounceBuffers.size")
     .doc("The size of bounce buffer to use in bytes. Note that this size will be the same " +
       "for device and host memory")
     .internal()
@@ -282,7 +282,7 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .createWithDefault(4 * 1024  * 1024)
 
   val SHUFFLE_UCX_BOUNCE_BUFFERS_DEVICE_COUNT =
-    conf("spark.rapids.shuffle.ucx.bounceBuffers.device.count")
+    conf("spark.cudf.shuffle.ucx.bounceBuffers.device.count")
     .doc("The number of bounce buffers to pre-allocate from device memory")
     .internal()
     .startupOnly()
@@ -290,29 +290,29 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .createWithDefault(32)
 
   val SHUFFLE_UCX_BOUNCE_BUFFERS_HOST_COUNT =
-    conf("spark.rapids.shuffle.ucx.bounceBuffers.host.count")
+    conf("spark.cudf.shuffle.ucx.bounceBuffers.host.count")
     .doc("The number of bounce buffers to pre-allocate from host memory")
     .internal()
     .startupOnly()
     .integerConf
     .createWithDefault(32)
 
-  val SHUFFLE_MAX_CLIENT_THREADS = conf("spark.rapids.shuffle.maxClientThreads")
+  val SHUFFLE_MAX_CLIENT_THREADS = conf("spark.cudf.shuffle.maxClientThreads")
     .doc("The maximum number of threads that the shuffle client should be allowed to start")
     .internal()
     .startupOnly()
     .integerConf
     .createWithDefault(50)
 
-  val SHUFFLE_MAX_CLIENT_TASKS = conf("spark.rapids.shuffle.maxClientTasks")
+  val SHUFFLE_MAX_CLIENT_TASKS = conf("spark.cudf.shuffle.maxClientTasks")
     .doc("The maximum number of tasks shuffle clients will queue before adding threads " +
-      s"(up to spark.rapids.shuffle.maxClientThreads), or slowing down the transport")
+      s"(up to spark.cudf.shuffle.maxClientThreads), or slowing down the transport")
     .internal()
     .startupOnly()
     .integerConf
     .createWithDefault(100)
 
-  val SHUFFLE_CLIENT_THREAD_KEEPALIVE = conf("spark.rapids.shuffle.clientThreadKeepAlive")
+  val SHUFFLE_CLIENT_THREAD_KEEPALIVE = conf("spark.cudf.shuffle.clientThreadKeepAlive")
     .doc("The number of seconds that the ThreadPoolExecutor will allow an idle client " +
       "shuffle thread to stay alive, before reclaiming.")
     .internal()
@@ -320,14 +320,14 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .integerConf
     .createWithDefault(30)
 
-  val SHUFFLE_MAX_SERVER_TASKS = conf("spark.rapids.shuffle.maxServerTasks")
+  val SHUFFLE_MAX_SERVER_TASKS = conf("spark.cudf.shuffle.maxServerTasks")
     .doc("The maximum number of tasks the shuffle server will queue up for its thread")
     .internal()
     .startupOnly()
     .integerConf
     .createWithDefault(1000)
 
-  val SHUFFLE_MAX_METADATA_SIZE = conf("spark.rapids.shuffle.maxMetadataSize")
+  val SHUFFLE_MAX_METADATA_SIZE = conf("spark.cudf.shuffle.maxMetadataSize")
     .doc("The maximum size of a metadata message that the shuffle plugin will keep in its " +
       "direct message pool. ")
     .internal()
@@ -335,7 +335,7 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .bytesConf(ByteUnit.BYTE)
     .createWithDefault(500 * 1024)
 
-  val SHUFFLE_COMPRESSION_CODEC = conf("spark.rapids.shuffle.compression.codec")
+  val SHUFFLE_COMPRESSION_CODEC = conf("spark.cudf.shuffle.compression.codec")
     .doc("The GPU codec used to compress shuffle data when using RAPIDS shuffle. " +
       "Supported codecs: zstd, lz4, copy, none")
     .internal()
@@ -343,7 +343,7 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .stringConf
     .createWithDefault("none")
 
-val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.lz4.chunkSize")
+val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.cudf.shuffle.compression.lz4.chunkSize")
     .doc("A configurable chunk size to use when compressing with LZ4.")
     .internal()
     .startupOnly()
@@ -351,7 +351,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .createWithDefault(64 * 1024)
 
   val SHUFFLE_COMPRESSION_ZSTD_CHUNK_SIZE =
-    conf("spark.rapids.shuffle.compression.zstd.chunkSize")
+    conf("spark.cudf.shuffle.compression.zstd.chunkSize")
       .doc("A configurable chunk size to use when compressing with ZSTD.")
       .internal()
       .startupOnly()
@@ -359,7 +359,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       .createWithDefault(64 * 1024)
 
   val FORCE_HIVE_HASH_FOR_BUCKETED_WRITE =
-    conf("spark.rapids.sql.format.write.forceHiveHashForBucketing")
+    conf("spark.cudf.sql.format.write.forceHiveHashForBucketing")
       .doc("Hive write commands before Spark 330 use Murmur3Hash for bucketed write. " +
         "When enabled, HiveHash will be always used for this instead of Murmur3. This is " +
         "used to align with some customized Spark binaries before 330.")
@@ -368,7 +368,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       .createWithDefault(false)
 
   val SHUFFLE_MULTITHREADED_MAX_BYTES_IN_FLIGHT =
-    conf("spark.rapids.shuffle.multiThreaded.maxBytesInFlight")
+    conf("spark.cudf.shuffle.multiThreaded.maxBytesInFlight")
       .doc(
         "The size limit, in bytes, that the RAPIDS shuffle manager configured in " +
         "\"MULTITHREADED\" mode will allow to be serialized or deserialized concurrently " +
@@ -383,7 +383,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       .createWithDefault(128 * 1024 * 1024)
 
   val SHUFFLE_MULTITHREADED_WRITER_THREADS =
-    conf("spark.rapids.shuffle.multiThreaded.writer.threads")
+    conf("spark.cudf.shuffle.multiThreaded.writer.threads")
       .doc("The number of threads to use for writing shuffle blocks per executor in the " +
           "RAPIDS shuffle manager configured in \"MULTITHREADED\" mode. " +
           "There are two special values: " +
@@ -394,7 +394,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       .createWithDefault(20)
 
   val SHUFFLE_PARTITIONING_MAX_CPU_BATCH_SIZE =
-    conf("spark.rapids.shuffle.partitioning.maxCpuBatchSize")
+    conf("spark.cudf.shuffle.partitioning.maxCpuBatchSize")
       .doc("The maximum size of a sliced batch output to the CPU side " +
         "when GPU partitioning shuffle data. This can be used to limit the peak on-heap memory " +
         "used by CPU to serialize the shuffle data, especially for skew data cases. " +
@@ -408,7 +408,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       .createWithDefault(2147483639L - 2048L)
 
   val SHUFFLE_MULTITHREADED_READER_THREADS =
-    conf("spark.rapids.shuffle.multiThreaded.reader.threads")
+    conf("spark.cudf.shuffle.multiThreaded.reader.threads")
         .doc("The number of threads to use for reading shuffle blocks per executor in the " +
             "RAPIDS shuffle manager configured in \"MULTITHREADED\" mode. " +
             "There are two special values: " +
@@ -418,14 +418,14 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
         .integerConf
         .createWithDefault(20)
 
-  val SHUFFLE_KUDO_SERIALIZER_ENABLED = conf("spark.rapids.shuffle.kudo.serializer.enabled")
+  val SHUFFLE_KUDO_SERIALIZER_ENABLED = conf("spark.cudf.shuffle.kudo.serializer.enabled")
     .doc("Enable or disable the Kudo serializer for the shuffle.")
     .internal()
     .startupOnly()
     .booleanConf
     .createWithDefault(true)
 
-  val SHUFFLE_KUDO_WRITE_MODE = conf("spark.rapids.shuffle.kudo.serializer.write.mode")
+  val SHUFFLE_KUDO_WRITE_MODE = conf("spark.cudf.shuffle.kudo.serializer.write.mode")
     .doc("Kudo serializer mode. " +
       "\"CPU\": serialize shuffle outputs on the cpu. " +
       "\"GPU\": serialize shuffle outputs on the gpu. ")
@@ -434,7 +434,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .stringConf
     .createWithDefault("CPU")
 
-  val SHUFFLE_KUDO_READ_MODE = conf("spark.rapids.shuffle.kudo.serializer.read.mode")
+  val SHUFFLE_KUDO_READ_MODE = conf("spark.cudf.shuffle.kudo.serializer.read.mode")
     .doc("Kudo serializer read mode. " +
       "\"CPU\": deserialize shuffle inputs on the cpu. " +
       "\"GPU\": deserialize shuffle inputs on the gpu. ")
@@ -444,16 +444,16 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .createWithDefault("GPU")
 
   val SHUFFLE_KUDO_SERIALIZER_MEASURE_BUFFER_COPY_ENABLED =
-    conf("spark.rapids.shuffle.kudo.serializer.measure.buffer.copy.enabled")
+    conf("spark.cudf.shuffle.kudo.serializer.measure.buffer.copy.enabled")
     .doc("Enable or disable measuring buffer copy time when using Kudo serializer for the shuffle.")
     .internal()
     .startupOnly()
     .booleanConf
     .createWithDefault(false)
 
-  val SHUFFLE_ASYNC_READ_ENABLED = conf("spark.rapids.sql.asyncRead.shuffle.enabled")
+  val SHUFFLE_ASYNC_READ_ENABLED = conf("spark.cudf.sql.asyncRead.shuffle.enabled")
     .doc("Enable or disable the asynchronous read for Shuffle. If you turn this on you should " +
-      "also consider increasing spark.rapids.sql.asyncRead.maxInFlightHostMemoryBytes so that " +
+      "also consider increasing spark.cudf.sql.asyncRead.maxInFlightHostMemoryBytes so that " +
       "async threads won't be blocked by the memory limit. If By default this in off now.")
     .internal()
     .startupOnly()
@@ -464,9 +464,9 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
   private val KudoDebugModes =
     DumpOption.values.map(_.toString.toUpperCase(java.util.Locale.ROOT)).toSet
 
-  val SHUFFLE_KUDO_SERIALIZER_DEBUG_MODE = conf("spark.rapids.shuffle.kudo.serializer.debug.mode")
+  val SHUFFLE_KUDO_SERIALIZER_DEBUG_MODE = conf("spark.cudf.shuffle.kudo.serializer.debug.mode")
     .doc("Debug mode for Kudo serializer for the shuffle. If Always, it will dump the " +
-      "kudo tables to a file in spark.rapids.shuffle.kudo.serializer.debug.dump.path.prefix. " +
+      "kudo tables to a file in spark.cudf.shuffle.kudo.serializer.debug.dump.path.prefix. " +
       "If Never, it will not dump the kudo tables data. If OnFailure, it will only dump the " +
       "kudo tables data when the shuffle fails.")
     .internal()
@@ -477,7 +477,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .createWithDefault("NEVER")
 
   val SHUFFLE_KUDO_SERIALIZER_DEBUG_DUMP_PREFIX =
-    conf("spark.rapids.shuffle.kudo.serializer.debug.dump.path.prefix")
+    conf("spark.cudf.shuffle.kudo.serializer.debug.dump.path.prefix")
     .doc("The path prefix to use for the kudo tables when using Kudo serializer for the shuffle.")
     .internal()
     .startupOnly()
@@ -487,12 +487,12 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
   // USER FACING DEBUG CONFIGS
 
   val SHUFFLE_COMPRESSION_MAX_BATCH_MEMORY =
-    conf("spark.rapids.shuffle.compression.maxBatchMemory")
+    conf("spark.cudf.shuffle.compression.maxBatchMemory")
       .internal()
       .bytesConf(ByteUnit.BYTE)
       .createWithDefault(1024 * 1024 * 1024)
 
-  val EXPLAIN = conf("spark.rapids.sql.explain")
+  val EXPLAIN = conf("spark.cudf.sql.explain")
     .doc("Explain why some parts of a query were not placed on a GPU or not. Possible " +
       "values are ALL: print everything, NONE: print nothing, NOT_ON_GPU: print only parts of " +
       "a query that did not go on the GPU. ALL is intended only for debugging and can generate " +
@@ -503,7 +503,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .stringConf
     .createWithDefault("NOT_ON_GPU")
 
-  val SHIMS_PROVIDER_OVERRIDE = conf("spark.rapids.shims-provider-override")
+  val SHIMS_PROVIDER_OVERRIDE = conf("spark.cudf.shims-provider-override")
     .internal()
     .startupOnly()
     .doc("Overrides the automatic Spark shim detection logic and forces a specific shims " +
@@ -522,7 +522,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .stringConf
     .createOptional
 
-  val CUDF_VERSION_OVERRIDE = conf("spark.rapids.cudfVersionOverride")
+  val CUDF_VERSION_OVERRIDE = conf("spark.cudf.cudfVersionOverride")
     .internal()
     .startupOnly()
     .doc("Overrides the cudf version compatibility check between cudf jar and cuDF plugin " +
@@ -531,7 +531,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .booleanConf
     .createWithDefault(false)
 
-  val ALLOW_MULTIPLE_JARS = conf("spark.rapids.sql.allowMultipleJars")
+  val ALLOW_MULTIPLE_JARS = conf("spark.cudf.sql.allowMultipleJars")
     .startupOnly()
     .doc("Allow multiple rapids-4-spark, cudf-spark-jni, and cudf jars on the classpath. " +
       "Spark will take the first one it finds, so the version may not be expected. Possible " +
@@ -542,7 +542,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .checkValues(Set("ALWAYS", "SAME_REVISION", "NEVER"))
     .createWithDefault("SAME_REVISION")
 
-  val ALLOW_DISABLE_ENTIRE_PLAN = conf("spark.rapids.allowDisableEntirePlan")
+  val ALLOW_DISABLE_ENTIRE_PLAN = conf("spark.cudf.allowDisableEntirePlan")
     .internal()
     .doc("The plugin has the ability to detect possibe incompatibility with some specific " +
       "queries and cluster configurations. In those cases the plugin will disable GPU support " +
@@ -551,7 +551,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .booleanConf
     .createWithDefault(true)
 
-  val OPTIMIZER_ENABLED = conf("spark.rapids.sql.optimizer.enabled")
+  val OPTIMIZER_ENABLED = conf("spark.cudf.sql.optimizer.enabled")
       .internal()
       .doc("Enable cost-based optimizer that will attempt to avoid " +
           "transitions to GPU for operations that will not result in improved performance " +
@@ -559,80 +559,80 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       .booleanConf
       .createWithDefault(false)
 
-  val OPTIMIZER_EXPLAIN = conf("spark.rapids.sql.optimizer.explain")
+  val OPTIMIZER_EXPLAIN = conf("spark.cudf.sql.optimizer.explain")
       .internal()
       .doc("Explain why some parts of a query were not placed on a GPU due to " +
           "optimization rules. Possible values are ALL: print everything, NONE: print nothing")
       .stringConf
       .createWithDefault("NONE")
 
-  val OPTIMIZER_DEFAULT_ROW_COUNT = conf("spark.rapids.sql.optimizer.defaultRowCount")
+  val OPTIMIZER_DEFAULT_ROW_COUNT = conf("spark.cudf.sql.optimizer.defaultRowCount")
     .internal()
     .doc("The cost-based optimizer uses estimated row counts to calculate costs and sometimes " +
       "there is no row count available so we need a default assumption to use in this case")
     .longConf
     .createWithDefault(1000000)
 
-  val OPTIMIZER_CLASS_NAME = conf("spark.rapids.sql.optimizer.className")
+  val OPTIMIZER_CLASS_NAME = conf("spark.cudf.sql.optimizer.className")
     .internal()
     .doc("Optimizer implementation class name. The class must implement the " +
       "com.nvidia.spark.rapids.Optimizer trait")
     .stringConf
     .createWithDefault("com.nvidia.spark.rapids.CostBasedOptimizer")
 
-  val OPTIMIZER_DEFAULT_CPU_OPERATOR_COST = conf("spark.rapids.sql.optimizer.cpu.exec.default")
+  val OPTIMIZER_DEFAULT_CPU_OPERATOR_COST = conf("spark.cudf.sql.optimizer.cpu.exec.default")
     .internal()
     .doc("Default per-row CPU cost of executing an operator, in seconds")
     .doubleConf
     .createWithDefault(0.0002)
 
-  val OPTIMIZER_DEFAULT_CPU_EXPRESSION_COST = conf("spark.rapids.sql.optimizer.cpu.expr.default")
+  val OPTIMIZER_DEFAULT_CPU_EXPRESSION_COST = conf("spark.cudf.sql.optimizer.cpu.expr.default")
     .internal()
     .doc("Default per-row CPU cost of evaluating an expression, in seconds")
     .doubleConf
     .createWithDefault(0.0)
 
-  val OPTIMIZER_DEFAULT_GPU_OPERATOR_COST = conf("spark.rapids.sql.optimizer.gpu.exec.default")
+  val OPTIMIZER_DEFAULT_GPU_OPERATOR_COST = conf("spark.cudf.sql.optimizer.gpu.exec.default")
       .internal()
       .doc("Default per-row GPU cost of executing an operator, in seconds")
       .doubleConf
       .createWithDefault(0.0001)
 
-  val OPTIMIZER_DEFAULT_GPU_EXPRESSION_COST = conf("spark.rapids.sql.optimizer.gpu.expr.default")
+  val OPTIMIZER_DEFAULT_GPU_EXPRESSION_COST = conf("spark.cudf.sql.optimizer.gpu.expr.default")
       .internal()
       .doc("Default per-row GPU cost of evaluating an expression, in seconds")
       .doubleConf
       .createWithDefault(0.0)
 
   val OPTIMIZER_CPU_READ_SPEED = conf(
-    "spark.rapids.sql.optimizer.cpuReadSpeed")
+    "spark.cudf.sql.optimizer.cpuReadSpeed")
       .internal()
       .doc("Speed of reading data from CPU memory in GB/s")
       .doubleConf
       .createWithDefault(30.0)
 
   val OPTIMIZER_CPU_WRITE_SPEED = conf(
-    "spark.rapids.sql.optimizer.cpuWriteSpeed")
+    "spark.cudf.sql.optimizer.cpuWriteSpeed")
     .internal()
     .doc("Speed of writing data to CPU memory in GB/s")
     .doubleConf
     .createWithDefault(30.0)
 
   val OPTIMIZER_GPU_READ_SPEED = conf(
-    "spark.rapids.sql.optimizer.gpuReadSpeed")
+    "spark.cudf.sql.optimizer.gpuReadSpeed")
     .internal()
     .doc("Speed of reading data from GPU memory in GB/s")
     .doubleConf
     .createWithDefault(320.0)
 
   val OPTIMIZER_GPU_WRITE_SPEED = conf(
-    "spark.rapids.sql.optimizer.gpuWriteSpeed")
+    "spark.cudf.sql.optimizer.gpuWriteSpeed")
     .internal()
     .doc("Speed of writing data to GPU memory in GB/s")
     .doubleConf
     .createWithDefault(320.0)
 
-  val USE_ARROW_OPT = conf("spark.rapids.arrowCopyOptimizationEnabled")
+  val USE_ARROW_OPT = conf("spark.cudf.arrowCopyOptimizationEnabled")
     .doc("Option to turn off using the optimized Arrow copy code when reading from " +
       "ArrowColumnVector in HostColumnarToGpu. Left as internal as user shouldn't " +
       "have to turn it off, but its convenient for testing.")
@@ -640,14 +640,14 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .booleanConf
     .createWithDefault(true)
 
-  val SPARK_GPU_RESOURCE_NAME = conf("spark.rapids.gpu.resourceName")
+  val SPARK_GPU_RESOURCE_NAME = conf("spark.cudf.gpu.resourceName")
     .doc("The name of the Spark resource that represents a GPU that you want the plugin to use " +
       "if using custom resources with Spark.")
     .startupOnly()
     .stringConf
     .createWithDefault("gpu")
 
-  val SUPPRESS_PLANNING_FAILURE = conf("spark.rapids.sql.suppressPlanningFailure")
+  val SUPPRESS_PLANNING_FAILURE = conf("spark.cudf.sql.suppressPlanningFailure")
     .doc("Option to fallback an individual query to CPU if an unexpected condition prevents the " +
       "query plan from being converted to a GPU-enabled one. Note this is different from " +
       "a normal CPU fallback for a yet-to-be-supported Spark SQL feature. If this happens " +
@@ -655,27 +655,27 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .booleanConf
     .createWithDefault(value = false)
 
-  val ENABLE_FAST_SAMPLE = conf("spark.rapids.sql.fast.sample")
+  val ENABLE_FAST_SAMPLE = conf("spark.cudf.sql.fast.sample")
     .doc("Option to turn on fast sample. If enable it is inconsistent with CPU sample " +
       "because of GPU sample algorithm is inconsistent with CPU.")
     .booleanConf
     .createWithDefault(value = false)
 
-  val DETECT_DELTA_LOG_QUERIES = conf("spark.rapids.sql.detectDeltaLogQueries")
+  val DETECT_DELTA_LOG_QUERIES = conf("spark.cudf.sql.detectDeltaLogQueries")
     .doc("Queries against Delta Lake _delta_log JSON files are not efficient on the GPU. When " +
       "this option is enabled, the plugin will attempt to detect these queries and fall back " +
       "to the CPU.")
     .booleanConf
     .createWithDefault(value = true)
 
-  val DETECT_DELTA_CHECKPOINT_QUERIES = conf("spark.rapids.sql.detectDeltaCheckpointQueries")
+  val DETECT_DELTA_CHECKPOINT_QUERIES = conf("spark.cudf.sql.detectDeltaCheckpointQueries")
     .doc("Queries against Delta Lake _delta_log checkpoint Parquet files are not efficient on " +
       "the GPU. When this option is enabled, the plugin will attempt to detect these queries " +
       "and fall back to the CPU.")
     .booleanConf
     .createWithDefault(value = true)
 
-  val NUM_FILES_FILTER_PARALLEL = conf("spark.rapids.sql.coalescing.reader.numFilterParallel")
+  val NUM_FILES_FILTER_PARALLEL = conf("spark.cudf.sql.coalescing.reader.numFilterParallel")
     .doc("This controls the number of files the coalescing reader will run " +
       "in each thread when it filters blocks for reading. If this value is greater than zero " +
       "the files will be filtered in a multithreaded manner where each thread filters " +
@@ -686,7 +686,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .createWithDefault(value = 0)
 
   val CONCURRENT_WRITER_PARTITION_FLUSH_SIZE =
-    conf("spark.rapids.sql.concurrentWriterPartitionFlushSize")
+    conf("spark.cudf.sql.concurrentWriterPartitionFlushSize")
         .doc("The flush size of the concurrent writer cache in bytes for each partition. " +
             "If specified spark.sql.maxConcurrentOutputFileWriters, use concurrent writer to " +
             "write data. Concurrent writer first caches data for each partition and begins to " +
@@ -700,7 +700,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
         .bytesConf(ByteUnit.BYTE)
         .createWithDefault(0L)
 
-  val NUM_SUB_PARTITIONS = conf("spark.rapids.sql.join.hash.numSubPartitions")
+  val NUM_SUB_PARTITIONS = conf("spark.cudf.sql.join.hash.numSubPartitions")
     .doc("The number of partitions for the repartition in each partition for big hash join. " +
       "GPU will try to repartition the data into smaller partitions in each partition when the " +
       "data from the build side is too large to fit into a single batch.")
@@ -709,7 +709,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .createWithDefault(16)
 
   val SIZED_JOIN_PARTITION_AMPLIFICATION =
-    conf("spark.rapids.sql.join.sizedJoin.buildPartitionNumberAmplification")
+    conf("spark.cudf.sql.join.sizedJoin.buildPartitionNumberAmplification")
       .doc("In sized join, by default we'll use bytes_of_build_size/batch_size + 1 as the number " +
         "of partitions for the build side. This config is used to amplify the number of " +
         "partitions for the build side. The default value is 1, which means we'll use the " +
@@ -720,7 +720,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       .checkValue(v => v >= 1, "The amplification factor must be greater than or equal to 1")
       .createWithDefault(1)
 
-  val ENABLE_AQE_EXCHANGE_REUSE_FIXUP = conf("spark.rapids.sql.aqeExchangeReuseFixup.enable")
+  val ENABLE_AQE_EXCHANGE_REUSE_FIXUP = conf("spark.cudf.sql.aqeExchangeReuseFixup.enable")
       .doc("Option to turn on the fixup of exchange reuse when running with " +
           "adaptive query execution.")
       .internal()
@@ -728,7 +728,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       .createWithDefault(true)
 
   val ENABLE_NON_AQE_BROADCAST_REUSE_FIXUP =
-    conf("spark.rapids.sql.nonAqeBroadcastReuseFixup.enable")
+    conf("spark.cudf.sql.nonAqeBroadcastReuseFixup.enable")
       .doc("Option to turn on the fixup of broadcast exchange reuse for DPP " +
           "subqueries when AQE is disabled. The DPP-side GpuBroadcastExchange is built " +
           "during GpuOverrides and bypasses GpuTransitionOverrides, so it does not match " +
@@ -739,7 +739,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       .booleanConf
       .createWithDefault(true)
 
-  val CHUNKED_PACK_POOL_SIZE = conf("spark.rapids.sql.chunkedPack.poolSize")
+  val CHUNKED_PACK_POOL_SIZE = conf("spark.cudf.sql.chunkedPack.poolSize")
       .doc("Amount of GPU memory (in bytes) to set aside at startup for the chunked pack " +
            "scratch space, needed during spill from GPU to host memory. As a rule of thumb, each " +
            "column should see around 200B that will be allocated from this pool. " +
@@ -750,7 +750,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       .bytesConf(ByteUnit.BYTE)
       .createWithDefault(10L*1024*1024)
 
-  val CHUNKED_PACK_BOUNCE_BUFFER_SIZE = conf("spark.rapids.sql.chunkedPack.bounceBufferSize")
+  val CHUNKED_PACK_BOUNCE_BUFFER_SIZE = conf("spark.cudf.sql.chunkedPack.bounceBufferSize")
       .doc("Amount of GPU memory (in bytes) to set aside at startup per chunked pack " +
           "bounce buffer, needed during spill from GPU to host memory. ")
       .internal()
@@ -759,7 +759,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
         "The chunked pack bounce buffer must be at least 1MB in size")
       .createWithDefault(32L * 1024 * 1024)
 
-  val CHUNKED_PACK_BOUNCE_BUFFER_COUNT = conf("spark.rapids.sql.chunkedPack.bounceBuffers")
+  val CHUNKED_PACK_BOUNCE_BUFFER_COUNT = conf("spark.cudf.sql.chunkedPack.bounceBuffers")
     .doc("Number of chunked pack bounce buffers, needed during spill from GPU to host memory. ")
     .internal()
     .integerConf
@@ -768,7 +768,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .createWithDefault(4)
 
   val SPILL_TO_DISK_BOUNCE_BUFFER_SIZE =
-    conf("spark.rapids.memory.host.spillToDiskBounceBufferSize")
+    conf("spark.cudf.memory.host.spillToDiskBounceBufferSize")
       .doc("Amount of host memory (in bytes) to set aside at startup for the " +
         "bounce buffer used for gpu to disk spill that bypasses the host store.")
       .internal()
@@ -778,7 +778,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       .createWithDefault(32L * 1024 * 1024)
 
   val SPILL_TO_DISK_BOUNCE_BUFFER_COUNT =
-    conf("spark.rapids.memory.host.spillToDiskBounceBuffers")
+    conf("spark.cudf.memory.host.spillToDiskBounceBuffers")
       .doc("Number of bounce buffers used for gpu to disk spill that bypasses the host store.")
       .internal()
       .integerConf
@@ -786,13 +786,13 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
         "The gpu to disk spill bounce buffer count must be positive")
       .createWithDefault(4)
 
-  val SPLIT_UNTIL_SIZE_OVERRIDE = conf("spark.rapids.sql.test.overrides.splitUntilSize")
+  val SPLIT_UNTIL_SIZE_OVERRIDE = conf("spark.cudf.sql.test.overrides.splitUntilSize")
       .doc("Only for tests: override the value of GpuDeviceManager.splitUntilSize")
       .internal()
       .longConf
       .createOptional
 
-  val PROJECT_SPLIT_RETRY_ENABLED = conf("spark.rapids.sql.projectExec.splitRetry.enabled")
+  val PROJECT_SPLIT_RETRY_ENABLED = conf("spark.cudf.sql.projectExec.splitRetry.enabled")
       .doc("When true, GpuProjectExec uses split-and-retry on GPU OOM for retryable " +
           "projections: the input batch is halved by rows and the projection is re-run on " +
           "each half. Projections that include non-retryable expressions fall back to the " +
@@ -802,20 +802,20 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       .booleanConf
       .createWithDefault(true)
 
-  val TEST_IO_ENCRYPTION = conf("spark.rapids.test.io.encryption")
+  val TEST_IO_ENCRYPTION = conf("spark.cudf.test.io.encryption")
     .doc("Only for tests: verify for IO encryption")
     .internal()
     .booleanConf
     .createOptional
 
-  val SKIP_GPU_ARCH_CHECK = conf("spark.rapids.skipGpuArchitectureCheck")
+  val SKIP_GPU_ARCH_CHECK = conf("spark.cudf.skipGpuArchitectureCheck")
     .doc("When true, skips GPU architecture compatibility check. Note that this check " +
       "might still be present in cuDF.")
     .internal()
     .booleanConf
     .createWithDefault(false)
 
-  val TEST_GET_JSON_OBJECT_SAVE_PATH = conf("spark.rapids.sql.expression.GetJsonObject.debugPath")
+  val TEST_GET_JSON_OBJECT_SAVE_PATH = conf("spark.cudf.sql.expression.GetJsonObject.debugPath")
     .doc("Only for tests: specify a directory to save CSV debug output for get_json_object " +
       "if the output differs from the CPU version. Multiple files may be saved")
     .internal()
@@ -823,7 +823,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .createOptional
 
   val TEST_GET_JSON_OBJECT_SAVE_ROWS =
-    conf("spark.rapids.sql.expression.GetJsonObject.debugSaveRows")
+    conf("spark.cudf.sql.expression.GetJsonObject.debugSaveRows")
       .doc("Only for tests: when a debugPath is provided this is the number " +
         "of rows that is saved per file. There may be multiple files if there " +
         "are multiple tasks or multiple batches within a task")
@@ -832,14 +832,14 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       .createWithDefault(1024)
 
   val DELTA_LOW_SHUFFLE_MERGE_SCATTER_DEL_VECTOR_BATCH_SIZE =
-    conf("spark.rapids.sql.delta.lowShuffleMerge.deletion.scatter.max.size")
+    conf("spark.cudf.sql.delta.lowShuffleMerge.deletion.scatter.max.size")
       .doc("Option to set max batch size when scattering deletion vector")
       .internal()
       .integerConf
       .createWithDefault(32 * 1024)
 
   val DELTA_LOW_SHUFFLE_MERGE_DEL_VECTOR_BROADCAST_THRESHOLD =
-    conf("spark.rapids.sql.delta.lowShuffleMerge.deletionVector.broadcast.threshold")
+    conf("spark.cudf.sql.delta.lowShuffleMerge.deletionVector.broadcast.threshold")
       .doc("Currently we need to broadcast deletion vector to all executors to perform low " +
         "shuffle merge. When we detect the deletion vector broadcast size is larger than this " +
         "value, we will fallback to normal shuffle merge.")
@@ -847,7 +847,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       .createWithDefault(20 * 1024 * 1024)
 
   val ENABLE_DELTA_LOW_SHUFFLE_MERGE =
-    conf("spark.rapids.sql.delta.lowShuffleMerge.enabled")
+    conf("spark.cudf.sql.delta.lowShuffleMerge.enabled")
     .doc("Option to turn on the low shuffle merge for Delta Lake. Currently there are some " +
       "limitations for this feature: " +
       "1. We only support Delta Lake 2.4. " +
@@ -858,7 +858,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .createWithDefault(false)
 
     val DELTA_DELETION_VECTOR_PREDICATE_PUSHDOWN =
-    conf("spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled")
+    conf("spark.cudf.sql.delta.deletionVectors.predicatePushdown.enabled")
       .doc("When true, the deletion vector processing will be pushed down to " +
         "the GPU Delta Lake scans. The result of the scan will contain only the rows " +
         "that are not deleted according to the deletion vector. When false, " +
@@ -872,7 +872,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       .createWithDefault(true)
 
   val ENABLE_HASH_FUNCTION_IN_PARTITIONING =
-    conf("spark.rapids.sql.partitioning.hashFunction.enabled")
+    conf("spark.cudf.sql.partitioning.hashFunction.enabled")
       .doc("When false, Only Murmur3Hash is used for GPU hash partitioning to " +
         "align with the regular Spark. When enabled, GPU will try to infer the hash " +
         "function from the CPU hash partitioning and use the same one. This is for " +
@@ -883,13 +883,13 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       .booleanConf
       .createWithDefault(true)
 
-  val TAG_LORE_ID_ENABLED = conf("spark.rapids.sql.lore.tag.enabled")
+  val TAG_LORE_ID_ENABLED = conf("spark.cudf.sql.lore.tag.enabled")
     .doc("Enable add a LORE id to each gpu plan node")
     .internal()
     .booleanConf
     .createWithDefault(true)
 
-  val LORE_DUMP_IDS = conf("spark.rapids.sql.lore.idsToDump")
+  val LORE_DUMP_IDS = conf("spark.cudf.sql.lore.idsToDump")
     .doc("Specify the LORE ids of operators to dump. The format is a comma separated list of " +
       "LORE ids. For example: \"1[0]\" will dump partition 0 of input of gpu operator " +
       "with lore id 1. For more details, please refer to " +
@@ -897,7 +897,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .stringConf
     .createOptional
 
-  val LORE_DUMP_PATH = conf("spark.rapids.sql.lore.dumpPath")
+  val LORE_DUMP_PATH = conf("spark.cudf.sql.lore.dumpPath")
     .doc(s"The path to dump the LORE nodes' input data. This must be set if ${LORE_DUMP_IDS.key} " +
       "has been set. The data of each LORE node will be dumped to a subfolder with name " +
       "'loreId-<LORE id>' under this path. For more details, please refer to " +
@@ -905,20 +905,20 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .stringConf
     .createOptional
 
-  val LORE_SKIP_DUMPING_PLAN = conf("spark.rapids.sql.lore.skip.plan.dump")
+  val LORE_SKIP_DUMPING_PLAN = conf("spark.cudf.sql.lore.skip.plan.dump")
     .doc("Skip dumping plan metadata when doing lore dump")
     .internal()
     .booleanConf
     .createWithDefault(false)
 
-  val LORE_NON_STRICT_MODE = conf("spark.rapids.sql.lore.nonStrictMode.enabled")
+  val LORE_NON_STRICT_MODE = conf("spark.cudf.sql.lore.nonStrictMode.enabled")
     .doc("Allow LoRE dumping to continue when a selected lore id fails. When enabled, failing " +
       "lore ids are skipped with a warning, previously dumped data under the dump path is kept, " +
       "and the rest of the query continues executing.")
     .booleanConf
     .createWithDefault(false)
 
-  val OP_TIME_TRACKING_RDD_ENABLED = conf("spark.rapids.sql.exec.opTimeTrackingRDD.enabled")
+  val OP_TIME_TRACKING_RDD_ENABLED = conf("spark.cudf.sql.exec.opTimeTrackingRDD.enabled")
     .doc("Enable OpTimeTrackingRDD for all GPU operations. When true, OpTimeTrackingRDD " +
       "wrappers will be created to track operation time. When false, can improve " +
       "performance by avoiding overhead of operation time tracking.")
@@ -926,7 +926,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .createWithDefault(true)
 
   val LORE_PARQUET_USE_ORIGINAL_NAMES =
-    conf("spark.rapids.sql.lore.parquet.useOriginalSchemaNames")
+    conf("spark.cudf.sql.lore.parquet.useOriginalSchemaNames")
       .doc("When enabled, LORE writes Parquet files using the original Spark schema names " +
         "instead of auto-generated type-based names. This makes the dumped Parquet data " +
         "easier to consume directly via Spark/other tools.")
@@ -934,14 +934,14 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       .createWithDefault(true)
 
   val CASE_WHEN_FUSE =
-    conf("spark.rapids.sql.case_when.fuse")
+    conf("spark.cudf.sql.case_when.fuse")
       .doc("If when branches is greater than 2 and all then/else values in case when are string " +
         "scalar, fuse mode improves the performance. By default this is enabled.")
       .internal()
       .booleanConf
       .createWithDefault(true)
 
-  val TRACE_TASK_GPU_OWNERSHIP = conf("spark.rapids.sql.nvtx.traceTaskGpuOwnership")
+  val TRACE_TASK_GPU_OWNERSHIP = conf("spark.cudf.sql.nvtx.traceTaskGpuOwnership")
     .doc("Enable tracing of the GPU ownership of tasks. This can be useful for debugging " +
       "deadlocks and other issues related to GPU semaphore.")
     .internal()
@@ -949,7 +949,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .createWithDefault(false)
 
   val ENABLE_ASYNC_OUTPUT_WRITE =
-    conf("spark.rapids.sql.asyncWrite.queryOutput.enabled")
+    conf("spark.cudf.sql.asyncWrite.queryOutput.enabled")
       .doc("Option to turn on the async query output write. During the final output write, the " +
         "task first copies the output to the host memory, and then writes it into the storage. " +
         "When this option is enabled, the task will asynchronously write the output in the host " +
@@ -959,7 +959,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       .createWithDefault(false)
 
   val ASYNC_QUERY_OUTPUT_WRITE_HOLD_GPU_IN_TASK =
-    conf("spark.rapids.sql.queryOutput.holdGpuInTask")
+    conf("spark.cudf.sql.queryOutput.holdGpuInTask")
       .doc("Option to hold GPU semaphore between batch processing during the final output write. " +
         "This option could degrade query performance if it is enabled without the async query " +
         "output write. It is recommended to consider enabling this option only when " +
@@ -970,7 +970,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       .createOptional
 
   val ASYNC_WRITE_MAX_IN_FLIGHT_HOST_MEMORY_BYTES =
-    conf("spark.rapids.sql.asyncWrite.maxInFlightHostMemoryBytes")
+    conf("spark.cudf.sql.asyncWrite.maxInFlightHostMemoryBytes")
       .doc("Maximum number of host memory bytes per executor that can be in-flight for async " +
         "write. Tasks may be blocked if the total host memory bytes in-flight " +
         "exceeds this value. Today this config only covers file output write, but in future" +
@@ -981,7 +981,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       .createWithDefault(2L * 1024 * 1024 * 1024)
 
   val ASYNC_READ_MAX_IN_FLIGHT_HOST_MEMORY_BYTES =
-    conf("spark.rapids.sql.asyncRead.maxInFlightHostMemoryBytes")
+    conf("spark.cudf.sql.asyncRead.maxInFlightHostMemoryBytes")
       .doc("Maximum number of host memory bytes per executor that can be in-flight for async " +
         "read. Tasks may be blocked if the total host memory bytes in-flight " +
         "exceeds this value. Today this config only covers shuffle read, but in future" +

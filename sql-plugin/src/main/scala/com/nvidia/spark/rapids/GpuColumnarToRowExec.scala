@@ -475,7 +475,7 @@ object GpuColumnarToRowExec {
         // UnsafeProjection is not serializable so do it on the executor side
         val toUnsafe = UnsafeProjection.create(output, output)
         // The fast path requires both a capable GPU and the conf-level kill switch
-        // (spark.rapids.sql.acceleratedColumnarToRow.enabled) to be on. The conf exists so
+        // (spark.cudf.sql.acceleratedColumnarToRow.enabled) to be on. The conf exists so
         // users can A/B test or fall back without changing code.
         if (acceleratedTransposeEnabled && isAcceleratedTransposeSupported) {
           new AcceleratedColumnarToRowIterator(output, batches, numInputBatches, numOutputRows,

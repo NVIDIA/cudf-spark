@@ -2013,6 +2013,34 @@ This will force full Scala code rebuild in downstream modules.
                 <!-- parent-pom only executions -->
                 <inherited>false</inherited>
                 <executions>
+                    <execution>
+                        <id>forbid-legacy-rapids-conf-keys</id>
+                        <phase>process-sources</phase>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                        <configuration>
+                            <target>
+                                <resourcecount property="legacy.rapids.conf.key.count">
+                                    <fileset dir="${spark.rapids.source.basedir}">
+                                        <include name="**/src/main/**/*.java"/>
+                                        <include name="**/src/main/**/*.scala"/>
+                                        <exclude name="**/target/**"/>
+                                        <!-- The alias resolver is the single sanctioned legacy literal. -->
+                                        <exclude name="sql-plugin-api/src/main/java/com/nvidia/spark/rapids/internal/config/CudfConfKeys.java"/>
+                                        <containsregexp expression="(&quot;|')+spark[.]rapids[.]"/>
+                                    </fileset>
+                                </resourcecount>
+                                <fail message="Legacy spark.rapids.* configuration keys are forbidden in main sources; use spark.cudf.* and resolve compatibility through CudfConfKeys.">
+                                    <condition>
+                                        <not>
+                                            <equals arg1="${legacy.rapids.conf.key.count}" arg2="0"/>
+                                        </not>
+                                    </condition>
+                                </fail>
+                            </target>
+                        </configuration>
+                    </execution>
                     <!-- Run this repository-wide audit only from the canonical root reactor.
                          Encode option hyphens so the generated Scala 2.13 comment stays valid. -->
                     <!-- #if scala-2.12 -->

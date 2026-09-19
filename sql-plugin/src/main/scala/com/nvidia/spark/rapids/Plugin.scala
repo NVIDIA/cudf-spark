@@ -128,7 +128,7 @@ object RapidsPluginUtils extends Logging {
         s"support set `${RapidsConf.SQL_ENABLED}` to false.")
 
       if (conf.explain != "NONE") {
-        logWarning(s"spark.rapids.sql.explain is set to `${conf.explain}`. Set it to 'NONE' to " +
+        logWarning(s"spark.cudf.sql.explain is set to `${conf.explain}`. Set it to 'NONE' to " +
           "suppress the diagnostics logging about the query placement on the GPU.")
       }
 
@@ -290,10 +290,10 @@ object RapidsPluginUtils extends Logging {
     // set driver timezone
     conf.set(RapidsConf.DRIVER_TIMEZONE.key, ZoneId.systemDefault().normalized().toString)
 
-    // If spark.rapids.sql.multiThreadedRead.numThreads is not set explicitly, then we derive it
+    // If spark.cudf.sql.multiThreadedRead.numThreads is not set explicitly, then we derive it
     // from other settings. Otherwise, we keep the users' setting.
     val numThreadsKey = RapidsConf.MULTITHREAD_READ_NUM_THREADS.key
-    if (!conf.contains(numThreadsKey)) {
+    if (!RapidsConf.contains(conf, numThreadsKey)) {
       // Derive it from spark.executor.cores, since spark.executor.cores is not set on all cluster
       // managers by default, we should judge whether if it's set explicitly.
       if (conf.contains(EXECUTOR_CORES_KEY)) {
@@ -435,7 +435,7 @@ object RapidsPluginUtils extends Logging {
       throw new IllegalStateException(s"Compatibility check failed for GPU architecture " +
         s"$gpuArch. Supported GPU architectures by JNI: $jniSupportedGpuArchsStr and " +
         s"cuDF: $cudfSupportedGpuArchsStr. Please report this issue at $SPARK_RAPIDS_REPO_URL." +
-        s" This check can be disabled by setting `spark.rapids.skipGpuArchitectureCheck` to" +
+        s" This check can be disabled by setting `spark.cudf.skipGpuArchitectureCheck` to" +
         s" `true`, but it may lead to functional failures.")
     }
 
@@ -525,6 +525,7 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
   override def init(
     sc: SparkContext, pluginContext: PluginContext): java.util.Map[String, String] = {
     val sparkConf = pluginContext.conf
+    RapidsConf.warnIfLegacyConfs(sc, sparkConf.getAll.map(_._1))
     RapidsPluginUtils.fixupConfigsOnDriver(sparkConf)
     val conf = new RapidsConf(sparkConf)
     RapidsPluginUtils.detectMultipleJars(conf)
@@ -555,7 +556,7 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
     } else if (conf.isMultiThreadedShuffleManagerMode &&
         conf.isMultithreadedShuffleSkipMergeEnabled && !conf.offHeapLimitEnabled) {
       logWarning("ShuffleCleanupManager disabled - off-heap memory limits are disabled. " +
-        "Set spark.rapids.memory.host.offHeapLimit.enabled=true to use skipMerge feature.")
+        "Set spark.cudf.memory.host.offHeapLimit.enabled=true to use skipMerge feature.")
     }
 
     if (GpuShuffleEnv.isRapidsShuffleAvailable(conf)) {
@@ -665,7 +666,7 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
 
       // Compare if the cudf version mentioned in the classpath is equal to the version which
       // plugin expects. If there is a version mismatch, throw error. This check can be disabled
-      // by setting this config spark.rapids.cudfVersionOverride=true
+      // by setting this config spark.cudf.cudfVersionOverride=true
       checkCudfVersion(conf)
       checkJniConstants()
 

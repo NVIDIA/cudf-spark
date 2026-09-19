@@ -1181,7 +1181,7 @@ case class GpuMergeIntoCommand(
         noopCopyOutputMetas ++ deleteRowOutputMetas
     allMetas.foreach(_.tagForGpu())
     val canReplace = allMetas.forall(_.canExprTreeBeReplaced) && rapidsConf.isOperatorEnabled(
-      "spark.rapids.sql.exec.RapidsProcessDeltaMergeJoinExec", false, false)
+      "spark.cudf.sql.exec.RapidsProcessDeltaMergeJoinExec", false, false)
     if (rapidsConf.shouldExplainAll || (rapidsConf.shouldExplain && !canReplace)) {
       val exprExplains = allMetas.map(_.explain(rapidsConf.shouldExplainAll))
       val execWorkInfo = if (canReplace) {

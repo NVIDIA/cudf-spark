@@ -40,14 +40,14 @@ fi
 
 SPARK_CONFS=(
     --spark-conf spark.master="local[8]"
-    --spark-conf spark.rapids.sql.enabled="true"
+    --spark-conf spark.cudf.sql.enabled="true"
     --spark-conf spark.plugins="com.nvidia.spark.SQLPlugin"
     --spark-conf spark.locality.wait="0s"
     --spark-conf spark.sql.cache.serializer="com.nvidia.spark.ParquetCachedBatchSerializer"
-    --spark-conf spark.rapids.sql.format.parquet.reader.type="MULTITHREADED"
-    --spark-conf spark.rapids.sql.reader.batchSizeBytes="1000MB"
+    --spark-conf spark.cudf.sql.format.parquet.reader.type="MULTITHREADED"
+    --spark-conf spark.cudf.sql.reader.batchSizeBytes="1000MB"
     --spark-conf spark.sql.files.maxPartitionBytes="512MB"
-    --spark-conf spark.rapids.sql.metrics.level="DEBUG"
+    --spark-conf spark.cudf.sql.metrics.level="DEBUG"
 )
 
 EXEC_ARGS="--rows $ROWS --partitions 32"

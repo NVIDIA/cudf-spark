@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * This file was derived from MergeIntoCommand.scala
  * in the Delta Lake project at https://github.com/delta-io/delta.
@@ -937,7 +937,7 @@ case class GpuMergeIntoCommand(
         noopCopyOutputMetas ++ deleteRowOutputMetas
     allMetas.foreach(_.tagForGpu())
     val canReplace = allMetas.forall(_.canExprTreeBeReplaced) && rapidsConf.isOperatorEnabled(
-      "spark.rapids.sql.exec.RapidsProcessDeltaMergeJoinExec", false, false)
+      "spark.cudf.sql.exec.RapidsProcessDeltaMergeJoinExec", false, false)
     if (rapidsConf.shouldExplainAll || (rapidsConf.shouldExplain && !canReplace)) {
       val exprExplains = allMetas.map(_.explain(rapidsConf.shouldExplainAll))
       val execWorkInfo = if (canReplace) {

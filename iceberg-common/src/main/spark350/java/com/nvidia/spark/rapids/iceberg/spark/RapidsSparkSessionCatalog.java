@@ -53,7 +53,7 @@ import org.apache.spark.sql.connector.catalog.ViewCatalog;
  * A drop-in replacement for {@link SparkSessionCatalog} that wraps every iceberg
  * {@link SparkTable} returned by {@code loadTable} with a {@link RapidsSparkTable}.
  * The wrapper augments scan options with session-level overrides keyed by
- * {@code spark.rapids.iceberg.<catalog>.<namespace>.<table>.}.
+ * {@code spark.cudf.iceberg.<catalog>.<namespace>.<table>.}.
  *
  * <p>Configure via:
  * <pre>{@code

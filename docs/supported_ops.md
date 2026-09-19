@@ -65,7 +65,7 @@ the level of compatibility with Apache Spark.  Those are covered [here](configs.
 Others are a part of Apache Spark itself and those are a bit harder to document.
 The work of updating this to cover that support is still ongoing.
 
-For debugging, set `spark.rapids.sql.explain` to ALL to report why
+For debugging, set `spark.cudf.sql.explain` to ALL to report why
 operators or expressions run on the CPU or GPU. ALL can generate
 substantial driver log output for complex or high-volume workloads,
 potentially degrading driver performance or making the driver
@@ -2466,7 +2466,7 @@ are limited.
 <tr>
 <td rowSpan="5">ArrayAggregate</td>
 <td rowSpan="5">`aggregate`</td>
-<td rowSpan="5">Aggregate elements in an array using an accumulator function and finishing transformation. Currently only lambdas of the form (acc, x) -> op(acc, g(x)) with an identity finish are executed on the GPU, where op is one of SUM/PRODUCT/MAX/MIN/ALL/ANY. If/CaseWhen branches are accepted as long as each branch is itself op-of-acc (or bare acc) with op consistent across branches; other shapes fall back to CPU. SUM/PRODUCT on float/double share the same parallel-reduction non-determinism as GpuSum and are gated by spark.rapids.sql.variableFloatAgg.enabled. SUM/PRODUCT on integer/decimal in ANSI mode fall back to CPU because cuDF segmented reduce wraps on overflow instead of raising.</td>
+<td rowSpan="5">Aggregate elements in an array using an accumulator function and finishing transformation. Currently only lambdas of the form (acc, x) -> op(acc, g(x)) with an identity finish are executed on the GPU, where op is one of SUM/PRODUCT/MAX/MIN/ALL/ANY. If/CaseWhen branches are accepted as long as each branch is itself op-of-acc (or bare acc) with op consistent across branches; other shapes fall back to CPU. SUM/PRODUCT on float/double share the same parallel-reduction non-determinism as GpuSum and are gated by spark.cudf.sql.variableFloatAgg.enabled. SUM/PRODUCT on integer/decimal in ANSI mode fall back to CPU because cuDF segmented reduce wraps on overflow instead of raising.</td>
 <td rowSpan="5">None</td>
 <td rowSpan="5">project</td>
 <td>zero</td>
@@ -24513,7 +24513,7 @@ and the accelerator produces the same result.
 <td>S</td>
 <td> </td>
 <td> </td>
-<td><em>PS<br/>Conversion may produce different results and requires spark.rapids.sql.castFloatToString.enabled to be true.</em></td>
+<td><em>PS<br/>Conversion may produce different results and requires spark.cudf.sql.castFloatToString.enabled to be true.</em></td>
 <td>S</td>
 <td> </td>
 <td> </td>
@@ -24536,7 +24536,7 @@ and the accelerator produces the same result.
 <td>S</td>
 <td> </td>
 <td> </td>
-<td><em>PS<br/>Conversion may produce different results and requires spark.rapids.sql.castFloatToString.enabled to be true.</em></td>
+<td><em>PS<br/>Conversion may produce different results and requires spark.cudf.sql.castFloatToString.enabled to be true.</em></td>
 <td>S</td>
 <td> </td>
 <td> </td>
@@ -24603,8 +24603,8 @@ and the accelerator produces the same result.
 <td>S</td>
 <td>S</td>
 <td>S</td>
-<td><em>PS<br/>Only 4 digit year parsing is available. To enable parsing anyways set spark.rapids.sql.hasExtendedYearValues to false.</em></td>
-<td><em>PS<br/>Only 4 digit year parsing is available. To enable parsing anyways set spark.rapids.sql.hasExtendedYearValues to false.;<br/>UTC is only supported TZ for TIMESTAMP</em></td>
+<td><em>PS<br/>Only 4 digit year parsing is available. To enable parsing anyways set spark.cudf.sql.hasExtendedYearValues to false.</em></td>
+<td><em>PS<br/>Only 4 digit year parsing is available. To enable parsing anyways set spark.cudf.sql.hasExtendedYearValues to false.;<br/>UTC is only supported TZ for TIMESTAMP</em></td>
 <td>S</td>
 <td>S</td>
 <td> </td>
@@ -25001,7 +25001,7 @@ and the accelerator produces the same result.
 <td>S</td>
 <td> </td>
 <td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
-<td><em>PS<br/>Conversion may produce different results and requires spark.rapids.sql.castFloatToString.enabled to be true.</em></td>
+<td><em>PS<br/>Conversion may produce different results and requires spark.cudf.sql.castFloatToString.enabled to be true.</em></td>
 <td>S</td>
 <td> </td>
 <td> </td>
@@ -25024,7 +25024,7 @@ and the accelerator produces the same result.
 <td>S</td>
 <td> </td>
 <td><em>PS<br/>UTC is only supported TZ for TIMESTAMP</em></td>
-<td><em>PS<br/>Conversion may produce different results and requires spark.rapids.sql.castFloatToString.enabled to be true.</em></td>
+<td><em>PS<br/>Conversion may produce different results and requires spark.cudf.sql.castFloatToString.enabled to be true.</em></td>
 <td>S</td>
 <td> </td>
 <td> </td>

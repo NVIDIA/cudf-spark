@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -282,8 +282,7 @@ object GpuSemaphore {
   private def computeMaxPermits(): Long = memToPermits(GpuDeviceManager.getMemorySize)
 
   private def isDynamicEnabled(conf: SQLConf): Boolean = {
-    val dynamicStr = conf.getConfString(RapidsConf.DYNAMIC_CONCURRENT_GPU_TASKS.key, null)
-    Option(dynamicStr)
+    RapidsConf.getOption(conf, RapidsConf.DYNAMIC_CONCURRENT_GPU_TASKS.key)
       .map(ConfHelper.toBoolean(_, RapidsConf.DYNAMIC_CONCURRENT_GPU_TASKS.key))
       .getOrElse(RapidsConf.DYNAMIC_CONCURRENT_GPU_TASKS.defaultValue)
   }

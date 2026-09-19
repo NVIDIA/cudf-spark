@@ -117,7 +117,7 @@ runtime line. If a binary compatibility error such as `NoSuchMethodError`
 occurs, verify the cuDF plugin and Databricks runtime combination against this
 page and the release notes.
 
-Support is operation-specific; use `spark.rapids.sql.explain=NOT_ON_GPU` to
+Support is operation-specific; use `spark.cudf.sql.explain=NOT_ON_GPU` to
 identify CPU fallback in a query plan.
 
 ### cuDF Plugin Support Policy for Apache Spark

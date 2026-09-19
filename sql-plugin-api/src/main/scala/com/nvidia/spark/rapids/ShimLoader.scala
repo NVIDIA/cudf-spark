@@ -22,6 +22,7 @@ import scala.collection.JavaConverters.enumerationAsScalaIteratorConverter
 import scala.util.Try
 
 import com.nvidia.spark.GpuCachedBatchSerializer
+import com.nvidia.spark.rapids.internal.config.CudfConfKeys
 import org.apache.commons.lang3.reflect.MethodUtils
 
 import org.apache.spark.{SPARK_BRANCH, SPARK_BUILD_DATE, SPARK_BUILD_USER, SPARK_REPO_URL, SPARK_REVISION, SPARK_VERSION, SparkConf, SparkEnv}
@@ -223,8 +224,12 @@ object ShimLoader {
 
     // IMPORTANT don't use RapidsConf as it transitively references classes that must remain
     // in parallel worlds
+    val shimProviderOverrideKey = "spark.cudf.shims-provider-override"
     val shimServiceProviderOverrideClassName = Option(SparkEnv.get) // Spark-less RapidsConf.help
-      .flatMap(_.conf.getOption("spark.rapids.shims-provider-override"))
+      .flatMap { env =>
+        env.conf.getOption(shimProviderOverrideKey)
+          .orElse(env.conf.getOption(CudfConfKeys.legacyKey(shimProviderOverrideKey)))
+      }
     shimServiceProviderOverrideClassName.foreach { shimProviderClass =>
       log.warn(s"Overriding Spark shims provider to $shimProviderClass. " +
         "This may be an untested configuration!")

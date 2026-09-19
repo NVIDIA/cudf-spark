@@ -353,7 +353,7 @@ object GpuDeviceManager extends Logging {
       conf: RapidsConf,
       features: Option[ArrayBuffer[String]] = None): Int = {
     // Old config warning
-    val oldPoolConfKey = "spark.rapids.memory.gpu.pooling.enabled"
+    val oldPoolConfKey = "spark.cudf.memory.gpu.pooling.enabled"
     if (conf.rapidsConfMap.containsKey(oldPoolConfKey)) {
       logWarning(s"Found '$oldPoolConfKey' is being used, but it will be ignored " +
         s"since it is completely dropped now.")
@@ -506,7 +506,7 @@ object GpuDeviceManager extends Logging {
       // nonPinnedLimit == -1 means off-heap limit tracking is disabled (unlimited).
       // Derive a concrete total from hardware so the MT read limit is still meaningful.
       // Note: this feature is off by default
-      // (spark.rapids.sql.multiThreadedRead.memoryLimit.enabled defaults to false), so the risk
+      // (spark.cudf.sql.multiThreadedRead.memoryLimit.enabled defaults to false), so the risk
       // of this approximation affecting users is low. The
       // underlying hardware-derived calculation has known limitations — in particular, it may not
       // account correctly for spark.memory.offHeap.size in all environments (see

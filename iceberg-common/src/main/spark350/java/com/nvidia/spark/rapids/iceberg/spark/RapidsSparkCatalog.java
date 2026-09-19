@@ -48,7 +48,7 @@ import org.apache.spark.sql.connector.catalog.Table;
  * {@link org.apache.iceberg.spark.source.SparkTable} returned by {@code loadTable}
  * with a {@link com.nvidia.spark.rapids.iceberg.spark.source.RapidsSparkTable}. The
  * wrapper augments scan options with session-level overrides keyed by
- * {@code spark.rapids.iceberg.<catalog>.<namespace>.<table>.}.
+ * {@code spark.cudf.iceberg.<catalog>.<namespace>.<table>.}.
  *
  * <p>Configure via:
  * <pre>{@code
