@@ -861,7 +861,7 @@ Invoke,S, ,The supported types are not deterministic since it's a dynamic expres
 StaticInvoke,S, ,The supported types are not deterministic since it's a dynamic expression,project,result,PS,PS,PS,PS,PS,PS,PS,PS,PS,PS,PS,PS,PS,PS,PS,PS,PS,PS,PS,PS,PS
 VariantGet,S, ,This is not 100% compatible with the Spark version because cuDF Variant extraction currently decodes exact physical Variant types; Spark try_variant_get cast semantics can return different values,project,variant,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,S
 VariantGet,S, ,This is not 100% compatible with the Spark version because cuDF Variant extraction currently decodes exact physical Variant types; Spark try_variant_get cast semantics can return different values,project,path,NA,NA,NA,NA,NA,NA,NA,NA,NA,PS,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
-VariantGet,S, ,This is not 100% compatible with the Spark version because cuDF Variant extraction currently decodes exact physical Variant types; Spark try_variant_get cast semantics can return different values,project,result,NA,S,S,S,S,NA,NA,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
+VariantGet,S, ,This is not 100% compatible with the Spark version because cuDF Variant extraction currently decodes exact physical Variant types; Spark try_variant_get cast semantics can return different values,project,result,S,S,S,S,S,S,S,NA,NA,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 NormalizeNaNAndZero,S, ,None,project,input,NA,NA,NA,NA,NA,S,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 NormalizeNaNAndZero,S, ,None,project,result,NA,NA,NA,NA,NA,S,S,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA
 Discard,S, ,None,project,condition,S,S,S,S,S,S,S,S,PS,S,S,S,S,S,PS,PS,PS,S,S,S,S

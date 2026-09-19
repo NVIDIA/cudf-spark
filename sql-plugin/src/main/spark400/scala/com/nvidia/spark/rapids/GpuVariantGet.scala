@@ -39,8 +39,8 @@ import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import org.apache.spark.sql.catalyst.expressions.{BoundReference, Expression, Literal,
   NamedExpression}
 import org.apache.spark.sql.catalyst.expressions.variant.VariantGet
-import org.apache.spark.sql.types.{ByteType, DataType, IntegerType, LongType, ShortType,
-  StringType}
+import org.apache.spark.sql.types.{BooleanType, ByteType, DataType, DoubleType, FloatType,
+  IntegerType, LongType, ShortType, StringType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.unsafe.types.UTF8String
 
@@ -58,7 +58,7 @@ case class GpuVariantGetMeta(
 
     if (!GpuVariantGet.isSupportedTargetType(expr.targetType)) {
       willNotWorkOnGpu(s"target type ${expr.targetType.simpleString} is not supported; " +
-        "supported types are tinyint, smallint, int, bigint, and string")
+        "supported types are boolean, tinyint, smallint, int, bigint, float, double, and string")
     }
 
     GpuVariantGet.parseSupportedPath(expr.path) match {
@@ -140,7 +140,8 @@ object GpuVariantGet {
   private val ObjectFieldPath = """^\$\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$""".r
 
   def isSupportedTargetType(dt: DataType): Boolean = dt match {
-    case ByteType | ShortType | IntegerType | LongType | StringType => true
+    case BooleanType | ByteType | ShortType | IntegerType | LongType | FloatType |
+        DoubleType | StringType => true
     case _ => false
   }
 
@@ -164,14 +165,10 @@ object GpuVariantGet {
       fallbackBridge: GpuCpuBridgeExpression): ColumnVector = {
     withResource(VariantUtils.getVariantFieldValue(cudfVariant, path)) { rawValue =>
       dt match {
-        case StringType =>
-          withResource(VariantUtils.castVariantValue(rawValue, DType.STRING)) { decoded =>
-            if (allRowsCovered(rawValue, Seq(decoded))) {
-              decoded.incRefCount()
-            } else {
-              evaluateOnCpu(input, fallbackBridge)
-            }
-          }
+        case BooleanType => decodeExactType(rawValue, DType.BOOL8, input, fallbackBridge)
+        case FloatType => decodeExactType(rawValue, DType.FLOAT32, input, fallbackBridge)
+        case DoubleType => decodeExactType(rawValue, DType.FLOAT64, input, fallbackBridge)
+        case StringType => decodeExactType(rawValue, DType.STRING, input, fallbackBridge)
         case ByteType | ShortType | IntegerType | LongType =>
           val decoded = Seq(DType.INT8, DType.INT16, DType.INT32, DType.INT64).safeMap {
             sourceType => VariantUtils.castVariantValue(rawValue, sourceType)
@@ -187,6 +184,20 @@ object GpuVariantGet {
           }
         case other =>
           throw new IllegalArgumentException(s"unsupported variant target type: $other")
+      }
+    }
+  }
+
+  private def decodeExactType(
+      rawValue: ColumnView,
+      targetType: DType,
+      input: GpuColumnVector,
+      fallbackBridge: GpuCpuBridgeExpression): ColumnVector = {
+    withResource(VariantUtils.castVariantValue(rawValue, targetType)) { decoded =>
+      if (allRowsCovered(rawValue, Seq(decoded))) {
+        decoded.incRefCount()
+      } else {
+        evaluateOnCpu(input, fallbackBridge)
       }
     }
   }

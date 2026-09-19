@@ -36,8 +36,8 @@ import com.nvidia.spark.rapids.Arm.withResource
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.expressions.{BoundReference, Literal}
-import org.apache.spark.sql.types.{BooleanType, ByteType, DoubleType, IntegerType, LongType,
-  ShortType, StringType, VariantType}
+import org.apache.spark.sql.types.{BinaryType, BooleanType, ByteType, DateType, DoubleType,
+  FloatType, IntegerType, LongType, ShortType, StringType, VariantType}
 import org.apache.spark.unsafe.types.UTF8String
 
 class GpuVariantGetSuite extends AnyFunSuite {
@@ -80,10 +80,11 @@ class GpuVariantGetSuite extends AnyFunSuite {
   }
 
   test("supported Variant target types") {
-    Seq(ByteType, ShortType, IntegerType, LongType, StringType).foreach { dataType =>
+    Seq(BooleanType, ByteType, ShortType, IntegerType, LongType, FloatType, DoubleType,
+      StringType).foreach { dataType =>
       assert(GpuVariantGet.isSupportedTargetType(dataType))
     }
-    Seq(BooleanType, DoubleType).foreach { dataType =>
+    Seq(BinaryType, DateType).foreach { dataType =>
       assert(!GpuVariantGet.isSupportedTargetType(dataType))
     }
   }
