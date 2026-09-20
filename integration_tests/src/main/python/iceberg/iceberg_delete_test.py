@@ -231,6 +231,11 @@ def test_iceberg_delete_v3_gpu_writes_and_merges_deletion_vectors(
     })
     assert_gpu_and_cpu_are_equal_collect(delete_data, conf=write_conf)
 
+    # Verify CPU Iceberg can read the GPU-written deletion vectors.
+    cpu_data = with_cpu_session(lambda spark: spark.table(cpu_table_name).collect())
+    gpu_data = with_cpu_session(lambda spark: spark.table(gpu_table_name).collect())
+    assert_equal_with_local_sort(cpu_data, gpu_data)
+
 
 @iceberg
 # Iceberg metadata table scans are CPU-only; the DELETE command is still GPU-validated.
@@ -280,6 +285,11 @@ def test_iceberg_delete_v3_gpu_upgrades_position_deletes(spark_tmp_table_factory
         return spark.table(table_name)
 
     assert_gpu_and_cpu_are_equal_collect(delete_data, conf=write_conf)
+
+    # Verify CPU Iceberg can read the GPU-written deletion vectors.
+    cpu_data = with_cpu_session(lambda spark: spark.table(cpu_table_name).collect())
+    gpu_data = with_cpu_session(lambda spark: spark.table(gpu_table_name).collect())
+    assert_equal_with_local_sort(cpu_data, gpu_data)
 
 
 @iceberg
