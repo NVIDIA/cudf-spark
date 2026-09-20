@@ -1756,7 +1756,9 @@ def test_exact_percentile_reduction(data_gen):
 @approximate_float
 @pytest.mark.parametrize('data_gen', exact_percentile_reduction_spark500_data_gen, ids=idfn)
 def test_exact_percentile_reduction_spark500(data_gen):
-    query = lambda spark: exact_percentile_reduction(gen_df(spark, data_gen))
+    def query(spark):
+        return exact_percentile_reduction(gen_df(spark, data_gen))
+
     if _is_exact_percentile_fp_data_gen(data_gen):
         assert_gpu_fallback_collect(query, 'Percentile')
     else:
@@ -1883,7 +1885,9 @@ def test_exact_percentile_groupby(data_gen):
 @approximate_float
 @pytest.mark.parametrize('data_gen', exact_percentile_groupby_spark500_data_gen, ids=idfn)
 def test_exact_percentile_groupby_spark500(data_gen):
-    query = lambda spark: exact_percentile_groupby(gen_df(spark, data_gen))
+    def query(spark):
+        return exact_percentile_groupby(gen_df(spark, data_gen))
+
     if _is_exact_percentile_fp_data_gen(data_gen):
         assert_gpu_fallback_collect(query, 'Percentile')
     else:
