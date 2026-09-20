@@ -20,8 +20,8 @@ import java.util.regex.{Pattern, PatternSyntaxException}
 
 import scala.collection.mutable.ListBuffer
 
-import com.nvidia.spark.rapids.GpuOverrides.regexMetaChars
-import com.nvidia.spark.rapids.RegexParser.toReadableString
+import com.nvidia.spark.rapids.RegexParser.{regexMetaChars, toReadableString}
+import com.nvidia.spark.rapids.ShimVersionUtils.isSpark400OrLater
 
 import org.apache.spark.unsafe.types.UTF8String
 
@@ -724,6 +724,9 @@ class RegexParser(pattern: String) {
 }
 
 object RegexParser {
+  // Based on https://docs.oracle.com/javase/8/docs/api/java/util/regex/Pattern.html
+  private[rapids] val regexMetaChars = ".$^[]\\|?*+(){}"
+
   private val regexpChars = Set('\u0000', '\\', '.', '^', '$', '\u0007', '\u001b', '\f')
 
   def parse(pattern: String): RegexAST = new RegexParser(pattern).parse
@@ -1421,7 +1424,7 @@ class CudfRegexTranspiler(mode: RegexMode) {
         // from the CPU on older JDKs. Use Spark version as a proxy for the executor JDK
         // version to gate falling back to the CPU. \P shares this path via its class name.
         if (flags.caseInsensitive && cc.fromPredefined.exists(Set("Lower", "Upper")) &&
-            !VersionUtils.isSpark400OrLater) {
+            !isSpark400OrLater) {
           throw new RegexUnsupportedException(
             "Case-insensitive matching is not supported for Upper/Lower predefined character " +
             "classes on this Spark version",

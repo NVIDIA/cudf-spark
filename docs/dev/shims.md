@@ -161,7 +161,7 @@ issue as you can see e.g., comparing shim implementations across versions:
 2. [Shim service provider for 3.5.1](https://github.com/NVIDIA/cudf-spark/blob/main/sql-plugin/src/main/spark351/scala/com/nvidia/spark/rapids/shims/spark351/SparkShimServiceProvider.scala)
 
 The `ShimExpression` and related traits themselves live in a single shared file,
-[TreeNode.scala](../../sql-plugin/src/main/scala/com/nvidia/spark/rapids/shims/TreeNode.scala),
+[TreeNode.scala](../../sql-plugin-api/src/main/scala/com/nvidia/spark/rapids/shims/TreeNode.scala),
 which is built as regular unshimmed source.
 
 This resolves compile-time problems, however, now we face the problem at run time.

@@ -494,8 +494,7 @@ done < "$UNSHIMMED_LIST_TXT" | sort -u > "$UNSHIMMED_NEED_SHARED_TXT"
 echo "$((++STEP))/ verifying unshimmed classes have unique sha1 across shims"
 comm -23 "$UNSHIMMED_NEED_SHARED_TXT" "$SPARK_SHARED_CLASSES_TXT" > "$UNSHIMMED_MISSING_SHARED_TXT"
 if [[ -s "$UNSHIMMED_MISSING_SHARED_TXT" ]]; then
-  read -r missing_unshimmed_class < "$UNSHIMMED_MISSING_SHARED_TXT"
-  echo >&2 "$missing_unshimmed_class is not bitwise-identical across shims"
+  sed 's|$| is not bitwise-identical across shims|' "$UNSHIMMED_MISSING_SHARED_TXT" >&2
   exit 255
 fi
 
