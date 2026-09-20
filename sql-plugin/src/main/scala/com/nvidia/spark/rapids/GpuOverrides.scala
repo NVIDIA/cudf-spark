@@ -193,7 +193,7 @@ abstract class ReplacementRule[INPUT <: BASE, BASE, WRAP_TYPE <: RapidsMeta[INPU
         } else {
           ConsoleOutput.write("None")
         }
-        ConsoleOutput.writeLine("|")
+        ConsoleOutput.writeLine(s"|${ConfVersionInfo.forKey(confKey).sinceVersion}")
       } else {
         ConsoleOutput.writeLine(s"$confKey:")
         ConsoleOutput.writeLine(s"\tEnable (true) or disable (false) the $tag $operationName.")
