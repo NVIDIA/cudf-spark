@@ -53,9 +53,12 @@ class Delta42xRuntimeShim extends DeltaRuntimeShimBase {
   }
 
   override protected def constructOptimisticTransaction(
-      arg: StartTransactionArg): GpuOptimisticTransactionBase =
+      arg: StartTransactionArg): GpuOptimisticTransactionBase = {
+    val snapshot = arg.snapshot.getOrElse(
+      arg.log.update(catalogTableOpt = arg.catalogTable))
     new GpuOptimisticTransaction(
-      arg.log, arg.catalogTable, arg.snapshot, arg.conf, GpuAutoCompact42x)
+      arg.log, arg.catalogTable, Some(snapshot), arg.conf, GpuAutoCompact42x)
+  }
 
   override def createGpuWrite(
       gpuDeltaLog: GpuDeltaLog,
