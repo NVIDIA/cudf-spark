@@ -24,6 +24,7 @@ spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
 import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
+import org.apache.spark.sql.rapids.shims.TrampolineConnectShims
 
 /**
  * Shim for invalidateCache callback signature differences between Spark versions.
@@ -34,7 +35,14 @@ object InvalidateCacheShims {
   type InvalidateCacheType = (TableCatalog, Identifier) => Unit
   
   def getInvalidateCache(
-      cpuInvalidateCache: (TableCatalog, Identifier) => Unit): InvalidateCacheType = {
-    cpuInvalidateCache
+      cpuInvalidateCache: (TableCatalog, Identifier) => Unit,
+      originalCatalog: TableCatalog,
+      qualifiedTableName: Option[String]): InvalidateCacheType = {
+    (_, ident) => {
+      cpuInvalidateCache(originalCatalog, ident)
+      qualifiedTableName.foreach { tableName =>
+        TrampolineConnectShims.getActiveSession.catalog.uncacheTable(tableName)
+      }
+    }
   }
 }

@@ -18,13 +18,15 @@ from asserts import (assert_cpu_and_gpu_are_equal_collect_with_capture,
                      assert_gpu_and_cpu_are_equal_collect,
                      assert_gpu_fallback_write,
                      assert_gpu_fallback_collect)
-from conftest import is_databricks_runtime
+from conftest import is_databricks_runtime, spark_jvm
 from data_gen import idfn
 from marks import allow_non_gpu, incompat
-from spark_session import is_before_spark_400, is_spark_411_or_later, with_cpu_session
+from spark_session import (is_before_spark_400, is_databricks173_or_later, is_spark_40x,
+                           is_spark_411_or_later, with_cpu_session)
 
 pytestmark = pytest.mark.skipif(
-    is_databricks_runtime(), reason='Enabled in follow-up PR #15645')
+    is_databricks_runtime() and not is_databricks173_or_later(),
+    reason='Variant extraction is supported for Databricks 17.3+')
 
 _variant_parquet_conf = {
     'spark.rapids.sql.format.parquet.enabled': 'true',
@@ -35,14 +37,22 @@ _variant_parquet_conf = {
 
 _variant_write_conf = {}
 
-if is_spark_411_or_later():
-    # Spark 4.1+ pushes Variant extraction into the Parquet reader and writes shredded
-    # Variant columns by default. The GPU implementation currently operates on unshredded
-    # Variant columns, so disable pushdown and require unshredded reads when exercising
-    # GpuVariantGet.
+if not is_before_spark_400():
+    # Keep extraction above the scan in tests intended to exercise GpuVariantGet.
     _variant_parquet_conf['spark.sql.variant.pushVariantIntoScan'] = 'false'
+
+if is_spark_411_or_later():
+    # Spark 4.1+ writes shredded Variant columns by default. The GPU implementation
+    # currently operates on unshredded Variant columns, so require unshredded reads
+    # when exercising GpuVariantGet.
     _variant_parquet_conf['spark.sql.variant.allowReadingShredded'] = 'false'
     _variant_write_conf['spark.sql.variant.writeShredding.enabled'] = 'false'
+
+
+_variant_pushdown_scan_params = [
+    pytest.param('parquet', 'FileSourceScanExec', False, id='v1'),
+    pytest.param('', 'BatchScanExec', True, id='v2')
+]
 
 
 def _with_cpu_variant_session(func):
@@ -124,6 +134,36 @@ def test_parquet_variant_write_falls_back(spark_tmp_path):
     assert_gpu_fallback_write(
         write_data, read_data, spark_tmp_path, ['DataWritingCommandExec', 'WriteFilesExec'],
         conf=write_conf)
+
+
+@allow_non_gpu('FileSourceScanExec', 'BatchScanExec', 'ColumnarToRowExec')
+@incompat
+@pytest.mark.parametrize(
+    'v1_enabled_list,fallback_class,requires_v2_pushdown', _variant_pushdown_scan_params)
+@pytest.mark.skipif(not is_spark_40x(),
+                    reason='This test covers Variant scan pushdown on Spark 4.0.x')
+def test_parquet_variant_scan_pushdown_falls_back(
+        spark_tmp_path, v1_enabled_list, fallback_class, requires_v2_pushdown):
+    if requires_v2_pushdown:
+        supports_v2_pushdown = spark_jvm().com.nvidia.spark.rapids.shims \
+            .ParquetVariantShims.supportsV2VariantPushdown()
+        if not supports_v2_pushdown:
+            pytest.skip('The selected shim does not support V2 Variant scan pushdown')
+
+    data_path = spark_tmp_path + '/VARIANT_SCAN_PUSHDOWN_FALLBACK_PARQUET'
+    _with_cpu_variant_session(lambda spark: _write_variant_parquet(spark, data_path))
+
+    def do_it(spark):
+        return spark.read.parquet(data_path).selectExpr(
+            "try_variant_get(v, '$.x', 'int') AS x",
+            "try_variant_get(v, '$.y', 'string') AS y")
+
+    read_conf = dict(_variant_parquet_conf)
+    read_conf['spark.sql.sources.useV1SourceList'] = v1_enabled_list
+    read_conf['spark.sql.variant.pushVariantIntoScan'] = 'true'
+    # TODO(#14251): Replace this fallback assertion when pushed Variant scans run on GPU.
+    assert_gpu_fallback_collect(
+        do_it, fallback_class, conf=read_conf)
 
 
 @allow_non_gpu('FileSourceScanExec', 'ColumnarToRowExec')

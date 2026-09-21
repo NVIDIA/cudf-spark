@@ -412,7 +412,8 @@ def assert_delta_row_tracking_dml(spark_tmp_path, dml_sql, conf,
 
 def assert_rapids_delta_write(
         do_test, conf, required_gpu_classes=delta_write, require_same_plan=False,
-        forbidden_cpu_fallback_classes=None):
+        forbidden_cpu_fallback_classes=None, require_non_empty=False,
+        expected_command=None, expected_classes=None):
     """
     Validates that a Delta write operation executed on the GPU produces the expected execution plans.
     This function starts a plan capture mechanism using the Spark JVM's ExecutionPlanCaptureCallback,
@@ -426,13 +427,19 @@ def assert_rapids_delta_write(
         A function that performs the Delta write operation to be validated.
     conf : dict
         A dictionary of configuration options to be passed to the GPU session.
-
     required_gpu_classes : list[str]
         GPU class names that must occur in the captured plans.
     require_same_plan : bool
         Whether all required GPU classes must occur in the same captured plan.
     forbidden_cpu_fallback_classes : list[str] or None
         CPU class names that must not be reported as falling back in any captured plan.
+    require_non_empty : bool
+        When true, require at least one captured plan. This is useful when a no-op is not valid
+        evidence for the feature being tested.
+    expected_command : str, optional
+        Additional GPU command or execution class that must be present in a captured plan.
+    expected_classes : iterable of str, optional
+        Additional GPU plan classes that must be present in a captured plan.
 
     Returns
     -------
@@ -445,6 +452,16 @@ def assert_rapids_delta_write(
     try:
         result = with_gpu_session(do_test, conf=conf)
         captured_plans = callback.getResultsWithTimeout(10000)
+        if require_non_empty:
+            assert len(captured_plans) > 0, "No execution plans captured for Delta write"
+        if expected_command is not None:
+            assert any(
+                callback.contains(plan, expected_command) for plan in captured_plans), \
+                f"{expected_command} is not found in any captured plan"
+        for cls in expected_classes or ():
+            assert any(
+                callback.contains(plan, cls) for plan in captured_plans), \
+                f"{cls} is not found in any captured plan"
         # Some write functions are no-op. We may not capture any GPU plan.
         if require_same_plan:
             found = any(
