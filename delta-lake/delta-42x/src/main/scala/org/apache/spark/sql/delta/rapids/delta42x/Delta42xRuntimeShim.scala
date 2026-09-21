@@ -30,8 +30,8 @@ import org.apache.spark.sql.connector.catalog.StagingTableCatalog
 import org.apache.spark.sql.delta.{DeltaOperations, DeltaOptions}
 import org.apache.spark.sql.delta.actions.{FileAction, Metadata}
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
-import org.apache.spark.sql.delta.commands.{DMLWithDeletionVectorsHelper, TouchedFileWithDV,
-  WriteIntoDelta}
+import org.apache.spark.sql.delta.commands.{CreateDeltaTableLikeShims,
+  DMLWithDeletionVectorsHelper, TouchedFileWithDV, WriteIntoDelta}
 import org.apache.spark.sql.delta.hooks.GpuAutoCompact42x
 import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShimBase, DMLWithDeletionVectorsRuntimeShim,
   GpuDeltaLog, GpuOptimisticTransaction,
@@ -54,6 +54,12 @@ class Delta42xRuntimeShim extends DeltaRuntimeShimBase
 
   override def getDeltaProvider: DeltaProvider = Delta42xProvider
 
+  override def isV1WriterSaveAsTableOverwrite(
+      options: DeltaOptions,
+      mode: SaveMode): Boolean = {
+    CreateDeltaTableLikeShims.isV1WriterSaveAsTableOverwrite(options, mode)
+  }
+
   override def getGpuDeltaCatalog(
       cpuCatalog: DeltaCatalog,
       rapidsConf: RapidsConf): StagingTableCatalog = {
@@ -61,9 +67,12 @@ class Delta42xRuntimeShim extends DeltaRuntimeShimBase
   }
 
   override protected def constructOptimisticTransaction(
-      arg: StartTransactionArg): GpuOptimisticTransactionBase =
+      arg: StartTransactionArg): GpuOptimisticTransactionBase = {
+    val snapshot = arg.snapshot.getOrElse(
+      arg.log.update(catalogTableOpt = arg.catalogTable))
     new GpuOptimisticTransaction(
-      arg.log, arg.catalogTable, arg.snapshot, arg.conf, GpuAutoCompact42x)
+      arg.log, arg.catalogTable, Some(snapshot), arg.conf, GpuAutoCompact42x)
+  }
 
   override def createGpuWrite(
       gpuDeltaLog: GpuDeltaLog,

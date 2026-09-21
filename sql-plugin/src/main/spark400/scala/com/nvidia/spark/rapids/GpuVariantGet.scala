@@ -44,12 +44,14 @@ import org.apache.spark.sql.types.{ByteType, DataType, IntegerType, LongType, Sh
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.unsafe.types.UTF8String
 
-class GpuVariantGetMeta(
+case class GpuVariantGetMeta(
     expr: VariantGet,
-    conf: RapidsConf,
-    parent: Option[RapidsMeta[_, _, _]],
+    override val conf: RapidsConf,
+    p: Option[RapidsMeta[_, _, _]],
     rule: DataFromReplacementRule)
-  extends BinaryExprMeta[VariantGet](expr, conf, parent, rule) {
+  extends BinaryExprMeta[VariantGet](expr, conf, p, rule) {
+
+  override def isTimeZoneSupported: Boolean = true
 
   override def tagExprForGpu(): Unit = {
     if (!GpuColumnVector.isVariantType(expr.child.dataType)) {

@@ -42,6 +42,8 @@ object ParquetVariantShims {
       sqlConf.parquetAnnotateVariantLogicalType.toString)
   }
 
+  def supportsV2VariantPushdown: Boolean = true
+
   def isPushedVariantStruct(dataType: DataType): Boolean =
     VariantMetadata.isVariantStruct(dataType)
 

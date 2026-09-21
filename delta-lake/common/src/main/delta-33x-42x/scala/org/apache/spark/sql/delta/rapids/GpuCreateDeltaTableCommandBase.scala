@@ -28,8 +28,8 @@ import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileSystem, Path}
 
 import org.apache.spark.SparkContext
-import org.apache.spark.sql.{DataFrame, DataFrameWriter, Row, SaveMode, SparkSession}
-import org.apache.spark.sql.catalyst.catalog.{CatalogTable, CatalogTableType}
+import org.apache.spark.sql.{DataFrame, Row, SaveMode, SparkSession}
+import org.apache.spark.sql.catalyst.catalog.{CatalogStorageFormat, CatalogTable, CatalogTableType}
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.connector.catalog.Identifier
@@ -172,6 +172,20 @@ abstract class GpuCreateDeltaTableCommandBase(
    */
   protected def catalogTableForTransaction: Option[CatalogTable] = None
 
+  /**
+   * Constructs the Delta log used by CREATE and REPLACE operations.
+   *
+   * Version-specific implementations can retain catalog metadata when it contains credentials or
+   * commit-coordinator state. The default preserves the historical path-based behavior.
+   */
+  protected def getGpuDeltaLogForTable(
+      sparkSession: SparkSession,
+      existingTableOpt: Option[CatalogTable],
+      tableLocation: Path,
+      fileSystemOptions: Map[String, String]): GpuDeltaLog = {
+    GpuDeltaLog.forTable(sparkSession, tableLocation, fileSystemOptions, rapidsConf)
+  }
+
   protected def createCatalogTableForCreateOrReplace(
       spark: SparkSession,
       table: CatalogTable,
@@ -180,6 +194,30 @@ abstract class GpuCreateDeltaTableCommandBase(
       table,
       ignoreIfExists = false,
       validateLocation = false)
+  }
+
+  /** Updates an existing catalog entry after a successful Delta commit. */
+  protected def updateExistingCatalogTable(
+      spark: SparkSession,
+      table: CatalogTable,
+      snapshot: Snapshot): Unit = {
+    UpdateCatalogFactory.getUpdateCatalogHook(table, spark).updateSchema(spark, snapshot)
+  }
+
+  /**
+   * Builds the catalog definition used when the standard Delta catalog-update setting is off.
+   * Version-specific catalogs can retain metadata required by their create-table contract.
+   */
+  protected def cleanupTableDefinitionWhenCatalogUpdateDisabled(
+      table: CatalogTable,
+      snapshot: Snapshot,
+      storage: CatalogStorageFormat): CatalogTable = {
+    table.copy(
+      schema = new StructType(),
+      properties = Map.empty,
+      partitionColumnNames = Nil,
+      storage = storage,
+      tracksPartitionsInCatalog = true)
   }
 
   override def run(sparkSession: SparkSession): Seq[Row] = {
@@ -226,8 +264,8 @@ abstract class GpuCreateDeltaTableCommandBase(
       DeltaTableUtils.validDeltaTableHadoopPrefixes.exists(k.startsWith)
     }
 
-    val gpuDeltaLog =
-      GpuDeltaLog.forTable(sparkSession, tableLocation, fileSystemOptions, rapidsConf)
+    val gpuDeltaLog = getGpuDeltaLogForTable(
+      sparkSession, existingTableOpt, tableLocation, fileSystemOptions)
     CoordinatedCommitsUtils.validateConfigurationsForCreateDeltaTableCommand(
       sparkSession, gpuDeltaLog.deltaLog.tableExists, query, tableWithLocation.properties)
     validateCatalogManagedTableProperties(sparkSession, gpuDeltaLog, tableWithLocation)
@@ -364,6 +402,8 @@ abstract class GpuCreateDeltaTableCommandBase(
      tableWithLocation: CatalogTable): Unit = {
     val isManagedTable = tableWithLocation.tableType == CatalogTableType.MANAGED
     val options = new DeltaOptions(table.storage.properties, sparkSession.sessionState.conf)
+    val isV1WriterSaveAsTableOverwrite =
+      DeltaRuntimeShim.isV1WriterSaveAsTableOverwrite(options, mode)
 
     // Execute write command for `deltaWriter` by
     //   - replacing the metadata new target table for DataFrameWriterV2 writer if it is a
@@ -376,7 +416,7 @@ abstract class GpuCreateDeltaTableCommandBase(
       schema: StructType): (TaggedCommitData[Action], DeltaOperations.Operation) = {
       // In the V2 Writer, methods like "replace" and "createOrReplace" implicitly mean that
       // the metadata should be changed. This wasn't the behavior for DataFrameWriterV1.
-      if (!isV1Writer) {
+      if (!isV1WriterSaveAsTableOverwrite) {
         replaceMetadataIfNecessary(
           txn,
           tableWithLocation,
@@ -394,13 +434,13 @@ abstract class GpuCreateDeltaTableCommandBase(
         // saveAsTable() command uses this same code path and is marked as a V1 writer.
         // We do not want saveAsTable() to be treated as a REPLACE command wrt dynamic partition
         // overwrite.
-        isTableReplace = isReplace && !isV1Writer
+        isTableReplace = isReplace && !isV1WriterSaveAsTableOverwrite
       )
       // Metadata updates for creating table (with any writer) and replacing table
       // (only with V1 writer) will be handled inside WriteIntoDelta.
       // For createOrReplace operation, metadata updates are handled here if the table already
       // exists (replacing table), otherwise it is handled inside WriteIntoDelta (creating table).
-      if (!isV1Writer && isReplace && txn.readVersion > -1L) {
+      if (!isV1WriterSaveAsTableOverwrite && isReplace && txn.readVersion > -1L) {
         val newDomainMetadata = Seq.empty[DomainMetadata] ++
           ClusteredTableUtils.getDomainMetadataFromTransaction(
             ClusteredTableUtils.getClusterBySpecOptional(table), txn)
@@ -413,7 +453,7 @@ abstract class GpuCreateDeltaTableCommandBase(
       val op = getOperation(txn.metadata, isManagedTable, Some(options),
         clusterBy = ClusteredTableUtils.getLogicalClusteringColumnNames(
           txn, taggedCommitData.actions),
-        isV1SaveAsTableOverwrite = if (isV1Writer) Some(true) else None
+        isV1SaveAsTableOverwrite = if (isV1WriterSaveAsTableOverwrite) Some(true) else None
       )
       (taggedCommitData, op)
     }
@@ -783,7 +823,7 @@ abstract class GpuCreateDeltaTableCommandBase(
         }
       case TableCreationModes.Replace | TableCreationModes.CreateOrReplace
         if existingTableOpt.isDefined =>
-        UpdateCatalogFactory.getUpdateCatalogHook(table, spark).updateSchema(spark, snapshot)
+        updateExistingCatalogTable(spark, table, snapshot)
       case TableCreationModes.Replace =>
         val ident = Identifier.of(table.identifier.database.toArray, table.identifier.table)
         throw DeltaErrors.cannotReplaceMissingTableException(ident)
@@ -826,13 +866,7 @@ abstract class GpuCreateDeltaTableCommandBase(
         storage = storageProps,
         tracksPartitionsInCatalog = true)
     } else {
-      table.copy(
-        schema = new StructType(),
-        properties = Map.empty,
-        partitionColumnNames = Nil,
-        // Remove write specific options when updating the catalog
-        storage = storageProps,
-        tracksPartitionsInCatalog = true)
+      cleanupTableDefinitionWhenCatalogUpdateDisabled(table, snapshot, storageProps)
     }
   }
 
@@ -866,19 +900,6 @@ abstract class GpuCreateDeltaTableCommandBase(
       newMetadata = metadataForReplace(txn, newMetadata)
       txn.updateMetadataForNewTableInReplace(newMetadata)
     }
-  }
-
-  /**
-   * Horrible hack to differentiate between DataFrameWriterV1 and V2 so that we can decide
-   * what to do with table metadata. In DataFrameWriterV1, mode("overwrite").saveAsTable,
-   * behaves as a CreateOrReplace table, but we have asked for "overwriteSchema" as an
-   * explicit option to overwrite partitioning or schema information. With DataFrameWriterV2,
-   * the behavior asked for by the user is clearer: .createOrReplace(), which means that we
-   * should overwrite schema and/or partitioning. Therefore we have this hack.
-   */
-  private def isV1Writer: Boolean = {
-    Thread.currentThread().getStackTrace.exists(_.toString.contains(
-      classOf[DataFrameWriter[_]].getCanonicalName + "."))
   }
 
   /** Returns true if the current operation could be replacing a table. */

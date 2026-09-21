@@ -30,8 +30,8 @@ import org.apache.spark.sql.connector.catalog.StagingTableCatalog
 import org.apache.spark.sql.delta.{DeltaOperations, DeltaOptions}
 import org.apache.spark.sql.delta.actions.{FileAction, Metadata}
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
-import org.apache.spark.sql.delta.commands.{DMLWithDeletionVectorsHelper, TouchedFileWithDV,
-  WriteIntoDelta}
+import org.apache.spark.sql.delta.commands.{CreateDeltaTableLikeShims,
+  DMLWithDeletionVectorsHelper, TouchedFileWithDV, WriteIntoDelta}
 import org.apache.spark.sql.delta.hooks.GpuAutoCompact41x
 import org.apache.spark.sql.delta.rapids.{
   DeltaRuntimeShimBase,
@@ -58,6 +58,12 @@ class Delta41xRuntimeShim extends DeltaRuntimeShimBase
   }
 
   override def getDeltaProvider: DeltaProvider = Delta41xProvider
+
+  override def isV1WriterSaveAsTableOverwrite(
+      options: DeltaOptions,
+      mode: SaveMode): Boolean = {
+    CreateDeltaTableLikeShims.isV1WriterSaveAsTableOverwrite(options, mode)
+  }
 
   override def createGpuWrite(
       gpuDeltaLog: GpuDeltaLog,
