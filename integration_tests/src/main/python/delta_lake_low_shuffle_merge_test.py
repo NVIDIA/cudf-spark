@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from uuid import UUID
+
 import pyspark.sql.functions as f
 import pytest
 
@@ -197,6 +199,45 @@ def test_delta_low_shuffle_merge_accepts_non_effective_duplicate_matches(
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
+@pytest.mark.skipif(not is_databricks_version(17, 3),
+                    reason="DBR 17.3 effective duplicate-match semantics")
+def test_delta_low_shuffle_merge_rejects_effective_duplicate_matches(
+        spark_tmp_path, spark_tmp_table_factory):
+    src_table = spark_tmp_table_factory.get()
+
+    def do_merge(spark):
+        gpu_enabled = \
+            str(spark.conf.get("spark.rapids.sql.enabled", "false")).lower() == "true"
+        target_path = spark_tmp_path + ("/GPU" if gpu_enabled else "/CPU")
+        target = gen_df(
+            spark,
+            [("k", UniqueLongGen(nullable=False)),
+             ("v", StringGen(pattern="[a-z]{1,20}", nullable=False))])
+        target.write.format("delta") \
+            .option("delta.enableDeletionVectors", "false") \
+            .mode("overwrite") \
+            .save(target_path)
+        matched = target.where(f.pmod("k", f.lit(4)) == 0)
+        first_match = matched.select(
+            "k", f.concat(f.lit("first-"), "v").alias("v"),
+            f.lit(True).alias("apply"))
+        second_match = matched.select(
+            "k", f.concat(f.lit("second-"), "v").alias("v"),
+            f.lit(True).alias("apply"))
+        first_match.unionByName(second_match).createOrReplaceTempView(src_table)
+        return spark.sql(
+            "MERGE INTO delta.`{}` t USING {} s ON t.k = s.k "
+            "WHEN MATCHED AND s.apply THEN UPDATE SET t.v = s.v".format(
+                target_path, src_table)).collect()
+
+    assert_gpu_and_cpu_error(
+        do_merge,
+        conf=delta_merge_enabled_conf,
+        error_message="DELTA_MULTIPLE_SOURCE_ROW_MATCHING_TARGET_ROW_IN_MERGE")
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
 @ignore_order
 @pytest.mark.skipif(not is_databricks_version(17, 3),
                     reason="DBR 17.3 low-shuffle helper-column regression")
@@ -253,15 +294,105 @@ def test_delta_low_shuffle_merge_internal_column_names(
         conf=delta_merge_enabled_conf)
 
 
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_databricks_version(17, 3),
+                    reason="DBR 17.3 low-shuffle nondeterministic-action regression")
+@pytest.mark.parametrize("use_cdf", [False, True], ids=idfn)
+def test_delta_low_shuffle_merge_non_deterministic_action_values(
+        spark_tmp_path, spark_tmp_table_factory, use_cdf):
+    def dest_table_func(spark):
+        return gen_df(spark, [("k", UniqueLongGen(nullable=False))], length=128) \
+            .withColumn("v", f.lit(0.5)).withColumn("u", f.lit(0.5)) \
+            .withColumn("token", f.lit("unchanged"))
+
+    def src_table_func(spark):
+        generated = dest_table_func(spark)
+        matched = generated.where(f.pmod("k", f.lit(4)) == 0)
+        effective = matched.selectExpr("k", "4 AS x", "2 AS d")
+        # Under ANSI mode, eagerly evaluating the unused update would divide by zero.
+        ignored = matched.selectExpr("k", "4 AS x", "0 AS d")
+        inserted = generated.where(f.pmod("k", f.lit(4)) == 1).selectExpr(
+            "k + {} AS k".format(_INSERT_KEY_OFFSET), "4 AS x", "2 AS d")
+        return effective.unionByName(ignored).unionByName(inserted)
+
+    merge_sql = (
+        "MERGE INTO {dest_table} t USING {src_table} s ON t.k = s.k "
+        "WHEN MATCHED AND s.d <> 0 THEN UPDATE SET "
+        "t.v = s.x / s.d + rand(7), t.token = uuid() "
+        "WHEN NOT MATCHED THEN INSERT (k, v, u, token) "
+        "VALUES (s.k, rand(7), rand(11) + 40, uuid()) "
+        "WHEN NOT MATCHED BY SOURCE AND pmod(t.k, 4) = 2 "
+        "THEN UPDATE SET t.u = rand(13) + 10, t.token = uuid()")
+    conf = copy_and_update(delta_merge_enabled_conf, {
+        "spark.sql.ansi.enabled": "true",
+        "spark.rapids.sql.expression.cpuBridge.enabled": "false"})
+    original_keys = set(with_cpu_session(
+        lambda spark: [r["k"] for r in dest_table_func(spark).select("k").collect()]))
+    inserted_keys = {key + _INSERT_KEY_OFFSET for key in original_keys if key % 4 == 1}
+    updated_keys = {key for key in original_keys if key % 4 in (0, 2)}
+
+    def check_func(data_path, do_merge):
+        assert_collect(do_merge, data_path, conf)
+        # CPU/GPU random values need not agree. Check their ranges and clause routing instead,
+        # then require exact equality between each engine's table and CDF values.
+        for run in ["CPU", "GPU"]:
+            path = data_path + "/" + run
+            rows = with_cpu_session(
+                lambda spark: read_delta_path(spark, path).collect(), conf=conf)
+            table = {r["k"]: (r["v"], r["u"], r["token"]) for r in rows}
+            assert len(rows) == len(table) == len(original_keys | inserted_keys)
+            assert set(table) == original_keys | inserted_keys
+            for key, (v, u, token) in table.items():
+                if key in inserted_keys:
+                    assert 0 <= v < 1 and 40 <= u < 41, (run, key, v, u)
+                elif key % 4 == 0:
+                    assert 2 <= v < 3 and u == 0.5, (run, key, v, u)
+                elif key % 4 == 2:
+                    assert v == 0.5 and 10 <= u < 11, (run, key, v, u)
+                else:
+                    assert (v, u, token) == (0.5, 0.5, "unchanged"), (run, key, v, u, token)
+                if key in updated_keys | inserted_keys:
+                    assert str(UUID(token)) == token, (run, key, token)
+            if use_cdf:
+                def merge_changes(spark):
+                    version = spark.sql(f"DESCRIBE HISTORY delta.`{path}`") \
+                        .where("operation = 'MERGE'").orderBy("version", ascending=False) \
+                        .first()["version"]
+                    return read_delta_path_with_cdf(spark, path) \
+                        .where(f"_commit_version = {version}").collect()
+
+                changes = with_cpu_session(merge_changes, conf=conf)
+                expected_changes = {(key, kind) for key in updated_keys
+                                    for kind in ["update_preimage", "update_postimage"]} | \
+                    {(key, "insert") for key in inserted_keys}
+                assert len(changes) == len(expected_changes)
+                assert {(r["k"], r["_change_type"]) for r in changes} == expected_changes
+                for row in changes:
+                    if row["_change_type"] == "update_preimage":
+                        expected = (0.5, 0.5, "unchanged")
+                    else:
+                        expected = table[row["k"]]
+                    actual = (row["v"], row["u"], row["token"])
+                    assert actual == expected, (run, row["k"], actual, expected)
+
+    delta_sql_merge_test(spark_tmp_path, spark_tmp_table_factory, use_cdf, False,
+                         src_table_func, dest_table_func, merge_sql, check_func)
+
+
 # DBR 17.3 exposes nullable row-tracking fields that make low-shuffle planning fall back to the
 # classic GPU merge, which consumes its GPU Parquet scan through ColumnarToRowExec.
 @allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not is_databricks_version(17, 3),
-                    reason="DBR 17.3 low-shuffle row-tracking regression")
-def test_delta_low_shuffle_merge_preserves_row_tracking(
+                    reason="DBR 17.3 row-tracking fallback regression")
+def test_delta_low_shuffle_merge_row_tracking_falls_back_to_classic_merge(
         spark_tmp_path, spark_tmp_table_factory):
+    # This verifies row tracking through classic GPU MERGE, not the low-shuffle path.
+    # TODO: Add a strict failOnFallback=true regression once nullable row-tracking scans are
+    # supported by low shuffle merge (https://github.com/NVIDIA/cudf-spark/issues/11079).
     conf = copy_and_update(delta_merge_enabled_conf, delta_row_tracking_dml_conf)
     conf["spark.rapids.sql.test.delta.lowShuffleMerge.failOnFallback"] = "false"
     data_path = spark_tmp_path + "/DELTA_DATA"
