@@ -23,6 +23,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.delta.DeltaParquetFileFormat.ROW_INDEX_COLUMN_NAME
 import org.apache.spark.sql.delta.commands.{DeletionVectorUtils, MergeIntoCommand}
+import org.apache.spark.sql.delta.sources.DeltaSQLConf
 
 abstract class MergeIntoCommandMetaBase(
     mergeCmd: MergeIntoCommand,
@@ -45,6 +46,7 @@ abstract class MergeIntoCommandMetaBase(
     val deltaLog = mergeCmd.targetFileIndex.deltaLog
     val targetSchema = mergeCmd.migratedSchema.getOrElse(mergeCmd.target.schema)
     if (DeletionVectorUtils.deletionVectorsWritable(deltaLog.unsafeVolatileSnapshot) &&
+        mergeCmd.conf.getConf(DeltaSQLConf.MERGE_USE_PERSISTENT_DELETION_VECTORS) &&
         targetSchema.fieldNames.exists(
           SparkSession.active.sessionState.conf.resolver(_, ROW_INDEX_COLUMN_NAME))) {
       willNotWorkOnGpu(s"user column $ROW_INDEX_COLUMN_NAME conflicts with the DV row index")

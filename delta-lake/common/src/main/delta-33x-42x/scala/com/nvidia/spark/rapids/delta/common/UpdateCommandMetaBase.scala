@@ -22,6 +22,7 @@ import com.nvidia.spark.rapids.delta.RapidsDeltaUtils
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.delta.DeltaParquetFileFormat.ROW_INDEX_COLUMN_NAME
 import org.apache.spark.sql.delta.commands.{DeletionVectorUtils, UpdateCommand}
+import org.apache.spark.sql.delta.sources.DeltaSQLConf
 
 abstract class UpdateCommandMetaBase(
     updateCmd: UpdateCommand,
@@ -37,6 +38,7 @@ abstract class UpdateCommandMetaBase(
     }
     val deltaLog = updateCmd.tahoeFileIndex.deltaLog
     if (DeletionVectorUtils.deletionVectorsWritable(deltaLog.unsafeVolatileSnapshot) &&
+        updateCmd.conf.getConf(DeltaSQLConf.UPDATE_USE_PERSISTENT_DELETION_VECTORS) &&
         updateCmd.target.schema.fieldNames.exists(
           SparkSession.active.sessionState.conf.resolver(_, ROW_INDEX_COLUMN_NAME))) {
       willNotWorkOnGpu(s"user column $ROW_INDEX_COLUMN_NAME conflicts with the DV row index")

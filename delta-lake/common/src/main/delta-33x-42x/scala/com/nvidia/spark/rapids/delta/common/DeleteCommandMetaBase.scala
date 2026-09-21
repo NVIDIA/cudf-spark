@@ -22,6 +22,7 @@ import com.nvidia.spark.rapids.delta.RapidsDeltaUtils
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.delta.DeltaParquetFileFormat.ROW_INDEX_COLUMN_NAME
 import org.apache.spark.sql.delta.commands.{DeleteCommand, DeletionVectorUtils}
+import org.apache.spark.sql.delta.sources.DeltaSQLConf
 
 abstract class DeleteCommandMetaBase(
     deleteCmd: DeleteCommand,
@@ -36,6 +37,7 @@ abstract class DeleteCommandMetaBase(
         s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
     }
     if (DeletionVectorUtils.deletionVectorsWritable(deleteCmd.deltaLog.unsafeVolatileSnapshot) &&
+        deleteCmd.conf.getConf(DeltaSQLConf.DELETE_USE_PERSISTENT_DELETION_VECTORS) &&
         deleteCmd.target.schema.fieldNames.exists(
           SparkSession.active.sessionState.conf.resolver(_, ROW_INDEX_COLUMN_NAME))) {
       willNotWorkOnGpu(s"user column $ROW_INDEX_COLUMN_NAME conflicts with the DV row index")

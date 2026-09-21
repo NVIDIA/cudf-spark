@@ -1636,17 +1636,24 @@ def test_delta_merge_dv_internal_file_path_name_collisions(
 @pytest.mark.skipif(is_databricks_runtime() or is_before_spark_353(),
                     reason="OSS persistent-DV DML requires Delta 3.3+")
 @pytest.mark.parametrize("command", ["DELETE", "UPDATE", "MERGE"])
-def test_delta_dml_dv_internal_row_index_column_fallback(
-        spark_tmp_path, spark_tmp_table_factory, command):
+@pytest.mark.parametrize("use_persistent_dv", [True, False], ids=idfn)
+def test_delta_dml_dv_internal_row_index_column_handling(
+        spark_tmp_path, spark_tmp_table_factory, command, use_persistent_dv):
     data_path = spark_tmp_path + "/DELTA_DATA"
     source_table = spark_tmp_table_factory.get()
+    persistent_dv_confs = {
+        "DELETE": "spark.databricks.delta.delete.deletionVectors.persistent",
+        "UPDATE": "spark.databricks.delta.update.deletionVectors.persistent",
+        "MERGE": "spark.databricks.delta.merge.deletionVectors.persistent"
+    }
     conf = copy_and_update(delta_writes_enabled_conf, {
         "spark.rapids.sql.command.DeleteCommand": "true",
         "spark.rapids.sql.command.DeleteCommandEdge": "true",
         "spark.rapids.sql.command.UpdateCommand": "true",
         "spark.rapids.sql.command.UpdateCommandEdge": "true",
         "spark.rapids.sql.command.MergeIntoCommand": "true",
-        "spark.rapids.sql.command.MergeIntoCommandEdge": "true"})
+        "spark.rapids.sql.command.MergeIntoCommandEdge": "true",
+        persistent_dv_confs[command]: str(use_persistent_dv).lower()})
 
     def dest_table_func(spark):
         return spark.createDataFrame(
@@ -1660,19 +1667,37 @@ def test_delta_dml_dv_internal_row_index_column_fallback(
 
     def write_func(spark, path):
         if command == "DELETE":
-            spark.sql(f"DELETE FROM delta.`{path}` WHERE k = 1").collect()
+            return spark.sql(f"DELETE FROM delta.`{path}` WHERE k = 1").collect()
         elif command == "UPDATE":
-            spark.sql(f"UPDATE delta.`{path}` SET v = 100 WHERE k = 1").collect()
+            return spark.sql(f"UPDATE delta.`{path}` SET v = 100 WHERE k = 1").collect()
         else:
             spark.createDataFrame([(1, 100)], "k INT, v INT") \
                 .createOrReplaceTempView(source_table)
-            spark.sql(
+            return spark.sql(
                 f"MERGE INTO delta.`{path}` AS t USING {source_table} AS s ON t.k = s.k "
                 "WHEN MATCHED THEN UPDATE SET t.v = s.v").collect()
 
     with_cpu_session(setup_tables)
-    assert_gpu_fallback_write(
-        write_func, read_delta_path, data_path, "ExecutedCommandExec", conf=conf)
+    if use_persistent_dv:
+        assert_gpu_fallback_write(
+            write_func, read_delta_path, data_path, "ExecutedCommandExec", conf=conf)
+    else:
+        cpu_result = with_cpu_session(
+            lambda spark: write_func(spark, data_path + "/CPU"), conf=conf)
+        expected_commands = {
+            "DELETE": "GpuDeleteCommand",
+            "UPDATE": "GpuUpdateCommand",
+            "MERGE": "GpuMergeIntoCommand"
+        }
+        gpu_result = assert_rapids_delta_write(
+            lambda spark: write_func(spark, data_path + "/GPU"), conf=conf,
+            expected_command=expected_commands[command])
+        assert_equal(cpu_result, gpu_result)
+        cpu_data = with_cpu_session(
+            lambda spark: read_delta_path(spark, data_path + "/CPU").collect(), conf=conf)
+        gpu_data = with_cpu_session(
+            lambda spark: read_delta_path(spark, data_path + "/GPU").collect(), conf=conf)
+        assert_equal(cpu_data, gpu_data)
 
 
 @allow_non_gpu(*delta_meta_allow)

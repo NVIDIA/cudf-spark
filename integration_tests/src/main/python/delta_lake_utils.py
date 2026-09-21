@@ -18,7 +18,8 @@ import pytest
 import re
 
 from spark_session import is_databricks122_or_later, supports_delta_lake_deletion_vectors, \
-    is_databricks173_or_later, is_spark_local_mode, with_cpu_session, with_gpu_session
+    is_databricks173_or_later, is_spark_353_or_later, is_spark_local_mode, \
+    with_cpu_session, with_gpu_session
 from asserts import assert_equal
 from conftest import is_databricks_runtime, spark_jvm
 
@@ -110,7 +111,30 @@ def deletion_vector_values_with_xfail_reasons(enabled_xfail_reason=None, disable
 
     return enable_deletion_vector
 
+
+def dml_deletion_vector_values_with_xfail_reasons(
+        enabled_xfail_reason=None, disabled_xfail_reason=None):
+    # DELETE, UPDATE, and MERGE support DVs on OSS Delta 3.3+. Keep Databricks xfails
+    # without suppressing OSS coverage.
+    if is_databricks_runtime() and disabled_xfail_reason is not None:
+        enable_deletion_vector = [
+            pytest.param(False, marks=pytest.mark.xfail(reason=disabled_xfail_reason))]
+    else:
+        enable_deletion_vector = [False]
+
+    if supports_delta_lake_deletion_vectors() and (
+            is_databricks_runtime() or is_spark_353_or_later()):
+        if is_databricks_runtime() and enabled_xfail_reason is not None:
+            enable_deletion_vector.append(
+                pytest.param(True, marks=pytest.mark.xfail(reason=enabled_xfail_reason)))
+        else:
+            enable_deletion_vector.append(True)
+
+    return enable_deletion_vector
+
+
 deletion_vector_values = deletion_vector_values_with_xfail_reasons()
+dml_deletion_vector_values = dml_deletion_vector_values_with_xfail_reasons()
 
 delta_writes_enabled_conf = {"spark.rapids.sql.format.delta.write.enabled": "true"}
 
