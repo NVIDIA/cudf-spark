@@ -23,6 +23,9 @@ package org.apache.spark.sql.rapids.shims
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources.v2.GroupPartitionsExec
 
+// Spark 5 makes the GroupPartitionsExec companion private[sql]. Keeping this test-only
+// trampoline under org.apache.spark.sql lets the shared Spark 4.2/5.0 suite use Spark's factory
+// without duplicating the suite or assembling the factory's derived planning state.
 object GroupPartitionsExecTestShim {
   def apply(child: SparkPlan, enableSortedMerge: Boolean): GroupPartitionsExec = {
     GroupPartitionsExec(child, enableSortedMerge = enableSortedMerge)
