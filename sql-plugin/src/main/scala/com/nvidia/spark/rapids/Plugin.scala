@@ -160,9 +160,10 @@ object RapidsPluginUtils extends Logging {
         // cudf-spark_2.12-26.10.0-cuda12.jar!/spark330/rapids4spark-version-info.properties
         // We only want to find the main jar, e.g.
         // cudf-spark_2.12-26.10.0-cuda12.jar!/rapids4spark-version-info.properties
-        !urlPath.contains("cudf-spark-") &&
-          !urlPath.contains("rapids-4-spark-") &&
-          urlPath.endsWith("!/" + propName)
+        urlPath.endsWith("!/" + propName) &&
+          (propName != PLUGIN_PROPS_FILENAME ||
+            (!urlPath.contains("cudf-spark-") &&
+              !urlPath.contains("rapids-4-spark-")))
       }
     }
     val revisionRegex = "revision=(.*)".r
