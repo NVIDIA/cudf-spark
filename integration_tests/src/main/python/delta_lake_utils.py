@@ -253,6 +253,7 @@ def assert_delta_log_json_equivalent(filename, c_json, g_json):
         elif key == "add":
             assert c_val.keys() == g_val.keys(), "Delta log {} 'add' keys mismatch:\nCPU: {}\nGPU: {}".format(filename, c_val, g_val)
             del_keys(("modificationTime", "size"), c_val, g_val)
+            fixup_deletion_vector(c_val, g_val)
             fixup_path(c_val)
             fixup_path(g_val)
         elif key == "cdc":
@@ -600,6 +601,22 @@ def assert_db173_gpu_data_writing_command(
         return result
     finally:
         callback.endCapture()
+
+
+def assert_rapids_gpu_merge_ran(do_test, conf):
+    """Runs a Delta MERGE and asserts that the GPU command did not fall back."""
+    jvm = spark_jvm()
+    callback = jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        result = with_gpu_session(do_test, conf=conf)
+        captured_plans = callback.getResultsWithTimeout(10000)
+        assert any(callback.contains(plan, "GpuMergeIntoCommand") for plan in captured_plans), \
+            "GpuMergeIntoCommand not found in any captured plan; MERGE may have fallen back to CPU"
+        return result
+    finally:
+        callback.endCapture()
+
 
 def assert_rapids_gpu_delete_ran(do_test, conf):
     """
