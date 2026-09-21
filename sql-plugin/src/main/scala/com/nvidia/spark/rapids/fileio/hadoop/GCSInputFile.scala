@@ -90,4 +90,9 @@ object GCSInputFile {
   def create(filePath: Path, conf: Configuration): GCSInputFile = {
     new GCSInputFile(HadoopInputFile.create(filePath, conf), filePath.toUri, conf)
   }
+
+  @throws[IOException]
+  def create(filePath: Path, conf: Configuration, knownLength: Long): GCSInputFile = {
+    new GCSInputFile(HadoopInputFile.create(filePath, conf, knownLength), filePath.toUri, conf)
+  }
 }

@@ -40,6 +40,7 @@ public class HadoopInputFile implements RapidsInputFile {
     private final Path filePath;
     private final FileSystem fs;
     private final int copyBufferSize;
+    private final OptionalLong knownLength;
 
     public static HadoopInputFile create(Path filePath, Configuration conf) throws IOException {
         Objects.requireNonNull(filePath, "filePath can't be null!");
@@ -47,18 +48,40 @@ public class HadoopInputFile implements RapidsInputFile {
         FileSystem fs = filePath.getFileSystem(conf);
         int copyBufferSize = conf.getInt(PARQUET_READ_ALLOCATION_SIZE,
                 RapidsInputFile.DEFAULT_READ_VECTORED_COPY_BUFFER_SIZE);
-        return new HadoopInputFile(filePath, fs, copyBufferSize);
+        return new HadoopInputFile(filePath, fs, copyBufferSize, OptionalLong.empty());
     }
 
-    private HadoopInputFile(Path filePath, FileSystem fs, int copyBufferSize) {
+    /**
+     * Creates an input file with a length already obtained by the caller, for example while
+     * Spark was planning file partitions. This avoids a redundant remote metadata lookup when
+     * the file is read later.
+     */
+    public static HadoopInputFile create(
+            Path filePath, Configuration conf, long knownLength) throws IOException {
+        if (knownLength < 0) {
+            throw new IllegalArgumentException("knownLength must be non-negative");
+        }
+        Objects.requireNonNull(filePath, "filePath can't be null!");
+        Objects.requireNonNull(conf, "Hadoop conf can't be null");
+        FileSystem fs = filePath.getFileSystem(conf);
+        int copyBufferSize = conf.getInt(PARQUET_READ_ALLOCATION_SIZE,
+                RapidsInputFile.DEFAULT_READ_VECTORED_COPY_BUFFER_SIZE);
+        return new HadoopInputFile(
+                filePath, fs, copyBufferSize, OptionalLong.of(knownLength));
+    }
+
+    private HadoopInputFile(
+            Path filePath, FileSystem fs, int copyBufferSize, OptionalLong knownLength) {
         Objects.requireNonNull(filePath, "filePath can't be null!");
         Objects.requireNonNull(fs, "FileSystem can't be null");
+        Objects.requireNonNull(knownLength, "knownLength can't be null");
         if (copyBufferSize <= 0) {
             throw new IllegalArgumentException(PARQUET_READ_ALLOCATION_SIZE + " must be positive");
         }
         this.filePath = filePath;
         this.fs = fs;
         this.copyBufferSize = copyBufferSize;
+        this.knownLength = knownLength;
     }
 
     @Override
@@ -68,7 +91,9 @@ public class HadoopInputFile implements RapidsInputFile {
 
     @Override
     public long getLength() throws IOException {
-        return fs.getFileStatus(this.filePath).getLen();
+        return knownLength.isPresent()
+                ? knownLength.getAsLong()
+                : fs.getFileStatus(this.filePath).getLen();
     }
 
     @Override
