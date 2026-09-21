@@ -15,38 +15,45 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "411"}
-{"spark": "412"}
-{"spark": "413"}
-{"spark": "420"}
-{"spark": "500"}
+{"spark": "400"}
+{"spark": "400db173"}
+{"spark": "401"}
+{"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
 spark-rapids-shim-json-lines ***/
+
 package com.nvidia.spark.rapids.shims
 
+import scala.util.Try
+
+import com.nvidia.spark.rapids.ShimReflectionUtils
 import org.apache.hadoop.conf.Configuration
 
 import org.apache.spark.sql.execution.datasources.VariantMetadata
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.types.{DataType, VariantType}
+import org.apache.spark.sql.types.DataType
 
 /**
- * Shim for Parquet variant-related configurations in Spark 4.1.0+.
- * Applies PARQUET_ANNOTATE_VARIANT_LOGICAL_TYPE without replacing a Spark 4.2+ per-write option.
+ * Shim for Parquet variant-related configurations in Spark 4.0.x.
  */
 object ParquetVariantShims {
   def setupParquetVariantConfig(conf: Configuration, sqlConf: SQLConf): Unit = {
-    // SparkToParquetSchemaConverter requires this value in the Hadoop configuration.
-    FileWriteOptionsShims.setConfWithWriteOptionPrecedence(
-      conf,
-      SQLConf.PARQUET_ANNOTATE_VARIANT_LOGICAL_TYPE.key,
-      sqlConf.parquetAnnotateVariantLogicalType.toString)
+    // No-op because PARQUET_ANNOTATE_VARIANT_LOGICAL_TYPE does not exist in Spark 4.0.x.
   }
 
-  def supportsV2VariantPushdown: Boolean = true
+  // OSS Spark 4.0.x only pushes Variant extraction into V1 scans. Detect distributions that
+  // backport V2 pushdown by checking whether their Parquet V2 scan builder implements the API.
+  def supportsV2VariantPushdown: Boolean = Try {
+    val pushdownInterface = ShimReflectionUtils.loadClass(
+      "org.apache.spark.sql.connector.read.SupportsPushDownVariantExtractions")
+    val parquetScanBuilder = ShimReflectionUtils.loadClass(
+      "org.apache.spark.sql.execution.datasources.v2.parquet.ParquetScanBuilder")
+    pushdownInterface.isAssignableFrom(parquetScanBuilder)
+  }.getOrElse(false)
 
   def isPushedVariantStruct(dataType: DataType): Boolean =
     VariantMetadata.isVariantStruct(dataType)
 
-  def isPotentiallyShreddedVariant(dataType: DataType, sqlConf: SQLConf): Boolean =
-    dataType == VariantType && sqlConf.getConf(SQLConf.VARIANT_ALLOW_READING_SHREDDED)
+  def isPotentiallyShreddedVariant(_dataType: DataType, _sqlConf: SQLConf): Boolean = false
 }

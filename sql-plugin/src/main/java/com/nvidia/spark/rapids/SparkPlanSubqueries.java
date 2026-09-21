@@ -14,9 +14,17 @@
  * limitations under the License.
  */
 
-/*** spark-rapids-shim-json-lines
-{"spark": "420"}
-spark-rapids-shim-json-lines ***/
-package com.nvidia.spark.rapids.shims
+package com.nvidia.spark.rapids;
 
-object SparkShimImpl extends Spark420PlusShims
+import org.apache.spark.sql.execution.SparkPlan;
+
+/** Access Spark's subquery wait for both CPU and GPU plans. */
+public final class SparkPlanSubqueries {
+  private SparkPlanSubqueries() {}
+
+  public static void waitForSubqueries(SparkPlan plan) {
+    // Scala's protected method is public in bytecode. Calling from Java preserves Spark's
+    // synchronization and consumes its pending results without reflection or duplicate updates.
+    plan.waitForSubqueries();
+  }
+}

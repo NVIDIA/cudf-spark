@@ -22,16 +22,20 @@
 package org.apache.spark.sql.delta.rapids.delta42x
 
 import com.nvidia.spark.rapids.RapidsConf
+import org.apache.hadoop.fs.Path
 
 import org.apache.spark.sql.{SaveMode, SparkSession}
-import org.apache.spark.sql.catalyst.catalog.CatalogTable
+import org.apache.spark.sql.catalyst.catalog.{CatalogStorageFormat, CatalogTable}
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.catalyst.util.CharVarcharUtils
 import org.apache.spark.sql.delta.{CatalogOwnedTableFeature, DeltaErrors, Snapshot, UniversalFormat}
 import org.apache.spark.sql.delta.actions.{Metadata, Protocol, TableFeatureProtocolUtils}
 import org.apache.spark.sql.delta.commands.TableCreationModes
 import org.apache.spark.sql.delta.coordinatedcommits.CatalogOwnedTableUtils
+import org.apache.spark.sql.delta.hooks.{UpdateCatalog, UpdateCatalogFactory}
 import org.apache.spark.sql.delta.rapids.{GpuCreateDeltaTableCommand40x42xBase, GpuDeltaLog, GpuOptimisticTransactionBase}
+import org.apache.spark.sql.delta.util.{Utils => DeltaUtils}
 
 case class GpuCreateDeltaTableCommand(
     table: CatalogTable,
@@ -100,6 +104,17 @@ case class GpuCreateDeltaTableCommand(
 
   override protected def catalogTableForTransaction: Option[CatalogTable] = existingTableOpt
 
+  override protected def getGpuDeltaLogForTable(
+      sparkSession: SparkSession,
+      existingTableOpt: Option[CatalogTable],
+      tableLocation: Path,
+      fileSystemOptions: Map[String, String]): GpuDeltaLog = {
+    new GpuDeltaLog(
+      DeltaUtils.getDeltaLogFromTableOrPath(
+        sparkSession, existingTableOpt, tableLocation, fileSystemOptions),
+      rapidsConf)
+  }
+
   override protected def createCatalogTableForCreateOrReplace(
       sparkSession: SparkSession,
       table: CatalogTable,
@@ -107,6 +122,32 @@ case class GpuCreateDeltaTableCommand(
     createTableFunc match {
       case Some(createFunc) => createFunc(table)
       case None => super.createCatalogTableForCreateOrReplace(sparkSession, table, createTableFunc)
+    }
+  }
+
+  override protected def updateExistingCatalogTable(
+      sparkSession: SparkSession,
+      table: CatalogTable,
+      snapshot: Snapshot): Unit = {
+    if (!allowCatalogManaged) {
+      UpdateCatalogFactory.getUpdateCatalogHook(table, sparkSession)
+        .updateSchema(sparkSession, snapshot)
+    }
+  }
+
+  override protected def cleanupTableDefinitionWhenCatalogUpdateDisabled(
+      table: CatalogTable,
+      snapshot: Snapshot,
+      storage: CatalogStorageFormat): CatalogTable = {
+    if (allowCatalogManaged) {
+      table.copy(
+        schema = CharVarcharUtils.getRawSchema(snapshot.schema),
+        partitionColumnNames = snapshot.metadata.partitionColumns,
+        properties = UpdateCatalog.updatedProperties(snapshot),
+        storage = storage,
+        tracksPartitionsInCatalog = true)
+    } else {
+      super.cleanupTableDefinitionWhenCatalogUpdateDisabled(table, snapshot, storage)
     }
   }
 }

@@ -122,19 +122,29 @@ object ConfHelper {
 }
 
 abstract class ConfEntry[T](val key: String, val converter: String => T, val doc: String,
-    val isInternal: Boolean, val isStartUpOnly: Boolean, val isCommonlyUsed: Boolean) {
+    val isInternal: Boolean, val isStartUpOnly: Boolean, val isCommonlyUsed: Boolean,
+    val versionInfo: ConfVersionInfo) {
 
   def get(conf: Map[String, String]): T
   def get(conf: SQLConf): T
   def help(asTable: Boolean = false): Unit
+
+  protected def effectiveVersionInfo: ConfVersionInfo = {
+    if (versionInfo.sinceVersion == ConfVersionInfo.UNKNOWN_VERSION) {
+      ConfVersionInfo.forKey(key)
+    } else {
+      versionInfo
+    }
+  }
 
   override def toString: String = key
 }
 
 class ConfEntryWithDefault[T](key: String, converter: String => T, doc: String,
     isInternal: Boolean, isStartupOnly: Boolean, isCommonlyUsed: Boolean = false,
-    val defaultValue: T)
-  extends ConfEntry[T](key, converter, doc, isInternal, isStartupOnly, isCommonlyUsed) {
+    val defaultValue: T, versionInfo: ConfVersionInfo = ConfVersionInfo.UNKNOWN)
+  extends ConfEntry[T](key, converter, doc, isInternal, isStartupOnly, isCommonlyUsed,
+    versionInfo) {
 
   override def get(conf: Map[String, String]): T = {
     conf.get(key).map(converter).getOrElse(defaultValue)
@@ -154,7 +164,8 @@ class ConfEntryWithDefault[T](key: String, converter: String => T, doc: String,
       val startupOnlyStr = if (isStartupOnly) "Startup" else "Runtime"
       if (asTable) {
         import ConfHelper.makeConfAnchor
-        ConsoleOutput.writeLine(s"${makeConfAnchor(key)}|$doc|$defaultValue|$startupOnlyStr")
+        ConsoleOutput.writeLine(s"${makeConfAnchor(key)}|$doc|$defaultValue|$startupOnlyStr|" +
+          s"${effectiveVersionInfo.sinceVersion}")
       } else {
         ConsoleOutput.writeLine(s"$key:")
         ConsoleOutput.writeLine(s"\t$doc")
@@ -167,9 +178,10 @@ class ConfEntryWithDefault[T](key: String, converter: String => T, doc: String,
 }
 
 class OptionalConfEntry[T](key: String, val rawConverter: String => T, doc: String,
-    isInternal: Boolean, isStartupOnly: Boolean, isCommonlyUsed: Boolean = false)
+    isInternal: Boolean, isStartupOnly: Boolean, isCommonlyUsed: Boolean = false,
+    versionInfo: ConfVersionInfo = ConfVersionInfo.UNKNOWN)
   extends ConfEntry[Option[T]](key, s => Some(rawConverter(s)), doc, isInternal,
-  isStartupOnly, isCommonlyUsed) {
+  isStartupOnly, isCommonlyUsed, versionInfo) {
 
   override def get(conf: Map[String, String]): Option[T] = {
     conf.get(key).map(rawConverter)
@@ -189,7 +201,8 @@ class OptionalConfEntry[T](key: String, val rawConverter: String => T, doc: Stri
       val startupOnlyStr = if (isStartupOnly) "Startup" else "Runtime"
       if (asTable) {
         import ConfHelper.makeConfAnchor
-        ConsoleOutput.writeLine(s"${makeConfAnchor(key)}|$doc|None|$startupOnlyStr")
+        ConsoleOutput.writeLine(s"${makeConfAnchor(key)}|$doc|None|$startupOnlyStr|" +
+          s"${effectiveVersionInfo.sinceVersion}")
       } else {
         ConsoleOutput.writeLine(s"$key:")
         ConsoleOutput.writeLine(s"\t$doc")
@@ -241,7 +254,8 @@ class TypedConfBuilder[T](
     // then 'converter' will throw an exception
     val transformedValue = converter(stringConverter(value))
     val ret = new ConfEntryWithDefault[T](parent.key, converter,
-      parent.doc, parent.isInternal, parent.isStartupOnly, parent.isCommonlyUsed, transformedValue)
+      parent.doc, parent.isInternal, parent.isStartupOnly, parent.isCommonlyUsed, transformedValue,
+      parent.versionInfo)
     parent.register(ret)
     ret
   }
@@ -254,7 +268,8 @@ class TypedConfBuilder[T](
 
   def createOptional: OptionalConfEntry[T] = {
     val ret = new OptionalConfEntry[T](parent.key, converter,
-      parent.doc, parent.isInternal, parent.isStartupOnly, parent.isCommonlyUsed)
+      parent.doc, parent.isInternal, parent.isStartupOnly, parent.isCommonlyUsed,
+      parent.versionInfo)
     parent.register(ret)
     ret
   }
@@ -268,6 +283,7 @@ class ConfBuilder(val key: String, val register: ConfEntry[_] => Unit) {
   var isInternal: Boolean = false
   var isStartupOnly: Boolean = false
   var isCommonlyUsed: Boolean = false
+  var versionInfo: ConfVersionInfo = ConfVersionInfo.forKey(key)
 
   def doc(data: String): ConfBuilder = {
     this.doc = data
@@ -286,6 +302,11 @@ class ConfBuilder(val key: String, val register: ConfEntry[_] => Unit) {
 
   def commonlyUsed(): ConfBuilder = {
     this.isCommonlyUsed = true
+    this
+  }
+
+  def sinceVersion(version: String): ConfBuilder = {
+    this.versionInfo = ConfVersionInfo(version)
     this
   }
 
@@ -426,14 +447,16 @@ object RapidsConf extends Logging with RapidsConfEntries {
 
   private def printToggleHeader(category: String): Unit = {
     printSectionHeader(category)
-    ConsoleOutput.writeLine("Name | Description | Default Value | Notes")
-    ConsoleOutput.writeLine("-----|-------------|---------------|------------------")
+    ConsoleOutput.writeLine("Name | Description | Default Value | Notes | Since Version")
+    ConsoleOutput.writeLine("-----|-------------|---------------|-------|--------------")
   }
 
   private def printToggleHeaderWithSqlFunction(category: String): Unit = {
     printSectionHeader(category)
-    ConsoleOutput.writeLine("Name | SQL Function(s) | Description | Default Value | Notes")
-    ConsoleOutput.writeLine("-----|-----------------|-------------|---------------|------")
+    ConsoleOutput.writeLine(
+      "Name | SQL Function(s) | Description | Default Value | Notes | Since Version")
+    ConsoleOutput.writeLine(
+      "-----|-----------------|-------------|---------------|-------|--------------")
   }
 
   def help(asTable: Boolean = false): Unit = {
@@ -471,11 +494,17 @@ object RapidsConf extends Logging with RapidsConfEntries {
         | work if they are set at runtime. Please check the column of "Applicable at" to see
         | when the config can be set. "Startup" means only valid on startup, "Runtime" means
         | valid on both startup and runtime.
+        |
+        |The "Since Version" column shows the first cuDF plugin release known to support
+        |the config. "Unreleased" means the config exists on this branch but is not in a tagged
+        |release yet. "Unknown" means the metadata has not been recorded yet.
         |""".stripMargin)
       // scalastyle:on line.size.limit
       ConsoleOutput.writeLine("\n## General Configuration\n")
-      ConsoleOutput.writeLine("Name | Description | Default Value | Applicable at")
-      ConsoleOutput.writeLine("-----|-------------|--------------|--------------")
+      ConsoleOutput.writeLine(
+        "Name | Description | Default Value | Applicable at | Since Version")
+      ConsoleOutput.writeLine(
+        "-----|-------------|--------------|---------------|--------------")
     } else {
       ConsoleOutput.writeLine("Commonly Used cuDF plugin Configs:")
     }
@@ -509,14 +538,20 @@ object RapidsConf extends Logging with RapidsConfEntries {
         |
         |The following configuration options are supported by the cuDF plugin.
         |
+        |The "Since Version" column shows the first cuDF plugin release known to support
+        |the config. "Unreleased" means the config exists on this branch but is not in a tagged
+        |release yet. "Unknown" means the metadata has not been recorded yet.
+        |
         |For commonly used configurations and examples of setting options, please refer to the
         |[NVIDIA cuDF plugin for Apache Spark Configuration](../configs.md) page.
         |""".stripMargin)
       // scalastyle:on line.size.limit
       ConsoleOutput.writeLine("\n## Advanced Configuration\n")
 
-      ConsoleOutput.writeLine("Name | Description | Default Value | Applicable at")
-      ConsoleOutput.writeLine("-----|-------------|--------------|--------------")
+      ConsoleOutput.writeLine(
+        "Name | Description | Default Value | Applicable at | Since Version")
+      ConsoleOutput.writeLine(
+        "-----|-------------|--------------|---------------|--------------")
     } else {
       ConsoleOutput.writeLine("Advanced cuDF Plugin Configs:")
     }
