@@ -123,8 +123,10 @@ pulls one handle from the returned iterator, combines and decodes its input, the
 scheduler with the decoded batch iterator and original handle. The scheduler may arrange another
 handoff and make a new handle available through the iterator, or complete the logical read. Any
 batch iterator not consumed by the scheduler remains with `UnifiedReader`. The scheduler uses the
-shared execution service for asynchronous IO, but it must not shut the service down. Combination
-and decoding run synchronously on the Spark task thread.
+shared execution service for asynchronous IO. The combiner receives the same service and may use
+it for parallel combination work. Neither component may shut the service down. The Spark task
+thread calls `combine` synchronously and waits for the complete combined result before decoding
+it on the task thread.
 
 The execution loop is:
 
@@ -161,7 +163,7 @@ class UnifiedReader(sources, scheduler, combiner, decoder, executor):
 
         currentHandle = handles.next()
         input = currentHandle.takeInput()
-        combined = combiner.combine(input)
+        combined = combiner.combine(input, executor)
         currentBatches = decoder.decode(combined)
 
         completedHandle = currentHandle
@@ -278,8 +280,8 @@ with it.
 interface Combiner<
     I extends CombineInput,
     C extends CombinedResult> {
-  // Combine one materialized input synchronously on the Spark task thread.
-  C combine(I input);
+  // Return a complete combined result, optionally using the executor for parallel work.
+  C combine(I input, ExecutorService executor);
 }
 ```
 
@@ -287,10 +289,21 @@ The combiner is a stateless transformation and has no knowledge of scheduler sta
 why its input was produced, or whether another scheduler handoff follows. It combines the
 already-read buffers described by `CombineInput` into an owned `CombinedResult`, either by building
 a synthetic file-format input or by creating a logical multi-source input. It may allocate output
-buffers, but it does not initiate unrelated IO or retain state between calls. Combination consumes
-host memory and CPU, so `combine` runs synchronously on the Spark task thread rather than on the
-shared IO executor. Calling `combine` transfers ownership of the input to the combiner on entry; on
-failure it must release the input and every resource allocated for the attempt.
+buffers, but it does not initiate unrelated IO or retain state between calls.
+
+`UnifiedReader` calls `combine` on the Spark task thread and passes the shared `ExecutorService`.
+An implementation may perform combination directly on the task thread or submit independent work
+to the executor. For example, a Parquet combiner may reference existing buffer slices and generate
+a combined footer on the task thread. Another implementation may allocate a large shared host
+buffer and copy each file's input into non-overlapping regions using executor workers, then
+finalize the footer after the copies complete. The API allows either implementation.
+
+The call remains synchronous: all submitted work must finish before `combine` returns a complete
+`CombinedResult`. The combiner must bound its submitted work and temporary memory, and must not
+shut down the shared executor. Calling `combine` transfers ownership of the input to the combiner
+on entry. On failure, including partial task submission, it must cancel unfinished work and ensure
+that no worker still accesses the input or output buffers before releasing the input and every
+resource allocated for the attempt. No submitted work may outlive the call.
 
 #### 4.2.4 `Decoder`
 
@@ -324,7 +337,7 @@ These interfaces allow one concern to change without replacing the others:
 | --- | --- |
 | `Scheduler` | metadata/body IO, readiness, continuation, cancellation, admission, and grouping |
 | `ReadHandle` | logical-read context, table context, request handles, and combine input |
-| `Combiner` | physical versus logical combination and output-buffer construction |
+| `Combiner` | physical versus logical combination, output-buffer construction, and copy parallelism |
 | `Decoder` | Parquet/ORC decoding and data post-processing |
 
 #### 4.2.5 Implementation class hierarchies
@@ -364,7 +377,7 @@ classDiagram
   }
   class Combiner {
     <<interface>>
-    +combine(input) CombinedResult
+    +combine(input, executor) CombinedResult
   }
   class Decoder {
     <<interface>>
@@ -503,7 +516,8 @@ classDiagram
 
 ##### Combiner
 
-The physical file format selects one of two stateless combiner implementations:
+The physical file format supplies stateless combiners. The diagram shows the Parquet and ORC
+bindings; each may provide different implementations for buffer assembly and copy parallelism:
 
 ```mermaid
 classDiagram
@@ -511,7 +525,7 @@ classDiagram
 
   class Combiner {
     <<interface>>
-    +combine(input) CombinedResult
+    +combine(input, executor) CombinedResult
   }
   class CombineInput {
     <<interface>>
@@ -646,7 +660,7 @@ sequenceDiagram
   HS->>HI: Make a ready HybridReadHandle available
   HI-->>UR: HybridFilterReadHandle or HybridCompleteReadHandle
   UR->>UR: handle.takeInput()
-  UR->>C: combine(input)
+  UR->>C: combine(input, executor)
   C-->>UR: CombinedResult
   UR->>D: decode(combined)
   D-->>UR: Iterator of ColumnarBatch
@@ -664,9 +678,10 @@ sequenceDiagram
 ```
 
 `UnifiedReader` does not inspect the hybrid subtype. It runs the same synchronous combine/decode
-path for either handle and reports the decoded iterator with the original handle. When
-`HybridScheduler.onDecode` receives a `HybridFilterReadHandle`, it may consume the filter result
-and make a `HybridCompleteReadHandle` available through the existing scheduler iterator. When it
+path for either handle, including any parallel work completed within `combine`, and reports the
+decoded iterator with the original handle. When `HybridScheduler.onDecode` receives a
+`HybridFilterReadHandle`, it may consume the filter result and make a `HybridCompleteReadHandle`
+available through the existing scheduler iterator. When it
 receives a `HybridCompleteReadHandle`, it leaves the output iterator for `UnifiedReader` to emit.
 The one-step case starts with a `HybridCompleteReadHandle` and uses the same framework path.
 
@@ -687,7 +702,9 @@ Parquet, the binding is `ParquetCombineInput`, `ParquetCombiner`, and `ParquetDe
 The scheduler owns admission, asynchronous IO, and its internal ready queue. The iterator returned
 by `schedule` exposes only handles whose `CombineInput` is ready. The scheduler is responsible for
 bounding the work and resources it owns, but the framework does not prescribe its admission unit,
-byte-accounting method, IO ordering, or ready-queue ordering.
+byte-accounting method, IO ordering, or ready-queue ordering. The combiner separately bounds and
+cleans up the worker tasks and temporary buffers it owns during each `combine` call, as described
+in Section 4.2.3.
 
 Ownership of a ready handle transfers from the scheduler to `UnifiedReader` when the iterator
 yields it. `takeInput` transfers the handoff input to the combiner, while `UnifiedReader` retains
@@ -695,8 +712,8 @@ the handle. Ownership of the handle transfers back to the scheduler when `onDeco
 the decoded batch iterator is borrowed for the duration of the callback. A scheduler may consume
 the batches and transfer retained state into another handle, or leave the iterator untouched for
 `UnifiedReader` to consume. `UnifiedReader` retains ownership of the iterator and closes it when it
-is exhausted or on failure. Any IO cancellation, semaphore use, retained filter state, and resource
-accounting remain inside the scheduler implementation.
+is exhausted or on failure. The scheduler remains responsible for IO cancellation, semaphore use,
+retained filter state, and accounting for the resources it owns.
 
 Closing the scheduler stops handle admission, unblocks iterator waiters, and releases every handle
 and internal resource it owns. `UnifiedReader` closes a handle that fails before it can be handed
@@ -733,6 +750,8 @@ The responsibilities are divided as follows:
   scheduler's transition decisions to `UnifiedReader`.
 - `ParquetCombiner` combines one `ParquetCombineInput` into a synthetic or logical multi-source
   `ParquetCombinedResult` without receiving a `HybridReadHandle` or retaining state between calls.
+  `UnifiedReader` passes the shared executor to `combine` so the implementation can parallelize
+  buffer copies, waiting for them to finish before returning the combined result.
 - `ParquetDecoder` decodes each `ParquetCombinedResult` and applies the carried Iceberg context for
   constant values, row positions, schema evolution, and deletes. It never receives a
   `HybridReadHandle` and does not decide what follows.
