@@ -7,9 +7,9 @@ SPDX-License-Identifier: CC-BY-4.0
 
 ## Dependency Model
 
-The native build uses the RAPIDS JAR already resolved by Maven. The `cuda-native-udf` profile asks Maven to copy `rapids-4-spark_<scala>-<version>-<cuda>.jar` and `rapids-4-spark_<scala>-<version>.jar` into `target/rapids-jar`. The `native/scripts/extract-cudf-libs.sh` script then extracts `libcudf.so*` and `libnvcomp.so*`, clones matching cuDF headers, builds `librapidsudfjni.so`, and packages it in the UDF JAR for `NativeDepsLoader`.
+The native build uses the cuDF Spark JAR already resolved by Maven. The `cuda-native-udf` profile asks Maven to copy `cudf-spark_<scala>-<version>-<cuda>.jar` and `cudf-spark_<scala>-<version>.jar` into `target/rapids-jar`. The `native/scripts/extract-cudf-libs.sh` script then extracts `libcudf.so*` and `libnvcomp.so*`, clones matching cuDF headers, builds `librapidsudfjni.so`, and packages it in the UDF JAR for `NativeDepsLoader`.
 
-No separate manual JAR download is required. Maven should resolve the RAPIDS dependency declared in `pom.xml`; the native profile reuses the same coordinates and copies the resolved JAR into `target/rapids-jar`.
+No separate manual JAR download is required. Maven should resolve the cuDF Spark dependency declared in `pom.xml`; the native profile reuses the same coordinates and copies the resolved JAR into `target/rapids-jar`.
 
 The profile first tries the CUDA-classified artifact (e.g. `-cuda12`) and then the unclassified artifact. If extraction fails, the selected JAR probably does not contain Linux native CUDA libraries or the Maven cache/repository is inconsistent with the generated version properties.
 
@@ -25,7 +25,7 @@ The profile first tries the CUDA-classified artifact (e.g. `-cuda12`) and then t
 
 ## CUDA Toolkit Version
 
-The native build compiles against the prebuilt libcudf in the spark-rapids jar, so the local CUDA toolkit must match the version spark-rapids was built against.
+The native build compiles against the prebuilt libcudf in the cuDF Spark JAR, so the local CUDA toolkit must match the version used to build that JAR.
 
 1. Get the CUDA version(s) spark-rapids is built against:
 
@@ -65,7 +65,7 @@ Keep these values aligned:
 - `rapids.cmake.branch`
 - JDK version
 
-The generated template maps RAPIDS `<major>.<minor>.<patch>` to the `v<major>.<minor>.00` cuDF and rapids-cmake tags. If building a snapshot, a custom RAPIDS JAR, or a patch release with known native ABI changes, verify the matching cuDF/RMM/CCCL versions with the user.
+The generated template maps RAPIDS `<major>.<minor>.<patch>` to the `v<major>.<minor>.00` cuDF and rapids-cmake tags. If building a snapshot, a custom cuDF Spark JAR, or a patch release with known native ABI changes, verify the matching cuDF/RMM/CCCL versions with the user.
 
 ## Fast Rebuilds and Verification
 
@@ -85,7 +85,7 @@ jar tf target/*.jar | grep librapidsudfjni.so
 
 Default: `USE_PREBUILT_CUDF=ON`.
 
-This extracts `libcudf` from the RAPIDS JAR and builds only the UDF JNI/CUDA library. This is the stable, fast path.
+This extracts `libcudf` from the cuDF Spark JAR and builds only the UDF JNI/CUDA library. This is the stable, fast path.
 
 Escape hatch: `-DUSE_PREBUILT_CUDF=OFF`.
 
