@@ -9,7 +9,7 @@ parent: Developer Overview
 
 ## 1. Background & Motivation
 
-Spark RAPIDS currently maintains three kinds of partition readers — **per-file**,
+cuDF Spark currently maintains three kinds of partition readers — **per-file**,
 **multi-threaded**, and **coalescing** — and re-implements each kind for every table format we
 support: raw Parquet, Iceberg, and Delta Lake. Code is shared by inheriting from the raw Parquet
 readers or embedding them as internal fields. Five problems fall out of this design.
