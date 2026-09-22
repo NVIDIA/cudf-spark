@@ -855,11 +855,11 @@ final class CachedHashBackendProvider private[execution] (
   private def acquireCachedBackend(
       buildSide: GpuBuildSide,
       request: BackendJoinRequest): HashProbeBackend = {
-    // Note that semi/anti join requests currently always use their own FilteredJoin artifact, even if
-    // a cached DistinctHashJoin artifact could have been reused for the semi/anti join by converting
-    // the inner-join gather maps. We may want to estimate the cost of reusing a DistinctHashJoin
-    // (at the cost of more memory for gather maps + conversion) vs. rebuilding a FilteredJoin.
-    // https://github.com/NVIDIA/cudf-spark/issues/16102
+    // Note that semi/anti join requests currently always use their own FilteredJoin artifact,
+    // even if a cached DistinctHashJoin artifact could have been reused for the semi/anti join
+    // by converting the inner-join gather maps. We may want to estimate whether reusing a
+    // DistinctHashJoin (with extra probe cost for gather maps + conversion) is preferable to
+    // rebuilding a FilteredJoin. https://github.com/NVIDIA/cudf-spark/issues/16102
     val isFiltered = request match {
       case BackendJoinRequest.LeftSemi | BackendJoinRequest.LeftAnti |
           BackendJoinRequest.Distinct.LeftSemi | BackendJoinRequest.Distinct.LeftAnti => true
