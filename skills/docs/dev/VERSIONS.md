@@ -1,6 +1,6 @@
 # Version Update Guide
 
-Before updating, verify that the exact `cudf-spark_<scala>` POM and the JAR for the selected CUDA classifier are published in Maven Central.
+Before updating, verify that the exact `rapids-4-spark_<scala>` POM and the JAR for the selected CUDA classifier are published in Maven Central.
 
 ## Files To Update
 

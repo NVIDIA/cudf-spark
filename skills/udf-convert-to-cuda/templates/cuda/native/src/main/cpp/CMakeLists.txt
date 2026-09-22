@@ -44,7 +44,7 @@ set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -w --expt-extended-lambda --expt-relaxed-constexpr")
 
-option(USE_PREBUILT_CUDF "Use libcudf extracted from the cudf-spark jar" ON)
+option(USE_PREBUILT_CUDF "Use libcudf extracted from the rapids-4-spark jar" ON)
 option(PER_THREAD_DEFAULT_STREAM "Build with per-thread default stream" ON)
 option(CUDF_ENABLE_ARROW_S3 "Enable Arrow S3 support in source-build mode" OFF)
 
