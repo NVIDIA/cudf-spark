@@ -190,8 +190,8 @@ class SerializeConcatHostBuffersDeserializeBatch(
       demandId,
       hashBuildCache,
       key,
-      () => HashBuildFactory.create(
-        buildBatch, boundBuiltKeys, compareNullsEqual, filterOutNulls, prepareBatch),
+      isFiltered => HashBuildFactory.create(
+        buildBatch, boundBuiltKeys, compareNullsEqual, filterOutNulls, prepareBatch, isFiltered),
       metrics)
   }
 
