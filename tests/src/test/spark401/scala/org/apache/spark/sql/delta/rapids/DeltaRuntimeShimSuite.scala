@@ -27,11 +27,13 @@ import com.nvidia.spark.rapids.delta.{DeltaProvider, NoDeltaProvider}
 import org.scalatestplus.mockito.MockitoSugar.mock
 
 import org.apache.spark.sql.{Dataset, Row, SaveMode}
+import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Literal}
 import org.apache.spark.sql.delta.{DeltaLog, DeltaOptions}
 import org.apache.spark.sql.delta.commands.{WriteIntoDelta, WriteIntoDeltaLike}
 import org.apache.spark.sql.delta.schema.ImplicitMetadataOperation
 import org.apache.spark.sql.execution.command.LeafRunnableCommand
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.types.{IntegerType, StructField, StructType, VariantType}
 
 class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
   test("delta provider resolves from the installed Delta Lake version") {
@@ -136,5 +138,50 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
     val accessor = classOf[WriteIntoDeltaLike]
       .getMethod("ReplaceWhereExprsAndDataFilterPresenceInExprs")
     assert(accessor.invoke(gpuWrite) != null)
+  }
+
+  test("Delta 4.3 GPU transactions use the 4.3 writer behavior") {
+    assume(io.delta.VERSION == "4.3.0")
+    val parquetOutputTimestampType = "spark.sql.parquet.outputTimestampType"
+    val parquetWriterVersion = "parquet.writer.version"
+
+    withGpuSparkSession { spark =>
+      withTempPath { tablePath =>
+        val gpuDeltaLog = GpuDeltaLog.forTable(
+          spark,
+          tablePath.getAbsolutePath,
+          Map.empty,
+          new RapidsConf(Map.empty[String, String]))
+        val txn = gpuDeltaLog.startTransaction()
+        assert(txn.getClass.getSimpleName == "GpuOptimisticTransaction43x")
+
+        val getWriterOptions = txn.getClass.getDeclaredMethods
+          .find(_.getName == "getWriterOptions")
+          .getOrElse(fail("Delta 4.3 transaction does not define getWriterOptions"))
+        getWriterOptions.setAccessible(true)
+        val writeOptions = new DeltaOptions(Map(
+          parquetOutputTimestampType -> "TIMESTAMP_MICROS"),
+          spark.sessionState.conf)
+        val resolvedOptions = getWriterOptions.invoke(txn, Some(writeOptions))
+          .asInstanceOf[Map[String, String]]
+
+        assert(resolvedOptions(parquetOutputTimestampType) == "TIMESTAMP_MICROS")
+        assert(resolvedOptions(parquetWriterVersion) == "v1")
+
+        val encodeVariantStatsIfNeeded = txn.getClass.getDeclaredMethods
+          .find(_.getName == "encodeVariantStatsIfNeeded")
+          .getOrElse(fail("Delta 4.3 transaction does not define encodeVariantStatsIfNeeded"))
+        encodeVariantStatsIfNeeded.setAccessible(true)
+        val statsCollector = Literal.create(null,
+          StructType(Seq(StructField("value", IntegerType))))
+        val integerSchema = Seq(AttributeReference("value", IntegerType)())
+        val variantSchema = Seq(AttributeReference("value", VariantType)())
+
+        assert(encodeVariantStatsIfNeeded.invoke(txn, integerSchema, statsCollector) eq
+          statsCollector)
+        assert(encodeVariantStatsIfNeeded.invoke(txn, variantSchema, statsCollector)
+          .getClass.getSimpleName == "EncodeNestedVariantAsZ85String")
+      }
+    }
   }
 }
