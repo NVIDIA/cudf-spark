@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -125,6 +125,8 @@ class ParquetFormatScanSuite extends SparkQueryCompareTestSuite with Eventually 
    * Writes arbitrary messages conforming to a given `messageType` to a Parquet file located by
    * `path` with given user-defined key-value `metadata`. Records are produced by `recordWriters`.
    */
+  // Spark 4.2 deprecates this Builder(Path) constructor, but older supported versions require it.
+  @scala.annotation.nowarn("cat=deprecation")
   def writeDirect(
       path: String,
       messageType: MessageType,

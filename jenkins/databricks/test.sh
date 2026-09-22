@@ -45,7 +45,8 @@ set -ex
 # - DELTA_LAKE_ONLY: delta_lake tests only
 # - MULTITHREADED_SHUFFLE: shuffle tests only
 # - PYARROW_ONLY: pyarrow tests only
-# - CI_PART1 or CI_PART2 : part1 or part2 of the tests run in parallel from CI
+# - CI_PART1 or CI_PART2 : part1 or part2 of the tests run in parallel from CI.
+#   CI_PART2 includes nightly resource-consuming tests to keep the split runtimes closer.
 TEST_MODE=${TEST_MODE:-'DEFAULT'}
 
 # CI_PART2 untars the spark-rapids tgz built by C1_PART1 instead of rebuilding it
@@ -104,6 +105,11 @@ run_pyarrow_tests() {
         bash integration_tests/run_pyspark_from_build.sh -m pyarrow_test --pyarrow_test --runtime_env="databricks" --test_type=$TEST_TYPE
 }
 
+# Move selected tests to CI_PART2 so the split CI jobs finish closer together.
+# Keep DEFAULT unchanged so manual/default runs still cover everything in the historical order.
+CI_PART2_BALANCED_TESTS="json_test orc_test parquet_test sort_test window_function_test"
+CI_PART2_BALANCED_TEST_EXPR="${CI_PART2_BALANCED_TESTS// / or }"
+
 ## Separate the integration tests into "CI_PART1" and "CI_PART2", run each part in parallel on separate Databricks clusters to speed up the testing process.
 if [[ $TEST_MODE == "DEFAULT" || $TEST_MODE == "CI_PART1" ]]; then
     # Run two-shim smoke test with the base Spark build
@@ -138,11 +144,23 @@ if [[ $TEST_MODE == "DEFAULT" || $TEST_MODE == "CI_PART1" ]]; then
         PYSP_TEST_spark_shuffle_manager=com.nvidia.spark.rapids.${UPSTREAM_SHIM_VER}.RapidsShuffleManager \
             bash integration_tests/run_pyspark_from_build.sh
     fi
-    bash integration_tests/run_pyspark_from_build.sh --runtime_env="databricks" --test_type=$TEST_TYPE
+    if [[ "$TEST_MODE" == "CI_PART1" ]]; then
+        bash integration_tests/run_pyspark_from_build.sh --runtime_env="databricks" \
+            --test_type=$TEST_TYPE -k "not ($CI_PART2_BALANCED_TEST_EXPR)"
+    else
+        bash integration_tests/run_pyspark_from_build.sh --runtime_env="databricks" --test_type=$TEST_TYPE
+    fi
 fi
 
 ## Run tests with jars building from the spark-rapids source code
 if [[ "$(pwd)" == "$SOURCE_PATH" ]]; then
+    if [[ "$TEST_MODE" == "CI_PART2" ]]; then
+        ## Run the balanced integration tests moved out of CI_PART1
+        TESTS="${CI_PART2_BALANCED_TESTS// /.py }.py" \
+            bash integration_tests/run_pyspark_from_build.sh --runtime_env="databricks" \
+                --test_type=$TEST_TYPE
+    fi
+
     ## Run cache tests
     if [[ "$IS_SPARK_321_OR_LATER" -eq "1" && ("$TEST_MODE" == "DEFAULT" || $TEST_MODE == "CI_PART2") ]]; then
         PYSP_TEST_spark_sql_cache_serializer=${PCBS_CONF} \

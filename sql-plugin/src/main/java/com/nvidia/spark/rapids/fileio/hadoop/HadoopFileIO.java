@@ -51,6 +51,10 @@ public class HadoopFileIO implements RapidsFileIO {
         if (scheme != null && scheme.startsWith("s3") && RapidsInputFiles.isS3PerfEnabled()) {
             return S3InputFile.create(path, hadoopConf.value());
         }
+        if (scheme != null && (scheme.equals("gs") || scheme.equals("gcs")) &&
+                RapidsInputFiles.isGCSPerfEnabled()) {
+            return GCSInputFile.create(path, hadoopConf.value());
+        }
         return HadoopInputFile.create(path, hadoopConf.value());
     }
 

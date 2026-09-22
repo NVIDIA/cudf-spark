@@ -16,22 +16,37 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark": "411"}
+{"spark": "412"}
+{"spark": "413"}
+{"spark": "420"}
+{"spark": "500"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
 import org.apache.hadoop.conf.Configuration
 
+import org.apache.spark.sql.execution.datasources.VariantMetadata
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.types.{DataType, VariantType}
 
 /**
  * Shim for Parquet variant-related configurations in Spark 4.1.0+.
- * Sets PARQUET_ANNOTATE_VARIANT_LOGICAL_TYPE which is required by ParquetWriteSupport.
+ * Applies PARQUET_ANNOTATE_VARIANT_LOGICAL_TYPE without replacing a Spark 4.2+ per-write option.
  */
 object ParquetVariantShims {
   def setupParquetVariantConfig(conf: Configuration, sqlConf: SQLConf): Unit = {
-    // Set the variant annotation config that SparkToParquetSchemaConverter requires
-    conf.set(
+    // SparkToParquetSchemaConverter requires this value in the Hadoop configuration.
+    FileWriteOptionsShims.setConfWithWriteOptionPrecedence(
+      conf,
       SQLConf.PARQUET_ANNOTATE_VARIANT_LOGICAL_TYPE.key,
       sqlConf.parquetAnnotateVariantLogicalType.toString)
   }
+
+  def supportsV2VariantPushdown: Boolean = true
+
+  def isPushedVariantStruct(dataType: DataType): Boolean =
+    VariantMetadata.isVariantStruct(dataType)
+
+  def isPotentiallyShreddedVariant(dataType: DataType, sqlConf: SQLConf): Boolean =
+    dataType == VariantType && sqlConf.getConf(SQLConf.VARIANT_ALLOW_READING_SHREDDED)
 }

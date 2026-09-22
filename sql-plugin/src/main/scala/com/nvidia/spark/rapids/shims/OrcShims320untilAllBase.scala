@@ -19,10 +19,10 @@ package com.nvidia.spark.rapids.shims
 import java.nio.ByteBuffer
 
 import scala.collection.mutable.ArrayBuffer
+import scala.util.control.NonFatal
 
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.OrcOutputStripe
-import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import org.apache.hadoop.conf.Configuration
 import org.apache.orc.{CompressionCodec, CompressionKind, DataReader, OrcConf, OrcFile, OrcProto, PhysicalWriter, Reader, StripeInformation, TypeDescription}
 import org.apache.orc.impl.{BufferChunk, DataReaderProperties, InStream, OrcCodecPool, OutStream, ReaderImpl, SchemaEvolution}
@@ -30,21 +30,35 @@ import org.apache.orc.impl.RecordReaderImpl.SargApplier
 import org.apache.orc.impl.reader.StripePlanner
 import org.apache.orc.impl.writer.StreamOptions
 
-trait OrcShims320untilAllBase {
+import org.apache.spark.internal.Logging
+
+trait OrcShims320untilAllBase extends Logging {
 
   // the ORC Reader in non-CDH Spark is closeable
   def withReader[T <: Reader, V](r: T)(block: T => V): V = {
     try {
       block(r)
     } finally {
-      r.safeClose()
+      closeReader(r)
     }
   }
 
   // the ORC Reader in non-CDH Spark is closeable
   def closeReader(reader: Reader): Unit = {
-    if(reader != null) {
-      reader.close()
+    if (reader != null) {
+      // Close without being aborted by a pending interrupt from task cancellation, then restore
+      // the interrupt status for the caller. This matches Spark's SPARK-57958 ORC reader hardening.
+      val interrupted = Thread.interrupted()
+      try {
+        reader.close()
+      } catch {
+        case NonFatal(t) =>
+          logWarning("Failed to close the ORC reader", t)
+      } finally {
+        if (interrupted) {
+          Thread.currentThread().interrupt()
+        }
+      }
     }
   }
 

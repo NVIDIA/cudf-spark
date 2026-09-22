@@ -18,11 +18,14 @@ from pyspark.sql.functions import array_contains, broadcast, col, lit
 from pyspark.sql.types import *
 from asserts import (assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_row_counts_equal,
                      assert_gpu_fallback_collect, assert_cpu_and_gpu_are_equal_collect_with_capture,
-                     assert_cpu_and_gpu_are_equal_sql_with_capture, assert_gpu_and_cpu_are_equal_sql)
-from conftest import is_emr_runtime
+                     assert_cpu_and_gpu_are_equal_sql_with_capture, assert_gpu_and_cpu_are_equal_sql,
+                     collect_plan_nodes)
+from conftest import is_dataproc_runtime, is_dataproc_serverless_runtime, is_emr_runtime
 from data_gen import *
-from marks import ignore_order, allow_non_gpu, incompat, validate_execs_in_gpu_plan, disable_ansi_mode
-from spark_session import with_cpu_session, is_before_spark_330, is_databricks_runtime, is_spark_400_or_later, is_spark_411_or_later
+from marks import (allow_non_gpu, disable_ansi_mode, ignore_order, incompat,
+                   validate_execs_in_gpu_plan)
+from spark_session import (with_cpu_session, is_databricks_runtime, is_spark_400_or_later,
+                           is_spark_411_or_later, spark_version)
 from src.main.python.spark_session import with_gpu_session
 
 # mark this test as ci_1 for mvn verify sanity check in pre-merge CI
@@ -380,6 +383,25 @@ def test_broadcast_join_right_table(data_gen, join_type):
     conf = {'spark.sql.adaptive.enabled': 'false'}
     assert_gpu_and_cpu_are_equal_collect(do_join, conf = conf)
 
+
+@ignore_order(local=True)
+@validate_execs_in_gpu_plan('GpuBroadcastHashJoinExec')
+def test_broadcast_hash_join_reuses_build_across_stream_partitions():
+    def do_join(spark):
+        stream = spark.range(0, 4096, 1, 8).select(
+            (col('id') % 128).alias('key'), col('id').alias('stream_value'))
+        build = spark.range(0, 256, 1, 1).select(
+            (col('id') % 128).alias('key'), col('id').alias('build_value'))
+        return stream.join(broadcast(build), 'key')
+
+    conf = {
+        'spark.sql.adaptive.enabled': 'false',
+        'spark.rapids.sql.join.buildSide': 'FIXED',
+        'spark.rapids.sql.join.hashTable.reuse': 'true',
+    }
+    assert_gpu_and_cpu_are_equal_collect(do_join, conf=conf)
+
+
 @ignore_order(local=True)
 @pytest.mark.parametrize('rows', ['(1)', '(1), (null)', '()'], ids=['no_nulls', 'has_nulls', 'empty'])
 def test_broadcast_join_null_aware_anti(rows):
@@ -400,6 +422,55 @@ def test_broadcast_join_null_aware_anti(rows):
         exist_classes='GpuBroadcastHashJoinExec',
         conf=conf)
 
+
+@pytest.mark.skipif(spark_version() != '4.2.0',
+                    reason='Spark 4.2.0 alone applies the general broadcast threshold to NAAJ')
+@allow_non_gpu('BroadcastExchangeExec', 'BroadcastNestedLoopJoinExec',
+               'EqualTo', 'IsNull', 'Or')
+@ignore_order(local=True)
+def test_broadcast_join_null_aware_anti_build_left_fallback():
+    def do_join(spark):
+        spark.range(101, 102).selectExpr('id AS key') \
+            .createOrReplaceTempView('naaj_small_left')
+        # Keep the key nullable so Spark plans a null-aware anti join, but use a condition that
+        # does not produce a null so the result also verifies an unmatched row is preserved.
+        spark.range(100).selectExpr(
+            'IF(id = 200, CAST(NULL AS BIGINT), id) AS key') \
+            .createOrReplaceTempView('naaj_large_right')
+        return spark.sql(
+            'SELECT * FROM naaj_small_left '
+            'WHERE key NOT IN (SELECT key FROM naaj_large_right)')
+
+    def assert_build_left_fallback(cpu_plan, gpu_plan):
+        for plan_name, plan in [('CPU', cpu_plan), ('GPU', gpu_plan)]:
+            joins = [
+                node for node in collect_plan_nodes(plan)
+                if node.getClass().getSimpleName() == 'BroadcastNestedLoopJoinExec'
+            ]
+            assert len(joins) == 1, \
+                f'Expected one {plan_name} BroadcastNestedLoopJoinExec, found {len(joins)}:\n{plan}'
+            join = joins[0]
+            assert join.buildSide().toString() == 'BuildLeft', \
+                f'Expected {plan_name} NAAJ fallback to build left:\n{plan}'
+            assert join.joinType().toString() == 'LeftAnti', \
+                f'Expected {plan_name} NAAJ fallback to be LeftAnti:\n{plan}'
+
+    # Spark estimates the two inputs at 8 and 800 bytes. Keeping only the left side below this
+    # threshold produces the Spark 4.2.0-specific BuildLeft nested-loop fallback.
+    conf = {
+        'spark.sql.adaptive.enabled': 'false',
+        'spark.sql.autoBroadcastJoinThreshold': '100',
+        'spark.sql.optimizeNullAwareAntiJoin': 'true',
+    }
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_join,
+        exist_classes='BroadcastNestedLoopJoinExec',
+        non_exist_classes='GpuBroadcastNestedLoopJoinExec',
+        conf=conf,
+        require_non_empty=True,
+        gpu_plan_assertion=assert_build_left_fallback)
+
+
 @ignore_order(local=True)
 def test_broadcast_nested_loop_join_degen_left_outer_build_no_columns():
     def gen_df_func(spark):
@@ -417,8 +488,8 @@ def test_broadcast_nested_loop_join_degen_left_outer_build_no_columns():
                                      conf={'spark.sql.adaptive.enabled': 'false'})
 
 @ignore_order(local=True)
-@pytest.mark.skipif(is_before_spark_330() or is_databricks_runtime(),
-                    reason="GPU does not support InSubqueryExec before 330 and on DBs")
+@pytest.mark.skipif(is_databricks_runtime(),
+                    reason="GPU does not support InSubqueryExec on Databricks")
 @pytest.mark.parametrize('a_val', ['1', '10'], ids=idfn)  # 1: in t1, 10: not in t1
 def test_broadcast_nested_loop_join_degen_left_outer_stream_no_columns(a_val):
     def degen_join_func(spark):
@@ -516,31 +587,29 @@ def test_cartesian_join(data_gen, batch_size):
 # After 3.1.0 is the min spark version we can drop this
 @ignore_order(local=True)
 @pytest.mark.order(1) # at the head of xdist worker queue if pytest-order is installed
-@pytest.mark.xfail(condition=is_databricks_runtime(),
-    reason='https://github.com/NVIDIA/spark-rapids/issues/334')
 @pytest.mark.parametrize('batch_size', ['100', '1g'], ids=idfn) # set the batch size so we can test multiple stream batches
 def test_cartesian_join_special_case_count(batch_size):
     def do_join(spark):
         left, right = create_df(spark, int_gen, 50, 25)
         return left.crossJoin(right).selectExpr('COUNT(*)')
-    assert_gpu_and_cpu_are_equal_collect(do_join, conf={
-        'spark.rapids.sql.batchSizeBytes': batch_size,
-    })
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_join,
+        exist_classes='GpuCartesianProductExec',
+        conf={'spark.rapids.sql.batchSizeBytes': batch_size})
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
 # After 3.1.0 is the min spark version we can drop this
 @ignore_order(local=True)
 @pytest.mark.order(1) # at the head of xdist worker queue if pytest-order is installed
-@pytest.mark.xfail(condition=is_databricks_runtime(),
-    reason='https://github.com/NVIDIA/spark-rapids/issues/334')
 @pytest.mark.parametrize('batch_size', ['1000', '1g'], ids=idfn) # set the batch size so we can test multiple stream batches
 def test_cartesian_join_special_case_group_by_count(batch_size):
     def do_join(spark):
         left, right = create_df(spark, int_gen, 50, 25)
         return left.crossJoin(right).groupBy('a').count()
-    assert_gpu_and_cpu_are_equal_collect(do_join, conf={
-        'spark.rapids.sql.batchSizeBytes': batch_size,
-    })
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_join,
+        exist_classes='GpuCartesianProductExec',
+        conf={'spark.rapids.sql.batchSizeBytes': batch_size})
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
 # After 3.1.0 is the min spark version we can drop this
@@ -593,16 +662,15 @@ def test_broadcast_nested_loop_join_special_case_count(batch_size):
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
 # After 3.1.0 is the min spark version we can drop this
 @ignore_order(local=True)
-@pytest.mark.xfail(condition=is_databricks_runtime(),
-    reason='https://github.com/NVIDIA/spark-rapids/issues/334')
 @pytest.mark.parametrize('batch_size', ['1000', '1g'], ids=idfn) # set the batch size so we can test multiple stream batches
 def test_broadcast_nested_loop_join_special_case_group_by_count(batch_size):
     def do_join(spark):
         left, right = create_df(spark, int_gen, 50, 25)
         return left.crossJoin(broadcast(right)).groupBy('a').count()
-    assert_gpu_and_cpu_are_equal_collect(do_join, conf={
-        'spark.rapids.sql.batchSizeBytes': batch_size,
-    })
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_join,
+        exist_classes='GpuBroadcastNestedLoopJoinExec',
+        conf={'spark.rapids.sql.batchSizeBytes': batch_size})
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
 # After 3.1.0 is the min spark version we can drop this
@@ -1111,15 +1179,15 @@ def test_broadcast_join_right_struct_mixed_key(data_gen, join_type):
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
 # After 3.1.0 is the min spark version we can drop this
 @ignore_order(local=True)
-@pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/2140')
 @pytest.mark.parametrize('data_gen', [basic_struct_gen_with_floats], ids=idfn)
 @pytest.mark.parametrize('join_type', ['Inner', 'Left', 'Right', 'Cross', 'LeftSemi', 'LeftAnti'], ids=idfn)
 def test_sortmerge_join_struct_with_floats_key(data_gen, join_type):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 500, 250)
         return left.join(right, left.a == right.r_a, join_type)
-    conf = copy_and_update(_sortmerge_join_conf,
-                           {})
+    conf = copy_and_update(_sortmerge_join_conf, {
+        'spark.sql.adaptive.enabled': 'false'  # Disable AQE as it can change the join type.
+    })
     assert_gpu_and_cpu_are_equal_collect(do_join, conf=conf)
 
 @allow_non_gpu('SortMergeJoinExec', 'SortExec', 'NormalizeNaNAndZero', 'CreateNamedStruct',
@@ -1355,14 +1423,30 @@ bloom_filter_confs = {
     "spark.sql.optimizer.runtime.bloomFilter.enabled": "true"
 }
 
-def check_bloom_filter_join(confs, expected_classes, is_multi_column):
+# Dataproc uses Cast instead of XxHash64 for runtime bloom filter probe keys.
+dataproc_bloom_filter_probe_allow = (
+    ("Cast",)
+    if is_dataproc_runtime() or is_dataproc_serverless_runtime()
+    else ()
+)
+
+def check_bloom_filter_join(confs, expected_classes, is_multi_column, probe_gen=None):
     def do_join(spark):
+        left = spark.range(100000)
+        if probe_gen is not None:
+            corner_values = list(probe_gen.list_of_special_cases)
+            if probe_gen.nullable:
+                corner_values.append(None)
+            corner_schema = StructType([
+                StructField("id", probe_gen.data_type, nullable=probe_gen.nullable)])
+            corner_rows = spark.createDataFrame(
+                [(value,) for value in corner_values], schema=corner_schema)
+            left = left.unionByName(corner_rows)
         if is_multi_column:
-            left = spark.range(100000).withColumn("second_id", col("id") % 5)
+            left = left.withColumn("second_id", col("id") % 5)
             right = spark.range(10).withColumn("id2", col("id").cast("string")).withColumn("second_id", col("id") % 5)
             return right.filter("cast(id2 as bigint) % 3 = 0").join(left, (left.id == right.id) & (left.second_id == right.second_id), "inner")
         else:
-            left = spark.range(100000)
             right = spark.range(10).withColumn("id2", col("id").cast("string"))
             return right.filter("cast(id2 as bigint) % 3 = 0").join(left, left.id == right.id, "inner")
     all_confs = copy_and_update(bloom_filter_confs, confs)
@@ -1371,19 +1455,25 @@ def check_bloom_filter_join(confs, expected_classes, is_multi_column):
 @ignore_order(local=True)
 @pytest.mark.parametrize("batch_size", ['1g', '1000'], ids=idfn)
 @pytest.mark.parametrize("is_multi_column", [False, True], ids=idfn)
+@pytest.mark.parametrize("probe_gen", [
+    LongGen(special_cases=[LONG_MIN, LONG_MAX, 0, 1, -1])
+], ids=idfn)
 @pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/8921")
-@pytest.mark.skipif(is_before_spark_330(), reason="Bloom filter joins added in Spark 3.3.0")
-def test_bloom_filter_join(batch_size, is_multi_column):
+def test_bloom_filter_join(batch_size, is_multi_column, probe_gen):
+    # Runtime bloom-filter rewriting inserts might_contain(...) on the large probe side.
     conf = {"spark.rapids.sql.batchSizeBytes": batch_size}
     check_bloom_filter_join(confs=conf,
                             expected_classes="GpuBloomFilterMightContain,GpuBloomFilterAggregate",
-                            is_multi_column=is_multi_column)
+                            is_multi_column=is_multi_column,
+                            probe_gen=probe_gen)
 
-@allow_non_gpu("FilterExec", "ShuffleExchangeExec")
+@allow_non_gpu(
+    "ShuffleExchangeExec", "And", "BloomFilterMightContain", "GetStructField",
+    "ScalarSubquery", "XxHash64", "Remainder",
+    *dataproc_bloom_filter_probe_allow)
 @ignore_order(local=True)
 @pytest.mark.parametrize("is_multi_column", [False, True], ids=idfn)
 @pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/8921")
-@pytest.mark.skipif(is_before_spark_330(), reason="Bloom filter joins added in Spark 3.3.0")
 def test_bloom_filter_join_cpu_probe(is_multi_column):
     conf = {"spark.rapids.sql.expression.BloomFilterMightContain": "false"}
     check_bloom_filter_join(confs=conf,
@@ -1394,7 +1484,6 @@ def test_bloom_filter_join_cpu_probe(is_multi_column):
 @ignore_order(local=True)
 @pytest.mark.parametrize("is_multi_column", [False, True], ids=idfn)
 @pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/8921")
-@pytest.mark.skipif(is_before_spark_330(), reason="Bloom filter joins added in Spark 3.3.0")
 def test_bloom_filter_join_cpu_build(is_multi_column):
     conf = {"spark.rapids.sql.expression.BloomFilterAggregate": "false"}
     check_bloom_filter_join(confs=conf,
@@ -1406,7 +1495,6 @@ def test_bloom_filter_join_cpu_build(is_multi_column):
 @pytest.mark.parametrize("agg_replace_mode", ["partial", "final"])
 @pytest.mark.parametrize("is_multi_column", [False, True], ids=idfn)
 @pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/8921")
-@pytest.mark.skipif(is_before_spark_330(), reason="Bloom filter joins added in Spark 3.3.0")
 def test_bloom_filter_join_split_cpu_build(agg_replace_mode, is_multi_column):
     conf = {"spark.rapids.sql.hashAgg.replaceMode": agg_replace_mode}
     check_bloom_filter_join(confs=conf,
@@ -1415,7 +1503,6 @@ def test_bloom_filter_join_split_cpu_build(agg_replace_mode, is_multi_column):
 
 @ignore_order(local=True)
 @pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/8921")
-@pytest.mark.skipif(is_before_spark_330(), reason="Bloom filter joins added in Spark 3.3.0")
 def test_bloom_filter_join_with_merge_some_null_filters(spark_tmp_path):
     data_path1 = spark_tmp_path + "/BLOOM_JOIN_DATA1"
     data_path2 = spark_tmp_path + "/BLOOM_JOIN_DATA2"
@@ -1432,7 +1519,6 @@ def test_bloom_filter_join_with_merge_some_null_filters(spark_tmp_path):
 
 @ignore_order(local=True)
 @pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/8921")
-@pytest.mark.skipif(is_before_spark_330(), reason="Bloom filter joins added in Spark 3.3.0")
 def test_bloom_filter_join_with_merge_all_null_filters(spark_tmp_path):
     data_path1 = spark_tmp_path + "/BLOOM_JOIN_DATA1"
     data_path2 = spark_tmp_path + "/BLOOM_JOIN_DATA2"
@@ -1525,7 +1611,7 @@ def test_broadcast_nested_join_fix_fallback_by_inputfile(spark_tmp_path, disable
     )
 
 @ignore_order(local=True)
-@pytest.mark.parametrize("join_type", ["Inner", "LeftOuter", "RightOuter"], ids=idfn)
+@pytest.mark.parametrize("join_type", ["Inner", "LeftOuter", "RightOuter", "LeftSemi", "LeftAnti"], ids=idfn)
 @pytest.mark.parametrize("batch_size", ["500", "1g"], ids=idfn)
 def test_distinct_join(join_type, batch_size):
     join_conf = {
@@ -1535,6 +1621,42 @@ def test_distinct_join(join_type, batch_size):
         left_df = spark.range(1024).withColumn("x", f.col("id") + 1)
         right_df = spark.range(768).withColumn("x", f.col("id") + f.col("id"))
         return left_df.join(right_df, ["x"], join_type)
+    assert_gpu_and_cpu_are_equal_collect(do_join, conf=join_conf)
+
+@validate_execs_in_gpu_plan("GpuShuffledHashJoinExec")
+@ignore_order(local=True)
+@pytest.mark.parametrize(
+    "build_side", ["left", "right"], ids=["BUILD_LEFT", "BUILD_RIGHT"])
+def test_distinct_full_outer_join(build_side):
+    join_conf = {
+        "spark.sql.adaptive.enabled": "false",
+        "spark.sql.autoBroadcastJoinThreshold": "-1",
+        "spark.sql.join.preferSortMergeJoin": "false",
+        "spark.sql.shuffle.partitions": "2",
+        # Exercise the stream-side iterator across multiple batches.
+        "spark.rapids.sql.batchSizeBytes": "1",
+        "spark.rapids.sql.join.useShuffledSymmetricHashJoin": "false",
+    }
+
+    def do_join(spark):
+        left_df = spark.createDataFrame([
+            (None, "left_null"),
+            (1, "left_match"),
+            (2, "left_only"),
+            (4, "left_match_2"),
+        ], ["join_key", "left_value"])
+        right_df = spark.createDataFrame([
+            (None, "right_null"),
+            (1, "right_match"),
+            (3, "right_only"),
+            (4, "right_match_2"),
+        ], ["join_key", "right_value"])
+        if build_side == "left":
+            left_df = left_df.hint("SHUFFLE_HASH")
+        else:
+            right_df = right_df.hint("SHUFFLE_HASH")
+        return left_df.join(right_df, ["join_key"], "fullouter")
+
     assert_gpu_and_cpu_are_equal_collect(do_join, conf=join_conf)
 
 @ignore_order(local=True)

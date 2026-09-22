@@ -19,44 +19,7 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
-import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.{HashExprChecks, Murmur3HashExprMeta, XxHash64ExprMeta}
-
-import org.apache.spark.sql.catalyst.expressions.{CollationAwareMurmur3Hash, CollationAwareXxHash64,
-  Expression}
-import org.apache.spark.sql.execution.{OneRowRelationExec, SparkPlan}
-
 /**
- * SparkShimImpl for Spark 4.1.1
- * Extends Spark400PlusCommonShims with 4.1.1 specific overrides.
+ * SparkShimImpl for Spark 4.1.1.
  */
-object SparkShimImpl extends Spark400PlusCommonShims with RebaseShims {
-  override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
-    val shimExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
-      GpuOverrides.expr[CollationAwareMurmur3Hash](
-        "Collation-aware murmur3 hash operator",
-        HashExprChecks.murmur3ProjectChecks,
-        Murmur3HashExprMeta.apply
-      ),
-      GpuOverrides.expr[CollationAwareXxHash64](
-        "Collation-aware xxhash64 operator",
-        HashExprChecks.xxhash64ProjectChecks,
-        XxHash64ExprMeta.apply
-      )
-    ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
-    // Include TimeAddShims for TimestampAddInterval support in 4.1.0
-    super.getExprs ++ shimExprs ++ TimeAddShims.exprs
-  }
-
-  override def getExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = {
-    val shimExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = Seq(
-      // OneRowRelationExec is a new class in Spark 4.1.0 for single-row queries (e.g. SELECT 1)
-      // GPU version produces a single ColumnarBatch with one row and zero columns
-      GpuOverrides.exec[OneRowRelationExec](
-        "Single row relation for literal queries without FROM clause",
-        ExecChecks(TypeSig.all, TypeSig.all),
-        (exec, conf, parent, rule) => new GpuOneRowRelationExecMeta(exec, conf, parent, rule))
-    ).map(r => (r.getClassFor.asSubclass(classOf[SparkPlan]), r)).toMap
-    super.getExecs ++ shimExecs
-  }
-}
+object SparkShimImpl extends Spark411PlusShims

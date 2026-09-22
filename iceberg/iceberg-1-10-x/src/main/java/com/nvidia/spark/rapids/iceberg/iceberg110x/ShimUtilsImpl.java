@@ -19,7 +19,9 @@ package com.nvidia.spark.rapids.iceberg.iceberg110x;
 import com.nvidia.spark.rapids.GpuMetric;
 import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
+import com.nvidia.spark.rapids.iceberg.IcebergDeletionVector;
 import com.nvidia.spark.rapids.iceberg.IcebergShimUtils;
+import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.*;
 import org.apache.iceberg.io.FileIO;
@@ -28,7 +30,7 @@ import org.apache.iceberg.io.SupportsStorageCredentials;
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions;
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.iceberg.spark.SparkUtil;
-import org.apache.iceberg.spark.source.GpuSparkCopyOnWriteScan;
+import org.apache.iceberg.spark.source.GpuSparkCopyOnWriteV1Scan;
 import org.apache.iceberg.spark.source.GpuSparkScan;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.PartitionUtil;
@@ -42,8 +44,27 @@ import java.util.Map;
 /** Iceberg 1.10.x shim: uses {@code SparkUtil::internalToSpark} and a cache-aware footer path. */
 public class ShimUtilsImpl implements IcebergShimUtils {
     @Override
+    public int formatVersion(Table table) {
+        return TableUtil.formatVersion(table);
+    }
+
+    @Override
     public String locationOf(ContentFile<?> f) {
         return f.location();
+    }
+
+    @Override
+    public boolean isDeletionVector(DeleteFile deleteFile) {
+        return deleteFile.format() == FileFormat.PUFFIN;
+    }
+
+    @Override
+    public IcebergDeletionVector readDeletionVector(
+            DeleteFile deleteFile, RapidsInputFile inputFile, boolean validateCrc)
+            throws IOException {
+        return IcebergDeletionVector.read(
+                inputFile, deleteFile.contentOffset(), deleteFile.contentSizeInBytes(),
+                deleteFile.recordCount(), validateCrc);
     }
 
     @Override
@@ -84,6 +105,6 @@ public class ShimUtilsImpl implements IcebergShimUtils {
             Scan cpuScan,
             RapidsConf rapidsConf,
             boolean queryUsesInputFile) {
-        return GpuSparkCopyOnWriteScan.create(cpuScan, rapidsConf, queryUsesInputFile);
+        return GpuSparkCopyOnWriteV1Scan.create(cpuScan, rapidsConf, queryUsesInputFile);
     }
 }

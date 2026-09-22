@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2025, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,7 +15,9 @@
 import pytest
 
 from asserts import assert_gpu_and_cpu_are_equal_iterator
+from conftest import is_emr_runtime
 from marks import approximate_float, incompat, ignore_order, allow_non_gpu, limit
+from spark_session import is_spark_testing_enabled
 
 @incompat
 @approximate_float
@@ -23,5 +25,11 @@ from marks import approximate_float, incompat, ignore_order, allow_non_gpu, limi
 @ignore_order
 @allow_non_gpu(any=True)
 def test_mortgage(mortgage):
+  conf = {}
+  # EMR's PullUpUnion rule rejects the exchange inserted below GpuTopN only when
+  # Spark's internal testing mode is enabled. See https://github.com/NVIDIA/cudf-spark/issues/14928.
+  if is_emr_runtime() and is_spark_testing_enabled():
+    conf['spark.sql.execution.pullUpUnion.enabled'] = 'false'
+
   assert_gpu_and_cpu_are_equal_iterator(
-          lambda spark : mortgage.do_test_query(spark))
+          lambda spark : mortgage.do_test_query(spark), conf=conf)

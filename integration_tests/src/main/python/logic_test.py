@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2024, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@ import pytest
 
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error
 from data_gen import *
-from spark_session import is_before_spark_330, is_before_spark_400
+from spark_session import is_before_spark_400
 from marks import incompat, approximate_float
 from pyspark.sql.types import *
 import pyspark.sql.functions as f
@@ -75,7 +75,6 @@ def test_logical_with_side_effect(ansi_enabled, lhs_arg, int_arg, logic_op):
     bypass_map = {'AND': 'a', 'OR': 'b'}
     expect_error = int_arg == INT_MAX and (lhs_arg == 'NULL' or bypass_map[logic_op] != lhs_arg)
     exception = \
-        "java.lang.ArithmeticException" if is_before_spark_330() else \
         "SparkArithmeticException" if is_before_spark_400() else \
         "pyspark.errors.exceptions.captured.ArithmeticException"
     

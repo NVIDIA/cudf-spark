@@ -22,7 +22,8 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits.ReallyAGpuExpression
 import com.nvidia.spark.rapids.jni.Aggregation64Utils
-import com.nvidia.spark.rapids.shims.{GpuDeterministicFirstLastCollectShim, ShimExpression, TypeUtilsShims}
+import com.nvidia.spark.rapids.shims.{GpuDeterministicFirstLastCollectShim, ShimExpression,
+  TypeUtilsShims}
 import com.nvidia.spark.rapids.window._
 
 import org.apache.spark.sql.catalyst.InternalRow
@@ -90,11 +91,12 @@ object CudfAll {
   def apply(): CudfAggregate = new CudfMin(BooleanType)
 }
 
-class CudfCollectList(override val dataType: DataType) extends CudfAggregate {
+class CudfCollectList(override val dataType: DataType, nullPolicy: NullPolicy)
+    extends CudfAggregate {
   override lazy val reductionAggregate: cudf.ColumnVector => cudf.Scalar =
-    (col: cudf.ColumnVector) => col.reduce(ReductionAggregation.collectList(), DType.LIST)
+    (col: cudf.ColumnVector) => col.reduce(ReductionAggregation.collectList(nullPolicy), DType.LIST)
   override lazy val groupByAggregate: GroupByAggregation =
-    GroupByAggregation.collectList()
+    GroupByAggregation.collectList(nullPolicy)
   override val name: String = "CudfCollectList"
 }
 
@@ -110,31 +112,51 @@ class CudfMergeLists(override val dataType: DataType) extends CudfAggregate {
  * Spark handles NaN's equality by different way for non-nested float/double and float/double
  * in nested types. When we use non-nested versions of floats and doubles, NaN values are
  * considered unequal, but when we collect sets of nested versions, NaNs are considered equal
- * on the CPU. So we set NaNEquality dynamically in CudfCollectSet and CudfMergeSets.
+ * on the CPU. Spark 4.2 changed non-nested NaNs to be equal too, so use a shim helper
+ * for the non-nested NaN equality in CudfCollectSet and CudfMergeSets.
  * Note that dataType is ArrayType(child.dataType) here.
  */
-class CudfCollectSet(override val dataType: DataType) extends CudfAggregate {
-  override lazy val reductionAggregate: cudf.ColumnVector => cudf.Scalar =
-    (col: cudf.ColumnVector) => {
-      val collectSet = dataType match {
-        case ArrayType(FloatType | DoubleType, _) =>
-          ReductionAggregation.collectSet(
-            NullPolicy.EXCLUDE, NullEquality.EQUAL, NaNEquality.UNEQUAL)
-        case _: DataType =>
-          ReductionAggregation.collectSet(
-            NullPolicy.EXCLUDE, NullEquality.EQUAL, NaNEquality.ALL_EQUAL)
-      }
-      col.reduce(collectSet, DType.LIST)
-    }
+class CudfCollectSet(
+    override val dataType: DataType,
+    nullPolicy: NullPolicy) extends CudfAggregate {
+  private lazy val reductionCollectSet: ReductionAggregation = dataType match {
+    case ArrayType(FloatType | DoubleType, _) =>
+      ReductionAggregation.collectSet(
+        nullPolicy, NullEquality.EQUAL, TypeUtilsShims.collectSetFloatNanEquality)
+    case _: DataType =>
+      ReductionAggregation.collectSet(
+        nullPolicy, NullEquality.EQUAL, NaNEquality.ALL_EQUAL)
+  }
+
   override lazy val groupByAggregate: GroupByAggregation = dataType match {
     case ArrayType(FloatType | DoubleType, _) =>
       GroupByAggregation.collectSet(
-        NullPolicy.EXCLUDE, NullEquality.EQUAL, NaNEquality.UNEQUAL)
+        nullPolicy, NullEquality.EQUAL, TypeUtilsShims.collectSetFloatNanEquality)
     case _: DataType =>
       GroupByAggregation.collectSet(
-        NullPolicy.EXCLUDE, NullEquality.EQUAL, NaNEquality.ALL_EQUAL)
+        nullPolicy, NullEquality.EQUAL, NaNEquality.ALL_EQUAL)
   }
   override val name: String = "CudfCollectSet"
+
+  override lazy val reductionAggregate: cudf.ColumnVector => cudf.Scalar =
+    (col: cudf.ColumnVector) => {
+      val rowCount = Math.toIntExact(col.getRowCount)
+      if (nullPolicy == NullPolicy.INCLUDE && rowCount > 0) {
+        // cuDF reduction collectSet currently drops nulls for some INCLUDE cases. Use the
+        // group-by implementation for single-group reductions to preserve Spark's null semantics.
+        withResource(Scalar.fromInt(0)) { keyScalar =>
+          withResource(ColumnVector.fromScalar(keyScalar, rowCount)) { keys =>
+            withResource(new cudf.Table(keys, col)) { table =>
+              withResource(table.groupBy(0).aggregate(groupByAggregate.onColumn(1))) { result =>
+                result.getColumn(1).getScalarElement(0)
+              }
+            }
+          }
+        }
+      } else {
+        col.reduce(reductionCollectSet, DType.LIST)
+      }
+    }
 }
 
 class CudfMergeSets(override val dataType: DataType) extends CudfAggregate {
@@ -142,7 +164,8 @@ class CudfMergeSets(override val dataType: DataType) extends CudfAggregate {
     (col: cudf.ColumnVector) => {
       val mergeSets = dataType match {
         case ArrayType(FloatType | DoubleType, _) =>
-          ReductionAggregation.mergeSets(NullEquality.EQUAL, NaNEquality.UNEQUAL)
+          ReductionAggregation.mergeSets(
+            NullEquality.EQUAL, TypeUtilsShims.collectSetFloatNanEquality)
         case _: DataType =>
           ReductionAggregation.mergeSets(NullEquality.EQUAL, NaNEquality.ALL_EQUAL)
       }
@@ -150,7 +173,7 @@ class CudfMergeSets(override val dataType: DataType) extends CudfAggregate {
     }
   override lazy val groupByAggregate: GroupByAggregation = dataType match {
     case ArrayType(FloatType | DoubleType, _) =>
-      GroupByAggregation.mergeSets(NullEquality.EQUAL, NaNEquality.UNEQUAL)
+      GroupByAggregation.mergeSets(NullEquality.EQUAL, TypeUtilsShims.collectSetFloatNanEquality)
     case _: DataType =>
       GroupByAggregation.mergeSets(NullEquality.EQUAL, NaNEquality.ALL_EQUAL)
   }
@@ -1900,24 +1923,34 @@ trait GpuCollectBase
   with GpuAggregateWindowFunction {
 
   def child: Expression
+  protected def arrayContainsNull: Boolean = false
+
+  /**
+   * Element type stored in the aggregation buffer. Defaults to the result element type.
+   * Spark 4.2+ CollectSet overrides this for float/double to store normalized bit keys.
+   */
+  protected def bufferElementType: DataType = child.dataType
+
+  protected final def bufferDataType: DataType =
+    ArrayType(bufferElementType, containsNull = arrayContainsNull)
 
   override def nullable: Boolean = false
 
-  override def dataType: DataType = ArrayType(child.dataType, containsNull = false)
+  override def dataType: DataType = ArrayType(child.dataType, containsNull = arrayContainsNull)
 
   override def children: Seq[Expression] = child :: Nil
 
   // WINDOW FUNCTION
-  override val windowInputProjection: Seq[Expression] = Seq(child)
+  override lazy val windowInputProjection: Seq[Expression] = Seq(child)
 
-  override val initialValues: Seq[Expression] = {
-    Seq(GpuLiteral.create(new GenericArrayData(Array.empty[Any]), dataType))
+  override lazy val initialValues: Seq[Expression] = {
+    Seq(GpuLiteral.create(new GenericArrayData(Array.empty[Any]), bufferDataType))
   }
 
-  override val inputProjection: Seq[Expression] = Seq(child)
+  override lazy val inputProjection: Seq[Expression] = Seq(child)
 
   protected final lazy val outputBuf: AttributeReference =
-    AttributeReference("inputBuf", dataType)()
+    AttributeReference("inputBuf", bufferDataType)()
 }
 
 /**
@@ -1929,10 +1962,17 @@ trait GpuCollectBase
 case class GpuCollectList(
     child: Expression,
     mutableAggBufferOffset: Int = 0,
-    inputAggBufferOffset: Int = 0)
+    inputAggBufferOffset: Int = 0,
+    ignoreNulls: Boolean = true)
     extends GpuCollectBase {
 
-  override lazy val updateAggregates: Seq[CudfAggregate] = Seq(new CudfCollectList(dataType))
+  private lazy val nullPolicy: NullPolicy =
+    if (ignoreNulls) NullPolicy.EXCLUDE else NullPolicy.INCLUDE
+
+  override protected def arrayContainsNull: Boolean = !ignoreNulls
+
+  override lazy val updateAggregates: Seq[CudfAggregate] =
+    Seq(new CudfCollectList(dataType, nullPolicy))
   override lazy val mergeAggregates: Seq[CudfAggregate] = Seq(new CudfMergeLists(dataType))
   override lazy val evaluateExpression: Expression = outputBuf
   override def aggBufferAttributes: Seq[AttributeReference] = outputBuf :: Nil
@@ -1941,7 +1981,7 @@ case class GpuCollectList(
 
   override def windowAggregation(
       inputs: Seq[(ColumnVector, Int)]): RollingAggregationOnColumn =
-    RollingAggregation.collectList().onColumn(inputs.head._2)
+    RollingAggregation.collectList(nullPolicy).onColumn(inputs.head._2)
 
   // minPeriods should be 0.
   // Consider the following rows: v = [ 0, 1, 2, 3, 4, 5 ]
@@ -1955,16 +1995,59 @@ case class GpuCollectList(
  *
  * The two 'offset' parameters are not used by GPU version, but are here for the compatibility
  * with the CPU version and automated checks.
+ *
+ * On Spark 4.2+, CollectSet stores float/double aggregation buffers as normalized bit patterns
+ * (INT/LONG) so HashSet can treat NaNs and signed zeros as equal. GPU CollectSet mirrors that
+ * by normalizing and bit-keying in [[inputProjection]], so mixed CPU/GPU aggregate stages share
+ * the same buffer layout without host-side per-row float↔bits converters.
  */
 case class GpuCollectSet(
     child: Expression,
     mutableAggBufferOffset: Int = 0,
-    inputAggBufferOffset: Int = 0)
+    inputAggBufferOffset: Int = 0,
+    ignoreNulls: Boolean = true)
     extends GpuCollectBase with GpuUnboundedToUnboundedWindowAgg {
 
-  override lazy val updateAggregates: Seq[CudfAggregate] = Seq(new CudfCollectSet(dataType))
-  override lazy val mergeAggregates: Seq[CudfAggregate] = Seq(new CudfMergeSets(dataType))
-  override lazy val evaluateExpression: Expression = outputBuf
+  private lazy val nullPolicy: NullPolicy =
+    if (ignoreNulls) NullPolicy.EXCLUDE else NullPolicy.INCLUDE
+
+  override protected def arrayContainsNull: Boolean = !ignoreNulls
+
+  // Spark 4.2+ float/double buffers use normalized bit keys (see TypeUtilsShims).
+  override protected def bufferElementType: DataType =
+    TypeUtilsShims.collectSetCpuBufferElementType(child.dataType)
+
+  private lazy val useNormalizedBitKeys: Boolean = bufferElementType != child.dataType
+
+  // Bit-key inputProjection is incompatible with GpuUnboundedToUnboundedAggWindowExec, which only
+  // accepts BoundReference/Literal projections and never applies evaluateExpression. Keep the
+  // Spark 4.2+ float/double path on regular GpuWindowExec (windowInputProjection + rolling).
+  override def supportsUnboundedToUnboundedWindowExec: Boolean = !useNormalizedBitKeys
+
+  override lazy val inputProjection: Seq[Expression] = {
+    if (useNormalizedBitKeys) {
+      Seq(GpuCollectSetNormalizedBitKey(child))
+    } else {
+      Seq(child)
+    }
+  }
+
+  // Window collect_set emits the result array directly from rolling aggregation, so normalize
+  // floats in-place rather than switching the window input to bit keys.
+  override lazy val windowInputProjection: Seq[Expression] = {
+    if (useNormalizedBitKeys) {
+      Seq(GpuNormalizeNaNAndZero(child))
+    } else {
+      Seq(child)
+    }
+  }
+
+  override lazy val updateAggregates: Seq[CudfAggregate] =
+    Seq(new CudfCollectSet(bufferDataType, nullPolicy))
+  override lazy val mergeAggregates: Seq[CudfAggregate] = Seq(new CudfMergeSets(bufferDataType))
+  override lazy val evaluateExpression: Expression =
+    if (useNormalizedBitKeys) GpuCollectSetBitKeysToValues(outputBuf) else outputBuf
+
   override def aggBufferAttributes: Seq[AttributeReference] = outputBuf :: Nil
 
   override def prettyName: String = "collect_set"
@@ -1972,14 +2055,14 @@ case class GpuCollectSet(
   // Spark handles NaN's equality by different way for non-nested float/double and float/double
   // in nested types. When we use non-nested versions of floats and doubles, NaN values are
   // considered unequal, but when we collect sets of nested versions, NaNs are considered equal
-  // on the CPU. So we set NaNEquality dynamically here.
+  // on the CPU. Spark 4.2 changed non-nested NaNs to be equal too, so use a shim helper here.
   override def windowAggregation(
       inputs: Seq[(ColumnVector, Int)]): RollingAggregationOnColumn = child.dataType match {
     case FloatType | DoubleType =>
-      RollingAggregation.collectSet(NullPolicy.EXCLUDE, NullEquality.EQUAL,
-        NaNEquality.UNEQUAL).onColumn(inputs.head._2)
+      RollingAggregation.collectSet(nullPolicy, NullEquality.EQUAL,
+        TypeUtilsShims.collectSetFloatNanEquality).onColumn(inputs.head._2)
     case _ =>
-      RollingAggregation.collectSet(NullPolicy.EXCLUDE, NullEquality.EQUAL,
+      RollingAggregation.collectSet(nullPolicy, NullEquality.EQUAL,
         NaNEquality.ALL_EQUAL).onColumn(inputs.head._2)
   }
 
@@ -1990,20 +2073,77 @@ case class GpuCollectSet(
   override def getMinPeriods: Int = 0
 }
 
+/**
+ * Normalize float/double and bit-cast to the Spark 4.2 CollectSet buffer key type
+ * (Float -> Int, Double -> Long). Uses cuDF normalizeNANsAndZeros (same as
+ * [[GpuNormalizeNaNAndZero]]) for NaN payload and signed-zero canonicalization.
+ */
+case class GpuCollectSetNormalizedBitKey(child: Expression) extends GpuUnaryExpression {
+  override def dataType: DataType = {
+    val keyType = TypeUtilsShims.collectSetCpuBufferElementType(child.dataType)
+    if (keyType == child.dataType) {
+      throw new IllegalStateException(
+        s"CollectSet bit-key conversion only applies when buffer keys differ, found $keyType")
+    }
+    keyType
+  }
+
+  override def doColumnar(input: GpuColumnVector): ColumnVector = {
+    withResource(input.getBase.normalizeNANsAndZeros()) { normalized =>
+      val bitsType = GpuColumnVector.getNonNestedRapidsType(dataType)
+      withResource(normalized.bitCastTo(bitsType)) { bits =>
+        bits.copyToColumnVector()
+      }
+    }
+  }
+}
+
+/**
+ * Convert a CollectSet aggregation buffer of normalized bit keys back to float/double values.
+ * Int keys -> Float, Long keys -> Double.
+ */
+case class GpuCollectSetBitKeysToValues(child: Expression) extends GpuUnaryExpression {
+  override def dataType: DataType = child.dataType match {
+    case ArrayType(IntegerType, containsNull) => ArrayType(FloatType, containsNull)
+    case ArrayType(LongType, containsNull) => ArrayType(DoubleType, containsNull)
+    case t =>
+      throw new IllegalStateException(
+        s"CollectSet bit-key buffer must be ArrayType(IntegerType|LongType), found $t")
+  }
+
+  override def doColumnar(input: GpuColumnVector): ColumnVector = {
+    val list = input.getBase
+    withResource(list.getChildColumnView(0)) { bitsView =>
+      val outDType = bitsView.getType match {
+        case DType.INT32 => DType.FLOAT32
+        case DType.INT64 => DType.FLOAT64
+        case t => throw new IllegalStateException(s"Unexpected CollectSet bit-key cudf type $t")
+      }
+      withResource(bitsView.bitCastTo(outDType)) { valuesView =>
+        withResource(list.replaceListChild(valuesView)) { replaced =>
+          replaced.copyToColumnVector()
+        }
+      }
+    }
+  }
+}
+
 class CpuToGpuCollectBufferConverter(
-    elementType: DataType) extends CpuToGpuAggregateBufferConverter {
+    elementType: DataType,
+    containsNull: Boolean = false) extends CpuToGpuAggregateBufferConverter {
   def createExpression(child: Expression): CpuToGpuBufferTransition = {
-    CpuToGpuCollectBufferTransition(child, elementType)
+    CpuToGpuCollectBufferTransition(child, elementType, containsNull)
   }
 }
 
 case class CpuToGpuCollectBufferTransition(
     override val child: Expression,
-    private val elementType: DataType) extends CpuToGpuBufferTransition {
+    private val elementType: DataType,
+    private val containsNull: Boolean) extends CpuToGpuBufferTransition {
 
   private lazy val row = new UnsafeRow(1)
 
-  override def dataType: DataType = ArrayType(elementType, containsNull = false)
+  override def dataType: DataType = ArrayType(elementType, containsNull)
 
   override protected def nullSafeEval(input: Any): ArrayData = {
     // Converts binary buffer into UnSafeArrayData, according to the deserialize method of Collect.

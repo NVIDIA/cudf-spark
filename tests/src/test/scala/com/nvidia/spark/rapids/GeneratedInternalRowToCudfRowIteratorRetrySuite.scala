@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids
 
-import ai.rapids.cudf.Table
+import ai.rapids.cudf.{HostMemoryBuffer, Table}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.jni.{GpuSplitAndRetryOOM, RmmSpark}
 import com.nvidia.spark.rapids.spill.{SpillableColumnarBatchHandle, SpillableDeviceStore, SpillFramework}
@@ -217,6 +217,69 @@ class GeneratedInternalRowToCudfRowIteratorRetrySuite
         }
       }
       assert(!GpuColumnVector.extractBases(batch).exists(_.getRefCount > 0))
+      assert(!myIter.hasNext)
+      assertResult(0)(SpillFramework.stores.deviceStore.spill(1))
+    }
+  }
+
+  test("fillBatch writes the terminal offset of the packed rows list column") {
+    val batch = buildBatch()
+    val batchIter = Seq(batch).iterator
+    withResource(new ColumnarToRowIterator(batchIter, NoopMetric, NoopMetric, NoopMetric,
+      NoopMetric)) { ctriter =>
+      val schema = Array(AttributeReference("longcol", LongType)().toAttribute)
+      val myIter = GeneratedInternalRowToCudfRowIterator(
+        ctriter, schema, TargetSize(Int.MaxValue),
+        NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric)
+      val numRows = 4
+      withResource(HostMemoryBuffer.allocate(1024)) { dataBuffer =>
+        withResource(HostMemoryBuffer.allocate((numRows + 1) * 4L)) { offsetsBuffer =>
+          // Poison the offsets buffer to mimic recycled host memory: fillBatch must
+          // overwrite every slot it is responsible for, including the terminal one.
+          (0 to numRows).foreach(i => offsetsBuffer.setInt(i * 4L, 0xDEADBEEF))
+          val used = myIter.fillBatch(dataBuffer, offsetsBuffer, 1024L, numRows)
+          val dataOffset = used(0)
+          val rowsCopied = used(1)
+          assertResult(numRows)(rowsCopied)
+          assertResult(0)(offsetsBuffer.getInt(0))
+          // A cudf list requires the terminal offset to equal the child size in bytes,
+          // otherwise offsets-reading consumers like chunked_pack (spill) compute a
+          // corrupt child size.
+          assertResult(dataOffset)(offsetsBuffer.getInt(rowsCopied * 4L))
+        }
+      }
+    }
+  }
+
+  test("converting from rows works after the device batch actually spills") {
+    val batch = buildBatch()
+    val batchIter = Seq(batch).iterator
+    var bytesSpilled = 0L
+    doAnswer(new Answer[Boolean]() {
+      override def answer(invocation: InvocationOnMock): Boolean = {
+        val handle = invocation.getArgument(0).asInstanceOf[SpillableColumnarBatchHandle]
+        invocation.callRealMethod()
+        // Really spill the device column of rows: materializing it afterwards rebuilds
+        // the batch from the chunked-pack metadata, which derives the list child size
+        // from the terminal offset written by fillBatch.
+        bytesSpilled += SpillFramework.stores.deviceStore.spill(handle.approxSizeInBytes)
+        true
+      }
+    }).when(SpillFramework.stores.deviceStore)
+      .track(any())
+
+    withResource(new ColumnarToRowIterator(batchIter, NoopMetric, NoopMetric, NoopMetric,
+      NoopMetric)) { ctriter =>
+      val schema = Array(AttributeReference("longcol", LongType)().toAttribute)
+      val myIter = GeneratedInternalRowToCudfRowIterator(
+        ctriter, schema, TargetSize(Int.MaxValue),
+        NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric)
+      withResource(myIter.next()) { devBatch =>
+        withResource(buildBatch()) { expected =>
+          TestUtils.compareBatches(expected, devBatch)
+        }
+      }
+      assert(bytesSpilled > 0)
       assert(!myIter.hasNext)
       assertResult(0)(SpillFramework.stores.deviceStore.spill(1))
     }

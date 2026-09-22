@@ -33,34 +33,34 @@ object RapidsDeletionVectorRowCountUtils {
   }
 
   /**
-   * Computes the number of deleted rows within the given row ranges.
+   * Computes the number of bitmap-marked rows within the given row ranges.
    *
    * The caller supplies bitmap iteration so OSS and Databricks shims can adapt
    * their distinct RoaringBitmapArray types without coupling this shared source
    * set to either implementation.
    */
-  def countDeletedRows(
+  def countMarkedRows(
       bitmapCardinality: Long,
       rowGroupOffsets: Array[Long],
       rowGroupNumRows: Array[Int])(
-      foreachDeletedRow: (Long => Unit) => Unit): Long = {
+      foreachMarkedRow: (Long => Unit) => Unit): Long = {
     if (bitmapCardinality == 0) {
       0L
     } else {
       var count = 0L
       val rowRanges = rowGroupOffsets.zip(rowGroupNumRows)
-      // Computes the number of deleted rows by iterating only over the set bits
-      // in the bitmap (deleted row indices) and checking which row group each
-      // belongs to. This is O(deleted_rows * num_row_groups) instead of
+      // Computes the number of marked rows by iterating only over the set bits
+      // in the bitmap (marked row indices) and checking which row group each
+      // belongs to. This is O(marked_rows * num_row_groups) instead of
       // O(total_rows). The former is usually smaller than the latter.
       // cuDF added a dedicated API in https://github.com/rapidsai/cudf/pull/21963.
       // Track the Spark RAPIDS follow-up in
       // https://github.com/NVIDIA/spark-rapids/issues/14628.
-      foreachDeletedRow { deletedIndex: Long =>
+      foreachMarkedRow { markedIndex: Long =>
         rowRanges.find { case (offset, numRows) =>
-          deletedIndex >= offset && deletedIndex < offset + numRows
+          markedIndex >= offset && markedIndex < offset + numRows
         }.foreach { _ =>
-          // If the deleted index falls within this row group, count it as deleted.
+          // If the marked index falls within this row group, count it.
           count += 1L
         }
       }
@@ -74,7 +74,7 @@ object RapidsDeletionVectorRowCountUtils {
       chunkedBlocks: collection.Seq[BlockMetaData])(
       foreachDeletedRow: (Long => Unit) => Unit): Int = {
     val (rowGroupOffsets, rowGroupNumRows) = getRowGroupMetadata(chunkedBlocks)
-    val numDeletedRows = countDeletedRows(bitmapCardinality, rowGroupOffsets, rowGroupNumRows)(
+    val numDeletedRows = countMarkedRows(bitmapCardinality, rowGroupOffsets, rowGroupNumRows)(
       foreachDeletedRow)
 
     require(numDeletedRows <= totalNumRows,

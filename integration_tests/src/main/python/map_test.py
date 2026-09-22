@@ -18,7 +18,8 @@ from asserts import *
 from conftest import is_not_utc
 from data_gen import *
 from conftest import is_databricks_runtime
-from marks import allow_non_gpu, datagen_overrides, disable_ansi_mode, ignore_order
+from marks import allow_non_gpu, datagen_overrides, disable_ansi_mode, ignore_order, \
+    validate_execs_in_gpu_plan
 from spark_session import *
 from pyspark.sql.functions import create_map, col, lit, row_number
 from pyspark.sql.types import *
@@ -43,6 +44,7 @@ maps_with_struct_key = [
     MapGen(StructGen([['child0', IntegerGen()],
                       ['child1', IntegerGen()]], nullable=False),
            IntegerGen())]
+
 
 supported_key_map_gens = \
     map_gens_sample + \
@@ -253,7 +255,7 @@ def test_get_map_value_supported_keys(data_gen):
         exist_classes="GpuGetMapValue,GpuMapKeys")
 
 
-@allow_non_gpu("ProjectExec")
+@allow_non_gpu("GetMapValue")
 @pytest.mark.parametrize('data_gen', not_supported_get_map_value_keys_map_gens, ids=idfn)
 def test_get_map_value_fallback_keys(data_gen):
     key_gen = data_gen._key_gen
@@ -279,9 +281,8 @@ def test_basic_scalar_map_get_map_value(key_gen):
 
 
 @allow_non_gpu('WindowLocalExec')
-@datagen_overrides(seed=0, condition=is_before_spark_314()
-                             or (not is_before_spark_320() and is_before_spark_323())
-                             or (not is_before_spark_330() and is_before_spark_331()), reason="https://issues.apache.org/jira/browse/SPARK-40089")
+@datagen_overrides(seed=0, condition=is_before_spark_331(),
+                   reason="https://issues.apache.org/jira/browse/SPARK-40089")
 @pytest.mark.parametrize('data_gen', supported_key_map_gens, ids=idfn)
 @allow_non_gpu(*non_utc_allow)
 def test_map_scalars_supported_key_types(data_gen):
@@ -527,6 +528,20 @@ def test_str_to_map_expr_with_all_regex_delimiters():
             'str_to_map(a, "[,]{1,10}", "[:]{1,10}") as m5'
         ), conf={'spark.sql.mapKeyDedupPolicy': 'LAST_WIN'})
 
+    # test case-insensitive delimiters
+    flag_rows = [
+        ('k1xv1PAIRk2xv2',),
+        ('k1Xv1pairk2xv2',),
+        ('k1Xv1PAIRk2xv2',),
+        (None,),
+    ]
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.createDataFrame(flag_rows, ['a']).selectExpr(
+            'str_to_map(a, "(?i)pair", "x") as inline_pair',
+            'str_to_map(a, "pair", "(?i)x") as inline_key_value',
+            'str_to_map(a, "(?i:pair)", "(?i:x)") as scoped_both'),
+        conf={'spark.sql.mapKeyDedupPolicy': 'LAST_WIN'})
+
 
 @pytest.mark.parametrize('empty_type', all_empty_string_types)
 def test_str_to_map_input_all_empty(empty_type):
@@ -537,17 +552,6 @@ def test_str_to_map_input_all_empty(empty_type):
             'str_to_map(a, ",") as m1',
             'str_to_map(a, ",", ":") as m2'
         ), conf={'spark.sql.mapKeyDedupPolicy': 'LAST_WIN'})
-
-@pytest.mark.skipif(not is_before_spark_330(),
-                    reason="Only in Spark 3.1.1+ (< 3.3.0) + ANSI mode, map key throws on no such element")
-@pytest.mark.parametrize('data_gen', [simple_string_to_string_map_gen], ids=idfn)
-def test_simple_get_map_value_ansi_fail(data_gen):
-    message = "org.apache.spark.SparkNoSuchElementException" if is_databricks104_or_later() else "java.util.NoSuchElementException"
-    assert_gpu_and_cpu_error(
-            lambda spark: unary_op_df(spark, data_gen).selectExpr(
-                'a["NOT_FOUND"]').collect(),
-            conf=ansi_enabled_conf,
-            error_message=message)
 
 @pytest.mark.skipif(is_before_spark_340() and not is_databricks113_or_later(),
                     reason="Only in Spark 3.4+ with ANSI mode, map key returns null on no such element")
@@ -651,7 +655,7 @@ def test_get_map_value_element_at_map_string_col_keys(data_gen):
                     reason="Since Spark3.4 and DB11.3, null will always be returned on invalid access to map")
 def test_element_at_map_string_col_keys_ansi_fail(data_gen):
     keys = StringGen(pattern='NOT_FOUND')
-    message = "org.apache.spark.SparkNoSuchElementException" if (not is_before_spark_330() or is_databricks104_or_later()) else "java.util.NoSuchElementException"
+    message = "org.apache.spark.SparkNoSuchElementException"
     # For 3.3.X strictIndexOperator should not affect element_at
     test_conf = copy_and_update(ansi_enabled_conf, {'spark.sql.ansi.strictIndexOperator': 'false'})
     assert_gpu_and_cpu_error(
@@ -675,7 +679,7 @@ def test_element_at_map_string_col_keys_ansi_null(data_gen):
                     reason="Since Spark3.4 and DB11.3, null will always be returned on invalid access to map")
 def test_get_map_value_string_col_keys_ansi_fail(data_gen):
     keys = StringGen(pattern='NOT_FOUND')
-    message = "org.apache.spark.SparkNoSuchElementException" if (not is_before_spark_330() or is_databricks104_or_later()) else "java.util.NoSuchElementException"
+    message = "org.apache.spark.SparkNoSuchElementException"
     assert_gpu_and_cpu_error(
         lambda spark: two_col_df(spark, data_gen, keys).selectExpr(
             'a[b]').collect(),
@@ -722,7 +726,7 @@ def test_element_at_map_timestamp_keys(data_gen):
 @pytest.mark.skipif(is_spark_340_or_later() or is_databricks113_or_later(),
                     reason="Since Spark3.4 and DB11.3, null will always be returned on invalid access to map")
 def test_map_element_at_ansi_fail(data_gen):
-    message = "org.apache.spark.SparkNoSuchElementException" if (not is_before_spark_330() or is_databricks104_or_later()) else "java.util.NoSuchElementException"
+    message = "org.apache.spark.SparkNoSuchElementException"
     # For 3.3.0+ strictIndexOperator should not affect element_at
     test_conf = copy_and_update(ansi_enabled_conf, {'spark.sql.ansi.strictIndexOperator': 'false'})
     assert_gpu_and_cpu_error(
@@ -850,7 +854,8 @@ def test_sql_map_scalars(query):
 
 @pytest.mark.parametrize('data_gen', map_gens_sample + maps_with_binary_value \
                          + [MapGen(f(nullable=False, min_val=-10, max_val=10), f(), min_length=10) for f in [ByteGen, ShortGen, IntegerGen, LongGen]] \
-                         + [MapGen(StringGen(pattern='key_[0-9]', nullable=False), StringGen(), min_length=10)], ids=idfn)
+                         + [MapGen(StringGen(pattern='key_[0-9]', nullable=False), StringGen(), min_length=10)],
+                         ids=idfn)
 @allow_non_gpu(*non_utc_allow)
 def test_map_zip_with(data_gen):
     def do_it(spark):
@@ -881,6 +886,45 @@ def test_map_zip_with(data_gen):
     # ANSI mode is disabled since this test verifies the behaviour of map_zip_with and the evaluation of the associated lambda. 
     # Exceptions during overflow conditions are tested in the arithmetic-ops tests.
     # Not using @disable_ansi_mode because of https://github.com/NVIDIA/spark-rapids/issues/13214.  Using explicit setting instead.
+    assert_gpu_and_cpu_are_equal_collect(do_it, conf={'spark.sql.ansi.enabled': False})
+
+
+@pytest.mark.parametrize('data_gen', [
+    MapGen(DecimalGen(12, 2, nullable=False),
+           DecimalGen(12, 2, nullable=False), nullable=False),
+    MapGen(DecimalGen(20, 2, nullable=False),
+           DecimalGen(20, 2, nullable=False), nullable=False),
+], ids=idfn)
+@validate_execs_in_gpu_plan('GpuProjectExec')
+@allow_non_gpu(*non_utc_allow)
+def test_map_zip_with_decimal_non_identity(data_gen):
+    def do_it(spark):
+        df = two_col_df(spark, data_gen, data_gen)
+        return df.selectExpr(
+            'a',
+            'b',
+            'map_zip_with(a, b, (key, value1, value2) -> null) as n',
+            'map_zip_with(a, b, (key, value1, value2) -> 1) as one',
+            'map_zip_with(a, b, (key, value1, value2) -> key) as indexed')
+
+    assert_gpu_and_cpu_are_equal_collect(do_it, conf={'spark.sql.ansi.enabled': False})
+
+
+@pytest.mark.parametrize('data_gen', [
+    MapGen(DecimalGen(12, 2, nullable=False),
+           DecimalGen(12, 2, nullable=False), nullable=False),
+    MapGen(DecimalGen(20, 2, nullable=False),
+           DecimalGen(20, 2, nullable=False), nullable=False),
+], ids=idfn)
+@validate_execs_in_gpu_plan('GpuProjectExec')
+@allow_non_gpu(*non_utc_allow)
+def test_map_zip_with_decimal_identity(data_gen):
+    def do_it(spark):
+        df = two_col_df(spark, data_gen, data_gen)
+        return df.selectExpr(
+            'map_zip_with(a, b, (key, value1, value2) -> value1) as ident1',
+            'map_zip_with(a, b, (key, value1, value2) -> value2) as ident2')
+
     assert_gpu_and_cpu_are_equal_collect(do_it, conf={'spark.sql.ansi.enabled': False})
 
 @pytest.mark.parametrize('data_gen', [MapGen(IntegerGen(False, min_val=-5, max_val=5), ArrayGen(int_gen, max_length=5), min_length=7)], ids=idfn)
@@ -928,7 +972,6 @@ def test_map_filter(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: unary_op_df(spark, data_gen).selectExpr(columns))
 
-@pytest.mark.skipif(is_before_spark_330(), reason="try_element_at is not supported before Spark 3.3.0")
 @pytest.mark.parametrize('data_gen', numeric_key_map_gens, ids=idfn)
 def test_try_element_at_map_numeric_keys(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
@@ -940,7 +983,6 @@ def test_try_element_at_map_numeric_keys(data_gen):
             'try_element_at(a, 999)'))
 
 
-@pytest.mark.skipif(is_before_spark_330(), reason="try_element_at is not supported before Spark 3.3.0")
 @pytest.mark.parametrize('data_gen', [simple_string_to_string_map_gen], ids=idfn)
 def test_try_element_at_map_missing_keys(data_gen):
     missing_keys = StringGen(pattern='MISSING_KEY')

@@ -16,18 +16,26 @@
 
 package com.nvidia.spark.rapids.spill
 
-import java.io.File
+import java.io.{BufferedOutputStream, File, FileOutputStream}
 import java.util.Arrays
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsConf
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
+import org.scalatestplus.mockito.MockitoSugar
 
-class SpillablePartialFileHandleSuite extends AnyFunSuite with BeforeAndAfterEach {
+class SpillablePartialFileHandleSuite
+    extends AnyFunSuite with BeforeAndAfterEach with MockitoSugar {
 
   // Use 1GB max buffer size for tests to avoid memory issues on test machines
   private val testMaxBufferSize = 1L * 1024 * 1024 * 1024
+  private val spillInProgressField = {
+    val field = classOf[SpillablePartialFileHandle].getDeclaredField("spillInProgress")
+    field.setAccessible(true)
+    field
+  }
 
   override def beforeEach(): Unit = {
     super.beforeEach()
@@ -40,6 +48,38 @@ class SpillablePartialFileHandleSuite extends AnyFunSuite with BeforeAndAfterEac
   override def afterEach(): Unit = {
     SpillFramework.shutdown()
     super.afterEach()
+  }
+
+  private def setSpillInProgress(handle: SpillablePartialFileHandle, value: Boolean): Unit = {
+    spillInProgressField.setBoolean(handle, value)
+  }
+
+  private def waitUntil(condition: => Boolean, clue: String): Unit = {
+    val deadline = System.currentTimeMillis() + 5000
+    while (!condition && System.currentTimeMillis() < deadline) {
+      Thread.sleep(10)
+    }
+    assert(condition, clue)
+  }
+
+  /**
+   * Runs `body` against a finished FILE_ONLY handle backed by a fresh temp file, then closes the
+   * handle and deletes the file. The temp file is exposed so tests can assert on its deletion.
+   */
+  private def withFinishedFileOnlyHandle(data: Array[Byte] = "lease".getBytes("UTF-8"))(
+      body: (SpillablePartialFileHandle, File) => Unit): Unit = {
+    val tempFile = File.createTempFile("test-lease-", ".tmp")
+    val handle = SpillablePartialFileHandle.createFileOnly(tempFile)
+    try {
+      handle.write(data, 0, data.length)
+      handle.finishWrite()
+      body(handle, tempFile)
+    } finally {
+      handle.close()
+      if (tempFile.exists()) {
+        tempFile.delete()
+      }
+    }
   }
 
   test("FILE_ONLY mode: write and read") {
@@ -222,6 +262,68 @@ class SpillablePartialFileHandleSuite extends AnyFunSuite with BeforeAndAfterEac
     }
   }
 
+  test("MEMORY_WITH_SPILL mode: interrupted close still completes cleanup") {
+    val tempFile = File.createTempFile("test-interrupted-close-", ".tmp")
+    val handle = SpillablePartialFileHandle.createMemoryWithSpill(
+      initialCapacity = 1024,
+      maxBufferSize = testMaxBufferSize,
+      memoryThreshold = 0.5,
+      spillFile = tempFile)
+    var closeThread: Thread = null
+
+    try {
+      val testData = "data retained until close".getBytes("UTF-8")
+      handle.write(testData, 0, testData.length)
+      handle.finishWrite()
+      assert(handle.host.nonEmpty)
+      assert(tempFile.exists())
+
+      handle.synchronized {
+        setSpillInProgress(handle, true)
+      }
+
+      val closeReturnedWithInterrupt = new AtomicBoolean(false)
+      val closeError = new AtomicReference[Throwable]()
+      closeThread = new Thread("test-interrupted-partial-file-close") {
+        override def run(): Unit = {
+          try {
+            handle.close()
+            closeReturnedWithInterrupt.set(Thread.currentThread().isInterrupted)
+          } catch {
+            case t: Throwable => closeError.set(t)
+          }
+        }
+      }
+
+      closeThread.start()
+      waitUntil(closeThread.getState == Thread.State.WAITING,
+        "close thread did not wait for spillInProgress")
+      closeThread.interrupt()
+
+      handle.synchronized {
+        setSpillInProgress(handle, false)
+        handle.notifyAll()
+      }
+      closeThread.join(5000)
+
+      assert(!closeThread.isAlive)
+      assert(closeError.get() == null)
+      assert(closeReturnedWithInterrupt.get())
+      assert(handle.host.isEmpty)
+      assert(!tempFile.exists())
+    } finally {
+      handle.synchronized {
+        setSpillInProgress(handle, false)
+        handle.notifyAll()
+      }
+      if (closeThread != null && closeThread.isAlive) {
+        closeThread.join(5000)
+      }
+      handle.close()
+      tempFile.delete()
+    }
+  }
+
   test("MEMORY_WITH_SPILL mode: sequential write with single bytes") {
     val tempFile = File.createTempFile("test-single-bytes-", ".tmp")
 
@@ -283,6 +385,37 @@ class SpillablePartialFileHandleSuite extends AnyFunSuite with BeforeAndAfterEac
       
       // EOF
       assert(handle.read(read0, 0, 10) == -1)
+    }
+  }
+
+  test("FILE_ONLY mode: read with logical size larger than Int.MaxValue") {
+    val testData = "dummy shuffle bytes".getBytes("UTF-8")
+    val tempFile = createTempFileWithData("test-file-only-large-logical-", testData)
+
+    withLargeLogicalFileOnlyHandle(tempFile) { handle =>
+      val readBuffer = new Array[Byte](testData.length)
+      assert(handle.read(readBuffer, 0, readBuffer.length) == readBuffer.length)
+      assert(readBuffer.sameElements(testData))
+    }
+  }
+
+  test("FILE_ONLY mode: readAt with logical size larger than Int.MaxValue") {
+    val testData = "dummy shuffle bytes".getBytes("UTF-8")
+    val tempFile = createTempFileWithData("test-file-only-large-logical-random-", testData)
+
+    withLargeLogicalFileOnlyHandle(tempFile) { handle =>
+      val readBuffer = new Array[Byte](testData.length)
+      assert(handle.readAt(0, readBuffer, 0, readBuffer.length) == readBuffer.length)
+      assert(readBuffer.sameElements(testData))
+    }
+  }
+
+  test("boundedReadLength requires non-negative inputs") {
+    assertThrows[IllegalArgumentException] {
+      SpillablePartialFileHandle.boundedReadLengthAsInt(-1, 1L)
+    }
+    assertThrows[IllegalArgumentException] {
+      SpillablePartialFileHandle.boundedReadLengthAsInt(1, -1L)
     }
   }
 
@@ -572,5 +705,99 @@ class SpillablePartialFileHandleSuite extends AnyFunSuite with BeforeAndAfterEac
       assert(handle.isSpilled)
     }
   }
-}
 
+  private def withLargeLogicalFileOnlyHandle(tempFile: File)(
+      testBody: SpillablePartialFileHandle => Unit): Unit = {
+    val outputStream = mock[BufferedOutputStream]
+    withResource(SpillablePartialFileHandle.createFileOnly(
+      file = tempFile,
+      syncWrites = false,
+      bufferedOutputStreamFactory = _ => outputStream)) { handle =>
+      val ignored = new Array[Byte](1)
+      val expectedLogicalSize = Int.MaxValue.toLong + 4096L
+      handle.write(ignored, 0, Int.MaxValue)
+      handle.write(ignored, 0, 4096)
+      handle.finishWrite()
+      assert(handle.getTotalBytesWritten == expectedLogicalSize)
+      testBody(handle)
+    }
+  }
+
+  private def createTempFileWithData(prefix: String, data: Array[Byte]): File = {
+    val tempFile = File.createTempFile(prefix, ".tmp")
+    val out = new FileOutputStream(tempFile)
+    try {
+      out.write(data)
+    } finally {
+      out.close()
+    }
+    tempFile
+  }
+
+  // ----- Shuffle read-lease lifecycle: acquireRead / releaseRead / deferred close --------------
+
+  test("read lease: close defers until the last lease is released") {
+    withFinishedFileOnlyHandle() { (handle, tempFile) =>
+      handle.acquireRead()
+      handle.acquireRead()
+
+      // Close requested while two leases are held: must defer.
+      handle.close()
+      assert(!handle.isPhysicallyClosed, "handle must stay open while leases are held")
+      assert(tempFile.exists(), "backing file must not be deleted while leases are held")
+
+      handle.releaseRead()
+      assert(!handle.isPhysicallyClosed, "handle must stay open while one lease remains")
+
+      handle.releaseRead()
+      assert(handle.isPhysicallyClosed, "handle must close once the last lease is released")
+      assert(!tempFile.exists(), "FILE_ONLY close must delete the backing file")
+    }
+  }
+
+  test("read lease: repeated close() while a lease is held stays deferred") {
+    withFinishedFileOnlyHandle() { (handle, tempFile) =>
+      handle.acquireRead()
+
+      // Multiple owners can request close while a reader is active: the catalog's
+      // unregisterShuffle and the spill store's shutdown both call handle.close(). close() is a
+      // close-request, not a refcount decrement, so repeated calls stay idempotent and must not
+      // free the handle while the lease is outstanding.
+      handle.close()
+      handle.close()
+      assert(!handle.isPhysicallyClosed,
+        "repeated close() must not free the handle while a lease is held")
+      assert(tempFile.exists(), "backing file must survive repeated close() while a lease is held")
+
+      handle.releaseRead()
+      assert(handle.isPhysicallyClosed, "handle closes once the lease is released")
+      assert(!tempFile.exists(), "FILE_ONLY close must delete the backing file")
+    }
+  }
+
+  test("read lease: close with no active leases closes immediately") {
+    withFinishedFileOnlyHandle() { (handle, tempFile) =>
+      handle.close()
+      assert(handle.isPhysicallyClosed, "close with no leases must close immediately")
+      assert(!tempFile.exists())
+    }
+  }
+
+  test("read lease: acquireRead after close throws") {
+    withFinishedFileOnlyHandle() { (handle, _) =>
+      handle.close()
+      assert(handle.isPhysicallyClosed)
+      assertThrows[IllegalStateException] {
+        handle.acquireRead()
+      }
+    }
+  }
+
+  test("read lease: releaseRead without acquireRead throws") {
+    withFinishedFileOnlyHandle() { (handle, _) =>
+      assertThrows[IllegalStateException] {
+        handle.releaseRead()
+      }
+    }
+  }
+}

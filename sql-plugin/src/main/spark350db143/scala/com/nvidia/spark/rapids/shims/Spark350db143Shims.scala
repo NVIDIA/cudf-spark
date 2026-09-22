@@ -25,7 +25,10 @@ import com.nvidia.spark.rapids._
 import org.apache.spark.sql.execution.{SparkPlan, UnionExec}
 
 trait Spark350db143Shims extends Spark341PlusDBShims {
-  private val shimExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = Seq(
+  // Keep this lazy to avoid a class-initialization cycle: building these rules calls
+  // GpuOverrides.exec, while GpuOverrides initialization calls SparkShimImpl.
+  // Eager evaluation can deadlock if the two singleton objects are initialized concurrently.
+  private lazy val shimExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = Seq(
     GpuOverrides.exec[UnionExec](
       "The backend for the union operator",
       ExecChecks((TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 +

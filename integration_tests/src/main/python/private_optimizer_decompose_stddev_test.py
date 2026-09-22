@@ -18,12 +18,10 @@ from marks import approximate_float
 from private_optimizer_common import (
     assert_rule_fires,
     private_optimizer_conf,
-    require_private_optimizer,
 )
 
 
 @pytest.mark.private_optimizer
-@require_private_optimizer
 @approximate_float
 def test_decompose_stddev_pop():
     """DecomposeStddevPop rewrites stddev_pop(x) into sum(x), sum(x*x),

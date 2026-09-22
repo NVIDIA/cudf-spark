@@ -1,4 +1,4 @@
-# Copyright (c) 2021-2025, NVIDIA CORPORATION.
+# Copyright (c) 2021-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ from data_gen import *
 from marks import *
 from pyspark.sql.functions import *
 from pyspark.sql.types import *
-from spark_session import with_cpu_session, with_gpu_session
+from spark_session import is_spark_420_or_later, with_cpu_session, with_gpu_session
 
 # mark this test as ci_1 for mvn verify sanity check in pre-merge CI
 pytestmark = pytest.mark.premerge_ci_1
@@ -67,11 +67,20 @@ def test_explain_udf():
         df = spark.createDataFrame([(1, "John Doe", 21)], ("id", "name", "age"))
         df2 = df.select(slen("name").alias("slen(name)"), to_upper("name"), add_one("age"))
         explain_str = spark.sparkContext._jvm.com.nvidia.spark.rapids.ExplainPlan.explainPotentialGpuPlan(df2._jdf, "ALL")
-        # udf shouldn't be on GPU
-        udf_str_not = 'cannot run on GPU because GPU does not currently support the operator class org.apache.spark.sql.execution.python.BatchEvalPythonExec'
-        assert udf_str_not in explain_str
+        # udf shouldn't be fully on GPU. Spark 4.2 enables Arrow-optimized Python
+        # UDFs here, so regular udf(...) is planned as ArrowEvalPythonExec instead
+        # of the older BatchEvalPythonExec.
+        udf_exec = 'ArrowEvalPythonExec' if is_spark_420_or_later() else 'BatchEvalPythonExec'
+        udf_str_not = \
+            'cannot run on GPU because GPU does not currently support the operator class ' + \
+            f'org.apache.spark.sql.execution.python.{udf_exec}'
+        if is_spark_420_or_later():
+            assert f'Exec <{udf_exec}> will partially run on GPU' in explain_str
+        else:
+            assert udf_str_not in explain_str
         not_on_gpu_str = spark.sparkContext._jvm.com.nvidia.spark.rapids.ExplainPlan.explainPotentialGpuPlan(df2._jdf, "NOT")
-        assert udf_str_not in not_on_gpu_str
+        if not is_spark_420_or_later():
+            assert udf_str_not in not_on_gpu_str
         assert "will run on GPU" not in not_on_gpu_str
 
     with_cpu_session(do_explain)

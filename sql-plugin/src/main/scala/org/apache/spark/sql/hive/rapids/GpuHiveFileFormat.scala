@@ -213,6 +213,11 @@ class GpuHiveParquetFileFormat(compType: CompressionType) extends ColumnarFileFo
       RapidsConf.PARQUET_WRITER_ROW_GROUP_SIZE_ROWS.get(sparkSession.sessionState.conf)
     val parquetWriterRowGroupSizeBytes =
       RapidsConf.PARQUET_WRITER_ROW_GROUP_SIZE_BYTES.get(sparkSession.sessionState.conf)
+    val parquetWriterMaxDictionarySize =
+      RapidsConf.PARQUET_WRITER_MAX_DICTIONARY_SIZE.get(sparkSession.sessionState.conf)
+    val parquetWriterDictionaryPolicy =
+      RapidsConf.PARQUET_WRITER_DICTIONARY_POLICY.get(sparkSession.sessionState.conf)
+        .map(ParquetWriterOptions.DictionaryPolicy.valueOf)
     new ColumnarOutputWriterFactory {
       override def getFileExtension(context: TaskAttemptContext): String =
         compressionType match {
@@ -227,7 +232,8 @@ class GpuHiveParquetFileFormat(compType: CompressionType) extends ColumnarFileFo
           debugOutputPath: Option[String],
           fileIO: RapidsFileIO): ColumnarOutputWriter = {
         new GpuHiveParquetWriter(path, dataSchema, context, compressionType, statsTrackers,
-          debugOutputPath, parquetWriterRowGroupSizeRows, parquetWriterRowGroupSizeBytes, fileIO)
+          debugOutputPath, parquetWriterRowGroupSizeRows, parquetWriterRowGroupSizeBytes,
+          parquetWriterMaxDictionarySize, parquetWriterDictionaryPolicy, fileIO)
       }
 
       override def partitionFlushSize(context: TaskAttemptContext): Long =
@@ -242,6 +248,8 @@ class GpuHiveParquetWriter(override val path: String, dataSchema: StructType,
     debugOutputPath: Option[String],
     parquetWriterRowGroupSizeRows: Option[Integer],
     parquetWriterRowGroupSizeBytes: Option[Long],
+    parquetWriterMaxDictionarySize: Option[Long],
+    parquetWriterDictionaryPolicy: Option[ParquetWriterOptions.DictionaryPolicy],
     fileIO: RapidsFileIO)
   extends ColumnarOutputWriter(context, dataSchema, NvtxRegistry.FILE_FORMAT_WRITE, true,
     statsTrackers, debugOutputPath, false, false, fileIO) {
@@ -258,6 +266,12 @@ class GpuHiveParquetWriter(override val path: String, dataSchema: StructType,
     }
     parquetWriterRowGroupSizeBytes.foreach { rowGroupSizeBytes =>
       optionsBuilder.withRowGroupSizeBytes(rowGroupSizeBytes)
+    }
+    parquetWriterMaxDictionarySize.foreach { maxDictionarySize =>
+      optionsBuilder.withMaxDictionarySize(maxDictionarySize)
+    }
+    parquetWriterDictionaryPolicy.foreach { dictionaryPolicy =>
+      optionsBuilder.withDictionaryPolicy(dictionaryPolicy)
     }
     Table.writeParquetChunked(optionsBuilder.build(), this)
   }

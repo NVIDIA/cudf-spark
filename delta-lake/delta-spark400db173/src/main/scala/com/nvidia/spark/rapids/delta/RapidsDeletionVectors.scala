@@ -130,7 +130,7 @@ object RapidsDeletionVectors extends Logging {
         val filterTypes = tahoeFileIndex.rowIndexFilters.getOrElse(Map.empty)
           .map(kv => kv._1 -> kv._2.getRowIndexFilterType)
         val matchingFiles = tahoeFileIndex
-          .matchingFiles(partitionFilters = Seq(TrueLiteral), dataFilters = Seq(TrueLiteral))
+          .matchingFiles(partitionFilters = Seq.empty, dataFilters = Seq(TrueLiteral))
 
         def fileKeys(relativePath: String): Seq[String] = {
           val absolute = absolutePath(tahoeFileIndex.path.toString, relativePath)
@@ -362,7 +362,7 @@ object RapidsDeletionVectors extends Logging {
       scalaBitmap: RoaringBitmapArray,
       rowGroupOffsets: Array[Long],
       rowGroupNumRows: Array[Int]): Long = {
-    RapidsDeletionVectorRowCountUtils.countDeletedRows(
+    RapidsDeletionVectorRowCountUtils.countMarkedRows(
       scalaBitmap.cardinality, rowGroupOffsets, rowGroupNumRows) { countDeletedRow =>
         scalaBitmap.forEach { deletedIndex: Long =>
           countDeletedRow(deletedIndex)

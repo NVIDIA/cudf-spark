@@ -18,14 +18,91 @@ from pyspark.sql.types import *
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_cpu_and_gpu_are_equal_collect_with_capture
 from conftest import is_databricks_runtime, is_not_utc
 from data_gen import *
-from spark_session import is_spark_400_or_later
+from spark_session import is_databricks173_or_later, is_spark_400_or_later
 from marks import ignore_order, allow_non_gpu
-from spark_session import with_cpu_session, is_databricks113_or_later, is_before_spark_330, is_databricks_version, is_databricks_version_or_later
+from spark_session import with_cpu_session, is_databricks113_or_later, is_databricks_version, is_databricks_version_or_later
 
 # allow non gpu when time zone is non-UTC because of https://github.com/NVIDIA/spark-rapids/issues/9653'
 not_utc_aqe_allow=['ShuffleExchangeExec', 'HashAggregateExec'] if is_not_utc() else []
 
 _adaptive_conf = { "spark.sql.adaptive.enabled": "true" }
+
+
+@pytest.mark.skipif(
+    not is_databricks173_or_later(), reason="Databricks 17.3+ AutoOptimizedShuffle")
+@ignore_order(local=True)
+def test_databricks_auto_optimized_shuffle():
+    initial_shuffle_partitions = 32
+    conf = copy_and_update(_adaptive_conf, {
+        "spark.databricks.adaptive.autoOptimizeShuffle.enabled": "true",
+        # Isolate pre-shuffle AOS resizing from AQE post-shuffle coalescing.
+        "spark.sql.adaptive.coalescePartitions.enabled": "false",
+        "spark.sql.shuffle.partitions": str(initial_shuffle_partitions),
+    })
+
+    def do_groupby(spark):
+        assert spark.conf.get(
+            "spark.databricks.adaptive.autoOptimizeShuffle.enabled") == "true"
+        return spark.range(0, 4096, 1, 32) \
+            .selectExpr("id % 8 AS key", "id AS value") \
+            .groupBy("key").sum("value")
+
+    def collect_plan_nodes(plan):
+        nodes = [plan]
+        class_name = plan.getClass().getSimpleName()
+        if class_name == "AdaptiveSparkPlanExec":
+            nodes.extend(collect_plan_nodes(plan.executedPlan()))
+        elif class_name.endswith("QueryStageExec"):
+            nodes.extend(collect_plan_nodes(plan.plan()))
+        elif class_name in ("ReusedExchangeExec", "ReusedSubqueryExec"):
+            nodes.extend(collect_plan_nodes(plan.child()))
+        else:
+            children = plan.children().iterator()
+            while children.hasNext():
+                nodes.extend(collect_plan_nodes(children.next()))
+        return nodes
+
+    def assert_auto_optimized_shuffle(cpu_plan, gpu_plan):
+        cpu_exchanges = [
+            node for node in collect_plan_nodes(cpu_plan)
+            if node.getClass().getSimpleName() == "ShuffleExchangeExec"
+        ]
+        assert len(cpu_exchanges) == 1, \
+            f"Expected one CPU shuffle exchange, found {len(cpu_exchanges)}:\n{cpu_plan}"
+        cpu_partition_count = cpu_exchanges[0].outputPartitioning().numPartitions()
+        assert cpu_partition_count > 0, \
+            f"Expected a positive CPU shuffle partition count:\n{cpu_plan}"
+        assert cpu_partition_count != initial_shuffle_partitions, \
+            f"AutoOptimizedShuffle did not resize the CPU shuffle from " \
+            f"{initial_shuffle_partitions} partitions:\n{cpu_plan}"
+
+        gpu_exchanges = [
+            node for node in collect_plan_nodes(gpu_plan)
+            if node.getClass().getSimpleName() == "GpuShuffleExchangeExec"
+        ]
+        assert len(gpu_exchanges) == 1, \
+            f"Expected one GPU shuffle exchange, found {len(gpu_exchanges)}:\n{gpu_plan}"
+
+        exchange = gpu_exchanges[0]
+        partition_counts = {
+            "target": exchange.targetOutputPartitioning().numPartitions(),
+            "output": exchange.outputPartitioning().numPartitions(),
+            "gpu": exchange.gpuOutputPartitioning().numPartitions(),
+            "dependency": exchange.shuffleDependencyColumnar().partitioner().numPartitions(),
+        }
+        assert len(set(partition_counts.values())) == 1, \
+            f"Inconsistent optimized shuffle partition counts: {partition_counts}\n{gpu_plan}"
+        assert partition_counts["target"] == cpu_partition_count, \
+            f"CPU and GPU AutoOptimizedShuffle partition counts differ: " \
+            f"CPU={cpu_partition_count}, GPU={partition_counts['target']}\n{gpu_plan}"
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_groupby,
+        exist_classes="GpuShuffleExchangeExec",
+        conf=conf,
+        require_non_empty=True,
+        gpu_plan_assertion=assert_auto_optimized_shuffle)
+
 
 def create_skew_df(spark, length):
     root = spark.range(0, length)
@@ -169,7 +246,10 @@ def test_aqe_broadcast_join_non_columnar_child(spark_tmp_path):
             """
         )
 
-    conf = copy_and_update(_adaptive_conf, { 'spark.rapids.sql.expression.Concat': 'false' })
+    # Disable the CPU Bridge because the test wants to know what happens when ProjectExec falls back to CPU
+    # Not what happens when the bridge falls back an expression.
+    conf = copy_and_update(_adaptive_conf, { 'spark.rapids.sql.expression.Concat': 'false',
+        'spark.rapids.sql.expression.cpuBridge.enabled': 'false' })
 
     if is_databricks113_or_later():
         assert_cpu_and_gpu_are_equal_collect_with_capture(do_it, exist_classes="GpuShuffleExchangeExec",conf=conf)
@@ -250,7 +330,6 @@ def test_aqe_join_reused_exchange_inequality_condition(spark_tmp_path, join):
 # https://github.com/NVIDIA/spark-rapids/issues/10165 where it has an executor broadcast
 # but the exchange going into the BroadcastHashJoin is an exchange with multiple partitions
 # and goes into AQEShuffleRead that uses CoalescePartitions to go down to a single partition
-db_133_cpu_bnlj_join_allow=["ShuffleExchangeExec"] if is_databricks113_or_later() else []
 @ignore_order(local=True)
 @pytest.mark.skipif(not (is_databricks_runtime()), \
     reason="Executor side broadcast only supported on Databricks")
@@ -427,7 +506,7 @@ def test_aqe_join_and_agg_single_value():
     assert_gpu_and_cpu_are_equal_collect(lambda spark: spark.sql(test_query), conf=_adaptive_conf)
 
 # this should be fixed by https://github.com/NVIDIA/spark-rapids/issues/11120
-aqe_join_with_dpp_fallback=["FilterExec"] if (is_databricks_runtime() or is_before_spark_330()) else []
+aqe_join_with_dpp_fallback=["FilterExec", "InSubqueryExec"] if is_databricks_runtime() else []
 if is_databricks_version_or_later(14, 3):
     aqe_join_with_dpp_fallback.append("CollectLimitExec")
 

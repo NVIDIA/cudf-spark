@@ -22,7 +22,6 @@ import java.nio.channels.SeekableByteChannel
 import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.Arm.closeOnExcept
 import com.nvidia.spark.rapids.GpuMetric
-import com.nvidia.spark.rapids.filecache.FileCache
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.hive.common.io.DiskRangeList
 import org.apache.orc.OrcProto
@@ -35,7 +34,6 @@ abstract class GpuOrcDataReader320Plus(
 
   private class BufferChunkLoader(useDirect: Boolean) extends BlockLoader {
     override def loadRemoteBlocks(
-        baseOffset: Long,
         first: DiskRangeList,
         last: DiskRangeList,
         data: ByteBuffer): DiskRangeList = {
@@ -47,8 +45,8 @@ abstract class GpuOrcDataReader320Plus(
         buffer.limit((current.getEnd - offset).toInt)
         current.asInstanceOf[BufferChunk].setChunk(buffer)
         // see if the filecache wants any of this data
-        val cacheToken = FileCache.get.startDataRangeCache(inputFile,
-          baseOffset + current.getOffset, current.getLength)
+        val cacheToken = fileCache.startDataRangeCache(inputFile,
+          current.getOffset, current.getLength)
         cacheToken.foreach { token =>
           val hmb = closeOnExcept(HostMemoryBuffer.allocate(current.getLength, false)) { hmb =>
             hmb.setBytes(0, buffer.array(),
@@ -91,7 +89,7 @@ abstract class GpuOrcDataReader320Plus(
 
   override def readFileData(chunks: BufferChunkList, forceDirect: Boolean): BufferChunkList = {
     if (chunks != null) {
-      readDiskRanges(chunks.get, 0, new BufferChunkLoader(forceDirect))
+      readDiskRanges(chunks.get, new BufferChunkLoader(forceDirect))
     }
     chunks
   }

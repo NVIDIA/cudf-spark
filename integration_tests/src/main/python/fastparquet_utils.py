@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.
+# Copyright (c) 2023-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 import pytest
 
 from pyspark.sql import Row
+from spark_session import is_spark_420_or_later
 
 def get_fastparquet_result_canonicalizer():
     # Get a converter like fastparquet that flattens the GPU results.
@@ -35,8 +37,34 @@ def _convert_fastparquet_result(fastparquet_cpu, gpu):
     :param gpu: the gpu result, it's a Spark Row list
     :return: (fastparquet, converted_gpu) tuple
     """
-    new_gpu = [_convert_gpu_row(gpu_row) for gpu_row in gpu]
+    converted_gpu = [_convert_gpu_row(gpu_row) for gpu_row in gpu]
+    if not is_spark_420_or_later():
+        return (fastparquet_cpu, converted_gpu)
+    new_gpu = [
+        _normalize_gpu_nans_like_fastparquet(
+            fastparquet_cpu[idx] if idx < len(fastparquet_cpu) else None,
+            gpu_row)
+        for idx, gpu_row in enumerate(converted_gpu)]
     return (fastparquet_cpu, new_gpu)
+
+def _normalize_gpu_nans_like_fastparquet(cpu_value, gpu_value):
+    # Spark 4.2 converts pandas NaN values from fastparquet into Spark nulls.
+    # Normalize only those matching GPU NaN values so other null mismatches still fail.
+    if cpu_value is None:
+        return None if isinstance(gpu_value, float) and math.isnan(gpu_value) else gpu_value
+    if isinstance(cpu_value, Row) and isinstance(gpu_value, Row):
+        cpu_dict = cpu_value.asDict()
+        gpu_dict = gpu_value.asDict()
+        return Row(**{
+            key: _normalize_gpu_nans_like_fastparquet(cpu_dict.get(key), gpu_dict.get(key))
+            for key in gpu_value.__fields__})
+    if isinstance(cpu_value, list) and isinstance(gpu_value, list):
+        return [
+            _normalize_gpu_nans_like_fastparquet(
+                cpu_value[idx] if idx < len(cpu_value) else None,
+                gpu_item)
+            for idx, gpu_item in enumerate(gpu_value)]
+    return gpu_value
 
 def _convert_gpu_row(gpu_row):
     converted_dict = _get_converted_dict(gpu_row)

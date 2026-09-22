@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,10 +16,12 @@
 
 package org.apache.spark.sql.rapids
 
+import com.nvidia.spark.rapids.GpuIn
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.dsl.expressions._
-import org.apache.spark.sql.catalyst.expressions.Literal
+import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Literal}
+import org.apache.spark.sql.types.IntegerType
 
 class CanonicalizeSuite extends AnyFunSuite {
   /* In the future, if we decide to implement the Spark 3.3 algorithm to perform canonicalization
@@ -33,5 +35,15 @@ class CanonicalizeSuite extends AnyFunSuite {
         assert(bc(GpuAdd($"a", $"b", true)(), Literal(10))
             .semanticEquals(bc(GpuAdd($"b", $"a", true)(), Literal(10))))
       })
+  }
+
+  test("GpuIn list order") {
+    val a = AttributeReference("a", IntegerType)()
+    val b = AttributeReference("b", IntegerType)()
+    val c = AttributeReference("c", IntegerType)()
+    val left = GpuIn(a, Seq(1, 2), Seq(b, c))
+    val right = GpuIn(a, Seq(2, 1), Seq(c, b))
+
+    assert(left.semanticEquals(right))
   }
 }

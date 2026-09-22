@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids.tests.scaletest
 
 import java.io.{File, FileOutputStream}
 
+import com.nvidia.spark.rapids.ConsoleOutput
 import com.nvidia.spark.rapids.tests.scaletest.ScaleTest.Config
 import org.json4s._
 import org.json4s.jackson.Serialization.writePretty
@@ -47,6 +48,6 @@ class TestReport(config: Config, queryMetas: Seq[QueryMeta]) {
     val os = new FileOutputStream(config.reportPath)
     os.write(writePretty(queryMetas).getBytes)
     os.close()
-    println(s"JSON report file saved at: ${config.reportPath}")
+    ConsoleOutput.writeLine(s"JSON report file saved at: ${config.reportPath}")
   }
 }

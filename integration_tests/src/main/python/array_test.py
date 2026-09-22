@@ -14,10 +14,10 @@
 
 import pytest
 
-from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_are_equal_sql, assert_gpu_and_cpu_error, assert_gpu_and_cpu_same_data_or_error, assert_gpu_fallback_collect
+from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_are_equal_sql, assert_gpu_and_cpu_error, assert_gpu_and_cpu_same_data_or_error, assert_gpu_fallback_collect, assert_cpu_and_gpu_are_equal_collect_with_capture
 from data_gen import *
 from conftest import is_databricks_runtime
-from marks import incompat, allow_non_gpu, disable_ansi_mode
+from marks import incompat, allow_non_gpu, disable_ansi_mode, validate_execs_in_gpu_plan
 from spark_session import *
 from pyspark.sql.types import *
 from pyspark.sql.types import IntegralType
@@ -163,7 +163,6 @@ def test_array_item_ansi_fail_invalid_index(index):
         error_message=message)
 
 
-@pytest.mark.skipif(is_before_spark_330(), reason="try_element_at is not supported before Spark 3.3.0")
 @pytest.mark.parametrize('data_gen', array_item_test_gens, ids=idfn)
 def test_try_element_at_basic(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
@@ -176,7 +175,6 @@ def test_try_element_at_basic(data_gen):
             'try_element_at(a, b)'))
 
 
-@pytest.mark.skipif(is_before_spark_330(), reason="try_element_at is not supported before Spark 3.3.0")
 @pytest.mark.parametrize('index', [-2, 100, array_out_index_gen], ids=idfn)
 def test_try_element_at_invalid_index(index):
     if isinstance(index, int):
@@ -191,7 +189,6 @@ def test_try_element_at_invalid_index(index):
     assert_gpu_and_cpu_are_equal_collect(test_func, conf=ansi_enabled_conf)
 
 
-@pytest.mark.skipif(is_before_spark_330(), reason="try_element_at is not supported before Spark 3.3.0")
 @pytest.mark.parametrize('index', [0, array_zero_index_gen], ids=idfn)
 def test_try_element_at_zero_index_throws_error(index):
     if is_spark_340_or_later():
@@ -317,7 +314,10 @@ def test_array_contains_for_nans(data_gen):
 orderable_gens_sample = orderable_gens + array_gens_sample + struct_gens_sample_with_decimal128
 orderable_gens_sample_no_null = [g for g in orderable_gens_sample if g != null_gen]
 @pytest.mark.parametrize('data_gen',
-    orderable_gens_sample_no_null if is_spark_340_or_later() or is_databricks_runtime() else orderable_gens_sample, ids=idfn)
+    (orderable_gens_sample_no_null if is_spark_340_or_later() or is_databricks_runtime()
+     else orderable_gens_sample) + [
+        pytest.param(BinaryGen(), marks=validate_execs_in_gpu_plan('GpuProjectExec'))
+    ], ids=idfn)
 def test_array_position(data_gen):
     # min_length=6 to make sure 'a[5]' always works.
     arr_gen = ArrayGen(data_gen, min_length=6)
@@ -381,7 +381,7 @@ def test_array_slice_with_zero_start(data_gen, zero_start, valid_length):
         lambda spark: three_col_df(spark, array_all_null_gen, zero_start_gen, valid_length_gen, length=5).selectExpr(
             f"slice(a, {zero_start}, {valid_length})"))
     error = "The value of parameter(s) `start` in `slice` is invalid: Expects a positive or a negative value for `start`, but got"\
-        if is_databricks143_or_later() or is_spark_400_or_later() \
+        if is_databricks_runtime() or is_spark_400_or_later() \
         else "Unexpected value for start in function slice: SQL array indices start at 1."
     # start can not be zero
     assert_gpu_and_cpu_error(
@@ -440,7 +440,7 @@ def test_array_slice_with_negative_length_error_null_scalar_length():
 def test_array_slice_with_negative_length_error(data_gen, valid_start, negative_length):
     negative_length_gen = IntegerGen(nullable=False, min_val=-25, max_val=-1, special_cases=[])
     error = "The value of parameter(s) `length` in `slice` is invalid: Expects `length` greater than or equal to 0"\
-        if is_databricks143_or_later() or is_spark_400_or_later()\
+        if is_databricks_runtime() or is_spark_400_or_later()\
         else 'Unexpected value for length in function slice: length must be greater than or equal to 0.'
     # Non-null start, length can not be negative
     assert_gpu_and_cpu_error(
@@ -458,7 +458,7 @@ def test_array_slice_with_negative_length_error(data_gen, valid_start, negative_
 def test_array_slice_with_negative_length_fails_when_cpu_fails(data_gen, valid_start, negative_length):
     negative_length_gen = IntegerGen(nullable=True, min_val=-25, max_val=-1, special_cases=[])
     maybe_error = "The value of parameter(s) `length` in `slice` is invalid: Expects `length` greater than or equal to 0"\
-        if is_databricks143_or_later() or is_spark_400_or_later()\
+        if is_databricks_runtime() or is_spark_400_or_later()\
         else 'Unexpected value for length in function slice: length must be greater than or equal to 0.'
     # Non-null start, length can not be negative
     assert_gpu_and_cpu_same_data_or_error(
@@ -487,7 +487,7 @@ def test_array_element_at(data_gen):
 @pytest.mark.parametrize('index', [100, array_out_index_gen], ids=idfn)
 @disable_ansi_mode
 def test_array_element_at_ansi_fail_invalid_index(index):
-    message = "ArrayIndexOutOfBoundsException" if is_before_spark_330() or not is_before_spark_400() else "SparkArrayIndexOutOfBoundsException"
+    message = "ArrayIndexOutOfBoundsException" if not is_before_spark_400() else "SparkArrayIndexOutOfBoundsException"
     if isinstance(index, int):
         test_func = lambda spark: unary_op_df(spark, ArrayGen(int_gen)).select(
             element_at(col('a'), index)).collect()
@@ -719,6 +719,66 @@ def test_array_filter(data_gen):
         return unary_op_df(spark, data_gen).selectExpr(columns)
 
     assert_gpu_and_cpu_are_equal_collect(do_it)
+
+
+# Port of Spark DataFrameFunctionsSuite.test("test array_compact") and coverage for array_compact.
+# array_compact removes null values from an array; in Spark 4.0 it is rewritten to
+# KnownNotContainsNull(ArrayFilter(_, x -> x IS NOT NULL)), so result schema has containsNull=false.
+@pytest.mark.skipif(is_before_spark_340(), reason="array_compact is supported from Spark 3.4.0")
+@pytest.mark.parametrize('data_gen', [
+    ArrayGen(string_gen),
+    ArrayGen(int_gen),
+    ArrayGen(ArrayGen(int_gen)),
+    ArrayGen(ArrayGen(StructGen([["A", int_gen], ["B", string_gen]])))], ids=idfn)
+def test_array_compact(data_gen):
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: unary_op_df(spark, data_gen).selectExpr('array_compact(a)'))
+
+
+@pytest.mark.skipif(is_before_spark_400(), reason="KnownNotContainsNull is used from Spark 4.0")
+@pytest.mark.parametrize('data_gen', [
+    ArrayGen(BinaryGen(max_length=10), max_length=10),
+    ArrayGen(ArrayGen(BinaryGen(max_length=10), max_length=5), max_length=5),
+    ArrayGen(StructGen([["A", BinaryGen(max_length=10)]]), max_length=5)], ids=idfn)
+def test_array_compact_binary(data_gen):
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: unary_op_df(spark, data_gen).selectExpr('array_compact(a)'),
+        exist_classes="GpuKnownNotContainsNull",
+        non_exist_classes="GpuCpuBridgeExpression")
+
+
+# Port of Spark DataFrameFunctionsSuite.test("test array_compact") - literal and corner cases.
+@pytest.mark.skipif(is_before_spark_340(), reason="array_compact is supported from Spark 3.4.0")
+def test_array_compact_corner_cases():
+    # Same data and expectations as Spark test: nulls removed, empty arrays, all-null -> empty.
+    assert_gpu_and_cpu_are_equal_sql(
+        lambda spark: spark.createDataFrame(
+            [
+                ([None, 1, 2, None, 3, 4], ["a", None, "b", None, "c", "d"], ["", ""]),
+                ([], ["1.0", "2.2", "3.0"], []),
+                ([None, None, None], None, None),
+            ],
+            "a array<int>, b array<string>, c array<string>"),
+        "array_compact_table",
+        "SELECT array_compact(a) as a, array_compact(b) as b, array_compact(c) as c FROM array_compact_table")
+    # Literal: array_compact(array(1.0D, 2.0D, null)) -> [1.0, 2.0]
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql("SELECT array_compact(array(1.0D, 2.0D, null))"))
+    # Nested arrays: null elements removed, nested nulls inside retained
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(
+            "SELECT array_compact(array(array(1, null, 3), null, array(null, 2, 3)))"))
+
+
+# Port of Spark DataFrameFunctionsSuite.test("test array_compact") - invalid type raises analysis error.
+@pytest.mark.skipif(is_before_spark_340(), reason="array_compact is supported from Spark 3.4.0")
+def test_array_compact_invalid_type():
+    from pyspark.sql.functions import array_compact
+    # array_compact expects ARRAY; passing INT must fail with DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE.
+    assert_gpu_and_cpu_error(
+        lambda spark: spark.range(3).select(array_compact(col("id"))).collect(),
+        conf={},
+        error_message="UNEXPECTED_INPUT_TYPE")
 
 
 array_zips_gen = array_gens_sample + [ArrayGen(map_string_string_gen[0], max_length=5),

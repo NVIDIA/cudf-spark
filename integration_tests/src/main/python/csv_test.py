@@ -214,7 +214,7 @@ def read_csv_sql(data_path, schema, spark_tmp_table_factory, options = {}):
     ('trucks-more-comments.csv', _trucks_schema,  {'header': 'true', 'comment': '#'}),
     pytest.param('trucks-missing-quotes.csv', _trucks_schema, {'header': 'true'}, marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/130')),
     pytest.param('trucks-null.csv', _trucks_schema, {'header': 'true', 'nullValue': 'null'}, marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/2068')),
-    pytest.param('trucks-null.csv', _trucks_schema, {'header': 'true'}, marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/1986')),
+    ('trucks-null.csv', _trucks_schema, {'header': 'true'}),
     pytest.param('simple_int_values.csv', _byte_schema, {'header': 'true'}),
     pytest.param('simple_int_values.csv', _short_schema, {'header': 'true'}),
     pytest.param('simple_int_values.csv', _int_schema, {'header': 'true'}),
@@ -255,8 +255,18 @@ def test_basic_csv_read(std_input_path, name, schema, options, read_func, v1_ena
         'spark.sql.sources.useV1SourceList': v1_enabled_list,
         'spark.sql.ansi.enabled': ansi_enabled
     })
-    assert_gpu_and_cpu_are_equal_collect(read_func(std_input_path + '/' + name, schema, spark_tmp_table_factory, options),
-            conf=updated_conf)
+    read = read_func(std_input_path + '/' + name, schema, spark_tmp_table_factory, options)
+    if name == 'trucks-null.csv' and 'nullValue' not in options:
+        if v1_enabled_list == 'csv':
+            gpu_scan = 'GpuFileSourceScanExec'
+        elif read_func is read_csv_sql:
+            gpu_scan = 'GpuFileSourceScanExec'
+        else:
+            gpu_scan = 'GpuBatchScanExec'
+        assert_cpu_and_gpu_are_equal_collect_with_capture(
+            read, exist_classes=gpu_scan, conf=updated_conf)
+    else:
+        assert_gpu_and_cpu_are_equal_collect(read, conf=updated_conf)
 
 @pytest.mark.parametrize('name,schema,options', [
     pytest.param('small_float_values.csv', _float_schema, {'header': 'true'}),
@@ -492,7 +502,6 @@ def test_csv_save_as_table_fallback(spark_tmp_path, spark_tmp_table_factory):
             data_path,
             'DataWritingCommandExec')
 
-@pytest.mark.skipif(is_before_spark_330(), reason='Hidden file metadata columns are a new feature of Spark 330')
 @allow_non_gpu(any = True)
 @pytest.mark.parametrize('metadata_column', ["file_path", "file_name", "file_size", "file_modification_time"])
 def test_csv_scan_with_hidden_metadata_fallback(spark_tmp_path, metadata_column):
@@ -512,7 +521,6 @@ def test_csv_scan_with_hidden_metadata_fallback(spark_tmp_path, metadata_column)
         exist_classes= "FileSourceScanExec",
         non_exist_classes= "GpuBatchScanExec")
 
-@pytest.mark.skipif(is_before_spark_330(), reason='Reading day-time interval type is supported from Spark3.3.0')
 @pytest.mark.parametrize('v1_enabled_list', ["", "csv"])
 def test_round_trip_for_interval(spark_tmp_path, v1_enabled_list):
     csv_interval_gens = [
@@ -568,26 +576,45 @@ def test_csv_read_count(spark_tmp_path):
     assert_gpu_and_cpu_row_counts_equal(lambda spark: spark.read.csv(data_path),
         conf = {'spark.rapids.sql.explain': 'ALL'})
 
+spark_350_timestamp_inference_xfail_formats = {
+    ('yyyy-MM-dd', ''),
+    ('yyyy-MM', ''),
+    ('yyyy-MM-dd', "'T'HH:mm:ss"),
+    ('yyyy-MM-dd', "'T'HH:mm"),
+}
+
+def run_csv_infer_schema_timestamp_ntz(
+        spark_tmp_path, date_format, ts_part, timestamp_type, v1_enabled_list, cpu_scan_class):
+    try:
+        csv_infer_schema_timestamp_ntz(
+            spark_tmp_path, date_format, ts_part, timestamp_type, v1_enabled_list,
+            cpu_scan_class)
+    except Exception:
+        if (is_spark_350()
+                and timestamp_type == 'TIMESTAMP_LTZ'
+                and (date_format, ts_part) in spark_350_timestamp_inference_xfail_formats):
+            pytest.xfail(reason="https://github.com/NVIDIA/spark-rapids/issues/9325")
+        raise
+
 @allow_non_gpu('FileSourceScanExec', 'ProjectExec', 'CollectLimitExec', 'DeserializeToObjectExec')
 @pytest.mark.skipif(is_before_spark_341(), reason='`TIMESTAMP_NTZ` is only supported in PySpark 341+')
 @pytest.mark.parametrize('date_format', csv_supported_date_formats)
 @pytest.mark.parametrize('ts_part', csv_supported_ts_parts)
-@pytest.mark.parametrize("timestamp_type", [
-    pytest.param('TIMESTAMP_LTZ', marks=pytest.mark.xfail(is_spark_350_or_later(), reason="https://github.com/NVIDIA/spark-rapids/issues/9325")),
-    "TIMESTAMP_NTZ"])
+@pytest.mark.parametrize('timestamp_type', ['TIMESTAMP_LTZ', 'TIMESTAMP_NTZ'])
 def test_csv_infer_schema_timestamp_ntz_v1(spark_tmp_path, date_format, ts_part, timestamp_type):
-    csv_infer_schema_timestamp_ntz(spark_tmp_path, date_format, ts_part, timestamp_type, 'csv', 'FileSourceScanExec')
+    run_csv_infer_schema_timestamp_ntz(
+        spark_tmp_path, date_format, ts_part, timestamp_type, 'csv', 'FileSourceScanExec')
 
 @allow_non_gpu('BatchScanExec', 'FileSourceScanExec', 'ProjectExec', 'CollectLimitExec', 'DeserializeToObjectExec')
-@pytest.mark.skip(reason="https://github.com/NVIDIA/spark-rapids/issues/9325")
+@pytest.mark.skipif(is_databricks_runtime(),
+    reason="https://github.com/NVIDIA/spark-rapids/issues/9325")
 @pytest.mark.skipif(is_before_spark_341(), reason='`TIMESTAMP_NTZ` is only supported in PySpark 341+')
 @pytest.mark.parametrize('date_format', csv_supported_date_formats)
 @pytest.mark.parametrize('ts_part', csv_supported_ts_parts)
-@pytest.mark.parametrize("timestamp_type", [
-    pytest.param('TIMESTAMP_LTZ', marks=pytest.mark.xfail(is_spark_350_or_later(), reason="https://github.com/NVIDIA/spark-rapids/issues/9325")),
-    "TIMESTAMP_NTZ"])
+@pytest.mark.parametrize('timestamp_type', ['TIMESTAMP_LTZ', 'TIMESTAMP_NTZ'])
 def test_csv_infer_schema_timestamp_ntz_v2(spark_tmp_path, date_format, ts_part, timestamp_type):
-    csv_infer_schema_timestamp_ntz(spark_tmp_path, date_format, ts_part, timestamp_type, '', 'BatchScanExec')
+    run_csv_infer_schema_timestamp_ntz(
+        spark_tmp_path, date_format, ts_part, timestamp_type, '', 'BatchScanExec')
 
 def csv_infer_schema_timestamp_ntz(spark_tmp_path, date_format, ts_part, timestamp_type, v1_enabled_list, cpu_scan_class):
     full_format = date_format + ts_part
@@ -708,8 +735,8 @@ def test_read_case_col_name(spark_tmp_path, spark_tmp_table_factory, read_func, 
 def test_csv_read_gbk_encoded_data(std_input_path):
     # Conf does not work before 4.0.0, so verify even setting to false it should still work.
     legacy_charset = "false"
-    if is_spark_400_or_later() or is_databricks143_or_later():
-        # true from Spark 4.0.0 or DB 143 to pass the test for GBK.
+    if is_spark_400_or_later() or is_databricks_runtime():
+        # true from Spark 4.0.0 or on supported Databricks runtimes to pass the test for GBK.
         # We can not test the "GBK-with-false" case because Spark will fail the
         # current app before running into the GPU world.
         legacy_charset = "true"

@@ -17,7 +17,6 @@
 /*** spark-rapids-shim-json-lines
 {"spark": "330db"}
 {"spark": "332db"}
-{"spark": "341db"}
 {"spark": "350db143"}
 {"spark": "400db173"}
 spark-rapids-shim-json-lines ***/
@@ -52,7 +51,8 @@ trait Spark330PlusDBShims extends Spark321PlusDBShims {
         }),
       GpuElementAtMeta.elementAtRule(true)
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
-    super.getExprs ++ shimExprs ++ DayTimeIntervalShims.exprs ++ RoundingShims.exprs
+    super.getExprs ++ shimExprs ++ YearMonthIntervalShims.exprs ++
+      DayTimeIntervalShims.exprs ++ RoundingShims.exprs
   }
 
   override def getExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] =

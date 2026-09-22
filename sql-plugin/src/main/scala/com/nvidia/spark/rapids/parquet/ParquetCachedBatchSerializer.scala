@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids.parquet
 
-import java.io.{InputStream, IOException}
+import java.io.IOException
 import java.nio.ByteBuffer
 
 import scala.collection.JavaConverters._
@@ -26,10 +26,11 @@ import scala.collection.mutable.ListBuffer
 import ai.rapids.cudf._
 import ai.rapids.cudf.ParquetWriterOptions.StatisticsFrequency
 import com.nvidia.spark.GpuCachedBatchSerializer
-import com.nvidia.spark.rapids.{ColumnCastUtil, DecimalUtil, GpuColumnVector, GpuRowToColumnConverter, GpuSemaphore, RapidsConf, RequireSingleBatch, RowToColumnarIterator, SchemaUtils}
+import com.nvidia.spark.rapids.{ByteBufferInputStream, ColumnCastUtil, DecimalUtil, GpuColumnVector, GpuRowToColumnConverter, GpuSemaphore, RapidsConf, RequireSingleBatch, RowToColumnarIterator, SchemaUtils}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.GpuColumnVector.GpuColumnarBatchBuilder
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
+import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 import com.nvidia.spark.rapids.shims.{LegacyBehaviorPolicyShim, ParquetVariantShims, SparkShimImpl}
 import com.nvidia.spark.rapids.shims.parquet.{ParquetFieldIdShims, ParquetLegacyNanoAsLongShims, ParquetTimestampNTZShims}
@@ -61,59 +62,6 @@ import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.unsafe.types.CalendarInterval
-
-/**
- * copied from Spark org.apache.spark.util.ByteBufferInputStream
- */
-private class ByteBufferInputStream(private var buffer: ByteBuffer)
-    extends InputStream {
-
-  override def read(): Int = {
-    if (buffer == null || buffer.remaining() == 0) {
-      cleanUp()
-      -1
-    } else {
-      buffer.get() & 0xFF
-    }
-  }
-
-  override def read(dest: Array[Byte]): Int = {
-    read(dest, 0, dest.length)
-  }
-
-  override def read(dest: Array[Byte], offset: Int, length: Int): Int = {
-    if (buffer == null || buffer.remaining() == 0) {
-      cleanUp()
-      -1
-    } else {
-      val amountToGet = math.min(buffer.remaining(), length)
-      buffer.get(dest, offset, amountToGet)
-      amountToGet
-    }
-  }
-
-  override def skip(bytes: Long): Long = {
-    if (buffer != null) {
-      val amountToSkip = math.min(bytes, buffer.remaining).toInt
-      buffer.position(buffer.position() + amountToSkip)
-      if (buffer.remaining() == 0) {
-        cleanUp()
-      }
-      amountToSkip
-    } else {
-      0L
-    }
-  }
-
-  /**
-   * Clean up the buffer, and potentially dispose of it using StorageUtils.dispose().
-   */
-  private def cleanUp(): Unit = {
-    if (buffer != null) {
-      buffer = null
-    }
-  }
-}
 
 class ByteArrayInputFile(buff: Array[Byte]) extends InputFile {
 
@@ -506,38 +454,43 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
         GpuSemaphore.acquireIfNecessary(TaskContext.get())
         val parquetOptions = ParquetOptions.builder()
             .includeColumn(selectedAttributes.map(_.name).asJavaCollection).build()
-        val table = try {
-          Table.readParquet(parquetOptions, parquetCB.buffer, 0, parquetCB.sizeInBytes)
-        } catch {
-          case e: Exception =>
-            throw new IOException("Error when processing file " +
-                s"[range: 0-${parquetCB.sizeInBytes}]", e)
-        }
-        withResource(table) { table =>
-          withResource {
-            for (i <- 0 until table.getNumberOfColumns) yield {
-              ColumnCastUtil.ifTrueThenDeepConvertTypeAtoTypeB(table.getColumn(i),
-                originalSelectedAttributes(i).dataType,
-                (dataType, _) => dataType match {
-                  case d: DecimalType if d.scale < 0 => true
-                  case _ => false
-                },
-                (dataType, cv) => {
-                  dataType match {
-                    case d: DecimalType =>
-                      withResource(cv.bitCastTo(DecimalUtil.createCudfDecimal(d))) {
-                        _.copyToColumnVector()
-                      }
-                    case _ =>
-                      throw new IllegalStateException("We don't cast any type besides Decimal " +
-                          "with scale < 0")
+        withRetryNoSplit {
+          val table = try {
+            Table.readParquet(parquetOptions, parquetCB.buffer, 0, parquetCB.sizeInBytes)
+          } catch {
+            case e: Exception =>
+              throw new IOException("Error when processing file " +
+                  s"[range: 0-${parquetCB.sizeInBytes}]", e)
+          }
+          withResource(table) { table =>
+            withResource(new mutable.ArrayBuffer[ColumnVector]) { columns =>
+              for (i <- 0 until table.getNumberOfColumns) {
+                columns += ColumnCastUtil.ifTrueThenDeepConvertTypeAtoTypeB(table.getColumn(i),
+                  originalSelectedAttributes(i).dataType,
+                  (dataType, cv) => dataType match {
+                    case BinaryType if cv.getType == DType.STRING => true
+                    case d: DecimalType if d.scale < 0 => true
+                    case _ => false
+                  },
+                  (dataType, cv) => {
+                    dataType match {
+                      case BinaryType =>
+                        ParquetSchemaUtils.convertStringToBinary(cv)
+                      case d: DecimalType =>
+                        withResource(cv.bitCastTo(DecimalUtil.createCudfDecimal(d))) {
+                          _.copyToColumnVector()
+                        }
+                      case _ =>
+                        throw new IllegalStateException("We only cast STRING-backed BinaryType " +
+                            "and DecimalType with scale < 0")
+                    }
                   }
-                }
-              )
-            }
-          } { col =>
-            withResource(new Table(col: _*)) { t =>
-              GpuColumnVector.from(t, originalSelectedAttributes.map(_.dataType).toArray)
+                )
+              }
+              withResource(new Table(columns.toArray: _*)) { convertedTable =>
+                GpuColumnVector.from(convertedTable,
+                  originalSelectedAttributes.map(_.dataType).toArray)
+              }
             }
           }
         }

@@ -16,11 +16,15 @@
 
 package org.apache.iceberg.spark.source
 
+import com.nvidia.spark.rapids.shims.GpuV2BatchWriteSummaryCommit
+
 import org.apache.spark.sql.connector.write._
 
 abstract class GpuBaseBatchWrite(
     write: GpuSparkWrite,
-    cpuBatchWrite: BatchWrite) extends BatchWrite {
+    cpuBatchWrite: BatchWrite) extends BatchWrite with GpuV2BatchWriteSummaryCommit {
+  override protected def summaryCommitDelegate: BatchWrite = cpuBatchWrite
+
   override def createBatchWriterFactory(physicalWriteInfo: PhysicalWriteInfo): DataWriterFactory
   = write.createDataWriterFactory
 
@@ -76,8 +80,9 @@ class GpuCopyOnWriteOperation(write: GpuSparkWrite, cpuBatchWrite: BatchWrite)
  */
 class GpuPositionDeltaBatchWrite(write: GpuSparkPositionDeltaWrite,
                                  cpuBatchWrite: DeltaBatchWrite)
-  extends DeltaBatchWrite {
-  
+  extends DeltaBatchWrite with GpuV2BatchWriteSummaryCommit {
+
+  override protected def summaryCommitDelegate: BatchWrite = cpuBatchWrite
 
   override def commit(messages: Array[WriterCommitMessage]): Unit = {
     // Delegate to CPU PositionDeltaBatchWrite's commit method

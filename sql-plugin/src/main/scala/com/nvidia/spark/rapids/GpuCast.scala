@@ -755,7 +755,7 @@ object GpuCast {
     case DateType => input.asStrings("%Y-%m-%d")
     case TimestampType if options.castToJsonString => castTimestampToJson(input)
     case TimestampType => castTimestampToString(input)
-    case FloatType | DoubleType => CastStrings.fromFloat(input)
+    case FloatType | DoubleType => CastStrings.fromFloat(input, options.castToJsonString)
     case BinaryType => castBinToString(input, options)
     case _: DecimalType => GpuCastShims.CastDecimalToString(input, options.useDecimalPlainString)
     case StructType(fields) => castStructToString(input, fields, options)
@@ -1167,17 +1167,18 @@ object GpuCast {
             }
           }
           // now wrap the string with `{` and `}`
-          withResource(jsonAttrs) { _ =>
+          val wrapped = withResource(jsonAttrs) { _ =>
             withResource(ArrayBuffer.empty[ColumnVector]) { columns =>
               columns += leftBrace.incRefCount()
               columns += jsonAttrs.incRefCount()
               columns += rightBrace.incRefCount()
-              withResource(ColumnVector.stringConcatenate(emptyScalar,
-                emptyScalar, columns.toArray, false))(
-                _.mergeAndSetValidity(BinaryOp.BITWISE_AND, input) // original whole row is null
-              )
+              ColumnVector.stringConcatenate(emptyScalar,
+                emptyScalar, columns.toArray, false)
             }
           }
+          withResource(wrapped)(
+            _.mergeAndSetValidity(BinaryOp.BITWISE_AND, input) // original whole row is null
+          )
       }
     }
   }
@@ -1432,11 +1433,7 @@ object GpuCast {
         if (input.getNullCount == 0) {
           casted.copyToColumnVector()
         } else {
-          withResource(input.isNull) { isNull =>
-            withResource(GpuScalar.from(null, to)) { nullVal =>
-              isNull.ifElse(nullVal, casted)
-            }
-          }
+          casted.mergeAndSetValidity(BinaryOp.BITWISE_AND, input)
         }
       }
     }

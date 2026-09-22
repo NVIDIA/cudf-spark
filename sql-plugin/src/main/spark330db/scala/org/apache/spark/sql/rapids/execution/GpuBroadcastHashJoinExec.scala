@@ -17,7 +17,6 @@
 /*** spark-rapids-shim-json-lines
 {"spark": "330db"}
 {"spark": "332db"}
-{"spark": "341db"}
 {"spark": "350db143"}
 {"spark": "400db173"}
 spark-rapids-shim-json-lines ***/
@@ -96,6 +95,9 @@ case class GpuBroadcastHashJoinExec(
     NUM_INPUT_ROWS -> createMetric(DEBUG_LEVEL, DESCRIPTION_NUM_INPUT_ROWS),
     NUM_INPUT_BATCHES -> createMetric(DEBUG_LEVEL, DESCRIPTION_NUM_INPUT_BATCHES),
     CONCAT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_CONCAT_TIME),
+    HASH_TABLE_BUILDS -> createMetric(DEBUG_LEVEL, DESCRIPTION_HASH_TABLE_BUILDS),
+    HASH_TABLE_REBUILDS -> createMetric(DEBUG_LEVEL, DESCRIPTION_HASH_TABLE_REBUILDS),
+    HASH_TABLE_REUSES -> createMetric(DEBUG_LEVEL, DESCRIPTION_HASH_TABLE_REUSES),
   )
 
   override def requiredChildDistribution: Seq[Distribution] = {
@@ -127,6 +129,11 @@ case class GpuBroadcastHashJoinExec(
       case reused: ReusedExchangeExec => reused.child.asInstanceOf[GpuShuffleExchangeExec]
       case GpuShuffleCoalesceExec(GpuCustomShuffleReaderExec(sqse: ShuffleQueryStageExec, _), _) =>
         from(sqse)
+      // A GpuProjectExec for a bridged/split join condition (extractNonAstFromJoinCond) on the
+      // executor-broadcast build side is peeled off by getBroadcastPlan, leaving the coalesce
+      // directly over the shuffle query stage with no custom shuffle reader in between. The
+      // nested-loop-join path already handles this same shape (added with split-condition
+      // support in #9702); mirror it here.
       case GpuShuffleCoalesceExec(sqse: ShuffleQueryStageExec, _) => from(sqse)
       case GpuCustomShuffleReaderExec(sqse: ShuffleQueryStageExec, _) => from(sqse)
       case other => throw new IllegalStateException(

@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2025, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,11 +14,11 @@
 
 import pytest
 
-from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_are_equal_sql
+from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_are_equal_sql, assert_cpu_and_gpu_are_equal_collect_with_capture
 from data_gen import *
 from spark_session import is_before_spark_320, is_jvm_charset_utf8, is_before_spark_400
 from pyspark.sql.types import *
-from marks import datagen_overrides, allow_non_gpu, disable_ansi_mode
+from marks import datagen_overrides, allow_non_gpu, disable_ansi_mode, validate_execs_in_gpu_plan
 import pyspark.sql.functions as f
 
 # mark this test as ci_1 for mvn verify sanity check in pre-merge CI
@@ -138,7 +138,13 @@ def test_nvl(data_gen):
 # in both cpu and gpu runs.
 #      E: java.lang.AssertionError: assertion failed: each serializer expression should contain\
 #         at least one `BoundReference`
-@pytest.mark.parametrize('data_gen', all_gens + all_nested_gens_nonempty_struct + map_gens_sample, ids=idfn)
+@pytest.mark.parametrize(
+    'data_gen', all_gens + [
+        pytest.param(
+            DayTimeIntervalGen(),
+            marks=validate_execs_in_gpu_plan('GpuProjectExec'))
+    ] +
+    all_nested_gens_nonempty_struct + map_gens_sample, ids=idfn)
 def test_coalesce(data_gen):
     num_cols = 20
     s1 = with_cpu_session(
@@ -152,12 +158,51 @@ def test_coalesce(data_gen):
             lambda spark : gen_df(spark, gen).select(
                 f.coalesce(*command_args)))
 
+def test_coalesce_year_month_interval():
+    # PySpark 3.3 cannot deserialize a YearMonthIntervalType result, so cast the
+    # coalesce result to its month count after the expression has been evaluated.
+    # Use nullable input columns for the interval multipliers. Building the
+    # nullability with CaseWhen lets Databricks rewrite it as an unsupported
+    # interval-valued CPU expression before Coalesce reaches the GPU.
+    def do_it(spark):
+        return spark.createDataFrame(
+            [(1, None), (None, 2), (None, None), (-13, 0)],
+            'a_multiplier INT, b_multiplier INT') \
+            .selectExpr(
+                "INTERVAL '0-1' YEAR TO MONTH * a_multiplier AS a",
+                "INTERVAL '0-1' YEAR TO MONTH * b_multiplier AS b") \
+            .selectExpr("CAST(coalesce(a, b) AS BIGINT)")
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        exist_classes='GpuCoalesce',
+        conf={'spark.sql.adaptive.enabled': 'false'})
+
 def test_coalesce_constant_output():
     # Coalesce can allow a constant value as output. Technically Spark should mark this
     # as foldable and turn it into a constant, but it does not, so make sure our code
     # can deal with it.  (This means something like + will get two constant scalar values)
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : spark.range(1, 100).selectExpr("4 + coalesce(5, id) as nine"))
+
+def test_coalesce_foldable_non_literal():
+    # A foldable coalesce(cast(null as T), lit) can reach the planner unfolded (e.g. when AQE
+    # regenerates it; the AQE-time optimizer runs neither ConstantFolding nor NullPropagation).
+    # Reproduced deterministically by excluding both rules so the coalesce survives to tagging.
+    # It must still run on GPU rather than forcing the project onto the CPU.
+    conf = {
+        'spark.sql.optimizer.excludedRules':
+            'org.apache.spark.sql.catalyst.optimizer.ConstantFolding,'
+            'org.apache.spark.sql.catalyst.optimizer.NullPropagation',
+        'spark.sql.adaptive.enabled': 'false',  # deterministic plan capture
+    }
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+            lambda spark : spark.range(0, 100).selectExpr(
+                'coalesce(cast(null as bigint), -1001) as c0',
+                'coalesce(cast(null as int), 100) as c1',
+                'id'),
+            exist_classes='GpuCoalesce',
+            conf=conf)
 
 @pytest.mark.parametrize('data_gen', all_basic_gens + decimal_gens, ids=idfn)
 # https://github.com/NVIDIA/spark-rapids/issues/12019

@@ -20,9 +20,11 @@ import com.nvidia.spark.rapids.GpuMetric;
 import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.ShimLoader;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
+import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 
 import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.ContentFile;
+import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
@@ -42,6 +44,11 @@ import java.util.Map;
  * <p>Version detection is centralized in {@link IcebergProvider#shimPackage()}.
  */
 public class ShimUtils {
+    // Reserved field IDs defined by the Iceberg specification. Older Iceberg runtimes do not
+    // expose the corresponding MetadataColumns fields, so keep the stable IDs in common code.
+    private static final int ROW_ID_FIELD_ID = 2147483540;
+    private static final int LAST_UPDATED_SEQUENCE_NUMBER_FIELD_ID = 2147483539;
+
     private static final IcebergShimUtils IMPL = loadImpl();
 
     private static IcebergShimUtils loadImpl() {
@@ -56,6 +63,29 @@ public class ShimUtils {
 
     public static String locationOf(ContentFile<?> f) {
         return IMPL.locationOf(f);
+    }
+
+    public static int formatVersion(Table table) {
+        return IMPL.formatVersion(table);
+    }
+
+    public static int rowIdFieldId() {
+        return ROW_ID_FIELD_ID;
+    }
+
+    public static int lastUpdatedSequenceNumberFieldId() {
+        return LAST_UPDATED_SEQUENCE_NUMBER_FIELD_ID;
+    }
+
+    public static boolean isDeletionVector(DeleteFile deleteFile) {
+        return IMPL.isDeletionVector(deleteFile);
+    }
+
+    public static IcebergDeletionVector readDeletionVector(DeleteFile deleteFile,
+                                                             RapidsInputFile inputFile,
+                                                             boolean validateCrc)
+            throws IOException {
+        return IMPL.readDeletionVector(deleteFile, inputFile, validateCrc);
     }
 
     public static Map<Integer, ?> constantsMap(FileScanTask task, Schema readSchema,

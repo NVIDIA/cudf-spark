@@ -13,12 +13,19 @@
 # limitations under the License.
 """Upload & run test script on Databricks cluster."""
 
+import glob
+import shlex
 import subprocess
 import sys
 
 from clusterutils import ClusterUtils
 
 import params
+
+
+def shell_join(args):
+    """Return shell-escaped command arguments."""
+    return ' '.join(shlex.quote(arg) for arg in args)
 
 
 def get_test_report_path_prefix():
@@ -52,40 +59,57 @@ def main():
     print("Master node address is: %s" % master_addr)
 
     print("Copying script")
-    ssh_args = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2200 -i %s" % params.private_key_file
-    rsync_command = "rsync -I -Pave \"ssh %s\" %s ubuntu@%s:%s" % \
-        (ssh_args, params.local_script, master_addr, params.script_dest)
-    print("rsync command: %s" % rsync_command)
-    subprocess.check_call(rsync_command, shell=True)
+    ssh_args = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+                "-p", "2200", "-i", params.private_key_file]
+    rsync_ssh = shell_join(["ssh"] + ssh_args)
+    rsync_command = ["rsync", "-I", "-Pave", rsync_ssh, "--", params.local_script,
+                     "ubuntu@%s:%s" % (master_addr, params.script_dest)]
+    print("rsync command: %s" % shell_join(rsync_command))
+    subprocess.check_call(rsync_command)
 
-    ssh_command = "ssh %s ubuntu@%s " % (ssh_args, master_addr) + \
-        "'LOCAL_JAR_PATH=%s SPARK_CONF=%s BASE_SPARK_VERSION=%s EXTRA_ENVS=%s TEST_TYPE=%s bash %s %s 2>&1 | tee testout; " \
-        "if [ ${PIPESTATUS[0]} -ne 0 ]; then false; else true; fi'" % \
-        (params.jar_path, params.spark_conf, params.base_spark_pom_version, params.extra_envs, params.test_type,
-         params.script_dest, ' '.join(params.script_args))
-    print("ssh command: %s" % ssh_command)
+    test_command = shell_join([
+        "env",
+        "LOCAL_JAR_PATH=%s" % params.jar_path,
+        "SPARK_CONF=%s" % params.spark_conf,
+        "BASE_SPARK_VERSION=%s" % params.base_spark_pom_version,
+        "EXTRA_ENVS=%s" % params.extra_envs,
+        "TEST_TYPE=%s" % params.test_type,
+        "bash",
+        params.script_dest,
+    ] + params.script_args)
+    remote_command = "%s 2>&1 | tee testout; exit ${PIPESTATUS[0]}" % test_command
+    ssh_command = ["ssh"] + ssh_args + ["ubuntu@%s" % master_addr,
+                                         "bash -c %s" % shlex.quote(remote_command)]
+    print("ssh command: %s" % shell_join(ssh_command))
     try:
-        subprocess.check_call(ssh_command, shell=True)
+        subprocess.check_call(ssh_command)
     finally:
         print("Copying test reports back")
         try:
             report_target_path = "%s/integration_tests/target" % get_test_report_path_prefix()
-            subprocess.check_call("mkdir -p integration_tests/target", shell=True)
+            subprocess.check_call(["mkdir", "-p", "integration_tests/target"])
             # Copy the diagnostics needed by Jenkins while avoiding unrelated run_dir contents.
-            rsync_command = "rsync -I -Pave \"ssh %s\" --prune-empty-dirs " \
-                "--include='run_dir*/' " \
-                "--include='run_dir*/TEST-pytest-*.xml' " \
-                "--include='run_dir*/eventlog_*/***' " \
-                "--include='run_dir*/*_worker_logs.log' " \
-                "--exclude='*' ubuntu@%s:%s/ integration_tests/target/" % \
-                (ssh_args, master_addr, report_target_path)
-            print("rsync command: %s" % rsync_command)
-            subprocess.check_call(rsync_command, shell=True)
+            rsync_command = [
+                "rsync", "-I", "-Pave", rsync_ssh,
+                "--prune-empty-dirs",
+                "--include=run_dir*/",
+                "--include=run_dir*/TEST-pytest-*.xml",
+                "--include=run_dir*/eventlog_*/***",
+                "--include=run_dir*/*_worker_logs.log",
+                "--exclude=*",
+                "--",
+                "ubuntu@%s:%s/" % (master_addr, report_target_path),
+                "integration_tests/target/",
+            ]
+            print("rsync command: %s" % shell_join(rsync_command))
+            subprocess.check_call(rsync_command)
             # Keep the existing Jenkins JUnit publishing flow, which expects XML files in this
             # directory.
-            copy_xml_command = "cp integration_tests/target/run_dir*/TEST-pytest-*.xml ./ || true"
-            print("copy xml command: %s" % copy_xml_command)
-            subprocess.check_call(copy_xml_command, shell=True)
+            xml_files = glob.glob("integration_tests/target/run_dir*/TEST-pytest-*.xml")
+            if xml_files:
+                copy_xml_command = ["cp"] + xml_files + ["./"]
+                print("copy xml command: %s" % shell_join(copy_xml_command))
+                subprocess.call(copy_xml_command)
         except subprocess.CalledProcessError as e:
             print("WARNING: test report collection failed: %s" % e)
 

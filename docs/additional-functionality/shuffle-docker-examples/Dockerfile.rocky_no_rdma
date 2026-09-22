@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2022-2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -25,7 +25,7 @@
 #   - ROCKY_VER: Rocky Linux OS version
 
 ARG CUDA_VER=13.0.1
-ARG UCX_VER=1.19.1-rc2
+ARG UCX_VER=1.22.0
 ARG UCX_CUDA_VER=13
 ARG UCX_ARCH=x86_64
 ARG ROCKY_VER=8

@@ -19,6 +19,8 @@ package com.nvidia.spark.rapids
 import java.io.File
 import java.nio.charset.StandardCharsets
 
+import scala.collection.JavaConverters._
+
 import ai.rapids.cudf.CompressionType
 import com.nvidia.spark.rapids.shims.SparkShimImpl
 import org.apache.hadoop.conf.Configuration
@@ -26,12 +28,14 @@ import org.apache.hadoop.fs.FileUtil.fullyDelete
 import org.apache.hadoop.fs.Path
 import org.apache.hadoop.mapreduce.{Job, JobContext, TaskAttemptContext, TaskAttemptID, TaskType}
 import org.apache.hadoop.mapreduce.task.TaskAttemptContextImpl
+import org.apache.parquet.column.Encoding
 import org.apache.parquet.hadoop.{ParquetFileReader, ParquetOutputFormat, ParquetWriter}
 
 import org.apache.spark.SparkConf
 import org.apache.spark.internal.io.FileCommitProtocol
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.execution.datasources.SQLHadoopMapReduceCommitProtocol
+import org.apache.spark.sql.functions.input_file_name
 import org.apache.spark.sql.hive.rapids.GpuHiveParquetFileFormat
 import org.apache.spark.sql.rapids.BasicColumnarWriteJobStatsTracker
 import org.apache.spark.sql.rapids.shims.SparkUpgradeExceptionShims
@@ -98,7 +102,7 @@ class ParquetWriterSuite extends SparkQueryCompareTestSuite {
     try {
       SparkSessionHolder.withSparkSession(conf, spark => {
         import spark.implicits._
-        val df = spark.sparkContext.parallelize((1L to 10000000L))
+        val df = spark.sparkContext.parallelize(1L to 1000L, 2)
             .map{i => ("a", f"$i%010d", i)}.toDF("partkey", "val", "val2")
         df.repartition(1, $"partkey").sortWithinPartitions($"partkey", $"val", $"val2")
             .write.mode("overwrite").partitionBy("partkey").parquet(tempFile.getAbsolutePath)
@@ -182,6 +186,86 @@ class ParquetWriterSuite extends SparkQueryCompareTestSuite {
     }, conf)
   }
 
+  test("parquet writer dictionary policy NEVER config") {
+    val conf = new SparkConf()
+      .set(RapidsConf.PARQUET_WRITER_DICTIONARY_POLICY.key, "NEVER")
+    withGpuSparkSession(spark => {
+      withTempPath { writePath =>
+        // Small low-cardinality column: ADAPTIVE would otherwise dictionary-encode it.
+        spark.range(0, 1000, 1, 1)
+          .selectExpr("cast(id % 10 as string) as s")
+          .write.mode("overwrite")
+          .parquet(writePath.getAbsolutePath)
+
+        val encodings = getSingleParquetFileColumnEncodings(spark, writePath)
+        assert(encodings.nonEmpty)
+        assert(encodings.forall(es => !isDictionaryEncoding(es)),
+          s"Expected no dictionary encoding under NEVER policy, got $encodings")
+      }
+    }, conf)
+  }
+
+  test("parquet writer dictionary policy ALWAYS overrides max dictionary size cap") {
+    // Use a repeated wide payload whose dictionary is useful but exceeds the tiny cap.
+    // Lowercase policy value verifies case-insensitive config parsing.
+    val conf = new SparkConf()
+      .set(RapidsConf.PARQUET_WRITER_DICTIONARY_POLICY.key, "always")
+      .set(RapidsConf.PARQUET_WRITER_MAX_DICTIONARY_SIZE.key, "1024")
+    withGpuSparkSession(spark => {
+      withTempPath { writePath =>
+        spark.range(0, 5000, 1, 1)
+          .selectExpr("concat(cast(id % 100 as string), repeat('x', 64)) as s")
+          .write.mode("overwrite")
+          .parquet(writePath.getAbsolutePath)
+
+        val encodings = getSingleParquetFileColumnEncodings(spark, writePath)
+        assert(encodings.nonEmpty)
+        assert(encodings.exists(isDictionaryEncoding),
+          s"Expected dictionary encoding under ALWAYS (cap should be ignored), got $encodings")
+      }
+    }, conf)
+  }
+
+  test("parquet writer max dictionary size config bails under ADAPTIVE") {
+    val baseConf = new SparkConf()
+      .set(RapidsConf.PARQUET_WRITER_DICTIONARY_POLICY.key, "ADAPTIVE")
+
+    // Repeated values keep dictionary encoding useful while the wide payload makes the
+    // dictionary trip a 1 KiB cap and still fit comfortably under a 1 MiB cap.
+    def writeWidePayload(spark: SparkSession, path: File): Unit = {
+      spark.range(0, 5000, 1, 1)
+        .selectExpr("concat(cast(id % 100 as string), repeat('x', 64)) as s")
+        .write.mode("overwrite")
+        .parquet(path.getAbsolutePath)
+    }
+
+    // Tiny cap: ADAPTIVE should bail to non-dictionary encoding.
+    val tinyCapConf = baseConf.clone()
+      .set(RapidsConf.PARQUET_WRITER_MAX_DICTIONARY_SIZE.key, "1024")
+    withGpuSparkSession(spark => {
+      withTempPath { writePath =>
+        writeWidePayload(spark, writePath)
+        val encodings = getSingleParquetFileColumnEncodings(spark, writePath)
+        assert(encodings.nonEmpty)
+        assert(encodings.forall(es => !isDictionaryEncoding(es)),
+          s"Expected ADAPTIVE to bail to non-dictionary under tiny cap, got $encodings")
+      }
+    }, tinyCapConf)
+
+    // Generous cap (1 MiB == cuDF default): dictionary encoding should be used.
+    val largeCapConf = baseConf.clone()
+      .set(RapidsConf.PARQUET_WRITER_MAX_DICTIONARY_SIZE.key, (1024 * 1024).toString)
+    withGpuSparkSession(spark => {
+      withTempPath { writePath =>
+        writeWidePayload(spark, writePath)
+        val encodings = getSingleParquetFileColumnEncodings(spark, writePath)
+        assert(encodings.nonEmpty)
+        assert(encodings.exists(isDictionaryEncoding),
+          s"Expected ADAPTIVE to dictionary-encode under generous cap, got $encodings")
+      }
+    }, largeCapConf)
+  }
+
   test("parquet block size warning") {
     val unsetConf = new Configuration(false)
     assert(GpuParquetFileFormat.parquetBlockSizeWarning(unsetConf, Map.empty).isEmpty)
@@ -233,6 +317,16 @@ class ParquetWriterSuite extends SparkQueryCompareTestSuite {
 
   private case class ParquetRowGroup(rowCount: Long, totalByteSize: Long)
 
+  private def parquetFileRowCounts(spark: SparkSession, parquetPath: File): Seq[Long] = {
+    spark.read.parquet(parquetPath.getAbsolutePath)
+      .select(input_file_name().as("file"))
+      .groupBy("file")
+      .count()
+      .collect()
+      .map(_.getLong(1))
+      .toSeq
+  }
+
   private def getSingleParquetFileRowGroups(
       spark: SparkSession,
       parquetPath: File): Seq[ParquetRowGroup] = {
@@ -249,6 +343,27 @@ class ParquetWriterSuite extends SparkQueryCompareTestSuite {
     }
   }
 
+  /** Encodings per column chunk across all row groups in a single Parquet file. */
+  private def getSingleParquetFileColumnEncodings(
+      spark: SparkSession,
+      parquetPath: File): Seq[Set[Encoding]] = {
+    val parquetFiles = listAllFiles(parquetPath).filter(_.getName.endsWith(".parquet"))
+    assertResult(1) {
+      parquetFiles.length
+    }
+    val footer = ParquetFileReader.readFooters(spark.sparkContext.hadoopConfiguration,
+      new Path(parquetFiles.head.getAbsolutePath)).get(0)
+    footer.getParquetMetadata.getBlocks.asScala
+      .flatMap(_.getColumns.asScala)
+      .map(_.getEncodings.asScala.toSet)
+      .toSeq
+  }
+
+  @scala.annotation.nowarn("cat=deprecation")
+  private def isDictionaryEncoding(encodings: Set[Encoding]): Boolean =
+    encodings.contains(Encoding.PLAIN_DICTIONARY) ||
+      encodings.contains(Encoding.RLE_DICTIONARY)
+
   test("set max records per file no partition") {
     val conf = new SparkConf()
         .set("spark.sql.files.maxRecordsPerFile", "50")
@@ -259,15 +374,13 @@ class ParquetWriterSuite extends SparkQueryCompareTestSuite {
     try {
       SparkSessionHolder.withSparkSession(conf, spark => {
         import spark.implicits._
-        val df = (1 to 16000).toDF()
+        val df = (1 to 200).toDF().repartition(1)
         df.write.mode("overwrite").parquet(tempFile.getAbsolutePath())
 
-        listAllFiles(tempFile)
-          .map(f => f.getAbsolutePath())
-          .filter(p => p.endsWith("parquet"))
-          .map(p => {
-            assertRowCount50 (spark.read.parquet(p).count()) 
-          })
+        val rowCounts = parquetFileRowCounts(spark, tempFile)
+        assertResult(4)(rowCounts.size)
+        assertResult(200)(rowCounts.sum)
+        rowCounts.foreach(assertRowCount50)
       })
     } finally {
       fullyDelete(tempFile)
@@ -285,15 +398,13 @@ class ParquetWriterSuite extends SparkQueryCompareTestSuite {
     try {
       SparkSessionHolder.withSparkSession(conf, spark => {
         import spark.implicits._
-        val df = (1 to 16000).map(i => (i, i % 2)).toDF()
+        val df = (1 to 200).map(i => (i, i % 2)).toDF().repartition(1)
         df.write.mode("overwrite").partitionBy("_2").parquet(tempFile.getAbsolutePath())
 
-        listAllFiles(tempFile)
-          .map(f => f.getAbsolutePath())
-          .filter(p => p.endsWith("parquet"))
-          .map(p => {
-            assertRowCount50 (spark.read.parquet(p).count()) 
-          })
+        val rowCounts = parquetFileRowCounts(spark, tempFile)
+        assertResult(4)(rowCounts.size)
+        assertResult(200)(rowCounts.sum)
+        rowCounts.foreach(assertRowCount50)
       })
     } finally {
       fullyDelete(tempFile)
@@ -320,14 +431,10 @@ class ParquetWriterSuite extends SparkQueryCompareTestSuite {
             .partitionBy("_2")
             .parquet(tempFile.getAbsolutePath())
           // check the whole number of rows
-          assertResult(1600) (spark.read.parquet(tempFile.getAbsolutePath()).count())
+          val rowCounts = parquetFileRowCounts(spark, tempFile)
+          assertResult(1600)(rowCounts.sum)
           // check number of rows in each file
-          listAllFiles(tempFile)
-            .map(f => f.getAbsolutePath())
-            .filter(p => p.endsWith("parquet"))
-            .map(p => {
-              assertResult(expectedRecordsPerFile) (spark.read.parquet(p).count())
-            })
+          rowCounts.foreach(assertResult(expectedRecordsPerFile))
         })
       } finally {
         fullyDelete(tempFile)
@@ -355,14 +462,10 @@ class ParquetWriterSuite extends SparkQueryCompareTestSuite {
               .partitionBy("_2")
               .parquet(tempFile.getAbsolutePath())
           // check the whole number of rows
-          assertResult(1600)(spark.read.parquet(tempFile.getAbsolutePath()).count())
+          val rowCounts = parquetFileRowCounts(spark, tempFile)
+          assertResult(1600)(rowCounts.sum)
           // check number of rows in each file
-          listAllFiles(tempFile)
-              .map(f => f.getAbsolutePath())
-              .filter(p => p.endsWith("parquet"))
-              .map(p => {
-                assertResult(expectedRecordsPerFile)(spark.read.parquet(p).count())
-              })
+          rowCounts.foreach(assertResult(expectedRecordsPerFile))
         })
       } finally {
         fullyDelete(tempFile)

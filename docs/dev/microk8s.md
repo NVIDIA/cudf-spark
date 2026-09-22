@@ -13,7 +13,8 @@ environment for development and testing purposes. These instructions explain how
 ## Install Microk8s
 
 It is important to install the 1.20 version because there are some issues in the 1.21 release with GPU support. These
-may have been resolved in the 1.22 release but this has not been tested yet with the RAPIDS Accelerator.
+may have been resolved in the 1.22 release but this has not been tested yet with the NVIDIA cuDF
+plugin for Apache Spark.
 
 ```bash
 sudo snap install microk8s --classic --channel=1.20/stable
@@ -91,18 +92,18 @@ This token can then be specified in the `spark-submit` command with
 
 ## Building and exporting Docker images
 
-Follow the instructions in [Getting Started with RAPIDS and Kubernetes](https://docs.nvidia.com/spark-rapids/user-guide/latest/getting-started/kubernetes.html)
-to create Docker images containing Spark and the RAPIDS Accelerator for Apache Spark.
+Follow the instructions in [Getting Started with the NVIDIA cuDF plugin for Apache Spark and Kubernetes](https://docs.nvidia.com/spark-rapids/user-guide/latest/getting-started/kubernetes.html)
+to create Docker images containing Spark and the cuDF plugin.
 
 Note that an additional step is required to export the Docker images from the host and import them into the Microk8s
 cluster.
 
-For example, the following commands can be used to export a Docker image named `spark-rapids` and import it into
+For example, the following commands can be used to export a Docker image named `cudf-spark` and import it into
 Microk8s.
 
 ```bash
-docker save spark-rapids > /tmp/spark-rapids.tar
-microk8s ctr image import /tmp/spark-rapids.tar
+docker save cudf-spark > /tmp/cudf-spark.tar
+microk8s ctr image import /tmp/cudf-spark.tar
 ```
 
 ## Spark Submit
@@ -117,13 +118,13 @@ $SPARK_HOME/bin/spark-submit \
     --conf spark.kubernetes.authenticate.driver.serviceAccountName=spark \
     --conf spark.kubernetes.authenticate.caCertFile=/var/snap/microk8s/current/certs/ca.crt \
     --conf spark.kubernetes.authenticate.submission.oauthToken=$K8S_TOKEN \
-    --conf spark.kubernetes.container.image=spark-rapids \
+    --conf spark.kubernetes.container.image=cudf-spark \
 ```
 
 ## Further Reading
 
-The following documentation pages and blog posts provide more information on setting up Microk8s, Apache Spark, and
-RAPIDS.
+The following documentation pages and blog posts provide more information on setting up Microk8s,
+Apache Spark, and the cuDF plugin.
 
 - [Running Spark on Kubernetes](https://spark.apache.org/docs/latest/running-on-kubernetes.html)
 - [Setting up Apache Spark on Kubernetes with microk8s](https://www.waitingforcode.com/apache-spark/setting-up-apache-spark-kubernetes-microk8s/read)

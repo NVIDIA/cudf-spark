@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,8 +20,8 @@ import scala.collection.JavaConverters.asScalaIteratorConverter
 import scala.collection.mutable.{ArrayBuffer, ListBuffer}
 import scala.collection.mutable
 
-import ai.rapids.cudf.{ColumnVector, CompressionType, DType, Rmm, Table, TableWriter}
-import com.nvidia.spark.rapids.Arm.withResource
+import ai.rapids.cudf.{ColumnVector, CompressionType, DType, ParquetTableWriter, Rmm, Table}
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableFromBatchColumns
 import com.nvidia.spark.rapids.parquet.{ParquetCachedBatchSerializer, ParquetOutputFileFormat}
 import org.apache.hadoop.mapreduce.{RecordWriter, TaskAttemptContext}
@@ -32,9 +32,11 @@ import org.mockito.invocation.InvocationOnMock
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.SparkSession.setActiveSession
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.AttributeReference
+import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference}
+import org.apache.spark.sql.columnar.CachedBatch
 import org.apache.spark.sql.execution.columnar.DefaultCachedBatchSerializer
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.rapids.PCBSSchemaHelper
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.types._
@@ -149,6 +151,79 @@ class CachedBatchWriterSuite extends SparkQueryCompareTestSuite {
 
   test("cache empty columnar batch on GPU") {
     withGpuSparkSession(writeAndConsumeEmptyBatch)
+  }
+
+  test("PCBS round trip preserves nested and top-level NullType columns") {
+    withGpuSparkSession { spark =>
+      setActiveSession(spark)
+      val ser = new ParquetCachedBatchSerializer
+      val values = Array(1, 2, 3)
+      val numRows = values.length
+      val nestedType = StructType(Array(
+        StructField("a", IntegerType, nullable = true),
+        StructField("code", NullType, nullable = true)))
+      val arrayType = ArrayType(NullType, containsNull = true)
+      val mapType = MapType(IntegerType, NullType, valueContainsNull = true)
+      // Doubly-nested array<struct<..null..>> exercises the .nested() NullType round-trip.
+      val arrayOfStructType = ArrayType(nestedType, containsNull = true)
+      val origAttrs: Seq[Attribute] = Seq(
+        AttributeReference("properties", nestedType, nullable = true)(),
+        AttributeReference("code", NullType, nullable = true)(),
+        AttributeReference("arr", arrayType, nullable = true)(),
+        AttributeReference("m", mapType, nullable = true)(),
+        AttributeReference("arr_of_struct", arrayOfStructType, nullable = true)())
+      // The serializer rewrites NullType to ByteType on disk; build that schema the way it does.
+      val cachedSchema = PCBSSchemaHelper.getSupportedSchemaFromUnsupported(origAttrs).toStructType
+      val origSchema = origAttrs.toStructType
+
+      val listOfPCB = withResource(
+        buildNullTypeBatch(values, nestedType, arrayType, mapType, arrayOfStructType)) {
+        gpuCB => ser.compressColumnarBatchWithParquet(gpuCB, cachedSchema, origSchema,
+          BYTES_ALLOWED_PER_BATCH, useCompression = false)
+      }
+
+      val conf = TrampolineUtil.getSparkConf(spark)
+      val cachedRdd = spark.sparkContext.parallelize[CachedBatch](listOfPCB, numSlices = 1)
+      val cbRdd = ser.convertCachedBatchToColumnarBatch(cachedRdd, origAttrs, origAttrs, conf)
+      val context = new MockTaskContext(taskAttemptId = 1, partitionId = 0)
+      TrampolineUtil.setTaskContext(context)
+      try {
+        val batches = cbRdd.compute(cbRdd.partitions.head, context)
+        assert(batches.hasNext)
+        val cb = batches.next()
+        assert(cb.numRows() == numRows)
+        val structCol = cb.column(0)
+        val aChild = structCol.getChild(0)
+        val codeChild = structCol.getChild(1)
+        val topNull = cb.column(1)
+        val arrCol = cb.column(2)
+        val mapCol = cb.column(3)
+        val arrStructCol = cb.column(4)
+        for (i <- 0 until numRows) {
+          assert(!structCol.isNullAt(i))
+          assert(aChild.getInt(i) == values(i))
+          assert(codeChild.isNullAt(i), s"nested struct NullType child must be null at row $i")
+          assert(topNull.isNullAt(i), s"top-level NullType column must be null at row $i")
+          val arr = arrCol.getArray(i)
+          assert(arr.numElements() == 1)
+          assert(arr.isNullAt(0), s"array NullType element must be null at row $i")
+          val m = mapCol.getMap(i)
+          assert(m.numElements() == 1)
+          assert(m.keyArray().getInt(0) == values(i))
+          assert(m.valueArray().isNullAt(0), s"map NullType value must be null at row $i")
+          val arrStruct = arrStructCol.getArray(i)
+          assert(arrStruct.numElements() == 1)
+          val innerStruct = arrStruct.getStruct(0, 2)
+          assert(innerStruct.getInt(0) == values(i), s"array<struct> int child at row $i")
+          assert(innerStruct.isNullAt(1),
+            s"array<struct> nested NullType child must be null at row $i")
+        }
+        assert(!batches.hasNext)
+      } finally {
+        TrampolineUtil.unsetTaskContext()
+        context.markTaskComplete()
+      }
+    }
   }
 
   private def writeAndConsumeEmptyBatch(spark: SparkSession): Unit = {
@@ -280,7 +355,7 @@ class CachedBatchWriterSuite extends SparkQueryCompareTestSuite {
      gpuCols: Array[org.apache.spark.sql.vectorized.ColumnVector], splitAt: Int*): Unit = {
     // mock static method for Table
     val theTableMock = mockStatic(classOf[Table], (_: InvocationOnMock) => {
-      val ret = mock(classOf[TableWriter])
+      val ret = mock(classOf[ParquetTableWriter])
       doAnswer( invocation =>
         checkSize(invocation.getArgument(0, classOf[Table]))
       ).when(ret).write(isA(classOf[Table]))
@@ -345,5 +420,42 @@ class CachedBatchWriterSuite extends SparkQueryCompareTestSuite {
         assert(totalRows == ROWS)
     }
     assert(totalSize == ROWS * schema.indices.length * 1024L)
+  }
+
+  private def buildNullTypeBatch(values: Array[Int], nestedType: StructType,
+      arrayType: ArrayType, mapType: MapType, arrayOfStructType: ArrayType): ColumnarBatch = {
+    val numRows = values.length
+    val cols = new ArrayBuffer[GpuColumnVector]()
+    closeOnExcept(cols) { buf =>
+      // The code child is an all-null INT8 column (cudf models NullType as INT8).
+      buf += withResource(ColumnVector.fromInts(values: _*)) { aChild =>
+        withResource(GpuColumnVector.columnVectorFromNull(numRows, NullType)) { codeChild =>
+          GpuColumnVector.from(
+            ColumnVector.makeStruct(numRows.toLong, aChild, codeChild), nestedType)
+        }
+      }
+      buf += GpuColumnVector.fromNull(numRows, NullType)
+      // array<null>: makeList makes one entry per input column, so each row is a 1-element [null].
+      buf += withResource(GpuColumnVector.columnVectorFromNull(numRows, NullType)) { elem =>
+        GpuColumnVector.from(ColumnVector.makeList(elem), arrayType)
+      }
+      // map<int,null> is list<struct<key,value>> in cudf: one entry/row, int key -> null value.
+      buf += withResource(ColumnVector.fromInts(values: _*)) { keyChild =>
+        withResource(GpuColumnVector.columnVectorFromNull(numRows, NullType)) { valChild =>
+          withResource(ColumnVector.makeStruct(numRows.toLong, keyChild, valChild)) { entry =>
+            GpuColumnVector.from(ColumnVector.makeList(entry), mapType)
+          }
+        }
+      }
+      // One struct entry per row; its code child is all-null INT8 (NullType two levels deep).
+      buf += withResource(ColumnVector.fromInts(values: _*)) { aChild =>
+        withResource(GpuColumnVector.columnVectorFromNull(numRows, NullType)) { codeChild =>
+          withResource(ColumnVector.makeStruct(numRows.toLong, aChild, codeChild)) { structElem =>
+            GpuColumnVector.from(ColumnVector.makeList(structElem), arrayOfStructType)
+          }
+        }
+      }
+      new ColumnarBatch(buf.toArray, numRows)
+    }
   }
 }

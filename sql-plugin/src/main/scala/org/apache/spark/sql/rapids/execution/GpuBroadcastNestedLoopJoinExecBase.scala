@@ -23,6 +23,7 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingArray
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{withRestoreOnRetry, withRetry, withRetryNoSplit}
+import com.nvidia.spark.rapids.SplittableJoinIterator.PreparedJoinBatch
 import com.nvidia.spark.rapids.shims.{GpuBroadcastJoinMeta, ShimBinaryExecNode}
 
 import org.apache.spark.TaskContext
@@ -77,6 +78,20 @@ abstract class GpuBroadcastNestedLoopJoinMetaBase(
     JoinTypeChecks.nonEquiJoinMeta(conditionMeta)
 
   override val childExprs: Seq[BaseExprMeta[_]] = conditionMeta.toSeq
+
+  override protected def runChildExprBridgeOptimization(): Unit = {
+    conditionMeta.foreach { cond =>
+      val leftExprIds = join.left.output.map(_.exprId)
+      val rightExprIds = join.right.output.map(_.exprId)
+      if (AstUtil.canExtractNonAstConditionIfNeed(cond, leftExprIds, rightExprIds)) {
+        GpuCpuBridgeOptimizer.checkAndOptimizeNonAstSubtrees(cond)
+      } else {
+        // Inner joins can consume a bridged post-filter. Joins that require an AST condition
+        // will call requireAstForGpuOn later and reject GPU execution if the bridge remains.
+        GpuCpuBridgeOptimizer.checkAndOptimizeExpressionMetas(Seq(cond))
+      }
+    }
+  }
 
   override def tagPlanForGpu(): Unit = {
     JoinTypeChecks.tagForGpu(join.joinType, this)
@@ -207,7 +222,7 @@ class ConditionalNestedLoopJoinIterator(
     condition: ast.CompiledExpression,
     opTime: GpuMetric,
     joinTime: GpuMetric)
-    extends SplittableJoinIterator(
+    extends SplittableJoinIterator[PreparedJoinBatch](
       NvtxRegistry.JOIN_GATHER,
       stream,
       streamAttributes,
@@ -223,24 +238,26 @@ class ConditionalNestedLoopJoinIterator(
     }
   }
 
-  override def computeNumJoinRows(scb: LazySpillableColumnarBatch): Long = {
-    scb.checkpoint()
-    builtBatch.checkpoint()
-    withRetryNoSplit {
-      withRestoreOnRetry(Seq(builtBatch, scb)) {
-        withResource(GpuColumnVector.from(builtBatch.getBatch)) { builtTable =>
-          withResource(GpuColumnVector.from(scb.getBatch)) { streamTable =>
-            val (left, right) = buildSide match {
-              case GpuBuildLeft => (builtTable, streamTable)
-              case GpuBuildRight => (streamTable, builtTable)
-            }
-            joinType match {
-              case _: InnerLike => left.conditionalInnerJoinRowCount(right, condition)
-              case LeftOuter => left.conditionalLeftJoinRowCount(right, condition)
-              case RightOuter => right.conditionalLeftJoinRowCount(left, condition)
-              case LeftSemi => left.conditionalLeftSemiJoinRowCount(right, condition)
-              case LeftAnti => left.conditionalLeftAntiJoinRowCount(right, condition)
-              case _ => throw new IllegalStateException(s"Unsupported join type $joinType")
+  override def prepareJoinBatch(scb: LazySpillableColumnarBatch): PreparedJoinBatch = {
+    PreparedJoinBatch {
+      scb.checkpoint()
+      builtBatch.checkpoint()
+      withRetryNoSplit {
+        withRestoreOnRetry(Seq(builtBatch, scb)) {
+          withResource(GpuColumnVector.from(builtBatch.getBatch)) { builtTable =>
+            withResource(GpuColumnVector.from(scb.getBatch)) { streamTable =>
+              val (left, right) = buildSide match {
+                case GpuBuildLeft => (builtTable, streamTable)
+                case GpuBuildRight => (streamTable, builtTable)
+              }
+              joinType match {
+                case _: InnerLike => left.conditionalInnerJoinRowCount(right, condition)
+                case LeftOuter => left.conditionalLeftJoinRowCount(right, condition)
+                case RightOuter => right.conditionalLeftJoinRowCount(left, condition)
+                case LeftSemi => left.conditionalLeftSemiJoinRowCount(right, condition)
+                case LeftAnti => left.conditionalLeftAntiJoinRowCount(right, condition)
+                case _ => throw new IllegalStateException(s"Unsupported join type $joinType")
+              }
             }
           }
         }
@@ -250,7 +267,8 @@ class ConditionalNestedLoopJoinIterator(
 
   override def createGatherer(
       cb: LazySpillableColumnarBatch,
-      numJoinRows: Option[Long]): Option[JoinGatherer] = {
+      prepared: Option[PreparedJoinBatch]): Option[JoinGatherer] = {
+    val numJoinRows = prepared.map(_.numJoinRows)
     if (numJoinRows.contains(0)) {
       // nothing matched
       return None
@@ -577,7 +595,11 @@ abstract class GpuBroadcastNestedLoopJoinExecBase(
     OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
     BUILD_DATA_SIZE -> createSizeMetric(MODERATE_LEVEL, DESCRIPTION_BUILD_DATA_SIZE),
     BUILD_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_BUILD_TIME),
-    JOIN_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_JOIN_TIME))
+    JOIN_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_JOIN_TIME),
+    CPU_BRIDGE_PROCESSING_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_PROCESSING_TIME),
+    CPU_BRIDGE_WAIT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_WAIT_TIME))
 
   /** BuildRight means the right relation <=> the broadcast relation. */
   val (streamed, buildPlan) = gpuBuildSide match {

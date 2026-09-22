@@ -29,6 +29,7 @@ import org.apache.spark.sql.catalyst.analysis.FunctionRegistry.FUNC_ALIAS
 import org.apache.spark.sql.catalyst.expressions.{EmptyRow, Expression, NamedExpression}
 import org.apache.spark.sql.catalyst.util.TypeUtils
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.rapids.shims.CreateNamedStructShims
 import org.apache.spark.sql.types.{ArrayType, DataType, MapType, Metadata, NullType, StringType, StructField, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -205,7 +206,7 @@ case class GpuCreateNamedStruct(children: Seq[Expression]) extends GpuExpression
           case ne: NamedExpression => ne.metadata
           case _ => Metadata.empty
         }
-        StructField(name.toString, expr.dataType, expr.nullable, metadata)
+        StructField(CreateNamedStructShims.fieldName(name), expr.dataType, expr.nullable, metadata)
     }
     StructType(fields)
   }

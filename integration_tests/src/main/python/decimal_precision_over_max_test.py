@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.
+# Copyright (c) 2025-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@ import pytest
 
 from asserts import assert_gpu_and_cpu_are_equal_collect
 from data_gen import *
-from spark_session import is_spark_400_or_later, is_databricks143_or_later
+from spark_session import is_spark_400_or_later, is_databricks_runtime
 
 # The following tests are designed to verify the Spark change at
 # [SPARK-45905](https://github.com/apache/spark/commit/7120e6b88f2)
@@ -49,7 +49,7 @@ def test_decimal_precision_over_max():
     #       DecimalType(MAX_PRECISION, math.max(0, scale - diff))
     #     }
     #   }
-    result_scale = 6 if is_spark_400_or_later() or is_databricks143_or_later() else 8
+    result_scale = 6 if is_spark_400_or_later() or is_databricks_runtime() else 8
     expected_dec_type = DecimalType(38, result_scale)
 
     def test_fn(spark):

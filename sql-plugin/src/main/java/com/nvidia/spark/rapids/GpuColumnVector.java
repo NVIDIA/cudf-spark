@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids;
 
 import ai.rapids.cudf.*;
 import com.nvidia.spark.rapids.shims.GpuTypeShims;
+import com.nvidia.spark.rapids.shims.VariantTypeShims;
 import org.apache.arrow.memory.ReferenceManager;
 
 import org.apache.spark.sql.catalyst.expressions.Attribute;
@@ -101,8 +102,31 @@ public class GpuColumnVector extends GpuColumnVectorBase {
     TableDebug.get().debug(name, hostCol);
   }
 
+  /** Returns true when the Spark data type is VariantType. */
+  public static boolean isVariantType(DataType sparkType) {
+    return VariantTypeShims.isVariantType(sparkType);
+  }
+
+  private static HostColumnVector.ListType variantByteListType(boolean nullable) {
+    return new HostColumnVector.ListType(
+        nullable, new HostColumnVector.BasicType(false, DType.UINT8));
+  }
+
+  static HostColumnVector.DataType[] variantHostChildren() {
+    return new HostColumnVector.DataType[] {
+        variantByteListType(true),
+        variantByteListType(true)
+    };
+  }
+
+  private static HostColumnVector.StructType variantHostType(boolean nullable) {
+    return new HostColumnVector.StructType(nullable, variantHostChildren());
+  }
+
   public static HostColumnVector.DataType convertFrom(DataType spark, boolean nullable) {
-    if (spark instanceof ArrayType) {
+    if (isVariantType(spark)) {
+      return variantHostType(nullable);
+    } else if (spark instanceof ArrayType) {
       ArrayType arrayType = (ArrayType) spark;
       return new HostColumnVector.ListType(nullable,
           convertFrom(arrayType.elementType(), arrayType.containsNull()));
@@ -447,6 +471,8 @@ public class GpuColumnVector extends GpuColumnVectorBase {
       return DecimalUtil.createCudfDecimal((DecimalType) type);
     } else if (type instanceof GpuUnsignedIntegerType) {
       return DType.UINT32;
+    } else if (isVariantType(type)) {
+      return DType.STRUCT;
     } else if (type instanceof GpuUnsignedLongType) {
       return DType.UINT64;
     }
@@ -464,7 +490,9 @@ public class GpuColumnVector extends GpuColumnVectorBase {
   }
 
   public static boolean isNonNestedSupportedType(DataType type) {
-    return toRapidsOrNull(type) != null;
+    // Variant is atomic in Spark but nested in cuDF, so callers that require a physical
+    // non-nested type (notably the GPU cache serializer) cannot handle it.
+    return !isVariantType(type) && toRapidsOrNull(type) != null;
   }
 
   public static DType getNonNestedRapidsType(DataType type) {
@@ -593,6 +621,12 @@ public class GpuColumnVector extends GpuColumnVectorBase {
       } else if (dt instanceof BinaryType) {
         Schema.Builder listBuilder = builder.addColumn(DType.LIST, name);
         listBuilder.addColumn(DType.UINT8, name + "_bytes");
+      } else if (isVariantType(dt)) {
+        Schema.Builder structBuilder = builder.addColumn(DType.STRUCT, name);
+        structBuilder.addColumn(DType.LIST, name + "_value")
+            .addColumn(DType.UINT8, name + "_value_bytes");
+        structBuilder.addColumn(DType.LIST, name + "_metadata")
+            .addColumn(DType.UINT8, name + "_metadata_bytes");
       } else {
         Schema.Builder childBuilder = builder.addColumn(GpuColumnVector.getRapidsType(dt), name);
         if (dt instanceof ArrayType) {
@@ -617,8 +651,17 @@ public class GpuColumnVector extends GpuColumnVectorBase {
    * Convert a ColumnarBatch to a table. The table will increment the reference count for all of
    * the columns in the batch, so you will need to close both the batch passed in and the table
    * returned to avoid any memory leaks.
+   * @throws IllegalArgumentException if the batch has no columns
    */
   public static Table from(ColumnarBatch batch) {
+    if (batch.numCols() <= 0) {
+      // A cudf Table takes its row count from its first column, so a batch with rows but no
+      // columns has no Table equivalent. Checked here because cudf's own check is an assert,
+      // which is elided outside -ea and leaves production with an ArrayIndexOutOfBoundsException.
+      throw new IllegalArgumentException(
+          "Cannot convert a rows-only ColumnarBatch to a cudf Table: numRows=" + batch.numRows() +
+              " numCols=" + batch.numCols());
+    }
     return new Table(extractBases(batch));
   }
 
@@ -659,6 +702,11 @@ public class GpuColumnVector extends GpuColumnVectorBase {
    */
   static boolean typeConversionAllowed(ColumnView cv, DataType colType) {
     DType dt = cv.getType();
+    if (isVariantType(colType)) {
+      // The logical-type check above prevents an ordinary two-field Spark struct from being
+      // mistaken for Variant; this helper only validates Variant's physical cuDF layout.
+      return hasVariantPhysicalLayout(cv);
+    }
     if (!dt.isNestedType()) {
       return getNonNestedRapidsType(colType).equals(dt);
     }
@@ -720,6 +768,28 @@ public class GpuColumnVector extends GpuColumnVectorBase {
     } else {
       // Unexpected type
       return false;
+    }
+  }
+
+  private static boolean hasVariantPhysicalLayout(ColumnView cv) {
+    if (!cv.getType().equals(DType.STRUCT) || cv.getNumChildren() != 2) {
+      return false;
+    }
+    try (ColumnView value = cv.getChildColumnView(0);
+         ColumnView metadata = cv.getChildColumnView(1)) {
+      return isVariantBinaryChild(value) && isVariantBinaryChild(metadata);
+    }
+  }
+
+  private static boolean isVariantBinaryChild(ColumnView cv) {
+    if (cv.getType().equals(DType.STRING)) {
+      return true;
+    }
+    if (!cv.getType().equals(DType.LIST) || cv.getNumChildren() != 1) {
+      return false;
+    }
+    try (ColumnView bytes = cv.getChildColumnView(0)) {
+      return bytes.getType().equals(DType.UINT8);
     }
   }
 
@@ -830,6 +900,9 @@ public class GpuColumnVector extends GpuColumnVectorBase {
   }
 
   private static String buildColumnTypeString(DataType sparkType) {
+    if (isVariantType(sparkType)) {
+      return "STRUCT(LIST(UINT8),LIST(UINT8))";
+    }
     DType dtype = toRapidsOrNull(sparkType);
     if (dtype != null) {
       return dtype.toString();

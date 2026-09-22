@@ -80,6 +80,17 @@ object GpuRowToColumnConverter {
   private def getConverterFor(field: StructField): TypeConverter =
     getConverterForType(field.dataType, field.nullable)
 
+  /** Whether this converter can materialize the type, including all nested child types. */
+  def supportsType(dataType: DataType): Boolean = dataType match {
+    case BooleanType | ByteType | ShortType | IntegerType | FloatType | LongType |
+         DoubleType | DateType | TimestampType | StringType | BinaryType | NullType => true
+    case _: DecimalType => true
+    case ArrayType(elementType, _) => supportsType(elementType)
+    case StructType(fields) => fields.forall(field => supportsType(field.dataType))
+    case MapType(keyType, valueType, _) => supportsType(keyType) && supportsType(valueType)
+    case otherType => GpuTypeShims.hasConverterForType(otherType)
+  }
+
   def getConverterForType(dataType: DataType, nullable: Boolean): TypeConverter = {
     (dataType, nullable) match {
       case (BooleanType, true) => BooleanConverter
@@ -905,6 +916,10 @@ object GeneratedInternalRowToCudfRowIterator extends Logging {
          |            input.hasNext());
          |      }
          |    }
+         |    // A cudf LIST column requires a terminal offset equal to the child data size, else
+         |    // offsets-reading consumers (e.g. chunked_pack when the batch spills) see a corrupt
+         |    // child extent. On the pending-row exit the slot already holds dataOffset (no-op).
+         |    offsetsBuffer.setInt((long) currentRow * 4, dataOffset);
          |    return new int[] {dataOffset, currentRow};
          |  }
          |

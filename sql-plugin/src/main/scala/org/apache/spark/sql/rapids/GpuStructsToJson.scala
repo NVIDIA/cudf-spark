@@ -41,6 +41,11 @@ class GpuStructsToJsonMeta(
     if (expr.options.get("pretty").exists(_.equalsIgnoreCase("true"))) {
       willNotWorkOnGpu("to_json option pretty=true is not supported")
     }
+    if (expr.options.exists { case (key, value) =>
+      key.equalsIgnoreCase("sortKeys") && value.equalsIgnoreCase("true")
+    }) {
+      willNotWorkOnGpu("to_json option sortKeys=true is not supported")
+    }
     val options = GpuJsonUtils.parseJSONOptions(expr.options)
     val hasDates = TrampolineUtil.dataTypeExistsRecursively(expr.child.dataType,
       _.isInstanceOf[DateType])

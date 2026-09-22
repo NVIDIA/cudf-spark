@@ -18,7 +18,6 @@
 {"spark": "332db"}
 {"spark": "340"}
 {"spark": "341"}
-{"spark": "341db"}
 {"spark": "342"}
 {"spark": "343"}
 {"spark": "344"}
@@ -32,19 +31,27 @@
 {"spark": "356"}
 {"spark": "357"}
 {"spark": "358"}
+{"spark": "359"}
 {"spark": "400"}
 {"spark": "400db173"}
 {"spark": "401"}
 {"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
 {"spark": "411"}
+{"spark": "412"}
+{"spark": "413"}
+{"spark": "420"}
+{"spark": "500"}
 spark-rapids-shim-json-lines ***/
+
 package org.apache.spark.sql.rapids.shims
 
 import java.net.URI
 
 import com.nvidia.spark.rapids.AssertUtils.assertInTests
 import com.nvidia.spark.rapids.GpuDataWritingCommand
-import com.nvidia.spark.rapids.shims.SparkShimImpl
+import com.nvidia.spark.rapids.shims.{CharVarcharUtilsShims, SparkShimImpl}
 
 import org.apache.spark.sql.{AnalysisException, Row, SaveMode, SparkSession}
 import org.apache.spark.sql.catalyst.catalog._
@@ -103,12 +110,14 @@ case class GpuCreateDataSourceTableAsSelectCommand(
       val result = saveDataIntoTable(
         TrampolineConnectShims.getActiveSession, table, tableLocation, SaveMode.Overwrite,
         tableExists = false)
+      val tableSchema = CharVarcharUtilsShims.getRawSchema(
+        SchemaMetadataShims.getCleanedSchema(result.schema), sessionState.conf)
       val newTable = table.copy(
         storage = table.storage.copy(locationUri = tableLocation),
         // We will use the schema of resolved.relation as the schema of the table (instead of
         // the schema of df). It is important since the nullability may be changed by the relation
         // provider (for example, see org.apache.spark.sql.parquet.DefaultSource).
-        schema = SchemaMetadataShims.getCleanedSchema(result.schema))
+        schema = tableSchema)
       // Table location is already validated. No need to check it again during table creation.
       sessionState.catalog.createTable(newTable, ignoreIfExists = false, validateLocation = false)
 

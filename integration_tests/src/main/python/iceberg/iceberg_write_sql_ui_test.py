@@ -37,11 +37,10 @@ def _is_write_node(name):
 def test_v2_write_sql_ui_shows_gpu_child_operators(spark_tmp_table_factory):
     """Regression test: the SQL UI / History Server must show the GPU child
     operators under a DataSource V2 table write (GpuV2TableWriteExec), not just
-    the write node. GpuV2TableWriteExec wraps its query in an AdaptiveSparkPlanExec
-    whose own final-plan update only refreshes its subtree, so without re-posting
-    the final plan the write execution's plan graph only contains the write node
-    and the GPU operators under it are missing. See GpuV2TableWriteExec
-    .postFinalPlanUpdateToSqlUi."""
+    the write node. GpuV2TableWriteExec executes a columnar copy of the query's
+    AdaptiveSparkPlanExec and re-posts the settled final graph after execution.
+    Otherwise the write execution's plan graph can show only the write node or
+    the wrong child plan."""
     table_name = get_full_table_name(spark_tmp_table_factory)
 
     def run(spark):
@@ -108,3 +107,80 @@ def test_v2_write_sql_ui_shows_gpu_child_operators(spark_tmp_table_factory):
     assert gpu_children, \
         f"SQL UI plan graph for the V2 write is missing GPU child operators " \
         f"(only the write node is shown): {names}"
+
+
+@allow_non_gpu('CreateTableExec')
+@iceberg
+def test_v2_write_sql_ui_gpu_child_operator_metrics_are_visible(spark_tmp_table_factory):
+    """Regression test: the SQL UI / History Server must show metric values (op
+    times) on the GPU child operators of a DataSource V2 table write, not just
+    their names. GpuV2TableWriteExec executes a columnar copy of the query's
+    AdaptiveSparkPlanExec; the copy must register its SQLMetric accumulator ids
+    before each stage job starts, otherwise Spark's SQL listener drops the task
+    accumulator updates."""
+    table_name = get_full_table_name(spark_tmp_table_factory)
+
+    def run(spark):
+        sql_store = spark._jsparkSession.sharedState().statusStore()
+
+        def nodes_of(exec_id):
+            ns = []
+            it = sql_store.planGraph(exec_id).allNodes().iterator()
+            while it.hasNext():
+                ns.append(it.next())
+            return ns
+
+        def max_execution_id():
+            mx = -1
+            it = sql_store.executionsList().iterator()
+            while it.hasNext():
+                mx = max(mx, it.next().executionId())
+            return mx
+
+        spark.sql(f"CREATE TABLE {table_name} (grp BIGINT, cnt BIGINT) "
+                  f"USING ICEBERG {_BASE_TBLPROPS_SQL}")
+        # See test_v2_write_sql_ui_shows_gpu_child_operators: drain the listener bus
+        # and scope to executions created by our own INSERT (the IT Spark session is
+        # shared, so the status store accumulates executions from earlier tests).
+        spark.sparkContext._jsc.sc().listenerBus().waitUntilEmpty(30000)
+        baseline_exec_id = max_execution_id()
+        # GROUP BY -> shuffle -> AQE re-plans; the INSERT is the V2 write execution.
+        spark.sql(f"INSERT INTO {table_name} "
+                  f"SELECT id % 8 AS grp, count(*) AS cnt FROM range(0, 100000) GROUP BY id % 8")
+        spark.sparkContext._jsc.sc().listenerBus().waitUntilEmpty(30000)
+
+        write_exec_ids = []
+        it = sql_store.executionsList().iterator()
+        while it.hasNext():
+            exec_id = it.next().executionId()
+            if exec_id > baseline_exec_id and \
+                    any(_is_write_node(n.name()) for n in nodes_of(exec_id)):
+                write_exec_ids.append(exec_id)
+        assert write_exec_ids, \
+            f"No V2 write execution found after baseline_exec_id={baseline_exec_id}."
+        write_exec_id = min(write_exec_ids)
+
+        # accumulator-id -> rendered metric value, for this execution.
+        metric_values = sql_store.executionMetrics(write_exec_id)
+        gpu_op_time = []  # (node_name, present_in_metric_values)
+        for node in nodes_of(write_exec_id):
+            if not node.name().startswith("Gpu") or _is_write_node(node.name()):
+                continue
+            mit = node.metrics().iterator()
+            while mit.hasNext():
+                metric = mit.next()
+                if metric.name().startswith("op time"):
+                    gpu_op_time.append(
+                        (node.name(), metric_values.contains(metric.accumulatorId())))
+        return gpu_op_time
+
+    gpu_op_time = with_gpu_session(run, conf=iceberg_write_enabled_conf)
+    assert gpu_op_time, \
+        "No GPU child 'op time' metrics found under the V2 write."
+    missing = [n for (n, ok) in gpu_op_time if not ok]
+    # With the bug the SQL listener drops every GPU task accumulator update, so none
+    # of the GPU child op-time ids appear in the metric-value map.
+    assert not missing, \
+        f"SQL UI shows blank op-time values on some of the V2 write's GPU child " \
+        f"operators (task accumulator updates were not joined to the plan for): " \
+        f"{missing}; all GPU op-time metrics: {[n for (n, _) in gpu_op_time]}"

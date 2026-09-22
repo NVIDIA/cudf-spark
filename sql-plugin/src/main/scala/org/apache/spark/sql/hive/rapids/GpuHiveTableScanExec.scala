@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,7 +23,7 @@ import scala.collection.immutable.HashSet
 import scala.collection.mutable
 
 import ai.rapids.cudf.{CaptureGroups, ColumnVector, DType, RegexProgram, Scalar, Schema, Table}
-import com.nvidia.spark.rapids.{ColumnarPartitionReaderWithPartitionValues, CSVPartitionReaderBase, DateUtils, GpuColumnVector, GpuExec, GpuMetric, HostStringColBufferer, HostStringColBuffererFactory, NvtxIdWithMetrics, NvtxRegistry, PartitionReaderIterator, PartitionReaderWithBytesRead, RapidsConf}
+import com.nvidia.spark.rapids.{ColumnarPartitionReaderWithPartitionValues, CSVPartitionReaderBase, DateUtils, GpuColumnVector, GpuExec, GpuMetric, HostStringColBufferer, HostStringColBuffererFactory, NvtxIdWithMetrics, NvtxRegistry, PartitionReaderIterator, RapidsConf}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingSeq
@@ -158,10 +158,17 @@ case class GpuHiveTableScanExec(requestedAttributes: Seq[Attribute],
         val normalizedFilters = partitionPruningPredicate.map(_.transform {
           case a: AttributeReference => originalAttributes(a)
         })
-        sparkSession.sessionState.catalog
-          .listPartitionsByFilter(hiveTableRelation.tableMeta.identifier, normalizedFilters)
+        SparkShimImpl.listPartitionsByFilter(
+          sparkSession,
+          hiveTableRelation.tableMeta.identifier,
+          normalizedFilters,
+          Some(hiveTableRelation.tableMeta))
       } else {
-        sparkSession.sessionState.catalog.listPartitions(hiveTableRelation.tableMeta.identifier)
+        SparkShimImpl.listPartitions(
+          sparkSession,
+          hiveTableRelation.tableMeta.identifier,
+          None,
+          Some(hiveTableRelation.tableMeta))
       }
     prunedPartitions.map(HiveClientImpl.toHivePartition(_, hiveQlTable))
   }
@@ -174,6 +181,7 @@ case class GpuHiveTableScanExec(requestedAttributes: Seq[Attribute],
     "metadataTime" -> createTimingMetric(ESSENTIAL_LEVEL, "metadata time"),
     "filesSize" -> createSizeMetric(ESSENTIAL_LEVEL, "size of files read"),
     GPU_DECODE_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_GPU_DECODE_TIME),
+    GPU_OUTPUT_BATCH_BYTES -> createSizeMetric(MODERATE_LEVEL, DESCRIPTION_GPU_OUTPUT_BATCH_BYTES),
     BUFFER_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_BUFFER_TIME),
     FILTER_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_FILTER_TIME),
     BUFFER_TIME_BUBBLE -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_BUFFER_TIME_BUBBLE),
@@ -463,11 +471,10 @@ case class GpuHiveTextPartitionReaderFactory(sqlConf: SQLConf,
 
   override def buildColumnarReader(partFile: PartitionedFile): PartitionReader[ColumnarBatch] = {
     val conf = broadcastConf.value.value
-    val reader = new PartitionReaderWithBytesRead(
-                   new GpuHiveDelimitedTextPartitionReader(
-                     conf, csvOptions, params, partFile, inputFileSchema,
-                     requestedOutputDataSchema, maxReaderBatchSizeRows,
-                     maxReaderBatchSizeBytes, metrics))
+    val reader = new GpuHiveDelimitedTextPartitionReader(
+      conf, csvOptions, params, partFile, inputFileSchema,
+      requestedOutputDataSchema, maxReaderBatchSizeRows,
+      maxReaderBatchSizeBytes, metrics)
     new AlphabeticallyReorderingColumnPartitionReader(reader,
                                                       partFile.partitionValues,
                                                       partitionSchema,

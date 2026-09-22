@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -153,6 +153,10 @@ class GpuPartitioningSuite extends AnyFunSuite with BeforeAndAfterEach {
     testGpuPartitionWithCompression("zstd")
   }
 
+  test("GPU partition with copy compression") {
+    testGpuPartitionWithCompression("copy")
+  }
+
   test("GPU kudo partitioning with serialization") {
     TrampolineUtil.cleanupAnyExistingSession()
     val conf = new SparkConf()
@@ -173,6 +177,32 @@ class GpuPartitioningSuite extends AnyFunSuite with BeforeAndAfterEach {
           assertResult(2)(partitions(0).numRows())
           assertResult(8)(partitions(1).numRows())
         }
+      }
+    }
+  }
+
+  test("GPU kudo partitioning rejects oversized serialized batch") {
+    TrampolineUtil.cleanupAnyExistingSession()
+    val conf = new SparkConf()
+        .set(RapidsConf.SHUFFLE_COMPRESSION_CODEC.key, "none")
+        .set(RapidsConf.SHUFFLE_KUDO_WRITE_MODE.key, "GPU")
+    TestUtils.withGpuSparkSession(conf) { _ =>
+      GpuShuffleEnv.init(new RapidsConf(conf))
+      val partitionIndices = Array(0, 2, 2)
+      val gp = new GpuPartitioning {
+        override val numPartitions: Int = partitionIndices.length
+        // Force the oversized-batch guard to trip with a 10-byte limit.
+        override protected[rapids] def maxGpuSerializedSliceBytes: Long = 10L
+      }
+      withResource(buildBatch()) { batch =>
+        GpuColumnVector.incRefCounts(batch)
+        val columns = GpuColumnVector.extractColumns(batch)
+        val numRows = batch.numRows
+        val ex = intercept[IllegalArgumentException] {
+          gp.sliceInternalGpuOrCpuAndClose(numRows, partitionIndices, columns)
+        }
+        assert(ex.getMessage.contains("exceeding the"))
+        assert(ex.getMessage.contains("reduce spark.rapids.sql.batchSizeBytes"))
       }
     }
   }

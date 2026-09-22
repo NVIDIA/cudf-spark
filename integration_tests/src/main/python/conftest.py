@@ -16,6 +16,8 @@ import math
 import os
 import pytest
 import random
+import shutil
+import tempfile
 import warnings
 
 # TODO redo _spark stuff using fixtures
@@ -123,6 +125,15 @@ def is_iceberg_rest_catalog():
     v = os.environ.get('ICEBERG_TEST_CATALOG_TYPE')
     return v == "rest"
 
+def unity_catalog_uri():
+    return os.environ.get('DELTA_UC_URI')
+
+def unity_catalog_storage_root():
+    return os.environ.get('DELTA_UC_STORAGE_ROOT')
+
+def is_unity_catalog_configured():
+    return unity_catalog_uri() is not None
+
 # key is time zone, value is recorded boolean value
 _support_info_cache_for_time_zone = {}
 
@@ -149,6 +160,11 @@ def is_nightly_run():
 
 def is_precommit_run():
     return _is_precommit_run
+
+
+def is_reduced_it_run():
+    return os.environ.get('REDUCED_IT', 'false').lower() == 'true'
+
 
 def is_at_least_precommit_run():
     return _is_nightly_run or _is_precommit_run
@@ -265,7 +281,6 @@ def pytest_runtest_setup(item):
     _allow_any_non_gpu_conditional = False
     non_gpu_databricks = item.get_closest_marker('allow_non_gpu_databricks')
     non_gpu = item.get_closest_marker('allow_non_gpu')
-    non_gpu_conditional = item.get_closest_marker('allow_non_gpu_conditional')
     _per_test_ansi_mode_enabled = None if item.get_closest_marker('disable_ansi_mode') is None \
       else not item.get_closest_marker('disable_ansi_mode')
 
@@ -292,21 +307,42 @@ def pytest_runtest_setup(item):
         _allow_any_non_gpu = False
         _non_gpu_allowed = []
 
-    if non_gpu_conditional:
+    for non_gpu_conditional in item.iter_markers('allow_non_gpu_conditional'):
+        # Validate the marker deterministically on BOTH condition branches so a
+        # malformed marker fails everywhere, not only where its condition is true.
+        unknown_kwargs = set(non_gpu_conditional.kwargs) - {'any'}
+        if unknown_kwargs:
+            raise TypeError(
+                "allow_non_gpu_conditional got unexpected keyword argument(s) "
+                f"{sorted(unknown_kwargs)}; only 'any' is supported.")
+        allow_any = non_gpu_conditional.kwargs.get('any', False)
+        if not isinstance(allow_any, bool):
+            raise TypeError(
+                "The 'any' parameter of 'allow_non_gpu_conditional' must be a Boolean.")
+        if not non_gpu_conditional.args:
+            raise TypeError(
+                "The 'allow_non_gpu_conditional' marker requires a Boolean condition "
+                "as its first argument.")
         condition = non_gpu_conditional.args[0]
-        _non_gpu_allowed_conditional = non_gpu_conditional.args[1]
         if not isinstance(condition, bool):
-            raise TypeError("The first parameter of 'allow_non_gpu_conditional' must be a Boolean.")
+            raise TypeError(
+                "The first parameter of 'allow_non_gpu_conditional' must be a Boolean.")
+        op_args = non_gpu_conditional.args[1:]
+        if not all(isinstance(arg, str) for arg in op_args):
+            raise TypeError("allow_non_gpu_conditional op names must be strings.")
+        ops = [op.strip() for arg in op_args for op in arg.split(',')]
+        ops = [op for op in ops if op]
+        if op_args and not ops:
+            warnings.warn('allow_non_gpu_conditional marker with an empty ops payload')
         if condition:
-            if non_gpu_conditional.kwargs and non_gpu_conditional.kwargs['any']:
+            if allow_any:
                 _allow_any_non_gpu_conditional = True
-                _non_gpu_allowed_conditional = []
-            elif _non_gpu_allowed_conditional:
-                _allow_any_non_gpu_conditional = False
-            else:
+            elif ops:
+                for op in ops:
+                    if op not in _non_gpu_allowed_conditional:
+                        _non_gpu_allowed_conditional.append(op)
+            elif not op_args:
                 warnings.warn('allow_non_gpu_conditional marker without anything allowed')
-                _allow_any_non_gpu_conditional = False
-                _non_gpu_allowed_conditional = []
 
 
     _allow_any_non_gpu = _allow_any_non_gpu | _allow_any_non_gpu_databricks | _allow_any_non_gpu_conditional
@@ -315,7 +351,7 @@ def pytest_runtest_setup(item):
     elif _non_gpu_allowed_databricks:
         _non_gpu_allowed = _non_gpu_allowed_databricks
     if _non_gpu_allowed_conditional:
-        _non_gpu_allowed = list(_non_gpu_allowed) + _non_gpu_allowed_conditional.split(",")
+        _non_gpu_allowed = list(_non_gpu_allowed) + _non_gpu_allowed_conditional
 
     global _validate_execs_in_gpu_plan
     validate_execs = item.get_closest_marker('validate_execs_in_gpu_plan')
@@ -359,6 +395,12 @@ def pytest_runtest_setup(item):
         if not item.config.getoption('delta_lake'):
             pytest.skip('delta lake tests not configured to run')
 
+    if item.get_closest_marker('unity_catalog'):
+        if not item.config.getoption('unity_catalog'):
+            pytest.skip('Unity Catalog tests not configured to run')
+        elif not is_unity_catalog_configured():
+            pytest.skip('DELTA_UC_URI is not set to a running Unity Catalog server')
+
     if item.get_closest_marker('large_data_test'):
         if not item.config.getoption('large_data_test'):
             pytest.skip('tests for large data not configured to run')
@@ -368,6 +410,9 @@ def pytest_runtest_setup(item):
             pytest.skip('tests for pyarrow not configured to run')
 
 def pytest_configure(config):
+    if config.getoption('iceberg') and not os.environ.get('EXPECTED_ICEBERG_VERSION'):
+        raise pytest.UsageError(
+            "EXPECTED_ICEBERG_VERSION must be set when running Iceberg tests")
     global _runtime_env
     _runtime_env = config.getoption('runtime_env')
     global _std_input_path
@@ -496,9 +541,99 @@ def _maybe_apply_random_select(config, items):
 
 _random_select_config = _parse_random_select_config()
 
+
+def _precommit_parametrize_factors(item):
+    factors = []
+    for position, mark in enumerate(item.iter_markers(name='parametrize')):
+        argvalues = mark.args[1] if len(mark.args) > 1 else mark.kwargs['argvalues']
+        try:
+            size = len(argvalues)
+        except TypeError:
+            # Pytest accepts iterators here, but their size cannot be recovered after collection.
+            return []
+        factors.append((size, position))
+    factors.sort(key=lambda factor: (-factor[0], factor[1]))
+    return factors
+
+
+def _combination_for_position(position, factors):
+    # Reconstruct the per-decorator value indices from pytest's Cartesian-product ordering.
+    indices = {}
+    for size, original_position in sorted(factors, key=lambda factor: factor[1], reverse=True):
+        indices[original_position] = position % size
+        position //= size
+    return tuple(indices[factor[1]] for factor in factors)
+
+
+def _reduced_it_required_items(items):
+    """Return (required_items, each_choice_test_count) for reduced IT selection.
+
+    ``required_items`` is the subset of ``items`` to keep. Every value of every
+    stacked ``parametrize`` decorator is guaranteed to appear in at least one
+    kept item. Tests with fewer than two parametrize decorators, or whose
+    collected cases do not form the expected Cartesian product (iterator,
+    fixture, or otherwise dynamic parametrization), are kept in full. This is
+    each-choice (1-wise) coverage, not pairwise: parameter interactions are not
+    guaranteed. Kept as a pure helper so it can be unit tested without pytest
+    config or pre-commit gating (see reduced_it_selection_test.py)."""
+    groups = {}
+    for item in items:
+        groups.setdefault(item.nodeid.split('[', 1)[0], []).append(item)
+
+    required = set()
+    each_choice_test_count = 0
+    for group_items in groups.values():
+        first_item = group_items[0]
+        factors = _precommit_parametrize_factors(first_item)
+        expected_group_size = math.prod(factor[0] for factor in factors)
+        if (len(factors) < 2
+                or any(factor[0] == 0 for factor in factors)
+                or len(group_items) != expected_group_size):
+            # Preserve all cases when there is nothing to combine or collection includes
+            # dynamic/fixture parametrization that cannot be mapped safely.
+            required.update(group_items)
+            continue
+
+        selected_combinations = {
+            # Factors are largest-first, so this produces the minimum number of combinations
+            # needed to include every value from every factor.
+            tuple(index % factor[0] for factor in factors)
+            for index in range(factors[0][0])
+        }
+        each_choice_test_count += 1
+
+        for position, item in enumerate(group_items):
+            combination = _combination_for_position(position, factors)
+            if combination in selected_combinations:
+                required.add(item)
+    return required, each_choice_test_count
+
+
+def _select_precommit_cases(config, items):
+    """Select each-choice combinations while covering every parameter value at least once."""
+    if not is_precommit_run():
+        return
+
+    original_items = list(items)
+    required, each_choice_test_count = _reduced_it_required_items(original_items)
+    items[:] = [item for item in original_items if item in required]
+    deselected = [item for item in original_items if item not in required]
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        reporter = config.pluginmanager.get_plugin('terminalreporter')
+        if reporter:
+            reporter.write_line(
+                f"REDUCED_IT active: running {len(items)} of {len(original_items)} tests "
+                f"({len(items) / len(original_items):.1%}); "
+                f"each-choice tests={each_choice_test_count}.")
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config, items):
-    _maybe_apply_random_select(config, items)
+    if is_precommit_run() and is_reduced_it_run():
+        _select_precommit_cases(config, items)
+    else:
+        _maybe_apply_random_select(config, items)
     r = random.Random(oom_random_injection_seed)
     for item in items:
         extras = []
@@ -599,6 +734,16 @@ def spark_tmp_path(request):
     yield ret
     if not debug:
         fs.delete(path)
+
+# Driver-local counterpart to spark_tmp_path; spark_tmp_path lives in the
+# default Hadoop FS, which is not local on distributed setups.
+@pytest.fixture
+def local_tmp_path(request):
+    debug = request.config.getoption('debug_tmp_path')
+    ret = tempfile.mkdtemp(prefix='pyspark_tests_')
+    yield ret
+    if not debug:
+        shutil.rmtree(ret, ignore_errors=True)
 
 class TmpTableFactory:
   def __init__(self, base_id):

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -201,7 +201,7 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
         }
       } catch {
         case t: Throwable =>
-          System.err.println("THROWABLE CAUGHT IN " + name)
+          ConsoleOutput.writeErrorLine("THROWABLE CAUGHT IN " + name)
           t.printStackTrace(System.err)
       }
     }
@@ -306,7 +306,7 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
 
   object MyThreadSignaler extends Signaler {
     override def apply(testThread: Thread): Unit = {
-      System.err.println("\n\n\t\tTEST THREAD APPEARS TO BE STUCK")
+      ConsoleOutput.writeErrorLine("\n\n\t\tTEST THREAD APPEARS TO BE STUCK")
       Thread.getAllStackTraces.forEach {
         case (thread, trace) =>
           val name = if (thread.getId == testThread.getId) {
@@ -314,7 +314,7 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
           } else {
             thread.getName
           }
-          System.err.println(name + "\n\t" + trace.mkString("\n\t"))
+          ConsoleOutput.writeErrorLine(name + "\n\t" + trace.mkString("\n\t"))
       }
     }
   }
@@ -364,7 +364,7 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
       case t: Throwable =>
         // if the exception does not have a message set, then scalatest fails in
         // ways that make it so you do not see the exception at all.
-        System.err.println(t)
+        ConsoleOutput.writeErrorLine(t)
         t.printStackTrace(System.err)
         throw t
     }

@@ -6,7 +6,7 @@ nav_order: 4
 ---
 # UDF to Catalyst Expressions
 
-To speedup the processing of user defined functions (UDFs), the RAPIDS Accelerator for Apache Spark
+To speedup the processing of user defined functions (UDFs), the NVIDIA cuDF plugin for Apache Spark
 introduces a UDF compiler extension to translate UDFs to Catalyst expressions.
 
 To enable this operation on the GPU, set

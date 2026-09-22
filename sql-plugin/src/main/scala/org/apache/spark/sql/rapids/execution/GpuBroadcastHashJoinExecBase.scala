@@ -20,6 +20,7 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.shims.{GpuBroadcastJoinMeta, ShimBinaryExecNode}
 
+import org.apache.spark.TaskContext
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.Expression
@@ -50,6 +51,21 @@ abstract class GpuBroadcastHashJoinMetaBase(
     JoinTypeChecks.equiJoinMeta(leftKeys, rightKeys, conditionMeta)
 
   override val childExprs: Seq[BaseExprMeta[_]] = leftKeys ++ rightKeys ++ conditionMeta
+
+  override protected def runChildExprBridgeOptimization(): Unit = {
+    GpuCpuBridgeOptimizer.checkAndOptimizeExpressionMetas(leftKeys ++ rightKeys)
+    conditionMeta.foreach { cond =>
+      val leftExprIds = join.left.output.map(_.exprId)
+      val rightExprIds = join.right.output.map(_.exprId)
+      if (AstUtil.canExtractNonAstConditionIfNeed(cond, leftExprIds, rightExprIds)) {
+        GpuCpuBridgeOptimizer.checkAndOptimizeNonAstSubtrees(cond)
+      } else {
+        // Inner joins can consume a bridged post-filter. Joins that require an AST condition
+        // will call requireAstForGpuOn later and reject GPU execution if the bridge remains.
+        GpuCpuBridgeOptimizer.checkAndOptimizeExpressionMetas(Seq(cond))
+      }
+    }
+  }
 
   override def tagPlanForGpu(): Unit = {
     GpuHashJoin.tagJoin(this, join.joinType, buildSide, join.leftKeys, join.rightKeys,
@@ -105,6 +121,13 @@ abstract class GpuBroadcastHashJoinExecBase(
     isNullAwareAntiJoin: Boolean) extends ShimBinaryExecNode with GpuHashJoin {
   import GpuMetric._
 
+  // Mirror Spark BroadcastHashJoinExec: show skew status in plan strings after AQE
+  // OptimizeSkewedJoin (Spark 4.2+). Subclasses override isSkewJoin when propagating
+  // the CPU flag; older Spark versions keep the GpuHashJoin default of false.
+  override def nodeName: String = {
+    if (isSkewJoin) super.nodeName + "(skew=true)" else super.nodeName
+  }
+
   // Same checks as Spark
   if (isNullAwareAntiJoin) {
     require(leftKeys.length == 1, "leftKeys length should be 1")
@@ -119,7 +142,14 @@ abstract class GpuBroadcastHashJoinExecBase(
   override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
     OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
     STREAM_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_STREAM_TIME),
-    JOIN_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_JOIN_TIME))
+    JOIN_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_JOIN_TIME),
+    HASH_TABLE_BUILDS -> createMetric(DEBUG_LEVEL, DESCRIPTION_HASH_TABLE_BUILDS),
+    HASH_TABLE_REBUILDS -> createMetric(DEBUG_LEVEL, DESCRIPTION_HASH_TABLE_REBUILDS),
+    HASH_TABLE_REUSES -> createMetric(DEBUG_LEVEL, DESCRIPTION_HASH_TABLE_REUSES),
+    CPU_BRIDGE_PROCESSING_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_PROCESSING_TIME),
+    CPU_BRIDGE_WAIT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
+      DESCRIPTION_CPU_BRIDGE_WAIT_TIME))
 
   override def requiredChildDistribution: Seq[Distribution] = {
     val mode = HashedRelationBroadcastMode(buildKeys)
@@ -152,15 +182,12 @@ abstract class GpuBroadcastHashJoinExecBase(
     case reused: ReusedExchangeExec => reused.child.asInstanceOf[GpuBroadcastExchangeExec]
   }
 
-  protected def buildSidePostProjection: Option[ColumnarBatch => ColumnarBatch] = {
+  private def makeBuildSidePostProjection(
+      bindProject: GpuProjectExec => GpuTieredProject):
+      Option[ColumnarBatch => ColumnarBatch] = {
     val projects = splitBroadcastPlan(buildPlan)._2.reverse
     if (projects.nonEmpty) {
-      val boundProjects = projects.map { project =>
-        // Match GpuProjectExec's tiered binding so build-side extraction has the same
-        // splitting and retry behavior as a normal project.
-        GpuBindReferences.bindGpuReferencesTiered(
-          project.projectList, project.child.output, conf, allMetrics)
-      }
+      val boundProjects = projects.map(bindProject)
       Some((batch: ColumnarBatch) => boundProjects.foldLeft(batch) {
         case (currentBatch, boundProject) =>
           val spillableBatch = SpillableColumnarBatch(
@@ -169,6 +196,30 @@ abstract class GpuBroadcastHashJoinExecBase(
       })
     } else {
       None
+    }
+  }
+
+  protected def buildSidePostProjection: Option[ColumnarBatch => ColumnarBatch] = {
+    makeBuildSidePostProjection { project =>
+      // Match GpuProjectExec's tiered binding so build-side extraction has the same
+      // splitting, retry, and metric behavior as a normal project.
+      GpuBindReferences.bindGpuReferencesTiered(
+        project.projectList, project.child.output, conf, allMetrics)
+    }
+  }
+
+  private def cachedBuildSidePostProjection: Option[ColumnarBatch => ColumnarBatch] = {
+    makeBuildSidePostProjection { project =>
+      // For a post-projection that will be cached, do not include metrics
+      // since the projection can outlive the task that creates it.
+      GpuBindReferences.bindGpuReferencesTieredNoMetrics(
+        project.projectList, project.child.output, conf)
+    }
+  }
+
+  protected def buildSidePostProjectionKey: Seq[Seq[Expression]] = {
+    splitBroadcastPlan(buildPlan)._2.reverse.map { project =>
+      project.projectList.map(_.canonicalized)
     }
   }
 
@@ -182,22 +233,61 @@ abstract class GpuBroadcastHashJoinExecBase(
     val opTime = gpuLongMetric(OP_TIME_LEGACY)
     val streamTime = gpuLongMetric(STREAM_TIME)
     val joinTime = gpuLongMetric(JOIN_TIME)
+    val hashTableBuilds = gpuLongMetric(HASH_TABLE_BUILDS)
+    val hashTableRebuilds = gpuLongMetric(HASH_TABLE_REBUILDS)
+    val hashTableReuses = gpuLongMetric(HASH_TABLE_REUSES)
 
     val targetSize = RapidsConf.GPU_BATCH_SIZE_BYTES.get(conf)
     val joinOptions = RapidsConf.getJoinOptions(conf, targetSize)
+    val enableHashTableReuse = RapidsConf.HASH_TABLE_REUSE.get(conf)
 
     val broadcastRelation = broadcastExchange.executeColumnarBroadcast[Any]()
 
     val rdd = streamedPlan.executeColumnar()
     val buildSchema = getBroadcastPlan(buildPlan).schema
     val postProjectionAndClose = buildSidePostProjection
+    // The cache needs the build and post projection keys to identify a cached build side, and uses
+    // the post projection function during construction and rebuilds. We bind these without metrics,
+    // since they can outlive the task that creates the cached artifact.
+    val (cachedPostProjectionAndClose, cachedPostProjectionKey, cachedBoundBuildKeys) =
+      if (enableHashTableReuse) {
+        (
+          cachedBuildSidePostProjection,
+          buildSidePostProjectionKey,
+          GpuBindReferences.bindGpuReferencesNoMetrics(buildKeys, buildPlan.output))
+      } else {
+        (None, Seq.empty[Seq[Expression]], Seq.empty[GpuExpression])
+      }
     val localIsNullAwareAntiJoin = isNullAwareAntiJoin
+    val localJoinId = id
     rdd.mapPartitions { it =>
       val (broadcastBuiltBatch, streamIter) =
         GpuBroadcastHelper.getBroadcastBuiltBatchAndStreamIter(
           broadcastRelation,
           buildSchema,
           new CollectTimeIterator(NvtxRegistry.BROADCAST_JOIN_STREAM, it, streamTime))
+      val hashBackendProvider = closeOnExcept(broadcastBuiltBatch) { _ =>
+        // Check that the broadcast batch is not an empty relation before we pass it to the join.
+        val broadcastBatch = broadcastRelation.value match {
+          case batch: SerializeConcatHostBuffersDeserializeBatch => Some(batch)
+          case _ => None
+        }
+        if (enableHashTableReuse) {
+          broadcastBatch.map { batch =>
+            val taskContext = TaskContext.get()
+            val demandId = HashBuildDemandId(localJoinId, taskContext.stageId(),
+              taskContext.stageAttemptNumber())
+            val filterOutNulls = GpuHashJoin.buildSideNeedsNullFilter(
+              joinType, compareNullsEqual, buildSide, buildKeys)
+            batch.createCachedHashBackendProvider(buildSide, demandId, cachedPostProjectionKey,
+              cachedBoundBuildKeys, compareNullsEqual, filterOutNulls,
+              cachedPostProjectionAndClose,
+              HashBuildMetrics(hashTableBuilds, hashTableRebuilds, hashTableReuses))
+          }.getOrElse(OnDemandHashBackendProvider)
+        } else {
+          OnDemandHashBackendProvider
+        }
+      }
       val builtBatch = postProjectionAndClose.map(_(broadcastBuiltBatch))
           .getOrElse(broadcastBuiltBatch)
       if (localIsNullAwareAntiJoin) {
@@ -220,12 +310,12 @@ abstract class GpuBroadcastHashJoinExecBase(
               boundStreamKeys)
           }
           doJoin(builtBatch, nullFilteredStreamIter, joinOptions, numOutputRows,
-            numOutputBatches, opTime, joinTime)
+            numOutputBatches, opTime, joinTime, hashBackendProvider)
         }
       } else {
         // builtBatch will be closed in doJoin
         doJoin(builtBatch, streamIter, joinOptions, numOutputRows, numOutputBatches, opTime,
-          joinTime)
+          joinTime, hashBackendProvider)
       }
     }
   }

@@ -84,7 +84,10 @@ object ParquetSchemaClipShims {
    * Based on Spark's ParquetSchemaConverter.convertPrimitiveField
    */
   def convertPrimitiveField(parquetType: PrimitiveType): DataType = {
-    val typeAnnotation = parquetType.getLogicalTypeAnnotation
+    // Mirror Spark's respectUnknownTypeAnnotation handling (SPARK-56045 / SPARK-54220):
+    // strip UNKNOWN when the Spark version (or SQL conf) says to fall back to the physical type.
+    val typeAnnotation = ParquetUnknownTypeAnnotationShims.effectiveLogicalTypeAnnotation(
+      parquetType.getLogicalTypeAnnotation)
     val typeName = parquetType.getPrimitiveTypeName
 
     def typeString =
@@ -114,92 +117,97 @@ object ParquetSchemaClipShims {
       DecimalType(precision, scale)
     }
 
-    typeName match {
-      case BOOLEAN => BooleanType
+    // After SPARK-54220 / SPARK-56045, a remaining UNKNOWN annotation maps to NullType.
+    if (ParquetUnknownTypeAnnotationShims.mapsToNullType(typeAnnotation)) {
+      NullType
+    } else {
+      typeName match {
+        case BOOLEAN => BooleanType
 
-      case FLOAT => FloatType
+        case FLOAT => FloatType
 
-      case DOUBLE => DoubleType
+        case DOUBLE => DoubleType
 
-      case INT32 =>
-        typeAnnotation match {
-          case intTypeAnnotation: IntLogicalTypeAnnotation if intTypeAnnotation.isSigned =>
-            intTypeAnnotation.getBitWidth match {
-              case 8 => ByteType
-              case 16 => ShortType
-              case 32 => IntegerType
-              case _ => illegalType()
-            }
-          case null => IntegerType
-          case _: DateLogicalTypeAnnotation => DateType
-          case _: DecimalLogicalTypeAnnotation => makeDecimalType(Decimal.MAX_INT_DIGITS)
-          case intTypeAnnotation: IntLogicalTypeAnnotation if !intTypeAnnotation.isSigned =>
-            intTypeAnnotation.getBitWidth match {
-              case 8 => ShortType
-              case 16 => IntegerType
-              case 32 => LongType
-              case _ => illegalType()
-            }
-          case t: TimestampLogicalTypeAnnotation if t.getUnit == TimeUnit.MILLIS =>
-            typeNotImplemented()
-          case _ => illegalType()
-        }
+        case INT32 =>
+          typeAnnotation match {
+            case intTypeAnnotation: IntLogicalTypeAnnotation if intTypeAnnotation.isSigned =>
+              intTypeAnnotation.getBitWidth match {
+                case 8 => ByteType
+                case 16 => ShortType
+                case 32 => IntegerType
+                case _ => illegalType()
+              }
+            case null => IntegerType
+            case _: DateLogicalTypeAnnotation => DateType
+            case _: DecimalLogicalTypeAnnotation => makeDecimalType(Decimal.MAX_INT_DIGITS)
+            case intTypeAnnotation: IntLogicalTypeAnnotation if !intTypeAnnotation.isSigned =>
+              intTypeAnnotation.getBitWidth match {
+                case 8 => ShortType
+                case 16 => IntegerType
+                case 32 => LongType
+                case _ => illegalType()
+              }
+            case t: TimestampLogicalTypeAnnotation if t.getUnit == TimeUnit.MILLIS =>
+              typeNotImplemented()
+            case _ => illegalType()
+          }
 
-      case INT64 =>
-        typeAnnotation match {
-          case intTypeAnnotation: IntLogicalTypeAnnotation if intTypeAnnotation.isSigned =>
-            intTypeAnnotation.getBitWidth match {
-              case 64 => LongType
-              case _ => illegalType()
-            }
-          case null => LongType
-          case _: DecimalLogicalTypeAnnotation => makeDecimalType(Decimal.MAX_LONG_DIGITS)
-          case intTypeAnnotation: IntLogicalTypeAnnotation if !intTypeAnnotation.isSigned =>
-            intTypeAnnotation.getBitWidth match {
-              // The precision to hold the largest unsigned long is:
-              // `java.lang.Long.toUnsignedString(-1).length` = 20
-              case 64 => DecimalType(20, 0)
-              case _ => illegalType()
-            }
-          case timestamp: TimestampLogicalTypeAnnotation
-            if timestamp.getUnit == TimeUnit.MICROS || timestamp.getUnit == TimeUnit.MILLIS =>
-              ParquetTimestampAnnotationShims.timestampTypeForMillisOrMicros(timestamp)
-          case timestamp: TimestampLogicalTypeAnnotation if timestamp.getUnit == TimeUnit.NANOS &&
-              ParquetLegacyNanoAsLongShims.legacyParquetNanosAsLong =>
+        case INT64 =>
+          typeAnnotation match {
+            case intTypeAnnotation: IntLogicalTypeAnnotation if intTypeAnnotation.isSigned =>
+              intTypeAnnotation.getBitWidth match {
+                case 64 => LongType
+                case _ => illegalType()
+              }
+            case null => LongType
+            case _: DecimalLogicalTypeAnnotation => makeDecimalType(Decimal.MAX_LONG_DIGITS)
+            case intTypeAnnotation: IntLogicalTypeAnnotation if !intTypeAnnotation.isSigned =>
+              intTypeAnnotation.getBitWidth match {
+                // The precision to hold the largest unsigned long is:
+                // `java.lang.Long.toUnsignedString(-1).length` = 20
+                case 64 => DecimalType(20, 0)
+                case _ => illegalType()
+              }
+            case timestamp: TimestampLogicalTypeAnnotation
+              if timestamp.getUnit == TimeUnit.MICROS || timestamp.getUnit == TimeUnit.MILLIS =>
+                ParquetTimestampAnnotationShims.timestampTypeForMillisOrMicros(timestamp)
+            case timestamp: TimestampLogicalTypeAnnotation if timestamp.getUnit == TimeUnit.NANOS &&
+                ParquetLegacyNanoAsLongShims.legacyParquetNanosAsLong =>
+              throw new RapidsAnalysisException(
+                "GPU does not support spark.sql.legacy.parquet.nanosAsLong")
+            case _ => illegalType()
+          }
+
+        case INT96 =>
+          if (!SQLConf.get.isParquetINT96AsTimestamp) {
             throw new RapidsAnalysisException(
-              "GPU does not support spark.sql.legacy.parquet.nanosAsLong")
-          case _ => illegalType()
-        }
+              "INT96 is not supported unless it's interpreted as timestamp. " +
+                s"Please try to set ${SQLConf.PARQUET_INT96_AS_TIMESTAMP.key} to true.")
+          }
+          TimestampType
 
-      case INT96 =>
-        if (!SQLConf.get.isParquetINT96AsTimestamp) {
-          throw new RapidsAnalysisException(
-            "INT96 is not supported unless it's interpreted as timestamp. " +
-              s"Please try to set ${SQLConf.PARQUET_INT96_AS_TIMESTAMP.key} to true.")
-        }
-        TimestampType
+        case BINARY =>
+          typeAnnotation match {
+            case _: StringLogicalTypeAnnotation | _: EnumLogicalTypeAnnotation |
+                 _: JsonLogicalTypeAnnotation => StringType
+            case null if SQLConf.get.isParquetBinaryAsString => StringType
+            case null => BinaryType
+            case _: BsonLogicalTypeAnnotation => BinaryType
+            case _: DecimalLogicalTypeAnnotation => makeDecimalType()
+            case _ => illegalType()
+          }
 
-      case BINARY =>
-        typeAnnotation match {
-          case _: StringLogicalTypeAnnotation | _: EnumLogicalTypeAnnotation |
-               _: JsonLogicalTypeAnnotation => StringType
-          case null if SQLConf.get.isParquetBinaryAsString => StringType
-          case null => BinaryType
-          case _: BsonLogicalTypeAnnotation => BinaryType
-          case _: DecimalLogicalTypeAnnotation => makeDecimalType()
-          case _ => illegalType()
-        }
+        case FIXED_LEN_BYTE_ARRAY =>
+          typeAnnotation match {
+            case _: DecimalLogicalTypeAnnotation =>
+              makeDecimalType(Decimal.maxPrecisionForBytes(parquetType.getTypeLength))
+            case null => BinaryType
+            case _: IntervalLogicalTypeAnnotation => typeNotImplemented()
+            case _ => illegalType()
+          }
 
-      case FIXED_LEN_BYTE_ARRAY =>
-        typeAnnotation match {
-          case _: DecimalLogicalTypeAnnotation =>
-            makeDecimalType(Decimal.maxPrecisionForBytes(parquetType.getTypeLength))
-          case null => BinaryType
-          case _: IntervalLogicalTypeAnnotation => typeNotImplemented()
-          case _ => illegalType()
-        }
-
-      case _ => illegalType()
+        case _ => illegalType()
+      }
     }
   }
 }

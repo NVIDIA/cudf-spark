@@ -28,13 +28,34 @@ import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.jni.{GpuSplitAndRetryOOM, RmmSpark}
 
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Expression}
-import org.apache.spark.sql.types.{ArrayType, DataType, IntegerType, MapType}
+import org.apache.spark.sql.types.{ArrayType, DataType, IntegerType, MapType, StringType, StructType => SparkStructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class GpuGenerateSuite
   extends RmmSparkRetrySuiteBase
     with SparkQueryCompareTestSuite {
   val rapidsConf = new RapidsConf(Map.empty[String, String])
+
+  test("GpuExplode/GpuPosExplode elementSchema for array and map children") {
+    // array element -> "col"; map element -> "key"/"value"; PosExplode prepends "pos"
+    val arr = AttributeReference("a", ArrayType(IntegerType))()
+    val map = AttributeReference("m", MapType(IntegerType, StringType))()
+    assertResult(new SparkStructType().add("col", IntegerType, nullable = true))(
+      GpuExplode(arr).elementSchema)
+    assertResult(new SparkStructType()
+        .add("pos", IntegerType, nullable = false)
+        .add("col", IntegerType, nullable = true))(
+      GpuPosExplode(arr).elementSchema)
+    assertResult(new SparkStructType()
+        .add("key", IntegerType, nullable = false)
+        .add("value", StringType, nullable = true))(
+      GpuExplode(map).elementSchema)
+    assertResult(new SparkStructType()
+        .add("pos", IntegerType, nullable = false)
+        .add("key", IntegerType, nullable = false)
+        .add("value", StringType, nullable = true))(
+      GpuPosExplode(map).elementSchema)
+  }
 
   def makeListColumn(
       numRows: Int,

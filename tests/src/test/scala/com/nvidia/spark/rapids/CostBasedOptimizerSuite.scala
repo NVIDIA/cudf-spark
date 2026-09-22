@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -336,6 +336,8 @@ class CostBasedOptimizerSuite extends SparkQueryCompareTestSuite
     val conf = createDefaultConf()
       .set(SQLConf.ADAPTIVE_EXECUTION_ENABLED.key, "true")
       .set(RapidsConf.ENABLE_CAST_STRING_TO_TIMESTAMP.key, "false")
+      // disable gpu cpu bridge, or else the cost optimizer will not run properly
+      .set(RapidsConf.ENABLE_CPU_BRIDGE.key, "false")
       .set(RapidsConf.TEST_ALLOWED_NONGPU.key,
         "ProjectExec,BroadcastExchangeExec,BroadcastHashJoinExec," +
             "Alias,Cast,LessThan,ShuffleExchangeExec,RoundRobinPartitioning")
@@ -373,6 +375,8 @@ class CostBasedOptimizerSuite extends SparkQueryCompareTestSuite
       .set(TRANSITION_TO_GPU_COST, "0.1")
       .set(SQLConf.ADAPTIVE_EXECUTION_ENABLED.key, "false")
       .set(RapidsConf.ENABLE_CAST_STRING_TO_TIMESTAMP.key, "false")
+      // disable gpu cpu bridge, or else the cost optimizer will not run properly
+      .set(RapidsConf.ENABLE_CPU_BRIDGE.key, "false")
       .set(RapidsConf.TEST_ALLOWED_NONGPU.key,
         "ProjectExec,BroadcastExchangeExec,BroadcastHashJoinExec," +
         "Alias,Cast,LessThan,ShuffleExchangeExec,RoundRobinPartitioning")
@@ -417,6 +421,8 @@ class CostBasedOptimizerSuite extends SparkQueryCompareTestSuite
     val conf = createDefaultConf()
       .set(SQLConf.ADAPTIVE_EXECUTION_ENABLED.key, "true")
       .set(RapidsConf.ENABLE_CAST_STRING_TO_TIMESTAMP.key, "false")
+      // disable gpu cpu bridge, or else the cost optimizer will not run properly
+      .set(RapidsConf.ENABLE_CPU_BRIDGE.key, "false")
       .set(RapidsConf.TEST_ALLOWED_NONGPU.key,
         "ProjectExec,BroadcastExchangeExec,BroadcastHashJoinExec," +
             "Alias,Cast,LessThan,ShuffleExchangeExec,RoundRobinPartitioning")
@@ -441,6 +447,8 @@ class CostBasedOptimizerSuite extends SparkQueryCompareTestSuite
       .set(RapidsConf.ENABLE_CAST_STRING_TO_TIMESTAMP.key, "false")
       .set(RapidsConf.OPTIMIZER_DEFAULT_CPU_OPERATOR_COST.key, "0")
       .set(RapidsConf.OPTIMIZER_DEFAULT_GPU_OPERATOR_COST.key, "0")
+      // disable gpu cpu bridge, or else the cost optimizer will not run properly
+      .set(RapidsConf.ENABLE_CPU_BRIDGE.key, "false")
       .set(RapidsConf.TEST_ALLOWED_NONGPU.key,
         "ProjectExec,BroadcastExchangeExec,BroadcastHashJoinExec," +
             "Alias,Cast,LessThan,ShuffleExchangeExec,RoundRobinPartitioning")
@@ -468,6 +476,8 @@ class CostBasedOptimizerSuite extends SparkQueryCompareTestSuite
       .set(SQLConf.ADAPTIVE_EXECUTION_ENABLED.key, "true")
       .set(SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key, "1")
       .set("spark.rapids.sql.optimizer.gpu.exec.GpuCustomShuffleReaderExec", "99999999")
+      // disable gpu cpu bridge, or else the cost optimizer will not run properly
+      .set(RapidsConf.ENABLE_CPU_BRIDGE.key, "false")
       .set(RapidsConf.TEST_ALLOWED_NONGPU.key,
         "ProjectExec,SortMergeJoinExec,SortExec,Alias,Cast,LessThan,ShuffleExchangeExec," +
             "RoundRobinPartitioning,HashPartitioning,EmptyRelationExec")
@@ -489,6 +499,8 @@ class CostBasedOptimizerSuite extends SparkQueryCompareTestSuite
     val conf = createDefaultConf()
       .set(SQLConf.ADAPTIVE_EXECUTION_ENABLED.key, "true")
       .set(SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key, "-1")
+      // disable gpu cpu bridge, or else the cost optimizer will not run properly
+      .set(RapidsConf.ENABLE_CPU_BRIDGE.key, "false")
       .set(RapidsConf.TEST_ALLOWED_NONGPU.key,
         "ProjectExec,SortMergeJoinExec,SortExec,Alias,Cast,LessThan,ShuffleExchangeExec," +
             "HashPartitioning,EmptyRelationExec")
@@ -537,6 +549,8 @@ class CostBasedOptimizerSuite extends SparkQueryCompareTestSuite
     logError("Compute estimated row count nested joins with broadcast")
     val conf = createDefaultConf()
       .set(SQLConf.ADAPTIVE_EXECUTION_ENABLED.key, "true")
+      // disable gpu cpu bridge, or else the cost optimizer will not run properly
+      .set(RapidsConf.ENABLE_CPU_BRIDGE.key, "false")
       .set(RapidsConf.TEST_ALLOWED_NONGPU.key,
         "ProjectExec,SortMergeJoinExec,SortExec,Alias,Cast,LessThan,ShuffleExchangeExec," +
             "RoundRobinPartitioning,EmptyRelationExec")
@@ -584,6 +598,8 @@ class CostBasedOptimizerSuite extends SparkQueryCompareTestSuite
 
     val conf = createDefaultConf()
       .set(SQLConf.ADAPTIVE_EXECUTION_ENABLED.key, "true")
+      // disable gpu cpu bridge, or else the cost optimizer will not run properly
+      .set(RapidsConf.ENABLE_CPU_BRIDGE.key, "false")
       .set(RapidsConf.TEST_ALLOWED_NONGPU.key,
         "ProjectExec,WindowExec,ShuffleExchangeExec,WindowSpecDefinition," +
           "SpecifiedWindowFrame,WindowExpression,Alias,Rank,HashPartitioning," +

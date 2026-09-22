@@ -42,7 +42,8 @@ trait GpuDataSourceScanExec extends ShimLeafExecNode with GpuExec {
   // Metadata that describes more details of this scan.
   protected def metadata: Map[String, String]
 
-  protected val maxMetadataValueLength = sparkSession.sessionState.conf.maxMetadataStringLength
+  protected lazy val maxMetadataValueLength =
+    sparkSession.sessionState.conf.maxMetadataStringLength
 
   override def simpleString(maxFields: Int): String = {
     val metadataEntries = metadata.toSeq.sorted.map {

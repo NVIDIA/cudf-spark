@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.
+# Copyright (c) 2025-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,11 +18,12 @@ from pyspark.sql.types import StringType, IntegerType
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect
 from data_gen import gen_df, int_gen, string_gen, long_gen, SetValuesGen
 from delta_lake_utils import delta_meta_allow
-from marks import allow_non_gpu, delta_lake, disable_ansi_mode, ignore_order
+from marks import allow_non_gpu, allow_non_gpu_conditional, delta_lake, disable_ansi_mode, \
+    ignore_order
 from spark_session import (
     is_databricks_runtime,
-    is_databricks133_or_later,
     is_before_spark_353,
+    is_spark_400_or_later,
     supports_delta_lake_deletion_vectors,
     with_cpu_session,
 )
@@ -69,15 +70,12 @@ def setup_clustered_table(spark, path, table_name, enable_dv):
 
 
 @allow_non_gpu(*delta_meta_allow)
+@allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
 @delta_lake
 @ignore_order
 @disable_ansi_mode
 @pytest.mark.skipif(
-    is_databricks_runtime() and not is_databricks133_or_later(),
-    reason="Delta Lake liquid clustering is only supported on Databricks 13.3+",
-)
-@pytest.mark.skipif(
-    is_before_spark_353(),
+    not is_databricks_runtime() and is_before_spark_353(),
     reason="Clustered table DDL is only supported on Delta 3.3+/Spark 3.5.3+",
 )
 def test_delta_clustered_read_sql(spark_tmp_path, spark_tmp_table_factory):
@@ -104,15 +102,12 @@ def test_delta_clustered_read_sql(spark_tmp_path, spark_tmp_table_factory):
 
 
 @allow_non_gpu(*delta_meta_allow)
+@allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
 @delta_lake
 @ignore_order
 @disable_ansi_mode
 @pytest.mark.skipif(
-    is_databricks_runtime() and not is_databricks133_or_later(),
-    reason="Delta Lake liquid clustering is only supported on Databricks 13.3+",
-)
-@pytest.mark.skipif(
-    is_before_spark_353(),
+    not is_databricks_runtime() and is_before_spark_353(),
     reason="Clustered table DDL is only supported on Delta 3.3+/Spark 3.5.3+",
 )
 def test_delta_clustered_read_df(spark_tmp_path, spark_tmp_table_factory):

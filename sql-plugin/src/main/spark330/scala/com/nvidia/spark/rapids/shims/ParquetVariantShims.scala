@@ -24,7 +24,6 @@
 {"spark": "334"}
 {"spark": "340"}
 {"spark": "341"}
-{"spark": "341db"}
 {"spark": "342"}
 {"spark": "343"}
 {"spark": "344"}
@@ -38,16 +37,15 @@
 {"spark": "356"}
 {"spark": "357"}
 {"spark": "358"}
-{"spark": "400"}
-{"spark": "400db173"}
-{"spark": "401"}
-{"spark": "402"}
+{"spark": "359"}
 spark-rapids-shim-json-lines ***/
+
 package com.nvidia.spark.rapids.shims
 
 import org.apache.hadoop.conf.Configuration
 
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.types.DataType
 
 /**
  * Shim for Parquet variant-related configurations.
@@ -59,4 +57,10 @@ object ParquetVariantShims {
     // No-op for Spark versions before 4.1.0
     // PARQUET_ANNOTATE_VARIANT_LOGICAL_TYPE doesn't exist
   }
+
+  def supportsV2VariantPushdown: Boolean = false
+
+  def isPushedVariantStruct(_dataType: DataType): Boolean = false
+
+  def isPotentiallyShreddedVariant(_dataType: DataType, _sqlConf: SQLConf): Boolean = false
 }

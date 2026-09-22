@@ -20,13 +20,11 @@ import java.nio.charset.StandardCharsets
 import java.util.Arrays
 
 import ai.rapids.cudf.HostMemoryBuffer
-import com.nvidia.spark.rapids.{GpuMetric, NoopMetric, NvtxRegistry, RapidsConf}
-import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.{GpuMetric, NoopMetric, NvtxRegistry, PerfIO, RapidsConf}
+import com.nvidia.spark.rapids.Arm.closeOnExcept
 import com.nvidia.spark.rapids.filecache.FileCache
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile
 import org.apache.hadoop.fs.Path
-import org.apache.hadoop.io.IOUtils
-import org.apache.parquet.bytes.BytesUtils.readIntLittleEndian
 import org.apache.parquet.hadoop.ParquetFileWriter.MAGIC
 
 /**
@@ -80,36 +78,8 @@ object ParquetFooterUtils {
   def readFooterBufferFromInputFile(
       inputFile: RapidsInputFile,
       filePath: Path): HostMemoryBuffer = {
-    val fileLen = inputFile.getLength
-    if (fileLen < MAGIC.length + FooterLengthSize + MAGIC.length) {
-      throw new RuntimeException(s"$filePath is not a Parquet file (too small length: $fileLen )")
-    }
-    val footerLengthIndex = fileLen - FooterLengthSize - MAGIC.length
-    withResource(inputFile.open()) { inputStream =>
-      NvtxRegistry.PARQUET_READ_FOOTER_BYTES {
-        inputStream.seek(footerLengthIndex)
-        val footerLength = readIntLittleEndian(inputStream)
-        val magic = new Array[Byte](MAGIC.length)
-        IOUtils.readFully(inputStream, magic, 0, magic.length)
-        verifyParquetMagic(filePath, magic)
-        val fIdx = footerIndex(filePath, fileLen, footerLength, FooterLengthSize)
-        val tailBytes = Math.toIntExact(fileLen - fIdx)
-        closeOnExcept(HostMemoryBuffer.allocate(tailBytes + MAGIC.length, false)) { outBuffer =>
-          outBuffer.setBytes(0, MAGIC, 0, MAGIC.length)
-          inputStream.seek(fIdx)
-          val tmp = new Array[Byte](4096)
-          var written = MAGIC.length.toLong
-          var bytesLeft = tailBytes
-          while (bytesLeft > 0) {
-            val toRead = math.min(bytesLeft, tmp.length)
-            IOUtils.readFully(inputStream, tmp, 0, toRead)
-            outBuffer.setBytes(written, tmp, 0, toRead)
-            written += toRead
-            bytesLeft -= toRead
-          }
-          outBuffer
-        }
-      }
+    NvtxRegistry.PARQUET_READ_FOOTER_BYTES {
+      PerfIO.readParquetFooterBuffer(inputFile, filePath, verifyParquetMagic)
     }
   }
 

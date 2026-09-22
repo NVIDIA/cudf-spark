@@ -20,11 +20,13 @@ import java.util.{Locale, Optional}
 
 import scala.collection.JavaConverters._
 
-import ai.rapids.cudf.{ColumnView, DType, Table}
+import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Table}
 import com.nvidia.spark.rapids.{CastOptions, GpuCast, GpuColumnVector, SchemaUtils}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.shims.parquet.ParquetSchemaClipShims
+import com.nvidia.spark.rapids.shims.parquet.ParquetUnknownTypeAnnotationShims
 import org.apache.parquet.schema._
+import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
 import org.apache.parquet.schema.Type.Repetition
 
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
@@ -65,6 +67,9 @@ object ParquetSchemaUtils {
       caseSensitive: Boolean,
       useFieldId: Boolean): Type = {
     val newParquetType = catalystType match {
+      case t if GpuColumnVector.isVariantType(t) =>
+        normalizeVariantFieldOrder(parquetType)
+
       case t: ArrayType if !isPrimitiveCatalystType(t.elementType) =>
         // Only clips array types with nested type as element type.
         clipParquetListType(parquetType.asGroupType(), t.elementType, caseSensitive, useFieldId)
@@ -80,15 +85,118 @@ object ParquetSchemaUtils {
         clipParquetGroup(parquetType.asGroupType(), t, caseSensitive, useFieldId)
 
       case _ =>
-        // UDTs and primitive types are not clipped.  For UDTs, a clipped version might not be able
-        // to be mapped to desired user-space types.  So UDTs shouldn't participate schema merging.
-        parquetType
+        // UDTs, primitive types, and primitive-element arrays/maps are not clipped
+        // structurally. Still normalize UNKNOWN annotations so cuDF sees the physical
+        // type when Spark would ignore the annotation (SPARK-56045).
+        stripIgnoredUnknownAnnotation(parquetType, catalystType)
     }
 
-    if (useFieldId && parquetType.getId != null) {
+    // Nested rebuilds may already carry field IDs; only re-apply when missing.
+    if (useFieldId && parquetType.getId != null && newParquetType.getId == null) {
       newParquetType.withId(parquetType.getId.intValue())
     } else {
       newParquetType
+    }
+  }
+
+  /** Normalize an unshredded Variant group to Spark's value/metadata child order. */
+  private def normalizeVariantFieldOrder(parquetType: Type): Type = {
+    if (isVariantPhysicalType(parquetType)) {
+      val groupType = parquetType.asGroupType()
+      groupType.withNewFields(Seq(
+        groupType.getType("value"),
+        groupType.getType("metadata")).asJava)
+    } else {
+      parquetType
+    }
+  }
+
+  private[rapids] def isVariantPhysicalType(parquetType: Type): Boolean = {
+    if (parquetType.isPrimitive || parquetType.asGroupType().getFieldCount != 2) {
+      false
+    } else {
+      val groupType = parquetType.asGroupType()
+      Seq("value", "metadata").forall { name =>
+        groupType.containsField(name) && {
+          val field = groupType.getType(name)
+          field.isRepetition(Repetition.REQUIRED) &&
+            field.isPrimitive &&
+            field.asPrimitiveType().getPrimitiveTypeName == PrimitiveTypeName.BINARY
+        }
+      }
+    }
+  }
+
+  /**
+   * Leaf Catalyst type used when deciding whether an UNKNOWN annotation should be
+   * stripped for nested array/map groups that bypass structural clipping.
+   */
+  private def unknownAnnotationLeafType(catalystType: DataType): DataType = {
+    catalystType match {
+      case ArrayType(elementType, _) => unknownAnnotationLeafType(elementType)
+      case MapType(_, valueType, _) => unknownAnnotationLeafType(valueType)
+      case other => other
+    }
+  }
+
+  /**
+   * Rebuild primitives without an UNKNOWN logical annotation when Spark would not map
+   * that annotation to NullType for the requested Catalyst type. Recurses through group
+   * nodes so primitive-element lists/maps that skip structural clipping are covered.
+   *
+   * @param preserveFieldId when rebuilding nested primitives (not returning through
+   *   [[clipParquetType]]), copy the original field ID onto the rebuilt type.
+   */
+  @scala.annotation.nowarn("msg=method as in class Builder is deprecated")
+  private def stripIgnoredUnknownAnnotation(
+      parquetType: Type,
+      catalystType: DataType,
+      preserveFieldId: Boolean = false): Type = {
+    if (!parquetType.isPrimitive) {
+      val group = parquetType.asGroupType()
+      val leafType = unknownAnnotationLeafType(catalystType)
+      val fields = group.getFields.asScala
+      val strippedFields = fields.map { field =>
+        stripIgnoredUnknownAnnotation(field, leafType, preserveFieldId = true)
+      }
+      if (fields.iterator.zip(strippedFields.iterator).forall {
+            case (original, stripped) => original eq stripped
+          }) {
+        parquetType
+      } else {
+        group.withNewFields(strippedFields.asJava)
+      }
+    } else {
+      val primitive = parquetType.asPrimitiveType()
+      val rawAnnotation = primitive.getLogicalTypeAnnotation
+      val leafType = unknownAnnotationLeafType(catalystType)
+      // Respect conf for inferred/requested NullType; strip UNKNOWN when the requested
+      // type is a non-Null physical type even if respectUnknownTypeAnnotation is true.
+      val effectiveAnnotation =
+        if (leafType != NullType &&
+            ParquetUnknownTypeAnnotationShims.mapsToNullType(rawAnnotation)) {
+          null
+        } else {
+          ParquetUnknownTypeAnnotationShims.effectiveLogicalTypeAnnotation(rawAnnotation)
+        }
+      if (rawAnnotation == effectiveAnnotation) {
+        parquetType
+      } else {
+        val builder = Types.primitive(primitive.getPrimitiveTypeName, primitive.getRepetition)
+        if (primitive.getPrimitiveTypeName == PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY) {
+          builder.length(primitive.getTypeLength)
+        }
+        if (effectiveAnnotation != null) {
+          builder.as(effectiveAnnotation)
+        }
+        val rebuilt = builder.named(primitive.getName)
+        if (preserveFieldId && primitive.getId != null) {
+          rebuilt.withId(primitive.getId.intValue())
+        } else {
+          // Top-level field IDs are re-applied by clipParquetType after this returns.
+          rebuilt
+        }
+      }
     }
   }
 
@@ -100,6 +208,7 @@ object ParquetSchemaUtils {
   private def isPrimitiveCatalystType(dataType: DataType): Boolean = {
     dataType match {
       case _: ArrayType | _: MapType | _: StructType => false
+      case dt if GpuColumnVector.isVariantType(dt) => false
       case _ => true
     }
   }
@@ -355,6 +464,9 @@ object ParquetSchemaUtils {
       case t: StructType =>
         clipSparkStructType(t, parquetType.asGroupType(), caseSensitive, useFieldId)
 
+      case t if GpuColumnVector.isVariantType(t) =>
+        t
+
       case _ =>
         ParquetSchemaClipShims.convertPrimitiveField(parquetType.asPrimitiveType())
     }
@@ -573,6 +685,20 @@ object ParquetSchemaUtils {
     }
   }
 
+  private[parquet] def convertStringToBinary(cv: ColumnView): ColumnVector = {
+    // Ideally we would bitCast the STRING to a LIST, but that does not work.
+    // Instead, pull apart the string and put it back together as a list.
+    val dataBuf = Option(cv.getData)
+    withResource(new ColumnView(DType.UINT8, dataBuf.map(_.getLength).getOrElse(0),
+      Optional.of(0L), dataBuf.orNull, null)) { data =>
+      withResource(new ColumnView(DType.LIST, cv.getRowCount,
+        Optional.of[java.lang.Long](cv.getNullCount),
+        cv.getValid, cv.getOffsets, Array(data))) { everything =>
+        everything.copyToColumnVector()
+      }
+    }
+  }
+
   // Wrap up all required casts for Parquet schema evolution
   //
   // Note: The behavior of unsigned to signed is decided by the Spark,
@@ -593,20 +719,7 @@ object ParquetSchemaUtils {
       needUpcast(cv, dt)) {
       cv.castTo(GpuColumnVector.getNonNestedRapidsType(dt))
     } else if (DType.STRING.equals(cv.getType) && dt == BinaryType) {
-      // Ideally we would bitCast the STRING to a LIST, but that does not work.
-      // Instead, we are going to have to pull apart the string and put it back together
-      // as a list.
-
-      val dataBuf = Option(cv.getData)
-      withResource(new ColumnView(DType.UINT8, dataBuf.map(_.getLength).getOrElse(0),
-        Optional.of(0L),
-        dataBuf.orNull, null)) { data =>
-        withResource(new ColumnView(DType.LIST, cv.getRowCount,
-          Optional.of[java.lang.Long](cv.getNullCount),
-          cv.getValid, cv.getOffsets, Array(data))) { everything =>
-          everything.copyToColumnVector()
-        }
-      }
+      convertStringToBinary(cv)
     } else {
       throw new IllegalStateException("Logical error: no valid casts are found " +
           s"${cv.getType} to $dt")
