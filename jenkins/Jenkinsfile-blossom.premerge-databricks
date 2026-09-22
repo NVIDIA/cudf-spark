@@ -59,6 +59,7 @@ pipeline {
 
     environment {
         GITHUB_TOKEN = credentials("github-token")
+        ART_CREDS = credentials("urm_creds")
         CUSTOM_WORKSPACE = "/home/jenkins/agent/workspace/${BUILD_TAG}"
         // DB related ENVs
         IDLE_TIMEOUT = '390' // 6.5 hours
@@ -122,7 +123,11 @@ pipeline {
                                         unstash('source_tree')
                                         databricksBuild()
                                     } catch (e) {
-                                        common.uploadDebugBundle(this, 'spark-rapids', "databricks-${DB_RUNTIME}")
+                                        try {
+                                            common.uploadDebugBundle(this, 'spark-rapids', "databricks-${DB_RUNTIME}")
+                                        } catch (debugError) {
+                                            echo "Failed to collect or upload debug bundle: ${debugError}"
+                                        }
                                         throw e
                                     }
                                 }
