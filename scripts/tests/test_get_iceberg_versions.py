@@ -18,168 +18,178 @@ import contextlib
 import importlib.util
 import io
 import json
-import re
 import sys
 import tempfile
 import unittest
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = REPO_ROOT / "jenkins" / "get_iceberg_versions.py"
+SCRIPT = REPO_ROOT / "scripts" / "get_iceberg_versions.py"
 SPEC = importlib.util.spec_from_file_location("get_iceberg_versions", SCRIPT)
 MATRIX_READER = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 sys.modules[SPEC.name] = MATRIX_READER
 SPEC.loader.exec_module(MATRIX_READER)
 
-POM_NAMESPACE = {"pom": "http://maven.apache.org/POM/4.0.0"}
-PROPERTY_REFERENCE = re.compile(r"^\$\{([^}]+)\}$")
-
-EXPECTED_RELEASE_SELECTIONS = {
-    "release350": [],
-    "release351": ["1.6.1"],
-    "release352": ["1.6.1"],
-    "release353": ["1.6.1"],
-    "release354": [],
-    "release355": ["1.9.2"],
-    "release356": ["1.9.2", "1.10.1"],
-    "release357": ["1.9.2", "1.10.1"],
-    "release358": ["1.9.2", "1.10.1"],
-    "release359": ["1.9.2", "1.10.1"],
-    "release400": ["1.10.1"],
-    "release401": ["1.10.1"],
-    "release402": ["1.10.1", "1.11.0"],
-    "release403": ["1.10.1", "1.11.0"],
-    "release404": ["1.10.1", "1.11.0"],
-    "release411": ["1.11.0"],
-    "release412": ["1.11.0"],
-    "release413": ["1.11.0"],
-    "release420": [],
-}
-
-
-def _release_profiles(pom_path):
-    root = ET.parse(pom_path).getroot()
-    properties = {
-        child.tag.rsplit("}", 1)[-1]: (child.text or "").strip()
-        for child in root.find("pom:properties", POM_NAMESPACE)
-    }
-    profiles = {}
-    for profile in root.findall("pom:profiles/pom:profile", POM_NAMESPACE):
-        profile_id = profile.findtext("pom:id", namespaces=POM_NAMESPACE)
-        if not re.fullmatch(r"release[0-9]+", profile_id or ""):
-            continue
-        spark_reference = profile.findtext(
-            "pom:properties/pom:spark.version", namespaces=POM_NAMESPACE)
-        match = PROPERTY_REFERENCE.fullmatch(spark_reference or "")
-        if match is None:
-            raise AssertionError(f"{profile_id} has an invalid Spark version reference")
-        modules = [
-            (module.text or "").strip()
-            for module in profile.findall("pom:modules/pom:module", POM_NAMESPACE)
-        ]
-        profiles[profile_id] = (properties[match.group(1)], modules)
-    return profiles
+# Only the properties consumed by the loader are needed. Keep parser/selector tests
+# independent of the live release profiles, Spark shims, and Iceberg version pins.
+POM_FIXTURE = """<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <properties>
+    <spark350.version>3.5.0</spark350.version>
+    <spark351.version>3.5.1</spark351.version>
+    <spark354.version>3.5.4</spark354.version>
+    <spark355.version>3.5.5</spark355.version>
+    <spark356.version>3.5.6</spark356.version>
+    <spark401.version>4.0.1</spark401.version>
+    <spark420.version>4.2.0</spark420.version>
+    <iceberg.version>1.6.1</iceberg.version>
+  </properties>
+</project>
+"""
 
 
 class IcebergVersionMatrixSuite(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.matrix = MATRIX_READER.IcebergVersionMatrix.load()
+    def setUp(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        self.pom_path = Path(temp_dir.name) / "pom.xml"
+        self.pom_path.write_text(POM_FIXTURE, encoding="utf-8")
+        self.matrix_path = Path(temp_dir.name) / "matrix.json"
+        self.document = {
+            "iceberg_versions": [
+                {
+                    "version": "1.6.1",
+                    "upstream_minimums": {"3.5": "3.5.1"},
+                    "spark_versions": [
+                        {"version": "3.5.1", "supported": True},
+                        {"version": "3.5.4", "supported": False,
+                         "reason": "Iceberg 1.6.x is not packaged for this Spark shim"},
+                        {"version": "3.5.5", "supported": False,
+                         "reason": "Iceberg 1.6.x is not packaged for this Spark shim"},
+                        {"version": "3.5.6", "supported": False,
+                         "reason": "Iceberg 1.6.x is not packaged for this Spark shim"},
+                    ],
+                },
+                {
+                    "version": "1.9.2",
+                    "upstream_minimums": {"3.5": "3.5.5"},
+                    "spark_versions": [
+                        {"version": "3.5.5", "supported": True},
+                        {"version": "3.5.6", "supported": True},
+                    ],
+                },
+                {
+                    "version": "1.10.1",
+                    "upstream_minimums": {"3.5": "3.5.6", "4.0": "4.0.0"},
+                    "spark_versions": [
+                        {"version": "3.5.6", "supported": True},
+                        {"version": "4.0.1", "supported": True},
+                    ],
+                },
+            ],
+        }
+        self.matrix = self._load_document(self.document)
 
     def _load_document(self, document):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            matrix_path = Path(temp_dir) / "matrix.json"
-            matrix_path.write_text(json.dumps(document), encoding="utf-8")
-            return MATRIX_READER.IcebergVersionMatrix.load(matrix_path)
+        self.matrix_path.write_text(json.dumps(document), encoding="utf-8")
+        return MATRIX_READER.IcebergVersionMatrix.load(self.matrix_path, self.pom_path)
 
-    def test_selects_expected_versions_for_every_release_profile(self):
-        profiles = _release_profiles(MATRIX_READER.DEFAULT_POM)
-        self.assertEqual(set(EXPECTED_RELEASE_SELECTIONS), set(profiles))
+    def _run_cli(self, *arguments):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            exit_code = MATRIX_READER.main([
+                "--matrix", str(self.matrix_path), "--pom", str(self.pom_path), *arguments])
+        return exit_code, stdout.getvalue(), stderr.getvalue()
 
-        for profile_id, expected_versions in EXPECTED_RELEASE_SELECTIONS.items():
-            spark_version, _ = profiles[profile_id]
-            with self.subTest(profile=profile_id, spark=spark_version):
+    def test_selects_representative_versions(self):
+        selections = {
+            "3.5.1": ["1.6.1"],
+            "3.5.6": ["1.9.2", "1.10.1"],
+            "4.0.1": ["1.10.1"],
+        }
+        for spark_version, expected_versions in selections.items():
+            with self.subTest(spark=spark_version):
                 self.assertEqual(
                     expected_versions,
                     self.matrix.supported_iceberg_versions(spark_version))
 
-    def test_stub_release_profiles_select_no_iceberg_versions(self):
-        profiles = _release_profiles(MATRIX_READER.DEFAULT_POM)
-        stub_profiles = {
-            profile_id: spark_version
-            for profile_id, (spark_version, modules) in profiles.items()
-            if "iceberg/iceberg-stub" in modules
-        }
-        self.assertEqual({"release420": "4.2.0"}, stub_profiles)
-        for spark_version in stub_profiles.values():
-            self.assertEqual([], self.matrix.supported_iceberg_versions(spark_version))
+    def test_minimum_baselines_intentionally_exclude_older_patches(self):
+        for spark_version in ("3.5.0", "3.5.4"):
+            with self.subTest(spark=spark_version):
+                self.assertEqual([], self.matrix.supported_iceberg_versions(spark_version))
+        self.assertEqual(["1.9.2"], self.matrix.supported_iceberg_versions("3.5.5"))
 
     def test_valid_requested_versions_preserve_caller_order(self):
         requested = ["1.10.1", "1.9.2"]
         self.assertEqual(
             requested,
-            self.matrix.validate_requested_versions("3.5.8", requested))
+            self.matrix.validate_requested_versions("3.5.6", requested))
 
     def test_unknown_requested_version_fails(self):
         with self.assertRaisesRegex(
                 MATRIX_READER.MatrixError, "not present in the test matrix"):
-            self.matrix.validate_requested_versions("3.5.8", ["9.9.9"])
+            self.matrix.validate_requested_versions("3.5.6", ["9.9.9"])
 
-    def test_upstream_incompatible_requested_version_fails(self):
-        with self.assertRaisesRegex(MATRIX_READER.MatrixError, "not upstream-compatible"):
-            self.matrix.validate_requested_versions("4.0.1", ["1.9.2"])
+    def test_requested_versions_outside_baseline_policy_fail(self):
+        for spark_version in ("3.5.5", "4.2.0"):
+            with self.subTest(spark=spark_version):
+                with self.assertRaisesRegex(MATRIX_READER.MatrixError, "minimum-baseline"):
+                    self.matrix.validate_requested_versions(spark_version, ["1.10.1"])
 
     def test_packaging_unsupported_requested_version_fails_with_reason(self):
         with self.assertRaisesRegex(
-                MATRIX_READER.MatrixError,
-                "Iceberg 1.11.0 is not supported with Spark 3.5.8"):
-            self.matrix.validate_requested_versions("3.5.8", ["1.11.0"])
+                MATRIX_READER.MatrixError, "Iceberg 1.6.x is not packaged"):
+            self.matrix.validate_requested_versions("3.5.6", ["1.6.1"])
 
     def test_rejects_malformed_top_level_metadata(self):
-        document = json.loads(MATRIX_READER.DEFAULT_MATRIX.read_text(encoding="utf-8"))
-        document["unexpected"] = True
+        self.document["unexpected"] = True
         with self.assertRaisesRegex(MATRIX_READER.MatrixError, "must contain only"):
-            self._load_document(document)
+            self._load_document(self.document)
 
     def test_rejects_unsupported_entry_without_reason(self):
-        document = json.loads(MATRIX_READER.DEFAULT_MATRIX.read_text(encoding="utf-8"))
-        unsupported = next(
-            support
-            for iceberg in document["iceberg_versions"]
-            for support in iceberg["spark_versions"]
-            if not support["supported"])
-        del unsupported["reason"]
+        del self.document["iceberg_versions"][0]["spark_versions"][1]["reason"]
         with self.assertRaisesRegex(MATRIX_READER.MatrixError, "needs a reason"):
-            self._load_document(document)
+            self._load_document(self.document)
 
     def test_rejects_missing_pom_derived_spark_mapping(self):
-        document = json.loads(MATRIX_READER.DEFAULT_MATRIX.read_text(encoding="utf-8"))
-        spark_versions = document["iceberg_versions"][0]["spark_versions"]
-        spark_versions[:] = [
-            support for support in spark_versions if support["version"] != "3.5.2"
-        ]
-        with self.assertRaisesRegex(MATRIX_READER.MatrixError, "missing 3.5.2"):
-            self._load_document(document)
+        self.document["iceberg_versions"][0]["spark_versions"].pop()
+        with self.assertRaisesRegex(MATRIX_READER.MatrixError, "missing 3.5.6"):
+            self._load_document(self.document)
 
-    def test_cli_succeeds_when_release_profile_has_no_selected_version(self):
-        stdout = io.StringIO()
-        with contextlib.redirect_stdout(stdout):
-            exit_code = MATRIX_READER.main(["--spark-version", "3.5.0"])
+    def test_cli_fails_for_missing_mapping_instead_of_skipping(self):
+        self.document["iceberg_versions"][1]["spark_versions"].pop(0)
+        self.matrix_path.write_text(json.dumps(self.document), encoding="utf-8")
+        exit_code, stdout, stderr = self._run_cli("--spark-version", "3.5.5")
+        self.assertEqual(1, exit_code)
+        self.assertEqual("", stdout)
+        self.assertIn("missing 3.5.5", stderr)
+
+    def test_cli_explains_empty_selections(self):
+        # 4.2.0 represents the stub family. Below-baseline patches are also valid
+        # empty selections under issue #15875, even if their POM packages Iceberg.
+        for spark_version in ("4.2.0", "3.5.0", "3.5.4"):
+            with self.subTest(spark=spark_version):
+                exit_code, stdout, stderr = self._run_cli("--spark-version", spark_version)
+                self.assertEqual(0, exit_code)
+                self.assertEqual("\n", stdout)
+                self.assertIn(f"No Iceberg versions selected for Spark {spark_version}", stderr)
+                self.assertIn("minimum-baseline and packaging test policy", stderr)
+
+    def test_cli_validates_requested_versions(self):
+        exit_code, stdout, stderr = self._run_cli(
+            "--spark-version", "3.5.6", "--requested-versions", "1.10.1, 1.9.2")
         self.assertEqual(0, exit_code)
-        self.assertEqual("\n", stdout.getvalue())
+        self.assertEqual("1.10.1 1.9.2\n", stdout)
+        self.assertEqual("", stderr)
 
     def test_cli_reports_malformed_json(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            matrix_path = Path(temp_dir) / "matrix.json"
-            matrix_path.write_text("{", encoding="utf-8")
-            stderr = io.StringIO()
-            with contextlib.redirect_stderr(stderr):
-                exit_code = MATRIX_READER.main(["--validate", "--matrix", str(matrix_path)])
+        self.matrix_path.write_text("{", encoding="utf-8")
+        exit_code, stdout, stderr = self._run_cli("--validate")
         self.assertEqual(1, exit_code)
-        self.assertIn("Iceberg test matrix error", stderr.getvalue())
+        self.assertEqual("", stdout)
+        self.assertIn("Iceberg test matrix error", stderr)
 
 
 if __name__ == "__main__":

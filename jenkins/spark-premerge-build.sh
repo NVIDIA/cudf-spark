@@ -182,10 +182,11 @@ run_iceberg_version_detect_tests() {
     echo "Running Iceberg version detection tests for Spark $spark_ver (Scala $scala_ver)..."
 
     local iceberg_versions
-    iceberg_versions=$(python jenkins/get_iceberg_versions.py \
+    iceberg_versions=$(python scripts/get_iceberg_versions.py \
         --spark-version "$spark_ver") || return 1
     if [[ -z "$iceberg_versions" ]]; then
-        echo "!!!! Skipping Iceberg version detection. No supported Iceberg version for Spark $spark_ver"
+        # Issue #15875 can exclude packaged combinations below the minimum test baselines.
+        echo "!!!! Skipping Iceberg version detection. No matrix-selected version for Spark $spark_ver"
         return 0
     fi
 

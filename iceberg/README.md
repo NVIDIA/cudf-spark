@@ -6,37 +6,54 @@ version it supports.
 
 # Iceberg Submodules
 
-The following table shows the mapping of Iceberg versions to their supported Spark version
-and the directory that contains the corresponding support code.
+The following table shows which Iceberg integration modules are packaged for each Spark
+version and the directory that contains the corresponding support code.
 
 | Iceberg Version | Spark Version              | Directory         |
 |-----------------|----------------------------|-------------------|
-| 1.6.x           | Spark 3.5.1-3.5.3          | `iceberg-1-6-x`  |
-| 1.9.x           | Spark 3.5.5-3.5.9          | `iceberg-1-9-x`  |
-| 1.10.x          | Spark 3.5.6-3.5.9, 4.0.x  | `iceberg-1-10-x` |
+| 1.6.x           | Spark 3.5.0-3.5.3          | `iceberg-1-6-x`  |
+| 1.9.x           | Spark 3.5.4-3.5.9          | `iceberg-1-9-x`  |
+| 1.10.x          | Spark 3.5.4-3.5.9, 4.0.x  | `iceberg-1-10-x` |
 | 1.11.x          | Spark 4.0.2+, 4.1.x        | `iceberg-1-11-x` |
 
 Iceberg GPU acceleration is currently supported on Spark 3.5.x, 4.0.x, and 4.1.x.
-The authoritative integration-test compatibility list, including upstream-compatible
-combinations that are not currently packaged, is maintained in
-[`iceberg-versions.json`](iceberg-versions.json).
+The integration-test matrix is maintained in
+[`scripts/iceberg-versions.json`](../scripts/iceberg-versions.json) and read by
+[`scripts/get_iceberg_versions.py`](../scripts/get_iceberg_versions.py).
 
 Each matrix entry describes one Apache Iceberg runtime version tested by cudf-spark. For that
 Iceberg release, `upstream_minimums` is copied from the Spark versions in Apache Iceberg's
 `gradle/libs.versions.toml`. Each key is a Spark major/minor family, and its value is the patch
-release that Iceberg builds and tests against; cudf-spark treats that patch as the minimum
-upstream-compatible version.
+release that Iceberg builds and tests against. As specified in
+[issue #15875](https://github.com/NVIDIA/cudf-spark/issues/15875), cudf-spark treats that patch
+as the minimum baseline for this test matrix. This is a cudf-spark test policy; the upstream
+dependency pin does not itself declare a minimum compatible Spark patch.
 
 The `spark_versions` list is computed from the `spark*.version` properties in
 `scala2.13/pom.xml`.
 For each family in `upstream_minimums`, it contains every cudf-spark shim whose patch version is
-greater than or equal to the upstream minimum. A shim is marked as supported when cudf-spark
-packages the corresponding Iceberg integration module. Upstream-compatible shims that are not
-packaged remain in the list with `supported` set to `false` and an explanation in `reason`.
+greater than or equal to the baseline. A shim is marked as supported when cudf-spark
+packages the corresponding Iceberg integration module. Shims at or above the baseline that
+are not packaged remain in the list with `supported` set to `false` and an explanation in
+`reason`. Maven release profiles determine packaging; packaging alone does not select a
+combination for this test matrix.
+
+Consequently, the following exclusions are intentional:
+
+| Spark version | Matrix selection | Reason |
+|---------------|------------------|--------|
+| 3.5.0 | None | Packaged Iceberg 1.6.1 has a 3.5.1 test baseline. |
+| 3.5.4 | None | Packaged Iceberg 1.9.2 and 1.10.1 have 3.5.5 and 3.5.6 test baselines. |
+| 3.5.5 | Iceberg 1.9.2 | Packaged Iceberg 1.10.1 has a 3.5.6 test baseline. |
+| 4.2.0 | None | The release profile uses the Iceberg stub, and the matrix has no 4.2 baseline. |
+
+An empty selection succeeds and reports the test policy in the CLI diagnostic and CI skip
+message. Missing matrix entries for shims at or above a baseline are validation errors,
+so the callers fail instead of silently skipping those tests. Explicitly requested Iceberg
+versions must also satisfy the baseline and packaging policy.
 
 For Spark 3.5.4+, both `iceberg-1-9-x` and `iceberg-1-10-x` modules are compiled into the
-build. The integration-test support baseline follows the Spark patch versions used to build
-the corresponding Apache Iceberg release. The correct version-specific implementation is
+build. The correct version-specific implementation is
 selected at runtime by probing the `iceberg-spark-runtime` jar on the classpath.
 Version-specific code lives in distinct sub-packages (`iceberg19x`, `iceberg110x`,
 `iceberg111x`) to avoid class conflicts, and the common `ShimUtils` dispatcher delegates to

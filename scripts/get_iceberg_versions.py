@@ -14,7 +14,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Read and validate the Iceberg integration-test compatibility matrix."""
+"""Read and validate the Iceberg integration-test matrix defined by issue #15875.
+
+Iceberg's Spark dependency pins are minimum test baselines by cudf-spark policy,
+not upstream compatibility guarantees. Packaged combinations below those baselines
+are intentionally excluded: https://github.com/NVIDIA/cudf-spark/issues/15875.
+"""
 
 import argparse
 import json
@@ -26,7 +31,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MATRIX = REPO_ROOT / "iceberg" / "iceberg-versions.json"
+DEFAULT_MATRIX = REPO_ROOT / "scripts" / "iceberg-versions.json"
 DEFAULT_POM = REPO_ROOT / "scala2.13" / "pom.xml"
 VERSION_PATTERN = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 SPARK_PROPERTY_PATTERN = re.compile(r"^spark[0-9]+\.version$")
@@ -116,6 +121,8 @@ class IcebergSupport:
         if not isinstance(spark_entries, list) or not spark_entries:
             raise MatrixError(f"spark_versions for Iceberg {version} must be a list")
 
+        # Issue #15875 uses upstream build/test pins as minimum test baselines.
+        # Maven packaging alone does not qualify a below-baseline Spark patch.
         expected_versions = set()
         for family, minimum in spark_minor_to_patch.items():
             minimum_tuple = _version_tuple(minimum)
@@ -196,8 +203,8 @@ class IcebergVersionMatrix:
             spark_support = by_version[iceberg_version].support_for(spark_version)
             if spark_support is None:
                 raise MatrixError(
-                    f"Iceberg {iceberg_version} is not upstream-compatible with "
-                    f"Spark {spark_version}")
+                    f"Iceberg {iceberg_version} with Spark {spark_version} is excluded "
+                    "by the minimum-baseline test policy (issue #15875)")
             if not spark_support.supported:
                 raise MatrixError(
                     f"Iceberg {iceberg_version} is not supported with Spark {spark_version}: "
@@ -236,6 +243,14 @@ def main(arguments=None):
             versions = matrix.validate_requested_versions(args.spark_version, requested)
         else:
             versions = matrix.supported_iceberg_versions(args.spark_version)
+        if not versions:
+            # A valid matrix can intentionally exclude even a packaged combination.
+            # Missing entries for shims at or above a baseline fail during load().
+            print(
+                f"No Iceberg versions selected for Spark {args.spark_version}: "
+                "the minimum-baseline and packaging test policy excludes all entries "
+                "(https://github.com/NVIDIA/cudf-spark/issues/15875).",
+                file=sys.stderr)
         print(" ".join(versions))
         return 0
     except (MatrixError, ET.ParseError, OSError, json.JSONDecodeError) as error:

@@ -437,7 +437,7 @@ run_iceberg_tests() {
     fi
   fi
 
-  local matrix_reader="$WORKSPACE/jenkins/get_iceberg_versions.py"
+  local matrix_reader="$WORKSPACE/scripts/get_iceberg_versions.py"
   local supported_versions
   supported_versions=$(python "$matrix_reader" --spark-version "$SPARK_VER") || return 1
 
@@ -447,7 +447,8 @@ run_iceberg_tests() {
       --spark-version "$SPARK_VER" --requested-versions "$ICEBERG_VERSIONS") || return 1
     echo "Using user-specified ICEBERG_VERSIONS=$ICEBERG_VERSIONS"
   elif [[ -z "$supported_versions" ]]; then
-    echo "!!!! Skipping Iceberg tests. No supported Iceberg version for Spark $SPARK_VER"
+    # Issue #15875 can exclude packaged combinations below the minimum test baselines.
+    echo "!!!! Skipping Iceberg tests. No matrix-selected Iceberg version for Spark $SPARK_VER"
     return 0
   else
     iceberg_versions="$supported_versions"
