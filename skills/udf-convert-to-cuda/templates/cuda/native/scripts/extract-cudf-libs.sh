@@ -12,6 +12,7 @@ CUDF_REPO_DIR="${TARGET_DIR}/cudf-repo"
 RAPIDS_JAR_DIR="${TARGET_DIR}/rapids-jar"
 
 SCALA_VERSION="${SCALA_VERSION:-2.12}"
+RAPIDS4SPARK_ARTIFACT_ID="${RAPIDS4SPARK_ARTIFACT_ID:-rapids-4-spark_${SCALA_VERSION}}"
 RAPIDS4SPARK_VERSION="${RAPIDS4SPARK_VERSION:-26.06.0}"
 CUDA_VERSION="${CUDA_VERSION:-cuda12}"
 CUDF_BRANCH="${CUDF_BRANCH:-v26.06.00}"
@@ -19,7 +20,7 @@ CUDF_BRANCH="${CUDF_BRANCH:-v26.06.00}"
 mkdir -p "${NATIVE_DEPS_DIR}" "${CUDF_REPO_DIR}"
 
 choose_rapids_jar() {
-  local artifact_id="cudf-spark_${SCALA_VERSION}"
+  local artifact_id="${RAPIDS4SPARK_ARTIFACT_ID}"
   local jar_name="${artifact_id}-${RAPIDS4SPARK_VERSION}"
   local maven_dir="${HOME}/.m2/repository/com/nvidia/${artifact_id}/${RAPIDS4SPARK_VERSION}"
   local candidates=(

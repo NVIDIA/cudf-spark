@@ -7,7 +7,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 ## Dependency Model
 
-The native build uses the cuDF Spark JAR already resolved by Maven. The `cuda-native-udf` profile asks Maven to copy `cudf-spark_<scala>-<version>-<cuda>.jar` and `cudf-spark_<scala>-<version>.jar` into `target/rapids-jar`. The `native/scripts/extract-cudf-libs.sh` script then extracts `libcudf.so*` and `libnvcomp.so*`, clones matching cuDF headers, builds `librapidsudfjni.so`, and packages it in the UDF JAR for `NativeDepsLoader`.
+The native build uses the cuDF Spark JAR already resolved by Maven. The `cuda-native-udf` profile copies the configured classified and unclassified JARs into `target/rapids-jar`. The `native/scripts/extract-cudf-libs.sh` script then extracts `libcudf.so*` and `libnvcomp.so*`, clones matching cuDF headers, builds `librapidsudfjni.so`, and packages it in the UDF JAR for `NativeDepsLoader`.
 
 No separate manual JAR download is required. Maven should resolve the cuDF Spark dependency declared in `pom.xml`; the native profile reuses the same coordinates and copies the resolved JAR into `target/rapids-jar`.
 
@@ -59,11 +59,14 @@ CMake stores absolute source and build paths in `CMakeCache.txt`. A host-generat
 Keep these values aligned:
 - Spark version
 - Scala binary version
+- `rapids4spark.artifactId`
 - `rapids4spark.version`
 - `cuda.version`
 - `cudf.git.branch`
 - `rapids.cmake.branch`
 - JDK version
+
+The `26.06.0` default uses `rapids-4-spark_<scala>`; use `cudf-spark_<scala>` only for versions published under the new coordinates.
 
 The generated template maps RAPIDS `<major>.<minor>.<patch>` to the `v<major>.<minor>.00` cuDF and rapids-cmake tags. If building a snapshot, a custom cuDF Spark JAR, or a patch release with known native ABI changes, verify the matching cuDF/RMM/CCCL versions with the user.
 
