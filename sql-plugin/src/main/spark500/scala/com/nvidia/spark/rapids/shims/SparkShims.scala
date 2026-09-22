@@ -19,9 +19,10 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
+import com.nvidia.spark.rapids.jni.Histogram.PercentileInterpolation
+
 import org.apache.spark.sql.catalyst.expressions.{Expression, GetJsonObject, JsonToStructs,
   NamedLambdaVariable, RegExpExtract, RegExpExtractAll, StringTranslate}
-import org.apache.spark.sql.types.{DataType, DoubleType, FloatType}
 
 object SparkShimImpl extends Spark420PlusShims {
   override protected def isBridgeCloneSafeStatefulExpression(expr: Expression): Boolean =
@@ -39,10 +40,7 @@ object SparkShimImpl extends Spark420PlusShims {
     }.canonicalized
   }
 
-  // Spark 5 changed exact-percentile interpolation. With floating infinities, its new formula can
-  // produce NaN where the JNI implementation's earlier formula produces an infinity.
-  override def isExactPercentileInputTypeSupported(dataType: DataType): Boolean = dataType match {
-    case FloatType | DoubleType => false
-    case _ => true
-  }
+  // SPARK-57982 changed exact percentile to scale the delta between adjacent endpoints.
+  override def exactPercentileInterpolation: PercentileInterpolation =
+    PercentileInterpolation.ENDPOINT_DELTA
 }

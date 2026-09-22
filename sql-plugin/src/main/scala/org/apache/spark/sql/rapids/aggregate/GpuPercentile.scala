@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,7 +26,7 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{withResource, withResourceIfAllowed}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.ReallyAGpuExpression
 import com.nvidia.spark.rapids.jni.Histogram
-import com.nvidia.spark.rapids.shims.ShimExpression
+import com.nvidia.spark.rapids.shims.{ShimExpression, SparkShimImpl}
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Expression,  UnsafeArrayData, UnsafeProjection, UnsafeRow}
@@ -84,7 +84,7 @@ case class GpuPercentileEvaluation(childExpr: Expression, percentage: Either[Dou
   override def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
     withResourceIfAllowed(childExpr.columnarEval(batch)) { histograms =>
       val percentiles = Histogram.percentileFromHistogram(histograms.getBase,
-        percentageArray, outputAsList)
+        percentageArray, outputAsList, SparkShimImpl.exactPercentileInterpolation)
       GpuColumnVector.from(percentiles, outputType)
     }
   }
