@@ -18,7 +18,8 @@ import pytest
 import re
 
 from spark_session import is_databricks122_or_later, supports_delta_lake_deletion_vectors, \
-    is_databricks173_or_later, is_spark_local_mode, with_cpu_session, with_gpu_session
+    is_databricks173_or_later, is_spark_353_or_later, is_spark_local_mode, \
+    with_cpu_session, with_gpu_session
 from asserts import assert_equal
 from conftest import is_databricks_runtime, spark_jvm
 
@@ -73,6 +74,15 @@ def _loaded_delta_lake_version():
         return None
 
 
+def is_oss_delta_lake_42():
+    return not is_databricks_runtime() and _loaded_delta_lake_version() == "4.2.0"
+
+
+def is_oss_delta_lake_41_or_42():
+    return (not is_databricks_runtime()
+            and _loaded_delta_lake_version() in ("4.1.0", "4.2.0"))
+
+
 delta_reorg_xfail = pytest.mark.xfail(
     not is_databricks_runtime()
     and _loaded_delta_lake_version() in ("4.0.1", "4.1.0")
@@ -101,7 +111,30 @@ def deletion_vector_values_with_xfail_reasons(enabled_xfail_reason=None, disable
 
     return enable_deletion_vector
 
+
+def dml_deletion_vector_values_with_xfail_reasons(
+        enabled_xfail_reason=None, disabled_xfail_reason=None):
+    # DELETE, UPDATE, and MERGE support DVs on OSS Delta 3.3+. Keep Databricks xfails
+    # without suppressing OSS coverage.
+    if is_databricks_runtime() and disabled_xfail_reason is not None:
+        enable_deletion_vector = [
+            pytest.param(False, marks=pytest.mark.xfail(reason=disabled_xfail_reason))]
+    else:
+        enable_deletion_vector = [False]
+
+    if supports_delta_lake_deletion_vectors() and (
+            is_databricks_runtime() or is_spark_353_or_later()):
+        if is_databricks_runtime() and enabled_xfail_reason is not None:
+            enable_deletion_vector.append(
+                pytest.param(True, marks=pytest.mark.xfail(reason=enabled_xfail_reason)))
+        else:
+            enable_deletion_vector.append(True)
+
+    return enable_deletion_vector
+
+
 deletion_vector_values = deletion_vector_values_with_xfail_reasons()
+dml_deletion_vector_values = dml_deletion_vector_values_with_xfail_reasons()
 
 delta_writes_enabled_conf = {"spark.rapids.sql.format.delta.write.enabled": "true"}
 
@@ -220,6 +253,7 @@ def assert_delta_log_json_equivalent(filename, c_json, g_json):
         elif key == "add":
             assert c_val.keys() == g_val.keys(), "Delta log {} 'add' keys mismatch:\nCPU: {}\nGPU: {}".format(filename, c_val, g_val)
             del_keys(("modificationTime", "size"), c_val, g_val)
+            fixup_deletion_vector(c_val, g_val)
             fixup_path(c_val)
             fixup_path(g_val)
         elif key == "cdc":
@@ -401,7 +435,10 @@ def assert_delta_row_tracking_dml(spark_tmp_path, dml_sql, conf,
     with_cpu_session(lambda spark: assert_gpu_and_cpu_latest_delta_log_equivalent(spark, data_path),
                      conf=conf)
 
-def assert_rapids_delta_write(do_test, conf):
+def assert_rapids_delta_write(
+        do_test, conf, required_gpu_classes=delta_write, require_same_plan=False,
+        forbidden_cpu_fallback_classes=None, require_non_empty=False,
+        expected_command=None, expected_classes=None):
     """
     Validates that a Delta write operation executed on the GPU produces the expected execution plans.
     This function starts a plan capture mechanism using the Spark JVM's ExecutionPlanCaptureCallback,
@@ -415,6 +452,19 @@ def assert_rapids_delta_write(do_test, conf):
         A function that performs the Delta write operation to be validated.
     conf : dict
         A dictionary of configuration options to be passed to the GPU session.
+    required_gpu_classes : list[str]
+        GPU class names that must occur in the captured plans.
+    require_same_plan : bool
+        Whether all required GPU classes must occur in the same captured plan.
+    forbidden_cpu_fallback_classes : list[str] or None
+        CPU class names that must not be reported as falling back in any captured plan.
+    require_non_empty : bool
+        When true, require at least one captured plan. This is useful when a no-op is not valid
+        evidence for the feature being tested.
+    expected_command : str, optional
+        Additional GPU command or execution class that must be present in a captured plan.
+    expected_classes : iterable of str, optional
+        Additional GPU plan classes that must be present in a captured plan.
 
     Returns
     -------
@@ -422,22 +472,43 @@ def assert_rapids_delta_write(do_test, conf):
         The result returned by the `do_test` function.
     """
     jvm = spark_jvm()
-    jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.startCapture()
+    callback = jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
     try:
         result = with_gpu_session(do_test, conf=conf)
-        captured_plans = jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.getResultsWithTimeout(10000)
+        captured_plans = callback.getResultsWithTimeout(10000)
+        if require_non_empty:
+            assert len(captured_plans) > 0, "No execution plans captured for Delta write"
+        if expected_command is not None:
+            assert any(
+                callback.contains(plan, expected_command) for plan in captured_plans), \
+                f"{expected_command} is not found in any captured plan"
+        for cls in expected_classes or ():
+            assert any(
+                callback.contains(plan, cls) for plan in captured_plans), \
+                f"{cls} is not found in any captured plan"
         # Some write functions are no-op. We may not capture any GPU plan.
-        if len(captured_plans) > 0:
-            for cls in delta_write:
+        if require_same_plan:
+            found = any(
+                all(callback.contains(plan, cls) for cls in required_gpu_classes)
+                for plan in captured_plans)
+            assert found, \
+                f"No captured plan contains all required GPU classes: {required_gpu_classes}"
+        elif len(captured_plans) > 0:
+            for cls in required_gpu_classes:
                 found = False
                 for plan in captured_plans:
-                    found = jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.contains(plan, cls)
+                    found = callback.contains(plan, cls)
                     if found:
                         break
                 assert found, f"{cls} is not found in any captured plan"
+        for plan in captured_plans:
+            for cls in forbidden_cpu_fallback_classes or []:
+                assert not callback.didFallBack(plan, cls), \
+                    f"Captured Delta write plan fell back to CPU {cls}"
         return result
     finally:
-        jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.endCapture()
+        callback.endCapture()
 
 def assert_db173_gpu_data_writing_command(
         do_test, conf, optimized_write, expected_atomic_gpu_class, aqe_enabled=None,
@@ -530,6 +601,22 @@ def assert_db173_gpu_data_writing_command(
         return result
     finally:
         callback.endCapture()
+
+
+def assert_rapids_gpu_merge_ran(do_test, conf):
+    """Runs a Delta MERGE and asserts that the GPU command did not fall back."""
+    jvm = spark_jvm()
+    callback = jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        result = with_gpu_session(do_test, conf=conf)
+        captured_plans = callback.getResultsWithTimeout(10000)
+        assert any(callback.contains(plan, "GpuMergeIntoCommand") for plan in captured_plans), \
+            "GpuMergeIntoCommand not found in any captured plan; MERGE may have fallen back to CPU"
+        return result
+    finally:
+        callback.endCapture()
+
 
 def assert_rapids_gpu_delete_ran(do_test, conf):
     """

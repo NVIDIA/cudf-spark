@@ -32,7 +32,9 @@ import org.apache.spark.sql.delta.rapids.GpuOptimisticTransactionBase
  * - DeltaTransaction instead of OptimisticTransactionImpl
  * - Iterator[Action] instead of Seq[Action]
  */
-case object GpuAutoCompact extends GpuTransactionalAutoCompactBase {
+case object GpuAutoCompact40x extends GpuTransactionalAutoCompactBase {
+
+  override protected def getTableId(deltaLog: DeltaLog): String = deltaLog.tableId
 
   override def run(
       spark: SparkSession,

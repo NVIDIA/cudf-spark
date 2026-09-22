@@ -19,7 +19,7 @@ package com.nvidia.spark.rapids
 import ai.rapids.cudf.{Rmm, RmmAllocationMode, RmmEventHandler, Table}
 import com.nvidia.spark.Retryable
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitTargetSizeInHalfGpu, withRestoreOnRetry, withRetry, withRetryNoSplit}
+import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitSpillableInHalfByRows, splitTargetSizeInHalfGpu, withRestoreOnRetry, withRetry, withRetryNoSplit}
 import com.nvidia.spark.rapids.jni.{GpuRetryOOM, GpuSplitAndRetryOOM, RmmSpark}
 import com.nvidia.spark.rapids.spill.SpillFramework
 import org.mockito.Mockito._
@@ -30,6 +30,7 @@ import org.scalatestplus.mockito.MockitoSugar
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.types.{DataType, LongType}
+import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
 
 class WithRetrySuite
     extends AnyFunSuite
@@ -44,6 +45,10 @@ class WithRetrySuite
       spy(SpillableColumnarBatch(cb, -1))
     }
   }
+
+  /** Column pruning can empty a batch while its row count still matters. */
+  private def buildRowsOnlyBatch(numRows: Int): SpillableColumnarBatch =
+    spy(SpillableColumnarBatch(new ColumnarBatch(Array.empty[SparkColumnVector], numRows), -1))
   
   private var rmmWasInitialized = false
 
@@ -176,6 +181,53 @@ class WithRetrySuite
         myItems(1).close()
       }
     }
+  }
+
+  test("range producer restores native progress before retrying a deferred batch") {
+    var nextIndex = 0
+    var checkpointIndex = 0
+    var failedOnce = false
+    var restoreCount = 0
+    var closed = false
+    val successfulValues = new scala.collection.mutable.ArrayBuffer[Long]
+    val producer = new RetryableTableProducer {
+      override def hasNext: Boolean = nextIndex < 2
+
+      override def next: Table = {
+        val value = nextIndex
+        nextIndex += 1
+        if (!failedOnce) {
+          failedOnce = true
+          throw new GpuRetryOOM("in tests")
+        }
+        successfulValues += value
+        new Table.TestBuilder().column(Array[java.lang.Long](value.toLong): _*).build()
+      }
+
+      override def checkpoint(): Unit = checkpointIndex = nextIndex
+
+      override def restore(): Unit = {
+        restoreCount += 1
+        nextIndex = checkpointIndex
+      }
+
+      override def close(): Unit = closed = true
+    }
+
+    val iter = RangeInputBatching.withRangeInput(enabled = true) {
+      CachedGpuBatchIterator(producer, Array[DataType](LongType))
+    }
+    withResource(iter) { _ =>
+      assert(iter.hasNext)
+      withResource(iter.next())(batch => assert(batch.numRows() == 1))
+      assert(iter.hasNext)
+      withResource(iter.next())(batch => assert(batch.numRows() == 1))
+      assert(!iter.hasNext)
+    }
+
+    assert(restoreCount == 1)
+    assert(successfulValues == Seq(0L, 1L))
+    assert(closed)
   }
 
   test("withRestoreOnRetry restores state on retry") {
@@ -366,6 +418,38 @@ class WithRetrySuite
       assert(lastSplitSize >= minValue)
       assert(lastSplitSize == (initialValue / (2 * (numSplits - 1))))
     }
+  }
+
+  test("splitSpillableInHalfByRows splits a rows-only batch by row count") {
+    val toSplit = buildRowsOnlyBatch(4001)
+    val halves = splitSpillableInHalfByRows(toSplit)
+    withResource(halves) { _ =>
+      // Odd on purpose: contiguousSplit cuts at rowCount/2, so the extra row belongs to the
+      // second half and the rows-only path has to agree with it.
+      assert(halves.map(_.numRows()) === Seq(2000, 2001))
+      assert(halves.forall(_.dataTypes.isEmpty))
+    }
+    verify(toSplit, times(1)).close()
+  }
+
+  test("splitSpillableInHalfByRows throws on a rows-only batch of one row") {
+    val toSplit = buildRowsOnlyBatch(1)
+    assertThrows[GpuSplitAndRetryOOM] {
+      splitSpillableInHalfByRows(toSplit)
+    }
+    verify(toSplit, times(1)).close()
+  }
+
+  test("withRetry splits a rows-only batch and runs the work on both halves") {
+    var doThrow = true
+    val rowCounts = withRetry(buildRowsOnlyBatch(4000), splitSpillableInHalfByRows) { attempt =>
+      if (doThrow) {
+        doThrow = false
+        throw new GpuSplitAndRetryOOM("in tests")
+      }
+      attempt.numRows()
+    }.toSeq
+    assert(rowCounts === Seq(2000, 2000))
   }
 
   private class BaseRmmEventHandler extends RmmEventHandler {

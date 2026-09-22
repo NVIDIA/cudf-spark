@@ -202,6 +202,10 @@ def copy_and_extract_jars(
     cache_root = target_dir / "unshim-parallel-world-cache"
     sorted_buildvers = sorted(buildvers, reverse=True)
     root_buildver = sorted_buildvers[0]
+    # Classifiers are processed newest-first. Let older classifiers contribute
+    # conditional root-safe classes that are absent from newer classifiers,
+    # without overwriting a newer implementation of the same class path.
+    promoted_root_safe_members = set()
 
     for buildver in sorted_buildvers:
         classifier = "spark%s" % buildver
@@ -216,7 +220,7 @@ def copy_and_extract_jars(
             link_tree_contents(contents_dir, parallel_world / classifier)
             if buildver == root_buildver and artifact == "sql-plugin-api":
                 link_tree_contents(contents_dir, parallel_world)
-            if buildver == root_buildver and artifact == "aggregator":
+            if artifact == "aggregator":
                 root_safe_members = root_safe_module_class_members(
                     base_dir,
                     scala_binary_version,
@@ -228,7 +232,11 @@ def copy_and_extract_jars(
                     raise RuntimeError(
                         "root-safe module classes missing from aggregator: %s" %
                         ", ".join(missing_members))
-                link_members(contents_dir, parallel_world, sorted(root_safe_members))
+                new_root_safe_members = (
+                    root_safe_members - promoted_root_safe_members)
+                link_members(contents_dir, parallel_world,
+                             sorted(new_root_safe_members))
+                promoted_root_safe_members.update(root_safe_members)
 
             patterns = from_each
             if buildver == root_buildver:

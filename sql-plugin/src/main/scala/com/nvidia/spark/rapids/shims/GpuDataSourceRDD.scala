@@ -16,16 +16,18 @@
 
 package com.nvidia.spark.rapids.shims
 
-import java.util.concurrent.ConcurrentHashMap
+import java.io.FileNotFoundException
+import java.util.concurrent.{ConcurrentHashMap, ExecutionException}
 
+import com.nvidia.spark.rapids.{FileSystemBytesReadTracker, GpuFileNotFoundException}
 import com.nvidia.spark.rapids.Arm.closeOnExcept
-import com.nvidia.spark.rapids.FileSystemBytesReadTracker
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 
 import org.apache.spark.{InterruptibleIterator, Partition, SparkContext, SparkException, TaskContext}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read.{InputPartition, PartitionReader, PartitionReaderFactory}
+import org.apache.spark.sql.execution.datasources.FilePartition
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -63,6 +65,7 @@ class GpuDataSourceRDD(
     sc: SparkContext,
     @transient private val inputPartitions: Seq[Seq[InputPartition]],
     partitionReaderFactory: PartitionReaderFactory,
+    includeRefreshHint: Boolean,
     customMetricsFactory: GpuDataSourceCustomMetricsFactory =
       NoopGpuDataSourceCustomMetricsFactory
 ) extends RDD[InternalRow](sc, Nil) {
@@ -94,20 +97,45 @@ class GpuDataSourceRDD(
       private val inputPartitions = castPartition(split).inputPartitions
       private var currentIter: Option[Iterator[Object]] = None
       private var currentIndex: Int = 0
+      private var currentInputPartition: InputPartition = _
 
-      override def hasNext: Boolean = {
+      override def hasNext: Boolean = try {
         val result = currentIter.exists(_.hasNext) || advanceToNextIter()
         if (!result) {
           bytesReadTracker.update()
         }
         result
+      } catch {
+        case e: FileNotFoundException =>
+          throw GpuDataSourceRDD.missingFileError(
+            e, includeRefreshHint, currentInputPartition)
+        case e: ExecutionException =>
+          e.getCause match {
+            case cause: FileNotFoundException =>
+              throw GpuDataSourceRDD.missingFileError(
+                cause, includeRefreshHint, currentInputPartition)
+            case _ => throw e
+          }
       }
 
       override def next(): Object = {
-        if (!hasNext) {
-          throw new NoSuchElementException("No more elements")
+        try {
+          if (!hasNext) {
+            throw new NoSuchElementException("No more elements")
+          }
+          currentIter.get.next()
+        } catch {
+          case e: FileNotFoundException =>
+            throw GpuDataSourceRDD.missingFileError(
+              e, includeRefreshHint, currentInputPartition)
+          case e: ExecutionException =>
+            e.getCause match {
+              case cause: FileNotFoundException =>
+                throw GpuDataSourceRDD.missingFileError(
+                  cause, includeRefreshHint, currentInputPartition)
+              case _ => throw e
+            }
         }
-        currentIter.get.next()
       }
 
       private def advanceToNextIter(): Boolean = {
@@ -115,6 +143,7 @@ class GpuDataSourceRDD(
           false
         } else {
           val inputPartition = inputPartitions(currentIndex)
+          currentInputPartition = inputPartition
           currentIndex += 1
 
           // TODO: SPARK-25083 remove the type erasure hack in data source scan
@@ -236,6 +265,25 @@ class GpuDataSourceRDD(
 }
 
 object GpuDataSourceRDD {
+  private def missingFileError(
+      error: FileNotFoundException,
+      includeRefreshHint: Boolean,
+      inputPartition: InputPartition): Throwable = {
+    val (filePath, originalError) = error match {
+      case GpuFileNotFoundException(path, originalException) =>
+        (Some(path), originalException)
+      case _ =>
+        (singleFilePath(inputPartition), error)
+    }
+    MissingFileErrorShim.convert(filePath, originalError, includeRefreshHint)
+  }
+
+  private def singleFilePath(inputPartition: InputPartition): Option[String] = {
+    Option(inputPartition).collect { case filePartition: FilePartition =>
+      SparkShimImpl.getPartitionFiles(filePartition)
+    }.filter(_.length == 1).map(_.head.filePath.toString)
+  }
+
   private case class GpuDataSourceRDDPartition(
       override val index: Int,
       inputPartitions: Seq[InputPartition]) extends Partition
@@ -243,7 +291,9 @@ object GpuDataSourceRDD {
   def apply(
       sc: SparkContext,
       inputPartitions: Seq[InputPartition],
-      partitionReaderFactory: PartitionReaderFactory): GpuDataSourceRDD = {
-    new GpuDataSourceRDD(sc, inputPartitions.map(Seq(_)), partitionReaderFactory)
+      partitionReaderFactory: PartitionReaderFactory,
+      includeRefreshHint: Boolean): GpuDataSourceRDD = {
+    new GpuDataSourceRDD(
+      sc, inputPartitions.map(Seq(_)), partitionReaderFactory, includeRefreshHint)
   }
 }

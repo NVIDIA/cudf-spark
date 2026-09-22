@@ -660,6 +660,7 @@ case class GpuOrcMultiFilePartitionReaderFactory(
   private val combineThresholdSize = rapidsConf.getMultithreadedCombineThreshold
   private val combineWaitTime = rapidsConf.getMultithreadedCombineWaitTime
   private val keepReadsInOrder = rapidsConf.getMultithreadedReaderKeepOrder
+  private val skipReadEstimate = rapidsConf.skipReadEstimate(useChunkedReader)
 
   // we can't use the coalescing files reader when InputFileName, InputFileBlockStart,
   // or InputFileBlockLength because we are combining all the files into a single buffer
@@ -683,7 +684,7 @@ case class GpuOrcMultiFilePartitionReaderFactory(
     val reader = new MultiFileCloudOrcPartitionReader(
       conf, files, dataSchema, readDataSchema, partitionSchema,
       maxReadBatchSizeRows, maxReadBatchSizeBytes, targetBatchSizeBytes, maxGpuColumnSizeBytes,
-      useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes, poolConf,
+      useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes, skipReadEstimate, poolConf,
       maxNumFileProcessed,
       debugDumpPrefix, debugDumpAlways, filters, filterHandler, metrics, ignoreMissingFiles,
       ignoreCorruptFiles, queryUsesInputFile, keepReadsInOrder, combineConf)
@@ -734,6 +735,8 @@ case class GpuOrcMultiFilePartitionReaderFactory(
           } catch {
             case e: FileNotFoundException if ignoreMissingFiles =>
               logWarning(s"Skipped missing file: ${file.filePath}", e)
+            case e: FileNotFoundException =>
+              throw GpuFileNotFoundException(file.filePath.toString, e)
           }
         }
       }
@@ -744,7 +747,7 @@ case class GpuOrcMultiFilePartitionReaderFactory(
     new MultiFileOrcPartitionReader(conf, files, clippedStripes, readDataSchema,
       debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows, maxReadBatchSizeBytes,
       targetBatchSizeBytes, maxGpuColumnSizeBytes, useChunkedReader,
-      maxChunkedReaderMemoryUsageSizeBytes,
+      maxChunkedReaderMemoryUsageSizeBytes, skipReadEstimate,
       metrics, partitionSchema, poolConf, filterHandler.isCaseSensitive)
   }
 
@@ -783,6 +786,7 @@ case class GpuOrcPartitionReaderFactory(
     } else {
       0L
     }
+  private val skipReadEstimate = rapidsConf.skipReadEstimate(useChunkedReader)
   private val filterHandler = GpuOrcFileFilterHandler(sqlConf, metrics, broadcastedConf,
     pushedFilters, rapidsConf.isOrcFloatTypesToStringEnable)
 
@@ -807,7 +811,7 @@ case class GpuOrcPartitionReaderFactory(
       val reader = new GpuOrcPartitionReader(conf, partFile, ctx,
         readDataSchema, debugDumpPrefix, debugDumpAlways,  maxReadBatchSizeRows,
         maxReadBatchSizeBytes, targetBatchSizeBytes,
-        useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes,
+        useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes, skipReadEstimate,
         metrics, filterHandler.isCaseSensitive)
       ColumnarPartitionReaderWithPartitionValues.newReader(partFile, reader, partitionSchema,
         maxGpuColumnSizeBytes)
@@ -1146,7 +1150,8 @@ trait OrcPartitionReaderBase extends OrcCommonFunctions with Logging
   def populateCurrentBlockChunk(
       blockIterator: BufferedIterator[OrcOutputStripe],
       maxReadBatchSizeRows: Int,
-      maxReadBatchSizeBytes: Long): Seq[OrcOutputStripe] = {
+      maxReadBatchSizeBytes: Long,
+      skipReadEstimate: Boolean): Seq[OrcOutputStripe] = {
     val currentChunk = new ArrayBuffer[OrcOutputStripe]
 
     var numRows: Long = 0
@@ -1162,8 +1167,14 @@ trait OrcPartitionReaderBase extends OrcCommonFunctions with Logging
         }
         if (numRows == 0 ||
           numRows + peekedStripe.infoBuilder.getNumberOfRows <= maxReadBatchSizeRows) {
-          val estimatedBytes = GpuBatchUtils.estimateGpuMemory(readDataSchema,
-            peekedStripe.infoBuilder.getNumberOfRows)
+          // A chunked reader bounds its own GPU memory usage, so the estimate is redundant
+          // there. See spark.rapids.sql.reader.useReadEstimateFromSchema.
+          val estimatedBytes = if (skipReadEstimate) {
+            0L
+          } else {
+            GpuBatchUtils.estimateGpuMemory(readDataSchema,
+              peekedStripe.infoBuilder.getNumberOfRows)
+          }
           if (numBytes == 0 || numBytes + estimatedBytes <= maxReadBatchSizeBytes) {
             currentChunk += blockIterator.next()
             numRows += currentChunk.last.infoBuilder.getNumberOfRows
@@ -1296,6 +1307,7 @@ trait OrcPartitionReaderBase extends OrcCommonFunctions with Logging
  * @param useChunkedReader whether to read Parquet by chunks or read all at once
  * @param maxChunkedReaderMemoryUsageSizeBytes soft limit on the number of bytes of internal memory
  *                                             usage that the reader will use
+ * @param skipReadEstimate whether to ignore the schema based GPU memory estimate for a batch
  * @param execMetrics metrics to update during read
  * @param isCaseSensitive whether the name check should be case sensitive or not
  */
@@ -1311,6 +1323,7 @@ class GpuOrcPartitionReader(
     targetBatchSizeBytes: Long,
     useChunkedReader: Boolean,
     maxChunkedReaderMemoryUsageSizeBytes: Long,
+    skipReadEstimate: Boolean,
     execMetrics : Map[String, GpuMetric],
     isCaseSensitive: Boolean) extends FilePartitionReaderBase(conf, execMetrics)
   with OrcPartitionReaderBase {
@@ -1336,7 +1349,7 @@ class GpuOrcPartitionReader(
   private def readBatches(): Iterator[ColumnarBatch] = {
     NvtxRegistry.ORC_READ_BATCHES {
       val currentStripes = populateCurrentBlockChunk(ctx.blockIterator, maxReadBatchSizeRows,
-        maxReadBatchSizeBytes)
+        maxReadBatchSizeBytes, skipReadEstimate)
       if (ctx.updatedReadSchema.isEmpty) {
         // not reading any data, so return a degenerate ColumnarBatch with the row count
         val numRows = currentStripes.map(_.infoBuilder.getNumberOfRows).sum.toInt
@@ -2248,6 +2261,7 @@ private object GpuOrcFileFilterHandler {
  * @param useChunkedReader whether to read Parquet by chunks or read all at once
  * @param maxChunkedReaderMemoryUsageSizeBytes soft limit on the number of bytes of internal memory
  *                                             usage that the reader will use
+ * @param skipReadEstimate whether to ignore the schema based GPU memory estimate for a batch
  * @param poolConf thread pool configurations
  * @param maxNumFileProcessed threshold to control the maximum file number to be
  *                            submitted to threadpool
@@ -2271,6 +2285,7 @@ class MultiFileCloudOrcPartitionReader(
     maxGpuColumnSizeBytes: Long,
     useChunkedReader: Boolean,
     maxChunkedReaderMemoryUsageSizeBytes: Long,
+    skipReadEstimate: Boolean,
     poolConf: ThreadPoolConf,
     maxNumFileProcessed: Int,
     override val debugDumpPrefix: Option[String],
@@ -2374,7 +2389,7 @@ class MultiFileCloudOrcPartitionReader(
             } else {
               while (blockChunkIter.hasNext) {
                 val blocksToRead = populateCurrentBlockChunk(blockChunkIter, maxReadBatchSizeRows,
-                  maxReadBatchSizeBytes)
+                  maxReadBatchSizeBytes, skipReadEstimate)
                 val (hostBuf, bufSize) = readPartFile(ctx, blocksToRead)
                 val numRows = blocksToRead.map(_.infoBuilder.getNumberOfRows).sum
                 val metas = blocksToRead.map(b => OrcDataStripe(OrcStripeWithMeta(b, ctx)))
@@ -2852,6 +2867,7 @@ private case class OrcSingleStripeMeta(
  * @param useChunkedReader      whether to read Parquet by chunks or read all at once
  * @param maxChunkedReaderMemoryUsageSizeBytes soft limit on the number of bytes of internal memory
  *                                             usage that the reader will use
+ * @param skipReadEstimate      whether to ignore the schema based GPU memory estimate for a batch
  * @param execMetrics           metrics
  * @param partitionSchema       schema of partitions
  * @param poolConf              the thread pool configuration
@@ -2870,13 +2886,14 @@ class MultiFileOrcPartitionReader(
     maxGpuColumnSizeBytes: Long,
     useChunkedReader: Boolean,
     maxChunkedReaderMemoryUsageSizeBytes: Long,
+    skipReadEstimate: Boolean,
     execMetrics: Map[String, GpuMetric],
     partitionSchema: StructType,
     poolConf: ThreadPoolConf,
     isCaseSensitive: Boolean)
   extends MultiFileCoalescingPartitionReaderBase(conf, clippedStripes,
     partitionSchema, maxReadBatchSizeRows, maxReadBatchSizeBytes, maxGpuColumnSizeBytes,
-    poolConf, execMetrics)
+    skipReadEstimate, poolConf, execMetrics)
     with OrcCommonFunctions {
 
   // implicit to convert SchemaBase to Orc TypeDescription
@@ -3163,6 +3180,7 @@ object MakeOrcTableProducer extends Logging {
         table, writerTimezone, writerUsedProlepticGregorian)
       val evolvedSchemaTable = SchemaUtils.evolveSchemaIfNeededAndClose(rebased, tableSchema,
         readDataSchema, isSchemaCaseSensitive, Some(GpuOrcScan.castColumnTo))
+      GpuMetric.recordOutputBatchBytes(evolvedSchemaTable, metrics.get(GPU_OUTPUT_BATCH_BYTES))
       new SingleGpuDataProducer(evolvedSchemaTable)
     }
   }
@@ -3222,8 +3240,10 @@ case class OrcTableReader(
     metrics(NUM_OUTPUT_BATCHES) += 1
     val rebased = GpuOrcTimezoneUtils.rebaseOrcDateTime(
       table, writerTimezone, writerUsedProlepticGregorian)
-    SchemaUtils.evolveSchemaIfNeededAndClose(rebased, catalystTableSchema,
+    val evolvedSchemaTable = SchemaUtils.evolveSchemaIfNeededAndClose(rebased, catalystTableSchema,
       readDataSchema, isSchemaCaseSensitive, Some(GpuOrcScan.castColumnTo))
+    GpuMetric.recordOutputBatchBytes(evolvedSchemaTable, metrics.get(GPU_OUTPUT_BATCH_BYTES))
+    evolvedSchemaTable
   }
 
   override def close(): Unit = {

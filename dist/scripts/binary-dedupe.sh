@@ -182,6 +182,12 @@ function filter_keep_in_spark_shim_dirs() {
     path_without_leading_slash="${class_resource#/}"
     class_file="${path_without_leading_slash#*/}"
     if keep_in_spark_shim_dirs "$class_file"; then
+      # Root-layout classes were explicitly selected by the packager and must
+      # remain eligible for de-duplication so the later root promotion can
+      # remove their shim copies.
+      if [[ -f "./parallel-world/$class_file" ]]; then
+        echo "$class_resource"
+      fi
       continue
     fi
     echo "$class_resource"
@@ -488,8 +494,7 @@ done < "$UNSHIMMED_LIST_TXT" | sort -u > "$UNSHIMMED_NEED_SHARED_TXT"
 echo "$((++STEP))/ verifying unshimmed classes have unique sha1 across shims"
 comm -23 "$UNSHIMMED_NEED_SHARED_TXT" "$SPARK_SHARED_CLASSES_TXT" > "$UNSHIMMED_MISSING_SHARED_TXT"
 if [[ -s "$UNSHIMMED_MISSING_SHARED_TXT" ]]; then
-  read -r missing_unshimmed_class < "$UNSHIMMED_MISSING_SHARED_TXT"
-  echo >&2 "$missing_unshimmed_class is not bitwise-identical across shims"
+  sed 's|$| is not bitwise-identical across shims|' "$UNSHIMMED_MISSING_SHARED_TXT" >&2
   exit 255
 fi
 

@@ -26,6 +26,7 @@ import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.CastOptions
 import com.nvidia.spark.rapids.GpuCast
 import com.nvidia.spark.rapids.GpuColumnVector
+import com.nvidia.spark.rapids.GpuMetric.GPU_OUTPUT_BATCH_BYTES
 import com.nvidia.spark.rapids.GpuScalar
 import com.nvidia.spark.rapids.NoopMetric
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingSeq
@@ -41,6 +42,7 @@ import org.apache.iceberg.shaded.org.apache.parquet.schema.{MessageType => Shade
 import org.apache.iceberg.spark.SparkSchemaUtil
 import org.apache.iceberg.types.{Type, Types}
 
+import org.apache.spark.sql.rapids.GpuTaskMetrics
 import org.apache.spark.sql.types.{DataType, LongType, StringType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
@@ -610,35 +612,6 @@ private class ActionBuildingVisitor(
   }
 }
 
-/**
- * Partner accessors to navigate file schema alongside expected schema.
- */
-private class FileSchemaAccessors
-    extends SchemaWithPartnerVisitor.PartnerAccessors[Type] {
-
-  override def fieldPartner(partnerStruct: Type, fieldId: Int, name: String): Type = {
-    if (partnerStruct == null) return null
-    val structType = partnerStruct.asStructType()
-    val field = structType.field(fieldId)
-    if (field == null) null else field.`type`()
-  }
-
-  override def listElementPartner(partnerList: Type): Type = {
-    if (partnerList == null) return null
-    partnerList.asListType().elementType()
-  }
-
-  override def mapKeyPartner(partnerMap: Type): Type = {
-    if (partnerMap == null) return null
-    partnerMap.asMapType().keyType()
-  }
-
-  override def mapValuePartner(partnerMap: Type): Type = {
-    if (partnerMap == null) return null
-    partnerMap.asMapType().valueType()
-  }
-}
-
 /** Processes columnar batch after reading from parquet file.
  *
  * Apache iceberg uses a lazy approach to deal with schema evolution, e.g. when you
@@ -672,6 +645,8 @@ class GpuParquetReaderPostProcessor(
     metrics.getOrElse(icebergBuildActionTimeMetricName, NoopMetric)
   private val postProcessTimeMetric: com.nvidia.spark.rapids.GpuMetric =
     metrics.getOrElse(icebergPostProcessTimeMetricName, NoopMetric)
+  private val outputBatchBytesMetric: com.nvidia.spark.rapids.GpuMetric =
+    metrics.getOrElse(GPU_OUTPUT_BATCH_BYTES, NoopMetric)
   require(parquetInfo != null, "parquetInfo cannot be null")
   require(parquetInfo.blocks.size == parquetInfo.blocksFirstRowIndices.size,
     s"Parquet info block count ${parquetInfo.blocks.size} not matching parquet info block " +
@@ -864,7 +839,16 @@ class GpuParquetReaderPostProcessor(
       return originalBatch
     }
 
-    postProcessTimeMetric.ns {
+    // The DV path injects unprojected columns that get dropped below; charging them goes negative.
+    val decodedBytes = rootAction match {
+      case ProcessStruct(_, indices) =>
+        indices.flatten.distinct.map { i =>
+          originalBatch.column(i).asInstanceOf[GpuColumnVector].getBase.getDeviceMemorySize
+        }.sum
+      case _ => GpuColumnVector.getTotalDeviceMemoryUsed(originalBatch)
+    }
+
+    val outputBatch = postProcessTimeMetric.ns {
       // Snapshot the _pos counters before withRetryNoSplit. FetchRowPosition.execute commits
       // its advance to the processor after fromLongs() succeeds, but a later field action in
       // the same safeMap iteration (UpCast, FillNull, GpuColumnVector.from, ...) can still
@@ -918,5 +902,12 @@ class GpuParquetReaderPostProcessor(
         }
       }
     }
+
+    // Pass-through columns cancel out; getTotalDeviceMemoryUsed dedupes by native view.
+    val fabricatedBytes = math.max(0L,
+      GpuColumnVector.getTotalDeviceMemoryUsed(outputBatch) - decodedBytes)
+    outputBatchBytesMetric += fabricatedBytes
+    GpuTaskMetrics.get.recordOutputBatchBytes(fabricatedBytes)
+    outputBatch
   }
 }

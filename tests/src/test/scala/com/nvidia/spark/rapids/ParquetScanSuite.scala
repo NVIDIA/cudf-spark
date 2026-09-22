@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2022, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,6 +30,26 @@ class ParquetScanSuite extends SparkQueryCompareTestSuite {
 
   testSparkResultsAreEqual("Test Parquet with byte chunks", fileSplitsParquet,
     conf = new SparkConf().set(RapidsConf.MAX_READER_BATCH_SIZE_BYTES.key, "100")) {
+    frame => frame.select(col("*"))
+  }
+
+  // The read estimate is only consulted when there is no chunked reader, so the chunked reader
+  // is turned off here to keep covering the byte limit path.
+  testSparkResultsAreEqual("Test Parquet with byte chunks using the read estimate",
+    fileSplitsParquet,
+    conf = new SparkConf()
+      .set(RapidsConf.CHUNKED_READER.key, "false")
+      .set(RapidsConf.READER_USE_READ_ESTIMATE_FROM_SCHEMA.key, "true")
+      .set(RapidsConf.MAX_READER_BATCH_SIZE_BYTES.key, "100")) {
+    frame => frame.select(col("*"))
+  }
+
+  testSparkResultsAreEqual("Test Parquet with byte chunks skipping the read estimate",
+    fileSplitsParquet,
+    conf = new SparkConf()
+      .set(RapidsConf.CHUNKED_READER.key, "false")
+      .set(RapidsConf.READER_USE_READ_ESTIMATE_FROM_SCHEMA.key, "false")
+      .set(RapidsConf.MAX_READER_BATCH_SIZE_BYTES.key, "100")) {
     frame => frame.select(col("*"))
   }
 
@@ -195,5 +215,20 @@ class ParquetScanSuite extends SparkQueryCompareTestSuite {
     // The exception is like "Parquet type not supported: INT32 (UINT_8)"
     assumeCondition = (_ => (VersionUtils.isSpark320OrLater, "Spark version not 3.2.0+"))) {
     frame => frame.select(col("*"))
+  }
+
+  test("gpuOutputBatchBytes metric is recorded for Parquet scan") {
+    withGpuSparkSession({ spark =>
+      val df = frameFromParquet("file-splits.parquet")(spark)
+      val rows = df.collect()
+      val scan = df.queryExecution.executedPlan
+        .find(_.metrics.contains(GpuMetric.GPU_OUTPUT_BATCH_BYTES))
+      assert(scan.isDefined)
+      // Physical device width per row from cudf; variable-width types report 0.
+      val bytesPerRow = df.schema.fields
+        .map(f => GpuColumnVector.getRapidsType(f.dataType).getSizeInBytes).sum
+      val minBytes = rows.length.toLong * bytesPerRow
+      assert(scan.get.metrics(GpuMetric.GPU_OUTPUT_BATCH_BYTES).value >= minBytes)
+    })
   }
 }

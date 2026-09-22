@@ -29,14 +29,17 @@
 #   - SPARK_HOME: Path to your Apache Spark installation.
 #   - SKIP_TESTS: If set to true, skips running the Python integration tests.
 #   - INCLUDE_SPARK_AVRO_JAR: If set to true, includes Avro tests.
+#   - INCLUDE_SPARK_PROTOBUF_JAR: Controls external spark-protobuf jar injection; setting it to
+#                                false also disables protobuf tests on Apache Spark.
 #   - TEST: Specifies a specific test to run.
 #   - TEST_TAGS: Allows filtering tests based on tags.
 #   - TEST_TYPE: Specifies the type of tests to run.
 #   - LOCAL_JAR_PATH: Path to local jars if not building from source.
 #   - PLUGIN_JAR: Path to a built spark-rapids plugin jar, the default points to the target directory
 #   - INTEGRATION_TEST_VERSION_OVERRIDE: Overrides the auto-detected shim version.
-#   - ICEBERG_EXTRA_CLASSPATH: Colon- or comma-separated local Iceberg jars to use with
+#   - EXTRA_MAVEN_CLASSPATH: Colon- or comma-separated local jars to use with
 #     spark.driver.extraClassPath and spark.executor.extraClassPath instead of --jars/--packages.
+#     ICEBERG_EXTRA_CLASSPATH is accepted as a deprecated alias.
 #
 # Script Flow:
 #   1. Setup and Checks: Validates environment and detects Spark/Scala versions.
@@ -47,6 +50,9 @@
 # Example Usage:
 #   To run all tests, including Avro tests:
 #     INCLUDE_SPARK_AVRO_JAR=true ./run_pyspark_from_build.sh
+#
+#   To run without injecting an external spark-protobuf jar:
+#     INCLUDE_SPARK_PROTOBUF_JAR=false ./run_pyspark_from_build.sh
 #
 #   To run a specific test:
 #     TEST=my_test ./run_pyspark_from_build.sh
@@ -59,6 +65,28 @@
 # ============================================================================
 
 set -ex
+
+is_databricks_runtime_arg() {
+    local expect_runtime_env_value=false
+    local runtime_env=""
+    local arg
+    for arg in "$@"; do
+        if [[ "$expect_runtime_env_value" == "true" ]]; then
+            runtime_env="$arg"
+            expect_runtime_env_value=false
+            continue
+        fi
+        case "$arg" in
+            --runtime_env)
+                expect_runtime_env_value=true
+                ;;
+            --runtime_env=*)
+                runtime_env="${arg#*=}"
+                ;;
+        esac
+    done
+    [[ "${runtime_env,,}" == "databricks" ]]
+}
 
 SCRIPTPATH="$( cd "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
 cd "$SCRIPTPATH"
@@ -102,6 +130,7 @@ else
     # support alternate local jars NOT building from the source code
     if [ -d "$LOCAL_JAR_PATH" ]; then
         AVRO_JARS=$(echo "$LOCAL_JAR_PATH"/spark-avro*.jar)
+        PROTOBUF_JARS=$(echo "$LOCAL_JAR_PATH"/spark-protobuf*.jar)
         PLUGIN_JAR=$(echo "$LOCAL_JAR_PATH"/rapids-4-spark_*.jar)
         if [ -f $(echo $LOCAL_JAR_PATH/parquet-hadoop*.jar) ]; then
             export INCLUDE_PARQUET_HADOOP_TEST_JAR=true
@@ -118,6 +147,7 @@ else
     else
         [[ "$SCALA_VERSION" != "2.12"  ]] && TARGET_DIR=${TARGET_DIR/integration_tests/scala$SCALA_VERSION\/integration_tests}
         AVRO_JARS=$(echo "$TARGET_DIR"/dependency/spark-avro*.jar)
+        PROTOBUF_JARS=$(echo "$TARGET_DIR"/dependency/spark-protobuf*.jar)
         PARQUET_HADOOP_TESTS=$(echo "$TARGET_DIR"/dependency/parquet-hadoop*.jar)
         # remove the log4j.properties file so it doesn't conflict with ours, ignore errors
         # if it isn't present or already removed
@@ -143,9 +173,30 @@ else
         AVRO_JARS=""
     fi
 
-    # ALL_JARS includes dist.jar integration-test.jar avro.jar parquet.jar if they exist
+    INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED=$(echo "${INCLUDE_SPARK_PROTOBUF_JAR}" | tr '[:upper:]' '[:lower:]')
+    PROTOBUF_JAR_COUNT=$(readlink -e $PROTOBUF_JARS 2>/dev/null | wc -l)
+    if is_databricks_runtime_arg "$@"; then
+        export INCLUDE_SPARK_PROTOBUF_JAR=false
+        PROTOBUF_JARS=""
+    elif [[ "$INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED" != "false" \
+          && "$PROTOBUF_JAR_COUNT" -eq 1 ]];
+    then
+        export INCLUDE_SPARK_PROTOBUF_JAR=true
+    else
+        if [[ "$INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED" != "false" \
+              && "$PROTOBUF_JAR_COUNT" -gt 1 ]]; then
+            >&2 echo "WARNING: Multiple spark-protobuf jars were found (matched: $PROTOBUF_JARS); not injecting spark-protobuf."
+        elif [[ "$INCLUDE_SPARK_PROTOBUF_JAR_REQUESTED" != "false" ]] \
+             && printf '%s\n' "3.4.0" "$VERSION_STRING" | sort -V | head -1 | grep -qx "3.4.0"; then
+            >&2 echo "WARNING: a spark-protobuf jar was not found (searched: $PROTOBUF_JARS); protobuf tests will be skipped."
+        fi
+        export INCLUDE_SPARK_PROTOBUF_JAR=false
+        PROTOBUF_JARS=""
+    fi
+
+    # ALL_JARS includes dist.jar integration-test.jar avro.jar parquet.jar protobuf.jar if they exist
     # Remove non-existing paths and canonicalize the paths including get rid of links and `..`
-    ALL_JARS=$(readlink -e $PLUGIN_JAR $TEST_JARS $AVRO_JARS $PARQUET_HADOOP_TESTS || true)
+    ALL_JARS=$(readlink -e $PLUGIN_JAR $TEST_JARS $AVRO_JARS $PARQUET_HADOOP_TESTS $PROTOBUF_JARS || true)
     # `:` separated jars
     ALL_JARS="${ALL_JARS//$'\n'/:}"
 
@@ -291,22 +342,25 @@ else
 
     SPARK_TASK_MAXFAILURES=${SPARK_TASK_MAXFAILURES:-1}
 
-    ICEBERG_EXTRA_CLASSPATH_COMMA="${ICEBERG_EXTRA_CLASSPATH//:/,}"
-    if [[ -n "${ICEBERG_EXTRA_CLASSPATH_COMMA}" ]]; then
+    # ICEBERG_EXTRA_CLASSPATH is the original name of this variable, kept working for callers
+    # that have not moved to the format-neutral name yet.
+    EXTRA_MAVEN_CLASSPATH="${EXTRA_MAVEN_CLASSPATH:-${ICEBERG_EXTRA_CLASSPATH}}"
+    EXTRA_MAVEN_CLASSPATH_COMMA="${EXTRA_MAVEN_CLASSPATH//:/,}"
+    if [[ -n "${EXTRA_MAVEN_CLASSPATH_COMMA}" ]]; then
         if [[ -n "${PYSP_TEST_spark_jars_packages}" ]]; then
-            >&2 echo "ICEBERG_EXTRA_CLASSPATH cannot be used with PYSP_TEST_spark_jars_packages."
-            >&2 echo "Use local Iceberg jar paths in ICEBERG_EXTRA_CLASSPATH instead of Maven coordinates."
+            >&2 echo "EXTRA_MAVEN_CLASSPATH cannot be used with PYSP_TEST_spark_jars_packages."
+            >&2 echo "Use local jar paths in EXTRA_MAVEN_CLASSPATH instead of Maven coordinates."
             exit 1
         fi
         if [[ -n "${PYSP_TEST_spark_jars}" ]]; then
-            PYSP_TEST_spark_jars="${PYSP_TEST_spark_jars},${ICEBERG_EXTRA_CLASSPATH_COMMA}"
+            PYSP_TEST_spark_jars="${PYSP_TEST_spark_jars},${EXTRA_MAVEN_CLASSPATH_COMMA}"
         else
-            PYSP_TEST_spark_jars="${ICEBERG_EXTRA_CLASSPATH_COMMA}"
+            PYSP_TEST_spark_jars="${EXTRA_MAVEN_CLASSPATH_COMMA}"
         fi
     fi
 
     if [[ "${PYSP_TEST_spark_shuffle_manager}" =~ "RapidsShuffleManager" ||
-          -n "${ICEBERG_EXTRA_CLASSPATH_COMMA}" ]]; then
+          -n "${EXTRA_MAVEN_CLASSPATH_COMMA}" ]]; then
         # The RAPIDS shuffle manager and Iceberg package-private access tests need the plugin
         # and dependency jars on extraClassPath instead of spark.jars/spark.jars.packages.
         EXTRA_CLASSPATH="${ALL_JARS}"
@@ -433,20 +487,6 @@ else
     # See AllocationRetryCoverageTracker.scala and https://github.com/NVIDIA/spark-rapids/issues/13672
     if [[ -n "${SPARK_RAPIDS_RETRY_COVERAGE_TRACKING}" ]]; then
         export PYSP_TEST_spark_executorEnv_SPARK_RAPIDS_RETRY_COVERAGE_TRACKING="${SPARK_RAPIDS_RETRY_COVERAGE_TRACKING}"
-    fi
-
-    # Turns on $LOAD_HYBRID_BACKEND and setup the filepath of hybrid backend jars, to activate the
-    # hybrid backend while running subsequent integration tests.
-    if [[ "$LOAD_HYBRID_BACKEND" -eq 1 ]]; then
-      if [ -z "${HYBRID_BACKEND_JARS}" ]; then
-        echo "Error: Environment HYBRID_BACKEND_JARS is not set."
-        exit 1
-      fi
-      export PYSP_TEST_spark_jars="${PYSP_TEST_spark_jars},${HYBRID_BACKEND_JARS//:/,}"
-      export PYSP_TEST_spark_rapids_sql_hybrid_loadBackend=true
-      export PYSP_TEST_spark_memory_offHeap_enabled=true
-      export PYSP_TEST_spark_memory_offHeap_size=512M
-      export PYSP_TEST_spark_gluten_loadLibFromJar=true
     fi
 
     SPARK_SHELL_SMOKE_TEST="${SPARK_SHELL_SMOKE_TEST:-0}"

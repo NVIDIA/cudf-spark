@@ -86,7 +86,7 @@ jobs:
           svArrBodyNoSnapshot=${svArrBodyNoSnapshot:1}
 
           # get private artifact version
-          privateVer=$(mvn help:evaluate -q -pl dist -Dexpression=spark-rapids-private.version -DforceStdout)
+          privateVer=$(mvn help:evaluate -q -pl dist -Dexpression=cudf-spark-private.version -DforceStdout)
           # do not add empty snapshot versions or when private version is released one (does not include snapshot shims)
           if [[ ${#SPARK_SHIM_VERSIONS_SNAPSHOTS_ONLY[@]} -gt 0 && $privateVer == *"-SNAPSHOT" ]]; then
             svArrBodySnapshot=$(printf ",{\"spark-version\":\"%s\",\"isSnapshot\":true}" "${SPARK_SHIM_VERSIONS_SNAPSHOTS_ONLY[@]}")
@@ -121,7 +121,7 @@ jobs:
       - name: Setup Java and Maven Env
         uses: actions/setup-java@v5
         with:
-          distribution: adopt
+          distribution: temurin
           java-version: 17
 
       - name: Cache local Maven repository
@@ -204,7 +204,7 @@ jobs:
           svArrBodyNoSnapshot=$(printf ",{\"spark-version\":\"%s\",\"isSnapshot\":false}" "${SPARK_SHIM_VERSIONS_NOSNAPSHOTS[@]}")
           svArrBodyNoSnapshot=${svArrBodyNoSnapshot:1}
           # get private artifact version
-          privateVer=$(mvn help:evaluate -q -pl dist -Dexpression=spark-rapids-private.version -DforceStdout)
+          privateVer=$(mvn help:evaluate -q -pl dist -Dexpression=cudf-spark-private.version -DforceStdout)
           svJsonStr=$(printf {\"include\":[%s]} $svArrBodyNoSnapshot)
 
           echo "scala213Versions=$svJsonStr" >> $GITHUB_OUTPUT
@@ -232,7 +232,7 @@ jobs:
       - name: Setup Java and Maven Env
         uses: actions/setup-java@v5
         with:
-          distribution: adopt
+          distribution: temurin
           java-version: 17
 
       - name: Cache local Maven repository
@@ -288,7 +288,7 @@ jobs:
       - name: Setup Java and Maven Env
         uses: actions/setup-java@v5
         with:
-          distribution: adopt
+          distribution: temurin
           java-version: 17
 
       - name: Cache local Maven repository
@@ -343,7 +343,7 @@ jobs:
       - name: Setup Java and Maven Env
         uses: actions/setup-java@v5
         with:
-          distribution: adopt
+          distribution: temurin
           java-version: ${{ matrix.java-version }}
 
       - name: Cache local Maven repository
@@ -391,7 +391,7 @@ jobs:
       - name: Setup Java
         uses: actions/setup-java@v5
         with:
-          distribution: adopt
+          distribution: temurin
           java-version: 11
 
       - name: Cache local Maven repository
@@ -430,3 +430,29 @@ jobs:
             fi
           }
           done
+
+  with-resource-nesting-audit:
+    name: withResource nesting audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: NVIDIA/spark-rapids-common/checkout@main
+
+      - name: Report withResource nesting violations
+        run: |
+          audit_status=0
+          mvn --batch-mode -N antrun:run@with-resource-nesting-audit \
+            -DwithResource.audit.rawReport="$RUNNER_TEMP/with-resource-nesting-audit.json" \
+            -DwithResource.audit.summary="$GITHUB_STEP_SUMMARY" \
+            -DwithResource.audit.annotations="$RUNNER_TEMP/with-resource-nesting-annotations.txt" || audit_status=$?
+          if [[ -f "$RUNNER_TEMP/with-resource-nesting-annotations.txt" ]]; then
+            cat "$RUNNER_TEMP/with-resource-nesting-annotations.txt"
+          fi
+          exit "$audit_status"
+
+      - name: Upload withResource nesting report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: with-resource-nesting-audit
+          path: ${{ runner.temp }}/with-resource-nesting-audit.json
+          if-no-files-found: ignore

@@ -17,7 +17,8 @@
 package com.nvidia.spark.rapids.delta.delta33x
 
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.delta.common.{DeltaProviderBase, DeltaReorgTableCommandMeta}
+import com.nvidia.spark.rapids.delta.common.{DeltaCDFRelationStrategy, DeltaProviderBase,
+  DeltaReorgTableCommandMeta}
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.connector.catalog.SupportsWrite
@@ -29,6 +30,8 @@ import org.apache.spark.sql.execution.datasources.FileFormat
 import org.apache.spark.sql.execution.datasources.v2.{AppendDataExecV1, OverwriteByExpressionExecV1}
 
 object Delta33xProvider extends DeltaProviderBase with Logging {
+
+  override protected def getCDFRelationStrategy = DeltaCDFRelationStrategy
 
   override def isSupportedWrite(write: Class[_ <: SupportsWrite]): Boolean = {
     write == classOf[DeltaTableV2] || write == classOf[GpuDeltaCatalog#GpuStagedDeltaTableV2]
@@ -91,7 +94,9 @@ object Delta33xProvider extends DeltaProviderBase with Logging {
 
   override protected def toGpuParquetFileFormat(conf: RapidsConf, fmt: DeltaParquetFileFormat)
   : FileFormat = {
-    if (isPushDVPredicateDownEnabled(conf)) {
+    // A DML scan without existing DVs needs the reader that synthesizes physical row indexes.
+    val needsGeneratedRowIndex = !fmt.optimizationsEnabled && !fmt.hasTablePath
+    if (isPushDVPredicateDownEnabled(conf) && !needsGeneratedRowIndex) {
       // Pushing down deletion vector predicates is currently only supported
       // when the metadata row index is enabled.
       GpuDelta33xParquetFileFormat2(fmt.protocol, fmt.metadata, fmt.nullableRowTrackingFields,

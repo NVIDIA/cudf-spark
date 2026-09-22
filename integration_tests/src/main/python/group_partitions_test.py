@@ -43,7 +43,7 @@ def _collect_plan_nodes(plan):
     return nodes
 
 
-def _assert_partial_clustering_spj_plan(plan):
+def _assert_partial_clustering_spj_plan(_cpu_plan, plan):
     nodes = _collect_plan_nodes(plan)
 
     def nodes_of_class(class_name):
@@ -83,7 +83,7 @@ def _assert_partial_clustering_spj_plan(plan):
             f"GroupPartitionsExec is not expected before Spark 4.2:\n{plan}"
 
 
-def _assert_sorted_merge_spj_plan(plan):
+def _assert_sorted_merge_spj_plan(_cpu_plan, plan):
     nodes = _collect_plan_nodes(plan)
     gpu_groups = [
         node for node in nodes

@@ -99,9 +99,8 @@ object GpuGroupPartitionsExecInfo {
       gpuOutputOrdering,
       groupPartitions.groupedPartitions.map(_._2),
       groupPartitions.joinKeyPositions,
-      groupPartitions.expectedPartitionKeys.map(_.size),
-      groupPartitions.reducers.map(
-        _.map(_.map(_.displayName()).getOrElse("identity"))),
+      GpuGroupPartitionsShims.expectedPartitionKeyCount(groupPartitions),
+      GpuGroupPartitionsShims.reducerNames(groupPartitions),
       groupPartitions.distributePartitions,
       groupPartitions.enableSortedMerge)
   }

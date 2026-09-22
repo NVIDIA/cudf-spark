@@ -68,8 +68,8 @@
         </dependency>
         <dependency>
             <groupId>com.nvidia</groupId>
-            <artifactId>rapids-4-spark-private_${scala.binary.version}</artifactId>
-            <version>${spark-rapids-private.version}</version>
+            <artifactId>${cudf-spark-private.artifactId}</artifactId>
+            <version>${cudf-spark-private.version}</version>
             <classifier>${spark.version.classifier}</classifier>
         </dependency>
         <!--
@@ -166,8 +166,8 @@
                     <artifactSet>
                         <excludes>
                             <exclude>org.slf4j:*</exclude>
-                            <!-- excludes spark-rapids-jni and jucx, will package them in the dist submodule -->
-                            <exclude>com.nvidia:spark-rapids-jni:*</exclude>
+                            <!-- excludes cudf-spark-jni and jucx, will package them in the dist submodule -->
+                            <exclude>com.nvidia:${cudf-spark-jni.artifactId}:*</exclude>
                             <exclude>org.openucx:jucx:*</exclude>
                         </excludes>
                     </artifactSet>

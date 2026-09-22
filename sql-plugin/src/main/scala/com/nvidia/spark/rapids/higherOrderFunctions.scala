@@ -1071,14 +1071,13 @@ case class GpuMapZipWith(
     boundIntermediate: Seq[GpuExpression] = Seq.empty)
     extends GpuMapTwoArgumentHigherOrderFunction {
 
-  @transient lazy val MapType(keyType1, valueType1, valueContainsNull1) = argument1.dataType
-  @transient lazy val MapType(keyType2, valueType2, valueContainsNull2) = argument2.dataType
+  @transient lazy val MapType(keyType1, _, _) = argument1.dataType
+  @transient lazy val MapType(keyType2, _, _) = argument2.dataType
 
   @transient lazy val keyType =
     TypeCoercion.findCommonTypeDifferentOnlyInNullFlags(keyType1, keyType2).get
 
-  override def dataType: DataType = MapType(keyType, function.dataType, 
-    valueContainsNull1 || valueContainsNull2)
+  override def dataType: DataType = MapType(keyType, function.dataType, function.nullable)
 
   override def prettyName: String = "map_zip_with"
 
