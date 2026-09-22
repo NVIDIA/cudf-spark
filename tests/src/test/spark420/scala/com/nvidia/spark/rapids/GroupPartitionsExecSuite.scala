@@ -30,7 +30,7 @@ import com.nvidia.spark.rapids.shims.{GpuGroupPartitionsExec, GpuGroupPartitions
 import com.nvidia.spark.rapids.shims.ShimLeafExecNode
 import org.mockito.Mockito.{doReturn, mock, spy, when}
 
-import org.apache.spark.SparkConf
+import org.apache.spark.{SparkConf, SparkException}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, AttributeReference,
@@ -118,6 +118,44 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
       s"Expected GpuRowToColumnarExec in plan:\n$gpuPlan")
     assert(gpuGroups.exists(_.partitionGroups.exists(_.size > 1)),
       "Expected grouping metadata from the original CPU child")
+    assert(gpuGroups.forall { group =>
+      group.groupInfo.plannedChildPartitioning.forall(_ == group.child.outputPartitioning)
+    }, "Expected the transitioned child to preserve its planned partitioning")
+  }
+
+  test("Spark 5 GPU execution rejects stale GroupPartitionsExec grouping") {
+    withGpuSparkSession { _ =>
+      val attr = AttributeReference("id", IntegerType, nullable = false)()
+      val originalChild = spy(LocalTableScanExec(Seq(attr), Nil, None))
+      val originalPartitioning = KeyedPartitioning(
+        Seq(attr),
+        Seq(InternalRow(1), InternalRow(1), InternalRow(2)))
+      doReturn(originalPartitioning).when(originalChild).outputPartitioning
+
+      val plannedCpu = GroupPartitionsExecTestShim(
+        originalChild,
+        enableSortedMerge = false)
+      val groupInfo = GpuGroupPartitionsExecInfo(plannedCpu, Seq.empty)
+      assume(groupInfo.plannedChildPartitioning.nonEmpty,
+        "SPARK-59289 child partitioning is only available in Spark 5")
+      assert(plannedCpu.groupedPartitions.map(_._2) == Seq(Seq(0, 1), Seq(2)))
+
+      val changedChild = GroupPartitionsTestGpuLeaf(
+        Seq(attr),
+        Seq(Seq[Integer](10), Seq[Integer](20), Seq[Integer](30), Seq[Integer](40)),
+        Seq.empty)
+      val staleCpu = plannedCpu.withNewChildren(Seq(changedChild))
+        .asInstanceOf[GroupPartitionsExec]
+      val cpuError = intercept[SparkException](staleCpu.executeColumnar())
+      assert(cpuError.getMessage.contains(
+        "no longer reports the partitioning it was planned over"))
+
+      val staleGpu = GpuGroupPartitionsExec(changedChild, groupInfo)
+      assert(staleGpu.outputPartitioning == UnknownPartitioning(2))
+      val gpuError = intercept[SparkException](staleGpu.executeColumnar())
+      assert(gpuError.getMessage.contains(
+        "no longer reports the partitioning it was planned over"))
+    }
   }
 
   test("GpuGroupPartitionsExec returns an empty RDD for an empty grouping plan") {
@@ -182,7 +220,8 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
           expectedPartitionKeyCount = None,
           reducerNames = None,
           distributePartitions = false,
-          enableSortedMerge = false))
+          enableSortedMerge = false,
+          plannedChildPartitioning = Some(HashPartitioning(Seq(attr), 2))))
     }
 
     val first = newPlan()
