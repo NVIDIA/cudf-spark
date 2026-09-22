@@ -125,6 +125,15 @@ def is_iceberg_rest_catalog():
     v = os.environ.get('ICEBERG_TEST_CATALOG_TYPE')
     return v == "rest"
 
+def unity_catalog_uri():
+    return os.environ.get('DELTA_UC_URI')
+
+def unity_catalog_storage_root():
+    return os.environ.get('DELTA_UC_STORAGE_ROOT')
+
+def is_unity_catalog_configured():
+    return unity_catalog_uri() is not None
+
 # key is time zone, value is recorded boolean value
 _support_info_cache_for_time_zone = {}
 
@@ -386,6 +395,12 @@ def pytest_runtest_setup(item):
         if not item.config.getoption('delta_lake'):
             pytest.skip('delta lake tests not configured to run')
 
+    if item.get_closest_marker('unity_catalog'):
+        if not item.config.getoption('unity_catalog'):
+            pytest.skip('Unity Catalog tests not configured to run')
+        elif not is_unity_catalog_configured():
+            pytest.skip('DELTA_UC_URI is not set to a running Unity Catalog server')
+
     if item.get_closest_marker('large_data_test'):
         if not item.config.getoption('large_data_test'):
             pytest.skip('tests for large data not configured to run')
@@ -395,6 +410,9 @@ def pytest_runtest_setup(item):
             pytest.skip('tests for pyarrow not configured to run')
 
 def pytest_configure(config):
+    if config.getoption('iceberg') and not os.environ.get('EXPECTED_ICEBERG_VERSION'):
+        raise pytest.UsageError(
+            "EXPECTED_ICEBERG_VERSION must be set when running Iceberg tests")
     global _runtime_env
     _runtime_env = config.getoption('runtime_env')
     global _std_input_path

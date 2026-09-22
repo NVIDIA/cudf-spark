@@ -4,16 +4,6 @@
   "trackingIssue": "https://github.com/NVIDIA/cudf-spark/issues/11713",
   "entries": [
     {
-      "path": "iceberg/common/src/main/scala/com/nvidia/spark/rapids/iceberg/data/GpuDeleteFilter.scala",
-      "fingerprint": "4415694eea89f25ab795",
-      "resource": "withResource(GpuColumnVector.from(newTable,outputDataType))"
-    },
-    {
-      "path": "iceberg/common/src/main/scala/com/nvidia/spark/rapids/iceberg/data/GpuDeleteLoader.scala",
-      "fingerprint": "155ccf9ad83e60adabb9",
-      "resource": "withResource(GpuColumnVector.from(combined,sparkTypes))"
-    },
-    {
       "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/GpuCast.scala",
       "fingerprint": "27fc2acfeb96c0d4259b",
       "resource": "withResource(Scalar.fromString(<literal>))"
@@ -282,21 +272,6 @@
       "path": "sql-plugin/src/main/spark359/scala/com/nvidia/spark/rapids/shims/mathExpressions.scala",
       "fingerprint": "e068d373aa01140b6d32",
       "resource": "withResource(Scalar.fromDouble(1.0))"
-    },
-    {
-      "path": "sql-plugin/src/main/spark400/scala/com/nvidia/spark/rapids/GpuVariantGet.scala",
-      "fingerprint": "746efd41147bf4814886",
-      "resource": "withResource(Scalar.fromNull(DType.INT64))"
-    },
-    {
-      "path": "sql-plugin/src/main/spark400/scala/com/nvidia/spark/rapids/GpuVariantGet.scala",
-      "fingerprint": "e24c1b8fef6791399f1c",
-      "resource": "withResource(inRange.ifElse(input,nullValue))"
-    },
-    {
-      "path": "sql-plugin/src/main/spark400/scala/com/nvidia/spark/rapids/GpuVariantGet.scala",
-      "fingerprint": "f7d3007c65e764df4ee2",
-      "resource": "withResource(aboveMin.and(belowMax))"
     }
   ]
 }

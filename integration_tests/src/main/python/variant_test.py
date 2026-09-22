@@ -18,13 +18,15 @@ from asserts import (assert_cpu_and_gpu_are_equal_collect_with_capture,
                      assert_gpu_and_cpu_are_equal_collect,
                      assert_gpu_fallback_write,
                      assert_gpu_fallback_collect)
-from conftest import is_databricks_runtime
+from conftest import is_databricks_runtime, spark_jvm
 from data_gen import idfn
-from marks import allow_non_gpu, incompat
-from spark_session import is_before_spark_400, with_cpu_session
+from marks import allow_non_gpu, ignore_order, incompat
+from spark_session import (is_before_spark_400, is_databricks173_or_later, is_spark_40x,
+                           is_spark_411_or_later, with_cpu_session)
 
 pytestmark = pytest.mark.skipif(
-    is_databricks_runtime(), reason='Enabled in follow-up PR #15645')
+    is_databricks_runtime() and not is_databricks173_or_later(),
+    reason='Variant extraction is supported for Databricks 17.3+')
 
 _variant_parquet_conf = {
     'spark.rapids.sql.format.parquet.enabled': 'true',
@@ -32,6 +34,29 @@ _variant_parquet_conf = {
     'spark.rapids.sql.format.parquet.write.enabled': 'true',
     'spark.sql.sources.useV1SourceList': 'parquet'
 }
+
+_variant_write_conf = {}
+
+if not is_before_spark_400():
+    # Keep extraction above the scan in tests intended to exercise GpuVariantGet.
+    _variant_parquet_conf['spark.sql.variant.pushVariantIntoScan'] = 'false'
+
+if is_spark_411_or_later():
+    # Spark 4.1+ writes shredded Variant columns by default. The GPU implementation
+    # currently operates on unshredded Variant columns, so require unshredded reads
+    # when exercising GpuVariantGet.
+    _variant_parquet_conf['spark.sql.variant.allowReadingShredded'] = 'false'
+    _variant_write_conf['spark.sql.variant.writeShredding.enabled'] = 'false'
+
+
+_variant_pushdown_scan_params = [
+    pytest.param('parquet', 'FileSourceScanExec', False, id='v1'),
+    pytest.param('', 'BatchScanExec', True, id='v2')
+]
+
+
+def _with_cpu_variant_session(func):
+    return with_cpu_session(func, conf=_variant_write_conf)
 
 
 def _write_variant_parquet(spark, path):
@@ -46,6 +71,21 @@ def _write_variant_parquet(spark, path):
     """).write.mode('overwrite').parquet(path)
 
 
+def _write_array_variant_parquet(spark, path):
+    spark.sql("""
+      SELECT id, parse_json(json) AS v
+      FROM VALUES
+        (0, '{"items":[{"sku":"a","qty":1},{"sku":"b","qty":2}],"matrix":[[10,11],[20]]}'),
+        (1, '{"items":[],"matrix":[]}'),
+        (2, '{"items":[null],"matrix":[[30]]}'),
+        (3, '{"items":"wrong container","matrix":40}'),
+        (4, '[{"sku":"root"}]'),
+        (5, 'null'),
+        (6, NULL)
+      AS source(id, json)
+    """).write.mode('overwrite').parquet(path)
+
+
 def _write_heterogeneous_variant_parquet(spark, path):
     spark.sql("""
       SELECT id, parse_json(json) AS v
@@ -57,7 +97,10 @@ def _write_heterogeneous_variant_parquet(spark, path):
         (4, '{"x":false}'),
         (5, '{"x":"bad"}'),
         (6, '{"x":null}'),
-        (7, '{"y":"missing"}')
+        (7, '{"y":"missing"}'),
+        (8, '{"x":128}'),
+        (9, '{"x":32768}'),
+        (10, '{"x":2147483648}')
       AS source(id, json)
     """).write.mode('overwrite').parquet(path)
 
@@ -91,7 +134,7 @@ def _write_variant_if_parquet(spark, path):
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
 def test_parquet_variant_write_falls_back(spark_tmp_path):
     source_path = spark_tmp_path + '/VARIANT_WRITE_SOURCE'
-    with_cpu_session(lambda spark: _write_variant_parquet(spark, source_path))
+    _with_cpu_variant_session(lambda spark: _write_variant_parquet(spark, source_path))
 
     def write_data(spark, path):
         spark.read.parquet(source_path).write.mode('overwrite').parquet(path)
@@ -104,10 +147,143 @@ def test_parquet_variant_write_falls_back(spark_tmp_path):
             "try_variant_get(v, '$.n.num', 'int') AS num")
 
     write_conf = dict(_variant_parquet_conf)
+    write_conf.update(_variant_write_conf)
     write_conf['spark.rapids.sql.format.parquet.read.enabled'] = 'false'
     assert_gpu_fallback_write(
         write_data, read_data, spark_tmp_path, ['DataWritingCommandExec', 'WriteFilesExec'],
         conf=write_conf)
+
+
+@allow_non_gpu('FileSourceScanExec', 'BatchScanExec', 'ColumnarToRowExec')
+@incompat
+@pytest.mark.parametrize(
+    'v1_enabled_list,fallback_class,requires_v2_pushdown', _variant_pushdown_scan_params)
+@pytest.mark.skipif(not is_spark_40x(),
+                    reason='This test covers Variant scan pushdown on Spark 4.0.x')
+def test_parquet_variant_scan_pushdown_falls_back(
+        spark_tmp_path, v1_enabled_list, fallback_class, requires_v2_pushdown):
+    if requires_v2_pushdown:
+        supports_v2_pushdown = spark_jvm().com.nvidia.spark.rapids.shims \
+            .ParquetVariantShims.supportsV2VariantPushdown()
+        if not supports_v2_pushdown:
+            pytest.skip('The selected shim does not support V2 Variant scan pushdown')
+
+    data_path = spark_tmp_path + '/VARIANT_SCAN_PUSHDOWN_FALLBACK_PARQUET'
+    _with_cpu_variant_session(lambda spark: _write_variant_parquet(spark, data_path))
+
+    def do_it(spark):
+        return spark.read.parquet(data_path).selectExpr(
+            "try_variant_get(v, '$.x', 'int') AS x",
+            "try_variant_get(v, '$.y', 'string') AS y")
+
+    read_conf = dict(_variant_parquet_conf)
+    read_conf['spark.sql.sources.useV1SourceList'] = v1_enabled_list
+    read_conf['spark.sql.variant.pushVariantIntoScan'] = 'true'
+    # TODO(#14251): Replace this fallback assertion when pushed Variant scans run on GPU.
+    assert_gpu_fallback_collect(
+        do_it, fallback_class, conf=read_conf)
+
+
+@allow_non_gpu('FileSourceScanExec', 'ColumnarToRowExec')
+@incompat
+@pytest.mark.skipif(not is_spark_411_or_later(),
+                    reason='Variant scan pushdown is available in Spark 4.1.1+')
+def test_parquet_variant_shredding_and_scan_pushdown_fall_back(spark_tmp_path):
+    data_path = spark_tmp_path + '/VARIANT_SCAN_PUSHDOWN_FALLBACK_PARQUET'
+    write_conf = {'spark.sql.variant.writeShredding.enabled': 'true'}
+    with_cpu_session(
+        lambda spark: _write_variant_parquet(spark, data_path), conf=write_conf)
+
+    def do_it(spark):
+        return spark.read.parquet(data_path).selectExpr(
+            "try_variant_get(v, '$.x', 'int') AS x",
+            "try_variant_get(v, '$.y', 'string') AS y")
+
+    read_conf = dict(_variant_parquet_conf)
+    read_conf['spark.sql.variant.pushVariantIntoScan'] = 'true'
+    read_conf['spark.sql.variant.allowReadingShredded'] = 'true'
+    # TODO(#14251): Replace this fallback assertion when pushed Variant scans run on GPU.
+    assert_gpu_fallback_collect(
+        do_it, 'FileSourceScanExec', conf=read_conf)
+
+
+@allow_non_gpu('FileSourceScanExec', 'BatchScanExec', 'ColumnarToRowExec',
+               'ProjectExec', 'VariantGet', 'ShuffleExchangeExec')
+@incompat
+@pytest.mark.parametrize('pushdown_enabled,nested_pass_through,repartition_before_extract', [
+    ('true', True, False),
+    ('false', False, False),
+    ('false', False, True),
+], ids=['nested-pass-through', 'pushdown-disabled', 'aqe-query-stage'])
+@pytest.mark.parametrize('v1_enabled_list,fallback_class', [
+    ('parquet', 'FileSourceScanExec'),
+    ('', 'BatchScanExec'),
+], ids=['v1', 'v2'])
+@pytest.mark.skipif(not is_spark_411_or_later(),
+                    reason='Variant shredding is enabled by default in Spark 4.1.1+')
+def test_parquet_shredded_raw_variant_scan_falls_back(
+        spark_tmp_path, pushdown_enabled, nested_pass_through, repartition_before_extract,
+        v1_enabled_list, fallback_class):
+    data_path = spark_tmp_path + '/RAW_SHREDDED_VARIANT_SCAN_FALLBACK_PARQUET'
+
+    def write_data(spark):
+        spark.sql("""
+          SELECT
+            parse_json('{"x":7}') AS v,
+            named_struct('payload', parse_json('{"x":42}')) AS nested
+        """).write.mode('overwrite').parquet(data_path)
+
+    write_conf = {'spark.sql.variant.writeShredding.enabled': 'true'}
+    with_cpu_session(write_data, conf=write_conf)
+
+    def do_it(spark):
+        df = spark.read.parquet(data_path)
+        if nested_pass_through:
+            return df.selectExpr('to_json(nested) AS nested')
+        if repartition_before_extract:
+            df = df.repartition(2)
+        return df.selectExpr("try_variant_get(v, '$.x', 'int') AS x")
+
+    read_conf = dict(_variant_parquet_conf)
+    read_conf['spark.sql.sources.useV1SourceList'] = v1_enabled_list
+    read_conf['spark.sql.adaptive.enabled'] = 'true'
+    read_conf['spark.sql.variant.pushVariantIntoScan'] = pushdown_enabled
+    read_conf['spark.sql.variant.allowReadingShredded'] = 'true'
+    assert_gpu_fallback_collect(
+        do_it, fallback_class, conf=read_conf)
+
+
+@allow_non_gpu('FileSourceScanExec', 'BatchScanExec', 'ColumnarToRowExec',
+               'ProjectExec', 'VariantGet')
+@incompat
+@pytest.mark.parametrize('v1_enabled_list,fallback_class', [
+    ('parquet', 'FileSourceScanExec'),
+    ('', 'BatchScanExec'),
+], ids=['v1', 'v2'])
+@pytest.mark.skipif(not is_spark_411_or_later(),
+                    reason='Variant shredding is enabled by default in Spark 4.1.1+')
+def test_parquet_shredded_variant_aggregate_returns_to_gpu(
+        spark_tmp_path, v1_enabled_list, fallback_class):
+    data_path = spark_tmp_path + '/SHREDDED_VARIANT_AGGREGATE_PARQUET'
+    write_conf = {'spark.sql.variant.writeShredding.enabled': 'true'}
+    with_cpu_session(
+        lambda spark: _write_variant_parquet(spark, data_path), conf=write_conf)
+
+    def do_it(spark):
+        return spark.read.parquet(data_path) \
+            .selectExpr("try_variant_get(v, '$.x', 'int') AS x") \
+            .selectExpr('sum(x) AS total')
+
+    read_conf = dict(_variant_parquet_conf)
+    read_conf['spark.sql.sources.useV1SourceList'] = v1_enabled_list
+    read_conf['spark.sql.adaptive.enabled'] = 'true'
+    read_conf['spark.sql.variant.pushVariantIntoScan'] = 'false'
+    read_conf['spark.sql.variant.allowReadingShredded'] = 'true'
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        exist_classes=f'{fallback_class},ProjectExec,GpuHashAggregateExec',
+        non_exist_classes='GpuVariantGet',
+        conf=read_conf)
 
 
 @incompat
@@ -115,13 +291,14 @@ def test_parquet_variant_write_falls_back(spark_tmp_path):
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
 def test_parquet_variant_try_get_string(spark_tmp_path, v1_enabled_list):
     data_path = spark_tmp_path + '/VARIANT_PARQUET'
-    with_cpu_session(lambda spark: _write_variant_parquet(spark, data_path))
+    _with_cpu_variant_session(lambda spark: _write_variant_parquet(spark, data_path))
 
     read_conf = dict(_variant_parquet_conf)
     read_conf['spark.sql.sources.useV1SourceList'] = v1_enabled_list
-    assert_gpu_and_cpu_are_equal_collect(
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.read.parquet(data_path).selectExpr(
             "try_variant_get(v, '$.y', 'string') AS y"),
+        exist_classes='GpuVariantGet',
         conf=read_conf)
 
 
@@ -146,7 +323,7 @@ def test_parquet_variant_try_get_string(spark_tmp_path, v1_enabled_list):
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
 def test_parquet_variant_try_get_integral_targets(spark_tmp_path, field_name, target_type):
     data_path = spark_tmp_path + '/VARIANT_PARQUET'
-    with_cpu_session(lambda spark: _write_variant_parquet(spark, data_path))
+    _with_cpu_variant_session(lambda spark: _write_variant_parquet(spark, data_path))
 
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.parquet(data_path).selectExpr(
@@ -158,7 +335,7 @@ def test_parquet_variant_try_get_integral_targets(spark_tmp_path, field_name, ta
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
 def test_parquet_variant_try_get_nested_object_path(spark_tmp_path):
     data_path = spark_tmp_path + '/VARIANT_PARQUET'
-    with_cpu_session(lambda spark: _write_variant_parquet(spark, data_path))
+    _with_cpu_variant_session(lambda spark: _write_variant_parquet(spark, data_path))
 
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.parquet(data_path).selectExpr(
@@ -182,7 +359,7 @@ def test_parquet_nested_struct_variant_try_get(spark_tmp_path):
           AS source(id, json)
         """).write.mode('overwrite').parquet(data_path)
 
-    with_cpu_session(write_data)
+    _with_cpu_variant_session(write_data)
 
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.parquet(data_path).selectExpr(
@@ -205,7 +382,7 @@ def test_parquet_variant_try_get_null_variant_rows(spark_tmp_path):
           SELECT parse_json('{"x":42}') AS v
         """).write.mode('overwrite').parquet(data_path)
 
-    with_cpu_session(write_data)
+    _with_cpu_variant_session(write_data)
 
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.parquet(data_path).selectExpr(
@@ -228,7 +405,7 @@ def test_parquet_variant_try_get_null_and_missing_fields(spark_tmp_path):
           SELECT parse_json('{"x":7}') AS v
         """).write.mode('overwrite').parquet(data_path)
 
-    with_cpu_session(write_data)
+    _with_cpu_variant_session(write_data)
 
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.parquet(data_path).selectExpr(
@@ -251,12 +428,14 @@ def test_parquet_variant_try_get_integral_boundaries(spark_tmp_path):
             '"imin":-2147483648,"imax":2147483647,' ||
             '"lmin":-9223372036854775808,"lmax":9223372036854775807,' ||
             '"byte_overflow":128,"short_overflow":32768,' ||
-            '"int_overflow":2147483648}') AS v
+            '"int_overflow":2147483648,' ||
+            '"byte_underflow":-129,"short_underflow":-32769,' ||
+            '"int_underflow":-2147483649}') AS v
         """).write.mode('overwrite').parquet(data_path)
 
-    with_cpu_session(write_data)
+    _with_cpu_variant_session(write_data)
 
-    assert_gpu_and_cpu_are_equal_collect(
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.read.parquet(data_path).selectExpr(
             "try_variant_get(v, '$.bmin', 'tinyint') AS bmin",
             "try_variant_get(v, '$.bmin', 'int') AS bmin_as_int",
@@ -273,7 +452,11 @@ def test_parquet_variant_try_get_integral_boundaries(spark_tmp_path):
             "try_variant_get(v, '$.lmax', 'bigint') AS lmax",
             "try_variant_get(v, '$.byte_overflow', 'tinyint') AS byte_overflow",
             "try_variant_get(v, '$.short_overflow', 'smallint') AS short_overflow",
-            "try_variant_get(v, '$.int_overflow', 'int') AS int_overflow"),
+            "try_variant_get(v, '$.int_overflow', 'int') AS int_overflow",
+            "try_variant_get(v, '$.byte_underflow', 'tinyint') AS byte_underflow",
+            "try_variant_get(v, '$.short_underflow', 'smallint') AS short_underflow",
+            "try_variant_get(v, '$.int_underflow', 'int') AS int_underflow"),
+        exist_classes='GpuVariantGet',
         conf=_variant_parquet_conf)
 
 
@@ -282,7 +465,7 @@ def test_parquet_variant_try_get_integral_boundaries(spark_tmp_path):
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
 def test_parquet_variant_pass_through_filter_project(spark_tmp_path):
     data_path = spark_tmp_path + '/VARIANT_PASS_THROUGH_PARQUET'
-    with_cpu_session(lambda spark: _write_variant_parquet(spark, data_path))
+    _with_cpu_variant_session(lambda spark: _write_variant_parquet(spark, data_path))
 
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.parquet(data_path)
@@ -300,7 +483,7 @@ def test_parquet_variant_pass_through_filter_project(spark_tmp_path):
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
 def test_parquet_variant_try_get_direct_filter(spark_tmp_path):
     data_path = spark_tmp_path + '/VARIANT_FILTER_PARQUET'
-    with_cpu_session(lambda spark: _write_variant_parquet(spark, data_path))
+    _with_cpu_variant_session(lambda spark: _write_variant_parquet(spark, data_path))
 
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.parquet(data_path)
@@ -315,7 +498,7 @@ def test_parquet_variant_try_get_direct_filter(spark_tmp_path):
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
 def test_parquet_variant_try_get_aggregate(spark_tmp_path):
     data_path = spark_tmp_path + '/VARIANT_AGGREGATE_PARQUET'
-    with_cpu_session(lambda spark: _write_variant_parquet(spark, data_path))
+    _with_cpu_variant_session(lambda spark: _write_variant_parquet(spark, data_path))
 
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.parquet(data_path).selectExpr(
@@ -324,20 +507,21 @@ def test_parquet_variant_try_get_aggregate(spark_tmp_path):
 
 
 @incompat
+@ignore_order(local=True)
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
 def test_parquet_variant_try_get_heterogeneous_values(spark_tmp_path):
     data_path = spark_tmp_path + '/VARIANT_HETEROGENEOUS_PARQUET'
-    with_cpu_session(lambda spark: _write_heterogeneous_variant_parquet(spark, data_path))
+    _with_cpu_variant_session(lambda spark: _write_heterogeneous_variant_parquet(spark, data_path))
 
-    assert_gpu_and_cpu_are_equal_collect(
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.read.parquet(data_path).selectExpr(
             "id",
             "try_variant_get(v, '$.x', 'tinyint') AS byte_value",
             "try_variant_get(v, '$.x', 'smallint') AS short_value",
             "try_variant_get(v, '$.x', 'int') AS int_value",
             "try_variant_get(v, '$.x', 'bigint') AS long_value",
-            "try_variant_get(v, '$.x', 'string') AS string_value")
-            .orderBy("id"),
+            "try_variant_get(v, '$.x', 'string') AS string_value"),
+        exist_classes='GpuVariantGet',
         conf=_variant_parquet_conf)
 
 
@@ -345,7 +529,7 @@ def test_parquet_variant_try_get_heterogeneous_values(spark_tmp_path):
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
 def test_parquet_variant_try_get_before_shuffle(spark_tmp_path):
     data_path = spark_tmp_path + '/VARIANT_SHUFFLE_PARQUET'
-    with_cpu_session(lambda spark: _write_variant_parquet(spark, data_path))
+    _with_cpu_variant_session(lambda spark: _write_variant_parquet(spark, data_path))
 
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.parquet(data_path).selectExpr(
@@ -359,7 +543,7 @@ def test_parquet_variant_try_get_before_shuffle(spark_tmp_path):
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
 def test_parquet_variant_if(spark_tmp_path):
     data_path = spark_tmp_path + '/VARIANT_IF_PARQUET'
-    with_cpu_session(lambda spark: _write_variant_if_parquet(spark, data_path))
+    _with_cpu_variant_session(lambda spark: _write_variant_if_parquet(spark, data_path))
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.read.parquet(data_path)
@@ -372,18 +556,27 @@ def test_parquet_variant_if(spark_tmp_path):
         conf=_variant_parquet_conf)
 
 
-@allow_non_gpu('ProjectExec', 'VariantGet')
 @incompat
+@pytest.mark.parametrize('v1_enabled_list', ['parquet', ''], ids=['v1', 'v2'])
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
-def test_variant_try_get_array_path_falls_back(spark_tmp_path):
-    data_path = spark_tmp_path + '/VARIANT_ARRAY_PATH_FALLBACK_PARQUET'
-    with_cpu_session(lambda spark: _write_variant_parquet(spark, data_path))
+def test_parquet_variant_try_get_array_paths(spark_tmp_path, v1_enabled_list):
+    data_path = spark_tmp_path + '/VARIANT_ARRAY_PATH_PARQUET'
+    read_conf = dict(_variant_parquet_conf)
+    read_conf['spark.sql.sources.useV1SourceList'] = v1_enabled_list
+    _with_cpu_variant_session(lambda spark: _write_array_variant_parquet(spark, data_path))
 
-    def do_it(spark):
-        return spark.read.parquet(data_path).selectExpr(
-            "try_variant_get(v, '$.arr[0]', 'int') AS first_value")
-
-    assert_gpu_fallback_collect(do_it, 'VariantGet', conf=_variant_parquet_conf)
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.read.parquet(data_path).selectExpr(
+            'id',
+            "try_variant_get(v, '$.items[0].sku', 'string') AS first_sku",
+            "try_variant_get(v, '$.items[1].qty', 'bigint') AS second_qty",
+            "try_variant_get(v, '$.matrix[0][1]', 'int') AS matrix_value",
+            "try_variant_get(v, '$[0].sku', 'string') AS root_sku",
+            "try_variant_get(v, '$.items[99].sku', 'string') AS out_of_bounds",
+            "try_variant_get(v, '$.items[0][0]', 'int') AS wrong_container")
+            .orderBy('id'),
+        exist_classes='GpuVariantGet',
+        conf=read_conf)
 
 
 @allow_non_gpu('ProjectExec', 'VariantGet')
@@ -391,7 +584,7 @@ def test_variant_try_get_array_path_falls_back(spark_tmp_path):
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
 def test_variant_try_get_non_literal_path_falls_back(spark_tmp_path):
     data_path = spark_tmp_path + '/VARIANT_NON_LITERAL_PATH_FALLBACK_PARQUET'
-    with_cpu_session(lambda spark: _write_variant_with_path_parquet(spark, data_path))
+    _with_cpu_variant_session(lambda spark: _write_variant_with_path_parquet(spark, data_path))
 
     def do_it(spark):
         return spark.read.parquet(data_path).selectExpr(
@@ -405,7 +598,7 @@ def test_variant_try_get_non_literal_path_falls_back(spark_tmp_path):
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
 def test_variant_try_get_quoted_path_falls_back(spark_tmp_path):
     data_path = spark_tmp_path + '/VARIANT_QUOTED_PATH_FALLBACK_PARQUET'
-    with_cpu_session(lambda spark: _write_variant_parquet(spark, data_path))
+    _with_cpu_variant_session(lambda spark: _write_variant_parquet(spark, data_path))
 
     def do_it(spark):
         return spark.read.parquet(data_path).selectExpr(
@@ -419,7 +612,7 @@ def test_variant_try_get_quoted_path_falls_back(spark_tmp_path):
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
 def test_variant_get_strict_mode_falls_back(spark_tmp_path):
     data_path = spark_tmp_path + '/VARIANT_STRICT_MODE_FALLBACK_PARQUET'
-    with_cpu_session(lambda spark: _write_variant_parquet(spark, data_path))
+    _with_cpu_variant_session(lambda spark: _write_variant_parquet(spark, data_path))
 
     def do_it(spark):
         return spark.read.parquet(data_path).selectExpr(
@@ -433,7 +626,7 @@ def test_variant_get_strict_mode_falls_back(spark_tmp_path):
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
 def test_variant_try_get_unsupported_target_type_falls_back(spark_tmp_path):
     data_path = spark_tmp_path + '/VARIANT_TARGET_TYPE_FALLBACK_PARQUET'
-    with_cpu_session(lambda spark: _write_variant_parquet(spark, data_path))
+    _with_cpu_variant_session(lambda spark: _write_variant_parquet(spark, data_path))
 
     def do_it(spark):
         return spark.read.parquet(data_path).selectExpr(
@@ -447,7 +640,7 @@ def test_variant_try_get_unsupported_target_type_falls_back(spark_tmp_path):
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
 def test_variant_try_get_cpu_bridge_disabled_falls_back(spark_tmp_path):
     data_path = spark_tmp_path + '/VARIANT_CPU_BRIDGE_DISABLED_FALLBACK_PARQUET'
-    with_cpu_session(lambda spark: _write_variant_parquet(spark, data_path))
+    _with_cpu_variant_session(lambda spark: _write_variant_parquet(spark, data_path))
 
     def do_it(spark):
         return spark.read.parquet(data_path).selectExpr(

@@ -539,6 +539,8 @@ Some tests require that Apache Iceberg has been configured in the Spark environm
 properly without it. These tests assume Iceberg is not configured and are disabled by default.
 If Spark has been configured to support Iceberg then these tests can be enabled by adding the
 `--iceberg` option to the command.
+Set `EXPECTED_ICEBERG_VERSION` to the exact Iceberg runtime version whenever `--iceberg` is used;
+pytest reports a configuration error when it is missing.
 
 When testing Iceberg package-private access paths, load the local Iceberg runtime jar with
 `ICEBERG_EXTRA_CLASSPATH` instead of `PYSP_TEST_spark_jars` or
@@ -546,6 +548,7 @@ When testing Iceberg package-private access paths, load the local Iceberg runtim
 jars on `spark.driver.extraClassPath` and `spark.executor.extraClassPath`:
 
 ```shell
+EXPECTED_ICEBERG_VERSION=1.10.1 \
 ICEBERG_EXTRA_CLASSPATH=/path/to/iceberg-spark-runtime-3.5_2.12-1.10.1.jar \
 PYSP_TEST_spark_sql_extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
 PYSP_TEST_spark_sql_catalog_spark__catalog=org.apache.iceberg.spark.SparkSessionCatalog \
@@ -607,6 +610,56 @@ Some tests require that Delta Lake has been configured in the Spark environment 
 properly without it. These tests assume Delta Lake is not configured and are disabled by default.
 If Spark has been configured to support Delta Lake then these tests can be enabled by adding the
 `--delta_lake` option to the command.
+
+### Enabling Unity Catalog catalog-managed table tests
+
+`delta_lake_catalog_managed_test.py` covers Delta Lake catalog-managed (catalog-owned) tables
+through an OSS Unity Catalog server. It needs a running catalog server, so it is disabled by
+default and is skipped unless both `--delta_lake` and `--unity_catalog` are passed and
+`DELTA_UC_URI` names a reachable server.
+
+The suite only applies to a narrow, pinned combination: Scala 2.13, Delta Lake 4.2.0, Unity
+Catalog 0.6.0, and Spark 4.0.1 or 4.1.1. The implementation validates the expected 0.6.0
+`UCSingleCatalog` staging shape and falls back if that shape is not recognized.
+This fixture exercises Unity Catalog's pre-Delta-4.3 staging path without an active coordinated
+commit implementation. Server-side planning, coordinated-commit recovery, and failures in the
+catalog REST synchronization step require a newer or fault-injectable catalog harness and are not
+claimed by this suite.
+
+`run_unity_catalog_server.sh` resolves the Unity Catalog jars, starts a server backed by a fake S3
+bucket on local disk, and exports everything the tests need. To run the whole suite in one shot:
+
+```shell
+./integration_tests/run_unity_catalog_server.sh -- \
+  ./integration_tests/run_pyspark_from_build.sh -m unity_catalog --delta_lake --unity_catalog
+```
+
+To keep one server alive across repeated test runs, start it without a command. It stays in the
+foreground and prints an env file to source from a second terminal:
+
+```shell
+./integration_tests/run_unity_catalog_server.sh
+```
+
+`--port`, `--uc-version` and `--refresh` are available; see `--help`. Spark and Scala versions are
+taken from `SPARK_VER`/`SCALA_BINARY_VER` when set and otherwise derived from `$SPARK_HOME`, and
+the resolved classpaths are cached under `integration_tests/target/unity-catalog/`.
+
+No real object store is involved. `CredentialTestFileSystem` maps the fake `s3://test-bucket0`
+bucket onto local disk and asserts that the credentials vended by the catalog reached the
+filesystem, so a path-only Delta log cannot pass, and the RAPIDS S3 reader is disabled because
+that bucket is not a real S3 endpoint. The tests create their own catalog and schema on the server
+and generate all of their own data, so it starts empty and is discarded afterwards.
+
+`jenkins/spark-tests.sh` runs an end-to-end managed-table smoke case in `TEST_MODE=DEFAULT` for
+the supported Spark/Scala matrix. `TEST_MODE=DELTA_LAKE_UC_ONLY` runs the full suite, with its own
+copy of the server launch. The repository exposes that strict full-suite entry point; the external
+CI job configuration must schedule it for both supported Spark versions.
+
+This base catalog-managed-table integration accelerates DELETE, UPDATE, MERGE, and dynamic
+partition overwrite when those operations rewrite data files. If an operation is configured to
+persist deletion vectors, it deliberately falls back to the CPU until the separate persistent-DV
+DML work is integrated and exercised against catalog-managed tables.
 
 ### Enabling large data tests
 Some tests are testing large data which will take a long time. By default, these tests are disabled.

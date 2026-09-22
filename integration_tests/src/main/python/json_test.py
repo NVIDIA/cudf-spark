@@ -1336,7 +1336,6 @@ def test_json_datetime_parsing_fallback_no_datetime(std_input_path, filename, sc
         lambda spark : spark.read.schema(schema).option('enableDateTimeParsingFallback', "true").json(data_path),
         conf=_enable_all_types_conf)
 
-@pytest.mark.skip(reason=str("https://github.com/NVIDIA/spark-rapids/issues/8403"))
 @pytest.mark.parametrize('v1_enabled_list', ["", "json"])
 @pytest.mark.parametrize('col_name', ['K0', 'k0', 'K3', 'k3', 'V0', 'v0'], ids=idfn)
 @ignore_order

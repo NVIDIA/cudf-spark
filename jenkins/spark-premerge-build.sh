@@ -239,12 +239,15 @@ run_iceberg_extra_classpath_tests() {
 
     # Loading Iceberg from extraClassPath creates the app/shim classloader split.
     echo "!!! Running targeted Iceberg extraClassPath tests for Iceberg $iceberg_version"
-    ICEBERG_EXTRA_CLASSPATH="${iceberg_runtime_jar}" \
+    EXPECTED_ICEBERG_VERSION="${iceberg_version}" \
+        ICEBERG_EXTRA_CLASSPATH="${iceberg_runtime_jar}" \
         PYSP_TEST_spark_sql_extensions="org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions" \
         PYSP_TEST_spark_sql_catalog_spark__catalog="org.apache.iceberg.spark.SparkSessionCatalog" \
         PYSP_TEST_spark_sql_catalog_spark__catalog_type="hadoop" \
         PYSP_TEST_spark_sql_catalog_spark__catalog_warehouse="/tmp/spark-warehouse-$RANDOM" \
         TESTS="iceberg/iceberg_test.py::test_iceberg_read_appended_table \
+iceberg/iceberg_test.py::test_iceberg_spj_partition_filter_with_runtime_filter_cpu_fails_gpu_succeeds \
+iceberg/iceberg_test.py::test_iceberg_spj_runtime_filter_with_trailing_join_key \
 iceberg/iceberg_append_test.py::test_insert_into_unpartitioned_table \
 noop_write_test.py" \
         ./integration_tests/run_pyspark_from_build.sh --iceberg
@@ -316,6 +319,18 @@ ci_scala213() {
     # export 'LC_ALL' to set locale with UTF-8 so regular expressions are enabled
     SPARK_HOME=$SPARK_HOME PYTHONPATH=$PYTHONPATH \
         LC_ALL="en_US.UTF-8" TEST="regexp_test.py" ./integration_tests/run_pyspark_from_build.sh
+
+    # Exercise one catalog-managed Delta 4.2 operation in the actual Blossom premerge entrypoint.
+    # TEST_MODE=DELTA_LAKE_UC_ONLY exposes the full operation/failure matrix for external jobs
+    # that must be scheduled separately for Spark 4.0.1 and 4.1.1.
+    MVN="$MVN" SPARK_VER="$SPARK_VER" SCALA_BINARY_VER=2.13 \
+        SPARK_HOME=$SPARK_HOME PYTHONPATH=$PYTHONPATH \
+        TESTS=delta_lake_catalog_managed_test.py \
+        TEST=catalog_managed_ctas_insert_and_deletion_vector_scan \
+        ./integration_tests/run_unity_catalog_server.sh \
+          --run-dir "${WORKSPACE:-${TMPDIR:-/tmp}}" -- \
+          ./integration_tests/run_pyspark_from_build.sh \
+            -m unity_catalog --delta_lake --unity_catalog
 
     # Trigger the RapidsShuffleManager tests for scala 2.13
     rapids_shuffle_smoke_test $SPARK_VER

@@ -37,8 +37,9 @@
 #   - LOCAL_JAR_PATH: Path to local jars if not building from source.
 #   - PLUGIN_JAR: Path to a built spark-rapids plugin jar, the default points to the target directory
 #   - INTEGRATION_TEST_VERSION_OVERRIDE: Overrides the auto-detected shim version.
-#   - ICEBERG_EXTRA_CLASSPATH: Colon- or comma-separated local Iceberg jars to use with
+#   - EXTRA_MAVEN_CLASSPATH: Colon- or comma-separated local jars to use with
 #     spark.driver.extraClassPath and spark.executor.extraClassPath instead of --jars/--packages.
+#     ICEBERG_EXTRA_CLASSPATH is accepted as a deprecated alias.
 #
 # Script Flow:
 #   1. Setup and Checks: Validates environment and detects Spark/Scala versions.
@@ -341,22 +342,25 @@ else
 
     SPARK_TASK_MAXFAILURES=${SPARK_TASK_MAXFAILURES:-1}
 
-    ICEBERG_EXTRA_CLASSPATH_COMMA="${ICEBERG_EXTRA_CLASSPATH//:/,}"
-    if [[ -n "${ICEBERG_EXTRA_CLASSPATH_COMMA}" ]]; then
+    # ICEBERG_EXTRA_CLASSPATH is the original name of this variable, kept working for callers
+    # that have not moved to the format-neutral name yet.
+    EXTRA_MAVEN_CLASSPATH="${EXTRA_MAVEN_CLASSPATH:-${ICEBERG_EXTRA_CLASSPATH}}"
+    EXTRA_MAVEN_CLASSPATH_COMMA="${EXTRA_MAVEN_CLASSPATH//:/,}"
+    if [[ -n "${EXTRA_MAVEN_CLASSPATH_COMMA}" ]]; then
         if [[ -n "${PYSP_TEST_spark_jars_packages}" ]]; then
-            >&2 echo "ICEBERG_EXTRA_CLASSPATH cannot be used with PYSP_TEST_spark_jars_packages."
-            >&2 echo "Use local Iceberg jar paths in ICEBERG_EXTRA_CLASSPATH instead of Maven coordinates."
+            >&2 echo "EXTRA_MAVEN_CLASSPATH cannot be used with PYSP_TEST_spark_jars_packages."
+            >&2 echo "Use local jar paths in EXTRA_MAVEN_CLASSPATH instead of Maven coordinates."
             exit 1
         fi
         if [[ -n "${PYSP_TEST_spark_jars}" ]]; then
-            PYSP_TEST_spark_jars="${PYSP_TEST_spark_jars},${ICEBERG_EXTRA_CLASSPATH_COMMA}"
+            PYSP_TEST_spark_jars="${PYSP_TEST_spark_jars},${EXTRA_MAVEN_CLASSPATH_COMMA}"
         else
-            PYSP_TEST_spark_jars="${ICEBERG_EXTRA_CLASSPATH_COMMA}"
+            PYSP_TEST_spark_jars="${EXTRA_MAVEN_CLASSPATH_COMMA}"
         fi
     fi
 
     if [[ "${PYSP_TEST_spark_shuffle_manager}" =~ "RapidsShuffleManager" ||
-          -n "${ICEBERG_EXTRA_CLASSPATH_COMMA}" ]]; then
+          -n "${EXTRA_MAVEN_CLASSPATH_COMMA}" ]]; then
         # The RAPIDS shuffle manager and Iceberg package-private access tests need the plugin
         # and dependency jars on extraClassPath instead of spark.jars/spark.jars.packages.
         EXTRA_CLASSPATH="${ALL_JARS}"

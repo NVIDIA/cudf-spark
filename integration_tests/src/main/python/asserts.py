@@ -518,6 +518,32 @@ def assert_gpu_fallback_write_sql(write_func,
         jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.endCapture()
 
 
+def collect_plan_nodes(plan):
+    """Flatten a JVM SparkPlan into a list of nodes, parents before children.
+
+    Intended for the gpu_plan_assertion callback of
+    assert_cpu_and_gpu_are_equal_collect_with_capture. This does not descend into
+    AdaptiveSparkPlanExec or QueryStageExec, so a caller that needs the whole tree should
+    disable AQE.
+    """
+    nodes = [plan]
+    children = plan.children().iterator()
+    while children.hasNext():
+        nodes.extend(collect_plan_nodes(children.next()))
+    return nodes
+
+def plan_metric(node, name):
+    """Value of a named metric on a JVM plan node, or None if the node has no such metric.
+
+    Many GPU metrics are only registered at certain values of spark.rapids.sql.metrics.level
+    (numOutputBatches on a non-aggregate exec is DEBUG), so a None here usually means the
+    metrics level is too low rather than that the operator did no work.
+    """
+    metrics = node.metrics()
+    if not metrics.contains(name):
+        return None
+    return metrics.apply(name).value()
+
 def assert_cpu_and_gpu_are_equal_collect_with_capture(func,
         exist_classes='',
         non_exist_classes='',

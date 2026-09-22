@@ -16,8 +16,10 @@
 
 package com.databricks.sql.transaction.tahoe.rapids
 
+import com.databricks.sql.io.skipping.liquid.ClusteredTableUtils
 import com.databricks.sql.transaction.tahoe.{DeltaColumnMapping, DeltaParquetFileFormat}
 import com.databricks.sql.transaction.tahoe.commands.WriteIntoDeltaCommand
+import com.databricks.sql.transaction.tahoe.files.TahoeBatchFileIndex
 import com.databricks.sql.transaction.tahoe.schema.InnerInvariantViolationException
 import com.databricks.sql.transaction.tahoe.stats.{DeltaJobStatisticsTracker,
   StatisticsOnLoadJobTracker}
@@ -28,7 +30,8 @@ import com.nvidia.spark.rapids.delta.RapidsDeltaUtils
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.execution.SparkPlan
-import org.apache.spark.sql.execution.datasources.{BasicWriteJobStatsTracker, GpuWriteFiles}
+import org.apache.spark.sql.execution.datasources.{BasicWriteJobStatsTracker, GpuWriteFiles,
+  HadoopFsRelation, LogicalRelation}
 import org.apache.spark.sql.execution.datasources.v2.rapids.GpuAtomicDeltaWriteContext
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.rapids.{BasicColumnarWriteJobStatsTracker, ColumnarWriteJobStatsTracker,
@@ -124,9 +127,18 @@ class GpuWriteIntoDeltaCommandMeta(
   }
 
   override protected def tagSelfForGpuInternal(): Unit = {
-    if (!GpuAtomicDeltaWriteContext.isActive) {
+    val isNativeOptimize = cmd.query.collectLeaves() match {
+      case Seq(LogicalRelation(HadoopFsRelation(
+          index: TahoeBatchFileIndex, _, _, _, _, _), _, _, _, _, _, _)) =>
+        index.actionType.equalsIgnoreCase("Optimize")
+      case _ => false
+    }
+    val isSupportedNativeOptimize =
+      isNativeOptimize && !ClusteredTableUtils.isSupported(cmd.protocol)
+    if (!GpuAtomicDeltaWriteContext.isActive && !isSupportedNativeOptimize) {
       willNotWorkOnGpu(
-        "DBR WriteIntoDeltaCommand GPU support is limited to atomic CTAS/RTAS")
+        "DBR WriteIntoDeltaCommand GPU support is limited to atomic CTAS/RTAS or " +
+          "native non-clustered OPTIMIZE")
     }
     if (!conf.isDeltaWriteEnabled) {
       willNotWorkOnGpu("Delta Lake output acceleration has been disabled")

@@ -51,7 +51,7 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Spark runtime 2.3 LTS
 		Spark runtime 3.0
 
-*Some hardware may have a minimum driver version greater than R470. Check the GPU spec sheet
+*Some hardware may have a minimum driver version greater than R525. Check the GPU spec sheet
 for your hardware's minimum driver version.
 
 *For EMR support, please refer to the
@@ -142,7 +142,7 @@ The output of signature verify:
 v26.08.0 includes the following updates:
 * Added support for Apache Spark 3.5.9, 4.0.3, 4.0.4, 4.1.2, 4.1.3, and 4.2.0; Databricks 13.3 ML LTS is no longer supported ([#15286](https://github.com/NVIDIA/cudf-spark/pull/15286), [#15151](https://github.com/NVIDIA/cudf-spark/pull/15151), [#15313](https://github.com/NVIDIA/cudf-spark/pull/15313), [#15071](https://github.com/NVIDIA/cudf-spark/pull/15071), [#15310](https://github.com/NVIDIA/cudf-spark/pull/15310), [#15279](https://github.com/NVIDIA/cudf-spark/pull/15279), [#15276](https://github.com/NVIDIA/cudf-spark/pull/15276))
 * Added full CPU/GPU bridge support and re-enabled the accelerated columnar-to-row path, allowing unsupported portions of a query to fall back while surrounding operators remain accelerated ([#14132](https://github.com/NVIDIA/cudf-spark/pull/14132), [#14651](https://github.com/NVIDIA/cudf-spark/pull/14651))
-* Added Iceberg 1.11 support for Spark 4.x, accelerated incremental append scans, optimized S3 Parquet footer reads, and exposed Parquet writer dictionary controls ([#14881](https://github.com/NVIDIA/cudf-spark/pull/14881), [#14882](https://github.com/NVIDIA/cudf-spark/pull/14882), [#14883](https://github.com/NVIDIA/cudf-spark/pull/14883), [#15174](https://github.com/NVIDIA/cudf-spark/pull/15174), [#15384](https://github.com/NVIDIA/cudf-spark/pull/15384), [#14878](https://github.com/NVIDIA/cudf-spark/pull/14878))
+* Added Iceberg 1.11 support for Spark 4.0.x starting with 4.0.2, and Spark 4.1.x, accelerated incremental append scans, optimized S3 Parquet footer reads, and exposed Parquet writer dictionary controls ([#14881](https://github.com/NVIDIA/cudf-spark/pull/14881), [#14882](https://github.com/NVIDIA/cudf-spark/pull/14882), [#14883](https://github.com/NVIDIA/cudf-spark/pull/14883), [#15174](https://github.com/NVIDIA/cudf-spark/pull/15174), [#15384](https://github.com/NVIDIA/cudf-spark/pull/15384), [#14878](https://github.com/NVIDIA/cudf-spark/pull/14878))
 * Expanded GPU SQL support with default-comparator `array_sort`, array and map inputs for `array_aggregate`, nested map/array output for `from_json`, multiple ORDER BY columns in RANGE windows, and additional regex compatibility fixes ([#15108](https://github.com/NVIDIA/cudf-spark/pull/15108), [#15149](https://github.com/NVIDIA/cudf-spark/pull/15149), [#15134](https://github.com/NVIDIA/cudf-spark/pull/15134), [#14961](https://github.com/NVIDIA/cudf-spark/pull/14961), [#14862](https://github.com/NVIDIA/cudf-spark/pull/14862))
 * Expanded Delta Lake support on Databricks 17.3 with liquid clustering and CTAS/RTAS, and improved OSS Delta deletion-vector reads and GPU MERGE commit summaries ([#15278](https://github.com/NVIDIA/cudf-spark/pull/15278), [#15320](https://github.com/NVIDIA/cudf-spark/pull/15320), [#15368](https://github.com/NVIDIA/cudf-spark/pull/15368), [#15429](https://github.com/NVIDIA/cudf-spark/pull/15429))
 * Improved shuffle, spill, and memory reliability by auto-configuring the shuffle manager, preventing multithreaded shuffle-merger and RMM pool-wait deadlocks, and hardening handling of batches and spill files larger than 2 GiB ([#15285](https://github.com/NVIDIA/cudf-spark/pull/15285), [#15208](https://github.com/NVIDIA/cudf-spark/pull/15208), [#15104](https://github.com/NVIDIA/cudf-spark/pull/15104), [#14967](https://github.com/NVIDIA/cudf-spark/pull/14967), [#15327](https://github.com/NVIDIA/cudf-spark/pull/15327))
@@ -197,7 +197,7 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Spark runtime 2.3 LTS
 		Spark runtime 3.0
 
-*Some hardware may have a minimum driver version greater than R470. Check the GPU spec sheet
+*Some hardware may have a minimum driver version greater than R525. Check the GPU spec sheet
 for your hardware's minimum driver version.
 
 *For EMR support, please refer to the
@@ -306,7 +306,7 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Spark runtime 2.3 LTS
 		Spark runtime 3.0
 
-*Some hardware may have a minimum driver version greater than R470. Check the GPU spec sheet
+*Some hardware may have a minimum driver version greater than R525. Check the GPU spec sheet
 for your hardware's minimum driver version.
 
 *For EMR support, please refer to the
@@ -410,7 +410,7 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Spark runtime 2.1
 		Spark runtime 2.2
 
-*Some hardware may have a minimum driver version greater than R470. Check the GPU spec sheet
+*Some hardware may have a minimum driver version greater than R525. Check the GPU spec sheet
 for your hardware's minimum driver version.
 
 *For EMR support, please refer to the
@@ -524,7 +524,7 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Spark runtime 2.1
 		Spark runtime 2.2
 
-*Some hardware may have a minimum driver version greater than R470. Check the GPU spec sheet
+*Some hardware may have a minimum driver version greater than R525. Check the GPU spec sheet
 for your hardware's minimum driver version.
 
 *For EMR support, please refer to the
@@ -633,7 +633,7 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Spark runtime 2.1
 		Spark runtime 2.2
 
-*Some hardware may have a minimum driver version greater than R470. Check the GPU spec sheet
+*Some hardware may have a minimum driver version greater than R525. Check the GPU spec sheet
 for your hardware's minimum driver version.
 
 *For EMR support, please refer to the
@@ -736,7 +736,7 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Spark runtime 2.1
 		Spark runtime 2.2
 
-*Some hardware may have a minimum driver version greater than R470. Check the GPU spec sheet
+*Some hardware may have a minimum driver version greater than R525. Check the GPU spec sheet
 for your hardware's minimum driver version.
 
 *For Cloudera and EMR support, please refer to the
@@ -843,7 +843,7 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Spark runtime 2.1
 		Spark runtime 2.2
 
-*Some hardware may have a minimum driver version greater than R470. Check the GPU spec sheet
+*Some hardware may have a minimum driver version greater than R525. Check the GPU spec sheet
 for your hardware's minimum driver version.
 
 *For Cloudera and EMR support, please refer to the
@@ -934,7 +934,7 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Spark runtime 2.1
 		Spark runtime 2.2
 
-*Some hardware may have a minimum driver version greater than R470. Check the GPU spec sheet
+*Some hardware may have a minimum driver version greater than R525. Check the GPU spec sheet
 for your hardware's minimum driver version.
 
 *For Cloudera and EMR support, please refer to the
@@ -1020,7 +1020,7 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Spark runtime 2.1
 		Spark runtime 2.2
 
-*Some hardware may have a minimum driver version greater than R470. Check the GPU spec sheet
+*Some hardware may have a minimum driver version greater than R525. Check the GPU spec sheet
 for your hardware's minimum driver version.
 
 *For Cloudera and EMR support, please refer to the
@@ -1109,7 +1109,7 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Spark runtime 2.1
 		Spark runtime 2.2
 
-*Some hardware may have a minimum driver version greater than R470. Check the GPU spec sheet
+*Some hardware may have a minimum driver version greater than R525. Check the GPU spec sheet
 for your hardware's minimum driver version.
 
 *For Cloudera and EMR support, please refer to the
@@ -1200,7 +1200,7 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 		Spark runtime 2.1
 		Spark runtime 2.2
 
-*Some hardware may have a minimum driver version greater than R470. Check the GPU spec sheet
+*Some hardware may have a minimum driver version greater than R525. Check the GPU spec sheet
 for your hardware's minimum driver version.
 
 *For Cloudera and EMR support, please refer to the

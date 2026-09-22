@@ -92,7 +92,7 @@ case class GpuBatchScanExec(
     }
 
     if (dataSourceFilters.nonEmpty) {
-      val originalPartitioning = outputPartitioning
+      val originalPartitioning = super.outputPartitioning
 
       // the cast is safe as runtime filters are only assigned if the scan can be filtered
       val filterableScan = scan.asInstanceOf[SupportsRuntimeV2Filtering]

@@ -352,7 +352,8 @@ run_delta_lake_tests() {
       # Delta Lake 1.2+ moved LogStore implementations into delta-storage.
       # All versions tested here are 2.0+, so include it explicitly.
       DELTA_JAR="${DELTA_MAIN_JAR},io.delta:delta-storage:$v"
-      HOST_NAME=$PROJECT_REPO_HOST \
+      env \
+        HOST_NAME=$PROJECT_REPO_HOST \
         PYSP_TEST_spark_jars_packages=${DELTA_JAR} \
         PYSP_TEST_spark_jars_ivySettings="${WORKSPACE}/jenkins/ivysettings.xml" \
         PYSP_TEST_spark_sql_extensions="io.delta.sql.DeltaSparkSessionExtension" \
@@ -362,11 +363,72 @@ run_delta_lake_tests() {
   fi
 }
 
+# Delta Lake catalog-managed table tests against an OSS Unity Catalog server.
+#
+# This is deliberately a separate invocation from run_delta_lake_tests: the Unity Catalog
+# connector and its dependency tree only belong on the classpath of the tests that need it.
+# The server itself runs in its own JVM, so unitycatalog-server (Armeria, Vert.x, Hibernate,
+# Spring, ...) never reaches Spark at all.
+run_delta_lake_uc_tests() {
+  local delta_version='4.2.0'
+  local test_filter=${1:-}
+
+  # These conditions mirror the Delta Lake 4.2.0 rows of run_delta_lake_tests above: that Delta
+  # version is only exercised on Scala 2.13 with Spark 4.0.1 or 4.1.1. They are repeated rather
+  # than read from DELTA_LAKE_VERSIONS because that variable is assigned inside
+  # run_delta_lake_tests, which TEST_MODE=DELTA_LAKE_UC_ONLY never runs. run_unity_catalog_server.sh
+  # rejects the same combinations outright; CI skips them instead.
+  if [[ "$SCALA_BINARY_VER" != "2.13" ]]; then
+    if [[ "$TEST_MODE" == "DELTA_LAKE_UC_ONLY" ]]; then
+      echo "!!!! Unity Catalog tests require Scala 2.13, found $SCALA_BINARY_VER"
+      return 1
+    fi
+    echo "!!!! Skipping Unity Catalog tests. They require Scala 2.13, found $SCALA_BINARY_VER"
+    return 0
+  fi
+  if [[ "$SPARK_VER" != "4.0.1" && "$SPARK_VER" != "4.1.1" ]]; then
+    if [[ "$TEST_MODE" == "DELTA_LAKE_UC_ONLY" ]]; then
+      echo "!!!! Delta Lake $delta_version Unity Catalog tests require Spark 4.0.1 or 4.1.1," \
+        "found $SPARK_VER"
+      return 1
+    fi
+    echo "!!!! Skipping Unity Catalog tests. Delta Lake $delta_version is only tested against" \
+      "Spark 4.0.1 and 4.1.1, found $SPARK_VER"
+    return 0
+  fi
+
+  # run_unity_catalog_server.sh owns the jar resolution, the server lifecycle and every setting
+  # the tests need, so it is shared with local runs instead of being duplicated here. The scratch
+  # directory is placed under ARTF_ROOT so the server log and the fake S3 tree stay in the
+  # workspace. UNITY_CATALOG_VERSION and UNITY_CATALOG_PORT are read by the script directly.
+  env \
+    HOST_NAME=$PROJECT_REPO_HOST \
+    TESTS=delta_lake_catalog_managed_test.py \
+    TEST="$test_filter" \
+    ./run_unity_catalog_server.sh --run-dir "$ARTF_ROOT" -- \
+      ./run_pyspark_from_build.sh -m unity_catalog --delta_lake --unity_catalog
+}
+
 run_iceberg_tests() {
   # get the major/minor version of Spark
   ICEBERG_SPARK_VER=$(echo "$SPARK_VER" | cut -d. -f1,2)
   # get the patch version of Spark
   SPARK_PATCH_VER=$(echo "$SPARK_VER" | cut -d. -f3)
+
+  # Spark 3.5 validates every optimizer rule's output when the spark.testing JVM property is
+  # present. Iceberg V3 COW rewrites temporarily produce an unresolved ReplaceData plan while
+  # GroupBasedRowLevelOperationScanPlanning rewrites row-lineage columns, so the test-only
+  # validation fails CPU setup before physical planning. Because spark.testing is presence-based
+  # (even false enables it) and cannot be disabled through SparkSession configuration, omit it for
+  # Spark 3.5 Iceberg test subprocesses. Spark 4 uses native row-lineage metadata projections and
+  # does not have this issue.
+  # See https://github.com/NVIDIA/cudf-spark/issues/15680
+  # https://github.com/NVIDIA/cudf-spark/issues/15950
+  # and https://github.com/apache/iceberg/issues/18131.
+  if [[ "$ICEBERG_SPARK_VER" == "3.5" ]]; then
+    local SPARK_TESTING_ENABLED=0
+    export SPARK_TESTING_ENABLED
+  fi
 
   if [[ "$ICEBERG_SPARK_VER" != "3.5" && "$ICEBERG_SPARK_VER" != "4.0" \
         && "$ICEBERG_SPARK_VER" != "4.1" ]]; then
@@ -574,6 +636,7 @@ run_non_utc_time_zone_tests() {
 # TEST_MODE
 # - DEFAULT: all tests except cudf_udf tests
 # - DELTA_LAKE_ONLY: Delta Lake tests only
+# - DELTA_LAKE_UC_ONLY: Delta Lake catalog-managed table tests against an OSS Unity Catalog server
 # - ICEBERG_ONLY: iceberg tests only
 # - ICEBERG_S3TABLES_ONLY: iceberg s3tables tests only
 # - ICEBERG_REST_CATALOG_ONLY: iceberg rest catalog tests only
@@ -622,9 +685,20 @@ if [[ $TEST_MODE == "DEFAULT" ]]; then
     ./run_pyspark_from_build.sh -k cache_test
 fi
 
-# Delta Lake tests
+# Delta Lake tests. DEFAULT runs one end-to-end managed-table smoke for supported Spark/Scala
+# combinations in jobs that use this script. Blossom premerge runs the same smoke from
+# spark-premerge-build.sh. DELTA_LAKE_UC_ONLY is the strict full-suite entry point that external
+# jobs must schedule separately for Spark 4.0.1 and 4.1.1.
 if [[ "$TEST_MODE" == "DEFAULT" || "$TEST_MODE" == "DELTA_LAKE_ONLY" ]]; then
   run_delta_lake_tests
+fi
+if [[ "$TEST_MODE" == "DEFAULT" ]]; then
+  run_delta_lake_uc_tests "catalog_managed_ctas_insert_and_deletion_vector_scan"
+fi
+
+# Delta Lake catalog-managed table tests
+if [[ "$TEST_MODE" == "DELTA_LAKE_UC_ONLY" ]]; then
+  run_delta_lake_uc_tests
 fi
 
 # Iceberg tests
