@@ -46,7 +46,6 @@ import org.apache.spark.sql.delta.DeltaParquetFileFormat._
 import org.apache.spark.sql.delta.actions.{Metadata, Protocol}
 import org.apache.spark.sql.delta.schema.SchemaMergingUtils
 import org.apache.spark.sql.delta.sources.DeltaSQLConf
-import org.apache.spark.sql.execution.QueryExecutionException
 import org.apache.spark.sql.execution.datasources.PartitionedFile
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.GpuFileSourceScanExec
@@ -54,6 +53,20 @@ import org.apache.spark.sql.sources._
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.util.SerializableConfiguration
+
+object GpuDeltaParquetFileFormatBase2 {
+  private val GPU_ROW_INDEX_METADATA_KEY = "rapids.delta.internalRowIndex"
+
+  val GPU_ROW_INDEX_STRUCT_FIELD: StructField = ROW_INDEX_STRUCT_FIELD.copy(
+    metadata = new MetadataBuilder().putBoolean(GPU_ROW_INDEX_METADATA_KEY, true).build())
+
+  private[common] def isGpuRowIndexColumn(field: StructField): Boolean =
+    field.metadata.contains(GPU_ROW_INDEX_METADATA_KEY) &&
+      field.metadata.getBoolean(GPU_ROW_INDEX_METADATA_KEY)
+
+  private[common] def findGpuRowIndexColumn(schema: StructType): Int =
+    schema.fields.indexWhere(isGpuRowIndexColumn)
+}
 
 /**
  * This is the version 2 of the Delta Parquet file format implementation, which uses the
@@ -1451,14 +1464,37 @@ case class DeltaParquetTableReader(
   override protected def additionalResources: Seq[AutoCloseable] =
     dvInfos.map(_.serializedBitmap)
 
+  private val rowIndexColumn =
+    GpuDeltaParquetFileFormatBase2.findGpuRowIndexColumn(readDataSchema)
+
   override protected def postProcessChunk(chunk: Table): Table = {
-    // The cuDF reader prepends an extra index column in the output table.
-    // We need to drop it before returning as we don't use it.
-    RapidsDeletionVectors.dropFirstColumn(chunk)
+    // Keep the prepended cuDF physical index through schema evolution when Delta requests it.
+    if (rowIndexColumn >= 0) chunk else RapidsDeletionVectors.dropFirstColumn(chunk)
+  }
+
+  override protected def evolveSchemaAndClose(table: Table): Table = {
+    if (rowIndexColumn < 0) {
+      super.evolveSchemaAndClose(table)
+    } else {
+      withResource(MakeParquetTableWithDVProducer.castPhysicalRowIndex(table)) { physicalRowIndex =>
+        val dataTable = RapidsDeletionVectors.dropFirstColumn(table)
+        val evolvedTable = super.evolveSchemaAndClose(dataTable)
+        RapidsDeletionVectors.replaceColumnAndClose(
+          evolvedTable, rowIndexColumn, physicalRowIndex)
+      }
+    }
   }
 }
 
 object MakeParquetTableWithDVProducer extends Logging {
+  private[common] def castPhysicalRowIndex(table: Table): ColumnVector = {
+    closeOnExcept(table) { _ =>
+      RmmRapidsRetryIterator.withRetryNoSplit[ColumnVector] {
+        table.getColumn(0).castTo(DType.INT64)
+      }
+    }
+  }
+
   def apply(
       useChunkedReader: Boolean,
       maxChunkedReaderMemoryUsageSizeBytes: Long,
@@ -1516,24 +1552,36 @@ object MakeParquetTableWithDVProducer extends Logging {
           }
         }
       }
-      // The cuDF reader prepends an extra index column in the output table.
-      // We need to drop it before returning as we don't use it.
-      val tableWithoutIndex = RapidsDeletionVectors.dropFirstColumn(table)
-      closeOnExcept(tableWithoutIndex) { _ =>
-        GpuParquetScan.throwIfRebaseNeededInExceptionMode(tableWithoutIndex, dateRebaseMode,
-          timestampRebaseMode)
-        if (readDataSchema.length < tableWithoutIndex.getNumberOfColumns) {
-          throw new QueryExecutionException(s"Expected ${readDataSchema.length} columns " +
-            s"but read ${tableWithoutIndex.getNumberOfColumns} from ${splits.mkString("; ")}")
-        }
+      // Preserve cuDF physical row indexes only for Delta internal row-index scans.
+      val rowIndexColumn =
+        GpuDeltaParquetFileFormatBase2.findGpuRowIndexColumn(readDataSchema)
+      val physicalRowIndex = if (rowIndexColumn >= 0) {
+        Some(castPhysicalRowIndex(table))
+      } else {
+        None
       }
-      metrics(NUM_OUTPUT_BATCHES) += 1
-      val evolvedSchemaTable = ParquetSchemaUtils.evolveSchemaIfNeededAndClose(tableWithoutIndex,
-        clippedParquetSchema, readDataSchema, isSchemaCaseSensitive, useFieldId)
-      val outputTable = GpuParquetScan.rebaseDateTime(evolvedSchemaTable, dateRebaseMode,
-        timestampRebaseMode)
-      GpuMetric.recordOutputBatchBytes(outputTable, metrics.get(GPU_OUTPUT_BATCH_BYTES))
-      new SingleGpuDataProducer(outputTable)
+      withResource(physicalRowIndex) { _ =>
+        val tableWithoutIndex = RapidsDeletionVectors.dropFirstColumn(table)
+        closeOnExcept(tableWithoutIndex) { _ =>
+          GpuParquetScan.throwIfRebaseNeededInExceptionMode(tableWithoutIndex, dateRebaseMode,
+            timestampRebaseMode)
+          if (readDataSchema.length < tableWithoutIndex.getNumberOfColumns) {
+            throw new org.apache.spark.sql.execution.QueryExecutionException(
+              s"Expected ${readDataSchema.length} columns " +
+              s"but read ${tableWithoutIndex.getNumberOfColumns} from ${splits.mkString("; ")}")
+          }
+        }
+        metrics(NUM_OUTPUT_BATCHES) += 1
+        val evolvedSchemaTable = ParquetSchemaUtils.evolveSchemaIfNeededAndClose(tableWithoutIndex,
+          clippedParquetSchema, readDataSchema, isSchemaCaseSensitive, useFieldId)
+        val tableWithRowIndex = physicalRowIndex.map { index =>
+          RapidsDeletionVectors.replaceColumnAndClose(evolvedSchemaTable, rowIndexColumn, index)
+        }.getOrElse(evolvedSchemaTable)
+        val outputTable = GpuParquetScan.rebaseDateTime(tableWithRowIndex, dateRebaseMode,
+          timestampRebaseMode)
+        GpuMetric.recordOutputBatchBytes(outputTable, metrics.get(GPU_OUTPUT_BATCH_BYTES))
+        new SingleGpuDataProducer(outputTable)
+      }
     }
   }
 }

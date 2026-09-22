@@ -18,12 +18,14 @@ from pyspark.sql.functions import array_contains, broadcast, col, lit
 from pyspark.sql.types import *
 from asserts import (assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_row_counts_equal,
                      assert_gpu_fallback_collect, assert_cpu_and_gpu_are_equal_collect_with_capture,
-                     assert_cpu_and_gpu_are_equal_sql_with_capture, assert_gpu_and_cpu_are_equal_sql)
+                     assert_cpu_and_gpu_are_equal_sql_with_capture, assert_gpu_and_cpu_are_equal_sql,
+                     collect_plan_nodes)
 from conftest import is_dataproc_runtime, is_dataproc_serverless_runtime, is_emr_runtime
 from data_gen import *
 from marks import (allow_non_gpu, disable_ansi_mode, ignore_order, incompat,
                    validate_execs_in_gpu_plan)
-from spark_session import with_cpu_session, is_databricks_runtime, is_spark_400_or_later, is_spark_411_or_later
+from spark_session import (with_cpu_session, is_databricks_runtime, is_spark_400_or_later,
+                           is_spark_411_or_later, spark_version)
 from src.main.python.spark_session import with_gpu_session
 
 # mark this test as ci_1 for mvn verify sanity check in pre-merge CI
@@ -419,6 +421,55 @@ def test_broadcast_join_null_aware_anti(rows):
         table_name='null_aware_anti_table',
         exist_classes='GpuBroadcastHashJoinExec',
         conf=conf)
+
+
+@pytest.mark.skipif(spark_version() != '4.2.0',
+                    reason='Spark 4.2.0 alone applies the general broadcast threshold to NAAJ')
+@allow_non_gpu('BroadcastExchangeExec', 'BroadcastNestedLoopJoinExec',
+               'EqualTo', 'IsNull', 'Or')
+@ignore_order(local=True)
+def test_broadcast_join_null_aware_anti_build_left_fallback():
+    def do_join(spark):
+        spark.range(101, 102).selectExpr('id AS key') \
+            .createOrReplaceTempView('naaj_small_left')
+        # Keep the key nullable so Spark plans a null-aware anti join, but use a condition that
+        # does not produce a null so the result also verifies an unmatched row is preserved.
+        spark.range(100).selectExpr(
+            'IF(id = 200, CAST(NULL AS BIGINT), id) AS key') \
+            .createOrReplaceTempView('naaj_large_right')
+        return spark.sql(
+            'SELECT * FROM naaj_small_left '
+            'WHERE key NOT IN (SELECT key FROM naaj_large_right)')
+
+    def assert_build_left_fallback(cpu_plan, gpu_plan):
+        for plan_name, plan in [('CPU', cpu_plan), ('GPU', gpu_plan)]:
+            joins = [
+                node for node in collect_plan_nodes(plan)
+                if node.getClass().getSimpleName() == 'BroadcastNestedLoopJoinExec'
+            ]
+            assert len(joins) == 1, \
+                f'Expected one {plan_name} BroadcastNestedLoopJoinExec, found {len(joins)}:\n{plan}'
+            join = joins[0]
+            assert join.buildSide().toString() == 'BuildLeft', \
+                f'Expected {plan_name} NAAJ fallback to build left:\n{plan}'
+            assert join.joinType().toString() == 'LeftAnti', \
+                f'Expected {plan_name} NAAJ fallback to be LeftAnti:\n{plan}'
+
+    # Spark estimates the two inputs at 8 and 800 bytes. Keeping only the left side below this
+    # threshold produces the Spark 4.2.0-specific BuildLeft nested-loop fallback.
+    conf = {
+        'spark.sql.adaptive.enabled': 'false',
+        'spark.sql.autoBroadcastJoinThreshold': '100',
+        'spark.sql.optimizeNullAwareAntiJoin': 'true',
+    }
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_join,
+        exist_classes='BroadcastNestedLoopJoinExec',
+        non_exist_classes='GpuBroadcastNestedLoopJoinExec',
+        conf=conf,
+        require_non_empty=True,
+        gpu_plan_assertion=assert_build_left_fallback)
+
 
 @ignore_order(local=True)
 def test_broadcast_nested_loop_join_degen_left_outer_build_no_columns():

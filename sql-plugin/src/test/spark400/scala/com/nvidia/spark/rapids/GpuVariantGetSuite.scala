@@ -89,13 +89,15 @@ class GpuVariantGetSuite extends AnyFunSuite {
   }
 
   test("supported Variant paths") {
-    Seq("$.field", "$._field", "$.a1.b_2").foreach { path =>
+    Seq("$.field", "$._field", "$.a1.b_2", "$.items[0].name", "$[0]", "$[0][01]",
+      "$[2147483647]").foreach { path =>
       assert(GpuVariantGet.parseSupportedPath(path).contains(path))
     }
   }
 
   test("unsupported Variant paths") {
-    Seq("$", "$.items[0]", "$['field']", "$.bad-field", "field", "$.a.", "$.1a")
+    Seq("$", "$['field']", "$[\"field\"]", "$.bad-field", "field", "$.a.", "$.1a",
+      "$[-1]", "$[+1]", "$[*]", "$[]", "$[2147483648]")
         .foreach { path =>
           assert(GpuVariantGet.parseSupportedPath(path).isEmpty)
         }

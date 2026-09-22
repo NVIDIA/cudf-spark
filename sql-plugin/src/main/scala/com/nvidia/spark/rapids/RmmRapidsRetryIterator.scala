@@ -836,23 +836,32 @@ object RmmRapidsRetryIterator extends Logging {
             s"GPU OutOfMemory: a batch of $toSplitRows cannot be split!")
         }
         val (firstHalf, secondHalf) = withResource(spillable.getColumnarBatch()) { src =>
-          withResource(GpuColumnVector.from(src)) { tbl =>
-            val splitIx = (tbl.getRowCount / 2).toInt
-            withResource(tbl.contiguousSplit(splitIx)) { cts =>
-              val tables = cts.map(_.getTable)
-              withResource(tables.safeMap(GpuColumnVector.from(_, spillable.dataTypes))) {
-                batches =>
-                  val spillables = batches.safeMap { b =>
-                    SpillableColumnarBatch(
-                      GpuColumnVector.incRefCounts(b),
-                      SpillPriorities.ACTIVE_BATCHING_PRIORITY)
-                  }
-                  closeOnExcept(spillables) { _ =>
-                    require(spillables.length == 2,
-                      s"Contiguous split returned ${spillables.length} tables but two were " +
-                          s"expected!")
-                  }
-                  (spillables.head, spillables.last)
+          if (src.numCols() == 0) {
+            // A rows-only batch carries nothing but its row count, and a cudf table needs at
+            // least one column to hold it, so cut the count instead. The cut matches the
+            // contiguousSplit below so both paths halve a batch the same way.
+            val splitIx = toSplitRows / 2
+            (new JustRowsColumnarBatch(splitIx),
+                new JustRowsColumnarBatch(toSplitRows - splitIx))
+          } else {
+            withResource(GpuColumnVector.from(src)) { tbl =>
+              val splitIx = (tbl.getRowCount / 2).toInt
+              withResource(tbl.contiguousSplit(splitIx)) { cts =>
+                val tables = cts.map(_.getTable)
+                withResource(tables.safeMap(GpuColumnVector.from(_, spillable.dataTypes))) {
+                  batches =>
+                    val spillables = batches.safeMap { b =>
+                      SpillableColumnarBatch(
+                        GpuColumnVector.incRefCounts(b),
+                        SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+                    }
+                    closeOnExcept(spillables) { _ =>
+                      require(spillables.length == 2,
+                        s"Contiguous split returned ${spillables.length} tables but two were " +
+                            s"expected!")
+                    }
+                    (spillables.head, spillables.last)
+                }
               }
             }
           }
