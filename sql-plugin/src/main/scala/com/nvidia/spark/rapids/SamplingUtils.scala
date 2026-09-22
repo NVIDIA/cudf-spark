@@ -39,7 +39,7 @@ object SamplingUtils {
    * `GpuColumnVector.from` the same way, so do not narrow this to also require rows.
    *
    * A cuDF `Table` takes its row count from its first column, so `GpuColumnVector.from`
-   * throws an `ArrayIndexOutOfBoundsException` on one.
+   * rejects one.
    */
   private def isRowsOnly(cb: ColumnarBatch): Boolean = cb.numCols() == 0
 
@@ -66,7 +66,7 @@ object SamplingUtils {
       while (notSelected.size < toRemove) {
         notSelected += rand.nextInt(rows)
       }
-      val selected = (0 until rows).filter(notSelected.contains)
+      val selected = (0 until rows).filterNot(notSelected.contains)
       withResource(ColumnVector.fromInts(selected: _*)) { gatherMap =>
         withResource(GpuColumnVector.from(cb)) { tab =>
           tab.gather(gatherMap)

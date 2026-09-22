@@ -651,8 +651,17 @@ public class GpuColumnVector extends GpuColumnVectorBase {
    * Convert a ColumnarBatch to a table. The table will increment the reference count for all of
    * the columns in the batch, so you will need to close both the batch passed in and the table
    * returned to avoid any memory leaks.
+   * @throws IllegalArgumentException if the batch has no columns
    */
   public static Table from(ColumnarBatch batch) {
+    if (batch.numCols() <= 0) {
+      // A cudf Table takes its row count from its first column, so a batch with rows but no
+      // columns has no Table equivalent. Checked here because cudf's own check is an assert,
+      // which is elided outside -ea and leaves production with an ArrayIndexOutOfBoundsException.
+      throw new IllegalArgumentException(
+          "Cannot convert a rows-only ColumnarBatch to a cudf Table: numRows=" + batch.numRows() +
+              " numCols=" + batch.numCols());
+    }
     return new Table(extractBases(batch));
   }
 

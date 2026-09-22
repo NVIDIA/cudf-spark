@@ -285,7 +285,8 @@ case class GpuDeltaParquetFileFormatNativeDV(
       new DeltaParquetPartitionReader(fileIO, conf, file, singleFileInfo.filePath,
         singleFileInfo.blocks, singleFileInfo.schema, isCaseSensitive, readDataSchema,
         debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows, maxReadBatchSizeBytes,
-        targetSizeBytes, useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes, compressCfg,
+        targetSizeBytes, useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes,
+        skipReadEstimate, compressCfg,
         metrics, singleFileInfo.dateRebaseMode, singleFileInfo.timestampRebaseMode,
         singleFileInfo.hasInt96Timestamps, readUseFieldId, deletionVectorReadInfo, tablePathOpt)
     }
@@ -307,6 +308,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
       targetBatchSizeBytes: Long,
       useChunkedReader: Boolean,
       maxChunkedReaderMemoryUsageSizeBytes: Long,
+      skipReadEstimate: Boolean,
       override val compressCfg: CpuCompressionConfig,
       override val execMetrics: Map[String, GpuMetric],
       dateRebaseMode: DateTimeRebaseMode,
@@ -318,7 +320,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
     extends AbstractParquetPartitionReader(
     fileIO, conf, split, filePath, clippedBlocks, clippedParquetSchema, isSchemaCaseSensitive,
     readDataSchema, debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows, maxReadBatchSizeBytes,
-    compressCfg, execMetrics, useFieldId) {
+    skipReadEstimate, compressCfg, execMetrics, useFieldId) {
 
     override protected def readBuffer(
         parquetOpts: ParquetOptions,
@@ -582,6 +584,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
         maxGpuColumnSizeBytes: Long,
         useChunkedReader: Boolean,
         maxChunkedReaderMemoryUsageSizeBytes: Long,
+        skipReadEstimate: Boolean,
         compressCfg: CpuCompressionConfig,
         execMetrics: Map[String, GpuMetric],
         partitionSchema: StructType,
@@ -608,6 +611,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
         maxGpuColumnSizeBytes,
         useChunkedReader,
         maxChunkedReaderMemoryUsageSizeBytes,
+        skipReadEstimate,
         compressCfg,
         execMetrics,
         partitionSchema,
@@ -676,7 +680,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
         clippedBlocks.toSeq, isCaseSensitive, debugDumpPrefix, debugDumpAlways,
         maxReadBatchSizeRows, maxReadBatchSizeBytes, targetBatchSizeBytes,
         maxGpuColumnSizeBytes, useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes,
-        compressCfg, metrics, partitionSchema, poolConf, ignoreMissingFiles,
+        skipReadEstimate, compressCfg, metrics, partitionSchema, poolConf, ignoreMissingFiles,
         ignoreCorruptFiles, readUseFieldId, tablePathOpt)
     }
   }
@@ -695,6 +699,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
       maxGpuColumnSizeBytes: Long,
       useChunkedReader: Boolean,
       maxChunkedReaderMemoryUsageSizeBytes: Long,
+      skipReadEstimate: Boolean,
       override val compressCfg: CpuCompressionConfig,
       override val execMetrics: Map[String, GpuMetric],
       partitionSchema: StructType,
@@ -711,9 +716,9 @@ case class GpuDeltaParquetFileFormatNativeDV(
     extends AbstractMultiFileCloudParquetPartitionReader(fileIO, conf, files, filterFunc,
       isSchemaCaseSensitive, debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows,
       maxReadBatchSizeBytes, targetBatchSizeBytes, maxGpuColumnSizeBytes, useChunkedReader,
-      maxChunkedReaderMemoryUsageSizeBytes, compressCfg, execMetrics, partitionSchema,
-      poolConf, maxNumFileProcessed, ignoreMissingFiles, ignoreCorruptFiles, useFieldId,
-      queryUsesInputFile, keepReadsInOrder, combineConf) {
+      maxChunkedReaderMemoryUsageSizeBytes, skipReadEstimate, compressCfg, execMetrics,
+      partitionSchema, poolConf, maxNumFileProcessed, ignoreMissingFiles, ignoreCorruptFiles,
+      useFieldId, queryUsesInputFile, keepReadsInOrder, combineConf) {
 
     override def readBatches(
         fileBufsAndMeta: HostMemoryBuffersWithMetaDataBase): Iterator[ColumnarBatch] = {
@@ -1203,6 +1208,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
       maxGpuColumnSizeBytes: Long,
       useChunkedReader: Boolean,
       maxChunkedReaderMemoryUsageSizeBytes: Long,
+      skipReadEstimate: Boolean,
       compressCfg: CpuCompressionConfig,
       execMetrics: Map[String, GpuMetric],
       partitionSchema: StructType,
@@ -1213,8 +1219,8 @@ case class GpuDeltaParquetFileFormatNativeDV(
       tablePathOpt: Option[String])
     extends MultiFileCoalescingParquetPartitionReaderBase(fileIO, conf, clippedBlocks,
       isSchemaCaseSensitive, maxReadBatchSizeRows, maxReadBatchSizeBytes, targetBatchSizeBytes,
-      maxGpuColumnSizeBytes, compressCfg, execMetrics, partitionSchema, poolConf,
-      ignoreMissingFiles, ignoreCorruptFiles) {
+      maxGpuColumnSizeBytes, skipReadEstimate, compressCfg, execMetrics, partitionSchema,
+      poolConf, ignoreMissingFiles, ignoreCorruptFiles) {
 
     override protected def augmentChunkMeta(meta: CurrentChunkMeta): CurrentChunkMeta = {
       if (meta.currentChunk.isEmpty) return meta

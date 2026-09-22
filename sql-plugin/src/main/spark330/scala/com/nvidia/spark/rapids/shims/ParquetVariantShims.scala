@@ -38,12 +38,6 @@
 {"spark": "357"}
 {"spark": "358"}
 {"spark": "359"}
-{"spark": "400"}
-{"spark": "400db173"}
-{"spark": "401"}
-{"spark": "402"}
-{"spark": "403"}
-{"spark": "404"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
@@ -63,6 +57,8 @@ object ParquetVariantShims {
     // No-op for Spark versions before 4.1.0
     // PARQUET_ANNOTATE_VARIANT_LOGICAL_TYPE doesn't exist
   }
+
+  def supportsV2VariantPushdown: Boolean = false
 
   def isPushedVariantStruct(_dataType: DataType): Boolean = false
 

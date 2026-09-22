@@ -18,40 +18,65 @@ package com.nvidia.spark.rapids.delta.delta42x
 
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.delta.GpuDeltaCatalogBase
-import com.nvidia.spark.rapids.delta.common.{DeleteCommandMeta,
-  DeltaDynamicPartitionOverwriteCommandMeta, UpdateCommandMeta}
 import com.nvidia.spark.rapids.delta.common.{GpuDelta4xParquetFileFormat, GpuDeltaParquetFileFormat2}
+import com.nvidia.spark.rapids.delta.common.DeltaDynamicPartitionOverwriteCommandMeta
 import com.nvidia.spark.rapids.delta.common.DeltaProviderBase
+import com.nvidia.spark.rapids.shims.InvalidateCacheShims
 
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.connector.catalog.SupportsWrite
-import org.apache.spark.sql.delta.{CatalogOwnedTableFeature, DeltaDynamicPartitionOverwriteCommand,
+import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
+import org.apache.spark.sql.catalyst.catalog.CatalogTable
+import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.connector.catalog.{Identifier, StagingTableCatalog, SupportsWrite}
+import org.apache.spark.sql.delta.{DeltaDynamicPartitionOverwriteCommand, DeltaLog, DeltaOptions,
   DeltaParquetFileFormat}
-import org.apache.spark.sql.delta.actions.TableFeatureProtocolUtils
-import org.apache.spark.sql.delta.catalog.DeltaTableV2
+import org.apache.spark.sql.delta.catalog.{DeltaCatalog, DeltaTableV2}
 import org.apache.spark.sql.delta.commands.{DeleteCommand, MergeIntoCommand, OptimizeTableCommand,
-  UpdateCommand}
-import org.apache.spark.sql.delta.coordinatedcommits.CatalogOwnedTableUtils
+  UpdateCommand, WriteIntoDelta}
+import org.apache.spark.sql.delta.rapids.DeltaRuntimeShim
 import org.apache.spark.sql.delta.serverSidePlanning.ServerSidePlannedTable
 import org.apache.spark.sql.execution.command.RunnableCommand
 import org.apache.spark.sql.execution.datasources.FileFormat
 import org.apache.spark.sql.execution.datasources.v2.{AppendDataExecV1, AtomicCreateTableAsSelectExec,
   AtomicReplaceTableAsSelectExec, OverwriteByExpressionExecV1}
+import org.apache.spark.sql.execution.datasources.v2.rapids.{GpuAtomicCreateTableAsSelectExec,
+  GpuAtomicReplaceTableAsSelectExec}
 
 object Delta42xProvider extends DeltaProviderBase with Logging {
 
   override protected def getCDFRelationStrategy = Delta42xCDFRelationStrategy
 
-  private def tagIfCatalogManagedTableProperty(
+  override protected def getDeltaLogForV1Write(
+      spark: SparkSession,
+      deltaTable: DeltaTableV2): DeltaLog = deltaTable.deltaLog
+
+  override protected def getCatalogTableForV1Write(
+      deltaTable: DeltaTableV2): Option[CatalogTable] = deltaTable.catalogTable
+
+  override protected def getRecachePlanForV1Write(
+      deltaLog: DeltaLog,
+      deltaTable: DeltaTableV2): LogicalPlan = deltaTable.toLogicalRelation
+
+  override protected def getRefreshTableNameForV1Write(
+      deltaTable: DeltaTableV2): Option[String] =
+    deltaTable.catalogTable.map(_.identifier.quotedString)
+
+  override protected def createWriteIntoDelta(
+      deltaLog: DeltaLog,
+      mode: SaveMode,
+      options: DeltaOptions,
+      configuration: Map[String, String],
+      data: DataFrame,
+      catalogTable: Option[CatalogTable]): WriteIntoDelta = {
+    WriteIntoDelta(deltaLog, mode, options, Nil, configuration, data, catalogTable)
+  }
+
+  private def tagIfUnityCatalogUnsupported(
       meta: RapidsMeta[_, _, _],
-      properties: Map[String, String],
-      spark: SparkSession): Unit = {
-    val tableFeatures =
-      TableFeatureProtocolUtils.getSupportedFeaturesFromTableConfigs(properties)
-    if (tableFeatures.contains(CatalogOwnedTableFeature) ||
-        CatalogOwnedTableUtils.defaultCatalogOwnedEnabled(spark)) {
-      meta.willNotWorkOnGpu("Delta 4.2 catalog-managed table writes are not supported on GPU")
+      catalog: StagingTableCatalog): Unit = {
+    if (GpuDeltaCatalog.isUnityCatalog(catalog)) {
+      GpuDeltaCatalog.unsupportedUnityCatalogReason(catalog).foreach(reason =>
+        meta.willNotWorkOnGpu(reason))
     }
   }
 
@@ -60,9 +85,6 @@ object Delta42xProvider extends DeltaProviderBase with Logging {
       cpuExec: AtomicReplaceTableAsSelectExec): Unit = {
     if (cpuExec.catalog.tableExists(cpuExec.ident)) {
       cpuExec.catalog.loadTable(cpuExec.ident) match {
-        case table: DeltaTableV2 if table.deltaLog.unsafeVolatileSnapshot.isCatalogOwned =>
-          meta.willNotWorkOnGpu(
-            "Delta 4.2 catalog-managed table writes are not supported on GPU")
         case _: ServerSidePlannedTable =>
           meta.willNotWorkOnGpu(
             "Delta 4.2 server-side planned table replacement is not supported on GPU")
@@ -75,6 +97,11 @@ object Delta42xProvider extends DeltaProviderBase with Logging {
     write == classOf[DeltaTableV2] || write == classOf[GpuDeltaCatalogBase#GpuStagedDeltaTableV2]
   }
 
+  override def isSupportedCatalog(catalogClass: Class[_ <: StagingTableCatalog]): Boolean = {
+    super.isSupportedCatalog(catalogClass) ||
+      catalogClass.getCanonicalName == "io.unitycatalog.spark.UCSingleCatalog"
+  }
+
   override def isSupportedFormat(format: Class[_ <: FileFormat]): Boolean =
     super.isSupportedFormat(format) || format == classOf[GpuDelta4xParquetFileFormat]
 
@@ -82,14 +109,14 @@ object Delta42xProvider extends DeltaProviderBase with Logging {
       cpuExec: AtomicCreateTableAsSelectExec,
       meta: AtomicCreateTableAsSelectExecMeta): Unit = {
     super.tagForGpu(cpuExec, meta)
-    tagIfCatalogManagedTableProperty(meta, cpuExec.properties, cpuExec.session)
+    tagIfUnityCatalogUnsupported(meta, cpuExec.catalog)
   }
 
   override def tagForGpu(
       cpuExec: AtomicReplaceTableAsSelectExec,
       meta: AtomicReplaceTableAsSelectExecMeta): Unit = {
     super.tagForGpu(cpuExec, meta)
-    tagIfCatalogManagedTableProperty(meta, cpuExec.properties, cpuExec.session)
+    tagIfUnityCatalogUnsupported(meta, cpuExec.catalog)
     tagIfTargetTableUnsupported(meta, cpuExec)
   }
 
@@ -147,7 +174,8 @@ object Delta42xProvider extends DeltaProviderBase with Logging {
 
   override protected def toGpuParquetFileFormat(conf: RapidsConf, fmt: DeltaParquetFileFormat)
   : FileFormat = {
-    if (isPushDVPredicateDownEnabled(conf)) {
+    val needsGeneratedRowIndex = !fmt.optimizationsEnabled && !fmt.hasTablePath
+    if (isPushDVPredicateDownEnabled(conf) && !needsGeneratedRowIndex) {
       GpuDeltaParquetFileFormat2(
         protocol = fmt.protocol,
         metadata = fmt.metadata,
@@ -175,6 +203,50 @@ object Delta42xProvider extends DeltaProviderBase with Logging {
         tablePath = fmt.tablePath,
         isCDCRead = fmt.isCDCRead)
     }
+  }
+
+  override def convertToGpu(
+      cpuExec: AtomicCreateTableAsSelectExec,
+      meta: AtomicCreateTableAsSelectExecMeta): GpuExec = {
+    GpuAtomicCreateTableAsSelectExec(
+      toGpuCatalog(cpuExec.catalog, meta.conf),
+      cpuExec.ident,
+      cpuExec.partitioning,
+      cpuExec.query,
+      cpuExec.tableSpec,
+      cpuExec.writeOptions,
+      cpuExec.ifNotExists)
+  }
+
+  override def convertToGpu(
+      cpuExec: AtomicReplaceTableAsSelectExec,
+      meta: AtomicReplaceTableAsSelectExecMeta): GpuExec = {
+    GpuAtomicReplaceTableAsSelectExec(
+      toGpuCatalog(cpuExec.catalog, meta.conf),
+      cpuExec.ident,
+      cpuExec.partitioning,
+      cpuExec.query,
+      cpuExec.tableSpec,
+      cpuExec.writeOptions,
+      cpuExec.orCreate,
+      InvalidateCacheShims.getInvalidateCache(
+        cpuExec.invalidateCache,
+        cpuExec.catalog,
+        Some(qualifiedTableName(cpuExec.catalog.name(), cpuExec.ident))))
+  }
+
+  private def qualifiedTableName(catalogName: String, ident: Identifier): String = {
+    def quote(part: String): String = s"`${part.replace("`", "``")}`"
+    (Seq(catalogName) ++ ident.namespace() :+ ident.name()).map(quote).mkString(".")
+  }
+
+  private def toGpuCatalog(
+      catalog: StagingTableCatalog,
+      rapidsConf: RapidsConf): StagingTableCatalog = catalog match {
+    case delta: DeltaCatalog => DeltaRuntimeShim.getGpuDeltaCatalog(delta, rapidsConf)
+    case uc if GpuDeltaCatalog.isUnityCatalog(uc) =>
+      GpuDeltaCatalog.wrapUnityCatalog(uc, rapidsConf)
+    case other => throw new IllegalStateException(s"Unsupported Delta catalog: ${other.getClass}")
   }
 
   override def convertToGpu(
