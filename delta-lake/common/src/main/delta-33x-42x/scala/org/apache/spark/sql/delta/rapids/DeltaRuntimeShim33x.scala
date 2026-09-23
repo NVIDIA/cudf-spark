@@ -19,7 +19,7 @@ package org.apache.spark.sql.delta.rapids
 import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression}
-import org.apache.spark.sql.delta.{DeltaLog, DeltaOptions, Snapshot}
+import org.apache.spark.sql.delta.{DeltaLog, DeltaOptions, NumRecordsStats, Snapshot}
 import org.apache.spark.sql.delta.actions.AddFile
 import org.apache.spark.sql.delta.commands.{DeltaReorgOperation, WriteIntoDelta}
 import org.apache.spark.sql.types.StructType
@@ -77,6 +77,18 @@ trait DeltaRuntimeShim33x extends DeltaRuntimeShim {
       numDeletedRows: Option[Long]): (Option[Long], Option[Long]) = {
     (numCopiedRows, numDeletedRows)
   }
+
+  def shouldKeepNumRecordsForValidation(spark: SparkSession): Boolean = false
+
+  def validateDeleteNumRecords(
+      spark: SparkSession,
+      deltaLog: DeltaLog,
+      numRecordsStats: NumRecordsStats): Unit = {}
+
+  def validateUpdateNumRecords(
+      spark: SparkSession,
+      deltaLog: DeltaLog,
+      numRecordsStats: NumRecordsStats): Unit = {}
 }
 
 object DeltaRuntimeShim33x {
@@ -132,4 +144,19 @@ object DeltaRuntimeShim33x {
       numDeletedRows: Option[Long]): (Option[Long], Option[Long]) = {
     shimInstance.reportSomeZeroMetrics(spark, numCopiedRows, numDeletedRows)
   }
+
+  def shouldKeepNumRecordsForValidation(spark: SparkSession): Boolean =
+    shimInstance.shouldKeepNumRecordsForValidation(spark)
+
+  def validateDeleteNumRecords(
+      spark: SparkSession,
+      deltaLog: DeltaLog,
+      numRecordsStats: NumRecordsStats): Unit =
+    shimInstance.validateDeleteNumRecords(spark, deltaLog, numRecordsStats)
+
+  def validateUpdateNumRecords(
+      spark: SparkSession,
+      deltaLog: DeltaLog,
+      numRecordsStats: NumRecordsStats): Unit =
+    shimInstance.validateUpdateNumRecords(spark, deltaLog, numRecordsStats)
 }

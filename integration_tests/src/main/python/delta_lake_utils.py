@@ -62,6 +62,33 @@ if is_databricks173_or_later():
 delta_write = ["RapidsDeltaWrite"]
 
 
+def set_delta_num_records(spark, target_path, num_records):
+    """Rewrite the sole AddFile in version 0 with a controlled numRecords value."""
+    log_path = target_path + "/_delta_log/00000000000000000000.json"
+    log_files = spark.sparkContext.wholeTextFiles(log_path).collect()
+    assert len(log_files) == 1, f"Expected one Delta log file at {log_path}"
+
+    log_uri, contents = log_files[0]
+    actions = [json.loads(line) for line in contents.splitlines()]
+    add_actions = [action["add"] for action in actions if "add" in action]
+    assert len(add_actions) == 1, f"Expected one AddFile action in {log_path}"
+    stats = json.loads(add_actions[0]["stats"])
+    stats["numRecords"] = num_records
+    add_actions[0]["stats"] = json.dumps(stats, separators=(",", ":"))
+    rewritten_contents = "\n".join(
+        json.dumps(action, separators=(",", ":")) for action in actions) + "\n"
+
+    jvm = spark.sparkContext._jvm
+    hadoop_path = jvm.org.apache.hadoop.fs.Path(log_uri)
+    fs = hadoop_path.getFileSystem(spark.sparkContext._jsc.hadoopConfiguration())
+    output = fs.create(hadoop_path, True)
+    try:
+        output.write(bytearray(rewritten_contents, "utf-8"))
+    finally:
+        output.close()
+    jvm.org.apache.spark.sql.delta.DeltaLog.clearCache()
+
+
 def _loaded_delta_lake_version():
     try:
         context_class_loader = (
@@ -72,6 +99,15 @@ def _loaded_delta_lake_version():
     except Exception:
         # Delta Lake is optional for most integration test runs.
         return None
+
+
+def is_oss_delta_lake_42():
+    return not is_databricks_runtime() and _loaded_delta_lake_version() == "4.2.0"
+
+
+def is_oss_delta_lake_41_or_42():
+    return (not is_databricks_runtime()
+            and _loaded_delta_lake_version() in ("4.1.0", "4.2.0"))
 
 
 def is_oss_delta_lake_42_or_43():

@@ -26,8 +26,9 @@ import com.nvidia.spark.rapids.delta.common.DeltaProviderBase
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.connector.catalog.SupportsWrite
-import org.apache.spark.sql.delta.{CatalogOwnedTableFeature, DeltaDynamicPartitionOverwriteCommand,
-  DeltaParquetFileFormat}
+import org.apache.spark.sql.delta.{CatalogOwnedTableFeature, DeltaConfigs,
+  DeltaDynamicPartitionOverwriteCommand, DeltaParquetFileFormat, IcebergCompat,
+  MaterializePartitionColumnsTableFeature}
 import org.apache.spark.sql.delta.actions.TableFeatureProtocolUtils
 import org.apache.spark.sql.delta.catalog.DeltaTableV2
 import org.apache.spark.sql.delta.commands.{DeleteCommand, MergeIntoCommand, OptimizeTableCommand,
@@ -71,6 +72,29 @@ object Delta43xProvider extends DeltaProviderBase with Logging {
     }
   }
 
+  private def tagIfUnsupportedWriterFeatures(
+      meta: RapidsMeta[_, _, _],
+      properties: Map[String, String],
+      hasPartitionColumns: Boolean,
+      spark: SparkSession): Unit = {
+    val effectiveProperties = DeltaConfigs.mergeGlobalConfigs(
+      spark.sessionState.conf, properties)
+    if (DeltaConfigs.ENABLE_VARIANT_SHREDDING.fromMap(effectiveProperties)) {
+      meta.willNotWorkOnGpu("Delta 4.3 variant shredding writes are not supported on GPU")
+    }
+    val supportedFeatures =
+      TableFeatureProtocolUtils.getSupportedFeaturesFromTableConfigs(effectiveProperties)
+    val materializesPartitionColumns =
+      IcebergCompat.isAnyEnabled(effectiveProperties) ||
+        DeltaConfigs.ENABLE_MATERIALIZE_PARTITION_COLUMNS_FEATURE
+          .fromMap(effectiveProperties).contains(true) ||
+        supportedFeatures.contains(MaterializePartitionColumnsTableFeature)
+    if (hasPartitionColumns && materializesPartitionColumns) {
+      meta.willNotWorkOnGpu(
+        "Delta 4.3 materialized partition column writes are not supported on GPU")
+    }
+  }
+
   override def isSupportedWrite(write: Class[_ <: SupportsWrite]): Boolean = {
     write == classOf[DeltaTableV2] || write == classOf[GpuDeltaCatalogBase#GpuStagedDeltaTableV2]
   }
@@ -83,6 +107,8 @@ object Delta43xProvider extends DeltaProviderBase with Logging {
       meta: AtomicCreateTableAsSelectExecMeta): Unit = {
     super.tagForGpu(cpuExec, meta)
     tagIfCatalogManagedTableProperty(meta, cpuExec.properties, cpuExec.session)
+    tagIfUnsupportedWriterFeatures(
+      meta, cpuExec.properties, cpuExec.partitioning.nonEmpty, cpuExec.session)
   }
 
   override def tagForGpu(
@@ -90,6 +116,8 @@ object Delta43xProvider extends DeltaProviderBase with Logging {
       meta: AtomicReplaceTableAsSelectExecMeta): Unit = {
     super.tagForGpu(cpuExec, meta)
     tagIfCatalogManagedTableProperty(meta, cpuExec.properties, cpuExec.session)
+    tagIfUnsupportedWriterFeatures(
+      meta, cpuExec.properties, cpuExec.partitioning.nonEmpty, cpuExec.session)
     tagIfTargetTableUnsupported(meta, cpuExec)
   }
 

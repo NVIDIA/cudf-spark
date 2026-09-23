@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 import re
 
 import pyspark.sql.functions as f
@@ -154,31 +153,6 @@ def test_delta_merge_check_overflow_in_table_write_error(
 def test_delta_merge_num_records_validation(spark_tmp_path, spark_tmp_table_factory):
     updates_view = spark_tmp_table_factory.get()
 
-    def set_num_records_to_zero(spark, target_path):
-        log_path = target_path + "/_delta_log/00000000000000000000.json"
-        log_files = spark.sparkContext.wholeTextFiles(log_path).collect()
-        assert len(log_files) == 1, f"Expected one Delta log file at {log_path}"
-
-        log_uri, contents = log_files[0]
-        actions = [json.loads(line) for line in contents.splitlines()]
-        add_actions = [action["add"] for action in actions if "add" in action]
-        assert len(add_actions) == 1, f"Expected one AddFile action in {log_path}"
-        stats = json.loads(add_actions[0]["stats"])
-        stats["numRecords"] = 0
-        add_actions[0]["stats"] = json.dumps(stats, separators=(",", ":"))
-        rewritten_contents = "\n".join(
-            json.dumps(action, separators=(",", ":")) for action in actions) + "\n"
-
-        jvm = spark.sparkContext._jvm
-        hadoop_path = jvm.org.apache.hadoop.fs.Path(log_uri)
-        fs = hadoop_path.getFileSystem(spark.sparkContext._jsc.hadoopConfiguration())
-        output = fs.create(hadoop_path, True)
-        try:
-            output.write(bytearray(rewritten_contents, "utf-8"))
-        finally:
-            output.close()
-        jvm.org.apache.spark.sql.delta.DeltaLog.clearCache()
-
     def do_merge(spark):
         gpu_enabled = str(spark.conf.get("spark.rapids.sql.enabled", "false")).lower() == "true"
         target_path = spark_tmp_path + ("/GPU" if gpu_enabled else "/CPU")
@@ -188,7 +162,7 @@ def test_delta_merge_num_records_validation(spark_tmp_path, spark_tmp_table_fact
             .option("delta.enableDeletionVectors", "false") \
             .mode("overwrite") \
             .save(target_path)
-        set_num_records_to_zero(spark, target_path)
+        set_delta_num_records(spark, target_path, 0)
         spark.createDataFrame([(1, "new")], "id INT, value STRING") \
             .createOrReplaceTempView(updates_view)
         return spark.sql(f"""

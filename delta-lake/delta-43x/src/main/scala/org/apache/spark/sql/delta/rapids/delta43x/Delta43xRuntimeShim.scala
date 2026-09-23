@@ -28,7 +28,8 @@ import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression}
 import org.apache.spark.sql.connector.catalog.StagingTableCatalog
-import org.apache.spark.sql.delta.{DeltaLog, DeltaOperations, DeltaOptions, Snapshot}
+import org.apache.spark.sql.delta.{DeltaErrors, DeltaLog, DeltaOperations, DeltaOptions,
+  NumRecordsStats, Snapshot}
 import org.apache.spark.sql.delta.actions.{AddFile, Metadata}
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
 import org.apache.spark.sql.delta.commands.{DeltaReorgOperation, UpdateCommand, WriteIntoDelta}
@@ -68,6 +69,45 @@ class Delta43xRuntimeShim extends DeltaRuntimeShimBase {
       }
     }
     (reportSomeZero(numCopiedRows), reportSomeZero(numDeletedRows))
+  }
+
+  override def shouldKeepNumRecordsForValidation(spark: SparkSession): Boolean =
+    spark.sessionState.conf.getConf(DeltaSQLConf.NUM_RECORDS_VALIDATION_ENABLED)
+
+  override def validateDeleteNumRecords(
+      spark: SparkSession,
+      deltaLog: DeltaLog,
+      numRecordsStats: NumRecordsStats): Unit = {
+    validateNumRecords(spark, deltaLog, numRecordsStats, "DELETE", _ > _)
+  }
+
+  override def validateUpdateNumRecords(
+      spark: SparkSession,
+      deltaLog: DeltaLog,
+      numRecordsStats: NumRecordsStats): Unit = {
+    validateNumRecords(spark, deltaLog, numRecordsStats, "UPDATE", _ != _)
+  }
+
+  private def validateNumRecords(
+      spark: SparkSession,
+      deltaLog: DeltaLog,
+      numRecordsStats: NumRecordsStats,
+      operation: String,
+      isMismatch: (Long, Long) => Boolean): Unit = {
+    (numRecordsStats.numLogicalRecordsAdded,
+      numRecordsStats.numLogicalRecordsRemoved,
+      numRecordsStats.numLogicalRecordsAddedInFilesWithDeletionVectors) match {
+      case (Some(numAddedRecords), Some(numRemovedRecords), Some(_))
+          if isMismatch(numAddedRecords, numRemovedRecords) &&
+            spark.sessionState.conf.getConf(DeltaSQLConf.NUM_RECORDS_VALIDATION_ENABLED) =>
+        throw DeltaErrors.numRecordsMismatch(operation, numAddedRecords, numRemovedRecords)
+      case _ if numRecordsStats.numLogicalRecordsAdded.isEmpty ||
+          numRecordsStats.numLogicalRecordsRemoved.isEmpty ||
+          numRecordsStats.numLogicalRecordsAddedInFilesWithDeletionVectors.isEmpty =>
+        recordDeltaEvent(
+          deltaLog, opType = "delta.assertions.statsNotPresentForNumRecordsCheck")
+      case _ =>
+    }
   }
 
   override def runDeltaOperation[A](

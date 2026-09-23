@@ -19,7 +19,8 @@ package com.nvidia.spark.rapids.delta.delta43x
 import com.nvidia.spark.rapids.RapidsMeta
 import com.nvidia.spark.rapids.delta.DeltaConfigChecker
 
-import org.apache.spark.sql.delta.{DeltaLog, DeltaOptions}
+import org.apache.spark.sql.delta.{DeltaConfigs, DeltaLog, DeltaOptions, IcebergCompat,
+  MaterializePartitionColumnsTableFeature}
 import org.apache.spark.sql.internal.SQLConf
 
 object Delta43xConfigChecker extends DeltaConfigChecker {
@@ -41,6 +42,17 @@ object Delta43xConfigChecker extends DeltaConfigChecker {
     }
     if (deltaLog.exists(_.unsafeVolatileSnapshot.isCatalogOwned)) {
       meta.willNotWorkOnGpu("Delta 4.3 catalog-managed table writes are not supported on GPU")
+    }
+    deltaLog.map(_.unsafeVolatileSnapshot).foreach { snapshot =>
+      if (DeltaConfigs.ENABLE_VARIANT_SHREDDING.fromMetaData(snapshot.metadata)) {
+        meta.willNotWorkOnGpu("Delta 4.3 variant shredding writes are not supported on GPU")
+      }
+      if (snapshot.metadata.partitionColumns.nonEmpty &&
+          (IcebergCompat.isAnyEnabled(snapshot.metadata) ||
+            snapshot.protocol.isFeatureSupported(MaterializePartitionColumnsTableFeature))) {
+        meta.willNotWorkOnGpu(
+          "Delta 4.3 materialized partition column writes are not supported on GPU")
+      }
     }
   }
 }

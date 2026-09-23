@@ -85,6 +85,9 @@ abstract class GpuDeleteCommandBase(
 
         val opSpark = toOperationSparkSession(sparkSession.asInstanceOf[ShimSparkSession])
         val (deleteActions, deleteMetrics) = performDelete(opSpark, deltaLog, txn)
+        val numRecordsStats = NumRecordsStats.fromActions(deleteActions)
+        DeltaRuntimeShim33x.validateDeleteNumRecords(
+          sparkSession, deltaLog, numRecordsStats)
         val commitVersion = txn.commitIfNeeded(
           actions = deleteActions,
           op = DeltaOperations.Delete(condition.toSeq),
@@ -145,7 +148,8 @@ abstract class GpuDeleteCommandBase(
       case None =>
         // Case 1: Delete the whole table if the condition is true
         val reportRowLevelMetrics = conf.getConf(DeltaSQLConf.DELTA_DML_METRICS_FROM_METADATA)
-        val allFiles = txn.filterFiles(Nil, keepNumRecords = reportRowLevelMetrics)
+        val allFiles = txn.filterFiles(Nil, keepNumRecords = reportRowLevelMetrics ||
+          DeltaRuntimeShim33x.shouldKeepNumRecordsForValidation(sparkSession))
 
         numRemovedFiles = allFiles.size
         numDeletionVectorsRemoved = allFiles.count(_.deletionVector != null)
@@ -179,7 +183,8 @@ abstract class GpuDeleteCommandBase(
           val operationTimestamp = System.currentTimeMillis()
           val reportRowLevelMetrics = conf.getConf(DeltaSQLConf.DELTA_DML_METRICS_FROM_METADATA)
           val candidateFiles =
-            txn.filterFiles(metadataPredicates, keepNumRecords = reportRowLevelMetrics)
+            txn.filterFiles(metadataPredicates, keepNumRecords = reportRowLevelMetrics ||
+              DeltaRuntimeShim33x.shouldKeepNumRecordsForValidation(sparkSession))
 
           scanTimeMs = (System.nanoTime() - startTime) / 1000 / 1000
           numRemovedFiles = candidateFiles.size
@@ -205,7 +210,8 @@ abstract class GpuDeleteCommandBase(
 
           val candidateFiles = txn.filterFiles(
             metadataPredicates ++ otherPredicates,
-            keepNumRecords = shouldWriteDVs)
+            keepNumRecords = shouldWriteDVs ||
+              DeltaRuntimeShim33x.shouldKeepNumRecordsForValidation(sparkSession))
           // `candidateFiles` contains the files filtered using statistics and delete condition
           // They may or may not contains any rows that need to be deleted.
 
