@@ -61,9 +61,17 @@ object Delta43xProvider extends DeltaProviderBase with Logging {
       cpuExec: AtomicReplaceTableAsSelectExec): Unit = {
     if (cpuExec.catalog.tableExists(cpuExec.ident)) {
       cpuExec.catalog.loadTable(cpuExec.ident) match {
-        case table: DeltaTableV2 if table.deltaLog.unsafeVolatileSnapshot.isCatalogOwned =>
-          meta.willNotWorkOnGpu(
-            "Delta 4.3 catalog-managed table writes are not supported on GPU")
+        case table: DeltaTableV2 =>
+          val snapshot = table.deltaLog.unsafeVolatileSnapshot
+          if (snapshot.isCatalogOwned) {
+            meta.willNotWorkOnGpu(
+              "Delta 4.3 catalog-managed table writes are not supported on GPU")
+          }
+          if (cpuExec.partitioning.nonEmpty &&
+              snapshot.protocol.isFeatureSupported(MaterializePartitionColumnsTableFeature)) {
+            meta.willNotWorkOnGpu(
+              "Delta 4.3 materialized partition column writes are not supported on GPU")
+          }
         case _: ServerSidePlannedTable =>
           meta.willNotWorkOnGpu(
             "Delta 4.3 server-side planned table replacement is not supported on GPU")

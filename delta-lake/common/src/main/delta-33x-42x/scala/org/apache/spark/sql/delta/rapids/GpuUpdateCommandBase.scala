@@ -139,8 +139,7 @@ abstract class GpuUpdateCommandBase(
     val shouldWriteDeletionVectors = shouldWritePersistentDeletionVectors(sparkSession, txn)
     val candidateFiles = txn.filterFiles(
       metadataPredicates ++ dataPredicates,
-      keepNumRecords = shouldWriteDeletionVectors ||
-        DeltaRuntimeShim33x.shouldKeepNumRecordsForValidation(sparkSession))
+      keepNumRecords = shouldWriteDeletionVectors)
     val nameToAddFile = generateCandidateFileMap(deltaLog.dataPath, candidateFiles)
 
     scanTimeMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTime)

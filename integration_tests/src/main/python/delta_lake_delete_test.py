@@ -15,8 +15,7 @@
 import pytest
 
 from asserts import assert_gpu_and_cpu_writes_are_equal_collect, assert_gpu_fallback_write, \
-    assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect, assert_equal, \
-    assert_gpu_and_cpu_error
+    assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect, assert_equal
 from data_gen import *
 from delta_lake_utils import *
 from marks import *
@@ -36,31 +35,24 @@ delta_delete_enabled_conf = copy_and_update(delta_writes_enabled_conf,
 @delta_lake
 @pytest.mark.skipif(not is_oss_delta_lake_43(),
                     reason="DELETE record-count validation was added in OSS Delta 4.3")
-def test_delta_delete_num_records_validation(spark_tmp_path):
-    conf = copy_and_update(delta_delete_enabled_conf, {
-        "spark.databricks.delta.numRecordsValidation.enabled": "true"
-    })
-
-    def setup_tables(spark):
-        for suffix in ("CPU", "GPU"):
-            target_path = f"{spark_tmp_path}/{suffix}"
-            spark.createDataFrame([(1, "delete"), (2, "keep")], "id INT, value STRING") \
-                .coalesce(1) \
-                .write.format("delta") \
-                .option("delta.enableDeletionVectors", "false") \
-                .mode("overwrite") \
-                .save(target_path)
-            set_delta_num_records(spark, target_path, 0)
-
-    with_cpu_session(setup_tables, conf=conf)
-
+def test_delta_delete_num_records_validation_without_dv(spark_tmp_path):
     def do_delete(spark):
         gpu_enabled = str(spark.conf.get("spark.rapids.sql.enabled", "false")).lower() == "true"
         target_path = spark_tmp_path + ("/GPU" if gpu_enabled else "/CPU")
-        return spark.sql(f"DELETE FROM delta.`{target_path}` WHERE id = 1").collect()
+        spark.createDataFrame([(1, "delete"), (2, "keep")], "id INT, value STRING") \
+            .coalesce(1) \
+            .write.format("delta") \
+            .option("delta.enableDeletionVectors", "false") \
+            .mode("overwrite") \
+            .save(target_path)
+        set_delta_num_records(spark, target_path, 0)
+        spark.sql(f"DELETE FROM delta.`{target_path}` WHERE id = 1").collect()
+        return spark.read.format("delta").load(target_path)
 
-    assert_gpu_and_cpu_error(
-        do_delete, conf=conf, error_message="DELTA_NUM_RECORDS_MISMATCH")
+    conf = copy_and_update(delta_delete_enabled_conf, {
+        "spark.databricks.delta.numRecordsValidation.enabled": "true"
+    })
+    assert_gpu_and_cpu_are_equal_collect(do_delete, conf=conf)
 
 
 def _assert_db173_gpu_delta_scan_if_enabled(spark, df):

@@ -28,7 +28,7 @@ import org.scalatestplus.mockito.MockitoSugar.mock
 
 import org.apache.spark.sql.{Dataset, Row, SaveMode}
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Literal}
-import org.apache.spark.sql.delta.{DeltaLog, DeltaOptions}
+import org.apache.spark.sql.delta.{DeltaLog, DeltaOptions, NumRecordsStats}
 import org.apache.spark.sql.delta.commands.{WriteIntoDelta, WriteIntoDeltaLike}
 import org.apache.spark.sql.delta.schema.ImplicitMetadataOperation
 import org.apache.spark.sql.execution.command.LeafRunnableCommand
@@ -138,6 +138,33 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
     val accessor = classOf[WriteIntoDeltaLike]
       .getMethod("ReplaceWhereExprsAndDataFilterPresenceInExprs")
     assert(accessor.invoke(gpuWrite) != null)
+  }
+
+  test("Delta 4.3 DELETE and UPDATE validate mismatched record counts") {
+    assume(io.delta.VERSION == "4.3.0")
+    val deltaLog = mock[DeltaLog]
+    val mismatchStats = NumRecordsStats(
+      numLogicalRecordsAddedPartial = 2L,
+      numLogicalRecordsRemovedPartial = 1L,
+      numDeletionVectorRecordsAdded = 0L,
+      numDeletionVectorRecordsRemoved = 0L,
+      numFilesAddedWithoutNumRecords = 0L,
+      numFilesRemovedWithoutNumRecords = 0L,
+      numLogicalRecordsAddedInFilesWithDeletionVectorsPartial = 2L)
+
+    def assertValidation(spark: org.apache.spark.sql.SparkSession): Unit = {
+      spark.conf.set("spark.databricks.delta.numRecordsValidation.enabled", "true")
+      Seq(
+        () => DeltaRuntimeShim33x.validateDeleteNumRecords(spark, deltaLog, mismatchStats),
+        () => DeltaRuntimeShim33x.validateUpdateNumRecords(spark, deltaLog, mismatchStats)
+      ).foreach { validate =>
+        val error = intercept[Exception](validate())
+        assert(error.getMessage.contains("DELTA_NUM_RECORDS_MISMATCH"))
+      }
+    }
+
+    withCpuSparkSession(assertValidation)
+    withGpuSparkSession(assertValidation)
   }
 
   test("Delta 4.3 GPU transactions use the 4.3 writer behavior") {

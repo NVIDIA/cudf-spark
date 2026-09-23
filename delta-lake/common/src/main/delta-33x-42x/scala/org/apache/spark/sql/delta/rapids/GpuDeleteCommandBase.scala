@@ -148,8 +148,7 @@ abstract class GpuDeleteCommandBase(
       case None =>
         // Case 1: Delete the whole table if the condition is true
         val reportRowLevelMetrics = conf.getConf(DeltaSQLConf.DELTA_DML_METRICS_FROM_METADATA)
-        val allFiles = txn.filterFiles(Nil, keepNumRecords = reportRowLevelMetrics ||
-          DeltaRuntimeShim33x.shouldKeepNumRecordsForValidation(sparkSession))
+        val allFiles = txn.filterFiles(Nil, keepNumRecords = reportRowLevelMetrics)
 
         numRemovedFiles = allFiles.size
         numDeletionVectorsRemoved = allFiles.count(_.deletionVector != null)
@@ -183,8 +182,7 @@ abstract class GpuDeleteCommandBase(
           val operationTimestamp = System.currentTimeMillis()
           val reportRowLevelMetrics = conf.getConf(DeltaSQLConf.DELTA_DML_METRICS_FROM_METADATA)
           val candidateFiles =
-            txn.filterFiles(metadataPredicates, keepNumRecords = reportRowLevelMetrics ||
-              DeltaRuntimeShim33x.shouldKeepNumRecordsForValidation(sparkSession))
+            txn.filterFiles(metadataPredicates, keepNumRecords = reportRowLevelMetrics)
 
           scanTimeMs = (System.nanoTime() - startTime) / 1000 / 1000
           numRemovedFiles = candidateFiles.size
@@ -210,8 +208,7 @@ abstract class GpuDeleteCommandBase(
 
           val candidateFiles = txn.filterFiles(
             metadataPredicates ++ otherPredicates,
-            keepNumRecords = shouldWriteDVs ||
-              DeltaRuntimeShim33x.shouldKeepNumRecordsForValidation(sparkSession))
+            keepNumRecords = shouldWriteDVs)
           // `candidateFiles` contains the files filtered using statistics and delete condition
           // They may or may not contains any rows that need to be deleted.
 

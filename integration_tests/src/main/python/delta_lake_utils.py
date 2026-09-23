@@ -62,9 +62,9 @@ if is_databricks173_or_later():
 delta_write = ["RapidsDeltaWrite"]
 
 
-def set_delta_num_records(spark, target_path, num_records):
-    """Rewrite the sole AddFile in version 0 with a controlled numRecords value."""
-    log_path = target_path + "/_delta_log/00000000000000000000.json"
+def set_delta_num_records(spark, target_path, num_records, log_version=0):
+    """Rewrite the sole AddFile in a Delta log version with a controlled numRecords value."""
+    log_path = target_path + f"/_delta_log/{log_version:020d}.json"
     log_files = spark.sparkContext.wholeTextFiles(log_path).collect()
     assert len(log_files) == 1, f"Expected one Delta log file at {log_path}"
 

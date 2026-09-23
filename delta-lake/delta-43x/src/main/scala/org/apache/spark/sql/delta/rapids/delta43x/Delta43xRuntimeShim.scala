@@ -71,9 +71,6 @@ class Delta43xRuntimeShim extends DeltaRuntimeShimBase {
     (reportSomeZero(numCopiedRows), reportSomeZero(numDeletedRows))
   }
 
-  override def shouldKeepNumRecordsForValidation(spark: SparkSession): Boolean =
-    spark.sessionState.conf.getConf(DeltaSQLConf.NUM_RECORDS_VALIDATION_ENABLED)
-
   override def validateDeleteNumRecords(
       spark: SparkSession,
       deltaLog: DeltaLog,

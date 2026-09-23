@@ -246,6 +246,39 @@ def test_delta_43_materialized_partition_columns_fallback(
     assert "part" in physical_schema
 
 
+@allow_non_gpu("AtomicReplaceTableAsSelectExec", "OverwriteByExpressionExecV1",
+               *delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="Materialized partition columns were added in OSS Delta 4.3")
+def test_delta_43_rtas_retains_materialized_partition_columns_fallback(
+        spark_tmp_table_factory):
+    base_table = spark_tmp_table_factory.get()
+    property_sql = "'delta.enableMaterializePartitionColumnsFeature' = 'true'"
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+
+    def create_tables(spark):
+        for suffix in ("cpu", "gpu"):
+            spark.sql(
+                f"CREATE TABLE {base_table}_{suffix} (id BIGINT, part INT) USING DELTA "
+                f"PARTITIONED BY (part) TBLPROPERTIES ({property_sql})")
+
+    with_cpu_session(create_tables, conf=conf)
+
+    def replace_table(spark, table):
+        spark.sql(
+            f"CREATE OR REPLACE TABLE {table} USING DELTA PARTITIONED BY (part) "
+            "AS SELECT id, CAST(id % 2 AS INT) AS part FROM range(4)")
+
+    assert_gpu_fallback_write_sql(
+        replace_table, lambda spark, table: spark.table(table), base_table,
+        ["AtomicReplaceTableAsSelectExec"], conf=conf)
+    physical_schema = with_cpu_session(
+        lambda spark: _physical_parquet_schema(spark, f"{base_table}_gpu"), conf=conf)
+    assert "part" in physical_schema
+
+
 @allow_non_gpu("AppendDataExecV1", "AtomicCreateTableAsSelectExec",
                "AtomicReplaceTableAsSelectExec", "OverwriteByExpressionExecV1", *delta_meta_allow)
 @delta_lake

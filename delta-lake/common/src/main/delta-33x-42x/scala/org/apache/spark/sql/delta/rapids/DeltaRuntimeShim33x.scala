@@ -78,8 +78,6 @@ trait DeltaRuntimeShim33x extends DeltaRuntimeShim {
     (numCopiedRows, numDeletedRows)
   }
 
-  def shouldKeepNumRecordsForValidation(spark: SparkSession): Boolean = false
-
   def validateDeleteNumRecords(
       spark: SparkSession,
       deltaLog: DeltaLog,
@@ -144,9 +142,6 @@ object DeltaRuntimeShim33x {
       numDeletedRows: Option[Long]): (Option[Long], Option[Long]) = {
     shimInstance.reportSomeZeroMetrics(spark, numCopiedRows, numDeletedRows)
   }
-
-  def shouldKeepNumRecordsForValidation(spark: SparkSession): Boolean =
-    shimInstance.shouldKeepNumRecordsForValidation(spark)
 
   def validateDeleteNumRecords(
       spark: SparkSession,
