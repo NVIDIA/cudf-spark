@@ -1,4 +1,4 @@
-# Copyright (c) 2024-2025, NVIDIA CORPORATION.
+# Copyright (c) 2024-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -59,9 +59,10 @@ def assert_collect(do_merge, data_path, conf, expect_write=True):
     gpu_path = data_path + "/GPU"
     cpu_result = with_cpu_session(lambda spark: do_merge(spark, cpu_path), conf=conf)
     if expect_write:
-        gpu_result = assert_rapids_delta_write(lambda spark: do_merge(spark, gpu_path), conf=conf)
+        gpu_result = assert_rapids_delta_write(lambda spark: do_merge(spark, gpu_path), conf=conf, expected_command="GpuMergeIntoCommand")
     else:
-        gpu_result = with_gpu_session(lambda spark: do_merge(spark, gpu_path), conf=conf)
+        gpu_result = assert_rapids_gpu_merge_ran(
+            lambda spark: do_merge(spark, gpu_path), conf=conf)
     assert_equal(cpu_result, gpu_result)
 
 # This method is used for making sure ExecutedCommand fallsback for Spark 3.5.3

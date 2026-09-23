@@ -22,14 +22,16 @@ import com.nvidia.spark.rapids.delta.delta40x.Delta40xProvider
 import com.nvidia.spark.rapids.delta.delta40x.GpuDeltaCatalog
 
 import org.apache.spark.sql.SaveMode
-import org.apache.spark.sql.classic.DataFrameWriter
+import org.apache.spark.sql.classic.{DataFrameWriter, SparkSession}
 import org.apache.spark.sql.connector.catalog.StagingTableCatalog
 import org.apache.spark.sql.delta.{DeltaOperations, DeltaOptions}
-import org.apache.spark.sql.delta.actions.Metadata
+import org.apache.spark.sql.delta.actions.{FileAction, Metadata}
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
-import org.apache.spark.sql.delta.commands.WriteIntoDelta
+import org.apache.spark.sql.delta.commands.{DMLWithDeletionVectorsHelper, TouchedFileWithDV,
+  WriteIntoDelta}
 import org.apache.spark.sql.delta.hooks.GpuAutoCompact40x
-import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShimBase, GpuDeltaLog,
+import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShimBase, DMLWithDeletionVectorsRuntimeShim,
+  GpuDeltaLog,
   GpuOptimisticTransaction, GpuOptimisticTransactionBase, GpuWriteIntoDelta,
   GpuWriteIntoDeltaLike, StartTransactionArg}
 
@@ -38,7 +40,14 @@ import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShimBase, GpuDeltaLog,
  *
  * @note This class is instantiated via reflection from DeltaProbeImpl
  */
-class Delta40xRuntimeShim extends DeltaRuntimeShimBase {
+class Delta40xRuntimeShim extends DeltaRuntimeShimBase with DMLWithDeletionVectorsRuntimeShim {
+
+  override def processUnmodifiedData(
+      spark: SparkSession,
+      touchedFiles: Seq[TouchedFileWithDV],
+      txn: GpuOptimisticTransactionBase): (Seq[FileAction], Map[String, Long]) = {
+    DMLWithDeletionVectorsHelper.processUnmodifiedData(spark, touchedFiles, txn.snapshot)
+  }
 
   override def getDeltaProvider: DeltaProvider = Delta40xProvider
 
@@ -48,7 +57,7 @@ class Delta40xRuntimeShim extends DeltaRuntimeShimBase {
     mode == SaveMode.Overwrite && Thread.currentThread().getStackTrace.exists(_.toString.contains(
       classOf[DataFrameWriter[_]].getCanonicalName + "."))
   }
-  
+
   override def createGpuWrite(
       gpuDeltaLog: GpuDeltaLog,
       cpuWrite: WriteIntoDelta): GpuWriteIntoDeltaLike = {

@@ -3650,6 +3650,11 @@ abstract class AbstractParquetTableReader(
 
   protected def postProcessChunk(chunk: Table): Table
 
+  protected def evolveSchemaAndClose(table: Table): Table = {
+    ParquetSchemaUtils.evolveSchemaIfNeededAndClose(
+      table, clippedParquetSchema, readDataSchema, isSchemaCaseSensitive, useFieldId)
+  }
+
   private def decodeNext(reader: ChunkedReader): Table = {
     NvtxIdWithMetrics(NvtxRegistry.PARQUET_DECODE, metrics(GPU_DECODE_TIME)) {
       try {
@@ -3681,8 +3686,7 @@ abstract class AbstractParquetTableReader(
       }
     }
     metrics(NUM_OUTPUT_BATCHES) += 1
-    val evolvedSchemaTable = ParquetSchemaUtils.evolveSchemaIfNeededAndClose(postProcessedTable,
-      clippedParquetSchema, readDataSchema, isSchemaCaseSensitive, useFieldId)
+    val evolvedSchemaTable = evolveSchemaAndClose(postProcessedTable)
     val outputTable =
       GpuParquetScan.rebaseDateTime(evolvedSchemaTable, dateRebaseMode, timestampRebaseMode)
     GpuMetric.recordOutputBatchBytes(outputTable, metrics.get(GPU_OUTPUT_BATCH_BYTES))

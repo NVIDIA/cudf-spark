@@ -18,6 +18,7 @@ package org.apache.iceberg.spark.source
 
 import com.nvidia.spark.rapids.{ColumnarOutputWriterFactory, GpuParquetWriter, SpillableColumnarBatch}
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
+import com.nvidia.spark.rapids.iceberg.ShimUtils
 import com.nvidia.spark.rapids.iceberg.parquet.GpuIcebergParquetAppender
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.mapreduce.TaskAttemptContext
@@ -45,8 +46,10 @@ class GpuSparkFileWriterFactory(val table: Table,
 ) extends FileWriterFactory[SpillableColumnarBatch] {
   require(dataFileFormat == FileFormat.PARQUET,
     s"GpuSparkFileWriterFactory only supports PARQUET file format, but got $dataFileFormat")
-  require(deleteFileFormat == FileFormat.PARQUET,
-    s"GpuSparkFileWriterFactory only supports PARQUET file format, but got $deleteFileFormat")
+  require(deleteFileFormat == FileFormat.PARQUET ||
+      ShimUtils.isPuffinFormat(deleteFileFormat),
+    s"GpuSparkFileWriterFactory only supports PARQUET or Puffin deletion vectors, " +
+      s"but got $deleteFileFormat")
 
   private def newTaskAttemptContext(sparkType: StructType): TaskAttemptContext = {
     val conf = new Configuration(hadoopConf.value)

@@ -18,7 +18,8 @@ import pytest
 import re
 
 from spark_session import is_databricks122_or_later, supports_delta_lake_deletion_vectors, \
-    is_databricks173_or_later, is_spark_local_mode, with_cpu_session, with_gpu_session
+    is_databricks173_or_later, is_spark_353_or_later, is_spark_local_mode, \
+    with_cpu_session, with_gpu_session
 from asserts import assert_equal
 from conftest import is_databricks_runtime, spark_jvm
 
@@ -110,7 +111,30 @@ def deletion_vector_values_with_xfail_reasons(enabled_xfail_reason=None, disable
 
     return enable_deletion_vector
 
+
+def dml_deletion_vector_values_with_xfail_reasons(
+        enabled_xfail_reason=None, disabled_xfail_reason=None):
+    # DELETE, UPDATE, and MERGE support DVs on OSS Delta 3.3+. Keep Databricks xfails
+    # without suppressing OSS coverage.
+    if is_databricks_runtime() and disabled_xfail_reason is not None:
+        enable_deletion_vector = [
+            pytest.param(False, marks=pytest.mark.xfail(reason=disabled_xfail_reason))]
+    else:
+        enable_deletion_vector = [False]
+
+    if supports_delta_lake_deletion_vectors() and (
+            is_databricks_runtime() or is_spark_353_or_later()):
+        if is_databricks_runtime() and enabled_xfail_reason is not None:
+            enable_deletion_vector.append(
+                pytest.param(True, marks=pytest.mark.xfail(reason=enabled_xfail_reason)))
+        else:
+            enable_deletion_vector.append(True)
+
+    return enable_deletion_vector
+
+
 deletion_vector_values = deletion_vector_values_with_xfail_reasons()
+dml_deletion_vector_values = dml_deletion_vector_values_with_xfail_reasons()
 
 delta_writes_enabled_conf = {"spark.rapids.sql.format.delta.write.enabled": "true"}
 
@@ -229,6 +253,7 @@ def assert_delta_log_json_equivalent(filename, c_json, g_json):
         elif key == "add":
             assert c_val.keys() == g_val.keys(), "Delta log {} 'add' keys mismatch:\nCPU: {}\nGPU: {}".format(filename, c_val, g_val)
             del_keys(("modificationTime", "size"), c_val, g_val)
+            fixup_deletion_vector(c_val, g_val)
             fixup_path(c_val)
             fixup_path(g_val)
         elif key == "cdc":
@@ -576,6 +601,22 @@ def assert_db173_gpu_data_writing_command(
         return result
     finally:
         callback.endCapture()
+
+
+def assert_rapids_gpu_merge_ran(do_test, conf):
+    """Runs a Delta MERGE and asserts that the GPU command did not fall back."""
+    jvm = spark_jvm()
+    callback = jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        result = with_gpu_session(do_test, conf=conf)
+        captured_plans = callback.getResultsWithTimeout(10000)
+        assert any(callback.contains(plan, "GpuMergeIntoCommand") for plan in captured_plans), \
+            "GpuMergeIntoCommand not found in any captured plan; MERGE may have fallen back to CPU"
+        return result
+    finally:
+        callback.endCapture()
+
 
 def assert_rapids_gpu_delete_ran(do_test, conf):
     """

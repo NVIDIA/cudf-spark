@@ -22,6 +22,10 @@ package com.nvidia.spark.rapids.shims
 import org.apache.spark.sql.execution.datasources.v2.GroupPartitionsExec
 
 object GpuGroupPartitionsShims {
+  def expectedPartitionKeyCount(groupPartitions: GroupPartitionsExec): Option[Int] = {
+    groupPartitions.expectedPartitionKeys.map(_.size)
+  }
+
   // Spark 4.2.0 stores connector Reducer values. displayName is on Reducer.
   def reducerNames(groupPartitions: GroupPartitionsExec): Option[Seq[String]] = {
     groupPartitions.reducers.map(

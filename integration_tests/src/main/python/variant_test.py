@@ -20,7 +20,7 @@ from asserts import (assert_cpu_and_gpu_are_equal_collect_with_capture,
                      assert_gpu_fallback_collect)
 from conftest import is_databricks_runtime, spark_jvm
 from data_gen import idfn
-from marks import allow_non_gpu, incompat
+from marks import allow_non_gpu, ignore_order, incompat
 from spark_session import (is_before_spark_400, is_databricks173_or_later, is_spark_40x,
                            is_spark_411_or_later, with_cpu_session)
 
@@ -71,6 +71,21 @@ def _write_variant_parquet(spark, path):
     """).write.mode('overwrite').parquet(path)
 
 
+def _write_array_variant_parquet(spark, path):
+    spark.sql("""
+      SELECT id, parse_json(json) AS v
+      FROM VALUES
+        (0, '{"items":[{"sku":"a","qty":1},{"sku":"b","qty":2}],"matrix":[[10,11],[20]]}'),
+        (1, '{"items":[],"matrix":[]}'),
+        (2, '{"items":[null],"matrix":[[30]]}'),
+        (3, '{"items":"wrong container","matrix":40}'),
+        (4, '[{"sku":"root"}]'),
+        (5, 'null'),
+        (6, NULL)
+      AS source(id, json)
+    """).write.mode('overwrite').parquet(path)
+
+
 def _write_heterogeneous_variant_parquet(spark, path):
     spark.sql("""
       SELECT id, parse_json(json) AS v
@@ -82,7 +97,10 @@ def _write_heterogeneous_variant_parquet(spark, path):
         (4, '{"x":false}'),
         (5, '{"x":"bad"}'),
         (6, '{"x":null}'),
-        (7, '{"y":"missing"}')
+        (7, '{"y":"missing"}'),
+        (8, '{"x":128}'),
+        (9, '{"x":32768}'),
+        (10, '{"x":2147483648}')
       AS source(id, json)
     """).write.mode('overwrite').parquet(path)
 
@@ -410,12 +428,14 @@ def test_parquet_variant_try_get_integral_boundaries(spark_tmp_path):
             '"imin":-2147483648,"imax":2147483647,' ||
             '"lmin":-9223372036854775808,"lmax":9223372036854775807,' ||
             '"byte_overflow":128,"short_overflow":32768,' ||
-            '"int_overflow":2147483648}') AS v
+            '"int_overflow":2147483648,' ||
+            '"byte_underflow":-129,"short_underflow":-32769,' ||
+            '"int_underflow":-2147483649}') AS v
         """).write.mode('overwrite').parquet(data_path)
 
     _with_cpu_variant_session(write_data)
 
-    assert_gpu_and_cpu_are_equal_collect(
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.read.parquet(data_path).selectExpr(
             "try_variant_get(v, '$.bmin', 'tinyint') AS bmin",
             "try_variant_get(v, '$.bmin', 'int') AS bmin_as_int",
@@ -432,7 +452,11 @@ def test_parquet_variant_try_get_integral_boundaries(spark_tmp_path):
             "try_variant_get(v, '$.lmax', 'bigint') AS lmax",
             "try_variant_get(v, '$.byte_overflow', 'tinyint') AS byte_overflow",
             "try_variant_get(v, '$.short_overflow', 'smallint') AS short_overflow",
-            "try_variant_get(v, '$.int_overflow', 'int') AS int_overflow"),
+            "try_variant_get(v, '$.int_overflow', 'int') AS int_overflow",
+            "try_variant_get(v, '$.byte_underflow', 'tinyint') AS byte_underflow",
+            "try_variant_get(v, '$.short_underflow', 'smallint') AS short_underflow",
+            "try_variant_get(v, '$.int_underflow', 'int') AS int_underflow"),
+        exist_classes='GpuVariantGet',
         conf=_variant_parquet_conf)
 
 
@@ -483,20 +507,21 @@ def test_parquet_variant_try_get_aggregate(spark_tmp_path):
 
 
 @incompat
+@ignore_order(local=True)
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
 def test_parquet_variant_try_get_heterogeneous_values(spark_tmp_path):
     data_path = spark_tmp_path + '/VARIANT_HETEROGENEOUS_PARQUET'
     _with_cpu_variant_session(lambda spark: _write_heterogeneous_variant_parquet(spark, data_path))
 
-    assert_gpu_and_cpu_are_equal_collect(
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.read.parquet(data_path).selectExpr(
             "id",
             "try_variant_get(v, '$.x', 'tinyint') AS byte_value",
             "try_variant_get(v, '$.x', 'smallint') AS short_value",
             "try_variant_get(v, '$.x', 'int') AS int_value",
             "try_variant_get(v, '$.x', 'bigint') AS long_value",
-            "try_variant_get(v, '$.x', 'string') AS string_value")
-            .orderBy("id"),
+            "try_variant_get(v, '$.x', 'string') AS string_value"),
+        exist_classes='GpuVariantGet',
         conf=_variant_parquet_conf)
 
 
@@ -531,18 +556,27 @@ def test_parquet_variant_if(spark_tmp_path):
         conf=_variant_parquet_conf)
 
 
-@allow_non_gpu('ProjectExec', 'VariantGet')
 @incompat
+@pytest.mark.parametrize('v1_enabled_list', ['parquet', ''], ids=['v1', 'v2'])
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
-def test_variant_try_get_array_path_falls_back(spark_tmp_path):
-    data_path = spark_tmp_path + '/VARIANT_ARRAY_PATH_FALLBACK_PARQUET'
-    _with_cpu_variant_session(lambda spark: _write_variant_parquet(spark, data_path))
+def test_parquet_variant_try_get_array_paths(spark_tmp_path, v1_enabled_list):
+    data_path = spark_tmp_path + '/VARIANT_ARRAY_PATH_PARQUET'
+    read_conf = dict(_variant_parquet_conf)
+    read_conf['spark.sql.sources.useV1SourceList'] = v1_enabled_list
+    _with_cpu_variant_session(lambda spark: _write_array_variant_parquet(spark, data_path))
 
-    def do_it(spark):
-        return spark.read.parquet(data_path).selectExpr(
-            "try_variant_get(v, '$.arr[0]', 'int') AS first_value")
-
-    assert_gpu_fallback_collect(do_it, 'VariantGet', conf=_variant_parquet_conf)
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.read.parquet(data_path).selectExpr(
+            'id',
+            "try_variant_get(v, '$.items[0].sku', 'string') AS first_sku",
+            "try_variant_get(v, '$.items[1].qty', 'bigint') AS second_qty",
+            "try_variant_get(v, '$.matrix[0][1]', 'int') AS matrix_value",
+            "try_variant_get(v, '$[0].sku', 'string') AS root_sku",
+            "try_variant_get(v, '$.items[99].sku', 'string') AS out_of_bounds",
+            "try_variant_get(v, '$.items[0][0]', 'int') AS wrong_container")
+            .orderBy('id'),
+        exist_classes='GpuVariantGet',
+        conf=read_conf)
 
 
 @allow_non_gpu('ProjectExec', 'VariantGet')

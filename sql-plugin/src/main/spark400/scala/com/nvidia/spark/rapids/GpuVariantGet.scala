@@ -31,9 +31,11 @@ package com.nvidia.spark.rapids
 
 import java.util.Optional
 
+import scala.util.Try
+
 import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Scalar, VariantUtils}
 import com.nvidia.spark.Retryable
-import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 
 import org.apache.spark.sql.catalyst.expressions.{BoundReference, Expression, Literal,
@@ -66,7 +68,8 @@ case class GpuVariantGetMeta(
     GpuVariantGet.parseSupportedPath(expr.path) match {
       case Some(_) =>
       case None =>
-        willNotWorkOnGpu("path must be a literal object-field path like $.field or $.nested.field")
+        willNotWorkOnGpu("path must be a literal object-field/array-index path like " +
+          "$.field, $.nested.field, or $.items[0].field")
     }
 
     if (expr.failOnError) {
@@ -139,7 +142,9 @@ case class GpuVariantGet(
 }
 
 object GpuVariantGet {
-  private val ObjectFieldPath = """^\$\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$""".r
+  private val SupportedPath =
+    """^\$(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[0-9]+\])+$""".r
+  private val ArrayIndex = """\[([0-9]+)\]""".r
 
   def isSupportedTargetType(dt: DataType): Boolean = dt match {
     case ByteType | ShortType | IntegerType | LongType | StringType => true
@@ -234,21 +239,23 @@ object GpuVariantGet {
       minValue: Long,
       maxValue: Long,
       targetType: DType): ColumnVector = {
-    withResource(Scalar.fromLong(minValue)) { min =>
-      withResource(input.greaterOrEqualTo(min)) { aboveMin =>
-        withResource(Scalar.fromLong(maxValue)) { max =>
-          withResource(input.lessOrEqualTo(max)) { belowMax =>
-            withResource(aboveMin.and(belowMax)) { inRange =>
-              withResource(Scalar.fromNull(DType.INT64)) { nullValue =>
-                withResource(inRange.ifElse(input, nullValue)) { masked =>
-                  masked.castTo(targetType)
-                }
-              }
-            }
-          }
-        }
+    val aboveMin = withResource(Scalar.fromLong(minValue)) { min =>
+      input.greaterOrEqualTo(min)
+    }
+    val belowMax = closeOnExcept(aboveMin) { _ =>
+      withResource(Scalar.fromLong(maxValue)) { max =>
+        input.lessOrEqualTo(max)
       }
     }
+    val inRange = withResource(Seq(aboveMin, belowMax)) { _ =>
+      aboveMin.and(belowMax)
+    }
+    val masked = withResource(inRange) { inRange =>
+      withResource(Scalar.fromNull(DType.INT64)) { nullValue =>
+        inRange.ifElse(input, nullValue)
+      }
+    }
+    withResource(masked)(_.castTo(targetType))
   }
 
   private def evaluateOnCpu(
@@ -315,7 +322,9 @@ object GpuVariantGet {
   }
 
   def parseSupportedPath(path: String): Option[String] = {
-    if (ObjectFieldPath.pattern.matcher(path).matches) {
+    val validIndexes =
+      ArrayIndex.findAllMatchIn(path).forall(index => Try(index.group(1).toInt).isSuccess)
+    if (SupportedPath.pattern.matcher(path).matches && validIndexes) {
       Some(path)
     } else {
       None

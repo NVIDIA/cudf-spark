@@ -20,6 +20,7 @@ import com.nvidia.spark.rapids.{DataFromReplacementRule, RapidsConf, RapidsMeta,
 import com.nvidia.spark.rapids.delta.RapidsDeltaUtils
 
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.delta.DeltaParquetFileFormat.ROW_INDEX_COLUMN_NAME
 import org.apache.spark.sql.delta.commands.{DeleteCommand, DeletionVectorUtils}
 import org.apache.spark.sql.delta.sources.DeltaSQLConf
 
@@ -35,14 +36,12 @@ abstract class DeleteCommandMetaBase(
       willNotWorkOnGpu("Delta Lake output acceleration has been disabled. To enable set " +
         s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
     }
-    val dvFeatureEnabled = DeletionVectorUtils.deletionVectorsWritable(
-      deleteCmd.deltaLog.unsafeVolatileSnapshot)
-    if (dvFeatureEnabled && deleteCmd.conf.getConf(
-        DeltaSQLConf.DELETE_USE_PERSISTENT_DELETION_VECTORS)) {
-      // https://github.com/NVIDIA/spark-rapids/issues/8554
-      willNotWorkOnGpu("Deletion vectors are not supported on GPU")
+    if (DeletionVectorUtils.deletionVectorsWritable(deleteCmd.deltaLog.unsafeVolatileSnapshot) &&
+        deleteCmd.conf.getConf(DeltaSQLConf.DELETE_USE_PERSISTENT_DELETION_VECTORS) &&
+        deleteCmd.target.schema.fieldNames.exists(
+          SparkSession.active.sessionState.conf.resolver(_, ROW_INDEX_COLUMN_NAME))) {
+      willNotWorkOnGpu(s"user column $ROW_INDEX_COLUMN_NAME conflicts with the DV row index")
     }
-
     RapidsDeltaUtils.tagForDeltaWrite(this, deleteCmd.target.schema, Some(deleteCmd.deltaLog),
       Map.empty, SparkSession.active)
   }
