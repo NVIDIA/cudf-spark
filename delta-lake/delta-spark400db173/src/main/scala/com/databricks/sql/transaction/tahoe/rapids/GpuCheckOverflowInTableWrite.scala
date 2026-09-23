@@ -30,7 +30,10 @@ import org.apache.spark.sql.types.DataType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /** GPU version of Delta's CheckOverflowInTableWrite expression. */
-case class GpuCheckOverflowInTableWrite(child: GpuCast, columnName: String)
+case class GpuCheckOverflowInTableWrite(
+    child: GpuExpression,
+    columnName: String,
+    sourceType: DataType)
     extends ShimUnaryExpression with GpuExpression {
 
   override def dataType: DataType = child.dataType
@@ -41,7 +44,7 @@ case class GpuCheckOverflowInTableWrite(child: GpuCast, columnName: String)
     } catch {
       case _: ArithmeticException =>
         throw DeltaErrors.castingCauseOverflowErrorInTableWrite(
-          child.child.dataType,
+          sourceType,
           dataType,
           columnName)
     }
@@ -60,9 +63,13 @@ object GpuCheckOverflowInTableWrite {
       (check, conf, parent, rule) =>
         new UnaryExprMeta[CheckOverflowInTableWrite](check, conf, parent, rule) {
           override def convertToGpu(child: Expression): GpuExpression = child match {
-            case cast: GpuCast => GpuCheckOverflowInTableWrite(cast, check.columnName)
+            case gpuChild: GpuExpression =>
+              val sourceType = check.child.children.headOption
+                .map(_.dataType)
+                .getOrElse(check.child.dataType)
+              GpuCheckOverflowInTableWrite(gpuChild, check.columnName, sourceType)
             case _ =>
-              throw new IllegalStateException("Expression child is not of type GpuCast")
+              throw new IllegalStateException("Expression child cannot run on the GPU")
           }
         })
 }
