@@ -16,12 +16,42 @@
 
 package com.nvidia.spark.rapids
 
+import java.net.URL
+
 import com.nvidia.spark.rapids.shims.ShuffleManagerShimUtils
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.SparkConf
 
 class RapidsPluginUtilsSuite extends AnyFunSuite {
+  private def pluginResourceUrl(parentDir: String, jarName: String): URL = {
+    new URL(s"jar:file:$parentDir/$jarName!/${RapidsPluginUtils.PLUGIN_PROPS_FILENAME}")
+  }
+
+  test("main plugin JAR detection only examines the JAR filename") {
+    val renamedJar = pluginResourceUrl(
+      "/work/cudf-spark-pr-16053",
+      "cudf-spark_2.12-26.10.0-cuda13.jar")
+    val legacyJar = pluginResourceUrl(
+      "/work/rapids-4-spark-pr-16053",
+      "rapids-4-spark_2.12-26.10.0-cuda13.jar")
+    val submoduleJar = pluginResourceUrl(
+      "/work/cudf-spark-pr-16053",
+      "cudf-spark-aggregator_2.12-26.10.0-spark341.jar")
+    val legacySubmoduleJar = pluginResourceUrl(
+      "/work/rapids-4-spark-pr-16053",
+      "rapids-4-spark-aggregator_2.12-26.10.0-spark341.jar")
+
+    assert(RapidsPluginUtils.isMainJarResource(
+      renamedJar, RapidsPluginUtils.PLUGIN_PROPS_FILENAME))
+    assert(RapidsPluginUtils.isMainJarResource(
+      legacyJar, RapidsPluginUtils.PLUGIN_PROPS_FILENAME))
+    assert(!RapidsPluginUtils.isMainJarResource(
+      submoduleJar, RapidsPluginUtils.PLUGIN_PROPS_FILENAME))
+    assert(!RapidsPluginUtils.isMainJarResource(
+      legacySubmoduleJar, RapidsPluginUtils.PLUGIN_PROPS_FILENAME))
+  }
+
   test("shuffle manager auto-configuration follows Spark initialization support") {
     val conf = new SparkConf(false)
 
