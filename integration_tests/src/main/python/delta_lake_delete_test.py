@@ -15,7 +15,8 @@
 import pytest
 
 from asserts import assert_gpu_and_cpu_writes_are_equal_collect, assert_gpu_fallback_write, \
-    assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect, assert_equal
+    assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect, assert_equal, \
+    assert_spark_exception
 from data_gen import *
 from delta_lake_utils import *
 from marks import *
@@ -53,6 +54,36 @@ def test_delta_delete_num_records_validation_without_dv(spark_tmp_path):
         "spark.databricks.delta.numRecordsValidation.enabled": "true"
     })
     assert_gpu_and_cpu_are_equal_collect(do_delete, conf=conf)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="DELETE record-count validation was added in OSS Delta 4.3")
+def test_delta_delete_num_records_validation(spark_tmp_path):
+    conf = copy_and_update(delta_delete_enabled_conf, {
+        "spark.databricks.delta.numRecordsValidation.enabled": "true",
+        "spark.databricks.delta.dmlMetricsFromMetadata.enabled": "true"
+    })
+
+    def do_delete(spark):
+        gpu_enabled = str(
+            spark.conf.get("spark.rapids.sql.enabled", "false")).lower() == "true"
+        target_path = spark_tmp_path + ("/GPU" if gpu_enabled else "/CPU")
+        (spark.createDataFrame([(1,), (2,)], "id INT")
+            .coalesce(1)
+            .write.format("delta")
+            .option("delta.enableDeletionVectors", "false")
+            .save(target_path))
+        set_delta_num_records(spark, target_path, -1)
+        spark.sql(f"DELETE FROM delta.`{target_path}`").collect()
+
+    assert_spark_exception(
+        lambda: with_cpu_session(do_delete, conf=conf),
+        "DELTA_NUM_RECORDS_MISMATCH")
+    assert_spark_exception(
+        lambda: with_gpu_session(do_delete, conf=conf),
+        "DELTA_NUM_RECORDS_MISMATCH")
 
 
 def _assert_db173_gpu_delta_scan_if_enabled(spark, df):
