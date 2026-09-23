@@ -1075,7 +1075,7 @@
         <spark.version.classifier>spark${buildver}</spark.version.classifier>
         <cuda.version>cuda12</cuda.version>
         <jni.classifier>${cuda.version}</jni.classifier>
-        <cudf-spark-jni.version>26.10.0-SNAPSHOT</cudf-spark-jni.version>
+        <cudf-spark-jni.version>26.12.0-SNAPSHOT</cudf-spark-jni.version>
         <cudf-spark-jni.artifactId>cudf-spark-jni</cudf-spark-jni.artifactId>
         <cudf-spark-private.version>26.10.0-SNAPSHOT</cudf-spark-private.version>
         <cudf-spark-private.artifactId>cudf-spark-private_${scala.binary.version}</cudf-spark-private.artifactId>
@@ -1567,16 +1567,26 @@
                                     </else>
                                 </ac:if>
                                 <echo>
-Comparing git revisions:
-    previous=${saved.build-info.revision}
-     current=${git.head.revision}
+Comparing build information:
+                   previous revision=${saved.build-info.revision}
+                    current revision=${git.head.revision}
+      previous Scala library version=${saved.build-info.scala_library_version}
+       current Scala library version=${scala.version}
+       previous Java bytecode target=${saved.build-info.java_bytecode_target}
+        current Java bytecode target=${java.major.version}
                                 </echo>
                                 <taskdef resource="net/sf/antcontrib/antcontrib.properties"/>
                                 <ac:if xmlns:ac="antlib:net.sf.antcontrib">
-                                    <equals arg1="${git.head.revision}" arg2="${saved.build-info.revision}"/>
+                                    <and>
+                                        <equals arg1="${git.head.revision}" arg2="${saved.build-info.revision}"/>
+                                        <equals arg1="${project.version}" arg2="${saved.build-info.version}"/>
+                                        <equals arg1="${cudf-spark-jni.version}" arg2="${saved.build-info.cudf_version}"/>
+                                        <equals arg1="${scala.version}" arg2="${saved.build-info.scala_library_version}"/>
+                                        <equals arg1="${java.major.version}" arg2="${saved.build-info.java_bytecode_target}"/>
+                                    </and>
                                     <then>
                                         <echo>
-Git revisions unchanged: skipping version info file generation.
+Build information unchanged: skipping version info file generation.
 Delete ${build.info.path} or mvn clean if regeneration desired.
 This will force full Scala code rebuild in downstream modules.
                                         </echo>
@@ -1592,6 +1602,8 @@ This will force full Scala code rebuild in downstream modules.
                                             <arg value="${spark.rapids.source.basedir}/build/build-info"/>
                                             <arg value="${project.version}"/>
                                             <arg value="${cudf-spark-jni.version}"/>
+                                            <arg value="${scala.version}"/>
+                                            <arg value="${java.major.version}"/>
                                         </exec>
                                         <fail message="exec build-info.sh failed, exit code is ${build-info.exitCode}, error msg is ${build-info.errorMsg}">
                                             <condition>

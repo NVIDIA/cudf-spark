@@ -242,7 +242,12 @@
                             <goal>jar</goal>
                         </goals>
                         <configuration>
-                            <archive><compress>${dist.jar.compress}</compress></archive>
+                            <archive>
+                                <compress>${dist.jar.compress}</compress>
+                                <manifest>
+                                    <mainClass>com.nvidia.spark.rapids.SparkRapidsJarTool</mainClass>
+                                </manifest>
+                            </archive>
                             <classesDirectory>${project.build.directory}/parallel-world</classesDirectory>
                             <classifier>${jni.classifier}</classifier>
                         </configuration>
@@ -400,6 +405,94 @@
                                             metadata_dir="${dist.native.chunking.metadata.dir}"/>
                                     </then>
                                 </ac:if>
+                            </target>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>verify-dist-jar-main</id>
+                        <phase>verify</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <java jar="${dist.jar.name}" fork="true" failonerror="true"
+                                      output="${project.build.directory}/dist-jar-info.txt"/>
+                                <loadfile property="dist.jar.info"
+                                          srcFile="${project.build.directory}/dist-jar-info.txt"/>
+                                <fail message="Distribution JAR build report is incomplete">
+                                    <condition>
+                                        <not>
+                                            <and>
+                                                <contains string="${dist.jar.info}"
+                                                          substring="RAPIDS Accelerator for Apache Spark:"/>
+                                                <contains string="${dist.jar.info}"
+                                                          substring="scala_library_version: ${scala.version}"/>
+                                                <contains string="${dist.jar.info}"
+                                                          substring="java_bytecode_target: ${java.major.version}"/>
+                                                <contains string="${dist.jar.info}"
+                                                          substring="Compute the payload SHA-256 with:"/>
+                                                <contains string="${dist.jar.info}"
+                                                          substring="Packaged Spark versions:"/>
+                                                <contains string="${dist.jar.info}"
+                                                          substring="cuDF Spark JNI:"/>
+                                                <contains string="${dist.jar.info}"
+                                                          substring="cuDF Spark Private:"/>
+                                            </and>
+                                        </not>
+                                    </condition>
+                                </fail>
+                                <java jar="${dist.jar.name}" fork="true" failonerror="true"
+                                      output="${project.build.directory}/dist-jar-checksum.txt">
+                                    <arg value="checksum"/>
+                                </java>
+                                <loadfile property="dist.jar.checksum"
+                                          srcFile="${project.build.directory}/dist-jar-checksum.txt"/>
+                                <fail message="Distribution JAR payload checksum is invalid">
+                                    <condition>
+                                        <not>
+                                            <matches string="${dist.jar.checksum}"
+                                                     pattern="^[0-9a-f]{64}\s*$"/>
+                                        </not>
+                                    </condition>
+                                </fail>
+                                <fail message="Distribution JAR must contain exactly one cudf-spark-private build-info resource">
+                                    <condition>
+                                        <not>
+                                            <resourcecount count="1">
+                                                <zipfileset src="${dist.jar.name}"
+                                                            includes="**/cudf-spark-private-version-info.properties"/>
+                                            </resourcecount>
+                                        </not>
+                                    </condition>
+                                </fail>
+                                <fail message="Distribution JAR requires ai.rapids.cudf.NativeDepUtil; use a cuDF build containing NVIDIA/cudf#23854">
+                                    <condition>
+                                        <not>
+                                            <resourcecount count="1">
+                                                <zipfileset src="${dist.jar.name}"
+                                                            includes="ai/rapids/cudf/NativeDepUtil.class"/>
+                                            </resourcecount>
+                                        </not>
+                                    </condition>
+                                </fail>
+                                <taskdef resource="net/sf/antcontrib/antcontrib.properties"/>
+                                <ac:trycatch xmlns:ac="antlib:net.sf.antcontrib">
+                                    <ac:try>
+                                        <mkdir dir="${project.build.directory}/native-extraction-smoke"/>
+                                        <java jar="${dist.jar.name}" fork="true" failonerror="true">
+                                            <arg value="extract"/>
+                                            <arg value="cudfjni"/>
+                                            <arg value="${project.build.directory}/native-extraction-smoke/cudfjni"/>
+                                        </java>
+                                        <java jar="${dist.jar.name}" fork="true" failonerror="true">
+                                            <arg value="extract"/>
+                                            <arg value="cudf"/>
+                                            <arg value="${project.build.directory}/native-extraction-smoke/cudf"/>
+                                        </java>
+                                    </ac:try>
+                                    <ac:finally>
+                                        <delete dir="${project.build.directory}/native-extraction-smoke"/>
+                                    </ac:finally>
+                                </ac:trycatch>
                             </target>
                         </configuration>
                     </execution>
