@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ package org.apache.spark.sql.hive.rapids
 import scala.collection.JavaConverters._
 
 import com.nvidia.spark.rapids.{GpuExpression, GpuLiteral, GpuRowBasedUserDefinedFunction, GpuScalar}
-import org.apache.hadoop.hive.ql.exec.{FunctionRegistry, UDF}
+import org.apache.hadoop.hive.ql.exec.UDF
 import org.apache.hadoop.hive.ql.udf.{UDFType => HiveUDFType}
 import org.apache.hadoop.hive.ql.udf.generic.GenericUDF
 import org.apache.hadoop.hive.ql.udf.generic.GenericUDF.DeferredObject
@@ -31,7 +31,8 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Expression, Literal, SpecializedGetters}
 import org.apache.spark.sql.hive.DeferredObjectAdapter
 import org.apache.spark.sql.hive.HiveShim.HiveFunctionWrapper
-import org.apache.spark.sql.hive.rapids.shims.{GpuRowBasedHiveGenericUDFShim, HiveInspectorsShim}
+import org.apache.spark.sql.hive.rapids.shims.{GpuRowBasedHiveGenericUDFShim,
+  GpuRowBasedHiveSimpleUDFShim, HiveInspectorsShim}
 import org.apache.spark.sql.types.DataType
 
 /** Common implementation across row-based Hive UDFs */
@@ -123,7 +124,8 @@ case class GpuRowBasedHiveSimpleUDF(
 
   @transient
   private lazy val method =
-    function.getResolver.getEvalMethod(children.map(_.dataType.toTypeInfo).asJava)
+    GpuRowBasedHiveSimpleUDFShim.getEvalMethod(
+      function, children.map(_.dataType.toTypeInfo).asJava)
 
   // Create parameter converters
   @transient
@@ -136,10 +138,10 @@ case class GpuRowBasedHiveSimpleUDF(
 
   override protected def evaluateRow(childrenRow: InternalRow): Any = {
     val inputs = wrapRow(childRowAccessors.map(_(childrenRow)), wrappers, cached, inputDataTypes)
-    val ret = FunctionRegistry.invoke(
+    val ret = GpuRowBasedHiveSimpleUDFShim.invoke(
       method,
       function,
-      conversionHelper.convertIfNecessary(inputs : _*): _*)
+      conversionHelper.convertIfNecessary(inputs : _*))
     unwrapper(ret)
   }
 
