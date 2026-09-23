@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,19 +14,18 @@
  * limitations under the License.
  */
 
-package com.nvidia.spark.rapids
+package com.nvidia.spark.rapids.parquet
 
-import org.apache.spark.scheduler.SparkListenerEvent
+import org.apache.commons.io.output.ByteArrayOutputStream
+import org.scalatest.funsuite.AnyFunSuite
 
-private[rapids] trait SparkRapidsBuildInfoEventShortToString {
-  def shortToString: String
-}
+class ByteArrayOutputFileSuite extends AnyFunSuite {
+  test("single-byte writes advance the position by one") {
+    val stream = new ByteArrayOutputStream()
+    val output = new ByteArrayOutputFile(stream).create(0L)
 
-case class SparkRapidsBuildInfoEvent(
-  sparkRapidsBuildInfo: Map[String, String],
-  sparkRapidsJniBuildInfo: Map[String, String],
-  cudfBuildInfo: Map[String, String],
-  sparkRapidsPrivateBuildInfo: Map[String, String]
-) extends SparkListenerEvent with SparkRapidsBuildInfoEventShortToString {
-  override def shortToString: String = toString
+    output.write(42)
+
+    assertResult(1L)(output.getPos)
+  }
 }

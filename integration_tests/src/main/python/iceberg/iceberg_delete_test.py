@@ -14,8 +14,8 @@
 
 import pytest
 
-from asserts import assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect, \
-    assert_gpu_fallback_write_sql
+from asserts import (assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect,
+                     assert_gpu_fallback_write_sql)
 from conftest import is_iceberg_remote_catalog
 from data_gen import *
 from iceberg import (create_iceberg_table, get_full_table_name, iceberg_write_enabled_conf,
@@ -162,6 +162,134 @@ def test_iceberg_delete_v3_table_fallback(
         base_table_name,
         [fallback_exec],
         conf=iceberg_delete_cow_enabled_conf)
+
+
+def _assert_only_deletion_vectors(spark, table_name):
+    delete_files = spark.sql(f"""
+        SELECT file_path, file_format, referenced_data_file
+        FROM {table_name}.delete_files
+    """).collect()
+    assert delete_files, "Expected at least one deletion vector"
+
+    deletion_vectors = {}
+    for delete_file in delete_files:
+        assert delete_file.file_format == 'PUFFIN', \
+            f"Expected only Puffin deletion vectors, found {delete_files}"
+        assert delete_file.referenced_data_file is not None, \
+            f"Deletion vector must reference a data file: {delete_file}"
+        assert delete_file.referenced_data_file not in deletion_vectors, \
+            f"Expected at most one deletion vector per data file, found {delete_files}"
+        deletion_vectors[delete_file.referenced_data_file] = delete_file.file_path
+    return deletion_vectors
+
+
+@iceberg
+# Iceberg metadata table scans are CPU-only; the DELETE command is still GPU-validated.
+@allow_non_gpu("BatchScanExec")
+@ignore_order(local=True)
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.parametrize('fanout_enabled', [False, True], ids=['clustered', 'fanout'])
+def test_iceberg_delete_v3_gpu_writes_and_merges_deletion_vectors(
+        spark_tmp_table_factory, fanout_enabled):
+    base_table_name = get_full_table_name(spark_tmp_table_factory)
+    cpu_table_name = f"{base_table_name}_cpu"
+    gpu_table_name = f"{base_table_name}_gpu"
+    data_gen_func = lambda spark: gen_df(
+        spark, [
+            ('id', LongGen(nullable=False, min_val=0, max_val=127)),
+            ('value', LongGen()),
+            ('data', StringGen())
+        ], seed=0)
+    table_properties = {
+        'format-version': '3',
+        'write.spark.fanout.enabled': fanout_enabled
+    }
+    create_iceberg_table_with_data(
+        cpu_table_name, "bucket(2, id)", data_gen_func, table_properties,
+        delete_mode='merge-on-read')
+    create_iceberg_table_with_data(
+        gpu_table_name, "bucket(2, id)", data_gen_func, table_properties,
+        delete_mode='merge-on-read')
+
+    def delete_data(spark):
+        is_gpu = spark.conf.get('spark.rapids.sql.enabled') == 'true'
+        table_name = gpu_table_name if is_gpu else cpu_table_name
+        spark.sql(f"DELETE FROM {table_name} WHERE id % 3 = 0")
+        first_delete_vectors = _assert_only_deletion_vectors(spark, table_name)
+        spark.sql(f"DELETE FROM {table_name} WHERE id % 5 = 0")
+        second_delete_vectors = _assert_only_deletion_vectors(spark, table_name)
+        rewritten_data_files = {
+            data_file for data_file, delete_file in first_delete_vectors.items()
+            if data_file in second_delete_vectors and
+            second_delete_vectors[data_file] != delete_file
+        }
+        assert rewritten_data_files, "Expected the second DELETE to rewrite an existing DV"
+        return spark.table(table_name)
+
+    write_conf = copy_and_update(iceberg_write_enabled_conf, {
+        'spark.rapids.sql.format.iceberg.v3.enabled': 'true'
+    })
+    assert_gpu_and_cpu_are_equal_collect(delete_data, conf=write_conf)
+
+    # Verify CPU Iceberg can read the GPU-written deletion vectors.
+    cpu_data = with_cpu_session(lambda spark: spark.table(cpu_table_name).collect())
+    gpu_data = with_cpu_session(lambda spark: spark.table(gpu_table_name).collect())
+    assert_equal_with_local_sort(cpu_data, gpu_data)
+
+
+@iceberg
+# Iceberg metadata table scans are CPU-only; the DELETE command is still GPU-validated.
+@allow_non_gpu("BatchScanExec")
+@ignore_order(local=True)
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+def test_iceberg_delete_v3_gpu_upgrades_position_deletes(spark_tmp_table_factory):
+    base_table_name = get_full_table_name(spark_tmp_table_factory)
+    cpu_table_name = f"{base_table_name}_cpu"
+    gpu_table_name = f"{base_table_name}_gpu"
+    data_gen_func = lambda spark: gen_df(
+        spark, [
+            ('id', LongGen(nullable=False, min_val=0, max_val=63)),
+            ('value', LongGen()),
+            ('data', StringGen())
+        ], seed=0)
+    table_properties = {'format-version': '2'}
+    create_iceberg_table_with_data(
+        cpu_table_name, data_gen_func=data_gen_func, table_properties=table_properties,
+        delete_mode='merge-on-read')
+    create_iceberg_table_with_data(
+        gpu_table_name, data_gen_func=data_gen_func, table_properties=table_properties,
+        delete_mode='merge-on-read')
+
+    def create_position_deletes(spark, table_name):
+        spark.sql(f"DELETE FROM {table_name} WHERE id % 4 = 0")
+        delete_files = spark.sql(f"""
+            SELECT file_format FROM {table_name}.delete_files
+        """).collect()
+        assert delete_files, "Expected at least one v2 position-delete file"
+        assert all(delete_file.file_format == 'PARQUET' for delete_file in delete_files), \
+            f"Expected only Parquet position deletes before the v3 upgrade, found {delete_files}"
+        spark.sql(
+            f"ALTER TABLE {table_name} SET TBLPROPERTIES ('format-version' = '3')")
+
+    with_cpu_session(lambda spark: create_position_deletes(spark, cpu_table_name))
+    with_cpu_session(lambda spark: create_position_deletes(spark, gpu_table_name))
+    write_conf = copy_and_update(iceberg_write_enabled_conf, {
+        'spark.rapids.sql.format.iceberg.v3.enabled': 'true'
+    })
+
+    def delete_data(spark):
+        is_gpu = spark.conf.get('spark.rapids.sql.enabled') == 'true'
+        table_name = gpu_table_name if is_gpu else cpu_table_name
+        spark.sql(f"DELETE FROM {table_name} WHERE id % 5 = 0")
+        _assert_only_deletion_vectors(spark, table_name)
+        return spark.table(table_name)
+
+    assert_gpu_and_cpu_are_equal_collect(delete_data, conf=write_conf)
+
+    # Verify CPU Iceberg can read the GPU-written deletion vectors.
+    cpu_data = with_cpu_session(lambda spark: spark.table(cpu_table_name).collect())
+    gpu_data = with_cpu_session(lambda spark: spark.table(gpu_table_name).collect())
+    assert_equal_with_local_sort(cpu_data, gpu_data)
 
 
 @iceberg
