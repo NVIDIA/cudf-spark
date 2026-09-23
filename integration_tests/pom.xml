@@ -21,11 +21,11 @@
 
     <parent>
         <groupId>com.nvidia</groupId>
-        <artifactId>rapids-4-spark-shim-deps-parent_2.12</artifactId>
+        <artifactId>cudf-spark-shim-deps-parent_2.12</artifactId>
         <version>26.10.0-SNAPSHOT</version>
         <relativePath>../shim-deps/pom.xml</relativePath>
     </parent>
-    <artifactId>rapids-4-spark-integration-tests_2.12</artifactId>
+    <artifactId>cudf-spark-integration-tests_2.12</artifactId>
     <version>26.10.0-SNAPSHOT</version>
     <properties>
         <rapids.module>integration_tests</rapids.module>
@@ -54,14 +54,14 @@
         </dependency>
         <dependency>
             <groupId>com.nvidia</groupId>
-            <artifactId>rapids-4-spark_${scala.binary.version}</artifactId>
+            <artifactId>cudf-spark_${scala.binary.version}</artifactId>
             <version>${project.version}</version>
             <classifier>${jni.classifier}</classifier>
             <scope>provided</scope>
         </dependency>
         <dependency>
             <groupId>com.nvidia</groupId>
-            <artifactId>rapids-4-spark-sql-plugin-api_${scala.binary.version}</artifactId>
+            <artifactId>cudf-spark-sql-plugin-api_${scala.binary.version}</artifactId>
             <version>${project.version}</version>
             <scope>provided</scope>
         </dependency>
@@ -79,7 +79,7 @@
                 <version>3.6.0</version>
                 <configuration>
                     <tarLongFileMode>posix</tarLongFileMode>
-                    <finalName>rapids-4-spark-integration-tests_${scala.binary.version}-${project.version}-${spark.version.classifier}</finalName>
+                    <finalName>cudf-spark-integration-tests_${scala.binary.version}-${project.version}-${spark.version.classifier}</finalName>
                     <descriptorRefs>
                         <descriptorRef>jar-with-dependencies</descriptorRef>
                     </descriptorRefs>

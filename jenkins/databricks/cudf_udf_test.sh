@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright (c) 2023-2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2023-2026, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -61,7 +61,9 @@ CUDF_UDF_TEST_ARGS="--conf spark.python.daemon.module=rapids.daemon_databricks \
 export PYSP_TEST_spark_eventLog_enabled=true
 mkdir -p /tmp/spark-events
 
-CUDF_UDF_TEST_ARGS="$CUDF_UDF_TEST_ARGS --conf spark.executorEnv.PYTHONPATH=`ls $PWD/rapids-4-spark_*.jar | grep -v 'tests.jar'`"
+PLUGIN_JAR=$(ls "$PWD"/cudf-spark_*.jar 2>/dev/null | grep -v 'tests.jar' ||
+    ls "$PWD"/rapids-4-spark_*.jar | grep -v 'tests.jar')
+CUDF_UDF_TEST_ARGS="$CUDF_UDF_TEST_ARGS --conf spark.executorEnv.PYTHONPATH=$PLUGIN_JAR"
 
 SPARK_SUBMIT_FLAGS="$SPARK_CONF $CUDF_UDF_TEST_ARGS" TEST_PARALLEL=1 \
     bash integration_tests/run_pyspark_from_build.sh --runtime_env="databricks" -m "cudf_udf" --cudf_udf --test_type=$TEST_TYPE

@@ -13,14 +13,16 @@ The accelerator is built upon the [cuDF project](https://github.com/rapidsai/cud
 The cuDF plugin requires each worker node in the cluster to have an NVIDIA GPU and the [NVIDIA
 driver](https://www.nvidia.com/en-us/drivers/) installed.
 
-The cuDF plugin consists of the rapids-4-spark plugin jar.  The jar is either preinstalled in the Spark
+The cuDF plugin consists of the cudf-spark plugin jar.  The jar is either preinstalled in the Spark
 classpath on all nodes or submitted with each job that uses the cuDF plugin. See the
 [getting-started
 guide](https://docs.nvidia.com/spark-rapids/user-guide/latest/getting-started/overview.html) for
 more details.
 
-Note: The NVIDIA cuDF plugin for Apache Spark was formerly known as the RAPIDS Accelerator for Apache Spark.  The RAPIDS name will be sunset over time.  Github links from
-`spark-rapids` will redirect to `cudf-spark`.  Artifact names will remain the same for now.
+Note: The NVIDIA cuDF plugin for Apache Spark was formerly known as the RAPIDS Accelerator for
+Apache Spark. The RAPIDS name will be sunset over time. This repository now uses the `cudf-spark`
+name for its GitHub location and Maven artifacts. Releases through 26.08 retain their original
+Maven coordinates.
 
 ## Release v26.08.1
 ### Hardware Requirements:

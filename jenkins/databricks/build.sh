@@ -165,7 +165,7 @@ initialize()
     SPARK_PLUGIN_JAR_VERSION=$($MVN_CMD help:evaluate -q -f $POM_FILE -pl dist -Dexpression=project.version -DforceStdout)
     SCALA_VERSION=$($MVN_CMD help:evaluate -q -f $POM_FILE -pl dist -Dexpression=scala.binary.version -DforceStdout)
     CUDA_VERSION=$($MVN_CMD help:evaluate -q -f $POM_FILE -pl dist -Dexpression=cuda.version -DforceStdout)
-    RAPIDS_BUILT_JAR=rapids-4-spark_$SCALA_VERSION-$SPARK_PLUGIN_JAR_VERSION.jar
+    RAPIDS_BUILT_JAR=cudf-spark_$SCALA_VERSION-$SPARK_PLUGIN_JAR_VERSION.jar
     # If set to 1, skips installing dependencies into mvn repo.
     SKIP_DEP_INSTALL=${SKIP_DEP_INSTALL:-'0'}
     # export 'M2DIR' so that shims can get the correct Spark dependency info

@@ -127,15 +127,15 @@ mvn -pl dist -PnoSnapshots package -DskipTests
 Verify that shim-specific classes are hidden from a conventional classloader.
 
 ```bash
-$ javap -cp dist/target/rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar com.nvidia.spark.rapids.shims.SparkShimImpl
+$ javap -cp dist/target/cudf-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar com.nvidia.spark.rapids.shims.SparkShimImpl
 Error: class not found: com.nvidia.spark.rapids.shims.SparkShimImpl
 ```
 
 However, its bytecode can be loaded if prefixed with `spark3XY` not contained in the package name
 
 ```bash
-$ javap -cp dist/target/rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar spark330.com.nvidia.spark.rapids.shims.SparkShimImpl | head -2
-Warning: File dist/target/rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar(/spark330/com/nvidia/spark/rapids/shims/SparkShimImpl.class) does not contain class spark330.com.nvidia.spark.rapids.shims.SparkShimImpl
+$ javap -cp dist/target/cudf-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar spark330.com.nvidia.spark.rapids.shims.SparkShimImpl | head -2
+Warning: File dist/target/cudf-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar(/spark330/com/nvidia/spark/rapids/shims/SparkShimImpl.class) does not contain class spark330.com.nvidia.spark.rapids.shims.SparkShimImpl
 Compiled from "SparkShims.scala"
 public final class com.nvidia.spark.rapids.shims.SparkShimImpl {
 ```
@@ -177,7 +177,7 @@ mvn package -pl dist -am -Dbuildver=340 -DallowConventionalDistJar=true
 Verify `com.nvidia.spark.rapids.shims.SparkShimImpl` is conventionally loadable:
 
 ```bash
-$ javap -cp dist/target/rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar com.nvidia.spark.rapids.shims.SparkShimImpl | head -2
+$ javap -cp dist/target/cudf-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar com.nvidia.spark.rapids.shims.SparkShimImpl | head -2
 Compiled from "SparkShims.scala"
 public final class com.nvidia.spark.rapids.shims.SparkShimImpl {
 ```
@@ -204,11 +204,11 @@ mvn clean verify -Dbuildver=330 -Parm64
 
 When iterating on changes impacting the `dist` module artifact directly or via
 dependencies you might find the jar creation step unacceptably slow. Due to the
-current size of the artifact `rapids-4-spark_2.12` Maven Jar Plugin spends the
+current size of the artifact `cudf-spark_2.12` Maven Jar Plugin spends the
 bulk of the time compressing the artifact content.
 Since the JAR file specification focuses on the file entry layout in a ZIP
 archive without requiring file entries to be compressed it is possible to skip
-compression, and increase the speed of creating `rapids-4-spark_2.12` jar ~3x
+compression, and increase the speed of creating `cudf-spark_2.12` jar ~3x
 for a single Spark version Shim alone.
 
 To this end in a pre-production build you can set the Boolean property
@@ -224,7 +224,7 @@ The time saved is more significant if you are merely changing
 the `aggregator` module, or the `dist` module, or just incorporating changes from
 [cudf-spark-jni](https://github.com/NVIDIA/cudf-spark-jni/blob/branch-23.04/CONTRIBUTING.md#local-testing-of-cross-repo-contributions-cudf-spark-rapids-jni-and-spark-rapids)
 
-For example, to quickly repackage `rapids-4-spark` after the
+For example, to quickly repackage `cudf-spark` after the
 initial `./build/buildall` you can iterate by invoking
 ```Bash
 mvn package -pl dist -PnoSnapshots -Ddist.jar.compress=false -Drapids.jni.unpack.skip
@@ -334,9 +334,9 @@ folders such as `tests/src/test/spark3*` manually as `Test Sources Root`
 * There is a known issue where, even after selecting a different Maven profile in the Maven submenu,
 the source folders from a previously selected profile may remain active. As a workaround,
 when switching to a different profile, go to
-`File | Project Structure ... | Modules`, select the `rapids-4-spark-sql_2.12` module,
+`File | Project Structure ... | Modules`, select the `cudf-spark-sql_2.12` module,
 click `Sources`, and delete all the shim source roots from the `Source Folders` list. Make sure
-the right test source folders are in `rapids-4-spark-sql_2.12` and `rapids-4-spark-tests_2.12`.
+the right test source folders are in `cudf-spark-sql_2.12` and `cudf-spark-tests_2.12`.
 Re-execute the steps above: reload, and `Generate Sources ...`.
 
 If you see Scala symbols unresolved (highlighted red) in IDEA please try the following steps to resolve it:

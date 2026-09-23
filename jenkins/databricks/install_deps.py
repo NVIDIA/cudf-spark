@@ -244,7 +244,7 @@ def install_deps(deps, spark_version_to_install_databricks_jars, m2_dir, jar_dir
             xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
             <modelVersion>4.0.0</modelVersion>
             <groupId>com.nvidia</groupId>
-            <artifactId>rapids-4-spark-databricks-deps-installer</artifactId>
+            <artifactId>cudf-spark-databricks-deps-installer</artifactId>
             <description>bulk databricks deps installer</description>
             <version>${SPARK_PLUGIN_JAR_VERSION}</version>
             <packaging>pom</packaging>

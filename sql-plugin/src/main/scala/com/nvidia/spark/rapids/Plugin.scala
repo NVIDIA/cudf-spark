@@ -17,7 +17,7 @@
 package com.nvidia.spark.rapids
 
 import java.lang.reflect.InvocationTargetException
-import java.net.URL
+import java.net.{JarURLConnection, URL}
 import java.time.ZoneId
 import java.util.Properties
 import java.util.concurrent.ConcurrentHashMap
@@ -152,17 +152,8 @@ object RapidsPluginUtils extends Logging {
 
   private def detectMultipleJar(propName: String, jarName: String, conf: RapidsConf): Unit = {
     val classloader = ShimLoader.getShimClassLoader()
-    val possibleRapidsJarURLs = classloader.getResources(propName).asScala.toSet.toSeq.filter {
-      url => {
-        val urlPath = url.toString
-        // Filter out submodule jars, e.g. rapids-4-spark-aggregator_2.12-26.10.0-spark341.jar,
-        // and files stored under subdirs of '!/', e.g.
-        // rapids-4-spark_2.12-26.10.0-cuda12.jar!/spark330/rapids4spark-version-info.properties
-        // We only want to find the main jar, e.g.
-        // rapids-4-spark_2.12-26.10.0-cuda12.jar!/rapids4spark-version-info.properties
-        !urlPath.contains("rapids-4-spark-") && urlPath.endsWith("!/" + propName)
-      }
-    }
+    val possibleRapidsJarURLs = classloader.getResources(propName).asScala.toSet.toSeq
+      .filter(isMainJarResource(_, propName))
     val revisionRegex = "revision=(.*)".r
     val revisionMap: Map[String, Seq[URL]] = possibleRapidsJarURLs.map { url =>
       val versionInfo = scala.io.Source.fromURL(url).getLines().toSeq
@@ -208,8 +199,26 @@ object RapidsPluginUtils extends Logging {
     }
   }
 
+  private[rapids] def isMainJarResource(url: URL, propName: String): Boolean = {
+    val urlPath = url.toString
+    if (!urlPath.endsWith("!/" + propName)) {
+      false
+    } else if (propName != PLUGIN_PROPS_FILENAME) {
+      true
+    } else {
+      val jarPath = url.openConnection() match {
+        case jarConnection: JarURLConnection => jarConnection.getJarFileURL.getPath
+        case _ => urlPath.substring(0, urlPath.lastIndexOf("!/"))
+      }
+      val jarFileName = jarPath.substring(jarPath.lastIndexOf('/') + 1)
+      // Filter out submodule jars, e.g. cudf-spark-aggregator_2.12-26.10.0-spark341.jar.
+      !jarFileName.contains("cudf-spark-") &&
+        !jarFileName.contains("rapids-4-spark-")
+    }
+  }
+
   def detectMultipleJars(conf: RapidsConf): Unit = {
-    detectMultipleJar(PLUGIN_PROPS_FILENAME, "rapids-4-spark", conf)
+    detectMultipleJar(PLUGIN_PROPS_FILENAME, "cudf-spark", conf)
     detectMultipleJar(JNI_PROPS_FILENAME, "cudf-spark-jni", conf)
     detectMultipleJar(CUDF_PROPS_FILENAME, "cudf", conf)
   }
