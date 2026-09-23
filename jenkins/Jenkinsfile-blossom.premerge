@@ -74,6 +74,8 @@ pipeline {
             description: 'Merged commit of specific PR')
         string(name: 'GITHUB_DATA', defaultValue: '',
             description: 'Json-formatted github data from upstream blossom-ci')
+        booleanParam(name: 'JNI_PROVENANCE_REQUIRED', defaultValue: false,
+            description: 'Require URM JNI provenance to match the checked-out submodule pointer')
     }
 
     environment {
@@ -122,6 +124,25 @@ pipeline {
                     }
                     githubHelper.updateCommitStatus("", "Running", GitHubCommitState.PENDING)
                     checkoutCode(githubHelper.getCloneUrl(), githubHelper.getMergedSHA())
+                    sh '''
+                        python3 jenkins/jni_dependency.py \
+                            --pom pom.xml \
+                            --pom scala2.13/pom.xml \
+                            check
+                    '''
+                    if (params.JNI_PROVENANCE_REQUIRED) {
+                        sh '''
+                            python3 jenkins/jni_dependency.py \
+                                --pom pom.xml \
+                                --pom scala2.13/pom.xml \
+                                verify-repository \
+                                --base-url "$ART_URL" \
+                                --username-env ART_CREDS_USR \
+                                --password-env ART_CREDS_PSW \
+                                --attempts 20 \
+                                --wait-seconds 30
+                        '''
+                    }
 
                     def changedFilesOutput = sh(returnStdout: true,
                         script: 'git -c core.quotePath=false --no-pager diff ' +
@@ -318,6 +339,7 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                                         common.resolveIncompatibleDriverIssue(this)
                                         common.restoreM2Cache(this)
                                         common.prepareArtNetrc(this)
+                                        verifyResolvedJni(params.JNI_PROVENANCE_REQUIRED)
                                         sh "$PREMERGE_SCRIPT mvn_verify"
                                         step([$class                : 'JacocoPublisher',
                                               execPattern           : '**/target/jacoco.exec',
@@ -372,6 +394,7 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                                         common.resolveIncompatibleDriverIssue(this)
                                         common.restoreM2Cache(this)
                                         common.prepareArtNetrc(this)
+                                        verifyResolvedJni(params.JNI_PROVENANCE_REQUIRED)
                                         sh "$PREMERGE_SCRIPT ci_2"
                                     } catch(e) {
                                         try {
@@ -420,6 +443,7 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                                         common.resolveIncompatibleDriverIssue(this)
                                         common.restoreM2Cache(this)
                                         common.prepareArtNetrc(this)
+                                        verifyResolvedJni(params.JNI_PROVENANCE_REQUIRED)
                                         sh "$PREMERGE_SCRIPT ci_scala213"
                                     } catch(e) {
                                         try {
@@ -572,6 +596,25 @@ void abortDupBuilds() {
         }
         prevBuild = prevBuild.getPreviousBuildInProgress()
     }
+}
+
+void verifyResolvedJni(boolean required) {
+    if (!required) {
+        return
+    }
+    sh '''
+        jniVersion=$(mvn $MVN_URM_MIRROR help:evaluate -q \
+            -Dexpression=cudf-spark-jni.version -DforceStdout)
+        mvn -B $MVN_URM_MIRROR -U \
+            org.apache.maven.plugins:maven-dependency-plugin:3.8.1:get \
+            -Dartifact=com.nvidia:cudf-spark-jni:${jniVersion}:jar:${CLASSIFIER} \
+            -Dtransitive=false
+        python3 jenkins/jni_dependency.py \
+            --pom pom.xml \
+            --pom scala2.13/pom.xml \
+            verify-jar \
+            --jar "$HOME/.m2/repository/com/nvidia/cudf-spark-jni/${jniVersion}/cudf-spark-jni-${jniVersion}-${CLASSIFIER}.jar"
+    '''
 }
 
 void checkoutCode(String url, String sha) {

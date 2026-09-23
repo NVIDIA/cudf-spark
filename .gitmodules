@@ -1,3 +1,7 @@
 [submodule "thirdparty/parquet-testing"]
 	path = thirdparty/parquet-testing
 	url = https://github.com/apache/parquet-testing
+[submodule "thirdparty/cudf-spark-jni"]
+	path = thirdparty/cudf-spark-jni
+	url = https://github.com/NVIDIA/cudf-spark-jni.git
+	branch = release/26.10
