@@ -864,7 +864,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       "3. The deletion vector size must be smaller than " +
       s"${DELTA_LOW_SHUFFLE_MERGE_DEL_VECTOR_BROADCAST_THRESHOLD.key} ")
     .booleanConf
-    .createWithDefault(false)
+    .createWithDefault(true)
 
     val DELTA_DELETION_VECTOR_PREDICATE_PUSHDOWN =
     conf("spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled")

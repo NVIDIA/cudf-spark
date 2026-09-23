@@ -30,7 +30,7 @@ import com.databricks.sql.io.RowIndexFilterType
 import com.databricks.sql.transaction.tahoe._
 import com.databricks.sql.transaction.tahoe.actions.{AddCDCFile, AddFile,
   DeletionVectorDescriptor, FileAction}
-import com.databricks.sql.transaction.tahoe.commands.DeltaCommand
+import com.databricks.sql.transaction.tahoe.commands.{DeletionVectorUtils, DeltaCommand}
 import com.databricks.sql.transaction.tahoe.commands.cdc.CDCReader._
 import com.databricks.sql.transaction.tahoe.commands.merge.MergeIntoMaterializeSource
 import com.databricks.sql.transaction.tahoe.deletionvectors.{RoaringBitmapArray,
@@ -668,6 +668,8 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
     .metricUpdateExpr("numTargetRowsNotMatchedBySourceUpdated", deterministic = false)
   private val incrInsertedCountExpr: Expression = context.cmd
     .metricUpdateExpr("numTargetRowsInserted", deterministic = false)
+  private val incrCopiedCountExpr: Expression = context.cmd
+    .metricUpdateExpr("numTargetRowsCopied", deterministic = false)
   private val incrDeletedCountExpr: Expression = context.cmd
     .metricUpdateExpr("numTargetRowsDeleted", deterministic = false)
   private val incrDeletedMatchedCountExpr: Expression = context.cmd
@@ -684,6 +686,14 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
    * when the changeset is too large.
    */
   def shouldFallback(): Boolean = {
+    // Check the transaction snapshot, not the potentially older planning snapshot. Existing
+    // persistent DVs are handled by classic merge; do not load and combine them on the driver.
+    if (!DeletionVectorUtils.isTableDVFree(context.deltaTxn.snapshot)) {
+      logWarning("Existing deletion vectors are not supported by low shuffle merge, " +
+        "fallback to classic GPU merge.")
+      return true
+    }
+
     // Trying to detect if we can execute finding touched files on the GPU.
     val touchFilePlanOverrideSucceed = verifyGpuPlan(planForFindingTouchedFiles()) { planMeta =>
       def check(meta: SparkPlanMeta[SparkPlan]): Boolean = {
@@ -1130,7 +1140,8 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
     import org.apache.spark.sql.catalyst.expressions.Literal.{FalseLiteral, TrueLiteral}
 
     val isDeleteWithDuplicateMatches = multipleMatchDeleteOnlyOvercount.nonEmpty
-    val sourcePlanDF = this.sourceDF
+    // The write pass updates numSourceRowsInSecondScan, not the discovery counter.
+    val sourcePlanDF = context.cmd.mergeSourceDF
     val (targetPlanDF, rowTrackingCols, rowTrackingUpdateExprs) =
       UpdateCommandShims.preserveRowTrackingColumns(
         buildTargetDFWithFiles(touchedFiles.values.map(_._2).toSeq),
@@ -1209,6 +1220,8 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
       "numTargetRowsNotMatchedBySourceUpdated", deterministic = true)
     val incrInsertedCount = context.cmd.metricUpdateExpr(
       "numTargetRowsInserted", deterministic = true)
+    val incrCopiedCount = context.cmd.metricUpdateExpr(
+      "numTargetRowsCopied", deterministic = true)
     val incrDeletedCount = context.cmd.metricUpdateExpr(
       "numTargetRowsDeleted", deterministic = true)
     val incrDeletedMatchedCount = context.cmd.metricUpdateExpr(
@@ -1344,7 +1357,7 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
           clause, clauseRouting(targetRowHasNoMatch, notMatchedBySourceConditions, index))
     }
     val noopCopyOutput = resolveOnJoinedPlan(
-      cdfTargetOutputCols :+ FalseLiteral :+ TrueLiteral :+ CDC_TYPE_NOT_CDC_LITERAL)
+      cdfTargetOutputCols :+ FalseLiteral :+ incrCopiedCount :+ CDC_TYPE_NOT_CDC_LITERAL)
     val deleteRowOutput = resolveOnJoinedPlan(
       cdfTargetOutputCols :+ TrueLiteral :+ TrueLiteral :+ CDC_TYPE_NOT_CDC_LITERAL)
     val processorInputPlan = if (materializedValues.isEmpty) {
@@ -1412,7 +1425,8 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
 
     // The join itself selects touched target rows, so this pass can scan the touched files without
     // applying the temporary deletion vectors used by the unmodified-row pass.
-    val sourcePlanDF = this.sourceDF
+    // The write pass updates numSourceRowsInSecondScan, not the discovery counter.
+    val sourcePlanDF = context.cmd.mergeSourceDF
     val (targetPlanDF, rowTrackingCols, rowTrackingUpdateExprs) =
       UpdateCommandShims.preserveRowTrackingColumns(
         buildTargetDFWithFiles(touchedFiles.values.map(_._2).toSeq),
@@ -1589,7 +1603,7 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
           Literal.FalseLiteral :+
           Literal.TrueLiteral :+
           Literal(null) :+
-          Literal.TrueLiteral
+          incrCopiedCountExpr
       }
       if (context.cmd.matchedClauses.isEmpty) {
         // If there is not matched clause, this is insert only, we should delete this row.
@@ -1612,7 +1626,7 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
           Literal.FalseLiteral :+
           UnresolvedAttribute(targetRowPresentCol) :+
           UnresolvedAttribute(sourceRowPresentCol) :+
-          Literal.TrueLiteral
+          incrCopiedCountExpr
       }
       modifiedRowsSchema.zipWithIndex.map { case (_, idx) =>
         CaseWhen(
@@ -1656,11 +1670,13 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
         hadoopConf,
         tablePath))
     }.toSeq
-    val (unmodifiedDF, _, _) = UpdateCommandShims.preserveRowTrackingColumns(
+    val (targetDF, _, _) = UpdateCommandShims.preserveRowTrackingColumns(
       buildTargetDFWithFiles(filesWithTemporaryDVs),
       context.deltaTxn.snapshot,
       Seq.empty,
       Seq.empty)
+    // Count only live, untouched rows from rewritten files, after temporary-DV filtering.
+    val unmodifiedDF = targetDF.filter(DFUDFShims.exprToColumn(incrCopiedCountExpr))
     if (DeltaConfigs.CHANGE_DATA_FEED.fromMetaData(context.deltaTxn.metadata)) {
       unmodifiedDF.withColumn(
         CDC_TYPE_COLUMN_NAME, DFUDFShims.exprToColumn(CDC_TYPE_NOT_CDC_LITERAL))

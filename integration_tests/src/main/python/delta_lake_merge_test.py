@@ -28,7 +28,8 @@ from spark_session import (is_before_spark_320, is_databricks_runtime, spark_ver
 
 delta_merge_enabled_conf = copy_and_update(delta_writes_enabled_conf,
                                            {"spark.rapids.sql.command.MergeIntoCommand": "true",
-                                            "spark.rapids.sql.command.MergeIntoCommandEdge": "true"})
+                                            "spark.rapids.sql.command.MergeIntoCommandEdge": "true",
+                                            "spark.rapids.sql.delta.lowShuffleMerge.enabled": "false"})
 
 if is_spark_400_or_later():
     # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
