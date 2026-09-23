@@ -50,7 +50,7 @@
                 <configuration>
                     <release conf.combine="override">8</release>
                     <target combine.self="override"/>
-                    <addJavacArgs conf.combine="override">-Xlint:all,-serial,-path,-try,-processing</addJavacArgs>
+                    <addJavacArgs conf.combine="override">-Xlint:all,-serial,-path,-try,-processing|-Werror</addJavacArgs>
                 </configuration>
             </plugin>
             <plugin>
