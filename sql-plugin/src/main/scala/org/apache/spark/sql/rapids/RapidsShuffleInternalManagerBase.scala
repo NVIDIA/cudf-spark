@@ -622,7 +622,13 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
     mapOutputWriters += mapOutputWriter  // Track for cleanup
 
     val partLengths = if (!records.hasNext) {
-      commitAllPartitions(mapOutputWriter, true)
+      val lengths = commitAllPartitions(mapOutputWriter, true)
+      // An empty attempt follows the catalog's rules too: a map id published earlier keeps its
+      // output and lengths, and a shuffle already cleaned up fails the task.
+      GpuShuffleEnv.getMultithreadedCatalog.map { catalog =>
+        catalog.publishMapOutputOrFail(shuffleId, mapId, new MapOutputSegments.Builder().build(),
+          numPartitions)
+      }.getOrElse(lengths)
     } else {
       writePartitionedGpuBatches(records, mapOutputWriter)
     }
@@ -965,7 +971,7 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
         case Some(catalog) =>
           // Store data in MultithreadedShuffleBufferCatalog instead of merging.
           // The catalog takes ownership of the handles.
-          val lengths = storePartialFilesInCatalog(catalog, partialFiles.toSeq, isMultiBatch)
+          val lengths = storePartialFilesInCatalog(catalog, partialFiles.toSeq)
           handlesTransferred = true
           lengths
         case None =>
@@ -1018,47 +1024,21 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
    *
    * @param catalog the MultithreadedShuffleBufferCatalog to store data
    * @param partialFiles list of partial files from all batches
-   * @param isMultiBatch whether this is a multi-batch scenario
-   * @return array of partition lengths (sum across all batches for each partition)
+   * @return partition lengths of the output the catalog keeps for this map, which is an earlier
+   *         attempt's if one was already published
+   * @throws IllegalStateException if the shuffle was cleaned up before the publish; the catalog
+   *                               has closed the handles by then
    */
   private def storePartialFilesInCatalog(
       catalog: MultithreadedShuffleBufferCatalog,
-      partialFiles: Seq[PartialFile],
-      isMultiBatch: Boolean): Array[Long] = {
-    val accumulatedLengths = new Array[Long](numPartitions)
-
-    if (isMultiBatch) {
-      // Multi-batch: store each partial file's partitions in catalog
-      partialFiles.foreach { pf =>
-        var offset = 0L
-        for (partId <- 0 until numPartitions) {
-          val length = pf.partitionLengths(partId)
-          if (length > 0) {
-            catalog.addPartition(shuffleId, mapId, partId, pf.handle, offset, length)
-          }
-          accumulatedLengths(partId) += length
-          offset += length
-        }
-        // Don't close the handle here - it will be closed when shuffle is unregistered
-        // Disk write savings are recorded by the reducer when reading the data
-      }
-    } else {
-      // Single batch: use handle already extracted in the write loop
-      // (partialFiles should have exactly one element in single-batch mode)
-      val pf = partialFiles.head
-      var offset = 0L
-      for (partId <- 0 until numPartitions) {
-        val length = pf.partitionLengths(partId)
-        if (length > 0) {
-          catalog.addPartition(shuffleId, mapId, partId, pf.handle, offset, length)
-        }
-        accumulatedLengths(partId) = length
-        offset += length
-      }
-      // Disk write savings are recorded by the reducer when reading the data
-    }
-
-    accumulatedLengths
+      partialFiles: Seq[PartialFile]): Array[Long] = {
+    val output = partialFiles.foldLeft(new MapOutputSegments.Builder()) { (builder, pf) =>
+      builder.addPartialFile(pf.handle, pf.partitionLengths)
+    }.build()
+    // Published whole, so readers never see part of a map output. The catalog owns the handles
+    // from here and closes them itself if it does not keep this output.
+    // Disk write savings are recorded by the reducer when reading the data
+    catalog.publishMapOutputOrFail(shuffleId, mapId, output, numPartitions)
   }
 
   /**

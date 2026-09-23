@@ -17,7 +17,6 @@
 package com.nvidia.spark.rapids
 
 import java.io.{InputStream, IOException}
-import java.lang.{Boolean => JBoolean}
 import java.nio.ByteBuffer
 import java.nio.channels.WritableByteChannel
 import java.util.HashSet
@@ -120,6 +119,136 @@ private[rapids] object MultithreadedShuffleBufferCatalog {
 }
 
 /**
+ * All segments of one map task's output, grouped by reduce partition. It is built once and never
+ * changed, so a reader that finds it sees the whole map output. Empty partitions are not stored.
+ *
+ * @param handles every partial file handle the output owns, including ones that hold no data
+ */
+final class MapOutputSegments private (
+    reduceIds: Array[Int],
+    segmentsByReduceId: Array[Array[PartitionSegment]],
+    val handles: Seq[SpillablePartialFileHandle]) {
+
+  def contains(reduceId: Int): Boolean = {
+    java.util.Arrays.binarySearch(reduceIds, reduceId) >= 0
+  }
+
+  /** Total bytes per reduce id, which is what the map task reports in its MapStatus. */
+  def partitionLengths(numPartitions: Int): Array[Long] = {
+    val lengths = new Array[Long](numPartitions)
+    reduceIds.indices.foreach { i =>
+      lengths(reduceIds(i)) = segmentsByReduceId(i).map(_.length).sum
+    }
+    lengths
+  }
+
+  /** Segments of the reduce ids in [startReduceId, endReduceId), in reduce id then write order. */
+  def segments(startReduceId: Int, endReduceId: Int): Seq[PartitionSegment] = {
+    val found = java.util.Arrays.binarySearch(reduceIds, startReduceId)
+    var i = if (found >= 0) found else -(found + 1)
+    val result = new ArrayBuffer[PartitionSegment]()
+    while (i < reduceIds.length && reduceIds(i) < endReduceId) {
+      result ++= segmentsByReduceId(i)
+      i += 1
+    }
+    result.toSeq
+  }
+}
+
+object MapOutputSegments {
+  /** Collects the segments of one map task's output. Not thread-safe. */
+  final class Builder {
+    // Indexed by reduce id, null where a reduce id has no segment, so build() needs no sort.
+    private val segmentsByReduceId = new ArrayBuffer[ArrayBuffer[PartitionSegment]]()
+    private val handles = new ArrayBuffer[SpillablePartialFileHandle]()
+    private val handleSet = java.util.Collections.newSetFromMap(
+      new java.util.IdentityHashMap[SpillablePartialFileHandle, java.lang.Boolean]())
+
+    /** Adds a partial file whose partitions are stored back to back in reduce id order. */
+    def addPartialFile(
+        handle: SpillablePartialFileHandle,
+        partitionLengths: Array[Long]): Builder = {
+      addHandle(handle)
+      var offset = 0L
+      partitionLengths.indices.foreach { reduceId =>
+        addSegment(reduceId, handle, offset, partitionLengths(reduceId))
+        offset += partitionLengths(reduceId)
+      }
+      this
+    }
+
+    /** Adds one segment. An empty segment is dropped, and so is its handle. */
+    private[rapids] def add(
+        reduceId: Int,
+        handle: SpillablePartialFileHandle,
+        offset: Long,
+        length: Long): Builder = {
+      if (length > 0) {
+        addHandle(handle)
+        addSegment(reduceId, handle, offset, length)
+      }
+      this
+    }
+
+    def build(): MapOutputSegments = {
+      val reduceIds = segmentsByReduceId.indices.filter(segmentsByReduceId(_) != null).toArray
+      new MapOutputSegments(reduceIds, reduceIds.map(id => segmentsByReduceId(id).toArray),
+        handles.toList)
+    }
+
+    private def addSegment(
+        reduceId: Int,
+        handle: SpillablePartialFileHandle,
+        offset: Long,
+        length: Long): Unit = {
+      if (length > 0) {
+        while (segmentsByReduceId.length <= reduceId) {
+          segmentsByReduceId += null
+        }
+        if (segmentsByReduceId(reduceId) == null) {
+          segmentsByReduceId(reduceId) = new ArrayBuffer[PartitionSegment]()
+        }
+        segmentsByReduceId(reduceId) += PartitionSegment(handle, offset, length)
+      }
+    }
+
+    private def addHandle(handle: SpillablePartialFileHandle): Unit = {
+      if (handleSet.add(handle)) {
+        handles += handle
+      }
+    }
+  }
+}
+
+/**
+ * One registration of a shuffle. Cleanup detaches it whole and never removes an output from it,
+ * so a reader that resolved it before cleanup still sees complete map outputs.
+ */
+private[rapids] final class ShuffleState {
+  private val outputs = new ConcurrentHashMap[Long, MapOutputSegments]()
+  private var closed = false
+
+  def output(mapId: Long): MapOutputSegments = outputs.get(mapId)
+
+  /**
+   * Stores the output unless cleanup has closed this registration. If the map id already has an
+   * output, the first one stays, as Spark keeps the first committed attempt of a map. Returns the
+   * output kept for the map id, or None if closed. The caller closes an output that is not kept.
+   */
+  def tryPublish(mapId: Long, output: MapOutputSegments): Option[MapOutputSegments] =
+    synchronized {
+      if (closed) None else Some(Option(outputs.putIfAbsent(mapId, output)).getOrElse(output))
+    }
+
+  /** Refuses any later publish and returns the outputs this registration holds. */
+  def close(): Seq[MapOutputSegments] = synchronized {
+    import scala.collection.JavaConverters._
+    closed = true
+    outputs.values().asScala.toList
+  }
+}
+
+/**
  * Catalog for managing shuffle data in MULTITHREADED mode without merging.
  * 
  * Instead of merging partial files into a single shuffle file, this catalog
@@ -133,67 +262,80 @@ private[rapids] object MultithreadedShuffleBufferCatalog {
  */
 class MultithreadedShuffleBufferCatalog extends Logging {
 
-  /**
-   * Map from ShuffleBlockId to list of segments.
-   * A partition may have multiple segments if there are multiple batches.
-   */
-  private val partitionSegments = 
-    new ConcurrentHashMap[ShuffleBlockId, ArrayBuffer[PartitionSegment]]()
-
-  /** Track active shuffles for cleanup */
-  private val activeShuffles = new ConcurrentHashMap[Int, JBoolean]()
+  /** Registered shuffles. unregisterShuffle detaches a registration whole. */
+  private val shuffles = new ConcurrentHashMap[Int, ShuffleState]()
 
   /**
-   * Register a shuffle as active.
-   * Must be called before adding any partitions for this shuffle.
+   * Register a shuffle as active. Must be called before publishing any map output for it.
+   * Registering again keeps the current registration; after cleanup it starts a new, empty one.
    */
   def registerShuffle(shuffleId: Int): Unit = {
-    activeShuffles.put(shuffleId, true)
+    shuffles.computeIfAbsent(shuffleId, _ => new ShuffleState)
   }
 
   /**
-   * Add a partition segment to the catalog.
-   * 
-   * @param shuffleId shuffle identifier
-   * @param mapId map task identifier
-   * @param partitionId reduce partition identifier
-   * @param handle the partial file handle containing the data
-   * @param offset starting offset within the handle
-   * @param length number of bytes for this partition
+   * Publish one map task's output. Returns the output the catalog keeps for the map id, which is
+   * an earlier attempt's if one was already published, or None if the shuffle is no longer
+   * registered. The catalog owns the output's handles either way and closes them if not kept.
    */
-  def addPartition(
+  def publishMapOutput(
       shuffleId: Int,
       mapId: Long,
-      partitionId: Int,
-      handle: SpillablePartialFileHandle,
-      offset: Long,
-      length: Long): Unit = {
-    if (length <= 0) {
-      return // Skip empty partitions
+      output: MapOutputSegments): Option[MapOutputSegments] = {
+    // If cleanup closed the registration found first, a map task may have registered it again.
+    val kept = tryPublish(shuffleId, mapId, output).orElse(tryPublish(shuffleId, mapId, output))
+    if (!kept.exists(_ eq output)) {
+      if (kept.isEmpty) {
+        logInfo(s"Discarding output of map $mapId: shuffle $shuffleId is no longer registered")
+      }
+      closeHandles(shuffleId, output.handles)
     }
+    kept
+  }
 
-    val blockId = ShuffleBlockId(shuffleId, mapId, partitionId)
-    val segment = PartitionSegment(handle, offset, length)
+  /**
+   * Publish a map task's output for the writer, which reports the returned lengths in its
+   * MapStatus: the lengths of the output the catalog keeps, an earlier attempt's if one exists.
+   *
+   * @throws IllegalStateException if the shuffle was cleaned up before the publish, so the task
+   *                               is retried instead of advertising data the catalog discarded
+   */
+  def publishMapOutputOrFail(
+      shuffleId: Int,
+      mapId: Long,
+      output: MapOutputSegments,
+      numPartitions: Int): Array[Long] = {
+    val kept = publishMapOutput(shuffleId, mapId, output).getOrElse {
+      throw new IllegalStateException(s"Shuffle $shuffleId was cleaned up on this executor " +
+        s"before map $mapId published its output")
+    }
+    kept.partitionLengths(numPartitions)
+  }
 
-    partitionSegments.compute(blockId, (_, existing) => {
-      val segments = if (existing == null) new ArrayBuffer[PartitionSegment]() else existing
-      segments += segment
-      segments
-    })
+  /** The current registration of a shuffle, or null. */
+  private[rapids] def registration(shuffleId: Int): ShuffleState = shuffles.get(shuffleId)
+
+  private def tryPublish(
+      shuffleId: Int,
+      mapId: Long,
+      output: MapOutputSegments): Option[MapOutputSegments] = {
+    val state = registration(shuffleId)
+    if (state == null) None else state.tryPublish(mapId, output)
   }
 
   /**
    * Check if the catalog has data for a given block.
    */
   def hasData(blockId: ShuffleBlockId): Boolean = {
-    partitionSegments.containsKey(blockId)
+    val output = mapOutput(blockId.shuffleId, blockId.mapId)
+    output != null && output.contains(blockId.reduceId)
   }
 
   /**
    * Check if a shuffle is being managed by this catalog.
    */
   def hasActiveShuffle(shuffleId: Int): Boolean = {
-    activeShuffles.containsKey(shuffleId)
+    shuffles.containsKey(shuffleId)
   }
 
   /**
@@ -202,7 +344,7 @@ class MultithreadedShuffleBufferCatalog extends Logging {
    */
   def getActiveShuffleIds: Seq[Int] = {
     import scala.collection.JavaConverters._
-    activeShuffles.keySet().asScala.map(_.intValue()).toSeq
+    shuffles.keySet().asScala.map(_.intValue()).toSeq
   }
 
   /**
@@ -210,13 +352,8 @@ class MultithreadedShuffleBufferCatalog extends Logging {
    * The buffer dynamically assembles data from multiple partial files if needed.
    */
   def getMergedBuffer(blockId: ShuffleBlockId): ManagedBuffer = {
-    val segments = partitionSegments.get(blockId)
-    if (segments == null || segments.isEmpty) {
-      throw new IllegalArgumentException(
-        MultithreadedShuffleBufferCatalog.missingDataMessage(blockId))
-    }
-
-    new MultiBatchManagedBuffer(segments.toSeq, blockId)
+    mergedBuffer(blockId, blockId.shuffleId, blockId.mapId, blockId.reduceId,
+      blockId.reduceId + 1)
   }
 
   /**
@@ -224,22 +361,31 @@ class MultithreadedShuffleBufferCatalog extends Logging {
    * This method handles ShuffleBlockBatchId which represents multiple reduce partitions.
    */
   def getMergedBatchBuffer(batchId: ShuffleBlockBatchId): ManagedBuffer = {
-    val allSegments = new ArrayBuffer[PartitionSegment]()
+    mergedBuffer(batchId, batchId.shuffleId, batchId.mapId, batchId.startReduceId,
+      batchId.endReduceId)
+  }
 
-    for (reduceId <- batchId.startReduceId until batchId.endReduceId) {
-      val blockId = ShuffleBlockId(batchId.shuffleId, batchId.mapId, reduceId)
-      val segments = partitionSegments.get(blockId)
-      if (segments != null) {
-        allSegments ++= segments
-      }
-    }
-
-    if (allSegments.isEmpty) {
+  // A map output is found whole or not at all, so a buffer never holds part of what was asked.
+  private def mergedBuffer(
+      blockId: BlockId,
+      shuffleId: Int,
+      mapId: Long,
+      startReduceId: Int,
+      endReduceId: Int): ManagedBuffer = {
+    val output = mapOutput(shuffleId, mapId)
+    val segments =
+      if (output == null) Seq.empty else output.segments(startReduceId, endReduceId)
+    if (segments.isEmpty) {
       throw new IllegalArgumentException(
-        MultithreadedShuffleBufferCatalog.missingDataMessage(batchId))
+        MultithreadedShuffleBufferCatalog.missingDataMessage(blockId))
     }
 
-    new MultiBatchManagedBuffer(allSegments.toSeq, batchId)
+    new MultiBatchManagedBuffer(segments, blockId)
+  }
+
+  private def mapOutput(shuffleId: Int, mapId: Long): MapOutputSegments = {
+    val state = registration(shuffleId)
+    if (state == null) null else state.output(mapId)
   }
 
   /**
@@ -249,17 +395,13 @@ class MultithreadedShuffleBufferCatalog extends Logging {
    * @return optional cleanup statistics (None if this catalog has no data for the shuffle)
    */
   def unregisterShuffle(shuffleId: Int): Option[ShuffleCleanupStats] = {
-    activeShuffles.remove(shuffleId)
-
-    // Find and remove all blocks for this shuffle
-    val iterator = partitionSegments.keySet().iterator()
-    val toRemove = new ArrayBuffer[ShuffleBlockId]()
-    while (iterator.hasNext) {
-      val blockId = iterator.next()
-      if (blockId.shuffleId == shuffleId) {
-        toRemove += blockId
-      }
-    }
+    // Close the registration in the same step that detaches it, so a writer that looked it up
+    // earlier cannot publish into a registration that is no longer reachable.
+    var outputs: Seq[MapOutputSegments] = Seq.empty
+    shuffles.computeIfPresent(shuffleId, (_, state) => {
+      outputs = state.close()
+      null
+    })
 
     // Collect unique handles and gather statistics before closing
     val closedHandles = new HashSet[SpillablePartialFileHandle]()
@@ -269,41 +411,26 @@ class MultithreadedShuffleBufferCatalog extends Logging {
     var numSpills = 0
     var numForcedFileOnly = 0
 
-    toRemove.foreach { blockId =>
-      val segments = partitionSegments.remove(blockId)
-      if (segments != null) {
-        segments.foreach { segment =>
-          // Only process each handle once (multiple partitions may share a handle)
-          if (!closedHandles.contains(segment.handle)) {
-            closedHandles.add(segment.handle)
-
-            // Collect statistics before closing
-            val handle = segment.handle
-            val totalBytes = handle.getTotalBytesWritten
-            if (handle.isMemoryBased && !handle.isSpilled) {
-              bytesFromMemory += totalBytes
-            } else {
-              bytesFromDisk += totalBytes
-            }
-
-            // Collect behavior counters
-            numExpansions += handle.getExpansionCount
-            numSpills += handle.getSpillCount
-            if (handle.isFileOnly) {
-              numForcedFileOnly += 1
-            }
-
-            // Drop catalog ownership; retained buffers, streams, and file regions keep the handle
-            // alive through their read leases, so the physical close is deferred until the last
-            // lease is released. close() propagates failures, so catch here so one bad handle
-            // does not abort cleanup of the rest.
-            try {
-              handle.close()
-            } catch {
-              case NonFatal(e) =>
-                logWarning(s"Failed to request close of handle for shuffle $shuffleId", e)
-            }
+    outputs.foreach { output =>
+      output.handles.foreach { handle =>
+        // Only process each handle once
+        if (closedHandles.add(handle)) {
+          // Collect statistics before closing
+          val totalBytes = handle.getTotalBytesWritten
+          if (handle.isMemoryBased && !handle.isSpilled) {
+            bytesFromMemory += totalBytes
+          } else {
+            bytesFromDisk += totalBytes
           }
+
+          // Collect behavior counters
+          numExpansions += handle.getExpansionCount
+          numSpills += handle.getSpillCount
+          if (handle.isFileOnly) {
+            numForcedFileOnly += 1
+          }
+
+          closeHandle(shuffleId, handle)
         }
       }
     }
@@ -319,6 +446,23 @@ class MultithreadedShuffleBufferCatalog extends Logging {
         numExpansions, numSpills, numForcedFileOnly))
     } else {
       None
+    }
+  }
+
+  private def closeHandles(shuffleId: Int, handles: Seq[SpillablePartialFileHandle]): Unit = {
+    handles.foreach(closeHandle(shuffleId, _))
+  }
+
+  // Drop catalog ownership; retained buffers, streams, and file regions keep the handle alive
+  // through their read leases, so the physical close is deferred until the last lease is
+  // released. close() propagates failures, so catch here so one bad handle does not abort
+  // cleanup of the rest.
+  private def closeHandle(shuffleId: Int, handle: SpillablePartialFileHandle): Unit = {
+    try {
+      handle.close()
+    } catch {
+      case NonFatal(e) =>
+        logWarning(s"Failed to request close of handle for shuffle $shuffleId", e)
     }
   }
 }

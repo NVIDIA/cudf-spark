@@ -43,7 +43,8 @@ Building on Phase 1's foundation:
 
 Instead of merging partial files at task end, we:
 1. **Keep partial files alive** (whether in memory or on disk)
-2. **Build an in-memory index** mapping ShuffleBlockId -> [segments in partial files]
+2. **Build an in-memory index** per map output: reduce id -> [segments in partial files],
+   published whole so a reader never sees part of a map output
 3. **Serve reducer requests** by reading from the appropriate segments
 
 ```
@@ -79,9 +80,9 @@ A reducer requesting partition P from map task M needs data from ALL partial fil
 │  │                     │                                               │  │
 │  │                     ▼                                               │  │
 │  │       ┌───────────────────────────────────┐                         │  │
-│  │       │ MultithreadedShuffleBufferCatalog │ ◄── Register partitions │  │
-│  │       │                                   │     (offset, length)    │  │
-│  │       │  ShuffleBlockId -> [Segments]     │                         │  │
+│  │       │ MultithreadedShuffleBufferCatalog │ ◄── Publish whole map   │  │
+│  │       │                                   │     output at task end  │  │
+│  │       │  mapId -> MapOutputSegments       │                         │  │
 │  │       └───────────────────────────────────┘                         │  │
 │  └─────────────────────────────────────────────────────────────────────┘  │
 │                                                                           │
@@ -108,6 +109,7 @@ A reducer requesting partition P from map task M needs data from ALL partial fil
 │  │                     │                                               │  │
 │  │                     ▼                                               │  │
 │  │       MultithreadedShuffleBufferCatalog.unregisterShuffle()         │  │
+│  │       (detaches and closes the whole registration)                  │  │
 │  └─────────────────────────────────────────────────────────────────────┘  │
 └───────────────────────────────────────────────────────────────────────────┘
 
@@ -141,8 +143,8 @@ A reducer requesting partition P from map task M needs data from ALL partial fil
 
 ### 6.2 MultithreadedShuffleBufferCatalog
 
-**What it is**: An in-memory index that maps shuffle block IDs to their locations 
-across partial files.
+**What it is**: An in-memory index of each map task's output that locates every reduce
+partition's segments across partial files.
 
 **Data structure**:
 ```scala
@@ -152,17 +154,27 @@ case class PartitionSegment(
   length: Long
 )
 
-// Map: ShuffleBlockId -> List of segments (one per batch)
-val buffers: ConcurrentHashMap[ShuffleBlockId, ArrayBuffer[PartitionSegment]]
+// One immutable object per map task: the segments of each non-empty reduce id, in
+// partial-file order, and every handle the map output owns
+final class MapOutputSegments
+
+// shuffleId -> registration; a registration maps mapId -> MapOutputSegments
+val shuffles: ConcurrentHashMap[Int, ShuffleState]
 ```
 
 **Key methods**:
 
 | Method | Description |
 |--------|-------------|
-| `addPartition(shuffleId, mapId, partId, handle, offset, length)` | Register a partition segment in the catalog |
-| `getMergedBuffer(blockId)` | Return a `ManagedBuffer` that spans all segments for a block |
-| `unregisterShuffle(shuffleId)` | Remove all entries for a shuffle, close handles, return stats |
+| `registerShuffle(shuffleId)` | Create the shuffle's registration if it has none; every map task calls it |
+| `publishMapOutput(shuffleId, mapId, output)` | Publish a whole map output built with `MapOutputSegments.Builder`; returns the output kept for the map id, or `None` if the shuffle was already cleaned up |
+| `publishMapOutputOrFail(shuffleId, mapId, output, numPartitions)` | The writer's entry point, also used for an empty map task: returns the kept output's lengths for the MapStatus, or fails the task if the shuffle was already cleaned up |
+| `getMergedBuffer(blockId)`, `getMergedBatchBuffer(batchId)` | Return a `ManagedBuffer` over the segments of one map output, or report missing data |
+| `unregisterShuffle(shuffleId)` | Detach and close the shuffle's registration in one step, close its handles, return stats |
+
+A map output is published whole and cleanup never removes part of one, so a lookup sees either
+a complete map output or missing data, even while cleanup runs or the shuffle is registered
+again. A repeated map id keeps the first output, as Spark keeps a map's first committed attempt.
 
 ### 6.3 MultiBatchManagedBuffer
 
@@ -238,24 +250,26 @@ cleanup when SQL executions complete.
   ┌───────────────────────────────────────┐
   │  storePartialFilesInCatalog()         │
   │                                       │
+  │  builder = MapOutputSegments.Builder  │
   │  for each partial file:               │
-  │    for partId in 0..numPartitions:    │
-  │      catalog.addPartition(            │
-  │        shuffleId, mapId, partId,      │
-  │        handle, offset, length)        │
+  │    builder.addPartialFile(handle,     │
+  │      partitionLengths)                │
+  │  catalog.publishMapOutputOrFail(      │
+  │    shuffleId, mapId, builder.build()) │
+  │  -> kept output's lengths, or the     │
+  │     task fails if cleanup already ran │
   └───────────────────────────────────────┘
        │
        ▼
   ┌───────────────────────────────────────┐
   │  MultithreadedShuffleBufferCatalog    │
   │                                       │
-  │  ShuffleBlockId(0, 0, 0) -> [         │
-  │    Segment(handle1, 0, 100)           │
-  │  ]                                    │
-  │  ShuffleBlockId(0, 0, 1) -> [         │
-  │    Segment(handle1, 100, 150)         │
-  │  ]                                    │
-  │  ...                                  │
+  │  shuffle 0 -> registration            │
+  │    map 0 -> MapOutputSegments         │
+  │      reduce 0: [Segment(h1, 0, 100)]  │
+  │      reduce 1: [Segment(h1, 100, 150)]│
+  │      ...                              │
+  │    ...                                │
   └───────────────────────────────────────┘
 ```
 
@@ -284,7 +298,8 @@ builds an index for direct access.
   │  MultithreadedShuffleBufferCatalog    │
   │  .getMergedBuffer(blockId)            │
   │                                       │
-  │  Lookup: blockId -> [                 │
+  │  registration(0) -> map output 5      │
+  │  .segments(3, 4) -> [                 │
   │    Segment(handle1, 500, 100),        │  <- From batch 1
   │    Segment(handle2, 200, 50)          │  <- From batch 2
   │  ]                                    │
