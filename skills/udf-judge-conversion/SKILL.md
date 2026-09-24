@@ -49,6 +49,7 @@ Check that:
 - The CPU path and GPU/SQL path run on the same input data.
 - The CPU result and GPU/SQL result are compared directly.
 - The comparison test actually runs on the GPU with the Spark RAPIDS plugin enabled.
+  - For cuDF/CUDA RapidsUDF targets, the Spark session must run with `spark.rapids.sql.mode=executeOnGpu` to actually exercise GPU execution.
 - The converted path is also validated with the same result assertions used for the CPU path.
 - Additional unit test cases are converted into CPU-vs-GPU/SQL comparison cases, not left as CPU-only tests.
 - Commented-out tests or assertions include a clear explanation and a user-facing note. Documented deviations are acceptable only if the reason is explicit.
