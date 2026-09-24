@@ -29,11 +29,6 @@
       "resource": "withResource(valueColumn.isNull)"
     },
     {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/GpuOrcTimezoneUtils.scala",
-      "fingerprint": "0ea0d172ebf76d2b0b78",
-      "resource": "withResource(timestamp.lessThan(firstTransition))"
-    },
-    {
       "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/RmmRapidsRetryIterator.scala",
       "fingerprint": "e002e24d036ea07b9ae9",
       "resource": "withResource(tables.safeMap(GpuColumnVector.from(_,spillable.dataTypes)))"
