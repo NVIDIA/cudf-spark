@@ -203,7 +203,7 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
     .createWithDefault(true)
 
   val HAS_EXTENDED_YEAR_VALUES = conf("spark.rapids.sql.hasExtendedYearValues")
-      .doc("Spark 3.2.0+ extended parsing of years in dates and " +
+      .doc("Spark 3.2.0+ extended parsing and formatting of years in dates and " +
           "timestamps to support the full range of possible values. Prior " +
           "to this it was limited to a positive 4 digit year. The Accelerator does not " +
           "support the extended range yet. This config indicates if your data includes " +

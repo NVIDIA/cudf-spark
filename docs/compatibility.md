@@ -693,10 +693,10 @@ the specified format string will fall into one of three categories:
 
 The formats which are supported on GPU vary depending on the setting for `timeParserPolicy`.
 
-### CORRECTED and EXCEPTION timeParserPolicy
+### CORRECTED timeParserPolicy
 
-With timeParserPolicy set to `CORRECTED` or `EXCEPTION` (the default), the following formats are supported
-on the GPU without requiring any additional settings.
+With timeParserPolicy set to `CORRECTED` (the default in Spark 4.0 and later), the following formats
+are supported on the GPU without requiring any additional settings.
 
 - `yyyy-MM-dd`
 - `yyyy/MM/dd`
@@ -712,7 +712,39 @@ on the GPU without requiring any additional settings.
 - `MM-yyyy`
 - `MM/dd/yyyy`
 - `MM-dd-yyyy`
+- `yyyyMMdd`
 - `MMyyyy`
+
+`yyyyMMdd` parsing is supported when
+[`spark.rapids.sql.hasExtendedYearValues`](additional-functionality/advanced_configs.md#sql.hasExtendedYearValues)
+is set to `false`. The GPU parser accepts unsigned four-digit years for this packed format, while
+Spark can parse signed or extended years. It falls back to the CPU when extended-year values may be
+present.
+
+### EXCEPTION timeParserPolicy
+
+With timeParserPolicy set to `EXCEPTION` (the default before Spark 4.0), the following formats are
+supported on the GPU without requiring any additional settings.
+
+- `yyyy-MM-dd`
+- `yyyy/MM/dd`
+- `yyyy-MM`
+- `yyyy/MM`
+- `dd/MM/yyyy`
+- `yyyy-MM-dd HH:mm:ss`
+- `MM-dd`
+- `MM/dd`
+- `dd-MM`
+- `dd/MM`
+- `MM/yyyy`
+- `MM-yyyy`
+- `MM/dd/yyyy`
+- `MM-dd-yyyy`
+- `yyyyMMdd`
+- `MMyyyy`
+
+Spark first uses CORRECTED parsing under `EXCEPTION`, then probes LEGACY parsing after a failure and
+raises an error when the parsers disagree. The GPU preserves that behavior for the formats above.
 
 Valid Spark date/time formats that do not appear in the list above may also be supported but have not been
 extensively tested and may produce different results compared to the CPU. Known issues include:
@@ -773,6 +805,12 @@ LEGACY timeParserPolicy support has the following limitations when running on th
 
 When formatting dates and timestamps as strings using functions such as `from_unixtime`, only a
 subset of valid format strings are supported on the GPU.
+
+Formats containing a four-digit year (`yyyy`) are accelerated when
+[`spark.rapids.sql.hasExtendedYearValues`](additional-functionality/advanced_configs.md#sql.hasExtendedYearValues)
+is set to `false`. When it is `true` (the default), the operation falls back to the CPU because Spark
+can format signed and extended years that the GPU formatting path does not yet support. Formats that
+do not contain `yyyy` are unaffected.
 
 With timeParserPolicy set to `LEGACY`, `date_format` and `from_unixtime` additionally support
 `yyyy-MM-dd HH:mm:ss.SSS` when
