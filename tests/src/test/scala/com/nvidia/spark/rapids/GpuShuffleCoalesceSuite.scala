@@ -53,7 +53,7 @@ class GpuShuffleCoalesceSuite extends AnyFunSuite with BeforeAndAfterEach {
    * them if needed so the results need to be closed.
    */
   private def extractColumnVectors(batch: ColumnarBatch): Array[ColumnVector] = {
-    if (GpuPackedTableColumn.isBatchPacked(batch)) {
+    if (TestUtils.isBatchPacked(batch)) {
       val packedColumn = batch.column(0).asInstanceOf[GpuPackedTableColumn]
       val table = packedColumn.getContiguousTable.getTable
       // The contiguous table is still responsible for closing these columns.

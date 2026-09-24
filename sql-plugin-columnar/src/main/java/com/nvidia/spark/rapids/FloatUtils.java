@@ -37,32 +37,6 @@ public final class FloatUtils {
     }
   }
 
-  public static Scalar getNanScalar(DType dType) {
-    if (dType == DType.FLOAT64) {
-      return Scalar.fromDouble(Double.NaN);
-    } else if (dType == DType.FLOAT32) {
-      return Scalar.fromFloat(Float.NaN);
-    } else {
-      throw new IllegalArgumentException("NaNs are only supported for Float types");
-    }
-  }
-
-  public static Scalar getPositiveInfinityScalar(DType dType) {
-    if (dType == DType.FLOAT64) {
-      return Scalar.fromDouble(Double.POSITIVE_INFINITY);
-    } else {
-      return Scalar.fromFloat(Float.POSITIVE_INFINITY);
-    }
-  }
-
-  public static Scalar getNegativeInfinityScalar(DType dType) {
-    if (dType == DType.FLOAT64) {
-      return Scalar.fromDouble(Double.NEGATIVE_INFINITY);
-    } else {
-      return Scalar.fromFloat(Float.NEGATIVE_INFINITY);
-    }
-  }
-
   public static ColumnVector getInfinityVector(DType dtype) {
     if (dtype == DType.FLOAT64) {
       return ColumnVector.fromDoubles(Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY);

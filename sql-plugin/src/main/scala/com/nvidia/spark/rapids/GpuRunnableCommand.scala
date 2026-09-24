@@ -18,14 +18,11 @@ package com.nvidia.spark.rapids
 
 import java.net.URI
 
-import com.nvidia.spark.rapids.shims.{ShimUnaryCommand, ShimUnaryExecNode}
+import com.nvidia.spark.rapids.shims.ShimUnaryCommand
 import org.apache.hadoop.conf.Configuration
 
 import org.apache.spark.SparkContext
-import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{Row, SaveMode, SparkSession}
-import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.execution.{SparkPlan, SQLExecution}
 import org.apache.spark.sql.execution.command.RunnableCommand
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
@@ -106,44 +103,3 @@ object GpuRunnableCommand {
       metrics.values.toSeq)
   }
 }
-
-case class GpuRunnableCommandExec(cmd: GpuRunnableCommand, child: SparkPlan)
-    extends ShimUnaryExecNode with GpuExec {
-  override lazy val allMetrics: Map[String, GpuMetric] = GpuMetric.wrap(cmd.metrics)
-
-  private lazy val sideEffectResult: Seq[ColumnarBatch] =
-    cmd.runColumnar(sparkSession, child)
-
-  override def output: Seq[Attribute] = cmd.output
-
-  override def nodeName: String = "Execute " + cmd.nodeName
-
-  // override the default one, otherwise the `cmd.nodeName` will appear twice from simpleString
-  override def argString(maxFields: Int): String = cmd.argString(maxFields)
-
-  override def executeCollect(): Array[InternalRow] = throw new UnsupportedOperationException(
-    s"${getClass.getCanonicalName} does not support row-based execution")
-
-  override def executeToIterator(): Iterator[InternalRow] = throw new UnsupportedOperationException(
-    s"${getClass.getCanonicalName} does not support row-based execution")
-
-  override def executeTake(limit: Int): Array[InternalRow] =
-    throw new UnsupportedOperationException(
-      s"${getClass.getCanonicalName} does not support row-based execution")
-
-  protected override def doExecute(): RDD[InternalRow] = throw new UnsupportedOperationException(
-    s"${getClass.getCanonicalName} does not support row-based execution")
-
-  override protected def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
-    sparkContext.parallelize(sideEffectResult, 1)
-  }
-
-  // Need single batch in some cases
-  override def childrenCoalesceGoal: Seq[CoalesceGoal] =
-    if (cmd.requireSingleBatch) {
-      Seq(RequireSingleBatch)
-    } else {
-      Seq(null)
-    }
-}
-

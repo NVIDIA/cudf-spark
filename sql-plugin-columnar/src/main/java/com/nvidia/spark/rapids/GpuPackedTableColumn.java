@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -42,11 +42,6 @@ public final class GpuPackedTableColumn extends GpuColumnVectorBase implements W
   public static ColumnarBatch from(ContiguousTable contigTable) {
     ColumnVector column = new GpuPackedTableColumn(contigTable);
     return new ColumnarBatch(new ColumnVector[] { column }, (int) contigTable.getRowCount());
-  }
-
-  /** Returns true if this columnar batch uses a packed table */
-  public static boolean isBatchPacked(ColumnarBatch batch) {
-    return batch.numCols() == 1 && batch.column(0) instanceof GpuPackedTableColumn;
   }
 
   GpuPackedTableColumn(ContiguousTable contigTable) {

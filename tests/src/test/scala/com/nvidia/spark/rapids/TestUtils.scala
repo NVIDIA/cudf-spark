@@ -40,6 +40,9 @@ object TestUtils extends Assertions {
     conf
   }
 
+  def isBatchPacked(batch: ColumnarBatch): Boolean =
+    batch.numCols() == 1 && batch.column(0).isInstanceOf[GpuPackedTableColumn]
+
   def getTempDir(basename: String): File = new File(
     System.getProperty("test.build.data", System.getProperty("java.io.tmpdir", "/tmp")),
     basename)

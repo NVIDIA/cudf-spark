@@ -1021,24 +1021,6 @@ case class GpuStringTranslate(
   }
 }
 
-object CudfRegexp {
-  val escapeForCudfCharSet = Seq('^', '-', ']')
-
-  def notCharSet(c: Char): String = c match {
-    case '\n' => "(?:.|\r)"
-    case '\r' => "(?:.|\n)"
-    case chr if escapeForCudfCharSet.contains(chr) => "(?:[^\\" + chr + "]|\r|\n)"
-    case chr => "(?:[^" + chr + "]|\r|\n)"
-  }
-
-  val escapeForCudf = Seq('[', '^', '$', '.', '|', '?', '*','+', '(', ')', '\\', '{', '}')
-
-  def cudfQuote(c: Character): String = c match {
-    case chr if escapeForCudf.contains(chr) => "\\" + chr
-    case chr => Character.toString(chr)
-  }
-}
-
 case class GpuLike(left: Expression, right: Expression, escapeChar: Char)
   extends GpuBinaryExpression
       with ImplicitCastInputTypes
