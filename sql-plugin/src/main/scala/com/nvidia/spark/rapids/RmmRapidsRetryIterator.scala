@@ -50,6 +50,7 @@ object RmmRapidsRetryIterator extends Logging {
    * This function will close the elements of `input` as `fn` is successfully
    * invoked. Elements of `input` not manifested are the responsibility of the caller to
    * close!
+   * Close the returned iterator when abandoning pending attempts.
    *
    * `fn` must be idempotent: this is a requirement because we may call `fn` multiple times
    * while handling retries.
@@ -65,7 +66,7 @@ object RmmRapidsRetryIterator extends Logging {
   def withRetry[T <: AutoCloseable, K](
       input: Iterator[T],
       splitPolicy: T => Seq[T])
-      (fn: T => K): Iterator[K] = {
+      (fn: T => K): Iterator[K] with AutoCloseable = {
     val attemptIter = new AutoCloseableAttemptSpliterator(input, fn, splitPolicy)
     new RmmRapidsRetryAutoCloseableIterator(attemptIter)
   }
@@ -83,6 +84,7 @@ object RmmRapidsRetryIterator extends Logging {
    *
    * This function will close the elements of `input` as `fn` is successfully
    * invoked. In the event of an unhandled exception `input` is also closed.
+   * Close the returned iterator when abandoning pending attempts.
    *
    * `fn` must be idempotent: this is a requirement because we may call `fn` multiple times
    * while handling retries.
@@ -98,7 +100,7 @@ object RmmRapidsRetryIterator extends Logging {
   def withRetry[T <: AutoCloseable, K](
       input: T,
       splitPolicy: T => Seq[T])
-      (fn: T => K): Iterator[K] = {
+      (fn: T => K): Iterator[K] with AutoCloseable = {
     val attemptIter = new AutoCloseableAttemptSpliterator(
       SingleItemAutoCloseableIteratorInternal(input), fn, splitPolicy)
     new RmmRapidsRetryAutoCloseableIterator(attemptIter)
@@ -389,6 +391,7 @@ object RmmRapidsRetryIterator extends Logging {
 
     override def close(): Unit = {
       if (!wasCalledSuccessfully) {
+        wasCalledSuccessfully = true
         ts.close()
       }
     }
@@ -502,7 +505,8 @@ object RmmRapidsRetryIterator extends Logging {
     }
 
     // Don't install the callback if in a unit test
-    private val onClose = Option(TaskContext.get()).map { tc =>
+    private val taskContext = Option(TaskContext.get())
+    private val onClose = taskContext.map { tc =>
       onTaskCompletion(tc) {
         closeInternal()
       }
@@ -596,7 +600,12 @@ object RmmRapidsRetryIterator extends Logging {
     }
 
     override def close(): Unit = {
-      onClose.map(_.removeAndCall()).getOrElse(closeInternal())
+      // A reader can close us from another task-completion callback, where removal is forbidden.
+      if (taskContext.exists(_.isCompleted())) {
+        closeInternal()
+      } else {
+        onClose.map(_.removeAndCall()).getOrElse(closeInternal())
+      }
     }
   }
 
@@ -636,7 +645,7 @@ object RmmRapidsRetryIterator extends Logging {
         case t: Throwable =>
           // exception occurred while trying to handle this retry
           // we close our attempts (which includes the item we last attempted)
-          attemptIter.close()
+          close()
           throw t
       } finally {
         RetryStateTracker.exitRetryBlock()
@@ -653,7 +662,8 @@ object RmmRapidsRetryIterator extends Logging {
    * @param attemptIter an iterator of T
    */
   class RmmRapidsRetryIterator[T, K](attemptIter: Spliterator[K])
-      extends Iterator[K] {
+      extends Iterator[K] with AutoCloseable {
+    private var closed = false
     // We want to be sure that retry will work in all cases
     TaskRegistryTracker.registerThreadForRetry()
 
@@ -662,7 +672,14 @@ object RmmRapidsRetryIterator extends Logging {
     // this is true if the OOM was cleared after it was injected (only for tests)
     private var injectedOOMCleared = false
 
-    override def hasNext: Boolean = attemptIter.hasNext
+    override def hasNext: Boolean = !closed && attemptIter.hasNext
+
+    override def close(): Unit = {
+      if (!closed) {
+        closed = true
+        attemptIter.close()
+      }
+    }
 
     private def clearInjectedOOMIfNeeded(): Unit = {
       if (injectedOOM && !injectedOOMCleared) {
