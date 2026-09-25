@@ -15,10 +15,13 @@
  */
 package org.apache.spark.sql.rapids
 
+import scala.collection.mutable.ArrayBuffer
+
 import ai.rapids.cudf.{Rmm, RmmAllocationMode, TableWriter}
 import com.nvidia.spark.rapids.{ColumnarOutputWriter, ColumnarOutputWriterFactory, GpuColumnVector, GpuLiteral, NvtxId, NvtxRegistry, RapidsConf, ScalableTaskCompletion}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.jni.{GpuRetryOOM, GpuSplitAndRetryOOM}
+import com.nvidia.spark.rapids.jni.fileio.RapidsHostBufferConsumer
 import com.nvidia.spark.rapids.spill.SpillFramework
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.FSDataOutputStream
@@ -71,8 +74,19 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
     // check for leaks
     override def transformAndClose(cb: ColumnarBatch): ColumnarBatch = cb
     override val tableWriter: TableWriter = mock[TableWriter]
-    override def getOutputStream: FSDataOutputStream = mock[FSDataOutputStream]
+    var hostBufferConsumerForTest: Option[RapidsHostBufferConsumer] = None
+    var outputStreamForTest: Option[FSDataOutputStream] = None
+    var abortEventsForTest: Option[ArrayBuffer[String]] = None
+    override def getHostBufferConsumer: Option[RapidsHostBufferConsumer] = hostBufferConsumerForTest
+    override def getOutputStream: FSDataOutputStream =
+      outputStreamForTest.getOrElse(mock[FSDataOutputStream])
     override def path(): String = null
+    private var gpuSemaphoreReleaseCount = 0
+    override protected def releaseGpuSemaphore(): Unit = {
+      gpuSemaphoreReleaseCount += 1
+      abortEventsForTest.foreach(_ += "release")
+    }
+    def gpuSemaphoreReleaseCountForTest: Int = gpuSemaphoreReleaseCount
     private var throwOnce: Option[Throwable] = None
     override def bufferBatchAndClose(batch: ColumnarBatch): Long = {
       //closeOnExcept to maintain the contract of `bufferBatchAndClose`
@@ -90,6 +104,19 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
       throwOnce = Some(exception)
     }
 
+  }
+
+  class TestDynamicPartitionDataConcurrentWriter(
+      description: GpuWriteJobDescription,
+      taskAttemptContext: TaskAttemptContext,
+      committer: FileCommitProtocol,
+      spec: GpuConcurrentOutputWriterSpec)
+    extends GpuDynamicPartitionDataConcurrentWriter(
+      description, taskAttemptContext, committer, spec, None) {
+
+    def setCurrentWriterForTest(writer: ColumnarOutputWriter): Unit = {
+      currentWriterStatus.writer = writer
+    }
   }
 
   def mockOutputWriter(types: StructType, includeRetry: Boolean): Unit = {
@@ -300,6 +327,80 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
           singleWriter.writeWithIterator(Iterator.empty)
           singleWriter.commit()
         }
+      }
+    }
+  }
+
+  test("task abort aborts the output writer without completing it") {
+    resetMocksWithAndWithoutRetry {
+      val cbs = Seq(buildBatchWithPartitionedCol(1))
+      withColumnarBatchesVerifyClosed(cbs) {
+        withResource(cbs) { _ =>
+          Seq(false, true).foreach { direct =>
+            mockOutputWriter(StructType(Seq.empty[StructField]), includeRetry)
+            val events = ArrayBuffer.empty[String]
+            mockOutputWriter.abortEventsForTest = Some(events)
+            mockCommitter = mock[FileCommitProtocol]
+            doAnswer(_ => { events += "committer"; null })
+              .when(mockCommitter).abortTask(mockTaskAttemptContext)
+            if (direct) {
+              val consumer = mock[RapidsHostBufferConsumer]
+              doAnswer(_ => { events += "sink"; null }).when(consumer).abort()
+              mockOutputWriter.hostBufferConsumerForTest = Some(consumer)
+            } else {
+              val stream = mock[FSDataOutputStream]
+              doAnswer(_ => { events += "sink"; null }).when(stream).close()
+              mockOutputWriter.outputStreamForTest = Some(stream)
+            }
+            val singleWriter = new GpuSingleDirectoryDataWriter(
+              mockJobDescription, mockTaskAttemptContext, mockCommitter, None)
+
+            singleWriter.abort()
+
+            verify(mockOutputWriter).abort()
+            verify(mockOutputWriter, never()).close()
+            assert(mockOutputWriter.gpuSemaphoreReleaseCountForTest == 1)
+            verify(mockCommitter).abortTask(mockTaskAttemptContext)
+            assert(events.toSeq == Seq("release", "sink", "committer"))
+          }
+        }
+      }
+    }
+  }
+
+  test("concurrent writer abort attempts every writer after a failure") {
+    resetMocksWithAndWithoutRetry {
+      val cbs = Seq(buildBatchWithPartitionedCol(1, 2))
+      withColumnarBatchesVerifyClosed(cbs) {
+        when(mockJobDescription.concurrentWriterPartitionFlushSize).thenReturn(Long.MaxValue)
+        when(mockJobDescription.customPartitionLocations)
+          .thenReturn(Map.empty[TablePartitionSpec, String])
+        when(mockTaskAttemptContext.getConfiguration).thenReturn(new Configuration())
+
+        def newWriter(): NoTransformColumnarOutputWriter = spy(
+          new NoTransformColumnarOutputWriter(mockTaskAttemptContext, StructType(Nil),
+            NvtxRegistry.FILE_FORMAT_WRITE, includeRetry))
+
+        val firstWriter = newWriter()
+        val secondWriter = newWriter()
+        val currentWriter = newWriter()
+        when(mockOutputWriterFactory.newInstance(any(), any(), any(), any(), any(), any()))
+          .thenReturn(firstWriter, secondWriter)
+
+        val sortSpec = partSpec.map(SortOrder(_, Ascending))
+        val concurrentSpec = GpuConcurrentOutputWriterSpec(2, allCols, 1, sortSpec)
+        val concurrentWriter = new TestDynamicPartitionDataConcurrentWriter(
+          mockJobDescription, mockTaskAttemptContext, mockCommitter, concurrentSpec)
+        concurrentWriter.write(cbs.head)
+        concurrentWriter.setCurrentWriterForTest(currentWriter)
+        doThrow(new RuntimeException("injected abort failure")).when(firstWriter).abort()
+
+        val thrown = intercept[RuntimeException](concurrentWriter.abortResources())
+
+        assert(thrown.getMessage.contains("injected abort failure"))
+        verify(firstWriter).abort()
+        verify(secondWriter).abort()
+        verify(currentWriter).abort()
       }
     }
   }

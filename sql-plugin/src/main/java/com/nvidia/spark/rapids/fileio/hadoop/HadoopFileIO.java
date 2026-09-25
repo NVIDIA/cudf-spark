@@ -19,7 +19,6 @@ package com.nvidia.spark.rapids.fileio.hadoop;
 import com.nvidia.spark.rapids.fileio.RapidsInputFiles;
 import com.nvidia.spark.rapids.jni.fileio.RapidsFileIO;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
-import com.nvidia.spark.rapids.jni.fileio.RapidsOutputFile;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -61,6 +60,15 @@ public class HadoopFileIO implements RapidsFileIO {
     @Override
     public HadoopOutputFile newOutputFile(String path) throws IOException {
         Objects.requireNonNull(path, "path can't be null");
-        return HadoopOutputFile.create(new Path(path), hadoopConf.value());
+        Path outputPath = new Path(path);
+        String scheme = outputPath.toUri().getScheme();
+        if (isPerfIOS3OutputScheme(scheme) && RapidsInputFiles.isS3PerfEnabled()) {
+            return new PerfIOOutputFile(outputPath, hadoopConf.value());
+        }
+        return HadoopOutputFile.create(outputPath, hadoopConf.value());
+    }
+
+    static boolean isPerfIOS3OutputScheme(String scheme) {
+        return "s3".equalsIgnoreCase(scheme) || "s3a".equalsIgnoreCase(scheme);
     }
 }

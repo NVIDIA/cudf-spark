@@ -147,6 +147,16 @@ abstract class GpuFileFormatDataWriter(
         }
       }
     }
+
+    final def abort(): Unit = {
+      if (writer != null) {
+        try {
+          writer.abort()
+        } finally {
+          writer = null
+        }
+      }
+    }
   }
 
   /**
@@ -167,6 +177,11 @@ abstract class GpuFileFormatDataWriter(
     status.release()
   }
 
+  /** Abort a WriterStatus without completing its output. */
+  protected final def abortOutWriter(status: WriterAndStatus): Unit = {
+    status.abort()
+  }
+
   protected final def writeUpdateMetricsAndClose(scb: SpillableColumnarBatch,
       writerStatus: WriterAndStatus): Unit = {
     writerStatus.recordsInFile += writerStatus.writer.writeSpillableAndClose(scb)
@@ -176,6 +191,11 @@ abstract class GpuFileFormatDataWriter(
   def releaseResources(): Unit = {
     // Release current writer by default, as this is the only resource to be released.
     releaseOutWriter(currentWriterStatus)
+  }
+
+  /** Abort all resources. Public for testing. */
+  def abortResources(): Unit = {
+    abortOutWriter(currentWriterStatus)
   }
 
   /** Write an iterator of column batch. */
@@ -232,7 +252,7 @@ abstract class GpuFileFormatDataWriter(
   override def abort(): Unit = {
     try {
       updateWritersNumber()
-      releaseResources()
+      abortResources()
     } finally {
       committer.abortTask(taskAttemptContext)
     }
@@ -740,6 +760,13 @@ class GpuDynamicPartitionDataConcurrentWriter(
       tableCaches.safeClose()
       tableCaches.clear()
     }
+
+    def abortWriter(): Unit = try {
+      abortOutWriter(this)
+    } finally {
+      tableCaches.safeClose()
+      tableCaches.clear()
+    }
   }
 
   override protected val reportSingleWriter: Boolean = false
@@ -971,6 +998,27 @@ class GpuDynamicPartitionDataConcurrentWriter(
     concurrentWriters.values.toSeq.safeClose()
     concurrentWriters.clear()
     super.releaseResources()
+  }
+
+  override def abortResources(): Unit = {
+    var abortFailure: Throwable = null
+    def abortAndRecordFailure(body: => Unit): Unit = {
+      try {
+        body
+      } catch {
+        case t: Throwable if abortFailure == null => abortFailure = t
+        case t: Throwable => abortFailure.addSuppressed(t)
+      }
+    }
+
+    abortAndRecordFailure(pendingBatches.safeClose())
+    pendingBatches.clear()
+    concurrentWriters.values.foreach(ws => abortAndRecordFailure(ws.abortWriter()))
+    concurrentWriters.clear()
+    abortAndRecordFailure(super.abortResources())
+    if (abortFailure != null) {
+      throw abortFailure
+    }
   }
 }
 
