@@ -24,6 +24,7 @@ SPDX-License-Identifier: Apache-2.0
         <scala.version>2.12.21</scala.version>
         <!-- Spark/RAPIDS versions -->
         <spark.version>3.5.8</spark.version>
+        <rapids4spark.artifactId>rapids-4-spark_${scala.binary.version}</rapids4spark.artifactId>
         <rapids4spark.version>26.06.0</rapids4spark.version>
         <jacoco.version>0.8.14</jacoco.version>
         <scoverage.plugin.version>2.1.0</scoverage.plugin.version>
@@ -161,7 +162,7 @@ SPDX-License-Identifier: Apache-2.0
                                     <artifactItems>
                                         <artifactItem>
                                             <groupId>com.nvidia</groupId>
-                                            <artifactId>rapids-4-spark_${scala.binary.version}</artifactId>
+                                            <artifactId>${rapids4spark.artifactId}</artifactId>
                                             <version>${rapids4spark.version}</version>
                                             <classifier>${cuda.version}</classifier>
                                             <type>jar</type>
@@ -182,7 +183,7 @@ SPDX-License-Identifier: Apache-2.0
                                     <artifactItems>
                                         <artifactItem>
                                             <groupId>com.nvidia</groupId>
-                                            <artifactId>rapids-4-spark_${scala.binary.version}</artifactId>
+                                            <artifactId>${rapids4spark.artifactId}</artifactId>
                                             <version>${rapids4spark.version}</version>
                                             <type>jar</type>
                                             <overWrite>false</overWrite>
@@ -207,6 +208,7 @@ SPDX-License-Identifier: Apache-2.0
                                     <target>
                                         <exec executable="bash" dir="${project.basedir}" failonerror="true">
                                             <arg value="native/scripts/extract-cudf-libs.sh"/>
+                                            <env key="RAPIDS4SPARK_ARTIFACT_ID" value="${rapids4spark.artifactId}"/>
                                             <env key="RAPIDS4SPARK_VERSION" value="${rapids4spark.version}"/>
                                             <env key="SCALA_VERSION" value="${scala.binary.version}"/>
                                             <env key="CUDA_VERSION" value="${cuda.version}"/>
@@ -300,7 +302,7 @@ SPDX-License-Identifier: Apache-2.0
         <!-- RAPIDS plugin -->
         <dependency>
             <groupId>com.nvidia</groupId>
-            <artifactId>rapids-4-spark_${scala.binary.version}</artifactId>
+            <artifactId>${rapids4spark.artifactId}</artifactId>
             <version>${rapids4spark.version}</version>
             <scope>provided</scope>
         </dependency>
