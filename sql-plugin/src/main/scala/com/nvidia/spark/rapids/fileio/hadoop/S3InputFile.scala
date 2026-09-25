@@ -96,4 +96,9 @@ object S3InputFile {
   def create(filePath: Path, conf: Configuration): S3InputFile = {
     new S3InputFile(HadoopInputFile.create(filePath, conf), filePath.toUri, conf)
   }
+
+  @throws[IOException]
+  def create(filePath: Path, conf: Configuration, knownLength: Long): S3InputFile = {
+    new S3InputFile(HadoopInputFile.create(filePath, conf, knownLength), filePath.toUri, conf)
+  }
 }

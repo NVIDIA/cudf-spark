@@ -27,6 +27,7 @@ import org.apache.spark.util.SerializableConfiguration;
 
 import java.io.IOException;
 import java.util.Objects;
+import java.util.OptionalLong;
 
 /**
  * Implementation {@link RapidsFileIO} using the hadoop file system.
@@ -47,15 +48,32 @@ public class HadoopFileIO implements RapidsFileIO {
 
     @Override
     public RapidsInputFile newInputFile(Path path) throws IOException {
+        return newInputFile(path, OptionalLong.empty());
+    }
+
+    /**
+     * Creates an input file using a file length already known by the caller.
+     */
+    public RapidsInputFile newInputFile(Path path, long knownLength) throws IOException {
+        return newInputFile(path, OptionalLong.of(knownLength));
+    }
+
+    private RapidsInputFile newInputFile(Path path, OptionalLong knownLength) throws IOException {
         String scheme = path.toUri().getScheme();
         if (scheme != null && scheme.startsWith("s3") && RapidsInputFiles.isS3PerfEnabled()) {
-            return S3InputFile.create(path, hadoopConf.value());
+            return knownLength.isPresent()
+                    ? S3InputFile.create(path, hadoopConf.value(), knownLength.getAsLong())
+                    : S3InputFile.create(path, hadoopConf.value());
         }
         if (scheme != null && (scheme.equals("gs") || scheme.equals("gcs")) &&
                 RapidsInputFiles.isGCSPerfEnabled()) {
-            return GCSInputFile.create(path, hadoopConf.value());
+            return knownLength.isPresent()
+                    ? GCSInputFile.create(path, hadoopConf.value(), knownLength.getAsLong())
+                    : GCSInputFile.create(path, hadoopConf.value());
         }
-        return HadoopInputFile.create(path, hadoopConf.value());
+        return knownLength.isPresent()
+                ? HadoopInputFile.create(path, hadoopConf.value(), knownLength.getAsLong())
+                : HadoopInputFile.create(path, hadoopConf.value());
     }
 
     @Override
