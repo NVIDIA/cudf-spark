@@ -22,7 +22,7 @@ import scala.collection.mutable
 import scala.util.control.NonFatal
 
 import ai.rapids.cudf.{DistinctHashJoin => CudfDistinctHashJoin,
-  HashJoin => CudfHashJoin, Table}
+  FilteredJoin => CudfFilteredJoin, HashJoin => CudfHashJoin, Table}
 import com.nvidia.spark.rapids.{GpuBuildLeft, GpuBuildRight, GpuBuildSide, GpuColumnVector,
   GpuExpression, GpuMetric, GpuProjectExec, GpuSemaphore, NoopMetric, NvtxRegistry,
   SpillableColumnarBatch, SpillPriorities}
@@ -45,13 +45,15 @@ case class HashBuildMetrics(
 /**
  * Identifies derived hash-build state within a [[HashBuildCache]].
  * The same build-side data can be cached and reused by multiple joins. The key includes the
- * projection, canonicalized join keys, and null-handling semantics to disambiguate.
+ * projection, canonicalized join keys, null-handling semantics, and whether the artifact is a
+ * filtered lookup (for semi/anti joins) to disambiguate.
  */
 case class HashBuildKey(
     sourceProjection: Seq[Seq[Expression]],
     projectedKeys: Seq[Expression],
     compareNullsEqual: Boolean,
-    filterOutNulls: Boolean)
+    filterOutNulls: Boolean,
+    isFiltered: Boolean = false)
 
 object HashBuildKey {
   def fromExpressions(
@@ -326,6 +328,22 @@ private[execution] trait HashArtifact extends AutoCloseable {
       buildSide: GpuBuildSide,
       metrics: HashBuildMetrics,
       onRebuild: () => Unit): HashProbeBackend
+
+  /** Acquire a lease and transfer ownership to the backend, releasing it on failure. */
+  protected final def acquireBackend[T <: AutoCloseable](
+      handle: SharedRecomputableHandle[T],
+      metrics: HashBuildMetrics,
+      onRebuild: () => Unit)(
+      create: SharedRecomputableHandle.Lease[T] => HashProbeBackend): HashProbeBackend = {
+    val lease = handle.acquire()
+    closeOnExcept(lease) { _ =>
+      if (lease.rebuilt) {
+        metrics.rebuilds += 1
+        onRebuild()
+      }
+      create(lease)
+    }
+  }
 }
 
 /** Recomputable non-distinct cuDF hash table owned by a [[HashBuildCache]]. */
@@ -338,12 +356,7 @@ private final class HashJoinArtifact(
       physicalBuildSide: GpuBuildSide,
       metrics: HashBuildMetrics,
       onRebuild: () => Unit): HashProbeBackend = {
-    val lease = handle.acquire()
-    closeOnExcept(lease) { _ =>
-      if (lease.rebuilt) {
-        metrics.rebuilds += 1
-        onRebuild()
-      }
+    acquireBackend(handle, metrics, onRebuild) { lease =>
       new CachedHashProbeBackend(physicalBuildSide, lease)
     }
   }
@@ -361,13 +374,26 @@ private final class DistinctHashJoinArtifact(
       physicalBuildSide: GpuBuildSide,
       metrics: HashBuildMetrics,
       onRebuild: () => Unit): HashProbeBackend = {
-    val lease = handle.acquire()
-    closeOnExcept(lease) { _ =>
-      if (lease.rebuilt) {
-        metrics.rebuilds += 1
-        onRebuild()
-      }
+    acquireBackend(handle, metrics, onRebuild) { lease =>
       new CachedDistinctHashProbeBackend(physicalBuildSide, lease)
+    }
+  }
+
+  override def close(): Unit = handle.close()
+}
+
+/** Recomputable cuDF filtered lookup table owned by a [[HashBuildCache]]. */
+private final class FilteredJoinArtifact(
+    override val stats: JoinBuildSideStats,
+    handle: SharedRecomputableHandle[CudfFilteredJoin]) extends HashArtifact {
+  override def isReady: Boolean = handle.isReady
+
+  override def backend(
+      physicalBuildSide: GpuBuildSide,
+      metrics: HashBuildMetrics,
+      onRebuild: () => Unit): HashProbeBackend = {
+    acquireBackend(handle, metrics, onRebuild) { lease =>
+      new CachedFilteredProbeBackend(physicalBuildSide, lease)
     }
   }
 
@@ -452,13 +478,11 @@ private final class CachedDistinctHashProbeBackend(
     case BackendJoinRequest.Inner => inner(leftKeys, rightKeys)
     case BackendJoinRequest.LeftOuter | BackendJoinRequest.RightOuter =>
       throw new IllegalStateException("expected a non-distinct hash build")
-    case BackendJoinRequest.LeftSemi => leftSemi(leftKeys, rightKeys)
-    case BackendJoinRequest.LeftAnti => leftAnti(leftKeys, rightKeys)
     case _: BackendJoinRequest.Distinct.Inner => inner(leftKeys, rightKeys)
     case BackendJoinRequest.Distinct.LeftOuter => leftOuter(leftKeys)
     case BackendJoinRequest.Distinct.RightOuter => rightOuter(rightKeys)
-    case BackendJoinRequest.Distinct.LeftSemi => leftSemi(leftKeys, rightKeys)
-    case BackendJoinRequest.Distinct.LeftAnti => leftAnti(leftKeys, rightKeys)
+    case _ =>
+      throw new IllegalStateException(s"unsupported cached distinct hash join request: $request")
   }
 
   private def inner(leftKeys: Table, rightKeys: Table): GatherMapsResult = {
@@ -470,24 +494,42 @@ private final class CachedDistinctHashProbeBackend(
     }
   }
 
-  private def leftSemi(leftKeys: Table, rightKeys: Table): GatherMapsResult = {
-    withResource(inner(leftKeys, rightKeys)) { innerMaps =>
-      JoinImpl.makeLeftSemi(innerMaps, leftKeys.getRowCount.toInt)
-    }
-  }
-
-  private def leftAnti(leftKeys: Table, rightKeys: Table): GatherMapsResult = {
-    withResource(inner(leftKeys, rightKeys)) { innerMaps =>
-      JoinImpl.makeLeftAnti(innerMaps, leftKeys.getRowCount.toInt)
-    }
-  }
-
   private def leftOuter(leftKeys: Table): GatherMapsResult = {
     JoinImpl.leftOuterDistinctHashJoinBuildRight(leftKeys, lease.resource)
   }
 
   private def rightOuter(rightKeys: Table): GatherMapsResult = {
     JoinImpl.rightOuterDistinctHashJoinBuildLeft(rightKeys, lease.resource)
+  }
+
+  override def outputRowCount(joinType: JoinType, probeKeys: Table): Option[Long] = None
+
+  override def close(): Unit = lease.close()
+}
+
+/**
+ * Backend that holds a lease on a reusable cuDF filtered lookup artifact until `close()`. This
+ * probes a pre-built native table for semi/anti joins. Probing a filtered join directly produces
+ * a Boolean array describing whether a probe row matched or not, bypassing potentially quadratic
+ * intermediate gather maps if we first went through an inner join instead.
+ */
+private final class CachedFilteredProbeBackend(
+    override val buildSide: GpuBuildSide,
+    lease: SharedRecomputableHandle.Lease[CudfFilteredJoin])
+    extends HashProbeBackend {
+  override val isCached: Boolean = true
+
+  override protected def doExecute(
+      request: BackendJoinRequest,
+      leftKeys: Table,
+      rightKeys: Table,
+      outputRowCount: Option[Long]): GatherMapsResult = request match {
+    case BackendJoinRequest.LeftSemi | BackendJoinRequest.Distinct.LeftSemi =>
+      GatherMapsResult.makeFromLeft(leftKeys.leftSemiJoinGatherMap(lease.resource))
+    case BackendJoinRequest.LeftAnti | BackendJoinRequest.Distinct.LeftAnti =>
+      GatherMapsResult.makeFromLeft(leftKeys.leftAntiJoinGatherMap(lease.resource))
+    case _ =>
+      throw new IllegalStateException(s"unsupported cached filtered join request: $request")
   }
 
   override def outputRowCount(joinType: JoinType, probeKeys: Table): Option[Long] = None
@@ -744,7 +786,7 @@ final class CachedHashBackendProvider private[execution] (
     demandId: HashBuildDemandId,
     cache: HashBuildCache,
     key: HashBuildKey,
-    create: () => HashArtifact,
+    create: Boolean => HashArtifact,
     metrics: HashBuildMetrics) extends HashBackendProvider {
   override def readyStats: Option[JoinBuildSideStats] = cache.readyStats(key)
 
@@ -791,17 +833,9 @@ final class CachedHashBackendProvider private[execution] (
         numericKeys,
         demand)
     }
-    // Disable the cached path for semi/anti joins, since we need cuDF's native filtered join
-    // to avoid materializing potentially quadratic inner-join maps. Distinct requests can
-    // reuse since their inner-join maps are at most linear in the probe rows.
-    // TODO: Enable reusable filtered joins: https://github.com/NVIDIA/cudf/issues/24144
-    val supportsReuse = request match {
-      case BackendJoinRequest.LeftSemi | BackendJoinRequest.LeftAnti => false
-      case _ => true
-    }
-    if (selectedSide == offeredSide && supportsReuse) {
+    if (selectedSide == offeredSide) {
       try {
-        acquireCachedBackend(selectedSide)
+        acquireCachedBackend(selectedSide, request)
       } catch {
         case e: InterruptedException =>
           // The current thread was interrupted while waiting, propagate the interruption.
@@ -818,11 +852,24 @@ final class CachedHashBackendProvider private[execution] (
     }
   }
 
-  private def acquireCachedBackend(buildSide: GpuBuildSide): HashProbeBackend = {
-    val (artifact, reused) = cache.getOrBuild(key, metrics)(create())
+  private def acquireCachedBackend(
+      buildSide: GpuBuildSide,
+      request: BackendJoinRequest): HashProbeBackend = {
+    // Note that semi/anti join requests currently always use their own FilteredJoin artifact,
+    // even if a cached DistinctHashJoin artifact could have been reused for the semi/anti join
+    // by converting the inner-join gather maps. We may want to estimate whether reusing a
+    // DistinctHashJoin (with extra probe cost for gather maps + conversion) is preferable to
+    // rebuilding a FilteredJoin. https://github.com/NVIDIA/cudf-spark/issues/16102
+    val isFiltered = request match {
+      case BackendJoinRequest.LeftSemi | BackendJoinRequest.LeftAnti |
+          BackendJoinRequest.Distinct.LeftSemi | BackendJoinRequest.Distinct.LeftAnti => true
+      case _ => false
+    }
+    val buildKey = if (isFiltered) key.copy(isFiltered = true) else key
+    val (artifact, reused) = cache.getOrBuild(buildKey, metrics)(create(isFiltered))
     // The callback resets demand if acquiring the artifact would reconstruct its native resource.
     val backend = artifact.backend(
-      buildSide, metrics, () => cache.resetDemands(key))
+      buildSide, metrics, () => cache.resetDemands(buildKey))
     closeOnExcept(backend) { _ =>
       if (reused) {
         metrics.reuses += 1
@@ -888,11 +935,32 @@ object HashBuildFactory {
       boundKeys: Seq[GpuExpression],
       compareNullsEqual: Boolean,
       filterOutNulls: Boolean,
-      prepareBatch: Option[ColumnarBatch => ColumnarBatch]): HashArtifact = {
+      prepareBatch: Option[ColumnarBatch => ColumnarBatch],
+      isFiltered: Boolean): HashArtifact = {
     withBuildKeys(buildBatch, boundKeys, filterOutNulls, prepareBatch) { keys =>
-      val stats = JoinBuildSideStats.fromTable(keys)
+      // We don't need to compute stats for semi/anti (filtered) joins, since their output
+      // is simply bounded by the number of probe rows.
+      val stats = if (isFiltered) {
+        JoinBuildSideStats(streamMagnificationFactor = 1.0, isDistinct = false)
+      } else {
+        JoinBuildSideStats.fromTable(keys)
+      }
       val approxSizeInBytes = estimateHashTableSizeBytes(keys.getRowCount)
-      if (stats.isDistinct) {
+      if (isFiltered) {
+        new FilteredJoinArtifact(
+          stats,
+          SharedRecomputableHandle(
+            approxSizeInBytes,
+            NvtxRegistry.HASH_TABLE_BUILD {
+              new CudfFilteredJoin(keys, compareNullsEqual)
+            }) {
+            withBuildKeys(buildBatch, boundKeys, filterOutNulls, prepareBatch) { rebuiltKeys =>
+              NvtxRegistry.HASH_TABLE_BUILD {
+                new CudfFilteredJoin(rebuiltKeys, compareNullsEqual)
+              }
+            }
+          })
+      } else if (stats.isDistinct) {
         new DistinctHashJoinArtifact(
           stats,
           SharedRecomputableHandle(
