@@ -12,9 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import pytest
 from contextlib import redirect_stdout
 from io import StringIO
+
+import pytest
 
 from asserts import *
 from conftest import is_not_utc, is_supported_time_zone, is_dataproc_serverless_runtime
