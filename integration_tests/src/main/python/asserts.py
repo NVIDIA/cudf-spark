@@ -14,8 +14,10 @@
 
 from conftest import (is_incompat, should_sort_on_spark, should_sort_locally, array_columns_to_sort_locally, get_float_check,
                       get_limit, spark_jvm, current_test_has_delta_marker, current_test_allows_non_gpu_delta_write)
+from contextlib import redirect_stdout
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from io import StringIO
 import math
 from pyspark.sql import Row
 
@@ -249,6 +251,13 @@ def _prep_func_for_compare(func, mode):
             return (df.collect(), df)
         collect_type = 'COLLECT'
         return (bring_back, collect_type)
+    elif mode == 'SHOW':
+        def bring_back(spark):
+            output = StringIO()
+            with redirect_stdout(output):
+                limit_func(spark).show()
+            return output.getvalue()
+        collect_type = 'SHOW'
     else:
         bring_back = lambda spark: limit_func(spark).toLocalIterator()
         collect_type = 'ITERATOR'
@@ -772,6 +781,15 @@ def assert_gpu_and_cpu_are_equal_collect(func, conf={}, is_cpu_first=True, resul
                                                   Usage of this func is: (cpu, gpu) = result_canonicalize_func_before_compare(original_cpu_result, original_gpu_result)
     """
     _assert_gpu_and_cpu_are_equal(func, 'COLLECT', conf=conf, is_cpu_first=is_cpu_first, result_canonicalize_func_before_compare=result_canonicalize_func_before_compare)
+
+def assert_gpu_and_cpu_are_equal_show(func, conf={}, is_cpu_first=True):
+    """
+    Assert that DataFrame.show() produces identical output on CPU and GPU.
+    The output is captured from stdout so ToPrettyString formatting is compared
+    directly while GPU test-mode validation still checks the executed plan.
+    """
+    _assert_gpu_and_cpu_are_equal(func, 'SHOW', conf=conf, is_cpu_first=is_cpu_first)
+
 
 def assert_gpu_and_cpu_are_equal_iterator(func, conf={}, is_cpu_first=True):
     """
