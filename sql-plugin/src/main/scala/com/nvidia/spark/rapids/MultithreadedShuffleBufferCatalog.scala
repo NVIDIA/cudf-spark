@@ -137,9 +137,15 @@ final class MapOutputSegments private (
   def partitionLengths(numPartitions: Int): Array[Long] = {
     val lengths = new Array[Long](numPartitions)
     reduceIds.indices.foreach { i =>
-      lengths(reduceIds(i)) = segmentsByReduceId(i).map(_.length).sum
+      lengths(reduceIds(i)) = segmentsByReduceId(i).foldLeft(0L)(_ + _.length)
     }
     lengths
+  }
+
+  /** Segments of one reduce id in write order, empty if it has none. One binary search. */
+  def segmentsOf(reduceId: Int): Seq[PartitionSegment] = {
+    val i = java.util.Arrays.binarySearch(reduceIds, reduceId)
+    if (i < 0) Nil else segmentsByReduceId(i).toSeq
   }
 
   /** Segments of the reduce ids in [startReduceId, endReduceId), in reduce id then write order. */
@@ -240,11 +246,15 @@ private[rapids] final class ShuffleState {
       if (closed) None else Some(Option(outputs.putIfAbsent(mapId, output)).getOrElse(output))
     }
 
-  /** Refuses any later publish and returns the outputs this registration holds. */
-  def close(): Seq[MapOutputSegments] = synchronized {
+  /**
+   * Refuses any later publish and returns the outputs this registration holds, as a live view
+   * rather than a copy: only tryPublish adds to it, under this monitor after checking closed, so
+   * it cannot change once this returns.
+   */
+  def close(): Iterable[MapOutputSegments] = synchronized {
     import scala.collection.JavaConverters._
     closed = true
-    outputs.values().asScala.toList
+    outputs.values().asScala
   }
 }
 
@@ -357,6 +367,17 @@ class MultithreadedShuffleBufferCatalog extends Logging {
   }
 
   /**
+   * Get a ManagedBuffer for a block if this catalog holds data for it, or None so the caller can
+   * fall back to another resolver. Looks the map output up once, unlike hasData followed by
+   * getMergedBuffer.
+   */
+  def getMergedBufferOption(blockId: ShuffleBlockId): Option[ManagedBuffer] = {
+    val output = mapOutput(blockId.shuffleId, blockId.mapId)
+    val segments = if (output == null) Nil else output.segmentsOf(blockId.reduceId)
+    if (segments.isEmpty) None else Some(new MultiBatchManagedBuffer(segments, blockId))
+  }
+
+  /**
    * Get a ManagedBuffer for a batch of shuffle blocks (used in batch fetch optimization).
    * This method handles ShuffleBlockBatchId which represents multiple reduce partitions.
    */
@@ -397,7 +418,7 @@ class MultithreadedShuffleBufferCatalog extends Logging {
   def unregisterShuffle(shuffleId: Int): Option[ShuffleCleanupStats] = {
     // Close the registration in the same step that detaches it, so a writer that looked it up
     // earlier cannot publish into a registration that is no longer reachable.
-    var outputs: Seq[MapOutputSegments] = Seq.empty
+    var outputs: Iterable[MapOutputSegments] = Nil
     shuffles.computeIfPresent(shuffleId, (_, state) => {
       outputs = state.close()
       null

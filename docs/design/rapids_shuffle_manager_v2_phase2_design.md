@@ -94,7 +94,7 @@ A reducer requesting partition P from map task M needs data from ALL partial fil
 │  │                     ▼                                               │  │
 │  │       ┌───────────────────────────────────┐                         │  │
 │  │       │ MultithreadedShuffleBufferCatalog │                         │  │
-│  │       │         .getMergedBuffer()        │                         │  │
+│  │       │      .getMergedBufferOption()     │                         │  │
 │  │       └───────────────────────────────────┘                         │  │
 │  │                     │                                               │  │
 │  │                     ▼                                               │  │
@@ -169,6 +169,7 @@ val shuffles: ConcurrentHashMap[Int, ShuffleState]
 | `registerShuffle(shuffleId)` | Create the shuffle's registration if it has none; every map task calls it |
 | `publishMapOutput(shuffleId, mapId, output)` | Publish a whole map output built with `MapOutputSegments.Builder`; returns the output kept for the map id, or `None` if the shuffle was already cleaned up |
 | `publishMapOutputOrFail(shuffleId, mapId, output, numPartitions)` | The writer's entry point, also used for an empty map task: returns the kept output's lengths for the MapStatus, or fails the task if the shuffle was already cleaned up |
+| `getMergedBufferOption(blockId)` | Return a `ManagedBuffer` for a single block, or None so the resolver falls back to disk; looks the map output up once |
 | `getMergedBuffer(blockId)`, `getMergedBatchBuffer(batchId)` | Return a `ManagedBuffer` over the segments of one map output, or report missing data |
 | `unregisterShuffle(shuffleId)` | Detach and close the shuffle's registration in one step, close its handles, return stats |
 
@@ -296,10 +297,10 @@ builds an index for direct access.
        ▼
   ┌───────────────────────────────────────┐
   │  MultithreadedShuffleBufferCatalog    │
-  │  .getMergedBuffer(blockId)            │
+  │  .getMergedBufferOption(blockId)      │
   │                                       │
   │  registration(0) -> map output 5      │
-  │  .segments(3, 4) -> [                 │
+  │  .segmentsOf(3) -> [                  │
   │    Segment(handle1, 500, 100),        │  <- From batch 1
   │    Segment(handle2, 200, 50)          │  <- From batch 2
   │  ]                                    │

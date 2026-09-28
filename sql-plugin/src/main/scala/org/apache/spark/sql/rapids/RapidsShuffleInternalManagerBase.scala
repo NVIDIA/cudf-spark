@@ -81,10 +81,10 @@ abstract class GpuShuffleBlockResolverBase(
     blockId match {
       case sbid: ShuffleBlockId =>
         // Check MultithreadedShuffleBufferCatalog for single partition blocks
-        mtCatalogOpt match {
-          case Some(mtc) if mtc.hasData(sbid) =>
-            return mtc.getMergedBuffer(sbid)
-          case _ =>
+        mtCatalogOpt.flatMap(_.getMergedBufferOption(sbid)) match {
+          case Some(buffer) =>
+            return buffer
+          case None =>
         }
 
         // Check UCX/CACHE_ONLY catalog

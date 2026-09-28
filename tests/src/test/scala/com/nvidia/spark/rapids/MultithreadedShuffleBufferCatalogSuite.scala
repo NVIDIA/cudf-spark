@@ -29,7 +29,10 @@ import com.nvidia.spark.rapids.spill.SpillablePartialFileHandle
 import org.mockito.ArgumentMatchers._
 import org.mockito.Mockito._
 import org.scalatest.BeforeAndAfterEach
+import org.scalatest.concurrent.Eventually.eventually
+import org.scalatest.concurrent.PatienceConfiguration.Timeout
 import org.scalatest.funsuite.AnyFunSuite
+import org.scalatest.time.{Seconds, Span}
 import org.scalatestplus.mockito.MockitoSugar
 
 import org.apache.spark.network.buffer.ManagedBuffer
@@ -465,6 +468,30 @@ class MultithreadedShuffleBufferCatalogSuite
     catalog.unregisterShuffle(1)
   }
 
+  test("getMergedBufferOption finds a block exactly where hasData does, with one lookup") {
+    val catalog = spy(new MultithreadedShuffleBufferCatalog())
+    catalog.registerShuffle(1)
+    publish(catalog, 1, 0L, (1, createMockHandle(), 0L, 4L), (1, createMockHandle(), 4L, 2L),
+      (3, createMockHandle(), 0L, 3L))
+    val blocks = Seq(ShuffleBlockId(1, 0L, 1), ShuffleBlockId(1, 0L, 3), ShuffleBlockId(1, 0L, 0),
+      ShuffleBlockId(1, 0L, 2), ShuffleBlockId(1, 0L, 4), ShuffleBlockId(1, 7L, 1),
+      ShuffleBlockId(2, 0L, 1))
+    blocks.foreach { blockId =>
+      assertResult(catalog.hasData(blockId), blockId)(
+        catalog.getMergedBufferOption(blockId).isDefined)
+    }
+    // Both partial files' segments for reduce id 1, as getMergedBuffer returns them.
+    assertResult(Some(6L))(catalog.getMergedBufferOption(ShuffleBlockId(1, 0L, 1)).map(_.size()))
+    assertResult(Some(3L))(catalog.getMergedBufferOption(ShuffleBlockId(1, 0L, 3)).map(_.size()))
+    // One map-output lookup per call, where hasData followed by getMergedBuffer takes two.
+    clearInvocations(catalog)
+    assert(catalog.getMergedBufferOption(ShuffleBlockId(1, 0L, 1)).isDefined)
+    verify(catalog, times(1)).registration(1)
+
+    catalog.unregisterShuffle(1)
+    assertResult(None)(catalog.getMergedBufferOption(ShuffleBlockId(1, 0L, 1)))
+  }
+
   test("a publish racing cleanup is refused when the close gets the registration first") {
     val state = new ShuffleState()
     val output = new MapOutputSegments.Builder().add(0, createMockHandle(), 0L, 10L).build()
@@ -475,11 +502,9 @@ class MultithreadedShuffleBufferCatalogSuite
     state.synchronized {
       publisher.start()
       // Close while the publish waits for the registration's monitor.
-      val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(AwaitSeconds)
-      while (publisher.getState != Thread.State.BLOCKED && System.nanoTime() < deadline) {
-        Thread.sleep(1)
+      eventually(Timeout(Span(AwaitSeconds, Seconds))) {
+        assert(publisher.getState == Thread.State.BLOCKED, "the publish did not wait for the close")
       }
-      assert(publisher.getState == Thread.State.BLOCKED, "the publish did not wait for the close")
       assert(state.close().isEmpty)
     }
     publisher.join(TimeUnit.SECONDS.toMillis(AwaitSeconds))
@@ -496,11 +521,9 @@ class MultithreadedShuffleBufferCatalogSuite
     registration.synchronized {
       cleanup.start()
       // Holding the registration's monitor stops cleanup at its close.
-      val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(AwaitSeconds)
-      while (cleanup.getState != Thread.State.BLOCKED && System.nanoTime() < deadline) {
-        Thread.sleep(1)
+      eventually(Timeout(Span(AwaitSeconds, Seconds))) {
+        assert(cleanup.getState == Thread.State.BLOCKED, "cleanup never reached the close")
       }
-      assert(cleanup.getState == Thread.State.BLOCKED, "cleanup never reached the close")
       // A writer that finds the registration now publishes into one cleanup will close; it must
       // never find it detached yet open.
       assert(catalog.registration(1) eq registration, "cleanup detached before closing")

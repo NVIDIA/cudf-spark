@@ -73,13 +73,14 @@ import org.scalatestplus.mockito.MockitoSugar
 import org.apache.spark.{HashPartitioner, SparkConf, SparkEnv, TaskContext}
 import org.apache.spark.executor.{ShuffleWriteMetrics, TaskMetrics}
 import org.apache.spark.internal.Logging
+import org.apache.spark.network.buffer.ManagedBuffer
 import org.apache.spark.serializer._
 import org.apache.spark.shuffle.IndexShuffleBlockResolver
 import org.apache.spark.shuffle.api.{ShuffleExecutorComponents, ShuffleMapOutputWriter,
   ShufflePartitionWriter, WritableByteChannelWrapper}
 import org.apache.spark.shuffle.sort.io.{RapidsLocalDiskShuffleExecutorComponents,
   RapidsLocalDiskShuffleMapOutputWriter}
-import org.apache.spark.sql.rapids.shims.RapidsShuffleThreadedWriter
+import org.apache.spark.sql.rapids.shims.{GpuShuffleBlockResolver, RapidsShuffleThreadedWriter}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.storage._
 import org.apache.spark.util.Utils
@@ -646,6 +647,26 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
       val writer = createWriter()
       intercept[IllegalStateException](writer.write(createTestRecords(Iterator(0, 1, 2))))
       writer.stop(false)
+    }
+  }
+
+  test("skip-merge: the resolver serves a catalog block and falls back to disk otherwise") {
+    withSkipMergeCatalog { catalog =>
+      catalog.registerShuffle(0)
+      val output = new MapOutputSegments.Builder()
+        .addPartialFile(mock[SpillablePartialFileHandle], Array(0L, 5L, 0L)).build()
+      assert(catalog.publishMapOutput(0, 0L, output).isDefined)
+      val disk = mock[IndexShuffleBlockResolver]
+      val diskBuffer = mock[ManagedBuffer]
+      when(disk.getBlockData(any[BlockId](), any[Option[Array[String]]]())).thenReturn(diskBuffer)
+      val resolver = new GpuShuffleBlockResolver(disk, null)
+
+      assertResult(5L)(resolver.getBlockData(ShuffleBlockId(0, 0L, 1), None).size())
+      verify(disk, never()).getBlockData(any[BlockId](), any[Option[Array[String]]]())
+      // An empty reduce id of a published map, and a map this executor never wrote, go to disk.
+      assert(resolver.getBlockData(ShuffleBlockId(0, 0L, 2), None) eq diskBuffer)
+      assert(resolver.getBlockData(ShuffleBlockId(0, 1L, 1), None) eq diskBuffer)
+      catalog.unregisterShuffle(0)
     }
   }
 
