@@ -272,8 +272,12 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                                         '''
                                         sh "skills/ci/pre-merge.sh"
                                     } catch(e) {
-                                        common.printJVMCoreDumps(this)
-                                        common.uploadDebugBundle(this, 'spark-rapids', 'skills')
+                                        try {
+                                            common.printJVMCoreDumps(this)
+                                            common.uploadDebugBundle(this, 'spark-rapids', 'skills')
+                                        } catch (debugError) {
+                                            echo "Failed to collect or upload debug bundle: ${debugError}"
+                                        }
                                         throw e
                                     }
                                 }
@@ -322,8 +326,12 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                                               sourcePattern         : sourcePattern
                                         ])
                                     } catch(e) {
-                                        common.printJVMCoreDumps(this)
-                                        common.uploadDebugBundle(this, 'spark-rapids', 'mvn-verify')
+                                        try {
+                                            common.printJVMCoreDumps(this)
+                                            common.uploadDebugBundle(this, 'spark-rapids', 'mvn-verify')
+                                        } catch (debugError) {
+                                            echo "Failed to collect or upload debug bundle: ${debugError}"
+                                        }
                                         throw e
                                     } finally {
                                         common.publishPytestResult(this, "${STAGE_NAME}")
@@ -366,8 +374,12 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                                         common.prepareArtNetrc(this)
                                         sh "$PREMERGE_SCRIPT ci_2"
                                     } catch(e) {
-                                        common.printJVMCoreDumps(this)
-                                        common.uploadDebugBundle(this, 'spark-rapids', 'ci-2')
+                                        try {
+                                            common.printJVMCoreDumps(this)
+                                            common.uploadDebugBundle(this, 'spark-rapids', 'ci-2')
+                                        } catch (debugError) {
+                                            echo "Failed to collect or upload debug bundle: ${debugError}"
+                                        }
                                         throw e
                                     } finally {
                                         common.publishPytestResult(this, "${STAGE_NAME}")
@@ -410,8 +422,12 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                                         common.prepareArtNetrc(this)
                                         sh "$PREMERGE_SCRIPT ci_scala213"
                                     } catch(e) {
-                                        common.printJVMCoreDumps(this)
-                                        common.uploadDebugBundle(this, 'spark-rapids', 'scala-213')
+                                        try {
+                                            common.printJVMCoreDumps(this)
+                                            common.uploadDebugBundle(this, 'spark-rapids', 'scala-213')
+                                        } catch (debugError) {
+                                            echo "Failed to collect or upload debug bundle: ${debugError}"
+                                        }
                                         throw e
                                     } finally {
                                         common.publishPytestResult(this, "${STAGE_NAME}")

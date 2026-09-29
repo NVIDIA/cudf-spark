@@ -67,6 +67,20 @@ spark-rapids/
 
 ## Coding Conventions
 
+### Configuration Entries
+
+All plugin configuration properties are exposed through the `RapidsConf` object, but place
+new declarations according to category:
+
+- Add resource, memory, metrics, and profiler entries to `RapidsConfResourceEntries.scala`.
+- Add SQL and file-format entries to `RapidsConfSqlEntries.scala`.
+- Add test, debug, and remaining general entries to `RapidsConfEntries.scala`.
+
+Keep enumeration definitions and the configuration registry in `RapidsConf.scala` so their
+singleton ownership and initialization order remain stable. See
+[`Adding Configuration Properties`](docs/dev/README.md#adding-configuration-properties) for
+the complete contributor guidance.
+
 ### Scala/Java
 
 - **Coding style**: Enforced by `scalastyle-config.xml` — run `mvn scalastyle:check` to validate

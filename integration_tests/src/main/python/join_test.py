@@ -1734,6 +1734,75 @@ def test_sized_join_conditional(join_type, is_ast_supported, is_left_smaller, ba
         return left_df.join(right_df, cond, join_type)
     assert_gpu_and_cpu_are_equal_collect(do_join, conf=join_conf)
 
+
+@ignore_order(local=True)
+@validate_execs_in_gpu_plan('GpuShuffledAsymmetricHashJoinExec')
+@pytest.mark.parametrize(
+    'join_strategy', ['AUTO', 'HASH_ONLY', 'INNER_SORT_WITH_POST'], ids=idfn)
+def test_right_outer_join_root_boolean_condition(join_strategy):
+    join_conf = {
+        'spark.sql.adaptive.enabled': 'false',
+        'spark.sql.autoBroadcastJoinThreshold': '-1',
+        'spark.sql.shuffle.partitions': '2',
+        'spark.rapids.sql.join.useShuffledAsymmetricHashJoin': 'true',
+        'spark.rapids.sql.join.strategy': join_strategy,
+        'spark.rapids.sql.join.buildSide': 'FIXED',
+    }
+
+    def do_join(spark):
+        source = spark.createDataFrame([
+            (1, True),
+            (2, False),
+            (3, True),
+            (None, True),
+        ], 'c_customer_sk INT, _update BOOLEAN').alias('source')
+        target = spark.createDataFrame([
+            (1, 100, True),
+            (2, 200, True),
+            (3, 300, False),
+            (None, 400, True),
+        ], 'c_customer_sk INT, surrogate_key INT, is_current BOOLEAN').alias('target')
+        condition = (source['c_customer_sk'].eqNullSafe(target['c_customer_sk']) &
+                     source['_update'] & target['is_current'])
+        return source.hint('SHUFFLE_HASH').join(target, condition, 'RightOuter') \
+            .select(source['c_customer_sk'].alias('source_key'), source['_update'],
+                    target['c_customer_sk'].alias('target_key'), target['surrogate_key'],
+                    target['is_current'])
+
+    assert_gpu_and_cpu_are_equal_collect(do_join, conf=join_conf)
+
+
+@ignore_order(local=True)
+@validate_execs_in_gpu_plan('GpuShuffledSymmetricHashJoinExec')
+@pytest.mark.parametrize(
+    'join_strategy', ['AUTO', 'HASH_ONLY', 'INNER_SORT_WITH_POST'], ids=idfn)
+def test_full_outer_join_root_boolean_condition(join_strategy):
+    join_conf = {
+        'spark.sql.adaptive.enabled': 'false',
+        'spark.sql.autoBroadcastJoinThreshold': '-1',
+        'spark.sql.shuffle.partitions': '2',
+        'spark.rapids.sql.join.useShuffledSymmetricHashJoin': 'true',
+        'spark.rapids.sql.join.strategy': join_strategy,
+        'spark.rapids.sql.join.buildSide': 'FIXED',
+    }
+
+    def do_join(spark):
+        source = spark.createDataFrame([
+            (0, False),
+        ], 'customer_key LONG, _update BOOLEAN').alias('source')
+        target = spark.createDataFrame([
+            (0, True),
+        ], 'customer_key LONG, _target_row_present_ BOOLEAN').alias('target')
+        condition = ((source['customer_key'] == target['customer_key']) &
+                     source['_update'])
+        return source.join(target, condition, 'FullOuter') \
+            .select(source['customer_key'].alias('source_key'), source['_update'],
+                    target['customer_key'].alias('target_key'),
+                    target['_target_row_present_'])
+
+    assert_gpu_and_cpu_are_equal_collect(do_join, conf=join_conf)
+
+
 @pytest.mark.parametrize("join_type", ["LeftOuter", "RightOuter"], ids=idfn)
 @pytest.mark.parametrize("is_left_replicated", [False, True], ids=["LEFT_REPLICATED_OFF", "LEFT_REPLICATED_ON"])
 @pytest.mark.parametrize("is_conditional", [False, True], ids=["CONDITIONAL_OFF", "CONDITIONAL_ON"])

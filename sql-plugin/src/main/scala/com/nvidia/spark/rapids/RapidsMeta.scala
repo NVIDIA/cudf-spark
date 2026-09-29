@@ -1747,14 +1747,6 @@ abstract class RuntimeReplaceableUnaryExprMeta[INPUT <: RuntimeReplaceable](
     rule: DataFromReplacementRule)
   extends UnaryExprMetaBase[INPUT](expr, conf, parent, rule)
 
-/** Base metadata class for RuntimeReplaceable expressions that support conversion to AST as well */
-abstract class RuntimeReplaceableUnaryAstExprMeta[INPUT <: RuntimeReplaceable](
-    expr: INPUT,
-    conf: RapidsConf,
-    parent: Option[RapidsMeta[_, _, _]],
-    rule: DataFromReplacementRule)
-  extends RuntimeReplaceableUnaryExprMeta[INPUT](expr, conf, parent, rule)
-
 /**
  * Base class for metadata around `UnaryExpression`.
  */

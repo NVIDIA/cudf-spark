@@ -75,9 +75,9 @@ abstract class GpuDeleteCommandBase(
 
   final override def run(sparkSession: SparkSession): Seq[Row] = {
     val deltaLog = gpuDeltaLog.deltaLog
-    recordDeltaOperation(gpuDeltaLog.deltaLog, "delta.dml.delete") {
+    DeltaRuntimeShim33x.runDeltaOperation(gpuDeltaLog.deltaLog, "delta.dml.delete") {
       gpuDeltaLog.withNewTransaction(catalogTable) { txn =>
-        DeltaLog.assertRemovable(txn.snapshot)
+        DeltaRuntimeShim33x.assertRemovable(txn.snapshot)
         if (hasBeenExecuted(txn, sparkSession.asInstanceOf[ShimSparkSession])) {
           sendDriverMetrics(sparkSession, metrics)
           return Seq.empty
@@ -85,12 +85,15 @@ abstract class GpuDeleteCommandBase(
 
         val opSpark = toOperationSparkSession(sparkSession.asInstanceOf[ShimSparkSession])
         val (deleteActions, deleteMetrics) = performDelete(opSpark, deltaLog, txn)
+        val numRecordsStats = NumRecordsStats.fromActions(deleteActions)
+        DeltaRuntimeShim33x.validateDeleteNumRecords(
+          sparkSession, deltaLog, numRecordsStats)
         val commitVersion = txn.commitIfNeeded(
           actions = deleteActions,
           op = DeltaOperations.Delete(condition.toSeq),
           tags = RowTracking.addPreservedRowTrackingTagIfNotSet(txn.snapshot))
 
-        recordDeltaEvent(
+        DeltaRuntimeShim33x.emitDeltaEvent(
           deltaLog,
           "delta.dml.delete.stats",
           data = deleteMetrics.copy(commitVersion = commitVersion))
@@ -351,6 +354,8 @@ abstract class GpuDeleteCommandBase(
     sendDriverMetrics(sparkSession, metrics)
 
     val numRecordsStats = NumRecordsStats.fromActions(deleteActions)
+    val (reportedNumCopiedRows, reportedNumDeletedRows) =
+      DeltaRuntimeShim33x.reportSomeZeroMetrics(sparkSession, numCopiedRows, numDeletedRows)
     val deleteMetrics = DeleteMetric(
         condition = condition.map(_.sql).getOrElse("true"),
         numFilesTotal,
@@ -366,8 +371,8 @@ abstract class GpuDeleteCommandBase(
         numPartitionsAfterSkipping,
         numPartitionsAddedTo,
         numPartitionsRemovedFrom,
-        numCopiedRows,
-        numDeletedRows,
+        reportedNumCopiedRows,
+        reportedNumDeletedRows,
         numBytesAdded,
         numBytesRemoved,
         changeFileBytes = changeFileBytes,

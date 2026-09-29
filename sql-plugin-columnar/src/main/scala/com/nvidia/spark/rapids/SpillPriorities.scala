@@ -51,25 +51,4 @@ object SpillPriorities {
    */
   val ACTIVE_BATCHING_PRIORITY: Long = ACTIVE_ON_DECK_PRIORITY + 100
 
-  /**
-   * Priority offset for host memory buffers for spilling.
-   */
-  val HOST_MEMORY_BUFFER_SPILL_OFFSET: Long = 0
-
-  /**
-   * Calculate a new priority based on an offset, clamping it to avoid wraparound.
-   *
-   * @param originalPriority the original priority
-   * @param offset           the desired offset
-   * @return the resulting priority, with clamping if needed
-   */
-  def applyPriorityOffset(originalPriority: Long, offset: Long): Long = {
-    if (offset < 0 && originalPriority < Long.MinValue - offset) {
-      Long.MinValue
-    } else if (offset > 0 && originalPriority > Long.MaxValue - offset) {
-      Long.MaxValue
-    } else {
-      originalPriority + offset
-    }
-  }
 }

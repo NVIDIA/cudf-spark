@@ -14,17 +14,53 @@
 
 import pytest
 
-from asserts import assert_gpu_and_cpu_writes_are_equal_collect, assert_gpu_fallback_write, assert_equal
+from asserts import assert_gpu_and_cpu_writes_are_equal_collect, assert_gpu_fallback_write, \
+    assert_equal, assert_spark_exception
 from data_gen import *
 from delta_lake_utils import *
 from marks import *
 from spark_session import is_before_spark_320, is_databricks_runtime, \
-    supports_delta_lake_deletion_vectors, with_cpu_session, is_before_spark_353, \
+    supports_delta_lake_deletion_vectors, with_cpu_session, with_gpu_session, is_before_spark_353, \
     is_databricks173_or_later, supports_delta_lake_row_tracking
 
 delta_update_enabled_conf = copy_and_update(delta_writes_enabled_conf,
                                             {"spark.rapids.sql.command.UpdateCommand": "true",
                                              "spark.rapids.sql.command.UpdateCommandEdge": "true"})
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="UPDATE record-count validation was added in OSS Delta 4.3")
+def test_delta_update_num_records_validation(spark_tmp_path):
+    conf = copy_and_update(delta_update_enabled_conf, {
+        "spark.databricks.delta.numRecordsValidation.enabled": "true",
+        "spark.databricks.delta.update.deletionVectors.persistent": "true"
+    })
+
+    def setup_tables(spark):
+        for suffix in ("CPU", "GPU"):
+            target_path = f"{spark_tmp_path}/{suffix}"
+            setup_delta_dest_table(
+                spark, target_path,
+                lambda spark: spark.createDataFrame(
+                    [(1, "old"), (2, "keep")], "id INT, value STRING").coalesce(1),
+                use_cdf=False, enable_deletion_vectors=True)
+            set_delta_num_records(spark, target_path, 0, log_version=1)
+
+    with_cpu_session(setup_tables, conf=conf)
+
+    def do_update(spark):
+        gpu_enabled = str(spark.conf.get("spark.rapids.sql.enabled", "false")).lower() == "true"
+        target_path = spark_tmp_path + ("/GPU" if gpu_enabled else "/CPU")
+        return spark.sql(
+            f"UPDATE delta.`{target_path}` SET value = 'new'").collect()
+
+    assert_spark_exception(
+        lambda: with_cpu_session(do_update, conf=conf), "DELTA_NUM_RECORDS_MISMATCH")
+    assert_spark_exception(
+        lambda: with_gpu_session(do_update, conf=conf), "DELTA_NUM_RECORDS_MISMATCH")
+
 
 def delta_sql_update_test(spark_tmp_path, use_cdf, dest_table_func, update_sql,
                           check_func, partition_columns=None, enable_deletion_vectors=False):

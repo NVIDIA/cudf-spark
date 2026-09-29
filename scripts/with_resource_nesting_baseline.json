@@ -219,11 +219,6 @@
       "resource": "withResource(builtTable.filter(trackerTab.getColumn(0)))"
     },
     {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/predicates.scala",
-      "fingerprint": "b59f9e74f85dc00b4612",
-      "resource": "withResource(gather(lhsNoNulls,rEval))"
-    },
-    {
       "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/shims/intervalExpressions.scala",
       "fingerprint": "bdb0982a0a7b49fdc047",
       "resource": "withResource(diff.greaterOrEqualTo(one))"
@@ -272,21 +267,6 @@
       "path": "sql-plugin/src/main/spark359/scala/com/nvidia/spark/rapids/shims/mathExpressions.scala",
       "fingerprint": "e068d373aa01140b6d32",
       "resource": "withResource(Scalar.fromDouble(1.0))"
-    },
-    {
-      "path": "sql-plugin/src/main/spark400/scala/com/nvidia/spark/rapids/GpuVariantGet.scala",
-      "fingerprint": "746efd41147bf4814886",
-      "resource": "withResource(Scalar.fromNull(DType.INT64))"
-    },
-    {
-      "path": "sql-plugin/src/main/spark400/scala/com/nvidia/spark/rapids/GpuVariantGet.scala",
-      "fingerprint": "e24c1b8fef6791399f1c",
-      "resource": "withResource(inRange.ifElse(input,nullValue))"
-    },
-    {
-      "path": "sql-plugin/src/main/spark400/scala/com/nvidia/spark/rapids/GpuVariantGet.scala",
-      "fingerprint": "f7d3007c65e764df4ee2",
-      "resource": "withResource(aboveMin.and(belowMax))"
     }
   ]
 }

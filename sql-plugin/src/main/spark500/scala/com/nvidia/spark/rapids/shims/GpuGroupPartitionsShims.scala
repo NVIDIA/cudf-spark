@@ -22,6 +22,11 @@ package com.nvidia.spark.rapids.shims
 import org.apache.spark.sql.execution.datasources.v2.GroupPartitionsExec
 
 object GpuGroupPartitionsShims {
+  // SPARK-59289 keeps only the expected key count after planning the grouping.
+  def expectedPartitionKeyCount(groupPartitions: GroupPartitionsExec): Option[Int] = {
+    groupPartitions.expectedKeyCount
+  }
+
   // SPARK-59045 wraps each Reducer in KeyReducer. displayName stays on the inner Reducer.
   def reducerNames(groupPartitions: GroupPartitionsExec): Option[Seq[String]] = {
     groupPartitions.reducers.map(
