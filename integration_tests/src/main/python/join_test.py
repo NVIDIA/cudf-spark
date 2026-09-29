@@ -386,13 +386,15 @@ def test_broadcast_join_right_table(data_gen, join_type):
 
 @ignore_order(local=True)
 @validate_execs_in_gpu_plan('GpuBroadcastHashJoinExec')
-def test_broadcast_hash_join_reuses_build_across_stream_partitions():
+@pytest.mark.parametrize('join_type', ['Inner', 'LeftSemi', 'LeftAnti'], ids=idfn)
+def test_broadcast_hash_join_reuses_build_across_stream_partitions(join_type):
     def do_join(spark):
+        # Stream keys 128-159 have no build-side match, so anti joins produce rows.
         stream = spark.range(0, 4096, 1, 8).select(
-            (col('id') % 128).alias('key'), col('id').alias('stream_value'))
+            (col('id') % 160).alias('key'), col('id').alias('stream_value'))
         build = spark.range(0, 256, 1, 1).select(
             (col('id') % 128).alias('key'), col('id').alias('build_value'))
-        return stream.join(broadcast(build), 'key')
+        return stream.join(broadcast(build), 'key', join_type)
 
     conf = {
         'spark.sql.adaptive.enabled': 'false',

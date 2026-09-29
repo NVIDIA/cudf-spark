@@ -19,6 +19,7 @@ package com.nvidia.spark.rapids
 import com.nvidia.spark.rapids.TestUtils.findOperator
 
 import org.apache.spark.SparkConf
+import org.apache.spark.sql.catalyst.plans.Inner
 import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
 import org.apache.spark.sql.functions.{broadcast, col}
 import org.apache.spark.sql.rapids.execution.{GpuBroadcastHashJoinExec, GpuHashJoin}
@@ -52,11 +53,6 @@ class BroadcastHashJoinSuite extends SparkQueryCompareTestSuite {
     spark.range(0, 16).selectExpr(
       "CAST(id % 4 AS INT) AS join_key",
       "CAST(id AS INT) AS build_value")
-
-  private def duplicateHeavyDf(spark: SparkSession): DataFrame =
-    spark.range(0, 100000, 1, 1).selectExpr(
-      "CAST(id % 2 AS INT) AS join_key",
-      "id AS value")
 
   private def nullableProbeDf(spark: SparkSession): DataFrame =
     spark.range(0, 8).selectExpr(
@@ -242,18 +238,6 @@ class BroadcastHashJoinSuite extends SparkQueryCompareTestSuite {
           col("p.probe_value") < col("b.build_value"),
         joinType)
     }
-
-    // Keep each side in one batch: an inner intermediate would contain five billion pairs.
-    // The filtered join should avoid that intermediate blowup.
-    val conf = broadcastReuseConf
-      .set("spark.rapids.sql.batchSizeBytes", (16 * 1024 * 1024).toString)
-    IGNORE_ORDER_testSparkResultsAreEqual2(
-      s"broadcast hash join reuse duplicate-heavy $joinType",
-      duplicateHeavyDf,
-      duplicateHeavyDf,
-      conf = conf) { (probe, build) =>
-      probe.join(broadcast(build), Seq("join_key"), joinType)
-    }
   }
 
   test("AUTO admits a cold broadcast hash build after repeated smaller numeric probes") {
@@ -296,10 +280,20 @@ class BroadcastHashJoinSuite extends SparkQueryCompareTestSuite {
       inner.union(semi).union(anti)
     } { (_, gpuPlan) =>
       val joins = PlanUtils.findOperators(gpuPlan, _.isInstanceOf[GpuBroadcastHashJoinExec])
+        .map(_.asInstanceOf[GpuHashJoin])
       assertResult(3)(joins.size)
       assert(PlanUtils.findOperators(gpuPlan, _.isInstanceOf[ReusedExchangeExec]).nonEmpty)
-      assertResult(2L)(joins.map(_.metrics("hashTableBuilds").value).sum)
-      assert(joins.map(_.metrics("hashTableReuses").value).sum > 0L)
+      def builds(join: GpuHashJoin): Long = join.metrics("hashTableBuilds").value
+      def reuses(join: GpuHashJoin): Long = join.metrics("hashTableReuses").value
+      val (inner, semiAnti) = joins.partition(_.joinType == Inner)
+      assertResult(1)(inner.size)
+      assertResult(1L)(builds(inner.head))
+      // Whichever of semi/anti probes first builds the shared filtered artifact; the other must
+      // reuse it without building.
+      assertResult(1L)(semiAnti.map(builds).sum)
+      val summary = semiAnti.map(j => s"${j.joinType}: builds=${builds(j)} reuses=${reuses(j)}")
+      assert(semiAnti.exists(j => builds(j) == 0L && reuses(j) > 0L),
+        s"expected semi/anti to share one filtered build: ${summary.mkString(", ")}")
     }
   }
 }

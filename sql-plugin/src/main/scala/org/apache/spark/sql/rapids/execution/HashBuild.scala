@@ -510,7 +510,7 @@ private final class CachedDistinctHashProbeBackend(
 /**
  * Backend that holds a lease on a reusable cuDF filtered lookup artifact until `close()`. This
  * probes a pre-built native table for semi/anti joins. Probing a filtered join directly produces
- * a Boolean array describing whether a probe row matched or not, bypassing potentially quadratic
+ * a gather map describing whether a probe row matched or not, bypassing potentially quadratic
  * intermediate gather maps if we first went through an inner join instead.
  */
 private final class CachedFilteredProbeBackend(
