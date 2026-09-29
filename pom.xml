@@ -23,7 +23,7 @@
     <artifactId>rapids-4-spark-parent_2.12</artifactId>
     <name>NVIDIA cuDF plugin for Apache Spark Root Project</name>
     <description>The root project of the NVIDIA cuDF plugin for Apache Spark</description>
-    <version>26.10.0-SNAPSHOT</version>
+    <version>26.12.0-SNAPSHOT</version>
     <packaging>pom</packaging>
 
     <url>https://nvidia.github.io/cudf-spark/</url>
@@ -1082,9 +1082,9 @@
         <spark.version.classifier>spark${buildver}</spark.version.classifier>
         <cuda.version>cuda12</cuda.version>
         <jni.classifier>${cuda.version}</jni.classifier>
-        <cudf-spark-jni.version>26.10.0-SNAPSHOT</cudf-spark-jni.version>
+        <cudf-spark-jni.version>26.12.0-SNAPSHOT</cudf-spark-jni.version>
         <cudf-spark-jni.artifactId>cudf-spark-jni</cudf-spark-jni.artifactId>
-        <cudf-spark-private.version>26.10.0-SNAPSHOT</cudf-spark-private.version>
+        <cudf-spark-private.version>26.12.0-SNAPSHOT</cudf-spark-private.version>
         <cudf-spark-private.artifactId>cudf-spark-private_${scala.binary.version}</cudf-spark-private.artifactId>
         <scala.binary.version>2.12</scala.binary.version>
         <scala.recompileMode>incremental</scala.recompileMode>
