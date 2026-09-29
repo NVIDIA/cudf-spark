@@ -27,6 +27,12 @@ delta_merge_enabled_conf = copy_and_update(delta_writes_enabled_conf,
                             "spark.rapids.sql.delta.lowShuffleMerge.enabled": "true",
                             "spark.rapids.sql.format.parquet.reader.type": "PERFILE"})
 
+
+def assert_low_shuffle_merge_collect(do_merge, data_path, conf, expect_write=True):
+    assert_collect(do_merge, data_path, conf, expect_write=expect_write,
+                   expected_command="GpuLowShuffleMergeCommand")
+
+
 @allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
@@ -51,7 +57,8 @@ def test_delta_low_shuffle_merge_when_gpu_file_scan_override_failed(spark_tmp_pa
                                "spark.sql.autoBroadcastJoinThreshold": "-1"
                             })
     assert_delta_sql_merge_collect(spark_tmp_path, spark_tmp_table_factory, use_cdf, False,
-                                   src_table_func, dest_table_func, merge_sql, False, conf=conf)
+                                   src_table_func, dest_table_func, merge_sql, False,
+                                   assert_func=assert_low_shuffle_merge_collect, conf=conf)
 
 
 
@@ -71,7 +78,8 @@ def test_delta_merge_not_match_insert_only(spark_tmp_path, spark_tmp_table_facto
                                            use_cdf, partition_columns, num_slices):
     do_test_delta_merge_not_match_insert_only(spark_tmp_path, spark_tmp_table_factory,
                                               table_ranges, use_cdf, False, partition_columns,
-                                              num_slices, False, delta_merge_enabled_conf)
+                                              num_slices, False, delta_merge_enabled_conf,
+                                              assert_func=assert_low_shuffle_merge_collect)
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
@@ -89,7 +97,8 @@ def test_delta_merge_match_delete_only(spark_tmp_path, spark_tmp_table_factory, 
                                        use_cdf, partition_columns, num_slices):
     do_test_delta_merge_match_delete_only(spark_tmp_path, spark_tmp_table_factory, table_ranges,
                                           use_cdf, False, partition_columns, num_slices, False,
-                                          delta_merge_enabled_conf)
+                                          delta_merge_enabled_conf,
+                                          assert_func=assert_low_shuffle_merge_collect)
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
@@ -100,7 +109,8 @@ def test_delta_merge_match_delete_only(spark_tmp_path, spark_tmp_table_factory, 
 @pytest.mark.parametrize("num_slices", num_slices_to_test, ids=idfn)
 def test_delta_merge_standard_upsert(spark_tmp_path, spark_tmp_table_factory, use_cdf, num_slices):
     do_test_delta_merge_standard_upsert(spark_tmp_path, spark_tmp_table_factory, use_cdf, False,
-                                        num_slices, False, delta_merge_enabled_conf)
+                                        num_slices, False, delta_merge_enabled_conf,
+                                        assert_func=assert_low_shuffle_merge_collect)
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
@@ -123,7 +133,8 @@ def test_delta_merge_standard_upsert(spark_tmp_path, spark_tmp_table_factory, us
 def test_delta_merge_upsert_with_condition(spark_tmp_path, spark_tmp_table_factory, use_cdf, merge_sql, num_slices):
     do_test_delta_merge_upsert_with_condition(spark_tmp_path, spark_tmp_table_factory, use_cdf, False, 
                                               merge_sql, num_slices, False, 
-                                              delta_merge_enabled_conf)
+                                              delta_merge_enabled_conf,
+                                              assert_func=assert_low_shuffle_merge_collect)
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
@@ -139,7 +150,8 @@ def test_delta_merge_upsert_with_unmatchable_match_condition(spark_tmp_path, spa
                                                                 False,
                                                                 num_slices,
                                                                 False,
-                                                                delta_merge_enabled_conf)
+                                                                delta_merge_enabled_conf,
+                                                                assert_func=assert_low_shuffle_merge_collect)
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
@@ -149,4 +161,5 @@ def test_delta_merge_upsert_with_unmatchable_match_condition(spark_tmp_path, spa
 @pytest.mark.parametrize("use_cdf", [pytest.param(True, marks=pytest.mark.xfail(reason="https://github.com/NVIDIA/spark-rapids/issues/13552")), False], ids=idfn)
 def test_delta_merge_update_with_aggregation(spark_tmp_path, spark_tmp_table_factory, use_cdf):
     do_test_delta_merge_update_with_aggregation(spark_tmp_path, spark_tmp_table_factory, use_cdf, False,
-                                                delta_merge_enabled_conf)
+                                                delta_merge_enabled_conf,
+                                                assert_func=assert_low_shuffle_merge_collect)
