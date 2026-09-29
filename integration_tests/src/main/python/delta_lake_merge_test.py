@@ -37,6 +37,18 @@ if is_spark_400_or_later():
 delta_merge_no_cpu_bridge_conf = copy_and_update(
     delta_merge_enabled_conf, {"spark.rapids.sql.expression.cpuBridge.enabled": "false"})
 
+
+def merge_deletion_vector_values_with_xfail_reasons(enabled_xfail_reason=None):
+    values = dml_deletion_vector_values_with_xfail_reasons(
+        enabled_xfail_reason=enabled_xfail_reason)
+    if is_oss_delta_lake_40():
+        # Delta's DV processing joins table-state metadata to touched file paths on the CPU.
+        # Permit those nodes only for the DV-enabled case, while asserting the GPU MERGE ran.
+        return [values[0], pytest.param(
+            True, marks=allow_non_gpu_conditional(
+                True, "BroadcastHashJoinExec", "BroadcastExchangeExec"))]
+    return values
+
 fallback_test_params = [{"spark.rapids.sql.format.delta.write.enabled": "false"},
                         {"spark.rapids.sql.format.parquet.enabled": "false"},
                         {"spark.rapids.sql.format.parquet.write.enabled": "false"},
@@ -422,7 +434,7 @@ def test_delta_merge_not_matched_by_source_union_source_fallback(
 @pytest.mark.parametrize("disable_conf", [
     "spark.rapids.sql.exec.RapidsProcessDeltaMergeJoinExec",
     "spark.rapids.sql.expression.Add"], ids=idfn)
-@pytest.mark.parametrize("enable_deletion_vectors", dml_deletion_vector_values_with_xfail_reasons(
+@pytest.mark.parametrize("enable_deletion_vectors", merge_deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_merge_partial_fallback_via_conf(spark_tmp_path, spark_tmp_table_factory,
                                                use_cdf, partition_columns, num_slices, disable_conf, enable_deletion_vectors):
@@ -451,7 +463,7 @@ def test_delta_merge_partial_fallback_via_conf(spark_tmp_path, spark_tmp_table_f
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
 @pytest.mark.parametrize("partition_columns", [None, ["a"], ["b"], ["a", "b"]], ids=idfn)
 @pytest.mark.parametrize("num_slices", num_slices_to_test, ids=idfn)
-@pytest.mark.parametrize("enable_deletion_vector", dml_deletion_vector_values_with_xfail_reasons(
+@pytest.mark.parametrize("enable_deletion_vector", merge_deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_merge_not_match_insert_only(spark_tmp_path, spark_tmp_table_factory, table_ranges,
                                            use_cdf, partition_columns, num_slices, enable_deletion_vector):
@@ -513,7 +525,7 @@ def test_delta_materialize_merge(spark_tmp_path, spark_tmp_table_factory):
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
 @pytest.mark.parametrize("partition_columns", [None, ["a"], ["b"], ["a", "b"]], ids=idfn)
 @pytest.mark.parametrize("num_slices", num_slices_to_test, ids=idfn)
-@pytest.mark.parametrize("enable_deletion_vector", dml_deletion_vector_values_with_xfail_reasons(
+@pytest.mark.parametrize("enable_deletion_vector", merge_deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_merge_match_delete_only(spark_tmp_path, spark_tmp_table_factory, table_ranges_expect_write,
                                        use_cdf, partition_columns, num_slices, enable_deletion_vector):
@@ -532,7 +544,7 @@ def test_delta_merge_match_delete_only(spark_tmp_path, spark_tmp_table_factory, 
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
 @pytest.mark.parametrize("num_slices", num_slices_to_test, ids=idfn)
-@pytest.mark.parametrize("enable_deletion_vector", dml_deletion_vector_values_with_xfail_reasons(
+@pytest.mark.parametrize("enable_deletion_vector", merge_deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_merge_standard_upsert(spark_tmp_path, spark_tmp_table_factory, use_cdf, num_slices, enable_deletion_vector):
     do_test_delta_merge_standard_upsert(spark_tmp_path, spark_tmp_table_factory, use_cdf, enable_deletion_vector,
@@ -1545,7 +1557,7 @@ def test_delta_merge_preserves_row_tracking_db173(spark_tmp_path):
     " WHEN NOT MATCHED AND s.b > 'b' AND s.b < 'f' THEN INSERT *" \
     " WHEN NOT MATCHED AND s.b > 'f' AND s.b < 'z' THEN INSERT (b) VALUES ('not here')" ], ids=idfn)
 @pytest.mark.parametrize("num_slices", num_slices_to_test, ids=idfn)
-@pytest.mark.parametrize("enable_deletion_vector", dml_deletion_vector_values_with_xfail_reasons(
+@pytest.mark.parametrize("enable_deletion_vector", merge_deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_merge_upsert_with_condition(spark_tmp_path, spark_tmp_table_factory, use_cdf, merge_sql, num_slices,
                                            enable_deletion_vector):
@@ -1559,7 +1571,7 @@ def test_delta_merge_upsert_with_condition(spark_tmp_path, spark_tmp_table_facto
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
 @pytest.mark.parametrize("num_slices", num_slices_to_test, ids=idfn)
-@pytest.mark.parametrize("enable_deletion_vector", dml_deletion_vector_values_with_xfail_reasons(
+@pytest.mark.parametrize("enable_deletion_vector", merge_deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_merge_upsert_with_unmatchable_match_condition(spark_tmp_path, spark_tmp_table_factory, use_cdf,
                                                              num_slices, enable_deletion_vector):
@@ -1574,7 +1586,7 @@ def test_delta_merge_upsert_with_unmatchable_match_condition(spark_tmp_path, spa
 @ignore_order
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
-@pytest.mark.parametrize("enable_deletion_vector", dml_deletion_vector_values_with_xfail_reasons(
+@pytest.mark.parametrize("enable_deletion_vector", merge_deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_merge_update_with_aggregation(spark_tmp_path, spark_tmp_table_factory, use_cdf, enable_deletion_vector):
     do_test_delta_merge_update_with_aggregation(spark_tmp_path, spark_tmp_table_factory, use_cdf, enable_deletion_vector,
@@ -1587,7 +1599,7 @@ def test_delta_merge_update_with_aggregation(spark_tmp_path, spark_tmp_table_fac
 @pytest.mark.xfail(not is_databricks_runtime() and is_before_spark_353(), reason="https://github.com/NVIDIA/spark-rapids/issues/7573")
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
 @pytest.mark.parametrize("num_slices", num_slices_to_test, ids=idfn)
-@pytest.mark.parametrize("enable_deletion_vector", dml_deletion_vector_values_with_xfail_reasons(
+@pytest.mark.parametrize("enable_deletion_vector", merge_deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_merge_dataframe_api(spark_tmp_path, use_cdf, num_slices, enable_deletion_vector):
     from delta.tables import DeltaTable
@@ -1603,7 +1615,11 @@ def test_delta_merge_dataframe_api(spark_tmp_path, use_cdf, num_slices, enable_d
             .whenNotMatchedInsertAll() \
             .execute()
     read_func = read_delta_path_with_cdf if use_cdf else read_delta_path
-    assert_gpu_and_cpu_writes_are_equal_collect(do_merge, read_func, data_path, conf=delta_merge_enabled_conf)
+    expected_command = ("GpuMergeIntoCommand"
+                        if is_oss_delta_lake_40() and enable_deletion_vector else None)
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        do_merge, read_func, data_path, conf=delta_merge_enabled_conf,
+        expected_command=expected_command)
     # Non-deterministic input for each task means we can only reliably compare record counts when using only one task
     if num_slices == 1:
         with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
@@ -1783,6 +1799,8 @@ def test_delta_dv_read_user_internal_row_index_column(
         require_non_empty=True)
 
 
+@allow_non_gpu_conditional(
+    is_oss_delta_lake_40(), "BroadcastHashJoinExec", "BroadcastExchangeExec")
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
