@@ -24,8 +24,8 @@ import org.mockito.Mockito.{doThrow, mock, times, verify, when}
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.TaskContext
-import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, Expression,
-  NamedExpression}
+import org.apache.spark.sql.catalyst.expressions.{Abs, Attribute, AttributeReference, BoundReference,
+  Expression, NamedExpression}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.{GpuAdd, GpuGreatest, GpuMultiply, GpuSubtract}
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
@@ -311,6 +311,26 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     assert(collectExpressions[GpuSubtract](tiered.exprTiers.last).nonEmpty)
   }
 
+  test("JIT selection crosses a CPU bridge without a shared output") {
+    val left = reference(0, LongType)
+    val right = reference(1, LongType)
+    val input = GpuAdd(left, right, failOnError = false)()
+    val cpuExpression = Abs(BoundReference(0, LongType, nullable = true))
+    val bridge = GpuCpuBridgeExpression(Seq(input), cpuExpression, LongType, outputNullable = true)
+    // [CPU_ABS(left+right)*right AS result], with no other output exposing left+right.
+    val expression = alias(GpuMultiply(bridge, right, failOnError = false)(), "result")
+
+    val tiered = bindProject(Seq(expression), Seq(left, right), projectConf())
+    // tier 0: AST_JIT(left+right); tier 1: CPU_ABS(t0); tier 2: AST_JIT(t1*right).
+    val jitTiers = tiered.exprTiers.map(_.flatMap(GpuAstJitExpression.extractTopLevel))
+    assertResult(Seq(1, 0, 1))(jitTiers.map(_.size))
+    assert(jitTiers.head.head.child.isInstanceOf[GpuAdd])
+    assert(jitTiers.last.head.child.isInstanceOf[GpuMultiply])
+    val boundBridge = collectExpressions[GpuCpuBridgeExpression](tiered.exprTiers(1)).head
+    assert(boundBridge.gpuInputs.head.isInstanceOf[GpuBoundReference])
+    assertResult(cpuExpression)(boundBridge.cpuExpression)
+  }
+
   test("JIT planner keeps non-deterministic arithmetic on the regular backend") {
     val expression = alias(
       GpuAdd(
@@ -448,14 +468,14 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
 
     val all = GpuAstJitExpression.explainFinalSelections(selections, all = true)
     assert(all.contains("final backend: AST JIT"), all)
-    assert(all.contains("final backend: AST\n"), all)
+    assert(all.contains("final backend: AST Interpreted\n"), all)
     assert(all.contains("final backend: the regular GPU projection"), all)
     assertResult("")(
       GpuAstJitExpression.explainFinalSelections(Seq(Seq(jit)), all = false))
 
     val notOnGpu = GpuAstJitExpression.explainFinalSelections(selections, all = false)
     assert(!notOnGpu.contains("final backend: AST JIT"), notOnGpu)
-    assert(notOnGpu.contains("final backend: AST\n"), notOnGpu)
+    assert(notOnGpu.contains("final backend: AST Interpreted\n"), notOnGpu)
     assert(notOnGpu.contains("final backend: the regular GPU projection"), notOnGpu)
   }
 

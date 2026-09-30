@@ -31,6 +31,12 @@ import org.apache.spark.sql.rapids.catalyst.expressions.GpuExpressionEquals
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 object GpuAstJitExpression {
+  /** Extracts an AST JIT wrapper after unwrapping any top-level aliases. */
+  private[rapids] def extractTopLevel(expression: Expression): Option[GpuAstJitExpression] =
+    GpuProjectAstExpressionBase.extractTopLevel(expression).collect {
+      case jitExpression: GpuAstJitExpression => jitExpression
+    }
+
   private final case class JitInputColumn(
       ordinal: Int,
       dataType: DType,
@@ -88,12 +94,6 @@ object GpuAstJitExpression {
       newRoots.foreach(root => operations ++= root.operations)
     }
   }
-
-  /** Extracts an AST JIT wrapper after unwrapping any top-level aliases. */
-  private[rapids] def extractTopLevel(expression: Expression): Option[GpuAstJitExpression] =
-    GpuProjectAstExpressionBase.extractTopLevel(expression).collect {
-      case jitExpression: GpuAstJitExpression => jitExpression
-    }
 
   private[rapids] def canUseAstJit(expression: Expression): Boolean = expression match {
     case gpuExpression: GpuExpression =>
@@ -280,7 +280,7 @@ object GpuAstJitExpression {
   private def finalBackend(expression: Expression): String = {
     GpuProjectAstExpressionBase.extractTopLevel(expression) match {
       case Some(_: GpuAstJitExpression) => "AST JIT"
-      case Some(_: GpuProjectAstExpression) => "AST"
+      case Some(_: GpuProjectAstExpression) => "AST Interpreted"
       case _ => "the regular GPU projection"
     }
   }

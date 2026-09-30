@@ -81,6 +81,11 @@ equivalence, not the final cuDF Row IR or GPU instructions. Grouping honors the
 multi-output execution setting. These are final physical tiers, not the original
 planner's dependency-wave identifiers.
 
+The final backend labels distinguish `AST JIT` (compiled execution),
+`AST Interpreted` (the cuDF AST interpreter), and the regular GPU projection.
+These describe the backend selected for each bound tier output; an earlier Spark
+plan string may not show JIT subexpressions extracted during tier planning.
+
 With `spark.rapids.sql.metrics.level=DEBUG`, `GpuProjectExec` exposes:
 
 | Metric key | Meaning |

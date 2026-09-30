@@ -203,7 +203,7 @@ object GpuBindReferences extends Logging {
    * Binding method for tiered expressions without metric injection.
    * This is for use by GpuBind implementations and should not be called directly
    * from SparkPlan nodes. Use the public API that requires metrics instead, except
-   * when absolutely needed.
+   * when absolutely needed. AST JIT is opt-in; generic callers leave it disabled.
    */
   def bindGpuReferencesTieredNoMetrics[A <: Expression](
       expressions: Seq[A],
@@ -283,7 +283,8 @@ object GpuBindReferences extends Logging {
    * @param input The input schema
    * @param conf SQL configuration
    * @param metrics Metrics to inject into the bound expressions
-   * @param enableAstJit Whether eligible expressions may use AST JIT
+   * @param enableAstJit Whether eligible expressions may use AST JIT. Defaults to false so
+   *                     generic callers do not enable the experimental backend implicitly.
    */
   def bindGpuReferencesTiered[A <: Expression](
       expressions: Seq[A],
