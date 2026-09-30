@@ -27,6 +27,7 @@ import scala.annotation.tailrec
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 import scala.language.implicitConversions
+import scala.util.control.NonFatal
 
 import ai.rapids.cudf._
 import ai.rapids.cudf.{ParquetChunkedReader => JniParquetChunkedReader}
@@ -615,11 +616,42 @@ protected case class GpuParquetFileFilterHandler(
       conf: Configuration,
       metrics: Map[String, GpuMetric],
       fileSize: Long): HostMemoryBuffer = {
-    val inputFile = newInputFile(fileIO, filePath, fileSize)
-    withResource(ParquetFooterUtils.getFooterBuffer(inputFile, metrics,
-        readFooterBuffer(fileIO, filePath, conf, fileSize))) { hmb =>
+    withResource(readCachedFooterBuffer(fileIO, filePath, conf, metrics, fileSize)) { hmb =>
       // buffer includes header and trailing length and magic, stripped here
       hmb.slice(MAGIC.length, hmb.getLength - Integer.BYTES - MAGIC.length)
+    }
+  }
+
+  private def readCachedFooterBuffer(
+      fileIO: RapidsFileIO,
+      filePath: Path,
+      conf: Configuration,
+      metrics: Map[String, GpuMetric],
+      fileSize: Long): HostMemoryBuffer = {
+    def read(size: Long): HostMemoryBuffer = {
+      val inputFile = newInputFile(fileIO, filePath, size)
+      ParquetFooterUtils.getFooterBuffer(inputFile, metrics,
+        readFooterBuffer(fileIO, filePath, conf, size))
+    }
+
+    val canRetryWithCurrentFileSize = fileIO.isInstanceOf[HadoopFileIO] && fileSize > 0
+    if (canRetryWithCurrentFileSize) {
+      try {
+        read(fileSize)
+      } catch {
+        case NonFatal(firstError) =>
+          logWarning(s"Footer read failed for $filePath using planned file size $fileSize; " +
+            "retrying with the current file size", firstError)
+          try {
+            read(-1)
+          } catch {
+            case NonFatal(retryError) =>
+              retryError.addSuppressed(firstError)
+              throw retryError
+          }
+      }
+    } else {
+      read(fileSize)
     }
   }
 
@@ -747,9 +779,7 @@ protected case class GpuParquetFileFilterHandler(
       filePath: Path): ParquetMetadata = {
     //noinspection ScalaDeprecation
     NvtxRegistry.PARQUET_READ_FOOTER {
-      val inputFile = newInputFile(fileIO, filePath, file.fileSize)
-      withResource(ParquetFooterUtils.getFooterBuffer(inputFile, metrics,
-          readFooterBuffer(fileIO, filePath, conf, file.fileSize))) { hmb =>
+      withResource(readCachedFooterBuffer(fileIO, filePath, conf, metrics, file.fileSize)) { hmb =>
         ParquetFileReader.readFooter(new HMBInputFile(hmb),
           ParquetMetadataConverter.range(file.start, file.start + file.length))
       }
