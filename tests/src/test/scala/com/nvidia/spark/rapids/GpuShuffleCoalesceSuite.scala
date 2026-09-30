@@ -255,6 +255,45 @@ class GpuShuffleCoalesceSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
+  test("kudo concat packs a partition that has columns but no rows") {
+    // partitionIndices 0,2,2 makes partition 1 four columns wide and zero rows
+    // long. concat writes that table's header and must advance the data offset
+    // by its totalDataLen of zero, or every later table in the packed buffer
+    // lands at the wrong offset and the assembled batch is wrong.
+    TrampolineUtil.cleanupAnyExistingSession()
+    val conf = createSparkConf()
+    TestUtils.withGpuSparkSession(conf) { _ =>
+      GpuShuffleEnv.init(new RapidsConf(conf))
+      val partitionIndices = Array(0, 2, 2)
+      val gp = createGpuPartitioning(partitionIndices)
+      withResource(buildBatch()) { originalBatch =>
+        GpuColumnVector.incRefCounts(originalBatch)
+        val columns = GpuColumnVector.extractColumns(originalBatch)
+        val numRows = originalBatch.numRows
+        val dataTypes = GpuColumnVector.extractTypes(originalBatch)
+        withResource(gp.sliceInternalGpuOrCpuAndClose(
+          numRows, partitionIndices, columns).map(_._1)) { serializedPartitions =>
+          val serializedData = serializeBatchesToStream(serializedPartitions, dataTypes)
+          withResource(deserializeStreamToIterator(serializedData, dataTypes).toArray) {
+            kudoBatches =>
+              val kudoColumns = kudoBatches.map(
+                _.column(0).asInstanceOf[KudoSerializedTableColumn])
+              // the zero-row table really is among the ones concat is handed
+              assert(kudoColumns.exists(_.spillableKudoTable.header.getNumRows == 0),
+                "expected a zero-row kudo table among the serialized partitions")
+              assert(kudoColumns.forall(_.spillableKudoTable.header.getNumColumns > 0),
+                "expected every serialized partition to carry columns")
+              withResource(new KudoGpuTableOperator(dataTypes).concat(kudoColumns)) {
+                concatenated =>
+                  assertResult(numRows)(concatenated.numRows)
+                  compareBatches(originalBatch, concatenated)
+              }
+          }
+        }
+      }
+    }
+  }
+
   test("GPU kudo partitioning with deserialization") {
     // Use a small target size to prevent coalescing from combining partitions
     runKudoShuffleTest(targetBatchSize = 1000)
