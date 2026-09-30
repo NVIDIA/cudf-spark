@@ -33,6 +33,16 @@ class SpillableKudoTable(val header: KudoTableHeader,
     }
   }
 
+  /**
+   * Copy this table's data bytes into `dst` at `dstOffset`. A table with no
+   * buffer contributes nothing.
+   */
+  def materializeInto(dst: HostMemoryBuffer, dstOffset: Long): Unit = {
+    if (shb != null) {
+      shb.materializeInto(dst, dstOffset)
+    }
+  }
+
   override def toString: String =
     "SpillableKudoTable{header=" + this.header + ", shb=" + this.shb + '}'
 
