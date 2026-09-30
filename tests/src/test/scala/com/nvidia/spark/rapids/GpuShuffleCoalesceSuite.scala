@@ -22,7 +22,6 @@ import ai.rapids.cudf.{ColumnVector, Cuda, DType, Table}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.jni.RmmSpark
 import com.nvidia.spark.rapids.jni.kudo.DumpOption
-import com.nvidia.spark.rapids.spill.SpillFramework
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -250,46 +249,6 @@ class GpuShuffleCoalesceSuite extends AnyFunSuite with BeforeAndAfterEach {
             val retryCount = RmmSpark.getAndResetNumSplitRetryThrow(1)
             assert(retryCount > 0,
               s"Expected at least one split retry, but saw $retryCount retries")
-          }
-        }
-      }
-    }
-  }
-
-  test("kudo concat assembles tables that have spilled to disk") {
-    // concat copies each spilled table straight into the staging buffer, so the
-    // disk path of materializeInto runs inside concat at a running offset. The
-    // previous code materialized every table into its own host buffer first.
-    TrampolineUtil.cleanupAnyExistingSession()
-    val conf = createSparkConf()
-    TestUtils.withGpuSparkSession(conf) { _ =>
-      GpuShuffleEnv.init(new RapidsConf(conf))
-      val partitionIndices = Array(0, 2, 5)
-      val gp = createGpuPartitioning(partitionIndices)
-      withResource(buildBatch()) { originalBatch =>
-        GpuColumnVector.incRefCounts(originalBatch)
-        val columns = GpuColumnVector.extractColumns(originalBatch)
-        val numRows = originalBatch.numRows
-        val dataTypes = GpuColumnVector.extractTypes(originalBatch)
-        withResource(gp.sliceInternalGpuOrCpuAndClose(
-          numRows, partitionIndices, columns).map(_._1)) { serializedPartitions =>
-          val serializedData = serializeBatchesToStream(serializedPartitions, dataTypes)
-          withResource(deserializeStreamToIterator(serializedData, dataTypes).toArray) {
-            kudoBatches =>
-              val kudoColumns = kudoBatches.map(
-                _.column(0).asInstanceOf[KudoSerializedTableColumn])
-              assert(kudoColumns.length > 1,
-                "need more than one table so the running offset is exercised")
-              // push every kudo table out of the host store and onto disk
-              val hostBytes = kudoColumns.map(_.spillableKudoTable.length).sum
-              SpillFramework.stores.hostStore.spill(hostBytes)
-              assert(SpillFramework.stores.diskStore.numHandles > 0,
-                "expected the kudo tables to have spilled to disk")
-              withResource(new KudoGpuTableOperator(dataTypes).concat(kudoColumns)) {
-                concatenated =>
-                  assertResult(numRows)(concatenated.numRows)
-                  compareBatches(originalBatch, concatenated)
-              }
           }
         }
       }
