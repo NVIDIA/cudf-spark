@@ -173,7 +173,7 @@ def create_contacts_table_and_read(is_partitioned, format, data_path, expected_s
 # https://github.com/NVIDIA/spark-rapids/issues/8713
 # https://github.com/NVIDIA/spark-rapids/issues/8714
 @pytest.mark.parametrize('query,expected_schemata', [("select friends.middle, friends from {} where p=1", "struct<friends:array<struct<first:string,middle:string,last:string>>>"),
-                                                     pytest.param("select name.middle, address from {} where p=2", "struct<name:struct<middle:string>,address:string>", marks=pytest.mark.skip(reason='https://github.com/NVIDIA/spark-rapids/issues/8788')),
+                                                     ("select name.middle, address from {} where p=2", "struct<name:struct<middle:string>,address:string>"),
                                                      ("select name.first from {} where name.first = 'Jane'", "struct<name:struct<first:string>>")])
 @pytest.mark.parametrize('is_partitioned', [True, False])
 @pytest.mark.parametrize('format', ["parquet", "orc"])
