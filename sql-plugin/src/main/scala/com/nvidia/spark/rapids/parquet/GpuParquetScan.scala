@@ -552,6 +552,8 @@ protected case class GpuParquetFileFilterHandler(
     @transient sqlConf: SQLConf,
     metrics: Map[String, GpuMetric]) extends Logging {
 
+  private class InvalidFooterIndexException(message: String) extends RuntimeException(message)
+
   private val FOOTER_LENGTH_SIZE = 4
   private val isCaseSensitive = sqlConf.caseSensitiveAnalysis
   private val enableParquetFilterPushDown: Boolean = sqlConf.parquetFilterPushDown
@@ -634,24 +636,29 @@ protected case class GpuParquetFileFilterHandler(
         readFooterBuffer(fileIO, filePath, conf, size))
     }
 
-    val canRetryWithCurrentFileSize = fileIO.isInstanceOf[HadoopFileIO] && fileSize > 0
-    if (canRetryWithCurrentFileSize) {
-      try {
+    fileIO match {
+      case hadoopFileIO: HadoopFileIO if fileSize > 0 =>
+        try {
+          read(fileSize)
+        } catch {
+          case firstError @ (_: EOFException | _: InvalidFooterIndexException) =>
+            val currentFileSize = hadoopFileIO.newInputFile(filePath).getLength
+            if (currentFileSize == fileSize) {
+              throw firstError
+            } else {
+              logWarning(s"Footer read failed for $filePath because its size changed from " +
+                s"$fileSize to $currentFileSize; retrying with the current file size", firstError)
+              try {
+                read(currentFileSize)
+              } catch {
+                case NonFatal(retryError) =>
+                  retryError.addSuppressed(firstError)
+                  throw retryError
+              }
+            }
+        }
+      case _ =>
         read(fileSize)
-      } catch {
-        case firstError: EOFException =>
-          logWarning(s"Footer read failed for $filePath using planned file size $fileSize; " +
-            "retrying with the current file size", firstError)
-          try {
-            read(-1)
-          } catch {
-            case NonFatal(retryError) =>
-              retryError.addSuppressed(firstError)
-              throw retryError
-          }
-      }
-    } else {
-      read(fileSize)
     }
   }
 
@@ -723,7 +730,7 @@ protected case class GpuParquetFileFilterHandler(
       val footerLengthIndex = fileLen - trailerLen
       val footerIndex = footerLengthIndex - footerLength
       if (footerIndex < MAGIC.length || footerIndex >= footerLengthIndex) {
-        throw new RuntimeException(s"corrupted file: the footer index is not within " +
+        throw new InvalidFooterIndexException(s"corrupted file: the footer index is not within " +
           s"the file: $footerIndex")
       }
       val hmbLength = (fileLen - footerIndex).toInt
