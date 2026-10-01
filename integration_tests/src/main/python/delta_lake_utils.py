@@ -743,7 +743,7 @@ def assert_rapids_gpu_merge_ran(do_test, conf):
         do_test, conf, required_gpu_classes=[], expected_command="GpuMergeIntoCommand")
 
 
-def assert_rapids_gpu_delete_ran(do_test, conf):
+def assert_rapids_gpu_delete_ran(do_test, conf, expected_classes=None):
     """
     Runs a Delta DELETE on the GPU and asserts the GpuDeleteCommand actually executed
     (i.e. the command did not fall back to CPU). Unlike assert_rapids_delta_write, this
@@ -758,6 +758,9 @@ def assert_rapids_gpu_delete_ran(do_test, conf):
         captured_plans = callback.getResultsWithTimeout(10000)
         assert any(callback.contains(plan, "GpuDeleteCommand") for plan in captured_plans), \
             "GpuDeleteCommand not found in any captured plan; DELETE may have fallen back to CPU"
+        for cls in expected_classes or ():
+            assert any(callback.contains(plan, cls) for plan in captured_plans), \
+                f"{cls} is not found in any captured DELETE plan"
         return result
     finally:
         callback.endCapture()

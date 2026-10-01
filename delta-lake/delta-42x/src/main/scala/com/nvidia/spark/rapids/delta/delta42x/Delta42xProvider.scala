@@ -18,8 +18,9 @@ package com.nvidia.spark.rapids.delta.delta42x
 
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.delta.GpuDeltaCatalogBase
+import com.nvidia.spark.rapids.delta.common.{DeleteCommandMeta,
+  DeltaDynamicPartitionOverwriteCommandMeta, UpdateCommandMeta}
 import com.nvidia.spark.rapids.delta.common.{GpuDelta4xParquetFileFormat, GpuDeltaParquetFileFormat2}
-import com.nvidia.spark.rapids.delta.common.DeltaDynamicPartitionOverwriteCommandMeta
 import com.nvidia.spark.rapids.delta.common.DeltaProviderBase
 import com.nvidia.spark.rapids.shims.InvalidateCacheShims
 

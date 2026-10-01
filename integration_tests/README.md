@@ -656,10 +656,10 @@ the supported Spark/Scala matrix. `TEST_MODE=DELTA_LAKE_UC_ONLY` runs the full s
 copy of the server launch. The repository exposes that strict full-suite entry point; the external
 CI job configuration must schedule it for both supported Spark versions.
 
-This base catalog-managed-table integration accelerates DELETE, UPDATE, MERGE, and dynamic
-partition overwrite when those operations rewrite data files. If an operation is configured to
-persist deletion vectors, it deliberately falls back to the CPU until the separate persistent-DV
-DML work is integrated and exercised against catalog-managed tables.
+Catalog-managed DELETE, UPDATE, and MERGE are accelerated in both file-rewrite and persistent
+deletion-vector modes. Dynamic partition overwrite is accelerated when it rewrites data files,
+but falls back to the CPU when configured to persist deletion vectors, matching the limitation
+for non-catalog-managed Delta tables.
 
 ### Enabling large data tests
 Some tests are testing large data which will take a long time. By default, these tests are disabled.
