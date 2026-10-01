@@ -639,7 +639,7 @@ protected case class GpuParquetFileFilterHandler(
       try {
         read(fileSize)
       } catch {
-        case NonFatal(firstError) =>
+        case firstError: EOFException =>
           logWarning(s"Footer read failed for $filePath using planned file size $fileSize; " +
             "retrying with the current file size", firstError)
           try {
