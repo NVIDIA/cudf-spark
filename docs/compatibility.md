@@ -330,6 +330,28 @@ ability to
 fall back to the CPU when reading an unsupported compression format, and will error out in that
 case.
 
+## Delta Lake low shuffle merge on Databricks Runtime 17.3
+
+Low shuffle merge is enabled by default for supported runtimes when the Parquet reader
+is set to `PERFILE`. Set `spark.rapids.sql.delta.lowShuffleMerge.enabled=false` to use
+classic GPU merge explicitly.
+
+On Databricks Runtime 17.3, tables with existing deletion vectors fall back to classic
+GPU merge before low shuffle merge builds temporary deletion vectors. The existing
+CPU fallback for MERGE operations configured to write persistent deletion vectors
+is unchanged.
+
+Tables with row tracking enabled fall back to classic GPU merge, even when
+[`spark.rapids.sql.delta.lowShuffleMerge.enabled`](additional-functionality/advanced_configs.md#sql.delta.lowShuffleMerge.enabled)
+is `true`. Databricks Runtime 17.3 exposes nullable row-tracking metadata fields that
+the GPU scans required by low shuffle merge cannot currently replace. The classic
+merge path preserves row IDs and row commit versions; enabling low shuffle merge
+does not provide the low-shuffle optimization for these tables.
+
+The row-tracking regression currently verifies this fallback, not native low-shuffle
+row-tracking execution. Supporting that execution path and adding a regression that
+forbids fallback remain follow-up work under [#11079](https://github.com/NVIDIA/cudf-spark/issues/11079).
+
 ## JSON
 
 JSON, despite being a standard format, has some ambiguity in it. Spark also offers the ability to allow 
