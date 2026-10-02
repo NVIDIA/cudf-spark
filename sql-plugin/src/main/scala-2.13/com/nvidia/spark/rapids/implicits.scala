@@ -56,6 +56,9 @@ object RapidsPluginImplicits {
           try {
             autoCloseable.close()
           } catch {
+            case interrupted: InterruptedException =>
+              Thread.currentThread().interrupt()
+              e.addSuppressed(interrupted)
             case suppressed: Throwable => e.addSuppressed(suppressed)
           }
         } else {
@@ -74,16 +77,26 @@ object RapidsPluginImplicits {
      */
     def safeClose(error: Throwable = null): Unit = if (in != null) {
       var closeException: Throwable = null
-      in.foreach { element =>
-        if (element != null) {
-          try {
-            element.close()
-          } catch {
-            case e: Throwable if error != null => error.addSuppressed(e)
-            case e: Throwable if closeException == null => closeException = e
-            case e: Throwable => closeException.addSuppressed(e)
+      var interrupted = false
+      try {
+        in.foreach { element =>
+          if (element != null) {
+            try {
+              element.close()
+            } catch {
+              case e: InterruptedException =>
+                interrupted = true
+                if (error != null) error.addSuppressed(e)
+                else if (closeException == null) closeException = e
+                else closeException.addSuppressed(e)
+              case e: Throwable if error != null => error.addSuppressed(e)
+              case e: Throwable if closeException == null => closeException = e
+              case e: Throwable => closeException.addSuppressed(e)
+            }
           }
         }
+      } finally {
+        if (interrupted) Thread.currentThread().interrupt()
       }
       if (closeException != null) {
         // an exception happened while we were trying to safely close

@@ -227,5 +227,31 @@ class ImplicitsTestSuite extends AnyFlatSpec with Matchers {
     }
     assert(resources.forall(!_.leaked))
   }
-}
 
+  it should "preserve interruption when safeClose suppresses a close failure" in {
+    val primary = new Exception("primary")
+    var closedAfterInterrupt = false
+    val resources = Seq[AutoCloseable](
+      () => throw new Exception("first close failed"),
+      () => throw new InterruptedException("interrupted close"),
+      () => closedAfterInterrupt = true)
+
+    resources.safeClose(primary)
+    primary.getSuppressed should have size 2
+    Thread.currentThread().isInterrupted shouldBe true
+    Thread.interrupted()
+    closedAfterInterrupt shouldBe true
+  }
+
+  it should "preserve interruption when a single safeClose suppresses a close failure" in {
+    val primary = new Exception("primary")
+    val resource = new AutoCloseable {
+      override def close(): Unit = throw new InterruptedException("interrupted close")
+    }
+
+    resource.safeClose(primary)
+    primary.getSuppressed should have size 1
+    Thread.currentThread().isInterrupted shouldBe true
+    Thread.interrupted()
+  }
+}
