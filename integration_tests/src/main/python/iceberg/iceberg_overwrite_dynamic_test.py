@@ -16,7 +16,7 @@ from typing import Callable, Any
 import pytest
 
 from asserts import assert_equal_with_local_sort, assert_gpu_fallback_collect
-from conftest import is_iceberg_remote_catalog
+from conftest import is_iceberg_remote_catalog, is_iceberg_test_fast_run
 from data_gen import gen_df, copy_and_update
 from iceberg import create_iceberg_table, \
     iceberg_base_table_cols, iceberg_gens_list, \
@@ -148,7 +148,8 @@ def test_insert_overwrite_dynamic_bucket_partitioned(spark_tmp_table_factory, pa
 @iceberg
 @datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids-jni/issues/4016')
 @ignore_order(local=True)
-@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
+@pytest.mark.skipif(is_iceberg_remote_catalog() or is_iceberg_test_fast_run(),
+                    reason="Skip for remote catalog or fast Iceberg run to reduce test time")
 @pytest.mark.parametrize("partition_col_sql", overwrite_dynamic_partition_transforms)
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
 def test_insert_overwrite_dynamic_bucket_partitioned_full_coverage(spark_tmp_table_factory, partition_col_sql):
@@ -161,7 +162,8 @@ def test_insert_overwrite_dynamic_bucket_partitioned_full_coverage(spark_tmp_tab
 
 @iceberg
 @ignore_order(local=True)
-@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
+@pytest.mark.skipif(is_iceberg_remote_catalog() or is_iceberg_test_fast_run(),
+                    reason="Skip for remote catalog or fast Iceberg run to reduce test time")
 def test_insert_overwrite_dynamic_nested_types(spark_tmp_table_factory):
     """Test INSERT OVERWRITE with dynamic mode on Iceberg-native nested types on GPU."""
     table_prop = {"format-version": "2"}
@@ -207,7 +209,8 @@ def test_insert_overwrite_dynamic_nested_types(spark_tmp_table_factory):
 
 @iceberg
 @ignore_order(local=True)
-@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
+@pytest.mark.skipif(is_iceberg_remote_catalog() or is_iceberg_test_fast_run(),
+                    reason="Skip for remote catalog or fast Iceberg run to reduce test time")
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
 def test_insert_overwrite_dynamic_all_cols(spark_tmp_table_factory):
     """Test INSERT OVERWRITE with dynamic mode on all Iceberg write types on GPU."""
@@ -255,7 +258,8 @@ def test_insert_overwrite_dynamic_all_cols(spark_tmp_table_factory):
 @iceberg
 @ignore_order(local=True)
 @allow_non_gpu('OverwritePartitionsDynamicExec', 'ShuffleExchangeExec', 'SortExec', 'ProjectExec')
-@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
+@pytest.mark.skipif(is_iceberg_remote_catalog() or is_iceberg_test_fast_run(),
+                    reason="Skip for remote catalog or fast Iceberg run to reduce test time")
 @pytest.mark.parametrize("file_format", ["orc", "avro"], ids=lambda x: f"file_format={x}")
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
 def test_insert_overwrite_dynamic_unsupported_file_format_fallback(
@@ -296,7 +300,8 @@ def test_insert_overwrite_dynamic_unsupported_file_format_fallback(
 @iceberg
 @ignore_order(local=True)
 @allow_non_gpu('OverwritePartitionsDynamicExec', 'ShuffleExchangeExec', 'SortExec', 'ProjectExec')
-@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
+@pytest.mark.skipif(is_iceberg_remote_catalog() or is_iceberg_test_fast_run(),
+                    reason="Skip for remote catalog or fast Iceberg run to reduce test time")
 @pytest.mark.parametrize("conf_key", ["spark.rapids.sql.format.iceberg.enabled",
                                       "spark.rapids.sql.format.iceberg.write.enabled"],
                          ids=lambda x: f"{x}=False")
@@ -384,7 +389,8 @@ def test_overwrite_dynamic_aqe(spark_tmp_table_factory, partition_col_sql):
 @allow_non_gpu("BatchScanExec", "ColumnarToRowExec")
 @iceberg
 @ignore_order(local=True)
-@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
+@pytest.mark.skipif(is_iceberg_remote_catalog() or is_iceberg_test_fast_run(),
+                    reason="Skip for remote catalog or fast Iceberg run to reduce test time")
 def test_insert_overwrite_dynamic_after_drop_partition_field(spark_tmp_table_factory):
     """Test INSERT OVERWRITE (dynamic mode) on table after dropping a partition field (void transform).
     
@@ -449,7 +455,8 @@ def test_insert_overwrite_dynamic_after_drop_partition_field(spark_tmp_table_fac
 @iceberg
 @datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids-jni/issues/4016')
 @ignore_order(local=True)
-@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Skip for remote catalog to reduce test time")
+@pytest.mark.skipif(is_iceberg_remote_catalog() or is_iceberg_test_fast_run(),
+                    reason="Skip for remote catalog or fast Iceberg run to reduce test time")
 def test_insert_overwrite_dynamic_partitioned_fanout_enabled(spark_tmp_table_factory):
     # Use bucket(2, ...) to keep partition count low and avoid OOM from Iceberg's FanoutDataWriter.
     _do_test_insert_overwrite_dynamic_partitioned(

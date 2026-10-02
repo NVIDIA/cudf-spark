@@ -1982,6 +1982,7 @@ This will force full Scala code rebuild in downstream modules.
                         <exclude>**/src/main/java/com/nvidia/spark/rapids/format/*</exclude>
                         <exclude>**/*.csv</exclude>
                         <exclude>scripts/with_resource_nesting_baseline.json</exclude>
+                        <exclude>scripts/iceberg-versions.json</exclude>
                         <exclude>dist/*.txt</exclude>
                         <exclude>**/META-INF/com.nvidia.spark.rapids.SparkShimServiceProvider</exclude>
                         <!-- Apache Rat excludes target folder for projects that are included by
@@ -2089,6 +2090,16 @@ This will force full Scala code rebuild in downstream modules.
                                     <arg line="--xmlEncoding ${project.reporting.outputEncoding}"/>
                                     <arg line="${scalastyle.dirs}"/>
                                 </java>
+                                <exec executable="python3" failonerror="true"
+                                      dir="${spark.rapids.source.basedir}">
+                                    <arg value="-m"/>
+                                    <arg value="unittest"/>
+                                    <arg value="discover"/>
+                                    <arg value="-s"/>
+                                    <arg value="scripts/tests"/>
+                                    <arg value="-p"/>
+                                    <arg value="test_*.py"/>
+                                </exec>
                                 <exec executable="python3" failonerror="true"
                                       dir="${spark.rapids.source.basedir}">
                                     <arg value="-B"/>
