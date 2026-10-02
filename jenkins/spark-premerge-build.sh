@@ -332,6 +332,18 @@ ci_scala213() {
           ./integration_tests/run_pyspark_from_build.sh \
             -m unity_catalog --delta_lake --unity_catalog
 
+    # Delta 4.3 defaults the Unity Catalog Delta REST API on. Exercise the complete routing,
+    # metadata-intent, validation, and abort-safety matrix.
+    MVN="$MVN" SPARK_VER="$SPARK_VER" SCALA_BINARY_VER=2.13 \
+        SPARK_HOME=$SPARK_HOME PYTHONPATH=$PYTHONPATH \
+        TEST_PARALLEL=1 \
+        TESTS=delta_lake_catalog_rest_test.py \
+        TEST= \
+        ./integration_tests/run_unity_catalog_server.sh \
+          --delta-version 4.3.0 --run-dir "${WORKSPACE:-${TMPDIR:-/tmp}}" -- \
+          ./integration_tests/run_pyspark_from_build.sh \
+            -m unity_catalog --delta_lake --unity_catalog
+
     # Trigger the RapidsShuffleManager tests for scala 2.13
     rapids_shuffle_smoke_test $SPARK_VER
 

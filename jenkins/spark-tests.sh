@@ -370,12 +370,20 @@ run_delta_lake_tests() {
 # The server itself runs in its own JVM, so unitycatalog-server (Armeria, Vert.x, Hibernate,
 # Spring, ...) never reaches Spark at all.
 run_delta_lake_uc_tests() {
-  local delta_version='4.2.0'
-  local test_filter=${1:-}
+  local delta_version=${1:-'4.2.0'}
+  local test_file=${2:-'delta_lake_catalog_managed_test.py'}
+  local test_filter=${3:-}
+  local test_parallel=${TEST_PARALLEL:-}
 
-  # These conditions mirror the Delta Lake 4.2.0 rows of run_delta_lake_tests above: that Delta
-  # version is only exercised on Scala 2.13 with Spark 4.0.1 or 4.1.1. They are repeated rather
-  # than read from DELTA_LAKE_VERSIONS because that variable is assigned inside
+  # The REST safety module shares one UC server and includes failure-injection scenarios.
+  # Running it concurrently can terminate the shared server while another worker is using it.
+  if [[ "$test_file" == "delta_lake_catalog_rest_test.py" ]]; then
+    test_parallel=1
+  fi
+
+  # These conditions mirror the Delta Lake 4.2.0 and 4.3.0 rows of run_delta_lake_tests above:
+  # those versions are only exercised on Scala 2.13 with Spark 4.0.1 or 4.1.1. They are repeated
+  # rather than read from DELTA_LAKE_VERSIONS because that variable is assigned inside
   # run_delta_lake_tests, which TEST_MODE=DELTA_LAKE_UC_ONLY never runs. run_unity_catalog_server.sh
   # rejects the same combinations outright; CI skips them instead.
   if [[ "$SCALA_BINARY_VER" != "2.13" ]]; then
@@ -403,9 +411,11 @@ run_delta_lake_uc_tests() {
   # workspace. UNITY_CATALOG_VERSION and UNITY_CATALOG_PORT are read by the script directly.
   env \
     HOST_NAME=$PROJECT_REPO_HOST \
-    TESTS=delta_lake_catalog_managed_test.py \
+    TEST_PARALLEL="$test_parallel" \
+    TESTS="$test_file" \
     TEST="$test_filter" \
-    ./run_unity_catalog_server.sh --run-dir "$ARTF_ROOT" -- \
+    ./run_unity_catalog_server.sh --delta-version "$delta_version" \
+      --run-dir "$ARTF_ROOT" -- \
       ./run_pyspark_from_build.sh -m unity_catalog --delta_lake --unity_catalog
 }
 
@@ -685,20 +695,22 @@ if [[ $TEST_MODE == "DEFAULT" ]]; then
     ./run_pyspark_from_build.sh -k cache_test
 fi
 
-# Delta Lake tests. DEFAULT runs one end-to-end managed-table smoke for supported Spark/Scala
-# combinations in jobs that use this script. Blossom premerge runs the same smoke from
-# spark-premerge-build.sh. DELTA_LAKE_UC_ONLY is the strict full-suite entry point that external
-# jobs must schedule separately for Spark 4.0.1 and 4.1.1.
+# Delta Lake tests. DEFAULT runs a Delta 4.2 managed-table smoke and the complete Delta 4.3 REST
+# safety suite for supported Spark/Scala combinations. Blossom premerge follows the same split.
+# DELTA_LAKE_UC_ONLY remains the strict entry point for both complete catalog suites.
 if [[ "$TEST_MODE" == "DEFAULT" || "$TEST_MODE" == "DELTA_LAKE_ONLY" ]]; then
   run_delta_lake_tests
 fi
 if [[ "$TEST_MODE" == "DEFAULT" ]]; then
-  run_delta_lake_uc_tests "catalog_managed_ctas_insert_and_deletion_vector_scan"
+  run_delta_lake_uc_tests 4.2.0 delta_lake_catalog_managed_test.py \
+    "catalog_managed_ctas_insert_and_deletion_vector_scan"
+  run_delta_lake_uc_tests 4.3.0 delta_lake_catalog_rest_test.py
 fi
 
 # Delta Lake catalog-managed table tests
 if [[ "$TEST_MODE" == "DELTA_LAKE_UC_ONLY" ]]; then
-  run_delta_lake_uc_tests
+  run_delta_lake_uc_tests 4.2.0 delta_lake_catalog_managed_test.py
+  run_delta_lake_uc_tests 4.3.0 delta_lake_catalog_rest_test.py
 fi
 
 # Iceberg tests

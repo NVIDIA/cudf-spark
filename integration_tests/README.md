@@ -613,18 +613,25 @@ If Spark has been configured to support Delta Lake then these tests can be enabl
 
 ### Enabling Unity Catalog catalog-managed table tests
 
-`delta_lake_catalog_managed_test.py` covers Delta Lake catalog-managed (catalog-owned) tables
-through an OSS Unity Catalog server. It needs a running catalog server, so it is disabled by
-default and is skipped unless both `--delta_lake` and `--unity_catalog` are passed and
-`DELTA_UC_URI` names a reachable server.
+`delta_lake_catalog_managed_test.py` covers Delta Lake 4.2 catalog-managed (catalog-owned) tables
+through an OSS Unity Catalog server. `delta_lake_catalog_rest_test.py` covers the Delta 4.3 REST
+API safety boundary. They need a running catalog server, so they are disabled by default and are
+skipped unless both `--delta_lake` and `--unity_catalog` are passed and `DELTA_UC_URI` names a
+reachable server.
 
-The suite only applies to a narrow, pinned combination: Scala 2.13, Delta Lake 4.2.0, Unity
-Catalog 0.6.0, and Spark 4.0.1 or 4.1.1. The implementation validates the expected 0.6.0
-`UCSingleCatalog` staging shape and falls back if that shape is not recognized.
-This fixture exercises Unity Catalog's pre-Delta-4.3 staging path without an active coordinated
-commit implementation. Server-side planning, coordinated-commit recovery, and failures in the
-catalog REST synchronization step require a newer or fault-injectable catalog harness and are not
-claimed by this suite.
+The suites only apply to a narrow, pinned combination: Scala 2.13, Delta Lake 4.2.0 or 4.3.0,
+Unity Catalog 0.6.0, and Spark 4.0.1 or 4.1.1. The 4.2 implementation validates the expected 0.6.0
+`UCSingleCatalog` staging shape and falls back if that shape is not recognized. The 4.3 suite
+verifies that the CPU Delta catalog retains REST staging and commit control, including catalog
+identity, managed location, credentials, metadata-changing operations, and abort cleanup, while
+reads and classic path tables can still use the GPU.
+
+In Delta 4.3.0, dynamic partition overwrite, UPDATE, and MERGE write generated row-tracking
+domain metadata into the staged commit referenced by the REST `add-commit` update; these
+operations do not send a separate `set-domain-metadata` update. The REST suite verifies the
+referenced staged action for each DML operation and separately verifies a direct
+`set-domain-metadata` intent on clustered RTAS. It does not claim direct REST domain-intent
+coverage for DML that Delta 4.3.0 does not emit.
 
 `run_unity_catalog_server.sh` resolves the Unity Catalog jars, starts a server backed by a fake S3
 bucket on local disk, and exports everything the tests need. To run the whole suite in one shot:
@@ -634,6 +641,9 @@ bucket on local disk, and exports everything the tests need. To run the whole su
   ./integration_tests/run_pyspark_from_build.sh -m unity_catalog --delta_lake --unity_catalog
 ```
 
+The default is Delta 4.2.0. Pass `--delta-version 4.3.0` and select
+`delta_lake_catalog_rest_test.py` to run the REST safety suite.
+
 To keep one server alive across repeated test runs, start it without a command. It stays in the
 foreground and prints an env file to source from a second terminal:
 
@@ -641,9 +651,10 @@ foreground and prints an env file to source from a second terminal:
 ./integration_tests/run_unity_catalog_server.sh
 ```
 
-`--port`, `--uc-version` and `--refresh` are available; see `--help`. Spark and Scala versions are
-taken from `SPARK_VER`/`SCALA_BINARY_VER` when set and otherwise derived from `$SPARK_HOME`, and
-the resolved classpaths are cached under `integration_tests/target/unity-catalog/`.
+`--port`, `--uc-version`, `--delta-version`, and `--refresh` are available; see `--help`. Spark and
+Scala versions are taken from `SPARK_VER`/`SCALA_BINARY_VER` when set and otherwise derived from
+`$SPARK_HOME`, and the resolved classpaths are cached under
+`integration_tests/target/unity-catalog/`.
 
 No real object store is involved. `CredentialTestFileSystem` maps the fake `s3://test-bucket0`
 bucket onto local disk and asserts that the credentials vended by the catalog reached the
@@ -651,10 +662,9 @@ filesystem, so a path-only Delta log cannot pass, and the RAPIDS S3 reader is di
 that bucket is not a real S3 endpoint. The tests create their own catalog and schema on the server
 and generate all of their own data, so it starts empty and is discarded afterwards.
 
-`jenkins/spark-tests.sh` runs an end-to-end managed-table smoke case in `TEST_MODE=DEFAULT` for
-the supported Spark/Scala matrix. `TEST_MODE=DELTA_LAKE_UC_ONLY` runs the full suite, with its own
-copy of the server launch. The repository exposes that strict full-suite entry point; the external
-CI job configuration must schedule it for both supported Spark versions.
+`jenkins/spark-tests.sh` runs an end-to-end Delta 4.2 managed-table smoke case and the complete
+Delta 4.3 REST safety suite in `TEST_MODE=DEFAULT` for the supported Spark/Scala matrix.
+`TEST_MODE=DELTA_LAKE_UC_ONLY` runs both complete suites with its own copy of the server launch.
 
 This base catalog-managed-table integration accelerates DELETE, UPDATE, MERGE, and dynamic
 partition overwrite when those operations rewrite data files. If an operation is configured to
