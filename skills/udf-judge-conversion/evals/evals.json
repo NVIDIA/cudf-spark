@@ -1,0 +1,49 @@
+{
+  "skill_name": "udf-judge-conversion",
+  "evals": [
+    {
+      "id": "udf-judge-conversion__array-segment-sum",
+      "prompt": "Review the cuDF RapidsUDF conversion at input/array-segment-sum/ArraySegmentSumRapidsUDF.scala (original CPU UDF at input/array-segment-sum/ArraySegmentSumUDF.scala, unit test at input/array-segment-sum/UnitTest.scala, comparison test at input/array-segment-sum/CudfComparisonTest.scala). Report a PASS/FAIL verdict on correctness, hidden CPU fallback, test cheating, and whether the tests adequately verify the conversion.",
+      "expected_skill": "udf-judge-conversion",
+      "expected_script": null,
+      "files": [
+        "evals/files/array-segment-sum/ArraySegmentSumUDF.scala",
+        "evals/files/array-segment-sum/UnitTest.scala",
+        "evals/files/array-segment-sum/ArraySegmentSumRapidsUDF.scala",
+        "evals/files/array-segment-sum/CudfComparisonTest.scala"
+      ],
+      "expected_output": "A non-PASS verdict with actionable findings. The comparison test's Spark session sets spark.rapids.sql.mode=explainOnly, so the converted RapidsUDF never executes on the GPU. The test data also omits edge cases such as negatives/zeroes/empty arrays. The judge should flag the lack of real GPU-execution and the coverage gaps and not give a clean PASS.",
+      "assertions": [
+        "Loads the udf-judge-conversion skill",
+        "Reads the unit test, the RapidsUDF implementation, and the comparison test",
+        "Checks whether the comparison test directly compares CPU vs GPU outputs on the same data and actually executes the converted path on the GPU",
+        "Checks the RapidsUDF for hidden CPU fallback or host-side copying",
+        "Identifies that the comparison test uses explainOnly mode, so it does not validate real GPU execution",
+        "Identifies edge-case coverage gaps in the unit and comparison test data such as negative values, zero-valued elements, duplicate rows, empty arrays, negative start, start exactly at array length, and non-positive length",
+        "Returns a non-PASS verdict with actionable findings"
+      ]
+    },
+    {
+      "id": "udf-judge-conversion__negative-config",
+      "prompt": "What's the difference between map() and flatMap() in Spark?",
+      "expected_skill": null,
+      "expected_script": null,
+      "files": [],
+      "expected_output": "A one-line conceptual Spark answer; not a request to review a UDF GPU conversion, so udf-judge-conversion should not activate.",
+      "assertions": [
+        "Does not load the udf-judge-conversion skill"
+      ]
+    },
+    {
+      "id": "udf-judge-conversion__negative-unrelated",
+      "prompt": "Recommend an AWS GPU instance type for running Spark.",
+      "expected_skill": null,
+      "expected_script": null,
+      "files": [],
+      "expected_output": "Infrastructure/sizing question, unrelated to reviewing a Spark UDF GPU conversion; no UDF skill should activate.",
+      "assertions": [
+        "Does not load the udf-judge-conversion skill"
+      ]
+    }
+  ]
+}
