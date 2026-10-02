@@ -216,27 +216,27 @@ class GpuArrayHofFusionSuite extends GpuUnitTests {
     withResource(FuzzerUtils.createColumnarBatch(schema, 8))(check)
   }
 
-  test("fused HOF project preserves the shared AST input table") {
+  test("fused HOF project preserves the shared legacy and JIT AST input table") {
     val arrayType = ArrayType(IntegerType, containsNull = true)
     val schema = FuzzerUtils.createSchema(arrayType, LongType, LongType)
-    val firstAst = spy(GpuProjectAstExpression(GpuAdd(
+    val legacyAst = spy(GpuProjectAstExpression(GpuAdd(
       GpuBoundReference(1, LongType, nullable = true)(ExprId(400), "a"),
       GpuBoundReference(2, LongType, nullable = true)(ExprId(401), "b"),
       failOnError = false)()))
-    val secondAst = spy(GpuProjectAstExpression(GpuMultiply(
+    val jitAst = spy(GpuAstJitExpression(GpuMultiply(
       GpuBoundReference(1, LongType, nullable = true)(ExprId(402), "a"),
       GpuBoundReference(2, LongType, nullable = true)(ExprId(403), "b"),
       failOnError = false)())) // Prevent side effects in ANSI mode.
     val expressions = Seq(
       alias(executableTransform(404), "left"),
-      alias(firstAst, "sum"),
-      alias(secondAst, "product"),
+      alias(legacyAst, "sum"),
+      alias(jitAst, "product"),
       alias(executableTransform(405), "right"))
 
     assertResult(Seq(Seq(0, 3))) {
       GpuArrayHofFusion.findFusedGroupIndexes(expressions)
     }
-    withResource(Seq(firstAst, secondAst)) { _ =>
+    withResource(Seq(legacyAst, jitAst)) { _ =>
       withResource(FuzzerUtils.createColumnarBatch(schema, 8)) { batch =>
         withResource(GpuProjectExec.project(batch, expressions)) { projected =>
           assertResult(4)(projected.numCols())
@@ -245,10 +245,10 @@ class GpuArrayHofFusionSuite extends GpuUnitTests {
       }
     }
 
-    val firstTable = ArgumentCaptor.forClass(classOf[Table])
-    val secondTable = ArgumentCaptor.forClass(classOf[Table])
-    verify(firstAst).computeColumn(firstTable.capture())
-    verify(secondAst).computeColumn(secondTable.capture())
-    assert(firstTable.getValue eq secondTable.getValue)
+    val legacyTable = ArgumentCaptor.forClass(classOf[Table])
+    val jitTable = ArgumentCaptor.forClass(classOf[Table])
+    verify(legacyAst).computeColumn(legacyTable.capture())
+    verify(jitAst).computeColumn(jitTable.capture())
+    assert(legacyTable.getValue eq jitTable.getValue)
   }
 }
