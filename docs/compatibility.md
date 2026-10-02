@@ -294,6 +294,11 @@ file-statistics are missing (see [SPARK-34960 discussion](https://issues.apache.
 
 *Writing ORC Files*
 
+Timestamp writes use the JVM default timezone, independently of `spark.sql.session.timeZone`,
+to match the Apache ORC writer. Named timezones such as `Asia/Shanghai` and `America/New_York`
+support GPU writes. Timezone IDs without a system timezone file, such as `GMT+05:30` and
+`SystemV/EST5`, fall back to CPU because cuDF requires the system timezone database.
+
 There are issues writing ORC files with dates or timestamps that fall within the lost days during
 the switch from the Julian to Gregorian calendar, i.e.: between October 3rd, 1582 and October 15th,
 1582. Dates or timestamps that fall within the range of lost days will not always be written

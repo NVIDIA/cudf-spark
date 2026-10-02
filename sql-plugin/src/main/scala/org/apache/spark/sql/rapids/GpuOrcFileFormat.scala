@@ -16,7 +16,11 @@
 
 package org.apache.spark.sql.rapids
 
-import java.time.ZoneId
+import java.nio.file.{Files, Paths}
+import java.time.{ZoneId, ZoneOffset}
+import java.util.TimeZone
+
+import scala.collection.JavaConverters._
 
 import ai.rapids.cudf._
 import com.nvidia.spark.rapids._
@@ -34,7 +38,6 @@ import org.apache.spark.sql.{SPARK_VERSION_METADATA_KEY, SparkSession}
 import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.execution.datasources.FileFormat
 import org.apache.spark.sql.execution.datasources.orc.{OrcFileFormat, OrcOptions, OrcUtils}
-import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.types._
 
@@ -42,6 +45,40 @@ object GpuOrcFileFormat extends Logging {
   // The classname used when Spark is configured to use the Hive implementation for ORC.
   // Spark is not always compiled with Hive support so we cannot import from Spark jars directly.
   private val HIVE_IMPL_CLASS = "org.apache.spark.sql.hive.orc.OrcFileFormat"
+
+  // Some tzdata installations omit alias files. Match cuDF's fallback to tzdata.zi Link entries.
+  private lazy val writerTimezoneAliases: Map[String, String] = {
+    val tzdata = Paths.get("/usr/share/zoneinfo/tzdata.zi")
+    if (Files.isRegularFile(tzdata)) {
+      Files.readAllLines(tzdata).asScala.flatMap { line =>
+        val fields = line.split("\\s+")
+        if (fields.length >= 3 && (fields(0) == "L" || fields(0) == "Link")) {
+          Some(fields(2) -> fields(1))
+        } else {
+          None
+        }
+      }.toMap
+    } else {
+      Map.empty
+    }
+  }
+
+  private[rapids] def writerTimezoneId: String = ZoneId.systemDefault() match {
+    case timezone if GpuOverrides.isUTCTimezone(timezone) => "UTC"
+    // Java resolves EST/MST/HST to offsets, but cuDF can resolve their original TZif names.
+    case _: ZoneOffset => TimeZone.getDefault.getID
+    case timezone => timezone.getId
+  }
+
+  private def supportsWriterTimezone(timezone: String): Boolean = {
+    def resolvesToFile(name: String, visited: Set[String]): Boolean = {
+      Files.isRegularFile(Paths.get("/usr/share/zoneinfo", name)) ||
+        (!visited.contains(name) && writerTimezoneAliases.get(name).exists { target =>
+          resolvesToFile(target, visited + name)
+        })
+    }
+    timezone == "UTC" || resolvesToFile(timezone, Set.empty)
+  }
 
   def isSparkOrcFormat(cls: Class[_ <: FileFormat]): Boolean = {
     cls == classOf[OrcFileFormat] || cls.getCanonicalName.equals(HIVE_IMPL_CLASS)
@@ -78,12 +115,6 @@ object GpuOrcFileFormat extends Logging {
         t.isInstanceOf[BooleanType])
     }
 
-    // cuDF's ORC writer always stamps writerTimezone="UTC" in the stripe footer and cannot
-    // record the actual JVM writer timezone (https://github.com/rapidsai/cudf/issues/23422).
-    // Because ORC's `timestamp` type is timezone-agnostic, a file written on the GPU in a
-    // non-UTC JVM is read back shifted by the zone offset by a CPU ORC reader. Fall back to CPU
-    // for non-UTC timestamp writes so the output stays interoperable. Reads use the JVM default
-    // (systemDefault) zone, so the write-side gate matches the reader on the same check.
     val types = schema.map(_.dataType).toSet
     val hasDates = types.exists { dataType =>
       TrampolineUtil.dataTypeExistsRecursively(dataType, _.isInstanceOf[DateType])
@@ -95,11 +126,12 @@ object GpuOrcFileFormat extends Logging {
         "writer does not emit calendar metadata")
     }
 
+    // cuDF resolves writer timezones under /usr/share/zoneinfo. Java custom offsets and some
+    // legacy IDs (for example, SystemV/EST5) do not name TZif files, so keep them on the CPU.
     if (types.exists(GpuOverrides.isOrContainsTimestamp) &&
-        !GpuOverrides.isUTCTimezone(ZoneId.systemDefault())) {
-      meta.willNotWorkOnGpu("Writing ORC timestamps is only supported in the UTC timezone " +
-        s"(JVM: ${ZoneId.systemDefault()}, session: ${SQLConf.get.sessionLocalTimeZone}). " +
-        "See https://github.com/rapidsai/cudf/issues/23422")
+        !supportsWriterTimezone(writerTimezoneId)) {
+      meta.willNotWorkOnGpu("Writing ORC timestamps requires a named JVM timezone " +
+        s"supported by the system timezone database: ${ZoneId.systemDefault()}")
     }
 
     if (hasBools && !meta.conf.isOrcBoolTypeEnabled) {
@@ -263,6 +295,10 @@ class GpuOrcWriter(
       .writerOptionsFromSchema(ORCWriterOptions.builder(), dataSchema, nullable = false)
       .withMetadata(SPARK_VERSION_METADATA_KEY, SPARK_VERSION_SHORT)
       .withCompressionType(CompressionType.valueOf(OrcConf.COMPRESS.getString(conf)))
+    if (dataSchema.exists(field => GpuOverrides.isOrContainsTimestamp(field.dataType))) {
+      // Apache ORC uses the executor JVM timezone, independently of Spark's session timezone.
+      builder.withWriterTimezone(GpuOrcFileFormat.writerTimezoneId)
+    }
     orcStripeSizeRows.foreach { ss =>
       builder.withStripeSizeRows(ss)
     }
