@@ -26,7 +26,7 @@ import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitSpillableInHalfByRows, withRestoreOnRetry, withRetry, withRetryNoSplit}
 import com.nvidia.spark.rapids.io.async.{AsyncOutputStream, TrafficController}
-import com.nvidia.spark.rapids.jni.fileio.{RapidsFileIO, RapidsOutputFile}
+import com.nvidia.spark.rapids.jni.fileio.{RapidsFileIO, RapidsHostBufferConsumer, RapidsOutputFile}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 import org.apache.hadoop.mapreduce.TaskAttemptContext
@@ -132,18 +132,29 @@ abstract class ColumnarOutputWriter(context: TaskAttemptContext,
     rapidsFileIO.newOutputFile(path())
   }
 
+  private lazy val outputFile = openOutputFile()
+
   // This is implemented as a method to make it easier to subclass
   // ColumnarOutputWriter in the tests, and override this behavior.
   protected def getOutputStream: OutputStream = {
     if (useAsyncWrite) {
       logWarning("Async output write enabled")
-      AsyncOutputStream(() => openOutputFile().create(false), trafficController, statsTrackers)
+      AsyncOutputStream(() => outputFile.create(false), trafficController, statsTrackers)
     } else {
-      openOutputFile().create(false)
+      outputFile.create(false)
     }
   }
 
-  protected val outputStream: OutputStream = getOutputStream
+  // This is implemented as a method to make it easier to subclass in tests.
+  protected def getHostBufferConsumer: Option[RapidsHostBufferConsumer] = {
+    val consumer = outputFile.createHostBufferConsumer(false)
+    if (consumer.isPresent) Some(consumer.get) else None
+  }
+
+  protected lazy val outputStream: OutputStream = getOutputStream
+  private lazy val hostBufferConsumer = getHostBufferConsumer
+  private var hostBufferMetricsRecorded = false
+  private var tableWriterClosed = false
 
   private[this] val tempBuffer = new Array[Byte](128 * 1024)
   private[this] var anythingWritten = false
@@ -157,8 +168,16 @@ abstract class ColumnarOutputWriter(context: TaskAttemptContext,
 
   def writeBufferedData(): Long = {
     val start = System.nanoTime()
-    ColumnarOutputWriter.writeBufferedData(buffers, tempBuffer, outputStream)
+    hostBufferConsumer match {
+      case Some(consumer) => ColumnarOutputWriter.writeBufferedData(buffers, consumer)
+      case None => ColumnarOutputWriter.writeBufferedData(buffers, tempBuffer, outputStream)
+    }
     System.nanoTime() - start
+  }
+
+  // This is implemented as a method to make abort-path semaphore handling testable.
+  protected def releaseGpuSemaphore(): Unit = {
+    GpuSemaphore.releaseIfNecessary(TaskContext.get())
   }
 
   def dropBufferedData(): Unit = buffers.dequeueAll {
@@ -230,7 +249,7 @@ abstract class ColumnarOutputWriter(context: TaskAttemptContext,
     // the buffered data to the FS
     if (!holdGpuBetweenBatches) {
       logDebug("Releasing semaphore between batches")
-      GpuSemaphore.releaseIfNecessary(TaskContext.get)
+      releaseGpuSemaphore()
     }
 
     val ioTime = writeBufferedData()
@@ -289,26 +308,114 @@ abstract class ColumnarOutputWriter(context: TaskAttemptContext,
   }
 
   private def finishClose(): Unit = {
-    GpuSemaphore.releaseIfNecessary(TaskContext.get())
+    releaseGpuSemaphore()
     writeBufferedData()
-    outputStream.close()
+    hostBufferConsumer match {
+      case Some(consumer) =>
+        try {
+          consumer.close()
+        } finally {
+          updateHostBufferMetrics(consumer)
+        }
+      case None => outputStream.close()
+    }
     debugDumpOutputStream.foreach { os =>
       os.close()
     }
   }
 
+  private def updateHostBufferMetrics(consumer: RapidsHostBufferConsumer): Unit = {
+    if (!hostBufferMetricsRecorded) {
+      hostBufferMetricsRecorded = true
+      statsTrackers.foreach {
+        case gpuTracker: GpuWriteTaskStatsTracker =>
+          gpuTracker.addHostBufferUploadMetrics(consumer.getBytesWritten,
+            consumer.getWaitTimeNanos, consumer.getRequestTimeNanos, consumer.getRetryCount,
+            consumer.getFailureCount, consumer.getPeakRetainedBytes)
+        case _ =>
+      }
+    }
+  }
+
   protected final def closeAndReturn[T <: AutoCloseable](closeWriter: => T): T = {
-    prepareToClose()
-    closeOnExcept(closeWriter) { result =>
-      finishClose()
-      result
+    abortOnError {
+      prepareToClose()
+      val result = closeWriter
+      tableWriterClosed = true
+      closeOnExcept(result) { result =>
+        finishClose()
+        result
+      }
     }
   }
 
   def close(): Unit = {
-    prepareToClose()
-    tableWriter.close()
-    finishClose()
+    abortOnError {
+      prepareToClose()
+      tableWriter.close()
+      tableWriterClosed = true
+      finishClose()
+    }
+  }
+
+  private def abortOnError[T](body: => T): T = try {
+    body
+  } catch {
+    case t: Throwable =>
+      try {
+        abort()
+      } catch {
+        case abortError: Throwable => t.addSuppressed(abortError)
+      }
+      throw t
+  }
+
+  /** Aborts any in-progress direct upload and releases queued host buffers. */
+  def abort(): Unit = {
+    var failure: Throwable = null
+    def recordFailure(t: Throwable): Unit = {
+      if (failure == null) failure = t else failure.addSuppressed(t)
+    }
+    if (!tableWriterClosed) {
+      try {
+        // cuDF close may emit final buffers. They are discarded below rather than committed.
+        tableWriter.close()
+        tableWriterClosed = true
+      } catch {
+        case t: Throwable => recordFailure(t)
+      }
+    }
+    try {
+      releaseGpuSemaphore()
+    } catch {
+      case t: Throwable => recordFailure(t)
+    }
+    try {
+      dropBufferedData()
+    } catch {
+      case t: Throwable => recordFailure(t)
+    }
+    try {
+      hostBufferConsumer match {
+        case Some(consumer) =>
+          try {
+            consumer.abort()
+          } finally {
+            updateHostBufferMetrics(consumer)
+          }
+        case None => outputStream.close()
+      }
+    } catch {
+      case t: Throwable => recordFailure(t)
+    }
+    try {
+      debugDumpOutputStream.foreach(_.close())
+    } catch {
+      case t: Throwable => recordFailure(t)
+    }
+    if (failure != null) {
+      throw failure
+    }
   }
 
   /**
@@ -318,6 +425,22 @@ abstract class ColumnarOutputWriter(context: TaskAttemptContext,
 }
 
 object ColumnarOutputWriter {
+  // Transfer buffers to a consumer. Ownership transfers before each call, even if it throws.
+  def writeBufferedData(buffers: mutable.Queue[(HostMemoryBuffer, Long)],
+      consumer: RapidsHostBufferConsumer): Unit = {
+    val toProcess = buffers.dequeueAll(_ => true)
+    var next = 0
+    try {
+      while (next < toProcess.length) {
+        val (buffer, len) = toProcess(next)
+        next += 1
+        consumer.handleBuffer(buffer, len)
+      }
+    } finally {
+      toProcess.drop(next).map { case (buffer, _) => buffer }.safeClose()
+    }
+  }
+
   // write buffers to outputStream via tempBuffer and close buffers
   def writeBufferedData(buffers: mutable.Queue[(HostMemoryBuffer, Long)],
       tempBuffer: Array[Byte], outputStream: OutputStream): Unit = {

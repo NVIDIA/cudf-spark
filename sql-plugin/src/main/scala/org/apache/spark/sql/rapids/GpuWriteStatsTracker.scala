@@ -31,6 +31,8 @@ class GpuWriteTaskStatsTracker(
     hadoopConf: Configuration,
     taskMetrics: Map[String, GpuMetric])
     extends BasicColumnarWriteTaskStatsTracker(hadoopConf, taskMetrics.get(TASK_COMMIT_TIME)) {
+  private var hostBufferUploadPeakRetainedBytes = 0L
+
   def addGpuTime(nanos: Long): Unit = {
     taskMetrics(GpuWriteJobStatsTracker.GPU_TIME_KEY) += nanos
   }
@@ -49,6 +51,22 @@ class GpuWriteTaskStatsTracker(
 
   def addWriteIOTime(nanos: Long): Unit = {
     taskMetrics(GpuWriteJobStatsTracker.WRITE_IO_TIME_KEY) += nanos
+  }
+
+  def addHostBufferUploadMetrics(bytes: Long, waitNanos: Long, requestNanos: Long,
+      retries: Long, failures: Long, peakRetainedBytes: Long): Unit = {
+    taskMetrics(GpuWriteJobStatsTracker.HOST_BUFFER_UPLOAD_BYTES_KEY) += bytes
+    taskMetrics(GpuWriteJobStatsTracker.HOST_BUFFER_UPLOAD_WAIT_TIME_KEY) += waitNanos
+    taskMetrics(GpuWriteJobStatsTracker.HOST_BUFFER_UPLOAD_REQUEST_TIME_KEY) += requestNanos
+    taskMetrics(GpuWriteJobStatsTracker.HOST_BUFFER_UPLOAD_RETRIES_KEY) += retries
+    taskMetrics(GpuWriteJobStatsTracker.HOST_BUFFER_UPLOAD_FAILURES_KEY) += failures
+    synchronized {
+      // A task can create multiple output files. Keep the metric additive and attempt-local so a
+      // failed or speculative attempt cannot consume a shared value before Spark discards it.
+      hostBufferUploadPeakRetainedBytes += peakRetainedBytes
+      taskMetrics(GpuWriteJobStatsTracker.HOST_BUFFER_UPLOAD_PEAK_RETAINED_BYTES_KEY)
+        .set(hostBufferUploadPeakRetainedBytes)
+    }
   }
 
   def setAsyncWriteThrottleTimes(numTasks: Int, accumulatedThrottleTimeNs: Long, minNs: Long,
@@ -106,6 +124,12 @@ object GpuWriteJobStatsTracker {
   val ASYNC_WRITE_AVG_THROTTLE_TIME_KEY = "asyncWriteAvgThrottleTime"
   val ASYNC_WRITE_MIN_THROTTLE_TIME_KEY = "asyncWriteMinThrottleTime"
   val ASYNC_WRITE_MAX_THROTTLE_TIME_KEY = "asyncWriteMaxThrottleTime"
+  val HOST_BUFFER_UPLOAD_BYTES_KEY = "hostBufferUploadBytes"
+  val HOST_BUFFER_UPLOAD_WAIT_TIME_KEY = "hostBufferUploadWaitTime"
+  val HOST_BUFFER_UPLOAD_REQUEST_TIME_KEY = "hostBufferUploadRequestTime"
+  val HOST_BUFFER_UPLOAD_RETRIES_KEY = "hostBufferUploadRetries"
+  val HOST_BUFFER_UPLOAD_FAILURES_KEY = "hostBufferUploadFailures"
+  val HOST_BUFFER_UPLOAD_PEAK_RETAINED_BYTES_KEY = "hostBufferUploadPeakRetainedBytes"
 
   def basicMetrics: Map[String, GpuMetric] = BasicColumnarWriteJobStatsTracker.metrics
 
@@ -135,7 +159,20 @@ object GpuWriteJobStatsTracker {
       ASYNC_WRITE_MIN_THROTTLE_TIME_KEY -> metricFactory.createNanoTiming(
         GpuMetric.DEBUG_LEVEL, "min throttle time per async write"),
       ASYNC_WRITE_MAX_THROTTLE_TIME_KEY -> metricFactory.createNanoTiming(
-        GpuMetric.DEBUG_LEVEL, "max throttle time per async write")
+        GpuMetric.DEBUG_LEVEL, "max throttle time per async write"),
+      HOST_BUFFER_UPLOAD_BYTES_KEY -> metricFactory.createSize(
+        GpuMetric.DEBUG_LEVEL, "direct host-buffer upload bytes"),
+      HOST_BUFFER_UPLOAD_WAIT_TIME_KEY -> metricFactory.createNanoTiming(
+        GpuMetric.DEBUG_LEVEL, "direct host-buffer upload backpressure time"),
+      HOST_BUFFER_UPLOAD_REQUEST_TIME_KEY -> metricFactory.createNanoTiming(
+        GpuMetric.DEBUG_LEVEL, "direct host-buffer upload request time"),
+      HOST_BUFFER_UPLOAD_RETRIES_KEY -> metricFactory.create(
+        GpuMetric.DEBUG_LEVEL, "direct host-buffer upload retries"),
+      HOST_BUFFER_UPLOAD_FAILURES_KEY -> metricFactory.create(
+        GpuMetric.DEBUG_LEVEL, "direct host-buffer upload failures"),
+      HOST_BUFFER_UPLOAD_PEAK_RETAINED_BYTES_KEY -> metricFactory.createSize(
+        GpuMetric.DEBUG_LEVEL,
+        "direct host-buffer upload retained bytes (sum of output-file peaks)")
     )
   }
 
