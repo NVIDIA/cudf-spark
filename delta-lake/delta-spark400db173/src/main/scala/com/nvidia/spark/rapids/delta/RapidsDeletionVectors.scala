@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids.delta
 
-import ai.rapids.cudf.{HostMemoryBuffer, Table}
+import ai.rapids.cudf.{ColumnVector, HostMemoryBuffer, Table}
 import com.databricks.sql.io.{RowIndexFilterProvider, RowIndexFilterType}
 import com.databricks.sql.transaction.tahoe.DeltaParquetFileFormat._
 import com.databricks.sql.transaction.tahoe.actions.DeletionVectorDescriptor
@@ -382,6 +382,23 @@ object RapidsDeletionVectors extends Logging {
       withResource(table) { _ =>
         new Table(columnIndices.map(table.getColumn): _*)
       }
+    }
+  }
+
+  /**
+   * Replaces one column in a table and consumes the input table. The returned table owns
+   * references to the replacement and all unchanged columns.
+   */
+  def replaceColumnAndClose(
+      table: Table,
+      outputColumn: Int,
+      replacement: ColumnVector): Table = {
+    require(outputColumn >= 0 && outputColumn < table.getNumberOfColumns,
+      "Invalid replacement column position")
+    withResource(table) { input =>
+      val outputColumns = (0 until input.getNumberOfColumns).map(input.getColumn).toArray
+      outputColumns(outputColumn) = replacement
+      new Table(outputColumns: _*)
     }
   }
 

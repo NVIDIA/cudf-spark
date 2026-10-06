@@ -78,7 +78,7 @@ import org.apache.spark.sql.execution.datasources.v2.rapids.{
 import org.apache.spark.sql.rapids.{GpuAnd, GpuEqualTo, GpuFileSourceScanExec, GpuNot}
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims
 import org.apache.spark.sql.sources.InsertableRelation
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{StructField, StructType}
 
 object DeltaSpark400DB173Provider extends DatabricksDeltaProviderBase {
 
@@ -161,12 +161,20 @@ object DeltaSpark400DB173Provider extends DatabricksDeltaProviderBase {
     def pruneMetadataProject(
         project: GpuProjectExec,
         scan: GpuFileSourceScanExec): SparkPlan = {
+      def isMarkedGpuRowIndex(field: StructField): Boolean =
+        GpuDeltaParquetFileFormatBase.isGpuRowIndexColumn(field)
+
       project.copy(projectList = project.projectList.filterNot(_.name == "_metadata"))
         .withNewChildren(Seq(
           scan.copy(
-            originalOutput = scan.originalOutput.filterNot(_.name == "_tmp_metadata_row_index"),
+            originalOutput = scan.originalOutput.filterNot { attr =>
+              attr.name == "_tmp_metadata_row_index" && !isMarkedGpuRowIndex(StructField(
+                attr.name, attr.dataType, attr.nullable, attr.metadata))
+            },
             requiredSchema = StructType(
-              scan.requiredSchema.filterNot(_.name == "_tmp_metadata_row_index")
+              scan.requiredSchema.filterNot { field =>
+                field.name == "_tmp_metadata_row_index" && !isMarkedGpuRowIndex(field)
+              }
             ))(scan.rapidsConf)))
     }
 

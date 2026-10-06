@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,8 +29,36 @@ import org.apache.spark.sql.connector.read.PartitionReaderFactory
 import org.apache.spark.sql.execution.datasources.PartitionedFile
 import org.apache.spark.sql.rapids.GpuFileSourceScanExec
 import org.apache.spark.sql.sources.Filter
-import org.apache.spark.sql.types.{MetadataBuilder, StructType}
+import org.apache.spark.sql.types.{LongType, Metadata, MetadataBuilder, StructField, StructType}
 import org.apache.spark.util.SerializableConfiguration
+
+object GpuDeltaParquetFileFormatBase {
+  private val GPU_ROW_INDEX_METADATA_KEY = "rapids.delta.internalRowIndex"
+
+  def markGpuRowIndexColumn(field: StructField): StructField = field.copy(
+    metadata = new MetadataBuilder()
+      .withMetadata(field.metadata)
+      .putBoolean(GPU_ROW_INDEX_METADATA_KEY, value = true)
+      .build())
+
+  val GPU_ROW_INDEX_STRUCT_FIELD: StructField = markGpuRowIndexColumn(StructField(
+    "_tmp_metadata_row_index",
+    LongType,
+    nullable = false,
+    metadata = Metadata.empty))
+
+  private[delta] def isGpuRowIndexColumn(field: StructField): Boolean =
+    field.metadata.contains(GPU_ROW_INDEX_METADATA_KEY) &&
+      field.metadata.getBoolean(GPU_ROW_INDEX_METADATA_KEY)
+
+  private[delta] def findGpuRowIndexColumn(schema: StructType): Int =
+    schema.fields.indexWhere(isGpuRowIndexColumn)
+
+  private[delta] def findGpuRowIndexColumn(schema: StructType, nativeName: String): Int = {
+    val markedIndex = findGpuRowIndexColumn(schema)
+    if (markedIndex >= 0) markedIndex else schema.fieldNames.indexOf(nativeName)
+  }
+}
 
 abstract class GpuDeltaParquetFileFormatBase extends GpuReadParquetFileFormat {
   val columnMappingMode: DeltaColumnMappingMode

@@ -16,6 +16,7 @@
 
 package com.nvidia.spark.rapids.delta.shims
 
+import com.databricks.sql.transaction.tahoe.DeltaParquetFileFormat
 import com.databricks.sql.transaction.tahoe.commands.DeletionVectorUtils
 import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
 import com.nvidia.spark.rapids.delta.{UpdateCommandEdgeMeta, UpdateCommandMeta}
@@ -27,8 +28,19 @@ object UpdateCommandMetaShim {
       DeletionVectorUtils.deletionVectorsWritable(deltaLog.unsafeVolatileSnapshot)
 
     if (dvFeatureEnabled && meta.updateCmd.conf.getConf(
-      DeltaSQLConf.UPDATE_USE_PERSISTENT_DELETION_VECTORS)) {
-      meta.willNotWorkOnGpu("Deletion vector writes are not supported on GPU")
+      DeltaSQLConf.UPDATE_USE_PERSISTENT_DELETION_VECTORS) &&
+        !supportsPersistentDeletionVectorWrites(meta)) {
+      meta.willNotWorkOnGpu(
+        "Persistent deletion vector writes on GPU require DBR metadata row indexes and " +
+          "native cuDF deletion-vector predicate pushdown")
+    }
+    if (dvFeatureEnabled && meta.updateCmd.conf.getConf(
+        DeltaSQLConf.UPDATE_USE_PERSISTENT_DELETION_VECTORS) &&
+        hasUserRowIndexColumn(
+          meta.updateCmd.target.schema.fieldNames, meta.updateCmd.conf.resolver)) {
+      meta.willNotWorkOnGpu(
+        s"user column ${DeltaParquetFileFormat.ROW_INDEX_STRUCT_FIELD.name} " +
+          "conflicts with the DV row index")
     }
   }
 
@@ -38,8 +50,33 @@ object UpdateCommandMetaShim {
       DeletionVectorUtils.deletionVectorsWritable(deltaLog.unsafeVolatileSnapshot)
 
     if (dvFeatureEnabled && meta.updateCmd.conf.getConf(
-      DeltaSQLConf.UPDATE_USE_PERSISTENT_DELETION_VECTORS)) {
-      meta.willNotWorkOnGpu("Deletion vector writes are not supported on GPU")
+      DeltaSQLConf.UPDATE_USE_PERSISTENT_DELETION_VECTORS) &&
+        !supportsPersistentDeletionVectorWrites(meta)) {
+      meta.willNotWorkOnGpu(
+        "Persistent deletion vector writes on GPU require DBR metadata row indexes and " +
+          "native cuDF deletion-vector predicate pushdown")
     }
+    if (dvFeatureEnabled && meta.updateCmd.conf.getConf(
+        DeltaSQLConf.UPDATE_USE_PERSISTENT_DELETION_VECTORS) &&
+        hasUserRowIndexColumn(
+          meta.updateCmd.target.schema.fieldNames, meta.updateCmd.conf.resolver)) {
+      meta.willNotWorkOnGpu(
+        s"user column ${DeltaParquetFileFormat.ROW_INDEX_STRUCT_FIELD.name} " +
+          "conflicts with the DV row index")
+    }
+  }
+
+  private def supportsPersistentDeletionVectorWrites(meta: UpdateCommandMeta): Boolean =
+    meta.updateCmd.conf.getConf(DeltaSQLConf.DELETION_VECTORS_USE_METADATA_ROW_INDEX) &&
+      meta.conf.isDeltaDeletionVectorPredicatePushdownEnabled
+
+  private def supportsPersistentDeletionVectorWrites(meta: UpdateCommandEdgeMeta): Boolean =
+    meta.updateCmd.conf.getConf(DeltaSQLConf.DELETION_VECTORS_USE_METADATA_ROW_INDEX) &&
+      meta.conf.isDeltaDeletionVectorPredicatePushdownEnabled
+
+  private def hasUserRowIndexColumn(
+      fieldNames: Array[String],
+      resolver: (String, String) => Boolean): Boolean = {
+    fieldNames.exists(resolver(_, DeltaParquetFileFormat.ROW_INDEX_STRUCT_FIELD.name))
   }
 }
