@@ -15,10 +15,11 @@
  */
 package org.apache.spark.sql.rapids
 
-import ai.rapids.cudf.{Rmm, RmmAllocationMode, TableWriter}
-import com.nvidia.spark.rapids.{ColumnarOutputWriter, ColumnarOutputWriterFactory, GpuColumnVector, GpuLiteral, NvtxId, NvtxRegistry, RapidsConf, ScalableTaskCompletion}
+import ai.rapids.cudf.{Rmm, RmmAllocationMode, Table, TableWriter}
+import com.nvidia.spark.rapids.{ColumnarOutputWriter, ColumnarOutputWriterFactory, GpuColumnVector, GpuLiteral, NvtxId, NvtxRegistry, RapidsConf, ScalableTaskCompletion, SpillableColumnarBatch}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
-import com.nvidia.spark.rapids.jni.{GpuRetryOOM, GpuSplitAndRetryOOM}
+import com.nvidia.spark.rapids.SpillPriorities.ACTIVE_ON_DECK_PRIORITY
+import com.nvidia.spark.rapids.jni.{CpuRetryOOM, GpuRetryOOM, GpuSplitAndRetryOOM}
 import com.nvidia.spark.rapids.spill.SpillFramework
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.FSDataOutputStream
@@ -319,6 +320,23 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
             .writeSpillableAndClose(any())
         verify(mockOutputWriter, times(1)).close()
       }
+    }
+  }
+
+  test("native file writer OOM must fail the task instead of replaying the batch") {
+    resetMocks()
+    includeRetry = true
+    val cb = buildBatchWithPartitionedCol(1, 2, 3)
+    withColumnarBatchesVerifyClosed(Seq(cb)) {
+      val nativeWriter = mockOutputWriter.tableWriter
+      doThrow(new CpuRetryOOM("native write failed"))
+        .when(nativeWriter).write(any[Table]())
+      val spillable = SpillableColumnarBatch(cb, ACTIVE_ON_DECK_PRIORITY)
+      val failure = intercept[IllegalStateException] {
+        mockOutputWriter.writeSpillableAndClose(spillable)
+      }
+      assert(failure.getSuppressed.exists(_.isInstanceOf[CpuRetryOOM]))
+      verify(nativeWriter, times(1)).write(any[Table]())
     }
   }
 

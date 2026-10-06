@@ -19,6 +19,7 @@ package com.nvidia.spark.rapids
 import java.io.{BufferedOutputStream, DataOutputStream, OutputStream}
 
 import scala.collection.mutable
+import scala.util.control.NonFatal
 
 import ai.rapids.cudf.{HostBufferConsumer, HostMemoryBuffer, JCudfSerialization, TableWriter}
 import com.nvidia.spark.Retryable
@@ -261,9 +262,8 @@ abstract class ColumnarOutputWriter(context: TaskAttemptContext,
   private def encodeAndBufferToHost(batch: ColumnarBatch): Unit = {
     withResource(GpuColumnVector.from(batch)) { table =>
       // `anythingWritten` is set here as an indication that there was data at all
-      // to write, even if the `tableWriter.write` method fails. If we fail to write
-      // and the task fails, any output is going to be discarded anyway, so no data
-      // corruption to worry about. Otherwise, we should retry (OOM case).
+      // to write, even if the `tableWriter.write` method fails. If the task fails,
+      // any output is discarded.
       // If we have nothing to write, we won't flip this flag to true and we will
       // buffer an empty batch on close() to work around issues in cuDF
       // where corrupt files can be written if nothing is encoded via the writer.
@@ -273,7 +273,20 @@ abstract class ColumnarOutputWriter(context: TaskAttemptContext,
       // tableWriter.write() serializes the table into the HostMemoryBuffer, and buffers it
       // by calling handleBuffer() on the ColumnarOutputWriter. It may not write to the
       // output stream just yet.
-      tableWriter.write(table)
+      try {
+        tableWriter.write(table)
+      } catch {
+        case NonFatal(writeError) =>
+          // cuDF may have already advanced the writer or emitted buffers. Replaying the
+          // batch on this writer can duplicate rows and produce an invalid Parquet file,
+          // even when a retry OOM is wrapped by another exception. Keep the original
+          // exception out of the cause chain so withRetry fails the task instead.
+          dropBufferedData()
+          val failure = new IllegalStateException(
+            "Cannot retry a failed native file write; the task must be retried")
+          failure.addSuppressed(writeError)
+          throw failure
+      }
     }
   }
 
