@@ -249,12 +249,26 @@ def test_delta_delete_deletion_vector_full_file_data_predicate(spark_tmp_path):
         spark_tmp_path,
         use_cdf=False,
         dest_table_func=lambda spark: spark.createDataFrame(
-            [(1, "a"), (2, "b")], "id INT, v STRING").coalesce(1),
+            [(1, "a", 0), (2, "b", 1)], "id INT, v STRING, p INT").coalesce(1),
         delete_sql="DELETE FROM delta.`{path}` WHERE id >= 0",
         enable_deletion_vectors=True,
+        partition_columns=["p"],
         conf=conf,
         expected_num_affected_rows=2,
         assert_gpu_delete_command=True)
+
+    def history_metrics(spark):
+        path = spark_tmp_path + "/DELTA_DATA/GPU"
+        row = spark.sql(f"DESCRIBE HISTORY delta.`{path}`") \
+            .where("operation = 'DELETE'").orderBy("version", ascending=False).first()
+        return row["operationMetrics"]
+
+    metrics = with_cpu_session(history_metrics, conf=conf)
+    assert int(metrics["numRemovedFiles"]) == 2
+    assert int(metrics["numRemovedBytes"]) > 0
+    assert int(metrics["numPartitionsRemovedFrom"]) == 2
+    assert int(metrics["numPartitionsAddedTo"]) == 0
+
 
 @allow_non_gpu("SortExec, ColumnarToRowExec", *delta_meta_allow)
 @delta_lake

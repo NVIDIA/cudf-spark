@@ -73,7 +73,7 @@ abstract class GpuDeleteCommandBase(
       fileIndex: TahoeBatchFileIndex,
       deleteCondition: Expression,
       nameToAddFileMap: Map[String, AddFile]):
-      Option[(Seq[FileAction], Map[String, Long])] = None
+      Option[(Seq[FileAction], Map[String, Long], Seq[AddFile])] = None
 
   override def innerChildren: Seq[QueryPlan[_]] = Seq(target)
 
@@ -227,7 +227,7 @@ abstract class GpuDeleteCommandBase(
           if (shouldWriteDVs) {
             deleteWithPersistentDeletionVectors(
               sparkSession, txn, candidateFiles, fileIndex, cond, nameToAddFileMap) match {
-              case Some((actions, metricMap)) =>
+              case Some((actions, metricMap, fullyRemovedFiles)) =>
                 scanTimeMs = (System.nanoTime() - startTime) / 1000 / 1000
                 numDeletedRows = Some(metricMap("numModifiedRows"))
                 numCopiedRows = Some(0L)
@@ -235,6 +235,13 @@ abstract class GpuDeleteCommandBase(
                 numDeletionVectorsRemoved = metricMap("numDeletionVectorsRemoved")
                 numDeletionVectorsUpdated = metricMap("numDeletionVectorsUpdated")
                 numRemovedFiles = metricMap("numRemovedFiles")
+                val (removedBytes, removedPartitions) =
+                  totalBytesAndDistinctPartitionValues(fullyRemovedFiles)
+                numBytesRemoved = removedBytes
+                if (txn.metadata.partitionColumns.nonEmpty) {
+                  numPartitionsRemovedFrom = Some(removedPartitions)
+                  numPartitionsAddedTo = Some(0)
+                }
                 actions
               case None =>
                 throw new IllegalStateException(

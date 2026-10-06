@@ -46,7 +46,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.encoders.{ExpressionEncoder, RowEncoder}
-import org.apache.spark.sql.catalyst.expressions.{Alias, And, Attribute, AttributeReference, BasePredicate, EqualNullSafe, Expression, If, IsNull, Literal, NamedExpression, Not, Or, PredicateHelper, UnsafeProjection}
+import org.apache.spark.sql.catalyst.expressions.{Alias, And, Attribute, AttributeReference, BasePredicate, EqualNullSafe, Expression, If, IsNotNull, IsNull, Literal, NamedExpression, Not, Or, PredicateHelper, UnsafeProjection}
 import org.apache.spark.sql.catalyst.expressions.codegen.GeneratePredicate
 import org.apache.spark.sql.catalyst.plans.logical.{DeltaMergeIntoClause, DeltaMergeIntoMatchedClause, DeltaMergeIntoMatchedDeleteClause, DeltaMergeIntoMatchedUpdateClause, DeltaMergeIntoNotMatchedBySourceClause, DeltaMergeIntoNotMatchedBySourceDeleteClause, DeltaMergeIntoNotMatchedBySourceUpdateClause, DeltaMergeIntoNotMatchedClause, LogicalPlan, Project}
 import org.apache.spark.sql.catalyst.types.DataTypeUtils.toAttributes
@@ -789,7 +789,10 @@ case class GpuMergeIntoCommand(
 
   private def generateFilterForModifiedRows(sourceRowPresentCol: String): Expression = {
     val matchedExpression = if (matchedClauses.nonEmpty) {
-      And(condition, clauseDisjunction(matchedClauses))
+      // A null-safe ON condition can match an unmatched target against its null-filled source.
+      And(
+        IsNotNull(UnresolvedAttribute(sourceRowPresentCol)),
+        And(condition, clauseDisjunction(matchedClauses)))
     } else {
       Literal.FalseLiteral
     }

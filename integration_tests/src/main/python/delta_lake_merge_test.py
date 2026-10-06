@@ -1426,14 +1426,19 @@ def test_delta_dml_dv_metadata_cpu_scope(spark_tmp_path, command):
 @ignore_order
 @pytest.mark.skipif(not is_databricks173_or_later(),
                     reason="Persistent-DV command acceleration requires DBR 17.3+")
+@pytest.mark.parametrize(
+    "target_rows, expected_removed_partitions",
+    [pytest.param([(1, 10, 0), (2, 20, 0), (3, 30, 1)], 0, id="partial-file"),
+     pytest.param([(1, 10, 0), (2, 20, 1), (3, 30, 2)], 1, id="full-file")])
 def test_delta_merge_deletion_vector_removed_file_metrics(
-        spark_tmp_path, spark_tmp_table_factory):
+        spark_tmp_path, spark_tmp_table_factory, target_rows, expected_removed_partitions):
     conf = copy_and_update(
         delta_merge_enabled_conf,
         {"spark.databricks.delta.merge.deletionVectors.persistent": "true",
          "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
          "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true",
-         "spark.databricks.delta.autoCompact.enabled": "false"})
+         "spark.databricks.delta.autoCompact.enabled": "false",
+         "spark.databricks.delta.optimizeWrite.enabled": "false"})
     merge_sql = "MERGE INTO {dest_table} AS target USING {src_table} AS source " \
                 "ON target.id = source.id " \
                 "WHEN MATCHED THEN UPDATE SET target.v = source.v"
@@ -1442,7 +1447,7 @@ def test_delta_merge_deletion_vector_removed_file_metrics(
         use_cdf=False, enable_deletion_vectors=True,
         src_table_func=lambda spark: spark.createDataFrame([(1, 100)], "id INT, v INT"),
         dest_table_func=lambda spark: spark.createDataFrame(
-            [(1, 10, 0), (2, 20, 0), (3, 30, 1)], "id INT, v INT, p INT"),
+            target_rows, "id INT, v INT, p INT").coalesce(1),
         merge_sql=merge_sql, compare_logs=False, partition_columns=["p"], conf=conf)
 
     def history_metrics(spark, path):
@@ -1452,13 +1457,14 @@ def test_delta_merge_deletion_vector_removed_file_metrics(
                 for key in ["numTargetBytesRemoved", "numTargetPartitionsRemovedFrom"]}
 
     data_path = spark_tmp_path + "/DELTA_DATA"
-    cpu_metrics = with_cpu_session(
-        lambda spark: history_metrics(spark, data_path + "/CPU"), conf=conf)
     gpu_metrics = with_cpu_session(
         lambda spark: history_metrics(spark, data_path + "/GPU"), conf=conf)
-    assert cpu_metrics == gpu_metrics, f"CPU {cpu_metrics} vs GPU {gpu_metrics}"
-    assert gpu_metrics["numTargetBytesRemoved"] > 0
-    assert gpu_metrics["numTargetPartitionsRemovedFrom"] == 0
+    # CPU may rewrite a file where GPU uses a DV; check both full and partial target files.
+    if expected_removed_partitions:
+        assert gpu_metrics["numTargetBytesRemoved"] > 0
+    else:
+        assert gpu_metrics["numTargetBytesRemoved"] == 0
+    assert gpu_metrics["numTargetPartitionsRemovedFrom"] == expected_removed_partitions
 
 
 @allow_non_gpu("ExecutedCommandExec,BroadcastHashJoinExec,ColumnarToRowExec,"
@@ -2069,3 +2075,34 @@ def test_delta_merge_not_matched_by_source_with_dv(spark_tmp_path, spark_tmp_tab
             "spark.databricks.delta.merge.deletionVectors.persistent": "true",
             "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
             "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true"}))
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="Persistent-DV MERGE acceleration requires DBR 17.3+")
+def test_delta_merge_dv_null_safe_unmatched_target(spark_tmp_path, spark_tmp_table_factory):
+    merge_sql = "MERGE INTO {dest_table} AS target USING {src_table} AS source " \
+                "ON target.k <=> source.k " \
+                "WHEN MATCHED THEN UPDATE SET target.v = source.v " \
+                "WHEN NOT MATCHED BY SOURCE AND target.k = 2 THEN DELETE"
+    assert_delta_sql_merge_collect(
+        spark_tmp_path, spark_tmp_table_factory,
+        use_cdf=False, enable_deletion_vectors=True,
+        src_table_func=lambda spark: spark.createDataFrame([(1, 100)], "k INT, v INT"),
+        dest_table_func=lambda spark: spark.createDataFrame(
+            [(None, 10), (1, 20), (2, 30)], "k INT, v INT"),
+        merge_sql=merge_sql, compare_logs=False,
+        conf=copy_and_update(delta_merge_enabled_conf, {
+            "spark.databricks.delta.merge.deletionVectors.persistent": "true",
+            "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
+            "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true"}))
+
+    def gpu_dv_count(spark):
+        path = spark_tmp_path + "/DELTA_DATA/GPU"
+        row = spark.sql(f"DESCRIBE HISTORY delta.`{path}`") \
+            .where("operation = 'MERGE'").orderBy("version", ascending=False).first()
+        return int(row["operationMetrics"].get("numTargetDeletionVectorsAdded", 0))
+
+    assert with_cpu_session(gpu_dv_count, conf=delta_merge_enabled_conf) > 0

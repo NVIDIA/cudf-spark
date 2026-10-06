@@ -39,7 +39,7 @@ case class GpuDeleteCommand(
       fileIndex: TahoeBatchFileIndex,
       deleteCondition: Expression,
       nameToAddFileMap: Map[String, AddFile]):
-      Option[(Seq[FileAction], Map[String, Long])] = {
+      Option[(Seq[FileAction], Map[String, Long], Seq[AddFile])] = {
     val targetScan = DMLWithDeletionVectorsHelperShims.createTargetDfForGpuScanningForMatches(
       sparkSession, target, fileIndex)
     val touchedFiles = GpuDeletionVectorBitmapGenerator.findTouchedFilesForDelete(
@@ -50,15 +50,17 @@ case class GpuDeleteCommand(
       DFUDFShims.exprToColumn(deleteCondition),
       nameToAddFileMap)
     if (touchedFiles.nonEmpty) {
-      Some(GpuDeletionVectorBitmapGenerator.processUnmodifiedData(
-        sparkSession, touchedFiles, txn))
+      val (actions, metricMap) = GpuDeletionVectorBitmapGenerator.processUnmodifiedData(
+        sparkSession, touchedFiles, txn)
+      val fullyRemovedFiles = touchedFiles.filter(_.isFullyReplaced()).map(_.fileLogEntry)
+      Some((actions, metricMap, fullyRemovedFiles))
     } else {
-      Some(Nil -> Map(
+      Some((Nil, Map(
         "numModifiedRows" -> 0L,
         "numDeletionVectorsAdded" -> 0L,
         "numDeletionVectorsRemoved" -> 0L,
         "numDeletionVectorsUpdated" -> 0L,
-        "numRemovedFiles" -> 0L))
+        "numRemovedFiles" -> 0L), Nil))
     }
   }
 }
