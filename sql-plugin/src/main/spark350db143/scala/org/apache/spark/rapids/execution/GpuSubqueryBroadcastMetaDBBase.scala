@@ -50,7 +50,7 @@ abstract class GpuSubqueryBroadcastMetaDBBase(s: SubqueryBroadcastExec,
       val exMeta = new GpuBroadcastMeta(ex.copy(child = child), conf, p, r)
       exMeta.tagForGpu()
       if (exMeta.canThisBeReplaced) {
-        broadcastBuilder = () => exMeta.convertToGpu()
+        broadcastBuilder = () => exMeta.convertIfNeeded()
       } else {
         willNotWorkOnGpu("underlying BroadcastExchange can not run in the GPU.")
       }
@@ -67,7 +67,7 @@ abstract class GpuSubqueryBroadcastMetaDBBase(s: SubqueryBroadcastExec,
           val exMeta = new GpuBroadcastMeta(ex, conf, p, r)
           exMeta.tagForGpu()
           if (exMeta.canThisBeReplaced) {
-            broadcastBuilder = () => exMeta.convertToGpu()
+            broadcastBuilder = () => exMeta.convertIfNeeded()
           } else {
             willNotWorkOnGpu("underlying BroadcastExchange can not run in the GPU.")
           }

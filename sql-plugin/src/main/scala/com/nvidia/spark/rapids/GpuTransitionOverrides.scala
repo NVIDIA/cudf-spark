@@ -1046,12 +1046,6 @@ object GpuTransitionOverrides {
     tagPlanAndSubqueries(plan)
   }
 
-  def copyAqeQueryStageExchangeTag(from: SparkPlan, to: SparkPlan): Unit = {
-    if (from.getTagValue(aqeQueryStageExchange).contains(true)) {
-      to.setTagValue(aqeQueryStageExchange, true)
-    }
-  }
-
   private[rapids] def canExposeExchangeForAqeStage(
       exchange: SparkPlan,
       parent: Option[SparkPlan]): Boolean = {

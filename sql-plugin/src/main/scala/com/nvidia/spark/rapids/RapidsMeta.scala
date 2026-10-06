@@ -886,7 +886,9 @@ abstract class SparkPlanMeta[INPUT <: SparkPlan](plan: INPUT,
       childPlans.head.convertIfNeeded()
     } else {
       if (canThisBeReplaced) {
-        convertToGpu()
+        val converted = convertToGpu()
+        converted.copyTagsFrom(wrapped)
+        converted
       } else {
         convertToCpu()
       }
