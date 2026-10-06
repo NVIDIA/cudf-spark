@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -132,14 +132,18 @@ public final class RapidsHostColumnBuilder implements AutoCloseable {
     if (snapshot == null) {
       throw new IllegalArgumentException("snapshot cannot be null");
     }
+    long previousIndex = this.currentIndex;
+    if (valid != null) {
+      // Non-null appends can grow the data buffers without growing the validity bitmap.
+      // Unallocated validity bits are implicitly valid and need no rollback.
+      long allocatedEnd = Math.min(previousIndex, valid.getLength() * Byte.SIZE);
+      for (long index = snapshot.currentIndex; index < allocatedEnd; index++) {
+        nullCount -= setValidAt(valid, index);
+      }
+    }
     this.rows = snapshot.rows;
     this.currentIndex = snapshot.currentIndex;
     this.currentStringByteIndex = Math.toIntExact(snapshot.currentStringByteIndex);
-    // Note: nullCount is intentionally NOT restored because setNullAt() is idempotent.
-    // It only increments nullCount if the validity bit was previously valid (1).
-    // Since we restore currentIndex and replay the same row, setNullAt will be called
-    // at the same index with the bit already set to null (0), so it returns 0 and
-    // nullCount isn't double-incremented.
     if (snapshot.childStates != null) {
       if (snapshot.childStates.length != childBuilders.size()) {
         throw new IllegalStateException(
@@ -441,6 +445,16 @@ public final class RapidsHostColumnBuilder implements AutoCloseable {
     currentByte &= bitmask;
     valid.setByte(bucket, currentByte);
     return ret;
+  }
+
+  private static long setValidAt(HostMemoryBuffer valid, long index) {
+    long bucket = index / 8;
+    byte currentByte = valid.getByte(bucket);
+    int bitmask = 1 << (index % 8);
+    long wasNull = (currentByte & bitmask) == 0 ? 1 : 0;
+    currentByte |= bitmask;
+    valid.setByte(bucket, currentByte);
+    return wasNull;
   }
 
   /**

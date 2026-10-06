@@ -1731,14 +1731,14 @@ class RapidsCachingWriter[K, V](
               val contigTable = c.getContiguousTable
               partSize = c.getTableBuffer.getLength
               uncompressedMetric += partSize
-              catalog.addContiguousTable(
+              writtenBufferIds += catalog.addContiguousTable(
                 blockId,
                 contigTable,
                 SpillPriorities.OUTPUT_FOR_SHUFFLE_INITIAL_TASK_PRIORITY)
             case c: GpuCompressedColumnVector =>
               partSize = c.getTableBuffer.getLength
               uncompressedMetric += c.getTableMeta.bufferMeta().uncompressedSize()
-              catalog.addCompressedBatch(
+              writtenBufferIds += catalog.addCompressedBatch(
                 blockId,
                 batch,
                 SpillPriorities.OUTPUT_FOR_SHUFFLE_INITIAL_TASK_PRIORITY)
@@ -1758,7 +1758,7 @@ class RapidsCachingWriter[K, V](
         } else {
           // no device data, tracking only metadata
           val tableMeta = MetaUtils.buildDegenerateTableMeta(batch)
-          catalog.addDegenerateRapidsBuffer(
+          writtenBufferIds += catalog.addDegenerateRapidsBuffer(
             blockId,
             tableMeta)
 

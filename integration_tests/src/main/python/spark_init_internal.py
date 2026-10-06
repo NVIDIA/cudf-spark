@@ -249,10 +249,10 @@ def _get_driver_opts_for_worker_logs(_sb, wid):
     current_directory = os.path.abspath(os.path.curdir)
     log_file = '{}/{}_worker_logs.log'.format(current_directory, wid)
 
-    from conftest import get_std_input_path
-    std_input_path = get_std_input_path()
+    local_resources = os.path.abspath(os.path.join(
+        os.path.dirname(__file__), '..', '..', 'test', 'resources'))
     # This is not going to take effect when TEST_PARALLEL=1 as it's set as a conf when calling spark-submit
-    driver_opts = ' -Dlog4j.configuration=file://{}/pytest_log4j.properties '.format(std_input_path) + \
+    driver_opts = ' -Dlog4j.configuration=file://{}/pytest_log4j.properties '.format(local_resources) + \
         ' -Dlogfile={}'.format(log_file)
 
     # Set up Logging to the WORKERID_worker_logs

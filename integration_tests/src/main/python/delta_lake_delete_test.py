@@ -117,7 +117,8 @@ def assert_delta_sql_delete_collect(spark_tmp_path, use_cdf, dest_table_func, de
                                     conf=delta_delete_enabled_conf,
                                     skip_sql_result_check=False, expect_write=True,
                                     expected_num_affected_rows=None,
-                                    assert_gpu_delete_command=False):
+                                    assert_gpu_delete_command=False,
+                                    expected_cpu_fallback_class=None):
     def read_data(spark, path):
         read_func = read_delta_path_with_cdf if use_cdf else read_delta_path
         df = read_func(spark, path)
@@ -130,10 +131,26 @@ def assert_delta_sql_delete_collect(spark_tmp_path, use_cdf, dest_table_func, de
             # compare resulting dataframe from the delete operation (some older Spark versions return empty here)
             cpu_result = with_cpu_session(lambda spark: do_delete(spark, cpu_path).collect(), conf=conf)
             if expect_write:
-                expected_command = "GpuDeleteCommand" if assert_gpu_delete_command else None
-                gpu_result = assert_rapids_delta_write(
-                    lambda spark: do_delete(spark, gpu_path).collect(), conf=conf,
-                    expected_command=expected_command)
+                if expected_cpu_fallback_class is not None:
+                    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+                    callback.startCapture()
+                    try:
+                        gpu_result = with_gpu_session(
+                            lambda spark: do_delete(spark, gpu_path).collect(), conf=conf)
+                        plans = callback.getResultsWithTimeout(10000)
+                        assert any(callback.didFallBack(plan, expected_cpu_fallback_class)
+                                   for plan in plans), \
+                            f"{expected_cpu_fallback_class} fallback was not captured"
+                        assert not any(callback.contains(plan, "GpuDeleteCommand")
+                                       for plan in plans), \
+                            "GPU delete command ran despite expected CPU fallback"
+                    finally:
+                        callback.endCapture()
+                else:
+                    expected_command = "GpuDeleteCommand" if assert_gpu_delete_command else None
+                    gpu_result = assert_rapids_delta_write(
+                        lambda spark: do_delete(spark, gpu_path).collect(), conf=conf,
+                        expected_command=expected_command)
             elif assert_gpu_delete_command:
                 gpu_result = assert_rapids_gpu_delete_ran(
                     lambda spark: do_delete(spark, gpu_path).collect(), conf=conf)
@@ -182,6 +199,7 @@ def test_delta_delete_disabled_fallback(spark_tmp_path, disable_conf, enable_del
     assert_gpu_fallback_write(write_func, read_delta_path, data_path,
                               "ExecutedCommandExec", disable_conf)
 
+@allow_non_gpu_conditional(is_oss_delta_lake_24(), "ExecutedCommandExec")
 @allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
@@ -193,6 +211,7 @@ def test_delta_delete_disabled_fallback(spark_tmp_path, disable_conf, enable_del
     reason="Deletion vectors new in Delta Lake 2.4 / Apache Spark 3.4")
 def test_delta_delete_with_deletion_vectors(
         spark_tmp_path, use_cdf, use_metadata_row_index):
+    expect_cpu_fallback = is_oss_delta_lake_24()
     conf = copy_and_update(
         delta_delete_enabled_conf,
         {"spark.databricks.delta.delete.deletionVectors.persistent": "true",
@@ -205,7 +224,8 @@ def test_delta_delete_with_deletion_vectors(
         delete_sql="DELETE FROM delta.`{path}` WHERE a = 0",
         enable_deletion_vectors=True,
         conf=conf,
-        assert_gpu_delete_command=True)
+        assert_gpu_delete_command=not expect_cpu_fallback,
+        expected_cpu_fallback_class="ExecutedCommandExec" if expect_cpu_fallback else None)
 
 @allow_non_gpu("SortExec, ColumnarToRowExec", *delta_meta_allow)
 @delta_lake

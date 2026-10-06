@@ -101,6 +101,10 @@ def _loaded_delta_lake_version():
         return None
 
 
+def is_oss_delta_lake_24():
+    return not is_databricks_runtime() and _loaded_delta_lake_version() == "2.4.0"
+
+
 def is_oss_delta_lake_40():
     return (not is_databricks_runtime()
             and _loaded_delta_lake_version() in ("4.0.0", "4.0.1"))
@@ -737,10 +741,10 @@ def assert_db173_gpu_data_writing_command(
         callback.endCapture()
 
 
-def assert_rapids_gpu_merge_ran(do_test, conf):
+def assert_rapids_gpu_merge_ran(do_test, conf, expected_command="GpuMergeIntoCommand"):
     """Runs a Delta MERGE and asserts that the GPU command did not fall back."""
     return assert_rapids_delta_write(
-        do_test, conf, required_gpu_classes=[], expected_command="GpuMergeIntoCommand")
+        do_test, conf, required_gpu_classes=[], expected_command=expected_command)
 
 
 def assert_rapids_gpu_delete_ran(do_test, conf):
