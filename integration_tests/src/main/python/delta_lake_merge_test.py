@@ -1320,7 +1320,8 @@ def test_delta_merge_deletion_vector_db173(spark_tmp_path, spark_tmp_table_facto
         merge_sql=merge_sql, compare_logs=False, conf=conf)
 
 
-@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
+# DBR can scan Delta table-state AddFiles through this CPU metadata operator.
+@allow_non_gpu("ColumnarToRowExec", "ExternalRDDScanExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not is_databricks173_or_later(),
