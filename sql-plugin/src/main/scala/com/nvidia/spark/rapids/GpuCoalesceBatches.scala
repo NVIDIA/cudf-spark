@@ -66,6 +66,13 @@ object ConcatAndConsumeAll {
                                   dataTypes: Array[DataType]): ColumnarBatch = {
     if (arrayOfBatches.length == 1) {
       arrayOfBatches(0)
+    } else if (arrayOfBatches.length > 1 && arrayOfBatches.forall(_.numCols() == 0)) {
+      // cuDF cannot build a Table without columns, and rows-only batches concatenate by row count.
+      withResource(arrayOfBatches) { _ =>
+        val numRows = arrayOfBatches.iterator.map(_.numRows().toLong).sum
+        require(numRows <= Int.MaxValue, s"Cannot concatenate $numRows rows into one batch")
+        new ColumnarBatch(Array.empty, numRows.toInt)
+      }
     } else {
       val tables = arrayOfBatches.safeMap(GpuColumnVector.from)
       try {
