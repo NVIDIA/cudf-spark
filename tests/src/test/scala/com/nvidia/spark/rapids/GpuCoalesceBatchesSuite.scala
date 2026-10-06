@@ -60,6 +60,12 @@ class GpuCoalesceBatchesSuite extends SparkQueryCompareTestSuite {
         assertResult(0)(batch.numCols())
         assertResult(7)(batch.numRows())
     }
+    val tooManyRows = Array(
+      new ColumnarBatch(Array.empty, Int.MaxValue), new ColumnarBatch(Array.empty, 1))
+    val e = intercept[IllegalArgumentException] {
+      ConcatAndConsumeAll.buildNonEmptyBatchFromTypes(tooManyRows, Array.empty)
+    }
+    assert(e.getMessage.contains("Cannot concatenate"), e.getMessage)
   }
 
   def getCapturedPlan(): SparkPlan = {

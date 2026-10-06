@@ -84,6 +84,12 @@ class GpuBatchUtilsSuite extends AnyFunSuite {
         assertResult(7)(batch.numRows())
       }
     }
+    val tooManyRows = Seq[SpillableColumnarBatch](
+      new JustRowsColumnarBatch(Int.MaxValue), new JustRowsColumnarBatch(1))
+    val e = intercept[IllegalArgumentException] {
+      GpuBatchUtils.concatSpillBatchesAndClose(tooManyRows)
+    }
+    assert(e.getMessage.contains("Cannot concatenate"), e.getMessage)
   }
 
   test("Calculate GPU memory for batch of 64 rows with integers") {
