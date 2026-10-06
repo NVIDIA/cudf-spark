@@ -271,10 +271,13 @@ trait GpuPartitioning extends Partitioning {
 
   def sliceInternalGpuOrCpuAndClose(numRows: Int, partitionIndexes: Array[Int],
       partitionColumns: Array[GpuColumnVector]): Array[(ColumnarBatch, Int)] = {
-    if (usesKudoGPUSlicing) {
+    // Both GPU slicers build a cuDF Table, which cannot hold a rows-only batch. The CPU
+    // slicer cuts one by row count, and every shuffle writer accepts its zero-column slices.
+    val rowsOnly = partitionColumns.isEmpty
+    if (usesKudoGPUSlicing && !rowsOnly) {
       sliceAndSerializeOnGpu(numRows, partitionIndexes, partitionColumns)
     } else {
-      val sliceOnGpu = usesGPUShuffle
+      val sliceOnGpu = usesGPUShuffle && !rowsOnly
       val nvtxId = if (sliceOnGpu) {
         NvtxRegistry.SLICE_INTERNAL_GPU
       } else {
