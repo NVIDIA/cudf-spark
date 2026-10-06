@@ -23,6 +23,7 @@ import scala.util.control.NonFatal
 
 import ai.rapids.cudf.{DistinctHashJoin => CudfDistinctHashJoin,
   FilteredJoin => CudfFilteredJoin, HashJoin => CudfHashJoin, Table}
+import com.nvidia.spark.Retryable
 import com.nvidia.spark.rapids.{GpuBuildLeft, GpuBuildRight, GpuBuildSide, GpuColumnVector,
   GpuExpression, GpuMetric, GpuProjectExec, GpuSemaphore, NoopMetric, NvtxRegistry,
   SpillableColumnarBatch, SpillPriorities}
@@ -179,7 +180,7 @@ private[execution] object BackendJoinRequest {
 private[execution] final class ResolvedHashJoin(
     private val backend: HashProbeBackend,
     request: BackendJoinRequest,
-    val exactOutputRows: Option[Long]) extends AutoCloseable {
+    val exactOutputRows: Option[Long]) extends AutoCloseable with Retryable {
   def isCached: Boolean = backend.isCached
 
   def execute(leftKeys: Table, rightKeys: Table): GatherMapsResult = {
@@ -201,6 +202,10 @@ private[execution] final class ResolvedHashJoin(
     }
   }
 
+  override def checkpoint(): Unit = backend.checkpoint()
+
+  override def restore(): Unit = backend.restore()
+
   override def close(): Unit = backend.close()
 }
 
@@ -208,10 +213,16 @@ private[execution] final class ResolvedHashJoin(
  * The physical build implementation of a hash probe selected once for a stream batch.
  * The caller owns the backend until `close()`. The `buildSide` is the physical side the
  * backend will actually use, under the constraints of `BackendJoinRequest.requiredBuildSide`.
+ * On a retry, `restore` releases anything the backend pins so it can be spilled while the task
+ * waits, and the backend reacquires it on its next use.
  */
-sealed trait HashProbeBackend extends AutoCloseable {
+sealed trait HashProbeBackend extends AutoCloseable with Retryable {
   def buildSide: GpuBuildSide
   def isCached: Boolean
+
+  override def checkpoint(): Unit = {}
+
+  override def restore(): Unit = {}
 
   final def execute(
       request: BackendJoinRequest,
@@ -334,15 +345,13 @@ private[execution] trait HashArtifact extends AutoCloseable {
       handle: SharedRecomputableHandle[T],
       metrics: HashBuildMetrics,
       onRebuild: () => Unit)(
-      create: SharedRecomputableHandle.Lease[T] => HashProbeBackend): HashProbeBackend = {
-    val lease = handle.acquire()
-    closeOnExcept(lease) { _ =>
-      if (lease.rebuilt) {
-        metrics.rebuilds += 1
-        onRebuild()
-      }
-      create(lease)
-    }
+      create: SharedRecomputableHandle.ReacquirableLease[T] => HashProbeBackend
+  ): HashProbeBackend = {
+    val lease = new SharedRecomputableHandle.ReacquirableLease(handle, () => {
+      metrics.rebuilds += 1
+      onRebuild()
+    })
+    closeOnExcept(lease)(create)
   }
 }
 
@@ -406,7 +415,7 @@ private final class FilteredJoinArtifact(
  */
 private final class CachedHashProbeBackend(
     override val buildSide: GpuBuildSide,
-    lease: SharedRecomputableHandle.Lease[CudfHashJoin])
+    lease: SharedRecomputableHandle.ReacquirableLease[CudfHashJoin])
     extends HashProbeBackend {
   override val isCached: Boolean = true
 
@@ -457,6 +466,8 @@ private final class CachedHashProbeBackend(
     })
   }
 
+  override def restore(): Unit = lease.release()
+
   override def close(): Unit = lease.close()
 }
 
@@ -466,7 +477,7 @@ private final class CachedHashProbeBackend(
  */
 private final class CachedDistinctHashProbeBackend(
     override val buildSide: GpuBuildSide,
-    lease: SharedRecomputableHandle.Lease[CudfDistinctHashJoin])
+    lease: SharedRecomputableHandle.ReacquirableLease[CudfDistinctHashJoin])
     extends HashProbeBackend {
   override val isCached: Boolean = true
 
@@ -504,6 +515,8 @@ private final class CachedDistinctHashProbeBackend(
 
   override def outputRowCount(joinType: JoinType, probeKeys: Table): Option[Long] = None
 
+  override def restore(): Unit = lease.release()
+
   override def close(): Unit = lease.close()
 }
 
@@ -515,7 +528,7 @@ private final class CachedDistinctHashProbeBackend(
  */
 private final class CachedFilteredProbeBackend(
     override val buildSide: GpuBuildSide,
-    lease: SharedRecomputableHandle.Lease[CudfFilteredJoin])
+    lease: SharedRecomputableHandle.ReacquirableLease[CudfFilteredJoin])
     extends HashProbeBackend {
   override val isCached: Boolean = true
 
@@ -533,6 +546,8 @@ private final class CachedFilteredProbeBackend(
   }
 
   override def outputRowCount(joinType: JoinType, probeKeys: Table): Option[Long] = None
+
+  override def restore(): Unit = lease.release()
 
   override def close(): Unit = lease.close()
 }
