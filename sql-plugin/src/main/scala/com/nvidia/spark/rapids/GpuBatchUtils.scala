@@ -202,7 +202,14 @@ object GpuBatchUtils {
    */
   def concatSpillBatchesAndClose(
       spillBatches: Seq[SpillableColumnarBatch]): Option[SpillableColumnarBatch] = {
-    val retBatch = if (spillBatches.length >= 2) {
+    val retBatch = if (spillBatches.length >= 2 && spillBatches.forall(isRowsOnly)) {
+      // cuDF cannot build a Table without columns, and rows-only batches concatenate by row count.
+      withResource(spillBatches) { _ =>
+        val numRows = spillBatches.iterator.map(_.numRows().toLong).sum
+        require(numRows <= Int.MaxValue, s"Cannot concatenate $numRows rows into one batch")
+        new JustRowsColumnarBatch(numRows.toInt)
+      }
+    } else if (spillBatches.length >= 2) {
       // two or more batches, concatenate them
       val (concatTable, types) = RmmRapidsRetryIterator.withRetryNoSplit(spillBatches) { _ =>
         withResource(spillBatches.safeMap(_.getColumnarBatch())) { batches =>
@@ -223,5 +230,11 @@ object GpuBatchUtils {
     } else null
 
     Option(retBatch)
+  }
+
+  // A compressed batch reports null types but always has a column.
+  private def isRowsOnly(batch: SpillableColumnarBatch): Boolean = {
+    val types = batch.dataTypes
+    types != null && types.isEmpty
   }
 }
