@@ -729,14 +729,14 @@ def spark_tmp_path(request):
     sc = get_spark_i_know_what_i_am_doing().sparkContext
     config = sc._jsc.hadoopConfiguration()
     path = sc._jvm.org.apache.hadoop.fs.Path(ret)
-    fs = sc._jvm.org.apache.hadoop.fs.FileSystem.get(config)
+    fs = path.getFileSystem(config)
     fs.mkdirs(path)
     yield ret
     if not debug:
         fs.delete(path)
 
-# Driver-local counterpart to spark_tmp_path; spark_tmp_path lives in the
-# default Hadoop FS, which is not local on distributed setups.
+# Driver-local counterpart to spark_tmp_path; spark_tmp_path may live on a
+# distributed filesystem, depending on the --tmp_path option.
 @pytest.fixture
 def local_tmp_path(request):
     debug = request.config.getoption('debug_tmp_path')

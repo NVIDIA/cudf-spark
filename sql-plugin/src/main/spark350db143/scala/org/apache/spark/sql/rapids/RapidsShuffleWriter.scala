@@ -97,12 +97,15 @@ abstract class RapidsCachingWriterBase[K, V](
     with Logging {
   protected val numParts = handle.dependency.partitioner.numPartitions
   protected val sizes = new Array[Long](numParts)
+  /** The buffers this writer added to the catalog, the only ones it may remove on failure. */
+  protected val writtenBufferIds = new ArrayBuffer[ShuffleBufferId]()
 
   /**
    * Used to remove shuffle buffers when the writing task detects an error, calling `stop(false)`
    */
   private def cleanStorage(): Unit = {
-    catalog.removeCachedHandles()
+    catalog.removeCachedHandles(writtenBufferIds)
+    writtenBufferIds.clear()
   }
 
   override def stop(success: Boolean): Option[MapStatusWithStats] = {

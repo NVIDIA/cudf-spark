@@ -723,6 +723,50 @@ class SpillableHostBufferHandle private (
     materialized
   }
 
+  /**
+   * Copy this handle's bytes into `dst` starting at `dstOffset`, without
+   * allocating a buffer of our own. When the data is on disk it is read
+   * directly into a slice of `dst`.
+   *
+   * A caller assembling many handles into one staging buffer makes a single
+   * host allocation rather than one per handle, which matters because the
+   * pinned pool serializes every allocation on one lock.
+   */
+  def materializeInto(dst: HostMemoryBuffer, dstOffset: Long): Unit = {
+    var hostBuf: HostMemoryBuffer = null
+    var diskHandle: DiskHandle = null
+    synchronized {
+      if (closed) {
+        throw new IllegalStateException(
+          "attempting to materialize a closed handle")
+      // after spilling, the host can get removed asynchronously, so let's
+      // use disk if it's defined even if host is still present
+      } else if (disk.isDefined) {
+        diskHandle = disk.get
+      } else if (host.isDefined) {
+        hostBuf = host.get
+        hostBuf.incRefCount()
+      } else {
+        throw new IllegalStateException(
+          "open handle has no underlying buffer")
+      }
+    }
+    if (hostBuf != null) {
+      withResource(hostBuf) { hb =>
+        dst.copyFromHostBuffer(dstOffset, hb, 0, sizeInBytes)
+      }
+    } else {
+      com.nvidia.spark.rapids.jni.RmmSpark.spillRangeStart()
+      try {
+        withResource(dst.slice(dstOffset, sizeInBytes)) { slice =>
+          diskHandle.materializeToHostMemoryBuffer(slice)
+        }
+      } finally {
+        com.nvidia.spark.rapids.jni.RmmSpark.spillRangeDone()
+      }
+    }
+  }
+
   override def spill(): Long = {
     if (!spillable) {
       0L

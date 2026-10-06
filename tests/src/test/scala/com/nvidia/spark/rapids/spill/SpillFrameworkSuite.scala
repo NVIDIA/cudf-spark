@@ -344,6 +344,85 @@ class SpillFrameworkSuite extends SpillUnitTestBase with BeforeAndAfterAll {
     }
   }
 
+  test("host originated: materializeInto copies into a caller buffer at an offset") {
+    val len = 1L * 1024
+    val hmb = HostMemoryBuffer.allocate(len)
+    (0L until len).foreach(i => hmb.setByte(i, (i % 127).toByte))
+    val spillableBuffer = SpillableHostBuffer(hmb, len, SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+    withResource(spillableBuffer) { _ =>
+      val offset = 64L
+      withResource(HostMemoryBuffer.allocate(offset + len)) { dst =>
+        // poison the whole destination so a short or misplaced copy is visible
+        (0L until dst.getLength).foreach(i => dst.setByte(i, 0xFF.toByte))
+        spillableBuffer.materializeInto(dst, offset)
+        // bytes before the offset are untouched
+        (0L until offset).foreach { i =>
+          assertResult(0xFF.toByte)(dst.getByte(i))
+        }
+        // and the payload landed starting exactly at the offset
+        (0L until len).foreach { i =>
+          assertResult((i % 127).toByte)(dst.getByte(offset + i))
+        }
+      }
+    }
+    assertResult(0)(hmb.getRefCount)
+  }
+
+  test("host originated: materializeInto copies after spill to disk") {
+    val len = 1L * 1024
+    val hmb = HostMemoryBuffer.allocate(len)
+    (0L until len).foreach(i => hmb.setByte(i, (i % 127).toByte))
+    val spillableBuffer = SpillableHostBuffer(hmb, len, SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+    // force the handle onto disk, so materializeInto takes the slice/read path
+    SpillFramework.stores.hostStore.spill(len)
+    withResource(spillableBuffer) { _ =>
+      assertResult(0)(hmb.getRefCount)
+      val offset = 32L
+      withResource(HostMemoryBuffer.allocate(offset + len)) { dst =>
+        (0L until dst.getLength).foreach(i => dst.setByte(i, 0xFF.toByte))
+        spillableBuffer.materializeInto(dst, offset)
+        (0L until offset).foreach { i =>
+          assertResult(0xFF.toByte)(dst.getByte(i))
+        }
+        (0L until len).foreach { i =>
+          assertResult((i % 127).toByte)(dst.getByte(offset + i))
+        }
+      }
+    }
+  }
+
+  test("host originated: materializeInto packs several handles back to back") {
+    // this is the shape KudoGpuTableOperator.concat relies on: one destination
+    // buffer, each handle written at a running offset, no per-handle allocation
+    val len = 256L
+    val handles = (0 until 3).map { h =>
+      val hmb = HostMemoryBuffer.allocate(len)
+      (0L until len).foreach(i => hmb.setByte(i, (h * 10 + (i % 7)).toByte))
+      SpillableHostBuffer(hmb, len, SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+    }
+    // spill the middle one so the run mixes host-resident and disk-backed handles
+    SpillFramework.stores.hostStore.spill(len)
+    withResource(handles.head) { _ =>
+      withResource(handles(1)) { _ =>
+        withResource(handles(2)) { _ =>
+          withResource(HostMemoryBuffer.allocate(len * handles.length)) { dst =>
+            var offset = 0L
+            handles.foreach { h =>
+              h.materializeInto(dst, offset)
+              offset += len
+            }
+            assertResult(len * handles.length)(offset)
+            handles.indices.foreach { h =>
+              (0L until len).foreach { i =>
+                assertResult((h * 10 + (i % 7)).toByte)(dst.getByte(h * len + i))
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
   test("host originated: a buffer is not spillable when we leak it") {
     val hmb = HostMemoryBuffer.allocate(1L * 1024)
     withResource(SpillableHostBuffer(hmb, hmb.getLength,
