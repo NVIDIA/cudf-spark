@@ -219,6 +219,22 @@ class GpuPartitioningSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
+  private def partitioning(n: Int): GpuPartitioning = new GpuPartitioning {
+    override val numPartitions: Int = n
+  }
+
+  /** Rows-only slicing that must hold in every shuffle mode. */
+  private def assertRowsOnlySlicing(): Unit = {
+    // The empty partition gets no slice, as on the CPU path.
+    assertResult(Seq((0, 3, 0), (2, 4, 0), (3, 3, 0)))(
+      sliceRowsOnly(partitioning(4), 10, Array(0, 3, 3, 7)))
+    // Leading and trailing empty partitions leave the other partitions' ids alone.
+    assertResult(Seq((1, 4, 0), (2, 6, 0)))(
+      sliceRowsOnly(partitioning(5), 10, Array(0, 0, 4, 10, 10)))
+    assertResult(Seq((0, 5, 0)))(sliceRowsOnly(partitioning(1), 5, Array(0)))
+    assertResult(Seq.empty)(sliceRowsOnly(partitioning(2), 0, Array(0, 0)))
+  }
+
   private def cacheOnlyShuffleConf(): SparkConf = new SparkConf()
       .set("spark.shuffle.manager", GpuShuffleEnv.RAPIDS_SHUFFLE_CLASS)
       .set("spark.rapids.shuffle.mode", RapidsConf.RapidsShuffleManagerMode.CACHE_ONLY.toString)
@@ -228,15 +244,10 @@ class GpuPartitioningSuite extends AnyFunSuite with BeforeAndAfterEach {
     val conf = cacheOnlyShuffleConf()
     TestUtils.withGpuSparkSession(conf) { _ =>
       GpuShuffleEnv.init(new RapidsConf(conf))
-      val partitionIndices = Array(0, 3, 3, 7)
-      val gp = new GpuPartitioning {
-        override val numPartitions: Int = partitionIndices.length
-      }
+      val gp = partitioning(1)
       assert(gp.usesGPUShuffle)
       assert(!gp.usesKudoGPUSlicing)
-      // The empty partition gets no slice, as on the CPU path.
-      assertResult(Seq((0, 3, 0), (2, 4, 0), (3, 3, 0)))(
-        sliceRowsOnly(gp, 10, partitionIndices))
+      assertRowsOnlySlicing()
     }
   }
 
@@ -245,13 +256,8 @@ class GpuPartitioningSuite extends AnyFunSuite with BeforeAndAfterEach {
     val conf = new SparkConf().set(RapidsConf.SHUFFLE_KUDO_WRITE_MODE.key, "GPU")
     TestUtils.withGpuSparkSession(conf) { _ =>
       GpuShuffleEnv.init(new RapidsConf(conf))
-      val partitionIndices = Array(0, 3, 3, 7)
-      val gp = new GpuPartitioning {
-        override val numPartitions: Int = partitionIndices.length
-      }
-      assert(gp.usesKudoGPUSlicing)
-      assertResult(Seq((0, 3, 0), (2, 4, 0), (3, 3, 0)))(
-        sliceRowsOnly(gp, 10, partitionIndices))
+      assert(partitioning(1).usesKudoGPUSlicing)
+      assertRowsOnlySlicing()
     }
   }
 
