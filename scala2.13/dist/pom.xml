@@ -433,6 +433,18 @@ self.log("... OK")
                             </target>
                         </configuration>
                     </execution>
+                    <execution>
+                        <id>set-included-buidlvers</id>
+                        <goals><goal>run</goal></goals>
+                        <phase>generate-sources</phase>
+                        <configuration>
+                            <skip>${dyn.shim.include.buildvers.skip}</skip>
+                            <target xmlns:ac="antlib:net.sf.antcontrib">
+                                <script language="jython" src="${spark.rapids.source.basedir}/build/dyn_shim_detection.py"/>
+                            </target>
+                            <exportAntProperties>true</exportAntProperties>
+                        </configuration>
+                    </execution>
                 </executions>
                 <dependencies>
                     <dependency>
@@ -553,25 +565,6 @@ self.log("... OK")
                             https://github.com/apache/maven-deploy-plugin/blob/4a72d8e9778c1878058435bdb919d40d65c879dd/src/main/java/org/apache/maven/plugins/deploy/DeployFileMojo.java#L186
                             -->
                             <version>${project.version}</version>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-antrun-plugin</artifactId>
-                <version>3.1.0</version>
-                <executions>
-                    <execution>
-                        <id>set-included-buidlvers</id>
-                        <goals><goal>run</goal></goals>
-                        <phase>generate-sources</phase>
-                        <configuration>
-                            <skip>${dyn.shim.include.buildvers.skip}</skip>
-                            <target xmlns:ac="antlib:net.sf.antcontrib">
-                                <script language="jython" src="${spark.rapids.source.basedir}/build/dyn_shim_detection.py"/>
-                            </target>
-                            <exportAntProperties>true</exportAntProperties>
                         </configuration>
                     </execution>
                 </executions>
