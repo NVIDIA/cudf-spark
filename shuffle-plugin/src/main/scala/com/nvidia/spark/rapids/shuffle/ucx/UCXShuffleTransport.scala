@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -133,7 +133,8 @@ class UCXShuffleTransport(shuffleServerId: BlockManagerId, rapidsConf: RapidsCon
 
     val deviceAllocator: Long => BaseDeviceMemoryBuffer = (size: Long) => {
       // CUDA async allocator is not compatible with GPUDirectRDMA, so need to use `cudaMalloc`.
-      if (rapidsConf.rmmPool.equalsIgnoreCase("ASYNC")) {
+      // GpuDeviceManager.computeRmmPoolSize reserves this memory beside the pool.
+      if (GpuDeviceManager.ucxDeviceBounceBuffersOutsideRmm(rapidsConf)) {
         CudaMemoryBuffer.allocate(size)
       } else {
         DeviceMemoryBuffer.allocate(size)
