@@ -731,6 +731,7 @@ case class DateFormatClassRuleMeta(
     r: DataFromReplacementRule)
   extends UnixTimeExprMeta[DateFormatClass](a, conf, p, r) {
   override def isTimeZoneSupported = true
+  override protected def formatDirection: DateUtils.FormatDirection = DateUtils.Formatting
   override protected def allowLegacyFormattingOnlyFormats: Boolean = true
   override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
     GpuDateFormatClass(lhs, rhs, strfFormat, a.timeZoneId)
