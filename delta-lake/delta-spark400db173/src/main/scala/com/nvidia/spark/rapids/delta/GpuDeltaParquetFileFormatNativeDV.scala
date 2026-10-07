@@ -32,6 +32,7 @@ import com.databricks.sql.transaction.tahoe.{
   NoMapping
 }
 import com.databricks.sql.transaction.tahoe.actions.{Metadata, Protocol}
+import com.databricks.sql.transaction.tahoe.deletionvectors.RoaringBitmapArray
 import com.databricks.sql.transaction.tahoe.schema.SchemaMergingUtils
 import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
 import com.nvidia.spark.rapids._
@@ -185,8 +186,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
   }
 
   private def requiresPhysicalRowIndex(schema: StructType): Boolean =
-    GpuDeltaParquetFileFormatBase.findGpuRowIndexColumn(
-      schema, DeltaParquetFileFormat.ROW_INDEX_STRUCT_FIELD.name) >= 0
+    GpuDeltaParquetFileFormatBase.findGpuRowIndexColumn(schema) >= 0
 
   private def computeNumDeletedRows(
       serializedBitmap: HostMemoryBuffer,
@@ -203,6 +203,47 @@ case class GpuDeltaParquetFileFormatNativeDV(
 
   private def totalNumRows(rowGroupNumRows: Array[Int]): Long =
     rowGroupNumRows.foldLeft(0L)(_ + _)
+
+  private def physicalRowIndexBatch(
+      schema: StructType,
+      rowGroupOffsets: Array[Long],
+      rowGroupNumRows: Array[Int],
+      deletedRows: RoaringBitmapArray,
+      expectedRows: Int): ColumnarBatch = {
+    require(rowGroupOffsets.length == rowGroupNumRows.length)
+    val rowRanges = rowGroupOffsets.zip(rowGroupNumRows).map { case (offset, count) =>
+      (offset, offset + count)
+    }
+    val deleted = scala.collection.mutable.HashSet.empty[Long]
+    deletedRows.forEach { index: Long =>
+      if (rowRanges.exists { case (start, end) => index >= start && index < end }) {
+        deleted += index
+      }
+      ()
+    }
+    val rowIndices = new ArrayBuffer[Long](expectedRows)
+    rowGroupOffsets.zip(rowGroupNumRows).foreach { case (offset, count) =>
+      var index = offset
+      val end = offset + count
+      while (index < end) {
+        if (!deleted.contains(index)) rowIndices += index
+        index += 1
+      }
+    }
+    require(rowIndices.size == expectedRows,
+      s"Expected $expectedRows surviving rows but found ${rowIndices.size}")
+    val columns = schema.fields.safeMap { field =>
+      val column = if (GpuDeltaParquetFileFormatBase.isGpuRowIndexColumn(field)) {
+        GpuColumnVector.from(ColumnVector.fromLongs(rowIndices.toArray: _*), LongType)
+      } else {
+        GpuColumnVector.fromNull(expectedRows, field.dataType)
+      }
+      column.asInstanceOf[org.apache.spark.sql.vectorized.ColumnVector]
+    }
+    closeOnExcept(columns) { ownedColumns =>
+      new ColumnarBatch(ownedColumns.toArray, expectedRows)
+    }
+  }
 
   override def hashCode(): Int = getClass.getCanonicalName.hashCode()
 
@@ -410,6 +451,20 @@ case class GpuDeltaParquetFileFormatNativeDV(
         }
       }
     }
+
+    override protected def readEmptySchemaBatch(
+        chunkedBlocks: Seq[BlockMetaData],
+        rows: Int): ColumnarBatch = {
+      if (!requiresPhysicalRowIndex(readDataSchema)) {
+        super.readEmptySchemaBatch(chunkedBlocks, rows)
+      } else {
+        val (offsets, counts) = RapidsDeletionVectors.getRowGroupMetadata(chunkedBlocks)
+        val deletedRows = tablePathOpt.map(path =>
+          RapidsDeletionVectors.loadScalaBitmap(conf, split, path, deletionVectorReadInfo))
+          .getOrElse(new RoaringBitmapArray())
+        physicalRowIndexBatch(readDataSchema, offsets, counts, deletedRows, rows)
+      }
+    }
   }
 
   ///////////////////////////////////////
@@ -578,6 +633,9 @@ case class GpuDeltaParquetFileFormatNativeDV(
       dataSchema, readDataSchema, partitionSchema, filters, rapidsConf, poolConfBuilder,
       metrics, queryUsesInputFile) with Logging {
 
+    override val canUseCoalesceFilesReader: Boolean =
+      !requiresPhysicalRowIndex(readDataSchema) && super.canUseCoalesceFilesReader
+
     logDebug("Using GpuDeltaParquetMultiFilePartitionReaderFactory for multi-threaded Parquet " +
       "reading with deletion vectors")
 
@@ -730,6 +788,28 @@ case class GpuDeltaParquetFileFormatNativeDV(
       maxChunkedReaderMemoryUsageSizeBytes, skipReadEstimate, compressCfg, execMetrics,
       partitionSchema, poolConf, maxNumFileProcessed, ignoreMissingFiles, ignoreCorruptFiles,
       useFieldId, queryUsesInputFile, keepReadsInOrder, combineConf) {
+
+    override def canUseCombine: Boolean =
+      !requiresPhysicalRowIndex(readDataSchema) && super.canUseCombine
+
+    override protected def readEmptySchemaBatch(
+        meta: HostMemoryEmptyMetaData,
+        rows: Int): ColumnarBatch = {
+      if (rows == 0 || !requiresPhysicalRowIndex(meta.readSchema)) {
+        super.readEmptySchemaBatch(meta, rows)
+      } else {
+        val deltaMeta = meta.asInstanceOf[DeltaParquetHostMemoryEmptyMetaData]
+        val dvInfos = deltaMeta.dvMetadata.flatMap(_.peekDvInfos)
+        require(dvInfos.length == 1 && deltaMeta.allPartValues.isEmpty,
+          "An index-only Delta batch must come from one file")
+        val info = dvInfos.head
+        val deletedRows = tablePathOpt.map(path => RapidsDeletionVectors.loadScalaBitmap(
+          conf, meta.partitionedFile, path, deletionVectorReadInfo))
+          .getOrElse(new RoaringBitmapArray())
+        physicalRowIndexBatch(meta.readSchema, info.rowGroupOffsets, info.rowGroupNumRows,
+          deletedRows, rows)
+      }
+    }
 
     override def readBatches(
         fileBufsAndMeta: HostMemoryBuffersWithMetaDataBase): Iterator[ColumnarBatch] = {
@@ -1235,8 +1315,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
       poolConf, ignoreMissingFiles, ignoreCorruptFiles) {
 
     private val needsPhysicalRowIndex =
-      GpuDeltaParquetFileFormatBase.findGpuRowIndexColumn(
-        readDataSchema, DeltaParquetFileFormat.ROW_INDEX_STRUCT_FIELD.name) >= 0
+      GpuDeltaParquetFileFormatBase.findGpuRowIndexColumn(readDataSchema) >= 0
 
     override protected def augmentChunkMeta(meta: CurrentChunkMeta): CurrentChunkMeta = {
       if (meta.currentChunk.isEmpty) return meta
@@ -1537,8 +1616,7 @@ case class DeltaParquetTableReader(
     MakeParquetTableWithDVProducer.deletionVectorSkipRowIndexes(readDataSchema)
 
   private val rowIndexColumn =
-    GpuDeltaParquetFileFormatBase.findGpuRowIndexColumn(
-      readDataSchema, DeltaParquetFileFormat.ROW_INDEX_STRUCT_FIELD.name)
+    GpuDeltaParquetFileFormatBase.findGpuRowIndexColumn(readDataSchema)
 
   override protected def postProcessChunk(chunk: Table): Table = {
     // Keep the prepended cuDF physical index through schema evolution when Delta requests it.
@@ -1685,8 +1763,7 @@ object MakeParquetTableWithDVProducer extends Logging {
         }
       }
       val rowIndexColumn =
-        GpuDeltaParquetFileFormatBase.findGpuRowIndexColumn(
-          readDataSchema, DeltaParquetFileFormat.ROW_INDEX_STRUCT_FIELD.name)
+        GpuDeltaParquetFileFormatBase.findGpuRowIndexColumn(readDataSchema)
       val physicalRowIndex =
         if (rowIndexColumn >= 0) Some(castPhysicalRowIndex(table)) else None
       withResource(physicalRowIndex) { _ =>

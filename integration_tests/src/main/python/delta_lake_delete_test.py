@@ -16,7 +16,7 @@ import pytest
 
 from asserts import assert_gpu_and_cpu_writes_are_equal_collect, assert_gpu_fallback_write, \
     assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect, assert_equal, \
-    assert_spark_exception
+    assert_spark_exception, collect_plan_nodes, plan_metric
 from data_gen import *
 from delta_lake_utils import *
 from marks import *
@@ -118,7 +118,8 @@ def assert_delta_sql_delete_collect(spark_tmp_path, use_cdf, dest_table_func, de
                                     skip_sql_result_check=False, expect_write=True,
                                     expected_num_affected_rows=None,
                                     assert_gpu_delete_command=False,
-                                    expected_cpu_fallback_class=None):
+                                    expected_cpu_fallback_class=None,
+                                    captured_gpu_plans=None):
     def read_data(spark, path):
         read_func = read_delta_path_with_cdf if use_cdf else read_delta_path
         df = read_func(spark, path)
@@ -150,7 +151,8 @@ def assert_delta_sql_delete_collect(spark_tmp_path, use_cdf, dest_table_func, de
                     expected_command = "GpuDeleteCommand" if assert_gpu_delete_command else None
                     gpu_result = assert_rapids_delta_write(
                         lambda spark: do_delete(spark, gpu_path).collect(), conf=conf,
-                        expected_command=expected_command)
+                        expected_command=expected_command,
+                        captured_plans_out=captured_gpu_plans)
             elif assert_gpu_delete_command:
                 gpu_result = assert_rapids_gpu_delete_ran(
                     lambda spark: do_delete(spark, gpu_path).collect(), conf=conf)
@@ -238,6 +240,7 @@ def test_delta_delete_with_deletion_vectors(
 @pytest.mark.skipif(not is_databricks173_or_later(),
                     reason="Persistent-DV command acceleration requires DBR 17.3+")
 def test_delta_delete_deletion_vector_full_file_data_predicate(spark_tmp_path):
+    captured_plans = []
     conf = copy_and_update(
         delta_delete_enabled_conf,
         {"spark.databricks.delta.delete.deletionVectors.persistent": "true",
@@ -255,7 +258,8 @@ def test_delta_delete_deletion_vector_full_file_data_predicate(spark_tmp_path):
         partition_columns=["p"],
         conf=conf,
         expected_num_affected_rows=2,
-        assert_gpu_delete_command=True)
+        assert_gpu_delete_command=True,
+        captured_gpu_plans=captured_plans)
 
     def history_metrics(spark):
         path = spark_tmp_path + "/DELTA_DATA/GPU"
@@ -266,8 +270,11 @@ def test_delta_delete_deletion_vector_full_file_data_predicate(spark_tmp_path):
     metrics = with_cpu_session(history_metrics, conf=conf)
     assert int(metrics["numRemovedFiles"]) == 2
     assert int(metrics["numRemovedBytes"]) > 0
-    assert int(metrics["numPartitionsRemovedFrom"]) == 2
-    assert int(metrics["numPartitionsAddedTo"]) == 0
+    command_plans = [node for plan in captured_plans for node in collect_plan_nodes(plan)
+                     if node.nodeName().startswith("GpuExecute GpuDeleteCommand")]
+    assert command_plans, "GPU DELETE command was not captured"
+    assert plan_metric(command_plans[-1], "numPartitionsRemovedFrom") == 2
+    assert plan_metric(command_plans[-1], "numPartitionsAddedTo") == 0
 
 
 @allow_non_gpu("SortExec, ColumnarToRowExec", *delta_meta_allow)

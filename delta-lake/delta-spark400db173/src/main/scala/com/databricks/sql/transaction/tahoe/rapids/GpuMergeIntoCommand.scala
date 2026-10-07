@@ -758,10 +758,13 @@ case class GpuMergeIntoCommand(
         hasReadableDVs = DeletionVectorUtils.deletionVectorsReadable(deltaTxn.snapshot),
         targetScan.copy(dataFrame = joinedDf),
         filesToRewrite,
-        DFUDFShims.exprToColumn(generateFilterForModifiedRows(sourceRowPresentCol)),
+        DFUDFShims.exprToColumn(generateFilterForModifiedRows(sourceRowPresentCol, None)),
         nameToAddFileMap)
 
       if (touchedFiles.isEmpty) {
+        metrics("numTargetFilesRemoved").set(0L)
+        metrics("numTargetBytesRemoved").set(0L)
+        metrics("numTargetPartitionsRemovedFrom").set(0L)
         Nil
       } else {
         val (dvActions, metricMap) =
@@ -787,11 +790,17 @@ case class GpuMergeIntoCommand(
   private def clauseDisjunction(clauses: Seq[DeltaMergeIntoClause]): Expression =
     clauses.map(_.condition.getOrElse(Literal.TrueLiteral)).reduce(Or)
 
-  private def generateFilterForModifiedRows(sourceRowPresentCol: String): Expression = {
+  private def generateFilterForModifiedRows(
+      sourceRowPresentCol: String,
+      targetRowPresentCol: Option[String]): Expression = {
     val matchedExpression = if (matchedClauses.nonEmpty) {
-      // A null-safe ON condition can match an unmatched target against its null-filled source.
+      // An outer join can leave either side null. A null-safe ON condition can then match the
+      // null-filled side when re-evaluated here, so check row presence before clause conditions.
+      val targetRowPresent: Expression = targetRowPresentCol.map { name =>
+        IsNotNull(UnresolvedAttribute(name))
+      }.getOrElse(Literal.TrueLiteral)
       And(
-        IsNotNull(UnresolvedAttribute(sourceRowPresentCol)),
+        And(targetRowPresent, IsNotNull(UnresolvedAttribute(sourceRowPresentCol))),
         And(condition, clauseDisjunction(matchedClauses)))
     } else {
       Literal.FalseLiteral
@@ -956,7 +965,7 @@ case class GpuMergeIntoCommand(
       rawJoinedDF
     } else {
       val rowsToWrite = Or(
-        generateFilterForModifiedRows(sourceRowPresentCol),
+        generateFilterForModifiedRows(sourceRowPresentCol, Some(targetRowPresentCol)),
         generateFilterForNewRows(targetRowPresentCol))
       rawJoinedDF.filter(DFUDFShims.exprToColumn(rowsToWrite))
     }
