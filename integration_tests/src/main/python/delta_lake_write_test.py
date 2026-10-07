@@ -1037,12 +1037,14 @@ def test_delta_replace_where_save_as_table_preserves_partitioning(spark_tmp_tabl
         plans = callback.getResultsWithTimeout(10000)
         assert any(callback.contains(plan, "GpuAtomicReplaceTableAsSelectExec")
                    for plan in plans), "GpuAtomicReplaceTableAsSelectExec was not executed"
-        # Spark 3.5+ runs the RTAS data write as a nested query execution. Spark 4.0+
-        # issues it as OverwriteByExpression, while Spark 3.5 uses AppendData. Earlier
-        # Spark versions write through V1 directly and do not produce a separately
-        # captured V1 write plan.
+        # Spark 3.5+ runs the RTAS data write as a nested query execution. OSS Spark
+        # 3.5.6+ and Spark 4.0+ issue it as OverwriteByExpression; earlier Spark 3.5
+        # releases use AppendData. Before Spark 3.5, the V1 write is not captured
+        # as a separate plan.
         if not is_before_spark_350():
-            v1_write_node = ("GpuOverwriteByExpressionExecV1" if is_spark_400_or_later()
+            uses_overwrite = (is_spark_400_or_later() or
+                              (not is_databricks_runtime() and spark_version() >= "3.5.6"))
+            v1_write_node = ("GpuOverwriteByExpressionExecV1" if uses_overwrite
                              else "GpuAppendDataExecV1")
             assert any(callback.contains(plan, v1_write_node)
                        for plan in plans), f"{v1_write_node} was not executed"
