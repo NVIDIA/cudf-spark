@@ -72,6 +72,7 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
     // check for leaks
     override def transformAndClose(cb: ColumnarBatch): ColumnarBatch = cb
     override val tableWriter: TableWriter = mock[TableWriter]
+    override protected def canRetryGpuOomFromNativeWrite: Boolean = true
     override def getOutputStream: FSDataOutputStream = mock[FSDataOutputStream]
     override def path(): String = null
     private var throwOnce: Option[Throwable] = None
@@ -323,7 +324,7 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  test("native file writer OOM must fail the task instead of replaying the batch") {
+  test("CPU OOM during a native file write must fail the task") {
     resetMocks()
     includeRetry = true
     val cb = buildBatchWithPartitionedCol(1, 2, 3)
@@ -337,6 +338,21 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
       }
       assert(failure.getSuppressed.exists(_.isInstanceOf[CpuRetryOOM]))
       verify(nativeWriter, times(1)).write(any[Table]())
+    }
+  }
+
+  test("Parquet native writer retries a GPU OOM") {
+    resetMocks()
+    includeRetry = true
+    val cb = buildBatchWithPartitionedCol(1, 2, 3)
+    withColumnarBatchesVerifyClosed(Seq(cb)) {
+      val nativeWriter = mockOutputWriter.tableWriter
+      doThrow(new GpuRetryOOM("native encoding failed"))
+        .doNothing()
+        .when(nativeWriter).write(any[Table]())
+      val spillable = SpillableColumnarBatch(cb, ACTIVE_ON_DECK_PRIORITY)
+      mockOutputWriter.writeSpillableAndClose(spillable)
+      verify(nativeWriter, times(2)).write(any[Table]())
     }
   }
 

@@ -27,6 +27,7 @@ import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitSpillableInHalfByRows, withRestoreOnRetry, withRetry, withRetryNoSplit}
 import com.nvidia.spark.rapids.io.async.{AsyncOutputStream, TrafficController}
+import com.nvidia.spark.rapids.jni.{GpuRetryOOM, GpuSplitAndRetryOOM}
 import com.nvidia.spark.rapids.jni.fileio.{RapidsFileIO, RapidsOutputFile}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
@@ -91,6 +92,11 @@ abstract class ColumnarOutputWriter(context: TaskAttemptContext,
   def getFileLength: Long = fileLength
 
   protected val tableWriter: TableWriter
+
+  // A format may opt in only if a GPU allocation failure cannot occur after its native writer
+  // has updated its state or emitted output.
+  protected def canRetryGpuOomFromNativeWrite: Boolean = false
+
   private lazy val debugDumpOutputStream: Option[OutputStream] = try {
     debugDumpPath.map { path =>
       val tc = TaskContext.get()
@@ -276,6 +282,10 @@ abstract class ColumnarOutputWriter(context: TaskAttemptContext,
       try {
         tableWriter.write(table)
       } catch {
+        case gpuOom: GpuRetryOOM if canRetryGpuOomFromNativeWrite =>
+          throw gpuOom
+        case gpuOom: GpuSplitAndRetryOOM if canRetryGpuOomFromNativeWrite =>
+          throw gpuOom
         case NonFatal(writeError) =>
           // cuDF may have already advanced the writer or emitted buffers. Replaying the
           // batch on this writer can duplicate rows and produce an invalid Parquet file,
