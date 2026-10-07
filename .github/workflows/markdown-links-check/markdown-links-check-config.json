@@ -23,10 +23,14 @@
     },
     {
       "pattern": "https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.*"
+    },
+    {
+      "pattern": "^https://deepwiki\\.com/"
     }
   ],
   "timeout": "15s",
   "retryOn429": true,
-  "retryCount":30,
-  "aliveStatusCodes": [200, 403]
+  "retryCount":3,
+  "fallbackRetryDelay": "5s",
+  "aliveStatusCodes": [200, 403, 429]
 } 
