@@ -637,7 +637,9 @@ case class GpuDeltaParquetFileFormatNativeDV(
       metrics, queryUsesInputFile) with Logging {
 
     override val canUseCoalesceFilesReader: Boolean =
-      !requiresPhysicalRowIndex(readDataSchema) && super.canUseCoalesceFilesReader
+      !requiresPhysicalRowIndex(readDataSchema) &&
+        rapidsConf.isParquetCoalesceFileReadEnabled &&
+        !(queryUsesInputFile || sqlConf.ignoreCorruptFiles)
 
     logDebug("Using GpuDeltaParquetMultiFilePartitionReaderFactory for multi-threaded Parquet " +
       "reading with deletion vectors")
