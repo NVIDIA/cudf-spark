@@ -62,7 +62,13 @@ object RapidsPluginImplicits {
             case suppressed: Throwable => e.addSuppressed(suppressed)
           }
         } else {
-          autoCloseable.close()
+          try {
+            autoCloseable.close()
+          } catch {
+            case interrupted: InterruptedException =>
+              Thread.currentThread().interrupt()
+              throw interrupted
+          }
         }
       }
     }

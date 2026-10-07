@@ -254,4 +254,19 @@ class ImplicitsTestSuite extends AnyFlatSpec with Matchers {
     Thread.currentThread().isInterrupted shouldBe true
     Thread.interrupted()
   }
+
+  it should "preserve interruption when a single safeClose rethrows a close failure" in {
+    val resource = new AutoCloseable {
+      override def close(): Unit = throw new InterruptedException("interrupted close")
+    }
+
+    try {
+      assertThrows[InterruptedException] {
+        resource.safeClose()
+      }
+      Thread.currentThread().isInterrupted shouldBe true
+    } finally {
+      Thread.interrupted()
+    }
+  }
 }
