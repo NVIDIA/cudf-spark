@@ -997,6 +997,22 @@ def test_delta_rtas_truncate_capability(spark_tmp_table_factory):
     assert [row.id for row in gpu_rows] == list(range(10, 20))
 
 
+@pytest.mark.parametrize("version, expected", [
+    ("3.4.10", False),
+    ("3.5.5", False),
+    ("3.5.6", True),
+    ("3.5.9", True),
+    ("3.5.10", True),
+    ("3.5.5-SNAPSHOT", False),
+    ("3.5.6-SNAPSHOT", True),
+    ("3.5.10-amzn-0", True),
+    ("4.0.0", True),
+])
+def test_is_spark_356_or_later(version, expected, monkeypatch):
+    monkeypatch.setattr("spark_session.spark_version", lambda: version)
+    assert is_spark_356_or_later() == expected
+
+
 @allow_non_gpu('DataWritingCommandExec', 'WriteFilesExec', *delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
