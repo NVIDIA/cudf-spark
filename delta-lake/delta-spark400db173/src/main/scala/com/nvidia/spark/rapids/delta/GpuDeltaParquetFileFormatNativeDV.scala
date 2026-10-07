@@ -232,16 +232,19 @@ case class GpuDeltaParquetFileFormatNativeDV(
     }
     require(rowIndices.size == expectedRows,
       s"Expected $expectedRows surviving rows but found ${rowIndices.size}")
-    val columns = schema.fields.safeMap { field =>
-      val column = if (GpuDeltaParquetFileFormatBase.isGpuRowIndexColumn(field)) {
-        GpuColumnVector.from(ColumnVector.fromLongs(rowIndices.toArray: _*), LongType)
-      } else {
-        GpuColumnVector.fromNull(expectedRows, field.dataType)
+    val indices = rowIndices.toArray
+    RmmRapidsRetryIterator.withRetryNoSplit {
+      val columns = schema.fields.safeMap { field =>
+        val column = if (GpuDeltaParquetFileFormatBase.isGpuRowIndexColumn(field)) {
+          GpuColumnVector.from(ColumnVector.fromLongs(indices: _*), LongType)
+        } else {
+          GpuColumnVector.fromNull(expectedRows, field.dataType)
+        }
+        column.asInstanceOf[org.apache.spark.sql.vectorized.ColumnVector]
       }
-      column.asInstanceOf[org.apache.spark.sql.vectorized.ColumnVector]
-    }
-    closeOnExcept(columns) { ownedColumns =>
-      new ColumnarBatch(ownedColumns.toArray, expectedRows)
+      closeOnExcept(columns) { ownedColumns =>
+        new ColumnarBatch(ownedColumns.toArray, expectedRows)
+      }
     }
   }
 
@@ -683,6 +686,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
         skipReadEstimate,
         compressCfg,
         execMetrics,
+        readDataSchema,
         partitionSchema,
         poolConf,
         maxNumFileProcessed,
@@ -771,6 +775,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
       skipReadEstimate: Boolean,
       override val compressCfg: CpuCompressionConfig,
       override val execMetrics: Map[String, GpuMetric],
+      readDataSchema: StructType,
       partitionSchema: StructType,
       poolConf: ThreadPoolConf,
       maxNumFileProcessed: Int,
