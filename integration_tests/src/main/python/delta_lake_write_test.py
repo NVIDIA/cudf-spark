@@ -1043,7 +1043,7 @@ def test_delta_replace_where_save_as_table_preserves_partitioning(spark_tmp_tabl
         # as a separate plan.
         if not is_before_spark_350():
             uses_overwrite = (is_spark_400_or_later() or
-                              (not is_databricks_runtime() and spark_version() >= "3.5.6"))
+                              (not is_databricks_runtime() and is_spark_356_or_later()))
             v1_write_node = ("GpuOverwriteByExpressionExecV1" if uses_overwrite
                              else "GpuAppendDataExecV1")
             assert any(callback.contains(plan, v1_write_node)
