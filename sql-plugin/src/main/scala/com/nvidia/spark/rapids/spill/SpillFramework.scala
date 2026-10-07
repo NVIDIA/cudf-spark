@@ -29,7 +29,7 @@ import scala.collection.mutable
 
 import ai.rapids.cudf._
 import com.nvidia.spark.rapids.{GpuColumnVector, GpuColumnVectorFromBuffer,
-  GpuCompressedColumnVector, GpuDeviceManager, HashedPriorityQueue, HostAlloc,
+  GpuCompressedColumnVector, GpuDeviceManager, GpuSemaphore, HashedPriorityQueue, HostAlloc,
   HostMemoryOutputStream, MemoryBufferToHostByteBufferIterator, NvtxId, NvtxRegistry,
   RapidsConf, RapidsHostColumnVector, SpillPriorities, TaskRegistryTracker}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
@@ -416,6 +416,9 @@ class SharedRecomputableHandle[T <: AutoCloseable] private[spill] (
    */
   @tailrec
   final def acquire(): Lease[T] = {
+    // Waiters keep their GPU semaphore permits, so a thread must hold the semaphore before it
+    // can claim the rebuild. This must happen outside the lock.
+    GpuSemaphore.acquireIfNecessary(TaskContext.get())
     // All threads decide whether to build, wait, or reuse under the lock.
     val action: AcquireAction[T] = synchronized {
       if (closed) {
