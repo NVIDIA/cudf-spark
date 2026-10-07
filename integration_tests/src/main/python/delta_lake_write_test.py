@@ -872,8 +872,7 @@ def test_delta_atomic_create_table_as_select(spark_tmp_table_factory, spark_tmp_
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
 @pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12041"), ids=idfn)
-@pytest.mark.xfail(is_spark_356_or_later() and not is_spark_400_or_later(),
-                   reason="https://github.com/delta-io/delta/issues/4671")
+@delta_rtas_truncate_skip
 @pytest.mark.xfail(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
 def test_delta_atomic_replace_table_as_select(spark_tmp_table_factory, spark_tmp_path, enable_deletion_vectors):
     _atomic_write_table_as_select(delta_write_gens, spark_tmp_table_factory, spark_tmp_path,
@@ -944,8 +943,7 @@ def test_delta_ctas_sql(spark_tmp_table_factory, enable_deletion_vectors, use_cd
 @pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
     enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12041"), ids=idfn)
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
-@pytest.mark.xfail(is_spark_356_or_later() and not is_spark_400_or_later(),
-                   reason="https://github.com/delta-io/delta/issues/4671")
+@delta_rtas_truncate_skip
 @pytest.mark.xfail(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
 def test_delta_rtas_sql(spark_tmp_table_factory, enable_deletion_vectors, use_cdf):
     _atomic_write_table_as_select_sql(delta_write_gens, spark_tmp_table_factory,
@@ -1004,6 +1002,7 @@ def test_delta_rtas_truncate_capability(spark_tmp_table_factory):
 @ignore_order(local=True)
 @pytest.mark.xfail(is_databricks_runtime(),
                    reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
+@delta_rtas_truncate_skip
 def test_delta_replace_where_save_as_table_preserves_partitioning(spark_tmp_table_factory):
     cpu_table = spark_tmp_table_factory.get()
     gpu_table = spark_tmp_table_factory.get()
