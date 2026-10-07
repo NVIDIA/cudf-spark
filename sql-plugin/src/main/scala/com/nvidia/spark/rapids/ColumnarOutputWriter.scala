@@ -224,6 +224,7 @@ abstract class ColumnarOutputWriter(context: TaskAttemptContext,
       // rather than a SpillableColumnBatch to be able to do that
       // See https://github.com/NVIDIA/spark-rapids/issues/8262
       withRetry(spillableBatch, splitSpillableInHalfByRows) { attempt =>
+        checkpointRestore.checkpoint()
         withRestoreOnRetry(checkpointRestore) {
           bufferBatchAndClose(attempt.getColumnarBatch())
         }
@@ -261,8 +262,31 @@ abstract class ColumnarOutputWriter(context: TaskAttemptContext,
   def transformAndClose(cb: ColumnarBatch): ColumnarBatch = cb
 
   private val checkpointRestore = new Retryable {
-    override def checkpoint(): Unit = ()
-    override def restore(): Unit = dropBufferedData()
+    private var bufferedCount = 0
+    private var checkpointFileLength = 0L
+
+    override def checkpoint(): Unit = {
+      bufferedCount = buffers.size
+      checkpointFileLength = fileLength
+    }
+
+    override def restore(): Unit = {
+      // A completed split is no longer in the retry iterator. Keep its buffers when a later
+      // split retries, and discard only buffers queued by the failed attempt.
+      if (buffers.size > bufferedCount) {
+        var seen = 0
+        buffers.dequeueAll { case (buffer, _) =>
+          seen += 1
+          if (seen > bufferedCount) {
+            buffer.close()
+            true
+          } else {
+            false
+          }
+        }
+      }
+      fileLength = checkpointFileLength
+    }
   }
 
   private def encodeAndBufferToHost(batch: ColumnarBatch): Unit = {
@@ -279,12 +303,15 @@ abstract class ColumnarOutputWriter(context: TaskAttemptContext,
       // tableWriter.write() serializes the table into the HostMemoryBuffer, and buffers it
       // by calling handleBuffer() on the ColumnarOutputWriter. It may not write to the
       // output stream just yet.
+      val bufferedBeforeWrite = buffers.size
       try {
         tableWriter.write(table)
       } catch {
-        case gpuOom: GpuRetryOOM if canRetryGpuOomFromNativeWrite =>
+        case gpuOom: GpuRetryOOM if canRetryGpuOomFromNativeWrite &&
+            buffers.size == bufferedBeforeWrite =>
           throw gpuOom
-        case gpuOom: GpuSplitAndRetryOOM if canRetryGpuOomFromNativeWrite =>
+        case gpuOom: GpuSplitAndRetryOOM if canRetryGpuOomFromNativeWrite &&
+            buffers.size == bufferedBeforeWrite =>
           throw gpuOom
         case NonFatal(writeError) =>
           // cuDF may have already advanced the writer or emitted buffers. Replaying the
