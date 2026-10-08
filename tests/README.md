@@ -83,6 +83,40 @@ Apache Spark 3.3.0 on Scala 2.13 artifacts, issue:
 mvn package -f scala2.13 -pl tests -am -Dbuildver=330 -Dsuffixes='.*CastOpSuite' -Dtests=decimal
 ```
 
+### Large Host Memory Tests
+
+Some tests build host columns up to the 2 GiB limit of a cuDF column. They need a GPU and, per
+test, an estimated 3 to 12 GiB of native host memory, which `-Xmx` does not bound, so they are
+skipped, and reported as canceled, unless `spark.rapids.test.largeHostMemory.enabled=true` is
+passed through `SPARK_CONF`. They also fail unless JVM assertions are enabled (`-ea`, as the Maven
+build sets), because without them a column built past its limit corrupts memory instead of
+failing. Run them one at a time, without `-Drapids.parallelUnitTests=true`, and at a Spark 3.x
+`buildver`: the Spark 4.x test executions set `SPARK_CONF` themselves, which replaces this one.
+
+```bash
+SPARK_CONF=spark.rapids.test.largeHostMemory.enabled=true \
+  mvn package -pl tests -am -Dbuildver=353 \
+  -DwildcardSuites=com.nvidia.spark.rapids.LargeHostMemorySuite
+```
+
+The end-to-end cache test, `test_cache_partition_with_column_over_2gib` in
+[cache_test.py](../integration_tests/src/main/python/cache_test.py), uses the `large_data_test`
+marker instead. It needs the `ParquetCachedBatchSerializer`, a single pytest worker
+(`TEST_PARALLEL=1`) and Spark local mode, where the driver whose `-ea` it checks is the JVM that
+builds the cache. It skips itself in any other mode, so leave `NUM_LOCAL_EXECS` unset. Its cached
+batch alone is about 2 GiB on the GPU, more than the fixed pool `run_pyspark_from_build.sh` sets
+by default, so raise that pool too:
+
+```bash
+TEST_PARALLEL=1 \
+PYSP_TEST_spark_sql_cache_serializer=com.nvidia.spark.ParquetCachedBatchSerializer \
+PYSP_TEST_spark_rapids_memory_gpu_allocSize=12g \
+  ./integration_tests/run_pyspark_from_build.sh --large_data_test \
+  -k test_cache_partition_with_column_over_2gib
+```
+
+Check that the log reports the test as passed, not skipped.
+
 ### Parallel Unit Tests
 
 Premerge runs the Scala unit tests in parallel, using

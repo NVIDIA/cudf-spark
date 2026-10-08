@@ -40,17 +40,18 @@
 {"spark": "359"}
 spark-rapids-shim-json-lines ***/
 
-package com.nvidia.spark.rapids.shims
+package org.apache.spark.sql.hive.rapids.shims
 
-import com.nvidia.spark.rapids.{TypeConverter, TypeSig}
+import java.lang.reflect.Method
+import java.util.{List => JList}
 
-import org.apache.spark.sql.types.DataType
+import org.apache.hadoop.hive.ql.exec.{FunctionRegistry, UDF}
+import org.apache.hadoop.hive.serde2.typeinfo.TypeInfo
 
-object VariantTypeShims {
-  def isVariantType(_dataType: DataType): Boolean = false
-  def additionalParquetReadSupportedTypes: TypeSig = TypeSig.none
-  def supportsVariantType: Boolean = false
-  def additionalCommonOperatorSupportedTypes: TypeSig = TypeSig.none
-  def getRowToColumnConverter(_nullable: Boolean): TypeConverter =
-    throw new UnsupportedOperationException("VariantType is not supported by this Spark version")
+object GpuRowBasedHiveSimpleUDFShim {
+  def getEvalMethod(function: UDF, argumentTypes: JList[TypeInfo]): Method =
+    function.getResolver.getEvalMethod(argumentTypes)
+
+  def invoke(method: Method, function: UDF, arguments: Array[AnyRef]): AnyRef =
+    FunctionRegistry.invoke(method, function, arguments: _*)
 }

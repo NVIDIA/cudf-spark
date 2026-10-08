@@ -1055,7 +1055,7 @@
     </profiles>
 
     <properties>
-        <delta33x.version>3.3.0</delta33x.version>
+        <delta33x.version>3.3.3</delta33x.version>
         <delta40x.version>4.0.1</delta40x.version>
         <delta40x.spark.artifactId>delta-spark_${scala.binary.version}</delta40x.spark.artifactId>
         <delta41x.version>4.1.0</delta41x.version>

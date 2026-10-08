@@ -1748,7 +1748,7 @@ def test_delta_dml_dv_internal_row_index_column_handling(
             lambda spark: read_delta_path(spark, data_path + "/CPU").collect(), conf=conf)
         gpu_data = with_cpu_session(
             lambda spark: read_delta_path(spark, data_path + "/GPU").collect(), conf=conf)
-        assert_equal(cpu_data, gpu_data)
+        assert_equal_with_local_sort(cpu_data, gpu_data)
 
 
 @allow_non_gpu(*delta_meta_allow)

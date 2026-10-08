@@ -149,6 +149,70 @@ def _write_variant_if_parquet(spark, path):
 
 
 @incompat
+@allow_non_gpu('RDDScanExec')
+@ignore_order(local=True)
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_variant_cpu_rows_convert_to_gpu():
+    def make_rows(spark):
+        df = spark.sql("""
+          SELECT id, parse_json(json) AS v
+          FROM VALUES
+            (0, '{"x":7,"s":"a"}'),
+            (1, '{"x":42,"s":"longer-value"}'),
+            (2, NULL)
+          AS source(id, json)
+        """)
+        return df.collect(), df.schema
+
+    rows, schema = with_cpu_session(make_rows)
+
+    def do_it(spark):
+        # A DataFrame backed by local VariantVal rows produces a row-based RDDScanExec.
+        return spark.createDataFrame(rows, schema).selectExpr(
+            'id',
+            "try_variant_get(v, '$.x', 'bigint') AS x",
+            "try_variant_get(v, '$.s', 'string') AS s")
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        exist_classes='RDDScanExec,GpuRowToColumnarExec,GpuProjectExec,GpuVariantGet',
+        non_exist_classes='HostColumnarToGpu',
+        conf={'spark.sql.adaptive.enabled': 'false'},
+        require_non_empty=True)
+
+
+@incompat
+@allow_non_gpu('FileSourceScanExec', 'ColumnarToRowExec')
+@ignore_order(local=True)
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_cpu_vectorized_parquet_variant_converts_via_rows(spark_tmp_path):
+    data_path = spark_tmp_path + '/CPU_VECTORIZED_VARIANT_PARQUET'
+    _with_cpu_variant_session(lambda spark: _write_variant_parquet(spark, data_path))
+
+    def do_it(spark):
+        return spark.read.parquet(data_path).selectExpr(
+            "try_variant_get(v, '$.x', 'int') AS x",
+            "try_variant_get(v, '$.y', 'string') AS y")
+
+    conf = dict(_variant_parquet_conf)
+    conf.update({
+        'spark.sql.adaptive.enabled': 'false',
+        'spark.sql.parquet.enableVectorizedReader': 'true',
+        # Force a CPU columnar scan while leaving its Variant consumer GPU-eligible.
+        'spark.rapids.sql.format.parquet.read.enabled': 'false',
+        'spark.sql.variant.pushVariantIntoScan': 'false',
+        'spark.sql.variant.allowReadingShredded': 'false',
+    })
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        exist_classes=('FileSourceScanExec,ColumnarToRowExec,'
+                       'GpuRowToColumnarExec,GpuProjectExec,GpuVariantGet'),
+        non_exist_classes='HostColumnarToGpu',
+        conf=conf,
+        require_non_empty=True)
+
+
+@incompat
 @allow_non_gpu('DataWritingCommandExec', 'WriteFilesExec',
                'ColumnarToRowExec', 'FileSourceScanExec')
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')

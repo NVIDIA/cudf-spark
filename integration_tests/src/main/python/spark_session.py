@@ -244,7 +244,9 @@ def is_spark_351_or_later():
     return spark_version() >= "3.5.1"
 
 def is_spark_356_or_later():
-    return spark_version() >= "3.5.6"
+    # Compare numeric parts so multi-digit patches sort correctly; ignore runtime suffixes.
+    parts = spark_version().split("-", 1)[0].split(".")[:3]
+    return tuple(int(part) for part in parts) >= (3, 5, 6)
 
 def is_spark_359():
     return spark_version() == "3.5.9"
