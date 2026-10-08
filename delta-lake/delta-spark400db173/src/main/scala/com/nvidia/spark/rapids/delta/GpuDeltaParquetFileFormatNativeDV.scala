@@ -211,39 +211,35 @@ case class GpuDeltaParquetFileFormatNativeDV(
       deletedRows: RoaringBitmapArray,
       expectedRows: Int): ColumnarBatch = {
     require(rowGroupOffsets.length == rowGroupNumRows.length)
-    val rowRanges = rowGroupOffsets.zip(rowGroupNumRows).map { case (offset, count) =>
-      (offset, offset + count)
-    }
-    val deleted = scala.collection.mutable.HashSet.empty[Long]
-    deletedRows.forEach { index: Long =>
-      if (rowRanges.exists { case (start, end) => index >= start && index < end }) {
-        deleted += index
-      }
-      ()
-    }
     val rowIndices = new ArrayBuffer[Long](expectedRows)
     rowGroupOffsets.zip(rowGroupNumRows).foreach { case (offset, count) =>
       var index = offset
       val end = offset + count
       while (index < end) {
-        if (!deleted.contains(index)) rowIndices += index
+        if (!deletedRows.contains(index)) rowIndices += index
         index += 1
       }
     }
     require(rowIndices.size == expectedRows,
       s"Expected $expectedRows surviving rows but found ${rowIndices.size}")
-    val indices = rowIndices.toArray
+    physicalRowIndexBatch(schema, rowIndices.toArray)
+  }
+
+  private def physicalRowIndexBatch(
+      schema: StructType,
+      indices: Array[Long]): ColumnarBatch = {
+    val rows = indices.length
     RmmRapidsRetryIterator.withRetryNoSplit {
       val columns = schema.fields.safeMap { field =>
         val column = if (GpuDeltaParquetFileFormatBase.isGpuRowIndexColumn(field)) {
           GpuColumnVector.from(ColumnVector.fromLongs(indices: _*), LongType)
         } else {
-          GpuColumnVector.fromNull(expectedRows, field.dataType)
+          GpuColumnVector.fromNull(rows, field.dataType)
         }
         column.asInstanceOf[org.apache.spark.sql.vectorized.ColumnVector]
       }
       closeOnExcept(columns) { ownedColumns =>
-        new ColumnarBatch(ownedColumns.toArray, expectedRows)
+        new ColumnarBatch(ownedColumns.toArray, rows)
       }
     }
   }
@@ -818,9 +814,78 @@ case class GpuDeltaParquetFileFormatNativeDV(
       }
     }
 
+    private def readIndexOnlyBatches(
+        meta: DeltaParquetHostMemoryEmptyMetaData): Iterator[ColumnarBatch] = {
+      // Capture the JVM data before closing the spillable DV metadata. The iterator creates
+      // GPU batches only as they are requested, so a large split never becomes one GPU column.
+      val (schema, offsets, counts, deletedRows, partitionValues) = withResource(meta) { _ =>
+        val dvInfos = meta.dvMetadata.flatMap(_.peekDvInfos)
+        require(dvInfos.length == 1 && meta.allPartValues.isEmpty,
+          "An index-only Delta batch must come from one file")
+        val info = dvInfos.head
+        require(info.rowGroupOffsets.length == info.rowGroupNumRows.length)
+        val bitmap = tablePathOpt.map(path => RapidsDeletionVectors.loadScalaBitmap(
+          conf, meta.partitionedFile, path, deletionVectorReadInfo))
+          .getOrElse(new RoaringBitmapArray())
+        (meta.readSchema, info.rowGroupOffsets, info.rowGroupNumRows, bitmap,
+          meta.partitionedFile.partitionValues)
+      }
+
+      // The row limit and byte limits all apply to the 8-byte physical row-index column.
+      val indexBytes = java.lang.Long.BYTES
+      val maxRows = math.max(1L, Seq(maxReadBatchSizeRows.longValue(),
+        maxReadBatchSizeBytes / indexBytes, targetBatchSizeBytes / indexBytes,
+        maxGpuColumnSizeBytes / indexBytes).min).toInt
+      val indexBatches = new Iterator[Array[Long]] {
+        private var group = 0
+        private var rowIndex = if (offsets.nonEmpty) offsets(0) else 0L
+        private var pending = -1L
+
+        override def hasNext: Boolean = {
+          while (pending < 0 && group < counts.length) {
+            if (rowIndex >= offsets(group) + counts(group)) {
+              group += 1
+              if (group < counts.length) rowIndex = offsets(group)
+            } else {
+              val candidate = rowIndex
+              rowIndex += 1
+              if (!deletedRows.contains(candidate)) pending = candidate
+            }
+          }
+          pending >= 0
+        }
+
+        override def next(): Array[Long] = {
+          if (!hasNext) throw new NoSuchElementException()
+          var indices = new Array[Long](math.min(maxRows, 1024))
+          var size = 0
+          while (size < maxRows && hasNext) {
+            if (size == indices.length) {
+              val capacity = math.min(maxRows.toLong, indices.length.toLong * 2).toInt
+              indices = java.util.Arrays.copyOf(indices, capacity)
+            }
+            indices(size) = pending
+            pending = -1L
+            size += 1
+          }
+          if (size == indices.length) indices else java.util.Arrays.copyOf(indices, size)
+        }
+      }
+
+      indexBatches.flatMap { indices =>
+        GpuSemaphore.acquireIfNecessary(TaskContext.get())
+        val batch = physicalRowIndexBatch(schema, indices)
+        BatchWithPartitionDataUtils.addSinglePartitionValueToBatch(batch,
+          partitionValues, partitionSchema, maxGpuColumnSizeBytes)
+      }
+    }
+
     override def readBatches(
         fileBufsAndMeta: HostMemoryBuffersWithMetaDataBase): Iterator[ColumnarBatch] = {
       fileBufsAndMeta match {
+        case meta: DeltaParquetHostMemoryEmptyMetaData
+            if meta.numRows > 0 && requiresPhysicalRowIndex(meta.readSchema) =>
+          readIndexOnlyBatches(meta)
         case meta: DeltaParquetHostMemoryEmptyMetaData =>
           withResource(meta) { _ =>
             super.readBatches(fileBufsAndMeta)

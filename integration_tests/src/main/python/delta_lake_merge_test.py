@@ -1526,7 +1526,9 @@ def test_delta_merge_dv_index_only_target_scan(spark_tmp_path):
         "spark.databricks.delta.merge.deletionVectors.persistent": "true",
         "spark.databricks.delta.delete.deletionVectors.persistent": "true",
         "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
-        "spark.databricks.delta.autoCompact.enabled": "false"})
+        "spark.databricks.delta.autoCompact.enabled": "false",
+        "spark.rapids.sql.format.parquet.reader.type": "MULTITHREADED",
+        "spark.rapids.sql.reader.batchSizeRows": "1"})
 
     def setup(spark):
         setup_delta_dest_tables(
