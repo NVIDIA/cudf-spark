@@ -26,6 +26,7 @@ from spark_session import is_databricks_version, spark_version
 delta_merge_enabled_conf = copy_and_update(delta_writes_enabled_conf,
                                            {"spark.rapids.sql.command.MergeIntoCommand": "true",
                             "spark.rapids.sql.command.MergeIntoCommandEdge": "true",
+                            "spark.rapids.sql.delta.lowShuffleMerge.enabled": "true",
                             "spark.rapids.sql.test.delta.lowShuffleMerge.failOnFallback": "true",
                             "spark.rapids.sql.format.parquet.reader.type": "PERFILE",
                             "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
@@ -343,6 +344,68 @@ def test_delta_low_shuffle_merge_internal_column_names(
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not is_databricks_version(17, 3),
+                    reason="DBR 17.3 low-shuffle column-mapping regression")
+@pytest.mark.parametrize("mapping", ["name", "id"], ids=idfn)
+@pytest.mark.parametrize("collision", ["none", "source", "target"], ids=idfn)
+@pytest.mark.parametrize("use_cdf", [False, True], ids=idfn)
+def test_delta_low_shuffle_merge_column_mapping(
+        spark_tmp_path, spark_tmp_table_factory, mapping, collision, use_cdf):
+    conf = copy_and_update(delta_merge_enabled_conf, {
+        "spark.databricks.delta.properties.defaults.columnMapping.mode": mapping,
+        "spark.databricks.delta.properties.defaults.minReaderVersion": "2",
+        "spark.databricks.delta.properties.defaults.minWriterVersion": "5",
+        "spark.sql.parquet.fieldId.read.enabled": "true",
+        "spark.sql.parquet.fieldId.write.enabled": "true"})
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    src_table = spark_tmp_table_factory.get()
+
+    def dest_table_func(spark):
+        df = spark.range(4, numPartitions=1).withColumn("value", f.lit(-1))
+        if collision == "target":
+            df = df.withColumn("__metadata_row_index", f.col("id") + 100)
+        return df
+
+    def setup(spark):
+        setup_delta_dest_tables(spark, data_path, dest_table_func, use_cdf, False)
+        source = spark.range(1, 5, numPartitions=1).withColumn("value", f.col("id") + 10)
+        if collision == "source":
+            source = source.withColumn("__metadata_row_index", f.col("id") + 100)
+        source.createOrReplaceTempView(src_table)
+
+    with_cpu_session(setup, conf=conf)
+    # Use the colliding columns in the merge so neither can be pruned before discovery.
+    condition = "t.id = s.id"
+    if collision == "source":
+        condition += " AND t.id + 100 = s.__metadata_row_index"
+    update = "t.value = s.value"
+    columns, values = "id, value", "s.id, s.value"
+    if collision == "target":
+        condition += " AND t.__metadata_row_index = s.id + 100"
+        update += ", t.__metadata_row_index = s.id + 200"
+        columns += ", __metadata_row_index"
+        values += ", s.id + 200"
+
+    def do_merge(spark, path):
+        return spark.sql(
+            f"MERGE INTO delta.`{path}` t USING {src_table} s ON {condition} "
+            "WHEN MATCHED AND s.id = 1 THEN DELETE "
+            f"WHEN MATCHED AND s.id = 2 THEN UPDATE SET {update} "
+            f"WHEN NOT MATCHED THEN INSERT ({columns}) VALUES ({values})").collect()
+
+    # This must execute low shuffle, not just enter the command and fall back to classic merge.
+    _assert_collect_with_counters(do_merge, data_path, conf)
+    readers = [read_delta_path, read_delta_path_with_cdf] if use_cdf else [read_delta_path]
+    for reader in readers:
+        results = [with_cpu_session(
+            lambda spark, run=run: reader(spark, data_path + "/" + run).collect(), conf=conf)
+            for run in ["CPU", "GPU"]]
+        assert_equal_with_local_sort(*results)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_databricks_version(17, 3),
                     reason="DBR 17.3 low-shuffle nondeterministic-action regression")
 @pytest.mark.parametrize("use_cdf", [False, True], ids=idfn)
 def test_delta_low_shuffle_merge_non_deterministic_action_values(
@@ -565,11 +628,12 @@ def test_delta_low_shuffle_merge_existing_deletion_vectors_fall_back(
                     reason="DBR 17.3 temporary deletion-vector regression")
 def test_delta_low_shuffle_merge_temporary_deletion_vector(
         spark_tmp_path, spark_tmp_table_factory):
-    # Leave the enabling property unset: low shuffle merge is the default, while the strict
-    # fallback setting in delta_merge_enabled_conf still requires the low-shuffle scans to work.
-    assert with_cpu_session(lambda spark: spark_jvm().com.nvidia.spark.rapids.RapidsConf(
+    # Production remains opt-in; the merge below explicitly enables strict low shuffle.
+    default_conf = dict(delta_merge_enabled_conf)
+    del default_conf["spark.rapids.sql.delta.lowShuffleMerge.enabled"]
+    assert not with_cpu_session(lambda spark: spark_jvm().com.nvidia.spark.rapids.RapidsConf(
         spark._jsparkSession.sessionState().conf()).isDeltaLowShuffleMergeEnabled(),
-        conf=delta_merge_enabled_conf)
+        conf=default_conf)
 
     def dest_table_func(spark):
         return gen_df(

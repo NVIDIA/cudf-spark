@@ -88,9 +88,22 @@ case class GpuDeltaParquetFileFormat(
    * Parquet reader after name mapping rewrites.
    */
   override def prepareSchema(inputSchema: StructType): StructType = {
+    // The discovery row index is synthetic, so it has no entry in the table's column mapping.
+    // Match its collision-safe name only on marked scans; similarly named user columns still
+    // need physical mapping. The base reader also calls this method for schemas without it.
+    val rowIndexOrdinal = if (lowShuffleMergeScan) {
+      inputSchema.fields.indexWhere(_.name == lowShuffleMergeRowIndexColumn)
+    } else {
+      -1
+    }
+    val tableSchema = if (rowIndexOrdinal >= 0) {
+      StructType(inputSchema.fields.patch(rowIndexOrdinal, Nil, 1))
+    } else {
+      inputSchema
+    }
     val schema = DeltaColumnMapping.createPhysicalSchema(
-      inputSchema, referenceSchema, columnMappingMode)
-    if (columnMappingMode == NameMapping) {
+      tableSchema, referenceSchema, columnMappingMode)
+    val physicalSchema = if (columnMappingMode == NameMapping) {
       SchemaMergingUtils.transformColumns(schema) { (_, field, _) =>
         field.copy(metadata = new MetadataBuilder()
           .withMetadata(field.metadata)
@@ -100,6 +113,12 @@ case class GpuDeltaParquetFileFormat(
       }
     } else {
       schema
+    }
+    if (rowIndexOrdinal >= 0) {
+      StructType(physicalSchema.fields.patch(
+        rowIndexOrdinal, Seq(inputSchema.fields(rowIndexOrdinal)), 0))
+    } else {
+      physicalSchema
     }
   }
 

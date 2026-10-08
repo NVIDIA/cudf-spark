@@ -332,9 +332,10 @@ case.
 
 ## Delta Lake low shuffle merge on Databricks Runtime 17.3
 
-Low shuffle merge is enabled by default for supported runtimes when the Parquet reader
-is set to `PERFILE`. Set `spark.rapids.sql.delta.lowShuffleMerge.enabled=false` to use
-classic GPU merge explicitly.
+Low shuffle merge is disabled by default. To enable it on Databricks Runtime 17.3, set
+`spark.rapids.sql.delta.lowShuffleMerge.enabled=true` and the Parquet reader to `PERFILE`.
+The default remains disabled because Delta Lake 2.4 does not support low shuffle merge
+with change data feed enabled.
 
 On Databricks Runtime 17.3, tables with existing deletion vectors fall back to classic
 GPU merge before low shuffle merge builds temporary deletion vectors. The existing
