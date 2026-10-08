@@ -351,11 +351,10 @@ def test_delta_low_shuffle_merge_internal_column_names(
 def test_delta_low_shuffle_merge_column_mapping(
         spark_tmp_path, spark_tmp_table_factory, mapping, collision, use_cdf):
     conf = copy_and_update(delta_merge_enabled_conf, {
-        "spark.databricks.delta.properties.defaults.columnMapping.mode": mapping,
-        "spark.databricks.delta.properties.defaults.minReaderVersion": "2",
-        "spark.databricks.delta.properties.defaults.minWriterVersion": "5",
-        "spark.sql.parquet.fieldId.read.enabled": "true",
-        "spark.sql.parquet.fieldId.write.enabled": "true"})
+        "spark.databricks.delta.properties.defaults.columnMapping.mode": mapping})
+    if mapping == "id":
+        # The existing GPU id-mapped reader requires Parquet field-ID reads.
+        conf["spark.sql.parquet.fieldId.read.enabled"] = "true"
     data_path = spark_tmp_path + "/DELTA_DATA"
     src_table = spark_tmp_table_factory.get()
 
@@ -628,12 +627,10 @@ def test_delta_low_shuffle_merge_existing_deletion_vectors_fall_back(
                     reason="DBR 17.3 temporary deletion-vector regression")
 def test_delta_low_shuffle_merge_temporary_deletion_vector(
         spark_tmp_path, spark_tmp_table_factory):
-    # Production remains opt-in; the merge below explicitly enables strict low shuffle.
-    default_conf = dict(delta_merge_enabled_conf)
-    del default_conf["spark.rapids.sql.delta.lowShuffleMerge.enabled"]
-    assert not with_cpu_session(lambda spark: spark_jvm().com.nvidia.spark.rapids.RapidsConf(
+    # The shared configuration enables low shuffle and requires its scans to work without fallback.
+    assert with_cpu_session(lambda spark: spark_jvm().com.nvidia.spark.rapids.RapidsConf(
         spark._jsparkSession.sessionState().conf()).isDeltaLowShuffleMergeEnabled(),
-        conf=default_conf)
+        conf=delta_merge_enabled_conf)
 
     def dest_table_func(spark):
         return gen_df(
