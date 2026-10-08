@@ -160,9 +160,13 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
 
   private val asyncWriterThreadName = "GpuFileFormatDataWriterSuite async output"
 
+  /** The pools asyncOutputStream made in this test, stopped afterwards in case no close did. */
+  private var asyncPools: List[ExecutorService] = Nil
+
   /** An async stream over `delegate`, with the pool that runs its writes and its close. */
   def asyncOutputStream(delegate: OutputStream): (AsyncOutputStream, ExecutorService) = {
     val pool = TrampolineUtil.newDaemonSingleThreadExecutor(asyncWriterThreadName)
+    asyncPools ::= pool
     val throttle = new TrafficController(new HostMemoryThrottle(Long.MaxValue)) {}
     (new AsyncOutputStream(() => delegate, new ThrottlingExecutor(pool, throttle, _ => ())), pool)
   }
@@ -301,8 +305,15 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
   }
 
   override def afterEach(): Unit = {
-    SpillFramework.shutdown()
-    Rmm.shutdown()
+    try {
+      // A test that failed before its writer closed would otherwise leave its pool running.
+      asyncPools.foreach(_.shutdownNow())
+      asyncPools.foreach(_.awaitTermination(10, TimeUnit.SECONDS))
+    } finally {
+      asyncPools = Nil
+      SpillFramework.shutdown()
+      Rmm.shutdown()
+    }
   }
 
   def buildEmptyBatch: ColumnarBatch =
