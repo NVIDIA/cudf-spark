@@ -911,4 +911,19 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
     assert(footerCloses == 1)
     assertClosedOnWriterThread(delegate, pool)
   }
+
+  test("close keeps a cached async write failure that the delegate rethrows from close") {
+    val writeFailure = new IOException("write failed")
+    val delegate = new RecordingOutputStream(writeFailure, writeFailure)
+    val (stream, pool) = asyncOutputStream(delegate)
+    val writer = streamOutputWriter(stream)
+    stream.write(1)
+    assert(intercept[IOException](stream.flush()) eq writeFailure)
+    writer.bufferBytes(16)
+    val (thrown, interrupted) = runOnNewThread(interruptFirst = false)(writer.close())
+    assert(thrown.exists(_ eq writeFailure))
+    assert(writeFailure.getSuppressed.isEmpty)
+    assert(!interrupted)
+    assertClosedOnWriterThread(delegate, pool)
+  }
 }

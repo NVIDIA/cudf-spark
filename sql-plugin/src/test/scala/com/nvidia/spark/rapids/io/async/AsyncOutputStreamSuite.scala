@@ -412,4 +412,30 @@ class AsyncOutputStreamSuite extends AnyFunSuite with BeforeAndAfterEach {
       }
     }
   }
+
+  test("close keeps a write failure that the delegate rethrows from its close") {
+    val failure = new IOException("write failed")
+    val delegate = new RecordingOutputStream(writeFailure = failure, closeFailure = failure)
+    val (os, pool) = openOnPool(delegate)
+    os.write(buf)
+    // close is the first call to see the failure: the writer thread runs the write first.
+    val thrown = intercept[IOException](os.close())
+    assert(thrown eq failure)
+    assert(thrown.getSuppressed.isEmpty)
+    assertResult(1)(delegate.closeCount)
+    assertResult(writerThreadName)(delegate.closeThread.getName)
+    assert(pool.isTerminated)
+  }
+
+  test("close keeps a failed open as a cause and still stops the writer thread") {
+    val openFailure = new IOException("open failed")
+    val pool = TrampolineUtil.newDaemonSingleThreadExecutor(writerThreadName)
+    val os = new AsyncOutputStream(() => throw openFailure,
+      new ThrottlingExecutor(pool, trafficController, _ => ()))
+    os.write(buf)
+    val thrown = intercept[IOException](os.close())
+    val causes = Iterator.iterate[Throwable](thrown)(_.getCause).takeWhile(_ != null)
+    assert(causes.exists(_ eq openFailure))
+    assert(pool.isTerminated)
+  }
 }
