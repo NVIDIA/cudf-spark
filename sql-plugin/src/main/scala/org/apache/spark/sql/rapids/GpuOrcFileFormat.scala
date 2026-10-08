@@ -258,6 +258,9 @@ class GpuOrcWriter(
   extends ColumnarOutputWriter(context, dataSchema, NvtxRegistry.FILE_FORMAT_WRITE, true,
     statsTrackers, debugOutputPath, holdGpuBetweenBatches, useAsyncWrite, fileIO) {
 
+  // cuDF completes GPU allocation and encoding before writing ORC data to the sink.
+  override protected def canRetryGpuOomFromNativeWrite: Boolean = true
+
   override val tableWriter: TableWriter = {
     val builder = SchemaUtils
       .writerOptionsFromSchema(ORCWriterOptions.builder(), dataSchema, nullable = false)
