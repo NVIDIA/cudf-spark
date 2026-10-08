@@ -20,6 +20,7 @@ import java.util.concurrent.ConcurrentHashMap
 
 import scala.collection.mutable.ArrayBuffer
 
+import com.nvidia.spark.rapids.shims.SparkShimImpl
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -374,9 +375,9 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
     // Spark's own shuffle also keeps one attempt per map, so the count proves nothing unless the
     // shuffles stayed on the GPU while the UDF fell back to the CPU
     val plan = query.queryExecution.executedPlan
-    assert(PlanUtils.findOperators(plan, _.isInstanceOf[ShuffleExchangeExec]).isEmpty,
+    assert(SparkShimImpl.findOperators(plan, _.isInstanceOf[ShuffleExchangeExec]).isEmpty,
       s"a shuffle fell back to the CPU:\n$plan")
-    assert(PlanUtils.findOperators(plan, _.isInstanceOf[GpuShuffleExchangeExecBase]).nonEmpty,
+    assert(SparkShimImpl.findOperators(plan, _.isInstanceOf[GpuShuffleExchangeExecBase]).nonEmpty,
       s"no GPU shuffle in:\n$plan")
     assertResult(1, "first attempts that failed after their write")(
       RapidsShuffleIntegrationSuite.failedTasks.size())
