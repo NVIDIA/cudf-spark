@@ -114,7 +114,9 @@ class TrafficController protected[rapids] (@GuardedBy("lock") throttle: Throttle
   }
 
   def taskCompleted[T](task: Task[T]): Unit = {
-    lock.lockInterruptibly()
+    // Not interruptible: this runs in the finally of a task whose thread may have been
+    // interrupted, and skipping it would leave the task scheduled for good.
+    lock.lock()
     try {
       numTasks -= 1
       throttle.taskCompleted(task)

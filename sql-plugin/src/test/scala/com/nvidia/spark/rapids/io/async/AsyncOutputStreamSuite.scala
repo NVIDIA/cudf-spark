@@ -341,7 +341,7 @@ class AsyncOutputStreamSuite extends AnyFunSuite with BeforeAndAfterEach {
   class RecordingOutputStream(
       writeFailure: IOException = null,
       flushFailure: IOException = null,
-      closeFailure: IOException = null) extends OutputStream {
+      closeFailure: Throwable = null) extends OutputStream {
     @volatile var bytesWritten: Int = 0
     @volatile var closeCount: Int = 0
     @volatile var closeThread: Thread = _
@@ -373,9 +373,11 @@ class AsyncOutputStreamSuite extends AnyFunSuite with BeforeAndAfterEach {
   private val writerThreadName = "AsyncOutputStreamSuite writer"
 
   /** An async stream over `delegate`, with the pool that runs its writes and its close. */
-  def openOnPool(delegate: OutputStream): (AsyncOutputStream, ExecutorService) = {
+  def openOnPool(
+      delegate: OutputStream,
+      controller: TrafficController = trafficController): (AsyncOutputStream, ExecutorService) = {
     val pool = TrampolineUtil.newDaemonSingleThreadExecutor(writerThreadName)
-    val executor = new ThrottlingExecutor(pool, trafficController, _ => ())
+    val executor = new ThrottlingExecutor(pool, controller, _ => ())
     (new AsyncOutputStream(() => delegate, executor), pool)
   }
 
@@ -424,6 +426,22 @@ class AsyncOutputStreamSuite extends AnyFunSuite with BeforeAndAfterEach {
     assert(thrown.getSuppressed.isEmpty)
     assertResult(1)(delegate.closeCount)
     assertResult(writerThreadName)(delegate.closeThread.getName)
+    assert(pool.isTerminated)
+  }
+
+  test("close keeps a write failure and releases its task when the delegate close is interrupted") {
+    val failure = new IOException("write failed")
+    val interrupted = new InterruptedException("close interrupted")
+    val delegate = new RecordingOutputStream(writeFailure = failure, closeFailure = interrupted)
+    // A controller of its own, so the count checked below is this stream's alone.
+    val controller = new TrafficController(new HostMemoryThrottle(bufLen * maxBufCount))
+    val (os, pool) = openOnPool(delegate, controller)
+    os.write(buf)
+    val thrown = intercept[IOException](os.close())
+    assert(thrown eq failure)
+    assert(thrown.getSuppressed.toSeq == Seq(interrupted))
+    assertResult(0)(controller.numScheduledTasks)
+    assertResult(1)(delegate.closeCount)
     assert(pool.isTerminated)
   }
 
