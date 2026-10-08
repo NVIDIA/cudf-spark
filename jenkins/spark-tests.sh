@@ -302,7 +302,8 @@ run_delta_lake_tests() {
   fi
 
   if [[ $SPARK_VER =~ $SPARK_35X_PATTERN ]]; then
-    DELTA_LAKE_VERSIONS="3.3.0"
+    # Delta 3.3.3 fixes staged-table truncate validation on Spark 3.5.6+.
+    DELTA_LAKE_VERSIONS="3.3.3"
   fi
 
   if [[ $SPARK_VER =~ $SPARK_40X_PATTERN ]]; then
@@ -343,7 +344,7 @@ run_delta_lake_tests() {
         DELTA_MAIN_JAR="io.delta:delta-spark_${DELTA_SPARK_LINE}_${SCALA_BINARY_VER}:$v"
       elif [[ "$v" == "4.1.0" ]]; then
         DELTA_MAIN_JAR="io.delta:delta-spark_4.1_${SCALA_BINARY_VER}:$v"
-      elif [[ "$v" == "3.3.0" || "$v" == "4.0.0" || \
+      elif [[ "$v" == "3.3.3" || "$v" == "4.0.0" || \
           "$v" == "4.0.1" ]]; then
         DELTA_MAIN_JAR="io.delta:delta-spark_${SCALA_BINARY_VER}:$v"
       else

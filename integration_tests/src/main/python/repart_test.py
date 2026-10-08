@@ -18,7 +18,7 @@ from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, assert_gp
 from spark_session import is_before_spark_320, with_cpu_session
 from conftest import is_not_utc
 from data_gen import *
-from marks import ignore_order, allow_non_gpu
+from marks import ignore_order, allow_non_gpu, shuffle_test
 import pyspark.sql.functions as f
 
 # 4 level nested struct
@@ -386,6 +386,7 @@ def _assert_zero_column_range_exchange(cpu_plan, plan):
             "Expected the zero-column child of the range exchange to produce rows, got {} in:\n{}".format(
                 rows, plan)
 
+@shuffle_test
 def test_range_partition_zero_column_scan(spark_tmp_path):
     # payload exists only so the scan has a column for pruning to drop.
     data_path = spark_tmp_path + '/PARQUET_DATA'
@@ -406,6 +407,7 @@ def test_range_partition_zero_column_scan(spark_tmp_path):
         conf = _zero_column_range_conf,
         gpu_plan_assertion = _assert_zero_column_range_exchange)
 
+@shuffle_test
 def test_range_partition_zero_column_skewed_resample():
     # Hits randomResample, not reservoirSampleAndCount: createRangeBounds only re-samples a
     # partition holding more than three quarters of the rows, hence the skewed filter.

@@ -605,7 +605,8 @@ class RowToColumnarIterator(
   private var totalOutputRows: Long = 0
   private lazy val rowCopyProjection: UnsafeProjection = UnsafeProjection.create(localSchema)
 
-  // Carries a failed row across batch boundaries when OOM interrupted conversion.
+  // Carries a row across a batch boundary when an OOM or a column's size limit interrupted
+  // its conversion.
   private var pendingRow: InternalRow = _
 
   override def hasNext: Boolean = {
@@ -650,23 +651,41 @@ class RowToColumnarIterator(
    *  - Has rows to emit (and not RequireSingleBatch) → emit partial batch, save failed row
    *  - No rows yet + RetryOOM → block until memory freed, then while loop retries
    *  - No rows yet + SplitAndRetryOOM → propagate (can't split a single row)
+   *
+   * In both modes a row that would take a column past its size limit ends the batch before
+   * it, unless the batch is empty or the goal requires a single batch (see splitAtColumnLimit).
    */
   private def convertRows(builders: GpuColumnarBatchBuilder): (Int, Double) = {
     var rowCount = 0
     var byteCount: Double = 0
+
+    // One snapshot for the batch, refilled before each row.
+    var snapshots: Array[RapidsHostColumnBuilder.BuilderSnapshot] = null
+    def captureState(): Unit = {
+      if (snapshots == null) {
+        snapshots = builders.captureState()
+      } else {
+        builders.captureState(snapshots)
+      }
+    }
 
     if (enableRetry) {
       var batchDone = false
       RmmRapidsRetryIterator.withRetryBlock {
         while (!batchDone && hasNext &&
             (rowCount == 0 || rowCount < targetRows && byteCount < targetSizeBytes)) {
-          val snapshots = builders.captureState()
+          captureState()
           var row: InternalRow = null
           try {
             row = nextRow()
             byteCount += converters.convert(row, builders)
             rowCount += 1
           } catch {
+            // A row that was never taken failed in the input iterator, not at a column limit.
+            case limit: ColumnLimitExceededException if row != null =>
+              builders.restoreState(snapshots)
+              splitAtColumnLimit(limit, row, rowCount)
+              batchDone = true
             case oom @ (_: CpuRetryOOM | _: CpuSplitAndRetryOOM |
                         _: GpuRetryOOM | _: GpuSplitAndRetryOOM) =>
               builders.restoreState(snapshots)
@@ -693,13 +712,43 @@ class RowToColumnarIterator(
         }
       }
     } else {
-      while (hasNext && (rowCount == 0 || rowCount < targetRows && byteCount < targetSizeBytes)) {
+      var batchDone = false
+      while (!batchDone && hasNext &&
+          (rowCount == 0 || rowCount < targetRows && byteCount < targetSizeBytes)) {
         val row = nextRow()
-        byteCount += converters.convert(row, builders)
-        rowCount += 1
+        captureState()
+        try {
+          byteCount += converters.convert(row, builders)
+          rowCount += 1
+        } catch {
+          case limit: ColumnLimitExceededException =>
+            builders.restoreState(snapshots)
+            splitAtColumnLimit(limit, row, rowCount)
+            batchDone = true
+        }
       }
     }
     (rowCount, byteCount)
+  }
+
+  /**
+   * Handles a row that would take a column past its size limit, after its partial conversion
+   * was rolled back: carries it to the next batch, or throws when no batch can take it.
+   */
+  private def splitAtColumnLimit(
+      limit: ColumnLimitExceededException,
+      row: InternalRow,
+      rowCount: Int): Unit = {
+    if (rowCount == 0) {
+      // Smaller batches or more partitions cannot help a row that fails in empty builders.
+      throw new ColumnLimitExceededException(
+        "A single row cannot fit in a batch on its own: " + limit.getLimitDetail,
+        "reduce the size of that row's values", limit)
+    } else if (localGoal.isInstanceOf[RequireSingleBatchLike]) {
+      throw limit
+    } else {
+      pendingRow = copyRow(row)
+    }
   }
 
   private def estimateInitialTargetRows(): Unit = {

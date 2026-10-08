@@ -554,6 +554,22 @@ def test_pandas_udf_rows_only():
         conf=arrow_udf_conf)
 
 
+def test_pandas_iter_udf_rows_only_spanning_batches():
+    # One output Series for all inputs makes the GPU join it back to several rows-only batches.
+    def concat_all(it: Iterator[pd.Series]) -> Iterator[pd.Series]:
+        parts = [s + 1 for s in it]
+        if parts:
+            yield pd.concat(parts, ignore_index=True)
+    my_udf = f.pandas_udf(concat_all, returnType=LongType())
+    # 8000 bytes makes GpuRangeExec emit 1000-row batches, above the 500-row Arrow batch target.
+    conf = copy_and_update(arrow_udf_conf, {
+        'spark.rapids.sql.batchSizeBytes': '8000',
+        'spark.sql.execution.arrow.maxRecordsPerBatch': '500'})
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.range(0, 4000, 1, 1).select(my_udf(f.lit(1).cast('long'))),
+        conf=conf)
+
+
 # Python UDFs support nondeterministic expressions from Spark 3.3.1.
 # See https://github.com/apache/spark/commit/1a01a492c051bb861c480f224a3c310e133e4d01
 @ignore_order(local=True)

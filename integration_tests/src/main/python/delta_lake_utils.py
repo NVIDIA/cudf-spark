@@ -18,7 +18,8 @@ import pytest
 import re
 
 from spark_session import is_databricks122_or_later, supports_delta_lake_deletion_vectors, \
-    is_databricks173_or_later, is_spark_353_or_later, is_spark_local_mode, \
+    is_databricks173_or_later, is_spark_353_or_later, is_spark_356_or_later, \
+    is_spark_400_or_later, is_spark_local_mode, \
     with_cpu_session, with_gpu_session
 from asserts import assert_equal
 from conftest import get_non_gpu_allowed, is_databricks_runtime, spark_jvm
@@ -99,6 +100,23 @@ def _loaded_delta_lake_version():
     except Exception:
         # Delta Lake is optional for most integration test runs.
         return None
+
+
+def _is_delta_rtas_truncate_unsupported():
+    if (is_databricks_runtime() or not is_spark_356_or_later()
+            or is_spark_400_or_later()):
+        return False
+    version = _loaded_delta_lake_version()
+    if version is None:
+        return False
+    parts = version.split("-", 1)[0].split(".")[:3]
+    return tuple(int(part) for part in parts) < (3, 3, 3)
+
+
+delta_rtas_truncate_skip = pytest.mark.skipif(
+    _is_delta_rtas_truncate_unsupported(),
+    reason="OSS Delta before 3.3.3 does not support staged-table truncate validation "
+           "on Spark 3.5.6+: https://github.com/delta-io/delta/issues/4671")
 
 
 def is_oss_delta_lake_24():
