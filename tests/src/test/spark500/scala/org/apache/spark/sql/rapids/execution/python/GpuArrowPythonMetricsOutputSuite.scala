@@ -25,15 +25,16 @@ import java.nio.charset.StandardCharsets
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicBoolean
 
+import org.mockito.Mockito.when
+import org.scalatest.funsuite.AnyFunSuite
+import org.scalatestplus.mockito.MockitoSugar.mock
+
 import org.apache.spark.{SparkConf, SparkEnv, TaskContext}
 import org.apache.spark.api.python._
 import org.apache.spark.sql.rapids.execution.python.shims.GpuArrowPythonRunner
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.types.{IntegerType, StructField, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
-import org.mockito.Mockito.when
-import org.scalatest.funsuite.AnyFunSuite
-import org.scalatestplus.mockito.MockitoSugar.mock
 
 class GpuArrowPythonMetricsOutputSuite extends AnyFunSuite {
   private val memoryBytesSpilled = 123L
