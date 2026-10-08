@@ -26,7 +26,9 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.apache.spark.{SparkConf, TaskContext}
 import org.apache.spark.scheduler.{SparkListener, SparkListenerEvent}
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.execution.exchange.ShuffleExchangeExec
 import org.apache.spark.sql.functions.{col, sum, udf}
+import org.apache.spark.sql.rapids.execution.GpuShuffleExchangeExecBase
 
 /**
  * Listener to capture SparkRapidsShuffleDiskSavingsEvent during tests.
@@ -365,9 +367,17 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
       id
     }
     val numRows = 100000L
-    val total = spark.range(0, numRows, 1, 4).select(failAfterWrite(col("id")).as("id"))
+    val query = spark.range(0, numRows, 1, 4).select(failAfterWrite(col("id")).as("id"))
       .selectExpr("id % 97 AS k").repartition(8, col("k")).groupBy("k").count()
-      .agg(sum("count")).collect().head.getLong(0)
+      .agg(sum("count"))
+    val total = query.collect().head.getLong(0)
+    // Spark's own shuffle also keeps one attempt per map, so the count proves nothing unless the
+    // shuffles stayed on the GPU while the UDF fell back to the CPU
+    val plan = query.queryExecution.executedPlan
+    assert(PlanUtils.findOperators(plan, _.isInstanceOf[ShuffleExchangeExec]).isEmpty,
+      s"a shuffle fell back to the CPU:\n$plan")
+    assert(PlanUtils.findOperators(plan, _.isInstanceOf[GpuShuffleExchangeExecBase]).nonEmpty,
+      s"no GPU shuffle in:\n$plan")
     assertResult(1, "first attempts that failed after their write")(
       RapidsShuffleIntegrationSuite.failedTasks.size())
     assertResult(numRows)(total)
