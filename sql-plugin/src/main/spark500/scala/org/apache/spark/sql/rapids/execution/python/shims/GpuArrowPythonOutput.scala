@@ -76,8 +76,8 @@ trait GpuArrowPythonOutput extends GpuArrowOutput { _: GpuBasePythonRunner[_] =>
               case SpecialLengths.START_ARROW_STREAM =>
                 gpuArrowReader.start(stream)
                 read()
-              case SpecialLengths.TIMING_DATA =>
-                handleTimingData()
+              case SpecialLengths.METRICS_DATA =>
+                handleMetricsData()
                 read()
               case SpecialLengths.PYTHON_EXCEPTION_THROWN =>
                 throw handlePythonException()
