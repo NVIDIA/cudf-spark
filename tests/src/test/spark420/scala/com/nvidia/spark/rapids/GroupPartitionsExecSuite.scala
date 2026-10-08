@@ -206,7 +206,7 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
     assert(GpuGroupPartitionsExec(targetSizeChild, groupInfo).outputBatching == target)
   }
 
-  test("GpuGroupPartitionsExec canonicalizes captured output expressions") {
+  test("GpuGroupPartitionsExec canonicalizes captured partitioning expressions") {
     def newPlan(): GpuGroupPartitionsExec = {
       val attr = AttributeReference("id", IntegerType, nullable = false)()
       GpuGroupPartitionsExec(
@@ -221,7 +221,9 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
           reducerNames = None,
           distributePartitions = false,
           enableSortedMerge = false,
-          plannedChildPartitioning = Some(HashPartitioning(Seq(attr), 2))))
+          plannedChildPartitioning = Some(KeyedPartitioning(
+            Seq(attr),
+            Seq(InternalRow(1), InternalRow(2))))))
     }
 
     val first = newPlan()
