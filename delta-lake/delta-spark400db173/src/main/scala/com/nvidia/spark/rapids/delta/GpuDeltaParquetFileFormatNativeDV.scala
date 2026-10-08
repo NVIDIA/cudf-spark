@@ -206,27 +206,6 @@ case class GpuDeltaParquetFileFormatNativeDV(
 
   private def physicalRowIndexBatch(
       schema: StructType,
-      rowGroupOffsets: Array[Long],
-      rowGroupNumRows: Array[Int],
-      deletedRows: RoaringBitmapArray,
-      expectedRows: Int): ColumnarBatch = {
-    require(rowGroupOffsets.length == rowGroupNumRows.length)
-    val rowIndices = new ArrayBuffer[Long](expectedRows)
-    rowGroupOffsets.zip(rowGroupNumRows).foreach { case (offset, count) =>
-      var index = offset
-      val end = offset + count
-      while (index < end) {
-        if (!deletedRows.contains(index)) rowIndices += index
-        index += 1
-      }
-    }
-    require(rowIndices.size == expectedRows,
-      s"Expected $expectedRows surviving rows but found ${rowIndices.size}")
-    physicalRowIndexBatch(schema, rowIndices.toArray)
-  }
-
-  private def physicalRowIndexBatch(
-      schema: StructType,
       indices: Array[Long]): ColumnarBatch = {
     val rows = indices.length
     RmmRapidsRetryIterator.withRetryNoSplit {
@@ -240,6 +219,71 @@ case class GpuDeltaParquetFileFormatNativeDV(
       }
       closeOnExcept(columns) { ownedColumns =>
         new ColumnarBatch(ownedColumns.toArray, rows)
+      }
+    }
+  }
+
+  // Apply the normal batch limits to the 8-byte physical row-index column, even when a
+  // single Parquet row group is larger than those limits.
+  private def maxPhysicalRowIndexBatchRows(
+      rowLimit: Integer,
+      byteLimit: Long,
+      targetBytes: Long,
+      columnByteLimit: Long): Int = {
+    val indexBytes = java.lang.Long.BYTES
+    math.max(1L, Seq(rowLimit.longValue(), byteLimit / indexBytes,
+      targetBytes / indexBytes, columnByteLimit / indexBytes).min).toInt
+  }
+
+  private def physicalRowIndexArrays(
+      rowGroupOffsets: Array[Long],
+      rowGroupNumRows: Array[Int],
+      deletedRows: RoaringBitmapArray,
+      maxRows: Int,
+      expectedRows: Option[Int] = None): Iterator[Array[Long]] = {
+    require(rowGroupOffsets.length == rowGroupNumRows.length)
+    require(maxRows > 0)
+    new Iterator[Array[Long]] {
+      private var group = 0
+      private var rowIndex = if (rowGroupOffsets.nonEmpty) rowGroupOffsets(0) else 0L
+      private var pending = -1L
+      private var emittedRows = 0L
+      private var validated = false
+
+      override def hasNext: Boolean = {
+        while (pending < 0 && group < rowGroupNumRows.length) {
+          if (rowIndex >= rowGroupOffsets(group) + rowGroupNumRows(group)) {
+            group += 1
+            if (group < rowGroupNumRows.length) rowIndex = rowGroupOffsets(group)
+          } else {
+            val candidate = rowIndex
+            rowIndex += 1
+            if (!deletedRows.contains(candidate)) pending = candidate
+          }
+        }
+        if (pending < 0 && !validated) {
+          expectedRows.foreach(rows => require(emittedRows == rows,
+            s"Expected $rows surviving rows but found $emittedRows"))
+          validated = true
+        }
+        pending >= 0
+      }
+
+      override def next(): Array[Long] = {
+        if (!hasNext) throw new NoSuchElementException()
+        var indices = new Array[Long](math.min(maxRows, 1024))
+        var size = 0
+        while (size < maxRows && hasNext) {
+          if (size == indices.length) {
+            val capacity = math.min(maxRows.toLong, indices.length.toLong * 2).toInt
+            indices = java.util.Arrays.copyOf(indices, capacity)
+          }
+          indices(size) = pending
+          pending = -1L
+          size += 1
+          emittedRows += 1
+        }
+        if (size == indices.length) indices else java.util.Arrays.copyOf(indices, size)
       }
     }
   }
@@ -331,7 +375,8 @@ case class GpuDeltaParquetFileFormatNativeDV(
       new DeltaParquetPartitionReader(fileIO, conf, file, singleFileInfo.filePath,
         singleFileInfo.blocks, singleFileInfo.schema, isCaseSensitive, readDataSchema,
         debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows, maxReadBatchSizeBytes,
-        targetSizeBytes, useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes,
+        targetSizeBytes, maxGpuColumnSizeBytes, useChunkedReader,
+        maxChunkedReaderMemoryUsageSizeBytes,
         skipReadEstimate, compressCfg,
         metrics, singleFileInfo.dateRebaseMode, singleFileInfo.timestampRebaseMode,
         singleFileInfo.hasInt96Timestamps, readUseFieldId, deletionVectorReadInfo, tablePathOpt)
@@ -352,6 +397,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
       maxReadBatchSizeRows: Integer,
       maxReadBatchSizeBytes: Long,
       targetBatchSizeBytes: Long,
+      maxGpuColumnSizeBytes: Long,
       useChunkedReader: Boolean,
       maxChunkedReaderMemoryUsageSizeBytes: Long,
       skipReadEstimate: Boolean,
@@ -451,17 +497,22 @@ case class GpuDeltaParquetFileFormatNativeDV(
       }
     }
 
-    override protected def readEmptySchemaBatch(
+    override protected def readEmptySchemaBatches(
         chunkedBlocks: Seq[BlockMetaData],
-        rows: Int): ColumnarBatch = {
+        rows: Int): Iterator[ColumnarBatch] = {
       if (!requiresPhysicalRowIndex(readDataSchema)) {
-        super.readEmptySchemaBatch(chunkedBlocks, rows)
+        super.readEmptySchemaBatches(chunkedBlocks, rows)
       } else {
         val (offsets, counts) = RapidsDeletionVectors.getRowGroupMetadata(chunkedBlocks)
         val deletedRows = tablePathOpt.map(path =>
           RapidsDeletionVectors.loadScalaBitmap(conf, split, path, deletionVectorReadInfo))
           .getOrElse(new RoaringBitmapArray())
-        physicalRowIndexBatch(readDataSchema, offsets, counts, deletedRows, rows)
+        val maxRows = maxPhysicalRowIndexBatchRows(maxReadBatchSizeRows,
+          maxReadBatchSizeBytes, targetBatchSizeBytes, maxGpuColumnSizeBytes)
+        physicalRowIndexArrays(offsets, counts, deletedRows, maxRows, Some(rows)).map { indices =>
+          GpuSemaphore.acquireIfNecessary(TaskContext.get())
+          physicalRowIndexBatch(readDataSchema, indices)
+        }
       }
     }
   }
@@ -795,25 +846,6 @@ case class GpuDeltaParquetFileFormatNativeDV(
     override def canUseCombine: Boolean =
       !requiresPhysicalRowIndex(readDataSchema) && super.canUseCombine
 
-    override protected def readEmptySchemaBatch(
-        meta: HostMemoryEmptyMetaData,
-        rows: Int): ColumnarBatch = {
-      if (rows == 0 || !requiresPhysicalRowIndex(meta.readSchema)) {
-        super.readEmptySchemaBatch(meta, rows)
-      } else {
-        val deltaMeta = meta.asInstanceOf[DeltaParquetHostMemoryEmptyMetaData]
-        val dvInfos = deltaMeta.dvMetadata.flatMap(_.peekDvInfos)
-        require(dvInfos.length == 1 && deltaMeta.allPartValues.isEmpty,
-          "An index-only Delta batch must come from one file")
-        val info = dvInfos.head
-        val deletedRows = tablePathOpt.map(path => RapidsDeletionVectors.loadScalaBitmap(
-          conf, meta.partitionedFile, path, deletionVectorReadInfo))
-          .getOrElse(new RoaringBitmapArray())
-        physicalRowIndexBatch(meta.readSchema, info.rowGroupOffsets, info.rowGroupNumRows,
-          deletedRows, rows)
-      }
-    }
-
     private def readIndexOnlyBatches(
         meta: DeltaParquetHostMemoryEmptyMetaData): Iterator[ColumnarBatch] = {
       // Capture the JVM data before closing the spillable DV metadata. The iterator creates
@@ -831,46 +863,9 @@ case class GpuDeltaParquetFileFormatNativeDV(
           meta.partitionedFile.partitionValues)
       }
 
-      // The row limit and byte limits all apply to the 8-byte physical row-index column.
-      val indexBytes = java.lang.Long.BYTES
-      val maxRows = math.max(1L, Seq(maxReadBatchSizeRows.longValue(),
-        maxReadBatchSizeBytes / indexBytes, targetBatchSizeBytes / indexBytes,
-        maxGpuColumnSizeBytes / indexBytes).min).toInt
-      val indexBatches = new Iterator[Array[Long]] {
-        private var group = 0
-        private var rowIndex = if (offsets.nonEmpty) offsets(0) else 0L
-        private var pending = -1L
-
-        override def hasNext: Boolean = {
-          while (pending < 0 && group < counts.length) {
-            if (rowIndex >= offsets(group) + counts(group)) {
-              group += 1
-              if (group < counts.length) rowIndex = offsets(group)
-            } else {
-              val candidate = rowIndex
-              rowIndex += 1
-              if (!deletedRows.contains(candidate)) pending = candidate
-            }
-          }
-          pending >= 0
-        }
-
-        override def next(): Array[Long] = {
-          if (!hasNext) throw new NoSuchElementException()
-          var indices = new Array[Long](math.min(maxRows, 1024))
-          var size = 0
-          while (size < maxRows && hasNext) {
-            if (size == indices.length) {
-              val capacity = math.min(maxRows.toLong, indices.length.toLong * 2).toInt
-              indices = java.util.Arrays.copyOf(indices, capacity)
-            }
-            indices(size) = pending
-            pending = -1L
-            size += 1
-          }
-          if (size == indices.length) indices else java.util.Arrays.copyOf(indices, size)
-        }
-      }
+      val maxRows = maxPhysicalRowIndexBatchRows(maxReadBatchSizeRows,
+        maxReadBatchSizeBytes, targetBatchSizeBytes, maxGpuColumnSizeBytes)
+      val indexBatches = physicalRowIndexArrays(offsets, counts, deletedRows, maxRows)
 
       indexBatches.flatMap { indices =>
         GpuSemaphore.acquireIfNecessary(TaskContext.get())

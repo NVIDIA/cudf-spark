@@ -1520,14 +1520,15 @@ def test_delta_merge_insert_only_after_unmodified_match_metrics(
 @ignore_order
 @pytest.mark.skipif(not is_databricks173_or_later(),
                     reason="Index-only persistent-DV scans require DBR 17.3+")
-def test_delta_merge_dv_index_only_target_scan(spark_tmp_path):
+@pytest.mark.parametrize("reader_type", ["MULTITHREADED", "PERFILE"])
+def test_delta_merge_dv_index_only_target_scan(spark_tmp_path, reader_type):
     path = spark_tmp_path + "/DELTA_DATA"
     conf = copy_and_update(delta_merge_enabled_conf, {
         "spark.databricks.delta.merge.deletionVectors.persistent": "true",
         "spark.databricks.delta.delete.deletionVectors.persistent": "true",
         "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
         "spark.databricks.delta.autoCompact.enabled": "false",
-        "spark.rapids.sql.format.parquet.reader.type": "MULTITHREADED",
+        "spark.rapids.sql.format.parquet.reader.type": reader_type,
         "spark.rapids.sql.reader.batchSizeRows": "1"})
 
     def setup(spark):

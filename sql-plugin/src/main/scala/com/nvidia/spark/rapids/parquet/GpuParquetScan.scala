@@ -3851,8 +3851,7 @@ abstract class AbstractParquetPartitionReader(
         } else {
           // Someone is going to process this data, even if it is just a row count
           GpuSemaphore.acquireIfNecessary(TaskContext.get())
-          new SingleGpuColumnarBatchIterator(
-            readEmptySchemaBatch(currentChunkedBlocks, numRows))
+          readEmptySchemaBatches(currentChunkedBlocks, numRows)
         }
       } else {
         val colTypes = readDataSchema.fields.map(f => f.dataType)
@@ -3902,6 +3901,12 @@ abstract class AbstractParquetPartitionReader(
     val nullColumns = readDataSchema.safeMap(f =>
       GpuColumnVector.fromNull(rows, f.dataType).asInstanceOf[SparkVector])
     new ColumnarBatch(nullColumns.toArray, rows)
+  }
+
+  protected def readEmptySchemaBatches(
+      chunkedBlocks: Seq[BlockMetaData],
+      rows: Int): Iterator[ColumnarBatch] = {
+    new SingleGpuColumnarBatchIterator(readEmptySchemaBatch(chunkedBlocks, rows))
   }
 }
 
