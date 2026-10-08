@@ -102,7 +102,7 @@ classifier selects the bundled cuDF native libraries.
 | Delta writes with deletion vectors | CPU fallback | CPU fallback for paths that create persistent deletion vectors |
 | DELETE and UPDATE | GPU for copy-on-write. Operations that write deletion vectors fall back to CPU. | GPU for copy-on-write, including liquid-clustered tables. Operations that write persistent deletion vectors fall back to CPU. |
 | MERGE | GPU, including liquid clustering | GPU, including liquid clustering. Persistent deletion-vector writes fall back to CPU. |
-| OPTIMIZE | CPU fallback | GPU for supported standard and ordinary liquid-clustering paths |
+| OPTIMIZE | GPU for supported native non-clustered write paths; the outer command remains on CPU | GPU for supported native non-clustered and ordinary liquid-clustering write paths; the outer command remains on CPU |
 | Auto compaction | GPU when triggered by supported GPU writes | GPU for supported inline, deletion-vector-free paths |
 | Liquid clustering | GPU | GPU for writes, DELETE, UPDATE, MERGE, and ordinary OPTIMIZE |
 
