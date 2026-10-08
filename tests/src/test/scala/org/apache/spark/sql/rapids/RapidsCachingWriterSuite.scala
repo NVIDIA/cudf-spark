@@ -409,6 +409,8 @@ class RapidsCachingWriterSuite extends RmmSparkRetrySuiteBase with MockitoSugar 
     val catalog = new ShuffleBufferCatalog(mapIdsCanRepeat = true)
     val first = newWriter(catalog, 1, 7L)
     succeed(first, firstAttempt)
+    // a task can still fail after stop(true), and a committed output must survive its stop(false)
+    assert(first.stop(false).isEmpty)
     val later = newWriter(catalog, 1, 7L)
     succeed(later, laterAttempt)
     assertReadable(catalog, 1, 7L, firstAttempt)
