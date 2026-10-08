@@ -36,8 +36,8 @@ import com.nvidia.spark.rapids.Arm.withResource
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.expressions.{BoundReference, Literal}
-import org.apache.spark.sql.types.{BooleanType, ByteType, DoubleType, IntegerType, LongType,
-  ShortType, StringType, VariantType}
+import org.apache.spark.sql.types.{BinaryType, BooleanType, ByteType, DataType, DateType,
+  DoubleType, FloatType, IntegerType, LongType, ShortType, StringType, VariantType}
 import org.apache.spark.unsafe.types.UTF8String
 
 class GpuVariantGetSuite extends AnyFunSuite {
@@ -74,16 +74,50 @@ class GpuVariantGetSuite extends AnyFunSuite {
     }
   }
 
+  // Spark Variant binary encoding for [true, 1.25f, -2.5d]. Keep this encoded because
+  // Databricks Spark 4.0 does not expose the OSS org.apache.spark.types.variant API.
+  private val exactScalarArrayValue = Array[Byte](
+    3, 3, 0, 1, 6, 15, 4, 56, 0, 0, -96, 63, 28, 0, 0, 0, 0, 0, 0, 4, -64)
+  private val emptyMetadata = Array[Byte](1, 0, 0)
+
   test("extracts Variant with mixed binary child representations") {
     assertMixedVariantExtraction(valueAsString = true, metadataAsString = false)
     assertMixedVariantExtraction(valueAsString = false, metadataAsString = true)
   }
 
+  test("directly decodes exact Boolean, Float, and Double Variant values") {
+    withResource(makeBinaryColumn(exactScalarArrayValue, asString = false)) { value =>
+      withResource(makeBinaryColumn(emptyMetadata, asString = false)) { metadata =>
+        withResource(ColumnVector.makeStruct(1, value, metadata)) { variant =>
+          withResource(new GpuColumnVector(VariantType, variant.incRefCount())) { input =>
+            def assertDecoded(path: String, dataType: DataType)(check: HostColumnVector => Unit)
+                : Unit = {
+              // A null fallback makes any unexpected CPU bridge use fail this test.
+              val expression = GpuVariantGet(Literal(0), path, dataType, null)
+              withResource(expression.doColumnar(input)) { result =>
+                withResource(result.copyToHost()) { host =>
+                  assert(host.getRowCount == 1)
+                  assert(!host.isNull(0))
+                  check(host)
+                }
+              }
+            }
+
+            assertDecoded("$[0]", BooleanType)(host => assert(host.getBoolean(0)))
+            assertDecoded("$[1]", FloatType)(host => assert(host.getFloat(0) == 1.25f))
+            assertDecoded("$[2]", DoubleType)(host => assert(host.getDouble(0) == -2.5))
+          }
+        }
+      }
+    }
+  }
+
   test("supported Variant target types") {
-    Seq(ByteType, ShortType, IntegerType, LongType, StringType).foreach { dataType =>
+    Seq(BooleanType, ByteType, ShortType, IntegerType, LongType, FloatType, DoubleType,
+      StringType).foreach { dataType =>
       assert(GpuVariantGet.isSupportedTargetType(dataType))
     }
-    Seq(BooleanType, DoubleType).foreach { dataType =>
+    Seq(BinaryType, DateType).foreach { dataType =>
       assert(!GpuVariantGet.isSupportedTargetType(dataType))
     }
   }

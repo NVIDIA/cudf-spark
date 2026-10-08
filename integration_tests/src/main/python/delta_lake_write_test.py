@@ -46,6 +46,19 @@ _delta_confs = copy_and_update(writer_confs, delta_writes_enabled_conf,
                                 "spark.sql.legacy.parquet.datetimeRebaseModeInRead": "CORRECTED",
                                 "spark.sql.legacy.parquet.int96RebaseModeInRead": "CORRECTED"})
 
+
+def _physical_parquet_schema(spark, table):
+    file_path = spark.table(table).selectExpr("input_file_name() AS file").first().file
+    jvm = spark.sparkContext._jvm
+    reader = jvm.org.apache.parquet.hadoop.ParquetFileReader.open(
+        spark.sparkContext._jsc.hadoopConfiguration(),
+        jvm.org.apache.hadoop.fs.Path(file_path))
+    try:
+        return reader.getFooter().getFileMetaData().getSchema().toString()
+    finally:
+        reader.close()
+
+
 def get_writer_with_deletion_vector_property_set(writer, enable_deletion_vectors):
     if supports_delta_lake_deletion_vectors():
         return writer.option("delta.enableDeletionVectors", str(enable_deletion_vectors).lower())
@@ -188,6 +201,124 @@ def test_delta_write_disabled_fallback(spark_tmp_path, disable_conf, enable_dele
         data_path,
         delta_write_fallback_check,
         conf=copy_and_update(writer_confs, disable_conf))
+
+
+@allow_non_gpu("AppendDataExecV1", "AtomicCreateTableAsSelectExec",
+               "AtomicReplaceTableAsSelectExec", "OverwriteByExpressionExecV1", *delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="Materialized partition columns were added in OSS Delta 4.3")
+@pytest.mark.parametrize("write_mode", ["append", "ctas", "rtas"])
+def test_delta_43_materialized_partition_columns_fallback(
+        spark_tmp_table_factory, write_mode):
+    base_table = spark_tmp_table_factory.get()
+    property_sql = "'delta.enableMaterializePartitionColumnsFeature' = 'true'"
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+    if write_mode == "append":
+        def create_tables(spark):
+            for suffix in ("cpu", "gpu"):
+                spark.sql(
+                    f"CREATE TABLE {base_table}_{suffix} (id BIGINT, part INT) USING DELTA "
+                    f"PARTITIONED BY (part) TBLPROPERTIES ({property_sql})")
+        with_cpu_session(create_tables, conf=conf)
+
+    def write_table(spark, table):
+        if write_mode == "append":
+            spark.sql(
+                f"INSERT INTO {table} SELECT id, CAST(id % 2 AS INT) FROM range(4)")
+        else:
+            command = "CREATE TABLE" if write_mode == "ctas" else "CREATE OR REPLACE TABLE"
+            spark.sql(
+                f"{command} {table} USING DELTA PARTITIONED BY (part) "
+                f"TBLPROPERTIES ({property_sql}) "
+                "AS SELECT id, CAST(id % 2 AS INT) AS part FROM range(4)")
+
+    fallback = {
+        "append": "AppendDataExecV1",
+        "ctas": "AtomicCreateTableAsSelectExec",
+        "rtas": "AtomicReplaceTableAsSelectExec"
+    }[write_mode]
+    assert_gpu_fallback_write_sql(
+        write_table, lambda spark, table: spark.table(table), base_table, [fallback], conf=conf)
+    physical_schema = with_cpu_session(
+        lambda spark: _physical_parquet_schema(spark, f"{base_table}_gpu"), conf=conf)
+    assert "part" in physical_schema
+
+
+@allow_non_gpu("AtomicReplaceTableAsSelectExec", "OverwriteByExpressionExecV1",
+               *delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="Materialized partition columns were added in OSS Delta 4.3")
+def test_delta_43_rtas_retains_materialized_partition_columns_fallback(
+        spark_tmp_table_factory):
+    base_table = spark_tmp_table_factory.get()
+    property_sql = "'delta.enableMaterializePartitionColumnsFeature' = 'true'"
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+
+    def create_tables(spark):
+        for suffix in ("cpu", "gpu"):
+            spark.sql(
+                f"CREATE TABLE {base_table}_{suffix} (id BIGINT, part INT) USING DELTA "
+                f"PARTITIONED BY (part) TBLPROPERTIES ({property_sql})")
+
+    with_cpu_session(create_tables, conf=conf)
+
+    def replace_table(spark, table):
+        spark.sql(
+            f"CREATE OR REPLACE TABLE {table} USING DELTA PARTITIONED BY (part) "
+            "AS SELECT id, CAST(id % 2 AS INT) AS part FROM range(4)")
+
+    assert_gpu_fallback_write_sql(
+        replace_table, lambda spark, table: spark.table(table), base_table,
+        ["AtomicReplaceTableAsSelectExec"], conf=conf)
+    physical_schema = with_cpu_session(
+        lambda spark: _physical_parquet_schema(spark, f"{base_table}_gpu"), conf=conf)
+    assert "part" in physical_schema
+
+
+@allow_non_gpu("AppendDataExecV1", "AtomicCreateTableAsSelectExec",
+               "AtomicReplaceTableAsSelectExec", "OverwriteByExpressionExecV1", *delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_oss_delta_lake_43() or not is_spark_41x(),
+                    reason="Variant shredding requires OSS Delta 4.3 with Spark 4.1")
+@pytest.mark.parametrize("write_mode", ["append", "ctas", "rtas"])
+def test_delta_43_variant_shredding_fallback(spark_tmp_table_factory, write_mode):
+    base_table = spark_tmp_table_factory.get()
+    property_sql = "'delta.enableVariantShredding' = 'true'"
+    query = "SELECT id, parse_json('{\"a\": 1}') AS v FROM range(4)"
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+    if write_mode == "append":
+        def create_tables(spark):
+            for suffix in ("cpu", "gpu"):
+                spark.sql(
+                    f"CREATE TABLE {base_table}_{suffix} (id BIGINT, v VARIANT) USING DELTA "
+                    f"TBLPROPERTIES ({property_sql})")
+        with_cpu_session(create_tables, conf=conf)
+
+    def write_table(spark, table):
+        if write_mode == "append":
+            spark.sql(f"INSERT INTO {table} {query}")
+        else:
+            command = "CREATE TABLE" if write_mode == "ctas" else "CREATE OR REPLACE TABLE"
+            spark.sql(
+                f"{command} {table} USING DELTA TBLPROPERTIES ({property_sql}) AS {query}")
+
+    fallback = {
+        "append": "AppendDataExecV1",
+        "ctas": "AtomicCreateTableAsSelectExec",
+        "rtas": "AtomicReplaceTableAsSelectExec"
+    }[write_mode]
+    assert_gpu_fallback_write_sql(
+        write_table, lambda spark, table: spark.table(table).select("id"),
+        base_table, [fallback], conf=conf)
+    physical_schema = with_cpu_session(
+        lambda spark: _physical_parquet_schema(spark, f"{base_table}_gpu"), conf=conf)
+    assert "typed_value" in physical_schema
+
 
 # unsupported WriteIntoDeltaCommand tracked by https://github.com/NVIDIA/spark-rapids/issues/11169
 @allow_non_gpu_conditional(is_databricks_runtime(), "DataWritingCommandExec, WriteFilesExec")
@@ -1841,7 +1972,7 @@ def test_delta_write_partial_overwrite_replace_where(spark_tmp_path):
 @allow_non_gpu(*delta_meta_allow, delta_write_fallback_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_42(), reason="Delta 4.2 write option")
+@pytest.mark.skipif(not is_oss_delta_lake_42_or_43(), reason="Delta 4.2+ write option")
 @pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
 def test_delta_replace_on_or_using_fallback(spark_tmp_path, option_name):
     data_path = spark_tmp_path + "/DELTA_DATA"
@@ -1851,8 +1982,15 @@ def test_delta_replace_on_or_using_fallback(spark_tmp_path, option_name):
             spark.range(4).write.format("delta").save(path)
 
     def overwrite(spark, path):
-        (spark.range(2, 6).write.format("delta").mode("overwrite")
-         .option(option_name, "id").save(path))
+        replacement = spark.range(2, 6)
+        if option_name == "replaceOn":
+            (replacement.alias("source").write.format("delta").mode("overwrite")
+             .option("targetAlias", "target")
+             .option("replaceOn", "target.id = source.id")
+             .save(path))
+        else:
+            (replacement.write.format("delta").mode("overwrite")
+             .option("replaceUsing", "id").save(path))
 
     with_cpu_session(setup_tables, conf=_delta_confs)
     assert_gpu_fallback_write(
@@ -1862,7 +2000,7 @@ def test_delta_replace_on_or_using_fallback(spark_tmp_path, option_name):
 @allow_non_gpu(*delta_meta_allow, delta_write_fallback_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_42(), reason="Delta 4.2 write option")
+@pytest.mark.skipif(not is_oss_delta_lake_42_or_43(), reason="Delta 4.2+ write option")
 def test_delta_target_alias_fallback(spark_tmp_path):
     data_path = spark_tmp_path + "/DELTA_DATA"
 
@@ -1886,8 +2024,8 @@ def test_delta_target_alias_fallback(spark_tmp_path):
 @allow_non_gpu(*delta_meta_allow, delta_write_fallback_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_42(), reason="Delta 4.2 write option")
-def test_delta_42_null_intolerant_dpo_fallback(spark_tmp_path):
+@pytest.mark.skipif(not is_oss_delta_lake_42_or_43(), reason="Delta 4.2+ write option")
+def test_delta_42_or_43_null_intolerant_dpo_fallback(spark_tmp_path):
     data_path = spark_tmp_path + "/DELTA_DATA"
 
     def setup_tables(spark):
@@ -1910,7 +2048,7 @@ def test_delta_42_null_intolerant_dpo_fallback(spark_tmp_path):
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_oss_delta_lake_41_or_42(),
+@pytest.mark.skipif(not is_oss_delta_lake_41_to_43(),
                     reason="Delta only evaluates DPO in the write commit metadata since 4.1")
 def test_delta_invalid_partition_overwrite_mode_non_partitioned(spark_tmp_path):
     data_path = spark_tmp_path + "/DELTA_DATA"

@@ -314,7 +314,7 @@ run_delta_lake_tests() {
         DELTA_LAKE_VERSIONS="4.0.1"
       fi
       if [[ "$SPARK_VER" == "4.0.1" ]]; then
-        DELTA_LAKE_VERSIONS="$DELTA_LAKE_VERSIONS 4.2.0"
+        DELTA_LAKE_VERSIONS="$DELTA_LAKE_VERSIONS 4.2.0 4.3.0"
       fi
     else
       echo "Skipping Delta Lake 4.0.x tests for Scala $SCALA_BINARY_VER (requires Scala 2.13)"
@@ -326,7 +326,7 @@ run_delta_lake_tests() {
     if [[ "$SCALA_BINARY_VER" == "2.13" ]]; then
       DELTA_LAKE_VERSIONS="4.1.0"
       if [[ "$SPARK_VER" == "4.1.1" ]]; then
-        DELTA_LAKE_VERSIONS="$DELTA_LAKE_VERSIONS 4.2.0"
+        DELTA_LAKE_VERSIONS="$DELTA_LAKE_VERSIONS 4.2.0 4.3.0"
       fi
     else
       echo "Skipping Delta Lake 4.1.x tests for Scala $SCALA_BINARY_VER (requires Scala 2.13)"
@@ -338,7 +338,7 @@ run_delta_lake_tests() {
   else
     for v in $DELTA_LAKE_VERSIONS; do
       echo "Running Delta Lake tests for Delta Lake version $v"
-      if [[ "$v" == "4.2.0" ]]; then
+      if [[ "$v" == "4.2.0" || "$v" == "4.3.0" ]]; then
         DELTA_SPARK_LINE=${SPARK_VER%.*}
         DELTA_MAIN_JAR="io.delta:delta-spark_${DELTA_SPARK_LINE}_${SCALA_BINARY_VER}:$v"
       elif [[ "$v" == "4.1.0" ]]; then

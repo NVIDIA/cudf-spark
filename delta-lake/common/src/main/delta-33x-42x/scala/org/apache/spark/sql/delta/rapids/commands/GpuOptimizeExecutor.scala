@@ -40,7 +40,7 @@ import org.apache.spark.sql.delta.commands.{Batch, Bin, ClusteringStrategy, Dele
 import org.apache.spark.sql.delta.commands.optimize._
 import org.apache.spark.sql.delta.files.SQLMetricsReporting
 import org.apache.spark.sql.delta.logging.DeltaLogKeys
-import org.apache.spark.sql.delta.rapids.{GpuDeltaCommandLike, GpuDeltaLog,
+import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShim33x, GpuDeltaCommandLike, GpuDeltaLog,
   GpuOptimisticTransactionBase, GpuOptimizeTableCommand}
 import org.apache.spark.sql.delta.rapids.DeltaMdcShims.mdc
 import org.apache.spark.sql.delta.skipping.MultiDimClustering
@@ -114,7 +114,7 @@ class GpuOptimizeExecutor(
   private val partitionSchema = snapshot.metadata.partitionSchema
 
   def optimize(): Seq[Row] = {
-    recordDeltaOperation(snapshot.deltaLog, "delta.optimize") {
+    DeltaRuntimeShim33x.runDeltaOperation(snapshot.deltaLog, "delta.optimize") {
       val minFileSize = optimizeContext.minFileSize.getOrElse(
         sparkSession.sessionState.conf.getConf(DeltaSQLConf.DELTA_OPTIMIZE_MIN_FILE_SIZE))
       val maxFileSize = optimizeContext.maxFileSize.getOrElse(
@@ -129,11 +129,13 @@ class GpuOptimizeExecutor(
 
       val filesToProcess = optimizeContext.reorg match {
         case Some(reorgOperation) =>
-          reorgOperation.filterFilesToReorg(sparkSession, snapshot, candidateFiles)
+          DeltaRuntimeShim33x.filterFilesToReorg(
+            reorgOperation, sparkSession, snapshot, candidateFiles)
         case None =>
           filterCandidateFileList(minFileSize, maxDeletedRowsRatio, candidateFiles)
       }
-      val partitionsToCompact = filesToProcess.groupBy(_.partitionValues).toSeq
+      val partitionsToCompact = DeltaRuntimeShim33x.groupOptimizeFilesByPartition(
+        sparkSession, snapshot, filesToProcess)
 
       val jobs = groupFilesIntoBins(partitionsToCompact)
 

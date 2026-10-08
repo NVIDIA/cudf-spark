@@ -307,6 +307,23 @@ class WithResourceNestingLintSuite(unittest.TestCase):
         self.assertEqual("&lt;literal&gt; &amp; value \\| next",
                          LINT.markdown_escape("<literal> & value | next"))
 
+    def test_raw_report_with_stale_entry_preserves_source_file(self):
+        with temporary_directory() as root:
+            source_path = os.path.join(root, "Test.scala")
+            source = "object Test {}\n"
+            write_text(source_path, source)
+            report_path = os.path.join(root, "report.json")
+            stale = collections.Counter({(source_path, "fingerprint"): 1})
+
+            LINT.write_raw_report(report_path, (), stale, (), 4)
+
+            with io.open(report_path, "r", encoding="utf-8") as report_file:
+                report = json.loads(report_file.read())
+            with io.open(source_path, "r", encoding="utf-8") as source_file:
+                self.assertEqual(source, source_file.read())
+            self.assertEqual([{"path": source_path, "fingerprint": "fingerprint",
+                               "count": 1}], report["staleBaselineEntries"])
+
     def test_annotations_distinguish_baselined_and_new_violations(self):
         violations = LINT.scan_source("Test:File.scala", nested_source(6), 4).violations
         baseline = collections.Counter({violations[0].baseline_key: 1})

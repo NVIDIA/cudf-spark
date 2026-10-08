@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids
 
 import ai.rapids.cudf.DType
 import ai.rapids.cudf.HostColumnVector.{BasicType, ListType, StructType}
+import com.nvidia.spark.rapids.Arm.withResource
 import org.scalatest.funsuite.AnyFunSuite
 
 class RapidsHostColumnBuilderSuite extends AnyFunSuite {
@@ -83,6 +84,119 @@ class RapidsHostColumnBuilderSuite extends AnyFunSuite {
         assertResult(1L)(v.getRowCount)
       } finally {
         v.close()
+      }
+    } finally {
+      b.close()
+    }
+  }
+
+  test("restoreState handles non-null rows beyond the allocated validity bitmap") {
+    withResource(new RapidsHostColumnBuilder(new BasicType(true, DType.INT32), 4)) { b =>
+      b.appendNull()
+      (1 to 4096).foreach(i => b.append(i))
+      val snapshot = b.captureState()
+      b.append(4097)
+      b.restoreState(snapshot)
+      b.append(4098)
+      withResource(b.build()) { column =>
+        assertResult(4098L)(column.getRowCount)
+        assertResult(1L)(column.getNullCount)
+        assert(column.isNull(0))
+        (1 to 4096).foreach(i => assertResult(i)(column.getInt(i)))
+        assertResult(4098)(column.getInt(4097))
+      }
+    }
+  }
+
+  test("restoreState preserves earlier nulls and is idempotent across validity bytes") {
+    withResource(new RapidsHostColumnBuilder(new BasicType(true, DType.INT32), 16)) { b =>
+      b.appendNull()
+      (1 to 6).foreach(i => b.append(i))
+      val snapshot = b.captureState()
+      b.appendNull()
+      b.append(8)
+      b.appendNull()
+      b.restoreState(snapshot)
+      b.restoreState(snapshot)
+      (7 to 9).foreach(i => b.append(i))
+      withResource(b.build()) { column =>
+        assertResult(10L)(column.getRowCount)
+        assertResult(1L)(column.getNullCount)
+        assert(column.isNull(0))
+        (1 to 9).foreach { i =>
+          assert(!column.isNull(i))
+          assertResult(i)(column.getInt(i))
+        }
+      }
+    }
+  }
+
+  test("restoreState rolls back a partial struct child before non-null replay") {
+    val byteList = new ListType(true, new BasicType(false, DType.UINT8))
+    withResource(new RapidsHostColumnBuilder(new StructType(true, byteList, byteList), 4)) {
+      b =>
+        val snapshot = b.captureState()
+        b.getChild(0).appendNull()
+        b.restoreState(snapshot)
+        b.getChild(0).appendByteList(Array[Byte](1, 2))
+        b.getChild(1).appendByteList(Array[Byte](3))
+        b.endStruct()
+        withResource(b.build()) { column =>
+          assertResult(1L)(column.getRowCount)
+          assertResult(0L)(column.getNullCount)
+          (0 until column.getNumChildren).foreach { index =>
+            withResource(column.getChildColumnView(index)) { child =>
+              assertResult(0L)(child.getNullCount)
+              assert(!child.isNull(0))
+              withResource(child.getChildColumnView(0)) { values =>
+                val expected = if (index == 0) Array[Byte](1, 2) else Array[Byte](3)
+                assertResult(expected.length.toLong)(values.getRowCount)
+                expected.indices.foreach(i => assertResult(expected(i))(values.getByte(i)))
+              }
+            }
+          }
+        }
+    }
+  }
+
+  test("restoreState rolls back null counts and validity recursively") {
+    val byteList = new ListType(true, new BasicType(false, DType.UINT8))
+    val st = new StructType(true, byteList, byteList)
+    val b = new RapidsHostColumnBuilder(st, 4)
+    try {
+      b.getChild(0).appendByteList(Array[Byte](1, 2))
+      b.getChild(1).appendByteList(Array[Byte](3))
+      b.endStruct()
+
+      val snapshot = b.captureState()
+      b.appendNull()
+      b.restoreState(snapshot)
+
+      val partial = b.build()
+      try {
+        assertResult(1L)(partial.getRowCount)
+        assertResult(0L)(partial.getNullCount)
+        (0 until partial.getNumChildren).foreach { index =>
+          withResource(partial.getChildColumnView(index)) { child =>
+            assertResult(0L)(child.getNullCount)
+          }
+        }
+      } finally {
+        partial.close()
+      }
+
+      b.appendNull()
+      val replayed = b.build()
+      try {
+        assertResult(2L)(replayed.getRowCount)
+        assertResult(1L)(replayed.getNullCount)
+        (0 until replayed.getNumChildren).foreach { index =>
+          withResource(replayed.getChildColumnView(index)) { child =>
+            assertResult(1L)(child.getNullCount)
+          }
+        }
+      } finally {
+        replayed.close()
       }
     } finally {
       b.close()

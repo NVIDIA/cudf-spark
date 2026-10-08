@@ -36,9 +36,9 @@ import org.apache.spark.sql.connector.expressions.Transform
 import org.apache.spark.sql.connector.write.{LogicalWriteInfo, SupportsTruncate, V1Write, WriteBuilder}
 import org.apache.spark.sql.delta.{ColumnWithDefaultExprUtils, DeltaConfigs, DeltaErrors, DeltaLog, DeltaOptions, DeltaTableUtils}
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
-import org.apache.spark.sql.delta.commands.{TableCreationModes, WriteIntoDelta}
+import org.apache.spark.sql.delta.commands.TableCreationModes
 import org.apache.spark.sql.delta.metering.DeltaLogging
-import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShim, DeltaTrampoline, GpuDeltaLog,
+import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShim, DeltaRuntimeShim33x, DeltaTrampoline, GpuDeltaLog,
   GpuWriteIntoDeltaLike}
 import org.apache.spark.sql.delta.sources.{DeltaSourceUtils, DeltaSQLConf}
 import org.apache.spark.sql.delta.stats.StatisticsCollection
@@ -310,7 +310,7 @@ abstract class GpuDeltaCatalogBase(
         DeltaTableUtils.validDeltaTableHadoopPrefixes.exists(k.startsWith)
       }
       val deltaLog = getDeltaLogForWrite(existingTableOpt, new Path(loc), fileSystemOptions)
-      val cpuWriter = WriteIntoDelta(
+      val cpuWriter = DeltaRuntimeShim33x.createCpuWrite(
         deltaLog,
         operation.mode,
         new DeltaOptions(withDb.storage.properties, spark.sessionState.conf),

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2026, NVIDIA CORPORATION.
+ * Copyright (c) 2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -38,21 +38,20 @@
 {"spark": "357"}
 {"spark": "358"}
 {"spark": "359"}
-{"spark": "400"}
-{"spark": "400db173"}
-{"spark": "401"}
-{"spark": "402"}
-{"spark": "403"}
-{"spark": "404"}
 spark-rapids-shim-json-lines ***/
 
-package com.nvidia.spark.rapids.shims;
+package org.apache.spark.sql.hive.rapids.shims
 
-import org.apache.spark.sql.connector.read.SupportsRuntimeFiltering;
+import java.lang.reflect.Method
+import java.util.{List => JList}
 
-/**
- * Shim interface for Apache Spark's SupportsRuntimeFiltering interface
- * which was added in Spark 3.2.0.
- */
-public interface ShimSupportsRuntimeFiltering extends SupportsRuntimeFiltering {
+import org.apache.hadoop.hive.ql.exec.{FunctionRegistry, UDF}
+import org.apache.hadoop.hive.serde2.typeinfo.TypeInfo
+
+object GpuRowBasedHiveSimpleUDFShim {
+  def getEvalMethod(function: UDF, argumentTypes: JList[TypeInfo]): Method =
+    function.getResolver.getEvalMethod(argumentTypes)
+
+  def invoke(method: Method, function: UDF, arguments: Array[AnyRef]): AnyRef =
+    FunctionRegistry.invoke(method, function, arguments: _*)
 }

@@ -15,9 +15,11 @@
 import pytest
 
 from asserts import (assert_cpu_and_gpu_are_equal_collect_with_capture,
+                     assert_equal_with_signed_zero,
                      assert_gpu_and_cpu_are_equal_collect,
                      assert_gpu_fallback_write,
-                     assert_gpu_fallback_collect)
+                     assert_gpu_fallback_collect,
+                     run_with_cpu_and_gpu)
 from conftest import is_databricks_runtime, spark_jvm
 from data_gen import idfn
 from marks import allow_non_gpu, ignore_order, incompat
@@ -86,6 +88,24 @@ def _write_array_variant_parquet(spark, path):
     """).write.mode('overwrite').parquet(path)
 
 
+def _write_common_scalar_variant_parquet(spark, path):
+    spark.sql("""
+      SELECT id, to_variant_object(named_struct(
+        'bool_value', bool_value,
+        'float_value', float_value,
+        'double_value', double_value)) AS v
+      FROM VALUES
+        (0, true, CAST(1.25 AS FLOAT), CAST(2.5 AS DOUBLE)),
+        (1, false,
+          CAST(-1.0 AS FLOAT) * CAST(0.0 AS FLOAT),
+          CAST(-1.0 AS DOUBLE) * CAST(0.0 AS DOUBLE)),
+        (2, true, CAST('NaN' AS FLOAT), CAST('Infinity' AS DOUBLE))
+      AS source(id, bool_value, float_value, double_value)
+      UNION ALL
+      SELECT 3 AS id, CAST(NULL AS VARIANT) AS v
+    """).write.mode('overwrite').parquet(path)
+
+
 def _write_heterogeneous_variant_parquet(spark, path):
     spark.sql("""
       SELECT id, parse_json(json) AS v
@@ -126,6 +146,70 @@ def _write_variant_if_parquet(spark, path):
         (3, '{"x":4}', NULL)
       AS source(id, left_json, right_json)
     """).write.mode('overwrite').parquet(path)
+
+
+@incompat
+@allow_non_gpu('RDDScanExec')
+@ignore_order(local=True)
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_variant_cpu_rows_convert_to_gpu():
+    def make_rows(spark):
+        df = spark.sql("""
+          SELECT id, parse_json(json) AS v
+          FROM VALUES
+            (0, '{"x":7,"s":"a"}'),
+            (1, '{"x":42,"s":"longer-value"}'),
+            (2, NULL)
+          AS source(id, json)
+        """)
+        return df.collect(), df.schema
+
+    rows, schema = with_cpu_session(make_rows)
+
+    def do_it(spark):
+        # A DataFrame backed by local VariantVal rows produces a row-based RDDScanExec.
+        return spark.createDataFrame(rows, schema).selectExpr(
+            'id',
+            "try_variant_get(v, '$.x', 'bigint') AS x",
+            "try_variant_get(v, '$.s', 'string') AS s")
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        exist_classes='RDDScanExec,GpuRowToColumnarExec,GpuProjectExec,GpuVariantGet',
+        non_exist_classes='HostColumnarToGpu',
+        conf={'spark.sql.adaptive.enabled': 'false'},
+        require_non_empty=True)
+
+
+@incompat
+@allow_non_gpu('FileSourceScanExec', 'ColumnarToRowExec')
+@ignore_order(local=True)
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_cpu_vectorized_parquet_variant_converts_via_rows(spark_tmp_path):
+    data_path = spark_tmp_path + '/CPU_VECTORIZED_VARIANT_PARQUET'
+    _with_cpu_variant_session(lambda spark: _write_variant_parquet(spark, data_path))
+
+    def do_it(spark):
+        return spark.read.parquet(data_path).selectExpr(
+            "try_variant_get(v, '$.x', 'int') AS x",
+            "try_variant_get(v, '$.y', 'string') AS y")
+
+    conf = dict(_variant_parquet_conf)
+    conf.update({
+        'spark.sql.adaptive.enabled': 'false',
+        'spark.sql.parquet.enableVectorizedReader': 'true',
+        # Force a CPU columnar scan while leaving its Variant consumer GPU-eligible.
+        'spark.rapids.sql.format.parquet.read.enabled': 'false',
+        'spark.sql.variant.pushVariantIntoScan': 'false',
+        'spark.sql.variant.allowReadingShredded': 'false',
+    })
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        exist_classes=('FileSourceScanExec,ColumnarToRowExec,'
+                       'GpuRowToColumnarExec,GpuProjectExec,GpuVariantGet'),
+        non_exist_classes='HostColumnarToGpu',
+        conf=conf,
+        require_non_empty=True)
 
 
 @incompat
@@ -520,6 +604,9 @@ def test_parquet_variant_try_get_heterogeneous_values(spark_tmp_path):
             "try_variant_get(v, '$.x', 'smallint') AS short_value",
             "try_variant_get(v, '$.x', 'int') AS int_value",
             "try_variant_get(v, '$.x', 'bigint') AS long_value",
+            "try_variant_get(v, '$.x', 'boolean') AS boolean_value",
+            "try_variant_get(v, '$.x', 'float') AS float_value",
+            "try_variant_get(v, '$.x', 'double') AS double_value",
             "try_variant_get(v, '$.x', 'string') AS string_value"),
         exist_classes='GpuVariantGet',
         conf=_variant_parquet_conf)
@@ -579,6 +666,36 @@ def test_parquet_variant_try_get_array_paths(spark_tmp_path, v1_enabled_list):
         conf=read_conf)
 
 
+@incompat
+@pytest.mark.parametrize('v1_enabled_list', ['parquet', ''], ids=['v1', 'v2'])
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_parquet_variant_try_get_common_scalar_targets(spark_tmp_path, v1_enabled_list):
+    data_path = spark_tmp_path + '/VARIANT_COMMON_SCALAR_PARQUET'
+    read_conf = dict(_variant_parquet_conf)
+    read_conf['spark.sql.sources.useV1SourceList'] = v1_enabled_list
+    _with_cpu_variant_session(
+        lambda spark: _write_common_scalar_variant_parquet(spark, data_path))
+
+    def do_it(spark):
+        return (spark.read.parquet(data_path).selectExpr(
+            'id',
+            "try_variant_get(v, '$.bool_value', 'boolean') AS bool_value",
+            "try_variant_get(v, '$.float_value', 'float') AS float_value",
+            "try_variant_get(v, '$.double_value', 'double') AS double_value",
+            "try_variant_get(v, '$.float_value', 'double') AS float_as_double",
+            "try_variant_get(v, '$.double_value', 'float') AS double_as_float")
+            .orderBy('id'))
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        exist_classes='GpuVariantGet',
+        conf=read_conf)
+
+    (from_cpu, _), (from_gpu, _) = run_with_cpu_and_gpu(
+        do_it, 'COLLECT_WITH_DATAFRAME', conf=read_conf)
+    assert_equal_with_signed_zero(from_cpu, from_gpu)
+
+
 @allow_non_gpu('ProjectExec', 'VariantGet')
 @incompat
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
@@ -630,7 +747,7 @@ def test_variant_try_get_unsupported_target_type_falls_back(spark_tmp_path):
 
     def do_it(spark):
         return spark.read.parquet(data_path).selectExpr(
-            "try_variant_get(v, '$.flag', 'boolean') AS flag")
+            "try_variant_get(v, '$.x', 'decimal(10, 2)') AS decimal_value")
 
     assert_gpu_fallback_collect(do_it, 'VariantGet', conf=_variant_parquet_conf)
 

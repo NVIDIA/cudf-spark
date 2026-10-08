@@ -219,11 +219,6 @@
       "resource": "withResource(builtTable.filter(trackerTab.getColumn(0)))"
     },
     {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/predicates.scala",
-      "fingerprint": "b59f9e74f85dc00b4612",
-      "resource": "withResource(gather(lhsNoNulls,rEval))"
-    },
-    {
       "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/shims/intervalExpressions.scala",
       "fingerprint": "bdb0982a0a7b49fdc047",
       "resource": "withResource(diff.greaterOrEqualTo(one))"

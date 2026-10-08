@@ -55,8 +55,8 @@ trait Spark400PlusDBShims extends Spark341PlusDBShims {
       GpuOverrides.expr[VariantGet](
         "Extracts a field from a Variant value by path",
         ExprChecks.binaryProject(
-          TypeSig.integral + TypeSig.STRING,
-          TypeSig.integral + TypeSig.STRING,
+          TypeSig.integral + TypeSig.fp + TypeSig.BOOLEAN + TypeSig.STRING,
+          TypeSig.integral + TypeSig.fp + TypeSig.BOOLEAN + TypeSig.STRING,
           ("variant", TypeSig.VARIANT, TypeSig.VARIANT),
           ("path", TypeSig.lit(TypeEnum.STRING), TypeSig.STRING)),
         GpuVariantGetMeta)
