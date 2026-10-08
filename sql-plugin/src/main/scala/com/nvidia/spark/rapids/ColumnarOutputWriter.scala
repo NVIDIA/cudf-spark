@@ -18,16 +18,18 @@ package com.nvidia.spark.rapids
 
 import java.io.{BufferedOutputStream, DataOutputStream, OutputStream}
 
+import scala.annotation.tailrec
 import scala.collection.mutable
 import scala.util.control.NonFatal
 
 import ai.rapids.cudf.{HostBufferConsumer, HostMemoryBuffer, JCudfSerialization, TableWriter}
-import com.nvidia.spark.Retryable
+import ai.rapids.cudf.CudfColumnSizeOverflowException
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
-import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitSpillableInHalfByRows, withRestoreOnRetry, withRetry, withRetryNoSplit}
+import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitSpillableInHalfByRows, withRetry, withRetryNoSplit}
 import com.nvidia.spark.rapids.io.async.{AsyncOutputStream, TrafficController}
-import com.nvidia.spark.rapids.jni.{GpuRetryOOM, GpuSplitAndRetryOOM}
+import com.nvidia.spark.rapids.jni.{CpuRetryOOM, CpuSplitAndRetryOOM, GpuRetryOOM,
+  GpuSplitAndRetryOOM}
 import com.nvidia.spark.rapids.jni.fileio.{RapidsFileIO, RapidsOutputFile}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
@@ -93,8 +95,8 @@ abstract class ColumnarOutputWriter(context: TaskAttemptContext,
 
   protected val tableWriter: TableWriter
 
-  // A format may opt in only if a GPU allocation failure cannot occur after its native writer
-  // has updated its state or emitted output.
+  // Formats opt in when their GPU encoding OOMs can be retried on the same native writer.
+  // Checking emitted buffers below cannot detect every native writer state change.
   protected def canRetryGpuOomFromNativeWrite: Boolean = false
 
   private lazy val debugDumpOutputStream: Option[OutputStream] = try {
@@ -224,10 +226,7 @@ abstract class ColumnarOutputWriter(context: TaskAttemptContext,
       // rather than a SpillableColumnBatch to be able to do that
       // See https://github.com/NVIDIA/spark-rapids/issues/8262
       withRetry(spillableBatch, splitSpillableInHalfByRows) { attempt =>
-        checkpointRestore.checkpoint()
-        withRestoreOnRetry(checkpointRestore) {
-          bufferBatchAndClose(attempt.getColumnarBatch())
-        }
+        bufferBatchAndClose(attempt.getColumnarBatch())
       }.sum
     } else {
       withResource(spillableBatch) { _ =>
@@ -261,34 +260,6 @@ abstract class ColumnarOutputWriter(context: TaskAttemptContext,
   /** Apply any necessary casts before writing batch out */
   def transformAndClose(cb: ColumnarBatch): ColumnarBatch = cb
 
-  private val checkpointRestore = new Retryable {
-    private var bufferedCount = 0
-    private var checkpointFileLength = 0L
-
-    override def checkpoint(): Unit = {
-      bufferedCount = buffers.size
-      checkpointFileLength = fileLength
-    }
-
-    override def restore(): Unit = {
-      // A completed split is no longer in the retry iterator. Keep its buffers when a later
-      // split retries, and discard only buffers queued by the failed attempt.
-      if (buffers.size > bufferedCount) {
-        var seen = 0
-        buffers.dequeueAll { case (buffer, _) =>
-          seen += 1
-          if (seen > bufferedCount) {
-            buffer.close()
-            true
-          } else {
-            false
-          }
-        }
-      }
-      fileLength = checkpointFileLength
-    }
-  }
-
   private def encodeAndBufferToHost(batch: ColumnarBatch): Unit = {
     withResource(GpuColumnVector.from(batch)) { table =>
       // `anythingWritten` is set here as an indication that there was data at all
@@ -307,18 +278,20 @@ abstract class ColumnarOutputWriter(context: TaskAttemptContext,
       try {
         tableWriter.write(table)
       } catch {
-        case gpuOom: GpuRetryOOM if canRetryGpuOomFromNativeWrite &&
-            buffers.size == bufferedBeforeWrite =>
-          throw gpuOom
-        case gpuOom: GpuSplitAndRetryOOM if canRetryGpuOomFromNativeWrite &&
+        case gpuOom @ (_: GpuRetryOOM | _: GpuSplitAndRetryOOM)
+            if canRetryGpuOomFromNativeWrite &&
             buffers.size == bufferedBeforeWrite =>
           throw gpuOom
         case NonFatal(writeError) =>
+          dropBufferedData()
+          if (!ColumnarOutputWriter.isRetryableByWithRetry(writeError)) {
+            // Keep fatal CUDA errors in the cause chain for the executor's task failure hook.
+            throw writeError
+          }
           // cuDF may have already advanced the writer or emitted buffers. Replaying the
           // batch on this writer can duplicate rows and produce an invalid Parquet file,
           // even when a retry OOM is wrapped by another exception. Keep the original
           // exception out of the cause chain so withRetry fails the task instead.
-          dropBufferedData()
           val failure = new IllegalStateException(
             "Cannot retry a failed native file write; the task must be retried")
           failure.addSuppressed(writeError)
@@ -368,6 +341,15 @@ abstract class ColumnarOutputWriter(context: TaskAttemptContext,
 }
 
 object ColumnarOutputWriter {
+  // Match the retry and split exceptions recognized by RmmRapidsRetryIterator.withRetry.
+  @tailrec
+  private def isRetryableByWithRetry(t: Throwable): Boolean = t match {
+    case null => false
+    case _: GpuRetryOOM | _: GpuSplitAndRetryOOM | _: CpuRetryOOM | _: CpuSplitAndRetryOOM |
+         _: CudfColumnSizeOverflowException => true
+    case _ => isRetryableByWithRetry(t.getCause)
+  }
+
   // write buffers to outputStream via tempBuffer and close buffers
   def writeBufferedData(buffers: mutable.Queue[(HostMemoryBuffer, Long)],
       tempBuffer: Array[Byte], outputStream: OutputStream): Unit = {
