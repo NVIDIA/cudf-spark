@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -234,7 +234,7 @@ class UCX(transport: UCXShuffleTransport, executor: BlockManagerId, rapidsConf: 
    *   a transaction each time. This is one way to handle several requests inbound to a server.
    *
    *   - useRndv: is set to false. We expect UCX to be able to use eager protocols or rndv
-   *   at its leasure. `rapidsConf.shuffleUcxActiveMessagesForceRndv` can be used to force rndv.
+   *   at its leasure.
    *
    * For responses:
    *   - `activeMessageId` for responses is the value of the `MessageType` enum with an extra
@@ -249,7 +249,7 @@ class UCX(transport: UCXShuffleTransport, executor: BlockManagerId, rapidsConf: 
    *   responseActiveMessageId1 -> [callbackForHeader1, callbackForHeader2, ..., callbackForHeaderN]
    *
    *   - useRndv: is set to false. We expect UCX to be able to use eager protocols or rndv
-   *   at its leasure. `rapidsConf.shuffleUcxActiveMessagesForceRndv` can be used to force rndv.
+   *   at its leasure.
    *
    * For buffers:
    *   - `activeMessageId` for buffers is the value of the `MessageType` enum (`MessageType.Buffer`)
@@ -294,7 +294,7 @@ class UCX(transport: UCXShuffleTransport, executor: BlockManagerId, rapidsConf: 
 
     def getCallback(header: Long): UCXAmCallback = requestCbGen()
 
-    override def useRndv: Boolean = rapidsConf.shuffleUcxActiveMessagesForceRndv
+    override def useRndv: Boolean = false
   }
 
   class ResponseActiveMessageRegistration(override val activeMessageId: Int)
@@ -322,7 +322,7 @@ class UCX(transport: UCXShuffleTransport, executor: BlockManagerId, rapidsConf: 
       responseCallbacks.remove(header)
     }
 
-    override def useRndv: Boolean = rapidsConf.shuffleUcxActiveMessagesForceRndv
+    override def useRndv: Boolean = false
   }
 
   /**
@@ -563,8 +563,6 @@ class UCX(transport: UCXShuffleTransport, executor: BlockManagerId, rapidsConf: 
   private def sendActiveMessage(ep: UcpEndpoint, am: UCXActiveMessage,
                                 dataAddress: Long, dataSize: Long,
                                 cb: UcxCallback, isGpu: Boolean): Unit = {
-    val useRndv = am.forceRndv || rapidsConf.shuffleUcxActiveMessagesForceRndv
-
     // This isn't coming from the pool right now because it would be a bit of a
     // waste to get a larger hard-partitioned buffer just for 8 bytes.
     // TODO: since we no longer have metadata limits, the pool can be managed using the
@@ -573,7 +571,7 @@ class UCX(transport: UCXShuffleTransport, executor: BlockManagerId, rapidsConf: 
     header.putLong(am.header)
     header.rewind()
 
-    val flags = if (useRndv) {
+    val flags = if (am.forceRndv) {
       UcpConstants.UCP_AM_SEND_FLAG_RNDV
     } else {
       0L /* AUTO */

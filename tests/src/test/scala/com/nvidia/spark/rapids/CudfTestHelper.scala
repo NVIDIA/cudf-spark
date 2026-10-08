@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,9 @@
 
 package com.nvidia.spark.rapids
 
-import ai.rapids.cudf.{ColumnView, DType, HostColumnVector, HostColumnVectorCore}
+import scala.collection.mutable.ArrayBuffer
+
+import ai.rapids.cudf.{ColumnView, DefaultHostMemoryAllocator, DType, HostColumnVector, HostColumnVectorCore, HostMemoryAllocator, HostMemoryBuffer}
 import com.nvidia.spark.rapids.Arm.withResource
 import org.junit.jupiter.api.Assertions.{assertArrayEquals, assertEquals}
 
@@ -128,5 +130,42 @@ object CudfTestHelper {
     }
   }
 
+  /** Delegates host allocations, recording the largest request and every buffer returned. */
+  class RecordingHostAllocator(delegate: HostMemoryAllocator) extends HostMemoryAllocator {
+    private val buffers = ArrayBuffer[HostMemoryBuffer]()
+    private var largestRequest = 0L
 
+    override def allocate(amount: Long, preferPinned: Boolean): HostMemoryBuffer =
+      record(amount)(delegate.allocate(amount, preferPinned))
+
+    override def allocate(amount: Long): HostMemoryBuffer =
+      record(amount)(delegate.allocate(amount))
+
+    private def record(amount: Long)(doAllocate: => HostMemoryBuffer): HostMemoryBuffer = {
+      synchronized {
+        largestRequest = math.max(largestRequest, amount)
+      }
+      val buffer = doAllocate
+      synchronized {
+        buffers += buffer
+      }
+      buffer
+    }
+
+    def largest: Long = synchronized(largestRequest)
+
+    def allClosed: Boolean = synchronized(buffers.forall(_.getRefCount == 0))
+  }
+
+  /** Runs `body` with cuDF's default host allocator wrapped in a recorder. */
+  def withRecordedHostAllocations[T](body: RecordingHostAllocator => T): T = {
+    val previous = DefaultHostMemoryAllocator.get()
+    val recorder = new RecordingHostAllocator(previous)
+    DefaultHostMemoryAllocator.set(recorder)
+    try {
+      body(recorder)
+    } finally {
+      DefaultHostMemoryAllocator.set(previous)
+    }
+  }
 }

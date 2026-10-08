@@ -2049,24 +2049,23 @@ def test_delta_dml_dv_internal_row_index_column_handling(
     if use_persistent_dv:
         assert_gpu_fallback_write(
             write_func, read_delta_path, data_path, "ExecutedCommandExec", conf=conf)
-        return
-
-    cpu_result = with_cpu_session(
-        lambda spark: write_func(spark, data_path + "/CPU"), conf=conf)
-    expected_commands = {
-        "DELETE": "GpuDeleteCommand",
-        "UPDATE": "GpuUpdateCommand",
-        "MERGE": "GpuMergeIntoCommand"
-    }
-    gpu_result = assert_rapids_delta_write(
-        lambda spark: write_func(spark, data_path + "/GPU"), conf=conf,
-        expected_command=expected_commands[command])
-    assert_equal(cpu_result, gpu_result)
-    cpu_data = with_cpu_session(
-        lambda spark: read_delta_path(spark, data_path + "/CPU").collect(), conf=conf)
-    gpu_data = with_cpu_session(
-        lambda spark: read_delta_path(spark, data_path + "/GPU").collect(), conf=conf)
-    assert_equal(cpu_data, gpu_data)
+    else:
+        cpu_result = with_cpu_session(
+            lambda spark: write_func(spark, data_path + "/CPU"), conf=conf)
+        expected_commands = {
+            "DELETE": "GpuDeleteCommand",
+            "UPDATE": "GpuUpdateCommand",
+            "MERGE": "GpuMergeIntoCommand"
+        }
+        gpu_result = assert_rapids_delta_write(
+            lambda spark: write_func(spark, data_path + "/GPU"), conf=conf,
+            expected_command=expected_commands[command])
+        assert_equal(cpu_result, gpu_result)
+        cpu_data = with_cpu_session(
+            lambda spark: read_delta_path(spark, data_path + "/CPU").collect(), conf=conf)
+        gpu_data = with_cpu_session(
+            lambda spark: read_delta_path(spark, data_path + "/GPU").collect(), conf=conf)
+        assert_equal_with_local_sort(cpu_data, gpu_data)
 
 
 @allow_non_gpu(*delta_meta_allow)

@@ -30,6 +30,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.StringJoiner;
+import java.util.function.Supplier;
 
 /**
  * This is a copy of the cudf HostColumnVector.ColumnBuilder class.
@@ -37,6 +38,66 @@ import java.util.StringJoiner;
  */
 public final class RapidsHostColumnBuilder implements AutoCloseable {
 
+  /**
+   * The most a column can hold. String data bytes are addressed by Int offsets, and offsets need
+   * one more entry than there are rows. Fixed-width elements and struct rows stop one below
+   * Integer.MAX_VALUE, where the capacity caps of the original cuDF builder stopped them.
+   */
+  static final class Limits {
+    final long maxStringBytes;
+    final long maxFixedWidthElements;
+    final long maxOffsetRows;
+    final long maxStructRows;
+
+    Limits(long maxStringBytes, long maxFixedWidthElements, long maxOffsetRows,
+        long maxStructRows) {
+      this.maxStringBytes = maxStringBytes;
+      this.maxFixedWidthElements = maxFixedWidthElements;
+      this.maxOffsetRows = maxOffsetRows;
+      this.maxStructRows = maxStructRows;
+    }
+  }
+
+  static final Limits PRODUCTION_LIMITS = new Limits(Integer.MAX_VALUE,
+      Integer.MAX_VALUE - 1, Integer.MAX_VALUE - 2, Integer.MAX_VALUE - 1);
+
+  private static final ThreadLocal<Limits> TEST_LIMITS = new ThreadLocal<>();
+
+  /**
+   * Test-only: runs body with lower limits for every builder this thread creates inside it.
+   * Production code must never call this.
+   */
+  static <T> T withTestLimits(Limits limits, Supplier<T> body) {
+    checkTestLimit(limits.maxStringBytes, PRODUCTION_LIMITS.maxStringBytes);
+    checkTestLimit(limits.maxFixedWidthElements, PRODUCTION_LIMITS.maxFixedWidthElements);
+    checkTestLimit(limits.maxOffsetRows, PRODUCTION_LIMITS.maxOffsetRows);
+    checkTestLimit(limits.maxStructRows, PRODUCTION_LIMITS.maxStructRows);
+    Limits previous = TEST_LIMITS.get();
+    TEST_LIMITS.set(limits);
+    try {
+      return body.get();
+    } finally {
+      if (previous == null) {
+        TEST_LIMITS.remove();
+      } else {
+        TEST_LIMITS.set(previous);
+      }
+    }
+  }
+
+  private static void checkTestLimit(long limit, long productionLimit) {
+    if (limit <= 0 || limit > productionLimit) {
+      throw new IllegalArgumentException("A test limit must be in (0, " + productionLimit +
+          "], got " + limit);
+    }
+  }
+
+  private static Limits currentLimits() {
+    Limits testLimits = TEST_LIMITS.get();
+    return testLimits == null ? PRODUCTION_LIMITS : testLimits;
+  }
+
+  private final Limits limits;
   private HostColumnVector.DataType dataType;
   private DType type;
   private HostMemoryBuffer data;
@@ -52,8 +113,8 @@ public final class RapidsHostColumnBuilder implements AutoCloseable {
   private List<RapidsHostColumnBuilder> childBuilders = new ArrayList<>();
   private Runnable nullHandler;
 
-  // The value of currentIndex can't exceed Int32.Max. Storing currentIndex as a long is to
-  // adapt HostMemoryBuffer.setXXX, which requires a long offset.
+  // The limit checks in the grow methods keep currentIndex within Int32.Max. Storing it as a
+  // long is to adapt HostMemoryBuffer.setXXX, which requires a long offset.
   private long currentIndex = 0;
   // Only for Strings: pointer of the byte (data) buffer
   private int currentStringByteIndex = 0;
@@ -66,6 +127,12 @@ public final class RapidsHostColumnBuilder implements AutoCloseable {
   private static final int bitShiftByOffset = (int) (Math.log(OFFSET_SIZE) / Math.log(2));
 
   public RapidsHostColumnBuilder(HostColumnVector.DataType dataType, long estimatedRows) {
+    this(dataType, estimatedRows, currentLimits());
+  }
+
+  private RapidsHostColumnBuilder(HostColumnVector.DataType dataType, long estimatedRows,
+      Limits limits) {
+    this.limits = limits;
     this.dataType = dataType;
     this.type = dataType.getType();
     this.nullable = dataType.isNullable();
@@ -77,18 +144,18 @@ public final class RapidsHostColumnBuilder implements AutoCloseable {
     this.setupNullHandler();
 
     for (int i = 0; i < dataType.getNumChildren(); i++) {
-      childBuilders.add(new RapidsHostColumnBuilder(dataType.getChild(i), estimatedRows));
+      childBuilders.add(new RapidsHostColumnBuilder(dataType.getChild(i), estimatedRows, limits));
     }
   }
 
   /**
-   * Immutable snapshot of a builder and all of its children so the state can be restored
-   * if an exception happens while appending a row.
+   * Snapshot of a builder and all of its children so the state can be restored if an exception
+   * happens while appending a row. {@link #captureState(BuilderSnapshot)} can refill it.
    */
   public static final class BuilderSnapshot {
-    private final long rows;
-    private final long currentIndex;
-    private final long currentStringByteIndex;
+    private long rows;
+    private long currentIndex;
+    private long currentStringByteIndex;
     private final BuilderSnapshot[] childStates;
 
     private BuilderSnapshot(long rows,
@@ -120,6 +187,21 @@ public final class RapidsHostColumnBuilder implements AutoCloseable {
    */
   public BuilderSnapshot captureState() {
     return new BuilderSnapshot(rows, currentIndex, currentStringByteIndex, captureChildStates());
+  }
+
+  /**
+   * Refills a snapshot that {@link #captureState()} returned for this builder, so that a caller
+   * taking one per row allocates it only once.
+   */
+  public void captureState(BuilderSnapshot into) {
+    into.rows = rows;
+    into.currentIndex = currentIndex;
+    into.currentStringByteIndex = currentStringByteIndex;
+    if (into.childStates != null) {
+      for (int i = 0; i < into.childStates.length; i++) {
+        childBuilders.get(i).captureState(into.childStates[i]);
+      }
+    }
   }
 
   /**
@@ -331,16 +413,22 @@ public final class RapidsHostColumnBuilder implements AutoCloseable {
    * multiple values or nulls.
    */
   private void growFixedWidthBuffersAndRows(int numRows) {
+    // Capacities never exceed the limits, so only a buffer that must grow can reach one.
+    if ((data == null || rows + numRows > rowCapacity) &&
+        rows + numRows > limits.maxFixedWidthElements) {
+      throw limitExceeded("The number of elements", rows + numRows,
+          limits.maxFixedWidthElements);
+    }
     assert rows + numRows <= Integer.MAX_VALUE : "Row count cannot go over Integer.MAX_VALUE";
     rows += numRows;
 
     if (data == null) {
-      long neededSize = Math.max(rows, estimatedRows);
+      long neededSize = Math.min(Math.max(rows, estimatedRows), limits.maxFixedWidthElements);
       data = HostMemoryBuffer.allocate(neededSize << bitShiftBySize);
       rowCapacity = neededSize;
     } else if (rows > rowCapacity) {
       long neededSize = Math.max(rows, rowCapacity * 2);
-      long newCap = Math.min(neededSize, Integer.MAX_VALUE - 1);
+      long newCap = Math.min(neededSize, limits.maxFixedWidthElements);
       data = copyBuffer(HostMemoryBuffer.allocate(newCap << bitShiftBySize), data);
       rowCapacity = newCap;
     }
@@ -351,15 +439,19 @@ public final class RapidsHostColumnBuilder implements AutoCloseable {
    * incrementing the row counts. Please call this method before appending any value or null.
    */
   private void growListBuffersAndRows() {
+    if (offsets == null || rows + 1 > rowCapacity) {
+      checkOffsetRows();
+    }
     assert rows + 2 <= Integer.MAX_VALUE : "Row count cannot go over Integer.MAX_VALUE";
     rows++;
 
     if (offsets == null) {
-      offsets = HostMemoryBuffer.allocate((estimatedRows + 1) << bitShiftByOffset);
+      long initialRows = Math.min(estimatedRows, limits.maxOffsetRows);
+      offsets = HostMemoryBuffer.allocate((initialRows + 1) << bitShiftByOffset);
       offsets.setInt(0, 0);
-      rowCapacity = estimatedRows;
+      rowCapacity = initialRows;
     } else if (rows > rowCapacity) {
-      long newCap = Math.min(rowCapacity * 2, Integer.MAX_VALUE - 2);
+      long newCap = Math.min(rowCapacity * 2, limits.maxOffsetRows);
       offsets = copyBuffer(HostMemoryBuffer.allocate((newCap + 1) << bitShiftByOffset), offsets);
       rowCapacity = newCap;
     }
@@ -372,31 +464,46 @@ public final class RapidsHostColumnBuilder implements AutoCloseable {
    * @param stringLength number of bytes required by the next row
    */
   private void growStringBuffersAndRows(int stringLength) {
+    long currentLength = (long) currentStringByteIndex + stringLength;
+    if (offsets == null || rows + 1 > rowCapacity || currentLength > data.getLength()) {
+      checkOffsetRows();
+      if (currentLength > limits.maxStringBytes) {
+        throw limitExceeded("The string data size in bytes", currentLength,
+            limits.maxStringBytes);
+      }
+    }
     assert rows + 2 <= Integer.MAX_VALUE : "Row count cannot go over Integer.MAX_VALUE";
     rows++;
 
     if (offsets == null) {
       // Initialize data buffer with at least 1 byte in case the first appended value is null.
       data = HostMemoryBuffer.allocate(Math.max(1, stringLength));
-      offsets = HostMemoryBuffer.allocate((estimatedRows + 1) << bitShiftByOffset);
+      long initialRows = Math.min(estimatedRows, limits.maxOffsetRows);
+      offsets = HostMemoryBuffer.allocate((initialRows + 1) << bitShiftByOffset);
       offsets.setInt(0, 0);
-      rowCapacity = estimatedRows;
+      rowCapacity = initialRows;
       return;
     }
 
     if (rows > rowCapacity) {
-      long newCap = Math.min(rowCapacity * 2, Integer.MAX_VALUE - 2);
+      long newCap = Math.min(rowCapacity * 2, limits.maxOffsetRows);
       offsets = copyBuffer(HostMemoryBuffer.allocate((newCap + 1) << bitShiftByOffset), offsets);
       rowCapacity = newCap;
     }
 
-    long currentLength = currentStringByteIndex + stringLength;
     if (currentLength > data.getLength()) {
       long requiredLength = data.getLength();
       do {
         requiredLength = requiredLength * 2;
       } while (currentLength > requiredLength);
+      requiredLength = Math.min(requiredLength, limits.maxStringBytes);
       data = copyBuffer(HostMemoryBuffer.allocate(requiredLength), data);
+    }
+  }
+
+  private void checkOffsetRows() {
+    if (rows + 1 > limits.maxOffsetRows) {
+      throw limitExceeded("The number of rows", rows + 1, limits.maxOffsetRows);
     }
   }
 
@@ -406,13 +513,16 @@ public final class RapidsHostColumnBuilder implements AutoCloseable {
    * Please call this method before appending any value or null.
    */
   private void growStructBuffersAndRows() {
+    if ((rowCapacity == 0 || rows + 1 > rowCapacity) && rows + 1 > limits.maxStructRows) {
+      throw limitExceeded("The number of rows", rows + 1, limits.maxStructRows);
+    }
     assert rows + 1 <= Integer.MAX_VALUE : "Row count cannot go over Integer.MAX_VALUE";
     rows++;
 
     if (rowCapacity == 0) {
-      rowCapacity = estimatedRows;
+      rowCapacity = Math.min(estimatedRows, limits.maxStructRows);
     } else if (rows > rowCapacity) {
-      rowCapacity = Math.min(rowCapacity * 2, Integer.MAX_VALUE - 1);
+      rowCapacity = Math.min(rowCapacity * 2, limits.maxStructRows);
     }
   }
 
@@ -465,6 +575,13 @@ public final class RapidsHostColumnBuilder implements AutoCloseable {
   private void setNullAt(long index) {
     assert index < rows : "Index for null value should fit the column with " + rows + " rows";
     nullCount += setNullAt(valid, index);
+  }
+
+  private ColumnLimitExceededException limitExceeded(String what, long attempted, long limit) {
+    return new ColumnLimitExceededException(what + " would be " + attempted +
+        ", exceeding the limit of " + limit + " for a column of cuDF type " + type,
+        "split the input into smaller batches or partitions, or reduce the size of individual " +
+            "values");
   }
 
   public final long appendNull() {
@@ -592,7 +709,7 @@ public final class RapidsHostColumnBuilder implements AutoCloseable {
   }
 
   public int getCurrentIndex() {
-    return (int) currentIndex;
+    return Math.toIntExact(currentIndex);
   }
 
   @Deprecated
@@ -707,7 +824,7 @@ public final class RapidsHostColumnBuilder implements AutoCloseable {
     assert value != null : "appendNull must be used to append null strings";
     assert srcOffset >= 0;
     assert length >= 0;
-    assert value.length + srcOffset <= length;
+    assert length <= value.length - srcOffset;
     assert type.equals(DType.STRING) : " type " + type + " is not String";
     growStringBuffersAndRows(length);
     assert currentIndex < rows;

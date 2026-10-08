@@ -323,6 +323,18 @@ public class GpuColumnVector extends GpuColumnVectorBase {
     }
 
     /**
+     * Refills snapshots that {@link #captureState()} returned for these builders, without
+     * allocating.
+     */
+    public void captureState(RapidsHostColumnBuilder.BuilderSnapshot[] into) {
+      for (int i = 0; i < builders.length; i++) {
+        if (builders[i] != null) {
+          builders[i].captureState(into[i]);
+        }
+      }
+    }
+
+    /**
      * Restore all column builders to a previously captured state.
      * @param snapshots the snapshots captured via {@link #captureState()}
      */

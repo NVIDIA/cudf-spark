@@ -872,8 +872,7 @@ def test_delta_atomic_create_table_as_select(spark_tmp_table_factory, spark_tmp_
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
 @pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12041"), ids=idfn)
-@pytest.mark.xfail(is_spark_356_or_later() and not is_spark_400_or_later(),
-                   reason="https://github.com/delta-io/delta/issues/4671")
+@delta_rtas_truncate_skip
 @pytest.mark.xfail(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
 def test_delta_atomic_replace_table_as_select(spark_tmp_table_factory, spark_tmp_path, enable_deletion_vectors):
     _atomic_write_table_as_select(delta_write_gens, spark_tmp_table_factory, spark_tmp_path,
@@ -944,8 +943,7 @@ def test_delta_ctas_sql(spark_tmp_table_factory, enable_deletion_vectors, use_cd
 @pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
     enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12041"), ids=idfn)
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
-@pytest.mark.xfail(is_spark_356_or_later() and not is_spark_400_or_later(),
-                   reason="https://github.com/delta-io/delta/issues/4671")
+@delta_rtas_truncate_skip
 @pytest.mark.xfail(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
 def test_delta_rtas_sql(spark_tmp_table_factory, enable_deletion_vectors, use_cdf):
     _atomic_write_table_as_select_sql(delta_write_gens, spark_tmp_table_factory,
@@ -999,11 +997,28 @@ def test_delta_rtas_truncate_capability(spark_tmp_table_factory):
     assert [row.id for row in gpu_rows] == list(range(10, 20))
 
 
+@pytest.mark.parametrize("version, expected", [
+    ("3.4.10", False),
+    ("3.5.5", False),
+    ("3.5.6", True),
+    ("3.5.9", True),
+    ("3.5.10", True),
+    ("3.5.5-SNAPSHOT", False),
+    ("3.5.6-SNAPSHOT", True),
+    ("3.5.10-amzn-0", True),
+    ("4.0.0", True),
+])
+def test_is_spark_356_or_later(version, expected, monkeypatch):
+    monkeypatch.setattr("spark_session.spark_version", lambda: version)
+    assert is_spark_356_or_later() == expected
+
+
 @allow_non_gpu('DataWritingCommandExec', 'WriteFilesExec', *delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
 @pytest.mark.xfail(is_databricks_runtime(),
                    reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
+@delta_rtas_truncate_skip
 def test_delta_replace_where_save_as_table_preserves_partitioning(spark_tmp_table_factory):
     cpu_table = spark_tmp_table_factory.get()
     gpu_table = spark_tmp_table_factory.get()
@@ -1037,12 +1052,14 @@ def test_delta_replace_where_save_as_table_preserves_partitioning(spark_tmp_tabl
         plans = callback.getResultsWithTimeout(10000)
         assert any(callback.contains(plan, "GpuAtomicReplaceTableAsSelectExec")
                    for plan in plans), "GpuAtomicReplaceTableAsSelectExec was not executed"
-        # Spark 3.5+ runs the RTAS data write as a nested query execution. Spark 4.0+
-        # issues it as OverwriteByExpression, while Spark 3.5 uses AppendData. Earlier
-        # Spark versions write through V1 directly and do not produce a separately
-        # captured V1 write plan.
+        # Spark 3.5+ runs the RTAS data write as a nested query execution. OSS Spark
+        # 3.5.6+ and Spark 4.0+ issue it as OverwriteByExpression; earlier Spark 3.5
+        # releases use AppendData. Before Spark 3.5, the V1 write is not captured
+        # as a separate plan.
         if not is_before_spark_350():
-            v1_write_node = ("GpuOverwriteByExpressionExecV1" if is_spark_400_or_later()
+            uses_overwrite = (is_spark_400_or_later() or
+                              (not is_databricks_runtime() and is_spark_356_or_later()))
+            v1_write_node = ("GpuOverwriteByExpressionExecV1" if uses_overwrite
                              else "GpuAppendDataExecV1")
             assert any(callback.contains(plan, v1_write_node)
                        for plan in plans), f"{v1_write_node} was not executed"

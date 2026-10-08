@@ -77,7 +77,6 @@ object ConfVersionInfo {
     "spark.rapids.shuffle.transport.earlyStart.heartbeatInterval" -> "v21.06.0",
     "spark.rapids.shuffle.transport.earlyStart.heartbeatTimeout" -> "v21.08.0",
     "spark.rapids.shuffle.transport.maxReceiveInflightBytes" -> "v21.06.0",
-    "spark.rapids.shuffle.ucx.activeMessages.forceRndv" -> "v21.08.0",
     "spark.rapids.shuffle.ucx.useWakeup" -> "v0.1.0",
     "spark.rapids.sql.acceleratedColumnarToRow.enabled" -> "Unreleased",
     "spark.rapids.sql.allowMultipleJars" -> "v24.02.0",
