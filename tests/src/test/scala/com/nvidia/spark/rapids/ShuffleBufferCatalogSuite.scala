@@ -32,6 +32,7 @@ import org.scalatestplus.mockito.MockitoSugar
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.types.{DataType, IntegerType}
+import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.storage.ShuffleBlockId
 
 class ShuffleBufferCatalogSuite
@@ -190,5 +191,64 @@ class ShuffleBufferCatalogSuite
       assertResult(1)(cbs.last.numCols())
       shuffleCatalog.unregisterShuffle(1)
     }
+  }
+
+  test("when map ids repeat, only the first output committed for a map is read") {
+    // With spark.shuffle.useOldFetchProtocol=true every attempt of a map writes the same blocks.
+    val catalog = new ShuffleBufferCatalog(mapIdsCanRepeat = true)
+    catalog.registerShuffle(1)
+    val blocks = (0 until 3).map(ShuffleBlockId(1, 7L, _))
+    def rowCounts(block: ShuffleBlockId): Seq[Long] = {
+      val metaRows = catalog.blockIdToMetas(block).map(_.rowCount())
+      withResource(catalog.getColumnarBatchIterator(block, Array[DataType](IntegerType)).toArray) {
+        batches => assertResult(metaRows)(batches.map(_.numRows().toLong).toSeq)
+      }
+      metaRows
+    }
+    val first = Seq(
+      catalog.addContiguousTable(blocks(0), RapidsShuffleTestHelper.buildContiguousTable(10), -1),
+      catalog.addDegenerateRapidsBuffer(blocks(0),
+        MetaUtils.buildDegenerateTableMeta(new ColumnarBatch(Array.empty, 11))),
+      catalog.addContiguousTable(blocks(1), RapidsShuffleTestHelper.buildContiguousTable(5), -1))
+    // an attempt is not read before it commits
+    blocks.foreach(block => assertThrows[NoSuchElementException](catalog.blockIdToMetas(block)))
+    val firstSizes = Array(200L, 100L, 0L)
+    catalog.commitMapOutput(1, 7L, first, firstSizes)
+    assertResult(Seq(200L, 100L, 0L))(firstSizes.toSeq)
+
+    val second = Seq(
+      catalog.addContiguousTable(blocks(0), RapidsShuffleTestHelper.buildContiguousTable(20), -1),
+      catalog.addContiguousTable(blocks(2), RapidsShuffleTestHelper.buildContiguousTable(30), -1))
+    assertResult(Seq(10L, 11L))(rowCounts(blocks(0)))
+    val secondSizes = Array(400L, 0L, 300L)
+    catalog.commitMapOutput(1, 7L, second, secondSizes)
+    // the later attempt reports the committed output's sizes, as Spark's sort shuffle does
+    assertResult(Seq(200L, 100L, 0L))(secondSizes.toSeq)
+    assertResult(Seq(10L, 11L))(rowCounts(blocks(0)))
+    assertResult(Seq(5L))(rowCounts(blocks(1)))
+    assertThrows[NoSuchElementException](catalog.blockIdToMetas(blocks(2)))
+    second.foreach { id =>
+      assertThrows[NoSuchElementException](catalog.getShuffleBufferHandle(id.tableId))
+    }
+    assertResult(2)(SpillFramework.stores.deviceStore.numHandles)
+    assertResult((3, 3, 3))(catalog.bookkeepingSizes)
+
+    catalog.unregisterShuffle(1)
+    assertResult(0)(SpillFramework.stores.deviceStore.numHandles)
+    assertResult((0, 0, 0))(catalog.bookkeepingSizes)
+  }
+
+  test("when map ids repeat, a commit after unregisterShuffle fails") {
+    val catalog = new ShuffleBufferCatalog(mapIdsCanRepeat = true)
+    catalog.registerShuffle(1)
+    val block = ShuffleBlockId(1, 7L, 0)
+    val ids = Seq(
+      catalog.addContiguousTable(block, RapidsShuffleTestHelper.buildContiguousTable(10), -1))
+    catalog.unregisterShuffle(1)
+    // the map's MapStatus would name output the executor no longer has
+    assertThrows[IllegalStateException](catalog.commitMapOutput(1, 7L, ids, Array(100L)))
+    catalog.removeCachedHandles(ids)
+    assertResult(0)(SpillFramework.stores.deviceStore.numHandles)
+    assertResult((0, 0, 0))(catalog.bookkeepingSizes)
   }
 }

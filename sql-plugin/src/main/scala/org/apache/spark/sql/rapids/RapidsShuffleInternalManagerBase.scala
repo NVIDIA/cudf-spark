@@ -1771,6 +1771,12 @@ class RapidsCachingWriter[K, V](
       }
       metricsReporter.incBytesWritten(bytesWritten)
       metricsReporter.incRecordsWritten(recordsWritten)
+      if (catalog.mapIdsCanRepeat) {
+        // Every attempt of this map writes the same blocks, so the catalog serves only the first
+        // output committed. It owns this attempt's buffers from here on.
+        catalog.commitMapOutput(handle.shuffleId, mapId, writtenBufferIds, sizes)
+        writtenBufferIds.clear()
+      }
     }
   }
 
@@ -2050,7 +2056,7 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
               // cast the handle with specific generic types due to type-erasure
               gpuDep.asInstanceOf[GpuShuffleDependency[K, V, V]])
             // we need to track this mapId so we can clean it up later on unregisterShuffle
-            trackMapTaskForCleanup(handle.shuffleId, context.taskAttemptId())
+            trackMapTaskForCleanup(handle.shuffleId, mapId)
             // in most scenarios, the pools have already started, except for local mode
             // here we try to start them if we see they haven't
             RapidsShuffleInternalManagerBase.startThreadPoolIfNeeded(
