@@ -1,0 +1,73 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+name: Spark ROI package
+
+on:
+  push:
+    paths:
+      - 'tools/spark-roi/**'
+      - '.github/workflows/spark-roi.yml'
+  pull_request:
+    paths:
+      - 'tools/spark-roi/**'
+      - '.github/workflows/spark-roi.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: '3.10'
+          - os: ubuntu-latest
+            python: '3.12'
+          - os: ubuntu-latest
+            python: '3.14'
+          - os: windows-latest
+            python: '3.12'
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: tools/spark-roi
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install development tools and package
+        run: python -m pip install . build ruff coverage
+      - name: Lint and regression tests
+        run: |
+          ruff check .
+          ruff format --check .
+          coverage run --source=spark_roi -m unittest discover -s tests -v
+          coverage report --fail-under=85
+      - name: Build and reinstall wheel
+        run: |
+          python -m build
+          python -m pip install --force-reinstall --no-deps dist/*.whl
+      - name: Installed command smoke test
+        run: |
+          cd "$RUNNER_TEMP"
+          spark-roi init --example cloud --output cloud.json
+          spark-roi evaluate cloud.json --output cloud-report --strict
+          spark-roi init --example shared --output shared.json
+          spark-roi evaluate shared.json --output shared-report --strict
+          spark-roi init --example owned --output owned.json
+          spark-roi evaluate owned.json --output owned-report --strict

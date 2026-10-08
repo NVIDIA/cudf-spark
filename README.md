@@ -62,6 +62,10 @@ access to any of the memory that RMM is holding.
 
 ## Qualification and Profiling tools
 
+The [standalone Spark ROI calculator](tools/spark-roi/README.md) compares CPU/GPU
+costs using supplied hardware configurations, prices and runtime evidence. It can
+be installed separately with Python and does not require Spark or a GPU to run.
+
 The Qualification and Profiling tools are available in the
 [NVIDIA/cudf-spark-tools](https://github.com/NVIDIA/cudf-spark-tools) repository.
 
