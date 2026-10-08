@@ -21,6 +21,7 @@ import java.util.concurrent.{ExecutorService, TimeUnit}
 import ai.rapids.cudf.{HostMemoryBuffer, Rmm, RmmAllocationMode, TableWriter}
 import com.nvidia.spark.rapids.{ColumnarOutputWriter, ColumnarOutputWriterFactory, GpuColumnVector, GpuLiteral, NvtxId, NvtxRegistry, RapidsConf, ScalableTaskCompletion}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.io.async.{AsyncOutputStream, HostMemoryThrottle, ThrottlingExecutor, TrafficController}
 import com.nvidia.spark.rapids.jni.{GpuRetryOOM, GpuSplitAndRetryOOM}
 import com.nvidia.spark.rapids.spill.SpillFramework
@@ -855,6 +856,19 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
     assert(stream.closeCount == 1)
   }
 
+  test("close suppresses an interrupted close behind a write failure and restores it") {
+    val writeFailure = new IOException("write failed")
+    val interruptedClose = new InterruptedException("interrupted close")
+    val stream = new RecordingOutputStream(writeFailure, interruptedClose)
+    val writer = streamOutputWriter(stream)
+    writer.bufferBytes(16)
+    val (thrown, interrupted) = runOnNewThread(interruptFirst = false)(writer.close())
+    assert(thrown.exists(_ eq writeFailure))
+    assert(writeFailure.getSuppressed.toSeq == Seq(interruptedClose))
+    assert(interrupted)
+    assert(stream.closeCount == 1)
+  }
+
   test("close keeps the write failure when the output stream rethrows it from close") {
     val writeFailure = new IOException("write failed")
     val stream = new RecordingOutputStream(writeFailure, writeFailure)
@@ -924,6 +938,27 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
     assert(thrown.exists(_ eq writeFailure))
     assert(writeFailure.getSuppressed.isEmpty)
     assert(!interrupted)
+    assertClosedOnWriterThread(delegate, pool)
+  }
+
+  test("a writer closed after a nested safeClose restored an interrupt closes its output") {
+    val delegate = new RecordingOutputStream()
+    val (stream, pool) = asyncOutputStream(delegate)
+    val writer = streamOutputWriter(stream)
+    writer.bufferBytes(16)
+    val earlierFailure = new IOException("earlier close failed")
+    val resources = Seq[AutoCloseable](
+      // Its own safeClose suppresses the interrupt and so restores it before the writer closes.
+      () => Seq[AutoCloseable](
+        () => throw earlierFailure,
+        () => throw new InterruptedException("interrupted close")).safeClose(),
+      () => writer.close())
+    val (thrown, interrupted) = runOnNewThread(interruptFirst = false)(resources.safeClose())
+    assert(thrown.contains(earlierFailure))
+    // One from the nested safeClose, one from the writer's buffered write that saw it restored.
+    assert(earlierFailure.getSuppressed.count(_.isInstanceOf[InterruptedException]) == 2)
+    assert(interrupted)
+    assert(delegate.bytesWritten == 0)
     assertClosedOnWriterThread(delegate, pool)
   }
 }
