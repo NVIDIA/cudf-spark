@@ -247,7 +247,6 @@ class ShuffleBufferCatalogSuite
     catalog.unregisterShuffle(1)
     // the map's MapStatus would name output the executor no longer has
     assertThrows[IllegalStateException](catalog.commitMapOutput(1, 7L, ids, Array(100L)))
-    catalog.removeCachedHandles(ids)
     assertResult(0)(SpillFramework.stores.deviceStore.numHandles)
     assertResult((0, 0, 0))(catalog.bookkeepingSizes)
   }

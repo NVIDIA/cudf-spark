@@ -86,6 +86,7 @@ class RapidsCachingWriterSuite extends RmmSparkRetrySuiteBase with MockitoSugar 
     extends RapidsCachingWriter[Int, ColumnarBatch](mock[BlockManager], handle, mapId,
       new ShuffleWriteMetrics, catalog, None, Map(METRIC_DATA_SIZE -> new SQLMetric("size"))) {
     def partitionSizes: Seq[Long] = sizes.toList
+    def numRecordedBuffers: Int = writtenBufferIds.size
   }
 
   private def newWriter(
@@ -104,14 +105,16 @@ class RapidsCachingWriterSuite extends RmmSparkRetrySuiteBase with MockitoSugar 
   /**
    * Feeds `inputs` to the writer, building each batch when the writer asks for it, as an
    * upstream operator does, then fails the map task's input if `thenFail`. `afterFirstBatch` runs
-   * once the first batch is cached. Afterwards the batches are closed as the shuffle exchange
-   * closes them, except compressed ones, which the catalog has already closed.
+   * once the first batch is cached, and `afterLastBatch` once every batch is. Afterwards the
+   * batches are closed as the shuffle exchange closes them, except compressed ones, which the
+   * catalog has already closed.
    */
   private def write(
       writer: RapidsCachingWriter[Int, ColumnarBatch],
       inputs: Seq[Input],
       thenFail: Boolean = false,
-      afterFirstBatch: () => Unit = () => ()): Unit = {
+      afterFirstBatch: () => Unit = () => (),
+      afterLastBatch: () => Unit = () => ()): Unit = {
     val built = new ArrayBuffer[ColumnarBatch]()
     val records = inputs.iterator.zipWithIndex.map { case (input, i) =>
       if (i == 1) {
@@ -122,7 +125,14 @@ class RapidsCachingWriterSuite extends RmmSparkRetrySuiteBase with MockitoSugar 
       (input.partId, batch)
     }
     val failure = new Iterator[(Int, ColumnarBatch)] {
-      override def hasNext: Boolean = thenFail
+      private var reachedEnd = false
+      override def hasNext: Boolean = {
+        if (!reachedEnd) {
+          reachedEnd = true
+          afterLastBatch()
+        }
+        thenFail
+      }
       override def next(): (Int, ColumnarBatch) =
         throw new IllegalStateException("injected map task failure")
     }
@@ -453,6 +463,18 @@ class RapidsCachingWriterSuite extends RmmSparkRetrySuiteBase with MockitoSugar 
     assertResult(firstAttempt.count(_.deviceBacked))(numDeviceHandles)
     assertConsistent(catalog, firstAttempt.size)
     catalog.unregisterShuffle(1)
+    assertResult(0)(numDeviceHandles)
+    assertConsistent(catalog, 0)
+  }
+
+  test("when map ids repeat, a commit after unregisterShuffle leaves the output to stop(false)") {
+    // the shuffle can be unregistered while a zombie or cancelled map task is still writing
+    val catalog = new ShuffleBufferCatalog(mapIdsCanRepeat = true)
+    val writer = newWriter(catalog, 1, 7L)
+    assertThrows[IllegalStateException](write(writer, firstAttempt,
+      afterLastBatch = () => catalog.unregisterShuffle(1)))
+    assertResult(firstAttempt.size)(writer.numRecordedBuffers)
+    assert(writer.stop(false).isEmpty)
     assertResult(0)(numDeviceHandles)
     assertConsistent(catalog, 0)
   }

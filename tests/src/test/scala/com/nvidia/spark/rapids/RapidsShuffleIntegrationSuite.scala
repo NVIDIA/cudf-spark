@@ -334,10 +334,15 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
     runMultiSegmentShuffleTest(Some("snappy"))
   }
 
+  test("multi-segment shuffle with zstd compression") {
+    runMultiSegmentShuffleTest(Some("zstd"))
+  }
+
   test("with the old fetch protocol, a map retried on the same executor is read once") {
     // spark.shuffle.useOldFetchProtocol makes every attempt of a map write the same blocks, and
     // local mode has one executor, so the retry always runs where the first attempt cached its
-    // output. local[2,4] allows four attempts per task.
+    // output. local[2,4] allows four attempts per task. The UDF runs on the CPU, so
+    // spark.rapids.sql.test.enabled stays off.
     val conf = new SparkConf()
       .setMaster("local[2,4]")
       .setAppName("RapidsShuffleIntegrationTest")
@@ -346,7 +351,6 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
       .set("spark.shuffle.manager", shuffleManagerClass)
       .set("spark.rapids.shuffle.mode", "CACHE_ONLY")
       .set("spark.shuffle.useOldFetchProtocol", "true")
-      .set("spark.sql.adaptive.enabled", "false")
     spark = SparkSession.builder().config(conf).getOrCreate()
     RapidsShuffleIntegrationSuite.failedTasks.clear()
     // fails the first attempt of map 0 once its shuffle write has returned
@@ -367,10 +371,6 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
     assertResult(1, "first attempts that failed after their write")(
       RapidsShuffleIntegrationSuite.failedTasks.size())
     assertResult(numRows)(total)
-  }
-
-  test("multi-segment shuffle with zstd compression") {
-    runMultiSegmentShuffleTest(Some("zstd"))
   }
 
 }

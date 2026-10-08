@@ -1772,9 +1772,8 @@ class RapidsCachingWriter[K, V](
       metricsReporter.incBytesWritten(bytesWritten)
       metricsReporter.incRecordsWritten(recordsWritten)
       if (catalog.mapIdsCanRepeat) {
-        // Every attempt of this map writes the same blocks, so the catalog serves only the first
-        // output committed. It owns this attempt's buffers from here on.
         catalog.commitMapOutput(handle.shuffleId, mapId, writtenBufferIds, sizes)
+        // the catalog owns these buffers now, and a later stop(false) must not remove them
         writtenBufferIds.clear()
       }
     }

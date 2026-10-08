@@ -47,9 +47,7 @@ case class ShuffleBufferId(
  * Catalog for lookup of shuffle buffers by block ID
  *
  * @param mapIdsCanRepeat whether attempts of a map share its map id, as they do with
- *                        spark.shuffle.useOldFetchProtocol=true. Every attempt then writes the
- *                        same blocks, so readers are served only the first output committed for
- *                        each map, see commitMapOutput.
+ *                        spark.shuffle.useOldFetchProtocol=true; see commitMapOutput
  */
 class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging {
   /**
@@ -76,7 +74,8 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
 
   /**
    * Only when map ids can repeat: per registered shuffle, the output readers are served for each
-   * map id. The per-block lists still hold every attempt's buffers, so cleanup is unchanged.
+   * map id. The per-block lists hold every buffer not yet removed, committed or not, and cleanup
+   * goes through them.
    */
   private[this] val committedOutputs =
     new ConcurrentHashMap[Int, ConcurrentHashMap[Long, CommittedMapOutput]]
@@ -231,7 +230,9 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
     GpuDeviceManager.getDeviceId().foreach(Cuda.setDevice)
 
     if (mapIdsCanRepeat) {
-      // first, so that a map committing from now on fails rather than report freed output
+      // first, so that a commit that looks the shuffle up from now on fails rather than report
+      // freed output. A commit already past its lookup, or one into a registration made again
+      // for this dead shuffle, only adds a record that no reducer reads.
       committedOutputs.remove(shuffleId)
     }
     val info = activeShuffles.remove(shuffleId)
@@ -332,15 +333,16 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
   }
 
   /**
-   * Commits the output of one map attempt, when map ids can repeat. The first output committed
-   * for a map on this executor is the one readers are served, as Spark's IndexShuffleBlockResolver
-   * keeps the first committed attempt. A later attempt's buffers are removed, and its `sizes`
-   * are overwritten with the committed output's, which its MapStatus then reports.
+   * Commits the output of one map attempt, when map ids can repeat. Every attempt of a map then
+   * writes the same blocks, so readers are served only the first output committed for the map on
+   * this executor, as Spark's IndexShuffleBlockResolver keeps the first committed attempt. A
+   * later attempt's buffers are removed, and its `sizes` are overwritten with the committed
+   * output's, which its MapStatus then reports.
    *
    * @param bufferIds every buffer the attempt added, which the catalog owns once this returns
    * @param sizes the attempt's size of each partition, as its MapStatus reports them
-   * @throws IllegalStateException if the shuffle was unregistered, leaving the buffers with the
-   *                               caller
+   * @throws IllegalStateException if the shuffle was unregistered before the commit looked it
+   *                               up, leaving the buffers with the caller
    */
   def commitMapOutput(
       shuffleId: Int,
