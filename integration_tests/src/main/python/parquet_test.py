@@ -1193,10 +1193,16 @@ def test_parquet_read_nano_as_longs_31x(std_input_path):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.parquet(data_path))
 
+# Spark 5 enables nanosecond timestamp types by default when spark.testing is set. These tests
+# verify the legacy rejection behavior, so keep the preview feature disabled there.
+legacy_parquet_nanos_error_conf = copy_and_update(
+    original_parquet_file_reader_conf,
+    {'spark.sql.timestampNanosTypes.enabled': False} if is_spark_500_or_later() else {})
+
 @pytest.mark.skipif(is_before_spark_320(), reason='Spark 3.1.x supports reading timestamps in nanos')
 def test_parquet_read_nano_as_longs_false(std_input_path):
     data_path = "%s/timestamp-nanos.parquet" % (std_input_path)
-    conf = copy_and_update(original_parquet_file_reader_conf, {
+    conf = copy_and_update(legacy_parquet_nanos_error_conf, {
             'spark.sql.legacy.parquet.nanosAsLong': False })
     def read_timestamp_nano_parquet(spark):
         spark.read.parquet(data_path).collect()
@@ -1212,7 +1218,7 @@ def test_parquet_read_nano_as_longs_not_configured(std_input_path):
         spark.read.parquet(data_path).collect()
     assert_gpu_and_cpu_error(
         read_timestamp_nano_parquet,
-        conf=original_parquet_file_reader_conf,
+        conf=legacy_parquet_nanos_error_conf,
         error_message="Illegal Parquet type: INT64 (TIMESTAMP(NANOS,true))")
 
 @pytest.mark.skipif(is_before_spark_320(), reason='Spark 3.1.x supports reading timestamps in nanos')
