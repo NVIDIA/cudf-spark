@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids.delta.shims
 
-import com.databricks.sql.transaction.tahoe.DeltaLog
+import com.databricks.sql.transaction.tahoe.{DeltaLog, DeltaParquetFileFormat}
 import com.databricks.sql.transaction.tahoe.commands.{DeletionVectorUtils, MergeIntoCommand,
   MergeIntoCommandBase, MergeIntoCommandEdge}
 import com.databricks.sql.transaction.tahoe.rapids.{GpuDeltaLog, GpuLowShuffleMergeCommand,
@@ -39,19 +39,36 @@ object MergeIntoCommandMetaShim {
   private def tagForGpuCommon(
       meta: RapidsMeta[_, _, _],
       mergeCmd: MergeIntoCommandBase): Unit = {
+    val usePersistentDeletionVectors =
+      mergeCmd.conf.getConf(DeltaSQLConf.MERGE_USE_PERSISTENT_DELETION_VECTORS)
     tagPersistentDeletionVectorFallback(
       meta,
       mergeCmd.targetFileIndex.deltaLog,
-      mergeCmd.conf.getConf(DeltaSQLConf.MERGE_USE_PERSISTENT_DELETION_VECTORS))
+      usePersistentDeletionVectors,
+      mergeCmd.conf.getConf(DeltaSQLConf.DELETION_VECTORS_USE_METADATA_ROW_INDEX))
+    val targetSchema = mergeCmd.migratedSchema.getOrElse(mergeCmd.target.schema)
+    if (DeletionVectorUtils.deletionVectorsWritable(
+        mergeCmd.targetFileIndex.deltaLog.unsafeVolatileSnapshot) &&
+        usePersistentDeletionVectors &&
+        targetSchema.fieldNames.exists(mergeCmd.conf.resolver(
+          _, DeltaParquetFileFormat.ROW_INDEX_STRUCT_FIELD.name))) {
+      meta.willNotWorkOnGpu(
+        s"user column ${DeltaParquetFileFormat.ROW_INDEX_STRUCT_FIELD.name} " +
+          "conflicts with the DV row index")
+    }
   }
 
   private def tagPersistentDeletionVectorFallback(
       meta: RapidsMeta[_, _, _],
       deltaLog: DeltaLog,
-      usePersistentDeletionVectors: Boolean): Unit = {
+      usePersistentDeletionVectors: Boolean,
+      useMetadataRowIndex: Boolean): Unit = {
     if (DeletionVectorUtils.deletionVectorsWritable(deltaLog.unsafeVolatileSnapshot) &&
-        usePersistentDeletionVectors) {
-      meta.willNotWorkOnGpu("Deletion vectors are not supported on GPU")
+        usePersistentDeletionVectors &&
+        !(useMetadataRowIndex && meta.conf.isDeltaDeletionVectorPredicatePushdownEnabled)) {
+      meta.willNotWorkOnGpu(
+        "Persistent deletion vector writes on GPU require DBR metadata row indexes and " +
+          "native cuDF deletion-vector predicate pushdown")
     }
   }
 

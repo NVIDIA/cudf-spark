@@ -3285,6 +3285,12 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
    * @param fileBufsAndMeta the file HostMemoryBuffer read from a PartitionedFile
    * @return Option[ColumnarBatch]
    */
+  protected def readEmptySchemaBatch(meta: HostMemoryEmptyMetaData, rows: Int): ColumnarBatch = {
+    val nullColumns = meta.readSchema.fields.safeMap(f =>
+      GpuColumnVector.fromNull(rows, f.dataType).asInstanceOf[SparkVector])
+    new ColumnarBatch(nullColumns, rows)
+  }
+
   override def readBatches(fileBufsAndMeta: HostMemoryBuffersWithMetaDataBase):
   Iterator[ColumnarBatch] = fileBufsAndMeta match {
     case meta: HostMemoryEmptyMetaData =>
@@ -3295,9 +3301,7 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
       } else {
         // Someone is going to process this data, even if it is just a row count
         GpuSemaphore.acquireIfNecessary(TaskContext.get())
-        val nullColumns = meta.readSchema.fields.safeMap(f =>
-          GpuColumnVector.fromNull(rows, f.dataType).asInstanceOf[SparkVector])
-        new ColumnarBatch(nullColumns, rows)
+        readEmptySchemaBatch(meta, rows)
       }
 
       // we have to add partition values here for this batch, we already verified that
@@ -3847,9 +3851,7 @@ abstract class AbstractParquetPartitionReader(
         } else {
           // Someone is going to process this data, even if it is just a row count
           GpuSemaphore.acquireIfNecessary(TaskContext.get())
-          val nullColumns = readDataSchema.safeMap(f =>
-            GpuColumnVector.fromNull(numRows, f.dataType).asInstanceOf[SparkVector])
-          new SingleGpuColumnarBatchIterator(new ColumnarBatch(nullColumns.toArray, numRows))
+          readEmptySchemaBatches(currentChunkedBlocks, numRows)
         }
       } else {
         val colTypes = readDataSchema.fields.map(f => f.dataType)
@@ -3891,6 +3893,20 @@ abstract class AbstractParquetPartitionReader(
       totalNumRows: Long,
       chunkedBlocks: Seq[BlockMetaData]): Int = {
     Math.toIntExact(totalNumRows)
+  }
+
+  protected def readEmptySchemaBatch(
+      chunkedBlocks: Seq[BlockMetaData],
+      rows: Int): ColumnarBatch = {
+    val nullColumns = readDataSchema.safeMap(f =>
+      GpuColumnVector.fromNull(rows, f.dataType).asInstanceOf[SparkVector])
+    new ColumnarBatch(nullColumns.toArray, rows)
+  }
+
+  protected def readEmptySchemaBatches(
+      chunkedBlocks: Seq[BlockMetaData],
+      rows: Int): Iterator[ColumnarBatch] = {
+    new SingleGpuColumnarBatchIterator(readEmptySchemaBatch(chunkedBlocks, rows))
   }
 }
 

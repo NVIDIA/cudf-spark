@@ -1293,34 +1293,357 @@ def test_delta_merge_nullable_not_matched_by_source_condition(
     _assert_nullable_condition_result(spark_tmp_path, with_not_matched_by_source=True)
 
 
-@allow_non_gpu("ExecutedCommandExec", *delta_meta_allow)
+@allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not is_databricks173_or_later(),
-                    reason="Issue-specific deletion vector fallback coverage for Databricks 17.3+")
+                    reason="Persistent-DV MERGE acceleration requires Databricks 17.3+")
 @pytest.mark.skipif(not supports_delta_lake_deletion_vectors(),
                     reason="Delta Lake deletion vector support is required")
-def test_delta_merge_deletion_vector_db173_fallback(spark_tmp_path, spark_tmp_table_factory):
+def test_delta_merge_deletion_vector_db173(spark_tmp_path, spark_tmp_table_factory):
     conf = copy_and_update(
         delta_merge_enabled_conf,
-        {"spark.databricks.delta.merge.deletionVectors.persistent": "true"})
-
-    def checker(data_path, do_merge):
-        assert_gpu_fallback_write(do_merge, read_delta_path, data_path, "ExecutedCommandExec",
-                                  conf=conf)
+        {"spark.databricks.delta.merge.deletionVectors.persistent": "true",
+         "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
+         "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true"})
 
     merge_sql = "MERGE INTO {dest_table} " \
                 "USING {src_table} " \
                 "ON {src_table}.a == {dest_table}.a " \
                 "WHEN MATCHED THEN DELETE"
-    delta_sql_merge_test(spark_tmp_path, spark_tmp_table_factory,
-                         use_cdf=False, enable_deletion_vectors=True,
-                         src_table_func=lambda spark: unary_op_df(
-                             spark, SetValuesGen(IntegerType(), range(10))),
-                         dest_table_func=lambda spark: unary_op_df(
-                             spark, SetValuesGen(IntegerType(), range(20))),
-                         merge_sql=merge_sql,
-                         check_func=checker)
+    assert_delta_sql_merge_collect(
+        spark_tmp_path, spark_tmp_table_factory,
+        use_cdf=False, enable_deletion_vectors=True,
+        src_table_func=lambda spark: unary_op_df(
+            spark, SetValuesGen(IntegerType(), range(10))),
+        dest_table_func=lambda spark: unary_op_df(
+            spark, SetValuesGen(IntegerType(), range(20))),
+        merge_sql=merge_sql, compare_logs=False, conf=conf)
+
+
+# DBR can scan Delta table-state AddFiles through this CPU metadata operator.
+@allow_non_gpu("ColumnarToRowExec", "ExternalRDDScanExec", *delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="DBR 17.3 native DV metadata processing")
+@pytest.mark.parametrize("command", ["DELETE", "UPDATE", "MERGE"])
+@pytest.mark.parametrize("column_mapping", ["none", "name"])
+def test_delta_dml_dv_metadata_cpu_scope(spark_tmp_path, command, column_mapping):
+    conf = copy_and_update(delta_merge_enabled_conf, {
+        "spark.rapids.sql.command.DeleteCommand": "true",
+        "spark.rapids.sql.command.DeleteCommandEdge": "true",
+        "spark.rapids.sql.command.UpdateCommand": "true",
+        "spark.rapids.sql.command.UpdateCommandEdge": "true",
+        "spark.databricks.delta.delete.deletionVectors.persistent": "true",
+        "spark.databricks.delta.update.deletionVectors.persistent": "true",
+        "spark.databricks.delta.merge.deletionVectors.persistent": "true",
+        "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
+        "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true",
+        "spark.databricks.delta.autoCompact.enabled": "false",
+        "spark.databricks.delta.optimizeWrite.enabled": "false",
+    })
+    if column_mapping == "name":
+        conf = copy_and_update(conf, {
+            "spark.databricks.delta.properties.defaults.columnMapping.mode": "name",
+            "spark.databricks.delta.properties.defaults.minReaderVersion": "2",
+            "spark.databricks.delta.properties.defaults.minWriterVersion": "5",
+            "spark.sql.parquet.fieldId.read.enabled": "true"})
+    paths = {engine: spark_tmp_path + "/" + engine for engine in ("CPU", "GPU")}
+
+    def setup(spark):
+        for path in paths.values():
+            spark.range(1024, numPartitions=2).withColumn("v", f.col("id") * 7) \
+                .write.format("delta") \
+                .option("delta.enableDeletionVectors", "true") \
+                .option("delta.enableRowTracking", "false") \
+                .option("delta.autoOptimize.autoCompact", "false") \
+                .option("delta.autoOptimize.optimizeWrite", "false").save(path)
+            if column_mapping == "name":
+                properties = spark.sql(f"DESCRIBE DETAIL delta.`{path}`").first()["properties"]
+                assert properties["delta.columnMapping.mode"] == "name"
+            # Keep DV density below the runtime's 20% compaction threshold across all operations.
+            spark.sql(f"DELETE FROM delta.`{path}` WHERE pmod(id, 64) = 63").collect()
+
+    with_cpu_session(setup, conf=conf)
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    gpu_command = "Gpu" + ("MergeInto" if command == "MERGE" else command.title()) + "Command"
+
+    def run(spark, path, remainder):
+        enabled_before = spark.conf.get("spark.rapids.sql.enabled")
+        predicate = f"pmod(id, 16) = {remainder}"
+        if command == "DELETE":
+            sql = f"DELETE FROM delta.`{path}` WHERE {predicate}"
+        elif command == "UPDATE":
+            sql = f"UPDATE delta.`{path}` SET v = v + 10 WHERE {predicate}"
+        else:
+            sql = (f"MERGE INTO delta.`{path}` AS t "
+                   f"USING (SELECT id FROM range(1024) WHERE {predicate}) AS s "
+                   "ON t.id = s.id WHEN MATCHED THEN UPDATE SET t.v = t.v + 10")
+        result = spark.sql(sql).collect()
+        assert spark.conf.get("spark.rapids.sql.enabled") == enabled_before
+        return result
+
+    # Two operations on existing DVs verify that the metadata scope does not disable later DML.
+    for remainder in (0, 1):
+        cpu_result = with_cpu_session(
+            lambda spark: run(spark, paths["CPU"], remainder), conf=conf)
+        callback.startCapture()
+        try:
+            gpu_result = with_gpu_session(
+                lambda spark: run(spark, paths["GPU"], remainder), conf=conf)
+            plans = list(callback.getResultsWithTimeout(10000))
+        finally:
+            callback.endCapture()
+        assert_equal(cpu_result, gpu_result)
+        assert any(callback.contains(plan, gpu_command) for plan in plans)
+        assert any(callback.contains(plan, "GpuFileSourceScanExec") for plan in plans)
+        if command != "DELETE":
+            assert any(callback.contains(plan, "RapidsDeltaWrite") for plan in plans)
+
+        metadata_joins = []
+        for plan in plans:
+            output = plan.output().iterator()
+            names = set()
+            while output.hasNext():
+                names.add(output.next().name())
+            # File-statistics results, not a user-table join or the file-to-DV lookup.
+            if {"path", "stats"}.issubset(names) and (
+                    callback.contains(plan, "BroadcastHashJoinExec") or
+                    callback.contains(plan, "GpuBroadcastHashJoinExec")):
+                metadata_joins.append(plan)
+        assert metadata_joins, "No native DV statistics join captured"
+        for plan in metadata_joins:
+            assert not callback.contains(plan, "GpuBroadcastHashJoinExec"), str(plan)
+
+    for path in paths.values():
+        def check_dvs(spark):
+            history = spark.sql(f"DESCRIBE HISTORY delta.`{path}`") \
+                .where(f.col("operation") == command).orderBy(f.desc("version")).first()
+            assert history is not None, f"No {command} history entry for {path}"
+            prefix = "numTargetDeletionVectors" if command == "MERGE" else "numDeletionVectors"
+            metrics = history["operationMetrics"]
+            assert int(metrics.get(prefix + "Updated", 0)) > 0, \
+                f"{command} at {path} has no updated DVs: {metrics}"
+        with_cpu_session(check_dvs, conf=conf)
+    cpu_rows, gpu_rows = [with_cpu_session(
+        lambda spark: spark.read.format("delta").load(path).orderBy("id").collect(), conf=conf)
+        for path in paths.values()]
+    assert_equal(cpu_rows, gpu_rows)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="Persistent-DV command acceleration requires DBR 17.3+")
+@pytest.mark.parametrize(
+    "target_rows, expected_removed_partitions",
+    [pytest.param([(1, 10, 0), (2, 20, 0), (3, 30, 1)], 0, id="partial-file"),
+     pytest.param([(1, 10, 0), (2, 20, 1), (3, 30, 2)], 1, id="full-file")])
+def test_delta_merge_deletion_vector_removed_file_metrics(
+        spark_tmp_path, spark_tmp_table_factory, target_rows, expected_removed_partitions):
+    captured_plans = []
+
+    def assert_with_capture(do_merge, data_path, conf, expect_write=True):
+        cpu_result = with_cpu_session(lambda spark: do_merge(spark, data_path + "/CPU"), conf=conf)
+        gpu_result = assert_rapids_delta_write(
+            lambda spark: do_merge(spark, data_path + "/GPU"), conf=conf,
+            expected_command="GpuMergeIntoCommand", captured_plans_out=captured_plans)
+        assert_equal(cpu_result, gpu_result)
+
+    conf = copy_and_update(
+        delta_merge_enabled_conf,
+        {"spark.databricks.delta.merge.deletionVectors.persistent": "true",
+         "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
+         "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true",
+         "spark.databricks.delta.autoCompact.enabled": "false",
+         "spark.databricks.delta.optimizeWrite.enabled": "false"})
+    merge_sql = "MERGE INTO {dest_table} AS target USING {src_table} AS source " \
+                "ON target.id = source.id " \
+                "WHEN MATCHED THEN UPDATE SET target.v = source.v"
+    assert_delta_sql_merge_collect(
+        spark_tmp_path, spark_tmp_table_factory,
+        use_cdf=False, enable_deletion_vectors=True,
+        src_table_func=lambda spark: spark.createDataFrame([(1, 100)], "id INT, v INT"),
+        dest_table_func=lambda spark: spark.createDataFrame(
+            target_rows, "id INT, v INT, p INT").coalesce(1),
+        merge_sql=merge_sql, compare_logs=False, partition_columns=["p"], conf=conf,
+        assert_func=assert_with_capture)
+
+    command_plans = [node for plan in captured_plans for node in collect_plan_nodes(plan)
+                     if node.nodeName().startswith("GpuExecute GpuMergeIntoCommand")]
+    assert command_plans, "GPU MERGE command was not captured"
+    gpu_metrics = {key: plan_metric(command_plans[-1], key)
+                   for key in ["numTargetBytesRemoved", "numTargetPartitionsRemovedFrom"]}
+    assert all(value is not None for value in gpu_metrics.values()), gpu_metrics
+    # CPU may rewrite a file where GPU uses a DV; check both full and partial target files.
+    if expected_removed_partitions:
+        assert gpu_metrics["numTargetBytesRemoved"] > 0
+    else:
+        assert gpu_metrics["numTargetBytesRemoved"] == 0
+    assert gpu_metrics["numTargetPartitionsRemovedFrom"] == expected_removed_partitions
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="Persistent-DV MERGE acceleration requires DBR 17.3+")
+def test_delta_merge_insert_only_after_unmodified_match_metrics(
+        spark_tmp_path, spark_tmp_table_factory):
+    conf = copy_and_update(delta_merge_enabled_conf, {
+        "spark.databricks.delta.merge.deletionVectors.persistent": "true",
+        "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
+        "spark.databricks.delta.autoCompact.enabled": "false"})
+    captured_plans = []
+
+    def assert_with_capture(do_merge, data_path, conf, expect_write=True):
+        cpu_result = with_cpu_session(lambda spark: do_merge(spark, data_path + "/CPU"), conf=conf)
+        gpu_result = assert_rapids_delta_write(
+            lambda spark: do_merge(spark, data_path + "/GPU"), conf=conf,
+            expected_command="GpuMergeIntoCommand", captured_plans_out=captured_plans)
+        assert_equal(cpu_result, gpu_result)
+
+    assert_delta_sql_merge_collect(
+        spark_tmp_path, spark_tmp_table_factory,
+        use_cdf=False, enable_deletion_vectors=True,
+        src_table_func=lambda spark: spark.createDataFrame(
+            [(1, 100), (4, 400)], "id INT, v INT"),
+        dest_table_func=lambda spark: spark.createDataFrame(
+            [(1, 10), (2, 20), (3, 30)], "id INT, v INT").coalesce(1),
+        merge_sql="MERGE INTO {dest_table} AS target USING {src_table} AS source "
+                  "ON target.id = source.id "
+                  "WHEN MATCHED AND source.v < 0 THEN UPDATE SET target.v = source.v "
+                  "WHEN NOT MATCHED THEN INSERT (id, v) VALUES (source.id, source.v)",
+        compare_logs=False, conf=conf, assert_func=assert_with_capture)
+
+    command_plans = [node for plan in captured_plans for node in collect_plan_nodes(plan)
+                     if node.nodeName().startswith("GpuExecute GpuMergeIntoCommand")]
+    assert command_plans, "GPU MERGE command was not captured"
+    for key in ("numTargetFilesRemoved", "numTargetBytesRemoved",
+                "numTargetPartitionsRemovedFrom"):
+        assert plan_metric(command_plans[-1], key) == 0, key
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="Index-only persistent-DV scans require DBR 17.3+")
+@pytest.mark.parametrize("reader_type", ["MULTITHREADED", "PERFILE"])
+def test_delta_merge_dv_index_only_target_scan(spark_tmp_path, reader_type):
+    path = spark_tmp_path + "/DELTA_DATA"
+    conf = copy_and_update(delta_merge_enabled_conf, {
+        "spark.databricks.delta.merge.deletionVectors.persistent": "true",
+        "spark.databricks.delta.delete.deletionVectors.persistent": "true",
+        "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
+        "spark.databricks.delta.autoCompact.enabled": "false",
+        "spark.rapids.sql.format.parquet.reader.type": reader_type,
+        "spark.rapids.sql.reader.batchSizeRows": "1"})
+
+    def setup(spark):
+        setup_delta_dest_tables(
+            spark, path,
+            lambda session: session.createDataFrame(
+                [(1, 10, 0), (2, 20, 0), (3, 30, 0), (4, 40, 1)],
+                "id INT, v INT, p INT").coalesce(1),
+            use_cdf=False, enable_deletion_vectors=True, partition_columns=["p"])
+        for run in ("CPU", "GPU"):
+            spark.sql(f"DELETE FROM delta.`{path}/{run}` WHERE id = 2").collect()
+
+    def merge(spark, run):
+        spark.createDataFrame([(0,)], "p INT").createOrReplaceTempView("dv_index_source")
+        return spark.sql(
+            f"MERGE INTO delta.`{path}/{run}` AS target USING dv_index_source AS source "
+            "ON target.p = source.p WHEN MATCHED THEN UPDATE SET target.v = 100").collect()
+
+    with_cpu_session(setup, conf=conf)
+    cpu_result = with_cpu_session(lambda spark: merge(spark, "CPU"), conf=conf)
+    captured_plans = []
+    gpu_result = assert_rapids_delta_write(
+        lambda spark: merge(spark, "GPU"), conf=conf,
+        expected_command="GpuMergeIntoCommand", captured_plans_out=captured_plans)
+    assert_equal(cpu_result, gpu_result)
+    index_only_scans = [node for plan in captured_plans for node in collect_plan_nodes(plan)
+                        if node.getClass().getSimpleName() == "GpuFileSourceScanExec"
+                        and len(node.requiredSchema().fields()) == 1
+                        and node.requiredSchema().fields()[0].metadata().contains(
+                            "rapids.delta.internalRowIndex")
+                        and node.requiredSchema().fields()[0].metadata().getBoolean(
+                            "rapids.delta.internalRowIndex")]
+    assert index_only_scans, "No index-only GPU target scan was captured"
+    cpu_rows, gpu_rows = [with_cpu_session(
+        lambda spark, run=run: spark.read.format("delta").load(path + "/" + run)
+            .orderBy("id").collect(), conf=conf) for run in ("CPU", "GPU")]
+    assert [(row.id, row.v, row.p) for row in cpu_rows] == [
+        (1, 100, 0), (3, 100, 0), (4, 40, 1)]
+    assert_equal(cpu_rows, gpu_rows)
+
+
+@allow_non_gpu("ExecutedCommandExec,BroadcastHashJoinExec,ColumnarToRowExec,"
+               "BroadcastExchangeExec,DataWritingCommandExec",
+               delta_write_fallback_allow, *delta_meta_allow)
+@delta_lake
+@ignore_order
+@allow_non_gpu_delta_write_if(
+    True, reason="the command runs on the CPU by design; its jobs are planned by the plugin")
+@pytest.mark.skipif(not (is_databricks143() or is_databricks173_or_later()),
+                    reason="Databricks persistent-DV eligibility fallback coverage")
+@pytest.mark.parametrize("command", ["DELETE", "UPDATE", "MERGE"])
+@pytest.mark.parametrize(
+    "unsupported_conf",
+    [pytest.param({}, id="unsupported_dbr")]
+    if is_databricks143() else [
+        pytest.param(
+            {"spark.databricks.delta.deletionVectors.useMetadataRowIndex": "false"},
+            id="no_metadata_row_index"),
+        pytest.param(
+            {"spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "false"},
+            id="no_native_dv_pushdown")])
+def test_delta_dml_deletion_vector_databricks_fallback(
+        spark_tmp_path, spark_tmp_table_factory, command, unsupported_conf):
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    source_table = spark_tmp_table_factory.get()
+    persistent_dv_confs = {
+        "DELETE": "spark.databricks.delta.delete.deletionVectors.persistent",
+        "UPDATE": "spark.databricks.delta.update.deletionVectors.persistent",
+        "MERGE": "spark.databricks.delta.merge.deletionVectors.persistent"
+    }
+    conf = copy_and_update(delta_writes_enabled_conf, {
+        "spark.rapids.sql.command.DeleteCommand": "true",
+        "spark.rapids.sql.command.DeleteCommandEdge": "true",
+        "spark.rapids.sql.command.UpdateCommand": "true",
+        "spark.rapids.sql.command.UpdateCommandEdge": "true",
+        "spark.rapids.sql.command.MergeIntoCommand": "true",
+        "spark.rapids.sql.command.MergeIntoCommandEdge": "true",
+        "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
+        "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true",
+        persistent_dv_confs[command]: "true",
+        **unsupported_conf})
+
+    def setup_tables(spark):
+        setup_delta_dest_tables(
+            spark, data_path,
+            lambda session: unary_op_df(
+                session, SetValuesGen(IntegerType(), range(20))),
+            use_cdf=False, enable_deletion_vectors=True)
+
+    def write_func(spark, path):
+        if command == "DELETE":
+            return spark.sql("DELETE FROM delta.`{}` WHERE a < 10".format(path)).collect()
+        if command == "UPDATE":
+            return spark.sql(
+                "UPDATE delta.`{}` SET a = a + 100 WHERE a < 10".format(path)).collect()
+        spark.createDataFrame([(value,) for value in range(10)], "a INT") \
+            .createOrReplaceTempView(source_table)
+        return spark.sql(
+            "MERGE INTO delta.`{}` AS t USING {} AS s ON t.a = s.a "
+            "WHEN MATCHED THEN DELETE".format(path, source_table)).collect()
+
+    with_cpu_session(setup_tables)
+    assert_gpu_fallback_write(
+        write_func, read_delta_path, data_path, "ExecutedCommandExec", conf=conf)
 
 
 @allow_non_gpu("ExecutedCommandExec,BroadcastHashJoinExec,ColumnarToRowExec,BroadcastExchangeExec,DataWritingCommandExec", delta_write_fallback_allow, *delta_meta_allow)
@@ -1682,11 +2005,17 @@ def test_delta_merge_dv_internal_file_path_name_collisions(
         merge_sql=merge_sql, compare_logs=True, conf=delta_merge_enabled_conf)
 
 
-@allow_non_gpu("ExecutedCommandExec", *delta_meta_allow)
+@allow_non_gpu("ExecutedCommandExec,BroadcastHashJoinExec,ColumnarToRowExec,"
+               "BroadcastExchangeExec,DataWritingCommandExec",
+               delta_write_fallback_allow, *delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(is_databricks_runtime() or is_before_spark_353(),
-                    reason="OSS persistent-DV DML requires Delta 3.3+")
+@allow_non_gpu_delta_write_if(
+    True, reason="the persistent-DV name collision falls back by design")
+@pytest.mark.skipif(
+    not (is_databricks173_or_later() or
+         (not is_databricks_runtime() and not is_before_spark_353())),
+    reason="Persistent-DV DML requires DBR 17.3+ or OSS Delta 3.3+")
 @pytest.mark.parametrize("command", ["DELETE", "UPDATE", "MERGE"])
 @pytest.mark.parametrize("use_persistent_dv", [True, False], ids=idfn)
 def test_delta_dml_dv_internal_row_index_column_handling(
@@ -1705,6 +2034,8 @@ def test_delta_dml_dv_internal_row_index_column_handling(
         "spark.rapids.sql.command.UpdateCommandEdge": "true",
         "spark.rapids.sql.command.MergeIntoCommand": "true",
         "spark.rapids.sql.command.MergeIntoCommandEdge": "true",
+        "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
+        "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true",
         persistent_dv_confs[command]: str(use_persistent_dv).lower()})
 
     def dest_table_func(spark):
@@ -1800,13 +2131,48 @@ def test_delta_dv_read_user_internal_row_index_column(
         require_non_empty=True)
 
 
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="The native row-index name is specific to DBR 17.3+")
+def test_delta_dv_read_user_native_row_index_name(spark_tmp_path):
+    path = spark_tmp_path + "/DELTA_DATA"
+    conf = copy_and_update(delta_writes_enabled_conf, {
+        "spark.databricks.delta.delete.deletionVectors.persistent": "true",
+        "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
+        "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true"})
+
+    def setup(spark):
+        spark.createDataFrame(
+            [(101, 1), (202, 2), (303, 3)],
+            "`_tmp_metadata_row_index` LONG, k INT").coalesce(1) \
+            .write.format("delta").option("delta.enableDeletionVectors", "true").save(path)
+        spark.sql(f"DELETE FROM delta.`{path}` WHERE k = 2").collect()
+        assert spark.read.json(path + "/_delta_log/*.json") \
+            .where("add.deletionVector IS NOT NULL").count() > 0
+
+    with_cpu_session(setup, conf=conf)
+
+    def read_table(spark):
+        return spark.read.format("delta").load(path).select("_tmp_metadata_row_index", "k")
+
+    expected = with_cpu_session(lambda spark: read_table(spark).orderBy("k").collect(), conf=conf)
+    assert [(row[0], row[1]) for row in expected] == [(101, 1), (303, 3)]
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        read_table, exist_classes="GpuFileSourceScanExec", conf=conf,
+        require_non_empty=True)
+
+
 @allow_non_gpu_conditional(
     is_oss_delta_lake_40(), "BroadcastHashJoinExec", "BroadcastExchangeExec")
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(is_databricks_runtime() or is_before_spark_353(),
-                    reason="OSS persistent-DV MERGE requires Delta 3.3+")
+@pytest.mark.skipif(
+    not (is_databricks173_or_later() or
+         (not is_databricks_runtime() and not is_before_spark_353())),
+    reason="Persistent-DV MERGE requires DBR 17.3+ or OSS Delta 3.3+")
 def test_delta_merge_dv_many_touched_files(spark_tmp_path, spark_tmp_table_factory):
     def src_table_func(spark):
         return spark.range(0, 640, 10).selectExpr("CAST(id AS INT) AS k", "CAST(-1 AS INT) AS v")
@@ -1821,14 +2187,20 @@ def test_delta_merge_dv_many_touched_files(spark_tmp_path, spark_tmp_table_facto
         spark_tmp_path, spark_tmp_table_factory,
         use_cdf=False, enable_deletion_vectors=True,
         src_table_func=src_table_func, dest_table_func=dest_table_func,
-        merge_sql=merge_sql, compare_logs=False, conf=delta_merge_enabled_conf)
+        merge_sql=merge_sql, compare_logs=False,
+        conf=copy_and_update(delta_merge_enabled_conf, {
+            "spark.databricks.delta.merge.deletionVectors.persistent": "true",
+            "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
+            "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true"}))
 
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(is_databricks_runtime() or not is_oss_delta_lake_41_or_42(),
-                    reason="OSS NOT MATCHED BY SOURCE requires Delta 4.1+")
+@pytest.mark.skipif(
+    not (is_databricks173_or_later() or
+         (not is_databricks_runtime() and is_oss_delta_lake_41_or_42())),
+    reason="NOT MATCHED BY SOURCE with persistent DVs requires DBR 17.3+ or OSS Delta 4.1+")
 def test_delta_merge_not_matched_by_source_with_dv(spark_tmp_path, spark_tmp_table_factory):
     def src_table_func(spark):
         return spark.createDataFrame([(1, 100)], "k INT, v INT")
@@ -1844,4 +2216,87 @@ def test_delta_merge_not_matched_by_source_with_dv(spark_tmp_path, spark_tmp_tab
         spark_tmp_path, spark_tmp_table_factory,
         use_cdf=False, enable_deletion_vectors=True,
         src_table_func=src_table_func, dest_table_func=dest_table_func,
-        merge_sql=merge_sql, compare_logs=True, conf=delta_merge_enabled_conf)
+        merge_sql=merge_sql, compare_logs=not is_databricks_runtime(),
+        conf=copy_and_update(delta_merge_enabled_conf, {
+            "spark.databricks.delta.merge.deletionVectors.persistent": "true",
+            "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
+            "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true"}))
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="Persistent-DV MERGE acceleration requires DBR 17.3+")
+def test_delta_merge_dv_null_safe_unmatched_target(spark_tmp_path, spark_tmp_table_factory):
+    merge_sql = "MERGE INTO {dest_table} AS target USING {src_table} AS source " \
+                "ON target.k <=> source.k " \
+                "WHEN MATCHED THEN UPDATE SET target.v = source.v " \
+                "WHEN NOT MATCHED BY SOURCE AND target.k = 2 THEN DELETE"
+    assert_delta_sql_merge_collect(
+        spark_tmp_path, spark_tmp_table_factory,
+        use_cdf=False, enable_deletion_vectors=True,
+        src_table_func=lambda spark: spark.createDataFrame([(1, 100)], "k INT, v INT"),
+        dest_table_func=lambda spark: spark.createDataFrame(
+            [(None, 10), (1, 20), (2, 30)], "k INT, v INT").coalesce(1),
+        merge_sql=merge_sql, compare_logs=False,
+        conf=copy_and_update(delta_merge_enabled_conf, {
+            "spark.databricks.delta.merge.deletionVectors.persistent": "true",
+            "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
+            "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true"}))
+
+    def gpu_dv_count(spark):
+        path = spark_tmp_path + "/DELTA_DATA/GPU"
+        row = spark.sql(f"DESCRIBE HISTORY delta.`{path}`") \
+            .where("operation = 'MERGE'").orderBy("version", ascending=False).first()
+        return int(row["operationMetrics"].get("numTargetDeletionVectorsAdded", 0))
+
+    assert with_cpu_session(gpu_dv_count, conf=delta_merge_enabled_conf) > 0
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="Persistent-DV MERGE acceleration requires DBR 17.3+")
+def test_delta_merge_dv_null_safe_unmatched_source_ansi(
+        spark_tmp_path, spark_tmp_table_factory):
+    # The source-only NULL key must take the INSERT branch. Rechecking the null-safe ON condition
+    # against its null-filled target would otherwise evaluate the matched clause's 1 / 0.
+    merge_sql = "MERGE INTO {dest_table} AS target USING {src_table} AS source " \
+                "ON target.k <=> source.k " \
+                "WHEN MATCHED AND 1 / source.v > 0 THEN UPDATE SET target.v = source.v " \
+                "WHEN NOT MATCHED THEN INSERT (k, v) VALUES (source.k, source.v) " \
+                "WHEN NOT MATCHED BY SOURCE AND target.k = 99 THEN DELETE"
+    conf = copy_and_update(delta_merge_enabled_conf, {
+        "spark.sql.ansi.enabled": "true",
+        "spark.databricks.delta.merge.deletionVectors.persistent": "true",
+        "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
+        "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true"})
+    path = spark_tmp_path + "/DELTA_DATA/GPU"
+    with_cpu_session(lambda spark: setup_delta_dest_table(
+        spark, path,
+        lambda session: session.createDataFrame(
+            [(1, 10), (2, 20)], "k INT, v INT").coalesce(1),
+        use_cdf=False, enable_deletion_vectors=True), conf=conf)
+
+    def merge(spark):
+        source_table = spark_tmp_table_factory.get()
+        spark.createDataFrame([(1, 1), (None, 0)], "k INT, v INT") \
+            .createOrReplaceTempView(source_table)
+        return spark.sql(merge_sql.format(
+            dest_table=f"delta.`{path}`", src_table=source_table)).collect()
+
+    assert_rapids_delta_write(merge, conf=conf, expected_command="GpuMergeIntoCommand")
+
+    def gpu_result(spark):
+        rows = [(row["k"], row["v"]) for row in read_delta_path(spark, path).collect()]
+        history = spark.sql(f"DESCRIBE HISTORY delta.`{path}`") \
+            .where("operation = 'MERGE'").orderBy("version", ascending=False).first()
+        return rows, int(history["operationMetrics"].get(
+            "numTargetDeletionVectorsAdded", 0))
+
+    rows, dv_count = with_cpu_session(gpu_result, conf=conf)
+    assert sorted(rows, key=lambda row: (row[0] is None, row[0] or 0)) == [
+        (1, 1), (2, 20), (None, 0)]
+    assert dv_count > 0
