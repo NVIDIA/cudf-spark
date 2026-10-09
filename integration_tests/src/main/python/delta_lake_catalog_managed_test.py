@@ -14,6 +14,7 @@
 
 import json
 import os
+import re
 import stat
 import uuid
 from urllib.parse import urlparse
@@ -249,6 +250,11 @@ def _normalize_operation_metrics(metrics):
 
 def _normalize_operation_parameters(parameters):
     normalized = dict(parameters or {})
+    for key in ("predicate", "matchedPredicates", "notMatchedPredicates"):
+        value = normalized.get(key)
+        if value:
+            value = re.sub(r"catalog_managed_merge_source_[0-9a-f]+", "merge_source", value)
+            normalized[key] = re.sub(r"#[0-9]+", "#ref", value)
     properties = normalized.get("properties")
     if properties:
         decoded = json.loads(properties)
@@ -1392,44 +1398,74 @@ def test_catalog_managed_uc_shape_guard(unity_catalog_server):
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @unity_catalog
-def test_catalog_managed_delete_update_and_merge(unity_catalog_server):
-    _, table = _new_table_name("catalog_managed_dml")
+@pytest.mark.parametrize("persistent_dv", [False, True], ids=["rewrite", "persistent_dv"])
+def test_catalog_managed_delete_update_and_merge(unity_catalog_server, persistent_dv):
+    _, cpu_table = _new_table_name("catalog_managed_cpu_dml")
+    _, gpu_table = _new_table_name("catalog_managed_gpu_dml")
+    persistent_dv_value = str(persistent_dv).lower()
     conf = {
         **_catalog_conf(unity_catalog_server),
-        "spark.databricks.delta.delete.deletionVectors.persistent": "false",
-        "spark.databricks.delta.update.deletionVectors.persistent": "false",
-        "spark.databricks.delta.merge.deletionVectors.persistent": "false",
+        "spark.databricks.delta.delete.deletionVectors.persistent": persistent_dv_value,
+        "spark.databricks.delta.update.deletionVectors.persistent": persistent_dv_value,
+        "spark.databricks.delta.merge.deletionVectors.persistent": persistent_dv_value,
     }
 
     try:
-        _assert_catalog_gpu_write(
-            lambda spark: spark.sql(f"""
+        def create(spark, table):
+            return spark.sql(f"""
                 CREATE TABLE {table}
                 USING DELTA
                 TBLPROPERTIES (
                     '{_CATALOG_MANAGED_PROPERTY}' = 'supported',
                     'delta.enableChangeDataFeed' = 'true')
-                AS SELECT /*+ COALESCE(1) */ * FROM VALUES
-                    (1L, 'one'), (2L, 'two'), (3L, 'three') AS source(id, value)
-                """).collect(),
+                AS SELECT /*+ COALESCE(1) */ id, CAST(id AS STRING) AS value
+                FROM range(100)
+                """).collect()
+
+        with_cpu_session(lambda spark: create(spark, cpu_table), conf=conf)
+        _assert_catalog_gpu_write(lambda spark: create(spark, gpu_table), conf=conf)
+        _assert_catalog_tables_equivalent(
+            cpu_table, gpu_table, unity_catalog_server["tables_api"], conf)
+        before_detail = with_cpu_session(
+            lambda spark: spark.sql(f"DESCRIBE DETAIL {gpu_table}").first().asDict(), conf=conf)
+        before_catalog_id = unity_catalog_server["tables_api"].getTable(
+            gpu_table, None, None).getTableId()
+
+        with_cpu_session(
+            lambda spark: spark.sql(f"DELETE FROM {cpu_table} WHERE id = 1").collect(),
             conf=conf)
 
-        _assert_catalog_gpu_write(
-            lambda spark: spark.sql(f"DELETE FROM {table} WHERE id = 1").collect(),
-            conf=conf,
-            expected_command="GpuDeleteCommand",
-            expected_classes=["GpuFileSourceScanExec"])
+        def delete(spark):
+            return spark.sql(f"DELETE FROM {gpu_table} WHERE id = 1").collect()
+        if persistent_dv:
+            assert_rapids_gpu_delete_ran(
+                delete, conf=conf, expected_classes=["GpuFileSourceScanExec"])
+        else:
+            _assert_catalog_gpu_write(
+                delete, conf=conf, expected_command="GpuDeleteCommand",
+                expected_classes=["GpuFileSourceScanExec"])
+        _assert_latest_dv_write(gpu_table, conf, persistent_dv)
+        _assert_catalog_tables_equivalent(
+            cpu_table, gpu_table, unity_catalog_server["tables_api"], conf)
+
+        with_cpu_session(
+            lambda spark: spark.sql(
+                f"UPDATE {cpu_table} SET value = 'updated-two' WHERE id = 2").collect(),
+            conf=conf)
         _assert_catalog_gpu_write(
             lambda spark: spark.sql(
-                f"UPDATE {table} SET value = 'updated-two' WHERE id = 2").collect(),
+                f"UPDATE {gpu_table} SET value = 'updated-two' WHERE id = 2").collect(),
             conf=conf,
             expected_command="GpuUpdateCommand",
             expected_classes=["GpuFileSourceScanExec"])
+        _assert_latest_dv_write(gpu_table, conf, persistent_dv)
+        _assert_catalog_tables_equivalent(
+            cpu_table, gpu_table, unity_catalog_server["tables_api"], conf)
 
-        def merge(spark):
+        def merge(spark, table):
             source = f"catalog_managed_merge_source_{uuid.uuid4().hex}"
             spark.createDataFrame(
-                [(2, "merged-two"), (4, "four")], "id LONG, value STRING") \
+                [(3, "merged-three"), (100, "one-hundred")], "id LONG, value STRING") \
                 .createOrReplaceTempView(source)
             return spark.sql(f"""
                 MERGE INTO {table} AS target
@@ -1439,27 +1475,207 @@ def test_catalog_managed_delete_update_and_merge(unity_catalog_server):
                 WHEN NOT MATCHED THEN INSERT (id, value) VALUES (source.id, source.value)
                 """).collect()
 
+        with_cpu_session(lambda spark: merge(spark, cpu_table), conf=conf)
         _assert_catalog_gpu_write(
-            merge, conf=conf, expected_command="GpuMergeIntoCommand",
+            lambda spark: merge(spark, gpu_table),
+            conf=conf,
+            expected_command="GpuMergeIntoCommand",
             expected_classes=["GpuFileSourceScanExec"])
-        assert _table_rows(table, conf) == [
-            (2, "merged-two"), (3, "three"), (4, "four")]
-        _assert_three_dml_change_feed(table, conf)
+        _assert_latest_dv_write(gpu_table, conf, persistent_dv, merge=True)
+        _assert_catalog_tables_equivalent(
+            cpu_table, gpu_table, unity_catalog_server["tables_api"], conf)
+
+        def verify_rows(spark):
+            assert spark.table(gpu_table).count() == 100
+            rows = [tuple(row) for row in spark.sql(
+                f"SELECT id, value FROM {gpu_table} "
+                "WHERE id IN (1, 2, 3, 100) ORDER BY id").collect()]
+            assert rows == [
+                (2, "updated-two"), (3, "merged-three"), (100, "one-hundred")]
+
+        with_cpu_session(verify_rows, conf=conf)
+        _assert_three_dml_change_feed(cpu_table, conf)
+        _assert_three_dml_change_feed(gpu_table, conf)
+        after_detail = with_cpu_session(
+            lambda spark: spark.sql(f"DESCRIBE DETAIL {gpu_table}").first().asDict(), conf=conf)
+        assert after_detail["id"] == before_detail["id"]
+        assert after_detail["location"] == before_detail["location"]
+        assert after_detail["properties"]["delta.enableRowTracking"] == "true"
+        assert after_detail["properties"]["delta.enableInCommitTimestamps"] == "true"
+        assert unity_catalog_server["tables_api"].getTable(
+            gpu_table, None, None).getTableId() == before_catalog_id
     finally:
+        _drop_table(cpu_table, conf)
+        _drop_table(gpu_table, conf)
+
+
+def _assert_latest_dv_write(table, conf, expected, merge=False):
+    metrics = with_cpu_session(
+        lambda spark: dict(spark.sql(
+            f"DESCRIBE HISTORY {table} LIMIT 1").first()["operationMetrics"]), conf=conf)
+    prefix = "numTarget" if merge else "num"
+    changed_dvs = sum(int(metrics.get(key, "0")) for key in [
+        f"{prefix}DeletionVectorsAdded", f"{prefix}DeletionVectorsUpdated"])
+    assert (changed_dvs > 0) == expected, metrics
+    return metrics
+
+
+def _assert_unique_active_data_files(spark, table):
+    detail = spark.sql(f"DESCRIBE DETAIL {table}").first().asDict()
+    # Resolve through the catalog so the managed table's vended credentials remain in scope.
+    input_files = spark.table(table).inputFiles()
+    assert detail["numFiles"] == len(set(input_files)), \
+        "The Delta snapshot contains multiple active AddFiles for one physical path"
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@unity_catalog
+def test_catalog_managed_external_dv_failure_can_retry(unity_catalog_server):
+    """An external-DV write failure leaves the managed snapshot unchanged and retryable."""
+    _, table = _new_table_name("catalog_managed_external_dv_failure")
+    conf = {
+        **_catalog_conf(unity_catalog_server),
+        "spark.databricks.delta.delete.deletionVectors.persistent": "true",
+        "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
+        "spark.databricks.delta.optimizeWrite.enabled": "false",
+    }
+    credential_fs = spark_jvm().com.nvidia.spark.rapids.tests.delta.CredentialTestFileSystem
+
+    try:
+        _assert_catalog_gpu_write(
+            lambda spark: spark.sql(f"""
+                CREATE TABLE {table}
+                USING DELTA
+                TBLPROPERTIES ('{_CATALOG_MANAGED_PROPERTY}' = 'supported')
+                AS SELECT /*+ COALESCE(1) */ id,
+                    repeat(CAST(id AS STRING), 20) AS value
+                FROM range(100000)
+                """).collect(),
+            conf=conf)
+        before = with_cpu_session(
+            lambda spark: {
+                "catalog": _catalog_identity_state(unity_catalog_server["tables_api"], table),
+                "count": spark.table(table).count(),
+                "files": sorted(spark.table(table).inputFiles()),
+                "version": spark.sql(
+                    f"DESCRIBE HISTORY {table} LIMIT 1").first()["version"],
+            }, conf=conf)
+
+        credential_fs.failNextCreateEndingWith(".bin")
+        with pytest.raises(Exception, match="Injected create failure"):
+            with_gpu_session(
+                lambda spark: spark.sql(
+                    f"DELETE FROM {table} WHERE id % 2 = 0").collect(),
+                conf=conf)
+
+        after_failure = with_cpu_session(
+            lambda spark: {
+                "catalog": _catalog_identity_state(unity_catalog_server["tables_api"], table),
+                "count": spark.table(table).count(),
+                "files": sorted(spark.table(table).inputFiles()),
+                "version": spark.sql(
+                    f"DESCRIBE HISTORY {table} LIMIT 1").first()["version"],
+            }, conf=conf)
+        assert after_failure == before
+
+        assert_rapids_gpu_delete_ran(
+            lambda spark: spark.sql(
+                f"DELETE FROM {table} WHERE id % 2 = 0").collect(),
+            conf=conf,
+            expected_classes=["GpuFileSourceScanExec"])
+        metrics = _assert_latest_dv_write(table, conf, True)
+        assert int(metrics.get("numDeletionVectorsAdded", "0")) == 1, metrics
+        assert with_cpu_session(lambda spark: spark.table(table).count(), conf=conf) == 50000
+    finally:
+        credential_fs.clearInjectedFailure()
         _drop_table(table, conf)
 
 
-@allow_non_gpu("ExecutedCommandExec", *delta_meta_allow)
+@allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @unity_catalog
-def test_catalog_managed_persistent_dv_dml_falls_back(unity_catalog_server):
-    """Keep persistent-DV mutation out of the base PR until its dedicated support lands."""
-    _, table = _new_table_name("catalog_managed_persistent_dv_fallback")
+@pytest.mark.parametrize("use_metadata_row_index", [False, True],
+                         ids=["generated_row_index", "metadata_row_index"])
+def test_catalog_managed_mixed_dv_files_with_column_mapping(
+        unity_catalog_server, use_metadata_row_index):
+    """DML handles mapped columns and a mix of existing-DV and clean active files."""
+    _, table = _new_table_name("catalog_managed_mixed_dv_files")
     conf = {
         **_catalog_conf(unity_catalog_server),
         "spark.databricks.delta.delete.deletionVectors.persistent": "true",
         "spark.databricks.delta.update.deletionVectors.persistent": "true",
-        "spark.databricks.delta.merge.deletionVectors.persistent": "true",
+        "spark.databricks.delta.deletionVectors.useMetadataRowIndex":
+            str(use_metadata_row_index).lower(),
+        "spark.databricks.delta.optimizeWrite.enabled": "false",
+    }
+
+    try:
+        _assert_catalog_gpu_write(
+            lambda spark: spark.sql(f"""
+                CREATE TABLE {table}
+                USING DELTA
+                PARTITIONED BY (p)
+                TBLPROPERTIES (
+                    '{_CATALOG_MANAGED_PROPERTY}' = 'supported',
+                    'delta.columnMapping.mode' = 'name')
+                AS SELECT /*+ REPARTITION(2, p) */ id,
+                    CAST(id AS STRING) AS value, CAST(id % 2 AS INT) AS p
+                FROM range(10000)
+                """).collect(),
+            conf=conf)
+
+        assert_rapids_gpu_delete_ran(
+            lambda spark: spark.sql(f"DELETE FROM {table} WHERE id = 10").collect(),
+            conf=conf,
+            expected_classes=["GpuFileSourceScanExec"])
+        delete_metrics = _assert_latest_dv_write(table, conf, True)
+        assert int(delete_metrics.get("numDeletionVectorsAdded", "0")) == 1, delete_metrics
+
+        _assert_catalog_gpu_write(
+            lambda spark: spark.sql(f"""
+                UPDATE {table}
+                SET value = concat('updated-', CAST(id AS STRING))
+                WHERE id IN (20, 21)
+                """).collect(),
+            conf=conf,
+            expected_command="GpuUpdateCommand",
+            expected_classes=["GpuFileSourceScanExec"])
+        update_metrics = _assert_latest_dv_write(table, conf, True)
+        assert int(update_metrics.get("numDeletionVectorsAdded", "0")) >= 1, update_metrics
+        assert int(update_metrics.get("numDeletionVectorsUpdated", "0")) >= 1, update_metrics
+
+        def verify(spark):
+            assert spark.table(table).count() == 9999
+            assert [tuple(row) for row in spark.sql(f"""
+                SELECT id, value, p FROM {table}
+                WHERE id IN (10, 20, 21) ORDER BY id
+                """).collect()] == [
+                    (20, "updated-20", 0), (21, "updated-21", 1)]
+            detail = spark.sql(f"DESCRIBE DETAIL {table}").first().asDict()
+            assert detail["properties"]["delta.columnMapping.mode"] == "name"
+            _assert_unique_active_data_files(spark, table)
+
+        with_cpu_session(verify, conf=conf)
+    finally:
+        _drop_table(table, conf)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@unity_catalog
+def test_catalog_managed_repeated_dv_dml_with_split_file(unity_catalog_server):
+    """A second DV mutation combines all splits of the original managed-table file."""
+    _, table = _new_table_name("catalog_managed_split_dv_dml")
+    conf = {
+        **_catalog_conf(unity_catalog_server),
+        "spark.databricks.delta.delete.deletionVectors.persistent": "true",
+        "spark.databricks.delta.update.deletionVectors.persistent": "true",
+        "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
+        "spark.sql.files.maxPartitionBytes": "65536",
+        "spark.sql.files.openCostInBytes": "0",
+        "spark.hadoop.parquet.block.size": "65536",
+        "spark.sql.parquet.compression.codec": "uncompressed",
     }
 
     try:
@@ -1468,46 +1684,72 @@ def test_catalog_managed_persistent_dv_dml_falls_back(unity_catalog_server):
                 CREATE TABLE {table}
                 USING DELTA
                 TBLPROPERTIES ('{_CATALOG_MANAGED_PROPERTY}' = 'supported')
-                AS SELECT /*+ COALESCE(1) */ * FROM VALUES
-                    (1L, 'one'), (2L, 'two'), (3L, 'three') AS source(id, value)
+                AS SELECT /*+ COALESCE(1) */ id,
+                    repeat(CAST(id AS STRING), 20) AS value
+                FROM range(100000)
                 """).collect(),
             conf=conf)
 
-        _assert_catalog_command_fallback(
-            lambda spark: spark.sql(f"DELETE FROM {table} WHERE id = 1").collect(),
-            conf=conf)
+        assert_rapids_gpu_delete_ran(
+            lambda spark: spark.sql(f"DELETE FROM {table} WHERE id = 10").collect(),
+            conf=conf,
+            expected_classes=["GpuFileSourceScanExec"])
+        delete_metrics = _assert_latest_dv_write(table, conf, True)
+        assert int(delete_metrics.get("numDeletionVectorsAdded", "0")) == 1, delete_metrics
+        assert int(delete_metrics.get("numDeletionVectorsUpdated", "0")) == 0, delete_metrics
+        assert int(delete_metrics.get("numDeletionVectorsRemoved", "0")) == 0, delete_metrics
 
-        # The asymmetric settings catch accidental use of DELETE's flag for UPDATE tagging.
-        update_conf = {
-            **conf,
-            "spark.databricks.delta.delete.deletionVectors.persistent": "false",
-            "spark.databricks.delta.update.deletionVectors.persistent": "true",
-        }
-        _assert_catalog_command_fallback(
+        partitions = with_cpu_session(
+            lambda spark: spark.table(table).rdd.getNumPartitions(), conf=conf)
+        assert partitions > 1, f"Expected a split DV scan, found {partitions} input partition(s)"
+
+        _assert_catalog_gpu_write(
             lambda spark: spark.sql(
-                f"UPDATE {table} SET value = 'updated-two' WHERE id = 2").collect(),
-            conf=update_conf)
+                f"UPDATE {table} SET value = 'bulk-updated' WHERE id % 1000 = 0").collect(),
+            conf=conf,
+            expected_command="GpuUpdateCommand",
+            expected_classes=["GpuFileSourceScanExec"])
+        update_metrics = _assert_latest_dv_write(table, conf, True)
+        # Exactly one existing AddFile must be updated even though Delta also reports the
+        # newly serialized replacement descriptor in numDeletionVectorsAdded.
+        assert int(update_metrics.get("numDeletionVectorsUpdated", "0")) == 1, update_metrics
 
         def merge(spark):
-            source = f"catalog_managed_fallback_source_{uuid.uuid4().hex}"
-            spark.createDataFrame(
-                [(2, "merged-two"), (4, "four")], "id LONG, value STRING") \
+            source = f"catalog_managed_split_merge_source_{uuid.uuid4().hex}"
+            spark.range(100000).where("id % 1001 = 0") \
+                .selectExpr("id", "concat('merged-', cast(id as string)) AS value") \
                 .createOrReplaceTempView(source)
             return spark.sql(f"""
                 MERGE INTO {table} AS target
                 USING {source} AS source
                 ON target.id = source.id
                 WHEN MATCHED THEN UPDATE SET value = source.value
-                WHEN NOT MATCHED THEN INSERT (id, value) VALUES (source.id, source.value)
                 """).collect()
 
-        _assert_catalog_command_fallback(merge, conf=conf)
-        assert _table_rows(table, conf) == [
-            (2, "merged-two"), (3, "three"), (4, "four")]
-        metrics = with_cpu_session(
-            lambda spark: spark.sql(f"DESCRIBE HISTORY {table} LIMIT 3").collect(), conf=conf)
-        assert any(int(row["operationMetrics"].get("numDeletionVectorsAdded", "0")) > 0
-                   for row in metrics)
+        _assert_catalog_gpu_write(
+            merge, conf=conf, expected_command="GpuMergeIntoCommand",
+            expected_classes=["GpuFileSourceScanExec"])
+        merge_metrics = _assert_latest_dv_write(table, conf, True, merge=True)
+        assert int(merge_metrics.get(
+            "numTargetDeletionVectorsUpdated", "0")) == 1, merge_metrics
+
+        def verify(spark):
+            assert spark.table(table).count() == 99999
+            rows = [tuple(row) for row in spark.sql(
+                f"SELECT id, value FROM {table} WHERE id IN (10, 1001, 90000) "
+                "ORDER BY id").collect()]
+            assert rows == [(1001, "merged-1001"), (90000, "bulk-updated")]
+            assert spark.sql(f"""
+                SELECT * FROM {table}
+                WHERE id % 1000 = 0 AND value = 'bulk-updated'
+                """).count() == 99
+            assert spark.sql(f"""
+                SELECT * FROM {table}
+                WHERE id % 1001 = 0 AND value = concat('merged-', CAST(id AS STRING))
+                """).count() == 100
+            _assert_unique_active_data_files(spark, table)
+
+        with_cpu_session(verify, conf=conf)
     finally:
         _drop_table(table, conf)
 
