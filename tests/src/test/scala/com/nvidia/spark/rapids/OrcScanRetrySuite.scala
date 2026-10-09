@@ -32,7 +32,8 @@ class OrcScanRetrySuite extends RmmSparkRetrySuiteBase {
   private val timestampSchema = StructType(Seq(StructField("a", TimestampType)))
   private val longSchema = StructType(Seq(StructField("a", LongType)))
   private val shanghaiZone = ZoneId.of("Asia/Shanghai")
-  private val decodedShanghaiTimestampUs = 21087883873L
+  // The native ORC reader folds in the negative nanos borrow for resolved writer timezones.
+  private val decodedShanghaiTimestampUs = 21086883873L
   private val expectedShanghaiTimestampUs = -7713116127L
   private val expectedShanghaiIntegerTimestampUs = -28800000000L
 

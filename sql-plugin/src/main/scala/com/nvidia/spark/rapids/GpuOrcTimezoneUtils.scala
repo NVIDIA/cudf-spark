@@ -71,10 +71,12 @@ object GpuOrcTimezoneUtils {
    * Rebase ORC legacy dates and timestamps considering writer and reader timezones.
    *
    * Uses the fused JNI kernel `GpuTimeZoneDB.convertOrcTimestampToSpark` for proleptic-calendar
-   * files. Legacy-calendar files reconstruct the writer-specific ORC timestamp before applying
-   * Spark's Julian-to-Gregorian rebase. Both paths preserve ORC's negative nanos borrow.
+   * files. cuDF has already decided ORC's negative nanos borrow in the writer timezone's ORC epoch
+   * frame. JNI then applies the remaining writer-to-reader timezone conversion and Spark's
+   * historical java.util.TimeZone-to-java.time rebase. Legacy-calendar files apply the timezone
+   * conversion before Spark's Julian-to-Gregorian rebase.
    *
-   * @param input the input table (timestamps read as UTC via ignoreTimezoneInStripeFooter)
+   * @param input the input table (timestamps read with ignoreTimezoneInStripeFooter)
    * @param writerTimezone the resolved writer timezone from the ORC stripe footer
    * @param writerUsedProlepticGregorian whether the writer used the proleptic Gregorian calendar
    * @return table with rebased date/time columns; input is closed
@@ -93,14 +95,12 @@ object GpuOrcTimezoneUtils {
    * Legacy dates are rebased from the hybrid Julian/Gregorian calendar to the proleptic
    * Gregorian calendar. Proleptic dates are retained unchanged.
    *
-   * cuDF reads ORC timestamps with `ignoreTimezoneInStripeFooter`, so the base_timestamp
-   * is computed in UTC. ORC Java computes base_timestamp in the *writer* timezone, so the
-   * millis passed to `convertBetweenTimezones` already encode the writer TZ base offset.
-   *
-   * To match ORC Java, timestamp conversion first applies the writer TZ base offset, recomputes
-   * the negative nanos borrow, and applies any writer-to-reader TZ delta. Proleptic-calendar
-   * files also use the fused historical java.util.TimeZone-to-java.time correction; legacy files
-   * instead apply Spark's timezone-specific Julian-to-Gregorian rebase.
+   * cuDF reads ORC timestamps with `ignoreTimezoneInStripeFooter`, but still uses the writer
+   * timezone's ORC epoch to decide the negative nanos borrow. JNI consumes that decoded value
+   * without recomputing the borrow and applies the remaining writer-to-reader timezone
+   * conversion. Proleptic-calendar files also use the fused historical
+   * java.util.TimeZone-to-java.time correction; legacy files instead apply Spark's
+   * timezone-specific Julian-to-Gregorian rebase.
    */
   private def rebaseWithWriterTimezone(
       input: Table,
@@ -183,10 +183,11 @@ object GpuOrcTimezoneUtils {
   }
 
   /**
-   * Match the full Spark ORC timestamp path after reconstructing the writer-specific ORC epoch.
-   * Legacy-calendar files use Spark's timezone-specific Julian-to-Gregorian rebase map. Files
-   * already written with the proleptic calendar only need the java.util.TimeZone versus java.time
-   * rule correction from the ORC materialization path.
+   * Match the full Spark ORC timestamp path after cuDF decides the negative nanos borrow in the
+   * writer timezone's ORC epoch frame. JNI applies the remaining writer-to-reader conversion.
+   * Legacy-calendar files then use Spark's timezone-specific Julian-to-Gregorian rebase map.
+   * Files already written with the proleptic calendar instead use the java.util.TimeZone versus
+   * java.time rule correction from the ORC materialization path.
    */
   private def convertOrcTimestamp(
       col: ColumnView,

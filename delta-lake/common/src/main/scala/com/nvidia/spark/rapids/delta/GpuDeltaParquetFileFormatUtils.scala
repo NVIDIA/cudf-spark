@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -46,17 +46,16 @@ object GpuDeltaParquetFileFormatUtils {
   val FILE_PATH_COL: String = "_metadata_file_path"
   val FILE_PATH_FIELD: StructField = StructField(FILE_PATH_COL, StringType, nullable = false)
 
-  /**
-   * Add a metadata column to the iterator. Currently only support [[METADATA_ROW_IDX_COL]].
-   */
+  /** Add the requested row-index metadata column to the iterator. */
   def addMetadataColumnToIterator(
       schema: StructType,
       delVector: Option[Roaring64Bitmap],
       input: Iterator[ColumnarBatch],
       maxBatchSize: Int,
-      delVectorScatterTimeMetric: GpuMetric
+      delVectorScatterTimeMetric: GpuMetric,
+      metadataRowIndexColumnName: String = METADATA_ROW_IDX_COL
   ): Iterator[ColumnarBatch] = {
-    val metadataRowIndexCol = schema.fieldNames.indexOf(METADATA_ROW_IDX_COL)
+    val metadataRowIndexCol = schema.fieldNames.indexOf(metadataRowIndexColumnName)
     val delRowIdx = schema.fieldNames.indexOf(METADATA_ROW_DEL_COL)
     if (metadataRowIndexCol == -1 && delRowIdx == -1) {
       return input
