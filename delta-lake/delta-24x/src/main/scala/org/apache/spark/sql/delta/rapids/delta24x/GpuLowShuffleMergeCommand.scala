@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * This file was derived from MergeIntoCommand.scala
  * in the Delta Lake project at https://github.com/delta-io/delta.
@@ -522,6 +522,8 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
     .makeMetricUpdateUDF("numTargetRowsNotMatchedBySourceUpdated")
   private val incrInsertedCountExpr: Expression = context.cmd
     .makeMetricUpdateUDF("numTargetRowsInserted")
+  private val incrCopiedCountExpr: Expression = context.cmd
+    .makeMetricUpdateUDF("numTargetRowsCopied")
   private val incrDeletedCountExpr: Expression = context.cmd
     .makeMetricUpdateUDF("numTargetRowsDeleted")
   private val incrDeletedMatchedCountExpr: Expression = context.cmd
@@ -909,7 +911,8 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
    * 4. Target rows which are deleted
    */
   private def getModifiedDF(touchedFiles: Map[String, (Roaring64Bitmap, AddFile)]): DataFrame = {
-    val sourceDF = this.sourceDF
+    // The write pass updates numSourceRowsInSecondScan, not the discovery counter.
+    val sourceDF = Dataset.ofRows(context.spark, context.cmd.source)
       .withColumn(SOURCE_ROW_PRESENT_COL, new Column(incrSourceRowCountExpr))
 
     val targetDF = getTouchedTargetDF(touchedFiles)
@@ -981,7 +984,7 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
           Literal.FalseLiteral :+
           Literal.TrueLiteral :+
           Literal(null) :+
-          Literal.TrueLiteral
+          incrCopiedCountExpr
       }
       if (context.cmd.matchedClauses.isEmpty) {
         // If there is not matched clause, this is insert only, we should delete this row.
@@ -1024,6 +1027,7 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
   private def getUnmodifiedDF(touchedFiles: Map[String, (Roaring64Bitmap, AddFile)]): DataFrame = {
     getTouchedTargetDF(touchedFiles)
       .filter(!col(METADATA_ROW_DEL_COL))
+      .filter(Column(incrCopiedCountExpr))
       .drop(TARGET_ROW_PRESENT_COL, METADATA_ROW_DEL_COL)
   }
 }

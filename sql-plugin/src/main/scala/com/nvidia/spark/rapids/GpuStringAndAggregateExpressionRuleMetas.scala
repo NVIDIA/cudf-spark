@@ -578,9 +578,11 @@ case class PercentileRuleMeta(
     r: DataFromReplacementRule)
   extends TypedImperativeAggExprMeta[Percentile](c, conf, p, r) {
   override def tagAggForGpu(): Unit = {
-    if (!SparkShimImpl.isExactPercentileInputTypeSupported(c.child.dataType)) {
-      willNotWorkOnGpu(
-        "exact percentile for floating-point inputs does not match Spark 5 interpolation semantics")
+    if (c.reverse) {
+      willNotWorkOnGpu("exact percentile with descending ordering is not supported on GPU")
+    }
+    if (c.frequencyExpression.nullable) {
+      willNotWorkOnGpu("exact percentile with a nullable frequency is not supported on GPU")
     }
 
     // Check if the input percentage can be supported on GPU.

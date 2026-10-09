@@ -339,6 +339,29 @@ ability to
 fall back to the CPU when reading an unsupported compression format, and will error out in that
 case.
 
+## Delta Lake low shuffle merge on Databricks Runtime 17.3
+
+Low shuffle merge is disabled by default. To enable it on Databricks Runtime 17.3, set
+`spark.rapids.sql.delta.lowShuffleMerge.enabled=true` and the Parquet reader to `PERFILE`.
+The default remains disabled because Delta Lake 2.4 does not support low shuffle merge
+with change data feed enabled.
+
+On Databricks Runtime 17.3, tables with existing deletion vectors fall back to classic
+GPU merge before low shuffle merge builds temporary deletion vectors. The existing
+CPU fallback for MERGE operations configured to write persistent deletion vectors
+is unchanged.
+
+Tables with row tracking enabled fall back to classic GPU merge, even when
+[`spark.rapids.sql.delta.lowShuffleMerge.enabled`](additional-functionality/advanced_configs.md#sql.delta.lowShuffleMerge.enabled)
+is `true`. Databricks Runtime 17.3 exposes nullable row-tracking metadata fields that
+the GPU scans required by low shuffle merge cannot currently replace. The classic
+merge path preserves row IDs and row commit versions; enabling low shuffle merge
+does not provide the low-shuffle optimization for these tables.
+
+The row-tracking regression currently verifies this fallback, not native low-shuffle
+row-tracking execution. Supporting that execution path and adding a regression that
+forbids fallback remain follow-up work under [#11079](https://github.com/NVIDIA/cudf-spark/issues/11079).
+
 ## JSON
 
 JSON, despite being a standard format, has some ambiguity in it. Spark also offers the ability to allow 
@@ -912,14 +935,6 @@ The GPU implementation of `approximate_percentile` uses
 distribution. The results are not bit-for-bit identical with the Apache Spark implementation of
 `approximate_percentile`. This feature is enabled by default and can be disabled by setting
 `spark.rapids.sql.expression.ApproximatePercentile=false`.
-
-## Exact Percentile
-
-On Spark 5.0 and later, exact `percentile` aggregation over `FLOAT` or `DOUBLE` input falls back
-to CPU. Spark 5.0 changed its interpolation formula, and the GPU implementation does not yet match
-the resulting `NaN` and infinity semantics. Exact `percentile` over integral input remains GPU
-accelerated. Native GPU support for the Spark 5.0 interpolation behavior is tracked by
-[issue-15516](https://github.com/NVIDIA/cudf-spark/issues/15516).
 
 ## Conditionals and operations with side effects (ANSI mode)
 

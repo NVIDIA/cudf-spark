@@ -16,6 +16,7 @@
 
 package com.nvidia.spark.rapids
 
+import com.nvidia.spark.rapids.jni.Histogram.PercentileInterpolation
 import org.apache.hadoop.fs.FileStatus
 import org.apache.parquet.schema.MessageType
 
@@ -63,7 +64,9 @@ trait SparkShims {
 
   def canonicalizeArraySortComparator(expr: Expression): Expression = expr.canonicalized
 
-  def isExactPercentileInputTypeSupported(dataType: DataType): Boolean = true
+  // Spark releases before SPARK-57982 interpolate by weighting both endpoints.
+  def exactPercentileInterpolation: PercentileInterpolation =
+    PercentileInterpolation.WEIGHTED_ENDPOINTS
 
   def isExpressionStateful(expr: Expression): Boolean = false
 

@@ -29,6 +29,8 @@ import org.scalatestplus.mockito.MockitoSugar
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.rapids.execution.TrampolineUtil
+import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.types.{DataType, LongType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
 
@@ -87,6 +89,50 @@ class WithRetrySuite
         verify(myItems.head, times(1)).close()
         verify(myItems.last, times(0)).close()
         myItems(1).close()
+      }
+    }
+  }
+
+  test("withRetry can close a single input before its first attempt") {
+    val input = mock[AutoCloseable]
+    withResource(withRetry(input, splitPolicy = null) { _ =>
+      fail("Closing an unused retry iterator must not execute the operation")
+    }) { attempts =>
+      assert(attempts.hasNext)
+      attempts.close()
+      assert(!attempts.hasNext)
+    }
+    verify(input, times(1)).close()
+  }
+
+  for (consume <- Seq(false, true)) {
+    test(s"withRetry closes from another task-completion callback, consumed=$consume") {
+      var completed = false
+      val context = new MockTaskContext(1, partitionId = 0) {
+        override def isCompleted(): Boolean = completed
+      }
+      TrampolineUtil.setTaskContext(context)
+      val input = mock[AutoCloseable]
+      try {
+        withResource(withRetry(input, splitPolicy = null)(_ => 1)) { attempts =>
+          ScalableTaskCompletion.onTaskCompletion(context) {
+            attempts.close()
+          }
+          if (consume) assert(attempts.next() == 1)
+          completed = true
+          context.markTaskComplete()
+          assert(!attempts.hasNext)
+        }
+        verify(input, times(1)).close()
+      } finally {
+        try {
+          if (!completed) {
+            completed = true
+            context.markTaskComplete()
+          }
+        } finally {
+          TrampolineUtil.unsetTaskContext()
+        }
       }
     }
   }
@@ -418,6 +464,39 @@ class WithRetrySuite
       assert(lastSplitSize >= minValue)
       assert(lastSplitSize == (initialValue / (2 * (numSplits - 1))))
     }
+  }
+
+  test("splitSpillableInHalfByRows preserves values and releases GPU allocations") {
+    val baseline = Rmm.getTotalBytesAllocated
+    val toSplit = withResource(new Table.TestBuilder()
+      .column(5L, null.asInstanceOf[java.lang.Long], 3L, 1L, 9L).build()) { table =>
+      spy(SpillableColumnarBatch(GpuColumnVector.from(table, Array[DataType](LongType)), -1))
+    }
+    withResource(splitSpillableInHalfByRows(toSplit)) { halves =>
+      verify(toSplit, times(1)).close()
+      assert(halves.map(_.numRows()) == Seq(2, 3))
+      val values = halves.flatMap { half =>
+        withResource(half.getColumnarBatch()) { batch =>
+          withResource(batch.column(0).asInstanceOf[GpuColumnVector].getBase.copyToHost()) { col =>
+            (0 until batch.numRows()).map(i => if (col.isNull(i)) None else Some(col.getLong(i)))
+          }
+        }
+      }
+      assert(values == Seq(Some(5L), None, Some(3L), Some(1L), Some(9L)))
+    }
+    assert(Rmm.getTotalBytesAllocated == baseline)
+  }
+
+  test("splitSpillableInHalfByRows closes its input when splitting runs out of memory") {
+    val baseline = Rmm.getTotalBytesAllocated
+    val toSplit = buildBatch
+    RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
+      RmmSpark.OomInjectionType.GPU.ordinal, 0)
+    intercept[GpuRetryOOM] {
+      splitSpillableInHalfByRows(toSplit)
+    }
+    verify(toSplit, times(1)).close()
+    assert(Rmm.getTotalBytesAllocated == baseline)
   }
 
   test("splitSpillableInHalfByRows splits a rows-only batch by row count") {

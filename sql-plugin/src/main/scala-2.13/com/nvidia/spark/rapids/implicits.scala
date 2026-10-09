@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -56,6 +56,10 @@ object RapidsPluginImplicits {
           try {
             autoCloseable.close()
           } catch {
+            case suppressed: InterruptedException =>
+              e.addSuppressed(suppressed)
+              // It is not rethrown, so restore the interrupt status that its wait cleared.
+              Thread.currentThread().interrupt()
             case suppressed: Throwable => e.addSuppressed(suppressed)
           }
         } else {
@@ -65,30 +69,60 @@ object RapidsPluginImplicits {
     }
   }
 
+  /**
+   * The close failures of one AutoCloseableSeq.safeClose call. It is created on the first
+   * failure, so a call in which every close succeeds allocates nothing for it.
+   */
+  private final class CloseFailures(error: Throwable) {
+    private var first: Throwable = error
+    private var interrupted = false
+
+    def add(e: Throwable): Unit = if (first == null) {
+      first = e
+    } else {
+      first.addSuppressed(e)
+      interrupted |= e.isInstanceOf[InterruptedException]
+    }
+
+    def finish(): Unit = {
+      if (interrupted) {
+        // A suppressed InterruptedException is not rethrown, so restore the interrupt status
+        // its wait cleared. Every close has been attempted, so this cannot cut one short.
+        Thread.currentThread().interrupt()
+      }
+      if (error == null) {
+        // an exception happened while we were trying to safely close
+        // resources, throw the exception to alert the caller
+        throw first
+      }
+    }
+  }
+
   implicit class AutoCloseableSeq[A <: AutoCloseable](val in: collection.Iterable[A]) {
     /**
      * safeClose: Is an implicit on a sequence of AutoCloseable classes that tries to close each
      * element of the sequence, even if prior close calls fail. In case of failure in any of the
      * close calls, an Exception is thrown containing the suppressed exceptions (getSuppressed),
-     * if any.
+     * if any. If an InterruptedException is suppressed rather than thrown, the thread's interrupt
+     * status is set again once every close has been attempted.
      */
     def safeClose(error: Throwable = null): Unit = if (in != null) {
-      var closeException: Throwable = null
+      var failures: CloseFailures = null
       in.foreach { element =>
         if (element != null) {
           try {
             element.close()
           } catch {
-            case e: Throwable if error != null => error.addSuppressed(e)
-            case e: Throwable if closeException == null => closeException = e
-            case e: Throwable => closeException.addSuppressed(e)
+            case e: Throwable =>
+              if (failures == null) {
+                failures = new CloseFailures(error)
+              }
+              failures.add(e)
           }
         }
       }
-      if (closeException != null) {
-        // an exception happened while we were trying to safely close
-        // resources, throw the exception to alert the caller
-        throw closeException
+      if (failures != null) {
+        failures.finish()
       }
     }
 

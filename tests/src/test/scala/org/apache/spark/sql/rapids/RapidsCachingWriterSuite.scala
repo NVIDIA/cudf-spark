@@ -78,32 +78,43 @@ class RapidsCachingWriterSuite extends RmmSparkRetrySuiteBase with MockitoSugar 
     }
   }
 
+  /** A writer that exposes the per-partition sizes its MapStatus reports. */
+  private class SizedWriter(
+      handle: GpuShuffleHandle[Int, ColumnarBatch],
+      mapId: Long,
+      catalog: ShuffleBufferCatalog)
+    extends RapidsCachingWriter[Int, ColumnarBatch](mock[BlockManager], handle, mapId,
+      new ShuffleWriteMetrics, catalog, None, Map(METRIC_DATA_SIZE -> new SQLMetric("size"))) {
+    def partitionSizes: Seq[Long] = sizes.toList
+    def numRecordedBuffers: Int = writtenBufferIds.size
+  }
+
   private def newWriter(
       catalog: ShuffleBufferCatalog,
       shuffleId: Int,
-      mapId: Long): RapidsCachingWriter[Int, ColumnarBatch] = {
+      mapId: Long): SizedWriter = {
     val dependency = mock[GpuShuffleDependency[Int, ColumnarBatch, ColumnarBatch]]
     when(dependency.partitioner).thenReturn(new HashPartitioner(numPartitions))
-    val metrics = Map(METRIC_DATA_SIZE -> new SQLMetric("size"))
     val handle = new GpuShuffleHandle[Int, ColumnarBatch](
       new BaseShuffleHandle(shuffleId, dependency), dependency)
     // the shuffle manager registers the shuffle before it builds a writer for it
     catalog.registerShuffle(shuffleId)
-    new RapidsCachingWriter(mock[BlockManager], handle, mapId, new ShuffleWriteMetrics,
-      catalog, None, metrics)
+    new SizedWriter(handle, mapId, catalog)
   }
 
   /**
    * Feeds `inputs` to the writer, building each batch when the writer asks for it, as an
    * upstream operator does, then fails the map task's input if `thenFail`. `afterFirstBatch` runs
-   * once the first batch is cached. Afterwards the batches are closed as the shuffle exchange
-   * closes them, except compressed ones, which the catalog has already closed.
+   * once the first batch is cached, and `afterLastBatch` once every batch is. Afterwards the
+   * batches are closed as the shuffle exchange closes them, except compressed ones, which the
+   * catalog has already closed.
    */
   private def write(
       writer: RapidsCachingWriter[Int, ColumnarBatch],
       inputs: Seq[Input],
       thenFail: Boolean = false,
-      afterFirstBatch: () => Unit = () => ()): Unit = {
+      afterFirstBatch: () => Unit = () => (),
+      afterLastBatch: () => Unit = () => ()): Unit = {
     val built = new ArrayBuffer[ColumnarBatch]()
     val records = inputs.iterator.zipWithIndex.map { case (input, i) =>
       if (i == 1) {
@@ -114,7 +125,14 @@ class RapidsCachingWriterSuite extends RmmSparkRetrySuiteBase with MockitoSugar 
       (input.partId, batch)
     }
     val failure = new Iterator[(Int, ColumnarBatch)] {
-      override def hasNext: Boolean = thenFail
+      private var reachedEnd = false
+      override def hasNext: Boolean = {
+        if (!reachedEnd) {
+          reachedEnd = true
+          afterLastBatch()
+        }
+        thenFail
+      }
       override def next(): (Int, ColumnarBatch) =
         throw new IllegalStateException("injected map task failure")
     }
@@ -386,5 +404,78 @@ class RapidsCachingWriterSuite extends RmmSparkRetrySuiteBase with MockitoSugar 
       assertResult(0)(numDeviceHandles)
       assertConsistent(catalog, 0)
     }
+  }
+
+  // With spark.shuffle.useOldFetchProtocol=true every attempt of a map partition writes the same
+  // blocks, and the executor serves the first attempt to commit, as Spark's sort shuffle does.
+  private val firstAttempt = Seq(Input(0, 50, Packed), Input(0, 51, Compressed),
+    Input(1, 52, NoColumns), Input(3, 53, Packed))
+  private val laterAttempt = Seq(Input(0, 60, Packed), Input(1, 61, Packed),
+    Input(1, 62, NoColumns), Input(2, 63, Compressed))
+
+  test("when map ids repeat, a later attempt is discarded and reports the first one's sizes") {
+    // The first attempt's task fails after its write returned, so the driver never gets its
+    // MapStatus and runs the map again on the same executor.
+    val catalog = new ShuffleBufferCatalog(mapIdsCanRepeat = true)
+    val first = newWriter(catalog, 1, 7L)
+    succeed(first, firstAttempt)
+    // a task can still fail after stop(true), and a committed output must survive its stop(false)
+    assert(first.stop(false).isEmpty)
+    val later = newWriter(catalog, 1, 7L)
+    succeed(later, laterAttempt)
+    assertReadable(catalog, 1, 7L, firstAttempt)
+    assertGone(catalog, 1, 7L, Seq(Input(2, 0, NoColumns)))
+    assertResult(first.partitionSizes)(later.partitionSizes)
+    assertResult(0L)(later.partitionSizes(2))
+    assertResult(firstAttempt.count(_.deviceBacked))(numDeviceHandles)
+    assertConsistent(catalog, firstAttempt.size)
+    catalog.unregisterShuffle(1)
+    assertResult(0)(numDeviceHandles)
+    assertConsistent(catalog, 0)
+  }
+
+  test("when map ids repeat, an attempt that failed without stop(false) is never read") {
+    // Spark calls stop(false) only for an Exception, so an Error leaves the output cached.
+    val catalog = new ShuffleBufferCatalog(mapIdsCanRepeat = true)
+    assertThrows[IllegalStateException](write(newWriter(catalog, 1, 7L), firstAttempt,
+      thenFail = true))
+    succeed(newWriter(catalog, 1, 7L), laterAttempt)
+    assertReadable(catalog, 1, 7L, laterAttempt)
+    assertGone(catalog, 1, 7L, Seq(Input(3, 0, NoColumns)))
+    catalog.unregisterShuffle(1)
+    assertResult(0)(numDeviceHandles)
+    assertConsistent(catalog, 0)
+  }
+
+  test("when map ids repeat, an overlapping attempt that commits second is discarded") {
+    // A zombie task of an earlier stage attempt can run beside the resubmitted one.
+    val catalog = new ShuffleBufferCatalog(mapIdsCanRepeat = true)
+    val zombie = newWriter(catalog, 1, 7L)
+    val running = newWriter(catalog, 1, 7L)
+    write(zombie, laterAttempt, afterFirstBatch = () => {
+      succeed(running, firstAttempt)
+      // the zombie's first batch is cached in a block the running attempt also wrote
+      assertReadable(catalog, 1, 7L, firstAttempt)
+    })
+    assert(zombie.stop(true).isDefined)
+    assertReadable(catalog, 1, 7L, firstAttempt)
+    assertResult(running.partitionSizes)(zombie.partitionSizes)
+    assertResult(firstAttempt.count(_.deviceBacked))(numDeviceHandles)
+    assertConsistent(catalog, firstAttempt.size)
+    catalog.unregisterShuffle(1)
+    assertResult(0)(numDeviceHandles)
+    assertConsistent(catalog, 0)
+  }
+
+  test("when map ids repeat, a commit after unregisterShuffle leaves the output to stop(false)") {
+    // the shuffle can be unregistered while a zombie or cancelled map task is still writing
+    val catalog = new ShuffleBufferCatalog(mapIdsCanRepeat = true)
+    val writer = newWriter(catalog, 1, 7L)
+    assertThrows[IllegalStateException](write(writer, firstAttempt,
+      afterLastBatch = () => catalog.unregisterShuffle(1)))
+    assertResult(firstAttempt.size)(writer.numRecordedBuffers)
+    assert(writer.stop(false).isEmpty)
+    assertResult(0)(numDeviceHandles)
+    assertConsistent(catalog, 0)
   }
 }

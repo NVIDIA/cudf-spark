@@ -1771,6 +1771,11 @@ class RapidsCachingWriter[K, V](
       }
       metricsReporter.incBytesWritten(bytesWritten)
       metricsReporter.incRecordsWritten(recordsWritten)
+      if (catalog.mapIdsCanRepeat) {
+        catalog.commitMapOutput(handle.shuffleId, mapId, writtenBufferIds, sizes)
+        // the catalog owns these buffers now, and a later stop(false) must not remove them
+        writtenBufferIds.clear()
+      }
     }
   }
 
@@ -2050,7 +2055,7 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
               // cast the handle with specific generic types due to type-erasure
               gpuDep.asInstanceOf[GpuShuffleDependency[K, V, V]])
             // we need to track this mapId so we can clean it up later on unregisterShuffle
-            trackMapTaskForCleanup(handle.shuffleId, context.taskAttemptId())
+            trackMapTaskForCleanup(handle.shuffleId, mapId)
             // in most scenarios, the pools have already started, except for local mode
             // here we try to start them if we see they haven't
             RapidsShuffleInternalManagerBase.startThreadPoolIfNeeded(

@@ -19,9 +19,13 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
+import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.datasources.v2.GroupPartitionsExec
 
 object GpuGroupPartitionsShims {
+  // Spark 4.2 re-derives the grouping when its child changes.
+  def plannedChildPartitioning(groupPartitions: GroupPartitionsExec): Option[Partitioning] = None
+
   def expectedPartitionKeyCount(groupPartitions: GroupPartitionsExec): Option[Int] = {
     groupPartitions.expectedPartitionKeys.map(_.size)
   }

@@ -23,7 +23,7 @@ import com.nvidia.spark.rapids.RowBasedShuffleChecksumConf
 import com.nvidia.spark.rapids.shims.ShuffleManagerShimUtils
 
 import org.apache.spark.{SparkConf, SparkEnv}
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{config, Logging}
 import org.apache.spark.sql.internal.SQLConf
 
 class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
@@ -49,8 +49,8 @@ class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
 
   def init(): Unit = {
     if (isRapidsShuffleConfigured) {
-      shuffleCatalog =
-          new ShuffleBufferCatalog()
+      shuffleCatalog = new ShuffleBufferCatalog(
+        mapIdsCanRepeat = SparkEnv.get.conf.get(config.SHUFFLE_USE_OLD_FETCH_PROTOCOL))
       shuffleReceivedBufferCatalog =
           new ShuffleReceivedBufferCatalog()
       // Initialize MultithreadedShuffleBufferCatalog for MULTITHREADED mode when:

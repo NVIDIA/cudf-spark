@@ -258,6 +258,11 @@ class GpuOrcWriter(
   extends ColumnarOutputWriter(context, dataSchema, NvtxRegistry.FILE_FORMAT_WRITE, true,
     statsTrackers, debugOutputPath, holdGpuBetweenBatches, useAsyncWrite, fileIO) {
 
+  // Encoding-phase GPU OOMs can be retried, but cuDF also allocates for statistics after
+  // writing stripes to the sink. A late OOM can still replay an advanced ORC writer, as before
+  // this change, because the JNI buffer count cannot detect unflushed native state changes.
+  override protected def canRetryGpuOomFromNativeWrite: Boolean = true
+
   override val tableWriter: TableWriter = {
     val builder = SchemaUtils
       .writerOptionsFromSchema(ORCWriterOptions.builder(), dataSchema, nullable = false)

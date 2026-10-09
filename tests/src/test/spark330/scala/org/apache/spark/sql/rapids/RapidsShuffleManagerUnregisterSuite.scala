@@ -39,13 +39,18 @@ spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids
 
 import org.mockito.ArgumentMatchers.{anyInt, anyLong}
-import org.mockito.Mockito.{never, verify}
+import org.mockito.Mockito.{never, verify, when}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatestplus.mockito.MockitoSugar
 
-import org.apache.spark.SparkConf
-import org.apache.spark.shuffle.{IndexShuffleBlockResolver, ShuffleBlockResolver}
+import org.apache.spark.{HashPartitioner, SparkConf, TaskContext}
+import org.apache.spark.shuffle.{BaseShuffleHandle, IndexShuffleBlockResolver,
+  ShuffleBlockResolver, ShuffleWriteMetricsReporter}
+import org.apache.spark.shuffle.api.ShuffleExecutorComponents
+import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.rapids.shims.GpuShuffleBlockResolver
+import org.apache.spark.sql.vectorized.ColumnarBatch
+import org.apache.spark.storage.BlockManager
 import org.apache.spark.util.collection.OpenHashSet
 
 /**
@@ -133,5 +138,41 @@ class RapidsShuffleManagerUnregisterSuite extends AnyFunSuite with MockitoSugar 
       verify(mockIsbr).removeDataByMap(shuffleId, mid)
     }
     assert(result)
+  }
+
+  test("unregisterShuffle removes the files of a multithreaded writer's map id") {
+    // With spark.shuffle.useOldFetchProtocol=true the map id is the partition id rather than the
+    // task attempt id, and the writer names its shuffle files by map id.
+    val mockIsbr = mock[IndexShuffleBlockResolver]
+    val conf = newConf().set("spark.rapids.shuffle.multiThreaded.writer.threads", "1")
+    val manager =
+      new TestableRapidsShuffleManager(conf, new GpuShuffleBlockResolver(mockIsbr, null)) {
+        override protected lazy val blockManager: BlockManager = mock[BlockManager]
+        override lazy val execComponents: Option[ShuffleExecutorComponents] =
+          Some(mock[ShuffleExecutorComponents])
+      }
+    val shuffleId = 7
+    val mapId = 3L
+    val taskAttemptId = 1003L
+    val dependency = mock[GpuShuffleDependency[Int, ColumnarBatch, ColumnarBatch]]
+    when(dependency.useMultiThreadedShuffle).thenReturn(true)
+    when(dependency.shuffleId).thenReturn(shuffleId)
+    when(dependency.partitioner).thenReturn(new HashPartitioner(2))
+    when(dependency.serializer).thenReturn(new TestColumnarBatchSerializer)
+    when(dependency.metrics).thenReturn(Map.empty[String, SQLMetric])
+    val context = mock[TaskContext]
+    when(context.taskAttemptId()).thenReturn(taskAttemptId)
+    try {
+      val writer = manager.getWriter[Int, ColumnarBatch](
+        new BaseShuffleHandle(shuffleId, dependency), mapId, context,
+        mock[ShuffleWriteMetricsReporter])
+      assert(writer.stop(false).isEmpty)
+      assert(manager.unregisterShuffle(shuffleId))
+      verify(mockIsbr).removeDataByMap(shuffleId, mapId)
+      verify(mockIsbr, never()).removeDataByMap(shuffleId, taskAttemptId)
+    } finally {
+      // getWriter starts the writer and reader pools
+      RapidsShuffleInternalManagerBase.stopThreadPool()
+    }
   }
 }
