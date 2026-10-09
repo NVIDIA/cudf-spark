@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids.io.async
 
-import java.util.concurrent.{Callable, ExecutorService, Future, TimeUnit}
+import java.util.concurrent.{Callable, ExecutorService, Future, FutureTask, RejectedExecutionException, TimeUnit}
 
 import org.apache.spark.sql.rapids.{ColumnarWriteTaskStatsTracker, GpuWriteTaskStatsTracker}
 
@@ -66,22 +66,41 @@ class ThrottlingExecutor(executor: ExecutorService, throttler: TrafficController
     updateStats(stats)
   }
 
+  private class ThrottledFutureTask[T](task: Task[T]) extends FutureTask[T](task) {
+    override def done(): Unit = {
+      throttler.taskCompleted(task)
+    }
+  }
+
   def submit[T](callable: Callable[T], hostMemoryBytes: Long): Future[T] = {
     val task = new Task[T](hostMemoryBytes, callable)
     blockUntilTaskRunnable(task)
 
-    executor.submit(() => {
-      try {
-        task.call()
-      } finally {
-        throttler.taskCompleted(task)
-      }
-    })
+    val futureTask = new ThrottledFutureTask[T](task)
+    try {
+      executor.execute(futureTask)
+      futureTask
+    } catch {
+      case e: RejectedExecutionException =>
+        // The task was admitted by the TrafficController but never handed to a worker.
+        // Canceling completes the FutureTask and releases the admission through done().
+        futureTask.cancel(false)
+        throw e
+    }
   }
 
   def shutdownNow(timeout: Long, timeUnit: TimeUnit): Unit = {
     updateStats(stats)
-    executor.shutdownNow()
+    val pendingTasks = executor.shutdownNow().iterator()
+    while (pendingTasks.hasNext) {
+      pendingTasks.next() match {
+        case task: ThrottledFutureTask[_] =>
+          // shutdownNow returns tasks that never started. Cancel them so their
+          // TrafficController admission is released through done().
+          task.cancel(false)
+        case _ =>
+      }
+    }
     executor.awaitTermination(timeout, timeUnit)
   }
 }
