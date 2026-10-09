@@ -104,6 +104,7 @@ def test_collate_count_fallback(collate_type):
 
 
 @pytest.mark.skipif(is_before_spark_400(), reason="Spark versions before 400 do not support collate")
+@allow_non_gpu_conditional(is_spark_500_or_later(), "HashAggregateExec")
 @allow_non_gpu("SortAggregateExec", "ShuffleExchangeExec", "SortExec", "ColumnarToRowExec", "FileSourceScanExec")
 def test_collate_using_table_fallback(spark_tmp_table_factory):
     table = spark_tmp_table_factory.get()
