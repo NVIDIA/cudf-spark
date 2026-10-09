@@ -21,6 +21,7 @@ import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
 import com.nvidia.spark.rapids.iceberg.IcebergDeletionVector;
 import com.nvidia.spark.rapids.iceberg.Iceberg19PlusShimUtils;
+import com.nvidia.spark.rapids.iceberg.parquet.ColumnAction;
 import com.nvidia.spark.rapids.iceberg.parquet.converter.ParquetUnshader;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import org.apache.hadoop.fs.Path;
@@ -28,11 +29,13 @@ import org.apache.iceberg.*;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.StorageCredential;
 import org.apache.iceberg.io.SupportsStorageCredentials;
+import org.apache.iceberg.schema.SchemaWithPartnerVisitor;
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions;
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.iceberg.spark.SparkUtil;
 import org.apache.iceberg.spark.source.GpuSparkCopyOnWriteScan;
 import org.apache.iceberg.spark.source.GpuSparkScan;
+import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.PartitionUtil;
 import org.apache.spark.sql.connector.read.Scan;
@@ -109,5 +112,11 @@ public class ShimUtilsImpl extends Iceberg19PlusShimUtils {
             RapidsConf rapidsConf,
             boolean queryUsesInputFile) {
         return GpuSparkCopyOnWriteScan.create(cpuScan, rapidsConf, queryUsesInputFile);
+    }
+
+    @Override
+    public SchemaWithPartnerVisitor<Type, ColumnAction> newActionBuildingVisitor(
+            Map<Integer, ?> idToConstant) {
+        return new VariantActionBuildingVisitor(idToConstant);
     }
 }

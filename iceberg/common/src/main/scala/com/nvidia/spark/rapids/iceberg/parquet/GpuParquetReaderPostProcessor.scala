@@ -427,7 +427,7 @@ private[iceberg] object MissingFieldActionBuilder {
  * Uses SchemaWithPartnerVisitor where partner is the corresponding file schema type.
  * Tracks current field context to handle missing primitives properly.
  */
-private class ActionBuildingVisitor(
+private[iceberg] class ActionBuildingVisitor(
     idToConstant: JMap[Integer, _]
 ) extends SchemaWithPartnerVisitor[Type, ColumnAction] {
 
@@ -576,10 +576,7 @@ private class ActionBuildingVisitor(
     }
   }
 
-  override def primitive(
-      primitive: Type.PrimitiveType,
-      partner: Type): ColumnAction = {
-    val expectedType = SparkSchemaUtil.convert(primitive)
+  protected def leaf(expectedType: DataType, partner: Type): ColumnAction = {
     val fieldId = currentField.fieldId()
 
     // Lineage columns may be physically present but contain nulls that must inherit
@@ -593,7 +590,7 @@ private class ActionBuildingVisitor(
 
     if (partner != null) {
       // Partner exists - check for type promotion
-      val fileType = SparkSchemaUtil.convert(partner.asPrimitiveType())
+      val fileType = SparkSchemaUtil.convert(partner)
       if (DataType.equalsStructurally(expectedType, fileType)) {
         PassThrough
       } else {
@@ -609,6 +606,12 @@ private class ActionBuildingVisitor(
         currentField.isOptional,
         idToConstant)
     }
+  }
+
+  override def primitive(
+      primitive: Type.PrimitiveType,
+      partner: Type): ColumnAction = {
+    leaf(SparkSchemaUtil.convert(primitive), partner)
   }
 }
 
@@ -756,7 +759,7 @@ class GpuParquetReaderPostProcessor(
 
   // Pre-compute action tree by visiting expected schema with file schema as partner
   private lazy val rootAction: ColumnAction = buildActionTimeMetric.ns {
-    val visitor = new ActionBuildingVisitor(idToConstant)
+    val visitor = ShimUtils.newActionBuildingVisitor(idToConstant)
     val accessors = new FileSchemaAccessors()
     SchemaWithPartnerVisitor.visit(
       expectedSchema.asStruct(),
