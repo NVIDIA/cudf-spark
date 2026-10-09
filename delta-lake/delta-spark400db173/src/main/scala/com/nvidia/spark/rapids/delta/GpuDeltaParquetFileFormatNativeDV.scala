@@ -117,10 +117,13 @@ case class GpuDeltaParquetFileFormatNativeDV(
    * Parquet reader after name mapping rewrites.
    */
   override def prepareSchema(inputSchema: StructType): StructType = {
-    val schema = DeltaColumnMapping.createPhysicalSchema(
-      inputSchema, referenceSchema, columnMappingMode)
-    if (columnMappingMode == NameMapping) {
-      SchemaMergingUtils.transformColumns(schema) { (_, field, _) =>
+    // The generated row index is not a table column and has no column-mapping entry.
+    val dataSchema = StructType(inputSchema.filterNot(
+      GpuDeltaParquetFileFormatBase.isGpuRowIndexColumn))
+    val mappedSchema = DeltaColumnMapping.createPhysicalSchema(
+      dataSchema, referenceSchema, columnMappingMode)
+    val physicalSchema = if (columnMappingMode == NameMapping) {
+      SchemaMergingUtils.transformColumns(mappedSchema) { (_, field, _) =>
         field.copy(metadata = new MetadataBuilder()
           .withMetadata(field.metadata)
           .remove(DeltaColumnMapping.PARQUET_FIELD_ID_METADATA_KEY)
@@ -128,8 +131,13 @@ case class GpuDeltaParquetFileFormatNativeDV(
           .build())
       }
     } else {
-      schema
+      mappedSchema
     }
+    val mappedFields = physicalSchema.iterator
+    StructType(inputSchema.map { field =>
+      if (GpuDeltaParquetFileFormatBase.isGpuRowIndexColumn(field)) field
+      else mappedFields.next()
+    })
   }
 
   /**

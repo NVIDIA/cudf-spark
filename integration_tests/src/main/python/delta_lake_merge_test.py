@@ -1327,7 +1327,8 @@ def test_delta_merge_deletion_vector_db173(spark_tmp_path, spark_tmp_table_facto
 @pytest.mark.skipif(not is_databricks173_or_later(),
                     reason="DBR 17.3 native DV metadata processing")
 @pytest.mark.parametrize("command", ["DELETE", "UPDATE", "MERGE"])
-def test_delta_dml_dv_metadata_cpu_scope(spark_tmp_path, command):
+@pytest.mark.parametrize("column_mapping", ["none", "name"])
+def test_delta_dml_dv_metadata_cpu_scope(spark_tmp_path, command, column_mapping):
     conf = copy_and_update(delta_merge_enabled_conf, {
         "spark.rapids.sql.command.DeleteCommand": "true",
         "spark.rapids.sql.command.DeleteCommandEdge": "true",
@@ -1341,6 +1342,12 @@ def test_delta_dml_dv_metadata_cpu_scope(spark_tmp_path, command):
         "spark.databricks.delta.autoCompact.enabled": "false",
         "spark.databricks.delta.optimizeWrite.enabled": "false",
     })
+    if column_mapping == "name":
+        conf = copy_and_update(conf, {
+            "spark.databricks.delta.properties.defaults.columnMapping.mode": "name",
+            "spark.databricks.delta.properties.defaults.minReaderVersion": "2",
+            "spark.databricks.delta.properties.defaults.minWriterVersion": "5",
+            "spark.sql.parquet.fieldId.read.enabled": "true"})
     paths = {engine: spark_tmp_path + "/" + engine for engine in ("CPU", "GPU")}
 
     def setup(spark):
@@ -1351,6 +1358,9 @@ def test_delta_dml_dv_metadata_cpu_scope(spark_tmp_path, command):
                 .option("delta.enableRowTracking", "false") \
                 .option("delta.autoOptimize.autoCompact", "false") \
                 .option("delta.autoOptimize.optimizeWrite", "false").save(path)
+            if column_mapping == "name":
+                properties = spark.sql(f"DESCRIBE DETAIL delta.`{path}`").first()["properties"]
+                assert properties["delta.columnMapping.mode"] == "name"
             # Keep DV density below the runtime's 20% compaction threshold across all operations.
             spark.sql(f"DELETE FROM delta.`{path}` WHERE pmod(id, 64) = 63").collect()
 
@@ -1556,8 +1566,11 @@ def test_delta_merge_dv_index_only_target_scan(spark_tmp_path, reader_type):
     assert_equal(cpu_result, gpu_result)
     index_only_scans = [node for plan in captured_plans for node in collect_plan_nodes(plan)
                         if node.getClass().getSimpleName() == "GpuFileSourceScanExec"
-                        and list(node.requiredSchema().fieldNames()) ==
-                        ["_tmp_metadata_row_index"]]
+                        and len(node.requiredSchema().fields()) == 1
+                        and node.requiredSchema().fields()[0].metadata().contains(
+                            "rapids.delta.internalRowIndex")
+                        and node.requiredSchema().fields()[0].metadata().getBoolean(
+                            "rapids.delta.internalRowIndex")]
     assert index_only_scans, "No index-only GPU target scan was captured"
     cpu_rows, gpu_rows = [with_cpu_session(
         lambda spark, run=run: spark.read.format("delta").load(path + "/" + run)
@@ -2259,17 +2272,23 @@ def test_delta_merge_dv_null_safe_unmatched_source_ansi(
         "spark.databricks.delta.merge.deletionVectors.persistent": "true",
         "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
         "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true"})
-    assert_delta_sql_merge_collect(
-        spark_tmp_path, spark_tmp_table_factory,
-        use_cdf=False, enable_deletion_vectors=True,
-        src_table_func=lambda spark: spark.createDataFrame(
-            [(1, 1), (None, 0)], "k INT, v INT"),
-        dest_table_func=lambda spark: spark.createDataFrame(
+    path = spark_tmp_path + "/DELTA_DATA/GPU"
+    with_cpu_session(lambda spark: setup_delta_dest_table(
+        spark, path,
+        lambda session: session.createDataFrame(
             [(1, 10), (2, 20)], "k INT, v INT").coalesce(1),
-        merge_sql=merge_sql, compare_logs=False, conf=conf)
+        use_cdf=False, enable_deletion_vectors=True), conf=conf)
+
+    def merge(spark):
+        source_table = spark_tmp_table_factory.get()
+        spark.createDataFrame([(1, 1), (None, 0)], "k INT, v INT") \
+            .createOrReplaceTempView(source_table)
+        return spark.sql(merge_sql.format(
+            dest_table=f"delta.`{path}`", src_table=source_table)).collect()
+
+    assert_rapids_delta_write(merge, conf=conf, expected_command="GpuMergeIntoCommand")
 
     def gpu_result(spark):
-        path = spark_tmp_path + "/DELTA_DATA/GPU"
         rows = [(row["k"], row["v"]) for row in read_delta_path(spark, path).collect()]
         history = spark.sql(f"DESCRIBE HISTORY delta.`{path}`") \
             .where("operation = 'MERGE'").orderBy("version", ascending=False).first()
