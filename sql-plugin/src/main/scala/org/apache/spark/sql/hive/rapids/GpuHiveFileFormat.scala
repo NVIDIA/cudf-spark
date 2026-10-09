@@ -254,6 +254,9 @@ class GpuHiveParquetWriter(override val path: String, dataSchema: StructType,
   extends ColumnarOutputWriter(context, dataSchema, NvtxRegistry.FILE_FORMAT_WRITE, true,
     statsTrackers, debugOutputPath, false, false, fileIO) {
 
+  // Hive Parquet uses the same cuDF writer and JNI sink as GpuParquetWriter.
+  override protected def canRetryGpuOomFromNativeWrite: Boolean = true
+
   override protected val tableWriter: CudfTableWriter = {
     val optionsBuilder = SchemaUtils
       .writerOptionsFromSchema(ParquetWriterOptions.builder(), dataSchema,

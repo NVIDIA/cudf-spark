@@ -18,16 +18,20 @@ package org.apache.spark.sql.rapids
 import java.io.{IOException, OutputStream}
 import java.util.concurrent.{ExecutorService, TimeUnit}
 
-import ai.rapids.cudf.{HostMemoryBuffer, Rmm, RmmAllocationMode, TableWriter}
-import com.nvidia.spark.rapids.{ColumnarOutputWriter, ColumnarOutputWriterFactory, GpuColumnVector, GpuLiteral, NvtxId, NvtxRegistry, RapidsConf, ScalableTaskCompletion}
+import ai.rapids.cudf.{CudaFatalException, HostMemoryBuffer, Rmm, RmmAllocationMode, Table,
+  TableWriter}
+import com.nvidia.spark.rapids.{ColumnarOutputWriter, ColumnarOutputWriterFactory, GpuColumnVector, GpuLiteral, NvtxId, NvtxRegistry, RapidsConf, ScalableTaskCompletion, SpillableColumnarBatch}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
+import com.nvidia.spark.rapids.SpillPriorities.ACTIVE_ON_DECK_PRIORITY
 import com.nvidia.spark.rapids.io.async.{AsyncOutputStream, HostMemoryThrottle, ThrottlingExecutor, TrafficController}
-import com.nvidia.spark.rapids.jni.{GpuRetryOOM, GpuSplitAndRetryOOM}
+import com.nvidia.spark.rapids.jni.{CpuRetryOOM, GpuRetryOOM, GpuSplitAndRetryOOM}
 import com.nvidia.spark.rapids.spill.SpillFramework
+import org.apache.commons.lang3.exception.ExceptionUtils
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.FSDataOutputStream
 import org.apache.hadoop.mapred.TaskAttemptContext
+import org.mockito.ArgumentCaptor
 import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito._
 import org.scalatest.BeforeAndAfterEach
@@ -77,7 +81,10 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
     // check for leaks
     override def transformAndClose(cb: ColumnarBatch): ColumnarBatch = cb
     override val tableWriter: TableWriter = mock[TableWriter]
+    var nativeGpuOomRetryEnabled: Boolean = true
+    override protected def canRetryGpuOomFromNativeWrite: Boolean = nativeGpuOomRetryEnabled
     override def getOutputStream: FSDataOutputStream = mock[FSDataOutputStream]
+    def outputStreamMock: FSDataOutputStream = outputStream.asInstanceOf[FSDataOutputStream]
     override def path(): String = null
     private var throwOnce: Option[Throwable] = None
     override def bufferBatchAndClose(batch: ColumnarBatch): Long = {
@@ -444,6 +451,170 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
         verify(mockOutputWriter, times(2))
             .writeSpillableAndClose(any())
         verify(mockOutputWriter, times(1)).close()
+      }
+    }
+  }
+
+  test("CPU OOM during a native file write must fail the task") {
+    resetMocks()
+    includeRetry = true
+    val cb = buildBatchWithPartitionedCol(1, 2, 3)
+    withColumnarBatchesVerifyClosed(Seq(cb)) {
+      val nativeWriter = mockOutputWriter.tableWriter
+      doThrow(new CpuRetryOOM("native write failed"))
+        .when(nativeWriter).write(any[Table]())
+      val spillable = SpillableColumnarBatch(cb, ACTIVE_ON_DECK_PRIORITY)
+      val failure = intercept[IllegalStateException] {
+        mockOutputWriter.writeSpillableAndClose(spillable)
+      }
+      assert(failure.getSuppressed.exists(_.isInstanceOf[CpuRetryOOM]))
+      verify(nativeWriter, times(1)).write(any[Table]())
+    }
+  }
+
+  test("a native write error that withRetry would not retry is rethrown unchanged") {
+    resetMocks()
+    includeRetry = true
+    val cb = buildBatchWithPartitionedCol(1, 2, 3)
+    withColumnarBatchesVerifyClosed(Seq(cb)) {
+      val nativeWriter = mockOutputWriter.tableWriter
+      val writeError = new RuntimeException("native write failed")
+      doThrow(writeError).when(nativeWriter).write(any[Table]())
+      val spillable = SpillableColumnarBatch(cb, ACTIVE_ON_DECK_PRIORITY)
+      val failure = intercept[RuntimeException] {
+        mockOutputWriter.writeSpillableAndClose(spillable)
+      }
+      assert(failure eq writeError)
+      verify(nativeWriter, times(1)).write(any[Table]())
+    }
+  }
+
+  test("fatal CUDA errors in native write causes remain visible") {
+    resetMocks()
+    includeRetry = true
+    val cb = buildBatchWithPartitionedCol(1, 2, 3)
+    withColumnarBatchesVerifyClosed(Seq(cb)) {
+      val nativeWriter = mockOutputWriter.tableWriter
+      val fatalError = mock[CudaFatalException]
+      val writeError = new RuntimeException("native write failed", fatalError)
+      doThrow(writeError).when(nativeWriter).write(any[Table]())
+      val spillable = SpillableColumnarBatch(cb, ACTIVE_ON_DECK_PRIORITY)
+      val failure = intercept[RuntimeException] {
+        mockOutputWriter.writeSpillableAndClose(spillable)
+      }
+      assert(failure eq writeError)
+      assert(ExceptionUtils.getThrowableList(failure).contains(fatalError))
+      verify(nativeWriter, times(1)).write(any[Table]())
+    }
+  }
+
+  test("a wrapped native CPU OOM must fail the task") {
+    resetMocks()
+    includeRetry = true
+    val cb = buildBatchWithPartitionedCol(1, 2, 3)
+    withColumnarBatchesVerifyClosed(Seq(cb)) {
+      val nativeWriter = mockOutputWriter.tableWriter
+      val writeError = new RuntimeException("native write failed",
+        new CpuRetryOOM("host allocation failed"))
+      doThrow(writeError).when(nativeWriter).write(any[Table]())
+      val spillable = SpillableColumnarBatch(cb, ACTIVE_ON_DECK_PRIORITY)
+      val failure = intercept[IllegalStateException] {
+        mockOutputWriter.writeSpillableAndClose(spillable)
+      }
+      assert(failure.getSuppressed.exists(_ eq writeError))
+      verify(nativeWriter, times(1)).write(any[Table]())
+    }
+  }
+
+  test("Parquet native writer retries a GPU OOM") {
+    resetMocks()
+    includeRetry = true
+    val cb = buildBatchWithPartitionedCol(1, 2, 3)
+    withColumnarBatchesVerifyClosed(Seq(cb)) {
+      val nativeWriter = mockOutputWriter.tableWriter
+      doThrow(new GpuRetryOOM("native encoding failed"))
+        .doNothing()
+        .when(nativeWriter).write(any[Table]())
+      val spillable = SpillableColumnarBatch(cb, ACTIVE_ON_DECK_PRIORITY)
+      mockOutputWriter.writeSpillableAndClose(spillable)
+      verify(nativeWriter, times(2)).write(any[Table]())
+    }
+  }
+
+  test("native GPU OOM without retry opt-in must fail the task") {
+    resetMocks()
+    includeRetry = true
+    val cb = buildBatchWithPartitionedCol(1, 2, 3)
+    withColumnarBatchesVerifyClosed(Seq(cb)) {
+      mockOutputWriter.nativeGpuOomRetryEnabled = false
+      val nativeWriter = mockOutputWriter.tableWriter
+      doThrow(new GpuRetryOOM("native encoding failed"))
+        .when(nativeWriter).write(any[Table]())
+      val spillable = SpillableColumnarBatch(cb, ACTIVE_ON_DECK_PRIORITY)
+      val failure = intercept[IllegalStateException] {
+        mockOutputWriter.writeSpillableAndClose(spillable)
+      }
+      assert(failure.getSuppressed.exists(_.isInstanceOf[GpuRetryOOM]))
+      verify(nativeWriter, times(1)).write(any[Table]())
+    }
+  }
+
+  test("GPU OOM after native output must fail the task") {
+    Seq[Throwable](new GpuRetryOOM("retry after output"),
+      new GpuSplitAndRetryOOM("split after output")).foreach { oom =>
+      resetMocks()
+      includeRetry = true
+      val cb = buildBatchWithPartitionedCol(1, 2, 3)
+      withColumnarBatchesVerifyClosed(Seq(cb)) {
+        val nativeWriter = mockOutputWriter.tableWriter
+        closeOnExcept(HostMemoryBuffer.allocate(4)) { buffer =>
+          doAnswer { _ =>
+            mockOutputWriter.handleBuffer(buffer, 4)
+            throw oom
+          }.when(nativeWriter).write(any[Table]())
+
+          val spillable = SpillableColumnarBatch(cb, ACTIVE_ON_DECK_PRIORITY)
+          val failure = intercept[IllegalStateException] {
+            mockOutputWriter.writeSpillableAndClose(spillable)
+          }
+          assert(failure.getSuppressed.exists(_ eq oom))
+          verify(nativeWriter, times(1)).write(any[Table]())
+        }
+      }
+    }
+  }
+
+  test("GPU OOM on a later split preserves earlier split output") {
+    resetMocks()
+    includeRetry = true
+    val cb = buildBatchWithPartitionedCol(1, 2, 3, 4)
+    withColumnarBatchesVerifyClosed(Seq(cb)) {
+      val nativeWriter = mockOutputWriter.tableWriter
+      val payload = Array[Byte](1, 2, 3, 4)
+      closeOnExcept(HostMemoryBuffer.allocate(payload.length)) { buffer =>
+        buffer.setBytes(0, payload, 0, payload.length)
+        var attempts = 0
+        doAnswer { _ =>
+          attempts += 1
+          attempts match {
+            case 1 => throw new GpuSplitAndRetryOOM("split the input")
+            case 2 => mockOutputWriter.handleBuffer(buffer, payload.length)
+            case 3 => throw new GpuRetryOOM("retry the second split")
+            case _ => ()
+          }
+          null
+        }.when(nativeWriter).write(any[Table]())
+
+        val spillable = SpillableColumnarBatch(cb, ACTIVE_ON_DECK_PRIORITY)
+        mockOutputWriter.writeSpillableAndClose(spillable)
+
+        verify(nativeWriter, times(4)).write(any[Table]())
+        val written = ArgumentCaptor.forClass(classOf[Array[Byte]])
+        verify(mockOutputWriter.outputStreamMock).write(
+          written.capture(), org.mockito.ArgumentMatchers.eq(0),
+          org.mockito.ArgumentMatchers.eq(payload.length))
+        assert(written.getValue.take(payload.length).sameElements(payload))
+        assert(mockOutputWriter.getFileLength == payload.length)
       }
     }
   }
