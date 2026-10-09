@@ -44,6 +44,7 @@ import org.apache.spark.sql.types.{IntegerType, StructField, StructType, Timesta
  *   - `America/Los_Angeles`
  *   - `Asia/Shanghai`
  *   - `Europe/Paris`
+ *   - `Pacific/Port_Moresby`
  *   - `US/Pacific` (alias of `America/Los_Angeles`)
  *   - `PST` (legacy short ID)
  *
@@ -91,6 +92,10 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
   // Exact pre-first-transition values from non-UTC schema-evolution failures.
   private val newYorkHistoricalTsUs = -2957649381472612L
   private val shanghaiHistoricalTsUs = -3649379812521628L
+  // Exact CPU value from #15895, inside New York's 1883 LMT-to-EST transition window.
+  private val newYorkLmtTransitionTsUs = -2717655338076025L
+  // Exercises a zone whose legacy TimeZone has no transitions but whose ZoneRules has LMT.
+  private val portMoresbyHistoricalTsUs = -3155673600000000L
 
   // Includes legacy/alias IDs ("US/Pacific", "PST") alongside canonical region IDs to
   // exercise the read path against the kinds of writer-timezone strings ORC footers can
@@ -102,6 +107,7 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
     "America/Los_Angeles",
     "Asia/Shanghai",
     "Europe/Paris",
+    "Pacific/Port_Moresby",
     "US/Pacific",
     "PST"
   )
@@ -143,6 +149,8 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
     Seq(
       newYorkHistoricalTsUs,
       shanghaiHistoricalTsUs,
+      newYorkLmtTransitionTsUs,
+      portMoresbyHistoricalTsUs,
       ShanghaiEpochBorrowTsUs,
       minTs,
       maxTs) ++ dstBoundaries ++ firstTransitionBoundaries
@@ -281,6 +289,7 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
         "NULL",
         Math.floorDiv(newYorkHistoricalTsUs, TimeUnit.SECONDS.toMicros(1)).toString,
         Math.floorDiv(shanghaiHistoricalTsUs, TimeUnit.SECONDS.toMicros(1)).toString,
+        Math.floorDiv(portMoresbyHistoricalTsUs, TimeUnit.SECONDS.toMicros(1)).toString,
         "-2208988800", // 1900-01-01T00:00:00Z, before Asia/Shanghai's first transition
         Int.MinValue.toString,
         Int.MaxValue.toString,
@@ -330,6 +339,7 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
     "America/New_York" -> "UTC",
     "UTC" -> "Asia/Shanghai",
     "Asia/Shanghai" -> "UTC",
+    "UTC" -> "Pacific/Port_Moresby",
     "UTC" -> "Europe/Paris",
     "Europe/Paris" -> "UTC",
     "America/New_York" -> "Asia/Shanghai",

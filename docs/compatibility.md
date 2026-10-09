@@ -251,9 +251,18 @@ See https://github.com/NVIDIA/cudf-spark/issues/7246
 ## ORC
 
 The ORC format has fairly complete support for both reads and writes. There are only a few known
-issues. The first is for reading timestamps and dates around the transition between Julian and
-Gregorian calendars as described [here](https://github.com/NVIDIA/cudf-spark/issues/131). A
-similar issue exists for writing dates as described
+issues. The reader supports rebasing legacy-calendar ORC timestamps, including Spark 2.4 files,
+to Spark's proleptic Gregorian calendar. Rebasing follows the reader JVM's default timezone
+after applying the file's writer timezone; `spark.sql.session.timeZone` does not select the
+rebase timezone. This also applies to timestamps nested in arrays and structs. Values before
+the Common Era and timezones absent from Spark's rebase map use Spark's CPU implementation
+within the GPU reader.
+
+This addresses the legacy timestamp case in [#15471](https://github.com/NVIDIA/cudf-spark/issues/15471).
+The broader set of historical date/timestamp reading limitations remains tracked in
+[#131](https://github.com/NVIDIA/cudf-spark/issues/131). In particular, proleptic Gregorian ORC
+timestamps near the October 1582 cutover can still differ from CPU when the writer and reader
+use different timezones. A similar issue exists for writing dates as described
 [here](https://github.com/NVIDIA/cudf-spark/issues/139). Writing timestamps, however only appears
 to work for dates after the epoch as described
 [here](https://github.com/NVIDIA/cudf-spark/issues/140).
@@ -329,6 +338,29 @@ The plugin supports reading `uncompressed`, `snappy`, `gzip` and `zstd` Parquet 
 ability to
 fall back to the CPU when reading an unsupported compression format, and will error out in that
 case.
+
+## Delta Lake low shuffle merge on Databricks Runtime 17.3
+
+Low shuffle merge is disabled by default. To enable it on Databricks Runtime 17.3, set
+`spark.rapids.sql.delta.lowShuffleMerge.enabled=true` and the Parquet reader to `PERFILE`.
+The default remains disabled because Delta Lake 2.4 does not support low shuffle merge
+with change data feed enabled.
+
+On Databricks Runtime 17.3, tables with existing deletion vectors fall back to classic
+GPU merge before low shuffle merge builds temporary deletion vectors. The existing
+CPU fallback for MERGE operations configured to write persistent deletion vectors
+is unchanged.
+
+Tables with row tracking enabled fall back to classic GPU merge, even when
+[`spark.rapids.sql.delta.lowShuffleMerge.enabled`](additional-functionality/advanced_configs.md#sql.delta.lowShuffleMerge.enabled)
+is `true`. Databricks Runtime 17.3 exposes nullable row-tracking metadata fields that
+the GPU scans required by low shuffle merge cannot currently replace. The classic
+merge path preserves row IDs and row commit versions; enabling low shuffle merge
+does not provide the low-shuffle optimization for these tables.
+
+The row-tracking regression currently verifies this fallback, not native low-shuffle
+row-tracking execution. Supporting that execution path and adding a regression that
+forbids fallback remain follow-up work under [#11079](https://github.com/NVIDIA/cudf-spark/issues/11079).
 
 ## JSON
 

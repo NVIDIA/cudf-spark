@@ -53,6 +53,21 @@ class GpuCoalesceBatchesSuite extends SparkQueryCompareTestSuite {
     }
   }
 
+  test("buildNonEmptyBatchFromTypes sums the row counts of rows-only batches") {
+    val rowsOnly = Array(new ColumnarBatch(Array.empty, 3), new ColumnarBatch(Array.empty, 4))
+    withResource(ConcatAndConsumeAll.buildNonEmptyBatchFromTypes(rowsOnly, Array.empty)) {
+      batch =>
+        assertResult(0)(batch.numCols())
+        assertResult(7)(batch.numRows())
+    }
+    val tooManyRows = Array(
+      new ColumnarBatch(Array.empty, Int.MaxValue), new ColumnarBatch(Array.empty, 1))
+    val e = intercept[IllegalArgumentException] {
+      ConcatAndConsumeAll.buildNonEmptyBatchFromTypes(tooManyRows, Array.empty)
+    }
+    assert(e.getMessage.contains("Cannot concatenate"), e.getMessage)
+  }
+
   def getCapturedPlan(): SparkPlan = {
     val capturedPlans = ExecutionPlanCaptureCallback.getResultsWithTimeout()
     assert(capturedPlans.length == 1,

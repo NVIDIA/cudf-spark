@@ -28,7 +28,8 @@ from spark_session import (is_before_spark_320, is_databricks_runtime, spark_ver
 
 delta_merge_enabled_conf = copy_and_update(delta_writes_enabled_conf,
                                            {"spark.rapids.sql.command.MergeIntoCommand": "true",
-                                            "spark.rapids.sql.command.MergeIntoCommandEdge": "true"})
+                                            "spark.rapids.sql.command.MergeIntoCommandEdge": "true",
+                                            "spark.rapids.sql.delta.lowShuffleMerge.enabled": "false"})
 
 if is_spark_400_or_later():
     # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
@@ -1748,7 +1749,7 @@ def test_delta_dml_dv_internal_row_index_column_handling(
             lambda spark: read_delta_path(spark, data_path + "/CPU").collect(), conf=conf)
         gpu_data = with_cpu_session(
             lambda spark: read_delta_path(spark, data_path + "/GPU").collect(), conf=conf)
-        assert_equal(cpu_data, gpu_data)
+        assert_equal_with_local_sort(cpu_data, gpu_data)
 
 
 @allow_non_gpu(*delta_meta_allow)

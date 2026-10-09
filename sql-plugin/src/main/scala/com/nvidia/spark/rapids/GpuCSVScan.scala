@@ -23,9 +23,9 @@ import java.util.Locale
 import scala.collection.JavaConverters._
 
 import ai.rapids.cudf
-import ai.rapids.cudf.{ColumnVector, DType, Scalar, Schema, Table}
+import ai.rapids.cudf.{ColumnVector, DType, HostMemoryBuffer, Scalar, Schema, Table}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
-import com.nvidia.spark.rapids.jni.CastStrings
+import com.nvidia.spark.rapids.jni.{CastStrings, GpuSplitAndRetryOOM}
 import com.nvidia.spark.rapids.shims.{ColumnDefaultValuesShims, ShimFilePartitionReaderFactory}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
@@ -440,6 +440,109 @@ abstract class CSVPartitionReaderBase[BUFF <: LineBufferer, FACT <: LineBufferer
 
 
 object CSVPartitionReader {
+  private def startsWithBom(buffer: HostMemoryBuffer, offset: Long, size: Long): Boolean = {
+    size - offset >= 3 && buffer.getByte(offset) == 0xef.toByte &&
+      buffer.getByte(offset + 1) == 0xbb.toByte && buffer.getByte(offset + 2) == 0xbf.toByte
+  }
+
+  private def offsetAfterLine(buffer: HostMemoryBuffer, size: Long, start: Long): Long = {
+    var pos = start
+    while (pos < size && buffer.getByte(pos) != '\n'.toByte) {
+      pos += 1
+    }
+    math.min(pos + 1, size)
+  }
+
+  private def headerStart(buffer: HostMemoryBuffer, size: Long, comment: Byte): Long = {
+    // cuDF ignores a UTF-8 BOM before checking for leading comments and the header.
+    var pos = if (startsWithBom(buffer, 0, size)) 3L else 0L
+    while (pos < size && comment != 0 && buffer.getByte(pos) == comment) {
+      pos = offsetAfterLine(buffer, size, pos)
+    }
+    pos
+  }
+
+  private[rapids] case class CsvReadChunk(
+      buffer: HostMemoryBuffer,
+      hasHeader: Boolean,
+      comment: Byte) extends AutoCloseable {
+    override def close(): Unit = buffer.close()
+
+    private def previousLineBoundary(start: Long, headerEnd: Long): Long = {
+      var pos = start
+      while (pos >= headerEnd && buffer.getByte(pos) != '\n'.toByte) {
+        pos -= 1
+      }
+      pos + 1
+    }
+
+    private def splitOffsets: (Long, Long) = {
+      val size = buffer.getLength
+      val headerEnd = if (hasHeader) {
+        offsetAfterLine(buffer, size, headerStart(buffer, size, comment))
+      } else {
+        0L
+      }
+      val midpoint = math.max(size / 2, headerEnd)
+      val nextLineBoundary = offsetAfterLine(buffer, size, midpoint)
+      val leftEnd = if (nextLineBoundary < size) {
+        nextLineBoundary
+      } else {
+        previousLineBoundary(midpoint - 1, headerEnd)
+      }
+      // Keep the preceding newline so cuDF cannot strip an interior U+FEFF as a file BOM.
+      val rightStart = if (startsWithBom(buffer, leftEnd, size)) {
+        leftEnd - 1
+      } else {
+        leftEnd
+      }
+      if (rightStart <= 0 || leftEnd >= size || leftEnd < headerEnd) {
+        throw new GpuSplitAndRetryOOM("CSV input cannot be split at a record boundary")
+      }
+      (leftEnd, rightStart)
+    }
+
+    def split(): Seq[CsvReadChunk] = withResource(this) { _ =>
+      val (leftEnd, rightStart) = splitOffsets
+      closeOnExcept(buffer.slice(0, leftEnd)) { left =>
+        val right = buffer.slice(rightStart, buffer.getLength - rightStart)
+        Seq(CsvReadChunk(left, hasHeader, comment), CsvReadChunk(right, false, comment))
+      }
+    }
+  }
+
+  private[rapids] def readToTables(
+      dataBufferer: HostLineBufferer,
+      cudfSchema: Schema,
+      decodeTime: GpuMetric,
+      csvOpts: Boolean => cudf.CSVOptions,
+      hasHeader: Boolean,
+      comment: Byte,
+      partFile: PartitionedFile): Iterator[Table] with AutoCloseable = {
+    val size = dataBufferer.getLength
+    val buffer = withResource(dataBufferer.getBufferAndRelease)(_.slice(0, size))
+    val chunks = closeOnExcept(buffer) { _ =>
+      RmmRapidsRetryIterator.withRetry(CsvReadChunk(buffer, hasHeader, comment),
+        (chunk: CsvReadChunk) => chunk.split()) { chunk =>
+        NvtxIdWithMetrics(NvtxRegistry.CSV_DECODE, decodeTime) {
+          Table.readCSV(cudfSchema, csvOpts(chunk.hasHeader), chunk.buffer, 0,
+            chunk.buffer.getLength)
+        }
+      }
+    }
+    new Iterator[Table] with AutoCloseable {
+      override def hasNext: Boolean = chunks.hasNext
+      override def next(): Table = {
+        try {
+          chunks.next()
+        } catch {
+          case e: Exception => throw new IOException(s"Error when processing file [$partFile]", e)
+        }
+      }
+      override def close(): Unit = chunks.close()
+    }
+  }
+
   def readToTable(
       dataBufferer: HostLineBufferer,
       cudfSchema: Schema,
@@ -478,6 +581,32 @@ class CSVPartitionReader(
     // legitimate data and must not be filtered out.
     if (parsedOptions.multiLine) HostLineBuffererFactory
     else FilterCsvEmptyHostLineBuffererFactory) {
+
+  private var headerPending = partFile.start == 0 && parsedOptions.headerFlag
+
+  override protected def readToTables(
+      dataBufferer: HostLineBufferer,
+      cudfDataSchema: Schema,
+      readDataSchema: StructType,
+      cudfReadDataSchema: Schema,
+      isFirstChunk: Boolean,
+      decodeTime: GpuMetric): Iterator[Table] = {
+    if (parsedOptions.multiLine) {
+      // Physical newlines are not record boundaries for multiline CSV.
+      super.readToTables(dataBufferer, cudfDataSchema, readDataSchema, cudfReadDataSchema,
+        isFirstChunk, decodeTime)
+    } else {
+      val hasHeader = headerPending
+      if (headerPending && CSVPartitionReader.headerStart(dataBufferer.getBuffer,
+          dataBufferer.getLength, parsedOptions.comment.toByte) < dataBufferer.getLength) {
+        // A header-only chunk consumes the header, but a comment-only chunk does not.
+        headerPending = false
+      }
+      CSVPartitionReader.readToTables(dataBufferer, cudfDataSchema, decodeTime,
+        hasHeader => buildCsvOptions(parsedOptions, readDataSchema, hasHeader).build(),
+        hasHeader, parsedOptions.comment.toByte, partFile)
+    }
+  }
 
   def buildCsvOptions(
       parsedOptions: CSVOptions,

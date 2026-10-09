@@ -21,7 +21,7 @@ from datetime import date, datetime, timezone
 from dateutil import tz
 from marks import allow_non_gpu, approximate_float, disable_ansi_mode, ignore_order, incompat, tz_sensitive_test
 from pyspark.sql.types import *
-from spark_session import with_cpu_session, is_before_spark_350, is_before_spark_400, \
+from spark_session import with_cpu_session, is_before_spark_340, is_before_spark_350, is_before_spark_400, \
     is_spark_420_or_later, is_spark_500_or_later
 import pyspark.sql.functions as f
 from timezones import all_timezones, fixed_offset_timezones, fixed_offset_timezones_iana, variable_offset_timezones, variable_offset_timezones_iana
@@ -573,9 +573,29 @@ def test_string_to_timestamp_functions_ansi_valid(parser_policy):
     assert_gpu_and_cpu_are_equal_collect(fun, conf=copy_and_update(parser_policy_dic, ansi_enabled_conf))
 
 
+@pytest.mark.skipif(is_before_spark_340(), reason='try_to_timestamp SQL is available in Spark 3.4+')
+def test_try_to_timestamp_invalid_input_with_ansi(spark_tmp_path):
+    data_path = spark_tmp_path + '/TRY_TO_TS_REPRO'
+
+    def fun(spark):
+        spark.createDataFrame(
+            [(0, 'invalid'), (1, ''), (2, '2024/05/06'), (3, '2024-05-06'), (4, None)],
+            'rid long, s string') \
+            .coalesce(1).write.mode('overwrite').parquet(data_path)
+        return spark.read.parquet(data_path).selectExpr(
+            'rid', "try_to_timestamp(s, 'yyyy-MM-dd') AS parsed").orderBy('rid')
+
+    assert_gpu_and_cpu_are_equal_collect(
+        fun,
+        conf={
+            'spark.sql.ansi.enabled': True,
+            'spark.sql.session.timeZone': 'UTC'
+        })
+
+
 exception_policy_operators = [
     "to_unix_timestamp", "unix_timestamp", "to_timestamp", "to_date"]
-if not is_before_spark_350():
+if not is_before_spark_340():
     exception_policy_operators.append("try_to_timestamp")
 
 

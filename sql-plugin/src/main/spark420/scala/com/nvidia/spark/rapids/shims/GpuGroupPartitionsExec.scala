@@ -23,11 +23,12 @@ package com.nvidia.spark.rapids.shims
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 
+import org.apache.spark.SparkException
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Expression, SortOrder}
 import org.apache.spark.sql.catalyst.plans.QueryPlan
-import org.apache.spark.sql.catalyst.plans.physical.Partitioning
+import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, UnknownPartitioning}
 import org.apache.spark.sql.catalyst.util.truncatedString
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources.v2.{GroupedPartitionCoalescer,
@@ -62,9 +63,8 @@ class GpuGroupPartitionsExecMeta(
   override def convertToCpu(): SparkPlan = {
     // This is only the safety path when normal GPU compatibility checks reject replacement.
     // Supported ordinary and sorted-merge plans are converted to GpuGroupPartitionsExec.
-    // GroupPartitionsExec reads its child's KeyedPartitioning at execution time.
-    // If this node cannot be converted to GPU, keep the original CPU subtree so
-    // child conversions do not replace the required partitioning.
+    // If this node cannot be converted to GPU, keep the original CPU subtree so its grouping
+    // remains paired with the child partitioning it was planned over.
     groupPartitions
   }
 
@@ -86,7 +86,8 @@ case class GpuGroupPartitionsExecInfo(
     expectedPartitionKeyCount: Option[Int],
     reducerNames: Option[Seq[String]],
     distributePartitions: Boolean,
-    enableSortedMerge: Boolean)
+    enableSortedMerge: Boolean,
+    plannedChildPartitioning: Option[Partitioning] = None)
 
 object GpuGroupPartitionsExecInfo {
   // Snapshot the planning metadata needed after the CPU operator has been replaced.
@@ -102,7 +103,8 @@ object GpuGroupPartitionsExecInfo {
       GpuGroupPartitionsShims.expectedPartitionKeyCount(groupPartitions),
       GpuGroupPartitionsShims.reducerNames(groupPartitions),
       groupPartitions.distributePartitions,
-      groupPartitions.enableSortedMerge)
+      groupPartitions.enableSortedMerge,
+      GpuGroupPartitionsShims.plannedChildPartitioning(groupPartitions))
   }
 }
 
@@ -129,7 +131,16 @@ case class GpuGroupPartitionsExec(
 
   override def output = child.output
 
-  override def outputPartitioning: Partitioning = groupInfo.outputPartitioning
+  private def childStillMatches: Boolean =
+    groupInfo.plannedChildPartitioning.forall(_ == child.outputPartitioning)
+
+  @transient override lazy val outputPartitioning: Partitioning = {
+    if (childStillMatches) {
+      groupInfo.outputPartitioning
+    } else {
+      UnknownPartitioning(partitionGroups.size)
+    }
+  }
 
   override def outputOrdering: Seq[SortOrder] = groupInfo.outputOrdering
 
@@ -166,20 +177,25 @@ case class GpuGroupPartitionsExec(
   private def needsSortedMerge: Boolean =
     enableSortedMerge && hasCoalescing && groupInfo.gpuOutputOrdering.nonEmpty
 
-  override protected def doCanonicalize(): SparkPlan = {
-    val normalizedPartitioning = groupInfo.outputPartitioning match {
+  private def normalizePartitioning(partitioning: Partitioning): Partitioning = {
+    partitioning match {
       case p: (Partitioning with Expression) =>
         QueryPlan.normalizeExpressions(p, child.output)
       case other => other
     }
+  }
+
+  override protected def doCanonicalize(): SparkPlan = {
     copy(
       child = child.canonicalized,
       groupInfo = groupInfo.copy(
-        outputPartitioning = normalizedPartitioning,
+        outputPartitioning = normalizePartitioning(groupInfo.outputPartitioning),
         outputOrdering =
           groupInfo.outputOrdering.map(QueryPlan.normalizeExpressions(_, child.output)),
         gpuOutputOrdering =
-          groupInfo.gpuOutputOrdering.map(QueryPlan.normalizeExpressions(_, child.output))))
+          groupInfo.gpuOutputOrdering.map(QueryPlan.normalizeExpressions(_, child.output)),
+        plannedChildPartitioning =
+          groupInfo.plannedChildPartitioning.map(normalizePartitioning)))
   }
 
   override protected def doExecute(): RDD[InternalRow] = {
@@ -225,7 +241,15 @@ case class GpuGroupPartitionsExec(
     }
   }
 
+  private def checkChildStillMatches(): Unit = {
+    if (!childStillMatches) {
+      throw SparkException.internalError(
+        "GpuGroupPartitionsExec's child no longer reports the partitioning it was planned over")
+    }
+  }
+
   override protected def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
+    checkChildStillMatches()
     if (partitionGroups.isEmpty) {
       sparkContext.emptyRDD
     } else {

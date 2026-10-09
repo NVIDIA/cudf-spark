@@ -28,7 +28,10 @@ import com.databricks.sql.transaction.tahoe.{
 import com.databricks.sql.transaction.tahoe.actions.{Metadata, Protocol}
 import com.databricks.sql.transaction.tahoe.files.TahoeFileIndex
 import com.databricks.sql.transaction.tahoe.schema.SchemaMergingUtils
-import com.nvidia.spark.rapids.{GpuMetric, SparkPlanMeta}
+import com.nvidia.spark.rapids.{GpuMetric, RapidsConf, SparkPlanMeta}
+import com.nvidia.spark.rapids.delta.GpuDeltaParquetFileFormatUtils.{
+  addMetadataColumnToIterator,
+  METADATA_ROW_IDX_COL}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 
@@ -41,6 +44,7 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.{MetadataBuilder, StructType}
+import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
  * GPU Delta Parquet file format for Databricks 17.3.
@@ -62,7 +66,9 @@ case class GpuDeltaParquetFileFormat(
     nullableRowTrackingGeneratedFields: Boolean = false,
     optimizationsEnabled: Boolean = true,
     tablePath: Option[String] = None,
-    isCDCRead: Boolean = false
+    isCDCRead: Boolean = false,
+    lowShuffleMergeScan: Boolean = false,
+    lowShuffleMergeRowIndexColumn: String = METADATA_ROW_IDX_COL
   ) extends GpuDeltaParquetFileFormatBase {
 
   override val columnMappingMode: DeltaColumnMappingMode = metadata.columnMappingMode
@@ -82,9 +88,22 @@ case class GpuDeltaParquetFileFormat(
    * Parquet reader after name mapping rewrites.
    */
   override def prepareSchema(inputSchema: StructType): StructType = {
+    // The discovery row index is synthetic, so it has no entry in the table's column mapping.
+    // Match its collision-safe name only on marked scans; similarly named user columns still
+    // need physical mapping. The base reader also calls this method for schemas without it.
+    val rowIndexOrdinal = if (lowShuffleMergeScan) {
+      inputSchema.fields.indexWhere(_.name == lowShuffleMergeRowIndexColumn)
+    } else {
+      -1
+    }
+    val tableSchema = if (rowIndexOrdinal >= 0) {
+      StructType(inputSchema.fields.patch(rowIndexOrdinal, Nil, 1))
+    } else {
+      inputSchema
+    }
     val schema = DeltaColumnMapping.createPhysicalSchema(
-      inputSchema, referenceSchema, columnMappingMode)
-    if (columnMappingMode == NameMapping) {
+      tableSchema, referenceSchema, columnMappingMode)
+    val physicalSchema = if (columnMappingMode == NameMapping) {
       SchemaMergingUtils.transformColumns(schema) { (_, field, _) =>
         field.copy(metadata = new MetadataBuilder()
           .withMetadata(field.metadata)
@@ -94,6 +113,12 @@ case class GpuDeltaParquetFileFormat(
       }
     } else {
       schema
+    }
+    if (rowIndexOrdinal >= 0) {
+      StructType(physicalSchema.fields.patch(
+        rowIndexOrdinal, Seq(inputSchema.fields(rowIndexOrdinal)), 0))
+    } else {
+      physicalSchema
     }
   }
 
@@ -113,7 +138,7 @@ case class GpuDeltaParquetFileFormat(
    * Translates pushed filters to physical column names when Delta column mapping is enabled.
    */
   private def prepareFiltersForRead(filters: Seq[Filter]): Seq[Filter] = {
-    if (!effectiveOptimizationsEnabled) {
+    if (lowShuffleMergeScan || !effectiveOptimizationsEnabled) {
       Seq.empty
     } else if (columnMappingMode != NoMapping) {
       val physicalNameMap = DeltaColumnMapping.getLogicalNameToPhysicalNameMap(referenceSchema)
@@ -131,7 +156,7 @@ case class GpuDeltaParquetFileFormat(
   override def isSplitable(
       sparkSession: SparkSession,
       options: Map[String, String],
-      path: Path): Boolean = effectiveOptimizationsEnabled
+      path: Path): Boolean = !lowShuffleMergeScan && effectiveOptimizationsEnabled
 
   private def hasDeletionVectorRead: Boolean =
     GpuDeltaParquetFileFormat.isDeletionVectorRead(
@@ -164,7 +189,7 @@ case class GpuDeltaParquetFileFormat(
       hadoopConf: Configuration,
       metrics: Map[String, GpuMetric])
   : PartitionedFile => Iterator[InternalRow] = {
-    super.buildReaderWithPartitionValuesAndMetrics(
+    val dataReader = super.buildReaderWithPartitionValuesAndMetrics(
       sparkSession,
       dataSchema,
       partitionSchema,
@@ -173,12 +198,37 @@ case class GpuDeltaParquetFileFormat(
       options,
       hadoopConf,
       metrics)
+
+    if (lowShuffleMergeScan) {
+      val maxBatchSize = RapidsConf.DELTA_LOW_SHUFFLE_MERGE_SCATTER_DEL_VECTOR_BATCH_SIZE
+        .get(sparkSession.sessionState.conf)
+      val scatterTime = metrics(GpuMetric.DELETION_VECTOR_SCATTER_TIME)
+      (file: PartitionedFile) => {
+        addMetadataColumnToIterator(
+          prepareSchema(requiredSchema),
+          None,
+          dataReader(file).asInstanceOf[Iterator[ColumnarBatch]],
+          maxBatchSize,
+          scatterTime,
+          lowShuffleMergeRowIndexColumn).asInstanceOf[Iterator[InternalRow]]
+      }
+    } else {
+      dataReader
+    }
   }
 }
 
 object GpuDeltaParquetFileFormat {
   private[delta] val EDGE_COMPUTED_COLUMN_SKIP_ROW =
     "_databricks_internal_edge_computed_column_skip_row"
+
+  val LOW_SHUFFLE_MERGE_SCAN_OPTION =
+    "spark.rapids.internal.delta.lowShuffleMerge.scan"
+  val LOW_SHUFFLE_MERGE_ROW_INDEX_COLUMN_OPTION =
+    "spark.rapids.internal.delta.lowShuffleMerge.rowIndexColumn"
+
+  def isLowShuffleMergeScan(options: Map[String, String]): Boolean =
+    options.get(LOW_SHUFFLE_MERGE_SCAN_OPTION).contains("true")
 
   def isDeletionVectorRead(format: DeltaParquetFileFormat): Boolean =
     isDeletionVectorRead(
@@ -268,7 +318,10 @@ object GpuDeltaParquetFileFormat {
       nullableRowTrackingGeneratedFields = fmt.nullableRowTrackingGeneratedFields,
       optimizationsEnabled = fmt.optimizationsEnabled,
       tablePath = fmt.tablePath,
-      isCDCRead = fmt.isCDCRead)
+      isCDCRead = fmt.isCDCRead,
+      lowShuffleMergeScan = isLowShuffleMergeScan(relation.options),
+      lowShuffleMergeRowIndexColumn = relation.options
+        .getOrElse(LOW_SHUFFLE_MERGE_ROW_INDEX_COLUMN_OPTION, METADATA_ROW_IDX_COL))
   }
 
   private def hasRowIndexFiltersInTahoeFileIndex(relation: HadoopFsRelation): Boolean = {

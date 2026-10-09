@@ -455,6 +455,25 @@ object GpuOrcScan {
     }
   }
 
+  private[rapids] def rebaseAndEvolveSchemaWithRetryAndClose(
+      table: Table,
+      tableSchema: StructType,
+      readDataSchema: StructType,
+      isSchemaCaseSensitive: Boolean,
+      writerTimezone: ZoneId,
+      writerUsedProlepticGregorian: Boolean): Table = {
+    val spillableTable = closeOnExcept(table) { _ =>
+      SpillableTable(table, SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+    }
+    withRetryNoSplit(spillableTable) { attempt =>
+      val attemptTable = attempt.getTable()
+      val rebased = GpuOrcTimezoneUtils.rebaseOrcDateTime(
+        attemptTable, writerTimezone, writerUsedProlepticGregorian)
+      SchemaUtils.evolveSchemaIfNeededAndClose(rebased, tableSchema,
+        readDataSchema, isSchemaCaseSensitive, Some(castColumnTo))
+    }
+  }
+
   /**
    * Apply ORC's offset lookup ordering before its millisecond rounding and overflow check.
    * ORC looks up the offset at `(localMillis - rawOffset)`, while Spark materializes the final
@@ -3176,10 +3195,9 @@ object MakeOrcTableProducer extends Logging {
         }
       }
       metrics(NUM_OUTPUT_BATCHES) += 1
-      val rebased = GpuOrcTimezoneUtils.rebaseOrcDateTime(
-        table, writerTimezone, writerUsedProlepticGregorian)
-      val evolvedSchemaTable = SchemaUtils.evolveSchemaIfNeededAndClose(rebased, tableSchema,
-        readDataSchema, isSchemaCaseSensitive, Some(GpuOrcScan.castColumnTo))
+      val evolvedSchemaTable = GpuOrcScan.rebaseAndEvolveSchemaWithRetryAndClose(
+        table, tableSchema, readDataSchema, isSchemaCaseSensitive,
+        writerTimezone, writerUsedProlepticGregorian)
       GpuMetric.recordOutputBatchBytes(evolvedSchemaTable, metrics.get(GPU_OUTPUT_BATCH_BYTES))
       new SingleGpuDataProducer(evolvedSchemaTable)
     }
@@ -3238,10 +3256,9 @@ case class OrcTableReader(
       }
     }
     metrics(NUM_OUTPUT_BATCHES) += 1
-    val rebased = GpuOrcTimezoneUtils.rebaseOrcDateTime(
-      table, writerTimezone, writerUsedProlepticGregorian)
-    val evolvedSchemaTable = SchemaUtils.evolveSchemaIfNeededAndClose(rebased, catalystTableSchema,
-      readDataSchema, isSchemaCaseSensitive, Some(GpuOrcScan.castColumnTo))
+    val evolvedSchemaTable = GpuOrcScan.rebaseAndEvolveSchemaWithRetryAndClose(
+      table, catalystTableSchema, readDataSchema, isSchemaCaseSensitive,
+      writerTimezone, writerUsedProlepticGregorian)
     GpuMetric.recordOutputBatchBytes(evolvedSchemaTable, metrics.get(GPU_OUTPUT_BATCH_BYTES))
     evolvedSchemaTable
   }

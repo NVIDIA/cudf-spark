@@ -38,11 +38,11 @@ from data_gen import unary_op_df, int_gen, copy_and_update, SetValuesGen, string
 from delta_lake_delete_test import delta_delete_enabled_conf
 from delta_lake_merge_test import delta_merge_enabled_conf
 from delta_lake_update_test import delta_update_enabled_conf
-from delta_lake_utils import delta_meta_allow, \
+from delta_lake_utils import delta_meta_allow, delta_rtas_truncate_skip, \
     delta_writes_enabled_conf, delta_write_fallback_allow, assert_gpu_and_cpu_delta_logs_equivalent
 from marks import allow_non_gpu, delta_lake, ignore_order, disable_ansi_mode, \
     allow_non_gpu_conditional, allow_non_gpu_delta_write_if
-from spark_session import is_spark_353_or_later, is_spark_356_or_later, \
+from spark_session import is_spark_353_or_later, \
     is_before_spark_353, with_cpu_session, is_spark_400_or_later, is_databricks173_or_later
 
 
@@ -176,8 +176,7 @@ def assert_db173_gpu_liquid_rtas(spark, replace_sql):
 @ignore_order
 @pytest.mark.skipif(not is_spark_353_or_later(),
                     reason="RTAS with cluster by is only supported on delta 3.3+")
-@pytest.mark.skipif(is_spark_356_or_later() and not is_spark_400_or_later(),
-                    reason="https://github.com/delta-io/delta/issues/4671")
+@delta_rtas_truncate_skip
 def test_delta_rtas_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_factory):
     def write_func(spark, path):
         table_name = spark_tmp_table_factory.get()
