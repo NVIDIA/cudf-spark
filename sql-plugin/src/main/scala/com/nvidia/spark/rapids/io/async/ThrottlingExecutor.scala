@@ -17,6 +17,7 @@
 package com.nvidia.spark.rapids.io.async
 
 import java.util.concurrent.{Callable, ExecutorService, Future, FutureTask, RejectedExecutionException, TimeUnit}
+import java.util.concurrent.atomic.AtomicBoolean
 
 import org.apache.spark.sql.rapids.{ColumnarWriteTaskStatsTracker, GpuWriteTaskStatsTracker}
 
@@ -67,8 +68,31 @@ class ThrottlingExecutor(executor: ExecutorService, throttler: TrafficController
   }
 
   private class ThrottledFutureTask[T](task: Task[T]) extends FutureTask[T](task) {
-    override def done(): Unit = {
-      throttler.taskCompleted(task)
+    private val started = new AtomicBoolean(false)
+    private val admissionReleased = new AtomicBoolean(false)
+
+    private def releaseAdmission(): Unit = {
+      if (admissionReleased.compareAndSet(false, true)) {
+        throttler.taskCompleted(task)
+      }
+    }
+
+    override def run(): Unit = {
+      started.set(true)
+      try {
+        super.run()
+      } finally {
+        releaseAdmission()
+      }
+    }
+
+    def cancelBeforeRun(): Unit = {
+      if (!started.get()) {
+        cancel(false)
+        if (!started.get()) {
+          releaseAdmission()
+        }
+      }
     }
   }
 
@@ -84,7 +108,7 @@ class ThrottlingExecutor(executor: ExecutorService, throttler: TrafficController
       case e: RejectedExecutionException =>
         // The task was admitted by the TrafficController but never handed to a worker.
         // Canceling completes the FutureTask and releases the admission through done().
-        futureTask.cancel(false)
+        futureTask.cancelBeforeRun()
         throw e
     }
   }
@@ -97,7 +121,7 @@ class ThrottlingExecutor(executor: ExecutorService, throttler: TrafficController
         case task: ThrottledFutureTask[_] =>
           // shutdownNow returns tasks that never started. Cancel them so their
           // TrafficController admission is released through done().
-          task.cancel(false)
+          task.cancelBeforeRun()
         case _ =>
       }
     }
