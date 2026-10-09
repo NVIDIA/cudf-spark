@@ -16,6 +16,7 @@
 package org.apache.spark.sql.rapids
 
 import java.io.{IOException, OutputStream}
+import java.net.URI
 import java.util.concurrent.{ExecutorService, TimeUnit}
 
 import ai.rapids.cudf.{CudaFatalException, HostMemoryBuffer, Rmm, RmmAllocationMode, Table,
@@ -29,8 +30,10 @@ import com.nvidia.spark.rapids.jni.{CpuRetryOOM, GpuRetryOOM, GpuSplitAndRetryOO
 import com.nvidia.spark.rapids.spill.SpillFramework
 import org.apache.commons.lang3.exception.ExceptionUtils
 import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.FSDataOutputStream
+import org.apache.hadoop.fs.{FileStatus, FileSystem, FSDataInputStream, FSDataOutputStream, Path}
+import org.apache.hadoop.fs.permission.FsPermission
 import org.apache.hadoop.mapred.TaskAttemptContext
+import org.apache.hadoop.util.Progressable
 import org.mockito.ArgumentCaptor
 import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito._
@@ -45,6 +48,7 @@ import org.apache.spark.sql.catalyst.expressions.{Ascending, AttributeReference,
 import org.apache.spark.sql.execution.datasources.WriteTaskStats
 import org.apache.spark.sql.rapids.GpuFileFormatWriter.GpuConcurrentOutputWriterSpec
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
+import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.types.{IntegerType, StringType, StructField, StructType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
@@ -112,6 +116,7 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
     @volatile var bytesWritten: Int = 0
     @volatile var closeCount: Int = 0
     @volatile var closeThread: Thread = _
+    @volatile var interruptedAtClose: Boolean = false
 
     override def write(b: Int): Unit = write(Array(b.toByte), 0, 1)
 
@@ -125,6 +130,7 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
     override def close(): Unit = {
       closeCount += 1
       closeThread = Thread.currentThread()
+      interruptedAtClose = Thread.currentThread().isInterrupted
       if (closeFailure != null) {
         throw closeFailure
       }
@@ -136,13 +142,13 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
   private var nextWriterStream: OutputStream = _
 
   /** A writer over a given stream that encodes nothing, so closing it needs no GPU work. */
-  class StreamOutputWriter extends ColumnarOutputWriter(
+  class StreamOutputWriter(debugPath: Option[String] = None) extends ColumnarOutputWriter(
       mockTaskAttemptContext,
       StructType(Seq.empty),
       NvtxRegistry.FILE_FORMAT_WRITE,
       false,
       Seq.empty,
-      None,
+      debugPath,
       rapidsFileIO = mockJobDescription.fileIO) {
     override val tableWriter: TableWriter = mock[TableWriter]
     override def getOutputStream: OutputStream = nextWriterStream
@@ -157,12 +163,28 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
 
     /** Closes the way a writer that returns its footer does. */
     def closeReturning(footer: AutoCloseable): AutoCloseable = closeAndReturn(footer)
+
+    /** Encodes `batch` as a real writer does, which also writes it to the debug stream. */
+    def encode(batch: ColumnarBatch): Long = super.bufferBatchAndClose(batch)
   }
 
-  def streamOutputWriter(stream: OutputStream): StreamOutputWriter = {
+  /** A writer over `stream`, with `debugStream` as its debug dump when that is set. */
+  def streamOutputWriter(
+      stream: OutputStream,
+      debugStream: OutputStream = null): StreamOutputWriter = {
     resetMocks()
     nextWriterStream = stream
-    new StreamOutputWriter
+    if (debugStream == null) {
+      new StreamOutputWriter
+    } else {
+      // The writer opens its debug dump through the task's Hadoop configuration.
+      val conf = new Configuration(false)
+      conf.setClass("fs.probe.impl", classOf[DebugStreamFileSystem], classOf[FileSystem])
+      conf.setBoolean("fs.probe.impl.disable.cache", true)
+      when(mockTaskAttemptContext.getConfiguration).thenReturn(conf)
+      DebugStreamFileSystem.nextStream = debugStream
+      new StreamOutputWriter(Some("probe:/debug"))
+    }
   }
 
   private val asyncWriterThreadName = "GpuFileFormatDataWriterSuite async output"
@@ -1051,6 +1073,30 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
     assert(stream.closeCount == 1)
   }
 
+  test("an interrupt from the output stream's close waits until the debug stream closes") {
+    val writeFailure = new IOException("write failed")
+    val interruptedClose = new InterruptedException("interrupted close")
+    val stream = new RecordingOutputStream(writeFailure, interruptedClose)
+    val debugStream = new RecordingOutputStream()
+    val writer = streamOutputWriter(stream, debugStream)
+    // The writer opens its debug stream at the first batch it encodes, which needs a task.
+    TrampolineUtil.setTaskContext(new MockTaskContext(taskAttemptId = 1, partitionId = 0))
+    try {
+      writer.encode(buildBatchWithPartitionedCol(1))
+    } finally {
+      TrampolineUtil.unsetTaskContext()
+    }
+    assert(debugStream.bytesWritten > 0)
+    writer.bufferBytes(16)
+    val (thrown, interrupted) = runOnNewThread(interruptFirst = false)(writer.close())
+    assert(thrown.exists(_ eq writeFailure))
+    assert(writeFailure.getSuppressed.toSeq == Seq(interruptedClose))
+    assert(interrupted)
+    assert(stream.closeCount == 1)
+    assert(debugStream.closeCount == 1)
+    assert(!debugStream.interruptedAtClose)
+  }
+
   test("close keeps the write failure when the output stream rethrows it from close") {
     val writeFailure = new IOException("write failed")
     val stream = new RecordingOutputStream(writeFailure, writeFailure)
@@ -1143,4 +1189,45 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
     assert(delegate.bytesWritten == 0)
     assertClosedOnWriterThread(delegate, pool)
   }
+}
+
+/** A file system whose files are all the stream a test set, to see how a writer closes it. */
+class DebugStreamFileSystem extends FileSystem {
+  private def unsupported: Nothing = throw new UnsupportedOperationException()
+
+  override def getUri: URI = URI.create("probe:///")
+
+  override def create(
+      f: Path,
+      permission: FsPermission,
+      overwrite: Boolean,
+      bufferSize: Int,
+      replication: Short,
+      blockSize: Long,
+      progress: Progressable): FSDataOutputStream =
+    new FSDataOutputStream(DebugStreamFileSystem.nextStream, null)
+
+  override def open(f: Path, bufferSize: Int): FSDataInputStream = unsupported
+
+  override def append(f: Path, bufferSize: Int, progress: Progressable): FSDataOutputStream =
+    unsupported
+
+  override def rename(src: Path, dst: Path): Boolean = unsupported
+
+  override def delete(f: Path, recursive: Boolean): Boolean = unsupported
+
+  override def listStatus(f: Path): Array[FileStatus] = unsupported
+
+  override def setWorkingDirectory(dir: Path): Unit = unsupported
+
+  override def getWorkingDirectory: Path = new Path("probe:///")
+
+  override def mkdirs(f: Path, permission: FsPermission): Boolean = unsupported
+
+  override def getFileStatus(f: Path): FileStatus = unsupported
+}
+
+object DebugStreamFileSystem {
+  /** The stream that every file this file system creates writes to. */
+  @volatile var nextStream: OutputStream = _
 }

@@ -327,15 +327,19 @@ abstract class ColumnarOutputWriter(context: TaskAttemptContext,
    * Closes the output streams, adding their failures to `error` as suppressed when it is set.
    * An interrupt still set from earlier cleanup on this thread, such as one a safeClose
    * restored, would stop an async stream before it closes its delegate, so it is cleared for
-   * the close and set again afterwards. The buffered write before this still sees it.
+   * the close and set again afterwards. The buffered write before this still sees it. An
+   * interrupt that the output stream's close leaves set is held the same way until the debug
+   * stream has closed, so it cannot stop that close either.
    */
   private def closeOutputStreams(error: Throwable): Unit = {
-    val interrupted = Thread.interrupted()
+    val interruptedBeforeClose = Thread.interrupted()
+    var interruptedDuringMainClose = false
     try {
       closeOutputStream(outputStream, error)
+      interruptedDuringMainClose = Thread.interrupted()
       debugDumpOutputStream.foreach(closeOutputStream(_, error))
     } finally {
-      if (interrupted) {
+      if (interruptedBeforeClose || interruptedDuringMainClose) {
         Thread.currentThread().interrupt()
       }
     }
