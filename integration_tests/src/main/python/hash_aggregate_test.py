@@ -1725,6 +1725,9 @@ _exact_percentile_strict_skip_reason = \
     f'{_exact_percentile_issue}: Spark 5 exact percentile coverage uses the Spark 500 variant'
 _exact_percentile_tolerance_reason = \
     f'{_exact_percentile_issue}: Spark 5 exact percentile result tolerance'
+_exact_percentile_fallback_classes = (
+    'ObjectHashAggregateExec', 'SortAggregateExec', 'ShuffleExchangeExec', 'HashPartitioning',
+    'AggregateExpression', 'Alias', 'Cast', 'Literal', 'ProjectExec', 'Percentile')
 
 @pytest.mark.skipif(is_spark_500_or_later(),
                     reason=_exact_percentile_strict_skip_reason)
@@ -1748,6 +1751,23 @@ def test_exact_percentile_endpoint_delta_reduction_spark500():
         lambda spark: spark.createDataFrame(
             [(-math.inf,), (10.0,)], 'val double')
         .selectExpr('percentile(val, 0.2)'))
+
+@allow_non_gpu(*_exact_percentile_fallback_classes)
+def test_exact_percentile_descending_fallback():
+    assert_gpu_fallback_collect(
+        lambda spark: spark.sql("""
+            SELECT percentile_cont(0.1) WITHIN GROUP (ORDER BY v DESC)
+            FROM VALUES (0.0D), (100.0D) AS t(v)
+            """),
+        'Percentile')
+
+@allow_non_gpu(*_exact_percentile_fallback_classes)
+def test_exact_percentile_null_frequency_fallback():
+    assert_gpu_fallback_collect(
+        lambda spark: spark.createDataFrame(
+            [(10.0, 1), (20.0, None)], 'val double, freq long')
+        .selectExpr('percentile(val, 0.5, freq)'),
+        'Percentile')
 
 exact_percentile_reduction_cpu_fallback_data_gen = [
     [('val', data_gen),
@@ -1866,12 +1886,16 @@ def test_exact_percentile_groupby_spark500(data_gen):
 def test_exact_percentile_endpoint_delta_groupby_frequency_spark500():
     # The first group distinguishes endpoint-delta from weighted-endpoints across -Inf. The second
     # pins Spark's non-FMA rounding, while the frequency column and nulls exercise the grouped
-    # frequency path and null handling.
+    # frequency path and null value handling.
     data = [
         (0, -math.inf, 1), (0, 10.0, 1), (0, None, 1),
         (1, -100.0, 1), (1, -99.3, 1), (1, None, 1)]
+    schema = StructType([
+        StructField('key', IntegerType(), nullable=False),
+        StructField('val', DoubleType(), nullable=True),
+        StructField('freq', LongType(), nullable=False)])
     assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.createDataFrame(data, 'key int, val double, freq long')
+        lambda spark: spark.createDataFrame(data, schema)
         .groupby('key')
         .agg(f.expr('percentile(val, 0.1, freq)')))
 
