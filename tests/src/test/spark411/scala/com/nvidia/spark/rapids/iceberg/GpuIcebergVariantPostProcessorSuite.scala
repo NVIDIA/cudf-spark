@@ -23,20 +23,39 @@ package com.nvidia.spark.rapids.iceberg
 
 import java.util.{HashMap => JHashMap}
 
+import com.nvidia.spark.rapids.{FuzzerUtils, GpuColumnVector, RapidsConf, SpillableColumnarBatch}
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.SpillPriorities.ACTIVE_ON_DECK_PRIORITY
 import com.nvidia.spark.rapids.iceberg.parquet.GpuParquetReaderPostProcessor
 import com.nvidia.spark.rapids.parquet.ParquetFileInfoWithBlockMeta
+import com.nvidia.spark.rapids.spill.SpillFramework
 import org.apache.hadoop.fs.Path
 import org.apache.iceberg.Schema
 import org.apache.iceberg.parquet.ParquetSchemaUtil
 import org.apache.iceberg.shaded.org.apache.parquet.schema.MessageType
 import org.apache.iceberg.types.Types
 import org.apache.parquet.hadoop.metadata.BlockMetaData
+import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuite
 
+import org.apache.spark.SparkConf
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{LongType, StructField, StructType, VariantType}
 
-class GpuIcebergVariantPostProcessorSuite extends AnyFunSuite {
+class GpuIcebergVariantPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
+
+  override def beforeAll(): Unit = {
+    super.beforeAll()
+    SpillFramework.initialize(new RapidsConf(new SparkConf()))
+  }
+
+  override def afterAll(): Unit = {
+    try {
+      SpillFramework.shutdown()
+    } finally {
+      super.afterAll()
+    }
+  }
 
   private def createParquetInfo(
       shadedSchema: MessageType): ParquetFileInfoWithBlockMeta = {
@@ -90,5 +109,23 @@ class GpuIcebergVariantPostProcessorSuite extends AnyFunSuite {
         |    PassThrough
         |  variant_value (generated):
         |    FillNull(variant)""".stripMargin)
+
+    val rowCount = 3
+    val inputSchema = StructType(Array(StructField("id", LongType, nullable = true)))
+    val inputBatch = FuzzerUtils.createColumnarBatch(inputSchema, rowCount, seed = 42)
+    val spillable = closeOnExcept(inputBatch) { batch =>
+      SpillableColumnarBatch(batch, ACTIVE_ON_DECK_PRIORITY)
+    }
+
+    withResource(spillable) { _ =>
+      withResource(processor(expectedSchema, fileSchema)
+          .process(spillable.getColumnarBatch())) { outputBatch =>
+        assert(outputBatch.numRows() == rowCount)
+        assert(outputBatch.numCols() == 2)
+        assert(outputBatch.column(1).dataType() == VariantType)
+        val variantColumn = outputBatch.column(1).asInstanceOf[GpuColumnVector].getBase
+        assert(variantColumn.getNullCount == rowCount)
+      }
+    }
   }
 }
