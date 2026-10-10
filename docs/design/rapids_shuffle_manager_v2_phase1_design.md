@@ -31,7 +31,7 @@ This means when we iterate through the partitioned data, we see **all records fo
 partition 0 first, then all records for partition 1, and so on**. This is fundamentally 
 different from CPU-based shuffle where records arrive in arbitrary order.
 
-Reference: [cudf partitioning API](https://docs.rapids.ai/api/libcudf/legacy/group__reorder__partition)
+Reference: [cudf partitioning API](https://docs.nvidia.com/cudf/latest/libcudf/api_docs/reorder_partition/)
 
 ### Important Nuance: Per-Batch Ordering, Not Global Ordering
 
