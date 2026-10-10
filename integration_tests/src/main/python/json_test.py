@@ -1099,15 +1099,21 @@ def test_from_json_struct_decimal():
     # boolean
     "(true|false)"
 ])
-@pytest.mark.parametrize('date_format', [None, 'yyyy-MM-dd'] if is_before_spark_320 else json_supported_date_formats)
+@pytest.mark.parametrize('date_format', [
+    None] + [pytest.param(date_format, marks=pytest.mark.xfail(
+        condition=is_before_spark_340(),
+        reason='https://github.com/NVIDIA/spark-rapids/issues/10535'))
+            for date_format in (['yyyy-MM-dd'] if is_before_spark_320()
+                                else json_supported_date_formats[1:])])
 @allow_non_gpu(*non_utc_project_allow)
-@pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/10535')
 def test_from_json_struct_date(date_gen, date_format):
     json_string_gen = StringGen(r'{ "a": ' + date_gen + ' }') \
         .with_special_case('{ "a": null }') \
         .with_special_case('null')
     options = { 'dateFormat': date_format } if date_format else { }
-    conf = copy_and_update(_enable_all_types_conf, {'spark.sql.legacy.timeParserPolicy': 'CORRECTED'})
+    conf = copy_and_update(_enable_all_types_conf, {
+        'spark.sql.legacy.timeParserPolicy': 'CORRECTED',
+        'spark.rapids.sql.json.read.datetime.enabled': 'true'})
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark : unary_op_df(spark, json_string_gen) \
             .select(f.col('a'), f.from_json('a', 'struct<a:date>', options)),
