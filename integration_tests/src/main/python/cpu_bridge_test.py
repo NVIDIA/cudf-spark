@@ -60,6 +60,30 @@ def test_cpu_bridge_add_fallback():
     assert_gpu_and_cpu_are_equal_collect(test_func, conf=conf)
 
 
+@allow_non_gpu('Subtract')
+@pytest.mark.parametrize('data_gen', [int_gen, long_gen], ids=idfn)
+@pytest.mark.parametrize('tiered', ['true', 'false'])
+@pytest.mark.parametrize('multi_output', ['true', 'false'])
+@pytest.mark.parametrize('backend', ['legacy', 'jit', 'both'])
+def test_cpu_bridge_with_ast_backends(data_gen, tiered, multi_output, backend):
+    def test_func(spark):
+        return binary_op_df(spark, data_gen).selectExpr(
+            "(a + b) * b as jit", "((a + b) * b) - b as bridged",
+            "(((a + b) * b) - b) * a + b as result")
+
+    conf = copy_and_update(create_cpu_bridge_fallback_conf(
+        ['Subtract'], ['org.apache.spark.sql.catalyst.expressions.Add']), {
+        'spark.rapids.sql.projectAstJitEnabled': str(backend != 'legacy').lower(),
+        'spark.rapids.sql.projectAstEnabled': str(backend != 'jit').lower(),
+        'spark.rapids.sql.tiered.project.enabled': tiered,
+        'spark.rapids.sql.projectAstJitMultiOutputEnabled': multi_output,
+    })
+    ast_pattern = r'AST\(' if backend == 'legacy' else 'AST_JIT'
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        test_func, exist_classes=rf'GpuProject.*{ast_pattern},GpuCpuBridgeExpression',
+        non_exist_classes='AST_JIT' if backend == 'legacy' else '', conf=conf)
+
+
 # MIN_ROWS_PER_SUBBATCH is 500,000: these values exercise one and two sub-batch results.
 @allow_non_gpu('Add')
 @pytest.mark.parametrize('row_count', [500000, 500001], ids=idfn)

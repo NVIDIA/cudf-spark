@@ -258,6 +258,39 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
       .booleanConf
       .createWithDefault(false)
 
+  val ENABLE_PROJECT_AST_JIT = conf("spark.rapids.sql.projectAstJitEnabled")
+      .doc("Enable the experimental cuDF JIT backend for supported project AST expressions. " +
+        "Shared subexpressions across backends are materialized first. When both project AST " +
+        "backends support a complete expression, JIT takes precedence. " +
+        "Otherwise, prefer an intact interpreted AST expression over splitting it for JIT.")
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
+
+  val ENABLE_PROJECT_AST_JIT_MULTI_OUTPUT =
+    conf("spark.rapids.sql.projectAstJitMultiOutputEnabled")
+      .doc("Evaluate multiple Project AST JIT expressions in one cuDF call when possible.")
+      .internal()
+      .booleanConf
+      .createWithDefault(true)
+
+  val PROJECT_AST_JIT_MAX_GROUP_OPS =
+    conf("spark.rapids.sql.projectAstJit.maxGroupOps")
+      .doc("Maximum number of unique AST JIT operations in one multi-output group. " +
+        "An individually oversized expression remains eligible for single-output AST JIT.")
+      .internal()
+      .integerConf
+      .checkValue(_ > 0, "The maximum AST JIT group operation count must be greater than zero.")
+      .createWithDefault(384)
+
+  val PROJECT_AST_JIT_MAX_GROUP_OUTPUTS =
+    conf("spark.rapids.sql.projectAstJit.maxGroupOutputs")
+      .doc("Maximum number of outputs evaluated in one multi-output AST JIT group.")
+      .internal()
+      .integerConf
+      .checkValue(_ > 0, "The maximum AST JIT group output count must be greater than zero.")
+      .createWithDefault(32)
+
   val ENABLE_TIERED_PROJECT = conf("spark.rapids.sql.tiered.project.enabled")
       .doc("Enable tiered projections.")
       .internal()
