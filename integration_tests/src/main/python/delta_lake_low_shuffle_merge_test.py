@@ -28,6 +28,8 @@ delta_merge_enabled_conf = copy_and_update(delta_writes_enabled_conf,
                             "spark.rapids.sql.command.MergeIntoCommandEdge": "true",
                             "spark.rapids.sql.delta.lowShuffleMerge.enabled": "true",
                             "spark.rapids.sql.test.delta.lowShuffleMerge.failOnFallback": "true",
+                            # Record no-op CPU MERGEs so history contains counters to compare.
+                            "spark.databricks.delta.skipRecordingEmptyCommits": "false",
                             "spark.rapids.sql.format.parquet.reader.type": "PERFILE",
                             "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
                             "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled":
