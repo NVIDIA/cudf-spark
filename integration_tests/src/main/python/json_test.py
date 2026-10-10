@@ -167,7 +167,7 @@ def read_json_sql(data_path, schema, spark_tmp_table_factory, options = {}):
 @ignore_order
 @pytest.mark.parametrize('v1_enabled_list', ['', 'json'])
 @pytest.mark.parametrize('reader_batch_bytes', [1, 1024 * 1024])
-@pytest.mark.parametrize('max_partition_bytes', [64, 1024 * 1024])
+@pytest.mark.parametrize('max_partition_bytes', [32, 1024 * 1024])
 @pytest.mark.parametrize('encoding', [None, 'UTF-8', 'US-ASCII'])
 def test_json_bom_at_batch_and_partition_boundaries(spark_tmp_path, v1_enabled_list,
                                                    reader_batch_bytes, max_partition_bytes,
@@ -194,7 +194,14 @@ def test_json_bom_at_batch_and_partition_boundaries(spark_tmp_path, v1_enabled_l
         'spark.rapids.sql.reader.batchSizeBytes': str(reader_batch_bytes),
         'spark.sql.files.maxPartitionBytes': str(max_partition_bytes),
         'spark.sql.files.openCostInBytes': '0',
+        'spark.sql.files.minPartitionNum': '1',
     })
+    if max_partition_bytes == 32:
+        # The preceding record crosses byte 32, so the BOM record at byte 44 starts this split.
+        starts = with_cpu_session(
+            lambda spark: spark.read.text(data_path).where(f.col('value') == records[2])
+                .selectExpr('input_file_block_start() AS block_start').collect(), conf=conf)
+        assert [row.block_start for row in starts] == [32]
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.schema(schema).options(**options).json(data_path), conf=conf)
 

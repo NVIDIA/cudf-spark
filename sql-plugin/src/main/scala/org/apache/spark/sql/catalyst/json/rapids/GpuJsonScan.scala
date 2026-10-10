@@ -16,7 +16,7 @@
 
 package org.apache.spark.sql.catalyst.json.rapids
 
-import java.io.{ByteArrayInputStream, IOException}
+import java.io.IOException
 import java.nio.charset.StandardCharsets
 import java.util.Locale
 
@@ -30,6 +30,7 @@ import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuTextBasedPartitionReader.LineDelimitedReadChunk
 import com.nvidia.spark.rapids.shims.{ColumnDefaultValuesShims, ShimFilePartitionReaderFactory}
 import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.io.Text
 
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.sql.SparkSession
@@ -317,8 +318,10 @@ object JsonPartitionReader {
         private def isEmptyArray(line: Array[Byte], offset: Int, len: Int): Boolean = {
           try {
             val parser = parsedOptions.encoding match {
-              case Some(encoding) => CreateJacksonParser.inputStream(encoding, jsonFactory,
-                new ByteArrayInputStream(line, offset, len))
+              case Some(encoding) =>
+                val text = new Text()
+                text.set(line, offset, len)
+                CreateJacksonParser.text(encoding, jsonFactory, text)
               case None => jsonFactory.createParser(line, offset, len)
             }
             withResource(parser) { jsonParser =>

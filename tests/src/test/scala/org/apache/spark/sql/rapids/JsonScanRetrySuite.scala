@@ -120,8 +120,17 @@ class JsonScanRetrySuite extends RmmSparkRetrySuiteBase {
       options: Map[String, String] = Map.empty,
       wrapTables: Iterator[Table] => Iterator[Table] = identity[Iterator[Table]] _)
       (fn: JsonPartitionReader => T): T = {
+    withReaderBytes(text.getBytes(StandardCharsets.UTF_8), readSchema, maxBytes,
+      options, wrapTables)(fn)
+  }
+
+  private def withReaderBytes[T](bytes: Array[Byte], readSchema: StructType, maxBytes: Long,
+      options: Map[String, String],
+      wrapTables: Iterator[Table] => Iterator[Table] = identity[Iterator[Table]] _,
+      readBufferedInput: Option[HostLineBufferer => Iterator[Table]] = None)
+      (fn: JsonPartitionReader => T): T = {
     val file = Files.createTempFile("json-reader-retry", ".json")
-    Files.write(file, text.getBytes(StandardCharsets.UTF_8))
+    Files.write(file, bytes)
     try {
       withResource(new JsonPartitionReader(new Configuration(),
         PartitionedFileUtilsShim.newPartitionedFile(
@@ -136,8 +145,11 @@ class JsonScanRetrySuite extends RmmSparkRetrySuiteBase {
             cudfReadDataSchema: Schema,
             isFirstChunk: Boolean,
             decodeTime: GpuMetric): Iterator[Table] = {
-          wrapTables(super.readToTables(dataBufferer, cudfDataSchema, readDataSchema,
-            cudfReadDataSchema, isFirstChunk, decodeTime))
+          readBufferedInput match {
+            case Some(read) => read(dataBufferer)
+            case None => wrapTables(super.readToTables(dataBufferer, cudfDataSchema,
+              readDataSchema, cudfReadDataSchema, isFirstChunk, decodeTime))
+          }
         }
       })(fn)
     } finally {
@@ -260,6 +272,35 @@ class JsonScanRetrySuite extends RmmSparkRetrySuiteBase {
       withReader(line, dataSchema, 1024 * 1024, options) { reader =>
         assert(collectReaderRows(reader) == Seq((None, None)))
       }
+    }
+  }
+
+  for ((encoding, name, suffix, retain) <- Seq(
+      ("UTF-8", "invalid UTF-8", Array(0x80.toByte), true),
+      ("US-ASCII", "non-ASCII", "é".getBytes(StandardCharsets.UTF_8), true),
+      ("UTF-8", "valid UTF-8", "é".getBytes(StandardCharsets.UTF_8), false),
+      ("UTF-8", "unread invalid UTF-8",
+        (" " * 10240).getBytes(StandardCharsets.UTF_8) :+ 0x80.toByte, false))) {
+    test(s"JSON empty-array filtering preserves encoding errors: $encoding, $name") {
+      val newline = Array('\n'.toByte)
+      val record = "[]".getBytes(StandardCharsets.UTF_8) ++ suffix ++ newline
+      var bufferedBytes = Seq.empty[Byte]
+      val inspect: HostLineBufferer => Iterator[Table] = bufferer => {
+        assert(bufferer.getNumLines == 1)
+        withResource(bufferer.getBufferAndRelease) { buffer =>
+          val bytes = new Array[Byte](bufferer.getLength.toInt)
+          buffer.getBytes(bytes, 0, 0, bytes.length)
+          bufferedBytes = bytes.toSeq
+        }
+        Iterator.empty
+      }
+      val options = Map("encoding" -> encoding, "lineSep" -> "\n")
+      // Inspect before cuDF, whose existing root-array recovery cannot handle these records.
+      withReaderBytes("[]\n".getBytes(StandardCharsets.UTF_8) ++ record,
+        dataSchema, 1024 * 1024, options, readBufferedInput = Some(inspect)) { reader =>
+        assert(!reader.next())
+      }
+      assert(bufferedBytes == (if (retain) record.toSeq else Seq.empty))
     }
   }
 
