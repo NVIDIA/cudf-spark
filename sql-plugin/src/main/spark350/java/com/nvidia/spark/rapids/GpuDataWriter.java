@@ -24,22 +24,31 @@
 {"spark": "357"}
 {"spark": "358"}
 {"spark": "359"}
+{"spark": "400"}
+{"spark": "401"}
+{"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
+{"spark": "411"}
+{"spark": "412"}
+{"spark": "413"}
+{"spark": "420"}
+{"spark": "500"}
 spark-rapids-shim-json-lines ***/
-package com.nvidia.spark.rapids.shims
 
-import ai.rapids.cudf.{ColumnVector => CudfColumnVector, Scalar => CudfScalar}
-import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.GpuColumnVector
+package com.nvidia.spark.rapids;
 
-import org.apache.spark.sql.catalyst.util.RowDeltaUtils.INSERT_OPERATION
-import org.apache.spark.sql.vectorized.ColumnarBatch
+import java.io.IOException;
 
-object DeltaInsertFilter {
-  val reinsertOperation: Option[Int] = None
+import org.apache.spark.sql.connector.write.DataWriter;
+import org.apache.spark.sql.vectorized.ColumnarBatch;
 
-  def filterInsertRows(batch: ColumnarBatch): CudfColumnVector = {
-    withResource(CudfScalar.fromInt(INSERT_OPERATION)) { s =>
-      batch.column(0).asInstanceOf[GpuColumnVector].getBase.equalTo(s)
-    }
+/** Spark-facing contract for GPU data writers. */
+public interface GpuDataWriter extends DataWriter<ColumnarBatch> {
+  @Override
+  void write(ColumnarBatch record) throws IOException;
+
+  default void write(ColumnarBatch metadata, ColumnarBatch record) throws IOException {
+    throw new UnsupportedOperationException("Writing records with metadata is not supported");
   }
 }

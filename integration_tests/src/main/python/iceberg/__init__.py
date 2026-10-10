@@ -23,9 +23,10 @@ from pyspark.sql.types import FloatType, DoubleType, BinaryType
 
 import pytest
 
+from asserts import assert_equal_with_local_sort
 from conftest import is_iceberg_rest_catalog, spark_jvm
 from data_gen import *
-from spark_session import is_iceberg_supported_spark, with_cpu_session
+from spark_session import is_iceberg_supported_spark, with_cpu_session, with_gpu_session
 
 iceberg_unsupported_mark = pytest.mark.skipif(
     not is_iceberg_supported_spark(),
@@ -42,6 +43,76 @@ supports_iceberg_row_lineage_inheritance = (
     tuple(int(part) for part in runtime_iceberg_version.split(".")[:2]) >= (1, 10))
 ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON = \
     "Iceberg row lineage inheritance requires iceberg 1.10.0 or later"
+
+# Keep format versions crossed with every existing semantic test parameter.
+_v3_unsupported_mark = pytest.mark.skipif(
+    not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+# Row-level COW planning can retain the CPU scan used for file pruning.
+_v3_cow_scan_mark = pytest.mark.allow_non_gpu_conditional(True, "BatchScanExec")
+iceberg_format_versions = [
+    pytest.param("2", id="v2"),
+    pytest.param("3", marks=_v3_unsupported_mark, id="v3")]
+iceberg_read_format_versions = [pytest.param("1", id="v1"), *iceberg_format_versions]
+iceberg_read_enabled_conf = {"spark.rapids.sql.format.iceberg.v3.enabled": "true"}
+iceberg_mor_format_versions = [
+    pytest.param("2", id="v2"),
+    pytest.param("3", marks=_v3_unsupported_mark, id="v3")]
+iceberg_cow_format_versions = [
+    pytest.param("2", id="v2"),
+    pytest.param("3", marks=[_v3_unsupported_mark, _v3_cow_scan_mark], id="v3")]
+
+
+def with_iceberg_format_versions(parameters):
+    """Prepend Iceberg v2 and v3 to every row in an existing DML parameter matrix.
+
+    Input rows may be scalar values, tuples, or ``pytest.param`` instances. Existing marks are
+    preserved, and existing IDs receive a ``v2-`` or ``v3-`` prefix. V3 rows are skipped when the
+    runtime lacks format-v3 support; copy-on-write v3 rows also allow the expected CPU
+    ``BatchScanExec`` used for file pruning.
+    """
+    result = []
+    for parameter in parameters:
+        if hasattr(parameter, "values"):
+            values, marks, case_id = parameter.values, list(parameter.marks), parameter.id
+        else:
+            values = parameter if isinstance(parameter, tuple) else (parameter,)
+            marks, case_id = [], None
+        for version in ("2", "3"):
+            version_marks = list(marks)
+            if version == "3":
+                version_marks.append(_v3_unsupported_mark)
+                if "copy-on-write" in values:
+                    version_marks.append(_v3_cow_scan_mark)
+            result.append(pytest.param(
+                version, *values, marks=version_marks,
+                id=f"v{version}-{case_id}" if case_id is not None else None))
+    return result
+
+
+def with_iceberg_dml_session(func, format_version, mode, conf):
+    """Require GPU deletion-vector writes for v3 MOR operations."""
+    if format_version != "3" or mode != "merge-on-read":
+        return with_gpu_session(func, conf=conf)
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        result = with_gpu_session(func, conf=conf)
+        plans = callback.getResultsWithTimeout(10000)
+        # Spark rewrites insert-only MERGE to append even on a MOR table.
+        assert not any(callback.didFallBack(plan, "WriteDeltaExec") for plan in plans), \
+            "Unexpected v3 MOR CPU delta write:\n" + "\n".join(str(plan) for plan in plans)
+        assert any(callback.contains(plan, "GpuWriteDeltaExec") or
+                   callback.contains(plan, "GpuAppendDataExec") for plan in plans), \
+            "Expected GPU delta write or GPU append for insert-only MERGE:\n" + \
+            "\n".join(str(plan) for plan in plans)
+        return result
+    finally:
+        callback.endCapture()
+
+
+def iceberg_table_properties_sql(format_version):
+    props = _build_tblprops({'format-version': format_version})
+    return "TBLPROPERTIES (" + ", ".join(f"'{k}' = '{v}'" for k, v in props.items()) + ")"
 
 # iceberg supported types
 iceberg_table_gen = MappingProxyType({
@@ -204,6 +275,7 @@ iceberg_write_enabled_conf = {
     "spark.sql.parquet.int96RebaseModeInWrite": "CORRECTED",
     "spark.rapids.sql.format.iceberg.enabled": "true",
     "spark.rapids.sql.format.iceberg.write.enabled": "true",
+    "spark.rapids.sql.format.iceberg.v3.enabled": "true",
     # WriteDeltaExec is disabled by default as it's experimental, but we need it enabled
     # for merge-on-read (MOR) DML operations (UPDATE/DELETE/MERGE with write.*.mode='merge-on-read')
     "spark.rapids.sql.exec.WriteDeltaExec": "true",
@@ -316,6 +388,43 @@ def get_full_table_name(spark_tmp_table_factory):
     return f"default.{spark_tmp_table_factory.get()}"
 
 
+_ROW_LINEAGE_WRITE_CONF = {
+    **iceberg_write_enabled_conf,
+    "spark.rapids.sql.format.iceberg.v3.enabled": "true"
+}
+
+
+def assert_gpu_and_cpu_lineage_writes_are_equal(
+        spark_tmp_table_factory, setup_func, write_func, read_func):
+    base_table = get_full_table_name(spark_tmp_table_factory)
+    cpu_table = f"{base_table}_cpu"
+    gpu_table = f"{base_table}_gpu"
+
+    def setup_tables(spark):
+        setup_func(spark, cpu_table)
+        setup_func(spark, gpu_table)
+
+    def next_row_id(spark, table):
+        iceberg_table = spark._jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
+            spark._jsparkSession, table)
+        return iceberg_table.operations().current().nextRowId()
+
+    with_cpu_session(setup_tables)
+    with_cpu_session(lambda spark: write_func(spark, cpu_table), conf=_ROW_LINEAGE_WRITE_CONF)
+    with_gpu_session(lambda spark: write_func(spark, gpu_table), conf=_ROW_LINEAGE_WRITE_CONF)
+
+    cpu_data = with_cpu_session(
+        lambda spark: read_func(spark, cpu_table).collect(), conf=_ROW_LINEAGE_WRITE_CONF)
+    gpu_data = with_cpu_session(
+        lambda spark: read_func(spark, gpu_table).collect(), conf=_ROW_LINEAGE_WRITE_CONF)
+    assert_equal_with_local_sort(cpu_data, gpu_data)
+    cpu_next_row_id = with_cpu_session(
+        lambda spark: next_row_id(spark, cpu_table), conf=_ROW_LINEAGE_WRITE_CONF)
+    gpu_next_row_id = with_cpu_session(
+        lambda spark: next_row_id(spark, gpu_table), conf=_ROW_LINEAGE_WRITE_CONF)
+    assert cpu_next_row_id == gpu_next_row_id
+
+
 def schema_to_ddl(spark, schema):
     return spark.sparkContext._jvm.org.apache.spark.sql.types.DataType.fromJson(schema.json()).toDDL()
 
@@ -387,9 +496,12 @@ def assert_iceberg_files_use_codec(spark: SparkSession, table_name: str, expecte
 def create_iceberg_table(table_name: str,
                          partition_col_sql: Optional[str] = None,
                          table_prop: Optional[Dict[str, str]] = None,
-                         df_gen: Optional[Callable[[SparkSession], DataFrame]] = None) -> str:
+                         df_gen: Optional[Callable[[SparkSession], DataFrame]] = None,
+                         format_version: Optional[str] = None) -> str:
     if table_prop is None:
         table_prop = {'format-version':'1'}
+    if format_version is not None:
+        table_prop = {**table_prop, 'format-version': format_version}
     table_prop = _build_tblprops(table_prop)
 
     if df_gen is None:

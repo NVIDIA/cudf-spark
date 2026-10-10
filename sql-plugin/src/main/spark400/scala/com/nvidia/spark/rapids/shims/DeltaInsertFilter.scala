@@ -36,18 +36,11 @@ import org.apache.spark.sql.catalyst.util.RowDeltaUtils.{INSERT_OPERATION, REINS
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 object DeltaInsertFilter {
+  val reinsertOperation: Option[Int] = Some(REINSERT_OPERATION)
+
   def filterInsertRows(batch: ColumnarBatch): CudfColumnVector = {
-    val opCol = batch.column(0).asInstanceOf[GpuColumnVector].getBase
-    val insertMatch = withResource(CudfScalar.fromInt(INSERT_OPERATION)) { s =>
-      opCol.equalTo(s)
-    }
-    withResource(insertMatch) { _ =>
-      val reinsertMatch = withResource(CudfScalar.fromInt(REINSERT_OPERATION)) { s =>
-        opCol.equalTo(s)
-      }
-      withResource(reinsertMatch) { _ =>
-        insertMatch.or(reinsertMatch)
-      }
+    withResource(CudfScalar.fromInt(INSERT_OPERATION)) { s =>
+      batch.column(0).asInstanceOf[GpuColumnVector].getBase.equalTo(s)
     }
   }
 }
