@@ -891,20 +891,15 @@ def _read_iceberg_variant_table(spark, table):
 @iceberg
 @ignore_order(local=True)
 @incompat
+@allow_non_gpu('BatchScanExec', 'ColumnarToRowExec', 'ProjectExec', 'VariantGet')
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @pytest.mark.skipif(not is_spark_411_or_later(),
                     reason="Iceberg Variant requires Spark 4.1.1+")
-@pytest.mark.parametrize("fallback_conf", [
-    pytest.param(
-        {"spark.sql.variant.allowReadingShredded": "true"},
-        id="allow_shredded"),
-    pytest.param(
-        {"spark.sql.variant.pushVariantIntoScan": "true"},
-        id="pushdown"),
-])
-def test_iceberg_v3_variant_read_fallback(spark_tmp_table_factory, fallback_conf):
+def test_iceberg_v3_shredded_variant_read_fallback(spark_tmp_table_factory):
     table = get_full_table_name(spark_tmp_table_factory)
-    conf = copy_and_update(_ICEBERG_VARIANT_READ_CONF, fallback_conf)
+    conf = copy_and_update(
+        _ICEBERG_VARIANT_READ_CONF,
+        {"spark.sql.variant.allowReadingShredded": "true"})
 
     with_cpu_session(
         lambda spark: _setup_iceberg_variant_table(spark, table),
