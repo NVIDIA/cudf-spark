@@ -23,17 +23,20 @@ import java.util.Locale
 import scala.collection.JavaConverters._
 
 import ai.rapids.cudf
-import ai.rapids.cudf.{Schema, Table}
+import ai.rapids.cudf.{HostMemoryBuffer, Schema, Table}
+import com.fasterxml.jackson.core.JsonToken
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.GpuTextBasedPartitionReader.LineDelimitedReadChunk
 import com.nvidia.spark.rapids.shims.{ColumnDefaultValuesShims, ShimFilePartitionReaderFactory}
 import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.io.Text
 
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.Expression
-import org.apache.spark.sql.catalyst.json.{GpuJsonUtils, JSONOptions, JSONOptionsInRead}
+import org.apache.spark.sql.catalyst.json.{CreateJacksonParser, GpuJsonUtils, JSONOptions, JSONOptionsInRead}
 import org.apache.spark.sql.catalyst.util.PermissiveMode
 import org.apache.spark.sql.connector.read.{PartitionReader, PartitionReaderFactory}
 import org.apache.spark.sql.execution.QueryExecutionException
@@ -305,6 +308,106 @@ case class GpuJsonPartitionReaderFactory(
 }
 
 object JsonPartitionReader {
+  private class JsonHostLineBuffererFactory(parsedOptions: JSONOptions)
+      extends LineBuffererFactory[HostLineBufferer] {
+    private val jsonFactory = parsedOptions.buildJsonFactory()
+
+    override def createBufferer(estimatedSize: Long,
+        lineSeparatorInRead: Array[Byte]): HostLineBufferer = {
+      new HostLineBufferer(estimatedSize, lineSeparatorInRead, true) {
+        private def isEmptyArray(line: Array[Byte], offset: Int, len: Int): Boolean = {
+          try {
+            val parser = parsedOptions.encoding match {
+              case Some(encoding) =>
+                val text = new Text()
+                text.set(line, offset, len)
+                CreateJacksonParser.text(encoding, jsonFactory, text)
+              case None => jsonFactory.createParser(line, offset, len)
+            }
+            withResource(parser) { jsonParser =>
+              jsonParser.nextToken() == JsonToken.START_ARRAY &&
+                jsonParser.nextToken() == JsonToken.END_ARRAY
+            }
+          } catch {
+            case _: IOException => false
+          }
+        }
+
+        override def add(line: Array[Byte], offset: Int, len: Int): Unit = {
+          if (len > 0 && line(offset) == '{'.toByte) {
+            super.add(line, offset, len)
+          } else {
+            val hasBom = parsedOptions.encoding.isEmpty && len > 3 &&
+              line(offset) == 0xef.toByte && line(offset + 1) == 0xbb.toByte &&
+              line(offset + 2) == 0xbf.toByte
+            val contentOffset = if (hasBom) offset + 3 else offset
+            val end = offset + len
+            var firstToken = contentOffset
+            while (firstToken < end && isWhiteSpace(line(firstToken))) {
+              firstToken += 1
+            }
+            // Spark emits no rows for an empty root array; it must not become a split-only chunk.
+            val emptyArray = firstToken < end && line(firstToken) == '['.toByte &&
+              isEmptyArray(line, contentOffset, end - contentOffset)
+            if (!emptyArray) {
+              // Removing a BOM from a root array can make cuDF fail on mixed object/array batches.
+              val stripBom = hasBom && (firstToken == end || line(firstToken) == '{'.toByte)
+              val start = if (stripBom) contentOffset else offset
+              super.add(line, start, end - start)
+            }
+          }
+        }
+      }
+    }
+  }
+
+  private def decode(
+      buffer: HostMemoryBuffer,
+      size: Long,
+      cudfSchema: Schema,
+      decodeTime: GpuMetric,
+      jsonOpts: cudf.JSONOptions,
+      partFile: PartitionedFile): Table = {
+    NvtxIdWithMetrics(NvtxRegistry.JSON_DECODE_SCAN, decodeTime) {
+      try {
+        Table.readJSON(cudfSchema, jsonOpts, buffer, 0, size)
+      } catch {
+        case e: AssertionError if e.getMessage == "CudfColumns can't be null or empty" =>
+          // This happens when cuDF cannot recover any columns from invalid JSON.
+          throw new IOException(s"Error when processing file [$partFile]", e)
+      }
+    }
+  }
+
+  private def readToTables(
+      dataBufferer: HostLineBufferer,
+      cudfSchema: Schema,
+      decodeTime: GpuMetric,
+      jsonOpts: cudf.JSONOptions,
+      partFile: PartitionedFile,
+      project: Table => Table): Iterator[Table] with AutoCloseable = {
+    val size = dataBufferer.getLength
+    val buffer = withResource(dataBufferer.getBufferAndRelease)(_.slice(0, size))
+    val chunks = closeOnExcept(buffer) { _ =>
+      RmmRapidsRetryIterator.withRetry(LineDelimitedReadChunk(buffer),
+        (chunk: LineDelimitedReadChunk) => chunk.split()) { chunk =>
+        decode(chunk.buffer, chunk.buffer.getLength, cudfSchema, decodeTime, jsonOpts, partFile)
+      }
+    }
+    new Iterator[Table] with AutoCloseable {
+      override def hasNext: Boolean = chunks.hasNext
+      override def next(): Table = {
+        val table = try {
+          chunks.next()
+        } catch {
+          case e: Exception => throw new IOException(s"Error when processing file [$partFile]", e)
+        }
+        project(table)
+      }
+      override def close(): Unit = chunks.close()
+    }
+  }
+
   def readToTable(
       dataBufferer: HostLineBufferer,
       cudfSchema: Schema,
@@ -313,20 +416,9 @@ object JsonPartitionReader {
       formatName: String,
       partFile: PartitionedFile): Table = {
     val dataSize = dataBufferer.getLength
-    // cuDF does not yet support reading a subset of columns so we have
-    // to apply the read schema projection here
     try {
       RmmRapidsRetryIterator.withRetryNoSplit(dataBufferer.getBufferAndRelease) { dataBuffer =>
-        NvtxIdWithMetrics(NvtxRegistry.JSON_DECODE_SCAN, decodeTime) {
-          try {
-            Table.readJSON(cudfSchema, jsonOpts, dataBuffer, 0, dataSize)
-          } catch {
-            case e: AssertionError if e.getMessage == "CudfColumns can't be null or empty" =>
-              // this happens when every row in a JSON file is invalid (or we are
-              // trying to read a non-JSON file format as JSON)
-              throw new IOException(s"Error when processing file [$partFile]", e)
-          }
-        }
+        decode(dataBuffer, dataSize, cudfSchema, decodeTime, jsonOpts, partFile)
       }
     } catch {
       case e: Exception =>
@@ -345,12 +437,25 @@ class JsonPartitionReader(
     maxBytesPerChunk: Long,
     execMetrics: Map[String, GpuMetric])
   extends GpuTextBasedPartitionReader[HostLineBufferer,
-    FilterEmptyHostLineBuffererFactory.type](conf,
+    LineBuffererFactory[HostLineBufferer]](conf,
     partFile, dataSchema, readDataSchema, parsedOptions.lineSeparatorInRead, maxRowsPerChunk,
-    maxBytesPerChunk, execMetrics, FilterEmptyHostLineBuffererFactory) {
+    maxBytesPerChunk, execMetrics,
+    new JsonPartitionReader.JsonHostLineBuffererFactory(parsedOptions)) {
 
   def buildJsonOptions(parsedOptions: JSONOptions): cudf.JSONOptions =
     GpuJsonReadCommon.cudfJsonOptions(parsedOptions)
+
+  override protected def readToTables(
+      dataBufferer: HostLineBufferer,
+      cudfDataSchema: Schema,
+      readDataSchema: StructType,
+      cudfReadDataSchema: Schema,
+      isFirstChunk: Boolean,
+      decodeTime: GpuMetric): Iterator[Table] = {
+    JsonPartitionReader.readToTables(dataBufferer, cudfReadDataSchema, decodeTime,
+      buildJsonOptions(parsedOptions), partFile,
+      table => projectTable(table, readDataSchema, cudfReadDataSchema))
+  }
 
   /**
    * Read the host buffer to GPU table
@@ -372,7 +477,12 @@ class JsonPartitionReader(
     val jsonOpts = buildJsonOptions(parsedOptions)
     val jsonTbl = JsonPartitionReader.readToTable(dataBufferer, cudfReadDataSchema, decodeTime,
       jsonOpts, getFileFormatShortName, partFile)
-    withResource(jsonTbl) { tbl =>
+    projectTable(jsonTbl, readDataSchema, cudfReadDataSchema)
+  }
+
+  private def projectTable(table: Table, readDataSchema: StructType,
+      cudfReadDataSchema: Schema): Table = {
+    withResource(table) { tbl =>
       val cudfColumnNames = cudfReadDataSchema.getColumnNames
       val columns = readDataSchema.map { field =>
         val i = cudfColumnNames.indexOf(field.name)

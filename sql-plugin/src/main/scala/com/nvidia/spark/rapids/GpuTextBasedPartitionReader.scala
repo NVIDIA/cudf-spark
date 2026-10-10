@@ -29,6 +29,7 @@ import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.DateUtils.{toStrf, TimestampFormatConversionException}
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.jni.CastStrings
+import com.nvidia.spark.rapids.jni.GpuSplitAndRetryOOM
 import com.nvidia.spark.rapids.shims.GpuTypeShims
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
@@ -69,9 +70,11 @@ trait LineBufferer extends AutoCloseable {
   }
 
   def isEmpty(line: Array[Byte], lineOffset: Int, lineLen: Int): Boolean = {
-    (0 until lineLen).forall { idx =>
-      isWhiteSpace(line(lineOffset + idx))
+    var idx = 0
+    while (idx < lineLen && isWhiteSpace(line(lineOffset + idx))) {
+      idx += 1
     }
+    idx >= lineLen
   }
 }
 
@@ -105,6 +108,19 @@ object FilterCsvEmptyHostLineBuffererFactory extends LineBuffererFactory[HostLin
     new HostLineBufferer(estimatedSize, lineSeparatorInRead, true) {
       // Match Java's String.trim() which treats all chars <= '\u0020' as whitespace.
       override def isWhiteSpace(b: Byte): Boolean = (b & 0xFF) <= 0x20
+
+      override def add(line: Array[Byte], offset: Int, len: Int): Unit = {
+        // Hadoop strips the file BOM; a BOM here is data even after filtered empty lines.
+        if (getLength == 0 && len >= 3 && line(offset) == 0xef.toByte &&
+            line(offset + 1) == 0xbb.toByte && line(offset + 2) == 0xbf.toByte) {
+          val protectedLine = new Array[Byte](len + 1)
+          protectedLine(0) = '\n'.toByte
+          System.arraycopy(line, offset, protectedLine, 1, len)
+          super.add(protectedLine, 0, protectedLine.length)
+        } else {
+          super.add(line, offset, len)
+        }
+      }
     }
 }
 
@@ -237,6 +253,40 @@ class HostStringColBufferer(size: Long, separator: Array[Byte]) extends LineBuff
 }
 
 object GpuTextBasedPartitionReader {
+  def findSplitOffset(buffer: HostMemoryBuffer, minSplitOffset: Long = 0): Long = {
+    val size = buffer.getLength
+    val midpoint = math.max(size / 2, minSplitOffset)
+    var pos = midpoint
+    while (pos < size && buffer.getByte(pos) != '\n'.toByte) {
+      pos += 1
+    }
+    val nextBoundary = math.min(pos + 1, size)
+    if (nextBoundary < size) {
+      nextBoundary
+    } else {
+      pos = midpoint - 1
+      while (pos >= minSplitOffset && buffer.getByte(pos) != '\n'.toByte) {
+        pos -= 1
+      }
+      pos + 1
+    }
+  }
+
+  case class LineDelimitedReadChunk(buffer: HostMemoryBuffer) extends AutoCloseable {
+    override def close(): Unit = buffer.close()
+
+    def split(): Seq[LineDelimitedReadChunk] = withResource(this) { _ =>
+      val splitOffset = findSplitOffset(buffer)
+      if (splitOffset <= 0 || splitOffset >= buffer.getLength) {
+        throw new GpuSplitAndRetryOOM("Text input cannot be split at a record boundary")
+      }
+      closeOnExcept(buffer.slice(0, splitOffset)) { left =>
+        val right = buffer.slice(splitOffset, buffer.getLength - splitOffset)
+        Seq(LineDelimitedReadChunk(left), LineDelimitedReadChunk(right))
+      }
+    }
+  }
+
   def castStringToTimestamp(
       lhs: ColumnVector,
       sparkFormat: String,

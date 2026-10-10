@@ -603,6 +603,40 @@ def test_csv_small_reader_budget(spark_tmp_path, compression, v1_enabled_list, p
         'spark.rapids.sql.reader.batchSizeBytes': '2048'})
 
 
+@ignore_order(local=True)
+@pytest.mark.parametrize('v1_enabled_list', ['', 'csv'])
+@pytest.mark.parametrize('header', [False, True])
+@pytest.mark.parametrize('boundary', ['rows', 'bytes', 'partition'])
+@pytest.mark.parametrize('projection', ['all', 'pruned', 'count'])
+def test_csv_read_interior_bom(spark_tmp_path, v1_enabled_list, header, boundary, projection):
+    path = spark_tmp_path + '/csv_interior_bom'
+    prefix = '# x\n# y\na,b\n' if header else ''
+    values = ['plain', '\ufefffirst', '\ufeff#value', '\ufeff', 'normal'] * 8
+    text = '\ufeff' + prefix + '\n'.join(f'{value},{i}' for i, value in enumerate(values))
+    with_cpu_session(lambda spark: spark.createDataFrame([(text,)], 'value string')
+                     .coalesce(1).write.text(path))
+
+    def read(spark):
+        # CPU also strips BOM at partition starts; read in one partition for the oracle.
+        if boundary == 'partition' and spark.conf.get('spark.rapids.sql.enabled') == 'false':
+            spark.conf.set('spark.sql.files.maxPartitionBytes', '1m')
+        df = spark.read.schema('a string, b int').option('header', header).option('comment', '#').csv(path)
+        if projection == 'pruned':
+            return df.select('b')
+        if projection == 'count':
+            return df.selectExpr('count(*) as n')
+        return df
+
+    boundary_conf = {
+        'rows': {'spark.rapids.sql.reader.batchSizeRows': '1'},
+        'bytes': {'spark.rapids.sql.reader.batchSizeBytes': '1'},
+        'partition': {'spark.sql.files.maxPartitionBytes': '32'}
+    }
+    assert_gpu_and_cpu_are_equal_collect(read, conf={
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        **boundary_conf[boundary]})
+
+
 spark_350_timestamp_inference_xfail_formats = {
     ('yyyy-MM-dd', ''),
     ('yyyy-MM', ''),

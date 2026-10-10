@@ -456,6 +456,9 @@ object CSVPartitionReader {
   private def headerStart(buffer: HostMemoryBuffer, size: Long, comment: Byte): Long = {
     // cuDF ignores a UTF-8 BOM before checking for leading comments and the header.
     var pos = if (startsWithBom(buffer, 0, size)) 3L else 0L
+    while (pos < size && buffer.getByte(pos) == '\n'.toByte) {
+      pos += 1
+    }
     while (pos < size && comment != 0 && buffer.getByte(pos) == comment) {
       pos = offsetAfterLine(buffer, size, pos)
     }
@@ -468,14 +471,6 @@ object CSVPartitionReader {
       comment: Byte) extends AutoCloseable {
     override def close(): Unit = buffer.close()
 
-    private def previousLineBoundary(start: Long, headerEnd: Long): Long = {
-      var pos = start
-      while (pos >= headerEnd && buffer.getByte(pos) != '\n'.toByte) {
-        pos -= 1
-      }
-      pos + 1
-    }
-
     private def splitOffsets: (Long, Long) = {
       val size = buffer.getLength
       val headerEnd = if (hasHeader) {
@@ -483,13 +478,7 @@ object CSVPartitionReader {
       } else {
         0L
       }
-      val midpoint = math.max(size / 2, headerEnd)
-      val nextLineBoundary = offsetAfterLine(buffer, size, midpoint)
-      val leftEnd = if (nextLineBoundary < size) {
-        nextLineBoundary
-      } else {
-        previousLineBoundary(midpoint - 1, headerEnd)
-      }
+      val leftEnd = GpuTextBasedPartitionReader.findSplitOffset(buffer, headerEnd)
       // Keep the preceding newline so cuDF cannot strip an interior U+FEFF as a file BOM.
       val rightStart = if (startsWithBom(buffer, leftEnd, size)) {
         leftEnd - 1
