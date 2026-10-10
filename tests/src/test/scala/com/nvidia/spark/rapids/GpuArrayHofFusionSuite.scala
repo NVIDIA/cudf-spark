@@ -20,6 +20,7 @@ import ai.rapids.cudf.Table
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import org.mockito.ArgumentCaptor
+import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito.{spy, verify}
 
 import org.apache.spark.sql.catalyst.expressions.{Expression, ExprId}
@@ -248,7 +249,7 @@ class GpuArrayHofFusionSuite extends GpuUnitTests {
     val legacyTable = ArgumentCaptor.forClass(classOf[Table])
     val jitTable = ArgumentCaptor.forClass(classOf[Table])
     verify(legacyAst).computeColumn(legacyTable.capture())
-    verify(jitAst).computeColumn(jitTable.capture())
+    verify(jitAst).getJitProgram(any[Seq[GpuAstJitExpression]](), jitTable.capture())
     assert(legacyTable.getValue eq jitTable.getValue)
   }
 }

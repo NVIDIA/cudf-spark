@@ -70,10 +70,45 @@ where valid values are { 1, 2 }. Refer to
 [NVIDIA Nsight Systems documentation](https://docs.nvidia.com/nsight-systems/)
 for further details.
 
+## Project AST backend selection
+
+`spark.rapids.sql.projectAstEnabled` and `spark.rapids.sql.projectAstJitEnabled`
+independently enable interpreted AST and AST JIT. Both remain disabled by default.
+Project and extracted broadcast build-side projections use a shared tier planner;
+generic tiered binders continue to require an explicit backend opt-in.
+
+The planner first materializes deterministic AST subexpressions shared across
+backends, so their consumers reuse one computed column. It then preserves a complete
+expression when an enabled AST backend supports it. JIT wins when both support the
+complete expression; a complete interpreted AST
+is preferred over splitting an expression only to use JIT for part of it. Otherwise,
+eligible subexpressions can produce columns for a later backend tier, including
+GPU inputs to CPU bridges. Conditional and lambda evaluation boundaries are kept
+intact. With tiered projection disabled, only complete output expressions are wrapped.
+Legacy eligibility comes from the existing expression metadata and is carried by
+driver-side tree tags. Tiering replaces those decisions with executable AST wrappers
+before the bound project is serialized to executors.
+
+Interpreted AST uses plugin-side CSE and can execute several expressions separately
+in one tier. JIT roots in the same multi-output group keep shared subtrees for cuDF
+CSE. Cross-tier dependencies are materialized and managed by the existing tiered
+projection lifecycle. Cross-backend sharing takes precedence over complete expression
+matching; shared descendants are not separately materialized when sharing their parent
+already eliminates the repeated work. This is a fixed policy, not a cost model:
+materializing a cheap operation can cost more than recomputing it, and enabling JIT
+does not imply that cold compilation will be amortized.
+
+Standalone add, subtract, and multiply expressions with only column or literal
+inputs stay on regular GPU execution instead of interpreted AST. The planner
+checks this before boundary selection and after CSE, when a fused expression may
+have become a single operation. These operations remain eligible inside compound
+AST expressions, and this rule does not change JIT selection.
+
 ## Project AST JIT diagnostics
 
-For an AST-JIT-enabled Project, `spark.rapids.sql.explain=ALL` logs the final bound
-tiers and their JIT execution groups. Input ordinals refer to the current tier's
+With either Project AST backend enabled, `spark.rapids.sql.explain=ALL` logs the
+final bound tiers under `FINAL PROJECT AST SELECTION`, including any JIT execution
+groups. Input ordinals refer to the current tier's
 input batch; output positions refer to its output batch. The log identifies
 forwarded outputs and computed outputs materialized for the next tier.
 `plugin_unique_ops` and `plugin_shared_ops` count operations using plugin expression
@@ -84,7 +119,7 @@ planner's dependency-wave identifiers.
 The final backend labels distinguish `AST JIT` (compiled execution),
 `AST Interpreted` (the cuDF AST interpreter), and the regular GPU projection.
 These describe the backend selected for each bound tier output; an earlier Spark
-plan string may not show JIT subexpressions extracted during tier planning.
+plan string may not show AST subexpressions extracted during tier planning.
 
 With `spark.rapids.sql.metrics.level=DEBUG`, `GpuProjectExec` exposes:
 

@@ -260,8 +260,9 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
 
   val ENABLE_PROJECT_AST_JIT = conf("spark.rapids.sql.projectAstJitEnabled")
       .doc("Enable the experimental cuDF JIT backend for supported project AST expressions. " +
-        "When both project AST backends are enabled, JIT takes precedence for supported " +
-        "expressions within each projection tier.")
+        "Shared subexpressions across backends are materialized first. When both project AST " +
+        "backends support a complete expression, JIT takes precedence. " +
+        "Otherwise, prefer an intact interpreted AST expression over splitting it for JIT.")
       .internal()
       .booleanConf
       .createWithDefault(false)

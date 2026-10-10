@@ -217,7 +217,8 @@ object GpuAstJitExpression {
       conf: SQLConf): Seq[Expression] = {
     val roots = expressions.zipWithIndex.flatMap { case (expression, index) =>
       expression match {
-        case GpuAlias(child: GpuExpression, _) =>
+        case GpuAlias(child: GpuExpression, _) if
+            !child.isInstanceOf[GpuProjectAstExpression] =>
           astJitChild(child).map { jitChild =>
             JitRoot(index, jitChild, operationSet(jitChild))
           }

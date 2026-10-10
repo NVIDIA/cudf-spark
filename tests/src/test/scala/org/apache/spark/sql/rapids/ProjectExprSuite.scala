@@ -174,7 +174,7 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
     }
   }
 
-  test("tiered project preserves AST across multi-level shared expressions") {
+  test("tiered project preserves multi-level CSE with simple regular arithmetic") {
     val a = AttributeReference("a", LongType)()
     val b = AttributeReference("b", LongType)()
     val c = AttributeReference("c", LongType)()
@@ -198,16 +198,19 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
       expressions, Seq(a, b, c, d, e, f), new SQLConf())
 
     // After CSE:
-    // tier 0: [AST(a+b) AS t1]
-    // tier 1: [AST(t1*c) AS t2]
-    // tier 2: [AST(t2+d) AS first, AST(t2+e) AS second,
+    // tier 0: [a+b AS t1]
+    // tier 1: [t1*c AS t2]
+    // tier 2: [t2+d AS first, t2+e AS second,
     //          t1 AS shared_first, t1 AS shared_second, greatest(t1, f) AS regular]
     val astExpressionTiers = tiered.exprTiers.map(
       collectExpressions[GpuProjectAstExpression])
-    assertResult(Seq(1, 1, 2))(astExpressionTiers.map(_.size))
-    assert(astExpressionTiers.head.head.child.isInstanceOf[GpuAdd])
-    assert(astExpressionTiers(1).head.child.isInstanceOf[GpuMultiply])
-    assertResult(1)(tierReferences(astExpressionTiers(1).head).size)
+    assertResult(3)(tiered.exprTiers.size)
+    assert(astExpressionTiers.flatten.isEmpty)
+    assertResult(1)(collectExpressions[GpuAdd](tiered.exprTiers.head).size)
+    val products = collectExpressions[GpuMultiply](tiered.exprTiers(1))
+    assertResult(1)(products.size)
+    assertResult(1)(tierReferences(products.head).size)
+    assertResult(2)(collectExpressions[GpuAdd](tiered.exprTiers.last).size)
     // Final references: [t2, t2, t1, t1, t1] (distinct: {t2, t1}).
     val finalReferences = tiered.exprTiers.last.flatMap(tierReferences)
     assertResult(5)(finalReferences.size)

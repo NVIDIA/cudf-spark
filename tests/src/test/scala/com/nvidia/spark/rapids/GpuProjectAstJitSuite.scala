@@ -139,7 +139,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     assert(subtract.right.isInstanceOf[GpuMultiply])
   }
 
-  test("project wave exports a shared supported expression to JIT") {
+  test("cross-backend sharing takes precedence over a complete legacy root") {
     val left = reference(0, IntegerType)
     val right = reference(1, IntegerType)
     val third = reference(2, IntegerType)
@@ -156,20 +156,20 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
 
     // after wave planning:
     // tier 0: [AST_JIT(left+right) AS t1]
-    // tier 1: [AST(t1-third) AS legacy, greatest(t1, fourth) AS regular]
+    // tier 1: [t1-third AS legacy, greatest(t1, fourth) AS regular]
     val jitExpressionTiers = tiered.exprTiers.map(collectExpressions[GpuAstJitExpression])
     assertResult(Seq(1, 0))(jitExpressionTiers.map(_.size))
     assert(jitExpressionTiers.head.head.child.isInstanceOf[GpuAdd])
-    assert(GpuProjectAstExpression.extractTopLevel(tiered.exprTiers.last.head).isDefined)
-    assert(GpuProjectAstExpression.extractTopLevel(tiered.exprTiers.last(1)).isEmpty)
-    // Final references: [t1, t1] (distinct: {t1}).
+    val legacyTiers = tiered.exprTiers.map(collectExpressions[GpuProjectAstExpression])
+    assert(legacyTiers.flatten.isEmpty)
+    assertResult(1)(collectExpressions[GpuSubtract](tiered.exprTiers.last).size)
+    assert(collectExpressions[GpuAdd](tiered.exprTiers.last).isEmpty)
     val waveExprId = tiered.exprTiers.head.collectFirst {
       case alias: GpuAlias if GpuAstJitExpression.extractTopLevel(alias).isDefined => alias.exprId
     }.get
     val finalTierReferences = collectExpressions[GpuBoundReference](tiered.exprTiers.last)
         .filter(_.exprId == waveExprId)
     assertResult(2)(finalTierReferences.size)
-    assertResult(1)(finalTierReferences.map(_.exprId).distinct.size)
   }
 
   test("same-wave JIT roots keep their shared subtree inside one group") {
@@ -370,7 +370,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
       GpuAstJitExpression.explainFinalSelections(tiered.exprTiers, all = false))
   }
 
-  test("project JIT takes precedence while unsupported legacy AST falls back") {
+  test("project JIT takes precedence while standalone subtraction stays regular") {
     val left = reference(0, IntegerType)
     val right = reference(1, IntegerType)
     val jitCandidate = GpuProjectAstExpression.wrap(
@@ -383,7 +383,8 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     val outputs = tiered.exprTiers.last
 
     assert(GpuAstJitExpression.extractTopLevel(outputs.head).isDefined)
-    assert(GpuProjectAstExpression.extractTopLevel(outputs(1)).isDefined)
+    assert(GpuProjectAstExpression.extractTopLevel(outputs(1)).isEmpty)
+    assertResult(1)(collectExpressions[GpuSubtract](Seq(outputs(1))).size)
   }
 
   test("tiered binding only selects JIT when explicitly enabled") {
