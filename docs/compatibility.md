@@ -263,9 +263,12 @@ The broader set of historical date/timestamp reading limitations remains tracked
 [#131](https://github.com/NVIDIA/cudf-spark/issues/131). In particular, proleptic Gregorian ORC
 timestamps near the October 1582 cutover can still differ from CPU when the writer and reader
 use different timezones. A similar issue exists for writing dates as described
-[here](https://github.com/NVIDIA/cudf-spark/issues/139). Writing timestamps, however only appears
-to work for dates after the epoch as described
-[here](https://github.com/NVIDIA/cudf-spark/issues/140).
+[here](https://github.com/NVIDIA/cudf-spark/issues/139). GPU timestamp writes in UTC are supported
+from 1590 onward. Timestamps in the last 999 milliseconds before the Unix epoch are read one second
+later, matching the Apache ORC format behavior documented in
+[NVIDIA/cudf#23391](https://github.com/NVIDIA/cudf/pull/23391). In non-UTC timezones, timestamp
+writes fall back to CPU as tracked in
+[#15385](https://github.com/NVIDIA/cudf-spark/issues/15385).
 
 ORC writes containing `DATE` columns, including nested `DATE` columns, use the CPU writer by
 default. The cuDF ORC writer does not record calendar metadata in the file footer, so readers
