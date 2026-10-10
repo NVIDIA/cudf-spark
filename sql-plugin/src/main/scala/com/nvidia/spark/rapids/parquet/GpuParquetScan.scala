@@ -27,6 +27,7 @@ import scala.annotation.tailrec
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 import scala.language.implicitConversions
+import scala.util.control.NonFatal
 
 import ai.rapids.cudf._
 import ai.rapids.cudf.{ParquetChunkedReader => JniParquetChunkedReader}
@@ -551,6 +552,8 @@ protected case class GpuParquetFileFilterHandler(
     @transient sqlConf: SQLConf,
     metrics: Map[String, GpuMetric]) extends Logging {
 
+  private class InvalidFooterIndexException(message: String) extends RuntimeException(message)
+
   private val FOOTER_LENGTH_SIZE = 4
   private val isCaseSensitive = sqlConf.caseSensitiveAnalysis
   private val enableParquetFilterPushDown: Boolean = sqlConf.parquetFilterPushDown
@@ -613,19 +616,67 @@ protected case class GpuParquetFileFilterHandler(
       fileIO: RapidsFileIO,
       filePath: Path,
       conf: Configuration,
-      metrics: Map[String, GpuMetric]): HostMemoryBuffer = {
-    val inputFile = fileIO.newInputFile(filePath)
-    withResource(ParquetFooterUtils.getFooterBuffer(inputFile, metrics,
-        readFooterBuffer(fileIO, filePath, conf))) { hmb =>
+      metrics: Map[String, GpuMetric],
+      fileSize: Long): HostMemoryBuffer = {
+    withResource(readCachedFooterBuffer(fileIO, filePath, conf, metrics, fileSize)) { hmb =>
       // buffer includes header and trailing length and magic, stripped here
       hmb.slice(MAGIC.length, hmb.getLength - Integer.BYTES - MAGIC.length)
     }
   }
 
+  private def readCachedFooterBuffer(
+      fileIO: RapidsFileIO,
+      filePath: Path,
+      conf: Configuration,
+      metrics: Map[String, GpuMetric],
+      fileSize: Long): HostMemoryBuffer = {
+    def read(size: Long): HostMemoryBuffer = {
+      val inputFile = newInputFile(fileIO, filePath, size)
+      ParquetFooterUtils.getFooterBuffer(inputFile, metrics,
+        readFooterBuffer(fileIO, filePath, conf, size))
+    }
+
+    fileIO match {
+      case hadoopFileIO: HadoopFileIO if fileSize > 0 =>
+        try {
+          read(fileSize)
+        } catch {
+          case firstError @ (_: EOFException | _: InvalidFooterIndexException) =>
+            val currentFileSize = hadoopFileIO.newInputFile(filePath).getLength
+            if (currentFileSize == fileSize) {
+              throw firstError
+            } else {
+              logWarning(s"Footer read failed for $filePath because its size changed from " +
+                s"$fileSize to $currentFileSize; retrying with the current file size", firstError)
+              try {
+                read(currentFileSize)
+              } catch {
+                case NonFatal(retryError) =>
+                  retryError.addSuppressed(firstError)
+                  throw retryError
+              }
+            }
+        }
+      case _ =>
+        read(fileSize)
+    }
+  }
+
+  private def newInputFile(
+      fileIO: RapidsFileIO,
+      filePath: Path,
+      fileSize: Long): RapidsInputFile = fileIO match {
+    case hadoopFileIO: HadoopFileIO if fileSize > 0 =>
+      hadoopFileIO.newInputFile(filePath, fileSize)
+    case _ =>
+      fileIO.newInputFile(filePath)
+  }
+
   private def readFooterBuffer(
       fileIO: RapidsFileIO,
       filePath: Path,
-      conf: Configuration): HostMemoryBuffer = {
+      conf: Configuration,
+      fileSize: Long): HostMemoryBuffer = {
     if (fileIO.isInstanceOf[HadoopFileIO]) {
       // We should remove this after https://github.com/NVIDIA/spark-rapids/issues/13306 is
       // implemented.
@@ -641,14 +692,17 @@ protected case class GpuParquetFileFilterHandler(
       } else if (result.isDefined && (scheme == "gs" || scheme == "gcs")) {
         taskMetrics.recordPerfioGCSBackendOnce()
       }
-      result.getOrElse(readFooterBufUsingHadoop(fileIO, filePath))
+      result.getOrElse(readFooterBufUsingHadoop(fileIO, filePath, fileSize))
     } else {
-      readFooterBufUsingHadoop(fileIO, filePath)
+      readFooterBufUsingHadoop(fileIO, filePath, fileSize)
     }
   }
 
-  private def readFooterBufUsingHadoop(fileIO: RapidsFileIO, filePath: Path): HostMemoryBuffer = {
-    val inputFile = fileIO.newInputFile(filePath)
+  private def readFooterBufUsingHadoop(
+      fileIO: RapidsFileIO,
+      filePath: Path,
+      fileSize: Long): HostMemoryBuffer = {
+    val inputFile = newInputFile(fileIO, filePath, fileSize)
     // Much of this code came from the parquet_mr projects ParquetFileReader, and was modified
     // to match our needs.
     val fileLen = inputFile.getLength
@@ -676,7 +730,7 @@ protected case class GpuParquetFileFilterHandler(
       val footerLengthIndex = fileLen - trailerLen
       val footerIndex = footerLengthIndex - footerLength
       if (footerIndex < MAGIC.length || footerIndex >= footerLengthIndex) {
-        throw new RuntimeException(s"corrupted file: the footer index is not within " +
+        throw new InvalidFooterIndexException(s"corrupted file: the footer index is not within " +
           s"the file: $footerIndex")
       }
       val hmbLength = (fileLen - footerIndex).toInt
@@ -707,7 +761,7 @@ protected case class GpuParquetFileFilterHandler(
       readDataSchema: StructType,
       filePath: Path): ParquetFooter = {
     val footerSchema = convertToFooterSchema(readDataSchema)
-    val footerBuffer = getFooterBuffer(fileIO, filePath, conf, metrics)
+    val footerBuffer = getFooterBuffer(fileIO, filePath, conf, metrics, file.fileSize)
     withResource(footerBuffer) { footerBuffer =>
       NvtxRegistry.PARQUET_PARSE_FILTER_FOOTER {
         // In the future, if we know we're going to read the entire file,
@@ -732,9 +786,7 @@ protected case class GpuParquetFileFilterHandler(
       filePath: Path): ParquetMetadata = {
     //noinspection ScalaDeprecation
     NvtxRegistry.PARQUET_READ_FOOTER {
-      val inputFile = fileIO.newInputFile(filePath)
-      withResource(ParquetFooterUtils.getFooterBuffer(inputFile, metrics,
-          readFooterBuffer(fileIO, filePath, conf))) { hmb =>
+      withResource(readCachedFooterBuffer(fileIO, filePath, conf, metrics, file.fileSize)) { hmb =>
         ParquetFileReader.readFooter(new HMBInputFile(hmb),
           ParquetMetadataConverter.range(file.start, file.start + file.length))
       }
