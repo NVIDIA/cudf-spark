@@ -164,6 +164,65 @@ def read_json_sql(data_path, schema, spark_tmp_table_factory, options = {}):
         return spark.catalog.createTable(tmp_name, source='json', path=data_path, **opts)
     return read_impl
 
+@ignore_order
+@pytest.mark.parametrize('v1_enabled_list', ['', 'json'])
+@pytest.mark.parametrize('reader_batch_bytes', [1, 1024 * 1024])
+@pytest.mark.parametrize('max_partition_bytes', [64, 1024 * 1024])
+@pytest.mark.parametrize('encoding', [None, 'UTF-8', 'US-ASCII'])
+def test_json_bom_at_batch_and_partition_boundaries(spark_tmp_path, v1_enabled_list,
+                                                   reader_batch_bytes, max_partition_bytes,
+                                                   encoding):
+    data_path = spark_tmp_path + '/JSON_BOM'
+    records = [
+        '\ufeff{"a":0,"b":"first"}',
+        '\ufeff{"a":1,"b":"one"}',
+        '\ufeff \t{"a":2,"b":"two"}',
+        ' \ufeff{"a":3,"b":"invalid"}',
+        '\ufeff\ufeff{"a":4,"b":"invalid"}',
+        '\ufeff',
+        '\ufeff \t',
+    ]
+    if encoding != 'US-ASCII':
+        records.append('{"a":5,"b":"\ufeffquoted"}')
+    records.append('{"a":6,"b":"last"}')
+    with_cpu_session(lambda spark: spark.createDataFrame([(line,) for line in records], ['value'])
+                     .coalesce(1).write.text(data_path))
+    schema = StructType([StructField('a', IntegerType()), StructField('b', StringType())])
+    options = {'encoding': encoding, 'lineSep': '\n'} if encoding else {}
+    conf = copy_and_update(_enable_all_types_conf, {
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        'spark.rapids.sql.reader.batchSizeBytes': str(reader_batch_bytes),
+        'spark.sql.files.maxPartitionBytes': str(max_partition_bytes),
+        'spark.sql.files.openCostInBytes': '0',
+    })
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(schema).options(**options).json(data_path), conf=conf)
+
+@ignore_order
+@pytest.mark.parametrize('v1_enabled_list', ['', 'json'])
+@pytest.mark.parametrize('reader_batch_bytes', [1, 1024 * 1024])
+@pytest.mark.parametrize('encoding', [None, 'UTF-8', 'US-ASCII'])
+@pytest.mark.parametrize('empty_only', [False, True])
+def test_json_empty_root_arrays(spark_tmp_path, v1_enabled_list, reader_batch_bytes,
+                                encoding, empty_only):
+    data_path = spark_tmp_path + '/JSON_EMPTY_ARRAYS'
+    empty_arrays = ['[]', ' [ \t ] ', '[]']
+    if empty_only:
+        records = empty_arrays
+    else:
+        records = ['{"a":0,"b":"first"}'] + empty_arrays + [
+            '\ufeff[]', '\ufeff \t[ \t ]', ' \ufeff[]', '{"a":1,"b":"last"}']
+    with_cpu_session(lambda spark: spark.createDataFrame([(line,) for line in records], ['value'])
+                     .coalesce(1).write.text(data_path))
+    schema = StructType([StructField('a', IntegerType()), StructField('b', StringType())])
+    options = {'encoding': encoding, 'lineSep': '\n'} if encoding else {}
+    conf = copy_and_update(_enable_all_types_conf, {
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        'spark.rapids.sql.reader.batchSizeBytes': str(reader_batch_bytes),
+    })
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(schema).options(**options).json(data_path), conf=conf)
+
 @approximate_float
 @pytest.mark.parametrize('data_gen', [
     StringGen('(\\w| |\t|\ud720){0,10}', nullable=False),

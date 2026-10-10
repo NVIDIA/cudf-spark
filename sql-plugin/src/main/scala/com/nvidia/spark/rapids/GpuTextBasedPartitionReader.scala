@@ -29,6 +29,7 @@ import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.DateUtils.{toStrf, TimestampFormatConversionException}
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.jni.CastStrings
+import com.nvidia.spark.rapids.jni.GpuSplitAndRetryOOM
 import com.nvidia.spark.rapids.shims.GpuTypeShims
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
@@ -237,6 +238,40 @@ class HostStringColBufferer(size: Long, separator: Array[Byte]) extends LineBuff
 }
 
 object GpuTextBasedPartitionReader {
+  def findSplitOffset(buffer: HostMemoryBuffer, minSplitOffset: Long = 0): Long = {
+    val size = buffer.getLength
+    val midpoint = math.max(size / 2, minSplitOffset)
+    var pos = midpoint
+    while (pos < size && buffer.getByte(pos) != '\n'.toByte) {
+      pos += 1
+    }
+    val nextBoundary = math.min(pos + 1, size)
+    if (nextBoundary < size) {
+      nextBoundary
+    } else {
+      pos = midpoint - 1
+      while (pos >= minSplitOffset && buffer.getByte(pos) != '\n'.toByte) {
+        pos -= 1
+      }
+      pos + 1
+    }
+  }
+
+  case class LineDelimitedReadChunk(buffer: HostMemoryBuffer) extends AutoCloseable {
+    override def close(): Unit = buffer.close()
+
+    def split(): Seq[LineDelimitedReadChunk] = withResource(this) { _ =>
+      val splitOffset = findSplitOffset(buffer)
+      if (splitOffset <= 0 || splitOffset >= buffer.getLength) {
+        throw new GpuSplitAndRetryOOM("Text input cannot be split at a record boundary")
+      }
+      closeOnExcept(buffer.slice(0, splitOffset)) { left =>
+        val right = buffer.slice(splitOffset, buffer.getLength - splitOffset)
+        Seq(LineDelimitedReadChunk(left), LineDelimitedReadChunk(right))
+      }
+    }
+  }
+
   def castStringToTimestamp(
       lhs: ColumnVector,
       sparkFormat: String,

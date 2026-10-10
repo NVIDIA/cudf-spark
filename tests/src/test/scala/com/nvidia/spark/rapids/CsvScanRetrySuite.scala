@@ -181,17 +181,18 @@ class CsvScanRetrySuite extends RmmSparkRetrySuiteBase with MockitoSugar {
   }
 
   private def withReader[T](text: String, readSchema: StructType, maxBytes: Long,
-      wrapTables: Iterator[Table] => Iterator[Table] = identity[Iterator[Table]] _)
+      wrapTables: Iterator[Table] => Iterator[Table] = identity[Iterator[Table]] _,
+      header: Boolean = true, maxRows: Int = 1024, start: Long = 0)
       (fn: CSVPartitionReader => T): T = {
     val file = Files.createTempFile("csv-reader-retry", ".csv")
     Files.write(file, text.getBytes(StandardCharsets.UTF_8))
     try {
       withResource(new CSVPartitionReader(new Configuration(),
         PartitionedFileUtilsShim.newPartitionedFile(
-          InternalRow.empty, file.toString, 0, Files.size(file)),
+          InternalRow.empty, file.toString, start, Files.size(file) - start),
         stringSchema, readSchema,
-        new SparkCSVOptions(Map("header" -> "true", "comment" -> "#"), false, "UTC"),
-        1024, maxBytes, Map[String, GpuMetric]().withDefaultValue(NoopMetric)) {
+        new SparkCSVOptions(Map("header" -> header.toString, "comment" -> "#"), false, "UTC"),
+        maxRows, maxBytes, Map[String, GpuMetric]().withDefaultValue(NoopMetric)) {
         override protected def readToTables(
             dataBufferer: HostLineBufferer,
             cudfDataSchema: Schema,
@@ -205,6 +206,82 @@ class CsvScanRetrySuite extends RmmSparkRetrySuiteBase with MockitoSugar {
       })(fn)
     } finally {
       Files.deleteIfExists(file)
+    }
+  }
+
+  private def collectReaderStrings(reader: CSVPartitionReader): (Seq[Seq[String]], Int) = {
+    val actual = ArrayBuffer[Seq[String]]()
+    var rows = 0
+    while (reader.next()) {
+      withResource(reader.get()) { batch =>
+        rows += batch.numRows()
+        if (batch.numCols() > 0) {
+          withResource(GpuColumnVector.from(batch)) { table =>
+            withResource(table.getColumn(0).copyToHost()) { a =>
+              withResource(table.getColumn(1).copyToHost()) { b =>
+                (0 until batch.numRows()).foreach { i =>
+                  actual += Seq(a.getJavaString(i), b.getJavaString(i))
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    (actual.toSeq, rows)
+  }
+
+  for (readSchema <- Seq(stringSchema, StructType(Seq.empty));
+      header <- Seq(false, true); byRows <- Seq(false, true)) {
+    test(s"CSV batches preserve interior U+FEFF: $readSchema, header=$header, rows=$byRows") {
+      val prefix = if (header) "# leading comment\n# another comment\na,b\n" else ""
+      val values = Seq("plain", "\uFEFFfirst", "\uFEFF#value", "\uFEFF", "normal")
+      val data = values.zipWithIndex.map { case (value, i) => s"$value,$i\n" }.mkString
+      withReader("\uFEFF" + prefix + data, readSchema,
+          if (byRows) 1024 else 1, header = header, maxRows = if (byRows) 1 else 1024) {
+        reader =>
+          val (actual, rows) = collectReaderStrings(reader)
+          assert(rows == values.size)
+          if (readSchema.nonEmpty) {
+            assert(actual == values.zipWithIndex.map { case (value, i) => Seq(value, i.toString) })
+          }
+      }
+    }
+  }
+
+  for (readSchema <- Seq(stringSchema, StructType(Seq.empty)); header <- Seq(false, true)) {
+    test(s"CSV partitions preserve their first interior U+FEFF: $readSchema, header=$header") {
+      val prefix = "\uFEFFa,b\nskipped,0\n"
+      val start = prefix.getBytes(StandardCharsets.UTF_8).length - 1L
+      withReader(prefix + "\uFEFF#first,1\n\uFEFFsecond,2\nnormal,3\n", readSchema,
+          1024, header = header, start = start) { reader =>
+        val (actual, rows) = collectReaderStrings(reader)
+        assert(rows == 3)
+        if (readSchema.nonEmpty) {
+          assert(actual == Seq(Seq("\uFEFF#first", "1"), Seq("\uFEFFsecond", "2"),
+            Seq("normal", "3")))
+        }
+      }
+    }
+  }
+
+  for (prefix <- Seq("\n\t\u0001\n", "\uFEFF", "\uFEFF\n")) {
+    test(s"CSV preserves U+FEFF after the file BOM or filtered empty lines: ${prefix.length}") {
+      withReader(prefix + "\uFEFF#data,1\n", stringSchema, 1024, header = false) { reader =>
+        val (actual, rows) = collectReaderStrings(reader)
+        assert(actual == Seq(Seq("\uFEFF#data", "1")))
+        assert(rows == 1)
+      }
+    }
+  }
+
+  test("CSV split retains a header after the protective newline") {
+    withReader("\n\uFEFFa,b\n" + "first,1\nsecond,2\n", stringSchema, 1024) { reader =>
+      RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
+        RmmSpark.OomInjectionType.GPU.ordinal, 0)
+      val (actual, rows) = collectReaderStrings(reader)
+      assert(actual == Seq(Seq("first", "1"), Seq("second", "2")))
+      assert(rows == 2)
     }
   }
 

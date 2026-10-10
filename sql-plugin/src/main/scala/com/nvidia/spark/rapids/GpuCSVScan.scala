@@ -440,6 +440,28 @@ abstract class CSVPartitionReaderBase[BUFF <: LineBufferer, FACT <: LineBufferer
 
 
 object CSVPartitionReader {
+  private val lineBuffererFactory = new LineBuffererFactory[HostLineBufferer] {
+    override def createBufferer(estimatedSize: Long,
+        lineSeparatorInRead: Array[Byte]): HostLineBufferer = {
+      new HostLineBufferer(estimatedSize, lineSeparatorInRead, true) {
+        override def isWhiteSpace(b: Byte): Boolean = (b & 0xFF) <= 0x20
+
+        override def add(line: Array[Byte], offset: Int, len: Int): Unit = {
+          // Hadoop strips the file BOM; a BOM here is data even after filtered empty lines.
+          if (getLength == 0 && len >= 3 && line(offset) == 0xef.toByte &&
+              line(offset + 1) == 0xbb.toByte && line(offset + 2) == 0xbf.toByte) {
+            val protectedLine = new Array[Byte](len + 1)
+            protectedLine(0) = '\n'.toByte
+            System.arraycopy(line, offset, protectedLine, 1, len)
+            super.add(protectedLine, 0, protectedLine.length)
+          } else {
+            super.add(line, offset, len)
+          }
+        }
+      }
+    }
+  }
+
   private def startsWithBom(buffer: HostMemoryBuffer, offset: Long, size: Long): Boolean = {
     size - offset >= 3 && buffer.getByte(offset) == 0xef.toByte &&
       buffer.getByte(offset + 1) == 0xbb.toByte && buffer.getByte(offset + 2) == 0xbf.toByte
@@ -456,6 +478,9 @@ object CSVPartitionReader {
   private def headerStart(buffer: HostMemoryBuffer, size: Long, comment: Byte): Long = {
     // cuDF ignores a UTF-8 BOM before checking for leading comments and the header.
     var pos = if (startsWithBom(buffer, 0, size)) 3L else 0L
+    while (pos < size && buffer.getByte(pos) == '\n'.toByte) {
+      pos += 1
+    }
     while (pos < size && comment != 0 && buffer.getByte(pos) == comment) {
       pos = offsetAfterLine(buffer, size, pos)
     }
@@ -468,14 +493,6 @@ object CSVPartitionReader {
       comment: Byte) extends AutoCloseable {
     override def close(): Unit = buffer.close()
 
-    private def previousLineBoundary(start: Long, headerEnd: Long): Long = {
-      var pos = start
-      while (pos >= headerEnd && buffer.getByte(pos) != '\n'.toByte) {
-        pos -= 1
-      }
-      pos + 1
-    }
-
     private def splitOffsets: (Long, Long) = {
       val size = buffer.getLength
       val headerEnd = if (hasHeader) {
@@ -483,13 +500,7 @@ object CSVPartitionReader {
       } else {
         0L
       }
-      val midpoint = math.max(size / 2, headerEnd)
-      val nextLineBoundary = offsetAfterLine(buffer, size, midpoint)
-      val leftEnd = if (nextLineBoundary < size) {
-        nextLineBoundary
-      } else {
-        previousLineBoundary(midpoint - 1, headerEnd)
-      }
+      val leftEnd = GpuTextBasedPartitionReader.findSplitOffset(buffer, headerEnd)
       // Keep the preceding newline so cuDF cannot strip an interior U+FEFF as a file BOM.
       val rightStart = if (startsWithBom(buffer, leftEnd, size)) {
         leftEnd - 1
@@ -580,7 +591,7 @@ class CSVPartitionReader(
     // In multiLine mode, empty lines within quoted fields are
     // legitimate data and must not be filtered out.
     if (parsedOptions.multiLine) HostLineBuffererFactory
-    else FilterCsvEmptyHostLineBuffererFactory) {
+    else CSVPartitionReader.lineBuffererFactory) {
 
   private var headerPending = partFile.start == 0 && parsedOptions.headerFlag
 
