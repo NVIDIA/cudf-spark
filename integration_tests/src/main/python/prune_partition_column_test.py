@@ -18,8 +18,9 @@ import pytest
 from asserts import assert_gpu_and_cpu_are_equal_collect, run_with_cpu_and_gpu, assert_equal
 from data_gen import *
 from marks import *
+from pyspark.sql import Row
 from pyspark.sql.types import IntegerType
-from spark_session import with_cpu_session, is_before_spark_320
+from spark_session import with_cpu_session, is_before_spark_320, is_spark_411_or_later
 from conftest import spark_jvm
 
 # Several values to avoid generating too many folders for partitions.
@@ -173,7 +174,7 @@ def create_contacts_table_and_read(is_partitioned, format, data_path, expected_s
 # https://github.com/NVIDIA/spark-rapids/issues/8713
 # https://github.com/NVIDIA/spark-rapids/issues/8714
 @pytest.mark.parametrize('query,expected_schemata', [("select friends.middle, friends from {} where p=1", "struct<friends:array<struct<first:string,middle:string,last:string>>>"),
-                                                     pytest.param("select name.middle, address from {} where p=2", "struct<name:struct<middle:string>,address:string>", marks=pytest.mark.skip(reason='https://github.com/NVIDIA/spark-rapids/issues/8788')),
+                                                     ("select name.middle, address from {} where p=2", "struct<name:struct<middle:string>,address:string>"),
                                                      ("select name.first from {} where name.first = 'Jane'", "struct<name:struct<first:string>>")])
 @pytest.mark.parametrize('is_partitioned', [True, False])
 @pytest.mark.parametrize('format', ["parquet", "orc"])
@@ -187,6 +188,45 @@ def test_select_complex_field(format, spark_tmp_path, query, expected_schemata, 
         return do_it
     conf={"spark.sql.parquet.enableVectorizedReader": "true"}
     create_contacts_table_and_read(is_partitioned, format, data_path, expected_schemata, read_temp_view, conf, table_name)
+
+
+@pytest.mark.skipif(not is_spark_411_or_later(),
+                    reason="Spark 4.1.1+ exposes missing-struct parent validity")
+@pytest.mark.parametrize('return_null_struct', [False, True])
+@pytest.mark.parametrize('nested_array', [False, True])
+@ignore_order(local=True)
+def test_parquet_missing_nested_field_parent_null(spark_tmp_path, return_null_struct,
+                                                  nested_array):
+    data_path = spark_tmp_path + "/MISSING_NESTED_PARENT"
+    if nested_array:
+        source_rows = [
+            Row(name=None, address="null parent"),
+            Row(name=Row(arr=[Row(first="Ada")]), address="present parent")]
+        source_schema = "name struct<arr:array<struct<first:string>>>, address string"
+        read_schema = "name struct<arr:array<struct<middle:string>>>, address string"
+    else:
+        source_rows = [
+            Row(name=None, address="null parent"),
+            Row(name=Row(first="Ada", last="Lovelace"), address="present parent")]
+        source_schema = "name struct<first:string,last:string>, address string"
+        read_schema = "name struct<middle:string>, address string"
+    with_cpu_session(lambda spark: spark.createDataFrame(
+        source_rows, source_schema)
+        .write.parquet(data_path))
+
+    conf = {
+        "spark.sql.legacy.parquet.returnNullStructIfAllFieldsMissing":
+            str(return_null_struct).lower(),
+        "spark.sql.parquet.enableVectorizedReader": "true"}
+
+    def read_parent(spark):
+        return spark.read.schema(read_schema).parquet(data_path).select("name", "address")
+
+    from_cpu = with_cpu_session(lambda spark: read_parent(spark).collect(), conf=conf)
+    assert len(from_cpu) == 2
+    if not return_null_struct:
+        assert sorted(row.name is None for row in from_cpu) == [False, True]
+    assert_gpu_and_cpu_are_equal_collect(read_parent, conf=conf)
 
 # https://github.com/NVIDIA/spark-rapids/issues/8715
 @pytest.mark.parametrize('query, expected_schemata', [("friend.First", "struct<friends:array<struct<first:string>>>"),

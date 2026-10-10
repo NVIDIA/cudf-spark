@@ -45,7 +45,7 @@ import com.nvidia.spark.rapids.jni.fileio.{RapidsFileIO, RapidsInputFile}
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile.CopyRange
 import com.nvidia.spark.rapids.parquet.ParquetPartitionReader.{LocalCopy, PARQUET_MAGIC}
 import com.nvidia.spark.rapids.shims.{ColumnDefaultValuesShims, GpuParquetCrypto, GpuTypeShims,
-  ParquetVariantShims, ShimFilePartitionReaderFactory, SparkShimImpl}
+  ParquetMissingStructShims, ParquetVariantShims, ShimFilePartitionReaderFactory, SparkShimImpl}
 import com.nvidia.spark.rapids.shims.parquet.{GpuParquetUtilsShims, ParquetLegacyNanoAsLongShims, ParquetSchemaClipShims, ParquetStringPredShims}
 import org.apache.commons.io.output.{CountingOutputStream, NullOutputStream}
 import org.apache.hadoop.conf.Configuration
@@ -565,6 +565,8 @@ protected case class GpuParquetFileFilterHandler(
   private val int96RebaseMode = SparkShimImpl.int96ParquetRebaseRead(sqlConf)
   private val readUseFieldId = ParquetSchemaClipShims.useFieldId(sqlConf)
   private val ignoreMissingParquetFieldId = ParquetSchemaClipShims.ignoreMissingIds(sqlConf)
+  private val returnNullStructIfAllFieldsMissing =
+    ParquetMissingStructShims.returnNullStructIfAllFieldsMissing(sqlConf)
 
   private val PARQUET_ENCRYPTION_CONFS = Seq("parquet.encryption.kms.client.class",
     "parquet.encryption.kms.client.class", "parquet.crypto.factory.class")
@@ -851,7 +853,8 @@ protected case class GpuParquetFileFilterHandler(
       val (clipped, clippedSchema) =
         NvtxRegistry.PARQUET_CLIP_SCHEMA {
           val clippedSchema = ParquetSchemaUtils.clipParquetSchema(
-            fileSchema, readDataSchema, isCaseSensitive, readUseFieldId)
+            fileSchema, readDataSchema, isCaseSensitive, readUseFieldId,
+            returnNullStructIfAllFieldsMissing)
           // Check if the read schema is compatible with the file schema.
           checkSchemaCompat(clippedSchema, readDataSchema,
             (t: Type, d: DataType) => throwTypeIncompatibleError(t, d, file.filePath.toString()),
