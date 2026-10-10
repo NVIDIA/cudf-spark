@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -158,6 +158,53 @@ class ThrottlingExecutorSuite extends AnyFunSuite with BeforeAndAfterEach {
     assertCause(e1, classOf[InterruptedException])
     val e2 = intercept[ExecutionException](future2.get())
     assertCause(e2, classOf[RejectedExecutionException])
+  }
+
+  test("rejected task releases throttle admission") {
+    executor.shutdownNow(longTimeoutSec, TimeUnit.SECONDS)
+
+    intercept[RejectedExecutionException] {
+      executor.submit(() => (), 30)
+    }
+
+    assertResult(0)(trafficController.numScheduledTasks)
+    assertResult(0)(throttle.getTotalHostMemoryBytes)
+  }
+
+  test("shutdown releases throttle admission for queued tasks") {
+    val started = new CountDownLatch(1)
+    val release = new CountDownLatch(1)
+
+    try {
+      executor.submit(() => {
+        started.countDown()
+        var waiting = true
+        while (waiting) {
+          try {
+            release.await()
+            waiting = false
+          } catch {
+            case _: InterruptedException =>
+          }
+        }
+      }, 10)
+      executor.submit(() => (), 20)
+
+      assert(started.await(longTimeoutSec, TimeUnit.SECONDS))
+      assertResult(2)(trafficController.numScheduledTasks)
+      assertResult(30)(throttle.getTotalHostMemoryBytes)
+
+      executor.shutdownNow(100, TimeUnit.MILLISECONDS)
+
+      assertResult(1)(trafficController.numScheduledTasks)
+      assertResult(10)(throttle.getTotalHostMemoryBytes)
+    } finally {
+      release.countDown()
+    }
+
+    assert(executor.shutdownNow(longTimeoutSec, TimeUnit.SECONDS) == ())
+    assertResult(0)(trafficController.numScheduledTasks)
+    assertResult(0)(throttle.getTotalHostMemoryBytes)
   }
 
   test("task metrics") {
