@@ -25,7 +25,7 @@ from marks import allow_non_gpu, delta_lake, ignore_order
 from parquet_test import reader_opt_confs_no_native
 from parquet_test_utils import parquet_row_group_midpoints
 from spark_session import with_cpu_session, with_gpu_session, is_databricks_runtime, \
-    is_spark_320_or_later, is_spark_340_or_later, \
+    is_spark_320_or_later, is_spark_340_or_later, is_spark_350_or_later, \
     supports_delta_lake_deletion_vectors, is_spark_412_or_later, \
     gpu_supports_delta_dv_scan, is_before_spark_353, is_databricks173_or_later
 
@@ -1627,6 +1627,28 @@ def _test_delta_dv_filter_after_native_scan(spark_tmp_path, cpu_bridge_enabled):
                     reason="Spark-RAPIDS supports scan with deletion vectors starting in Spark 3.5.3")
 def test_delta_dv_cpu_filter_after_native_scan(spark_tmp_path):
     _test_delta_dv_filter_after_native_scan(spark_tmp_path, cpu_bridge_enabled=False)
+
+
+@delta_lake
+@pytest.mark.skipif(is_databricks_runtime(), reason="Smoke test uses OSS Delta bitmap classes")
+@pytest.mark.skipif(not is_spark_350_or_later(), reason="Smoke test covers the Delta 3.x+ matrix")
+@pytest.mark.parametrize("serialization_format", ["Native", "Portable"])
+def test_delta_bitmap_serialization_java_compatibility(serialization_format):
+    def round_trip(spark):
+        deletion_vectors = spark._jvm.org.apache.spark.sql.delta.deletionvectors
+        bitmap = deletion_vectors.RoaringBitmapArray()
+        # Exercise both bitmap containers, including a row index beyond 32 bits.
+        row_indices = [1, (1 << 32) + 2]
+        for row_index in row_indices:
+            bitmap.add(row_index)
+        bitmap_format = getattr(deletion_vectors.RoaringBitmapArrayFormat, serialization_format)()
+        serialized = bitmap.serializeAsByteArray(bitmap_format)
+        restored = deletion_vectors.RoaringBitmapArray.readFrom(serialized)
+        assert restored.cardinality() == len(row_indices)
+        for row_index in row_indices:
+            assert restored.contains(row_index)
+
+    with_cpu_session(round_trip)
 
 
 # This covers the CPU bridge path: the filter expression runs on the CPU while

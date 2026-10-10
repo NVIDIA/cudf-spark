@@ -302,8 +302,21 @@ run_delta_lake_tests() {
   fi
 
   if [[ $SPARK_VER =~ $SPARK_35X_PATTERN ]]; then
-    # Delta 3.3.3 fixes staged-table truncate validation on Spark 3.5.6+.
-    DELTA_LAKE_VERSIONS="3.3.3"
+    local java_command="${JAVA_HOME:+$JAVA_HOME/bin/}java"
+    local java_specification_version
+    java_specification_version=$("$java_command" -XshowSettings:properties -version 2>&1 |
+      awk '$1 == "java.specification.version" {print $3}')
+    if [[ -z "$java_specification_version" ]]; then
+      echo "Cannot determine the Java version for Delta Lake tests" >&2
+      return 1
+    fi
+    if [[ "$java_specification_version" == "1.8" ]]; then
+      # Delta 3.3.3 bitmap deserialization calls a ByteBuffer API absent from Java 8.
+      DELTA_LAKE_VERSIONS="3.3.0"
+    else
+      # Delta 3.3.3 fixes staged-table truncate validation on Spark 3.5.6+.
+      DELTA_LAKE_VERSIONS="3.3.3"
+    fi
   fi
 
   if [[ $SPARK_VER =~ $SPARK_40X_PATTERN ]]; then
@@ -344,7 +357,7 @@ run_delta_lake_tests() {
         DELTA_MAIN_JAR="io.delta:delta-spark_${DELTA_SPARK_LINE}_${SCALA_BINARY_VER}:$v"
       elif [[ "$v" == "4.1.0" ]]; then
         DELTA_MAIN_JAR="io.delta:delta-spark_4.1_${SCALA_BINARY_VER}:$v"
-      elif [[ "$v" == "3.3.3" || "$v" == "4.0.0" || \
+      elif [[ "$v" == "3.3.0" || "$v" == "3.3.3" || "$v" == "4.0.0" || \
           "$v" == "4.0.1" ]]; then
         DELTA_MAIN_JAR="io.delta:delta-spark_${SCALA_BINARY_VER}:$v"
       else
@@ -353,13 +366,19 @@ run_delta_lake_tests() {
       # Delta Lake 1.2+ moved LogStore implementations into delta-storage.
       # All versions tested here are 2.0+, so include it explicitly.
       DELTA_JAR="${DELTA_MAIN_JAR},io.delta:delta-storage:$v"
-      env \
-        HOST_NAME=$PROJECT_REPO_HOST \
-        PYSP_TEST_spark_jars_packages=${DELTA_JAR} \
-        PYSP_TEST_spark_jars_ivySettings="${WORKSPACE}/jenkins/ivysettings.xml" \
-        PYSP_TEST_spark_sql_extensions="io.delta.sql.DeltaSparkSessionExtension" \
-        PYSP_TEST_spark_sql_catalog_spark__catalog="org.apache.spark.sql.delta.catalog.DeltaCatalog" \
-        ./run_pyspark_from_build.sh -m delta_lake --delta_lake
+      local delta_test_env=(env
+        "HOST_NAME=$PROJECT_REPO_HOST"
+        "PYSP_TEST_spark_jars_packages=${DELTA_JAR}"
+        "PYSP_TEST_spark_jars_ivySettings=${WORKSPACE}/jenkins/ivysettings.xml"
+        "PYSP_TEST_spark_sql_extensions=io.delta.sql.DeltaSparkSessionExtension"
+        "PYSP_TEST_spark_sql_catalog_spark__catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog")
+      if [[ "$v" == "3.3.0" || "$v" == "3.3.3" ]]; then
+        # Catch Delta/JDK linkage failures before running the full matrix.
+        "${delta_test_env[@]}" TEST= \
+          TESTS=delta_lake_test.py::test_delta_bitmap_serialization_java_compatibility \
+          ./run_pyspark_from_build.sh -m delta_lake --delta_lake || return 1
+      fi
+      "${delta_test_env[@]}" ./run_pyspark_from_build.sh -m delta_lake --delta_lake
     done
   fi
 }
