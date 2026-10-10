@@ -594,6 +594,9 @@ final class HashBuildCache extends AutoCloseable {
   private[execution] def getOrBuild(
       key: HashBuildKey,
       metrics: HashBuildMetrics)(create: => HashArtifact): (HashArtifact, Boolean) = {
+    // Waiting threads keep the GPU semaphore, so a thread must hold the semaphore before it
+    // can claim the rebuild to avoid deadlock. This must happen outside the lock.
+    GpuSemaphore.acquireIfNecessary(TaskContext.get())
     // All threads decide whether to build or wait under the lock.
     val (future, shouldBuild) = synchronized {
       if (closed) {
