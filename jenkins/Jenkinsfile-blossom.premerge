@@ -122,6 +122,17 @@ pipeline {
                     }
                     githubHelper.updateCommitStatus("", "Running", GitHubCommitState.PENDING)
                     checkoutCode(githubHelper.getCloneUrl(), githubHelper.getMergedSHA())
+                    sh '''
+                        python3 jenkins/jni_pin.py check \
+                            --pom pom.xml \
+                            --pom scala2.13/pom.xml
+                        python3 jenkins/jni_pin.py verify-repository \
+                            --pom pom.xml \
+                            --pom scala2.13/pom.xml \
+                            --repository urm \
+                            --base-url "$ART_URL" \
+                            --basic-auth-env ART_CREDS_USR,ART_CREDS_PSW
+                    '''
 
                     def changedFilesOutput = sh(returnStdout: true,
                         script: 'git -c core.quotePath=false --no-pager diff ' +

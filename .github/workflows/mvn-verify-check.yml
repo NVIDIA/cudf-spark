@@ -48,6 +48,16 @@ jobs:
       sparkJDKVersions: ${{ steps.all212ShimVersionsStep.outputs.jdkVersions }}
     steps:
       - uses: NVIDIA/spark-rapids-common/checkout@main # refs/pull/:prNumber/merge
+      - name: Verify JNI candidate pin provenance
+        run: |
+          python3 jenkins/jni_pin.py check \
+            --pom pom.xml \
+            --pom scala2.13/pom.xml
+          python3 jenkins/jni_pin.py verify-repository \
+            --pom pom.xml \
+            --pom scala2.13/pom.xml \
+            --repository sonatype \
+            --base-url https://central.sonatype.com/repository/maven-snapshots
       - uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
