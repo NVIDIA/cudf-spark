@@ -59,8 +59,8 @@ class AsyncOutputStreamSuite extends AnyFunSuite with BeforeAndAfterEach {
           }
 
           /**
-           * Technically, overriding this method is good enough for the test, but we also override
-           * the other submit methods as well in case we modify our code to use them in the future.
+           * Keep the delay on both execute and submit paths so this fixture remains useful if the
+           * async executor changes how it hands work to the underlying pool.
            */
           override def submit[T](task: Callable[T]): Future[T] = {
             super.submit(() => {
