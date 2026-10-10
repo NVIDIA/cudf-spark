@@ -74,6 +74,7 @@
                             <sources>
                                 <source>${spark.rapids.source.basedir}/iceberg/common/src/main/java</source>
                                 <source>${spark.rapids.source.basedir}/iceberg/common/src/main/scala</source>
+                                <source>${spark.rapids.source.basedir}/iceberg/iceberg-19plus-common/src/main/java</source>
                             </sources>
                         </configuration>
                     </execution>

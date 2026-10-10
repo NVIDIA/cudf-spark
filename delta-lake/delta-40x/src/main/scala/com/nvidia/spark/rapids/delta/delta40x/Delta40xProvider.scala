@@ -98,7 +98,8 @@ object Delta40xProvider extends DeltaProviderBase with Logging {
 
   override protected def toGpuParquetFileFormat(conf: RapidsConf, fmt: DeltaParquetFileFormat)
   : FileFormat = {
-    if (isPushDVPredicateDownEnabled(conf)) {
+    val needsGeneratedRowIndex = !fmt.optimizationsEnabled && !fmt.hasTablePath
+    if (isPushDVPredicateDownEnabled(conf) && !needsGeneratedRowIndex) {
       GpuDeltaParquetFileFormat2(
         protocol = fmt.protocol,
         metadata = fmt.metadata,

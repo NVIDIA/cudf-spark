@@ -97,12 +97,34 @@ private case class DeletionVectorOutputColumns(rowIndexColumn: Option[Int] = Non
 }
 
 private object DeletionVectorOutputColumns {
-  def fromSchema(readDataSchema: StructType): DeletionVectorOutputColumns = {
-    val rowIndex = readDataSchema.fieldNames.indexOf(METADATA_ROW_IDX_COL) match {
+  def fromSchema(
+      readDataSchema: StructType,
+      rowIndexColumnName: String): DeletionVectorOutputColumns = {
+    val rowIndex = readDataSchema.fieldNames.indexOf(rowIndexColumnName) match {
       case -1 => None
       case index => Some(index)
     }
     DeletionVectorOutputColumns(rowIndex)
+  }
+}
+
+private[delta] object LowShuffleMergeRowIndexes {
+  /** Builds already flattened file-relative row-group sequences; the caller owns the result. */
+  def buildColumn(rowGroupRanges: Array[(Long, Int)]): ColumnVector = {
+    val rowIndexChunks = rowGroupRanges.safeMap { case (offset, numRows) =>
+      withResource(Scalar.fromLong(offset)) { start =>
+        ColumnVector.sequence(start, numRows)
+      }
+    }
+    withResource(rowIndexChunks) { chunks =>
+      if (chunks.isEmpty) {
+        ColumnVector.fromLongs()
+      } else if (chunks.length == 1) {
+        chunks.head.incRefCount()
+      } else {
+        ColumnVector.concatenate(chunks: _*)
+      }
+    }
   }
 }
 
@@ -129,6 +151,8 @@ case class GpuDeltaParquetFileFormatNativeDV(
 
   private val lowShuffleMergeScan =
     GpuDeltaParquetFileFormat.isLowShuffleMergeScan(relation.options)
+  private val lowShuffleMergeRowIndexColumn = relation.options.getOrElse(
+    GpuDeltaParquetFileFormat.LOW_SHUFFLE_MERGE_ROW_INDEX_COLUMN_OPTION, METADATA_ROW_IDX_COL)
 
   // Validate either we have all arguments for DV enabled read or none of them.
 
@@ -164,9 +188,21 @@ case class GpuDeltaParquetFileFormatNativeDV(
    * Parquet reader after name mapping rewrites.
    */
   override def prepareSchema(inputSchema: StructType): StructType = {
+    // Match the discovery column's exact collision-safe name. It is synthetic and has no
+    // physical column mapping; similarly named user columns still need normal mapping.
+    val rowIndexOrdinal = if (lowShuffleMergeScan) {
+      inputSchema.fields.indexWhere(_.name == lowShuffleMergeRowIndexColumn)
+    } else {
+      -1
+    }
+    val tableSchema = if (rowIndexOrdinal >= 0) {
+      StructType(inputSchema.fields.patch(rowIndexOrdinal, Nil, 1))
+    } else {
+      inputSchema
+    }
     val schema = DeltaColumnMapping.createPhysicalSchema(
-      inputSchema, referenceSchema, columnMappingMode)
-    if (columnMappingMode == NameMapping) {
+      tableSchema, referenceSchema, columnMappingMode)
+    val physicalSchema = if (columnMappingMode == NameMapping) {
       SchemaMergingUtils.transformColumns(schema) { (_, field, _) =>
         field.copy(metadata = new MetadataBuilder()
           .withMetadata(field.metadata)
@@ -176,6 +212,12 @@ case class GpuDeltaParquetFileFormatNativeDV(
       }
     } else {
       schema
+    }
+    if (rowIndexOrdinal >= 0) {
+      StructType(physicalSchema.fields.patch(
+        rowIndexOrdinal, Seq(inputSchema.fields(rowIndexOrdinal)), 0))
+    } else {
+      physicalSchema
     }
   }
 
@@ -200,7 +242,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
    * physical column names.
    */
   private def prepareFiltersForRead(filters: Seq[Filter]): Seq[Filter] = {
-    if (!optimizationsEnabled) {
+    if (lowShuffleMergeScan || !optimizationsEnabled) {
       Seq.empty
     } else if (columnMappingMode != NoMapping) {
       val physicalNameMap = DeltaColumnMapping.getLogicalNameToPhysicalNameMap(referenceSchema)
@@ -217,7 +259,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
 
   override def isSplitable(sparkSession: SparkSession,
       options: Map[String, String],
-      path: Path): Boolean = optimizationsEnabled
+      path: Path): Boolean = !lowShuffleMergeScan && optimizationsEnabled
 
   def hasTablePath: Boolean = tablePath.isDefined
 
@@ -333,7 +375,8 @@ case class GpuDeltaParquetFileFormatNativeDV(
       new DeltaParquetPartitionReader(fileIO, conf, file, singleFileInfo.filePath,
         singleFileInfo.blocks, singleFileInfo.schema, isCaseSensitive, readDataSchema,
         debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows, maxReadBatchSizeBytes,
-        targetSizeBytes, useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes, compressCfg,
+        targetSizeBytes, useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes,
+        skipReadEstimate, compressCfg,
         metrics, singleFileInfo.dateRebaseMode, singleFileInfo.timestampRebaseMode,
         singleFileInfo.hasInt96Timestamps, readUseFieldId, deletionVectorReadInfo, tablePathOpt)
     }
@@ -355,6 +398,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
       targetBatchSizeBytes: Long,
       useChunkedReader: Boolean,
       maxChunkedReaderMemoryUsageSizeBytes: Long,
+      skipReadEstimate: Boolean,
       override val compressCfg: CpuCompressionConfig,
       override val execMetrics: Map[String, GpuMetric],
       dateRebaseMode: DateTimeRebaseMode,
@@ -366,7 +410,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
     extends AbstractParquetPartitionReader(
     fileIO, conf, split, filePath, clippedBlocks, clippedParquetSchema, isSchemaCaseSensitive,
     readDataSchema, debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows, maxReadBatchSizeBytes,
-    compressCfg, execMetrics, useFieldId) {
+    skipReadEstimate, compressCfg, execMetrics, useFieldId) {
 
     override protected def readBuffer(
         parquetOpts: ParquetOptions,
@@ -638,6 +682,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
         maxGpuColumnSizeBytes: Long,
         useChunkedReader: Boolean,
         maxChunkedReaderMemoryUsageSizeBytes: Long,
+        skipReadEstimate: Boolean,
         compressCfg: CpuCompressionConfig,
         execMetrics: Map[String, GpuMetric],
         partitionSchema: StructType,
@@ -664,6 +709,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
         maxGpuColumnSizeBytes,
         useChunkedReader,
         maxChunkedReaderMemoryUsageSizeBytes,
+        skipReadEstimate,
         compressCfg,
         execMetrics,
         readDataSchema,
@@ -733,7 +779,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
         clippedBlocks.toSeq, isCaseSensitive, debugDumpPrefix, debugDumpAlways,
         maxReadBatchSizeRows, maxReadBatchSizeBytes, targetBatchSizeBytes,
         maxGpuColumnSizeBytes, useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes,
-        compressCfg, metrics, partitionSchema, poolConf, ignoreMissingFiles,
+        skipReadEstimate, compressCfg, metrics, partitionSchema, poolConf, ignoreMissingFiles,
         ignoreCorruptFiles, readUseFieldId, tablePathOpt)
     }
   }
@@ -752,6 +798,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
       maxGpuColumnSizeBytes: Long,
       useChunkedReader: Boolean,
       maxChunkedReaderMemoryUsageSizeBytes: Long,
+      skipReadEstimate: Boolean,
       override val compressCfg: CpuCompressionConfig,
       override val execMetrics: Map[String, GpuMetric],
       readDataSchema: StructType,
@@ -769,12 +816,12 @@ case class GpuDeltaParquetFileFormatNativeDV(
     extends AbstractMultiFileCloudParquetPartitionReader(fileIO, conf, files, filterFunc,
       isSchemaCaseSensitive, debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows,
       maxReadBatchSizeBytes, targetBatchSizeBytes, maxGpuColumnSizeBytes, useChunkedReader,
-      maxChunkedReaderMemoryUsageSizeBytes, compressCfg, execMetrics, partitionSchema,
-      poolConf, maxNumFileProcessed, ignoreMissingFiles, ignoreCorruptFiles, useFieldId,
-      queryUsesInputFile, keepReadsInOrder, combineConf) {
+      maxChunkedReaderMemoryUsageSizeBytes, skipReadEstimate, compressCfg, execMetrics,
+      partitionSchema, poolConf, maxNumFileProcessed, ignoreMissingFiles, ignoreCorruptFiles,
+      useFieldId, queryUsesInputFile, keepReadsInOrder, combineConf) {
 
     private val outputColumns = if (lowShuffleMergeScan) {
-      DeletionVectorOutputColumns.fromSchema(readDataSchema)
+      DeletionVectorOutputColumns.fromSchema(readDataSchema, lowShuffleMergeRowIndexColumn)
     } else {
       DeletionVectorOutputColumns()
     }
@@ -811,26 +858,13 @@ case class GpuDeltaParquetFileFormatNativeDV(
         require(info.rowGroupOffsets.length == info.rowGroupNumRows.length,
           "Row-group offsets and row counts must have the same length")
       }
+      val rowGroupRanges = rowGroupMetadata.flatMap { info =>
+        info.rowGroupOffsets.zip(info.rowGroupNumRows).filter(_._2 > 0)
+      }
+      val partitionRowsAndValues = metadata.allPartValues.map(_.unzip)
       RmmRapidsRetryIterator.withRetryNoSplit {
         GpuSemaphore.acquireIfNecessary(TaskContext.get())
-        val rowIndexChunks = rowGroupMetadata.flatMap { info =>
-          info.rowGroupOffsets.zip(info.rowGroupNumRows).collect {
-            case (offset, numRows) if numRows > 0 =>
-              withResource(Scalar.fromLong(offset)) { start =>
-                ColumnVector.sequence(start, numRows)
-              }
-          }
-        }
-        val rowIndexes = withResource(rowIndexChunks) { chunks =>
-          if (chunks.isEmpty) {
-            ColumnVector.fromLongs()
-          } else if (chunks.length == 1) {
-            chunks.head.incRefCount()
-          } else {
-            ColumnVector.concatenate(chunks: _*)
-          }
-        }
-        withResource(rowIndexes) { indexes =>
+        withResource(LowShuffleMergeRowIndexes.buildColumn(rowGroupRanges)) { indexes =>
           require(indexes.getRowCount == metadata.numRows,
             s"Generated ${indexes.getRowCount} row indexes for ${metadata.numRows} input rows")
           val numRows = Math.toIntExact(indexes.getRowCount)
@@ -845,18 +879,16 @@ case class GpuDeltaParquetFileFormatNativeDV(
           val batch = closeOnExcept(columns) { _ =>
             new ColumnarBatch(columns, numRows)
           }
-          closeOnExcept(batch) { _ =>
-            metadata.allPartValues match {
-              case Some(partitionRowsAndValues) =>
-                val (rowsPerPartition, partitionValues) = partitionRowsAndValues.unzip
-                BatchWithPartitionDataUtils.addPartitionValuesToBatch(
-                  batch, rowsPerPartition, partitionValues, partitionSchema,
-                  maxGpuColumnSizeBytes)
-              case None =>
-                BatchWithPartitionDataUtils.addSinglePartitionValueToBatch(
-                  batch, metadata.partitionedFile.partitionValues,
-                  partitionSchema, maxGpuColumnSizeBytes)
-            }
+          // The partition helpers take ownership of batch, including on failure.
+          partitionRowsAndValues match {
+            case Some((rowsPerPartition, partitionValues)) =>
+              BatchWithPartitionDataUtils.addPartitionValuesToBatch(
+                batch, rowsPerPartition, partitionValues, partitionSchema,
+                maxGpuColumnSizeBytes)
+            case None =>
+              BatchWithPartitionDataUtils.addSinglePartitionValueToBatch(
+                batch, metadata.partitionedFile.partitionValues,
+                partitionSchema, maxGpuColumnSizeBytes)
           }
         }
       }
@@ -1351,6 +1383,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
       maxGpuColumnSizeBytes: Long,
       useChunkedReader: Boolean,
       maxChunkedReaderMemoryUsageSizeBytes: Long,
+      skipReadEstimate: Boolean,
       compressCfg: CpuCompressionConfig,
       execMetrics: Map[String, GpuMetric],
       partitionSchema: StructType,
@@ -1361,8 +1394,8 @@ case class GpuDeltaParquetFileFormatNativeDV(
       tablePathOpt: Option[String])
     extends MultiFileCoalescingParquetPartitionReaderBase(fileIO, conf, clippedBlocks,
       isSchemaCaseSensitive, maxReadBatchSizeRows, maxReadBatchSizeBytes, targetBatchSizeBytes,
-      maxGpuColumnSizeBytes, compressCfg, execMetrics, partitionSchema, poolConf,
-      ignoreMissingFiles, ignoreCorruptFiles) {
+      maxGpuColumnSizeBytes, skipReadEstimate, compressCfg, execMetrics, partitionSchema,
+      poolConf, ignoreMissingFiles, ignoreCorruptFiles) {
 
     override protected def augmentChunkMeta(meta: CurrentChunkMeta): CurrentChunkMeta = {
       if (meta.currentChunk.isEmpty) return meta
@@ -1821,8 +1854,8 @@ private object MakeParquetTableWithDVProducer extends Logging {
       } else {
         None
       }
-      val tableWithoutIndex = RapidsDeletionVectors.dropFirstColumn(table)
-      closeOnExcept(rowIndex) { _ =>
+      withResource(rowIndex) { _ =>
+        val tableWithoutIndex = RapidsDeletionVectors.dropFirstColumn(table)
         closeOnExcept(tableWithoutIndex) { _ =>
           GpuParquetScan.throwIfRebaseNeededInExceptionMode(tableWithoutIndex, dateRebaseMode,
             timestampRebaseMode)
@@ -1836,7 +1869,8 @@ private object MakeParquetTableWithDVProducer extends Logging {
           clippedParquetSchema, readDataSchema, isSchemaCaseSensitive, useFieldId)
         val rebasedTable = GpuParquetScan.rebaseDateTime(evolvedSchemaTable, dateRebaseMode,
           timestampRebaseMode)
-        val outputTable = outputColumns.populateAndClose(rebasedTable, rowIndex)
+        val outputTable = outputColumns.populateAndClose(
+          rebasedTable, rowIndex.map(_.incRefCount()))
         // Recorded before materialization to match the chunked reader, whose next() records in
         // super.next and materializes afterwards.
         GpuMetric.recordOutputBatchBytes(outputTable, metrics.get(GPU_OUTPUT_BATCH_BYTES))

@@ -25,20 +25,40 @@ import com.nvidia.spark.rapids.delta.delta42x.{Delta42xConfigChecker, Delta42xPr
   GpuDeltaCatalog}
 
 import org.apache.spark.sql.SaveMode
+import org.apache.spark.sql.classic.SparkSession
 import org.apache.spark.sql.connector.catalog.StagingTableCatalog
 import org.apache.spark.sql.delta.{DeltaOperations, DeltaOptions}
-import org.apache.spark.sql.delta.actions.Metadata
+import org.apache.spark.sql.delta.actions.{FileAction, Metadata}
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
-import org.apache.spark.sql.delta.commands.WriteIntoDelta
+import org.apache.spark.sql.delta.commands.{CreateDeltaTableLikeShims,
+  DMLWithDeletionVectorsHelper, TouchedFileWithDV, WriteIntoDelta}
 import org.apache.spark.sql.delta.hooks.GpuAutoCompact42x
-import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShimBase, GpuDeltaLog, GpuOptimisticTransaction,
+import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShimBase, DMLWithDeletionVectorsRuntimeShim,
+  GpuDeltaLog, GpuOptimisticTransaction,
   GpuOptimisticTransactionBase, GpuWriteIntoDeltaLike, StartTransactionArg}
+import org.apache.spark.sql.delta.stats.StatsCollectionUtils
 
-class Delta42xRuntimeShim extends DeltaRuntimeShimBase {
+class Delta42xRuntimeShim extends DeltaRuntimeShimBase
+    with DMLWithDeletionVectorsRuntimeShim {
 
   override def getDeltaConfigChecker: DeltaConfigChecker = Delta42xConfigChecker
 
+  override def processUnmodifiedData(
+      spark: SparkSession,
+      touchedFiles: Seq[TouchedFileWithDV],
+      txn: GpuOptimisticTransactionBase): (Seq[FileAction], Map[String, Long]) = {
+    val prefixLength = StatsCollectionUtils.getDataSkippingStringPrefixLength(spark, txn.metadata)
+    DMLWithDeletionVectorsHelper.processUnmodifiedData(
+      spark, touchedFiles, txn.snapshot, prefixLength)
+  }
+
   override def getDeltaProvider: DeltaProvider = Delta42xProvider
+
+  override def isV1WriterSaveAsTableOverwrite(
+      options: DeltaOptions,
+      mode: SaveMode): Boolean = {
+    CreateDeltaTableLikeShims.isV1WriterSaveAsTableOverwrite(options, mode)
+  }
 
   override def getGpuDeltaCatalog(
       cpuCatalog: DeltaCatalog,
@@ -47,9 +67,12 @@ class Delta42xRuntimeShim extends DeltaRuntimeShimBase {
   }
 
   override protected def constructOptimisticTransaction(
-      arg: StartTransactionArg): GpuOptimisticTransactionBase =
+      arg: StartTransactionArg): GpuOptimisticTransactionBase = {
+    val snapshot = arg.snapshot.getOrElse(
+      arg.log.update(catalogTableOpt = arg.catalogTable))
     new GpuOptimisticTransaction(
-      arg.log, arg.catalogTable, arg.snapshot, arg.conf, GpuAutoCompact42x)
+      arg.log, arg.catalogTable, Some(snapshot), arg.conf, GpuAutoCompact42x)
+  }
 
   override def createGpuWrite(
       gpuDeltaLog: GpuDeltaLog,

@@ -909,7 +909,8 @@ case class GpuGetTimestamp(
     format: Expression,
     sparkFormat: String,
     strf: String,
-    timeZoneId: Option[String] = None) extends GpuToTimestamp {
+    timeZoneId: Option[String] = None,
+    override val failOnError: Boolean = SQLConf.get.ansiEnabled) extends GpuToTimestamp {
 
   override def strfFormat = strf
   override val downScaleFactor = 1

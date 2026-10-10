@@ -18,9 +18,11 @@ import pytest
 import re
 
 from spark_session import is_databricks122_or_later, supports_delta_lake_deletion_vectors, \
-    is_databricks173_or_later, is_spark_local_mode, with_cpu_session, with_gpu_session
+    is_databricks173_or_later, is_spark_353_or_later, is_spark_356_or_later, \
+    is_spark_400_or_later, is_spark_local_mode, \
+    with_cpu_session, with_gpu_session
 from asserts import assert_equal
-from conftest import is_databricks_runtime, spark_jvm
+from conftest import get_non_gpu_allowed, is_databricks_runtime, spark_jvm
 
 delta_meta_allow = [
     "DeserializeToObjectExec",
@@ -61,6 +63,33 @@ if is_databricks173_or_later():
 delta_write = ["RapidsDeltaWrite"]
 
 
+def set_delta_num_records(spark, target_path, num_records, log_version=0):
+    """Rewrite the sole AddFile in a Delta log version with a controlled numRecords value."""
+    log_path = target_path + f"/_delta_log/{log_version:020d}.json"
+    log_files = spark.sparkContext.wholeTextFiles(log_path).collect()
+    assert len(log_files) == 1, f"Expected one Delta log file at {log_path}"
+
+    log_uri, contents = log_files[0]
+    actions = [json.loads(line) for line in contents.splitlines()]
+    add_actions = [action["add"] for action in actions if "add" in action]
+    assert len(add_actions) == 1, f"Expected one AddFile action in {log_path}"
+    stats = json.loads(add_actions[0]["stats"])
+    stats["numRecords"] = num_records
+    add_actions[0]["stats"] = json.dumps(stats, separators=(",", ":"))
+    rewritten_contents = "\n".join(
+        json.dumps(action, separators=(",", ":")) for action in actions) + "\n"
+
+    jvm = spark.sparkContext._jvm
+    hadoop_path = jvm.org.apache.hadoop.fs.Path(log_uri)
+    fs = hadoop_path.getFileSystem(spark.sparkContext._jsc.hadoopConfiguration())
+    output = fs.create(hadoop_path, True)
+    try:
+        output.write(bytearray(rewritten_contents, "utf-8"))
+    finally:
+        output.close()
+    jvm.org.apache.spark.sql.delta.DeltaLog.clearCache()
+
+
 def _loaded_delta_lake_version():
     try:
         context_class_loader = (
@@ -73,6 +102,32 @@ def _loaded_delta_lake_version():
         return None
 
 
+def _is_delta_rtas_truncate_unsupported():
+    if (is_databricks_runtime() or not is_spark_356_or_later()
+            or is_spark_400_or_later()):
+        return False
+    version = _loaded_delta_lake_version()
+    if version is None:
+        return False
+    parts = version.split("-", 1)[0].split(".")[:3]
+    return tuple(int(part) for part in parts) < (3, 3, 3)
+
+
+delta_rtas_truncate_skip = pytest.mark.skipif(
+    _is_delta_rtas_truncate_unsupported(),
+    reason="OSS Delta before 3.3.3 does not support staged-table truncate validation "
+           "on Spark 3.5.6+: https://github.com/delta-io/delta/issues/4671")
+
+
+def is_oss_delta_lake_24():
+    return not is_databricks_runtime() and _loaded_delta_lake_version() == "2.4.0"
+
+
+def is_oss_delta_lake_40():
+    return (not is_databricks_runtime()
+            and _loaded_delta_lake_version() in ("4.0.0", "4.0.1"))
+
+
 def is_oss_delta_lake_42():
     return not is_databricks_runtime() and _loaded_delta_lake_version() == "4.2.0"
 
@@ -80,6 +135,21 @@ def is_oss_delta_lake_42():
 def is_oss_delta_lake_41_or_42():
     return (not is_databricks_runtime()
             and _loaded_delta_lake_version() in ("4.1.0", "4.2.0"))
+
+
+def is_oss_delta_lake_42_or_43():
+    return (not is_databricks_runtime()
+            and _loaded_delta_lake_version() in ("4.2.0", "4.3.0"))
+
+
+def is_oss_delta_lake_43():
+    return (not is_databricks_runtime()
+            and _loaded_delta_lake_version() == "4.3.0")
+
+
+def is_oss_delta_lake_41_to_43():
+    return (not is_databricks_runtime()
+            and _loaded_delta_lake_version() in ("4.1.0", "4.2.0", "4.3.0"))
 
 
 delta_reorg_xfail = pytest.mark.xfail(
@@ -110,7 +180,30 @@ def deletion_vector_values_with_xfail_reasons(enabled_xfail_reason=None, disable
 
     return enable_deletion_vector
 
+
+def dml_deletion_vector_values_with_xfail_reasons(
+        enabled_xfail_reason=None, disabled_xfail_reason=None):
+    # DELETE, UPDATE, and MERGE support DVs on OSS Delta 3.3+. Keep Databricks xfails
+    # without suppressing OSS coverage.
+    if is_databricks_runtime() and disabled_xfail_reason is not None:
+        enable_deletion_vector = [
+            pytest.param(False, marks=pytest.mark.xfail(reason=disabled_xfail_reason))]
+    else:
+        enable_deletion_vector = [False]
+
+    if supports_delta_lake_deletion_vectors() and (
+            is_databricks_runtime() or is_spark_353_or_later()):
+        if is_databricks_runtime() and enabled_xfail_reason is not None:
+            enable_deletion_vector.append(
+                pytest.param(True, marks=pytest.mark.xfail(reason=enabled_xfail_reason)))
+        else:
+            enable_deletion_vector.append(True)
+
+    return enable_deletion_vector
+
+
 deletion_vector_values = deletion_vector_values_with_xfail_reasons()
+dml_deletion_vector_values = dml_deletion_vector_values_with_xfail_reasons()
 
 delta_writes_enabled_conf = {"spark.rapids.sql.format.delta.write.enabled": "true"}
 
@@ -229,6 +322,7 @@ def assert_delta_log_json_equivalent(filename, c_json, g_json):
         elif key == "add":
             assert c_val.keys() == g_val.keys(), "Delta log {} 'add' keys mismatch:\nCPU: {}\nGPU: {}".format(filename, c_val, g_val)
             del_keys(("modificationTime", "size"), c_val, g_val)
+            fixup_deletion_vector(c_val, g_val)
             fixup_path(c_val)
             fixup_path(g_val)
         elif key == "cdc":
@@ -410,9 +504,92 @@ def assert_delta_row_tracking_dml(spark_tmp_path, dml_sql, conf,
     with_cpu_session(lambda spark: assert_gpu_and_cpu_latest_delta_log_equivalent(spark, data_path),
                      conf=conf)
 
+def _assert_oss_delta_40_merge_metadata_broadcasts(callback, captured_plans):
+    """Allow CPU broadcasts only for Delta's table-state/touched-file join."""
+    subquery_expression_class = spark_jvm().java.lang.Class.forName(
+        "org.apache.spark.sql.execution.ExecSubqueryExpression")
+
+    def children(node):
+        result = node.children()
+        nodes = [result.apply(i) for i in range(result.size())]
+        name = node.getClass().getSimpleName()
+        if not nodes and name == "AdaptiveSparkPlanExec":
+            nodes.append(node.executedPlan())
+        elif not nodes and name.endswith("QueryStageExec"):
+            nodes.append(node.plan())
+        elif not nodes and name in ("ReusedExchangeExec", "ReusedSubqueryExec"):
+            nodes.append(node.child())
+        return nodes
+
+    def subquery_plans(node):
+        def from_expression(expression):
+            if subquery_expression_class.isInstance(expression):
+                yield expression.plan()
+            expression_children = expression.children()
+            for i in range(expression_children.size()):
+                yield from from_expression(expression_children.apply(i))
+
+        expressions = node.expressions()
+        for i in range(expressions.size()):
+            yield from from_expression(expressions.apply(i))
+
+    def physical_descendants(node):
+        yield node
+        for child in children(node):
+            yield from physical_descendants(child)
+
+    def descendants(node):
+        yield node
+        for child in children(node):
+            yield from descendants(child)
+        for subquery in subquery_plans(node):
+            yield from descendants(subquery)
+
+    def class_name(node):
+        return node.getClass().getSimpleName()
+
+    def check(node, in_metadata_broadcast=False):
+        name = class_name(node)
+        node_children = children(node)
+        if name == "BroadcastHashJoinExec":
+            assert len(node_children) == 2 and any(
+                class_name(child) == "RDDScanExec" and
+                "Delta Table State with Stats" in child.nodeName()
+                for child in physical_descendants(node_children[0])), \
+                "CPU broadcast join outside Delta table-state metadata"
+            assert sum(class_name(child) == "BroadcastExchangeExec"
+                       for child in physical_descendants(node_children[1])) == 1, \
+                "Expected one touched-file broadcast in Delta table-state metadata"
+            check(node_children[0])
+            check(node_children[1], in_metadata_broadcast=True)
+            for subquery in subquery_plans(node):
+                check(subquery)
+            return
+        if name == "BroadcastExchangeExec":
+            local_scans = [child for child in physical_descendants(node)
+                           if class_name(child) == "LocalTableScanExec"]
+            assert in_metadata_broadcast and len(local_scans) == 1 and \
+                local_scans[0].output().size() == 1 and \
+                local_scans[0].output().apply(0).name() == "path", \
+                "CPU broadcast exchange outside Delta touched-file metadata"
+        for child in node_children:
+            check(child, in_metadata_broadcast)
+        for subquery in subquery_plans(node):
+            check(subquery)
+
+    for plan in captured_plans:
+        check(plan)
+        # Fail closed if a plan wrapper hides a broadcast from the child traversal.
+        for class_to_check in ("BroadcastHashJoinExec", "BroadcastExchangeExec"):
+            assert callback.contains(plan, class_to_check) == any(
+                class_name(node) == class_to_check for node in descendants(plan)), \
+                f"Could not inspect all {class_to_check} nodes in captured Delta plan"
+
+
 def assert_rapids_delta_write(
         do_test, conf, required_gpu_classes=delta_write, require_same_plan=False,
-        forbidden_cpu_fallback_classes=None):
+        forbidden_cpu_fallback_classes=None, require_non_empty=False,
+        expected_command=None, expected_classes=None):
     """
     Validates that a Delta write operation executed on the GPU produces the expected execution plans.
     This function starts a plan capture mechanism using the Spark JVM's ExecutionPlanCaptureCallback,
@@ -426,13 +603,19 @@ def assert_rapids_delta_write(
         A function that performs the Delta write operation to be validated.
     conf : dict
         A dictionary of configuration options to be passed to the GPU session.
-
     required_gpu_classes : list[str]
         GPU class names that must occur in the captured plans.
     require_same_plan : bool
         Whether all required GPU classes must occur in the same captured plan.
     forbidden_cpu_fallback_classes : list[str] or None
         CPU class names that must not be reported as falling back in any captured plan.
+    require_non_empty : bool
+        When true, require at least one captured plan. This is useful when a no-op is not valid
+        evidence for the feature being tested.
+    expected_command : str, optional
+        Additional GPU command or execution class that must be present in a captured plan.
+    expected_classes : iterable of str, optional
+        Additional GPU plan classes that must be present in a captured plan.
 
     Returns
     -------
@@ -445,6 +628,21 @@ def assert_rapids_delta_write(
     try:
         result = with_gpu_session(do_test, conf=conf)
         captured_plans = callback.getResultsWithTimeout(10000)
+        if require_non_empty:
+            assert len(captured_plans) > 0, "No execution plans captured for Delta write"
+        if expected_command is not None:
+            assert any(
+                callback.contains(plan, expected_command) for plan in captured_plans), \
+                f"{expected_command} is not found in any captured plan"
+        if expected_command == "GpuMergeIntoCommand" and \
+                "BroadcastHashJoinExec" in get_non_gpu_allowed() and is_oss_delta_lake_40():
+            # OSS Delta 4.0 uses a CPU broadcast join to attach stats to the table-state
+            # metadata during DV MERGE. Keep the allowance confined to that metadata query.
+            _assert_oss_delta_40_merge_metadata_broadcasts(callback, captured_plans)
+        for cls in expected_classes or ():
+            assert any(
+                callback.contains(plan, cls) for plan in captured_plans), \
+                f"{cls} is not found in any captured plan"
         # Some write functions are no-op. We may not capture any GPU plan.
         if require_same_plan:
             found = any(
@@ -559,6 +757,13 @@ def assert_db173_gpu_data_writing_command(
         return result
     finally:
         callback.endCapture()
+
+
+def assert_rapids_gpu_merge_ran(do_test, conf, expected_command="GpuMergeIntoCommand"):
+    """Runs a Delta MERGE and asserts that the GPU command did not fall back."""
+    return assert_rapids_delta_write(
+        do_test, conf, required_gpu_classes=[], expected_command=expected_command)
+
 
 def assert_rapids_gpu_delete_ran(do_test, conf):
     """

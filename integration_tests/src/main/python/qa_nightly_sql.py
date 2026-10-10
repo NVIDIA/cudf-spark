@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2021, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,9 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from conftest import is_databricks_runtime
 from spark_session import with_spark_session
-import pytest
 
 SELECT_SQL = [
 # (" FUNCTIONAL CHECKING", "FUNCTIONAL CHECKING"),
@@ -666,15 +664,15 @@ SELECT_NEEDS_SORT_SQL = [
 ("SELECT COUNT(byteF) as count, (AVG(intF) * 5.0) as avg, (SUM(intF) + MAX(shortF * 3)) as summax FROM test_table GROUP BY intF*3", "COUNT(byteF), AVG(intF) * 5.0, SUM(intF) + MAX(shortF * 3) GROUP BY intF*3"),
 ("SELECT COUNT(*) as count, (AVG(intF) * 5.0) as avg, (SUM(intF) + MAX(shortF * 3)) as summax FROM test_table GROUP BY intF*3", "COUNT(*), AVG(intF) * 5.0, SUM(intF) + MAX(shortF * 3) GROUP BY intF*3"),
 # ("SELECT  SUM(intF) OVER (PARTITION BY byteF ORDER BY shortF) as sum_total FROM test_table", "SUM(intF) OVER (PARTITION BY byteF ORDER BY shortF) as sum_total"),
-pytest.param(("SELECT ROW_NUMBER() OVER (PARTITION BY byteF ORDER BY byteF) row_num,  byteF FROM test_table", "ROW_NUMBER() OVER (PARTITION BY byteF ORDER BY byteF) row_num, byteF"), marks=pytest.mark.xfail(is_databricks_runtime(), reason='https://github.com/NVIDIA/spark-rapids/issues/203')),
-pytest.param(("SELECT ROW_NUMBER() OVER (PARTITION BY shortF ORDER BY shortF) row_num,  shortF FROM test_table", "ROW_NUMBER() OVER (PARTITION BY shortF ORDER BY shortF) row_num, shortF"), marks=pytest.mark.xfail(is_databricks_runtime(), reason='https://github.com/NVIDIA/spark-rapids/issues/203')),
-pytest.param(("SELECT ROW_NUMBER() OVER (PARTITION BY intF ORDER BY intF) row_num,  intF FROM test_table", "ROW_NUMBER() OVER (PARTITION BY intF ORDER BY intF) row_num, intF"), marks=pytest.mark.xfail(is_databricks_runtime(), reason='https://github.com/NVIDIA/spark-rapids/issues/203')),
-pytest.param(("SELECT ROW_NUMBER() OVER (PARTITION BY longF ORDER BY longF) row_num,  longF FROM test_table", "ROW_NUMBER() OVER (PARTITION BY longF ORDER BY longF) row_num, longF"), marks=pytest.mark.xfail(is_databricks_runtime(), reason='https://github.com/NVIDIA/spark-rapids/issues/203')),
-pytest.param(("SELECT ROW_NUMBER() OVER (PARTITION BY floatF ORDER BY floatF) row_num,  floatF FROM test_table", "ROW_NUMBER() OVER (PARTITION BY floatF ORDER BY floatF) row_num, floatF"), marks=pytest.mark.xfail(is_databricks_runtime(), reason='https://github.com/NVIDIA/spark-rapids/issues/203')),
-pytest.param(("SELECT ROW_NUMBER() OVER (PARTITION BY booleanF ORDER BY booleanF) row_num,  booleanF FROM test_table", "ROW_NUMBER() OVER (PARTITION BY booleanF ORDER BY booleanF) row_num, booleanF"), marks=pytest.mark.xfail(is_databricks_runtime(), reason='https://github.com/NVIDIA/spark-rapids/issues/203')),
-pytest.param(("SELECT ROW_NUMBER() OVER (PARTITION BY strF ORDER BY strF) row_num,  strF FROM test_table", "ROW_NUMBER() OVER (PARTITION BY strF ORDER BY strF) row_num, strF"), marks=pytest.mark.xfail(is_databricks_runtime(), reason='https://github.com/NVIDIA/spark-rapids/issues/203')),
-pytest.param(("SELECT ROW_NUMBER() OVER (PARTITION BY dateF ORDER BY dateF) row_num,  dateF FROM test_table", "ROW_NUMBER() OVER (PARTITION BY dateF ORDER BY dateF) row_num, dateF"), marks=pytest.mark.xfail(is_databricks_runtime(), reason='https://github.com/NVIDIA/spark-rapids/issues/203')),
-pytest.param(("SELECT ROW_NUMBER() OVER (PARTITION BY timestampF ORDER BY timestampF) row_num,  timestampF FROM test_table", "ROW_NUMBER() OVER (PARTITION BY timestampF ORDER BY timestampF) row_num, timestampF"), marks=pytest.mark.xfail(is_databricks_runtime(), reason='https://github.com/NVIDIA/spark-rapids/issues/203')),
+("SELECT ROW_NUMBER() OVER (PARTITION BY byteF ORDER BY byteF) row_num,  byteF FROM test_table", "ROW_NUMBER() OVER (PARTITION BY byteF ORDER BY byteF) row_num, byteF"),
+("SELECT ROW_NUMBER() OVER (PARTITION BY shortF ORDER BY shortF) row_num,  shortF FROM test_table", "ROW_NUMBER() OVER (PARTITION BY shortF ORDER BY shortF) row_num, shortF"),
+("SELECT ROW_NUMBER() OVER (PARTITION BY intF ORDER BY intF) row_num,  intF FROM test_table", "ROW_NUMBER() OVER (PARTITION BY intF ORDER BY intF) row_num, intF"),
+("SELECT ROW_NUMBER() OVER (PARTITION BY longF ORDER BY longF) row_num,  longF FROM test_table", "ROW_NUMBER() OVER (PARTITION BY longF ORDER BY longF) row_num, longF"),
+("SELECT ROW_NUMBER() OVER (PARTITION BY floatF ORDER BY floatF) row_num,  floatF FROM test_table", "ROW_NUMBER() OVER (PARTITION BY floatF ORDER BY floatF) row_num, floatF"),
+("SELECT ROW_NUMBER() OVER (PARTITION BY booleanF ORDER BY booleanF) row_num,  booleanF FROM test_table", "ROW_NUMBER() OVER (PARTITION BY booleanF ORDER BY booleanF) row_num, booleanF"),
+("SELECT ROW_NUMBER() OVER (PARTITION BY strF ORDER BY strF) row_num,  strF FROM test_table", "ROW_NUMBER() OVER (PARTITION BY strF ORDER BY strF) row_num, strF"),
+("SELECT ROW_NUMBER() OVER (PARTITION BY dateF ORDER BY dateF) row_num,  dateF FROM test_table", "ROW_NUMBER() OVER (PARTITION BY dateF ORDER BY dateF) row_num, dateF"),
+("SELECT ROW_NUMBER() OVER (PARTITION BY timestampF ORDER BY timestampF) row_num,  timestampF FROM test_table", "ROW_NUMBER() OVER (PARTITION BY timestampF ORDER BY timestampF) row_num, timestampF"),
 # ("window/row/range  (need change)", "window/row/range (need change)"),
 #("SELECT  byteF, SUM(byteF) OVER (PARTITION BY byteF ORDER BY byteF RANGE BETWEEN 20 PRECEDING AND 10 FOLLOWING ) as sum_total FROM test_table", "byteF, SUM(byteF) OVER (PARTITION BY byteF ORDER BY byteF RANGE BETWEEN 20 PRECEDING AND 10 FOLLOWING ) as sum_total"),
 #("SELECT  SUM(intF) OVER (PARTITION BY byteF ORDER BY byteF RANGE BETWEEN 20 PRECEDING AND 10 FOLLOWING ) as sum_total FROM test_table", "SUM(intF) OVER (PARTITION BY byteF ORDER BY byteF RANGE BETWEEN 20 PRECEDING AND 10 FOLLOWING ) as sum_total"),

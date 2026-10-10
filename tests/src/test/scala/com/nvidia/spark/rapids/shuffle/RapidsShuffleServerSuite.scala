@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -320,6 +320,235 @@ class RapidsShuffleServerSuite extends RapidsShuffleTestHelper {
 
       // the spillable that materialized we need to close
       verify(mockMaterialized, times(1)).close()
+    }
+  }
+
+  test("when GPU OOM prevents all sends, stop the request at the shuffle fetch timeout") {
+    val mockSendBuffer = mock[SendBounceBuffers]
+    val mockDeviceBounceBuffer = mock[BounceBuffer]
+    val mockDeviceMemoryBuffer = mock[DeviceMemoryBuffer]
+    val mockServerConnection = mock[ServerConnection]
+    when(mockDeviceBounceBuffer.buffer).thenReturn(mockDeviceMemoryBuffer)
+    when(mockSendBuffer.bounceBufferSize).thenReturn(1024)
+    when(mockSendBuffer.hostBounceBuffer).thenReturn(None)
+    when(mockSendBuffer.deviceBounceBuffer).thenReturn(mockDeviceBounceBuffer)
+
+    val tr = ShuffleMetadata.buildTransferRequest(0, Seq(1, 2))
+    when(mockTransaction.releaseMessage()).thenReturn(
+      new MetadataTransportBuffer(new RefCountedDirectByteBuffer(tr)))
+
+    val mockRequestHandler = mock[RapidsShuffleRequestHandler]
+    val bb = ByteBuffer.allocateDirect(123)
+    withResource(new RefCountedDirectByteBuffer(bb)) { _ =>
+      val tableMeta = MetaUtils.buildTableMeta(1, 456, bb, 100)
+      val mockHandle = mock[SpillableDeviceBufferHandle]
+      val mockHandleThatThrows = mock[SpillableDeviceBufferHandle]
+      val mockMaterialized = mock[DeviceMemoryBuffer]
+      when(mockHandle.sizeInBytes).thenReturn(tableMeta.bufferMeta().size())
+      when(mockHandle.materialize()).thenReturn(mockMaterialized)
+      when(mockHandleThatThrows.sizeInBytes).thenReturn(tableMeta.bufferMeta().size())
+      val oom = new OutOfMemoryError("GPU allocation failed in test")
+      when(mockHandleThatThrows.materialize()).thenThrow(oom)
+      val rapidsBuffer = RapidsShuffleHandle(mockHandle, tableMeta)
+      val rapidsBufferThatThrows = RapidsShuffleHandle(mockHandleThatThrows, tableMeta)
+      when(mockRequestHandler.getShuffleHandle(ArgumentMatchers.eq(1)))
+        .thenReturn(rapidsBuffer)
+      when(mockRequestHandler.getShuffleHandle(ArgumentMatchers.eq(2)))
+        .thenReturn(rapidsBufferThatThrows)
+
+      var nowNanos = 0L
+      val server = spy(new RapidsShuffleServer(
+        mockTransport,
+        mockServerConnection,
+        RapidsShuffleTestHelper.makeMockBlockManager("1", "foo"),
+        mockRequestHandler,
+        mockExecutor,
+        mockBssExecutor,
+        mockConf) {
+        override private[shuffle] def currentTimeNanos(): Long = nowNanos
+        override private[shuffle] def oomRetryTimeoutNanos: Long = 1L
+        override private[shuffle] def waitBeforeOomRetry(backoffMillis: Long): Unit = {}
+      })
+
+      val bss = new BufferSendState(mockTransaction, mockSendBuffer, mockRequestHandler, null)
+      assertResult(10L)(server.oomRetryBackoffMillis(1))
+      assertResult(20L)(server.oomRetryBackoffMillis(2))
+      assertResult(100L)(server.oomRetryBackoffMillis(5))
+      assertResult(100L)(server.oomRetryBackoffMillis(1000))
+      server.doHandleTransferRequest(Seq(bss))
+
+      verify(server, times(1)).addToContinueQueue(Seq(bss))
+      verify(server, times(1)).waitBeforeOomRetry(10L)
+      verify(mockSendBuffer, times(0)).close()
+
+      nowNanos = 1L
+      server.doHandleTransferRequest(Seq(bss))
+      verify(server, times(1)).addToContinueQueue(Seq(bss))
+      verify(server, times(1)).waitBeforeOomRetry(10L)
+      verify(mockHandle, times(2)).materialize()
+      verify(mockHandleThatThrows, times(2)).materialize()
+      verify(mockMaterialized, times(2)).close()
+      verify(mockSendBuffer, times(1)).close()
+    }
+  }
+
+  test("successful preparation resets the OOM retry window on the same send state") {
+    val sendBuffer = mock[SendBounceBuffers]
+    val deviceBounceBuffer = mock[BounceBuffer]
+    val deviceMemoryBuffer = mock[DeviceMemoryBuffer]
+    val bufferSlice = mock[DeviceMemoryBuffer]
+    when(deviceBounceBuffer.buffer).thenReturn(deviceMemoryBuffer)
+    when(deviceMemoryBuffer.getLength).thenReturn(1024L)
+    when(sendBuffer.bounceBufferSize).thenReturn(1024)
+    when(sendBuffer.hostBounceBuffer).thenReturn(None)
+    when(sendBuffer.deviceBounceBuffer).thenReturn(deviceBounceBuffer)
+    when(deviceMemoryBuffer.slice(ArgumentMatchers.anyLong(), ArgumentMatchers.anyLong()))
+      .thenReturn(bufferSlice)
+
+    val request = ShuffleMetadata.buildTransferRequest(0, Seq(1))
+    when(mockTransaction.releaseMessage()).thenReturn(
+      new MetadataTransportBuffer(new RefCountedDirectByteBuffer(request)))
+
+    val requestHandler = mock[RapidsShuffleRequestHandler]
+    val metadataBuffer = ByteBuffer.allocateDirect(123)
+    withResource(new RefCountedDirectByteBuffer(metadataBuffer)) { _ =>
+      val tableMeta = MetaUtils.buildTableMeta(1, 456, metadataBuffer, 100)
+      val handle = mock[SpillableDeviceBufferHandle]
+      val materialized = mock[DeviceMemoryBuffer]
+      when(handle.sizeInBytes).thenReturn(tableMeta.bufferMeta().size())
+      when(handle.materialize()).thenReturn(materialized)
+      when(requestHandler.getShuffleHandle(ArgumentMatchers.eq(1)))
+        .thenReturn(RapidsShuffleHandle(handle, tableMeta))
+
+      withResource(new BufferSendState(
+        mockTransaction, sendBuffer, requestHandler, null)) { bss =>
+        assertResult(Some(1))(bss.recordOomAndGetRetryAttempt(0L, 10L))
+        withResource(bss.getBufferToSend()) { _ => }
+
+        // This is a new OOM episode. If resetOomRetryWindow were a no-op or its successful
+        // preparation call site were removed, the old window would expire at this timestamp.
+        assertResult(Some(1))(bss.recordOomAndGetRetryAttempt(10L, 10L))
+      }
+    }
+  }
+
+  test("an expired OOM window does not close a co-batched send with a fresh window") {
+    def makeSendBuffer(name: String): SendBounceBuffers = {
+      val sb = mock[SendBounceBuffers](name)
+      val dbb = mock[BounceBuffer]
+      when(dbb.buffer).thenReturn(mock[DeviceMemoryBuffer])
+      when(sb.bounceBufferSize).thenReturn(1024)
+      when(sb.hostBounceBuffer).thenReturn(None)
+      when(sb.deviceBounceBuffer).thenReturn(dbb)
+      sb
+    }
+    val sendBufferA = makeSendBuffer("sendBufferA")
+    val sendBufferB = makeSendBuffer("sendBufferB")
+
+    val requestHandler = mock[RapidsShuffleRequestHandler]
+    val metadataBuffer = ByteBuffer.allocateDirect(123)
+    withResource(new RefCountedDirectByteBuffer(metadataBuffer)) { _ =>
+      val tableMeta = MetaUtils.buildTableMeta(1, 456, metadataBuffer, 100)
+      val oomHandle = mock[SpillableDeviceBufferHandle]
+      when(oomHandle.sizeInBytes).thenReturn(tableMeta.bufferMeta().size())
+      when(oomHandle.materialize())
+        .thenThrow(new OutOfMemoryError("GPU allocation failed in test"))
+      when(requestHandler.getShuffleHandle(ArgumentMatchers.eq(1)))
+        .thenReturn(RapidsShuffleHandle(oomHandle, tableMeta))
+
+      def makeTx(peerExecutorId: Long): Transaction = {
+        val tx = mock[Transaction]
+        when(tx.peerExecutorId()).thenReturn(peerExecutorId)
+        when(tx.releaseMessage()).thenReturn(new MetadataTransportBuffer(
+          new RefCountedDirectByteBuffer(ShuffleMetadata.buildTransferRequest(0, Seq(1)))))
+        tx
+      }
+
+      var nowNanos = 0L
+      val server = spy(new RapidsShuffleServer(
+        mockTransport,
+        mock[ServerConnection],
+        RapidsShuffleTestHelper.makeMockBlockManager("1", "foo"),
+        requestHandler,
+        mockExecutor,
+        mockBssExecutor,
+        mockConf) {
+        override private[shuffle] def currentTimeNanos(): Long = nowNanos
+        override private[shuffle] def oomRetryTimeoutNanos: Long = 10L
+        override private[shuffle] def waitBeforeOomRetry(backoffMillis: Long): Unit = {}
+      })
+
+      val bssA = new BufferSendState(makeTx(1L), sendBufferA, requestHandler, null)
+      server.doHandleTransferRequest(Seq(bssA))
+      verify(server, times(1)).addToContinueQueue(Seq(bssA))
+
+      nowNanos = 10L
+      val bssB = new BufferSendState(makeTx(2L), sendBufferB, requestHandler, null)
+      server.doHandleTransferRequest(Seq(bssA, bssB))
+
+      verify(sendBufferA, times(1)).close()
+      verify(sendBufferB, times(0)).close()
+      verify(server, times(1)).addToContinueQueue(Seq(bssB))
+    }
+  }
+
+  test("progress by a co-batched send does not reset another send state's OOM window") {
+    val sendBuffer = mock[SendBounceBuffers]
+    val deviceBounceBuffer = mock[BounceBuffer]
+    when(deviceBounceBuffer.buffer).thenReturn(mock[DeviceMemoryBuffer])
+    when(sendBuffer.bounceBufferSize).thenReturn(1024)
+    when(sendBuffer.hostBounceBuffer).thenReturn(None)
+    when(sendBuffer.deviceBounceBuffer).thenReturn(deviceBounceBuffer)
+
+    val request = ShuffleMetadata.buildTransferRequest(0, Seq(1))
+    when(mockTransaction.releaseMessage()).thenReturn(
+      new MetadataTransportBuffer(new RefCountedDirectByteBuffer(request)))
+
+    val requestHandler = mock[RapidsShuffleRequestHandler]
+    val metadataBuffer = ByteBuffer.allocateDirect(123)
+    withResource(new RefCountedDirectByteBuffer(metadataBuffer)) { _ =>
+      val tableMeta = MetaUtils.buildTableMeta(1, 456, metadataBuffer, 100)
+      val oomHandle = mock[SpillableDeviceBufferHandle]
+      when(oomHandle.sizeInBytes).thenReturn(tableMeta.bufferMeta().size())
+      when(oomHandle.materialize())
+        .thenThrow(new OutOfMemoryError("GPU allocation failed in test"))
+      when(requestHandler.getShuffleHandle(ArgumentMatchers.eq(1)))
+        .thenReturn(RapidsShuffleHandle(oomHandle, tableMeta))
+
+      val successfulState = mock[BufferSendState]
+      val successfulBuffer = mock[MemoryBuffer]
+      when(successfulState.hasMoreSends).thenReturn(true)
+      when(successfulState.getBufferToSend()).thenReturn(successfulBuffer)
+
+      val serverConnection = mock[ServerConnection]
+      when(serverConnection.send(
+        any(), any(), any(), any[MemoryBuffer](), any[TransactionCallback]()))
+        .thenReturn(mock[Transaction])
+
+      var nowNanos = 0L
+      val server = spy(new RapidsShuffleServer(
+        mockTransport,
+        serverConnection,
+        RapidsShuffleTestHelper.makeMockBlockManager("1", "foo"),
+        requestHandler,
+        mockExecutor,
+        mockBssExecutor,
+        mockConf) {
+        override private[shuffle] def currentTimeNanos(): Long = nowNanos
+        override private[shuffle] def oomRetryTimeoutNanos: Long = 10L
+        override private[shuffle] def waitBeforeOomRetry(backoffMillis: Long): Unit = {}
+      })
+
+      val oomState = new BufferSendState(
+        mockTransaction, sendBuffer, requestHandler, null)
+      server.doHandleTransferRequest(Seq(oomState))
+      verify(server, times(1)).addToContinueQueue(Seq(oomState))
+
+      nowNanos = 10L
+      server.doHandleTransferRequest(Seq(oomState, successfulState))
+
+      verify(sendBuffer, times(1)).close()
+      verify(server, times(1)).addToContinueQueue(any())
     }
   }
 

@@ -34,11 +34,11 @@ import org.apache.spark.sql.connector.catalog.{Identifier, StagedTable, StagingT
 import org.apache.spark.sql.connector.catalog.TableCapability._
 import org.apache.spark.sql.connector.expressions.Transform
 import org.apache.spark.sql.connector.write.{LogicalWriteInfo, SupportsTruncate, V1Write, WriteBuilder}
-import org.apache.spark.sql.delta.{ColumnWithDefaultExprUtils, DeltaConfigs, DeltaErrors, DeltaLog, DeltaOptions}
+import org.apache.spark.sql.delta.{ColumnWithDefaultExprUtils, DeltaConfigs, DeltaErrors, DeltaLog, DeltaOptions, DeltaTableUtils}
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
-import org.apache.spark.sql.delta.commands.{TableCreationModes, WriteIntoDelta}
+import org.apache.spark.sql.delta.commands.TableCreationModes
 import org.apache.spark.sql.delta.metering.DeltaLogging
-import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShim, DeltaTrampoline, GpuDeltaLog,
+import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShim, DeltaRuntimeShim33x, DeltaTrampoline, GpuDeltaLog,
   GpuWriteIntoDeltaLike}
 import org.apache.spark.sql.delta.sources.{DeltaSourceUtils, DeltaSQLConf}
 import org.apache.spark.sql.delta.stats.StatisticsCollection
@@ -105,6 +105,29 @@ abstract class GpuDeltaCatalogBase(
    */
   protected def useCatalogCreateTable(sourceQuery: Option[DataFrame]): Boolean = {
     isUnityCatalog && sourceQuery.isEmpty
+  }
+
+  /**
+   * Constructs the Delta log used by CTAS and RTAS writes.
+   *
+   * Delta versions that carry catalog credentials or commit-coordinator state in the
+   * [[CatalogTable]] can override this hook and consume `existingTableOpt` and
+   * `fileSystemOptions`. The default ignores both because the CPU catalogs of the older Delta
+   * versions sharing this class build the write log from the table path alone; consuming them
+   * here would change which cached [[DeltaLog]] those versions resolve.
+   */
+  protected def getDeltaLogForWrite(
+      existingTableOpt: Option[CatalogTable],
+      tablePath: Path,
+      fileSystemOptions: Map[String, String]): DeltaLog = {
+    DeltaLog.forTable(spark, tablePath)
+  }
+
+  /** Creates the final catalog entry after a staged Delta commit. */
+  protected def createTableInCatalog(ident: Identifier, table: CatalogTable): Unit = {
+    val v1Table = DeltaTrampoline.getV1Table(table)
+    cpuCatalog.createTable(
+      ident, v1Table.columns(), v1Table.partitioning, v1Table.properties)
   }
 
   /** copied from trait SupportsPathIdentifier */
@@ -283,8 +306,11 @@ abstract class GpuDeltaCatalogBase(
       )
 
     val writer = sourceQuery.map { df =>
-      val deltaLog = DeltaLog.forTable(spark, new Path(loc))
-      val cpuWriter = WriteIntoDelta(
+      val fileSystemOptions = writeOptions.filter { case (k, _) =>
+        DeltaTableUtils.validDeltaTableHadoopPrefixes.exists(k.startsWith)
+      }
+      val deltaLog = getDeltaLogForWrite(existingTableOpt, new Path(loc), fileSystemOptions)
+      val cpuWriter = DeltaRuntimeShim33x.createCpuWrite(
         deltaLog,
         operation.mode,
         new DeltaOptions(withDb.storage.properties, spark.sessionState.conf),
@@ -306,8 +332,7 @@ abstract class GpuDeltaCatalogBase(
     //       if UC is enabled to replace `V2SessionCatalog`.
     val tableCreateFunc = if (useCatalogCreateTable(sourceQuery)) {
       Some[CatalogTable => Unit](v1Table => {
-        val t = DeltaTrampoline.getV1Table(v1Table)
-        cpuCatalog.createTable(ident, t.columns(), t.partitioning, t.properties)
+        createTableInCatalog(ident, v1Table)
       })
     } else {
       None
@@ -454,6 +479,9 @@ abstract class GpuDeltaCatalogBase(
     }
   }
 
+  /** Applies version-specific normalization before staged properties are committed. */
+  protected def normalizeStagedTableProperties(props: util.Map[String, String]): Unit = {}
+
   override def tableExists(ident: Identifier): Boolean = cpuCatalog.tableExists(ident)
 
   protected def createGpuStagedDeltaTableV2(
@@ -491,6 +519,7 @@ abstract class GpuDeltaCatalogBase(
         writeOptions = sqlWriteOptions
       }
       expandTableProps(props, writeOptions, conf)
+      normalizeStagedTableProperties(props)
       createDeltaTable(
         ident,
         schema,

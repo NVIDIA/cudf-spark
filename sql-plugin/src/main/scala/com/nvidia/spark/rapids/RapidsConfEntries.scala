@@ -58,6 +58,15 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .booleanConf
     .createWithDefault(false)
 
+  val TEST_DELTA_LOW_SHUFFLE_MERGE_FAIL_ON_FALLBACK =
+    conf("spark.rapids.sql.test.delta.lowShuffleMerge.failOnFallback")
+      .doc("Only for tests on Databricks Runtime 17.3. When true and " +
+        s"${TEST_CONF.key} is enabled, fail if low shuffle merge falls back to the classic " +
+        "GPU merge executor.")
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
+
   val TEST_ALLOWED_NONGPU = conf("spark.rapids.sql.test.allowedNonGpu")
     .doc("Comma separate string of exec or expression class names that are allowed " +
       "to not be GPU accelerated for testing.")
@@ -853,7 +862,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       "1. We support Delta Lake 2.4 and Databricks Runtime 17.3. " +
       s"2. Delta Lake 2.4 requires the ${RapidsReaderType.PERFILE} file scan mode. " +
       s"Databricks Runtime 17.3 also supports ${RapidsReaderType.MULTITHREADED}; " +
-      s"${RapidsReaderType.COALESCING} and ${RapidsReaderType.AUTO} target scans use the " +
+      s"${RapidsReaderType.COALESCING} and ${RapidsReaderType.AUTO} discovery scans use the " +
       s"${RapidsReaderType.MULTITHREADED} reader. " +
       "3. The deletion vector size must be smaller than " +
       s"${DELTA_LOW_SHUFFLE_MERGE_DEL_VECTOR_BROADCAST_THRESHOLD.key} ")

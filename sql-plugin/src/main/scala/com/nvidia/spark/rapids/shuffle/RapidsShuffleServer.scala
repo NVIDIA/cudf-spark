@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,17 +16,19 @@
 
 package com.nvidia.spark.rapids.shuffle
 
-import java.util.concurrent.{ConcurrentLinkedQueue, Executor}
+import java.util.concurrent.{ConcurrentLinkedQueue, Executor, TimeUnit}
 
 import scala.collection.mutable.ArrayBuffer
 
 import ai.rapids.cudf.{Cuda, MemoryBuffer}
 import com.nvidia.spark.rapids.{NvtxRegistry, RapidsConf, RapidsShuffleHandle, ShuffleMetadata}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.format.TableMeta
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.shuffle.rapids.RapidsShuffleSendPrepareException
+import org.apache.spark.sql.rapids.GpuShuffleEnv
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.storage.{BlockManagerId, ShuffleBlockBatchId}
 
@@ -90,6 +92,33 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
    * On close, this is set to false to indicate that the server is shutting down.
    */
   private[this] var started = true
+
+  private[shuffle] def currentTimeNanos(): Long = System.nanoTime()
+
+  private[shuffle] def oomRetryTimeoutNanos: Long =
+    TimeUnit.SECONDS.toNanos(GpuShuffleEnv.shuffleFetchTimeoutSeconds)
+
+  private[shuffle] def oomRetryBackoffMillis(retryAttempt: Int): Long = {
+    val shift = math.min(retryAttempt - 1, 4)
+    math.min(10L << shift, 100L)
+  }
+
+  private[shuffle] def waitBeforeOomRetry(backoffMillis: Long): Unit =
+    Thread.sleep(backoffMillis)
+
+  private def stopOomRetries(
+      states: Seq[BufferSendState],
+      errors: Seq[Throwable],
+      reason: String): Unit = {
+    val failure = new IllegalStateException(
+      s"Unable to prepare shuffle sends. $reason These sends will not be retried.")
+    errors.foreach(failure.addSuppressed)
+    states.foreach(_.safeClose(failure))
+    logError(failure.getMessage, failure)
+    bssExec.synchronized {
+      bssExec.notifyAll()
+    }
+  }
 
   private object ShuffleServerOps {
     /**
@@ -337,7 +366,7 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
             case ex: RapidsShuffleSendPrepareException =>
               // We failed to prepare the send (copy to bounce buffer), and got an exception.
               // Put the `bufferSendState` back in the continue queue, so it can be retried.
-              // If no `BufferSendState` could be handled without error, nothing is retried.
+              // If no `BufferSendState` could be handled, retry only transient OOM failures.
               // TODO: we should respond with a failure to the client.
               // Please see: https://github.com/NVIDIA/spark-rapids/issues/3040
               if (toTryAgain == null) {
@@ -352,23 +381,73 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
 
       if (toTryAgain != null) {
         // we failed at least 1 time to copy to the bounce buffer
-        if (bssBuffers.isEmpty) {
-          // we were not able to handle anything, error out.
+        val failures = toTryAgain.toSeq.zip(supressedErrors.toSeq)
+        def isMaterializationOom(error: Throwable): Boolean = error match {
+          case ex: RapidsShuffleSendPrepareException =>
+            ex.getCause.isInstanceOf[OutOfMemoryError]
+          case _ => false
+        }
+
+        // Preserve the existing fail-fast behavior when an entire batch fails and at least one
+        // preparation failure is not a materialization OOM.
+        if (bssBuffers.isEmpty && !failures.forall(f => isMaterializationOom(f._2))) {
           val ise = new IllegalStateException("Unable to prepare any sends. " +
               "This issue can occur when requesting too many shuffle blocks. " +
               "The sends will not be retried.")
           supressedErrors.foreach(ise.addSuppressed)
           throw ise
+        }
+
+        val oomFailures = failures.filter(f => isMaterializationOom(f._2))
+        val oomDecisions = if (oomFailures.nonEmpty) {
+          val nowNanos = currentTimeNanos()
+          val timeoutNanos = oomRetryTimeoutNanos
+          oomFailures.map { case (state, error) =>
+            (state, error, state.recordOomAndGetRetryAttempt(nowNanos, timeoutNanos))
+          }
         } else {
-          // we at least handled 1 `BufferSendState`, lets continue to retry
-          logWarning(s"Unable to prepare ${toTryAgain.size} sends. " +
+          Seq.empty
+        }
+        val (retryableOom, expiredOom) = oomDecisions.partition(_._3.isDefined)
+
+        if (expiredOom.nonEmpty) {
+          stopOomRetries(
+            expiredOom.map(_._1),
+            expiredOom.map(_._2),
+            "The per-send OOM retry window derived from spark.network.timeout expired.")
+        }
+
+        val retryableOomStates = retryableOom.map(_._1).toSet
+        val statesToRetry = failures.collect {
+          case (state, error)
+              if !isMaterializationOom(error) || retryableOomStates.contains(state) =>
+            state
+        }
+
+        if (bssBuffers.isEmpty && retryableOom.nonEmpty) {
+          val retryAttempt = retryableOom.flatMap(_._3).max
+          val backoffMillis = oomRetryBackoffMillis(retryAttempt)
+          val message = s"Memory exhausted while preparing ${retryableOom.size} sends. " +
+              s"Retry attempt $retryAttempt will start after $backoffMillis ms."
+          if (retryAttempt == 1 || retryAttempt % 100 == 0) {
+            logWarning(message)
+          } else {
+            logDebug(message)
+          }
+          // Avoid a hot loop because each failed materialization can repeat spill sweeps and
+          // device synchronization before it reports the allocation failure.
+          waitBeforeOomRetry(backoffMillis)
+        } else if (statesToRetry.nonEmpty) {
+          logWarning(s"Unable to prepare ${statesToRetry.size} sends. " +
               "This issue can occur when requesting many shuffle blocks. " +
               "The sends will be retried.")
         }
 
-        // If we are still able to handle at least one `BufferSendState`, add any
-        // others that also failed due back to the queue.
-        addToContinueQueue(toTryAgain.toSeq)
+        // Each BufferSendState owns its OOM retry window. Incidental co-batching cannot expire a
+        // fresh state or reset a failing state when an unrelated state makes progress.
+        if (statesToRetry.nonEmpty) {
+          addToContinueQueue(statesToRetry)
+        }
       }
 
       serverStream.sync()

@@ -25,7 +25,9 @@ import scala.util.Try
 import com.nvidia.spark.rapids._
 import org.apache.hadoop.fs.Path
 
-import org.apache.spark.sql.{DataFrame, SaveMode}
+import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
+import org.apache.spark.sql.catalyst.catalog.CatalogTable
+import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.connector.catalog.{StagingTableCatalog, SupportsWrite}
 import org.apache.spark.sql.connector.write.V1Write
 import org.apache.spark.sql.delta.{DeltaLog, DeltaOptions, DeltaParquetFileFormat}
@@ -109,11 +111,49 @@ abstract class DeltaIOProvider extends DeltaProviderImplBase {
   private case class DeltaWriteV1Config(
       deltaLog: DeltaLog,
       forceOverwrite: Boolean,
-      options: mutable.HashMap[String, String])
+      options: mutable.HashMap[String, String],
+      catalogTable: Option[CatalogTable],
+      recachePlan: LogicalPlan,
+      refreshTableName: Option[String])
+
+  protected def getDeltaLogForV1Write(
+      spark: SparkSession,
+      deltaTable: DeltaTableV2): DeltaLog = {
+    val tablePath = if (deltaTable.catalogTable.isDefined) {
+      new Path(deltaTable.catalogTable.get.location)
+    } else {
+      DeltaDataSource.parsePathIdentifier(spark, deltaTable.path.toString,
+        deltaTable.options)._1
+    }
+    DeltaLog.forTable(spark, tablePath, deltaTable.options)
+  }
+
+  protected def getCatalogTableForV1Write(
+      deltaTable: DeltaTableV2): Option[CatalogTable] = None
+
+  protected def getRecachePlanForV1Write(
+      deltaLog: DeltaLog,
+      deltaTable: DeltaTableV2): LogicalPlan = LogicalRelation(deltaLog.createRelation())
+
+  protected def getRefreshTableNameForV1Write(
+      deltaTable: DeltaTableV2): Option[String] = None
+
+  protected def createWriteIntoDelta(
+      deltaLog: DeltaLog,
+      mode: SaveMode,
+      options: DeltaOptions,
+      configuration: Map[String, String],
+      data: DataFrame,
+      catalogTable: Option[CatalogTable]): WriteIntoDelta = {
+    WriteIntoDelta(deltaLog, mode, options, Nil, configuration, data)
+  }
 
   private def extractWriteV1Config(
       meta: RapidsMeta[_, _, _],
       deltaLog: DeltaLog,
+      catalogTable: Option[CatalogTable],
+      recachePlan: LogicalPlan,
+      refreshTableName: Option[String],
       write: V1Write): Option[DeltaWriteV1Config] = {
     // The V1Write instance on the CPU is an anonymous class that contains a private
     // WriteIntoDeltaBuilder class, the latter of which contains details on the type of write
@@ -141,8 +181,14 @@ abstract class DeltaIOProvider extends DeltaProviderImplBase {
           "org$apache$spark$sql$delta$catalog$WriteIntoDeltaBuilder$$options").map { f =>
           f.get(outerObj).asInstanceOf[mutable.HashMap[String, String]]
         }
+        val writeBuilderCatalogTable = getField(outerClass,
+          "org$apache$spark$sql$delta$catalog$WriteIntoDeltaBuilder$$table")
+          .map(_.get(outerObj).asInstanceOf[DeltaTableV2])
+          .flatMap(getCatalogTableForV1Write)
         if (forceOverwrite.isDefined && options.isDefined) {
-          Some(DeltaWriteV1Config(deltaLog, forceOverwrite.get, options.get))
+          Some(DeltaWriteV1Config(
+            deltaLog, forceOverwrite.get, options.get,
+            writeBuilderCatalogTable.orElse(catalogTable), recachePlan, refreshTableName))
         } else {
           meta.willNotWorkOnGpu(s"write class has unsupported outer class $outerClass")
           None
@@ -165,16 +211,12 @@ abstract class DeltaIOProvider extends DeltaProviderImplBase {
         s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
     }
     val deltaTable = cpuExec.table.asInstanceOf[DeltaTableV2]
-    val tablePath = if (deltaTable.catalogTable.isDefined) {
-      new Path(deltaTable.catalogTable.get.location)
-    } else {
-      DeltaDataSource.parsePathIdentifier(cpuExec.session, deltaTable.path.toString,
-        deltaTable.options)._1
-    }
-    val deltaLog = DeltaLog.forTable(cpuExec.session, tablePath, deltaTable.options)
+    val deltaLog = getDeltaLogForV1Write(cpuExec.session, deltaTable)
     RapidsDeltaUtils.tagForDeltaWrite(meta, cpuExec.plan.schema, Some(deltaLog),
       deltaTable.options, cpuExec.session)
-    extractWriteV1Config(meta, deltaLog, cpuExec.write).foreach { writeConfig =>
+    extractWriteV1Config(meta, deltaLog, getCatalogTableForV1Write(deltaTable),
+      getRecachePlanForV1Write(deltaLog, deltaTable),
+      getRefreshTableNameForV1Write(deltaTable), cpuExec.write).foreach { writeConfig =>
       meta.setCustomTaggingData(writeConfig)
     }
   }
@@ -198,16 +240,12 @@ abstract class DeltaIOProvider extends DeltaProviderImplBase {
         s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
     }
     val deltaTable = cpuExec.table.asInstanceOf[DeltaTableV2]
-    val tablePath = if (deltaTable.catalogTable.isDefined) {
-      new Path(deltaTable.catalogTable.get.location)
-    } else {
-      DeltaDataSource.parsePathIdentifier(cpuExec.session, deltaTable.path.toString,
-        deltaTable.options)._1
-    }
-    val deltaLog = DeltaLog.forTable(cpuExec.session, tablePath, deltaTable.options)
+    val deltaLog = getDeltaLogForV1Write(cpuExec.session, deltaTable)
     RapidsDeltaUtils.tagForDeltaWrite(meta, cpuExec.plan.schema, Some(deltaLog),
       deltaTable.options, cpuExec.session)
-    extractWriteV1Config(meta, deltaLog, cpuExec.write).foreach { writeConfig =>
+    extractWriteV1Config(meta, deltaLog, getCatalogTableForV1Write(deltaTable),
+      getRecachePlanForV1Write(deltaLog, deltaTable),
+      getRefreshTableNameForV1Write(deltaTable), cpuExec.write).foreach { writeConfig =>
       meta.setCustomTaggingData(writeConfig)
     }
   }
@@ -243,13 +281,13 @@ abstract class DeltaIOProvider extends DeltaProviderImplBase {
           val deltaLog = writeConfig.deltaLog
 
           // TODO: Get the config from WriteIntoDelta's txn.
-          val cpuWrite = WriteIntoDelta(
+          val cpuWrite = createWriteIntoDelta(
             deltaLog,
             if (writeConfig.forceOverwrite) SaveMode.Overwrite else SaveMode.Append,
             new DeltaOptions(writeConfig.options.toMap, session.sessionState.conf),
-            Nil,
             DeltaRuntimeShim.unsafeVolatileSnapshotFromLog(deltaLog).metadata.configuration,
-            data)
+            data,
+            writeConfig.catalogTable)
           val gpuWrite = DeltaRuntimeShim.createGpuWrite(
             new GpuDeltaLog(deltaLog, rapidsConf), cpuWrite)
           gpuWrite.run(session)
@@ -258,7 +296,8 @@ abstract class DeltaIOProvider extends DeltaProviderImplBase {
           // Re-cache all cached plans(including this relation itself, if it's cached) that refer
           // to this data source relation. This is the behavior for InsertInto
           session.sharedState.cacheManager.recacheByPlan(
-            session, LogicalRelation(deltaLog.createRelation()))
+            session, writeConfig.recachePlan)
+          writeConfig.refreshTableName.foreach(session.catalog.refreshTable)
         }
       }
     }

@@ -61,6 +61,10 @@ trait SparkShims {
     case _ => false
   }
 
+  def canonicalizeArraySortComparator(expr: Expression): Expression = expr.canonicalized
+
+  def isExactPercentileInputTypeSupported(dataType: DataType): Boolean = true
+
   def isExpressionStateful(expr: Expression): Boolean = false
 
   def getParquetFilters(

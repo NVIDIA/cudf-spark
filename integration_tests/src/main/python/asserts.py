@@ -283,7 +283,8 @@ def _assert_gpu_and_cpu_writes_are_equal(
         read_func,
         base_path,
         mode,
-        conf={}):
+        conf={},
+        expected_command=None):
     conf = _prep_incompat_conf(conf)
 
     print('### CPU RUN ###')
@@ -299,7 +300,9 @@ def _assert_gpu_and_cpu_writes_are_equal(
     if current_test_has_delta_marker() and not current_test_allows_non_gpu_delta_write():
         print("Delta Lake test detected - applying Delta write validation")
         from delta_lake_utils import assert_rapids_delta_write
-        gpu_result = assert_rapids_delta_write(lambda spark: write_func(spark, gpu_path), conf=conf)
+        gpu_result = assert_rapids_delta_write(
+            lambda spark: write_func(spark, gpu_path), conf=conf,
+            expected_command=expected_command)
     else:
         gpu_result = with_gpu_session(lambda spark : write_func(spark, gpu_path), conf=conf)
     gpu_end = time.time()
@@ -319,14 +322,18 @@ def _assert_gpu_and_cpu_writes_are_equal(
 
     assert_equal(from_cpu, from_gpu)
 
-def assert_gpu_and_cpu_writes_are_equal_collect(write_func, read_func, base_path, conf={}):
+def assert_gpu_and_cpu_writes_are_equal_collect(
+        write_func, read_func, base_path, conf={}, expected_command=None):
     """
     Assert when running write_func on both the CPU and the GPU and reading using read_func
     on the CPU that the results are equal.
     In this case the data is collected back to the driver and compared here, so be
     careful about the amount of data returned.
+    For Delta writes, expected_command also checks the captured GPU command.
     """
-    _assert_gpu_and_cpu_writes_are_equal(write_func, read_func, base_path, 'COLLECT', conf=conf)
+    _assert_gpu_and_cpu_writes_are_equal(
+        write_func, read_func, base_path, 'COLLECT', conf=conf,
+        expected_command=expected_command)
 
 def assert_gpu_and_cpu_writes_are_equal_iterator(write_func, read_func, base_path, conf={}):
     """

@@ -29,7 +29,9 @@ import com.databricks.sql.transaction.tahoe.actions.{Metadata, Protocol}
 import com.databricks.sql.transaction.tahoe.files.TahoeFileIndex
 import com.databricks.sql.transaction.tahoe.schema.SchemaMergingUtils
 import com.nvidia.spark.rapids.{GpuMetric, RapidsConf, SparkPlanMeta}
-import com.nvidia.spark.rapids.delta.GpuDeltaParquetFileFormatUtils.addMetadataColumnToIterator
+import com.nvidia.spark.rapids.delta.GpuDeltaParquetFileFormatUtils.{
+  addMetadataColumnToIterator,
+  METADATA_ROW_IDX_COL}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 
@@ -65,7 +67,8 @@ case class GpuDeltaParquetFileFormat(
     optimizationsEnabled: Boolean = true,
     tablePath: Option[String] = None,
     isCDCRead: Boolean = false,
-    lowShuffleMergeScan: Boolean = false
+    lowShuffleMergeScan: Boolean = false,
+    lowShuffleMergeRowIndexColumn: String = METADATA_ROW_IDX_COL
   ) extends GpuDeltaParquetFileFormatBase {
 
   override val columnMappingMode: DeltaColumnMappingMode = metadata.columnMappingMode
@@ -85,9 +88,22 @@ case class GpuDeltaParquetFileFormat(
    * Parquet reader after name mapping rewrites.
    */
   override def prepareSchema(inputSchema: StructType): StructType = {
+    // The discovery row index is synthetic, so it has no entry in the table's column mapping.
+    // Match its collision-safe name only on marked scans; similarly named user columns still
+    // need physical mapping. The base reader also calls this method for schemas without it.
+    val rowIndexOrdinal = if (lowShuffleMergeScan) {
+      inputSchema.fields.indexWhere(_.name == lowShuffleMergeRowIndexColumn)
+    } else {
+      -1
+    }
+    val tableSchema = if (rowIndexOrdinal >= 0) {
+      StructType(inputSchema.fields.patch(rowIndexOrdinal, Nil, 1))
+    } else {
+      inputSchema
+    }
     val schema = DeltaColumnMapping.createPhysicalSchema(
-      inputSchema, referenceSchema, columnMappingMode)
-    if (columnMappingMode == NameMapping) {
+      tableSchema, referenceSchema, columnMappingMode)
+    val physicalSchema = if (columnMappingMode == NameMapping) {
       SchemaMergingUtils.transformColumns(schema) { (_, field, _) =>
         field.copy(metadata = new MetadataBuilder()
           .withMetadata(field.metadata)
@@ -97,6 +113,12 @@ case class GpuDeltaParquetFileFormat(
       }
     } else {
       schema
+    }
+    if (rowIndexOrdinal >= 0) {
+      StructType(physicalSchema.fields.patch(
+        rowIndexOrdinal, Seq(inputSchema.fields(rowIndexOrdinal)), 0))
+    } else {
+      physicalSchema
     }
   }
 
@@ -187,7 +209,8 @@ case class GpuDeltaParquetFileFormat(
           None,
           dataReader(file).asInstanceOf[Iterator[ColumnarBatch]],
           maxBatchSize,
-          scatterTime).asInstanceOf[Iterator[InternalRow]]
+          scatterTime,
+          lowShuffleMergeRowIndexColumn).asInstanceOf[Iterator[InternalRow]]
       }
     } else {
       dataReader
@@ -201,6 +224,8 @@ object GpuDeltaParquetFileFormat {
 
   val LOW_SHUFFLE_MERGE_SCAN_OPTION =
     "spark.rapids.internal.delta.lowShuffleMerge.scan"
+  val LOW_SHUFFLE_MERGE_ROW_INDEX_COLUMN_OPTION =
+    "spark.rapids.internal.delta.lowShuffleMerge.rowIndexColumn"
 
   def isLowShuffleMergeScan(options: Map[String, String]): Boolean =
     options.get(LOW_SHUFFLE_MERGE_SCAN_OPTION).contains("true")
@@ -294,7 +319,9 @@ object GpuDeltaParquetFileFormat {
       optimizationsEnabled = fmt.optimizationsEnabled,
       tablePath = fmt.tablePath,
       isCDCRead = fmt.isCDCRead,
-      lowShuffleMergeScan = isLowShuffleMergeScan(relation.options))
+      lowShuffleMergeScan = isLowShuffleMergeScan(relation.options),
+      lowShuffleMergeRowIndexColumn = relation.options
+        .getOrElse(LOW_SHUFFLE_MERGE_ROW_INDEX_COLUMN_OPTION, METADATA_ROW_IDX_COL))
   }
 
   private def hasRowIndexFiltersInTahoeFileIndex(relation: HadoopFsRelation): Boolean = {

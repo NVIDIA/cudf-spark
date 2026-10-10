@@ -169,6 +169,7 @@ case class GpuAvroPartitionReaderFactory(
   private val maxReadBatchSizeRows = rapidsConf.maxReadBatchSizeRows
   private val maxReadBatchSizeBytes = rapidsConf.maxReadBatchSizeBytes
   private val maxGpuColumnSizeBytes = rapidsConf.maxGpuColumnSizeBytes
+  private val skipReadEstimate = rapidsConf.skipReadEstimate(chunkedReaderEnabled = false)
 
   override def supportColumnarReads(partition: InputPartition): Boolean = true
 
@@ -185,7 +186,7 @@ case class GpuAvroPartitionReaderFactory(
     }
     val reader = new GpuAvroPartitionReader(conf, partFile,
       blockMeta, readDataSchema, debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows,
-      maxReadBatchSizeBytes, metrics)
+      maxReadBatchSizeBytes, skipReadEstimate, metrics)
     ColumnarPartitionReaderWithPartitionValues.newReader(partFile, reader, partitionSchema,
       maxGpuColumnSizeBytes)
   }
@@ -214,6 +215,7 @@ case class GpuAvroMultiFilePartitionReaderFactory(
   private val ignoreCorruptFiles = sqlConf.ignoreCorruptFiles
 
   private val maxNumFileProcessed = rapidsConf.maxNumAvroFilesParallel
+  private val skipReadEstimate = rapidsConf.skipReadEstimate(chunkedReaderEnabled = false)
 
   // we can't use the coalescing files reader when InputFileName, InputFileBlockStart,
   // or InputFileBlockLength because we are combining all the files into a single buffer
@@ -307,7 +309,8 @@ case class GpuAvroMultiFilePartitionReaderFactory(
     val poolConf = poolConfBuilder.build()
     new GpuMultiFileAvroPartitionReader(conf, files, clippedBlocks.toSeq, readDataSchema,
       partitionSchema, maxReadBatchSizeRows, maxReadBatchSizeBytes, maxGpuColumnSizeBytes,
-      poolConf, debugDumpPrefix, debugDumpAlways, metrics, mapPathHeader.toMap)
+      skipReadEstimate, poolConf, debugDumpPrefix, debugDumpAlways, metrics,
+      mapPathHeader.toMap)
   }
 
 }
@@ -403,12 +406,14 @@ trait GpuAvroReaderBase extends Logging { self: FilePartitionReaderBase =>
    *                             reads per batch
    * @param maxReadBatchSizeBytes soft limit on the maximum number of bytes the reader
    *                              reads per batch
+   * @param skipReadEstimate whether to ignore the schema based GPU memory estimate for a batch
    * @return
    */
   protected final def populateCurrentBlockChunk(
       blockIter: BufferedIterator[BlockInfo],
       maxReadBatchSizeRows: Int,
-      maxReadBatchSizeBytes: Long): Seq[BlockInfo] = {
+      maxReadBatchSizeBytes: Long,
+      skipReadEstimate: Boolean): Seq[BlockInfo] = {
 
     val currentChunk = new ArrayBuffer[BlockInfo]
     var numRows, numBytes, numAvroBytes: Long = 0
@@ -421,7 +426,11 @@ trait GpuAvroReaderBase extends Logging { self: FilePartitionReaderBase =>
           throw new UnsupportedOperationException("Too many rows in split")
         }
         if (numRows == 0 || numRows + peekedRowGroup.count <= maxReadBatchSizeRows) {
-          val estBytes = GpuBatchUtils.estimateGpuMemory(readDataSchema, peekedRowGroup.count)
+          val estBytes = if (skipReadEstimate) {
+            0L
+          } else {
+            GpuBatchUtils.estimateGpuMemory(readDataSchema, peekedRowGroup.count)
+          }
           if (numBytes == 0 || numBytes + estBytes <= maxReadBatchSizeBytes) {
             currentChunk += blockIter.next()
             numRows += currentChunk.last.count
@@ -563,6 +572,7 @@ class GpuAvroPartitionReader(
     override val debugDumpAlways: Boolean,
     maxReadBatchSizeRows: Integer,
     maxReadBatchSizeBytes: Long,
+    skipReadEstimate: Boolean,
     execMetrics: Map[String, GpuMetric])
   extends FilePartitionReaderBase(conf, execMetrics) with GpuAvroReaderBase {
 
@@ -597,7 +607,7 @@ class GpuAvroPartitionReader(
   private def readBatch(): Option[ColumnarBatch] = {
     NvtxRegistry.AVRO_READ_BATCH {
       val currentChunkedBlocks = populateCurrentBlockChunk(blockIterator,
-        maxReadBatchSizeRows, maxReadBatchSizeBytes)
+        maxReadBatchSizeRows, maxReadBatchSizeBytes, skipReadEstimate)
       if (readDataSchema.isEmpty) {
         // not reading any data, so return a degenerate ColumnarBatch with the row count
         val numRows = currentChunkedBlocks.map(_.count).sum.toInt
@@ -912,6 +922,7 @@ class GpuMultiFileAvroPartitionReader(
     maxReadBatchSizeRows: Integer,
     maxReadBatchSizeBytes: Long,
     maxGpuColumnSizeBytes: Long,
+    skipReadEstimate: Boolean,
     poolConf: ThreadPoolConf,
     override val debugDumpPrefix: Option[String],
     override val debugDumpAlways: Boolean,
@@ -919,7 +930,7 @@ class GpuMultiFileAvroPartitionReader(
     mapPathHeader: Map[Path, Header])
   extends MultiFileCoalescingPartitionReaderBase(conf, clippedBlocks,
     partitionSchema, maxReadBatchSizeRows, maxReadBatchSizeBytes, maxGpuColumnSizeBytes,
-    poolConf, execMetrics) with GpuAvroReaderBase {
+    skipReadEstimate, poolConf, execMetrics) with GpuAvroReaderBase {
 
   override def checkIfNeedToSplitDataBlock(
       currentBlockInfo: SingleDataBlockInfo,

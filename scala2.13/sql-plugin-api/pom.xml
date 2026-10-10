@@ -47,6 +47,11 @@
             <plugin>
                 <groupId>net.alchim31.maven</groupId>
                 <artifactId>scala-maven-plugin</artifactId>
+                <configuration>
+                    <release conf.combine="override">8</release>
+                    <target combine.self="override"/>
+                    <addJavacArgs conf.combine="override">-Xlint:all,-serial,-path,-try,-processing|-Werror</addJavacArgs>
+                </configuration>
             </plugin>
             <plugin>
                 <groupId>org.apache.rat</groupId>
@@ -61,75 +66,4 @@
             </plugin>
         </plugins>
     </build>
-    <profiles>
-        <profile>
-            <id>release411</id>
-            <activation>
-                <property>
-                    <name>buildver</name>
-                    <value>411</value>
-                </property>
-            </activation>
-            <build>
-                <pluginManagement>
-                    <plugins>
-                        <plugin>
-                            <groupId>net.alchim31.maven</groupId>
-                            <artifactId>scala-maven-plugin</artifactId>
-                            <configuration>
-                                <release conf.combine="override">${java.major.version}</release>
-                                <addJavacArgs conf.combine="override">-Xlint:all,-serial,-path,-try,-processing</addJavacArgs>
-                            </configuration>
-                        </plugin>
-                    </plugins>
-                </pluginManagement>
-            </build>
-        </profile>
-        <profile>
-            <id>release412</id>
-            <activation>
-                <property>
-                    <name>buildver</name>
-                    <value>412</value>
-                </property>
-            </activation>
-            <build>
-                <pluginManagement>
-                    <plugins>
-                        <plugin>
-                            <groupId>net.alchim31.maven</groupId>
-                            <artifactId>scala-maven-plugin</artifactId>
-                            <configuration>
-                                <release conf.combine="override">${java.major.version}</release>
-                                <addJavacArgs conf.combine="override">-Xlint:all,-serial,-path,-try,-processing</addJavacArgs>
-                            </configuration>
-                        </plugin>
-                    </plugins>
-                </pluginManagement>
-            </build>
-        </profile>
-        <profile>
-            <id>release413</id>
-            <activation>
-                <property>
-                    <name>buildver</name>
-                    <value>413</value>
-                </property>
-            </activation>
-            <build>
-                <pluginManagement>
-                    <plugins>
-                        <plugin>
-                            <groupId>net.alchim31.maven</groupId>
-                            <artifactId>scala-maven-plugin</artifactId>
-                            <configuration>
-                                <release conf.combine="override">${java.major.version}</release>
-                                <addJavacArgs conf.combine="override">-Xlint:all,-serial,-path,-try,-processing</addJavacArgs>
-                            </configuration>
-                        </plugin>
-                    </plugins>
-                </pluginManagement>
-            </build>
-        </profile>
-    </profiles>
 </project>

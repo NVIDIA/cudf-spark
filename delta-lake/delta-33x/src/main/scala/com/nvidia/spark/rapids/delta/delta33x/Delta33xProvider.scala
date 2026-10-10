@@ -94,7 +94,9 @@ object Delta33xProvider extends DeltaProviderBase with Logging {
 
   override protected def toGpuParquetFileFormat(conf: RapidsConf, fmt: DeltaParquetFileFormat)
   : FileFormat = {
-    if (isPushDVPredicateDownEnabled(conf)) {
+    // A DML scan without existing DVs needs the reader that synthesizes physical row indexes.
+    val needsGeneratedRowIndex = !fmt.optimizationsEnabled && !fmt.hasTablePath
+    if (isPushDVPredicateDownEnabled(conf) && !needsGeneratedRowIndex) {
       // Pushing down deletion vector predicates is currently only supported
       // when the metadata row index is enabled.
       GpuDelta33xParquetFileFormat2(fmt.protocol, fmt.metadata, fmt.nullableRowTrackingFields,

@@ -39,8 +39,5 @@ object Delta42xConfigChecker extends DeltaConfigChecker {
       meta.willNotWorkOnGpu(
         "Delta 4.2 null-intolerant dynamic partition overwrite is not supported on GPU")
     }
-    if (deltaLog.exists(_.unsafeVolatileSnapshot.isCatalogOwned)) {
-      meta.willNotWorkOnGpu("Delta 4.2 catalog-managed table writes are not supported on GPU")
-    }
   }
 }

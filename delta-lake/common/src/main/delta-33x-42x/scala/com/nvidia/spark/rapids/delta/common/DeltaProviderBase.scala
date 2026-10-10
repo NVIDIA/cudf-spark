@@ -140,7 +140,8 @@ abstract class DeltaProviderBase extends DeltaIOProvider {
       cpuExec.tableSpec,
       cpuExec.writeOptions,
       cpuExec.orCreate,
-      InvalidateCacheShims.getInvalidateCache(cpuExec.invalidateCache))
+      InvalidateCacheShims.getInvalidateCache(
+        cpuExec.invalidateCache, cpuExec.catalog, qualifiedTableName = None))
   }
 
   override def isPushDVPredicateDownEnabled(conf: RapidsConf): Boolean = {

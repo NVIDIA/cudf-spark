@@ -31,25 +31,29 @@ package com.nvidia.spark.rapids
 
 import java.util.Optional
 
+import scala.util.Try
+
 import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Scalar, VariantUtils}
 import com.nvidia.spark.Retryable
-import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 
 import org.apache.spark.sql.catalyst.expressions.{BoundReference, Expression, Literal,
   NamedExpression}
 import org.apache.spark.sql.catalyst.expressions.variant.VariantGet
-import org.apache.spark.sql.types.{ByteType, DataType, IntegerType, LongType, ShortType,
-  StringType}
+import org.apache.spark.sql.types.{BooleanType, ByteType, DataType, DoubleType, FloatType,
+  IntegerType, LongType, ShortType, StringType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.unsafe.types.UTF8String
 
-class GpuVariantGetMeta(
+case class GpuVariantGetMeta(
     expr: VariantGet,
-    conf: RapidsConf,
-    parent: Option[RapidsMeta[_, _, _]],
+    override val conf: RapidsConf,
+    p: Option[RapidsMeta[_, _, _]],
     rule: DataFromReplacementRule)
-  extends BinaryExprMeta[VariantGet](expr, conf, parent, rule) {
+  extends BinaryExprMeta[VariantGet](expr, conf, p, rule) {
+
+  override def isTimeZoneSupported: Boolean = true
 
   override def tagExprForGpu(): Unit = {
     if (!GpuColumnVector.isVariantType(expr.child.dataType)) {
@@ -58,13 +62,14 @@ class GpuVariantGetMeta(
 
     if (!GpuVariantGet.isSupportedTargetType(expr.targetType)) {
       willNotWorkOnGpu(s"target type ${expr.targetType.simpleString} is not supported; " +
-        "supported types are tinyint, smallint, int, bigint, and string")
+        "supported types are boolean, tinyint, smallint, int, bigint, float, double, and string")
     }
 
     GpuVariantGet.parseSupportedPath(expr.path) match {
       case Some(_) =>
       case None =>
-        willNotWorkOnGpu("path must be a literal object-field path like $.field or $.nested.field")
+        willNotWorkOnGpu("path must be a literal object-field/array-index path like " +
+          "$.field, $.nested.field, or $.items[0].field")
     }
 
     if (expr.failOnError) {
@@ -137,10 +142,13 @@ case class GpuVariantGet(
 }
 
 object GpuVariantGet {
-  private val ObjectFieldPath = """^\$\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$""".r
+  private val SupportedPath =
+    """^\$(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[0-9]+\])+$""".r
+  private val ArrayIndex = """\[([0-9]+)\]""".r
 
   def isSupportedTargetType(dt: DataType): Boolean = dt match {
-    case ByteType | ShortType | IntegerType | LongType | StringType => true
+    case BooleanType | ByteType | ShortType | IntegerType | LongType | FloatType |
+        DoubleType | StringType => true
     case _ => false
   }
 
@@ -164,14 +172,10 @@ object GpuVariantGet {
       fallbackBridge: GpuCpuBridgeExpression): ColumnVector = {
     withResource(VariantUtils.getVariantFieldValue(cudfVariant, path)) { rawValue =>
       dt match {
-        case StringType =>
-          withResource(VariantUtils.castVariantValue(rawValue, DType.STRING)) { decoded =>
-            if (allRowsCovered(rawValue, Seq(decoded))) {
-              decoded.incRefCount()
-            } else {
-              evaluateOnCpu(input, fallbackBridge)
-            }
-          }
+        case BooleanType => decodeExactType(rawValue, DType.BOOL8, input, fallbackBridge)
+        case FloatType => decodeExactType(rawValue, DType.FLOAT32, input, fallbackBridge)
+        case DoubleType => decodeExactType(rawValue, DType.FLOAT64, input, fallbackBridge)
+        case StringType => decodeExactType(rawValue, DType.STRING, input, fallbackBridge)
         case ByteType | ShortType | IntegerType | LongType =>
           val decoded = Seq(DType.INT8, DType.INT16, DType.INT32, DType.INT64).safeMap {
             sourceType => VariantUtils.castVariantValue(rawValue, sourceType)
@@ -187,6 +191,20 @@ object GpuVariantGet {
           }
         case other =>
           throw new IllegalArgumentException(s"unsupported variant target type: $other")
+      }
+    }
+  }
+
+  private def decodeExactType(
+      rawValue: ColumnView,
+      targetType: DType,
+      input: GpuColumnVector,
+      fallbackBridge: GpuCpuBridgeExpression): ColumnVector = {
+    withResource(VariantUtils.castVariantValue(rawValue, targetType)) { decoded =>
+      if (allRowsCovered(rawValue, Seq(decoded))) {
+        decoded.incRefCount()
+      } else {
+        evaluateOnCpu(input, fallbackBridge)
       }
     }
   }
@@ -232,21 +250,23 @@ object GpuVariantGet {
       minValue: Long,
       maxValue: Long,
       targetType: DType): ColumnVector = {
-    withResource(Scalar.fromLong(minValue)) { min =>
-      withResource(input.greaterOrEqualTo(min)) { aboveMin =>
-        withResource(Scalar.fromLong(maxValue)) { max =>
-          withResource(input.lessOrEqualTo(max)) { belowMax =>
-            withResource(aboveMin.and(belowMax)) { inRange =>
-              withResource(Scalar.fromNull(DType.INT64)) { nullValue =>
-                withResource(inRange.ifElse(input, nullValue)) { masked =>
-                  masked.castTo(targetType)
-                }
-              }
-            }
-          }
-        }
+    val aboveMin = withResource(Scalar.fromLong(minValue)) { min =>
+      input.greaterOrEqualTo(min)
+    }
+    val belowMax = closeOnExcept(aboveMin) { _ =>
+      withResource(Scalar.fromLong(maxValue)) { max =>
+        input.lessOrEqualTo(max)
       }
     }
+    val inRange = withResource(Seq(aboveMin, belowMax)) { _ =>
+      aboveMin.and(belowMax)
+    }
+    val masked = withResource(inRange) { inRange =>
+      withResource(Scalar.fromNull(DType.INT64)) { nullValue =>
+        inRange.ifElse(input, nullValue)
+      }
+    }
+    withResource(masked)(_.castTo(targetType))
   }
 
   private def evaluateOnCpu(
@@ -313,7 +333,9 @@ object GpuVariantGet {
   }
 
   def parseSupportedPath(path: String): Option[String] = {
-    if (ObjectFieldPath.pattern.matcher(path).matches) {
+    val validIndexes =
+      ArrayIndex.findAllMatchIn(path).forall(index => Try(index.group(1).toInt).isSuccess)
+    if (SupportedPath.pattern.matcher(path).matches && validIndexes) {
       Some(path)
     } else {
       None

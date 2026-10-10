@@ -98,6 +98,6 @@ class GpuPositionDeltaBatchWrite(write: GpuSparkPositionDeltaWrite,
   override def useCommitCoordinator(): Boolean = cpuBatchWrite.useCommitCoordinator()
 
   override def createBatchWriterFactory(info: PhysicalWriteInfo): DeltaWriterFactory = {
-    write.createDeltaWriterFactory
+    write.createDeltaWriterFactory(cpuBatchWrite)
   }
 }

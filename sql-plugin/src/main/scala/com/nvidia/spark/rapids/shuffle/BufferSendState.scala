@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -118,6 +118,35 @@ class BufferSendState(
 
   private[this] var acquiredBuffs: Seq[RangeBuffer] = Seq.empty
 
+  // A retry window belongs to this transfer request. Its first materialization OOM starts an
+  // episode, and only a successful preparation by this state resets the episode. Results from
+  // other BufferSendState instances that happen to share a server batch do not affect it.
+  private[this] var oomRetryStartNanos: Option[Long] = None
+  private[this] var oomRetryAttempts: Int = 0
+
+  private[shuffle] def recordOomAndGetRetryAttempt(
+      nowNanos: Long,
+      timeoutNanos: Long): Option[Int] =
+    synchronized {
+      val startNanos = oomRetryStartNanos.getOrElse {
+        oomRetryStartNanos = Some(nowNanos)
+        nowNanos
+      }
+      if (nowNanos - startNanos < timeoutNanos) {
+        oomRetryAttempts += 1
+        Some(oomRetryAttempts)
+      } else {
+        None
+      }
+    }
+
+  private[shuffle] def resetOomRetryWindow(): Unit = synchronized {
+    if (oomRetryStartNanos.isDefined) {
+      oomRetryStartNanos = None
+      oomRetryAttempts = 0
+    }
+  }
+
   def getRequestTransaction: Transaction = synchronized {
     transaction
   }
@@ -182,7 +211,15 @@ class BufferSendState(
             // using `releaseAcquiredToCatalog`
             //these are closed later, after we synchronize streams
             val spillable = blockRange.block.bufferHandle.spillable
-            val buff = spillable.materialize()
+            val buff = try {
+              spillable.materialize()
+            } catch {
+              case oom: OutOfMemoryError =>
+                throw new RapidsShuffleSendPrepareException(
+                  s"Memory exhausted while materializing a shuffle buffer for executor " +
+                      s"${peerExecutorId} and header " +
+                      s"${TransportUtils.toHex(peerBufferReceiveHeader)}: ${oom.toString}", oom)
+            }
             buff match {
               case _: DeviceMemoryBuffer =>
                 deviceBuffs += blockRange.rangeSize()
@@ -214,6 +251,8 @@ class BufferSendState(
           }
           needsCleanup = false
         } catch {
+          case ex: RapidsShuffleSendPrepareException =>
+            throw ex
           case ex: Exception =>
             throw new RapidsShuffleSendPrepareException(
               s"Error while copying to bounce buffer for executor ${peerExecutorId} and " +
@@ -244,6 +283,8 @@ class BufferSendState(
     logDebug(s"Sending ${buffsToSend} for transfer request, " +
         s" [peer_executor_id=${transaction.peerExecutorId()}]")
 
+    // Preparing this state's next send ends its continuous materialization-OOM episode.
+    resetOomRetryWindow()
     buffsToSend
   }
 

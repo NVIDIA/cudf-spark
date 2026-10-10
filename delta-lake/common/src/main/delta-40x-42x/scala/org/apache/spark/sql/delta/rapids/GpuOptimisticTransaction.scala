@@ -72,7 +72,7 @@ class GpuOptimisticTransaction(deltaLog: DeltaLog,
   extends GpuOptimisticTransactionBase(deltaLog, catalogTable, snapshot, rapidsConf)
   with ClassicSessionDeltaCommandShims {
 
-  private def getGpuStatsColExpr(
+  protected def getGpuStatsColExpr(
       statsDataSchema: Seq[Attribute],
       statsCollection: GpuStatisticsCollection): Expression = {
     val analyzedExpr = createDataFrameForStats(
@@ -81,6 +81,18 @@ class GpuOptimisticTransaction(deltaLog: DeltaLog,
       .select(to_json(statsCollection.statsCollector))
       .queryExecution.analyzed.expressions.head
     postProcessStatsExpr(analyzedExpr)
+  }
+
+  protected def getWriterOptions(
+      writeOptions: Option[DeltaOptions]): Map[String, String] = {
+    writeOptions match {
+      case None => Map.empty[String, String]
+      case Some(options) =>
+        options.options.filterKeys { key =>
+          key.equalsIgnoreCase(DeltaOptions.MAX_RECORDS_PER_FILE) ||
+              key.equalsIgnoreCase(DeltaOptions.COMPRESSION)
+        }.toMap
+    }
   }
 
   /** Return the pair of optional stats tracker and stats collection class */
@@ -226,16 +238,7 @@ class GpuOptimisticTransaction(deltaLog: DeltaLog,
         }
       }
 
-      // Retain only a minimal selection of Spark writer options to avoid any potential
-      // compatibility issues
-      val options = writeOptions match {
-        case None => Map.empty[String, String]
-        case Some(writeOptions) =>
-          writeOptions.options.filterKeys { key =>
-            key.equalsIgnoreCase(DeltaOptions.MAX_RECORDS_PER_FILE) ||
-                key.equalsIgnoreCase(DeltaOptions.COMPRESSION)
-          }.toMap
-      }
+      val options = getWriterOptions(writeOptions)
 
       val deltaFileFormat = DeltaRuntimeShim.fileFormatFromLog(deltaLog)
       val gpuFileFormat = if (deltaFileFormat.getClass == classOf[DeltaParquetFileFormat]) {

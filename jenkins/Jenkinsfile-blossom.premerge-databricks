@@ -122,7 +122,16 @@ pipeline {
                                         unstash('source_tree')
                                         databricksBuild()
                                     } catch (e) {
-                                        common.uploadDebugBundle(this, 'spark-rapids', "databricks-${DB_RUNTIME}")
+                                        try {
+                                            withCredentials([usernamePassword(
+                                                credentialsId: 'urm_creds',
+                                                usernameVariable: 'ART_CREDS_USR',
+                                                passwordVariable: 'ART_CREDS_PSW')]) {
+                                                common.uploadDebugBundle(this, 'spark-rapids', "databricks-${DB_RUNTIME}")
+                                            }
+                                        } catch (debugError) {
+                                            echo "Failed to collect or upload debug bundle: ${debugError}"
+                                        }
                                         throw e
                                     }
                                 }

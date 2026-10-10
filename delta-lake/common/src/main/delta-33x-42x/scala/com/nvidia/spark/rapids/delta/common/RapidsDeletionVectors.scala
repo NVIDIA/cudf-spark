@@ -237,6 +237,23 @@ object RapidsDeletionVectors extends Logging {
     }
   }
 
+  /**
+   * Replaces one column in a table and consumes the input table. The returned table owns
+   * references to the replacement and all unchanged columns.
+   */
+  def replaceColumnAndClose(
+      table: Table,
+      outputColumn: Int,
+      replacement: ColumnVector): Table = {
+    require(outputColumn >= 0 && outputColumn < table.getNumberOfColumns,
+      "Invalid replacement column position")
+    withResource(table) { input =>
+      val outputColumns = (0 until input.getNumberOfColumns).map(input.getColumn).toArray
+      outputColumns(outputColumn) = replacement
+      new Table(outputColumns: _*)
+    }
+  }
+
   def isIfNotContainedRowIndexFilter(filterTypeOpt: Option[RowIndexFilterType]): Boolean = {
     filterTypeOpt.contains(RowIndexFilterType.IF_NOT_CONTAINED)
   }

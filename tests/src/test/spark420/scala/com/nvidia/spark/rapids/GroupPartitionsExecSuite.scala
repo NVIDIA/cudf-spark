@@ -35,8 +35,8 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, AttributeReference,
   CurrentDatabase, Descending, NullsLast, SortOrder}
-import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, Partitioning,
-  UnknownPartitioning}
+import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, KeyedPartitioning,
+  Partitioning, UnknownPartitioning}
 import org.apache.spark.sql.connector.catalog.{Column, Identifier, InMemoryCatalog}
 import org.apache.spark.sql.connector.distributions.Distributions
 import org.apache.spark.sql.connector.expressions.Expressions
@@ -45,6 +45,7 @@ import org.apache.spark.sql.execution.datasources.v2.GroupPartitionsExec
 import org.apache.spark.sql.execution.exchange.Exchange
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.GpuAdd
+import org.apache.spark.sql.rapids.shims.GroupPartitionsExecTestShim
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.SparkSession
 import org.apache.spark.sql.types.{IntegerType, LongType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -56,6 +57,16 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
     .set(SQLConf.V2_BUCKETING_ENABLED.key, "true")
     .set(SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key, "-1")
     .set(SQLConf.ADAPTIVE_EXECUTION_ENABLED.key, "false")
+
+  private def newCpuGroupPartitions(
+      output: Seq[Attribute],
+      enableSortedMerge: Boolean): GroupPartitionsExec = {
+    val key = output.headOption.getOrElse(AttributeReference("key", IntegerType)())
+    val child = spy(LocalTableScanExec(if (output.nonEmpty) output else Seq(key), Nil, None))
+    doReturn(KeyedPartitioning(Seq(key), Seq(InternalRow(0))))
+      .when(child).outputPartitioning
+    GroupPartitionsExecTestShim(child, enableSortedMerge)
+  }
 
   override protected def filterCapturedPlans(plans: Array[SparkPlan]): Array[SparkPlan] = {
     super.filterCapturedPlans(plans).filter(_.exists {
@@ -243,8 +254,8 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
       LongType,
       attr.nullable,
       attr.metadata)(attr.exprId, attr.qualifier)
-    val groupPartitions = GroupPartitionsExec(
-      LocalTableScanExec(Seq(attr), Nil, None),
+    val groupPartitions = newCpuGroupPartitions(
+      Seq(attr),
       enableSortedMerge = false)
     val originalMeta = new GpuGroupPartitionsExecMeta(
       groupPartitions,
@@ -264,9 +275,7 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
   }
 
   test("Unsupported sorted-merge ordering keeps the original CPU subtree") {
-    val groupPartitions = spy(GroupPartitionsExec(
-      LocalTableScanExec(Nil, Nil, None),
-      enableSortedMerge = true))
+    val groupPartitions = spy(newCpuGroupPartitions(Nil, enableSortedMerge = true))
     doReturn(Seq(SortOrder(CurrentDatabase(), Ascending)))
       .when(groupPartitions).outputOrdering
     val meta = GpuOverrides.wrapAndTagPlan(
@@ -285,9 +294,7 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
       attr,
       Ascending,
       sameOrderExpressions = Seq(CurrentDatabase())))
-    val groupPartitions = spy(GroupPartitionsExec(
-      LocalTableScanExec(Seq(attr), Nil, None),
-      enableSortedMerge = true))
+    val groupPartitions = spy(newCpuGroupPartitions(Seq(attr), enableSortedMerge = true))
     doReturn(outputOrdering).when(groupPartitions).outputOrdering
     doReturn(Seq.empty[(InternalRow, Seq[Int])]).when(groupPartitions).groupedPartitions
     val meta = GpuOverrides.wrapAndTagPlan(

@@ -64,11 +64,11 @@ trait Spark400PlusCommonShims extends Spark350PlusNonDBShims {
       GpuOverrides.expr[VariantGet](
         "Extracts a field from a Variant value by path",
         ExprChecks.binaryProject(
-          TypeSig.integral + TypeSig.STRING,
-          TypeSig.integral + TypeSig.STRING,
+          TypeSig.integral + TypeSig.fp + TypeSig.BOOLEAN + TypeSig.STRING,
+          TypeSig.integral + TypeSig.fp + TypeSig.BOOLEAN + TypeSig.STRING,
           ("variant", TypeSig.VARIANT, TypeSig.VARIANT),
           ("path", TypeSig.lit(TypeEnum.STRING), TypeSig.STRING)),
-        (expr, conf, p, r) => new GpuVariantGetMeta(expr, conf, p, r))
+        GpuVariantGetMeta)
         .incompat("cuDF Variant extraction currently decodes exact physical Variant types; " +
           "Spark try_variant_get cast semantics can return different values")
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap

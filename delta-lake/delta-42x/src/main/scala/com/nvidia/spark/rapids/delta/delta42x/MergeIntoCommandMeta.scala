@@ -19,9 +19,10 @@ package com.nvidia.spark.rapids.delta.delta42x
 import com.nvidia.spark.rapids.{DataFromReplacementRule, RapidsConf, RapidsMeta}
 import com.nvidia.spark.rapids.delta.common.MergeIntoCommandMetaBase
 
-import org.apache.spark.sql.delta.commands.MergeIntoCommand
+import org.apache.spark.sql.delta.commands.{DeletionVectorUtils, MergeIntoCommand}
 import org.apache.spark.sql.delta.rapids.GpuDeltaLog
 import org.apache.spark.sql.delta.rapids.delta42x.GpuMergeIntoCommand42x
+import org.apache.spark.sql.delta.sources.DeltaSQLConf
 import org.apache.spark.sql.execution.command.RunnableCommand
 
 class MergeIntoCommandMeta(
@@ -32,6 +33,17 @@ class MergeIntoCommandMeta(
   extends MergeIntoCommandMetaBase(mergeCmd, conf, parent, rule) {
 
   override protected def supportsNotMatchedBySourceClauses: Boolean = true
+
+  override def tagSelfForGpu(): Unit = {
+    super.tagSelfForGpu()
+    val snapshot = mergeCmd.targetFileIndex.deltaLog.unsafeVolatileSnapshot
+    if (snapshot.isCatalogOwned &&
+        DeletionVectorUtils.deletionVectorsWritable(snapshot) &&
+        mergeCmd.conf.getConf(DeltaSQLConf.MERGE_USE_PERSISTENT_DELETION_VECTORS)) {
+      willNotWorkOnGpu(
+        "Persistent deletion-vector MERGE is not yet supported for catalog-managed tables")
+    }
+  }
 
   override def convertToGpu(): RunnableCommand = {
     GpuMergeIntoCommand42x(
