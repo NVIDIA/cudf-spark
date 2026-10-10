@@ -94,7 +94,9 @@ class ThrottlingExecutor(executor: ExecutorService, throttler: TrafficController
   }
 
   private class ThrottledFutureTask[T](admission: TaskAdmission[T])
-      extends FutureTask[T](() => admission.call()) {
+      extends FutureTask[T](new Callable[T] {
+        override def call(): T = admission.call()
+      }) {
     override protected def done(): Unit = {
       admission.releaseIfNotStarted()
     }
