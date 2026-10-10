@@ -307,7 +307,7 @@ case class GpuJsonPartitionReaderFactory(
 }
 
 object JsonPartitionReader {
-  private[rapids] class JsonHostLineBuffererFactory(parsedOptions: JSONOptions)
+  private class JsonHostLineBuffererFactory(parsedOptions: JSONOptions)
       extends LineBuffererFactory[HostLineBufferer] {
     private val jsonFactory = parsedOptions.buildJsonFactory()
 
@@ -349,11 +349,8 @@ object JsonPartitionReader {
             if (!emptyArray) {
               // Removing a BOM from a root array can make cuDF fail on mixed object/array batches.
               val stripBom = hasBom && (firstToken == end || line(firstToken) == '{'.toByte)
-              if (stripBom) {
-                super.add(line, contentOffset, end - contentOffset)
-              } else {
-                super.add(line, offset, len)
-              }
+              val start = if (stripBom) contentOffset else offset
+              super.add(line, start, end - start)
             }
           }
         }
@@ -379,13 +376,13 @@ object JsonPartitionReader {
     }
   }
 
-  def readToTables(
+  private def readToTables(
       dataBufferer: HostLineBufferer,
       cudfSchema: Schema,
       decodeTime: GpuMetric,
       jsonOpts: cudf.JSONOptions,
-      formatName: String,
-      partFile: PartitionedFile): Iterator[Table] with AutoCloseable = {
+      partFile: PartitionedFile,
+      project: Table => Table): Iterator[Table] with AutoCloseable = {
     val size = dataBufferer.getLength
     val buffer = withResource(dataBufferer.getBufferAndRelease)(_.slice(0, size))
     val chunks = closeOnExcept(buffer) { _ =>
@@ -397,11 +394,12 @@ object JsonPartitionReader {
     new Iterator[Table] with AutoCloseable {
       override def hasNext: Boolean = chunks.hasNext
       override def next(): Table = {
-        try {
+        val table = try {
           chunks.next()
         } catch {
           case e: Exception => throw new IOException(s"Error when processing file [$partFile]", e)
         }
+        project(table)
       }
       override def close(): Unit = chunks.close()
     }
@@ -451,14 +449,9 @@ class JsonPartitionReader(
       cudfReadDataSchema: Schema,
       isFirstChunk: Boolean,
       decodeTime: GpuMetric): Iterator[Table] = {
-    val tables = JsonPartitionReader.readToTables(dataBufferer, cudfReadDataSchema, decodeTime,
-      buildJsonOptions(parsedOptions), getFileFormatShortName, partFile)
-    new Iterator[Table] with AutoCloseable {
-      override def hasNext: Boolean = tables.hasNext
-      override def next(): Table =
-        projectTable(tables.next(), readDataSchema, cudfReadDataSchema)
-      override def close(): Unit = tables.close()
-    }
+    JsonPartitionReader.readToTables(dataBufferer, cudfReadDataSchema, decodeTime,
+      buildJsonOptions(parsedOptions), partFile,
+      table => projectTable(table, readDataSchema, cudfReadDataSchema))
   }
 
   /**

@@ -137,9 +137,6 @@ default. The plugin will strip leading and trailing space for all values except 
 
 There are also discrepancies/issues with specific types that are detailed below.
 
-For line-delimited CSV input, a UTF-8 BOM at the beginning of the file is removed. U+FEFF
-elsewhere is preserved as data, including at reader batch, file partition, and OOM retry boundaries.
-
 ### CSV Strings
 Writing strings to a CSV file in general for Spark can be problematic unless you can ensure that
 your data does not have any line deliminator in it. The GPU accelerated CSV parser handles quoted
@@ -375,12 +372,6 @@ except for date and timestamp types where we still have work to complete. If you
 JSON Scan you can set `spark.rapids.sql.format.json.enabled` or
 `spark.rapids.sql.format.json.read.enabled` to false. To disable `from_json` you can set 
 `spark.rapids.sql.expression.JsonToStructs` to false.
-
-For line-delimited JSON scans without an explicit encoding, a UTF-8 BOM at the start of an
-object record is accepted, including at reader batch and file partition boundaries. With an
-explicit UTF-8 or US-ASCII encoding, an interior BOM is treated as invalid input, matching Spark.
-Empty top-level arrays produce no rows. OOM recovery splits input between records; a single
-record cannot be split.
 
 ### Limits
 

@@ -40,114 +40,59 @@ class JsonScanRetrySuite extends RmmSparkRetrySuiteBase {
     StructField("a", IntegerType), StructField("b", StringType)))
   private val parsedOptions = new JSONOptions(Map.empty[String, String], "UTC", "_corrupt_record")
 
-  private def withJsonTables[T](lines: Seq[String])
-      (fn: (Iterator[Table] with AutoCloseable) => T): T = {
-    withResource(FilterEmptyHostLineBuffererFactory.createBufferer(32,
-      Array('\n'.toByte))) { buffer =>
-      lines.foreach { line =>
-        val bytes = line.getBytes(StandardCharsets.UTF_8)
-        buffer.add(bytes, 0, bytes.length)
-      }
-      val opts = GpuJsonReadCommon.cudfJsonOptions(parsedOptions)
-      withResource(JsonPartitionReader.readToTables(buffer,
-        GpuJsonReadCommon.makeSchema(dataSchema), NoopMetric, opts, "JSON", null))(fn)
-    }
-  }
-
-  private def collectRows(tables: Iterator[Table]): (Seq[(Option[Int], Option[String])], Int) = {
-    val rows = ArrayBuffer[(Option[Int], Option[String])]()
-    var batches = 0
-    tables.foreach { table =>
-      withResource(table) { _ =>
-        withResource(GpuJsonReadCommon.convertTableToDesiredType(table,
-          dataSchema, parsedOptions)) { columns =>
-          withResource(columns(0).copyToHost()) { a =>
-            withResource(columns(1).copyToHost()) { b =>
-              (0 until table.getRowCount.toInt).foreach { i =>
-                rows += ((if (a.isNull(i)) None else Some(a.getInt(i)),
-                  if (b.isNull(i)) None else Some(b.getJavaString(i))))
-              }
-            }
-          }
+  private def collectTableRows(table: Table): Seq[(Option[Int], Option[String])] = {
+    withResource(table.getColumn(0).copyToHost()) { a =>
+      withResource(table.getColumn(1).copyToHost()) { b =>
+        (0 until table.getRowCount.toInt).map { i =>
+          (if (a.isNull(i)) None else Some(a.getInt(i)),
+            if (b.isNull(i)) None else Some(b.getJavaString(i)))
         }
       }
-      batches += 1
     }
-    (rows.toSeq, batches)
   }
 
   test("JSON retries without splitting and preserves values") {
-    withJsonTables(Seq("""{"a":1,"b":"value é"}""")) { tables =>
+    withReader("""{"a":1,"b":"value é"}""" + "\n", dataSchema, 1024 * 1024) { reader =>
       RmmSpark.getAndResetNumRetryThrow(1)
       RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
         RmmSpark.OomInjectionType.GPU.ordinal, 0)
-      val (actual, batches) = collectRows(tables)
+      val (actual, batches) = collectReaderRowsAndBatchCount(reader)
       assert(actual == Seq((Some(1), Some("value é"))))
       assert(batches == 1)
       assert(RmmSpark.getAndResetNumRetryThrow(1) > 0)
     }
   }
 
-  test("JSON recursively splits host input on OOM and preserves escaped values") {
-    val lines = Seq("""{"a":0,"b":"first\n\"quoted\" é"}""") ++
-      (1 until 16).map(i => s"""{"a":$i,"b":"value,$i é"}""")
-    withJsonTables(lines) { tables =>
-      RmmSpark.getAndResetNumSplitRetryThrow(1)
-      RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 2,
-        RmmSpark.OomInjectionType.GPU.ordinal, 0)
-      val (actual, batches) = collectRows(tables)
-      val expected = Seq((Some(0), Some("first\n\"quoted\" é"))) ++
-        (1 until 16).map(i => (Some(i), Some(s"value,$i é")))
-      assert(actual == expected)
-      assert(batches >= 3)
-      assert(RmmSpark.getAndResetNumSplitRetryThrow(1) >= 2)
-    }
-  }
-
   test("JSON split preserves malformed rows and skips empty lines") {
     val lines = Seq("""{"a":0,"b":"value"}""", "not json", "", " \t",
       """{"a":2,"b":null}""", """{"b":"missing"}""")
-    withJsonTables(lines) { tables =>
+    withReader(lines.mkString("", "\n", "\n"), dataSchema, 1024 * 1024) { reader =>
       RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 2,
         RmmSpark.OomInjectionType.GPU.ordinal, 0)
-      assert(collectRows(tables)._1 == Seq((Some(0), Some("value")),
+      assert(collectReaderRows(reader) == Seq((Some(0), Some("value")),
         (None, None), (Some(2), None), (None, Some("missing"))))
     }
   }
 
   test("JSON split preserves a chunk containing only a malformed record") {
     val value = "long" * 40
-    withJsonTables(Seq(s"""{"a":0,"b":"$value"}""", "not json")) { tables =>
+    val text = Seq(s"""{"a":0,"b":"$value"}""", "not json").mkString("", "\n", "\n")
+    withReader(text, dataSchema, 1024 * 1024) { reader =>
       RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
         RmmSpark.OomInjectionType.GPU.ordinal, 0)
-      val (actual, batches) = collectRows(tables)
+      val (actual, batches) = collectReaderRowsAndBatchCount(reader)
       assert(actual == Seq((Some(0), Some(value)), (None, None)))
       assert(batches == 2)
     }
   }
 
   test("JSON single record split failure is terminal") {
-    withJsonTables(Seq("""{"a":1,"b":"one"}""")) { tables =>
+    withReader("""{"a":1,"b":"one"}""" + "\n", dataSchema, 1024 * 1024) { reader =>
       RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
         RmmSpark.OomInjectionType.GPU.ordinal, 0)
-      val error = intercept[IOException](tables.next())
+      val error = intercept[IOException](reader.next())
       assert(error.getCause.isInstanceOf[GpuSplitAndRetryOOM])
-      assert(!tables.hasNext)
-    }
-  }
-
-  for (lines <- Seq(Seq("long" * 40, "short"), Seq("short", "long" * 40))) {
-    test(s"JSON splits before or after a large record: ${lines.head.length}") {
-      val records = lines.zipWithIndex.map { case (value, i) =>
-        s"""{"a":$i,"b":"$value"}"""
-      }
-      withJsonTables(records) { tables =>
-        RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
-          RmmSpark.OomInjectionType.GPU.ordinal, 0)
-        val (actual, batches) = collectRows(tables)
-        assert(actual == lines.zipWithIndex.map { case (v, i) => (Some(i), Some(v)) })
-        assert(batches == 2)
-      }
+      assert(!reader.next())
     }
   }
 
@@ -207,14 +152,7 @@ class JsonScanRetrySuite extends RmmSparkRetrySuiteBase {
     while (reader.next()) {
       withResource(reader.get()) { batch =>
         withResource(GpuColumnVector.from(batch)) { table =>
-          withResource(table.getColumn(0).copyToHost()) { a =>
-            withResource(table.getColumn(1).copyToHost()) { b =>
-              (0 until batch.numRows()).foreach { i =>
-                rows += ((if (a.isNull(i)) None else Some(a.getInt(i)),
-                  if (b.isNull(i)) None else Some(b.getJavaString(i))))
-              }
-            }
-          }
+          rows ++= collectTableRows(table)
         }
       }
       batches += 1
@@ -274,31 +212,35 @@ class JsonScanRetrySuite extends RmmSparkRetrySuiteBase {
     }
   }
 
-  test("JSON reader filters empty arrays before recursively splitting input") {
-    val lines = (0 until 16).flatMap { i =>
-      Seq(s"""{"a":$i,"b":"value,$i"}""", "[]", "\uFEFF [ \t ]")
-    }
+  test("JSON reader recursively splits escaped values after filtering empty arrays") {
+    val records = Seq("""{"a":0,"b":"first\n\"quoted\" é"}""") ++
+      (1 until 16).map(i => s"""{"a":$i,"b":"value,$i é"}""")
+    val lines = records.flatMap(record => Seq(record, "[]", "\uFEFF [ \t ]"))
     withReader(lines.mkString("", "\n", "\n"), dataSchema, 1024 * 1024) { reader =>
       RmmSpark.getAndResetNumSplitRetryThrow(1)
       RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 2,
         RmmSpark.OomInjectionType.GPU.ordinal, 0)
       val (actual, batches) = collectReaderRowsAndBatchCount(reader)
-      assert(actual == (0 until 16).map(i => (Some(i), Some(s"value,$i"))))
+      val expected = Seq((Some(0), Some("first\n\"quoted\" é"))) ++
+        (1 until 16).map(i => (Some(i), Some(s"value,$i é")))
+      assert(actual == expected)
       assert(batches >= 3)
       assert(RmmSpark.getAndResetNumSplitRetryThrow(1) >= 2)
     }
   }
 
-  test("JSON reader splits after a large record followed by empty arrays") {
-    val value = "long" * 40
-    val lines = Seq(s"""{"a":0,"b":"$value"}""", "[]", "[]",
-      """{"a":1,"b":"last"}""", "[]")
-    withReader(lines.mkString("", "\n", "\n"), dataSchema, 1024 * 1024) { reader =>
-      RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
-        RmmSpark.OomInjectionType.GPU.ordinal, 0)
-      val (actual, batches) = collectReaderRowsAndBatchCount(reader)
-      assert(actual == Seq((Some(0), Some(value)), (Some(1), Some("last"))))
-      assert(batches == 2)
+  for (values <- Seq(Seq("long" * 40, "short"), Seq("short", "long" * 40))) {
+    test(s"JSON reader splits around a large record and empty arrays: ${values.head.length}") {
+      val lines = values.zipWithIndex.flatMap { case (value, i) =>
+        Seq(s"""{"a":$i,"b":"$value"}""", "[]", "[]")
+      }
+      withReader(lines.mkString("", "\n", "\n"), dataSchema, 1024 * 1024) { reader =>
+        RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
+          RmmSpark.OomInjectionType.GPU.ordinal, 0)
+        val (actual, batches) = collectReaderRowsAndBatchCount(reader)
+        assert(actual == values.zipWithIndex.map { case (v, i) => (Some(i), Some(v)) })
+        assert(batches == 2)
+      }
     }
   }
 
@@ -449,9 +391,15 @@ class JsonScanRetrySuite extends RmmSparkRetrySuiteBase {
       val opts = GpuJsonReadCommon.baseCudfJsonOptionsBuilder().withLines(true).build()
       RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
         RmmSpark.OomInjectionType.GPU.ordinal, 0)
-      val table = JsonPartitionReader.readToTable(bufferer, cudfSchema, NoopMetric,
-        opts, "JSON", null)
-      assert(collectRows(Iterator.single(table))._1 == Seq((Some(1), Some("value"))))
+      withResource(JsonPartitionReader.readToTable(bufferer, cudfSchema, NoopMetric,
+        opts, "JSON", null)) { table =>
+        withResource(GpuJsonReadCommon.convertTableToDesiredType(table,
+          dataSchema, parsedOptions)) { columns =>
+          withResource(new Table(columns: _*)) { typed =>
+            assert(collectTableRows(typed) == Seq((Some(1), Some("value"))))
+          }
+        }
+      }
     }
   }
 }

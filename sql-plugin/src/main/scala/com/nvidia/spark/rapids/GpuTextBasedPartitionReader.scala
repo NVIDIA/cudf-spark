@@ -108,6 +108,19 @@ object FilterCsvEmptyHostLineBuffererFactory extends LineBuffererFactory[HostLin
     new HostLineBufferer(estimatedSize, lineSeparatorInRead, true) {
       // Match Java's String.trim() which treats all chars <= '\u0020' as whitespace.
       override def isWhiteSpace(b: Byte): Boolean = (b & 0xFF) <= 0x20
+
+      override def add(line: Array[Byte], offset: Int, len: Int): Unit = {
+        // Hadoop strips the file BOM; a BOM here is data even after filtered empty lines.
+        if (getLength == 0 && len >= 3 && line(offset) == 0xef.toByte &&
+            line(offset + 1) == 0xbb.toByte && line(offset + 2) == 0xbf.toByte) {
+          val protectedLine = new Array[Byte](len + 1)
+          protectedLine(0) = '\n'.toByte
+          System.arraycopy(line, offset, protectedLine, 1, len)
+          super.add(protectedLine, 0, protectedLine.length)
+        } else {
+          super.add(line, offset, len)
+        }
+      }
     }
 }
 
