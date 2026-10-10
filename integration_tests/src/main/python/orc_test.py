@@ -408,8 +408,8 @@ orc_gens_list = [orc_basic_gens,
     orc_array_gens_sample,
     orc_struct_gens_sample,
     orc_map_gens_sample,
-    pytest.param([date_gen], marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/131')),
-    pytest.param([timestamp_gen], marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/131'))]
+    [date_gen],
+    [timestamp_gen]]
 
 flattened_orc_gens = orc_basic_gens + orc_array_gens_sample + orc_struct_gens_sample
 
