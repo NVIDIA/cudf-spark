@@ -443,28 +443,8 @@ trait GpuDecimalMultiplyBase extends GpuExpression {
           CastOptions.getArithmeticCastOptions(failOnError))
       }
       withResource(castRhs) { castRhs =>
-        withResource(castLhs.mul(castRhs,
-          GpuColumnVector.getNonNestedRapidsType(intermediateResultType))) { mult =>
-          if (useLongMultiply) {
-            withResource(DecimalMultiplyChecks
-                .checkForOverflow(castLhs, castRhs)) { wouldOverflow =>
-              if (failOnError) {
-                withResource(wouldOverflow.any()) { anyOverflow =>
-                  if (anyOverflow.isValid && anyOverflow.getBoolean) {
-                    throw new IllegalStateException(GpuCast.INVALID_INPUT_MESSAGE)
-                  }
-                }
-                mult.incRefCount()
-              } else {
-                withResource(GpuScalar.from(null, intermediateResultType)) { nullVal =>
-                  wouldOverflow.ifElse(nullVal, mult)
-                }
-              }
-            }
-          } else {
-            mult.incRefCount()
-          }
-        }
+        castLhs.mul(castRhs,
+          GpuColumnVector.getNonNestedRapidsType(intermediateResultType))
       }
     }
     withResource(ret) { ret =>
@@ -597,45 +577,6 @@ object DecimalMultiplyChecks {
     val precision = intermediatePrecision(lhs, rhs, outputType)
     DecimalType(precision,
       math.min(outputType.scale + 1, DType.DECIMAL128_MAX_PRECISION))
-  }
-
-  private[this] lazy val max128Int = new BigInteger(Array(2.toByte)).pow(127)
-      .subtract(BigInteger.ONE)
-  private[this] lazy val min128Int = new BigInteger(Array(2.toByte)).pow(127)
-      .negate()
-
-  def checkForOverflow(a: ColumnView, b: ColumnView): ColumnVector = {
-    assert(a.getType.isDecimalType)
-    assert(b.getType.isDecimalType)
-    // a > MAX_INT / b || a < MIN_INT / b
-    // So to do this we need the unscaled value, but we have to get it in terms of a
-    // DECIMAL_128 with a scale of 0
-    withResource(a.bitCastTo(DType.create(DType.DTypeEnum.DECIMAL128, 0))) { castA =>
-      withResource(b.bitCastTo(DType.create(DType.DTypeEnum.DECIMAL128, 0))) { castB =>
-        val isNotZero = withResource(Scalar.fromDecimal(0, BigInteger.ZERO)) { zero =>
-          castB.notEqualTo(zero)
-        }
-        withResource(isNotZero) { isNotZero =>
-          val gt = withResource(Scalar.fromDecimal(0, max128Int)) { maxDecimal =>
-            withResource(maxDecimal.div(castB)) { divided =>
-              castA.greaterThan(divided)
-            }
-          }
-          withResource(gt) { gt =>
-            val lt = withResource(Scalar.fromDecimal(0, min128Int)) { minDecimal =>
-              withResource(minDecimal.div(castB)) { divided =>
-                castA.lessThan(divided)
-              }
-            }
-            withResource(lt) { lt =>
-              withResource(lt.or(gt)) { ored =>
-                ored.and(isNotZero)
-              }
-            }
-          }
-        }
-      }
-    }
   }
 }
 

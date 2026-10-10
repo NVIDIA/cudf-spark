@@ -64,16 +64,6 @@
       "resource": "withResource(deduped.getChildColumnView(0))"
     },
     {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/shims/AnsiUtil.scala",
-      "fingerprint": "66d771315929b49d2bb3",
-      "resource": "withResource(floorCv.greaterThan(maxLongS))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/shims/AnsiUtil.scala",
-      "fingerprint": "7ce99c35c4c18dfcf3b1",
-      "resource": "withResource(ceil.lessThan(minLongS))"
-    },
-    {
       "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/shims/GpuIntervalUtilsBase.scala",
       "fingerprint": "fb219b9f909a536ef217",
       "resource": "withResource(Scalar.fromString(prefixStr))"
@@ -137,41 +127,6 @@
       "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/aggregate/aggregateFunctions.scala",
       "fingerprint": "d40d88c1094eee8ec4f3",
       "resource": "withResource(problem.any())"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/arithmetic.scala",
-      "fingerprint": "57ab5ea585cd4489f10e",
-      "resource": "withResource(GpuScalar.from(null,intermediateResultType))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/arithmetic.scala",
-      "fingerprint": "5b9694a70d63c53d741f",
-      "resource": "withResource(minDecimal.div(castB))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/arithmetic.scala",
-      "fingerprint": "83df8ed3a8292cdc33f7",
-      "resource": "withResource(wouldOverflow.any())"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/arithmetic.scala",
-      "fingerprint": "95cacbffd9001fb359b9",
-      "resource": "withResource(Scalar.fromDecimal(0,min128Int))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/arithmetic.scala",
-      "fingerprint": "d649c5b0e4ec352dbf23",
-      "resource": "withResource(lt)"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/arithmetic.scala",
-      "fingerprint": "edcda84e10faad3cb77d",
-      "resource": "withResource(maxDecimal.div(castB))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/arithmetic.scala",
-      "fingerprint": "f7ce4a433a4dd4c05dc7",
-      "resource": "withResource(lt.or(gt))"
     },
     {
       "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/collectionOperations.scala",
