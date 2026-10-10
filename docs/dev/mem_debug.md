@@ -181,8 +181,8 @@ don't need to free a nullptr if the allocation size was 0.
 ### Missing Functionality
 
 We are still missing some functionality that would be helpful with debugging issues in addition to
-tracking [Scalar](https://github.com/rapidsai/cudf/issues/8227) and
-[Table](https://github.com/rapidsai/cudf/issues/14677) values.
+tracking [Scalar](https://github.com/NVIDIA/cudf/issues/8227) and
+[Table](https://github.com/NVIDIA/cudf/issues/14677) values.
 
 We don't have any [host memory logging](https://github.com/NVIDIA/cudf-spark/issues/10102) like
 we do for RMM. This might change when/if we go to RMM for host memory allocation too, but for now
