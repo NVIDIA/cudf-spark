@@ -733,7 +733,16 @@ if [[ "$TEST_MODE" == "DEFAULT" || "$TEST_MODE" == "MULTITHREADED_SHUFFLE" ]]; t
 fi
 
 if [[ "$TEST_MODE" == "UCX_SHUFFLE" ]]; then
-  invoke_shuffle_integration_test UCX ./run_pyspark_from_build.sh
+  # Disable pytest parallelism and use two single-core executors in the same
+  # application to exercise UCX remote fetches;
+  # parallel applications with one executor each cannot provide this coverage.
+  TEST_PARALLEL=0 \
+  PYSP_TEST_spark_cores_max=2 \
+  PYSP_TEST_spark_executor_cores=1 \
+    invoke_shuffle_integration_test UCX ./run_pyspark_from_build.sh
+
+  # UCX fetches from a peer executor (RapidsShuffleIterator INFO); 0 means none was logged
+  echo "UCX remote fetches: $(cat "$SPARK_HOME"/work/app-*/*/std* | grep -c 'triggered, for')"
 fi
 
 # cudf_udf test: this mostly depends on cudf-py, so we run it into an independent CI
