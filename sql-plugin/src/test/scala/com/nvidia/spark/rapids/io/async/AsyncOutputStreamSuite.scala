@@ -49,6 +49,15 @@ class AsyncOutputStreamSuite extends AnyFunSuite with BeforeAndAfterEach {
         new ForwardingExecutorService {
           override def delegate(): ExecutorService = del
 
+          override def execute(command: Runnable): Unit = {
+            super.execute(new Runnable {
+              override def run(): Unit = {
+                Thread.sleep(writeDelayMs)
+                command.run()
+              }
+            })
+          }
+
           /**
            * Technically, overriding this method is good enough for the test, but we also override
            * the other submit methods as well in case we modify our code to use them in the future.
