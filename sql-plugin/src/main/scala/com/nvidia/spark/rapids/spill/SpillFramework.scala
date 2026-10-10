@@ -358,6 +358,45 @@ object SharedRecomputableHandle {
     }
   }
 
+  /**
+   * A lease that its owner can release while it is not using the object, e.g. while waiting to
+   * retry after an OOM, so that the object can be spilled. The constructor acquires a lease,
+   * `release` drops it, and the next access to `resource` acquires a new one, rebuilding the
+   * object if it was spilled in between. This is not thread-safe.
+   *
+   * @param handle the handle to acquire leases on
+   * @param onRebuild callback that is invoked after an acquire rebuilds the object
+   */
+  final class ReacquirableLease[T <: AutoCloseable](
+      handle: SharedRecomputableHandle[T],
+      onRebuild: () => Unit) extends AutoCloseable {
+    private[this] var lease: Option[Lease[T]] = Some(acquire())
+
+    private def acquire(): Lease[T] = {
+      closeOnExcept(handle.acquire()) { acquired =>
+        if (acquired.rebuilt) {
+          onRebuild()
+        }
+        acquired
+      }
+    }
+
+    def resource: T = {
+      if (lease.isEmpty) {
+        lease = Some(acquire())
+      }
+      lease.get.resource
+    }
+
+    def release(): Unit = {
+      val held = lease
+      lease = None
+      held.foreach(_.close())
+    }
+
+    override def close(): Unit = release()
+  }
+
   def apply[T <: AutoCloseable](
       approxSizeInBytes: Long,
       initialValue: T)(

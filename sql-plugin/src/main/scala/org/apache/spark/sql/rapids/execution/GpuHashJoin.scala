@@ -1396,10 +1396,6 @@ abstract class BaseHashJoinIterator(
     }
   }
 
-  protected def disableCachedBackends(): Unit = {
-    cachedBackendsDisabled = true
-  }
-
   private def exactOutputRowCount(
       cb: LazySpillableColumnarBatch,
       backend: HashProbeBackend,
@@ -1413,7 +1409,7 @@ abstract class BaseHashJoinIterator(
       cb.checkpoint()
       try {
         withRetryNoSplit {
-          withRestoreOnRetry(cb) {
+          withRestoreOnRetry(Seq(cb, backend)) {
             withResource(GpuProjectExec.project(cb.getBatch, boundStreamKeys)) { streamKeys =>
               withResource(GpuColumnVector.from(streamKeys)) { probeKeys =>
                 backend.outputRowCount(request.exactCountJoinType.get, probeKeys)
@@ -1652,11 +1648,13 @@ abstract class BaseHashJoinIterator(
     }
     // cb will be closed by the caller, so use a spill-only version here
     val spillOnlyCb = LazySpillableColumnarBatch.spillOnly(cb)
-    val batches = Seq(built, spillOnlyCb)
-    batches.foreach(_.checkpoint())
+    // Include the hash batch operation in restore on retry. Restore releases its lease on a
+    // cached hash table so that the table can be spilled while the task waits to retry.
+    val retryables = Seq(built, spillOnlyCb) ++ hashBatch.operation
+    retryables.foreach(_.checkpoint())
     try {
       withRetryNoSplit {
-        withRestoreOnRetry(batches) {
+        withRestoreOnRetry(retryables) {
           // We need a new LSCB that will be taken over by the gatherer, or closed
           closeOnExcept(LazySpillableColumnarBatch(spillOnlyCb.getBatch, "stream_data")) {
             streamBatch =>
@@ -1681,7 +1679,6 @@ abstract class BaseHashJoinIterator(
           || joinType == LeftOuter
           || joinType == RightOuter
           || joinType == FullOuter =>
-        disableCachedBackends()
         // Because this is just an estimate, it is possible for us to get this wrong, so
         // make sure we at least split the batch in half.
         val numBatches = Math.max(2, estimatedNumBatches(spillOnlyCb))

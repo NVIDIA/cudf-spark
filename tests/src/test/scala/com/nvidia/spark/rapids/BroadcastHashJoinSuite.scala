@@ -19,6 +19,7 @@ package com.nvidia.spark.rapids
 import com.nvidia.spark.rapids.TestUtils.findOperator
 
 import org.apache.spark.SparkConf
+import org.apache.spark.sql.catalyst.plans.Inner
 import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
 import org.apache.spark.sql.functions.{broadcast, col}
 import org.apache.spark.sql.rapids.execution.{GpuBroadcastHashJoinExec, GpuHashJoin}
@@ -159,6 +160,24 @@ class BroadcastHashJoinSuite extends SparkQueryCompareTestSuite {
     (probe, build) => probe.join(broadcast(build), Seq("join_key"), "inner")
   }
 
+  for (joinType <- Seq("leftsemi", "leftanti");
+       distinct <- Seq(false, true);
+       nullSafe <- Seq(false, true)) {
+    IGNORE_ORDER_testSparkResultsAreEqual2(
+      s"broadcast $joinType reuse nullable keys distinct=$distinct nullSafe=$nullSafe",
+      nullableProbeDf,
+      nullableDistinctBuildDf,
+      conf = broadcastReuseConf) { (probe, build) =>
+      val broadcastBuild = broadcast(if (distinct) build else build.union(build))
+      val condition = if (nullSafe) {
+        probe("join_key").eqNullSafe(broadcastBuild("join_key"))
+      } else {
+        probe("join_key") === broadcastBuild("join_key")
+      }
+      probe.join(broadcastBuild, condition, joinType)
+    }
+  }
+
   IGNORE_ORDER_testSparkResultsAreEqual2(
     "broadcast hash join reuse distinct inner nullable keys build left",
     nullableDistinctBuildDf,
@@ -207,6 +226,20 @@ class BroadcastHashJoinSuite extends SparkQueryCompareTestSuite {
     }, conf)
   }
 
+  Seq("leftsemi", "leftanti").foreach { joinType =>
+    IGNORE_ORDER_testSparkResultsAreEqual2(
+      s"broadcast hash join reuse conditional $joinType",
+      streamedProbeDf,
+      nonDistinctBuildDf,
+      conf = broadcastReuseConf) { (probe, build) =>
+      probe.alias("p").join(
+        broadcast(build.alias("b")),
+        col("p.join_key") === col("b.join_key") &&
+          col("p.probe_value") < col("b.build_value"),
+        joinType)
+    }
+  }
+
   test("AUTO admits a cold broadcast hash build after repeated smaller numeric probes") {
     withGpuSparkSession(spark => {
       val probe = spark.range(0, 512, 1, 8).selectExpr(
@@ -223,5 +256,44 @@ class BroadcastHashJoinSuite extends SparkQueryCompareTestSuite {
       assertResult(1L)(bhj.metrics("hashTableBuilds").value)
       assert(bhj.metrics("hashTableReuses").value > 0L)
     }, broadcastAutoReuseConf)
+  }
+
+  Seq(false, true).foreach { distinct =>
+    val conf = broadcastReuseConf
+      .set("spark.sql.exchange.reuse", "true")
+      .set("spark.rapids.sql.metrics.level", "DEBUG")
+    IGNORE_ORDER_testSparkResultsAreEqualWithCapture(
+      s"semi/anti share a filtered build separately from inner distinct=$distinct",
+      streamedProbeDf,
+      conf = conf) { probe =>
+      val buildData = if (distinct) {
+        distinctBuildDf(probe.sparkSession)
+      } else {
+        nonDistinctBuildDf(probe.sparkSession)
+      }
+      val build = broadcast(buildData.select("join_key"))
+      val inner = probe.join(build, Seq("join_key"), "inner")
+      val semi = probe.filter(col("probe_value") % 2 === 0)
+        .join(build, Seq("join_key"), "leftsemi")
+      val anti = probe.filter(col("probe_value") % 2 === 1)
+        .join(build, Seq("join_key"), "leftanti")
+      inner.union(semi).union(anti)
+    } { (_, gpuPlan) =>
+      val joins = PlanUtils.findOperators(gpuPlan, _.isInstanceOf[GpuBroadcastHashJoinExec])
+        .map(_.asInstanceOf[GpuHashJoin])
+      assertResult(3)(joins.size)
+      assert(PlanUtils.findOperators(gpuPlan, _.isInstanceOf[ReusedExchangeExec]).nonEmpty)
+      def builds(join: GpuHashJoin): Long = join.metrics("hashTableBuilds").value
+      def reuses(join: GpuHashJoin): Long = join.metrics("hashTableReuses").value
+      val (inner, semiAnti) = joins.partition(_.joinType == Inner)
+      assertResult(1)(inner.size)
+      assertResult(1L)(builds(inner.head))
+      // Whichever of semi/anti probes first builds the shared filtered artifact; the other must
+      // reuse it without building.
+      assertResult(1L)(semiAnti.map(builds).sum)
+      val summary = semiAnti.map(j => s"${j.joinType}: builds=${builds(j)} reuses=${reuses(j)}")
+      assert(semiAnti.exists(j => builds(j) == 0L && reuses(j) > 0L),
+        s"expected semi/anti to share one filtered build: ${summary.mkString(", ")}")
+    }
   }
 }
