@@ -24,6 +24,7 @@ model: inherit
 ## Prerequisites
 
 - Project directory from Step 1 (`udf-gen-test`) with a passing unit test
+  - If the user provides their own tests, inline it into the project template's test harness.
 - Native build tools: CMake 3.30.4+, a CUDA-compatible C++ compiler, `git`, and `unzip`
 - Docker is optional, but can be used for a stable native build environment
 
