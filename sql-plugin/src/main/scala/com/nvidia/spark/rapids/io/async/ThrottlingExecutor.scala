@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,8 @@
 
 package com.nvidia.spark.rapids.io.async
 
-import java.util.concurrent.{Callable, ExecutorService, Future, TimeUnit}
+import java.util.concurrent.{Callable, ExecutorService, Future, FutureTask, RejectedExecutionException, TimeUnit}
+import java.util.concurrent.atomic.AtomicBoolean
 
 import org.apache.spark.sql.rapids.{ColumnarWriteTaskStatsTracker, GpuWriteTaskStatsTracker}
 
@@ -66,22 +67,60 @@ class ThrottlingExecutor(executor: ExecutorService, throttler: TrafficController
     updateStats(stats)
   }
 
+  private class TaskAdmission[T](task: Task[T]) {
+    private val started = new AtomicBoolean(false)
+    private val released = new AtomicBoolean(false)
+
+    def call(): T = {
+      started.set(true)
+      try {
+        task.call()
+      } finally {
+        release()
+      }
+    }
+
+    def releaseIfNotStarted(): Unit = {
+      if (!started.get()) {
+        release()
+      }
+    }
+
+    private def release(): Unit = {
+      if (released.compareAndSet(false, true)) {
+        throttler.taskCompleted(task)
+      }
+    }
+  }
+
+  private class ThrottledFutureTask[T](admission: TaskAdmission[T])
+      extends FutureTask[T](() => admission.call()) {
+    override protected def done(): Unit = {
+      admission.releaseIfNotStarted()
+    }
+  }
+
   def submit[T](callable: Callable[T], hostMemoryBytes: Long): Future[T] = {
     val task = new Task[T](hostMemoryBytes, callable)
     blockUntilTaskRunnable(task)
 
-    executor.submit(() => {
-      try {
-        task.call()
-      } finally {
-        throttler.taskCompleted(task)
-      }
-    })
+    val futureTask = new ThrottledFutureTask[T](new TaskAdmission(task))
+    try {
+      executor.execute(futureTask)
+      futureTask
+    } catch {
+      case e: RejectedExecutionException =>
+        futureTask.cancel(false)
+        throw e
+    }
   }
 
   def shutdownNow(timeout: Long, timeUnit: TimeUnit): Unit = {
     updateStats(stats)
-    executor.shutdownNow()
+    executor.shutdownNow().forEach {
+      case task: ThrottledFutureTask[_] => task.cancel(false)
+      case _ =>
+    }
     executor.awaitTermination(timeout, timeUnit)
   }
 }
