@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,41 +24,6 @@ import scala.collection.mutable
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.rapids.execution.TrampolineUtil.bytesToString
-
-// Being thrown when a task requests resources that are not valid or exceed the limits
-class InvalidResourceRequest(msg: String) extends RuntimeException(
-  s"Invalid resource request: $msg")
-
-// Represents the status of acquiring resources for a task
-sealed trait AcquireStatus
-
-case class AcquireSuccessful(elapsedTime: Long) extends AcquireStatus
-
-// AcquireFailed indicates that the task could not be scheduled due to resource constraints
-case object AcquireFailed extends AcquireStatus
-
-// AcquireExcepted indicates that an exception occurred while trying to acquire resources
-case class AcquireExcepted(exception: Throwable) extends AcquireStatus
-
-/**
- * ResourceManager interface to be implemented for AsyncRunners requiring different kinds of
- * resources.
- *
- * Currently, only HostMemoryManager is implemented, which limits the maximum in-flight host
- * memory bytes. In the future, we can add more.
- */
-trait ResourcePool {
-  /**
-   * Returns true if the task can be accepted, false otherwise.
-   * TrafficController will block the task from being scheduled until this method returns true.
-   */
-  def acquireResource[T](task: AsyncRunner[T], timeout: Long): AcquireStatus
-
-  /**
-   * Callback to be called when a task is completed, either successfully or with an exception.
-   */
-  def releaseResource[T](task: AsyncRunner[T]): Unit
-}
 
 /**
  * HostMemoryPool enforces a maximum limit on total host memory bytes that can be held
