@@ -47,8 +47,11 @@ class ThrottlingExecutorSuite extends AnyFunSuite with BeforeAndAfterEach {
   val taskMetrics: Map[String, GpuMetric] = GpuWriteJobStatsTracker.taskMetrics
 
   class TestTask extends Callable[Unit] {
+    val started = new CountDownLatch(1)
     val latch = new CountDownLatch(1)
+
     override def call(): Unit = {
+      started.countDown()
       latch.await()
     }
   }
@@ -71,6 +74,7 @@ class ThrottlingExecutorSuite extends AnyFunSuite with BeforeAndAfterEach {
   test("tasks submitted should update the state") {
     val task1 = new TestTask
     val future1 = executor.submit(task1, 10)
+    assert(task1.started.await(longTimeoutSec, TimeUnit.SECONDS))
     assertResult(1)(trafficController.numScheduledTasks)
     assertResult(10)(throttle.getTotalHostMemoryBytes)
 
