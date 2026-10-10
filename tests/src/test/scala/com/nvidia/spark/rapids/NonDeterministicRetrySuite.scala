@@ -70,6 +70,37 @@ class NonDeterministicRetrySuite extends RmmSparkRetrySuiteBase {
     }
   }
 
+  test("GPU rand stream is independent of input batch boundaries and restores") {
+    def evaluate(partition: Int, sizes: Seq[Int], restore: Boolean): Seq[Double] = {
+      val random = newGpuRand(ctxCheck = true)
+      random.initialize(partition)
+      sizes.flatMap { size =>
+        withResource(buildBatch(0 until size)) { batch =>
+          random.checkpoint()
+          if (restore) {
+            withResource(random.columnarEval(batch)) { _ => () }
+            random.restore()
+          }
+          withResource(random.columnarEval(batch)) { column =>
+            withResource(column.copyToHost()) { host =>
+              (0 until size).map(host.getDouble)
+            }
+          }
+        }
+      }
+    }
+    Seq(0, 3).foreach { partition =>
+      val expected = evaluate(partition, Seq(NUM_ROWS), restore = false)
+      Seq(Seq(0, 1, 17, 0, 233, 249), Seq.fill(NUM_ROWS)(1)).foreach { sizes =>
+        assert(sizes.sum == NUM_ROWS)
+        assert(evaluate(partition, sizes, restore = false) === expected)
+        assert(evaluate(partition, sizes, restore = true) === expected)
+      }
+    }
+    assert(evaluate(0, Seq(NUM_ROWS), restore = false) !==
+      evaluate(3, Seq(NUM_ROWS), restore = false))
+  }
+
   test("GPU project retry with GPU rand") {
     def projectRand(): Seq[GpuExpression] = Seq(GpuAlias(newGpuRand(), "rand")())
 

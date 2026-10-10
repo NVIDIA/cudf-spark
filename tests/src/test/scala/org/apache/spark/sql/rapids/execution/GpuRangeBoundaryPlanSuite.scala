@@ -20,7 +20,7 @@ import com.nvidia.spark.rapids.{GpuProjectExec, RapidsConf, SparkQueryCompareTes
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.DataFrame
-import org.apache.spark.sql.functions.{col, lit, rand}
+import org.apache.spark.sql.functions.{col, lit, monotonically_increasing_id, rand}
 import org.apache.spark.sql.rapids.GpuFileSourceScanExec
 
 class GpuRangeBoundaryPlanSuite extends SparkQueryCompareTestSuite {
@@ -211,17 +211,88 @@ class GpuRangeBoundaryPlanSuite extends SparkQueryCompareTestSuite {
     }, conf)
   }
 
-  test("nondeterministic range keys use the original boundary collection path") {
+  test("seeded random range keys preserve values and range ordering with a narrow scan") {
     withTempPath { path =>
       writeInput(path.getCanonicalPath)
+      withGpuSparkSession({ spark =>
+        val input = spark.read.parquet(path.getCanonicalPath)
+          .select(rand(7).as("range_key"), col("key"), col("payload"))
+        val expected = input.collect().sortBy(_.getLong(1))
+        val result = input.repartitionByRange(4, col("range_key"))
+        val boundary = rangeExchange(result).subqueries.collectFirst {
+          case plan: GpuRangeBoundaryExec => plan
+        }.getOrElse(fail("Expected a narrow random-key boundary plan"))
+        val scan = boundary.collectFirst { case fileScan: GpuFileSourceScanExec => fileScan }.get
+        assert(scan.requiredSchema.isEmpty)
+        assert(result.collect().sortBy(_.getLong(1)).toSeq === expected.toSeq)
+        val bounds = result.queryExecution.toRdd.mapPartitionsWithIndex { case (index, rows) =>
+          val keys = rows.map(_.getDouble(0)).toArray
+          if (keys.isEmpty) Iterator.empty else Iterator.single((index, keys.min, keys.max))
+        }.collect().sortBy(_._1)
+        bounds.sliding(2).foreach {
+          case Array((_, _, leftMax), (_, rightMin, _)) => assert(leftMax <= rightMin)
+          case _ =>
+        }
+      }, conf)
+    }
+  }
 
+  test("random tie keys retain only deterministic key and filter dependencies") {
+    withTempPath { path =>
+      writeInput(path.getCanonicalPath)
+      withGpuSparkSession({ spark =>
+        val input = spark.read.parquet(path.getCanonicalPath)
+          .filter(col("filter_col") > 0)
+          .select((col("key") % 3).as("range_key"),
+            ((rand(7) * 255) - 128).cast("byte").as("tie_key"),
+            col("key"), col("payload"))
+        val expected = input.collect().sortBy(_.getLong(2))
+        val result = input.repartitionByRange(4, col("range_key"), col("tie_key").desc)
+        val boundary = rangeExchange(result).subqueries.collectFirst {
+          case plan: GpuRangeBoundaryExec => plan
+        }.getOrElse(fail("Expected a narrow random tie-key boundary plan"))
+        val scan = boundary.collectFirst { case fileScan: GpuFileSourceScanExec => fileScan }.get
+        assert(scan.requiredSchema.fieldNames.toSeq === Seq("key", "filter_col"))
+        assert(result.collect().sortBy(_.getLong(2)).toSeq === expected.toSeq)
+        val bounds = result.queryExecution.toRdd.mapPartitionsWithIndex { case (index, rows) =>
+          val keys = rows.map(row => (row.getLong(0), -row.getByte(1).toInt)).toArray.sorted
+          if (keys.isEmpty) Iterator.empty else Iterator.single((index, keys.head, keys.last))
+        }.collect().sortBy(_._1)
+        val ordering = implicitly[Ordering[(Long, Int)]]
+        bounds.sliding(2).foreach {
+          case Array((_, _, leftMax), (_, rightMin, _)) =>
+            assert(ordering.lteq(leftMax, rightMin))
+          case _ =>
+        }
+      }, conf)
+    }
+  }
+
+  test("random filter dependencies through aliases use the original GPU input") {
+    withTempPath { path =>
+      writeInput(path.getCanonicalPath)
       withGpuSparkSession({ spark =>
         val result = spark.read.parquet(path.getCanonicalPath)
-          .select(rand(7).as("range_key"), col("payload"))
-          .repartitionByRange(4, col("range_key"))
-        val exchange = rangeExchange(result)
+          .withColumn("random_value", rand(7))
+          .withColumn("filter_alias", col("random_value") * 2)
+          .filter(col("filter_alias") > 1)
+          .repartitionByRange(4, col("key"))
+        assert(!rangeExchange(result).subqueries.exists(_.isInstanceOf[GpuRangeBoundaryExec]))
+        assert(result.collect().forall(_.getDouble(3) > 0.5))
+      }, conf)
+    }
+  }
 
-        assert(!exchange.subqueries.exists(_.isInstanceOf[GpuRangeBoundaryExec]))
+  test("batch-dependent nondeterministic range keys use the original GPU input") {
+    withTempPath { path =>
+      writeInput(path.getCanonicalPath)
+      withGpuSparkSession({ spark =>
+        val result = spark.read.parquet(path.getCanonicalPath)
+          .select(monotonically_increasing_id().as("range_key"), col("payload"))
+          .repartitionByRange(4, col("range_key"))
+        assert(!rangeExchange(result).subqueries.exists(_.isInstanceOf[GpuRangeBoundaryExec]))
+        assert(result.collect().length === 100)
+        assertAscendingRangePartitioning(result)
       }, conf)
     }
   }
