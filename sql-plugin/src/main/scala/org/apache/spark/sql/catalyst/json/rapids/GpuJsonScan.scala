@@ -331,25 +331,29 @@ object JsonPartitionReader {
         }
 
         override def add(line: Array[Byte], offset: Int, len: Int): Unit = {
-          val hasBom = parsedOptions.encoding.isEmpty && len > 3 &&
-            line(offset) == 0xef.toByte && line(offset + 1) == 0xbb.toByte &&
-            line(offset + 2) == 0xbf.toByte
-          val contentOffset = if (hasBom) offset + 3 else offset
-          val end = offset + len
-          var firstToken = contentOffset
-          while (firstToken < end && isWhiteSpace(line(firstToken))) {
-            firstToken += 1
-          }
-          // Spark emits no rows for an empty root array; it must not become a split-only chunk.
-          val emptyArray = firstToken < end && line(firstToken) == '['.toByte &&
-            isEmptyArray(line, contentOffset, end - contentOffset)
-          if (!emptyArray) {
-            // Removing a BOM from a root array can make cuDF fail on mixed object/array batches.
-            val stripBom = hasBom && (firstToken == end || line(firstToken) == '{'.toByte)
-            if (stripBom) {
-              super.add(line, contentOffset, end - contentOffset)
-            } else {
-              super.add(line, offset, len)
+          if (len > 0 && line(offset) == '{'.toByte) {
+            super.add(line, offset, len)
+          } else {
+            val hasBom = parsedOptions.encoding.isEmpty && len > 3 &&
+              line(offset) == 0xef.toByte && line(offset + 1) == 0xbb.toByte &&
+              line(offset + 2) == 0xbf.toByte
+            val contentOffset = if (hasBom) offset + 3 else offset
+            val end = offset + len
+            var firstToken = contentOffset
+            while (firstToken < end && isWhiteSpace(line(firstToken))) {
+              firstToken += 1
+            }
+            // Spark emits no rows for an empty root array; it must not become a split-only chunk.
+            val emptyArray = firstToken < end && line(firstToken) == '['.toByte &&
+              isEmptyArray(line, contentOffset, end - contentOffset)
+            if (!emptyArray) {
+              // Removing a BOM from a root array can make cuDF fail on mixed object/array batches.
+              val stripBom = hasBom && (firstToken == end || line(firstToken) == '{'.toByte)
+              if (stripBom) {
+                super.add(line, contentOffset, end - contentOffset)
+              } else {
+                super.add(line, offset, len)
+              }
             }
           }
         }

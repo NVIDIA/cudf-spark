@@ -70,9 +70,11 @@ trait LineBufferer extends AutoCloseable {
   }
 
   def isEmpty(line: Array[Byte], lineOffset: Int, lineLen: Int): Boolean = {
-    (0 until lineLen).forall { idx =>
-      isWhiteSpace(line(lineOffset + idx))
+    var idx = 0
+    while (idx < lineLen && isWhiteSpace(line(lineOffset + idx))) {
+      idx += 1
     }
+    idx >= lineLen
   }
 }
 
