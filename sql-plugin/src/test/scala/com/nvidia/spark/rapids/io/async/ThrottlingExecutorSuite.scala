@@ -202,7 +202,7 @@ class ThrottlingExecutorSuite extends AnyFunSuite with BeforeAndAfterEach {
       release.countDown()
     }
 
-    assert(executor.shutdownNow(longTimeoutSec, TimeUnit.SECONDS) == ())
+    executor.shutdownNow(longTimeoutSec, TimeUnit.SECONDS)
     assertResult(0)(trafficController.numScheduledTasks)
     assertResult(0)(throttle.getTotalHostMemoryBytes)
   }
