@@ -38,6 +38,7 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
+import com.nvidia.spark.rapids.delta.GpuDeltaParquetFileFormatUtils.METADATA_ROW_IDX_COL
 import com.nvidia.spark.rapids.jni.fileio.RapidsFileIO
 import com.nvidia.spark.rapids.parquet._
 import org.apache.hadoop.conf.Configuration
@@ -58,8 +59,74 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.GpuFileSourceScanExec
 import org.apache.spark.sql.sources._
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.vectorized.ColumnarBatch
+import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkVector}
 import org.apache.spark.util.SerializableConfiguration
+
+/** Optional metadata columns emitted by cuDF's Parquet deletion-vector reader. */
+private case class DeletionVectorOutputColumns(rowIndexColumn: Option[Int] = None) {
+  def needsRowIndex: Boolean = rowIndexColumn.isDefined
+
+  /**
+   * Replaces the synthetic row-index placeholder after Parquet schema evolution. cuDF prepends
+   * source row indexes to deletion-vector reads, so callers separate that column before schema
+   * evolution and transfer it here. This method takes ownership of both inputs.
+   */
+  def populateAndClose(table: Table, cudfRowIndex: Option[ColumnVector]): Table = {
+    if (!needsRowIndex) {
+      cudfRowIndex.foreach(_.safeClose())
+      table
+    } else {
+      withResource(cudfRowIndex) { rowIndexToClose =>
+        withResource(table) { tableToClose =>
+          require(rowIndexToClose.isDefined,
+            "cuDF row-index output does not match the requested metadata columns")
+          val outputIndex = rowIndexColumn.get
+          require(outputIndex >= 0 && outputIndex < tableToClose.getNumberOfColumns,
+            s"Metadata column index $outputIndex is outside the " +
+              s"${tableToClose.getNumberOfColumns}-column output")
+          withResource(rowIndexToClose.get.castTo(DType.INT64)) { rowIndexReplacement =>
+            val columns = (0 until tableToClose.getNumberOfColumns).map { index =>
+              if (index == outputIndex) rowIndexReplacement else tableToClose.getColumn(index)
+            }
+            new Table(columns: _*)
+          }
+        }
+      }
+    }
+  }
+}
+
+private object DeletionVectorOutputColumns {
+  def fromSchema(
+      readDataSchema: StructType,
+      rowIndexColumnName: String): DeletionVectorOutputColumns = {
+    val rowIndex = readDataSchema.fieldNames.indexOf(rowIndexColumnName) match {
+      case -1 => None
+      case index => Some(index)
+    }
+    DeletionVectorOutputColumns(rowIndex)
+  }
+}
+
+private[delta] object LowShuffleMergeRowIndexes {
+  /** Builds already flattened file-relative row-group sequences; the caller owns the result. */
+  def buildColumn(rowGroupRanges: Array[(Long, Int)]): ColumnVector = {
+    val rowIndexChunks = rowGroupRanges.safeMap { case (offset, numRows) =>
+      withResource(Scalar.fromLong(offset)) { start =>
+        ColumnVector.sequence(start, numRows)
+      }
+    }
+    withResource(rowIndexChunks) { chunks =>
+      if (chunks.isEmpty) {
+        ColumnVector.fromLongs()
+      } else if (chunks.length == 1) {
+        chunks.head.incRefCount()
+      } else {
+        ColumnVector.concatenate(chunks: _*)
+      }
+    }
+  }
+}
 
 /**
  * This is the version 2 of the Delta Parquet file format implementation, which uses the
@@ -81,6 +148,11 @@ case class GpuDeltaParquetFileFormatNativeDV(
     tablePath: Option[String] = None,
     isCDCRead: Boolean = false
 ) extends GpuDeltaParquetFileFormatBase with Logging {
+
+  private val lowShuffleMergeScan =
+    GpuDeltaParquetFileFormat.isLowShuffleMergeScan(relation.options)
+  private val lowShuffleMergeRowIndexColumn = relation.options.getOrElse(
+    GpuDeltaParquetFileFormat.LOW_SHUFFLE_MERGE_ROW_INDEX_COLUMN_OPTION, METADATA_ROW_IDX_COL)
 
   // Validate either we have all arguments for DV enabled read or none of them.
 
@@ -116,9 +188,21 @@ case class GpuDeltaParquetFileFormatNativeDV(
    * Parquet reader after name mapping rewrites.
    */
   override def prepareSchema(inputSchema: StructType): StructType = {
+    // Match the discovery column's exact collision-safe name. It is synthetic and has no
+    // physical column mapping; similarly named user columns still need normal mapping.
+    val rowIndexOrdinal = if (lowShuffleMergeScan) {
+      inputSchema.fields.indexWhere(_.name == lowShuffleMergeRowIndexColumn)
+    } else {
+      -1
+    }
+    val tableSchema = if (rowIndexOrdinal >= 0) {
+      StructType(inputSchema.fields.patch(rowIndexOrdinal, Nil, 1))
+    } else {
+      inputSchema
+    }
     val schema = DeltaColumnMapping.createPhysicalSchema(
-      inputSchema, referenceSchema, columnMappingMode)
-    if (columnMappingMode == NameMapping) {
+      tableSchema, referenceSchema, columnMappingMode)
+    val physicalSchema = if (columnMappingMode == NameMapping) {
       SchemaMergingUtils.transformColumns(schema) { (_, field, _) =>
         field.copy(metadata = new MetadataBuilder()
           .withMetadata(field.metadata)
@@ -128,6 +212,12 @@ case class GpuDeltaParquetFileFormatNativeDV(
       }
     } else {
       schema
+    }
+    if (rowIndexOrdinal >= 0) {
+      StructType(physicalSchema.fields.patch(
+        rowIndexOrdinal, Seq(inputSchema.fields(rowIndexOrdinal)), 0))
+    } else {
+      physicalSchema
     }
   }
 
@@ -152,7 +242,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
    * physical column names.
    */
   private def prepareFiltersForRead(filters: Seq[Filter]): Seq[Filter] = {
-    if (!optimizationsEnabled) {
+    if (lowShuffleMergeScan || !optimizationsEnabled) {
       Seq.empty
     } else if (columnMappingMode != NoMapping) {
       val physicalNameMap = DeltaColumnMapping.getLogicalNameToPhysicalNameMap(referenceSchema)
@@ -169,7 +259,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
 
   override def isSplitable(sparkSession: SparkSession,
       options: Map[String, String],
-      path: Path): Boolean = optimizationsEnabled
+      path: Path): Boolean = !lowShuffleMergeScan && optimizationsEnabled
 
   def hasTablePath: Boolean = tablePath.isDefined
 
@@ -567,6 +657,14 @@ case class GpuDeltaParquetFileFormatNativeDV(
       dataSchema, readDataSchema, partitionSchema, filters, rapidsConf, poolConfBuilder,
       metrics, queryUsesInputFile) with Logging {
 
+    // Low-shuffle target scans need a file-relative row index. The multithreaded reader keeps
+    // per-file row-group metadata, while the coalescing reader loses those file boundaries.
+    override val canUseCoalesceFilesReader: Boolean =
+      !lowShuffleMergeScan && rapidsConf.isParquetCoalesceFileReadEnabled &&
+        !(queryUsesInputFile || ignoreCorruptFiles)
+    override val canUseMultiThreadReader: Boolean =
+      lowShuffleMergeScan || rapidsConf.isParquetMultiThreadReadEnabled
+
     logDebug("Using GpuDeltaParquetMultiFilePartitionReaderFactory for multi-threaded Parquet " +
       "reading with deletion vectors")
 
@@ -614,6 +712,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
         skipReadEstimate,
         compressCfg,
         execMetrics,
+        readDataSchema,
         partitionSchema,
         poolConf,
         maxNumFileProcessed,
@@ -702,6 +801,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
       skipReadEstimate: Boolean,
       override val compressCfg: CpuCompressionConfig,
       override val execMetrics: Map[String, GpuMetric],
+      readDataSchema: StructType,
       partitionSchema: StructType,
       poolConf: ThreadPoolConf,
       maxNumFileProcessed: Int,
@@ -720,15 +820,77 @@ case class GpuDeltaParquetFileFormatNativeDV(
       partitionSchema, poolConf, maxNumFileProcessed, ignoreMissingFiles, ignoreCorruptFiles,
       useFieldId, queryUsesInputFile, keepReadsInOrder, combineConf) {
 
+    private val outputColumns = if (lowShuffleMergeScan) {
+      DeletionVectorOutputColumns.fromSchema(readDataSchema, lowShuffleMergeRowIndexColumn)
+    } else {
+      DeletionVectorOutputColumns()
+    }
+    private val useDeletionVectorReader = tablePathOpt.isDefined || outputColumns.needsRowIndex
+
     override def readBatches(
         fileBufsAndMeta: HostMemoryBuffersWithMetaDataBase): Iterator[ColumnarBatch] = {
       fileBufsAndMeta match {
+        case meta: DeltaParquetHostMemoryEmptyMetaData if outputColumns.needsRowIndex =>
+          withResource(meta) { metadata =>
+            metadataOnlyBatches(metadata)
+          }
         case meta: DeltaParquetHostMemoryEmptyMetaData =>
           withResource(meta) { _ =>
             super.readBatches(fileBufsAndMeta)
           }
         case _ =>
           super.readBatches(fileBufsAndMeta)
+      }
+    }
+
+    /**
+     * Builds the file-relative row-index column when no physical Parquet columns are requested.
+     * Low-shuffle discovery disables splitting and predicate pushdown, but combined metadata can
+     * still contain several files. Each file therefore contributes its own row-group sequences,
+     * and the sequences are concatenated in the same order as the multithreaded reader metadata.
+     */
+    private def metadataOnlyBatches(
+        metadata: DeltaParquetHostMemoryEmptyMetaData): Iterator[ColumnarBatch] = {
+      require(lowShuffleMergeScan,
+        "Row-index-only reads are supported only for low-shuffle merge discovery")
+      val rowGroupMetadata = metadata.dvMetadata.flatMap(_.peekDvInfos)
+      rowGroupMetadata.foreach { info =>
+        require(info.rowGroupOffsets.length == info.rowGroupNumRows.length,
+          "Row-group offsets and row counts must have the same length")
+      }
+      val rowGroupRanges = rowGroupMetadata.flatMap { info =>
+        info.rowGroupOffsets.zip(info.rowGroupNumRows).filter(_._2 > 0)
+      }
+      val partitionRowsAndValues = metadata.allPartValues.map(_.unzip)
+      RmmRapidsRetryIterator.withRetryNoSplit {
+        GpuSemaphore.acquireIfNecessary(TaskContext.get())
+        withResource(LowShuffleMergeRowIndexes.buildColumn(rowGroupRanges)) { indexes =>
+          require(indexes.getRowCount == metadata.numRows,
+            s"Generated ${indexes.getRowCount} row indexes for ${metadata.numRows} input rows")
+          val numRows = Math.toIntExact(indexes.getRowCount)
+          val columns = metadata.readSchema.fields.zipWithIndex.safeMap { case (field, index) =>
+            if (outputColumns.rowIndexColumn.contains(index)) {
+              GpuColumnVector.from(indexes.incRefCount(), field.dataType)
+                .asInstanceOf[SparkVector]
+            } else {
+              GpuColumnVector.fromNull(numRows, field.dataType).asInstanceOf[SparkVector]
+            }
+          }
+          val batch = closeOnExcept(columns) { _ =>
+            new ColumnarBatch(columns, numRows)
+          }
+          // The partition helpers take ownership of batch, including on failure.
+          partitionRowsAndValues match {
+            case Some((rowsPerPartition, partitionValues)) =>
+              BatchWithPartitionDataUtils.addPartitionValuesToBatch(
+                batch, rowsPerPartition, partitionValues, partitionSchema,
+                maxGpuColumnSizeBytes)
+            case None =>
+              BatchWithPartitionDataUtils.addSinglePartitionValueToBatch(
+                batch, metadata.partitionedFile.partitionValues,
+                partitionSchema, maxGpuColumnSizeBytes)
+          }
+        }
       }
     }
 
@@ -752,12 +914,12 @@ case class GpuDeltaParquetFileFormatNativeDV(
         val parsedOptions = getParquetOptions(readDataSchema, clippedSchema, useFieldId)
         val columnTypes = readDataSchema.fields.map(f => f.dataType)
         val deletionVectorInfos: Array[SpillableDeletionVectorInfo] =
-          if (tablePathOpt.isDefined) {
+          if (useDeletionVectorReader) {
             val filteredDvInfos = dvMetadata.takeDvInfos()
 
             closeOnExcept(filteredDvInfos) { _ =>
               require(filteredDvInfos.length == dvMetadata.metadatas.length,
-                "Every DeletionVectorInfo must exist if tablePath is defined")
+                "Every Parquet buffer must have deletion-vector metadata")
             }
             filteredDvInfos
           } else {
@@ -782,7 +944,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
             // buffer is ready to not block CPU things.
             GpuSemaphore.acquireIfNecessary(TaskContext.get())
 
-            val tableReader = if (tablePathOpt.isDefined) {
+            val tableReader = if (useDeletionVectorReader) {
               // The MakeParquetTableWithDVProducer will close the input buffers
               MakeParquetTableWithDVProducer(
                 useChunkedReader,
@@ -793,7 +955,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
                 dateRebaseMode, timestampRebaseMode,
                 isSchemaCaseSensitive, useFieldId, readDataSchema, clippedSchema, files,
                 debugDumpPrefix, debugDumpAlways,
-                hostDvInfos)
+                hostDvInfos, outputColumns)
             } else {
               // The MakeParquetTableProducer will close the input buffers
               MakeParquetTableProducer(
@@ -893,6 +1055,20 @@ case class GpuDeltaParquetFileFormatNativeDV(
       }
     }
 
+    private def loadDeletionVectorForFile(
+        partitionedFile: PartitionedFile): Option[HostMemoryBuffer] = {
+      tablePathOpt match {
+        case Some(tablePath) =>
+          Some(RapidsDeletionVectors.loadDeletionVector(
+            conf, partitionedFile, tablePath, deletionVectorReadInfo))
+        case None if outputColumns.needsRowIndex =>
+          // cuDF's deletion-vector reader produces source row indexes. An empty bitmap selects
+          // every row while retaining that index output for touched-file discovery.
+          Some(RapidsDeletionVectors.serializedEmptyBitmap())
+        case None => None
+      }
+    }
+
     private case class DeltaParquetHostMemoryEmptyMetaData(
         override val partitionedFile: PartitionedFile,
         bufferSize: Long,
@@ -956,9 +1132,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
         // numRows == 0 means the data is empty because of an empty file,
         // file not found, or a corrupted file. In all these cases, we don't
         // need to load deletion vectors.
-        tablePathOpt.map(tp =>
-          RapidsDeletionVectors.loadDeletionVector(
-            conf, partitionedFile, tp, deletionVectorReadInfo))
+        loadDeletionVectorForFile(partitionedFile)
       } else {
         None
       }
@@ -1015,8 +1189,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
         bytesRead: Long,
         fileBlockMeta: ParquetFileInfoWithBlockMeta
     ): HostMemoryBuffersWithMetaData = {
-      val maybeSerializedDV = tablePathOpt.map(tp =>
-        RapidsDeletionVectors.loadDeletionVector(conf, partitionedFile, tp, deletionVectorReadInfo))
+      val maybeSerializedDV = loadDeletionVectorForFile(partitionedFile)
       withResource(maybeSerializedDV) { _ =>
         val dvMetadataBuffer = ArrayBuffer.empty[DeletionVectorMetadata]
         val dvMetadataArray = closeOnExcept(dvMetadataBuffer) { dvMetadata =>
@@ -1480,7 +1653,7 @@ case class GpuDeltaParquetFileFormatNativeDV(
  * A simple wrapper to adapt the DeletionVector.ParquetChunkedReader to the ChunkedReader interface
  * expected by AbstractParquetTableReader.
  */
-case class DeltaParquetChunkedReader(delegate: DeletionVector.ParquetChunkedReader)
+private case class DeltaParquetChunkedReader(delegate: DeletionVector.ParquetChunkedReader)
   extends ChunkedReader {
   override def hasNext: Boolean = delegate.hasNext
   override def next: Table = delegate.readChunk()
@@ -1490,7 +1663,7 @@ case class DeltaParquetChunkedReader(delegate: DeletionVector.ParquetChunkedRead
 /**
  * A chunked reader for Parquet files with deletion vectors.
  */
-case class DeltaParquetTableReader(
+private case class DeltaParquetTableReader(
     conf: Configuration,
     chunkSizeByteLimit: Long,
     maxChunkedReaderMemoryUsageSizeBytes: Long,
@@ -1506,7 +1679,8 @@ case class DeltaParquetTableReader(
     splits: Array[PartitionedFile],
     debugDumpPrefix: Option[String],
     debugDumpAlways: Boolean,
-    dvInfos: Array[DeletionVector.DeletionVectorInfo]) extends AbstractParquetTableReader(
+    dvInfos: Array[DeletionVector.DeletionVectorInfo],
+    outputColumns: DeletionVectorOutputColumns) extends AbstractParquetTableReader(
   conf, chunkSizeByteLimit, maxChunkedReaderMemoryUsageSizeBytes, opts, buffers, metrics,
   dateRebaseMode, timestampRebaseMode, isSchemaCaseSensitive, useFieldId, readDataSchema,
   clippedParquetSchema, splits, debugDumpPrefix, debugDumpAlways
@@ -1524,20 +1698,46 @@ case class DeltaParquetTableReader(
 
   private lazy val deletionVectorSkipRowIndexes =
     MakeParquetTableWithDVProducer.deletionVectorSkipRowIndexes(readDataSchema)
+  private var currentRowIndex: Option[ColumnVector] = None
 
   override protected def postProcessChunk(chunk: Table): Table = {
-    // The cuDF reader prepends an extra index column in the output table.
-    // We need to drop it before returning as we don't use it.
-    RapidsDeletionVectors.dropFirstColumn(chunk)
+    require(currentRowIndex.isEmpty, "Previous cuDF row-index column was not consumed")
+    val rowIndex = if (outputColumns.needsRowIndex) {
+      Some(chunk.getColumn(0).incRefCount())
+    } else {
+      None
+    }
+    closeOnExcept(rowIndex) { _ =>
+      val table = RapidsDeletionVectors.dropFirstColumn(chunk)
+      currentRowIndex = rowIndex
+      table
+    }
   }
 
   override def next: Table = {
-    MakeParquetTableWithDVProducer.materializeDeletionVectorSkipRowColumnsAsFalseIfNeeded(
-      super.next, deletionVectorSkipRowIndexes)
+    try {
+      val table = super.next
+      val rowIndex = currentRowIndex
+      currentRowIndex = None
+      val tableWithRowIndex = outputColumns.populateAndClose(table, rowIndex)
+      MakeParquetTableWithDVProducer.materializeDeletionVectorSkipRowColumnsAsFalseIfNeeded(
+        tableWithRowIndex, deletionVectorSkipRowIndexes)
+    } catch {
+      case t: Throwable =>
+        currentRowIndex.foreach(_.safeClose())
+        currentRowIndex = None
+        throw t
+    }
+  }
+
+  override def close(): Unit = {
+    currentRowIndex.foreach(_.safeClose())
+    currentRowIndex = None
+    super.close()
   }
 }
 
-object MakeParquetTableWithDVProducer extends Logging {
+private object MakeParquetTableWithDVProducer extends Logging {
   private def isDeletionVectorSkipRowColumn(name: String): Boolean =
     name == DeltaParquetFileFormat.IS_ROW_DELETED_COLUMN_NAME ||
       name == GpuDeltaParquetFileFormat.EDGE_COMPUTED_COLUMN_SKIP_ROW
@@ -1607,7 +1807,8 @@ object MakeParquetTableWithDVProducer extends Logging {
       splits: Array[PartitionedFile],
       debugDumpPrefix: Option[String],
       debugDumpAlways: Boolean,
-      deletionVectorInfos: Array[DeletionVector.DeletionVectorInfo]
+      deletionVectorInfos: Array[DeletionVector.DeletionVectorInfo],
+      outputColumns: DeletionVectorOutputColumns = DeletionVectorOutputColumns()
   ): GpuDataProducer[Table] = {
 
     require(deletionVectorInfos.nonEmpty,
@@ -1623,7 +1824,7 @@ object MakeParquetTableWithDVProducer extends Logging {
       DeltaParquetTableReader(conf, chunkSizeByteLimit, maxChunkedReaderMemoryUsageSizeBytes,
         opts, buffers, metrics, dateRebaseMode, timestampRebaseMode,
         isSchemaCaseSensitive, useFieldId, readDataSchema, clippedParquetSchema,
-        splits, debugDumpPrefix, debugDumpAlways, deletionVectorInfos)
+        splits, debugDumpPrefix, debugDumpAlways, deletionVectorInfos, outputColumns)
     } else {
       val skipRowIndexes = deletionVectorSkipRowIndexes(readDataSchema)
       val table = withResource(buffers) { _ =>
@@ -1648,27 +1849,34 @@ object MakeParquetTableWithDVProducer extends Logging {
           }
         }
       }
-      // The cuDF reader prepends an extra index column in the output table.
-      // We need to drop it before returning as we don't use it.
-      val tableWithoutIndex = RapidsDeletionVectors.dropFirstColumn(table)
-      closeOnExcept(tableWithoutIndex) { _ =>
-        GpuParquetScan.throwIfRebaseNeededInExceptionMode(tableWithoutIndex, dateRebaseMode,
-          timestampRebaseMode)
-        if (readDataSchema.length < tableWithoutIndex.getNumberOfColumns) {
-          throw new QueryExecutionException(s"Expected ${readDataSchema.length} columns " +
-            s"but read ${tableWithoutIndex.getNumberOfColumns} from ${splits.mkString("; ")}")
-        }
+      val rowIndex = if (outputColumns.needsRowIndex) {
+        Some(table.getColumn(0).incRefCount())
+      } else {
+        None
       }
-      metrics(NUM_OUTPUT_BATCHES) += 1
-      val evolvedSchemaTable = ParquetSchemaUtils.evolveSchemaIfNeededAndClose(tableWithoutIndex,
-        clippedParquetSchema, readDataSchema, isSchemaCaseSensitive, useFieldId)
-      val outputTable = GpuParquetScan.rebaseDateTime(evolvedSchemaTable, dateRebaseMode,
-        timestampRebaseMode)
-      // Recorded before materialization to match the chunked reader, whose next() records in
-      // super.next and materializes afterwards.
-      GpuMetric.recordOutputBatchBytes(outputTable, metrics.get(GPU_OUTPUT_BATCH_BYTES))
-      new SingleGpuDataProducer(
-        materializeDeletionVectorSkipRowColumnsAsFalseIfNeeded(outputTable, skipRowIndexes))
+      withResource(rowIndex) { _ =>
+        val tableWithoutIndex = RapidsDeletionVectors.dropFirstColumn(table)
+        closeOnExcept(tableWithoutIndex) { _ =>
+          GpuParquetScan.throwIfRebaseNeededInExceptionMode(tableWithoutIndex, dateRebaseMode,
+            timestampRebaseMode)
+          if (readDataSchema.length < tableWithoutIndex.getNumberOfColumns) {
+            throw new QueryExecutionException(s"Expected ${readDataSchema.length} columns " +
+              s"but read ${tableWithoutIndex.getNumberOfColumns} from ${splits.mkString("; ")}")
+          }
+        }
+        metrics(NUM_OUTPUT_BATCHES) += 1
+        val evolvedSchemaTable = ParquetSchemaUtils.evolveSchemaIfNeededAndClose(tableWithoutIndex,
+          clippedParquetSchema, readDataSchema, isSchemaCaseSensitive, useFieldId)
+        val rebasedTable = GpuParquetScan.rebaseDateTime(evolvedSchemaTable, dateRebaseMode,
+          timestampRebaseMode)
+        val outputTable = outputColumns.populateAndClose(
+          rebasedTable, rowIndex.map(_.incRefCount()))
+        // Recorded before materialization to match the chunked reader, whose next() records in
+        // super.next and materializes afterwards.
+        GpuMetric.recordOutputBatchBytes(outputTable, metrics.get(GPU_OUTPUT_BATCH_BYTES))
+        new SingleGpuDataProducer(
+          materializeDeletionVectorSkipRowColumnsAsFalseIfNeeded(outputTable, skipRowIndexes))
+      }
     }
   }
 }

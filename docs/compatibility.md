@@ -342,7 +342,10 @@ case.
 ## Delta Lake low shuffle merge on Databricks Runtime 17.3
 
 Low shuffle merge is disabled by default. To enable it on Databricks Runtime 17.3, set
-`spark.rapids.sql.delta.lowShuffleMerge.enabled=true` and the Parquet reader to `PERFILE`.
+`spark.rapids.sql.delta.lowShuffleMerge.enabled=true`. The Parquet reader can use `PERFILE`
+or `MULTITHREADED`. With `COALESCING` or `AUTO`, touched-file discovery uses the
+multithreaded reader to preserve file-relative row indices. OSS Delta Lake 2.4 still
+requires `PERFILE`.
 The default remains disabled because Delta Lake 2.4 does not support low shuffle merge
 with change data feed enabled.
 
