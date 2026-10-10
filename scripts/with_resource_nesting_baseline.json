@@ -247,21 +247,6 @@
       "path": "sql-plugin/src/main/spark334/scala/com/nvidia/spark/rapids/shims/GetSequenceSize.scala",
       "fingerprint": "ae4f61b93e9b6f1888b0",
       "resource": "withResource(hasLongMin.and(stepEqualsMinusOne))"
-    },
-    {
-      "path": "sql-plugin/src/main/spark359/scala/com/nvidia/spark/rapids/shims/mathExpressions.scala",
-      "fingerprint": "05b42c83ae2fc3d5f565",
-      "resource": "withResource(Scalar.fromDouble(Double.NaN))"
-    },
-    {
-      "path": "sql-plugin/src/main/spark359/scala/com/nvidia/spark/rapids/shims/mathExpressions.scala",
-      "fingerprint": "bf09b2680ab9720d6d42",
-      "resource": "withResource(isInvalid)"
-    },
-    {
-      "path": "sql-plugin/src/main/spark359/scala/com/nvidia/spark/rapids/shims/mathExpressions.scala",
-      "fingerprint": "e068d373aa01140b6d32",
-      "resource": "withResource(Scalar.fromDouble(1.0))"
     }
   ]
 }

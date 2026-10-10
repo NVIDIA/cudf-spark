@@ -109,34 +109,33 @@ object HyperbolicMathExpressions {
         xSquared.sub(one)
       }
     }
-    val sqrt = withResource(xSquaredMinusOne) { xSquaredMinusOne =>
+    val sqrt = withResource(xSquaredMinusOne) { _ =>
       xSquaredMinusOne.sqrt()
     }
-    val basicResult = withResource(sqrt) { sqrt =>
+    val basicResult = withResource(sqrt) { _ =>
       withResource(x.add(sqrt)) { logInput =>
         logInput.log()
       }
     }
-    withResource(basicResult) { basicResult =>
+    val largeOrBasic = withResource(basicResult) { _ =>
       val isLarge = withResource(Scalar.fromDouble(LARGE_ACOSH)) { large =>
         x.greaterOrEqualTo(large)
       }
-      withResource(isLarge) { isLarge =>
-        val largeResult = logPlusLog2(x)
-        withResource(largeResult) { largeResult =>
-          val largeOrBasic = isLarge.ifElse(largeResult, basicResult)
-          withResource(largeOrBasic) { largeOrBasic =>
-            // Spark returns NaN for values outside acosh's domain. Apply this after the
-            // large/basic selection so invalid negative inputs cannot leak through as +/-Inf.
-            val isInvalid = withResource(Scalar.fromDouble(1.0)) { one =>
-              x.lessThan(one)
-            }
-            withResource(isInvalid) { isInvalid =>
-              withResource(Scalar.fromDouble(Double.NaN)) { nan =>
-                isInvalid.ifElse(nan, largeOrBasic)
-              }
-            }
-          }
+      withResource(isLarge) { _ =>
+        withResource(logPlusLog2(x)) { largeResult =>
+          isLarge.ifElse(largeResult, basicResult)
+        }
+      }
+    }
+    withResource(largeOrBasic) { _ =>
+      // The selected column owns its result, so both branch columns are closed before
+      // applying the invalid-domain mask.
+      val isInvalid = withResource(Scalar.fromDouble(1.0)) { one =>
+        x.lessThan(one)
+      }
+      withResource(isInvalid) { _ =>
+        withResource(Scalar.fromDouble(Double.NaN)) { nan =>
+          isInvalid.ifElse(nan, largeOrBasic)
         }
       }
     }
