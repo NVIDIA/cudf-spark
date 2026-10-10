@@ -935,7 +935,7 @@ data.  The cuDF plugin `get_json_object` operation on the GPU will return `None`
 updated in a future release to more closely match Spark.
 
 If the JSON has a single quote `'` in the path, the GPU query may fail with `ai.rapids.cudf.CudfException`.
-More examples are in [issue-12483](https://github.com/rapidsai/cudf/issues/12483).
+More examples are in [issue-12483](https://github.com/NVIDIA/cudf/issues/12483).
 
 ## Approximate Percentile
 
