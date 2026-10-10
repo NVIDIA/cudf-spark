@@ -476,8 +476,7 @@ orc_pred_push_gens = [
         # Once https://github.com/NVIDIA/spark-rapids/issues/139 is fixed replace this with
         # date_gen
         DateGen(start=date(1590, 1, 1)),
-        # Once https://github.com/NVIDIA/spark-rapids/issues/140 is fixed replace this with
-        # timestamp_gen
+        # ORC writer issue #140 is fixed, but the reader is still limited by issue #131.
         orc_timestamp_gen]
 orc_pred_push_test_matrix = generate_reduced_test_matrix({
     'orc_gen': {'values': orc_pred_push_gens, 'is_primary_dimension': True},
@@ -1501,12 +1500,21 @@ def test_orc_gpu_write_cpu_read_timestamp_near_epoch(spark_tmp_path):
     gpu_write_path = spark_tmp_path + "/ORC_DATA_GPU_NEAR_EPOCH"
     epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
     # Exercise the negative fractional timestamp encoding fixed by
-    # https://github.com/NVIDIA/cudf/pull/23391 by randomly sampling 16 values from the
-    # inclusive [-1000000 us, 0 us] range around the epoch.
-    ts_gen = TimestampGen(
-        start=epoch - timedelta(microseconds=1000000), end=epoch, nullable=False)
+    # https://github.com/NVIDIA/cudf/pull/23391 at ORC's 1 ms borrow threshold. Apache ORC
+    # reads timestamps in [-999000 us, -1 us] one second later; the surrounding values are
+    # lossless.
+    timestamp_values = [
+        epoch - timedelta(microseconds=1000001),
+        epoch - timedelta(microseconds=1000000),
+        epoch - timedelta(microseconds=999001),
+        epoch - timedelta(microseconds=999000),
+        epoch - timedelta(microseconds=1),
+        epoch,
+        epoch + timedelta(microseconds=1)]
+    ts_gen = RepeatSeqGen(timestamp_values, data_type=TimestampType())
     # Write timestamp on GPU
     with_gpu_session(
-        lambda spark: gen_df(spark, [("c1", ts_gen)], length=16).write.orc(gpu_write_path))
+        lambda spark: gen_df(
+            spark, [("c1", ts_gen)], length=len(timestamp_values)).write.orc(gpu_write_path))
     # Read timestamp on CPU and GPU
     assert_gpu_and_cpu_are_equal_collect(read_orc_df(gpu_write_path))
