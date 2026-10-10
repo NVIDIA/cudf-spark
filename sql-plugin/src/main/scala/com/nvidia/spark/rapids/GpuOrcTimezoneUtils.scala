@@ -76,16 +76,19 @@ object GpuOrcTimezoneUtils {
    * historical java.util.TimeZone-to-java.time rebase. Legacy-calendar files apply the timezone
    * conversion before Spark's Julian-to-Gregorian rebase.
    *
+   * Keep the footer ID rather than a normalized ZoneId so JNI can make the same timezone
+   * resolution decision that cuDF made while decoding the stripe.
+   *
    * @param input the input table (timestamps read with ignoreTimezoneInStripeFooter)
-   * @param writerTimezone the resolved writer timezone from the ORC stripe footer
+   * @param writerTimezone the writer timezone ID from the ORC stripe footer
    * @param writerUsedProlepticGregorian whether the writer used the proleptic Gregorian calendar
    * @return table with rebased date/time columns; input is closed
    */
   def rebaseOrcDateTime(
       input: Table,
-      writerTimezone: ZoneId,
+      writerTimezone: String,
       writerUsedProlepticGregorian: Boolean): Table = {
-    rebaseWithWriterTimezone(input, writerTimezone.getId, ZoneId.systemDefault().getId,
+    rebaseWithWriterTimezone(input, writerTimezone, ZoneId.systemDefault().getId,
       writerUsedProlepticGregorian)
   }
 

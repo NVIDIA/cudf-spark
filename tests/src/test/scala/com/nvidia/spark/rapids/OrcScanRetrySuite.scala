@@ -79,7 +79,7 @@ class OrcScanRetrySuite extends RmmSparkRetrySuiteBase {
     injectGpuRetryOom()
     withResource(GpuOrcScan.rebaseAndEvolveSchemaWithRetryAndClose(
         table, tableSchema, timestampSchema, isSchemaCaseSensitive = true,
-        writerTimezone = shanghaiZone, writerUsedProlepticGregorian = true)) { result =>
+        writerTimezone = shanghaiZone.getId, writerUsedProlepticGregorian = true)) { result =>
       assertResult(1)(result.getRowCount)
       assertResult(DType.TIMESTAMP_MICROSECONDS)(result.getColumn(0).getType)
       withResource(result.getColumn(0).copyToHost()) { host =>
@@ -119,7 +119,7 @@ class OrcScanRetrySuite extends RmmSparkRetrySuiteBase {
     injectGpuRetryOom()
     withResource(GpuOrcScan.rebaseAndEvolveSchemaWithRetryAndClose(
         table, tableSchema, readSchema, isSchemaCaseSensitive = true,
-        writerTimezone = ZoneId.of("UTC"), writerUsedProlepticGregorian = true)) { result =>
+        writerTimezone = ZoneId.of("UTC").getId, writerUsedProlepticGregorian = true)) { result =>
       assertResult(DType.create(DType.DTypeEnum.DECIMAL128, -6))(result.getColumn(0).getType)
     }
     assertGpuRetryOccurred()
@@ -141,7 +141,7 @@ class OrcScanRetrySuite extends RmmSparkRetrySuiteBase {
     injectGpuRetryOom()
     withResource(GpuOrcScan.rebaseAndEvolveSchemaWithRetryAndClose(
         table, tableSchema, readSchema, isSchemaCaseSensitive = true,
-        writerTimezone = ZoneId.of("UTC"), writerUsedProlepticGregorian = true)) { result =>
+        writerTimezone = ZoneId.of("UTC").getId, writerUsedProlepticGregorian = true)) { result =>
       assertResult(2)(result.getNumberOfColumns)
       withResource(result.getColumn(0).copyToHost()) { charHost =>
         assertResult("abc")(charHost.getJavaString(0))
