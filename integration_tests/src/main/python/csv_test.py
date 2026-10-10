@@ -603,6 +603,7 @@ def test_csv_small_reader_budget(spark_tmp_path, compression, v1_enabled_list, p
         'spark.rapids.sql.reader.batchSizeBytes': '2048'})
 
 
+@ignore_order(local=True)
 @pytest.mark.parametrize('v1_enabled_list', ['', 'csv'])
 @pytest.mark.parametrize('header', [False, True])
 @pytest.mark.parametrize('boundary', ['rows', 'bytes', 'partition'])
