@@ -844,44 +844,76 @@ def test_iceberg_v3_read_fallback(spark_tmp_table_factory):
 def test_iceberg_v3_top_level_variant_read(spark_tmp_table_factory):
     table = get_full_table_name(spark_tmp_table_factory)
 
-    def setup_table(spark):
-        spark.sql(
-            f"CREATE TABLE {table} (id INT, v VARIANT) USING ICEBERG "
-            "TBLPROPERTIES ('format-version' = '3')")
-        spark.sql(f"""
-            INSERT INTO {table}
-            SELECT id, parse_json(json)
-            FROM VALUES
-              (0, '{{"x":7,"s":"hi","b":true,"d":2.5,"empty_array":[],"empty_object":{{}}}}'),
-              (1, '[1,{{"x":2}}]'),
-              (2, '"scalar"'),
-              (3, '3.5'),
-              (4, 'true'),
-              (5, 'null'),
-              (6, NULL)
-            AS source(id, json)
-            """)
-
-    with_cpu_session(setup_table, conf=_ICEBERG_VARIANT_READ_CONF)
-
-    def read_table(spark):
-        return spark.sql(f"""
-            SELECT id,
-              try_variant_get(v, '$.x', 'int') AS object_x,
-              try_variant_get(v, '$.s', 'string') AS object_s,
-              try_variant_get(v, '$.b', 'boolean') AS object_b,
-              try_variant_get(v, '$.d', 'double') AS object_d,
-              try_variant_get(v, '$[0]', 'int') AS array_first,
-              try_variant_get(v, '$[1].x', 'int') AS array_object_x
-            FROM {table}
-            """)
+    with_cpu_session(
+        lambda spark: _setup_iceberg_variant_table(spark, table),
+        conf=_ICEBERG_VARIANT_READ_CONF)
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
-        read_table,
+        lambda spark: _read_iceberg_variant_table(spark, table),
         exist_classes="GpuBatchScanExec,GpuVariantGet",
         non_exist_classes="BatchScanExec,GpuRowToColumnarExec,HostColumnarToGpu",
         conf=_ICEBERG_VARIANT_READ_CONF,
         require_non_empty=True)
+
+
+def _setup_iceberg_variant_table(spark, table):
+    spark.sql(
+        f"CREATE TABLE {table} (id INT, v VARIANT) USING ICEBERG "
+        "TBLPROPERTIES ('format-version' = '3')")
+    spark.sql(f"""
+        INSERT INTO {table}
+        SELECT id, parse_json(json)
+        FROM VALUES
+          (0, '{{"x":7,"s":"hi","b":true,"d":2.5,"empty_array":[],"empty_object":{{}}}}'),
+          (1, '[1,{{"x":2}}]'),
+          (2, '"scalar"'),
+          (3, '3.5'),
+          (4, 'true'),
+          (5, 'null'),
+          (6, NULL)
+        AS source(id, json)
+        """)
+
+
+def _read_iceberg_variant_table(spark, table):
+    return spark.sql(f"""
+        SELECT id,
+          try_variant_get(v, '$.x', 'int') AS object_x,
+          try_variant_get(v, '$.s', 'string') AS object_s,
+          try_variant_get(v, '$.b', 'boolean') AS object_b,
+          try_variant_get(v, '$.d', 'double') AS object_d,
+          try_variant_get(v, '$[0]', 'int') AS array_first,
+          try_variant_get(v, '$[1].x', 'int') AS array_object_x
+        FROM {table}
+        """)
+
+
+@iceberg
+@ignore_order(local=True)
+@incompat
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.skipif(not is_spark_411_or_later(),
+                    reason="Iceberg Variant requires Spark 4.1.1+")
+@pytest.mark.parametrize("fallback_conf", [
+    pytest.param(
+        {"spark.sql.variant.allowReadingShredded": "true"},
+        id="allow_shredded"),
+    pytest.param(
+        {"spark.sql.variant.pushVariantIntoScan": "true"},
+        id="pushdown"),
+])
+def test_iceberg_v3_variant_read_fallback(spark_tmp_table_factory, fallback_conf):
+    table = get_full_table_name(spark_tmp_table_factory)
+    conf = copy_and_update(_ICEBERG_VARIANT_READ_CONF, fallback_conf)
+
+    with_cpu_session(
+        lambda spark: _setup_iceberg_variant_table(spark, table),
+        conf=conf)
+
+    assert_gpu_fallback_collect(
+        lambda spark: _read_iceberg_variant_table(spark, table),
+        "BatchScanExec",
+        conf=conf)
 
 
 @iceberg
