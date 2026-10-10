@@ -169,8 +169,12 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
       val tableMeta = MetaUtils.buildTableMeta(bufferId.tableId, contigTable)
       val buff = contigTable.getBuffer
       buff.incRefCount()
-      val handle = SpillableDeviceBufferHandle(buff, initialSpillPriority)
-      trackCachedHandle(bufferId, handle, tableMeta)
+      val handle = closeOnExcept(buff) { buffer =>
+        SpillableDeviceBufferHandle(buffer, initialSpillPriority)
+      }
+      closeOnExcept(handle) { trackedHandle =>
+        trackCachedHandle(bufferId, trackedHandle, tableMeta)
+      }
     }
   }
 
@@ -193,8 +197,12 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
       tableMeta.bufferMeta().mutateId(bufferId.tableId)
       val buff = compressed.getTableBuffer
       buff.incRefCount()
-      val handle = SpillableDeviceBufferHandle(buff, initialSpillPriority)
-      trackCachedHandle(bufferId, handle, tableMeta)
+      val handle = closeOnExcept(buff) { buffer =>
+        SpillableDeviceBufferHandle(buffer, initialSpillPriority)
+      }
+      closeOnExcept(handle) { trackedHandle =>
+        trackCachedHandle(bufferId, trackedHandle, tableMeta)
+      }
     }
   }
 
@@ -383,7 +391,7 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
 
     val tableId = tableIdCounter.getAndUpdate(ShuffleBufferCatalog.TABLE_ID_UPDATER)
     val id = ShuffleBufferId(blockId, tableId)
-    val prev = tableMap.put(tableId, id)
+    val prev = tableMap.putIfAbsent(tableId, id)
     if (prev != null) {
       throw new IllegalStateException(s"table ID $tableId is already in use")
     }

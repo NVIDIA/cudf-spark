@@ -18,11 +18,16 @@ package com.nvidia.spark.rapids
 
 import java.lang.management.ManagementFactory
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
+import ai.rapids.cudf.Cuda
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.format.CodecType
 import com.nvidia.spark.rapids.format.TableMeta
 import com.nvidia.spark.rapids.shuffle.RapidsShuffleTestHelper
-import com.nvidia.spark.rapids.spill.SpillFramework
+import com.nvidia.spark.rapids.spill.{SpillFramework, SpillableDeviceStore}
+import org.mockito.ArgumentMatchers.any
+import org.mockito.Mockito.{doThrow, spy}
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.concurrent.Eventually.eventually
 import org.scalatest.concurrent.PatienceConfiguration.Timeout
@@ -94,6 +99,82 @@ class ShuffleBufferCatalogSuite
     assertResult(0)(SpillFramework.stores.deviceStore.numHandles)
     assertThrows[NoSuchElementException](shuffleCatalog.blockIdToMetas(block))
     shuffleCatalog.unregisterShuffle(1)
+  }
+
+  test("a failed contiguous add releases the buffer reference") {
+    SpillFramework.storesInternal.deviceStore.close()
+    val deviceStore = spy(new SpillableDeviceStore)
+    SpillFramework.storesInternal.deviceStore = deviceStore
+    doThrow(new IllegalStateException("injected tracking failure"))
+      .doCallRealMethod().when(deviceStore).track(any())
+
+    val shuffleCatalog = new ShuffleBufferCatalog()
+    shuffleCatalog.registerShuffle(1)
+    val table = RapidsShuffleTestHelper.buildContiguousTable(10)
+    val buffer = table.getBuffer
+    buffer.incRefCount()
+    try {
+      assertThrows[IllegalStateException] {
+        shuffleCatalog.addContiguousTable(ShuffleBlockId(1, 1L, 1), table, -1)
+      }
+      assertResult(1)(buffer.getRefCount)
+    } finally {
+      buffer.close()
+      shuffleCatalog.unregisterShuffle(1)
+    }
+  }
+
+  test("a failed compressed add releases the buffer reference") {
+    SpillFramework.storesInternal.deviceStore.close()
+    val deviceStore = spy(new SpillableDeviceStore)
+    SpillFramework.storesInternal.deviceStore = deviceStore
+    doThrow(new IllegalStateException("injected tracking failure"))
+      .doCallRealMethod().when(deviceStore).track(any())
+
+    val shuffleCatalog = new ShuffleBufferCatalog()
+    shuffleCatalog.registerShuffle(1)
+    val batch = buildCompressedBatch()
+    val buffer = batch.column(0).asInstanceOf[GpuCompressedColumnVector].getTableBuffer
+    buffer.incRefCount()
+    try {
+      assertThrows[IllegalStateException] {
+        shuffleCatalog.addCompressedBatch(ShuffleBlockId(1, 1L, 1), batch, -1)
+      }
+      assertResult(1)(buffer.getRefCount)
+    } finally {
+      buffer.close()
+      shuffleCatalog.unregisterShuffle(1)
+    }
+  }
+
+  test("a table ID collision leaves the existing mapping intact") {
+    val shuffleCatalog = new ShuffleBufferCatalog()
+    shuffleCatalog.registerShuffle(1)
+    val existing = shuffleCatalog.addDegenerateRapidsBuffer(
+      ShuffleBlockId(1, 1L, 1), mock[TableMeta])
+
+    val counter = classOf[ShuffleBufferCatalog].getDeclaredField("tableIdCounter")
+    counter.setAccessible(true)
+    counter.get(shuffleCatalog).asInstanceOf[AtomicInteger].set(existing.tableId)
+
+    assertThrows[IllegalStateException] {
+      shuffleCatalog.addDegenerateRapidsBuffer(
+        ShuffleBlockId(1, 2L, 1), mock[TableMeta])
+    }
+    shuffleCatalog.removeCachedHandles(Seq(existing))
+    assertResult((0, 0, 0))(shuffleCatalog.bookkeepingSizes)
+    shuffleCatalog.unregisterShuffle(1)
+  }
+
+  private def buildCompressedBatch(): ColumnarBatch = {
+    val codec = TableCompressionCodec.getCodec(
+      CodecType.NVCOMP_LZ4, TableCompressionCodec.makeCodecConfig(new RapidsConf(new SparkConf)))
+    withResource(codec.createBatchCompressor(0, Cuda.DEFAULT_STREAM)) { compressor =>
+      compressor.addTableToCompress(RapidsShuffleTestHelper.buildContiguousTable(10))
+      withResource(compressor.finish()) { compressed =>
+        GpuCompressedColumnVector.from(compressed.head)
+      }
+    }
   }
 
   /** A block's list of buffer ids, which the catalog keeps private and locks for every change. */
