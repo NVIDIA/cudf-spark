@@ -900,6 +900,13 @@ Also, the GPU does not support casting from strings containing hex values to flo
 This configuration is enabled by default. To disable this operation on the GPU set
 [`spark.rapids.sql.castStringToFloat.enabled`](additional-functionality/advanced_configs.md#sql.castStringToFloat.enabled) to `false`.
 
+### Hexadecimal to Binary
+
+The GPU supports `unhex` for string input. It returns binary data, treats an odd number of hex
+digits as if a leading zero were present, and returns null for invalid input. The permissive
+hexadecimal form of `to_binary` in Spark 3.3 is also supported. Error-raising hexadecimal
+`to_binary` in Spark 3.4 and later falls back to the CPU.
+
 ### String to Date
 
 The following formats/patterns are supported on the GPU. Timezone of UTC is assumed.

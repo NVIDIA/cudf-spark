@@ -972,6 +972,57 @@ def test_hex(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : unary_op_df(spark, data_gen).selectExpr('hex(a)'))
 
+
+def test_unhex():
+    values = [('4142',), ('aF',), ('F',), ('ABC',), ('',), ('00FF',),
+              ('GG',), ('0xFF',), (' F',), ('é',), (None,)]
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: spark.createDataFrame(values, 'a string').selectExpr('unhex(a)'))
+
+
+def test_unhex_binary_consumer():
+    values = [('00FF',), ('F',), ('',), ('GG',), (None,)]
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: spark.createDataFrame(values, 'a string').selectExpr(
+                'hex(unhex(a))'))
+
+
+@pytest.mark.parametrize('data_gen', [StringGen('[0-9a-fA-F]{0,16}'), StringGen('.{0,10}')],
+                         ids=idfn)
+def test_unhex_generated(data_gen):
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: unary_op_df(spark, data_gen).selectExpr('unhex(a)'))
+
+
+@pytest.mark.skipif(not is_spark_330_or_later() or not is_before_spark_340(),
+                    reason='permissive to_binary with hex is Spark 3.3 only')
+def test_to_binary_hex_permissive():
+    values = [('4142',), ('F',), ('GG',), ('',), (None,)]
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: spark.createDataFrame(values, 'a string').selectExpr(
+                "to_binary(a, 'hex')"))
+
+
+@allow_non_gpu('Unhex')
+@pytest.mark.skipif(is_before_spark_340(), reason='strict to_binary with hex is unavailable')
+def test_to_binary_hex_error_mode_fallback():
+    values = [('4142',), ('F',)]
+    assert_gpu_fallback_collect(
+            lambda spark: spark.createDataFrame(values, 'a string').selectExpr(
+                "to_binary(a, 'hex')"),
+            'Unhex')
+
+
+@allow_non_gpu('Unhex')
+@pytest.mark.skipif(is_before_spark_340(), reason='strict to_binary with hex is unavailable')
+def test_to_binary_hex_invalid_input():
+    assert_gpu_and_cpu_error(
+            lambda spark: spark.createDataFrame([('GG',)], 'a string').selectExpr(
+                "to_binary(a, 'hex')").collect(),
+            {},
+            'CONVERSION_INVALID_INPUT')
+
+
 @approximate_float
 @pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
 def test_cos(data_gen):

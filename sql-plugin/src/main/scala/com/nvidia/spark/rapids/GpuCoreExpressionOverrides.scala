@@ -84,6 +84,10 @@ private[rapids] object GpuCoreExpressionOverrides {
         TypeSig.LONG + TypeSig.STRING + TypeSig.BINARY,
         TypeSig.LONG + TypeSig.STRING + TypeSig.BINARY),
       HexRuleMeta),
+    expr[Unhex](
+      "Converts a hexadecimal string to binary",
+      ExprChecks.unaryProject(TypeSig.BINARY, TypeSig.BINARY, TypeSig.STRING, TypeSig.STRING),
+      UnhexRuleMeta),
     expr[WindowExpression](
       "Calculates a return value for every input row of a table based on a group (or " +
         "\"window\") of rows",
