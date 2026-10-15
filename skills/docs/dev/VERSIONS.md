@@ -1,6 +1,6 @@
 # Version Update Guide
 
-Before updating, verify that the exact `rapids-4-spark_<scala>` POM and the JAR for the selected CUDA classifier are published in Maven Central.
+Before updating, verify that the configured artifact ID and version publish a POM, an unclassified JAR, and a JAR for the selected CUDA classifier in Maven Central.
 
 ## Files To Update
 
@@ -13,6 +13,7 @@ Update these properties together:
 - `<scala.binary.version>`
 - `<scala.version>`
 - `<spark.version>`
+- `<rapids4spark.artifactId>`
 - `<rapids4spark.version>`
 - `<cuda.version>` if the RAPIDS artifact classifier changes
 - `<cudf.git.branch>`
@@ -40,6 +41,7 @@ File: `skills/udf-convert-to-cuda/templates/cuda/native/scripts/extract-cudf-lib
 Update these default values:
 
 - `SCALA_VERSION`
+- `RAPIDS4SPARK_ARTIFACT_ID`
 - `RAPIDS4SPARK_VERSION`
 - `CUDA_VERSION` if the RAPIDS artifact classifier changes
 - `CUDF_BRANCH`
