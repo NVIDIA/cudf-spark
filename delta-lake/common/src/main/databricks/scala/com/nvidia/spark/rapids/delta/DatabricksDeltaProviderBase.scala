@@ -46,6 +46,8 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
  * Common implementation of the DeltaProvider interface for all Databricks versions.
  */
 trait DatabricksDeltaProviderBase extends DeltaProviderImplBase {
+  protected def isNativeStagedDeltaTable(tableClass: Class[_]): Boolean = false
+
   override def getCreatableRelationRules: Map[Class[_ <: CreatableRelationProvider],
       CreatableRelationProviderRule[_ <: CreatableRelationProvider]] = {
     Seq(
@@ -93,7 +95,9 @@ trait DatabricksDeltaProviderBase extends DeltaProviderImplBase {
   }
 
   override def isSupportedWrite(write: Class[_ <: SupportsWrite]): Boolean = {
-    write == classOf[DeltaTableV2] || classOf[GpuDeltaSupportsWrite].isAssignableFrom(write)
+    write == classOf[DeltaTableV2] ||
+      classOf[GpuDeltaSupportsWrite].isAssignableFrom(write) ||
+      isNativeStagedDeltaTable(write)
   }
 
   override def tagSupportForGpuFileSourceScan(meta: SparkPlanMeta[FileSourceScanExec]): Unit = {
@@ -232,59 +236,75 @@ trait DatabricksDeltaProviderBase extends DeltaProviderImplBase {
       meta.willNotWorkOnGpu("Delta Lake output acceleration has been disabled. To enable set " +
         s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
     }
-    cpuExec.write match {
-      case _: GpuDeltaV1Write => // write is already using GPU, nothing more to do
-      case write =>
-        val deltaTable = cpuExec.table.asInstanceOf[DeltaTableV2]
-        val tablePath = if (deltaTable.catalogTable.isDefined) {
-          new Path(deltaTable.catalogTable.get.location)
-        } else {
-          DeltaDataSource.parsePathIdentifier(cpuExec.session, deltaTable.path.toString,
-            deltaTable.options)._1
-        }
-        val deltaLog = DeltaLog.forTable(cpuExec.session, tablePath, deltaTable.options)
-        RapidsDeltaUtils.tagForDeltaWrite(meta, cpuExec.plan.schema, Some(deltaLog),
-          deltaTable.options, cpuExec.session)
-        extractWriteV1Config(meta, deltaLog, write).foreach { writeConfig =>
-          meta.setCustomTaggingData(writeConfig)
-        }
+    // DBR 17.3's atomic CTAS/RTAS wrappers intentionally retain the native catalog and staged
+    // table. Its V1 write only captures the query for the staged-table commit, so there is no
+    // DeltaTableV2 write builder to inspect here.
+    if (!isNativeStagedDeltaTable(cpuExec.table.getClass)) {
+      cpuExec.write match {
+        case _: GpuDeltaV1Write => // write is already using GPU, nothing more to do
+        case write =>
+          val deltaTable = cpuExec.table.asInstanceOf[DeltaTableV2]
+          val tablePath = if (deltaTable.catalogTable.isDefined) {
+            new Path(deltaTable.catalogTable.get.location)
+          } else {
+            DeltaDataSource.parsePathIdentifier(cpuExec.session, deltaTable.path.toString,
+              deltaTable.options)._1
+          }
+          val deltaLog = DeltaLog.forTable(cpuExec.session, tablePath, deltaTable.options)
+          RapidsDeltaUtils.tagForDeltaWrite(meta, cpuExec.plan.schema, Some(deltaLog),
+            deltaTable.options, cpuExec.session)
+          extractWriteV1Config(meta, deltaLog, write).foreach { writeConfig =>
+            meta.setCustomTaggingData(writeConfig)
+          }
+      }
     }
   }
 
   override def convertToGpu(
       cpuExec: AppendDataExecV1,
       meta: AppendDataExecV1Meta): GpuExec = {
-    val gpuWrite = cpuExec.write match {
-      case write: GpuDeltaV1Write => write
-      case _ =>
-        val writeConfig = meta.getCustomTaggingData match {
-          case Some(c: DeltaWriteV1Config) => c
-          case _ => throw new IllegalStateException("Missing Delta write config from tagging pass")
-        }
-        toGpuWrite(writeConfig, meta.conf)
+    if (isNativeStagedDeltaTable(cpuExec.table.getClass)) {
+      GpuAppendDataExecV1(
+        cpuExec.table, cpuExec.plan, cpuExec.refreshCache, cpuExec.write)
+    } else {
+      val gpuWrite = cpuExec.write match {
+        case write: GpuDeltaV1Write => write
+        case _ =>
+          val writeConfig = meta.getCustomTaggingData match {
+            case Some(c: DeltaWriteV1Config) => c
+            case _ =>
+              throw new IllegalStateException("Missing Delta write config from tagging pass")
+          }
+          toGpuWrite(writeConfig, meta.conf)
+      }
+      GpuAppendDataExecV1(cpuExec.table, cpuExec.plan, cpuExec.refreshCache, gpuWrite)
     }
-    GpuAppendDataExecV1(cpuExec.table, cpuExec.plan, cpuExec.refreshCache, gpuWrite)
   }
 
   override def tagForGpu(
       cpuExec: OverwriteByExpressionExecV1,
       meta: OverwriteByExpressionExecV1Meta): Unit = {
-    if (!meta.conf.isDeltaWriteEnabled) {
-      meta.willNotWorkOnGpu("Delta Lake output acceleration has been disabled. To enable set " +
-          s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
-    }
-    val deltaTable = cpuExec.table.asInstanceOf[DeltaTableV2]
-    val tablePath = if (deltaTable.catalogTable.isDefined) {
-      new Path(deltaTable.catalogTable.get.location)
+    if (isNativeStagedDeltaTable(cpuExec.table.getClass)) {
+      meta.willNotWorkOnGpu(
+        "Delta native staged tables are only supported by AppendDataExecV1")
     } else {
-      DeltaDataSource.parsePathIdentifier(cpuExec.session, deltaTable.path.toString,
-        deltaTable.options)._1
-    }
-    val deltaLog = DeltaLog.forTable(cpuExec.session, tablePath, deltaTable.options)
-    RapidsDeltaUtils.tagForDeltaWrite(meta, cpuExec.plan.schema, Some(deltaLog),
-      deltaTable.options, cpuExec.session)
-    extractWriteV1Config(meta, deltaLog, cpuExec.write).foreach { writeConfig =>
-      meta.setCustomTaggingData(writeConfig)
+      if (!meta.conf.isDeltaWriteEnabled) {
+        meta.willNotWorkOnGpu("Delta Lake output acceleration has been disabled. To enable set " +
+            s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
+      }
+      val deltaTable = cpuExec.table.asInstanceOf[DeltaTableV2]
+      val tablePath = if (deltaTable.catalogTable.isDefined) {
+        new Path(deltaTable.catalogTable.get.location)
+      } else {
+        DeltaDataSource.parsePathIdentifier(cpuExec.session, deltaTable.path.toString,
+          deltaTable.options)._1
+      }
+      val deltaLog = DeltaLog.forTable(cpuExec.session, tablePath, deltaTable.options)
+      RapidsDeltaUtils.tagForDeltaWrite(meta, cpuExec.plan.schema, Some(deltaLog),
+        deltaTable.options, cpuExec.session)
+      extractWriteV1Config(meta, deltaLog, cpuExec.write).foreach { writeConfig =>
+        meta.setCustomTaggingData(writeConfig)
+      }
     }
   }
 

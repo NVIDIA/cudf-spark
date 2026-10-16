@@ -81,6 +81,11 @@ import org.apache.spark.sql.sources.InsertableRelation
 import org.apache.spark.sql.types.StructType
 
 object DeltaSpark400DB173Provider extends DatabricksDeltaProviderBase {
+  private val NATIVE_STAGED_DELTA_TABLE_CLASS_NAME =
+    "com.databricks.sql.transaction.tahoe.catalog.DeltaCatalog$StagedDeltaTableV2"
+
+  override protected def isNativeStagedDeltaTable(tableClass: Class[_]): Boolean =
+    tableClass.getName == NATIVE_STAGED_DELTA_TABLE_CLASS_NAME
 
   override def getDataWritingCommandRules: Map[Class[_ <: DataWritingCommand],
       DataWritingCommandRule[_ <: DataWritingCommand]] = {

@@ -25,7 +25,8 @@ import com.databricks.sql.transaction.tahoe._
 import com.databricks.sql.transaction.tahoe.actions.Metadata
 import com.databricks.sql.transaction.tahoe.commands.{
   TableCreationModes,
-  WriteIntoDelta
+  WriteIntoDelta,
+  WriteIntoDeltaLike
 }
 import com.databricks.sql.transaction.tahoe.metering.DeltaLogging
 import com.databricks.sql.transaction.tahoe.schema.SchemaUtils
@@ -134,14 +135,19 @@ abstract class GpuCreateDeltaTableCommandBase(
         // We are either appending/overwriting with saveAsTable, creating a new table with CTAS,
         // or creating a table as part of a RunnableCommand.
         queryPlan match {
-          case writer: WriteIntoDelta =>
+          case writer: WriteIntoDeltaLike =>
             // In the V2 Writer, methods like "replace" and "createOrReplace" implicitly mean that
             // the metadata should be changed. This wasn't the behavior for DataFrameWriterV1.
-            if (!isV1Writer) {
+            val isV1WriterSaveAsTableOverwrite = isV1Writer
+            if (!isV1WriterSaveAsTableOverwrite) {
               replaceMetadataIfNecessary(
                 txn, tableWithLocation, options, writer.data.schema.asNullable)
             }
-            val actions = writer.write(txn, sparkSession)
+            val isTableReplace =
+              (operation == TableCreationModes.Replace ||
+                operation == TableCreationModes.CreateOrReplace) &&
+                !isV1WriterSaveAsTableOverwrite
+            val actions = writer.write(txn, sparkSession, None, isTableReplace)
             val op = getOperation(txn.metadata, isManagedTable, Some(options))
               txn.commit(actions, op)
           case cmd: RunnableCommand =>
