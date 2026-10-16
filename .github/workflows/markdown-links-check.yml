@@ -27,14 +27,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-    - name: work around permission issue
-      run: git config --global --add safe.directory /github/workspace
     - uses: NVIDIA/spark-rapids-common/checkout@main
-    - uses: gaurav-nelson/github-action-markdown-link-check@v1
+    - name: Check Markdown links
+      uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
       with:
-        max-depth: -1
-        use-verbose-mode: 'yes'
-        config-file: '.github/workflows/markdown-links-check/markdown-links-check-config.json'
-        base-branch: 'gh-pages'
-        
-        
+        lycheeVersion: v0.24.2
+        args: >-
+          --config .github/workflows/markdown-links-check/lychee.toml
+          --root-dir "${{ github.workspace }}"
+          './**/*.md'
