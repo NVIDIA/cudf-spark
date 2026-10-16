@@ -68,7 +68,8 @@
                             <sources>
                                 <source>${spark.rapids.source.basedir}/delta-lake/common/src/main/scala</source>
                                 <source>${spark.rapids.source.basedir}/delta-lake/common/src/main/databricks/scala</source>
-                                <source>${spark.rapids.source.basedir}/delta-lake/common/src/main/db-350db143-400db173/scala</source>
+                                <source>${spark.rapids.source.basedir}/delta-lake/common/src/main/db-400db173-410db183/scala</source>
+                                <source>${spark.rapids.source.basedir}/delta-lake/common/src/main/db-400db173-410db183/java</source>
                             </sources>
                         </configuration>
                     </execution>
