@@ -1658,7 +1658,9 @@ def test_distinct_join(join_type, batch_size):
 @ignore_order(local=True)
 @pytest.mark.parametrize(
     "build_side", ["left", "right"], ids=["BUILD_LEFT", "BUILD_RIGHT"])
-def test_distinct_full_outer_join(build_side):
+@pytest.mark.parametrize(
+    "unmatched_build_rows", [False, True], ids=["MATCHED", "UNMATCHED"])
+def test_distinct_full_outer_join(build_side, unmatched_build_rows):
     join_conf = {
         "spark.sql.adaptive.enabled": "false",
         "spark.sql.autoBroadcastJoinThreshold": "-1",
@@ -1670,18 +1672,16 @@ def test_distinct_full_outer_join(build_side):
     }
 
     def do_join(spark):
-        left_df = spark.createDataFrame([
-            (None, "left_null"),
-            (1, "left_match"),
-            (2, "left_only"),
-            (4, "left_match_2"),
-        ], ["join_key", "left_value"])
-        right_df = spark.createDataFrame([
-            (None, "right_null"),
-            (1, "right_match"),
-            (3, "right_only"),
-            (4, "right_match_2"),
-        ], ["join_key", "right_value"])
+        if unmatched_build_rows:
+            left_rows = [(None, "left_null"), (1, "left_match"),
+                         (2, "left_only"), (4, "left_match_2")]
+            right_rows = [(None, "right_null"), (1, "right_match"),
+                          (3, "right_only"), (4, "right_match_2")]
+        else:
+            left_rows = [(1, "left_match"), (2, "left_match_2")]
+            right_rows = [(1, "right_match"), (2, "right_match_2")]
+        left_df = spark.createDataFrame(left_rows, ["join_key", "left_value"])
+        right_df = spark.createDataFrame(right_rows, ["join_key", "right_value"])
         if build_side == "left":
             left_df = left_df.hint("SHUFFLE_HASH")
         else:
