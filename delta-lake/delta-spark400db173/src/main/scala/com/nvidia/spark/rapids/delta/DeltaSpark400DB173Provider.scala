@@ -78,7 +78,7 @@ import org.apache.spark.sql.execution.datasources.v2.rapids.{
 import org.apache.spark.sql.rapids.{GpuAnd, GpuEqualTo, GpuFileSourceScanExec, GpuNot}
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims
 import org.apache.spark.sql.sources.InsertableRelation
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{StructField, StructType}
 
 object DeltaSpark400DB173Provider extends DatabricksDeltaProviderBase {
 
@@ -163,12 +163,30 @@ object DeltaSpark400DB173Provider extends DatabricksDeltaProviderBase {
     def pruneMetadataProject(
         project: GpuProjectExec,
         scan: GpuFileSourceScanExec): SparkPlan = {
+      def isMarkedGpuRowIndex(field: StructField): Boolean =
+        GpuDeltaParquetFileFormatBase.isGpuRowIndexColumn(field)
+      // A table may have a real column with the same name as DBR's temporary row index.
+      val hasUserRowIndexColumn = scan.relation.fileFormat match {
+        case format: GpuDeltaParquetFileFormatBase =>
+          val resolver = scan.relation.sparkSession.sessionState.conf.resolver
+          format.referenceSchema.fieldNames.exists(
+            resolver(_, DeltaParquetFileFormat.ROW_INDEX_STRUCT_FIELD.name))
+        case _ => false
+      }
+      def isUnusedRowIndex(field: StructField): Boolean =
+        !hasUserRowIndexColumn &&
+          field.name == DeltaParquetFileFormat.ROW_INDEX_STRUCT_FIELD.name &&
+          !isMarkedGpuRowIndex(field)
+
       project.copy(projectList = project.projectList.filterNot(_.name == "_metadata"))
         .withNewChildren(Seq(
           scan.copy(
-            originalOutput = scan.originalOutput.filterNot(_.name == "_tmp_metadata_row_index"),
+            originalOutput = scan.originalOutput.filterNot { attr =>
+              isUnusedRowIndex(StructField(
+                attr.name, attr.dataType, attr.nullable, attr.metadata))
+            },
             requiredSchema = StructType(
-              scan.requiredSchema.filterNot(_.name == "_tmp_metadata_row_index")
+              scan.requiredSchema.filterNot(isUnusedRowIndex)
             ))(scan.rapidsConf)))
     }
 
