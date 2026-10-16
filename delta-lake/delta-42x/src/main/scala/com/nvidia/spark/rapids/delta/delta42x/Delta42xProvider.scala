@@ -28,6 +28,7 @@ import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.connector.catalog.{Identifier, StagingTableCatalog, SupportsWrite}
+import org.apache.spark.sql.connector.read.Scan
 import org.apache.spark.sql.delta.{DeltaDynamicPartitionOverwriteCommand, DeltaLog, DeltaOptions,
   DeltaParquetFileFormat}
 import org.apache.spark.sql.delta.catalog.{DeltaCatalog, DeltaTableV2}
@@ -43,6 +44,8 @@ import org.apache.spark.sql.execution.datasources.v2.rapids.{GpuAtomicCreateTabl
   GpuAtomicReplaceTableAsSelectExec}
 
 object Delta42xProvider extends DeltaProviderBase with Logging {
+
+  override def getScans: Map[Class[_ <: Scan], ScanRule[_ <: Scan]] = DeltaV2ScanRule.rules
 
   override protected def getCDFRelationStrategy = Delta42xCDFRelationStrategy
 

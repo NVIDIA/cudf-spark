@@ -74,7 +74,7 @@ object GpuDeltaParquetFileFormatBase2 {
  * are materialized into boolean columns and processed in a FilterExec, the deletion vectors
  * are passed to the Parquet reader and applied during reading with no materialization.
  *
- * Note that we do not support the DataSourceV2 API for Delta Lake tables yet.
+ * Both V1 file scans and Delta V2 batch scans use these readers.
  */
 class GpuDeltaParquetFileFormatBase2(
     protocol: Protocol,
@@ -457,6 +457,27 @@ class GpuDeltaParquetFileFormatBase2(
       poolConf,
       fileScan.allMetrics,
       fileScan.queryUsesInputFile)
+  }
+
+  /** Use the V2 connector's already planned files, without constructing a V1 file scan. */
+  def createV2ReaderFactory(
+      sqlConf: SQLConf,
+      broadcastedConf: Broadcast[SerializableConfiguration],
+      dataSchema: StructType,
+      readDataSchema: StructType,
+      partitionSchema: StructType,
+      filters: Array[Filter],
+      rapidsConf: RapidsConf,
+      metrics: Map[String, GpuMetric],
+      queryUsesInputFile: Boolean): PartitionReaderFactory = {
+    new GpuDeltaParquetMultiFilePartitionReaderFactory(
+      sqlConf, broadcastedConf, prepareSchema(dataSchema), prepareSchema(readDataSchema),
+      prepareSchema(partitionSchema), prepareFiltersForRead(filters).toArray, rapidsConf,
+      ThreadPoolConfBuilder(rapidsConf), metrics, queryUsesInputFile) {
+      // Delta's SparkPartitionReader visits files in their planned order. In particular,
+      // multithreaded reads must not return whichever file finishes first.
+      override protected val keepReadsInOrderFromConf: Boolean = true
+    }
   }
 
   /**
