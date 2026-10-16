@@ -1085,6 +1085,7 @@
         <cudf-spark-jni.version>26.12.0-SNAPSHOT</cudf-spark-jni.version>
         <cudf-spark-jni.artifactId>cudf-spark-jni</cudf-spark-jni.artifactId>
         <cudf-spark-private.version>26.12.0-SNAPSHOT</cudf-spark-private.version>
+        <history-metrics.version>26.10.0-SNAPSHOT</history-metrics.version>
         <cudf-spark-private.artifactId>cudf-spark-private_${scala.binary.version}</cudf-spark-private.artifactId>
         <scala.binary.version>2.13</scala.binary.version>
         <scala.recompileMode>incremental</scala.recompileMode>
@@ -1392,6 +1393,12 @@
             <dependency>
               <groupId>org.junit.jupiter</groupId>
               <artifactId>junit-jupiter-api</artifactId>
+              <version>5.4.2</version>
+              <scope>test</scope>
+            </dependency>
+            <dependency>
+              <groupId>org.junit.jupiter</groupId>
+              <artifactId>junit-jupiter-engine</artifactId>
               <version>5.4.2</version>
               <scope>test</scope>
             </dependency>

@@ -95,18 +95,21 @@ if [[ -n "$DEDUPE_CACHE_SPARK_SHARED_TXT" && \
   cp "$DEDUPE_CACHE_SHIM_SHA_PACKAGE_FILES_TXT" tmp-shim-sha-package-files.txt
   cp "$DEDUPE_CACHE_COUNT_SHIM_SHA_PACKAGE_FILES_TXT" tmp-count-shim-sha-package-files.txt
   CACHE_HIT=1
-# With one shim there is no cross-shim identity proof to perform; every
-# non-META file is the sole representative for its path.
+# With one shim there are no copies from other shims to compare. Include
+# META-INF versioned classes in the hash comparison while leaving service
+# descriptors and other metadata in their worlds.
 elif [[ "${UNSHIM_FAST:-0}" == "1" && "${#SPARK_SHIM_DIRS[@]}" == "1" ]]; then
   echo "$((++STEP))/ single shim fast path; listing files > $SPARK_SHARED_TXT"
   : > tmp-sha1-files.txt
   : > tmp-shim-sha-package-files.txt
   : > tmp-count-shim-sha-package-files.txt
-  find "${SPARK_SHIM_DIRS[0]}" -name META-INF -prune -o -name webapps -prune -o \( -type f -print \) | \
+  find "${SPARK_SHIM_DIRS[0]}" -name webapps -prune -o \
+    \( -type f \( -not -path '*/META-INF/*' -o -name '*.class' \) -print \) | \
     sort | sed 's|^\./parallel-world||' > "$SPARK_SHARED_TXT"
 else
-  echo "$((++STEP))/ SHA1 of all non-META files > tmp-sha1-files.txt"
-  find ./parallel-world/spark[345]* -name META-INF -prune -o -name webapps -prune -o \( -type f -print0 \) | \
+  echo "$((++STEP))/ SHA1 of candidate files > tmp-sha1-files.txt"
+  find ./parallel-world/spark[345]* -name webapps -prune -o \
+    \( -type f \( -not -path '*/META-INF/*' -o -name '*.class' \) -print0 \) | \
     xargs --null $SHASUM > tmp-sha1-files.txt
 
   echo "$((++STEP))/ make shim column 1 > tmp-shim-sha-package-files.txt"
