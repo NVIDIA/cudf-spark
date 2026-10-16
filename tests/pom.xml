@@ -267,8 +267,8 @@
                 </property>
             </activation>
             <properties>
-                <delta.test.spark.artifactId>${delta40x.spark.artifactId}</delta.test.spark.artifactId>
-                <delta.test.version>${delta40x.version}</delta.test.version>
+                <delta.test.spark.artifactId>${delta42x.spark.artifactId}</delta.test.spark.artifactId>
+                <delta.test.version>${delta42x.version}</delta.test.version>
             </properties>
             <dependencies>
                 <dependency>
@@ -347,8 +347,8 @@
                 </property>
             </activation>
             <properties>
-                <delta.test.spark.artifactId>${delta41x.spark.artifactId}</delta.test.spark.artifactId>
-                <delta.test.version>${delta41x.version}</delta.test.version>
+                <delta.test.spark.artifactId>${delta42x.spark.artifactId}</delta.test.spark.artifactId>
+                <delta.test.version>${delta42x.version}</delta.test.version>
             </properties>
             <dependencies>
                 <dependency>
