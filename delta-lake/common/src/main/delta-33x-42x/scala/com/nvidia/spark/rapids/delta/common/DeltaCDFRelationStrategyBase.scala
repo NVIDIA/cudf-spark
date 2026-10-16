@@ -21,8 +21,9 @@ import org.apache.spark.sql.catalyst.expressions.{Alias, And, Literal}
 import org.apache.spark.sql.catalyst.planning.PhysicalOperation
 import org.apache.spark.sql.catalyst.plans.logical.{Filter, LogicalPlan, Project}
 import org.apache.spark.sql.delta.commands.cdc.CDCReader.DeltaCDFRelation
-import org.apache.spark.sql.execution.{SparkPlan, SparkStrategy}
+import org.apache.spark.sql.execution.{ProjectExec, SparkPlan, SparkStrategy}
 import org.apache.spark.sql.execution.datasources.LogicalRelation
+import org.apache.spark.sql.types.DataType
 
 /**
  * Shared planning logic for exposing the internal DataFrame of an OSS Delta batch CDF relation.
@@ -53,7 +54,34 @@ abstract class DeltaCDFRelationStrategyBase extends SparkStrategy {
         val rewritten = Project(projects,
           Filter(filter, Project(relationOutput, changes.queryExecution.analyzed)))
 
-        Seq(planLater(spark.sessionState.optimizer.execute(rewritten)))
+        val optimized = spark.sessionState.optimizer.execute(rewritten)
+        if (optimized.output == rewritten.output) {
+          Seq(planLater(optimized))
+        } else {
+          // Optimizing this subtree can remove redundant aliases and change its output exprIds.
+          // The physical parent still references the original output, so restore it outside the
+          // optimizer while retaining predicate pushdown and column pruning within the CDF read.
+          // Spark's optimizer preserves the ordered output schema, allowing nullability changes.
+          // Check that contract before mapping by position to avoid silently truncating the zip.
+          require(DataType.equalsIgnoreNullability(optimized.schema, rewritten.schema),
+            "Delta CDF optimization changed the ordered output schema")
+          val (expressions, child) = optimized match {
+            case Project(projectList, input) => (projectList, input)
+            case other => (other.output, other)
+          }
+          val output = expressions.zip(rewritten.output).map { case (actual, expected) =>
+            // Reuse an existing projection's expressions rather than projecting its output twice.
+            val expression = actual match {
+              case alias: Alias => alias.child
+              case other => other
+            }
+            Alias(expression, expected.name)(
+              exprId = expected.exprId,
+              qualifier = expected.qualifier,
+              explicitMetadata = Some(expected.metadata))
+          }
+          Seq(ProjectExec(output, planLater(child)))
+        }
       }
     case _ => Nil
   }
