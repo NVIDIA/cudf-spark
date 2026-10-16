@@ -40,7 +40,7 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference}
 import org.apache.spark.sql.columnar.CachedBatch
 import org.apache.spark.sql.execution.columnar.DefaultCachedBatchSerializer
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.PCBSSchemaHelper
+import org.apache.spark.sql.rapids.{PCBSSchemaHelper, TestPrimitiveUDT}
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.types._
@@ -152,6 +152,19 @@ class CachedBatchWriterSuite extends SparkQueryCompareTestSuite {
           CompressionType.NONE
         }) == opts.getCompressionType)
     }
+  }
+
+  test("PCBS schema conversion supports nested UDTs") {
+    val udt = new TestPrimitiveUDT
+    assert(PCBSSchemaHelper.getSupportedDataType(
+      ArrayType(udt, containsNull = true)) ===
+      ArrayType(IntegerType, containsNull = true))
+    assert(PCBSSchemaHelper.getSupportedDataType(
+      StructType(Seq(StructField("value", udt, nullable = true)))) ===
+      StructType(Seq(StructField("_col0", IntegerType, nullable = true))))
+    assert(PCBSSchemaHelper.getSupportedDataType(
+      MapType(StringType, udt, valueContainsNull = true)) ===
+      MapType(StringType, IntegerType, valueContainsNull = true))
   }
 
   test("cache empty columnar batch on GPU") {

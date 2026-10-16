@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from decimal import Decimal
 import os
+
 import pytest
 
-from asserts import (assert_gpu_and_cpu_are_equal_collect,
+from asserts import (assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect,
     assert_cpu_and_gpu_are_equal_collect_with_capture, assert_equal)
 from conftest import is_not_utc
 from data_gen import *
@@ -323,19 +325,45 @@ def test_cache_map_and_array(data_gen, enable_vectorized):
 
     assert_gpu_and_cpu_are_equal_collect(helper)
 
-def test_cache_udt():
+@allow_non_gpu('InMemoryTableScanExec')
+@pytest.mark.parametrize('aqe_enabled', ['true', 'false'])
+def test_cache_udt(aqe_enabled):
+    schema = StructType([
+        StructField('mllib_v', mllib.VectorUDT(), nullable=True),
+        StructField('ml_v', ml.VectorUDT(), nullable=True),
+        StructField('ml_array', ArrayType(ml.VectorUDT(), containsNull=True), nullable=False),
+        StructField('ml_struct', StructType([
+            StructField('v', ml.VectorUDT(), nullable=True)]), nullable=False),
+        StructField('ml_map', MapType(StringType(), ml.VectorUDT(), valueContainsNull=True),
+            nullable=False),
+        StructField('decimal32', DecimalType(5, 2), nullable=False),
+        StructField('decimal64', DecimalType(12, 2), nullable=False)])
+    values = [
+        (mllib.DenseVector([1, ]), ml.DenseVector([1, ]),
+            [ml.DenseVector([1, ]), None], (ml.DenseVector([1, ]),),
+            {'dense': ml.DenseVector([1, ]), 'null': None},
+            Decimal('123.45'), Decimal('9876543210.12')),
+        (mllib.SparseVector(1, [0, ], [1, ]), ml.SparseVector(1, [0, ], [1, ]),
+            [ml.SparseVector(1, [0, ], [1, ])], (ml.SparseVector(1, [0, ], [1, ]),),
+            {'sparse': ml.SparseVector(1, [0, ], [1, ])},
+            Decimal('-12.34'), Decimal('-9876543210.12'))]
+
     def fun(spark):
-        df = spark.sparkContext.parallelize([
-            (mllib.DenseVector([1, ]), ml.DenseVector([1, ])),
-            (mllib.SparseVector(1, [0, ], [1, ]), ml.SparseVector(1, [0, ], [1, ]))
-        ]).toDF(["mllib_v", "ml_v"])
+        df = spark.createDataFrame(spark.sparkContext.parallelize(values), schema)
         df.cache().count()
-        return df.selectExpr("mllib_v", "ml_v").collect()
-    cpu_result = with_cpu_session(fun)
-    gpu_result = with_gpu_session(fun)
-    # assert_gpu_and_cpu_are_equal_collect method doesn't handle UDT so we just write a single
-    # statement here to compare
-    assert cpu_result == gpu_result, "not equal"
+        return df
+
+    def canonicalize(cpu_result, gpu_result):
+        # The generic result comparator does not handle vector UDT values. Check each round trip
+        # against the source first, then give it stable strings for its final CPU/GPU comparison.
+        assert cpu_result == values, "CPU result not equal to source values"
+        assert gpu_result == values, "GPU result not equal to source values"
+        return [repr(row) for row in cpu_result], [repr(row) for row in gpu_result]
+
+    assert_gpu_fallback_collect(
+        fun, 'InMemoryTableScanExec',
+        conf={'spark.sql.adaptive.enabled': aqe_enabled},
+        result_canonicalize_func_before_compare=canonicalize)
 
 @pytest.mark.parametrize('enable_vectorized_conf', enable_vectorized_confs, ids=idfn)
 @ignore_order(local=True)

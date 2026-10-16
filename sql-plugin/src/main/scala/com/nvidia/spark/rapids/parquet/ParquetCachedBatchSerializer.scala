@@ -745,7 +745,7 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
               } else {
                 newRow.setInterval(index, interval)
               }
-            case d: DecimalType =>
+            case d: DecimalType if d.scale < 0 =>
               if (row.isNullAt(index)) {
                 newRow.setDecimal(index, null, d.precision)
               } else {
