@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -136,32 +136,37 @@ case class ApproxPercentileFromTDigestExpr(
 
   override def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
     val expr = child.asInstanceOf[GpuExpression]
-    withResource(expr.columnarEval(batch)) { cv =>
+    val percentileValues = percentiles match {
+      case Left(p) => Array(p)
+      case Right(p) => p
+    }
+    val percentileColumn = withResource(expr.columnarEval(batch)) { cv =>
+      cv.getBase.approxPercentile(percentileValues)
+    }
+    withResource(percentileColumn) { _ =>
       percentiles match {
-        case Left(p) =>
+        case Left(_) =>
           // For the scalar case, we still pass cuDF an array of percentiles
           // (containing a single item) and then extract the child column from the resulting
           // array and return that (after converting from Double to finalDataType)
-          withResource(cv.getBase.approxPercentile(Array(p))) { percentiles =>
-            withResource(percentiles.extractListElement(0)) { childView =>
-              withResource(doCast(childView, DataTypes.DoubleType, finalDataType)) { childCv =>
-                GpuColumnVector.from(childCv.copyToColumnVector(), dataType)
-              }
-            }
+          val childCv = withResource(percentileColumn.extractListElement(0)) { childView =>
+            doCast(childView, DataTypes.DoubleType, finalDataType)
+          }
+          withResource(childCv) { _ =>
+            GpuColumnVector.from(childCv.copyToColumnVector(), dataType)
           }
 
-        case Right(p) =>
+        case Right(_) =>
           // array case - cast cuDF Array[Double] to Array[finalDataType]
-          withResource(cv.getBase.approxPercentile(p)) { percentiles =>
-            if (finalDataType == DataTypes.DoubleType) {
-              GpuColumnVector.from(percentiles.incRefCount(), dataType)
-            } else {
-              withResource(percentiles.getChildColumnView(0)) { childView =>
-                withResource(doCast(childView, DataTypes.DoubleType, finalDataType)) { childCv =>
-                  withResource(percentiles.replaceListChild(childCv)) { x =>
-                    GpuColumnVector.from(x.copyToColumnVector(), dataType)
-                  }
-                }
+          if (finalDataType == DataTypes.DoubleType) {
+            GpuColumnVector.from(percentileColumn.incRefCount(), dataType)
+          } else {
+            val childCv = withResource(percentileColumn.getChildColumnView(0)) { childView =>
+              doCast(childView, DataTypes.DoubleType, finalDataType)
+            }
+            withResource(childCv) { _ =>
+              withResource(percentileColumn.replaceListChild(childCv)) { castPercentiles =>
+                GpuColumnVector.from(castPercentiles.copyToColumnVector(), dataType)
               }
             }
           }

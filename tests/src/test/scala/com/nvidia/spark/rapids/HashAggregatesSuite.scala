@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids
 
 import java.sql.Timestamp
 
+import ai.rapids.cudf.{ColumnVector => CudfColumnVector, DType, HostColumnVector}
 import org.apache.spark
 
 import org.apache.spark.SparkConf
@@ -32,12 +33,64 @@ import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, Broadcast
 import org.apache.spark.sql.execution.aggregate.{ObjectHashAggregateExec, SortAggregateExec}
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
-import org.apache.spark.sql.rapids.aggregate.{CudfAggregate, GpuAggregateExpression,
-  GpuAggregateFunction}
+import org.apache.spark.sql.rapids.aggregate.{CudfAggregate, CudfMergeM2, GpuAggregateExpression,
+  GpuAggregateFunction, GpuCheckOverflowAfterSum}
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims._
-import org.apache.spark.sql.types.{DataType, DataTypes, IntegerType}
+import org.apache.spark.sql.types.{BooleanType, DataType, DataTypes, DecimalType, IntegerType}
 
 class HashAggregatesSuite extends SparkQueryCompareTestSuite {
+  test("merge M2 reduction returns an owning scalar after closing its input") {
+    import Arm.withResource
+
+    val structType = new HostColumnVector.StructType(false,
+      new HostColumnVector.BasicType(false, DType.FLOAT64),
+      new HostColumnVector.BasicType(false, DType.FLOAT64),
+      new HostColumnVector.BasicType(false, DType.FLOAT64))
+    def partial(n: Double, mean: Double, m2: Double): HostColumnVector.StructData =
+      new HostColumnVector.StructData(Double.box(n), Double.box(mean), Double.box(m2))
+
+    val merged = withResource(CudfColumnVector.fromStructs(structType,
+      partial(2.0, 3.0, 2.0), partial(2.0, 5.0, 2.0))) { input =>
+      new CudfMergeM2().reductionAggregate(input)
+    }
+    withResource(merged) { _ =>
+      withResource(CudfColumnVector.fromScalar(merged, 1)) { result =>
+        withResource(result.copyToHost()) { host =>
+          for ((expected, index) <- Seq(4.0, 4.0, 8.0).zipWithIndex) {
+            withResource(host.getChildColumnView(index)) { child =>
+              assert(child.getDouble(0) == expected)
+            }
+          }
+        }
+      }
+    }
+  }
+
+  test("decimal sum overflow check keeps empty, null, and ANSI behavior") {
+    import Arm.withResource
+
+    val decimalType = DecimalType(5, 0)
+    def checked(isEmpty: Boolean, nullOnOverflow: Boolean): GpuCheckOverflowAfterSum =
+      GpuCheckOverflowAfterSum(GpuLiteral(null, decimalType),
+        GpuLiteral(isEmpty, BooleanType), decimalType, nullOnOverflow)
+
+    withResource(new org.apache.spark.sql.vectorized.ColumnarBatch(
+      Array.empty[org.apache.spark.sql.vectorized.ColumnVector], 1)) { batch =>
+      for ((isEmpty, nullOnOverflow) <- Seq((true, false), (false, true))) {
+        withResource(checked(isEmpty, nullOnOverflow).columnarEval(batch)) { result =>
+          withResource(result.copyToHost()) { host =>
+            assert(host.isNullAt(0))
+          }
+        }
+      }
+      intercept[ArithmeticException] {
+        withResource(checked(isEmpty = false, nullOnOverflow = false).columnarEval(batch)) {
+          _ => ()
+        }
+      }
+    }
+  }
+
   private def floatAggConf: SparkConf = enableCsvConf()
       .set(RapidsConf.ENABLE_FLOAT_AGG.key, "true")
 
