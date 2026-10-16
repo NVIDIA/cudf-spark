@@ -801,18 +801,26 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
           val listBuffer = new ListBuffer[InternalRow]()
           val supportedSchema =
             PCBSSchemaHelper.getSupportedDataType(dataType).asInstanceOf[StructType]
-          arrayData.foreach(supportedSchema, (_, data) => {
-            val structRow =
-              handleStruct(data.asInstanceOf[InternalRow], s, s)
-            listBuffer += structRow.copy()
+          arrayData.foreach(supportedSchema, (i, data) => {
+            if (arrayData.isNullAt(i)) {
+              listBuffer += null
+            } else {
+              val structRow =
+                handleStruct(data.asInstanceOf[InternalRow], s, s)
+              listBuffer += structRow.copy()
+            }
           })
           new GenericArrayData(listBuffer)
 
         case ArrayType(elementType, _) =>
           val arrayList = new ListBuffer[Any]()
           scala.Range(0, arrayData.numElements()).foreach { i =>
-            val subArrayData = arrayData.getArray(i)
-            arrayList.append(handleArray(elementType, subArrayData))
+            if (arrayData.isNullAt(i)) {
+              arrayList.append(null)
+            } else {
+              val subArrayData = arrayData.getArray(i)
+              arrayList.append(handleArray(elementType, subArrayData))
+            }
           }
           new GenericArrayData(arrayList)
 
@@ -820,8 +828,12 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
           val mapList =
             new ListBuffer[Any]()
           scala.Range(0, arrayData.numElements()).foreach { i =>
-            val mapData = arrayData.getMap(i)
-            mapList.append(handleMap(m.keyType, m.valueType, mapData))
+            if (arrayData.isNullAt(i)) {
+              mapList.append(null)
+            } else {
+              val mapData = arrayData.getMap(i)
+              mapList.append(handleMap(m.keyType, m.valueType, mapData))
+            }
           }
           new GenericArrayData(mapList)
 
