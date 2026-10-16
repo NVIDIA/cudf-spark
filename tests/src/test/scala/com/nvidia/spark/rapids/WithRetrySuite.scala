@@ -487,6 +487,44 @@ class WithRetrySuite
     assert(Rmm.getTotalBytesAllocated == baseline)
   }
 
+  test("splitSpillableInHalfByRows releases split tables when type lookup fails") {
+    val baseline = Rmm.getTotalBytesAllocated
+    val toSplit = buildBatch
+    doThrow(new IllegalStateException("type lookup failed")).when(toSplit).dataTypes
+    intercept[IllegalStateException] {
+      splitSpillableInHalfByRows(toSplit)
+    }
+    verify(toSplit, times(1)).close()
+    assert(Rmm.getTotalBytesAllocated == baseline)
+  }
+
+  test("splitSpillableInHalfByRows releases split tables when input close fails") {
+    val baseline = Rmm.getTotalBytesAllocated
+    val toSplit = buildBatch
+    doAnswer(invocation => {
+      invocation.callRealMethod()
+      throw new IllegalStateException("input close failed")
+    }).when(toSplit).close()
+    intercept[IllegalStateException] {
+      splitSpillableInHalfByRows(toSplit)
+    }
+    verify(toSplit, times(1)).close()
+    assert(Rmm.getTotalBytesAllocated == baseline)
+  }
+
+  test("splitSpillableInHalfByRows closes a one-row GPU batch") {
+    val baseline = Rmm.getTotalBytesAllocated
+    val toSplit = withResource(new Table.TestBuilder()
+      .column(Array[java.lang.Long](5L): _*).build()) { table =>
+      spy(SpillableColumnarBatch(GpuColumnVector.from(table, Array[DataType](LongType)), -1))
+    }
+    intercept[GpuSplitAndRetryOOM] {
+      splitSpillableInHalfByRows(toSplit)
+    }
+    verify(toSplit, times(1)).close()
+    assert(Rmm.getTotalBytesAllocated == baseline)
+  }
+
   test("splitSpillableInHalfByRows closes its input when splitting runs out of memory") {
     val baseline = Rmm.getTotalBytesAllocated
     val toSplit = buildBatch

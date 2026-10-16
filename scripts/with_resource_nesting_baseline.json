@@ -29,11 +29,6 @@
       "resource": "withResource(valueColumn.isNull)"
     },
     {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/RmmRapidsRetryIterator.scala",
-      "fingerprint": "e002e24d036ea07b9ae9",
-      "resource": "withResource(tables.safeMap(GpuColumnVector.from(_,spillable.dataTypes)))"
-    },
-    {
       "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/SamplingUtils.scala",
       "fingerprint": "1b271f866d9bad5f247d",
       "resource": "withResource(concat)"
