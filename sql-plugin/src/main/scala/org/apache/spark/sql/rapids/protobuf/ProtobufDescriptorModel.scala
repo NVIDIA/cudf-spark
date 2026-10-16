@@ -87,6 +87,18 @@ final case class ProtobufEnumValue(number: Int, name: String)
  * Enum entries in declaration order, including aliases. Numeric lookup uses the first name.
  */
 final case class ProtobufEnumMetadata(values: Vector[ProtobufEnumValue]) {
+  private lazy val valuesByNumber = values.sortBy(_.number)
+
+  lazy val hasAliases: Boolean = valuesByNumber
+    .sliding(2)
+    .exists(pair => pair.length == 2 && pair.head.number == pair.last.number)
+  private lazy val validValuesSnapshot: Array[Int] = valuesByNumber.map(_.number).toArray
+  private lazy val orderedNamesSnapshot: Array[Array[Byte]] =
+    valuesByNumber.map(_.name.getBytes("UTF-8")).toArray
+
+  def validValues: Array[Int] = validValuesSnapshot.clone()
+  def orderedNames: Array[Array[Byte]] = orderedNamesSnapshot.map(_.clone())
+
   private lazy val namesByNumber: Map[Int, String] =
     values.reverseIterator.map(v => v.number -> v.name).toMap
 
