@@ -485,7 +485,7 @@ stderr is an intentional interface. If that helper is not available to a module,
 #### Java
 
 This project follows the
-[Oracle Java code conventions](http://www.oracle.com/technetwork/java/codeconvtoc-136057.html)
+[Oracle Java code conventions](https://www.oracle.com/java/technologies/javase/codeconventions-contents.html)
 and the Scala conventions detailed above, preferring the latter.
 
 ### Sign your work

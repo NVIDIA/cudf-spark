@@ -126,6 +126,8 @@ def define_deps(spark_version, scala_version):
 
         Artifact('com.google.protobuf', 'protobuf-java',
                  f'{prefix_ws_sp_mvn_hadoop}--com.google.protobuf--protobuf-java--com.google.protobuf__protobuf-java__*.jar'),
+        Artifact('com.univocity', 'univocity-parsers',
+                 f'{prefix_ws_sp_mvn_hadoop}--com.univocity--univocity-parsers--com.univocity__univocity-parsers__*.jar'),
         Artifact('com.esotericsoftware.kryo', f'kryo-shaded-db',
                  f'{prefix_ws_sp_mvn_hadoop}--com.esotericsoftware--kryo-shaded--com.esotericsoftware__kryo-shaded__*.jar'),
         Artifact('org.apache.commons', 'commons-io',

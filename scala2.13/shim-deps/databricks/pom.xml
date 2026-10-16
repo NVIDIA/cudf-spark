@@ -136,6 +136,12 @@
             <scope>compile</scope>
         </dependency>
         <dependency>
+            <groupId>com.univocity</groupId>
+            <artifactId>univocity-parsers</artifactId>
+            <version>${spark.version}</version>
+            <scope>compile</scope>
+        </dependency>
+        <dependency>
             <groupId>org.apache.spark</groupId>
             <artifactId>spark-network-common_${scala.binary.version}</artifactId>
             <version>${spark.version}</version>
