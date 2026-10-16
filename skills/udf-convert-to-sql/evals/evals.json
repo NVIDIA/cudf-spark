@@ -1,0 +1,45 @@
+{
+  "skill_name": "udf-convert-to-sql",
+  "evals": [
+    {
+      "id": "udf-convert-to-sql__array-segment-sum",
+      "prompt": "Convert the Spark UDF at input/array-segment-sum/ArraySegmentSumUDF.scala to an equivalent native Spark SQL expression that runs on the GPU, and verify it matches the CPU UDF. A passing unit test is provided at input/array-segment-sum/UnitTest.scala.",
+      "expected_skill": "udf-convert-to-sql",
+      "expected_script": null,
+      "files": [
+        "evals/files/array-segment-sum/ArraySegmentSumUDF.scala",
+        "evals/files/array-segment-sum/UnitTest.scala"
+      ],
+      "expected_output": "A native Spark SQL expression equivalent to the UDF whose output matches the CPU UDF in schema and values on the unit-test data, with the entire plan running on the GPU (no unsupported-operator fallback).",
+      "assertions": [
+        "Loads the udf-convert-to-sql skill",
+        "Produces a Spark SQL expression equivalent to the UDF across its edge cases (including edge case handling and branch semantics) and preserving the result type",
+        "Asserts the SQL output is identical in schema and values to the CPU UDF on the same unit-test data",
+        "Confirms the entire SQL plan runs on the GPU with no unsupported-operator (CPU) fallback",
+        "Keeps the implementation general - no hardcoded test values"
+      ]
+    },
+    {
+      "id": "udf-convert-to-sql__negative-config",
+      "prompt": "What's the difference between cache() and persist() in Spark?",
+      "expected_skill": null,
+      "expected_script": null,
+      "files": [],
+      "expected_output": "A one-line conceptual Spark answer; not a request to rewrite a UDF as SQL, so udf-convert-to-sql should not activate.",
+      "assertions": [
+        "Does not load the udf-convert-to-sql skill"
+      ]
+    },
+    {
+      "id": "udf-convert-to-sql__negative-unrelated",
+      "prompt": "How do I set the Spark log level to WARN?",
+      "expected_skill": null,
+      "expected_script": null,
+      "files": [],
+      "expected_output": "Basic Spark logging question, unrelated to converting a UDF to SQL; no UDF skill should activate.",
+      "assertions": [
+        "Does not load the udf-convert-to-sql skill"
+      ]
+    }
+  ]
+}

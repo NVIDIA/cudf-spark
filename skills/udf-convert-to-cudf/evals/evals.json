@@ -1,0 +1,47 @@
+{
+  "skill_name": "udf-convert-to-cudf",
+  "evals": [
+    {
+      "id": "udf-convert-to-cudf__array-segment-sum",
+      "prompt": "Convert the Spark UDF at input/array-segment-sum/ArraySegmentSumUDF.scala to a cuDF RapidsUDF and verify the GPU output matches the CPU UDF. A passing unit test is provided at input/array-segment-sum/UnitTest.scala.",
+      "expected_skill": "udf-convert-to-cudf",
+      "expected_script": null,
+      "files": [
+        "evals/files/array-segment-sum/ArraySegmentSumUDF.scala",
+        "evals/files/array-segment-sum/UnitTest.scala"
+      ],
+      "expected_output": "A cuDF RapidsUDF whose GPU output matches the CPU UDF in schema and values on the unit-test data, implemented with pure columnar cuDF ops, running on the GPU with no CPU fallback and no memory leaks.",
+      "assertions": [
+        "Loads the udf-convert-to-cudf skill",
+        "Implements a cuDF RapidsUDF reproducing every branch of the CPU UDF (including edge case handling and branch semantics) and preserving the result type",
+        "Keeps the GPU path pure columnar - no copyToHost or host-side per-row logic",
+        "Asserts the GPU output is identical in schema and values to the CPU UDF on the same unit-test data",
+        "Confirms the RapidsUDF executes on the GPU with no CPU fallback",
+        "Confirms there are no GPU memory leaks",
+        "Keeps the implementation general - no hardcoded test values or row-specific branches"
+      ]
+    },
+    {
+      "id": "udf-convert-to-cudf__negative-config",
+      "prompt": "How do I increase the executor memory for my Spark job on YARN?",
+      "expected_skill": null,
+      "expected_script": null,
+      "files": [],
+      "expected_output": "A one-line Spark cluster-config answer; not a request to convert a UDF, so udf-convert-to-cudf should not activate.",
+      "assertions": [
+        "Does not load the udf-convert-to-cudf skill"
+      ]
+    },
+    {
+      "id": "udf-convert-to-cudf__negative-unrelated",
+      "prompt": "How do I read a Parquet file into a DataFrame in PySpark?",
+      "expected_skill": null,
+      "expected_script": null,
+      "files": [],
+      "expected_output": "Basic Spark I/O question, unrelated to converting a UDF to a cuDF RapidsUDF; no UDF skill should activate.",
+      "assertions": [
+        "Does not load the udf-convert-to-cudf skill"
+      ]
+    }
+  ]
+}

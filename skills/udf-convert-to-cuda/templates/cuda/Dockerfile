@@ -13,7 +13,6 @@ ARG CMAKE_VERSION=4.0.3
 ARG CMAKE_ARCH=x86_64
 ARG CCACHE_VERSION=4.11.2
 ARG MAVEN_VERSION=3.9.9
-ARG MAVEN_BASE_URL=https://archive.apache.org/dist/maven/maven-3
 ARG PARALLEL_LEVEL=10
 
 ENV TOOLSET_VERSION=${TOOLSET_VERSION}
@@ -39,10 +38,11 @@ RUN cd /usr/local && \
   tar zxf cmake-${CMAKE_VERSION}-linux-${CMAKE_ARCH}.tar.gz && \
   rm cmake-${CMAKE_VERSION}-linux-${CMAKE_ARCH}.tar.gz
 
-# The rockylinux8 maven package is too old for the template build plugins.
-# Install a modern Maven binary on PATH instead.
+# The rockylinux8 `maven` package is 3.5.4, too old for the template build plugins
+# (build-helper-maven-plugin, scoverage-maven-plugin require Maven >= 3.6.3), so install
+# a modern Apache Maven binary on PATH instead.
 RUN cd /usr/local && \
-  wget --quiet ${MAVEN_BASE_URL}/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz && \
+  wget --quiet https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz && \
   tar zxf apache-maven-${MAVEN_VERSION}-bin.tar.gz && \
   rm apache-maven-${MAVEN_VERSION}-bin.tar.gz
 
