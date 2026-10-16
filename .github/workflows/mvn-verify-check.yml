@@ -24,6 +24,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # Shadow rollout: switch to true only after the first dual-repository provenance canary.
+  JNI_PROVENANCE_REQUIRED: 'false'
   COMMON_MVN_FLAGS: >-
     -Ddist.jar.compress=false
     -DskipTests
@@ -48,6 +50,12 @@ jobs:
       sparkJDKVersions: ${{ steps.all212ShimVersionsStep.outputs.jdkVersions }}
     steps:
       - uses: NVIDIA/spark-rapids-common/checkout@main # refs/pull/:prNumber/merge
+      - name: Validate JNI submodule contract
+        run: |
+          python3 jenkins/jni_dependency.py \
+            --pom pom.xml \
+            --pom scala2.13/pom.xml \
+            check
       - uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
@@ -58,7 +66,8 @@ jobs:
           set -x
           depsSHA1=$(. .github/workflows/mvn-verify-check/get-deps-sha1.sh 2.12)
           hashfile=$(echo ${{ hashFiles('**/pom.xml') }})
-          md5sum=$(echo -n "$depsSHA1-$hashfile" | md5sum | awk '{print $1}')
+          jniPointer=$(git ls-files --stage -- thirdparty/cudf-spark-jni | awk '{print $2}')
+          md5sum=$(echo -n "$depsSHA1-$hashfile-$jniPointer" | md5sum | awk '{print $1}')
           cacheKey="${{ runner.os }}-maven-${{ github.event.pull_request.base.ref }}-${md5sum}"
           echo "dailyCacheKey=$cacheKey" | tee $GITHUB_ENV $GITHUB_OUTPUT
       - name: Cache local Maven repository
@@ -77,6 +86,26 @@ jobs:
           SCALA_VER: '2.12'
         run: |
           . .github/workflows/mvn-verify-check/populate-daily-cache.sh
+      - name: Verify Sonatype JNI provenance
+        if: env.JNI_PROVENANCE_REQUIRED == 'true'
+        run: |
+          python3 jenkins/jni_dependency.py \
+            --pom pom.xml \
+            --pom scala2.13/pom.xml \
+            verify-repository \
+            --base-url https://central.sonatype.com/repository/maven-snapshots \
+            --attempts 20 \
+            --wait-seconds 30
+          jniVersion=$(mvn help:evaluate -q -Dexpression=cudf-spark-jni.version -DforceStdout)
+          mvn $COMMON_MVN_FLAGS -U \
+            org.apache.maven.plugins:maven-dependency-plugin:3.8.1:get \
+            -Dartifact=com.nvidia:cudf-spark-jni:${jniVersion}:jar:cuda12 \
+            -Dtransitive=false
+          python3 jenkins/jni_dependency.py \
+            --pom pom.xml \
+            --pom scala2.13/pom.xml \
+            verify-jar \
+            --jar "$HOME/.m2/repository/com/nvidia/cudf-spark-jni/${jniVersion}/cudf-spark-jni-${jniVersion}-cuda12.jar"
       - name: all shim versions
         id: all212ShimVersionsStep
         run: |
@@ -176,7 +205,8 @@ jobs:
           set -x
           depsSHA1=$(. .github/workflows/mvn-verify-check/get-deps-sha1.sh 2.13)
           hashfile=$(echo ${{ hashFiles('**/pom.xml') }})
-          md5sum=$(echo -n "$depsSHA1-$hashfile" | md5sum | awk '{print $1}')
+          jniPointer=$(git ls-files --stage -- thirdparty/cudf-spark-jni | awk '{print $2}')
+          md5sum=$(echo -n "$depsSHA1-$hashfile-$jniPointer" | md5sum | awk '{print $1}')
           cacheKey="${{ runner.os }}-maven-${{ github.event.pull_request.base.ref }}-${md5sum}"
           echo "scala213dailyCacheKey=$cacheKey" | tee $GITHUB_ENV $GITHUB_OUTPUT
       - name: Cache local Maven repository
@@ -195,6 +225,27 @@ jobs:
           SCALA_VER: '2.13'
         run: |
           . .github/workflows/mvn-verify-check/populate-daily-cache.sh
+      - name: Verify Sonatype JNI provenance
+        if: env.JNI_PROVENANCE_REQUIRED == 'true'
+        run: |
+          python3 jenkins/jni_dependency.py \
+            --pom pom.xml \
+            --pom scala2.13/pom.xml \
+            verify-repository \
+            --base-url https://central.sonatype.com/repository/maven-snapshots \
+            --attempts 20 \
+            --wait-seconds 30
+          jniVersion=$(mvn help:evaluate -q -f scala2.13/pom.xml \
+            -Dexpression=cudf-spark-jni.version -DforceStdout)
+          mvn $COMMON_MVN_FLAGS -U -f scala2.13/pom.xml \
+            org.apache.maven.plugins:maven-dependency-plugin:3.8.1:get \
+            -Dartifact=com.nvidia:cudf-spark-jni:${jniVersion}:jar:cuda12 \
+            -Dtransitive=false
+          python3 jenkins/jni_dependency.py \
+            --pom pom.xml \
+            --pom scala2.13/pom.xml \
+            verify-jar \
+            --jar "$HOME/.m2/repository/com/nvidia/cudf-spark-jni/${jniVersion}/cudf-spark-jni-${jniVersion}-cuda12.jar"
       - name: all 213 shim verions
         id: all213ShimVersionsStep
         run: |
