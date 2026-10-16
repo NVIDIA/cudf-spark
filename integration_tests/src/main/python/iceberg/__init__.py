@@ -435,8 +435,7 @@ def schema_to_ddl(spark, schema):
 _BASE_TBLPROPS = {'write.spark.fanout.enabled': False}
 
 # Older Iceberg REST clients, including 1.6.x, do not apply catalog table-default
-# properties when creating a table. Apply supported codecs directly to REST test
-# tables so writes do not fall back to gzip and then to CPU.
+# properties when creating a table. Set zstd directly to preserve the test codec.
 if is_iceberg_rest_catalog():
     _BASE_TBLPROPS.update({
         'write.parquet.compression-codec': 'zstd',
@@ -463,9 +462,8 @@ _BASE_TBLPROPS_SQL = "TBLPROPERTIES (" + \
     ", ".join(f"'{k}' = '{v}'" for k, v in _build_tblprops().items()) + ")"
 
 
-def read_parquet_codec(spark: SparkSession, path: str) -> str:
-    """Open the Parquet footer of `path` and return the codec name of the first column of
-    the first row group (uppercase, e.g. "ZSTD", "UNCOMPRESSED")."""
+def read_parquet_codecs(spark: SparkSession, path: str) -> List[str]:
+    """Return the codec of every column chunk in every row group of `path`."""
     jvm = spark_jvm()
     hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
     hadoop_path = jvm.org.apache.hadoop.fs.Path(path)
@@ -473,9 +471,12 @@ def read_parquet_codec(spark: SparkSession, path: str) -> str:
     try:
         blocks = reader.getFooter().getBlocks()
         assert blocks.size() > 0, f"Parquet file {path} has no row groups"
-        cols = blocks.get(0).getColumns()
-        assert cols.size() > 0, f"Row group 0 in {path} has no column chunks"
-        return cols.get(0).getCodec().name()
+        codecs = []
+        for row_group in blocks:
+            columns = row_group.getColumns()
+            assert columns.size() > 0, f"Parquet file {path} has a row group with no column chunks"
+            codecs.extend(column.getCodec().name() for column in columns)
+        return codecs
     finally:
         reader.close()
 
@@ -500,9 +501,10 @@ def assert_iceberg_files_use_codec(spark: SparkSession, table_name: str, expecte
     assert len(file_rows) > 0, f"no files found in {table_name}.{files_table}"
     expected_footer = expected_codec.upper()
     for row in file_rows:
-        actual = read_parquet_codec(spark, row.file_path)
-        assert actual == expected_footer, \
-            f"expected codec {expected_footer} but file {row.file_path} used {actual}"
+        actual_codecs = read_parquet_codecs(spark, row.file_path)
+        assert all(codec == expected_footer for codec in actual_codecs), \
+            f"expected codec {expected_footer} but file {row.file_path} used " \
+            f"{sorted(set(actual_codecs))}"
 
 
 def create_iceberg_table(table_name: str,

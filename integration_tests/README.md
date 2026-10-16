@@ -581,10 +581,9 @@ partition type to keep memory usage manageable.
 #### Iceberg REST catalog write compression
 
 Older Iceberg REST clients, including 1.6.x, do not apply client-side
-`spark.sql.catalog.*.table-default.*` settings when creating REST tables. The resulting tables
-can use a default Parquet compression codec that is not supported by the RAPIDS GPU writer.
-REST catalog tests therefore add explicit table properties for data and delete files to use
-`zstd`, which is supported by the GPU writer:
+`spark.sql.catalog.*.table-default.*` settings when creating REST tables. REST catalog tests
+therefore set explicit table properties for data and delete files to preserve `zstd` as the test
+codec:
 
 ```sql
 TBLPROPERTIES (

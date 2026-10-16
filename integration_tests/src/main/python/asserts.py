@@ -394,6 +394,7 @@ def assert_gpu_and_cpu_sql_writes_are_equal_collect(table_name_factory, write_sq
     both resulting tables on the CPU that the results are equal.
     In this case the data is collected back to the driver and compared here, so be
     careful about the amount of data returned.
+    Return the CPU and GPU table names for additional assertions.
     """
     conf = _prep_incompat_conf(conf)
 
@@ -428,6 +429,8 @@ def assert_gpu_and_cpu_sql_writes_are_equal_collect(table_name_factory, write_sq
         _sort_locally(from_cpu, from_gpu)
 
     assert_equal(from_cpu, from_gpu)
+
+    return cpu_table, gpu_table
 
 def assert_gpu_fallback_write(write_func,
         read_func,

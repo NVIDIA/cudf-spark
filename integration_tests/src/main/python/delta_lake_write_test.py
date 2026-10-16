@@ -22,6 +22,7 @@ from data_gen import *
 from conftest import is_databricks_runtime
 from delta_lake_utils import *
 from marks import *
+from parquet_test_utils import assert_parquet_files_use_codec
 from parquet_write_test import parquet_write_gens_list, writer_confs
 from pyspark.sql.types import *
 from pyspark.sql.utils import AnalysisException
@@ -1787,20 +1788,22 @@ def test_delta_write_encryption_hadoopconfig_fallback(spark_tmp_path, write_opti
     finally:
         with_cpu_session(reset_hadoop_confs)
 
-@allow_non_gpu(*delta_meta_allow, delta_write_fallback_allow)
+@allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.parametrize('codec', ['gzip'])
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
-def test_delta_write_compression_fallback(spark_tmp_path, codec):
+def test_delta_write_gzip_compression(spark_tmp_path):
     data_path = spark_tmp_path + "/DELTA_DATA"
-    confs=copy_and_update(delta_writes_enabled_conf, {"spark.sql.parquet.compression.codec": codec})
-    assert_gpu_fallback_write(
-        lambda spark, path: unary_op_df(spark, int_gen).coalesce(1).write.format("delta").save(path),
+    confs=copy_and_update(delta_writes_enabled_conf, {"spark.sql.parquet.compression.codec": "gzip"})
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        lambda spark, path: spark.range(20000).selectExpr("id % 100 AS value").coalesce(1)
+            .write.format("delta").save(path),
         lambda spark, path: spark.read.format("delta").load(path),
         data_path,
-        delta_write_fallback_check,
-        conf=confs)
+        conf=confs,
+        expected_command="RapidsDeltaWrite")
+    with_cpu_session(lambda spark: assert_parquet_files_use_codec(
+        spark, spark.read.format("delta").load(data_path + '/GPU'), 'GZIP'), conf=confs)
 
 @allow_non_gpu(*delta_meta_allow, delta_write_fallback_allow)
 @delta_lake
