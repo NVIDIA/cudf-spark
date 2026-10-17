@@ -67,7 +67,7 @@ case class GpuDeltaParquetFileFormat(
     optimizationsEnabled: Boolean = true,
     tablePath: Option[String] = None,
     isCDCRead: Boolean = false,
-    lowShuffleMergeScan: Boolean = false,
+    lowShuffleMergeDiscoveryScan: Boolean = false,
     lowShuffleMergeRowIndexColumn: String = METADATA_ROW_IDX_COL
   ) extends GpuDeltaParquetFileFormatBase {
 
@@ -91,7 +91,7 @@ case class GpuDeltaParquetFileFormat(
     // The discovery row index is synthetic, so it has no entry in the table's column mapping.
     // Match its collision-safe name only on marked scans; similarly named user columns still
     // need physical mapping. The base reader also calls this method for schemas without it.
-    val rowIndexOrdinal = if (lowShuffleMergeScan) {
+    val rowIndexOrdinal = if (lowShuffleMergeDiscoveryScan) {
       inputSchema.fields.indexWhere(_.name == lowShuffleMergeRowIndexColumn)
     } else {
       -1
@@ -138,7 +138,7 @@ case class GpuDeltaParquetFileFormat(
    * Translates pushed filters to physical column names when Delta column mapping is enabled.
    */
   private def prepareFiltersForRead(filters: Seq[Filter]): Seq[Filter] = {
-    if (lowShuffleMergeScan || !effectiveOptimizationsEnabled) {
+    if (lowShuffleMergeDiscoveryScan || !effectiveOptimizationsEnabled) {
       Seq.empty
     } else if (columnMappingMode != NoMapping) {
       val physicalNameMap = DeltaColumnMapping.getLogicalNameToPhysicalNameMap(referenceSchema)
@@ -156,7 +156,7 @@ case class GpuDeltaParquetFileFormat(
   override def isSplitable(
       sparkSession: SparkSession,
       options: Map[String, String],
-      path: Path): Boolean = !lowShuffleMergeScan && effectiveOptimizationsEnabled
+      path: Path): Boolean = !lowShuffleMergeDiscoveryScan && effectiveOptimizationsEnabled
 
   private def hasDeletionVectorRead: Boolean =
     GpuDeltaParquetFileFormat.isDeletionVectorRead(
@@ -199,7 +199,7 @@ case class GpuDeltaParquetFileFormat(
       hadoopConf,
       metrics)
 
-    if (lowShuffleMergeScan) {
+    if (lowShuffleMergeDiscoveryScan) {
       val maxBatchSize = RapidsConf.DELTA_LOW_SHUFFLE_MERGE_SCATTER_DEL_VECTOR_BATCH_SIZE
         .get(sparkSession.sessionState.conf)
       val scatterTime = metrics(GpuMetric.DELETION_VECTOR_SCATTER_TIME)
@@ -222,13 +222,21 @@ object GpuDeltaParquetFileFormat {
   private[delta] val EDGE_COMPUTED_COLUMN_SKIP_ROW =
     "_databricks_internal_edge_computed_column_skip_row"
 
-  val LOW_SHUFFLE_MERGE_SCAN_OPTION =
+  def hasPhysicalDeletionVectorSkipRowColumn(schema: StructType): Boolean =
+    schema.exists { field =>
+      Seq(field.name, DeltaColumnMapping.getPhysicalName(field)).exists { name =>
+        name == EDGE_COMPUTED_COLUMN_SKIP_ROW ||
+          name == DeltaParquetFileFormat.IS_ROW_DELETED_COLUMN_NAME
+      }
+    }
+
+  val LOW_SHUFFLE_MERGE_DISCOVERY_SCAN_OPTION =
     "spark.rapids.internal.delta.lowShuffleMerge.scan"
   val LOW_SHUFFLE_MERGE_ROW_INDEX_COLUMN_OPTION =
     "spark.rapids.internal.delta.lowShuffleMerge.rowIndexColumn"
 
-  def isLowShuffleMergeScan(options: Map[String, String]): Boolean =
-    options.get(LOW_SHUFFLE_MERGE_SCAN_OPTION).contains("true")
+  def isLowShuffleMergeDiscoveryScan(options: Map[String, String]): Boolean =
+    options.get(LOW_SHUFFLE_MERGE_DISCOVERY_SCAN_OPTION).contains("true")
 
   def isDeletionVectorRead(format: DeltaParquetFileFormat): Boolean =
     isDeletionVectorRead(
@@ -319,7 +327,7 @@ object GpuDeltaParquetFileFormat {
       optimizationsEnabled = fmt.optimizationsEnabled,
       tablePath = fmt.tablePath,
       isCDCRead = fmt.isCDCRead,
-      lowShuffleMergeScan = isLowShuffleMergeScan(relation.options),
+      lowShuffleMergeDiscoveryScan = isLowShuffleMergeDiscoveryScan(relation.options),
       lowShuffleMergeRowIndexColumn = relation.options
         .getOrElse(LOW_SHUFFLE_MERGE_ROW_INDEX_COLUMN_OPTION, METADATA_ROW_IDX_COL))
   }

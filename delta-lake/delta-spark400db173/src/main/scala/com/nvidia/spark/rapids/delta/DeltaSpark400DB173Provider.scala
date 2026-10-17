@@ -124,10 +124,25 @@ object DeltaSpark400DB173Provider extends DatabricksDeltaProviderBase {
 
   override def getReadFileFormat(
       relation: HadoopFsRelation, rapidsConf: RapidsConf): FileFormat = {
+    // DBR 17.3 target scans; DV pushdown includes the metadata-row-index setting:
+    // Reader        | DV pushdown | Discovery          | Rewrite / normal scan
+    // PERFILE       | enabled     | legacy PERFILE     | native DV PERFILE
+    // PERFILE       | disabled    | legacy PERFILE     | legacy PERFILE
+    // MULTITHREADED | either      | native DV threaded | native DV threaded
+    // COALESCING    | either      | native DV threaded | native DV coalescing*
+    // AUTO          | either      | native DV threaded | native DV AUTO*
+    // * Subject to normal reader eligibility rules.
+    // Native DV discovery row-index output is currently implemented only for MULTITHREADED.
+    // PERFILE discovery uses the legacy row-index path; COALESCING/AUTO discovery uses threading.
+    // TODO: Native PERFILE/COALESCING discovery row indexes: NVIDIA/cudf-spark#16323.
+    // Multi-file rewrites must apply temporary DVs even when general DV pushdown is disabled.
     val fmt = relation.fileFormat.asInstanceOf[DeltaParquetFileFormat]
-    if (GpuDeltaParquetFileFormat.isLowShuffleMergeScan(relation.options)) {
+    val isLowShuffleMergeDiscoveryScan =
+      GpuDeltaParquetFileFormat.isLowShuffleMergeDiscoveryScan(relation.options)
+    if (isLowShuffleMergeDiscoveryScan && rapidsConf.isParquetPerFileReadEnabled) {
       GpuDeltaParquetFileFormat.convertToGpu(relation)
-    } else if (isPushDVPredicateDownEnabled(rapidsConf)) {
+    } else if (!rapidsConf.isParquetPerFileReadEnabled ||
+        isPushDVPredicateDownEnabled(rapidsConf)) {
       GpuDeltaParquetFileFormatNativeDV(
         relation = relation,
         protocol = fmt.protocol,

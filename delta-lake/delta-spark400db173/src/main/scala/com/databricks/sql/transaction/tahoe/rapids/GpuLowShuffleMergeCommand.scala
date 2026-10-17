@@ -686,6 +686,16 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
    * when the changeset is too large.
    */
   def shouldFallback(): Boolean = {
+    // The native DV reader overwrites physical skip-row-named columns during discovery
+    // and the unmodified-row rewrite pass. Reject affected schemas before either scan.
+    // Use classic merge until https://github.com/NVIDIA/cudf-spark/issues/16381 is fixed.
+    if (GpuDeltaParquetFileFormat.hasPhysicalDeletionVectorSkipRowColumn(
+        context.deltaTxn.metadata.schema)) {
+      logWarning("Physical deletion-vector skip-row column is not supported by low shuffle " +
+        "merge, fallback to classic GPU merge (NVIDIA/cudf-spark#16381).")
+      return true
+    }
+
     // Check the transaction snapshot, not the potentially older planning snapshot. Existing
     // persistent DVs are handled by classic merge; do not load and combine them on the driver.
     if (!DeletionVectorUtils.isTableDVFree(context.deltaTxn.snapshot)) {
@@ -1026,13 +1036,15 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
       relation: HadoopFsRelation,
       dataSchema: StructType,
       rowIndexColumnName: String): HadoopFsRelation = {
+    // The legacy PERFILE reader counts rows from zero and requires whole-file reads.
+    // Native readers preserve file-relative offsets through filtering and splitting.
     val fileFormat = relation.fileFormat.asInstanceOf[DeltaParquetFileFormat]
-      .copy(optimizationsEnabled = false)
+      .copy(optimizationsEnabled = !context.rapidsConf.isParquetPerFileReadEnabled)
     relation.copy(
       dataSchema = dataSchema,
       fileFormat = fileFormat,
       options = relation.options +
-        (GpuDeltaParquetFileFormat.LOW_SHUFFLE_MERGE_SCAN_OPTION -> "true") +
+        (GpuDeltaParquetFileFormat.LOW_SHUFFLE_MERGE_DISCOVERY_SCAN_OPTION -> "true") +
         (GpuDeltaParquetFileFormat.LOW_SHUFFLE_MERGE_ROW_INDEX_COLUMN_OPTION ->
           rowIndexColumnName))(
       context.spark)

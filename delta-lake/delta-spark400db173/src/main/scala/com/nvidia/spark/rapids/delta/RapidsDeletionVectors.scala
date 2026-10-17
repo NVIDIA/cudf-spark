@@ -459,7 +459,7 @@ object RapidsDeletionVectors extends Logging {
     }
   }
 
-  private def serializedEmptyBitmap(): HostMemoryBuffer = {
+  private[delta] def serializedEmptyBitmap(): HostMemoryBuffer = {
     closeOnExcept(HostMemoryBuffer.allocate(8)) { buffer =>
       buffer.setLong(0, 0L)
       buffer
