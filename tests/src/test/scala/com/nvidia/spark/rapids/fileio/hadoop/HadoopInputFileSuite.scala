@@ -19,6 +19,8 @@ package com.nvidia.spark.rapids.fileio.hadoop
 import java.util.{Arrays, Collections}
 
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile.CopyRange
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.Path
 import org.scalatest.funsuite.AnyFunSuite
 
 class HadoopInputFileSuite extends AnyFunSuite {
@@ -36,5 +38,21 @@ class HadoopInputFileSuite extends AnyFunSuite {
       8 * 1024 * 1024)
 
     assertResult(8 * 1024 * 1024)(allocationSize)
+  }
+
+  test("known file length avoids file status lookup") {
+    val expectedLength = 12345L
+    val missingFile = new Path("file:///this/path/does/not/exist")
+    val inputFile = HadoopInputFile.create(missingFile, new Configuration(), expectedLength)
+
+    assertResult(expectedLength)(inputFile.getLength)
+  }
+
+  test("known file length must not be negative") {
+    val missingFile = new Path("file:///this/path/does/not/exist")
+
+    assertThrows[IllegalArgumentException] {
+      HadoopInputFile.create(missingFile, new Configuration(), -1L)
+    }
   }
 }
