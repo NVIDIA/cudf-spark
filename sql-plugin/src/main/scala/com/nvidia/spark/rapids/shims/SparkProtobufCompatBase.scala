@@ -27,6 +27,7 @@ import com.nvidia.spark.rapids.ShimReflectionUtils
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.rapids.protobuf._
+import org.apache.spark.sql.types.{ArrayType, StructType}
 
 /**
  * Provides protobuf schema metadata through a common interface across Spark versions.
@@ -35,6 +36,8 @@ import org.apache.spark.sql.rapids.protobuf._
 private[shims] abstract class SparkProtobufCompatBase extends Logging {
   private[this] val sparkProtobufUtilsObjectClassName =
     "org.apache.spark.sql.protobuf.utils.ProtobufUtils$"
+
+  val SupportedOptions: Set[String] = Set("enums.as.ints", "mode")
 
   /**
    * Reads arguments from ProtobufDataToCatalyst after runtime replacement, not an analyzed wrapper.
@@ -46,6 +49,92 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
       options <- reflectOptions(e)
       descriptorSource <- reflectDescriptorSource(e)
     } yield ProtobufExprInfo(messageName, descriptorSource, options)
+  }
+
+  def sameDecodeSemantics(left: Expression, right: Expression): Boolean = {
+    (extractExprInfo(left), extractExprInfo(right)) match {
+      case (Right(leftInfo), Right(rightInfo)) => leftInfo == rightInfo
+      case _ => false
+    }
+  }
+
+  def parsePlannerOptions(
+      options: Map[String, String]): Either[String, ProtobufPlannerOptions] = {
+    val mode = options.getOrElse("mode", "FAILFAST")
+    if (mode.equalsIgnoreCase("DROPMALFORMED")) {
+      Left("from_protobuf DROPMALFORMED mode is not supported on GPU")
+    } else {
+      val enumsAsInts = Try(options.getOrElse("enums.as.ints", "false").toBoolean)
+        .toEither
+        .left
+        .map { _ =>
+          "Invalid value for from_protobuf option 'enums.as.ints': " +
+            s"'${options.getOrElse("enums.as.ints", "")}' (expected true/false)"
+        }
+      enumsAsInts.map(v =>
+        ProtobufPlannerOptions(
+          enumsAsInts = v,
+          failOnErrors = mode.equalsIgnoreCase("FAILFAST")))
+    }
+  }
+
+  def unsupportedOptions(options: Map[String, String]): Seq[String] =
+    options.keys.filterNot(SupportedOptions.contains).toSeq.sorted
+
+  def isGpuSupportedProtoSyntax(syntax: String): Boolean =
+    syntax == "PROTO2"
+
+  private[shims] def validateDescriptorGraphSyntax(
+      schema: StructType,
+      root: ProtobufMessageDescriptor): Either[String, Unit] = {
+    def nestedStruct(dataType: org.apache.spark.sql.types.DataType): Option[StructType] = {
+      dataType match {
+        case st: StructType => Some(st)
+        case ArrayType(st: StructType, _) => Some(st)
+        case _ => None
+      }
+    }
+
+    def validate(schema: StructType, desc: ProtobufMessageDescriptor,
+        path: String): Either[String, Unit] = {
+      if (!isGpuSupportedProtoSyntax(desc.syntax)) {
+        val location = if (path.isEmpty) "root message" else s"protobuf field '$path'"
+        return Left(s"$location uses unsupported ${desc.syntax} syntax; only proto2 is supported")
+      }
+
+      if (desc.javaStringCheckUtf8 && schema.fields.exists { field =>
+        desc.findField(field.name).exists(_.protoTypeName == "STRING")
+      }) {
+        val location = if (path.isEmpty) "root message" else s"protobuf field '$path'"
+        return Left(
+          s"$location requires strict protobuf UTF-8 validation, which is not supported on GPU")
+      }
+
+      schema.fields.foreach { field =>
+        desc.findField(field.name).foreach { fieldDesc =>
+          val fieldPath = if (path.isEmpty) field.name else s"$path.${field.name}"
+          fieldDesc.referencedTypeSyntax.foreach { syntax =>
+            if (!isGpuSupportedProtoSyntax(syntax)) {
+              return Left(
+                s"Referenced type for protobuf field '$fieldPath' uses unsupported $syntax " +
+                  "syntax; only proto2 is supported")
+            }
+          }
+          for {
+            childSchema <- nestedStruct(field.dataType)
+            childDesc <- fieldDesc.messageDescriptor
+          } {
+            validate(childSchema, childDesc, fieldPath) match {
+              case left @ Left(_) => return left
+              case Right(_) =>
+            }
+          }
+        }
+      }
+      Right(())
+    }
+
+    validate(schema, root, "")
   }
 
   /** Resolves the schema or returns a failure reason; lazy metadata reads may still throw. */
