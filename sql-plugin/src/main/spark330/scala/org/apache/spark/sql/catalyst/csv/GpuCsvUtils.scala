@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -40,4 +40,7 @@ object GpuCsvUtils {
     })
 
   def enableDateTimeParsingFallback(options: CSVOptions): Boolean = false
+
+  // Spark 3.3 always retries stringToDate after a CSV date formatter failure.
+  def enableDateParsingFallback(options: CSVOptions): Boolean = true
 }

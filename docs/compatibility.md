@@ -133,7 +133,8 @@ will produce a different result compared to the plugin.
 ## CSV Reading
 
 Spark allows for stripping leading and trailing white space using various options that are off by
-default. The plugin will strip leading and trailing space for all values except strings.
+default. For supported `CORRECTED` date formats, whitespace handling follows Spark as described
+below. The plugin strips leading and trailing space for other non-string values.
 
 There are also discrepancies/issues with specific types that are detailed below.
 
@@ -152,7 +153,54 @@ replacement character �.  Instead it just passes them through as described in 
 
 ### CSV Dates
 
-Only a limited set of formats are supported when parsing dates.
+With `spark.sql.legacy.timeParserPolicy=CORRECTED`, GPU date parsing supports an absent `dateFormat`
+and the formats listed under [CORRECTED and EXCEPTION timeParserPolicy](#corrected-and-exception-timeparserpolicy).
+These dates are supported in both UTC and non-UTC session and JVM time zones.
+
+In Spark 3.3, an absent `dateFormat` uses Spark's CAST-style date grammar, including year-only,
+year-month, and signed or extended years. Spark 3.4 and later also use this grammar when
+`preferDate=false`. With the default `preferDate=true`, Spark 3.4 and later first resolve an absent
+format to `yyyy-MM-dd`; disabling parsing fallback therefore requires a strictly formatted date.
+Explicit and resolved formats require exact field widths and complete input consumption; the
+formatter does not strip leading or trailing whitespace. Invalid dates and epoch-day overflow
+produce nulls.
+
+When Spark enables date parsing fallback, a failed format parse retries the CAST-style grammar.
+Spark 3.3 always enables this fallback. Spark 3.4 and later use the read option
+`enableDateTimeParsingFallback`, then `spark.sql.legacy.csv.enableDateTimeParsingFallback`, then
+enable it by default when `dateFormat` is absent.
+
+CAST-style parsing follows the running Spark version's whitespace rules, including control-character
+trimming changes in patch releases.
+
+The CSV date parser is controlled by the following options and SQL configurations:
+
+| Setting | Effect on CSV dates |
+| --- | --- |
+| `spark.sql.legacy.timeParserPolicy` | Selects `LEGACY`, `CORRECTED`, or `EXCEPTION` semantics. This GPU parser handles `CORRECTED`; other policies retain their existing support restrictions. |
+| `dateFormat` and `preferDate` | Select the first formatter. In Spark 3.4+, `preferDate=true` resolves an absent format to `yyyy-MM-dd` even with an explicit schema; `preferDate=false` leaves it absent for the CAST-style formatter. |
+| `enableDateTimeParsingFallback` | Per-read override for the parsing retry in Spark 3.4+. |
+| `spark.sql.legacy.csv.enableDateTimeParsingFallback` | Supplies the retry setting when the read option is absent. If both are absent, the original absence of `dateFormat` enables retry, independently of `preferDate`. Spark 3.3 always retries. |
+| `mode` | Handles records rejected after all parsing attempts. `PERMISSIVE` can produce a null date, `DROPMALFORMED` drops the record, and `FAILFAST` throws. The latter two modes use CPU scans. A successful parsing retry also succeeds in `FAILFAST`. |
+| `timeZone`, `spark.sql.session.timeZone`, and `locale` | `timeZone` overrides the session zone. Supported numeric `CORRECTED` date patterns produce calendar days independently of timezone, DST transitions, or locale; timestamp columns retain their separate timezone restrictions. |
+| `ignoreLeadingWhiteSpace` and `ignoreTrailingWhiteSpace` | Control CSV token whitespace handling; enabling either option requires a CPU scan for these dates. |
+| `spark.sql.ansi.enabled` | Does not replace CSV `mode` or change invalid corrected CSV dates into ANSI cast errors. |
+
+Column pruning also matters for execution support: with parsing fallback enabled, reading a
+`TimestampType` column requires a CPU scan; pruning that column can allow the supported date-only
+projection to run on GPU. Spark's `spark.sql.csv.parser.columnPruning.enabled` can separately affect
+which malformed fields the CPU reader validates.
+
+See Spark's [CSV options](https://spark.apache.org/docs/latest/sql-data-sources-csv.html) and the
+[CSVOptions](https://github.com/apache/spark/blob/v3.4.0/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/csv/CSVOptions.scala)
+and [UnivocityParser](https://github.com/apache/spark/blob/v3.4.0/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/csv/UnivocityParser.scala)
+implementations for formatter selection and parsing retry precedence.
+
+For supported `CORRECTED` dates, setting `ignoreLeadingWhiteSpace` or `ignoreTrailingWhiteSpace`
+to `true` makes the scan fall back to CPU. Spark trims only unquoted fields, and the GPU parser
+cannot preserve that distinction.
+
+For other parser policies, date parsing supports the following limited set of formats.
 
 * `"yyyy-MM-dd"`
 * `"yyyy/MM/dd"`
@@ -184,8 +232,7 @@ portion followed by one of the following formats:
 * `HH:mm:ss.SSS`
 * `HH:mm:ss[.SSS]`
 
-Just like with dates all timestamp formats are actually supported at the same time.  The plugin will
-disable itself if it sees a format it cannot support.
+The plugin disables GPU timestamp parsing if the configured format is unsupported.
 
 Invalid timestamps in Spark, ones that have the correct format, but the numbers produce invalid
 dates or times, can result in an exception by default and how they are parsed can be controlled
