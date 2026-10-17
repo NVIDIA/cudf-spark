@@ -442,8 +442,6 @@ run_delta_lake_uc_tests() {
 run_iceberg_tests() {
   # get the major/minor version of Spark
   ICEBERG_SPARK_VER=$(echo "$SPARK_VER" | cut -d. -f1,2)
-  # get the patch version of Spark
-  SPARK_PATCH_VER=$(echo "$SPARK_VER" | cut -d. -f3)
 
   # Spark 3.5 validates every optimizer rule's output when the spark.testing JVM property is
   # present. Iceberg V3 COW rewrites temporarily produce an unresolved ReplaceData plan while
@@ -460,66 +458,42 @@ run_iceberg_tests() {
     export SPARK_TESTING_ENABLED
   fi
 
-  if [[ "$ICEBERG_SPARK_VER" != "3.5" && "$ICEBERG_SPARK_VER" != "4.0" \
-        && "$ICEBERG_SPARK_VER" != "4.1" ]]; then
-    echo "!!!! Skipping Iceberg tests. GPU acceleration of Iceberg is not supported on $ICEBERG_SPARK_VER"
+  local test_type=${1:-'default'}
+  local iceberg_test_tags="iceberg"
+  if [[ -n "${TEST_TAGS:-}" ]]; then
+    iceberg_test_tags="iceberg and ($TEST_TAGS)"
+  fi
+
+  if [[ "$ICEBERG_SPARK_VER" == "4.0" || "$ICEBERG_SPARK_VER" == "4.1" ]]; then
+    if [[ "$SCALA_BINARY_VER" != "2.13" ]]; then
+      echo "!!!! Skipping Iceberg tests. Spark $ICEBERG_SPARK_VER Iceberg tests require Scala 2.13"
+      return 0
+    fi
+  fi
+
+  local matrix_reader="$WORKSPACE/scripts/get_iceberg_versions.py"
+  local iceberg_versions
+  # Maven settings paths are relative to the workspace, not the test artifacts directory.
+  if [[ -n "${ICEBERG_VERSIONS:-}" ]]; then
+    iceberg_versions=$(
+      cd "$WORKSPACE" || exit 1
+      MVN="${MVN:-mvn}" python "$matrix_reader" validate-requested \
+        --spark-version "$SPARK_VER" --requested-versions "$ICEBERG_VERSIONS"
+    ) || return 1
+    echo "Using user-specified ICEBERG_VERSIONS=$ICEBERG_VERSIONS"
+  else
+    iceberg_versions=$(
+      cd "$WORKSPACE" || exit 1
+      MVN="${MVN:-mvn}" python "$matrix_reader" list --spark-version "$SPARK_VER"
+    ) || return 1
+  fi
+  if [[ -z "$iceberg_versions" ]]; then
+    # Issue #15875 can exclude packaged combinations below the minimum test baselines.
+    echo "!!!! Skipping Iceberg tests. No supported Iceberg version found for Spark $SPARK_VER"
     return 0
   fi
 
-  # Supported Iceberg versions per Spark patch version:
-  # Spark 3.5.0-3.5.3 -> Iceberg 1.6.1
-  # Spark 3.5.4+       -> Iceberg 1.9.2, 1.10.1
-  # Spark 4.0.0-4.0.1 -> Iceberg 1.10.1
-  # Spark 4.0.2+       -> Iceberg 1.10.1, 1.11.0
-  # Spark 4.1.x        -> Iceberg 1.11.0
-  local supported_versions
-  if [[ "$ICEBERG_SPARK_VER" == "4.1" ]]; then
-    if [[ "$SCALA_BINARY_VER" != "2.13" ]]; then
-      echo "!!!! Skipping Iceberg tests. Spark 4.1 Iceberg tests require Scala 2.13"
-      return 0
-    fi
-    supported_versions="1.11.0"
-  elif [[ "$ICEBERG_SPARK_VER" == "4.0" ]]; then
-    if [[ "$SCALA_BINARY_VER" != "2.13" ]]; then
-      echo "!!!! Skipping Iceberg tests. Spark 4.0 Iceberg tests require Scala 2.13"
-      return 0
-    fi
-    if [[ "$SPARK_PATCH_VER" -ge 2 ]]; then
-      supported_versions="1.10.1 1.11.0"
-    else
-      supported_versions="1.10.1"
-    fi
-  elif [[ "$SPARK_PATCH_VER" -le 3 ]]; then
-    supported_versions="1.6.1"
-  else
-    supported_versions="1.9.2 1.10.1"
-  fi
-
-  local test_type=${1:-'default'}
-
-  if [[ -n "$ICEBERG_VERSIONS" ]]; then
-    for ver in $ICEBERG_VERSIONS; do
-      if ! echo "$supported_versions" | grep -qw "$ver"; then
-        echo "!!!! Error: Iceberg version $ver is not supported on Spark $SPARK_VER (supported: $supported_versions)"
-        return 1
-      fi
-    done
-    echo "Using user-specified ICEBERG_VERSIONS=$ICEBERG_VERSIONS"
-  else
-    # Default: test one representative version per Spark patch range
-    if [[ "$ICEBERG_SPARK_VER" == "4.1" ]]; then
-      ICEBERG_VERSIONS="1.11.0"
-    elif [[ "$ICEBERG_SPARK_VER" == "4.0" ]]; then
-      ICEBERG_VERSIONS="1.10.1"
-    elif [[ "$SPARK_PATCH_VER" -le 3 ]]; then
-      ICEBERG_VERSIONS="1.6.1"
-    elif [[ "$SPARK_PATCH_VER" -le 6 ]]; then
-      ICEBERG_VERSIONS="1.9.2"
-    else
-      ICEBERG_VERSIONS="1.10.1"
-    fi
-  fi
-  for ICEBERG_VERSION in $ICEBERG_VERSIONS; do
+  for ICEBERG_VERSION in $iceberg_versions; do
     echo "Running Iceberg tests for Iceberg version $ICEBERG_VERSION"
     if [[ "$test_type" == "default" ]]; then
       echo "!!! Running iceberg tests"
@@ -534,7 +508,7 @@ run_iceberg_tests() {
         PYSP_TEST_spark_sql_catalog_spark__catalog="org.apache.iceberg.spark.SparkSessionCatalog" \
         PYSP_TEST_spark_sql_catalog_spark__catalog_type="hadoop" \
         PYSP_TEST_spark_sql_catalog_spark__catalog_warehouse="/tmp/spark-warehouse-$RANDOM" \
-        ./run_pyspark_from_build.sh -m iceberg --iceberg
+        ./run_pyspark_from_build.sh -m "$iceberg_test_tags" --iceberg
     elif [[ "$test_type" == "rest" ]]; then
       echo "!!! Running iceberg tests with rest catalog"
       ICEBERG_REST_JARS="org.apache.iceberg:iceberg-spark-runtime-${ICEBERG_SPARK_VER}_${SCALA_BINARY_VER}:${ICEBERG_VERSION},\
@@ -560,7 +534,7 @@ org.apache.iceberg:iceberg-aws-bundle:${ICEBERG_VERSION}"
             "PYSP_TEST_spark_sql_catalog_spark__catalog_oauth2-server-uri=${ICEBERG_REST_OAUTH2_SERVER_URI:-http://localhost:8080/realms/iceberg/protocol/openid-connect/token}" \
             PYSP_TEST_spark_sql_catalog_spark__catalog_scope="${ICEBERG_REST_SCOPE:-lakekeeper}" \
             PYSP_TEST_spark_sql_catalog_spark__catalog_warehouse="${ICEBERG_REST_WAREHOUSE:-demo}" \
-            ./run_pyspark_from_build.sh -m iceberg --iceberg
+            ./run_pyspark_from_build.sh -m "$iceberg_test_tags" --iceberg
     elif [[ "$test_type" == "s3tables" ]]; then
       echo "!!! Running iceberg tests with s3tables"
       # AWS deps versions for Spark 3.5.x and 4.0.x
@@ -613,7 +587,7 @@ com.amazonaws:aws-java-sdk-bundle:${AWS_SDK_BUNDLE_VERSION}"
         PYSP_TEST_spark_sql_catalog_spark__catalog="org.apache.iceberg.spark.SparkSessionCatalog" \
         "PYSP_TEST_spark_sql_catalog_spark__catalog_catalog-impl=software.amazon.s3tables.iceberg.S3TablesCatalog" \
         PYSP_TEST_spark_sql_catalog_spark__catalog_warehouse="${S3TABLES_BUCKET_ARN}" \
-        ./run_pyspark_from_build.sh -s -m iceberg --iceberg
+        ./run_pyspark_from_build.sh -s -m "$iceberg_test_tags" --iceberg
     fi
   done
 }
