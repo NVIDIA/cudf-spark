@@ -190,9 +190,8 @@ abstract class GpuBroadcastHashJoinExecBase(
       val boundProjects = projects.map(bindProject)
       Some((batch: ColumnarBatch) => boundProjects.foldLeft(batch) {
         case (currentBatch, boundProject) =>
-          val spillableBatch = SpillableColumnarBatch(
-            currentBatch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
-          boundProject.projectAndCloseWithRetrySingleBatch(spillableBatch)
+          boundProject.projectAndCloseWithRetrySingleBatch(
+            SpillableColumnarBatch(currentBatch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
       })
     } else {
       None
@@ -204,7 +203,9 @@ abstract class GpuBroadcastHashJoinExecBase(
       // Match GpuProjectExec's tiered binding so build-side extraction has the same
       // splitting, retry, and metric behavior as a normal project.
       GpuBindReferences.bindGpuReferencesTiered(
-        project.projectList, project.child.output, conf, allMetrics)
+        project.projectList, project.child.output, conf, allMetrics,
+        enableAstJit = RapidsConf.ENABLE_PROJECT_AST_JIT.get(conf),
+        enableAst = RapidsConf.ENABLE_PROJECT_AST.get(conf))
     }
   }
 
@@ -213,7 +214,9 @@ abstract class GpuBroadcastHashJoinExecBase(
       // For a post-projection that will be cached, do not include metrics
       // since the projection can outlive the task that creates it.
       GpuBindReferences.bindGpuReferencesTieredNoMetrics(
-        project.projectList, project.child.output, conf)
+        project.projectList, project.child.output, conf,
+        enableAstJit = RapidsConf.ENABLE_PROJECT_AST_JIT.get(conf),
+        enableAst = RapidsConf.ENABLE_PROJECT_AST.get(conf))
     }
   }
 

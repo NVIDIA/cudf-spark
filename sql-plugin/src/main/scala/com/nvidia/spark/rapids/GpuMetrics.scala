@@ -89,6 +89,12 @@ class GpuMetricFactory(metricsConf: MetricsLevel, context: SparkContext) {
 
 object GpuMetric extends Logging {
   // Metric names.
+  val AST_JIT_PROGRAM_BUILD_ATTEMPTS = "astJitProgramBuildAttempts"
+  val AST_JIT_PROGRAM_CACHE_HITS = "astJitProgramCacheHits"
+  val AST_JIT_PROGRAM_BUILD_TIME = "astJitProgramBuildTime"
+  val AST_JIT_EVAL_ATTEMPTS = "astJitEvalAttempts"
+  val AST_JIT_EVAL_ROWS = "astJitEvalRows"
+  val AST_JIT_EVAL_TIME = "astJitEvalTime"
   val BUFFER_TIME = "bufferTime"
   val BUFFER_TIME_BUBBLE = "bufferTimeBubble"
   val SCAN_TIME = "scanTime"

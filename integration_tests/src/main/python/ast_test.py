@@ -68,6 +68,12 @@ ast_acosh_descr = [(
     not (is_spark_359() or is_spark_403_or_404() or is_spark_412_or_later()))]
 
 _project_ast_enabled_conf = {"spark.rapids.sql.projectAstEnabled": "true"}
+_project_ast_jit_enabled_conf = {"spark.rapids.sql.projectAstJitEnabled": "true"}
+_project_ast_jit_and_legacy_enabled_conf = {
+    "spark.rapids.sql.projectAstEnabled": "true",
+    "spark.rapids.sql.projectAstJitEnabled": "true"
+}
+
 
 def assert_gpu_ast(is_supported, func, conf={}):
     ast_expression = "GpuProjectAstExpression"
@@ -360,7 +366,7 @@ def test_bitwise_xor(data_descr):
 @disable_ansi_mode
 def test_addition(data_descr):
     data_type = data_descr[0].data_type
-    assert_binary_ast(data_descr,
+    assert_binary_ast((data_descr[0], False),
         lambda df: df.select(
             f.col('a') + f.lit(100).cast(data_type),
             f.lit(-12).cast(data_type) + f.col('b'),
@@ -370,7 +376,7 @@ def test_addition(data_descr):
 @disable_ansi_mode
 def test_subtraction(data_descr):
     data_type = data_descr[0].data_type
-    assert_binary_ast(data_descr,
+    assert_binary_ast((data_descr[0], False),
         lambda df: df.select(
             f.col('a') - f.lit(100).cast(data_type),
             f.lit(-12).cast(data_type) - f.col('b'),
@@ -380,11 +386,131 @@ def test_subtraction(data_descr):
 @disable_ansi_mode
 def test_multiplication(data_descr):
     data_type = data_descr[0].data_type
-    assert_binary_ast(data_descr,
+    assert_binary_ast((data_descr[0], False),
         lambda df: df.select(
             f.col('a') * f.lit(100).cast(data_type),
             f.lit(-12).cast(data_type) * f.col('b'),
             f.col('a') * f.col('b')))
+
+@pytest.mark.parametrize('data_gen', [int_gen, long_gen], ids=idfn)
+@disable_ansi_mode
+def test_jit_add_multiply(data_gen):
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: binary_op_df(spark, data_gen).select(
+            f.col('a') + f.col('b'),
+            f.col('a') * f.col('b')),
+        exist_classes=r"GpuProject.*AST_JIT",
+        non_exist_classes="GpuProjectAst",
+        conf=_project_ast_jit_enabled_conf)
+
+@pytest.mark.parametrize('data_gen', [int_gen, long_gen], ids=idfn)
+@disable_ansi_mode
+def test_jit_partial_project_with_unique_unsupported_expression(data_gen):
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: binary_op_df(spark, data_gen).select(
+            (f.col('a') + f.col('b')) - (f.col('a') * f.col('b'))),
+        exist_classes="GpuProject",
+        non_exist_classes="GpuProjectAst",
+        conf=_project_ast_jit_enabled_conf)
+
+@pytest.mark.parametrize('data_gen', [int_gen, long_gen], ids=idfn)
+@pytest.mark.parametrize('backend', ['legacy', 'jit', 'both'])
+@disable_ansi_mode
+def test_ast_shared_subtree(data_gen, backend):
+    def project_shared_expression(spark):
+        df = binary_op_df(spark, data_gen)
+        shared = f.col('a') + f.col('b')
+        return df.select(
+            (shared * f.col('a')).alias('left'),
+            (shared * f.col('b')).alias('right'))
+
+    conf = {
+        'spark.rapids.sql.projectAstEnabled': str(backend != 'jit').lower(),
+        'spark.rapids.sql.projectAstJitEnabled': str(backend != 'legacy').lower(),
+    }
+    ast_pattern = r'AST\(' if backend == 'legacy' else 'AST_JIT'
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        project_shared_expression,
+        exist_classes=rf"GpuProject.*{ast_pattern}.*AS left.*{ast_pattern}.*AS right",
+        non_exist_classes='AST_JIT' if backend == 'legacy' else 'GpuProjectAst',
+        conf=conf)
+
+@pytest.mark.parametrize('data_gen', [int_gen, long_gen], ids=idfn)
+@disable_ansi_mode
+def test_jit_regular_jit_waves(data_gen):
+    def project_waves(spark):
+        df = binary_op_df(spark, data_gen)
+        shared = f.col('a') + f.col('b')
+        regular = f.greatest(shared, f.col('a'))
+        return df.select(
+            (shared * f.col('a')).alias('early'),
+            regular.alias('regular'),
+            (regular * f.col('b')).alias('late'))
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        project_waves,
+        exist_classes=r"GpuProject.*AST_JIT.*AS early.*AS regular.*AS late",
+        non_exist_classes="GpuProjectAst",
+        conf=_project_ast_jit_enabled_conf)
+
+@pytest.mark.parametrize('data_gen', [int_gen, long_gen], ids=idfn)
+@disable_ansi_mode
+def test_jit_cse_shared_subexpression(data_gen):
+    def project_shared_expression(spark):
+        df = binary_op_df(spark, data_gen)
+        shared = f.col('a') + f.col('b')
+        return df.select(
+            shared.alias('shared'),
+            (shared - f.col('a')).alias('left'),
+            (shared - f.col('b')).alias('right'))
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        project_shared_expression,
+        exist_classes=r"GpuProject.*AST_JIT.*AS shared.*AS left.*AS right",
+        non_exist_classes="GpuProjectAst",
+        conf=_project_ast_jit_enabled_conf)
+
+@pytest.mark.parametrize('data_gen', [int_gen, long_gen], ids=idfn)
+@pytest.mark.parametrize(
+    'tiered_project_enabled', ['true', 'false'], ids=['tiered', 'single_tier'])
+@disable_ansi_mode
+def test_jit_mixed_project_expressions(data_gen, tiered_project_enabled):
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: binary_op_df(spark, data_gen).select(
+            (f.col('a') + f.col('b')).alias('jit'),
+            (f.col('a') - f.col('b')).alias('gpu'),
+            ((f.col('a') * f.col('b')) - f.col('a')).alias('mixed')),
+        exist_classes=r"GpuProject.*AST_JIT.*AS jit.*AS gpu.*AS mixed",
+        non_exist_classes=r"GpuProjectAst,AS gpu.*AST_JIT",
+        conf=copy_and_update(_project_ast_jit_enabled_conf, {
+            'spark.rapids.sql.tiered.project.enabled': tiered_project_enabled
+        }))
+
+@pytest.mark.parametrize('data_gen', [int_gen, long_gen], ids=idfn)
+@disable_ansi_mode
+def test_jit_and_legacy_ast_mixed_project_expressions(data_gen):
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: binary_op_df(spark, data_gen).select(
+            (f.col('a') + f.col('b')).alias('jit'),
+            ((f.col('a') * f.col('a')) - f.col('b')).alias('legacy'),
+            ((f.col('a') + f.col('b')) -
+                (f.col('a') * f.col('b'))).alias('mixed')),
+        exist_classes=(
+            r"GpuProject.*AST_JIT.*AS jit.*AST\(.*AS legacy.*"
+            r"AST\(.*AS mixed,GpuProjectAstExpression"),
+        non_exist_classes=r"AS legacy.*AST_JIT",
+        conf=_project_ast_jit_and_legacy_enabled_conf)
+
+
+@pytest.mark.parametrize('data_gen', [int_gen, long_gen], ids=idfn)
+@disable_ansi_mode
+def test_cross_backend_shared_subtree(data_gen):
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: binary_op_df(spark, data_gen).selectExpr(
+            '(a + b) - a as legacy', '(a + b) * b as jit'),
+        exist_classes=r'GpuProject.*AST\(.*AS legacy.*AST_JIT.*AS jit',
+        conf=_project_ast_jit_and_legacy_enabled_conf)
+
 
 # Each descriptor contains a list of data generators and a corresponding boolean
 # indicating whether that data type is supported by the AST
