@@ -20,12 +20,31 @@ import com.nvidia.spark.rapids.GpuMetric
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
 import com.nvidia.spark.rapids.iceberg.ShimUtils
 import org.apache.hadoop.fs.Path
+import org.apache.iceberg.Schema
 import org.apache.iceberg.io.InputFile
+import org.apache.iceberg.mapping.NameMapping
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.iceberg.shaded.org.apache.parquet.io.{InputFile => ShadedInputFile}
+import org.apache.iceberg.shaded.org.apache.parquet.schema.{MessageType => ShadedMessageType}
 
 object GpuParquetIO {
+  // Planning and execution must inspect the same field-ID/name-mapped projection.
+  def projectSchema(
+      fileSchema: ShadedMessageType,
+      requiredSchema: Schema,
+      nameMapping: Option[NameMapping]): (ShadedMessageType, ShadedMessageType) = {
+    if (ParquetSchemaUtil.hasIds(fileSchema)) {
+      (fileSchema, ParquetSchemaUtil.pruneColumns(fileSchema, requiredSchema))
+    } else if (nameMapping.isDefined) {
+      val typeWithIds = ParquetSchemaUtil.applyNameMapping(fileSchema, nameMapping.get)
+      (typeWithIds, ParquetSchemaUtil.pruneColumns(typeWithIds, requiredSchema))
+    } else {
+      val typeWithIds = ParquetSchemaUtil.addFallbackIds(fileSchema)
+      (typeWithIds, ParquetSchemaUtil.pruneColumnsFallback(typeWithIds, requiredSchema))
+    }
+  }
+
   def file(file: InputFile): ShadedInputFile = {
     GpuParquetIOAccess.file(file)
   }

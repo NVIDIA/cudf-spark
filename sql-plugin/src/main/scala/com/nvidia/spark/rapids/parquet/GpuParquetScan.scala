@@ -172,8 +172,7 @@ object GpuParquetScan {
     }
   }
 
-  private[rapids] def tagVariantScanPrefixForCpu(
-      meta: RapidsMeta[_, _, _], reason: String): Unit = {
+  def tagVariantScanPrefixForCpu(meta: RapidsMeta[_, _, _], reason: String): Unit = {
     meta.willNotWorkOnGpu(reason)
     var ancestor = meta.parent
     var outputContainsVariant = true

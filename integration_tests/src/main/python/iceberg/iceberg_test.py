@@ -870,7 +870,9 @@ def _setup_iceberg_variant_table(spark, table):
           (3, '3.5'),
           (4, 'true'),
           (5, 'null'),
-          (6, NULL)
+          (6, NULL),
+          (7, '{{}}'),
+          (8, '[]')
         AS source(id, json)
         """)
 
@@ -895,20 +897,51 @@ def _read_iceberg_variant_table(spark, table):
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @pytest.mark.skipif(not is_spark_411_or_later(),
                     reason="Iceberg Variant requires Spark 4.1.1+")
-def test_iceberg_v3_shredded_variant_read_fallback(spark_tmp_table_factory):
+@pytest.mark.parametrize("allow_reading_shredded", ["false", "true"])
+def test_iceberg_v3_shredded_variant_read_fallback(
+        spark_tmp_table_factory, allow_reading_shredded):
     table = get_full_table_name(spark_tmp_table_factory)
     conf = copy_and_update(
         _ICEBERG_VARIANT_READ_CONF,
-        {"spark.sql.variant.allowReadingShredded": "true"})
+        {"spark.sql.variant.allowReadingShredded": allow_reading_shredded})
 
-    with_cpu_session(
-        lambda spark: _setup_iceberg_variant_table(spark, table),
-        conf=conf)
+    def setup_table(spark):
+        spark.sql(
+            f"CREATE TABLE {table} (id INT, v VARIANT) USING ICEBERG "
+            "TBLPROPERTIES ('format-version' = '3', "
+            "'write.parquet.shred-variants' = 'true', "
+            "'write.parquet.variant-inference-buffer-size' = '2')")
+        spark.sql(f"""
+            INSERT INTO {table}
+            SELECT id, parse_json(json)
+            FROM VALUES (0, '{{"x":7}}'), (1, '{{"x":8}}'), (2, '{{"x":9}}')
+            AS source(id, json)
+            """)
+        jvm = spark._jvm
+        iceberg_table = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
+            spark._jsparkSession, table)
+        files = spark.sql(f"SELECT file_path FROM {table}.files").collect()
+        assert files, "Expected shredded data files"
+        for row in files:
+            input_file = iceberg_table.io().newInputFile(row.file_path)
+            reader = jvm.org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader.open(
+                jvm.org.apache.iceberg.parquet.GpuParquetIOAccess.file(input_file))
+            try:
+                variant = reader.getFileMetaData().getSchema().getType("v").asGroupType()
+                assert variant.containsField("typed_value"), "Fixture must contain shredded Variant"
+            finally:
+                reader.close()
+        # A write-property check would miss these existing shredded files.
+        spark.sql(f"ALTER TABLE {table} SET TBLPROPERTIES ('write.parquet.shred-variants'='false')")
 
-    assert_gpu_fallback_collect(
+    with_cpu_session(setup_table, conf=conf)
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: _read_iceberg_variant_table(spark, table),
-        "BatchScanExec",
-        conf=conf)
+        exist_classes="BatchScanExec",
+        non_exist_classes="GpuBatchScanExec,GpuVariantGet",
+        conf=conf,
+        require_non_empty=True)
 
 
 @iceberg
