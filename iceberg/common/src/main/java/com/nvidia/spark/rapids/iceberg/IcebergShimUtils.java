@@ -195,7 +195,11 @@ public interface IcebergShimUtils {
             RapidsConf rapidsConf,
             boolean queryUsesInputFile);
 
-    /** Creates the version-specific visitor used to reconcile requested and file schemas. */
+    /**
+     * Creates the visitor used to reconcile requested and file schemas.
+     * The common visitor avoids Variant APIs absent from Iceberg 1.6.x;
+     * Variant-enabled shims supply the additional callback.
+     */
     default SchemaWithPartnerVisitor<Type, ColumnAction> newActionBuildingVisitor(
             Map<Integer, ?> idToConstant) {
         return new ActionBuildingVisitor(idToConstant);

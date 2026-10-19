@@ -425,7 +425,7 @@ private[iceberg] object MissingFieldActionBuilder {
 /**
  * Visitor to build column action tree by comparing expected schema with file schema.
  * Uses SchemaWithPartnerVisitor where partner is the corresponding file schema type.
- * Tracks current field context to handle missing primitives properly.
+ * Tracks current field context to handle missing leaf fields and containers.
  */
 private[iceberg] class ActionBuildingVisitor(
     idToConstant: JMap[Integer, _]
@@ -576,7 +576,9 @@ private[iceberg] class ActionBuildingVisitor(
     }
   }
 
-  protected def leaf(expectedType: DataType, partner: Type): ColumnAction = {
+  /** Builds an action for a primitive or a logical leaf supplied by a version-specific visitor. */
+  protected def buildLeafAction(expectedType: Type, partner: Type): ColumnAction = {
+    val expectedSparkType = SparkSchemaUtil.convert(expectedType)
     val fieldId = currentField.fieldId()
 
     // Lineage columns may be physically present but contain nulls that must inherit
@@ -590,19 +592,19 @@ private[iceberg] class ActionBuildingVisitor(
 
     if (partner != null) {
       // Partner exists - check for type promotion
-      val fileType = SparkSchemaUtil.convert(partner)
-      if (DataType.equalsStructurally(expectedType, fileType)) {
+      val fileSparkType = SparkSchemaUtil.convert(partner)
+      if (DataType.equalsStructurally(expectedSparkType, fileSparkType)) {
         PassThrough
       } else {
-        UpCast(fileType, expectedType)
+        UpCast(fileSparkType, expectedSparkType)
       }
     } else if (isInsideConstantStruct || isInsideMissingContainer) {
       // Children of a missing container — see struct() for rationale.
-      FillNull(expectedType)
+      FillNull(expectedSparkType)
     } else {
       MissingFieldActionBuilder.buildAction(
         currentField.fieldId(),
-        expectedType,
+        expectedSparkType,
         currentField.isOptional,
         idToConstant)
     }
@@ -611,7 +613,7 @@ private[iceberg] class ActionBuildingVisitor(
   override def primitive(
       primitive: Type.PrimitiveType,
       partner: Type): ColumnAction = {
-    leaf(SparkSchemaUtil.convert(primitive), partner)
+    buildLeafAction(primitive, partner)
   }
 }
 
