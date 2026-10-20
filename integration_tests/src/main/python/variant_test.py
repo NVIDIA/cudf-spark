@@ -20,9 +20,9 @@ from asserts import (assert_cpu_and_gpu_are_equal_collect_with_capture,
                      assert_gpu_fallback_write,
                      assert_gpu_fallback_collect,
                      run_with_cpu_and_gpu)
-from conftest import is_databricks_runtime, spark_jvm
+from conftest import is_databricks_runtime, is_not_utc, spark_jvm
 from data_gen import idfn
-from marks import allow_non_gpu, ignore_order, incompat
+from marks import allow_non_gpu, allow_non_gpu_conditional, ignore_order, incompat
 from spark_session import (is_before_spark_400, is_databricks173_or_later, is_spark_40x,
                            is_spark_410_or_later, is_spark_411_or_later, with_cpu_session)
 
@@ -453,6 +453,7 @@ def test_parquet_nested_struct_variant_try_get(spark_tmp_path):
 
 
 @incompat
+@allow_non_gpu_conditional(is_not_utc(), 'ProjectExec', 'VariantGet')
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
 def test_parquet_nested_array_map_variant_try_get(spark_tmp_path):
     data_path = spark_tmp_path + '/NESTED_ARRAY_MAP_VARIANT_PARQUET'
@@ -469,8 +470,16 @@ def test_parquet_nested_array_map_variant_try_get(spark_tmp_path):
           AS source(id, object_json, array_json)
         """).write.mode('overwrite').parquet(data_path)
 
+    # Generate Parquet data on CPU with the logical schema:
+    #   id: INT
+    #   items: ARRAY<VARIANT>
+    #   attributes: MAP<STRING, VARIANT>
     _with_cpu_variant_session(write_data)
 
+    # items[0] and items[1] access the outer SQL array (GpuGetArrayItem).
+    # attributes['object'] and attributes['array'] access SQL map values (GpuGetMapValue).
+    # try_variant_get(..., '$.x', 'int') and try_variant_get(..., '$[0]', 'int')
+    # extract an object field or array element inside a Variant (GpuVariantGet).
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.read.parquet(data_path).selectExpr(
             "id",
