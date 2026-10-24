@@ -916,6 +916,7 @@ The GPU supports `unhex` for string input. It returns binary data, treats an odd
 digits as if a leading zero were present, and returns null for invalid input. The permissive
 hexadecimal form of `to_binary` in Spark 3.3 is also supported. Error-raising hexadecimal
 `to_binary` in Spark 3.4 and later falls back to the CPU.
+`try_to_binary(..., 'hex')` also falls back to the CPU on Spark 3.4 and later.
 
 Spark 3.3.0 and 3.3.1 decode an odd number of hex digits incorrectly on the CPU
 ([SPARK-40924](https://issues.apache.org/jira/browse/SPARK-40924)). This also affects Databricks

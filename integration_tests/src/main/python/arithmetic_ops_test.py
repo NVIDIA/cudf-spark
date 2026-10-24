@@ -1031,6 +1031,23 @@ def test_unhex_generated(data_gen, conf):
                 unary_op_df(spark, data_gen)).selectExpr('unhex(a)'), conf=conf)
 
 
+def test_unhex_long_row():
+    values = [('A0' * (512 * 1024),), ('4142',), ('GG',), (None,), (None,)]
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: spark.createDataFrame(values, 'a string').selectExpr('unhex(a)'))
+
+
+def test_unhex_all_null():
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: spark.createDataFrame([(None,), (None,)], 'a string').selectExpr(
+                'unhex(a)'))
+
+
+def test_unhex_empty_batch():
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: spark.createDataFrame([], 'a string').selectExpr('unhex(a)'))
+
+
 @pytest.mark.skipif(not is_spark_330_or_later() or not is_before_spark_340(),
                     reason='permissive to_binary with hex is Spark 3.3 only')
 @pytest.mark.parametrize('conf', _unhex_confs)
@@ -1048,6 +1065,16 @@ def test_to_binary_hex_error_mode_fallback():
     assert_gpu_fallback_collect(
             lambda spark: spark.createDataFrame(values, 'a string').selectExpr(
                 "to_binary(a, 'hex')"),
+            'Unhex')
+
+
+@allow_non_gpu('Unhex')
+@pytest.mark.skipif(is_before_spark_340(), reason='try_to_binary with hex is unavailable')
+def test_try_to_binary_hex_fallback():
+    values = [('4142',), ('GG',), ('',), (None,)]
+    assert_gpu_fallback_collect(
+            lambda spark: spark.createDataFrame(values, 'a string').selectExpr(
+                "try_to_binary(a, 'hex')"),
             'Unhex')
 
 

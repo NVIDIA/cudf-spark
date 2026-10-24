@@ -19932,7 +19932,7 @@ are limited.
 <td rowSpan="2">Unhex</td>
 <td rowSpan="2">`unhex`</td>
 <td rowSpan="2">Converts a hexadecimal string to binary</td>
-<td rowSpan="2">None</td>
+<td rowSpan="2">Error-raising to_binary and try_to_binary with hex fall back to CPU. Odd-length input differs from legacy Spark 3.3 and Databricks CPU decoding; see compatibility.md.</td>
 <td rowSpan="2">project</td>
 <td>input</td>
 <td> </td>
