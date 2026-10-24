@@ -37,9 +37,9 @@ class AsyncOutputStreamSuite extends AnyFunSuite with BeforeAndAfterEach {
   private val trafficController = new TrafficController(
     new HostMemoryThrottle(bufLen * maxBufCount))
 
-  def openStream(writeDelayMs: Long = 0L): (AsyncOutputStream, String) = {
+  def openStream(writeGate: CountDownLatch = null): (AsyncOutputStream, String) = {
     val file = File.createTempFile("async-write-test", "tmp")
-    val stream = if (writeDelayMs == 0L) {
+    val stream = if (writeGate == null) {
       AsyncOutputStream(() => {
         new BufferedOutputStream(new FileOutputStream(file))
       }, trafficController, Seq.empty)
@@ -49,31 +49,13 @@ class AsyncOutputStreamSuite extends AnyFunSuite with BeforeAndAfterEach {
         new ForwardingExecutorService {
           override def delegate(): ExecutorService = del
 
-          /**
-           * Technically, overriding this method is good enough for the test, but we also override
-           * the other submit methods as well in case we modify our code to use them in the future.
-           */
-          override def submit[T](task: Callable[T]): Future[T] = {
-            super.submit(() => {
-              Thread.sleep(writeDelayMs)
-              task.call()
-            })
-          }
-
-          override def submit(task: Runnable): Future[_] = {
-            super.submit(new Runnable {
+          override def execute(command: Runnable): Unit = {
+            super.execute(new Runnable {
               override def run(): Unit = {
-                Thread.sleep(writeDelayMs)
-                task.run()
+                writeGate.await()
+                command.run()
               }
             })
-          }
-
-          override def submit[T](task: Runnable, result: T): Future[T] = {
-            super.submit(() => {
-              Thread.sleep(writeDelayMs)
-              task.run()
-            }, result)
           }
         },
         trafficController,
@@ -161,10 +143,15 @@ class AsyncOutputStreamSuite extends AnyFunSuite with BeforeAndAfterEach {
   def testWrite(writeCall: (AsyncOutputStream, Int) => Unit,
       readCall: DataInputStream => Int): Unit = {
     val numInts = 50
-    val (asyncStream, outputPath) = openStream(10)
+    val writeGate = new CountDownLatch(1)
+    val (asyncStream, outputPath) = openStream(writeGate)
     withResource(asyncStream) { asyncStream =>
-      for (i <- 0 until numInts) {
-        writeCall(asyncStream, i)
+      try {
+        for (i <- 0 until numInts) {
+          writeCall(asyncStream, i)
+        }
+      } finally {
+        writeGate.countDown()
       }
     }
 
