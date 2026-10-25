@@ -19,16 +19,23 @@ package org.apache.spark.sql.rapids.execution
 import scala.annotation.tailrec
 
 import com.nvidia.spark.rapids.{
-  GpuCoalesceBatches, GpuExec, GpuExpression, GpuFilterExec, GpuLiteral, GpuProjectExec}
+  GpuCoalesceBatches, GpuColumnarToRowExec, GpuExec, GpuExpression, GpuFilterExec, GpuLiteral,
+  GpuProjectExec, GpuRowToColumnarExec, GpuShuffleCoalesceExec, GpuShuffledAsymmetricHashJoinExec,
+  RapidsConf, TargetSize}
 import com.nvidia.spark.rapids.shims.ShimUnaryExecNode
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{
   Attribute, Expression, ExprId, NamedExpression, SortOrder}
+import org.apache.spark.sql.catalyst.plans.LeftOuter
 import org.apache.spark.sql.execution.SparkPlan
-import org.apache.spark.sql.rapids.GpuFileSourceScanExec
+import org.apache.spark.sql.execution.adaptive.ShuffleQueryStageExec
+import org.apache.spark.sql.execution.python.BatchEvalPythonExec
+import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.rapids.{GpuFileSourceScanExec, GpuShuffleEnv}
 import org.apache.spark.sql.rapids.catalyst.expressions.GpuRand
+import org.apache.spark.sql.rapids.execution.python.GpuArrowEvalPythonExec
 import org.apache.spark.sql.types.{IntegerType, LongType, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -60,15 +67,39 @@ private[rapids] case class GpuRangeBoundaryExec(child: SparkPlan)
  * Unsupported plans fall back to sampling the full exchange input.
  */
 private[rapids] object GpuRangeBoundaryPlan {
+  // Mirror GpuTransitionOverrides.addPostShuffleCoalesce so the terminal leaf feeds the same
+  // batches: coalesce device batches under the RAPIDS shuffle, otherwise coalesce the
+  // host-serialized read as it comes back onto the GPU.
+  private def wrapPostShuffleCoalesce(
+      terminal: SparkPlan, rapidsConf: RapidsConf): SparkPlan = {
+    if (GpuShuffleEnv.useGPUShuffle(rapidsConf)) {
+      GpuCoalesceBatches(terminal, TargetSize(rapidsConf.gpuTargetBatchSizeBytes))
+    } else {
+      GpuShuffleCoalesceExec(terminal, rapidsConf.gpuTargetBatchSizeBytes)
+    }
+  }
+
+  // Only a GPU shuffle stage may become a terminal leaf: a reused CPU exchange's columnar
+  // path is unsupported and would fail at boundary execution.
+  private def isGpuShuffleStage(plan: SparkPlan): Boolean = plan match {
+    case stage: ShuffleQueryStageExec =>
+      stage.shuffle.isInstanceOf[GpuShuffleExchangeExecBase]
+    case _ => false
+  }
+
   private def referencedExprIds(expressions: Seq[Expression]): Set[ExprId] =
     expressions.flatMap(_.references).map(_.exprId).toSet
 
-  def build(plan: SparkPlan, ordering: Seq[SortOrder]): Option[GpuRangeBoundaryExec] = {
+  def build(
+      plan: SparkPlan,
+      ordering: Seq[SortOrder],
+      pruneThroughPython: Boolean = false): Option[GpuRangeBoundaryExec] = {
     val required = referencedExprIds(ordering)
     if (required.isEmpty) {
       None
     } else {
-      prune(plan, required).flatMap { pruned =>
+      val rapidsConf = new RapidsConf(SQLConf.get)
+      prune(plan, required, Set.empty, pruneThroughPython, rapidsConf).flatMap { pruned =>
         val selected = pruned.output.filter(attr => required.contains(attr.exprId))
         if (selected.map(_.exprId).toSet != required) {
           None
@@ -135,7 +166,9 @@ private[rapids] object GpuRangeBoundaryPlan {
   private def prune(
       plan: SparkPlan,
       required: Set[ExprId],
-      deterministicRequired: Set[ExprId] = Set.empty): Option[SparkPlan] = plan match {
+      deterministicRequired: Set[ExprId],
+      pruneThroughPython: Boolean,
+      rapidsConf: RapidsConf): Option[SparkPlan] = plan match {
     case project: GpuProjectExec =>
       val childOutputIds = project.child.output.map(_.exprId).toSet
       val projectOutputIds = project.projectList.map(_.exprId).toSet
@@ -145,7 +178,8 @@ private[rapids] object GpuRangeBoundaryPlan {
         // Keep project-local dependencies here instead of requesting aliases from the child scan.
         val childRequired = referencedExprIds(selected) -- localOutputIds
         val childDeterministicRequired = referencedExprIds(deterministicSelected) -- localOutputIds
-        prune(project.child, childRequired, childDeterministicRequired).map { child =>
+        prune(project.child, childRequired, childDeterministicRequired, pruneThroughPython,
+          rapidsConf).map { child =>
           project.withProjectList(selected.toList, newChild = child)
         }
       }
@@ -153,14 +187,78 @@ private[rapids] object GpuRangeBoundaryPlan {
     case filter: GpuFilterExec if filter.condition.deterministic =>
       val filterRequired = referencedExprIds(Seq(filter.condition))
       val childRequired = required ++ filterRequired
-      prune(filter.child, childRequired, deterministicRequired ++ filterRequired).map { child =>
+      prune(filter.child, childRequired, deterministicRequired ++ filterRequired,
+        pruneThroughPython, rapidsConf).map { child =>
         filter.withNewChildren(Seq(child))
       }
 
     case coalesce: GpuCoalesceBatches =>
-      prune(coalesce.child, required, deterministicRequired).map { child =>
+      prune(coalesce.child, required, deterministicRequired, pruneThroughPython,
+        rapidsConf).map { child =>
         coalesce.withNewChildren(Seq(child))
       }
+
+    // The pruneThroughPython-gated cases below change which plan computes the sampled keys,
+    // which is why they sit behind spark.rapids.sql.rangePartitioning.pruneThroughPython.
+
+    // A host-serialized shuffle read wraps the exchange in this coalesce, so stepping through
+    // it keeps the exchange and the map-side plan (islands included) reachable.
+    case shuffleCoalesce: GpuShuffleCoalesceExec if pruneThroughPython =>
+      prune(shuffleCoalesce.child, required, deterministicRequired, pruneThroughPython,
+        rapidsConf)
+
+    // A reader only changes how its child stage's output is partitioned and read. Sampling it
+    // preserves the key set but not the key multiset: repeated partition specs (the non-split
+    // side of a skew join) repeat rows, which can only reweight boundary placement. Treating
+    // the reader and its materialized stage as a terminal leaf skips re-running the join or
+    // the Python island that produced the stage input.
+    case reader: GpuCustomShuffleReaderExec if pruneThroughPython &&
+        isGpuShuffleStage(reader.child) =>
+      Some(wrapPostShuffleCoalesce(reader, rapidsConf))
+
+    // Sampling a materialized stage conserves the key multiset and skips everything upstream
+    // of it: the island, join, or map-side plan that produced the stage's input.
+    case stage: ShuffleQueryStageExec if pruneThroughPython && isGpuShuffleStage(stage) =>
+      Some(wrapPostShuffleCoalesce(stage, rapidsConf))
+
+    // Row-boundary islands (C2R → BatchEvalPython → R2C) are pass-through only when no range
+    // key depends on a Python UDF output and every UDF is deterministic: a UDF-dependent key
+    // would change the sampled values, and the boundary plan executes the subtree separately
+    // from the shuffle input, so both executions must agree on the keys.
+    case python: BatchEvalPythonExec if pruneThroughPython &&
+        python.udfs.forall(_.deterministic) &&
+        required.intersect(python.resultAttrs.map(_.exprId).toSet).isEmpty =>
+      prune(python.child, required, deterministicRequired, pruneThroughPython, rapidsConf)
+
+    // Same pass-through for the Arrow-batched Python island, so key-only collection also
+    // composes with Arrow-optimized Python UDFs.
+    case arrow: GpuArrowEvalPythonExec if pruneThroughPython &&
+        arrow.udfs.forall(_.deterministic) &&
+        required.intersect(arrow.resultAttrs.map(_.exprId).toSet).isEmpty =>
+      prune(arrow.child, required, deterministicRequired, pruneThroughPython, rapidsConf)
+
+    // The island nodes are dropped rather than rewrapped: keeping R2C/C2R around the pruned
+    // child would add a pointless column→row→column round-trip to the sampling path, which
+    // must stay columnar.
+    case r2c: GpuRowToColumnarExec if pruneThroughPython =>
+      prune(r2c.child, required, deterministicRequired, pruneThroughPython, rapidsConf)
+
+    case c2r: GpuColumnarToRowExec if pruneThroughPython =>
+      prune(c2r.child, required, deterministicRequired, pruneThroughPython, rapidsConf)
+
+    // A GPU shuffle conserves rows, so the boundary plan can drop the exchange and sample its
+    // map-side child directly instead of re-shuffling inside the auxiliary subquery.
+    case exch: GpuShuffleExchangeExecBase if pruneThroughPython =>
+      prune(exch.child, required, deterministicRequired, pruneThroughPython, rapidsConf)
+
+    // LeftOuter keeps every unmatched left row and repeats each matched left row once per
+    // matching right row, so the key set stays the left leg's and duplicate right-side keys
+    // can only reweight boundary placement. A join condition, any other join type, or a key
+    // set that needs the right side falls back to full-width sampling.
+    case join: GpuShuffledAsymmetricHashJoinExec if pruneThroughPython &&
+        join.joinType == LeftOuter && join.condition.isEmpty &&
+        required.subsetOf(join.left.output.map(_.exprId).toSet) =>
+      prune(join.left, required, deterministicRequired, pruneThroughPython, rapidsConf)
 
     case scan: GpuFileSourceScanExec =>
       pruneFileScan(scan, required)
