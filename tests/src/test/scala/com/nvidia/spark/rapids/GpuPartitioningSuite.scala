@@ -216,30 +216,32 @@ class GpuPartitioningSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
-  /** Long enough that the delayed host allocations dominate the device-to-host copy time. */
-  private val slowAllocationMillis = 20L
-
-  /** Delays each host allocation made on the creating thread and totals the time it took. */
-  private class SlowHostAllocator(delegate: HostMemoryAllocator) extends HostMemoryAllocator {
+  /** Counts the host allocations made on the creating thread while `metric` is not timing. */
+  private class TimerProbingHostAllocator(delegate: HostMemoryAllocator, metric: GpuMetric)
+      extends HostMemoryAllocator {
     private val owner = Thread.currentThread()
     var allocations = 0
-    var allocationNanos = 0L
+    var untimedAllocations = 0
 
-    override def allocate(amount: Long, preferPinned: Boolean): HostMemoryBuffer =
-      timed(delegate.allocate(amount, preferPinned))
+    override def allocate(amount: Long, preferPinned: Boolean): HostMemoryBuffer = {
+      probe()
+      delegate.allocate(amount, preferPinned)
+    }
 
-    override def allocate(amount: Long): HostMemoryBuffer = timed(delegate.allocate(amount))
+    override def allocate(amount: Long): HostMemoryBuffer = {
+      probe()
+      delegate.allocate(amount)
+    }
 
-    private def timed(doAllocate: => HostMemoryBuffer): HostMemoryBuffer = {
+    private def probe(): Unit = {
       if (Thread.currentThread() eq owner) {
-        val start = System.nanoTime()
-        Thread.sleep(slowAllocationMillis)
-        val buffer = doAllocate
         allocations += 1
-        allocationNanos += System.nanoTime() - start
-        buffer
-      } else {
-        doAllocate
+        // A timer that is already running refuses to activate. An idle one activates, so it is
+        // stopped again at once, adding no time.
+        if (metric.tryActivateTimer(Seq.empty)) {
+          metric.deactivateTimer(0L, Seq.empty)
+          untimedAllocations += 1
+        }
       }
     }
   }
@@ -262,7 +264,7 @@ class GpuPartitioningSuite extends AnyFunSuite with BeforeAndAfterEach {
           GpuColumnVector.incRefCounts(batch)
           val columns = GpuColumnVector.extractColumns(batch)
           val previous = DefaultHostMemoryAllocator.get()
-          val allocator = new SlowHostAllocator(previous)
+          val allocator = new TimerProbingHostAllocator(previous, copyTime)
           DefaultHostMemoryAllocator.set(allocator)
           val parts = try {
             gp.sliceInternalGpuOrCpuAndClose(batch.numRows, partitionIndices, columns)
@@ -271,7 +273,8 @@ class GpuPartitioningSuite extends AnyFunSuite with BeforeAndAfterEach {
           }
           withResource(parts.map(_._1)) { _ =>
             assert(allocator.allocations > 0)
-            assert(copyTime.value >= allocator.allocationNanos)
+            assertResult(0)(allocator.untimedAllocations)
+            assert(copyTime.value > 0)
           }
         }
       }
