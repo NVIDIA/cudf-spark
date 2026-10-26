@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026, NVIDIA CORPORATION.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Inspect a Spark target's effective annotated shim source selection."""
+
+import argparse
+import json
+import os
+import sys
+
+from shimpler_source_graph import load_source_graph
+from shimpler_source_resolver import (candidate_inherited_sources, discover_shim_modules,
+                                     resolve_sources, scan_module_sources, validate_legacy_shadow)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('sources', choices=('sources',))
+    parser.add_argument('--target', required=True, help='Exact Spark build target')
+    parser.add_argument('--scala', choices=('2.12', '2.13'),
+                        help='Scala build tree; inferred when the target exists in only one tree')
+    parser.add_argument('--module', help='Restrict results to a repository-relative module path')
+    parser.add_argument('--explain', action='store_true', help='Show logical paths and provenance')
+    parser.add_argument('--format', choices=('text', 'json'), default='text')
+    parser.add_argument('--null', action='store_true', help='NUL-delimit physical paths')
+    args = parser.parse_args()
+    if args.null and (args.format != 'text' or args.explain):
+        parser.error('--null cannot be combined with --format=json or --explain')
+
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    graphs = {'2.12': load_source_graph(os.path.join(root, 'pom.xml')),
+              '2.13': load_source_graph(os.path.join(root, 'scala2.13', 'pom.xml'))}
+    scala = args.scala
+    if scala is None:
+        scala = '2.12' if args.target in graphs['2.12'] else '2.13'
+    graph = graphs[scala]
+    if args.target not in graph:
+        parser.error('target %s is not in the Scala %s build tree' % (args.target, scala))
+
+    valid_targets = set(graphs['2.12']) | set(graphs['2.13'])
+    modules = discover_shim_modules(root)
+    if args.module:
+        modules = [module for module in modules
+                   if os.path.relpath(module, root) == args.module]
+        if not modules:
+            parser.error('no shim module found at %s' % args.module)
+
+    rows = []
+    for module in modules:
+        variants, _ = scan_module_sources(module, valid_targets)
+        validate_legacy_shadow(graph, variants, (args.target,))
+        candidate_variants, _ = candidate_inherited_sources(graph, variants)
+        selected = resolve_sources(graph, candidate_variants, args.target)
+        module_name = os.path.relpath(module, root)
+        for logical, source in selected.items():
+            rows.append({'logical_source': module_name + '/' + logical,
+                         'physical_path': os.path.relpath(source.physical_path, root),
+                         'introduction_target': source.introduced_at,
+                         'selector_kind': source.selector_kind,
+                         'ancestry_path': source.ancestry_path})
+    rows.sort(key=lambda row: row['logical_source'])
+
+    if args.format == 'json':
+        json.dump({'target': args.target, 'scala': scala, 'sources': rows}, sys.stdout, indent=2)
+        sys.stdout.write('\n')
+    elif args.null:
+        sys.stdout.write(''.join(row['physical_path'] + '\0' for row in rows))
+    elif args.explain:
+        for row in rows:
+            sys.stdout.write('%s\n  -> %s\n  %s: %s via %s\n' %
+                             (row['logical_source'], row['physical_path'],
+                              row['selector_kind'], row['introduction_target'],
+                              ' <- '.join(row['ancestry_path'])))
+    else:
+        for row in rows:
+            sys.stdout.write(row['physical_path'] + '\n')
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except ValueError as error:
+        sys.stderr.write('shimpler: %s\n' % error)
+        sys.exit(1)

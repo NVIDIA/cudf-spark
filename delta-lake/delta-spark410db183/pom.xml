@@ -79,20 +79,6 @@
             <plugin>
                 <groupId>net.alchim31.maven</groupId>
                 <artifactId>scala-maven-plugin</artifactId>
-                <configuration>
-                    <!-- Compile the reader dependency closure until the write layer is added. -->
-                    <includes>
-                        <include>**/DeltaReadSupport.scala</include>
-                        <include>**/GpuDeltaParquetFileFormat.scala</include>
-                        <include>**/GpuDeltaParquetFileFormatNativeDV.scala</include>
-                        <include>**/GpuDeltaParquetFileFormatNativeDVBase.scala</include>
-                        <include>**/RapidsDeletionVectors.scala</include>
-                        <include>**/DeltaBitmapUtils.java</include>
-                        <include>**/GpuDeltaParquetFileFormatBase.scala</include>
-                        <include>**/GpuDeltaParquetFileFormatUtils.scala</include>
-                        <include>**/RapidsDeletionVectorRowCountUtils.scala</include>
-                    </includes>
-                </configuration>
             </plugin>
             <plugin>
                 <groupId>org.apache.rat</groupId>

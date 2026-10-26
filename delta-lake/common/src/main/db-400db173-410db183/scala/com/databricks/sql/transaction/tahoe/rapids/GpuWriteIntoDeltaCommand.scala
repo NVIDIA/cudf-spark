@@ -128,9 +128,12 @@ class GpuWriteIntoDeltaCommandMeta(
 
   override protected def tagSelfForGpuInternal(): Unit = {
     val isNativeOptimize = cmd.query.collectLeaves() match {
-      case Seq(LogicalRelation(HadoopFsRelation(
-          index: TahoeBatchFileIndex, _, _, _, _, _), _, _, _, _, _, _)) =>
-        index.actionType.equalsIgnoreCase("Optimize")
+      case Seq(relation: LogicalRelation) =>
+        relation.relation match {
+          case HadoopFsRelation(index: TahoeBatchFileIndex, _, _, _, _, _) =>
+            index.actionType.equalsIgnoreCase("Optimize")
+          case _ => false
+        }
       case _ => false
     }
     val isSupportedNativeOptimize =

@@ -37,5 +37,6 @@ case class GpuDeltaParquetFileFormatNativeDV(
     relation, protocol, metadata, generateRowIndexFilterId, generateRowIndexFilterColumn,
     nullableRowTrackingConstantFields, nullableRowTrackingGeneratedFields, optimizationsEnabled,
     tablePath, isCDCRead,
-    lowShuffleMergeDiscoveryScan = false,
-    lowShuffleMergeRowIndexColumn = METADATA_ROW_IDX_COL)
+    GpuDeltaParquetFileFormat.isLowShuffleMergeDiscoveryScan(relation.options),
+    relation.options.getOrElse(
+      GpuDeltaParquetFileFormat.LOW_SHUFFLE_MERGE_ROW_INDEX_COLUMN_OPTION, METADATA_ROW_IDX_COL))

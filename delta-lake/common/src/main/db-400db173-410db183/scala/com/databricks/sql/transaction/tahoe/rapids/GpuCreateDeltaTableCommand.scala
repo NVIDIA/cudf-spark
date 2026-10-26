@@ -50,7 +50,7 @@ case class GpuCreateDeltaTableCommand(
   override protected def validateQueryPlan(plan: LogicalPlan): Unit = plan match {
     case _: WriteIntoDeltaEdge =>
       throw new UnsupportedOperationException(
-        "Delta CTAS/RTAS using WriteIntoDeltaEdge is not supported on GPU for DB-17.3")
+        "Delta CTAS/RTAS using WriteIntoDeltaEdge is not supported on GPU for Databricks")
     case _ =>
   }
 }
