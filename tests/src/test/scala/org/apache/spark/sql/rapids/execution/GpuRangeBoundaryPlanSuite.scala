@@ -16,7 +16,7 @@
 
 package org.apache.spark.sql.rapids.execution
 
-import com.nvidia.spark.rapids.{GpuProjectExec, RapidsConf, SparkQueryCompareTestSuite}
+import com.nvidia.spark.rapids.{GpuFilterExec, GpuProjectExec, RapidsConf, SparkQueryCompareTestSuite}
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.DataFrame
@@ -271,15 +271,34 @@ class GpuRangeBoundaryPlanSuite extends SparkQueryCompareTestSuite {
   test("random filter dependencies through aliases use the original GPU input") {
     withTempPath { path =>
       writeInput(path.getCanonicalPath)
+      // Keep the filter above the alias projection so this exercises propagation of
+      // deterministic filter dependencies through a separate project.
+      val aliasConf = conf.clone().set("spark.sql.optimizer.excludedRules",
+        "org.apache.spark.sql.catalyst.optimizer.PushDownPredicates," +
+          "org.apache.spark.sql.catalyst.optimizer.PushPredicateThroughNonJoin")
       withGpuSparkSession({ spark =>
         val result = spark.read.parquet(path.getCanonicalPath)
           .withColumn("random_value", rand(7))
           .withColumn("filter_alias", col("random_value") * 2)
           .filter(col("filter_alias") > 1)
           .repartitionByRange(4, col("key"))
-        assert(!rangeExchange(result).subqueries.exists(_.isInstanceOf[GpuRangeBoundaryExec]))
+        val exchange = rangeExchange(result)
+        val filter = exchange.child.collectFirst {
+          case gpuFilter: GpuFilterExec
+              if gpuFilter.condition.references.exists(_.name == "filter_alias") => gpuFilter
+        }.getOrElse(fail(s"Expected a filter referencing filter_alias below:\n$exchange"))
+        val aliasProject = filter.child.collectFirst {
+          case project: GpuProjectExec
+              if project.projectList.exists(_.name == "filter_alias") => project
+        }.getOrElse(fail(s"Expected a separate alias projection below:\n$filter"))
+        assert(aliasProject.child.exists {
+          case project: GpuProjectExec =>
+            project.projectList.exists(expr => expr.name == "random_value" && !expr.deterministic)
+          case _ => false
+        }, s"Expected the random projection below the alias projection:\n$aliasProject")
+        assert(!exchange.subqueries.exists(_.isInstanceOf[GpuRangeBoundaryExec]))
         assert(result.collect().forall(_.getDouble(3) > 0.5))
-      }, conf)
+      }, aliasConf)
     }
   }
 

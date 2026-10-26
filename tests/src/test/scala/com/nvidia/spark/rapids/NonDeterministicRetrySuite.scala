@@ -89,9 +89,15 @@ class NonDeterministicRetrySuite extends RmmSparkRetrySuiteBase {
         }
       }
     }
-    Seq(0, 3).foreach { partition =>
+    // Exercise partition zero and a nonzero partition to check partition-dependent seeding.
+    val partitions = Seq(0, 3)
+    // Include empty and single-row batches, plus uneven batches totaling NUM_ROWS (500).
+    // The exact uneven sizes are arbitrary; they change the boundaries without changing rows.
+    val unevenBatchSizes = Seq(0, 1, 17, 0, 233, 249)
+    val singleRowBatchSizes = Seq.fill(NUM_ROWS)(1)
+    partitions.foreach { partition =>
       val expected = evaluate(partition, Seq(NUM_ROWS), restore = false)
-      Seq(Seq(0, 1, 17, 0, 233, 249), Seq.fill(NUM_ROWS)(1)).foreach { sizes =>
+      Seq(unevenBatchSizes, singleRowBatchSizes).foreach { sizes =>
         assert(sizes.sum == NUM_ROWS)
         assert(evaluate(partition, sizes, restore = false) === expected)
         assert(evaluate(partition, sizes, restore = true) === expected)
