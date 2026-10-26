@@ -37,6 +37,8 @@ case class AliasRuleMeta(
     p: Option[RapidsMeta[_, _, _]],
     r: DataFromReplacementRule)
   extends UnaryAstExprMeta[Alias](a, conf, p, r) {
+  override def typeMeta: DataTypeMeta = childExprs.head.typeMeta
+
   override def convertToGpu(child: Expression): GpuExpression =
     GpuAlias(child, a.name)(a.exprId, a.qualifier, a.explicitMetadata)
 }
@@ -62,7 +64,17 @@ case class AttributeReferenceRuleMeta(
     r: DataFromReplacementRule)
   extends BaseExprMeta[AttributeReference](att, conf, p, r) {
   // This is the only NOOP operator.  It goes away when things are bound
-  override def convertToGpuImpl(): Expression = att
+  override def convertToGpuImpl(): Expression = {
+    // A GPU child can produce a different type than Spark declares, e.g. a pruned protobuf struct.
+    RapidsMeta.findParentPlanMeta(this)
+      .flatMap(_.convertedChildOutputs.get(att.exprId))
+      .filter(_.dataType != att.dataType)
+      .map { converted =>
+        AttributeReference(att.name, converted.dataType, converted.nullable, att.metadata)(
+          att.exprId, att.qualifier)
+      }
+      .getOrElse(att)
+  }
 
   // There are so many of these that we don't need to print them out, unless it
   // will not work on the GPU

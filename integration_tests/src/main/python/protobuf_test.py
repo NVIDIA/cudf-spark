@@ -19,6 +19,7 @@ import struct
 import pytest
 
 from asserts import (
+    assert_cpu_and_gpu_are_equal_collect_with_capture,
     assert_gpu_and_cpu_are_equal_collect,
     assert_gpu_and_cpu_error,
     assert_gpu_fallback_collect,
@@ -27,7 +28,7 @@ from data_gen import (
     ArrayGen, BinaryGen, BooleanGen, DoubleGen, FloatGen, IntegerGen, LongGen,
     SetValuesGen, StringGen, StructGen, idfn
 )
-from marks import allow_non_gpu, ignore_order
+from marks import allow_non_gpu, ignore_order, validate_execs_in_gpu_plan
 from protobuf_data_gen import call_protobuf_function, materialize_protobuf_data
 from spark_session import (
     is_before_spark_340,
@@ -35,8 +36,10 @@ from spark_session import (
     is_spark_protobuf_available,
     spark_version,
     with_cpu_session,
+    with_gpu_session,
 )
 import pyspark.sql.functions as f
+from pyspark.sql.window import Window
 from pyspark.sql.types import StringType
 
 try:
@@ -77,24 +80,9 @@ def _has_permissive_null_row_fix():
 
 
 # Without SPARK-46275, Spark returns a struct of null fields for malformed PERMISSIVE rows and
-# rejects DROPMALFORMED during analysis; PERMISSIVE then stays on CPU.
+# rejects DROPMALFORMED during analysis.
 _permissive_null_row_fix = _has_permissive_null_row_fix()
-_permissive_marks = [] if _permissive_null_row_fix else [allow_non_gpu("ProtobufDataToCatalyst")]
-_modes = [pytest.param("PERMISSIVE", marks=_permissive_marks), "FAILFAST"]
-
-
-def _assert_permissive_gpu_and_cpu_equal(run_on_spark, conf={}):
-    if not _permissive_null_row_fix:
-        assert_gpu_fallback_collect(run_on_spark, "ProtobufDataToCatalyst", conf=conf)
-    else:
-        assert_gpu_and_cpu_are_equal_collect(run_on_spark, conf=conf)
-
-
-def _assert_gpu_and_cpu_equal_in_mode(run_on_spark, mode, conf={}):
-    if mode == "PERMISSIVE":
-        _assert_permissive_gpu_and_cpu_equal(run_on_spark, conf=conf)
-    else:
-        assert_gpu_and_cpu_are_equal_collect(run_on_spark, conf=conf)
+_modes = ["PERMISSIVE", "FAILFAST"]
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +134,38 @@ def _select_paths(decoded, paths):
         return [decoded.alias("decoded")]
     return [_get_field_by_path(decoded, path.split(".")).alias(path.replace(".", "_"))
             for path in paths]
+
+
+def _gpu_decoded_schemas(df):
+    """Output schemas of the GpuFromProtobuf expressions in df's executed plan."""
+    schemas = set()
+
+    def visit_expr(expr):
+        if expr.getClass().getSimpleName() == "GpuFromProtobuf":
+            schemas.add(expr.dataType().simpleString())
+        children = expr.children().iterator()
+        while children.hasNext():
+            visit_expr(children.next())
+
+    def visit_plan(plan):
+        exprs = plan.expressions().iterator()
+        while exprs.hasNext():
+            visit_expr(exprs.next())
+        children = plan.children().iterator()
+        while children.hasNext():
+            visit_plan(children.next())
+
+    visit_plan(df._jdf.queryExecution().executedPlan())
+    return schemas
+
+
+def _assert_gpu_decoded_schemas(run_on_spark, expected, conf={}):
+    """Equal results alone cannot show whether schema pruning happened, so check the plan."""
+    # AQE plans stages lazily, so inspect a fully planned query instead.
+    plan_conf = dict(conf, **{"spark.sql.adaptive.enabled": "false"})
+    actual = with_gpu_session(
+        lambda spark: _gpu_decoded_schemas(run_on_spark(spark)), conf=plan_conf)
+    assert actual == set(expected)
 
 
 def _encode_varint(value):
@@ -280,6 +300,46 @@ def _build_proto2_descriptor(
     return fds.SerializeToString()
 
 
+def test_call_from_protobuf_preserves_options_for_legacy_signature():
+    calls = []
+
+    def fake_from_protobuf(col, message_name, desc_path, *args):
+        calls.append((col, message_name, desc_path, args))
+        return "ok"
+
+    options = {"enums.as.ints": "true"}
+    result = _call_from_protobuf(
+        fake_from_protobuf, "col", "msg", "/tmp/test.desc", b"desc", options=options)
+
+    assert result == "ok"
+    assert calls == [("col", "msg", "/tmp/test.desc", (options,))]
+
+
+def test_call_protobuf_function_preserves_options_for_binary_signature():
+    calls = []
+
+    def fake_from_protobuf(
+            col, message_name, binaryDescriptorSet=None, options=None):
+        calls.append((col, message_name, binaryDescriptorSet, options))
+        return "ok"
+
+    options = {"enums.as.ints": "true"}
+    result = call_protobuf_function(
+        fake_from_protobuf, "col", "msg", "/tmp/test.desc", b"desc",
+        options=options)
+
+    assert result == "ok"
+    assert calls == [("col", "msg", bytearray(b"desc"), options)]
+
+
+def test_protobuf_materializer_reserves_binary_column_name():
+    logical_gen = StructGen([("BIN", IntegerGen())], nullable=False)
+
+    with pytest.raises(ValueError, match="conflicts with binary column"):
+        materialize_protobuf_data(
+            logical_gen, "BinaryColumnConflict", None, None)
+
+
 # ---------------------------------------------------------------------------
 # Descriptors shared by several sections
 # ---------------------------------------------------------------------------
@@ -301,14 +361,50 @@ _STATUS_NAMES = ["TEN", "ONE", "FIVE"]
 
 
 def _build_enum_descriptor_set_bytes(spark):
+    """Enum fields at the root, in a nested message and in repeated messages."""
+    enum_fields = [
+        _field("status", 1, "ENUM", type_name=".test.Status"),
+        _field("statuses", 2, "ENUM", label="repeated", type_name=".test.Status"),
+    ]
     return _build_proto2_descriptor(spark, "enum.proto", [
-        _msg("EnumRoot", [
-            _field("status", 1, "ENUM", type_name=".test.Status"),
-            _field("statuses", 2, "ENUM", label="repeated", type_name=".test.Status"),
-            _field("id", 3, "INT32"),
+        _msg("EnumDetail", enum_fields + [_field("count", 3, "INT32")]),
+        _msg("EnumRoot", enum_fields + [
+            _field("detail", 3, "MESSAGE", type_name=".test.EnumDetail"),
+            _field("items", 4, "MESSAGE", label="repeated", type_name=".test.EnumDetail"),
+            _field("id", 5, "INT32"),
         ]),
     # Values are declared out of numeric order and without zero.
     ], file_enums=[_enum("Status", [("TEN", 10), ("ONE", 1), ("FIVE", 5)])])
+
+
+def _build_nested_depth_descriptor_set_bytes(spark, depth):
+    messages = []
+    for i in range(depth, 0, -1):
+        fields = [_field(f"val{i}", 1, "INT32")]
+        if i < depth:
+            fields.append(
+                _field(
+                    f"level{i + 1}", 2, "MESSAGE",
+                    type_name=f".test.Level{i + 1}"))
+        messages.append(_msg(f"Level{i}", fields))
+    return _build_proto2_descriptor(spark, f"nested_depth_{depth}.proto", messages)
+
+
+def _build_nested_depth_gen(level, depth, nullable):
+    fields = [(f"val{level}", IntegerGen())]
+    if level < depth:
+        fields.append((
+            f"level{level + 1}",
+            _build_nested_depth_gen(level + 1, depth, nullable=True)))
+    return StructGen(fields, nullable=nullable)
+
+
+def _encode_nested_depth_message(level, depth):
+    body = _encode_varint_field(1, level)
+    if level < depth:
+        body += _encode_length_delimited_field(
+            2, _encode_nested_depth_message(level + 1, depth))
+    return body
 
 
 # ===========================================================================
@@ -356,20 +452,44 @@ def _build_all_types_descriptor_set_bytes(spark):
     fields += [_field(name, number, ftype, label="repeated", packed=packed)
                for number, (name, ftype, packed, _) in
                enumerate(_ALL_TYPES_REPEATED, start=len(fields) + 1)]
-    return _build_proto2_descriptor(spark, "all_types.proto", [_msg("AllTypes", fields)])
+    fields += [
+        _field("child", len(fields) + 1, "MESSAGE", type_name=".test.Child"),
+        _field("items", len(fields) + 2, "MESSAGE", label="repeated", type_name=".test.Child"),
+    ]
+    return _build_proto2_descriptor(spark, "all_types.proto", [
+        _msg("Leaf", [_field("value", 1, "INT32")]),
+        _msg("Child", [
+            _field("count", 1, "INT32"),
+            _field("name", 2, "STRING"),
+            _field("values", 3, "INT32", label="repeated"),
+            _field("leaf", 4, "MESSAGE", type_name=".test.Leaf"),
+        ]),
+        _msg("AllTypes", fields),
+    ])
+
+
+def _all_types_child_gen(nullable):
+    return StructGen([
+        ("count", IntegerGen()),
+        ("name", StringGen()),
+        ("values", ArrayGen(IntegerGen(nullable=False), max_length=5, nullable=False)),
+        ("leaf", StructGen([("value", IntegerGen())])),
+    ], nullable=nullable)
 
 
 _all_types_gen = StructGen(
     [(name, gen) for name, _, gen in _ALL_TYPES_SCALARS] +
     [(name, ArrayGen(gen, max_length=5, nullable=False))
-     for name, _, _, gen in _ALL_TYPES_REPEATED],
+     for name, _, _, gen in _ALL_TYPES_REPEATED] +
+    [("child", _all_types_child_gen(nullable=True)),
+     ("items", ArrayGen(_all_types_child_gen(nullable=False), max_length=3, nullable=False))],
     nullable=False)
 
 
 @ignore_order(local=True)
 def test_from_protobuf_all_field_types(local_tmp_path, from_protobuf_fn):
-    """Every scalar type and packed and unpacked repeated fields decode to the values Spark's
-    to_protobuf encoded."""
+    """Every scalar type, packed and unpacked repeated fields, and nested and repeated messages
+    decode to the values Spark's to_protobuf encoded."""
     desc = _setup_protobuf_desc(
         local_tmp_path, "all_types.desc", _build_all_types_descriptor_set_bytes)
     fixture_rows, fixture_schema = materialize_protobuf_data(
@@ -388,27 +508,42 @@ def test_from_protobuf_all_field_types(local_tmp_path, from_protobuf_fn):
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
 
 
-# proto2 test.UnsignedRoot with required, optional, repeated, and defaulted unsigned fields.
-# Kept as bytes so the unsigned contract does not depend on the protobuf runtime.
-_unsigned_desc_bytes = bytes.fromhex(
-    "0adb010a0a726f6f742e70726f746f120474657374229c010a0c556e7369676e"
-    "6564526f6f74121c0a0673746174757318012002280e320c2e746573742e5374"
-    "6174757312140a0c72657175697265645f75363418022002280412140a0c6f70"
-    "74696f6e616c5f75333218032001280d12140a0c72657065617465645f753332"
-    "18042003280d12140a0c72657065617465645f75363418052003280412160a0b"
-    "64656661756c745f7536341806200128043a01302a200a06537461747573120b"
-    "0a07554e4b4e4f574e100012090a0552454144591002620670726f746f32")
+# proto2 test.UnsignedRoot with required, optional, repeated, and defaulted unsigned fields,
+# test.ImportedRoot whose child and grandchild come from imported files, and
+# test.RepeatedRoot with three levels of repeated messages.
+# Kept as bytes so these cross-file contracts do not depend on the protobuf runtime.
+_protobuf_semantics_desc_bytes = bytes.fromhex(
+    "0a3f0a0a6c6561662e70726f746f12047465737422230a12496d706f72746564"
+    "4772616e646368696c64120d0a0576616c7565180120012805620670726f746f"
+    "320ad5010a0b6368696c642e70726f746f1204746573741a0a6c6561662e7072"
+    "6f746f223d0a0d496d706f727465644368696c64122c0a0a6772616e64636869"
+    "6c6418012001280b32182e746573742e496d706f727465644772616e64636869"
+    "6c6422380a0c52657065617465644c65616612280a0676616c75657318012003"
+    "280b32182e746573742e496d706f727465644772616e646368696c6422330a0d"
+    "52657065617465644368696c6412220a066c656176657318012003280b32122e"
+    "746573742e52657065617465644c656166620670726f746f320ad3020a0a726f"
+    "6f742e70726f746f1204746573741a0b6368696c642e70726f746f22320a0c49"
+    "6d706f72746564526f6f7412220a056368696c6418012001280b32132e746573"
+    "742e496d706f727465644368696c64229c010a0c556e7369676e6564526f6f74"
+    "121c0a0673746174757318012002280e320c2e746573742e5374617475731214"
+    "0a0c72657175697265645f75363418022002280412140a0c6f7074696f6e616c"
+    "5f75333218032001280d12140a0c72657065617465645f75333218042003280d"
+    "12140a0c72657065617465645f75363418052003280412160a0b64656661756c"
+    "745f7536341806200128043a013022350a0c5265706561746564526f6f741225"
+    "0a086368696c6472656e18012003280b32132e746573742e5265706561746564"
+    "4368696c642a200a06537461747573120b0a07554e4b4e4f574e100012090a05"
+    "52454144591002620670726f746f32")
 
 
 @pytest.fixture
-def unsigned_desc(local_tmp_path):
-    desc_path = os.path.join(local_tmp_path, "unsigned.desc")
+def protobuf_semantics_desc(local_tmp_path):
+    desc_path = os.path.join(local_tmp_path, "protobuf_semantics.desc")
     with open(desc_path, "wb") as fp:
-        fp.write(_unsigned_desc_bytes)
-    return desc_path, _unsigned_desc_bytes
+        fp.write(_protobuf_semantics_desc_bytes)
+    return desc_path, _protobuf_semantics_desc_bytes
 
 
-def test_from_protobuf_unsigned_boundaries(unsigned_desc, from_protobuf_fn):
+def test_from_protobuf_unsigned_boundaries(protobuf_semantics_desc, from_protobuf_fn):
     row = (
         _encode_tag(1, 0) + _encode_varint(2) +
         _encode_tag(2, 0) + _encode_varint((1 << 64) - 1) +
@@ -420,7 +555,7 @@ def test_from_protobuf_unsigned_boundaries(unsigned_desc, from_protobuf_fn):
 
     def run_on_spark(spark):
         return spark.createDataFrame([(row,)], ["bin"]).select(
-            _decode(from_protobuf_fn, unsigned_desc, "UnsignedRoot").alias("decoded"))
+            _decode(from_protobuf_fn, protobuf_semantics_desc, "UnsignedRoot").alias("decoded"))
 
     cpu_rows = with_cpu_session(lambda spark: run_on_spark(spark).collect())
     assert cpu_rows[0]["decoded"].asDict() == {
@@ -434,9 +569,69 @@ def test_from_protobuf_unsigned_boundaries(unsigned_desc, from_protobuf_fn):
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
 
 
+def test_from_protobuf_proto2_transitive_import(protobuf_semantics_desc, from_protobuf_fn):
+    def run_on_spark(spark):
+        decoded = _decode(from_protobuf_fn, protobuf_semantics_desc, "ImportedRoot")
+        return spark.createDataFrame([(b"\x0a\x04\x0a\x02\x08\x07",)], ["bin"]).select(
+            decoded.getField("child").getField("grandchild").getField("value").alias("value"))
+
+    cpu_rows = with_cpu_session(lambda spark: run_on_spark(spark).collect())
+    assert [row["value"] for row in cpu_rows] == [7]
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+
+
+def test_from_protobuf_multilevel_repeated_messages(protobuf_semantics_desc, from_protobuf_fn):
+    logical_gen = StructGen([
+        ("children", ArrayGen(
+            StructGen([
+                ("leaves", ArrayGen(
+                    StructGen([
+                        ("values", ArrayGen(
+                            StructGen([
+                                ("value", IntegerGen()),
+                            ], nullable=False),
+                            min_length=0, max_length=5, nullable=False)),
+                    ], nullable=False),
+                    min_length=0, max_length=5, nullable=False)),
+            ], nullable=False),
+            min_length=0, max_length=5, nullable=False)),
+    ], nullable=False)
+    values = [
+        {"children": []},
+        {"children": [{"leaves": []}]},
+        {"children": [
+            {"leaves": [{"values": [{"value": 1}, {"value": 2}]}]},
+            {"leaves": [{"values": []}]},
+        ]},
+    ]
+    fixture_rows, _ = materialize_protobuf_data(
+        logical_gen, "test.RepeatedRoot", *protobuf_semantics_desc, logical_rows=values)
+    rows = [(index, row[-1]) for index, row in enumerate(fixture_rows)]
+
+    def run_on_spark(spark):
+        decoded = _decode(from_protobuf_fn, protobuf_semantics_desc, "RepeatedRoot")
+        return spark.createDataFrame(rows, ["id", "bin"]).select(
+            "id", decoded.getField("children").alias("children")).orderBy("id")
+
+    cpu_rows = with_cpu_session(lambda spark: run_on_spark(spark).collect())
+    assert [row.asDict(recursive=True)["children"] for row in cpu_rows] == [
+        value["children"] for value in values]
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+
+
+def _enum_detail_gen(nullable):
+    return StructGen([
+        ("status", SetValuesGen(StringType(), _STATUS_NAMES + [None])),
+        ("statuses", ArrayGen(SetValuesGen(StringType(), _STATUS_NAMES), nullable=False)),
+        ("count", IntegerGen()),
+    ], nullable=nullable)
+
+
 _enum_root_gen = StructGen([
     ("status", SetValuesGen(StringType(), _STATUS_NAMES + [None])),
     ("statuses", ArrayGen(SetValuesGen(StringType(), _STATUS_NAMES), nullable=False)),
+    ("detail", _enum_detail_gen(nullable=True)),
+    ("items", ArrayGen(_enum_detail_gen(nullable=False), max_length=3, nullable=False)),
     ("id", IntegerGen()),
 ], nullable=False)
 
@@ -444,7 +639,7 @@ _enum_root_gen = StructGen([
 @pytest.mark.parametrize("enums_as_ints", [False, True], ids=["string", "int"])
 @ignore_order(local=True)
 def test_from_protobuf_enums(local_tmp_path, from_protobuf_fn, enums_as_ints):
-    """Singular and repeated enum values decode by name or by number."""
+    """Enum values at every nesting level decode by name or by number."""
     desc = _setup_protobuf_desc(local_tmp_path, "enum.desc", _build_enum_descriptor_set_bytes)
     fixture_rows, fixture_schema = materialize_protobuf_data(
         _enum_root_gen, "test.EnumRoot", *desc)
@@ -463,11 +658,53 @@ def test_from_protobuf_enums(local_tmp_path, from_protobuf_fn, enums_as_ints):
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
 
 
+@pytest.mark.parametrize("location", ["nested", "nested_repeated", "repeated_message"], ids=idfn)
+@pytest.mark.parametrize("mode", _modes, ids=idfn)
+@pytest.mark.parametrize("enums_as_ints", [False, True], ids=["string", "int"])
+@ignore_order(local=True)
+def test_from_protobuf_unknown_nested_enum(
+        local_tmp_path, from_protobuf_fn, location, mode, enums_as_ints):
+    """Spark checks unknown enum values only at the root, so nested ones keep the row valid."""
+    desc = _setup_protobuf_desc(local_tmp_path, "enum.desc", _build_enum_descriptor_set_bytes)
+    known_detail = _encode_varint_field(1, 1) + _encode_varint_field(3, 10)
+    if location == "nested_repeated":
+        unknown_detail = (_encode_varint_field(2, 1) + _encode_varint_field(2, 999) +
+                          _encode_varint_field(3, 20))
+    else:
+        unknown_detail = _encode_varint_field(1, 999) + _encode_varint_field(3, 20)
+    detail_field = 4 if location == "repeated_message" else 3
+
+    def row(detail, row_id):
+        return (_encode_varint_field(1, 5) +
+                _encode_length_delimited_field(detail_field, detail) +
+                _encode_varint_field(5, row_id))
+
+    rows = [(0, row(known_detail, 0)), (1, row(unknown_detail, 1))]
+    options = {"mode": mode}
+    if enums_as_ints:
+        options["enums.as.ints"] = "true"
+
+    def run_on_spark(spark):
+        df = spark.createDataFrame(rows, schema="idx int, bin binary")
+        return df.select("idx", _decode(from_protobuf_fn, desc, "EnumRoot", options)
+                         .alias("decoded"))
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+
+
 def _build_defaults_descriptor_set_bytes(spark):
+    """Explicit proto2 defaults at the root and inside a nested message."""
     return _build_proto2_descriptor(
         spark,
         "defaults.proto",
         [
+            _msg("DefaultsInner", [
+                _field("count", 1, "INT32", default=42),
+                _field("label", 2, "STRING", default="hello"),
+                _field("flag", 3, "BOOL", default=True),
+                _field("language", 4, "ENUM", type_name=".test.Language", default="EN"),
+                _field("note", 5, "STRING"),
+            ]),
             _msg("Defaults", [
                 _field("count", 1, "INT32", default=42),
                 _field("name", 2, "STRING", default="unknown"),
@@ -475,7 +712,7 @@ def _build_defaults_descriptor_set_bytes(spark):
                 _field("zero_count", 4, "INT32", default=0),
                 _field("empty_name", 5, "STRING", default=""),
                 _field("language", 6, "ENUM", type_name=".test.Language", default="ZH"),
-                _field("note", 7, "STRING"),
+                _field("inner", 7, "MESSAGE", type_name=".test.DefaultsInner"),
                 _field("ratio", 8, "FLOAT", default=1.5),
                 _field("score", 9, "DOUBLE", default=-2.25),
             ]),
@@ -486,19 +723,25 @@ def _build_defaults_descriptor_set_bytes(spark):
 @pytest.mark.parametrize("enums_as_ints", [False, True], ids=["string", "int"])
 @ignore_order(local=True)
 def test_from_protobuf_default_values(local_tmp_path, from_protobuf_fn, enums_as_ints):
-    """Absent fields take their declared defaults, or null without one."""
+    """Absent fields take their declared defaults, including inside a present nested message,
+    while an absent nested message stays null."""
     desc = _setup_protobuf_desc(
         local_tmp_path, "defaults.desc", _build_defaults_descriptor_set_bytes)
+    full_inner = (_encode_varint_field(1, 7) + _encode_length_delimited_field(2, "l") +
+                  _encode_varint_field(3, 0) + _encode_varint_field(4, 2) +
+                  _encode_length_delimited_field(5, "n"))
     rows = [
         (0, _encode_varint_field(1, 100) + _encode_length_delimited_field(2, "test") +
             _encode_varint_field(3, 0) + _encode_varint_field(4, 5) +
             _encode_length_delimited_field(5, "x") + _encode_varint_field(6, 1) +
-            _encode_length_delimited_field(7, "n") +
+            _encode_length_delimited_field(7, full_inner) +
             _encode_tag(8, 5) + struct.pack("<f", 0.25) +
             _encode_tag(9, 1) + struct.pack("<d", 3.5)),
         (1, b""),
         (2, _encode_varint_field(1, 100)),
-        (3, None),
+        (3, _encode_length_delimited_field(7, b"")),
+        (4, _encode_length_delimited_field(7, _encode_varint_field(1, 7))),
+        (5, None),
     ]
 
     def run_on_spark(spark):
@@ -510,15 +753,24 @@ def test_from_protobuf_default_values(local_tmp_path, from_protobuf_fn, enums_as
     cpu_rows = {row["idx"]: row["decoded"] for row in
                 with_cpu_session(lambda spark: run_on_spark(spark).collect())}
     assert cpu_rows[1]["zero_count"] == 0 and cpu_rows[1]["empty_name"] == ""
-    assert cpu_rows[1]["count"] == 42 and cpu_rows[1]["note"] is None
     assert (cpu_rows[1]["ratio"], cpu_rows[1]["score"]) == (1.5, -2.25)
     as_ints = enums_as_ints and with_cpu_session(_honors_enums_as_ints)
     assert cpu_rows[1]["language"] == (2 if as_ints else "ZH")
+    assert cpu_rows[1]["inner"] is None
+    assert cpu_rows[3]["inner"]["count"] == 42 and cpu_rows[3]["inner"]["note"] is None
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
 
 
 def _build_wire_variants_descriptor_set_bytes(spark):
     return _build_proto2_descriptor(spark, "wire_variants.proto", [
+        _msg("WireChild", [
+            _field("a", 1, "INT32"),
+            _field("b", 2, "STRING"),
+        ]),
+        _msg("WireParent", [
+            _field("child", 1, "MESSAGE", type_name=".test.WireChild"),
+            _field("ordinal", 2, "INT32"),
+        ]),
         _msg("Wire", [
             _field("b", 1, "BOOL"),
             _field("i32", 2, "INT32"),
@@ -527,6 +779,8 @@ def _build_wire_variants_descriptor_set_bytes(spark):
             _field("packed_ints", 5, "INT32", label="repeated", packed=True),
             _field("unpacked_doubles", 6, "DOUBLE", label="repeated"),
             _field("packed_fixed32", 7, "FIXED32", label="repeated", packed=True),
+            _field("child", 8, "MESSAGE", type_name=".test.WireChild"),
+            _field("parents", 9, "MESSAGE", label="repeated", type_name=".test.WireParent"),
         ]),
     ])
 
@@ -541,6 +795,8 @@ def _wire_variant_rows():
         _encode_length_delimited_field(52, b"\x08\x01unknown") +
         _encode_tag(53, 3) + unknown_group + _encode_tag(53, 4) +
         _encode_tag(54, 5) + bytes(range(4)))
+    child_a = _encode_varint_field(1, 1)
+    child_b = _encode_length_delimited_field(2, "x")
     invalid_utf8 = b"\xed\xa0\x80"
     return {
         "empty_message": [b""],
@@ -559,6 +815,12 @@ def _wire_variant_rows():
         "last_scalar_wins": [
             _encode_varint_field(2, 1) + _encode_varint_field(2, 42),
             _encode_varint_field(2, 3) + _encode_varint_field(2, 4) + _encode_varint_field(2, 5),
+        ],
+        "message_fields_merge": [
+            _encode_length_delimited_field(8, child_a) + _encode_length_delimited_field(8, child_b) +
+            _encode_length_delimited_field(
+                9, _encode_length_delimited_field(1, child_a) +
+                _encode_length_delimited_field(1, child_b) + _encode_varint_field(2, 7)),
         ],
         "unknown_fields_of_every_wire_type": [
             _encode_varint_field(2, 1) + unknown_fields + _encode_length_delimited_field(3, "s"),
@@ -593,6 +855,11 @@ def test_from_protobuf_wire_encoding_variants(local_tmp_path, from_protobuf_fn, 
         df = spark.createDataFrame(rows, schema="idx int, bin binary")
         return df.select("idx", _decode(from_protobuf_fn, desc, "Wire").alias("decoded"))
 
+    if variant == "message_fields_merge":
+        decoded = with_cpu_session(lambda spark: run_on_spark(spark).collect())[0]["decoded"]
+        assert decoded["child"].asDict() == {"a": 1, "b": "x"}
+        assert decoded["parents"][0]["child"].asDict() == {"a": 1, "b": "x"}
+        assert decoded["parents"][0]["ordinal"] == 7
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
 
 
@@ -606,7 +873,7 @@ def _build_many_repeated_fields_descriptor_set_bytes(spark, field_count):
 
 
 @pytest.mark.parametrize("field_count", [32, 33, 65], ids=idfn)
-@pytest.mark.parametrize("select_whole_message", [True, False], ids=["whole", "field"])
+@pytest.mark.parametrize("select_whole_message", [True, False], ids=["whole", "pruned"])
 @ignore_order(local=True)
 def test_from_protobuf_many_repeated_fields(
         local_tmp_path, from_protobuf_fn, field_count, select_whole_message):
@@ -661,6 +928,26 @@ def test_from_protobuf_large_repeated_array(local_tmp_path, from_protobuf_fn):
 
 
 @ignore_order(local=True)
+def test_from_protobuf_max_nesting_depth(local_tmp_path, from_protobuf_fn):
+    """Ten levels is the deepest schema the GPU decoder supports."""
+    depth = 10
+    desc = _setup_protobuf_desc(
+        local_tmp_path, f"nested_depth_{depth}.desc",
+        lambda spark: _build_nested_depth_descriptor_set_bytes(spark, depth))
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        _build_nested_depth_gen(1, depth, nullable=False), "test.Level1", *desc)
+
+    def run_on_spark(spark):
+        df = spark.createDataFrame(fixture_rows, fixture_schema)
+        decoded = _decode(from_protobuf_fn, desc, "Level1")
+        deepest = _get_field_by_path(decoded, [f"level{i}" for i in range(2, depth + 1)])
+        return df.select(decoded.alias("decoded"),
+                         deepest.getField(f"val{depth}").alias(f"val{depth}"))
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+
+
+@ignore_order(local=True)
 def test_from_protobuf_all_null_input(local_tmp_path, from_protobuf_fn):
     desc = _setup_protobuf_desc(
         local_tmp_path, "simple.desc", _build_simple_descriptor_set_bytes)
@@ -697,12 +984,44 @@ _simple_desc_bytes = bytes.fromhex(
     "0a360a0c73696d706c652e70726f746f12047465737422200a0653696d706c65"
     "120b0a0369333218012001280512090a0173180220012809")
 
+# proto2 test.Child { optional int32 a = 1; optional string b = 2; }
+# test.Root { optional int32 top = 1; optional Child child = 2; repeated Child items = 3; }
+_nested_smoke_desc_bytes = bytes.fromhex(
+    "0a8e010a126e65737465645f736d6f6b652e70726f746f120474657374221d0a"
+    "054368696c6412090a016118012001280512090a0162180220012809224b0a04"
+    "526f6f74120b0a03746f70180120012805121a0a056368696c6418022001280b"
+    "320b2e746573742e4368696c64121a0a056974656d7318032003280b320b2e74"
+    "6573742e4368696c64620670726f746f32")
+
+_nested_smoke_gen = StructGen([
+    ("top", IntegerGen()),
+    ("child", StructGen([
+        ("a", IntegerGen()),
+        ("b", StringGen()),
+    ])),
+    ("items", ArrayGen(
+        StructGen([
+            ("a", IntegerGen()),
+            ("b", StringGen()),
+        ], nullable=False),
+        min_length=0, max_length=5, nullable=False)),
+], nullable=False)
+
+
 @pytest.fixture
 def simple_desc(local_tmp_path):
     desc_path = os.path.join(local_tmp_path, "simple_smoke.desc")
     with open(desc_path, "wb") as fp:
         fp.write(_simple_desc_bytes)
     return desc_path, _simple_desc_bytes
+
+
+@pytest.fixture
+def nested_smoke_desc(local_tmp_path):
+    desc_path = os.path.join(local_tmp_path, "nested_smoke.desc")
+    with open(desc_path, "wb") as fp:
+        fp.write(_nested_smoke_desc_bytes)
+    return desc_path, _nested_smoke_desc_bytes
 
 
 def _encode_simple_message(i32_value, s_value):
@@ -729,11 +1048,511 @@ def test_from_protobuf_smoke_api(simple_desc, from_protobuf_fn, api):
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
 
 
+def test_from_protobuf_smoke_nested_projection(nested_smoke_desc, from_protobuf_fn):
+    values = [
+        {"top": 1, "child": {"a": 2, "b": "child"},
+         "items": [{"a": 3, "b": "first"}, {"a": 4, "b": "second"}]},
+        {"top": 5, "child": None, "items": []},
+    ]
+    fixture_rows, _ = materialize_protobuf_data(
+        _nested_smoke_gen, "test.Root", *nested_smoke_desc, logical_rows=values)
+    encoded = [(row[-1],) for row in fixture_rows]
+
+    def run_on_spark(spark):
+        decoded = _decode(from_protobuf_fn, nested_smoke_desc, "Root")
+        return spark.createDataFrame(encoded, ["bin"]).select(
+            decoded.getField("top").alias("top"),
+            decoded.getField("child").getField("a").alias("child_a"),
+            decoded.getField("items")[0].getField("b").alias("first_item_b"))
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+
+
+# ===========================================================================
+# Schema projection: the GPU decodes only the fields later operators read
+# ===========================================================================
+
+def _build_schema_projection_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(spark, "schema_proj.proto", [
+        _msg("Detail", [
+            _field("a", 1, "INT32"),
+            _field("b", 2, "INT32"),
+            _field("c", 3, "STRING"),
+        ]),
+        _msg("SchemaProj", [
+            _field("id", 1, "INT32"),
+            _field("name", 2, "STRING"),
+            _field("detail", 3, "MESSAGE", type_name=".test.Detail"),
+            _field("items", 4, "MESSAGE", label="repeated", type_name=".test.Detail"),
+        ]),
+    ])
+
+
+def _schema_projection_detail_gen(nullable):
+    return StructGen([
+        ("a", IntegerGen()),
+        ("b", IntegerGen(
+            nullable=False, min_val=-100, max_val=100, special_cases=[])),
+        ("c", StringGen("[a-z]{0,12}")),
+    ], nullable=nullable)
+
+
+_schema_proj_gen = StructGen([
+    ("id", IntegerGen(
+        nullable=False, min_val=0, max_val=7, special_cases=[])),
+    ("name", StringGen("[a-z]{0,16}", nullable=True)),
+    ("detail", _schema_projection_detail_gen(nullable=True)),
+    ("items", ArrayGen(
+        _schema_projection_detail_gen(nullable=False),
+        min_length=0, max_length=4, nullable=False)),
+], nullable=False)
+
+
+def _build_name_collision_descriptor_set_bytes(spark):
+    """Same-named fields in unrelated nested messages."""
+    return _build_proto2_descriptor(spark, "name_collision.proto", [
+        _msg("User", [
+            _field("age", 1, "INT32"),
+            _field("id", 2, "INT32"),
+        ]),
+        _msg("Ad", [_field("id", 1, "INT32")]),
+        _msg("Event", [
+            _field("user_info", 1, "MESSAGE", type_name=".test.User"),
+            _field("ad_info", 2, "MESSAGE", type_name=".test.Ad"),
+        ]),
+    ])
+
+
+_name_collision_gen = StructGen([
+    ("user_info", StructGen([
+        ("age", IntegerGen()),
+        ("id", IntegerGen()),
+    ])),
+    ("ad_info", StructGen([("id", IntegerGen())])),
+], nullable=False)
+
+_projection_sources = {
+    "schema_proj": (_build_schema_projection_descriptor_set_bytes, "SchemaProj",
+                    _schema_proj_gen),
+    "deep": (lambda spark: _build_nested_depth_descriptor_set_bytes(spark, 5), "Level1",
+             _build_nested_depth_gen(1, 5, nullable=False)),
+    "name_collision": (_build_name_collision_descriptor_set_bytes, "Event",
+                       _name_collision_gen),
+}
+
+_LEVEL5 = "level5:struct<val5:int>"
+_LEVEL4 = f"level4:struct<val4:int,{_LEVEL5}>"
+_LEVEL3 = f"level3:struct<val3:int,{_LEVEL4}>"
+
+# (case id, source, selected field paths, expected GPU decoded schema)
+_projection_cases = [
+    ("scalars_only", "schema_proj", ["id", "name"], "struct<id:int,name:string>"),
+    ("nested_single_field", "schema_proj", ["id", "detail.a"],
+     "struct<id:int,detail:struct<a:int>>"),
+    ("nested_two_fields", "schema_proj", ["detail.a", "detail.c"],
+     "struct<detail:struct<a:int,c:string>>"),
+    ("whole_nested", "schema_proj", ["id", "detail"],
+     "struct<id:int,detail:struct<a:int,b:int,c:string>>"),
+    ("whole_nested_and_its_field", "schema_proj", ["detail", "detail.a"],
+     "struct<detail:struct<a:int,b:int,c:string>>"),
+    ("repeated_single_field", "schema_proj", ["id", "items.a"],
+     "struct<id:int,items:array<struct<a:int>>>"),
+    ("repeated_two_fields", "schema_proj", ["items.a", "items.c"],
+     "struct<items:array<struct<a:int,c:string>>>"),
+    ("whole_repeated", "schema_proj", ["id", "items"],
+     "struct<id:int,items:array<struct<a:int,b:int,c:string>>>"),
+    ("nested_and_repeated", "schema_proj", ["id", "detail.a", "items.c"],
+     "struct<id:int,detail:struct<a:int>,items:array<struct<c:string>>>"),
+    # level3 keeps its message child level4 whole, because the CPU validates its payload.
+    ("depth_3_leaf", "deep", ["val1", "level2.level3.val3"],
+     f"struct<val1:int,level2:struct<{_LEVEL3}>>"),
+    ("depth_5_leaf", "deep", ["level2.level3.level4.level5.val5"],
+     "struct<level2:struct<level3:struct<level4:struct<level5:struct<val5:int>>>>>"),
+    ("leaves_at_every_depth", "deep",
+     ["val1", "level2.val2", "level2.level3.val3", "level2.level3.level4.level5.val5"],
+     "struct<val1:int,level2:struct<val2:int,level3:struct<val3:int,"
+     "level4:struct<level5:struct<val5:int>>>>>"),
+    ("whole_depth_3", "deep", ["level2.level3"],
+     f"struct<level2:struct<{_LEVEL3}>>"),
+    ("whole_depth_3_and_its_leaf", "deep", ["level2.level3", "level2.level3.val3"],
+     f"struct<level2:struct<{_LEVEL3}>>"),
+    ("whole_ancestor_and_deep_leaf", "deep", ["level2", "level2.level3.val3"],
+     f"struct<level2:struct<val2:int,{_LEVEL3}>>"),
+    ("same_name_in_sibling_messages", "name_collision",
+     ["user_info.age", "user_info.id", "ad_info.id"],
+     "struct<user_info:struct<age:int,id:int>,ad_info:struct<id:int>>"),
+]
+
+
+@pytest.mark.parametrize("case_id,source,paths,expected_schema",
+                         [pytest.param(*case, id=case[0]) for case in _projection_cases])
+@ignore_order(local=True)
+def test_from_protobuf_schema_projection(
+        local_tmp_path, from_protobuf_fn, case_id, source, paths, expected_schema):
+    build_fn, message, gen = _projection_sources[source]
+    desc = _setup_protobuf_desc(local_tmp_path, f"{source}.desc", build_fn)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        gen, f"test.{message}", *desc, length=64)
+
+    def run_on_spark(spark):
+        df = spark.createDataFrame(fixture_rows, fixture_schema)
+        return df.select(*_select_paths(_decode(from_protobuf_fn, desc, message), paths))
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+    _assert_gpu_decoded_schemas(run_on_spark, [expected_schema])
+
+
+def _schema_proj_fixture(local_tmp_path, length):
+    desc = _setup_protobuf_desc(
+        local_tmp_path, "schema_proj.desc", _build_schema_projection_descriptor_set_bytes)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        _schema_proj_gen, "test.SchemaProj", *desc, length=length)
+    return desc, fixture_rows, fixture_schema
+
+
+@validate_execs_in_gpu_plan("GpuHashAggregateExec")
+@ignore_order(local=True)
+def test_from_protobuf_projection_through_aggregate(local_tmp_path, from_protobuf_fn):
+    desc, fixture_rows, fixture_schema = _schema_proj_fixture(local_tmp_path, 257)
+
+    def run_on_spark(spark):
+        generated = spark.createDataFrame(fixture_rows, fixture_schema)
+        decoded_df = generated.repartition(4, "id").select(
+            "id", "detail", _decode(from_protobuf_fn, desc, "SchemaProj").alias("decoded"))
+        return decoded_df.groupBy("id").agg(
+            f.max(f.col("detail.a")).alias("expected_max_a"),
+            f.max(f.col("decoded.detail.a")).alias("decoded_max_a"))
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark, conf={
+        "spark.sql.adaptive.enabled": "false",
+    })
+    _assert_gpu_decoded_schemas(run_on_spark, ["struct<detail:struct<a:int>>"])
+
+
+@validate_execs_in_gpu_plan("GpuSortExec")
+@ignore_order(local=True)
+def test_from_protobuf_projection_through_sort(local_tmp_path, from_protobuf_fn):
+    desc, fixture_rows, fixture_schema = _schema_proj_fixture(local_tmp_path, 257)
+
+    def run_on_spark(spark):
+        generated = spark.createDataFrame(fixture_rows, fixture_schema)
+        decoded_df = generated.select(
+            "id", "name", "detail",
+            _decode(from_protobuf_fn, desc, "SchemaProj").alias("decoded"))
+        return decoded_df.sortWithinPartitions(
+            f.col("decoded.detail.b"),
+            f.col("decoded.id"),
+            f.col("decoded.name")).select(
+                "id",
+                "name",
+                f.col("detail.b").alias("expected_detail_b"),
+                f.col("decoded.id").alias("decoded_id"),
+                f.col("decoded.name").alias("decoded_name"),
+                f.col("decoded.detail.b").alias("decoded_detail_b"))
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+    _assert_gpu_decoded_schemas(
+        run_on_spark, ["struct<id:int,name:string,detail:struct<b:int>>"])
+
+
+@validate_execs_in_gpu_plan("GpuRunningWindowExec")
+@ignore_order(local=True)
+def test_from_protobuf_projection_through_window(local_tmp_path, from_protobuf_fn):
+    desc, fixture_rows, fixture_schema = _schema_proj_fixture(local_tmp_path, 257)
+
+    def run_on_spark(spark):
+        generated = spark.createDataFrame(fixture_rows, fixture_schema)
+        decoded_df = generated.repartition(4, "id").select(
+            "id", "detail", _decode(from_protobuf_fn, desc, "SchemaProj").alias("decoded"))
+        window = Window.partitionBy("id").orderBy(f.col("decoded.detail.b"))
+        return decoded_df.select(
+            "id",
+            f.col("detail.b").alias("expected_detail_b"),
+            f.col("decoded.detail.b").alias("decoded_detail_b"),
+            f.dense_rank().over(window).alias("decoded_rank"))
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark, conf={
+        "spark.sql.adaptive.enabled": "false",
+    })
+    _assert_gpu_decoded_schemas(run_on_spark, ["struct<detail:struct<b:int>>"])
+
+
+@pytest.mark.parametrize("boundary", ["alias", "withcolumn"], ids=idfn)
+@ignore_order(local=True)
+def test_from_protobuf_projection_across_plan_boundary(
+        local_tmp_path, from_protobuf_fn, boundary):
+    desc, fixture_rows, fixture_schema = _schema_proj_fixture(local_tmp_path, 64)
+
+    def run_on_spark(spark):
+        df = spark.createDataFrame(fixture_rows, fixture_schema)
+        decoded = _decode(from_protobuf_fn, desc, "SchemaProj")
+        if boundary == "alias":
+            return df.select(decoded.alias("decoded")).select(
+                f.col("decoded").getField("detail").getField("a").alias("detail_a"),
+                f.col("decoded").getField("id").alias("id"))
+        return df.withColumn("decoded", decoded).select(
+            f.col("decoded").getField("items").getField("a").alias("items_a"),
+            f.col("decoded").getField("id").alias("id"))
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+    expected = ("struct<id:int,detail:struct<a:int>>" if boundary == "alias"
+                else "struct<id:int,items:array<struct<a:int>>>")
+    _assert_gpu_decoded_schemas(run_on_spark, [expected])
+
+
+@pytest.mark.parametrize("terminal", ["project", "sort"], ids=idfn)
+@ignore_order(local=True)
+def test_from_protobuf_terminal_whole_struct_and_field(
+        local_tmp_path, from_protobuf_fn, terminal):
+    desc, fixture_rows, fixture_schema = _schema_proj_fixture(local_tmp_path, 64)
+
+    def run_on_spark(spark):
+        df = spark.createDataFrame(fixture_rows, fixture_schema)
+        decoded = _decode(from_protobuf_fn, desc, "SchemaProj")
+        result = df.select(decoded.alias("whole"), decoded.getField("id").alias("id"))
+        return result if terminal == "project" else result.sortWithinPartitions("id")
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+
+
+def _build_three_int_projection_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(spark, "three_int_projection.proto", [
+        _msg("ThreeInts", [
+            _field("a", 1, "INT32"),
+            _field("b", 2, "INT32"),
+            _field("c", 3, "INT32"),
+        ]),
+    ])
+
+
+def _three_int_rows():
+    rows = [(i % 2, _encode_tag(1, 0) + _encode_varint(10 + i) +
+             _encode_tag(2, 0) + _encode_varint(20 + i) +
+             _encode_tag(3, 0) + _encode_varint(30 + i)) for i in range(8)]
+    return rows + [(0, None)]
+
+
+def _setup_three_int_projection(local_tmp_path, from_protobuf_fn):
+    desc = _setup_protobuf_desc(
+        local_tmp_path, "three_int_projection.desc",
+        _build_three_int_projection_descriptor_set_bytes)
+
+    def decoded_df(spark):
+        df = spark.createDataFrame(_three_int_rows(), schema="k int, bin binary")
+        return df, _decode(from_protobuf_fn, desc, "ThreeInts")
+    return decoded_df
+
+
+@pytest.mark.parametrize("ancestor", ["none", "repartition", "aggregate", "sort"], ids=idfn)
+@ignore_order(local=True)
+def test_from_protobuf_pruning_with_unrelated_ancestors(
+        local_tmp_path, from_protobuf_fn, ancestor):
+    """Plans that never see the decoded struct must not disable pruning."""
+    decoded_df = _setup_three_int_projection(local_tmp_path, from_protobuf_fn)
+
+    def run_on_spark(spark):
+        df, decoded = decoded_df(spark)
+        result = df.select(decoded.getField("b").alias("b"), decoded.getField("c").alias("c"))
+        if ancestor == "repartition":
+            return result.repartition(3)
+        if ancestor == "aggregate":
+            return result.groupBy("b").agg(f.max("c").alias("c"))
+        if ancestor == "sort":
+            return result.orderBy("b")
+        return result
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+    _assert_gpu_decoded_schemas(run_on_spark, ["struct<b:int,c:int>"])
+
+
+@ignore_order(local=True)
+def test_from_protobuf_pruned_struct_through_filter(local_tmp_path, from_protobuf_fn):
+    """A filter that cannot be pushed below the decode passes the pruned struct through."""
+    decoded_df = _setup_three_int_projection(local_tmp_path, from_protobuf_fn)
+
+    def run_on_spark(spark):
+        df, decoded = decoded_df(spark)
+        # The nondeterministic column keeps Spark from pushing the filter below the decode.
+        return df.select(decoded.alias("decoded")) \
+            .withColumn("r", f.rand(42)) \
+            .filter(f.col("r") < 2.0) \
+            .select(f.col("decoded").getField("b").alias("b"),
+                    f.col("decoded").getField("c").alias("c"))
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+    _assert_gpu_decoded_schemas(run_on_spark, ["struct<b:int,c:int>"])
+
+
+@ignore_order(local=True)
+def test_from_protobuf_realiased_struct_is_not_pruned(local_tmp_path, from_protobuf_fn):
+    """A later alias publishes Spark's declared struct type, so the decode keeps every field."""
+    decoded_df = _setup_three_int_projection(local_tmp_path, from_protobuf_fn)
+
+    def run_on_spark(spark):
+        df, decoded = decoded_df(spark)
+        # The nondeterministic column keeps Spark from collapsing the re-aliasing project.
+        realiased = df.select(decoded.alias("decoded")).select(
+            f.col("decoded").alias("renamed"),
+            f.col("decoded").getField("a").alias("a"),
+            f.rand(42).alias("r"))
+        return realiased.select(
+            f.col("renamed").getField("b").alias("b"),
+            f.col("renamed").getField("c").alias("c"),
+            "a",
+            (f.col("r") >= 0).alias("r_valid"))
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+    _assert_gpu_decoded_schemas(run_on_spark, ["struct<a:int,b:int,c:int>"])
+
+
+@pytest.mark.parametrize("cpu_side, expected_schemas", [
+    # The decode runs on the CPU, so the GPU consumer must not expect a pruned struct.
+    ("decoding_project", []),
+    # A CPU consumer reads the struct with Spark's field ordinals, so it must not be pruned.
+    ("consuming_project", ["struct<a:int,b:int,c:int>"]),
+], ids=idfn)
+@allow_non_gpu("ProjectExec")
+@validate_execs_in_gpu_plan("GpuProjectExec")
+@ignore_order(local=True)
+def test_from_protobuf_cpu_project_around_decode(
+        local_tmp_path, from_protobuf_fn, cpu_side, expected_schemas):
+    decoded_df = _setup_three_int_projection(local_tmp_path, from_protobuf_fn)
+
+    def run_on_spark(spark):
+        df, decoded = decoded_df(spark)
+        if cpu_side == "decoding_project":
+            return df.select(decoded.alias("decoded"), f.rand(42).alias("force_cpu")).select(
+                f.col("decoded").getField("c").alias("c"), "force_cpu")
+        # Two references keep the decoding project separate from the consuming one.
+        return df.select(decoded.alias("decoded")).select(
+            f.col("decoded").getField("b").alias("b"),
+            f.col("decoded").getField("c").alias("c"),
+            f.rand(42).alias("force_cpu"))
+
+    conf = {
+        "spark.rapids.sql.expression.cpuBridge.enabled": "true",
+        "spark.rapids.sql.expression.Rand": "false",
+    }
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark, conf=conf)
+    _assert_gpu_decoded_schemas(run_on_spark, expected_schemas, conf=conf)
+
+
+@pytest.mark.parametrize("consumer, expected_schemas", [
+    # The CPU-bridged field access in the next project reads the struct with Spark's ordinals.
+    ("next_project", ["struct<a:int,b:int,c:int>"]),
+    # The bridge moves the access and its own decode copy to the CPU; the other copy is pruned.
+    ("same_project", ["struct<b:int,c:int>"]),
+], ids=idfn)
+@allow_non_gpu("Abs", "GetStructField", "ProtobufDataToCatalyst")
+@ignore_order(local=True)
+def test_from_protobuf_cpu_bridge_consumer(
+        local_tmp_path, from_protobuf_fn, consumer, expected_schemas):
+    decoded_df = _setup_three_int_projection(local_tmp_path, from_protobuf_fn)
+
+    def run_on_spark(spark):
+        df, decoded = decoded_df(spark)
+        if consumer == "same_project":
+            return df.select(f.abs(decoded.getField("b")).alias("abs_b"),
+                             decoded.getField("c").alias("c"))
+        return df.select(decoded.alias("decoded")).select(
+            f.abs(f.col("decoded").getField("b")).alias("abs_b"),
+            f.col("decoded").getField("c").alias("c"))
+
+    conf = {
+        "spark.rapids.sql.expression.cpuBridge.enabled": "true",
+        "spark.rapids.sql.expression.Abs": "false",
+    }
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        run_on_spark, exist_classes="GpuCpuBridgeExpression", conf=conf)
+    _assert_gpu_decoded_schemas(run_on_spark, expected_schemas, conf=conf)
+
+
+def _build_dual_view_descriptor_set_bytes(spark):
+    """Two views of one payload: field 2 as bytes in one and as a message in the other."""
+    return _build_proto2_descriptor(spark, "dual_view.proto", [
+        _msg("ViewPayload", [_field("count", 1, "INT32")]),
+        _msg("BytesView", [
+            _field("status", 1, "INT32"),
+            _field("payload", 2, "BYTES"),
+        ]),
+        _msg("MessageView", [
+            _field("status", 1, "INT32"),
+            _field("payload", 2, "MESSAGE", type_name=".test.ViewPayload"),
+        ]),
+    ])
+
+
+@pytest.mark.parametrize("filter_message", ["MessageView", "BytesView"], ids=idfn)
+@ignore_order(local=True)
+def test_from_protobuf_two_decodes_of_one_column(
+        local_tmp_path, from_protobuf_fn, filter_message):
+    """A filter on one decode and a projection of another, of the same or a different message,
+    prune each decode on its own."""
+    desc = _setup_protobuf_desc(
+        local_tmp_path, "dual_view.desc", _build_dual_view_descriptor_set_bytes)
+    rows = [(_encode_varint_field(1, status) +
+             _encode_length_delimited_field(2, _encode_varint_field(1, count)),)
+            for status, count in [(1, 7), (0, 9), (1, 11)]]
+
+    def run_on_spark(spark):
+        df = spark.createDataFrame(rows, schema="bin binary")
+        filter_decoded = _decode(from_protobuf_fn, desc, filter_message)
+        project_decoded = _decode(from_protobuf_fn, desc, "MessageView")
+        return df.filter(filter_decoded.getField("status") == 1).select(
+            project_decoded.getField("payload").getField("count").alias("payload_count"))
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+
+
+def _build_unrelated_struct_name_collision_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(spark, "unrelated_struct.proto", [
+        _msg("Nested", [
+            _field("dummy", 1, "INT32"),
+            _field("winfoid", 2, "INT32"),
+        ]),
+        _msg("Event", [
+            _field("ad_info", 1, "MESSAGE", type_name=".test.Nested"),
+        ]),
+    ])
+
+
+@ignore_order(local=True)
+def test_from_protobuf_pruning_leaves_unrelated_struct_alone(
+        spark_tmp_path, local_tmp_path, from_protobuf_fn):
+    """Pruning moves `winfoid` to ordinal 0 in the decoded struct; another struct with a field
+    of the same name keeps its own ordinal."""
+    desc = _setup_protobuf_desc(
+        local_tmp_path, "unrelated_struct.desc",
+        _build_unrelated_struct_name_collision_descriptor_set_bytes)
+    logical_gen = StructGen([
+        ("ad_info", StructGen([
+            ("dummy", IntegerGen()),
+            ("winfoid", IntegerGen()),
+        ])),
+    ], nullable=False)
+    fixture_rows, fixture_schema = materialize_protobuf_data(
+        logical_gen, "test.Event", *desc)
+
+    def run_on_spark(spark):
+        df = spark.createDataFrame(fixture_rows, fixture_schema).withColumn(
+            "other_struct",
+            f.struct(f.lit("hello").alias("dummy_str"), f.lit(42).alias("winfoid")))
+        # A parquet round trip keeps Catalyst from folding the literal struct's field access.
+        path = spark_tmp_path + "/unrelated_struct.parquet"
+        df.write.mode("overwrite").parquet(path)
+        decoded = _decode(from_protobuf_fn, desc, "Event")
+        return spark.read.parquet(path).select(
+            decoded.getField("ad_info").getField("winfoid").alias("pb_winfoid"),
+            f.col("other_struct").getField("winfoid").alias("other_winfoid"))
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+
+
 # ===========================================================================
 # Malformed input: PERMISSIVE nulls the row and FAILFAST fails, as on the CPU
 #
-# The CPU parses the whole payload, so cases that select fields also check that the GPU
-# validates the fields the query does not read.
+# The CPU parses the whole payload, so each case also checks that the GPU validates the
+# fields that schema projection leaves out of the result.
 # ===========================================================================
 
 def _build_required_field_descriptor_set_bytes(spark):
@@ -742,6 +1561,20 @@ def _build_required_field_descriptor_set_bytes(spark):
             _field("id", 1, "INT64", label="required"),
             _field("name", 2, "STRING"),
             _field("count", 3, "INT32"),
+        ]),
+    ])
+
+
+def _build_nested_required_field_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(spark, "nested_required.proto", [
+        _msg("InnerRequired", [
+            _field("child_id", 1, "INT32", label="required"),
+            _field("note", 2, "STRING"),
+        ]),
+        _msg("WithNestedRequired", [
+            _field("id", 1, "INT64"),
+            _field("inner", 2, "MESSAGE", type_name=".test.InnerRequired"),
+            _field("name", 3, "STRING"),
         ]),
     ])
 
@@ -756,14 +1589,50 @@ def _build_packed_repeated_descriptor_set_bytes(spark):
     ])
 
 
+def _build_nested_packed_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(spark, "nested_packed.proto", [
+        _msg("InnerPacked", [
+            _field("keep", 1, "INT32"),
+            _field("bad_values", 2, "INT32", label="repeated", packed=True),
+        ]),
+        _msg("OuterPacked", [
+            _field("inner", 1, "MESSAGE", type_name=".test.InnerPacked"),
+        ]),
+    ])
+
+
+def _build_nested_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(spark, "nested.proto", [
+        _msg("Nested", [_field("x", 1, "INT32")]),
+        _msg("WithNested", [
+            _field("simple_int", 1, "INT32"),
+            _field("simple_str", 2, "STRING"),
+            _field("nested_msg", 3, "MESSAGE", type_name=".test.Nested"),
+            _field("simple_long", 4, "INT64"),
+        ]),
+    ])
+
+
 _simple_valid = _encode_varint_field(1, 1) + _encode_varint_field(2, 42)
 _required_valid = (_encode_varint_field(1, 1) + _encode_length_delimited_field(2, "ok") +
                    _encode_varint_field(3, 10))
+_nested_required_valid = (
+    _encode_varint_field(1, 100) +
+    _encode_length_delimited_field(
+        2, _encode_varint_field(1, 7) + _encode_length_delimited_field(2, "ok")) +
+    _encode_length_delimited_field(3, "valid"))
+_nested_required_missing = (
+    _encode_varint_field(1, 200) +
+    _encode_length_delimited_field(2, _encode_length_delimited_field(2, "oops")) +
+    _encode_length_delimited_field(3, "missing"))
+_with_nested_scalars = (_encode_varint_field(1, 42) + _encode_length_delimited_field(2, "hello") +
+                        _encode_varint_field(4, 99))
 
 
 def _malformed_case(case_id, build_fn, message, valid, malformed, paths=None, options=None):
     """`valid` is one or more valid rows. `paths` None selects the whole struct, which tells a
-    null row from a struct of nulls; field paths leave the rest of the message unselected."""
+    null row from a struct of nulls; field paths leave the rest of the message to schema
+    projection."""
     valid_rows = valid if isinstance(valid, list) else [valid]
     return pytest.param(build_fn, message, valid_rows, malformed, paths, options or {},
                         id=case_id)
@@ -776,44 +1645,68 @@ _malformed_cases = [
                     _encode_varint_field(2, 42),
                     _encode_varint_field(2, 7) + _encode_tag(2, 5) + bytes([77, 0, 0, 0]) +
                     _encode_varint_field(2, 42) + _encode_length_delimited_field(6, "ok")),
-    _malformed_case("unterminated_varint_in_unselected_field",
-                    _build_simple_descriptor_set_bytes, "Simple", _simple_valid,
+    _malformed_case("unterminated_varint_in_pruned_field", _build_simple_descriptor_set_bytes,
+                    "Simple", _simple_valid,
                     _simple_valid + _encode_tag(3, 0) + _MALFORMED_VARINT, ["b", "i32"]),
-    _malformed_case("truncated_length_in_unselected_field",
-                    _build_simple_descriptor_set_bytes, "Simple", _simple_valid,
+    _malformed_case("truncated_length_in_pruned_field", _build_simple_descriptor_set_bytes,
+                    "Simple", _simple_valid,
                     _simple_valid + _encode_tag(6, 2) + _encode_varint(100) + b"short",
                     ["b", "i32"]),
-    _malformed_case("wrong_wire_type_in_unselected_field",
-                    _build_simple_descriptor_set_bytes, "Simple", _simple_valid,
+    _malformed_case("wrong_wire_type_in_pruned_field", _build_simple_descriptor_set_bytes,
+                    "Simple", _simple_valid,
                     _simple_valid + _encode_length_delimited_field(3, b"x"), ["b", "i32"]),
     _malformed_case("missing_required", _build_required_field_descriptor_set_bytes,
                     "WithRequired", _required_valid, _encode_length_delimited_field(2, "bad")),
-    _malformed_case("missing_required_unselected", _build_required_field_descriptor_set_bytes,
+    _malformed_case("missing_required_pruned", _build_required_field_descriptor_set_bytes,
                     "WithRequired", _required_valid, _encode_length_delimited_field(2, "bad"),
                     ["name", "count"]),
+    _malformed_case("missing_nested_required",
+                    _build_nested_required_field_descriptor_set_bytes, "WithNestedRequired",
+                    # An absent optional message has no required fields to check.
+                    [_nested_required_valid, _encode_varint_field(1, 300)],
+                    _nested_required_missing),
+    _malformed_case("missing_nested_required_pruned",
+                    _build_nested_required_field_descriptor_set_bytes, "WithNestedRequired",
+                    _nested_required_valid, _nested_required_missing, ["name", "inner.note"]),
     # Spark checks the root message for unknown enum values.
     _malformed_case("unknown_enum", _build_enum_descriptor_set_bytes, "EnumRoot",
                     _encode_varint_field(1, 1), _encode_varint_field(1, 999)),
     _malformed_case("unknown_enum_as_int", _build_enum_descriptor_set_bytes, "EnumRoot",
                     _encode_varint_field(1, 1), _encode_varint_field(1, 999),
                     options={"enums.as.ints": "true"}),
-    _malformed_case("unknown_enum_in_unselected_field",
-                    _build_enum_descriptor_set_bytes, "EnumRoot",
-                    _encode_varint_field(1, 1) + _encode_varint_field(3, 1),
-                    _encode_varint_field(1, 999) + _encode_varint_field(3, 2), ["id"]),
+    _malformed_case("unknown_enum_in_pruned_field", _build_enum_descriptor_set_bytes, "EnumRoot",
+                    _encode_varint_field(1, 1) + _encode_varint_field(5, 1),
+                    _encode_varint_field(1, 999) + _encode_varint_field(5, 2), ["id"]),
     _malformed_case("unknown_repeated_enum", _build_enum_descriptor_set_bytes, "EnumRoot",
                     _encode_varint_field(2, 10) + _encode_varint_field(2, 5),
                     _encode_varint_field(2, 1) + _encode_varint_field(2, 999)),
-    _malformed_case("unterminated_packed_varint_in_unselected_field",
+    _malformed_case("unterminated_packed_varint_in_pruned_field",
                     _build_packed_repeated_descriptor_set_bytes, "WithPackedRepeated",
                     _encode_varint_field(1, 7),
                     _encode_varint_field(1, 7) + _encode_length_delimited_field(2, b"\x80"),
                     ["id"]),
-    _malformed_case("misaligned_packed_fixed64_in_unselected_field",
+    _malformed_case("misaligned_packed_fixed64_in_pruned_field",
                     _build_packed_repeated_descriptor_set_bytes, "WithPackedRepeated",
                     _encode_varint_field(1, 7),
                     _encode_varint_field(1, 7) + _encode_length_delimited_field(3, b"\x00"),
                     ["id"]),
+    _malformed_case("malformed_packed_in_pruned_nested_field",
+                    _build_nested_packed_descriptor_set_bytes, "OuterPacked",
+                    _encode_length_delimited_field(1, _encode_varint_field(1, 7)),
+                    _encode_length_delimited_field(
+                        1, _encode_varint_field(1, 7) +
+                        _encode_length_delimited_field(2, b"\x80")),
+                    ["inner.keep"]),
+    _malformed_case("unterminated_varint_in_pruned_message",
+                    _build_nested_descriptor_set_bytes, "WithNested", _with_nested_scalars,
+                    _with_nested_scalars + _encode_length_delimited_field(
+                        3, _encode_tag(99, 0) + _MALFORMED_VARINT),
+                    ["simple_int", "simple_str"]),
+    _malformed_case("truncated_length_in_pruned_message",
+                    _build_nested_descriptor_set_bytes, "WithNested", _with_nested_scalars,
+                    _with_nested_scalars + _encode_length_delimited_field(
+                        3, _encode_tag(50, 2) + _encode_varint(100) + b"x"),
+                    ["simple_int", "simple_str"]),
 ]
 
 
@@ -835,7 +1728,25 @@ def test_from_protobuf_malformed_input(
         assert_gpu_and_cpu_error(lambda spark: run_on_spark(spark).collect(), {},
                                  "MALFORMED_PROTOBUF_MESSAGE")
     else:
-        _assert_permissive_gpu_and_cpu_equal(run_on_spark)
+        assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+
+
+@pytest.mark.parametrize("null_input", [False, True], ids=idfn)
+@ignore_order(local=True)
+def test_from_protobuf_permissive_malformed_rows_in_one_batch(
+        local_tmp_path, from_protobuf_fn, null_input):
+    """Without SPARK-46275, the GPU rebuilds struct validity only for batches with malformed
+    rows, so keep valid, malformed and null rows in the same batch."""
+    desc = _setup_protobuf_desc(
+        local_tmp_path, "simple.desc", _build_simple_descriptor_set_bytes)
+    rows = [(0, _simple_valid), (1, bytes([0x08, 0x80]))] + ([(2, None)] if null_input else [])
+
+    def run_on_spark(spark):
+        df = spark.createDataFrame(rows, schema="idx int, bin binary").coalesce(1)
+        return df.select("idx", _decode(from_protobuf_fn, desc, "Simple", {"mode": "PERMISSIVE"})
+                         .alias("decoded"))
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
 
 
 @pytest.mark.parametrize("malformed", [False, True], ids=["valid", "malformed"])
@@ -927,21 +1838,27 @@ def _build_bytes_default_descriptor_set_bytes(spark):
 
 def _build_oneof_descriptor_set_bytes(spark):
     return _build_proto2_descriptor(spark, "oneof.proto", [
+        _msg("NestedChoice", [
+            _field("int_value", 1, "INT32", oneof_index=0),
+            _field("string_value", 2, "STRING", oneof_index=0),
+        ], oneofs=["value"]),
+        _msg("OneofChild", [
+            _field("value", 1, "INT32"),
+        ]),
         _msg("Choice", [
             _field("int_value", 1, "INT32", oneof_index=0),
             _field("string_value", 2, "STRING", oneof_index=0),
             _field("sibling", 3, "INT32"),
         ], oneofs=["value"]),
-    ])
-
-
-def _build_message_field_descriptor_set_bytes(spark):
-    return _build_proto2_descriptor(spark, "message_field.proto", [
-        _msg("Child", [_field("x", 1, "INT32")]),
-        _msg("WithChild", [
-            _field("id", 1, "INT32"),
-            _field("child", 2, "MESSAGE", type_name=".test.Child"),
+        _msg("OuterChoice", [
+            _field("child", 1, "MESSAGE", type_name=".test.NestedChoice"),
+            _field("sibling", 2, "INT32"),
         ]),
+        _msg("ChoiceWithMessage", [
+            _field("child", 1, "MESSAGE", type_name=".test.OneofChild", oneof_index=0),
+            _field("scalar", 2, "INT32", oneof_index=0),
+            _field("sibling", 3, "INT32"),
+        ], oneofs=["choice"]),
     ])
 
 
@@ -979,6 +1896,15 @@ _fallback_cases = [
                    b""),
     _fallback_case("oneof_member", _build_oneof_descriptor_set_bytes, "Choice",
                    _oneof_child + _encode_varint_field(3, 9), ["int_value", "sibling"]),
+    _fallback_case("nested_oneof_member", _build_oneof_descriptor_set_bytes, "OuterChoice",
+                   _encode_length_delimited_field(1, _oneof_child) + _encode_varint_field(2, 9),
+                   ["child.int_value", "sibling"]),
+    # Pruning would skip the oneof message, but the CPU still parses its payload.
+    _fallback_case("unselected_oneof_message", _build_oneof_descriptor_set_bytes,
+                   "ChoiceWithMessage",
+                   _encode_length_delimited_field(1, _encode_tag(1, 0)) +
+                   _encode_varint_field(3, 9),
+                   ["sibling"], options={"mode": "PERMISSIVE"}),
     # Spark drops empty-message fields from its schema but still validates them.
     _fallback_case("empty_message_field_optional",
                    lambda spark: _build_empty_message_field_descriptor_set_bytes(
@@ -988,11 +1914,9 @@ _fallback_cases = [
                    lambda spark: _build_empty_message_field_descriptor_set_bytes(
                        spark, "required"),
                    "Root", _encode_varint_field(1, 7) + _encode_length_delimited_field(2, b"")),
-    # Message fields are not supported yet, even when unselected.
-    _fallback_case("message_field", _build_message_field_descriptor_set_bytes, "WithChild",
-                   _encode_varint_field(1, 7) +
-                   _encode_length_delimited_field(2, _encode_varint_field(1, 9)),
-                   ["id"]),
+    _fallback_case("nesting_too_deep",
+                   lambda spark: _build_nested_depth_descriptor_set_bytes(spark, 12),
+                   "Level1", _encode_nested_depth_message(1, 12)),
     _fallback_case("unsupported_option", _build_simple_descriptor_set_bytes, "Simple",
                    _simple_valid, options={"emit.default.values": "true"}),
     _fallback_case("disabled_by_expression_config", _build_simple_descriptor_set_bytes, "Simple",

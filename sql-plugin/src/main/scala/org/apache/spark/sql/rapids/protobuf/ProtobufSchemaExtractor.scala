@@ -148,7 +148,7 @@ object ProtobufSchemaExtractor {
   }
 
   /**
-   * Checks the Spark/protobuf type pairing, unwrapping repeated non-message fields.
+   * Checks the Spark/protobuf type pairing, including nested and repeated message fields.
    * Returns (supported, optional rejection reason, JNI encoding). Syntax, oneofs, defaults and
    * enum declarations are checked separately.
    */
@@ -158,10 +158,6 @@ object ProtobufSchemaExtractor {
       isRepeated: Boolean,
       enumsAsInts: Boolean): (Boolean, Option[String], Int) = {
 
-    if (protoTypeName == "MESSAGE" || protoTypeName == "GROUP") {
-      return (false, Some("protobuf message fields are not supported on GPU"), ENC_DEFAULT)
-    }
-
     if (isRepeated) {
       sparkType match {
         case ArrayType(elementType, _) =>
@@ -169,6 +165,8 @@ object ProtobufSchemaExtractor {
             case BooleanType | IntegerType | LongType | FloatType | DoubleType |
                  StringType | BinaryType =>
               return checkScalarEncoding(elementType, protoTypeName, enumsAsInts)
+            case _: StructType =>
+              return (true, None, ENC_DEFAULT)
             case _ =>
               return (
                 false,
@@ -179,6 +177,18 @@ object ProtobufSchemaExtractor {
           return (
             false,
             Some(s"repeated field should map to ArrayType, got: $sparkType"),
+            ENC_DEFAULT)
+      }
+    }
+
+    if (protoTypeName == "MESSAGE") {
+      sparkType match {
+        case _: StructType =>
+          return (true, None, ENC_DEFAULT)
+        case _ =>
+          return (
+            false,
+            Some(s"nested message should map to StructType, got: $sparkType"),
             ENC_DEFAULT)
       }
     }

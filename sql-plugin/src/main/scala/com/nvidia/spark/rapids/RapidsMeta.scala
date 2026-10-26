@@ -24,7 +24,7 @@ import com.nvidia.spark.rapids.GpuTypedImperativeSupportedAggregateExecMeta.{pre
 import com.nvidia.spark.rapids.RapidsMeta.noNeedToReplaceReason
 import com.nvidia.spark.rapids.shims.{AggregateInPandasExecShims, DistributionUtil, SparkShimImpl}
 
-import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, BinaryExpression, BoundReference, Cast, ComplexTypeMergingExpression, Expression, LambdaFunction, Literal, NamedLambdaVariable, QuaternaryExpression, RuntimeReplaceable, String2TrimExpression, TernaryExpression, TimeZoneAwareExpression, UnaryExpression, UTCTimestamp, WindowExpression, WindowFunction}
+import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, BinaryExpression, BoundReference, Cast, ComplexTypeMergingExpression, Expression, ExprId, LambdaFunction, Literal, NamedLambdaVariable, QuaternaryExpression, RuntimeReplaceable, String2TrimExpression, TernaryExpression, TimeZoneAwareExpression, UnaryExpression, UTCTimestamp, WindowExpression, WindowFunction}
 import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, AggregateFunction, ImperativeAggregate, TypedImperativeAggregate}
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.catalyst.trees.{CurrentOrigin, TreeNodeTag, UnaryLike}
@@ -68,6 +68,22 @@ object RapidsMeta {
   val gpuSupportedTag = TreeNodeTag[Set[String]]("rapids.gpu.supported")
 
   def noNeedToReplaceReason(klass: Class[_]) = s"there is no need to replace $klass"
+
+  /** The nearest enclosing plan meta, skipping expression and other non-plan metas. */
+  def findParentPlanMeta(meta: RapidsMeta[_, _, _]): Option[SparkPlanMeta[_]] =
+    meta.parent match {
+      case Some(p: SparkPlanMeta[_]) => Some(p)
+      case Some(p) => findParentPlanMeta(p)
+      case None => None
+    }
+}
+
+/**
+ * An expression meta whose tagging published a GPU-specific output type that only GPU
+ * consumers understand. Consumers are tagged after it, so it rechecks them in post-tag rules.
+ */
+trait ConsumerDependentExprMeta {
+  def recheckConsumersAfterTag(): Unit
 }
 
 /**
@@ -792,6 +808,24 @@ abstract class SparkPlanMeta[INPUT <: SparkPlan](plan: INPUT,
     //    and this change may cause mismatch between the join and its build side
     //    BroadcastExchangeExec, leading to errors. Need to fix the mismatch.
     fixUpBroadcastJoins()
+
+    // 5) An expression may publish a GPU-only output type, such as a pruned from_protobuf
+    //    struct. Its consumers are tagged after it and may end up on the CPU, so it rechecks
+    //    them once every rule that can move operators to the CPU has run.
+    recheckConsumerDependentExprs()
+  }
+
+  private def recheckConsumerDependentExprs(): Unit = {
+    childPlans.foreach(_.recheckConsumerDependentExprs())
+    def recheck(expr: BaseExprMeta[_]): Unit = {
+      expr match {
+        case consumerDependent: ConsumerDependentExprMeta =>
+          consumerDependent.recheckConsumersAfterTag()
+        case _ =>
+      }
+      expr.childExprs.foreach(recheck)
+    }
+    childExprs.foreach(recheck)
   }
 
   /**
@@ -943,7 +977,16 @@ abstract class SparkPlanMeta[INPUT <: SparkPlan](plan: INPUT,
   /**
    * Overrides this method to implement custom conversions for specific plans.
    */
-  protected lazy val outputTypeMetas: Option[Seq[DataTypeMeta]] = None
+  protected def outputTypeMetas: Option[Seq[DataTypeMeta]] = None
+
+  /**
+   * Child output attributes whose types were converted for the GPU, keyed by expression id.
+   * Only read during conversion, after post-tag rules have settled the converted types.
+   */
+  lazy val convertedChildOutputs: Map[ExprId, Attribute] = childPlans.flatMap { child =>
+    val declaredTypes = child.wrapped.output.map(a => a.exprId -> a.dataType).toMap
+    child.outputAttributes.filterNot(a => declaredTypes.get(a.exprId).contains(a.dataType))
+  }.map(a => a.exprId -> a).toMap
 
   /**
    * Whether to pass through the outputAttributes of childPlan's meta, only for UnaryPlan
@@ -1020,15 +1063,8 @@ object WindowAggExprContext extends ExpressionContext  {
 }
 
 object ExpressionContext {
-  private[this] def findParentPlanMeta(meta: BaseExprMeta[_]): Option[SparkPlanMeta[_]] =
-    meta.parent match {
-      case Some(p: BaseExprMeta[_]) => findParentPlanMeta(p)
-      case Some(p: SparkPlanMeta[_]) => Some(p)
-      case _ => None
-    }
-
   def getAggregateFunctionContext(meta: BaseExprMeta[_]): ExpressionContext = {
-    val parent = findParentPlanMeta(meta)
+    val parent = RapidsMeta.findParentPlanMeta(meta)
     assert(parent.isDefined, "It is expected that an aggregate function is a child of a SparkPlan")
     parent.get.wrapped match {
       case agg: SparkPlan if SparkShimImpl.isWindowFunctionExec(agg) =>

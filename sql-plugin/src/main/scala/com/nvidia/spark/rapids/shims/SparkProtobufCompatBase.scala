@@ -28,7 +28,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.rapids.protobuf._
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{ArrayType, StructType}
 
 /**
  * Provides protobuf schema metadata through a common interface across Spark versions.
@@ -37,6 +37,8 @@ import org.apache.spark.sql.types.StructType
 private[shims] abstract class SparkProtobufCompatBase extends Logging {
   private[this] val sparkProtobufUtilsObjectClassName =
     "org.apache.spark.sql.protobuf.utils.ProtobufUtils$"
+
+  private val PROTO2_MAGIC_STRING = "PROTO2"
 
   private val ProtobufDataToCatalystClassName =
     "org.apache.spark.sql.protobuf.ProtobufDataToCatalyst"
@@ -55,7 +57,7 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
     exprClass.getDeclaredFields.exists(_.getName == "nullResultRow")
 
   // The rule is registered only when the class loads, so a missing class never reaches planning.
-  private lazy val permissiveNeedsCpu: Boolean =
+  private lazy val permissiveReturnsNullFields: Boolean =
     Try(ShimReflectionUtils.loadClass(ProtobufDataToCatalystClassName))
       .toOption.exists(permissiveReturnsNullFieldsRow)
 
@@ -72,12 +74,23 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
   }
 
   /**
+   * Compares message, descriptor and options; unreadable expressions are treated as different.
+   * This prevents schema pruning from combining expressions with incompatible decode semantics.
+   */
+  def sameDecodeSemantics(left: Expression, right: Expression): Boolean = {
+    (extractExprInfo(left), extractExprInfo(right)) match {
+      case (Right(leftInfo), Right(rightInfo)) => leftInfo == rightInfo
+      case _ => false
+    }
+  }
+
+  /**
    * Parses enum representation and parse mode, returning Left for unsupported modes or booleans.
    * Defaults to FAILFAST; unrecognized mode strings use permissive behavior, matching Spark.
    */
   def parsePlannerOptions(
       options: Map[String, String]): Either[String, ProtobufPlannerOptions] =
-    parsePlannerOptions(options, permissiveNeedsCpu)
+    parsePlannerOptions(options, permissiveReturnsNullFields)
 
   private[shims] def parsePlannerOptions(
       options: Map[String, String],
@@ -88,9 +101,6 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
     val failOnErrors = mode.equalsIgnoreCase("FAILFAST")
     if (mode.equalsIgnoreCase("DROPMALFORMED")) {
       Left("from_protobuf DROPMALFORMED mode is not supported on GPU")
-    } else if (!failOnErrors && permissiveReturnsNullRow) {
-      Left("from_protobuf PERMISSIVE mode on this Spark version returns a struct of null " +
-        "fields for malformed input, which the GPU decoder does not produce")
     } else {
       val enumsAsInts = if (!honorsEnumsAsInts) {
         Right(false)
@@ -104,7 +114,8 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
               s"'$value' (expected true/false)"
           }
       }
-      enumsAsInts.map(v => ProtobufPlannerOptions(enumsAsInts = v, failOnErrors = failOnErrors))
+      enumsAsInts.map(v => ProtobufPlannerOptions(enumsAsInts = v, failOnErrors = failOnErrors,
+        malformedRowsAsNullFields = !failOnErrors && permissiveReturnsNullRow))
     }
   }
 
@@ -112,16 +123,75 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
   def unsupportedOptions(options: Map[String, String]): Seq[String] =
     options.keys.filterNot(k => SupportedOptions.contains(k.toLowerCase(Locale.ROOT))).toSeq.sorted
 
+  /** Only uppercase PROTO2 syntax is supported; unrecognized syntax strings are rejected. */
+  def isGpuSupportedProtoSyntax(syntax: String): Boolean =
+    syntax == PROTO2_MAGIC_STRING
+
   /**
-   * Spark drops empty-message fields from its schema but still checks their presence and
-   * encoding, which the GPU decoder cannot do without them.
+   * Checks root/referenced syntax, UTF-8 requirements and fields missing from the Spark schema
+   * before schema pruning can hide them.
+   * Left describes an unsupported schema; lazy descriptor reads may still throw.
    */
-  def checkNoFieldsMissingFromSchema(
+  private[shims] def validateDescriptorGraph(
       schema: StructType,
-      desc: ProtobufMessageDescriptor): Either[String, Unit] = {
-    val omitted = desc.fieldNames.filterNot(schema.fieldNames.contains)
-    Either.cond(omitted.isEmpty, (),
-      s"root message has fields missing from the Spark schema: ${omitted.mkString(", ")}")
+      root: ProtobufMessageDescriptor): Either[String, Unit] = {
+    def nestedStruct(dataType: org.apache.spark.sql.types.DataType): Option[StructType] = {
+      dataType match {
+        case st: StructType => Some(st)
+        case ArrayType(st: StructType, _) => Some(st)
+        case _ => None
+      }
+    }
+
+    def validate(schema: StructType, desc: ProtobufMessageDescriptor,
+        path: String): Either[String, Unit] = {
+      if (!isGpuSupportedProtoSyntax(desc.syntax)) {
+        val location = if (path.isEmpty) "root message" else s"protobuf field '$path'"
+        return Left(s"$location uses unsupported ${desc.syntax} syntax; only proto2 is supported")
+      }
+
+      // Spark drops empty-message fields from its schema but still checks their presence and
+      // encoding, which the GPU decoder cannot do without them.
+      val omitted = desc.fieldNames.filterNot(schema.fieldNames.contains)
+      if (omitted.nonEmpty) {
+        val location = if (path.isEmpty) "root message" else s"protobuf field '$path'"
+        return Left(s"$location has fields missing from the Spark schema: " +
+          omitted.mkString(", "))
+      }
+
+      if (desc.javaStringCheckUtf8 && schema.fields.exists { field =>
+        desc.findField(field.name).exists(_.protoTypeName == "STRING")
+      }) {
+        val location = if (path.isEmpty) "root message" else s"protobuf field '$path'"
+        return Left(
+          s"$location requires strict protobuf UTF-8 validation, which is not supported on GPU")
+      }
+
+      schema.fields.foreach { field =>
+        desc.findField(field.name).foreach { fieldDesc =>
+          val fieldPath = if (path.isEmpty) field.name else s"$path.${field.name}"
+          fieldDesc.referencedTypeSyntax.foreach { syntax =>
+            if (!isGpuSupportedProtoSyntax(syntax)) {
+              return Left(
+                s"Referenced type for protobuf field '$fieldPath' uses unsupported $syntax " +
+                  "syntax; only proto2 is supported")
+            }
+          }
+          for {
+            childSchema <- nestedStruct(field.dataType)
+            childDesc <- fieldDesc.messageDescriptor
+          } {
+            validate(childSchema, childDesc, fieldPath) match {
+              case left @ Left(_) => return left
+              case Right(_) =>
+            }
+          }
+        }
+      }
+      Right(())
+    }
+
+    validate(schema, root, "")
   }
 
   /** Resolves the schema or returns a failure reason; lazy metadata reads may still throw. */
@@ -400,7 +470,7 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
         invoke0[AnyRef](fileProto, "getSyntax")
       }
       val syntax = typeNameFn(syntaxObj).trim
-      if (syntax.isEmpty) "PROTO2" else syntax.toUpperCase(Locale.ROOT)
+      if (syntax.isEmpty) PROTO2_MAGIC_STRING else syntax.toUpperCase(Locale.ROOT)
     }.getOrElse("")
   }
 }
