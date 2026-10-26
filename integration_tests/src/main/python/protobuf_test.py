@@ -995,7 +995,7 @@ def test_from_protobuf_smoke_nested(nested_smoke_desc, from_protobuf_fn):
         return spark.createDataFrame(encoded, ["bin"]).select(
             decoded.getField("top").alias("top"),
             decoded.getField("child").getField("a").alias("child_a"),
-            decoded.getField("items")[0].getField("b").alias("first_item_b"))
+            f.get(decoded.getField("items"), 0).getField("b").alias("first_item_b"))
 
     assert_gpu_and_cpu_are_equal_collect(run_on_spark)
 
