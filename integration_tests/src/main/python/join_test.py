@@ -2079,17 +2079,36 @@ def test_conditional_nested_loop_join_rows_only_source_fallback(aqe_enabled):
 @pytest.mark.parametrize("join_type", ["left_semi", "left_anti"])
 @pytest.mark.parametrize("build_rows", [0, 2])
 @pytest.mark.parametrize("aqe_enabled", ["true", "false"])
-def test_unconditional_nested_loop_join_rows_only_existence(join_type, build_rows, aqe_enabled):
+@pytest.mark.parametrize("true_condition", [False, True])
+def test_unconditional_nested_loop_join_rows_only_existence(
+        join_type, build_rows, aqe_enabled, true_condition):
     def join_rows(spark):
         target = spark.range(3).select()
         # Keep build cardinality opaque to Catalyst so the empty case reaches the join.
         source = spark.createDataFrame(
             spark.sparkContext.parallelize([tuple()] * build_rows, 2), StructType([]))
-        return target.join(broadcast(source), how=join_type).select(lit(1).alias("value"))
+        condition = lit(True) if true_condition else None
+        return target.join(broadcast(source), on=condition, how=join_type).select(
+            lit(1).alias("value"))
 
     # Exercise the join itself instead of letting AQE replace it with an empty relation.
+    conf = {"spark.sql.adaptive.enabled": aqe_enabled,
+            "spark.sql.adaptive.optimizer.excludedRules":
+                "org.apache.spark.sql.execution.adaptive.AQEPropagateEmptyRelation"}
+    if true_condition:
+        # Preserve the join condition instead of pushing it into a target-side filter.
+        conf["spark.sql.optimizer.excludedRules"] = (
+            "org.apache.spark.sql.catalyst.optimizer.PushDownPredicates,"
+            "org.apache.spark.sql.catalyst.optimizer.PushPredicateThroughJoin")
+        def check_true_literal_join(spark):
+            plan = join_rows(spark)._jdf.queryExecution().executedPlan()
+            if plan.getClass().getSimpleName() == "AdaptiveSparkPlanExec":
+                plan = plan.executedPlan()
+            joins = [node for node in collect_plan_nodes(plan)
+                     if node.getClass().getSimpleName() == "BroadcastNestedLoopJoinExec"]
+            assert any(node.condition().isDefined() and
+                       node.condition().get().toString() == "true" for node in joins), \
+                f"The regression must exercise a true-literal join condition: {plan}"
+        with_cpu_session(check_true_literal_join, conf=conf)
     assert_cpu_and_gpu_are_equal_collect_with_capture(
-        join_rows, exist_classes="GpuBroadcastNestedLoopJoinExec",
-        conf={"spark.sql.adaptive.enabled": aqe_enabled,
-              "spark.sql.adaptive.optimizer.excludedRules":
-                  "org.apache.spark.sql.execution.adaptive.AQEPropagateEmptyRelation"})
+        join_rows, exist_classes="GpuBroadcastNestedLoopJoinExec", conf=conf)

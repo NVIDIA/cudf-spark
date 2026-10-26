@@ -30,7 +30,7 @@ import org.apache.spark.TaskContext
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression, NamedExpression}
+import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression, Literal, NamedExpression}
 import org.apache.spark.sql.catalyst.plans.{ExistenceJoin, FullOuter, InnerLike, JoinType, LeftAnti, LeftExistence, LeftOuter, LeftSemi, RightOuter}
 import org.apache.spark.sql.catalyst.plans.physical.{BroadcastDistribution, Distribution, IdentityBroadcastMode, Partitioning, UnspecifiedDistribution}
 import org.apache.spark.sql.execution.SparkPlan
@@ -94,7 +94,11 @@ abstract class GpuBroadcastNestedLoopJoinMetaBase(
   }
 
   override def tagPlanForGpu(): Unit = {
-    if (join.condition.nonEmpty && (join.left.output.isEmpty || join.right.output.isEmpty)) {
+    val needsConditionEvaluation = join.condition.exists {
+      case Literal(true, BooleanType) => false
+      case _ => true
+    }
+    if (needsConditionEvaluation && (join.left.output.isEmpty || join.right.output.isEmpty)) {
       willNotWorkOnGpu("Conditional nested-loop joins with a rows-only input are not supported")
     }
     JoinTypeChecks.tagForGpu(join.joinType, this)
