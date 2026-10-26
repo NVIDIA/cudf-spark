@@ -458,10 +458,10 @@ def test_basic_json_read(std_input_path, filename, schema, read_func, allow_non_
 def test_json_read_extreme_exponents(spark_tmp_path, data_type, v1_enabled_list):
     data_path = spark_tmp_path + '/JSON_EXTREME_EXPONENT_DATA'
     records = [
-        '{"numbers":[-630111.628E-58858,630111.628E58858]}',
-        '{"numbers":[-1E5000,1E5000,-1E-5000,1E-5000]}',
+        ('{"numbers":[-630111.628E-58858,630111.628E58858]}',),
+        ('{"numbers":[-1E5000,1E5000,-1E-5000,1E-5000]}',),
     ]
-    with_cpu_session(lambda spark: spark.createDataFrame([(line,) for line in records], ['value'])
+    with_cpu_session(lambda spark: spark.createDataFrame(records, ['value'])
                      .coalesce(1).write.text(data_path))
 
     schema = StructType([StructField('numbers', ArrayType(data_type))])
