@@ -26,7 +26,9 @@ import com.nvidia.spark.rapids.ShimReflectionUtils
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions.Expression
+import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.rapids.protobuf._
+import org.apache.spark.sql.types.StructType
 
 /**
  * Provides protobuf schema metadata through a common interface across Spark versions.
@@ -35,6 +37,27 @@ import org.apache.spark.sql.rapids.protobuf._
 private[shims] abstract class SparkProtobufCompatBase extends Logging {
   private[this] val sparkProtobufUtilsObjectClassName =
     "org.apache.spark.sql.protobuf.utils.ProtobufUtils$"
+
+  private val ProtobufDataToCatalystClassName =
+    "org.apache.spark.sql.protobuf.ProtobufDataToCatalyst"
+
+  /** Option keys whose semantics the GPU decoder handles. */
+  val SupportedOptions: Set[String] = Set("enums.as.ints", "mode")
+
+  /** Whether this Spark version reads `enums.as.ints`; older versions ignore the key. */
+  protected def honorsEnumsAsInts: Boolean = true
+
+  /**
+   * Spark without SPARK-46275 (before 3.4.3, and 3.5.0) returns a struct of null fields for
+   * malformed PERMISSIVE rows. Probe for the member that fix removed so vendor backports count.
+   */
+  private[shims] def permissiveReturnsNullFieldsRow(exprClass: Class[_]): Boolean =
+    exprClass.getDeclaredFields.exists(_.getName == "nullResultRow")
+
+  // The rule is registered only when the class loads, so a missing class never reaches planning.
+  private lazy val permissiveNeedsCpu: Boolean =
+    Try(ShimReflectionUtils.loadClass(ProtobufDataToCatalystClassName))
+      .toOption.exists(permissiveReturnsNullFieldsRow)
 
   /**
    * Reads arguments from ProtobufDataToCatalyst after runtime replacement, not an analyzed wrapper.
@@ -46,6 +69,59 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
       options <- reflectOptions(e)
       descriptorSource <- reflectDescriptorSource(e)
     } yield ProtobufExprInfo(messageName, descriptorSource, options)
+  }
+
+  /**
+   * Parses enum representation and parse mode, returning Left for unsupported modes or booleans.
+   * Defaults to FAILFAST; unrecognized mode strings use permissive behavior, matching Spark.
+   */
+  def parsePlannerOptions(
+      options: Map[String, String]): Either[String, ProtobufPlannerOptions] =
+    parsePlannerOptions(options, permissiveNeedsCpu)
+
+  private[shims] def parsePlannerOptions(
+      options: Map[String, String],
+      permissiveReturnsNullRow: Boolean): Either[String, ProtobufPlannerOptions] = {
+    // Spark reads protobuf options case-insensitively.
+    val caseInsensitiveOptions = CaseInsensitiveMap(options)
+    val mode = caseInsensitiveOptions.getOrElse("mode", "FAILFAST")
+    val failOnErrors = mode.equalsIgnoreCase("FAILFAST")
+    if (mode.equalsIgnoreCase("DROPMALFORMED")) {
+      Left("from_protobuf DROPMALFORMED mode is not supported on GPU")
+    } else if (!failOnErrors && permissiveReturnsNullRow) {
+      Left("from_protobuf PERMISSIVE mode on this Spark version returns a struct of null " +
+        "fields for malformed input, which the GPU decoder does not produce")
+    } else {
+      val enumsAsInts = if (!honorsEnumsAsInts) {
+        Right(false)
+      } else {
+        val value = caseInsensitiveOptions.getOrElse("enums.as.ints", "false")
+        Try(value.toBoolean)
+          .toEither
+          .left
+          .map { _ =>
+            "Invalid value for from_protobuf option 'enums.as.ints': " +
+              s"'$value' (expected true/false)"
+          }
+      }
+      enumsAsInts.map(v => ProtobufPlannerOptions(enumsAsInts = v, failOnErrors = failOnErrors))
+    }
+  }
+
+  /** Unrecognized option keys, sorted for stable fallback diagnostics. */
+  def unsupportedOptions(options: Map[String, String]): Seq[String] =
+    options.keys.filterNot(k => SupportedOptions.contains(k.toLowerCase(Locale.ROOT))).toSeq.sorted
+
+  /**
+   * Spark drops empty-message fields from its schema but still checks their presence and
+   * encoding, which the GPU decoder cannot do without them.
+   */
+  def checkNoFieldsMissingFromSchema(
+      schema: StructType,
+      desc: ProtobufMessageDescriptor): Either[String, Unit] = {
+    val omitted = desc.fieldNames.filterNot(schema.fieldNames.contains)
+    Either.cond(omitted.isEmpty, (),
+      s"root message has fields missing from the Spark schema: ${omitted.mkString(", ")}")
   }
 
   /** Resolves the schema or returns a failure reason; lazy metadata reads may still throw. */
@@ -129,6 +205,8 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
 
     override def findField(name: String): Option[ProtobufFieldDescriptor] =
       Option(ProtobufReflection.findFieldByName(raw, name)).map(new ReflectiveFieldDescriptor(_))
+
+    override lazy val fieldNames: Seq[String] = ProtobufReflection.getFieldNames(raw)
   }
 
   private final class ReflectiveFieldDescriptor(raw: AnyRef) extends ProtobufFieldDescriptor {
@@ -273,6 +351,12 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
 
     def findFieldByName(msgDesc: AnyRef, name: String): AnyRef =
       invoke1[AnyRef](msgDesc, "findFieldByName", classOf[String], name)
+
+    def getFieldNames(msgDesc: AnyRef): Seq[String] = {
+      import scala.collection.JavaConverters._
+      invoke0[java.util.List[AnyRef]](msgDesc, "getFields").asScala
+        .map(invoke0[String](_, "getName")).toList
+    }
 
     def getFieldNumber(fd: AnyRef): Int =
       invoke0[java.lang.Integer](fd, "getNumber").intValue()

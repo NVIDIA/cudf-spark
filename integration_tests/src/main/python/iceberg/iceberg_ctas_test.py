@@ -21,7 +21,8 @@ from pyspark.sql.types import ArrayType, BinaryType, TimestampType
 
 from asserts import (assert_cpu_and_gpu_are_equal_collect_with_capture,
                      assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect,
-                     assert_gpu_fallback_collect, assert_gpu_fallback_write, collect_plan_nodes)
+                     assert_gpu_fallback_collect, assert_gpu_fallback_write,
+                     assert_gpu_fallback_write_sql, collect_plan_nodes)
 from conftest import is_iceberg_remote_catalog, spark_jvm
 from data_gen import gen_df, copy_and_update, long_gen, RepeatSeqGen
 from iceberg import (
@@ -200,6 +201,24 @@ def test_ctas_gpu_timestamp_uses_iceberg_micros_and_has_metrics(
         assert_equal_with_local_sort(iceberg_rows, parquet_rows)
 
     with_cpu_session(assert_timestamp_file_metadata, conf=conf)
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@ignore_order(local=True)
+@allow_non_gpu('AtomicCreateTableAsSelectExec', 'AppendDataExec')
+def test_ctas_encryption_fallback(spark_tmp_table_factory):
+    base_table_name = get_full_table_name(spark_tmp_table_factory)
+
+    def run_ctas(spark, table):
+        _execute_ctas(
+            spark, table, spark_tmp_table_factory,
+            lambda sp: row_lineage_df(sp, length=128),
+            {"format-version": "3", "encryption.key-id": "test-key"}, ret=False)
+
+    assert_gpu_fallback_write_sql(
+        run_ctas, lambda spark, table: spark.table(table),
+        base_table_name, ["AtomicCreateTableAsSelectExec"], conf=iceberg_write_enabled_conf)
 
 
 @iceberg

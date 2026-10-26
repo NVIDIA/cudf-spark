@@ -39,11 +39,6 @@
       "resource": "withResource(deduped.getChildColumnView(0))"
     },
     {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/shims/GpuIntervalUtilsBase.scala",
-      "fingerprint": "fb219b9f909a536ef217",
-      "resource": "withResource(Scalar.fromString(prefixStr))"
-    },
-    {
       "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/window/GpuUnboundedToUnboundedAggWindowExec.scala",
       "fingerprint": "085fcea941ec509cb8e4",
       "resource": "withResource(cudf.ColumnVector.fromLongs(targetRows))"
@@ -114,16 +109,6 @@
       "resource": "withResource(builtTable.filter(trackerTab.getColumn(0)))"
     },
     {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/shims/intervalExpressions.scala",
-      "fingerprint": "bdb0982a0a7b49fdc047",
-      "resource": "withResource(diff.greaterOrEqualTo(one))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/shims/intervalExpressions.scala",
-      "fingerprint": "c005f1dbcf1c61780533",
-      "resource": "withResource(isMin.and(isNegOne))"
-    },
-    {
       "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/stringFunctions.scala",
       "fingerprint": "42399f8595279597588c",
       "resource": "withResource(extracted.replaceListChild(normalizedCaptures))"
@@ -137,16 +122,6 @@
       "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/stringFunctions.scala",
       "fingerprint": "c75e489f83b3420cde00",
       "resource": "withResource(captures.replaceNulls(emptyString))"
-    },
-    {
-      "path": "sql-plugin/src/main/spark334/scala/com/nvidia/spark/rapids/shims/GetSequenceSize.scala",
-      "fingerprint": "2ef8f1001188e98b0a1d",
-      "resource": "withResource(hasLongMinAndStepMinusOne.any())"
-    },
-    {
-      "path": "sql-plugin/src/main/spark334/scala/com/nvidia/spark/rapids/shims/GetSequenceSize.scala",
-      "fingerprint": "ae4f61b93e9b6f1888b0",
-      "resource": "withResource(hasLongMin.and(stepEqualsMinusOne))"
     }
   ]
 }

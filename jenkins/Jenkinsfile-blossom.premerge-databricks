@@ -123,7 +123,7 @@ pipeline {
                                 container('cpu') {
                                     try {
                                         unstash('source_tree')
-                                        load('jenkins/databricks/fallback.groovy').run(this, DbUtils,
+                                        load('jenkins/databricks/fallback.groovy').run(this, DbUtils, getDbRetryOrder(),
                                             { clusterId -> databricksBuild(clusterId) },
                                             { clusterId -> databricksTest(clusterId) })
                                     } catch (e) {
@@ -149,9 +149,28 @@ pipeline {
     } // end of stages
 } // end of pipeline
 
-// params.DATABRICKS_TYPE: 'aws' or 'azure3', param can be defined through the jenkins webUI
+List<String> getDbTypes() {
+    return ['aws2', 'aws', 'azure3']
+}
+
 String getDbType() {
-    return params.DATABRICKS_TYPE ? params.DATABRICKS_TYPE : 'aws'
+    // Match the initial environment to the fixed fallback order until the 26.10 release.
+    // TODO: Restore parameter selection together with getDbRetryOrder() after the release.
+    // def types = getDbTypes()
+    // def selected = params.DATABRICKS_TYPE ?: types[0]
+    // if (!(selected in types)) {
+    //     error "Unsupported Databricks profile: $selected"
+    // }
+    // return selected
+    return getDbTypes()[0]
+}
+
+List<String> getDbRetryOrder() {
+    // Keep this order independent of DATABRICKS_TYPE while 26.10 lacks fallback support.
+    // TODO: Restore selected-provider-first ordering after the 26.10 release.
+    // def selected = getDbType()
+    // return [selected] + getDbTypes().findAll { it != selected }
+    return getDbTypes()
 }
 
 void databricksBuild(String clusterId) {

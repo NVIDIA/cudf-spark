@@ -20,6 +20,15 @@ Map run(script, dbUtils, Closure build, Closure test) {
     if (!(preferred in ['aws', 'azure3'])) {
         script.error 'Databricks fallback supports only aws/azure3 profiles'
     }
+    def alternate = preferred == 'aws' ? 'azure3' : 'aws'
+    return run(script, dbUtils, [preferred, alternate], build, test)
+}
+
+Map run(script, dbUtils, List<String> providers, int attemptsPerProvider = 2,
+        Closure build, Closure test) {
+    if (!providers || providers.any { !dbUtils.getCloud(it) }) {
+        script.error 'Databricks fallback requires valid provider profiles'
+    }
     if (!(script.env.DB_RUNTIME ==~ /[A-Za-z0-9][A-Za-z0-9_.-]*/) ||
         !(script.env.BUILD_NUMBER ==~ /[0-9]+/) || !script.env.BUILD_TAG ||
         !script.env.WORKSPACE || !script.env.NODE_NAME) {
@@ -27,10 +36,9 @@ Map run(script, dbUtils, Closure build, Closure test) {
     }
     // Keep per-attempt configuration outside the source tar sent to the cluster.
     script.sh 'mkdir -p .databricks-fallback'
-    def alternate = preferred == 'aws' ? 'azure3' : 'aws'
     // Retry orchestration is shared with future CSPUTIL callers; this callback owns cuDF-Spark.
     // Rebuild on each cluster. Publish artifacts/trigger downstream jobs only after run returns.
-    return script.databricksRetry(script, preferred, alternate) { target, attempt, finalAttempt ->
+    return script.databricksRetry(script, providers, attemptsPerProvider) { target, attempt, finalAttempt ->
         def stateFile = "databricks-attempt-${script.env.BUILD_NUMBER}-${script.env.DB_RUNTIME}-${attempt}-${target}.json"
         def initDir = "${script.env.INIT_SCRIPTS_DIR}-${attempt}-${target}"
         def failureFile = ".databricks-fallback/failure-${stateFile}.txt"
@@ -40,24 +48,33 @@ Map run(script, dbUtils, Closure build, Closure test) {
         def testFailed = false
         def classificationAvailable = false
         def gpuDiagnostics = ''
-        script.withEnv([
-            "DB_TYPE=$target",
-            "DATABRICKS_HOST=${dbUtils.getHost(target)}",
-            "DATABRICKS_DRIVER=${dbUtils.getDriver(target)}",
-            "DATABRICKS_WORKER=${dbUtils.getWorker(target)}",
-            "CLUSTER_NAME=CI-${script.env.BUILD_TAG}-${script.env.DB_RUNTIME}-${attempt}-${target}",
-            "INIT_SCRIPTS_DIR=$initDir",
-            "DATABRICKS_TEST_FAILURE_FILE=$failureFile",
-            "DATABRICKS_READINESS_OBSERVATIONS_FILE=${failureFile}.readiness.json",
-            // An Azure-preferred job must not inherit an AWS-specific zone override.
-            'DB_ZONE=auto'
+        script.withCredentials([
+            script.string(credentialsId: dbUtils.getToken(target), variable: 'DATABRICKS_TOKEN'),
+            script.file(credentialsId: 'SPARK_DATABRICKS_PRIVKEY', variable: 'DATABRICKS_PRIVKEY')
         ]) {
-            script.withCredentials([
-                script.string(credentialsId: dbUtils.getToken(target), variable: 'DATABRICKS_TOKEN'),
-                script.file(credentialsId: 'SPARK_DATABRICKS_PRIVKEY', variable: 'DATABRICKS_PRIVKEY')
+            def sshConfig = dbUtils.getSshConfig(target, script.env.DATABRICKS_PRIVKEY)
+            def sshConfigFile = sshConfig ?
+                "${script.env.WORKSPACE}/.databricks-fallback/ssh-${stateFile}.config" : ''
+            script.withEnv([
+                "DB_TYPE=$target",
+                "DATABRICKS_CLOUD=${dbUtils.getCloud(target)}",
+                "DATABRICKS_HOST=${dbUtils.getHost(target)}",
+                "DATABRICKS_DRIVER=${dbUtils.getDriver(target)}",
+                "DATABRICKS_WORKER=${dbUtils.getWorker(target)}",
+                "DATABRICKS_SSH_CONFIG=$sshConfigFile",
+                "CLUSTER_NAME=CI-${script.env.BUILD_TAG}-${script.env.DB_RUNTIME}-${attempt}-${target}",
+                "INIT_SCRIPTS_DIR=$initDir",
+                "DATABRICKS_TEST_FAILURE_FILE=$failureFile",
+                "DATABRICKS_READINESS_OBSERVATIONS_FILE=${failureFile}.readiness.json",
+                // An Azure-preferred job must not inherit an AWS-specific zone override.
+                'DB_ZONE=auto'
             ]) {
                 def primaryError = null
                 try {
+                    if (sshConfigFile) {
+                        script.writeFile(file: sshConfigFile, text: sshConfig)
+                        script.sh 'chmod 600 "$DATABRICKS_SSH_CONFIG"'
+                    }
                     def paths = script.env.INIT_SCRIPTS ?
                         dbUtils.uploadFiles(script, script.env.INIT_SCRIPTS, initDir) : ''
                     script.withEnv(["INIT_SCRIPT_PATHS=$paths"]) {
@@ -148,6 +165,9 @@ Map run(script, dbUtils, Closure build, Closure test) {
                         cleanupFailed = true
                         throw cleanupError
                     } finally {
+                        if (sshConfigFile) {
+                            script.sh(returnStatus: true, script: 'rm -f -- "$DATABRICKS_SSH_CONFIG"')
+                        }
                         if (primaryError || retryable || cleanupFailed) {
                             printFailureSummary(script, stateFile, failureFile,
                                 cleanupFailed && !primaryError && !retryable ? 'cleanup' : operation,

@@ -148,6 +148,31 @@ def test_iceberg_delete_unpartitioned_table(format_version, spark_tmp_table_fact
     )
 
 
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@ignore_order(local=True)
+@allow_non_gpu('ReplaceDataExec', 'WriteDeltaExec', 'BatchScanExec', 'ColumnarToRowExec')
+@pytest.mark.parametrize('delete_mode,fallback_exec', [
+    pytest.param('copy-on-write', 'ReplaceDataExec', id='cow'),
+    pytest.param('merge-on-read', 'WriteDeltaExec', id='mor')
+])
+def test_iceberg_delete_encryption_fallback(spark_tmp_table_factory, delete_mode, fallback_exec):
+    base_table_name = get_full_table_name(spark_tmp_table_factory)
+    for suffix in ("_cpu", "_gpu"):
+        create_iceberg_table_with_data(
+            base_table_name + suffix,
+            data_gen_func=lambda spark: row_lineage_df(spark, length=128),
+            table_properties={"encryption.key-id": "test-key"},
+            delete_mode=delete_mode, format_version="3")
+
+    def delete_data(spark, table):
+        spark.sql(f"DELETE FROM {table} WHERE id % 2 = 0")
+
+    assert_gpu_fallback_write_sql(
+        delete_data, lambda spark, table: spark.table(table),
+        base_table_name, [fallback_exec], conf=iceberg_delete_v3_enabled_conf)
+
+
 @allow_non_gpu(
     "ReplaceDataExec", "WriteDeltaExec", "BatchScanExec", "ShuffleExchangeExec",
     "SortExec", "ProjectExec", "ColumnarToRowExec")

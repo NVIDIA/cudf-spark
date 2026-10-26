@@ -511,7 +511,8 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                     // upload log only in case of build failure
                     def guardWords = ["gitlab.*?\\.com", "urm.*?\\.com",
                                       "artifactory.*?\\.com", "sonar.*?\\.com",
-                                      "dbc.*?azuredatabricks\\.net", "adb.*?databricks\\.com"]
+                                      "dbc.*?azuredatabricks\\.net", "adb.*?databricks\\.com",
+                                      "(?i)\\S*?\\.nvidia\\.com"]
                     // Keep host/cloud/GPU identities in Jenkins, not the public log upload.
                     // An interrupted diagnostic block is redacted through the end of the log.
                     guardWords.add('(?s)Spark readiness: pre-test host diagnostics.*?' +

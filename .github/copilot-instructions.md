@@ -7,6 +7,22 @@ agent-actionable requirements from [CONTRIBUTING.md](../CONTRIBUTING.md) and
 documents on demand when more process detail is needed. Tool-specific
 instructions must not weaken the repository policy.
 
+## Shim compatibility review
+
+For shim/shared-caller or Spark/Databricks matrix changes, follow
+[check-shim-compatibility](../.agents/skills/check-shim-compatibility/SKILL.md).
+Read the `shim-compatibility` and automatic `shim-related-prs` advisory reports;
+verify head/base. Report confirmed gaps with file/symbol/profile and observed
+evidence. Inspect advisory matches before attributing a defect. If discovery
+failed or peers moved, state that limitation without invalidating the core
+combined-tree result. Separate base debt; Drafts/associations alone are not defects.
+Prefer exact-head `NEW_INTERACTION_FINDINGS` with profile/symbol/file evidence;
+inspect `COMBINATION_CONFLICT`, `INCOMPLETE` and `NOT_CHECKED` separately. Existing
+individual findings are not cross-PR regressions. No new static interaction
+findings is not compilation or runtime proof; stale evidence requires refresh.
+Use the read-only helper when possible;
+state missing evidence. Static success is not compilation; rerun stale reports.
+
 ## Cross-repo References
 
 When reviewing shim code or GPU operator implementations, cross-reference

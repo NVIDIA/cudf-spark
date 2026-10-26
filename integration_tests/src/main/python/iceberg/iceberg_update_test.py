@@ -148,6 +148,31 @@ def test_iceberg_update_unpartitioned_table_single_column(format_version, spark_
     )
 
 
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@ignore_order(local=True)
+@allow_non_gpu('ReplaceDataExec', 'WriteDeltaExec', 'BatchScanExec', 'ColumnarToRowExec')
+@pytest.mark.parametrize('update_mode,fallback_exec', [
+    pytest.param('copy-on-write', 'ReplaceDataExec', id='cow'),
+    pytest.param('merge-on-read', 'WriteDeltaExec', id='mor')
+])
+def test_iceberg_update_encryption_fallback(spark_tmp_table_factory, update_mode, fallback_exec):
+    base_table_name = get_full_table_name(spark_tmp_table_factory)
+    for suffix in ("_cpu", "_gpu"):
+        create_iceberg_table_with_data(
+            base_table_name + suffix,
+            data_gen_func=lambda spark: row_lineage_df(spark, length=128, with_value=True),
+            table_properties={"encryption.key-id": "test-key"},
+            update_mode=update_mode, format_version="3")
+
+    def update_data(spark, table):
+        spark.sql(f"UPDATE {table} SET v = v + 100 WHERE id % 2 = 0")
+
+    assert_gpu_fallback_write_sql(
+        update_data, lambda spark, table: spark.table(table),
+        base_table_name, [fallback_exec], conf=iceberg_update_v3_enabled_conf)
+
+
 @allow_non_gpu("ReplaceDataExec", "WriteDeltaExec", "BatchScanExec", "ColumnarToRowExec")
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)

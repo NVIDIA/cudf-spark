@@ -23,7 +23,7 @@ import org.apache.hadoop.mapreduce.task.TaskAttemptContextImpl
 
 import org.apache.spark.sql.rapids.{GpuFileFormatWriterBase, GpuWriteJobDescription}
 
-// Delta's DB-17.3 commit protocol casts partitioned task contexts to Databricks'
+// Delta's DBR 17.3 and 18.3 commit protocol casts partitioned task contexts to Databricks'
 // PartitionedTaskAttemptContextImpl. Use the same context for GPU partitioned writes
 // so parsePartitions sees the contract it expects.
 object GpuDeltaFileFormatWriter extends GpuFileFormatWriterBase {

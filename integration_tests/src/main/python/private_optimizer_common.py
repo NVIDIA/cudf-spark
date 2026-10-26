@@ -37,6 +37,8 @@ absent while preserving the same OFF-CPU vs ON-GPU result comparison.
 See ``private_optimizer_README.md`` for how to add a new rule module.
 """
 
+import re
+
 from asserts import assert_equal_with_local_sort
 from spark_session import with_cpu_session, with_gpu_session
 
@@ -116,5 +118,49 @@ def assert_rule_skipped(fn, on_conf, off_conf, marker, physical=False, required_
     for required_marker in required_on_markers:
         assert required_marker in on_plan, \
             "required marker '%s' missing from rule ON plan\n%s" % (required_marker, on_plan)
+
+    assert_equal_with_local_sort(cpu_rows, gpu_rows)
+
+
+_PLAN_VOLATILE_PATTERNS = (
+    (re.compile(r"#\d+L?"), "#"),
+    (re.compile(r"plan_id=\d+"), "plan_id=N"),
+    (re.compile(r"loreId=\d+"), "loreId=N"),
+    (re.compile(r"Statistics\([^)]*\)"), "Statistics"),
+)
+
+
+def _normalize_plan(plan):
+    """Strip expression/plan ids and runtime statistics so two runs of the same
+    query can be compared structurally."""
+    for pattern, replacement in _PLAN_VOLATILE_PATTERNS:
+        plan = pattern.sub(replacement, plan)
+    return plan
+
+
+def assert_rule_noop_on_gpu(fn, on_conf, off_conf, required_on_markers=(), physical=False):
+    """OFF-rule vs ON-rule GPU run for a runtime-specific no-op path where the
+    runtime can produce the rule's plan marker by itself.
+
+    Some runtimes apply an equivalent rewrite natively, so the marker cannot
+    discriminate a skipped rule from a fired one. Instead the ON-GPU plan must be
+    structurally identical to the OFF-GPU plan, and the OFF-CPU result must match
+    the ON-GPU result. Every required_on_markers entry must be present in the ON
+    plan to prove the test reached the expected shape.
+    """
+    cpu_rows, _ = with_cpu_session(
+        lambda s: collect_and_plan(s, fn, physical), conf=off_conf)
+    _, gpu_off_plan = with_gpu_session(
+        lambda s: collect_and_plan(s, fn, physical), conf=off_conf)
+    gpu_rows, gpu_on_plan = with_gpu_session(
+        lambda s: collect_and_plan(s, fn, physical), conf=on_conf)
+
+    for required_marker in required_on_markers:
+        assert required_marker in gpu_on_plan, \
+            "required marker '%s' missing from rule ON plan\n%s" % (
+                required_marker, gpu_on_plan)
+    assert _normalize_plan(gpu_on_plan) == _normalize_plan(gpu_off_plan), \
+        "rule ON changed the GPU plan, expected a no-op\nOFF:\n%s\nON:\n%s" % (
+            gpu_off_plan, gpu_on_plan)
 
     assert_equal_with_local_sort(cpu_rows, gpu_rows)

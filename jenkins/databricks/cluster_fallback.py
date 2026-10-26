@@ -26,6 +26,8 @@ import time
 
 import requests
 
+from clusterutils import ClusterUtils
+
 RETRYABLE_EXIT = 75
 START_TIMEOUT = 30 * 60
 SSH_ATTEMPTS = 6
@@ -99,7 +101,7 @@ def wait_for_driver(cluster_id, timeout=START_TIMEOUT):
         check_termination(info)
         print("Cluster %s: %s" % (cluster_id, info.get("state", "UNKNOWN")), flush=True)
         if info.get("state") == "RUNNING":
-            address = (info.get("driver") or {}).get("public_dns", "")
+            address = ClusterUtils.get_master_addr_from_json(info) or ""
             if re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9.-]*", address):
                 return address
         time.sleep(20)
@@ -110,10 +112,9 @@ def wait_for_driver(cluster_id, timeout=START_TIMEOUT):
 def wait_for_ssh(address, cluster_id):
     command = [
         "ssh", "-o", "BatchMode=yes", "-o", "ConnectionAttempts=1",
-        "-o", "ConnectTimeout=15", "-o", "StrictHostKeyChecking=no",
-        "-o", "UserKnownHostsFile=/dev/null", "-p", "2200",
-        "-i", os.environ["DATABRICKS_PRIVKEY"], "ubuntu@" + address, "true",
-    ]
+        "-o", "ConnectTimeout=15",
+    ] + ClusterUtils.get_ssh_options(os.environ["DATABRICKS_PRIVKEY"]) + [
+        "ubuntu@" + address, "true"]
     for attempt in range(SSH_ATTEMPTS):
         try:
             result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -126,7 +127,8 @@ def wait_for_ssh(address, cluster_id):
                 return
             # Auth, key/configuration errors and arbitrary remote exit codes are not retryable.
             transient = result.returncode == 255 and re.search(
-                r"ssh: connect to host \S+ port 2200: "
+                r"(?:ssh: connect to host \S+ port (?:22|2200): "
+                r"|channel \d+: open failed: connect failed: )"
                 r"(Connection timed out|Connection refused|No route to host)", result.stderr)
             if not transient:
                 raise PreparationError("SSH_READINESS_FAILED")
@@ -262,10 +264,9 @@ def readiness_command(state, command, **kwargs):
         raise PreparationError("INVALID_DRIVER_ADDRESS")
     return subprocess.run([
         "ssh", "-o", "BatchMode=yes", "-o", "ConnectionAttempts=1",
-        "-o", "ConnectTimeout=15", "-o", "StrictHostKeyChecking=no",
-        "-o", "UserKnownHostsFile=/dev/null", "-p", "2200",
-        "-i", os.environ["DATABRICKS_PRIVKEY"], "ubuntu@" + address, command,
-    ], text=True, timeout=60, check=True, **kwargs)
+        "-o", "ConnectTimeout=15",
+    ] + ClusterUtils.get_ssh_options(os.environ["DATABRICKS_PRIVKEY"]) + [
+        "ubuntu@" + address, command], text=True, timeout=60, check=True, **kwargs)
 
 
 def spark_readiness(path, operation):

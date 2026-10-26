@@ -23,13 +23,13 @@ from clusterutils import ClusterUtils
 
 def main():
     env = os.environ
-    target = env["DB_TYPE"]
-    if target not in {"aws", "azure3"}:
-        raise ValueError("Unsupported Databricks provider profile")
+    cloud = env["DATABRICKS_CLOUD"]
+    if cloud not in {"aws", "azure"}:
+        raise ValueError("Unsupported Databricks cloud")
     template = ClusterUtils.generate_create_templ(
         env["DATABRICKS_PUBKEY"], env["CLUSTER_NAME"], env["DATABRICKS_RUNTIME"],
         int(env["IDLE_TIMEOUT"]), int(env["NUM_WORKERS"]), env["DATABRICKS_DRIVER"],
-        env["DATABRICKS_WORKER"], "aws" if target == "aws" else "azure",
+        env["DATABRICKS_WORKER"], cloud,
         env.get("INIT_SCRIPT_PATHS", ""), env.get("DB_ZONE") or "auto", printLoc=sys.stderr)
     # run-tests.py forwards EXTRA_ENVS, not the Jenkins agent's process environment.
     test_env = dict(item.split("=", 1)
