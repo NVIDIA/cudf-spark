@@ -361,6 +361,27 @@ def test_ts_write_twice_fails_exception(spark_tmp_path, spark_tmp_table_factory)
     with_gpu_session(
             lambda spark : writeParquetNoOverwriteCatchException(spark, unary_op_df(spark, gen), data_path, table_name))
 
+# Spark 4.2.1 (SPARK-60387) replaces an existing table inside the CTAS instead of dropping it
+# in SaveAsV1TableCommand first.
+@pytest.mark.parametrize('partitioned', [False, True], ids=['unpartitioned', 'partitioned'])
+@pytest.mark.parametrize('external', [False, True], ids=['managed', 'external'])
+def test_save_as_table_overwrite_existing_table(spark_tmp_path, spark_tmp_table_factory,
+                                                external, partitioned):
+    table_name = spark_tmp_table_factory.get()
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+    def write(spark, start):
+        writer = spark.range(start, start + 5).selectExpr('id', 'id % 3 AS p') \
+            .coalesce(1).write.format('parquet').mode('overwrite')
+        if external:
+            writer = writer.option('path', data_path)
+        if partitioned:
+            writer = writer.partitionBy('p')
+        writer.saveAsTable(table_name)
+    with_cpu_session(lambda spark: write(spark, 0))
+    with_gpu_session(lambda spark: write(spark, 10))
+    rows = with_cpu_session(lambda spark: spark.table(table_name).orderBy('id').collect())
+    assert [(r['id'], r['p']) for r in rows] == [(i, i % 3) for i in range(10, 15)]
+
 @allow_non_gpu('DataWritingCommandExec,ExecutedCommandExec,WriteFilesExec')
 @pytest.mark.parametrize('write_options', [{"parquet.encryption.footer.key": "k1"},
                                            {"parquet.encryption.column.keys": "k2:a"},
