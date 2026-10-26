@@ -504,7 +504,7 @@ def assert_delta_row_tracking_dml(spark_tmp_path, dml_sql, conf,
     with_cpu_session(lambda spark: assert_gpu_and_cpu_latest_delta_log_equivalent(spark, data_path),
                      conf=conf)
 
-def _assert_oss_delta_40_merge_metadata_broadcasts(callback, captured_plans):
+def _assert_delta_metadata_broadcasts(callback, captured_plans):
     """Allow CPU broadcasts only for Delta's table-state/touched-file join."""
     subquery_expression_class = spark_jvm().java.lang.Class.forName(
         "org.apache.spark.sql.execution.ExecSubqueryExpression")
@@ -589,7 +589,7 @@ def _assert_oss_delta_40_merge_metadata_broadcasts(callback, captured_plans):
 def assert_rapids_delta_write(
         do_test, conf, required_gpu_classes=delta_write, require_same_plan=False,
         forbidden_cpu_fallback_classes=None, require_non_empty=False,
-        expected_command=None, expected_classes=None):
+        expected_command=None, expected_classes=None, check_metadata_broadcasts=False):
     """
     Validates that a Delta write operation executed on the GPU produces the expected execution plans.
     This function starts a plan capture mechanism using the Spark JVM's ExecutionPlanCaptureCallback,
@@ -616,6 +616,8 @@ def assert_rapids_delta_write(
         Additional GPU command or execution class that must be present in a captured plan.
     expected_classes : iterable of str, optional
         Additional GPU plan classes that must be present in a captured plan.
+    check_metadata_broadcasts : bool
+        Restrict allowed CPU broadcasts to Delta's table-state/touched-file metadata join.
 
     Returns
     -------
@@ -634,11 +636,12 @@ def assert_rapids_delta_write(
             assert any(
                 callback.contains(plan, expected_command) for plan in captured_plans), \
                 f"{expected_command} is not found in any captured plan"
-        if expected_command == "GpuMergeIntoCommand" and \
-                "BroadcastHashJoinExec" in get_non_gpu_allowed() and is_oss_delta_lake_40():
-            # OSS Delta 4.0 uses a CPU broadcast join to attach stats to the table-state
-            # metadata during DV MERGE. Keep the allowance confined to that metadata query.
-            _assert_oss_delta_40_merge_metadata_broadcasts(callback, captured_plans)
+        if check_metadata_broadcasts or (
+                expected_command == "GpuMergeIntoCommand" and is_oss_delta_lake_40() and
+                "BroadcastHashJoinExec" in get_non_gpu_allowed()):
+            # DV operations attach stats using a CPU table-state/touched-file join.
+            # Keep the allowance confined to that metadata query.
+            _assert_delta_metadata_broadcasts(callback, captured_plans)
         for cls in expected_classes or ():
             assert any(
                 callback.contains(plan, cls) for plan in captured_plans), \

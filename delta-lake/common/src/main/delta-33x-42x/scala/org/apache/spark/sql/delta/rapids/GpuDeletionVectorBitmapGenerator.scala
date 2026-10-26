@@ -53,7 +53,7 @@ private[rapids] object GpuDeletionVectorBitmapGenerator extends GpuDeltaCommandL
       condition: Column,
       nameToAddFileMap: Map[String, AddFile],
       operationName: String): Seq[TouchedFileWithDV] = {
-    recordDeltaOperation(txn.deltaLog, s"$operationName.findTouchedFiles") {
+    DeltaRuntimeShim33x.runDeltaOperation(txn.deltaLog, s"$operationName.findTouchedFiles") {
       val gpuTargetDf = DMLWithDeletionVectorsHelperShims.withGpuExecutionContext(
         spark, targetScan.dataFrame)
       val candidatesHaveDVs =
