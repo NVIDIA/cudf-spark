@@ -14,6 +14,8 @@
 
 import json
 import os
+from datetime import datetime as _datetime  # data_gen star-import rebinds datetime
+from zoneinfo import ZoneInfo
 import pyspark.sql.functions as f
 import pytest
 import re
@@ -2535,22 +2537,28 @@ def test_delta_invalid_partition_overwrite_mode_non_partitioned(spark_tmp_path):
     with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
 
 
-_dpo_timestamp_re = re.compile(r"^(\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d)(?:\.(\d+))?$")
+# Delta stores a timestamp partition as a UTC instant, e.g. 2020-01-01T00:00:00.000000Z
+_dpo_timestamp_re = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z$")
 _dpo_date_re = re.compile(r"^(\d{4})-(\d\d)-(\d\d)$")
 
-def _respell_dpo_partition_value(value, position):
+def _respell_dpo_partition_value(value, position, session_time_zone):
     """
     Return an equivalent but differently spelled Delta partition string. Timestamps rotate through
-    three spellings by `position`, so one table mixes several formats.
+    several spellings of the same instant by `position`, so one table mixes several formats.
     """
-    timestamp = _dpo_timestamp_re.match(value)
-    if timestamp:
-        day, time, fraction = timestamp.groups()
-        spelling = position % 3
-        if spelling == 0:  # 'T' separator instead of a space
-            return "{}T{}{}".format(day, time, "." + fraction if fraction else "")
-        if spelling == 1:  # fraction zero-padded to microseconds
-            return "{} {}.{}".format(day, time, (fraction or "").ljust(6, "0"))
+    if _dpo_timestamp_re.match(value):
+        instant = _datetime.fromisoformat(value.replace("Z", "+00:00"))
+        spelling = position % 4
+        if spelling == 0:  # UTC with the zero fraction dropped
+            return instant.strftime("%Y-%m-%dT%H:%M:%S") + (
+                ".{}".format(("%06d" % instant.microsecond).rstrip("0")) if instant.microsecond
+                else "") + "Z"
+        if spelling == 1:  # space separator and an explicit offset
+            return instant.strftime("%Y-%m-%d %H:%M:%S.%f") + "+00:00"
+        if spelling == 2:  # no zone: wall clock time in the session time zone
+            local = instant.astimezone(ZoneInfo(session_time_zone))
+            return local.strftime("%Y-%m-%d %H:%M:%S") + (
+                ".%06d" % local.microsecond if local.microsecond else "")
         return value  # unchanged
     date = _dpo_date_re.match(value)
     if date:
@@ -2563,34 +2571,45 @@ def _rewrite_dpo_partition_values(spark, data_path, new_value):
     """
     Rewrite every non-null AddFile partition string in the CPU and GPU table logs with
     `new_value(old_value, position)`, where `position` counts the values of one table in log
-    order, so both tables get identical rewrites. Returns the number of values rewritten per table.
+    order, so both tables get identical rewrites. Asserts that each table's log really changed.
     """
-    rewritten_per_table = []
+    # Use the Hadoop FileSystem API so the rewrite also works when --tmp_path is HDFS or S3.
+    jvm = spark.sparkContext._jvm
+    hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+    changed_per_table = []
     for side in ("CPU", "GPU"):
-        log_dir = "{}/{}/_delta_log".format(data_path, side)
+        log_dir = jvm.org.apache.hadoop.fs.Path("{}/{}/_delta_log".format(data_path, side))
+        fs = log_dir.getFileSystem(hadoop_conf)
         position = 0
-        for name in sorted(os.listdir(log_dir)):
-            log_file = os.path.join(log_dir, name)
-            if name.endswith(".crc"):  # checksums no longer match the edited log
-                os.remove(log_file)
+        changed = 0
+        for status in sorted(fs.listStatus(log_dir), key=lambda st: st.getPath().getName()):
+            log_file = status.getPath()
+            name = log_file.getName()
+            if name.endswith(".crc"):  # version checksums no longer match the edited log
+                fs.delete(log_file, False)
             elif name.endswith(".json"):
-                with open(log_file) as fin:
-                    actions = [json.loads(line) for line in fin if line.strip()]
+                actions = [json.loads(line) for line in
+                           spark.sparkContext.textFile(log_file.toString()).collect()
+                           if line.strip()]
                 for action in actions:
                     partition_values = action.get("add", {}).get("partitionValues", {})
                     for key, value in sorted(partition_values.items()):
                         if value is not None:
                             partition_values[key] = new_value(value, position)
+                            changed += partition_values[key] != value
                             position += 1
-                with open(log_file, "w") as fout:
-                    fout.write("\n".join(json.dumps(a) for a in actions) + "\n")
-        rewritten_per_table.append(position)
-    assert all(count > 0 for count in rewritten_per_table)
+                out = fs.create(log_file, True)
+                out.write(bytearray(("\n".join(json.dumps(a) for a in actions) + "\n").encode()))
+                out.close()
+        changed_per_table.append(changed)
+    assert all(count > 0 for count in changed_per_table), "log rewrite changed nothing"
     # DeltaLog caches the snapshot built before the log was edited.
     spark.sparkContext._jvm.org.apache.spark.sql.delta.DeltaLog.clearCache()
 
-def _respell_dpo_partition_values(spark, data_path):
-    _rewrite_dpo_partition_values(spark, data_path, _respell_dpo_partition_value)
+def _respell_dpo_partition_values(spark, data_path, session_time_zone):
+    _rewrite_dpo_partition_values(
+        spark, data_path,
+        lambda value, position: _respell_dpo_partition_value(value, position, session_time_zone))
 
 def _poison_dpo_partition_value(spark, data_path, bad_value):
     """Replace the first non-null partition string of each table with an unparseable one."""
@@ -2635,7 +2654,8 @@ def _dpo_normalization_test(spark_tmp_path, col_type, existing, replacement, con
             _dpo_df(spark, existing, col_type, "p").coalesce(1).write.format("delta") \
                 .mode("append").save(path)
     with_cpu_session(setup, conf=confs)
-    with_cpu_session(lambda spark: _respell_dpo_partition_values(spark, data_path), conf=confs)
+    with_cpu_session(lambda spark: _respell_dpo_partition_values(
+        spark, data_path, confs["spark.sql.session.timeZone"]), conf=confs)
     part_col = "p"
     if rename_partition_column:
         part_col = "p2"
@@ -2737,7 +2757,8 @@ def test_delta_dpo_unparseable_partition_value(spark_tmp_path, parse_values):
     # A partition value that cannot be parsed must not fail the write: Delta records telemetry
     # and compares the raw strings instead, so the CPU and GPU must both succeed and agree.
     with_cpu_session(lambda spark: overwrite(spark, data_path + "/CPU"), conf=confs)
-    with_gpu_session(lambda spark: overwrite(spark, data_path + "/GPU"), conf=confs)
+    # assert_rapids_delta_write fails if the Delta write falls back to the CPU.
+    assert_rapids_delta_write(lambda spark: overwrite(spark, data_path + "/GPU"), conf=confs)
     def read_rows(side):
         return with_cpu_session(
             lambda spark: read_delta_path(spark, data_path + "/" + side).sort("id", "p").collect(),
@@ -2768,7 +2789,8 @@ def test_delta_dpo_sql_insert_overwrite_multiple_partition_columns(spark_tmp_pat
                       "PARTITIONED BY (d, ts)".format(path))
             spark.sql("INSERT INTO delta.`{}` ".format(path) + select.format(rows))
     with_cpu_session(setup, conf=confs)
-    with_cpu_session(lambda spark: _respell_dpo_partition_values(spark, data_path), conf=confs)
+    with_cpu_session(lambda spark: _respell_dpo_partition_values(
+        spark, data_path, confs["spark.sql.session.timeZone"]), conf=confs)
 
     # Four replacement partitions match existing ones (including both null-bearing partitions)
     # and one is new. The (2020-01-01, 2020-01-02 12:30:00.5) partition is not replaced.
