@@ -575,9 +575,9 @@ def test_orc_write_column_name_with_dots(spark_tmp_path):
 def test_orc_do_not_lowercase_columns(spark_tmp_path):
     data_path = spark_tmp_path + "/ORC_DATA"
 
-    # The wording of the `is not exists` error message in Spark 4.x is unfortunate, but accurate:
+    # Spark 4.2 and DBR 18.3 correct the `is not exists` wording used by earlier Spark 4.x:
     # https://github.com/apache/spark/blob/4501285a49e4c0429c9cf2c105f044e1c8a93d21/python/pyspark/errors/error-conditions.json#L487
-    if is_spark_420_or_later():
+    if is_spark_420_or_later() or is_databricks_version_or_later(18, 3):
         expected_error_message = "Key `acol` does not exist."
     elif is_spark_400_or_later() or is_databricks_version_or_later(14, 3):
         expected_error_message = "Key `acol` is not exists."

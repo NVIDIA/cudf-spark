@@ -22,8 +22,10 @@ from data_gen import *
 from conftest import is_databricks_runtime
 from delta_lake_utils import *
 from marks import *
+from parquet_test_utils import assert_parquet_files_use_codec
 from parquet_write_test import parquet_write_gens_list, writer_confs
 from pyspark.sql.types import *
+from pyspark.sql.utils import AnalysisException
 from spark_session import *
 
 delta_write_gens = [x for sublist in parquet_write_gens_list for x in sublist]
@@ -52,7 +54,7 @@ def _physical_parquet_schema(spark, table):
     jvm = spark.sparkContext._jvm
     reader = jvm.org.apache.parquet.hadoop.ParquetFileReader.open(
         spark.sparkContext._jsc.hadoopConfiguration(),
-        jvm.org.apache.hadoop.fs.Path(file_path))
+        jvm.org.apache.hadoop.fs.Path(jvm.java.net.URI(file_path)))
     try:
         return reader.getFooter().getFileMetaData().getSchema().toString()
     finally:
@@ -197,6 +199,118 @@ def test_delta_write_round_trip_after_type_widening(
     # The row-level assertion above is the stable behavior check for this type-widening case.
     if not is_databricks173_or_later():
         with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_databricks173_or_later(), reason="DBR 17.3 Delta write AQE planning")
+@pytest.mark.parametrize("aqe_enabled", [False, True], ids=idfn)
+@pytest.mark.parametrize("empty_input", [False, True], ids=idfn)
+def test_delta_db173_path_write_aqe_gpu_stub(spark_tmp_path, aqe_enabled, empty_input):
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf, {
+        "spark.sql.adaptive.enabled": str(aqe_enabled).lower(),
+        "spark.sql.classic.shuffleDependency.fileCleanup.enabled": "true",
+        "spark.databricks.delta.optimizeWrite.enabled": "false",
+        "spark.databricks.delta.autoCompact.enabled": "false",
+    })
+    cpu_path = spark_tmp_path + "/CPU"
+    gpu_path = spark_tmp_path + "/GPU"
+    source_path = spark_tmp_path + "/SOURCE"
+    row_count = 0 if empty_input else 4096
+    # Parquet reads provide nullable columns, matching GPU output nullability even when
+    # Spark's test-mode query-planning validation is enabled.
+    with_cpu_session(
+        lambda spark: spark.range(row_count).selectExpr(
+            "id", "CAST(id % 4 AS INT) AS part", "concat('value-', id) AS value")
+            .write.parquet(source_path), conf=conf)
+
+    def write_delta(spark, path):
+        spark.read.parquet(source_path).repartition(4, "part").write.format("delta") \
+            .option("delta.enableDeletionVectors", "false").save(path)
+
+    with_cpu_session(lambda spark: write_delta(spark, cpu_path), conf=conf)
+    # Inspect the write's own AQE context so metadata queries cannot satisfy these checks.
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        with_gpu_session(lambda spark: write_delta(spark, gpu_path), conf=conf)
+        plans = callback.getResultsWithTimeout(10000)
+        assert len(plans) > 0, "No execution plans captured for Delta write"
+        writes = [node for plan in plans for node in collect_plan_nodes(plan)
+                  if node.getClass().getSimpleName() == "GpuRapidsDeltaWriteExec"]
+        assert writes, "GpuRapidsDeltaWriteExec was not executed"
+        # Default capture must still count one write once; final writer plans are opt-in.
+        assert len(writes) == 1, "Default capture recorded the same Delta write twice"
+        assert not any(callback.didFallBack(plan, "RapidsDeltaWriteExec") for plan in plans), \
+            "Delta write used CPU RapidsDeltaWriteExec"
+        if aqe_enabled:
+            adaptive_plans = [node for write in writes for node in collect_plan_nodes(write)
+                              if node.getClass().getSimpleName() == "AdaptiveSparkPlanExec"]
+            if not empty_input:
+                assert adaptive_plans, "Delta write did not execute an adaptive child"
+            for adaptive in adaptive_plans:
+                assert adaptive.context().qe().shuffleCleanupMode().toString() == \
+                    "RemoveShuffleFiles", "Delta write did not preserve shuffle cleanup mode"
+    finally:
+        callback.endCapture()
+
+    def read_rows(spark, path):
+        return [tuple(row) for row in spark.read.format("delta").load(path)
+                .orderBy("id").collect()]
+
+    cpu_rows = with_cpu_session(lambda spark: read_rows(spark, cpu_path), conf=conf)
+    gpu_rows = with_cpu_session(lambda spark: read_rows(spark, gpu_path), conf=conf)
+    assert_equal(cpu_rows, gpu_rows)
+    assert_equal(gpu_rows, [(i, i % 4, f"value-{i}") for i in range(row_count)])
+    for path in (cpu_path, gpu_path):
+        assert int(get_last_operation_metrics(path)["numOutputRows"]) == row_count
+
+
+@allow_non_gpu("RapidsDeltaWriteExec", *delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_databricks173_or_later(), reason="DBR 17.3 Delta write AQE planning")
+@pytest.mark.parametrize("aqe_enabled", [False, True], ids=idfn)
+def test_delta_db173_path_write_metadata_query_fallback(spark_tmp_path, aqe_enabled):
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf, {
+        "spark.sql.adaptive.enabled": str(aqe_enabled).lower(),
+        "spark.databricks.delta.optimizeWrite.enabled": "false",
+        "spark.databricks.delta.autoCompact.enabled": "false",
+    })
+    source_path = spark_tmp_path + "/SOURCE"
+    cpu_path = spark_tmp_path + "/CPU"
+    gpu_path = spark_tmp_path + "/GPU"
+    with_cpu_session(
+        lambda spark: spark.range(1).coalesce(1).write.format("delta")
+            .option("delta.enableDeletionVectors", "false").save(source_path), conf=conf)
+
+    def write_metadata(spark, path):
+        # Reading Delta log JSON deliberately triggers whole-plan metadata fallback.
+        spark.read.schema("add STRUCT<path: STRING>") \
+            .json(source_path + "/_delta_log/*.json").select("add.path") \
+            .where(f.col("path").isNotNull()).repartition(2).write.format("delta") \
+            .option("delta.enableDeletionVectors", "false").save(path)
+
+    with_cpu_session(lambda spark: write_metadata(spark, cpu_path), conf=conf)
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        with_gpu_session(lambda spark: write_metadata(spark, gpu_path), conf=conf)
+        plans = callback.getResultsWithTimeout(10000)
+        assert len(plans) > 0, "No execution plans captured for metadata write"
+        assert any(callback.didFallBack(plan, "RapidsDeltaWriteExec") for plan in plans), \
+            "Metadata write did not retain CPU RapidsDeltaWriteExec"
+        assert not any(callback.contains(plan, "GpuRapidsDeltaWriteExec") for plan in plans), \
+            "Metadata write incorrectly converted its Delta write placeholder to GPU"
+    finally:
+        callback.endCapture()
+
+    def read_rows(spark, path):
+        return spark.read.format("delta").load(path).collect()
+
+    cpu_rows = with_cpu_session(lambda spark: read_rows(spark, cpu_path), conf=conf)
+    gpu_rows = with_cpu_session(lambda spark: read_rows(spark, gpu_path), conf=conf)
+    assert_equal(cpu_rows, gpu_rows)
+    assert len(gpu_rows) == 1 and gpu_rows[0].path, "Expected one nonempty add-file path"
 
 
 @allow_non_gpu(delta_write_fallback_allow, *delta_meta_allow)
@@ -1013,6 +1127,217 @@ def test_delta_rtas_truncate_capability(spark_tmp_table_factory):
     assert [row.id for row in gpu_rows] == list(range(10, 20))
 
 
+@allow_non_gpu('DataWritingCommandExec', 'WriteFilesExec', *delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(is_databricks_runtime() or not is_spark_400_or_later(),
+                    reason="Requires OSS Delta Lake V1 fallback writers on Spark 4.x")
+@pytest.mark.parametrize("overwrite", [False, True], ids=["append", "overwrite"])
+@pytest.mark.parametrize("use_path, cache_table, partitioned", [
+    (False, False, False),
+    (True, False, False),
+    (False, True, False),
+    (False, False, True),
+    (True, False, True),
+], ids=["catalog", "path", "cached-catalog", "partitioned-catalog", "partitioned-path"])
+def test_delta_sql_insert_v1_write(spark_tmp_table_factory, spark_tmp_path, overwrite,
+                                   use_path, cache_table, partitioned):
+    cpu_table = spark_tmp_table_factory.get()
+    gpu_table = spark_tmp_table_factory.get()
+    confs = copy_and_update(writer_confs, delta_writes_enabled_conf,
+                           {"spark.sql.sources.partitionOverwriteMode": "STATIC"})
+
+    def target(table, suffix):
+        return f"delta.`{spark_tmp_path}/{suffix}`" if use_path else table
+
+    cpu_target = target(cpu_table, "CPU")
+    gpu_target = target(gpu_table, "GPU")
+    initial_rows = [(-1, "initial", 0), (-2, "untouched", 1)] if partitioned else [(-1, "initial")]
+
+    def create_initial_tables(spark):
+        schema = "id BIGINT, payload STRING, part INT" if partitioned else "id BIGINT, payload STRING"
+        partition_clause = "PARTITIONED BY (part)" if partitioned else ""
+        values = "(-1L, 'initial', 0), (-2L, 'untouched', 1)" if partitioned else "(-1L, 'initial')"
+        for table in [cpu_target, gpu_target]:
+            spark.sql(f"CREATE TABLE {table} ({schema}) USING DELTA {partition_clause}")
+            spark.sql(f"INSERT INTO {table} VALUES {values}")
+
+    def insert_rows(spark, table):
+        mode = "OVERWRITE" if overwrite else "INTO"
+        partition_clause = "PARTITION (part = 0)" if partitioned else ""
+        spark.sql(
+            f"INSERT {mode} {table} {partition_clause} "
+            "SELECT id, CAST(id AS STRING) FROM range(1000)")
+
+    def read_rows(spark, table):
+        return spark.table(table).orderBy("id").collect()
+
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+
+    def assert_cached_scan(df):
+        plan = df._jdf.queryExecution().executedPlan()
+        assert any(callback.contains(plan, node) for node in
+                   ["InMemoryTableScanExec", "GpuInMemoryTableScanExec"])
+
+    def write_and_read(spark, table, capture_gpu):
+        try:
+            if cache_table:
+                # Keep materialization, write, and reads in one session: with_*_session clears caches.
+                spark.catalog.cacheTable(table)
+                cached_df = spark.table(table)
+                assert [tuple(row) for row in cached_df.orderBy("id").collect()] == initial_rows
+                assert spark.catalog.isCached(table)
+                assert_cached_scan(cached_df)
+
+            if capture_gpu:
+                callback.startCapture()
+                try:
+                    insert_rows(spark, table)
+                    plans = callback.getResultsWithTimeout(10000)
+                    expected_exec = ("GpuOverwriteByExpressionExecV1" if overwrite
+                                     else "GpuAppendDataExecV1")
+                    assert any(callback.contains(plan, expected_exec) for plan in plans), \
+                        f"{expected_exec} was not executed"
+                finally:
+                    callback.endCapture()
+            else:
+                insert_rows(spark, table)
+
+            rows = read_rows(spark, table)
+            if cache_table:
+                assert spark.catalog.isCached(table)
+                fresh_df = spark.table(table)
+                assert_cached_scan(fresh_df)
+                # Both a pre-write DataFrame and a fresh catalog lookup must see the new rows.
+                assert_equal(cached_df.orderBy("id").collect(), rows)
+            return rows
+        finally:
+            if cache_table:
+                spark.catalog.uncacheTable(table)
+
+    with_cpu_session(create_initial_tables, conf=confs)
+    cpu_rows = with_cpu_session(lambda spark: write_and_read(spark, cpu_target, False), conf=confs)
+    gpu_rows = with_gpu_session(lambda spark: write_and_read(spark, gpu_target, True), conf=confs)
+    assert_equal(cpu_rows, gpu_rows)
+    expected = [(i, str(i), 0) if partitioned else (i, str(i)) for i in range(1000)]
+    if not overwrite:
+        expected.extend(initial_rows)
+    elif partitioned:
+        expected.append((-2, "untouched", 1))
+    assert [tuple(row) for row in gpu_rows] == sorted(expected)
+
+
+@allow_non_gpu("OverwriteByExpressionExecV1", "DataWritingCommandExec", "WriteFilesExec",
+               *delta_meta_allow, delta_write_fallback_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 V2 writer option validation")
+@pytest.mark.parametrize("option_name, error", [
+    ("replaceUsing", "replaceUsing requires targetAlias"),
+    ("replaceOn", "Expected a Project node"),
+], ids=["replace-using", "replace-on"])
+def test_delta_v2_writer_replace_options_fallback(spark_tmp_table_factory, option_name, error):
+    cpu_table = spark_tmp_table_factory.get()
+    gpu_table = spark_tmp_table_factory.get()
+    confs = copy_and_update(writer_confs, delta_writes_enabled_conf)
+
+    def setup(spark):
+        for table in [cpu_table, gpu_table]:
+            spark.sql(f"CREATE TABLE {table} (id BIGINT, payload STRING) USING DELTA")
+            spark.sql(f"INSERT INTO {table} SELECT id, 'old' FROM range(4)")
+
+    def overwrite(spark, table):
+        replacement = spark.range(2, 6).selectExpr("id", "'new' AS payload")
+        if option_name == "replaceOn":
+            writer = (replacement.alias("source").writeTo(table)
+                      .option("targetAlias", "target")
+                      .option("replaceOn", "target.id = source.id"))
+        else:
+            writer = replacement.writeTo(table).option("replaceUsing", "id")
+        writer.overwrite(f.lit(True))
+
+    def attempt_overwrite(spark, table):
+        # Native Delta rejects these raw V2 options before modifying the table.
+        try:
+            overwrite(spark, table)
+        except Exception as exc:
+            return exc
+        return None
+
+    with_cpu_session(setup, conf=confs)
+    cpu_error = with_cpu_session(lambda spark: attempt_overwrite(spark, cpu_table), conf=confs)
+    assert error in str(cpu_error)
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        gpu_error = with_gpu_session(lambda spark: attempt_overwrite(spark, gpu_table), conf=confs)
+        plans = callback.getResultsWithTimeout(10000)
+    finally:
+        callback.endCapture()
+
+    def read(spark, table):
+        return spark.table(table).orderBy("id").collect()
+
+    cpu_rows = with_cpu_session(lambda spark: read(spark, cpu_table), conf=confs)
+    gpu_rows = with_cpu_session(lambda spark: read(spark, gpu_table), conf=confs)
+    assert_equal(cpu_rows, gpu_rows)
+    assert [tuple(row) for row in gpu_rows] == [(i, "old") for i in range(4)]
+    assert type(gpu_error) == type(cpu_error)
+    assert error in str(gpu_error)
+    assert any(callback.contains(plan, "OverwriteByExpressionExecV1") for plan in plans)
+    assert not any(callback.contains(plan, "GpuOverwriteByExpressionExecV1") for plan in plans)
+
+
+@allow_non_gpu("DataWritingCommandExec", "WriteFilesExec", *delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_oss_delta_lake_42_or_43(), reason="Delta 4.2+ V2 by-name insert")
+@pytest.mark.parametrize("overwrite", [False, True], ids=["append", "overwrite"])
+def test_delta_v2_by_name_insert_null_partition(spark_tmp_table_factory, overwrite):
+    cpu_table = spark_tmp_table_factory.get()
+    gpu_table = spark_tmp_table_factory.get()
+    null_defaults_key = (spark_jvm().org.apache.spark.sql.internal.SQLConf
+                         .USE_NULLS_FOR_MISSING_DEFAULT_COLUMN_VALUES().key())
+    confs = copy_and_update(writer_confs, delta_writes_enabled_conf, {null_defaults_key: "true"})
+
+    def setup(spark):
+        for table in [cpu_table, gpu_table]:
+            spark.sql(f"CREATE TABLE {table} (id BIGINT, payload STRING, part STRING) "
+                      "USING DELTA PARTITIONED BY (part)")
+            spark.sql(f"INSERT INTO {table} VALUES (0L, 'old', 'keep')")
+
+    def insert(spark, table):
+        # DataFrameWriterV2 matches by name; the nullable partition column is omitted.
+        writer = spark.range(2, 4).selectExpr("id", "CAST(id AS STRING) AS payload").writeTo(table)
+        if overwrite:
+            writer.overwrite(f.lit(True))
+        else:
+            writer.append()
+
+    with_cpu_session(setup, conf=confs)
+    with_cpu_session(lambda spark: insert(spark, cpu_table), conf=confs)
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        with_gpu_session(lambda spark: insert(spark, gpu_table), conf=confs)
+        plans = callback.getResultsWithTimeout(10000)
+        expected_exec = "GpuOverwriteByExpressionExecV1" if overwrite else "GpuAppendDataExecV1"
+        assert any(callback.contains(plan, expected_exec) for plan in plans)
+    finally:
+        callback.endCapture()
+
+    def read(spark, table):
+        return spark.table(table).orderBy("id").collect()
+
+    cpu_rows = with_cpu_session(lambda spark: read(spark, cpu_table), conf=confs)
+    gpu_rows = with_cpu_session(lambda spark: read(spark, gpu_table), conf=confs)
+    assert_equal(cpu_rows, gpu_rows)
+    expected = [(2, "2", None), (3, "3", None)]
+    if not overwrite:
+        expected.insert(0, (0, "old", "keep"))
+    assert [tuple(row) for row in gpu_rows] == expected
+
+
 @pytest.mark.parametrize("version, expected", [
     ("3.4.10", False),
     ("3.5.5", False),
@@ -1169,6 +1494,83 @@ def test_delta_overwrite_dynamic_by_name(spark_tmp_path):
     _assert_sql(data_path, confs, "INSERT OVERWRITE delta.`{path}`(data, data2, id) VALUES('b', 'd', 2L)")
     _assert_sql(data_path, confs, "INSERT OVERWRITE delta.`{path}`(data, data2, id) VALUES('c', 'e', 1)")
     with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_oss_delta_lake_42_or_43(),
+                    reason="INSERT BY NAME schema evolution requires Delta 4.2+")
+@pytest.mark.parametrize("columns", ["data, id, new_col", "new_col, data, id"])
+def test_delta_insert_by_name_schema_evolution(spark_tmp_path, columns):
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    src_path = spark_tmp_path + "/PARQUET_DATA"
+    confs = copy_and_update(_delta_confs,
+                           {"spark.databricks.delta.schema.autoMerge.enabled": "true"})
+    expected_schema = StructType([
+        StructField("id", LongType()),
+        StructField("data", StringType()),
+        StructField("new_col", IntegerType())])
+
+    def setup(spark):
+        gen_df(spark, [("id", LongGen(nullable=False, min_val=0)),
+                       ("data", string_gen), ("new_col", int_gen)], length=32) \
+            .coalesce(1).write.parquet(src_path)
+        _create_cpu_gpu_tables(spark, data_path, "id BIGINT, data STRING")
+        for path in [data_path + "/CPU", data_path + "/GPU"]:
+            spark.sql(f"INSERT INTO delta.`{path}` VALUES (-1L, 'existing')")
+
+    with_cpu_session(setup, conf=_delta_confs)
+
+    def insert(spark, path):
+        # DeltaAnalysis resolves BY NAME to AppendData; the existing V1 append writer handles it.
+        query = spark.sql(f"INSERT INTO delta.`{path}` BY NAME "
+                          f"SELECT {columns} FROM parquet.`{src_path}`")
+        assert query._jdf.queryExecution().analyzed().nodeName() == "AppendData"
+        query.collect()
+
+    def read_and_check(spark, path):
+        df = read_delta_path(spark, path)
+        assert df.schema == expected_schema
+        expected = spark.read.parquet(src_path).select("id", "data", "new_col").union(
+            spark.sql("SELECT -1L AS id, 'existing' AS data, CAST(NULL AS INT) AS new_col"))
+        assert_equal(df.orderBy("id", "data", "new_col").collect(),
+                     expected.orderBy("id", "data", "new_col").collect())
+        logs = read_delta_logs(spark, path + "/_delta_log/*.json")
+        metadata = [action["metaData"] for action in logs[max(logs)] if "metaData" in action]
+        assert len(metadata) == 1, "Schema evolution must commit a metadata action"
+        assert json.loads(metadata[0]["schemaString"]) == expected_schema.jsonValue()
+        return df
+
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        insert, read_and_check, data_path, conf=confs,
+        expected_command="GpuAppendDataExecV1")
+    with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path),
+                     conf=confs)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_42_or_43(),
+                    reason="INSERT BY NAME schema evolution requires Delta 4.2+")
+def test_delta_insert_by_name_schema_evolution_disabled(spark_tmp_path):
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    confs = copy_and_update(_delta_confs,
+                           {"spark.databricks.delta.schema.autoMerge.enabled": "false"})
+    with_cpu_session(
+        lambda spark: _create_cpu_gpu_tables(spark, data_path, "id BIGINT, data STRING"),
+        conf=confs)
+
+    def insert(spark, path):
+        with pytest.raises(AnalysisException) as error:
+            spark.sql(f"INSERT INTO delta.`{path}` BY NAME "
+                      "SELECT 'value' AS data, 42 AS new_col, 1L AS id").collect()
+        return error.value.getErrorClass()
+
+    cpu_error = with_cpu_session(lambda spark: insert(spark, data_path + "/CPU"), conf=confs)
+    gpu_error = with_gpu_session(lambda spark: insert(spark, data_path + "/GPU"), conf=confs)
+    assert cpu_error == gpu_error == "DELTA_METADATA_MISMATCH"
+
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
@@ -1443,20 +1845,22 @@ def test_delta_write_encryption_hadoopconfig_fallback(spark_tmp_path, write_opti
     finally:
         with_cpu_session(reset_hadoop_confs)
 
-@allow_non_gpu(*delta_meta_allow, delta_write_fallback_allow)
+@allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.parametrize('codec', ['gzip'])
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
-def test_delta_write_compression_fallback(spark_tmp_path, codec):
+def test_delta_write_gzip_compression(spark_tmp_path):
     data_path = spark_tmp_path + "/DELTA_DATA"
-    confs=copy_and_update(delta_writes_enabled_conf, {"spark.sql.parquet.compression.codec": codec})
-    assert_gpu_fallback_write(
-        lambda spark, path: unary_op_df(spark, int_gen).coalesce(1).write.format("delta").save(path),
+    confs=copy_and_update(delta_writes_enabled_conf, {"spark.sql.parquet.compression.codec": "gzip"})
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        lambda spark, path: spark.range(20000).selectExpr("id % 100 AS value").coalesce(1)
+            .write.format("delta").save(path),
         lambda spark, path: spark.read.format("delta").load(path),
         data_path,
-        delta_write_fallback_check,
-        conf=confs)
+        conf=confs,
+        expected_command="RapidsDeltaWrite")
+    with_cpu_session(lambda spark: assert_parquet_files_use_codec(
+        spark, spark.read.format("delta").load(data_path + '/GPU'), 'GZIP'), conf=confs)
 
 @allow_non_gpu(*delta_meta_allow, delta_write_fallback_allow)
 @delta_lake
@@ -2041,6 +2445,49 @@ def test_delta_write_partial_overwrite_replace_where(spark_tmp_path):
         conf=copy_and_update(writer_confs, delta_writes_enabled_conf))
     # Avoid checking delta log equivalence here. Using partition columns involves sorting, and
     # there's no guarantees on the task partitioning due to random sampling.
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_42_or_43(), reason="Requires Delta 4.2+ CDF writes")
+@pytest.mark.parametrize("operation", ["add_only", "remove_only"])
+def test_delta_cdf_non_data_changing_write(spark_tmp_path, operation):
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    conf = copy_and_update(_delta_confs, {
+        "spark.databricks.delta.autoCompact.enabled": "false",
+        "spark.databricks.delta.optimizeWrite.enabled": "false"
+    })
+
+    def data(spark):
+        return gen_df(spark, [("id", long_gen)], length=16).coalesce(1)
+
+    def setup_tables(spark):
+        for path in [data_path + "/CPU", data_path + "/GPU"]:
+            data(spark).write.format("delta").option("delta.enableChangeDataFeed", "true") \
+                .option("delta.enableDeletionVectors", "false").save(path)
+
+    def write(spark, path):
+        # dataChange=false is a caller assertion; these deliberately isolated commits
+        # exercise add-only/remove-only action handling, not logical rearrangement.
+        df = data(spark) if operation == "add_only" else data(spark).limit(0)
+        mode = "append" if operation == "add_only" else "overwrite"
+        df.write.format("delta").mode(mode).option("dataChange", "false").save(path)
+
+    with_cpu_session(setup_tables, conf=conf)
+    assert_gpu_and_cpu_writes_are_equal_collect(write, read_delta_path, data_path, conf=conf)
+
+    def check(spark):
+        cdf_results = []
+        for path in [data_path + "/CPU", data_path + "/GPU"]:
+            cdf_results.append(assert_delta_non_data_changing_commit(
+                spark, path, {"add"} if operation == "add_only" else {"remove"}))
+            assert spark.read.format("delta").load(path).count() == \
+                (32 if operation == "add_only" else 0)
+        assert_equal(*cdf_results)
+        assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path)
+
+    with_cpu_session(check, conf=conf)
 
 
 @allow_non_gpu(*delta_meta_allow, delta_write_fallback_allow)
@@ -2834,3 +3281,114 @@ def test_delta_selective_replace_on_expressions(spark_tmp_path, condition, aqe_e
         "spark.databricks.delta.insertReplaceOnOrUsing.materializeSource": materialize})
     assert_gpu_and_cpu_writes_are_equal_collect(overwrite, read_result, data_path, conf=conf)
     with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_databricks173_or_later(), reason="DBR 17.3 Delta write AQE planning")
+@pytest.mark.parametrize("operation,aqe_enabled,optimize_write", [
+    pytest.param("update_literal", True, False, id="update-literal"),
+    pytest.param("update_subquery", True, False, id="update-subquery"),
+    pytest.param("merge", True, True, id="merge-optimized"),
+    pytest.param("merge", True, False, id="merge-unoptimized"),
+    pytest.param("merge", False, True, id="merge-no-aqe"),
+])
+def test_delta_db173_dml_aqe_gpu_stub(
+        spark_tmp_path, operation, aqe_enabled, optimize_write):
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf, {
+        "spark.sql.adaptive.enabled": str(aqe_enabled).lower(),
+        "spark.sql.shuffle.partitions": "4",
+        "spark.databricks.delta.optimizeWrite.enabled": str(optimize_write).lower(),
+        "spark.databricks.delta.autoCompact.enabled": "false",
+        "spark.rapids.sql.command.UpdateCommand": "true",
+        "spark.rapids.sql.command.UpdateCommandEdge": "true",
+        "spark.rapids.sql.command.MergeIntoCommand": "true",
+        "spark.rapids.sql.command.MergeIntoCommandEdge": "true",
+        "spark.rapids.sql.delta.lowShuffleMerge.enabled": "false",
+    })
+    row_count = 4096
+    source_rows = 1024
+    source_path = spark_tmp_path + "/SOURCE"
+    cpu_path = spark_tmp_path + "/CPU"
+    gpu_path = spark_tmp_path + "/GPU"
+
+    def setup(spark):
+        spark.range(row_count).selectExpr(
+            "CAST(id AS INT) AS intF", "CAST(id % 32 AS BYTE) AS byteF") \
+            .write.parquet(source_path)
+        for path in (cpu_path, gpu_path):
+            spark.read.parquet(source_path).write.format("delta") \
+                .option("delta.enableDeletionVectors", "false").save(path)
+
+    # CPU setup is outside plan capture, so it cannot satisfy GPU command/write assertions.
+    with_cpu_session(setup, conf=conf)
+
+    def run_dml(spark, path):
+        source = f"(SELECT intF FROM parquet.`{source_path}` WHERE intF < {source_rows})"
+        if operation == "update_literal":
+            statement = f"UPDATE delta.`{path}` SET byteF = byteF + 1 WHERE intF % 7 = 0"
+        elif operation == "update_subquery":
+            statement = (f"UPDATE delta.`{path}` SET byteF = byteF + 1 "
+                         f"WHERE intF IN (SELECT intF FROM {source})")
+        else:
+            statement = (f"MERGE INTO delta.`{path}` t USING {source} s ON t.intF = s.intF "
+                         "WHEN MATCHED THEN UPDATE SET byteF = t.byteF + 1")
+        return spark.sql(statement).collect()
+
+    cpu_result = with_cpu_session(lambda spark: run_dml(spark, cpu_path), conf=conf)
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCaptureWithWritePlans()
+    try:
+        gpu_result = with_gpu_session(lambda spark: run_dml(spark, gpu_path), conf=conf)
+        plans = callback.getResultsWithTimeout(10000)
+        command = "GpuMergeIntoCommand" if operation == "merge" else "GpuUpdateCommand"
+        assert any(callback.contains(plan, command) for plan in plans), \
+            f"{command} was not executed"
+        writes = [node for plan in plans for node in collect_plan_nodes(plan)
+                  if node.getClass().getSimpleName() == "GpuRapidsDeltaWriteExec"]
+        assert writes, "DML did not execute GpuRapidsDeltaWriteExec"
+        if operation == "merge":
+            assert any(callback.contains(plan, "GpuRapidsProcessDeltaMergeJoinExec")
+                       for plan in plans), "MERGE did not execute its GPU join processor"
+        assert not any(callback.didFallBack(plan, "RapidsDeltaWriteExec") for plan in plans), \
+            "DML write used CPU RapidsDeltaWriteExec"
+        # The writer adds optimized exchanges after QueryExecution prepares its stub.
+        # Inspect the captured final writer tree, then require a task-updated metric so
+        # merely constructing an unused exchange cannot satisfy this assertion.
+        writer_plans = [plan for plan in plans
+                        if callback.contains(plan, "GpuRapidsDeltaWriteExec")]
+        optimized_exchanges = [node for plan in writer_plans
+                               for node in collect_plan_nodes(plan)
+                               if node.getClass().getSimpleName() ==
+                               "GpuOptimizeWriteExchangeExec"]
+        assert bool(optimized_exchanges) == optimize_write, \
+            "DML did not use the requested GPU optimized-write plan"
+        assert not any(callback.didFallBack(plan, "OptimizeWriteExchangeExec")
+                       for plan in writer_plans), "DML used CPU optimized-write exchange"
+        for exchange in optimized_exchanges:
+            assert exchange.metrics().apply("numPartitions").value() > 0, \
+                "GPU optimized-write exchange did not execute any read partitions"
+        if aqe_enabled and operation != "update_literal":
+            assert any(node.getClass().getSimpleName() == "AdaptiveSparkPlanExec"
+                       for write in writes for node in collect_plan_nodes(write)), \
+                "Shuffled DML write did not execute an adaptive child"
+    finally:
+        callback.endCapture()
+
+    assert_equal(cpu_result, gpu_result)
+    changed_rows = (row_count + 6) // 7 if operation == "update_literal" else source_rows
+    assert gpu_result[0][0] == changed_rows
+
+    def read_rows(spark, path):
+        return [tuple(row) for row in spark.read.format("delta").load(path)
+                .orderBy("intF").collect()]
+
+    cpu_rows = with_cpu_session(lambda spark: read_rows(spark, cpu_path), conf=conf)
+    gpu_rows = with_cpu_session(lambda spark: read_rows(spark, gpu_path), conf=conf)
+    assert_equal(cpu_rows, gpu_rows)
+    assert_equal(gpu_rows, [(i, i % 32 + int(
+        i % 7 == 0 if operation == "update_literal" else i < source_rows))
+        for i in range(row_count)])
+    metric = "numTargetRowsUpdated" if operation == "merge" else "numUpdatedRows"
+    for path in (cpu_path, gpu_path):
+        assert int(get_last_operation_metrics(path)[metric]) == changed_rows

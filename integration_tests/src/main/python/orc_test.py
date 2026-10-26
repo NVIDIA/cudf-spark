@@ -1332,6 +1332,9 @@ def test_orc_with_null_column(spark_tmp_path, reader_confs):
 
 @ignore_order
 @large_data_test
+# AQE may replace an empty query subtree with row-based EmptyRelationExec.
+# Allow this empty leaf while retaining GPU validation for other operators.
+@allow_non_gpu("EmptyRelationExec")
 @pytest.mark.parametrize("reader_confs", reader_opt_confs, ids=idfn)
 def test_orc_with_null_column_with_1m_rows(spark_tmp_path, reader_confs):
     data_path = spark_tmp_path + "/ORC_DATA"
@@ -1360,7 +1363,8 @@ def test_orc_with_null_column_with_1m_rows(spark_tmp_path, reader_confs):
         assert_gpu_and_cpu_are_equal_sql(
             lambda spark: spark.read.orc(gpu_file_path),
             "my_large_table",
-            sql)
+            sql,
+            conf=all_confs)
 
 
 #
@@ -1419,7 +1423,8 @@ def test_orc_not_support_timestamp_ltz(std_input_path):
     """
     data_path = f"{std_input_path}/timestamp_ltz.orc"
     expected_error_message = "timestamp with local time zone" \
-        if is_spark_420_or_later() else "ParseException"
+        if is_spark_420_or_later() or is_databricks_version_or_later(18, 3) \
+        else "ParseException"
     assert_gpu_and_cpu_error(lambda spark: spark.read.orc(data_path).collect(),
                              conf={},
                              error_message=expected_error_message)

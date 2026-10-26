@@ -88,6 +88,13 @@ invoke_shuffle_integration_test() {
         return 1
     fi
 
+    if [[ "$(printf '%s\n' "4.2.0" "${spark_ver%-SNAPSHOT}" | sort -V | head -n1)" == "4.2.0" ]]; then
+        # Spark 4.2 turns on shuffle checksums that the RAPIDS shuffle does not compute yet.
+        # Turn them off so these smoke tests use the RAPIDS shuffle. Remove once it computes them.
+        env_vars+="PYSP_TEST_spark_sql_shuffle_orderIndependentChecksum_enabled=false "
+        env_vars+="PYSP_TEST_spark_sql_shuffle_orderIndependentChecksum_enableFullRetryOnMismatch=false "
+    fi
+
     # Execute the test
     eval "$env_vars $pyspark_script -m shuffle_test"
 }

@@ -168,7 +168,7 @@ object GpuCpuBridgeThreadPool extends Logging {
    * Get the shared thread pool, creating it if necessary.
    * The pool size is based on configured task slots rather than CPU cores.
    * 
-   * @throws IllegalStateException if the thread pool has been shut down
+   * @throws java.lang.IllegalStateException if the thread pool has been shut down
    */
   def getThreadPool: ThreadPoolExecutor = {
     if (hasShutdown) {

@@ -283,12 +283,22 @@ def assert_delta_history_equal(conf, cpu_table, gpu_table):
     assert_equal(cpu_history, gpu_history)
 
 
-def assert_delta_log_json_equivalent(filename, c_json, g_json):
+def assert_delta_log_json_equivalent(filename, c_json, g_json,
+                                     liquid_metadata_id_maps=None):
     assert c_json.keys() == g_json.keys(), "Delta log {} has mismatched keys:\nCPU: {}\nGPU: {}".format(filename, c_json, g_json)
+    if liquid_metadata_id_maps is None:
+        liquid_metadata_id_maps = ({}, {})
     def fixup_path(d):
         """Modify the 'path' value to remove random IDs in the pathname"""
         parts = d["path"].split("-")
         d["path"] = "-".join(parts[0:1]) + ".".join(parts[-1].split(".")[-2:])
+    def fixup_liquid_metadata_id(c_tags, g_tags):
+        """Remap table-specific liquid IDs while retaining their grouping."""
+        for tags, mapping in zip((c_tags, g_tags), liquid_metadata_id_maps):
+            if "LIQUID_METADATA_ID" in tags:
+                metadata_id = tags["LIQUID_METADATA_ID"]
+                tags["LIQUID_METADATA_ID"] = mapping.setdefault(
+                    metadata_id, "liquid-metadata-id-{}".format(len(mapping)))
     def del_keys(key_list, c_val, g_val):
         for key in key_list:
             c_val.pop(key, None)
@@ -312,6 +322,7 @@ def assert_delta_log_json_equivalent(filename, c_json, g_json):
         # Strip out the values that are expected to be different
         c_tags = c_val.get("tags", {})
         g_tags = g_val.get("tags", {})
+        fixup_liquid_metadata_id(c_tags, g_tags)
         del_keys(["INSERTION_TIME", "MAX_INSERTION_TIME", "MIN_INSERTION_TIME", "ZCUBE_ID",
                   "compactedInto", "optimizeCommandId"], c_tags, g_tags)
         if key == "metaData":
@@ -378,14 +389,17 @@ def assert_delta_logs_at_paths_equivalent(spark, cpu_path, gpu_path):
     assert len(cpu_log_data) == len(gpu_log_data), "Different number of Delta log files:\nCPU: {}\nGPU: {}".format(cpu_log_data, gpu_log_data)
     cpu_logs_data = [ (os.path.basename(x), y) for x, y in cpu_log_data if x.endswith(".json") ]
     gpu_logs_dict = dict([ (os.path.basename(x), y) for x, y in gpu_log_data if x.endswith(".json") ])
-    for file, cpu_json_data in cpu_logs_data:
+    # Keep ID equivalence consistent across the complete, chronological history.
+    liquid_metadata_id_maps = ({}, {})
+    for file, cpu_json_data in sorted(cpu_logs_data):
         gpu_json_data = gpu_logs_dict.get(file)
         assert gpu_json_data, "CPU Delta log file {} is missing from GPU Delta logs".format(file)
         cpu_jsons = _decode_jsons(cpu_json_data)
         gpu_jsons = _decode_jsons(gpu_json_data)
         assert len(cpu_jsons) == len(gpu_jsons), "Different line counts in {}:\nCPU: {}\nGPU: {}".format(file, cpu_json_data, gpu_json_data)
         for cpu_json, gpu_json in zip(cpu_jsons, gpu_jsons):
-            assert_delta_log_json_equivalent(file, cpu_json, gpu_json)
+            assert_delta_log_json_equivalent(
+                file, cpu_json, gpu_json, liquid_metadata_id_maps)
 
 def assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path):
     assert_delta_logs_at_paths_equivalent(spark, data_path + "/CPU", data_path + "/GPU")
@@ -417,21 +431,48 @@ def assert_gpu_and_cpu_latest_delta_log_equivalent(spark, data_path):
     gpu_jsons = gpu_logs[latest_file]
     assert len(cpu_jsons) == len(gpu_jsons), "Different line counts in {}:\nCPU: {}\nGPU: {}".format(
         latest_file, cpu_jsons, gpu_jsons)
+    liquid_metadata_id_maps = ({}, {})
     for cpu_json, gpu_json in zip(cpu_jsons, gpu_jsons):
-        assert_delta_log_json_equivalent(latest_file, cpu_json, gpu_json)
+        assert_delta_log_json_equivalent(
+            latest_file, cpu_json, gpu_json, liquid_metadata_id_maps)
 
 def read_delta_path(spark, path):
     return spark.read.format("delta").load(path)
 
-def read_delta_path_with_cdf(spark, path):
+def read_delta_path_with_cdf(spark, path, starting_version=0):
     df = spark.read.format("delta") \
-        .option("readChangeFeed", "true").option("startingVersion", 0) \
+        .option("readChangeFeed", "true").option("startingVersion", starting_version) \
         .load(path)
     assert "_change_type" in df.columns
     assert "_commit_version" in df.columns
     assert "_commit_timestamp" in df.columns
     # Drop the commit timestamp column since it will differ between CPU and GPU
     return df.drop("_commit_timestamp")
+
+def assert_delta_non_data_changing_commit(spark, path, expected_file_actions):
+    """Check a commit after initial inserts and return its timestamp-free CDF history."""
+    logs = read_delta_logs(spark, path + "/_delta_log/*.json")
+    latest_file = sorted(logs)[-1]
+    version = int(latest_file.split(".")[0])
+    assert version > 0, "Expected a new non-data-changing commit"
+    actions = logs[latest_file]
+    assert not any("cdc" in action for action in actions), "Unexpected CDC file"
+    file_actions = [(kind, action[kind]) for action in actions
+                    for kind in ("add", "remove") if kind in action]
+    assert {kind for kind, _ in file_actions} == set(expected_file_actions)
+    assert all(action["dataChange"] is False for _, action in file_actions)
+
+    # Like Delta's CDCReaderSuite, only the initial inserts should appear in CDF.
+    initial = spark.read.format("delta").option("versionAsOf", 0).load(path) \
+        .selectExpr("*", "'insert' AS _change_type", "0L AS _commit_version")
+    cdf = read_delta_path_with_cdf(spark, path)
+    cdf_rows = cdf.sort(cdf.columns).collect()
+    assert_equal(initial.sort(initial.columns).collect(), cdf_rows)
+    commit_cdf = spark.read.format("delta").option("readChangeFeed", "true") \
+        .option("startingVersion", version).option("endingVersion", version).load(path)
+    assert commit_cdf.count() == 0, "Non-data-changing commit produced CDF rows"
+    return cdf_rows
+
 
 def schema_to_ddl(spark, schema):
     return spark.sparkContext._jvm.org.apache.spark.sql.types.DataType.fromJson(schema.json()).toDDL()
@@ -637,8 +678,10 @@ def assert_rapids_delta_write(
                 callback.contains(plan, expected_command) for plan in captured_plans), \
                 f"{expected_command} is not found in any captured plan"
         if check_metadata_broadcasts or (
-                expected_command == "GpuMergeIntoCommand" and is_oss_delta_lake_40() and
-                "BroadcastHashJoinExec" in get_non_gpu_allowed()):
+                expected_command and expected_command.startswith(
+                    ("GpuMergeIntoCommand", "GpuDeleteCommand", "GpuUpdateCommand")) and
+                "BroadcastHashJoinExec" in get_non_gpu_allowed() and
+                (is_oss_delta_lake_40() or is_oss_delta_lake_42_or_43())):
             # DV operations attach stats using a CPU table-state/touched-file join.
             # Keep the allowance confined to that metadata query.
             _assert_delta_metadata_broadcasts(callback, captured_plans)

@@ -33,13 +33,13 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
  * Python runner for Window UDFs in Spark 4.1.x.
- * 
+ *
  * In Spark 4.1.x, the Python worker uses GroupPandasUDFSerializer for SQL_WINDOW_AGG_PANDAS_UDF,
  * which expects the grouped protocol:
  *   - Send 1 before each batch to indicate more data is coming
  *   - Create a new Arrow Stream for each batch
  *   - Send 0 to indicate end of data
- * 
+ *
  * This is different from earlier Spark versions which used ArrowStreamPandasUDFSerializer
  * that didn't require the 1/0 markers.
  */
@@ -53,6 +53,8 @@ class GpuWindowArrowPythonRunner(
     batchSize: Long,
     override val pythonOutSchema: StructType,
     argNames: Option[Array[Array[Option[String]]]] = None,
+    private[shims] val udfLogMaxEntries: Int = 0,
+    private[shims] val udfLogLevel: String = "WARNING",
     jobArtifactUUID: Option[String] = None)
   extends GpuBasePythonRunner[ColumnarBatch](funcs.map(_._1), evalType, argOffsets,
     jobArtifactUUID) with GpuArrowPythonOutput with GpuPythonRunnerCommon {
@@ -67,7 +69,8 @@ class GpuWindowArrowPythonRunner(
 
       val arrowWriter = new GpuArrowPythonWriter(pythonInSchema, batchSize) {
         override protected def writeUDFs(dataOut: DataOutputStream): Unit = {
-          WritePythonUDFUtils.writeUDFs(dataOut, funcs, argOffsets, argNames)
+          WritePythonUDFUtils.writeUDFs(dataOut, funcs, argOffsets, argNames,
+            udfLogMaxEntries = udfLogMaxEntries, udfLogLevel = udfLogLevel)
         }
       }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -58,8 +58,8 @@ object AstUtil {
    * @param condition to be split if needed
    * @param left attributions from left child
    * @param right attributions from right child
-   * @return a tuple of [[Expression]] for remained expressions, List of [[NamedExpression]] for
-   *         left child if any, List of [[NamedExpression]] for right child if any
+   * @return a tuple of `Expression` for remained expressions, List of `NamedExpression` for
+   *         left child if any, List of `NamedExpression` for right child if any
    */
   def extractNonAstFromJoinCond(condition: Option[BaseExprMeta[_]],
                                 left: AttributeSeq, right: AttributeSeq):

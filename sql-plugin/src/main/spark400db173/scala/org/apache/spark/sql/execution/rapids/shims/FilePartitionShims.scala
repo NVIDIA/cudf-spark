@@ -16,13 +16,36 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark": "400db173"}
+{"spark": "410db183"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.execution.rapids.shims
 
-import org.apache.spark.sql.execution.PartitionedFileUtil
+import com.nvidia.spark.rapids.shims.FileScanPartitionsHelper
+
+import org.apache.spark.sql.execution.{FileSourceScanExec, PartitionedFileUtil}
 import org.apache.spark.sql.execution.datasources._
+import org.apache.spark.sql.rapids.GpuFileSourceScanExec
 
 object FilePartitionShims extends SplitFiles {
+  def getCsvPartitions(
+      template: FileSourceScanExec,
+      scan: GpuFileSourceScanExec): Seq[FilePartition] = {
+    val cpuScan = template.copy(
+      output = scan.originalOutput,
+      requiredSchema = scan.requiredSchema,
+      partitionFilters = scan.partitionFilters,
+      optionalBucketSet = scan.optionalBucketSet,
+      optionalNumCoalescedBuckets = scan.optionalNumCoalescedBuckets,
+      dataFilters = scan.dataFilters,
+      disableBucketedScan = scan.disableBucketedScan)
+    cpuScan.copyTagsFrom(template)
+    val partitions = FileScanPartitionsHelper.getPartitions(cpuScan).toSeq
+    scan.updateDriverMetrics(cpuScan.driverMetrics.map { case (name, metric) =>
+      name -> metric.value
+    }.toMap)
+    partitions
+  }
+
   def getPartitions(selectedPartitions: Array[PartitionDirectory]): Array[PartitionedFile] = {
     selectedPartitions.flatMap { p =>
       p.files.map { f =>

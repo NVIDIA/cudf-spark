@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,12 +25,23 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.catalyst.csv
 
+import java.nio.charset.StandardCharsets
+
 import org.apache.spark.sql.catalyst.util.DateFormatter
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.types.Metadata
 
 object GpuCsvUtils {
+  def csvLineToParse(line: Array[Byte], offset: Int, len: Int,
+      options: CSVOptions, normalizedNewline: Char): String =
+    new String(line, offset, len, StandardCharsets.UTF_8)
+
   def dateFormatInRead(options: CSVOptions): String =
     options.dateFormatInRead.getOrElse(DateFormatter.defaultPattern)
+
+  // Follow vanilla Spark's format-selection path, without consulting column metadata.
+  def dateFormatInRead(options: CSVOptions, metadata: Metadata): Option[String] =
+    options.dateFormatInRead
 
   def timestampFormatInRead(options: CSVOptions): String = options.timestampFormatInRead.getOrElse(
     if (SQLConf.get.legacyTimeParserPolicy == SQLConf.LegacyBehaviorPolicy.LEGACY) {
@@ -40,4 +51,7 @@ object GpuCsvUtils {
     })
 
   def enableDateTimeParsingFallback(options: CSVOptions): Boolean = false
+
+  // Spark 3.3 always retries stringToDate after a CSV date formatter failure.
+  def enableDateParsingFallback(options: CSVOptions): Boolean = true
 }

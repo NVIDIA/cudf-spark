@@ -377,7 +377,7 @@ object SerializedTableColumn {
 
 /**
  * Serializer instance for serializing `ColumnarBatch`s for use during shuffle with
- * [[KudoSerializer]]
+ * `KudoSerializer`
  * @param metrics map of GpuMetric contains serializer specific metrics
  * @param dataTypes data types of the columns in the batch
  * @param measureBufferCopyTime whether to measure the buffer copy time
@@ -660,7 +660,7 @@ private class KudoGpuSerializerInstance(
 
 /**
  * A special `ColumnVector` that describes a serialized table read from shuffle using
- * [[KudoSerializer]].
+ * `KudoSerializer`.
  *
  * This appears in a `ColumnarBatch` to pass serialized tables to [[GpuShuffleCoalesceExec]]
  * which should always appear in the query plan immediately after a shuffle.

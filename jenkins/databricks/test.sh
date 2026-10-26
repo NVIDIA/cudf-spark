@@ -63,6 +63,27 @@ source jenkins/databricks/setup.sh
 # Init common variables like SPARK_HOME, spark configs
 source jenkins/databricks/common_vars.sh
 
+# TODO(#16317): Remove readiness-only mode when DBR 18.3 integration tests are enabled.
+# Keep the permanent startup checks that run before product tests.
+# The startup hook identifies CI callers; manual runs keep their historical behavior.
+# Set SPARK_READINESS_ONLY=0 explicitly to run integration tests in CI.
+if [[ -z "${SPARK_READINESS_ONLY:-}" && -n "${SPARK_STARTUP_CHECK:-}" &&
+      "${PYSP_TEST_spark_databricks_clusterUsageTags_sparkVersion:-}" == 18.3.* &&
+      ("$TEST_MODE" == "DEFAULT" || "$TEST_MODE" == "CI_PART1" || "$TEST_MODE" == "CI_PART2") ]]; then
+    SPARK_READINESS_ONLY=1
+fi
+SPARK_READINESS_ONLY=${SPARK_READINESS_ONLY:-0}
+if [[ "$SPARK_READINESS_ONLY" == "1" ]]; then
+    if [[ -z "${SPARK_STARTUP_CHECK:-}" ]]; then
+        echo "Readiness-only mode requires the CI Spark readiness hook" >&2
+        exit 1
+    fi
+    case "$TEST_MODE" in
+        DEFAULT|CI_PART1|CI_PART2) ;;
+        *) echo "Readiness-only mode does not support TEST_MODE=$TEST_MODE" >&2; exit 1 ;;
+    esac
+fi
+
 BASE_SPARK_VERSION=${BASE_SPARK_VERSION:-$(< /databricks/spark/VERSION)}
 
 # For Spark 4.x (Scala 2.13), the upstream base shim is 350 (Spark 3.5.0).
@@ -80,6 +101,18 @@ else
 fi
 
 WITH_DEFAULT_UPSTREAM_SHIM=${WITH_DEFAULT_UPSTREAM_SHIM:-1}
+
+# CI-only hook installed by fallback.groovy, not a prerequisite for local build/test commands.
+# Leave SPARK_STARTUP_CHECK unset for local usage; ordinary callers keep their existing behavior.
+if [[ -n "${SPARK_STARTUP_CHECK:-}" ]]; then
+    bash "$SPARK_STARTUP_CHECK" databricks
+fi
+
+if [[ "$SPARK_READINESS_ONLY" == "1" &&
+      ("$TEST_MODE" == "CI_PART2" || "$WITH_DEFAULT_UPSTREAM_SHIM" == "0") ]]; then
+    echo "Required Spark readiness checks completed; product tests remain disabled"
+    exit 0
+fi
 
 IS_SPARK_321_OR_LATER=0
 [[ "$(printf '%s\n' "3.2.1" "$BASE_SPARK_VERSION" | sort -V | head -n1)" = "3.2.1" ]] && IS_SPARK_321_OR_LATER=1
@@ -139,7 +172,38 @@ if [[ $TEST_MODE == "DEFAULT" || $TEST_MODE == "CI_PART1" ]]; then
             tar xf "/tmp/$JAR_FILE_NAME" -C $HOME
             rm -f "/tmp/$JAR_FILE_NAME"
         fi
-        SPARK_HOME=$HOME/spark-${UPSTREAM_SPARK_VERSION}-bin-hadoop3${UPSTREAM_SPARK_SCALA_SUFFIX} \
+        # Spark 3.5.0 bundles Scala 2.13.8, whose compiler is incompatible with JDK 21.
+        # Keep JDK 17 scoped to upstream processes; native Databricks uses its own JDK.
+        upstream_java_env=()
+        if [[ "$UPSTREAM_SPARK_VERSION" == "3.5.0" ]]; then
+            upstream_java_home=""
+            for candidate in "${JAVA_HOME:-}" /usr/lib/jvm/zulu17 /usr/lib/jvm/java-17-openjdk-*; do
+                if [[ -n "$candidate" && -x "$candidate/bin/java" ]]; then
+                    candidate_version=$("$candidate/bin/java" -XshowSettings:properties -version 2>&1) || continue
+                    if [[ "$candidate_version" =~ java\.specification\.version[[:space:]]*=[[:space:]]*17([[:space:]]|$) ]]; then
+                        upstream_java_home="$candidate"
+                        break
+                    fi
+                fi
+            done
+            if [[ -z "$upstream_java_home" ]]; then
+                echo "Upstream Spark 3.5.0 requires an installed JDK 17" >&2
+                exit 1
+            fi
+            upstream_java_env=("JAVA_HOME=$upstream_java_home" "PATH=$upstream_java_home/bin:$PATH")
+        fi
+        # The same CI-only hook checks upstream Spark; local runs leave it unset.
+        if [[ -n "${SPARK_STARTUP_CHECK:-}" ]]; then
+            env "${upstream_java_env[@]}" \
+            "SPARK_HOME=$HOME/spark-${UPSTREAM_SPARK_VERSION}-bin-hadoop3${UPSTREAM_SPARK_SCALA_SUFFIX}" \
+                bash "$SPARK_STARTUP_CHECK" upstream
+        fi
+        if [[ "$SPARK_READINESS_ONLY" == "1" ]]; then
+            echo "Required Spark readiness checks completed; product tests remain disabled"
+            exit 0
+        fi
+        env "${upstream_java_env[@]}" \
+        "SPARK_HOME=$HOME/spark-${UPSTREAM_SPARK_VERSION}-bin-hadoop3${UPSTREAM_SPARK_SCALA_SUFFIX}" \
         SPARK_SHELL_SMOKE_TEST=1 \
         PYSP_TEST_spark_shuffle_manager=com.nvidia.spark.rapids.${UPSTREAM_SHIM_VER}.RapidsShuffleManager \
             bash integration_tests/run_pyspark_from_build.sh

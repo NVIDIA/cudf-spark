@@ -17,6 +17,7 @@
 /*** spark-rapids-shim-json-lines
 {"spark": "350db143"}
 {"spark": "400db173"}
+{"spark": "410db183"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
@@ -99,7 +100,8 @@ trait Spark341PlusDBShims extends Spark332PlusDBShims {
               a.evalType, a.udfDeterministic, a.resultId)
         })
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
-    super.getExprs ++ shimExprs ++ DayTimeIntervalShims.exprs ++ RoundingShims.exprs
+    super.getExprs ++ shimExprs ++ DayTimeIntervalShims.exprs ++ RoundingShims.exprs ++
+      ProtobufExprShims.exprs
   }
 
   // Keep this lazy to avoid a class-initialization cycle: building these rules calls

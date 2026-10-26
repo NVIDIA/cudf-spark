@@ -7,9 +7,9 @@ nav_order: 5
 # NVIDIA cuDF plugin for Apache Spark Compatibility with Apache Spark
 
 The SQL plugin tries to produce results that are bit for bit identical with Apache Spark.  There are
-a number of cases where there are some differences. In most cases operators that produce different
+a number of cases where there are some differences. In some cases operators that produce different
 results are off by default, and you can look at the [configs](configs.md) for more information on
-how to enable them.  In some cases we felt that enabling the incompatibility by default was worth
+how to enable them.  In many cases we felt that enabling the incompatibility by default was worth
 the performance gain. All of those operators can be disabled through configs if it becomes a
 problem. Please also look at the current list of
 [bugs](https://github.com/NVIDIA/cudf-spark/issues?q=is%3Aopen+is%3Aissue+label%3Abug) which are
@@ -133,7 +133,8 @@ will produce a different result compared to the plugin.
 ## CSV Reading
 
 Spark allows for stripping leading and trailing white space using various options that are off by
-default. The plugin will strip leading and trailing space for all values except strings.
+default. For supported `CORRECTED` date formats, whitespace handling follows Spark as described
+below. The plugin strips leading and trailing space for other non-string values.
 
 There are also discrepancies/issues with specific types that are detailed below.
 
@@ -152,7 +153,34 @@ replacement character �.  Instead it just passes them through as described in 
 
 ### CSV Dates
 
-Only a limited set of formats are supported when parsing dates.
+With `spark.sql.legacy.timeParserPolicy=CORRECTED` (the default since Spark 4.0), CSV dates are
+parsed on the GPU with the same results as Spark, in any session time zone, when `dateFormat` is
+absent or is one of the following:
+
+- `yyyy-MM-dd`
+- `yyyy/MM/dd`
+- `yyyy-MM`
+- `yyyy/MM`
+- `dd/MM/yyyy`
+- `yyyy-MM-dd HH:mm:ss`
+- `MM-dd`
+- `MM/dd`
+- `dd-MM`
+- `dd/MM`
+- `MM/yyyy`
+- `MM-yyyy`
+- `MM/dd/yyyy`
+- `MM-dd-yyyy`
+- `MMyyyy`
+
+The scan falls back to the CPU for these dates when:
+
+- `ignoreLeadingWhiteSpace` or `ignoreTrailingWhiteSpace` is `true`. Spark trims only unquoted
+  fields, and the GPU parser cannot preserve that distinction.
+- On Databricks, the format detected for a date column is not in the list above.
+
+With `EXCEPTION` (the default before Spark 4.0), date parsing supports only the following formats.
+`LEGACY` falls back to the CPU.
 
 * `"yyyy-MM-dd"`
 * `"yyyy/MM/dd"`
@@ -184,8 +212,7 @@ portion followed by one of the following formats:
 * `HH:mm:ss.SSS`
 * `HH:mm:ss[.SSS]`
 
-Just like with dates all timestamp formats are actually supported at the same time.  The plugin will
-disable itself if it sees a format it cannot support.
+The plugin disables GPU timestamp parsing if the configured format is unsupported.
 
 Invalid timestamps in Spark, ones that have the correct format, but the numbers produce invalid
 dates or times, can result in an exception by default and how they are parsed can be controlled
@@ -345,18 +372,28 @@ values occurring before the transition between the Julian and Gregorian calendar
 When writing `spark.sql.legacy.parquet.datetimeRebaseModeInWrite` is currently ignored as described
 [here](https://github.com/NVIDIA/cudf-spark/issues/144).
 
-The plugin supports reading `uncompressed`, `snappy`, `gzip` and `zstd` Parquet files and writing
-`uncompressed`, `snappy` and `zstd` Parquet files.  At this point, the plugin does not have the 
-ability to
-fall back to the CPU when reading an unsupported compression format, and will error out in that
-case.
+The plugin supports reading and writing `uncompressed`, `snappy`, `gzip` and `zstd` Parquet files.
+At this point, the plugin cannot fall back to the CPU when reading an unsupported compression
+format, and will error out in that case.
 
 ## Delta Lake low shuffle merge on Databricks Runtime 17.3
 
-Low shuffle merge is disabled by default. To enable it on Databricks Runtime 17.3, set
-`spark.rapids.sql.delta.lowShuffleMerge.enabled=true` and the Parquet reader to `PERFILE`.
-The default remains disabled because Delta Lake 2.4 does not support low shuffle merge
-with change data feed enabled.
+Low shuffle merge is disabled by default because Delta Lake 2.4 does not support it
+with change data feed enabled. To enable it on Databricks Runtime 17.3, set
+`spark.rapids.sql.delta.lowShuffleMerge.enabled=true`. The Parquet reader can use `PERFILE`
+or `MULTITHREADED`. With `COALESCING` or `AUTO`, touched-file discovery uses the
+multithreaded reader to preserve file-relative row indices. OSS Delta Lake 2.4 still
+requires `PERFILE`.
+
+Low shuffle merge also requires both
+`spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled=true` and
+`spark.databricks.delta.deletionVectors.useMetadataRowIndex=true`. If either is `false`,
+MERGE falls back to classic GPU merge. In particular, remove the `useMetadataRowIndex=false`
+setting recommended for older runtimes when enabling low shuffle merge on Databricks Runtime 17.3.
+
+Tables with columns whose logical or physical name matches a deletion-vector skip-row marker
+use classic GPU merge to avoid corrupting those values during discovery and temporary-DV rewrites; see
+[the native reader column-collision issue](https://github.com/NVIDIA/cudf-spark/issues/16381).
 
 On Databricks Runtime 17.3, tables with existing deletion vectors fall back to classic
 GPU merge before low shuffle merge builds temporary deletion vectors. The existing
@@ -938,7 +975,7 @@ data.  The cuDF plugin `get_json_object` operation on the GPU will return `None`
 updated in a future release to more closely match Spark.
 
 If the JSON has a single quote `'` in the path, the GPU query may fail with `ai.rapids.cudf.CudfException`.
-More examples are in [issue-12483](https://github.com/rapidsai/cudf/issues/12483).
+More examples are in [issue-12483](https://github.com/NVIDIA/cudf/issues/12483).
 
 ## Approximate Percentile
 

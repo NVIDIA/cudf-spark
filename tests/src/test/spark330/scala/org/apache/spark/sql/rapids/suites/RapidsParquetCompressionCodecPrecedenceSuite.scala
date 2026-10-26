@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ import scala.collection.JavaConverters._
 import org.apache.hadoop.fs.Path
 
 import org.apache.spark.sql.execution.datasources.parquet.ParquetCompressionCodecPrecedenceSuite
-import org.apache.spark.sql.rapids.utils.RapidsSQLTestsBaseTrait
+import org.apache.spark.sql.rapids.utils.{RapidsQueryTestUtil, RapidsSQLTestsBaseTrait}
 import org.apache.spark.util.VersionUtils
 
 class RapidsParquetCompressionCodecPrecedenceSuite
@@ -34,8 +34,8 @@ class RapidsParquetCompressionCodecPrecedenceSuite
   // Original: ParquetCompressionCodecPrecedenceSuite.scala
   //   lines 95-105 (Spark 3.3.0)
   // GPU's libcudf skips compression when compressed output >=
-  // uncompressed (single-row table). Use 1000 rows so
-  // compression actually produces smaller output.
+  // uncompressed. Keep enough repeating rows in each partition for
+  // compressed output to be smaller.
   // https://github.com/NVIDIA/spark-rapids/issues/11416
   testRapids("Create parquet table with compression") {
     Seq(true, false).foreach { isPartitioned =>
@@ -50,8 +50,8 @@ class RapidsParquetCompressionCodecPrecedenceSuite
               s"'parquet.compression'='$codec')"
             val part = if (isPartitioned) "PARTITIONED BY (p)" else ""
             sql(s"CREATE TABLE $tbl USING Parquet $opts $part " +
-              s"AS SELECT id AS col1, CAST(id % 2 AS INT) AS p " +
-              s"FROM range(1000)")
+              s"AS SELECT /*+ COALESCE(1) */ id % 100 AS col1, " +
+              s"CAST(id % 2 AS INT) AS p FROM range(20000)")
             val dir = s"${tmpDir.getPath.stripSuffix("/")}/$tbl"
             val conf = spark.sessionState.newHadoopConf()
             val actual = for {
@@ -64,6 +64,14 @@ class RapidsParquetCompressionCodecPrecedenceSuite
               s"No parquet column metadata found for codec $codec")
             assert(actual.distinct.forall(_ == codec),
               s"Expected $codec but got ${actual.distinct}")
+            if (codec == "GZIP") {
+              withSQLConf("spark.rapids.sql.enabled" -> "false") {
+                val expectedRows = spark.range(20000).selectExpr(
+                  "id % 100 AS col1", "CAST(id % 2 AS INT) AS p").collect().toSeq
+                RapidsQueryTestUtil.checkAnswer(spark.table(tbl), expectedRows,
+                  checkToRDD = false)
+              }
+            }
           }
         }
       }

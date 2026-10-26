@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import struct
+
 import pyspark.sql.functions as f
 import pytest
 
@@ -21,7 +24,7 @@ from conftest import is_not_utc
 from datetime import timezone
 from conftest import is_databricks_runtime
 from marks import (approximate_float, allow_non_gpu, allow_non_gpu_conditional,
-                   ignore_order, datagen_overrides)
+                   ignore_order, datagen_overrides, validate_execs_in_gpu_plan)
 from spark_session import *
 
 # mark this test as ci_1 for mvn verify sanity check in pre-merge CI
@@ -163,6 +166,72 @@ def read_json_sql(data_path, schema, spark_tmp_table_factory, options = {}):
         tmp_name = spark_tmp_table_factory.get()
         return spark.catalog.createTable(tmp_name, source='json', path=data_path, **opts)
     return read_impl
+
+@ignore_order
+@pytest.mark.parametrize('v1_enabled_list', ['', 'json'])
+@pytest.mark.parametrize('reader_batch_bytes', [1, 1024 * 1024])
+@pytest.mark.parametrize('max_partition_bytes', [32, 1024 * 1024])
+@pytest.mark.parametrize('encoding', [None, 'UTF-8', 'US-ASCII'])
+def test_json_bom_at_batch_and_partition_boundaries(spark_tmp_path, v1_enabled_list,
+                                                   reader_batch_bytes, max_partition_bytes,
+                                                   encoding):
+    data_path = spark_tmp_path + '/JSON_BOM'
+    records = [
+        '\ufeff{"a":0,"b":"first"}',
+        '\ufeff{"a":1,"b":"one"}',
+        '\ufeff \t{"a":2,"b":"two"}',
+        ' \ufeff{"a":3,"b":"invalid"}',
+        '\ufeff\ufeff{"a":4,"b":"invalid"}',
+        '\ufeff',
+        '\ufeff \t',
+    ]
+    if encoding != 'US-ASCII':
+        records.append('{"a":5,"b":"\ufeffquoted"}')
+    records.append('{"a":6,"b":"last"}')
+    with_cpu_session(lambda spark: spark.createDataFrame([(line,) for line in records], ['value'])
+                     .coalesce(1).write.text(data_path))
+    schema = StructType([StructField('a', IntegerType()), StructField('b', StringType())])
+    options = {'encoding': encoding, 'lineSep': '\n'} if encoding else {}
+    conf = copy_and_update(_enable_all_types_conf, {
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        'spark.rapids.sql.reader.batchSizeBytes': str(reader_batch_bytes),
+        'spark.sql.files.maxPartitionBytes': str(max_partition_bytes),
+        'spark.sql.files.openCostInBytes': '0',
+        'spark.sql.files.minPartitionNum': '1',
+    })
+    if max_partition_bytes == 32:
+        # The preceding record crosses byte 32, so the BOM record at byte 44 starts this split.
+        starts = with_cpu_session(
+            lambda spark: spark.read.text(data_path).where(f.col('value') == records[2])
+                .selectExpr('input_file_block_start() AS block_start').collect(), conf=conf)
+        assert [row.block_start for row in starts] == [32]
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(schema).options(**options).json(data_path), conf=conf)
+
+@ignore_order(local=True)
+@pytest.mark.parametrize('v1_enabled_list', ['', 'json'])
+@pytest.mark.parametrize('reader_batch_bytes', [1, 1024 * 1024])
+@pytest.mark.parametrize('encoding', [None, 'UTF-8', 'US-ASCII'])
+@pytest.mark.parametrize('empty_only', [False, True])
+def test_json_empty_root_arrays(spark_tmp_path, v1_enabled_list, reader_batch_bytes,
+                                encoding, empty_only):
+    data_path = spark_tmp_path + '/JSON_EMPTY_ARRAYS'
+    empty_arrays = ['[]', ' [ \t ] ', '[]']
+    if empty_only:
+        records = empty_arrays
+    else:
+        records = ['{"a":0,"b":"first"}'] + empty_arrays + [
+            '\ufeff[]', '\ufeff \t[ \t ]', ' \ufeff[]', '{"a":1,"b":"last"}']
+    with_cpu_session(lambda spark: spark.createDataFrame([(line,) for line in records], ['value'])
+                     .coalesce(1).write.text(data_path))
+    schema = StructType([StructField('a', IntegerType()), StructField('b', StringType())])
+    options = {'encoding': encoding, 'lineSep': '\n'} if encoding else {}
+    conf = copy_and_update(_enable_all_types_conf, {
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        'spark.rapids.sql.reader.batchSizeBytes': str(reader_batch_bytes),
+    })
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(schema).options(**options).json(data_path), conf=conf)
 
 @approximate_float
 @pytest.mark.parametrize('data_gen', [
@@ -382,6 +451,26 @@ def test_basic_json_read(std_input_path, filename, schema, read_func, allow_non_
                   spark_tmp_table_factory,
                   options),
         conf=updated_conf)
+
+
+@pytest.mark.parametrize('data_type', [FloatType(), DoubleType()], ids=idfn)
+@pytest.mark.parametrize('v1_enabled_list', ["", "json"])
+def test_json_read_extreme_exponents(spark_tmp_path, data_type, v1_enabled_list):
+    data_path = spark_tmp_path + '/JSON_EXTREME_EXPONENT_DATA'
+    records = [
+        ('{"numbers":[-630111.628E-58858,630111.628E58858]}',),
+        ('{"numbers":[-1E5000,1E5000,-1E-5000,1E-5000]}',),
+    ]
+    with_cpu_session(lambda spark: spark.createDataFrame(records, ['value'])
+                     .coalesce(1).write.text(data_path))
+
+    schema = StructType([StructField('numbers', ArrayType(data_type))])
+    conf = copy_and_update(
+        _enable_all_types_conf, {'spark.sql.sources.useV1SourceList': v1_enabled_list})
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(schema).json(data_path),
+        conf=conf)
+
 
 @approximate_float
 @pytest.mark.parametrize('filename', [
@@ -1376,8 +1465,6 @@ _to_json_datagens=[byte_gen,
     decimal_gen_32bit,
     decimal_gen_64bit,
     decimal_gen_128bit,
-    pytest.param(float_gen, marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/9350')),
-    pytest.param(double_gen, marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/9350')),
     date_gen,
     timestamp_gen,
     StringGen('[A-Za-z0-9\r\n\'"\\\\]{0,10}', nullable=True) \
@@ -1389,6 +1476,77 @@ _to_json_datagens=[byte_gen,
     pytest.param(StringGen('\u001a', nullable=True), marks=pytest.mark.xfail(
         reason='https://github.com/NVIDIA/spark-rapids/issues/9705'))
 ]
+
+
+def _canonicalize_floating_point_json(rows, pack_format):
+    """Decode JSON numeric tokens at Float/Double width before comparing."""
+    def number_as_source_bits(value):
+        return ('number_bits', struct.pack(pack_format, float(value)))
+
+    def freeze_json(value):
+        if isinstance(value, list):
+            return ('array', tuple(freeze_json(item) for item in value))
+        return value
+
+    def object_as_pairs(pairs):
+        # Preserve member order and duplicates so only number spelling is normalized.
+        return ('object', tuple((key, freeze_json(item)) for key, item in pairs))
+
+    def canonicalize_json_text(value):
+        if value is None:
+            return ('sql_null',)
+        return ('json', freeze_json(json.loads(
+                value,
+                object_pairs_hook=object_as_pairs,
+                parse_float=number_as_source_bits,
+                parse_int=number_as_source_bits)))
+
+    return [
+        tuple((field, canonicalize_json_text(row[field])) for field in row.__fields__)
+        for row in rows
+    ]
+
+
+def _canonicalize_floating_point_json_results(cpu_rows, gpu_rows, pack_format):
+    return (_canonicalize_floating_point_json(cpu_rows, pack_format),
+            _canonicalize_floating_point_json(gpu_rows, pack_format))
+
+
+@pytest.mark.parametrize('pack_format', ['>f', '>d'])
+@pytest.mark.parametrize('expected,actual', [
+    ('{"a":1}', '{"a":2,"a":1}'),
+    ('{"a":1}', '{"a":1,"a":1}'),
+    ('{"nested":{"a":1}}', '{"nested":{"a":2,"a":1}}'),
+    ('[{"a":1}]', '[{"a":2,"a":1}]'),
+    ('{"a":1,"a":2}', '{"a":2,"a":1}'),
+])
+def test_floating_point_json_comparison_preserves_duplicate_members(pack_format, expected, actual):
+    cpu, gpu = _canonicalize_floating_point_json_results(
+        [Row(value=expected)], [Row(value=actual)], pack_format)
+    with pytest.raises(AssertionError):
+        assert_equal(cpu, gpu)
+
+
+@pytest.mark.parametrize('pack_format,expected,actual,equivalent', [
+    pytest.param('>f', '1.0E-45', '1.4E-45', True, id='float-subnormal-spellings'),
+    pytest.param('>f', '1.1754944E-38', '1.17549435E-38', True,
+                 id='float-min-normal-spellings'),
+    pytest.param('>d', '5.0E-324', '4.9E-324', True, id='double-subnormal-spellings'),
+    pytest.param('>d', '1.0E23', '9.999999999999999E22', True, id='double-large-spellings'),
+    pytest.param('>f', '1.0', '1.0000001192092896', False, id='float-adjacent-values'),
+    pytest.param('>d', '1.0', '1.0000000000000002', False, id='double-adjacent-values'),
+    pytest.param('>f', '-0.0', '0.0', False, id='float-signed-zero'),
+    pytest.param('>d', '-0.0', '0.0', False, id='double-signed-zero'),
+])
+def test_floating_point_json_comparison_numeric_contract(pack_format, expected, actual, equivalent):
+    cpu, gpu = _canonicalize_floating_point_json_results(
+        [Row(value=expected)], [Row(value=actual)], pack_format)
+    if equivalent:
+        assert_equal(cpu, gpu)
+    else:
+        with pytest.raises(AssertionError):
+            assert_equal(cpu, gpu)
+
 
 # Spark 400 changed the default timestamp format to "yyyy-MM-dd'T'HH:mm:ss[.SSS][XXXXX]"
 # We need to explicitly specify the format for Spark 400
@@ -1502,6 +1660,67 @@ def test_maps_to_json(data_gen, ignore_null_fields, timezone):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark : struct_to_json(spark),
         conf=conf)
+
+
+@pytest.mark.parametrize('data_gen,pack_format,known_rounding_value', [
+    (FloatGen(no_nans=True), '>f',
+     struct.unpack('>f', struct.pack('>I', 0x4CA5A5A1))[0]),
+    (DoubleGen(no_nans=True), '>d',
+     struct.unpack('>d', struct.pack('>Q', 0xC39DDD7467AF36D9))[0])
+], ids=['Float', 'Double'])
+@pytest.mark.parametrize('ignore_null_fields', [True, False])
+@pytest.mark.parametrize('timezone', [
+    'UTC',
+    'Etc/UTC'
+])
+def test_to_json_floating_point_semantic_parity(
+        data_gen, pack_format, known_rounding_value, ignore_null_fields, timezone):
+    struct_gen = StructGen([
+        ('a', data_gen),
+        ('b', StructGen([('child', data_gen)], nullable=True)),
+        ('c', ArrayGen(StructGen([('child', data_gen)], nullable=True))),
+        ('d', MapGen(StringGen('[A-Za-z0-9]{0,10}', nullable=False), data_gen)),
+        ('e', ArrayGen(MapGen(StringGen('[A-Z]{5}', nullable=False), data_gen), nullable=True)),
+    ], nullable=False)
+    array_gen = ArrayGen(data_gen, nullable=True)
+    map_gen = MapGen(StringGen('[A-Z]{1,10}', nullable=False), data_gen, nullable=True)
+    gen = StructGen([
+        ('my_struct', struct_gen),
+        ('my_array', array_gen),
+        ('my_map', map_gen),
+    ], nullable=False)
+
+    options = {'ignoreNullFields': ignore_null_fields, 'timeZone': timezone}
+    options.update(_gpu_supported_timestamp_format_conf)
+
+    def floating_point_to_json(spark):
+        df = gen_df(spark, gen)
+        # Always include the Float/Double value from cudf-spark-jni#5118 whose
+        # CPU and GPU JSON spellings differ while decoding to the same value.
+        known_struct = (
+            known_rounding_value,
+            (known_rounding_value,),
+            [(known_rounding_value,)],
+            {'known': known_rounding_value},
+            [{'KNOWN': known_rounding_value}])
+        known_df = spark.createDataFrame(
+            [(known_struct, [known_rounding_value], {'KNOWN': known_rounding_value})],
+            schema=gen.data_type)
+        df = df.union(known_df)
+        return df.select(
+            f.to_json('my_struct', options).alias('struct_json'),
+            f.to_json('my_array', options).alias('array_json'),
+            f.to_json('my_map', options).alias('map_json'))
+
+    conf = copy_and_update(_enable_all_types_conf,
+        {'spark.rapids.sql.expression.StructsToJson': True})
+
+    assert_gpu_and_cpu_are_equal_collect(
+        floating_point_to_json,
+        conf=conf,
+        result_canonicalize_func_before_compare=lambda cpu, gpu:
+            _canonicalize_floating_point_json_results(cpu, gpu, pack_format))
+
 
 @pytest.mark.parametrize('data_type', [FloatType(), DoubleType()], ids=idfn)
 def test_to_json_non_finite_floating_point(data_type):
@@ -1912,7 +2131,7 @@ def test_spark_from_json_timestamp_format_option_zoneid_but_supported_format(zon
         conf=conf)
 
 @pytest.mark.parametrize('zone_id', [
-    "UTC",
+    pytest.param("UTC", marks=validate_execs_in_gpu_plan('GpuProjectExec') if not is_not_utc() else []),
     pytest.param("-08:00", marks=pytest.mark.allow_non_gpu('JsonToStructs')),
     pytest.param("+01:00", marks=pytest.mark.allow_non_gpu('JsonToStructs')),
     pytest.param("Africa/Dakar", marks=pytest.mark.allow_non_gpu('JsonToStructs')),
@@ -1920,11 +2139,15 @@ def test_spark_from_json_timestamp_format_option_zoneid_but_supported_format(zon
     pytest.param("Asia/Urumqi", marks=pytest.mark.allow_non_gpu('JsonToStructs')),
     pytest.param("Asia/Hong_Kong", marks=pytest.mark.allow_non_gpu('JsonToStructs')),
     pytest.param("Europe/Brussels", marks=pytest.mark.allow_non_gpu('JsonToStructs'))], ids=idfn)
-@allow_non_gpu_conditional(is_not_utc(), 'JsonToStructs')
+@allow_non_gpu_conditional(is_not_utc(), 'JsonToStructs', 'ProjectExec')
 def test_spark_from_json_timestamp_format_option_zoneid_but_default_format(zone_id):
     schema = StructType([StructField("t", TimestampType())])
     data = [[r'''{"t": "2016-01-01 00:00:00"}'''],
-        [r'''{"t": "2023-07-27 12:21:05"}''']]
+        [r'''{"t": "2023-07-27 12:21:05"}'''],
+        [r'''{"t": "6395-12-21T56:86:40.205705Z"}'''],
+        [r'''{"t": "2023-01-01T24:00:00Z"}'''],
+        [r'''{"t": "2023-01-01T00:60:00Z"}'''],
+        [r'''{"t": "2023-01-01T00:00:60Z"}''']]
     conf = copy_and_update(_enable_all_types_conf, {"spark.rapids.sql.json.read.datetime.enabled": "true"})
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : spark.createDataFrame(data, 'json STRING').select(f.col('json'), f.from_json(f.col('json'), schema, {'timeZone': zone_id})),
