@@ -80,33 +80,21 @@ class HostMemoryPool(val maxHostMemoryBytes: Long) extends ResourcePool with Log
         // [Solution]
         // If there is no runner in flight, run the request runner immediately regardless of
         // the current available resource.
-        if (remaining < memoryRequire &&
-            numRunnerInFlight.compareAndSet(0L, 1L)) {
-          // The remaining resource should be negative here
-          remaining -= memoryRequire
-          isDone = true
-          // Register a post-hook to decrement numRunnerInFlight as soon as the runner is done
-          runner.addPostHook(() => numRunnerInFlight.decrementAndGet())
-        } else {
-          do {
-            // If enough resource is available, acquire it and exit the loop.
-            if (remaining >= memoryRequire) {
-              remaining -= memoryRequire
-              isDone = true
-              // Update numRunnerInFlight as soon as the runner being permitted to run, meanwhile
-              // register a post-hook to decrement it as soon as the runner is done
-              numRunnerInFlight.incrementAndGet()
-              runner.addPostHook(() => numRunnerInFlight.decrementAndGet())
-            } else if (waitTimeNs > 0) {
-              waitTimeNs = condition.awaitNanos(waitTimeNs)
-            } else {
-              isTimeout = true
-              logWarning(s"Failed to acquire ${bytesToString(memoryRequire)}, remaining=" +
-                  s"${bytesToString(remaining)}, AsyncRunners=$numRunnerInPool, " +
-                  s"SparkTasks=${tasksInPool.size}")
-            }
-          } while (!isDone && !isTimeout)
-        }
+        do {
+          if (remaining >= memoryRequire || numRunnerInFlight.get() == 0L) {
+            remaining -= memoryRequire
+            isDone = true
+            numRunnerInFlight.incrementAndGet()
+            runner.addPostHook(() => runnerCompleted())
+          } else if (waitTimeNs > 0) {
+            waitTimeNs = condition.awaitNanos(waitTimeNs)
+          } else {
+            isTimeout = true
+            logWarning(s"Failed to acquire ${bytesToString(memoryRequire)}, remaining=" +
+                s"${bytesToString(remaining)}, AsyncRunners=$numRunnerInPool, " +
+                s"SparkTasks=${tasksInPool.size}")
+          }
+        } while (!isDone && !isTimeout)
         if (!isDone) {
           AcquireFailed
         } else {
@@ -132,6 +120,18 @@ class HostMemoryPool(val maxHostMemoryBytes: Long) extends ResourcePool with Log
       } finally {
         lock.unlock()
       }
+    }
+  }
+
+  private def runnerCompleted(): Unit = {
+    lock.lock()
+    try {
+      // Completed results may retain the budget, so resource release cannot wake these waiters.
+      if (numRunnerInFlight.decrementAndGet() == 0L) {
+        condition.signalAll()
+      }
+    } finally {
+      lock.unlock()
     }
   }
 

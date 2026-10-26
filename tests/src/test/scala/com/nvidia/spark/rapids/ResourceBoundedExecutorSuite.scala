@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,15 +16,54 @@
 
 package com.nvidia.spark.rapids
 
-import java.util.concurrent.{Future => JFuture}
+import java.util.concurrent.{CountDownLatch, Future => JFuture, TimeUnit}
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.{Lock, ReentrantLock}
 
 import scala.collection.mutable
 
 import com.nvidia.spark.rapids.io.async._
+import org.scalatest.concurrent.Eventually._
 import org.scalatest.funsuite.AnyFunSuite
+import org.scalatest.time.{Seconds, Span}
 
 class ResourceBoundedExecutorSuite extends AnyFunSuite with RmmSparkRetrySuiteBase {
+
+  test("HostMemoryPool wakes waiting runners when completed results retain the budget") {
+    val pool = new HostMemoryPool(1L)
+    val first = AsyncRunner.newCpuTask(() => 1L, memoryBytes = 1L)
+    val second = AsyncRunner.newCpuTask(() => 2L, memoryBytes = 1L)
+    val attempting = new CountDownLatch(1)
+    val acquired = new CountDownLatch(1)
+    val status = new AtomicReference[AcquireStatus]()
+    val waiter = new Thread(() => {
+      attempting.countDown()
+      status.set(pool.acquireResource(second, timeoutMs = 30000L))
+      acquired.countDown()
+    })
+
+    assert(pool.acquireResource(first, timeoutMs = 30000L).isInstanceOf[AcquireSuccessful])
+    waiter.start()
+    try {
+      assert(attempting.await(5L, TimeUnit.SECONDS))
+      eventually(timeout(Span(5, Seconds))) {
+        assert(waiter.getState == Thread.State.TIMED_WAITING)
+      }
+      first.call()
+      assert(first.isHoldingResource)
+      assert(acquired.await(5L, TimeUnit.SECONDS),
+        "A waiter should not need the acquisition timeout to detect no runners remain in flight")
+      assert(status.get().isInstanceOf[AcquireSuccessful])
+    } finally {
+      waiter.interrupt()
+      waiter.join(5000L)
+      if (second.isHoldingResource) {
+        second.call()
+        pool.releaseResource(second)
+      }
+      pool.releaseResource(first)
+    }
+  }
 
   private def createSingleThreadedBoundedExecutor(
       maxThreadNumber: Int,
