@@ -25,7 +25,8 @@ from data_gen import *
 from marks import (allow_non_gpu, disable_ansi_mode, ignore_order, incompat, shuffle_test,
                    validate_execs_in_gpu_plan)
 from spark_session import (with_cpu_session, is_databricks_runtime, is_spark_400_or_later,
-                           is_spark_411_or_later, spark_version)
+                           is_spark_411_or_later, is_spark_420_or_later, is_spark_421_or_later,
+                           spark_version)
 from src.main.python.spark_session import with_gpu_session
 
 # mark this test as ci_1 for mvn verify sanity check in pre-merge CI
@@ -425,8 +426,27 @@ def test_broadcast_join_null_aware_anti(rows):
         conf=conf)
 
 
-@pytest.mark.skipif(spark_version() != '4.2.0',
-                    reason='Spark 4.2.0 alone applies the general broadcast threshold to NAAJ')
+# Spark 4.2.1 (SPARK-36082 follow-up) normalizes floating-point NAAJ keys, so -0.0 matches 0.0.
+@pytest.mark.skipif(not is_spark_421_or_later(),
+                    reason='Spark normalizes floating-point NAAJ keys since 4.2.1')
+@ignore_order(local=True)
+@pytest.mark.parametrize('data_type', ['DOUBLE', 'FLOAT'])
+def test_broadcast_join_null_aware_anti_floating_point_keys(data_type):
+    conf = {'spark.sql.adaptive.enabled': 'false',
+            'spark.sql.optimizeNullAwareAntiJoin': 'true'}
+    assert_cpu_and_gpu_are_equal_sql_with_capture(
+        lambda spark: spark.range(4).selectExpr(
+            f"CAST(CASE id WHEN 0 THEN '-0.0' WHEN 1 THEN '2.0' WHEN 2 THEN 'NaN' END "
+            f"AS {data_type}) AS key"),
+        sql="SELECT * FROM naaj_float_left WHERE key NOT IN ("
+            f"SELECT CAST(v AS {data_type}) FROM VALUES ('0.0'), ('1.0'), ('NaN') AS sub_right(v))",
+        table_name='naaj_float_left',
+        exist_classes='GpuBroadcastHashJoinExec',
+        conf=conf)
+
+
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='Spark only falls back from the NAAJ broadcast hash join since 4.2.0')
 @allow_non_gpu('BroadcastExchangeExec', 'BroadcastNestedLoopJoinExec',
                'EqualTo', 'IsNull', 'Or')
 @ignore_order(local=True)
@@ -457,12 +477,14 @@ def test_broadcast_join_null_aware_anti_build_left_fallback():
             assert join.joinType().toString() == 'LeftAnti', \
                 f'Expected {plan_name} NAAJ fallback to be LeftAnti:\n{plan}'
 
-    # Spark estimates the two inputs at 8 and 800 bytes. Keeping only the left side below this
-    # threshold produces the Spark 4.2.0-specific BuildLeft nested-loop fallback.
+    # Spark estimates the two inputs at 8 and 800 bytes. Keeping only the left side below these
+    # thresholds produces the BuildLeft nested-loop fallback. Spark 4.2.0 applies the general
+    # broadcast threshold to NAAJ; 4.2.1+ only falls back above the dedicated NAAJ threshold.
     conf = {
         'spark.sql.adaptive.enabled': 'false',
         'spark.sql.autoBroadcastJoinThreshold': '100',
         'spark.sql.optimizeNullAwareAntiJoin': 'true',
+        'spark.sql.optimizeNullAwareAntiJoin.broadcastThreshold': '100',
     }
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         do_join,
