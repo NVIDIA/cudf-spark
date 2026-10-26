@@ -1,11 +1,12 @@
 # Change log
-Generated on 2026-10-09
+Generated on 2026-10-26
 
 ## Release 26.10
 
 ### Features
 |||
 |:---|:---|
+|[#16047](https://github.com/NVIDIA/cudf-spark/issues/16047)|[FEA] Add a Unity Catalog Delta REST API safety boundary|
 |[#15664](https://github.com/NVIDIA/cudf-spark/issues/15664)|[FEA] Delta 4.2 support|
 |[#8415](https://github.com/NVIDIA/cudf-spark/issues/8415)|[FEA] Support GpuMergeIntoCommand notMatchedBySourceClauses on GPU for Databricks|
 |[#14757](https://github.com/NVIDIA/cudf-spark/issues/14757)|[FEA] Support Delta Lake 4.2 release|
@@ -39,6 +40,24 @@ Generated on 2026-10-09
 ### Bugs Fixed
 |||
 |:---|:---|
+|[#16396](https://github.com/NVIDIA/cudf-spark/issues/16396)|[BUG] Multithreaded reader leaks host buffers of deferred combine files when closed early|
+|[#16395](https://github.com/NVIDIA/cudf-spark/issues/16395)|[BUG] Multithreaded Parquet reader in combine mode drops rows from files that contain none of the requested columns|
+|[#11095](https://github.com/NVIDIA/cudf-spark/issues/11095)|[FEA] Force use PERFILE scan in low shuffle merge.|
+|[#16423](https://github.com/NVIDIA/cudf-spark/issues/16423)|[BUG] Delta reads of shredded VARIANT fail on GPU instead of falling back to CPU|
+|[#16419](https://github.com/NVIDIA/cudf-spark/issues/16419)|[BUG] Delta 4.3 GPU DELETE, UPDATE, and MERGE fail when writing deletion vectors|
+|[#16397](https://github.com/NVIDIA/cudf-spark/issues/16397)|[BUG] delta_lake_test.py::test_delta_deletion_vector_count_empty_splits fails with FileNotFoundException on URL-encoded Delta add.path (Spark 3.5.9)|
+|[#16367](https://github.com/NVIDIA/cudf-spark/issues/16367)|[BUG] GPU aggregation fails on an OPTIMIZE-only Delta CDF range|
+|[#16372](https://github.com/NVIDIA/cudf-spark/issues/16372)|[BUG] Delta writes fall back to row-based execution with AQE on DBR 17.3|
+|[#15805](https://github.com/NVIDIA/cudf-spark/issues/15805)|[BUG] Dataproc 2.2-ubuntu22 IT: 104 tests fail with py4j 'Target Object ID does not exist for this gateway' (driver/gateway lost)|
+|[#16299](https://github.com/NVIDIA/cudf-spark/issues/16299)|[BUG] Iceberg GPU writes omit timestamp metrics with INT96 output|
+|[#16294](https://github.com/NVIDIA/cudf-spark/issues/16294)|[BUG] HostColumnarToGpu retains CPU Arrow Python buffers past allocator close|
+|[#16271](https://github.com/NVIDIA/cudf-spark/issues/16271)|[BUG] GPU perf test on Dataproc Serverless: ABTestMetricAgg fails with exit code 50 on Spark 4.0.2 / RAPIDS 26.10.0-SNAPSHOT|
+|[#15897](https://github.com/NVIDIA/cudf-spark/issues/15897)|[BUG] test_get_json_object_spark_unit_tests[$] corrupts output on Blackwell|
+|[#15928](https://github.com/NVIDIA/cudf-spark/issues/15928)|BUG] RapidsCachedTableSuite accumulator cleanup test is flaky|
+|[#16251](https://github.com/NVIDIA/cudf-spark/issues/16251)|[BUG] Delta deletion-vector tests fail with ByteBuffer.position NoSuchMethodError on Java 8|
+|[#16244](https://github.com/NVIDIA/cudf-spark/issues/16244)|[BUG] Iceberg REST catalog (Lakekeeper) integration tests fail: format version 3 (V3) not supported|
+|[#16104](https://github.com/NVIDIA/cudf-spark/issues/16104)|[BUG] GPU CSV reader cannot split a buffered parse after GPU OOM|
+|[#15895](https://github.com/NVIDIA/cudf-spark/issues/15895)|[BUG] orc_test.py::test_read_round_trip fails with DATAGEN_SEED=1788463960 — GPU/CPU timestamp mismatch at the 1883 LMT/EST transition|
 |[#16166](https://github.com/NVIDIA/cudf-spark/issues/16166)|[BUG] Delta replaceWhere saveAsTable test fails on CPU with Spark 3.5.x|
 |[#16208](https://github.com/NVIDIA/cudf-spark/issues/16208)|[BUG] try_to_timestamp throws on invalid input on GPU with ANSI mode enabled|
 |[#16164](https://github.com/NVIDIA/cudf-spark/issues/16164)|[BUG] ParquetCachedBatchSerializer overflows Int sizes and segfaults when a cached partition exceeds 2 GiB|
@@ -157,6 +176,37 @@ Generated on 2026-10-09
 ### PRs
 |||
 |:---|:---|
+|[#16483](https://github.com/NVIDIA/cudf-spark/pull/16483)|Update JNI to 26.10.1 and backport Spark 3.3 test fixes|
+|[#16467](https://github.com/NVIDIA/cudf-spark/pull/16467)|Fix missing rows when combining batches with empty columns in multithreaded Parquet readers|
+|[#16410](https://github.com/NVIDIA/cudf-spark/pull/16410)|[DOC] correct 26.10 config version metadata and source links|
+|[#15934](https://github.com/NVIDIA/cudf-spark/pull/15934)|[FEA] Support multithreaded low shuffle merge on DBR 17.3|
+|[#16424](https://github.com/NVIDIA/cudf-spark/pull/16424)|Fall back safely for shredded VARIANT reads in DBR and OSS Delta|
+|[#16421](https://github.com/NVIDIA/cudf-spark/pull/16421)|Fix Delta 4.3 GPU deletion-vector DML and restore MERGE DV writes|
+|[#16402](https://github.com/NVIDIA/cudf-spark/pull/16402)|Decode Delta add paths in empty-split test|
+|[#16368](https://github.com/NVIDIA/cudf-spark/pull/16368)|[BUG] Preserve output attributes when planning Delta CDF reads|
+|[#16364](https://github.com/NVIDIA/cudf-spark/pull/16364)|[BUG] Fix Delta COUNT(*) truncation after fully deleted batches|
+|[#16371](https://github.com/NVIDIA/cudf-spark/pull/16371)|[BUG] Fix Delta DV counts on empty Parquet splits|
+|[#16376](https://github.com/NVIDIA/cudf-spark/pull/16376)|Fix Delta write GPU planning with AQE on DBR 17.3|
+|[#16366](https://github.com/NVIDIA/cudf-spark/pull/16366)|[BUG] Fix Delta 4.3 INSERT write constructor compatibility|
+|[#16324](https://github.com/NVIDIA/cudf-spark/pull/16324)|[BUG] Fix DBR 17.3 low-shuffle MERGE schema evolution [reduced-it]|
+|[#16298](https://github.com/NVIDIA/cudf-spark/pull/16298)|Force microsecond timestamps for Iceberg writes [reduced-it]|
+|[#16295](https://github.com/NVIDIA/cudf-spark/pull/16295)|Avoid retaining CPU Arrow Python buffers past allocator close [reduced-it]|
+|[#16214](https://github.com/NVIDIA/cudf-spark/pull/16214)|Update dependency version JNI, private to 26.10.0|
+|[#16154](https://github.com/NVIDIA/cudf-spark/pull/16154)|Fallback for Delta 4.3 Unity Catalog REST operations|
+|[#16258](https://github.com/NVIDIA/cudf-spark/pull/16258)|[BUG] Record empty MERGE commits in low-shuffle tests  [reduced-it]|
+|[#16254](https://github.com/NVIDIA/cudf-spark/pull/16254)|Fix Spark 3.5 Delta test compatibility with Java 8|
+|[#16242](https://github.com/NVIDIA/cudf-spark/pull/16242)|Allow opt-in GPU ORC DATE writes for safe ranges|
+|[#16210](https://github.com/NVIDIA/cudf-spark/pull/16210)|[DOC] update download page for 26.10 release [skip ci]|
+|[#16250](https://github.com/NVIDIA/cudf-spark/pull/16250)|[BUG] Preserve user deletion-marker columns in low-shuffle MERGE|
+|[#15916](https://github.com/NVIDIA/cudf-spark/pull/15916)|[FEA] Add GPU low shuffle merge for Databricks 17.3|
+|[#16175](https://github.com/NVIDIA/cudf-spark/pull/16175)|Prevent corrupt GPU Parquet output after native writer OOM|
+|[#16105](https://github.com/NVIDIA/cudf-spark/pull/16105)|Split GPU CSV input on OOM|
+|[#16062](https://github.com/NVIDIA/cudf-spark/pull/16062)|Fix historical ORC timestamp conversion|
+|[#16159](https://github.com/NVIDIA/cudf-spark/pull/16159)|test_delta_dml_dv_internal_row_index_column_handling test fix|
+|[#16200](https://github.com/NVIDIA/cudf-spark/pull/16200)|Fix Delta replaceWhere saveAsTable tests on Spark 3.5.6+|
+|[#16207](https://github.com/NVIDIA/cudf-spark/pull/16207)|Fix try_to_timestamp null handling in ANSI mode|
+|[#16213](https://github.com/NVIDIA/cudf-spark/pull/16213)|Split cached batches at a column's 2 GiB size limit  [reduced-it]|
+|[#15935](https://github.com/NVIDIA/cudf-spark/pull/15935)|Fix legacy ORC timestamp rebasing|
 |[#16194](https://github.com/NVIDIA/cudf-spark/pull/16194)|Fix Maven 3.10 distribution builds on release/26.10|
 |[#16132](https://github.com/NVIDIA/cudf-spark/pull/16132)|Add S3-backed Parquet canary support to integration tests|
 |[#16161](https://github.com/NVIDIA/cudf-spark/pull/16161)|Fix CPU-to-GPU transitions for Spark Variant columns|
@@ -379,7 +429,6 @@ Generated on 2026-10-09
 |[#15708](https://github.com/NVIDIA/cudf-spark/pull/15708)|[fast-ut] [reduced-it] [SkipRecovery] Narrow JSON array overflow xfails|
 |[#15500](https://github.com/NVIDIA/cudf-spark/pull/15500)|Delta Lake REORG TABLE APPLY (PURGE) Support|
 |[#15706](https://github.com/NVIDIA/cudf-spark/pull/15706)|Update default pinned pool init threads to 'all'|
-|[#15682](https://github.com/NVIDIA/cudf-spark/pull/15682)|Remove inert InMemoryTableScanExec allowances in cache_test.py|
 |[#15693](https://github.com/NVIDIA/cudf-spark/pull/15693)|[fast-ut] [reduced-it] Xfail Iceberg V3 COW DELETE on Spark 3.5|
 |[#15496](https://github.com/NVIDIA/cudf-spark/pull/15496)|Fix legacy ORC date rebasing|
 |[#14806](https://github.com/NVIDIA/cudf-spark/pull/14806)|[BUILD] Avoid scala213 doc generation overwriting shared outputs[reduced-it][fast-ut]|
