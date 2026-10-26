@@ -1069,6 +1069,8 @@ def test_to_binary_hex_error_mode_fallback():
 
 
 @allow_non_gpu('Unhex')
+@allow_non_gpu_conditional(is_spark_340_or_later() and not is_databricks_runtime(),
+                           'ProjectExec')
 @pytest.mark.skipif(is_before_spark_340(), reason='try_to_binary with hex is unavailable')
 def test_try_to_binary_hex_fallback():
     values = [('4142',), ('GG',), ('',), (None,)]
