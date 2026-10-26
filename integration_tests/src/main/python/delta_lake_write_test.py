@@ -15,7 +15,7 @@
 import json
 import os
 from datetime import datetime as _datetime  # data_gen star-import rebinds datetime
-from zoneinfo import ZoneInfo
+import pytz
 import pyspark.sql.functions as f
 import pytest
 import re
@@ -2556,7 +2556,7 @@ def _respell_dpo_partition_value(value, position, session_time_zone):
         if spelling == 1:  # space separator and an explicit offset
             return instant.strftime("%Y-%m-%d %H:%M:%S.%f") + "+00:00"
         if spelling == 2:  # no zone: wall clock time in the session time zone
-            local = instant.astimezone(ZoneInfo(session_time_zone))
+            local = instant.astimezone(pytz.timezone(session_time_zone))
             return local.strftime("%Y-%m-%d %H:%M:%S") + (
                 ".%06d" % local.microsecond if local.microsecond else "")
         return value  # unchanged
