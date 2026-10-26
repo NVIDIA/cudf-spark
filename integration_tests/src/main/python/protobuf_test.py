@@ -371,41 +371,45 @@ _ALL_TYPES_REPEATED = [
 ]
 
 
-def _build_all_types_descriptor_set_bytes(spark):
+def _all_types_fields():
     fields = [_field(name, number, ftype)
               for number, (name, ftype, _) in enumerate(_ALL_TYPES_SCALARS, start=1)]
     fields += [_field(name, number, ftype, label="repeated", packed=packed)
                for number, (name, ftype, packed, _) in
                enumerate(_ALL_TYPES_REPEATED, start=len(fields) + 1)]
+    return fields
+
+
+def _build_all_types_descriptor_set_bytes(spark):
+    child_fields = _all_types_fields()
+    child_fields.append(
+        _field("leaf", len(child_fields) + 1, "MESSAGE", type_name=".test.Leaf"))
+    fields = _all_types_fields()
     fields += [
         _field("child", len(fields) + 1, "MESSAGE", type_name=".test.Child"),
         _field("items", len(fields) + 2, "MESSAGE", label="repeated", type_name=".test.Child"),
     ]
     return _build_proto2_descriptor(spark, "all_types.proto", [
         _msg("Leaf", [_field("value", 1, "INT32")]),
-        _msg("Child", [
-            _field("count", 1, "INT32"),
-            _field("name", 2, "STRING"),
-            _field("values", 3, "INT32", label="repeated"),
-            _field("leaf", 4, "MESSAGE", type_name=".test.Leaf"),
-        ]),
+        _msg("Child", child_fields),
         _msg("AllTypes", fields),
     ])
 
 
+def _all_types_field_gens():
+    return ([(name, gen) for name, _, gen in _ALL_TYPES_SCALARS] +
+            [(name, ArrayGen(gen, max_length=5, nullable=False))
+             for name, _, _, gen in _ALL_TYPES_REPEATED])
+
+
 def _all_types_child_gen(nullable):
-    return StructGen([
-        ("count", IntegerGen()),
-        ("name", StringGen()),
-        ("values", ArrayGen(IntegerGen(nullable=False), max_length=5, nullable=False)),
-        ("leaf", StructGen([("value", IntegerGen())])),
-    ], nullable=nullable)
+    return StructGen(
+        _all_types_field_gens() + [("leaf", StructGen([("value", IntegerGen())]))],
+        nullable=nullable)
 
 
 _all_types_gen = StructGen(
-    [(name, gen) for name, _, gen in _ALL_TYPES_SCALARS] +
-    [(name, ArrayGen(gen, max_length=5, nullable=False))
-     for name, _, _, gen in _ALL_TYPES_REPEATED] +
+    _all_types_field_gens() +
     [("child", _all_types_child_gen(nullable=True)),
      ("items", ArrayGen(_all_types_child_gen(nullable=False), max_length=3, nullable=False))],
     nullable=False)
