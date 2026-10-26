@@ -298,6 +298,27 @@ private[parquet] class HybridScanParquetPartitionReader(
     }
   }
 
+  /**
+   * Fetch `ranges` into host memory off the GPU semaphore, then `decode` them into a table once
+   * the semaphore is held. This encodes the host ordering: fetch first, acquire after. A
+   * direct-to-device (GDS) source would fork here, acquiring before the read and having the fetch
+   * land bytes on the device so `decode` takes device buffers.
+   */
+  private def readAndMaterialize(ranges: Array[ByteRange])(
+      decode: Array[HostMemoryBuffer] => Table): Table = {
+    val chunks = NvtxRegistry.HYBRID_SCAN_READ_DATA {
+      source.fetch(ranges)
+    }
+    withResource(chunks) { c =>
+      // Start using the GPU only once the host buffers are ready, so the read above does not
+      // block another task from the GPU.
+      GpuSemaphore.acquireIfNecessary(TaskContext.get())
+      NvtxRegistry.HYBRID_SCAN_MATERIALIZE {
+        decode(c)
+      }
+    }
+  }
+
   /** Read every column, then apply the filter to what was decoded. */
   private def materializeSingleStage(
       reader: HybridScanReader,
@@ -306,24 +327,16 @@ private[parquet] class HybridScanParquetPartitionReader(
     val ranges = NvtxRegistry.HYBRID_SCAN_GET_BYTE_RANGES {
       reader.allColumnChunksByteRanges(rowGroups)
     }
-    val chunks = NvtxRegistry.HYBRID_SCAN_READ_DATA {
-      source.fetch(ranges)
-    }
-    withResource(chunks) { c =>
-      // Start using the GPU only once the host buffers are ready, so the read above does not
-      // block another task from the GPU.
-      GpuSemaphore.acquireIfNecessary(TaskContext.get())
-      closeOnExcept(NvtxRegistry.HYBRID_SCAN_MATERIALIZE {
-        withResource(copyToDevice(c)) { deviceChunks =>
-          reader.materializeAllColumns(rowGroups, deviceChunks)
+    closeOnExcept(readAndMaterialize(ranges) { c =>
+      withResource(copyToDevice(c)) { deviceChunks =>
+        reader.materializeAllColumns(rowGroups, deviceChunks)
+      }
+    }) { table =>
+      outputAst match {
+        case Some(ast) => NvtxRegistry.HYBRID_SCAN_OUTPUT_FILTER {
+          applyOutputFilter(table, ast)
         }
-      }) { table =>
-        outputAst match {
-          case Some(ast) => NvtxRegistry.HYBRID_SCAN_OUTPUT_FILTER {
-            applyOutputFilter(table, ast)
-          }
-          case None => table
-        }
+        case None => table
       }
     }
   }
