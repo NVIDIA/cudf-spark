@@ -13,15 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+package com.nvidia.spark.rapids.delta
 
-/*** spark-rapids-shim-json-lines
-{"spark":"420"}
-{"spark":"500"}
-spark-rapids-shim-json-lines ***/
-
-package com.nvidia.spark.rapids.shims
-
-private[shims] object SparkProtobufCompat extends BinarySparkProtobufCompat {
-  override private[shims] def unwrapMessageDescriptor(raw: AnyRef): AnyRef =
-    ProtobufReflection.invoke0[AnyRef](raw, "descriptor")
+/**
+ * Implements the Delta Probe interface for probing the Delta Lake provider on Databricks.
+ * @note This is instantiated via reflection from ShimLoader.
+ */
+class DeltaProbeImpl extends DeltaProbe {
+  // Delta Lake is built-in for Databricks instances, so no probing is necessary.
+  override def getDeltaProvider: DeltaProvider = DeltaSpark410DB183Provider
 }

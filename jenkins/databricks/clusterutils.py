@@ -143,9 +143,18 @@ class ClusterUtils(object):
     def get_master_addr_from_json(jsonout):
         master_addr = None
         if ClusterUtils.is_cluster_running(jsonout):
-            driver = jsonout['driver']
-            master_addr = driver["public_dns"]
+            driver = jsonout.get('driver') or {}
+            master_addr = driver.get("public_dns") or driver.get("private_ip")
         return master_addr
+
+
+    @staticmethod
+    def get_ssh_options(private_key_file):
+        options = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+                   "-i", private_key_file]
+        config = os.environ.get("DATABRICKS_SSH_CONFIG")
+        # A per-attempt config supplies the target port and optional jump host.
+        return options + (["-F", config] if config else ["-p", "2200"])
 
 
     @staticmethod

@@ -101,6 +101,25 @@ def test_iceberg_v3_row_lineage_append(spark_tmp_table_factory):
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)
+@allow_non_gpu('AppendDataExec')
+def test_insert_into_encryption_fallback(spark_tmp_table_factory):
+    base_table_name = get_full_table_name(spark_tmp_table_factory)
+    df_gen = lambda spark: row_lineage_df(spark, length=128)
+    for suffix in ("_cpu", "_gpu"):
+        create_iceberg_table(
+            base_table_name + suffix,
+            table_prop={"format-version": "3", "encryption.key-id": "test-key"},
+            df_gen=df_gen)
+
+    assert_gpu_fallback_write_sql(
+        lambda spark, table: df_gen(spark).writeTo(table).append(),
+        lambda spark, table: spark.table(table),
+        base_table_name, ["AppendDataExec"], conf=iceberg_write_enabled_conf)
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@ignore_order(local=True)
 @allow_non_gpu("AppendDataExec")
 def test_insert_into_v3_table_fallback(spark_tmp_table_factory):
     base_table_name = get_full_table_name(spark_tmp_table_factory)

@@ -571,12 +571,13 @@ trait GpuIntervalUtilsBase {
 
     val retCv = withResource(new ArrayBuffer[ColumnView]) { parts =>
         // prefix with sign part: INTERVAL ' or INTERVAL '-
-        parts += withResource(Scalar.fromLong(0L)) { zero =>
-          withResource(micros.lessThan(zero)) { less =>
-            withResource(Scalar.fromString(prefixStr + "-")) { negPrefix =>
-              withResource(Scalar.fromString(prefixStr)) { prefix =>
-                less.ifElse(negPrefix, prefix)
-              }
+        val less = withResource(Scalar.fromLong(0L)) { zero =>
+          micros.lessThan(zero)
+        }
+        parts += withResource(less) { _ =>
+          withResource(Scalar.fromString(prefixStr + "-")) { negPrefix =>
+            withResource(Scalar.fromString(prefixStr)) { prefix =>
+              less.ifElse(negPrefix, prefix)
             }
           }
         }

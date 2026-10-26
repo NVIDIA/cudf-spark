@@ -20,6 +20,7 @@ spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.delta.delta42x
 
 import com.nvidia.spark.rapids.RapidsConf
+import com.nvidia.spark.rapids.delta.delta43x.Delta43xProvider
 import com.nvidia.spark.rapids.parquet.{GpuParquetMultiFilePartitionReaderFactory,
   GpuParquetPartitionReaderFactory}
 import org.apache.hadoop.conf.Configuration
@@ -52,6 +53,16 @@ class ServerSidePlannedScanSuite extends AnyFunSuite {
       plan
     }
     override def close(): Unit = { closes += 1 }
+  }
+
+  test("both providers retain upstream V2 rules alongside the server-side scan rule") {
+    val upstreamRules = DeltaV2ScanRule.rules
+    assert(upstreamRules.nonEmpty)
+    for (rules <- Seq(Delta42xProvider.getScans, Delta43xProvider.getScans)) {
+      assert(upstreamRules.keySet.subsetOf(rules.keySet))
+      assert(rules.contains(classOf[ServerSidePlannedScan]))
+      assert(rules.size == upstreamRules.size + 1)
+    }
   }
 
   test("reuse Delta's exact planning request, cached result and client lifecycle") {

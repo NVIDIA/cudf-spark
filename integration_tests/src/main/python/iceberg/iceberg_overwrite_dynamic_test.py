@@ -15,14 +15,15 @@ from typing import Callable, Any
 
 import pytest
 
-from asserts import assert_equal_with_local_sort, assert_gpu_fallback_collect
+from asserts import (assert_equal_with_local_sort, assert_gpu_fallback_collect,
+                     assert_gpu_fallback_write_sql)
 from conftest import is_iceberg_remote_catalog
 from data_gen import gen_df, copy_and_update
 from iceberg import (
     iceberg_format_versions, create_iceberg_table, iceberg_base_table_cols, iceberg_gens_list,
     get_full_table_name, iceberg_full_gens_list, iceberg_nested_write_gens_list,
     iceberg_write_enabled_conf, iceberg_unsupported_mark, overwrite_dynamic_partition_transforms,
-    supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON)
+    supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON, row_lineage_df)
 from marks import iceberg, ignore_order, allow_non_gpu, allow_non_gpu_conditional, datagen_overrides
 from spark_session import with_gpu_session, with_cpu_session, is_spark_400_or_later
 
@@ -91,6 +92,30 @@ def test_insert_overwrite_dynamic_unpartitioned_table(format_version, spark_tmp_
     do_test_insert_overwrite_dynamic(
         spark_tmp_table_factory,
         lambda table_name: create_iceberg_table(table_name, table_prop=table_prop))
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@ignore_order(local=True)
+@allow_non_gpu('OverwritePartitionsDynamicExec', 'ShuffleExchangeExec', 'SortExec', 'ProjectExec')
+def test_insert_overwrite_dynamic_encryption_fallback(spark_tmp_table_factory):
+    base_table_name = get_full_table_name(spark_tmp_table_factory)
+    for suffix in ("_cpu", "_gpu"):
+        table = base_table_name + suffix
+        create_iceberg_table(
+            table, partition_col_sql="truncate(64, id)",
+            table_prop={"format-version": "3", "encryption.key-id": "test-key"},
+            df_gen=lambda spark: row_lineage_df(spark, length=128))
+        with_cpu_session(lambda spark: row_lineage_df(spark, length=128).writeTo(table).append())
+
+    def overwrite_data(spark, table):
+        view = spark_tmp_table_factory.get()
+        row_lineage_df(spark, length=32).createOrReplaceTempView(view)
+        spark.sql(f"INSERT OVERWRITE TABLE {table} SELECT * FROM {view}")
+
+    assert_gpu_fallback_write_sql(
+        overwrite_data, lambda spark, table: spark.table(table),
+        base_table_name, ["OverwritePartitionsDynamicExec"], conf=dynamic_overwrite_conf)
 
 
 @iceberg

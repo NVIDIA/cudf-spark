@@ -1,0 +1,169 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Shim compatibility
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+
+# Fork PRs need only read access. Findings use workflow annotations, not PR writes.
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  # Metadata-only edits use their own group so they cannot cancel a useful scan.
+  group: >-
+    shim-compatibility-${{ github.event.pull_request.number }}-${{
+    github.event.action == 'edited' && !github.event.changes.base.ref && github.run_id || 'scan' }}
+  cancel-in-progress: true
+
+jobs:
+  shim-scope:
+    if: github.event.action != 'edited' || github.event.changes.base.ref
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      relevant: ${{ steps.scope.outputs.relevant }}
+    env:
+      SHIM_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+      SHIM_HEAD: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fetch current target branch
+        run: git fetch --no-tags origin "+refs/heads/${SHIM_BASE_BRANCH}:refs/remotes/origin/shim-review-base"
+      - name: Classify the complete PR diff
+        id: scope
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, 'build')
+          from check_shim_compatibility import git, git_paths, review_scope
+
+          root = Path.cwd()
+          head = os.environ['SHIM_HEAD']
+          common = git(root, 'merge-base', 'origin/shim-review-base', head)
+          # Avoid API file-count limits and retain both sides of moved sources.
+          changed = git_paths(root, 'diff', '--name-only', '--no-renames', common, head)
+          relevant = str(review_scope(changed)).lower()
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'relevant={relevant}\n')
+          print(f'Shim-related changes: {relevant} ({len(changed)} changed paths)')
+          PY
+
+  shim-compatibility:
+    needs: shim-scope
+    if: needs.shim-scope.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SHIM_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+      SHIM_HEAD: ${{ github.event.pull_request.head.sha }}
+      SHIM_REPO: ${{ github.repository }}
+      SHIM_PR: ${{ github.event.pull_request.number }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The merge checkout includes tooling from base for older PR branches.
+          # Analysis still uses the explicit PR head and freshly fetched base below.
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Fetch current target branch
+        run: git fetch --no-tags origin "+refs/heads/${SHIM_BASE_BRANCH}:refs/remotes/origin/shim-review-base"
+      - name: Check combined-tree source selection
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 build/check_shim_compatibility.py review
+          --repo "$SHIM_REPO" --pr "$SHIM_PR"
+          --head-ref "$SHIM_HEAD" --base-ref origin/shim-review-base
+          --base-branch "$SHIM_BASE_BRANCH"
+          --output-dir "$RUNNER_TEMP/shim-compatibility" --github-actions
+      - name: Publish review summary
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/shim-compatibility/report.md" ]; then
+            cat "$RUNNER_TEMP/shim-compatibility/report.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload complete review evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: shim-compatibility-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/shim-compatibility/
+          if-no-files-found: warn
+          retention-days: 14
+
+  shim-related-prs:
+    needs: shim-scope
+    if: needs.shim-scope.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Advisory setup/API failures must not fail the core check or the workflow.
+    continue-on-error: true
+    env:
+      SHIM_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+      SHIM_HEAD: ${{ github.event.pull_request.head.sha }}
+      SHIM_REPO: ${{ github.repository }}
+      SHIM_PR: ${{ github.event.pull_request.number }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Fetch current target branch
+        run: git fetch --no-tags origin "+refs/heads/${SHIM_BASE_BRANCH}:refs/remotes/origin/shim-review-base"
+      - name: Discover related PRs
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 build/check_shim_compatibility.py advisory
+          --repo "$SHIM_REPO" --pr "$SHIM_PR"
+          --head-ref "$SHIM_HEAD" --base-ref origin/shim-review-base
+          --base-branch "$SHIM_BASE_BRANCH"
+          --output-dir "$RUNNER_TEMP/shim-related-prs" --github-actions
+      - name: Publish related PR advisory
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/shim-related-prs/report.md" ]; then
+            cat "$RUNNER_TEMP/shim-related-prs/report.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '::warning title=Related PR advisory::No report was produced; core result is unchanged'
+            echo 'Related PR advisory unavailable; core result is unchanged.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload related PR evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: shim-related-prs-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/shim-related-prs/
+          if-no-files-found: warn
+          retention-days: 14

@@ -27,7 +27,6 @@ import com.nvidia.spark.rapids.iceberg.data.{DefaultDeleteLoader, GpuDeleteFileI
   GpuDeleteFilter}
 import com.nvidia.spark.rapids.iceberg.parquet._
 import org.apache.iceberg._
-import org.apache.iceberg.encryption.EncryptedFiles
 import org.apache.iceberg.mapping.NameMappingParser
 
 import org.apache.spark.sql.connector.read.PartitionReader
@@ -116,15 +115,8 @@ class GpuIcebergPartitionReader(
       .map(t => t.asFileScanTask())
       .toSeq
 
-    val encryptedFiles = tasks.flatMap(t => Seq(t.file()) ++ t.deletes().asScala)
-      .map(f => EncryptedFiles.encryptedInput(
-        fileIO.newInputFile(locationOf(f)),
-        f.keyMetadata()))
-
-    val inputFiles = table.encryption()
-      .decrypt(encryptedFiles.asJava)
-      .asScala
-      .map(f => f.location() -> rapidsFileIO.newInputFile(f))
+    val inputFiles = tasks.flatMap(t => Seq(t.file()) ++ t.deletes().asScala)
+      .map(f => locationOf(f) -> rapidsFileIO.newInputFile(locationOf(f)))
       .toMap
 
     val taskMap = toMapStrict(tasks.map(t => {

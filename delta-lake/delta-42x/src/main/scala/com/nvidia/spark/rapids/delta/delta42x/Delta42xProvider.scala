@@ -49,7 +49,7 @@ object Delta42xProvider extends DeltaProviderBase with Logging {
     val rule = GpuOverrides.scan[ServerSidePlannedScan](
       "Delta server-side planned Parquet scan",
       (scan, conf, parent, r) => new ServerSidePlannedScanMeta(scan, conf, parent, r))
-    Map(classOf[ServerSidePlannedScan] -> rule)
+    DeltaV2ScanRule.rules + (classOf[ServerSidePlannedScan] -> rule)
   }
 
   override protected def getCDFRelationStrategy = Delta42xCDFRelationStrategy

@@ -699,14 +699,14 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
    * 2. The temporary deletion vectors introduce extra overhead, so it may be better to fall back
    * when the changeset is too large.
    *
-   * See [[DeltaSpark400DB173Provider.getReadFileFormat]] for the reader-mode capability table
+   * See the runtime provider reader selection for the reader-mode capability table
    * and the discovery-reader mapping that requires these checks before reader selection.
    */
   def shouldFallback(): Boolean = {
     // The unmodified-row rewrite must apply temporary DVs to exclude the old versions of
-    // updated/deleted rows. The DBR 17.3 legacy readers ignore those DVs and can copy old rows
+    // updated/deleted rows. The DBR legacy readers ignore those DVs and can copy old rows
     // alongside their replacements. Honor disabled native DV processing for every reader mode.
-    if (!DeltaSpark400DB173Provider.isPushDVPredicateDownEnabled(context.rapidsConf)) {
+    if (!DeltaReadSupport.isPushDVPredicateDownEnabled(context.rapidsConf)) {
       logWarning("Low shuffle merge requires native deletion-vector pushdown, " +
         "fallback to classic GPU merge.")
       return true

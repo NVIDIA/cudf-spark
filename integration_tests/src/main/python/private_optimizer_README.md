@@ -57,6 +57,11 @@ All modules carry `@pytest.mark.private_optimizer`, so the whole area runs with:
      required_on_markers=())`
      — runs the same comparison but asserts a runtime-specific no-op path where
      the marker is absent from both plans.
+   - `assert_rule_noop_on_gpu(fn, on_conf, off_conf, required_on_markers=(),
+     physical=False)`
+     — for a skipped path where the runtime produces the rule's marker natively,
+     so the marker cannot discriminate. Asserts the ON-GPU plan is structurally
+     identical to the OFF-GPU plan and the OFF-CPU and ON-GPU results match.
 3. **Decorate** the test with `@pytest.mark.private_optimizer`. Add
    `@approximate_float` only when the rule
    changes floating-point evaluation order — that is enough for floating-point

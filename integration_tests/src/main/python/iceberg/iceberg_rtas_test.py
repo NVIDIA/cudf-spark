@@ -16,14 +16,15 @@ from typing import Callable, Dict, Optional
 
 import pytest
 
-from asserts import assert_equal_with_local_sort, assert_gpu_fallback_collect
+from asserts import (assert_equal_with_local_sort, assert_gpu_fallback_collect,
+                     assert_gpu_fallback_write_sql)
 from conftest import is_iceberg_remote_catalog
 from data_gen import gen_df, copy_and_update
 from iceberg import (
     iceberg_format_versions, create_iceberg_table, iceberg_base_table_cols, iceberg_gens_list,
     iceberg_full_gens_list, iceberg_nested_write_gens_list, get_full_table_name,
     iceberg_write_enabled_conf, iceberg_unsupported_mark, _build_tblprops, rtas_partition_transforms,
-    supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON)
+    supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON, row_lineage_df)
 from marks import iceberg, ignore_order, allow_non_gpu, allow_non_gpu_conditional, datagen_overrides
 from spark_session import with_gpu_session, with_cpu_session, is_spark_400_or_later
 
@@ -106,6 +107,29 @@ def test_rtas_unpartitioned_table(format_version, spark_tmp_table_factory):
     df_gen = lambda spark: gen_df(spark, list(zip(iceberg_base_table_cols, iceberg_gens_list)))
 
     _assert_gpu_equals_cpu_rtas(spark_tmp_table_factory, df_gen, table_prop)
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@ignore_order(local=True)
+@allow_non_gpu('AtomicReplaceTableAsSelectExec', 'OverwriteByExpressionExec')
+def test_rtas_encryption_fallback(spark_tmp_table_factory):
+    base_table_name = get_full_table_name(spark_tmp_table_factory)
+    props = {"format-version": "3", "encryption.key-id": "test-key"}
+    for suffix in ("_cpu", "_gpu"):
+        table = base_table_name + suffix
+        create_iceberg_table(
+            table, table_prop=props, df_gen=lambda spark: row_lineage_df(spark, length=128))
+        with_cpu_session(lambda spark: row_lineage_df(spark, length=128).writeTo(table).append())
+
+    def run_rtas(spark, table):
+        _execute_rtas(
+            spark, table, spark_tmp_table_factory,
+            lambda sp: row_lineage_df(sp, start=128, length=32), props, ret=False)
+
+    assert_gpu_fallback_write_sql(
+        run_rtas, lambda spark, table: spark.table(table),
+        base_table_name, ["AtomicReplaceTableAsSelectExec"], conf=iceberg_write_enabled_conf)
 
 
 @iceberg

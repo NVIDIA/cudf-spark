@@ -51,13 +51,11 @@ import org.apache.spark.sql.types.{MetadataBuilder, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
- * GPU Delta Parquet file format for Databricks 17.3.
+ * GPU Delta Parquet file format for Databricks 17.3 and 18.3.
  *
- * DB-17.3 uses a fundamentally different DV mechanism than DB-14.3:
- * - No broadcastDvMap / broadcastHadoopConf
- * - Per-file DV via PartitionedFile.otherConstantMetadataColumnValues or TahoeFileIndex metadata
- * - The CPU constructor starts with (protocol, metadata, ...); this GPU wrapper also carries the
- *   relation so it can inspect DBR file-index metadata.
+ * Applies Delta column mapping and validates GPU scan support. The relation supplies file-index
+ * metadata for deletion-vector eligibility checks; per-file bitmap lookup is handled by the
+ * shared deletion-vector utilities.
  */
 case class GpuDeltaParquetFileFormat(
     @transient relation: HadoopFsRelation,
@@ -265,7 +263,7 @@ object GpuDeltaParquetFileFormat {
       field.name == EDGE_COMPUTED_COLUMN_SKIP_ROW ||
         field.name == DeltaParquetFileFormat.IS_ROW_DELETED_COLUMN_NAME
     }
-    val isGpuDvFilterScan = DeltaSpark400DB173Provider.isDVScan(meta)
+    val isGpuDvFilterScan = DeltaReadSupport.isDVScan(meta)
     if (requiredSchema.exists { field =>
       field.name.startsWith("_databricks_internal") &&
         field.name != EDGE_COMPUTED_COLUMN_SKIP_ROW
@@ -288,13 +286,13 @@ object GpuDeltaParquetFileFormat {
     }
     val hasRowIndexFilters = hasRowIndexFiltersInTahoeFileIndex(meta.wrapped.relation)
     if (hasDeletionVectorSkipRowColumn &&
-        DeltaSpark400DB173Provider.isDmlMetricDVScan(meta)) {
+        DeltaReadSupport.isDmlMetricDVScan(meta)) {
       meta.willNotWorkOnGpu(
-        "Delta deletion vector skip-row columns are not supported on GPU for DB-17.3")
+        "Delta deletion vector skip-row columns are not supported on GPU for DBR 17.3/18.3")
     }
     if (hasUnsupportedRowIndexFiltersInTahoeFileIndex(meta.wrapped.relation)) {
       meta.willNotWorkOnGpu(
-        "DB-17.3 native deletion vector reads on GPU support only IF_CONTAINED " +
+        "DBR 17.3/18.3 native deletion vector reads on GPU support only IF_CONTAINED " +
           "row-index filters")
     }
     if (isDeletionVectorRead(format) ||
@@ -303,36 +301,36 @@ object GpuDeltaParquetFileFormat {
         hasRowIndexFilters) {
       if (format.isCDCRead) {
         meta.willNotWorkOnGpu(
-          "CDC reads with deletion vectors are not yet supported on GPU for DB-17.3")
+          "CDC reads with deletion vectors are not yet supported on GPU for DBR 17.3/18.3")
       }
-      if (!DeltaSpark400DB173Provider.isPushDVPredicateDownEnabled(meta.conf)) {
+      if (!DeltaReadSupport.isPushDVPredicateDownEnabled(meta.conf)) {
         meta.willNotWorkOnGpu(
-          "DB-17.3 deletion vector reads on GPU require native cuDF deletion-vector " +
+          "DBR 17.3/18.3 deletion vector reads on GPU require native cuDF deletion-vector " +
             "support with spark.databricks.delta.deletionVectors.useMetadataRowIndex " +
             "and spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled set to true")
       }
       if (!format.optimizationsEnabled) {
         meta.willNotWorkOnGpu(
-          "DB-17.3 native deletion vector reads require Delta scan optimizations enabled")
+          "DBR 17.3/18.3 native deletion vector reads require Delta scan optimizations enabled")
       }
     }
     if (format.generateDeltaFileInScanId) {
       meta.willNotWorkOnGpu(
-        "Delta file-in-scan metadata columns are not supported on GPU for DB-17.3")
+        "Delta file-in-scan metadata columns are not supported on GPU for DBR 17.3/18.3")
     }
     if (format.nullableRowTrackingConstantFields) {
       meta.willNotWorkOnGpu(
-        "nullable Delta row-tracking constant fields are not supported on GPU for DB-17.3")
+        "nullable Delta row-tracking constant fields are not supported on GPU for DBR 17.3/18.3")
     }
     if (format.nullableRowTrackingGeneratedFields) {
       meta.willNotWorkOnGpu(
-        "nullable Delta row-tracking generated fields are not supported on GPU for DB-17.3")
+        "nullable Delta row-tracking generated fields are not supported on GPU for DBR 17.3/18.3")
     }
   }
 
   /**
    * Convert a CPU Delta Parquet file format to the GPU version.
-   * Called from DatabricksDeltaProviderBase.getReadFileFormat.
+   * Preserves the CPU format settings and relation for reader construction.
    */
   def convertToGpu(relation: HadoopFsRelation): GpuDeltaParquetFileFormat = {
     val fmt = relation.fileFormat.asInstanceOf[DeltaParquetFileFormat]
