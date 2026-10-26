@@ -176,6 +176,7 @@ Generated on 2026-10-26
 ### PRs
 |||
 |:---|:---|
+|[#16499](https://github.com/NVIDIA/cudf-spark/pull/16499)|Fix Iceberg metadata-only file combining|
 |[#16483](https://github.com/NVIDIA/cudf-spark/pull/16483)|Update JNI to 26.10.1 and backport Spark 3.3 test fixes|
 |[#16467](https://github.com/NVIDIA/cudf-spark/pull/16467)|Fix missing rows when combining batches with empty columns in multithreaded Parquet readers|
 |[#16410](https://github.com/NVIDIA/cudf-spark/pull/16410)|[DOC] correct 26.10 config version metadata and source links|
