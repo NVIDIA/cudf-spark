@@ -36,7 +36,6 @@ import ai.rapids.cudf.{ColumnVector => CudfColumnVector}
 import com.nvidia.spark.rapids.{GpuColumnVector, RapidsConf}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.iceberg.parquet._
-import com.nvidia.spark.rapids.iceberg.parquet.converter.FromIcebergShaded.unshade
 import com.nvidia.spark.rapids.parquet.ParquetFileInfoWithBlockMeta
 import com.nvidia.spark.rapids.spill.SpillFramework
 import org.apache.hadoop.fs.Path
@@ -98,7 +97,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       filePath = new Path("/test/file.parquet"),
       blocks = Seq(block),
       partValues = InternalRow.empty,
-      schema = unshade(shadedSchema),
+      schema = ShimUtils.getParquetUnshader().unshade(shadedSchema),
       readSchema = StructType(Seq.empty),
       dateRebaseMode = null,
       timestampRebaseMode = null,
@@ -126,7 +125,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       filePath = new Path("/test/file.parquet"),
       blocks = blocks,
       partValues = InternalRow.empty,
-      schema = unshade(shadedSchema),
+      schema = ShimUtils.getParquetUnshader().unshade(shadedSchema),
       readSchema = StructType(Seq.empty),
       dateRebaseMode = null,
       timestampRebaseMode = null,

@@ -55,8 +55,8 @@ import org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
 
 
-/** Common Parquet conversions shared by all supported library versions. */
-class ParquetTypeConverter {
+/** Common shaded-to-unshaded Parquet schema and footer conversions. */
+class ParquetUnshader {
   def unshade(columnOrder: ShadedColumnOrder): ColumnOrder = {
     if (columnOrder == null) {
       return null

@@ -14,15 +14,9 @@
  * limitations under the License.
  */
 
-/*** spark-rapids-shim-json-lines
-{"spark": "402"}
-{"spark": "403"}
-{"spark": "404"}
-spark-rapids-shim-json-lines ***/
+package com.nvidia.spark.rapids.iceberg.iceberg110x;
 
-package com.nvidia.spark.rapids.iceberg.iceberg111x
+import com.nvidia.spark.rapids.iceberg.parquet.converter.ParquetUnshader;
 
-import com.nvidia.spark.rapids.iceberg.parquet.converter.ParquetTypeConverter
-
-// Spark 4.0's unshaded Parquet does not expose the Variant logical type.
-object VariantUnshadeShim extends ParquetTypeConverter
+/** Inherits the common Parquet conversions for Iceberg 1.10.x. */
+public final class ParquetUnshaderImpl extends ParquetUnshader {}

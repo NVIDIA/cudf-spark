@@ -23,7 +23,7 @@ package org.apache.iceberg.spark
 
 import com.nvidia.spark.rapids.SchemaUtils._
 import com.nvidia.spark.rapids.iceberg.ShimUtils
-import com.nvidia.spark.rapids.iceberg.parquet.converter.FromIcebergShaded
+import com.nvidia.spark.rapids.iceberg.parquet.converter.ParquetUnshader
 import org.apache.iceberg.Schema
 import org.apache.iceberg.parquet.ParquetSchemaUtil
 import org.apache.iceberg.shaded.org.apache.parquet.schema.{LogicalTypeAnnotation => ShadedLogicalTypeAnnotation, Types => ShadedTypes}
@@ -79,7 +79,7 @@ class GpuIcebergVariantSchemaSuite extends AnyFunSuite {
       .required(BINARY).named("value")
       .named("variant_value")
       .named("variant_schema")
-    val unshaded = ShimUtils.unshadeParquetSchema(shaded)
+    val unshaded = ShimUtils.getParquetUnshader().unshade(shaded)
       .asGroupType().getType("variant_value").getLogicalTypeAnnotation
       .asInstanceOf[LogicalTypeAnnotation.VariantLogicalTypeAnnotation]
 
@@ -88,7 +88,7 @@ class GpuIcebergVariantSchemaSuite extends AnyFunSuite {
 
   test("the selected converter handles Variant annotations throughout a Parquet schema") {
     val shadedSchema = ParquetSchemaUtil.convert(variantSchema, "variant_schema")
-    val unshadedSchema = ShimUtils.unshadeParquetSchema(shadedSchema)
+    val unshadedSchema = ShimUtils.getParquetUnshader().unshade(shadedSchema)
     val sparkSchema = new ParquetToSparkSchemaConverter(
       false, true, true, true, false).convert(unshadedSchema)
 
@@ -120,7 +120,7 @@ class GpuIcebergVariantSchemaSuite extends AnyFunSuite {
       .named("payload")
       .named("variant_schema")
 
-    assert(ShimUtils.unshadeParquetSchema(shaded) == expected)
+    assert(ShimUtils.getParquetUnshader().unshade(shaded) == expected)
   }
 
   test("the selected converter preserves ordinary nested Parquet schemas") {
@@ -134,6 +134,7 @@ class GpuIcebergVariantSchemaSuite extends AnyFunSuite {
         Types.NestedField.required(8, "uuid", Types.UUIDType.get()))))
     val shadedSchema = ParquetSchemaUtil.convert(schema, "ordinary_schema")
 
-    assert(ShimUtils.unshadeParquetSchema(shadedSchema) == FromIcebergShaded.unshade(shadedSchema))
+    assert(ShimUtils.getParquetUnshader().unshade(shadedSchema) ==
+      new ParquetUnshader().unshade(shadedSchema))
   }
 }
