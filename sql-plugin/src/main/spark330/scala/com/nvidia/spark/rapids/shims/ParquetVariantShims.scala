@@ -42,6 +42,7 @@ spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
 
+import com.nvidia.spark.rapids.TypeSig
 import org.apache.hadoop.conf.Configuration
 
 import org.apache.spark.sql.internal.SQLConf
@@ -53,6 +54,8 @@ import org.apache.spark.sql.types.DataType
  * In Spark 4.1.0+, we need to set this configuration for ParquetWriteSupport.
  */
 object ParquetVariantShims {
+  def additionalIcebergReadSupportedTypes: TypeSig = TypeSig.none
+
   def setupParquetVariantConfig(conf: Configuration, sqlConf: SQLConf): Unit = {
     // No-op for Spark versions before 4.1.0
     // PARQUET_ANNOTATE_VARIANT_LOGICAL_TYPE doesn't exist

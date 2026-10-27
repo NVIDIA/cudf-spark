@@ -27,7 +27,7 @@ package com.nvidia.spark.rapids.shims
 
 import scala.util.Try
 
-import com.nvidia.spark.rapids.ShimReflectionUtils
+import com.nvidia.spark.rapids.{ShimReflectionUtils, TypeSig}
 import org.apache.hadoop.conf.Configuration
 
 import org.apache.spark.sql.execution.datasources.VariantMetadata
@@ -38,6 +38,8 @@ import org.apache.spark.sql.types.DataType
  * Shim for Parquet variant-related configurations in Spark 4.0.x.
  */
 object ParquetVariantShims {
+  def additionalIcebergReadSupportedTypes: TypeSig = TypeSig.none
+
   def setupParquetVariantConfig(conf: Configuration, sqlConf: SQLConf): Unit = {
     // No-op because PARQUET_ANNOTATE_VARIANT_LOGICAL_TYPE does not exist in Spark 4.0.x.
   }
