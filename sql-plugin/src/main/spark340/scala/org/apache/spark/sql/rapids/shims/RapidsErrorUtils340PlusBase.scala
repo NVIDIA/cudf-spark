@@ -36,6 +36,7 @@
 {"spark": "402"}
 {"spark": "403"}
 {"spark": "404"}
+{"spark": "410db183"}
 {"spark": "411"}
 {"spark": "412"}
 {"spark": "413"}
@@ -85,11 +86,7 @@ trait RapidsErrorUtils340PlusBase extends RapidsErrorUtilsFor330plus with Rapids
   def cannotChangeDecimalPrecisionError(
       value: Decimal,
       toType: DecimalType,
-      context: SQLQueryContext = null): ArithmeticException = {
-    QueryExecutionErrors.cannotChangeDecimalPrecisionError(
-      value, toType.precision, toType.scale, context
-    )
-  }
+      context: SQLQueryContext = null): ArithmeticException
 
   def overflowInIntegralDivideError(context: SQLQueryContext = null): ArithmeticException = {
     QueryExecutionErrors.arithmeticOverflowError(

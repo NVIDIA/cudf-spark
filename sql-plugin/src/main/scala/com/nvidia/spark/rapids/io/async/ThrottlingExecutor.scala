@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,16 +19,6 @@ package com.nvidia.spark.rapids.io.async
 import java.util.concurrent.{Callable, ExecutorService, Future, TimeUnit}
 
 import org.apache.spark.sql.rapids.{ColumnarWriteTaskStatsTracker, GpuWriteTaskStatsTracker}
-
-
-/**
- * Stats related classes used by ThrottlingExecutor
- */
-case class ThrottlingExecutorStats (
-    var numTasksScheduled: Int,
-    var accumulatedThrottleTimeNs: Long,
-    var minThrottleTimeNs: Long,
-    var maxThrottleTimeNs: Long)
 
 /**
  * Only for GpuWriteTaskStatsTracker cases

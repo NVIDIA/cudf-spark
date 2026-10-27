@@ -230,11 +230,11 @@ private[rapids] object GpuComparisonAndAggregateExpressionOverrides {
       ExprChecksImpl(
         ExprChecks.reductionAndGroupByAgg(
           (TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL + TypeSig.STRUCT +
-            TypeSig.ARRAY).nested(),
+            TypeSig.ARRAY + TypeSig.BINARY).nested(),
           TypeSig.orderable,
           Seq(ParamCheck("input",
             (TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL + TypeSig.STRUCT +
-              TypeSig.ARRAY).nested(),
+              TypeSig.ARRAY + TypeSig.BINARY).nested(),
             TypeSig.orderable))).asInstanceOf[ExprChecksImpl].contexts
           ++
           ExprChecks.windowOnly(
@@ -249,11 +249,11 @@ private[rapids] object GpuComparisonAndAggregateExpressionOverrides {
       ExprChecksImpl(
         ExprChecks.reductionAndGroupByAgg(
           (TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL + TypeSig.STRUCT +
-              TypeSig.ARRAY).nested(),
+              TypeSig.ARRAY + TypeSig.BINARY).nested(),
           TypeSig.orderable,
           Seq(ParamCheck("input",
             (TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL + TypeSig.STRUCT +
-              TypeSig.ARRAY).nested(),
+              TypeSig.ARRAY + TypeSig.BINARY).nested(),
             TypeSig.orderable))).asInstanceOf[ExprChecksImpl].contexts
           ++
           ExprChecks.windowOnly(

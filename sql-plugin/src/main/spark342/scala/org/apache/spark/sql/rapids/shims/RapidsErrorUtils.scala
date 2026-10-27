@@ -30,5 +30,5 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.shims
 
-object RapidsErrorUtils extends RapidsErrorUtils340PlusBase
+object RapidsErrorUtils extends RapidsErrorUtils340To420Base
   with SequenceSizeTooLongUnsuccessfulErrorBuilder with ArrayInvalidArgumentErrorUtils

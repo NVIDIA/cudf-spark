@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package com.nvidia.spark.rapids.shuffle
 import java.util.concurrent.{ConcurrentHashMap, Executor}
 
 import scala.collection.mutable.ArrayBuffer
+import scala.util.control.NonFatal
 
 import ai.rapids.cudf.DeviceMemoryBuffer
 import com.nvidia.spark.rapids._
@@ -133,6 +134,15 @@ class RapidsShuffleClient(
      */
     case class HandleBounceBufferReceive(tx: Transaction,
                                          bufferReceiveState: BufferReceiveState)
+
+    /**
+     * When the server fails a transfer request, this event ends its receive state on the copy
+     * thread, after any window that thread still has to consume for it.
+     *
+     * @param bufferReceiveState the state of the failed request
+     * @param reason the error for the readers of its requests that will not arrive
+     */
+    case class HandleTransferFailure(bufferReceiveState: BufferReceiveState, reason: String)
   }
 
   import ShuffleClientOps._
@@ -146,6 +156,8 @@ class RapidsShuffleClient(
         doIssueBufferReceives(bufferReceiveState)
       case HandleBounceBufferReceive(tx, bufferReceiveState) =>
         doHandleBounceBufferReceive(tx, bufferReceiveState)
+      case HandleTransferFailure(bufferReceiveState, reason) =>
+        doHandleTransferFailure(bufferReceiveState, reason)
     }
   }
 
@@ -301,15 +313,30 @@ class RapidsShuffleClient(
             withResource(tx.releaseMessage()) { mtb =>
               // make sure all bufferTxs are still valid (e.g. resp says that they have STARTED)
               val transferResponse = ShuffleMetadata.getTransferResponse(mtb.getBuffer())
-              (0 until transferResponse.responsesLength()).foreach(r => {
-                val response = transferResponse.responses(r)
-                if (response.state() != TransferState.STARTED) {
-                  // we could either re-issue the request, cancelling and releasing memory
-                  // or we could re-issue, and leave the old receive waiting
-                  // for now, leaving the old receive waiting.
-                  throw new IllegalStateException("NOT IMPLEMENTED")
-                }
-              })
+              val error = transferResponse.error()
+              if (error != null) {
+                // read before the response's buffer is released
+                val failedCount = transferResponse.responsesLength()
+                val named = (0 until math.min(failedCount, RapidsShuffleClient.MAX_BUFFERS_NAMED))
+                  .map(r => transferResponse.responses(r).bufferId())
+                val more =
+                  if (failedCount > named.size) s" and ${failedCount - named.size} more" else ""
+                val buffers =
+                  if (named.isEmpty) "" else s" for shuffle buffers ${named.mkString(", ")}$more"
+                asyncOnCopyThread(HandleTransferFailure(toIssue,
+                  s"Executor ${connection.getPeerExecutorId} failed the transfer request" +
+                    s"$buffers: ${error.reason()}"))
+              } else {
+                (0 until transferResponse.responsesLength()).foreach(r => {
+                  val response = transferResponse.responses(r)
+                  if (response.state() != TransferState.STARTED) {
+                    // we could either re-issue the request, cancelling and releasing memory
+                    // or we could re-issue, and leave the old receive waiting
+                    // for now, leaving the old receive waiting.
+                    throw new IllegalStateException("NOT IMPLEMENTED")
+                  }
+                })
+              }
             }
           case _ =>
             toIssue.errorOccurred(tx.getErrorMessage.getOrElse("TransferRequest failed"))
@@ -373,6 +400,7 @@ class RapidsShuffleClient(
    */
   def doHandleBounceBufferReceive(tx: Transaction, 
       bufferReceiveState: BufferReceiveState): Unit = {
+    var moreWindows = false
     try {
       withResource(tx) { _ =>
         tx.getStatus match {
@@ -408,6 +436,7 @@ class RapidsShuffleClient(
               } else {
                 logDebug(s"BufferReceiveState: " +
                   s"${TransportUtils.toHex(bufferReceiveState.id)} is NOT done, continuing.")
+                moreWindows = true
               }
             }
           case TransactionStatus.Error =>
@@ -423,6 +452,47 @@ class RapidsShuffleClient(
             s"Error while handling buffer receive for BRS: " +
             s"${TransportUtils.toHex(bufferReceiveState.id)}", t)
         }
+    }
+    if (moreWindows) {
+      // A request that the server failed while this window was on its way ends here, outside
+      // the catch above, which would close the state a second time.
+      endIfFailed(bufferReceiveState, bufferReceiveState.maybeTakeFailure())
+    }
+  }
+
+  /**
+   * Ends the receive state of a request that the server failed. While a window for it is left
+   * to consume, `doHandleBounceBufferReceive` ends the state after consuming the last one.
+   */
+  private[this] def doHandleTransferFailure(
+      bufferReceiveState: BufferReceiveState,
+      reason: String): Unit =
+    endIfFailed(bufferReceiveState, bufferReceiveState.serverFailed(reason))
+
+  /**
+   * Ends a receive state if `failure` hands over a failed transfer. A non-fatal error from
+   * ending it is logged, since the copy thread's handlers must not throw.
+   */
+  private[this] def endIfFailed(
+      bufferReceiveState: BufferReceiveState,
+      failure: => Option[FailedTransfer]): Unit = {
+    try {
+      failure.foreach(endFailedTransfer(bufferReceiveState, _))
+    } catch {
+      case NonFatal(t) =>
+        logError(s"Error while ending BRS ${TransportUtils.toHex(bufferReceiveState.id)}, " +
+          "whose request the server failed", t)
+    }
+  }
+
+  /** Releases a receive state that the server failed, failing each reader still waiting on it. */
+  private[this] def endFailedTransfer(
+      bufferReceiveState: BufferReceiveState,
+      failure: FailedTransfer): Unit = {
+    // the throttle reserved these bytes for the requests that will not arrive
+    transport.doneBytesInFlight(failure.notReceived.map(_.getLength).sum)
+    withResource(bufferReceiveState) { _ =>
+      failure.notReceived.map(_.handler).distinct.foreach(_.transferError(failure.reason))
     }
   }
 
@@ -472,4 +542,9 @@ class RapidsShuffleClient(
     // completed, but it will also remove `handler` from internal tracking in `transport`.
     transport.cancelPending(handler)
   }
+}
+
+object RapidsShuffleClient {
+  // how many failed buffers a reader's error names before it only counts the rest
+  private val MAX_BUFFERS_NAMED = 5
 }

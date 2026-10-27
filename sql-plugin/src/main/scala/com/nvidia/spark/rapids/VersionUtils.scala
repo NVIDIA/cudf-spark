@@ -22,33 +22,18 @@ import org.apache.spark.internal.Logging
 
 object VersionUtils extends Logging {
 
-  lazy val isSpark320OrLater: Boolean = cmpSparkVersion(3, 2, 0) >= 0
+  lazy val isSpark320OrLater: Boolean = ShimVersionUtils.isSpark320OrLater
 
-  lazy val isSpark400OrLater: Boolean = cmpSparkVersion(4, 0, 0) >= 0
+  lazy val isSpark400OrLater: Boolean = ShimVersionUtils.isSpark400OrLater
 
-  lazy val isSpark: Boolean = {
-    ShimLoader.getShimVersion.isInstanceOf[SparkShimVersion]
-  }
+  lazy val isSpark: Boolean = ShimVersionUtils.isSpark
 
-  lazy val isDataBricks: Boolean = {
-    ShimLoader.getShimVersion.isInstanceOf[DatabricksShimVersion]
-  }
+  lazy val isDataBricks: Boolean = ShimVersionUtils.isDataBricks
 
-  lazy val isCloudera: Boolean = {
-    ShimLoader.getShimVersion.isInstanceOf[ClouderaShimVersion]
-  }
+  lazy val isCloudera: Boolean = ShimVersionUtils.isCloudera
 
-  def cmpSparkVersion(major: Int, minor: Int, bugfix: Int): Int = {
-    val sparkShimVersion = ShimLoader.getShimVersion
-    val (sparkMajor, sparkMinor, sparkBugfix) = sparkShimVersion match {
-      case SparkShimVersion(a, b, c) => (a, b, c)
-      case DatabricksShimVersion(a, b, c, _) => (a, b, c)
-      case ClouderaShimVersion(a, b, c, _) => (a, b, c)
-    }
-    val fullVersion = ((major.toLong * 1000) + minor) * 1000 + bugfix
-    val sparkFullVersion = ((sparkMajor.toLong * 1000) + sparkMinor) * 1000 + sparkBugfix
-    sparkFullVersion.compareTo(fullVersion)
-  }
+  def cmpSparkVersion(major: Int, minor: Int, bugfix: Int): Int =
+    ShimVersionUtils.cmpSparkVersion(major, minor, bugfix)
 
   /**
    * Get the version used by JNI interface

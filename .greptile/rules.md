@@ -3,6 +3,39 @@
 For full coding conventions, build commands, code examples, and
 shim layer architecture, see `AGENTS.md` at the repo root.
 
+## Shim compatibility review
+
+For versioned sources, shared shim callers, or Spark/Databricks profile/matrix
+changes, follow `.agents/skills/check-shim-compatibility/SKILL.md`. Read the
+current head's `shim-compatibility` and `shim-related-prs` advisory summaries and artifacts;
+verify head/base identities. If tools cannot retrieve the report or execute the
+read-only helper, state the missing evidence instead of claiming a clean scan.
+
+Cross-PR discovery runs automatically as an independent advisory and does not
+gate the core combined-tree check. Inspect its matches targeting the same branch:
+
+- Open PRs: all authors, including Drafts, without an age limit.
+- Merged PRs: from the base actually covered by the latest applicable successful
+  validation through the fetched current target branch. If that validated base
+  or coverage is unknown, use the PR/target-branch common ancestor.
+
+Prioritize related merges from the last 48 hours, but retain older changes in
+that commit range. Earlier green premerge checks justify a narrower range only
+when they included those changes and covered the affected profiles/shim APIs.
+Pure documentation overlaps are excluded. For bounded open-peer joint checks,
+report `NEW_INTERACTION_FINDINGS` with exact profile/symbol/file evidence and
+distinguish existing individual findings. Inspect combination conflicts and
+explicitly deferred/incomplete candidates separately. No new static interaction
+findings does not establish full compatibility; do not attribute stale evidence.
+Comment on confirmed new gaps with the file, symbol, profile, related PR links,
+and observed evidence. Keep unchanged base findings separate. An association or
+Draft alone is not a defect. Advisory `INCOMPLETE` means discovery evidence is
+missing; report it without invalidating a completed core result. Core `INCOMPLETE`
+is not a pass; static success is not compilation. Relevant base/head movement
+requires a rerun of affected evidence. With an execution
+environment such as TREX available, the same helper can produce the evidence;
+these rules do not enable that environment by themselves.
+
 ## Review Checklist
 
 - [ ] C1: Resource leaks — AutoCloseable not closed on exception paths; use withResource/closeOnExcept/safeClose, never bare .close() (see AGENTS.md § Resource management)

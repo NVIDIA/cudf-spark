@@ -21,6 +21,7 @@ import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.ShimLoader;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
 import com.nvidia.spark.rapids.iceberg.parquet.ColumnAction;
+import com.nvidia.spark.rapids.iceberg.parquet.converter.ParquetUnshader;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 
 import org.apache.hadoop.fs.Path;
@@ -78,8 +79,13 @@ public class ShimUtils {
         return IMPL.locationOf(f);
     }
 
+    public static ParquetUnshader getParquetUnshader() {
+        return IMPL.getParquetUnshader();
+    }
+
+    /** Retains the schema conversion entry point used by dependent readers. */
     public static org.apache.parquet.schema.MessageType unshadeParquetSchema(MessageType schema) {
-        return IMPL.unshadeParquetSchema(schema);
+        return getParquetUnshader().unshade(schema);
     }
 
     public static int formatVersion(Table table) {

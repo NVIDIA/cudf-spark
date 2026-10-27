@@ -29,7 +29,7 @@ import java.io.IOException;
 import java.util.Objects;
 
 /**
- * Implementation {@link RapidsFileIO} using the hadoop file system.
+ * Implementation {@code RapidsFileIO} using the hadoop file system.
  * <br/>
  */
 public class HadoopFileIO implements RapidsFileIO {

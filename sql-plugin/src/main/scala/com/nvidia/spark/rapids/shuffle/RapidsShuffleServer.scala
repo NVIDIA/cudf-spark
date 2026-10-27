@@ -16,21 +16,25 @@
 
 package com.nvidia.spark.rapids.shuffle
 
-import java.util.concurrent.{ConcurrentLinkedQueue, Executor, TimeUnit}
+import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, Executor, TimeUnit}
 
+import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
+import scala.util.control.NonFatal
 
 import ai.rapids.cudf.{Cuda, MemoryBuffer}
-import com.nvidia.spark.rapids.{NvtxRegistry, RapidsConf, RapidsShuffleHandle, ShuffleMetadata}
-import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.{NvtxRegistry, RapidsConf, RapidsShuffleHandle, ShuffleBufferCatalog,
+  ShuffleMetadata}
+import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.format.TableMeta
 
 import org.apache.spark.internal.Logging
-import org.apache.spark.shuffle.rapids.RapidsShuffleSendPrepareException
+import org.apache.spark.shuffle.rapids.{RapidsShuffleSendPrepareException,
+  ShuffleOutputGoneException}
 import org.apache.spark.sql.rapids.GpuShuffleEnv
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
-import org.apache.spark.storage.{BlockManagerId, ShuffleBlockBatchId}
+import org.apache.spark.storage.{BlockManagerId, ShuffleBlockBatchId, ShuffleBlockId}
 
 /**
  * Trait used for the server to get buffer metadata (for metadata requests), and
@@ -47,11 +51,38 @@ trait RapidsShuffleRequestHandler {
   def getShuffleBufferMetas(shuffleBlockBatchId: ShuffleBlockBatchId): Seq[TableMeta]
 
   /**
-   * Acquires (locks w.r.t. the memory tier) a [[RapidsBuffer]] corresponding to a table id.
+   * Acquires (locks w.r.t. the memory tier) a `RapidsBuffer` corresponding to a table id.
    * @param tableId the unique id for a table in the catalog
-   * @return a [[RapidsBuffer]] which is reference counted, and should be closed by the acquirer
+   * @return a `RapidsBuffer` which is reference counted, and should be closed by the acquirer
    */
   def getShuffleHandle(tableId: Int): RapidsShuffleHandle
+
+  /**
+   * Whether the buffer behind a handle that `getShuffleHandle(tableId)` returned has been
+   * removed since, which tells a failure to materialize a buffer that is gone from other
+   * failures. Asked only after a materialization failed.
+   * @param tableId the table id the handle was looked up with
+   * @param handle the handle `getShuffleHandle` returned
+   * @return true if the buffer is gone, false if it is still held or this cannot tell
+   */
+  def isShuffleBufferRemoved(tableId: Int, handle: RapidsShuffleHandle): Boolean = false
+}
+
+/** The request handler a shuffle manager gives its server: lookups in its executor's catalog. */
+class CatalogShuffleRequestHandler(catalog: ShuffleBufferCatalog)
+    extends RapidsShuffleRequestHandler {
+  override def getShuffleHandle(tableId: Int): RapidsShuffleHandle = {
+    catalog.getShuffleBufferHandle(tableId)
+  }
+
+  override def isShuffleBufferRemoved(tableId: Int, handle: RapidsShuffleHandle): Boolean =
+    catalog.isShuffleBufferRemoved(tableId, handle.spillable)
+
+  override def getShuffleBufferMetas(sbbId: ShuffleBlockBatchId): Seq[TableMeta] = {
+    (sbbId.startReduceId to sbbId.endReduceId).flatMap(rid => {
+      catalog.blockIdToMetas(ShuffleBlockId(sbbId.shuffleId, sbbId.mapId, rid))
+    })
+  }
 }
 
 /**
@@ -59,6 +90,23 @@ trait RapidsShuffleRequestHandler {
  *
  * A single command thread is used to orchestrate sends/receives and to remove
  * from transport's progress thread.
+ *
+ * Close shuts the transfer reply gate before waiting for admitted queue attempts. A reply
+ * decided while open still needs admission immediately before queueing.
+ * {{{
+ * [open] -- close --> [closing] -- queue attempts end --> [closed]
+ *
+ * reply decided while open --> [decided] -- gate open --> [queueing]
+ *                                  |                         |
+ *                             gate closed             returns or throws
+ *                                  v                         v
+ *                              [released]               [attempt ended]
+ * reply decided while closing or closed --> no reply
+ * }}}
+ *
+ * No reply is admitted once closing starts. Close waits for admitted queue attempts, including
+ * throws, then waits a bounded time for the send loop. Closed means close returned.
+ * Close does not wait for delivery or callbacks. Metadata replies do not use this gate.
  *
  * @param transport the transport we were configured with
  * @param serverConnection a connection object, which contains functions to send/receive
@@ -89,12 +137,55 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
   }
 
   /**
-   * On close, this is set to false to indicate that the server is shutting down.
+   * On close, this is set to false to indicate that the server is shutting down. It is written
+   * only under the `bssExec` monitor, where states are queued, so that nothing is queued after
+   * the send loop has drained the queues.
    */
-  private[this] var started = true
+  @volatile private[this] var started = true
+
+  // The transfer responses, error replies included, that `replyGate` let through and that are
+  // still being queued. Guarded by the `bssExec` monitor, with `started`, so that close can wait
+  // for them.
+  private[this] var repliesQueueing = 0
+
+  /**
+   * This server's reply gate, open while `started`. It counts the replies it lets through in
+   * `repliesQueueing`, and close waits for that count without a bound, since queueing a reply
+   * takes no blocking call.
+   */
+  private[this] object replyGate extends BufferSendState.ReplyGate {
+    override def queueIfOpen(queue: => Unit): Boolean = {
+      val open = bssExec.synchronized {
+        if (started) {
+          repliesQueueing += 1
+        }
+        started
+      }
+      if (open) {
+        try {
+          queue
+        } finally {
+          bssExec.synchronized {
+            repliesQueueing -= 1
+            // only a closing server waits for the count, so the send loop is not woken here
+            if (!started && repliesQueueing == 0) {
+              bssExec.notifyAll()
+            }
+          }
+        }
+      }
+      open
+    }
+  }
 
   private[shuffle] def currentTimeNanos(): Long = System.nanoTime()
 
+  /**
+   * How long a reader waits for its next batch, `spark.network.timeout`. A request's sends retry
+   * a materialization OOM until this wait less a margin has passed since the request arrived, so
+   * that the error reply reaches a reader still waiting. `RapidsShuffleServer.oomRetryNanos`
+   * subtracts the margin.
+   */
   private[shuffle] def oomRetryTimeoutNanos: Long =
     TimeUnit.SECONDS.toNanos(GpuShuffleEnv.shuffleFetchTimeoutSeconds)
 
@@ -113,7 +204,8 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
     val failure = new IllegalStateException(
       s"Unable to prepare shuffle sends. $reason These sends will not be retried.")
     errors.foreach(failure.addSuppressed)
-    states.foreach(_.safeClose(failure))
+    states.foreach(_.finish(BufferSendState.OomExpired,
+      errorReply(BufferSendState.OomExpired, failure)))
     logError(failure.getMessage, failure)
     bssExec.synchronized {
       bssExec.notifyAll()
@@ -199,48 +291,215 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
   private[this] val bssContinueQueue = new ConcurrentLinkedQueue[BufferSendState]()
 
   /**
+   * Send states from just before their send until its callback runs, or until the catch around
+   * the send if it throws. The transport may still read their bounce buffers, so only that
+   * callback ends them, or `releaseAbandoned` once the transport has stopped. Guarded by its own
+   * monitor, which also guards `inFlightSealed`.
+   */
+  private[this] val inFlight = new mutable.HashSet[BufferSendState]()
+
+  /** Set by `releaseAbandoned`: no send may be issued after it. */
+  private[this] var inFlightSealed = false
+
+  // the send loop has started, and has exited after ending what was still queued
+  @volatile private[this] var loopEntered = false
+  private[this] val loopExited = new CountDownLatch(1)
+
+  /**
    * Executor that loops until it finds bounce buffers for [[BufferSendState]],
    * and when it does it hands them off to a thread pool for handling.
    */
   bssExec.execute(() => {
-    while (started) {
-      closeOnExcept(new ArrayBuffer[BufferSendState]()) { bssToIssue =>
-        var bssContinue = bssContinueQueue.poll()
-        while (bssContinue != null) {
-          bssToIssue.append(bssContinue)
-          bssContinue = bssContinueQueue.poll()
-        }
-
-        var continue = true
-        while (!pendingTransfersQueue.isEmpty && continue) {
-          // TODO: throttle on too big a send total so we don't acquire the world (in flight limit)
-          val sendBounceBuffers =
-            transport.tryGetSendBounceBuffers(1, 1)
-          if (sendBounceBuffers.nonEmpty) {
-            val pendingTransfer = pendingTransfersQueue.poll()
-            bssToIssue.append(new BufferSendState(
-              pendingTransfer.tx,
-              sendBounceBuffers.head, // there's only one bounce buffer here for now
-              pendingTransfer.requestHandler,
-              serverStream))
-          } else {
-            // TODO: make this a metric => "blocked while waiting on bounce buffers"
-            logTrace(s"Can't acquire send bounce buffers")
-            continue = false
+    loopEntered = true
+    var exitFailure: Throwable = null
+    try {
+      while (started) {
+        val bssToIssue = new ArrayBuffer[BufferSendState]()
+        var backOff = false
+        try {
+          var bssContinue = bssContinueQueue.poll()
+          while (bssContinue != null) {
+            // Only this loop ends a queued state, so a state that already ended was queued in
+            // error, and driving it again would copy into a bounce buffer it no longer owns.
+            if (bssContinue.isTerminal) {
+              logWarning(s"Skipping $bssContinue, which was queued after it ended")
+            } else {
+              bssToIssue.append(bssContinue)
+            }
+            bssContinue = bssContinueQueue.poll()
           }
+
+          var continue = true
+          // checking `started` keeps the loop from taking bounce buffers that teardown frees
+          while (started && !pendingTransfersQueue.isEmpty && continue) {
+            // TODO: throttle on too big a send total so we don't acquire the world (in flight
+            //  limit)
+            val sendBounceBuffers =
+              transport.tryGetSendBounceBuffers(1, 1)
+            if (sendBounceBuffers.nonEmpty) {
+              val pendingTransfer = pendingTransfersQueue.poll()
+              // there's only one bounce buffer here for now
+              newSendState(pendingTransfer, sendBounceBuffers.head).foreach(bssToIssue.append(_))
+            } else {
+              // TODO: make this a metric => "blocked while waiting on bounce buffers"
+              logTrace(s"Can't acquire send bounce buffers")
+              continue = false
+            }
+          }
+        } catch {
+          case NonFatal(t) =>
+            // no send has been issued in this pass yet, so these states can end here
+            bssToIssue.foreach(_.finish(BufferSendState.Failed,
+              errorReply(BufferSendState.Failed, t)))
+            bssToIssue.clear()
+            if (BufferSendState.endsSendLoop(t)) {
+              throw t
+            }
+            logError("Error while gathering shuffle sends. These sends will not be retried.", t)
+            backOff = true
         }
         if (bssToIssue.nonEmpty) {
           doHandleTransferRequest(bssToIssue.toSeq)
         }
-      }
 
-      bssExec.synchronized {
-        if (bssContinueQueue.isEmpty && pendingTransfersQueue.isEmpty) {
-          bssExec.wait(100)
+        bssExec.synchronized {
+          if (started &&
+              (backOff || (bssContinueQueue.isEmpty && pendingTransfersQueue.isEmpty))) {
+            bssExec.wait(100)
+          }
         }
+      }
+    } catch {
+      case t: Throwable =>
+        exitFailure = t
+        throw t
+    } finally {
+      try {
+        endQueuedOnExit()
+      } catch {
+        // keep the error the loop is exiting with, which a drain failure would replace
+        case t: Throwable if exitFailure != null && (t ne exitFailure) =>
+          exitFailure.addSuppressed(t)
+      } finally {
+        loopExited.countDown()
       }
     }
   })
+
+  /**
+   * Builds the send state of a transfer request. If its lookups fail, nothing was sent and the
+   * request is not retried: this method releases the bounce buffers, sends the requester an
+   * error reply if it can, and closes the request transaction.
+   */
+  private def newSendState(
+      pendingTransfer: PendingTransferResponse,
+      sendBounceBuffers: SendBounceBuffers): Option[BufferSendState] = {
+    try {
+      Some(new BufferSendState(
+        pendingTransfer.tx,
+        sendBounceBuffers,
+        pendingTransfer.requestHandler,
+        serverStream,
+        pendingTransfer.arrivalNanos))
+    } catch {
+      case NonFatal(t) =>
+        val gone = isOutputGone(t)
+        if (gone) {
+          // expected after an unregister, possibly once per request, so the trace is debug only
+          logWarning(s"Unable to start transfer request ${pendingTransfer.tx}: the requested " +
+              s"shuffle output is gone (${t.getMessage}). It will not be retried.")
+          logDebug(s"Missing output for transfer request ${pendingTransfer.tx}", t)
+        } else {
+          logError(s"Unable to start transfer request ${pendingTransfer.tx}. " +
+              "It will not be retried.", t)
+        }
+        closeQuietly("send bounce buffers", sendBounceBuffers)
+        // a request whose own receive failed has no header to answer
+        if (pendingTransfer.tx.getStatus == TransactionStatus.Success) {
+          val requested = t match {
+            case e: BufferLookupException => e.tableIds
+            case _ => Seq.empty
+          }
+          errorReply(if (gone) BufferSendState.MissingOutput else BufferSendState.Failed, t)
+            .foreach { reply =>
+              BufferSendState.sendErrorReply(pendingTransfer.tx, reply.gate,
+                new RefCountedDirectByteBuffer(
+                  ShuffleMetadata.buildTransferErrorResponse(requested, reply.reason)))
+            }
+        }
+        closeQuietly("a transfer request", pendingTransfer.tx)
+        None
+    }
+  }
+
+  /**
+   * When the send loop exits, ends every state and closes every request still queued. They are
+   * taken under the monitor with `started` false, so nothing can be queued after this.
+   */
+  private def endQueuedOnExit(): Unit = {
+    val states = new ArrayBuffer[BufferSendState]()
+    val requests = new ArrayBuffer[PendingTransferResponse]()
+    bssExec.synchronized {
+      started = false
+      var state = bssContinueQueue.poll()
+      while (state != null) {
+        states.append(state)
+        state = bssContinueQueue.poll()
+      }
+      var request = pendingTransfersQueue.poll()
+      while (request != null) {
+        requests.append(request)
+        request = pendingTransfersQueue.poll()
+      }
+    }
+    var failure: Throwable = null
+    states.foreach { state =>
+      try {
+        state.finish(BufferSendState.ServerClosed)
+      } catch {
+        case NonFatal(t) => if (failure == null) failure = t else failure.addSuppressed(t)
+      }
+    }
+    requests.foreach(r => closeQuietly("a transfer request", r.tx))
+    if (failure != null) {
+      throw failure
+    }
+  }
+
+  private def isOutputGone(error: Throwable): Boolean = error match {
+    case _: ShuffleOutputGoneException => true
+    case e: BufferLookupException => isOutputGone(e.getCause)
+    case ex: RapidsShuffleSendPrepareException =>
+      ex.getCause.isInstanceOf[ShuffleOutputGoneException]
+    case _ => false
+  }
+
+  /**
+   * The error reply for a request that ended with `outcome` because of `cause`. There is none
+   * when `cause` ends the send loop, since the executor then exits and the requester hears of it
+   * when its connection closes. There is none once the server is closing either, which saves
+   * building a reply that `replyGate` would not let through. The send loop can still be running
+   * then, since the server's close and the transport's each wait for it a bounded time. A caller
+   * that ends several states calls this once per state, since the server can close between two
+   * of them.
+   */
+  private def errorReply(
+      outcome: BufferSendState.Outcome,
+      cause: Throwable): Option[BufferSendState.ErrorReply] = {
+    if (BufferSendState.endsSendLoop(cause) || !started) {
+      None
+    } else {
+      Some(BufferSendState.ErrorReply(RapidsShuffleServer.failureReason(outcome), replyGate))
+    }
+  }
+
+  private def closeQuietly(what: String, resource: AutoCloseable): Unit = {
+    try {
+      resource.close()
+    } catch {
+      case NonFatal(t) => logError(s"Error while closing $what", t)
+    }
+  }
 
   // NOTE: this stream will likely move to its own non-blocking stream in the future
   val serverStream = Cuda.DEFAULT_STREAM
@@ -262,20 +521,33 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
           case MessageType.MetadataRequest =>
             asyncOrBlock(HandleMeta(tx))
           case MessageType.TransferRequest =>
-            val pendingTransfer = PendingTransferResponse(tx, requestHandler)
-            bssExec.synchronized {
-              pendingTransfersQueue.add(pendingTransfer)
-              bssExec.notifyAll()
+            val pendingTransfer = PendingTransferResponse(tx, requestHandler, currentTimeNanos())
+            val queued = bssExec.synchronized {
+              if (started) {
+                pendingTransfersQueue.add(pendingTransfer)
+                bssExec.notifyAll()
+              }
+              started
             }
-            logDebug(s"Got a transfer request ${pendingTransfer} from ${tx}. " +
-              s"Pending requests [new=${pendingTransfersQueue.size}, " +
-              s"continuing=${bssContinueQueue.size}]")
+            if (queued) {
+              logDebug(s"Got a transfer request ${pendingTransfer} from ${tx}. " +
+                s"Pending requests [new=${pendingTransfersQueue.size}, " +
+                s"continuing=${bssContinueQueue.size}]")
+            } else {
+              // the server is closing, so this request is neither served nor answered
+              logDebug(s"Dropping transfer request ${pendingTransfer} from ${tx} after close")
+              closeQuietly("a transfer request received after close", tx)
+            }
         }
       }
     })
   }
 
-  case class PendingTransferResponse(tx: Transaction, requestHandler: RapidsShuffleRequestHandler)
+  /** A transfer request waiting for send bounce buffers, and when it arrived. */
+  case class PendingTransferResponse(
+      tx: Transaction,
+      requestHandler: RapidsShuffleRequestHandler,
+      arrivalNanos: Long)
 
   /**
    * Handles the very first message that a client will send, in order to request Table/Buffer info.
@@ -333,11 +605,22 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
     }
   }
 
+  /**
+   * Queues send states for their next window.
+   * @return the states it did not queue because the server is closing; the caller ends them,
+   *         outside the monitor
+   */
   // exposed for testing
   private [shuffle] def addToContinueQueue(
-      bufferSendStates: Seq[BufferSendState]): Unit = bssExec.synchronized {
-    bufferSendStates.foreach(bssContinueQueue.add)
-    bssExec.notifyAll()
+      bufferSendStates: Seq[BufferSendState]): Seq[BufferSendState] = {
+    val queued = bssExec.synchronized {
+      if (started) {
+        bufferSendStates.foreach(bssContinueQueue.add)
+        bssExec.notifyAll()
+      }
+      started
+    }
+    if (queued) Seq.empty else bufferSendStates
   }
 
   /**
@@ -347,10 +630,12 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
    * @param bufferSendStates state objects tracking sends needed to fulfill a TransferRequest
    */
   def doHandleTransferRequest(bufferSendStates: Seq[BufferSendState]): Unit = {
-    closeOnExcept(bufferSendStates) { _ =>
-      val bssBuffers =
-        new ArrayBuffer[(BufferSendState, MemoryBuffer)](bufferSendStates.size)
-
+    val bssBuffers =
+      new ArrayBuffer[(BufferSendState, MemoryBuffer)](bufferSendStates.size)
+    // States whose send this pass reached. Their callback, or the catch around their send,
+    // decides how they end, so the catch at the bottom leaves them alone.
+    val sendsReached = new mutable.HashSet[BufferSendState]()
+    try {
       var toTryAgain: ArrayBuffer[BufferSendState] = null
       var supressedErrors: ArrayBuffer[Throwable] = null
       bufferSendStates.foreach { bufferSendState =>
@@ -363,12 +648,13 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
             val buffersToSend = bufferSendState.getBufferToSend()
             bssBuffers.append((bufferSendState, buffersToSend))
           } catch {
+            case ex: RapidsShuffleSendPrepareException if BufferSendState.endsSendLoop(ex) =>
+              // the catch at the bottom ends this pass's states, then ends the loop
+              throw ex
             case ex: RapidsShuffleSendPrepareException =>
               // We failed to prepare the send (copy to bounce buffer), and got an exception.
               // Put the `bufferSendState` back in the continue queue, so it can be retried.
               // If no `BufferSendState` could be handled, retry only transient OOM failures.
-              // TODO: we should respond with a failure to the client.
-              // Please see: https://github.com/NVIDIA/spark-rapids/issues/3040
               if (toTryAgain == null) {
                 toTryAgain = new ArrayBuffer[BufferSendState]()
                 supressedErrors = new ArrayBuffer[Throwable]()
@@ -379,31 +665,50 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
         }
       }
 
+      var statesToRetry: Seq[BufferSendState] = Seq.empty
       if (toTryAgain != null) {
         // we failed at least 1 time to copy to the bounce buffer
-        val failures = toTryAgain.toSeq.zip(supressedErrors.toSeq)
+        val allFailures = toTryAgain.toSeq.zip(supressedErrors.toSeq)
         def isMaterializationOom(error: Throwable): Boolean = error match {
           case ex: RapidsShuffleSendPrepareException =>
             ex.getCause.isInstanceOf[OutOfMemoryError]
           case _ => false
         }
 
+        // A buffer that is gone never comes back, so its state ends now rather than retry. It
+        // failed before copying anything, so no copy into its bounce buffer can be running.
+        val (gone, failures) = allFailures.partition(f => isOutputGone(f._2))
+        if (gone.nonEmpty) {
+          // expected after an unregister, so the trace is debug only
+          logWarning(s"Unable to send ${gone.size} transfer requests, because requested " +
+              s"shuffle output is gone (${gone.head._2.getMessage}): " +
+              RapidsShuffleServer.describeRequests(
+                gone.map(f => (f._1.peerExecutorId, f._1.getPeerBufferReceiveHeader))) +
+              ". These sends will not be retried.")
+          logDebug("Missing output while preparing shuffle sends", gone.head._2)
+          gone.foreach { case (state, error) =>
+            state.finish(BufferSendState.MissingOutput,
+              errorReply(BufferSendState.MissingOutput, error))
+          }
+        }
+
         // Preserve the existing fail-fast behavior when an entire batch fails and at least one
-        // preparation failure is not a materialization OOM.
+        // preparation failure is not a materialization OOM. The catch below ends these sends,
+        // and the send loop goes on.
         if (bssBuffers.isEmpty && !failures.forall(f => isMaterializationOom(f._2))) {
           val ise = new IllegalStateException("Unable to prepare any sends. " +
               "This issue can occur when requesting too many shuffle blocks. " +
               "The sends will not be retried.")
-          supressedErrors.foreach(ise.addSuppressed)
+          failures.foreach(f => ise.addSuppressed(f._2))
           throw ise
         }
 
         val oomFailures = failures.filter(f => isMaterializationOom(f._2))
         val oomDecisions = if (oomFailures.nonEmpty) {
           val nowNanos = currentTimeNanos()
-          val timeoutNanos = oomRetryTimeoutNanos
+          val retryNanos = RapidsShuffleServer.oomRetryNanos(oomRetryTimeoutNanos)
           oomFailures.map { case (state, error) =>
-            (state, error, state.recordOomAndGetRetryAttempt(nowNanos, timeoutNanos))
+            (state, error, state.recordOomAndGetRetryAttempt(nowNanos, retryNanos))
           }
         } else {
           Seq.empty
@@ -414,11 +719,12 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
           stopOomRetries(
             expiredOom.map(_._1),
             expiredOom.map(_._2),
-            "The per-send OOM retry window derived from spark.network.timeout expired.")
+            "Their requests passed the OOM retry deadline, which comes before their readers' " +
+                "spark.network.timeout runs out.")
         }
 
         val retryableOomStates = retryableOom.map(_._1).toSet
-        val statesToRetry = failures.collect {
+        statesToRetry = failures.collect {
           case (state, error)
               if !isMaterializationOom(error) || retryableOomStates.contains(state) =>
             state
@@ -442,12 +748,6 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
               "This issue can occur when requesting many shuffle blocks. " +
               "The sends will be retried.")
         }
-
-        // Each BufferSendState owns its OOM retry window. Incidental co-batching cannot expire a
-        // fresh state or reset a failing state when an unrelated state makes progress.
-        if (statesToRetry.nonEmpty) {
-          addToContinueQueue(statesToRetry)
-        }
       }
 
       serverStream.sync()
@@ -457,73 +757,274 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
       bufferSendStates.foreach(_.releaseAcquiredToCatalog())
 
       bssBuffers.foreach { case (bufferSendState, buffersToSend) =>
-        val peerExecutorId = bufferSendState.peerExecutorId
-        val sendHeader = bufferSendState.getPeerBufferReceiveHeader
+        sendsReached += bufferSendState
         // make sure we close the buffer slice
         withResource(buffersToSend) { _ =>
-          // [Scala 2.13] The compiler does not seem to be able to do the implicit SAM
-          // conversion after expanding the call in the method call below. So we have to define the 
-          // callback here in a val and type it to TransactionCallback
-          val txCallback: TransactionCallback = tx => withResource(tx) { bufferTx =>
-            bufferTx.getStatus match {
-              case TransactionStatus.Success =>
-                logDebug(s"Done with the send for $bufferSendState with $buffersToSend")
+          issueSend(bufferSendState, buffersToSend)
+        }
+      }
 
-                if (bufferSendState.hasMoreSends) {
-                  // continue issuing sends.
-                  logDebug(s"Buffer send state $bufferSendState is NOT done. " +
-                    s"Still pending: ${pendingTransfersQueue.size}.")
-                  addToContinueQueue(Seq(bufferSendState))
-                } else {
-                  val transferResponse = bufferSendState.getTransferResponse()
-
-                  val requestTx = bufferSendState.getRequestTransaction
-                  logDebug(s"Handling transfer request $requestTx for executor " +
-                    s"$peerExecutorId with $buffersToSend")
-
-                  // send the transfer response
-                  requestTx.respond(transferResponse.acquire(), withResource(_) { responseTx =>
-                    withResource(transferResponse) { _ =>
-                      responseTx.getStatus match {
-                        case TransactionStatus.Cancelled | TransactionStatus.Error =>
-                          logError(s"Error while handling TransferResponse: " +
-                            s"${responseTx.getErrorMessage}")
-                        case _ =>
-                      }
-                    }
-                  })
-
-                  // wake up the bssExec since bounce buffers became available
-                  logDebug(s"Buffer send state " +
-                    s"${TransportUtils.toHex(bufferSendState.getPeerBufferReceiveHeader)} " +
-                    s"is done, closing. Still pending: ${pendingTransfersQueue.size}.")
-                  bssExec.synchronized {
-                    bufferSendState.close()
-                    bssExec.notifyAll()
-                  }
-                }
-              case _ =>
-                // errored or cancelled
-                logError(s"Error while sending buffers $bufferTx.")
-                bssExec.synchronized {
-                  bufferSendState.close()
-                  bssExec.notifyAll()
-                }
+      // Each BufferSendState owns its OOM retry window. Incidental co-batching cannot expire a
+      // fresh state or reset a failing state when an unrelated state makes progress. Retries are
+      // queued last, so a failure earlier in this pass never ends a state that is already queued.
+      if (statesToRetry.nonEmpty) {
+        addToContinueQueue(statesToRetry).foreach(_.finish(BufferSendState.ServerClosed))
+      }
+    } catch {
+      // a raw interruption comes from the OOM backoff's sleep
+      case t if NonFatal(t) || t.isInstanceOf[InterruptedException] =>
+        // Failures while cleaning up are kept with the one that started it, so that a fatal
+        // CUDA error or an interruption among them still ends the loop below.
+        def keep(e: Throwable): Unit = if (e ne t) t.addSuppressed(e)
+        try {
+          serverStream.sync()
+        } catch {
+          case NonFatal(e) => keep(e)
+        }
+        bssBuffers.foreach { case (bufferSendState, buffersToSend) =>
+          if (!sendsReached.contains(bufferSendState)) {
+            buffersToSend.safeClose(t)
+          }
+        }
+        bufferSendStates.foreach { bufferSendState =>
+          if (!sendsReached.contains(bufferSendState)) {
+            try {
+              // The reply is decided per state, since ending one can add an error to `t` that
+              // ends the loop. The states answered before that stay answered.
+              bufferSendState.finish(BufferSendState.Failed, errorReply(BufferSendState.Failed, t))
+            } catch {
+              case NonFatal(e) => keep(e)
             }
           }
-
-          serverConnection.send(peerExecutorId, MessageType.Buffer,
-            // TODO: it may be nice to hide `sendHeader` in `Transaction`
-            sendHeader, buffersToSend, txCallback)
         }
+        // The GPU is unusable after a fatal CUDA error, and an interruption asks the thread to
+        // stop. Either ends the loop, as it always did, so that the executor exits and its
+        // shuffle output is recomputed elsewhere.
+        if (BufferSendState.endsSendLoop(t)) {
+          if (BufferSendState.wasInterrupted(t)) {
+            Thread.currentThread().interrupt()
+          }
+          throw t
+        }
+        logError("Error while handling shuffle sends. The sends not yet issued will not be " +
+            "retried.", t)
+    }
+  }
+
+  /**
+   * Issues the send of one window. A send that throws queued nothing and never calls back, so
+   * its state ends here; otherwise the state is in flight until its callback runs.
+   */
+  private def issueSend(bufferSendState: BufferSendState, buffersToSend: MemoryBuffer): Unit = {
+    val registered = inFlight.synchronized {
+      if (!inFlightSealed) {
+        inFlight += bufferSendState
+      }
+      !inFlightSealed
+    }
+    if (!registered) {
+      // the transport has stopped, so this send could never complete
+      bufferSendState.finish(BufferSendState.ServerClosed)
+    } else {
+      val peerExecutorId = bufferSendState.peerExecutorId
+      val sendHeader = bufferSendState.getPeerBufferReceiveHeader
+      // [Scala 2.13] The compiler does not seem to be able to do the implicit SAM
+      // conversion after expanding the call in the method call below. So we have to define the
+      // callback here in a val and type it to TransactionCallback
+      val txCallback: TransactionCallback =
+        tx => onSendComplete(bufferSendState, buffersToSend, tx)
+      try {
+        serverConnection.send(peerExecutorId, MessageType.Buffer,
+          // TODO: it may be nice to hide `sendHeader` in `Transaction`
+          sendHeader, buffersToSend, txCallback)
+        bufferSendState.windowIssued()
+      } catch {
+        case NonFatal(t) =>
+          inFlight.synchronized {
+            inFlight -= bufferSendState
+          }
+          logError(s"Error while issuing a send for $bufferSendState. " +
+              "It will not be retried.", t)
+          bufferSendState.finish(BufferSendState.Failed, errorReply(BufferSendState.Failed, t))
       }
     }
   }
 
-  override def close(): Unit = {
-    started = false
-    bssExec.synchronized {
-      bssExec.notifyAll()
+  /**
+   * The callback of one window's send, on the transport's progress thread, which must not
+   * block. It takes no monitor while it calls into the transport.
+   */
+  private def onSendComplete(
+      bufferSendState: BufferSendState,
+      buffersToSend: MemoryBuffer,
+      tx: Transaction): Unit = {
+    withResource(tx) { bufferTx =>
+      inFlight.synchronized {
+        inFlight -= bufferSendState
+      }
+      if (bufferTx.getStatus != TransactionStatus.Success) {
+        // A failed send can report InProgress here rather than Error, so this tests for
+        // anything but success. No reply follows: a reply would take the same failing path.
+        logError(s"Error while sending buffers $bufferTx.")
+        bufferSendState.finish(BufferSendState.SendFailed)
+        wakeLoop()
+      } else if (bufferSendState.isTerminal) {
+        logWarning(s"Send completed for $bufferSendState, which already ended")
+      } else if (bufferSendState.hasMoreSends) {
+        logDebug(s"Done with the send for $bufferSendState with $buffersToSend")
+        // continue issuing sends.
+        logDebug(s"Buffer send state $bufferSendState is NOT done. " +
+          s"Still pending: ${pendingTransfersQueue.size}.")
+        addToContinueQueue(Seq(bufferSendState)).foreach(_.finish(BufferSendState.ServerClosed))
+      } else if (!started) {
+        // A reply queued after the transport's close task would never run or release its
+        // response, so a closing server ends the state without one.
+        bufferSendState.finish(BufferSendState.ServerClosed)
+        wakeLoop()
+      } else {
+        var outcome: BufferSendState.Outcome = BufferSendState.Failed
+        try {
+          val transferResponse = bufferSendState.getTransferResponse()
+
+          val requestTx = bufferSendState.getRequestTransaction
+          logDebug(s"Handling transfer request $requestTx for executor " +
+            s"${bufferSendState.peerExecutorId} with $buffersToSend")
+
+          // send the transfer response
+          val queued = try {
+            replyGate.queueIfOpen {
+              requestTx.respond(transferResponse.acquire(), withResource(_) { responseTx =>
+                withResource(transferResponse) { _ =>
+                  responseTx.getStatus match {
+                    case TransactionStatus.Cancelled | TransactionStatus.Error =>
+                      logError(s"Error while handling TransferResponse: " +
+                        s"${responseTx.getErrorMessage}")
+                    case _ =>
+                  }
+                }
+              })
+            }
+          } catch {
+            case t: Throwable =>
+              // a respond that throws queued nothing, so its callback will not release this
+              closeQuietly("a transfer response", transferResponse)
+              throw t
+          }
+          if (queued) {
+            outcome = BufferSendState.Completed
+          } else {
+            // the server closed after the check above
+            closeQuietly("a transfer response", transferResponse)
+            outcome = BufferSendState.ServerClosed
+          }
+        } finally {
+          logDebug(s"Buffer send state " +
+            s"${TransportUtils.toHex(bufferSendState.getPeerBufferReceiveHeader)} " +
+            s"is done, closing. Still pending: ${pendingTransfersQueue.size}.")
+          bufferSendState.finish(outcome)
+        }
+        wakeLoop()
+      }
     }
+  }
+
+  // wake up the bssExec, since a state that ended returned its bounce buffers
+  private def wakeLoop(): Unit = bssExec.synchronized {
+    bssExec.notifyAll()
+  }
+
+  override def close(): Unit = {
+    bssExec.synchronized {
+      started = false
+      bssExec.notifyAll()
+      // so that each reply let through is queued before the transport closes
+      while (repliesQueueing > 0) {
+        bssExec.wait()
+      }
+    }
+    // The loop ends what is still queued as it exits. The wait is bounded, because a pass can
+    // be stuck in a CUDA synchronization.
+    if (loopEntered &&
+        !loopExited.await(RapidsShuffleServer.CLOSE_WAIT_MILLIS, TimeUnit.MILLISECONDS)) {
+      logWarning("The shuffle server's send loop did not exit in time")
+    }
+  }
+
+  // exposed for testing
+  private[shuffle] def inFlightCount: Int = inFlight.synchronized(inFlight.size)
+
+  /**
+   * Called by the transport once it has closed: ends every send state whose callback never
+   * came, and seals the in-flight set so that no send is issued after this.
+   * @param transportStopped whether the transport's progress thread has terminated. If it has
+   *                         not, the transport may still read those bounce buffers, so they are
+   *                         leaked rather than freed.
+   */
+  def releaseAbandoned(transportStopped: Boolean): Unit = {
+    val abandoned = inFlight.synchronized {
+      inFlightSealed = true
+      val states = inFlight.toList
+      inFlight.clear()
+      states
+    }
+    if (abandoned.nonEmpty) {
+      if (transportStopped) {
+        logWarning(s"Ending ${abandoned.size} shuffle sends whose completion never arrived")
+        abandoned.foreach { state =>
+          try {
+            state.finish(BufferSendState.ServerClosed)
+          } catch {
+            case NonFatal(t) => logError(s"Error while ending abandoned send $state", t)
+          }
+        }
+      } else {
+        logWarning(s"Leaking ${abandoned.size} shuffle sends, because the transport did not " +
+            "stop and may still read their bounce buffers")
+      }
+    }
+  }
+}
+
+object RapidsShuffleServer {
+  // how long close() waits for the send loop to exit
+  private val CLOSE_WAIT_MILLIS = 500L
+
+  // How much sooner than its reader's wait a request's OOM retries end, for the error reply to
+  // reach the reader first. It covers the time from the reader starting to wait to the request
+  // arriving, the retry pass that finds the end, and the reply's delivery. A request that waited
+  // longer than that in its requester's queue, which the server cannot see, still arrives too
+  // late, and its reader times out.
+  private val OOM_REPLY_MARGIN_NANOS = TimeUnit.SECONDS.toNanos(10)
+
+  /**
+   * How long after its request arrived a send may retry a materialization OOM, given how long
+   * the reader waits: that wait less a margin of 10 seconds, or of half the wait if it is
+   * shorter than 20 seconds.
+   */
+  private[shuffle] def oomRetryNanos(readerWaitNanos: Long): Long =
+    readerWaitNanos - math.min(OOM_REPLY_MARGIN_NANOS, readerWaitNanos / 2)
+
+  /** Why a transfer request ended with `outcome`, in the error reply its requester gets. */
+  private[shuffle] def failureReason(outcome: BufferSendState.Outcome): String = outcome match {
+    case BufferSendState.MissingOutput => "the shuffle output it asked for is gone"
+    case BufferSendState.OomExpired =>
+      "memory ran out while preparing it, past its retry deadline"
+    case _ => "the server failed to prepare or send it"
+  }
+
+  // how many requests a log line names before it only counts the rest
+  private val MAX_REQUESTS_NAMED = 5
+
+  /**
+   * Names requests by the executor that sent each one and its receive header, the first few
+   * of them, for a log line.
+   * @param requests the executor id and receive header of each request
+   */
+  private[shuffle] def describeRequests(requests: Seq[(Long, Long)]): String = {
+    val named = requests.take(MAX_REQUESTS_NAMED).map { case (executorId, header) =>
+      s"executor $executorId header ${TransportUtils.toHex(header)}"
+    }
+    val more = requests.size - named.size
+    named.mkString(", ") + (if (more > 0) s" and $more more" else "")
   }
 }

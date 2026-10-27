@@ -35,7 +35,7 @@ pytestmark = pytest.mark.nightly_resource_consuming_test
 # Once the first issue is fixed, add back boolean_gen.
 orc_write_basic_gens = [byte_gen, short_gen, int_gen, long_gen, float_gen, double_gen,
         string_gen, DateGen(start=date(1590, 1, 1)),
-        TimestampGen(start=datetime(1970, 1, 1, tzinfo=timezone.utc)) ] + \
+        TimestampGen(start=datetime(1590, 1, 1, tzinfo=timezone.utc)) ] + \
         decimal_gens
 
 all_nulls_string_gen = SetValuesGen(StringType(), [None])
@@ -76,9 +76,10 @@ orc_write_array_gens_sample = [ArrayGen(sub_gen) for sub_gen in orc_write_basic_
 # Once the first issue is fixed, add back boolean_gen.
 orc_write_basic_map_gens = [simple_string_to_string_map_gen] + [MapGen(f(nullable=False), f()) for f in [
     ByteGen, ShortGen, IntegerGen, LongGen, FloatGen, DoubleGen,
-    # Using timestamps from 1970 to work around a cudf ORC bug
-    # https://github.com/NVIDIA/spark-rapids/issues/140.
-    lambda nullable=True: TimestampGen(start=datetime(1970, 1, 1, tzinfo=timezone.utc), nullable=nullable),
+    # These non-partitioned write tests are not affected by the Spark 3.3 partitioned-read race
+    # guarded by orc_part_timestamp_start.
+    lambda nullable=True: TimestampGen(
+        start=datetime(1590, 1, 1, tzinfo=timezone.utc), nullable=nullable),
     lambda nullable=True: DateGen(start=date(1590, 1, 1), nullable=nullable),
     lambda nullable=True: DecimalGen(precision=15, scale=1, nullable=nullable),
     lambda nullable=True: DecimalGen(precision=36, scale=5, nullable=nullable)]] + [MapGen(
@@ -271,6 +272,10 @@ def test_write_round_trip_nullable_struct(spark_tmp_path, gen, orc_impl):
                 # once this is fixed
                 'spark.rapids.sql.format.orc.write.boolType.enabled' : True})
 
+# Spark 3.3's Hive storage API cannot safely convert pre-epoch timestamps while partition
+# files are read concurrently. The single-file writer tests above retain that coverage.
+orc_part_timestamp_start = datetime(
+        1970 if is_before_spark_340() else 1590, 1, 1, tzinfo=timezone.utc)
 orc_part_write_gens = [
         # Add back boolean_gen when  https://github.com/rapidsai/cudf/issues/6763 is fixed
         byte_gen, short_gen, int_gen, long_gen,
@@ -280,9 +285,7 @@ orc_part_write_gens = [
         # date_gen
         pytest.param(DateGen(start=date(1590, 1, 1)),
                      marks=allow_non_gpu_conditional(True, *orc_date_writer_allow)),
-        # Once https://github.com/NVIDIA/spark-rapids/issues/140 is fixed replace this with
-        # timestamp_gen 
-        TimestampGen(start=datetime(1970, 1, 1, tzinfo=timezone.utc))]
+        TimestampGen(start=orc_part_timestamp_start)]
 
 # There are race conditions around when individual files are read in for partitioned data
 @ignore_order
@@ -572,9 +575,9 @@ def test_orc_write_column_name_with_dots(spark_tmp_path):
 def test_orc_do_not_lowercase_columns(spark_tmp_path):
     data_path = spark_tmp_path + "/ORC_DATA"
 
-    # The wording of the `is not exists` error message in Spark 4.x is unfortunate, but accurate:
+    # Spark 4.2 and DBR 18.3 correct the `is not exists` wording used by earlier Spark 4.x:
     # https://github.com/apache/spark/blob/4501285a49e4c0429c9cf2c105f044e1c8a93d21/python/pyspark/errors/error-conditions.json#L487
-    if is_spark_420_or_later():
+    if is_spark_420_or_later() or is_databricks_version_or_later(18, 3):
         expected_error_message = "Key `acol` does not exist."
     elif is_spark_400_or_later() or is_databricks_version_or_later(14, 3):
         expected_error_message = "Key `acol` is not exists."

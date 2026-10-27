@@ -22,7 +22,7 @@ from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_co
 from data_gen import *
 from marks import *
 from pyspark.sql.types import *
-from spark_session import is_before_spark_320, is_before_spark_350, is_before_spark_400, is_databricks_runtime, is_databricks143, is_jvm_charset_utf8, with_cpu_session, with_gpu_session
+from spark_session import is_before_spark_320, is_before_spark_350, is_before_spark_400, is_databricks_runtime, is_databricks143, get_java_major_version, is_jvm_charset_utf8, with_cpu_session, with_gpu_session
 
 if not is_jvm_charset_utf8():
     pytestmark = [pytest.mark.regexp, pytest.mark.skip(reason=str("Current locale doesn't support UTF-8, regexp support is disabled"))]
@@ -1323,8 +1323,6 @@ def test_regexp_replace_unicode_support():
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: unary_op_df(spark, gen).selectExpr(
             'REGEXP_REPLACE(a, "TEST\ud720", "PROD")',
-            'REGEXP_REPLACE(a, "TEST\\\\b", "PROD")',
-            'REGEXP_REPLACE(a, "TEST\\\\B", "PROD")',
             'REGEXP_REPLACE(a, "TEST䤫", "PROD")',
             'REGEXP_REPLACE(a, "TEST[䤫]", "PROD")',
             'REGEXP_REPLACE(a, "TEST.*\\\\d", "PROD")',
@@ -1332,6 +1330,20 @@ def test_regexp_replace_unicode_support():
             'REGEXP_REPLACE(a, "TEST.+$", "PROD")',
             'REGEXP_REPLACE("TEST䤫", "TEST.+$", "PROD")',
         ),
+        conf=_regexp_conf)
+
+# JDK 19+ made \b and \B ASCII-only (JDK-8264160), while cuDF treats non-ASCII letters and digits
+# as word characters, so \b and \B next to non-ASCII text are a known GPU/CPU difference.
+@pytest.mark.skipif(get_java_major_version() >= 19,
+                    reason="\\b and \\B on non-ASCII text differ between CPU and GPU on JDK 19+")
+def test_regexp_replace_unicode_word_boundary():
+    gen = mk_str_gen('TEST[85\ud720\ud800\ud900]')\
+        .with_special_case('TEST䤫畍킱곂⬡❽ࢅ獰᳌蛫青')
+
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: unary_op_df(spark, gen).selectExpr(
+            'REGEXP_REPLACE(a, "TEST\\\\b", "PROD")',
+            'REGEXP_REPLACE(a, "TEST\\\\B", "PROD")'),
         conf=_regexp_conf)
 
 @allow_non_gpu('ProjectExec', 'RegExpReplace')
