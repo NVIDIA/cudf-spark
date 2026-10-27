@@ -302,8 +302,21 @@ run_delta_lake_tests() {
   fi
 
   if [[ $SPARK_VER =~ $SPARK_35X_PATTERN ]]; then
-    # Delta 3.3.3 fixes staged-table truncate validation on Spark 3.5.6+.
-    DELTA_LAKE_VERSIONS="3.3.3"
+    local java_command="${JAVA_HOME:+$JAVA_HOME/bin/}java"
+    local java_specification_version
+    java_specification_version=$("$java_command" -XshowSettings:properties -version 2>&1 |
+      awk '$1 == "java.specification.version" {print $3}')
+    if [[ -z "$java_specification_version" ]]; then
+      echo "Cannot determine the Java version for Delta Lake tests" >&2
+      return 1
+    fi
+    if [[ "$java_specification_version" == "1.8" ]]; then
+      # Delta 3.3.3 bitmap deserialization calls a ByteBuffer API absent from Java 8.
+      DELTA_LAKE_VERSIONS="3.3.0"
+    else
+      # Delta 3.3.3 fixes staged-table truncate validation on Spark 3.5.6+.
+      DELTA_LAKE_VERSIONS="3.3.3"
+    fi
   fi
 
   if [[ $SPARK_VER =~ $SPARK_40X_PATTERN ]]; then
@@ -344,7 +357,7 @@ run_delta_lake_tests() {
         DELTA_MAIN_JAR="io.delta:delta-spark_${DELTA_SPARK_LINE}_${SCALA_BINARY_VER}:$v"
       elif [[ "$v" == "4.1.0" ]]; then
         DELTA_MAIN_JAR="io.delta:delta-spark_4.1_${SCALA_BINARY_VER}:$v"
-      elif [[ "$v" == "3.3.3" || "$v" == "4.0.0" || \
+      elif [[ "$v" == "3.3.0" || "$v" == "3.3.3" || "$v" == "4.0.0" || \
           "$v" == "4.0.1" ]]; then
         DELTA_MAIN_JAR="io.delta:delta-spark_${SCALA_BINARY_VER}:$v"
       else
@@ -353,13 +366,19 @@ run_delta_lake_tests() {
       # Delta Lake 1.2+ moved LogStore implementations into delta-storage.
       # All versions tested here are 2.0+, so include it explicitly.
       DELTA_JAR="${DELTA_MAIN_JAR},io.delta:delta-storage:$v"
-      env \
-        HOST_NAME=$PROJECT_REPO_HOST \
-        PYSP_TEST_spark_jars_packages=${DELTA_JAR} \
-        PYSP_TEST_spark_jars_ivySettings="${WORKSPACE}/jenkins/ivysettings.xml" \
-        PYSP_TEST_spark_sql_extensions="io.delta.sql.DeltaSparkSessionExtension" \
-        PYSP_TEST_spark_sql_catalog_spark__catalog="org.apache.spark.sql.delta.catalog.DeltaCatalog" \
-        ./run_pyspark_from_build.sh -m delta_lake --delta_lake
+      local delta_test_env=(env
+        "HOST_NAME=$PROJECT_REPO_HOST"
+        "PYSP_TEST_spark_jars_packages=${DELTA_JAR}"
+        "PYSP_TEST_spark_jars_ivySettings=${WORKSPACE}/jenkins/ivysettings.xml"
+        "PYSP_TEST_spark_sql_extensions=io.delta.sql.DeltaSparkSessionExtension"
+        "PYSP_TEST_spark_sql_catalog_spark__catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog")
+      if [[ "$v" == "3.3.0" || "$v" == "3.3.3" ]]; then
+        # Catch Delta/JDK linkage failures before running the full matrix.
+        "${delta_test_env[@]}" TEST= \
+          TESTS=delta_lake_test.py::test_delta_bitmap_serialization_java_compatibility \
+          ./run_pyspark_from_build.sh -m delta_lake --delta_lake || return 1
+      fi
+      "${delta_test_env[@]}" ./run_pyspark_from_build.sh -m delta_lake --delta_lake
     done
   fi
 }
@@ -371,12 +390,20 @@ run_delta_lake_tests() {
 # The server itself runs in its own JVM, so unitycatalog-server (Armeria, Vert.x, Hibernate,
 # Spring, ...) never reaches Spark at all.
 run_delta_lake_uc_tests() {
-  local delta_version='4.2.0'
-  local test_filter=${1:-}
+  local delta_version=${1:-'4.2.0'}
+  local test_file=${2:-'delta_lake_catalog_managed_test.py'}
+  local test_filter=${3:-}
+  local test_parallel=${TEST_PARALLEL:-}
 
-  # These conditions mirror the Delta Lake 4.2.0 rows of run_delta_lake_tests above: that Delta
-  # version is only exercised on Scala 2.13 with Spark 4.0.1 or 4.1.1. They are repeated rather
-  # than read from DELTA_LAKE_VERSIONS because that variable is assigned inside
+  # The REST safety module shares one UC server and includes failure-injection scenarios.
+  # Running it concurrently can terminate the shared server while another worker is using it.
+  if [[ "$test_file" == "delta_lake_catalog_rest_test.py" ]]; then
+    test_parallel=1
+  fi
+
+  # These conditions mirror the Delta Lake 4.2.0 and 4.3.0 rows of run_delta_lake_tests above:
+  # those versions are only exercised on Scala 2.13 with Spark 4.0.1 or 4.1.1. They are repeated
+  # rather than read from DELTA_LAKE_VERSIONS because that variable is assigned inside
   # run_delta_lake_tests, which TEST_MODE=DELTA_LAKE_UC_ONLY never runs. run_unity_catalog_server.sh
   # rejects the same combinations outright; CI skips them instead.
   if [[ "$SCALA_BINARY_VER" != "2.13" ]]; then
@@ -404,9 +431,11 @@ run_delta_lake_uc_tests() {
   # workspace. UNITY_CATALOG_VERSION and UNITY_CATALOG_PORT are read by the script directly.
   env \
     HOST_NAME=$PROJECT_REPO_HOST \
-    TESTS=delta_lake_catalog_managed_test.py \
+    TEST_PARALLEL="$test_parallel" \
+    TESTS="$test_file" \
     TEST="$test_filter" \
-    ./run_unity_catalog_server.sh --run-dir "$ARTF_ROOT" -- \
+    ./run_unity_catalog_server.sh --delta-version "$delta_version" \
+      --run-dir "$ARTF_ROOT" -- \
       ./run_pyspark_from_build.sh -m unity_catalog --delta_lake --unity_catalog
 }
 
@@ -686,20 +715,22 @@ if [[ $TEST_MODE == "DEFAULT" ]]; then
     ./run_pyspark_from_build.sh -k cache_test
 fi
 
-# Delta Lake tests. DEFAULT runs one end-to-end managed-table smoke for supported Spark/Scala
-# combinations in jobs that use this script. Blossom premerge runs the same smoke from
-# spark-premerge-build.sh. DELTA_LAKE_UC_ONLY is the strict full-suite entry point that external
-# jobs must schedule separately for Spark 4.0.1 and 4.1.1.
+# Delta Lake tests. DEFAULT runs a Delta 4.2 managed-table smoke and the complete Delta 4.3 REST
+# safety suite for supported Spark/Scala combinations. Blossom premerge follows the same split.
+# DELTA_LAKE_UC_ONLY remains the strict entry point for both complete catalog suites.
 if [[ "$TEST_MODE" == "DEFAULT" || "$TEST_MODE" == "DELTA_LAKE_ONLY" ]]; then
   run_delta_lake_tests
 fi
 if [[ "$TEST_MODE" == "DEFAULT" ]]; then
-  run_delta_lake_uc_tests "catalog_managed_ctas_insert_and_deletion_vector_scan"
+  run_delta_lake_uc_tests 4.2.0 delta_lake_catalog_managed_test.py \
+    "catalog_managed_ctas_insert_and_deletion_vector_scan"
+  run_delta_lake_uc_tests 4.3.0 delta_lake_catalog_rest_test.py
 fi
 
 # Delta Lake catalog-managed table tests
 if [[ "$TEST_MODE" == "DELTA_LAKE_UC_ONLY" ]]; then
-  run_delta_lake_uc_tests
+  run_delta_lake_uc_tests 4.2.0 delta_lake_catalog_managed_test.py
+  run_delta_lake_uc_tests 4.3.0 delta_lake_catalog_rest_test.py
 fi
 
 # Iceberg tests
@@ -733,7 +764,16 @@ if [[ "$TEST_MODE" == "DEFAULT" || "$TEST_MODE" == "MULTITHREADED_SHUFFLE" ]]; t
 fi
 
 if [[ "$TEST_MODE" == "UCX_SHUFFLE" ]]; then
-  invoke_shuffle_integration_test UCX ./run_pyspark_from_build.sh
+  # Disable pytest parallelism and use two single-core executors in the same
+  # application to exercise UCX remote fetches;
+  # parallel applications with one executor each cannot provide this coverage.
+  TEST_PARALLEL=0 \
+  PYSP_TEST_spark_cores_max=2 \
+  PYSP_TEST_spark_executor_cores=1 \
+    invoke_shuffle_integration_test UCX ./run_pyspark_from_build.sh
+
+  # UCX fetches from a peer executor (RapidsShuffleIterator INFO); 0 means none was logged
+  echo "UCX remote fetches: $(cat "$SPARK_HOME"/work/app-*/*/std* | grep -c 'triggered, for')"
 fi
 
 # cudf_udf test: this mostly depends on cudf-py, so we run it into an independent CI

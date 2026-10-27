@@ -100,7 +100,7 @@ class DynamicPruningSuite
         val newPartitionFilters = updatePartitionFilters(pf)
         val rc = g.rapidsConf
         GpuFileSourceScanExec(r, o, rs, newPartitionFilters,
-          obs, oncb, df, ti, dbs, quif, rps)(rc)
+          obs, oncb, df, ti, dbs, quif, rps)(rc, g.partitionPlanningScan)
       case FileSourceScanExec(r, o, rs, pf, obs, oncb, df, ti, dbs) =>
         val newPartitionFilters = updatePartitionFilters(pf)
         FileSourceScanExec(r, o, rs, newPartitionFilters, obs, oncb, df, ti, dbs)

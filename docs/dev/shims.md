@@ -49,6 +49,37 @@ compatible across the supported Spark APIs. When a file has Databricks-specific,
 or otherwise divergent siblings, keep the version-specific source and move only the API-safe part
 behind the one-way boundary.
 
+## Source Inheritance Metadata
+
+A build target profile may declare `shim.source.inherits` to name another target whose shim
+sources it will inherit. Shimplify validates these parent links and rejects missing parents or
+cycles. The first declared links are `359` to `358`, `402` to `401`, and Spark master `500` to
+`420`. The latter two targets exist only in the Scala 2.13 build tree.
+
+This is preparatory metadata: source generation still uses the exact
+`spark-rapids-shim-json-lines` membership lists. The parent does not change dependency resolution,
+generated package identity, binary deduplication, or runtime compatibility. Source selection will
+use the lineage only after an inheritance resolver and equivalence checks are in place.
+
+The source-inspection prototype can show the annotated shim files selected for one exact target
+without running Maven:
+
+```bash
+./build/shimpler sources --target 359
+./build/shimpler sources --target 359 --explain
+./build/shimpler sources --target 500 --format=json
+```
+
+It scans Scala and Java shim sources in all modules, including nested modules. `--module sql-plugin`
+restricts the output, and `--null` produces NUL-delimited paths for shell tools. The inspector
+derives candidate inheritance points from today's exact annotations and checks that they select the
+same physical files for the requested target. Non-contiguous memberships and versioned package
+paths remain exact. The reported introduction is relative to the source-parent links currently
+declared in Maven; it is not necessarily the target where the file was first written. Unannotated
+files under versioned directories are omitted from this annotated-source query.
+Shimplify's generated sources still use the existing exact annotations. Do not convert annotations
+to `introduced` or `only` yet; generation and the captured pre-conversion oracle are follow-up work.
+
 ## Reducing Parallel-World Classes
 
 The long-term goal is to maximize bytecode in the conventional jar layout and shrink the amount
@@ -161,7 +192,7 @@ issue as you can see e.g., comparing shim implementations across versions:
 2. [Shim service provider for 3.5.1](https://github.com/NVIDIA/cudf-spark/blob/main/sql-plugin/src/main/spark351/scala/com/nvidia/spark/rapids/shims/spark351/SparkShimServiceProvider.scala)
 
 The `ShimExpression` and related traits themselves live in a single shared file,
-[TreeNode.scala](../../sql-plugin/src/main/scala/com/nvidia/spark/rapids/shims/TreeNode.scala),
+[TreeNode.scala](../../sql-plugin-api/src/main/scala/com/nvidia/spark/rapids/shims/TreeNode.scala),
 which is built as regular unshimmed source.
 
 This resolves compile-time problems, however, now we face the problem at run time.

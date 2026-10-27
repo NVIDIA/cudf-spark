@@ -16,7 +16,7 @@ import pytest
 
 from private_optimizer_common import (
     assert_rule_fires,
-    assert_rule_skipped,
+    assert_rule_noop_on_gpu,
     private_optimizer_conf,
 )
 from spark_session import is_databricks_runtime, is_spark_420_or_later
@@ -106,12 +106,15 @@ def test_optimize_skewed_bhj_join_skips_on_databricks_executor_broadcast(spark_t
     """Databricks executor-broadcast AQE is expected to skip the streamed-side
     rewrite even when the streamed input is a materialized skewed shuffle stage.
     Without the executor-broadcast shim guard this shape is eligible for the
-    rewrite, as verified by the positive Apache test above. The streamed-side
-    skew marker must remain absent while CPU and GPU results still match. The
-    required markers verify a non-null-aware, executor-broadcast build-right join
-    whose streamed input retains the expected GPU hash-partitioning exchange."""
+    rewrite, as verified by the positive Apache test above. DBR 18.3 applies its
+    own skew reader to this shape with the rule disabled, so the skew marker
+    cannot discriminate a skipped rule. The plan with the rule ON must instead be
+    identical to the GPU plan with the rule OFF, and CPU and GPU results must
+    match. The required markers verify a non-null-aware, executor-broadcast
+    build-right join whose streamed input retains the expected GPU
+    hash-partitioning exchange."""
     on, off = _skewed_bhj_confs()
-    assert_rule_skipped(_skewed_bhj_global_agg, on, off, marker=SKEWED_BHJ_MARKER,
-                        physical=True, required_on_markers=(
-                            DB_EXECUTOR_BROADCAST_MARKER,
-                            DB_STREAMED_SHUFFLE_MARKER))
+    assert_rule_noop_on_gpu(_skewed_bhj_global_agg, on, off, physical=True,
+                            required_on_markers=(
+                                DB_EXECUTOR_BROADCAST_MARKER,
+                                DB_STREAMED_SHUFFLE_MARKER))

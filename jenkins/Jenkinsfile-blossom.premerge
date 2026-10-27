@@ -49,7 +49,7 @@ def TEMP_SKILLS_IMAGE_BUILD = false
 def normal_build = true
 def sourcePattern = 'shuffle-plugin/src/main/scala/,udf-compiler/src/main/scala/,' +
     'sql-plugin/src/main/java/,sql-plugin/src/main/scala/'
-// The path where the CI_PART1 job shares rapids plugin built tars with the CI_PART job
+// Retain the shared artifact path for older child Jenkinsfiles using the same job.
 def plugin_built_dir = "dbfs:/cicd/$BUILD_TAG"
 
 pipeline {
@@ -122,6 +122,7 @@ pipeline {
                     }
                     githubHelper.updateCommitStatus("", "Running", GitHubCommitState.PENDING)
                     checkoutCode(githubHelper.getCloneUrl(), githubHelper.getMergedSHA())
+                    env.DATABRICKS_SOURCE_SHA = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
 
                     def changedFilesOutput = sh(returnStdout: true,
                         script: 'git -c core.quotePath=false --no-pager diff ' +
@@ -228,7 +229,7 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                 beforeAgent true
                 beforeOptions true
                 expression {
-                    !skipped && (normal_build || skills_build)
+                    !skipped && (normal_build || skills_build || db_build)
                 }
             }
             // Parallel run mvn verify (build and integration tests) and unit tests (for multiple Spark versions)
@@ -445,11 +446,10 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                     steps {
                         script {
                             githubHelper.updateCommitStatus("", "Running - includes databricks", GitHubCommitState.PENDING)
-                            //CI_PART1 upload plugin buit tars to PLUGIN_BUILT_DIR for CI_PART2
                             def DBJob = build(job: 'rapids-databricks_premerge-github',
                                 propagate: false, wait: true,
                                 parameters: [
-                                        string(name: 'REF', value: params.REF),
+                                        string(name: 'REF', value: env.DATABRICKS_SOURCE_SHA),
                                         string(name: 'GITHUB_DATA', value: params.GITHUB_DATA),
                                         string(name: 'TEST_MODE', value: 'CI_PART1'),
                                         string(name: 'PLUGIN_BUILT_DIR', value: "$plugin_built_dir"),
@@ -474,7 +474,7 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                             def DBJob = build(job: 'rapids-databricks_premerge-github',
                                 propagate: false, wait: true,
                                 parameters: [
-                                        string(name: 'REF', value: params.REF),
+                                        string(name: 'REF', value: env.DATABRICKS_SOURCE_SHA),
                                         string(name: 'GITHUB_DATA', value: params.GITHUB_DATA),
                                         string(name: 'TEST_MODE', value: 'CI_PART2'),
                                         string(name: 'PLUGIN_BUILT_DIR', value: "$plugin_built_dir"),
@@ -511,7 +511,14 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                     // upload log only in case of build failure
                     def guardWords = ["gitlab.*?\\.com", "urm.*?\\.com",
                                       "artifactory.*?\\.com", "sonar.*?\\.com",
-                                      "dbc.*?azuredatabricks\\.net", "adb.*?databricks\\.com"]
+                                      "dbc.*?azuredatabricks\\.net", "adb.*?databricks\\.com",
+                                      "(?i)\\S*?\\.nvidia\\.com"]
+                    // Keep host/cloud/GPU identities in Jenkins, not the public log upload.
+                    // An interrupted diagnostic block is redacted through the end of the log.
+                    guardWords.add('(?s)Spark readiness: pre-test host diagnostics.*?' +
+                        '(?=Spark readiness (?:databricks|upstream): starting|\\Z)')
+                    guardWords.add('(?s)=== Databricks GPU diagnostics ===.*?' +
+                        '(?:=== End Databricks GPU diagnostics ===|\\Z)')
                     guardWords.add("nvidia-smi(?s)(.*?)(?=jenkins/version-def.sh)") // hide GPU info
                     guardWords.add("sc-ipp*") // hide cloud info
                     githubHelper.uploadParallelLogs(this, env.JOB_NAME, env.BUILD_NUMBER, null, guardWords)

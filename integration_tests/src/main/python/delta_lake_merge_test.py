@@ -1801,7 +1801,8 @@ def test_delta_dv_read_user_internal_row_index_column(
 
 
 @allow_non_gpu_conditional(
-    is_oss_delta_lake_40(), "BroadcastHashJoinExec", "BroadcastExchangeExec")
+    is_oss_delta_lake_40() or is_oss_delta_lake_42_or_43(),
+    "BroadcastHashJoinExec", "BroadcastExchangeExec")
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
@@ -1827,7 +1828,7 @@ def test_delta_merge_dv_many_touched_files(spark_tmp_path, spark_tmp_table_facto
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(is_databricks_runtime() or not is_oss_delta_lake_41_or_42(),
+@pytest.mark.skipif(is_databricks_runtime() or not is_oss_delta_lake_41_to_43(),
                     reason="OSS NOT MATCHED BY SOURCE requires Delta 4.1+")
 def test_delta_merge_not_matched_by_source_with_dv(spark_tmp_path, spark_tmp_table_factory):
     def src_table_func(spark):
@@ -1845,3 +1846,174 @@ def test_delta_merge_not_matched_by_source_with_dv(spark_tmp_path, spark_tmp_tab
         use_cdf=False, enable_deletion_vectors=True,
         src_table_func=src_table_func, dest_table_func=dest_table_func,
         merge_sql=merge_sql, compare_logs=True, conf=delta_merge_enabled_conf)
+
+
+@allow_non_gpu("BroadcastHashJoinExec", "BroadcastExchangeExec",
+               *delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(is_databricks_runtime() or not is_oss_delta_lake_42_or_43(),
+                    reason="Exercise the shared DV implementation with Delta 4.2 and 4.3")
+@pytest.mark.parametrize("command", ["DELETE", "UPDATE", "MERGE"])
+@pytest.mark.parametrize("use_metadata_row_index", [True, False], ids=idfn)
+@pytest.mark.parametrize("existing_dv", [True, False], ids=idfn)
+def test_delta_dv_dml_operation_logging(
+        spark_tmp_path, command, use_metadata_row_index, existing_dv):
+    """Check DML logging and physical row positions with fresh or existing DVs.
+
+    command selects DELETE, UPDATE, or MERGE. use_metadata_row_index exercises both
+    Delta row-index settings; the GPU helper supplies explicit physical indexes in either
+    case. existing_dv seeds a CPU DELETE so subsequent DML must preserve an existing DV.
+    """
+    conf = copy_and_update(delta_merge_enabled_conf, {
+        "spark.rapids.sql.command.DeleteCommand": "true",
+        "spark.rapids.sql.command.UpdateCommand": "true",
+        "spark.databricks.delta.delete.deletionVectors.persistent": "true",
+        "spark.databricks.delta.update.deletionVectors.persistent": "true",
+        "spark.databricks.delta.merge.deletionVectors.persistent": "true",
+        "spark.databricks.delta.deletionVectors.useMetadataRowIndex":
+            str(use_metadata_row_index).lower()})
+
+    def setup_tables(spark):
+        for mode in ["CPU", "GPU"]:
+            path = spark_tmp_path + "/" + mode
+            spark.range(1000).selectExpr("id", "CAST(id AS STRING) AS payload") \
+                .repartition(2).write.format("delta") \
+                .option("delta.enableDeletionVectors", "true").save(path)
+            if existing_dv:
+                spark.sql(f"DELETE FROM delta.`{path}` WHERE id % 10 = 1").collect()
+                metrics = spark.sql(f"DESCRIBE HISTORY delta.`{path}` LIMIT 1").first() \
+                    .operationMetrics
+                assert int(metrics["numDeletionVectorsAdded"]) > 0
+
+    with_cpu_session(setup_tables, conf=conf)
+
+    def run_command(spark, path):
+        statements = {
+            "DELETE": f"DELETE FROM delta.`{path}` WHERE id % 10 = 0",
+            "UPDATE": f"UPDATE delta.`{path}` SET payload = 'updated' WHERE id % 10 = 0",
+            "MERGE": f"MERGE INTO delta.`{path}` AS t "
+                "USING (SELECT id FROM range(1000) WHERE id % 10 = 0) AS s "
+                "ON t.id = s.id WHEN MATCHED THEN UPDATE SET t.payload = 'updated'"}
+        return spark.sql(statements[command]).collect()
+
+    expected_command = {"DELETE": "GpuDeleteCommand", "UPDATE": "GpuUpdateCommand",
+                        "MERGE": "GpuMergeIntoCommand43x" if is_oss_delta_lake_43()
+                            else "GpuMergeIntoCommand42x"}[command]
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        run_command, lambda spark, path: read_delta_path(spark, path).orderBy("id"),
+        spark_tmp_path, conf=conf, expected_command=expected_command,
+        required_gpu_classes=["GpuFileSourceScanExec"])
+
+    expected = [(i, "updated" if command != "DELETE" and i % 10 == 0 else str(i))
+                for i in range(1000)
+                if not (existing_dv and i % 10 == 1) and not (command == "DELETE" and i % 10 == 0)]
+
+    def check_tables(spark):
+        for mode in ["CPU", "GPU"]:
+            path = spark_tmp_path + "/" + mode
+            actual = spark.read.format("delta").load(path).orderBy("id").collect()
+            assert [(row.id, row.payload) for row in actual] == expected
+            metrics = spark.sql(f"DESCRIBE HISTORY delta.`{path}` LIMIT 1").first() \
+                .operationMetrics
+            prefix = "numTargetDeletionVectors" if command == "MERGE" else "numDeletionVectors"
+            assert sum(int(metrics.get(prefix + suffix, 0)) for suffix in ["Added", "Updated"]) > 0
+
+    with_cpu_session(check_tables, conf=conf)
+
+
+@allow_non_gpu("BroadcastHashJoinExec", "BroadcastExchangeExec",
+               *delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(is_databricks_runtime() or not is_oss_delta_lake_42_or_43(),
+                    reason="Exercise Delta 4.2 and 4.3 DV MERGE compatibility")
+@pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
+@pytest.mark.parametrize("persistent_dv", [True, False], ids=idfn)
+@pytest.mark.parametrize("merge_case", [
+    "mixed", "not_matched_by_source", "duplicate_delete", "no_match", "full_delete"])
+def test_delta_merge_dv_clauses(spark_tmp_path, use_cdf, persistent_dv, merge_case):
+    """Compare MERGE clause behavior on a target that already contains DVs.
+
+    use_cdf enables change data feed and checks the emitted change rows. persistent_dv
+    selects DV writes versus rewriting files while still reading the target's existing DVs.
+    merge_case covers mixed DELETE/UPDATE/INSERT clauses, NOT MATCHED BY SOURCE deletes,
+    duplicate source rows for an unconditional DELETE, a no-op, or removal of every row.
+    """
+    conf = copy_and_update(delta_merge_enabled_conf, {
+        "spark.databricks.delta.delete.deletionVectors.persistent": "true",
+        "spark.databricks.delta.merge.deletionVectors.persistent": str(persistent_dv).lower()})
+
+    def setup_tables(spark):
+        for mode in ["CPU", "GPU"]:
+            path = spark_tmp_path + "/" + mode
+            spark.range(20).selectExpr("id", "CAST(id AS STRING) AS payload") \
+                .repartition(2).write.format("delta") \
+                .option("delta.enableDeletionVectors", "true") \
+                .option("delta.enableChangeDataFeed", str(use_cdf).lower()).save(path)
+            spark.sql(f"DELETE FROM delta.`{path}` WHERE id = 19").collect()
+            metrics = spark.sql(f"DESCRIBE HISTORY delta.`{path}` LIMIT 1").first().operationMetrics
+            assert int(metrics["numDeletionVectorsAdded"]) > 0
+
+    with_cpu_session(setup_tables, conf=conf)
+    source_and_clauses = {
+        "mixed": ("SELECT * FROM VALUES (0L), (1L), (20L) AS source(id)",
+            "WHEN MATCHED AND t.id = 0 THEN DELETE "
+            "WHEN MATCHED THEN UPDATE SET t.payload = 'updated' "
+            "WHEN NOT MATCHED THEN INSERT (id, payload) VALUES (s.id, 'inserted')"),
+        "not_matched_by_source": ("SELECT * FROM VALUES (0L), (1L) AS source(id)",
+            "WHEN MATCHED THEN UPDATE SET t.payload = 'updated' "
+            "WHEN NOT MATCHED BY SOURCE AND t.id >= 10 THEN DELETE"),
+        "duplicate_delete": ("SELECT * FROM VALUES (0L), (0L) AS source(id)",
+            "WHEN MATCHED THEN DELETE"),
+        "no_match": ("SELECT 30L AS id", "WHEN MATCHED THEN UPDATE SET t.payload = 'updated'"),
+        "full_delete": ("SELECT id FROM range(20)", "WHEN MATCHED THEN DELETE")}
+    source_sql, clauses = source_and_clauses[merge_case]
+
+    affected = {"mixed": 3, "not_matched_by_source": 11, "duplicate_delete": 1,
+                "no_match": 0, "full_delete": 19}
+
+    def do_merge(spark, path):
+        result = spark.sql(f"MERGE INTO delta.`{path}` AS t USING ({source_sql}) AS s "
+                           f"ON t.id = s.id {clauses}").collect()
+        assert result[0][0] == affected[merge_case]
+        return result
+
+    expected_command = "GpuMergeIntoCommand43x" if is_oss_delta_lake_43() \
+        else "GpuMergeIntoCommand42x"
+    # Mixed clauses always write data, so also exercise the helper's default write check.
+    # Other cases include no-ops and full-file deletion without replacement Parquet data.
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        do_merge, lambda spark, path: read_delta_path(spark, path).orderBy("id"),
+        spark_tmp_path, conf=conf, expected_command=expected_command,
+        required_gpu_classes=None if merge_case == "mixed" else [])
+
+    expected = {i: str(i) for i in range(19)}
+    if merge_case == "mixed":
+        del expected[0]
+        expected.update({1: "updated", 20: "inserted"})
+    elif merge_case == "not_matched_by_source":
+        expected = {i: "updated" if i < 2 else str(i) for i in range(10)}
+    elif merge_case == "duplicate_delete":
+        del expected[0]
+    elif merge_case == "full_delete":
+        expected.clear()
+    def check_tables(spark):
+        cdf_results = []
+        for mode in ["CPU", "GPU"]:
+            path = spark_tmp_path + "/" + mode
+            actual = spark.read.format("delta").load(path).orderBy("id").collect()
+            assert [(row.id, row.payload) for row in actual] == sorted(expected.items())
+            if merge_case != "no_match":
+                metrics = spark.sql(f"DESCRIBE HISTORY delta.`{path}` LIMIT 1").first() \
+                    .operationMetrics
+                dv_count = sum(int(metrics.get(key, 0)) for key in
+                               ["numTargetDeletionVectorsAdded", "numTargetDeletionVectorsUpdated"])
+                assert (dv_count > 0) == (persistent_dv and merge_case != "full_delete")
+                if merge_case == "full_delete":
+                    assert int(metrics["numTargetFilesRemoved"]) > 0
+            if use_cdf:
+                changes = read_delta_path_with_cdf(spark, path)
+                cdf_results.append(changes.sort(changes.columns).collect())
+        if use_cdf:
+            assert_equal(cdf_results[0], cdf_results[1])
+
+    with_cpu_session(check_tables, conf=conf)

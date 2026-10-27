@@ -21,7 +21,7 @@
  *
  */
 
-@Library('blossom-lib')
+@Library('blossom-lib@main')
 @Library('blossom-github-lib@master')
 
 import ipp.blossom.*
@@ -46,15 +46,15 @@ pipeline {
     }
 
     parameters {
-        // Put a default value for REF to avoid error when running the pipeline manually
         string(name: 'REF', defaultValue: 'main',
-            description: 'Merged commit of specific PR')
+            description: 'Merged commit SHA; legacy branch refs resolve from the PR metadata')
         string(name: 'GITHUB_DATA', defaultValue: '',
             description: 'Json-formatted github data from upstream blossom-ci')
         choice(name: 'TEST_MODE', choices: ['CI_PART1', 'CI_PART2'],
             description: 'Separate integration tests into 2 parts, and run each part in parallell')
+        // Parameter definitions are shared with old branches; retain even when unused here.
         string(name: 'PLUGIN_BUILT_DIR', defaultValue: 'dbfs:/cicd',
-            description: 'CI_PART1 uploads spark-rapids built tgz for CI_PART2')
+            description: 'Legacy CI_PART1 artifact path for CI_PART2; unused by independent builds')
     }
 
     environment {
@@ -81,7 +81,10 @@ pipeline {
                     currentBuild.description = githubHelper.getBuildDescription() + " | $TEST_MODE"
                     def title = githubHelper.getIssue().title.toLowerCase()
                     env.REDUCED_IT = (title ==~ /.*\[reduced-it\].*/).toString()
-                    checkoutCode(githubHelper.getCloneUrl(), githubHelper.getMergedSHA())
+                    // New parents pin both parts to one SHA; older parents pass branch refs.
+                    def sourceSha = (params.REF ==~ /[0-9a-f]{40}/) ?
+                        params.REF : githubHelper.getMergedSHA()
+                    checkoutCode(githubHelper.getCloneUrl(), sourceSha)
                 }
             }
         } // end of Init githubHelper
@@ -94,7 +97,7 @@ pipeline {
                         // 'name' and 'value' only supprt literal string in the declarative Jenkins
                         // Refer to Jenkins issue https://issues.jenkins.io/browse/JENKINS-62127
                         name 'DB_RUNTIME'
-                        values '14.3', '17.3'
+                        values '14.3', '17.3', '18.3'
                     }
                 }
                 stages {
@@ -120,7 +123,9 @@ pipeline {
                                 container('cpu') {
                                     try {
                                         unstash('source_tree')
-                                        databricksBuild()
+                                        load('jenkins/databricks/fallback.groovy').run(this, DbUtils, getDbRetryOrder(),
+                                            { clusterId -> databricksBuild(clusterId) },
+                                            { clusterId -> databricksTest(clusterId) })
                                     } catch (e) {
                                         try {
                                             withCredentials([usernamePassword(
@@ -144,77 +149,59 @@ pipeline {
     } // end of stages
 } // end of pipeline
 
-// params.DATABRICKS_TYPE: 'aws' or 'azure', param can be defined through the jenkins webUI
-String getDbType() {
-    return params.DATABRICKS_TYPE ? params.DATABRICKS_TYPE : 'aws'
+List<String> getDbTypes() {
+    return ['aws2', 'aws', 'azure3']
 }
 
-void databricksBuild() {
-    def CLUSTER_ID = ''
+String getDbType() {
+    // Match the initial environment to the fixed fallback order until the 26.10 release.
+    // TODO: Restore parameter selection together with getDbRetryOrder() after the release.
+    // def types = getDbTypes()
+    // def selected = params.DATABRICKS_TYPE ?: types[0]
+    // if (!(selected in types)) {
+    //     error "Unsupported Databricks profile: $selected"
+    // }
+    // return selected
+    return getDbTypes()[0]
+}
+
+List<String> getDbRetryOrder() {
+    // Keep this order independent of DATABRICKS_TYPE while 26.10 lacks fallback support.
+    // TODO: Restore selected-provider-first ordering after the 26.10 release.
+    // def selected = getDbType()
+    // return [selected] + getDbTypes().findAll { it != selected }
+    return getDbTypes()
+}
+
+void databricksBuild(String clusterId) {
     def SPARK_MAJOR = BASE_SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS.replace('.', '')
-    def dbStep = ''
-    def pluginBuiltTar = "$PLUGIN_BUILT_DIR/$DB_RUNTIME/spark-rapids-built.tgz"
-    // Map DBFS path to the local path into the cluster
-    def buildArgs = (params.TEST_MODE == 'CI_PART1') ? pluginBuiltTar.replace('dbfs:/', '/dbfs/') : ''
-    def testArgs = (params.TEST_MODE == 'CI_PART2') ?  pluginBuiltTar.replace('dbfs:/', '/dbfs/') : ''
+    stage("Build against $SPARK_MAJOR DB") {
+        sh "rm -rf spark-rapids-ci.tgz"
+        sh "tar -zcf spark-rapids-ci.tgz * .git"
+        withCredentials([file(credentialsId: 'SPARK_DATABRICKS_PRIVKEY', variable: 'DATABRICKS_PRIVKEY')]) {
+            def BUILD_PARAMS = DbUtils.getParameters(this, 'BUILD', "-c $clusterId")
+            sh "python3 ./jenkins/databricks/run-build.py $BUILD_PARAMS"
+        }
+        sh "rm spark-rapids-ci.tgz"
+    }
+}
 
+void databricksTest(String clusterId) {
+    def SPARK_MAJOR = BASE_SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS.replace('.', '')
+    // TODO(#16317): Re-enable DBR 18.3 integration tests and remove the compile-only stage label.
+    // Preserve the permanent readiness checks when restoring integration coverage.
+    def readinessOnly = env.DB_RUNTIME == '18.3'
+    def stageName = readinessOnly ? "Compile only against ${SPARK_MAJOR}DB" :
+        "Test against $SPARK_MAJOR DB"
     try {
-        // wait for all the rapids plugin tars built in CI_PART1 to be ready
-        if (params.TEST_MODE == 'CI_PART2') {
-            // Check if the comma-separated files exist in the Databricks DBFS path within timeout minutes
-            if (DbUtils.filesExist(this, "$pluginBuiltTar", 60)) {
-                println('Rapids plugin built tars are ready for CI_PART2')
-            } else {
-                println('Rapids plugin built tars are not ready, CI_PART2 starts building them')
-                testArgs = '' // To let CI_PART2 build rapids plugin after the timeout
-                buildArgs = '' // To let CI_PART2 NOT upload plugin tars
-            }
-        }
-
-        stage("Create $SPARK_MAJOR DB") {
-            dbStep = 'CREATE'
-            // Add the init_script parameter, e.g. oo.sh,bar.sh --> /path/foo.sh,/path/bar.sh
-            def input_params = env.INIT_SCRIPTS ? " -f " + DbUtils.uploadFiles(this, env.INIT_SCRIPTS, env.INIT_SCRIPTS_DIR) : ''
-            def CREATE_PARAMS = DbUtils.getParameters(this, dbStep, input_params)
-            CLUSTER_ID = sh(script: "python3 ./jenkins/databricks/create.py $CREATE_PARAMS", returnStdout: true).trim()
-            echo CLUSTER_ID
-        }
-
-        if (params.TEST_MODE == 'CI_PART1' || (params.TEST_MODE == 'CI_PART2' && testArgs == '')) {
-            stage("Build against $SPARK_MAJOR DB") {
-                sh "rm -rf spark-rapids-ci.tgz"
-                sh "tar -zcf spark-rapids-ci.tgz * .git"
-                dbStep = 'BUILD'
-                withCredentials([file(credentialsId: 'SPARK_DATABRICKS_PRIVKEY', variable: 'DATABRICKS_PRIVKEY')]) {
-                    def BUILD_PARAMS = DbUtils.getParameters(this, dbStep, "-c $CLUSTER_ID")
-                    retry(3) {
-                        // Back-up built tar to the path "$buildArgs" on Databricks cluster
-                        // Refer to https://github.com/NVIDIA/spark-rapids/pull/11788/files#diff-dd60414e554e6bed881c3a7e14de334f3e52f36f81643412cd2497c275f8aee9R190-R194
-                        sh "python3 ./jenkins/databricks/run-build.py $BUILD_PARAMS $buildArgs"
-                    }
-                }
-                sh "rm spark-rapids-ci.tgz"
-            }
-        }
-
-        stage("Test against $SPARK_MAJOR DB") {
-            dbStep = 'TEST'
+        stage(stageName) {
             withCredentials([file(credentialsId: 'SPARK_DATABRICKS_PRIVKEY', variable: 'DATABRICKS_PRIVKEY')]) {
-                def TEST_PARAMS = DbUtils.getParameters(this, dbStep, "-c $CLUSTER_ID")
-                // Get built tar from the path "$testArgs" on Databricks cluster
-                // Refer to https://github.com/NVIDIA/spark-rapids/pull/11788/files#diff-db28879431d57d0e454a2c7ee89fdda9abdec463c61771333d6a6565bf96c062R52-R55
-                sh "python3 ./jenkins/databricks/run-tests.py $TEST_PARAMS $testArgs"
+                def TEST_PARAMS = DbUtils.getParameters(this, 'TEST', "-c $clusterId")
+                sh "python3 ./jenkins/databricks/run-tests.py $TEST_PARAMS"
             }
         }
     } finally {
-        if (CLUSTER_ID) {
-            (dbStep == 'TEST') ? common.publishPytestResult(this, "Test against $SPARK_MAJOR DB") : ''
-            retry(3) {
-                params.TEST_MODE == 'CI_PART2' ? DbUtils.cleanUp(this, "$PLUGIN_BUILT_DIR/$DB_RUNTIME") : ''
-                env.INIT_SCRIPTS ? DbUtils.cleanUp(this, env.INIT_SCRIPTS_DIR) : ''
-                sh "python3 ./jenkins/databricks/shutdown.py -s $DATABRICKS_HOST -t $DATABRICKS_TOKEN -c $CLUSTER_ID -d"
-            }
-        }
+        common.publishPytestResult(this, "Test against $SPARK_MAJOR DB")
     }
 }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@ import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Implementation of {@link RapidsOutputFile} using the Hadoop file system.
+ * Implementation of {@code RapidsOutputFile} using the Hadoop file system.
  * <br/>
  * This class provides methods to create an output file and to obtain the absolute path.
  */

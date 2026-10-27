@@ -1109,29 +1109,6 @@ case class AvroBlockMeta(header: Header, headerSize: Long, blocks: Seq[BlockInfo
  */
 private case class CopyRange(offset: Long, length: Long)
 
-/** Extra information */
-case class AvroExtraInfo() extends ExtraInfo
-
-/** avro schema wrapper */
-case class AvroSchemaWrapper(schema: Schema) extends SchemaBase {
-  override def isEmpty: Boolean = schema.getFields.isEmpty
-}
-
-/** avro BlockInfo wrapper */
-case class AvroDataBlock(blockInfo: BlockInfo) extends DataBlockBase {
-  override def getRowCount: Long = blockInfo.count
-  override def getReadDataSize: Long = blockInfo.dataSize
-  override def getBlockSize: Long = blockInfo.blockSize
-}
-
-case class AvroSingleDataBlockInfo(
-  filePath: Path,
-  dataBlock: AvroDataBlock,
-  partitionValues: InternalRow,
-  schema: AvroSchemaWrapper,
-  readSchema: StructType,
-  extraInfo: AvroExtraInfo) extends SingleDataBlockInfo
-
 case class AvroBatchContext(
   override val origChunkedBlocks: LinkedHashMap[Path, ArrayBuffer[DataBlockBase]],
   override val schema: SchemaBase,

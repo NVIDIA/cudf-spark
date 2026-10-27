@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,9 +18,10 @@ package com.nvidia.spark.rapids
 
 import ai.rapids.cudf.ColumnVector
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.jni.RmmSpark
+import com.nvidia.spark.rapids.jni.{GpuSplitAndRetryOOM, RmmSpark}
 
-import org.apache.spark.sql.catalyst.expressions.{Ascending, AttributeReference, ExprId, SortOrder}
+import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, AttributeReference, ExprId,
+  SortOrder}
 import org.apache.spark.sql.types.{DataType, IntegerType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -71,6 +72,57 @@ class LimitRetrySuite extends RmmSparkRetrySuiteBase {
       assertResult(numRows)(pos)
       // only one batch
       assert(!topNIter.hasNext)
+    }
+  }
+
+  /** A TopN over a rows-only child can only order by an expression that reads no column. */
+  private val literalSorter = new GpuSorter(Seq(SortOrder(GpuLiteral(1, IntegerType), Ascending)),
+    Array.empty[Attribute], Map.empty[String, GpuMetric])
+
+  /** Runs GpuTopN over rows-only batches and returns (rows, columns) for each output batch. */
+  private def rowsOnlyTopN(rowCounts: Seq[Int], limit: Int, offset: Int): Seq[(Int, Int)] = {
+    val topNIter = GpuTopN(limit, literalSorter,
+      rowCounts.map(n => new ColumnarBatch(Array.empty, n)).toIterator,
+      NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric,
+      offset)
+    topNIter.map { scb =>
+      withResource(scb) { _ =>
+        withResource(scb.getColumnarBatch())(cb => (cb.numRows, cb.numCols))
+      }
+    }.toList
+  }
+
+  test("GPU topn over rows-only batches keeps the rows the CPU keeps") {
+    Seq(
+      (Seq(1000, 1000), 5, 0), // two batches in one task
+      (Seq.fill(5)(1000), 5, 2),
+      (Seq(3, 4), 20, 0), // the limit exceeds the rows
+      (Seq(3, 4), 20, 5),
+      (Seq(2, 2), 10, 5), // the offset exceeds the rows
+      (Seq(0, 7, 0), 5, 0),
+      (Seq(0, 0), 5, 0),
+      (Seq(1000), 5, 0),
+      (Seq(10, Int.MaxValue - 5), 10, 0), // the two inputs together pass Int.MaxValue rows
+      // Each input alone fills a limit of 2^30.
+      (Seq(1 << 30, 1 << 30), 1 << 30, 0),
+      (Seq(1 << 30, 1 << 30), 1 << 30, 7),
+      // The largest limit Spark 3.5 plans as a top-k, under topKSortFallbackThreshold.
+      (Seq(Int.MaxValue, Int.MaxValue, Int.MaxValue), Int.MaxValue - 16, 0)
+    ).foreach { case (rowCounts, limit, offset) =>
+      val expected = math.max(0L, math.min(limit, rowCounts.map(_.toLong).sum) - offset).toInt
+      assertResult(Seq((expected, 0)), s"rows $rowCounts, limit $limit, offset $offset")(
+        rowsOnlyTopN(rowCounts, limit, offset))
+    }
+  }
+
+  test("GPU topn over rows-only batches allocates nothing a split and retry OOM can stop") {
+    RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
+      RmmSpark.OomInjectionType.GPU.ordinal, 0)
+    assertResult(Seq((5, 0)))(rowsOnlyTopN(Seq(1000, 1000), 5, 0))
+    assertResult(0)(RmmSpark.getAndResetNumSplitRetryThrow(1))
+    // The OOM is still armed, so the next device allocation takes it.
+    assertThrows[GpuSplitAndRetryOOM] {
+      withResource(ColumnVector.fromInts(1))(_ => ())
     }
   }
 

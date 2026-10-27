@@ -75,7 +75,9 @@ case class GpuFileSourceScanExec(
     tableIdentifier: Option[TableIdentifier],
     disableBucketedScan: Boolean = false,
     queryUsesInputFile: Boolean = false,
-    requiredPartitionSchema: Option[StructType] = None)(@transient val rapidsConf: RapidsConf)
+    requiredPartitionSchema: Option[StructType] = None)(
+    @transient val rapidsConf: RapidsConf,
+    @transient val partitionPlanningScan: Option[FileSourceScanExec] = None)
     extends GpuDataSourceScanExec with GpuExec {
 
   import GpuMetric._
@@ -98,7 +100,7 @@ case class GpuFileSourceScanExec(
 
   private val isPerFileReadEnabled = gpuFormat.isPerFileReadEnabled(rapidsConf)
 
-  override def otherCopyArgs: Seq[AnyRef] = Seq(rapidsConf)
+  override def otherCopyArgs: Seq[AnyRef] = Seq(rapidsConf, partitionPlanningScan)
 
   // All expressions are filter expressions used on the CPU.
   override def gpuExpressions: Seq[Expression] = Nil
@@ -108,6 +110,14 @@ case class GpuFileSourceScanExec(
   }
 
   private lazy val driverMetrics: HashMap[String, Long] = HashMap.empty
+
+  private[sql] def updateDriverMetrics(values: Map[String, Long]): Unit = {
+    values.foreach { case (name, value) =>
+      if (metrics.contains(name)) {
+        driverMetrics(name) = value
+      }
+    }
+  }
 
   private var prefetchEagerly = false
 
@@ -558,7 +568,7 @@ case class GpuFileSourceScanExec(
   private def createNonBucketedReadRDD(
       readFile: Option[(PartitionedFile) => Iterator[InternalRow]],
       fsRelation: HadoopFsRelation): RDD[InternalRow] = {
-    val partitions = StaticPartitionShims.getStaticPartitions(fsRelation).getOrElse {
+    val partitions = StaticPartitionShims.getPartitions(this).getOrElse {
       val openCostInBytes = fsRelation.sparkSession.sessionState.conf.filesOpenCostInBytes
       val maxSplitBytes =
         FilePartition.maxSplitBytes(fsRelation.sparkSession, dynamicallySelectedPartitions)

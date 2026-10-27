@@ -51,7 +51,9 @@ object WritePythonUDFUtils {
       funcs: Seq[(ChainedPythonFunctions, Long)],
       argOffsets: Array[Array[Int]],
       argNames: Option[Array[Array[Option[String]]]] = None,
-      profiler: Option[String] = None): Unit = {
+      profiler: Option[String] = None,
+      udfLogMaxEntries: Int = 0,
+      udfLogLevel: String = "WARNING"): Unit = {
     PythonUDFRunner.writeUDFs(dataOut, funcs.map(_._1), argOffsets)
   }
 }

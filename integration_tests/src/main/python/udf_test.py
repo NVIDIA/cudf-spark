@@ -17,6 +17,7 @@ from pyspark import BarrierTaskContext, TaskContext
 
 from conftest import is_at_least_precommit_run, is_databricks_runtime
 from spark_session import (is_before_spark_331, is_before_spark_350,
+                           is_databricks173_or_later,
                            is_spark_400_or_later,
                            is_spark_411_or_later, is_spark_420_or_later,
                            with_cpu_session)
@@ -264,6 +265,50 @@ def test_window_aggregate_udf(data_gen, window):
             pandas_sum(f.col('b')).over(window)),
         # use unsafe mode to avoid overflow
         conf=arrow_udf_conf_unsafe)
+
+
+@ignore_order
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="Databricks UDF logging requires DBR 17.3 or later")
+@pytest.mark.parametrize('logging_settings', [(0, 'WARNING'), (7, 'INFO')],
+                         ids=['default_logging', 'configured_logging'])
+@pytest.mark.parametrize('bounded', [False, True], ids=['unbounded', 'bounded'])
+@pytest.mark.parametrize('project_array', [False, True], ids=['scalar', 'array_projection'])
+def test_window_aggregate_udf_logging(logging_settings, bounded, project_array):
+    max_entries, log_level = logging_settings
+
+    def checked_sum(values):
+        from pyspark.sql.udf_logger import PySparkUDFLogger
+        # Verify the worker receives the settings, not just that the query returns results.
+        assert PySparkUDFLogger._max_entries == max_entries
+        assert PySparkUDFLogger._log_level == log_level
+        return int(values.sum())
+
+    if project_array:
+        @f.pandas_udf('array<long>')
+        def pandas_sum(values: pd.Series) -> list:
+            total = checked_sum(values)
+            return [total, total + 1]
+    else:
+        @f.pandas_udf('long')
+        def pandas_sum(values: pd.Series) -> int:
+            return checked_sum(values)
+
+    def query(spark):
+        df = spark.range(0, 32, 1, 2).withColumn('key', f.col('id') % 3)
+        window = Window.partitionBy('key')
+        if bounded:
+            window = window.orderBy('id').rowsBetween(-1, 1)
+        result = df.select('id', pandas_sum(f.col('id')).over(window).alias('value'))
+        if project_array:
+            result = result.select('id', f.col('value')[1].alias('value'))
+        return result
+
+    conf = copy_and_update(arrow_udf_conf, {
+        'spark.sql.pyspark.udf.logging.maxEntries': str(max_entries),
+        'spark.sql.pyspark.udf.logging.logLevel': log_level,
+    })
+    assert_gpu_and_cpu_are_equal_collect(query, conf=conf)
 
 
 @ignore_order

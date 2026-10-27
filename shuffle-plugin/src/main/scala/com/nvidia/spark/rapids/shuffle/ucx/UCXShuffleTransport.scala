@@ -305,6 +305,9 @@ class UCXShuffleTransport(shuffleServerId: BlockManagerId, rapidsConf: RapidsCon
       null,
       () => RmmSpark.removeAllCurrentThreadAssociation()))
 
+  // servers made here, whose sends still in flight at close are released by this transport
+  private[this] val servers = new ConcurrentLinkedQueue[RapidsShuffleServer]()
+
   /**
    * Construct a server instance
    *
@@ -312,7 +315,7 @@ class UCXShuffleTransport(shuffleServerId: BlockManagerId, rapidsConf: RapidsCon
    * @return the server instance
    */
   override def makeServer(requestHandler: RapidsShuffleRequestHandler): RapidsShuffleServer = {
-    new RapidsShuffleServer(
+    val server = new RapidsShuffleServer(
       this,
       ucx.getServerConnection,
       shuffleServerId,
@@ -320,6 +323,8 @@ class UCXShuffleTransport(shuffleServerId: BlockManagerId, rapidsConf: RapidsCon
       serverExecutor,
       bssExecutor,
       rapidsConf)
+    servers.add(server)
+    server
   }
 
   /**
@@ -589,6 +594,11 @@ class UCXShuffleTransport(shuffleServerId: BlockManagerId, rapidsConf: RapidsCon
     }
 
     ucx.close()
+    // If the progress thread terminated, no send callback can come after this, so the sends
+    // that never got one are released here, before their bounce buffers' pools are freed.
+    // Otherwise they are leaked, since UCX may still read those buffers.
+    val transportStopped = ucx.isProgressThreadTerminated
+    servers.forEach(_.releaseAbandoned(transportStopped))
     freeBounceBufferPools()
   }
 

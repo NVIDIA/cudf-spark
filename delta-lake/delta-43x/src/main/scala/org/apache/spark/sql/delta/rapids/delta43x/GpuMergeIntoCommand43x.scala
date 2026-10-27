@@ -36,10 +36,13 @@ import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.classic.{SparkSession => ClassicSparkSession}
 import org.apache.spark.sql.delta._
 import org.apache.spark.sql.delta.actions.{AddFile, FileAction}
-import org.apache.spark.sql.delta.commands.MergeIntoCommandBase
+import org.apache.spark.sql.delta.commands.{DeletionVectorUtils, MergeIntoCommandBase}
+import org.apache.spark.sql.delta.commands.MergeIntoCommandBase._
 import org.apache.spark.sql.delta.commands.merge._
 import org.apache.spark.sql.delta.files._
 import org.apache.spark.sql.delta.rapids.{
+  DMLWithDeletionVectorsHelperShims,
+  GpuDeletionVectorBitmapGenerator,
   GpuDeltaCommandLike,
   GpuDeltaLog,
   GpuMergeStats,
@@ -63,7 +66,7 @@ import org.apache.spark.sql.types.{LongType, StructType}
  *
  * Phase 1: Find the input files in target that are touched by the rows that satisfy
  *    the condition and verify that no two source rows match with the same target row.
- *    This is implemented as an inner-join using the given condition. See [[findTouchedFiles]]
+ *    This is implemented as an inner-join using the given condition. See `findTouchedFiles`
  *    for more details.
  *
  * Phase 2: Read the touched files again and write new files with updated and/or inserted rows.
@@ -106,6 +109,55 @@ case class GpuMergeIntoCommand43x(
     AttributeReference("num_updated_rows", LongType)(),
     AttributeReference("num_deleted_rows", LongType)(),
     AttributeReference("num_inserted_rows", LongType)())
+
+  override protected def writeDVs(
+      spark: SqlSparkSession,
+      deltaTxn: OptimisticTransaction,
+      filesToRewrite: Seq[AddFile]): Seq[FileAction] = recordMergeOperation(
+        extraOpType = "writeDeletionVectors",
+        status = "MERGE operation - Rewriting Deletion Vectors to " + filesToRewrite.size +
+          " files",
+        sqlMetricName = "rewriteTimeMs") {
+    val gpuTxn = deltaTxn.asInstanceOf[GpuOptimisticTransactionBase]
+    val fileIndex = new TahoeBatchFileIndex(
+      spark, "merge", filesToRewrite, deltaTxn.deltaLog,
+      deltaTxn.deltaLog.dataPath, deltaTxn.snapshot)
+    val sourceDf = getMergeSource.df.withColumn(SOURCE_ROW_PRESENT_COL, lit(true))
+    val targetScan = DMLWithDeletionVectorsHelperShims
+      .createTargetDfForGpuScanningForMatches(
+        spark,
+        target,
+        fileIndex,
+        filesToRewrite.exists(_.deletionVector != null),
+        sourceDf.queryExecution.analyzed.output.map(_.name))
+    val joinType = if (notMatchedBySourceClauses.isEmpty) "inner" else "rightOuter"
+    val joinedDf = sourceDf
+      .join(targetScan.dataFrame, DFUDFShims.exprToColumn(condition), joinType)
+    val nameToAddFileMap = generateCandidateFileMap(targetDeltaLog.dataPath, filesToRewrite)
+    val touchedFilesWithDVs = GpuDeletionVectorBitmapGenerator.findTouchedFiles(
+      spark,
+      gpuTxn,
+      hasReadableDVs = DeletionVectorUtils.deletionVectorsReadable(deltaTxn.snapshot),
+      targetScan.copy(dataFrame = joinedDf),
+      filesToRewrite,
+      DFUDFShims.exprToColumn(generateFilterForModifiedRows()),
+      nameToAddFileMap,
+      operationName = "MERGE")
+    val (dvActions, metricsMap) = DMLWithDeletionVectorsHelperShims.processUnmodifiedData(
+      spark.asInstanceOf[ClassicSparkSession], touchedFilesWithDVs, gpuTxn)
+    metrics("numTargetDeletionVectorsAdded")
+      .set(metricsMap.getOrElse("numDeletionVectorsAdded", 0L))
+    metrics("numTargetDeletionVectorsRemoved")
+      .set(metricsMap.getOrElse("numDeletionVectorsRemoved", 0L))
+    metrics("numTargetDeletionVectorsUpdated")
+      .set(metricsMap.getOrElse("numDeletionVectorsUpdated", 0L))
+    metrics("numTargetFilesRemoved").set(metricsMap.getOrElse("numRemovedFiles", 0L))
+    val fullyRemovedFiles = touchedFilesWithDVs.filter(_.isFullyReplaced()).map(_.fileLogEntry)
+    val (removedBytes, removedPartitions) = totalBytesAndDistinctPartitionValues(fullyRemovedFiles)
+    metrics("numTargetBytesRemoved").set(removedBytes)
+    metrics("numTargetPartitionsRemovedFrom").set(removedPartitions)
+    dvActions
+  }
 
   @transient override protected lazy val sc: SparkContext = SparkContext.getOrCreate()
 
@@ -178,8 +230,20 @@ case class GpuMergeIntoCommand43x(
               val shouldWriteDeletionVectors =
                 shouldWritePersistentDeletionVectors(spark, gpuDeltaTxn)
               if (shouldWriteDeletionVectors) {
-                // We should never come here because we should have tagged the Exec to fallback
-                throw new IllegalStateException("Deletion Vectors are not supported on the GPU")
+                val newWrittenFiles = withStatusCode("DELTA", "Writing modified data") {
+                  writeAllChanges(
+                    spark,
+                    gpuDeltaTxn,
+                    filesToRewrite,
+                    deduplicateCDFDeletes,
+                    writeUnmodifiedRows = false)
+                }
+                val dvActions = withStatusCode(
+                    "DELTA",
+                    "Writing Deletion Vectors for modified data") {
+                  writeDVs(spark, gpuDeltaTxn, filesToRewrite)
+                }
+                newWrittenFiles ++ dvActions
               } else {
                 val newWrittenFiles = withStatusCode("DELTA", "Writing modified data") {
                   writeAllChanges(
@@ -263,7 +327,7 @@ case class GpuMergeIntoCommand43x(
   }
 
   /**
-   * Collects the merge operation stats and metrics into a [[MergeStats]] object that can be
+   * Collects the merge operation stats and metrics into a `MergeStats` object that can be
    * recorded with `recordDeltaEvent`. Merge stats should be collected after committing all new
    * actions as metrics may still be updated during commit.
    */

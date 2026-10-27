@@ -29,31 +29,6 @@
       "resource": "withResource(valueColumn.isNull)"
     },
     {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/RmmRapidsRetryIterator.scala",
-      "fingerprint": "e002e24d036ea07b9ae9",
-      "resource": "withResource(tables.safeMap(GpuColumnVector.from(_,spillable.dataTypes)))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/SamplingUtils.scala",
-      "fingerprint": "1b271f866d9bad5f247d",
-      "resource": "withResource(concat)"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/SamplingUtils.scala",
-      "fingerprint": "875424e1a922ad29fd4a",
-      "resource": "withResource(filtered)"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/SamplingUtils.scala",
-      "fingerprint": "ed89e60559df2992cca0",
-      "resource": "withResource(GpuColumnVector.from(cb))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/conditionalExpressions.scala",
-      "fingerprint": "d88291756077c688ade8",
-      "resource": "withResource(oneColumnTable.gather(firstTrueIndex))"
-    },
-    {
       "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/higherOrderFunctions.scala",
       "fingerprint": "7f869aeb1f10af718805",
       "resource": "withResource(updatedMapView.getChildColumnView(0))"
@@ -62,21 +37,6 @@
       "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/higherOrderFunctions.scala",
       "fingerprint": "b12699d8d247b786ecad",
       "resource": "withResource(deduped.getChildColumnView(0))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/shims/AnsiUtil.scala",
-      "fingerprint": "66d771315929b49d2bb3",
-      "resource": "withResource(floorCv.greaterThan(maxLongS))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/shims/AnsiUtil.scala",
-      "fingerprint": "7ce99c35c4c18dfcf3b1",
-      "resource": "withResource(ceil.lessThan(minLongS))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/shims/GpuIntervalUtilsBase.scala",
-      "fingerprint": "fb219b9f909a536ef217",
-      "resource": "withResource(Scalar.fromString(prefixStr))"
     },
     {
       "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/window/GpuUnboundedToUnboundedAggWindowExec.scala",
@@ -107,71 +67,6 @@
       "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/window/GpuUnboundedToUnboundedAggWindowExec.scala",
       "fingerprint": "bff3c1ddc31981e7aaab",
       "resource": "withResource(counts.getBase.getScalarElement(indexToLookAt))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/aggregate/GpuApproximatePercentile.scala",
-      "fingerprint": "4230cc0e3d01f15ca350",
-      "resource": "withResource(percentiles.replaceListChild(childCv))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/aggregate/aggregateFunctions.scala",
-      "fingerprint": "6f0d3706d5dffff60285",
-      "resource": "withResource(isEmptyBase.not())"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/aggregate/aggregateFunctions.scala",
-      "fingerprint": "7c60aef085f55620572c",
-      "resource": "withResource(ColumnVector.fromDoubles(mergeMean))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/aggregate/aggregateFunctions.scala",
-      "fingerprint": "9456f9ce546675b26ba6",
-      "resource": "withResource(ColumnVector.fromDoubles(mergeM2))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/aggregate/aggregateFunctions.scala",
-      "fingerprint": "ac84ab989156313c1757",
-      "resource": "withResource(ColumnVector.fromDoubles(mergeN))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/aggregate/aggregateFunctions.scala",
-      "fingerprint": "d40d88c1094eee8ec4f3",
-      "resource": "withResource(problem.any())"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/arithmetic.scala",
-      "fingerprint": "57ab5ea585cd4489f10e",
-      "resource": "withResource(GpuScalar.from(null,intermediateResultType))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/arithmetic.scala",
-      "fingerprint": "5b9694a70d63c53d741f",
-      "resource": "withResource(minDecimal.div(castB))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/arithmetic.scala",
-      "fingerprint": "83df8ed3a8292cdc33f7",
-      "resource": "withResource(wouldOverflow.any())"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/arithmetic.scala",
-      "fingerprint": "95cacbffd9001fb359b9",
-      "resource": "withResource(Scalar.fromDecimal(0,min128Int))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/arithmetic.scala",
-      "fingerprint": "d649c5b0e4ec352dbf23",
-      "resource": "withResource(lt)"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/arithmetic.scala",
-      "fingerprint": "edcda84e10faad3cb77d",
-      "resource": "withResource(maxDecimal.div(castB))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/arithmetic.scala",
-      "fingerprint": "f7ce4a433a4dd4c05dc7",
-      "resource": "withResource(lt.or(gt))"
     },
     {
       "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/collectionOperations.scala",
@@ -209,21 +104,6 @@
       "resource": "withResource(getNullScalar)"
     },
     {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/execution/GpuHashJoin.scala",
-      "fingerprint": "e94cecefc0efd9c40217",
-      "resource": "withResource(builtTable.filter(trackerTab.getColumn(0)))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/shims/intervalExpressions.scala",
-      "fingerprint": "bdb0982a0a7b49fdc047",
-      "resource": "withResource(diff.greaterOrEqualTo(one))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/shims/intervalExpressions.scala",
-      "fingerprint": "c005f1dbcf1c61780533",
-      "resource": "withResource(isMin.and(isNegOne))"
-    },
-    {
       "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/stringFunctions.scala",
       "fingerprint": "42399f8595279597588c",
       "resource": "withResource(extracted.replaceListChild(normalizedCaptures))"
@@ -237,31 +117,6 @@
       "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/stringFunctions.scala",
       "fingerprint": "c75e489f83b3420cde00",
       "resource": "withResource(captures.replaceNulls(emptyString))"
-    },
-    {
-      "path": "sql-plugin/src/main/spark334/scala/com/nvidia/spark/rapids/shims/GetSequenceSize.scala",
-      "fingerprint": "2ef8f1001188e98b0a1d",
-      "resource": "withResource(hasLongMinAndStepMinusOne.any())"
-    },
-    {
-      "path": "sql-plugin/src/main/spark334/scala/com/nvidia/spark/rapids/shims/GetSequenceSize.scala",
-      "fingerprint": "ae4f61b93e9b6f1888b0",
-      "resource": "withResource(hasLongMin.and(stepEqualsMinusOne))"
-    },
-    {
-      "path": "sql-plugin/src/main/spark359/scala/com/nvidia/spark/rapids/shims/mathExpressions.scala",
-      "fingerprint": "05b42c83ae2fc3d5f565",
-      "resource": "withResource(Scalar.fromDouble(Double.NaN))"
-    },
-    {
-      "path": "sql-plugin/src/main/spark359/scala/com/nvidia/spark/rapids/shims/mathExpressions.scala",
-      "fingerprint": "bf09b2680ab9720d6d42",
-      "resource": "withResource(isInvalid)"
-    },
-    {
-      "path": "sql-plugin/src/main/spark359/scala/com/nvidia/spark/rapids/shims/mathExpressions.scala",
-      "fingerprint": "e068d373aa01140b6d32",
-      "resource": "withResource(Scalar.fromDouble(1.0))"
     }
   ]
 }

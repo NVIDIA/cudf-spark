@@ -190,7 +190,7 @@ public final class RapidsHostColumnBuilder implements AutoCloseable {
   }
 
   /**
-   * Refills a snapshot that {@link #captureState()} returned for this builder, so that a caller
+   * Refills a snapshot that {@code captureState()} returned for this builder, so that a caller
    * taking one per row allocates it only once.
    */
   public void captureState(BuilderSnapshot into) {
@@ -208,7 +208,7 @@ public final class RapidsHostColumnBuilder implements AutoCloseable {
    * Restore the builder to a previously captured snapshot. This will also restore child builders
    * to their corresponding snapshots.
    *
-   * @param snapshot the snapshot captured earlier via {@link #captureState()}
+   * @param snapshot the snapshot captured earlier via {@code captureState()}
    */
   public void restoreState(BuilderSnapshot snapshot) {
     if (snapshot == null) {

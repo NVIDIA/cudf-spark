@@ -36,8 +36,8 @@ package com.nvidia.spark.rapids.shims
 import org.apache.spark.sql.connector.write.BatchWrite
 
 /**
- * No-op on Spark versions that lack [[org.apache.spark.sql.connector.write.WriteSummary]].
- * GPU [[BatchWrite]] wrappers mix this in so the Spark 4.1+ shim can override the summary
+ * No-op on Spark versions that lack `org.apache.spark.sql.connector.write.WriteSummary`.
+ * GPU `BatchWrite` wrappers mix this in so the Spark 4.1+ shim can override the summary
  * commit path without breaking older builds.
  */
 trait GpuV2BatchWriteSummaryCommit { this: BatchWrite =>

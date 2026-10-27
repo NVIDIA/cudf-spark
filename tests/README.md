@@ -7,7 +7,7 @@ and the code is in the `com.nvidia.spark.rapids.tests.mortgage` package.
 
 ## Unit Tests
 
-Unit tests implemented using the ScalaTest framework reside in the [tests]() directory. This is
+Unit tests implemented using the ScalaTest framework reside in the [tests](.) directory. This is
 unconventional and is done so we can run the tests on the close-to-final shaded single-shim version
 of the plugin. It also helps with how we collect code coverage.
 

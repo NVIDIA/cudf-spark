@@ -21,7 +21,7 @@ import scala.util.{Failure, Success, Try}
 
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.iceberg.{IcebergFormatVersionSupport, ShimUtils}
+import com.nvidia.spark.rapids.iceberg.{IcebergEncryptionSupport, IcebergFormatVersionSupport, ShimUtils}
 import com.nvidia.spark.rapids.iceberg.parquet.GpuIcebergParquetReaderUtils
 import com.nvidia.spark.rapids.parquet.GpuParquetScan
 import org.apache.iceberg.{FileFormat, FileScanTask, ScanTaskGroup, TableProperties}
@@ -104,7 +104,7 @@ abstract class GpuSparkScan(val cpuScan: Scan,
             reader.getFileMetaData.getSchema, requiredSchema, nameMapping)
           // Use the execution reader's strict conversion: it rejects shredded Variant layouts
           // before any GPU task runs. Fail closed if a footer cannot be checked.
-          converter.convert(ShimUtils.unshadeParquetSchema(projectedSchema))
+          converter.convert(ShimUtils.getParquetUnshader().unshade(projectedSchema))
         }
       }
     }
@@ -171,16 +171,18 @@ object GpuSparkScan {
     }
 
     gpuScan match {
-      case Success(scan) if meta.canThisBeReplaced && readSchema.exists { field =>
-        TrampolineUtil.dataTypeExistsRecursively(field.dataType, GpuColumnVector.isVariantType)
-      } =>
-        scan.variantLayoutSupport match {
-          case Failure(e) =>
-            GpuParquetScan.tagVariantScanPrefixForCpu(meta,
-              s"GPU Iceberg reader requires unshredded Variant input: ${e.getMessage}")
-          case _ =>
+      case Success(scan) =>
+        IcebergEncryptionSupport.tagForScan(meta.wrapped, meta)
+        if (meta.canThisBeReplaced && readSchema.exists { field =>
+          TrampolineUtil.dataTypeExistsRecursively(field.dataType, GpuColumnVector.isVariantType)
+        }) {
+          scan.variantLayoutSupport match {
+            case Failure(e) =>
+              GpuParquetScan.tagVariantScanPrefixForCpu(meta,
+                s"GPU Iceberg reader requires unshredded Variant input: ${e.getMessage}")
+            case _ =>
+          }
         }
-      case Success(_) =>
       case Failure(e) => meta.willNotWorkOnGpu(s"conversion to GPU scan failed: ${e.getMessage}")
     }
   }
