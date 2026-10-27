@@ -299,22 +299,37 @@ private[parquet] class HybridScanParquetPartitionReader(
   }
 
   /**
-   * Fetch `ranges` into host memory off the GPU semaphore, then `decode` them into a table once
-   * the semaphore is held. This encodes the host ordering: fetch first, acquire after. A
-   * direct-to-device (GDS) source would fork here, acquiring before the read and having the fetch
-   * land bytes on the device so `decode` takes device buffers.
+   * Choose the column-chunk byte ranges the projection needs and fetch them into host memory, off
+   * the GPU semaphore so the read does not hold the GPU from another task. The caller owns the
+   * returned buffers.
    */
-  private def readAndMaterialize(ranges: Array[ByteRange])(
-      decode: Array[HostMemoryBuffer] => Table): Table = {
-    val chunks = NvtxRegistry.HYBRID_SCAN_READ_DATA {
+  private def planAndReadColumnChunks(
+      reader: HybridScanReader,
+      rowGroups: Array[Int]): Array[HostMemoryBuffer] = {
+    val ranges = NvtxRegistry.HYBRID_SCAN_GET_BYTE_RANGES {
+      reader.allColumnChunksByteRanges(rowGroups)
+    }
+    NvtxRegistry.HYBRID_SCAN_READ_DATA {
       source.fetch(ranges)
     }
-    withResource(chunks) { c =>
-      // Start using the GPU only once the host buffers are ready, so the read above does not
-      // block another task from the GPU.
-      GpuSemaphore.acquireIfNecessary(TaskContext.get())
-      NvtxRegistry.HYBRID_SCAN_MATERIALIZE {
-        decode(c)
+  }
+
+  /**
+   * Copy the already-fetched host buffers to the device under the GPU semaphore and decode them
+   * into a table. The semaphore is taken only now, after the host read, which is what keeps the
+   * fetch off the GPU. A direct-to-device (GDS) source would instead acquire before the fetch and
+   * hand `materialize*` device buffers directly.
+   *
+   * The host buffers stay the caller's to close; this does not take them.
+   */
+  private def materializeFromHostBuffers(
+      reader: HybridScanReader,
+      rowGroups: Array[Int],
+      hostChunks: Array[HostMemoryBuffer]): Table = {
+    GpuSemaphore.acquireIfNecessary(TaskContext.get())
+    NvtxRegistry.HYBRID_SCAN_MATERIALIZE {
+      withResource(copyToDevice(hostChunks)) { deviceChunks =>
+        reader.materializeAllColumns(rowGroups, deviceChunks)
       }
     }
   }
@@ -324,13 +339,8 @@ private[parquet] class HybridScanParquetPartitionReader(
       reader: HybridScanReader,
       rowGroups: Array[Int],
       outputAst: Option[CompiledExpression]): Table = {
-    val ranges = NvtxRegistry.HYBRID_SCAN_GET_BYTE_RANGES {
-      reader.allColumnChunksByteRanges(rowGroups)
-    }
-    closeOnExcept(readAndMaterialize(ranges) { c =>
-      withResource(copyToDevice(c)) { deviceChunks =>
-        reader.materializeAllColumns(rowGroups, deviceChunks)
-      }
+    closeOnExcept(withResource(planAndReadColumnChunks(reader, rowGroups)) { hostChunks =>
+      materializeFromHostBuffers(reader, rowGroups, hostChunks)
     }) { table =>
       outputAst match {
         case Some(ast) => NvtxRegistry.HYBRID_SCAN_OUTPUT_FILTER {
