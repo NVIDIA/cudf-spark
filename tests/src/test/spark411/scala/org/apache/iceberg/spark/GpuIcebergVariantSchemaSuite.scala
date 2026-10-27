@@ -28,7 +28,7 @@ import org.apache.iceberg.Schema
 import org.apache.iceberg.parquet.ParquetSchemaUtil
 import org.apache.iceberg.shaded.org.apache.parquet.schema.{LogicalTypeAnnotation => ShadedLogicalTypeAnnotation, Types => ShadedTypes}
 import org.apache.iceberg.shaded.org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.BINARY
-import org.apache.iceberg.types.Types
+import org.apache.iceberg.types.{Type, Types}
 import org.apache.parquet.schema.{LogicalTypeAnnotation, Types => ParquetTypes}
 import org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit.MICROS
 import org.apache.parquet.schema.PrimitiveType.{PrimitiveTypeName => ParquetPrimitiveTypeName}
@@ -36,7 +36,8 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.execution.datasources.parquet.ParquetToSparkSchemaConverter
 import org.apache.spark.sql.execution.datasources.parquet.ParquetUtils.FIELD_ID_METADATA_KEY
-import org.apache.spark.sql.types.{ArrayType, MapType, StringType, StructType, VariantType}
+import org.apache.spark.sql.types.{ArrayType, IntegerType, MapType, Metadata, MetadataBuilder,
+    StringType, StructField, StructType, VariantType}
 
 class GpuIcebergVariantSchemaSuite extends AnyFunSuite {
 
@@ -72,6 +73,98 @@ class GpuIcebergVariantSchemaSuite extends AnyFunSuite {
     assert(attributes.metadata.getLong(MAP_VALUE_FIELD_ID_METADATA_KEY) == 7L)
     assert(attributes.dataType ==
       MapType(StringType, VariantType, valueContainsNull = true))
+  }
+
+  // Pairwise coverage of field, collection-child, and Variant nullability.
+  for ((fieldOptional, childOptional, variantOptional) <- Seq(
+      (false, false, false),
+      (false, true, true),
+      (true, false, true),
+      (true, true, false))) {
+    test("nested Variant metadata and nullability: " +
+        s"field=$fieldOptional child=$childOptional variant=$variantOptional") {
+      def listType(id: Int, elementType: Type, optional: Boolean): Types.ListType = {
+        if (optional) {
+          Types.ListType.ofOptional(id, elementType)
+        } else {
+          Types.ListType.ofRequired(id, elementType)
+        }
+      }
+
+      val nestedLists = listType(11,
+        listType(12, Types.VariantType.get(), variantOptional), childOptional)
+      val mapValue = listType(23, Types.VariantType.get(), variantOptional)
+      val mappedLists = if (childOptional) {
+        Types.MapType.ofOptional(21, 22, Types.StringType.get(), mapValue)
+      } else {
+        Types.MapType.ofRequired(21, 22, Types.StringType.get(), mapValue)
+      }
+      val record = Types.StructType.of(
+        Types.NestedField.of(32, variantOptional, "v", Types.VariantType.get()),
+        Types.NestedField.of(33, !variantOptional, "count", Types.IntegerType.get()))
+      val mapKey = listType(42, Types.StringType.get(), childOptional)
+      val keyedVariants = if (variantOptional) {
+        Types.MapType.ofOptional(41, 43, mapKey, Types.VariantType.get())
+      } else {
+        Types.MapType.ofRequired(41, 43, mapKey, Types.VariantType.get())
+      }
+      val schema = new Schema(
+        Types.NestedField.required(1, "id", Types.IntegerType.get()),
+        Types.NestedField.of(10, fieldOptional, "nested_lists", nestedLists),
+        Types.NestedField.of(2, !fieldOptional, "marker", Types.VariantType.get()),
+        Types.NestedField.of(20, !fieldOptional, "mapped_lists", mappedLists),
+        Types.NestedField.of(30, fieldOptional, "records", listType(31, record, childOptional)),
+        Types.NestedField.of(40, !fieldOptional, "keyed_variants", keyedVariants),
+        Types.NestedField.optional(3, "tail", Types.StringType.get()))
+
+      def fieldMetadata(id: Long): Metadata =
+        new MetadataBuilder().putLong(FIELD_ID_METADATA_KEY, id).build()
+
+      val nestedListsMetadata = new MetadataBuilder()
+        .putLong(FIELD_ID_METADATA_KEY, 10L)
+        .putLong(LIST_ELEMENT_FIELD_ID_METADATA_KEY, 11L)
+        .putString(LIST_ELEMENT_NESTED_IDS_METADATA_KEY,
+          new MetadataBuilder().putLong(LIST_ELEMENT_FIELD_ID_METADATA_KEY, 12L).build().json)
+        .build()
+      val mappedListsMetadata = new MetadataBuilder()
+        .putLong(FIELD_ID_METADATA_KEY, 20L)
+        .putLong(MAP_KEY_FIELD_ID_METADATA_KEY, 21L)
+        .putLong(MAP_VALUE_FIELD_ID_METADATA_KEY, 22L)
+        .putString(MAP_VALUE_NESTED_IDS_METADATA_KEY,
+          new MetadataBuilder().putLong(LIST_ELEMENT_FIELD_ID_METADATA_KEY, 23L).build().json)
+        .build()
+      val recordsMetadata = new MetadataBuilder()
+        .putLong(FIELD_ID_METADATA_KEY, 30L)
+        .putLong(LIST_ELEMENT_FIELD_ID_METADATA_KEY, 31L)
+        .build()
+      val keyedVariantsMetadata = new MetadataBuilder()
+        .putLong(FIELD_ID_METADATA_KEY, 40L)
+        .putLong(MAP_KEY_FIELD_ID_METADATA_KEY, 41L)
+        .putLong(MAP_VALUE_FIELD_ID_METADATA_KEY, 43L)
+        .putString(MAP_KEY_NESTED_IDS_METADATA_KEY,
+          new MetadataBuilder().putLong(LIST_ELEMENT_FIELD_ID_METADATA_KEY, 42L).build().json)
+        .build()
+      val expectedRecord = StructType(Seq(
+        StructField("v", VariantType, variantOptional, fieldMetadata(32L)),
+        StructField("count", IntegerType, !variantOptional, fieldMetadata(33L))))
+      val expected = StructType(Seq(
+        StructField("id", IntegerType, nullable = false, metadata = fieldMetadata(1L)),
+        StructField("nested_lists",
+          ArrayType(ArrayType(VariantType, variantOptional), childOptional),
+          fieldOptional, nestedListsMetadata),
+        StructField("marker", VariantType, !fieldOptional, fieldMetadata(2L)),
+        StructField("mapped_lists",
+          MapType(StringType, ArrayType(VariantType, variantOptional), childOptional),
+          !fieldOptional, mappedListsMetadata),
+        StructField("records", ArrayType(expectedRecord, childOptional),
+          fieldOptional, recordsMetadata),
+        StructField("keyed_variants",
+          MapType(ArrayType(StringType, childOptional), VariantType, variantOptional),
+          !fieldOptional, keyedVariantsMetadata),
+        StructField("tail", StringType, nullable = true, metadata = fieldMetadata(3L))))
+
+      assert(GpuTypeToSparkType.toSparkType(schema) == expected)
+    }
   }
 
   test("unshade preserves the Variant logical type spec version") {
