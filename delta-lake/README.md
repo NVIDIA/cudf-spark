@@ -23,7 +23,7 @@ and directory contains the corresponding support code.
 | 4.3.0              | Spark 4.0.1, 4.1.1 | `delta-43x`     |
 | Databricks 14.3    | Databricks 14.3 | `delta-spark350db143` |
 | Databricks 17.3    | Databricks 17.3 | `delta-spark400db173` |
-| Databricks 18.3 | Databricks 18.3 | `delta-spark410db183` (standalone module; release profile uses `delta-stub`) |
+| Databricks 18.3 | Databricks 18.3 | `delta-spark410db183` |
 
 Delta Lake is not supported on all Spark versions, and for Spark versions where it is not
 supported the `delta-stub` project is used.
@@ -71,6 +71,6 @@ Runtime wrappers derive low-shuffle discovery settings and the collision-safe ro
 from scan options. The shared bitmap lookup prefers row-index providers and keeps descriptor
 objects intact, avoiding the string encoding limit for large temporary deletion vectors.
 
-The standalone DBR 18.3 module compiles the reader, transaction, catalog, and write layers.
-The DBR 18.3 release profile still builds the Delta stub; distribution activation is a
-separate step. Databricks integration-test enablement is tracked separately.
+The DBR 18.3 release profile compiles the reader, transaction, catalog, and write layers
+and packages the Delta module in the plugin distribution. Databricks integration-test
+enablement is tracked separately.

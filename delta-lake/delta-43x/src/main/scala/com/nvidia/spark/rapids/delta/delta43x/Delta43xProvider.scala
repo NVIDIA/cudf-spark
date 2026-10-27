@@ -25,7 +25,7 @@ import com.nvidia.spark.rapids.delta.common.{DeleteCommandMeta,
   DeltaDynamicPartitionOverwriteCommandMeta, UpdateCommandMeta}
 import com.nvidia.spark.rapids.delta.common.{GpuDelta4xParquetFileFormat, GpuDeltaParquetFileFormat2}
 import com.nvidia.spark.rapids.delta.common.DeltaProviderBase
-import com.nvidia.spark.rapids.delta.delta42x.DeltaV2ScanRule
+import com.nvidia.spark.rapids.delta.delta42x.Delta42xProvider
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
@@ -51,8 +51,6 @@ import org.apache.spark.sql.internal.SQLConf
 
 object Delta43xProvider extends DeltaProviderBase with Logging {
 
-  override def getScans: Map[Class[_ <: Scan], ScanRule[_ <: Scan]] = DeltaV2ScanRule.rules
-
   private val UNITY_CATALOG_CLASS_NAME = "io.unitycatalog.spark.UCSingleCatalog"
   private val REST_API_FALLBACK_REASON =
     "Delta 4.3 Unity Catalog Delta REST API operations must run on CPU"
@@ -62,6 +60,9 @@ object Delta43xProvider extends DeltaProviderBase with Logging {
     "Delta 4.3 non-Delta catalog writes must run on CPU"
 
   override protected def getCDFRelationStrategy = Delta43xCDFRelationStrategy
+
+  // Delta 4.3 uses the same server-side scan API as 4.2.
+  override def getScans: Map[Class[_ <: Scan], ScanRule[_ <: Scan]] = Delta42xProvider.getScans
 
   override protected def getDeltaLogForV1Write(
       spark: SparkSession,
