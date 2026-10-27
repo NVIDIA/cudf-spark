@@ -140,10 +140,12 @@ private[rapids] object GpuCollectionExpressionOverrides {
       "Gets the field at `ordinal` in the Array",
       ExprChecks.binaryProject(
         (TypeSig.commonCudfTypes + TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.NULL +
-            TypeSig.DECIMAL_128 + TypeSig.MAP + TypeSig.BINARY).nested(),
+            TypeSig.DECIMAL_128 + TypeSig.MAP + TypeSig.BINARY +
+            GpuTypeShims.additionalVariantSupportedTypes).nested(),
         TypeSig.all,
         ("array", TypeSig.ARRAY.nested(TypeSig.commonCudfTypes + TypeSig.ARRAY +
-            TypeSig.STRUCT + TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.MAP + TypeSig.BINARY),
+            TypeSig.STRUCT + TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.MAP + TypeSig.BINARY +
+            GpuTypeShims.additionalVariantSupportedTypes),
             TypeSig.ARRAY.nested(TypeSig.all)),
         ("ordinal", TypeSig.integral, TypeSig.integral)),
       GetArrayItemRuleMeta),
@@ -151,10 +153,12 @@ private[rapids] object GpuCollectionExpressionOverrides {
       "Gets Value from a Map based on a key",
       ExprChecks.binaryProject(
         (TypeSig.commonCudfTypes + TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.NULL +
-          TypeSig.DECIMAL_128 + TypeSig.MAP + TypeSig.BINARY).nested(),
+          TypeSig.DECIMAL_128 + TypeSig.MAP + TypeSig.BINARY +
+          GpuTypeShims.additionalVariantSupportedTypes).nested(),
         TypeSig.all,
         ("map", TypeSig.MAP.nested(TypeSig.commonCudfTypes + TypeSig.ARRAY + TypeSig.STRUCT +
-          TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.MAP + TypeSig.BINARY),
+          TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.MAP + TypeSig.BINARY +
+          GpuTypeShims.additionalVariantSupportedTypes),
           TypeSig.MAP.nested(TypeSig.all)),
         ("key", TypeSig.commonCudfTypes + TypeSig.DECIMAL_128, TypeSig.all)),
       GetMapValueRuleMeta),
