@@ -23,5 +23,5 @@ You can install it or otherwise use `flatbuffers/build/flatc`
 From this directory:
 
 ```
-flatc --java -o ../java/ --gen-mutable *.fbs
+flatc --java -o ../../../../sql-plugin-format/src/main/java/ --gen-mutable *.fbs
 ```

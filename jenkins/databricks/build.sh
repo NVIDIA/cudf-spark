@@ -19,25 +19,14 @@
 # All the environments can be overwritten by shell variables:
 #   SPARKSRCTGZ: Archive file location of the plugin repository. Default is empty.
 #   BASE_SPARK_VERSION: Spark version [3.2.1, 3.3.0]. Default is pulled from current instance.
-#   BASE_SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS: The version of Spark used when we install the
-#       Databricks jars in .m2. Default is {BASE_SPARK_VERSION}.
 #   MVN_OPT: Options to be passed to the MVN commands. Note that "-DskipTests" is hardcoded in the
 #       build command.
-#   SKIP_DEP_INSTALL: Skips installation of dependencies when set to 1. Default is 0.
 # Usage:
 # - build for DB10.4/Spark 3.2.1:
 #       `BASE_SPARK_VERSION=3.2.1 ./jenkins/databricks/build.sh`
-# - Build without dependency installation:
-#       `BASE_SPARK_VERSION=3.2.1 SKIP_DEP_INSTALL=1 ./jenkins/databricks/build.sh`
-# To add support of new runtime:
-#   1. Review `install_deps.py` to make sure that the prefix of the jar files is set
-#      correctly. If not, then add a new if-else block to set the variables as necessary.
-#   2. The jar files and their artifacts are defined in `install_deps.py`.
-#      You may need to add another conditional block because some runtimes may require special
-#      handling.
-#      For example, "3.1.2" had different patterns for a few JARs (i.e., HIVE).
-#   3. If you had to go beyond the above steps to support the new runtime, then update the
-#      instructions accordingly.
+# The Databricks runtime jars are not installed into the local Maven repository. Instead,
+# build/gen-spark-home-deps.py renders shim-deps/databricks/pom.xml.template into a BOM that references
+# every jar under /databricks/jars as a system-scoped dependency.
 
 set -ex
 
@@ -116,9 +105,6 @@ initialize()
     ## '-Pfoo=1,-Dbar=2,...' to '-Pfoo=1 -Dbar=2 ...'
     MVN_OPT=${MVN_OPT//','/' '}
     BUILDVER=$(echo ${BASE_SPARK_VERSION} | sed 's/\.//g')db
-    # the version of Spark used when we install the Databricks jars in .m2
-    BASE_SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS=${BASE_SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS:-$BASE_SPARK_VERSION}
-    SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS=${BASE_SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS}-databricks
 
      # Determine Scala version based on Spark version
     # Spark 4.0+ uses Scala 2.13, earlier versions use 2.12
@@ -127,17 +113,15 @@ initialize()
     fi
 
     DBR_VER=$(cat /databricks/DBR_VERSION)
-    if [ $DBR_VER == '14.3' ] || [ $DBR_VER == '17.3' ]; then
+    if [ $DBR_VER == '14.3' ] || [ $DBR_VER == '17.3' ] || [ $DBR_VER == '18.3' ]; then
         DBR_VER=$(echo $DBR_VER | sed 's/\.//g')
         # We are appending 143 in addition to the base spark version because Databricks 14.3
         # and Databricks 15.4 are both based on spark version 3.5.0. Similarly, we are appending 173
-        # for Databricks 17.3 based on Spark 4.0.0.
+        # for Databricks 17.3 and 183 for Databricks 18.3 to identify their exact runtimes.
         BUILDVER="$BUILDVER$DBR_VER"
-        SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS="$SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS-$DBR_VER"
     fi
 
-    # pull normal Spark artifacts and ignore errors then install databricks jars, then build again.
-    # this should match the databricks init script.
+    # Databricks runtime jars referenced as system-scoped dependencies.
     JARDIR=/databricks/jars
 
     if [[ -n $SPARKSRCTGZ ]]
@@ -166,10 +150,6 @@ initialize()
     SCALA_VERSION=$($MVN_CMD help:evaluate -q -f $POM_FILE -pl dist -Dexpression=scala.binary.version -DforceStdout)
     CUDA_VERSION=$($MVN_CMD help:evaluate -q -f $POM_FILE -pl dist -Dexpression=cuda.version -DforceStdout)
     RAPIDS_BUILT_JAR=rapids-4-spark_$SCALA_VERSION-$SPARK_PLUGIN_JAR_VERSION.jar
-    # If set to 1, skips installing dependencies into mvn repo.
-    SKIP_DEP_INSTALL=${SKIP_DEP_INSTALL:-'0'}
-    # export 'M2DIR' so that shims can get the correct Spark dependency info
-    export M2DIR=/home/ubuntu/.m2/repository
     # whether to build a two-shim jar with the lowest supported upstream Spark version
     WITH_DEFAULT_UPSTREAM_SHIM=${WITH_DEFAULT_UPSTREAM_SHIM:-1}
 
@@ -181,28 +161,26 @@ initialize()
     echo "tgz                                           : ${SPARKSRCTGZ}"
     echo "Base Spark version                            : ${BASE_SPARK_VERSION}"
     echo "maven options                                 : ${MVN_OPT}"
-    echo "BASE_SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS : ${BASE_SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS}"
     echo "workspace                                     : ${WORKSPACE}"
     echo "Scala version                                 : ${SCALA_VERSION}"
     echo "CUDA version                                  : ${CUDA_VERSION}"
     echo "Rapids build jar                              : ${RAPIDS_BUILT_JAR}"
     echo "Build Version                                 : ${BUILDVER}"
-    echo "Skip Dependencies                             : ${SKIP_DEP_INSTALL}"
     echo "Include Default Spark Shim                    : ${WITH_DEFAULT_UPSTREAM_SHIM}"
     echo "Extra environments                            : ${EXTRA_ENVS}"
     printf '+ %*s +\n' 100 '' | tr ' ' =
 }
 
-# Install dependency jars to MVN repository.
-install_dependencies()
+# Generate the Databricks BOM referencing the runtime jars as system-scoped dependencies.
+generate_dependencies()
 {
-    local depsPomXml="$(mktemp /tmp/install-databricks-deps-XXXXXX-pom.xml)"
-
-    python jenkins/databricks/install_deps.py "${BASE_SPARK_VERSION}" "${SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS}" "${SCALA_VERSION}" "${M2DIR}" "${JARDIR}" "${depsPomXml}"
-
-    $MVN_CMD -f ${depsPomXml} initialize
-    echo "Done with installation of Databricks dependencies, removing ${depsPomXml}"
-    rm ${depsPomXml}
+    local pomDir=$(dirname $POM_FILE)
+    python build/gen-spark-home-deps.py \
+        --output-pom "$pomDir/shim-deps/databricks/pom.xml" \
+        --project-pom "$POM_FILE" \
+        --scala-binary-version "$SCALA_VERSION" \
+        --jar-dir "$JARDIR" \
+        shim-deps/databricks/pom.xml.template
 }
 
 ##########################
@@ -214,13 +192,7 @@ if [ -n "$EXTRA_ENVS" ]; then
 fi
 
 initialize
-if [[ $SKIP_DEP_INSTALL == "1" ]]
-then
-    echo "!!!! SKIP_DEP_INSTALL is set to $SKIP_DEP_INSTALL. Skipping install-file for dependencies."
-else
-    echo "!!!! Installing dependendecies. Set SKIP_DEP_INSTALL=1 to speed up reruns of build.sh"# Install required dependencies.
-    install_dependencies
-fi
+generate_dependencies
 
 if [[ "$WITH_BLOOP" == "1" ]]; then
     MVN_OPT="-DbloopInstall $MVN_OPT"

@@ -26,3 +26,18 @@ class RapidsShuffleTimeoutException(message: String) extends Exception(message)
  */
 class RapidsShuffleSendPrepareException(message: String, cause: Throwable)
     extends Exception(message, cause)
+
+/**
+ * Cached shuffle output that is gone, because the catalog no longer holds it, as after its
+ * shuffle was unregistered: a lookup found no entry for it, or its buffer was closed after the
+ * lookup. Retrying cannot recover it.
+ * @param message - string naming the missing output
+ * @param cause - the failure that revealed it, or null
+ */
+class ShuffleOutputGoneException(message: String, cause: Throwable = null)
+    extends NoSuchElementException(message) {
+  // NoSuchElementException has no constructor that takes a cause before Java 15
+  if (cause != null) {
+    initCause(cause)
+  }
+}

@@ -454,6 +454,14 @@ trait GpuNumberToTimestampUnaryExpression extends GpuUnaryExpression {
 
 case class GpuSecondsToTimestamp(child: Expression) extends GpuNumberToTimestampUnaryExpression {
 
+  // Overflow and decimal rounding checks can throw even when ANSI mode is disabled.
+  override def hasSideEffects: Boolean = super.hasSideEffects || (child.dataType match {
+    case LongType => true
+    // Up to 12 integer digits fit in Long microseconds; scales above 6 may need rounding.
+    case dt: DecimalType => dt.scale > 6 || dt.precision - dt.scale > 12
+    case _ => false
+  })
+
   override def nullable: Boolean = child.dataType match {
     case _: FloatType | _: DoubleType => true
     case _ => child.nullable
@@ -556,6 +564,9 @@ case class GpuSecondsToTimestamp(child: Expression) extends GpuNumberToTimestamp
 }
 
 case class GpuMillisToTimestamp(child: Expression) extends GpuNumberToTimestampUnaryExpression {
+  override def hasSideEffects: Boolean =
+    super.hasSideEffects || child.dataType == LongType
+
   protected lazy val convertTo: GpuColumnVector => ColumnVector = child.dataType match {
     case LongType =>
       (input: GpuColumnVector) => {
@@ -565,7 +576,6 @@ case class GpuMillisToTimestamp(child: Expression) extends GpuNumberToTimestampU
     case IntegerType | ShortType | ByteType =>
       (input: GpuColumnVector) => {
         withResource(input.getBase.castTo(DType.INT64)) { longs =>
-          checkLongMultiplicationOverflow(longs, DateTimeConstants.MICROS_PER_MILLIS)
           longs.asTimestampMilliseconds()
         }
       }

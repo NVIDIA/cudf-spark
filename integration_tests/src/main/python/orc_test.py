@@ -408,8 +408,8 @@ orc_gens_list = [orc_basic_gens,
     orc_array_gens_sample,
     orc_struct_gens_sample,
     orc_map_gens_sample,
-    pytest.param([date_gen], marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/131')),
-    pytest.param([timestamp_gen], marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/131'))]
+    [date_gen],
+    [timestamp_gen]]
 
 flattened_orc_gens = orc_basic_gens + orc_array_gens_sample + orc_struct_gens_sample
 
@@ -476,8 +476,7 @@ orc_pred_push_gens = [
         # Once https://github.com/NVIDIA/spark-rapids/issues/139 is fixed replace this with
         # date_gen
         DateGen(start=date(1590, 1, 1)),
-        # Once https://github.com/NVIDIA/spark-rapids/issues/140 is fixed replace this with
-        # timestamp_gen
+        # ORC writer issue #140 is fixed, but the reader is still limited by issue #131.
         orc_timestamp_gen]
 orc_pred_push_test_matrix = generate_reduced_test_matrix({
     'orc_gen': {'values': orc_pred_push_gens, 'is_primary_dimension': True},
@@ -1333,6 +1332,9 @@ def test_orc_with_null_column(spark_tmp_path, reader_confs):
 
 @ignore_order
 @large_data_test
+# AQE may replace an empty query subtree with row-based EmptyRelationExec.
+# Allow this empty leaf while retaining GPU validation for other operators.
+@allow_non_gpu("EmptyRelationExec")
 @pytest.mark.parametrize("reader_confs", reader_opt_confs, ids=idfn)
 def test_orc_with_null_column_with_1m_rows(spark_tmp_path, reader_confs):
     data_path = spark_tmp_path + "/ORC_DATA"
@@ -1361,7 +1363,8 @@ def test_orc_with_null_column_with_1m_rows(spark_tmp_path, reader_confs):
         assert_gpu_and_cpu_are_equal_sql(
             lambda spark: spark.read.orc(gpu_file_path),
             "my_large_table",
-            sql)
+            sql,
+            conf=all_confs)
 
 
 #
@@ -1420,7 +1423,8 @@ def test_orc_not_support_timestamp_ltz(std_input_path):
     """
     data_path = f"{std_input_path}/timestamp_ltz.orc"
     expected_error_message = "timestamp with local time zone" \
-        if is_spark_420_or_later() else "ParseException"
+        if is_spark_420_or_later() or is_databricks_version_or_later(18, 3) \
+        else "ParseException"
     assert_gpu_and_cpu_error(lambda spark: spark.read.orc(data_path).collect(),
                              conf={},
                              error_message=expected_error_message)
@@ -1501,12 +1505,21 @@ def test_orc_gpu_write_cpu_read_timestamp_near_epoch(spark_tmp_path):
     gpu_write_path = spark_tmp_path + "/ORC_DATA_GPU_NEAR_EPOCH"
     epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
     # Exercise the negative fractional timestamp encoding fixed by
-    # https://github.com/NVIDIA/cudf/pull/23391 by randomly sampling 16 values from the
-    # inclusive [-1000000 us, 0 us] range around the epoch.
-    ts_gen = TimestampGen(
-        start=epoch - timedelta(microseconds=1000000), end=epoch, nullable=False)
+    # https://github.com/NVIDIA/cudf/pull/23391 at ORC's 1 ms borrow threshold. Apache ORC
+    # reads timestamps in [-999000 us, -1 us] one second later; the surrounding values are
+    # lossless.
+    timestamp_values = [
+        epoch - timedelta(microseconds=1000001),
+        epoch - timedelta(microseconds=1000000),
+        epoch - timedelta(microseconds=999001),
+        epoch - timedelta(microseconds=999000),
+        epoch - timedelta(microseconds=1),
+        epoch,
+        epoch + timedelta(microseconds=1)]
+    ts_gen = RepeatSeqGen(timestamp_values, data_type=TimestampType())
     # Write timestamp on GPU
     with_gpu_session(
-        lambda spark: gen_df(spark, [("c1", ts_gen)], length=16).write.orc(gpu_write_path))
+        lambda spark: gen_df(
+            spark, [("c1", ts_gen)], length=len(timestamp_values)).write.orc(gpu_write_path))
     # Read timestamp on CPU and GPU
     assert_gpu_and_cpu_are_equal_collect(read_orc_df(gpu_write_path))

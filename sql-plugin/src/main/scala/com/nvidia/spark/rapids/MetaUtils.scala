@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -379,7 +379,25 @@ object ShuffleMetadata extends Logging{
           buffMetaOffset)
     }.toArray
     val responsesVector = TransferResponse.createResponsesVector(fbb, responses)
-    val root = TransferResponse.createTransferResponse(fbb, responsesVector)
+    // 0 leaves the error out, which adds no bytes to the response
+    val root = TransferResponse.createTransferResponse(fbb, responsesVector, 0)
+    fbb.finish(root)
+    fbb.dataBuffer()
+  }
+
+  /**
+   * Builds the reply to a transfer request that the server failed.
+   * @param failedBufferIds the requested buffers the server will not send
+   * @param reason why the request failed, for the requester's error message
+   */
+  def buildTransferErrorResponse(failedBufferIds: Seq[Int], reason: String): ByteBuffer = {
+    val fbb = new FlatBufferBuilder(1024, bbFactory)
+    val responses = failedBufferIds.map { id =>
+      BufferTransferResponse.createBufferTransferResponse(fbb, id, TransferState.FAILED, 0)
+    }.toArray
+    val responsesVector = TransferResponse.createResponsesVector(fbb, responses)
+    val error = ResponseError.createResponseError(fbb, fbb.createString(reason))
+    val root = TransferResponse.createTransferResponse(fbb, responsesVector, error)
     fbb.finish(root)
     fbb.dataBuffer()
   }

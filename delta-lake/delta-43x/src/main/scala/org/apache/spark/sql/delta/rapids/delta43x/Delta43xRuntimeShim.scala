@@ -30,16 +30,35 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression}
 import org.apache.spark.sql.connector.catalog.StagingTableCatalog
 import org.apache.spark.sql.delta.{DeltaErrors, DeltaLog, DeltaOperations, DeltaOptions,
   NumRecordsStats, Snapshot}
-import org.apache.spark.sql.delta.actions.{AddFile, Metadata}
+import org.apache.spark.sql.delta.{TableFeature, VariantShreddingPreviewTableFeature,
+  VariantShreddingTableFeature}
+import org.apache.spark.sql.delta.actions.{AddFile, FileAction, Metadata}
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
-import org.apache.spark.sql.delta.commands.{DeltaReorgOperation, UpdateCommand, WriteIntoDelta}
+import org.apache.spark.sql.delta.commands.{DeltaReorgOperation, DMLWithDeletionVectorsHelper,
+  TouchedFileWithDV, UpdateCommand, WriteIntoDelta}
 import org.apache.spark.sql.delta.hooks.GpuAutoCompact43x
-import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShimBase, GpuDeltaLog,
-  GpuOptimisticTransactionBase, GpuWriteIntoDeltaLike, StartTransactionArg}
+import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShimBase, DeltaVariantShreddingShim,
+  DMLWithDeletionVectorsRuntimeShim, GpuDeltaLog, GpuOptimisticTransactionBase,
+  GpuWriteIntoDeltaLike, StartTransactionArg}
 import org.apache.spark.sql.delta.sources.DeltaSQLConf
+import org.apache.spark.sql.delta.stats.StatsCollectionUtils
 import org.apache.spark.sql.types.StructType
 
-class Delta43xRuntimeShim extends DeltaRuntimeShimBase {
+class Delta43xRuntimeShim extends DeltaRuntimeShimBase
+    with DMLWithDeletionVectorsRuntimeShim
+    with DeltaVariantShreddingShim {
+
+  override protected def variantShreddingFeatures: Set[TableFeature] =
+    Set(VariantShreddingPreviewTableFeature, VariantShreddingTableFeature)
+
+  override def processUnmodifiedData(
+      spark: org.apache.spark.sql.classic.SparkSession,
+      touchedFiles: Seq[TouchedFileWithDV],
+      txn: GpuOptimisticTransactionBase): (Seq[FileAction], Map[String, Long]) = {
+    val prefixLength = StatsCollectionUtils.getDataSkippingStringPrefixLength(spark, txn.metadata)
+    DMLWithDeletionVectorsHelper.processUnmodifiedData(
+      spark, touchedFiles, txn.snapshot, prefixLength)
+  }
 
   override def groupOptimizeFilesByPartition(
       spark: SparkSession,

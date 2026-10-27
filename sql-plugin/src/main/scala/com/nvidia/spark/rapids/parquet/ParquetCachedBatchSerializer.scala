@@ -745,7 +745,7 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
               } else {
                 newRow.setInterval(index, interval)
               }
-            case d: DecimalType =>
+            case d: DecimalType if d.scale < 0 =>
               if (row.isNullAt(index)) {
                 newRow.setDecimal(index, null, d.precision)
               } else {
@@ -801,18 +801,26 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
           val listBuffer = new ListBuffer[InternalRow]()
           val supportedSchema =
             PCBSSchemaHelper.getSupportedDataType(dataType).asInstanceOf[StructType]
-          arrayData.foreach(supportedSchema, (_, data) => {
-            val structRow =
-              handleStruct(data.asInstanceOf[InternalRow], s, s)
-            listBuffer += structRow.copy()
+          arrayData.foreach(supportedSchema, (i, data) => {
+            if (arrayData.isNullAt(i)) {
+              listBuffer += null
+            } else {
+              val structRow =
+                handleStruct(data.asInstanceOf[InternalRow], s, s)
+              listBuffer += structRow.copy()
+            }
           })
           new GenericArrayData(listBuffer)
 
         case ArrayType(elementType, _) =>
           val arrayList = new ListBuffer[Any]()
           scala.Range(0, arrayData.numElements()).foreach { i =>
-            val subArrayData = arrayData.getArray(i)
-            arrayList.append(handleArray(elementType, subArrayData))
+            if (arrayData.isNullAt(i)) {
+              arrayList.append(null)
+            } else {
+              val subArrayData = arrayData.getArray(i)
+              arrayList.append(handleArray(elementType, subArrayData))
+            }
           }
           new GenericArrayData(arrayList)
 
@@ -820,8 +828,12 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
           val mapList =
             new ListBuffer[Any]()
           scala.Range(0, arrayData.numElements()).foreach { i =>
-            val mapData = arrayData.getMap(i)
-            mapList.append(handleMap(m.keyType, m.valueType, mapData))
+            if (arrayData.isNullAt(i)) {
+              mapList.append(null)
+            } else {
+              val mapData = arrayData.getMap(i)
+              mapList.append(handleMap(m.keyType, m.valueType, mapData))
+            }
           }
           new GenericArrayData(mapList)
 
@@ -1123,6 +1135,10 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
         }
       }
 
+      // The input can write its next row over the values of the row it returned when hasNext
+      // is called, as whole-stage codegen does, so a row kept for the next batch is copied.
+      protected def keepForNextBatch(row: InternalRow): InternalRow = row.copy()
+
       protected def convertRowIteratorToCachedBatch(
           rowIterator: Iterator[InternalRow]): mutable.Queue[CachedBatch] = {
         val queue = new mutable.Queue[CachedBatch]()
@@ -1174,11 +1190,7 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
               }
               recordWriter.write(null, row)
             } else {
-              leftOverRow = Some(if (row.isInstanceOf[UnsafeRow]) {
-                row.copy()
-              } else {
-                row
-              })
+              leftOverRow = Some(keepForNextBatch(row))
             }
           }
           // passing null as context isn't used in this method
@@ -1210,6 +1222,11 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
       override def next(): CachedBatch = myIter.next()
 
       override def hasNext: Boolean = myIter.hasNext
+
+      // A batch's row iterator moves its row only in next(), which the writer calls after the
+      // kept row is written. ColumnarBatchRow.copy() also lacks types the writer takes, such as
+      // Variant before Spark 4.1.2.
+      override protected def keepForNextBatch(row: InternalRow): InternalRow = row
 
       val myIter = iter.asInstanceOf[Iterator[ColumnarBatch]].flatMap { batch =>
         val hostBatch = if (batch.column(0).isInstanceOf[GpuColumnVector]) {

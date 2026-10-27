@@ -56,18 +56,27 @@ public class CredentialTestFileSystem extends RawLocalFileSystem {
   private static final String S3A_SESSION_TOKEN = "fs.s3a.session.token";
   private static final AtomicReference<String> FAIL_NEXT_CREATE_SUFFIX =
       new AtomicReference<>();
+  private static final AtomicReference<String> LAST_FAILED_CREATE_PATH =
+      new AtomicReference<>();
 
   /** Inject a one-shot failure for the next create whose path ends with {@code suffix}. */
   public static void failNextCreateEndingWith(String suffix) {
     if (suffix == null || suffix.isEmpty()) {
       throw new IllegalArgumentException("The failure suffix must not be empty");
     }
+    LAST_FAILED_CREATE_PATH.set(null);
     FAIL_NEXT_CREATE_SUFFIX.set(suffix);
+  }
+
+  /** Return the path whose create was most recently failed by this test filesystem. */
+  public static String getLastFailedCreatePath() {
+    return LAST_FAILED_CREATE_PATH.get();
   }
 
   /** Clear a pending failure so it cannot leak into another integration test. */
   public static void clearInjectedFailure() {
     FAIL_NEXT_CREATE_SUFFIX.set(null);
+    LAST_FAILED_CREATE_PATH.set(null);
   }
 
   @Override
@@ -88,6 +97,7 @@ public class CredentialTestFileSystem extends RawLocalFileSystem {
     String failSuffix = FAIL_NEXT_CREATE_SUFFIX.get();
     if (failSuffix != null && path.toString().endsWith(failSuffix) &&
         FAIL_NEXT_CREATE_SUFFIX.compareAndSet(failSuffix, null)) {
+      LAST_FAILED_CREATE_PATH.set(path.toString());
       throw new IOException("Injected create failure for " + path);
     }
     return super.create(

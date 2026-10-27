@@ -28,13 +28,14 @@ import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.connector.catalog.{Identifier, StagingTableCatalog, SupportsWrite}
+import org.apache.spark.sql.connector.read.Scan
 import org.apache.spark.sql.delta.{DeltaDynamicPartitionOverwriteCommand, DeltaLog, DeltaOptions,
   DeltaParquetFileFormat}
 import org.apache.spark.sql.delta.catalog.{DeltaCatalog, DeltaTableV2}
 import org.apache.spark.sql.delta.commands.{DeleteCommand, MergeIntoCommand, OptimizeTableCommand,
   UpdateCommand, WriteIntoDelta}
 import org.apache.spark.sql.delta.rapids.DeltaRuntimeShim
-import org.apache.spark.sql.delta.serverSidePlanning.ServerSidePlannedTable
+import org.apache.spark.sql.delta.serverSidePlanning.{ServerSidePlannedScan, ServerSidePlannedTable}
 import org.apache.spark.sql.execution.command.RunnableCommand
 import org.apache.spark.sql.execution.datasources.FileFormat
 import org.apache.spark.sql.execution.datasources.v2.{AppendDataExecV1, AtomicCreateTableAsSelectExec,
@@ -43,6 +44,13 @@ import org.apache.spark.sql.execution.datasources.v2.rapids.{GpuAtomicCreateTabl
   GpuAtomicReplaceTableAsSelectExec}
 
 object Delta42xProvider extends DeltaProviderBase with Logging {
+
+  override def getScans: Map[Class[_ <: Scan], ScanRule[_ <: Scan]] = {
+    val rule = GpuOverrides.scan[ServerSidePlannedScan](
+      "Delta server-side planned Parquet scan",
+      (scan, conf, parent, r) => new ServerSidePlannedScanMeta(scan, conf, parent, r))
+    DeltaV2ScanRule.rules + (classOf[ServerSidePlannedScan] -> rule)
+  }
 
   override protected def getCDFRelationStrategy = Delta42xCDFRelationStrategy
 

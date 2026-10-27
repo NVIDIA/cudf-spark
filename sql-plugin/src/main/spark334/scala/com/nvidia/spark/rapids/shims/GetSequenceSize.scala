@@ -34,6 +34,7 @@
 {"spark": "402"}
 {"spark": "403"}
 {"spark": "404"}
+{"spark": "410db183"}
 {"spark": "411"}
 {"spark": "412"}
 {"spark": "413"}
@@ -86,32 +87,34 @@ object GetSequenceSize {
         }
       }
     }
-    withResource(Scalar.fromLong(Long.MinValue)) { longMin =>
-      withResource(delta.equalTo(longMin)) { hasLongMin =>
+    val quotient = withResource(delta) { _ =>
+      val hasLongMin = withResource(Scalar.fromLong(Long.MinValue)) { longMin =>
+        delta.equalTo(longMin)
+      }
+      val hasLongMinAndStepMinusOne = withResource(hasLongMin) { _ =>
         withResource(Scalar.fromInt(-1)) { minusOne =>
           withResource(step.equalTo(minusOne)) { stepEqualsMinusOne =>
-            withResource(hasLongMin.and(stepEqualsMinusOne)) { hasLongMinAndStepMinusOne =>
-              withResource(hasLongMinAndStepMinusOne.any()) { result =>
-                if (result.isValid && result.getBoolean) {
-                  // Overflow, throw an exception
-                  throw new ArithmeticException("Unsuccessful try to create array with " +
-                    s"elements exceeding the array size limit $MAX_ROUNDED_ARRAY_LENGTH")
-                }
-              }
-            }
+            hasLongMin.and(stepEqualsMinusOne)
           }
         }
       }
-    }
-    val quotient = withResource(delta) { _ =>
+      withResource(hasLongMinAndStepMinusOne) { _ =>
+        withResource(hasLongMinAndStepMinusOne.any()) { result =>
+          if (result.isValid && result.getBoolean) {
+            // Overflow, throw an exception
+            throw new ArithmeticException("Unsuccessful try to create array with " +
+              s"elements exceeding the array size limit $MAX_ROUNDED_ARRAY_LENGTH")
+          }
+        }
+      }
       withResource(step.castTo(DType.INT64)) { stepAsLong =>
         delta.div(stepAsLong)
       }
     }
     // delta = (stop.toLong - start.toLong) / estimatedStep.toLong
     // actualSize = 1L + delta
-    val actualSize = withResource(Scalar.fromLong(1L)) { one =>
-      withResource(quotient) { quotient =>
+    val actualSize = withResource(quotient) { _ =>
+      withResource(Scalar.fromLong(1L)) { one =>
         closeOnExcept(quotient.add(one, DType.INT64)) { ret =>
           AddOverflowChecks.basicOpOverflowCheck(quotient, one, ret)
           ret

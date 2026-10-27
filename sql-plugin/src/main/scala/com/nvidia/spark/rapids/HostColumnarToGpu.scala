@@ -33,6 +33,7 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.execution.python.ArrowEvalPythonExec
 import org.apache.spark.sql.execution.vectorized.WritableColumnVector
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.{ArrowColumnVector, ColumnarBatch, ColumnVector}
@@ -378,7 +379,16 @@ case class HostColumnarToGpu(child: SparkPlan, goal: CoalesceSizeGoal)
 
     val batches = child.executeColumnar()
 
-    val confUseArrow = new RapidsConf(child.conf).useArrowCopyOptimization
+    // The optimized builder borrows Arrow buffers across calls to the input iterator's hasNext
+    // so it can coalesce multiple input batches before copying them to the GPU. A CPU
+    // ArrowEvalPythonExec closes its Arrow output allocator from the hasNext call that discovers
+    // end-of-stream. We cannot know that a call will discover end-of-stream without making it,
+    // and by then the allocator close fails if the builder still holds references to its buffers.
+    // Releasing the references before every hasNext would require materializing every input batch
+    // separately and defeat host-side coalescing. Use the copying builder for this producer so
+    // the coalesced data is owned by the plugin before the upstream iterator can close it.
+    val confUseArrow = new RapidsConf(child.conf).useArrowCopyOptimization &&
+      !child.isInstanceOf[ArrowEvalPythonExec]
     batches.mapPartitions { iter =>
       new HostToGpuCoalesceIterator(iter, goal, outputSchema,
         numInputRows, numInputBatches, numOutputRows, numOutputBatches,

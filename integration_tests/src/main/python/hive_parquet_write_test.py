@@ -19,6 +19,7 @@ from conftest import is_databricks_runtime
 from data_gen import *
 from hive_write_test import _restricted_timestamp
 from marks import allow_non_gpu, ignore_order
+from parquet_test_utils import assert_parquet_files_use_codec
 from spark_session import with_cpu_session, with_gpu_session, is_before_spark_320, is_spark_350_or_later, is_spark_330_or_later, is_databricks122_or_later
 
 # Disable the meta conversion from Hive write to FrameData write in Spark, to test
@@ -177,13 +178,30 @@ zstd_param = pytest.param('ZSTD',
 @ignore_order(local=True)
 @pytest.mark.parametrize("comp_type", ['UNCOMPRESSED', 'SNAPPY', zstd_param])
 def test_write_compressed_parquet_into_hive_table(spark_tmp_table_factory, comp_type):
+    _check_write_compressed_parquet_into_hive_table(spark_tmp_table_factory, comp_type)
+
+
+# Keep GZIP separate so the non-UTC fallback allowance above cannot mask CPU writes.
+@ignore_order(local=True)
+def test_write_gzip_parquet_into_hive_table(spark_tmp_table_factory):
+    _check_write_compressed_parquet_into_hive_table(spark_tmp_table_factory, 'GZIP')
+
+
+def _check_write_compressed_parquet_into_hive_table(spark_tmp_table_factory, comp_type):
     # Generate hive table in Parquet format
     def gen_table(spark):
+        data_table = spark_tmp_table_factory.get()
+        # Use enough simple rows for cuDF to emit GZIP rather than uncompressed chunks.
+        if comp_type == 'GZIP':
+            spark.range(20000).selectExpr(
+                "CAST(id % 100 AS INT) AS _c0", "CAST(id % 10 AS STRING) AS _c1") \
+                .coalesce(1).createOrReplaceTempView(data_table)
+            return data_table, "_c0 int, _c1 string"
+
         gens = _hive_basic_gens + _hive_struct_gens + _hive_array_gens + _hive_map_gens
         gen_list = [('_c' + str(i), gen) for i, gen in enumerate(gens)]
         types_sql_str = ','.join('{} {}'.format(
             name, gen.data_type.simpleString()) for name, gen in gen_list)
-        data_table = spark_tmp_table_factory.get()
         gen_df(spark, gen_list).createOrReplaceTempView(data_table)
         return data_table, types_sql_str
 
@@ -199,10 +217,14 @@ def test_write_compressed_parquet_into_hive_table(spark_tmp_table_factory, comp_
             "INSERT OVERWRITE TABLE {} SELECT * FROM {}".format(output_table, input_table)
         ]
 
-    assert_gpu_and_cpu_sql_writes_are_equal_collect(
+    _, gpu_table = assert_gpu_and_cpu_sql_writes_are_equal_collect(
         spark_tmp_table_factory,
         write_to_hive_sql,
         _write_to_hive_conf)
+    if comp_type == 'GZIP':
+        # Read through the converted Parquet scan, whose input_file_name() is URL-encoded
+        with_cpu_session(lambda spark: assert_parquet_files_use_codec(
+            spark, spark.table(gpu_table), 'GZIP'))
 
 
 @allow_non_gpu(*non_utc_allow)

@@ -39,7 +39,9 @@ object WritePythonUDFUtils {
       funcs: Seq[(ChainedPythonFunctions, Long)],
       argOffsets: Array[Array[Int]],
       argNames: Option[Array[Array[Option[String]]]] = None,
-      profiler: Option[String] = None): Unit = {
+      profiler: Option[String] = None,
+      udfLogMaxEntries: Int = 0,
+      udfLogLevel: String = "WARNING"): Unit = {
     if (argNames.isDefined) {
       // Support also send the argument name to Python from Spark 400
       val argMetas = argOffsets.zip(argNames.get).map { case (idxs, names) =>

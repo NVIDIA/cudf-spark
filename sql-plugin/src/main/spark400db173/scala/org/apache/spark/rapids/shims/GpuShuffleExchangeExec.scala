@@ -15,6 +15,7 @@
  */
 /*** spark-rapids-shim-json-lines
 {"spark": "400db173"}
+{"spark": "410db183"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.rapids.shims
 
@@ -110,7 +111,7 @@ case class GpuShuffleExchangeExec(
     newExec
   }
 
-  def repartition(numPartitions: Int,
+  override def repartition(numPartitions: Int,
       updatedRepartitioningStatus: AdaptiveRepartitioningStatus):
       ShuffleExchangeLike = {
     // See withNewNumPartitions: an explicitly resized exchange no longer uses the zero-partition

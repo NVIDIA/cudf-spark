@@ -35,16 +35,6 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.unsafe.types.UTF8String
 import org.apache.spark.util.SerializableConfiguration
 
-// Copied from Apache Spark org/apache/spark/sql/catalyst/expressions/jsonExpressions.scala
-sealed trait PathInstruction
-object PathInstruction {
-  case object Subscript extends PathInstruction
-  case object Wildcard extends PathInstruction
-  case object Key extends PathInstruction
-  case class Index(index: Long) extends PathInstruction
-  case class Named(name: String) extends PathInstruction
-}
-
 object JsonPathParser {
   // Mirrors JSONUtils.MAX_PATH_DEPTH from spark-rapids-jni (get_json_object.hpp).
   // Duplicated here to avoid triggering JNI native library loading during
@@ -90,16 +80,6 @@ object JsonPathParser {
           throw new IllegalArgumentException(s"Internal Error should not see a $other instruction")
       }, name, index)
     }.toArray
-  }
-
-  def containsUnsupportedPath(instructions: List[PathInstruction]): Boolean = {
-    // Gpu GetJsonObject is not supported if JSON path contains wildcard [*]
-    // see https://github.com/NVIDIA/spark-rapids/issues/10216
-    instructions.exists {
-      case Wildcard => true
-      case Named("*")  => true
-      case _ => false
-    }
   }
 
   def normalize(instructions: List[PathInstruction]): String = {

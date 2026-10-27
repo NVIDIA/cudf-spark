@@ -18,6 +18,10 @@ and the directory that contains the corresponding support code.
 
 Iceberg GPU acceleration is currently supported on Spark 3.5.x, 4.0.x, and 4.1.x.
 
+Iceberg tables configured with `encryption.key-id` fall back to CPU for scans and writes,
+including when experimental v3 support is enabled. Encryption inspection failures also fall back
+to CPU. Iceberg's CPU implementation remains responsible for encryption and key management.
+
 For Spark 3.5.4+, both `iceberg-1-9-x` and `iceberg-1-10-x` modules are compiled into the
 build. The correct version-specific implementation is selected at runtime by probing the
 `iceberg-spark-runtime` jar on the classpath. Version-specific code lives in distinct
