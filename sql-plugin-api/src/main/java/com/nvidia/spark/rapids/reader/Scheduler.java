@@ -20,6 +20,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 
+import com.nvidia.spark.rapids.utils.CloseableIterator;
+
 import org.apache.spark.sql.vectorized.ColumnarBatch;
 
 /** Plans compatible reads and owns admission, IO, readiness, and continuation. */

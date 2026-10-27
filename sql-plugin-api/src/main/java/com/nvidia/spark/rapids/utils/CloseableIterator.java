@@ -14,11 +14,18 @@
  * limitations under the License.
  */
 
-package com.nvidia.spark.rapids.reader;
+package com.nvidia.spark.rapids.utils;
 
-/** Runs owned-handoff tests through the standard ScalaTest discovery path. */
-public final class InputReadHandleSuite extends JavaReaderSuite {
-  public InputReadHandleSuite() {
-    super(new TestInputReadHandle());
-  }
+import java.util.Iterator;
+
+/**
+ * An iterator owning resources needed to produce its remaining elements.
+ *
+ * <p>Close is idempotent and releases unconsumed elements and retained state. An element
+ * returned by next belongs to its caller and must remain valid after this iterator closes.
+ * Unless documented otherwise, iteration and close are confined to a single thread.
+ */
+public interface CloseableIterator<T> extends Iterator<T>, AutoCloseable {
+  @Override
+  void close();
 }

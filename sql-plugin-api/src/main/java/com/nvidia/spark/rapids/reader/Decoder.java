@@ -16,6 +16,8 @@
 
 package com.nvidia.spark.rapids.reader;
 
+import com.nvidia.spark.rapids.utils.CloseableIterator;
+
 import org.apache.spark.sql.vectorized.ColumnarBatch;
 
 /** Stateless physical-format decoding, without scheduler or continuation decisions. */
