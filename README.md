@@ -82,3 +82,5 @@ GPU-accelerated UDFs) we recommend you declare the distribution artifact as a `p
     <scope>provided</scope>
 </dependency>
 ```
+
+<!-- Temporary prebuilt signoff image validation. Do not merge this change. -->
