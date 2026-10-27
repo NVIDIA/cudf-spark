@@ -68,7 +68,7 @@ class GpuIcebergVariantPostProcessorSuite extends AnyFunSuite with BeforeAndAfte
       filePath = new Path("/test/file.parquet"),
       blocks = Seq(block),
       partValues = InternalRow.empty,
-      schema = ShimUtils.unshadeParquetSchema(shadedSchema),
+      schema = ShimUtils.getParquetUnshader().unshade(shadedSchema),
       readSchema = StructType(Seq.empty),
       dateRebaseMode = null,
       timestampRebaseMode = null,

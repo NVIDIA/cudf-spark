@@ -26,7 +26,6 @@ import com.nvidia.spark.rapids.{CombineConf, DateTimeRebaseCorrected, GpuMetric,
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
 import com.nvidia.spark.rapids.iceberg.ShimUtils
-import com.nvidia.spark.rapids.iceberg.parquet.converter.FromIcebergShaded._
 import com.nvidia.spark.rapids.parquet.{GpuParquetUtils, ParquetFileInfoWithBlockMeta,
   ParquetSchemaUtils}
 import com.nvidia.spark.rapids.shims.PartitionedFileUtilsShim
@@ -189,8 +188,9 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
 
   def clipBlocksToSchema(fileReadSchema: MessageType,
       blocks: Seq[ShadedBlockMetaData]): Seq[BlockMetaData] = {
+    val unshader = ShimUtils.getParquetUnshader()
     GpuParquetUtils.clipBlocksToSchema(fileReadSchema,
-      blocks.map(unshade).asJava,
+      blocks.map(unshader.unshade).asJava,
       conf.caseSensitive)
   }
 
@@ -263,7 +263,7 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
         }
       }
       val sqlConf = SQLConf.get
-      val unshadedFileReadSchema = ShimUtils.unshadeParquetSchema(fileReadSchema)
+      val unshadedFileReadSchema = ShimUtils.getParquetUnshader().unshade(fileReadSchema)
       val partReaderSparkSchema = new ParquetToSparkSchemaConverter(
         sqlConf.isParquetBinaryAsString,
         sqlConf.isParquetINT96AsTimestamp,

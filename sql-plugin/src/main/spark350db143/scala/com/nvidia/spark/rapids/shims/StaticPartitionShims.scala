@@ -17,15 +17,30 @@
 /*** spark-rapids-shim-json-lines
 {"spark": "350db143"}
 {"spark": "400db173"}
+{"spark": "410db183"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
 import com.databricks.sql.transaction.tahoe.files.TahoeFileIndexWithStaticPartitions
 
+import org.apache.spark.sql.execution.FileSourceScanExec
 import org.apache.spark.sql.execution.datasources.FilePartition
 import org.apache.spark.sql.execution.datasources.HadoopFsRelation
+import org.apache.spark.sql.execution.datasources.csv.CSVFileFormat
+import org.apache.spark.sql.execution.rapids.shims.FilePartitionShims
+import org.apache.spark.sql.rapids.GpuFileSourceScanExec
 
 object StaticPartitionShims {
+  def getPartitionPlanningScan(scan: FileSourceScanExec): Option[FileSourceScanExec] = {
+    if (scan.relation.fileFormat.isInstanceOf[CSVFileFormat]) Some(scan) else None
+  }
+
+  def getPartitions(scan: GpuFileSourceScanExec): Option[Seq[FilePartition]] = {
+    getStaticPartitions(scan.relation).orElse {
+      scan.partitionPlanningScan.map(FilePartitionShims.getCsvPartitions(_, scan))
+    }
+  }
+
   /** Get the static partitions associated with a relation, if any. */
   def getStaticPartitions(relation: HadoopFsRelation): Option[Seq[FilePartition]] = {
     relation.location match {

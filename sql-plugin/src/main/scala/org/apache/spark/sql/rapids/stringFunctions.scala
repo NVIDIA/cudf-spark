@@ -1076,7 +1076,7 @@ object GpuRegExpUtils {
   }
 
   /**
-   * Convert numbered `$group_index` back-reference symbols into cuDF's `${group_index}` form.
+   * Convert numbered `\$group_index` back-reference symbols into cuDF's `\${group_index}` form.
    * Java `Matcher#appendReplacement` treats `\digit` as the literal digit character, not as a
    * back-reference. Escaped pairs are kept verbatim here and are later normalized by
    * `unescapeReplaceString`.
@@ -1091,7 +1091,7 @@ object GpuRegExpUtils {
    * @param rep replacement string
    * @param numCaptureGroups number of capturing groups in the corresponding pattern; pass a
    *                         negative value to disable greedy-with-backoff
-   * @return A pair containing a boolean that indicates whether a raw numbered `$N`
+   * @return A pair containing a boolean that indicates whether a raw numbered `\$N`
    *         back-reference was converted, and the converted replacement.
    */
   def backrefConversion(rep: String, numCaptureGroups: Int): (Boolean, String) = {

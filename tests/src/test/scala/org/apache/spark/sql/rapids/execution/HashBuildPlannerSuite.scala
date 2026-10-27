@@ -245,4 +245,26 @@ class HashBuildPlannerSuite extends AnyFunSuite with Eventually {
     }
     assertResult(1)(artifact.closeCount.get())
   }
+
+  test("hash-build cache separates filtered lookups from regular hash tables") {
+    val cache = new HashBuildCache
+    val regular = new TestArtifact
+    val filtered = new TestArtifact
+    val filteredKey = key.copy(isFiltered = true)
+    try {
+      assert(cache.getOrBuild(key, HashBuildMetrics())(regular)._1 eq regular)
+      assert(cache.getOrBuild(filteredKey, HashBuildMetrics())(filtered)._1 eq filtered)
+      Seq(key -> regular, filteredKey -> filtered).foreach { case (buildKey, expected) =>
+        val (actual, reused) = cache.getOrBuild(buildKey, HashBuildMetrics()) {
+          fail("the requested artifact should already be cached")
+        }
+        assert(actual eq expected)
+        assert(reused)
+      }
+    } finally {
+      cache.close()
+    }
+    assertResult(1)(regular.closeCount.get())
+    assertResult(1)(filtered.closeCount.get())
+  }
 }

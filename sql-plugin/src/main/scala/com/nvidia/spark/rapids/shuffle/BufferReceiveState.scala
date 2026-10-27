@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ import scala.collection.mutable.ArrayBuffer
 import ai.rapids.cudf.{BaseDeviceMemoryBuffer, Cuda, DeviceMemoryBuffer, Rmm}
 import com.nvidia.spark.rapids.Arm.closeOnExcept
 import com.nvidia.spark.rapids.NvtxRegistry
+import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.format.TableMeta
 import com.nvidia.spark.rapids.jni.RmmSpark
 
@@ -32,6 +33,9 @@ case class ConsumedBatchFromBounceBuffer(
     contigBuffer: DeviceMemoryBuffer,
     meta: TableMeta,
     handler: RapidsShuffleFetchHandler)
+
+/** A transfer request that the server failed: why, and the requests that will not arrive. */
+case class FailedTransfer(reason: String, notReceived: Seq[PendingTransferRequest])
 
 /**
  * A helper case class to maintain the state associated with a transfer request to a peer.
@@ -44,7 +48,24 @@ case class ConsumedBatchFromBounceBuffer(
  * `consumeWindow` is called when data has arrived at the bounce buffer, copying
  * onto the ranges the bytes received.
  *
- * It also is AutoCloseable. close() should be called to free bounce buffers.
+ * An error reply waits for outstanding windows before the client ends incomplete requests.
+ * {{{
+ * request issued --> [receiving] -- all tables consumed --> [done] -- close --> [closed]
+ *                         |                                  ^                   ^
+ *                    error reply                             |                   |
+ *                         v                                  |                   |
+ *                  [serverFailure] -- all tables consumed ----+                   |
+ *                         |                                                      |
+ *                  no outstanding windows                                        |
+ *                         v                                                      |
+ *                  [FailedTransfer] -- fail waiting readers ----------------------+
+ * handler failure ---------------------------------------------------------------+
+ * }}}
+ *
+ * Recording or taking the failure releases nothing. The copy thread returns unused bytes and
+ * fails each distinct waiting reader before closing. The first close attempts to release the
+ * bounce buffer, partial-table buffer and transport entry, even if one release fails.
+ * Repeated close and late error replies release nothing.
  *
  * @param id - a numeric id that is used in all headers for this `BufferReceiveState`
  * @param bounceBuffer - bounce buffer to use (device memory strictly)
@@ -99,6 +120,16 @@ class BufferReceiveState(
 
   private[this] var hasMoreBuffers_ = windowedBlockIterator.hasNext
 
+  // how many requests, in order, were consumed into batches
+  private[this] var received = 0
+
+  // why the server failed this request, until `maybeTakeFailure` hands it over
+  private[this] var serverFailure: String = null
+
+  // set by close, after which neither a second close nor a failure the server reports later
+  // releases anything
+  private[this] var closed = false
+
   def getBufferWhenReady(finalizeCb: TransportBuffer => Unit, size: Long): Unit =
     synchronized {
       require(transportBuffer.getLength() >= size,
@@ -119,14 +150,16 @@ class BufferReceiveState(
   def getRequests: Seq[PendingTransferRequest] = requests
 
   override def close(): Unit = synchronized {
-    if (bounceBuffer != null) {
-      bounceBuffer.close()
+    // RapidsShuffleClient.doHandleBounceBufferReceive closes the state after the last window.
+    // Its catch closes the state again if that close or the window's transaction then fails.
+    if (!closed) {
+      closed = true
+      if (workingOn != null) {
+        logWarning(s"BufferReceiveState closing, but there are unfinished batches")
+      }
+      // each is released even when one before it fails, and the first failure is thrown
+      Seq[AutoCloseable](bounceBuffer, workingOn, () => transportOnClose()).safeClose()
     }
-    if (workingOn != null) {
-      logWarning(s"BufferReceiveState closing, but there are unfinished batches")
-      workingOn.close()
-    }
-    transportOnClose()
   }
 
   /**
@@ -141,6 +174,41 @@ class BufferReceiveState(
 
   def hasMoreBlocks: Boolean = synchronized { hasMoreBuffers_ }
 
+  /**
+   * Records the server's failure, and returns it if `maybeTakeFailure` can hand it over now.
+   * Otherwise `RapidsShuffleClient.doHandleBounceBufferReceive` tries again after each window
+   * that leaves more to receive.
+   * @param reason the error message for each reader whose request will not arrive
+   * @return what `maybeTakeFailure` returns
+   */
+  def serverFailed(reason: String): Option[FailedTransfer] = synchronized {
+    // A transfer request gets one terminal response, so this runs at most once per state. A
+    // second failure while the first waits for a window keeps the first and is only logged.
+    if (serverFailure == null) {
+      serverFailure = reason
+    } else {
+      logWarning(s"Ignoring a second server failure for ${TransportUtils.toHex(id)}: $reason")
+    }
+    maybeTakeFailure()
+  }
+
+  /**
+   * Hands over and clears the server's failure only when no window is left to consume and
+   * nothing closed this state. While a window is left, UCX can still write into the bounce
+   * buffer, and the copy thread has yet to copy out of it. The one caller that gets the failure
+   * must end this state: return the bytes in flight for `notReceived` to the transport, fail
+   * their readers and close this state.
+   */
+  def maybeTakeFailure(): Option[FailedTransfer] = synchronized {
+    if (serverFailure != null && toConsume == 0 && !closed) {
+      val failure = FailedTransfer(serverFailure, requests.drop(received))
+      serverFailure = null
+      Some(failure)
+    } else {
+      None
+    }
+  }
+
   private def advance(): Unit = {
     if (!hasMoreBuffers_) {
       throw new NoSuchElementException(
@@ -153,6 +221,13 @@ class BufferReceiveState(
       iterated = true
     }
     currentBlocks = nextBlocks
+
+    // The window handler's catch can close this state while this window is on its way. The
+    // catch then tells this window's readers, which no earlier error reached.
+    if (closed) {
+      throw new IllegalStateException(
+        s"BufferReceiveState ${TransportUtils.toHex(id)} is closed, yet received a window")
+    }
 
     if (windowedBlockIterator.hasNext) {
       nextBlocks = windowedBlockIterator.next()
@@ -202,14 +277,16 @@ class BufferReceiveState(
 
               workingOnOffset += b.rangeSize()
               if (workingOnOffset == fullSize) {
+                toClose.append(workingOn)
                 contigBuffer = workingOn
                 workingOn = null
                 workingOnOffset = 0
               }
             } else {
-              // need to keep it around
+              // need to keep it around. Only the field owns it, so that if this window fails, the
+              // catch in RapidsShuffleClient.doHandleBounceBufferReceive closes the state, which
+              // frees it once.
               workingOn = Rmm.alloc(fullSize, stream)
-              toClose.append(workingOn)
 
               workingOn.copyFromDeviceBufferAsync(0, deviceBounceBuffer,
                 bounceBufferByteOffset, b.rangeSize(), stream)
@@ -238,6 +315,7 @@ class BufferReceiveState(
         results.foreach { result =>
           RmmSpark.poolThreadFinishedForTasks(result.handler.getTaskIds)
         }
+        received += results.size
 
         // cpu is in sync, we can recycle the bounce buffer
         if (!toFinalize.isEmpty) {

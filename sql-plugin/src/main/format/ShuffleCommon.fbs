@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2024, NVIDIA CORPORATION.
+// Copyright (c) 2020-2026, NVIDIA CORPORATION.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -60,4 +60,11 @@ table BufferMeta {
 
   /// array of codec buffer descriptors if the data is compressed
   codec_buffer_descrs: [CodecBufferDescriptor];
+}
+
+/// Why the server failed a request. A transfer response carries it, and it holds nothing
+/// specific to transfers, so that other responses can carry it too.
+table ResponseError {
+  /// why the request failed, for the requester's error message
+  reason: string;
 }

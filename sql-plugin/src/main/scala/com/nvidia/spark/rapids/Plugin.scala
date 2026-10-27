@@ -743,7 +743,7 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
       // and exit immediately.
       case e: CudaException =>
         logError("Exception in the executor plugin, shutting down!", e)
-        logGpuDebugInfoAndExit(systemExitCode = 1)
+        RapidsExecutorPlugin.logGpuDebugInfoAndExit(systemExitCode = 1)
       case e: Throwable =>
         logError("Exception in the executor plugin, shutting down!", e)
         RapidsExecutorPlugin.exitWithHaltOnTimeout(1)
@@ -801,43 +801,6 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
         s"JSONUtils.MAX_PATH_DEPTH (${JSONUtils.MAX_PATH_DEPTH})")
   }
 
-  // Wait for command spawned via Process
-  private def waitForProcess(cmd: Process, durationMs: Long): Option[Int] = {
-    val endTime = System.currentTimeMillis() + durationMs
-    do {
-      Thread.sleep(10)
-      if (!cmd.isAlive()) {
-        return Some(cmd.exitValue())
-      }
-    } while (System.currentTimeMillis() < endTime)
-    // Timed out
-    cmd.destroy()
-    None
-  }
-
-  // Try to run nvidia-smi when task fails due to a cuda exception.
-  private def logGpuDebugInfoAndExit(systemExitCode: Int) = synchronized {
-    try {
-      val nvidiaSmiStdout = new StringBuilder
-      val nvidiaSmiStderr = new StringBuilder
-      val cmd = "nvidia-smi -q".run(
-        ProcessLogger(s => nvidiaSmiStdout.append(s + "\n"), s => nvidiaSmiStderr.append(s + "\n")))
-      waitForProcess(cmd, 10000) match {
-        case Some(exitStatus) =>
-          if (exitStatus == 0) {
-            logWarning("nvidia-smi:\n" + nvidiaSmiStdout)
-          } else {
-            logWarning("nvidia-smi failed with: " + nvidiaSmiStdout + nvidiaSmiStderr)
-          }
-        case None => logWarning("nvidia-smi command timed out")
-      }
-    } catch {
-      case e: Throwable =>
-        logWarning("nvidia-smi process failed", e)
-    }
-    RapidsExecutorPlugin.exitWithHaltOnTimeout(systemExitCode)
-  }
-
   override def shutdown(): Unit = {
     RapidsPluginUtils.safeShutdown(
       Seq(
@@ -868,8 +831,7 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
           case Some(e) if containsCudaFatalException(e) =>
             logError("Stopping the Executor based on exception being a fatal CUDA error: " +
               s"${ef.toErrorString}")
-            GpuCoreDumpHandler.waitForDump(timeoutSecs = 60)
-            logGpuDebugInfoAndExit(systemExitCode = 20)
+            RapidsExecutorPlugin.exitOnCudaFatalError(20)
           case Some(_: CudaException) =>
             logDebug(s"Executor onTaskFailed because of a non-fatal CUDA error: " +
               s"${ef.toErrorString}")
@@ -927,6 +889,62 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
 }
 
 object RapidsExecutorPlugin extends Logging {
+  private def waitForProcess(cmd: Process, durationMs: Long): Option[Int] = {
+    val endTime = System.currentTimeMillis() + durationMs
+    do {
+      Thread.sleep(10)
+      if (!cmd.isAlive()) {
+        return Some(cmd.exitValue())
+      }
+    } while (System.currentTimeMillis() < endTime)
+    cmd.destroy()
+    None
+  }
+
+  private[rapids] def exitOnCudaFatalError(exitCode: Int): Unit = {
+    waitForGpuCoreDumpThenExit(
+      GpuCoreDumpHandler.waitForDump(timeoutSecs = 60),
+      logGpuDebugInfoAndExit(exitCode))
+  }
+
+  private[rapids] def waitForGpuCoreDumpThenExit(waitForDump: => Unit, exit: => Unit): Unit = {
+    // Clear an interrupt pending on entry so it cannot skip the dump wait or diagnostics.
+    var interrupted = Thread.interrupted()
+    try {
+      waitForDump
+    } catch {
+      case error: InterruptedException =>
+        interrupted = true
+        logWarning("Interrupted while waiting for GPU core dump", error)
+      case error: Throwable =>
+        logWarning("Error while waiting for GPU core dump", error)
+    } finally {
+      try exit finally if (interrupted) Thread.currentThread().interrupt()
+    }
+  }
+
+  private[rapids] def logGpuDebugInfoAndExit(systemExitCode: Int): Unit = synchronized {
+    try {
+      val nvidiaSmiStdout = new StringBuilder
+      val nvidiaSmiStderr = new StringBuilder
+      val cmd = "nvidia-smi -q".run(
+        ProcessLogger(s => nvidiaSmiStdout.append(s + "\n"), s => nvidiaSmiStderr.append(s + "\n")))
+      waitForProcess(cmd, 10000) match {
+        case Some(exitStatus) =>
+          if (exitStatus == 0) {
+            logWarning("nvidia-smi:\n" + nvidiaSmiStdout)
+          } else {
+            logWarning("nvidia-smi failed with: " + nvidiaSmiStdout + nvidiaSmiStderr)
+          }
+        case None => logWarning("nvidia-smi command timed out")
+      }
+    } catch {
+      case e: Throwable =>
+        logWarning("nvidia-smi process failed", e)
+    }
+    exitWithHaltOnTimeout(systemExitCode)
+  }
+
   /**
    * Calling System.exit will trigger shutdown hooks to run.
    * This code is intended to let them run, but then force

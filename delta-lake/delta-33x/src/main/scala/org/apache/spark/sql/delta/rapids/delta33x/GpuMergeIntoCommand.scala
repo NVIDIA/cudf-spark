@@ -241,7 +241,7 @@ object GpuMergeStats {
  *
  * Phase 1: Find the input files in target that are touched by the rows that satisfy
  *    the condition and verify that no two source rows match with the same target row.
- *    This is implemented as an inner-join using the given condition. See [[findTouchedFiles]]
+ *    This is implemented as an inner-join using the given condition. See `findTouchedFiles`
  *    for more details.
  *
  * Phase 2: Read the touched files again and write new files with updated and/or inserted rows.
@@ -479,7 +479,7 @@ case class GpuMergeIntoCommand(
   }
 
   /**
-   * Collects the merge operation stats and metrics into a [[MergeStats]] object that can be
+   * Collects the merge operation stats and metrics into a `MergeStats` object that can be
    * recorded with `recordDeltaEvent`. Merge stats should be collected after committing all new
    * actions as metrics may still be updated during commit.
    */

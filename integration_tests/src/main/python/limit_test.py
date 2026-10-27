@@ -14,9 +14,10 @@
 
 import pytest
 
-from asserts import assert_gpu_and_cpu_are_equal_collect
+from asserts import (assert_cpu_and_gpu_are_equal_collect_with_capture,
+                     assert_gpu_and_cpu_are_equal_collect, collect_plan_nodes, plan_metric)
 from data_gen import *
-from spark_session import is_before_spark_340
+from spark_session import is_before_spark_340, with_cpu_session
 from marks import allow_non_gpu, approximate_float
 
 @pytest.mark.parametrize('data_gen', all_basic_gens + decimal_gens + array_gens_sample + map_gens_sample + struct_gens_sample, ids=idfn)
@@ -99,3 +100,54 @@ def test_order_by_offset_with_limit(limit, offset, data_gen, batch_size):
         sql = "select * from tmp_table order by a limit {} offset {}".format(limit, offset)
         return spark.sql(sql)
     assert_gpu_and_cpu_are_equal_collect(spark_df, conf={'spark.rapids.sql.batchSizeBytes': batch_size})
+
+
+# Settings that give one GpuTopN task several input batches.
+_zero_column_topn_routes = {
+    'perfile': {'spark.rapids.sql.format.parquet.reader.type': 'PERFILE',
+                'spark.sql.files.maxPartitionBytes': '2g',
+                'spark.sql.files.minPartitionNum': '1',
+                'spark.sql.files.openCostInBytes': '1'},
+    'small_batches': {'spark.rapids.sql.batchSizeBytes': '8000'}}
+
+def _assert_zero_column_topn(cpu_plan, gpu_plan):
+    """Asserts a GpuTopN over a zero-column child that got several batches in one task."""
+    topns = [node for node in collect_plan_nodes(gpu_plan)
+             if node.getClass().getSimpleName() == 'GpuTopN'
+             and node.children().apply(0).output().isEmpty()]
+    assert topns, "Expected a GpuTopN over a zero-column child in:\n{}".format(gpu_plan)
+    assert any(plan_metric(topn, 'numInputBatches') > plan_metric(topn, 'numOutputBatches')
+               for topn in topns), \
+        "Expected a zero-column GpuTopN to get two or more batches in one task in:\n{}".format(
+            gpu_plan)
+
+@pytest.mark.parametrize('route', list(_zero_column_topn_routes))
+@pytest.mark.parametrize('limit, offset', [
+    (5, 0),
+    (3000, 0),
+    pytest.param(5, 2, marks=pytest.mark.skipif(is_before_spark_340(),
+                                                reason='offset is introduced from Spark 3.4.0'))])
+def test_topn_zero_column_multiple_batches(spark_tmp_path, route, limit, offset):
+    # count(1) prunes every column, and a scalar subquery is a sort key that reads none.
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+    if route == 'perfile':
+        with_cpu_session(lambda spark: spark.range(0, 4000, 1, 4)
+                         .selectExpr('CAST(id AS INT) AS key').write.parquet(data_path))
+
+    def do_it(spark):
+        if route == 'perfile':
+            df = spark.read.parquet(data_path)
+        else:
+            df = spark.range(0, 4000, 1, 1).selectExpr('CAST(id AS INT) AS key')
+        df.createOrReplaceTempView('t')
+        offset_sql = ' offset {}'.format(offset) if offset else ''
+        return spark.sql('select count(1) from (select * from t order by (select max(key) from t) '
+                         'limit {}{})'.format(limit, offset_sql))
+
+    # AQE off: collect_plan_nodes does not descend into AdaptiveSparkPlanExec.
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        conf = copy_and_update({'spark.sql.adaptive.enabled': False,
+                                'spark.rapids.sql.metrics.level': 'DEBUG'},
+                               _zero_column_topn_routes[route]),
+        gpu_plan_assertion = _assert_zero_column_topn)

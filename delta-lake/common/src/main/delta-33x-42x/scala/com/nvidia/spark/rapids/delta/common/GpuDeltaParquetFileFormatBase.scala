@@ -74,6 +74,11 @@ class GpuDeltaParquetFileFormatBase(
   val columnMappingMode: DeltaColumnMappingMode = metadata.columnMappingMode
   val referenceSchema: StructType = metadata.schema
 
+  // Delta does not mark its synthetic deleted-row field in StructField metadata. A field
+  // present in the table schema is user data, even when it has the internal marker's name.
+  private val hasSyntheticRowDeletedColumn =
+    !referenceSchema.exists(_.name == IS_ROW_DELETED_COLUMN_NAME)
+
   if (columnMappingMode == IdMapping) {
     val requiredReadConf = SQLConf.PARQUET_FIELD_ID_READ_ENABLED
     require(SparkSession.getActiveSession.exists(_.sessionState.conf.getConf(requiredReadConf)),
@@ -89,7 +94,7 @@ class GpuDeltaParquetFileFormatBase(
    */
   override def prepareSchema(inputSchema: StructType): StructType = {
     def isInternalColumn(field: StructField): Boolean =
-      field.name == IS_ROW_DELETED_COLUMN_NAME ||
+      (hasSyntheticRowDeletedColumn && field.name == IS_ROW_DELETED_COLUMN_NAME) ||
         GpuDeltaParquetFileFormatBase2.isGpuRowIndexColumn(field)
     val dataSchema = StructType(inputSchema.fields.filterNot(
       isInternalColumn))
@@ -190,7 +195,11 @@ class GpuDeltaParquetFileFormatBase(
       results.headOption.map(e => ColumnMetadata(e._2, e._1))
     }
 
-    val isRowDeletedColumn = findColumn(IS_ROW_DELETED_COLUMN_NAME)
+    val isRowDeletedColumn = if (hasSyntheticRowDeletedColumn) {
+      findColumn(IS_ROW_DELETED_COLUMN_NAME)
+    } else {
+      None
+    }
     val rowIndexColumn = schemaWithIndices
       .find(entry => GpuDeltaParquetFileFormatBase2.isGpuRowIndexColumn(entry._1))
       .map(entry => ColumnMetadata(entry._2, entry._1))
@@ -241,6 +250,7 @@ class GpuDeltaParquetFileFormatBase(
       fileScan.rapidsConf,
       fileScan.allMetrics,
       useMetadataRowIndex = false,
+      hasSyntheticRowDeletedColumn,
       tablePath,
       // queryUsesInputFile is used to disable combining small files in the multi-threaded reader.
       // When it is true, combining small files is disabled. Since we don't currently support
@@ -266,6 +276,7 @@ class DeltaMultiFileReaderFactory(
     @transient rapidsConf: RapidsConf,
     metrics: Map[String, GpuMetric],
     useMetadataRowIndex: Boolean,
+    hasSyntheticRowDeletedColumn: Boolean,
     tablePath: Option[String],
     queryUsesInputFile: Boolean
     ) extends GpuParquetMultiFilePartitionReaderFactory(sqlConf, broadcastedConf,
@@ -283,7 +294,11 @@ class DeltaMultiFileReaderFactory(
     results.headOption.map(e => ColumnMetadata(e._2, e._1))
   }
 
-  private val isRowDeletedColumn = findColumn(IS_ROW_DELETED_COLUMN_NAME)
+  private val isRowDeletedColumn = if (hasSyntheticRowDeletedColumn) {
+    findColumn(IS_ROW_DELETED_COLUMN_NAME)
+  } else {
+    None
+  }
   private val rowIndexColumn = schemaWithIndices
     .find(entry => GpuDeltaParquetFileFormatBase2.isGpuRowIndexColumn(entry._1))
     .map(entry => ColumnMetadata(entry._2, entry._1))
@@ -355,14 +370,14 @@ class DeltaMultiFileParquetPartitionReader(
 object RapidsDeletionVectorUtils {
 
   /**
-   * Processes a {@link ColumnarBatch} by applying row deletion vectors and returns a new batch
+   * Processes a `ColumnarBatch` by applying row deletion vectors and returns a new batch
    * that includes additional metadata columns for row deletion status and row index, as specified.
    *
    * This function generates and adds new metadata columns using the given options and filter, then
    * replaces or augments the input batch with them. It is typically used to mark deleted rows and
    * propagate row index information for further processing or filtering.
    *
-   * @param batch                 The input {@link ColumnarBatch} to augment with metadata columns.
+   * @param batch                 The input `ColumnarBatch` to augment with metadata columns.
    * @param rowIndex              Starting row index for this batch in the overall dataset.
    * @param isRowDeletedColumnOpt Optional metadata describing the "is row deleted" column.
    * @param rowIndexFilterOpt     Optional filter to materialize the "is row deleted" vector for
@@ -370,7 +385,7 @@ object RapidsDeletionVectorUtils {
    * @param rowIndexColumnOpt     Optional metadata describing the row index column.
    * @param metrics               Map capturing GPU metric times for each major phase, keyed by
    *                              metric name.
-   * @return A new {@link ColumnarBatch} with additional or replaced metadata columns indicating
+   * @return A new `ColumnarBatch` with additional or replaced metadata columns indicating
    * deletion and row index.
    */
   def processBatchWithDeletionVector(
@@ -405,7 +420,8 @@ object RapidsDeletionVectorUtils {
    * @param serializableConf      Serializable Hadoop configuration for accessing file system.
    * @param metrics               Map for tracking GPU metric times by name.
    * @return Iterator yielding {@code ColumnarBatch} objects with added columns per batch.
-   * @throws RuntimeException If an unexpected row type is encountered in the input iterator.
+   * @throws java.lang.RuntimeException If an unexpected row type is encountered in the input
+   *                                    iterator.
    */
   def iteratorWithAdditionalMetadataColumns(
     partitionedFile: PartitionedFile,
@@ -449,7 +465,7 @@ object RapidsDeletionVectorUtils {
    * provided filter. Both columns are added or replaced in the input batch according to the
    * specified column metadata.
    *
-   * @param batch                  Input {@link ColumnarBatch} to be updated with replacement
+   * @param batch                  Input `ColumnarBatch` to be updated with replacement
    *                               columns.
    * @param size                   The number of rows in the batch.
    * @param rowIndexColumnOpt      Optional metadata for the row index column.
@@ -458,7 +474,7 @@ object RapidsDeletionVectorUtils {
    *                               status.
    * @param metrics                Map for tracking time spent in specific stages, keyed by metric
    *                               name.
-   * @return                       A new {@link ColumnarBatch} with replaced/added columns for
+   * @return                       A new `ColumnarBatch` with replaced/added columns for
    *                               row indices and deletion status.
    */
   private def replaceVectors(
@@ -527,7 +543,7 @@ object RapidsDeletionVectorUtils {
   * provided filter. Both columns are added or replaced in the input batch according to the
   * specified column metadata.
   *
-  * @param batch                  Input {@link ColumnarBatch} to be updated with replacement
+  * @param batch                  Input `ColumnarBatch` to be updated with replacement
   *                               columns.
   * @param size                   The number of rows in the batch.
   * @param rowIndexColumnOpt      Optional metadata for the row index column.
@@ -536,7 +552,7 @@ object RapidsDeletionVectorUtils {
   *                               status.
   * @param metrics                Map for tracking time spent in specific stages, keyed by metric
   *                               name.
-  * @return                       A new {@link ColumnarBatch} with replaced/added columns for
+  * @return                       A new `ColumnarBatch` with replaced/added columns for
   *                               row indices and deletion status.
   */
   private def replaceBatch(rowIndex: Long,

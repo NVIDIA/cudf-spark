@@ -27,7 +27,6 @@ env:
   COMMON_MVN_FLAGS: >-
     -Ddist.jar.compress=false
     -DskipTests
-    -Dmaven.scaladoc.skip
     -Dmaven.artifact.threads=10
     --batch-mode
     -Dmaven.wagon.http.retryHandler.count=3
@@ -39,6 +38,13 @@ permissions:
   contents: read
 
 jobs:
+  shim-source-graph-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: NVIDIA/spark-rapids-common/checkout@main
+      - name: Validate shim source inheritance
+        run: python3 -m unittest discover -s build/tests -p 'test_*.py' -v
+
   cache-dependencies:
     runs-on: ubuntu-latest
     outputs:

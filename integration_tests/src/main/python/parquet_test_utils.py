@@ -36,3 +36,28 @@ def parquet_row_group_midpoints(spark, path):
         ]
     finally:
         reader.close()
+
+
+def assert_parquet_files_use_codec(spark, dataframe, expected_codec):
+    file_paths = [row.file for row in
+                  dataframe.selectExpr("input_file_name() AS file").distinct().collect()]
+    assert file_paths, "No Parquet files found"
+
+    jvm = spark.sparkContext._jvm
+    hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+    for file_path in file_paths:
+        # input_file_name() returns a URL-encoded URI string; decode it via URI
+        reader = jvm.org.apache.parquet.hadoop.ParquetFileReader.open(
+            hadoop_conf, jvm.org.apache.hadoop.fs.Path(jvm.java.net.URI(file_path)))
+        try:
+            row_groups = reader.getFooter().getBlocks()
+            assert row_groups.size() > 0, f"Parquet file {file_path} has no row groups"
+            for row_group in row_groups:
+                columns = row_group.getColumns()
+                assert columns.size() > 0, f"Parquet file {file_path} has no column chunks"
+                for column in columns:
+                    actual_codec = column.getCodec().name()
+                    assert actual_codec == expected_codec, \
+                        f"Parquet file {file_path} uses {actual_codec}, expected {expected_codec}"
+        finally:
+            reader.close()

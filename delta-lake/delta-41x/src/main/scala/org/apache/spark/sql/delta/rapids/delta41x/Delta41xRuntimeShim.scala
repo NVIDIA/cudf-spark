@@ -28,6 +28,8 @@ import org.apache.spark.sql.SaveMode
 import org.apache.spark.sql.classic.SparkSession
 import org.apache.spark.sql.connector.catalog.StagingTableCatalog
 import org.apache.spark.sql.delta.{DeltaOperations, DeltaOptions}
+import org.apache.spark.sql.delta.{TableFeature, VariantShreddingPreviewTableFeature,
+  VariantShreddingTableFeature}
 import org.apache.spark.sql.delta.actions.{FileAction, Metadata}
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
 import org.apache.spark.sql.delta.commands.{CreateDeltaTableLikeShims,
@@ -35,6 +37,7 @@ import org.apache.spark.sql.delta.commands.{CreateDeltaTableLikeShims,
 import org.apache.spark.sql.delta.hooks.GpuAutoCompact41x
 import org.apache.spark.sql.delta.rapids.{
   DeltaRuntimeShimBase,
+  DeltaVariantShreddingShim,
   DMLWithDeletionVectorsRuntimeShim,
   GpuDeltaLog,
   GpuOptimisticTransaction,
@@ -46,7 +49,10 @@ import org.apache.spark.sql.delta.rapids.{
 import org.apache.spark.sql.delta.stats.StatsCollectionUtils
 
 class Delta41xRuntimeShim extends DeltaRuntimeShimBase
-    with DMLWithDeletionVectorsRuntimeShim {
+    with DeltaVariantShreddingShim with DMLWithDeletionVectorsRuntimeShim {
+
+  override protected def variantShreddingFeatures: Set[TableFeature] =
+    Set(VariantShreddingPreviewTableFeature, VariantShreddingTableFeature)
 
   override def processUnmodifiedData(
       spark: SparkSession,

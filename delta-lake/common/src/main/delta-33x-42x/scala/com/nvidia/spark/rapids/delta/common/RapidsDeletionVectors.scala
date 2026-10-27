@@ -56,7 +56,7 @@ object RapidsDeletionVectors extends Logging {
   /**
    * Translates the filter to use physical column names instead of logical column names.
    * This is needed when the column mapping mode is set to `NameMapping` or `IdMapping`
-   * to match the requested schema that's passed to the [[ParquetFileFormat]].
+   * to match the requested schema that's passed to the `ParquetFileFormat`.
    */
   def translateFilterForColumnMapping(
       filter: Filter,
@@ -147,7 +147,7 @@ object RapidsDeletionVectors extends Logging {
 
   /**
    * Convenience overload for callers that have already verified the filter type is
-   * [[RowIndexFilterType.IF_CONTAINED]] and only carry the descriptor string.
+   * `RowIndexFilterType.IF_CONTAINED` and only carry the descriptor string.
    */
   def loadDeletionVector(
       fileIO: RapidsFileIO,

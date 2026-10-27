@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import java.util.concurrent.atomic.AtomicInteger
 
 import ai.rapids.cudf.MemoryBuffer
 import com.nvidia.spark.rapids.{NvtxRegistry, RapidsConf, ShimReflectionUtils}
+import com.nvidia.spark.rapids.Arm.closeOnExcept
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.rapids.storage.RapidsStorageUtils
@@ -585,5 +586,20 @@ object RapidsShuffleTransport extends Logging {
           s"to instantiate", t)
         throw t
     }
+  }
+
+  /**
+   * Closes an executor's shuffle server, then its transport, which stops UCX and frees the
+   * bounce-buffer pools. The transport closes even when the server's close throws, as when the
+   * stopping thread is interrupted, and the server's error is the one thrown. A reply that the
+   * interrupted server was still queueing may then never be sent.
+   */
+  def closeServerThenTransport(
+      server: Option[AutoCloseable],
+      transport: Option[AutoCloseable]): Unit = {
+    closeOnExcept(transport) { _ =>
+      server.foreach(_.close())
+    }
+    transport.foreach(_.close())
   }
 }

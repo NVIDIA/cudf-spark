@@ -2822,12 +2822,6 @@ trait OrcCodecWritingHelper {
   }
 }
 
-// Orc schema wrapper
-private case class OrcSchemaWrapper(schema: TypeDescription) extends SchemaBase {
-
-  override def isEmpty: Boolean = schema.getFieldNames.isEmpty
-}
-
 case class OrcStripeWithMeta(stripe: OrcOutputStripe, ctx: OrcPartitionReaderContext)
     extends OrcCodecWritingHelper {
 
@@ -2853,12 +2847,6 @@ private[rapids] case class OrcDataStripe(stripeMeta: OrcStripeWithMeta) extends 
 
   override def getBlockSize: Long = stripeMeta.stripeLength
 }
-
-/** Orc extra information containing the requested column ids for the current coalescing stripes */
-case class OrcExtraInfo(
-    requestedMapping: Option[Array[Int]],
-    writerTimezone: ZoneId,
-    writerUsedProlepticGregorian: Boolean) extends ExtraInfo
 
 // Contains meta about a single stripe of an ORC file
 private case class OrcSingleStripeMeta(

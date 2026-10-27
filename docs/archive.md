@@ -1217,7 +1217,7 @@ The output of signature verify:
 * Fix race condition due to premature disk handle exposure.
 
 Note: There is a known issue in the 25.12.0 release when decompressing gzip files on H100 GPUs.
-Please find more details in [issue-16661](https://github.com/rapidsai/cudf/issues/16661).
+Please find more details in [issue-16661](https://github.com/NVIDIA/cudf/issues/16661).
 
 ## Release v25.10.0
 ### Hardware Requirements:
@@ -1308,7 +1308,7 @@ The output of signature verify:
 * Added CUDA 13 support, in addition to CUDA 12 support. 
 
 Note: There is a known issue in the 25.10.0 release when decompressing gzip files on H100 GPUs.
-Please find more details in [issue-16661](https://github.com/rapidsai/cudf/issues/16661).
+Please find more details in [issue-16661](https://github.com/NVIDIA/cudf/issues/16661).
 
 ## Release v25.08.0
 ### Hardware Requirements:
@@ -1401,7 +1401,7 @@ The output of signature verify:
 * Stability improvements and bug fixes for production workloads
 
 Note: There is a known issue in the 25.08.0 release when decompressing gzip files on H100 GPUs.
-Please find more details in [issue-16661](https://github.com/rapidsai/cudf/issues/16661).
+Please find more details in [issue-16661](https://github.com/NVIDIA/cudf/issues/16661).
 
 For a detailed list of changes, please refer to the
 [CHANGELOG](https://github.com/NVIDIA/spark-rapids/blob/main/CHANGELOG.md).
@@ -1497,7 +1497,7 @@ The output of signature verify:
 * Fix a get_json_object bug when encounter some special pattern path
 
 Note: There is a known issue in the 25.06.0 release when decompressing gzip files on H100 GPUs.
-Please find more details in [issue-16661](https://github.com/rapidsai/cudf/issues/16661).
+Please find more details in [issue-16661](https://github.com/NVIDIA/cudf/issues/16661).
 
 For a detailed list of changes, please refer to the
 [CHANGELOG](https://github.com/NVIDIA/spark-rapids/blob/main/CHANGELOG.md).
@@ -1590,7 +1590,7 @@ The output of signature verify:
 * Allow BigSizedJoinIterator#buildPartitioner to produce more sub-partitions to avoid CudfColumnSizeOverflowException
 
 Note: There is a known issue in the 25.04.0 release when decompressing gzip files on H100 GPUs.
-Please find more details in [issue-16661](https://github.com/rapidsai/cudf/issues/16661).
+Please find more details in [issue-16661](https://github.com/NVIDIA/cudf/issues/16661).
 
 For a detailed list of changes, please refer to the
 [CHANGELOG](https://github.com/NVIDIA/spark-rapids/blob/main/CHANGELOG.md).
@@ -1681,7 +1681,7 @@ The output of signature verify:
 * Upgraded statically linked CUDA toolkit to 12.8, which includes support for GB100 GPUs
 
 Note: There is a known issue in the 25.02.1 release when decompressing gzip files on H100 GPUs.
-Please find more details in [issue-16661](https://github.com/rapidsai/cudf/issues/16661).
+Please find more details in [issue-16661](https://github.com/NVIDIA/cudf/issues/16661).
 
 For a detailed list of changes, please refer to the
 [CHANGELOG](https://github.com/NVIDIA/spark-rapids/blob/main/CHANGELOG.md).
@@ -1771,7 +1771,7 @@ The output of signature verify:
 * For updates on RAPIDS Accelerator Tools, please visit [this link](https://github.com/NVIDIA/spark-rapids-tools/releases)
 
 Note: There is a known issue in the 25.02.0 release when decompressing gzip files on H100 GPUs.
-Please find more details in [issue-16661](https://github.com/rapidsai/cudf/issues/16661).
+Please find more details in [issue-16661](https://github.com/NVIDIA/cudf/issues/16661).
 
 For a detailed list of changes, please refer to the
 [CHANGELOG](https://github.com/NVIDIA/spark-rapids/blob/main/CHANGELOG.md).
@@ -1864,7 +1864,7 @@ The output of signature verify:
 * For updates on RAPIDS Accelerator Tools, please visit [this link](https://github.com/NVIDIA/spark-rapids-tools/releases)
 
 Note: There is a known issue in the 24.12.1 release when decompressing gzip files on H100 GPUs.
-Please find more details in [issue-16661](https://github.com/rapidsai/cudf/issues/16661).
+Please find more details in [issue-16661](https://github.com/NVIDIA/cudf/issues/16661).
 
 For a detailed list of changes, please refer to the
 [CHANGELOG](https://github.com/NVIDIA/spark-rapids/blob/main/CHANGELOG.md).
@@ -1957,7 +1957,7 @@ The output of signature verify:
 * For updates on RAPIDS Accelerator Tools, please visit [this link](https://github.com/NVIDIA/spark-rapids-tools/releases)
 
 Note: There is a known issue in the 24.12.0 release when decompressing gzip files on H100 GPUs.
-Please find more details in [issue-16661](https://github.com/rapidsai/cudf/issues/16661).
+Please find more details in [issue-16661](https://github.com/NVIDIA/cudf/issues/16661).
 
 For a detailed list of changes, please refer to the
 [CHANGELOG](https://github.com/NVIDIA/spark-rapids/blob/main/CHANGELOG.md).
@@ -2047,7 +2047,7 @@ The output of signature verify:
 * For updates on RAPIDS Accelerator Tools, please visit [this link](https://github.com/NVIDIA/spark-rapids-tools/releases)
 
 Note: There is a known issue in the 24.10.1 release when decompressing gzip files on H100 GPUs.  
-Please find more details in [issue-16661](https://github.com/rapidsai/cudf/issues/16661).
+Please find more details in [issue-16661](https://github.com/NVIDIA/cudf/issues/16661).
 
 For a detailed list of changes, please refer to the
 [CHANGELOG](https://github.com/NVIDIA/spark-rapids/blob/main/CHANGELOG.md).
@@ -2136,7 +2136,7 @@ The output of signature verify:
 * For updates on RAPIDS Accelerator Tools, please visit [this link](https://github.com/NVIDIA/spark-rapids-tools/releases)
 
 Note: There is a known issue in the 24.10.0 release when decompressing gzip files on H100 GPUs.  
-Please find more details in [issue-16661](https://github.com/rapidsai/cudf/issues/16661).
+Please find more details in [issue-16661](https://github.com/NVIDIA/cudf/issues/16661).
 
 For a detailed list of changes, please refer to the
 [CHANGELOG](https://github.com/NVIDIA/spark-rapids/blob/main/CHANGELOG.md).
@@ -2225,7 +2225,7 @@ The output of signature verify:
 * For updates on RAPIDS Accelerator Tools, please visit [this link](https://github.com/NVIDIA/spark-rapids-tools/releases)
 
 Note: There is a known issue in the 24.08.1 release when decompressing gzip files on H100 GPUs.  
-Please find more details in [issue-16661](https://github.com/rapidsai/cudf/issues/16661).
+Please find more details in [issue-16661](https://github.com/NVIDIA/cudf/issues/16661).
 
 For a detailed list of changes, please refer to the
 [CHANGELOG](https://github.com/NVIDIA/spark-rapids/blob/main/CHANGELOG.md).

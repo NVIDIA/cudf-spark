@@ -67,6 +67,15 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
       .booleanConf
       .createWithDefault(false)
 
+  val TEST_DELTA_LOW_SHUFFLE_MERGE_FAILED_ON_NOT_METADATA_ONLY =
+    conf("spark.rapids.sql.test.delta.lowShuffleMerge.failedOnNotMetadataOnly")
+      .doc("Only for tests on Databricks Runtime 17.3. When true and " +
+        s"${TEST_CONF.key} is enabled, fail if a nonempty native low shuffle merge discovery " +
+        "read does not use the metadata-only path.")
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
+
   val TEST_ALLOWED_NONGPU = conf("spark.rapids.sql.test.allowedNonGpu")
     .doc("Comma separate string of exec or expression class names that are allowed " +
       "to not be GPU accelerated for testing.")
@@ -837,7 +846,10 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .doc("Option to turn on the low shuffle merge for Delta Lake. Currently there are some " +
       "limitations for this feature: " +
       "1. We support Delta Lake 2.4 and Databricks Runtime 17.3. " +
-      s"2. The file scan mode must be set to ${RapidsReaderType.PERFILE}. " +
+      s"2. Delta Lake 2.4 requires the ${RapidsReaderType.PERFILE} file scan mode. " +
+      s"Databricks Runtime 17.3 also supports ${RapidsReaderType.MULTITHREADED}; " +
+      s"${RapidsReaderType.COALESCING} and ${RapidsReaderType.AUTO} discovery scans use the " +
+      s"${RapidsReaderType.MULTITHREADED} reader. " +
       "3. The deletion vector size must be smaller than " +
       s"${DELTA_LOW_SHUFFLE_MERGE_DEL_VECTOR_BROADCAST_THRESHOLD.key} ")
     .booleanConf
@@ -852,7 +864,11 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
         "the GPU filter operator will process it together with other filters. " +
         "This setting is effective only when " +
         "spark.databricks.delta.deletionVectors.useMetadataRowIndex is true. " +
-        "Otherwise, this setting is fixed to false regardless of its actual value.")
+        "Otherwise, this setting is fixed to false regardless of its actual value. " +
+        "On Databricks Runtime 17.3, low shuffle MERGE requires native filtering of temporary " +
+        "deletion vectors. Both settings must be true for every reader mode; otherwise MERGE " +
+        "falls back to the classic GPU executor. Ordinary reads retain their " +
+        "DV-setting-controlled reader selection.")
       .internal()
       .booleanConf
       .createWithDefault(true)
