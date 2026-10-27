@@ -132,8 +132,8 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
   val ENABLE_FLOAT_AGG = conf("spark.rapids.sql.variableFloatAgg.enabled")
     .doc("Spark assumes that all operations produce the exact same result each time. " +
       "This is not true for some floating point aggregations, which can produce slightly " +
-      "different results on the GPU as the aggregation is done in parallel.  This can enable " +
-      "those operations if you know the query is only computing it once.")
+      "different results on the GPU as the aggregation is done in parallel.  Set this to false " +
+      "if a query may compute the same aggregation more than once.")
     .booleanConf
     .createWithDefault(true)
 

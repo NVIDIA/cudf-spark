@@ -24,6 +24,13 @@ from parquet_test_utils import parquet_row_group_midpoints
 from pyspark.sql.types import *
 from spark_session import is_databricks_version, spark_version
 
+
+def supports_databricks_delta_low_shuffle_merge():
+    # Keep the runtime list explicit: later DBR versions need their own compatibility checks.
+    # The strict GPU-plan and fallback assertions below validate the enabled runtime paths.
+    return is_databricks_version(17, 3) or is_databricks_version(18, 3)
+
+
 delta_merge_enabled_conf = copy_and_update(delta_writes_enabled_conf,
                                            {"spark.rapids.sql.command.MergeIntoCommand": "true",
                             "spark.rapids.sql.command.MergeIntoCommandEdge": "true",
@@ -42,13 +49,13 @@ low_shuffle_merge_reader_types = [
     pytest.param(
         "MULTITHREADED",
         marks=pytest.mark.skipif(
-            not is_databricks_version(17, 3),
-            reason="Multithreaded low shuffle merge requires DBR 17.3")),
+            not supports_databricks_delta_low_shuffle_merge(),
+            reason="Multithreaded low shuffle merge requires DBR 17.3/18.3")),
     pytest.param(
         "COALESCING",
         marks=pytest.mark.skipif(
-            not is_databricks_version(17, 3),
-            reason="Coalescing low shuffle merge requires DBR 17.3"))]
+            not supports_databricks_delta_low_shuffle_merge(),
+            reason="Coalescing low shuffle merge requires DBR 17.3/18.3"))]
 
 
 def _delta_merge_conf(reader_type):
@@ -58,7 +65,7 @@ def _delta_merge_conf(reader_type):
 
 
 def supports_delta_low_shuffle_merge():
-    return is_databricks_version(17, 3) or \
+    return supports_databricks_delta_low_shuffle_merge() or \
         (not is_databricks_runtime() and spark_version().startswith("3.4"))
 
 
@@ -72,7 +79,7 @@ def _merge_counters(spark, path):
     # Compare only logical row counts; copied/output rows depend on which files are rewritten.
     row_counters = ["numSourceRows", "numTargetRowsInserted", "numTargetRowsUpdated",
                     "numTargetRowsDeleted"]
-    if is_databricks_version(17, 3):
+    if supports_databricks_delta_low_shuffle_merge():
         row_counters += ["numTargetRowsMatchedUpdated", "numTargetRowsMatchedDeleted",
                          "numTargetRowsNotMatchedBySourceUpdated",
                          "numTargetRowsNotMatchedBySourceDeleted"]
@@ -102,7 +109,7 @@ def _assert_collect_with_counters(do_merge, data_path, conf, expect_write=True,
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not supports_delta_low_shuffle_merge(),
-                    reason="Low Shuffle Merge requires Delta Lake 2.4 or DBR 17.3")
+                    reason="Low Shuffle Merge requires Delta Lake 2.4 or DBR 17.3/18.3")
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
 @pytest.mark.parametrize("num_slices", num_slices_to_test, ids=idfn)
 @pytest.mark.parametrize("reader_type", ["PERFILE"], ids=idfn)
@@ -134,7 +141,7 @@ def test_delta_low_shuffle_merge_when_gpu_file_scan_override_failed(spark_tmp_pa
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not supports_delta_low_shuffle_merge(),
-                    reason="Low Shuffle Merge requires Delta Lake 2.4 or DBR 17.3")
+                    reason="Low Shuffle Merge requires Delta Lake 2.4 or DBR 17.3/18.3")
 @pytest.mark.parametrize("table_ranges", [(range(20), range(10)),  # partial insert of source
                                           (range(5), range(5)),  # no-op insert
                                           (range(10), range(20, 30))  # full insert of source
@@ -151,18 +158,18 @@ def test_delta_merge_not_match_insert_only(spark_tmp_path, spark_tmp_table_facto
                                               num_slices, False, _delta_merge_conf(reader_type),
                                               assert_func=_assert_collect_with_counters)
 
-# DBR 17.3 AQE can replace a no-match join with its row-based EmptyRelationExec.
+# AQE can replace a no-match join with its row-based EmptyRelationExec.
 @allow_non_gpu("EmptyRelationExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not supports_delta_low_shuffle_merge(),
-                    reason="Low Shuffle Merge requires Delta Lake 2.4 or DBR 17.3")
+                    reason="Low Shuffle Merge requires Delta Lake 2.4 or DBR 17.3/18.3")
 @pytest.mark.parametrize("table_ranges", [(range(10), range(20)),  # partial delete of target
                                           (range(5), range(5)),  # full delete of target
                                           (range(10), range(20, 30))  # no-op delete
                                           ], ids=idfn)
 @pytest.mark.parametrize("use_cdf", [pytest.param(True, marks=pytest.mark.xfail(
-    not is_databricks_version(17, 3),
+    not supports_databricks_delta_low_shuffle_merge(),
     reason="https://github.com/NVIDIA/spark-rapids/issues/13552")), False], ids=idfn)
 @pytest.mark.parametrize("partition_columns", [None, ["a"], ["b"], ["a", "b"]], ids=idfn)
 @pytest.mark.parametrize("num_slices", num_slices_to_test, ids=idfn)
@@ -178,9 +185,9 @@ def test_delta_merge_match_delete_only(spark_tmp_path, spark_tmp_table_factory, 
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not supports_delta_low_shuffle_merge(),
-                    reason="Low Shuffle Merge requires Delta Lake 2.4 or DBR 17.3")
+                    reason="Low Shuffle Merge requires Delta Lake 2.4 or DBR 17.3/18.3")
 @pytest.mark.parametrize("use_cdf", [pytest.param(True, marks=pytest.mark.xfail(
-    not is_databricks_version(17, 3),
+    not supports_databricks_delta_low_shuffle_merge(),
     reason="https://github.com/NVIDIA/spark-rapids/issues/13552")), False], ids=idfn)
 @pytest.mark.parametrize("num_slices", num_slices_to_test, ids=idfn)
 @pytest.mark.parametrize("reader_type", low_shuffle_merge_reader_types, ids=idfn)
@@ -193,7 +200,8 @@ def test_delta_merge_standard_upsert(spark_tmp_path, spark_tmp_table_factory, us
 @allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks_version(17, 3), reason="DBR 17.3 reader routing")
+@pytest.mark.skipif(not supports_databricks_delta_low_shuffle_merge(),
+                    reason="DBR 17.3/18.3 reader routing")
 @pytest.mark.parametrize("reader_type", ["PERFILE", "MULTITHREADED", "COALESCING", "AUTO"], ids=idfn)
 @pytest.mark.parametrize("dv_predicate_pushdown,use_metadata_row_index",
                          [(True, True), (False, True), (True, False), (False, False)], ids=idfn)
@@ -243,7 +251,8 @@ def test_delta_low_shuffle_merge_rewrite_with_dv_settings(
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks_version(17, 3), reason="DBR 17.3 reader routing")
+@pytest.mark.skipif(not supports_databricks_delta_low_shuffle_merge(),
+                    reason="DBR 17.3/18.3 reader routing")
 @pytest.mark.parametrize("reader_type", ["MULTITHREADED", "COALESCING", "AUTO"], ids=idfn)
 @pytest.mark.parametrize("metadata_only", [False, True], ids=idfn)
 @pytest.mark.parametrize("use_chunked_reader", [False, True], ids=idfn)
@@ -311,8 +320,8 @@ def test_delta_low_shuffle_merge_multiple_row_groups(
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks_version(17, 3),
-                    reason="DBR 17.3 low-shuffle schema evolution regression")
+@pytest.mark.skipif(not supports_databricks_delta_low_shuffle_merge(),
+                    reason="DBR 17.3/18.3 low-shuffle schema evolution regression")
 @pytest.mark.parametrize("use_cdf", [False, True], ids=idfn)
 @pytest.mark.parametrize("multiple_columns", [False, True], ids=idfn)
 def test_delta_low_shuffle_merge_schema_evolution(
@@ -368,8 +377,8 @@ def test_delta_low_shuffle_merge_schema_evolution(
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks_version(17, 3),
-                    reason="DBR 17.3 low-shuffle NOT MATCHED BY SOURCE support")
+@pytest.mark.skipif(not supports_databricks_delta_low_shuffle_merge(),
+                    reason="DBR 17.3/18.3 low-shuffle NOT MATCHED BY SOURCE support")
 @pytest.mark.parametrize("use_cdf", [False, True], ids=idfn)
 @pytest.mark.parametrize("reader_type", low_shuffle_merge_reader_types, ids=idfn)
 @pytest.mark.parametrize("use_chunked_reader", [False, True], ids=idfn)
@@ -410,8 +419,8 @@ def test_delta_low_shuffle_merge_not_matched_by_source(
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks_version(17, 3),
-                    reason="DBR 17.3 effective duplicate-match semantics")
+@pytest.mark.skipif(not supports_databricks_delta_low_shuffle_merge(),
+                    reason="DBR 17.3/18.3 effective duplicate-match semantics")
 @pytest.mark.parametrize("use_cdf", [False, True], ids=idfn)
 @pytest.mark.parametrize("has_effective_match", [True, False], ids=idfn)
 @pytest.mark.parametrize("reader_type", low_shuffle_merge_reader_types, ids=idfn)
@@ -450,8 +459,8 @@ def test_delta_low_shuffle_merge_accepts_non_effective_duplicate_matches(
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
-@pytest.mark.skipif(not is_databricks_version(17, 3),
-                    reason="DBR 17.3 effective duplicate-match semantics")
+@pytest.mark.skipif(not supports_databricks_delta_low_shuffle_merge(),
+                    reason="DBR 17.3/18.3 effective duplicate-match semantics")
 @pytest.mark.parametrize("reader_type", low_shuffle_merge_reader_types, ids=idfn)
 def test_delta_low_shuffle_merge_rejects_effective_duplicate_matches(
         spark_tmp_path, spark_tmp_table_factory, reader_type):
@@ -496,8 +505,8 @@ def test_delta_low_shuffle_merge_rejects_effective_duplicate_matches(
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks_version(17, 3),
-                    reason="DBR 17.3 low-shuffle helper-column regression")
+@pytest.mark.skipif(not supports_databricks_delta_low_shuffle_merge(),
+                    reason="DBR 17.3/18.3 low-shuffle helper-column regression")
 @pytest.mark.parametrize("use_cdf", [False, True], ids=idfn)
 @pytest.mark.parametrize("reader_type", low_shuffle_merge_reader_types, ids=idfn)
 def test_delta_low_shuffle_merge_internal_column_names(
@@ -558,8 +567,8 @@ def test_delta_low_shuffle_merge_internal_column_names(
 @allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks_version(17, 3),
-                    reason="DBR 17.3 physical skip-row column regression")
+@pytest.mark.skipif(not supports_databricks_delta_low_shuffle_merge(),
+                    reason="DBR 17.3/18.3 physical skip-row column regression")
 @pytest.mark.parametrize("use_chunked_reader", [False, True], ids=idfn)
 @pytest.mark.parametrize("skip_row_predicate", [None, True, False],
                          ids=["rewrite-only", "predicate-true", "predicate-false"])
@@ -640,8 +649,8 @@ def test_delta_low_shuffle_merge_physical_internal_column(
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks_version(17, 3),
-                    reason="DBR 17.3 physical metadata-column regression")
+@pytest.mark.skipif(not supports_databricks_delta_low_shuffle_merge(),
+                    reason="DBR 17.3/18.3 physical metadata-column regression")
 @pytest.mark.parametrize("mapping", ["none", "name", "id"], ids=idfn)
 @pytest.mark.parametrize("reader_type", ["MULTITHREADED", "COALESCING"], ids=idfn)
 @pytest.mark.parametrize("use_chunked_reader", [False, True], ids=idfn)
@@ -708,8 +717,8 @@ def test_delta_low_shuffle_merge_physical_metadata_columns(
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks_version(17, 3),
-                    reason="DBR 17.3 low-shuffle column-mapping regression")
+@pytest.mark.skipif(not supports_databricks_delta_low_shuffle_merge(),
+                    reason="DBR 17.3/18.3 low-shuffle column-mapping regression")
 @pytest.mark.parametrize("reader_type", low_shuffle_merge_reader_types, ids=idfn)
 @pytest.mark.parametrize("use_chunked_reader", [False, True], ids=idfn)
 @pytest.mark.parametrize("mapping", ["name", "id"], ids=idfn)
@@ -815,8 +824,8 @@ def test_delta_low_shuffle_merge_column_mapping(
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks_version(17, 3),
-                    reason="DBR 17.3 low-shuffle physical column-mapping regression")
+@pytest.mark.skipif(not supports_databricks_delta_low_shuffle_merge(),
+                    reason="DBR 17.3/18.3 low-shuffle physical column-mapping regression")
 @pytest.mark.parametrize("reader_type", low_shuffle_merge_reader_types, ids=idfn)
 @pytest.mark.parametrize("use_chunked_reader", [False, True], ids=idfn)
 @pytest.mark.parametrize("collision", [
@@ -901,8 +910,8 @@ def test_delta_low_shuffle_merge_column_mapping_physical_columns(
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks_version(17, 3),
-                    reason="DBR 17.3 low-shuffle nondeterministic-action regression")
+@pytest.mark.skipif(not supports_databricks_delta_low_shuffle_merge(),
+                    reason="DBR 17.3/18.3 low-shuffle nondeterministic-action regression")
 @pytest.mark.parametrize("use_cdf", [False, True], ids=idfn)
 @pytest.mark.parametrize("reader_type", low_shuffle_merge_reader_types, ids=idfn)
 def test_delta_low_shuffle_merge_non_deterministic_action_values(
@@ -986,13 +995,13 @@ def test_delta_low_shuffle_merge_non_deterministic_action_values(
                          src_table_func, dest_table_func, merge_sql, check_func)
 
 
-# DBR 17.3 exposes nullable row-tracking fields that make low-shuffle planning fall back to the
+# Nullable row-tracking fields make low-shuffle planning fall back to the
 # classic GPU merge, which consumes its GPU Parquet scan through ColumnarToRowExec.
 @allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks_version(17, 3),
-                    reason="DBR 17.3 row-tracking fallback regression")
+@pytest.mark.skipif(not supports_databricks_delta_low_shuffle_merge(),
+                    reason="DBR 17.3/18.3 row-tracking fallback regression")
 @pytest.mark.parametrize("reader_type", low_shuffle_merge_reader_types, ids=idfn)
 def test_delta_low_shuffle_merge_row_tracking_falls_back_to_classic_merge(
         spark_tmp_path, spark_tmp_table_factory, reader_type):
@@ -1043,7 +1052,7 @@ def test_delta_low_shuffle_merge_row_tracking_falls_back_to_classic_merge(
         matched.unionByName(inserted).createOrReplaceTempView(src_table)
         return spark.sql(merge_sql.format(path=path, src_table=src_table)).collect()
 
-    # DBR 17.3 exposes nullable row-tracking scan fields that the GPU reader does not support, so
+    # Nullable row-tracking scan fields are unsupported by the GPU reader, so
     # low-shuffle planning intentionally falls back to the classic GPU merge executor.
     _assert_collect_with_counters(
         do_merge, data_path, conf, expected_gpu_classes=["GpuRapidsProcessDeltaMergeJoinExec"])
@@ -1077,8 +1086,8 @@ def test_delta_low_shuffle_merge_row_tracking_falls_back_to_classic_merge(
 @allow_non_gpu("LocalLimitExec", "HashAggregateExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks_version(17, 3),
-                    reason="DBR 17.3 existing-DV low-shuffle fallback")
+@pytest.mark.skipif(not supports_databricks_delta_low_shuffle_merge(),
+                    reason="DBR 17.3/18.3 existing-DV low-shuffle fallback")
 @pytest.mark.parametrize("disable_dv_property", [False, True], ids=idfn)
 @pytest.mark.parametrize("reader_type", ["MULTITHREADED"], ids=idfn)
 def test_delta_low_shuffle_merge_existing_deletion_vectors_fall_back(
@@ -1124,8 +1133,8 @@ def test_delta_low_shuffle_merge_existing_deletion_vectors_fall_back(
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
-@pytest.mark.skipif(not is_databricks_version(17, 3),
-                    reason="DBR 17.3 temporary deletion-vector regression")
+@pytest.mark.skipif(not supports_databricks_delta_low_shuffle_merge(),
+                    reason="DBR 17.3/18.3 temporary deletion-vector regression")
 @pytest.mark.parametrize("reader_type", low_shuffle_merge_reader_types, ids=idfn)
 def test_delta_low_shuffle_merge_temporary_deletion_vector(
         spark_tmp_path, spark_tmp_table_factory, reader_type):
@@ -1161,9 +1170,9 @@ def test_delta_low_shuffle_merge_temporary_deletion_vector(
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not supports_delta_low_shuffle_merge(),
-                    reason="Low Shuffle Merge requires Delta Lake 2.4 or DBR 17.3")
+                    reason="Low Shuffle Merge requires Delta Lake 2.4 or DBR 17.3/18.3")
 @pytest.mark.parametrize("use_cdf", [pytest.param(True, marks=pytest.mark.xfail(
-    not is_databricks_version(17, 3),
+    not supports_databricks_delta_low_shuffle_merge(),
     reason="https://github.com/NVIDIA/spark-rapids/issues/13552")), False], ids=idfn)
 @pytest.mark.parametrize("merge_sql", [
     "MERGE INTO {dest_table} d USING {src_table} s ON d.a == s.a" \
@@ -1188,7 +1197,7 @@ def test_delta_merge_upsert_with_condition(spark_tmp_path, spark_tmp_table_facto
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not supports_delta_low_shuffle_merge(),
-                    reason="Low Shuffle Merge requires Delta Lake 2.4 or DBR 17.3")
+                    reason="Low Shuffle Merge requires Delta Lake 2.4 or DBR 17.3/18.3")
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
 @pytest.mark.parametrize("num_slices", num_slices_to_test, ids=idfn)
 @pytest.mark.parametrize("reader_type", low_shuffle_merge_reader_types, ids=idfn)
@@ -1206,9 +1215,9 @@ def test_delta_merge_upsert_with_unmatchable_match_condition(spark_tmp_path, spa
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not supports_delta_low_shuffle_merge(),
-                    reason="Low Shuffle Merge requires Delta Lake 2.4 or DBR 17.3")
+                    reason="Low Shuffle Merge requires Delta Lake 2.4 or DBR 17.3/18.3")
 @pytest.mark.parametrize("use_cdf", [pytest.param(True, marks=pytest.mark.xfail(
-    not is_databricks_version(17, 3),
+    not supports_databricks_delta_low_shuffle_merge(),
     reason="https://github.com/NVIDIA/spark-rapids/issues/13552")), False], ids=idfn)
 @pytest.mark.parametrize("reader_type", low_shuffle_merge_reader_types, ids=idfn)
 def test_delta_merge_update_with_aggregation(spark_tmp_path, spark_tmp_table_factory, use_cdf, reader_type):

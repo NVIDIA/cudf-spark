@@ -22,9 +22,9 @@ import org.apache.spark.sql.execution.{ShuffledRowRDD, ShufflePartitionSpec}
 import org.apache.spark.sql.execution.metric.SQLMetric
 
 /**
- * DB-17.3 shim for ShuffledRowRDD construction.
+ * DBR 17.3 and 18.3 shim for ShuffledRowRDD construction.
  *
- * Databricks 17.3 extends ShuffledRowRDD with Prism and mapper-count constructor
+ * Databricks 17.3 and 18.3 extend ShuffledRowRDD with Prism and mapper-count constructor
  * parameters. The GPU Optimize Write path does not use Prism; Databricks' own
  * ShuffleExchangeExec passes null and -1 for the same unused fields.
  */
