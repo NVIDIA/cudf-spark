@@ -91,6 +91,14 @@ class GpuIcebergVariantSchemaSuite extends AnyFunSuite {
         }
       }
 
+      def field(id: Int, optional: Boolean, name: String, fieldType: Type): Types.NestedField = {
+        if (optional) {
+          Types.NestedField.optional(id, name, fieldType)
+        } else {
+          Types.NestedField.required(id, name, fieldType)
+        }
+      }
+
       val nestedLists = listType(11,
         listType(12, Types.VariantType.get(), variantOptional), childOptional)
       val mapValue = listType(23, Types.VariantType.get(), variantOptional)
@@ -100,8 +108,8 @@ class GpuIcebergVariantSchemaSuite extends AnyFunSuite {
         Types.MapType.ofRequired(21, 22, Types.StringType.get(), mapValue)
       }
       val record = Types.StructType.of(
-        Types.NestedField.of(32, variantOptional, "v", Types.VariantType.get()),
-        Types.NestedField.of(33, !variantOptional, "count", Types.IntegerType.get()))
+        field(32, variantOptional, "v", Types.VariantType.get()),
+        field(33, !variantOptional, "count", Types.IntegerType.get()))
       val mapKey = listType(42, Types.StringType.get(), childOptional)
       val keyedVariants = if (variantOptional) {
         Types.MapType.ofOptional(41, 43, mapKey, Types.VariantType.get())
@@ -110,11 +118,11 @@ class GpuIcebergVariantSchemaSuite extends AnyFunSuite {
       }
       val schema = new Schema(
         Types.NestedField.required(1, "id", Types.IntegerType.get()),
-        Types.NestedField.of(10, fieldOptional, "nested_lists", nestedLists),
-        Types.NestedField.of(2, !fieldOptional, "marker", Types.VariantType.get()),
-        Types.NestedField.of(20, !fieldOptional, "mapped_lists", mappedLists),
-        Types.NestedField.of(30, fieldOptional, "records", listType(31, record, childOptional)),
-        Types.NestedField.of(40, !fieldOptional, "keyed_variants", keyedVariants),
+        field(10, fieldOptional, "nested_lists", nestedLists),
+        field(2, !fieldOptional, "marker", Types.VariantType.get()),
+        field(20, !fieldOptional, "mapped_lists", mappedLists),
+        field(30, fieldOptional, "records", listType(31, record, childOptional)),
+        field(40, !fieldOptional, "keyed_variants", keyedVariants),
         Types.NestedField.optional(3, "tail", Types.StringType.get()))
 
       def fieldMetadata(id: Long): Metadata =
