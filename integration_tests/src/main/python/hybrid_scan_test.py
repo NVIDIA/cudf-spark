@@ -23,11 +23,13 @@ import pytest
 
 from datetime import date, datetime, timezone
 
-from asserts import assert_gpu_and_cpu_are_equal_collect
+from asserts import assert_gpu_and_cpu_are_equal_collect, assert_spark_exception
+from conftest import is_not_utc
 from data_gen import *
 from marks import inject_oom
-from parquet_test import hybrid_fallback_parquet_file_reader_conf, hybrid_parquet_file_reader_conf
-from spark_session import with_cpu_session
+from parquet_test import hybrid_fallback_parquet_file_reader_conf, hybrid_parquet_file_reader_conf, \
+    rebase_write_legacy_conf
+from spark_session import with_cpu_session, with_gpu_session
 
 
 def hybrid_conf(**overrides):
@@ -146,6 +148,25 @@ def test_hybrid_scan_retry_oom(spark_tmp_path):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.parquet(data_path).filter('filter_int = 7'),
         conf=hybrid_conf())
+
+
+@pytest.mark.skipif(is_not_utc(), reason="LEGACY datetime rebase mode is only supported for UTC timezone")
+def test_hybrid_scan_legacy_old_date_filter_throws(spark_tmp_path):
+    """A LEGACY file stores pre-1582 dates in another calendar, which the reader cannot tell.
+
+    Pruning on the stored days would drop the matching row group without an error, so the
+    filter is withheld and the decoded dates fail the rebase check instead.
+    """
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(
+        lambda spark: spark.range(0, 100).selectExpr(
+            "DATE_ADD(DATE'1000-01-01', CAST(id AS INT)) AS d").write.parquet(data_path),
+        conf=rebase_write_legacy_conf)
+    assert_spark_exception(
+        lambda: with_gpu_session(
+            lambda spark: spark.read.parquet(data_path).filter("d = DATE'1000-01-01'").collect(),
+            conf=hybrid_conf()),
+        'SparkUpgradeException')
 
 
 def test_hybrid_scan_file_split_across_tasks(spark_tmp_path):

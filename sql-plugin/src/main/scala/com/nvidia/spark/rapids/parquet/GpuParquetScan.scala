@@ -594,6 +594,13 @@ private[parquet] object GpuParquetFileFilterHandler {
       configuredReader: ParquetFooterReaderType.Value,
       schema: StructType): Boolean =
     configuredReader == ParquetFooterReaderType.NATIVE && canUseNativeFooterReader(schema)
+
+  private[parquet] val PARQUET_ENCRYPTION_CONFS = Seq("parquet.encryption.kms.client.class",
+    "parquet.encryption.kms.client.class", "parquet.crypto.factory.class")
+
+  /** Whether `conf` sets up Parquet decryption, which the GPU readers do not support. */
+  def isDecryptionConfigured(conf: Configuration): Boolean =
+    PARQUET_ENCRYPTION_CONFS.exists(conf.get(_) != null)
 }
 
 protected case class GpuParquetFileFilterHandler(
@@ -616,9 +623,6 @@ protected case class GpuParquetFileFilterHandler(
   private val ignoreMissingParquetFieldId = ParquetSchemaClipShims.ignoreMissingIds(sqlConf)
   private val returnNullStructIfAllFieldsMissing =
     ParquetMissingStructShims.returnNullStructIfAllFieldsMissing(sqlConf)
-
-  private val PARQUET_ENCRYPTION_CONFS = Seq("parquet.encryption.kms.client.class",
-    "parquet.encryption.kms.client.class", "parquet.crypto.factory.class")
 
   private def isParquetTimeInInt96(parquetType: Type): Boolean = {
     parquetType match {
@@ -824,7 +828,7 @@ protected case class GpuParquetFileFilterHandler(
       // Make sure we aren't trying to read encrypted files. For now, remove the related
       // parquet confs from the hadoop configuration and try to catch the resulting
       // exception and print a useful message
-      PARQUET_ENCRYPTION_CONFS.foreach { encryptConf =>
+      GpuParquetFileFilterHandler.PARQUET_ENCRYPTION_CONFS.foreach { encryptConf =>
         if (conf.get(encryptConf) != null) {
           conf.unset(encryptConf)
         }
@@ -1679,25 +1683,33 @@ case class GpuParquetPartitionReaderFactory(
     sqlConf, broadcastedConf, dataSchema, readDataSchema, partitionSchema,
     rapidsConf, metrics, params) with Logging {
 
-  private val hybridScanConfig = HybridScanConfig(rapidsConf,
-    new HybridScanFilters(readDataSchema, isCaseSensitive, filters))
-  private val useHybridScan = HybridScanParquetPartitionReader.isEligible(
-    rapidsConf.isParquetHybridScanEnabled, rapidsConf.testParquetHybridScanFailOnFallback,
-    readDataSchema, hybridScanConfig.filters,
-    useChunkedReader, compressCfg.decompressSnappyCpu || compressCfg.decompressZstdCpu,
-    readUseFieldId, sqlConf.ignoreCorruptFiles,
-    DateTimeRebaseMode.fromName(SparkShimImpl.parquetRebaseRead(sqlConf)),
-    DateTimeRebaseMode.fromName(SparkShimImpl.int96ParquetRebaseRead(sqlConf)))
+  // Only set for an eligible read.
+  private val hybridScanConfig = if (rapidsConf.isParquetHybridScanEnabled) {
+    val config = HybridScanConfig(rapidsConf,
+      new HybridScanFilters(readDataSchema, isCaseSensitive, filters))
+
+    val eligible = HybridScanParquetPartitionReader.isEligible(
+      rapidsConf.isParquetHybridScanEnabled, rapidsConf.testParquetHybridScanFailOnFallback,
+      readDataSchema, config.filters,
+      useChunkedReader, compressCfg.decompressSnappyCpu || compressCfg.decompressZstdCpu,
+      readUseFieldId, sqlConf.ignoreCorruptFiles,
+      GpuParquetFileFilterHandler.isDecryptionConfigured(broadcastedConf.value.value),
+      DateTimeRebaseMode.fromName(SparkShimImpl.parquetRebaseRead(sqlConf)),
+      DateTimeRebaseMode.fromName(SparkShimImpl.int96ParquetRebaseRead(sqlConf)))
+      
+    if (eligible) Some(config) else None
+  } else {
+    None
+  }
 
   override protected def buildBaseColumnarParquetReader(
       file: PartitionedFile): PartitionReader[ColumnarBatch] = {
     // we need to copy the Hadoop Configuration because filter push down can mutate it,
     // which can affect other tasks.
     val conf = new Configuration(broadcastedConf.value.value)
-    if (useHybridScan) {
-      buildHybridScanReader(file, conf)
-    } else {
-      buildParquetMrReader(file, conf)
+    hybridScanConfig match {
+      case Some(config) => buildHybridScanReader(file, conf, config)
+      case None => buildParquetMrReader(file, conf)
     }
   }
 
@@ -1707,7 +1719,8 @@ case class GpuParquetPartitionReaderFactory(
    */
   private def buildHybridScanReader(
       file: PartitionedFile,
-      conf: Configuration): PartitionReader[ColumnarBatch] = {
+      conf: Configuration,
+      config: HybridScanConfig): PartitionReader[ColumnarBatch] = {
     val filePath = new Path(new URI(file.filePath.toString()))
     val startTime = System.nanoTime()
     val footer = NvtxRegistry.HYBRID_SCAN_READ_FOOTER {
@@ -1721,7 +1734,7 @@ case class GpuParquetPartitionReaderFactory(
       val options = HybridScanParquetPartitionReader.parquetOptions(readDataSchema.fieldNames)
       new HybridScanParquetPartitionReader(
         byteSource, file.start, file.length, footer, options,
-        readDataSchema, hybridScanConfig.filters, hybridScanConfig.filterKeepThreshold, metrics)
+        readDataSchema, config.filters, config.filterKeepThreshold, metrics)
     }
   }
 

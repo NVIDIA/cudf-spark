@@ -468,11 +468,12 @@ object HybridScanParquetPartitionReader extends Logging {
       decompressAnyCpu: Boolean,
       useFieldId: Boolean,
       ignoreCorruptFiles: Boolean,
+      decryptionConfigured: Boolean,
       dateRebaseMode: DateTimeRebaseMode,
       int96RebaseMode: DateTimeRebaseMode): Boolean = {
     val reason = ineligibleReason(hybridScanEnabled, readDataSchema, scanFilters,
-      useChunkedReader, decompressAnyCpu, useFieldId, ignoreCorruptFiles, dateRebaseMode,
-      int96RebaseMode)
+      useChunkedReader, decompressAnyCpu, useFieldId, ignoreCorruptFiles, decryptionConfigured,
+      dateRebaseMode, int96RebaseMode)
     if (hybridScanEnabled) {
       reason.foreach { r =>
         if (failOnFallback) {
@@ -499,6 +500,7 @@ object HybridScanParquetPartitionReader extends Logging {
    * @param useFieldId        whether columns are matched by Parquet field ID
    * @param ignoreCorruptFiles whether a file that fails to read is skipped rather than failing
    *                          the query
+   * @param decryptionConfigured whether the Hadoop configuration sets up Parquet decryption
    * @param dateRebaseMode    the configured date rebase-on-read mode
    * @param int96RebaseMode   the configured INT96 timestamp rebase-on-read mode
    */
@@ -510,6 +512,7 @@ object HybridScanParquetPartitionReader extends Logging {
       decompressAnyCpu: Boolean,
       useFieldId: Boolean,
       ignoreCorruptFiles: Boolean,
+      decryptionConfigured: Boolean,
       dateRebaseMode: DateTimeRebaseMode,
       int96RebaseMode: DateTimeRebaseMode): Option[String] = {
     // The hybrid path produces the whole split as one batch, reads the
@@ -526,6 +529,10 @@ object HybridScanParquetPartitionReader extends Logging {
     } else if (ignoreCorruptFiles) {
       // The reader fails a file whose schema it cannot decode, which would skip a readable file.
       Some("corrupt files are ignored (spark.sql.files.ignoreCorruptFiles)")
+    } else if (decryptionConfigured) {
+      // libcudf skips a column's encryption metadata, so an encrypted column would fail in decode
+      // with no mention of encryption. The parquet-mr path reports it as unsupported.
+      Some("Parquet decryption is configured")
     } else if (readDataSchema.isEmpty) {
       Some("the read projects no columns")
     } else {

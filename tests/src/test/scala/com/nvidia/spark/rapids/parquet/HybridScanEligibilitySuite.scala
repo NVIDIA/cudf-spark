@@ -38,12 +38,13 @@ class HybridScanEligibilitySuite extends AnyFunSuite {
       decompressAnyCpu: Boolean = false,
       useFieldId: Boolean = false,
       ignoreCorruptFiles: Boolean = false,
+      decryptionConfigured: Boolean = false,
       dateRebaseMode: DateTimeRebaseMode = DateTimeRebaseException,
       int96RebaseMode: DateTimeRebaseMode = DateTimeRebaseException): Option[String] = {
     HybridScanParquetPartitionReader.ineligibleReason(enabled, schema,
       new HybridScanFilters(schema, isCaseSensitive, filters),
-      useChunkedReader, decompressAnyCpu, useFieldId, ignoreCorruptFiles, dateRebaseMode,
-      int96RebaseMode)
+      useChunkedReader, decompressAnyCpu, useFieldId, ignoreCorruptFiles, decryptionConfigured,
+      dateRebaseMode, int96RebaseMode)
   }
 
   private def isEligible(
@@ -55,10 +56,11 @@ class HybridScanEligibilitySuite extends AnyFunSuite {
       decompressAnyCpu: Boolean = false,
       useFieldId: Boolean = false,
       ignoreCorruptFiles: Boolean = false,
+      decryptionConfigured: Boolean = false,
       dateRebaseMode: DateTimeRebaseMode = DateTimeRebaseException,
       int96RebaseMode: DateTimeRebaseMode = DateTimeRebaseException): Boolean = {
     ineligibleReason(enabled, schema, filters, isCaseSensitive, useChunkedReader, decompressAnyCpu,
-      useFieldId, ignoreCorruptFiles, dateRebaseMode, int96RebaseMode).isEmpty
+      useFieldId, ignoreCorruptFiles, decryptionConfigured, dateRebaseMode, int96RebaseMode).isEmpty
   }
 
   test("a filtered read of a flat schema is eligible") {
@@ -74,6 +76,7 @@ class HybridScanEligibilitySuite extends AnyFunSuite {
     assert(!isEligible(decompressAnyCpu = true))
     assert(!isEligible(useFieldId = true))
     assert(!isEligible(ignoreCorruptFiles = true))
+    assert(!isEligible(decryptionConfigured = true))
   }
 
   test("a read with no columns is not eligible") {
@@ -180,7 +183,8 @@ class HybridScanEligibilitySuite extends AnyFunSuite {
       HybridScanParquetPartitionReader.isEligible(enabled, failOnFallback = true, flatSchema,
         new HybridScanFilters(flatSchema, true, Array(GreaterThan("int_col", 5))),
         useChunkedReader, decompressAnyCpu = false, useFieldId = false,
-        ignoreCorruptFiles = false, DateTimeRebaseException, DateTimeRebaseException)
+        ignoreCorruptFiles = false, decryptionConfigured = false, DateTimeRebaseException,
+        DateTimeRebaseException)
     val e = intercept[IllegalStateException] {
       check(enabled = true, useChunkedReader = true)
     }
