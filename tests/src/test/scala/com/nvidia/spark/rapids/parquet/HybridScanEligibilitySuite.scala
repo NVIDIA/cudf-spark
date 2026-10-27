@@ -151,6 +151,20 @@ class HybridScanEligibilitySuite extends AnyFunSuite {
       filters = Array(GreaterThan("`ts col`", 0L))).pushable.isEmpty)
   }
 
+  test("a conjunct with a date before 1582-10-15 is withheld from the reader") {
+    val schema = StructType(Seq(StructField("date_col", DateType)))
+    def pushable(filter: Filter): Array[Filter] =
+      new HybridScanFilters(schema, isCaseSensitive = true, Array(filter)).pushable
+    val old = java.time.LocalDate.of(1000, 1, 1)
+    val cutover = java.time.LocalDate.of(1582, 10, 15)
+    assert(pushable(EqualTo("date_col", old)).isEmpty)
+    assert(pushable(EqualTo("date_col", java.sql.Date.valueOf("1000-01-01"))).isEmpty)
+    assert(pushable(In("date_col", Array[Any](cutover, old))).isEmpty)
+    assert(pushable(Or(GreaterThan("date_col", cutover), LessThan("date_col", old))).isEmpty)
+    assert(pushable(GreaterThanOrEqual("date_col", cutover)).nonEmpty)
+    assert(pushable(LessThan("date_col", java.sql.Date.valueOf("1998-09-02"))).nonEmpty)
+  }
+
   test("a rebase mode only matters when the read has a datetime column") {
     assert(isEligible(dateRebaseMode = DateTimeRebaseLegacy,
       int96RebaseMode = DateTimeRebaseCorrected))

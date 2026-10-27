@@ -22,9 +22,11 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
+import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 
 import org.apache.spark.TaskContext
 import org.apache.spark.internal.Logging
+import org.apache.spark.sql.catalyst.util.RebaseDateTime
 import org.apache.spark.sql.connector.read.PartitionReader
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types._
@@ -259,8 +261,11 @@ private[parquet] class HybridScanParquetPartitionReader(
     // dictionary encoding the chunk rather than exceed it, and only the filter columns have pages
     // here.
     GpuSemaphore.acquireIfNecessary(TaskContext.get())
-    val kept = withResource(copyToDevice(hostPages)) { dictPages =>
-      reader.filterRowGroupsWithDictionaryPages(dictPages, rowGroups)
+    // The host pages outlive each attempt, so a retry copies them again.
+    val kept = withRetryNoSplit[Array[Int]] {
+      withResource(copyToDevice(hostPages)) { dictPages =>
+        reader.filterRowGroupsWithDictionaryPages(dictPages, rowGroups)
+      }
     }
     // Leaving the GPU for a while: what survives the pruning is a host-side list of row group
     // indexes, and reading the column chunks it selects is the longest IO of the read.
@@ -327,8 +332,11 @@ private[parquet] class HybridScanParquetPartitionReader(
       hostChunks: Array[HostMemoryBuffer]): Table = {
     GpuSemaphore.acquireIfNecessary(TaskContext.get())
     NvtxRegistry.HYBRID_SCAN_MATERIALIZE {
-      withResource(copyToDevice(hostChunks)) { deviceChunks =>
-        reader.materializeAllColumns(rowGroups, deviceChunks)
+      // The host chunks outlive each attempt, so a retry copies them again.
+      withRetryNoSplit[Table] {
+        withResource(copyToDevice(hostChunks)) { deviceChunks =>
+          reader.materializeAllColumns(rowGroups, deviceChunks)
+        }
       }
     }
   }
@@ -607,12 +615,16 @@ class HybridScanFilters(
 
   /**
    * Conjuncts on a timestamp column are withheld: it may be stored as INT96, whose statistics
-   * cannot be compared with a literal, and only the file's schema says which. Spark applies the
-   * withheld ones above the scan.
+   * cannot be compared with a literal, and only the file's schema says which. So are conjuncts
+   * with a date before 1582-10-15: a file written with LEGACY rebasing stores such dates in
+   * another calendar, which only its footer metadata says, so pruning could drop every row group
+   * before the decode-time rebase check sees one. Spark applies the withheld ones above the scan.
    */
   private def isPushable(conjunct: Filter): Boolean =
     !FilterToAstConverter.getReferencedColumns(conjunct)
-      .exists(byName.columnType(_).contains(TimestampType))
+      .exists(byName.columnType(_).contains(TimestampType)) &&
+      !FilterToAstConverter.getLiterals(conjunct).flatMap(FilterToAstConverter.dateLiteralDays)
+        .exists(_ < RebaseDateTime.lastSwitchJulianDay)
 
   /** The conjuncts the reader may be given. */
   val pushable: Array[Filter] = conjuncts.filter(isPushable)

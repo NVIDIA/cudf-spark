@@ -25,6 +25,7 @@ from datetime import date, datetime, timezone
 
 from asserts import assert_gpu_and_cpu_are_equal_collect
 from data_gen import *
+from marks import inject_oom
 from parquet_test import hybrid_fallback_parquet_file_reader_conf, hybrid_parquet_file_reader_conf
 from spark_session import with_cpu_session
 
@@ -131,6 +132,19 @@ def test_hybrid_scan_residual_filter(spark_tmp_path):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.parquet(data_path)
             .filter("sorted_int < 2000 AND filter_str LIKE 'key_1%'"),
+        conf=hybrid_conf())
+
+
+@inject_oom
+def test_hybrid_scan_retry_oom(spark_tmp_path):
+    """An OOM during dictionary pruning or decode is retried rather than failing the task.
+
+    The filter needs the dictionary pages, so both device stages run.
+    """
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(lambda spark: write_test_data(spark, data_path))
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(data_path).filter('filter_int = 7'),
         conf=hybrid_conf())
 
 
