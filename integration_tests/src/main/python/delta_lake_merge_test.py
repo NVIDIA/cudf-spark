@@ -42,7 +42,7 @@ delta_merge_no_cpu_bridge_conf = copy_and_update(
 def merge_deletion_vector_values_with_xfail_reasons(enabled_xfail_reason=None):
     values = dml_deletion_vector_values_with_xfail_reasons(
         enabled_xfail_reason=enabled_xfail_reason)
-    if is_oss_delta_lake_40():
+    if is_oss_delta_lake_40() or is_oss_delta_lake_43():
         # Delta's DV processing joins table-state metadata to touched file paths on the CPU.
         # Permit those nodes only for the DV-enabled case, while asserting the GPU MERGE ran.
         return [values[0], pytest.param(
@@ -192,6 +192,141 @@ def test_delta_merge_num_records_validation(spark_tmp_path, spark_tmp_table_fact
         do_merge,
         conf=conf,
         error_message="DELTA_NUM_RECORDS_MISMATCH")
+
+
+def _target_path(spark, spark_tmp_path):
+    """Separate target table per run so the CPU and GPU runs of one test don't share state."""
+    gpu_enabled = str(spark.conf.get("spark.rapids.sql.enabled", "false")).lower() == "true"
+    return (spark_tmp_path + ("/GPU" if gpu_enabled else "/CPU")).replace("//", "/")
+
+
+def _create_empty_schema_target(spark, path):
+    from delta.tables import DeltaTable
+    DeltaTable.create(spark).location("file:" + path).execute()
+
+
+def _create_generated_column_target(spark, path, column_kind):
+    """Creates (id, value, gen) where `gen` is a "generated" or an "identity" column."""
+    from delta.tables import DeltaTable, IdentityGenerator
+    generated_always_as = IdentityGenerator() if column_kind == "identity" else "id + 1"
+    DeltaTable.create(spark).location("file:" + path) \
+        .addColumn("id", LongType()) \
+        .addColumn("value", StringType()) \
+        .addColumn("gen", LongType(), generatedAlwaysAs=generated_always_as) \
+        .execute()
+
+
+def _assert_merge_analysis_error(spark_tmp_path, spark_tmp_table_factory, create_target,
+                                 merge_sql, error_message, analysis_only, conf):
+    """Asserts CPU and GPU fail with the same error for a MERGE the Delta analyzer rejects.
+    `create_target(spark, path)` creates the MERGE target. With `analysis_only` the statement
+    is only analyzed, never executed, so the error cannot come from GPU command execution."""
+    source_view = spark_tmp_table_factory.get()
+
+    def do_merge(spark):
+        target_path = _target_path(spark, spark_tmp_path)
+        create_target(spark, target_path)
+        spark.createDataFrame([(1, "new")], "id INT, value STRING") \
+            .createOrReplaceTempView(source_view)
+        statement = merge_sql.format(path=target_path, source=source_view)
+        if analysis_only:
+            jspark = spark._jsparkSession
+            jspark.sessionState().analyzer().execute(
+                jspark.sessionState().sqlParser().parsePlan(statement))
+        else:
+            spark.sql(statement).collect()
+
+    assert_gpu_and_cpu_error(do_merge, conf=conf, error_message=error_message)
+
+
+@allow_non_gpu("CreateTableExec", *delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="MERGE into an empty-schema target error was added in OSS Delta 4.3")
+@pytest.mark.parametrize("analysis_only", [True, False], ids=["analysis_only", "execute"])
+def test_delta_merge_empty_schema_target_error(
+        spark_tmp_path, spark_tmp_table_factory, analysis_only):
+    # Without schema evolution, MERGE into a target with no columns must fail with a user error.
+    _assert_merge_analysis_error(
+        spark_tmp_path, spark_tmp_table_factory, _create_empty_schema_target,
+        """MERGE INTO delta.`{path}` AS target USING {source} AS source
+           ON target.id = source.id
+           WHEN NOT MATCHED THEN INSERT *""",
+        "DELTA_MERGE_INTO_EMPTY_SCHEMA_TARGET",
+        analysis_only,
+        copy_and_update(delta_merge_no_cpu_bridge_conf, {
+            "spark.databricks.delta.schema.autoMerge.enabled": "false"}))
+
+
+@allow_non_gpu("CreateTableExec", *delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="Case-variant duplicate MERGE column check was added in OSS Delta 4.3")
+@pytest.mark.parametrize("analysis_only", [True, False], ids=["analysis_only", "execute"])
+@pytest.mark.parametrize("column_kind", ["generated", "identity"])
+def test_delta_merge_case_variant_duplicate_insert_columns_error(
+        spark_tmp_path, spark_tmp_table_factory, column_kind, analysis_only):
+    _assert_merge_analysis_error(
+        spark_tmp_path, spark_tmp_table_factory,
+        lambda spark, path: _create_generated_column_target(spark, path, column_kind),
+        """MERGE INTO delta.`{path}` AS target USING {source} AS source
+           ON target.id = source.id
+           WHEN NOT MATCHED THEN INSERT (id, ID, value) VALUES (source.id, source.id, source.value)""",
+        "DELTA_DUPLICATE_COLUMNS_ON_INSERT",
+        analysis_only,
+        delta_merge_no_cpu_bridge_conf)
+
+
+@allow_non_gpu("CreateTableExec", *delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="MERGE into an empty-schema target was changed in OSS Delta 4.3")
+def test_delta_merge_empty_schema_target_with_schema_evolution(
+        spark_tmp_path, spark_tmp_table_factory):
+    # With schema evolution enabled the source schema is adopted instead of raising an error.
+    source_view = spark_tmp_table_factory.get()
+
+    def do_merge(spark):
+        target_path = _target_path(spark, spark_tmp_path)
+        _create_empty_schema_target(spark, target_path)
+        spark.createDataFrame([(1, "new")], "id INT, value STRING") \
+            .createOrReplaceTempView(source_view)
+        spark.sql(f"""
+            MERGE INTO delta.`{target_path}` AS target USING {source_view} AS source
+            ON 1 = 0
+            WHEN NOT MATCHED THEN INSERT *""").collect()
+        return spark.read.format("delta").load(target_path)
+
+    assert_gpu_and_cpu_are_equal_collect(
+        do_merge,
+        conf=copy_and_update(delta_merge_no_cpu_bridge_conf, {
+            "spark.databricks.delta.schema.autoMerge.enabled": "true"}))
+
+
+@allow_non_gpu("CreateTableExec", *delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="Case-variant duplicate MERGE column check was added in OSS Delta 4.3")
+def test_delta_merge_case_variant_duplicate_insert_columns_plain_table(
+        spark_tmp_path, spark_tmp_table_factory):
+    # Tables without generated or identity columns keep tolerating case-variant duplicates.
+    source_view = spark_tmp_table_factory.get()
+
+    def do_merge(spark):
+        target_path = _target_path(spark, spark_tmp_path)
+        spark.createDataFrame([(0, "old")], "id BIGINT, value STRING") \
+            .write.format("delta").save(target_path)
+        spark.createDataFrame([(1, "new")], "id INT, value STRING") \
+            .createOrReplaceTempView(source_view)
+        spark.sql(f"""
+            MERGE INTO delta.`{target_path}` AS target USING {source_view} AS source
+            ON target.id = source.id
+            WHEN NOT MATCHED THEN INSERT (id, ID, value)
+            VALUES (source.id, source.id, source.value)""").collect()
+        return spark.read.format("delta").load(target_path)
+
+    assert_gpu_and_cpu_are_equal_collect(do_merge, conf=delta_merge_no_cpu_bridge_conf)
 
 
 @allow_non_gpu(delta_write_fallback_allow, *delta_meta_allow)
