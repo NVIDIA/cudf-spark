@@ -570,8 +570,8 @@ parquet_pred_push_gens = [
 @allow_non_gpu(*non_utc_allow)
 def test_parquet_pred_push_round_trip(spark_tmp_path, parquet_gen, read_func, v1_enabled_list, reader_confs):
     if reader_confs is hybrid_parquet_file_reader_conf and parquet_gen is date_gen:
-        pytest.skip('the hybrid reader cannot read the file metadata that says a date before '
-                    '1582 needs no rebase, so it reports one')
+        # The hybrid reader cannot read the file metadata that says an earlier date needs no rebase.
+        parquet_gen = DateGen(start=date(1582, 10, 15))
     data_path = spark_tmp_path + '/PARQUET_DATA'
     gen_list = [('a', RepeatSeqGen(parquet_gen, 100)), ('b', parquet_gen)]
     s0 = with_cpu_session(lambda spark: gen_scalar(parquet_gen, force_no_nulls=True))
@@ -1525,7 +1525,7 @@ def test_parquet_scan_with_hidden_metadata_fallback(spark_tmp_path, metadata_col
 
 @ignore_order
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
-@pytest.mark.parametrize('reader_confs', reader_opt_confs + [hybrid_parquet_file_reader_conf], ids=idfn)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs + [hybrid_fallback_parquet_file_reader_conf], ids=idfn)
 @pytest.mark.skipif(is_databricks_runtime(), reason="Databricks does not support ignoreCorruptFiles")
 def test_parquet_read_with_corrupt_files(spark_tmp_path, reader_confs, v1_enabled_list):
     first_data_path = spark_tmp_path + '/PARQUET_DATA/first'

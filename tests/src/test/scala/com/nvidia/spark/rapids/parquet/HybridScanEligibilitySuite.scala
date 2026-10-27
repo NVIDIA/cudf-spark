@@ -37,11 +37,13 @@ class HybridScanEligibilitySuite extends AnyFunSuite {
       useChunkedReader: Boolean = false,
       decompressAnyCpu: Boolean = false,
       useFieldId: Boolean = false,
+      ignoreCorruptFiles: Boolean = false,
       dateRebaseMode: DateTimeRebaseMode = DateTimeRebaseException,
       int96RebaseMode: DateTimeRebaseMode = DateTimeRebaseException): Option[String] = {
     HybridScanParquetPartitionReader.ineligibleReason(enabled, schema,
       new HybridScanFilters(schema, isCaseSensitive, filters),
-      useChunkedReader, decompressAnyCpu, useFieldId, dateRebaseMode, int96RebaseMode)
+      useChunkedReader, decompressAnyCpu, useFieldId, ignoreCorruptFiles, dateRebaseMode,
+      int96RebaseMode)
   }
 
   private def isEligible(
@@ -52,10 +54,11 @@ class HybridScanEligibilitySuite extends AnyFunSuite {
       useChunkedReader: Boolean = false,
       decompressAnyCpu: Boolean = false,
       useFieldId: Boolean = false,
+      ignoreCorruptFiles: Boolean = false,
       dateRebaseMode: DateTimeRebaseMode = DateTimeRebaseException,
       int96RebaseMode: DateTimeRebaseMode = DateTimeRebaseException): Boolean = {
     ineligibleReason(enabled, schema, filters, isCaseSensitive, useChunkedReader, decompressAnyCpu,
-      useFieldId, dateRebaseMode, int96RebaseMode).isEmpty
+      useFieldId, ignoreCorruptFiles, dateRebaseMode, int96RebaseMode).isEmpty
   }
 
   test("a filtered read of a flat schema is eligible") {
@@ -70,6 +73,7 @@ class HybridScanEligibilitySuite extends AnyFunSuite {
     assert(!isEligible(useChunkedReader = true))
     assert(!isEligible(decompressAnyCpu = true))
     assert(!isEligible(useFieldId = true))
+    assert(!isEligible(ignoreCorruptFiles = true))
   }
 
   test("a read with no columns is not eligible") {
@@ -162,7 +166,7 @@ class HybridScanEligibilitySuite extends AnyFunSuite {
       HybridScanParquetPartitionReader.isEligible(enabled, failOnFallback = true, flatSchema,
         new HybridScanFilters(flatSchema, true, Array(GreaterThan("int_col", 5))),
         useChunkedReader, decompressAnyCpu = false, useFieldId = false,
-        DateTimeRebaseException, DateTimeRebaseException)
+        ignoreCorruptFiles = false, DateTimeRebaseException, DateTimeRebaseException)
     val e = intercept[IllegalStateException] {
       check(enabled = true, useChunkedReader = true)
     }
@@ -189,6 +193,7 @@ class HybridScanEligibilitySuite extends AnyFunSuite {
   test("the reason a read is not eligible names what stopped it") {
     assert(ineligibleReason(useChunkedReader = true).exists(_.contains("chunked")))
     assert(ineligibleReason(useFieldId = true).exists(_.contains("field ID")))
+    assert(ineligibleReason(ignoreCorruptFiles = true).exists(_.contains("corrupt")))
     assert(ineligibleReason(decompressAnyCpu = true).exists(_.contains("CPU")))
     assert(ineligibleReason(enabled = false).exists(_.contains("disabled")))
     val residual: Array[Filter] = Array(GreaterThan("int_col", 5),

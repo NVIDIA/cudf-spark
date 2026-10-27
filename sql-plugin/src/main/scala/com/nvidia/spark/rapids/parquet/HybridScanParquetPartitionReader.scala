@@ -94,7 +94,6 @@ private[parquet] class HybridScanParquetPartitionReader(
   private def readBatch(): GpuColumnarBatchIterator = readTable() match {
     case Some(table) =>
       withResource(table) { t =>
-        checkDecodedSchema(t)
         new SingleGpuColumnarBatchIterator(
           GpuColumnVector.from(t, readDataSchema.fields.map(_.dataType)))
       }
@@ -342,6 +341,8 @@ private[parquet] class HybridScanParquetPartitionReader(
     closeOnExcept(withResource(planAndReadColumnChunks(reader, rowGroups)) { hostChunks =>
       materializeFromHostBuffers(reader, rowGroups, hostChunks)
     }) { table =>
+      // Before the output filter, which references columns by index.
+      checkDecodedSchema(table)
       outputAst match {
         case Some(ast) => NvtxRegistry.HYBRID_SCAN_OUTPUT_FILTER {
           applyOutputFilter(table, ast)
@@ -458,10 +459,12 @@ object HybridScanParquetPartitionReader extends Logging {
       useChunkedReader: Boolean,
       decompressAnyCpu: Boolean,
       useFieldId: Boolean,
+      ignoreCorruptFiles: Boolean,
       dateRebaseMode: DateTimeRebaseMode,
       int96RebaseMode: DateTimeRebaseMode): Boolean = {
     val reason = ineligibleReason(hybridScanEnabled, readDataSchema, scanFilters,
-      useChunkedReader, decompressAnyCpu, useFieldId, dateRebaseMode, int96RebaseMode)
+      useChunkedReader, decompressAnyCpu, useFieldId, ignoreCorruptFiles, dateRebaseMode,
+      int96RebaseMode)
     if (hybridScanEnabled) {
       reason.foreach { r =>
         if (failOnFallback) {
@@ -486,6 +489,8 @@ object HybridScanParquetPartitionReader extends Logging {
    * @param useChunkedReader  whether the read may be split into several batches
    * @param decompressAnyCpu  whether any codec is set to decompress on the CPU
    * @param useFieldId        whether columns are matched by Parquet field ID
+   * @param ignoreCorruptFiles whether a file that fails to read is skipped rather than failing
+   *                          the query
    * @param dateRebaseMode    the configured date rebase-on-read mode
    * @param int96RebaseMode   the configured INT96 timestamp rebase-on-read mode
    */
@@ -496,6 +501,7 @@ object HybridScanParquetPartitionReader extends Logging {
       useChunkedReader: Boolean,
       decompressAnyCpu: Boolean,
       useFieldId: Boolean,
+      ignoreCorruptFiles: Boolean,
       dateRebaseMode: DateTimeRebaseMode,
       int96RebaseMode: DateTimeRebaseMode): Option[String] = {
     // The hybrid path produces the whole split as one batch, reads the
@@ -509,6 +515,9 @@ object HybridScanParquetPartitionReader extends Logging {
       Some("a codec is set to decompress on the CPU")
     } else if (useFieldId) {
       Some("columns are matched by Parquet field ID")
+    } else if (ignoreCorruptFiles) {
+      // The reader fails a file whose schema it cannot decode, which would skip a readable file.
+      Some("corrupt files are ignored (spark.sql.files.ignoreCorruptFiles)")
     } else if (readDataSchema.isEmpty) {
       Some("the read projects no columns")
     } else {
