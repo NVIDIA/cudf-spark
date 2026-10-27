@@ -149,6 +149,7 @@ def test_iceberg_delete_unpartitioned_table(format_version, spark_tmp_table_fact
     )
 
 
+@iceberg_fast_test
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)

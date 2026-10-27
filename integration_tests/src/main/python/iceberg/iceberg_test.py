@@ -784,6 +784,7 @@ def test_iceberg_read_fallback(format_version, spark_tmp_table_factory, disable_
         conf = {**iceberg_read_enabled_conf, disable_conf : "false"})
 
 
+@iceberg_fast_test
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)

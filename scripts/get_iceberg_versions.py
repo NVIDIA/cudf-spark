@@ -17,8 +17,9 @@
 """Read and validate the Iceberg integration-test matrix defined by issue #15875.
 
 Iceberg's Spark dependency pins are minimum test baselines by cudf-spark policy,
-not upstream compatibility guarantees. Packaged combinations below those baselines
-are intentionally excluded: https://github.com/NVIDIA/cudf-spark/issues/15875.
+not upstream compatibility guarantees. Enabled combinations must exactly match
+Maven packaging. Four documented legacy combinations retain below-baseline support
+for compatibility; new Iceberg versions must respect the minimum test baselines.
 """
 
 from __future__ import annotations
@@ -45,6 +46,14 @@ DEFAULT_POM = REPO_ROOT / "scala2.13" / "pom.xml"
 VERSION_PATTERN = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 SPARK_PROPERTY_PATTERN = re.compile(r"^spark[0-9]+\.version$")
 POM_NAMESPACE = {"pom": "http://maven.apache.org/POM/4.0.0"}
+# Preserve only combinations already supported before the matrix was introduced.
+# Do not extend this exception set for new Iceberg versions.
+LEGACY_BASELINE_EXCEPTIONS = frozenset({
+    ("1.6.1", "3.5.0"),
+    ("1.9.2", "3.5.4"),
+    ("1.10.1", "3.5.4"),
+    ("1.10.1", "3.5.5"),
+})
 
 
 class MatrixError(ValueError):
@@ -277,15 +286,17 @@ class SparkSupport:
 
     Attributes:
         version: SparkVersion describing an exact Spark release.
-        supported: Whether the matrix enables this combination. For entries at
-            or above the test baseline, this reflects the packaged integration.
+        supported: Whether the matrix enables this combination. Must agree with
+            Maven packaging, including existing below-baseline combinations.
         reason: Non-blank explanation required when ``supported`` is false;
             otherwise None. It is included in rejected-request diagnostics.
+        comment: Optional documentation; required for a legacy baseline exception.
     """
 
     version: SparkVersion
     supported: bool
     reason: Optional[str] = None
+    comment: Optional[str] = None
 
     def __post_init__(self) -> None:
         """Require a non-blank reason exactly when a combination is unsupported."""
@@ -307,8 +318,8 @@ class IcebergSupport:
             as minimum test baselines by cudf-spark policy.
         spark_supports: Records keyed by SparkVersion, in JSON order, including unsupported
             combinations and their reasons. ``validate`` checks that this mapping
-            contains every POM shim at or above a declared family's baseline
-            exactly once, and that each support flag agrees with Maven packaging.
+            contains every packaged combination, references only declared Spark shims,
+            and has support flags matching Maven packaging. Unsupported records are optional.
     """
 
     version: IcebergVersion
@@ -318,54 +329,71 @@ class IcebergSupport:
         metadata={"json_name": "spark_versions"})
 
     def __post_init__(self) -> None:
-        """Ensure each baseline belongs to its declared Spark family."""
+        """Check baseline families and permit only documented legacy exceptions."""
         for family, minimum in self.spark_minor_to_patch.items():
             if minimum.family != family:
                 raise MatrixError(
                     f"minimum {minimum!r} does not belong to Spark family {family!r}")
+        for support in self.spark_supports.values():
+            if not support.supported:
+                continue
+            baseline = self.spark_minor_to_patch.get(support.version.family)
+            if baseline is None:
+                raise MatrixError(
+                    f"Iceberg {self.version}: missing minimum for Spark family "
+                    f"{support.version.family}")
+            if support.version < baseline:
+                if (str(self.version), str(support.version)) not in LEGACY_BASELINE_EXCEPTIONS:
+                    raise MatrixError(
+                        f"Iceberg {self.version}, Spark {support.version}: below minimum test "
+                        f"baseline {baseline}; only existing compatibility exceptions are allowed")
+                if support.comment is None or not support.comment.strip():
+                    raise MatrixError(
+                        f"Iceberg {self.version}, Spark {support.version}: "
+                        "legacy baseline exception needs a compatibility comment")
 
     def validate(self, packaging: MavenPackaging) -> None:
-        """Compare eligible Spark records and support flags with inferred Maven combinations.
+        """Require declared Spark shims and an exact match of enabled combinations.
 
         Args:
             packaging: ``MavenPackaging`` loaded from the parent and module POMs.
 
         Returns:
-            None after the expected Spark entries and every support flag agree
-            with the baseline policy and Maven packaging.
+            None when every packaged combination is represented and each listed
+            Spark shim and support flag agrees with Maven packaging.
 
         Raises:
-            MatrixError: The Spark entry list differs from the eligible POM shims,
-                or a support flag disagrees with the included modules' runtime pins.
+            MatrixError: A packaged combination is missing, a Spark shim is not
+                declared in the POM, or a support flag disagrees with packaging.
 
-        Packaged combinations below the minimum test baselines remain excluded
-        under issue #15875; all combinations at or above a baseline are checked.
+        Unsupported records are optional. Baseline and legacy-exception policy
+        is checked independently during construction.
         """
-        # Issue #15875 uses upstream build/test pins as minimum test baselines.
-        # Maven packaging alone does not qualify a below-baseline Spark patch.
-        expected_versions: Set[SparkVersion] = set()
-        for family, minimum in self.spark_minor_to_patch.items():
-            expected_versions.update(
-                spark_version for spark_version in packaging.spark_versions
-                if spark_version.family == family and spark_version >= minimum)
+        unknown_versions = set(self.spark_supports) - packaging.spark_versions
+        if unknown_versions:
+            raise MatrixError(
+                f"Iceberg {self.version} has unknown Spark shims: "
+                f"{', '.join(map(str, sorted(unknown_versions)))}")
+        expected_versions = {
+            spark_version for spark_version, runtimes in packaging.iceberg_versions_by_spark.items()
+            if self.version in runtimes
+        }
+        supported_versions = {
+            spark_version for spark_version, support in self.spark_supports.items()
+            if support.supported
+        }
 
-        actual_versions = set(self.spark_supports)
-
-        missing = expected_versions - actual_versions
-        extra = actual_versions - expected_versions
+        missing = expected_versions - supported_versions
+        extra = supported_versions - expected_versions
         if missing or extra:
             details = []
             if missing:
                 details.append(f"missing {', '.join(map(str, sorted(missing)))}")
             if extra:
                 details.append(f"unexpected {', '.join(map(str, sorted(extra)))}")
-            raise MatrixError(f"Iceberg {self.version} Spark entries: {'; '.join(details)}")
-        for support in self.spark_supports.values():
-            inferred = packaging.supports(support.version, self.version)
-            if support.supported != inferred:
-                raise MatrixError(
-                    f"Iceberg {self.version}, Spark {support.version}: supported={support.supported} "
-                    f"disagrees with Maven packaging (expected {inferred})")
+            raise MatrixError(
+                f"Iceberg {self.version} Spark support disagrees with Maven packaging: "
+                f"{'; '.join(details)}")
 
     def support_for(self, spark_version: SparkVersion) -> Optional[SparkSupport]:
         """Return the record for a SparkVersion, or None if absent.
@@ -443,11 +471,17 @@ class IcebergVersionMatrix:
         packaging = MavenPackaging.load(pom_path)
         packaged_versions: Set[IcebergVersion] = set().union(
             *packaging.iceberg_versions_by_spark.values())
-        missing = packaged_versions - self.iceberg_supports.keys()
+        actual_versions = set(self.iceberg_supports)
+        missing = packaged_versions - actual_versions
         if missing:
             raise MatrixError(
                 "packaged Iceberg versions missing from the matrix: "
                 f"{', '.join(map(str, sorted(missing)))}")
+        extra = actual_versions - packaged_versions
+        if extra:
+            raise MatrixError(
+                "matrix Iceberg versions not packaged by Maven: "
+                f"{', '.join(map(str, sorted(extra)))}")
         for support in self.iceberg_supports.values():
             support.validate(packaging)
 
@@ -496,8 +530,7 @@ class IcebergVersionMatrix:
             spark_support = self.iceberg_supports[runtime].support_for(release)
             if spark_support is None:
                 raise MatrixError(
-                    f"Iceberg {iceberg_version} with Spark {spark_version} is excluded "
-                    "by the minimum-baseline test policy (issue #15875)")
+                    f"Iceberg {iceberg_version} has no matrix entry for Spark {spark_version}")
             if not spark_support.supported:
                 raise MatrixError(
                     f"Iceberg {iceberg_version} is not supported with Spark {spark_version}: "
@@ -558,12 +591,10 @@ def _decode_matrix_record(record: Dict[str, Any]) -> Union[
 def _print_versions(spark_version: str, versions: List[str]) -> None:
     """Print shell-readable versions and explain an empty selection on stderr."""
     if not versions:
-        # A valid matrix can intentionally exclude even a packaged combination.
-        # Premerge validation rejects missing entries at or above a baseline.
         print(
             f"No Iceberg versions selected for Spark {spark_version}: "
-            "the minimum-baseline and packaging test policy excludes all entries "
-            "(https://github.com/NVIDIA/cudf-spark/issues/15875).",
+            "the matrix contains no enabled combination; "
+            "validate checks all packaged combinations against Maven.",
             file=sys.stderr)
     print(" ".join(versions))
 
@@ -630,7 +661,7 @@ def command_validate_requested(args: argparse.Namespace) -> None:
 
     Raises:
         MatrixError: The matrix or Spark release is invalid, or a requested
-            Iceberg version is unknown, below the test baseline, or unsupported.
+            Iceberg version is unknown, absent for this Spark version, or unsupported.
         OSError, json.JSONDecodeError: The JSON cannot be read or parsed.
             ``main`` reports these failures and returns status 1.
 
@@ -714,12 +745,12 @@ def main(arguments: Optional[Sequence[str]] = None) -> int:
     prints a newline and a policy diagnostic on stderr, letting CI skip that run.
 
     Issue #15875 treats Iceberg's Spark dependency pins in upstream_minimums as
-    minimum test baselines, not upstream compatibility guarantees. Combinations
-    below a baseline are intentionally excluded even when Maven packages them:
-    Spark 3.5.0 and 3.5.4 select no versions; Spark 3.5.5 selects 1.9.2 but excludes
-    1.10.1. Spark 4.2.0 uses the stub and selects none. Queries accept exact
-    major.minor.patch releases only. Explicit requests must satisfy both the
-    baseline and packaging rules.
+    minimum test baselines, not upstream compatibility guarantees. Enabled JSON
+    combinations must exactly match Maven packaging. Existing combinations
+    3.5.0/1.6.1, 3.5.4/1.9.2, and 3.5.4-3.5.5/1.10.1 retain below-baseline support
+    for compatibility, with comments on their JSON entries. New Iceberg versions
+    cannot use these exceptions. Spark 4.2.0 uses the stub and selects none.
+    Queries accept exact major.minor.patch releases only.
 
     Args:
         arguments: Command-line strings; None reads sys.argv[1:].

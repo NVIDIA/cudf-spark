@@ -440,7 +440,8 @@ run_delta_lake_uc_tests() {
 }
 
 # Pipeline jobs supply ICEBERG_VERSIONS and ICEBERG_FAST_TEST (1=fast, 0=full,
-# default 0) to choose their runtime(s) and suite. TEST_TAGS adds a marker filter.
+# unset defaults to 0) to choose their runtime(s) and suite. Other flag values
+# are rejected. TEST_TAGS adds a marker filter.
 # A single requested version runs only that version; this function does not add
 # or schedule other versions. Without overrides, run every JSON-selected version
 # with the full Iceberg suite. An unmatched marker filter
@@ -469,9 +470,19 @@ run_iceberg_tests() {
   if [[ -n "${TEST_TAGS:-}" ]]; then
     iceberg_test_tags="iceberg and ($TEST_TAGS)"
   fi
-  if [[ "${ICEBERG_FAST_TEST:-0}" == "1" ]]; then
-    iceberg_test_tags="$iceberg_test_tags and iceberg_fast_test"
-  fi
+  case "${ICEBERG_FAST_TEST-0}" in
+    0)
+      echo "Selected full Iceberg suite (TEST_TAGS=$iceberg_test_tags)"
+      ;;
+    1)
+      iceberg_test_tags="$iceberg_test_tags and iceberg_fast_test"
+      echo "Selected fast Iceberg suite (TEST_TAGS=$iceberg_test_tags)"
+      ;;
+    *)
+      echo "Invalid ICEBERG_FAST_TEST='$ICEBERG_FAST_TEST': expected 0, 1, or unset" >&2
+      return 1
+      ;;
+  esac
 
   if [[ "$ICEBERG_SPARK_VER" == "4.0" || "$ICEBERG_SPARK_VER" == "4.1" ]]; then
     if [[ "$SCALA_BINARY_VER" != "2.13" ]]; then
@@ -495,7 +506,7 @@ run_iceberg_tests() {
     ) || return 1
   fi
   if [[ -z "$iceberg_versions" ]]; then
-    # Issue #15875 can exclude packaged combinations below the minimum test baselines.
+    # Profiles without a packaged Iceberg runtime have an empty selection.
     echo "!!!! Skipping Iceberg tests. No supported Iceberg version found for Spark $SPARK_VER"
     return 0
   fi

@@ -185,7 +185,7 @@ run_iceberg_version_detect_tests() {
     iceberg_versions=$(python scripts/get_iceberg_versions.py list \
         --spark-version "$spark_ver") || return 1
     if [[ -z "$iceberg_versions" ]]; then
-        # Issue #15875 can exclude packaged combinations below the minimum test baselines.
+        # Profiles without a packaged Iceberg runtime have an empty selection.
         echo "!!!! Skipping Iceberg version detection. No matrix-selected version for Spark $spark_ver"
         return 0
     fi
