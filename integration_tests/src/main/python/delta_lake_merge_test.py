@@ -197,19 +197,21 @@ def test_delta_merge_num_records_validation(spark_tmp_path, spark_tmp_table_fact
 def _target_path(spark, spark_tmp_path):
     """Separate target table per run so the CPU and GPU runs of one test don't share state."""
     gpu_enabled = str(spark.conf.get("spark.rapids.sql.enabled", "false")).lower() == "true"
-    return (spark_tmp_path + ("/GPU" if gpu_enabled else "/CPU")).replace("//", "/")
+    path = spark_tmp_path + ("/GPU" if gpu_enabled else "/CPU")
+    # Collapse repeated slashes (Delta rejects them as ambiguous paths) but keep "scheme://".
+    return re.sub(r"(?<!:)/{2,}", "/", path)
 
 
 def _create_empty_schema_target(spark, path):
     from delta.tables import DeltaTable
-    DeltaTable.create(spark).location("file:" + path).execute()
+    DeltaTable.create(spark).location(path).execute()
 
 
 def _create_generated_column_target(spark, path, column_kind):
     """Creates (id, value, gen) where `gen` is a "generated" or an "identity" column."""
     from delta.tables import DeltaTable, IdentityGenerator
     generated_always_as = IdentityGenerator() if column_kind == "identity" else "id + 1"
-    DeltaTable.create(spark).location("file:" + path) \
+    DeltaTable.create(spark).location(path) \
         .addColumn("id", LongType()) \
         .addColumn("value", StringType()) \
         .addColumn("gen", LongType(), generatedAlwaysAs=generated_always_as) \
