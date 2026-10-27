@@ -29,7 +29,9 @@ import org.apache.iceberg.parquet.ParquetSchemaUtil
 import org.apache.iceberg.shaded.org.apache.parquet.schema.{LogicalTypeAnnotation => ShadedLogicalTypeAnnotation, Types => ShadedTypes}
 import org.apache.iceberg.shaded.org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.BINARY
 import org.apache.iceberg.types.Types
-import org.apache.parquet.schema.LogicalTypeAnnotation
+import org.apache.parquet.schema.{LogicalTypeAnnotation, Types => ParquetTypes}
+import org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit.MICROS
+import org.apache.parquet.schema.PrimitiveType.{PrimitiveTypeName => ParquetPrimitiveTypeName}
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.execution.datasources.parquet.ParquetToSparkSchemaConverter
@@ -123,7 +125,7 @@ class GpuIcebergVariantSchemaSuite extends AnyFunSuite {
     assert(ShimUtils.getParquetUnshader().unshade(shaded) == expected)
   }
 
-  test("the selected converter preserves ordinary nested Parquet schemas") {
+  test("common and selected converters preserve ordinary nested Parquet schemas") {
     val schema = new Schema(
       Types.NestedField.required(1, "id", Types.IntegerType.get()),
       Types.NestedField.optional(2, "payload", Types.StructType.of(
@@ -133,8 +135,29 @@ class GpuIcebergVariantSchemaSuite extends AnyFunSuite {
           Types.MapType.ofOptional(6, 7, Types.StringType.get(), Types.TimestampType.withZone())),
         Types.NestedField.required(8, "uuid", Types.UUIDType.get()))))
     val shadedSchema = ParquetSchemaUtil.convert(schema, "ordinary_schema")
+    val expected = ParquetTypes.buildMessage()
+      .required(ParquetPrimitiveTypeName.INT32).id(1).named("id")
+      .optionalGroup().id(2)
+      .optionalGroup().as(LogicalTypeAnnotation.listType()).id(3)
+      .repeatedGroup()
+      .optional(ParquetPrimitiveTypeName.INT32)
+      .as(LogicalTypeAnnotation.decimalType(2, 9)).id(4).named("element")
+      .named("list")
+      .named("amounts")
+      .optionalGroup().as(LogicalTypeAnnotation.mapType()).id(5)
+      .repeatedGroup()
+      .required(ParquetPrimitiveTypeName.BINARY)
+      .as(LogicalTypeAnnotation.stringType()).id(6).named("key")
+      .optional(ParquetPrimitiveTypeName.INT64)
+      .as(LogicalTypeAnnotation.timestampType(true, MICROS)).id(7).named("value")
+      .named("key_value")
+      .named("timestamps")
+      .required(ParquetPrimitiveTypeName.FIXED_LEN_BYTE_ARRAY).length(16)
+      .as(LogicalTypeAnnotation.uuidType()).id(8).named("uuid")
+      .named("payload")
+      .named("ordinary_schema")
 
-    assert(ShimUtils.getParquetUnshader().unshade(shadedSchema) ==
-      new ParquetUnshader().unshade(shadedSchema))
+    assert(new ParquetUnshader().unshade(shadedSchema) == expected)
+    assert(ShimUtils.getParquetUnshader().unshade(shadedSchema) == expected)
   }
 }
