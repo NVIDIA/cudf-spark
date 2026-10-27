@@ -249,6 +249,7 @@ class GpuIcebergVariantSchemaSuite extends AnyFunSuite {
       .named("variant_schema")
 
     assert(ShimUtils.getParquetUnshader().unshade(shaded) == expected)
+    assert(ShimUtils.unshadeParquetSchema(shaded) == expected)
   }
 
   test("common and selected converters preserve ordinary nested Parquet schemas") {
@@ -285,5 +286,6 @@ class GpuIcebergVariantSchemaSuite extends AnyFunSuite {
 
     assert(new ParquetUnshader().unshade(shadedSchema) == expected)
     assert(ShimUtils.getParquetUnshader().unshade(shadedSchema) == expected)
+    assert(ShimUtils.unshadeParquetSchema(shadedSchema) == expected)
   }
 }

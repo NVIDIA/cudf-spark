@@ -39,6 +39,7 @@ import org.apache.iceberg.io.PartitioningWriter;
 import org.apache.iceberg.io.WriteResult;
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions;
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader;
+import org.apache.iceberg.shaded.org.apache.parquet.schema.MessageType;
 import org.apache.iceberg.spark.source.GpuSparkScan;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.read.Scan;
@@ -77,6 +78,11 @@ public class ShimUtils {
 
     public static ParquetUnshader getParquetUnshader() {
         return IMPL.getParquetUnshader();
+    }
+
+    /** Retains the schema conversion entry point used by dependent readers. */
+    public static org.apache.parquet.schema.MessageType unshadeParquetSchema(MessageType schema) {
+        return getParquetUnshader().unshade(schema);
     }
 
     public static int formatVersion(Table table) {
