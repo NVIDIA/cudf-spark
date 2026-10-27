@@ -167,18 +167,15 @@ class GpuIcebergVariantSchemaSuite extends AnyFunSuite {
     }
   }
 
-  test("unshade preserves the Variant logical type spec version") {
-    val shaded = ShadedTypes.buildMessage()
-      .optionalGroup().as(ShadedLogicalTypeAnnotation.variantType(1.toByte))
-      .required(BINARY).named("metadata")
-      .required(BINARY).named("value")
-      .named("variant_value")
-      .named("variant_schema")
-    val unshaded = ShimUtils.getParquetUnshader().unshade(shaded)
-      .asGroupType().getType("variant_value").getLogicalTypeAnnotation
-      .asInstanceOf[LogicalTypeAnnotation.VariantLogicalTypeAnnotation]
+  // Check annotation parameter forwarding, not support for decoding another Variant format.
+  for (specVersion <- Seq(1.toByte, 2.toByte)) {
+    test(s"unshade preserves the Variant logical type spec byte $specVersion") {
+      val shaded = ShadedLogicalTypeAnnotation.variantType(specVersion)
+      val unshaded = ShimUtils.getParquetUnshader().unshade(shaded)
+        .asInstanceOf[LogicalTypeAnnotation.VariantLogicalTypeAnnotation]
 
-    assert(unshaded.getSpecVersion == 1.toByte)
+      assert(unshaded.getSpecVersion == specVersion)
+    }
   }
 
   test("the selected converter handles Variant annotations throughout a Parquet schema") {
