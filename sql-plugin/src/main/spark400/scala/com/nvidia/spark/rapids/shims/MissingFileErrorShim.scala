@@ -21,6 +21,7 @@
 {"spark": "402"}
 {"spark": "403"}
 {"spark": "404"}
+{"spark": "410db183"}
 {"spark": "411"}
 {"spark": "412"}
 {"spark": "413"}
@@ -35,6 +36,7 @@ import java.util.concurrent.ExecutionException
 import com.nvidia.spark.rapids.GpuFileNotFoundException
 
 import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.connector.metric.CustomTaskMetric
 import org.apache.spark.sql.connector.read.{InputPartition, PartitionReader, PartitionReaderFactory}
 import org.apache.spark.sql.execution.datasources.FilePartition
 import org.apache.spark.sql.execution.datasources.v2.FileDataSourceV2
@@ -85,6 +87,9 @@ object MissingFileErrorShim {
         case error: FileNotFoundException => rethrowMissingFile(partition, error)
         case error: ExecutionException => rethrowMissingFile(partition, error)
       }
+
+      override def currentMetricsValues(): Array[CustomTaskMetric] =
+        reader.currentMetricsValues()
 
       override def close(): Unit = reader.close()
     }

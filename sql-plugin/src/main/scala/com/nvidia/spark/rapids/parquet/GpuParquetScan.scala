@@ -45,7 +45,7 @@ import com.nvidia.spark.rapids.jni.fileio.{RapidsFileIO, RapidsInputFile}
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile.CopyRange
 import com.nvidia.spark.rapids.parquet.ParquetPartitionReader.{LocalCopy, PARQUET_MAGIC}
 import com.nvidia.spark.rapids.shims.{ColumnDefaultValuesShims, GpuParquetCrypto, GpuTypeShims,
-  ParquetVariantShims, ShimFilePartitionReaderFactory, SparkShimImpl}
+  ParquetMissingStructShims, ParquetVariantShims, ShimFilePartitionReaderFactory, SparkShimImpl}
 import com.nvidia.spark.rapids.shims.parquet.{GpuParquetUtilsShims, ParquetLegacyNanoAsLongShims, ParquetSchemaClipShims, ParquetStringPredShims}
 import org.apache.commons.io.output.{CountingOutputStream, NullOutputStream}
 import org.apache.hadoop.conf.Configuration
@@ -183,7 +183,8 @@ object GpuParquetScan {
           plan.setTagValue(RapidsMeta.gpuSupportedTag,
             plan.getTagValue(RapidsMeta.gpuSupportedTag).getOrElse(Set.empty) + reason)
           outputContainsVariant = plan.output.exists { attr =>
-            TrampolineUtil.dataTypeExistsRecursively(attr.dataType, GpuColumnVector.isVariantType)
+            TrampolineUtil.dataTypeExistsRecursively(
+              attr.dataType, GpuColumnVector.isVariantType)
           }
         case _ =>
       }
@@ -194,7 +195,14 @@ object GpuParquetScan {
   def tagVariantSupport(
       readSchema: StructType,
       meta: RapidsMeta[_, _, _],
-      sqlConf: SQLConf): Unit = {
+      sqlConf: SQLConf): Unit =
+    tagVariantSupport(readSchema, meta, sqlConf, None)
+
+  private def tagVariantSupport(
+      readSchema: StructType,
+      meta: RapidsMeta[_, _, _],
+      sqlConf: SQLConf,
+      mayContainShreddedVariant: Option[Boolean]): Unit = {
     val schemaHasPushedVariant = readSchema.exists { field =>
       TrampolineUtil.dataTypeExistsRecursively(
         field.dataType, ParquetVariantShims.isPushedVariantStruct)
@@ -203,11 +211,22 @@ object GpuParquetScan {
       meta.willNotWorkOnGpu("GPU Parquet reader does not support Variant extraction pushdown")
     }
 
-    val schemaHasPotentiallyShreddedVariant =
-      hasPotentiallyShreddedVariant(readSchema.map(_.dataType), sqlConf)
+    // Delta can establish whether shredded files are possible from its table protocol.
+    // Other sources retain the conservative check based on Spark's reader configuration.
+    val schemaHasPotentiallyShreddedVariant = mayContainShreddedVariant match {
+      case Some(mayContain) => mayContain && readSchema.exists { field =>
+        TrampolineUtil.dataTypeExistsRecursively(field.dataType, GpuColumnVector.isVariantType)
+      }
+      case None => hasPotentiallyShreddedVariant(readSchema.map(_.dataType), sqlConf)
+    }
     if (schemaHasPotentiallyShreddedVariant) {
-      val reason = "GPU Parquet reader cannot safely read Variant columns when Spark allows " +
-        "shredded Variant input"
+      val reason = if (mayContainShreddedVariant.isDefined) {
+        "GPU Delta reader cannot safely read VARIANT columns when the table protocol supports " +
+          "shredding or an unrecognized reader feature"
+      } else {
+        "GPU Parquet reader cannot safely read Variant columns when Spark allows " +
+          "shredded Variant input"
+      }
       // Keep the scan and its consumers on CPU until an operator no longer outputs Variant.
       tagVariantScanPrefixForCpu(meta, reason)
     }
@@ -220,7 +239,11 @@ object GpuParquetScan {
   }
 
   def tagSupport(sparkSession: SparkSession, readSchema: StructType,
-      meta: RapidsMeta[_, _, _]): Unit = {
+      meta: RapidsMeta[_, _, _]): Unit =
+    tagSupport(sparkSession, readSchema, meta, None)
+
+  def tagSupport(sparkSession: SparkSession, readSchema: StructType,
+      meta: RapidsMeta[_, _, _], mayContainShreddedVariant: Option[Boolean]): Unit = {
     if (ParquetLegacyNanoAsLongShims.legacyParquetNanosAsLong) {
       meta.willNotWorkOnGpu("GPU does not support spark.sql.legacy.parquet.nanosAsLong")
     }
@@ -236,7 +259,7 @@ object GpuParquetScan {
     }
 
     val sqlConf = sparkSession.sessionState.conf
-    tagVariantSupport(readSchema, meta, sqlConf)
+    tagVariantSupport(readSchema, meta, sqlConf, mayContainShreddedVariant)
 
     FileFormatChecks.tag(meta, readSchema, ParquetFormatType, ReadFileOp)
 
@@ -572,6 +595,8 @@ protected case class GpuParquetFileFilterHandler(
   private val int96RebaseMode = SparkShimImpl.int96ParquetRebaseRead(sqlConf)
   private val readUseFieldId = ParquetSchemaClipShims.useFieldId(sqlConf)
   private val ignoreMissingParquetFieldId = ParquetSchemaClipShims.ignoreMissingIds(sqlConf)
+  private val returnNullStructIfAllFieldsMissing =
+    ParquetMissingStructShims.returnNullStructIfAllFieldsMissing(sqlConf)
 
   private val PARQUET_ENCRYPTION_CONFS = Seq("parquet.encryption.kms.client.class",
     "parquet.encryption.kms.client.class", "parquet.crypto.factory.class")
@@ -774,16 +799,20 @@ protected case class GpuParquetFileFilterHandler(
               conf, readDataSchema, filePath)) { tableFooter =>
                 if (tableFooter.getNumColumns <= 0) {
                   // Special case because java parquet reader does not like having 0 columns.
-                  val numRows = tableFooter.getNumRows
-                  val block = new BlockMetaData()
-                  block.setRowCount(numRows)
-                  // Fix up the row index offset
                   val offsets = tableFooter.getRowIndexOffsets
-                  if (offsets.nonEmpty) {
+                  val blocks = if (offsets.nonEmpty) {
+                    val block = new BlockMetaData()
+                    block.setRowCount(tableFooter.getNumRows)
                     GpuParquetUtilsShims.setRowIndexOffset(block, offsets(0))
+                    Seq(block)
+                  } else {
+                    // A split without row groups must not produce a synthetic block with
+                    // the default row index offset (-1). Delta DV readers validate these
+                    // offsets even for zero-column scans.
+                    Seq.empty
                   }
                   val schema = new MessageType("root")
-                  return ParquetFileInfoWithBlockMeta(filePath, Seq(block), file.partitionValues,
+                  return ParquetFileInfoWithBlockMeta(filePath, blocks, file.partitionValues,
                     schema, readDataSchema, DateTimeRebaseLegacy, DateTimeRebaseLegacy,
                     hasInt96Timestamps = false)
                 }
@@ -858,7 +887,8 @@ protected case class GpuParquetFileFilterHandler(
       val (clipped, clippedSchema) =
         NvtxRegistry.PARQUET_CLIP_SCHEMA {
           val clippedSchema = ParquetSchemaUtils.clipParquetSchema(
-            fileSchema, readDataSchema, isCaseSensitive, readUseFieldId)
+            fileSchema, readDataSchema, isCaseSensitive, readUseFieldId,
+            returnNullStructIfAllFieldsMissing)
           // Check if the read schema is compatible with the file schema.
           checkSchemaCompat(clippedSchema, readDataSchema,
             (t: Type, d: DataType) => throwTypeIncompatibleError(t, d, file.filePath.toString()),
@@ -2462,11 +2492,6 @@ trait ParquetPartitionReaderBase extends Logging with ScanWithMetrics
     blocks.map(_.asInstanceOf[ParquetDataBlock].dataBlock)
 }
 
-// Parquet schema wrapper
-case class ParquetSchemaWrapper(schema: MessageType) extends SchemaBase {
-  override def isEmpty: Boolean = schema.getFields.isEmpty
-}
-
 // Parquet BlockMetaData wrapper
 case class ParquetDataBlock(
     dataBlock: BlockMetaData,
@@ -2497,7 +2522,7 @@ case class ParquetSingleDataBlockMeta(
  *
  * Provides all the Parquet-specific block-copy machinery shared between the plain coalescing
  * reader and the Delta-aware coalescing reader: header/footer writing, block-split predicate,
- * batch runner, and the [[populateCurrentBlockChunk]] template method with the
+ * batch runner, and the [[populateCurrentBlockChunk():*]] template method with the
  * [[augmentChunkMeta]] extension point.
  *
  * Both [[MultiFileParquetPartitionReader]] and the Delta-aware coalescing reader extend this
@@ -2689,7 +2714,7 @@ abstract class MultiFileCoalescingParquetPartitionReaderBase(
   }
 
   /**
-   * Extension point called after each batch is assembled by [[populateCurrentBlockChunk]].
+   * Extension point called after each batch is assembled by [[populateCurrentBlockChunk():*]].
    * Subclasses override this to inject additional per-batch metadata (e.g. DV entries) into
    * the returned [[CurrentChunkMeta]] without touching the assembly loop.
    * Default implementation returns the meta unchanged.
@@ -2917,7 +2942,7 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
     // since we know not all of them are empty and we know all these have the same schema since
     // we already separated, just use the clippedSchema from metadata
     val schemaToUse = metaToUse.clippedSchema
-    val combined = closeOnExcept(new ArrayBuffer[HostMemoryBuffer]) { buffers =>
+    val combined = withResource(new ArrayBuffer[HostMemoryBuffer]) { buffers =>
       var offset: Long = PARQUET_MAGIC.size
       val allOutputBlocks = new ArrayBuffer[BlockMetaData]()
 
@@ -2961,106 +2986,149 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
         footerOut.write(ParquetPartitionReader.PARQUET_MAGIC)
         offset += footerOut.getPos
       }
-      val spHostBufs = buffers.map(b =>
-        SpillableHostBuffer(b, b.getLength, SpillPriorities.ACTIVE_BATCHING_PRIORITY))
-      val newHmbBufferInfo = SingleHMBAndMeta(spHostBufs.toArray, offset,
-        combinedMeta.allPartValues.map(_._1).sum, Seq.empty)
-      val newHmbMeta = newCombinedHMBWithMetaData(combinedMeta, newHmbBufferInfo, offset)
-      // Combine the metrics from all the parts
-      val filterTime = combinedMeta.toCombine.map(_.getFilterTime).sum
-      val bufferTime = combinedMeta.toCombine.map(_.getBufferTime).sum
-      newHmbMeta.setExecutionTime(filterTime, bufferTime)
-      val scheduleTime = combinedMeta.toCombine.map(_.getScheduleTime).sum
-      newHmbMeta.setScheduleTime(scheduleTime)
-      // Combine the release callbacks from all the parts
-      combinedMeta.toCombine.foreach { hmb =>
-        hmb.combineReleaseCallbacks(newHmbMeta)
+      val spHostBufs = buffers.toArray.safeMap { b =>
+        // The spillable buffer owns its reference; the original is closed by withResource.
+        b.incRefCount()
+        SpillableHostBuffer(b, b.getLength, SpillPriorities.ACTIVE_BATCHING_PRIORITY)
       }
-      newHmbMeta
+      closeOnExcept(spHostBufs) { _ =>
+        val newHmbBufferInfo = SingleHMBAndMeta(spHostBufs.toArray, offset,
+          combinedMeta.allPartValues.map(_._1).sum, Seq.empty)
+        newCombinedHMBWithMetaData(combinedMeta, newHmbBufferInfo, offset)
+      }
     }
-    logDebug(s"Took ${(System.currentTimeMillis() - startCombineTime)} " +
-      s"ms to do combine of ${toCombineHmbs.size} files, " +
-      s"task id: ${TaskContext.get().taskAttemptId()}")
-    combined
+    closeOnExcept(combined) { _ =>
+      logDebug(s"Took ${(System.currentTimeMillis() - startCombineTime)} " +
+        s"ms to do combine of ${toCombineHmbs.size} files, " +
+        s"task id: ${TaskContext.get().taskAttemptId()}")
+      combined
+    }
+  }
+
+  private def validateEmptyRowCount(empty: HostMemoryEmptyMetaData): Unit = {
+    if (empty.numRows > Int.MaxValue) {
+      throw new ArithmeticException(
+        s"Cannot read metadata-only Parquet split for ${empty.partitionedFile.filePath}: " +
+          s"row count ${empty.numRows} exceeds the maximum supported batch row count " +
+          s"of ${Int.MaxValue}.")
+    }
+  }
+
+  override protected def validateHostBuffers(
+      fileHostBuffers: HostMemoryBuffersWithMetaDataBase): Unit = fileHostBuffers match {
+    case empty: HostMemoryEmptyMetaData => validateEmptyRowCount(empty)
+    case _ =>
+  }
+
+  private def selectCombineHMBs(
+      input: Array[HostMemoryBuffersWithMetaDataBase]):
+      (Array[HostMemoryBuffersWithMetaDataBase], Array[HostMemoryBuffersWithMetaDataBase]) = {
+    val toCombine = ArrayBuffer[HostMemoryBuffersWithMetaDataBase]()
+    val leftOvers = ArrayBuffer[HostMemoryBuffersWithMetaDataBase]()
+    var firstNonEmpty: HostMemoryBuffersWithMetaData = null
+    var emptyNumRows = 0L
+    var needsSplit = false
+    var iterLoc = 0
+    while (!needsSplit && iterLoc < input.length) {
+      val result = input(iterLoc)
+      val compatible = result match {
+        // Zero-row entries, including ignored missing files, do not establish a group kind.
+        case empty: HostMemoryEmptyMetaData if empty.numRows == 0 => true
+        // Positive-row metadata uses synthetic batches, whose row counts must fit in Int.
+        case empty: HostMemoryEmptyMetaData =>
+          if (emptyNumRows == 0) {
+            validateEmptyRowCount(empty)
+          }
+          firstNonEmpty == null && empty.numRows <= Int.MaxValue.toLong - emptyNumRows
+        case data: HostMemoryBuffersWithMetaData =>
+          emptyNumRows == 0 && (firstNonEmpty == null || !checkIfNeedToSplit(firstNonEmpty, data))
+        case _ => throw new RuntimeException("Unknown HostMemoryBuffersWithMetaDataBase")
+      }
+      if (compatible) {
+        toCombine += result
+        result match {
+          case empty: HostMemoryEmptyMetaData =>
+            emptyNumRows += empty.numRows
+          case data: HostMemoryBuffersWithMetaData if firstNonEmpty == null =>
+            firstNonEmpty = data
+          case _ =>
+        }
+      } else if (keepReadsInOrder) {
+        needsSplit = true
+        leftOvers ++= input.drop(iterLoc)
+      } else {
+        leftOvers += result
+      }
+      iterLoc += 1
+    }
+    // Keep original results: recombining an already combined result would lose its per-file
+    // partition values, because the metadata aggregation below expects individual files.
+    (toCombine.toArray, leftOvers.toArray)
   }
 
   private def computeCombineHMBMeta(
       input: Array[HostMemoryBuffersWithMetaDataBase]): (CombinedMeta, CombinedEmptyMeta) = {
     val allPartValues = new ArrayBuffer[(Long, InternalRow)]()
-    var allEmpty = true
-    val emptyMetas: ArrayBuffer[HostMemoryEmptyMetaData] = ArrayBuffer.empty
+    val emptyMetas = ArrayBuffer[HostMemoryEmptyMetaData]()
     var emptyNumRows = 0L
     var emptyBufferSize = 0L
     var emptyTotalBytesRead = 0L
-    val toCombine = ArrayBuffer[HostMemoryBuffersWithMetaDataBase]()
-    // this is only used when keepReadsInOrder is false
-    val leftOversWhenNotKeepReadsInOrder = ArrayBuffer[HostMemoryBuffersWithMetaDataBase]()
     var firstNonEmpty: HostMemoryBuffersWithMetaData = null
-    var numCombined: Int = 0
-    var needsSplit = false
-    var iterLoc = 0
-    // iterating through this to handle the case we want to keep the files
-    // in the same order as Spark
-    while (!needsSplit && iterLoc < input.size) {
-      val result = input(iterLoc)
+    input.foreach { result =>
       result match {
         case emptyHMData: HostMemoryEmptyMetaData =>
           emptyMetas += emptyHMData
-          val totalNumRows = computeNumRowsAlive(result.memBuffersAndSizes.map(_.numRows).sum,
-            emptyHMData)
-          val partValues = result.partitionedFile.partitionValues
-          allPartValues.append((totalNumRows, partValues))
           emptyBufferSize += emptyHMData.bufferSize
           emptyNumRows += emptyHMData.numRows
           emptyTotalBytesRead += emptyHMData.bytesRead
-          toCombine += emptyHMData
-          numCombined += 1
-        case hmWithData: HostMemoryBuffersWithMetaData =>
-          allEmpty = false
-          if (firstNonEmpty != null && checkIfNeedToSplit(firstNonEmpty, hmWithData)) {
-            // if we need to keep the same order as Spark we just stop here and put rest in
-            // leftOverFiles, but if we don't then continue so we combine as much as possible
-            if (keepReadsInOrder) {
-              needsSplit = true
-              combineLeftOverFiles = Some(input.drop(numCombined))
-            } else {
-              leftOversWhenNotKeepReadsInOrder += hmWithData
-            }
-          } else {
-            if (firstNonEmpty == null) {
-              firstNonEmpty = hmWithData
-            }
-            numCombined += 1
-            toCombine += hmWithData
-            val partValues = hmWithData.partitionedFile.partitionValues
-            val totalNumRows = computeNumRowsAlive(hmWithData.memBuffersAndSizes.map(_.numRows).sum,
-              hmWithData)
-            allPartValues.append((totalNumRows, partValues))
-          }
+        case data: HostMemoryBuffersWithMetaData if firstNonEmpty == null =>
+          firstNonEmpty = data
+        case _: HostMemoryBuffersWithMetaData =>
         case _ => throw new RuntimeException("Unknown HostMemoryBuffersWithMetaDataBase")
       }
-      iterLoc += 1
+      val totalNumRows = computeNumRowsAlive(result.memBuffersAndSizes.map(_.numRows).sum, result)
+      allPartValues.append((totalNumRows, result.partitionedFile.partitionValues))
     }
-    if (!keepReadsInOrder && leftOversWhenNotKeepReadsInOrder.nonEmpty) {
-      combineLeftOverFiles = Some(leftOversWhenNotKeepReadsInOrder.toArray)
-    }
-    val combinedMeta = CombinedMeta(allPartValues.toArray, toCombine.toArray, firstNonEmpty)
+    val combinedMeta = CombinedMeta(allPartValues.toArray, input, firstNonEmpty)
     val combinedEmptyMeta = CombinedEmptyMeta(emptyNumRows, emptyBufferSize,
-      emptyTotalBytesRead, allEmpty, emptyMetas.toArray)
+      emptyTotalBytesRead, firstNonEmpty == null, emptyMetas.toArray)
     (combinedMeta, combinedEmptyMeta)
   }
 
   override def combineHMBs(
       input: Array[HostMemoryBuffersWithMetaDataBase]): HostMemoryBuffersWithMetaDataBase = {
     if (input.size == 1) {
-      input.head
+      closeOnExcept(input.head) { result =>
+        result match {
+          case empty: HostMemoryEmptyMetaData => validateEmptyRowCount(empty)
+          case _ =>
+        }
+        result
+      }
     } else {
-      val (combinedMeta, combinedEmptyMeta) = computeCombineHMBMeta(input)
-
-      if (combinedEmptyMeta.allEmpty) {
-        newCombinedHMEmptyMetadata(combinedEmptyMeta, combinedMeta)
-      } else {
-        doCombineHMBs(combinedMeta)
+      closeOnExcept(input) { _ =>
+        val (selected, leftOvers) = selectCombineHMBs(input)
+        val remaining = if (leftOvers.nonEmpty) Some(leftOvers) else None
+        // Preserve the original per-file chunking and avoid aggregating a singleton's rows.
+        val result = if (selected.length == 1) {
+          selected.head
+        } else {
+          val (combinedMeta, combinedEmptyMeta) = computeCombineHMBMeta(selected)
+          val result = if (combinedEmptyMeta.allEmpty) {
+            newCombinedHMEmptyMetadata(combinedEmptyMeta, combinedMeta)
+          } else {
+            doCombineHMBs(combinedMeta)
+          }
+          closeOnExcept(result) { combined =>
+            combined.setExecutionTime(selected.map(_.getFilterTime).sum,
+              selected.map(_.getBufferTime).sum)
+            combined.setScheduleTime(selected.map(_.getScheduleTime).sum)
+            selected.foreach(_.combineReleaseCallbacks(combined))
+            combined
+          }
+        }
+        combineLeftOverFiles = remaining
+        result
       }
     }
   }
@@ -3217,7 +3285,7 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
           } else {
             if (fileBlockMeta.schema.getFieldCount == 0) {
               val bytesRead = fileSystemBytesRead() - startingBytesRead
-              val numRows = fileBlockMeta.blocks.map(_.getRowCount).sum.toInt
+              val numRows = fileBlockMeta.blocks.map(_.getRowCount).sum
               newHMEmptyMetadataForChunks(file, 0, bytesRead,
                 fileBlockMeta.dateRebaseMode, fileBlockMeta.timestampRebaseMode,
                 fileBlockMeta.hasInt96Timestamps, fileBlockMeta.schema, fileBlockMeta.readSchema,
@@ -3294,9 +3362,12 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
    */
   override def readBatches(fileBufsAndMeta: HostMemoryBuffersWithMetaDataBase):
   Iterator[ColumnarBatch] = fileBufsAndMeta match {
-    case meta: HostMemoryEmptyMetaData =>
+    case meta: HostMemoryEmptyMetaData => withResource(meta) { _ =>
       // Not reading any data, but add in partition data if needed
-      val rows = computeNumRowsAlive(meta.numRows, meta)
+      val rows = meta.allPartValues match {
+        case Some(parts) => Math.toIntExact(parts.iterator.map(_._1).sum)
+        case None => computeNumRowsAlive(meta.numRows, meta)
+      }
       val origBatch = if (meta.readSchema.isEmpty) {
         new ColumnarBatch(Array.empty, rows)
       } else {
@@ -3319,6 +3390,7 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
           BatchWithPartitionDataUtils.addSinglePartitionValueToBatch(origBatch,
             meta.partitionedFile.partitionValues, partitionSchema, maxGpuColumnSizeBytes)
       }
+    }
 
     case buffer: HostMemoryBuffersWithMetaData =>
       val memBuffersAndSize = buffer.memBuffersAndSizes
@@ -3612,7 +3684,7 @@ object MakeParquetTableProducer extends Logging {
 }
 
 /**
- * An interator that reads Parquet files in chunks and produce a [[Table]] for each chunk.
+ * An interator that reads Parquet files in chunks and produce a `Table` for each chunk.
  */
 trait ChunkedReader extends AutoCloseable {
   def hasNext: Boolean
@@ -3824,7 +3896,8 @@ abstract class AbstractParquetPartitionReader(
       return true
     }
     batchIter = EmptyGpuColumnarBatchIterator
-    if (!isDone) {
+    // Row-level deletes can empty a batch while later row groups still contain live rows.
+    while (!batchIter.hasNext && !isDone) {
       if (!blockIterator.hasNext) {
         isDone = true
       } else {

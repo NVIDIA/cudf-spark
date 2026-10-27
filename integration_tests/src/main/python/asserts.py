@@ -284,7 +284,8 @@ def _assert_gpu_and_cpu_writes_are_equal(
         base_path,
         mode,
         conf={},
-        expected_command=None):
+        expected_command=None,
+        required_gpu_classes=None):
     conf = _prep_incompat_conf(conf)
 
     print('### CPU RUN ###')
@@ -299,10 +300,12 @@ def _assert_gpu_and_cpu_writes_are_equal(
     # Check if current test has delta_lake marker
     if current_test_has_delta_marker() and not current_test_allows_non_gpu_delta_write():
         print("Delta Lake test detected - applying Delta write validation")
-        from delta_lake_utils import assert_rapids_delta_write
+        from delta_lake_utils import assert_rapids_delta_write, delta_write
         gpu_result = assert_rapids_delta_write(
             lambda spark: write_func(spark, gpu_path), conf=conf,
-            expected_command=expected_command)
+            expected_command=expected_command,
+            required_gpu_classes=(delta_write if required_gpu_classes is None
+                                  else required_gpu_classes))
     else:
         gpu_result = with_gpu_session(lambda spark : write_func(spark, gpu_path), conf=conf)
     gpu_end = time.time()
@@ -323,17 +326,21 @@ def _assert_gpu_and_cpu_writes_are_equal(
     assert_equal(from_cpu, from_gpu)
 
 def assert_gpu_and_cpu_writes_are_equal_collect(
-        write_func, read_func, base_path, conf={}, expected_command=None):
+        write_func, read_func, base_path, conf={}, expected_command=None,
+        required_gpu_classes=None):
     """
     Assert when running write_func on both the CPU and the GPU and reading using read_func
     on the CPU that the results are equal.
     In this case the data is collected back to the driver and compared here, so be
     careful about the amount of data returned.
     For Delta writes, expected_command also checks the captured GPU command.
+    required_gpu_classes overrides the default RapidsDeltaWrite requirement, for example
+    when a persistent-DV DELETE scans on the GPU without writing replacement Parquet data.
+    An empty list requires no data-writing operator; expected_command is still checked.
     """
     _assert_gpu_and_cpu_writes_are_equal(
         write_func, read_func, base_path, 'COLLECT', conf=conf,
-        expected_command=expected_command)
+        expected_command=expected_command, required_gpu_classes=required_gpu_classes)
 
 def assert_gpu_and_cpu_writes_are_equal_iterator(write_func, read_func, base_path, conf={}):
     """
@@ -394,6 +401,7 @@ def assert_gpu_and_cpu_sql_writes_are_equal_collect(table_name_factory, write_sq
     both resulting tables on the CPU that the results are equal.
     In this case the data is collected back to the driver and compared here, so be
     careful about the amount of data returned.
+    Return the CPU and GPU table names for additional assertions.
     """
     conf = _prep_incompat_conf(conf)
 
@@ -428,6 +436,8 @@ def assert_gpu_and_cpu_sql_writes_are_equal_collect(table_name_factory, write_sq
         _sort_locally(from_cpu, from_gpu)
 
     assert_equal(from_cpu, from_gpu)
+
+    return cpu_table, gpu_table
 
 def assert_gpu_fallback_write(write_func,
         read_func,

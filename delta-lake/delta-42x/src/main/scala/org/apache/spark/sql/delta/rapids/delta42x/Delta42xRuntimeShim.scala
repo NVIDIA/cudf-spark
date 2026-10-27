@@ -28,18 +28,24 @@ import org.apache.spark.sql.SaveMode
 import org.apache.spark.sql.classic.SparkSession
 import org.apache.spark.sql.connector.catalog.StagingTableCatalog
 import org.apache.spark.sql.delta.{DeltaOperations, DeltaOptions}
+import org.apache.spark.sql.delta.{TableFeature, VariantShreddingPreviewTableFeature,
+  VariantShreddingTableFeature}
 import org.apache.spark.sql.delta.actions.{FileAction, Metadata}
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
 import org.apache.spark.sql.delta.commands.{CreateDeltaTableLikeShims,
   DMLWithDeletionVectorsHelper, TouchedFileWithDV, WriteIntoDelta}
 import org.apache.spark.sql.delta.hooks.GpuAutoCompact42x
-import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShimBase, DMLWithDeletionVectorsRuntimeShim,
+import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShimBase, DeltaVariantShreddingShim,
+  DMLWithDeletionVectorsRuntimeShim,
   GpuDeltaLog, GpuOptimisticTransaction,
   GpuOptimisticTransactionBase, GpuWriteIntoDeltaLike, StartTransactionArg}
 import org.apache.spark.sql.delta.stats.StatsCollectionUtils
 
 class Delta42xRuntimeShim extends DeltaRuntimeShimBase
-    with DMLWithDeletionVectorsRuntimeShim {
+    with DeltaVariantShreddingShim with DMLWithDeletionVectorsRuntimeShim {
+
+  override protected def variantShreddingFeatures: Set[TableFeature] =
+    Set(VariantShreddingPreviewTableFeature, VariantShreddingTableFeature)
 
   override def getDeltaConfigChecker: DeltaConfigChecker = Delta42xConfigChecker
 

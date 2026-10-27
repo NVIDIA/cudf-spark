@@ -361,30 +361,32 @@ def test_union_with_filter():
 
 
 # AQE off: collect_plan_nodes does not descend into AdaptiveSparkPlanExec.
-_zero_column_range_conf = {'spark.sql.adaptive.enabled': False,
-                           'spark.rapids.sql.metrics.level': 'DEBUG'}
+_zero_column_exchange_conf = {'spark.sql.adaptive.enabled': False,
+                              'spark.rapids.sql.metrics.level': 'DEBUG'}
 
-def _zero_column_range_exchanges(plan):
-    """gpuOutputPartitioning, not outputPartitioning: the latter is the CPU RangePartitioning."""
+def _zero_column_exchanges(plan, partitioning):
+    """GPU shuffle exchanges with a zero-column child and the given GPU partitioning."""
     return [node for node in collect_plan_nodes(plan)
             if node.getClass().getSimpleName() == "GpuShuffleExchangeExec"
-            and node.gpuOutputPartitioning().getClass().getSimpleName() == "GpuRangePartitioning"
+            and node.gpuOutputPartitioning().getClass().getSimpleName() == partitioning
             and node.children().apply(0).output().isEmpty()]
 
-def _assert_zero_column_range_exchange(cpu_plan, plan):
-    """The rows > 0 check matters: a plan that produces no rows never reaches the sampler."""
-    exchanges = _zero_column_range_exchanges(plan)
-    assert exchanges, \
-        "Expected a GPU range-partitioning exchange over a zero-column child in:\n{}".format(plan)
-    for exchange in exchanges:
-        child = exchange.children().apply(0)
-        rows = plan_metric(child, "numOutputRows")
-        assert rows is not None, \
-            "Expected a numOutputRows metric on {}; is the metrics level high enough?:\n{}".format(
-                child.getClass().getSimpleName(), plan)
-        assert rows > 0, \
-            "Expected the zero-column child of the range exchange to produce rows, got {} in:\n{}".format(
-                rows, plan)
+def _assert_zero_column_exchange(partitioning):
+    """Asserts a GPU exchange with the given partitioning over a zero-column child with rows."""
+    def assert_plan(cpu_plan, plan):
+        exchanges = _zero_column_exchanges(plan, partitioning)
+        assert exchanges, \
+            "Expected a GPU {} exchange over a zero-column child in:\n{}".format(partitioning, plan)
+        for exchange in exchanges:
+            child = exchange.children().apply(0)
+            rows = plan_metric(child, "numOutputRows")
+            assert rows is not None, \
+                "Expected a numOutputRows metric on {}; is the metrics level high enough?:\n{}".format(
+                    child.getClass().getSimpleName(), plan)
+            assert rows > 0, \
+                "Expected the zero-column child of the exchange to produce rows, got {} in:\n{}".format(
+                    rows, plan)
+    return assert_plan
 
 @shuffle_test
 def test_range_partition_zero_column_scan(spark_tmp_path):
@@ -404,8 +406,8 @@ def test_range_partition_zero_column_scan(spark_tmp_path):
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         do_it,
-        conf = _zero_column_range_conf,
-        gpu_plan_assertion = _assert_zero_column_range_exchange)
+        conf = _zero_column_exchange_conf,
+        gpu_plan_assertion = _assert_zero_column_exchange('GpuRangePartitioning'))
 
 @shuffle_test
 def test_range_partition_zero_column_skewed_resample():
@@ -419,5 +421,23 @@ def test_range_partition_zero_column_skewed_resample():
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         do_it,
-        conf = _zero_column_range_conf,
-        gpu_plan_assertion = _assert_zero_column_range_exchange)
+        conf = _zero_column_exchange_conf,
+        gpu_plan_assertion = _assert_zero_column_exchange('GpuRangePartitioning'))
+
+@shuffle_test
+@pytest.mark.parametrize('num_parts', [4, 200])
+@pytest.mark.parametrize('by_partition', [False, True], ids=['count', 'by_partition'])
+def test_hash_partition_zero_column_literal_key(num_parts, by_partition):
+    # by_partition also checks which partition the rows land in, not just how many arrive.
+    def do_it(spark):
+        df = (spark.range(0, 4000, 1, 4).select(f.col('id').alias('payload'))
+              .select(f.lit(1).cast('long').alias('k'), f.col('payload'))
+              .repartition(num_parts, f.col('k')))
+        if by_partition:
+            df = df.groupBy(f.spark_partition_id().alias('part'))
+        return df.agg(f.count(f.lit(1)))
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        conf = _zero_column_exchange_conf,
+        gpu_plan_assertion = _assert_zero_column_exchange('GpuHashPartitioning'))

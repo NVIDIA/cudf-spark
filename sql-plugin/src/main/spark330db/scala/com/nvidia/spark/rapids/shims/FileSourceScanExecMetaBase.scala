@@ -19,6 +19,7 @@
 {"spark": "332db"}
 {"spark": "350db143"}
 {"spark": "400db173"}
+{"spark": "410db183"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
@@ -154,6 +155,6 @@ abstract class FileSourceScanExecMetaBase(plan: FileSourceScanExec,
       dataFilters,
       wrapped.tableIdentifier,
       wrapped.disableBucketedScan,
-      queryUsesInputFile = false)(conf)
+      queryUsesInputFile = false)(conf, StaticPartitionShims.getPartitionPlanningScan(wrapped))
   }
 }

@@ -111,10 +111,10 @@ abstract class GpuDeltaCatalogBase(
    * Constructs the Delta log used by CTAS and RTAS writes.
    *
    * Delta versions that carry catalog credentials or commit-coordinator state in the
-   * [[CatalogTable]] can override this hook and consume `existingTableOpt` and
+   * `CatalogTable` can override this hook and consume `existingTableOpt` and
    * `fileSystemOptions`. The default ignores both because the CPU catalogs of the older Delta
    * versions sharing this class build the write log from the table path alone; consuming them
-   * here would change which cached [[DeltaLog]] those versions resolve.
+   * here would change which cached `DeltaLog` those versions resolve.
    */
   protected def getDeltaLogForWrite(
       existingTableOpt: Option[CatalogTable],

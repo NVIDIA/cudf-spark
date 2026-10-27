@@ -26,7 +26,7 @@ import org.apache.spark.sql.{DataFrame, DataFrameWriter, SaveMode, SparkSession}
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.connector.catalog.StagingTableCatalog
 import org.apache.spark.sql.delta.{DeltaLog, DeltaOperations, DeltaOptions, DeltaUDF, Snapshot}
-import org.apache.spark.sql.delta.actions.Metadata
+import org.apache.spark.sql.delta.actions.{Metadata, Protocol}
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
 import org.apache.spark.sql.delta.commands.WriteIntoDelta
 import org.apache.spark.sql.execution.datasources.FileFormat
@@ -40,6 +40,9 @@ case class StartTransactionArg(log: DeltaLog, conf: RapidsConf, clock: Clock,
 trait DeltaRuntimeShim {
   def getDeltaConfigChecker: DeltaConfigChecker
   def getDeltaProvider: DeltaProvider
+
+  /** Unknown runtimes must not assume that a VARIANT table contains only unshredded files. */
+  def mayContainShreddedVariant(protocol: Protocol): Boolean = true
   def startTransaction(log: DeltaLog, conf: RapidsConf, clock: Clock)
   : GpuOptimisticTransactionBase = {
     startTransaction(StartTransactionArg(log, conf, clock))
@@ -196,6 +199,9 @@ object DeltaRuntimeShim {
   private[rapids] def getShimInstance: DeltaRuntimeShim = shimInstance
 
   def getDeltaProvider: DeltaProvider = shimInstance.getDeltaProvider
+
+  def mayContainShreddedVariant(protocol: Protocol): Boolean =
+    shimInstance.mayContainShreddedVariant(protocol)
 
   def getDeltaConfigChecker: DeltaConfigChecker = {
     shimInstance.getDeltaConfigChecker

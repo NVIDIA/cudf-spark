@@ -71,7 +71,7 @@ import org.apache.spark.sql.types.{BooleanType, LongType, StringType, StructFiel
  *
  * Phase 1: Find the input files in target that are touched by the rows that satisfy
  * the condition and verify that no two source rows match with the same target row.
- * This is implemented as an inner-join using the given condition. See [[findTouchedFiles]]
+ * This is implemented as an inner-join using the given condition. See `findTouchedFiles`
  * for more details.
  *
  * Phase 2: Read the touched files again and write new files with updated and/or inserted rows
@@ -582,8 +582,8 @@ class LowShuffleMergeExecutor(override val context: MergeExecutorContext) extend
    *
    * 1. Low shuffle merge algorithm requires generating metadata columns such as
    * [[METADATA_ROW_IDX_COL]], [[METADATA_ROW_DEL_COL]], which only implemented on
-   * [[org.apache.spark.sql.rapids.GpuFileSourceScanExec]]. That means we need to fallback to
-   * this normal executor when [[org.apache.spark.sql.rapids.GpuFileSourceScanExec]] is disabled
+   * `org.apache.spark.sql.rapids.GpuFileSourceScanExec`. That means we need to fallback to
+   * this normal executor when `org.apache.spark.sql.rapids.GpuFileSourceScanExec` is disabled
    * for some reason.
    * 2. Low shuffle merge algorithm currently needs to broadcast deletion vector, which may
    * introduce extra overhead. It maybe better to fallback to this algorithm when the changeset

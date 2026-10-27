@@ -51,10 +51,18 @@ spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
 
+import org.apache.spark.sql.execution.FileSourceScanExec
 import org.apache.spark.sql.execution.datasources.FilePartition
 import org.apache.spark.sql.execution.datasources.HadoopFsRelation
+import org.apache.spark.sql.rapids.GpuFileSourceScanExec
 
 object StaticPartitionShims {
+  def getPartitionPlanningScan(scan: FileSourceScanExec): Option[FileSourceScanExec] = None
+
+  def getPartitions(scan: GpuFileSourceScanExec): Option[Seq[FilePartition]] = {
+    getStaticPartitions(scan.relation)
+  }
+
   /** Get the static partitions associated with a relation, if any. */
   def getStaticPartitions(relation: HadoopFsRelation): Option[Seq[FilePartition]] = None
 }

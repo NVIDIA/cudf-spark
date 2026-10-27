@@ -31,6 +31,7 @@
 {"spark": "402"}
 {"spark": "403"}
 {"spark": "404"}
+{"spark": "410db183"}
 {"spark": "411"}
 {"spark": "412"}
 {"spark": "413"}
@@ -325,8 +326,19 @@ object GpuMergeRowsExec {
       condition.columnarEval(batch)
     }
 
-    def applyOutputs(batch: ColumnarBatch): Seq[ColumnarBatch] = {
-      outputs.map(output => GpuProjectExec.project(batch, output))
+    def applyOutputs(
+        batch: ColumnarBatch,
+        outputDataTypes: Array[DataType]): Seq[ColumnarBatch] = {
+      outputs.map { output =>
+        // Spark InternalRow merge actions can have different widths, as with Iceberg row lineage.
+        // cuDF concatenation requires equal schemas, so materialize omitted trailing fields.
+        val paddedOutput = if (output.length == outputDataTypes.length) {
+          output
+        } else {
+          output ++ outputDataTypes.drop(output.length).map(GpuLiteral(null, _))
+        }
+        GpuProjectExec.project(batch, paddedOutput)
+      }
     }
 
     override def nullable: Boolean = false
@@ -393,6 +405,16 @@ class GpuMergeBatchIterator(
     mergeMetrics: GpuMergeRowsExec.MergeRowMetrics) extends Iterator[ColumnarBatch] {
 
   import GpuMergeRowsExec.MergeRowMetrics
+
+  private val outputDataTypes: Array[DataType] = {
+    val instructionOutputs = (matchedInstructionExecs ++ notMatchedInstructionExecs ++
+      notMatchedBySourceInstructionExecs).flatMap(_.outputs)
+    if (instructionOutputs.isEmpty) {
+      Array.empty[DataType]
+    } else {
+      instructionOutputs.maxBy(_.length).map(_.dataType).toArray
+    }
+  }
 
   // Skip staging/publish work before Spark 4.1 where WriteSummary is unused.
   private val writeSummaryEnabled: Boolean = GpuMergeRowMetricsShims.writeSummaryEnabled
@@ -518,7 +540,7 @@ class GpuMergeBatchIterator(
           if (writeSummaryEnabled) {
             attemptMetrics.record(instructionExec, filtered.numRows(), sourcePresent)
           }
-          outputs ++= instructionExec.applyOutputs(filtered)
+          outputs ++= instructionExec.applyOutputs(filtered, outputDataTypes)
             .map(SpillableColumnarBatch
               .apply(_, SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
         }
@@ -529,4 +551,3 @@ class GpuMergeBatchIterator(
       sourcePresent, attemptMetrics)
   }
 }
-

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -61,6 +61,10 @@ trait GpuMapInBatchExec extends ShimUnaryExecNode with GpuPythonExecBase {
     val chainedFunc = Seq((ChainedPythonFunctions(Seq(udf.func)), udf.resultId.id))
     val sessionLocalTimeZone = conf.sessionLocalTimeZone
     val pythonRunnerConf = ArrowUtilsShim.getPythonRunnerConfMap(conf)
+    val udfLogMaxEntries =
+      conf.getConfString("spark.sql.pyspark.udf.logging.maxEntries", "0").toInt
+    val udfLogLevel =
+      conf.getConfString("spark.sql.pyspark.udf.logging.logLevel", "WARNING")
     val isPythonOnGpuEnabled = GpuPythonHelper.isPythonOnGpuEnabled(conf)
     val localOutput = output
     val localBatchSize = batchSize
@@ -99,7 +103,9 @@ trait GpuMapInBatchExec extends ShimUnaryExecNode with GpuPythonExecBase {
           sessionLocalTimeZone,
           pythonRunnerConf,
           localBatchSize,
-          GpuColumnVector.structFromAttributes(localOutput.asJava)) {
+          GpuColumnVector.structFromAttributes(localOutput.asJava),
+          udfLogMaxEntries = udfLogMaxEntries,
+          udfLogLevel = udfLogLevel) {
         override def toBatch(table: Table): ColumnarBatch = {
           BatchGroupedIterator.extractChildren(table, localOutput)
         }

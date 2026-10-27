@@ -44,6 +44,8 @@ class GpuWindowArrowPythonRunner(
     batchSize: Long,
     override val pythonOutSchema: StructType,
     argNames: Option[Array[Array[Option[String]]]] = None,
+    udfLogMaxEntries: Int = 0,
+    udfLogLevel: String = "WARNING",
     jobArtifactUUID: Option[String] = None)
   extends GpuBasePythonRunner[ColumnarBatch](funcs.map(_._1), evalType, argOffsets,
     jobArtifactUUID) with GpuArrowPythonOutput with GpuPythonRunnerCommon {
@@ -60,12 +62,14 @@ class GpuWindowArrowPythonRunner(
 
       val arrowWriter = new GpuArrowPythonWriter(pythonInSchema, batchSize) {
         override protected def writeUDFs(dataOut: DataOutputStream): Unit = {
-          WritePythonUDFUtils.writeUDFs(dataOut, funcs, argOffsets, argNames)
+          WritePythonUDFUtils.writeUDFs(dataOut, funcs, argOffsets, argNames,
+            udfLogMaxEntries = udfLogMaxEntries, udfLogLevel = udfLogLevel)
         }
       }
 
       protected override def writeCommand(dataOut: DataOutputStream): Unit = {
-        WritePythonUDFUtils.writeUDFs(dataOut, funcs, argOffsets, argNames)
+        WritePythonUDFUtils.writeUDFs(dataOut, funcs, argOffsets, argNames,
+          udfLogMaxEntries = udfLogMaxEntries, udfLogLevel = udfLogLevel)
       }
 
       override def writeNextInputToStream(dataOut: DataOutputStream): Boolean = {

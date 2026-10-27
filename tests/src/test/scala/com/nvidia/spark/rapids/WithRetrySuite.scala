@@ -16,7 +16,9 @@
 
 package com.nvidia.spark.rapids
 
-import ai.rapids.cudf.{Rmm, RmmAllocationMode, RmmEventHandler, Table}
+import java.util.concurrent.atomic.AtomicReference
+
+import ai.rapids.cudf.{DeviceMemoryBuffer, Rmm, RmmAllocationMode, RmmEventHandler, Table}
 import com.nvidia.spark.Retryable
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitSpillableInHalfByRows, splitTargetSizeInHalfGpu, withRestoreOnRetry, withRetry, withRetryNoSplit}
@@ -29,6 +31,7 @@ import org.scalatestplus.mockito.MockitoSugar
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.types.{DataType, LongType}
@@ -52,6 +55,58 @@ class WithRetrySuite
   private def buildRowsOnlyBatch(numRows: Int): SpillableColumnarBatch =
     spy(SpillableColumnarBatch(new ColumnarBatch(Array.empty[SparkColumnVector], numRows), -1))
   
+  private def runOnNewTaskThread(taskAttemptId: Long)(body: => Unit): Unit = {
+    val failure = new AtomicReference[Throwable]()
+    val thread = new Thread(new Runnable {
+      override def run(): Unit = {
+        val context = new MockTaskContext(taskAttemptId, partitionId = 0)
+        TrampolineUtil.setTaskContext(context)
+        try {
+          body
+        } catch {
+          case t: Throwable => failure.set(t)
+        } finally {
+          try {
+            context.markTaskComplete()
+          } catch {
+            case t: Throwable => failure.compareAndSet(null, t)
+          }
+          RmmSpark.removeAllCurrentThreadAssociation()
+          TrampolineUtil.unsetTaskContext()
+        }
+      }
+    })
+    thread.start()
+    var timedOut = false
+    try {
+      thread.join(10000)
+      timedOut = thread.isAlive
+    } finally {
+      if (thread.isAlive) {
+        thread.interrupt()
+        thread.join()
+      }
+    }
+    assert(!timedOut, "task thread did not finish")
+    val thrown = failure.get()
+    if (thrown != null) {
+      throw thrown
+    }
+  }
+
+  private def countAttemptsWithInjectedGpuOOM(): Int = {
+    val sqlConf = new SQLConf()
+    sqlConf.setConfString(RapidsConf.TEST_RETRY_OOM_INJECTION_MODE.key, "type=GPU")
+    var attempts = 0
+    SQLConf.withExistingConf(sqlConf) {
+      withRetryNoSplit {
+        attempts += 1
+        withResource(DeviceMemoryBuffer.allocate(1))(_ => ())
+      }
+    }
+    attempts
+  }
+
   private var rmmWasInitialized = false
 
   override def beforeEach(): Unit = {
@@ -73,6 +128,37 @@ class WithRetrySuite
     RmmSpark.clearEventHandler()
     if (rmmWasInitialized) {
       Rmm.shutdown()
+    }
+  }
+
+  test("OOM injection does not classify an unknown task-context thread as dedicated") {
+    val taskAttemptId = 101L
+    runOnNewTaskThread(taskAttemptId) {
+      assert(!RmmSpark.isThreadWorkingOnTaskAsPoolThread)
+      assert(!TaskRegistryTracker.isCurrentThreadRegisteredAsDedicatedTaskThread)
+
+      val attempts = countAttemptsWithInjectedGpuOOM()
+
+      RmmSpark.poolThreadWorkingOnTask(taskAttemptId)
+      assert(RmmSpark.isThreadWorkingOnTaskAsPoolThread)
+      assertResult(1)(attempts)
+    }
+  }
+
+  test("OOM injection remains enabled on registered pool threads") {
+    val taskAttemptId = 102L
+    runOnNewTaskThread(taskAttemptId) {
+      RmmSpark.poolThreadWorkingOnTask(taskAttemptId)
+      assert(countAttemptsWithInjectedGpuOOM() > 1)
+    }
+  }
+
+  test("OOM injection remains enabled on registered dedicated task threads") {
+    val taskAttemptId = 103L
+    runOnNewTaskThread(taskAttemptId) {
+      TaskRegistryTracker.registerDedicatedThreadForRetry()
+      assert(TaskRegistryTracker.isCurrentThreadRegisteredAsDedicatedTaskThread)
+      assert(countAttemptsWithInjectedGpuOOM() > 1)
     }
   }
 
@@ -484,6 +570,44 @@ class WithRetrySuite
       }
       assert(values == Seq(Some(5L), None, Some(3L), Some(1L), Some(9L)))
     }
+    assert(Rmm.getTotalBytesAllocated == baseline)
+  }
+
+  test("splitSpillableInHalfByRows releases split tables when type lookup fails") {
+    val baseline = Rmm.getTotalBytesAllocated
+    val toSplit = buildBatch
+    doThrow(new IllegalStateException("type lookup failed")).when(toSplit).dataTypes
+    intercept[IllegalStateException] {
+      splitSpillableInHalfByRows(toSplit)
+    }
+    verify(toSplit, times(1)).close()
+    assert(Rmm.getTotalBytesAllocated == baseline)
+  }
+
+  test("splitSpillableInHalfByRows releases split tables when input close fails") {
+    val baseline = Rmm.getTotalBytesAllocated
+    val toSplit = buildBatch
+    doAnswer(invocation => {
+      invocation.callRealMethod()
+      throw new IllegalStateException("input close failed")
+    }).when(toSplit).close()
+    intercept[IllegalStateException] {
+      splitSpillableInHalfByRows(toSplit)
+    }
+    verify(toSplit, times(1)).close()
+    assert(Rmm.getTotalBytesAllocated == baseline)
+  }
+
+  test("splitSpillableInHalfByRows closes a one-row GPU batch") {
+    val baseline = Rmm.getTotalBytesAllocated
+    val toSplit = withResource(new Table.TestBuilder()
+      .column(Array[java.lang.Long](5L): _*).build()) { table =>
+      spy(SpillableColumnarBatch(GpuColumnVector.from(table, Array[DataType](LongType)), -1))
+    }
+    intercept[GpuSplitAndRetryOOM] {
+      splitSpillableInHalfByRows(toSplit)
+    }
+    verify(toSplit, times(1)).close()
     assert(Rmm.getTotalBytesAllocated == baseline)
   }
 
