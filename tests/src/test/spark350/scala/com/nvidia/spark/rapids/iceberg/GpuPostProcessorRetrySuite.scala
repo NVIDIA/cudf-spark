@@ -35,7 +35,6 @@ import scala.collection.JavaConverters._
 import com.nvidia.spark.rapids.{GpuColumnVector, RmmSparkRetrySuiteBase}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.iceberg.parquet._
-import com.nvidia.spark.rapids.iceberg.parquet.converter.FromIcebergShaded.unshade
 import com.nvidia.spark.rapids.jni.RmmSpark
 import com.nvidia.spark.rapids.parquet.ParquetFileInfoWithBlockMeta
 import org.apache.hadoop.fs.Path
@@ -92,7 +91,7 @@ class GpuPostProcessorRetrySuite extends RmmSparkRetrySuiteBase {
       filePath = new Path("/test/file.parquet"),
       blocks = blocks,
       partValues = InternalRow.empty,
-      schema = unshade(parquetSchema),
+      schema = ShimUtils.getParquetUnshader().unshade(parquetSchema),
       readSchema = StructType(Seq.empty),
       dateRebaseMode = null,
       timestampRebaseMode = null,

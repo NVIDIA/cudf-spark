@@ -16,6 +16,7 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark": "401"}
+{"spark": "402"}
 {"spark": "411"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.delta.rapids
@@ -32,6 +33,7 @@ import org.apache.spark.{SparkConf, SparkException}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{Dataset, Row, SaveMode}
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Literal}
+import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.delta.{DeltaLog, DeltaOptions, NumRecordsStats}
 import org.apache.spark.sql.delta.commands.{WriteIntoDelta, WriteIntoDeltaLike}
 import org.apache.spark.sql.delta.schema.ImplicitMetadataOperation
@@ -344,9 +346,8 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
         val resolvedOptions = getWriterOptions.invoke(txn, Some(writeOptions))
           .asInstanceOf[Map[String, String]]
 
-        assert(resolvedOptions.exists { case (key, value) =>
-          key.equalsIgnoreCase(parquetOutputTimestampType) && value == "TIMESTAMP_MICROS"
-        })
+        assert(CaseInsensitiveMap(resolvedOptions)(parquetOutputTimestampType) ==
+          "TIMESTAMP_MICROS")
         assert(resolvedOptions(parquetWriterVersion) == "v1")
 
         val encodeVariantStatsIfNeeded = txn.getClass.getDeclaredMethods
