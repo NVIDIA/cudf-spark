@@ -950,6 +950,57 @@ def test_iceberg_v3_shredded_variant_read_fallback(
 
 @iceberg
 @ignore_order(local=True)
+@incompat
+@allow_non_gpu_conditional(is_not_utc(), "ProjectExec", "VariantGet")
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.skipif(not is_spark_411_or_later(),
+                    reason="Iceberg Variant requires Spark 4.1.1+")
+def test_iceberg_v3_nested_variant_read(spark_tmp_table_factory):
+    table = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_table(spark):
+        spark.sql(
+            f"CREATE TABLE {table} (id INT, payload STRUCT<v: VARIANT>, "
+            "items ARRAY<VARIANT>, attributes MAP<STRING, VARIANT>) USING ICEBERG "
+            "TBLPROPERTIES ('format-version' = '3')")
+        spark.sql(f"""
+            INSERT INTO {table}
+            SELECT id,
+              named_struct('v', parse_json(payload_json)),
+              array(parse_json(item_object_json), parse_json(item_array_json)),
+              map('object', parse_json(attribute_object_json),
+                  'array', parse_json(attribute_array_json))
+            FROM VALUES
+              (0, '{{"x":1}}', '{{"x":10}}', '[20]', '{{"x":30}}', '[40]'),
+              (1, '{{}}', 'null', '[]', '{{}}', '[]'),
+              (2, NULL, NULL, 'null', NULL, 'null')
+            AS source(id, payload_json, item_object_json, item_array_json,
+                      attribute_object_json, attribute_array_json)
+            """)
+
+    with_cpu_session(setup_table, conf=_ICEBERG_VARIANT_READ_CONF)
+
+    def read_table(spark):
+        return spark.sql(f"""
+            SELECT id,
+              try_variant_get(payload.v, '$.x', 'int') AS struct_x,
+              try_variant_get(items[0], '$.x', 'int') AS array_object_x,
+              try_variant_get(items[1], '$[0]', 'int') AS array_value,
+              try_variant_get(attributes['object'], '$.x', 'int') AS map_object_x,
+              try_variant_get(attributes['array'], '$[0]', 'int') AS map_array_value
+            FROM {table}
+            """)
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        read_table,
+        exist_classes="GpuBatchScanExec,GpuVariantGet",
+        non_exist_classes="BatchScanExec,GpuRowToColumnarExec,HostColumnarToGpu",
+        conf=_ICEBERG_VARIANT_READ_CONF,
+        require_non_empty=True)
+
+
+@iceberg
+@ignore_order(local=True)
 @pytest.mark.skipif(
     not supports_iceberg_row_lineage_inheritance,
     reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
