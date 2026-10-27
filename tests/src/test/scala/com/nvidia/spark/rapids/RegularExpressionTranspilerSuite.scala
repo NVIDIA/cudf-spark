@@ -803,6 +803,40 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     assertCpuGpuMatchesRegexpReplace(replacePatterns, inputs)
   }
 
+  test("quantified escaped literals") {
+    // see https://github.com/NVIDIA/cudf-spark/issues/16157
+    // escaped metacharacters stay escaped
+    Seq(raw"\|*", raw"\.+", raw"\*?", raw"\\{2}", "\\$+", raw"\^{2,}", raw"\(+", raw"\)+",
+        raw"\[+", raw"\]+", raw"\{+", raw"\}+", raw"\?+", raw"\++",
+        raw"(\.\|)+", raw"(\.|\|)+").foreach { pattern =>
+      doTranspileTest(pattern, pattern)
+    }
+    // other escaped punctuation is emitted unescaped
+    doTranspileTest(raw"\@*", "@*")
+    doTranspileTest(raw"\-+", "-+")
+    doTranspileTest(raw"\/{2}", "/{2}")
+    doTranspileTest(raw"(\~\#)+", "(~#)+")
+    // the original report: regexp_extract(col, '\\|*', 0)
+    doTranspileTest(raw"\|*", raw"\|*", 0)
+
+    // anchors, boundaries, and linebreaks are still not quantifiable
+    Seq(raw"a\A*", raw"a\Z?", raw"a\b+", raw"a\B{2}", raw"a\R+").foreach { pattern =>
+      assertUnsupported(pattern, RegexFindMode, "Preceding token cannot be quantified")
+    }
+
+    val inputs = Seq("", "a", "ab", "|", "a||b", "a|b|", "..", "a.b..c", "**", "\\\\", "$$",
+        "^^", "(())", "[[]]", "{{}}", "??", "++", "@@", "--", "//", "~#~#", ".|.|", "a\n|\r\n.")
+    val findPatterns = Seq(raw"a\|*b", raw"\|+", raw"\.{2,}", raw"\*+", raw"\\+", "\\$+",
+        raw"\^{2}", raw"\(+\)+", raw"\[+\]+", raw"\{+\}+", raw"\?+", raw"\++", raw"\@+",
+        raw"\-{2}", raw"\/+", raw"(\~\#)+", raw"(\.|\|)+", raw"(\|+)")
+    // * and ? omitted from replace: empty-match semantics differ (see issue 4884)
+    val replacePatterns = Seq(raw"\|+", raw"\.{2,3}", raw"\\+", "\\$+", raw"\(+\)+", raw"\@+",
+        raw"(\.|\|)+", raw"(\|+)")
+    assertCpuGpuMatchesRegexpFind(findPatterns, inputs)
+    assertCpuGpuMatchesRegexpReplace(replacePatterns, inputs)
+    doStringSplitTest(Set(raw"\|+", raw"\.{2}", raw"\@+"), inputs, limit = -1)
+  }
+
   test("dot matches CR on GPU but not on CPU") {
     // see https://github.com/rapidsai/cudf/issues/9619
     val pattern = "1."

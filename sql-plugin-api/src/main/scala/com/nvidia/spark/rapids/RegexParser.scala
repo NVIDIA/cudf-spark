@@ -906,6 +906,7 @@ class CudfRegexTranspiler(mode: RegexMode) {
     e match {
       case RegexEscaped(ch) => ch match {
         case 'd' | 'D' | 'w' | 'W' | 's' | 'S' | 'h' | 'H' | 'v' | 'V' => None
+        case c if regexMetaChars.contains(c) || regexPunct.contains(c) => None  // escaped literal
         case _ => Some(e)
       }
       case RegexChar(a) if "$^".contains(a) =>

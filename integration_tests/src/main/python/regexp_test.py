@@ -1018,6 +1018,41 @@ def test_regexp_quantified_digit_word():
         ),
         conf=_regexp_conf)
 
+def test_regexp_quantified_escaped_literals():
+    # https://github.com/NVIDIA/cudf-spark/issues/16157
+    gen = mk_str_gen('[a-c]{0,2}[|.*+?$^(){}\\[\\]\\\\@~/-]{0,6}[a-c]{0,2}') \
+        .with_special_case('a||b..c') \
+        .with_special_case('a\n|\r\n.')
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: unary_op_df(spark, gen).selectExpr(
+            'rlike(a, "a\\\\|*b")',
+            'rlike(a, "\\\\|+")',
+            'rlike(a, "\\\\.{2,}")',
+            'rlike(a, "\\\\*+")',
+            'rlike(a, "\\\\\\\\+")',
+            'rlike(a, "\\\\$+")',
+            'rlike(a, "\\\\^{2}")',
+            'rlike(a, "\\\\(+\\\\)+")',
+            'rlike(a, "\\\\[+\\\\]+")',
+            'rlike(a, "\\\\{+\\\\}+")',
+            'rlike(a, "\\\\?+")',
+            'rlike(a, "\\\\++")',
+            'rlike(a, "\\\\@+")',
+            'rlike(a, "\\\\-{2}")',
+            'rlike(a, "(\\\\.|\\\\|)+")',
+            'regexp_extract(a, "\\\\|*", 0)',
+            'regexp_extract(a, "(\\\\|+)", 1)',
+            'regexp_extract(a, "([a-c]+)(\\\\.+)", 2)',
+            'regexp_extract(a, "(\\\\~\\\\/)+", 0)',
+            'regexp_replace(a, "\\\\|+", "#")',
+            'regexp_replace(a, "\\\\.{2,3}", "#")',
+            'regexp_replace(a, "(\\\\*|\\\\?)+", "#")',
+            'regexp_replace(a, "\\\\~+", "#")',
+            'split(a, "\\\\|+", -1)',
+            'split(a, "\\\\.{2}", -1)',
+        ),
+        conf=_regexp_conf)
+
 def test_predefined_character_classes():
     gen = mk_str_gen('[a-zA-Z]{0,2}[\r\n!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~]{0,2}[0-9]{0,2}')
     assert_gpu_and_cpu_are_equal_collect(
