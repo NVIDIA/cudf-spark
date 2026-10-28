@@ -31,7 +31,7 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read._
 import org.apache.spark.sql.delta.serverSidePlanning._
-import org.apache.spark.sql.execution.datasources.FilePartition
+import org.apache.spark.sql.execution.datasources.{FilePartition, PartitionedFile}
 import org.apache.spark.sql.sources.{And, EqualTo, Filter, GreaterThan}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -53,6 +53,14 @@ class ServerSidePlannedScanSuite extends AnyFunSuite {
       plan
     }
     override def close(): Unit = { closes += 1 }
+  }
+
+  private def withSpark[T](confs: (String, String)*)(f: SparkSession => T): T = {
+    val builder = SparkSession.builder().master("local[2]").appName("server-side-scan-test")
+      .config("spark.ui.enabled", "false")
+    confs.foreach { case (k, v) => builder.config(k, v) }
+    val spark = builder.getOrCreate()
+    try f(spark) finally spark.stop()
   }
 
   test("both providers retain upstream V2 rules alongside the server-side scan rule") {
@@ -77,26 +85,29 @@ class ServerSidePlannedScanSuite extends AnyFunSuite {
     val client = new Client(plan)
     val required = StructType(Seq(schema("nested")))
     val filters: Array[Filter] = Array(EqualTo("id", 7), GreaterThan("id", 3))
-    val cpu = new ServerSidePlannedScan(null, "catalog.db", "table", schema, client,
-      filters, required, Some(5))
-    val access = new ServerSidePlannedScanAccess(cpu)
-    val gpu = GpuServerSidePlannedScan(cpu, access, new RapidsConf(Map.empty[String, String]))
-    assert(client.calls == 0) // Constructing/tagging the adapter must not contact the server.
-    assert(access.tableSchema == schema)
-    assert(gpu.readSchema() == required)
-    assert(access.plan eq plan) // Also exercise factory-before-partitions ordering.
-    assert(gpu.planInputPartitions().toSeq == cpu.planInputPartitions().toSeq)
-    assert(gpu.planInputPartitions().toSeq == Seq(
-      ServerSidePlannedFileInputPartition("s3a://bucket/a%20b.parquet", 123, "PARQUET")))
-    assert(client.request.contains(("catalog.db", "table", Some(And(filters(0), filters(1))),
-      Some(Seq("nested.`a.b`")), Some(5))))
-    assert(client.calls == 1)
-    assert(client.closes == 1)
-    val conf = new Configuration(false)
-    access.plan.credentials.foreach(_.configure(conf))
-    assert(conf.get("fs.s3a.session.token") == "temporary-test-token")
-    assert(conf.getBoolean("fs.s3a.impl.disable.cache", false))
-    assert(gpu.withInputFile() eq gpu)
+    withSpark() { spark =>
+      val cpu = new ServerSidePlannedScan(spark, "catalog.db", "table", schema, client,
+        filters, required, Some(5))
+      val access = new ServerSidePlannedScanAccess(cpu)
+      val gpu = GpuServerSidePlannedScan(cpu, access, new RapidsConf(Map.empty[String, String]))
+      assert(client.calls == 0) // Constructing/tagging the adapter must not contact the server.
+      assert(access.tableSchema == schema)
+      assert(gpu.readSchema() == required)
+      assert(access.plan eq plan) // Also exercise factory-before-partitions ordering.
+      val partitions = gpu.planInputPartitions().map(_.asInstanceOf[FilePartition])
+      assert(partitions.length == 1)
+      assert(partitions.head.files.map(f => (f.filePath, f.start, f.length)).toSeq ==
+        Seq((SparkPath.fromPathString("s3a://bucket/a%20b.parquet"), 0L, 123L)))
+      assert(client.request.contains(("catalog.db", "table", Some(And(filters(0), filters(1))),
+        Some(Seq("nested.`a.b`")), Some(5))))
+      assert(client.calls == 1)
+      assert(client.closes == 1)
+      val conf = new Configuration(false)
+      access.plan.credentials.foreach(_.configure(conf))
+      assert(conf.get("fs.s3a.session.token") == "temporary-test-token")
+      assert(conf.getBoolean("fs.s3a.impl.disable.cache", false))
+      assert(gpu.withInputFile() eq gpu)
+    }
   }
 
   test("scan equality depends only on the original Delta scan") {
@@ -119,17 +130,19 @@ class ServerSidePlannedScanSuite extends AnyFunSuite {
 
   test("empty plans and full projections preserve Delta's planning semantics") {
     val client = new Client(ScanPlan(Seq.empty))
-    val cpu = new ServerSidePlannedScan(null, "db", "table", schema, client,
-      Array.empty, schema, None)
-    val gpu = GpuServerSidePlannedScan(cpu, new ServerSidePlannedScanAccess(cpu),
-      new RapidsConf(Map.empty[String, String]))
-    assert(gpu.planInputPartitions().isEmpty)
-    assert(client.request.contains(("db", "table", None, None, None)))
-    assert(client.calls == 1)
-    assert(client.closes == 1)
+    withSpark() { spark =>
+      val cpu = new ServerSidePlannedScan(spark, "db", "table", schema, client,
+        Array.empty, schema, None)
+      val gpu = GpuServerSidePlannedScan(cpu, new ServerSidePlannedScanAccess(cpu),
+        new RapidsConf(Map.empty[String, String]))
+      assert(gpu.planInputPartitions().isEmpty)
+      assert(client.request.contains(("db", "table", None, None, None)))
+      assert(client.calls == 1)
+      assert(client.closes == 1)
+    }
   }
 
-  test("reader adapter preserves whole file ranges and rejects unsupported formats") {
+  test("reader adapter delegates file partitions and rejects unsupported formats") {
     var received: Option[FilePartition] = None
     val delegate = new PartitionReaderFactory {
       override def createReader(p: InputPartition): PartitionReader[InternalRow] =
@@ -140,16 +153,14 @@ class ServerSidePlannedScanSuite extends AnyFunSuite {
       }
     }
     val factory = new ServerSidePlannedGpuReaderFactory(delegate)
-    val partition = ServerSidePlannedFileInputPartition("file:/tmp/a%20b.parquet", 987, "PaRqUeT")
-    assert(factory.supportColumnarReads(partition))
-    factory.createColumnarReader(partition)
-    val file = received.get.files.head
-    assert(file.filePath == SparkPath.fromPathString(partition.filePath))
-    assert(file.start == 0)
-    assert(file.length == 987)
-    assert(file.partitionValues.numFields == 0)
+    val partition = ServerSidePlannedFileInputPartition("file:/tmp/a%20b.parquet", 987, "orc")
+    val files = FilePartition(0, Array(PartitionedFile(InternalRow.empty,
+      SparkPath.fromPathString(partition.filePath), 0, 987)))
+    assert(factory.supportColumnarReads(files))
+    factory.createColumnarReader(files)
+    assert(received.get eq files)
     intercept[UnsupportedOperationException] {
-      factory.createColumnarReader(partition.copy(fileFormat = "orc"))
+      factory.createColumnarReader(partition)
     }
     intercept[IllegalStateException] { factory.createReader(partition) }
   }
@@ -245,6 +256,43 @@ class ServerSidePlannedScanSuite extends AnyFunSuite {
       }
     } finally {
       spark.stop()
+    }
+  }
+
+  test("small files are packed and large files split into ranges") {
+    withSpark("spark.sql.files.maxPartitionBytes" -> "100",
+        "spark.sql.files.openCostInBytes" -> "10",
+        "spark.sql.files.minPartitionNum" -> "1") { spark =>
+      def planned(files: Seq[ScanFile]) = {
+        val cpu = new ServerSidePlannedScan(spark, "db", "table", schema,
+          new Client(ScanPlan(files)), Array.empty, schema, None)
+        GpuServerSidePlannedScan(cpu, new ServerSidePlannedScanAccess(cpu),
+          new RapidsConf(Map.empty[String, String])).planInputPartitions()
+          .map(_.asInstanceOf[FilePartition].files.map(f => (f.filePath.urlEncoded, f.start,
+            f.length)).toSeq).toSeq
+      }
+      // Four 30 byte files cost 40 each, so two fit per 100 byte partition.
+      val small = (1 to 4).map(i => ScanFile(s"file:/t/$i.parquet", 30, "parquet"))
+      assert(planned(small).map(_.size) == Seq(2, 2))
+      // A 250 byte file is split into 100, 100 and 50 byte ranges; ranges cover it exactly.
+      val ranges = planned(Seq(ScanFile("file:/t/big.parquet", 250, "parquet"))).flatten
+      assert(ranges.map(r => (r._2, r._3)).sorted == Seq((0L, 100L), (100L, 100L), (200L, 50L)))
+      // An empty file is retained so the reader reports it as Delta would.
+      assert(planned(Seq(ScanFile("file:/t/e.parquet", 0, "parquet"))).flatten.map(_._3) ==
+        Seq(0L))
+    }
+  }
+
+  test("non-Parquet manifests keep Delta's partitions") {
+    withSpark() { spark =>
+      val files = Seq(ScanFile("file:/t/a.parquet", 1, "parquet"),
+        ScanFile("file:/t/b.orc", 1, "orc"))
+      val cpu = new ServerSidePlannedScan(spark, "db", "table", schema,
+        new Client(ScanPlan(files)), Array.empty, schema, None)
+      val gpu = GpuServerSidePlannedScan(cpu, new ServerSidePlannedScanAccess(cpu),
+        new RapidsConf(Map.empty[String, String]))
+      assert(gpu.planInputPartitions().forall(_.isInstanceOf[ServerSidePlannedFileInputPartition]))
+      assert(gpu.planInputPartitions().length == 2)
     }
   }
 
