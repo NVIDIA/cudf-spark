@@ -21,7 +21,7 @@ import java.util.concurrent.TimeUnit
 import scala.collection.mutable
 import scala.io.Source
 
-import com.nvidia.spark.rapids.shims.EventLogJsonShims
+import com.nvidia.spark.rapids.shims.{EventLogJsonShims, SparkShimImpl}
 import org.json4s._
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
@@ -31,6 +31,7 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, QueryStageExec, ShuffleQueryStageExec}
 import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
 import org.apache.spark.sql.functions._
+import org.apache.spark.sql.rapids.GpuInMemoryTableScanExec
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 
 class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach {
@@ -56,6 +57,7 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
       .set("spark.rapids.sql.batchSizeBytes", "65536")
       .set("spark.eventLog.enabled", "true")
       .set("spark.plugins", "com.nvidia.spark.SQLPlugin")
+      .set("spark.sql.cache.serializer", "com.nvidia.spark.ParquetCachedBatchSerializer")
       .set("spark.eventLog.dir", eventLogDir.getAbsolutePath)
       .set("spark.eventLog.rolling.enabled", "false") // Keep single file for easier parsing
     spark = SparkSession.builder().config(conf).getOrCreate()
@@ -857,6 +859,51 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
         "exchange's \"op time (shuffle read)\" metric (so it is excluded from the consumer's " +
         "op time); it was missing, so the shuffle-read time would be double-counted. " +
         s"Collected ${descendants.size} descendant op-time metrics.")
+  }
+
+  test("cached scan op time is excluded from consumers across AQE table cache stages") {
+    spark.conf.set("spark.rapids.sql.exec.opTimeTrackingRDD.enabled", "true")
+
+    // Spark 3.5.2+ wraps the cached relation's scan in a TableCacheQueryStageExec, a
+    // LeafExecNode whose children are empty. A consumer's descendant-op-time walk only
+    // reaches the scan's op time metric if it descends through that wrapper.
+    val cached = spark.range(0, 200000L, 1, 8)
+      .selectExpr("id", "id % 100 as k", "cast(id as string) as s").cache()
+    cached.count() // materialize the cache
+    val resultDF = cached.where("k = 7")
+    assert(resultDF.collect().nonEmpty, "Query should produce results")
+
+    val executed = resultDF.queryExecution.executedPlan match {
+      case a: AdaptiveSparkPlanExec => a.executedPlan
+      case other => other
+    }
+    val finalPlan = executed match {
+      case q: QueryStageExec => q.plan
+      case other => other
+    }
+
+    // The consumer is the GpuExec whose child is the cached scan, possibly wrapped.
+    def scanOf(p: org.apache.spark.sql.execution.SparkPlan): Option[GpuInMemoryTableScanExec] =
+      SparkShimImpl.getTableCacheNonQueryStagePlan(p).getOrElse(p) match {
+        case s: GpuInMemoryTableScanExec => Some(s)
+        case _ => None
+      }
+    val consumers = finalPlan.collect {
+      case c: GpuExec if c.children.exists(scanOf(_).isDefined) => c
+    }
+    assert(consumers.nonEmpty,
+      s"expected a GpuExec consuming a GpuInMemoryTableScanExec; plan was:\n$finalPlan")
+    val consumer = consumers.head
+    val scan = consumer.children.flatMap(scanOf).head
+    val scanMetric = scan.getOpTimeNewMetric
+    assert(scanMetric.isDefined, "GpuInMemoryTableScanExec should expose an OP_TIME_NEW metric")
+
+    val descendants = consumer.getDescendantOpTimeMetrics
+    assert(descendants.exists(_ eq scanMetric.get),
+      s"${consumer.nodeName}.getDescendantOpTimeMetrics must include the cached scan's " +
+        "op time metric (so it is excluded from the consumer's op time); it was missing, " +
+        s"so the scan time would be double-counted. Collected ${descendants.size} " +
+        "descendant op-time metrics.")
   }
 
 }
