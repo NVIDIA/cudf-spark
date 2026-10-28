@@ -13,7 +13,7 @@ The accelerator is built upon the [cuDF project](https://github.com/rapidsai/cud
 The cuDF plugin requires each worker node in the cluster to have an NVIDIA GPU and the [NVIDIA
 driver](https://www.nvidia.com/en-us/drivers/) installed.
 
-The cuDF plugin consists of the rapids-4-spark plugin jar.  The jar is either preinstalled in the Spark
+The cuDF plugin is distributed as a JAR.  The jar is either preinstalled in the Spark
 classpath on all nodes or submitted with each job that uses the cuDF plugin. See the
 [getting-started
 guide](https://docs.nvidia.com/spark-rapids/user-guide/latest/getting-started/overview.html) for

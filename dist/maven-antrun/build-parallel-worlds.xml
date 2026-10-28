@@ -150,7 +150,7 @@
         <resources id="aggregatorDependencyRegexWithoutWhitespace">
             <string>&lt;dependency&gt;</string>
             <string>&lt;groupId&gt;com.nvidia&lt;/groupId&gt;</string>
-            <string>&lt;artifactId&gt;rapids-4-spark-aggregator_\S+?&lt;/artifactId&gt;</string>
+            <string>&lt;artifactId&gt;cudf-spark-aggregator_\S+?&lt;/artifactId&gt;</string>
             <string>&lt;version&gt;\S+?&lt;/version&gt;</string>
             <string>&lt;classifier&gt;\S+?&lt;/classifier&gt;</string>
             <string>&lt;scope&gt;\S+?&lt;/scope&gt;</string>

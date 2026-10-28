@@ -434,7 +434,7 @@ class IcebergPackagePrivateAccessTest(unittest.TestCase):
     def test_aggregator_runtime_discovery_is_fail_closed(self):
         with temporary_directory() as root:
             aggregator = os.path.join(root, "aggregator.jar")
-            real_module = "rapids-4-spark-iceberg-1-11-x_2.13"
+            real_module = "cudf-spark-iceberg-1-11-x_2.13"
             write_aggregator(aggregator, [(real_module, RUNTIME_DEPENDENCY)])
             archive = zipfile.ZipFile(aggregator, "r")
             try:
@@ -458,7 +458,7 @@ class IcebergPackagePrivateAccessTest(unittest.TestCase):
                 archive.close()
 
             write_aggregator(aggregator, [
-                ("rapids-4-spark-iceberg-common_2.13", "")])
+                ("cudf-spark-iceberg-common_2.13", "")])
             archive = zipfile.ZipFile(aggregator, "r")
             try:
                 with self.assertRaises(RuntimeError) as raised:
@@ -472,7 +472,7 @@ class IcebergPackagePrivateAccessTest(unittest.TestCase):
         with temporary_directory() as root:
             aggregator = os.path.join(root, "aggregator.jar")
             write_aggregator(aggregator, [
-                ("rapids-4-spark-iceberg-stub_2.12", "")])
+                ("cudf-spark-iceberg-stub_2.12", "")])
             archive = zipfile.ZipFile(aggregator, "r")
             try:
                 self.assertEqual([], RUNTIME_DISCOVERY.coordinates(
@@ -483,7 +483,7 @@ class IcebergPackagePrivateAccessTest(unittest.TestCase):
     def test_aggregator_system_runtime_is_explicit(self):
         with temporary_directory() as root:
             aggregator = os.path.join(root, "aggregator.jar")
-            real_module = "rapids-4-spark-iceberg-1-10-x_2.13"
+            real_module = "cudf-spark-iceberg-1-10-x_2.13"
             write_aggregator(aggregator, [(real_module, "")])
             properties = {
                 RUNTIME_DISCOVERY.SYSTEM_RUNTIME_PROPERTY:
@@ -505,7 +505,7 @@ class IcebergPackagePrivateAccessTest(unittest.TestCase):
     def test_aggregator_rejects_system_and_maven_runtimes(self):
         with temporary_directory() as root:
             aggregator = os.path.join(root, "aggregator.jar")
-            real_module = "rapids-4-spark-iceberg-1-11-x_2.13"
+            real_module = "cudf-spark-iceberg-1-11-x_2.13"
             write_aggregator(aggregator, [(real_module, RUNTIME_DEPENDENCY)])
             properties = dict(ICEBERG_411_PROPERTIES)
             properties[RUNTIME_DISCOVERY.SYSTEM_RUNTIME_PROPERTY] = \
@@ -523,7 +523,7 @@ class IcebergPackagePrivateAccessTest(unittest.TestCase):
         with temporary_directory() as root:
             aggregator = os.path.join(root, "aggregator.jar")
             write_aggregator(aggregator, [(
-                "rapids-4-spark-iceberg-1-11-x_2.13", RUNTIME_DEPENDENCY)])
+                "cudf-spark-iceberg-1-11-x_2.13", RUNTIME_DEPENDENCY)])
             archive = zipfile.ZipFile(aggregator, "r")
             try:
                 with self.assertRaises(RuntimeError) as raised:
@@ -537,7 +537,7 @@ class IcebergPackagePrivateAccessTest(unittest.TestCase):
     def test_aggregator_rejects_multiple_runtime_dependencies(self):
         with temporary_directory() as root:
             aggregator = os.path.join(root, "aggregator.jar")
-            real_module = "rapids-4-spark-iceberg-1-11-x_2.13"
+            real_module = "cudf-spark-iceberg-1-11-x_2.13"
             write_aggregator(aggregator, [(
                 real_module, RUNTIME_DEPENDENCY + RUNTIME_DEPENDENCY)])
             archive = zipfile.ZipFile(aggregator, "r")
@@ -554,8 +554,8 @@ class IcebergPackagePrivateAccessTest(unittest.TestCase):
         with temporary_directory() as root:
             aggregator = os.path.join(root, "aggregator.jar")
             write_aggregator(aggregator, [
-                ("rapids-4-spark-iceberg-1-11-x_2.13", RUNTIME_DEPENDENCY),
-                ("rapids-4-spark-iceberg-stub_2.13", ""),
+                ("cudf-spark-iceberg-1-11-x_2.13", RUNTIME_DEPENDENCY),
+                ("cudf-spark-iceberg-stub_2.13", ""),
             ])
             archive = zipfile.ZipFile(aggregator, "r")
             try:

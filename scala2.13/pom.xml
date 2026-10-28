@@ -20,7 +20,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>com.nvidia</groupId>
-    <artifactId>rapids-4-spark-parent_2.13</artifactId>
+    <artifactId>cudf-spark-parent_2.13</artifactId>
     <name>NVIDIA cuDF plugin for Apache Spark Root Project</name>
     <description>The root project of the NVIDIA cuDF plugin for Apache Spark</description>
     <version>26.12.0-SNAPSHOT</version>
@@ -95,9 +95,9 @@
                 <buildver>330</buildver>
                 <spark.version>${spark330.version}</spark.version>
                 <parquet.hadoop.version>1.12.2</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-21x</rapids.delta.artifactId1>
-                <rapids.delta.artifactId2>rapids-4-spark-delta-22x</rapids.delta.artifactId2>
-                <rapids.delta.artifactId3>rapids-4-spark-delta-23x</rapids.delta.artifactId3>
+                <rapids.delta.artifactId1>cudf-spark-delta-21x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId2>cudf-spark-delta-22x</rapids.delta.artifactId2>
+                <rapids.delta.artifactId3>cudf-spark-delta-23x</rapids.delta.artifactId3>
                 <spark.protobuf.copy.skip>true</spark.protobuf.copy.skip>
             </properties>
             <dependencies>
@@ -127,9 +127,9 @@
                 <buildver>331</buildver>
                 <spark.version>${spark331.version}</spark.version>
                 <parquet.hadoop.version>1.12.2</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-21x</rapids.delta.artifactId1>
-                <rapids.delta.artifactId2>rapids-4-spark-delta-22x</rapids.delta.artifactId2>
-                <rapids.delta.artifactId3>rapids-4-spark-delta-23x</rapids.delta.artifactId3>
+                <rapids.delta.artifactId1>cudf-spark-delta-21x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId2>cudf-spark-delta-22x</rapids.delta.artifactId2>
+                <rapids.delta.artifactId3>cudf-spark-delta-23x</rapids.delta.artifactId3>
                 <spark.protobuf.copy.skip>true</spark.protobuf.copy.skip>
             </properties>
             <modules>
@@ -151,9 +151,9 @@
                 <buildver>332</buildver>
                 <spark.version>${spark332.version}</spark.version>
                 <parquet.hadoop.version>1.12.2</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-21x</rapids.delta.artifactId1>
-                <rapids.delta.artifactId2>rapids-4-spark-delta-22x</rapids.delta.artifactId2>
-                <rapids.delta.artifactId3>rapids-4-spark-delta-23x</rapids.delta.artifactId3>
+                <rapids.delta.artifactId1>cudf-spark-delta-21x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId2>cudf-spark-delta-22x</rapids.delta.artifactId2>
+                <rapids.delta.artifactId3>cudf-spark-delta-23x</rapids.delta.artifactId3>
                 <spark.protobuf.copy.skip>true</spark.protobuf.copy.skip>
             </properties>
             <modules>
@@ -175,9 +175,9 @@
                 <buildver>333</buildver>
                 <spark.version>${spark333.version}</spark.version>
                 <parquet.hadoop.version>1.12.2</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-21x</rapids.delta.artifactId1>
-                <rapids.delta.artifactId2>rapids-4-spark-delta-22x</rapids.delta.artifactId2>
-                <rapids.delta.artifactId3>rapids-4-spark-delta-23x</rapids.delta.artifactId3>
+                <rapids.delta.artifactId1>cudf-spark-delta-21x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId2>cudf-spark-delta-22x</rapids.delta.artifactId2>
+                <rapids.delta.artifactId3>cudf-spark-delta-23x</rapids.delta.artifactId3>
                 <spark.protobuf.copy.skip>true</spark.protobuf.copy.skip>
             </properties>
             <modules>
@@ -199,9 +199,9 @@
                 <buildver>334</buildver>
                 <spark.version>${spark334.version}</spark.version>
                 <parquet.hadoop.version>1.12.2</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-21x</rapids.delta.artifactId1>
-                <rapids.delta.artifactId2>rapids-4-spark-delta-22x</rapids.delta.artifactId2>
-                <rapids.delta.artifactId3>rapids-4-spark-delta-23x</rapids.delta.artifactId3>
+                <rapids.delta.artifactId1>cudf-spark-delta-21x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId2>cudf-spark-delta-22x</rapids.delta.artifactId2>
+                <rapids.delta.artifactId3>cudf-spark-delta-23x</rapids.delta.artifactId3>
                 <spark.protobuf.copy.skip>true</spark.protobuf.copy.skip>
             </properties>
             <modules>
@@ -223,7 +223,7 @@
                 <buildver>340</buildver>
                 <spark.version>${spark340.version}</spark.version>
                 <parquet.hadoop.version>1.12.3</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-24x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-24x</rapids.delta.artifactId1>
                 <slf4j.version>2.0.6</slf4j.version>
             </properties>
             <modules>
@@ -243,7 +243,7 @@
                 <buildver>341</buildver>
                 <spark.version>${spark341.version}</spark.version>
                 <parquet.hadoop.version>1.12.3</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-24x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-24x</rapids.delta.artifactId1>
                 <slf4j.version>2.0.6</slf4j.version>
             </properties>
             <modules>
@@ -263,7 +263,7 @@
                 <buildver>342</buildver>
                 <spark.version>${spark342.version}</spark.version>
                 <parquet.hadoop.version>1.12.3</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-24x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-24x</rapids.delta.artifactId1>
                 <slf4j.version>2.0.6</slf4j.version>
             </properties>
             <modules>
@@ -283,7 +283,7 @@
                 <buildver>343</buildver>
                 <spark.version>${spark343.version}</spark.version>
                 <parquet.hadoop.version>1.12.3</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-24x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-24x</rapids.delta.artifactId1>
                 <slf4j.version>2.0.6</slf4j.version>
             </properties>
             <modules>
@@ -303,7 +303,7 @@
                 <buildver>344</buildver>
                 <spark.version>${spark344.version}</spark.version>
                 <parquet.hadoop.version>1.12.3</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-24x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-24x</rapids.delta.artifactId1>
                 <slf4j.version>2.0.6</slf4j.version>
             </properties>
             <modules>
@@ -329,7 +329,7 @@
                 <hadoop.client.version>3.3.1</hadoop.client.version>
                 <rat.consoleOutput>true</rat.consoleOutput>
                 <parquet.hadoop.version>1.12.0</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-${spark.version.classifier}</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-${spark.version.classifier}</rapids.delta.artifactId1>
             </properties>
             <modules>
                 <module>shim-deps/databricks</module>
@@ -354,9 +354,9 @@
                 <buildver>350</buildver>
                 <spark.version>${spark350.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-stub</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-stub</rapids.delta.artifactId1>
                 <iceberg.artifact.suffix>${spark35x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
-                <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-6-x</rapids.iceberg.artifactId>
+                <rapids.iceberg.artifactId>cudf-spark-iceberg-1-6-x</rapids.iceberg.artifactId>
                 <slf4j.version>2.0.7</slf4j.version>
             </properties>
             <modules>
@@ -376,9 +376,9 @@
                 <buildver>351</buildver>
                 <spark.version>${spark351.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-stub</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-stub</rapids.delta.artifactId1>
                 <iceberg.artifact.suffix>${spark35x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
-                <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-6-x</rapids.iceberg.artifactId>
+                <rapids.iceberg.artifactId>cudf-spark-iceberg-1-6-x</rapids.iceberg.artifactId>
                 <slf4j.version>2.0.7</slf4j.version>
             </properties>
             <modules>
@@ -398,9 +398,9 @@
                 <buildver>352</buildver>
                 <spark.version>${spark352.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-stub</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-stub</rapids.delta.artifactId1>
                 <iceberg.artifact.suffix>${spark35x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
-                <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-6-x</rapids.iceberg.artifactId>
+                <rapids.iceberg.artifactId>cudf-spark-iceberg-1-6-x</rapids.iceberg.artifactId>
                 <slf4j.version>2.0.7</slf4j.version>
             </properties>
             <modules>
@@ -420,9 +420,9 @@
                 <buildver>353</buildver>
                 <spark.version>${spark353.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-33x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-33x</rapids.delta.artifactId1>
                 <iceberg.artifact.suffix>${spark35x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
-                <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-6-x</rapids.iceberg.artifactId>
+                <rapids.iceberg.artifactId>cudf-spark-iceberg-1-6-x</rapids.iceberg.artifactId>
                 <slf4j.version>2.0.7</slf4j.version>
             </properties>
             <modules>
@@ -442,11 +442,11 @@
                 <buildver>354</buildver>
                 <spark.version>${spark354.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-33x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-33x</rapids.delta.artifactId1>
                 <iceberg.artifact.suffix>${spark35x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.version>${iceberg.19x.version}</iceberg.version>
-                <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-9-x</rapids.iceberg.artifactId>
-                <rapids.iceberg.artifactId2>rapids-4-spark-iceberg-1-10-x</rapids.iceberg.artifactId2>
+                <rapids.iceberg.artifactId>cudf-spark-iceberg-1-9-x</rapids.iceberg.artifactId>
+                <rapids.iceberg.artifactId2>cudf-spark-iceberg-1-10-x</rapids.iceberg.artifactId2>
                 <slf4j.version>2.0.7</slf4j.version>
             </properties>
             <modules>
@@ -467,11 +467,11 @@
                 <buildver>355</buildver>
                 <spark.version>${spark355.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-33x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-33x</rapids.delta.artifactId1>
                 <iceberg.artifact.suffix>${spark35x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.version>${iceberg.19x.version}</iceberg.version>
-                <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-9-x</rapids.iceberg.artifactId>
-                <rapids.iceberg.artifactId2>rapids-4-spark-iceberg-1-10-x</rapids.iceberg.artifactId2>
+                <rapids.iceberg.artifactId>cudf-spark-iceberg-1-9-x</rapids.iceberg.artifactId>
+                <rapids.iceberg.artifactId2>cudf-spark-iceberg-1-10-x</rapids.iceberg.artifactId2>
                 <slf4j.version>2.0.7</slf4j.version>
             </properties>
             <modules>
@@ -492,11 +492,11 @@
                 <buildver>356</buildver>
                 <spark.version>${spark356.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-33x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-33x</rapids.delta.artifactId1>
                 <iceberg.artifact.suffix>${spark35x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.version>${iceberg.19x.version}</iceberg.version>
-                <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-9-x</rapids.iceberg.artifactId>
-                <rapids.iceberg.artifactId2>rapids-4-spark-iceberg-1-10-x</rapids.iceberg.artifactId2>
+                <rapids.iceberg.artifactId>cudf-spark-iceberg-1-9-x</rapids.iceberg.artifactId>
+                <rapids.iceberg.artifactId2>cudf-spark-iceberg-1-10-x</rapids.iceberg.artifactId2>
                 <slf4j.version>2.0.7</slf4j.version>
             </properties>
             <modules>
@@ -517,11 +517,11 @@
                 <buildver>357</buildver>
                 <spark.version>${spark357.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-33x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-33x</rapids.delta.artifactId1>
                 <iceberg.artifact.suffix>${spark35x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.version>${iceberg.19x.version}</iceberg.version>
-                <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-9-x</rapids.iceberg.artifactId>
-                <rapids.iceberg.artifactId2>rapids-4-spark-iceberg-1-10-x</rapids.iceberg.artifactId2>
+                <rapids.iceberg.artifactId>cudf-spark-iceberg-1-9-x</rapids.iceberg.artifactId>
+                <rapids.iceberg.artifactId2>cudf-spark-iceberg-1-10-x</rapids.iceberg.artifactId2>
                 <slf4j.version>2.0.7</slf4j.version>
             </properties>
             <modules>
@@ -542,11 +542,11 @@
                 <buildver>358</buildver>
                 <spark.version>${spark358.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-33x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-33x</rapids.delta.artifactId1>
                 <iceberg.artifact.suffix>${spark35x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.version>${iceberg.19x.version}</iceberg.version>
-                <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-9-x</rapids.iceberg.artifactId>
-                <rapids.iceberg.artifactId2>rapids-4-spark-iceberg-1-10-x</rapids.iceberg.artifactId2>
+                <rapids.iceberg.artifactId>cudf-spark-iceberg-1-9-x</rapids.iceberg.artifactId>
+                <rapids.iceberg.artifactId2>cudf-spark-iceberg-1-10-x</rapids.iceberg.artifactId2>
                 <slf4j.version>2.0.7</slf4j.version>
             </properties>
             <modules>
@@ -568,11 +568,11 @@
                 <shim.source.inherits>358</shim.source.inherits>
                 <spark.version>${spark359.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-33x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-33x</rapids.delta.artifactId1>
                 <iceberg.artifact.suffix>${spark35x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.version>${iceberg.19x.version}</iceberg.version>
-                <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-9-x</rapids.iceberg.artifactId>
-                <rapids.iceberg.artifactId2>rapids-4-spark-iceberg-1-10-x</rapids.iceberg.artifactId2>
+                <rapids.iceberg.artifactId>cudf-spark-iceberg-1-9-x</rapids.iceberg.artifactId>
+                <rapids.iceberg.artifactId2>cudf-spark-iceberg-1-10-x</rapids.iceberg.artifactId2>
                 <slf4j.version>2.0.7</slf4j.version>
             </properties>
             <modules>
@@ -595,10 +595,10 @@
                 <delta40x.version>4.0.0</delta40x.version>
                 <spark.version>${spark400.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-40x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-40x</rapids.delta.artifactId1>
                 <iceberg.artifact.suffix>${spark40x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.110x.version}</iceberg.runtime.version>
-                <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-10-x</rapids.iceberg.artifactId>
+                <rapids.iceberg.artifactId>cudf-spark-iceberg-1-10-x</rapids.iceberg.artifactId>
                 <slf4j.version>2.0.7</slf4j.version>
             </properties>
             <modules>
@@ -620,7 +620,7 @@
                 <hadoop.client.version>3.3.1</hadoop.client.version>
                 <rat.consoleOutput>true</rat.consoleOutput>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-${spark.version.classifier}</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-${spark.version.classifier}</rapids.delta.artifactId1>
             </properties>
             <modules>
                 <module>shim-deps/databricks</module>
@@ -640,14 +640,14 @@
                 <buildver>401</buildver>
                 <spark.version>${spark401.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-40x</rapids.delta.artifactId1>
-                <rapids.delta.artifactId2>rapids-4-spark-delta-42x</rapids.delta.artifactId2>
-                <rapids.delta.artifactId3>rapids-4-spark-delta-43x</rapids.delta.artifactId3>
+                <rapids.delta.artifactId1>cudf-spark-delta-40x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId2>cudf-spark-delta-42x</rapids.delta.artifactId2>
+                <rapids.delta.artifactId3>cudf-spark-delta-43x</rapids.delta.artifactId3>
                 <delta42x.spark.artifactId>delta-spark_4.0_${scala.binary.version}</delta42x.spark.artifactId>
                 <delta43x.spark.artifactId>delta-spark_4.0_${scala.binary.version}</delta43x.spark.artifactId>
                 <iceberg.artifact.suffix>${spark40x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.110x.version}</iceberg.runtime.version>
-                <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-10-x</rapids.iceberg.artifactId>
+                <rapids.iceberg.artifactId>cudf-spark-iceberg-1-10-x</rapids.iceberg.artifactId>
                 <slf4j.version>2.0.7</slf4j.version>
             </properties>
             <modules>
@@ -670,11 +670,11 @@
                 <shim.source.inherits>401</shim.source.inherits>
                 <spark.version>${spark402.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-40x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-40x</rapids.delta.artifactId1>
                 <iceberg.artifact.suffix>${spark40x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.110x.version}</iceberg.runtime.version>
-                <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-10-x</rapids.iceberg.artifactId>
-                <rapids.iceberg.artifactId2>rapids-4-spark-iceberg-1-11-x</rapids.iceberg.artifactId2>
+                <rapids.iceberg.artifactId>cudf-spark-iceberg-1-10-x</rapids.iceberg.artifactId>
+                <rapids.iceberg.artifactId2>cudf-spark-iceberg-1-11-x</rapids.iceberg.artifactId2>
                 <slf4j.version>2.0.7</slf4j.version>
             </properties>
             <modules>
@@ -695,11 +695,11 @@
                 <buildver>403</buildver>
                 <spark.version>${spark403.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-40x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-40x</rapids.delta.artifactId1>
                 <iceberg.artifact.suffix>${spark40x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.110x.version}</iceberg.runtime.version>
-                <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-10-x</rapids.iceberg.artifactId>
-                <rapids.iceberg.artifactId2>rapids-4-spark-iceberg-1-11-x</rapids.iceberg.artifactId2>
+                <rapids.iceberg.artifactId>cudf-spark-iceberg-1-10-x</rapids.iceberg.artifactId>
+                <rapids.iceberg.artifactId2>cudf-spark-iceberg-1-11-x</rapids.iceberg.artifactId2>
                 <slf4j.version>2.0.7</slf4j.version>
             </properties>
             <modules>
@@ -720,11 +720,11 @@
                 <buildver>404</buildver>
                 <spark.version>${spark404.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-40x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-40x</rapids.delta.artifactId1>
                 <iceberg.artifact.suffix>${spark40x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.110x.version}</iceberg.runtime.version>
-                <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-10-x</rapids.iceberg.artifactId>
-                <rapids.iceberg.artifactId2>rapids-4-spark-iceberg-1-11-x</rapids.iceberg.artifactId2>
+                <rapids.iceberg.artifactId>cudf-spark-iceberg-1-10-x</rapids.iceberg.artifactId>
+                <rapids.iceberg.artifactId2>cudf-spark-iceberg-1-11-x</rapids.iceberg.artifactId2>
                 <slf4j.version>2.0.7</slf4j.version>
             </properties>
             <modules>
@@ -747,7 +747,7 @@
                 <hadoop.client.version>3.3.1</hadoop.client.version>
                 <rat.consoleOutput>true</rat.consoleOutput>
                 <parquet.hadoop.version>1.16.0</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-${spark.version.classifier}</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-${spark.version.classifier}</rapids.delta.artifactId1>
                 <slf4j.version>2.0.7</slf4j.version>
                 <scala.javac.args>-Xlint:all,-serial,-path,-try,-processing,-options|-Werror</scala.javac.args>
             </properties>
@@ -783,14 +783,14 @@
                 <buildver>411</buildver>
                 <spark.version>${spark411.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-41x</rapids.delta.artifactId1>
-                <rapids.delta.artifactId2>rapids-4-spark-delta-42x</rapids.delta.artifactId2>
-                <rapids.delta.artifactId3>rapids-4-spark-delta-43x</rapids.delta.artifactId3>
+                <rapids.delta.artifactId1>cudf-spark-delta-41x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId2>cudf-spark-delta-42x</rapids.delta.artifactId2>
+                <rapids.delta.artifactId3>cudf-spark-delta-43x</rapids.delta.artifactId3>
                 <delta42x.spark.artifactId>delta-spark_4.1_${scala.binary.version}</delta42x.spark.artifactId>
                 <delta43x.spark.artifactId>delta-spark_4.1_${scala.binary.version}</delta43x.spark.artifactId>
                 <iceberg.artifact.suffix>${spark41x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.111x.version}</iceberg.runtime.version>
-                <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-11-x</rapids.iceberg.artifactId>
+                <rapids.iceberg.artifactId>cudf-spark-iceberg-1-11-x</rapids.iceberg.artifactId>
                 <slf4j.version>2.0.7</slf4j.version>
                 <scala.javac.args>-Xlint:all,-serial,-path,-try,-processing,-options|-Werror</scala.javac.args>
             </properties>
@@ -831,10 +831,10 @@
                 <buildver>412</buildver>
                 <spark.version>${spark412.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-41x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-41x</rapids.delta.artifactId1>
                 <iceberg.artifact.suffix>${spark41x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.111x.version}</iceberg.runtime.version>
-                <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-11-x</rapids.iceberg.artifactId>
+                <rapids.iceberg.artifactId>cudf-spark-iceberg-1-11-x</rapids.iceberg.artifactId>
                 <slf4j.version>2.0.7</slf4j.version>
                 <scala.javac.args>-Xlint:all,-serial,-path,-try,-processing,-options|-Werror</scala.javac.args>
             </properties>
@@ -873,10 +873,10 @@
                 <buildver>413</buildver>
                 <spark.version>${spark413.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-41x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-41x</rapids.delta.artifactId1>
                 <iceberg.artifact.suffix>${spark41x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.111x.version}</iceberg.runtime.version>
-                <rapids.iceberg.artifactId>rapids-4-spark-iceberg-1-11-x</rapids.iceberg.artifactId>
+                <rapids.iceberg.artifactId>cudf-spark-iceberg-1-11-x</rapids.iceberg.artifactId>
                 <slf4j.version>2.0.7</slf4j.version>
                 <scala.javac.args>-Xlint:all,-serial,-path,-try,-processing,-options|-Werror</scala.javac.args>
             </properties>
@@ -915,7 +915,7 @@
                 <buildver>420</buildver>
                 <spark.version>${spark420.version}</spark.version>
                 <parquet.hadoop.version>1.15.2</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-stub</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-stub</rapids.delta.artifactId1>
                 <iceberg.artifact.suffix>${spark41x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.111x.version}</iceberg.runtime.version>
                 <slf4j.version>2.0.7</slf4j.version>
@@ -960,7 +960,7 @@
                 <parquet.hadoop.version>1.15.2</parquet.hadoop.version>
                 <maven.compiler.source>17</maven.compiler.source>
                 <java.major.version>17</java.major.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-stub</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-stub</rapids.delta.artifactId1>
                 <iceberg.artifact.suffix>${spark41x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.111x.version}</iceberg.runtime.version>
                 <slf4j.version>2.0.7</slf4j.version>
@@ -1208,11 +1208,11 @@
         <dist.jar.compress>true</dist.jar.compress>
         <!--
         This property is used to in aggregator module to determine the artifactId of iceberg
-        integration. We use rapids-4-spark-sql as default, which is a hack way since we don't
+        integration. We use cudf-spark-sql as default, which is a hack way since we don't
         support all spark versions. In spark versions that we don't support, the aggregator
-        includes rapids-4-spark-sql, otherwise it includes actual iceberg integration artifact.
+        includes cudf-spark-sql, otherwise it includes actual iceberg integration artifact.
         -->
-        <rapids.iceberg.artifactId>rapids-4-spark-iceberg-stub</rapids.iceberg.artifactId>
+        <rapids.iceberg.artifactId>cudf-spark-iceberg-stub</rapids.iceberg.artifactId>
         <rapids.iceberg.artifactId2>${rapids.iceberg.artifactId}</rapids.iceberg.artifactId2>
         <spark33x.iceberg.artifact.suffix>3.3</spark33x.iceberg.artifact.suffix>
         <spark33x.iceberg.version>1.6.1</spark33x.iceberg.version>
@@ -1307,7 +1307,7 @@
         <dependencies>
             <dependency>
               <groupId>com.nvidia</groupId>
-              <artifactId>rapids-4-spark-sql_${scala.binary.version}</artifactId>
+              <artifactId>cudf-spark-sql_${scala.binary.version}</artifactId>
               <version>${project.version}</version>
               <classifier>${spark.version.classifier}</classifier>
               <scope>provided</scope>
@@ -1985,7 +1985,7 @@ This will force full Scala code rebuild in downstream modules.
                         <requireProperty>
                             <regexMessage>At least one of rapids.delta.artifactId1, rapids.delta.artifactId2 ... is required in the POM profile "release${buildver}"</regexMessage>
                             <property>rapids.delta.artifactId1</property>
-                            <regex>^rapids-4-spark-delta-.*</regex>
+                            <regex>^cudf-spark-delta-.*</regex>
                         </requireProperty>
                       </rules>
                     </configuration>

@@ -140,7 +140,7 @@ def read_patterns(path):
 
 
 def artifact_file_name(art, classifier):
-    art_id = '-'.join(['rapids-4-spark', art + '_' + scala_version])
+    art_id = '-'.join(['cudf-spark', art + '_' + scala_version])
     return '-'.join([art_id, project_version, classifier]) + '.jar'
 
 
@@ -151,7 +151,7 @@ def ensure_artifact(art, classifier):
     if os.path.isfile(art_jar_path):
         shutil.copy(art_jar_path, deps_dir)
     else:
-        art_id = '-'.join(['rapids-4-spark', art + '_' + scala_version])
+        art_id = '-'.join(['cudf-spark', art + '_' + scala_version])
         maven_get('com.nvidia', art_id, project_version, classifier, deps_dir)
     return os.sep.join([deps_dir, art_jar])
 
