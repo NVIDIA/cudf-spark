@@ -21,7 +21,7 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.iceberg
 
-import java.util.{HashMap => JHashMap}
+import java.util.{Arrays, HashMap => JHashMap}
 
 import ai.rapids.cudf.{ColumnVector => CudfColumnVector, DType, HostColumnVector}
 import com.nvidia.spark.rapids.{FuzzerUtils, GpuColumnVector, RapidsConf, SpillableColumnarBatch}
@@ -44,6 +44,7 @@ import org.apache.spark.SparkConf
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types.{LongType, StructField, StructType, VariantType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
+import org.apache.spark.types.variant.VariantBuilder
 
 class GpuIcebergVariantPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
 
@@ -97,6 +98,93 @@ class GpuIcebergVariantPostProcessorSuite extends AnyFunSuite with BeforeAndAfte
         Types.MapType.ofOptional(7, 8, Types.StringType.get(), Types.VariantType.get())))
 
     assert(createProcessor(schema, schema).displayActionPlan() == "PassThrough")
+  }
+
+  test("existing Variant values survive null filling and projection reordering") {
+    val fileSchema = new Schema(
+      Types.NestedField.optional(1, "id", Types.LongType.get()),
+      Types.NestedField.optional(2, "variant_value", Types.VariantType.get()))
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(2, "variant_value", Types.VariantType.get()),
+      Types.NestedField.optional(3, "added", Types.LongType.get()),
+      Types.NestedField.optional(1, "id", Types.LongType.get()))
+    val processor = createProcessor(expectedSchema, fileSchema)
+    assert(processor.displayActionPlan() ==
+      """ProcessStruct
+        |  variant_value (input[1]):
+        |    PassThrough
+        |  added (generated):
+        |    FillNull(bigint)
+        |  id (input[0]):
+        |    PassThrough""".stripMargin)
+
+    // Use Spark's encoder as the byte oracle, independently of the GPU post-processor.
+    // None is SQL null; parseJson("null") is a non-null Variant containing JSON null.
+    val variants = Seq(
+      Some(VariantBuilder.parseJson("""{"a": 1}""", false)),
+      None,
+      Some(VariantBuilder.parseJson("null", false)),
+      Some(VariantBuilder.parseJson("""{"name": "spark", "values": [2, 3]}""", false)))
+    val ids = Array(10L, 20L, 30L, 40L)
+    val rowCount = variants.size
+    val byteListType = new HostColumnVector.ListType(
+      true, new HostColumnVector.BasicType(false, DType.UINT8))
+    val hostType = new HostColumnVector.StructType(true, byteListType, byteListType)
+    val variantRows = variants.map(_.map { variant =>
+      new HostColumnVector.StructData(
+        Arrays.asList(variant.getValue.map(Byte.box): _*),
+        Arrays.asList(variant.getMetadata.map(Byte.box): _*))
+    }.orNull)
+    val idColumn = closeOnExcept(CudfColumnVector.fromLongs(ids: _*)) { column =>
+      GpuColumnVector.from(column, LongType)
+    }
+    val inputBatch = closeOnExcept(idColumn) { id =>
+      val variantColumn = closeOnExcept(CudfColumnVector.fromStructs(
+          hostType, variantRows: _*)) { column =>
+        GpuColumnVector.from(column, VariantType)
+      }
+      closeOnExcept(variantColumn) { variant =>
+        new ColumnarBatch(Array(id, variant), rowCount)
+      }
+    }
+    val spillable = closeOnExcept(inputBatch) { batch =>
+      SpillableColumnarBatch(batch, ACTIVE_ON_DECK_PRIORITY)
+    }
+
+    withResource(spillable) { _ =>
+      withResource(processor.process(spillable.getColumnarBatch())) { outputBatch =>
+        assert(outputBatch.numRows() == rowCount)
+        assert(outputBatch.numCols() == 3)
+        assert(outputBatch.column(0).dataType() == VariantType)
+        assert(outputBatch.column(1).dataType() == LongType)
+        assert(outputBatch.column(2).dataType() == LongType)
+        withResource(outputBatch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { host =>
+          val variantColumn = host.getBase
+          assert(variantColumn.getNumChildren == 2)
+          assert(variantColumn.getNullCount == 1)
+          val values = variantColumn.getChildColumnView(0)
+          val metadata = variantColumn.getChildColumnView(1)
+          variants.zipWithIndex.foreach { case (expected, row) =>
+            assert(variantColumn.isNull(row) == expected.isEmpty)
+            expected.foreach { variant =>
+              assert(!values.isNull(row))
+              assert(!metadata.isNull(row))
+              assert(values.getBytesFromList(row).toSeq == variant.getValue.toSeq)
+              assert(metadata.getBytesFromList(row).toSeq == variant.getMetadata.toSeq)
+            }
+          }
+        }
+        withResource(outputBatch.column(1).asInstanceOf[GpuColumnVector].copyToHost()) { host =>
+          assert(host.getBase.getNullCount == rowCount)
+        }
+        withResource(outputBatch.column(2).asInstanceOf[GpuColumnVector].copyToHost()) { host =>
+          ids.indices.foreach { row =>
+            assert(!host.getBase.isNull(row))
+            assert(host.getBase.getLong(row) == ids(row))
+          }
+        }
+      }
+    }
   }
 
   test("missing optional Variant field is filled with nulls") {
