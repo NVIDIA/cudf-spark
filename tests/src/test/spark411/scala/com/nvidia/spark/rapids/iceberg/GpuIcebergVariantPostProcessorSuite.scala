@@ -21,9 +21,15 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.iceberg
 
-import java.util.{Arrays, HashMap => JHashMap}
+import java.util.{Arrays, HashMap => JHashMap, List => JList}
 
-import ai.rapids.cudf.{ColumnVector => CudfColumnVector, DType, HostColumnVector}
+import ai.rapids.cudf.{
+  ColumnVector => CudfColumnVector,
+  DType,
+  HostColumnVector,
+  HostColumnVectorCore
+}
+import ai.rapids.cudf.HostColumnVector.StructData
 import com.nvidia.spark.rapids.{FuzzerUtils, GpuColumnVector, RapidsConf, SpillableColumnarBatch}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.SpillPriorities.ACTIVE_ON_DECK_PRIORITY
@@ -42,7 +48,15 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.types.{LongType, StructField, StructType, VariantType}
+import org.apache.spark.sql.types.{
+  ArrayType,
+  LongType,
+  MapType,
+  StringType,
+  StructField,
+  StructType,
+  VariantType
+}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.types.variant.VariantBuilder
 
@@ -85,6 +99,25 @@ class GpuIcebergVariantPostProcessorSuite extends AnyFunSuite with BeforeAndAfte
       expectedSchema,
       shadedSchema,
       Map.empty)
+  }
+
+  private def score(value: java.lang.Long): StructData = new StructData(value)
+
+  private def assertScoreAndNullVariant(
+      column: HostColumnVectorCore,
+      row: Int,
+      expected: StructData): Unit = {
+    assert(column.getNumChildren == 2)
+    assert(column.isNull(row) == (expected == null))
+    if (expected != null) {
+      val expectedScore = expected.getField(0).asInstanceOf[java.lang.Long]
+      val scores = column.getChildColumnView(0)
+      assert(scores.isNull(row) == (expectedScore == null))
+      if (expectedScore != null) {
+        assert(scores.getLong(row) == expectedScore.longValue())
+      }
+    }
+    assert(column.getChildColumnView(1).isNull(row))
   }
 
   test("Variant fields pass through the Iceberg post-processor") {
@@ -216,6 +249,153 @@ class GpuIcebergVariantPostProcessorSuite extends AnyFunSuite with BeforeAndAfte
         assert(outputBatch.column(1).dataType() == VariantType)
         val variantColumn = outputBatch.column(1).asInstanceOf[GpuColumnVector].getBase
         assert(variantColumn.getNullCount == rowCount)
+      }
+    }
+  }
+
+  test("missing optional Variant in existing list elements preserves structure and values") {
+    val fileElementType = Types.StructType.of(
+        Types.NestedField.optional(3, "score", Types.LongType.get()))
+    val expectedElementType = Types.StructType.of(
+        Types.NestedField.optional(3, "score", Types.LongType.get()),
+        Types.NestedField.optional(4, "v", Types.VariantType.get()))
+    val fileSchema = new Schema(
+        Types.NestedField.optional(1, "items", Types.ListType.ofOptional(2, fileElementType)))
+    val expectedSchema = new Schema(
+        Types.NestedField.optional(1, "items", Types.ListType.ofOptional(2, expectedElementType)))
+    val processor = createProcessor(expectedSchema, fileSchema)
+    assert(processor.displayActionPlan().contains("ProcessList"))
+
+    val elementType = StructType(Seq(StructField("score", LongType, nullable = true)))
+    val inputType = ArrayType(elementType, containsNull = true)
+    val expectedType = ArrayType(
+        elementType.add("v", VariantType, nullable = true), containsNull = true)
+    val hostType = new HostColumnVector.ListType(
+        true, new HostColumnVector.StructType(
+            true, new HostColumnVector.BasicType(true, DType.INT64)))
+    val rows = Seq[JList[StructData]](
+        null,
+        Arrays.asList[StructData](),
+        Arrays.asList[StructData](null),
+        Arrays.asList(score(10L), null, score(null), score(20L)),
+        Arrays.asList(score(30L), score(40L)))
+    // Seven child rows in five batch rows catches using the parent count for FillNull.
+    val offsets = Array(0, 0, 0, 1, 5, 7)
+    val inputColumn = closeOnExcept(CudfColumnVector.fromLists(hostType, rows: _*)) { column =>
+      GpuColumnVector.from(column, inputType)
+    }
+    val inputBatch = closeOnExcept(inputColumn) { column =>
+      new ColumnarBatch(Array(column), rows.size)
+    }
+    val spillable = closeOnExcept(inputBatch) { batch =>
+      SpillableColumnarBatch(batch, ACTIVE_ON_DECK_PRIORITY)
+    }
+
+    withResource(spillable) { _ =>
+      withResource(processor.process(spillable.getColumnarBatch())) { outputBatch =>
+        assert(outputBatch.numRows() == rows.size)
+        assert(outputBatch.numCols() == 1)
+        assert(outputBatch.column(0).dataType() == expectedType)
+        withResource(outputBatch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { host =>
+          val lists = host.getBase
+          assert(lists.getNumChildren == 1)
+          val elements = lists.getChildColumnView(0)
+          assert(elements.getRowCount == offsets.last)
+          assert(elements.getChildColumnView(1).getRowCount == offsets.last)
+          assert(elements.getChildColumnView(1).getNullCount == offsets.last)
+          rows.zipWithIndex.foreach { case (expected, row) =>
+            assert(lists.isNull(row) == (expected == null))
+            assert(lists.getStartListOffset(row) == offsets(row))
+            assert(lists.getEndListOffset(row) == offsets(row + 1))
+            if (expected != null) {
+              (0 until expected.size()).foreach { index =>
+                assertScoreAndNullVariant(elements, offsets(row) + index, expected.get(index))
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  test("missing optional Variant in existing map values preserves keys and structure") {
+    val fileValueType = Types.StructType.of(
+        Types.NestedField.optional(4, "score", Types.LongType.get()))
+    val expectedValueType = Types.StructType.of(
+        Types.NestedField.optional(4, "score", Types.LongType.get()),
+        Types.NestedField.optional(5, "v", Types.VariantType.get()))
+    val fileSchema = new Schema(
+        Types.NestedField.optional(1, "entries", Types.MapType.ofOptional(
+            2, 3, Types.StringType.get(), fileValueType)))
+    val expectedSchema = new Schema(
+        Types.NestedField.optional(1, "entries", Types.MapType.ofOptional(
+            2, 3, Types.StringType.get(), expectedValueType)))
+    val processor = createProcessor(expectedSchema, fileSchema)
+    assert(processor.displayActionPlan().contains("ProcessMap"))
+
+    val valueType = StructType(Seq(StructField("score", LongType, nullable = true)))
+    val inputType = MapType(StringType, valueType, valueContainsNull = true)
+    val expectedType = MapType(
+        StringType, valueType.add("v", VariantType, nullable = true), valueContainsNull = true)
+    val hostValueType = new HostColumnVector.StructType(
+        true, new HostColumnVector.BasicType(true, DType.INT64))
+    val hostType = new HostColumnVector.ListType(
+        true, new HostColumnVector.StructType(
+            false, new HostColumnVector.BasicType(false, DType.STRING), hostValueType))
+    def entry(key: String, value: StructData): StructData = new StructData(key, value)
+    val rows = Seq[JList[StructData]](
+        null,
+        Arrays.asList[StructData](),
+        Arrays.asList(entry("only-null", null)),
+        Arrays.asList(
+            entry("first", score(10L)), entry("null-value", null),
+            entry("null-score", score(null)), entry("last", score(20L))),
+        Arrays.asList(entry("third", score(30L)), entry("fourth", score(40L))))
+    val offsets = Array(0, 0, 0, 1, 5, 7)
+    val inputColumn = closeOnExcept(CudfColumnVector.fromLists(hostType, rows: _*)) { column =>
+      GpuColumnVector.from(column, inputType)
+    }
+    val inputBatch = closeOnExcept(inputColumn) { column =>
+      new ColumnarBatch(Array(column), rows.size)
+    }
+    val spillable = closeOnExcept(inputBatch) { batch =>
+      SpillableColumnarBatch(batch, ACTIVE_ON_DECK_PRIORITY)
+    }
+
+    withResource(spillable) { _ =>
+      withResource(processor.process(spillable.getColumnarBatch())) { outputBatch =>
+        assert(outputBatch.numRows() == rows.size)
+        assert(outputBatch.numCols() == 1)
+        assert(outputBatch.column(0).dataType() == expectedType)
+        withResource(outputBatch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { host =>
+          val maps = host.getBase
+          assert(maps.getNumChildren == 1)
+          val entries = maps.getChildColumnView(0)
+          assert(entries.getNumChildren == 2)
+          assert(entries.getRowCount == offsets.last)
+          assert(entries.getNullCount == 0)
+          val keys = entries.getChildColumnView(0)
+          val values = entries.getChildColumnView(1)
+          assert(keys.getRowCount == offsets.last)
+          assert(values.getRowCount == offsets.last)
+          assert(values.getChildColumnView(1).getRowCount == offsets.last)
+          assert(values.getChildColumnView(1).getNullCount == offsets.last)
+          rows.zipWithIndex.foreach { case (expected, row) =>
+            assert(maps.isNull(row) == (expected == null))
+            assert(maps.getStartListOffset(row) == offsets(row))
+            assert(maps.getEndListOffset(row) == offsets(row + 1))
+            if (expected != null) {
+              (0 until expected.size()).foreach { index =>
+                val childRow = offsets(row) + index
+                val expectedEntry = expected.get(index)
+                assert(!keys.isNull(childRow))
+                assert(keys.getJavaString(childRow) == expectedEntry.getField(0))
+                assertScoreAndNullVariant(
+                    values, childRow, expectedEntry.getField(1).asInstanceOf[StructData])
+              }
+            }
+          }
+        }
       }
     }
   }
