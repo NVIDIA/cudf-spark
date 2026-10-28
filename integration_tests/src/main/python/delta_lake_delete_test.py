@@ -573,17 +573,33 @@ def test_delta_delete_metadata_only_reports_row_count(spark_tmp_path):
         enable_deletion_vectors=False, partition_columns=["a"], conf=conf, expect_write=False,
         expected_num_affected_rows=2, assert_gpu_delete_command=True)
 
+def latest_delete_row_count_metrics(spark, path):
+    """Row-count metrics (those present) of the latest DELETE in the table history, or None if
+    the table has no DELETE commit."""
+    history = spark.sql(f"DESCRIBE HISTORY delta.`{path}`") \
+        .where("operation = 'DELETE'").orderBy("version", ascending=False).first()
+    if history is None:
+        return None
+    operation_metrics = history["operationMetrics"]
+    return {name: int(operation_metrics[name])
+            for name in ("numCopiedRows", "numDeletedRows") if name in operation_metrics}
+
+
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not is_oss_delta_lake_43(),
                     reason="Delta 4.3 DELETE zero-metric history regression coverage")
-@pytest.mark.parametrize("predicate, expected_metrics", [
-    ("id = 999", None),
-    ("part = 1", {"numCopiedRows": 0, "numDeletedRows": 2}),
-], ids=["no_match", "metadata_only"])
+@pytest.mark.parametrize("predicate, metrics_from_metadata, expected_metrics, expected_num_rows", [
+    # No commit is made when nothing matches, so there is no history entry; the row count is 0.
+    ("id = 999", True, None, 0),
+    ("part = 1", True, {"numCopiedRows": 0, "numDeletedRows": 2}, 2),
+    # Without row-level metadata metrics a partition-only DELETE records no row-count history
+    # metrics and reports -1 rows, as on CPU.
+    ("part = 1", False, {}, -1),
+], ids=["no_match", "metadata_only", "metadata_only_no_row_metrics"])
 def test_delta_delete_43_reports_zero_row_count_metrics(
-        spark_tmp_path, predicate, expected_metrics):
+        spark_tmp_path, predicate, metrics_from_metadata, expected_metrics, expected_num_rows):
     data_path = spark_tmp_path + "/DELTA_DATA"
 
     def generate_dest_data(spark):
@@ -598,23 +614,14 @@ def test_delta_delete_43_reports_zero_row_count_metrics(
     cpu_path = data_path + "/CPU"
     gpu_path = data_path + "/GPU"
     delete_sql = "DELETE FROM delta.`{path}` WHERE " + predicate
+    conf = copy_and_update(delta_delete_enabled_conf, {
+        "spark.databricks.delta.dmlMetricsFromMetadata.enabled": str(metrics_from_metadata).lower()})
     cpu_result = with_cpu_session(
-        lambda spark: spark.sql(delete_sql.format(path=cpu_path)).collect(),
-        conf=delta_delete_enabled_conf)
+        lambda spark: spark.sql(delete_sql.format(path=cpu_path)).collect(), conf=conf)
     gpu_result = assert_rapids_gpu_delete_ran(
-        lambda spark: spark.sql(delete_sql.format(path=gpu_path)).collect(),
-        conf=delta_delete_enabled_conf)
+        lambda spark: spark.sql(delete_sql.format(path=gpu_path)).collect(), conf=conf)
     assert_equal(cpu_result, gpu_result)
-
-    metric_names = ("numCopiedRows", "numDeletedRows")
-
-    def latest_delete_row_count_metrics(spark, path):
-        history = spark.sql(f"DESCRIBE HISTORY delta.`{path}`") \
-            .where("operation = 'DELETE'").orderBy("version", ascending=False).first()
-        if history is None:
-            return None
-        operation_metrics = history["operationMetrics"]
-        return {name: int(operation_metrics[name]) for name in metric_names}
+    assert gpu_result[0][0] == expected_num_rows
 
     cpu_metrics = with_cpu_session(
         lambda spark: latest_delete_row_count_metrics(spark, cpu_path),
@@ -662,6 +669,43 @@ def test_delta_delete_43_zero_metric_runtime_shim(always_report, expected):
             assert deleted.get() == expected
 
     with_cpu_session(assert_zero_metric_conversion, conf=conf)
+
+
+@allow_non_gpu("ExecutedCommandExec", *delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="Delta 4.3 DELETE zero-metric history regression coverage")
+@pytest.mark.parametrize("always_report", [True, False], ids=idfn)
+def test_delta_delete_43_deletion_vector_copied_rows_metric(spark_tmp_path, always_report):
+    # A DV DELETE never copies rows; 4.3 reports numCopiedRows as 0 instead of omitting it.
+    data_path = spark_tmp_path + "/DELTA_DATA"
+
+    def generate_dest_data(spark):
+        return spark.createDataFrame([(i, i % 2) for i in range(10)], "id INT, part INT")
+
+    conf = copy_and_update(delta_delete_enabled_conf, {
+        "spark.databricks.delta.delete.deletionVectors.persistent": "true",
+        "spark.databricks.delta.metrics.alwaysReportSomeZeroMetrics": str(always_report).lower()})
+    with_cpu_session(lambda spark: setup_delta_dest_tables(
+        spark, data_path, generate_dest_data, use_cdf=False, enable_deletion_vectors=True))
+    cpu_path = data_path + "/CPU"
+    gpu_path = data_path + "/GPU"
+    delete_sql = "DELETE FROM delta.`{path}` WHERE id = 3"
+    with_cpu_session(
+        lambda spark: spark.sql(delete_sql.format(path=cpu_path)).collect(), conf=conf)
+    assert_rapids_delta_write(
+        lambda spark: spark.sql(delete_sql.format(path=gpu_path)).collect(),
+        conf=conf, expected_command="GpuDeleteCommand")
+
+    cpu_metrics = with_cpu_session(
+        lambda spark: latest_delete_row_count_metrics(spark, cpu_path), conf=conf)
+    gpu_metrics = with_cpu_session(
+        lambda spark: latest_delete_row_count_metrics(spark, gpu_path), conf=conf)
+    assert cpu_metrics == gpu_metrics
+    assert gpu_metrics["numDeletedRows"] == 1
+    if always_report:
+        assert gpu_metrics["numCopiedRows"] == 0
 
 
 @allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
