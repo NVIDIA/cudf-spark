@@ -330,7 +330,7 @@ private[rapids] object GpuDeletionVectorBitmapGenerator {
     // The snapshot's DataFrames are bound to the command's session, so RAPIDS must be disabled
     // there; an isolated session would not stop those joins from being planned on the GPU.
     val (actions, metrics) = GpuDeltaCpuFallback.withRapidsDisabled(spark) {
-      DMLWithDeletionVectorsHelper.processUnmodifiedData(spark, touchedFiles, txn.snapshot)
+      DMLProcessUnmodifiedDataShim.processUnmodifiedData(spark, touchedFiles, txn)
     }
     // DBR rehydrates the replacement AddFile stats from the snapshot, but the paired RemoveFile
     // can retain the numRecords-only stats from the data-skipping candidate. Both actions describe
