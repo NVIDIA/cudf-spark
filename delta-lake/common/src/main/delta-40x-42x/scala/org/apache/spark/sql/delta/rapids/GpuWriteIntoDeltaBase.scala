@@ -33,7 +33,7 @@ import org.apache.spark.sql.classic.{SparkSession => ClassicSparkSession}
 import org.apache.spark.sql.delta.{ColumnWithDefaultExprUtils, DeltaErrors, DeltaLog,
   DeltaOperations, DeltaOptions, DeltaTableUtils, IdentityColumn, OptimisticTransaction}
 import org.apache.spark.sql.delta.actions.{Action, AddCDCFile, AddFile, FileAction, RemoveFile}
-import org.apache.spark.sql.delta.commands.{DeleteCommand, WriteIntoDelta}
+import org.apache.spark.sql.delta.commands.{DeleteCommand, DeleteMetric, WriteIntoDelta}
 import org.apache.spark.sql.delta.commands.DMLUtils.TaggedCommitData
 import org.apache.spark.sql.delta.commands.cdc.CDCReader
 import org.apache.spark.sql.delta.schema.{ImplicitMetadataOperation, InvariantViolationException, SchemaUtils}
@@ -45,6 +45,7 @@ import org.apache.spark.sql.execution.datasources.LogicalRelation
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 import org.apache.spark.sql.functions.{array, col, explode, lit, struct}
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.nvidia.DFUDFShims
 import org.apache.spark.sql.types.StructType
 
 /**
@@ -63,11 +64,74 @@ abstract class GpuWriteIntoDeltaBase(
 
   override protected val canMergeSchema: Boolean = cpuWrite.options.canMergeSchema
 
-  private def isOverwriteOperation: Boolean = cpuWrite.mode == SaveMode.Overwrite
+  protected def isOverwriteOperation: Boolean = cpuWrite.mode == SaveMode.Overwrite
 
   override protected val canOverwriteSchema: Boolean =
     cpuWrite.options.canOverwriteSchema && isOverwriteOperation &&
-      cpuWrite.options.replaceWhere.isEmpty
+      !isInsertAtomicReplaceOp
+
+  /** Version-specific classification and expression resolution for atomic replacements. */
+  protected def isInsertAtomicReplaceOp: Boolean = cpuWrite.options.replaceWhere.isDefined
+
+  protected def isReplaceOnOrUsing: Boolean = false
+
+  protected def validateAtomicReplaceOptions(): Unit = {}
+
+  protected def getAtomicReplaceExpressions(
+      spark: SqlSparkSession,
+      txn: OptimisticTransaction,
+      replaceOnDataColsEnabled: Boolean): (Option[Seq[Expression]], Boolean) = {
+    var containsDataFilters = false
+    val replaceWhere = cpuWrite.options.replaceWhere.flatMap { replace =>
+      val parsed = parsePredicates(spark, replace)
+      if (replaceOnDataColsEnabled) {
+        val (metadataPredicates, dataFilters) = DeltaTableUtils.splitMetadataAndDataPredicates(
+          parsed.head, txn.metadata.partitionColumns, spark)
+        if (cpuWrite.options.rearrangeOnly && dataFilters.nonEmpty) {
+          throw DeltaErrors.replaceWhereWithFilterDataChangeUnset(dataFilters.mkString(","))
+        }
+        containsDataFilters = dataFilters.nonEmpty
+        Some(metadataPredicates ++ dataFilters)
+      } else if (isOverwriteOperation) {
+        verifyPartitionPredicates(spark, txn.metadata.partitionColumns, parsed)
+        Some(parsed)
+      } else {
+        None
+      }
+    }
+    (replaceWhere, containsDataFilters)
+  }
+
+  protected def constraintPredicates(
+      spark: SqlSparkSession,
+      condition: Seq[Expression]): Seq[Expression] = condition
+
+  protected def constraintViolation(e: InvariantViolationException): Throwable =
+    DeltaErrors.replaceWhereMismatchException(cpuWrite.options.replaceWhere.get, e)
+
+  protected def observeCommit[T](body: => T): T = body
+
+  protected def observeDelete[T](body: => T): T = body
+
+  protected def observeInsert[T](body: => T): T = body
+
+  protected def recordDeleteMetrics(deleteMetrics: DeleteMetric): Unit = {
+    DeltaRuntimeShim33x.emitDeltaEvent(
+      deltaLog, "delta.dml.write.removeFiles.stats", data = deleteMetrics)
+  }
+
+  protected def prepareDeleteCommand(
+      spark: ClassicSparkSession,
+      txn: OptimisticTransaction,
+      condition: Seq[Expression]): (ClassicSparkSession, DeleteCommand) = {
+    val relation = LogicalRelation(
+      txn.deltaLog.createRelation(snapshotToUseOpt = Some(txn.snapshot),
+        catalogTableOpt = txn.catalogTable))
+    val command = spark.sessionState.analyzer.execute(
+      DeleteFromTable(relation, condition.reduceOption(And).getOrElse(Literal.TrueLiteral)))
+    spark.sessionState.analyzer.checkAnalysis(command)
+    (spark, command.asInstanceOf[DeleteCommand])
+  }
 
   /**
    * Build the Delta commit metadata object for this runtime's `WriteIntoDelta` implementation.
@@ -108,10 +172,12 @@ abstract class GpuWriteIntoDeltaBase(
       val taggedCommitData = writeAndReturnCommitData(
         txn, sparkSession, None, false
       )
-      txn.commitIfNeeded(
-        taggedCommitData.actions,
-        buildCommitMetadata,
-        tags = taggedCommitData.stringTags)
+      observeCommit {
+        txn.commitIfNeeded(
+          taggedCommitData.actions,
+          buildCommitMetadata,
+          tags = taggedCommitData.stringTags)
+      }
     }
     Seq.empty
   }
@@ -125,6 +191,8 @@ abstract class GpuWriteIntoDeltaBase(
 
     require(txn.isInstanceOf[GpuOptimisticTransactionBase], "Only gpu transaction supported")
 
+    validateAtomicReplaceOptions()
+
     if (txn.readVersion > -1) {
       // This table already exists, check if the insert is valid.
       if (cpuWrite.mode == SaveMode.ErrorIfExists) {
@@ -135,14 +203,12 @@ abstract class GpuWriteIntoDeltaBase(
         DeltaRuntimeShim33x.assertRemovable(txn.snapshot)
       }
     }
-    val isReplaceWhere = cpuWrite.mode == SaveMode.Overwrite &&
-      cpuWrite.options.replaceWhere.nonEmpty
     val finalClusterBySpecOpt =
-      if (cpuWrite.mode == SaveMode.Append || isReplaceWhere) {
+      if (cpuWrite.mode == SaveMode.Append || (isOverwriteOperation && isInsertAtomicReplaceOp)) {
         clusterBySpecOpt.foreach { clusterBySpec =>
           ClusteredTableUtils.validateClusteringColumnsInSnapshot(txn.snapshot, clusterBySpec)
         }
-        // Append mode and replaceWhere cannot update the clustering columns.
+        // Append and atomic partial overwrites cannot update the clustering columns.
         None
       } else {
         clusterBySpecOpt
@@ -177,7 +243,7 @@ abstract class GpuWriteIntoDeltaBase(
     val newDomainMetadata = getNewDomainMetadata(
       txn,
       canUpdateMetadata,
-      isReplacingTable = isOverwriteOperation && cpuWrite.options.replaceWhere.isEmpty,
+      isReplacingTable = isOverwriteOperation && !isInsertAtomicReplaceOp,
       finalClusterBySpecOpt
     )
 
@@ -214,41 +280,25 @@ abstract class GpuWriteIntoDeltaBase(
       throw DeltaErrors.overwriteSchemaUsedWithDynamicPartitionOverwrite()
     }
 
-    // Validate partition predicates
-    var containsDataFilters = false
-    val replaceWhere = cpuWrite.options.replaceWhere.flatMap { replace =>
-      val parsed = parsePredicates(sparkSession, replace)
-      if (replaceOnDataColsEnabled) {
-        // Helps split the predicate into separate expressions
-        val (metadataPredicates, dataFilters) = DeltaTableUtils.splitMetadataAndDataPredicates(
-          parsed.head, txn.metadata.partitionColumns, sparkSession)
-        if (rearrangeOnly && dataFilters.nonEmpty) {
-          throw DeltaErrors.replaceWhereWithFilterDataChangeUnset(dataFilters.mkString(","))
-        }
-        containsDataFilters = dataFilters.nonEmpty
-        Some(metadataPredicates ++ dataFilters)
-      } else if (cpuWrite.mode == SaveMode.Overwrite) {
-        verifyPartitionPredicates(sparkSession, txn.metadata.partitionColumns, parsed)
-        Some(parsed)
-      } else {
-        None
-      }
-    }
+    val (atomicReplaceExpressions, containsDataFilters) =
+      getAtomicReplaceExpressions(sparkSession, txn, replaceOnDataColsEnabled)
 
     if (txn.readVersion < 0) {
       // Initialize the log path
       deltaLog.createLogDirectoriesIfNotExists()
     }
 
-    val (newFiles, addFiles, deletedFiles) = (cpuWrite.mode, replaceWhere) match {
-      case (SaveMode.Overwrite, Some(predicates)) if !replaceOnDataColsEnabled =>
+    val (newFiles, addFiles, deletedFiles) = (cpuWrite.mode, atomicReplaceExpressions) match {
+      case (SaveMode.Overwrite, Some(predicates))
+          if cpuWrite.options.replaceWhere.isDefined && !replaceOnDataColsEnabled =>
         // fall back to match on partition cols only when replaceArbitrary is disabled.
         val newFiles = txn.writeFiles(data, Some(cpuWrite.options))
         val addFiles = newFiles.collect { case a: AddFile => a }
         // Check to make sure the files we wrote out were actually valid.
+        val partitionPredicates = constraintPredicates(sparkSession, predicates)
         val matchingFiles = DeltaLog.filterFileList(
-            txn.metadata.partitionSchema, addFiles.toDF(sparkSession), predicates).as[AddFile]
-          .collect()
+            txn.metadata.partitionSchema, addFiles.toDF(sparkSession), partitionPredicates)
+          .as[AddFile].collect()
         val invalidFiles = addFiles.toSet -- matchingFiles
         if (invalidFiles.nonEmpty) {
           val badPartitions = invalidFiles
@@ -258,11 +308,17 @@ abstract class GpuWriteIntoDeltaBase(
           throw DeltaErrors.replaceWhereMismatchException(cpuWrite.options.replaceWhere.get,
             badPartitions)
         }
-        (newFiles, addFiles, txn.filterFiles(predicates).map(_.remove))
+        (newFiles, addFiles, txn.filterFiles(partitionPredicates).map(_.remove))
       case (SaveMode.Overwrite, Some(condition)) if txn.snapshot.version >= 0 =>
-        val constraints = extractConstraints(sparkSession, condition)
+        val constraints = if (isReplaceOnOrUsing) {
+          Seq.empty
+        } else {
+          extractConstraints(sparkSession, constraintPredicates(sparkSession, condition))
+        }
 
-        val removedFileActions = removeFiles(ClassicSparkSession.active, txn, condition)
+        val removedFileActions = observeDelete {
+          removeFiles(sparkSession.asInstanceOf[ClassicSparkSession], txn, condition)
+        }
         val cdcExistsInRemoveOp = removedFileActions.exists(_.isInstanceOf[AddCDCFile])
 
         // The above REMOVE will not produce explicit CDF data when persistent DV is enabled.
@@ -272,7 +328,8 @@ abstract class GpuWriteIntoDeltaBase(
         val dataToWrite =
           if (containsDataFilters &&
             CDCReader.isCDCEnabledOnTable(txn.metadata, sparkSession) &&
-            sparkSession.conf.get(DeltaSQLConf.REPLACEWHERE_DATACOLUMNS_WITH_CDF_ENABLED) &&
+            (isReplaceOnOrUsing ||
+              sparkSession.conf.get(DeltaSQLConf.REPLACEWHERE_DATACOLUMNS_WITH_CDF_ENABLED)) &&
             cdcExistsInRemoveOp) {
             var dataWithDefaultExprs = data
             // Add identity columns if they are not in `data`.
@@ -301,7 +358,8 @@ abstract class GpuWriteIntoDeltaBase(
             val insertCols = outputCols :+
               lit(CDCReader.CDC_TYPE_INSERT).as(CDCReader.CDC_TYPE_COLUMN_NAME)
             val insertDataCols = outputCols :+
-              lit(CDCReader.CDC_TYPE_NOT_CDC).as(CDCReader.CDC_TYPE_COLUMN_NAME)
+              DFUDFShims.exprToColumn(CDCReader.CDC_TYPE_NOT_CDC)
+                .as(CDCReader.CDC_TYPE_COLUMN_NAME)
             val packedInsertsExpr = array(
               struct(insertCols: _*),
               struct(insertDataCols: _*)
@@ -315,11 +373,11 @@ abstract class GpuWriteIntoDeltaBase(
           } else {
             data
           }
-        val newFiles = try txn.writeFiles(dataToWrite, Some(cpuWrite.options), constraints) catch {
-          case e: InvariantViolationException =>
-            throw DeltaErrors.replaceWhereMismatchException(
-              cpuWrite.options.replaceWhere.get,
-              e)
+        val newFiles = observeInsert {
+          try txn.writeFiles(dataToWrite, Some(cpuWrite.options), constraints) catch {
+            case e: InvariantViolationException =>
+              throw constraintViolation(e)
+          }
         }
         (newFiles,
           newFiles.collect { case a: AddFile => a },
@@ -340,7 +398,7 @@ abstract class GpuWriteIntoDeltaBase(
     }
 
     registerWriteOperationMetrics(
-      sparkSession, txn, newFiles, deletedFiles, replaceWhere, replaceOnDataColsEnabled)
+      sparkSession, txn, newFiles, deletedFiles, atomicReplaceExpressions, replaceOnDataColsEnabled)
 
     val fileActions = if (rearrangeOnly) {
       val changeFiles = newFiles.collect { case c: AddCDCFile => c }
@@ -361,8 +419,12 @@ abstract class GpuWriteIntoDeltaBase(
         createSetTransaction(sparkSession, deltaLog, Some(cpuWrite.options)).toSeq ++
         fileActions
 
-    // Register numRemovedFiles metric (even when 0) so WRITE operationMetrics match CPU
-    val removedFilesCount = fileActions.count(_.isInstanceOf[RemoveFile])
+    // DV updates remove and re-add the same physical file. They do not count as file removals.
+    val readdedPaths = deletedFiles.collect { case add: AddFile => add.path }.toSet
+    val removedFilesCount = fileActions.count {
+      case remove: RemoveFile => !readdedPaths.contains(remove.path)
+      case _ => false
+    }
     val m: SQLMetric = SQLMetrics.createMetric(
       sparkSession.sparkContext, "number of files removed.")
     m.set(removedFilesCount)
@@ -382,33 +444,23 @@ abstract class GpuWriteIntoDeltaBase(
       spark: ClassicSparkSession,
       txn: OptimisticTransaction,
       condition: Seq[Expression]): Seq[Action] = {
-    val relation = LogicalRelation(
-      txn.deltaLog.createRelation(snapshotToUseOpt = Some(txn.snapshot),
-        catalogTableOpt = txn.catalogTable))
-    val processedCondition = condition.reduceOption(And)
-    val command = spark.sessionState.analyzer.execute(
-      DeleteFromTable(relation, processedCondition.getOrElse(Literal.TrueLiteral)))
-    spark.sessionState.analyzer.checkAnalysis(command)
+    val (deleteSpark, command) = prepareDeleteCommand(spark, txn, condition)
     val deleteCommandMeta = GpuOverrides
-      .wrapRunnableCmd(command.asInstanceOf[DeleteCommand], gpuDeltaLog.rapidsConf, None)
+      .wrapRunnableCmd(command, gpuDeltaLog.rapidsConf, None)
     deleteCommandMeta.initReasons()
     deleteCommandMeta.tagSelfForGpu()
 
     val deleteResult = if (deleteCommandMeta.canThisBeReplaced) {
       val gpuTxn = txn.asInstanceOf[GpuOptimisticTransactionBase]
       deleteCommandMeta.convertToGpu().asInstanceOf[GpuDeleteCommand]
-        .performDelete(spark, gpuTxn.deltaLog, gpuTxn)
+        .performDelete(deleteSpark, gpuTxn.deltaLog, gpuTxn)
     } else {
-      command.asInstanceOf[DeleteCommand].performDelete(spark, txn.deltaLog, txn)
+      command.performDelete(deleteSpark, txn.deltaLog, txn)
     }
     val deleteActions = deleteResult._1
     val deleteMetrics = deleteResult._2
 
-    DeltaRuntimeShim33x.emitDeltaEvent(
-      deltaLog,
-      "delta.dml.write.removeFiles.stats",
-      data = deleteMetrics
-    )
+    recordDeleteMetrics(deleteMetrics)
     deleteActions
   }
 

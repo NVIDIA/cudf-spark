@@ -21,12 +21,16 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.delta.rapids
 
-import java.lang.reflect.Modifier
+import java.lang.reflect.{InvocationTargetException, Modifier}
+
+import scala.collection.mutable.ArrayBuffer
 
 import com.nvidia.spark.rapids.{RapidsConf, SparkQueryCompareTestSuite}
 import com.nvidia.spark.rapids.delta.{DeltaProvider, NoDeltaProvider}
 import org.scalatestplus.mockito.MockitoSugar.mock
 
+import org.apache.spark.{SparkConf, SparkException}
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{Dataset, Row, SaveMode}
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Literal}
 import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
@@ -140,6 +144,154 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
     val accessor = classOf[WriteIntoDeltaLike]
       .getMethod("ReplaceWhereExprsAndDataFilterPresenceInExprs")
     assert(accessor.invoke(gpuWrite) != null)
+  }
+
+  test("Delta 4.3 uses Spark 4.1's V1 saveAsTable marker") {
+    assume(io.delta.VERSION == "4.3.0" && org.apache.spark.SPARK_VERSION.startsWith("4.1."))
+    val v1Options = new DeltaOptions(
+      Map("__v1_save_as_table_overwrite" -> "true"), new SQLConf)
+    assert(DeltaRuntimeShim.isV1WriterSaveAsTableOverwrite(v1Options, SaveMode.Overwrite))
+    assert(!DeltaRuntimeShim.isV1WriterSaveAsTableOverwrite(v1Options, SaveMode.Append))
+    val v2Options = new DeltaOptions(Map.empty[String, String], new SQLConf)
+    assert(!DeltaRuntimeShim.isV1WriterSaveAsTableOverwrite(v2Options, SaveMode.Overwrite))
+  }
+
+  test("Delta 4.3 prepared replacement copies retain GPU dispatch and prepared fields") {
+    assume(io.delta.VERSION == "4.3.0")
+    withCpuSparkSession { spark =>
+      val deltaLog = mock[DeltaLog]
+      val gpuDeltaLog = new GpuDeltaLog(deltaLog, new RapidsConf(Map.empty[String, String]))
+      val originalData = spark.range(3).toDF()
+      val cpuWrite = WriteIntoDelta(deltaLog, SaveMode.Overwrite,
+        new DeltaOptions(Map("replaceUsing" -> "id"), spark.sessionState.conf),
+        Nil, Map.empty, originalData)
+      // Reflection keeps this suite compilable against older Delta runtimes sharing these shims.
+      val adapterClass = Class.forName(
+        "org.apache.spark.sql.delta.rapids.delta43x.GpuPreparedReplaceWrite43x")
+      val prepared = adapterClass.getConstructors.head.newInstance(gpuDeltaLog, cpuWrite)
+        .asInstanceOf[WriteIntoDelta]
+      val materializedData = spark.range(2, 5).toDF()
+      val preparedOptions = new DeltaOptions(Map(
+        "replaceUsing" -> "id", "targetAlias" -> "__replace_using_table_alias__"),
+        spark.sessionState.conf)
+      val copyMethod = adapterClass.getMethods.find(m =>
+        m.getName == "copy" && m.getParameterCount == 9).get
+      val copied = copyMethod.invoke(prepared, deltaLog, SaveMode.Overwrite, preparedOptions,
+        Nil, Map("prepared" -> "true"), materializedData, None, None, Boolean.box(true))
+        .asInstanceOf[WriteIntoDelta]
+      assert(copied.getClass == adapterClass)
+      assert(copied.data eq materializedData)
+      assert(copied.options eq preparedOptions)
+      assert(copied.configuration == Map("prepared" -> "true"))
+      assert(adapterClass.getMethod("copy$default$9").invoke(copied) == Boolean.box(true))
+      val configured = copied.withNewWriterConfiguration(Map("updated" -> "true"))
+      assert(configured.getClass == adapterClass)
+      assert(configured.data eq materializedData)
+      assert(configured.configuration == Map("updated" -> "true"))
+    }
+  }
+
+  test("Delta 4.3 replacement factory retains upstream command and by-name preparation") {
+    assume(io.delta.VERSION == "4.3.0")
+    withCpuSparkSession { spark =>
+      withTempPath { tablePath =>
+        val deltaLog = DeltaLog.forTable(spark, tablePath.getAbsolutePath)
+        val cpuWrite = WriteIntoDelta(deltaLog, SaveMode.Overwrite,
+          new DeltaOptions(Map("replaceUsing" -> "id"), spark.sessionState.conf),
+          Nil, Map.empty, spark.range(3).toDF())
+        val gpuWrite = DeltaRuntimeShim.createGpuWrite(
+          new GpuDeltaLog(deltaLog, new RapidsConf(Map.empty[String, String])), cpuWrite)
+        assert(gpuWrite.getClass.getSimpleName == "GpuInsertReplaceOnOrUsingCommand")
+        val cpuCommand = gpuWrite.getClass.getMethod("cpuCommand").invoke(gpuWrite)
+        assert(cpuCommand.getClass.getSimpleName == "DeltaInsertReplaceOnOrUsingCommand")
+        assert(cpuCommand.getClass.getMethod("byName").invoke(cpuCommand) == Boolean.box(true))
+        val configured = gpuWrite.withNewWriterConfiguration(Map("updated" -> "true"))
+        assert(configured.configuration == Map("updated" -> "true"))
+        assert(configured.data eq cpuWrite.data)
+        val rules = DeltaProvider().getRunnableCommandRules
+        assert(rules.keys.exists(_.getSimpleName == "DeltaInsertReplaceOnOrUsingCommand"))
+      }
+    }
+  }
+
+  Seq("retry", "exhausted", "fatal").foreach { outcome =>
+    test(s"Delta 4.3 replacement materialization cleanup on $outcome") {
+      assume(io.delta.VERSION == "4.3.0")
+      val conf = new SparkConf()
+        .set("spark.databricks.delta.insertReplaceOnOrUsing.materializeSource", "all")
+      withCpuSparkSession({ spark =>
+        withTempPath { tablePath =>
+          val deltaLog = DeltaLog.forTable(spark, tablePath.getAbsolutePath)
+          val data = spark.range(3).selectExpr("id", "id * 10 AS unused")
+          val cpuWrite = WriteIntoDelta(deltaLog, SaveMode.Overwrite,
+            new DeltaOptions(Map("replaceUsing" -> "id"), spark.sessionState.conf),
+            Nil, Map.empty, data)
+          val gpuWrite = DeltaRuntimeShim.createGpuWrite(
+            new GpuDeltaLog(deltaLog, new RapidsConf(Map.empty[String, String])), cpuWrite)
+          val adapt = gpuWrite.getClass.getDeclaredMethod("adaptedCommand")
+          adapt.setAccessible(true)
+          val command = adapt.invoke(gpuWrite)
+          val materializedRDD = command.getClass.getMethod("materializedSourceRDD")
+          val execute = command.getClass.getDeclaredMethods
+            .find(_.getName == "withMaterializeRetryAndStats").get
+          execute.setAccessible(true)
+          val maxAttempts = spark.conf.get(
+            "spark.databricks.delta.merge.materializeSource.maxAttempts", "4").toInt
+          val sources = ArrayBuffer.empty[RDD[_]]
+          val fatal = new IllegalStateException("non-retryable replacement failure")
+          val callback: WriteIntoDelta => String = prepared => {
+            // The adapter must survive each upstream prepareWriteCmd copy, and materialization
+            // must retain columns that are not referenced by the matching condition.
+            assert(prepared.getClass.getSimpleName == "GpuPreparedReplaceWrite43x")
+            assert(prepared.data.columns.toSeq == Seq("id", "unused"))
+            assert(sources.forall(_.getStorageLevel == org.apache.spark.storage.StorageLevel.NONE))
+            val rdd = materializedRDD.invoke(command).asInstanceOf[Option[RDD[_]]].get
+            sources += rdd
+            if (outcome == "fatal") {
+              throw fatal
+            } else if (sources.size == 1 || outcome == "exhausted") {
+              throw new SparkException("CHECKPOINT_RDD_BLOCK_ID_NOT_FOUND",
+                Map("rddBlockId" -> s"rdd_${rdd.id}_0"), null)
+            }
+            "done"
+          }
+          if (outcome == "retry") {
+            assert(execute.invoke(command, spark, callback) == "done")
+            assert(sources.size == 2)
+          } else {
+            val error = intercept[InvocationTargetException] {
+              execute.invoke(command, spark, callback)
+            }.getCause
+            if (outcome == "fatal") {
+              assert(error eq fatal)
+              assert(sources.size == 1)
+            } else {
+              assert(error.getMessage.contains("DELTA_MERGE_MATERIALIZE_SOURCE_FAILED_REPEATEDLY"))
+              assert(sources.size == maxAttempts)
+            }
+          }
+          assert(materializedRDD.invoke(command) == None)
+          assert(sources.forall(_.getStorageLevel == org.apache.spark.storage.StorageLevel.NONE))
+        }
+      }, conf)
+    }
+  }
+
+  test("Delta 4.3 atomic and partial overwrite classification remains distinct") {
+    assume(io.delta.VERSION == "4.3.0")
+    Seq(
+      (Map("replaceWhere" -> "id = 1"), true, true),
+      (Map("replaceOn" -> "target.id = source.id"), true, true),
+      (Map("replaceUsing" -> "id"), true, true),
+      (Map("partitionOverwriteMode" -> "dynamic"), false, true),
+      (Map("partitionOverwriteMode" -> "static"), false, false)
+    ).foreach { case (options, atomic, partial) =>
+      val deltaOptions = new DeltaOptions(options, new SQLConf)
+      assert(deltaOptions.getClass.getMethod("isInsertAtomicReplaceOp")
+        .invoke(deltaOptions) == Boolean.box(atomic))
+      assert(deltaOptions.getClass.getMethod("isInsertPartialOverwriteOp")
+        .invoke(deltaOptions) == Boolean.box(partial))
+    }
   }
 
   test("Delta 4.3 DELETE and UPDATE validate mismatched record counts") {

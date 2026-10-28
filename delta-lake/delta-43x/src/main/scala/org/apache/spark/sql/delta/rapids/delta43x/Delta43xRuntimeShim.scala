@@ -27,15 +27,17 @@ import com.nvidia.spark.rapids.delta.delta43x.{Delta43xConfigChecker, Delta43xPr
 import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression}
+import org.apache.spark.sql.classic.{SparkSession => ClassicSparkSession}
 import org.apache.spark.sql.connector.catalog.StagingTableCatalog
 import org.apache.spark.sql.delta.{DeltaErrors, DeltaLog, DeltaOperations, DeltaOptions,
   NumRecordsStats, Snapshot}
 import org.apache.spark.sql.delta.{TableFeature, VariantShreddingPreviewTableFeature,
   VariantShreddingTableFeature}
 import org.apache.spark.sql.delta.actions.{AddFile, FileAction, Metadata}
-import org.apache.spark.sql.delta.catalog.DeltaCatalog
-import org.apache.spark.sql.delta.commands.{DeltaReorgOperation, DMLWithDeletionVectorsHelper,
-  TouchedFileWithDV, UpdateCommand, WriteIntoDelta}
+import org.apache.spark.sql.delta.catalog.{DeltaCatalog, DeltaTableV2}
+import org.apache.spark.sql.delta.commands.{CreateDeltaTableLikeShims, DeltaInsertReplaceOnOrUsingCommand,
+  DeltaReorgOperation, DMLWithDeletionVectorsHelper,
+  InsertReplaceOnOrUsingAPIOrigin, TouchedFileWithDV, UpdateCommand, WriteIntoDelta}
 import org.apache.spark.sql.delta.hooks.GpuAutoCompact43x
 import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShimBase, DeltaVariantShreddingShim,
   DMLWithDeletionVectorsRuntimeShim, GpuDeltaLog, GpuOptimisticTransactionBase,
@@ -52,7 +54,7 @@ class Delta43xRuntimeShim extends DeltaRuntimeShimBase
     Set(VariantShreddingPreviewTableFeature, VariantShreddingTableFeature)
 
   override def processUnmodifiedData(
-      spark: org.apache.spark.sql.classic.SparkSession,
+      spark: ClassicSparkSession,
       touchedFiles: Seq[TouchedFileWithDV],
       txn: GpuOptimisticTransactionBase): (Seq[FileAction], Map[String, Long]) = {
     val prefixLength = StatsCollectionUtils.getDataSkippingStringPrefixLength(spark, txn.metadata)
@@ -162,6 +164,12 @@ class Delta43xRuntimeShim extends DeltaRuntimeShimBase
 
   override def getDeltaProvider: DeltaProvider = Delta43xProvider
 
+  override def isV1WriterSaveAsTableOverwrite(
+      options: DeltaOptions,
+      mode: SaveMode): Boolean = {
+    CreateDeltaTableLikeShims.isV1WriterSaveAsTableOverwrite(options, mode)
+  }
+
   override def getGpuDeltaCatalog(
       cpuCatalog: DeltaCatalog,
       rapidsConf: RapidsConf): StagingTableCatalog = {
@@ -197,7 +205,32 @@ class Delta43xRuntimeShim extends DeltaRuntimeShimBase
   override def createGpuWrite(
       gpuDeltaLog: GpuDeltaLog,
       cpuWrite: WriteIntoDelta): GpuWriteIntoDeltaLike = {
-    GpuWriteIntoDelta43x(gpuDeltaLog, cpuWrite)
+    if (cpuWrite.options.isReplaceOnOrUsingDefined) {
+      val sqlConf = cpuWrite.data.sparkSession.sessionState.conf
+      if (cpuWrite.options.replaceOn.isDefined &&
+          !sqlConf.getConf(DeltaSQLConf.REPLACE_ON_OPTION_IN_DATAFRAME_WRITER_ENABLED)) {
+        throw DeltaErrors.operationNotSupportedException("replaceOn")
+      } else if (cpuWrite.options.replaceUsing.isDefined &&
+          !sqlConf.getConf(DeltaSQLConf.REPLACE_USING_OPTION_IN_DATAFRAME_WRITER_ENABLED)) {
+        throw DeltaErrors.operationNotSupportedException("replaceUsing")
+      }
+    }
+    if (cpuWrite.options.isReplaceOnOrUsingDefined &&
+        (cpuWrite.mode == SaveMode.Overwrite || cpuWrite.catalogTableOpt.isEmpty)) {
+      val origin = if (cpuWrite.catalogTableOpt.isDefined) {
+        InsertReplaceOnOrUsingAPIOrigin.DFv1SaveAsTable
+      } else {
+        InsertReplaceOnOrUsingAPIOrigin.DFv1Save
+      }
+      val command = DeltaInsertReplaceOnOrUsingCommand.createCmdForSaveAndSaveAsTable(
+        DeltaTableV2(
+          cpuWrite.data.sparkSession, gpuDeltaLog.deltaLog.dataPath,
+          catalogTable = cpuWrite.catalogTableOpt),
+        cpuWrite.data, cpuWrite, origin)
+      GpuInsertReplaceOnOrUsingCommand(gpuDeltaLog, command)
+    } else {
+      GpuWriteIntoDelta43x(gpuDeltaLog, cpuWrite)
+    }
   }
 
   override def buildWriteOperation(
@@ -211,7 +244,9 @@ class Delta43xRuntimeShim extends DeltaRuntimeShimBase
       options.userMetadata,
       dynamicPartitionOverwriteOption(options),
       toBooleanOption(options.canOverwriteSchema),
-      toBooleanOption(options.canMergeSchema))
+      toBooleanOption(options.canMergeSchema),
+      replaceOnCond = options.replaceOn,
+      replaceUsingCols = options.replaceUsing)
   }
 
   override def buildReplaceTableOperation(
