@@ -820,7 +820,7 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     doTranspileTest(raw"\|*", raw"\|*", 0)
 
     // anchors, boundaries, and linebreaks are still not quantifiable
-    Seq(raw"a\A*", raw"a\Z?", raw"a\b+", raw"a\B{2}", raw"a\R+").foreach { pattern =>
+    Seq(raw"a\A*", raw"a\Z?", raw"a\z+", raw"a\b+", raw"a\B{2}", raw"a\R+").foreach { pattern =>
       assertUnsupported(pattern, RegexFindMode, "Preceding token cannot be quantified")
     }
 
@@ -829,9 +829,8 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
     val findPatterns = Seq(raw"a\|*b", raw"\|+", raw"\.{2,}", raw"\*+", raw"\\+", "\\$+",
         raw"\^{2}", raw"\(+\)+", raw"\[+\]+", raw"\{+\}+", raw"\?+", raw"\++", raw"\@+",
         raw"\-{2}", raw"\/+", raw"(\~\#)+", raw"(\.|\|)+", raw"(\|+)")
-    // * and ? omitted from replace: empty-match semantics differ (see issue 4884)
-    val replacePatterns = Seq(raw"\|+", raw"\.{2,3}", raw"\\+", "\\$+", raw"\(+\)+", raw"\@+",
-        raw"(\.|\|)+", raw"(\|+)")
+    val replacePatterns = Seq(raw"\|*", raw"\.?", raw"\|+", raw"\.{2,3}", raw"\\+", "\\$+",
+        raw"\(+\)+", raw"\@+", raw"(\.|\|)+", raw"(\|+)")
     assertCpuGpuMatchesRegexpFind(findPatterns, inputs)
     assertCpuGpuMatchesRegexpReplace(replacePatterns, inputs)
     doStringSplitTest(Set(raw"\|+", raw"\.{2}", raw"\@+"), inputs, limit = -1)
