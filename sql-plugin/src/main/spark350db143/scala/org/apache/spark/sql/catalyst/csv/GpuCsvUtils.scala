@@ -17,6 +17,7 @@
 /*** spark-rapids-shim-json-lines
 {"spark": "350db143"}
 {"spark": "400db173"}
+{"spark": "410db183"}
 spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.catalyst.csv
@@ -25,7 +26,9 @@ import java.nio.charset.StandardCharsets
 
 import com.nvidia.spark.rapids.shims.LegacyBehaviorPolicyShim
 
-import org.apache.spark.sql.catalyst.util.DateFormatter
+import org.apache.spark.sql.catalyst.util.{DateFormatDetector, DateFormatter}
+import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.types.Metadata
 
 object GpuCsvUtils {
   def csvLineToParse(line: Array[Byte], offset: Int, len: Int,
@@ -41,6 +44,23 @@ object GpuCsvUtils {
   def dateFormatInRead(options: CSVOptions): String =
     options.dateFormatInRead.getOrElse(DateFormatter.defaultPattern)
 
+  def dateFormatInRead(options: CSVOptions, metadata: Metadata): Option[String] = {
+    if (options.detectDateFormat) {
+      // DBR enables detection when preferDate is true and dateFormat is unspecified.
+      // UnivocityParser then selects a format from each column's metadata, even with
+      // an explicit schema. Missing metadata selects DefaultDateFormatter, whose
+      // CAST-style grammar accepts "2020" as 2020-01-01. dateFormatInRead can still be
+      // Some("yyyy-MM-dd"), which selects a different formatter and rejects "2020".
+      // Preserve None so JNI receives null and uses the same default parsing semantics.
+      val key = DateFormatDetector.DETECTED_DATE_FORMAT_ATTR_KEY
+      if (metadata.contains(key)) Some(metadata.getString(key)) else None
+    } else {
+      // Use the same format-selection path as vanilla Spark. DBR also reaches this
+      // branch when dateFormat is specified or preferDate is false.
+      options.dateFormatInRead
+    }
+  }
+
   def timestampFormatInRead(options: CSVOptions): String = options.timestampFormatInRead.getOrElse(
     if (LegacyBehaviorPolicyShim.isLegacyTimeParserPolicy()) {
       s"${DateFormatter.defaultPattern}'T'HH:mm:ss.SSSXXX"
@@ -50,4 +70,11 @@ object GpuCsvUtils {
 
   def enableDateTimeParsingFallback(options: CSVOptions): Boolean =
     options.enableDateTimeParsingFallback.getOrElse(false)
+
+  def enableDateParsingFallback(options: CSVOptions): Boolean =
+    options.enableDateTimeParsingFallback
+      .orElse(SQLConf.get.csvEnableDateTimeParsingFallback)
+      .getOrElse {
+        LegacyBehaviorPolicyShim.isLegacyTimeParserPolicy() || options.dateFormatOption.isEmpty
+      }
 }

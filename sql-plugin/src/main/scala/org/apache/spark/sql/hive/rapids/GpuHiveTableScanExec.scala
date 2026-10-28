@@ -50,7 +50,7 @@ import org.apache.spark.sql.execution.rapids.shims.FilePartitionShims
 import org.apache.spark.sql.hive.client.HiveClientImpl
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.SparkSession
-import org.apache.spark.sql.types.{BooleanType, DataType, DecimalType, StructType}
+import org.apache.spark.sql.types.{BooleanType, DataType, DecimalType, StructField, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.util.SerializableConfiguration
 
@@ -583,9 +583,13 @@ class GpuHiveDelimitedTextPartitionReader(conf: Configuration,
   override def castStringToDecimal(input: ColumnVector, dt: DecimalType): ColumnVector =
     CastStrings.toDecimal(input, false, false, dt.precision, -dt.scale)
 
+  // Hive DATE conversion must keep LazySimpleSerDe semantics instead of CSV date parsing.
+  override def castStringToDate(input: ColumnVector, dt: DType,
+      field: StructField): ColumnVector = castStringToDate(input, dt)
+
   /**
-   * Override of [[com.nvidia.spark.rapids.GpuTextBasedPartitionReader#castStringToDate]],
-   * to convert parsed string columns to Dates.
+   * Override of the two-argument `castStringToDate` in
+   * [[com.nvidia.spark.rapids.GpuTextBasedPartitionReader]] to convert string columns to Dates.
    * Two key differences from the base implementation, to comply with Hive LazySimpleSerDe
    * semantics:
    *   1. The input strings are not trimmed of whitespace.

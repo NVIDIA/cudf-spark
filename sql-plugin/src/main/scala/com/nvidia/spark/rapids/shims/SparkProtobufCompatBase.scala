@@ -55,7 +55,7 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
     exprClass.getDeclaredFields.exists(_.getName == "nullResultRow")
 
   // The rule is registered only when the class loads, so a missing class never reaches planning.
-  private lazy val permissiveNeedsCpu: Boolean =
+  private lazy val permissiveReturnsNullFields: Boolean =
     Try(ShimReflectionUtils.loadClass(ProtobufDataToCatalystClassName))
       .toOption.exists(permissiveReturnsNullFieldsRow)
 
@@ -77,7 +77,7 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
    */
   def parsePlannerOptions(
       options: Map[String, String]): Either[String, ProtobufPlannerOptions] =
-    parsePlannerOptions(options, permissiveNeedsCpu)
+    parsePlannerOptions(options, permissiveReturnsNullFields)
 
   private[shims] def parsePlannerOptions(
       options: Map[String, String],
@@ -88,9 +88,6 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
     val failOnErrors = mode.equalsIgnoreCase("FAILFAST")
     if (mode.equalsIgnoreCase("DROPMALFORMED")) {
       Left("from_protobuf DROPMALFORMED mode is not supported on GPU")
-    } else if (!failOnErrors && permissiveReturnsNullRow) {
-      Left("from_protobuf PERMISSIVE mode on this Spark version returns a struct of null " +
-        "fields for malformed input, which the GPU decoder does not produce")
     } else {
       val enumsAsInts = if (!honorsEnumsAsInts) {
         Right(false)
@@ -104,7 +101,8 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
               s"'$value' (expected true/false)"
           }
       }
-      enumsAsInts.map(v => ProtobufPlannerOptions(enumsAsInts = v, failOnErrors = failOnErrors))
+      enumsAsInts.map(v => ProtobufPlannerOptions(enumsAsInts = v, failOnErrors = failOnErrors,
+        malformedRowsAsNullFields = !failOnErrors && permissiveReturnsNullRow))
     }
   }
 
@@ -118,10 +116,11 @@ private[shims] abstract class SparkProtobufCompatBase extends Logging {
    */
   def checkNoFieldsMissingFromSchema(
       schema: StructType,
-      desc: ProtobufMessageDescriptor): Either[String, Unit] = {
+      desc: ProtobufMessageDescriptor,
+      location: String): Either[String, Unit] = {
     val omitted = desc.fieldNames.filterNot(schema.fieldNames.contains)
     Either.cond(omitted.isEmpty, (),
-      s"root message has fields missing from the Spark schema: ${omitted.mkString(", ")}")
+      s"$location has fields missing from the Spark schema: ${omitted.mkString(", ")}")
   }
 
   /** Resolves the schema or returns a failure reason; lazy metadata reads may still throw. */

@@ -776,12 +776,7 @@ object RegexSplitMode extends RegexMode
 sealed case class RegexRewriteFlags(
     emptyRepetition: Boolean,
     // whether case-insensitive matching (the inline `(?i)` flag) is currently active
-    caseInsensitive: Boolean = false,
-    // whether a choice alternative follows the current position within the enclosing group. An
-    // inline flag toggle here would, in Java, also apply to that following alternative, which we
-    // cannot represent while rewriting branches independently, so we reject and fall back to the
-    // CPU. A flag in the last (right-most) alternative has nothing after it and is fine.
-    choiceAltFollows: Boolean = false)
+    caseInsensitive: Boolean = false)
 
 /**
  * Transpile Java/Spark regular expression to a format that cuDF supports, or throw an exception
@@ -906,6 +901,7 @@ class CudfRegexTranspiler(mode: RegexMode) {
     e match {
       case RegexEscaped(ch) => ch match {
         case 'd' | 'D' | 'w' | 'W' | 's' | 'S' | 'h' | 'H' | 'v' | 'V' => None
+        case c if regexMetaChars.contains(c) || regexPunct.contains(c) => None  // escaped literal
         case _ => Some(e)
       }
       case RegexChar(a) if "$^".contains(a) =>
@@ -1177,6 +1173,18 @@ class CudfRegexTranspiler(mode: RegexMode) {
     if (caseInsensitive == current.caseInsensitive) current
     else current.copy(caseInsensitive = caseInsensitive)
   }
+
+  /**
+   * The flag state in effect after `regex`, given `flags` before it. Groups restore the outer
+   * state when they close, so only bare inline flags outside of any group carry over.
+   */
+  private def inlineFlagsAfter(regex: RegexAST, flags: RegexRewriteFlags): RegexRewriteFlags =
+    regex match {
+      case RegexInlineFlags(flagSet) => applyInlineFlags(flags, flagSet, regex.position)
+      case RegexSequence(parts) => parts.foldLeft(flags)((f, part) => inlineFlagsAfter(part, f))
+      case RegexChoice(l, r) => inlineFlagsAfter(r, inlineFlagsAfter(l, flags))
+      case _ => flags
+    }
 
   private def isAsciiLetter(cp: Int): Boolean =
     (cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z')
@@ -1515,15 +1523,6 @@ class CudfRegexTranspiler(mode: RegexMode) {
             val (r, last) = m
             part match {
               case RegexInlineFlags(flagSet) =>
-                if (flags.choiceAltFollows) {
-                  // In Java a bare `(?i)` applies to the end of the enclosing group, crossing
-                  // `|` into any following alternative. We rewrite choice branches independently,
-                  // so we cannot represent a toggle that leaks into a following alternative;
-                  // fall back to the CPU. (A toggle in the last alternative is fine.)
-                  throw new RegexUnsupportedException(
-                    "Inline flags followed by a choice ('|') alternative are not supported",
-                    part.position)
-                }
                 currentFlags = applyInlineFlags(currentFlags, flagSet, part.position)
                 // inline flags are zero-width directives, so emit nothing and leave `last`
                 // (used by the anchor handling below) unchanged
@@ -1661,11 +1660,10 @@ class CudfRegexTranspiler(mode: RegexMode) {
       }
 
       case RegexChoice(l, r) =>
-        // The left branch has the right branch as a following alternative, so an inline flag
-        // toggle there would (in Java) also apply across the `|`. The right branch only has a
-        // following alternative if this whole choice does, so it inherits the current flag.
-        val ll = rewrite(l, None, flags.copy(choiceAltFollows = true))
-        val rr = rewrite(r, None, flags)
+        // In Java a bare inline flag applies to the end of the enclosing group, crossing `|`, so
+        // the right branch starts from the flag state left at the end of the left branch.
+        val ll = rewrite(l, None, flags)
+        val rr = rewrite(r, None, inlineFlagsAfter(l, flags))
 
         // cuDF does not support zero-length repetition in replace or split mode
         // cuDF does support +, fixed-length, and variable length with min > 0
@@ -1746,11 +1744,9 @@ class CudfRegexTranspiler(mode: RegexMode) {
             }
           case _ =>
         }
-        // A group opens a new inline-flag scope: reset `choiceAltFollows` (a `(?i)` inside this
-        // group cannot leak out to an alternative of an enclosing choice) while inheriting the
-        // case state.
-        RegexGroup(g.groupType,
-          rewrite(term, None, flags.copy(choiceAltFollows = false)))
+        // A group opens a new inline-flag scope: it inherits the case state, and a `(?i)` inside
+        // it cannot leak out (see `inlineFlagsAfter`).
+        RegexGroup(g.groupType, rewrite(term, None, flags))
 
       case g @ RegexGroup(RegexGroup.ScopedFlags(flagSet), term) =>
         val innerFlags = applyInlineFlags(flags, flagSet, g.position)

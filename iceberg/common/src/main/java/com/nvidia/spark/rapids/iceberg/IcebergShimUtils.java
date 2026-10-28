@@ -20,6 +20,7 @@ import com.nvidia.spark.rapids.GpuMetric;
 import com.nvidia.spark.rapids.NoopMetric$;
 import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
+import com.nvidia.spark.rapids.iceberg.parquet.converter.ParquetUnshader;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.ContentFile;
@@ -57,6 +58,12 @@ import java.util.Map;
  * {@link ShimUtils} based on the detected Iceberg version.
  */
 public interface IcebergShimUtils {
+    /**
+     * Returns the converter for shaded Parquet schemas and footer metadata.
+     * Implementations override only conversions specific to the selected library versions.
+     */
+    ParquetUnshader getParquetUnshader();
+
     /** Returns the Iceberg table format version from the table's current metadata. */
     int formatVersion(Table table);
 

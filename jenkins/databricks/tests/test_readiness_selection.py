@@ -34,7 +34,7 @@ class ReadinessSelectionTest(unittest.TestCase):
             integration_dir = root / "integration_tests"
             integration_dir.mkdir()
             (integration_dir / "run_pyspark_from_build.sh").write_text(
-                'echo "PRODUCT_TEST $*"\n')
+                'echo "PRODUCT_TEST $*"\necho "TEST_FILES ${TESTS:-}"\n')
             startup = root / "startup.sh"
             startup.write_text(f'echo "READINESS $1"\nexit {hook_exit}\n')
             # Keep the actual control flow, with external setup/Spark calls stubbed.
@@ -54,14 +54,15 @@ class ReadinessSelectionTest(unittest.TestCase):
             return subprocess.run(["bash", str(root / "test.sh")], env=env,
                                   text=True, capture_output=True, check=False)
 
-    def test_ci_defaults_to_readiness_only_for_dbr_183(self):
+    def test_ci_runs_non_delta_integration_tests_for_dbr_183(self):
         for mode in ("DEFAULT", "CI_PART1", "CI_PART2"):
             with self.subTest(mode=mode):
                 result = self.run_script(mode=mode)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("READINESS databricks", result.stdout)
                 self.assertEqual("READINESS upstream" in result.stdout, mode != "CI_PART2")
-                self.assertNotIn("PRODUCT_TEST", result.stdout)
+                self.assertIn("PRODUCT_TEST", result.stdout)
+                self.assertNotIn("--delta_lake", result.stdout)
 
     def test_manual_and_other_runtimes_keep_integration_tests(self):
         for version, hook in (("18.3.", False), ("17.3.", True),
@@ -89,7 +90,29 @@ class ReadinessSelectionTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("READINESS databricks", result.stdout)
         self.assertNotIn("READINESS upstream", result.stdout)
-        self.assertNotIn("PRODUCT_TEST", result.stdout)
+        self.assertIn("PRODUCT_TEST", result.stdout)
+
+    def test_ci_part2_includes_files_matched_by_part1_substrings(self):
+        result = self.run_script(mode="CI_PART2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        files = next(line.removeprefix("TEST_FILES ").split()
+                     for line in result.stdout.splitlines()
+                     if line.startswith("TEST_FILES ") and line != "TEST_FILES ")
+        self.assertEqual(set(files), {"json_test.py", "get_json_test.py", "orc_test.py",
+                                      "parquet_test.py", "parquet_testing_test.py",
+                                      "sort_test.py", "window_function_test.py"})
+
+    def test_other_runtimes_and_manual_runs_keep_delta_lake(self):
+        for version, hook in (("14.3.", True), ("17.3.", True), ("18.3.", False)):
+            with self.subTest(version=version, hook=hook):
+                result = self.run_script(version=version, hook=hook, mode="CI_PART2")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("--delta_lake", result.stdout)
+
+    def test_explicit_delta_only_mode_is_preserved(self):
+        result = self.run_script(mode="DELTA_LAKE_ONLY")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("-m delta_lake --delta_lake", result.stdout)
 
     def test_explicit_readiness_requires_hook_and_supported_mode(self):
         result = self.run_script(hook=False, override="1")

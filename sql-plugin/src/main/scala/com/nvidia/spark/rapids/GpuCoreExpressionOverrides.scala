@@ -84,6 +84,13 @@ private[rapids] object GpuCoreExpressionOverrides {
         TypeSig.LONG + TypeSig.STRING + TypeSig.BINARY,
         TypeSig.LONG + TypeSig.STRING + TypeSig.BINARY),
       HexRuleMeta),
+    expr[Unhex](
+      "Converts a hexadecimal string to binary",
+      ExprChecks.unaryProject(TypeSig.BINARY, TypeSig.BINARY, TypeSig.STRING, TypeSig.STRING),
+      UnhexRuleMeta).note(
+      "Error-raising to_binary and try_to_binary with hex fall back to CPU. " +
+        "Odd-length input differs from legacy Spark 3.3 and Databricks CPU decoding; " +
+        "see compatibility.md."),
     expr[WindowExpression](
       "Calculates a return value for every input row of a table based on a group (or " +
         "\"window\") of rows",

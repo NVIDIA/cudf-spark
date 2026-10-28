@@ -39,12 +39,6 @@ import org.apache.spark.sql.rapids.{GpuWriteJobStatsTracker, GpuWriteTaskStatsTr
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
-sealed trait SortExecType extends Serializable
-
-object OutOfCoreSort extends SortExecType
-object FullSortSingleBatch extends SortExecType
-object SortEachBatch extends SortExecType
-
 class GpuSortMeta(
     sort: SortExec,
     conf: RapidsConf,
