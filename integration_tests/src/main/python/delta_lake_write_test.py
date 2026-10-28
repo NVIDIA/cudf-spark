@@ -1359,8 +1359,8 @@ def test_delta_replace_where_save_as_table_preserves_partitioning(spark_tmp_tabl
             spark.sql(f"INSERT INTO {table} VALUES {initial_values}")
 
     def replace_na_partition(spark, table):
-        replacement = spark.sql(
-            "SELECT 100L AS record_id, 'NA' AS region, 100.0D AS amount")
+        # Read from the target table to exercise a partial self-overwrite.
+        replacement = spark.table(table).where("region = 'NA'").orderBy("record_id").limit(1)
         (replacement.write.format("delta").mode("overwrite")
          .option("replaceWhere", "region = 'NA'")
          .saveAsTable(table))
@@ -1409,6 +1409,8 @@ def test_delta_replace_where_save_as_table_preserves_partitioning(spark_tmp_tabl
         lambda spark: partition_columns(spark, gpu_table), conf=confs)
     assert cpu_partition_columns == ["region"]
     assert gpu_partition_columns == cpu_partition_columns
+
+    assert_gpu_and_cpu_are_equal_collect(lambda spark: spark.table(gpu_table), conf=confs)
 
 
 @allow_non_gpu(*delta_meta_allow)
