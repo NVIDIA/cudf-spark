@@ -423,12 +423,18 @@ class ProtobufSchemaSuite extends AnyFunSuite {
     }
   }
 
-  test("extractor rejects messages, maps, proto3, and strict UTF-8 schemas") {
+  test("extractor accepts messages but rejects groups, maps, proto3, and strict UTF-8 schemas") {
     val nested = StructType(Seq(StructField("value", IntegerType)))
-    for (dataType <- Seq(nested, ArrayType(nested), MapType(StringType, IntegerType))) {
+    for (dataType <- Seq(nested, ArrayType(nested))) {
+      val repeated = dataType.isInstanceOf[ArrayType]
+      assert(ProtobufSchemaExtractor.checkFieldSupport(
+        dataType, "MESSAGE", repeated, enumsAsInts = false) == ((true, None, ENC_DEFAULT)))
       assert(!ProtobufSchemaExtractor.checkFieldSupport(
-        dataType, "MESSAGE", dataType.isInstanceOf[ArrayType], enumsAsInts = false)._1)
+        dataType, "GROUP", repeated, enumsAsInts = false)._1)
     }
+    // Spark decodes protobuf map fields, which are repeated messages, as MapType.
+    assert(!ProtobufSchemaExtractor.checkFieldSupport(
+      MapType(StringType, IntegerType), "MESSAGE", isRepeated = true, enumsAsInts = false)._1)
     val schema = StructType(Seq(StructField("value", StringType)))
     for (descriptor <- Seq(
       FakeMessageDescriptor("PROTO3", Map.empty),
@@ -440,6 +446,38 @@ class ProtobufSchemaSuite extends AnyFunSuite {
     val field = FakeFieldDescriptor("status", 1, "ENUM", referencedTypeSyntax = Some("PROTO3"))
     assert(!ProtobufSchemaExtractor.extractFieldInfo(
       StructField("status", StringType), field, enumsAsInts = false).toOption.get.isSupported)
+  }
+
+  test("nested extracted schemas satisfy the JNI descriptor contract") {
+    val childSchema = StructType(Seq(StructField("id", IntegerType)))
+    val childDescriptor = FakeMessageDescriptor("PROTO2",
+      Map("id" -> FakeFieldDescriptor("id", 1, "INT32")))
+    val schema = StructType(Seq(StructField("single", childSchema),
+      StructField("items", ArrayType(childSchema))))
+    val descriptor = FakeMessageDescriptor("PROTO2", Map(
+      "single" -> FakeFieldDescriptor("single", 1, "MESSAGE",
+        messageDescriptor = Some(childDescriptor), referencedTypeSyntax = Some("PROTO2")),
+      "items" -> FakeFieldDescriptor("items", 2, "MESSAGE", isRepeated = true,
+        messageDescriptor = Some(childDescriptor), referencedTypeSyntax = Some("PROTO2"))))
+    val infos = ProtobufSchemaExtractor.analyzeAllFields(
+      schema, descriptor, enumsAsInts = false, "test.Message").fold(fail(_), identity)
+    val childField = childSchema.fields.head
+    val childInfo = ProtobufSchemaExtractor.extractFieldInfo(childField,
+      childDescriptor.fields("id"), enumsAsInts = false).fold(fail(_), identity)
+    val fields = schema.fields.zipWithIndex.flatMap { case (field, index) =>
+      val parent = ProtobufSchemaValidator.toFlattenedFieldDescriptor(field.name,
+        field, infos(field.name), -1, 0, DType.STRUCT.getTypeId.getNativeId, isOutput = true)
+        .fold(fail(_), identity)
+      val child = ProtobufSchemaValidator.toFlattenedFieldDescriptor(s"${field.name}.id",
+        childField, childInfo, index * 2, 1, DType.INT32.getTypeId.getNativeId, isOutput = true)
+        .fold(fail(_), identity)
+      Array(parent, child)
+    }
+    val arrays = ProtobufSchemaValidator.toFlattenedSchemaArrays(fields)
+    assert(arrays.parentIndices.toSeq == Seq(-1, 0, -1, 2))
+    assert(arrays.depthLevels.toSeq == Seq(0, 1, 0, 1))
+    assert(arrays.isRepeated.toSeq == Seq(false, false, true, false))
+    assert(arrays.toJniDescriptor.numFields() == 4)
   }
 
   test("repeated fields per message are not capped by the occurrence-scan batch size") {

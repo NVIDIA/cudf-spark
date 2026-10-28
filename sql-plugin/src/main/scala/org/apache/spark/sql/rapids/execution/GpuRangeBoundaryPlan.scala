@@ -18,7 +18,8 @@ package org.apache.spark.sql.rapids.execution
 
 import scala.annotation.tailrec
 
-import com.nvidia.spark.rapids.{GpuCoalesceBatches, GpuExec, GpuFilterExec, GpuProjectExec}
+import com.nvidia.spark.rapids.{
+  GpuCoalesceBatches, GpuExec, GpuExpression, GpuFilterExec, GpuLiteral, GpuProjectExec}
 import com.nvidia.spark.rapids.shims.ShimUnaryExecNode
 
 import org.apache.spark.rdd.RDD
@@ -27,7 +28,8 @@ import org.apache.spark.sql.catalyst.expressions.{
   Attribute, Expression, ExprId, NamedExpression, SortOrder}
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.rapids.GpuFileSourceScanExec
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.rapids.catalyst.expressions.GpuRand
+import org.apache.spark.sql.types.{IntegerType, LongType, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
@@ -82,10 +84,27 @@ private[rapids] object GpuRangeBoundaryPlan {
     }
   }
 
+  // GpuRand consumes one RNG value per row, independently of batch boundaries, and its
+  // checkpoint/restore support preserves that stream through retries. Other nondeterministic
+  // expressions (for example partition/batch-dependent IDs) are not safe to prune this way.
+  private def isSampleable(expression: Expression): Boolean = expression match {
+    case _ if expression.deterministic => true
+    case random: GpuRand => random.child match {
+      case GpuLiteral(_, IntegerType | LongType) => true
+      case _ => false
+    }
+    case gpu: GpuExpression if !gpu.selfNonDeterministic &&
+        gpu.children.exists(child => !child.deterministic) =>
+      gpu.children.forall(isSampleable)
+    case _ => false
+  }
+
   private def selectProjectExpressions(
       projectList: List[NamedExpression],
       localOutputIds: Set[ExprId],
-      required: Set[ExprId]): Option[List[NamedExpression]] = {
+      required: Set[ExprId],
+      deterministicRequired: Set[ExprId])
+      : Option[(List[NamedExpression], List[NamedExpression])] = {
     val projectOutputIds = projectList.map(_.exprId).toSet
     if (!required.subsetOf(projectOutputIds)) {
       None
@@ -99,34 +118,47 @@ private[rapids] object GpuRangeBoundaryPlan {
       }
 
       val selected = dependencyClosure(required)
-      // Boundary collection and shuffle input are separate executions of the source plan.
-      // Nondeterministic expressions can produce different keys if the executions use different
-      // batch boundaries, even when their seeds and partition IDs match.
-      if (selected.forall(_.deterministic)) Some(selected) else None
+      val deterministicSelected = dependencyClosure(deterministicRequired)
+      // Sampling produces advisory split points; shuffled rows still come from the original
+      // child, and the original ordering compares those rows against the collected bounds.
+      // A separately evaluated random sort key can affect balance, but cannot change row values
+      // or invalidate range ordering. Randomness must not change which rows reach the sampler.
+      // Track filter dependencies through aliases and require them to be deterministic.
+      if (selected.forall(isSampleable) && deterministicSelected.forall(_.deterministic)) {
+        Some((selected, deterministicSelected))
+      } else {
+        None
+      }
     }
   }
 
-  private def prune(plan: SparkPlan, required: Set[ExprId]): Option[SparkPlan] = plan match {
+  private def prune(
+      plan: SparkPlan,
+      required: Set[ExprId],
+      deterministicRequired: Set[ExprId] = Set.empty): Option[SparkPlan] = plan match {
     case project: GpuProjectExec =>
       val childOutputIds = project.child.output.map(_.exprId).toSet
       val projectOutputIds = project.projectList.map(_.exprId).toSet
       val localOutputIds = projectOutputIds -- childOutputIds
-      selectProjectExpressions(project.projectList, localOutputIds, required).flatMap { selected =>
+      selectProjectExpressions(project.projectList, localOutputIds, required,
+          deterministicRequired).flatMap { case (selected, deterministicSelected) =>
         // Keep project-local dependencies here instead of requesting aliases from the child scan.
         val childRequired = referencedExprIds(selected) -- localOutputIds
-        prune(project.child, childRequired).map { child =>
+        val childDeterministicRequired = referencedExprIds(deterministicSelected) -- localOutputIds
+        prune(project.child, childRequired, childDeterministicRequired).map { child =>
           project.copy(projectList = selected.toList, child = child)
         }
       }
 
     case filter: GpuFilterExec if filter.condition.deterministic =>
-      val childRequired = required ++ referencedExprIds(Seq(filter.condition))
-      prune(filter.child, childRequired).map { child =>
+      val filterRequired = referencedExprIds(Seq(filter.condition))
+      val childRequired = required ++ filterRequired
+      prune(filter.child, childRequired, deterministicRequired ++ filterRequired).map { child =>
         filter.withNewChildren(Seq(child))
       }
 
     case coalesce: GpuCoalesceBatches =>
-      prune(coalesce.child, required).map { child =>
+      prune(coalesce.child, required, deterministicRequired).map { child =>
         coalesce.withNewChildren(Seq(child))
       }
 

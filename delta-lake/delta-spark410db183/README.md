@@ -1,17 +1,31 @@
-# Databricks 18.3 Delta reader layer
+# Databricks 18.3 Delta Lake implementation
 
-This module compiles the DBR 18.3 reader dependency subset. Native deletion-vector decoding and
-bitmap utilities and reader eligibility helpers are shared with DBR 17.3. The DBR 18.3 scan
-eligibility check marks low-shuffle MERGE scans for CPU fallback.
+The DBR 18.3 release profile compiles this module and includes it in the plugin distribution.
+It contains the reader, transaction, catalog, and write implementations for this runtime.
 
-Build the actual reader module with Java 17 after its SQL-plugin dependencies are available:
+The provider base, write commands, low-shuffle MERGE command, and Parquet reader
+implementations are shared with DBR 17.3. Native staged-write handling remains runtime specific.
+Both classic and Edge MERGE commands select low-shuffle MERGE when enabled. Discovery and
+rewrite scans retain the established reader-mode mapping and classic GPU MERGE fallbacks
+for unsupported scan settings, row-tracking tables, and existing deletion vectors.
+
+Runtime-specific transaction hooks preserve DBR 18.3 CDC, eager-clustering, and column-mapping
+removal semantics through native fallback. Explicit clustering columns alone do not require
+fallback: their native use selects optional Photon Parquet page indexes, which the GPU writer
+does not emit.
+
+Build with Java 17 on a DBR 18.3 node. First generate the Databricks dependency POM using
+[build/gen-spark-home-deps.py](../../build/gen-spark-home-deps.py), as shown in
+[jenkins/databricks/build.sh](../../jenkins/databricks/build.sh).
+The generated POM references the native runtime JARs under `/databricks/jars` as system-scoped
+dependencies instead of installing them into the local Maven repository.
+Build the Scala 2.13 reactor from the repository root:
 
 ```bash
-mvn -B -f scala2.13/delta-lake/delta-spark410db183/pom.xml \
+mvn -B -f scala2.13/pom.xml \
   -Ddatabricks -Dbuildver=410db183 -DskipTests -Dmaven.test.skip=true \
-  -Dmaven.scaladoc.skip clean package
+  -Dmaven.scaladoc.skip clean install
 ```
 
-The classified `*-spark410db183.jar` contains the compiled reader classes. The root release
-profile continues to build the Delta stub. This module does not register a Delta provider or
-enable Delta integration tests; transaction and write support remain separate implementation work.
+Runtime integration coverage and feature parity are tracked in NVIDIA/cudf-spark#16282.
+The DBR 18.3 pre-merge integration-test guard remains unchanged.

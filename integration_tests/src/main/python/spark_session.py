@@ -38,8 +38,8 @@ _orig_conf_keys = _orig_conf.keys()
 
 # Default settings that should apply to CPU and GPU sessions.
 # These settings can be overridden by specific tests if necessary.
-# Many of these are redundant with default settings for the configs but are set here explicitly
-# to ensure any cluster settings do not interfere with tests that assume the defaults.
+# Some of these are redundant with default settings for the configs but are set here explicitly
+# to ensure any cluster settings do not interfere with the tests.
 _default_conf = {
     'spark.rapids.sql.test.retryContextCheck.enabled': 'true',
     'spark.rapids.sql.castDecimalToFloat.enabled': 'false',
@@ -189,6 +189,9 @@ def is_before_spark_323():
 def is_before_spark_331():
     return spark_version() < "3.3.1"
 
+def is_before_spark_332():
+    return spark_version() < "3.3.2"
+
 def is_before_spark_334():
     return spark_version() < "3.3.4"
 
@@ -283,6 +286,9 @@ def is_spark_404():
 
 def is_spark_403_or_404():
     return is_spark_403() or is_spark_404()
+
+def is_spark_410_or_later():
+    return spark_version() >= "4.1.0"
 
 def is_spark_411_or_later():
     return spark_version() >= "4.1.1"

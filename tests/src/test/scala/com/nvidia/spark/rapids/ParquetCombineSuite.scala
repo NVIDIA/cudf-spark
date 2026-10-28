@@ -146,6 +146,47 @@ class ParquetCombineSuite extends RmmSparkRetrySuiteBase {
   }
 
   for (ordered <- Seq(true, false)) {
+    test(s"metadata-only compatibility splits preserve all rows, ordered=$ordered") {
+      val checkedPairs = scala.collection.mutable.ArrayBuffer[(Int, Int)]()
+      withResource(new Reader(ordered) {
+        override protected def checkIfNeedToSplitEmpty(current: HostMemoryEmptyMetaData,
+            next: HostMemoryEmptyMetaData): Boolean = {
+          assert(current.numRows > 0 && next.numRows > 0)
+          val currentKey = current.partitionedFile.partitionValues.getInt(0)
+          val nextKey = next.partitionedFile.partitionValues.getInt(0)
+          checkedPairs += ((currentKey, nextKey))
+          // Files 0 and 2 model matching output constants; file 1 is incompatible.
+          currentKey % 2 != nextKey % 2
+        }
+      }) { reader =>
+        val input: Array[HostMemoryBuffersWithMetaDataBase] =
+          Array(reader.empty(9, 0), reader.empty(0, 10, new StructType()),
+            reader.empty(8, 0), reader.empty(1, 20, new StructType()),
+            reader.empty(2, 30, new StructType()), reader.empty(7, 0))
+        val firstRows = withResource(reader.combineHMBs(input)) { combined =>
+          assert(combined.partitionedFile.filePath == input(1).partitionedFile.filePath)
+          assert(keys(combined) == (if (ordered) Seq(9, 0, 8) else Seq(9, 0, 8, 2, 7)))
+          readRowCount(reader, combined)
+        }
+        assert(checkedPairs.toSeq == (if (ordered) Seq((0, 1)) else Seq((0, 1), (0, 2))))
+        val remainingRows = withResource(reader.combinePending()) { combined =>
+          assert(keys(combined) == Seq(1))
+          readRowCount(reader, combined)
+        }
+        val lastRows = if (ordered) {
+          withResource(reader.combinePending()) { combined =>
+            assert(keys(combined) == Seq(2, 7))
+            readRowCount(reader, combined)
+          }
+        } else {
+          0
+        }
+        assert(firstRows == (if (ordered) 10 else 40))
+        assert(firstRows + remainingRows + lastRows == 60)
+        assert(reader.pending.isEmpty)
+      }
+    }
+
     test(s"consecutive metadata-only files combine and preserve partitions, ordered=$ordered") {
       withResource(new Reader(ordered)) { reader =>
         var released = 0

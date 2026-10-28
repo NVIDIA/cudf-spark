@@ -109,6 +109,21 @@ case class HexRuleMeta(
   override def convertToGpu(child: Expression): GpuExpression = GpuHex(child)
 }
 
+case class UnhexRuleMeta(
+    a: Unhex,
+    override val conf: RapidsConf,
+    p: Option[RapidsMeta[_, _, _]],
+    r: DataFromReplacementRule)
+  extends UnaryExprMeta[Unhex](a, conf, p, r) {
+  override def tagExprForGpu(): Unit = {
+    if (UnhexShims.failOnError(a)) {
+      willNotWorkOnGpu("error-raising hex conversion is not supported on GPU")
+    }
+  }
+
+  override def convertToGpu(child: Expression): GpuExpression = GpuUnhex(child)
+}
+
 case class CurrentRowRuleMeta(
     currentRow: CurrentRow.type,
     override val conf: RapidsConf,

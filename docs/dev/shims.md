@@ -61,6 +61,25 @@ This is preparatory metadata: source generation still uses the exact
 generated package identity, binary deduplication, or runtime compatibility. Source selection will
 use the lineage only after an inheritance resolver and equivalence checks are in place.
 
+The source-inspection prototype can show the annotated shim files selected for one exact target
+without running Maven:
+
+```bash
+./build/shimpler sources --target 359
+./build/shimpler sources --target 359 --explain
+./build/shimpler sources --target 500 --format=json
+```
+
+It scans Scala and Java shim sources in all modules, including nested modules. `--module sql-plugin`
+restricts the output, and `--null` produces NUL-delimited paths for shell tools. The inspector
+derives candidate inheritance points from today's exact annotations and checks that they select the
+same physical files for the requested target. Non-contiguous memberships and versioned package
+paths remain exact. The reported introduction is relative to the source-parent links currently
+declared in Maven; it is not necessarily the target where the file was first written. Unannotated
+files under versioned directories are omitted from this annotated-source query.
+Shimplify's generated sources still use the existing exact annotations. Do not convert annotations
+to `introduced` or `only` yet; generation and the captured pre-conversion oracle are follow-up work.
+
 ## Reducing Parallel-World Classes
 
 The long-term goal is to maximize bytecode in the conventional jar layout and shrink the amount

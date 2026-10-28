@@ -29,6 +29,7 @@ import java.nio.charset.StandardCharsets
 
 import org.apache.spark.sql.catalyst.util.DateFormatter
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.types.Metadata
 
 object GpuCsvUtils {
   def csvLineToParse(line: Array[Byte], offset: Int, len: Int,
@@ -38,6 +39,10 @@ object GpuCsvUtils {
   def dateFormatInRead(options: CSVOptions): String =
     options.dateFormatInRead.getOrElse(DateFormatter.defaultPattern)
 
+  // Follow vanilla Spark's format-selection path, without consulting column metadata.
+  def dateFormatInRead(options: CSVOptions, metadata: Metadata): Option[String] =
+    options.dateFormatInRead
+
   def timestampFormatInRead(options: CSVOptions): String = options.timestampFormatInRead.getOrElse(
     if (SQLConf.get.legacyTimeParserPolicy == SQLConf.LegacyBehaviorPolicy.LEGACY) {
       s"${DateFormatter.defaultPattern}'T'HH:mm:ss.SSSXXX"
@@ -46,4 +51,7 @@ object GpuCsvUtils {
     })
 
   def enableDateTimeParsingFallback(options: CSVOptions): Boolean = false
+
+  // Spark 3.3 always retries stringToDate after a CSV date formatter failure.
+  def enableDateParsingFallback(options: CSVOptions): Boolean = true
 }

@@ -154,15 +154,28 @@
                             <useBaseVersion>true</useBaseVersion>
                             <artifactItems>
                                 <artifactItem>
-                                    <groupId>org.apache.spark</groupId>
-                                    <artifactId>spark-avro_${scala.binary.version}</artifactId>
-                                    <version>${spark.version}</version>
-                                </artifactItem>
-                                <artifactItem>
                                     <groupId>org.apache.parquet</groupId>
                                     <artifactId>parquet-hadoop</artifactId>
                                     <version>${parquet.hadoop.version}</version>
                                     <classifier>tests</classifier>
+                                </artifactItem>
+                            </artifactItems>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>copy-spark-avro</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>copy</goal>
+                        </goals>
+                        <configuration>
+                            <skip>${spark.avro.copy.skip}</skip>
+                            <useBaseVersion>true</useBaseVersion>
+                            <artifactItems>
+                                <artifactItem>
+                                    <groupId>org.apache.spark</groupId>
+                                    <artifactId>spark-avro_${scala.binary.version}</artifactId>
+                                    <version>${spark.version}</version>
                                 </artifactItem>
                             </artifactItems>
                         </configuration>

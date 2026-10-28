@@ -21,8 +21,6 @@
 
 package com.nvidia.spark.rapids.delta
 
-import java.util.Locale
-
 import com.databricks.sql.execution.metric.IncrementMetric
 import com.databricks.sql.transaction.tahoe.DeltaParquetFileFormat
 import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
@@ -41,10 +39,6 @@ object DeltaReadSupport {
     LOW_SHUFFLE_MERGE_OPTION_PREFIX + "discoveryScan"
   val LOW_SHUFFLE_MERGE_ROW_INDEX_COLUMN_OPTION =
     LOW_SHUFFLE_MERGE_OPTION_PREFIX + "rowIndexColumn"
-
-  def hasLowShuffleMergeOptions(options: Map[String, String]): Boolean =
-    options.keys.exists(_.toLowerCase(Locale.ROOT).startsWith(
-      LOW_SHUFFLE_MERGE_OPTION_PREFIX.toLowerCase(Locale.ROOT)))
 
   def isPushDVPredicateDownEnabled(conf: RapidsConf): Boolean = {
     val dvConf = DeltaSQLConf.DELETION_VECTORS_USE_METADATA_ROW_INDEX

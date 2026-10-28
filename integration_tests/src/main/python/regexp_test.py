@@ -491,6 +491,13 @@ def test_regexp_replace():
             'regexp_replace(a, "(?i)abc", "X")',
             'regexp_replace(a, "(?i:abc)", "Y")',
             'regexp_replace(a, "(?i)a(?-i)b", "Z")',
+            # a leading (?i) applies to every choice alternative
+            'regexp_replace(a, "(?i)a|b", "X")',
+            'regexp_replace(a, "(?i)ab|cd", "X")',
+            'regexp_replace(a, "(?i)a|b|c", "X")',
+            # the flag turns on in one alternative and off in a later one
+            'regexp_replace(a, "a(?i)b|c(?-i)d", "X")',
+            'regexp_replace(a, "a(?i)b|cd|b(?-i)a", "X")',
             # $1 backref into a case-insensitive capture group
             'regexp_replace(a, "(?i)(abc)", "[$1]")',
             'regexp_replace(a, "((?i)abc)", "[$1]")',
@@ -680,7 +687,9 @@ def test_regexp_extract():
                 'regexp_extract(a, "(?i)([a-c]+)([0-9]+)", 2)',
                 # the flag turns on partway through, so only group 2 is case-insensitive
                 'regexp_extract(a, "([a-c]+)(?i)([a-c]+)", 2)',
-                'regexp_extract(a, "(?i)(abc)", 1)'),
+                'regexp_extract(a, "(?i)(abc)", 1)',
+                # the flag crosses '|' into an alternative whose capture group is extracted
+                'regexp_extract(a, "(?i)([0-9]+)|([a-c]+)", 2)'),
         conf=_regexp_conf)
 
     capture_group_gen = mk_str_gen('[abcd]{1,2}')
@@ -1067,6 +1076,10 @@ def test_rlike():
         'a rlike "(?i)[a-c]"',
         'a rlike "(?i)a(?-i)b"',
         'a rlike "(?i)(a|b)c"',
+        'a rlike "(?i)a|b"',
+        'a rlike "(?i)a|b|c"',
+        'a rlike "(?i)a(?-i)b|c"',
+        'a rlike "(a|(?i)b)|c"',
         'a rlike "(?i:abc)"',
         'a rlike "(?i:a|b)"',
         'a rlike "(?-i:a)b"',
@@ -1088,6 +1101,8 @@ def test_rlike():
         exprs += [
             'a rlike "a(?i)b"',
             'a rlike "a|(?i)b"',
+            'a rlike "a(?i)b|c"',
+            'a rlike "a|(?i)b|c"',
         ]
     conf = _regexp_conf
     if is_databricks_runtime():
@@ -1188,10 +1203,9 @@ def test_rlike_fallback_lookarounds_independent_named():
 @allow_non_gpu('ProjectExec', 'RLike')
 def test_rlike_fallback_unsupported_inline_flags():
     gen = mk_str_gen('[abcd]{1,3}')
-    # (?m)/(?s) are unsupported (positive) flags; (?i) that precedes a choice alternative cannot
-    # be folded (in Java `a(?i)b|c` makes both `b` and `c` case-insensitive); scoped groups with a
-    # positive non-case-insensitive flag are likewise unsupported
-    for pattern in ['(?m)a', '(?s)a', '(?i)a|b', '(?i)a|b|c', 'a(?i)b|c', '(?m:a)', '(?is:a)']:
+    # (?m)/(?s) are unsupported (positive) flags; scoped groups with a positive
+    # non-case-insensitive flag are likewise unsupported
+    for pattern in ['(?m)a', '(?s)a', '(?m:a)', '(?is:a)']:
         assert_gpu_fallback_collect(
             lambda spark, pattern=pattern: unary_op_df(spark, gen).selectExpr(
                 f'a rlike "{pattern}"'),

@@ -221,7 +221,7 @@ trait ExternalSourceBase extends Logging {
     if (hasIcebergJar) {
       scans = scans ++ icebergProvider.getScans
     }
-    scans
+    scans ++ deltaProvider.getScans
   }
 
   def wrapCreatableRelationProvider[INPUT <: CreatableRelationProvider](
