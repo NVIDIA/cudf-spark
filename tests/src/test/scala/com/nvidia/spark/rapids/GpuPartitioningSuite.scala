@@ -18,7 +18,8 @@ package com.nvidia.spark.rapids
 
 import java.math.RoundingMode
 
-import ai.rapids.cudf.{ColumnVector, Cuda, DType, Scalar, Table}
+import ai.rapids.cudf.{ColumnVector, Cuda, DefaultHostMemoryAllocator, DType, HostMemoryAllocator,
+  HostMemoryBuffer, Scalar, Table}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsConf.ShuffleKudoMode
 import com.nvidia.spark.rapids.jni.RmmSpark
@@ -211,6 +212,71 @@ class GpuPartitioningSuite extends AnyFunSuite with BeforeAndAfterEach {
         }
         assert(ex.getMessage.contains("exceeding the"))
         assert(ex.getMessage.contains("reduce spark.rapids.sql.batchSizeBytes"))
+      }
+    }
+  }
+
+  /** Counts the host allocations made on the creating thread while `metric` is not timing. */
+  private class TimerProbingHostAllocator(delegate: HostMemoryAllocator, metric: GpuMetric)
+      extends HostMemoryAllocator {
+    private val owner = Thread.currentThread()
+    var allocations = 0
+    var untimedAllocations = 0
+
+    override def allocate(amount: Long, preferPinned: Boolean): HostMemoryBuffer = {
+      probe()
+      delegate.allocate(amount, preferPinned)
+    }
+
+    override def allocate(amount: Long): HostMemoryBuffer = {
+      probe()
+      delegate.allocate(amount)
+    }
+
+    private def probe(): Unit = {
+      if (Thread.currentThread() eq owner) {
+        allocations += 1
+        // A timer that is already running refuses to activate. An idle one activates, so it is
+        // stopped again at once, adding no time.
+        if (metric.tryActivateTimer(Seq.empty)) {
+          metric.deactivateTimer(0L, Seq.empty)
+          untimedAllocations += 1
+        }
+      }
+    }
+  }
+
+  Seq("CPU", "GPU").foreach { writeMode =>
+    test(s"$writeMode kudo write mode slicing counts host allocation in the copy time") {
+      TrampolineUtil.cleanupAnyExistingSession()
+      val conf = new SparkConf()
+          .set(RapidsConf.SHUFFLE_COMPRESSION_CODEC.key, "none")
+          .set(RapidsConf.SHUFFLE_KUDO_WRITE_MODE.key, writeMode)
+      TestUtils.withGpuSparkSession(conf) { _ =>
+        GpuShuffleEnv.init(new RapidsConf(conf))
+        val partitionIndices = Array(0, 2, 2)
+        val gp = partitioning(partitionIndices.length)
+        assert(!gp.usesGPUShuffle)
+        assertResult(writeMode == "GPU")(gp.usesKudoGPUSlicing)
+        val copyTime = new LocalGpuMetric
+        gp.setupDebugMetrics(Map(GpuMetric.COPY_TO_HOST_TIME -> copyTime))
+        withResource(buildBatch()) { batch =>
+          GpuColumnVector.incRefCounts(batch)
+          val columns = GpuColumnVector.extractColumns(batch)
+          val previous = DefaultHostMemoryAllocator.get()
+          val allocator = new TimerProbingHostAllocator(previous, copyTime)
+          DefaultHostMemoryAllocator.set(allocator)
+          val parts = try {
+            gp.sliceInternalGpuOrCpuAndClose(batch.numRows, partitionIndices, columns)
+          } finally {
+            DefaultHostMemoryAllocator.set(previous)
+          }
+          withResource(parts.map(_._1)) { _ =>
+            assert(allocator.allocations > 0)
+            assertResult(0)(allocator.untimedAllocations)
+            assert(copyTime.value > 0)
+          }
+        }
       }
     }
   }

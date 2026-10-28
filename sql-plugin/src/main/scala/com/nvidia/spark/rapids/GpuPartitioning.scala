@@ -222,16 +222,18 @@ trait GpuPartitioning extends Partitioning {
             s"GPU-serialized shuffle batch is ${data.getLength} bytes, exceeding the " +
             s"$maxGpuSerializedSliceBytes-byte (2GB) limit addressable by the Int " +
             s"serialized-slice offsets; reduce spark.rapids.sql.batchSizeBytes")
-          closeOnExcept(Seq(HostMemoryBuffer.allocate(data.getLength),
-            HostMemoryBuffer.allocate(offsets.getLength))) { seq =>
-            val dataHost = seq(0)
-            val offsetsHost = seq(1)
-            NvtxRegistry.GPU_KUDO_COPY_TO_HOST {
-              dataHost.copyFromDeviceBufferAsync(data, Cuda.DEFAULT_STREAM)
-              offsetsHost.copyFromDeviceBufferAsync(offsets, Cuda.DEFAULT_STREAM)
-              Cuda.DEFAULT_STREAM.sync()
+          NvtxIdWithMetrics(NvtxRegistry.PARTITION_D2H, memCopyTime) {
+            closeOnExcept(Seq(HostMemoryBuffer.allocate(data.getLength),
+              HostMemoryBuffer.allocate(offsets.getLength))) { seq =>
+              val dataHost = seq(0)
+              val offsetsHost = seq(1)
+              NvtxRegistry.GPU_KUDO_COPY_TO_HOST {
+                dataHost.copyFromDeviceBufferAsync(data, Cuda.DEFAULT_STREAM)
+                offsetsHost.copyFromDeviceBufferAsync(offsets, Cuda.DEFAULT_STREAM)
+                Cuda.DEFAULT_STREAM.sync()
+              }
+              (dataHost, offsetsHost)
             }
-            (dataHost, offsetsHost)
           }
         }
       }
