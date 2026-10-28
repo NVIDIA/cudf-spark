@@ -376,7 +376,7 @@ private[iceberg] case class ProcessStruct(
 
 /**
  * Helper object for building column actions when field is missing from file schema.
- * Shared between ActionBuildingVisitor and GpuParquetReaderPostProcessor.
+ * Shared between BaseActionBuildingVisitor and GpuParquetReaderPostProcessor.
  */
 private[iceberg] object MissingFieldActionBuilder {
   /**
@@ -427,7 +427,7 @@ private[iceberg] object MissingFieldActionBuilder {
  * Uses SchemaWithPartnerVisitor where partner is the corresponding file schema type.
  * Tracks current field context to handle missing leaf fields and containers.
  */
-private[iceberg] class ActionBuildingVisitor(
+private[iceberg] class BaseActionBuildingVisitor(
     idToConstant: JMap[Integer, _]
 ) extends SchemaWithPartnerVisitor[Type, ColumnAction] {
 

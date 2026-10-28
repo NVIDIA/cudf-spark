@@ -20,7 +20,7 @@ import com.nvidia.spark.rapids.GpuMetric;
 import com.nvidia.spark.rapids.NoopMetric$;
 import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
-import com.nvidia.spark.rapids.iceberg.parquet.ActionBuildingVisitor;
+import com.nvidia.spark.rapids.iceberg.parquet.BaseActionBuildingVisitor;
 import com.nvidia.spark.rapids.iceberg.parquet.ColumnAction;
 import com.nvidia.spark.rapids.iceberg.parquet.converter.ParquetUnshader;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
@@ -202,6 +202,6 @@ public interface IcebergShimUtils {
      */
     default SchemaWithPartnerVisitor<Type, ColumnAction> newActionBuildingVisitor(
             Map<Integer, ?> idToConstant) {
-        return new ActionBuildingVisitor(idToConstant);
+        return new BaseActionBuildingVisitor(idToConstant);
     }
 }

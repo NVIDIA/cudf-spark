@@ -14,19 +14,19 @@
  * limitations under the License.
  */
 
-package com.nvidia.spark.rapids.iceberg.iceberg110x
+package com.nvidia.spark.rapids.iceberg.iceberg111x
 
 import java.util.{Map => JMap}
 
-import com.nvidia.spark.rapids.iceberg.parquet.{ActionBuildingVisitor, ColumnAction}
+import com.nvidia.spark.rapids.iceberg.parquet.{BaseActionBuildingVisitor, ColumnAction}
 import org.apache.iceberg.types.{Type, Types}
 
 /**
  * Iceberg visits Variant separately from primitive types, and its default callback throws.
  * Route Variant through the shared leaf action builder to apply the same missing-field rules.
  */
-private[iceberg] class VariantActionBuildingVisitor(idToConstant: JMap[Integer, _])
-    extends ActionBuildingVisitor(idToConstant) {
+private[iceberg] class ActionBuildingVisitor(idToConstant: JMap[Integer, _])
+    extends BaseActionBuildingVisitor(idToConstant) {
 
   override def variant(variant: Types.VariantType, partner: Type): ColumnAction = {
     buildLeafAction(variant, partner)

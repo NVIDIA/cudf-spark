@@ -117,6 +117,6 @@ public class ShimUtilsImpl extends Iceberg19PlusShimUtils {
     @Override
     public SchemaWithPartnerVisitor<Type, ColumnAction> newActionBuildingVisitor(
             Map<Integer, ?> idToConstant) {
-        return new VariantActionBuildingVisitor(idToConstant);
+        return new ActionBuildingVisitor(idToConstant);
     }
 }
