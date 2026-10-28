@@ -42,7 +42,7 @@ delta_merge_no_cpu_bridge_conf = copy_and_update(
 def merge_deletion_vector_values_with_xfail_reasons(enabled_xfail_reason=None):
     values = dml_deletion_vector_values_with_xfail_reasons(
         enabled_xfail_reason=enabled_xfail_reason)
-    if is_oss_delta_lake_40():
+    if is_oss_delta_lake_40_to_43():
         # Delta's DV processing joins table-state metadata to touched file paths on the CPU.
         # Permit those nodes only for the DV-enabled case, while asserting the GPU MERGE ran.
         return [values[0], pytest.param(
@@ -1617,7 +1617,7 @@ def test_delta_merge_dataframe_api(spark_tmp_path, use_cdf, num_slices, enable_d
             .execute()
     read_func = read_delta_path_with_cdf if use_cdf else read_delta_path
     expected_command = ("GpuMergeIntoCommand"
-                        if is_oss_delta_lake_40() and enable_deletion_vector else None)
+                        if is_oss_delta_lake_40_to_43() and enable_deletion_vector else None)
     assert_gpu_and_cpu_writes_are_equal_collect(
         do_merge, read_func, data_path, conf=delta_merge_enabled_conf,
         expected_command=expected_command)
@@ -1801,7 +1801,7 @@ def test_delta_dv_read_user_internal_row_index_column(
 
 
 @allow_non_gpu_conditional(
-    is_oss_delta_lake_40() or is_oss_delta_lake_42_or_43(),
+    is_oss_delta_lake_40_to_43(),
     "BroadcastHashJoinExec", "BroadcastExchangeExec")
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
