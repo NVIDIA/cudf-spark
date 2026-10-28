@@ -92,34 +92,6 @@ trait ServerConnection {
 }
 
 /**
- * Currently supported message types in the transport
- */
-object MessageType extends Enumeration {
-  /**
-   * A message used during startup when establishing
-   * a connection to a peer.
-   */
-  val Control = Value
-
-  /**
-   * A client will issue: `MetadataRequest`
-   * A server will respond with: `MetadataResponse`
-   */
-  val MetadataRequest = Value
-
-  /**
-   * A client will issue: `TransferRequest`
-   * A server will respond with: `TransferResponse`
-   */
-  val TransferRequest = Value
-
-  /**
-   * Messages with this type are shuffle blocks
-   */
-  val Buffer = Value
-}
-
-/**
  * Trait used by the clients to interact with the transport.
  */
 trait ClientConnection {
@@ -152,24 +124,6 @@ trait ClientConnection {
    */
   def getPeerExecutorId: Long
 }
-
-object TransactionStatus extends Enumeration {
-  val NotStarted, InProgress, Complete, Success, Error, Cancelled = Value
-}
-
-/**
- * Case class representing stats for the a transaction
- * @param txTimeMs amount of time this [[Transaction]] took
- * @param sendSize amount of bytes sent
- * @param receiveSize amount of bytes received
- * @param sendThroughput send throughput in GB/sec
- * @param recvThroughput receive throughput in GB/sec
- */
-case class TransactionStats(txTimeMs: Double,
-                            sendSize: Long,
-                            receiveSize: Long,
-                            sendThroughput: Double,
-                            recvThroughput: Double)
 
 /**
  * TransportBuffer represents a buffer with an address and length.

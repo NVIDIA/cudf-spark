@@ -30,13 +30,6 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.rapids.GpuTaskMetrics
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 
-/**
- * Storage mode for SpillablePartialFileHandle.
- */
-object PartialFileStorageMode extends Enumeration {
-  val FILE_ONLY, MEMORY_WITH_SPILL = Value
-}
-
 /** Marks only the expected acquire-after-close race; other lease failures must stay visible. */
 private[rapids] final class ClosedPartialFileHandleException
     extends IllegalStateException("Cannot acquire a read lease on a closed partial file handle")
