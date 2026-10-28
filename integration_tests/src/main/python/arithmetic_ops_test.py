@@ -19,6 +19,7 @@ from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_err
 from data_gen import *
 from marks import ignore_order, incompat, approximate_float, allow_non_gpu, allow_non_gpu_conditional, datagen_overrides, disable_ansi_mode
 from pyspark.sql.types import *
+from pyspark.sql import Row
 from pyspark.sql.types import IntegralType
 from spark_session import *
 import pyspark.sql.functions as f
@@ -971,6 +972,122 @@ def test_bin_long(data_gen):
 def test_hex(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : unary_op_df(spark, data_gen).selectExpr('hex(a)'))
+
+
+_unhex_odd_length_fix = 'spark.databricks.behaviorChange.SC114071UnhexConvertOddSymbol.enabled'
+_unhex_confs = [{_unhex_odd_length_fix: enabled} for enabled in ['false', 'true']] \
+    if is_databricks_runtime() else [{}]
+
+
+def cpu_compatible_unhex_input(df):
+    # SPARK-40924 affects Spark before 3.3.2 and Databricks with the fix disabled.
+    # Keep nulls in CPU/GPU comparisons; odd-length results are checked directly on the GPU.
+    dbr_legacy_unhex = is_databricks_runtime() and \
+        df.sparkSession.conf.get(_unhex_odd_length_fix, 'false').lower() != 'true'
+    if is_before_spark_332() or dbr_legacy_unhex:
+        return df.filter('a IS NULL OR length(a) % 2 = 0')
+    return df
+
+
+@pytest.mark.parametrize('conf', _unhex_confs)
+def test_unhex(conf):
+    values = [('4142',), ('aF',), ('F',), ('ABC',), ('',), ('00FF',),
+              ('GG',), ('0xFF',), (' F',), ('é',), (None,)]
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: cpu_compatible_unhex_input(
+                spark.createDataFrame(values, 'a string')).selectExpr('unhex(a)'), conf=conf)
+
+
+@pytest.mark.parametrize('conf', _unhex_confs)
+@pytest.mark.parametrize('binary_consumer', [False, True])
+def test_unhex_odd_length(binary_consumer, conf):
+    values = [('F',), ('ABC',), ('12345',), ('ABG',)]
+    expected = [Row(b=bytearray(b'\x0f')), Row(b=bytearray(b'\x0a\xbc')),
+                Row(b=bytearray(b'\x01\x23\x45')), Row(b=None)]
+    expr = 'unhex(a)'
+    if binary_consumer:
+        expr = 'hex(unhex(a))'
+        expected = [Row(b='0F'), Row(b='0ABC'), Row(b='012345'), Row(b=None)]
+    actual = with_gpu_session(
+            lambda spark: spark.createDataFrame(values, 'a string').selectExpr(
+                expr + ' AS b').collect(), conf=conf)
+    assert actual == expected
+
+
+@pytest.mark.parametrize('conf', _unhex_confs)
+def test_unhex_binary_consumer(conf):
+    values = [('00FF',), ('F',), ('',), ('GG',), (None,)]
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: cpu_compatible_unhex_input(
+                spark.createDataFrame(values, 'a string')).selectExpr('hex(unhex(a))'), conf=conf)
+
+
+@pytest.mark.parametrize('data_gen', [StringGen('[0-9a-fA-F]{0,16}'), StringGen('.{0,10}')],
+                         ids=idfn)
+@pytest.mark.parametrize('conf', _unhex_confs)
+def test_unhex_generated(data_gen, conf):
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: cpu_compatible_unhex_input(
+                unary_op_df(spark, data_gen)).selectExpr('unhex(a)'), conf=conf)
+
+
+def test_unhex_long_row():
+    values = [('A0' * (512 * 1024),), ('4142',), ('GG',), (None,), (None,)]
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: spark.createDataFrame(values, 'a string').selectExpr('unhex(a)'))
+
+
+def test_unhex_all_null():
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: spark.createDataFrame([(None,), (None,)], 'a string').selectExpr(
+                'unhex(a)'))
+
+
+def test_unhex_empty_batch():
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: spark.createDataFrame([], 'a string').selectExpr('unhex(a)'))
+
+
+@pytest.mark.skipif(not is_spark_330_or_later() or not is_before_spark_340(),
+                    reason='permissive to_binary with hex is Spark 3.3 only')
+@pytest.mark.parametrize('conf', _unhex_confs)
+def test_to_binary_hex_permissive(conf):
+    values = [('4142',), ('F',), ('GG',), ('',), (None,)]
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: cpu_compatible_unhex_input(
+                spark.createDataFrame(values, 'a string')).selectExpr("to_binary(a, 'hex')"), conf=conf)
+
+
+@allow_non_gpu('Unhex')
+@pytest.mark.skipif(is_before_spark_340(), reason='strict to_binary with hex is unavailable')
+def test_to_binary_hex_error_mode_fallback():
+    values = [('4142',), ('F',)]
+    assert_gpu_fallback_collect(
+            lambda spark: spark.createDataFrame(values, 'a string').selectExpr(
+                "to_binary(a, 'hex')"),
+            'Unhex')
+
+
+@allow_non_gpu('Unhex')
+@allow_non_gpu_conditional(is_spark_340_or_later(), 'ProjectExec')
+@pytest.mark.skipif(is_before_spark_340(), reason='try_to_binary with hex is unavailable')
+def test_try_to_binary_hex_fallback():
+    values = [('4142',), ('GG',), ('',), (None,)]
+    assert_gpu_fallback_collect(
+            lambda spark: spark.createDataFrame(values, 'a string').selectExpr(
+                "try_to_binary(a, 'hex')"),
+            'Unhex')
+
+
+@allow_non_gpu('Unhex')
+@pytest.mark.skipif(is_before_spark_340(), reason='strict to_binary with hex is unavailable')
+def test_to_binary_hex_invalid_input():
+    assert_gpu_and_cpu_error(
+            lambda spark: spark.createDataFrame([('GG',)], 'a string').selectExpr(
+                "to_binary(a, 'hex')").collect(),
+            {},
+            'CONVERSION_INVALID_INPUT')
+
 
 @approximate_float
 @pytest.mark.parametrize('data_gen', double_gens, ids=idfn)

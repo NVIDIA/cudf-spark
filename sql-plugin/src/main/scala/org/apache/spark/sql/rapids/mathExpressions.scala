@@ -99,6 +99,15 @@ case class GpuHex(child: Expression) extends GpuUnaryExpression with Serializabl
   }
 }
 
+case class GpuUnhex(child: Expression) extends GpuUnaryExpression with Serializable {
+  override def nullable: Boolean = true
+  override def dataType: DataType = BinaryType
+
+  override def doColumnar(input: GpuColumnVector): ColumnVector = {
+    CastStrings.hexToBytes(input.getBase)
+  }
+}
+
 case class GpuAcoshImproved(child: Expression) extends CudfUnaryMathExpression("ACOSH") {
   override def unaryOp: UnaryOp = UnaryOp.ARCCOSH
 }

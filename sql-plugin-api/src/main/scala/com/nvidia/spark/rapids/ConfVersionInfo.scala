@@ -408,6 +408,7 @@ object ConfVersionInfo {
     "spark.rapids.sql.expression.UnaryPositive" -> "v0.1.0",
     "spark.rapids.sql.expression.UnboundedFollowing$" -> "v21.06.0",
     "spark.rapids.sql.expression.UnboundedPreceding$" -> "v21.06.0",
+    "spark.rapids.sql.expression.Unhex" -> "v26.12.0",
     "spark.rapids.sql.expression.UnixTimestamp" -> "v21.06.0",
     "spark.rapids.sql.expression.UnscaledValue" -> "v21.06.0",
     "spark.rapids.sql.expression.Upper" -> "v0.1.0",

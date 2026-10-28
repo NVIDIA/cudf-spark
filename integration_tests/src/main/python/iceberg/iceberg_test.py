@@ -1572,12 +1572,7 @@ def test_iceberg_small_file_combine_with_schema_evolution(format_version, spark_
         conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
 
-@iceberg
-@ignore_order(local=True)
-@pytest.mark.parametrize('reader_type', rapids_reader_types)
-@pytest.mark.parametrize("format_version", iceberg_read_format_versions)
-def test_iceberg_small_file_combine_with_partition_spec_evolution(
-        format_version,         spark_tmp_table_factory, reader_type):
+def _create_iceberg_partition_spec_evolution_table(format_version, spark_tmp_table_factory):
     table = get_full_table_name(spark_tmp_table_factory)
     partition_evolution_gens = [('a', long_gen), ('b', int_gen), ('c', string_gen)]
     base_seed = get_datagen_seed()
@@ -1621,18 +1616,10 @@ def test_iceberg_small_file_combine_with_partition_spec_evolution(
 
     with_cpu_session(setup_iceberg_table)
 
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.sql(f"SELECT a, b, c, _spec_id, _partition FROM {table}"),
-        conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
+    return table
 
 
-@iceberg
-@ignore_order(local=True)
-@pytest.mark.parametrize('reader_type', rapids_reader_types)
-@pytest.mark.skipif(is_iceberg_remote_catalog(), reason = "S3tables catalog is managed")
-@pytest.mark.parametrize("format_version", iceberg_read_format_versions)
-def test_iceberg_small_file_combine_with_add_files_identity_partition(
-        format_version,         spark_tmp_table_factory, reader_type):
+def _create_iceberg_add_files_identity_partition_table(format_version, spark_tmp_table_factory):
     target_table = get_full_table_name(spark_tmp_table_factory)
     source_table = get_full_table_name(spark_tmp_table_factory)
     create_iceberg_table(
@@ -1677,7 +1664,81 @@ def test_iceberg_small_file_combine_with_add_files_identity_partition(
 
     with_cpu_session(setup_imported_table)
 
+    return target_table
+
+
+def _set_iceberg_open_file_cost_to_zero(table):
+    def configure_scan(spark):
+        spark.sql(
+            f"ALTER TABLE {table} SET TBLPROPERTIES ('read.split.open-file-cost' = '0')")
+        spark.sql(f"REFRESH TABLE {table}")
+
+    with_cpu_session(configure_scan)
+
+
+def _assert_iceberg_metadata_only_small_file_combine(table, projection, reader_type):
+    def read_table(spark):
+        df = spark.sql(f"SELECT {projection} FROM {table}")
+        # Different per-file constants must share a scan task to exercise the split check.
+        assert df.rdd.getNumPartitions() == 1
+        return df
+
+    assert_gpu_and_cpu_are_equal_collect(
+        read_table,
+        conf={
+            **iceberg_read_enabled_conf,
+            'spark.rapids.sql.format.parquet.reader.type': reader_type,
+            'spark.rapids.sql.reader.multithreaded.combine.sizeBytes': '64m',
+            'spark.rapids.sql.reader.multithreaded.combine.waitTime': '1000'})
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.parametrize("format_version", iceberg_read_format_versions)
+def test_iceberg_small_file_combine_with_partition_spec_evolution(
+        format_version, spark_tmp_table_factory, reader_type):
+    table = _create_iceberg_partition_spec_evolution_table(format_version, spark_tmp_table_factory)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(f"SELECT a, b, c, _spec_id, _partition FROM {table}"),
+        conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.skipif(is_iceberg_remote_catalog(),
+                   reason="Requires control of Iceberg scan split planning")
+@pytest.mark.parametrize("format_version", iceberg_read_format_versions)
+def test_iceberg_metadata_only_with_partition_spec_evolution(
+        format_version, spark_tmp_table_factory, reader_type):
+    table = _create_iceberg_partition_spec_evolution_table(format_version, spark_tmp_table_factory)
+    _set_iceberg_open_file_cost_to_zero(table)
+    _assert_iceberg_metadata_only_small_file_combine(table, '_spec_id, _partition', reader_type)
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason = "S3tables catalog is managed")
+@pytest.mark.parametrize("format_version", iceberg_read_format_versions)
+def test_iceberg_small_file_combine_with_add_files_identity_partition(
+        format_version, spark_tmp_table_factory, reader_type):
+    table = _create_iceberg_add_files_identity_partition_table(format_version, spark_tmp_table_factory)
     # Imported partitioned Parquet files materialize `a` from the path, not the file payload.
     assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.sql(f"SELECT a, b FROM {target_table}"),
+        lambda spark: spark.sql(f"SELECT a, b FROM {table}"),
         conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason = "S3tables catalog is managed")
+@pytest.mark.parametrize("format_version", iceberg_read_format_versions)
+def test_iceberg_metadata_only_with_add_files_identity_partition(
+        format_version, spark_tmp_table_factory, reader_type):
+    table = _create_iceberg_add_files_identity_partition_table(format_version, spark_tmp_table_factory)
+    _set_iceberg_open_file_cost_to_zero(table)
+    # Selecting only `a` requires no physical columns from the imported Parquet files.
+    _assert_iceberg_metadata_only_small_file_combine(table, 'a', reader_type)
