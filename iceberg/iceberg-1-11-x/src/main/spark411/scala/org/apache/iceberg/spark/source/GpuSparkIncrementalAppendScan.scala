@@ -14,9 +14,8 @@
  * limitations under the License.
  */
 /*** spark-rapids-shim-json-lines
-{"spark": "411"}
-{"spark": "412"}
-{"spark": "413"}
+{"spark":["411","412"],"carryForward":"none"}
+{"spark":["413"],"carryForward":"sameMinor"}
 spark-rapids-shim-json-lines ***/
 
 package org.apache.iceberg.spark.source

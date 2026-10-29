@@ -260,9 +260,9 @@ The version-specific directory names have one of the following forms / use cases
 * `src/main/spark${buildver}`, example: `src/main/spark350db143`
 * `src/test/spark${buildver}`, example: `src/test/spark340`
 
-with a special shim descriptor as a Scala/Java comment. See [shimplify.md][1]
+with a shim source selector in a Scala/Java comment. See [shims.md][1].
 
-[1]: ./docs/dev/shimplify.md
+[1]: ./docs/dev/shims.md#source-inheritance-metadata
 
 ### Setting up an Integrated Development Environment
 
@@ -289,8 +289,7 @@ profile, execute the install phase with the corresponding `buildver`, e.g. for S
 
 ##### Importing the project
 
-Our build relies on [symlink generation](./docs/dev/shimplify.md#symlinks--ide) for Spark
-release-specific sources. It is recommended to install
+Our build generates symlinks for the [selected Spark-version sources][1]. It is recommended to install
 the IDEA Resolve Symlinks plugin via `Marketplace` tab.
 
 To start working with the project in IDEA is as easy as

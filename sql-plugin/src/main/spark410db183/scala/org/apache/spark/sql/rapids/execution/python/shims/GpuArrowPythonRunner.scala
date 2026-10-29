@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 /*** spark-rapids-shim-json-lines
-{"spark": "410db183"}
+{"spark":["410db183"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.execution.python.shims
 

@@ -262,7 +262,7 @@
                 <artifactId>maven-antrun-plugin</artifactId>
                 <executions>
                     <execution>
-                        <id>shimplify-shim-sources</id>
+                        <id>generate-inherited-shim-sources</id>
                         <phase>none</phase>
                     </execution>
                     <execution>

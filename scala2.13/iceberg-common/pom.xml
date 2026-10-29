@@ -35,7 +35,7 @@
         <rapids.compressed.artifact>false</rapids.compressed.artifact>
         <rapids.default.jar.excludePattern>**/*</rapids.default.jar.excludePattern>
         <rapids.shim.jar.phase>package</rapids.shim.jar.phase>
-        <rapids.shimplify.skip>false</rapids.shimplify.skip>
+        <rapids.shim.sources.skip>false</rapids.shim.sources.skip>
         <maven.scaladoc.skip>true</maven.scaladoc.skip>
         <!--
         Spark 4.x catalyst class files carry @Deprecated(since = "...")

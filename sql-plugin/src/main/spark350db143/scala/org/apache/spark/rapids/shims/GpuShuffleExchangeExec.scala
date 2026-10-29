@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 /*** spark-rapids-shim-json-lines
-{"spark": "350db143"}
+{"spark":["350db143"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.rapids.shims
 

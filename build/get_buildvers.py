@@ -15,7 +15,7 @@
 import sys
 import xml.etree.ElementTree as ET
 
-# This method is used by shimplify.py and various build scripts. The build scripts use the 
+# This method is used by dynamic shim detection and various build scripts. The scripts use the
 # default values for the `logger` and `ignore_excluded_shims`
 def _get_buildvers(buildvers, pom_file, logger=None, ignore_excluded_shims=False):
     """Returns the spark versions supported for the specified arguments

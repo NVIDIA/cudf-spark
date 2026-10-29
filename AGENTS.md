@@ -131,14 +131,16 @@ to via a JSON annotation block after the copyright header:
 
 ```
 /*** spark-rapids-shim-json-lines
-{"spark": "330"}
-{"spark": "330db"}
+{"spark":["330","330db"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 ```
 
 **Key rules:**
 - The annotation controls which build profiles include the file.
   Files **without** the annotation compile for **all** versions.
+- `carryForward` is required: `none` names exact targets, `sameMinor` includes
+  descendants in the same Spark major/minor line, and `all` includes every
+  descendant. A nearer source variant wins.
 - By convention the file lives under the alphabetically earliest
   version directory it supports:
   `sql-plugin/src/main/<lowest_buildver>/scala/...`

@@ -15,9 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "330"}
-{"spark": "330db"}
-{"spark": "331"}
+{"spark":["330","330db","331"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.shims
 

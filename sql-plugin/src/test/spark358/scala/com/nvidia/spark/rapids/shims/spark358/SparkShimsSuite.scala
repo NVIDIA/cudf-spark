@@ -15,7 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "358"}
+{"spark":["358"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims.spark358
 
