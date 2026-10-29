@@ -66,11 +66,11 @@ class SourceSelectorTest(unittest.TestCase):
             derive_introductions(self.graph, {'999'})
 
     def test_unmapped_legacy_target_can_be_preserved_during_public_scan(self):
-        selector = parse_selector_line('{"spark":"330db"}', self.graph,
+        selector = parse_selector_line('{"spark":"350db143"}', self.graph,
                                        allow_unmapped_exact=True)
-        self.assertEqual(selector.targets, ('330db',))
-        with self.assertRaisesRegex(ValueError, 'Unknown Spark selector target 330db'):
-            parse_selector_line('{"spark":{"introduced":"330db"}}', self.graph,
+        self.assertEqual(selector.targets, ('350db143',))
+        with self.assertRaisesRegex(ValueError, 'Unknown Spark selector target 350db143'):
+            parse_selector_line('{"spark":{"introduced":"350db143"}}', self.graph,
                                 allow_unmapped_exact=True)
 
 

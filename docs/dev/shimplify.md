@@ -28,7 +28,7 @@ time of this writing) have a new set of special sibling directories
 `src/(main|test)/spark${buildver}`.
 
 Previous `src/(main|test)/${buildver}` and
-version-range-with-exceptions directories such as `src/main/320until340-non330db` are deprecated and
+version-range-with-exceptions directories such as `src/main/320until330-noncdh` are deprecated and
 are being removed as a result of the conversion to the new structure.
 
 `shimplify` changes the way the source code is shared among shims by using an explicit
@@ -163,7 +163,7 @@ It is not expected to be really necessary but it is possible to convert a subset
 
 * Either by adding -Dshimplify.shims=buildver1,buildver2,... to the commands above
 * Or by specifying a list of directories you would like to delete to have a simpler directory
--Dshimplify.dirs=320until340-non330db,320until330-noncdh
+-Dshimplify.dirs=320until330-noncdh
 
 The latter is just a minor twist on the former. Instead of having an explicit list of shims, it
 first computes the list of all `buildver` values using provided directories. After this *all* the

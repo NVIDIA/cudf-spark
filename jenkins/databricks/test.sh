@@ -20,8 +20,8 @@
 #   LOCAL_JAR_PATH: Location of the RAPIDS jars
 #   SPARK_CONF: Spark configuration parameters
 #   BASE_SPARK_VERSION: Spark version [3.2.1, 3.3.0]. Default is pulled from current instance.
-#   SHUFFLE_SPARK_SHIM: Set the default value for the shuffle shim. For databricks versions, append
-#                       db. Example: spark330 => spark330db
+#   SHUFFLE_SPARK_SHIM: Set the default value for the shuffle shim. For Databricks
+#                       versions, use the matching buildver, such as spark350db143
 #   TEST_MODE: Can be one of the following (`DEFAULT` is the default value):
 #       - DEFAULT: all tests except cudf_udf tests
 #       - DELTA_LAKE_ONLY: delta_lake tests only
