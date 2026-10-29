@@ -150,6 +150,22 @@ def test_hybrid_scan_retry_oom(spark_tmp_path):
         conf=hybrid_conf())
 
 
+@inject_oom('num_ooms=1,skip=1,type=GPU')
+def test_hybrid_scan_retry_oom_in_reader(spark_tmp_path):
+    """An OOM inside the reader's own calls is retried on the same reader.
+
+    One file of one row group, filtered and projected on one column, makes each retry block copy
+    exactly one buffer to the device, so skipping one GPU allocation lands the OOM inside the
+    dictionary pruning and the decode rather than in the copies.
+    """
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(lambda spark: write_test_data(
+        spark, data_path, num_rows=1000, row_group_size=128 * 1024 * 1024))
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(data_path).filter('filter_int = 7').select('filter_int'),
+        conf=hybrid_conf())
+
+
 @pytest.mark.skipif(is_not_utc(), reason="LEGACY datetime rebase mode is only supported for UTC timezone")
 def test_hybrid_scan_legacy_old_date_filter_throws(spark_tmp_path):
     """A LEGACY file stores pre-1582 dates in another calendar, which the reader cannot tell.
@@ -244,3 +260,28 @@ def test_hybrid_scan_unfiltered_read(spark_tmp_path):
     with_cpu_session(lambda spark: write_test_data(spark, data_path, files=4))
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.parquet(data_path), conf=hybrid_conf())
+
+
+_missing_col_schema = 'sorted_int INT, filter_int INT, added_int INT'
+
+
+@pytest.mark.xfail(strict=True, reason='a filter on a column the file lacks returns no rows '
+                   'until schema mismatches are detected')
+def test_hybrid_scan_filter_on_missing_column(spark_tmp_path):
+    """The file lacks `added_int`, so every row reads it as null and the filter keeps them all."""
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(lambda spark: write_test_data(spark, data_path))
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(_missing_col_schema).parquet(data_path)
+            .filter('added_int IS NULL AND sorted_int < 500'),
+        conf=fallback_conf())
+
+
+def test_hybrid_scan_ignore_corrupt_files_keeps_readable_file(spark_tmp_path):
+    """A readable file the reader cannot handle must still return its rows, not be skipped."""
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(lambda spark: write_test_data(spark, data_path))
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(_missing_col_schema).parquet(data_path)
+            .filter('sorted_int < 500'),
+        conf=fallback_conf(**{'spark.sql.files.ignoreCorruptFiles': 'true'}))

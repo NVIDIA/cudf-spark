@@ -165,6 +165,8 @@ class HybridScanEligibilitySuite extends AnyFunSuite {
     assert(pushable(In("date_col", Array[Any](cutover, old))).isEmpty)
     assert(pushable(Or(GreaterThan("date_col", cutover), LessThan("date_col", old))).isEmpty)
     assert(pushable(GreaterThanOrEqual("date_col", cutover)).nonEmpty)
+    // A LocalDate, unlike a java.sql.Date, can hold 1582-10-05 to 1582-10-14.
+    assert(pushable(LessThan("date_col", cutover.minusDays(1))).isEmpty)
     assert(pushable(LessThan("date_col", java.sql.Date.valueOf("1998-09-02"))).nonEmpty)
   }
 
