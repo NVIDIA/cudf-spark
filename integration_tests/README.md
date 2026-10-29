@@ -479,7 +479,7 @@ SPARK_HISTORY_OPTS="-Dspark.history.fs.logDirectory=integration_tests/target/run
   ${SPARK_HOME}/bin/spark-class org.apache.spark.deploy.history.HistoryServer
 ```
 
-By default, integration tests write event logs using [Zstandard](https://facebook.github.io/zstd/)
+By default, integration tests write event logs using [Zstandard](https://meta.github.io/zstd/)
 (`zstd`) compression codec. It can be changed by setting the environment variable `PYSP_TEST_spark_eventLog_compression_codec` to one of
 the SHS supported values for the config key
 [`spark.eventLog.compression.codec`](https://spark.apache.org/docs/latest/configuration.html#spark-ui)
