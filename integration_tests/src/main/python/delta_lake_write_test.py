@@ -1413,6 +1413,7 @@ def test_delta_replace_where_save_as_table_preserves_partitioning(spark_tmp_tabl
 
 @allow_non_gpu('DataWritingCommandExec', 'WriteFilesExec', *delta_meta_allow)
 @allow_non_gpu_conditional(is_databricks173_or_later(), 'AppendDataExecV1')
+@allow_non_gpu_conditional(is_databricks_runtime(), 'DeltaInvariantCheckerExec')
 @delta_lake
 @ignore_order(local=True)
 @delta_rtas_truncate_skip
@@ -1440,7 +1441,8 @@ def test_delta_replace_where_save_as_table_preserves_unmatched_rows(spark_tmp_ta
 
     with_cpu_session(create_initial_tables, conf=confs)
     with_cpu_session(lambda spark: replace_na_partition(spark, cpu_table), conf=confs)
-    # DBR 17.3 uses its native write command instead of RapidsDeltaWrite.
+    # DBR's predicate checker may run on CPU. Require the atomic overwrite and
+    # runtime-specific data writer to execute on GPU.
     gpu_write_classes = (["GpuDataWritingCommandExec", "GpuWriteFilesExec"]
                          if is_databricks173_or_later() else delta_write)
     assert_rapids_delta_write(
