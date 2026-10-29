@@ -74,8 +74,9 @@ trait RapidsShuffleFetchHandler {
   def getTaskIds: Array[Long]
 
   /**
-   * Whether the reader's task has completed, after which the transport queues none of its
-   * transfers. It is read without the reader's lock.
+   * Whether the reader's task has completed, after which the transport admits none of its
+   * transfers. It must not take the reader's lock, since the transport reads it under its
+   * queue lock, which the reader's cleaner takes while it holds the reader's lock.
    */
   def isDone: Boolean = false
 }
@@ -120,6 +121,11 @@ class RapidsShuffleClient(
   // these are handlers that are interested (live spark tasks) in peer failure handling
   private val liveHandlers =
     ConcurrentHashMap.newKeySet[RapidsShuffleFetchHandler]()
+
+  // each reader's metadata request, until its response is handled or the reader is done. An
+  // entry that a response handled before `doFetch` added it is left for the reader's end.
+  // `close` leaves the entries, so that a reader's end still withdraws after a peer error.
+  private val pendingMetadata = new ConcurrentHashMap[RapidsShuffleFetchHandler, Transaction]()
 
   object ShuffleClientOps {
     /**
@@ -212,12 +218,14 @@ class RapidsShuffleClient(
             s"${ShuffleMetadata.printRequest(
               ShuffleMetadata.getMetadataRequest(metaReq.getBuffer()))}")
 
-        // make request
-        connection.request(MessageType.MetadataRequest, metaReq.acquire(), tx => {
+        // make request. A withdrawn request may never run this callback, which leaves metaReq to
+        // the collector. The send may still read it, and keeps it reachable until the send ends.
+        val request = connection.request(MessageType.MetadataRequest, metaReq.acquire(), tx => {
           withResource(metaReq) { _ =>
             asyncOrBlock(HandleMetadataResponse(tx, shuffleRequests, handler))
           }
         })
+        pendingMetadata.put(handler, request)
       }
     } catch {
       case t: Throwable =>
@@ -227,6 +235,9 @@ class RapidsShuffleClient(
 
   /**
    * Function to handle MetadataResponses, as a result of the [[HandleMetadataResponse]] event.
+   * It can run after the reader is done, for a request whose send failed, or that the reader's
+   * end did not withdraw before a reply took its callback. The transport refuses a done
+   * reader's transfers.
    *
    * @param tx live metadata response transaction to be closed in this handler
    * @param shuffleRequests blocks to fetch
@@ -236,6 +247,7 @@ class RapidsShuffleClient(
       tx: Transaction,
       shuffleRequests: Seq[ShuffleBlockBatchId],
       handler: RapidsShuffleFetchHandler): Unit = {
+    pendingMetadata.remove(handler, tx)
     try {
       withResource(tx) { _ =>
         tx.getStatus match {
@@ -555,13 +567,24 @@ class RapidsShuffleClient(
     liveHandlers.add(handler)
   }
 
+  /**
+   * Called once per reader, by its task-completion cleaner. Stops peer-error notices for
+   * `handler` and withdraws its unanswered metadata request. The transport then drops the
+   * handler's queued transfers and unregisters it.
+   */
   def unregisterPeerErrorListener(handler: RapidsShuffleFetchHandler): Unit = {
     logDebug(s"Unregister $handler from client for ${connection.getPeerExecutorId}")
     liveHandlers.remove(handler)
+    // The reader is done, so its metadata request stops waiting for a response. This comes
+    // before the cancel below, so that a cancel that throws cannot skip it.
+    val unanswered = pendingMetadata.remove(handler)
+    if (unanswered != null) {
+      connection.cancelRequest(unanswered)
+    }
     // Make sure we remove the handler from the transport as well, otherwise
     // we could have a host memory leak: https://github.com/NVIDIA/spark-rapids/issues/7997
-    // At this stage this should not cancel any requests because the task should have
-    // completed, but it will also remove `handler` from internal tracking in `transport`.
+    // A done reader normally has nothing queued here, unless the cancel in its task-completion
+    // cleaner threw, so this mostly removes `handler` from internal tracking in `transport`.
     transport.cancelPending(handler)
   }
 }

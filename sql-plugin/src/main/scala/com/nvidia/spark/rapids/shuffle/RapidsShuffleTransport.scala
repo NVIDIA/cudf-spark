@@ -127,7 +127,8 @@ trait ClientConnection {
   /**
    * This performs a request/response for a message of type `MessageType`. The response
    * `Transaction` on completion will call the callback (`cb`). The caller of `request`
-   * must close, or consume the response in the transaction, otherwise we can leak.
+   * must close, or consume the response in the transaction, otherwise we can leak. A request
+   * that `cancelRequest` withdraws may never call `cb`.
    *
    * @param messageType value of the `MessageType` enum
    * @param request the populated request direct buffer `ByteBuffer`
@@ -153,8 +154,10 @@ trait ClientConnection {
   def getPeerExecutorId: Long
 
   /**
-   * Stops waiting for the response to `tx`, a request whose reader is done. A connection that
-   * cannot withdraw a request leaves it waiting.
+   * Stops waiting for the response to `tx`, a request whose reader is done. The request's
+   * callback can still run, for a reply that took it first or for a failed send. The reader's
+   * cleaner calls this under the reader's lock, so it must not wait for the transport's threads,
+   * which can wait on that lock. A connection that cannot withdraw a request leaves it waiting.
    * @param tx a transaction that `request` returned
    */
   def cancelRequest(tx: Transaction): Unit = {}
@@ -349,7 +352,8 @@ trait RapidsShuffleTransport extends AutoCloseable {
   def getDirectByteBuffer(size: Long): RefCountedDirectByteBuffer
 
   /**
-   * (throttle) Adds a set of requests to be throttled as limits allowed.
+   * (throttle) Adds a set of requests to be throttled as limits allowed. A transport may drop
+   * the requests of a reader that `isDone`, since its task no longer waits for them.
    * @param reqs requests to add to the throttle queue
    */
   def queuePending(reqs: Seq[PendingTransferRequest]): Unit

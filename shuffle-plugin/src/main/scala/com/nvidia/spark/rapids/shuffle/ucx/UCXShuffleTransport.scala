@@ -613,12 +613,13 @@ class UCXShuffleTransport(shuffleServerId: BlockManagerId, rapidsConf: RapidsCon
   }
 }
 
-object UCXShuffleTransport {
+object UCXShuffleTransport extends Logging {
   /**
    * Queues `reqs` for the throttle, and records their reader as one whose requests may be put
    * back, unless the reader is done. The caller holds `altList`'s lock, which the reader's
-   * cleaner takes after it marks the reader done, so a done reader's requests are either refused
-   * here or removed by its `cancelPending`.
+   * cleaner takes after it marks the reader done. So a done reader's requests are refused here,
+   * or removed by its `cancelPending` unless the throttle took them first. The throttle may
+   * still issue those, and the reader rejects their batches.
    * @return whether it queued them
    */
   private[ucx] def admit(
@@ -626,8 +627,14 @@ object UCXShuffleTransport {
       validHandlers: mutable.HashSet[RapidsShuffleFetchHandler],
       reqs: Seq[PendingTransferRequest]): Boolean = {
     import scala.collection.JavaConverters._
-    validHandlers.add(reqs.head.handler)
-    altList.addAll(reqs.asJava)
-    true
+    val handler = reqs.head.handler
+    if (handler.isDone) {
+      logDebug(s"Not queueing ${reqs.size} transfer requests of $handler, whose task is done")
+      false
+    } else {
+      validHandlers.add(handler)
+      altList.addAll(reqs.asJava)
+      true
+    }
   }
 }

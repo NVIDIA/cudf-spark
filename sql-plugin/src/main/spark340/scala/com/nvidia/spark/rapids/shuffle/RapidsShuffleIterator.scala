@@ -141,8 +141,9 @@ class RapidsShuffleIterator(
   private[this] var totalBatchesResolved: Long = 0L
 
   // If the task finishes, and this iterator is releasing resources, we set this to true
-  // which allows us to reject incoming batches that would otherwise get leaked
-  private[this] var taskComplete: Boolean = false
+  // which allows us to reject incoming batches that would otherwise get leaked. The handlers'
+  // `isDone` reads it without the lock.
+  @volatile private[this] var taskComplete: Boolean = false
 
   blocksByAddress.foreach(bba => {
     // expected blocks per address
@@ -237,6 +238,8 @@ class RapidsShuffleIterator(
           private[this] val taskIds = Array[Long](taskAttemptId)
 
           override def getTaskIds: Array[Long] = taskIds
+
+          override def isDone: Boolean = taskComplete
 
           override def start(expectedBatches: Int): Unit = resolvedBatches.synchronized {
             if (expectedBatches == 0) {
@@ -334,21 +337,48 @@ class RapidsShuffleIterator(
 
   private[this] def receiveBufferCleaner(): Unit = resolvedBatches.synchronized {
     taskComplete = true
-    if (hasNext) {
+    // Every step runs whatever an earlier one throws, since the last ones withdraw the reader's
+    // waiting requests. The first failure is rethrown with the rest suppressed, and an interrupt
+    // among the rest is restored after the last step, so that it cuts none short.
+    var failure: Throwable = null
+    var interrupted = false
+    def attempt(step: => Unit): Unit = {
+      try {
+        step
+      } catch {
+        case t: Throwable =>
+          if (failure == null) {
+            failure = t
+          } else if (t ne failure) {
+            failure.addSuppressed(t)
+            interrupted |= t.isInstanceOf[InterruptedException]
+          }
+      }
+    }
+    // a hasNext that throws counts as not done, so that the closes and cancels still run
+    var done = false
+    attempt { done = !hasNext }
+    if (!done) {
       logWarning(s"Iterator for task ${taskAttemptIdStr} closing, " +
           s"but it is not done. Closing ${resolvedBatches.size()} resolved batches!!")
       resolvedBatches.forEach {
-        case BufferReceived(handle) => handle.close()
+        case BufferReceived(handle) => attempt(handle.close())
         case _ =>
       }
       // tell the client to cancel pending requests
       clientAndHandlers.foreach {
-        case (client, handler) => client.cancelPending(handler)
+        case (client, handler) => attempt(client.cancelPending(handler))
       }
     }
     // tell the client this handler is done, and no longer requires peer failures
     clientAndHandlers.foreach {
-      case (client, handler) => client.unregisterPeerErrorListener(handler)
+      case (client, handler) => attempt(client.unregisterPeerErrorListener(handler))
+    }
+    if (failure != null) {
+      if (interrupted) {
+        Thread.currentThread().interrupt()
+      }
+      throw failure
     }
   }
 
