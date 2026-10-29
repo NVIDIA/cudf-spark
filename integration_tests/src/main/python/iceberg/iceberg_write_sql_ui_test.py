@@ -17,7 +17,7 @@ from iceberg import (
     iceberg_write_enabled_conf, iceberg_unsupported_mark, _BASE_TBLPROPS_SQL)
 import pytest
 
-from marks import allow_non_gpu, iceberg
+from marks import allow_non_gpu, iceberg, iceberg_fast_test
 from spark_session import with_gpu_session
 
 pytestmark = iceberg_unsupported_mark
@@ -35,6 +35,7 @@ def _is_write_node(name):
 # not (and need not be) on the GPU. In GPU test mode the plugin asserts the full plan
 # is columnar unless the CPU node is allowed, so allow it here; the INSERT below is the
 # write execution we actually assert on.
+@iceberg_fast_test
 @allow_non_gpu('CreateTableExec')
 @iceberg
 @pytest.mark.parametrize("format_version", iceberg_format_versions)
@@ -113,6 +114,7 @@ def test_write_sql_ui_shows_gpu_child_operators(format_version, spark_tmp_table_
         f"(only the write node is shown): {names}"
 
 
+@iceberg_fast_test
 @allow_non_gpu('CreateTableExec')
 @iceberg
 @pytest.mark.parametrize("format_version", iceberg_format_versions)

@@ -247,7 +247,7 @@ trait GpuFileFormatWriterBase extends Serializable with Logging {
       plan
     } else {
       val projectList = GpuV1WriteUtils.convertGpuEmptyToNull(plan.output, partitionSet)
-      if (projectList.nonEmpty) GpuProjectExec(projectList, plan) else plan
+      if (projectList.nonEmpty) GpuProjectExec(projectList, plan)() else plan
     }
 
     writeAndCommit(job, description, committer) {

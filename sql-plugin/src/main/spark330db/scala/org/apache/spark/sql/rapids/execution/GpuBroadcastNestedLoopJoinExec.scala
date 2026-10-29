@@ -66,9 +66,9 @@ class GpuBroadcastNestedLoopJoinMeta(
 
       // Reconstruct the child with wrapped project node if needed.
       val leftChild =
-        if (!leftExpr.isEmpty) GpuProjectExec(leftExpr ++ left.output, left) else left
+        if (!leftExpr.isEmpty) GpuProjectExec(leftExpr ++ left.output, left)() else left
       val rightChild =
-        if (!rightExpr.isEmpty) GpuProjectExec(rightExpr ++ right.output, right) else right
+        if (!rightExpr.isEmpty) GpuProjectExec(rightExpr ++ right.output, right)() else right
       val postBuildCondition =
         if (gpuBuildSide == GpuBuildLeft) leftExpr ++ left.output else rightExpr ++ right.output
 
@@ -91,7 +91,7 @@ class GpuBroadcastNestedLoopJoinMeta(
         GpuProjectExec(
           GpuBroadcastNestedLoopJoinExecBase.output(
             join.joinType, left.output, right.output).toList,
-          joinExec)
+          joinExec)()
       }
     } else {
       val condition = conditionMeta.map(_.convertToGpu())

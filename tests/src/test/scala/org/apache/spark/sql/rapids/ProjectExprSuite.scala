@@ -28,7 +28,13 @@ import org.mockito.Mockito.{never, spy, verify}
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.Row
-import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Literal, NamedExpression}
+import org.apache.spark.sql.catalyst.expressions.{
+  Add, Alias, Ascending, AttributeReference, Descending, Literal, NamedExpression,
+  NullsFirst, NullsLast, SortOrder}
+import org.apache.spark.sql.catalyst.plans.physical.{
+  HashPartitioning, PartitioningCollection, RangePartitioning}
+import org.apache.spark.sql.execution.{ProjectExec, SortExec}
+import org.apache.spark.sql.execution.exchange.ShuffleExchangeExec
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims._
@@ -40,6 +46,157 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
   def forceHostColumnarToGpu(): SparkConf = {
     // turns off BatchScanExec, so we get a CPU BatchScanExec together with a HostColumnarToGpu
     new SparkConf().set("spark.rapids.sql.exec.BatchScanExec", "false")
+  }
+
+  test("project metadata matches Spark for aliases and ordering prefixes") {
+    val id = AttributeReference("id", LongType, nullable = false)()
+    val range = GpuRangeExec(0L, 100L, 1L, 16, Seq(id), 1024L * 1024)
+    val key = GpuAlias(GpuRemainder(id, GpuLiteral(10L), failOnError = false), "k")()
+    val value = GpuAlias(id, "v")()
+    val other = GpuAlias(id, "other")()
+    val cpuAlias = Alias(id, "cpu_alias")()
+    def cpuAliasOf(alias: GpuAlias): Alias =
+      Alias(alias.child, alias.name)(alias.exprId, alias.qualifier, Some(alias.metadata))
+    val projections = Seq(
+      List[NamedExpression](id),
+      List[NamedExpression](value),
+      List[NamedExpression](cpuAlias),
+      List[NamedExpression](key, value),
+      List[NamedExpression](value, key),
+      List[NamedExpression](value, other, id),
+      List[NamedExpression](key))
+    projections.foreach { expressions =>
+      val cpuExpressions = expressions.map {
+        case alias: GpuAlias => cpuAliasOf(alias)
+        case expression => expression
+      }
+      val project = GpuProjectExec(expressions, range)()
+      val expected = ProjectExec(cpuExpressions, range)
+      assert(project.outputPartitioning == expected.outputPartitioning)
+      assert(project.outputOrdering == expected.outputOrdering)
+    }
+    // Modulo cannot claim the range's partitioning; a direct alias in the second position can.
+    assert(GpuProjectExec(List(key, value), range)().outputPartitioning ==
+      RangePartitioning(Seq(SortOrder(value.toAttribute, Ascending)), 16))
+
+    val first = value.toAttribute
+    val second = key.toAttribute
+    val equivalent = other.toAttribute
+    val child = GpuProjectExec(List(value, key, other), range)()
+    val ordering = Seq(SortOrder(first, Ascending, NullsLast, Seq(equivalent)),
+      SortOrder(second, Descending, NullsFirst, Seq.empty))
+    val sorted = GpuSortExec(ordering, false, child, OutOfCoreSort)(ordering)
+    val aliasedFirst = GpuAlias(first, "aliased_first")()
+    val aliasedSecond = Alias(second, "aliased_second")()
+    Seq(
+      List[NamedExpression](second),
+      List[NamedExpression](first),
+      List[NamedExpression](second, first),
+      List[NamedExpression](aliasedSecond, aliasedFirst),
+      List[NamedExpression](equivalent, second),
+      List[NamedExpression](first, equivalent, second)).foreach { expressions =>
+      val cpuExpressions = expressions.map {
+        case alias: GpuAlias => cpuAliasOf(alias)
+        case expression => expression
+      }
+      val project = GpuProjectExec(expressions, sorted)()
+      val expected = ProjectExec(cpuExpressions, sorted)
+      // Spark 3.3 retains ordering differently; use the installed version as the contract.
+      assert(project.outputPartitioning == expected.outputPartitioning)
+      assert(project.outputOrdering == expected.outputOrdering)
+    }
+  }
+
+  test("project metadata matches Spark for computed expressions and alias candidate limits") {
+    val limits = if (isSpark340OrLater) Seq(1, 2) else Seq(100)
+    limits.foreach { limit =>
+      withSQLConf("spark.sql.optimizer.expressionProjectionCandidateLimit" -> limit.toString) {
+        val id = AttributeReference("id", LongType, nullable = false)()
+        val range = GpuRangeExec(0L, 100L, 1L, 16, Seq(id), 1024L * 1024)
+        val cpuExpression = Add(id, Literal(1L))
+        val gpuExpression = GpuAdd(id, GpuLiteral(1L), failOnError = false)()
+        val first = GpuAlias(gpuExpression, "first")()
+        val second = GpuAlias(gpuExpression, "second")()
+        val cpuFirst = Alias(cpuExpression, first.name)(first.exprId)
+        val cpuSecond = Alias(cpuExpression, second.name)(second.exprId)
+        val shuffled = ShuffleExchangeExec(HashPartitioning(Seq(cpuExpression), 16), range)
+        val ordering = Seq(SortOrder(cpuExpression, Ascending, NullsLast, Seq.empty),
+          SortOrder(id, Descending, NullsFirst, Seq.empty))
+        val sorted = SortExec(ordering, false, shuffled)
+        Seq(false, true).foreach { retainOriginal =>
+          val gpuExpressions = List[NamedExpression](first, second) ++
+            (if (retainOriginal) List(id) else Nil)
+          val cpuExpressions = List[NamedExpression](cpuFirst, cpuSecond) ++
+            (if (retainOriginal) List(id) else Nil)
+          val project = GpuProjectExec(gpuExpressions, sorted)(Some(cpuExpressions))
+          val expected = ProjectExec(cpuExpressions, sorted)
+          assert(project.expressions == gpuExpressions)
+          assert(project.outputPartitioning == expected.outputPartitioning)
+          assert(project.outputOrdering == expected.outputOrdering)
+          val aggregate = GpuHashAggregateExec(
+            requiredChildDistributionExpressions = None,
+            groupingExpressions = Seq(id),
+            aggregateExpressions = Seq.empty,
+            aggregateAttributes = Seq.empty,
+            resultExpressions = gpuExpressions,
+            child = sorted,
+            configuredTargetBatchSize = 1024L * 1024,
+            estimatedPreProcessGrowth = 1.0,
+            forceSinglePassAgg = false,
+            allowSinglePassAgg = true,
+            allowNonFullyAggregatedOutput = false,
+            skipAggPassReductionRatio = 1.0)(Some(cpuExpressions))
+          assert(aggregate.outputPartitioning == expected.outputPartitioning)
+          assert(aggregate.outputOrdering.isEmpty)
+          assert(aggregate.gpuExpressions == Seq(id) ++ gpuExpressions)
+          assert(aggregate.expressions == aggregate.gpuExpressions)
+          assert(aggregate.withNewChildren(Seq(range)).asInstanceOf[GpuHashAggregateExec]
+            .cpuResultExpressions == aggregate.cpuResultExpressions)
+          if (isSpark340OrLater) {
+            val candidates = project.outputPartitioning match {
+              case PartitioningCollection(partitionings) => partitionings
+              case partitioning => Seq(partitioning)
+            }
+            assert(candidates.size == limit)
+            assert(candidates.head == HashPartitioning(Seq(second.toAttribute), 16))
+            assert(project.outputOrdering.head.child == second.toAttribute)
+            assert(project.outputOrdering.head.sameOrderExpressions.size == limit - 1)
+            assert(project.outputOrdering.head.nullOrdering == NullsLast)
+          }
+        }
+      }
+    }
+  }
+
+  test("project rewrites retain CPU metadata only for unchanged GPU expressions") {
+    val id = AttributeReference("id", LongType, nullable = false)()
+    val range = GpuRangeExec(0L, 100L, 1L, 16, Seq(id), 1024L * 1024)
+    val cpuExpression = Add(id, Literal(1L))
+    val first = GpuAlias(GpuAdd(id, GpuLiteral(1L), failOnError = false)(), "first")()
+    val second = GpuAlias(id, "second")()
+    val cpuFirst = Alias(cpuExpression, first.name)(first.exprId)
+    val cpuSecond = Alias(id, second.name)(second.exprId)
+    val project = GpuProjectExec(List(first, second), range)(Some(List(cpuFirst, cpuSecond)))
+    val shuffled = ShuffleExchangeExec(HashPartitioning(Seq(cpuExpression), 16), range)
+    val reordered = project.withProjectList(List(second, first),
+      newChild = shuffled, preSplit = false)
+    assert(reordered.cpuProjectList.contains(List(cpuSecond, cpuFirst)))
+    assert(!reordered.enablePreSplit)
+    assert(reordered.child == shuffled)
+    assert(project.withNewChildren(Seq(shuffled)).asInstanceOf[GpuProjectExec]
+      .cpuProjectList == project.cpuProjectList)
+    val expected = ProjectExec(List(cpuSecond, cpuFirst), shuffled)
+    assert(reordered.outputPartitioning == expected.outputPartitioning)
+    assert(reordered.outputOrdering == expected.outputOrdering)
+
+    val changed = GpuAlias(id, first.name)(first.exprId)
+    val replaced = project.withProjectList(List(changed))
+    val cpuChanged = Alias(id, changed.name)(changed.exprId)
+    assert(replaced.cpuProjectList.exists(_.size == 1))
+    assert(replaced.cpuProjectList.get.head.asInstanceOf[Alias].child == id)
+    val changedExpected = ProjectExec(List(cpuChanged), range)
+    assert(replaced.outputPartitioning == changedExpected.outputPartitioning)
+    assert(replaced.outputOrdering == changedExpected.outputOrdering)
   }
 
   test("rand is okay") {

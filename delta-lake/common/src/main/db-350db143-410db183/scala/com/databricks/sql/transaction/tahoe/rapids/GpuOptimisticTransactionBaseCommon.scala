@@ -107,7 +107,7 @@ abstract class GpuOptimisticTransactionBaseCommon
         GpuAlias(GpuEmpty2Null(p), p.name)()
       case attr => attr
     }
-    if (needConvert) GpuProjectExec(projectList.toList, plan) else plan
+    if (needConvert) GpuProjectExec(projectList.toList, plan)() else plan
   }
 
   /**

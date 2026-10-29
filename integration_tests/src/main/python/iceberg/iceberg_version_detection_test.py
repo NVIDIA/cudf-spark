@@ -16,7 +16,7 @@ import os
 import pytest
 
 from iceberg import iceberg_unsupported_mark
-from marks import allow_non_gpu, iceberg
+from marks import allow_non_gpu, iceberg, iceberg_fast_test
 from spark_session import with_gpu_session
 from spark_init_internal import spark_version
 
@@ -25,6 +25,7 @@ from spark_init_internal import spark_version
 # in IcebergProbeImpl — including the 1.11.0 mapping used on Spark 4.1 — are covered.
 pytestmark = iceberg_unsupported_mark
 
+@iceberg_fast_test
 @allow_non_gpu(any=True)
 @iceberg
 def test_iceberg_version_detection():

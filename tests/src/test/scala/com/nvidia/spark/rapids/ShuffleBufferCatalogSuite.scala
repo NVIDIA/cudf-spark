@@ -19,8 +19,9 @@ package com.nvidia.spark.rapids
 import java.lang.management.ManagementFactory
 import java.util.concurrent.TimeUnit
 
+import ai.rapids.cudf.Cuda
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.format.TableMeta
+import com.nvidia.spark.rapids.format.{CodecType, TableMeta}
 import com.nvidia.spark.rapids.shuffle.RapidsShuffleTestHelper
 import com.nvidia.spark.rapids.spill.SpillFramework
 import org.scalatest.BeforeAndAfterEach
@@ -31,6 +32,7 @@ import org.scalatest.time.{Seconds, Span}
 import org.scalatestplus.mockito.MockitoSugar
 
 import org.apache.spark.SparkConf
+import org.apache.spark.shuffle.rapids.ShuffleOutputGoneException
 import org.apache.spark.sql.types.{DataType, IntegerType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.storage.ShuffleBlockId
@@ -193,6 +195,43 @@ class ShuffleBufferCatalogSuite
     }
   }
 
+  test("a compressed batch reads back compressed through the local read path") {
+    val numRows = 1000
+    val codec = TableCompressionCodec.getCodec(CodecType.NVCOMP_LZ4,
+      TableCompressionCodec.makeCodecConfig(new RapidsConf(new SparkConf)))
+    val shuffleCatalog = new ShuffleBufferCatalog()
+    shuffleCatalog.registerShuffle(1)
+    val block = ShuffleBlockId(1, 1L, 1)
+    val compressed = withResource(codec.createBatchCompressor(0, Cuda.DEFAULT_STREAM)) { c =>
+      c.addTableToCompress(RapidsShuffleTestHelper.buildContiguousTable(numRows))
+      withResource(c.finish())(tables => GpuCompressedColumnVector.from(tables.head))
+    }
+    // the catalog closes the batch it is given
+    shuffleCatalog.addCompressedBatch(block, compressed, -1)
+    withResource(shuffleCatalog.getColumnarBatchIterator(
+        block, Array[DataType](IntegerType)).toArray) { batches =>
+      assertResult(1)(batches.length)
+      assert(GpuCompressedColumnVector.isBatchCompressed(batches.head))
+      val column = batches.head.column(0).asInstanceOf[GpuCompressedColumnVector]
+      val meta = column.getTableMeta
+      withResource(codec.createBatchDecompressor(0, Cuda.DEFAULT_STREAM)) {
+        decompressor =>
+          // the decompressor closes the buffer it is given
+          column.getTableBuffer.incRefCount()
+          decompressor.addBufferToDecompress(column.getTableBuffer, meta.bufferMeta)
+          withResource(decompressor.finishAsync()) { decoded =>
+            withResource(MetaUtils.getTableFromMeta(decoded.head, meta)) { table =>
+              withResource(RapidsShuffleTestHelper.buildContiguousTable(numRows)) { expected =>
+                TestUtils.compareColumns(expected.getTable.getColumn(0), table.getColumn(0))
+              }
+            }
+          }
+      }
+    }
+    shuffleCatalog.unregisterShuffle(1)
+    assertResult(0)(SpillFramework.stores.deviceStore.numHandles)
+  }
+
   test("when map ids repeat, only the first output committed for a map is read") {
     // With spark.shuffle.useOldFetchProtocol=true every attempt of a map writes the same blocks.
     val catalog = new ShuffleBufferCatalog(mapIdsCanRepeat = true)
@@ -236,6 +275,42 @@ class ShuffleBufferCatalogSuite
     catalog.unregisterShuffle(1)
     assertResult(0)(SpillFramework.stores.deviceStore.numHandles)
     assertResult((0, 0, 0))(catalog.bookkeepingSizes)
+  }
+
+  /** Reads every batch of `block` through the catalog's local read path, closing each. */
+  private def readLocally(catalog: ShuffleBufferCatalog, block: ShuffleBlockId): Unit =
+    catalog.getColumnarBatchIterator(block, Array[DataType](IntegerType)).foreach(_.close())
+
+  test("a lookup of output the catalog does not hold throws ShuffleOutputGoneException") {
+    Seq(false, true).foreach { mapIdsCanRepeat =>
+      val catalog = new ShuffleBufferCatalog(mapIdsCanRepeat)
+      val block = ShuffleBlockId(1, 7L, 0)
+      withClue(s"unknown shuffle, mapIdsCanRepeat=$mapIdsCanRepeat") {
+        assertThrows[ShuffleOutputGoneException](catalog.blockIdToMetas(block))
+        assertThrows[ShuffleOutputGoneException](readLocally(catalog, block))
+      }
+      catalog.registerShuffle(1)
+      withClue(s"unknown block, mapIdsCanRepeat=$mapIdsCanRepeat") {
+        assertThrows[ShuffleOutputGoneException](catalog.blockIdToMetas(block))
+        assertThrows[ShuffleOutputGoneException](readLocally(catalog, block))
+      }
+      catalog.unregisterShuffle(1)
+    }
+  }
+
+  test("when map ids repeat, a read of committed buffers that were removed throws " +
+      "ShuffleOutputGoneException") {
+    val catalog = new ShuffleBufferCatalog(mapIdsCanRepeat = true)
+    catalog.registerShuffle(1)
+    val block = ShuffleBlockId(1, 7L, 0)
+    val ids = Seq(
+      catalog.addContiguousTable(block, RapidsShuffleTestHelper.buildContiguousTable(10), -1))
+    catalog.commitMapOutput(1, 7L, ids, Array(100L))
+    // the committed output keeps its ids, so both reads find ids with no entries
+    catalog.removeCachedHandles(ids)
+    assertThrows[ShuffleOutputGoneException](catalog.blockIdToMetas(block))
+    assertThrows[ShuffleOutputGoneException](readLocally(catalog, block))
+    catalog.unregisterShuffle(1)
   }
 
   test("when map ids repeat, a commit after unregisterShuffle fails") {

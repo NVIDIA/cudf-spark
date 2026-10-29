@@ -742,7 +742,7 @@ object GpuHashJoin {
       right: SparkPlan,
       finalProjectList: Option[List[NamedExpression]]) {
     def projectIfNeeded(joinExec: GpuExec): GpuExec = {
-      finalProjectList.map(GpuProjectExec(_, joinExec)).getOrElse(joinExec)
+      finalProjectList.map(GpuProjectExec(_, joinExec)()).getOrElse(joinExec)
     }
   }
 
@@ -801,9 +801,9 @@ object GpuHashJoin {
       val (remains, leftExpr, rightExpr) =
         AstUtil.extractNonAstFromJoinCond(conditionMeta, left.output, right.output)
       val leftChild =
-        if (leftExpr.nonEmpty) GpuProjectExec(leftExpr ++ left.output.toList, left) else left
+        if (leftExpr.nonEmpty) GpuProjectExec(leftExpr ++ left.output.toList, left)() else left
       val rightChild =
-        if (rightExpr.nonEmpty) GpuProjectExec(rightExpr ++ right.output.toList, right) else right
+        if (rightExpr.nonEmpty) GpuProjectExec(rightExpr ++ right.output.toList, right)() else right
       val finalProjectList = if (leftExpr.isEmpty && rightExpr.isEmpty) {
         None
       } else {

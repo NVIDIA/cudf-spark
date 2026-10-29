@@ -2014,6 +2014,8 @@ This will force full Scala code rebuild in downstream modules.
                         <exclude>**/src/main/java/com/nvidia/spark/rapids/format/*</exclude>
                         <exclude>**/*.csv</exclude>
                         <exclude>scripts/with_resource_nesting_baseline.json</exclude>
+                        <exclude>scripts/iceberg-versions.json</exclude>
+                        <exclude>scripts/tests/resources/iceberg/iceberg-versions.json</exclude>
                         <exclude>dist/*.txt</exclude>
                         <exclude>**/META-INF/com.nvidia.spark.rapids.SparkShimServiceProvider</exclude>
                         <!-- Apache Rat excludes target folder for projects that are included by
@@ -2125,6 +2127,26 @@ This will force full Scala code rebuild in downstream modules.
                                       dir="${spark.rapids.source.basedir}">
                                     <arg value="-B"/>
                                     <arg value="dist/scripts/tests/test_root_safe_provider_selection.py"/>
+                                </exec>
+                            </target>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>iceberg-matrix-tests</id>
+                        <phase>verify</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <exec executable="python3" failonerror="true"
+                                      dir="${spark.rapids.source.basedir}">
+                                    <arg value="-B"/>
+                                    <arg value="-m"/>
+                                    <arg value="unittest"/>
+                                    <arg value="discover"/>
+                                    <arg value="-s"/>
+                                    <arg value="scripts/tests"/>
+                                    <arg value="-p"/>
+                                    <arg value="test_get_iceberg_versions.py"/>
                                 </exec>
                             </target>
                         </configuration>

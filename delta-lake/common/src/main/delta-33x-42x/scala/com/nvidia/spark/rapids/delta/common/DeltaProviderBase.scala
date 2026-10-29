@@ -178,7 +178,7 @@ abstract class DeltaProviderBase extends DeltaIOProvider {
       // Data and partition columns precede metadata columns in the scan output.
       val dataAndPartitionOutput = scan.originalOutput.take(
         scan.requiredSchema.length + scan.relation.partitionSchema.length)
-      project.copy(projectList = project.projectList.filterNot(_.name == "_metadata"))
+      project.withProjectList(project.projectList.filterNot(_.name == "_metadata"))
         .withNewChildren(Seq(
           scan.copy(
             // Drop the temporary row index along with the unused metadata struct.
@@ -333,7 +333,7 @@ object DVPredicatePushdown extends ShimPredicateHelper {
       plan.transformUp {
         case project @ GpuProjectExec(projectList, _, _) =>
           val newProjList = projectList.filterNot(isRowDeletedColumnRef(_))
-          project.copy(projectList = newProjList)
+          project.withProjectList(newProjList)
         case fsse: GpuFileSourceScanExec =>
           fsse.copy(originalOutput = fsse.originalOutput.filterNot(
             _.name == IS_ROW_DELETED_COLUMN_NAME),
@@ -430,7 +430,8 @@ object DVPredicatePushdown extends ShimPredicateHelper {
         // identical projections: merging over an alias-computing child would drop the
         // alias's only producer ("Couldn't find <attr>"). Merge only pure pass-throughs.
         if (projSet1 == projSet2 && projList2.forall(_.isInstanceOf[AttributeReference])) {
-          GpuProjectExec(projList1, child, enablePreSplit1 && enablePreSplit2)
+          p.withProjectList(projList1, newChild = child,
+            preSplit = enablePreSplit1 && enablePreSplit2)
         } else {
           p
         }
