@@ -1359,8 +1359,8 @@ def test_delta_replace_where_save_as_table_preserves_partitioning(spark_tmp_tabl
             spark.sql(f"INSERT INTO {table} VALUES {initial_values}")
 
     def replace_na_partition(spark, table):
-        # Read from the target table to exercise a partial self-overwrite.
-        replacement = spark.table(table).where("region = 'NA'").orderBy("record_id").limit(1)
+        replacement = spark.sql(
+            "SELECT 100L AS record_id, 'NA' AS region, 100.0D AS amount")
         (replacement.write.format("delta").mode("overwrite")
          .option("replaceWhere", "region = 'NA'")
          .saveAsTable(table))
@@ -1410,7 +1410,30 @@ def test_delta_replace_where_save_as_table_preserves_partitioning(spark_tmp_tabl
     assert cpu_partition_columns == ["region"]
     assert gpu_partition_columns == cpu_partition_columns
 
-    assert_gpu_and_cpu_are_equal_collect(lambda spark: spark.table(gpu_table), conf=confs)
+
+@allow_non_gpu('DataWritingCommandExec', 'WriteFilesExec', *delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.xfail(is_databricks_runtime(),
+                   reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
+@delta_rtas_truncate_skip
+def test_delta_replace_where_save_as_table_preserves_unmatched_rows(spark_tmp_table_factory):
+    confs = copy_and_update(writer_confs, delta_writes_enabled_conf)
+
+    def write_table(spark, table):
+        initial = spark.sql(
+            "SELECT * FROM VALUES (0L, 'NA', 10.0D), (1L, 'EMEA', 20.0D), "
+            "(2L, 'NA', 30.0D), (3L, 'APAC', 40.0D) AS t(record_id, region, amount)")
+        initial.write.format("delta").partitionBy("region").saveAsTable(table)
+        replacement = spark.sql(
+            "SELECT 100L AS record_id, 'NA' AS region, 100.0D AS amount")
+        # Leave partitionBy unspecified, as in the original overwrite regression.
+        (replacement.write.format("delta").mode("overwrite")
+         .option("replaceWhere", "region = 'NA'")
+         .saveAsTable(table))
+
+    assert_gpu_and_cpu_save_as_table_are_equal_collect(
+        spark_tmp_table_factory, write_table, conf=confs)
 
 
 @allow_non_gpu(*delta_meta_allow)
