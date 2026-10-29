@@ -35,6 +35,30 @@ private[rapids] trait RapidsConfResourceEntries {
     .bytesConf(ByteUnit.BYTE)
     .createWithDefault(0)
 
+  val PAGEABLE_POOL_SIZE = conf("spark.rapids.memory.pageablePool.size")
+    .doc("Size in bytes of a pre-touched pageable host memory pool used when the pinned " +
+      "pool is exhausted. Set to 0 to disable; allocation then uses raw host memory.")
+    .startupOnly()
+    .internal()
+    .bytesConf(ByteUnit.BYTE)
+    .createWithDefault(0)
+
+  val PAGEABLE_POOL_PRETOUCH_THREADS = conf("spark.rapids.memory.pageablePool.pretouchThreads")
+    .doc("Number of worker threads used to pre-touch the pageable pool at startup.")
+    .startupOnly()
+    .internal()
+    .integerConf
+    .createWithDefault(16)
+
+  val PAGEABLE_POOL_REPLACE_PINNED_HOST_ALLOC =
+    conf("spark.rapids.memory.pageablePool.replacePinnedHostAlloc")
+      .doc("Use the pageable pool for Spark host allocations that prefer pinned memory, " +
+        "with raw host memory as a fallback.")
+      .startupOnly()
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
+
   val PINNED_POOL_SET_CUIO_DEFAULT = conf("spark.rapids.memory.pinnedPool.setCuioDefault")
     .doc("If set to true, the pinned pool configured for the plugin will be shared with " +
       "cuIO for small pinned allocations.")

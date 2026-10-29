@@ -1332,6 +1332,11 @@ public class GpuColumnVector extends GpuColumnVectorBase {
     return new RapidsHostColumnVector(type, cudfCv.copyToHostAsync(stream));
   }
 
+  public final RapidsHostColumnVector copyToHostAsync(Cuda.Stream stream,
+      HostMemoryAllocator allocator) {
+    return new RapidsHostColumnVector(type, cudfCv.copyToHostAsync(stream, allocator));
+  }
+
   public final RapidsNullSafeHostColumnVector copyToNullSafeHost() {
     return new RapidsNullSafeHostColumnVector(copyToHost());
   }

@@ -102,6 +102,8 @@ class SpillablePartialFileHandle private (
   // Behavior counters for statistics reporting
   @volatile private var expansionCount: Int = 0
   @volatile private var spillCount: Int = 0
+  private val traceShuffleStorage = java.lang.Boolean.getBoolean(
+    "ai.rapids.cudf.pageable.staged.copy.trace.shuffle.storage")
 
   // Shuffle read-lease reference counting. Active consumers (retained buffers, input streams,
   // Netty file regions) hold leases so the physical close can be deferred until they finish.
@@ -649,6 +651,7 @@ class SpillablePartialFileHandle private (
     }
 
     // Finalize spill under lock - now we close the buffer
+    val finalizeStart = if (commit && traceShuffleStorage) System.nanoTime() else 0L
     synchronized {
       spillInProgress = false
       notifyAll()  // Wake up any waiting doClose()
@@ -661,9 +664,19 @@ class SpillablePartialFileHandle private (
 
       spilledToDisk = true
       spillCount += 1
+      val removeStart = if (commit && traceShuffleStorage) System.nanoTime() else 0L
       SpillFramework.removeFromHostStore(this)
+      val removeNs = if (commit && traceShuffleStorage) System.nanoTime() - removeStart else 0L
+      val closeStart = if (commit && traceShuffleStorage) System.nanoTime() else 0L
       bufferToSpill.close()
+      val closeNs = if (commit && traceShuffleStorage) System.nanoTime() - closeStart else 0L
       host = None
+
+      if (commit && traceShuffleStorage) {
+        logWarning(s"PartialFileSpillFinalize file=${file.getName} bytes=$totalBytesWritten " +
+          s"removeNs=$removeNs bufferCloseNs=$closeNs " +
+          s"totalNs=${System.nanoTime() - finalizeStart}")
+      }
 
       if (!commit) {
         // if we are not committing, we want to account for these bytes
@@ -683,19 +696,40 @@ class SpillablePartialFileHandle private (
   // Only to be called from spillInternal!
   private def doSpill(bufferToSpill: HostMemoryBuffer): Unit = {
     try {
+      val openStart = if (traceShuffleStorage) System.nanoTime() else 0L
       val fos = new FileOutputStream(file)
+      val openNs = if (traceShuffleStorage) System.nanoTime() - openStart else 0L
+      var byteBufferNs = 0L
+      var writeNs = 0L
+      var forceNs = 0L
+      var closeNs = 0L
+      var writeCalls = 0
       try {
         val channel = fos.getChannel
+        val bufferStart = if (traceShuffleStorage) System.nanoTime() else 0L
         val bb = bufferToSpill.asByteBuffer()
         bb.limit(totalBytesWritten.toInt)
+        if (traceShuffleStorage) byteBufferNs = System.nanoTime() - bufferStart
+        val writeStart = if (traceShuffleStorage) System.nanoTime() else 0L
         while (bb.hasRemaining) {
           channel.write(bb)
+          if (traceShuffleStorage) writeCalls += 1
         }
+        if (traceShuffleStorage) writeNs = System.nanoTime() - writeStart
         if (syncWrites) {
+          val forceStart = if (traceShuffleStorage) System.nanoTime() else 0L
           channel.force(true)
+          if (traceShuffleStorage) forceNs = System.nanoTime() - forceStart
         }
       } finally {
+        val closeStart = if (traceShuffleStorage) System.nanoTime() else 0L
         fos.close()
+        if (traceShuffleStorage) closeNs = System.nanoTime() - closeStart
+      }
+      if (traceShuffleStorage) {
+        logWarning(s"PartialFileSpillIO file=${file.getName} bytes=$totalBytesWritten " +
+          s"openNs=$openNs byteBufferNs=$byteBufferNs writeNs=$writeNs " +
+          s"forceNs=$forceNs closeNs=$closeNs writeCalls=$writeCalls")
       }
     } catch {
       case e: Exception =>

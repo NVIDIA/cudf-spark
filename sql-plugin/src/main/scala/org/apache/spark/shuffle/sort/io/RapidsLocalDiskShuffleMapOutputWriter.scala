@@ -56,6 +56,8 @@ class RapidsLocalDiskShuffleMapOutputWriter(
   private val initialBufferSize = rapidsConf.partialFileBufferInitialSize
   private val maxBufferSize = rapidsConf.partialFileBufferMaxSize
   private val memoryThreshold = rapidsConf.partialFileBufferMemoryThreshold
+  private val traceStorage = java.lang.Boolean.getBoolean(
+    "ai.rapids.cudf.pageable.staged.copy.trace.shuffle.storage")
 
   // Read Spark's shuffle sync configuration to maintain compatibility
   private val syncWrites = sparkConf.get("spark.shuffle.sync", "false").toBoolean
@@ -171,6 +173,12 @@ class RapidsLocalDiskShuffleMapOutputWriter(
           outputTempFile, syncWrites)
         partialFileHandle = Some(handle)
       }
+      if (traceStorage) {
+        val handle = partialFileHandle.get
+        logWarning(s"ShuffleStorage init shuffle=$shuffleId map=$mapId " +
+          s"memoryMode=${handle.isMemoryBased} spilled=${handle.isSpilled} " +
+          s"usageRatio=${HostAlloc.getUsageRatio()} threshold=$memoryThreshold")
+      }
     }
   }
 
@@ -188,6 +196,8 @@ class RapidsLocalDiskShuffleMapOutputWriter(
   }
 
   override def commitAllPartitions(checksums: Array[Long]): MapOutputCommitMessage = {
+    val commitStart = if (traceStorage) System.nanoTime() else 0L
+    var spillForCommitNs = 0L
     // Finish write phase to enable spilling and finalize data
     partialFileHandle.foreach { handle =>
       handle.finishWrite()
@@ -195,7 +205,9 @@ class RapidsLocalDiskShuffleMapOutputWriter(
       // If memory-based and not spilled yet, force spill to create file
       // writeMetadataFileAndCommit requires a valid file
       if (handle.isMemoryBased && !handle.isSpilled) {
+        val spillStart = if (traceStorage) System.nanoTime() else 0L
         handle.spillForCommit()
+        if (traceStorage) spillForCommitNs = System.nanoTime() - spillStart
       }
     }
 
@@ -209,6 +221,16 @@ class RapidsLocalDiskShuffleMapOutputWriter(
       s"${partitionLengths.length}")
     blockResolver.writeMetadataFileAndCommit(
       shuffleId, mapId, partitionLengths, checksums, resolvedTmp)
+
+    if (traceStorage) {
+      partialFileHandle.foreach { handle =>
+        logWarning(s"ShuffleStorage commit shuffle=$shuffleId map=$mapId " +
+          s"memoryMode=${handle.isMemoryBased} spilled=${handle.isSpilled} " +
+          s"expansions=${handle.getExpansionCount} spills=${handle.getSpillCount} " +
+          s"bytes=${handle.getTotalBytesWritten} spillForCommitNs=$spillForCommitNs " +
+          s"totalCommitNs=${System.nanoTime() - commitStart}")
+      }
+    }
 
     // Close the partial file handle to release any remaining resources
     // (e.g., host buffer if spill() was not called due to empty partitions)
@@ -241,7 +263,15 @@ class RapidsLocalDiskShuffleMapOutputWriter(
    * Finish write phase to finalize data (called before extraction).
    */
   def finishWritePhase(): Unit = {
-    partialFileHandle.foreach(_.finishWrite())
+    partialFileHandle.foreach { handle =>
+      handle.finishWrite()
+      if (traceStorage) {
+        logWarning(s"ShuffleStorage finish shuffle=$shuffleId map=$mapId " +
+          s"memoryMode=${handle.isMemoryBased} spilled=${handle.isSpilled} " +
+          s"expansions=${handle.getExpansionCount} spills=${handle.getSpillCount} " +
+          s"bytes=${handle.getTotalBytesWritten}")
+      }
+    }
   }
 
   private class RapidsPartitionWriter(partitionId: Int) extends ShufflePartitionWriter {

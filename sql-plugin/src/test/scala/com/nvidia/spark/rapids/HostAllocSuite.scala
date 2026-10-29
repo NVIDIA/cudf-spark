@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids
 
 import java.util.concurrent.{ExecutionException, Future, LinkedBlockingQueue, TimeoutException, TimeUnit}
 
-import ai.rapids.cudf.{HostMemoryBuffer, PinnedMemoryPool, Rmm, RmmAllocationMode}
+import ai.rapids.cudf.{HostMemoryBuffer, PageableMemoryPool, PinnedMemoryPool, Rmm, RmmAllocationMode}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.jni.{RmmSpark, RmmSparkThreadState, TaskPriority, ThreadStateRegistry}
 import com.nvidia.spark.rapids.spill._
@@ -367,6 +367,79 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
         ConsoleOutput.writeErrorLine(t)
         t.printStackTrace(System.err)
         throw t
+    }
+  }
+
+  test("non-pinned allocations prefer the pageable pool before raw and pinned memory") {
+    val properties = Map(
+      "ai.rapids.cudf.pageable.staged.copy.threads" -> "1",
+      "ai.rapids.cudf.pageable.staged.copy.chunk.bytes" -> "4096",
+      "ai.rapids.cudf.pageable.staged.copy.registered.buffers" -> "true")
+    val previous = properties.keys.map(key => key -> Option(System.getProperty(key))).toMap
+    properties.foreach { case (key, value) => System.setProperty(key, value) }
+    try {
+      PinnedMemoryPool.initialize(4096)
+      PageableMemoryPool.initialize(8192, 1)
+      HostAlloc.initialize(4096)
+      // Pinned-preferred H2D callers still use pinned memory even when the pageable pool is free.
+      withResource(HostAlloc.alloc(4096, preferPinned = true)) { pinned =>
+        assert(!PageableMemoryPool.isPageablePoolBuffer(pinned))
+        assert(HostAlloc.getUsageRatio() == 0.0)
+      }
+      withResource(HostAlloc.alloc(8192, preferPinned = false)) { pooled =>
+        assert(PageableMemoryPool.isPageablePoolBuffer(pooled))
+        assert(HostAlloc.getUsageRatio() == 0.0)
+        withResource(HostAlloc.alloc(4096, preferPinned = false)) { raw =>
+          assert(!PageableMemoryPool.isPageablePoolBuffer(raw))
+          assert(HostAlloc.getUsageRatio() == 0.25)
+          withResource(HostAlloc.alloc(4096, preferPinned = false)) { pinned =>
+            assert(!PageableMemoryPool.isPageablePoolBuffer(pinned))
+            assert(HostAlloc.getUsageRatio() == 0.25)
+            withResource(HostAlloc.tryAlloc(1, preferPinned = false)) { exhausted =>
+              assert(exhausted.isEmpty)
+            }
+          }
+        }
+        assert(HostAlloc.getUsageRatio() == 0.0)
+      }
+      // A pool with only 2 KiB remaining cannot fit a 3 KiB staged destination.
+      withResource(HostAlloc.alloc(2048, preferPinned = false)) { first =>
+        withResource(HostAlloc.alloc(2048, preferPinned = false)) { middle =>
+          withResource(HostAlloc.alloc(2048, preferPinned = false)) { last =>
+            // Only 2 KiB remains in the pool; raw fallback must still be budgeted.
+            withResource(HostAlloc.allocPageableForDeviceToHost(3072)) { raw =>
+              assert(!PageableMemoryPool.isPageablePoolBuffer(raw))
+              assert(HostAlloc.getUsageRatio() == 3072.0 / 16384)
+              // The pinned pool is free, but D2H must not consume it to bypass the raw limit.
+              withResource(HostAlloc.tryAllocPageableForDeviceToHost(3072)) { denied =>
+                assert(denied.isEmpty)
+              }
+              withResource(HostAlloc.alloc(4096, preferPinned = true)) { pinned =>
+                assert(!PageableMemoryPool.isPageablePoolBuffer(pinned))
+              }
+            }
+            assert(HostAlloc.getUsageRatio() == 0.0)
+          }
+        }
+      }
+      HostAlloc.initialize(16384)
+      // A request larger than the entire pool can still fit the raw budget.
+      withResource(HostAlloc.allocPageableForDeviceToHost(12288)) { raw =>
+        assert(!PageableMemoryPool.isPageablePoolBuffer(raw))
+        assert(HostAlloc.getUsageRatio() == 12288.0 / 28672)
+      }
+      assert(HostAlloc.getUsageRatio() == 0.0)
+      // A zero raw budget must not reject requests that fit in the reserved pageable pool.
+      HostAlloc.initialize(0)
+      withResource(HostAlloc.alloc(8192, preferPinned = false)) { pooled =>
+        assert(PageableMemoryPool.isPageablePoolBuffer(pooled))
+      }
+    } finally {
+      PageableMemoryPool.shutdown()
+      previous.foreach {
+        case (key, Some(value)) => System.setProperty(key, value)
+        case (key, None) => System.clearProperty(key)
+      }
     }
   }
 
