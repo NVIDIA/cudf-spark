@@ -100,6 +100,8 @@ class FakeProject:
             "env.ART_URL": "",
             "maven.local.repository": str(repository_dir),
             "should.build.conventional.jar": conventional,
+            "spark353.version": "3.5.3",
+            "spark413.version": "4.1.3",
         }
 
     def getProperty(self, name):
@@ -142,7 +144,21 @@ class RootSafeProviderSelectionTest(unittest.TestCase):
             "    return []\n")
         (self.config_dir / "build" / "build_info.py").write_text(
             (DIST_DIR / "build" / "build_info.py").read_text())
+        (self.config_dir / "build" / "runtime_jar_entries.py").write_text(
+            (DIST_DIR / "build" / "runtime_jar_entries.py").read_text())
         create_artifacts(self.project_dir)
+        spark_repo = self.root / "repository" / "org" / "apache" / "spark"
+        for buildver, version in (("353", "3.5.3"), ("413", "4.1.3")):
+            for module in ("spark-core", "spark-catalyst", "spark-sql", "spark-hive",
+                           "spark-avro", "spark-unsafe", "spark-network-common",
+                           "spark-network-shuffle", "spark-protobuf", "spark-sql-api",
+                           "spark-common-utils"):
+                artifact = "%s_2.13" % module
+                write_jar(spark_repo / artifact / version /
+                          ("%s-%s.jar" % (artifact, version)), {})
+            other_scala = "spark-sql_2.12"
+            write_jar(spark_repo / other_scala / version /
+                      ("%s-%s.jar" % (other_scala, version)), {})
 
     def tearDown(self):
         self.temp_dir.cleanup()

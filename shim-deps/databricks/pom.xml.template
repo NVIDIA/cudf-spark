@@ -40,6 +40,7 @@
 
     <properties>
         <rapids.module>../shim-deps/databricks</rapids.module>
+<!--DATABRICKS_BUILDVER_PROPERTY-->
 <!--SYSTEM_PROPERTIES_PLACEHOLDER-->
     </properties>
 

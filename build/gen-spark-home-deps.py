@@ -89,6 +89,8 @@ def main():
                         help='POM whose project version replaces <!--PROJECT_VERSION_PLACEHOLDER-->')
     parser.add_argument('--scala-binary-version', required=True,
                         help='Scala binary version that replaces @SCALA_BINARY_VERSION@')
+    parser.add_argument('--buildver',
+                        help='Databricks build version identified by the generated BOM')
     parser.add_argument('--jar-dir', action='append', required=True,
                         help='Directory whose *.jar files become system-scoped dependencies. '
                              'May be repeated.')
@@ -103,6 +105,9 @@ def main():
     deps = system_dependencies(jars, dir_props)
     pom = (pom
            .replace('@SCALA_BINARY_VERSION@', args.scala_binary_version)
+           .replace('<!--DATABRICKS_BUILDVER_PROPERTY-->',
+                    f'<rapids.audit.databricks.buildver>{escape(args.buildver)}</rapids.audit.databricks.buildver>'
+                    if args.buildver else '')
            .replace('<!--PROJECT_VERSION_PLACEHOLDER-->', read_project_version(args.project_pom))
            .replace('<!--SYSTEM_PROPERTIES_PLACEHOLDER-->', '\n'.join(system_properties(dir_props)))
            .replace('<!--SYSTEM_DEPENDENCIES_PLACEHOLDER-->', '\n'.join(deps)))

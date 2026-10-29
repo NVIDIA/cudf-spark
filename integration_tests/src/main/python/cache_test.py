@@ -700,6 +700,50 @@ _pcbs_gpu_scan_conf = {'spark.rapids.sql.exec.InMemoryTableScanExec': 'true',
                        'spark.sql.adaptive.enabled': 'false'}
 
 
+@_requires_pcbs_enabled
+def test_cache_cpu_columnar_read():
+    def find_cache_scan(plan):
+        if 'InMemoryTableScan' in plan.nodeName():
+            return plan
+        children = plan.children().iterator()
+        while children.hasNext():
+            scan = find_cache_scan(children.next())
+            if scan is not None:
+                return scan
+        return None
+
+    def check(spark):
+        source = spark.range(2000).selectExpr('id', 'cast(id as string) as value').cache()
+        assert source.count() == 2000
+        # Reading one cached relation while building another catches lost Hadoop settings.
+        derived = source.select('value').cache()
+        assert derived.count() == 2000
+        scan = find_cache_scan(source._jdf.queryExecution().executedPlan())
+        assert scan is not None and scan.supportsColumnar()
+        # executeColumnar reaches the Spark package-private ParquetColumnVector path.
+        assert scan.executeColumnar().count() > 0
+
+    with_cpu_session(check, conf={'spark.sql.adaptive.enabled': 'false',
+                                  'spark.rapids.sql.batchSizeBytes': '1k'})
+
+
+@_requires_pcbs_enabled
+@allow_non_gpu(any=True)
+@pytest.mark.skipif(not is_spark_35x(), reason='reproduces the Spark 3.5 CPU cache scan')
+def test_cache_cpu_scan_feeds_gpu_aggregate():
+    def check(spark):
+        cached = spark.range(10).selectExpr(
+            'cast(id as string) as s',
+            "cast('2026-01-01 00:00:00' as timestamp_ntz) as ts").cache()
+        assert cached.count() == 10
+        result = cached.groupBy('s').count()
+        assert len(result.collect()) == 10
+        spark._jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.assertContains(
+            result._jdf, 'HostColumnarToGpu')
+
+    with_gpu_session(check, conf={'spark.sql.adaptive.enabled': 'false'})
+
+
 def _cached_relation(spark, df):
     """Return the InMemoryRelation caching df. The serializer is handed rows, not columnar
     batches, unless the relation's cachedPlan supports columnar output."""

@@ -38,11 +38,12 @@ object ParquetCVShims {
       capacity: Int,
       memoryMode: MemoryMode,  // Ignored in Spark 4.1.0+
       missingColumns: java.util.Set[ParquetColumn],
-      isTopLevel: Boolean): ParquetColumnVector = {
+      isTopLevel: Boolean): AnyRef = {
     val defaultValue = if (sparkSchema != null) {
       ResolveDefaultColumns.getExistenceDefaultValues(sparkSchema)(idx)
     } else null
-    // Spark 4.1.0 removed memoryMode parameter
-    new ParquetColumnVector(column, vector, capacity, missingColumns, isTopLevel, defaultValue)
+    ParquetColumnVectorBridge411.newParquetColumnVector(
+      column, vector, capacity, memoryMode, missingColumns,
+      isTopLevel, defaultValue)
   }
 }

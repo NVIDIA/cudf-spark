@@ -179,6 +179,7 @@ generate_dependencies()
         --output-pom "$pomDir/shim-deps/databricks/pom.xml" \
         --project-pom "$POM_FILE" \
         --scala-binary-version "$SCALA_VERSION" \
+        --buildver "$BUILDVER" \
         --jar-dir "$JARDIR" \
         shim-deps/databricks/pom.xml.template
 }

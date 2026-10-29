@@ -19,7 +19,7 @@ import shlex
 import shutil
 import subprocess
 import zipfile
-
+import xml.etree.ElementTree as ET
 
 def shell_exec(shell_cmd, cwd=None):
     ret_code = subprocess.call(shell_cmd, cwd=cwd)
@@ -208,11 +208,15 @@ execfile(os.path.join(dist_dir, 'build', 'iceberg_runtime.py'), iceberg_runtime)
 build_info = {}
 execfile(os.path.join(dist_dir, 'build', 'build_info.py'), build_info)
 read_build_info = build_info['read_build_info']
+runtime_jar_entries = {}
+execfile(os.path.join(dist_dir, 'build', 'runtime_jar_entries.py'), runtime_jar_entries)
+jar_entry_names = runtime_jar_entries['jar_entry_names']
 system_iceberg_runtime = iceberg_runtime["system_runtime_path"](project.getProperty)
 if system_iceberg_runtime and len(buildver_list) != 1:
     raise Exception("%s is supported only for single-shim builds" %
                     iceberg_runtime["SYSTEM_RUNTIME_PROPERTY"])
 runtime_manifest = os.path.join(project_build_dir, 'iceberg-audit-runtimes.txt')
+spark_runtime_manifest = os.path.join(project_build_dir, 'spark-audit-runtimes.txt')
 with open(os.sep.join([dist_dir, 'unshimmed-common-from-single-shim.txt']), 'r') as f:
     from_single_shim = f.read().splitlines()
 with open(os.sep.join([dist_dir, 'unshimmed-from-each-spark3xx.txt']), 'r') as f:
@@ -326,3 +330,93 @@ with open(runtime_manifest, 'w') as manifest:
                 manifest.write("%s\t%s\n" % (buildver, runtime_path))
         else:
             manifest.write("%s\t-\n" % buildver)
+
+def databricks_spark_runtime_paths(buildver):
+    # The generated BOM is the build's source of truth for system-scoped jars.
+    pom_root = source_basedir if scala_version == '2.12' else os.path.join(
+        source_basedir, 'scala2.13')
+    bom_path = os.path.join(pom_root, 'shim-deps', 'databricks', 'pom.xml')
+    namespace = {'m': 'http://maven.apache.org/POM/4.0.0'}
+    root = ET.parse(bom_path).getroot()
+    properties = root.find('m:properties', namespace)
+    directories = {element.tag.rsplit('}', 1)[-1]: element.text.strip()
+                   for element in properties} if properties is not None else {}
+    if directories.get('rapids.audit.databricks.buildver') != buildver:
+        raise Exception('Databricks BOM %s does not identify spark%s' %
+                        (bom_path, buildver))
+    paths = set()
+    found_classes = set()
+    required_classes = {
+        'org/apache/spark/SparkContext.class',
+        'org/apache/spark/sql/catalyst/InternalRow.class',
+        'org/apache/spark/sql/SparkSession.class',
+    }
+    for dependency in root.findall('./m:dependencies/m:dependency', namespace):
+        if dependency.findtext('m:scope', namespaces=namespace) != 'system':
+            continue
+        system_path = dependency.findtext('m:systemPath', namespaces=namespace)
+        if not system_path:
+            raise Exception('Databricks BOM has a system dependency without systemPath')
+        for name in re.findall(r'\$\{([^}]+)\}', system_path):
+            if name not in directories:
+                raise Exception('Databricks BOM has unresolved systemPath property %s' % name)
+            system_path = system_path.replace('${%s}' % name, directories[name])
+        path = os.path.realpath(system_path)
+        if not os.path.isfile(path):
+            raise Exception('Databricks BOM system jar is missing: %s' % path)
+        if path in paths:
+            continue
+        entries = jar_entry_names(path)
+        if any(entry.startswith('org/apache/spark/') for entry in entries):
+            paths.add(path)
+            found_classes.update(required_classes.intersection(entries))
+    missing = sorted(required_classes - found_classes)
+    if missing:
+        raise Exception('Databricks BOM is missing Spark audit classes: %s' %
+                        ', '.join(missing))
+    return sorted(paths)
+
+
+# Each classifier was compiled against a distinct Spark version. Resolve the
+# same fixed set of Spark modules for every build, independent of local cache contents.
+spark_audit_modules = [
+    'spark-core', 'spark-catalyst', 'spark-sql', 'spark-hive', 'spark-avro',
+    'spark-unsafe', 'spark-network-common', 'spark-network-shuffle',
+]
+skip_spark_buildvers = set(filter(None, re.split(
+    r'[,\s]+', project.getProperty('rapids.spark.audit.skip.buildvers') or '')))
+if 'databricks' in skip_spark_buildvers:
+    skip_spark_buildvers.remove('databricks')
+    skip_spark_buildvers.update(buildver for buildver in buildver_list if 'db' in buildver)
+unknown_skips = skip_spark_buildvers - set(buildver_list)
+if unknown_skips:
+    raise Exception('Spark audit skip build versions are not included: %s' %
+                    ', '.join(sorted(unknown_skips)))
+databricks_buildvers = [buildver for buildver in buildver_list
+                       if 'db' in buildver and buildver not in skip_spark_buildvers]
+with open(spark_runtime_manifest, 'w') as manifest:
+    for buildver in sorted(buildver_list):
+        if buildver in skip_spark_buildvers:
+            print('Skipping Spark package-private audit for spark%s by explicit request' %
+                  buildver)
+            manifest.write('%s\t-\n' % buildver)
+            continue
+        if 'db' in buildver:
+            if len(databricks_buildvers) != 1:
+                raise Exception('Databricks Spark audit requires one included Databricks '
+                                'build version or explicit skip for the others')
+            runtime_paths = databricks_spark_runtime_paths(buildver)
+        else:
+            spark_version = project.getProperty('spark%s.version' % buildver)
+            if not spark_version:
+                raise Exception('Spark version is missing for build version %s' % buildver)
+            modules = list(spark_audit_modules)
+            if tuple(int(part) for part in spark_version.split('.')[:2]) >= (3, 4):
+                modules.append('spark-protobuf')
+            if tuple(int(part) for part in spark_version.split('.')[:2]) >= (3, 5):
+                modules.extend(['spark-sql-api', 'spark-common-utils'])
+            runtime_paths = [ensure_external_artifact(
+                'org.apache.spark', '%s_%s' % (module, scala_version), spark_version)
+                for module in modules]
+        for path in runtime_paths:
+            manifest.write('%s\t%s\n' % (buildver, path))

@@ -36,7 +36,7 @@ If you have to change the contents of the uber jar, the packaging flow can optio
 4. `unshimmed-common-from-single-shim.txt` - Files that must go into the base jar from one representative shim, such as root `META-INF` resources and Python worker files. Avoid adding class files here unless they need special root-layout treatment outside optional bitwise-identical promotion or module-level class promotion.
 5. `unshimmed-from-each-spark3xx.txt` - This is applied to all the individual Spark specific version jars to pull any files that need to go into the base of the jar and not into the Spark specific directory. These are per-shim root artifacts rather than common `spark-shared` classes.
 
-## Iceberg package-private access audit
+## Iceberg and Spark package-private access audit
 
 The `dist` package phase runs `scripts/check-iceberg-package-private-access.py` against
 the assembled parallel-world layout and every Iceberg runtime selected by the build. The
@@ -50,6 +50,32 @@ with `build/iceberg_runtime.py`, resolves the runtime jars, and writes the gener
 manifest. Fix failures by making the caller root-safe through
 `root-safe-module-classes.txt` or, for exceptional per-class placement, the applicable
 `unshimmed-*.txt` input above.
+
+The same package-phase audit also checks package-private and runtime-package-dependent
+protected accesses to Spark classes. It inspects the Spark jars for each selected build
+version, including class and member references from `org/apache/spark/` plugin classes.
+For upstream Spark, packaging resolves a fixed set of Spark modules for each version;
+the audit does not depend on which jars happen to be in the local Maven cache.
+For Databricks classifiers, it reads the Spark jars from the generated system-scope
+dependency BOM under `shim-deps/databricks` instead of the Maven repository. That BOM
+must identify the single Databricks build version being audited. Off-cluster distribution
+jobs may explicitly skip unavailable Databricks runtimes with
+`-Drapids.spark.audit.skip.buildvers=350db143,400db173`. The two off-cluster
+Databricks distribution profiles use `databricks` to skip all included Databricks
+classifiers; Databricks cluster builds
+run the audit against their own runtime. The generated
+`target/spark-audit-runtimes.txt` records the selected jars. Direct access to a
+Spark package-private class or member fails the audit even at the JAR root:
+`--jars` can load that root through a different classloader from Spark. The Parquet
+cache reader uses reflection for `ParquetColumnVector` to work in either layout.
+
+To exercise this access through a local Spark cache scan, run
+`SPARK_HOME=/path/to/spark dist/scripts/tests/run-spark-cache-root-safety.sh
+dist/target/rapids-4-spark_2.12-<version>-cuda12.jar` after assembling the
+distribution JAR. Use a Spark installation matching one of the JAR's shims and
+Scala binary version. The test checks cached table and view reads, builds a
+derived cache to exercise the CPU columnar read, then executes the columnar
+cache scan that calls `ShimCurrentBatchIterator`.
 
 Single-shim builds where every real Iceberg integration module uses the same non-Maven
 runtime can add its absolute local jar path with

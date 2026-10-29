@@ -61,6 +61,7 @@
             <properties>
                 <dyn.shim.include.buildvers.skip>false</dyn.shim.include.buildvers.skip>
                 <dyn.shim.buildver>no_snap_with_databricks</dyn.shim.buildver>
+                <rapids.spark.audit.skip.buildvers>databricks</rapids.spark.audit.skip.buildvers>
             </properties>
         </profile>
         <profile>
@@ -68,6 +69,7 @@
             <properties>
                 <dyn.shim.include.buildvers.skip>false</dyn.shim.include.buildvers.skip>
                 <dyn.shim.buildver>snap_and_no_snap_with_databricks</dyn.shim.buildver>
+                <rapids.spark.audit.skip.buildvers>databricks</rapids.spark.audit.skip.buildvers>
             </properties>
         </profile>
         <profile>
@@ -286,6 +288,8 @@
                                     <arg value="${spark.rapids.source.basedir}/${rapids.module}/scripts/check-iceberg-package-private-access.py"/>
                                     <arg value="--runtime-manifest"/>
                                     <arg value="${project.build.directory}/iceberg-audit-runtimes.txt"/>
+                                    <arg value="--spark-runtime-manifest"/>
+                                    <arg value="${project.build.directory}/spark-audit-runtimes.txt"/>
                                     <arg value="--expected-build-versions"/>
                                     <arg value="${included_buildvers}"/>
                                     <arg value="${project.build.directory}/parallel-world"/>

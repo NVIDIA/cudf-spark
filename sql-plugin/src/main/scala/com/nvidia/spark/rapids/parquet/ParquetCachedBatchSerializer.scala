@@ -54,7 +54,7 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference,
 import org.apache.spark.sql.catalyst.expressions.codegen.GenerateUnsafeProjection
 import org.apache.spark.sql.catalyst.util.{ArrayBasedMapData, ArrayData, GenericArrayData, MapData}
 import org.apache.spark.sql.columnar.CachedBatch
-import org.apache.spark.sql.execution.datasources.parquet.{ParquetReadSupport, ParquetToSparkSchemaConverter, ParquetWriteSupport, ShimCurrentBatchIterator}
+import org.apache.spark.sql.execution.datasources.parquet.{ParquetCVShims, ParquetReadSupport, ParquetToSparkSchemaConverter, ParquetWriteSupport, RapidsVectorizedColumnReader, ShimCurrentBatchIterator}
 import org.apache.spark.sql.execution.datasources.parquet.rapids.ParquetRecordMaterializer
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.PCBSSchemaHelper
@@ -903,10 +903,16 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
             List(new ColumnarBatch(null, cachedBatch.numRows)).iterator
           } else {
             new ShimCurrentBatchIterator(
-              cachedBatch,
-              conf,
-              selectedAttributes,
-              options, hadoopConf)
+              new ByteArrayInputFile(cachedBatch.buffer),
+              conf, selectedAttributes, options, hadoopConf,
+              ParquetTimestampNTZShims.setupTimestampNTZConfig _,
+              ParquetCVShims.newParquetCV _,
+              (column, required, pages, writerVersion) => RapidsVectorizedColumnReader(
+                column, required, pages, null,
+                LegacyBehaviorPolicyShim.CORRECTED_STR,
+                LegacyBehaviorPolicyShim.EXCEPTION_STR,
+                LegacyBehaviorPolicyShim.EXCEPTION_STR,
+                null, writerVersion))
           }
         }
       }
@@ -915,7 +921,18 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
         // go over the batch and get the next non-degenerate iterator
         // and return if it hasNext
         while ((iter == null || !iter.hasNext) && cbIter.hasNext) {
+          iter match {
+            case closeable: AutoCloseable => closeable.close()
+            case _ =>
+          }
           iter = getIterator
+        }
+        if (iter != null && !iter.hasNext) {
+          iter match {
+            case closeable: AutoCloseable => closeable.close()
+            case _ =>
+          }
+          iter = null
         }
         iter != null && iter.hasNext
       }
