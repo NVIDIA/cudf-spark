@@ -869,15 +869,20 @@ case class GpuMergeIntoCommand(
     val materializedValues = mutable.ArrayBuffer[NamedExpression]()
     def materializeNonDeterministic(
         exprs: Seq[Expression],
-        takesClause: Expression): Seq[Expression] = exprs.map {
-      case e if !e.deterministic =>
+        takesClause: Expression,
+        targetFields: Seq[StructField] = Nil): Seq[Expression] = exprs.zipWithIndex.map {
+      case (e, i) if !e.deterministic =>
+        // The value is evaluated here, before the clause output is typed, so an untyped NULL
+        // for a schema-evolved nested field has to get its target type now.
         val resolved = resolveOnJoinedPlan(Seq(e)).head
+        val typed = targetFields.lift(i).map(f => typeNullLiterals(resolved, f.dataType))
+          .getOrElse(resolved)
         val existing = joinedPlan.output.map(_.name) ++ materializedValues.map(_.name)
-        val alias = Alias(If(takesClause, resolved, Literal(null, resolved.dataType)),
+        val alias = Alias(If(takesClause, typed, Literal(null, typed.dataType)),
           uniqueColumnName(NON_DETERMINISTIC_VALUE_COL, existing))()
         materializedValues += alias
         alias.toAttribute
-      case e => e
+      case (e, _) => e
     }
 
     // The rows a clause acts on: the row kind, none of the earlier clauses of that kind taken,
@@ -1023,7 +1028,8 @@ case class GpuMergeIntoCommand(
     def clauseOutput(clause: DeltaMergeIntoClause, routing: Expression): Seq[Seq[Expression]] =
       clause match {
       case u: DeltaMergeIntoMatchedUpdateClause =>
-        updateOutput(materializeNonDeterministic(u.resolvedActions.map(_.expr), routing) ++
+        updateOutput(materializeNonDeterministic(u.resolvedActions.map(_.expr), routing,
+            outputRowSchema.fields.toSeq) ++
             rowTrackingUpdateExprs,
           And(incrUpdatedCountExpr, incrUpdatedMatchedCountExpr))
       case _: DeltaMergeIntoMatchedDeleteClause =>
@@ -1033,7 +1039,8 @@ case class GpuMergeIntoCommand(
             rowTrackingInsertExprs,
           incrInsertedCountExpr)
       case u: DeltaMergeIntoNotMatchedBySourceUpdateClause =>
-        updateOutput(materializeNonDeterministic(u.resolvedActions.map(_.expr), routing) ++
+        updateOutput(materializeNonDeterministic(u.resolvedActions.map(_.expr), routing,
+            outputRowSchema.fields.toSeq) ++
             rowTrackingUpdateExprs,
           And(incrUpdatedCountExpr, incrUpdatedNotMatchedBySourceCountExpr))
       case _: DeltaMergeIntoNotMatchedBySourceDeleteClause =>
