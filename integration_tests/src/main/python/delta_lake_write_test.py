@@ -1441,14 +1441,14 @@ def test_delta_replace_where_save_as_table_preserves_unmatched_rows(spark_tmp_ta
 
     with_cpu_session(create_initial_tables, conf=confs)
     with_cpu_session(lambda spark: replace_na_partition(spark, cpu_table), conf=confs)
-    # DBR's predicate checker may run on CPU. Require the atomic overwrite and
-    # runtime-specific data writer to execute on GPU.
-    gpu_write_classes = (["GpuDataWritingCommandExec", "GpuWriteFilesExec"]
-                         if is_databricks173_or_later() else delta_write)
+    # DBR may use its native CPU writer for partitioned tables. Require the GPU
+    # atomic replacement on every runtime, and the GPU data writer on OSS Delta.
+    gpu_write_classes = ["GpuAtomicReplaceTableAsSelectExec"]
+    if not is_databricks_runtime():
+        gpu_write_classes += delta_write
     assert_rapids_delta_write(
         lambda spark: replace_na_partition(spark, gpu_table), conf=confs,
-        required_gpu_classes=gpu_write_classes,
-        expected_command="GpuAtomicReplaceTableAsSelectExec")
+        required_gpu_classes=gpu_write_classes, require_non_empty=True)
 
     cpu_rows = with_cpu_session(
         lambda spark: spark.table(cpu_table).orderBy("record_id").collect(), conf=confs)
