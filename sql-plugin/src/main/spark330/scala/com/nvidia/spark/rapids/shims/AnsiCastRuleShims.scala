@@ -28,6 +28,14 @@ import org.apache.spark.sql.catalyst.expressions.{AnsiCast, Expression}
 
 trait AnsiCastRuleShims extends SparkShims {
 
+  private def createAnsiCastMeta(
+      cast: AnsiCast,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new CastExprMeta[AnsiCast](cast, GpuEvalMode.ANSI, conf = conf,
+        parent = p, rule = r, doFloatToIntCheck = true, stringToAnsiDate = true)
+
   override def ansiCastRule: ExprRule[ _ <: Expression] = {
     GpuOverrides.expr[AnsiCast](
       "Convert a column of one type of data into another type",
@@ -86,7 +94,6 @@ trait AnsiCastRuleShims extends SparkShims {
         override val udtChecks: TypeSig = none
         override val sparkUdtSig: TypeSig = UDT
       },
-      (cast, conf, p, r) => new CastExprMeta[AnsiCast](cast, GpuEvalMode.ANSI, conf = conf,
-        parent = p, rule = r, doFloatToIntCheck = true, stringToAnsiDate = true))
+      createAnsiCastMeta)
   }
 }

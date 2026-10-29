@@ -34,14 +34,13 @@ import org.apache.spark.sql.rapids.{GpuCheckOverflowInTableInsert, GpuElementAtM
 import org.apache.spark.sql.rapids.execution.{GpuBroadcastHashJoinExec, GpuBroadcastNestedLoopJoinExec}
 
 trait Spark330PlusDBShims extends Spark321PlusDBShims {
-  override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
-    val shimExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
-      GpuOverrides.expr[CheckOverflowInTableInsert](
-        "Casting a numeric value as another numeric type in store assignment",
-        ExprChecks.unaryProjectInputMatchesOutput(
-          TypeSig.all,
-          TypeSig.all),
-        (t, conf, p, r) => new UnaryExprMeta[CheckOverflowInTableInsert](t, conf, p, r) {
+
+  private class CheckOverflowInTableInsertMetaImpl(
+      t: CheckOverflowInTableInsert,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends UnaryExprMeta[CheckOverflowInTableInsert](t, conf, p, r) {
           override def convertToGpu(child: Expression): GpuExpression = {
             child match {
               case c: GpuCast => GpuCheckOverflowInTableInsert(c, t.columnName)
@@ -49,7 +48,22 @@ trait Spark330PlusDBShims extends Spark321PlusDBShims {
                 throw new IllegalStateException("Expression child is not of Type GpuCast")
             }
           }
-        }),
+        }
+
+  private def createCheckOverflowInTableInsertMeta(
+      t: CheckOverflowInTableInsert,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new CheckOverflowInTableInsertMetaImpl(t, conf, p, r)
+  override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
+    val shimExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
+      GpuOverrides.expr[CheckOverflowInTableInsert](
+        "Casting a numeric value as another numeric type in store assignment",
+        ExprChecks.unaryProjectInputMatchesOutput(
+          TypeSig.all,
+          TypeSig.all),
+        createCheckOverflowInTableInsertMeta),
       GpuElementAtMeta.elementAtRule(true)
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
     super.getExprs ++ shimExprs ++ YearMonthIntervalShims.exprs ++

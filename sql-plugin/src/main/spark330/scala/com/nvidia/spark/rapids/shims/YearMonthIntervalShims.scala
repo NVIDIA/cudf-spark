@@ -60,6 +60,40 @@ import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.rapids.shims.{GpuDivideYMInterval, GpuMultiplyYMInterval}
 
 object YearMonthIntervalShims {
+
+  private class MultiplyYMIntervalMetaImpl(
+      a: MultiplyYMInterval,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends BinaryExprMeta[MultiplyYMInterval](a, conf, p, r) {
+        override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
+          GpuMultiplyYMInterval(lhs, rhs)
+      }
+
+  private def createMultiplyYMIntervalMeta(
+      a: MultiplyYMInterval,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new MultiplyYMIntervalMetaImpl(a, conf, p, r)
+
+  private class DivideYMIntervalMetaImpl(
+      a: DivideYMInterval,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends BinaryExprMeta[DivideYMInterval](a, conf, p, r) {
+        override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
+          GpuDivideYMInterval(lhs, rhs)
+      }
+
+  private def createDivideYMIntervalMeta(
+      a: DivideYMInterval,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new DivideYMIntervalMetaImpl(a, conf, p, r)
   def exprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
     GpuOverrides.expr[MultiplyYMInterval](
       "Year-month interval * number",
@@ -68,10 +102,7 @@ object YearMonthIntervalShims {
         TypeSig.YEARMONTH,
         ("lhs", TypeSig.YEARMONTH, TypeSig.YEARMONTH),
         ("rhs", TypeSig.gpuNumeric - TypeSig.DECIMAL_128, TypeSig.gpuNumeric)),
-      (a, conf, p, r) => new BinaryExprMeta[MultiplyYMInterval](a, conf, p, r) {
-        override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
-          GpuMultiplyYMInterval(lhs, rhs)
-      }),
+      createMultiplyYMIntervalMeta),
     GpuOverrides.expr[DivideYMInterval](
       "Year-month interval / number",
       ExprChecks.binaryProject(
@@ -79,10 +110,7 @@ object YearMonthIntervalShims {
         TypeSig.YEARMONTH,
         ("lhs", TypeSig.YEARMONTH, TypeSig.YEARMONTH),
         ("rhs", TypeSig.gpuNumeric - TypeSig.DECIMAL_128, TypeSig.gpuNumeric)),
-      (a, conf, p, r) => new BinaryExprMeta[DivideYMInterval](a, conf, p, r) {
-        override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
-          GpuDivideYMInterval(lhs, rhs)
-      })
+      createDivideYMIntervalMeta)
   ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r))
     .toMap[Class[_ <: Expression], ExprRule[_ <: Expression]]
 }

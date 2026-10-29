@@ -24,17 +24,11 @@ import org.apache.spark.sql.rapids._
 import org.apache.spark.sql.types.DecimalType
 
 object RoundingShims {
-  def exprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
-    GpuOverrides.expr[RoundCeil](
-      "Computes the ceiling of the given expression to d decimal places",
-      ExprChecks.binaryProject(
-        TypeSig.gpuNumeric, TypeSig.cpuNumeric,
-        ("value", TypeSig.gpuNumeric +
-            TypeSig.psNote(TypeEnum.FLOAT, "result may round slightly differently") +
-            TypeSig.psNote(TypeEnum.DOUBLE, "result may round slightly differently"),
-            TypeSig.cpuNumeric),
-        ("scale", TypeSig.lit(TypeEnum.INT), TypeSig.lit(TypeEnum.INT))),
-      (ceil, conf, p, r) => new BinaryExprMeta[RoundCeil](ceil, conf, p, r) {
+  private class RoundCeilMetaImpl(
+      ceil: RoundCeil,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) extends BinaryExprMeta[RoundCeil](ceil, conf, p, r) {
         override def tagExprForGpu(): Unit = {
           ceil.child.dataType match {
             case dt: DecimalType =>
@@ -57,17 +51,19 @@ object RoundingShims {
           // use Spark `RoundCeil.dataType` to keep consistent between Spark versions.
           GpuCeil(lhs, ceil.dataType)
         }
-      }),
-    GpuOverrides.expr[RoundFloor](
-      "Computes the floor of the given expression to d decimal places",
-      ExprChecks.binaryProject(
-        TypeSig.gpuNumeric, TypeSig.cpuNumeric,
-        ("value", TypeSig.gpuNumeric +
-            TypeSig.psNote(TypeEnum.FLOAT, "result may round slightly differently") +
-            TypeSig.psNote(TypeEnum.DOUBLE, "result may round slightly differently"),
-            TypeSig.cpuNumeric),
-        ("scale", TypeSig.lit(TypeEnum.INT), TypeSig.lit(TypeEnum.INT))),
-      (floor, conf, p, r) => new BinaryExprMeta[RoundFloor](floor, conf, p, r) {
+      }
+
+  private def createRoundCeilMeta(
+      ceil: RoundCeil,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) = new RoundCeilMetaImpl(ceil, conf, p, r)
+
+  private class RoundFloorMetaImpl(
+      floor: RoundFloor,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) extends BinaryExprMeta[RoundFloor](floor, conf, p, r) {
         override def tagExprForGpu(): Unit = {
           floor.child.dataType match {
             case dt: DecimalType =>
@@ -90,6 +86,34 @@ object RoundingShims {
           // use Spark `RoundFloor.dataType` to keep consistent between Spark versions.
           GpuFloor(lhs, floor.dataType)
         }
-      })
+      }
+
+  private def createRoundFloorMeta(
+      floor: RoundFloor,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) = new RoundFloorMetaImpl(floor, conf, p, r)
+
+  def exprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
+    GpuOverrides.expr[RoundCeil](
+      "Computes the ceiling of the given expression to d decimal places",
+      ExprChecks.binaryProject(
+        TypeSig.gpuNumeric, TypeSig.cpuNumeric,
+        ("value", TypeSig.gpuNumeric +
+            TypeSig.psNote(TypeEnum.FLOAT, "result may round slightly differently") +
+            TypeSig.psNote(TypeEnum.DOUBLE, "result may round slightly differently"),
+            TypeSig.cpuNumeric),
+        ("scale", TypeSig.lit(TypeEnum.INT), TypeSig.lit(TypeEnum.INT))),
+      createRoundCeilMeta),
+    GpuOverrides.expr[RoundFloor](
+      "Computes the floor of the given expression to d decimal places",
+      ExprChecks.binaryProject(
+        TypeSig.gpuNumeric, TypeSig.cpuNumeric,
+        ("value", TypeSig.gpuNumeric +
+            TypeSig.psNote(TypeEnum.FLOAT, "result may round slightly differently") +
+            TypeSig.psNote(TypeEnum.DOUBLE, "result may round slightly differently"),
+            TypeSig.cpuNumeric),
+        ("scale", TypeSig.lit(TypeEnum.INT), TypeSig.lit(TypeEnum.INT))),
+      createRoundFloorMeta)
   ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
 }

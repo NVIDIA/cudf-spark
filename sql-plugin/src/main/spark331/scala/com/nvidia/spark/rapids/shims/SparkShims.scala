@@ -29,6 +29,13 @@ import org.apache.spark.sql.catalyst.expressions.objects.{ExternalMapToCatalyst,
 import org.apache.spark.sql.execution.command.{CreateDataSourceTableAsSelectCommand, DataWritingCommand, RunnableCommand}
 
 object SparkShimImpl extends Spark331PlusNonDBShims with AnsiCastRuleShims {
+
+  private def createCreateDataSourceTableAsSelectCommandMeta(
+      a: CreateDataSourceTableAsSelectCommand,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new CreateDataSourceTableAsSelectCommandMeta(a, conf, p, r)
   override def isExpressionStateful(expr: Expression): Boolean = expr match {
     case _: Stateful | _: InvokeLike | _: ExternalMapToCatalyst => true
     case _ => false
@@ -38,7 +45,7 @@ object SparkShimImpl extends Spark331PlusNonDBShims with AnsiCastRuleShims {
       DataWritingCommandRule[_ <: DataWritingCommand]] = {
     Seq(GpuOverrides.dataWriteCmd[CreateDataSourceTableAsSelectCommand](
     "Create table with select command",
-    (a, conf, p, r) => new CreateDataSourceTableAsSelectCommandMeta(a, conf, p, r))
+    createCreateDataSourceTableAsSelectCommandMeta)
     ).map(r => (r.getClassFor.asSubclass(classOf[DataWritingCommand]), r)).toMap
   }
 

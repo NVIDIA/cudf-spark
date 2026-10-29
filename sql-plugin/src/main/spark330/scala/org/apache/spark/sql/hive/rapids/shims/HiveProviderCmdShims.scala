@@ -35,6 +35,27 @@ import org.apache.spark.sql.hive.execution.{CreateHiveTableAsSelectCommand, Inse
 
 trait HiveProviderCmdShims extends HiveProvider {
 
+  private def createOptimizedCreateHiveTableAsSelectCommandMeta(
+      a: OptimizedCreateHiveTableAsSelectCommand,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new OptimizedCreateHiveTableAsSelectCommandMeta(a, conf, p, r)
+
+  private def createInsertIntoHiveTableMeta(
+      insert: InsertIntoHiveTable,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      rule: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuInsertIntoHiveTableMeta(insert, conf, parent, rule)
+
+  private def createCreateHiveTableAsSelectCommandMeta(
+      create: CreateHiveTableAsSelectCommand,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      rule: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuCreateHiveTableAsSelectCommandMeta(create, conf, parent, rule)
+
   // UDF class is deprecated in Cloudera
   @scala.annotation.nowarn("msg=class UDF in package exec is deprecated")
   def createFunction(a: HiveSimpleUDF): UDF = {
@@ -53,16 +74,15 @@ trait HiveProviderCmdShims extends HiveProvider {
 
     GpuOverrides.dataWriteCmd[OptimizedCreateHiveTableAsSelectCommand](
       "Create a Hive table from a query result using Spark data source APIs",
-      (a, conf, p, r) => new OptimizedCreateHiveTableAsSelectCommandMeta(a, conf, p, r)),
+      createOptimizedCreateHiveTableAsSelectCommandMeta),
 
     GpuOverrides.dataWriteCmd[InsertIntoHiveTable](
       desc = "Command to write to Hive tables",
-      (insert, conf, parent, rule) => new GpuInsertIntoHiveTableMeta(insert, conf, parent, rule)),
+      createInsertIntoHiveTableMeta),
 
     GpuOverrides.dataWriteCmd[CreateHiveTableAsSelectCommand](
       desc = "Command to create a Hive table from the result of a Spark data source",
-      (create, conf, parent, rule) =>
-        new GpuCreateHiveTableAsSelectCommandMeta(create, conf, parent, rule))
+      createCreateHiveTableAsSelectCommandMeta)
 
   ).map(r => (r.getClassFor.asSubclass(classOf[DataWritingCommand]), r)).toMap
 

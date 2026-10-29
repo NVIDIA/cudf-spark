@@ -60,35 +60,31 @@ import org.apache.spark.sql.rapids.GpuElementAtMeta
 import org.apache.spark.sql.rapids.GpuV1WriteUtils.GpuEmpty2Null
 
 trait Spark340PlusNonDBShims extends Spark331PlusNonDBShims {
-  override def isExpressionStateful(expr: Expression): Boolean = expr match {
-    case _: InvokeLike | _: ExternalMapToCatalyst => true
-    case _ => expr.stateful && !isBridgeCloneSafeStatefulExpression(expr)
-  }
 
-  // Keep this lazy to avoid a class-initialization cycle: building these rules calls
-  // GpuOverrides.exec, while GpuOverrides initialization calls SparkShimImpl.
-  // Eager evaluation can deadlock if the two singleton objects are initialized concurrently.
-  private lazy val shimExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = Seq(
-    GpuOverrides.exec[GlobalLimitExec](
-      "Limiting of results across partitions",
-      ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL +
-          TypeSig.STRUCT + TypeSig.ARRAY + TypeSig.MAP).nested(),
-        TypeSig.all),
-      (globalLimit, conf, p, r) =>
-        new SparkPlanMeta[GlobalLimitExec](globalLimit, conf, p, r) {
+  private class GlobalLimitExecMetaImpl(
+      globalLimit: GlobalLimitExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends SparkPlanMeta[GlobalLimitExec](globalLimit, conf, p, r) {
           override def convertToGpu(): GpuExec =
             GpuGlobalLimitExec(
               globalLimit.limit, childPlans.head.convertIfNeeded(), globalLimit.offset)
-        }),
-    exec[TakeOrderedAndProjectExec](
-      "Take the first limit elements after offset as defined by the sortOrder, and do " +
-          "projection if needed",
-      // The SortOrder TypeSig will govern what types can actually be used as sorting key data
-      // type. The types below are allowed as inputs and outputs.
-      ExecChecks((pluginSupportedOrderableSig +
-          TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.MAP).nested(), TypeSig.all),
-      (takeExec, conf, p, r) =>
-        new SparkPlanMeta[TakeOrderedAndProjectExec](takeExec, conf, p, r) {
+        }
+
+  private def createGlobalLimitExecMeta(
+      globalLimit: GlobalLimitExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GlobalLimitExecMetaImpl(globalLimit, conf, p, r)
+
+  private class TakeOrderedAndProjectExecMetaImpl(
+      takeExec: TakeOrderedAndProjectExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends SparkPlanMeta[TakeOrderedAndProjectExec](takeExec, conf, p, r) {
           val sortOrder: Seq[BaseExprMeta[SortOrder]] =
             takeExec.sortOrder.map(GpuOverrides.wrapExpr(_, this.conf, Some(this)))
           val projectList: Seq[BaseExprMeta[NamedExpression]] =
@@ -126,27 +122,116 @@ trait Spark340PlusNonDBShims extends Spark331PlusNonDBShims {
                 takeExec.offset)(takeExec.sortOrder)
             }
           }
-        }),
+        }
+
+  private def createTakeOrderedAndProjectExecMeta(
+      takeExec: TakeOrderedAndProjectExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new TakeOrderedAndProjectExecMetaImpl(takeExec, conf, p, r)
+
+  private class CollectLimitExecMetaImpl(
+      collectLimit: CollectLimitExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends GpuCollectLimitMeta(collectLimit, conf, p, r) {
+        override def convertToGpu(): GpuExec =
+          buildCollectLimitGpu(collectLimit.offset)
+      }
+
+  private def createCollectLimitExecMeta(
+      collectLimit: CollectLimitExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new CollectLimitExecMetaImpl(collectLimit, conf, p, r)
+
+  private def createWriteFilesExecMeta(
+      write: WriteFilesExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuWriteFilesMeta(write, conf, p, r)
+
+  private class Empty2NullMetaImpl(
+      a: Empty2Null,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends UnaryExprMeta[Empty2Null](a, conf, p, r) {
+          override def convertToGpu(child: Expression): GpuExpression = GpuEmpty2Null(child)
+        }
+
+  private def createEmpty2NullMeta(
+      a: Empty2Null,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new Empty2NullMetaImpl(a, conf, p, r)
+
+  private class KnownNullableMetaImpl(
+      a: KnownNullable,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends UnaryExprMeta[KnownNullable](a, conf, p, r) {
+          override def convertToGpu(child: Expression): GpuExpression = GpuKnownNullable(child)
+        }
+
+  private def createKnownNullableMeta(
+      a: KnownNullable,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new KnownNullableMetaImpl(a, conf, p, r)
+
+  private def createCreateDataSourceTableAsSelectCommandMeta(
+      a: CreateDataSourceTableAsSelectCommand,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new CreateDataSourceTableAsSelectCommandMeta(a, conf, p, r)
+  override def isExpressionStateful(expr: Expression): Boolean = expr match {
+    case _: InvokeLike | _: ExternalMapToCatalyst => true
+    case _ => expr.stateful && !isBridgeCloneSafeStatefulExpression(expr)
+  }
+
+  // Keep this lazy to avoid a class-initialization cycle: building these rules calls
+  // GpuOverrides.exec, while GpuOverrides initialization calls SparkShimImpl.
+  // Eager evaluation can deadlock if the two singleton objects are initialized concurrently.
+  private lazy val shimExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = Seq(
+    GpuOverrides.exec[GlobalLimitExec](
+      "Limiting of results across partitions",
+      ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL +
+          TypeSig.STRUCT + TypeSig.ARRAY + TypeSig.MAP).nested(),
+        TypeSig.all),
+      createGlobalLimitExecMeta),
+    exec[TakeOrderedAndProjectExec](
+      "Take the first limit elements after offset as defined by the sortOrder, and do " +
+          "projection if needed",
+      // The SortOrder TypeSig will govern what types can actually be used as sorting key data
+      // type. The types below are allowed as inputs and outputs.
+      ExecChecks((pluginSupportedOrderableSig +
+          TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.MAP).nested(), TypeSig.all),
+      createTakeOrderedAndProjectExecMeta),
     GpuOverrides.exec[CollectLimitExec](
       "Reduce to single partition and apply limit",
       ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL +
           TypeSig.STRUCT + TypeSig.ARRAY + TypeSig.MAP).nested(),
         TypeSig.all),
-      (collectLimit, conf, p, r) => new GpuCollectLimitMeta(collectLimit, conf, p, r) {
-        override def convertToGpu(): GpuExec =
-          buildCollectLimitGpu(collectLimit.offset)
-      }
-    ).disabledByDefault("Collect Limit replacement can be slower on the GPU, if huge number " +
-        "of rows in a batch it could help by limiting the number of rows transferred from " +
-        "GPU to CPU"),
+      createCollectLimitExecMeta).disabledByDefault(
+        "Collect Limit replacement can be slower on the GPU, if huge number " +
+          "of rows in a batch it could help by limiting the number of rows transferred from " +
+          "GPU to CPU"),
     GpuOverrides.exec[WriteFilesExec](
       "v1 write files",
       // WriteFilesExec always has patterns:
       //   InsertIntoHadoopFsRelationCommand(WriteFilesExec) or InsertIntoHiveTable(WriteFilesExec)
       // The parent node of `WriteFilesExec` will check the types, here just let type check pass
       ExecChecks(TypeSig.all, TypeSig.all),
-      (write, conf, p, r) => new GpuWriteFilesMeta(write, conf, p, r)
-    )
+      createWriteFilesExecMeta)
   ).map(r => (r.getClassFor.asSubclass(classOf[SparkPlan]), r)).toMap
 
   override def getExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] =
@@ -163,18 +248,12 @@ trait Spark340PlusNonDBShims extends Spark331PlusNonDBShims {
         "Converts the empty string to null for writing data",
         ExprChecks.unaryProjectInputMatchesOutput(
           TypeSig.STRING, TypeSig.STRING),
-        (a, conf, p, r) => new UnaryExprMeta[Empty2Null](a, conf, p, r) {
-          override def convertToGpu(child: Expression): GpuExpression = GpuEmpty2Null(child)
-        }
-      ),
+        createEmpty2NullMeta),
       GpuOverrides.expr[KnownNullable](
         "Tags the expression as being nullable",
         ExprChecks.unaryProjectInputMatchesOutput(
           TypeSig.all, TypeSig.all),
-        (a, conf, p, r) => new UnaryExprMeta[KnownNullable](a, conf, p, r) {
-          override def convertToGpu(child: Expression): GpuExpression = GpuKnownNullable(child)
-        }
-      ),
+        createKnownNullableMeta),
       GpuElementAtMeta.elementAtRule(true)
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
     super.getExprs ++ shimExprs ++ ProtobufExprShims.exprs
@@ -192,7 +271,7 @@ trait Spark340PlusNonDBShims extends Spark331PlusNonDBShims {
     Seq(
       GpuOverrides.runnableCmd[CreateDataSourceTableAsSelectCommand](
         "Write to a data source",
-        (a, conf, p, r) => new CreateDataSourceTableAsSelectCommandMeta(a, conf, p, r))
+        createCreateDataSourceTableAsSelectCommandMeta)
     ).map(r => (r.getClassFor.asSubclass(classOf[RunnableCommand]), r)).toMap
   }
 }

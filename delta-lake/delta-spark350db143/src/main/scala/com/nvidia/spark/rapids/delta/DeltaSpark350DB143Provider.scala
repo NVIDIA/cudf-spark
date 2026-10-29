@@ -38,13 +38,20 @@ import org.apache.spark.sql.execution.datasources.v2.rapids.{GpuAtomicCreateTabl
 import org.apache.spark.sql.sources.InsertableRelation
 
 object DeltaSpark350DB143Provider extends DatabricksDeltaProviderBase {
+  private def createGpuWriteIntoDeltaCommandMeta(
+    a: WriteIntoDeltaCommand,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuWriteIntoDeltaCommandMeta(a, conf, p, r)
+
 
   override def getDataWritingCommandRules: Map[Class[_ <: DataWritingCommand],
       DataWritingCommandRule[_ <: DataWritingCommand]] = {
     Seq(
       GpuOverrides.dataWriteCmd[WriteIntoDeltaCommand](
         "Write files for a DBR Delta OPTIMIZE transaction",
-        (a, conf, p, r) => new GpuWriteIntoDeltaCommandMeta(a, conf, p, r))
+        createGpuWriteIntoDeltaCommandMeta)
     ).map(r => (r.getClassFor.asSubclass(classOf[DataWritingCommand]), r)).toMap
   }
 

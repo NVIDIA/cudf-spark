@@ -38,57 +38,29 @@ import org.apache.spark.sql.rapids.execution.python.GpuPythonUDAF
 import org.apache.spark.sql.types.StringType
 
 trait Spark341PlusDBShims extends Spark332PlusDBShims {
-  override def isExpressionStateful(expr: Expression): Boolean = expr match {
-    case _: InvokeLike | _: ExternalMapToCatalyst => true
-    case _ => expr.stateful && !isBridgeCloneSafeStatefulExpression(expr)
-  }
 
-  override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
-    val shimExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
-      GpuOverrides.expr[ToPrettyString]("An internal expressions which is used to " +
-        "generate pretty string for all kinds of values",
-        new ToPrettyStringChecks(),
-        (toPrettyString, conf, p, r) => {
-          new CastExprMetaBase[ToPrettyString](toPrettyString, conf, p, r) {
-
-            override def needTimeZoneCheck: Boolean = 
-              castNeedsTimeZone(toPrettyString.child.dataType, StringType)
-
-            override val toType: StringType.type = StringType
-
-            override def convertToGpu(child: Expression): GpuExpression = {
-              GpuToPrettyString(child)
-            }
-          }
-        }),
-      // Empty2Null is pulled out of FileFormatWriter by default since Spark 3.4.0,
-      // so it is visible in the overriding stage.
-      GpuOverrides.expr[Empty2Null](
-        "Converts the empty string to null for writing data",
-        ExprChecks.unaryProjectInputMatchesOutput(
-          TypeSig.STRING, TypeSig.STRING),
-        (a, conf, p, r) => new UnaryExprMeta[Empty2Null](a, conf, p, r) {
+  private class Empty2NullMetaImpl(
+      a: Empty2Null,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends UnaryExprMeta[Empty2Null](a, conf, p, r) {
           override def convertToGpu(child: Expression): GpuExpression = GpuEmpty2Null(child)
         }
-      ),
-      GpuOverrides.expr[PythonUDAF](
-        "UDF run in an external python process. Does not actually run on the GPU, but " +
-          "the transfer of data to/from it can be accelerated",
-        ExprChecks.fullAggAndProject(
-          // Different types of Pandas UDF support different sets of output type. Please refer to
-          //   https://github.com/apache/spark/blob/master/python/pyspark/sql/udf.py#L98
-          // for more details.
-          // It is impossible to specify the exact type signature for each Pandas UDF type in a
-          // single expression 'PythonUDF'.
-          // So use the 'unionOfPandasUdfOut' to cover all types for Spark. The type signature of
-          // plugin is also an union of all the types of Pandas UDF.
-          (TypeSig.commonCudfTypes + TypeSig.ARRAY).nested() + TypeSig.STRUCT,
-          TypeSig.unionOfPandasUdfOut,
-          repeatingParamCheck = Some(RepeatingParamCheck(
-            "param",
-            (TypeSig.commonCudfTypes + TypeSig.ARRAY + TypeSig.STRUCT).nested(),
-            TypeSig.all))),
-        (a, conf, p, r) => new ExprMeta[PythonUDAF](a, conf, p, r) {
+
+  private def createEmpty2NullMeta(
+      a: Empty2Null,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new Empty2NullMetaImpl(a, conf, p, r)
+
+  private class PythonUDAFMetaImpl(
+      a: PythonUDAF,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends ExprMeta[PythonUDAF](a, conf, p, r) {
           override def replaceMessage: String = "not block GPU acceleration"
 
           override def noReplacementPossibleMessage(reasons: String): String =
@@ -98,25 +70,21 @@ trait Spark341PlusDBShims extends Spark332PlusDBShims {
             GpuPythonUDAF(a.name, a.func, a.dataType,
               childExprs.map(_.convertToGpu()),
               a.evalType, a.udfDeterministic, a.resultId)
-        })
-    ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
-    super.getExprs ++ shimExprs ++ DayTimeIntervalShims.exprs ++ RoundingShims.exprs ++
-      ProtobufExprShims.exprs
-  }
+        }
 
-  // Keep this lazy to avoid a class-initialization cycle: building these rules calls
-  // GpuOverrides.exec, while GpuOverrides initialization calls SparkShimImpl.
-  // Eager evaluation can deadlock if the two singleton objects are initialized concurrently.
-  private lazy val shimExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = Seq(
-      GpuOverrides.exec[TakeOrderedAndProjectExec](
-        "Take the first limit elements after offset as defined by the sortOrder, and do " +
-          "projection if needed",
-        // The SortOrder TypeSig will govern what types can actually be used as sorting key data
-        // type. The types below are allowed as inputs and outputs.
-        ExecChecks((pluginSupportedOrderableSig +
-          TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.MAP).nested(), TypeSig.all),
-        (takeExec, conf, p, r) =>
-          new SparkPlanMeta[TakeOrderedAndProjectExec](takeExec, conf, p, r) {
+  private def createPythonUDAFMeta(
+      a: PythonUDAF,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new PythonUDAFMetaImpl(a, conf, p, r)
+
+  private class TakeOrderedAndProjectExecMetaImpl(
+      takeExec: TakeOrderedAndProjectExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends SparkPlanMeta[TakeOrderedAndProjectExec](takeExec, conf, p, r) {
             val sortOrder: Seq[BaseExprMeta[SortOrder]] =
               takeExec.sortOrder.map(GpuOverrides.wrapExpr(_, this.conf, Some(this)))
             val projectList: Seq[BaseExprMeta[NamedExpression]] =
@@ -154,30 +122,136 @@ trait Spark341PlusDBShims extends Spark332PlusDBShims {
                   takeExec.offset)(takeExec.sortOrder)
               }
             }
-          }),
+          }
+
+  private def createTakeOrderedAndProjectExecMeta(
+      takeExec: TakeOrderedAndProjectExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new TakeOrderedAndProjectExecMetaImpl(takeExec, conf, p, r)
+
+  private class GlobalLimitExecMetaImpl(
+      globalLimit: GlobalLimitExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends SparkPlanMeta[GlobalLimitExec](globalLimit, conf, p, r) {
+            override def convertToGpu(): GpuExec =
+              GpuGlobalLimitExec(
+                globalLimit.limit, childPlans.head.convertIfNeeded(), globalLimit.offset)
+          }
+
+  private def createGlobalLimitExecMeta(
+      globalLimit: GlobalLimitExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GlobalLimitExecMetaImpl(globalLimit, conf, p, r)
+
+  private class CollectLimitExecMetaImpl(
+      collectLimit: CollectLimitExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends GpuCollectLimitMeta(collectLimit, conf, p, r) {
+          override def convertToGpu(): GpuExec =
+            buildCollectLimitGpu(collectLimit.offset)
+        }
+
+  private def createCollectLimitExecMeta(
+      collectLimit: CollectLimitExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new CollectLimitExecMetaImpl(collectLimit, conf, p, r)
+
+  private def createWindowGroupLimitExecMeta(
+      limit: WindowGroupLimitExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuWindowGroupLimitExecMeta(limit, conf, p, r)
+  override def isExpressionStateful(expr: Expression): Boolean = expr match {
+    case _: InvokeLike | _: ExternalMapToCatalyst => true
+    case _ => expr.stateful && !isBridgeCloneSafeStatefulExpression(expr)
+  }
+
+  override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
+    val shimExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
+      GpuOverrides.expr[ToPrettyString]("An internal expressions which is used to " +
+        "generate pretty string for all kinds of values",
+        new ToPrettyStringChecks(),
+        (toPrettyString, conf, p, r) => {
+          new CastExprMetaBase[ToPrettyString](toPrettyString, conf, p, r) {
+
+            override def needTimeZoneCheck: Boolean = 
+              castNeedsTimeZone(toPrettyString.child.dataType, StringType)
+
+            override val toType: StringType.type = StringType
+
+            override def convertToGpu(child: Expression): GpuExpression = {
+              GpuToPrettyString(child)
+            }
+          }
+        }),
+      // Empty2Null is pulled out of FileFormatWriter by default since Spark 3.4.0,
+      // so it is visible in the overriding stage.
+      GpuOverrides.expr[Empty2Null](
+        "Converts the empty string to null for writing data",
+        ExprChecks.unaryProjectInputMatchesOutput(
+          TypeSig.STRING, TypeSig.STRING),
+        createEmpty2NullMeta),
+      GpuOverrides.expr[PythonUDAF](
+        "UDF run in an external python process. Does not actually run on the GPU, but " +
+          "the transfer of data to/from it can be accelerated",
+        ExprChecks.fullAggAndProject(
+          // Different types of Pandas UDF support different sets of output type. Please refer to
+          //   https://github.com/apache/spark/blob/master/python/pyspark/sql/udf.py#L98
+          // for more details.
+          // It is impossible to specify the exact type signature for each Pandas UDF type in a
+          // single expression 'PythonUDF'.
+          // So use the 'unionOfPandasUdfOut' to cover all types for Spark. The type signature of
+          // plugin is also an union of all the types of Pandas UDF.
+          (TypeSig.commonCudfTypes + TypeSig.ARRAY).nested() + TypeSig.STRUCT,
+          TypeSig.unionOfPandasUdfOut,
+          repeatingParamCheck = Some(RepeatingParamCheck(
+            "param",
+            (TypeSig.commonCudfTypes + TypeSig.ARRAY + TypeSig.STRUCT).nested(),
+            TypeSig.all))),
+        createPythonUDAFMeta)
+    ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
+    super.getExprs ++ shimExprs ++ DayTimeIntervalShims.exprs ++ RoundingShims.exprs ++
+      ProtobufExprShims.exprs
+  }
+
+  // Keep this lazy to avoid a class-initialization cycle: building these rules calls
+  // GpuOverrides.exec, while GpuOverrides initialization calls SparkShimImpl.
+  // Eager evaluation can deadlock if the two singleton objects are initialized concurrently.
+  private lazy val shimExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = Seq(
+      GpuOverrides.exec[TakeOrderedAndProjectExec](
+        "Take the first limit elements after offset as defined by the sortOrder, and do " +
+          "projection if needed",
+        // The SortOrder TypeSig will govern what types can actually be used as sorting key data
+        // type. The types below are allowed as inputs and outputs.
+        ExecChecks((pluginSupportedOrderableSig +
+          TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.MAP).nested(), TypeSig.all),
+        createTakeOrderedAndProjectExecMeta),
       GpuOverrides.exec[GlobalLimitExec](
         "Limiting of results across partitions",
         ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL +
           TypeSig.STRUCT + TypeSig.ARRAY + TypeSig.MAP).nested(),
           TypeSig.all),
-        (globalLimit, conf, p, r) =>
-          new SparkPlanMeta[GlobalLimitExec](globalLimit, conf, p, r) {
-            override def convertToGpu(): GpuExec =
-              GpuGlobalLimitExec(
-                globalLimit.limit, childPlans.head.convertIfNeeded(), globalLimit.offset)
-          }),
+        createGlobalLimitExecMeta),
       GpuOverrides.exec[CollectLimitExec](
         "Reduce to single partition and apply limit",
         ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL +
           TypeSig.STRUCT + TypeSig.ARRAY + TypeSig.MAP).nested(),
           TypeSig.all),
-        (collectLimit, conf, p, r) => new GpuCollectLimitMeta(collectLimit, conf, p, r) {
-          override def convertToGpu(): GpuExec =
-            buildCollectLimitGpu(collectLimit.offset)
-        }
-      ).disabledByDefault("Collect Limit replacement can be slower on the GPU, if huge number " +
-        "of rows in a batch it could help by limiting the number of rows transferred from " +
-        "GPU to CPU"),
+        createCollectLimitExecMeta).disabledByDefault(
+          "Collect Limit replacement can be slower on the GPU, if huge number " +
+            "of rows in a batch it could help by limiting the number of rows transferred from " +
+            "GPU to CPU"),
     GpuOverrides.exec[WindowGroupLimitExec](
       "Apply group-limits for row groups destined for rank-based window functions like " +
         "row_number(), rank(), and dense_rank()",
@@ -185,7 +259,7 @@ trait Spark341PlusDBShims extends Spark332PlusDBShims {
         (TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 +
           TypeSig.STRUCT +  TypeSig.ARRAY + TypeSig.MAP).nested(),
         TypeSig.all),
-      (limit, conf, p, r) => new GpuWindowGroupLimitExecMeta(limit, conf, p, r))
+      createWindowGroupLimitExecMeta)
     ).map(r => (r.getClassFor.asSubclass(classOf[SparkPlan]), r)).toMap
 
   override def getExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] =

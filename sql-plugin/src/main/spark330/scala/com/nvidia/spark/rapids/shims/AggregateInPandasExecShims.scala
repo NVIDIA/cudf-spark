@@ -54,6 +54,13 @@ import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.python.AggregateInPandasExec
 
 object AggregateInPandasExecShims {
+
+  private def createAggregateInPandasExecMeta(
+      aggPy: AggregateInPandasExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuAggregateInPandasExecMeta(aggPy, conf, p, r)
   val execRule: Option[ExecRule[_ <: SparkPlan]] = Some(
     GpuOverrides.exec[AggregateInPandasExec](
       "The backend for an Aggregation Pandas UDF." +
@@ -61,7 +68,7 @@ object AggregateInPandasExecShims {
         " It also supports scheduling GPU resources for the Python process" +
         " when enabled.",
       ExecChecks(TypeSig.commonCudfTypes, TypeSig.all),
-      (aggPy, conf, p, r) => new GpuAggregateInPandasExecMeta(aggPy, conf, p, r))
+      createAggregateInPandasExecMeta)
   )
 
   def isAggregateInPandasExec(plan: SparkPlan): Boolean = plan.isInstanceOf[AggregateInPandasExec]

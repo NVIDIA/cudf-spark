@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,15 +27,22 @@ import org.apache.spark.sql.rapids.ExternalSource
 import org.apache.spark.sql.sources.CreatableRelationProvider
 
 abstract class Delta2xProviderBase extends DeltaIOProvider {
+  private def createDeltaCreatableRelationProviderMeta(
+    a: DeltaDataSource,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    {
+      require(p.isDefined, "Must provide parent meta")
+      new DeltaCreatableRelationProviderMeta(a, conf, p, r)
+    }
+
   override def getCreatableRelationRules: Map[Class[_ <: CreatableRelationProvider],
     CreatableRelationProviderRule[_ <: CreatableRelationProvider]] = {
     Seq(
       ExternalSource.toCreatableRelationProviderRule[DeltaDataSource](
         "Write to Delta Lake table",
-        (a, conf, p, r) => {
-          require(p.isDefined, "Must provide parent meta")
-          new DeltaCreatableRelationProviderMeta(a, conf, p, r)
-        })
+        createDeltaCreatableRelationProviderMeta)
     ).map(r => (r.getClassFor.asSubclass(classOf[CreatableRelationProvider]), r)).toMap
   }
 }

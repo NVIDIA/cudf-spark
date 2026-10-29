@@ -31,6 +31,31 @@ import org.apache.iceberg.spark.source.{GpuSparkIncrementalAppendScan, GpuSparkS
 import org.apache.spark.sql.connector.read.{Scan, SupportsRuntimeV2Filtering}
 
 class IcebergProviderImpl extends IcebergProviderBase {
+  private class RowLevelOperationScanMetaImpl(
+    a: Scan,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) extends ScanMeta[Scan](a, conf, p, r) {
+      private lazy val convertedScan: Try[GpuSparkScan] = Try(
+        GpuSparkIncrementalAppendScan.create(a, this.conf, false))
+
+      override def supportsRuntimeFilters: Boolean =
+        a.isInstanceOf[SupportsRuntimeV2Filtering]
+
+      override def tagSelfForGpu(): Unit = {
+        GpuSparkScan.tagForGpu(this, convertedScan)
+      }
+
+      override def convertToGpu(): GpuScan = convertedScan.get
+    }
+
+  private def createRowLevelOperationScanMeta(
+    a: Scan,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new RowLevelOperationScanMetaImpl(a, conf, p, r)
+
 
   /**
    * Adds a {@code SparkIncrementalAppendScan} rule on top of the base provider's two rules
@@ -45,19 +70,7 @@ class IcebergProviderImpl extends IcebergProviderBase {
       "org.apache.iceberg.spark.source.SparkIncrementalAppendScan")
 
     val incrementalRule = new ScanRule[Scan](
-      (a, conf, p, r) => new ScanMeta[Scan](a, conf, p, r) {
-        private lazy val convertedScan: Try[GpuSparkScan] = Try(
-          GpuSparkIncrementalAppendScan.create(a, this.conf, false))
-
-        override def supportsRuntimeFilters: Boolean =
-          a.isInstanceOf[SupportsRuntimeV2Filtering]
-
-        override def tagSelfForGpu(): Unit = {
-          GpuSparkScan.tagForGpu(this, convertedScan)
-        }
-
-        override def convertToGpu(): GpuScan = convertedScan.get
-      },
+      createRowLevelOperationScanMeta,
       "Iceberg incremental append scan",
       ClassTag(cpuIncrementalAppendScanClass)
     )

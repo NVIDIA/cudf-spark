@@ -80,17 +80,38 @@ import org.apache.spark.sql.sources.InsertableRelation
 import org.apache.spark.sql.types.StructType
 
 abstract class DatabricksDeltaProvider173183Base extends DatabricksDeltaProviderBase {
+  private def createGpuWriteIntoDeltaCommandMeta(
+    a: WriteIntoDeltaCommand,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    if (GpuLiquidOptimizeWriteContext.isActive) {
+      new GpuLiquidOptimizeWriteIntoDeltaCommandMeta(a, conf, p, r)
+    } else {
+      new GpuWriteIntoDeltaCommandMeta(a, conf, p, r)
+    }
+
+  private def createOptimizeTableCommandMeta(
+    a: OptimizeTableCommand,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new OptimizeTableCommandMeta(a, conf, p, r)
+
+  private def createOptimizeTableCommandEdgeMeta(
+    a: OptimizeTableCommandEdge,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new OptimizeTableCommandEdgeMeta(a, conf, p, r)
+
 
   override def getDataWritingCommandRules: Map[Class[_ <: DataWritingCommand],
       DataWritingCommandRule[_ <: DataWritingCommand]] = {
     Seq(
       GpuOverrides.dataWriteCmd[WriteIntoDeltaCommand](
         "Write files for a DBR Delta transaction",
-        (a, conf, p, r) => if (GpuLiquidOptimizeWriteContext.isActive) {
-          new GpuLiquidOptimizeWriteIntoDeltaCommandMeta(a, conf, p, r)
-        } else {
-          new GpuWriteIntoDeltaCommandMeta(a, conf, p, r)
-        })
+        createGpuWriteIntoDeltaCommandMeta)
     ).map(r => (r.getClassFor.asSubclass(classOf[DataWritingCommand]), r)).toMap
   }
 
@@ -107,11 +128,11 @@ abstract class DatabricksDeltaProvider173183Base extends DatabricksDeltaProvider
     super.getRunnableCommandRules ++ Seq(
       GpuOverrides.runnableCmd[OptimizeTableCommand](
         "Optimize a Delta Lake table",
-        (a, conf, p, r) => new OptimizeTableCommandMeta(a, conf, p, r))
+        createOptimizeTableCommandMeta)
           .disabledByDefault("Delta Lake optimize support is experimental"),
       GpuOverrides.runnableCmd[OptimizeTableCommandEdge](
         "Optimize a Delta Lake table",
-        (a, conf, p, r) => new OptimizeTableCommandEdgeMeta(a, conf, p, r))
+        createOptimizeTableCommandEdgeMeta)
           .disabledByDefault("Delta Lake optimize support is experimental")
     ).map(r => (r.getClassFor.asSubclass(classOf[RunnableCommand]), r)).toMap
   }

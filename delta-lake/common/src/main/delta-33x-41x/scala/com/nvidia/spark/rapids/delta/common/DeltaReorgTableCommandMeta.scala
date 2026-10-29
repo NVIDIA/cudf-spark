@@ -28,12 +28,18 @@ import org.apache.spark.sql.delta.rapids.{GpuDeltaCommandLike, GpuDeltaReorgTabl
 import org.apache.spark.sql.execution.command.RunnableCommand
 
 object DeltaReorgTableCommandMeta {
+  private def createDeltaReorgTableCommandMeta(
+    cmd: DeltaReorgTableCommand,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    rule: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new DeltaReorgTableCommandMeta(cmd, conf, parent, rule)
+
   private val optimizeCommandConfKey = "spark.rapids.sql.command.OptimizeTableCommand"
 
   def rule: RunnableCommandRule[DeltaReorgTableCommand] = {
     new RunnableCommandRule[DeltaReorgTableCommand](
-      (cmd, conf, parent, rule) =>
-        new DeltaReorgTableCommandMeta(cmd, conf, parent, rule),
+      createDeltaReorgTableCommandMeta,
       "Reorganize a Delta Lake table",
       classTag[DeltaReorgTableCommand]) {
       override def confKey: String = optimizeCommandConfKey

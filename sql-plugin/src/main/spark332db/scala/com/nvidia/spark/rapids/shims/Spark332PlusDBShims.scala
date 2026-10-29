@@ -30,6 +30,36 @@ import org.apache.spark.sql.execution.command.{CreateDataSourceTableAsSelectComm
 import org.apache.spark.sql.execution.datasources._
 
 trait Spark332PlusDBShims extends Spark330PlusDBShims {
+
+  private class KnownNullableMetaImpl(
+      a: KnownNullable,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends UnaryExprMeta[KnownNullable](a, conf, p, r) {
+          override def convertToGpu(child: Expression): GpuExpression = GpuKnownNullable(child)
+        }
+
+  private def createKnownNullableMeta(
+      a: KnownNullable,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new KnownNullableMetaImpl(a, conf, p, r)
+
+  private def createWriteFilesExecMeta(
+      write: WriteFilesExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuWriteFilesMeta(write, conf, p, r)
+
+  private def createCreateDataSourceTableAsSelectCommandMeta(
+      a: CreateDataSourceTableAsSelectCommand,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new CreateDataSourceTableAsSelectCommandMeta(a, conf, p, r)
   // AnsiCast is removed from Spark3.4.0
   override def ansiCastRule: ExprRule[_ <: Expression] = null
 
@@ -39,10 +69,7 @@ trait Spark332PlusDBShims extends Spark330PlusDBShims {
         "Tags the expression as being nullable",
         ExprChecks.unaryProjectInputMatchesOutput(
           TypeSig.all, TypeSig.all),
-        (a, conf, p, r) => new UnaryExprMeta[KnownNullable](a, conf, p, r) {
-          override def convertToGpu(child: Expression): GpuExpression = GpuKnownNullable(child)
-        }
-      )
+        createKnownNullableMeta)
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
     super.getExprs ++ shimExprs
   }
@@ -57,8 +84,7 @@ trait Spark332PlusDBShims extends Spark330PlusDBShims {
       //   InsertIntoHadoopFsRelationCommand(WriteFilesExec) or InsertIntoHiveTable(WriteFilesExec)
       // The parent node of `WriteFilesExec` will check the types, here just let type check pass
       ExecChecks(TypeSig.all, TypeSig.all),
-      (write, conf, p, r) => new GpuWriteFilesMeta(write, conf, p, r)
-    )
+      createWriteFilesExecMeta)
   ).map(r => (r.getClassFor.asSubclass(classOf[SparkPlan]), r)).toMap
 
   override def getExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] =
@@ -76,7 +102,7 @@ trait Spark332PlusDBShims extends Spark330PlusDBShims {
     Seq(
       GpuOverrides.runnableCmd[CreateDataSourceTableAsSelectCommand](
         "Write to a data source",
-        (a, conf, p, r) => new CreateDataSourceTableAsSelectCommandMeta(a, conf, p, r))
+        createCreateDataSourceTableAsSelectCommandMeta)
     ).map(r => (r.getClassFor.asSubclass(classOf[RunnableCommand]), r)).toMap
   }
 }

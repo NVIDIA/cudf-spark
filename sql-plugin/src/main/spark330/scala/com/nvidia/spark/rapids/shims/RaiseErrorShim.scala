@@ -46,14 +46,28 @@ import org.apache.spark.sql.catalyst.expressions.{Expression, RaiseError}
 import org.apache.spark.sql.rapids.shims.GpuRaiseError
 
 object RaiseErrorShim {
+
+  private class RaiseErrorMetaImpl(
+      a: RaiseError,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends UnaryExprMeta[RaiseError](a, conf, p, r) {
+        override def convertToGpu(child: Expression): GpuExpression = GpuRaiseError(child)
+      }
+
+  private def createRaiseErrorMeta(
+      a: RaiseError,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new RaiseErrorMetaImpl(a, conf, p, r)
   val exprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
     Seq(GpuOverrides.expr[RaiseError](
       "Throw an exception",
       ExprChecks.unaryProject(
         TypeSig.NULL, TypeSig.NULL,
         TypeSig.STRING, TypeSig.STRING),
-      (a, conf, p, r) => new UnaryExprMeta[RaiseError](a, conf, p, r) {
-        override def convertToGpu(child: Expression): GpuExpression = GpuRaiseError(child)
-      })).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
+      createRaiseErrorMeta)).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
   }
 }

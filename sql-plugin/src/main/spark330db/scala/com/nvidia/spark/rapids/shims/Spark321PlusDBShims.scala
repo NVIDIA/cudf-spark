@@ -49,6 +49,40 @@ import org.apache.spark.sql.types._
 
 trait Spark321PlusDBShims extends SparkShims
   with Spark321PlusShims {
+
+  private def createSubqueryBroadcastExecMeta(
+      s: SubqueryBroadcastExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuSubqueryBroadcastMeta(s, conf, p, r)
+
+  private def createRunningWindowFunctionExecMeta(
+      runningWindowFunctionExec: RunningWindowFunctionExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuRunningWindowExecMeta(runningWindowFunctionExec, conf, p, r)
+
+  private class EphemeralSubstringMetaImpl(
+      in: EphemeralSubstring,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends TernaryExprMeta[EphemeralSubstring](in, conf, p, r) {
+          override def convertToGpu(
+              column: Expression,
+              position: Expression,
+              length: Expression): GpuExpression =
+            GpuSubstring(column, position, length)
+        }
+
+  private def createEphemeralSubstringMeta(
+      in: EphemeralSubstring,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new EphemeralSubstringMetaImpl(in, conf, p, r)
   override def isCastingStringToNegDecimalScaleSupported: Boolean = true
 
   override def getFileScanRDD(
@@ -117,7 +151,7 @@ trait Spark321PlusDBShims extends SparkShims
       GpuOverrides.exec[SubqueryBroadcastExec](
         "Plan to collect and transform the broadcast key values",
         ExecChecks(TypeSig.all, TypeSig.all),
-        (s, conf, p, r) => new GpuSubqueryBroadcastMeta(s, conf, p, r)),
+        createSubqueryBroadcastExecMeta),
       GpuOverrides.exec[RunningWindowFunctionExec](
         "Databricks-specific window function exec, for \"running\" windows, " +
             "i.e. (UNBOUNDED PRECEDING TO CURRENT ROW)",
@@ -128,9 +162,7 @@ trait Spark321PlusDBShims extends SparkShims
           Map("partitionSpec" ->
               InputCheck(TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128,
                 TypeSig.all))),
-        (runningWindowFunctionExec, conf, p, r) =>
-          new GpuRunningWindowExecMeta(runningWindowFunctionExec, conf, p, r)
-      )
+        createRunningWindowFunctionExecMeta)
     ).map(r => (r.getClassFor.asSubclass(classOf[SparkPlan]), r)).toMap
   }
 
@@ -145,13 +177,7 @@ trait Spark321PlusDBShims extends SparkShims
           Seq(ParamCheck("str", TypeSig.STRING, TypeSig.STRING + TypeSig.BINARY),
             ParamCheck("pos", TypeSig.INT, TypeSig.INT),
             ParamCheck("len", TypeSig.INT, TypeSig.INT))),
-        (in, conf, p, r) => new TernaryExprMeta[EphemeralSubstring](in, conf, p, r) {
-          override def convertToGpu(
-              column: Expression,
-              position: Expression,
-              length: Expression): GpuExpression =
-            GpuSubstring(column, position, length)
-        })
+        createEphemeralSubstringMeta)
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
     exprs ++ super.getExprs
   }

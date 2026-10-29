@@ -54,6 +54,13 @@ import org.apache.spark.sql.execution.command.{DataWritingCommand, RunnableComma
 import org.apache.spark.sql.hive.execution.InsertIntoHiveTable
 
 trait HiveProviderCmdShims extends HiveProvider with CreateFunctions {
+
+  private def createInsertIntoHiveTableMeta(
+      insert: InsertIntoHiveTable,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      rule: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuInsertIntoHiveTableMeta(insert, conf, parent, rule)
   /**
    * Builds the data writing command rules that are specific to spark-hive Catalyst nodes.
    */
@@ -62,7 +69,7 @@ trait HiveProviderCmdShims extends HiveProvider with CreateFunctions {
 
     GpuOverrides.dataWriteCmd[InsertIntoHiveTable](
       desc = "Command to write to Hive tables",
-      (insert, conf, parent, rule) => new GpuInsertIntoHiveTableMeta(insert, conf, parent, rule))
+      createInsertIntoHiveTableMeta)
 
   ).map(r => (r.getClassFor.asSubclass(classOf[DataWritingCommand]), r)).toMap
 

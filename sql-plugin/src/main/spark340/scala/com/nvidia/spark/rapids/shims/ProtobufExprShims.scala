@@ -66,32 +66,13 @@ import org.apache.spark.sql.types._
  * The module can be external or runtime-provided, so these rules must be registered by reflection.
  */
 object ProtobufExprShims extends org.apache.spark.internal.Logging {
-  private[this] val protobufDataToCatalystClassName =
-    "org.apache.spark.sql.protobuf.ProtobufDataToCatalyst"
 
-  /** GPU expression rules, or an empty map when the optional spark-protobuf APIs cannot load. */
-  def exprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
-    try {
-      val clazz = ShimReflectionUtils.loadClass(protobufDataToCatalystClassName)
-        .asInstanceOf[Class[_ <: UnaryExpression]]
-      Map(clazz.asInstanceOf[Class[_ <: Expression]] -> fromProtobufRule(clazz))
-    } catch {
-      case _: ClassNotFoundException | _: NoClassDefFoundError => Map.empty
-    }
-  }
-
-  private def fromProtobufRule(clazz: Class[_ <: UnaryExpression]): ExprRule[_ <: Expression] = {
-    // Name the rule config and docs after ProtobufDataToCatalyst instead of UnaryExpression.
-    implicit val tag: ClassTag[UnaryExpression] = ClassTag(clazz)
-    GpuOverrides.expr[UnaryExpression](
-      "Decode a BinaryType column (protobuf) into a Spark SQL struct",
-      ExprChecks.unaryProject(
-        // Output support depends on the protobuf descriptor, so tagExprForGpu checks each field.
-        TypeSig.all,
-        TypeSig.all,
-        TypeSig.BINARY,
-        TypeSig.BINARY),
-      (e, conf, p, r) => new UnaryExprMeta[UnaryExpression](e, conf, p, r) {
+  private class UnaryExpressionMetaImpl(
+      e: UnaryExpression,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends UnaryExprMeta[UnaryExpression](e, conf, p, r) {
 
         private var failOnErrors: Boolean = _
         private var malformedRowsAsNullFields: Boolean = _
@@ -224,7 +205,39 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
           GpuFromProtobuf(e.dataType.asInstanceOf[StructType], flatSchema, failOnErrors,
             malformedRowsAsNullFields, child)
       }
-    )
+
+  private def createUnaryExpressionMeta(
+      e: UnaryExpression,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new UnaryExpressionMetaImpl(e, conf, p, r)
+  private[this] val protobufDataToCatalystClassName =
+    "org.apache.spark.sql.protobuf.ProtobufDataToCatalyst"
+
+  /** GPU expression rules, or an empty map when the optional spark-protobuf APIs cannot load. */
+  def exprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
+    try {
+      val clazz = ShimReflectionUtils.loadClass(protobufDataToCatalystClassName)
+        .asInstanceOf[Class[_ <: UnaryExpression]]
+      Map(clazz.asInstanceOf[Class[_ <: Expression]] -> fromProtobufRule(clazz))
+    } catch {
+      case _: ClassNotFoundException | _: NoClassDefFoundError => Map.empty
+    }
+  }
+
+  private def fromProtobufRule(clazz: Class[_ <: UnaryExpression]): ExprRule[_ <: Expression] = {
+    // Name the rule config and docs after ProtobufDataToCatalyst instead of UnaryExpression.
+    implicit val tag: ClassTag[UnaryExpression] = ClassTag(clazz)
+    GpuOverrides.expr[UnaryExpression](
+      "Decode a BinaryType column (protobuf) into a Spark SQL struct",
+      ExprChecks.unaryProject(
+        // Output support depends on the protobuf descriptor, so tagExprForGpu checks each field.
+        TypeSig.all,
+        TypeSig.all,
+        TypeSig.BINARY,
+        TypeSig.BINARY),
+      createUnaryExpressionMeta)
   }
 
 }

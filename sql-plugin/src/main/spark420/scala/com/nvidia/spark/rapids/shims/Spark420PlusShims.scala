@@ -26,6 +26,13 @@ import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources.v2.GroupPartitionsExec
 
 trait Spark420PlusShims extends Spark411PlusShims with HyperbolicExpressionShims {
+
+  private def createGroupPartitionsExecMeta(
+      groupPartitions: GroupPartitionsExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      rule: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuGroupPartitionsExecMeta(groupPartitions, conf, parent, rule)
   // Keep this lazy to avoid a class-initialization cycle: building these rules calls
   // GpuOverrides.exec, while GpuOverrides initialization calls SparkShimImpl.
   // Eager evaluation can deadlock if the two singleton objects are initialized concurrently.
@@ -33,8 +40,7 @@ trait Spark420PlusShims extends Spark411PlusShims with HyperbolicExpressionShims
     GpuOverrides.exec[GroupPartitionsExec](
       "Groups data source partitions with the same partition key",
       ExecChecks(TypeSig.all, TypeSig.all),
-      (groupPartitions, conf, parent, rule) =>
-        new GpuGroupPartitionsExecMeta(groupPartitions, conf, parent, rule))
+      createGroupPartitionsExecMeta)
   ).map(rule => (rule.getClassFor.asSubclass(classOf[SparkPlan]), rule)).toMap
 
   override def getExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] =

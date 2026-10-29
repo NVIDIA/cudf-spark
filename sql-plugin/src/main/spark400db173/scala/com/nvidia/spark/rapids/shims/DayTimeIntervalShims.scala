@@ -40,14 +40,13 @@ import org.apache.spark.unsafe.types.CalendarInterval
  * TimeAdd was renamed to TimestampAddInterval in Spark 4.1.0
  */
 object DayTimeIntervalShims {
-  def exprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
-    GpuOverrides.expr[Abs](
-      "Absolute value",
-      ExprChecks.unaryProjectAndAstInputMatchesOutput(
-        TypeSig.implicitCastsAstTypes,
-        TypeSig.gpuNumeric + GpuTypeShims.additionalArithmeticSupportedTypes,
-        TypeSig.cpuNumeric + GpuTypeShims.additionalArithmeticSupportedTypes),
-      (a, conf, p, r) => new UnaryAstExprMeta[Abs](a, conf, p, r) {
+
+  private class AbsMetaImpl(
+      a: Abs,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends UnaryAstExprMeta[Abs](a, conf, p, r) {
         val ansiEnabled = SQLConf.get.ansiEnabled
 
         override def tagSelfForAst(): Unit = {
@@ -58,38 +57,55 @@ object DayTimeIntervalShims {
 
         // ANSI support for ABS was added in 3.2.0 SPARK-33275
         override def convertToGpu(child: Expression): GpuExpression = GpuAbs(child, ansiEnabled)
-      }),
-    GpuOverrides.expr[MultiplyDTInterval](
-      "Day-time interval * number",
-      ExprChecks.binaryProject(
-        TypeSig.DAYTIME,
-        TypeSig.DAYTIME,
-        ("lhs", TypeSig.DAYTIME, TypeSig.DAYTIME),
-        ("rhs", TypeSig.gpuNumeric - TypeSig.DECIMAL_128, TypeSig.gpuNumeric)),
-      (a, conf, p, r) => new BinaryExprMeta[MultiplyDTInterval](a, conf, p, r) {
+      }
+
+  private def createAbsMeta(
+      a: Abs,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new AbsMetaImpl(a, conf, p, r)
+
+  private class MultiplyDTIntervalMetaImpl(
+      a: MultiplyDTInterval,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends BinaryExprMeta[MultiplyDTInterval](a, conf, p, r) {
         override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
           GpuMultiplyDTInterval(lhs, rhs)
-      }),
-    GpuOverrides.expr[DivideDTInterval](
-      "Day-time interval / number",
-      ExprChecks.binaryProject(
-        TypeSig.DAYTIME,
-        TypeSig.DAYTIME,
-        ("lhs", TypeSig.DAYTIME, TypeSig.DAYTIME),
-        ("rhs", TypeSig.gpuNumeric - TypeSig.DECIMAL_128, TypeSig.gpuNumeric)),
-      (a, conf, p, r) => new BinaryExprMeta[DivideDTInterval](a, conf, p, r) {
+      }
+
+  private def createMultiplyDTIntervalMeta(
+      a: MultiplyDTInterval,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new MultiplyDTIntervalMetaImpl(a, conf, p, r)
+
+  private class DivideDTIntervalMetaImpl(
+      a: DivideDTInterval,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends BinaryExprMeta[DivideDTInterval](a, conf, p, r) {
         override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
           GpuDivideDTInterval(lhs, rhs)
-      }),
-    GpuOverrides.expr[TimestampAddInterval](
-      "Adds interval to timestamp",
-      ExprChecks.binaryProject(TypeSig.TIMESTAMP, TypeSig.TIMESTAMP,
-        ("start", TypeSig.TIMESTAMP, TypeSig.TIMESTAMP),
-        // interval support DAYTIME column or CALENDAR literal
-        ("interval", TypeSig.DAYTIME + TypeSig.lit(TypeEnum.CALENDAR)
-            .withPsNote(TypeEnum.CALENDAR, "month intervals are not supported"),
-            TypeSig.DAYTIME + TypeSig.CALENDAR)),
-      (timeAdd, conf, p, r) => new BinaryExprMeta[TimestampAddInterval](timeAdd, conf, p, r) {
+      }
+
+  private def createDivideDTIntervalMeta(
+      a: DivideDTInterval,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new DivideDTIntervalMetaImpl(a, conf, p, r)
+
+  private class TimestampAddIntervalMetaImpl(
+      timeAdd: TimestampAddInterval,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends BinaryExprMeta[TimestampAddInterval](timeAdd, conf, p, r) {
         override def tagExprForGpu(): Unit = {
           GpuOverrides.extractLit(timeAdd.interval).foreach { lit =>
             lit.dataType match {
@@ -105,6 +121,46 @@ object DayTimeIntervalShims {
 
         override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
           GpuTimestampAddInterval(lhs, rhs)
-      })
+      }
+
+  private def createTimestampAddIntervalMeta(
+      timeAdd: TimestampAddInterval,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new TimestampAddIntervalMetaImpl(timeAdd, conf, p, r)
+  def exprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
+    GpuOverrides.expr[Abs](
+      "Absolute value",
+      ExprChecks.unaryProjectAndAstInputMatchesOutput(
+        TypeSig.implicitCastsAstTypes,
+        TypeSig.gpuNumeric + GpuTypeShims.additionalArithmeticSupportedTypes,
+        TypeSig.cpuNumeric + GpuTypeShims.additionalArithmeticSupportedTypes),
+      createAbsMeta),
+    GpuOverrides.expr[MultiplyDTInterval](
+      "Day-time interval * number",
+      ExprChecks.binaryProject(
+        TypeSig.DAYTIME,
+        TypeSig.DAYTIME,
+        ("lhs", TypeSig.DAYTIME, TypeSig.DAYTIME),
+        ("rhs", TypeSig.gpuNumeric - TypeSig.DECIMAL_128, TypeSig.gpuNumeric)),
+      createMultiplyDTIntervalMeta),
+    GpuOverrides.expr[DivideDTInterval](
+      "Day-time interval / number",
+      ExprChecks.binaryProject(
+        TypeSig.DAYTIME,
+        TypeSig.DAYTIME,
+        ("lhs", TypeSig.DAYTIME, TypeSig.DAYTIME),
+        ("rhs", TypeSig.gpuNumeric - TypeSig.DECIMAL_128, TypeSig.gpuNumeric)),
+      createDivideDTIntervalMeta),
+    GpuOverrides.expr[TimestampAddInterval](
+      "Adds interval to timestamp",
+      ExprChecks.binaryProject(TypeSig.TIMESTAMP, TypeSig.TIMESTAMP,
+        ("start", TypeSig.TIMESTAMP, TypeSig.TIMESTAMP),
+        // interval support DAYTIME column or CALENDAR literal
+        ("interval", TypeSig.DAYTIME + TypeSig.lit(TypeEnum.CALENDAR)
+            .withPsNote(TypeEnum.CALENDAR, "month intervals are not supported"),
+            TypeSig.DAYTIME + TypeSig.CALENDAR)),
+      createTimestampAddIntervalMeta)
   ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
 }

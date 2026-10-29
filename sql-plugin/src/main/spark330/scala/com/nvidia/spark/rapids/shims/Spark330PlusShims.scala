@@ -62,6 +62,20 @@ import org.apache.spark.sql.types.StructType
 
 trait Spark330PlusShims extends Spark321PlusShims with Spark320PlusNonDBShims {
 
+  private def createAppendDataExecMeta(
+      p: AppendDataExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new AppendDataExecMeta(p, conf, parent, r)
+
+  private def createOverwriteByExpressionExecMeta(
+      p: OverwriteByExpressionExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new OverwriteByExpressionExecMeta(p, conf, parent, r)
+
   override def neverReplaceShowCurrentNamespaceCommand: ExecRule[_ <: SparkPlan] = null
 
   override def getFileScanRDD(
@@ -86,11 +100,11 @@ trait Spark330PlusShims extends Spark321PlusShims with Spark320PlusNonDBShims {
     val appendDataRule = GpuOverrides.exec[AppendDataExec](
       "Append data into a datasource V2 table",
       ExecChecks.hiddenHack(),
-      (p, conf, parent, r) => new AppendDataExecMeta(p, conf, parent, r))
+      createAppendDataExecMeta)
     val overwriteByExpressionRule = GpuOverrides.exec[OverwriteByExpressionExec](
       "Overwrite data in a datasource V2 table",
       ExecChecks.hiddenHack(),
-      (p, conf, parent, r) => new OverwriteByExpressionExecMeta(p, conf, parent, r))
+      createOverwriteByExpressionExecMeta)
     val v2WriteRules: Seq[(Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan])] = Seq(
       (appendDataRule.getClassFor.asSubclass(classOf[SparkPlan]), appendDataRule),
       (overwriteByExpressionRule.getClassFor.asSubclass(classOf[SparkPlan]),

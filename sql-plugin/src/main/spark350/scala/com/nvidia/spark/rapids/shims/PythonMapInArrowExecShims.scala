@@ -39,14 +39,12 @@ import org.apache.spark.sql.types.{BinaryType, StringType}
 
 object PythonMapInArrowExecShims {
 
-  def execs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = Seq(
-      GpuOverrides.exec[PythonMapInArrowExec](
-        "The backend for Map Arrow Iterator UDF. Accelerates the data transfer between the" +
-          " Java process and the Python process. It also supports scheduling GPU resources" +
-          " for the Python process when enabled.",
-        ExecChecks((TypeSig.commonCudfTypes + TypeSig.ARRAY + TypeSig.STRUCT).nested(),
-          TypeSig.all),
-        (mapPy, conf, p, r) => new GpuPythonMapInArrowExecMeta(mapPy, conf, p, r) {
+  private class PythonMapInArrowExecMetaImpl(
+      mapPy: PythonMapInArrowExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends GpuPythonMapInArrowExecMeta(mapPy, conf, p, r) {
           override def tagPlanForGpu(): Unit = {
             super.tagPlanForGpu()
             if (SQLConf.get.getConf(SQLConf.ARROW_EXECUTION_USE_LARGE_VAR_TYPES)) {
@@ -65,7 +63,23 @@ object PythonMapInArrowExecShims {
               }
             }
           }
-      })
+      }
+
+  private def createPythonMapInArrowExecMeta(
+      mapPy: PythonMapInArrowExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new PythonMapInArrowExecMetaImpl(mapPy, conf, p, r)
+
+  def execs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = Seq(
+      GpuOverrides.exec[PythonMapInArrowExec](
+        "The backend for Map Arrow Iterator UDF. Accelerates the data transfer between the" +
+          " Java process and the Python process. It also supports scheduling GPU resources" +
+          " for the Python process when enabled.",
+        ExecChecks((TypeSig.commonCudfTypes + TypeSig.ARRAY + TypeSig.STRUCT).nested(),
+          TypeSig.all),
+        createPythonMapInArrowExecMeta)
     ).map(r => (r.getClassFor.asSubclass(classOf[SparkPlan]), r)).toMap
 
 }

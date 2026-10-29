@@ -56,13 +56,20 @@ import org.apache.spark.sql.execution.InSubqueryExec
 
 
 object InSubqueryShims {
+
+  private def createInSubqueryExecMeta(
+      a: InSubqueryExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new InSubqueryExecMeta(a, conf, p, r)
   val exprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
     Seq(
       GpuOverrides.expr[InSubqueryExec](
         "Evaluates to true if values are in a subquery's result set",
         ExprChecks.unaryProject(TypeSig.BOOLEAN, TypeSig.BOOLEAN,
           TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128, TypeSig.comparable),
-        (a, conf, p, r) => new InSubqueryExecMeta(a, conf, p, r))
+        createInSubqueryExecMeta)
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
   }
 }

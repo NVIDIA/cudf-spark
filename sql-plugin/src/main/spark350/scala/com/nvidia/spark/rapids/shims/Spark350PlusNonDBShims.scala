@@ -96,6 +96,86 @@ class TableCacheQueryStageExecMeta(
 }
 
 trait Spark350PlusNonDBShims extends Spark340PlusNonDBShims {
+
+  private class PythonUDAFMetaImpl(
+      a: PythonUDAF,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends ExprMeta[PythonUDAF](a, conf, p, r) {
+          override def replaceMessage: String = "not block GPU acceleration"
+
+          override def noReplacementPossibleMessage(reasons: String): String =
+            s"blocks running on GPU because $reasons"
+
+          override def convertToGpuImpl(): GpuExpression =
+            GpuPythonUDAF(a.name, a.func, a.dataType,
+              childExprs.map(_.convertToGpu()),
+              a.evalType, a.udfDeterministic, a.resultId)
+        }
+
+  private def createPythonUDAFMeta(
+      a: PythonUDAF,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new PythonUDAFMetaImpl(a, conf, p, r)
+
+  private def createKeepMeta(
+      keep: Keep,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuKeepInstructionMeta(keep, conf, p, r)
+
+  private def createDiscardMeta(
+      discard: Discard,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuDiscardInstructionMeta(discard, conf, p, r)
+
+  private def createSplitMeta(
+      split: Split,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuSplitInstructionMeta(split, conf, p, r)
+
+  private def createWindowGroupLimitExecMeta(
+      limit: WindowGroupLimitExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuWindowGroupLimitExecMeta(limit, conf, p, r)
+
+  private def createOverwritePartitionsDynamicExecMeta(
+      p: OverwritePartitionsDynamicExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new OverwritePartitionsDynamicExecMeta(p, conf, parent, r)
+
+  private def createReplaceDataExecMeta(
+      p: ReplaceDataExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new ReplaceDataExecMeta(p, conf, parent, r)
+
+  private def createMergeRowsExecMeta(
+      p: MergeRowsExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuMergeRowsExecMeta(p, conf, parent, r)
+
+  private def createWriteDeltaExecMeta(
+      p: WriteDeltaExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new WriteDeltaExecMeta(p, conf, parent, r)
   override def getFileScanRDD(
       sparkSession: SparkSession,
       readFunction: PartitionedFile => Iterator[InternalRow],
@@ -142,17 +222,7 @@ trait Spark350PlusNonDBShims extends Spark340PlusNonDBShims {
             "param",
             (TypeSig.commonCudfTypes + TypeSig.ARRAY + TypeSig.STRUCT).nested(),
             TypeSig.all))),
-        (a, conf, p, r) => new ExprMeta[PythonUDAF](a, conf, p, r) {
-          override def replaceMessage: String = "not block GPU acceleration"
-
-          override def noReplacementPossibleMessage(reasons: String): String =
-            s"blocks running on GPU because $reasons"
-
-          override def convertToGpuImpl(): GpuExpression =
-            GpuPythonUDAF(a.name, a.func, a.dataType,
-              childExprs.map(_.convertToGpu()),
-              a.evalType, a.udfDeterministic, a.resultId)
-        }),
+        createPythonUDAFMeta),
       GpuOverrides.expr[Keep](
         "Keep instruction for MERGE operations - keeps/updates rows based on condition",
         ExprChecks.projectOnly(
@@ -161,14 +231,14 @@ trait Spark350PlusNonDBShims extends Spark340PlusNonDBShims {
           Seq(ParamCheck("condition", TypeSig.all, TypeSig.all)),
           Some(RepeatingParamCheck("outputs", TypeSig.all, TypeSig.all))
         ),
-        (keep, conf, p, r) => new GpuKeepInstructionMeta(keep, conf, p, r)),
+        createKeepMeta),
       GpuOverrides.expr[Discard](
         "Discard instruction for MERGE operations - discards rows based on condition",
         ExprChecks.projectOnly(
           TypeSig.all,
           TypeSig.all,
           Seq(ParamCheck("condition", TypeSig.all, TypeSig.all))),
-        (discard, conf, p, r) => new GpuDiscardInstructionMeta(discard, conf, p, r)),
+        createDiscardMeta),
       GpuOverrides.expr[Split](
         "Split instruction for MERGE operations - splits rows into multiple outputs",
         ExprChecks.projectOnly(
@@ -176,7 +246,7 @@ trait Spark350PlusNonDBShims extends Spark340PlusNonDBShims {
           TypeSig.all,
           Seq(ParamCheck("condition", TypeSig.all, TypeSig.all)),
           Some(RepeatingParamCheck("outputs", TypeSig.all, TypeSig.all))),
-        (split, conf, p, r) => new GpuSplitInstructionMeta(split, conf, p, r))
+        createSplitMeta)
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
     super.getExprs ++ shimExprs
   }
@@ -192,28 +262,28 @@ trait Spark350PlusNonDBShims extends Spark340PlusNonDBShims {
           (TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 +
             TypeSig.STRUCT + TypeSig.ARRAY + TypeSig.MAP).nested(),
           TypeSig.all),
-        (limit, conf, p, r) => new GpuWindowGroupLimitExecMeta(limit, conf, p, r)),
+        createWindowGroupLimitExecMeta),
       exec[OverwritePartitionsDynamicExec](
         "Overwrite partitions dynamically in a datasource V2 table",
         ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
           TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
           GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
           TypeSig.all),
-        (p, conf, parent, r) => new OverwritePartitionsDynamicExecMeta(p, conf, parent, r)),
+        createOverwritePartitionsDynamicExecMeta),
       exec[ReplaceDataExec](
         "Replace data in a datasource V2 table (for copy-on-write DELETE operations)",
         ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
           TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
           GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
           TypeSig.all),
-        (p, conf, parent, r) => new ReplaceDataExecMeta(p, conf, parent, r)),
+        createReplaceDataExecMeta),
       exec[MergeRowsExec](
         "Process merge rows for copy-on-write MERGE operations",
         ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
           TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
           GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
           TypeSig.all),
-        (p, conf, parent, r) => new GpuMergeRowsExecMeta(p, conf, parent, r)),
+        createMergeRowsExecMeta),
       exec[WriteDeltaExec](
         "Write delta (position deletes) in a datasource V2 table " +
           "(for merge-on-read DELETE operations)",
@@ -221,7 +291,7 @@ trait Spark350PlusNonDBShims extends Spark340PlusNonDBShims {
           TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
           GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
           TypeSig.all),
-        (p, conf, parent, r) => new WriteDeltaExecMeta(p, conf, parent, r))
+        createWriteDeltaExecMeta)
         .disabledByDefault("Merge on read support for iceberg is experimental"),
       InMemoryTableScanUtils.getTableCacheQueryStageExecRule
     ).map(r => (r.getClassFor.asSubclass(classOf[SparkPlan]), r)).toMap

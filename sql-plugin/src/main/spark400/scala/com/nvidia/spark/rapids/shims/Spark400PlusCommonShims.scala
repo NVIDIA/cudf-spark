@@ -41,6 +41,23 @@ import org.apache.spark.sql.rapids.shims.InvokeExprMeta
  * Shared 4.0.x shims for expressions and exec rules that are common.
  */
 trait Spark400PlusCommonShims extends Spark350PlusNonDBShims {
+
+  private class KnownNotContainsNullMetaImpl(
+      a: KnownNotContainsNull,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends UnaryExprMeta[KnownNotContainsNull](a, conf, p, r) {
+          override def convertToGpu(child: Expression): GpuExpression =
+            GpuKnownNotContainsNull(child)
+        }
+
+  private def createKnownNotContainsNullMeta(
+      a: KnownNotContainsNull,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new KnownNotContainsNullMetaImpl(a, conf, p, r)
   override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
     val shimExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
       GpuOverrides.expr[KnownNotContainsNull](
@@ -49,10 +66,7 @@ trait Spark400PlusCommonShims extends Spark350PlusNonDBShims {
           TypeSig.ARRAY.nested(TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL +
             TypeSig.BINARY + TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.MAP),
           TypeSig.ARRAY.nested(TypeSig.all)),
-        (a, conf, p, r) => new UnaryExprMeta[KnownNotContainsNull](a, conf, p, r) {
-          override def convertToGpu(child: Expression): GpuExpression =
-            GpuKnownNotContainsNull(child)
-        }),
+        createKnownNotContainsNullMeta),
       GpuOverrides.expr[Invoke](
         "Calls the specified function on an object. This is a wrapper to other expressions, so " +
           "can not know the details in advance. E.g.: between is replaced by " +

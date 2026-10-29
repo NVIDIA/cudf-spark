@@ -35,6 +35,13 @@ import org.apache.spark.sql.execution.python.ArrowAggregatePythonExec
  * AggregateInPandasExec was renamed to ArrowAggregatePythonExec in Spark 4.1.0 and Databricks 17.3.
  */
 object AggregateInPandasExecShims {
+
+  private def createArrowAggregatePythonExecMeta(
+      aggPy: ArrowAggregatePythonExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuArrowAggregatePythonExecMeta(aggPy, conf, p, r)
   val execRule: Option[ExecRule[_ <: SparkPlan]] = Some(
     GpuOverrides.exec[ArrowAggregatePythonExec](
       "The backend for an Aggregation Pandas UDF." +
@@ -42,7 +49,7 @@ object AggregateInPandasExecShims {
         " It also supports scheduling GPU resources for the Python process" +
         " when enabled.",
       ExecChecks(TypeSig.commonCudfTypes, TypeSig.all),
-      (aggPy, conf, p, r) => new GpuArrowAggregatePythonExecMeta(aggPy, conf, p, r))
+      createArrowAggregatePythonExecMeta)
   )
 
   def isAggregateInPandasExec(plan: SparkPlan): Boolean =

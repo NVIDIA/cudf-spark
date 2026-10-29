@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,6 +28,32 @@ import org.apache.spark.sql.v2.avro.AvroScan
 import org.apache.spark.util.SerializableConfiguration
 
 class AvroProviderImpl extends AvroProvider {
+
+  private class AvroScanMetaImpl(
+      a: AvroScan,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) extends ScanMeta[AvroScan](a, conf, p, r) {
+          override def tagSelfForGpu(): Unit = GpuAvroScan.tagSupport(this)
+
+          override def convertToGpu(): GpuScan =
+            GpuAvroScan(a.sparkSession,
+              a.fileIndex,
+              a.dataSchema,
+              a.readDataSchema,
+              a.readPartitionSchema,
+              a.options,
+              a.pushedFilters,
+              this.conf,
+              a.partitionFilters,
+              a.dataFilters)
+        }
+
+  private def createAvroScanMeta(
+      a: AvroScan,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) = new AvroScanMetaImpl(a, conf, p, r)
 
   /** If the file format is supported as an external source */
   def isSupportedFormat(format: Class[_ <: FileFormat]): Boolean = {
@@ -79,21 +105,7 @@ class AvroProviderImpl extends AvroProvider {
     Seq(
       GpuOverrides.scan[AvroScan](
         "Avro parsing",
-        (a, conf, p, r) => new ScanMeta[AvroScan](a, conf, p, r) {
-          override def tagSelfForGpu(): Unit = GpuAvroScan.tagSupport(this)
-
-          override def convertToGpu(): GpuScan =
-            GpuAvroScan(a.sparkSession,
-              a.fileIndex,
-              a.dataSchema,
-              a.readDataSchema,
-              a.readPartitionSchema,
-              a.options,
-              a.pushedFilters,
-              this.conf,
-              a.partitionFilters,
-              a.dataFilters)
-        })
+        createAvroScanMeta)
     ).map(r => (r.getClassFor.asSubclass(classOf[Scan]), r)).toMap
   }
 }

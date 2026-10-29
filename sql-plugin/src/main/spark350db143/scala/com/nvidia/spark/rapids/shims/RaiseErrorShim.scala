@@ -38,6 +38,13 @@ import org.apache.spark.sql.catalyst.expressions.{Expression, RaiseError}
 import org.apache.spark.sql.rapids.shims.RaiseErrorMeta
 
 object RaiseErrorShim {
+
+  private def createRaiseErrorMeta(
+      a: RaiseError,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new RaiseErrorMeta(a, conf, p, r)
   val exprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
     Seq(GpuOverrides.expr[RaiseError](
       "Throw an exception",
@@ -48,7 +55,6 @@ object RaiseErrorShim {
         ("errorClass", TypeSig.lit(TypeEnum.STRING), TypeSig.STRING),
         ("errorParams", TypeSig.MAP.nested(TypeSig.STRING), TypeSig.MAP.nested(TypeSig.STRING)),
       ),
-      (a, conf, p, r) => new RaiseErrorMeta(a, conf, p, r)
-    )).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
+      createRaiseErrorMeta)).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
   }
 }

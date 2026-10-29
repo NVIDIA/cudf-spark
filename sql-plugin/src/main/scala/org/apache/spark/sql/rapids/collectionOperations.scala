@@ -388,33 +388,11 @@ case class GpuArrayJoin(override val children : Seq[Expression])
 }
 
 object GpuElementAtMeta {
-  /**
-   * Construct the expression rule for `ElementAt`.
-   * @param nullOnInvalidAccessToMap
-   *  Returns `null` or throws an exception on invalid access to map column.
-   *  For Spark 3.4+ and DB11.3+, this argument is `true`,
-   *  and for other Spark versions, it is `false`.
-   */
-  def elementAtRule(nullOnInvalidAccessToMap: Boolean): ExprRule[_ <: Expression] = {
-    GpuOverrides.expr[ElementAt](
-      "Returns element of array at given(1-based) index in value if column is array. " +
-        "Returns value for the given key in value if column is map.",
-      ExprChecks.binaryProject(
-        (TypeSig.commonCudfTypes + TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.NULL +
-          TypeSig.DECIMAL_128 + TypeSig.MAP + TypeSig.BINARY).nested(), TypeSig.all,
-        ("array/map", TypeSig.ARRAY.nested(TypeSig.commonCudfTypes + TypeSig.ARRAY +
-          TypeSig.STRUCT + TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.MAP + TypeSig.BINARY) +
-          TypeSig.MAP.nested(TypeSig.commonCudfTypes + TypeSig.ARRAY + TypeSig.STRUCT +
-            TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.MAP + TypeSig.BINARY)
-            .withPsNote(TypeEnum.MAP, "If it's map, only primitive key types are supported."),
-          TypeSig.ARRAY.nested(TypeSig.all) + TypeSig.MAP.nested(TypeSig.all)),
-        ("index/key", (TypeSig.commonCudfTypes + TypeSig.DECIMAL_128)
-          .withPsNote(
-            Seq(TypeEnum.BOOLEAN, TypeEnum.BYTE, TypeEnum.SHORT, TypeEnum.LONG,
-              TypeEnum.FLOAT, TypeEnum.DOUBLE, TypeEnum.DATE, TypeEnum.TIMESTAMP,
-              TypeEnum.STRING, TypeEnum.DECIMAL), "Unsupported as array index."),
-          TypeSig.all)),
-      (in, conf, p, r) => new BinaryExprMeta[ElementAt](in, conf, p, r) {
+  private class ElementAtMetaImpl(nullOnInvalidAccessToMap: Boolean)(
+      in: ElementAt,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) extends BinaryExprMeta[ElementAt](in, conf, p, r) {
         override def tagExprForGpu(): Unit = {
           // To distinguish the supported nested type between Array and Map
           val checks = in.left.dataType match {
@@ -452,7 +430,41 @@ object GpuElementAtMeta {
           }
           GpuElementAt(lhs, rhs, failOnError)(in.origin)
         }
-      })
+      }
+
+  private def createElementAtMeta(nullOnInvalidAccessToMap: Boolean)(
+      in: ElementAt,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) = new ElementAtMetaImpl(nullOnInvalidAccessToMap)(in, conf, p, r)
+
+  /**
+   * Construct the expression rule for `ElementAt`.
+   * @param nullOnInvalidAccessToMap
+   *  Returns `null` or throws an exception on invalid access to map column.
+   *  For Spark 3.4+ and DB11.3+, this argument is `true`,
+   *  and for other Spark versions, it is `false`.
+   */
+  def elementAtRule(nullOnInvalidAccessToMap: Boolean): ExprRule[_ <: Expression] = {
+    GpuOverrides.expr[ElementAt](
+      "Returns element of array at given(1-based) index in value if column is array. " +
+        "Returns value for the given key in value if column is map.",
+      ExprChecks.binaryProject(
+        (TypeSig.commonCudfTypes + TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.NULL +
+          TypeSig.DECIMAL_128 + TypeSig.MAP + TypeSig.BINARY).nested(), TypeSig.all,
+        ("array/map", TypeSig.ARRAY.nested(TypeSig.commonCudfTypes + TypeSig.ARRAY +
+          TypeSig.STRUCT + TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.MAP + TypeSig.BINARY) +
+          TypeSig.MAP.nested(TypeSig.commonCudfTypes + TypeSig.ARRAY + TypeSig.STRUCT +
+            TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.MAP + TypeSig.BINARY)
+            .withPsNote(TypeEnum.MAP, "If it's map, only primitive key types are supported."),
+          TypeSig.ARRAY.nested(TypeSig.all) + TypeSig.MAP.nested(TypeSig.all)),
+        ("index/key", (TypeSig.commonCudfTypes + TypeSig.DECIMAL_128)
+          .withPsNote(
+            Seq(TypeEnum.BOOLEAN, TypeEnum.BYTE, TypeEnum.SHORT, TypeEnum.LONG,
+              TypeEnum.FLOAT, TypeEnum.DOUBLE, TypeEnum.DATE, TypeEnum.TIMESTAMP,
+              TypeEnum.STRING, TypeEnum.DECIMAL), "Unsupported as array index."),
+          TypeSig.all)),
+      createElementAtMeta(nullOnInvalidAccessToMap))
   }
 }
 

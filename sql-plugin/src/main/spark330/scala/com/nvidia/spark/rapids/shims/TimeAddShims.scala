@@ -59,16 +59,13 @@ import org.apache.spark.unsafe.types.CalendarInterval
  * TimeAdd was renamed to TimestampAddInterval in Spark 4.1.
  */
 object TimeAddShims {
-  val exprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
-    GpuOverrides.expr[TimeAdd](
-      "Adds interval to timestamp",
-      ExprChecks.binaryProject(TypeSig.TIMESTAMP, TypeSig.TIMESTAMP,
-        ("start", TypeSig.TIMESTAMP, TypeSig.TIMESTAMP),
-        // interval support DAYTIME column or CALENDAR literal
-        ("interval", TypeSig.DAYTIME + TypeSig.lit(TypeEnum.CALENDAR)
-            .withPsNote(TypeEnum.CALENDAR, "month intervals are not supported"),
-            TypeSig.DAYTIME + TypeSig.CALENDAR)),
-      (timeAdd, conf, p, r) => new BinaryExprMeta[TimeAdd](timeAdd, conf, p, r) {
+
+  private class TimeAddMetaImpl(
+      timeAdd: TimeAdd,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends BinaryExprMeta[TimeAdd](timeAdd, conf, p, r) {
         override def tagExprForGpu(): Unit = {
           GpuOverrides.extractLit(timeAdd.interval).foreach { lit =>
             lit.dataType match {
@@ -84,6 +81,23 @@ object TimeAddShims {
 
         override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
           GpuTimeAdd(lhs, rhs)
-      })
+      }
+
+  private def createTimeAddMeta(
+      timeAdd: TimeAdd,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new TimeAddMetaImpl(timeAdd, conf, p, r)
+  val exprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
+    GpuOverrides.expr[TimeAdd](
+      "Adds interval to timestamp",
+      ExprChecks.binaryProject(TypeSig.TIMESTAMP, TypeSig.TIMESTAMP,
+        ("start", TypeSig.TIMESTAMP, TypeSig.TIMESTAMP),
+        // interval support DAYTIME column or CALENDAR literal
+        ("interval", TypeSig.DAYTIME + TypeSig.lit(TypeEnum.CALENDAR)
+            .withPsNote(TypeEnum.CALENDAR, "month intervals are not supported"),
+            TypeSig.DAYTIME + TypeSig.CALENDAR)),
+      createTimeAddMeta)
   ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
 }

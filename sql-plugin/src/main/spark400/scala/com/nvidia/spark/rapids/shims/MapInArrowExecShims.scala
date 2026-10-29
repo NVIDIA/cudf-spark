@@ -37,6 +37,13 @@ import org.apache.spark.sql.rapids.shims.GpuMapInArrowExecMeta
 
 object PythonMapInArrowExecShims {
 
+  private def createMapInArrowExecMeta(
+      mapPy: MapInArrowExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuMapInArrowExecMeta(mapPy, conf, p, r)
+
   def execs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = Seq(
     GpuOverrides.exec[MapInArrowExec](
       "The backend for Map Arrow Iterator UDF. Accelerates the data transfer between the" +
@@ -44,7 +51,7 @@ object PythonMapInArrowExecShims {
         " for the Python process when enabled.",
       ExecChecks((TypeSig.commonCudfTypes + TypeSig.ARRAY + TypeSig.STRUCT).nested(),
         TypeSig.all),
-      (mapPy, conf, p, r) => new GpuMapInArrowExecMeta(mapPy, conf, p, r))
+      createMapInArrowExecMeta)
   ).map(r => (r.getClassFor.asSubclass(classOf[SparkPlan]), r)).toMap
 
 }

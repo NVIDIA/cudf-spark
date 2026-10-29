@@ -47,6 +47,13 @@ import org.apache.spark.util.SerializableConfiguration
 
 /** Kept in the 4.2 module: older Delta releases need not link the optional V2 connector. */
 object DeltaV2ScanRule {
+  private def createDeltaV2ScanMeta(
+    scan: Scan,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new DeltaV2ScanMeta(scan, conf, parent, r)
+
   def rules: Map[Class[_ <: Scan], ScanRule[_ <: Scan]] = {
     val scanClass: Option[Class[_ <: Scan]] = try {
       Some(ShimReflectionUtils.loadClass(
@@ -57,7 +64,7 @@ object DeltaV2ScanRule {
     }
     scanClass.map { cls =>
       val rule = new ScanRule[Scan](
-        (scan, conf, parent, r) => new DeltaV2ScanMeta(scan, conf, parent, r),
+        createDeltaV2ScanMeta,
         "Delta DataSource V2 batch scan", ClassTag(cls))
       cls -> rule
     }.toMap

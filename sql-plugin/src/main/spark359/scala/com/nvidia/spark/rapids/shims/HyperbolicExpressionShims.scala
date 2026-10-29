@@ -37,12 +37,13 @@ import org.apache.spark.sql.rapids.{GpuAcoshImproved, GpuAsinhImproved}
  * implementation avoids large-input overflow in the default ACOSH/ASINH formulas.
  */
 trait HyperbolicExpressionShims extends SparkShims {
-  abstract override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
-    val shimExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
-      GpuOverrides.expr[Acosh](
-        "Inverse hyperbolic cosine",
-        ExprChecks.mathUnaryWithAst,
-        (a, conf, p, r) => new UnaryAstExprMeta[Acosh](a, conf, p, r) {
+
+  private class AcoshMetaImpl(
+      a: Acosh,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends UnaryAstExprMeta[Acosh](a, conf, p, r) {
           override def convertToGpu(child: Expression): GpuExpression =
             if (this.conf.includeImprovedFloat) {
               GpuAcoshImproved(child)
@@ -57,11 +58,21 @@ trait HyperbolicExpressionShims extends SparkShims {
               willNotWorkInAst("acosh is not AST compatible for this Spark version")
             }
           }
-        }),
-      GpuOverrides.expr[Asinh](
-        "Inverse hyperbolic sine",
-        ExprChecks.mathUnaryWithAst,
-        (a, conf, p, r) => new UnaryAstExprMeta[Asinh](a, conf, p, r) {
+        }
+
+  private def createAcoshMeta(
+      a: Acosh,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new AcoshMetaImpl(a, conf, p, r)
+
+  private class AsinhMetaImpl(
+      a: Asinh,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends UnaryAstExprMeta[Asinh](a, conf, p, r) {
           override def convertToGpu(child: Expression): GpuExpression =
             if (this.conf.includeImprovedFloat || TypeUtilsShims.useImprovedAsinhByDefault) {
               GpuAsinhImproved(child)
@@ -76,7 +87,24 @@ trait HyperbolicExpressionShims extends SparkShims {
               willNotWorkInAst("asinh is not AST compatible for this Spark version")
             }
           }
-        })
+        }
+
+  private def createAsinhMeta(
+      a: Asinh,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new AsinhMetaImpl(a, conf, p, r)
+  abstract override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
+    val shimExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
+      GpuOverrides.expr[Acosh](
+        "Inverse hyperbolic cosine",
+        ExprChecks.mathUnaryWithAst,
+        createAcoshMeta),
+      GpuOverrides.expr[Asinh](
+        "Inverse hyperbolic sine",
+        ExprChecks.mathUnaryWithAst,
+        createAsinhMeta)
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
     super.getExprs ++ shimExprs
   }

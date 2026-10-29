@@ -28,6 +28,36 @@ import org.apache.spark.sql.execution.{OneRowRelationExec, SparkPlan}
 
 object SparkShimImpl extends Spark400PlusDBShims {
 
+  private def createOneRowRelationExecMeta(
+      exec: OneRowRelationExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      rule: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuOneRowRelationExecMeta(exec, conf, parent, rule)
+
+  private class DeltaOptimizedWritePartitioningMetaImpl(
+      partitioning: DeltaOptimizedWritePartitioning,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      rule: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends PartMeta[DeltaOptimizedWritePartitioning](
+              partitioning, conf, parent, rule) {
+            // Keep DBR's marker as targetOutputPartitioning on the converted exchange so its
+            // DELTA_OPTIMIZED_WRITE AQE/skew rules still see the native contract. The exchange
+            // advertises and executes the equivalent physical hash partitioning on GPU.
+            override val childParts: Seq[PartMeta[_]] = Seq(GpuOverrides.wrapPart(
+              partitioning.getPhysicalPartitioning, this.conf, Some(this)))
+
+            override def convertToGpu(): GpuPartitioning = childParts.head.convertToGpu()
+          }
+
+  private def createDeltaOptimizedWritePartitioningMeta(
+      partitioning: DeltaOptimizedWritePartitioning,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      rule: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new DeltaOptimizedWritePartitioningMetaImpl(partitioning, conf, parent, rule)
+
   override def getExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = {
     val shimExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = Seq(
       // OneRowRelationExec is a new class in Spark 4.1.0 for single-row queries (e.g. SELECT 1)
@@ -35,7 +65,7 @@ object SparkShimImpl extends Spark400PlusDBShims {
       GpuOverrides.exec[OneRowRelationExec](
         "Single row relation for literal queries without FROM clause",
         ExecChecks(TypeSig.all, TypeSig.all),
-        (exec, conf, parent, rule) => new GpuOneRowRelationExecMeta(exec, conf, parent, rule))
+        createOneRowRelationExecMeta)
     ).map(r => (r.getClassFor.asSubclass(classOf[SparkPlan]), r)).toMap
     super.getExecs ++ shimExecs
   }
@@ -62,17 +92,7 @@ object SparkShimImpl extends Spark400PlusDBShims {
       GpuOverrides.part[DeltaOptimizedWritePartitioning](
         "Delta optimized write partitioning",
         PartChecks(),
-        (partitioning, conf, parent, rule) =>
-          new PartMeta[DeltaOptimizedWritePartitioning](
-              partitioning, conf, parent, rule) {
-            // Keep DBR's marker as targetOutputPartitioning on the converted exchange so its
-            // DELTA_OPTIMIZED_WRITE AQE/skew rules still see the native contract. The exchange
-            // advertises and executes the equivalent physical hash partitioning on GPU.
-            override val childParts: Seq[PartMeta[_]] = Seq(GpuOverrides.wrapPart(
-              partitioning.getPhysicalPartitioning, this.conf, Some(this)))
-
-            override def convertToGpu(): GpuPartitioning = childParts.head.convertToGpu()
-          })
+        createDeltaOptimizedWritePartitioningMeta)
     ).map(r => (r.getClassFor.asSubclass(classOf[Partitioning]), r)).toMap
     super.getPartitionings ++ shimPartitionings
   }

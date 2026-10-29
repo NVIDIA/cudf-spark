@@ -48,6 +48,13 @@ import org.apache.spark.sql.execution.columnar.InMemoryTableScanExec
  * For Spark 3.5.2+, InMemoryTableScanLike trait exists so we can safely enable GPU support.
  */
 object InMemoryTableScanUtils {
+
+  private def createTableCacheQueryStageExecMeta(
+      tcqs: TableCacheQueryStageExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new TableCacheQueryStageExecMeta(tcqs, conf, p, r)
   
   /**
    * Gets the InMemoryTableScan rule for Spark 3.5.2+.
@@ -68,7 +75,7 @@ object InMemoryTableScanUtils {
     GpuOverrides.exec[TableCacheQueryStageExec](
       "Table cache query stage that wraps InMemoryTableScan for AQE",
       ExecChecks(TypeSig.all, TypeSig.all),
-      (tcqs, conf, p, r) => new TableCacheQueryStageExecMeta(tcqs, conf, p, r))
+      createTableCacheQueryStageExecMeta)
       .disabledByDefault("Table cache query stage that wraps InMemoryTableScan for AQE")
   }
 }

@@ -30,21 +30,42 @@ import org.apache.spark.sql.execution.datasources.v2.{AtomicCreateTableAsSelectE
 import org.apache.spark.sql.execution.datasources.v2.rapids.{GpuAtomicCreateTableAsSelectExec, GpuAtomicReplaceTableAsSelectExec}
 
 object Delta22xProvider extends Delta2xProviderBase {
+  private def createDeleteCommandMeta(
+    a: DeleteCommand,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new DeleteCommandMeta(a, conf, p, r)
+
+  private def createMergeIntoCommandMeta(
+    a: MergeIntoCommand,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new MergeIntoCommandMeta(a, conf, p, r)
+
+  private def createUpdateCommandMeta(
+    a: UpdateCommand,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new UpdateCommandMeta(a, conf, p, r)
+
 
   override def getRunnableCommandRules: Map[Class[_ <: RunnableCommand],
       RunnableCommandRule[_ <: RunnableCommand]] = {
     Seq(
       GpuOverrides.runnableCmd[DeleteCommand](
         "Delete rows from a Delta Lake table",
-        (a, conf, p, r) => new DeleteCommandMeta(a, conf, p, r))
+        createDeleteCommandMeta)
         .disabledByDefault("Delta Lake delete support is experimental"),
       GpuOverrides.runnableCmd[MergeIntoCommand](
         "Merge of a source query/table into a Delta table",
-        (a, conf, p, r) => new MergeIntoCommandMeta(a, conf, p, r))
+        createMergeIntoCommandMeta)
           .disabledByDefault("Delta Lake merge support is experimental"),
       GpuOverrides.runnableCmd[UpdateCommand](
         "Update rows in a Delta Lake table",
-        (a, conf, p, r) => new UpdateCommandMeta(a, conf, p, r))
+        createUpdateCommandMeta)
           .disabledByDefault("Delta Lake update support is experimental")
     ).map(r => (r.getClassFor.asSubclass(classOf[RunnableCommand]), r)).toMap
   }

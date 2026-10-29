@@ -2128,6 +2128,18 @@ This will force full Scala code rebuild in downstream modules.
                                     <arg value="-B"/>
                                     <arg value="dist/scripts/tests/test_root_safe_provider_selection.py"/>
                                 </exec>
+                                <exec executable="python3" failonerror="true"
+                                      dir="${spark.rapids.source.basedir}">
+                                    <arg value="-B"/>
+                                    <arg value="scripts/tests/test_check_replacement_rule_meta_lambdas.py"/>
+                                </exec>
+                                <exec executable="python3" failonerror="true"
+                                      dir="${spark.rapids.source.basedir}">
+                                    <arg value="-B"/>
+                                    <arg value="scripts/check_replacement_rule_meta_lambdas.py"/>
+                                    <arg value="--root"/>
+                                    <arg value="${spark.rapids.source.basedir}"/>
+                                </exec>
                             </target>
                         </configuration>
                     </execution>

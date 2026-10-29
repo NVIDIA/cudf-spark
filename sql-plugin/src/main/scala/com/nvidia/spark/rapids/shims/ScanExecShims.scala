@@ -37,6 +37,18 @@ object ScanExecShims {
     GpuFileSourceScanExec.tagSupport(meta)
   }
 
+  private def createBatchScanExecMeta(
+      p: BatchScanExec,
+      conf: RapidsConf,
+      parent: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) = new BatchScanExecMeta(p, conf, parent, r)
+
+  private def createFileSourceScanExecMeta(
+      fsse: FileSourceScanExec,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) = new FileSourceScanExecMeta(fsse, conf, p, r)
+
   def execs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = Seq(
     GpuOverrides.exec[BatchScanExec](
       "The backend for most file input",
@@ -45,7 +57,7 @@ object ScanExecShims {
           TypeSig.DECIMAL_128 + TypeSig.BINARY +
           GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
         TypeSig.all),
-      (p, conf, parent, r) => new BatchScanExecMeta(p, conf, parent, r)),
+      createBatchScanExecMeta),
     GpuOverrides.exec[FileSourceScanExec](
       "Reading data from files, often from Hive tables",
       ExecChecks(
@@ -53,7 +65,7 @@ object ScanExecShims {
           TypeSig.ARRAY + TypeSig.DECIMAL_128 + TypeSig.BINARY +
           GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
         TypeSig.all),
-      (fsse, conf, p, r) => new FileSourceScanExecMeta(fsse, conf, p, r))
+      createFileSourceScanExecMeta)
 
   ).map(r => (r.getClassFor.asSubclass(classOf[SparkPlan]), r)).toMap
 }

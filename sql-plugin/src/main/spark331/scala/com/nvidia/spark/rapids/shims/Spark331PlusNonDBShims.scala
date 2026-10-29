@@ -54,6 +54,28 @@ import org.apache.spark.sql.catalyst.expressions.{CheckOverflowInTableInsert, Ex
 import org.apache.spark.sql.rapids.GpuCheckOverflowInTableInsert
 
 trait Spark331PlusNonDBShims extends Spark330PlusNonDBShims {
+
+  private class CheckOverflowInTableInsertMetaImpl(
+      t: CheckOverflowInTableInsert,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends UnaryExprMeta[CheckOverflowInTableInsert](t, conf, p, r) {
+          override def convertToGpu(child: Expression): GpuExpression = {
+            child match {
+              case c: GpuCast => GpuCheckOverflowInTableInsert(c, t.columnName)
+              case _ =>
+                throw new IllegalStateException("Expression child is not of Type GpuCast")
+            }
+          }
+        }
+
+  private def createCheckOverflowInTableInsertMeta(
+      t: CheckOverflowInTableInsert,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new CheckOverflowInTableInsertMetaImpl(t, conf, p, r)
   override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
     val map: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
       // Add expression CheckOverflowInTableInsert starting Spark-3.3.1+
@@ -63,15 +85,7 @@ trait Spark331PlusNonDBShims extends Spark330PlusNonDBShims {
         ExprChecks.unaryProjectInputMatchesOutput(
           TypeSig.all,
           TypeSig.all),
-        (t, conf, p, r) => new UnaryExprMeta[CheckOverflowInTableInsert](t, conf, p, r) {
-          override def convertToGpu(child: Expression): GpuExpression = {
-            child match {
-              case c: GpuCast => GpuCheckOverflowInTableInsert(c, t.columnName)
-              case _ =>
-                throw new IllegalStateException("Expression child is not of Type GpuCast")
-            }
-          }
-        })
+        createCheckOverflowInTableInsertMeta)
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
     super.getExprs ++ map
   }

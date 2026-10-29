@@ -39,6 +39,13 @@ import org.apache.spark.sql.execution.{OneRowRelationExec, SparkPlan}
  * later shim to override only the expressions whose behavior changed.
  */
 trait Spark411PlusShims extends Spark400PlusCommonShims with RebaseShims {
+
+  private def createOneRowRelationExecMeta(
+      exec: OneRowRelationExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      rule: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuOneRowRelationExecMeta(exec, conf, parent, rule)
   override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
     val shimExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
       GpuOverrides.expr[CollationAwareMurmur3Hash](
@@ -64,7 +71,7 @@ trait Spark411PlusShims extends Spark400PlusCommonShims with RebaseShims {
       GpuOverrides.exec[OneRowRelationExec](
         "Single row relation for literal queries without FROM clause",
         ExecChecks(TypeSig.all, TypeSig.all),
-        (exec, conf, parent, rule) => new GpuOneRowRelationExecMeta(exec, conf, parent, rule))
+        createOneRowRelationExecMeta)
     ).map(r => (r.getClassFor.asSubclass(classOf[SparkPlan]), r)).toMap
     super.getExecs ++ shimExecs
   }
