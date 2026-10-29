@@ -22,7 +22,7 @@ from delta_lake_merge_common import *
 from marks import *
 from parquet_test_utils import parquet_row_group_midpoints
 from pyspark.sql.types import *
-from spark_session import is_databricks_version, spark_version
+from spark_session import is_databricks_version, is_databricks173_or_later, spark_version
 
 
 def supports_databricks_delta_low_shuffle_merge():
@@ -103,7 +103,7 @@ def _assert_collect_with_counters(do_merge, data_path, conf, expect_write=True,
                          conf=conf)
         for run in ["CPU", "GPU"]]
     assert cpu_metrics == gpu_metrics, f"CPU {cpu_metrics} vs GPU {gpu_metrics}"
-    if is_databricks_version(17, 3) and expect_write:
+    if is_databricks173_or_later() and expect_write:
         def check_dv_metrics(spark):
             row = spark.sql(f"DESCRIBE HISTORY delta.`{data_path}/GPU`") \
                 .where("operation = 'MERGE'").orderBy("version", ascending=False).first()
