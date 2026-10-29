@@ -319,15 +319,39 @@ class UCX(transport: UCXShuffleTransport, executor: BlockManagerId, rapidsConf: 
       cb
     }
 
+    /**
+     * Registers `responseCallback` for `header`, unless a withdrawn request still holds the
+     * header, since its reply may yet come.
+     * @return true when the header is retired, so nothing was registered
+     */
     def addResponseActiveMessageHandler(
-        header: Long, responseCallback: UCXAmCallback): Unit = {
+        header: Long, responseCallback: UCXAmCallback): Boolean = {
       val prior = responseCallbacks.putIfAbsent(header, responseCallback)
       require(prior == null,
         s"Invalid Active Message re-registration of response handler for " +
           s"${UCX.formatAmIdAndHeader(activeMessageId, header)}")
+      false
     }
 
     def removeResponseActiveMessageHandler(header: Long): Unit = {
+      responseCallbacks.remove(header)
+    }
+
+    /**
+     * Withdraws the request that waits on `header` with `responseCallback`. The header holds
+     * `UCX.RetiredResponse` until the request's reply arrives, so that no newer request can take
+     * the header and be handed that reply.
+     * @return whether the request still waited, so that no reply took its callback
+     */
+    def retire(header: Long, responseCallback: UCXAmCallback): Boolean =
+      responseCallbacks.remove(header) != null
+
+    /**
+     * Frees `header` for a request whose send never left the executor, since no reply can
+     * come. It removes the request's callback, or the marker that the request's withdrawal left,
+     * and leaves another request's callback.
+     */
+    def release(header: Long, responseCallback: UCXAmCallback): Unit = {
       responseCallbacks.remove(header)
     }
 
@@ -340,8 +364,9 @@ class UCX(transport: UCXShuffleTransport, executor: BlockManagerId, rapidsConf: 
    * @note This function will be called for each client, with the same `am.activeMessageId`
    * @param am UCXActiveMessage (id and header) to register a one time response for
    * @param responseCallback callback to handle a particular response
+   * @return true when a withdrawn request still holds `am.header`, so nothing was registered
    */
-  def registerResponseHandler(am: UCXActiveMessage, responseCallback: UCXAmCallback): Unit = {
+  def registerResponseHandler(am: UCXActiveMessage, responseCallback: UCXAmCallback): Boolean = {
     logDebug(s"Register Active Message $am response handler") 
 
     amRegistrations.computeIfAbsent(am.activeMessageId,
@@ -378,6 +403,33 @@ class UCX(transport: UCXShuffleTransport, executor: BlockManagerId, rapidsConf: 
         }
       })
   }
+
+  /**
+   * Withdraws a request whose reader is done, or whose send failed, if `responseCallback` still
+   * waits for `am`. Its header stays taken until the request's reply arrives.
+   *
+   * @param am active message (id, header) of the response to withdraw
+   * @param responseCallback the callback that the request registered for `am`
+   * @return whether the callback still waited, so that no reply will reach it
+   */
+  def retireResponseHandler(am: UCXActiveMessage, responseCallback: UCXAmCallback): Boolean =
+    amRegistrations.get(am.activeMessageId) match {
+      case reg: ResponseActiveMessageRegistration => reg.retire(am.header, responseCallback)
+      case _ => false
+    }
+
+  /**
+   * Frees the header of a request whose send never left the executor, since no reply can come,
+   * whether `responseCallback` still waits for `am` or a withdrawal retired it.
+   *
+   * @param am active message (id, header) of the response to free
+   * @param responseCallback the callback that the request registered for `am`
+   */
+  def releaseResponseHandler(am: UCXActiveMessage, responseCallback: UCXAmCallback): Unit =
+    amRegistrations.get(am.activeMessageId) match {
+      case reg: ResponseActiveMessageRegistration => reg.release(am.header, responseCallback)
+      case _ =>
+    }
 
   /**
    * Register a request handler (the server will use this)
@@ -1109,6 +1161,26 @@ object UCX extends Logging {
 
   // We include a header with this size in our active messages
   private val ACTIVE_MESSAGE_HEADER_SIZE = 8L
+
+  /**
+   * What the response header of a withdrawn request holds until the request's reply arrives, in
+   * place of the request's callback. One marker serves every header, and nothing calls it, so
+   * each of its methods throws.
+   */
+  private[ucx] val RetiredResponse: UCXAmCallback = new UCXAmCallback {
+    private def misused: Nothing =
+      throw new IllegalStateException("A withdrawn request's response has no callback")
+    override def onError(am: UCXActiveMessage, error: UCXError): Unit = misused
+    override def onMessageStarted(receiveAm: UcpRequest): Unit = misused
+    override def onSuccess(am: UCXActiveMessage, buff: TransportBuffer): Unit = misused
+    override def onCancel(am: UCXActiveMessage): Unit = misused
+    override def onMessageReceived(size: Long, header: Long,
+        finalizeCb: TransportBuffer => Unit): Unit = misused
+  }
+
+  // The status a send reports when this executor has no endpoint to the peer, so it sends
+  // nothing. UCS statuses end at -100.
+  private[shuffle] val NO_ENDPOINT = -200
 
   // The status a send task reports when it throws before UCX takes the send. UCS statuses end
   // at -100, and -200 is an unknown executor. A literal, since UcsConstants loads the natives.

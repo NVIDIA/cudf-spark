@@ -25,7 +25,7 @@ import scala.collection.mutable.ArrayBuffer
 
 import ai.rapids.cudf.{DeviceMemoryBuffer, Rmm}
 import com.nvidia.spark.rapids.{LogCaptureUtils, MetaUtils, RapidsShuffleHandle,
-  ShuffleMetadata}
+  ShuffleMetadata, TestUtils}
 import com.nvidia.spark.rapids.format.TableMeta
 import com.nvidia.spark.rapids.jni.RmmSpark
 import com.nvidia.spark.rapids.shuffle._
@@ -39,22 +39,28 @@ import org.openucx.jucx.UcxCallback
 import org.apache.spark.FetchFailed
 import org.apache.spark.shuffle.rapids.{RapidsShuffleFetchFailedException,
   ShuffleOutputGoneException}
+import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.storage.{BlockId, BlockManagerId, ShuffleBlockBatchId}
 
 /**
- * What a requester does when the server answers its request with an error reply. The
- * reply reaches the client through the real UCX client connection and transaction, with only
- * UCX mocked, because the transaction's callback wrapper drops whatever the client's callback
- * throws. The suite is in the ucx package so that it can answer a request through the response
- * handler the connection registers, as UCX does.
+ * What a requester does when the server answers its request with an error reply, and when its
+ * reader is done before any reply comes. The reply reaches the client through the real UCX
+ * client connection and transaction, with only UCX mocked, because the transaction's callback
+ * wrapper drops whatever the client's callback throws. The suite is in the ucx package so that
+ * it can answer a request through the response handler the connection registers, as UCX does.
  */
 class RapidsShuffleErrorReplySuite extends RapidsShuffleTestHelper {
   private val awaitSeconds = 30L
 
   private val reason = "the shuffle output it asked for is gone"
 
-  /** A client of executor 2 whose requests the test answers. */
-  private class Requester {
+  private val metadataResponseAmId = UCXConnection.composeResponseAmId(MessageType.MetadataRequest)
+
+  /**
+   * A client of executor 2 whose requests the test answers, over a spied connection when
+   * `spied`, so that a test can see its transactions removed.
+   */
+  private class Requester(spied: Boolean = false) {
     val ucx: UCX = mock[UCX]
     private val txIds = new AtomicLong()
     when(ucx.getNextTransactionId).thenAnswer(_ => txIds.incrementAndGet())
@@ -64,9 +70,13 @@ class RapidsShuffleErrorReplySuite extends RapidsShuffleTestHelper {
       null
     }.when(ucx).registerResponseHandler(any(), any())
 
+    val connection: UCXClientConnection = {
+      val real = new UCXClientConnection(2L, ucx, mock[UCXShuffleTransport])
+      if (spied) spy(real) else real
+    }
+
     val client = new RapidsShuffleClient(
-      new UCXClientConnection(2L, ucx, mock[UCXShuffleTransport]),
-      mockTransport, mockExecutor, mockCopyExecutor, mockCatalog)
+      connection, mockTransport, mockExecutor, mockCopyExecutor, mockCatalog)
 
     /** Answers the oldest request still waiting for a response, as UCX delivers one. */
     def answer(response: ByteBuffer): Unit = {
@@ -74,6 +84,49 @@ class RapidsShuffleErrorReplySuite extends RapidsShuffleTestHelper {
       assert(callback != null, "the client sent no request to answer")
       callback.onSuccess(UCXActiveMessage(0, 0L, forceRndv = false),
         new MetadataTransportBuffer(new RefCountedDirectByteBuffer(response)))
+    }
+
+    /**
+     * Registers the responses of this client's later requests as UCX does, in the registration it
+     * returns, so that a reply finds what its header holds, a withdrawal retires the header, and
+     * a release frees it.
+     */
+    def registerResponses(): UCX#ResponseActiveMessageRegistration = {
+      val responses = metadataResponses()
+      doAnswer { invocation =>
+        java.lang.Boolean.valueOf(responses.addResponseActiveMessageHandler(
+          invocation.getArgument[UCXActiveMessage](0).header,
+          invocation.getArgument[UCXAmCallback](1)))
+      }.when(ucx).registerResponseHandler(any(), any())
+      doAnswer { invocation =>
+        java.lang.Boolean.valueOf(responses.retire(
+          invocation.getArgument[UCXActiveMessage](0).header,
+          invocation.getArgument[UCXAmCallback](1)))
+      }.when(ucx).retireResponseHandler(any(), any())
+      doAnswer { invocation =>
+        responses.release(
+          invocation.getArgument[UCXActiveMessage](0).header,
+          invocation.getArgument[UCXAmCallback](1))
+        null
+      }.when(ucx).releaseResponseHandler(any(), any())
+      responses
+    }
+
+    /** The response and callback that this client's latest request registered. */
+    def lastRegistered: (UCXActiveMessage, UCXAmCallback) = {
+      val response = ArgumentCaptor.forClass(classOf[UCXActiveMessage])
+      val callback = ArgumentCaptor.forClass(classOf[UCXAmCallback])
+      verify(ucx, atLeastOnce()).registerResponseHandler(response.capture(), callback.capture())
+      (response.getValue, callback.getValue)
+    }
+
+    /** The active message of this client's latest request, and its send's callback. */
+    def lastSent: (UCXActiveMessage, UcxCallback) = {
+      val request = ArgumentCaptor.forClass(classOf[UCXActiveMessage])
+      val send = ArgumentCaptor.forClass(classOf[UcxCallback])
+      verify(ucx, atLeastOnce()).sendActiveMessage(
+        anyLong(), request.capture(), any[ByteBuffer](), send.capture())
+      (request.getValue, send.getValue)
     }
   }
 
@@ -350,6 +403,9 @@ class RapidsShuffleErrorReplySuite extends RapidsShuffleTestHelper {
       }
       // and the response that will not come is no longer waited for
       verify(requester.ucx, times(1)).unregisterResponseHandler(any())
+      // by its header alone, since only a metadata request retires or releases its response
+      verify(requester.ucx, never()).retireResponseHandler(any(), any())
+      verify(requester.ucx, never()).releaseResponseHandler(any(), any())
     }
   }
 
@@ -847,5 +903,443 @@ class RapidsShuffleErrorReplySuite extends RapidsShuffleTestHelper {
     assert(thrown.getMessage.contains("Executor 2 failed the metadata request: " +
       s"${RapidsShuffleServer.failureReason(BufferSendState.Failed)}: " +
       classOf[NoSuchElementException].getName))
+  }
+
+  /** UCX's registration of metadata responses. It uses only its own map, so a mock UCX holds it. */
+  private def metadataResponses(): UCX#ResponseActiveMessageRegistration = {
+    val ucx = mock[UCX]
+    new ucx.ResponseActiveMessageRegistration(metadataResponseAmId)
+  }
+
+  /** Sends `handler`'s metadata request, returning the response and callback it registered. */
+  private def fetchMetadata(requester: Requester,
+      handler: RapidsShuffleFetchHandler): (UCXActiveMessage, UCXAmCallback) = {
+    requester.client.registerPeerErrorListener(handler)
+    requester.client.doFetch(Seq(ShuffleBlockBatchId(1, 7L, 2, 2)), handler)
+    requester.lastRegistered
+  }
+
+  /**
+   * Delivers `reply` for `response` as UCX's receive handler does: it takes what the response's
+   * header holds, and hands the reply only to a request's callback.
+   */
+  private def deliver(responses: UCX#ResponseActiveMessageRegistration,
+      response: UCXActiveMessage, reply: ByteBuffer): Unit = {
+    val callback = responses.getCallback(response.header)
+    if (callback != null && (callback ne UCX.RetiredResponse)) {
+      callback.onSuccess(response,
+        new MetadataTransportBuffer(new RefCountedDirectByteBuffer(directCopy(reply))))
+    }
+  }
+
+  test("a metadata request stops waiting for its response once its reader is done") {
+    val requester = new Requester(spied = true)
+    when(requester.ucx.retireResponseHandler(any(), any())).thenReturn(true)
+    val handler = reader()
+    val (response, callback) = fetchMetadata(requester, handler)
+
+    // the reader's task ends, as after its wait timed out, and no response has come
+    requester.client.unregisterPeerErrorListener(handler)
+
+    // it withdraws its own request: the callback it registered, then the transaction
+    verify(requester.ucx, times(1)).retireResponseHandler(response, callback)
+    verify(requester.connection, times(1)).removeTransaction(any())
+    verify(handler, never()).transferError(any(), any())
+  }
+
+  test("a metadata request whose response took its callback first keeps its transaction") {
+    val requester = new Requester(spied = true)
+    // the progress thread took the callback for the response just before the task ended
+    when(requester.ucx.retireResponseHandler(any(), any())).thenReturn(false)
+    val handler = reader()
+    val (response, callback) = fetchMetadata(requester, handler)
+
+    requester.client.unregisterPeerErrorListener(handler)
+
+    // the response's handling owns the transaction, and closes it
+    verify(requester.ucx, times(1)).retireResponseHandler(response, callback)
+    verify(requester.connection, never()).removeTransaction(any())
+  }
+
+  test("a reply handled before doFetch records its request leaves the header free") {
+    val requester = new Requester(spied = true)
+    val responses = requester.registerResponses()
+    // the reply is handled before request returns, so before doFetch records the request
+    doAnswer { invocation =>
+      val header = invocation.getArgument[UCXActiveMessage](1).header
+      deliver(responses, UCXActiveMessage(metadataResponseAmId, header, forceRndv = false),
+        ShuffleMetadata.buildMetaResponse(Seq(tableMeta(1, 100))))
+      null
+    }.when(requester.ucx).sendActiveMessage(
+      anyLong(), any[UCXActiveMessage](), any[ByteBuffer](), any[UcxCallback]())
+    val handler = reader()
+    val (response, callback) = fetchMetadata(requester, handler)
+    verify(handler, times(1)).start(1)
+
+    requester.client.unregisterPeerErrorListener(handler)
+
+    // the reader's end withdraws the stale entry, which finds the header free and retires
+    // nothing, and the reply's handling already closed the transaction
+    verify(requester.ucx, times(1)).retireResponseHandler(response, callback)
+    verify(requester.connection, times(1)).removeTransaction(any())
+    verify(handler, never()).transferError(any(), any())
+    assert(!responses.addResponseActiveMessageHandler(response.header, mock[UCXAmCallback]))
+  }
+
+  test("a metadata request is withdrawn before the transport cancels its reader, which can " +
+      "throw") {
+    val requester = new Requester
+    when(requester.ucx.retireResponseHandler(any(), any())).thenReturn(true)
+    val handler = reader()
+    val (response, callback) = fetchMetadata(requester, handler)
+    doThrow(new IllegalStateException("cancelling failed in test"))
+      .when(mockTransport).cancelPending(handler)
+
+    intercept[IllegalStateException](requester.client.unregisterPeerErrorListener(handler))
+
+    verify(requester.ucx, times(1)).retireResponseHandler(response, callback)
+  }
+
+  test("a reader that ends withdraws only its own metadata request from a shared client") {
+    val requester = new Requester(spied = true)
+    val responses = requester.registerResponses()
+    val (ended, running) = (reader(), reader())
+    val (endedResponse, endedCallback) = fetchMetadata(requester, ended)
+    val (runningResponse, runningCallback) = fetchMetadata(requester, running)
+
+    requester.client.unregisterPeerErrorListener(ended)
+
+    verify(requester.ucx, times(1)).retireResponseHandler(any(), any())
+    verify(requester.ucx, times(1)).retireResponseHandler(endedResponse, endedCallback)
+    verify(requester.connection, times(1)).removeTransaction(any())
+    // the running reader's request still waits, in the client and in UCX, until its own end
+    requester.client.unregisterPeerErrorListener(running)
+    verify(requester.ucx, times(1)).retireResponseHandler(runningResponse, runningCallback)
+    verify(requester.connection, times(2)).removeTransaction(any())
+    assert(responses.getCallback(runningResponse.header) eq UCX.RetiredResponse)
+  }
+
+  test("a reader whose client closed still withdraws its metadata request when it ends") {
+    val requester = new Requester(spied = true)
+    when(requester.ucx.retireResponseHandler(any(), any())).thenReturn(true)
+    val handler = reader()
+    val (response, callback) = fetchMetadata(requester, handler)
+    // a peer error closes the client, which fails its readers and leaves their requests
+    requester.client.close()
+    verify(handler, times(1)).transferError(any(), any())
+
+    requester.client.unregisterPeerErrorListener(handler)
+
+    verify(requester.ucx, times(1)).retireResponseHandler(response, callback)
+    verify(requester.connection, times(1)).removeTransaction(any())
+  }
+
+  test("a metadata request whose send fails retires its response, not removes it") {
+    val requester = new Requester
+    val handler = reader()
+    val (response, callback) = fetchMetadata(requester, handler)
+    val (_, send) = requester.lastSent
+
+    send.onError(-1, "the send failed in test")
+
+    // the send may have reached the peer before it failed, so a reply may still come
+    verify(requester.ucx, times(1)).retireResponseHandler(response, callback)
+    verify(requester.ucx, never()).unregisterResponseHandler(any())
+    verify(handler, times(1)).transferError(contains("the send failed in test"), isNull())
+  }
+
+  test("a metadata request whose send never left the executor releases its response") {
+    val requester = new Requester
+    val handler = reader()
+    val (response, callback) = fetchMetadata(requester, handler)
+    val (_, send) = requester.lastSent
+
+    send.onError(UCX.NO_ENDPOINT, "the send never left in test")
+
+    // no reply can come, so the header is freed
+    verify(requester.ucx, times(1)).releaseResponseHandler(response, callback)
+    verify(requester.ucx, never()).retireResponseHandler(any(), any())
+    verify(requester.ucx, never()).unregisterResponseHandler(any())
+    verify(handler, times(1)).transferError(contains("the send never left in test"), isNull())
+  }
+
+  test("a metadata request whose send fails after its withdrawal is closed once") {
+    val requester = new Requester
+    val responses = requester.registerResponses()
+    val handler = reader()
+    val (response, _) = fetchMetadata(requester, handler)
+    val (_, send) = requester.lastSent
+    requester.client.unregisterPeerErrorListener(handler)
+    verify(requester.ucx, times(1)).retireResponseHandler(any(), any())
+
+    // The send's callback releases the request buffer and the transaction, which the withdrawal
+    // leaves to it. A second release of either would be logged, or would reach the reader.
+    val logs = LogCaptureUtils.captureLogsFrom(Seq(classOf[UCXTransaction].getName)) {
+      send.onError(-1, "the send failed in test")
+    }
+    verify(handler, times(1)).transferError(any(), any())
+    verify(handler, times(1)).transferError(contains("the send failed in test"), isNull())
+    assert(!logs.exists(_.contains("Detected an exception from user code")))
+    // the reply may still come, so the withdrawn request's header stays held
+    assert(responses.getCallback(response.header) eq UCX.RetiredResponse)
+  }
+
+  test("a withdrawn metadata request whose send then never left frees its header") {
+    val requester = new Requester
+    val responses = requester.registerResponses()
+    val handler = reader()
+    val (response, _) = fetchMetadata(requester, handler)
+    val (_, send) = requester.lastSent
+    requester.client.unregisterPeerErrorListener(handler)
+    verify(requester.ucx, times(1)).retireResponseHandler(any(), any())
+
+    send.onError(UCX.SEND_TASK_FAILED, "the send never left in test")
+
+    // no reply can come, so the marker goes, and a newer request can take the header
+    assert(!responses.addResponseActiveMessageHandler(response.header, mock[UCXAmCallback]))
+  }
+
+  test("a late reply to a withdrawn metadata request does not reach a newer request") {
+    val requester = new Requester
+    val responses = requester.registerResponses()
+    // The first request draws transaction 5. The next draws 5 + 2^32, whose low 32 bits, and so
+    // its header, repeat the first's, as once the executor has run 2^32 transactions.
+    val wrap = 1L << 32
+    when(requester.ucx.getNextTransactionId).thenReturn(5L, 5L + wrap, 6L + wrap, 7L + wrap)
+
+    // the old reader's request goes unanswered, and its task ends
+    val old = reader()
+    val (oldResponse, _) = fetchMetadata(requester, old)
+    requester.client.unregisterPeerErrorListener(old)
+
+    // a newer reader's request draws the transaction id whose low 32 bits repeat
+    val current = reader()
+    val (currentResponse, currentCallback) = fetchMetadata(requester, current)
+    verify(current, never()).transferError(any(), any())
+    // and the request carries the header its response registered, which the server echoes
+    assertResult(currentResponse.header)(requester.lastSent._1.header)
+
+    // the old reply arrives now
+    deliver(responses, oldResponse, ShuffleMetadata.buildMetaResponse(
+      Seq(tableMeta(11, 100), tableMeta(12, 100), tableMeta(13, 100))))
+
+    // the newer reader gets none of the old tables, and its own request still waits: once its
+    // reader is done, the withdrawal finds its callback under the header that it registered
+    verify(current, never()).start(anyInt())
+    verify(current, never()).transferError(any(), any())
+    requester.client.unregisterPeerErrorListener(current)
+    verify(requester.ucx, times(1)).retireResponseHandler(currentResponse, currentCallback)
+    assert(responses.getCallback(currentResponse.header) eq UCX.RetiredResponse)
+  }
+
+  test("a withdrawn request's response header holds a marker until its reply takes it") {
+    val responses = metadataResponses()
+    val (withdrawn, newer) = (mock[UCXAmCallback], mock[UCXAmCallback])
+    responses.addResponseActiveMessageHandler(1L, withdrawn)
+    assert(responses.retire(1L, withdrawn))
+    // a newer request that draws the header is refused it, and the marker stays
+    assert(responses.addResponseActiveMessageHandler(1L, newer))
+    // the reply takes the marker, once, which frees the header
+    assert(responses.getCallback(1L) eq UCX.RetiredResponse)
+    assert(responses.getCallback(1L) == null)
+    assert(!responses.addResponseActiveMessageHandler(1L, newer))
+  }
+
+  test("a withdrawal that loses to the reply leaves a newer request's callback") {
+    val responses = metadataResponses()
+    val (answered, newer) = (mock[UCXAmCallback], mock[UCXAmCallback])
+    responses.addResponseActiveMessageHandler(1L, answered)
+    assert(responses.getCallback(1L) eq answered)
+    responses.addResponseActiveMessageHandler(1L, newer)
+    // a header that a live request holds still refuses another
+    intercept[IllegalArgumentException](
+      responses.addResponseActiveMessageHandler(1L, mock[UCXAmCallback]))
+
+    assert(!responses.retire(1L, answered))
+    assert(responses.getCallback(1L) eq newer)
+  }
+
+  test("a removal by header alone frees a live header and leaves a withdrawn one held") {
+    val responses = metadataResponses()
+    val (live, withdrawn) = (mock[UCXAmCallback], mock[UCXAmCallback])
+    responses.addResponseActiveMessageHandler(1L, live)
+    responses.addResponseActiveMessageHandler(2L, withdrawn)
+    responses.retire(2L, withdrawn)
+
+    responses.removeResponseActiveMessageHandler(1L)
+    responses.removeResponseActiveMessageHandler(2L)
+
+    assert(responses.getCallback(2L) eq UCX.RetiredResponse)
+    assert(responses.getCallback(1L) == null)
+  }
+
+  test("a release frees its own request's header, held by its callback or its marker") {
+    val responses = metadataResponses()
+    val (sent, withdrawn, newer) = (mock[UCXAmCallback], mock[UCXAmCallback], mock[UCXAmCallback])
+    responses.addResponseActiveMessageHandler(1L, sent)
+    responses.addResponseActiveMessageHandler(2L, withdrawn)
+    assert(responses.retire(2L, withdrawn))
+    responses.addResponseActiveMessageHandler(3L, newer)
+
+    responses.release(1L, sent)
+    responses.release(2L, withdrawn)
+    // a release by a request that does not hold the header leaves its holder
+    responses.release(3L, sent)
+
+    assert(responses.getCallback(3L) eq newer)
+    assert(responses.getCallback(1L) == null)
+    assert(responses.getCallback(2L) == null)
+  }
+
+  // past the task attempt ids that other suites register completion callbacks under, since
+  // ScalableTaskCompletion keys a map that the whole JVM shares by that id
+  private val taskAttempts = new AtomicLong(1000L)
+
+  /**
+   * Runs `body` with a reader of one block from each of `clients`' peers, built while a task
+   * context is set, as in a task, so that it registers its cleaner. The context's
+   * `markTaskComplete` ends the task, and nothing stays registered for it after `body`.
+   */
+  private def withReaderInTask(clients: RapidsShuffleClient*)(
+      body: (RapidsShuffleIterator, MockTaskContext) => Unit): Unit = {
+    val taskAttemptId = taskAttempts.incrementAndGet()
+    val context = new MockTaskContext(taskAttemptId, partitionId = 0)
+    val blocksByAddress = clients.zipWithIndex.map { case (client, i) =>
+      val peer = RapidsShuffleTestHelper.makeMockBlockManager(s"${i + 2}", s"${i + 2}")
+      when(mockTransport.makeClient(peer)).thenReturn(client)
+      (peer, Seq[(BlockId, Long, Int)]((ShuffleBlockBatchId(1, i, 1, 1), 100L, i)))
+    }
+    TestUtils.withTaskContext(context) {
+      body(new RapidsShuffleIterator(
+        RapidsShuffleTestHelper.makeMockBlockManager("1", "1"), mockConf, mockTransport,
+        blocksByAddress.toArray[(BlockManagerId, collection.Seq[(BlockId, Long, Int)])],
+        testMetricsUpdater, Array.empty, taskAttemptId, mockCatalog, timeoutSeconds = 5L),
+        context)
+    }
+  }
+
+  test("a task that ends with one of two peers answered withdraws the other's metadata " +
+      "request") {
+    val (answering, silent) = (new Requester, new Requester)
+    val answered = answering.registerResponses()
+    silent.registerResponses()
+    withReaderInTask(answering.client, silent.client) { (iterator, task) =>
+      iterator.start()
+      // one peer's reply comes, with a table to transfer
+      val (answeredResponse, _) = answering.lastRegistered
+      deliver(answered, answeredResponse,
+        ShuffleMetadata.buildMetaResponse(Seq(tableMeta(1, 100))))
+      val queued = ArgumentCaptor.forClass(classOf[Seq[PendingTransferRequest]])
+      verify(mockTransport, times(1)).queuePending(queued.capture())
+
+      // the task succeeds before the other peer answers, as when a limit stops reading
+      task.markTaskComplete()
+
+      val (unanswered, unansweredCallback) = silent.lastRegistered
+      verify(silent.ucx, times(1)).retireResponseHandler(unanswered, unansweredCallback)
+      verify(answering.ucx, never()).retireResponseHandler(any(), any())
+      // and the answered peer's reader reports itself done, which the transport's admit refuses
+      assert(queued.getValue.head.handler.isDone)
+    }
+  }
+
+  test("a reader's cleaner reaches every peer when a step throws, and rethrows the first " +
+      "failure") {
+    val (first, second) = (mock[RapidsShuffleClient], mock[RapidsShuffleClient])
+    withReaderInTask(first, second) { (iterator, task) =>
+      iterator.start()
+      val cancelFailed = new IllegalStateException("cancelling failed in test")
+      val unregisterFailed = new IllegalStateException("unregistering failed in test")
+      doThrow(cancelFailed).when(first).cancelPending(any())
+      // the same instance again, as a preallocated JVM error can be, which cannot suppress itself
+      doThrow(cancelFailed).when(second).cancelPending(any())
+      doThrow(unregisterFailed).when(first).unregisterPeerErrorListener(any())
+
+      val thrown = intercept[IllegalStateException](task.markTaskComplete())
+
+      assert(thrown eq cancelFailed)
+      assertResult(Seq(unregisterFailed))(thrown.getSuppressed.toSeq)
+      Seq(first, second).foreach { client =>
+        verify(client, times(1)).unregisterPeerErrorListener(any())
+      }
+    }
+  }
+
+  test("a reader's cleaner reaches every peer when closing a batch it received throws") {
+    val (first, second) = (mock[RapidsShuffleClient], mock[RapidsShuffleClient])
+    withReaderInTask(first, second) { (iterator, task) =>
+      iterator.start()
+      // the first peer's reader received two batches that the task never took
+      val handler = ArgumentCaptor.forClass(classOf[RapidsShuffleFetchHandler])
+      verify(first).doFetch(any(), handler.capture())
+      val (received, alsoReceived) = (mock[RapidsShuffleHandle], mock[RapidsShuffleHandle])
+      val closeFailed = new IllegalStateException("closing a batch failed in test")
+      doThrow(closeFailed).when(received).close()
+      handler.getValue.start(2)
+      assert(handler.getValue.batchReceived(received))
+      assert(handler.getValue.batchReceived(alsoReceived))
+
+      val thrown = intercept[IllegalStateException](task.markTaskComplete())
+
+      assert(thrown eq closeFailed)
+      Seq(first, second).foreach { client =>
+        verify(client, times(1)).cancelPending(any())
+        verify(client, times(1)).unregisterPeerErrorListener(any())
+      }
+      // the first batch's throwing close did not skip the second's
+      verify(alsoReceived, times(1)).close()
+    }
+  }
+
+  test("a reader's cleaner reaches every peer when its hasNext check throws") {
+    val client = mock[RapidsShuffleClient]
+    withReaderInTask(client) { (iterator, task) =>
+      iterator.start()
+      val handler = ArgumentCaptor.forClass(classOf[RapidsShuffleFetchHandler])
+      verify(client).doFetch(any(), handler.capture())
+      handler.getValue.start(1)
+      assert(handler.getValue.batchReceived(mock[RapidsShuffleHandle]))
+      assert(iterator.pollForResult(0).isDefined)
+      assert(!iterator.hasNext)
+      // a second start for a drained reader unbalances its counts
+      handler.getValue.start(1)
+
+      val thrown = intercept[IllegalStateException](task.markTaskComplete())
+
+      assert(thrown.getMessage.contains("were expected"))
+      verify(client, times(1)).cancelPending(any())
+      verify(client, times(1)).unregisterPeerErrorListener(any())
+    }
+  }
+
+  test("a reader's cleaner restores an interrupt that it suppressed, after its last step") {
+    val (first, second) = (mock[RapidsShuffleClient], mock[RapidsShuffleClient])
+    try {
+      withReaderInTask(first, second) { (iterator, task) =>
+        iterator.start()
+        val cancelFailed = new IllegalStateException("cancelling failed in test")
+        doThrow(cancelFailed).when(first).cancelPending(any())
+        // an interrupted wait in a later step, which doThrow cannot stub for a Scala method
+        doAnswer(_ => throw new InterruptedException("interrupted in test"))
+          .when(second).cancelPending(any())
+        var interruptedAtLastStep: Option[Boolean] = None
+        doAnswer { _ =>
+          interruptedAtLastStep = Some(Thread.currentThread().isInterrupted)
+          null
+        }.when(second).unregisterPeerErrorListener(any())
+
+        val thrown = intercept[IllegalStateException](task.markTaskComplete())
+
+        assert(thrown eq cancelFailed)
+        assert(thrown.getSuppressed.exists(_.isInstanceOf[InterruptedException]))
+        // restored once every step ran, so that it cut none short
+        assertResult(Some(false))(interruptedAtLastStep)
+        assert(Thread.currentThread().isInterrupted)
+      }
+    } finally {
+      // Clears the status the cleaner restored, which would fail the tests after this one, also
+      // when the test fails early and withTaskContext's reset runs the cleaner.
+      Thread.interrupted()
+    }
   }
 }

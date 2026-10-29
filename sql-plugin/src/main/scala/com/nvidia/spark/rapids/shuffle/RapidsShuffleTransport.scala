@@ -151,6 +151,13 @@ trait ClientConnection {
    * @return the executorId as a long
    */
   def getPeerExecutorId: Long
+
+  /**
+   * Stops waiting for the response to `tx`, a request whose reader is done. A connection that
+   * cannot withdraw a request leaves it waiting.
+   * @param tx a transaction that `request` returned
+   */
+  def cancelRequest(tx: Transaction): Unit = {}
 }
 
 object TransactionStatus extends Enumeration {

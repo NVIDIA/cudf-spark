@@ -72,6 +72,12 @@ trait RapidsShuffleFetchHandler {
    * Called to get the task attempt ids that this shuffle handler is for.
    */
   def getTaskIds: Array[Long]
+
+  /**
+   * Whether the reader's task has completed, after which the transport queues none of its
+   * transfers. It is read without the reader's lock.
+   */
+  def isDone: Boolean = false
 }
 
 /**
