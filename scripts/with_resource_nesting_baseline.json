@@ -104,11 +104,6 @@
       "resource": "withResource(getNullScalar)"
     },
     {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/execution/GpuHashJoin.scala",
-      "fingerprint": "e94cecefc0efd9c40217",
-      "resource": "withResource(builtTable.filter(trackerTab.getColumn(0)))"
-    },
-    {
       "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/stringFunctions.scala",
       "fingerprint": "42399f8595279597588c",
       "resource": "withResource(extracted.replaceListChild(normalizedCaptures))"

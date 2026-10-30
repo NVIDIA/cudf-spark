@@ -20,8 +20,8 @@
 #   LOCAL_JAR_PATH: Location of the RAPIDS jars
 #   SPARK_CONF: Spark configuration parameters
 #   BASE_SPARK_VERSION: Spark version [3.2.1, 3.3.0]. Default is pulled from current instance.
-#   SHUFFLE_SPARK_SHIM: Set the default value for the shuffle shim. For databricks versions, append
-#                       db. Example: spark330 => spark330db
+#   SHUFFLE_SPARK_SHIM: Set the default value for the shuffle shim. For Databricks
+#                       versions, use the matching buildver, such as spark350db143
 #   TEST_MODE: Can be one of the following (`DEFAULT` is the default value):
 #       - DEFAULT: all tests except cudf_udf tests
 #       - DELTA_LAKE_ONLY: delta_lake tests only
@@ -63,14 +63,13 @@ source jenkins/databricks/setup.sh
 # Init common variables like SPARK_HOME, spark configs
 source jenkins/databricks/common_vars.sh
 
-# TODO(#16317): Remove readiness-only mode when DBR 18.3 integration tests are enabled.
-# Keep the permanent startup checks that run before product tests.
 # The startup hook identifies CI callers; manual runs keep their historical behavior.
-# Set SPARK_READINESS_ONLY=0 explicitly to run integration tests in CI.
-if [[ -z "${SPARK_READINESS_ONLY:-}" && -n "${SPARK_STARTUP_CHECK:-}" &&
+# Enable native DBR 18.3 product tests while Delta Lake CI support is tracked in #16282.
+DBR183_NON_DELTA_CI=0
+if [[ -n "${SPARK_STARTUP_CHECK:-}" &&
       "${PYSP_TEST_spark_databricks_clusterUsageTags_sparkVersion:-}" == 18.3.* &&
       ("$TEST_MODE" == "DEFAULT" || "$TEST_MODE" == "CI_PART1" || "$TEST_MODE" == "CI_PART2") ]]; then
-    SPARK_READINESS_ONLY=1
+    DBR183_NON_DELTA_CI=1
 fi
 SPARK_READINESS_ONLY=${SPARK_READINESS_ONLY:-0}
 if [[ "$SPARK_READINESS_ONLY" == "1" ]]; then
@@ -140,7 +139,8 @@ run_pyarrow_tests() {
 
 # Move selected tests to CI_PART2 so the split CI jobs finish closer together.
 # Keep DEFAULT unchanged so manual/default runs still cover everything in the historical order.
-CI_PART2_BALANCED_TESTS="json_test orc_test parquet_test sort_test window_function_test"
+# Include files whose names also match the CI_PART1 substring expression.
+CI_PART2_BALANCED_TESTS="json_test get_json_test orc_test parquet_test parquet_testing_test sort_test window_function_test"
 CI_PART2_BALANCED_TEST_EXPR="${CI_PART2_BALANCED_TESTS// / or }"
 
 ## Separate the integration tests into "CI_PART1" and "CI_PART2", run each part in parallel on separate Databricks clusters to speed up the testing process.
@@ -232,10 +232,13 @@ if [[ "$(pwd)" == "$SOURCE_PATH" ]]; then
     fi
 
     if [[ "$TEST_MODE" == "DEFAULT" || $TEST_MODE == "CI_PART2" || "$TEST_MODE" == "DELTA_LAKE_ONLY" ]]; then
-        ## Run Delta Lake tests
-        DRIVER_MEMORY="4g" \
-            bash integration_tests/run_pyspark_from_build.sh --runtime_env="databricks" \
-                -m "delta_lake" --delta_lake --test_type=$TEST_TYPE
+        if [[ "$DBR183_NON_DELTA_CI" == "1" ]]; then
+            echo "DBR 18.3 CI: Delta Lake integration tests remain disabled (#16282)"
+        else
+            DRIVER_MEMORY="4g" \
+                bash integration_tests/run_pyspark_from_build.sh --runtime_env="databricks" \
+                    -m "delta_lake" --delta_lake --test_type=$TEST_TYPE
+        fi
     fi
 
     if [[ "$TEST_MODE" == "DEFAULT" || $TEST_MODE == "CI_PART2" || "$TEST_MODE" == "MULTITHREADED_SHUFFLE" ]]; then

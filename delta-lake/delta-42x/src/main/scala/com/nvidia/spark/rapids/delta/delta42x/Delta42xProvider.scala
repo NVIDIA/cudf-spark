@@ -35,7 +35,7 @@ import org.apache.spark.sql.delta.catalog.{DeltaCatalog, DeltaTableV2}
 import org.apache.spark.sql.delta.commands.{DeleteCommand, MergeIntoCommand, OptimizeTableCommand,
   UpdateCommand, WriteIntoDelta}
 import org.apache.spark.sql.delta.rapids.DeltaRuntimeShim
-import org.apache.spark.sql.delta.serverSidePlanning.ServerSidePlannedTable
+import org.apache.spark.sql.delta.serverSidePlanning.{ServerSidePlannedScan, ServerSidePlannedTable}
 import org.apache.spark.sql.execution.command.RunnableCommand
 import org.apache.spark.sql.execution.datasources.FileFormat
 import org.apache.spark.sql.execution.datasources.v2.{AppendDataExecV1, AtomicCreateTableAsSelectExec,
@@ -45,7 +45,12 @@ import org.apache.spark.sql.execution.datasources.v2.rapids.{GpuAtomicCreateTabl
 
 object Delta42xProvider extends DeltaProviderBase with Logging {
 
-  override def getScans: Map[Class[_ <: Scan], ScanRule[_ <: Scan]] = DeltaV2ScanRule.rules
+  override def getScans: Map[Class[_ <: Scan], ScanRule[_ <: Scan]] = {
+    val rule = GpuOverrides.scan[ServerSidePlannedScan](
+      "Delta server-side planned Parquet scan",
+      (scan, conf, parent, r) => new ServerSidePlannedScanMeta(scan, conf, parent, r))
+    DeltaV2ScanRule.rules + (classOf[ServerSidePlannedScan] -> rule)
+  }
 
   override protected def getCDFRelationStrategy = Delta42xCDFRelationStrategy
 

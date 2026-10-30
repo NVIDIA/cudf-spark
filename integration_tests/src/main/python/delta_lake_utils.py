@@ -147,6 +147,11 @@ def is_oss_delta_lake_43():
             and _loaded_delta_lake_version() == "4.3.0")
 
 
+def is_oss_delta_lake_40_to_43():
+    return (not is_databricks_runtime()
+            and _loaded_delta_lake_version() in ("4.0.0", "4.0.1", "4.1.0", "4.2.0", "4.3.0"))
+
+
 def is_oss_delta_lake_41_to_43():
     return (not is_databricks_runtime()
             and _loaded_delta_lake_version() in ("4.1.0", "4.2.0", "4.3.0"))
@@ -545,7 +550,7 @@ def assert_delta_row_tracking_dml(spark_tmp_path, dml_sql, conf,
     with_cpu_session(lambda spark: assert_gpu_and_cpu_latest_delta_log_equivalent(spark, data_path),
                      conf=conf)
 
-def _assert_oss_delta_40_merge_metadata_broadcasts(callback, captured_plans):
+def _assert_oss_delta_dv_metadata_broadcasts(callback, captured_plans):
     """Allow CPU broadcasts only for Delta's table-state/touched-file join."""
     subquery_expression_class = spark_jvm().java.lang.Class.forName(
         "org.apache.spark.sql.execution.ExecSubqueryExpression")
@@ -678,10 +683,10 @@ def assert_rapids_delta_write(
         if expected_command and expected_command.startswith(
                 ("GpuMergeIntoCommand", "GpuDeleteCommand", "GpuUpdateCommand")) and \
                 "BroadcastHashJoinExec" in get_non_gpu_allowed() and \
-                (is_oss_delta_lake_40() or is_oss_delta_lake_42_or_43()):
+                is_oss_delta_lake_40_to_43():
             # OSS Delta uses a CPU broadcast join to attach stats to the table-state
             # metadata during DV DML. Keep the allowance confined to that metadata query.
-            _assert_oss_delta_40_merge_metadata_broadcasts(callback, captured_plans)
+            _assert_oss_delta_dv_metadata_broadcasts(callback, captured_plans)
         for cls in expected_classes or ():
             assert any(
                 callback.contains(plan, cls) for plan in captured_plans), \

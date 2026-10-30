@@ -26,7 +26,7 @@ from iceberg import (
     update_partition_transforms_distributed, supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON,
     supports_iceberg_row_lineage_inheritance, ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON,
     row_lineage_df, rapids_reader_types)
-from marks import allow_non_gpu, allow_non_gpu_conditional, disable_ansi_mode, iceberg, ignore_order, datagen_overrides
+from marks import allow_non_gpu, allow_non_gpu_conditional, disable_ansi_mode, iceberg, ignore_order, datagen_overrides, iceberg_fast_test
 from spark_session import is_spark_400_or_later, with_cpu_session, with_gpu_session
 
 pytestmark = iceberg_unsupported_mark
@@ -131,6 +131,7 @@ def do_update_test(spark_tmp_table_factory, update_sql_func, data_gen_func=None,
     assert_equal_with_local_sort(cpu_data, gpu_data)
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.datagen_overrides(seed=UPDATE_TEST_SEED, reason=UPDATE_TEST_SEED_OVERRIDE_REASON)
@@ -173,6 +174,7 @@ def test_iceberg_update_encryption_fallback(spark_tmp_table_factory, update_mode
         base_table_name, [fallback_exec], conf=iceberg_update_v3_enabled_conf)
 
 
+@iceberg_fast_test
 @allow_non_gpu("ReplaceDataExec", "WriteDeltaExec", "BatchScanExec", "ColumnarToRowExec")
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
@@ -207,6 +209,7 @@ def test_iceberg_update_v3_table_fallback(
             {"spark.rapids.sql.format.iceberg.v3.enabled": "false"}))
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
@@ -245,6 +248,7 @@ def test_iceberg_update_v3_gpu_writes_deletion_vectors(spark_tmp_table_factory):
     assert_equal_with_local_sort(cpu_data, gpu_data)
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(
@@ -271,6 +275,7 @@ def test_iceberg_v3_row_lineage_update(spark_tmp_table_factory, reader_type):
         })
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @allow_non_gpu("BatchScanExec")
@@ -321,6 +326,7 @@ def _do_test_iceberg_update_partitioned_table_single_column(
     )
 
 
+@iceberg_fast_test
 @iceberg
 @datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids-jni/issues/4016')
 @ignore_order(local=True)
@@ -651,6 +657,7 @@ def test_iceberg_update_mor_fallback_writedelta_disabled(format_version, spark_t
 
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.parametrize(

@@ -1413,6 +1413,52 @@ def test_delta_replace_where_save_as_table_preserves_partitioning(spark_tmp_tabl
     assert gpu_partition_columns == cpu_partition_columns
 
 
+@allow_non_gpu('DataWritingCommandExec', 'WriteFilesExec', *delta_meta_allow)
+@allow_non_gpu_conditional(is_databricks173_or_later(), 'AppendDataExecV1')
+@allow_non_gpu_conditional(is_databricks_runtime(), 'DeltaInvariantCheckerExec')
+@delta_lake
+@ignore_order(local=True)
+@delta_rtas_truncate_skip
+def test_delta_replace_where_save_as_table_preserves_unmatched_rows(spark_tmp_table_factory):
+    cpu_table = spark_tmp_table_factory.get()
+    gpu_table = spark_tmp_table_factory.get()
+    confs = copy_and_update(writer_confs, delta_writes_enabled_conf)
+
+    def create_initial_tables(spark):
+        for table in [cpu_table, gpu_table]:
+            spark.sql(
+                f"CREATE TABLE {table} (record_id BIGINT, region STRING, amount DOUBLE) "
+                "USING DELTA PARTITIONED BY (region)")
+            spark.sql(
+                f"INSERT INTO {table} VALUES (0L, 'NA', 10.0D), (1L, 'EMEA', 20.0D), "
+                "(2L, 'NA', 30.0D), (3L, 'APAC', 40.0D)")
+
+    def replace_na_partition(spark, table):
+        replacement = spark.sql(
+            "SELECT 100L AS record_id, 'NA' AS region, 100.0D AS amount")
+        # Leave partitionBy unspecified, as in the original overwrite regression.
+        (replacement.write.format("delta").mode("overwrite")
+         .option("replaceWhere", "region = 'NA'")
+         .saveAsTable(table))
+
+    with_cpu_session(create_initial_tables, conf=confs)
+    with_cpu_session(lambda spark: replace_na_partition(spark, cpu_table), conf=confs)
+    # DBR may use its native CPU writer for partitioned tables. Require the GPU
+    # atomic replacement on every runtime, and the GPU data writer on OSS Delta.
+    gpu_write_classes = ["GpuAtomicReplaceTableAsSelectExec"]
+    if not is_databricks_runtime():
+        gpu_write_classes += delta_write
+    assert_rapids_delta_write(
+        lambda spark: replace_na_partition(spark, gpu_table), conf=confs,
+        required_gpu_classes=gpu_write_classes, require_non_empty=True)
+
+    cpu_rows = with_cpu_session(
+        lambda spark: spark.table(cpu_table).orderBy("record_id").collect(), conf=confs)
+    gpu_rows = with_cpu_session(
+        lambda spark: spark.table(gpu_table).orderBy("record_id").collect(), conf=confs)
+    assert_equal(cpu_rows, gpu_rows)
+
+
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)

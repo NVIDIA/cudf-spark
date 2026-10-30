@@ -138,11 +138,26 @@ class SourceResolverTest(unittest.TestCase):
         for module in modules:
             variants, _ = scan_module_sources(module, targets)
             for graph in graphs:
-                # Two existing RapidsErrorUtils.scala variants both claim 400db173.
-                # The inspector correctly rejects that ambiguity; keep other targets
-                # covered until the conflicting annotations are repaired separately.
-                selected_targets = [target for target in graph if target != '400db173']
-                validate_legacy_shadow(graph, variants, selected_targets)
+                validate_legacy_shadow(graph, variants)
+
+    def test_repository_rapids_error_utils_owners(self):
+        graphs = (load_source_graph(str(ROOT / 'pom.xml')),
+                  load_source_graph(str(ROOT / 'scala2.13' / 'pom.xml')))
+        targets = set(graphs[0]) | set(graphs[1])
+        variants, _ = scan_module_sources(str(ROOT / 'sql-plugin'), targets)
+        logical = 'src/main/scala/org/apache/spark/sql/rapids/shims/RapidsErrorUtils.scala'
+        expected = {
+            '350db143': 'spark350db143',
+            '400db173': 'spark350db143',
+            '410db183': 'spark350db143',
+            '400': 'spark400',
+            '401': 'spark400',
+        }
+        for graph in graphs:
+            for target, owner in expected.items():
+                if target in graph:
+                    selected = resolve_sources(graph, variants, target)[logical]
+                    self.assertIn('/src/main/%s/' % owner, selected.physical_path)
 
     def test_source_inspector_uses_candidate_lineage_and_infers_scala_tree(self):
         command = [str(ROOT / 'build' / 'shimpler'), 'sources', '--target', '359',

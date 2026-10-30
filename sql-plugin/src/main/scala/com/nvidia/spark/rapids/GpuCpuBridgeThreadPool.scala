@@ -26,15 +26,6 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 
 /**
- * Scheduling priority of a CPU bridge task. Lower priority value runs first; ties break FIFO
- * by submitTime.
- */
-private[rapids] trait CpuBridgeTaskPriority {
-  def priority: Long
-  def submitTime: Long
-}
-
-/**
  * A task submitted to the CPU bridge thread pool with priority information.
  */
 case class PrioritizedCpuBridgeTask[T](
