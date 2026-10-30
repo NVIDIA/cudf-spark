@@ -412,7 +412,7 @@ def test_jit_add_multiply(data_gen):
 def test_jit_partial_project_with_unique_unsupported_expression(data_gen):
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: binary_op_df(spark, data_gen).select(
-            (f.col('a') + f.col('b')) - (f.col('a') * f.col('b'))),
+            f.greatest(f.col('a') + f.col('b'), f.col('a') * f.col('b'))),
         exist_classes="GpuProject",
         non_exist_classes="GpuProjectAst",
         conf=_project_ast_jit_enabled_conf)
@@ -488,8 +488,8 @@ def test_jit_mixed_project_expressions(data_gen, tiered_project_enabled):
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: binary_op_df(spark, data_gen).select(
             (f.col('a') + f.col('b')).alias('jit'),
-            (f.col('a') - f.col('b')).alias('gpu'),
-            ((f.col('a') * f.col('b')) - f.col('a')).alias('mixed')),
+            f.greatest(f.col('a'), f.col('b')).alias('gpu'),
+            f.greatest(f.col('a') * f.col('b'), f.col('a')).alias('mixed')),
         exist_classes=r"GpuProject.*AST_JIT.*AS jit.*AS gpu.*AS mixed",
         non_exist_classes=r"GpuProjectAst,AS gpu.*AST_JIT",
         conf=copy_and_update(_project_ast_jit_enabled_conf, {
@@ -502,9 +502,9 @@ def test_jit_and_legacy_ast_mixed_project_expressions(data_gen):
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: binary_op_df(spark, data_gen).select(
             (f.col('a') + f.col('b')).alias('jit'),
-            ((f.col('a') * f.col('a')) - f.col('b')).alias('legacy'),
-            ((f.col('a') + f.col('b')) -
-                (f.col('a') * f.col('b'))).alias('mixed')),
+            (f.col('a') * f.col('a')).bitwiseXOR(f.col('b')).alias('legacy'),
+            (f.col('a') + f.col('b')).bitwiseXOR(
+                f.col('a') * f.col('b')).alias('mixed')),
         exist_classes=(
             r"GpuProject.*AST_JIT.*AS jit.*AST\(.*AS legacy.*"
             r"AST\(.*AS mixed,GpuProjectAstExpression"),
@@ -533,8 +533,8 @@ def test_project_ast_keeps_skipped_side_effects(expr, backend):
         project, exist_classes='GpuProjectExec', conf=conf)
 
 @pytest.mark.parametrize('data_gen', [int_gen, long_gen], ids=idfn)
-# The first remainder keeps a + b inline in both outputs; the second materializes it for both.
-@pytest.mark.parametrize('legacy_expr', ['(a + b) - a', '(a + b) - (a * b)'], ids=idfn)
+# Both legacy roots share a + b with the JIT output; the second also has a JIT-capable sibling.
+@pytest.mark.parametrize('legacy_expr', ['(a + b) ^ a', '(a + b) ^ (a * b)'], ids=idfn)
 @disable_ansi_mode
 def test_cross_backend_shared_subtree(data_gen, legacy_expr):
     assert_cpu_and_gpu_are_equal_collect_with_capture(
@@ -542,6 +542,30 @@ def test_cross_backend_shared_subtree(data_gen, legacy_expr):
             f'{legacy_expr} as legacy', '(a + b) * b as jit'),
         exist_classes=r'GpuProject.*AST\(.*AS legacy.*AST_JIT.*AS jit',
         conf=_project_ast_jit_and_legacy_enabled_conf)
+
+
+@pytest.mark.parametrize('data_gen', [byte_gen, short_gen, int_gen, long_gen], ids=idfn)
+@disable_ansi_mode
+def test_jit_wrapping_integral_arithmetic(data_gen):
+    # The special cases include the minimum value, which negation and abs wrap. abs(a + b) checks
+    # that a narrow intermediate wraps before abs.
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: binary_op_df(spark, data_gen).selectExpr(
+            '(a - b) * a AS sub_mul', '-a AS neg', 'abs(b) AS abs', 'abs(a + b) AS abs_sum'),
+        exist_classes=(r'GpuProject.*AST_JIT.*AS sub_mul.*AST_JIT.*AS neg.*AST_JIT.*AS abs.*'
+                       r'AST_JIT.*AS abs_sum'),
+        non_exist_classes='GpuProjectAst',
+        conf=_project_ast_jit_enabled_conf)
+
+@pytest.mark.parametrize('narrow_gen', [byte_gen, short_gen, int_gen], ids=idfn)
+@disable_ansi_mode
+def test_jit_integral_widening_cast(narrow_gen):
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: two_col_df(spark, narrow_gen, long_gen).selectExpr(
+            'a + b AS widened_sum', 'b * a AS widened_product'),
+        exist_classes=r'GpuProject.*AST_JIT.*AS widened_sum.*AST_JIT.*AS widened_product',
+        non_exist_classes='GpuProjectAst',
+        conf=_project_ast_jit_enabled_conf)
 
 
 # Each descriptor contains a list of data generators and a corresponding boolean
