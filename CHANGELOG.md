@@ -1,5 +1,5 @@
 # Change log
-Generated on 2026-10-26
+Generated on 2026-10-30
 
 ## Release 26.10
 
@@ -40,6 +40,8 @@ Generated on 2026-10-26
 ### Bugs Fixed
 |||
 |:---|:---|
+|[#16644](https://github.com/NVIDIA/cudf-spark/issues/16644)|[BUG][26.10] Delta 4.1 MERGE release tests fail on CPU BroadcastHashJoinExec|
+|[#16473](https://github.com/NVIDIA/cudf-spark/issues/16473)|[BUG] Iceberg metadata-only file combining can produce incorrect partition values|
 |[#16396](https://github.com/NVIDIA/cudf-spark/issues/16396)|[BUG] Multithreaded reader leaks host buffers of deferred combine files when closed early|
 |[#16395](https://github.com/NVIDIA/cudf-spark/issues/16395)|[BUG] Multithreaded Parquet reader in combine mode drops rows from files that contain none of the requested columns|
 |[#11095](https://github.com/NVIDIA/cudf-spark/issues/11095)|[FEA] Force use PERFILE scan in low shuffle merge.|
@@ -176,6 +178,9 @@ Generated on 2026-10-26
 ### PRs
 |||
 |:---|:---|
+|[#16647](https://github.com/NVIDIA/cudf-spark/pull/16647)|Preserve Delta 4.3 partitioning on saveAsTable overwrite|
+|[#16646](https://github.com/NVIDIA/cudf-spark/pull/16646)|Fix Delta 4.x DV MERGE metadata assertions|
+|[#16215](https://github.com/NVIDIA/cudf-spark/pull/16215)|Update changelog for the v26.10 release [skip ci]|
 |[#16499](https://github.com/NVIDIA/cudf-spark/pull/16499)|Fix Iceberg metadata-only file combining|
 |[#16483](https://github.com/NVIDIA/cudf-spark/pull/16483)|Update JNI to 26.10.1 and backport Spark 3.3 test fixes|
 |[#16467](https://github.com/NVIDIA/cudf-spark/pull/16467)|Fix missing rows when combining batches with empty columns in multithreaded Parquet readers|
