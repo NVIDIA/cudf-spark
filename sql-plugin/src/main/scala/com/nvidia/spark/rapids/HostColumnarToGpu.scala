@@ -16,16 +16,18 @@
 
 package com.nvidia.spark.rapids
 
-import java.{util => ju}
-import java.nio.ByteBuffer
+import java.nio.{ByteBuffer, ByteOrder}
+import java.util.function.LongFunction
 
 import scala.collection.JavaConverters._
-import scala.collection.mutable
 
+import ai.rapids.cudf.HostColumnVector
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.shims.{GpuTypeShims, ShimUnaryExecNode}
-import org.apache.arrow.memory.{ArrowBuf, ReferenceManager}
-import org.apache.arrow.vector.ValueVector
+import org.apache.arrow.vector.{BaseFixedWidthVector, BaseVariableWidthVector, BigIntVector,
+  BitVector, DateDayVector, Float4Vector, Float8Vector, IntVector, SmallIntVector,
+  TimeStampMicroTZVector, TinyIntVector, VarBinaryVector, VarCharVector}
 
 import org.apache.spark.TaskContext
 import org.apache.spark.internal.Logging
@@ -33,86 +35,121 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.execution.SparkPlan
-import org.apache.spark.sql.execution.python.ArrowEvalPythonExec
 import org.apache.spark.sql.execution.vectorized.WritableColumnVector
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.{ArrowColumnVector, ColumnarBatch, ColumnVector}
 
 object HostColumnarToGpu extends Logging {
 
-  // use reflection to get access to a private field in a class
-  private def getClassFieldAccessible(className: String, fieldName: String) = {
-    val classObj = ShimReflectionUtils.loadClass(className)
-    val fields = classObj.getDeclaredFields.toList
-    val field = fields.filter( x => {
-      x.getName.contains(fieldName)
-    }).head
-    field.setAccessible(true)
-    field
-  }
-
-  private lazy val accessorField = {
-    getClassFieldAccessible("org.apache.spark.sql.vectorized.ArrowColumnVector", "accessor")
-  }
-
-  private lazy val vecField = {
-    getClassFieldAccessible("org.apache.spark.sql.vectorized.ArrowColumnVector$ArrowVectorAccessor",
-      "vector")
-  }
-
-  // use reflection to get value vector from ArrowColumnVector
-  private def getArrowValueVector(cv: ColumnVector): ValueVector = {
-    val arrowCV = cv.asInstanceOf[ArrowColumnVector]
-    val accessor = accessorField.get(arrowCV)
-    vecField.get(accessor).asInstanceOf[ValueVector]
-  }
-
-  def arrowColumnarCopy(
-      cv: ColumnVector,
-      ab: ai.rapids.cudf.ArrowColumnBuilder,
-      rows: Int): (ju.List[ReferenceManager], java.lang.Long) = {
-    val valVector = cv match {
-      case v: ArrowColumnVector =>
-        try {
-          getArrowValueVector(v)
-        } catch {
-          case e: Exception =>
-            throw new IllegalStateException("Trying to read from a ArrowColumnVector but can't " +
-              "access its Arrow ValueVector", e)
-        }
-      case _ =>
-        throw new IllegalStateException(s"Illegal column vector type: ${cv.getClass}")
+  /**
+   * Copies an Arrow vector in bulk when cuDF shares its layout for the given type, into the
+   * builder that `builderFor` returns for the bytes of the values or of their variable-width
+   * data. Returns -1 without asking for a builder when the vector cannot be copied in bulk.
+   */
+  def arrowBulkCopy(
+      cv: ArrowColumnVector,
+      dataType: DataType,
+      rows: Int,
+      builderFor: LongFunction[RapidsHostColumnBuilder]): Long = {
+    val vector = cv.getValueVector
+    val nulls = vector.getNullCount.toLong
+    lazy val validity: ByteBuffer = if (nulls == 0) {
+      null
+    } else {
+      vector.getValidityBuffer.nioBuffer(0, (rows + 7) >>> 3)
     }
-
-    val referenceManagers = new mutable.ListBuffer[ReferenceManager]
-
-    def getBufferAndAddReference(buf: ArrowBuf): ByteBuffer = {
-      referenceManagers += buf.getReferenceManager
-      buf.nioBuffer()
-    }
-
-    val nullCount = valVector.getNullCount
-    val dataBuf = getBufferAndAddReference(valVector.getDataBuffer)
-    val validity = getBufferAndAddReference(valVector.getValidityBuffer)
-    // this is a bit ugly, not all Arrow types have the offsets buffer
-    var offsets: ByteBuffer = null
-    try {
-      offsets = getBufferAndAddReference(valVector.getOffsetBuffer)
-    } catch {
-      case _: UnsupportedOperationException =>
-        // swallow the exception and assume no offsets buffer
-    }
-    ab.addBatch(rows, nullCount, dataBuf, validity, offsets)
-    def getSize(buf: ByteBuffer): Long = {
-      if (buf != null) {
-        buf.remaining()
-      } else {
-        0L
+    if (rows == 0) {
+      0L
+    } else if (vector.getValueCount != rows) {
+      // The null count covers the whole vector, not only the rows of the batch.
+      -1L
+    } else {
+      (dataType, vector) match {
+        case (BooleanType, v: BitVector) =>
+          val bits = v.getDataBuffer.nioBuffer(0, (rows + 7) >>> 3)
+          builderFor.apply(rows).appendBooleanBits(bits, validity, rows, nulls)
+        case (ByteType, _: TinyIntVector) | (ShortType, _: SmallIntVector) |
+             (IntegerType, _: IntVector) | (DateType, _: DateDayVector) |
+             (LongType, _: BigIntVector) | (TimestampType, _: TimeStampMicroTZVector) |
+             (FloatType, _: Float4Vector) | (DoubleType, _: Float8Vector) =>
+          val bytes = rows.toLong * vector.asInstanceOf[BaseFixedWidthVector].getTypeWidth
+          if (bytes > Int.MaxValue) {
+            -1L
+          } else {
+            val values = vector.getDataBuffer.nioBuffer(0, bytes.toInt)
+            builderFor.apply(bytes).appendFixedWidth(values, validity, rows, nulls)
+          }
+        case (StringType, v: VarCharVector) =>
+          variableWidthCopy(v, validity, rows, nulls, builderFor, strings = true)
+        case (BinaryType, v: VarBinaryVector) =>
+          variableWidthCopy(v, validity, rows, nulls, builderFor, strings = false)
+        case _ =>
+          -1L
       }
     }
-    // total bytes added is data + validity + offsets (if present)
-    val bytesAdded = getSize(dataBuf) + getSize(validity) + getSize(offsets)
-    (referenceManagers.result().asJava, bytesAdded)
+  }
+
+  /** Copies the host pieces of a column to the GPU and concatenates them there. */
+  def concatenateOnDevice(
+      pieces: java.util.List[HostColumnVector]): ai.rapids.cudf.ColumnVector = {
+    if (pieces.size() == 1) {
+      pieces.get(0).copyToDevice()
+    } else {
+      withResource(pieces.asScala.toSeq.safeMap(_.copyToDevice())) { onDevice =>
+        ai.rapids.cudf.ColumnVector.concatenate(onDevice: _*)
+      }
+    }
+  }
+
+  /** Closes every resource in the list, even if some fail to close, and empties it. */
+  def closeAll[T <: AutoCloseable](resources: java.util.List[T]): Unit = {
+    try {
+      resources.asScala.safeClose()
+    } finally {
+      resources.clear()
+    }
+  }
+
+  private def variableWidthCopy(
+      v: BaseVariableWidthVector,
+      validity: ByteBuffer,
+      rows: Int,
+      nulls: Long,
+      builderFor: LongFunction[RapidsHostColumnBuilder],
+      strings: Boolean): Long = {
+    val offsets = v.getOffsetBuffer.nioBuffer(0, (rows + 1) * BaseVariableWidthVector.OFFSET_WIDTH)
+    if (nulls > 0 && !nullsAreEmpty(validity, offsets, rows)) {
+      -1L
+    } else {
+      val start = v.getStartOffset(0)
+      val end = v.getStartOffset(rows)
+      val data = v.getDataBuffer.nioBuffer(0, end)
+      val b = builderFor.apply(end.toLong - start)
+      if (strings) {
+        b.appendStrings(offsets, data, validity, rows, nulls)
+      } else {
+        b.appendByteLists(offsets, data, validity, rows, nulls)
+      }
+    }
+  }
+
+  // cuDF expects null rows of variable-width columns to be empty, while Arrow does not.
+  private def nullsAreEmpty(validity: ByteBuffer, offsets: ByteBuffer, rows: Int): Boolean = {
+    val ends = offsets.duplicate().order(ByteOrder.LITTLE_ENDIAN).asIntBuffer()
+    var empty = true
+    var i = 0
+    while (empty && i < rows) {
+      val bits = validity.get(i >> 3)
+      if (bits == -1 && (i & 7) == 0) {
+        i += 8
+      } else {
+        if ((bits & (1 << (i & 7))) == 0) {
+          empty = ends.get(i) == ends.get(i + 1)
+        }
+        i += 1
+      }
+    }
+    empty
   }
 
   // Data type is passed explicitly to allow overriding the reported type from the column vector.
@@ -207,11 +244,10 @@ class HostToGpuCoalesceIterator(iter: Iterator[ColumnarBatch],
   var batchBuilder: GpuColumnVector.GpuColumnarBatchBuilderBase = _
   var totalRows = 0
 
-  // the arrow cudf converter only supports primitive types and strings
-  // decimals and nested types aren't supported yet
+  // Arrow vectors of these types are copied in bulk, see HostColumnarToGpu.arrowBulkCopy
   private def arrowTypesSupported(schema: StructType): Boolean = {
     val dataTypes = schema.fields.map(_.dataType)
-    dataTypes.forall(GpuOverrides.isSupportedType(_))
+    dataTypes.forall(GpuOverrides.isSupportedType(_, allowBinary = true))
   }
 
   /**
@@ -379,16 +415,7 @@ case class HostColumnarToGpu(child: SparkPlan, goal: CoalesceSizeGoal)
 
     val batches = child.executeColumnar()
 
-    // The optimized builder borrows Arrow buffers across calls to the input iterator's hasNext
-    // so it can coalesce multiple input batches before copying them to the GPU. A CPU
-    // ArrowEvalPythonExec closes its Arrow output allocator from the hasNext call that discovers
-    // end-of-stream. We cannot know that a call will discover end-of-stream without making it,
-    // and by then the allocator close fails if the builder still holds references to its buffers.
-    // Releasing the references before every hasNext would require materializing every input batch
-    // separately and defeat host-side coalescing. Use the copying builder for this producer so
-    // the coalesced data is owned by the plugin before the upstream iterator can close it.
-    val confUseArrow = new RapidsConf(child.conf).useArrowCopyOptimization &&
-      !child.isInstanceOf[ArrowEvalPythonExec]
+    val confUseArrow = new RapidsConf(child.conf).useArrowCopyOptimization
     batches.mapPartitions { iter =>
       new HostToGpuCoalesceIterator(iter, goal, outputSchema,
         numInputRows, numInputBatches, numOutputRows, numOutputBatches,

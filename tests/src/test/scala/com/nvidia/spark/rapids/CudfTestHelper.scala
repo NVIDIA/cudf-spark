@@ -154,6 +154,8 @@ object CudfTestHelper {
 
     def largest: Long = synchronized(largestRequest)
 
+    def count: Int = synchronized(buffers.length)
+
     def allClosed: Boolean = synchronized(buffers.forall(_.getRefCount == 0))
   }
 
