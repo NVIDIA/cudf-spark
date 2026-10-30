@@ -21,13 +21,14 @@ import java.util.concurrent.TimeUnit
 import scala.collection.mutable
 import scala.io.Source
 
-import com.nvidia.spark.rapids.shims.EventLogJsonShims
+import com.nvidia.spark.rapids.shims.{EventLogJsonShims, SparkShimImpl}
 import org.json4s._
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, QueryStageExec, ShuffleQueryStageExec}
 import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
 import org.apache.spark.sql.functions._
@@ -56,6 +57,7 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
       .set("spark.rapids.sql.batchSizeBytes", "65536")
       .set("spark.eventLog.enabled", "true")
       .set("spark.plugins", "com.nvidia.spark.SQLPlugin")
+      .set("spark.sql.cache.serializer", "com.nvidia.spark.ParquetCachedBatchSerializer")
       .set("spark.eventLog.dir", eventLogDir.getAbsolutePath)
       .set("spark.eventLog.rolling.enabled", "false") // Keep single file for easier parsing
     spark = SparkSession.builder().config(conf).getOrCreate()
@@ -857,6 +859,62 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
         "exchange's \"op time (shuffle read)\" metric (so it is excluded from the consumer's " +
         "op time); it was missing, so the shuffle-read time would be double-counted. " +
         s"Collected ${descendants.size} descendant op-time metrics.")
+  }
+
+  test("cached scan op time is excluded from consumers across AQE table cache stages") {
+    // Defaults to true. Set explicitly as in the other tests in this suite. This test
+    // only checks the plan tree walk, which does not depend on the RDD wrapping.
+    spark.conf.set("spark.rapids.sql.exec.opTimeTrackingRDD.enabled", "true")
+
+    // Spark 3.5.2+ wraps the cached relation's scan in a TableCacheQueryStageExec, a
+    // LeafExecNode whose children are empty. A consumer's descendant-op-time walk only
+    // reaches the scan's op time metric if it descends through that wrapper.
+    val cached = spark.range(0, 200000L, 1, 8)
+      .selectExpr("id", "id % 100 as k", "cast(id as string) as s").cache()
+    try {
+      cached.count() // materialize the cache
+      val resultDF = cached.where("k = 7")
+      assert(resultDF.collect().nonEmpty, "Query should produce results")
+
+      val executed = resultDF.queryExecution.executedPlan match {
+        case a: AdaptiveSparkPlanExec => a.executedPlan
+        case other => other
+      }
+      val finalPlan = executed match {
+        case q: QueryStageExec => q.plan
+        case other => other
+      }
+
+      val filter = finalPlan.collectFirst { case f: GpuFilterExec => f }
+      assert(filter.isDefined, s"expected a GpuFilterExec; plan was:\n$finalPlan")
+
+      // The GPU execs directly below the filter, looking through CPU nodes and through a
+      // table cache stage. On Spark 3.5.2+ this is the GpuInMemoryTableScanExec inside the
+      // stage. On Spark 3.5.0 and 3.5.1 the scan runs on the CPU and this is the
+      // HostColumnarToGpu above the stage.
+      def gpuBelow(p: SparkPlan): Seq[GpuExec] = p match {
+        case g: GpuExec => Seq(g)
+        case o => SparkShimImpl.getTableCacheNonQueryStagePlan(o)
+          .map(gpuBelow).getOrElse(o.children.flatMap(gpuBelow))
+      }
+      val below = filter.get.children.flatMap(gpuBelow)
+      assert(below.nonEmpty, s"expected a GpuExec below the GpuFilterExec; plan was:\n$finalPlan")
+
+      val descendants = filter.get.getDescendantOpTimeMetrics
+      below.foreach { g =>
+        val metric = g.getOpTimeNewMetric
+        assert(metric.isDefined, s"${g.nodeName} should expose an OP_TIME_NEW metric")
+        assert(descendants.exists(_ eq metric.get),
+          s"GpuFilter.getDescendantOpTimeMetrics must include the op time metric of " +
+            s"${g.nodeName} (so it is excluded from the filter's op time); it was missing, " +
+            s"so that time would be double-counted. Collected ${descendants.size} " +
+            "descendant op-time metrics.")
+      }
+    } finally {
+      // The parallel test runner calls clearCache() on the stopped session after the
+      // suite, which fails if this relation is still cached.
+      cached.unpersist(blocking = true)
+    }
   }
 
 }
