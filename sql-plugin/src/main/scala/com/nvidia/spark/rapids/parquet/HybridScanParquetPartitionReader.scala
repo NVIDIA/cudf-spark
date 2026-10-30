@@ -346,17 +346,24 @@ private[parquet] class HybridScanParquetPartitionReader(
       reader: HybridScanReader,
       rowGroups: Array[Int],
       outputAst: Option[CompiledExpression]): Table = {
-    closeOnExcept(withResource(planAndReadColumnChunks(reader, rowGroups)) { hostChunks =>
+    val table = withResource(planAndReadColumnChunks(reader, rowGroups)) { hostChunks =>
       materializeFromHostBuffers(reader, rowGroups, hostChunks)
-    }) { table =>
+    }
+    val filtered = closeOnExcept(table) { t =>
       // Before the output filter, which references columns by index.
-      checkDecodedSchema(table)
-      outputAst match {
-        case Some(ast) => NvtxRegistry.HYBRID_SCAN_OUTPUT_FILTER {
-          applyOutputFilter(table, ast)
+      checkDecodedSchema(t)
+      outputAst.flatMap { ast =>
+        NvtxRegistry.HYBRID_SCAN_OUTPUT_FILTER {
+          // The decoded table outlives each attempt, so a retry filters it again.
+          withRetryNoSplit[Option[Table]] {
+            applyOutputFilter(t, ast)
+          }
         }
-        case None => table
       }
+    }
+    filtered match {
+      case Some(f) => withResource(table)(_ => f)
+      case None => table
     }
   }
 
@@ -371,9 +378,9 @@ private[parquet] class HybridScanParquetPartitionReader(
    * they are. Spark's filter above the scan removes the rest either way, which is what makes
    * both choices correct.
    *
-   * On return the argument table is either the returned table or has been closed.
+   * None when the rows are returned as they are. Never closes `table`.
    */
-  private def applyOutputFilter(table: Table, ast: CompiledExpression): Table = {
+  private def applyOutputFilter(table: Table, ast: CompiledExpression): Option[Table] = {
     withResource(ast.computeColumn(table)) { mask =>
       // A null verdict rejects the row, matching what the reader would have done with this same
       // filter, so counting the true entries counts exactly the rows a gather would keep.
@@ -382,13 +389,7 @@ private[parquet] class HybridScanParquetPartitionReader(
       }
       val rows = table.getRowCount
       val keepFraction = if (rows == 0) 0.0 else kept.toDouble / rows
-      if (keepFraction > filterKeepThreshold) {
-        table
-      } else {
-        withResource(table) { t =>
-          t.filter(mask)
-        }
-      }
+      if (keepFraction > filterKeepThreshold) None else Some(table.filter(mask))
     }
   }
 

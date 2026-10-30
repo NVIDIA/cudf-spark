@@ -123,6 +123,24 @@ def test_hybrid_scan_projections(spark_tmp_path, columns):
         conf=hybrid_conf())
 
 
+@pytest.mark.parametrize('keep_threshold', ['1.0', '0.5'], ids=['reader_filter', 'output_filter'])
+def test_hybrid_scan_projection_order_differs_from_file(spark_tmp_path, keep_threshold):
+    """Columns come back in the read schema's order, not the file's.
+
+    The decoded-schema check and the output filter both index the decoded table by read schema
+    position. Both columns are INT, so a table in file order would pass the type check and return
+    swapped values. Below the keep threshold the filter is applied by position rather than by name.
+    """
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(lambda spark: write_test_data(spark, data_path))
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema('filter_int INT, sorted_int INT').parquet(data_path)
+            .filter('sorted_int < 500'),
+        conf=hybrid_conf(**{
+            'spark.rapids.sql.format.parquet.hybridScan.singleStage.filterKeepThreshold':
+                keep_threshold}))
+
+
 def test_hybrid_scan_residual_filter(spark_tmp_path):
     """A filter the reader only partly understands must still return exactly the right rows.
 
@@ -262,19 +280,23 @@ def test_hybrid_scan_unfiltered_read(spark_tmp_path):
         lambda spark: spark.read.parquet(data_path), conf=hybrid_conf())
 
 
-_missing_col_schema = 'sorted_int INT, filter_int INT, added_int INT'
+_missing_col_schema = 'added_int INT, sorted_int INT, filter_int INT'
 
 
-@pytest.mark.xfail(strict=True, reason='a filter on a column the file lacks returns no rows '
-                   'until schema mismatches are detected')
 def test_hybrid_scan_filter_on_missing_column(spark_tmp_path):
-    """The file lacks `added_int`, so every row reads it as null and the filter keeps them all."""
+    """The file lacks `added_int`, so the reader must fail loudly rather than return wrong rows.
+
+    The filter is only on `sorted_int`, so statistics pruning succeeds and the read reaches the
+    decoded-schema check.
+    """
     data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
     with_cpu_session(lambda spark: write_test_data(spark, data_path))
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.read.schema(_missing_col_schema).parquet(data_path)
-            .filter('added_int IS NULL AND sorted_int < 500'),
-        conf=fallback_conf())
+    assert_spark_exception(
+        lambda: with_gpu_session(
+            lambda spark: spark.read.schema(_missing_col_schema).parquet(data_path)
+                .filter('sorted_int < 500').collect(),
+            conf=fallback_conf()),
+        error_message='a column is missing from the file')
 
 
 def test_hybrid_scan_ignore_corrupt_files_keeps_readable_file(spark_tmp_path):
