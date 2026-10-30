@@ -113,6 +113,13 @@ object GpuDataWritingCommand {
   }
 }
 
+/**
+ * Marks the GPU version of Spark 3.4+'s WriteFilesExec, which sits between a
+ * GpuDataWritingCommandExec and the query it writes and hands the query's batches to the
+ * command's writers unchanged. Lets shared code recognize it without depending on a shim.
+ */
+trait GpuWriteFilesLike
+
 case class GpuDataWritingCommandExec(cmd: GpuDataWritingCommand, child: SparkPlan)
     extends ShimUnaryExecNode with GpuExec {
   override lazy val allMetrics: Map[String, GpuMetric] = GpuMetric.wrap(cmd.metrics)

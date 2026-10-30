@@ -22,7 +22,7 @@ import scala.annotation.tailrec
 import scala.collection.mutable
 import scala.util.control.NonFatal
 
-import ai.rapids.cudf.{HostBufferConsumer, HostMemoryBuffer, JCudfSerialization, TableWriter}
+import ai.rapids.cudf.{DType, HostBufferConsumer, HostMemoryBuffer, JCudfSerialization, TableWriter}
 import ai.rapids.cudf.CudfColumnSizeOverflowException
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
@@ -249,12 +249,37 @@ abstract class ColumnarOutputWriter(context: TaskAttemptContext,
   protected[this] def bufferBatchAndClose(batch: ColumnarBatch): Long = {
     val startTimestamp = System.nanoTime
     nvtxId {
-      withResource(transformAndClose(batch)) { maybeTransformed =>
+      withResource(transformAndClose(decodeDictionariesAndClose(batch))) { maybeTransformed =>
         encodeAndBufferToHost(maybeTransformed)
       }
     }
     // time spent on GPU encoding to the host sink
     System.nanoTime - startTimestamp
+  }
+
+  /**
+   * The cudf writers do not accept DICTIONARY32 columns, which input_file_name() can produce
+   * (see InputFileNameDictionaryRule), so write their decoded strings. With includeRetry this
+   * runs inside the split-and-retry in writeSpillableAndClose, so a decode that overflows the
+   * column size limit splits the batch.
+   */
+  private def decodeDictionariesAndClose(batch: ColumnarBatch): ColumnarBatch = {
+    val columns = GpuColumnVector.extractColumns(batch)
+    if (!columns.exists(_.getBase.getType.equals(DType.DICTIONARY32))) {
+      batch
+    } else {
+      withResource(batch) { _ =>
+        val decoded = columns.safeMap { column =>
+          if (column.getBase.getType.equals(DType.DICTIONARY32)) {
+            GpuColumnVector.from(column.getBase.dictionaryDecode(), column.dataType())
+          } else {
+            column.incRefCount()
+          }
+        }
+        new ColumnarBatch(decoded.toArray[org.apache.spark.sql.vectorized.ColumnVector],
+          batch.numRows())
+      }
+    }
   }
 
   /** Apply any necessary casts before writing batch out */

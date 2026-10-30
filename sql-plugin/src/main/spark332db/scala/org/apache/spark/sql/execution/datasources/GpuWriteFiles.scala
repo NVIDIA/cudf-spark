@@ -50,7 +50,7 @@ package org.apache.spark.sql.execution.datasources
 
 import java.util.Date
 
-import com.nvidia.spark.rapids.{DataFromReplacementRule, GpuExec, GpuMetric, RapidsConf, RapidsMeta, SparkPlanMeta}
+import com.nvidia.spark.rapids.{DataFromReplacementRule, GpuExec, GpuMetric, GpuWriteFilesLike, RapidsConf, RapidsMeta, SparkPlanMeta}
 import com.nvidia.spark.rapids.shims.ShimUnaryExecNode
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.mapreduce.{TaskAttemptContext, TaskAttemptID, TaskID, TaskType}
@@ -111,7 +111,8 @@ case class GpuWriteFilesExec(
     bucketSpec: Option[BucketSpec],
     options: Map[String, String],
     staticPartitions: TablePartitionSpec,
-    baseOutputDebugPath: Option[String]) extends ShimUnaryExecNode with GpuExec {
+    baseOutputDebugPath: Option[String]) extends ShimUnaryExecNode with GpuExec
+    with GpuWriteFilesLike {
 
   override def output: Seq[Attribute] = Seq.empty
 

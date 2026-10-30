@@ -23,8 +23,9 @@ import com.nvidia.spark.rapids.Arm.withResource
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.functions.{col, input_file_name, substring_index}
-import org.apache.spark.sql.rapids.GpuInputFileName
+import org.apache.spark.sql.rapids.{ExecutionPlanCaptureCallback, GpuInputFileName}
 import org.apache.spark.sql.types.StringType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -39,9 +40,9 @@ class InputFileNameDictionarySuite extends SparkQueryCompareTestSuite {
       .write.parquet(path.getCanonicalPath)
   }
 
-  /** The outputDictionary flag of every GpuInputFileName in the executed plan. */
-  private def encodings(df: DataFrame): Seq[Boolean] =
-    df.queryExecution.executedPlan.flatMap(_.expressions.flatMap(_.collect {
+  /** The outputDictionary flag of every GpuInputFileName in an executed plan. */
+  private def encodings(plan: SparkPlan): Seq[Boolean] =
+    plan.flatMap(_.expressions.flatMap(_.collect {
       case f: GpuInputFileName => f.outputDictionary
     }))
 
@@ -54,12 +55,45 @@ class InputFileNameDictionarySuite extends SparkQueryCompareTestSuite {
       writeInput(path)
       def run(spark: SparkSession): (Seq[Boolean], Seq[String]) = {
         val df = query(spark.read.parquet(path.getCanonicalPath))
-        (encodings(df), df.collect().map(_.toString).sorted.toSeq)
+        (encodings(df.queryExecution.executedPlan), df.collect().map(_.toString).sorted.toSeq)
       }
       val (_, expected) = withCpuSparkSession(run, conf)
       val (gpuEncodings, actual) = withGpuSparkSession(run, conf)
       assert(gpuEncodings == expectedEncodings)
       assert(actual == expected)
+    }
+  }
+
+  /**
+   * Writes `select a, c, input_file_name() AS f` on the CPU and on the GPU, checks the GPU write
+   * plan's input_file_name encodings and that both wrote the same rows.
+   */
+  private def checkWrite(expectedEncodings: Seq[Boolean], format: String,
+      partitionBy: Seq[String] = Seq.empty, writeConf: SparkConf = conf): Unit = {
+    withTempPath { input =>
+      writeInput(input)
+      def write(output: File)(spark: SparkSession): Unit =
+        spark.read.parquet(input.getCanonicalPath)
+          .select(col("a"), col("c"), input_file_name().as("f"))
+          .write.partitionBy(partitionBy: _*).format(format).save(output.getCanonicalPath)
+      withTempPath { cpuOutput =>
+        withTempPath { gpuOutput =>
+          withCpuSparkSession(write(cpuOutput), writeConf)
+          val gpuEncodings = withGpuSparkSession({ spark =>
+            ExecutionPlanCaptureCallback.startCapture()
+            write(gpuOutput)(spark)
+            ExecutionPlanCaptureCallback.getResultsWithTimeout()
+              .flatMap(p => encodings(ExecutionPlanCaptureCallback.extractExecutedPlan(p)))
+              .toSeq
+          }, writeConf)
+          def read(output: File): Seq[String] = withCpuSparkSession { spark =>
+            spark.read.format(format).load(output.getCanonicalPath)
+              .collect().map(_.toString).sorted.toSeq
+          }
+          assert(gpuEncodings == expectedEncodings)
+          assert(read(gpuOutput) == read(cpuOutput))
+        }
+      }
     }
   }
 
@@ -103,6 +137,21 @@ class InputFileNameDictionarySuite extends SparkQueryCompareTestSuite {
     check(Seq(false)) { df =>
       df.select(col("a"), input_file_name().as("f")).groupBy("f").count()
     }
+  }
+
+  Seq("parquet", "orc").foreach { format =>
+    test(s"dictionary for input_file_name() written to $format") {
+      checkWrite(Seq(true), format)
+    }
+  }
+
+  test("dictionary for input_file_name() written without planned writes") {
+    checkWrite(Seq(true), "parquet",
+      writeConf = conf.clone().set("spark.sql.optimizer.plannedWrite.enabled", "false"))
+  }
+
+  test("string when the write is partitioned") {
+    checkWrite(Seq(false), "parquet", partitionBy = Seq("a"))
   }
 
   test("host reads of string dictionaries with every index width") {

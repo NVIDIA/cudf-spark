@@ -155,6 +155,19 @@ def test_write_round_trip(spark_tmp_path, orc_gens, orc_impl):
                   'spark.rapids.sql.format.orc.write.enabled': True,
                   'orc.proleptic.gregorian': 'true'})
 
+# input_file_name() reaches the unpartitioned ORC writer as a dictionary column, which it decodes.
+@ignore_order
+def test_write_input_file_name(spark_tmp_path):
+    src_path = spark_tmp_path + '/ORC_SRC'
+    with_cpu_session(lambda spark: gen_df(spark, [('a', int_gen), ('b', string_gen)])
+                     .repartition(3).write.orc(src_path))
+    assert_gpu_and_cpu_writes_are_equal_collect(
+            lambda spark, path: spark.read.orc(src_path)
+                .selectExpr('a', 'b', 'input_file_name() AS f').write.orc(path),
+            lambda spark, path: spark.read.orc(path),
+            spark_tmp_path + '/ORC_DATA',
+            conf={'spark.rapids.sql.format.orc.write.enabled': True})
+
 # Only runs on Apache and Databricks, as PyArrow requires files to be stored on the local filesystem.
 @pytest.mark.parametrize('orc_gen', [int_gen], ids=idfn)
 @pytest.mark.parametrize('orc_impl', ["native", "hive"])

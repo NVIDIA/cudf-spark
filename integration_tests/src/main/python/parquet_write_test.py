@@ -106,6 +106,22 @@ def test_write_round_trip(spark_tmp_path, parquet_gens):
             data_path,
             conf=writer_confs)
 
+# Unpartitioned writes get input_file_name() as a dictionary column, which the writer decodes.
+# Partitioned writes keep the string column.
+@ignore_order
+@pytest.mark.parametrize('partition_by', [[], ['a']], ids=idfn)
+def test_write_input_file_name(spark_tmp_path, partition_by):
+    src_path = spark_tmp_path + '/PARQUET_SRC'
+    gen_list = [('a', IntegerGen(min_val=0, max_val=4, special_cases=[])), ('b', string_gen)]
+    with_cpu_session(lambda spark: gen_df(spark, gen_list).repartition(3).write.parquet(src_path))
+    assert_gpu_and_cpu_writes_are_equal_collect(
+            lambda spark, path: spark.read.parquet(src_path)
+                .withColumn('f', f.input_file_name())
+                .write.partitionBy(*partition_by).parquet(path),
+            lambda spark, path: spark.read.parquet(path),
+            spark_tmp_path + '/PARQUET_DATA',
+            conf=writer_confs)
+
 @pytest.mark.parametrize('gen', [ByteGen(nullable=False),
     ShortGen(nullable=False),
     IntegerGen(nullable=False),

@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids
 
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, AttributeSet, NamedExpression}
 import org.apache.spark.sql.execution.SparkPlan
-import org.apache.spark.sql.rapids.GpuInputFileName
+import org.apache.spark.sql.rapids.{GpuInputFileName, GpuInsertIntoHadoopFsRelationCommand, GpuOrcFileFormat}
 import org.apache.spark.sql.types.StringType
 
 /**
@@ -45,6 +45,9 @@ trait GpuStringDictionaryPassThrough
  *  - GpuColumnarToRowExec, unless it exports the columnar RDD. Rows read strings through
  *    RapidsHostColumnVectorCore, which looks up the key per row, or through
  *    RowConversion.convertToRows, which decodes inside a split-and-retry block.
+ *  - GpuDataWritingCommandExec for an unpartitioned, unbucketed Parquet or ORC insert (see
+ *    writesDecodedDictionaries), through the GpuWriteFilesLike node of planned writes.
+ *    ColumnarOutputWriter decodes dictionaries inside a split-and-retry block before encoding.
  *  - GpuProjectExec, for columns it passes through unchanged (possibly aliased or wrapped in a
  *    GpuStringDictionaryPassThrough expression).
  *  - GpuFilterExec, for columns its condition does not reference.
@@ -65,6 +68,15 @@ object InputFileNameDictionaryRule {
     case c2r: GpuColumnarToRowExec =>
       val childAllowed = if (c2r.exportColumnarRdd) AttributeSet.empty else c2r.child.outputSet
       c2r.withNewChildren(Seq(rewrite(c2r.child, childAllowed)))
+    case write: GpuDataWritingCommandExec if writesDecodedDictionaries(write.cmd) =>
+      val newChild = write.child match {
+        case writeFiles if writeFiles.isInstanceOf[GpuWriteFilesLike] =>
+          val query = writeFiles.children.head
+          writeFiles.withNewChildren(Seq(rewrite(query, query.outputSet)))
+        case query =>
+          rewrite(query, query.outputSet)
+      }
+      write.withNewChildren(Seq(newChild))
     case project: GpuProjectExec =>
       rewriteProject(project, allowed)
     case filter: GpuFilterExec =>
@@ -77,6 +89,22 @@ object InputFileNameDictionaryRule {
       limit.withNewChildren(Seq(rewrite(limit.child, allowed)))
     case other =>
       other.withNewChildren(other.children.map(rewrite(_, AttributeSet.empty)))
+  }
+
+  /**
+   * Whether every column a write command receives reaches ColumnarOutputWriter, which decodes
+   * dictionaries, without any device operation in between. Only unpartitioned, unbucketed
+   * Parquet and ORC inserts qualify. Dynamic partitions and buckets make GpuFileFormatWriter
+   * sort the batches, possibly with a GpuSortExec it adds at run time where this rule cannot see
+   * it, and the partitioned writers split and group the batches on the device. Hive and Delta
+   * writes use other commands.
+   */
+  private def writesDecodedDictionaries(cmd: GpuDataWritingCommand): Boolean = cmd match {
+    case insert: GpuInsertIntoHadoopFsRelationCommand =>
+      insert.partitionColumns.isEmpty && insert.bucketSpec.isEmpty &&
+        (insert.fileFormat.isInstanceOf[GpuParquetFileFormat] ||
+          insert.fileFormat.isInstanceOf[GpuOrcFileFormat])
+    case _ => false
   }
 
   private def rewriteProject(project: GpuProjectExec, allowed: AttributeSet): SparkPlan = {
