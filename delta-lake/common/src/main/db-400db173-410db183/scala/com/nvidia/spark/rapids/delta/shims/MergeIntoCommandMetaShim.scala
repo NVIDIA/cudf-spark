@@ -16,9 +16,9 @@
 
 package com.nvidia.spark.rapids.delta.shims
 
-import com.databricks.sql.transaction.tahoe.DeltaLog
-import com.databricks.sql.transaction.tahoe.commands.{DeletionVectorUtils, MergeIntoCommand,
-  MergeIntoCommandBase, MergeIntoCommandEdge}
+import com.databricks.sql.transaction.tahoe.RowTracking
+import com.databricks.sql.transaction.tahoe.commands.{MergeIntoCommand, MergeIntoCommandBase,
+  MergeIntoCommandEdge}
 import com.databricks.sql.transaction.tahoe.rapids.{GpuDeltaLog, GpuLowShuffleMergeCommand,
   GpuMergeIntoCommand}
 import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
@@ -39,19 +39,16 @@ object MergeIntoCommandMetaShim {
   private def tagForGpuCommon(
       meta: RapidsMeta[_, _, _],
       mergeCmd: MergeIntoCommandBase): Unit = {
-    tagPersistentDeletionVectorFallback(
+    val snapshot = mergeCmd.targetFileIndex.deltaLog.unsafeVolatileSnapshot
+    val persistentDvEnabled = PersistentDeletionVectorMetaShim.tagForGpu(
       meta,
-      mergeCmd.targetFileIndex.deltaLog,
-      mergeCmd.conf.getConf(DeltaSQLConf.MERGE_USE_PERSISTENT_DELETION_VECTORS))
-  }
-
-  private def tagPersistentDeletionVectorFallback(
-      meta: RapidsMeta[_, _, _],
-      deltaLog: DeltaLog,
-      usePersistentDeletionVectors: Boolean): Unit = {
-    if (DeletionVectorUtils.deletionVectorsWritable(deltaLog.unsafeVolatileSnapshot) &&
-        usePersistentDeletionVectors) {
-      meta.willNotWorkOnGpu("Deletion vectors are not supported on GPU")
+      mergeCmd.conf,
+      snapshot,
+      DeltaSQLConf.MERGE_USE_PERSISTENT_DELETION_VECTORS,
+      mergeCmd.migratedSchema.getOrElse(mergeCmd.target.schema))
+    if (persistentDvEnabled && RowTracking.isEnabled(snapshot.protocol, snapshot.metadata)) {
+      meta.willNotWorkOnGpu(
+        "Persistent deletion vector MERGE with row tracking is not supported on GPU")
     }
   }
 

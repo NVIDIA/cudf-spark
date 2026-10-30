@@ -18,7 +18,7 @@ import pytest
 import re
 
 from spark_session import is_databricks122_or_later, supports_delta_lake_deletion_vectors, \
-    is_databricks173_or_later, is_spark_353_or_later, is_spark_356_or_later, \
+    is_databricks143, is_databricks173_or_later, is_spark_353_or_later, is_spark_356_or_later, \
     is_spark_400_or_later, is_spark_local_mode, \
     with_cpu_session, with_gpu_session
 from asserts import assert_equal
@@ -56,8 +56,8 @@ delta_meta_allow = [
     "JsonToStructs"
 ]
 
-if is_databricks173_or_later():
-    # DBR 17.3 DV write/update paths can serialize Delta stats JSON on the CPU bridge.
+if is_databricks143() or is_databricks173_or_later():
+    # DBR 14.3 and 17.3 DV write/update paths can serialize Delta stats JSON on the CPU bridge.
     delta_meta_allow += ["StructsToJson", "CreateNamedStruct"]
 
 delta_write = ["RapidsDeltaWrite"]
@@ -188,8 +188,8 @@ def deletion_vector_values_with_xfail_reasons(enabled_xfail_reason=None, disable
 
 def dml_deletion_vector_values_with_xfail_reasons(
         enabled_xfail_reason=None, disabled_xfail_reason=None):
-    # DELETE, UPDATE, and MERGE support DVs on OSS Delta 3.3+. Keep Databricks xfails
-    # without suppressing OSS coverage.
+    # DELETE, UPDATE, and MERGE support DVs on OSS Delta 3.3+ and DBR 17.3+. Keep the DV-enabled
+    # xfail only for Databricks runtimes before 17.3, without suppressing OSS or DBR 17.3 coverage.
     if is_databricks_runtime() and disabled_xfail_reason is not None:
         enable_deletion_vector = [
             pytest.param(False, marks=pytest.mark.xfail(reason=disabled_xfail_reason))]
@@ -198,7 +198,8 @@ def dml_deletion_vector_values_with_xfail_reasons(
 
     if supports_delta_lake_deletion_vectors() and (
             is_databricks_runtime() or is_spark_353_or_later()):
-        if is_databricks_runtime() and enabled_xfail_reason is not None:
+        if is_databricks_runtime() and not is_databricks173_or_later() \
+                and enabled_xfail_reason is not None:
             enable_deletion_vector.append(
                 pytest.param(True, marks=pytest.mark.xfail(reason=enabled_xfail_reason)))
         else:
@@ -509,18 +510,22 @@ def setup_delta_dest_tables(spark, data_path, dest_table_func, use_cdf, enable_d
         path = "{}/{}".format(data_path, name)
         setup_delta_dest_table(spark, path, dest_table_func, use_cdf, partition_columns, enable_deletion_vectors)
 
-def setup_delta_row_tracking_dest_table(spark, path, dest_table_func):
+def setup_delta_row_tracking_dest_table(spark, path, dest_table_func,
+                                        enable_deletion_vectors=False):
     dest_df = dest_table_func(spark)
     ddl = schema_to_ddl(spark, dest_df.schema)
     spark.sql("CREATE TABLE delta.`{}` ({}) USING DELTA "
               "TBLPROPERTIES (delta.enableRowTracking = true, "
-              "delta.enableDeletionVectors = false)".format(path, ddl))
+              "delta.enableDeletionVectors = {})".format(
+                  path, ddl, str(enable_deletion_vectors).lower()))
     dest_df.write.format("delta").mode("append").save(path)
 
-def setup_delta_row_tracking_dest_tables(spark, data_path, dest_table_func):
+def setup_delta_row_tracking_dest_tables(spark, data_path, dest_table_func,
+                                         enable_deletion_vectors=False):
     for name in ["CPU", "GPU"]:
         path = "{}/{}".format(data_path, name)
-        setup_delta_row_tracking_dest_table(spark, path, dest_table_func)
+        setup_delta_row_tracking_dest_table(
+            spark, path, dest_table_func, enable_deletion_vectors)
 
 def row_tracking_dml_test_df(spark):
     return spark.createDataFrame(
@@ -635,7 +640,7 @@ def _assert_oss_delta_dv_metadata_broadcasts(callback, captured_plans):
 def assert_rapids_delta_write(
         do_test, conf, required_gpu_classes=delta_write, require_same_plan=False,
         forbidden_cpu_fallback_classes=None, require_non_empty=False,
-        expected_command=None, expected_classes=None):
+        expected_command=None, expected_classes=None, captured_plans_out=None):
     """
     Validates that a Delta write operation executed on the GPU produces the expected execution plans.
     This function starts a plan capture mechanism using the Spark JVM's ExecutionPlanCaptureCallback,
@@ -662,6 +667,8 @@ def assert_rapids_delta_write(
         Additional GPU command or execution class that must be present in a captured plan.
     expected_classes : iterable of str, optional
         Additional GPU plan classes that must be present in a captured plan.
+    captured_plans_out : list, optional
+        Append captured plans to this list for inspection of executed SQL metrics.
 
     Returns
     -------
@@ -674,6 +681,8 @@ def assert_rapids_delta_write(
     try:
         result = with_gpu_session(do_test, conf=conf)
         captured_plans = callback.getResultsWithTimeout(10000)
+        if captured_plans_out is not None:
+            captured_plans_out.extend(captured_plans)
         if require_non_empty:
             assert len(captured_plans) > 0, "No execution plans captured for Delta write"
         if expected_command is not None:
