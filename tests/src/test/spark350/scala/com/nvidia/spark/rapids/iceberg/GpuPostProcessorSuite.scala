@@ -124,11 +124,14 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
   private def createMultiBlockParquetInfo(
       shadedSchema: ShadedMessageType,
       blockRowCounts: Seq[Long],
-      firstFileGlobalRowIndex: Long): (ParquetFileInfoWithBlockMeta, ShadedMessageType) = {
+      firstFileGlobalRowIndex: Long,
+      blockFirstRowIndices: Option[Seq[Long]] = None
+  ): (ParquetFileInfoWithBlockMeta, ShadedMessageType) = {
     val blocks = blockRowCounts.map(createBlockMetaData)
-    val firstRowIndices = blockRowCounts
-      .scanLeft(firstFileGlobalRowIndex)(_ + _)
-      .dropRight(1)
+    val firstRowIndices = blockFirstRowIndices.getOrElse {
+      blockRowCounts.scanLeft(firstFileGlobalRowIndex)(_ + _).dropRight(1)
+    }
+    require(firstRowIndices.length == blockRowCounts.length)
     val info = ParquetFileInfoWithBlockMeta(
       filePath = new Path("/test/file.parquet"),
       blocks = blocks,
@@ -1025,6 +1028,102 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     assert(ShimUtils.lastUpdatedSequenceNumberFieldId() == 2147483539)
   }
 
+  test("FetchRowPosition generates ranges across filtered row-group gaps") {
+    import com.nvidia.spark.rapids.Arm.withResource
+    import com.nvidia.spark.rapids.GpuColumnVector
+    import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
+
+    val rowPosId = MetadataColumns.ROW_POSITION.fieldId()
+    val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(rowPosId, "_pos", Types.LongType.get()))
+
+    // The row group between file positions 600 and 899 was filtered out. The last two
+    // selected row groups are adjacent so their position ranges can be coalesced.
+    val (parquetInfo, shadedSchema) = createMultiBlockParquetInfo(
+      parquetSchema,
+      blockRowCounts = Seq(100L, 100L, 50L),
+      firstFileGlobalRowIndex = 500L,
+      blockFirstRowIndices = Some(Seq(500L, 900L, 1000L)))
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo,
+      new JHashMap[Integer, Any](),
+      expectedSchema,
+      shadedSchema,
+      Map.empty)
+
+    def emptyBatch(rows: Int): ColumnarBatch =
+      new ColumnarBatch(Array.empty[SparkColumnVector], rows)
+
+    def assertPositions(batch: ColumnarBatch, expected: Seq[Long]): Unit = {
+      assert(batch.numRows() == expected.length)
+      withResource(batch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { hostCol =>
+        val base = hostCol.getBase
+        expected.zipWithIndex.foreach { case (position, index) =>
+          assert(base.getLong(index) == position,
+            s"_pos[$index] expected $position, got ${base.getLong(index)}")
+        }
+      }
+    }
+
+    // This batch expands two non-contiguous file-position ranges through JNI.
+    withResource(processor.process(emptyBatch(150))) { batch =>
+      assertPositions(batch, (500L until 600L) ++ (900L until 950L))
+    }
+
+    // This batch crosses two adjacent selected row groups and uses one GPU sequence.
+    withResource(processor.process(emptyBatch(100))) { batch =>
+      assertPositions(batch, 950L until 1050L)
+    }
+  }
+
+  test("Row lineage directly generates inherited IDs across row-group gaps") {
+    import com.nvidia.spark.rapids.Arm.withResource
+    import com.nvidia.spark.rapids.GpuColumnVector
+    import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
+
+    assume(supportsRowLineageInheritance,
+      "The selected Iceberg runtime does not support row lineage inheritance")
+    val rowIdFieldId = ShimUtils.rowIdFieldId()
+    val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(rowIdFieldId, "_row_id", Types.LongType.get()))
+    val constants = new JHashMap[Integer, Any]()
+    constants.put(rowIdFieldId, 1000L)
+
+    val (parquetInfo, shadedSchema) = createMultiBlockParquetInfo(
+      parquetSchema,
+      blockRowCounts = Seq(100L, 100L, 50L),
+      firstFileGlobalRowIndex = 500L,
+      blockFirstRowIndices = Some(Seq(500L, 900L, 1000L)))
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo, constants, expectedSchema, shadedSchema, Map.empty)
+
+    def emptyBatch(rows: Int): ColumnarBatch =
+      new ColumnarBatch(Array.empty[SparkColumnVector], rows)
+
+    def assertRowIds(batch: ColumnarBatch, expected: Seq[Long]): Unit = {
+      assert(batch.numRows() == expected.length)
+      withResource(batch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { hostCol =>
+        val base = hostCol.getBase
+        expected.zipWithIndex.foreach { case (rowId, index) =>
+          assert(base.getLong(index) == rowId,
+            s"_row_id[$index] expected $rowId, got ${base.getLong(index)}")
+        }
+      }
+    }
+
+    // Generate row IDs directly from first_row_id + file position, including a filtered gap.
+    withResource(processor.process(emptyBatch(150))) { batch =>
+      assertRowIds(batch, (1500L until 1600L) ++ (1900L until 1950L))
+    }
+
+    // Adjacent position ranges are coalesced into one direct GPU sequence.
+    withResource(processor.process(emptyBatch(100))) { batch =>
+      assertRowIds(batch, 1950L until 2050L)
+    }
+  }
+
   test("Row lineage reuses file-global positions and materializes missing columns") {
     import com.nvidia.spark.rapids.Arm.withResource
     import com.nvidia.spark.rapids.GpuColumnVector
@@ -1127,6 +1226,48 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
         }
       }
     }
+  }
+
+  test("Physical row IDs advance inheritance positions across batches") {
+    import ai.rapids.cudf.{ColumnVector => CudfColumnVector}
+    import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+    import com.nvidia.spark.rapids.GpuColumnVector
+    import org.apache.spark.sql.types.LongType
+    import org.apache.spark.sql.vectorized.ColumnarBatch
+
+    assume(supportsRowLineageInheritance,
+      "The selected Iceberg runtime does not support row lineage inheritance")
+    val rowIdFieldId = ShimUtils.rowIdFieldId()
+    val rowIdType = ShadedTypes
+      .primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+      .id(rowIdFieldId).named("_row_id")
+    val parquetSchema = new ShadedMessageType("test", Seq[ShadedType](rowIdType).asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(rowIdFieldId, "_row_id", Types.LongType.get()))
+    val constants = new JHashMap[Integer, Any]()
+    constants.put(rowIdFieldId, 1000L)
+    val (parquetInfo, shadedSchema) =
+      createMultiBlockParquetInfo(parquetSchema, Seq(6L), firstFileGlobalRowIndex = 500L)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo, constants, expectedSchema, shadedSchema, Map.empty)
+
+    def processAndCheck(inputValues: Seq[java.lang.Long], expected: Seq[Long]): Unit = {
+      val rowIds = closeOnExcept(CudfColumnVector.fromBoxedLongs(inputValues: _*)) { cudf =>
+        GpuColumnVector.from(cudf, LongType)
+      }
+      val input = new ColumnarBatch(Array(rowIds), inputValues.length)
+      withResource(processor.process(input)) { output =>
+        withResource(output.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { actual =>
+          assert(expected.indices.map(i => actual.getBase.getLong(i)) == expected)
+        }
+      }
+    }
+
+    // Even when no values need inheritance, the first batch must advance position state.
+    processAndCheck(
+      Seq[java.lang.Long](900L, 901L, 902L), Seq(900L, 901L, 902L))
+    processAndCheck(
+      Seq[java.lang.Long](null, 904L, null), Seq(1503L, 904L, 1505L))
   }
 
   test("native deletion-vector row index supplies _pos and shifts physical columns") {
