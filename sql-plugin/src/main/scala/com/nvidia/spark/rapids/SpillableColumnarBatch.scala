@@ -16,9 +16,12 @@
 
 package com.nvidia.spark.rapids
 
+import java.io.OutputStream
+
 import ai.rapids.cudf.{ContiguousTable, Cuda, DeviceMemoryBuffer, HostMemoryBuffer, Table}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{withRetryNoSplit, SizeProvider}
+import com.nvidia.spark.rapids.format.TableMeta
 import com.nvidia.spark.rapids.spill.{SpillableColumnarBatchFromBufferHandle, SpillableColumnarBatchHandle, SpillableCompressedColumnarBatchHandle, SpillableDeviceBufferHandle, SpillableHostBufferHandle, SpillableHostColumnarBatchHandle, SpillableTableHandle}
 
 import org.apache.spark.TaskContext
@@ -231,6 +234,12 @@ class SpillableColumnarBatchFromBufferImpl(
     GpuSemaphore.acquireIfNecessary(TaskContext.get())
     handle.materialize(dataTypes)
   }
+
+  /**
+   * Write the packed table bytes to `out` without the GPU semaphore or a device allocation.
+   * @return the metadata needed to unpack the bytes written
+   */
+  def writePackedTo(out: OutputStream): TableMeta = handle.writePackedTo(out)
 
   override def incRefCount(): SpillableColumnarBatch = {
     if (refCount <= 0) {

@@ -855,6 +855,44 @@ class SpillableHostBufferHandle private (
     }
   }
 
+  /**
+   * Stream this handle's bytes to `out` without allocating a buffer of our own.
+   * When the data is on disk it is copied directly from the spill file.
+   */
+  def writeTo(out: OutputStream): Unit = {
+    var hostBuf: HostMemoryBuffer = null
+    var diskHandle: DiskHandle = null
+    synchronized {
+      if (closed) {
+        throw new IllegalStateException(
+          "attempting to write a closed handle")
+      // after spilling, the host can get removed asynchronously, so let's
+      // use disk if it's defined even if host is still present
+      } else if (disk.isDefined) {
+        diskHandle = disk.get
+      } else if (host.isDefined) {
+        hostBuf = host.get
+        hostBuf.incRefCount()
+      } else {
+        throw new IllegalStateException(
+          "open handle has no underlying buffer")
+      }
+    }
+    if (hostBuf != null) {
+      withResource(hostBuf) { hb =>
+        SpillFramework.writeBuffers(new HostByteBufferIterator(hb), Channels.newChannel(out))
+      }
+    } else {
+      diskHandle.withInputWrappedStream { in =>
+        val len = IOUtils.copyLarge(in, out)
+        if (len != sizeInBytes) {
+          throw new IllegalStateException(
+            s"Expected to read $sizeInBytes bytes, but got $len bytes from disk")
+        }
+      }
+    }
+  }
+
   override def spill(): Long = {
     if (!spillable) {
       0L
@@ -1292,6 +1330,54 @@ class SpillableColumnarBatchFromBufferHandle private (
       }
     }
     materialized
+  }
+
+  /**
+   * Write the packed table bytes to `out` without acquiring the GPU semaphore or allocating
+   * device memory. Device-resident data is copied through a host spill bounce buffer, the same
+   * way spilling copies it, and spilled data is streamed from host memory or disk.
+   *
+   * Callers may hold locks that GPU tasks need, such as Spark's memory manager lock during
+   * `MemoryStore` eviction, so this must not wait for GPU resources. It may wait for a host
+   * spill bounce buffer and for the copy through it; holders of those never need such locks.
+   * Device-resident data cannot spill until the write to `out` finishes.
+   *
+   * @return the metadata needed to unpack the bytes written
+   */
+  def writePackedTo(out: OutputStream): TableMeta = {
+    var devBatch: ColumnarBatch = null
+    var hostHandle: SpillableHostBufferHandle = null
+    var hostMeta: TableMeta = null
+    synchronized {
+      if (closed) {
+        throw new IllegalStateException(
+          "attempting to write a closed handle")
+      } else if (host.isDefined) {
+        hostHandle = host.get
+        hostMeta = meta.get
+      } else if (dev.isDefined) {
+        devBatch = GpuColumnVector.incRefCounts(dev.get)
+      } else {
+        throw new IllegalStateException(
+          "open handle has no underlying buffer")
+      }
+    }
+    if (devBatch != null) {
+      withResource(devBatch) { cb =>
+        val cvFromBuffer = cb.column(0).asInstanceOf[GpuColumnVectorFromBuffer]
+        SpillFramework.withHostSpillBounceBuffer { bounceBuffer =>
+          val iter = new MemoryBufferToHostByteBufferIterator(
+            cvFromBuffer.getBuffer,
+            bounceBuffer,
+            Cuda.DEFAULT_STREAM)
+          SpillFramework.writeBuffers(iter, Channels.newChannel(out))
+        }
+        cvFromBuffer.getTableMeta
+      }
+    } else {
+      hostHandle.writeTo(out)
+      hostMeta
+    }
   }
 
   override def spill(): Long = {
@@ -2594,6 +2680,19 @@ object SpillFramework extends Logging {
   def withHostSpillBounceBuffer[T](body: HostMemoryBuffer => T): T = {
     withResource(hostSpillBounceBufferPool.nextBuffer()) { hmb =>
       body(hmb.buf)
+    }
+  }
+
+  /** Write each buffer from `buffers` fully to `out`, then dispose of it. */
+  def writeBuffers(buffers: Iterator[ByteBuffer], out: WritableByteChannel): Unit = {
+    buffers.foreach { bb =>
+      try {
+        while (bb.hasRemaining) {
+          out.write(bb)
+        }
+      } finally {
+        RapidsStorageUtils.dispose(bb)
+      }
     }
   }
 
