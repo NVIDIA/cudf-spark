@@ -36,7 +36,8 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.iceberg
 
-import java.util.{HashMap => JHashMap}
+import java.nio.ByteBuffer
+import java.util.{HashMap => JHashMap, UUID}
 
 import scala.collection.JavaConverters._
 
@@ -48,11 +49,15 @@ import com.nvidia.spark.rapids.parquet.ParquetFileInfoWithBlockMeta
 import com.nvidia.spark.rapids.spill.SpillFramework
 import org.apache.hadoop.fs.Path
 import org.apache.iceberg.{MetadataColumns, Schema}
+import org.apache.iceberg.expressions.Expressions
+import org.apache.iceberg.parquet.ParquetSchemaUtil
 import org.apache.iceberg.shaded.org.apache.parquet.schema.{
   MessageType => ShadedMessageType,
+  MessageTypeParser => ShadedMessageTypeParser,
   Type => ShadedType,
   Types => ShadedTypes
 }
+import org.apache.iceberg.shaded.org.apache.parquet.schema.LogicalTypeAnnotation
 import org.apache.iceberg.shaded.org.apache.parquet.schema.PrimitiveType.{
   PrimitiveTypeName => ShadedPrimitiveTypeName
 }
@@ -64,7 +69,8 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.types.{LongType, StructType}
+import org.apache.spark.sql.execution.datasources.parquet.ParquetToSparkSchemaConverter
+import org.apache.spark.sql.types.{BinaryType, DateType, LongType, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
@@ -72,6 +78,30 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
  * ColumnAction tree is built based on schema comparison.
  */
 class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
+
+  private def fieldWithDefaults(
+      id: Int,
+      name: String,
+      icebergType: org.apache.iceberg.types.Type,
+      required: Boolean,
+      initialDefault: Option[AnyRef]): Option[Types.NestedField] = {
+    try {
+      val factory = classOf[Types.NestedField].getMethod(
+        if (required) "required" else "optional", classOf[String])
+      val builder = factory.invoke(null, name)
+      val builderClass = builder.getClass
+      builderClass.getMethod("withId", java.lang.Integer.TYPE)
+        .invoke(builder, Int.box(id))
+      builderClass.getMethod("ofType", classOf[org.apache.iceberg.types.Type])
+        .invoke(builder, icebergType)
+      initialDefault.foreach { value =>
+        builderClass.getMethod("withInitialDefault", classOf[Object]).invoke(builder, value)
+      }
+      Some(builderClass.getMethod("build").invoke(builder).asInstanceOf[Types.NestedField])
+    } catch {
+      case _: NoSuchMethodException => None
+    }
+  }
 
   private lazy val supportsRowLineageInheritance = {
     val majorMinor = IcebergProvider.detectedVersion.split("\\.").take(2).mkString(".")
@@ -913,6 +943,585 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
         (0 until outputBatch.numRows()).foreach { i =>
           assert(hostCol.getBase.isNull(i))
         }
+      }
+    }
+  }
+
+  test("Missing required primitive is filled with its Iceberg initial default") {
+    import com.nvidia.spark.rapids.Arm.withResource
+    import com.nvidia.spark.rapids.GpuColumnVector
+    import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
+
+    val fieldId = 1
+    val defaultField = fieldWithDefaults(
+      fieldId,
+      "added",
+      Types.IntegerType.get(),
+      required = true,
+      initialDefault = Some(Int.box(7))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo,
+      new JHashMap[Integer, Any](),
+      new Schema(defaultField),
+      shadedSchema,
+      Map.empty)
+
+    assert(processor.displayActionPlan().contains(
+      s"FillDefault(fieldId=$fieldId, int)"))
+
+    withResource(processor.process(new ColumnarBatch(Array.empty[SparkColumnVector], 3))) {
+      outputBatch =>
+        withResource(outputBatch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { hostCol =>
+          (0 until outputBatch.numRows()).foreach { row =>
+            assert(hostCol.getBase.getInt(row) == 7)
+          }
+        }
+    }
+  }
+
+  test("Unsupported Iceberg defaults are identified by subtype and nested path") {
+    val timestampNtzField = fieldWithDefaults(
+      3,
+      "created_at",
+      Types.TimestampType.withoutZone(),
+      required = false,
+      initialDefault = Some(Long.box(0L))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val timestampField = fieldWithDefaults(
+      4,
+      "updated_at",
+      Types.TimestampType.withZone(),
+      required = false,
+      initialDefault = Some(Long.box(0L))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val uuidField = fieldWithDefaults(
+      5,
+      "uuid_value",
+      Types.UUIDType.get(),
+      required = false,
+      initialDefault = Some(UUID.fromString("123e4567-e89b-12d3-a456-426614174000"))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val fixedType = Types.FixedType.ofLength(2)
+    val fixedField = fieldWithDefaults(
+      6,
+      "fixed_value",
+      fixedType,
+      required = false,
+      initialDefault = Some(ByteBuffer.wrap(Array[Byte](1, 2)))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+
+    val unsupportedSchema = new Schema(Types.NestedField.optional(
+      1, "payload", Types.StructType.of(timestampNtzField)))
+    val unsupportedListSchema = new Schema(Types.NestedField.optional(
+      1, "events", Types.ListType.ofOptional(
+        2, Types.StructType.of(timestampNtzField))))
+    val unsupportedMapKeySchema = new Schema(Types.NestedField.optional(
+      1, "lookup", Types.MapType.ofOptional(
+        2, 4, Types.StructType.of(timestampNtzField), Types.StringType.get())))
+    val unsupportedMapValueSchema = new Schema(Types.NestedField.optional(
+      1, "lookup", Types.MapType.ofOptional(
+        2, 4, Types.StringType.get(), Types.StructType.of(timestampNtzField))))
+    val supportedSchema = new Schema(timestampField)
+
+    assert(IcebergFormatVersionSupport.unsupportedDefault(unsupportedSchema)
+      .contains("payload.created_at" -> "timestamp"))
+    assert(IcebergFormatVersionSupport.unsupportedDefault(unsupportedListSchema)
+      .contains("events.element.created_at" -> "timestamp"))
+    assert(IcebergFormatVersionSupport.unsupportedDefault(unsupportedMapKeySchema)
+      .contains("lookup.key.created_at" -> "timestamp"))
+    assert(IcebergFormatVersionSupport.unsupportedDefault(unsupportedMapValueSchema)
+      .contains("lookup.value.created_at" -> "timestamp"))
+    assert(IcebergFormatVersionSupport.unsupportedDefault(supportedSchema).isEmpty)
+    assert(IcebergFormatVersionSupport.unsupportedDefault(new Schema(uuidField))
+      .contains("uuid_value" -> Types.UUIDType.get().toString))
+    assert(IcebergFormatVersionSupport.unsupportedDefault(new Schema(fixedField))
+      .contains("fixed_value" -> fixedType.toString))
+  }
+
+  test("Equality-delete required fields are included in the unsupported default check") {
+    val projectedField = Types.NestedField.optional(1, "id", Types.LongType.get())
+    val equalityDeleteField = fieldWithDefaults(
+      2,
+      "delete_key",
+      Types.TimestampType.withoutZone(),
+      required = false,
+      initialDefault = Some(Long.box(0L))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val unreferencedField = fieldWithDefaults(
+      3,
+      "unreferenced",
+      Types.TimestampType.withoutZone(),
+      required = false,
+      initialDefault = Some(Long.box(0L))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val tableSchema = new Schema(projectedField, equalityDeleteField, unreferencedField)
+    val expectedSchema = new Schema(projectedField)
+
+    val schemaToCheck = IcebergFormatVersionSupport.withRequiredFields(
+      tableSchema, expectedSchema, Seq(equalityDeleteField.fieldId()))
+
+    assert(schemaToCheck.columns().asScala.map(_.fieldId()) == Seq(1, 2))
+    assert(IcebergFormatVersionSupport.unsupportedDefault(schemaToCheck)
+      .contains("delete_key" -> "timestamp"))
+  }
+
+  test("Nested equality-delete required fields fall back whether projected or implicit") {
+    val projectedField = Types.NestedField.optional(1, "id", Types.LongType.get())
+    val equalityDeleteField = fieldWithDefaults(
+      3,
+      "delete_key",
+      Types.StringType.get(),
+      required = false,
+      initialDefault = Some("legacy")).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val unreferencedField = fieldWithDefaults(
+      4,
+      "unreferenced",
+      Types.TimestampType.withoutZone(),
+      required = false,
+      initialDefault = Some(Long.box(0L))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val payloadField = Types.NestedField.optional(
+      2, "payload", Types.StructType.of(equalityDeleteField))
+    val tableSchema = new Schema(projectedField, payloadField, unreferencedField)
+
+    Seq(
+      new Schema(projectedField),
+      new Schema(projectedField, payloadField)).foreach { expectedSchema =>
+      val error = intercept[UnsupportedOperationException] {
+        IcebergFormatVersionSupport.withRequiredFields(
+          tableSchema, expectedSchema, Seq(equalityDeleteField.fieldId()))
+      }
+
+      assert(error.getMessage.contains(
+        "Nested equality-delete field 'delete_key' with ID 3 is not supported on GPU"))
+    }
+  }
+
+  test("Present struct children take precedence over defaults for missing children") {
+    val structId = 1
+    val presentId = 2
+    val defaultId = 3
+    val defaultField = fieldWithDefaults(
+      defaultId,
+      "added",
+      Types.IntegerType.get(),
+      required = true,
+      initialDefault = Some(Int.box(11))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+
+    val presentParquetField =
+      ShadedTypes.primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+        .id(presentId).named("present")
+    val parquetStruct = ShadedTypes.optionalGroup().addField(presentParquetField)
+      .id(structId).named("s")
+    val parquetSchema = new ShadedMessageType("test", Seq[ShadedType](parquetStruct).asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(structId, "s", Types.StructType.of(
+        Types.NestedField.optional(presentId, "present", Types.LongType.get()),
+        defaultField)))
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo,
+      new JHashMap[Integer, Any](),
+      expectedSchema,
+      shadedSchema,
+      Map.empty)
+
+    val plan = processor.displayActionPlan()
+    assert(plan.contains("field[0] (input[0]):\n        PassThrough"), plan)
+    assert(plan.contains(s"FillDefault(fieldId=$defaultId, int)"), plan)
+  }
+
+  test("Row-group pruning preserves missing defaults and recognizes physical field IDs") {
+    val defaultField = fieldWithDefaults(
+      2, "added", Types.IntegerType.get(), required = false,
+      initialDefault = Some(Int.box(11))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val nestedDefault = fieldWithDefaults(
+      4, "added", Types.IntegerType.get(), required = false,
+      initialDefault = Some(Int.box(11))).get
+    val requiredSchema = new Schema(
+      Types.NestedField.optional(1, "id", Types.LongType.get()),
+      defaultField,
+      Types.NestedField.optional(3, "s", Types.StructType.of(nestedDefault)))
+    val physicalId = ShadedTypes.optional(ShadedPrimitiveTypeName.INT64).id(1).named("id")
+    val physicalSibling =
+      ShadedTypes.optional(ShadedPrimitiveTypeName.INT64).id(5).named("present")
+    val physicalStruct = ShadedTypes.optionalGroup().addField(physicalSibling).id(3).named("s")
+    val oldSchema = new ShadedMessageType(
+      "test", Seq[ShadedType](physicalId, physicalStruct).asJava)
+
+    Seq(
+      Expressions.equal("added", 11),
+      Expressions.greaterThan("added", 10),
+      Expressions.notNull("added"),
+      Expressions.not(Expressions.equal("added", 23)),
+      Expressions.and(Expressions.equal("id", 1L), Expressions.equal("added", 11)),
+      Expressions.or(Expressions.equal("id", 1L), Expressions.equal("added", 11)),
+      Expressions.equal("s.added", 11)).foreach { filter =>
+      assert(ParquetReadUtils.hasMissingDefaultFilter(
+        oldSchema, requiredSchema, filter, caseSensitive = true), filter.toString)
+    }
+    assert(!ParquetReadUtils.hasMissingDefaultFilter(
+      oldSchema, requiredSchema, Expressions.equal("id", 1L), caseSensitive = true))
+    assert(ParquetReadUtils.hasMissingDefaultFilter(
+      oldSchema, requiredSchema, Expressions.equal("ADDED", 11), caseSensitive = false))
+
+    val renamedPhysical =
+      ShadedTypes.optional(ShadedPrimitiveTypeName.INT32).id(2).named("old_name")
+    val currentSchema = new ShadedMessageType(
+      "test", Seq[ShadedType](physicalId, renamedPhysical, physicalStruct).asJava)
+    assert(!ParquetReadUtils.hasMissingDefaultFilter(
+      currentSchema, requiredSchema, Expressions.notNull("added"), caseSensitive = true))
+    val nullDefaultSchema = new Schema(
+      Types.NestedField.optional(2, "added", Types.IntegerType.get()))
+    assert(!ParquetReadUtils.hasMissingDefaultFilter(
+      oldSchema, nullDefaultSchema, Expressions.notNull("added"), caseSensitive = true))
+  }
+
+  test("Validity helpers decode physical types and preserve projected logical types") {
+    val dateField = ShadedTypes.optional(ShadedPrimitiveTypeName.INT32)
+      .as(LogicalTypeAnnotation.dateType()).id(4).named("date")
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(1, "s", Types.StructType.of(
+        Types.NestedField.optional(3, "added", Types.IntegerType.get()))),
+      Types.NestedField.optional(4, "date", Types.DateType.get()))
+    val helpers = Seq(
+      ShadedTypes.optional(ShadedPrimitiveTypeName.FIXED_LEN_BYTE_ARRAY).length(16)
+        .as(LogicalTypeAnnotation.uuidType()).id(2).named("legacy") -> BinaryType,
+      ShadedTypes.optional(ShadedPrimitiveTypeName.INT64)
+        .as(LogicalTypeAnnotation.timeType(false, LogicalTypeAnnotation.TimeUnit.MICROS))
+        .id(2).named("legacy") -> LongType,
+      ShadedTypes.optional(ShadedPrimitiveTypeName.INT64)
+        .as(LogicalTypeAnnotation.timestampType(true, LogicalTypeAnnotation.TimeUnit.NANOS))
+        .id(2).named("legacy") -> LongType,
+      ShadedTypes.optional(ShadedPrimitiveTypeName.INT64)
+        .as(LogicalTypeAnnotation.timestampType(false, LogicalTypeAnnotation.TimeUnit.MICROS))
+        .id(2).named("legacy") -> LongType)
+
+    helpers.foreach { case (helper, sparkType) =>
+      val fileSchema = new ShadedMessageType("test", Seq[ShadedType](
+        ShadedTypes.optionalGroup().addField(helper).id(1).named("s"), dateField).asJava)
+      val projected = ParquetSchemaUtil.pruneColumns(fileSchema, expectedSchema)
+      val retained = ParquetSchemaProjection.preserveStructValidity(
+        fileSchema, projected, expectedSchema)
+      val physical = GpuIcebergParquetReader.physicalHelperSchema(retained, expectedSchema)
+      val converted = new ParquetToSparkSchemaConverter(false, true, true, true, false)
+        .convert(ShimUtils.getParquetUnshader().unshade(physical))
+      assert(converted("s").dataType.asInstanceOf[StructType]("legacy").dataType == sparkType)
+      assert(converted("date").dataType == DateType)
+      assert(physical.getType("s", "legacy").getId.intValue() == 2)
+      assert(physical.asGroupType().getType("date") == dateField)
+    }
+  }
+
+  test("Opaque logical groups used as validity helpers decode physically") {
+    val variant = try {
+      classOf[LogicalTypeAnnotation].getMethod("variantType", java.lang.Byte.TYPE)
+        .invoke(null, Byte.box(1.toByte)).asInstanceOf[LogicalTypeAnnotation]
+    } catch {
+      case _: NoSuchMethodException => cancel("Parquet runtime does not expose VARIANT")
+    }
+    val helper = ShadedTypes.optionalGroup()
+      .addField(ShadedTypes.required(ShadedPrimitiveTypeName.BINARY).named("metadata"))
+      .addField(ShadedTypes.required(ShadedPrimitiveTypeName.BINARY).named("value"))
+      .as(variant).id(2).named("legacy")
+    val fileSchema = new ShadedMessageType("test", Seq[ShadedType](
+      ShadedTypes.optionalGroup().addField(helper).id(1).named("s")).asJava)
+    val defaultField = fieldWithDefaults(
+      3, "added", Types.IntegerType.get(), required = false,
+      initialDefault = Some(Int.box(11))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(1, "s", Types.StructType.of(defaultField)))
+    val retained = ParquetSchemaProjection.preserveStructValidity(
+      fileSchema, ParquetSchemaUtil.pruneColumns(fileSchema, expectedSchema), expectedSchema)
+    val physical = GpuIcebergParquetReader.physicalHelperSchema(retained, expectedSchema)
+    val physicalHelper = physical.getType("s", "legacy").asGroupType()
+    assert(physicalHelper.getLogicalTypeAnnotation == null)
+    assert(physicalHelper.getId.intValue() == 2)
+    assert(physicalHelper.getFieldCount == 1)
+    assert(helper.getLogicalTypeAnnotation == variant)
+    val converted = new ParquetToSparkSchemaConverter(false, true, true, true, false)
+      .convert(ShimUtils.getParquetUnshader().unshade(physical))
+    assert(converted("s").dataType.asInstanceOf[StructType]("legacy")
+      .dataType.asInstanceOf[StructType]("metadata").dataType == BinaryType)
+    val (info, shaded) = createParquetInfo(physical)
+    val processor = new GpuParquetReaderPostProcessor(
+      info, new JHashMap[Integer, Any](), expectedSchema, shaded, Map.empty)
+    assert(processor.displayActionPlan().contains("FillDefault(fieldId=3, int)"))
+
+    val projectedVariant = org.apache.iceberg.SchemaParser.fromJson(
+      """{"type":"struct","fields":[{"id":1,"name":"s","required":false,
+        |"type":{"type":"struct","fields":[{"id":2,"name":"legacy",
+        |"required":false,"type":"variant"}]}}]}""".stripMargin)
+    val projected = GpuIcebergParquetReader.physicalHelperSchema(fileSchema, projectedVariant)
+    assert(projected.getType("s", "legacy").getLogicalTypeAnnotation == variant)
+  }
+
+  test("Unmapped validity helpers cannot bind to requested field IDs") {
+    val defaultField = fieldWithDefaults(
+      1000, "added", Types.IntegerType.get(), required = false,
+      initialDefault = Some(Int.box(11))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(1, "id", Types.IntegerType.get()),
+      Types.NestedField.optional(2, "s", Types.StructType.of(defaultField)),
+      Types.NestedField.optional(3, "other", Types.LongType.get()))
+    val helpers = Seq(
+      ShadedTypes.optional(ShadedPrimitiveTypeName.INT64).named("untracked"),
+      ShadedTypes.optionalGroup().addField(
+        ShadedTypes.optional(ShadedPrimitiveTypeName.INT64).named("leaf")).named("untracked"),
+      ShadedTypes.optionalList().element(ShadedTypes.optionalGroup().addField(
+        ShadedTypes.optional(ShadedPrimitiveTypeName.INT64).named("leaf")).named("element"))
+        .named("untracked"),
+      ShadedTypes.optionalMap().key(
+        ShadedTypes.required(ShadedPrimitiveTypeName.BINARY)
+          .as(LogicalTypeAnnotation.stringType()).named("key"))
+        .value(ShadedTypes.optionalGroup().addField(
+          ShadedTypes.optional(ShadedPrimitiveTypeName.INT64).named("leaf")).named("value"))
+        .named("untracked"))
+    helpers.foreach { helper =>
+      val fileSchema = new ShadedMessageType("test", Seq[ShadedType](
+        ShadedTypes.optional(ShadedPrimitiveTypeName.INT32).id(1).named("id"),
+        ShadedTypes.optionalGroup().addField(helper).id(2).named("s")).asJava)
+      val retained = ShimUtils.pruneColumns(fileSchema, expectedSchema, false)
+      val physical = GpuIcebergParquetReader.physicalHelperSchema(retained, expectedSchema)
+      val partner = ParquetSchemaUtil.convert(physical)
+      assert(partner.findField(1000) == null)
+      assert(partner.findField(3) == null)
+      assert(partner.findField("s.untracked").fieldId() != 1000)
+      if (helper.getLogicalTypeAnnotation != null) {
+        assert(physical.getType("s", "untracked").asGroupType().getType(0).getId == null)
+      }
+      val (info, shaded) = createParquetInfo(physical)
+      val processor = new GpuParquetReaderPostProcessor(
+        info, new JHashMap[Integer, Any](), expectedSchema, shaded, Map.empty)
+      assert(processor.displayActionPlan().contains("FillDefault(fieldId=1000, int)"))
+    }
+  }
+
+  test("Legacy two-level LIST projections preserve struct element interpretation") {
+    val defaultField = fieldWithDefaults(
+      5, "added", Types.IntegerType.get(), required = false,
+      initialDefault = Some(Int.box(11))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    for (elementName <- Seq("element", "array"); projectSibling <- Seq(false, true)) {
+      val fileSchema = ShadedMessageTypeParser.parseMessageType(
+        s"""message test {
+           |  optional group items (LIST) = 1 {
+           |    repeated group $elementName = 2 {
+           |      optional int64 a = 3;
+           |      optional int64 b = 4;
+           |    }
+           |  }
+           |}""".stripMargin)
+      val fields = if (projectSibling) {
+        Seq(Types.NestedField.optional(3, "a", Types.LongType.get()), defaultField)
+      } else {
+        Seq(defaultField)
+      }
+      val expectedSchema = new Schema(Types.NestedField.optional(1, "items",
+        Types.ListType.ofRequired(2, Types.StructType.of(fields.asJava))))
+      val retained = ParquetSchemaProjection.preserveStructValidity(
+        fileSchema, ParquetSchemaUtil.pruneColumns(fileSchema, expectedSchema), expectedSchema)
+      val physical = GpuIcebergParquetReader.physicalHelperSchema(retained, expectedSchema)
+      val element = ParquetSchemaUtil.convert(physical).findType("items")
+        .asListType().elementType()
+      assert(element.isStructType)
+      assert(element.asStructType().fields().size() == (if (elementName == "element") 2 else 1))
+      val (info, shaded) = createParquetInfo(physical)
+      val processor = new GpuParquetReaderPostProcessor(
+        info, new JHashMap[Integer, Any](), expectedSchema, shaded, Map.empty)
+      assert(processor.displayActionPlan().contains("FillDefault(fieldId=5, int)"))
+    }
+  }
+
+  test("Default-only struct projections retain physical validity through nested containers") {
+    val defaultField = fieldWithDefaults(
+      3,
+      "added",
+      Types.IntegerType.get(),
+      required = false,
+      initialDefault = Some(Int.box(11))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val expectedStruct = Types.StructType.of(defaultField)
+    val presentField =
+      ShadedTypes.primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+        .id(2).named("present")
+    val ignoredField =
+      ShadedTypes.primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+        .id(6).named("ignored")
+    val keyField =
+      ShadedTypes.primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.REQUIRED)
+        .id(5).named("key")
+    val unrelatedField =
+      ShadedTypes.primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+        .id(9).named("unrelated")
+
+    def physicalStruct(name: String, includeIgnored: Boolean) = {
+      val builder = ShadedTypes.optionalGroup().addField(presentField)
+      if (includeIgnored) {
+        builder.addField(ignoredField)
+      }
+      builder.id(1).named(name)
+    }
+
+    def physicalFields(includeIgnored: Boolean): Seq[ShadedType] = Seq(
+      physicalStruct("s", includeIgnored),
+      ShadedTypes.optionalGroup().addField(physicalStruct("s", includeIgnored))
+        .id(4).named("outer"),
+      ShadedTypes.optionalList().element(physicalStruct("element", includeIgnored))
+        .id(4).named("items"),
+      ShadedTypes.optionalMap().key(keyField).value(physicalStruct("value", includeIgnored))
+        .id(4).named("entries"),
+      ShadedTypes.optionalGroup().addField(
+        ShadedTypes.optionalMap().key(keyField).value(physicalStruct("value", includeIgnored))
+          .id(7).named("entries"))
+        .id(4).named("outer"),
+      ShadedTypes.optionalGroup().addField(
+        ShadedTypes.optionalList().element(physicalStruct("element", includeIgnored))
+          .id(7).named("items"))
+        .id(4).named("outer"))
+
+    val expectedFields = Seq(
+      Types.NestedField.optional(1, "s", expectedStruct),
+      Types.NestedField.optional(4, "outer", Types.StructType.of(
+        Types.NestedField.optional(1, "s", expectedStruct))),
+      Types.NestedField.optional(4, "items", Types.ListType.ofOptional(1, expectedStruct)),
+      Types.NestedField.optional(4, "entries",
+        Types.MapType.ofOptional(5, 1, Types.LongType.get(), expectedStruct)),
+      Types.NestedField.optional(4, "outer", Types.StructType.of(
+        Types.NestedField.optional(7, "entries",
+          Types.MapType.ofOptional(5, 1, Types.LongType.get(), expectedStruct)))),
+      Types.NestedField.optional(4, "outer", Types.StructType.of(
+        Types.NestedField.optional(7, "items", Types.ListType.ofOptional(1, expectedStruct)))))
+
+    physicalFields(includeIgnored = true).zip(physicalFields(includeIgnored = false))
+      .zip(expectedFields).foreach { case ((fileField, retainedField), expectedField) =>
+        withClue(s"${expectedField.name()}: ") {
+          val fileSchema = new ShadedMessageType("test", Seq(fileField, unrelatedField).asJava)
+          val expectedSchema = new Schema(expectedField)
+          val projected = ParquetSchemaUtil.pruneColumns(fileSchema, expectedSchema)
+          val restored = ParquetSchemaProjection.preserveStructValidity(
+            fileSchema, projected, expectedSchema)
+          val projectedPaths = projected.getPaths.asScala.map(_.toSeq).toSet
+          val helperSchema = new ShadedMessageType("test", Seq(retainedField).asJava)
+          val helperPaths = helperSchema.getPaths.asScala.map(_.toSeq).toSet
+          // Iceberg can already retain extra physical siblings for nested projections.
+          // Preserve those fields and add only the helper paths needed by empty structs.
+          assert(restored.getPaths.asScala.map(_.toSeq).toSet == projectedPaths ++ helperPaths)
+          val partnerSchema = ParquetSchemaUtil.convert(restored)
+          assert(partnerSchema.findField(1) != null)
+          assert(partnerSchema.findField(2) != null)
+          assert((partnerSchema.findField(6) != null) ==
+            projectedPaths.exists(_.last == "ignored"))
+          assert(partnerSchema.findField(9) == null)
+          assert(ParquetSchemaProjection.preserveStructValidity(
+            fileSchema, fileSchema, expectedSchema) == fileSchema)
+          val emptySchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
+          assert(ParquetSchemaProjection.preserveStructValidity(
+            fileSchema, emptySchema, new Schema()) == emptySchema)
+
+          val (parquetInfo, shadedSchema) = createParquetInfo(restored)
+          val processor = new GpuParquetReaderPostProcessor(
+            parquetInfo,
+            new JHashMap[Integer, Any](),
+            expectedSchema,
+            shadedSchema,
+            Map.empty)
+          val plan = processor.displayActionPlan()
+          assert(plan.contains("FillDefault(fieldId=3, int)"), plan)
+          assert(!plan.contains("FillNull"), plan)
+        }
+      }
+  }
+
+  test("Default-only projections restore all requested sibling collection paths") {
+    def addedField(id: Int) = fieldWithDefaults(
+      id, "added", Types.IntegerType.get(), required = false,
+      initialDefault = Some(Int.box(11))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val unrelated = ShadedTypes.optional(ShadedPrimitiveTypeName.INT64).id(2).named("unrelated")
+    val listElement = ShadedTypes.optionalGroup().addField(
+      ShadedTypes.optional(ShadedPrimitiveTypeName.INT64).id(5).named("present"))
+      .id(4).named("element")
+    val items = ShadedTypes.optionalList().element(listElement).id(3).named("b")
+    val mapKey = ShadedTypes.required(ShadedPrimitiveTypeName.INT64).id(8).named("key")
+    val mapValue = ShadedTypes.optionalGroup().addField(
+      ShadedTypes.optional(ShadedPrimitiveTypeName.INT64).id(10).named("present"))
+      .id(9).named("value")
+    val entries = ShadedTypes.optionalMap().key(mapKey).value(mapValue).id(7).named("c")
+    val fileStruct = ShadedTypes.optionalGroup().addFields(unrelated, items, entries)
+      .id(1).named("s")
+    val requestedCollections = Seq(
+      Types.NestedField.optional(3, "b",
+        Types.ListType.ofOptional(4, Types.StructType.of(addedField(6)))),
+      Types.NestedField.optional(7, "c", Types.MapType.ofOptional(
+        8, 9, Types.LongType.get(), Types.StructType.of(addedField(11)))))
+
+    for (nested <- Seq(false, true); projectSibling <- Seq(false, true)) {
+      withClue(s"nested=$nested, projectSibling=$projectSibling: ") {
+        val fields = if (projectSibling) {
+          Types.NestedField.optional(2, "unrelated", Types.LongType.get()) +:
+            requestedCollections
+        } else {
+          requestedCollections
+        }
+        val requiredStruct = Types.NestedField.optional(1, "s", Types.StructType.of(fields.asJava))
+        val fileField = if (nested) {
+          ShadedTypes.optionalGroup().addField(
+            ShadedTypes.optional(ShadedPrimitiveTypeName.INT64).id(13).named("first"))
+            .addField(fileStruct).id(12).named("outer")
+        } else {
+          fileStruct
+        }
+        val requiredField = if (nested) {
+          Types.NestedField.optional(12, "outer", Types.StructType.of(requiredStruct))
+        } else {
+          requiredStruct
+        }
+        val fileSchema = new ShadedMessageType("test", Seq[ShadedType](fileField).asJava)
+        val requiredSchema = new Schema(requiredField)
+        val projected = ParquetSchemaUtil.pruneColumns(fileSchema, requiredSchema)
+        val restored = ParquetSchemaProjection.preserveStructValidity(
+          fileSchema, projected, requiredSchema)
+        val partner = ParquetSchemaUtil.convert(restored)
+        val projectedPaths = projected.getPaths.asScala.map(_.toSeq).toSet
+        Seq(1, 3, 4, 5, 7, 8, 9, 10).foreach(id => assert(partner.findField(id) != null))
+        // Keep extra siblings already retained by Iceberg, but do not add unrelated helpers.
+        assert((partner.findField(2) != null) == projectedPaths.exists(_.last == "unrelated"))
+        assert((partner.findField(13) != null) == projectedPaths.exists(_.last == "first"))
+        assert(ParquetSchemaProjection.preserveStructValidity(
+          fileSchema, restored, requiredSchema) == restored)
+
+        val (parquetInfo, shadedSchema) = createParquetInfo(restored)
+        val processor = new GpuParquetReaderPostProcessor(
+          parquetInfo, new JHashMap[Integer, Any](), requiredSchema, shadedSchema, Map.empty)
+        val plan = processor.displayActionPlan()
+        assert(plan.contains("FillDefault(fieldId=6, int)"), plan)
+        assert(plan.contains("FillDefault(fieldId=11, int)"), plan)
+        assert(!plan.contains("FillNull"), plan)
       }
     }
   }
