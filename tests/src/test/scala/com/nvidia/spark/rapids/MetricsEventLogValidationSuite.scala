@@ -862,6 +862,8 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
   }
 
   test("cached scan op time is excluded from consumers across AQE table cache stages") {
+    // Defaults to true. Set explicitly as in the other tests in this suite. This test
+    // only checks the plan tree walk, which does not depend on the RDD wrapping.
     spark.conf.set("spark.rapids.sql.exec.opTimeTrackingRDD.enabled", "true")
 
     // Spark 3.5.2+ wraps the cached relation's scan in a TableCacheQueryStageExec, a
