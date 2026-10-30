@@ -14,8 +14,11 @@
 
 import json
 import os
+from datetime import datetime as _datetime  # data_gen star-import rebinds datetime
+import pytz
 import pyspark.sql.functions as f
 import pytest
+import re
 
 from asserts import *
 from data_gen import *
@@ -2758,6 +2761,271 @@ def test_delta_invalid_partition_overwrite_mode_non_partitioned(spark_tmp_path):
         data_path,
         conf=_delta_confs)
     with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+
+
+# Delta stores a timestamp partition as a UTC instant, e.g. 2020-01-01T00:00:00.000000Z
+_dpo_timestamp_re = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z$")
+_dpo_date_re = re.compile(r"^(\d{4})-(\d\d)-(\d\d)$")
+
+def _respell_dpo_partition_value(value, position, session_time_zone):
+    """
+    Return an equivalent but differently spelled Delta partition string. Timestamps rotate through
+    several spellings of the same instant by `position`, so one table mixes several formats.
+    """
+    if _dpo_timestamp_re.match(value):
+        instant = _datetime.fromisoformat(value.replace("Z", "+00:00"))
+        spelling = position % 4
+        if spelling == 0:  # UTC with the zero fraction dropped
+            return instant.strftime("%Y-%m-%dT%H:%M:%S") + (
+                ".{}".format(("%06d" % instant.microsecond).rstrip("0")) if instant.microsecond
+                else "") + "Z"
+        if spelling == 1:  # space separator and an explicit offset
+            return instant.strftime("%Y-%m-%d %H:%M:%S.%f") + "+00:00"
+        if spelling == 2:  # no zone: wall clock time in the session time zone
+            local = instant.astimezone(pytz.timezone(session_time_zone))
+            return local.strftime("%Y-%m-%d %H:%M:%S") + (
+                ".%06d" % local.microsecond if local.microsecond else "")
+        return value  # unchanged
+    date = _dpo_date_re.match(value)
+    if date:
+        year, month, day = date.groups()
+        return "{}-{}-{}".format(year, int(month), int(day))  # no zero padding
+    # decimal: drop trailing zeros, or add a fraction to a whole number
+    return value.rstrip("0").rstrip(".") if "." in value else value + ".0"
+
+def _rewrite_dpo_partition_values(spark, data_path, new_value):
+    """
+    Rewrite every non-null AddFile partition string in the CPU and GPU table logs with
+    `new_value(old_value, position)`, where `position` counts the values of one table in log
+    order, so both tables get identical rewrites. Asserts that each table's log really changed.
+    """
+    # Use the Hadoop FileSystem API so the rewrite also works when --tmp_path is HDFS or S3.
+    jvm = spark.sparkContext._jvm
+    hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+    changed_per_table = []
+    for side in ("CPU", "GPU"):
+        log_dir = jvm.org.apache.hadoop.fs.Path("{}/{}/_delta_log".format(data_path, side))
+        fs = log_dir.getFileSystem(hadoop_conf)
+        position = 0
+        changed = 0
+        for status in sorted(fs.listStatus(log_dir), key=lambda st: st.getPath().getName()):
+            log_file = status.getPath()
+            name = log_file.getName()
+            if name.endswith(".crc"):  # version checksums no longer match the edited log
+                fs.delete(log_file, False)
+            elif name.endswith(".json"):
+                actions = [json.loads(line) for line in
+                           spark.sparkContext.textFile(log_file.toString()).collect()
+                           if line.strip()]
+                for action in actions:
+                    partition_values = action.get("add", {}).get("partitionValues", {})
+                    for key, value in sorted(partition_values.items()):
+                        if value is not None:
+                            partition_values[key] = new_value(value, position)
+                            changed += partition_values[key] != value
+                            position += 1
+                out = fs.create(log_file, True)
+                out.write(bytearray(("\n".join(json.dumps(a) for a in actions) + "\n").encode()))
+                out.close()
+        changed_per_table.append(changed)
+    assert all(count > 0 for count in changed_per_table), "log rewrite changed nothing"
+    # DeltaLog caches the snapshot built before the log was edited.
+    spark.sparkContext._jvm.org.apache.spark.sql.delta.DeltaLog.clearCache()
+
+def _respell_dpo_partition_values(spark, data_path, session_time_zone):
+    _rewrite_dpo_partition_values(
+        spark, data_path,
+        lambda value, position: _respell_dpo_partition_value(value, position, session_time_zone))
+
+def _poison_dpo_partition_value(spark, data_path, bad_value):
+    """Replace the first non-null partition string of each table with an unparseable one."""
+    _rewrite_dpo_partition_values(
+        spark, data_path, lambda value, position: bad_value if position == 0 else value)
+
+def _removed_partition_values(data_path, side):
+    """Sorted partition values of every RemoveFile in the table log."""
+    def collect(spark):
+        logs = read_delta_logs(spark, "{}/{}/_delta_log/*.json".format(data_path, side))
+        return sorted(
+            [str(sorted(a["remove"]["partitionValues"].values(), key=str))
+             for acts in logs.values() for a in acts if "remove" in a])
+    return with_cpu_session(collect)
+
+# (partition column type, existing partition values, replacement partition values)
+_dpo_normalization_cases = [
+    pytest.param("timestamp",
+                 ["2020-01-01 00:00:00", "2020-01-02 12:30:00.5", "2020-03-04 05:06:07.123456", None],
+                 ["2020-01-01 00:00:00", "2020-01-02 12:30:00.5", "2021-01-01 00:00:00", None],
+                 id="timestamp"),
+    pytest.param("date", ["2020-01-01", "2020-02-11", "2020-12-31", None],
+                 ["2020-01-01", "2020-02-11", "2021-01-01", None], id="date"),
+    pytest.param("decimal(10,2)", ["1.50", "2.00", "3.25", None],
+                 ["1.50", "2.00", "9.99", None], id="decimal"),
+]
+_timestamp_case = _dpo_normalization_cases[0].values
+
+def _dpo_df(spark, rows, col_type, part_col):
+    return (spark.createDataFrame([(i, v) for i, v in enumerate(rows)], "id LONG, s STRING")
+            .selectExpr("id", "CAST(s AS {}) AS {}".format(col_type, part_col)))
+
+def _dpo_normalization_test(spark_tmp_path, col_type, existing, replacement, confs,
+                            expected_removes, rename_partition_column=False):
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    mapping_props = "TBLPROPERTIES ('delta.columnMapping.mode' = 'name')" if rename_partition_column else ""
+
+    def setup(spark):
+        for path in [data_path + "/CPU", data_path + "/GPU"]:
+            spark.sql("CREATE TABLE delta.`{}` (id LONG, p {}) USING delta PARTITIONED BY (p) {}"
+                      .format(path, col_type, mapping_props))
+            _dpo_df(spark, existing, col_type, "p").coalesce(1).write.format("delta") \
+                .mode("append").save(path)
+    with_cpu_session(setup, conf=confs)
+    with_cpu_session(lambda spark: _respell_dpo_partition_values(
+        spark, data_path, confs["spark.sql.session.timeZone"]), conf=confs)
+    part_col = "p"
+    if rename_partition_column:
+        part_col = "p2"
+        def do_rename(spark):
+            for path in [data_path + "/CPU", data_path + "/GPU"]:
+                spark.sql("ALTER TABLE delta.`{}` RENAME COLUMN p TO p2".format(path))
+        with_cpu_session(do_rename, conf=confs)
+
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        lambda spark, path: _dpo_df(spark, replacement, col_type, part_col).coalesce(1)
+            .write.format("delta").mode("overwrite").partitionBy(part_col)
+            .option("partitionOverwriteMode", "dynamic").save(path),
+        read_delta_path,
+        data_path,
+        conf=confs)
+    # Compare the removed AddFiles (partition values and paths), not only the final rows.
+    # Column mapping gives the CPU and GPU tables different random physical column names, so
+    # their logs can only be compared by the removed partition values.
+    if not rename_partition_column:
+        with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+    cpu_removed = _removed_partition_values(data_path, "CPU")
+    assert cpu_removed == _removed_partition_values(data_path, "GPU")
+    if expected_removes is not None:
+        assert len(cpu_removed) == expected_removes
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="DPO partition value normalization is available in Delta 4.3")
+@pytest.mark.parametrize("col_type, existing, replacement", _dpo_normalization_cases)
+@pytest.mark.parametrize("tz", ["UTC", "America/Los_Angeles"])
+def test_delta_dpo_partition_value_normalization(spark_tmp_path, col_type, existing, replacement, tz):
+    confs = copy_and_update(_delta_confs, {"spark.sql.session.timeZone": tz})
+    # Three existing non-null partitions and the null partition match; two of the replacement
+    # values and the null partition overlap, so the overlapping partitions must be removed
+    # although their stored strings are formatted differently from the new ones.
+    _dpo_normalization_test(spark_tmp_path, col_type, existing, replacement, confs,
+                            expected_removes=3)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="DPO partition value normalization is available in Delta 4.3")
+def test_delta_dpo_partition_value_normalization_renamed_column(spark_tmp_path):
+    confs = copy_and_update(_delta_confs, {"spark.sql.session.timeZone": "America/Los_Angeles"})
+    col_type, existing, replacement = _timestamp_case
+    _dpo_normalization_test(spark_tmp_path, col_type, existing, replacement, confs,
+                            expected_removes=3, rename_partition_column=True)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="DPO partition value normalization is available in Delta 4.3")
+def test_delta_dpo_partition_value_normalization_disabled(spark_tmp_path):
+    # With parsing disabled Delta compares raw strings, and the GPU must do the same.
+    confs = copy_and_update(_delta_confs, {
+        "spark.sql.session.timeZone": "UTC",
+        "spark.databricks.delta.dynamicPartitionOverwrite.parsePartitionValues": "false"})
+    col_type, existing, replacement = _timestamp_case
+    _dpo_normalization_test(spark_tmp_path, col_type, existing, replacement, confs,
+                            expected_removes=None)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="DPO partition value normalization is available in Delta 4.3")
+@pytest.mark.parametrize("parse_values", ["true", "false"])
+def test_delta_dpo_unparseable_partition_value(spark_tmp_path, parse_values):
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    confs = copy_and_update(_delta_confs, {
+        "spark.sql.session.timeZone": "UTC",
+        "spark.databricks.delta.dynamicPartitionOverwrite.parsePartitionValues": parse_values})
+    existing = ["2020-01-01 00:00:00", "2020-01-02 00:00:00", None]
+    replacement = ["2020-01-01 00:00:00", "2021-01-01 00:00:00", None]
+
+    def setup(spark):
+        for path in [data_path + "/CPU", data_path + "/GPU"]:
+            spark.sql("CREATE TABLE delta.`{}` (id LONG, p TIMESTAMP) USING delta "
+                      "PARTITIONED BY (p)".format(path))
+            _dpo_df(spark, existing, "timestamp", "p").coalesce(1).write.format("delta") \
+                .mode("append").save(path)
+    with_cpu_session(setup, conf=confs)
+    with_cpu_session(lambda spark: _poison_dpo_partition_value(spark, data_path, "not-a-timestamp"),
+                     conf=confs)
+
+    def overwrite(spark, path):
+        _dpo_df(spark, replacement, "timestamp", "p").coalesce(1) \
+            .write.format("delta").mode("overwrite").partitionBy("p") \
+            .option("partitionOverwriteMode", "dynamic").save(path)
+
+    # A partition value that cannot be parsed must not fail the write: Delta records telemetry
+    # and compares the raw strings instead, so the CPU and GPU must both succeed and agree.
+    with_cpu_session(lambda spark: overwrite(spark, data_path + "/CPU"), conf=confs)
+    # assert_rapids_delta_write fails if the Delta write falls back to the CPU.
+    assert_rapids_delta_write(lambda spark: overwrite(spark, data_path + "/GPU"), conf=confs)
+    def read_rows(side):
+        return with_cpu_session(
+            lambda spark: read_delta_path(spark, data_path + "/" + side).sort("id", "p").collect(),
+            conf=confs)
+    assert_equal(read_rows("CPU"), read_rows("GPU"))
+    assert _removed_partition_values(data_path, "CPU") == _removed_partition_values(data_path, "GPU")
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="DPO partition value normalization is available in Delta 4.3")
+def test_delta_dpo_sql_insert_overwrite_multiple_partition_columns(spark_tmp_path):
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    confs = copy_and_update(_delta_confs, {
+        "spark.sql.session.timeZone": "America/Los_Angeles",
+        "spark.sql.sources.partitionOverwriteMode": "DYNAMIC"})
+    rows = ("(1L, '2020-01-01', '2020-01-01 00:00:00'), (2L, '2020-01-01', '2020-01-02 12:30:00.5'),"
+            " (3L, '2020-02-11', '2020-01-01 00:00:00'), (4L, NULL, '2020-01-01 00:00:00'),"
+            " (5L, '2020-02-11', NULL)")
+    select = ("SELECT id, CAST(d AS DATE) AS d, CAST(ts AS TIMESTAMP) AS ts FROM VALUES {} "
+              "AS t(id, d, ts)")
+
+    def setup(spark):
+        for path in [data_path + "/CPU", data_path + "/GPU"]:
+            spark.sql("CREATE TABLE delta.`{}` (id LONG, d DATE, ts TIMESTAMP) USING delta "
+                      "PARTITIONED BY (d, ts)".format(path))
+            spark.sql("INSERT INTO delta.`{}` ".format(path) + select.format(rows))
+    with_cpu_session(setup, conf=confs)
+    with_cpu_session(lambda spark: _respell_dpo_partition_values(
+        spark, data_path, confs["spark.sql.session.timeZone"]), conf=confs)
+
+    # Four replacement partitions match existing ones (including both null-bearing partitions)
+    # and one is new. The (2020-01-01, 2020-01-02 12:30:00.5) partition is not replaced.
+    replacement = ("(10L, '2020-01-01', '2020-01-01 00:00:00'), (11L, '2020-02-11', '2020-01-01 00:00:00'),"
+                   " (12L, NULL, '2020-01-01 00:00:00'), (13L, '2020-02-11', NULL),"
+                   " (14L, '2021-01-01', '2020-01-01 00:00:00')")
+    _assert_sql(data_path, confs, "INSERT OVERWRITE TABLE delta.`{path}` " + select.format(replacement))
+    with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+    assert len(_removed_partition_values(data_path, "CPU")) == 4
 
 # ID mapping is supported starting in Delta Lake 2.2, but currently cannot distinguish
 # Delta Lake 2.1 from 2.2 in tests. https://github.com/NVIDIA/spark-rapids/issues/9276
