@@ -28,10 +28,10 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, QueryStageExec, ShuffleQueryStageExec}
 import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
 import org.apache.spark.sql.functions._
-import org.apache.spark.sql.rapids.GpuInMemoryTableScanExec
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 
 class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach {
@@ -884,28 +884,31 @@ class MetricsEventLogValidationSuite extends AnyFunSuite with BeforeAndAfterEach
       case other => other
     }
 
-    // The consumer is the GpuExec whose child is the cached scan, possibly wrapped.
-    def scanOf(p: org.apache.spark.sql.execution.SparkPlan): Option[GpuInMemoryTableScanExec] =
-      SparkShimImpl.getTableCacheNonQueryStagePlan(p).getOrElse(p) match {
-        case s: GpuInMemoryTableScanExec => Some(s)
-        case _ => None
-      }
-    val consumers = finalPlan.collect {
-      case c: GpuExec if c.children.exists(scanOf(_).isDefined) => c
-    }
-    assert(consumers.nonEmpty,
-      s"expected a GpuExec consuming a GpuInMemoryTableScanExec; plan was:\n$finalPlan")
-    val consumer = consumers.head
-    val scan = consumer.children.flatMap(scanOf).head
-    val scanMetric = scan.getOpTimeNewMetric
-    assert(scanMetric.isDefined, "GpuInMemoryTableScanExec should expose an OP_TIME_NEW metric")
+    val filter = finalPlan.collectFirst { case f: GpuFilterExec => f }
+    assert(filter.isDefined, s"expected a GpuFilterExec; plan was:\n$finalPlan")
 
-    val descendants = consumer.getDescendantOpTimeMetrics
-    assert(descendants.exists(_ eq scanMetric.get),
-      s"${consumer.nodeName}.getDescendantOpTimeMetrics must include the cached scan's " +
-        "op time metric (so it is excluded from the consumer's op time); it was missing, " +
-        s"so the scan time would be double-counted. Collected ${descendants.size} " +
-        "descendant op-time metrics.")
+    // The GPU execs directly below the filter, looking through CPU nodes and through a
+    // table cache stage. On Spark 3.5.2+ this is the GpuInMemoryTableScanExec inside the
+    // stage. On Spark 3.5.0 and 3.5.1 the scan runs on the CPU and this is the
+    // HostColumnarToGpu above the stage.
+    def gpuBelow(p: SparkPlan): Seq[GpuExec] = p match {
+      case g: GpuExec => Seq(g)
+      case o => SparkShimImpl.getTableCacheNonQueryStagePlan(o)
+        .map(gpuBelow).getOrElse(o.children.flatMap(gpuBelow))
+    }
+    val below = filter.get.children.flatMap(gpuBelow)
+    assert(below.nonEmpty, s"expected a GpuExec below the GpuFilterExec; plan was:\n$finalPlan")
+
+    val descendants = filter.get.getDescendantOpTimeMetrics
+    below.foreach { g =>
+      val metric = g.getOpTimeNewMetric
+      assert(metric.isDefined, s"${g.nodeName} should expose an OP_TIME_NEW metric")
+      assert(descendants.exists(_ eq metric.get),
+        s"GpuFilter.getDescendantOpTimeMetrics must include the op time metric of " +
+          s"${g.nodeName} (so it is excluded from the filter's op time); it was missing, " +
+          s"so that time would be double-counted. Collected ${descendants.size} " +
+          "descendant op-time metrics.")
+    }
   }
 
 }
