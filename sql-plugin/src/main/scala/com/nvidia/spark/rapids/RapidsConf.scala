@@ -736,6 +736,14 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
     }
   }
 
+  lazy val isParquetHybridScanEnabled: Boolean = get(PARQUET_HYBRID_SCAN_ENABLED)
+
+  lazy val testParquetHybridScanFailOnFallback: Boolean =
+    get(TEST_PARQUET_HYBRID_SCAN_FAIL_ON_FALLBACK)
+
+  lazy val hybridScanSingleStageFilterKeepThreshold: Double =
+    get(PARQUET_HYBRID_SCAN_SINGLE_STAGE_FILTER_KEEP_THRESHOLD)
+
   lazy val isParquetPerFileReadEnabled: Boolean =
     RapidsReaderType.withName(get(PARQUET_READER_TYPE)) == RapidsReaderType.PERFILE
 
