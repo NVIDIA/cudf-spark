@@ -51,8 +51,11 @@ import org.apache.spark.sql.catalyst.expressions.{Expression, TimeZoneAwareExpre
 import org.apache.spark.sql.types.{DataType, StringType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
+// A StringType child is copied as is (CastOptions.TO_PRETTY_STRING_OPTIONS does not quote
+// strings), and nulls are replaced with a scalar, so a dictionary child stays a dictionary.
 case class GpuToPrettyString(child: Expression, timeZoneId: Option[String] = None)
-  extends ShimUnaryExpression with GpuExpression with TimeZoneAwareExpression {
+  extends ShimUnaryExpression with GpuExpression with TimeZoneAwareExpression
+  with GpuStringDictionaryPassThrough {
 
   override lazy val resolved: Boolean = childrenResolved
 

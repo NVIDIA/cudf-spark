@@ -931,6 +931,22 @@ def test_parquet_input_meta(spark_tmp_path, v1_enabled_list, reader_confs):
                         'input_file_block_length()'),
             conf=all_confs)
 
+# More than 4 output columns convert to rows with RowConversion instead of per row, which
+# decodes the dictionary column input_file_name() returns.
+@ignore_order
+@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+@pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
+def test_parquet_input_file_name_many_columns(spark_tmp_path, v1_enabled_list, reader_confs):
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+    gens = [('a', long_gen), ('b', int_gen), ('c', string_gen), ('d', double_gen)]
+    with_cpu_session(
+            lambda spark : gen_df(spark, gens).repartition(3).write.parquet(data_path))
+    all_confs = copy_and_update(reader_confs, {'spark.sql.sources.useV1SourceList': v1_enabled_list})
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark : spark.read.parquet(data_path)\
+                    .selectExpr('a', 'b', 'c', 'd', 'input_file_name()'),
+            conf=all_confs)
+
 @allow_non_gpu('ProjectExec', 'Alias', 'InputFileName', 'InputFileBlockStart', 'InputFileBlockLength',
                'FilterExec', 'And', 'IsNotNull', 'GreaterThan', 'Literal',
                'FileSourceScanExec', 'ColumnarToRowExec',

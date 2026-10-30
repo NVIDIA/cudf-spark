@@ -981,6 +981,8 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
         if (rapidsConf.exportColumnarRdd) {
           updatedPlan = detectAndTagFinalColumnarOutput(updatedPlan)
         }
+        // Needs the final operators above each project, including exportColumnarRdd.
+        updatedPlan = InputFileNameDictionaryRule(updatedPlan)
         if (rapidsConf.isTestEnabled) {
           assertIsOnTheGpu(updatedPlan, rapidsConf)
           // Generate the canonicalized plan to ensure no incompatibilities.

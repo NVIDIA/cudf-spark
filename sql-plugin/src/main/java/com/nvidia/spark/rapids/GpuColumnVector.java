@@ -719,6 +719,19 @@ public class GpuColumnVector extends GpuColumnVectorBase {
       // mistaken for Variant; this helper only validates Variant's physical cuDF layout.
       return hasVariantPhysicalLayout(cv);
     }
+    if (dt.equals(DType.DICTIONARY32)) {
+      // A dictionary with STRING keys can back a StringType column; see GpuInputFileName. An
+      // empty dictionary may have no children.
+      if (!(colType instanceof StringType)) {
+        return false;
+      }
+      if (cv.getNumChildren() == 0) {
+        return true;
+      }
+      try (ColumnView keys = cv.getDictionaryKeys()) {
+        return keys.getType().equals(DType.STRING);
+      }
+    }
     if (!dt.isNestedType()) {
       return getNonNestedRapidsType(colType).equals(dt);
     }

@@ -180,13 +180,14 @@ public class RapidsHostColumnVectorCore extends ColumnVector {
 
   @Override
   public final UTF8String getUTF8String(int rowId) {
-    return UTF8String.fromBytes(cudfCv.getUTF8(rowId));
+    return UTF8String.fromBytes(getStringBytes(rowId));
   }
 
   @Override
   public final byte[] getBinary(int rowId) {
-    if (cudfCv.getType().equals(DType.STRING)) {
-      return cudfCv.getUTF8(rowId);
+    DType type = cudfCv.getType();
+    if (type.equals(DType.STRING) || type.equals(DType.DICTIONARY32)) {
+      return getStringBytes(rowId);
     }
     if (cachedChildren[0] == null) {
       // cache the child data
@@ -197,6 +198,37 @@ public class RapidsHostColumnVectorCore extends ColumnVector {
     int startOffset = (int) cudfCv.getStartListOffset(rowId);
     int endOffset = (int) cudfCv.getEndListOffset(rowId);
     return new ColumnarArray(data, startOffset, endOffset - startOffset).toByteArray();
+  }
+
+  /**
+   * The UTF-8 bytes of a row of a STRING column, or of a DICTIONARY32 column with STRING keys,
+   * whose value is the key its index points to.
+   */
+  private byte[] getStringBytes(int rowId) {
+    if (!cudfCv.getType().equals(DType.DICTIONARY32)) {
+      return cudfCv.getUTF8(rowId);
+    }
+    // children: [indices (INT8, INT16, INT32 or INT64), keys (STRING)]
+    HostColumnVectorCore indices = cudfCv.getChildColumnView(0);
+    HostColumnVectorCore keys = cudfCv.getChildColumnView(1);
+    final long keyIndex;
+    switch (indices.getType().getTypeId()) {
+      case INT8:
+        keyIndex = indices.getByte(rowId);
+        break;
+      case INT16:
+        keyIndex = indices.getShort(rowId);
+        break;
+      case INT32:
+        keyIndex = indices.getInt(rowId);
+        break;
+      case INT64:
+        keyIndex = indices.getLong(rowId);
+        break;
+      default:
+        throw new IllegalStateException("Unexpected dictionary indices type " + indices.getType());
+    }
+    return keys.getUTF8(keyIndex);
   }
 
   @Override
