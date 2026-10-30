@@ -38,7 +38,7 @@ The supported catalog-managed paths include:
 - V1 and V2 append, insert, overwrite, `replaceWhere`, and dynamic partition
   overwrite;
 - partitioned and clustered table writes and qualified optimized writes; and
-- copy-on-write `DELETE`, `UPDATE`, and `MERGE`.
+- `DELETE`, `UPDATE`, and `MERGE`, including persistent deletion-vector mutations.
 
 Create and replace operations keep the catalog-provided location and
 credentials. A data-only replacement also keeps the catalog table identity and
@@ -47,10 +47,9 @@ updated only after the Delta commit succeeds.
 
 ## Current limitations
 
-- Catalog-managed `DELETE`, `UPDATE`, `MERGE`, and dynamic partition overwrite
-  fall back to the CPU when the operation is configured to create persistent
-  deletion vectors. Deletion-vector reads remain accelerated. Persistent-DV
-  mutation support is tracked separately.
+- Dynamic partition overwrite falls back to the CPU when the operation is
+  configured to create persistent deletion vectors. This limitation also
+  applies to non-catalog-managed Delta tables.
 - Delta 4.2 rejects catalog-managed `OPTIMIZE` and `REORG TABLE` with
   `DELTA_UNSUPPORTED_CATALOG_MANAGED_TABLE_OPERATION` on both CPU and GPU.
 - Metadata-changing replacements follow the Delta CPU behavior and are rejected
