@@ -75,17 +75,18 @@ object CachedGpuBatchIterator {
 
   private def cacheProducer(producer: GpuDataProducer[Table],
       dataTypes: Array[DataType]): GpuColumnarBatchIterator = {
-    withResource(producer) { _ =>
+    val result = closeOnExcept(producer) { _ =>
       if (producer.hasNext) {
         // Special case for the first one.
-        closeOnExcept(producer.next) { firstTable =>
-          if (!producer.hasNext) {
-            val ret =
-              new SingleGpuColumnarBatchIterator(GpuColumnVector.from(firstTable, dataTypes))
-            firstTable.close()
-            ret
-          } else {
-            val pending = mutable.Queue.empty[SpillableColumnarBatch]
+        val firstTable = producer.next
+        val hasMore = closeOnExcept(firstTable)(_ => producer.hasNext)
+        if (!hasMore) {
+          withResource(firstTable) { table =>
+            new SingleGpuColumnarBatchIterator(GpuColumnVector.from(table, dataTypes))
+          }
+        } else {
+          val pending = mutable.Queue.empty[SpillableColumnarBatch]
+          closeOnExcept(pending) { _ =>
             pending += makeSpillableAndClose(firstTable, dataTypes)
             producer.foreach { t =>
               pending += makeSpillableAndClose(t, dataTypes)
@@ -96,6 +97,9 @@ object CachedGpuBatchIterator {
       } else {
         EmptyGpuColumnarBatchIterator
       }
+    }
+    closeOnExcept(result) { _ =>
+      withResource(producer)(_ => result)
     }
   }
 }

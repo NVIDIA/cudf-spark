@@ -406,6 +406,17 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
     .booleanConf
     .createWithDefault(true)
 
+  val PARQUET_CACHE_ROW_GROUP_SIZE_BYTES =
+    conf("spark.rapids.sql.cache.serializer.rowGroupSizeBytes")
+      .doc("Uncompressed byte target for Parquet cache records. The GPU writer may exceed " +
+        "this target because it cannot split below its page fragment granularity. " +
+        "The CPU writer uses it as a row-size budget and always admits at least one row.")
+      .internal()
+      .bytesConf(ByteUnit.BYTE)
+      .checkValue(v => v >= 1024L,
+        "The Parquet cache row group size bytes must be at least 1024.")
+      .createWithDefault(8L * 1024 * 1024)
+
   val PARQUET_WRITER_ROW_GROUP_SIZE_ROWS =
     conf("spark.rapids.sql.format.parquet.writer.rowGroupSizeRows")
       .doc("Maximum number of rows in a Parquet row group written by the GPU writer. " +

@@ -45,7 +45,7 @@ class CachedBatchWriterVariantSuite extends SparkQueryCompareTestSuite {
   // ColumnarBatchRow.copy() does not take Variant on Spark 4.0 and 4.1.0-4.1.1, so the
   // columnar entry has to carry its row into the next batch without copying it.
   test("columnar entry carries a Variant row into the next batch with its own values") {
-    // Each row is estimated at 2056 bytes, so a 16 KiB budget holds seven of them.
+    // Distinct 4 KiB payloads exceed the 16 KiB buffered-data budget across several records.
     val numRows = 30
     val attrs = Seq(AttributeReference("id", LongType, nullable = false)(),
       AttributeReference("v", VariantType, nullable = false)())
@@ -53,7 +53,7 @@ class CachedBatchWriterVariantSuite extends SparkQueryCompareTestSuite {
     withCpuSparkSession(spark => {
       // Spark's parse_json makes the Variant values, as no builder API exists on every runtime.
       val sources = spark.range(0, numRows, 1, 1).selectExpr("id",
-        """parse_json(format_string('{"id": %d, "s": "%04d"}', id, id))""")
+        """parse_json(format_string('{"id": %d, "s": "%04096d"}', id, id))""")
         .queryExecution.executedPlan.executeCollect()
         .map(r => (r.getLong(0), r.getVariant(1).getValue, r.getVariant(1).getMetadata))
       val ser = new ParquetCachedBatchSerializer

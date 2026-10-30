@@ -1771,10 +1771,7 @@ trait ParquetPartitionReaderBase extends Logging with ScanWithMetrics
       schema: MessageType): Unit = {
     val fileMeta = new FileMetaData(schema, Collections.emptyMap[String, String],
       ParquetPartitionReader.PARQUET_CREATOR)
-    val metadataConverter = new ParquetMetadataConverter
-    val footer = new ParquetMetadata(fileMeta, blocks.asJava)
-    val meta = metadataConverter.toParquetMetadata(ParquetPartitionReader.PARQUET_VERSION, footer)
-    org.apache.parquet.format.Util.writeFileMetaData(meta, out)
+    GpuParquetUtils.writeFooter(out, fileMeta, blocks)
   }
 
   /**
@@ -1785,45 +1782,17 @@ trait ParquetPartitionReaderBase extends Logging with ScanWithMetrics
    * @param realStartOffset starting file offset of the first block
    * @return updated block metadata
    */
-  @scala.annotation.nowarn(
-    "msg=method getPath in class ColumnChunkMetaData is deprecated"
-  )
   protected def computeBlockMetaData(
       blocks: Seq[BlockMetaData],
       realStartOffset: Long): Seq[BlockMetaData] = {
-    val outputBlocks = new ArrayBuffer[BlockMetaData](blocks.length)
-    var totalBytesToCopy = 0L
-    blocks.foreach { block =>
-      val columns = block.getColumns.asScala
-      val outputColumns = new ArrayBuffer[ColumnChunkMetaData](columns.length)
-      columns.foreach { column =>
-        // update column metadata to reflect new position in the output file
-        val startPosCol = column.getStartingPos
-        val offsetAdjustment = realStartOffset + totalBytesToCopy - startPosCol
-        val newDictOffset = if (column.getDictionaryPageOffset > 0) {
-          column.getDictionaryPageOffset + offsetAdjustment
-        } else {
-          0
-        }
-        val columnSize = column.getTotalSize
-        //noinspection ScalaDeprecation
-        outputColumns += ColumnChunkMetaData.get(
-          column.getPath,
-          column.getPrimitiveType,
-          column.getCodec,
-          column.getEncodingStats,
-          column.getEncodings,
-          column.getStatistics,
-          column.getStartingPos + offsetAdjustment,
-          newDictOffset,
-          column.getValueCount,
-          columnSize,
-          column.getTotalUncompressedSize)
-        totalBytesToCopy += columnSize
+    var position = realStartOffset
+    blocks.map { block =>
+      val relocated = GpuParquetUtils.relocateBlock(block, position)
+      block.getColumns.asScala.foreach { column =>
+        position = Math.addExact(position, column.getTotalSize)
       }
-      outputBlocks += GpuParquetUtils.newBlockMeta(block, outputColumns.toSeq)
+      relocated
     }
-    outputBlocks.toSeq
   }
 
   /**
@@ -3732,17 +3701,12 @@ abstract class AbstractParquetTableReader(
     clippedParquetSchema: MessageType,
     splits: Array[PartitionedFile],
     debugDumpPrefix: Option[String],
-    debugDumpAlways: Boolean) extends RetryableTableProducer with Logging {
-
-  protected def createReader(): ChunkedReader
+    debugDumpAlways: Boolean) extends ParquetChunkedTableProducer with Logging {
 
   protected def additionalResources: Seq[AutoCloseable] = Seq.empty
 
   private[this] lazy val splitsString = splits.mkString("; ")
-  private var activeReader: ChunkedReader = _
-  private var completedChunks = 0
-  private var checkpointedChunks = 0
-  private var closed = false
+  override protected def readerResources: Seq[AutoCloseable] = buffers ++ additionalResources
 
   protected def postProcessChunk(chunk: Table): Table
 
@@ -3751,7 +3715,7 @@ abstract class AbstractParquetTableReader(
       table, clippedParquetSchema, readDataSchema, isSchemaCaseSensitive, useFieldId)
   }
 
-  private def decodeNext(reader: ChunkedReader): Table = {
+  override protected def decodeNext(reader: ChunkedReader): Table = {
     NvtxIdWithMetrics(NvtxRegistry.PARQUET_DECODE, metrics(GPU_DECODE_TIME)) {
       try {
         reader.next
@@ -3770,7 +3734,7 @@ abstract class AbstractParquetTableReader(
     }
   }
 
-  private def readNext(reader: ChunkedReader): Table = {
+  override protected def readNext(reader: ChunkedReader): Table = {
     val table = decodeNext(reader)
     val postProcessedTable = closeOnExcept(table)(postProcessChunk)
     closeOnExcept(postProcessedTable) { _ =>
@@ -3787,56 +3751,6 @@ abstract class AbstractParquetTableReader(
       GpuParquetScan.rebaseDateTime(evolvedSchemaTable, dateRebaseMode, timestampRebaseMode)
     GpuMetric.recordOutputBatchBytes(outputTable, metrics.get(GPU_OUTPUT_BATCH_BYTES))
     outputTable
-  }
-
-  private def closeReader(): Unit = {
-    val reader = activeReader
-    activeReader = null
-    if (reader != null) {
-      reader.close()
-    }
-  }
-
-  private def getReader: ChunkedReader = {
-    if (activeReader == null) {
-      require(!closed, "Parquet table reader is closed")
-      val reader = createReader()
-      closeOnExcept(reader) { _ =>
-        var replayed = 0
-        while (replayed < completedChunks) {
-          require(reader.hasNext,
-            s"Unable to restore Parquet reader to chunk $completedChunks")
-          withResource(decodeNext(reader))(_ => ())
-          replayed += 1
-        }
-        activeReader = reader
-      }
-    }
-    activeReader
-  }
-
-  override def hasNext: Boolean = getReader.hasNext
-
-  override def next: Table = {
-    val result = readNext(getReader)
-    completedChunks += 1
-    result
-  }
-
-  override def checkpoint(): Unit = checkpointedChunks = completedChunks
-
-  override def restore(): Unit = {
-    completedChunks = checkpointedChunks
-    closeReader()
-  }
-
-  override def close(): Unit = {
-    if (!closed) {
-      closed = true
-      val reader = Option(activeReader).toSeq
-      activeReader = null
-      (reader ++ buffers ++ additionalResources).safeClose()
-    }
   }
 }
 

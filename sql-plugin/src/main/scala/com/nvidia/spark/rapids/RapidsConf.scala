@@ -719,6 +719,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val isParquetInt96WriteEnabled: Boolean = get(ENABLE_PARQUET_INT96_WRITE)
 
+  lazy val parquetCacheRowGroupSizeBytes: Long = get(PARQUET_CACHE_ROW_GROUP_SIZE_BYTES)
+
   lazy val parquetWriterRowGroupSizeRows: Option[Integer] =
     get(PARQUET_WRITER_ROW_GROUP_SIZE_ROWS)
 

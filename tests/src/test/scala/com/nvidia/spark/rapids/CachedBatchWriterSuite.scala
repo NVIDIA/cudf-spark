@@ -20,13 +20,13 @@ import scala.collection.JavaConverters.asScalaIteratorConverter
 import scala.collection.mutable.{ArrayBuffer, ListBuffer}
 import scala.collection.mutable
 
-import ai.rapids.cudf.{ColumnVector, CompressionType, DType, ParquetTableWriter, Rmm, Table}
+import ai.rapids.cudf.{ColumnVector, CompressionType, DType, ParquetTableWriter, ParquetWriterOptions, Rmm, Table}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.CudfTestHelper.withRecordedHostAllocations
 import com.nvidia.spark.rapids.RapidsHostColumnBuilderSuite.{limits, withLimits}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableFromBatchColumns
-import com.nvidia.spark.rapids.parquet.{ParquetCachedBatchSerializer, ParquetOutputFileFormat}
-import org.apache.hadoop.mapreduce.{RecordWriter, TaskAttemptContext}
+import com.nvidia.spark.rapids.parquet.{ParquetCachedBatchSerializer, ParquetOutputFileFormat, SizedParquetRecordWriter}
+import org.apache.hadoop.mapreduce.TaskAttemptContext
 import org.mockito.ArgumentMatchers.{any, isA}
 import org.mockito.Mockito.{doAnswer, mock, mockStatic, spy, times, verify, when}
 import org.mockito.invocation.InvocationOnMock
@@ -54,6 +54,8 @@ import org.apache.spark.unsafe.types.UTF8String
  * Unit tests for cached batch writing
  */
 class CachedBatchWriterSuite extends SparkQueryCompareTestSuite {
+  private val rowGroupSizeBytes = new RapidsConf(Map.empty[String, String])
+    .parquetCacheRowGroupSizeBytes
 
   class TestResources extends AutoCloseable {
     assert(Rmm.isInitialized, "Need to use this within Spark GPU session, or it may fail to " +
@@ -82,7 +84,7 @@ class CachedBatchWriterSuite extends SparkQueryCompareTestSuite {
             StructField("empty", ByteType, false)))
         val listOfPCB = ser.compressColumnarBatchWithParquet(
           cb, dummySchema, dummySchema,
-          BYTES_ALLOWED_PER_BATCH, false)
+          BYTES_ALLOWED_PER_BATCH, false, rowGroupSizeBytes)
         assert(listOfPCB.isEmpty)
       })
   }
@@ -145,13 +147,121 @@ class CachedBatchWriterSuite extends SparkQueryCompareTestSuite {
     val ser = new ParquetCachedBatchSerializer()
     val schema = new StructType().add("value", "string")
     List(false, true).foreach { comp =>
-      val opts = ser.getParquetWriterOptions(comp, schema)
+      val opts = ser.getParquetWriterOptions(comp, schema, rowGroupSizeBytes)
+      assert(opts.getRowGroupSizeRows == ParquetWriterOptions.builder().build()
+        .getRowGroupSizeRows)
       assert(
         (if (comp) {
           CompressionType.SNAPPY
         } else {
           CompressionType.NONE
         }) == opts.getCompressionType)
+    }
+  }
+
+  test("CPU writer returns a record before consuming the remaining input rows") {
+    val settings = new SparkConf()
+      .set(RapidsConf.PARQUET_CACHE_ROW_GROUP_SIZE_BYTES.key, "1k")
+      .set("spark.sql.inMemoryColumnarStorage.compressed", "false")
+    withCpuSparkSession(spark => {
+      val attrs: Seq[Attribute] = Seq(
+        AttributeReference("id", LongType, nullable = false)(),
+        AttributeReference("value", StringType, nullable = false)())
+      val cachedAttrs = PCBSSchemaHelper.getSupportedSchemaFromUnsupported(attrs)
+      val rowCount = 200
+      var consumedRows = 0
+      val input = (0 until rowCount).iterator.map { id =>
+        consumedRows += 1
+        InternalRow(id.toLong, UTF8String.fromString(s"value-$id"))
+      }
+      val ser = new ParquetCachedBatchSerializer
+      val conf = TrampolineUtil.getSparkConf(spark)
+      val sharedConf = spark.sparkContext.broadcast(conf.getAllConfs)
+      val producer = new ser.CachedBatchIteratorProducer[InternalRow](
+        input, cachedAttrs, attrs, sharedConf)
+      val cached = try {
+        withResource(new producer.InternalRowToCachedBatchIterator) { records =>
+          assert(consumedRows == 0)
+          assert(records.hasNext)
+          assert(consumedRows == 0)
+          val first = records.next()
+          // Size is checked after writing, without reading a row ahead of the record.
+          assert(consumedRows == first.numRows)
+          assert(consumedRows < rowCount)
+          first :: records.toList
+        }
+      } finally {
+        sharedConf.destroy()
+      }
+      assert(cached.length > 1)
+      assert(consumedRows == rowCount)
+      assert(cached.map(_.numRows).sum == rowCount)
+      val decoded = ser.convertCachedBatchToInternalRow(
+        spark.sparkContext.parallelize[CachedBatch](cached, numSlices = 1),
+        attrs, attrs, conf).map(_.copy()).collect()
+      assert(decoded.map(_.getLong(0)).toSeq == (0L until rowCount.toLong))
+      decoded.zipWithIndex.foreach { case (row, id) =>
+        assert(row.getUTF8String(1).toString == s"value-$id")
+      }
+    }, settings)
+  }
+
+  Seq("generic", "interval", "host-columnar").foreach { entry =>
+    test(s"CPU $entry records budget actual large-string data") {
+      withCpuSparkSession(spark => {
+        val attrs: Seq[Attribute] = Seq(
+          AttributeReference("value", StringType, nullable = false)()) ++
+          (if (entry == "interval") Seq(
+            AttributeReference("interval", CalendarIntervalType, nullable = false)())
+          else Seq.empty)
+        val cachedAttrs = PCBSSchemaHelper.getSupportedSchemaFromUnsupported(attrs)
+        val values = (0 until 12).map { id =>
+          UTF8String.fromString(id.toString + ("x" * (64 * 1024)))
+        }
+        val interval = new org.apache.spark.unsafe.types.CalendarInterval(1, 2, 3L)
+        val rows = values.map { value =>
+          if (entry == "interval") InternalRow(value, interval) else InternalRow(value)
+        }
+        val ser = new ParquetCachedBatchSerializer
+        val conf = TrampolineUtil.getSparkConf(spark)
+        val sharedConf = spark.sparkContext.broadcast(conf.getAllConfs)
+        val cached = try {
+          if (entry == "host-columnar") {
+            val columns = org.apache.spark.sql.execution.vectorized.OnHeapColumnVector
+              .allocateColumns(values.length, attrs.toStructType)
+            withResource(new ColumnarBatch(columns.map(
+                _.asInstanceOf[org.apache.spark.sql.vectorized.ColumnVector]), values.length)) {
+              batch =>
+                values.zipWithIndex.foreach { case (value, index) =>
+                  columns(0).putByteArray(index, value.getBytes)
+                }
+                val producer = new ser.CachedBatchIteratorProducer[ColumnarBatch](
+                  Iterator.single(batch), cachedAttrs, attrs, sharedConf)
+                producer.hadoopConf.setBoolean("parquet.enable.dictionary", false)
+                withResource(new producer.ColumnarBatchToCachedBatchIterator) { records =>
+                  records.toList
+                }
+            }
+          } else {
+            val producer = new ser.CachedBatchIteratorProducer[InternalRow](
+              rows.iterator, cachedAttrs, attrs, sharedConf)
+            producer.hadoopConf.setBoolean("parquet.enable.dictionary", false)
+            withResource(new producer.InternalRowToCachedBatchIterator)(_.toList)
+          }
+        } finally {
+          sharedConf.destroy()
+        }
+        assert(cached.length > 1, "large strings must split despite their small defaultSize")
+        assert(cached.forall(record => record.numRows > 0 && record.numRows <= 3))
+        assert(cached.map(_.numRows).sum == values.length)
+        val decoded = ser.convertCachedBatchToInternalRow(
+          spark.sparkContext.parallelize[CachedBatch](cached, numSlices = 1),
+          attrs, attrs, conf).map(_.copy()).collect()
+        assert(decoded.map(_.getUTF8String(0)).toSeq == values)
+        if (entry == "interval") {
+          assert(decoded.forall(_.getInterval(1) == interval))
+        }
+      }, new SparkConf().set(RapidsConf.PARQUET_CACHE_ROW_GROUP_SIZE_BYTES.key, "128k"))
     }
   }
 
@@ -198,7 +308,8 @@ class CachedBatchWriterSuite extends SparkQueryCompareTestSuite {
       val listOfPCB = withResource(
         buildNullTypeBatch(values, nestedType, arrayType, mapType, arrayOfStructType)) {
         gpuCB => ser.compressColumnarBatchWithParquet(gpuCB, cachedSchema, origSchema,
-          BYTES_ALLOWED_PER_BATCH, useCompression = false)
+          BYTES_ALLOWED_PER_BATCH, useCompression = false,
+          rowGroupSizeBytes = rowGroupSizeBytes).toList
       }
 
       val conf = TrampolineUtil.getSparkConf(spark)
@@ -363,18 +474,17 @@ class CachedBatchWriterSuite extends SparkQueryCompareTestSuite {
     }, oneMiBBatchConf)
   }
 
-  test("row entry carries a row into the next batch with its own values") {
+  test("CPU record boundaries preserve rows backed by reused codegen buffers") {
     withCpuSparkSession(spark => {
       // Whole-stage codegen produces each row into one reused buffer when hasNext is called.
-      // Rows that are not UnsafeRows but read their values from that buffer, as converted rows
-      // do, need the writer to copy the one it carries into the next batch. Each value has the
-      // same width in every row, so a value read after the buffer moves on is the next row's.
+      // Generic rows can still refer to values in that buffer. Record boundaries must not
+      // advance the input before writing the current row.
       val plan = spark.range(0, 20, 1, 1).selectExpr(
         "id",
-        "lpad(cast(id as string), 4, '0') as s",
-        "cast(lpad(cast(id as string), 4, '0') as binary) as b",
-        "named_struct('s', lpad(cast(id as string), 4, '0')) as st",
-        "array(cast(lpad(cast(id as string), 4, '0') as binary)) as a"
+        "lpad(cast(id as string), 128, '0') as s",
+        "cast(lpad(cast(id as string), 128, '0') as binary) as b",
+        "named_struct('s', lpad(cast(id as string), 128, '0')) as st",
+        "array(cast(lpad(cast(id as string), 128, '0') as binary)) as a"
       ).queryExecution.executedPlan
       assert(plan.isInstanceOf[WholeStageCodegenExec], plan)
       val types = plan.output.map(_.dataType)
@@ -541,7 +651,7 @@ class CachedBatchWriterSuite extends SparkQueryCompareTestSuite {
       val dummySchema = new StructType(
         gpuCols.map( _ => StructField("empty", ByteType, false)))
       ser.compressColumnarBatchWithParquet(cb, dummySchema, dummySchema,
-        BYTES_ALLOWED_PER_BATCH, false)
+        BYTES_ALLOWED_PER_BATCH, false, rowGroupSizeBytes)
     } finally {
       theTableMock.close()
       gpuCols(0).close()
@@ -566,11 +676,15 @@ class CachedBatchWriterSuite extends SparkQueryCompareTestSuite {
 
     val producer = new ser.CachedBatchIteratorProducer[ColumnarBatch](cbIter, schema, schema,
       withCpuSparkSession(spark => spark.sparkContext.broadcast(new SQLConf().getAllConfs)))
-    val mockParquetOutputFileFormat = mock(classOf[ParquetOutputFileFormat])
+    // Invocation history would retain an output buffer for every small record in this mock.
+    val mockParquetOutputFileFormat = mock(classOf[ParquetOutputFileFormat],
+      org.mockito.Mockito.withSettings().stubOnly())
     var totalSize = 0L
-    val mockRecordWriter = new RecordWriter[Void, InternalRow] {
+    val mockRecordWriter = new SizedParquetRecordWriter {
       val estimatedSize = schema.indices.length * 1024
       var thisBatchSize = 0L
+
+      override def getDataSize: Long = thisBatchSize
 
       override def write(k: Void, v: InternalRow): Unit = {
         thisBatchSize += estimatedSize
