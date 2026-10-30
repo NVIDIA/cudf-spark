@@ -201,9 +201,9 @@ def test_server_side_planned_scan_file_partitioning(planned_scan_conf, reader, p
 def test_server_side_planned_scan_row_group_ranges(spark_tmp_path, reader):
     def write(spark):
         # Small row groups so that a byte range holds some row groups but not others.
-        spark._jsc.hadoopConfiguration().setInt("parquet.block.size", 64 * 1024)
         spark.range(0, 200000).selectExpr("id", "concat('k', cast(id % 1000 as string)) s") \
-            .repartition(2).write.parquet(spark_tmp_path + "/selected")
+            .repartition(2).write.option("parquet.block.size", 64 * 1024) \
+            .parquet(spark_tmp_path + "/selected")
 
     with_cpu_session(write)
     catalog = "planned_" + uuid.uuid4().hex
