@@ -15,7 +15,7 @@
   limitations under the License.
 -->
 <!--
-  This template is rendered by build/gen-spark-home-deps.py into
+  This template is rendered by thirdparty/spark-rapids-common/spark-home-deps/gen-spark-home-deps.py into
   shim-deps/databricks/pom.xml (Scala 2.12) or
   scala2.13/shim-deps/databricks/pom.xml (Scala 2.13) on a Databricks cluster.
   Every jar under /databricks/jars becomes a system-scoped dependency, so the

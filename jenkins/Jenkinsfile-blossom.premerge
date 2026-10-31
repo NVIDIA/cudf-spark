@@ -594,7 +594,7 @@ void checkoutCode(String url, String sha) {
              extensions      : [[$class: 'CloneOption', shallow: true, depth: 10]]
         ]
     )
-    sh "git submodule update --init"
+    sh "git submodule update --init -- thirdparty/parquet-testing"
     if (!common.isSubmoduleInit(this)) {
         error "Failed to clone submodule : thirdparty/parquet-testing"
     }

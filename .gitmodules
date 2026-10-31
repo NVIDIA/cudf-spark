@@ -1,3 +1,6 @@
 [submodule "thirdparty/parquet-testing"]
 	path = thirdparty/parquet-testing
 	url = https://github.com/apache/parquet-testing
+[submodule "thirdparty/spark-rapids-common"]
+	path = thirdparty/spark-rapids-common
+	url = https://github.com/NVIDIA/spark-rapids-common.git
