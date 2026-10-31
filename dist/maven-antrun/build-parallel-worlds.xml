@@ -78,6 +78,19 @@
             <attribute name="artifact_csv"/>
         </scriptdef>
         <doCopyDependencies artifact_csv="sql-plugin-api,aggregator"/>
+        <condition property="historyMetricsRuntimeAtRoot">
+            <and>
+                <available file="${project.build.directory}/parallel-world/com/nvidia/spark/history/HistoryMetricsProvider.class"/>
+                <available file="${project.build.directory}/parallel-world/com/nvidia/spark/history/local/LocalHistoryMetricsProvider.class"/>
+                <available file="${project.build.directory}/parallel-world/org/sqlite/JDBC.class"/>
+                <available file="${project.build.directory}/parallel-world/org/sqlite/native" type="dir"/>
+                <available file="${project.build.directory}/parallel-world/META-INF/services/com.nvidia.spark.history.HistoryMetricsProvider"/>
+                <available file="${project.build.directory}/parallel-world/META-INF/services/java.sql.Driver"/>
+                <available file="${project.build.directory}/parallel-world/META-INF/maven/org.xerial/sqlite-jdbc/pom.properties"/>
+            </and>
+        </condition>
+        <fail unless="historyMetricsRuntimeAtRoot"
+              message="The history API, local provider and SQLite runtime must be present at the distribution root"/>
     </target>
     <target name="build-parallel-worlds"
             depends="copy-dependencies"
@@ -115,6 +128,10 @@
                 </ac:if>
             </ac:then>
         </ac:if>
+
+        <exec executable="python3" failonerror="true">
+            <arg value="${spark.rapids.source.basedir}/${rapids.module}/scripts/tests/test_binary_dedupe.py"/>
+        </exec>
 
         <exec executable="${spark.rapids.source.basedir}/${rapids.module}/scripts/binary-dedupe.sh"
               dir="${project.build.directory}"
