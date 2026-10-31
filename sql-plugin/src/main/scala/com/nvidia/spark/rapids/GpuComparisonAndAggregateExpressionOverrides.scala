@@ -350,8 +350,8 @@ private[rapids] object GpuComparisonAndAggregateExpressionOverrides {
       ExprChecks.binaryProject(
         TypeSig.gpuNumeric, TypeSig.cpuNumeric,
         ("value", TypeSig.gpuNumeric +
-            TypeSig.psNote(TypeEnum.FLOAT, "result may round slightly differently") +
-            TypeSig.psNote(TypeEnum.DOUBLE, "result may round slightly differently"),
+            TypeSig.psNote(TypeEnum.FLOAT, "nonzero scales may round differently") +
+            TypeSig.psNote(TypeEnum.DOUBLE, "nonzero scales may round differently"),
             TypeSig.cpuNumeric),
         ("scale", TypeSig.lit(TypeEnum.INT), TypeSig.lit(TypeEnum.INT))),
       BRoundRuleMeta),
@@ -360,8 +360,8 @@ private[rapids] object GpuComparisonAndAggregateExpressionOverrides {
       ExprChecks.binaryProject(
         TypeSig.gpuNumeric, TypeSig.cpuNumeric,
         ("value", TypeSig.gpuNumeric +
-            TypeSig.psNote(TypeEnum.FLOAT, "result may round slightly differently") +
-            TypeSig.psNote(TypeEnum.DOUBLE, "result may round slightly differently"),
+            TypeSig.psNote(TypeEnum.FLOAT, "nonzero scales may round differently") +
+            TypeSig.psNote(TypeEnum.DOUBLE, "nonzero scales may round differently"),
             TypeSig.cpuNumeric),
         ("scale", TypeSig.lit(TypeEnum.INT), TypeSig.lit(TypeEnum.INT))),
       RoundRuleMeta),

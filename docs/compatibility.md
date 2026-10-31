@@ -49,8 +49,15 @@ floating-point calculations. The ordering of operations to calculate the value m
 underlying JVM implementation used by the CPU and the C++ standard library implementation used by
 the GPU.
 
-In the case of `round` and `bround` the results can be off by more because they can enlarge the
-difference. This happens in cases where a binary floating-point representation cannot exactly
+For `FLOAT` and `DOUBLE` inputs, `round` and `bround` with a literal scale of zero (including an
+omitted scale) are compatible with Spark and run on the GPU even when
+[`spark.rapids.sql.incompatibleOps.enabled`](additional-functionality/advanced_configs.md#sql.incompatibleOps.enabled)
+is `false`. `round` uses `HALF_UP` rounding and `bround` uses `HALF_EVEN` rounding; both normalize
+negative zero to positive zero.
+
+At nonzero scales, GPU execution of floating-point `round` and `bround` requires
+`spark.rapids.sql.incompatibleOps.enabled=true`. Their results can be off by more because they can
+enlarge the difference. This happens in cases where a binary floating-point representation cannot exactly
 capture a decimal value. For example `1.025` cannot exactly be represented and ends up being closer
 to `1.02499`. The Spark implementation of `round` converts it first to a decimal value with complex
 logic to make it `1.025` and then does the rounding.  This results in `round(1.025, 2)` under pure

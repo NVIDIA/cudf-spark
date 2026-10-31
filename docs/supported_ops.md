@@ -4447,8 +4447,8 @@ are limited.
 <td>S</td>
 <td>S</td>
 <td>S</td>
-<td><em>PS<br/>result may round slightly differently</em></td>
-<td><em>PS<br/>result may round slightly differently</em></td>
+<td><em>PS<br/>nonzero scales may round differently</em></td>
+<td><em>PS<br/>nonzero scales may round differently</em></td>
 <td> </td>
 <td> </td>
 <td> </td>
@@ -15314,8 +15314,8 @@ are limited.
 <td>S</td>
 <td>S</td>
 <td>S</td>
-<td><em>PS<br/>result may round slightly differently</em></td>
-<td><em>PS<br/>result may round slightly differently</em></td>
+<td><em>PS<br/>nonzero scales may round differently</em></td>
+<td><em>PS<br/>nonzero scales may round differently</em></td>
 <td> </td>
 <td> </td>
 <td> </td>

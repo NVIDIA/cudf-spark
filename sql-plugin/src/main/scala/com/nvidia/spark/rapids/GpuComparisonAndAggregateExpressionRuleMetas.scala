@@ -413,8 +413,9 @@ case class BRoundRuleMeta(
   extends GpuBRoundMeta(a, conf, p, r) {
   override def tagExprForGpu(): Unit = {
     a.child.dataType match {
-      case FloatType | DoubleType if !this.conf.isIncompatEnabled =>
-        willNotWorkOnGpu("rounding floating point numbers may be slightly off " +
+      case FloatType | DoubleType if !this.conf.isIncompatEnabled &&
+          !GpuRoundBase.isZeroScale(a.scale) =>
+        willNotWorkOnGpu("rounding floating point numbers at nonzero scales may be slightly off " +
             s"compared to Spark's result, to enable set ${RapidsConf.INCOMPATIBLE_OPS}")
       case _ => // NOOP
     }
@@ -429,8 +430,9 @@ case class RoundRuleMeta(
   extends GpuRoundMeta(a, conf, p, r) {
   override def tagExprForGpu(): Unit = {
     a.child.dataType match {
-      case FloatType | DoubleType if !this.conf.isIncompatEnabled =>
-        willNotWorkOnGpu("rounding floating point numbers may be slightly off " +
+      case FloatType | DoubleType if !this.conf.isIncompatEnabled &&
+          !GpuRoundBase.isZeroScale(a.scale) =>
+        willNotWorkOnGpu("rounding floating point numbers at nonzero scales may be slightly off " +
             s"compared to Spark's result, to enable set ${RapidsConf.INCOMPATIBLE_OPS}")
       case _ => // NOOP
     }
