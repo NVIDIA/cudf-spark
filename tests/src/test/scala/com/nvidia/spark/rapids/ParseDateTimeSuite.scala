@@ -180,13 +180,13 @@ class ParseDateTimeSuite extends SparkQueryCompareTestSuite with BeforeAndAfterE
     df => df.withColumn("c1", unix_timestamp(col("c0"), "yyyy/MM/dd HH:mm:ss"))
   }
 
-  testGpuFallback("unix_timestamp parse timestamp millis (fall back to CPU)",
-      "UnixTimestamp",
+  testSparkResultsAreEqual("unix_timestamp parse timestamp millis",
       timestampsAsStrings,
-      new SparkConf().set(SQLConf.LEGACY_TIME_PARSER_POLICY.key, "CORRECTED")
-        .set("spark.sql.ansi.enabled", "false"),
-      // The ProjectExec is needed only if the gpu cpu bridge is disabled.
-      execsAllowedNonGpu = Seq("ProjectExec", "Alias", "UnixTimestamp")) {
+      conf = CORRECTED_TIME_PARSER_POLICY.clone()
+        .set(RapidsConf.INCOMPATIBLE_DATE_FORMATS.key, "false")
+        .set(RapidsConf.ENABLE_CPU_BRIDGE.key, "true"),
+      existClasses = "GpuUnixTimestamp",
+      nonExistClasses = "GpuCpuBridgeExpression") {
     df => df.withColumn("c1", unix_timestamp(col("c0"), "yyyy-MM-dd HH:mm:ss.SSS"))
   }
 
