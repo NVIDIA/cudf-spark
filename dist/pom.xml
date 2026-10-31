@@ -357,7 +357,8 @@
                                     <available file="${project.build.directory}/jni-deps" type="dir"/>
                                     <then>
                                         <copy todir="${project.build.directory}/parallel-world">
-                                            <fileset dir="${project.build.directory}/jni-deps"/>
+                                            <fileset dir="${project.build.directory}/jni-deps"
+                                                     excludes="ai/rapids/cudf/packaging/native_chunks.py"/>
                                         </copy>
                                     </then>
                                     <else>
@@ -426,13 +427,19 @@
                         <goals><goal>run</goal></goals>
                         <configuration>
                             <target>
-                                <java classname="org.python.util.jython"
-                                      classpathref="maven.plugin.classpath" fork="true" failonerror="true">
-                                    <arg value="${spark.rapids.source.basedir}/${rapids.module}/build/native_chunks.py"/>
-                                    <arg value="store"/>
-                                    <arg value="${project.build.directory}/parallel-world"/>
-                                    <arg value="${dist.jar.name}"/>
-                                </java>
+                                <taskdef resource="net/sf/antcontrib/antcontrib.properties"/>
+                                <ac:if xmlns:ac="antlib:net.sf.antcontrib">
+                                    <available file="${project.build.directory}/jni-deps/ai/rapids/cudf/packaging/native_chunks.py"/>
+                                    <then>
+                                        <java classname="org.python.util.jython"
+                                              classpathref="maven.plugin.classpath" fork="true" failonerror="true">
+                                            <arg value="${project.build.directory}/jni-deps/ai/rapids/cudf/packaging/native_chunks.py"/>
+                                            <arg value="store"/>
+                                            <arg value="${project.build.directory}/parallel-world"/>
+                                            <arg value="${dist.jar.name}"/>
+                                        </java>
+                                    </then>
+                                </ac:if>
                             </target>
                         </configuration>
                     </execution>
@@ -442,12 +449,18 @@
                         <goals><goal>run</goal></goals>
                         <configuration>
                             <target>
-                                <java classname="org.python.util.jython"
-                                      classpathref="maven.plugin.classpath" fork="true" failonerror="true">
-                                    <arg value="${spark.rapids.source.basedir}/${rapids.module}/build/native_chunks.py"/>
-                                    <arg value="verify"/>
-                                    <arg value="${dist.jar.name}"/>
-                                </java>
+                                <taskdef resource="net/sf/antcontrib/antcontrib.properties"/>
+                                <ac:if xmlns:ac="antlib:net.sf.antcontrib">
+                                    <available file="${project.build.directory}/jni-deps/ai/rapids/cudf/packaging/native_chunks.py"/>
+                                    <then>
+                                        <java classname="org.python.util.jython"
+                                              classpathref="maven.plugin.classpath" fork="true" failonerror="true">
+                                            <arg value="${project.build.directory}/jni-deps/ai/rapids/cudf/packaging/native_chunks.py"/>
+                                            <arg value="verify"/>
+                                            <arg value="${dist.jar.name}"/>
+                                        </java>
+                                    </then>
+                                </ac:if>
                             </target>
                         </configuration>
                     </execution>
