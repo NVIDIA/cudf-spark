@@ -25,7 +25,7 @@ from data_gen import *
 from marks import (allow_non_gpu, disable_ansi_mode, ignore_order, incompat, shuffle_test,
                    validate_execs_in_gpu_plan)
 from spark_session import (with_cpu_session, is_databricks_runtime, is_spark_400_or_later,
-                           is_spark_411_or_later, spark_version)
+                           is_before_spark_340, is_spark_411_or_later, spark_version)
 from src.main.python.spark_session import with_gpu_session
 
 # mark this test as ci_1 for mvn verify sanity check in pre-merge CI
@@ -828,6 +828,27 @@ def test_left_broadcast_nested_loop_join_condition_missing_count(data_gen, join_
         return broadcast(left).join(right, how=join_type).selectExpr('COUNT(*)')
     assert_gpu_and_cpu_are_equal_collect(do_join)
 
+# A join with no condition and no output columns only counts rows. With AQE off, Spark cannot see
+# that an RDD-backed build is empty, so the join must count it.
+@pytest.mark.parametrize('join_type,build_side', [
+    ('Inner', 'right'), ('Inner', 'left'), ('LeftSemi', 'right'), ('LeftAnti', 'right'),
+    ('LeftOuter', 'right'), ('RightOuter', 'left')], ids=idfn)
+@pytest.mark.parametrize('build_length', [0, 30], ids=idfn)
+def test_broadcast_nested_loop_join_condition_missing_count_empty_build(
+        join_type, build_side, build_length):
+    def do_join(spark):
+        stream = gen_df(spark, [('a', int_gen)], length=100, num_slices=1)
+        build = gen_df(spark, [('b', int_gen)], length=build_length, num_slices=1)
+        if build_side == 'right':
+            joined = stream.join(broadcast(build), how=join_type)
+        else:
+            joined = broadcast(build).join(stream, how=join_type)
+        return joined.agg(f.count(lit(1)))
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_join,
+        exist_classes='GpuBroadcastNestedLoopJoinExec',
+        conf={'spark.sql.adaptive.enabled': 'false'})
+
 @allow_non_gpu('BroadcastExchangeExec', 'BroadcastNestedLoopJoinExec', 'GreaterThanOrEqual', *non_utc_allow)
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', all_gen, ids=idfn)
@@ -1101,6 +1122,75 @@ def test_half_cache_join(join_type, cache_side, cpu_side):
     assert_gpu_and_cpu_are_equal_collect(do_join, {
         'spark.sql.autoBroadcastJoinThreshold': '1',
     })
+
+# The condition reads only the stream side, so column pruning leaves a rows-only build.
+@pytest.mark.parametrize('build_length', [0, 3], ids=idfn)
+@pytest.mark.parametrize('batch_size', ['100', '1g'], ids=idfn)
+def test_broadcast_nested_loop_join_rows_only_build(build_length, batch_size):
+    def do_join(spark):
+        left = gen_df(spark, [('a', SetValuesGen(IntegerType(), [None, 0, 5, 6, 9]))],
+                      length=100, num_slices=1)
+        right = gen_df(spark, [('b', int_gen)], length=build_length, num_slices=1)
+        return left.join(broadcast(right), col('a') > 5, 'left_anti').agg(f.count(lit(1)))
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_join,
+        exist_classes='GpuBroadcastNestedLoopJoinExec',
+        conf={'spark.sql.adaptive.enabled': 'false',
+              'spark.rapids.sql.batchSizeBytes': batch_size})
+
+# Spark 4.0 keeps a predicate that can throw, such as sequence, in the join condition. A predicate
+# that reads one side then leaves the other side with rows and no columns.
+@ignore_order(local=True)
+@allow_non_gpu(*non_utc_allow)
+@pytest.mark.parametrize('join_type,build_side', [
+    ('Inner', 'left'), ('Inner', 'right'), ('LeftSemi', 'right'), ('LeftAnti', 'right'),
+    ('LeftOuter', 'right'), ('RightOuter', 'left')], ids=idfn)
+@pytest.mark.parametrize('predicate_side', ['left', 'right'], ids=idfn)
+@pytest.mark.parametrize('build_length', [0, 30], ids=idfn)
+@pytest.mark.parametrize('batch_size', ['100', '1g'], ids=idfn)
+def test_broadcast_nested_loop_join_one_sided_sequence_condition(
+        join_type, build_side, predicate_side, build_length, batch_size):
+    def do_join(spark):
+        values = SetValuesGen(IntegerType(), [None, 0, 5, 6, 9])
+        left = gen_df(spark, [('a', values)],
+                      length=build_length if build_side == 'left' else 100, num_slices=1)
+        right = gen_df(spark, [('b', values)],
+                       length=build_length if build_side == 'right' else 100, num_slices=1)
+        if build_side == 'left':
+            left = broadcast(left)
+        else:
+            right = broadcast(right)
+        name = 'a' if predicate_side == 'left' else 'b'
+        side = col(name)
+        joined = left.join(right, f.size(f.sequence(side, lit(9), lit(1))) > side, join_type)
+        # LeftSemi and LeftAnti return only the left columns.
+        return joined.select([c for c in joined.columns if c == name])
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_join,
+        exist_classes='GpuBroadcastNestedLoopJoinExec',
+        conf={'spark.sql.adaptive.enabled': 'false',
+              'spark.rapids.sql.batchSizeBytes': batch_size})
+
+# A NOT EXISTS predicate that folds to false keeps its join, because Spark rewrites the subquery
+# after it drops joins with a false condition. Both sides then reach the join with no columns.
+@pytest.mark.parametrize('build_length', [0, 30], ids=idfn)
+def test_broadcast_nested_loop_join_rows_only_sides(spark_tmp_table_factory, build_length):
+    outer_table_name = spark_tmp_table_factory.get()
+    sub_table_name = spark_tmp_table_factory.get()
+
+    def do_join(spark):
+        spark.range(0, 100).selectExpr('CAST(id AS INT) AS a') \
+            .createOrReplaceTempView(outer_table_name)
+        spark.range(0, build_length).selectExpr('CAST(id AS INT) AS b') \
+            .createOrReplaceTempView(sub_table_name)
+        return spark.sql(
+            'SELECT count(*) FROM {} AS t '
+            'WHERE NOT EXISTS (SELECT 1 FROM {} AS s WHERE t.a < t.a)'.format(
+                outer_table_name, sub_table_name))
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_join,
+        exist_classes='GpuBroadcastNestedLoopJoinExec',
+        conf={'spark.sql.adaptive.enabled': 'false'})
 
 # Tests a GPU hash exchange of rows-only batches: the null-safe join on a literal leaves the
 # right side with no columns.
@@ -1386,6 +1476,32 @@ def test_degenerate_broadcast_nested_loop_existence_join(spark_tmp_table_factory
     capture_regexp = r"GpuBroadcastNestedLoopJoin ExistenceJoin\(exists#[0-9]+\),"
     assert_cpu_and_gpu_are_equal_collect_with_capture(do_join, capture_regexp,
                                                       conf={"spark.sql.adaptive.enabled": aqeEnabled})
+
+# Spark 4.0 keeps a sequence predicate in an existence join's condition too. Spark folds
+# IF(t.id = t.id, k, 0) to k only after it pulls the correlated predicate out of the subquery, so
+# the condition reads only the subquery side and the stream has no columns. A literal outer value
+# lets Databricks 17.3 plan the EXISTS as a scalar subquery with no join.
+@ignore_order(local=True)
+@allow_non_gpu(*non_utc_allow)
+@pytest.mark.skipif(is_before_spark_340(),
+                    reason='EXISTS in a select list needs Spark 3.4, SPARK-30220')
+@pytest.mark.parametrize('k', [0, 40], ids=idfn)
+def test_broadcast_nested_loop_existence_join_one_sided_sequence_condition(
+        spark_tmp_table_factory, k):
+    outer_table_name = spark_tmp_table_factory.get()
+    sub_table_name = spark_tmp_table_factory.get()
+
+    def do_join(spark):
+        spark.range(0, 100).createOrReplaceTempView(outer_table_name)
+        spark.range(0, 30).selectExpr('CAST(id AS INT) AS b').createOrReplaceTempView(sub_table_name)
+        return spark.sql(
+            'SELECT EXISTS (SELECT 1 FROM {} AS s '
+            'WHERE size(sequence(s.b, 30, 1)) > s.b + IF(t.id = t.id, {}, 0)) AS e '
+            'FROM {} AS t'.format(sub_table_name, k, outer_table_name))
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_join,
+        exist_classes='GpuBroadcastNestedLoopJoinExec',
+        conf={'spark.sql.adaptive.enabled': 'false'})
 
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', [StringGen(), IntegerGen()], ids=idfn)
