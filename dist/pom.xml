@@ -427,10 +427,26 @@
                         <goals><goal>run</goal></goals>
                         <configuration>
                             <target>
-                                <zip destfile="${dist.jar.name}" update="true" keepcompression="true">
-                                    <zipfileset src="${project.build.directory}/jni-archive/spark-rapids-jni-native.jar"
-                                                includes="**/*.chunks/*"/>
-                                </zip>
+                                <taskdef resource="net/sf/antcontrib/antcontrib.properties"/>
+                                <ac:if xmlns:ac="antlib:net.sf.antcontrib">
+                                    <available file="${project.build.directory}/jni-archive/spark-rapids-jni-native.jar"/>
+                                    <then>
+                                        <zip destfile="${dist.jar.name}" update="true" keepcompression="true">
+                                            <zipfileset src="${project.build.directory}/jni-archive/spark-rapids-jni-native.jar"
+                                                        includes="**/*.chunks/*"/>
+                                        </zip>
+                                    </then>
+                                    <else>
+                                        <fail message="JNI chunk archive is missing; re-execute with -Drapids.jni.unpack.skip=false">
+                                            <condition>
+                                                <resourcecount when="greater" count="0">
+                                                    <fileset dir="${project.build.directory}/jni-deps"
+                                                             includes="**/*.chunks.properties"/>
+                                                </resourcecount>
+                                            </condition>
+                                        </fail>
+                                    </else>
+                                </ac:if>
                             </target>
                         </configuration>
                     </execution>
