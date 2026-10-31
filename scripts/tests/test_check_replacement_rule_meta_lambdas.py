@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env jython
 
 # Copyright (c) 2026, NVIDIA CORPORATION.
 #
@@ -14,17 +14,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import importlib.util
+import imp
+import io
 import os
+import shutil
 import tempfile
 import unittest
 
 
 SCRIPT = os.path.join(os.path.dirname(os.path.dirname(__file__)),
                       "check_replacement_rule_meta_lambdas.py")
-SPEC = importlib.util.spec_from_file_location("check_replacement_rule_meta_lambdas", SCRIPT)
-LINT = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(LINT)
+LINT = imp.load_source("check_replacement_rule_meta_lambdas", SCRIPT)
 
 
 class ReplacementRuleMetaLambdaLintSuite(unittest.TestCase):
@@ -99,16 +99,19 @@ class ReplacementRuleMetaLambdaLintSuite(unittest.TestCase):
         """, [])
 
     def test_main_requires_zero_violations(self):
-        with tempfile.TemporaryDirectory() as root:
+        root = tempfile.mkdtemp()
+        try:
             source_dir = os.path.join(root, "module", "src", "main", "scala")
             os.makedirs(source_dir)
             source = os.path.join(source_dir, "Rules.scala")
-            with open(source, "w", encoding="utf-8") as source_file:
-                source_file.write("rule((a, b, c, d) => new ExampleMeta(a, b, c, d))")
+            with io.open(source, "w", encoding="utf-8") as source_file:
+                source_file.write(u"rule((a, b, c, d) => new ExampleMeta(a, b, c, d))")
             self.assertEqual(1, LINT.main(["--root", root]))
-            with open(source, "w", encoding="utf-8") as source_file:
-                source_file.write("rule(ExampleMeta)")
+            with io.open(source, "w", encoding="utf-8") as source_file:
+                source_file.write(u"rule(ExampleMeta)")
             self.assertEqual(0, LINT.main(["--root", root]))
+        finally:
+            shutil.rmtree(root)
 
 
 if __name__ == "__main__":

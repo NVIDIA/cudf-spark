@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env jython
 
 # Copyright (c) 2026, NVIDIA CORPORATION.
 #
@@ -21,6 +21,7 @@ Replacement rules must refer to named metadata factories.
 
 import argparse
 import collections
+import io
 import os
 import re
 import sys
@@ -29,6 +30,11 @@ import sys
 IDENTIFIER = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
 Token = collections.namedtuple("Token", "value start end line")
 Violation = collections.namedtuple("Violation", "path line factories")
+
+
+def _is_identifier(value):
+    match = IDENTIFIER.match(value)
+    return match is not None and match.end() == len(value)
 
 
 def _consume_block_comment(source, start):
@@ -174,7 +180,7 @@ def _metadata_type(tokens, new_index, end):
     names = []
     while index < end:
         value = tokens[index].value
-        if IDENTIFIER.fullmatch(value):
+        if _is_identifier(value):
             names.append(value)
             index += 1
             if index < end and tokens[index].value == ".":
@@ -216,7 +222,7 @@ def scan_source(path, source):
                 if (nested_close is not None and nested_close + 1 < body_end and
                         tokens[nested_close + 1].value == "=>"):
                     nested_body_start = nested_close + 2
-            elif (IDENTIFIER.fullmatch(tokens[body_index].value) and
+            elif (_is_identifier(tokens[body_index].value) and
                   body_index + 1 < body_end and tokens[body_index + 1].value == "=>"):
                 nested_body_start = body_index + 2
             if nested_body_start is not None:
@@ -244,7 +250,7 @@ def scan_tree(root):
                 continue
             absolute = os.path.join(current_root, filename)
             relative = os.path.relpath(absolute, root).replace(os.sep, "/")
-            with open(absolute, encoding="utf-8") as source_file:
+            with io.open(absolute, encoding="utf-8") as source_file:
                 violations.extend(scan_source(relative, source_file.read()))
     return tuple(sorted(violations, key=lambda item: (item.path, item.line, item.factories)))
 
@@ -257,11 +263,10 @@ def main(argv=None):
     root = os.path.abspath(args.root)
     violations = scan_tree(root)
     if violations:
-        print("Replacement-rule metadata constructor lambdas:", file=sys.stderr)
+        sys.stderr.write("Replacement-rule metadata constructor lambdas:\n")
         for violation in violations:
-            print("  {0}:{1}: use a named metadata factory instead of {2}".format(
-                violation.path, violation.line, ", ".join(violation.factories)),
-                file=sys.stderr)
+            sys.stderr.write("  {0}:{1}: use a named metadata factory instead of {2}\n".format(
+                violation.path, violation.line, ", ".join(violation.factories)))
         return 1
 
     print("Replacement-rule metadata lambda lint passed.")
