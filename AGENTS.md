@@ -184,7 +184,19 @@ reason; do not silently skip the preflight or claim a clean result.
 
 - Use `assert_gpu_and_cpu_are_equal_collect` to compare GPU vs CPU results
 - Use `assert_gpu_fallback_collect` to verify expected fallback behavior
-- Use `data_gen.py` for reproducible test data with seeds
+- Prefer reusing the framework in
+  [`data_gen.py`](integration_tests/src/main/python/data_gen.py) when writing or extending
+  integration tests. Use existing generators with `gen_df`, `unary_op_df`, or `binary_op_df`
+  before adding hand-crafted datasets or custom random-data generation code.
+- Configure and compose existing generators (e.g. `IntegerGen`, `StringGen`, `ArrayGen`,
+  `StructGen`, and `MapGen`) and parameterize over relevant data types. Use nullability,
+  value ranges, and `with_special_case` to exercise corner cases. Keep explicit input rows
+  when a regression requires exact values or guarantees that particular cases are present;
+  weighted special cases alone do not guarantee inclusion.
+- Preserve the framework's default seed handling so CPU and GPU runs use reproducible data
+  while allowing coverage to vary across runs. Replay failures with `DATAGEN_SEED`; see
+  [data generation](integration_tests/README.md#data_genpy) and
+  [seed control](integration_tests/README.md#running-with-a-fixed-data-generation-seed).
 - No external data dependencies — generate all test data in-test
 - No formal Python style checker configured yet; follow existing code conventions
 
