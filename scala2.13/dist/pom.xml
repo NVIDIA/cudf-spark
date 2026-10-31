@@ -302,6 +302,7 @@
                         <id>clean-any-prior-output</id>
                         <configuration>
                             <target>
+                                <taskdef resource="net/sf/antcontrib/antcontrib.properties"/>
                                 <delete dir="${project.build.directory}/parallel-world"
                                         includeemptydirs="true"/>
                                 <delete>
@@ -309,6 +310,14 @@
                                 </delete>
                                 <delete dir="${project.build.directory}/deps" includeemptydirs="true"/>
                                 <delete dir="${dist.native.chunking.metadata.dir}" includeemptydirs="true"/>
+                                <ac:if xmlns:ac="antlib:net.sf.antcontrib">
+                                    <not><istrue value="${rapids.jni.unpack.skip}"/></not>
+                                    <then>
+                                        <delete dir="${project.build.directory}/jni-deps" includeemptydirs="true"/>
+                                        <delete dir="${project.build.directory}/dependency-maven-plugin-markers"
+                                                includeemptydirs="true"/>
+                                    </then>
+                                </ac:if>
                                 <mkdir dir="${project.build.directory}/deps"/>
                             </target>
                         </configuration>
@@ -338,7 +347,7 @@
                     </execution>
                     <execution>
                         <id>copy-jni-and-ucx-classes</id>
-                        <!-- after optional unpack -->
+                        <!-- after optional unpack, including zstd-jni -->
                         <phase>process-resources</phase>
                         <goals><goal>run</goal></goals>
                         <configuration>
@@ -348,7 +357,8 @@
                                     <available file="${project.build.directory}/jni-deps" type="dir"/>
                                     <then>
                                         <copy todir="${project.build.directory}/parallel-world">
-                                            <fileset dir="${project.build.directory}/jni-deps"/>
+                                            <fileset dir="${project.build.directory}/jni-deps"
+                                                     excludes="**/*.chunks/**"/>
                                         </copy>
                                     </then>
                                     <else>
@@ -407,6 +417,35 @@
                                             jar_path="${dist.jar.name}"
                                             metadata_dir="${dist.native.chunking.metadata.dir}"/>
                                     </then>
+                                </ac:if>
+                            </target>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>copy-jni-native-chunks</id>
+                        <phase>package</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <taskdef resource="net/sf/antcontrib/antcontrib.properties"/>
+                                <ac:if xmlns:ac="antlib:net.sf.antcontrib">
+                                    <available file="${project.build.directory}/jni-archive/spark-rapids-jni-native.jar"/>
+                                    <then>
+                                        <zip destfile="${dist.jar.name}" update="true" keepcompression="true">
+                                            <zipfileset src="${project.build.directory}/jni-archive/spark-rapids-jni-native.jar"
+                                                        includes="**/*.chunks/*"/>
+                                        </zip>
+                                    </then>
+                                    <else>
+                                        <fail message="JNI chunk archive is missing; re-execute with -Drapids.jni.unpack.skip=false">
+                                            <condition>
+                                                <resourcecount when="greater" count="0">
+                                                    <fileset dir="${project.build.directory}/jni-deps"
+                                                             includes="**/*.chunks.properties"/>
+                                                </resourcecount>
+                                            </condition>
+                                        </fail>
+                                    </else>
                                 </ac:if>
                             </target>
                         </configuration>
@@ -571,12 +610,29 @@ self.log("... OK")
             <plugin>
                 <!-- The dependency scopes of spark-rapids-jni and jucx are `provided` in aggregator submodule,
                  this will skip the dedupe processing in `create-parallel-world`.
-                 Unpack spark-rapids-jni and jucx jars to `parallel-world` directory after `create-parallel-world`,
+                 Unpack spark-rapids-jni, jucx, and zstd-jni jars to `parallel-world` after `create-parallel-world`,
                  then `parallel-world` will be packaged.
                  Note all Shims use the same version of spark-rapids-jni and jucx -->
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-dependency-plugin</artifactId>
                 <executions>
+                    <execution>
+                        <id>copy-spark-rapids-jni-archive</id>
+                        <phase>generate-resources</phase>
+                        <goals><goal>copy</goal></goals>
+                        <configuration>
+                            <skip>${rapids.jni.unpack.skip}</skip>
+                            <artifactItems>
+                                <artifactItem>
+                                    <groupId>com.nvidia</groupId>
+                                    <artifactId>${cudf-spark-jni.artifactId}</artifactId>
+                                    <classifier>${jni.classifier}</classifier>
+                                    <outputDirectory>${project.build.directory}/jni-archive</outputDirectory>
+                                    <destFileName>spark-rapids-jni-native.jar</destFileName>
+                                </artifactItem>
+                            </artifactItems>
+                        </configuration>
+                    </execution>
                     <execution>
                         <id>unpack-spark-rapids-jni-and-ucx</id>
                         <!-- run after `create-parallel-world`, the phase equals to the phase of the `create-parallel-world` -->
@@ -592,12 +648,19 @@ self.log("... OK")
                                     <groupId>com.nvidia</groupId>
                                     <artifactId>${cudf-spark-jni.artifactId}</artifactId>
                                     <classifier>${jni.classifier}</classifier>
-                                    <excludes>META-INF/**</excludes>
+                                    <excludes>META-INF/**,**/*.chunks/**</excludes>
                                     <outputDirectory>${project.build.directory}/jni-deps</outputDirectory>
                                 </artifactItem>
                                 <artifactItem>
                                     <groupId>org.openucx</groupId>
                                     <artifactId>jucx</artifactId>
+                                    <excludes>META-INF/**</excludes>
+                                    <outputDirectory>${project.build.directory}/jni-deps</outputDirectory>
+                                </artifactItem>
+                                <artifactItem>
+                                    <groupId>com.github.luben</groupId>
+                                    <artifactId>zstd-jni</artifactId>
+                                    <version>1.5.6-6</version>
                                     <excludes>META-INF/**</excludes>
                                     <outputDirectory>${project.build.directory}/jni-deps</outputDirectory>
                                 </artifactItem>

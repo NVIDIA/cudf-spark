@@ -1677,6 +1677,11 @@ This will force full Scala code rebuild in downstream modules.
                         <version>2.7.3</version>
                     </dependency>
                     <dependency>
+                        <groupId>com.github.luben</groupId>
+                        <artifactId>zstd-jni</artifactId>
+                        <version>1.5.6-6</version>
+                    </dependency>
+                    <dependency>
                         <groupId>net.sourceforge.pmd</groupId>
                         <artifactId>pmd-dist</artifactId>
                         <version>6.55.0</version>
