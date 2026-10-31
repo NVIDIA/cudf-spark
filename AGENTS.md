@@ -13,6 +13,38 @@ This document provides context for AI coding agents (Claude Code, GitHub Copilot
 - **Keep pull request descriptions reviewable** — describe intent and rationale, do not paste code diffs or brittle line-level details, and update the description when later commits change its claims
 - **Bound draft and closure lifecycle** — use Draft only for concrete unfinished work, state in the description what remains (a TODO checklist is preferred). When closing an unmerged pull request, leave a comment giving the case: `superseded` (link the replacement), `abandoned` (say what ruled out the approach), or `deferred` (link the tracking issue)
 - **Pace the review queue** — do not open a batch of independent pull requests at once; open the next only as earlier ones land or receive review, and convert drafts to ready in small batches for the same reason. Stacked pull requests are exempt, but identify the dependency with `Stacked on #NNNN`
+- **Test locally before publishing or requesting CI** — follow
+  [Testing Your Code](CONTRIBUTING.md#testing-your-code). Build the submitted code, pass the full
+  affected unit-test suites and related integration tests, and confirm initial validation using the
+  PR's local-testing checkbox. Pasting full commands and logs is not required. Re-run affected
+  validation after code changes, including follow-up pushes. Developer-managed validation may run
+  locally or on EMR, Dataproc, Databricks, or another suitable remote environment. Choose the
+  environment matching the affected behavior; every change need not run on every platform.
+  If a test layer is inapplicable, explain why. If a required environment is unavailable,
+  provision it or obtain access; report the blocker and stop before publishing code (including
+  drafts or follow-up pushes) or requesting premerge until required tests pass. Environment
+  unavailability and maintainer approval do not waive required tests. Report CI results as CI
+  validation, not developer-test evidence. Draft status does not waive the testing requirement.
+- **Declare follow-up validation in commit messages** — A checked PR checkbox does not
+  confirm later commits. Cover each follow-up change with a declaration in its commit message
+  or a later tested tip's message that explicitly identifies the covered commits or range.
+  Use `Local-Tests: passed` only after applicable local tests pass. For justified reuse, use
+  `Local-Tests: reused <tested-commit-sha>` and explain why the changes preserve that coverage.
+  When no new runtime tests apply, use `Local-Tests: not-required` with a brief reason, such
+  as prose-only documentation or comment changes that do not affect behavior. Run applicable
+  documentation/static checks.
+  Judge the actual impact, not the file extension. This declaration covers only those changes
+  and does not waive validation of earlier code changes.
+  `Local-Tests: not-run` does not satisfy required validation. These are author declarations,
+  not independent proof of execution.
+  Do not rewrite published commits to add declarations; a new tested tip can cover the range.
+- **Share at most three premerge slots per GitHub user** — follow the
+  [per-user premerge limit](CONTRIBUTING.md#per-user-premerge-limit) before every `build` comment.
+  Check live running, queued, and just-submitted requests across all PRs for the triggering
+  account, including older heads. Deduplicate job fan-out by the original comment, avoid a
+  duplicate request on a busy PR, and coordinate submissions across agents using the account.
+  At three outstanding requests, wait and re-check. If capacity cannot be verified, do not
+  trigger a build.
 - **AI-assisted changes require a human in the loop** — disclose AI assistance in the pull request description, then stop for human review of the complete diff and description before opening or updating the pull request. The pull request queue is not a staging area for work no human has read
 
 ## Safety Rules

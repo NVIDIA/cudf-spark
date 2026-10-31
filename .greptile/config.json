@@ -14,6 +14,12 @@
 
   "rules": [
     {
+      "id": "local-validation-evidence",
+      "rule": "For initial validation, accept the PR's checked local-testing item or equivalent concise statement, without pasted commands or full logs. For follow-up changes, read full commit messages including trailers as described in .greptile/rules.md; an unchanged checkbox does not cover later commits. Require a declaration on the changed commit or a later tested tip explicitly naming the covered commits or range. Local-Tests: passed declares passing applicable local tests. Local-Tests: reused <tested-commit-sha> requires applicable referenced validation and a reason the intervening changes preserve coverage. Local-Tests: not-required with a brief, diff-supported reason is valid when no new runtime tests apply, such as prose-only documentation or comment changes with no behavior change. Check applicable documentation/static validation; do not demand runtime reruns solely for those changes or lower confidence for justified inapplicability. Judge actual impact, not file extensions. This declaration covers only those changes and does not waive earlier untested code. Accept developer-managed validation run locally or on EMR, Dataproc, Databricks, or another suitable remote environment matching the affected behavior; every change need not run on every platform. Local-Tests: not-run does not satisfy required validation. Environment unavailability and maintainer approval do not waive required tests; missing required results block publication or premerge. A new tested tip may cover several earlier commits; do not require rewriting published history or infer coverage of future changes. Declarations are author assertions, not independent proof of execution. Assess CI results separately; they do not replace required developer-test evidence. If a required declaration is missing, contradicted by observed results, or no longer covers the changed behavior, cap the confidence score at 3/5 and explain what remains unvalidated. Do not lower confidence merely because full commands or logs are omitted. Missing confirmation is not a test failure. Accept justified inapplicable test layers, and do not treat compilation, collection, or all-skipped runs as passing runtime tests.",
+      "scope": ["**"],
+      "severity": "medium"
+    },
+    {
       "id": "gpu-resource-arm",
       "rule": "GPU resources must use withResource() or closeOnExcept() from Arm.scala. Never use bare .close() on GPU resources.",
       "scope": ["sql-plugin/src/**", "shuffle-plugin/src/**"],

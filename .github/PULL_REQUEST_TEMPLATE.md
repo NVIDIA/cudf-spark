@@ -27,6 +27,17 @@ Please provide a description of the changes proposed in this pull request. Here 
 - How are the new features/behaviors tested? Please describe the test cases you added or modified. If they are tested in a cluster, please describe it as well.
 -->
 
+#### Local validation
+
+<!--
+This confirms initial local testing; follow-up commits need Local-Tests declarations
+as described in CONTRIBUTING.md#testing-your-code.
+Developer-managed validation may run locally or in a suitable remote environment,
+including EMR, Dataproc, or Databricks. Complete required tests before publishing.
+-->
+
+- [ ] I have run and passed the local tests relevant to this change.
+
 ### Checklists
 
 <!-- 

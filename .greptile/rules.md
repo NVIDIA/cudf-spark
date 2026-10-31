@@ -3,6 +3,46 @@
 For full coding conventions, build commands, code examples, and
 shim layer architecture, see `AGENTS.md` at the repo root.
 
+## Local validation confirmation
+
+For initial validation, accept the PR's checked local-testing item or an
+equivalent concise statement; do not require pasted commands or full logs.
+That checkbox does not establish validation of later commits.
+
+For follow-up changes, inspect full commit messages, including trailers. Require
+a declaration on the changed commit or a later tested tip that explicitly names
+the covered commits or range. `Local-Tests: passed` declares passing applicable
+local tests; one run may cover several commits, but not later untested changes.
+For `Local-Tests: reused <tested-commit-sha>`, inspect the referenced validation
+and the reason the intervening changes preserve coverage. Accept
+`Local-Tests: not-required` with a brief, diff-supported reason when no new
+runtime tests apply, such as prose-only documentation or comment changes with
+no behavior change. Check applicable documentation/static validation; do not
+demand a runtime rerun solely for those changes. Judge
+actual impact, not file extensions. This declaration covers only those changes
+and cannot waive validation of earlier untested code. `Local-Tests: not-run`
+does not satisfy required validation. Do not require
+rewriting published history; a new tested tip can declare the covered range.
+These are commit-specific author declarations, not independent proof that tests
+executed. Never infer follow-up validation solely from an unchanged checkbox.
+
+Accept developer-managed validation run locally or on EMR, Dataproc, Databricks,
+or another suitable remote environment matching the affected behavior, as
+described in `CONTRIBUTING.md#testing-your-code`. Do not require every platform
+for every change. Environment unavailability and maintainer approval do not
+waive required tests. Missing required results are a validation blocker before
+publication or premerge, rather than evidence of a test failure. Assess CI
+results separately; they do not replace required developer-test evidence.
+
+If the required declaration is missing, contradicted by observed results, or no
+longer covers the changed behavior, cap the confidence score at **3/5** and
+explain what remains unvalidated. Do not lower confidence merely because full
+commands or logs are omitted, or a justified `not-required` declaration omits
+runtime tests. Missing confirmation is not a test failure. Accept justified
+inapplicable test layers, including runtime tests for changes confined to agent
+instructions or review configuration. Compilation,
+test collection, and all-skipped runs do not establish passing runtime tests.
+
 ## Shim compatibility review
 
 For versioned sources, shared shim callers, or Spark/Databricks profile/matrix
