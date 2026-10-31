@@ -27,6 +27,10 @@ def pytest_addoption(parser):
         "--tmp_path", action="store", default=None, help="path to store tmp files"
     )
     parser.addoption(
+        "--path_backend", choices=['auto', 'hadoop', 's3-netty', 's3-crt', 'gcs-http'],
+        default='auto', help="required read backend for deterministic path-character tests"
+    )
+    parser.addoption(
         "--debug_tmp_path", action='store_true', default=False, help="if true don't delete tmp_path contents for debugging"
     )
     parser.addoption(

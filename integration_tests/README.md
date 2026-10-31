@@ -7,6 +7,77 @@ verify that the plugin is doing the right thing in as many cases as possible.
 There are two sets of tests. The PySpark tests are described on this page. The scala tests are
 described [here](../tests/README.md).
 
+## Deterministic path-character coverage
+
+`path_character_test.py` writes five distinct payloads at literal paths containing `a b`,
+`a+b`, `a%20b`, `a%2Fb`, and `路径`. It checks each spelling in base directories and
+filenames, then in Spark-escaped partition directories and filenames. A fixed row oracle
+checks that the values remain distinct, in addition to CPU/GPU comparison and an executed
+GPU scan assertion. Static source labels and partition columns keep each requested path
+associated with its payload, so swapping two object reads cannot pass by preserving the
+overall row set. Fixtures use Hadoop APIs rather than driver-local filesystem APIs,
+so the same tests work with the backend jobs' writable `--tmp_path`.
+With the file cache disabled, immutable file fixtures are shared across reader parameters
+within a module, limiting the full file matrix to ten small datasets. When the startup
+file cache is enabled, each Parquet and ORC case gets fresh files so transport checks still
+require backend I/O; the full file matrix then writes thirty small datasets. The backend runner
+disables caching at startup to keep fixture creation small.
+
+| Reader | Hadoop FileSystem (local/HDFS/S3A/GCS connector) | PerfIO S3 Netty / CRT | PerfIO GCS HTTP |
+| --- | --- | --- | --- |
+| Parquet | Base, partition, filename | Base, partition, filename | Base, partition, filename |
+| ORC | Base, partition, filename | Base, partition, filename | Base, partition, filename |
+| CSV / JSON | Base, partition, filename | N/A: reader uses Hadoop line streams | N/A: reader uses Hadoop line streams |
+| Avro | Base, partition, filename | N/A: reader uses Hadoop streams | N/A: reader uses Hadoop streams |
+| Delta Parquet | Table root and partitions through Delta's file index | Table root and partitions | Table root and partitions |
+| Iceberg Parquet | Partitions through catalog FileIO | Partitions through S3FileIO | N/A: Iceberg FileIO has no PerfIO GCS adapter; catalog streams are tested |
+| Text / binaryFile / other CPU-only sources | N/A: no GPU file reader | N/A | N/A |
+| Iceberg ORC / Avro | N/A: no GPU table reader | N/A | N/A |
+
+All five ordinary file formats cover V1 and V2 scans. Parquet, ORC, and Avro cover
+PERFILE, COALESCING, and MULTITHREADED readers without crossing unrelated reader options.
+CPU writes create the fixtures even when GPU writes are unavailable. Non-empty payload
+columns require data reads; Parquet/ORC additionally require their footer/tail reads.
+Delta and Iceberg own data filenames and transaction/manifest references, so arbitrary
+filename renames are N/A for those table scans. Hadoop and remote managed Iceberg catalogs
+also own table roots; arbitrary per-table locations are N/A. Configure a warehouse with
+unusual base-path characters to exercise the catalog's root policy. Iceberg tests cover
+supported format versions via the existing runtime/version gates. Avro requires the
+existing `INCLUDE_SPARK_AVRO_JAR=true` setup.
+
+The shared assertion reads task accumulators from stages completed by the GPU query,
+after the CPU query. It requires the selected PerfIO transport's counter to increase and
+rejects alternative transports, S3A fallback, and Iceberg S3 fallback. CSV/JSON/Avro and
+Iceberg GCS require all PerfIO transport counters to stay zero, as documented above.
+GCS gRPC is N/A for the current PerfIO default client: it constructs HTTP
+`StorageOptions`; a gRPC counter is still checked to detect unexpected transport changes.
+
+Existing EMR/Dataproc jobs discover `path_character_test.py`, Delta jobs select its
+`delta_lake` test, and Iceberg jobs discover `iceberg/iceberg_path_test.py`. By default,
+the expected backend is inferred from the input URI and the job's startup settings,
+then verified against observed task metrics. For an explicit backend matrix in those
+jobs, run each applicable command with the existing connector/SDK classpath and credentials:
+
+```bash
+# Each invocation starts a separate Spark application with file cache disabled.
+bash integration_tests/run_path_character_tests.sh hadoop <writable-local-or-cloud-path>
+bash integration_tests/run_path_character_tests.sh s3-netty s3a://<bucket>/<test-prefix>
+bash integration_tests/run_path_character_tests.sh s3-crt s3a://<bucket>/<test-prefix>
+bash integration_tests/run_path_character_tests.sh gcs-http gs://<bucket>/<test-prefix>
+
+# Use the existing Delta or Iceberg runtime/catalog configuration for table tests.
+TESTS=path_character_test.py bash integration_tests/run_path_character_tests.sh \
+    s3-netty s3a://<bucket>/<test-prefix> --delta_lake
+TESTS=iceberg/iceberg_path_test.py bash integration_tests/run_path_character_tests.sh \
+    s3-netty s3a://<bucket>/<test-prefix> --iceberg
+```
+
+The wrapper sets startup-only PerfIO flags before Spark starts; `--path_backend` declares
+the required backend independently. Missing classes, wrong URI schemes, or substituted
+transports fail the run instead of silently reducing the matrix. Normal temporary-path
+and table fixtures clean up the small datasets. Cloud credentials, connector dependencies,
+and Iceberg REST catalog setup remain those of the existing backend-specific jobs.
+
 ## Setting Up the Environment
 
 The tests are based off of `pyspark` and `pytest` running on Python 3. There really are
