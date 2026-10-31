@@ -29,6 +29,7 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
 
 class ParallelUnitTestRunnerSuite extends AnyFunSuite {
   private val fixtureSuiteName = classOf[ParallelUnitTestRunnerExpectedFailureFixtureSuite].getName
@@ -526,6 +527,47 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
       SparkSession.clearActiveSession()
       SparkSession.clearDefaultSession()
       FileUtil.fullyDelete(tmpDir.toFile)
+    }
+  }
+
+  test("worker cleanup disables inherited plan capture but explicit capture still works") {
+    val tmpDir = Files.createTempDirectory("capture-boundary-regression")
+    def session(name: String): SparkSession = {
+      val conf = new SparkConf(false)
+          .setAppName(name)
+          .setMaster("local[1]")
+          .set("spark.driver.host", "127.0.0.1")
+          .set("spark.ui.enabled", "false")
+          .set("spark.plugins", "")
+          .set("spark.rapids.sql.enabled", "false")
+          .set("spark.sql.warehouse.dir", tmpDir.resolve(name).toString)
+          .set("spark.sql.queryExecutionListeners",
+            "org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback")
+      val spark = SparkSession.builder().config(conf).getOrCreate()
+      spark.sparkContext.setLogLevel("ERROR")
+      spark
+    }
+    try {
+      val first = session("first-suite")
+      ExecutionPlanCaptureCallback.startCapture()
+      assert(first.range(1).collect().length == 1)
+      ParallelUnitTestRunner.cleanupWorkerState(tmpDir)
+
+      val next = session("next-suite")
+      assert(next.range(2).collect().length == 2)
+      val inheritedPlans = ExecutionPlanCaptureCallback.getResultsWithTimeout()
+      assert(inheritedPlans.isEmpty,
+        s"Worker inherited active capture from its preceding suite: ${inheritedPlans.length} plans")
+
+      ExecutionPlanCaptureCallback.startCapture()
+      assert(next.range(3).collect().length == 3)
+      val explicitPlans = ExecutionPlanCaptureCallback.getResultsWithTimeout()
+      assert(explicitPlans.length == 1, "An explicit capture in the new suite must still work")
+    } finally {
+      try ParallelUnitTestRunner.cleanupWorkerState(tmpDir) finally {
+        ExecutionPlanCaptureCallback.endCapture()
+        FileUtil.fullyDelete(tmpDir.toFile)
+      }
     }
   }
 }

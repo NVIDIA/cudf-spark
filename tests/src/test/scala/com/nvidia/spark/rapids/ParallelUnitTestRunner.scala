@@ -33,6 +33,7 @@ import org.apache.hadoop.fs.FileUtil
 
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.analysis.FunctionRegistry
+import org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 
 /** Runs ScalaTest suites concurrently in isolated JVMs. */
@@ -640,6 +641,7 @@ object ParallelUnitTestRunner {
       }
     }
     cleanup(cleanupSparkSessionAndContext())
+    cleanup(ExecutionPlanCaptureCallback.endCapture())
     cleanup(TestUtils.clearCachedBatchSerializer())
     cleanup {
       warehouseDirs ++= Option(tmpDir.toFile.listFiles()).getOrElse(Array.empty[File])
