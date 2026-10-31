@@ -1749,15 +1749,16 @@ case class GpuRegExpExtractAll(
             if (extracted.getRowCount == 0) {
               ColumnVector.fromScalar(emptyStringList, rowCount.toInt)
             } else {
-              val capturesWithEmptyStrings = withResource(extracted.getChildColumnView(0)) {
+              val normalizedCaptures = withResource(extracted.getChildColumnView(0)) {
                 captures =>
                   withResource(Scalar.fromString("")) { emptyString =>
-                    withResource(captures.replaceNulls(emptyString)) { normalizedCaptures =>
-                      withResource(extracted.replaceListChild(normalizedCaptures)) {
-                        _.copyToColumnVector()
-                      }
-                    }
+                    captures.replaceNulls(emptyString)
                   }
+              }
+              val capturesWithEmptyStrings = withResource(normalizedCaptures) { _ =>
+                withResource(extracted.replaceListChild(normalizedCaptures)) {
+                  _.copyToColumnVector()
+                }
               }
               withResource(capturesWithEmptyStrings) { normalized =>
                 withResource(normalized.isNull) { noMatchesOrNullInput =>
@@ -2124,44 +2125,44 @@ case class GpuStringToMap(strExpr: Expression,
     } else {
       str.getBase.stringSplitRecord(pairDelim)
     }
-    withResource(listsOfStrings) { listsOfStrings =>
+    withResource(listsOfStrings) { _ =>
       // Extract strings column from the output lists column.
-      withResource(listsOfStrings.getChildColumnView(0)) { stringsCol =>
+      val keysValuesTable = withResource(listsOfStrings.getChildColumnView(0)) { stringsCol =>
         // Split the key-value strings into pairs of strings of key-value (using limit = 2).
-        val keysValuesTable = if (isKeyValueDelimRegExp) {
+        if (isKeyValueDelimRegExp) {
           stringsCol.stringSplit(new RegexProgram(keyValueDelim,
             EnumSet.of(RegexFlag.EXT_NEWLINE), CaptureGroups.NON_CAPTURE), 2)
         } else {
           stringsCol.stringSplit(keyValueDelim, 2)
         }
-        withResource(keysValuesTable) { keysValuesTable =>
+      }
+      withResource(keysValuesTable) { _ =>
 
-          def toMapFromValues(values: ColumnVector): GpuColumnVector = {
-            // This code is safe, because the `keysValuesTable` always has at least one column
-            // (guarantee by `cudf::strings::split` implementation).
-            val keys = keysValuesTable.getColumn(0)
+        def toMapFromValues(values: ColumnVector): GpuColumnVector = {
+          // This code is safe, because the `keysValuesTable` always has at least one column
+          // (guarantee by `cudf::strings::split` implementation).
+          val keys = keysValuesTable.getColumn(0)
 
-            // Zip the key-value pairs into structs.
-            withResource(ColumnView.makeStructView(keys, values)) { structsCol =>
-              // Make a lists column from the new structs column, which will have the same shape
-              // as the previous lists of strings column.
-              withResource(GpuListUtils.replaceListDataColumnAsView(listsOfStrings, structsCol)) {
-                listsOfStructs =>
-                  GpuCreateMap.createMapFromKeysValuesAsStructs(dataType, listsOfStructs)
-              }
+          // Zip the key-value pairs into structs.
+          withResource(ColumnView.makeStructView(keys, values)) { structsCol =>
+            // Make a lists column from the new structs column, which will have the same shape
+            // as the previous lists of strings column.
+            withResource(GpuListUtils.replaceListDataColumnAsView(listsOfStrings, structsCol)) {
+              listsOfStructs =>
+                GpuCreateMap.createMapFromKeysValuesAsStructs(dataType, listsOfStructs)
             }
           }
+        }
 
-          // If the output from stringSplit has only one column (the map keys), we set all the
-          // output values to nulls.
-          if (keysValuesTable.getNumberOfColumns < 2) {
-            withResource(GpuColumnVector.columnVectorFromNull(
-              keysValuesTable.getRowCount.asInstanceOf[Int], StringType)) {
-              allNulls => toMapFromValues(allNulls)
-            }
-          } else {
-            toMapFromValues(keysValuesTable.getColumn(1))
+        // If the output from stringSplit has only one column (the map keys), we set all the
+        // output values to nulls.
+        if (keysValuesTable.getNumberOfColumns < 2) {
+          withResource(GpuColumnVector.columnVectorFromNull(
+            keysValuesTable.getRowCount.asInstanceOf[Int], StringType)) {
+            allNulls => toMapFromValues(allNulls)
           }
+        } else {
+          toMapFromValues(keysValuesTable.getColumn(1))
         }
       }
     }

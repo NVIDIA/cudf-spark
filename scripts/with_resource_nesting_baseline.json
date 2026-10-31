@@ -29,16 +29,6 @@
       "resource": "withResource(valueColumn.isNull)"
     },
     {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/higherOrderFunctions.scala",
-      "fingerprint": "7f869aeb1f10af718805",
-      "resource": "withResource(updatedMapView.getChildColumnView(0))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/higherOrderFunctions.scala",
-      "fingerprint": "b12699d8d247b786ecad",
-      "resource": "withResource(deduped.getChildColumnView(0))"
-    },
-    {
       "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/window/GpuUnboundedToUnboundedAggWindowExec.scala",
       "fingerprint": "085fcea941ec509cb8e4",
       "resource": "withResource(cudf.ColumnVector.fromLongs(targetRows))"
@@ -102,21 +92,6 @@
       "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/collectionOperations.scala",
       "fingerprint": "e4e7af8a9e767b6086fa",
       "resource": "withResource(getNullScalar)"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/stringFunctions.scala",
-      "fingerprint": "42399f8595279597588c",
-      "resource": "withResource(extracted.replaceListChild(normalizedCaptures))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/stringFunctions.scala",
-      "fingerprint": "7b9dccff53f319d8207c",
-      "resource": "withResource(GpuListUtils.replaceListDataColumnAsView(listsOfStrings,structsCol))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/stringFunctions.scala",
-      "fingerprint": "c75e489f83b3420cde00",
-      "resource": "withResource(captures.replaceNulls(emptyString))"
     }
   ]
 }

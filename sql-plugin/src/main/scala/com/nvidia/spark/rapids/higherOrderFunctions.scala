@@ -784,26 +784,29 @@ case class GpuTransformKeys(
       val newKeysCol = withResource(makeElementProjectBatch(batch, arg.getBase)) { cb =>
         function.columnarEval(cb)
       }
-      withResource(newKeysCol) { newKeysCol =>
+      val deduped = withResource(newKeysCol) { _ =>
         withResource(GpuMapUtils.replaceExplodedKeyAsView(arg.getBase, newKeysCol.getBase)) {
-          updatedMapView => {
+          updatedMapView =>
             GpuMapUtils.assertNoNullKeys(updatedMapView)
-            withResource(updatedMapView.dropListDuplicatesWithKeysValues()) { deduped =>
-              if (exceptionOnDupKeys) {
-                // Compare child data row count before and after removing duplicates to determine
-                // if there were duplicates.
-                withResource(deduped.getChildColumnView(0)) { a =>
-                  withResource(updatedMapView.getChildColumnView(0)) { b =>
-                    if (a.getRowCount != b.getRowCount) {
-                      throw GpuMapUtils.duplicateMapKeyFoundError
-                    }
-                  }
+            val checkDuplicates = exceptionOnDupKeys
+            val originalKeyCount = if (checkDuplicates) {
+              withResource(updatedMapView.getChildColumnView(0)) { _.getRowCount }
+            } else {
+              0L
+            }
+            closeOnExcept(updatedMapView.dropListDuplicatesWithKeysValues()) { deduped =>
+              if (checkDuplicates) {
+                val dedupedKeyCount = withResource(deduped.getChildColumnView(0)) { _.getRowCount }
+                if (dedupedKeyCount != originalKeyCount) {
+                  throw GpuMapUtils.duplicateMapKeyFoundError
                 }
               }
-              GpuColumnVector.from(deduped.incRefCount(), dataType)
+              deduped
             }
-          }
         }
+      }
+      withResource(deduped) { _ =>
+        GpuColumnVector.from(deduped.incRefCount(), dataType)
       }
     }
   }
