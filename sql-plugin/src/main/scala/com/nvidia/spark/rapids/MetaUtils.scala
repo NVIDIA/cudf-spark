@@ -326,8 +326,21 @@ object ShuffleMetadata extends Logging{
     val fbb = new FlatBufferBuilder(1024, bbFactory)
     val tableOffsets = copyTables(fbb, tables)
     val tableMetasOffset = MetadataResponse.createTableMetasVector(fbb, tableOffsets)
-    val finIndex = MetadataResponse.createMetadataResponse(fbb, tableMetasOffset)
+    // 0 leaves the error out, which adds no bytes to the response
+    val finIndex = MetadataResponse.createMetadataResponse(fbb, tableMetasOffset, 0)
     fbb.finish(finIndex)
+    fbb.dataBuffer()
+  }
+
+  /**
+   * Builds the reply to a metadata request that the server failed. It carries no tables.
+   * @param reason why the request failed, for the requester's error message
+   */
+  def buildMetaErrorResponse(reason: String): ByteBuffer = {
+    val fbb = new FlatBufferBuilder(1024, bbFactory)
+    val error = ResponseError.createResponseError(fbb, fbb.createString(reason))
+    val root = MetadataResponse.createMetadataResponse(fbb, 0, error)
+    fbb.finish(root)
     fbb.dataBuffer()
   }
 
@@ -421,6 +434,9 @@ object ShuffleMetadata extends Logging{
     val out = new StringBuilder
     out.append(s"----------------------- METADATA RESPONSE $state --------------------------\n")
     out.append(s"${res.tableMetasLength()} tables\n")
+    if (res.error() != null) {
+      out.append(s"error: ${res.error().reason()}\n")
+    }
     out.append("------------------------------------------------------------------------------\n")
     for (tableIndex <- 0 until res.tableMetasLength()) {
       val tableMeta = res.tableMetas(tableIndex)

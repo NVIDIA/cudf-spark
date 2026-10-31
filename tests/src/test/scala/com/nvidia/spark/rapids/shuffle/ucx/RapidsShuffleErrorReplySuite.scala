@@ -36,11 +36,12 @@ import org.mockito.Mockito._
 import org.mockito.invocation.InvocationOnMock
 import org.openucx.jucx.UcxCallback
 
-import org.apache.spark.shuffle.rapids.RapidsShuffleFetchFailedException
+import org.apache.spark.shuffle.rapids.{RapidsShuffleFetchFailedException,
+  ShuffleOutputGoneException}
 import org.apache.spark.storage.{BlockId, BlockManagerId}
 
 /**
- * What a requester does when the server answers its transfer request with an error reply. The
+ * What a requester does when the server answers its request with an error reply. The
  * reply reaches the client through the real UCX client connection and transaction, with only
  * UCX mocked, because the transaction's callback wrapper drops whatever the client's callback
  * throws. The suite is in the ucx package so that it can answer a request through the response
@@ -714,5 +715,108 @@ class RapidsShuffleErrorReplySuite extends RapidsShuffleTestHelper {
       RmmSpark.taskDone(taskId)
       bounceBuffers.filterNot(_.isClosed).foreach(_.close())
     }
+  }
+
+  /** A copy of what `buffer` has left, in a direct buffer, as UCX delivers a message. */
+  private def directCopy(buffer: ByteBuffer): ByteBuffer = {
+    val copy = ByteBuffer.allocateDirect(buffer.remaining())
+    copy.put(buffer.duplicate())
+    copy.flip()
+    copy
+  }
+
+  /**
+   * What a reader ends with when the server's lookup for its metadata request throws `failure`.
+   * The reader waits 5 seconds, far longer than the test takes, so a reader that timed out shows
+   * it.
+   */
+  private def readerOfFailedMetadataRequest(failure: Throwable): Throwable = {
+    val requester = new Requester
+    when(mockTransport.makeClient(any())).thenReturn(requester.client)
+    // the requests the client sends, which the test hands to the server
+    val sent = new LinkedBlockingQueue[ByteBuffer]()
+    doAnswer { invocation =>
+      sent.add(directCopy(invocation.getArgument[ByteBuffer](2)))
+      null
+    }.when(requester.ucx).sendActiveMessage(
+      anyLong(), any[UCXActiveMessage](), any[ByteBuffer](), any[UcxCallback]())
+
+    val requestHandler = mock[RapidsShuffleRequestHandler]
+    when(requestHandler.getShuffleBufferMetas(any())).thenThrow(failure)
+    val serverConnection = mock[ServerConnection]
+    val requestCallbacks = new ConcurrentHashMap[MessageType.Value, TransactionCallback]()
+    doAnswer { invocation =>
+      requestCallbacks.put(invocation.getArgument[MessageType.Value](0),
+        invocation.getArgument[TransactionCallback](1))
+      null
+    }.when(serverConnection).registerRequestHandler(any(), any())
+    // metadata requests run on the test's thread, and no transfer request comes
+    val server = new RapidsShuffleServer(mockTransport, serverConnection,
+      RapidsShuffleTestHelper.makeMockBlockManager("2", "2"), requestHandler, mockExecutor,
+      mockBssExecutor, mockConf)
+    server.start()
+    // the request as it reaches the server, whose reply goes to the requester when it is sent
+    val request = mock[Transaction]
+    when(request.peerExecutorId()).thenReturn(1L)
+    when(request.getStatus).thenReturn(TransactionStatus.Success)
+    doAnswer { invocation =>
+      requester.answer(directCopy(invocation.getArgument[ByteBuffer](0)))
+      val responseTx = mock[Transaction]
+      when(responseTx.getStatus).thenReturn(TransactionStatus.Success)
+      invocation.getArgument[TransactionCallback](1)(responseTx)
+      responseTx
+    }.when(request).respond(any(), any())
+
+    val taskId = 1L
+    val timeoutSeconds = 5L
+    val blocks: collection.Seq[(BlockId, Long, Int)] =
+      RapidsShuffleTestHelper.getShuffleBlocks.toSeq
+    val iterator = new RapidsShuffleIterator(
+      RapidsShuffleTestHelper.makeMockBlockManager("1", "1"), mockConf, mockTransport,
+      Array[(BlockManagerId, collection.Seq[(BlockId, Long, Int)])](
+        (RapidsShuffleTestHelper.makeMockBlockManager("2", "2"), blocks)),
+      testMetricsUpdater, Array.empty, taskId, mockCatalog, timeoutSeconds)
+    val thrown = new AtomicReference[Throwable]()
+    val readerThread = new Thread(() => {
+      RmmSpark.currentThreadIsDedicatedToTask(taskId)
+      try {
+        iterator.next()
+      } catch {
+        case t: Throwable => thrown.set(t)
+      }
+    }, "shuffle-reader")
+    readerThread.setDaemon(true)
+    try {
+      readerThread.start()
+      val metadataRequest = sent.poll(awaitSeconds, TimeUnit.SECONDS)
+      assert(metadataRequest != null, "the reader sent no metadata request")
+      when(request.releaseMessage()).thenReturn(
+        new MetadataTransportBuffer(new RefCountedDirectByteBuffer(metadataRequest)))
+      requestCallbacks.get(MessageType.MetadataRequest)(request)
+      readerThread.join(TimeUnit.SECONDS.toMillis(awaitSeconds))
+      thrown.get
+    } finally {
+      RmmSpark.taskDone(taskId)
+    }
+  }
+
+  test("a reader whose metadata request the server fails gets a fetch failure") {
+    val gone = "unknown shuffle block shuffle_1_1_1"
+    val thrown = readerOfFailedMetadataRequest(new ShuffleOutputGoneException(gone))
+    assert(thrown.isInstanceOf[RapidsShuffleFetchFailedException],
+      s"the reader ended with $thrown")
+    assert(thrown.getMessage.contains("Executor 2 failed the metadata request: " +
+      s"${RapidsShuffleServer.failureReason(BufferSendState.MissingOutput)}: $gone"))
+  }
+
+  test("a reader whose metadata request fails for a reason other than gone output gets a " +
+      "fetch failure") {
+    // with no message, the reason names the failure's class
+    val thrown = readerOfFailedMetadataRequest(new NoSuchElementException())
+    assert(thrown.isInstanceOf[RapidsShuffleFetchFailedException],
+      s"the reader ended with $thrown")
+    assert(thrown.getMessage.contains("Executor 2 failed the metadata request: " +
+      s"${RapidsShuffleServer.failureReason(BufferSendState.Failed)}: " +
+      classOf[NoSuchElementException].getName))
   }
 }

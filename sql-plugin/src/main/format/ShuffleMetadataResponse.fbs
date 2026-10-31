@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2021, NVIDIA CORPORATION.
+// Copyright (c) 2019-2026, NVIDIA CORPORATION.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -30,8 +30,11 @@ table TableMeta {
 
 /// Flat buffer for Rapids UCX Shuffle Metadata Response
 table MetadataResponse {
-  /// metadata for each table
+  /// metadata for each table. An error reply carries none.
   table_metas: [TableMeta];
+
+  /// set when the server failed the request
+  error: ResponseError;
 }
 
 root_type MetadataResponse;

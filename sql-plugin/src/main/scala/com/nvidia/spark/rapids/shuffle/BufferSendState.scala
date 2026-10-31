@@ -430,7 +430,7 @@ private[shuffle] class BufferLookupException(val tableIds: Seq[Int], cause: Thro
 
 object BufferSendState extends Logging {
   /**
-   * Lets a server queue its transfer responses, error replies included, only while it is open.
+   * Lets a server queue its error replies and transfer responses only while it is open.
    * The server shuts it before the transport closes, then waits until every reply it let through
    * is queued. UCX's progress thread runs no task queued after the transport's close, so a reply
    * queued later would never be sent or released.
@@ -444,7 +444,7 @@ object BufferSendState extends Logging {
   private[shuffle] case class ErrorReply(reason: String, gate: ReplyGate)
 
   /**
-   * Answers a failed transfer request with an error reply, through `gate`. The send's callback
+   * Answers a failed request with an error reply, through `gate`. The send's callback
    * releases the reply, whatever the send's status. This method releases it when the send cannot
    * start or the gate is shut. A reply that cannot be built or sent leaves its requester waiting
    * until it times out, as with no reply. The connection logs a failed send, and this method logs
@@ -458,9 +458,9 @@ object BufferSendState extends Logging {
       val response = try {
         reply
       } catch {
-        // Building the reply allocates on the send loop, a direct buffer included. Running out
-        // of memory there, heap or direct, leaves the request unanswered and the loop serving,
-        // since nothing has been sent yet.
+        // Building the reply allocates, a direct buffer included. Running out of memory there,
+        // heap or direct, leaves the request unanswered and the calling thread serving, since
+        // nothing has been sent yet.
         case oom: OutOfMemoryError =>
           throw new IllegalStateException("No memory to build the error reply", oom)
       }

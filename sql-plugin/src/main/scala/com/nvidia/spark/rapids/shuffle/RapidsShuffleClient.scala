@@ -234,11 +234,17 @@ class RapidsShuffleClient(
                   logDebug(s"Received from ${tx} response: \n:" +
                     s"${ShuffleMetadata.printResponse("received response", metadataResponse)}")
 
-                  // signal to the handler how many batches are expected
-                  handler.start(metadataResponse.tableMetasLength())
+                  val error = metadataResponse.error()
+                  if (error != null) {
+                    handler.transferError(s"Executor ${connection.getPeerExecutorId} failed " +
+                      s"the metadata request: ${error.reason()}")
+                  } else {
+                    // signal to the handler how many batches are expected
+                    handler.start(metadataResponse.tableMetasLength())
 
-                  // queue up the receives
-                  queueTransferRequests(metadataResponse, handler)
+                    // queue up the receives
+                    queueTransferRequests(metadataResponse, handler)
+                  }
                 } catch {
                   case t: Throwable =>
                     handler.transferError("Error occurred while handling metadata", t)

@@ -18,23 +18,31 @@ public final class MetadataResponse extends Table {
   public MetadataResponse __assign(int _i, ByteBuffer _bb) { __init(_i, _bb); return this; }
 
   /**
-   * metadata for each table
+   * metadata for each table. An error reply carries none.
    */
   public TableMeta tableMetas(int j) { return tableMetas(new TableMeta(), j); }
   public TableMeta tableMetas(TableMeta obj, int j) { int o = __offset(4); return o != 0 ? obj.__assign(__indirect(__vector(o) + j * 4), bb) : null; }
   public int tableMetasLength() { int o = __offset(4); return o != 0 ? __vector_len(o) : 0; }
+  /**
+   * set when the server failed the request
+   */
+  public ResponseError error() { return error(new ResponseError()); }
+  public ResponseError error(ResponseError obj) { int o = __offset(6); return o != 0 ? obj.__assign(__indirect(o + bb_pos), bb) : null; }
 
   public static int createMetadataResponse(FlatBufferBuilder builder,
-      int table_metasOffset) {
-    builder.startObject(1);
+      int table_metasOffset,
+      int errorOffset) {
+    builder.startObject(2);
+    MetadataResponse.addError(builder, errorOffset);
     MetadataResponse.addTableMetas(builder, table_metasOffset);
     return MetadataResponse.endMetadataResponse(builder);
   }
 
-  public static void startMetadataResponse(FlatBufferBuilder builder) { builder.startObject(1); }
+  public static void startMetadataResponse(FlatBufferBuilder builder) { builder.startObject(2); }
   public static void addTableMetas(FlatBufferBuilder builder, int tableMetasOffset) { builder.addOffset(0, tableMetasOffset, 0); }
   public static int createTableMetasVector(FlatBufferBuilder builder, int[] data) { builder.startVector(4, data.length, 4); for (int i = data.length - 1; i >= 0; i--) builder.addOffset(data[i]); return builder.endVector(); }
   public static void startTableMetasVector(FlatBufferBuilder builder, int numElems) { builder.startVector(4, numElems, 4); }
+  public static void addError(FlatBufferBuilder builder, int errorOffset) { builder.addOffset(1, errorOffset, 0); }
   public static int endMetadataResponse(FlatBufferBuilder builder) {
     int o = builder.endObject();
     return o;

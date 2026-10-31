@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids.shuffle
 
-import com.nvidia.spark.rapids.RapidsShuffleHandle
+import com.nvidia.spark.rapids.{RapidsShuffleHandle, ShuffleMetadata}
 import com.nvidia.spark.rapids.jni.RmmSpark
 import com.nvidia.spark.rapids.spill.SpillableDeviceBufferHandle
 import org.mockito.ArgumentCaptor
@@ -133,7 +133,29 @@ class RapidsShuffleIteratorSuite extends RapidsShuffleTestHelper {
     }
   }
 
-  test("a timeout while waiting for batches raises a fetch failure") {
+  test("a metadata response with no tables raises a fetch failure") {
+    val taskId = 1
+    try {
+      RmmSpark.currentThreadIsDedicatedToTask(taskId)
+      when(mockTransaction.getStatus).thenReturn(TransactionStatus.Success)
+      // what a requester that does not read the response's error sees in an error reply
+      when(mockTransaction.releaseMessage()).thenReturn(new MetadataTransportBuffer(
+        new RefCountedDirectByteBuffer(ShuffleMetadata.buildMetaResponse(Seq.empty))))
+      when(mockTransport.makeClient(any())).thenReturn(client)
+      val cl =
+        RapidsShuffleTestHelper.makeIterator(
+          mockConf, mockTransport, testMetricsUpdater, taskId, mockCatalog)
+
+      assert(cl.hasNext)
+      val failure = intercept[RapidsShuffleFetchFailedException](cl.next())
+      assert(failure.getCause.getMessage.contains("0 expected batches"))
+      verify(mockTransport, never()).queuePending(any())
+    } finally {
+      RmmSpark.taskDone(taskId)
+    }
+  }
+
+  test("a timeout while waiting for batches throws RapidsShuffleTimeoutException") {
     val taskId = 1
     try {
       RmmSpark.currentThreadIsDedicatedToTask(taskId)

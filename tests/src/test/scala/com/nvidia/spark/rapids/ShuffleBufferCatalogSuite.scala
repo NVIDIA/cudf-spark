@@ -286,7 +286,8 @@ class ShuffleBufferCatalogSuite
       val catalog = new ShuffleBufferCatalog(mapIdsCanRepeat)
       val block = ShuffleBlockId(1, 7L, 0)
       withClue(s"unknown shuffle, mapIdsCanRepeat=$mapIdsCanRepeat") {
-        assertThrows[ShuffleOutputGoneException](catalog.blockIdToMetas(block))
+        val gone = intercept[ShuffleOutputGoneException](catalog.blockIdToMetas(block))
+        assertResult("unknown shuffle 1 for block shuffle_1_7_0")(gone.getMessage)
         assertThrows[ShuffleOutputGoneException](readLocally(catalog, block))
       }
       catalog.registerShuffle(1)
