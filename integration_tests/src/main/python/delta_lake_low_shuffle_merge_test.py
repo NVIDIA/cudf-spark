@@ -122,6 +122,8 @@ def _assert_collect_with_counters(do_merge, data_path, conf, expect_write=True,
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
 @pytest.mark.parametrize("num_slices", num_slices_to_test, ids=idfn)
 @pytest.mark.parametrize("reader_type", ["PERFILE"], ids=idfn)
+@pytest.mark.xfail(is_databricks_version(18, 3), run=False,
+                   reason="https://github.com/NVIDIA/cudf-spark/issues/16685")
 def test_delta_low_shuffle_merge_when_gpu_file_scan_override_failed(spark_tmp_path,
                                                                     spark_tmp_table_factory,
                                                                     use_cdf, num_slices, reader_type):
