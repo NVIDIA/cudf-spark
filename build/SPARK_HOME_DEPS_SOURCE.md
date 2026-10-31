@@ -20,6 +20,7 @@ limitations under the License.
 `NVIDIA/spark-rapids-common`. The Databricks build runs
 `spark-home-deps/gen-spark-home-deps.py` from that checkout.
 `build/prepare-common-submodule.sh` initializes the pinned commit when needed.
-The Databricks build runs it locally, and CI runs it before copying source to a node.
+The Databricks build runs it locally and on the node. Pre-merge CI initializes
+the submodule during checkout, before copying source to the node.
 Release branches should pin their own tested common commit. Updating the pin
 requires an explicit consumer change; a build does not follow common's `main`.
