@@ -632,7 +632,7 @@ self.log("... OK")
                                     <groupId>com.nvidia</groupId>
                                     <artifactId>${cudf-spark-jni.artifactId}</artifactId>
                                     <classifier>${jni.classifier}</classifier>
-                                    <excludes>META-INF/**</excludes>
+                                    <excludes>META-INF/**,**/*.chunks/**</excludes>
                                     <outputDirectory>${project.build.directory}/jni-deps</outputDirectory>
                                 </artifactItem>
                                 <artifactItem>

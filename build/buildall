@@ -42,6 +42,18 @@ function last_pom_value() {
   sed -n "s|.*<$key>\([^<]*\)</$key>.*|\1|p" "$pom" | tail -n 1
 }
 
+function jni_archive_matches_unpacked() {
+  local unpacked_dir="$1"
+  local archive="$2"
+  local info
+  [[ -d "$unpacked_dir" && -f "$archive" ]] || return 1
+  command -v unzip >/dev/null 2>&1 || return 1
+  for info in cudf-spark-jni-version-info.properties cudf-java-version-info.properties; do
+    [[ -f "$unpacked_dir/$info" ]] || return 1
+    unzip -p "$archive" "$info" 2>/dev/null | cmp -s - "$unpacked_dir/$info" || return 1
+  done
+}
+
 function join_by { local IFS="$1"; shift; echo "$*"; }
 
 
@@ -333,7 +345,9 @@ fi
 if [[ "$UNSHIM_PARALLEL_WORLD_ONLY" == "1" ]]; then
   echo "Unshim parallel-world-only: preparing analyzer-only output and skipping JNI unpack, shimplify, and reduced POM generation"
   MVN_FAST_SKIP_OPTS="$MVN_FAST_SKIP_OPTS -Drapids.jni.unpack.skip=true -Drapids.shimplify.skip=true -Drapids.parallel.world.skip.reduced.pom=true -Drapids.aggregator.downstream.refresh.skip=true"
-elif [[ "$UNSHIM_FAST" == "1" && -d "$MVN_BASE_DIR/dist/target/jni-deps" ]]; then
+elif [[ "$UNSHIM_FAST" == "1" ]] &&
+     jni_archive_matches_unpacked "$MVN_BASE_DIR/dist/target/jni-deps" \
+       "$MVN_BASE_DIR/dist/target/jni-archive/spark-rapids-jni-native.jar"; then
   echo "Unshim fast: reusing existing JNI deps from $MVN_BASE_DIR/dist/target/jni-deps"
   MVN_FAST_SKIP_OPTS="$MVN_FAST_SKIP_OPTS -Drapids.jni.unpack.skip=true"
 fi
