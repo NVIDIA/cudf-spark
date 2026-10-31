@@ -63,6 +63,21 @@ class ReplacementRuleMetaLambdaLintSuite(unittest.TestCase):
           })
         """, [("EnabledMeta", "DisabledMeta")])
 
+    def test_checks_match_arms_without_skipping_nested_lambdas(self):
+        self.assert_factories("""
+          rule((a, conf, p, r) => a match {
+            case value => new ExampleMeta(value, conf, p, r)
+            case other if enabled(other) =>
+              new GuardedMetaImpl(other, conf, p, r)
+            case nested => helper(x => new NestedMeta(x, conf, p, r))
+          })
+        """, [("ExampleMeta", "GuardedMetaImpl")])
+
+    def test_checks_extracted_metadata_implementation(self):
+        self.assert_factories(
+            "rule((a, conf, p, r) => new AbsMetaImpl(a, conf, p, r))",
+            [("AbsMetaImpl",)])
+
     def test_nested_lambda_constructor_is_only_attributed_to_nested_lambda(self):
         self.assert_factories("""
           outer((a, b, c, d) =>

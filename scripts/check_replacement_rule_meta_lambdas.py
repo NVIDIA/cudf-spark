@@ -175,6 +175,25 @@ def _lambda_body_end(tokens, start):
     return len(tokens)
 
 
+def _is_case_pattern(tokens, index, body_start):
+    """Distinguish a match arm from a single-parameter nested lambda."""
+    depth = 0
+    for previous in range(index - 1, body_start - 1, -1):
+        value = tokens[previous].value
+        if value in CLOSE_TO_OPEN:
+            depth += 1
+        elif value in OPEN_TO_CLOSE:
+            if depth == 0:
+                return False
+            depth -= 1
+        elif depth == 0:
+            if value == "case":
+                return True
+            if value in ("=>", ";"):
+                return False
+    return False
+
+
 def _metadata_type(tokens, new_index, end):
     index = new_index + 1
     names = []
@@ -188,7 +207,7 @@ def _metadata_type(tokens, new_index, end):
                 continue
             break
         return None
-    if not names or not names[-1].endswith("Meta"):
+    if not names or not names[-1].endswith(("Meta", "MetaImpl")):
         return None
     if index < end and tokens[index].value == "[":
         close = _matching_token(tokens, index)
@@ -220,11 +239,13 @@ def scan_source(path, source):
             if tokens[body_index].value == "(":
                 nested_close = _matching_token(tokens, body_index)
                 if (nested_close is not None and nested_close + 1 < body_end and
-                        tokens[nested_close + 1].value == "=>"):
+                        tokens[nested_close + 1].value == "=>" and
+                        not _is_case_pattern(tokens, body_index, body_start)):
                     nested_body_start = nested_close + 2
             elif (_is_identifier(tokens[body_index].value) and
                   body_index + 1 < body_end and tokens[body_index + 1].value == "=>"):
-                nested_body_start = body_index + 2
+                if not _is_case_pattern(tokens, body_index, body_start):
+                    nested_body_start = body_index + 2
             if nested_body_start is not None:
                 body_index = _lambda_body_end(tokens, nested_body_start)
                 continue
