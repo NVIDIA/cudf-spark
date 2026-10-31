@@ -358,7 +358,7 @@
                                     <then>
                                         <copy todir="${project.build.directory}/parallel-world">
                                             <fileset dir="${project.build.directory}/jni-deps"
-                                                     excludes="ai/rapids/cudf/packaging/native_chunks.py"/>
+                                                     excludes="**/*.chunks/**"/>
                                         </copy>
                                     </then>
                                     <else>
@@ -422,45 +422,15 @@
                         </configuration>
                     </execution>
                     <execution>
-                        <id>store-zstd-native-chunks</id>
+                        <id>copy-jni-native-chunks</id>
                         <phase>package</phase>
                         <goals><goal>run</goal></goals>
                         <configuration>
                             <target>
-                                <taskdef resource="net/sf/antcontrib/antcontrib.properties"/>
-                                <ac:if xmlns:ac="antlib:net.sf.antcontrib">
-                                    <available file="${project.build.directory}/jni-deps/ai/rapids/cudf/packaging/native_chunks.py"/>
-                                    <then>
-                                        <java classname="org.python.util.jython"
-                                              classpathref="maven.plugin.classpath" fork="true" failonerror="true">
-                                            <arg value="${project.build.directory}/jni-deps/ai/rapids/cudf/packaging/native_chunks.py"/>
-                                            <arg value="store"/>
-                                            <arg value="${project.build.directory}/parallel-world"/>
-                                            <arg value="${dist.jar.name}"/>
-                                        </java>
-                                    </then>
-                                </ac:if>
-                            </target>
-                        </configuration>
-                    </execution>
-                    <execution>
-                        <id>verify-zstd-native-chunks</id>
-                        <phase>verify</phase>
-                        <goals><goal>run</goal></goals>
-                        <configuration>
-                            <target>
-                                <taskdef resource="net/sf/antcontrib/antcontrib.properties"/>
-                                <ac:if xmlns:ac="antlib:net.sf.antcontrib">
-                                    <available file="${project.build.directory}/jni-deps/ai/rapids/cudf/packaging/native_chunks.py"/>
-                                    <then>
-                                        <java classname="org.python.util.jython"
-                                              classpathref="maven.plugin.classpath" fork="true" failonerror="true">
-                                            <arg value="${project.build.directory}/jni-deps/ai/rapids/cudf/packaging/native_chunks.py"/>
-                                            <arg value="verify"/>
-                                            <arg value="${dist.jar.name}"/>
-                                        </java>
-                                    </then>
-                                </ac:if>
+                                <zip destfile="${dist.jar.name}" update="true" keepcompression="true">
+                                    <zipfileset src="${project.build.directory}/jni-archive/spark-rapids-jni-native.jar"
+                                                includes="**/*.chunks/*"/>
+                                </zip>
                             </target>
                         </configuration>
                     </execution>
@@ -630,6 +600,23 @@ self.log("... OK")
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-dependency-plugin</artifactId>
                 <executions>
+                    <execution>
+                        <id>copy-spark-rapids-jni-archive</id>
+                        <phase>generate-resources</phase>
+                        <goals><goal>copy</goal></goals>
+                        <configuration>
+                            <skip>${rapids.jni.unpack.skip}</skip>
+                            <artifactItems>
+                                <artifactItem>
+                                    <groupId>com.nvidia</groupId>
+                                    <artifactId>${cudf-spark-jni.artifactId}</artifactId>
+                                    <classifier>${jni.classifier}</classifier>
+                                    <outputDirectory>${project.build.directory}/jni-archive</outputDirectory>
+                                    <destFileName>spark-rapids-jni-native.jar</destFileName>
+                                </artifactItem>
+                            </artifactItems>
+                        </configuration>
+                    </execution>
                     <execution>
                         <id>unpack-spark-rapids-jni-and-ucx</id>
                         <!-- run after `create-parallel-world`, the phase equals to the phase of the `create-parallel-world` -->
