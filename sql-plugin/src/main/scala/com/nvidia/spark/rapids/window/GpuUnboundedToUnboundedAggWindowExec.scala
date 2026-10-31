@@ -696,50 +696,48 @@ object PendingSecondAggResults {
         // This is a little complicated in the general case. We need to find which row
         // in the aggregation we need to split on. The only way to do that is to get a
         // running sum of the counts, and then do an upper bound on that column
-        withResource(AggResultBatchConventions.getCount(cb)) { counts =>
-          val (splitIndex, countToKeep, countForNextTime) =
-            withResource(counts.getBase.prefixSum()) { runningCount =>
-              val splitIndex = withResource(new cudf.Table(runningCount)) { runningCountTable =>
-                withResource(cudf.ColumnVector.fromLongs(targetRows)) { tr =>
-                  withResource(new cudf.Table(tr)) { targetRowsTable =>
-                    runningCountTable.lowerBound(Array(true), targetRowsTable, Array(false))
-                  }
-                }
-              }
-              withResource(splitIndex) { _ =>
-                val indexToLookAt = withResource(splitIndex.getScalarElement(0)) { s =>
-                  s.getInt
-                }
-                val totalRowsUpToIndex = withResource(
-                  runningCount.getScalarElement(indexToLookAt)) { s =>
-                  s.getLong
-                }
-                val countInRow = withResource(counts.getBase.getScalarElement(indexToLookAt)) { s =>
-                  s.getLong
-                }
-                val countToKeep = targetRows - (totalRowsUpToIndex - countInRow)
-                val countForNextTime = countInRow - countToKeep
-                (indexToLookAt, countToKeep, countForNextTime)
-              }
+        val runningCount = withResource(AggResultBatchConventions.getCount(cb)) { counts =>
+          counts.getBase.prefixSum()
+        }
+        val (splitIndex, countToKeep, countForNextTime) = withResource(runningCount) { _ =>
+          val splitIndex = withResource(new cudf.Table(runningCount)) { runningCountTable =>
+            val targetRowsTable = withResource(cudf.ColumnVector.fromLongs(targetRows)) { tr =>
+              new cudf.Table(tr)
             }
-          if (countForNextTime == 0) {
-            // We got lucky and it is on an agg boundary
-            val (a, b) = splitCb(cb, splitIndex + 1)
-            (SpillableColumnarBatch(a, SpillPriorities.ACTIVE_ON_DECK_PRIORITY),
-                SpillableColumnarBatch(b, SpillPriorities.ACTIVE_BATCHING_PRIORITY))
-          } else {
-            val scbFirst = withResource(sliceInclusiveCb(cb, 0, splitIndex)) { first =>
-              SpillableColumnarBatch(replaceCountInAggAt(first, splitIndex, countToKeep),
-                SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+            withResource(targetRowsTable) { _ =>
+              runningCountTable.lowerBound(Array(true), targetRowsTable, Array(false))
             }
-            closeOnExcept(scbFirst) { _ =>
-              val scbSecond = withResource(sliceInclusiveCb(cb, splitIndex, cb.numRows() - 1)) {
-                second =>
-                  SpillableColumnarBatch(replaceCountInAggAt(second, 0, countForNextTime),
-                    SpillPriorities.ACTIVE_BATCHING_PRIORITY)
-              }
-              (scbFirst, scbSecond)
+          }
+          val indexToLookAt = withResource(splitIndex) { _ =>
+            withResource(splitIndex.getScalarElement(0)) { _.getInt }
+          }
+          val totalRowsUpToIndex = withResource(runningCount.getScalarElement(indexToLookAt)) {
+            _.getLong
+          }
+          val countInRow = withResource(AggResultBatchConventions.getCount(cb)) { counts =>
+            withResource(counts.getBase.getScalarElement(indexToLookAt)) { _.getLong }
+          }
+          val countToKeep = targetRows - (totalRowsUpToIndex - countInRow)
+          val countForNextTime = countInRow - countToKeep
+          (indexToLookAt, countToKeep, countForNextTime)
+        }
+        if (countForNextTime == 0) {
+          // We got lucky and it is on an agg boundary
+          val (a, b) = splitCb(cb, splitIndex + 1)
+          (SpillableColumnarBatch(a, SpillPriorities.ACTIVE_ON_DECK_PRIORITY),
+              SpillableColumnarBatch(b, SpillPriorities.ACTIVE_BATCHING_PRIORITY))
+        } else {
+          val scbFirst = withResource(sliceInclusiveCb(cb, 0, splitIndex)) { first =>
+            SpillableColumnarBatch(replaceCountInAggAt(first, splitIndex, countToKeep),
+              SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+          }
+          closeOnExcept(scbFirst) { _ =>
+            val scbSecond = withResource(sliceInclusiveCb(cb, splitIndex, cb.numRows() - 1)) {
+              second =>
+                SpillableColumnarBatch(replaceCountInAggAt(second, 0, countForNextTime),
+                  SpillPriorities.ACTIVE_BATCHING_PRIORITY)
             }
+            (scbFirst, scbSecond)
           }
         }
       }
@@ -930,15 +928,18 @@ class GpuUnboundedToUnboundedAggFinalIterator(
       opTime.ns {
         // The first stage is to expand the aggregate based on the count column
         val repeatedAggs = withResource(toExpand.aggResults.getColumnarBatch()) { cb =>
-          withResource(AggResultBatchConventions.getCount(cb)) { counts =>
+          val (repeated, dataTypes) =
             withResource(AggResultBatchConventions.getRepeatedAggColumns(cb)) { toRepeat =>
               val dataTypes = GpuColumnVector.extractTypes(toRepeat)
-              withResource(GpuColumnVector.from(toRepeat)) { table =>
-                withResource(table.repeat(counts.getBase)) { repeated =>
-                  GpuColumnVector.from(repeated, dataTypes)
+              val repeated = withResource(GpuColumnVector.from(toRepeat)) { table =>
+                withResource(AggResultBatchConventions.getCount(cb)) { counts =>
+                  table.repeat(counts.getBase)
                 }
               }
+              (repeated, dataTypes)
             }
+          withResource(repeated) { _ =>
+            GpuColumnVector.from(repeated, dataTypes)
           }
         }
         // Second step is to stitch the two together
