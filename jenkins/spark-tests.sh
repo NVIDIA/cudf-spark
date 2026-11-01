@@ -278,11 +278,11 @@ mkdir -p $TARGET_DIR
 run_delta_lake_tests() {
   echo "run_delta_lake_tests SPARK_VER = $SPARK_VER, SCALA_BINARY_VER = $SCALA_BINARY_VER"
   DELTA_LAKE_VERSIONS=""
-  SPARK_32X_PATTERN="(3\.2\.[0-9])"
-  SPARK_33X_PATTERN="(3\.3\.[0-9])"
-  SPARK_34X_PATTERN="(3\.4\.[0-9])"
-  SPARK_35X_PATTERN="(3\.5\.[3-9])"
-  SPARK_40X_PATTERN="(4\.0\.[0-9])"
+  SPARK_32X_PATTERN="(3\.2\.[0-9]+)"
+  SPARK_33X_PATTERN="(3\.3\.[0-9]+)"
+  SPARK_34X_PATTERN="(3\.4\.[0-9]+)"
+  SPARK_35X_PATTERN="(3\.5\.([3-9]|[1-9][0-9]+))"
+  SPARK_40X_PATTERN="(4\.0\.[0-9]+)"
   # Delta 4.1.0 is binary-incompatible with Spark 4.1.2+ after Spark changed internal
   # Catalyst and Parquet APIs. Keep coverage on the compatible Spark patch releases.
   SPARK_41_0_1_PATTERN="^(4\.1\.[0-1])$"
