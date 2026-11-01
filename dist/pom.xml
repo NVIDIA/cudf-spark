@@ -314,6 +314,7 @@
                                     <not><istrue value="${rapids.jni.unpack.skip}"/></not>
                                     <then>
                                         <delete dir="${project.build.directory}/jni-deps" includeemptydirs="true"/>
+                                        <delete dir="${project.build.directory}/jni-archive" includeemptydirs="true"/>
                                         <delete dir="${project.build.directory}/dependency-maven-plugin-markers"
                                                 includeemptydirs="true"/>
                                     </then>
