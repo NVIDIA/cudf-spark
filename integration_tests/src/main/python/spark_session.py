@@ -165,9 +165,20 @@ def with_gpu_session(func, conf={}):
     copy['spark.rapids.sql.test.validateExecsInGpuPlan'] = ','.join(get_validate_execs_in_gpu_plan())
     return with_spark_session(func, conf=copy)
 
-from spark_version import spark_version_tuple
-
-_spark_version_tuple = spark_version_tuple
+# Compare numeric parts so multi-digit patches sort correctly ("3.5.10" < "3.5.3" as strings).
+# Qualifiers such as -SNAPSHOT, -amzn-0 or -preview2 are ignored.
+def spark_version_tuple(ver=None):
+    v = spark_version() if ver is None else ver
+    raw = v.split("-", 1)[0].split("+", 1)[0]
+    parts = []
+    for part in raw.split("."):
+        try:
+            parts.append(int(part))
+        except ValueError:
+            break
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts[:3])
 
 def is_before_spark_312():
     return spark_version_tuple() < (3, 1, 2)
