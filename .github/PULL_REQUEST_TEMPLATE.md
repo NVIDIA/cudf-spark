@@ -25,18 +25,8 @@ Please provide a description of the changes proposed in this pull request. Here 
 - After this change, what will the user experience be like? Please describe any user-facing changes, such as new configurations or new behaviors. If you are introducing new configurations, please add some guidelines on how to use them.
 - How are you fixing the problem? Please provide a technical description of your solution. You can add or link your design doc if it exists.
 - How are the new features/behaviors tested? Please describe the test cases you added or modified. If they are tested in a cluster, please describe it as well.
+- Summarize validation results and any remaining gaps using CONTRIBUTING.md#testing-your-code.
 -->
-
-#### Local validation
-
-<!--
-This confirms initial local testing; follow-up commits need Local-Tests declarations
-as described in CONTRIBUTING.md#testing-your-code.
-Developer-managed validation may run locally or in a suitable remote environment,
-including EMR, Dataproc, or Databricks. Complete required tests before publishing.
--->
-
-- [ ] I have run and passed the local tests relevant to this change.
 
 ### Checklists
 
