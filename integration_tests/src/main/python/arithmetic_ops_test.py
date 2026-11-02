@@ -1058,6 +1058,10 @@ def test_to_binary_hex_permissive(conf):
                 spark.createDataFrame(values, 'a string')).selectExpr("to_binary(a, 'hex')"), conf=conf)
 
 
+_to_binary_hex_codegen_conf = {'spark.sql.codegen.wholeStage': 'false'} \
+    if spark_version() == '3.4.0' else {}
+
+
 @allow_non_gpu('Unhex')
 @pytest.mark.skipif(is_before_spark_340(), reason='strict to_binary with hex is unavailable')
 def test_to_binary_hex_error_mode_fallback():
@@ -1065,7 +1069,7 @@ def test_to_binary_hex_error_mode_fallback():
     assert_gpu_fallback_collect(
             lambda spark: spark.createDataFrame(values, 'a string').selectExpr(
                 "to_binary(a, 'hex')"),
-            'Unhex')
+            'Unhex', conf=_to_binary_hex_codegen_conf)
 
 
 @allow_non_gpu('Unhex')
@@ -1076,7 +1080,7 @@ def test_try_to_binary_hex_fallback():
     assert_gpu_fallback_collect(
             lambda spark: spark.createDataFrame(values, 'a string').selectExpr(
                 "try_to_binary(a, 'hex')"),
-            'Unhex')
+            'Unhex', conf=_to_binary_hex_codegen_conf)
 
 
 @allow_non_gpu('Unhex')
@@ -1085,7 +1089,7 @@ def test_to_binary_hex_invalid_input():
     assert_gpu_and_cpu_error(
             lambda spark: spark.createDataFrame([('GG',)], 'a string').selectExpr(
                 "to_binary(a, 'hex')").collect(),
-            {},
+            _to_binary_hex_codegen_conf,
             'CONVERSION_INVALID_INPUT')
 
 

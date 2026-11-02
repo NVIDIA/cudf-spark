@@ -12,6 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Exact shim tags retained for targets outside the public Maven graphs."""
+"""External exact targets intentionally accepted by the public source scanner."""
 
-EXTERNAL_EXACT_TARGETS = frozenset(('330db', '332db', '341db'))
+EXTERNAL_EXACT_TARGETS = frozenset()

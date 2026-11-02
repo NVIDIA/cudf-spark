@@ -27,7 +27,7 @@ from iceberg import (
     delete_partition_transforms_distributed, _build_tblprops, assert_iceberg_files_use_codec,
     supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance,
     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df, rapids_reader_types)
-from marks import allow_non_gpu, allow_non_gpu_conditional, iceberg, ignore_order, datagen_overrides
+from marks import allow_non_gpu, allow_non_gpu_conditional, iceberg, ignore_order, datagen_overrides, iceberg_fast_test
 from spark_session import is_spark_400_or_later, with_cpu_session, with_gpu_session
 
 pytestmark = iceberg_unsupported_mark
@@ -131,6 +131,7 @@ def do_delete_test(spark_tmp_table_factory, delete_sql_func, data_gen_func=None,
 
 
 # This requires reading of _partition field, which is a struct
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.datagen_overrides(seed=DELETE_TEST_SEED, reason=DELETE_TEST_SEED_OVERRIDE_REASON)
@@ -148,6 +149,7 @@ def test_iceberg_delete_unpartitioned_table(format_version, spark_tmp_table_fact
     )
 
 
+@iceberg_fast_test
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)
@@ -173,6 +175,7 @@ def test_iceberg_delete_encryption_fallback(spark_tmp_table_factory, delete_mode
         base_table_name, [fallback_exec], conf=iceberg_delete_v3_enabled_conf)
 
 
+@iceberg_fast_test
 @allow_non_gpu(
     "ReplaceDataExec", "WriteDeltaExec", "BatchScanExec", "ShuffleExchangeExec",
     "SortExec", "ProjectExec", "ColumnarToRowExec")
@@ -228,6 +231,7 @@ def _assert_only_deletion_vectors(spark, table_name):
     return deletion_vectors
 
 
+@iceberg_fast_test
 @iceberg
 # Iceberg metadata table scans are CPU-only; the DELETE command is still GPU-validated.
 @allow_non_gpu("BatchScanExec")
@@ -282,6 +286,7 @@ def test_iceberg_delete_v3_gpu_writes_and_merges_deletion_vectors(
     assert_equal_with_local_sort(cpu_data, gpu_data)
 
 
+@iceberg_fast_test
 @iceberg
 # Iceberg metadata table scans are CPU-only; the DELETE command is still GPU-validated.
 @allow_non_gpu("BatchScanExec")
@@ -337,6 +342,7 @@ def test_iceberg_delete_v3_gpu_upgrades_position_deletes(spark_tmp_table_factory
     assert_equal_with_local_sort(cpu_data, gpu_data)
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(
@@ -367,6 +373,7 @@ def test_iceberg_v3_row_lineage_delete_leading_rows(spark_tmp_table_factory, rea
         })
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @allow_non_gpu("BatchScanExec")
@@ -406,6 +413,7 @@ def _do_test_iceberg_delete_partitioned_table(
 
 
 # This requires reading of _partition field, which is a struct
+@iceberg_fast_test
 @iceberg
 @datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids-jni/issues/4016')
 @ignore_order(local=True)
@@ -675,6 +683,7 @@ def test_iceberg_delete_mor_fallback_writedelta_disabled(format_version, spark_t
 
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.datagen_overrides(seed=DELETE_TEST_SEED, reason=DELETE_TEST_SEED_OVERRIDE_REASON)

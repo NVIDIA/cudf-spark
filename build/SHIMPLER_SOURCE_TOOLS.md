@@ -21,9 +21,9 @@ vendored unchanged from the `shimpler-source-tools` directory of public
 `NVIDIA/spark-rapids-common` at merged PR #64 commit
 `2dab44f16f04e96471f6ab63d86fd2495f54bf5c`.
 
-The public POMs omit legacy exact targets `330db`, `332db`, and `341db`.
-`shimpler_source_targets.py` lists those names explicitly so unknown target
-typos still fail validation. External names cannot be inheritance roots.
+The public POMs no longer include the old Databricks targets. The
+`shimpler_source_targets.py` allowlist is empty, so unknown target names fail
+validation. External names cannot be inheritance roots.
 
 The copies are checked in so Maven generation remains offline. Update all four
 from one reviewed common commit, update `shimpler_source_tools.sha256`, then
