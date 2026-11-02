@@ -35,6 +35,10 @@ table MetadataResponse {
 
   /// set when the server failed the request
   error: ResponseError;
+
+  /// with an error, the index in the request's block_ids of the block whose lookup failed, or
+  /// -1 when no single block failed
+  failed_block: int = -1;
 }
 
 root_type MetadataResponse;

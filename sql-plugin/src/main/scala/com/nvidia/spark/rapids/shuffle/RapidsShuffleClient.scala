@@ -59,6 +59,15 @@ trait RapidsShuffleFetchHandler {
   def transferError(errorMessage: String, throwable: Throwable = null): Unit
 
   /**
+   * Called when the server answers the metadata request with an error reply.
+   *
+   * @param errorMessage - a string containing an error message
+   * @param failedBlock - the index, in the requested blocks, of the block whose lookup failed on
+   *                    the server, or -1 when no single block failed
+   */
+  def metadataError(errorMessage: String, failedBlock: Int): Unit
+
+  /**
    * Called to get the task attempt ids that this shuffle handler is for.
    */
   def getTaskIds: Array[Long]
@@ -236,8 +245,8 @@ class RapidsShuffleClient(
 
                   val error = metadataResponse.error()
                   if (error != null) {
-                    handler.transferError(s"Executor ${connection.getPeerExecutorId} failed " +
-                      s"the metadata request: ${error.reason()}")
+                    handler.metadataError(s"Executor ${connection.getPeerExecutorId} failed " +
+                      s"the metadata request: ${error.reason()}", metadataResponse.failedBlock())
                   } else {
                     // signal to the handler how many batches are expected
                     handler.start(metadataResponse.tableMetasLength())

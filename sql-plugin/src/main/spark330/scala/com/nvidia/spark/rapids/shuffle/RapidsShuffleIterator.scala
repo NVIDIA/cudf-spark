@@ -266,13 +266,29 @@ class RapidsShuffleIterator(
             }
           }
 
-          override def transferError(errorMessage: String, throwable: Throwable): Unit = {
+          override def transferError(errorMessage: String, throwable: Throwable): Unit =
+            failRequest(errorMessage, throwable, failedBlock = -1)
+
+          override def metadataError(errorMessage: String, failedBlock: Int): Unit =
+            failRequest(errorMessage, null, failedBlock)
+
+          // Queues an error for each block of the request. `next()` throws for the first one it
+          // takes, so the block at `failedBlock`, when it is one of them, goes first.
+          private def failRequest(
+              errorMessage: String,
+              throwable: Throwable,
+              failedBlock: Int): Unit = {
             resolvedBatches.synchronized {
               if (!clientDone) {
                 // If Spark detects a single fetch failure, the whole task has failed
-                // as per `FetchFailedException`. In the future `mapIndex` will come from the
-                // error callback.
-                shuffleRequestsMapIndex.map { case BlockIdMapIndex(id, mapIndex) =>
+                // as per `FetchFailedException`.
+                val blocks = if (failedBlock >= 0 && failedBlock < shuffleRequestsMapIndex.size) {
+                  shuffleRequestsMapIndex(failedBlock) +:
+                    shuffleRequestsMapIndex.patch(failedBlock, Nil, 1)
+                } else {
+                  shuffleRequestsMapIndex
+                }
+                blocks.foreach { case BlockIdMapIndex(id, mapIndex) =>
                   resolvedBatches.offer(TransferError(
                     blockManagerId, id, mapIndex, errorMessage, throwable))
                 }

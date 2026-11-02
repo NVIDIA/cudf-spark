@@ -23,6 +23,7 @@ import org.mockito.ArgumentCaptor
 import org.mockito.ArgumentMatchers._
 import org.mockito.Mockito._
 
+import org.apache.spark.FetchFailed
 import org.apache.spark.shuffle.rapids.{RapidsShuffleFetchFailedException, RapidsShuffleTimeoutException}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -89,6 +90,34 @@ class RapidsShuffleIteratorSuite extends RapidsShuffleTestHelper {
 
   test("a transport cancel raises a fetch failure") {
     doTestErrorOrCancelledRaisesFetchFailure(TransactionStatus.Cancelled)
+  }
+
+  test("a metadata error names the block whose lookup failed, or else the request's first") {
+    // the iterator asks for three blocks, at map indices 1, 2 and 3
+    Seq(1 -> 2, -1 -> 1, 3 -> 1).foreach { case (failedBlock, mapIndex) =>
+      val taskId = 1
+      try {
+        RmmSpark.currentThreadIsDedicatedToTask(taskId)
+        val cl =
+          RapidsShuffleTestHelper.makeIterator(
+            mockConf, mockTransport, testMetricsUpdater, taskId, mockCatalog)
+
+        val ac = ArgumentCaptor.forClass(classOf[RapidsShuffleFetchHandler])
+        when(mockTransport.makeClient(any())).thenReturn(client)
+        doNothing().when(client).doFetch(any(), ac.capture())
+        cl.start()
+
+        val handler = ac.getValue
+        handler.metadataError("Test", failedBlock)
+
+        val failure = intercept[RapidsShuffleFetchFailedException](cl.next())
+          .toTaskFailedReason.asInstanceOf[FetchFailed]
+        assertResult(mapIndex, s"for failed block $failedBlock")(failure.mapIndex)
+        verify(mockTransport, times(1)).cancelPending(handler)
+      } finally {
+        RmmSpark.taskDone(taskId)
+      }
+    }
   }
 
   test("a transport exception raises a fetch failure with the cause exception") {

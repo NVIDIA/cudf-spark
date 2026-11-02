@@ -1983,7 +1983,31 @@ class RapidsShuffleServerSuite extends RapidsShuffleTestHelper {
     assertResult(
       s"${RapidsShuffleServer.failureReason(BufferSendState.MissingOutput)}: $gone")(
       response.error().reason())
+    // the request's second block, whose lookup failed
+    assertResult(1)(response.failedBlock())
     // releases the reply as the transport would, and throws if the server closed it already
+    sent.getValue.apply(mock[Transaction])
+  }
+
+  test("a metadata request that fails after its lookups names no failed block") {
+    val requestHandler = mock[RapidsShuffleRequestHandler]
+    // the lookup succeeds, and building the response from what it found fails
+    val unreadable = mock[TableMeta]
+    when(unreadable.bufferMeta()).thenThrow(new IllegalStateException("unreadable table"))
+    when(requestHandler.getShuffleBufferMetas(any())).thenReturn(Seq(unreadable))
+    val serverConnection = mock[ServerConnection]
+    val onRequest = startForMetadata(newServer(requestHandler, serverConnection), serverConnection)
+    val requestTx = makeMetadataTx(ShuffleBlockBatchId(1, 7L, 2, 2))
+    onRequest(requestTx)
+
+    val reply = ArgumentCaptor.forClass(classOf[ByteBuffer])
+    val sent = ArgumentCaptor.forClass(classOf[TransactionCallback])
+    verify(requestTx, times(1)).respond(reply.capture(), sent.capture())
+    val response = ShuffleMetadata.getMetadataResponse(reply.getValue)
+    assertResult(0)(response.tableMetasLength())
+    assertResult(-1)(response.failedBlock())
+    assertResult(s"${RapidsShuffleServer.failureReason(BufferSendState.Failed)}: unreadable table")(
+      response.error().reason())
     sent.getValue.apply(mock[Transaction])
   }
 

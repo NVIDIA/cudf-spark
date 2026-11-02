@@ -585,19 +585,29 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
             val metadataResponse = try {
               val responseTables = (0 until req.blockIdsLength()).flatMap { i =>
                 val blockId = req.blockIds(i)
-                // this is getting shuffle buffer ids
-                requestHandler.getShuffleBufferMetas(
-                  ShuffleBlockBatchId(blockId.shuffleId(), blockId.mapId(),
-                    blockId.startReduceId(), blockId.endReduceId()))
+                try {
+                  // this is getting shuffle buffer ids
+                  requestHandler.getShuffleBufferMetas(
+                    ShuffleBlockBatchId(blockId.shuffleId(), blockId.mapId(),
+                      blockId.startReduceId(), blockId.endReduceId()))
+                } catch {
+                  case NonFatal(t) => throw new BlockLookupException(i, t)
+                }
               }
               ShuffleMetadata.buildMetaResponse(responseTables)
             } catch {
               case NonFatal(t) =>
+                // the block whose lookup failed, by its index in the request, or -1 for any
+                // other failure
+                val (cause, failedBlock) = t match {
+                  case e: BlockLookupException => (e.getCause, e.blockIndex)
+                  case _ => (t, -1)
+                }
                 // the reason adds the cause, which says what is gone or what failed
-                answerFailedRequest("metadata request", tx, t) { reason =>
-                  val detail = Option(t.getMessage).getOrElse(t.getClass.getName)
+                answerFailedRequest("metadata request", tx, cause) { reason =>
+                  val detail = Option(cause.getMessage).getOrElse(cause.getClass.getName)
                   new RefCountedDirectByteBuffer(
-                    ShuffleMetadata.buildMetaErrorResponse(s"$reason: $detail"))
+                    ShuffleMetadata.buildMetaErrorResponse(s"$reason: $detail", failedBlock))
                 }
                 null
             }
@@ -1011,6 +1021,10 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
     }
   }
 }
+
+/** A metadata request whose block at `blockIndex`, in the request, could not be looked up. */
+private[shuffle] class BlockLookupException(val blockIndex: Int, cause: Throwable)
+    extends RuntimeException(cause.getMessage, cause)
 
 object RapidsShuffleServer {
   // how long close() waits for the send loop to exit
