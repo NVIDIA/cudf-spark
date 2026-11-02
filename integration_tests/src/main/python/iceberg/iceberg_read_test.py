@@ -158,8 +158,9 @@ def test_iceberg_physical_schema_after_evolution(
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Imported files require a local catalog")
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @pytest.mark.skipif(not is_spark_411_or_later(), reason="Iceberg Variant requires Spark 4.1.1+")
+@pytest.mark.parametrize('variant_column', ['v', 'renamed_v'])
 def test_iceberg_v3_unannotated_shredded_variant_read_fallback(
-        spark_tmp_table_factory, spark_tmp_path):
+        spark_tmp_table_factory, spark_tmp_path, variant_column):
     table = get_full_table_name(spark_tmp_table_factory)
     data_path = spark_tmp_path + '/unannotated_variant'
 
@@ -193,6 +194,8 @@ def test_iceberg_v3_unannotated_shredded_variant_read_fallback(
                      .withFileSizeInBytes(file.getLen()).withRecordCount(4).build())
         iceberg_table.newAppend().appendFile(data_file).commit()
         spark.sql(f"REFRESH TABLE {table}")
+        if variant_column != 'v':
+            spark.sql(f"ALTER TABLE {table} RENAME COLUMN v TO {variant_column}")
 
     with_cpu_session(setup_table, conf=copy_and_update(_ICEBERG_VARIANT_READ_CONF, {
         'spark.sql.parquet.variant.annotateLogicalType.enabled': 'false',
@@ -201,11 +204,75 @@ def test_iceberg_v3_unannotated_shredded_variant_read_fallback(
         'spark.sql.variant.forceShreddingSchemaForTest': 'STRUCT<x: BIGINT>',
     }))
     assert_cpu_and_gpu_are_equal_collect_with_capture(
-        lambda spark: spark.sql(f"SELECT id, try_variant_get(v, '$.x', 'int') AS x FROM {table}"),
+        lambda spark: spark.sql(
+            f"SELECT id, try_variant_get({variant_column}, '$.x', 'int') AS x FROM {table}"),
         exist_classes='BatchScanExec',
         non_exist_classes='GpuBatchScanExec,GpuVariantGet',
         conf=_ICEBERG_VARIANT_READ_CONF,
         require_non_empty=True)
+
+
+@iceberg
+@ignore_order(local=True)
+@incompat
+@allow_non_gpu('BatchScanExec', 'ColumnarToRowExec', 'ProjectExec', 'VariantGet')
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.skipif(not is_spark_411_or_later(), reason="Iceberg Variant requires Spark 4.1.1+")
+def test_iceberg_v3_mixed_variant_layout_read_fallback(spark_tmp_table_factory):
+    table = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_table(spark):
+        spark.sql(f"CREATE TABLE {table} (id INT, v VARIANT) USING ICEBERG "
+                  "TBLPROPERTIES ('format-version'='3', 'write.parquet.shred-variants'='false')")
+        spark.sql(f"INSERT INTO {table} SELECT /*+ COALESCE(1) */ 0, parse_json('{{\"x\":7}}')")
+        spark.sql(f"ALTER TABLE {table} SET TBLPROPERTIES ("
+                  "'write.parquet.shred-variants'='true', "
+                  "'write.parquet.variant-inference-buffer-size'='2')")
+        spark.sql(f"""
+            INSERT INTO {table} SELECT /*+ COALESCE(1) */ id, parse_json(json)
+            FROM VALUES (1, '{{"x":8}}'), (2, '{{"x":9}}'), (3, '{{"x":10}}')
+            AS source(id, json)
+            """)
+        spark.sql(f"ALTER TABLE {table} SET TBLPROPERTIES ('write.parquet.shred-variants'='false')")
+        jvm = spark._jvm
+        iceberg_table = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
+            spark._jsparkSession, table)
+        layouts = {}
+        for row in spark.sql(f"SELECT file_path FROM {table}.files").collect():
+            input_file = iceberg_table.io().newInputFile(row.file_path)
+            reader = jvm.org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader.open(
+                jvm.org.apache.iceberg.parquet.GpuParquetIOAccess.file(input_file))
+            try:
+                variant = reader.getFileMetaData().getSchema().getType('v').asGroupType()
+                layouts[row.file_path] = variant.containsField('typed_value')
+            finally:
+                reader.close()
+        assert sorted(layouts.values()) == [False, True], "Fixture must contain both layouts"
+        return next(path for path, shredded in layouts.items() if not shredded)
+
+    supported_file = with_cpu_session(setup_table, conf=_ICEBERG_VARIANT_READ_CONF)
+
+    def read_table(spark):
+        df = spark.sql(f"SELECT id, try_variant_get(v, '$.x', 'int') AS x FROM {table}")
+        scan = df._jdf.queryExecution().optimizedPlan().collectLeaves().apply(0).scan()
+        jvm = spark._jvm
+        groups = jvm.org.apache.iceberg.spark.source.GpuSparkScanAccess.taskGroups(scan)
+        tasks = [task for group in groups.toArray() for task in group.tasks().toArray()]
+        assert len({task.file().location() for task in tasks}) == 2
+        tasks.sort(key=lambda task: task.file().location() != supported_file)
+        assert tasks[0].file().location() == supported_file
+        # Fix the actual scan order so checking only the first file cannot satisfy this test.
+        # Keep every planned split, using one task per group for this unpartitioned table.
+        groups.removeAll(groups)
+        for task in tasks:
+            groups.add(jvm.org.apache.iceberg.BaseScanTaskGroup(
+                jvm.java.util.Collections.singletonList(task)))
+        return df
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        read_table, exist_classes='BatchScanExec',
+        non_exist_classes='GpuBatchScanExec,GpuVariantGet',
+        conf=_ICEBERG_VARIANT_READ_CONF, require_non_empty=True)
 
 
 @iceberg
