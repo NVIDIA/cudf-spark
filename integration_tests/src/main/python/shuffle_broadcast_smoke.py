@@ -59,6 +59,22 @@ def main():
             'spark.rapids.sql.join.hashTable.reuse': 'false',
         }.items():
             spark.conf.set(key, value)
+        startup_enabled = spark.sparkContext.getConf().get(
+            'spark.rapids.shuffle.broadcast.enabled', 'false').lower() == 'true'
+        if not startup_enabled:
+            spark.conf.set('spark.rapids.sql.enabled', 'false')
+            expected = sorted(repr(row) for row in query(spark, 'inner', 'right').collect())
+            spark.conf.set('spark.rapids.sql.enabled', 'true')
+            for enabled in ['false', 'true']:
+                spark.conf.set('spark.rapids.shuffle.broadcast.enabled', enabled)
+                frame = query(spark, 'inner', 'right')
+                assert sorted(repr(row) for row in frame.collect()) == expected
+                plan = frame._jdf.queryExecution().executedPlan()
+                names = [node.getClass().getSimpleName() for node in plan_nodes(plan)]
+                assert 'GpuShuffleBroadcastHashJoinExec' not in names, plan.toString()
+                assert 'GpuBroadcastHashJoinExec' in names, plan.toString()
+            print('EXECUTOR_BROADCAST_DISABLED_APP_PASS', flush=True)
+            return
         cases = [('inner', 'left', False), ('inner', 'right', False),
                  ('left_outer', 'right', False), ('right_outer', 'left', False),
                  ('left_semi', 'right', False), ('left_anti', 'right', False),
