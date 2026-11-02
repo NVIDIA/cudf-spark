@@ -29,7 +29,7 @@ import org.apache.iceberg.encryption.EncryptedFiles
 import org.apache.iceberg.mapping.NameMappingParser
 import org.apache.iceberg.parquet.GpuParquetIO
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader
-import org.apache.iceberg.spark.GpuSparkReadConf
+import org.apache.iceberg.spark.{GpuSparkReadConf, SparkSchemaUtil}
 import org.apache.iceberg.types.Types
 
 import org.apache.spark.sql.connector.metric.{CustomMetric, CustomTaskMetric}
@@ -102,9 +102,20 @@ abstract class GpuSparkScan(val cpuScan: Scan,
         withResource(ParquetFileReader.open(GpuParquetIO.file(input), options)) { reader =>
           val (_, projectedSchema) = GpuParquetIO.projectSchema(
             reader.getFileMetaData.getSchema, requiredSchema, nameMapping)
-          // Use the execution reader's strict conversion: it rejects shredded Variant layouts
-          // before any GPU task runs. Fail closed if a footer cannot be checked.
-          converter.convert(ShimUtils.getParquetUnshader().unshade(projectedSchema))
+          val convertedSchema = converter.convert(
+            ShimUtils.getParquetUnshader().unshade(projectedSchema))
+          // Without a Variant annotation, conversion can succeed as an ordinary struct even
+          // for shredded input. Match by Iceberg ID so renamed and name-mapped fields work.
+          projectedSchema.getFields.asScala.zip(convertedSchema.fields).foreach {
+            case (fileField, sparkField) =>
+              val requiredField = Option(fileField.getId)
+                .flatMap(id => Option(requiredSchema.findField(id.intValue())))
+              val expectsVariant = requiredField.exists { field =>
+                GpuColumnVector.isVariantType(SparkSchemaUtil.convert(field.`type`()))
+              }
+              require(!expectsVariant || GpuColumnVector.isVariantType(sparkField.dataType),
+                "Projected Variant input is missing a supported Variant annotation")
+          }
         }
       }
     }

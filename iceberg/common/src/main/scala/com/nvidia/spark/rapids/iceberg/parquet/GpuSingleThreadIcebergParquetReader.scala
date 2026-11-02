@@ -146,7 +146,7 @@ private class SingleFileReader(
       new Path(file.file.getDelegate.location()),
       filteredParquet.blocks,
       filteredParquet.schema,
-      conf.caseSensitive,
+      true, // Iceberg has already resolved the physical schema by field ID.
       filteredParquet.readSchema,
       conf.parquetDebugDumpPrefix,
       conf.parquetDebugDumpAlways,
@@ -177,7 +177,7 @@ private class SingleFileReader(
               readerConf.useChunkedReader, readerConf.maxChunkedReaderMemoryUsageSizeBytes,
               readerConf.conf, readerConf.targetBatchSizeBytes, parquetOpts, Array(hostBuffer),
               readerConf.metrics, DateTimeRebaseCorrected, DateTimeRebaseCorrected,
-              readerConf.caseSensitive,
+              true, // The deletion-vector producer also evolves the physical schema.
               useFieldId = false, filteredParquet.readSchema, filteredParquet.schema,
               Array(file.sparkPartitionedFile), readerConf.parquetDebugDumpPrefix,
               readerConf.parquetDebugDumpAlways, dv, chunkedBlocks)
