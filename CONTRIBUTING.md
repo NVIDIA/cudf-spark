@@ -676,24 +676,31 @@ find the uploaded log.
 
 ##### Premerge capacity guidance
 
-Use focused testing before requesting broad premerge validation. As an operating guideline,
-keep at most **three outstanding premerge requests per GitHub account**, shared across all
-PRs, humans, agents, and sessions using that account. Before posting `build`, check capacity
-using available GitHub status and request information through a tool of your choice.
-Reading public status does not require internal CI access.
+Use focused testing before requesting broad premerge validation. Keep at most **three
+outstanding Blossom premerge requests** across the PR owner's open PRs, shared by all
+humans, agents, and sessions acting for that account. Before an agent posts `build`:
 
-- Count running, queued, and newly submitted requests until completion or cancellation is
-  confirmed, including requests against older PR heads. Attribute requests to the `build`
-  comment author and count job fan-out from one original comment once.
-- At three outstanding requests, wait and re-check. Avoid a duplicate request on a busy PR.
-  Coordinate the capacity check and submission across agents sharing the account so
-  simultaneous submissions do not exceed the limit.
-- A missing or `Expected` status alone does not establish available capacity. If the
-  available information is insufficient, or you lack permission to trigger CI, ask an
-  authorized maintainer to help before submitting.
+1. List all of the owner's open PRs in this repository through the GitHub API, including
+   Drafts and all result pages. The owner is the GitHub account whose PRs the agent maintains.
+2. Read each PR's current head SHA and its GitHub check runs and commit statuses. Identify
+   Blossom premerge checks/statuses; unrelated GitHub Actions jobs do not count.
+   Use build-request comments or workflow history for requests not yet reflected there.
+3. Count queued or running Blossom requests, including `queued`/`in_progress` check runs
+   and `pending` commit statuses. Count job fan-out from one original `build` comment once.
+   Retain newly submitted requests and known requests on older heads until completion or
+   cancellation is confirmed.
+4. If three or more requests are outstanding, do not post another `build`; wait and re-check.
+   Also avoid a duplicate request on a PR that already has one outstanding. Coordinate the
+   check and submission across agents sharing the owner account to prevent simultaneous
+   submissions from exceeding the limit.
+5. A missing or `Expected` status alone does not establish available capacity. If GitHub
+   information is insufficient, or the agent lacks permission to post `build`, hand the
+   request to an authorized maintainer rather than assuming a free slot.
 
-These instructions provide client-side request throttling. Automated repository-wide
-queueing and quota enforcement remain separate CI tooling work.
+Use any available GitHub API client or read-only MCP interface for the status check.
+It does not require an internal Blossom/Jenkins account or credentials. This is a client-side
+gate on agent submissions; repository-wide queueing and quota enforcement remain separate
+CI tooling work.
 
 ##### CI options
 
