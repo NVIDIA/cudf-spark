@@ -348,7 +348,7 @@
                     </execution>
                     <execution>
                         <id>copy-jni-and-ucx-classes</id>
-                        <!-- after optional unpack, including zstd-jni -->
+                        <!-- after optional JNI and UCX unpack -->
                         <phase>process-resources</phase>
                         <goals><goal>run</goal></goals>
                         <configuration>
@@ -517,16 +517,34 @@
                                         </not>
                                     </condition>
                                 </fail>
+                                <fail message="Distribution JAR must use Spark's zstd-jni dependency instead of bundling it">
+                                    <condition>
+                                        <resourcecount when="greater" count="0">
+                                            <zipfileset src="${dist.jar.name}"
+                                                        includes="com/github/luben/zstd/**,**/libzstd-jni-*"/>
+                                        </resourcecount>
+                                    </condition>
+                                </fail>
                                 <taskdef resource="net/sf/antcontrib/antcontrib.properties"/>
                                 <ac:trycatch xmlns:ac="antlib:net.sf.antcontrib">
                                     <ac:try>
                                         <mkdir dir="${project.build.directory}/native-extraction-smoke"/>
-                                        <java jar="${dist.jar.name}" fork="true" failonerror="true">
+                                        <java classname="com.nvidia.spark.rapids.SparkRapidsJarTool"
+                                              fork="true" failonerror="true">
+                                            <classpath>
+                                                <pathelement location="${dist.jar.name}"/>
+                                                <path refid="maven.compile.classpath"/>
+                                            </classpath>
                                             <arg value="extract"/>
                                             <arg value="cudfjni"/>
                                             <arg value="${project.build.directory}/native-extraction-smoke/cudfjni"/>
                                         </java>
-                                        <java jar="${dist.jar.name}" fork="true" failonerror="true">
+                                        <java classname="com.nvidia.spark.rapids.SparkRapidsJarTool"
+                                              fork="true" failonerror="true">
+                                            <classpath>
+                                                <pathelement location="${dist.jar.name}"/>
+                                                <path refid="maven.compile.classpath"/>
+                                            </classpath>
                                             <arg value="extract"/>
                                             <arg value="cudf"/>
                                             <arg value="${project.build.directory}/native-extraction-smoke/cudf"/>
@@ -611,7 +629,7 @@ self.log("... OK")
             <plugin>
                 <!-- The dependency scopes of spark-rapids-jni and jucx are `provided` in aggregator submodule,
                  this will skip the dedupe processing in `create-parallel-world`.
-                 Unpack spark-rapids-jni, jucx, and zstd-jni jars to `parallel-world` after `create-parallel-world`,
+                 Unpack spark-rapids-jni and jucx jars to `parallel-world` after `create-parallel-world`,
                  then `parallel-world` will be packaged.
                  Note all Shims use the same version of spark-rapids-jni and jucx -->
                 <groupId>org.apache.maven.plugins</groupId>
@@ -649,19 +667,12 @@ self.log("... OK")
                                     <groupId>com.nvidia</groupId>
                                     <artifactId>${cudf-spark-jni.artifactId}</artifactId>
                                     <classifier>${jni.classifier}</classifier>
-                                    <excludes>META-INF/**,**/*.chunks/**</excludes>
+                                    <excludes>META-INF/**,**/*.chunks/**,com/github/luben/zstd/**,**/libzstd-jni-*</excludes>
                                     <outputDirectory>${project.build.directory}/jni-deps</outputDirectory>
                                 </artifactItem>
                                 <artifactItem>
                                     <groupId>org.openucx</groupId>
                                     <artifactId>jucx</artifactId>
-                                    <excludes>META-INF/**</excludes>
-                                    <outputDirectory>${project.build.directory}/jni-deps</outputDirectory>
-                                </artifactItem>
-                                <artifactItem>
-                                    <groupId>com.github.luben</groupId>
-                                    <artifactId>zstd-jni</artifactId>
-                                    <version>1.5.6-6</version>
                                     <excludes>META-INF/**</excludes>
                                     <outputDirectory>${project.build.directory}/jni-deps</outputDirectory>
                                 </artifactItem>

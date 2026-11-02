@@ -65,6 +65,9 @@ public final class SparkRapidsJarTool {
       "ai/rapids/cudf/NativeDepUtil.class";
   private static final Pattern SPARK_SHIM = Pattern.compile("spark(\\d)(\\d)(\\d)(.*)");
   private static final int COPY_BUFFER_SIZE = 128 * 1024;
+  private static final String EXTRACT_COMMAND =
+      "java -cp \"<dist.jar>" + File.pathSeparator + "<zstd-jni.jar>\" " +
+          "com.nvidia.spark.rapids.SparkRapidsJarTool extract <library-name> <destination>";
 
   private SparkRapidsJarTool() {
   }
@@ -100,8 +103,7 @@ public final class SparkRapidsJarTool {
       return 0;
     }
     if (args.length == 3 && "extract".equals(args[0])) {
-      extractNativeDependency(args);
-      return 0;
+      return extractNativeDependency(args, err);
     }
 
     err.println("Invalid arguments");
@@ -109,13 +111,18 @@ public final class SparkRapidsJarTool {
     return 2;
   }
 
-  private static void extractNativeDependency(String[] args) throws IOException {
+  private static int extractNativeDependency(String[] args, PrintStream err) throws IOException {
     String os = System.getProperty("os.name");
     String hostArchitecture = System.getProperty("os.arch");
     String packagedArchitecture;
     try (JarFile jar = new JarFile(getJarPath())) {
       packagedArchitecture = selectNativeArchitecture(
           nativeLibrariesByArchitecture(jar, os), args[1], hostArchitecture);
+    }
+    if (!zstdAvailable()) {
+      err.println("Native extraction needs zstd-jni on the classpath. Run:");
+      err.println("  " + EXTRACT_COMMAND);
+      return 1;
     }
     if (hostArchitecture.equals(packagedArchitecture)) {
       NativeDepUtil.main(args);
@@ -126,6 +133,17 @@ public final class SparkRapidsJarTool {
       } finally {
         System.setProperty("os.arch", hostArchitecture);
       }
+    }
+    return 0;
+  }
+
+  private static boolean zstdAvailable() {
+    try {
+      Class.forName("com.github.luben.zstd.ZstdInputStreamNoFinalizer", false,
+          SparkRapidsJarTool.class.getClassLoader());
+      return true;
+    } catch (ClassNotFoundException e) {
+      return false;
     }
   }
 
@@ -410,7 +428,7 @@ public final class SparkRapidsJarTool {
     }
     if (extractionAvailable) {
       out.println("Extract one with:");
-      out.println("  java -jar <dist.jar> extract <library-name> <destination>");
+      out.println("  " + EXTRACT_COMMAND);
     } else {
       out.println("Native extraction unavailable: missing " + NATIVE_DEP_UTIL);
     }
@@ -450,7 +468,7 @@ public final class SparkRapidsJarTool {
     out.println("  java -jar <dist.jar> [info]");
     out.println("  java -jar <dist.jar> checksum");
     if (extractionAvailable) {
-      out.println("  java -jar <dist.jar> extract <library-name> <destination>");
+      out.println("  " + EXTRACT_COMMAND);
     }
     out.println("  java -jar <dist.jar> help");
   }
