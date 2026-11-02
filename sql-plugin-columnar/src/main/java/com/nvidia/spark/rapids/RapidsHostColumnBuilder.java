@@ -25,6 +25,7 @@ import ai.rapids.cudf.HostMemoryBuffer;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.math.RoundingMode;
+import java.nio.Buffer;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.IntBuffer;
@@ -1047,7 +1048,9 @@ public final class RapidsHostColumnBuilder implements AutoCloseable {
       long dstOffset, long length) {
     if (length > 0) {
       ByteBuffer from = src.duplicate();
-      from.limit(Math.toIntExact(srcOffset + length)).position(srcOffset);
+      // Through Buffer, as JDK 9+ overrides these in ByteBuffer: the class must be the same
+      // bytecode whichever JDK compiles it, and must run on Java 8.
+      ((Buffer) from).limit(Math.toIntExact(srcOffset + length)).position(srcOffset);
       dst.asByteBuffer(dstOffset, Math.toIntExact(length)).put(from);
     }
   }
