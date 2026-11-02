@@ -14,9 +14,37 @@ This document provides context for AI coding agents (Claude Code, GitHub Copilot
 - **Bound draft and closure lifecycle** — use Draft only for concrete unfinished work, state in the description what remains (a TODO checklist is preferred). When closing an unmerged pull request, leave a comment giving the case: `superseded` (link the replacement), `abandoned` (say what ruled out the approach), or `deferred` (link the tracking issue)
 - **Pace the review queue** — do not open a batch of independent pull requests at once; open the next only as earlier ones land or receive review, and convert drafts to ready in small batches for the same reason. Stacked pull requests are exempt, but identify the dependency with `Stacked on #NNNN`
 - **Validation and CI** — follow [Testing Your Code](CONTRIBUTING.md#testing-your-code)
-  and [Premerge capacity guidance](CONTRIBUTING.md#premerge-capacity-guidance).
-  Hand steps outside your granted tools or permissions back to the developer.
+  and [Premerge requests](#premerge-requests). Use the tools and permissions chosen by the
+  developer; hand steps outside that access back to them.
 - **AI-assisted changes require a human in the loop** — disclose AI assistance in the pull request description, then stop for human review of the complete diff and description before opening or updating the pull request. The pull request queue is not a staging area for work no human has read
+
+## Premerge requests
+
+Before an agent posts `build`, check the PR owner's open PRs against a shared limit of
+**three outstanding Blossom premerge requests**. Include requests made by humans and all
+agents/sessions maintaining those PRs.
+
+1. List all of the owner's open PRs in this repository through the GitHub API, including
+   Drafts and all result pages. The owner is the GitHub account whose PRs the agent maintains.
+2. Read each PR's current head SHA and its GitHub check runs and commit statuses. Identify
+   Blossom premerge checks/statuses; unrelated GitHub Actions jobs do not count.
+   Use build-request comments or workflow history for requests not yet reflected there.
+3. Count queued or running Blossom requests, including `queued`/`in_progress` check runs
+   and `pending` commit statuses. Count job fan-out from one original `build` comment once.
+   Retain newly submitted requests and known requests on older heads until completion or
+   cancellation is confirmed.
+4. If three or more requests are outstanding, do not post another `build`; wait and re-check.
+   Also avoid a duplicate request on a PR that already has one outstanding. Coordinate the
+   check and submission across agents sharing the owner account to prevent simultaneous
+   submissions from exceeding the limit.
+5. A missing or `Expected` status alone does not establish available capacity. If GitHub
+   information is insufficient, or the agent lacks permission to post `build`, hand the
+   request to an authorized maintainer rather than assuming a free slot.
+
+Use any available GitHub API client or read-only MCP interface for the status check.
+It does not require an internal Blossom/Jenkins account or credentials. This is a client-side
+gate on agent submissions; repository-wide queueing and quota enforcement remain separate
+CI tooling work.
 
 ## Safety Rules
 
