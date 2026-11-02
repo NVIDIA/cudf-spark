@@ -26,7 +26,8 @@ pytestmark = [shuffle_test]
 def _require_ucx():
     startup = get_spark_i_know_what_i_am_doing().sparkContext.getConf()
     if not startup.get('spark.shuffle.manager', '').endswith('RapidsShuffleManager') or \
-            startup.get('spark.rapids.shuffle.mode', 'UCX').upper() != 'UCX':
+            startup.get('spark.rapids.shuffle.mode', 'MULTITHREADED').upper() != 'UCX' or \
+            startup.get('spark.rapids.shuffle.compression.codec', 'none').lower() != 'none':
         pytest.skip('Requires a SparkContext started with the UCX RAPIDS shuffle manager')
 
 
@@ -57,7 +58,6 @@ _conf = {
     'spark.sql.exchange.reuse': 'false',
     'spark.rapids.shuffle.broadcast.enabled': 'true',
     'spark.rapids.shuffle.broadcast.maxSize': '1g',
-    'spark.rapids.shuffle.compression.codec': 'none',
     'spark.rapids.sql.join.hashTable.reuse': 'false',
 }
 

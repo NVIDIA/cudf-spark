@@ -19,7 +19,7 @@ import scala.concurrent.duration.Duration
 
 import com.nvidia.spark.rapids._
 
-import org.apache.spark.TaskContext
+import org.apache.spark.{SparkEnv, TaskContext}
 import org.apache.spark.rapids.shims.GpuShuffleExchangeExec
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.Expression
@@ -131,14 +131,24 @@ case class GpuShuffleBroadcastHashJoinExec(
 }
 
 object GpuShuffleBroadcastHashJoinExec {
+  private def supportsGpuBuildReads(conf: RapidsConf): Boolean = {
+    Option(SparkEnv.get).exists { env =>
+      // The shuffle transport and codec are fixed when the application starts. A session
+      // override must not make compressed map bytes look like uncompressed GPU build bytes.
+      val startup = new RapidsConf(env.conf)
+      startup.isUCXShuffleManagerMode &&
+        startup.shuffleCompressionCodec.equalsIgnoreCase("none") &&
+        GpuShuffleEnv.useGPUShuffle(conf)
+    }
+  }
+
   /** Preserve the standard path for unsupported environments and exchange wrappers. */
   def rewrite(plan: SparkPlan, conf: RapidsConf): SparkPlan = {
     if (!RapidsConf.SHUFFLE_BROADCAST_ENABLED.get(plan.conf) ||
-        plan.conf.adaptiveExecutionEnabled || !conf.isUCXShuffleManagerMode ||
-        !GpuShuffleEnv.useGPUShuffle(conf) ||
+        plan.conf.adaptiveExecutionEnabled || !supportsGpuBuildReads(conf) ||
         SparkSessionUtils.sessionFromPlan(plan).sparkContext.cleaner.isEmpty ||
         RapidsConf.HASH_TABLE_REUSE.get(plan.conf) ||
-        !conf.shuffleCompressionCodec.equalsIgnoreCase("none") || plan.exists {
+        plan.exists {
           case _: ReusedExchangeExec => true
           case node => node.expressions.exists(_.exists(_.isInstanceOf[ExecSubqueryExpression]))
         }) {
