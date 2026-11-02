@@ -19,8 +19,10 @@ package com.nvidia.spark.rapids
 import java.util.IdentityHashMap
 
 import scala.collection.mutable
+import scala.util.Try
 
-import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Expression, Literal}
+import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Expression, Literal,
+  NamedExpression}
 import org.apache.spark.sql.catalyst.trees.TreeNodeTag
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.{GpuAdd, GpuMultiply, GpuSubtract}
@@ -62,8 +64,23 @@ private[rapids] object GpuProjectAstPlanner {
     LegacySignature(expression.getClass, expression.dataType, expression.children.map(_.dataType))
 
   def tagLegacySupport(expression: Expression, supported: Boolean): Unit = {
-    if (supported) expression.setTagValue(legacySupport, signature(expression))
-    else expression.unsetTagValue(legacySupport)
+    if (supported && convertsToAst(expression)) {
+      expression.setTagValue(legacySupport, signature(expression))
+    } else {
+      expression.unsetTagValue(legacySupport)
+    }
+  }
+
+  // A meta can rewrite its node into another operator, such as instr(s, x) > 0 into contains, so
+  // its eligibility applies only if the converted node itself has an AST form.
+  private def convertsToAst(expression: Expression): Boolean = expression match {
+    case gpu: GpuExpression =>
+      val references = gpu.children.zipWithIndex.map { case (child, ordinal) =>
+        GpuBoundReference(ordinal, child.dataType, child.nullable)(NamedExpression.newExprId, "")
+      }
+      Try(gpu.withNewChildren(references).asInstanceOf[GpuExpression]
+          .convertToAst(references.size)).isSuccess
+    case _ => false
   }
 
   private def selfSupportsLegacy(expression: Expression): Boolean =

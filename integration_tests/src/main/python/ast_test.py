@@ -627,3 +627,18 @@ def test_project_ast_mixed_expressions(tiered_project_enabled):
         conf={
             'spark.rapids.sql.tiered.project.enabled': tiered_project_enabled
         })
+
+def test_instr_rewritten_to_contains_stays_regular():
+    # The plugin plans instr(s, x) > 0 as contains, which has no AST form.
+    assert_gpu_project_without_ast(
+        lambda spark: unary_op_df(spark, string_gen).select(
+            (f.instr(f.col('a'), 'a') > 0).alias('contains_a')))
+
+def test_ast_region_with_rewritten_contains_operand():
+    def project(spark):
+        df = gen_df(spark, [('s', string_gen), ('i', int_gen)])
+        return df.select(((f.instr(f.col('s'), 'a') > 0) & (f.col('i') > 0)).alias('result'))
+
+    # Only bind-time tiering makes AND an AST region over an earlier contains tier, and the plan
+    # string shows only complete AST outputs, so compare results.
+    assert_gpu_and_cpu_are_equal_collect(project, conf=_project_ast_enabled_conf)

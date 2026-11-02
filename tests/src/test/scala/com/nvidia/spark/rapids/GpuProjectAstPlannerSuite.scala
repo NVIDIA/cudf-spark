@@ -23,17 +23,19 @@ import org.apache.spark.SparkConf
 import org.apache.spark.serializer.JavaSerializer
 import org.apache.spark.sql.catalyst.expressions.{Abs, Add, Alias, And, AttributeReference,
   BoundReference, EqualTo, Expression, GreaterThan, GreaterThanOrEqual, Greatest, LessThan,
-  Literal, Multiply, Or, Subtract}
+  Literal, Multiply, Or, StringInstr, Subtract}
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.{GpuAdd, GpuAnd, GpuGreatest, GpuMultiply, GpuOr, GpuSubtract}
-import org.apache.spark.sql.types.{FloatType, LongType}
+import org.apache.spark.sql.rapids.{GpuAdd, GpuAnd, GpuContains, GpuGreatest, GpuMultiply, GpuOr,
+  GpuSubtract}
+import org.apache.spark.sql.types.{FloatType, LongType, StringType}
 
 class GpuProjectAstPlannerSuite extends AnyFunSuite {
   private val a = AttributeReference("a", LongType)()
   private val b = AttributeReference("b", LongType)()
   private val c = AttributeReference("c", LongType)()
   private val d = AttributeReference("d", LongType)()
-  private val inputs = Seq(a, b, c, d)
+  private val str = AttributeReference("str", StringType)()
+  private val inputs = Seq(a, b, c, d, str)
 
   private def conf(
       legacy: Boolean,
@@ -97,6 +99,35 @@ class GpuProjectAstPlannerSuite extends AnyFunSuite {
       val expression = convert(Alias(EqualTo(a, b), "result")(), sqlConf)
       val tiers = bind(Seq(expression), sqlConf).exprTiers
       assertResult(1)(collectExpressions[GpuProjectAstExpression](tiers.flatten).size)
+    }
+  }
+
+  test("legacy AST skips a comparison rewritten into an operator without an AST form") {
+    val sqlConf = conf(legacy = true, jit = false)
+    SQLConf.withExistingConf(sqlConf) {
+      val expression = convert(
+        Alias(GreaterThan(StringInstr(str, Literal("b")), Literal(0)), "result")(), sqlConf)
+      // The GreaterThan meta converts instr(str, 'b') > 0 into contains(str, 'b').
+      assertResult(1)(collectExpressions[GpuContains](Seq(expression)).size)
+      val wrapped = GpuProjectAstPlanner.wrapProjectOutputs(
+        Seq(expression), sqlConf, enableAst = true, enableAstJit = false)
+      assert(GpuProjectAstExpressionBase.extractTopLevel(wrapped.head).isEmpty)
+      val tiers = bind(Seq(expression), sqlConf).exprTiers
+      assert(collectExpressions[GpuProjectAstExpression](tiers.flatten).isEmpty)
+    }
+  }
+
+  test("legacy AST region reads a rewritten non-AST operand from an earlier tier") {
+    val sqlConf = conf(legacy = true, jit = false)
+    SQLConf.withExistingConf(sqlConf) {
+      val expression = convert(Alias(And(
+        GreaterThan(StringInstr(str, Literal("b")), Literal(0)),
+        GreaterThan(a, Literal(0L))), "result")(), sqlConf)
+      val tiers = bind(Seq(expression), sqlConf).exprTiers
+      val astExpressions = collectExpressions[GpuProjectAstExpression](tiers.flatten)
+      assertResult(1)(astExpressions.size)
+      assert(collectExpressions[GpuContains](astExpressions).isEmpty)
+      assertResult(1)(collectExpressions[GpuContains](tiers.flatten).size)
     }
   }
 
