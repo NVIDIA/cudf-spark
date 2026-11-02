@@ -29,17 +29,11 @@ The checksum ignores ZIP ordering, compression, timestamps, signatures, manifest
 metadata, and build-information properties. It therefore remains stable when only artifact
 coordinates, product names, or other publication metadata change.
 
-To extract a bundled native library, put the distribution JAR and `zstd-jni` on the
-classpath, then specify the library name and destination path. Spark supplies
-`zstd-jni` when the plugin runs inside Spark; standalone extraction needs the
-dependency JAR explicitly:
+To extract a bundled native library, specify its name and destination path:
 
 ```shell
-java -cp "<dist.jar>:<zstd-jni.jar>" com.nvidia.spark.rapids.SparkRapidsJarTool \
-  extract <library-name> <destination>
+java -jar <dist.jar> extract <library-name> <destination>
 ```
-
-On Windows, use `;` instead of `:` as the classpath separator.
 
 Running the JAR without arguments lists the native library names and architectures packaged
 for the current operating system. Extraction uses the host architecture when available, or

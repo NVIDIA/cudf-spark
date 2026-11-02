@@ -65,9 +65,6 @@ public final class SparkRapidsJarTool {
       "ai/rapids/cudf/NativeDepUtil.class";
   private static final Pattern SPARK_SHIM = Pattern.compile("spark(\\d)(\\d)(\\d)(.*)");
   private static final int COPY_BUFFER_SIZE = 128 * 1024;
-  private static final String EXTRACT_COMMAND =
-      "java -cp \"<dist.jar>" + File.pathSeparator + "<zstd-jni.jar>\" " +
-          "com.nvidia.spark.rapids.SparkRapidsJarTool extract <library-name> <destination>";
 
   private SparkRapidsJarTool() {
   }
@@ -413,7 +410,7 @@ public final class SparkRapidsJarTool {
     }
     if (extractionAvailable) {
       out.println("Extract one with:");
-      out.println("  " + EXTRACT_COMMAND);
+      out.println("  java -jar <dist.jar> extract <library-name> <destination>");
     } else {
       out.println("Native extraction unavailable: missing " + NATIVE_DEP_UTIL);
     }
@@ -453,7 +450,7 @@ public final class SparkRapidsJarTool {
     out.println("  java -jar <dist.jar> [info]");
     out.println("  java -jar <dist.jar> checksum");
     if (extractionAvailable) {
-      out.println("  " + EXTRACT_COMMAND);
+      out.println("  java -jar <dist.jar> extract <library-name> <destination>");
     }
     out.println("  java -jar <dist.jar> help");
   }
