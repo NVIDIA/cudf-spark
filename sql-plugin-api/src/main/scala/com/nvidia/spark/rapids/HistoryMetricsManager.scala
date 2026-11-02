@@ -24,8 +24,7 @@ import scala.collection.JavaConverters._
 import scala.util.control.NonFatal
 
 import com.nvidia.spark.history.{HistoryMetricsProvider, MetricStores}
-
-import org.apache.spark.internal.Logging
+import org.slf4j.LoggerFactory
 
 /**
  * Selects, installs, and owns the configured history metrics provider on the driver.
@@ -33,8 +32,8 @@ import org.apache.spark.internal.Logging
  * The no-op store remains installed unless one named provider opens and validates successfully.
  */
 private[rapids] class HistoryMetricsManager(
-    loadProviders: () => Seq[HistoryMetricsProvider] = HistoryMetricsManager.discover _)
-    extends Logging {
+    loadProviders: () => Seq[HistoryMetricsProvider] = HistoryMetricsManager.discover _) {
+  private val log = LoggerFactory.getLogger(classOf[HistoryMetricsManager])
   private var activeProvider: HistoryMetricsProvider = _
   private var registration: AutoCloseable = _
 
@@ -45,7 +44,7 @@ private[rapids] class HistoryMetricsManager(
       producerVersion: String,
       configuredName: String): Unit = synchronized {
     if (activeProvider != null || registration != null) {
-      logWarning("History metrics provider initialization was requested more than once; " +
+      log.warn("History metrics provider initialization was requested more than once; " +
         "keeping the current provider")
     } else {
       val providerConfiguration: JavaMap[String, String] =
@@ -54,7 +53,7 @@ private[rapids] class HistoryMetricsManager(
       val requested =
         Option(configuredName).map(_.trim.toLowerCase(Locale.ROOT)).getOrElse("")
       if (requested == HistoryMetricsManager.NO_PROVIDER) {
-        logInfo("History metrics: requested=none, active=noop, reason=disabled by configuration")
+        log.info("History metrics: requested=none, active=noop, reason=disabled by configuration")
       } else {
         discoverProviders(requested).foreach { providers =>
           select(requested, providers, providerConfiguration, applicationId,
@@ -72,9 +71,9 @@ private[rapids] class HistoryMetricsManager(
       } catch {
         case interrupted: InterruptedException =>
           Thread.currentThread().interrupt()
-          logWarning("Interrupted while waiting for history metrics listeners", interrupted)
+          log.warn("Interrupted while waiting for history metrics listeners", interrupted)
         case failure if HistoryMetricsManager.isContained(failure) =>
-          logWarning("Could not finish waiting for history metrics listeners; " +
+          log.warn("Could not finish waiting for history metrics listeners; " +
             "continuing provider shutdown", failure)
       }
     }
@@ -88,19 +87,19 @@ private[rapids] class HistoryMetricsManager(
         currentRegistration.close()
       } catch {
         case failure if HistoryMetricsManager.isContained(failure) =>
-          logError("History metrics registration could not be removed", failure)
+          log.error("History metrics registration could not be removed", failure)
       }
     }
 
     if (currentProvider != null) {
       try {
         if (!currentProvider.shutdown(HistoryMetricsManager.PROVIDER_SHUTDOWN_TIMEOUT)) {
-          logError(s"History metrics provider ${currentProvider.getClass.getName} " +
+          log.error(s"History metrics provider ${currentProvider.getClass.getName} " +
             "did not finish shutdown within its budget")
         }
       } catch {
         case failure if HistoryMetricsManager.isContained(failure) =>
-          logError(s"History metrics provider ${currentProvider.getClass.getName} " +
+          log.error(s"History metrics provider ${currentProvider.getClass.getName} " +
             "failed during shutdown", failure)
       }
     }
@@ -119,7 +118,7 @@ private[rapids] class HistoryMetricsManager(
           s"$name=${provider.getClass.getName}"
         }.mkString(", ")
       }
-      logInfo(s"History metrics provider discovery: requested=$requested, found=$found")
+      log.info(s"History metrics provider discovery: requested=$requested, found=$found")
       Some(providers)
     } catch {
       case failure if HistoryMetricsManager.isContained(failure) =>
@@ -135,7 +134,7 @@ private[rapids] class HistoryMetricsManager(
       val rawName = provider.name()
       val name = Option(rawName).map(_.trim.toLowerCase(Locale.ROOT)).getOrElse("")
       if (name.isEmpty || name == HistoryMetricsManager.NO_PROVIDER) {
-        logError(s"Ignoring history metrics provider ${provider.getClass.getName}: " +
+        log.error(s"Ignoring history metrics provider ${provider.getClass.getName}: " +
           s"provider name '$rawName' is invalid")
         None
       } else {
@@ -143,7 +142,7 @@ private[rapids] class HistoryMetricsManager(
       }
     } catch {
       case failure if HistoryMetricsManager.isContained(failure) =>
-        logError(s"Ignoring history metrics provider ${provider.getClass.getName}: " +
+        log.error(s"Ignoring history metrics provider ${provider.getClass.getName}: " +
           "could not read its name", failure)
         None
     }
@@ -184,7 +183,7 @@ private[rapids] class HistoryMetricsManager(
       val newRegistration = MetricStores.install(store)
       activeProvider = provider
       registration = newRegistration
-      logInfo(s"History metrics: requested=$requested, active=$requested, " +
+      log.info(s"History metrics: requested=$requested, active=$requested, " +
         s"implementation=${provider.getClass.getName}")
     } catch {
       case failure if HistoryMetricsManager.isContained(failure) =>
@@ -196,12 +195,12 @@ private[rapids] class HistoryMetricsManager(
   private def cleanupFailedProvider(provider: HistoryMetricsProvider): Unit = {
     try {
       if (!provider.shutdown(HistoryMetricsManager.PROVIDER_SHUTDOWN_TIMEOUT)) {
-        logWarning(s"History metrics provider ${provider.getClass.getName} " +
+        log.warn(s"History metrics provider ${provider.getClass.getName} " +
           "did not finish cleanup within its budget")
       }
     } catch {
       case failure if HistoryMetricsManager.isContained(failure) =>
-        logWarning(s"History metrics provider ${provider.getClass.getName} also failed cleanup",
+        log.warn(s"History metrics provider ${provider.getClass.getName} also failed cleanup",
           failure)
     }
   }
@@ -210,9 +209,9 @@ private[rapids] class HistoryMetricsManager(
     val message = s"History metrics: requested=$requested, active=noop, reason=$reason. " +
       "History-backed heuristics remain disabled."
     if (failure == null) {
-      logError(message)
+      log.error(message)
     } else {
-      logError(message, failure)
+      log.error(message, failure)
     }
   }
 }

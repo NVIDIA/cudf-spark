@@ -249,6 +249,7 @@
                                 </manifest>
                                 <manifestEntries>
                                     <Implementation-Title>${spark.rapids.product.name}</Implementation-Title>
+                                    <Multi-Release>true</Multi-Release>
                                 </manifestEntries>
                             </archive>
                             <classesDirectory>${project.build.directory}/parallel-world</classesDirectory>
@@ -304,6 +305,8 @@
                             <target>
                                 <delete dir="${project.build.directory}/parallel-world"
                                         includeemptydirs="true"/>
+                                <delete dir="${project.build.directory}/history-metrics-unpack-markers"
+                                        includeemptydirs="true"/>
                                 <delete>
                                     <fileset dir="${project.build.directory}" includes="*.jar"/>
                                 </delete>
@@ -333,6 +336,31 @@
                                 >
                                     <reference refid="maven.project"/>
                                 </ant>
+                            </target>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>check-history-runtime-at-root</id>
+                        <phase>prepare-package</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <condition property="historyMetricsRuntimeAtRoot">
+                                    <and>
+                                        <available file="${project.build.directory}/parallel-world/com/nvidia/spark/history/HistoryMetricsProvider.class"/>
+                                        <available file="${project.build.directory}/parallel-world/com/nvidia/spark/history/backend/BackendMetricSupport.class"/>
+                                        <available file="${project.build.directory}/parallel-world/com/nvidia/spark/history/relational/RelationalJdbcSupport.class"/>
+                                        <available file="${project.build.directory}/parallel-world/com/nvidia/spark/history/local/LocalHistoryMetricsProvider.class"/>
+                                        <available file="${project.build.directory}/parallel-world/org/sqlite/JDBC.class"/>
+                                        <available file="${project.build.directory}/parallel-world/org/sqlite/native" type="dir"/>
+                                        <available file="${project.build.directory}/parallel-world/META-INF/services/com.nvidia.spark.history.HistoryMetricsProvider"/>
+                                        <available file="${project.build.directory}/parallel-world/META-INF/services/java.sql.Driver"/>
+                                        <available file="${project.build.directory}/parallel-world/META-INF/maven/org.xerial/sqlite-jdbc/pom.properties"/>
+                                        <available file="${project.build.directory}/parallel-world/META-INF/versions/9/org/sqlite/nativeimage/SqliteJdbcFeature.class"/>
+                                    </and>
+                                </condition>
+                                <fail unless="historyMetricsRuntimeAtRoot"
+                                      message="The history API, provider, backend and SQLite runtime must be at the distribution root"/>
                             </target>
                         </configuration>
                     </execution>
@@ -577,6 +605,21 @@ self.log("... OK")
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-dependency-plugin</artifactId>
                 <executions>
+                    <execution>
+                        <id>unpack-history-metrics-at-root</id>
+                        <!-- Resolve versions through the SQL plugin's transitive runtime dependencies. -->
+                        <phase>generate-resources</phase>
+                        <goals>
+                            <goal>unpack-dependencies</goal>
+                        </goals>
+                        <configuration>
+                            <includeGroupIds>com.nvidia,org.xerial</includeGroupIds>
+                            <includeArtifactIds>cudf-spark-history-metrics-api,cudf-spark-history-metrics-backend-core,cudf-spark-history-metrics-relational-core,cudf-spark-history-metrics-local,sqlite-jdbc</includeArtifactIds>
+                            <includes>com/nvidia/spark/history/**,org/sqlite/**,META-INF/versions/*/org/sqlite/**,META-INF/native-image/org.xerial/sqlite-jdbc/**,META-INF/services/com.nvidia.spark.history.HistoryMetricsProvider,META-INF/services/java.sql.Driver,META-INF/maven/org.xerial/sqlite-jdbc/**</includes>
+                            <outputDirectory>${project.build.directory}/parallel-world</outputDirectory>
+                            <markersDirectory>${project.build.directory}/history-metrics-unpack-markers</markersDirectory>
+                        </configuration>
+                    </execution>
                     <execution>
                         <id>unpack-spark-rapids-jni-and-ucx</id>
                         <!-- run after `create-parallel-world`, the phase equals to the phase of the `create-parallel-world` -->

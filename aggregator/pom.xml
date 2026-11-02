@@ -169,6 +169,12 @@
                             <!-- excludes cudf-spark-jni and jucx, will package them in the dist submodule -->
                             <exclude>com.nvidia:${cudf-spark-jni.artifactId}:*</exclude>
                             <exclude>org.openucx:jucx:*</exclude>
+                            <!-- These unclassified Java artifacts are packaged once at the dist root. -->
+                            <exclude>com.nvidia:cudf-spark-history-metrics-api:*</exclude>
+                            <exclude>com.nvidia:cudf-spark-history-metrics-backend-core:*</exclude>
+                            <exclude>com.nvidia:cudf-spark-history-metrics-relational-core:*</exclude>
+                            <exclude>com.nvidia:cudf-spark-history-metrics-local:*</exclude>
+                            <exclude>org.xerial:sqlite-jdbc:*</exclude>
                         </excludes>
                     </artifactSet>
                     <transformers>
