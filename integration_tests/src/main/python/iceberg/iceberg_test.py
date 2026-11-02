@@ -856,6 +856,26 @@ def test_iceberg_v3_top_level_variant_read(spark_tmp_table_factory):
         require_non_empty=True)
 
 
+@iceberg
+@ignore_order(local=True)
+@incompat
+@allow_non_gpu('BatchScanExec', 'ColumnarToRowExec', 'ProjectExec', 'VariantGet')
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.skipif(not is_spark_411_or_later(),
+                   reason="Iceberg Variant requires Spark 4.1.1+")
+def test_iceberg_v3_variant_encryption_read_fallback(spark_tmp_table_factory):
+    table = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_table(spark):
+        _setup_iceberg_variant_table(spark, table)
+        spark.sql(f"ALTER TABLE {table} SET TBLPROPERTIES ('encryption.key-id'='test-key')")
+
+    with_cpu_session(setup_table, conf=_ICEBERG_VARIANT_READ_CONF)
+    assert_gpu_fallback_collect(
+        lambda spark: _read_iceberg_variant_table(spark, table),
+        "BatchScanExec", conf=_ICEBERG_VARIANT_READ_CONF)
+
+
 def _setup_iceberg_variant_table(spark, table):
     spark.sql(
         f"CREATE TABLE {table} (id INT, v VARIANT) USING ICEBERG "
@@ -944,6 +964,7 @@ def test_iceberg_v3_shredded_variant_read_fallback(
         require_non_empty=True)
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(
