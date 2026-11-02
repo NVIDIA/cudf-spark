@@ -201,6 +201,7 @@ object GpuDeviceManager extends Logging {
     chunkedPackMemoryResource = None
     poolSizeLimit = 0L
 
+    GpuShuffleEnv.closeBroadcastCache()
     SpillFramework.shutdown()
 
     // If we close RMM resources in the shutdown hook in `MemoryCleaner`, will
