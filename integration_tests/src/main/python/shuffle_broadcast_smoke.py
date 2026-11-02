@@ -12,9 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Single-executor smoke check; launch with spark-submit and the UCX shuffle manager.
+"""GPU broadcast smoke checks; launch with spark-submit and the UCX shuffle manager.
 
-This does not validate cross-executor UCX transfers or the full qualification workload.
+With two executors, checks include remote UCX reads and one cached build per executor.
+This is a synthetic correctness check, not the full qualification workload.
 """
 
 import json
