@@ -29,6 +29,7 @@ import com.nvidia.spark.rapids.shims.ShimExpression
 import org.apache.spark.sql.catalyst.analysis.TypeCoercion
 import org.apache.spark.sql.catalyst.expressions.{Add, And, ArrayAggregate, Attribute, AttributeReference, AttributeSeq, CaseWhen, Cast, Expression, ExprId, Greatest, If, LambdaFunction, Least, Literal, Multiply, NamedExpression, NamedLambdaVariable, Or}
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.rapids.GpuCreateMap
 import org.apache.spark.sql.types.{ArrayType, BooleanType, ByteType, DataType, Decimal, DecimalType, DoubleType, FloatType, IntegerType, LongType, MapType, Metadata, NumericType, ShortType, StructField, StructType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
@@ -762,16 +763,12 @@ case class GpuTransformKeys(
 
   @transient lazy val MapType(keyType, valueType, valueContainsNull) = argument.dataType
 
-  override def dataType: DataType = MapType(function.dataType, valueType, valueContainsNull)
+  override def dataType: MapType = MapType(function.dataType, valueType, valueContainsNull)
 
   override def prettyName: String = "transform_keys"
 
-  // Spark 4.1+ returns an enum value instead of String, so use toString first
-  private def exceptionOnDupKeys =
-    SQLConf.get.getConf(SQLConf.MAP_KEY_DEDUP_POLICY).toString.toUpperCase == "EXCEPTION"
-
   override lazy val hasSideEffects: Boolean =
-    function.nullable || exceptionOnDupKeys || super.hasSideEffects
+    function.nullable || GpuCreateMap.exceptionOnDupKeys || super.hasSideEffects
 
   override def bind(input: AttributeSeq): GpuExpression = {
     val (boundFunc, boundArg, boundIntermediate) = bindLambdaFunc(input)
@@ -784,29 +781,11 @@ case class GpuTransformKeys(
       val newKeysCol = withResource(makeElementProjectBatch(batch, arg.getBase)) { cb =>
         function.columnarEval(cb)
       }
-      val deduped = withResource(newKeysCol) { _ =>
+      withResource(newKeysCol) { _ =>
         withResource(GpuMapUtils.replaceExplodedKeyAsView(arg.getBase, newKeysCol.getBase)) {
           updatedMapView =>
-            GpuMapUtils.assertNoNullKeys(updatedMapView)
-            val checkDuplicates = exceptionOnDupKeys
-            val originalKeyCount = if (checkDuplicates) {
-              withResource(updatedMapView.getChildColumnView(0)) { _.getRowCount }
-            } else {
-              0L
-            }
-            closeOnExcept(updatedMapView.dropListDuplicatesWithKeysValues()) { deduped =>
-              if (checkDuplicates) {
-                val dedupedKeyCount = withResource(deduped.getChildColumnView(0)) { _.getRowCount }
-                if (dedupedKeyCount != originalKeyCount) {
-                  throw GpuMapUtils.duplicateMapKeyFoundError
-                }
-              }
-              deduped
-            }
+            GpuCreateMap.createMapFromKeysValuesAsStructs(dataType, updatedMapView)
         }
-      }
-      withResource(deduped) { _ =>
-        GpuColumnVector.from(deduped.incRefCount(), dataType)
       }
     }
   }

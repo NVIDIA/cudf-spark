@@ -1741,40 +1741,41 @@ case class GpuRegExpExtractAll(
         // returns one list element per regex match. Align the remaining result semantics with
         // Spark: an unmatched capture is an empty string, no matches is an empty list, and a
         // null input is a null list.
-        withResource(str.getBase.extractAllRecord(prog, 1)) { extracted =>
-          val noMatchesAsEmptyLists = withResource(GpuScalar.from(
+        val noMatchesAsEmptyLists = withResource(str.getBase.extractAllRecord(prog, 1)) {
+          extracted => withResource(GpuScalar.from(
             new GenericArrayData(Array.empty[Any]), dataType)) { emptyStringList =>
             // cuDF returns a zero-row list column when the entire input has no matches.
             // Restore the input row count before applying Spark's null-input semantics.
             if (extracted.getRowCount == 0) {
               ColumnVector.fromScalar(emptyStringList, rowCount.toInt)
             } else {
-              val normalizedCaptures = withResource(extracted.getChildColumnView(0)) {
-                captures =>
-                  withResource(Scalar.fromString("")) { emptyString =>
-                    captures.replaceNulls(emptyString)
-                  }
-              }
-              val capturesWithEmptyStrings = withResource(normalizedCaptures) { _ =>
-                withResource(extracted.replaceListChild(normalizedCaptures)) {
-                  _.copyToColumnVector()
-                }
-              }
-              withResource(capturesWithEmptyStrings) { normalized =>
-                withResource(normalized.isNull) { noMatchesOrNullInput =>
-                  noMatchesOrNullInput.ifElse(emptyStringList, normalized)
-                }
-              }
-            }
-          }
-          withResource(noMatchesAsEmptyLists) { normalized =>
-            withResource(GpuScalar.from(null, dataType)) { nullStringList =>
-              withResource(str.getBase.isNull) { isInputNull =>
-                isInputNull.ifElse(nullStringList, normalized)
-              }
+              normalizeCaptures(extracted, emptyStringList)
             }
           }
         }
+        withResource(noMatchesAsEmptyLists) { _ =>
+          withResource(GpuScalar.from(null, dataType)) { nullStringList =>
+            withResource(str.getBase.isNull) { isInputNull =>
+              isInputNull.ifElse(nullStringList, noMatchesAsEmptyLists)
+            }
+          }
+        }
+    }
+  }
+
+  private def normalizeCaptures(extracted: ColumnView, emptyStringList: Scalar): ColumnVector = {
+    val normalizedCaptures = withResource(extracted.getChildColumnView(0)) { captures =>
+      withResource(Scalar.fromString("")) { emptyString =>
+        captures.replaceNulls(emptyString)
+      }
+    }
+    withResource(normalizedCaptures) { _ =>
+      withResource(extracted.replaceListChild(normalizedCaptures)) { normalized =>
+        withResource(normalized.isNull) { noMatchesOrNullInput =>
+          // ifElse materializes the result while both owners of this view remain alive.
+          noMatchesOrNullInput.ifElse(emptyStringList, normalized)
+        }
+      }
     }
   }
 }
