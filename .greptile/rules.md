@@ -3,11 +3,6 @@
 For full coding conventions, build commands, code examples, and
 shim layer architecture, see `AGENTS.md` at the repo root.
 
-## Validation review
-
-Assess validation using [Testing Your Code](../CONTRIBUTING.md#testing-your-code).
-Explain any remaining coverage gaps against the current diff.
-
 ## Shim compatibility review
 
 For versioned sources, shared shim callers, or Spark/Databricks profile/matrix

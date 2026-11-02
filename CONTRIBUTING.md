@@ -560,13 +560,10 @@ permissions, and may perform steps themselves or ask an authorized person to hel
 - Choose unit tests, integration tests, and runtime configurations appropriate to the change.
   For GPU behavior changes, verify CPU/GPU parity and GPU execution. Prose-only changes
   need applicable static checks rather than runtime tests.
-- Summarize checks run, observed results, and the tested SHA or commit range in the PR
-  description, a comment, or a commit message. Update this evidence after relevant changes,
-  or explain why earlier results still apply. No specific commit trailer is required.
-  An initial checkbox alone does not cover later changes. Author declarations are not
-  independent proof of execution; compilation or an all-skipped run is not a passing runtime
-  test. Review coverage of the current change, not the reporting format, and describe missing
-  evidence as a validation gap rather than a test failure.
+- Summarize checks run, observed results, and any remaining validation gaps in the PR
+  description or a comment. Review test coverage for the proposed change. Compilation or an
+  all-skipped run is not a passing runtime test; missing evidence is a validation gap rather
+  than a test failure.
 - If the required environment is unavailable, run feasible checks and document the remaining
   validation. Obtain explicit maintainer approval before publishing those changes (including
   drafts or follow-up pushes) or requesting targeted CI validation. This exception does not

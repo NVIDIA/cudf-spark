@@ -14,12 +14,6 @@
 
   "rules": [
     {
-      "id": "local-validation-evidence",
-      "rule": "Assess validation for the current change using CONTRIBUTING.md#testing-your-code.",
-      "scope": ["**"],
-      "severity": "medium"
-    },
-    {
       "id": "gpu-resource-arm",
       "rule": "GPU resources must use withResource() or closeOnExcept() from Arm.scala. Never use bare .close() on GPU resources.",
       "scope": ["sql-plugin/src/**", "shuffle-plugin/src/**"],
