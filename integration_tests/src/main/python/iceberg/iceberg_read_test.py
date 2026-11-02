@@ -72,6 +72,87 @@ def test_iceberg_renamed_case_sensitive_columns_read(
 
 @iceberg
 @ignore_order(local=True)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.parametrize('use_name_mapping', [False, True])
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Imported files require a local catalog")
+def test_iceberg_physical_schema_after_evolution(
+        spark_tmp_table_factory, reader_type, use_name_mapping):
+    table = get_full_table_name(spark_tmp_table_factory)
+    source = get_full_table_name(spark_tmp_table_factory) if use_name_mapping else table
+    columns = ('id INT, Payload STRUCT<First: INT, Second: STRING>, '
+               'Items ARRAY<STRUCT<X: INT, Y: STRING>>, '
+               'Attrs MAP<STRING, STRUCT<X: INT, Y: STRING>>')
+
+    def setup_table(spark):
+        spark.sql(f"CREATE TABLE {table} (unused INT, {columns}) USING ICEBERG "
+                  "TBLPROPERTIES ('format-version'='2')")
+        spark.sql(f"ALTER TABLE {table} DROP COLUMN unused")
+        if use_name_mapping:
+            spark.sql(f"CREATE TABLE {source} ({columns}) USING PARQUET")
+        spark.sql(f"""
+            INSERT INTO {source} SELECT /*+ COALESCE(1) */ * FROM VALUES
+              (1, named_struct('First', 11, 'Second', 'old-a'),
+               array(named_struct('X', 101, 'Y', 'a')),
+               map('k', named_struct('X', 1001, 'Y', 'ka'))),
+              (2, NULL, array(NULL), map('k', NULL))
+            """)
+        if use_name_mapping:
+            spark.sql(f"CALL spark_catalog.system.add_files("
+                      f"table => '{table}', source_table => '{source}')")
+            mapping = json.loads(spark.sql(
+                f"SHOW TBLPROPERTIES {table} ('schema.name-mapping.default')").first()['value'])
+            assert next(field['field-id'] for field in mapping if 'id' in field['names']) == 2
+        jvm = spark._jvm
+        iceberg_table = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
+            spark._jsparkSession, table)
+        assert iceberg_table.schema().findField('id').fieldId() == 2
+        files = spark.sql(f"SELECT file_path FROM {table}.files").collect()
+        assert len(files) == 1
+        input_file = iceberg_table.io().newInputFile(files[0].file_path)
+        reader = jvm.org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader.open(
+            jvm.org.apache.iceberg.parquet.GpuParquetIOAccess.file(input_file))
+        try:
+            has_ids = jvm.org.apache.iceberg.parquet.ParquetSchemaUtil.hasIds(
+                reader.getFileMetaData().getSchema())
+            assert has_ids == (not use_name_mapping)
+        finally:
+            reader.close()
+        spark.sql(f"ALTER TABLE {table} RENAME COLUMN Payload.First TO renamed_first")
+        spark.sql(f"ALTER TABLE {table} RENAME COLUMN Items.element.X TO renamed_x")
+        spark.sql(f"ALTER TABLE {table} RENAME COLUMN Attrs.value.X TO renamed_x")
+        spark.sql(f"ALTER TABLE {table} RENAME COLUMN Payload TO Record")
+        spark.sql(f"ALTER TABLE {table} ADD COLUMN Record.extra BIGINT")
+        spark.sql(f"ALTER TABLE {table} ALTER COLUMN Record FIRST")
+        spark.sql(f"""
+            INSERT INTO {table} (id, Record, Items, Attrs)
+            SELECT 3, named_struct('renamed_first', 33, 'Second', 'new-c', 'extra', 300L),
+              array(named_struct('renamed_x', 303, 'Y', 'c')),
+              map('k', named_struct('renamed_x', 3003, 'Y', 'kc'))
+            """)
+        rows = spark.sql(f"SELECT id, Record.renamed_first, Items[0].renamed_x, "
+                         f"Attrs['k'].renamed_x, Record.extra FROM {table}").collect()
+        assert sorted(tuple(row) for row in rows) == [
+            (1, 11, 101, 1001, None), (2, None, None, None, None), (3, 33, 303, 3003, 300)]
+
+    with_cpu_session(setup_table, conf={
+        'spark.sql.caseSensitive': 'true',
+        'spark.sql.parquet.fieldId.write.enabled': 'false',
+    })
+    conf = {
+        'spark.sql.caseSensitive': 'false',
+        'spark.sql.adaptive.enabled': 'false',
+        'spark.rapids.sql.format.parquet.reader.type': reader_type,
+    }
+    for query in [f"SELECT * FROM {table}",
+                  f"SELECT ID, record.renamed_first, items[0].renamed_x, "
+                  f"attrs['k'].renamed_x, record.extra FROM {table} WHERE ID <> 2"]:
+        assert_cpu_and_gpu_are_equal_collect_with_capture(
+            lambda spark: spark.sql(query), exist_classes='GpuBatchScanExec',
+            non_exist_classes='BatchScanExec', conf=conf, require_non_empty=True)
+
+
+@iceberg
+@ignore_order(local=True)
 @incompat
 @allow_non_gpu('BatchScanExec', 'ColumnarToRowExec', 'ProjectExec', 'VariantGet')
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Imported files require a local catalog")
