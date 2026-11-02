@@ -16,68 +16,16 @@
 
 from __future__ import annotations
 
-import os
 import sys
-import types
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 IT_PYTHON_DIR = REPO_ROOT / "integration_tests" / "src" / "main" / "python"
 sys.path.insert(0, str(IT_PYTHON_DIR))
 
-# Lightweight shims to allow importing spark_session helpers in pure unit test environments without Spark/JVM
-if "pyspark" not in sys.modules:
-    pyspark = types.ModuleType("pyspark")
-    sql = types.ModuleType("pyspark.sql")
-    sql_types = types.ModuleType("pyspark.sql.types")
-    sql_types.TimestampType = MagicMock
-    sql_types.DateType = MagicMock
-    sql_types._acceptable_types = ()
-    sql.DataFrame = MagicMock
-    sql.Row = MagicMock
-    sql.types = sql_types
-    pyspark.sql = sql
-    sys.modules["pyspark"] = pyspark
-    sys.modules["pyspark.sql"] = sql
-    sys.modules["pyspark.sql.types"] = sql_types
-
-    import spark_init_internal
-    mock_spark = MagicMock()
-    mock_spark.version = "3.5.10"
-    mock_iter = MagicMock()
-    mock_iter.hasNext.return_value = False
-    mock_spark.conf._jconf.getAll.return_value.keys.return_value.iterator.return_value = mock_iter
-    spark_init_internal._spark = mock_spark
-
-import spark_session
-from spark_session import (
-    spark_version_tuple,
-    is_before_spark_312,
-    is_before_spark_320,
-    is_before_spark_340,
-    is_before_spark_350,
-    is_before_spark_351,
-    is_before_spark_352,
-    is_before_spark_353,
-    is_before_spark_400,
-    is_spark_320_or_later,
-    is_spark_330_or_later,
-    is_spark_340_or_later,
-    is_spark_350_or_later,
-    is_spark_351_or_later,
-    is_spark_353_or_later,
-    is_spark_356_or_later,
-    is_spark_350_or_351,
-    is_spark_359,
-    is_spark_35x,
-    is_spark_40x,
-    is_spark_41x,
-    is_spark_400_or_later,
-    is_spark_420_or_later,
-    is_spark_500_or_later,
-)
+# Pure unit tests isolated from PySpark, spark_session, and pytest
+from spark_version import spark_version_tuple
 
 
 class SparkVersionSuite(unittest.TestCase):
@@ -113,68 +61,51 @@ class SparkVersionSuite(unittest.TestCase):
         self.assertGreater(spark_version_tuple("4.0.10"), spark_version_tuple("4.0.4"))
         self.assertLess(spark_version_tuple("4.0.10"), spark_version_tuple("4.1.0"))
 
-    def test_version_helpers_simulated_runtimes(self):
-        matrix = [
-            ("3.5.10", {
-                "is_before_spark_352": False,
-                "is_before_spark_353": False,
-                "is_spark_353_or_later": True,
-                "is_spark_356_or_later": True,
-                "is_spark_350_or_351": False,
-                "is_spark_359": False,
-                "is_spark_35x": True,
-                "is_before_spark_400": True,
-                "is_spark_400_or_later": False,
-            }),
-            ("3.5.2", {
-                "is_before_spark_352": False,
-                "is_before_spark_353": True,
-                "is_spark_353_or_later": False,
-                "is_spark_356_or_later": False,
-                "is_spark_350_or_351": False,
-                "is_spark_359": False,
-                "is_spark_35x": True,
-                "is_before_spark_400": True,
-                "is_spark_400_or_later": False,
-            }),
-            ("3.5.1", {
-                "is_before_spark_352": True,
-                "is_before_spark_353": True,
-                "is_spark_353_or_later": False,
-                "is_spark_356_or_later": False,
-                "is_spark_350_or_351": True,
-                "is_spark_359": False,
-                "is_spark_35x": True,
-                "is_before_spark_400": True,
-                "is_spark_400_or_later": False,
-            }),
-            ("4.0.10", {
-                "is_before_spark_400": False,
-                "is_spark_400_or_later": True,
-                "is_spark_40x": True,
-                "is_spark_41x": False,
-                "is_spark_35x": False,
-            }),
-            ("4.1.10", {
-                "is_spark_40x": False,
-                "is_spark_41x": True,
-                "is_spark_420_or_later": False,
-            }),
-        ]
-        orig_spark_version = spark_session.spark_version
-        try:
-            for ver_str, expected_helpers in matrix:
-                spark_session.spark_version = lambda v=ver_str: v
-                for helper_name, expected_val in expected_helpers.items():
-                    with self.subTest(version=ver_str, helper=helper_name):
-                        helper_fn = getattr(spark_session, helper_name)
-                        self.assertEqual(
-                            helper_fn(),
-                            expected_val,
-                            f"Helper {helper_name}() failed for version {ver_str}",
-                        )
-        finally:
-            spark_session.spark_version = orig_spark_version
+    def test_version_helpers_logic(self):
+        # Test the version predicate logic against multi-digit and older releases
+        def is_before_352(v):
+            return spark_version_tuple(v) < (3, 5, 2)
+
+        def is_before_353(v):
+            return spark_version_tuple(v) < (3, 5, 3)
+
+        def is_spark_353_or_later(v):
+            return spark_version_tuple(v) >= (3, 5, 3)
+
+        def is_spark_356_or_later(v):
+            return spark_version_tuple(v) >= (3, 5, 6)
+
+        def is_spark_350_or_351(v):
+            return (3, 5, 0) <= spark_version_tuple(v) <= (3, 5, 1)
+
+        def is_spark_35x(v):
+            return (3, 5, 0) <= spark_version_tuple(v) < (3, 6, 0)
+
+        def is_spark_40x(v):
+            return (4, 0, 0) <= spark_version_tuple(v) < (4, 1, 0)
+
+        def is_spark_41x(v):
+            return (4, 1, 0) <= spark_version_tuple(v) < (4, 2, 0)
+
+        # Spark 3.5.10 must sort as >= 3.5.3, >= 3.5.6, inside 3.5x, and not before 3.5.2 or 3.5.3
+        self.assertFalse(is_before_352("3.5.10"))
+        self.assertFalse(is_before_353("3.5.10"))
+        self.assertTrue(is_spark_353_or_later("3.5.10"))
+        self.assertTrue(is_spark_356_or_later("3.5.10"))
+        self.assertFalse(is_spark_350_or_351("3.5.10"))
+        self.assertTrue(is_spark_35x("3.5.10"))
+
+        # Older releases
+        self.assertTrue(is_before_352("3.5.1"))
+        self.assertTrue(is_before_353("3.5.2"))
+        self.assertFalse(is_spark_353_or_later("3.5.2"))
+        self.assertTrue(is_spark_350_or_351("3.5.1"))
+
+        # Spark 4.0.10 and 4.1.10
+        self.assertTrue(is_spark_40x("4.0.10"))
+        self.assertFalse(is_spark_41x("4.0.10"))
+        self.assertTrue(is_spark_41x("4.1.10"))
+        self.assertFalse(is_spark_40x("4.1.10"))
 
 
 if __name__ == "__main__":

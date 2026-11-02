@@ -2156,6 +2156,7 @@ This will force full Scala code rebuild in downstream modules.
                         <phase>verify</phase>
                         <goals><goal>run</goal></goals>
                         <configuration>
+                            <skip>${skipTests}</skip>
                             <target>
                                 <exec executable="python3" failonerror="true"
                                       dir="${spark.rapids.source.basedir}">

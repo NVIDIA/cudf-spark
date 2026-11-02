@@ -165,21 +165,7 @@ def with_gpu_session(func, conf={}):
     copy['spark.rapids.sql.test.validateExecsInGpuPlan'] = ','.join(get_validate_execs_in_gpu_plan())
     return with_spark_session(func, conf=copy)
 
-def spark_version_tuple(ver=None):
-    """Return a numeric tuple of (major, minor, patch) for the given or current Spark version."""
-    if isinstance(ver, tuple):
-        return ver[:3]
-    v = spark_version() if ver is None else ver
-    raw = v.split("-", 1)[0].split("+", 1)[0]
-    parts = []
-    for part in raw.split("."):
-        try:
-            parts.append(int(part))
-        except ValueError:
-            break
-    while len(parts) < 3:
-        parts.append(0)
-    return tuple(parts[:3])
+from spark_version import spark_version_tuple
 
 _spark_version_tuple = spark_version_tuple
 
