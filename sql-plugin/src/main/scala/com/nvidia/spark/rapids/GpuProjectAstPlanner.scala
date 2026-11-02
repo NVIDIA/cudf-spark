@@ -71,15 +71,29 @@ private[rapids] object GpuProjectAstPlanner {
     }
   }
 
-  // A meta can rewrite its node into another operator, such as instr(s, x) > 0 into contains, so
-  // its eligibility applies only if the converted node itself has an AST form.
+  /** Tags a meta's conversion with the eligibility the meta computed for its CPU expression. */
+  def tagConvertedLegacySupport(
+      vetted: Expression,
+      converted: Expression,
+      supported: Boolean): Unit = {
+    // A meta can rewrite its node into another operator, such as instr(s, x) > 0 into
+    // contains(s, x). Its judgment covers only an operator over the types it checked.
+    tagLegacySupport(converted, supported && hasSameTypes(vetted, converted))
+  }
+
+  private def hasSameTypes(vetted: Expression, converted: Expression): Boolean =
+    vetted.dataType == converted.dataType &&
+      vetted.children.map(_.dataType) == converted.children.map(_.dataType)
+
+  // Eligibility applies only if the node itself has an AST form, which a rewritten operator can
+  // lack even when its types match.
   private def convertsToAst(expression: Expression): Boolean = expression match {
     case gpu: GpuExpression =>
       val references = gpu.children.zipWithIndex.map { case (child, ordinal) =>
         GpuBoundReference(ordinal, child.dataType, child.nullable)(NamedExpression.newExprId, "")
       }
       Try(gpu.withNewChildren(references).asInstanceOf[GpuExpression]
-          .convertToAst(references.size)).isSuccess
+          .convertToAst(Int.MaxValue)).isSuccess
     case _ => false
   }
 

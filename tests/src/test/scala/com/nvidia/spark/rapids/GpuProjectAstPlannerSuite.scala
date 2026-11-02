@@ -25,8 +25,8 @@ import org.apache.spark.sql.catalyst.expressions.{Abs, Add, Alias, And, Attribut
   BoundReference, EqualTo, Expression, GreaterThan, GreaterThanOrEqual, Greatest, LessThan,
   Literal, Multiply, Or, StringInstr, Subtract}
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.{GpuAdd, GpuAnd, GpuContains, GpuGreatest, GpuMultiply, GpuOr,
-  GpuSubtract}
+import org.apache.spark.sql.rapids.{GpuAdd, GpuAnd, GpuContains, GpuEqualTo, GpuGreatest,
+  GpuMultiply, GpuOr, GpuSubtract}
 import org.apache.spark.sql.types.{FloatType, LongType, StringType}
 
 class GpuProjectAstPlannerSuite extends AnyFunSuite {
@@ -114,6 +114,25 @@ class GpuProjectAstPlannerSuite extends AnyFunSuite {
       assert(GpuProjectAstExpressionBase.extractTopLevel(wrapped.head).isEmpty)
       val tiers = bind(Seq(expression), sqlConf).exprTiers
       assert(collectExpressions[GpuProjectAstExpression](tiers.flatten).isEmpty)
+    }
+  }
+
+  test("a meta's legacy AST eligibility needs matching types and an AST form") {
+    val sqlConf = conf(legacy = true, jit = false)
+    SQLConf.withExistingConf(sqlConf) {
+      val search = convert(Literal("b"), sqlConf)
+      // Simulates a meta that judged `vetted` and converted it into `converted`.
+      def wrapsAfterTagging(vetted: Expression, converted: GpuExpression): Boolean = {
+        GpuProjectAstPlanner.tagConvertedLegacySupport(vetted, converted, supported = true)
+        val wrapped = GpuProjectAstPlanner.wrapProjectOutputs(
+          Seq(GpuAlias(converted, "result")()), sqlConf, enableAst = true, enableAstJit = false)
+        GpuProjectAstExpressionBase.extractTopLevel(wrapped.head).isDefined
+      }
+      assert(wrapsAfterTagging(EqualTo(str, Literal("b")), GpuEqualTo(str, search)))
+      // An operator with an AST form, but over types the meta did not judge.
+      assert(!wrapsAfterTagging(EqualTo(a, b), GpuEqualTo(str, search)))
+      // The judged types, but an operator without an AST form.
+      assert(!wrapsAfterTagging(EqualTo(str, Literal("b")), GpuContains(str, search)))
     }
   }
 
