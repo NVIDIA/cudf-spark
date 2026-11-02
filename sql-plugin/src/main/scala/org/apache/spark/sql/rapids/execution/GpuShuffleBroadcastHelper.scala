@@ -17,6 +17,7 @@ package org.apache.spark.sql.rapids.execution
 
 import com.nvidia.spark.rapids._
 
+import org.apache.spark.TaskContext
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -31,6 +32,10 @@ private[execution] object GpuShuffleBroadcastHelper {
       RequireSingleBatch, NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric,
       metrics(GpuMetric.CONCAT_TIME), metrics(GpuMetric.OP_TIME_LEGACY),
       "executor broadcast build")
+    if (!coalesced.hasNext) {
+      // An empty shuffle does not acquire the semaphore through its reader.
+      GpuSemaphore.acquireIfNecessary(TaskContext.get())
+    }
     ConcatAndConsumeAll.getSingleBatchWithVerification(coalesced, output)
   }
 }

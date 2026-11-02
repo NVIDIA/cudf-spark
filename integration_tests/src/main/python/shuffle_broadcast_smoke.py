@@ -30,14 +30,18 @@ def plan_nodes(plan):
         yield from plan_nodes(children.next())
 
 
-def query(spark, kind, side):
+def query(spark, kind, side, empty_build=False):
     left = spark.range(128, numPartitions=8).selectExpr(
         'IF(id % 13 = 0, CAST(NULL AS BIGINT), id % 11) AS left_key', 'id AS left_value')
     right = spark.range(24, numPartitions=4).selectExpr(
         'IF(id % 7 = 0, CAST(NULL AS BIGINT), id % 11) AS right_key', 'id AS right_value')
     if side == 'left':
+        if empty_build:
+            left = left.where('rand(123) < 0')
         left = broadcast(left)
     else:
+        if empty_build:
+            right = right.where('rand(123) < 0')
         right = broadcast(right)
     return left.join(right,
         (left.left_key == right.right_key) & (left.left_value > right.right_value), kind)
@@ -52,17 +56,22 @@ def main():
             'spark.rapids.sql.join.hashTable.reuse': 'false',
         }.items():
             spark.conf.set(key, value)
-        cases = [('inner', 'left'), ('inner', 'right'), ('left_outer', 'right'),
-                 ('right_outer', 'left'), ('left_semi', 'right'), ('left_anti', 'right')]
-        for kind, side in cases:
+        cases = [('inner', 'left', False), ('inner', 'right', False),
+                 ('left_outer', 'right', False), ('right_outer', 'left', False),
+                 ('left_semi', 'right', False), ('left_anti', 'right', False),
+                 ('inner', 'right', True), ('left_anti', 'right', True)]
+        for kind, side, empty_build in cases:
             spark.conf.set('spark.rapids.sql.enabled', 'false')
-            expected = sorted(repr(row) for row in query(spark, kind, side).collect())
-            assert expected, (kind, side)
+            expected = sorted(repr(row) for row in query(spark, kind, side, empty_build).collect())
+            assert expected or empty_build, (kind, side)
             spark.conf.set('spark.rapids.sql.enabled', 'true')
-            for mode, ceiling in [('disabled', '1g'), ('native', '1g'), ('oversized', '1')]:
+            modes = [('disabled', '1g'), ('native', '1g')]
+            if not empty_build:
+                modes.append(('oversized', '1'))
+            for mode, ceiling in modes:
                 spark.conf.set('spark.rapids.shuffle.broadcast.enabled', str(mode != 'disabled'))
                 spark.conf.set('spark.rapids.shuffle.broadcast.maxSize', ceiling)
-                frame = query(spark, kind, side)
+                frame = query(spark, kind, side, empty_build)
                 actual = sorted(repr(row) for row in frame.collect())
                 assert actual == expected, (kind, side, mode, len(expected), len(actual))
                 plan = frame._jdf.queryExecution().executedPlan()
@@ -79,7 +88,8 @@ def main():
                     fallbacks = native[0].metrics().apply('runtimeFallbacks').value()
                     assert (builds, fallbacks) == ((1, 0) if mode == 'native' else (0, 1)), \
                         (kind, side, mode, builds, fallbacks)
-                print(json.dumps(dict(kind=kind, side=side, mode=mode, rows=len(actual),
+                print(json.dumps(dict(kind=kind, side=side, empty_build=empty_build,
+                                      mode=mode, rows=len(actual),
                                       builds=builds, fallbacks=fallbacks, result='PASS')), flush=True)
         print('EXECUTOR_BROADCAST_SMOKE_PASS', flush=True)
     finally:
