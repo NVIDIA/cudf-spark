@@ -25,7 +25,8 @@ import org.apache.spark.sql.types.DataType
 /** Planning flags for enum representation and malformed-message handling. */
 final case class ProtobufPlannerOptions(
     enumsAsInts: Boolean,
-    failOnErrors: Boolean)
+    failOnErrors: Boolean,
+    malformedRowsAsNullFields: Boolean = false)
 
 /** Extracted facts for one Spark field; unsupported fields retain a fallback reason. */
 final case class ProtobufFieldInfo(

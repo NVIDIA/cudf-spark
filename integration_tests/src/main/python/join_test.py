@@ -1656,36 +1656,45 @@ def test_distinct_join(join_type, batch_size):
 
 @validate_execs_in_gpu_plan("GpuShuffledHashJoinExec")
 @ignore_order(local=True)
+@pytest.mark.inject_oom
+@pytest.mark.parametrize("use_condition", [False, True], ids=["EQUI", "CONDITION"])
 @pytest.mark.parametrize(
     "build_side", ["left", "right"], ids=["BUILD_LEFT", "BUILD_RIGHT"])
-def test_distinct_full_outer_join(build_side):
+@pytest.mark.parametrize(
+    "unmatched_build_rows", [False, True], ids=["ALL_KEYS_MATCH", "SOME_KEYS_UNMATCHED"])
+def test_distinct_full_outer_join(build_side, unmatched_build_rows, use_condition):
     join_conf = {
+        # The residual addition must use GPU AST; ANSI overflow checks are unsupported there.
+        "spark.sql.ansi.enabled": "false",
         "spark.sql.adaptive.enabled": "false",
         "spark.sql.autoBroadcastJoinThreshold": "-1",
         "spark.sql.join.preferSortMergeJoin": "false",
-        "spark.sql.shuffle.partitions": "2",
+        "spark.sql.shuffle.partitions": "1",
         # Exercise the stream-side iterator across multiple batches.
         "spark.rapids.sql.batchSizeBytes": "1",
         "spark.rapids.sql.join.useShuffledSymmetricHashJoin": "false",
     }
 
     def do_join(spark):
-        left_df = spark.createDataFrame([
-            (None, "left_null"),
-            (1, "left_match"),
-            (2, "left_only"),
-            (4, "left_match_2"),
-        ], ["join_key", "left_value"])
-        right_df = spark.createDataFrame([
-            (None, "right_null"),
-            (1, "right_match"),
-            (3, "right_only"),
-            (4, "right_match_2"),
-        ], ["join_key", "right_value"])
+        if unmatched_build_rows:
+            left_rows = [(None, "left_null"), (1, "left_match"),
+                         (2, "left_only"), (4, "left_match_2")]
+            right_rows = [(None, "right_null"), (1, "right_match"),
+                          (3, "right_only"), (4, "right_match_2")]
+        else:
+            left_rows = [(1, "left_match"), (2, "left_match_2")]
+            right_rows = [(1, "right_match"), (2, "right_match_2")]
+        left_df = spark.createDataFrame(left_rows, ["join_key", "left_value"])
+        right_df = spark.createDataFrame(right_rows, ["join_key", "right_value"])
         if build_side == "left":
             left_df = left_df.hint("SHUFFLE_HASH")
         else:
             right_df = right_df.hint("SHUFFLE_HASH")
+        if use_condition:
+            # Key 1 matches the equi-join but fails the residual condition.
+            condition = ((left_df.join_key == right_df.join_key) &
+                         (left_df.join_key + right_df.join_key > 2))
+            return left_df.join(right_df, condition, "fullouter")
         return left_df.join(right_df, ["join_key"], "fullouter")
 
     assert_gpu_and_cpu_are_equal_collect(do_join, conf=join_conf)

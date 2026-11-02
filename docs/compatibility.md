@@ -7,9 +7,9 @@ nav_order: 5
 # NVIDIA cuDF plugin for Apache Spark Compatibility with Apache Spark
 
 The SQL plugin tries to produce results that are bit for bit identical with Apache Spark.  There are
-a number of cases where there are some differences. In most cases operators that produce different
+a number of cases where there are some differences. In some cases operators that produce different
 results are off by default, and you can look at the [configs](configs.md) for more information on
-how to enable them.  In some cases we felt that enabling the incompatibility by default was worth
+how to enable them.  In many cases we felt that enabling the incompatibility by default was worth
 the performance gain. All of those operators can be disabled through configs if it becomes a
 problem. Please also look at the current list of
 [bugs](https://github.com/NVIDIA/cudf-spark/issues?q=is%3Aopen+is%3Aissue+label%3Abug) which are
@@ -598,9 +598,7 @@ The following regular expression patterns are not yet supported on the GPU and w
 - Named capture groups: `(?<n>a)`
 - Empty groups: `()`
 - Inline flags other than case-insensitive matching, such as `(?m)`, `(?s)`, or `(?x)`
-- Case-insensitive matching (`(?i)`) whose scope would extend across a choice, such as `(?i)a|b`
-  or `a(?i)b|c` (in Java the flag applies to the end of the enclosing group, crossing `|`), or that
-  applies to a letter-valued escape, such as `(?i)\x61`
+- Case-insensitive matching (`(?i)`) that applies to a letter-valued escape, such as `(?i)\x61`
 - Case-insensitive matching of `\p{Lower}` and `\p{Upper}` (and their `\P` counterparts) on Spark versions
   below 4.0, to preserve pre-[JDK-8214245](https://bugs.openjdk.org/browse/JDK-8214245) behavior
 - Empty pattern: `""`
@@ -936,6 +934,23 @@ Also, the GPU does not support casting from strings containing hex values to flo
 
 This configuration is enabled by default. To disable this operation on the GPU set
 [`spark.rapids.sql.castStringToFloat.enabled`](additional-functionality/advanced_configs.md#sql.castStringToFloat.enabled) to `false`.
+
+### Hexadecimal to Binary
+
+The GPU supports `unhex` for string input. It returns binary data, treats an odd number of hex
+digits as if a leading zero were present, and returns null for invalid input. The permissive
+hexadecimal form of `to_binary` in Spark 3.3 is also supported. Error-raising hexadecimal
+`to_binary` in Spark 3.4 and later falls back to the CPU.
+`try_to_binary(..., 'hex')` also falls back to the CPU on Spark 3.4 and later.
+
+Spark 3.3.0 and 3.3.1 decode an odd number of hex digits incorrectly on the CPU
+([SPARK-40924](https://issues.apache.org/jira/browse/SPARK-40924)). This also affects Databricks
+runtimes, including 14.3 and 17.3. For example, `unhex('ABC')` returns `0xBC00` instead of
+`0x0ABC`. The GPU returns the corrected result for every Spark version, so results for
+odd-length input differ from the CPU on those runtimes. On Databricks 14.3, setting the internal
+configuration `spark.databricks.behaviorChange.SC114071UnhexConvertOddSymbol.enabled` to `true`
+(default: `false`) enables the corrected CPU behavior. The GPU behavior is unchanged by this
+setting.
 
 ### String to Date
 

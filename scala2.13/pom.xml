@@ -747,13 +747,13 @@
                 <hadoop.client.version>3.3.1</hadoop.client.version>
                 <rat.consoleOutput>true</rat.consoleOutput>
                 <parquet.hadoop.version>1.16.0</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-stub</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>rapids-4-spark-delta-${spark.version.classifier}</rapids.delta.artifactId1>
                 <slf4j.version>2.0.7</slf4j.version>
                 <scala.javac.args>-Xlint:all,-serial,-path,-try,-processing,-options|-Werror</scala.javac.args>
             </properties>
             <modules>
                 <module>shim-deps/databricks</module>
-                <module>delta-lake/delta-stub</module>
+                <module>delta-lake/delta-spark410db183</module>
                 <module>iceberg/iceberg-stub</module>
             </modules>
             <build>
@@ -2014,6 +2014,8 @@ This will force full Scala code rebuild in downstream modules.
                         <exclude>**/src/main/java/com/nvidia/spark/rapids/format/*</exclude>
                         <exclude>**/*.csv</exclude>
                         <exclude>scripts/with_resource_nesting_baseline.json</exclude>
+                        <exclude>scripts/iceberg-versions.json</exclude>
+                        <exclude>scripts/tests/resources/iceberg/iceberg-versions.json</exclude>
                         <exclude>dist/*.txt</exclude>
                         <exclude>**/META-INF/com.nvidia.spark.rapids.SparkShimServiceProvider</exclude>
                         <!-- Apache Rat excludes target folder for projects that are included by
@@ -2125,6 +2127,26 @@ This will force full Scala code rebuild in downstream modules.
                                       dir="${spark.rapids.source.basedir}">
                                     <arg value="-B"/>
                                     <arg value="dist/scripts/tests/test_root_safe_provider_selection.py"/>
+                                </exec>
+                            </target>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>iceberg-matrix-tests</id>
+                        <phase>verify</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <exec executable="python3" failonerror="true"
+                                      dir="${spark.rapids.source.basedir}">
+                                    <arg value="-B"/>
+                                    <arg value="-m"/>
+                                    <arg value="unittest"/>
+                                    <arg value="discover"/>
+                                    <arg value="-s"/>
+                                    <arg value="scripts/tests"/>
+                                    <arg value="-p"/>
+                                    <arg value="test_get_iceberg_versions.py"/>
                                 </exec>
                             </target>
                         </configuration>

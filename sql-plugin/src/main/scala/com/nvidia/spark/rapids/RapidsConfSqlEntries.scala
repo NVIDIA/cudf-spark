@@ -132,8 +132,8 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
   val ENABLE_FLOAT_AGG = conf("spark.rapids.sql.variableFloatAgg.enabled")
     .doc("Spark assumes that all operations produce the exact same result each time. " +
       "This is not true for some floating point aggregations, which can produce slightly " +
-      "different results on the GPU as the aggregation is done in parallel.  This can enable " +
-      "those operations if you know the query is only computing it once.")
+      "different results on the GPU as the aggregation is done in parallel.  Set this to false " +
+      "if a query may compute the same aggregation more than once.")
     .booleanConf
     .createWithDefault(true)
 
@@ -257,6 +257,39 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
       .internal()
       .booleanConf
       .createWithDefault(false)
+
+  val ENABLE_PROJECT_AST_JIT = conf("spark.rapids.sql.projectAstJitEnabled")
+      .doc("Enable the experimental cuDF JIT backend for supported project AST expressions. " +
+        "Shared subexpressions across backends are materialized first. When both project AST " +
+        "backends support a complete expression, JIT takes precedence. " +
+        "Otherwise, prefer an intact interpreted AST expression over splitting it for JIT.")
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
+
+  val ENABLE_PROJECT_AST_JIT_MULTI_OUTPUT =
+    conf("spark.rapids.sql.projectAstJitMultiOutputEnabled")
+      .doc("Evaluate multiple Project AST JIT expressions in one cuDF call when possible.")
+      .internal()
+      .booleanConf
+      .createWithDefault(true)
+
+  val PROJECT_AST_JIT_MAX_GROUP_OPS =
+    conf("spark.rapids.sql.projectAstJit.maxGroupOps")
+      .doc("Maximum number of unique AST JIT operations in one multi-output group. " +
+        "An individually oversized expression remains eligible for single-output AST JIT.")
+      .internal()
+      .integerConf
+      .checkValue(_ > 0, "The maximum AST JIT group operation count must be greater than zero.")
+      .createWithDefault(384)
+
+  val PROJECT_AST_JIT_MAX_GROUP_OUTPUTS =
+    conf("spark.rapids.sql.projectAstJit.maxGroupOutputs")
+      .doc("Maximum number of outputs evaluated in one multi-output AST JIT group.")
+      .internal()
+      .integerConf
+      .checkValue(_ > 0, "The maximum AST JIT group output count must be greater than zero.")
+      .createWithDefault(32)
 
   val ENABLE_TIERED_PROJECT = conf("spark.rapids.sql.tiered.project.enabled")
       .doc("Enable tiered projections.")

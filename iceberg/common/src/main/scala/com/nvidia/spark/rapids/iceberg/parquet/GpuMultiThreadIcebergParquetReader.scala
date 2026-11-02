@@ -28,7 +28,7 @@ import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
 import com.nvidia.spark.rapids.iceberg.IcebergDeletionVector
 import com.nvidia.spark.rapids.iceberg.data.GpuDeleteFilter
 import com.nvidia.spark.rapids.parquet.{CpuCompressionConfig, HostMemoryBuffersWithMetaData,
-  MultiFileCloudParquetPartitionReader, ParquetDataBlock}
+  HostMemoryEmptyMetaData, MultiFileCloudParquetPartitionReader, ParquetDataBlock}
 
 import org.apache.spark.TaskContext
 import org.apache.spark.sql.execution.datasources.PartitionedFile
@@ -50,7 +50,8 @@ class GpuMultiThreadIcebergParquetReader(
 
 
   private var inited = false
-  private lazy val reader = createParquetReader()
+  // Visible for testing
+  private[iceberg] lazy val reader = createParquetReader()
 
   override def close(): Unit = {
     try {
@@ -110,9 +111,18 @@ class GpuMultiThreadIcebergParquetReader(
           next: HostMemoryBuffersWithMetaData): Boolean = {
         if (current.partitionedFile.filePath == next.partitionedFile.filePath) return false
         if (super.checkIfNeedToSplit(current, next)) return true
-        if (multiThreadConf.disableCombining) return true
-        val curFile = findIcebergFile(current.partitionedFile)
-        val nextFile = findIcebergFile(next.partitionedFile)
+        checkIfNeedToSplitIcebergFiles(current.partitionedFile, next.partitionedFile)
+      }
+
+      override protected def checkIfNeedToSplitEmpty(current: HostMemoryEmptyMetaData,
+          next: HostMemoryEmptyMetaData): Boolean = {
+        checkIfNeedToSplitIcebergFiles(current.partitionedFile, next.partitionedFile)
+      }
+
+      private def checkIfNeedToSplitIcebergFiles(current: PartitionedFile,
+          next: PartitionedFile): Boolean = {
+        val curFile = findIcebergFile(current)
+        val nextFile = findIcebergFile(next)
         val curProcessor = postProcessors.get(curFile)
         val nextProcessor = postProcessors.get(nextFile)
         if (curProcessor == null || nextProcessor == null) return true
