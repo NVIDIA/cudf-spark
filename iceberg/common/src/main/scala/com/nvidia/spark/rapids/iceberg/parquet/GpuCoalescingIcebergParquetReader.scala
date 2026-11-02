@@ -89,7 +89,7 @@ class GpuCoalescingIcebergParquetReader(
       conf.conf,
       files.map(_.sparkPartitionedFile).toArray,
       clippedBlocks,
-      conf.caseSensitive,
+      true, // Iceberg has already resolved the physical schema by field ID.
       conf.parquetDebugDumpPrefix,
       conf.parquetDebugDumpAlways,
       conf.maxBatchSizeRows,

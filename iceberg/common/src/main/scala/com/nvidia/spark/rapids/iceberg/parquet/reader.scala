@@ -191,7 +191,7 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
     val unshader = ShimUtils.getParquetUnshader()
     GpuParquetUtils.clipBlocksToSchema(fileReadSchema,
       blocks.map(unshader.unshade).asJava,
-      conf.caseSensitive)
+      isCaseSensitive = true)
   }
 
   def filterParquetBlocks(file: IcebergPartitionedFile,
@@ -274,10 +274,12 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
       // Iceberg's Variant schema follows the Parquet spec's metadata/value child order. Spark's
       // physical Variant column uses value/metadata, so apply the same normalization as the
       // standard GPU Parquet reader after Iceberg has finished field-ID projection.
+      // These Spark names came from this physical schema; session name resolution must not
+      // conflate distinct physical names that Iceberg has already resolved by field ID.
       val gpuFileReadSchema = ParquetSchemaUtils.clipParquetSchema(
         unshadedFileReadSchema,
         partReaderSparkSchema,
-        conf.caseSensitive,
+        caseSensitive = true,
         useFieldId = false)
       val blocks = clipBlocksToSchema(gpuFileReadSchema, filteredBlocks.map(_._1))
       blocks.zip(blockFirstRowIndices).foreach { case (block, firstRowIndex) =>

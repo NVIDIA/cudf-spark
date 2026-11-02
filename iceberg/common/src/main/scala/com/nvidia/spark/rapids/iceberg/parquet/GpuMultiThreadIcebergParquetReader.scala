@@ -85,7 +85,7 @@ class GpuMultiThreadIcebergParquetReader(
       conf.conf,
       sparkPartitionedFiles,
       this.filterBlock,
-      conf.caseSensitive,
+      true, // Iceberg has already resolved the physical schema by field ID.
       conf.parquetDebugDumpPrefix,
       conf.parquetDebugDumpAlways,
       conf.maxBatchSizeRows,
@@ -156,7 +156,7 @@ class GpuMultiThreadIcebergParquetReader(
               GpuMultiThreadIcebergParquetReader.this.conf.targetBatchSizeBytes,
               parseOptions, hostBufs, GpuMultiThreadIcebergParquetReader.this.conf.metrics,
               buffer.dateRebaseMode, buffer.timestampRebaseMode,
-              GpuMultiThreadIcebergParquetReader.this.conf.caseSensitive,
+              true, // The deletion-vector producer also evolves the physical schema.
               useFieldId = false, buffer.readSchema, buffer.clippedSchema,
               Array(buffer.partitionedFile),
               GpuMultiThreadIcebergParquetReader.this.conf.parquetDebugDumpPrefix,

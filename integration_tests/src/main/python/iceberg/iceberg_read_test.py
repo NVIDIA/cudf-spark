@@ -16,14 +16,115 @@ import json
 
 import pytest
 
-from asserts import assert_gpu_and_cpu_are_equal_collect
-from iceberg import get_full_table_name, iceberg_unsupported_mark, supports_iceberg_v3, \
-    ICEBERG_V3_UNSUPPORTED_REASON
+from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
+    assert_gpu_and_cpu_are_equal_collect
+from conftest import is_iceberg_remote_catalog
+from data_gen import copy_and_update
+from iceberg import get_full_table_name, iceberg_unsupported_mark, rapids_reader_types, \
+    supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON
 from iceberg.iceberg_test import _ICEBERG_VARIANT_READ_CONF, _setup_iceberg_variant_table
-from marks import iceberg, ignore_order, incompat
+from marks import allow_non_gpu, iceberg, ignore_order, incompat
 from spark_session import is_spark_411_or_later, with_cpu_session
 
 pytestmark = iceberg_unsupported_mark
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_type,with_deletion_vector',
+    [(reader, False) for reader in rapids_reader_types] + [
+        pytest.param(reader, True, marks=pytest.mark.skipif(
+            not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON))
+        for reader in ['PERFILE', 'MULTITHREADED']])
+def test_iceberg_renamed_case_sensitive_columns_read(
+        spark_tmp_table_factory, reader_type, with_deletion_vector):
+    table = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_table(spark):
+        version = '3' if with_deletion_vector else '2'
+        spark.sql(f"CREATE TABLE {table} (a INT, A INT) USING ICEBERG "
+                  f"TBLPROPERTIES ('format-version'='{version}', "
+                  "'write.delete.mode'='merge-on-read')")
+        spark.sql(f"INSERT INTO {table} SELECT /*+ COALESCE(1) */ * "
+                  "FROM VALUES (1, 10), (2, 20) AS source(a, b)")
+        spark.sql(f"ALTER TABLE {table} RENAME COLUMN A TO b")
+        if with_deletion_vector:
+            spark.sql(f"DELETE FROM {table} WHERE a = 1")
+            delete_files = {(row.content, row.file_format) for row in
+                            spark.sql(f"SELECT content, file_format FROM {table}.delete_files")
+                            .collect()}
+            assert delete_files == {(1, 'PUFFIN')}, "Fixture must contain a deletion vector"
+
+    with_cpu_session(setup_table, conf={'spark.sql.caseSensitive': 'true'})
+    # Iceberg resolves the old physical a/A names by ID before GPU schema normalization.
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.sql(f"SELECT a, b FROM {table}"),
+        exist_classes='GpuBatchScanExec',
+        non_exist_classes='BatchScanExec',
+        conf={
+            'spark.sql.caseSensitive': 'false',
+            'spark.sql.adaptive.enabled': 'false',
+            'spark.rapids.sql.format.parquet.reader.type': reader_type,
+            'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
+        },
+        require_non_empty=True)
+
+
+@iceberg
+@ignore_order(local=True)
+@incompat
+@allow_non_gpu('BatchScanExec', 'ColumnarToRowExec', 'ProjectExec', 'VariantGet')
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Imported files require a local catalog")
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.skipif(not is_spark_411_or_later(), reason="Iceberg Variant requires Spark 4.1.1+")
+def test_iceberg_v3_unannotated_shredded_variant_read_fallback(
+        spark_tmp_table_factory, spark_tmp_path):
+    table = get_full_table_name(spark_tmp_table_factory)
+    data_path = spark_tmp_path + '/unannotated_variant'
+
+    def setup_table(spark):
+        spark.sql(f"CREATE TABLE {table} (id INT, v VARIANT) USING ICEBERG "
+                  "TBLPROPERTIES ('format-version'='3')")
+        spark.sql("""
+            SELECT id, parse_json(json) AS v
+            FROM VALUES (0, '{"x":7}'), (1, '{"x":9}'), (2, 'null'), (3, NULL)
+            AS source(id, json)
+            """).coalesce(1).write.parquet(data_path)
+
+        jvm = spark._jvm
+        iceberg_table = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
+            spark._jsparkSession, table)
+        path = jvm.org.apache.hadoop.fs.Path(data_path + '/*.parquet')
+        files = path.getFileSystem(spark.sparkContext._jsc.hadoopConfiguration()).globStatus(path)
+        assert len(files) == 1, "Expected one imported Parquet file"
+        file = files[0]
+        input_file = iceberg_table.io().newInputFile(file.getPath().toString())
+        reader = jvm.org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader.open(
+            jvm.org.apache.iceberg.parquet.GpuParquetIOAccess.file(input_file))
+        try:
+            variant = reader.getFileMetaData().getSchema().getType('v').asGroupType()
+            assert variant.getLogicalTypeAnnotation() is None
+            assert variant.containsField('typed_value'), "Fixture must contain shredded Variant"
+        finally:
+            reader.close()
+        data_file = (jvm.org.apache.iceberg.DataFiles.builder(iceberg_table.spec())
+                     .withPath(file.getPath().toString()).withFormat('PARQUET')
+                     .withFileSizeInBytes(file.getLen()).withRecordCount(4).build())
+        iceberg_table.newAppend().appendFile(data_file).commit()
+        spark.sql(f"REFRESH TABLE {table}")
+
+    with_cpu_session(setup_table, conf=copy_and_update(_ICEBERG_VARIANT_READ_CONF, {
+        'spark.sql.parquet.variant.annotateLogicalType.enabled': 'false',
+        'spark.sql.parquet.fieldId.write.enabled': 'false',
+        'spark.sql.variant.writeShredding.enabled': 'true',
+        'spark.sql.variant.forceShreddingSchemaForTest': 'STRUCT<x: BIGINT>',
+    }))
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.sql(f"SELECT id, try_variant_get(v, '$.x', 'int') AS x FROM {table}"),
+        exist_classes='BatchScanExec',
+        non_exist_classes='GpuBatchScanExec,GpuVariantGet',
+        conf=_ICEBERG_VARIANT_READ_CONF,
+        require_non_empty=True)
 
 
 @iceberg
