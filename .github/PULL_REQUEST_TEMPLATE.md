@@ -25,7 +25,6 @@ Please provide a description of the changes proposed in this pull request. Here 
 - After this change, what will the user experience be like? Please describe any user-facing changes, such as new configurations or new behaviors. If you are introducing new configurations, please add some guidelines on how to use them.
 - How are you fixing the problem? Please provide a technical description of your solution. You can add or link your design doc if it exists.
 - How are the new features/behaviors tested? Please describe the test cases you added or modified. If they are tested in a cluster, please describe it as well.
-- Summarize validation results and any remaining gaps using CONTRIBUTING.md#testing-your-code.
 -->
 
 ### Checklists
