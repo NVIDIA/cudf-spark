@@ -439,7 +439,7 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
       errorReply(outcome, cause) match {
         case Some(reply) => BufferSendState.sendErrorReply(tx, reply.gate, build(reply.reason))
         case None =>
-          // the server is closing, or the failure ends the send loop
+          // the server is closing, or the failure must end the send loop
           logDebug(s"Not answering $what $tx")
       }
     }
@@ -488,13 +488,18 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
   }
 
   /**
-   * The error reply for a request that ended with `outcome` because of `cause`. There is none
-   * when `cause` ends the send loop, since the executor then exits and the requester hears of it
-   * when its connection closes. There is none once the server is closing either, which saves
-   * building a reply that `replyGate` would not let through. The send loop can still be running
-   * then, since the server's close and the transport's each wait for it a bounded time. A caller
-   * that ends several states calls this once per state, since the server can close between two
-   * of them.
+   * The error reply for a request that ended with `outcome` because of `cause`. It is None in
+   * two cases:
+   *  - `cause` must end the send loop (`BufferSendState.endsSendLoop`). A caller that rethrows
+   *    it ends the loop, so that the Spark executor exits. The requester then hears of it when
+   *    its connection closes. A caller that does not rethrow it, as `issueSend`, `newSendState`
+   *    and a metadata request do, leaves the requester waiting until it times out.
+   *  - The server is closing, which saves building a reply that `replyGate` would not let
+   *    through. The send loop can still be running then, since the server's close and the
+   *    transport's each wait for it a bounded time.
+   *
+   * A caller that ends several states calls this method once per state, since the server can
+   * close between two of them.
    */
   private def errorReply(
       outcome: BufferSendState.Outcome,

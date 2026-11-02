@@ -132,7 +132,7 @@ class RapidsShuffleIterator(
 
   // Batches expected is a moving target of batches this iterator will see. The target is moved, by
   // [[RapidsShuffleFetchHandler]]'s start method, as metadata responses are received from
-  // [[RapidsShuffleServer]]s.
+  // [[RapidsShuffleServer]]s. An error reply to a metadata request calls `metadataError` instead.
   private[this] var totalBatchesExpected: Long = 0L
 
   // As batches are received this counter is updated. When all is said and done,

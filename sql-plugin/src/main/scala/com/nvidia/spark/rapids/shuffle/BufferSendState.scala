@@ -31,18 +31,16 @@ import org.apache.spark.shuffle.rapids.{RapidsShuffleSendPrepareException,
   ShuffleOutputGoneException}
 
 /**
- * A helper case class to maintain the server side state in response to a transfer
+ * A helper class to maintain the server side state in response to a transfer
  * request initiated by a peer.
  *
- * The class implements the Iterator interface.
- *
- * On next(), a set of RapidsBuffer are copied onto a bounce buffer, and a
+ * On `getBufferToSend()`, a set of buffers are copied onto a bounce buffer, and a
  * `MemoryBuffer` slice of the bounce buffer is returned. Buffers are copied to the bounce
  * buffer in `TransferRequest` order. The receiver has the same conventions.
  *
  * Synchronization with `serverStream` is outside of this class. It is assumed that the caller
- * has several `BufferSendState` iterators and on calling next on this collection, it will
- * perform a sync on `serverStream` before handing it off to the transport.
+ * has several `BufferSendState` instances and on calling `getBufferToSend()` on each, it will
+ * perform a sync on `serverStream` before handing the slices off to the transport.
  *
  * It also is AutoCloseable. close() should be called to free bounce buffers.
  *
@@ -51,7 +49,7 @@ import org.apache.spark.shuffle.rapids.{RapidsShuffleSendPrepareException,
  * {{{
  * request arrival -- lookup succeeds --> [live] -- success reply queues --> [Completed]
  *                                         | ^
- *                                         +-+ OOM before deadline
+ *                                         +-+ prepare failure retried
  *                                         |
  *     +-----------------------------------+
  *     +-- output gone ------> [MissingOutput] -+
@@ -67,6 +65,8 @@ import org.apache.spark.shuffle.rapids.{RapidsShuffleSendPrepareException,
  * transport stops. Failed in the final data callback gets no error reply.
  * Error replies require an open server and no loop-ending failure. The materialization OOM
  * deadline starts at request arrival and never resets when a window succeeds.
+ * A prepare failure other than an OOM, gone output or loop-ending failure can be retried too,
+ * but only if another state of its server batch prepared a window.
  *
  * @param transaction a request transaction
  * @param sendBounceBuffers - an object that contains a device and potentially a host
