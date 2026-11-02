@@ -73,6 +73,7 @@ def test_executor_broadcast_preserves_null_duplicate_and_residual_semantics(join
         join = _native_join(gpu_plan)
         assert join.metrics().apply('executorBuilds').value() > 0
         assert join.metrics().apply('runtimeFallbacks').value() == 0
+        assert join.fallbackBroadcast().metrics().apply('dataSize').value() == 0
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: _join(spark, join_type, build_side),
@@ -87,6 +88,7 @@ def test_executor_broadcast_rejects_oversized_build_before_executor_assembly():
         join = _native_join(gpu_plan)
         assert join.metrics().apply('runtimeFallbacks').value() == 1
         assert join.metrics().apply('executorBuilds').value() == 0
+        assert join.fallbackBroadcast().metrics().apply('dataSize').value() > 0
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: _join(spark, 'inner', 'right'),

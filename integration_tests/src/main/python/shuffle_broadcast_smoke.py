@@ -78,6 +78,7 @@ def main():
                 native = [node for node in plan_nodes(plan)
                           if node.getClass().getSimpleName() == 'GpuShuffleBroadcastHashJoinExec']
                 builds, fallbacks = 0, 0
+                driver_bytes = 0
                 if mode == 'disabled':
                     assert not native, plan.toString()
                     assert any(node.getClass().getSimpleName() == 'GpuBroadcastHashJoinExec'
@@ -86,11 +87,15 @@ def main():
                     assert len(native) == 1, plan.toString()
                     builds = native[0].metrics().apply('executorBuilds').value()
                     fallbacks = native[0].metrics().apply('runtimeFallbacks').value()
+                    driver_bytes = native[0].fallbackBroadcast().metrics().apply('dataSize').value()
                     assert (builds, fallbacks) == ((1, 0) if mode == 'native' else (0, 1)), \
                         (kind, side, mode, builds, fallbacks)
+                    assert (driver_bytes == 0) if mode == 'native' else (driver_bytes > 0), \
+                        (kind, side, mode, driver_bytes)
                 print(json.dumps(dict(kind=kind, side=side, empty_build=empty_build,
                                       mode=mode, rows=len(actual),
-                                      builds=builds, fallbacks=fallbacks, result='PASS')), flush=True)
+                                      builds=builds, fallbacks=fallbacks,
+                                      driver_broadcast_bytes=driver_bytes, result='PASS')), flush=True)
         print('EXECUTOR_BROADCAST_SMOKE_PASS', flush=True)
     finally:
         spark.stop()
