@@ -34,10 +34,11 @@ def _require_ucx():
 def _join(spark, join_type, build_side):
     left = spark.range(128, numPartitions=8).selectExpr(
         'IF(id % 13 = 0, CAST(NULL AS BIGINT), id % 11) AS left_key',
-        'id AS left_value')
+        'id AS left_value', "concat('left-', CAST(id AS STRING)) AS left_payload",
+        'CAST(id AS DECIMAL(12, 2)) AS left_decimal')
     right = spark.range(24, numPartitions=4).selectExpr(
         'IF(id % 7 = 0, CAST(NULL AS BIGINT), id % 11) AS right_key',
-        'id AS right_value')
+        'id AS right_value', "concat('right-', CAST(id AS STRING)) AS right_payload")
     if build_side == 'left':
         left = broadcast(left)
     else:

@@ -32,9 +32,12 @@ def plan_nodes(plan):
 
 def query(spark, kind, side, empty_build=False):
     left = spark.range(128, numPartitions=8).selectExpr(
-        'IF(id % 13 = 0, CAST(NULL AS BIGINT), id % 11) AS left_key', 'id AS left_value')
+        'IF(id % 13 = 0, CAST(NULL AS BIGINT), id % 11) AS left_key', 'id AS left_value',
+        "concat('left-', CAST(id AS STRING)) AS left_payload",
+        'CAST(id AS DECIMAL(12, 2)) AS left_decimal')
     right = spark.range(24, numPartitions=4).selectExpr(
-        'IF(id % 7 = 0, CAST(NULL AS BIGINT), id % 11) AS right_key', 'id AS right_value')
+        'IF(id % 7 = 0, CAST(NULL AS BIGINT), id % 11) AS right_key', 'id AS right_value',
+        "concat('right-', CAST(id AS STRING)) AS right_payload")
     if side == 'left':
         if empty_build:
             left = left.where("sha2(CAST(left_value AS STRING), 256) = repeat('0', 64)")
@@ -81,8 +84,10 @@ def main():
                 driver_bytes = 0
                 if mode == 'disabled':
                     assert not native, plan.toString()
-                    assert any(node.getClass().getSimpleName() == 'GpuBroadcastHashJoinExec'
-                               for node in plan_nodes(plan)), plan.toString()
+                    standard = [node for node in plan_nodes(plan)
+                                if node.getClass().getSimpleName() == 'GpuBroadcastHashJoinExec']
+                    assert len(standard) == 1, plan.toString()
+                    driver_bytes = standard[0].broadcastExchange().metrics().apply('dataSize').value()
                 else:
                     assert len(native) == 1, plan.toString()
                     builds = native[0].metrics().apply('executorBuilds').value()
