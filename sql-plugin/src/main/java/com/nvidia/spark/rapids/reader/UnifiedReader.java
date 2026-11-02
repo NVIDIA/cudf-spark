@@ -24,6 +24,8 @@ import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 
+import com.nvidia.spark.rapids.utils.CloseableIterator;
+
 import org.apache.spark.TaskContext;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
 import org.apache.spark.util.TaskCompletionListener;
