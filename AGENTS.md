@@ -13,10 +13,30 @@ This document provides context for AI coding agents (Claude Code, GitHub Copilot
 - **Keep pull request descriptions reviewable** — describe intent and rationale, do not paste code diffs or brittle line-level details, and update the description when later commits change its claims
 - **Bound draft and closure lifecycle** — use Draft only for concrete unfinished work, state in the description what remains (a TODO checklist is preferred). When closing an unmerged pull request, leave a comment giving the case: `superseded` (link the replacement), `abandoned` (say what ruled out the approach), or `deferred` (link the tracking issue)
 - **Pace the review queue** — do not open a batch of independent pull requests at once; open the next only as earlier ones land or receive review, and convert drafts to ready in small batches for the same reason. Stacked pull requests are exempt, but identify the dependency with `Stacked on #NNNN`
-- **Validation and CI** — follow [Testing Your Code](CONTRIBUTING.md#testing-your-code)
+- **Validation and CI** — follow [Testing changes](#testing-changes)
   and [Premerge requests](#premerge-requests). Use the tools and permissions chosen by the
   developer; hand steps outside that access back to them.
 - **AI-assisted changes require a human in the loop** — disclose AI assistance in the pull request description, then stop for human review of the complete diff and description before opening or updating the pull request. The pull request queue is not a staging area for work no human has read
+
+## Testing changes
+
+Before publishing or updating a PR, or requesting premerge, run relevant tests in a
+suitable environment using the tools and permissions chosen by the developer.
+
+- Choose unit tests, integration tests, and runtime configurations appropriate to the change.
+  For GPU behavior changes, verify CPU/GPU parity and GPU execution. Prose-only changes
+  need applicable static checks rather than runtime tests.
+- Summarize checks run, observed results, and any remaining validation gaps in the PR
+  description or a comment. Review test coverage for the proposed change. Compilation or an
+  all-skipped run is not a passing runtime test; missing evidence is a validation gap rather
+  than a test failure.
+- If the required environment is unavailable, run feasible checks and document the remaining
+  validation. Obtain explicit maintainer approval before publishing those changes (including
+  drafts or follow-up pushes) or requesting targeted CI validation. This exception does not
+  waive known product-test failures. Identify where validation ran, including when it ran in CI.
+
+See the [unit-test guide](tests/README.md) and
+[integration-test guide](integration_tests/README.md) for commands and environment setup.
 
 ## Premerge requests
 

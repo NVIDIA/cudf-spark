@@ -552,24 +552,7 @@ By making a contribution to this project, I certify that:
 ```
 
 ### Testing Your Code
-
-Before publishing a PR or follow-up changes, run relevant tests in a suitable environment.
-Choose your tools and test environment, and ask for help when needed.
-
-- Choose unit tests, integration tests, and runtime configurations appropriate to the change.
-  For GPU behavior changes, verify CPU/GPU parity and GPU execution. Prose-only changes
-  need applicable static checks rather than runtime tests.
-- Summarize checks run, observed results, and any remaining validation gaps in the PR
-  description or a comment. Review test coverage for the proposed change. Compilation or an
-  all-skipped run is not a passing runtime test; missing evidence is a validation gap rather
-  than a test failure.
-- If the required environment is unavailable, run feasible checks and document the remaining
-  validation. Obtain explicit maintainer approval before publishing those changes (including
-  drafts or follow-up pushes) or requesting targeted CI validation. This exception does not
-  waive known product-test failures. Identify where validation ran, including when it ran in CI.
-
-See the [unit-test guide](tests/README.md) and
-[integration-test guide](integration_tests/README.md) for commands and environment setup.
+Please visit the [testing doc](tests/README.md) for details about how to run tests
 
 
 ### Pre-commit hooks
@@ -673,15 +656,7 @@ Ref: [spark-premerge-build.sh](jenkins/spark-premerge-build.sh)
 If it fails, you can click the `Details` link of this check, and go to `Upload log -> Jenkins log for pull request xxx (click here)` to
 find the uploaded log.
 
-##### Premerge capacity guidance
-
-Use focused testing before requesting broad premerge validation. Avoid duplicate `build`
-requests while a premerge run is outstanding, and ask a project committer if you need help
-requesting CI. Agent-specific submission checks are documented in
-[AGENTS.md](AGENTS.md#premerge-requests).
-
-##### CI options
-
+Options:
 1. Skip tests run by adding `[skip ci]` to the title. This should only be used for doc-only changes.
 2. Run build and tests in Databricks runtimes by adding `[databricks]` to the title. This adds around 30-40 minutes.
 3. Run Scala unit tests serially by adding `[serial ut]` or `[serial-ut]` to the title. Parallel execution is the default.
