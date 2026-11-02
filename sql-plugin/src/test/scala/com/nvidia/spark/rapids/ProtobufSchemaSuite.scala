@@ -580,4 +580,35 @@ class ProtobufSchemaSuite extends AnyFunSuite {
     assert(new String(arrays.defaultStrings(2), "UTF-8") == "EN")
     assert(arrays.toJniDescriptor.numFields() == 4)
   }
+
+  test("field reads merge paths and keep whole reads whole") {
+    import FieldReads._
+    val reads = path(Seq("a", "b")).merge(path(Seq("a", "c"))).merge(path(Seq("d")))
+    assert(reads.child("a").flatMap(_.child("b")).contains(All))
+    assert(reads.child("a").flatMap(_.child("c")).contains(All))
+    assert(reads.child("a").flatMap(_.child("e")).isEmpty)
+    assert(reads.child("d").flatMap(_.child("anything")).contains(All))
+    assert(reads.child("e").isEmpty)
+    assert(path(Seq("a")).merge(path(Seq("a", "b"))).child("a").contains(All))
+    assert(Unread.merge(path(Seq.empty)) == All)
+  }
+
+  test("a JNI schema may hide the children of an output message") {
+    // message Outer { Inner inner = 1; }  message Inner { int32 read = 1; int32 unread = 2; }
+    val fields = Seq(
+      FlattenedFieldDescriptor(1, -1, 0, WT_LEN, DType.STRUCT.getTypeId.getNativeId,
+        ENC_DEFAULT, isRepeated = false, isRequired = false, hasDefaultValue = false,
+        isOutput = true, defaultInt = 0, defaultFloat = 0, defaultBool = false,
+        defaultString = null, enumValidValues = null, enumNames = null),
+      FlattenedFieldDescriptor(1, 0, 1, WT_VARINT, DType.INT32.getTypeId.getNativeId,
+        ENC_DEFAULT, isRepeated = false, isRequired = false, hasDefaultValue = false,
+        isOutput = true, defaultInt = 0, defaultFloat = 0, defaultBool = false,
+        defaultString = null, enumValidValues = null, enumNames = null),
+      FlattenedFieldDescriptor(2, 0, 1, WT_VARINT, DType.INT32.getTypeId.getNativeId,
+        ENC_DEFAULT, isRepeated = false, isRequired = false, hasDefaultValue = false,
+        isOutput = false, defaultInt = 0, defaultFloat = 0, defaultBool = false,
+        defaultString = null, enumValidValues = null, enumNames = null))
+    val arrays = ProtobufSchemaValidator.toFlattenedSchemaArrays(fields.toArray)
+    assert(arrays.toJniDescriptor.numFields() == 3)
+  }
 }

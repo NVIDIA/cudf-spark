@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import inspect
+import json
 import os
 import struct
 
@@ -35,6 +36,7 @@ from spark_session import (
     is_spark_protobuf_available,
     spark_version,
     with_cpu_session,
+    with_gpu_session,
 )
 import pyspark.sql.functions as f
 from pyspark.sql.types import StringType
@@ -131,6 +133,51 @@ def _select_paths(decoded, paths):
         return [decoded.alias("decoded")]
     return [_get_field_by_path(decoded, path.split(".")).alias(path.replace(".", "_"))
             for path in paths]
+
+
+def _gpu_output_paths(df):
+    """The field paths each GpuFromProtobuf in df's executed plan outputs, as one set per
+    decode. Fields that are not output are validated but returned as nulls."""
+    decodes = []
+
+    def struct_paths(struct_type, prefix=""):
+        # Flattened order: every field, followed by the fields of its message.
+        for field in struct_type["fields"]:
+            path = prefix + field["name"]
+            yield path
+            field_type = field["type"]
+            if isinstance(field_type, dict) and field_type.get("type") == "array":
+                field_type = field_type["elementType"]
+            if isinstance(field_type, dict) and field_type.get("type") == "struct":
+                yield from struct_paths(field_type, path + ".")
+
+    def visit_expr(expr):
+        if expr.getClass().getSimpleName() == "GpuFromProtobuf":
+            paths = struct_paths(json.loads(expr.dataType().json()))
+            is_output = list(expr.schema().isOutput())
+            decodes.append(frozenset(p for p, out in zip(paths, is_output) if out))
+        children = expr.children().iterator()
+        while children.hasNext():
+            visit_expr(children.next())
+
+    def visit_plan(plan):
+        exprs = plan.expressions().iterator()
+        while exprs.hasNext():
+            visit_expr(exprs.next())
+        children = plan.children().iterator()
+        while children.hasNext():
+            visit_plan(children.next())
+
+    visit_plan(df._jdf.queryExecution().executedPlan())
+    return set(decodes)
+
+
+def _assert_gpu_output_paths(run_on_spark, expected):
+    """Equal results cannot show which fields the GPU skipped, so check the plan."""
+    # AQE plans stages lazily, so inspect a fully planned query instead.
+    actual = with_gpu_session(lambda spark: _gpu_output_paths(run_on_spark(spark)),
+                              conf={"spark.sql.adaptive.enabled": "false"})
+    assert actual == {frozenset(paths) for paths in expected}
 
 
 def _encode_varint(value):
@@ -1001,6 +1048,85 @@ def test_from_protobuf_smoke_nested(nested_smoke_desc, from_protobuf_fn):
 
 
 # ===========================================================================
+# Fields the query does not read are validated but returned as nulls
+# ===========================================================================
+
+_nested_smoke_all_paths = ["top", "child", "child.a", "child.b", "items", "items.a", "items.b"]
+
+
+def _read_top_and_leaves(decoded, df):
+    return df.select(decoded.getField("top").alias("top"),
+                     decoded.getField("child").getField("a").alias("child_a"),
+                     f.get(decoded.getField("items"), 0).getField("b").alias("first_item_b"))
+
+
+def _read_leaf_of_every_item(decoded, df):
+    return df.select(decoded.getField("items").getField("a").alias("item_a"))
+
+
+def _read_through_alias(decoded, df):
+    return df.select(decoded.alias("d")).select(f.col("d.child.b"))
+
+
+def _filter_then_read(decoded, df):
+    return df.select(decoded.alias("d")).where(f.col("d.top") > 0).select(f.col("d.child.a"))
+
+
+def _sort_then_read(decoded, df):
+    return df.select(decoded.alias("d")).orderBy(f.col("d.top")).select(f.col("d.items"))
+
+
+def _aggregate_one_field(decoded, df):
+    return df.select(decoded.alias("d")).groupBy(f.col("d.child.a")).count()
+
+
+def _read_whole_struct(decoded, df):
+    return df.select(decoded.alias("d"))
+
+
+def _read_whole_child(decoded, df):
+    return df.select(decoded.getField("child").alias("child"))
+
+
+def _read_whole_struct_in_null_check(decoded, df):
+    return df.select(decoded.getField("top").alias("top"),
+                     decoded.isNotNull().alias("present"))
+
+
+# Each case lists the output paths of every decode in the plan.
+_field_read_cases = [
+    pytest.param(_read_top_and_leaves, [["top", "child", "child.a", "items", "items.b"]],
+                 id="top_and_leaves"),
+    pytest.param(_read_leaf_of_every_item, [["items", "items.a"]], id="leaf_of_every_item"),
+    pytest.param(_read_through_alias, [["child", "child.b"]], id="through_alias"),
+    # Spark pushes the filter below the projection, so the filter decodes on its own.
+    pytest.param(_filter_then_read, [["top"], ["child", "child.a"]], id="filter"),
+    pytest.param(_sort_then_read, [["top", "items", "items.a", "items.b"]], id="sort"),
+    pytest.param(_aggregate_one_field, [["child", "child.a"]], id="aggregate"),
+    pytest.param(_read_whole_struct, [_nested_smoke_all_paths], id="whole_struct"),
+    pytest.param(_read_whole_child, [["child", "child.a", "child.b"]], id="whole_child"),
+    pytest.param(_read_whole_struct_in_null_check, [_nested_smoke_all_paths],
+                 id="whole_struct_in_null_check"),
+]
+
+
+@pytest.mark.parametrize("query,decodes", _field_read_cases)
+@ignore_order(local=True)
+def test_from_protobuf_outputs_only_fields_read(
+        nested_smoke_desc, from_protobuf_fn, query, decodes):
+    fixture_rows, _ = materialize_protobuf_data(
+        _nested_smoke_gen, "test.Root", *nested_smoke_desc)
+    encoded = [(row[-1],) for row in fixture_rows]
+
+    def run_on_spark(spark):
+        decoded = _decode(from_protobuf_fn, nested_smoke_desc, "Root")
+        return query(decoded, spark.createDataFrame(encoded, ["bin"]))
+
+    assert_gpu_and_cpu_are_equal_collect(run_on_spark)
+    _assert_gpu_output_paths(run_on_spark, decodes)
+
+
+# ===========================================================================
 # Malformed input: PERMISSIVE nulls the row and FAILFAST fails, as on the CPU
 #
 # The CPU parses the whole payload, so cases that select fields also check that the GPU
@@ -1050,6 +1176,17 @@ def _build_nested_packed_descriptor_set_bytes(spark):
         _msg("OuterPacked", [
             _field("inner", 1, "MESSAGE", type_name=".test.InnerPacked"),
         ]),
+    ])
+
+
+def _build_nested_repeated_required_descriptor_set_bytes(spark):
+    return _build_proto2_descriptor(spark, "nested_repeated_required.proto", [
+        _msg("Leaf", [_field("x", 1, "INT32", label="required")]),
+        _msg("Middle", [
+            _field("keep", 1, "INT32"),
+            _field("leaves", 2, "MESSAGE", label="repeated", type_name=".test.Leaf"),
+        ]),
+        _msg("WithMiddle", [_field("middle", 1, "MESSAGE", type_name=".test.Middle")]),
     ])
 
 
@@ -1149,6 +1286,15 @@ _malformed_cases = [
                         1, _encode_varint_field(1, 7) +
                         _encode_length_delimited_field(2, b"\x80")),
                     ["inner.keep"]),
+    # The unread repeated message sits next to a read field of the same message.
+    _malformed_case("missing_required_in_unselected_repeated_sibling",
+                    _build_nested_repeated_required_descriptor_set_bytes, "WithMiddle",
+                    _encode_length_delimited_field(1, _encode_varint_field(1, 7) +
+                                                   _encode_length_delimited_field(
+                                                       2, _encode_varint_field(1, 1))),
+                    _encode_length_delimited_field(1, _encode_varint_field(1, 7) +
+                                                   _encode_length_delimited_field(2, b"")),
+                    ["middle.keep"]),
     _malformed_case("unterminated_varint_in_unselected_message",
                     _build_nested_descriptor_set_bytes, "WithNested", _with_nested_scalars,
                     _with_nested_scalars + _encode_length_delimited_field(
