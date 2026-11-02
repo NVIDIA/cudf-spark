@@ -29,12 +29,20 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.execution.ExecutorBroadcastCache
 
 class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
-  private[rapids] val broadcastCache =
-    new ExecutorBroadcastCache[SpillableColumnarBatch](owned => {
-      // Unregister can run on an RPC thread that has not selected this executor's device.
-      GpuDeviceManager.getDeviceId().foreach(Cuda.setDevice)
-      Arm.withResource(owned)(_ => ())
-    })
+  private[rapids] val broadcastCache = {
+    val enabled = Option(SparkEnv.get).exists { env =>
+      new RapidsConf(env.conf).isShuffleBroadcastEnabled
+    }
+    if (enabled) {
+      Some(new ExecutorBroadcastCache[SpillableColumnarBatch](owned => {
+        // Unregister can run on an RPC thread that has not selected this executor's device.
+        GpuDeviceManager.getDeviceId().foreach(Cuda.setDevice)
+        Arm.withResource(owned)(_ => ())
+      }))
+    } else {
+      None
+    }
+  }
   private var shuffleCatalog: ShuffleBufferCatalog = _
   private var shuffleReceivedBufferCatalog: ShuffleReceivedBufferCatalog = _
   private var multithreadedCatalog: MultithreadedShuffleBufferCatalog = _
@@ -228,15 +236,16 @@ object GpuShuffleEnv extends Logging {
 
   private[rapids] def getBroadcastCache: ExecutorBroadcastCache[SpillableColumnarBatch] = {
     require(env != null, "GPU shuffle environment has not been initialized")
-    env.broadcastCache
+    env.broadcastCache.getOrElse(throw new IllegalStateException(
+      "Executor broadcast must be enabled when the application starts"))
   }
 
   def invalidateBroadcast(shuffleId: Int): Unit = {
-    Option(env).foreach(_.broadcastCache.invalidate(shuffleId))
+    Option(env).foreach(_.broadcastCache.foreach(_.invalidate(shuffleId)))
   }
 
   def closeBroadcastCache(): Unit = {
-    Option(env).foreach(_.broadcastCache.close())
+    Option(env).foreach(_.broadcastCache.foreach(_.close()))
   }
 
   def getMultithreadedCatalog: Option[MultithreadedShuffleBufferCatalog] = {

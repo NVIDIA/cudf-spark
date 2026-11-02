@@ -27,8 +27,9 @@ def _require_ucx():
     startup = get_spark_i_know_what_i_am_doing().sparkContext.getConf()
     if not startup.get('spark.shuffle.manager', '').endswith('RapidsShuffleManager') or \
             startup.get('spark.rapids.shuffle.mode', 'MULTITHREADED').upper() != 'UCX' or \
-            startup.get('spark.rapids.shuffle.compression.codec', 'none').lower() != 'none':
-        pytest.skip('Requires a SparkContext started with the UCX RAPIDS shuffle manager')
+            startup.get('spark.rapids.shuffle.compression.codec', 'none').lower() != 'none' or \
+            startup.get('spark.rapids.shuffle.broadcast.enabled', 'false').lower() != 'true':
+        pytest.skip('Requires application startup opt-in and an uncompressed UCX shuffle manager')
 
 
 def _join(spark, join_type, build_side):

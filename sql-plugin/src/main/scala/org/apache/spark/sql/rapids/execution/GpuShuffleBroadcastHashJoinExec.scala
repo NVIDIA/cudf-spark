@@ -138,7 +138,7 @@ object GpuShuffleBroadcastHashJoinExec {
       // The shuffle transport and codec are fixed when the application starts. A session
       // override must not make compressed map bytes look like uncompressed GPU build bytes.
       val startup = new RapidsConf(env.conf)
-      startup.isUCXShuffleManagerMode &&
+      startup.isShuffleBroadcastEnabled && startup.isUCXShuffleManagerMode &&
         startup.shuffleCompressionCodec.equalsIgnoreCase("none") &&
         GpuShuffleEnv.useGPUShuffle(conf)
     }

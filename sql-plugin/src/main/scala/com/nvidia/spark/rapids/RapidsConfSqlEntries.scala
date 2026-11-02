@@ -25,6 +25,7 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
 
   val SHUFFLE_BROADCAST_ENABLED = conf("spark.rapids.shuffle.broadcast.enabled")
     .doc("Use executor-to-executor GPU shuffle reads for eligible broadcast hash joins. " +
+      "Must be enabled at application startup; it can then be disabled per query. " +
       "Requires UCX shuffle without table compression, AQE disabled, and hash-table reuse " +
       "disabled. Null-aware anti joins, reused exchanges, and plans containing subqueries " +
       "retain the standard path. Builds that exceed runtime limits use standard broadcast.")
