@@ -677,13 +677,23 @@ find the uploaded log.
 ##### Premerge capacity guidance
 
 Use focused testing before requesting broad premerge validation. As an operating guideline,
-keep at most **three outstanding premerge requests per GitHub account**, counting active and
-queued requests across that account's PRs, and avoid duplicate requests on a busy PR.
+keep at most **three outstanding premerge requests per GitHub account**, shared across all
+PRs, humans, agents, and sessions using that account. Before posting `build`, check capacity
+using available GitHub status and request information through a tool of your choice.
+Reading public status does not require internal CI access.
 
-An authorized person with internal CI access should check capacity and submit requests.
-Contributors or agents without that access should ask an authorized maintainer to handle it;
-they do not need to obtain access themselves. Automated queueing and capacity enforcement
-belong in CI tooling and are outside this documentation change.
+- Count running, queued, and newly submitted requests until completion or cancellation is
+  confirmed, including requests against older PR heads. Attribute requests to the `build`
+  comment author and count job fan-out from one original comment once.
+- At three outstanding requests, wait and re-check. Avoid a duplicate request on a busy PR.
+  Coordinate the capacity check and submission across agents sharing the account so
+  simultaneous submissions do not exceed the limit.
+- A missing or `Expected` status alone does not establish available capacity. If the
+  available information is insufficient, or you lack permission to trigger CI, ask an
+  authorized maintainer to help before submitting.
+
+These instructions provide client-side request throttling. Automated repository-wide
+queueing and quota enforcement remain separate CI tooling work.
 
 ##### CI options
 
