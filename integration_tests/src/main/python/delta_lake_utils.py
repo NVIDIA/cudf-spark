@@ -159,11 +159,11 @@ def is_oss_delta_lake_41_to_43():
 
 delta_reorg_xfail = pytest.mark.xfail(
     not is_databricks_runtime()
-    and _loaded_delta_lake_version() in ("4.0.1", "4.1.0")
+    and _loaded_delta_lake_version() in ("4.0.1", "4.1.0", "4.2.0", "4.3.0")
     and not is_spark_local_mode(),
-    reason="Delta Lake REORG in 4.0.1 and 4.1.0 calls SparkSession.active on "
+    reason="Delta Lake REORG in 4.0.1, 4.1.0, 4.2.0 and 4.3.0 calls SparkSession.active on "
            "executors in distributed mode: "
-           "https://github.com/delta-io/delta/pull/5697#discussion_r2695998447")
+           "https://github.com/delta-io/delta/issues/7776")
 
 
 # Parameterize Deletion Vectors only on runtimes that expose the feature in these tests.
