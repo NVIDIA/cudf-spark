@@ -36,9 +36,10 @@ import org.mockito.Mockito._
 import org.mockito.invocation.InvocationOnMock
 import org.openucx.jucx.UcxCallback
 
+import org.apache.spark.FetchFailed
 import org.apache.spark.shuffle.rapids.{RapidsShuffleFetchFailedException,
   ShuffleOutputGoneException}
-import org.apache.spark.storage.{BlockId, BlockManagerId}
+import org.apache.spark.storage.{BlockId, BlockManagerId, ShuffleBlockBatchId}
 
 /**
  * What a requester does when the server answers its request with an error reply. The
@@ -727,10 +728,17 @@ class RapidsShuffleErrorReplySuite extends RapidsShuffleTestHelper {
 
   /**
    * What a reader ends with when the server's lookup for its metadata request throws `failure`.
-   * The reader waits 5 seconds, far longer than the test takes, so a reader that timed out shows
-   * it.
    */
-  private def readerOfFailedMetadataRequest(failure: Throwable): Throwable = {
+  private def readerOfFailedMetadataRequest(failure: Throwable): Throwable =
+    readerOfMetadataRequest(_ => throw failure)
+
+  /**
+   * What a reader of the helper's three blocks ends with when the server looks up each block of
+   * its metadata request with `lookup`. The reader waits 5 seconds, far longer than the test
+   * takes, so a reader that timed out shows it.
+   */
+  private def readerOfMetadataRequest(
+      lookup: ShuffleBlockBatchId => Seq[TableMeta]): Throwable = {
     val requester = new Requester
     when(mockTransport.makeClient(any())).thenReturn(requester.client)
     // the requests the client sends, which the test hands to the server
@@ -742,7 +750,9 @@ class RapidsShuffleErrorReplySuite extends RapidsShuffleTestHelper {
       anyLong(), any[UCXActiveMessage](), any[ByteBuffer](), any[UcxCallback]())
 
     val requestHandler = mock[RapidsShuffleRequestHandler]
-    when(requestHandler.getShuffleBufferMetas(any())).thenThrow(failure)
+    when(requestHandler.getShuffleBufferMetas(any())).thenAnswer { invocation =>
+      lookup(invocation.getArgument[ShuffleBlockBatchId](0))
+    }
     val serverConnection = mock[ServerConnection]
     val requestCallbacks = new ConcurrentHashMap[MessageType.Value, TransactionCallback]()
     doAnswer { invocation =>
@@ -798,6 +808,25 @@ class RapidsShuffleErrorReplySuite extends RapidsShuffleTestHelper {
     } finally {
       RmmSpark.taskDone(taskId)
     }
+  }
+
+  test("a reader's fetch failure names the block whose lookup failed") {
+    // the server finds the request's first block, then fails to find its second
+    val (missing, _, missingMapIndex) = RapidsShuffleTestHelper.getShuffleBlocks(1)
+    val gone = "unknown shuffle block shuffle_2_2_2"
+    val thrown = readerOfMetadataRequest { blockId =>
+      if (blockId == missing) throw new ShuffleOutputGoneException(gone) else Seq(tableMeta(1, 100))
+    }
+    assert(thrown.isInstanceOf[RapidsShuffleFetchFailedException],
+      s"the reader ended with $thrown")
+    // Spark unregisters by name the map index that the fetch failure carries
+    val failure = thrown.asInstanceOf[RapidsShuffleFetchFailedException].toTaskFailedReason
+      .asInstanceOf[FetchFailed]
+    assertResult((missing.shuffleId, missing.mapId, missingMapIndex, missing.startReduceId))(
+      (failure.shuffleId, failure.mapId, failure.mapIndex, failure.reduceId))
+    assertResult("2")(failure.bmAddress.executorId)
+    assert(thrown.getMessage.contains("Executor 2 failed the metadata request: " +
+      s"${RapidsShuffleServer.failureReason(BufferSendState.MissingOutput)}: $gone"))
   }
 
   test("a reader whose metadata request the server fails gets a fetch failure") {
