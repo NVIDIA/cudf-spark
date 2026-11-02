@@ -37,11 +37,11 @@ def query(spark, kind, side, empty_build=False):
         'IF(id % 7 = 0, CAST(NULL AS BIGINT), id % 11) AS right_key', 'id AS right_value')
     if side == 'left':
         if empty_build:
-            left = left.where('rand(123) < 0')
+            left = left.where("sha2(CAST(left_value AS STRING), 256) = repeat('0', 64)")
         left = broadcast(left)
     else:
         if empty_build:
-            right = right.where('rand(123) < 0')
+            right = right.where("sha2(CAST(right_value AS STRING), 256) = repeat('0', 64)")
         right = broadcast(right)
     return left.join(right,
         (left.left_key == right.right_key) & (left.left_value > right.right_value), kind)
