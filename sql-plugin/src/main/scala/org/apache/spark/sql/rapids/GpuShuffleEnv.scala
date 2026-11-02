@@ -18,6 +18,8 @@ package org.apache.spark.sql.rapids
 
 import java.util.Locale
 
+import ai.rapids.cudf.Cuda
+
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.RowBasedShuffleChecksumConf
 import com.nvidia.spark.rapids.shims.ShuffleManagerShimUtils
@@ -29,7 +31,11 @@ import org.apache.spark.sql.rapids.execution.ExecutorBroadcastCache
 
 class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
   private[rapids] val broadcastCache =
-    new ExecutorBroadcastCache[SpillableColumnarBatch](owned => Arm.withResource(owned)(_ => ()))
+    new ExecutorBroadcastCache[SpillableColumnarBatch](owned => {
+      // Unregister can run on an RPC thread that has not selected this executor's device.
+      GpuDeviceManager.getDeviceId().foreach(Cuda.setDevice)
+      Arm.withResource(owned)(_ => ())
+    })
   private var shuffleCatalog: ShuffleBufferCatalog = _
   private var shuffleReceivedBufferCatalog: ShuffleReceivedBufferCatalog = _
   private var multithreadedCatalog: MultithreadedShuffleBufferCatalog = _

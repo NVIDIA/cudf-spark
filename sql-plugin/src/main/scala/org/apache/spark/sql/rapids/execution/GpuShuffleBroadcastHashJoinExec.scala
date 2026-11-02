@@ -18,6 +18,7 @@ package org.apache.spark.sql.rapids.execution
 import scala.concurrent.duration.Duration
 
 import com.nvidia.spark.rapids._
+import com.nvidia.spark.rapids.Arm.closeOnExcept
 
 import org.apache.spark.{SparkEnv, TaskContext}
 import org.apache.spark.rapids.shims.GpuShuffleExchangeExec
@@ -117,7 +118,8 @@ case class GpuShuffleBroadcastHashJoinExec(
             builds += 1
             val batch = GpuShuffleBroadcastHelper.assemble(
               openBuild(), schema, output, localMetrics)
-            SpillableColumnarBatch(batch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+            closeOnExcept(batch)(
+              SpillableColumnarBatch(_, SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
           }, () => GpuSemaphore.releaseIfNecessary(context),
             () => context.killTaskIfInterrupted(),
             () => GpuSemaphore.acquireIfNecessary(context)) { cached =>
