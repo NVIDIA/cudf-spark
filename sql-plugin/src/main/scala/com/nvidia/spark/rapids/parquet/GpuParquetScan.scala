@@ -1332,6 +1332,25 @@ abstract class AbstractGpuParquetMultiFilePartitionReaderFactory(
   protected val compressCfg = CpuCompressionConfig.forParquet(rapidsConf)
   protected val skipReadEstimate = rapidsConf.skipReadEstimate(useChunkedReader)
 
+  // Set only for an eligible scan; scopes hybrid to the MULTITHREADED cloud reader path. Mirrors
+  // the per-file factory's eligibility check so the two paths gate identically.
+  protected val hybridScanConfig: Option[HybridScanConfig] =
+    if (rapidsConf.isParquetHybridScanEnabled) {
+      val config = HybridScanConfig(rapidsConf,
+        new HybridScanFilters(readDataSchema, isCaseSensitive, filters))
+      val eligible = HybridScanBase.isEligible(
+        rapidsConf.isParquetHybridScanEnabled, rapidsConf.testParquetHybridScanFailOnFallback,
+        readDataSchema, config.filters,
+        useChunkedReader, compressCfg.decompressSnappyCpu || compressCfg.decompressZstdCpu,
+        readUseFieldId, sqlConf.ignoreCorruptFiles,
+        GpuParquetFileFilterHandler.isDecryptionConfigured(broadcastedConf.value.value),
+        DateTimeRebaseMode.fromName(SparkShimImpl.parquetRebaseRead(sqlConf)),
+        DateTimeRebaseMode.fromName(SparkShimImpl.int96ParquetRebaseRead(sqlConf)))
+      if (eligible) Some(config) else None
+    } else {
+      None
+    }
+
   // We can't use the coalescing files reader when InputFileName, InputFileBlockStart,
   // or InputFileBlockLength because we are combining all the files into a single buffer
   // and we don't know which file is associated with each row.
@@ -1366,7 +1385,7 @@ abstract class AbstractGpuParquetMultiFilePartitionReaderFactory(
       queryUsesInputFile: Boolean,
       keepReadsInOrder: Boolean,
       combineConf: CombineConf
-  ): AbstractMultiFileCloudParquetPartitionReader
+  ): MultiFileCloudPartitionReaderBase
 
   /**
    * Build the PartitionReader for cloud reading
@@ -1585,8 +1604,21 @@ case class GpuParquetMultiFilePartitionReaderFactory(
       queryUsesInputFile: Boolean,
       keepReadsInOrder: Boolean,
       combineConf: CombineConf
-  ): AbstractMultiFileCloudParquetPartitionReader = {
-    new MultiFileCloudParquetPartitionReader(
+  ): MultiFileCloudPartitionReaderBase = hybridScanConfig match {
+    // Delta's deletion-vector factories override this method, so their reads never take hybrid.
+    case Some(config) =>
+      // The footer read needs the filter handler only the factory has.
+      val readFooter = (file: PartitionedFile, fileConf: Configuration) => {
+        val filePath = new Path(new URI(file.filePath.toString()))
+        NvtxRegistry.HYBRID_SCAN_READ_FOOTER {
+          filterHandler.readThriftFooter(fileIO, filePath, fileConf)
+        }
+      }
+      new HybridScanMultithreadedParquetPartitionReader(fileIO, conf, files, config,
+        readDataSchema, HybridScanBase.parquetOptions(readDataSchema.fieldNames), readFooter,
+        maxReadBatchSizeRows, maxReadBatchSizeBytes, maxGpuColumnSizeBytes, execMetrics,
+        partitionSchema, poolConf, maxNumFileProcessed, ignoreMissingFiles, keepReadsInOrder)
+    case None => new MultiFileCloudParquetPartitionReader(
       fileIO,
       conf,
       files,

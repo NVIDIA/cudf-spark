@@ -70,7 +70,8 @@ private[parquet] case class HybridScanSplit(
  * the pushed filter rules out, fetch the column chunks that survive, and materialize them into a
  * table. Built once per scan; each call is given the split it reads. It is split into a phase that
  * selects and fetches ([[planAndFetch]]) and one that decodes ([[materializeFetched]]). Dictionary
- * pruning and the decode take the GPU semaphore, so only the task thread may run them.
+ * pruning and the decode take the GPU semaphore, so only the task thread may run them. It holds no
+ * per-read state, so pool threads may share it.
  */
 private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Logging {
   import context.{execMetrics, filterKeepThreshold, readDataSchema, scanFilters}
@@ -82,14 +83,17 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
    * fetch its column chunks into host memory, off the GPU semaphore so the read does not hold the
    * GPU from another task. None when the split owns no surviving rows. The result is the caller's.
    *
-   * A direct-to-device (GDS) source would instead acquire the semaphore and fetch straight to the
-   * device.
+   * Dictionary pruning copies pages to the device under the semaphore, which only a task thread
+   * may do, so a `MULTITHREADED` pool thread passes `allowDictionaryPruning = false` and the task
+   * prunes the fetched chunks instead ([[pruneFetchedWithDictionaries]]). A direct-to-device
+   * (GDS) source would instead acquire the semaphore and fetch straight to the device.
    */
   def planAndFetch(
       split: HybridScanSplit,
       reader: HybridScanReader,
-      ast: Option[CompiledExpression]): Option[FetchedColumnChunks] = {
-    val rowGroups = selectRowGroups(split, reader, ast)
+      ast: Option[CompiledExpression],
+      allowDictionaryPruning: Boolean): Option[FetchedColumnChunks] = {
+    val rowGroups = selectRowGroups(split, reader, ast, allowDictionaryPruning)
     if (rowGroups.isEmpty || reader.totalRowsInRowGroups(rowGroups) == 0) {
       None
     } else {
@@ -128,7 +132,8 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
   private def selectRowGroups(
       split: HybridScanSplit,
       reader: HybridScanReader,
-      ast: Option[CompiledExpression]): Array[Int] = {
+      ast: Option[CompiledExpression],
+      allowDictionaryPruning: Boolean): Array[Int] = {
     ast.foreach(reader.setFilter)
     val inSplit = rowGroupsInScope(split, reader, reader.allRowGroups())
     if (inSplit.isEmpty || ast.isEmpty) {
@@ -141,13 +146,14 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
         "row groups")
       if (afterStats.isEmpty) {
         afterStats
-      } else if (!scanFilters.pushed.exists(FilterToAstConverter.canPruneWithDictionary)) {
+      } else if (!allowDictionaryPruning ||
+          !scanFilters.pushed.exists(FilterToAstConverter.canPruneWithDictionary)) {
         // Reading the dictionary pages costs an IO, a copy to the device and a semaphore hold,
         // so it is only worth doing for a filter the reader can prune with.
         afterStats
       } else {
         NvtxRegistry.HYBRID_SCAN_FILTER_DICT {
-          filterRowGroupsWithDictionaries(split.source, reader, afterStats)
+          filterRowGroupsWithDictionaries(reader, afterStats, split.source.fetch(_))
         }
       }
     }
@@ -178,10 +184,15 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
     }
   }
 
+  /**
+   * `getDictPages` supplies the dictionary page buffers for the ranges the reader asks for: read
+   * from the file by a single-threaded read, sliced from the fetched chunks by a `MULTITHREADED`
+   * task. The buffers it returns are closed here.
+   */
   private def filterRowGroupsWithDictionaries(
-      source: HybridScanByteSource,
       reader: HybridScanReader,
-      rowGroups: Array[Int]): Array[Int] = {
+      rowGroups: Array[Int],
+      getDictPages: Array[ByteRange] => Array[HostMemoryBuffer]): Array[Int] = {
     val dictRanges = reader.dictionaryPagesByteRanges(rowGroups)
     // The reader reports one range per filter column per row group and an empty range for a chunk
     // it will not prune with, so a list of nothing but empty ranges means there is nothing to do.
@@ -192,13 +203,91 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
     if (totalBytes(dictRanges) == 0) {
       rowGroups
     } else {
-      val afterDict = withResource(source.fetch(dictRanges)) { hostPages =>
+      val afterDict = withResource(getDictPages(dictRanges)) { hostPages =>
         compareDictionaryPages(reader, rowGroups, hostPages)
       }
       logDebug(s"HybridScan dictionary pruning: ${rowGroups.length} -> ${afterDict.length} " +
         "row groups")
       afterDict
     }
+  }
+
+  /**
+   * Prune already-fetched chunks to the row groups the filter's dictionaries cannot rule out,
+   * slicing the dictionary pages out of the chunks rather than reading them again. The pruned row
+   * groups' IO is already spent, but their device copy and decode are saved. Takes `fetched` and
+   * returns what to decode: `fetched` itself when nothing is pruned, the surviving chunks when
+   * some are, or None when no row group survives.
+   */
+  def pruneFetchedWithDictionaries(
+      reader: HybridScanReader,
+      ast: Option[CompiledExpression],
+      fetched: FetchedColumnChunks): Option[FetchedColumnChunks] = {
+    if (ast.isEmpty ||
+        !scanFilters.pushed.exists(FilterToAstConverter.canPruneWithDictionary)) {
+      Some(fetched)
+    } else {
+      val survivors = closeOnExcept(fetched) { f =>
+        ast.foreach(reader.setFilter)
+        NvtxRegistry.HYBRID_SCAN_FILTER_DICT {
+          filterRowGroupsWithDictionaries(reader, f.rowGroups,
+            sliceDictPagesFromChunks(reader, f.rowGroups, f.hostChunks, _))
+        }
+      }
+      if (survivors.length == fetched.rowGroups.length) {
+        Some(fetched)
+      } else {
+        withResource(fetched) { f =>
+          if (survivors.isEmpty) None else Some(selectSurvivingChunks(f, survivors))
+        }
+      }
+    }
+  }
+
+  /**
+   * The dictionary pages for `dictRanges`, sliced from the fetched chunks. A dictionary page is
+   * the first page of its column chunk, so a non-empty range starts where exactly one chunk does
+   * and is that chunk's leading bytes. An empty range (a chunk the reader will not prune with)
+   * keeps its slot as an empty buffer, since the reader matches buffers to ranges by position.
+   * The slices are the caller's to close.
+   */
+  private def sliceDictPagesFromChunks(
+      reader: HybridScanReader,
+      rowGroups: Array[Int],
+      chunks: Array[HostMemoryBuffer],
+      dictRanges: Array[ByteRange]): Array[HostMemoryBuffer] = {
+    val chunkRanges = reader.allColumnChunksByteRanges(rowGroups)
+    require(chunkRanges.length == chunks.length,
+      "hybrid scan column chunk count does not match the fetched buffers")
+    val chunkByOffset = chunkRanges.indices.map(i => chunkRanges(i).offset() -> i).toMap
+    dictRanges.safeMap { r =>
+      if (r.size() == 0) {
+        chunks.head.slice(0, 0)
+      } else {
+        chunks(chunkByOffset(r.offset())).slice(0, r.size())
+      }
+    }
+  }
+
+  /**
+   * The chunks of the surviving row groups, in row group order, as new slices that own their own
+   * references, so `fetched` can be closed independently. Every selected column has one chunk in
+   * every row group, so each row group's run of chunks is the same length.
+   */
+  private def selectSurvivingChunks(
+      fetched: FetchedColumnChunks,
+      survivors: Array[Int]): FetchedColumnChunks = {
+    val numRowGroups = fetched.rowGroups.length
+    val chunksPerRowGroup = fetched.hostChunks.length / numRowGroups
+    require(chunksPerRowGroup * numRowGroups == fetched.hostChunks.length,
+      "hybrid scan column chunks do not divide evenly into row groups")
+    val survivorSet = survivors.toSet
+    val kept = fetched.rowGroups.indices.filter(i => survivorSet.contains(fetched.rowGroups(i)))
+    val keptChunks = kept.flatMap { i =>
+      fetched.hostChunks.slice(i * chunksPerRowGroup, (i + 1) * chunksPerRowGroup)
+    }.toArray
+    new FetchedColumnChunks(kept.map(fetched.rowGroups(_)).toArray,
+      keptChunks.safeMap(c => c.slice(0, c.getLength)))
   }
 
   /** Compare the dictionary pages against the filter and return the row groups that survive. */
@@ -662,7 +751,7 @@ private[parquet] class HybridScanPerFileParquetPartitionReader(
         withResource(openReader(footer, parquetOptions)) { reader =>
           // The footer bytes are only read while the reader is being constructed.
           closeFooter()
-          pipeline.planAndFetch(split, reader, ast)
+          pipeline.planAndFetch(split, reader, ast, allowDictionaryPruning = true)
             .flatMap(pipeline.materializeFetched(reader, ast, _))
         }
       }
