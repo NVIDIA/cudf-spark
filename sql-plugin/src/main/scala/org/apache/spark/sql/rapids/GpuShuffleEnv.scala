@@ -19,7 +19,6 @@ package org.apache.spark.sql.rapids
 import java.util.Locale
 
 import ai.rapids.cudf.Cuda
-
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.RowBasedShuffleChecksumConf
 import com.nvidia.spark.rapids.shims.ShuffleManagerShimUtils
