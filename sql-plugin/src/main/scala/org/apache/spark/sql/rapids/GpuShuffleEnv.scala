@@ -25,8 +25,11 @@ import com.nvidia.spark.rapids.shims.ShuffleManagerShimUtils
 import org.apache.spark.{SparkConf, SparkEnv}
 import org.apache.spark.internal.{config, Logging}
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.rapids.execution.ExecutorBroadcastCache
 
 class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
+  private[rapids] val broadcastCache =
+    new ExecutorBroadcastCache[SpillableColumnarBatch](owned => Arm.withResource(owned)(_ => ()))
   private var shuffleCatalog: ShuffleBufferCatalog = _
   private var shuffleReceivedBufferCatalog: ShuffleReceivedBufferCatalog = _
   private var multithreadedCatalog: MultithreadedShuffleBufferCatalog = _
@@ -216,6 +219,19 @@ object GpuShuffleEnv extends Logging {
     null
   } else {
     env.getCatalog
+  }
+
+  private[rapids] def getBroadcastCache: ExecutorBroadcastCache[SpillableColumnarBatch] = {
+    require(env != null, "GPU shuffle environment has not been initialized")
+    env.broadcastCache
+  }
+
+  def invalidateBroadcast(shuffleId: Int): Unit = {
+    Option(env).foreach(_.broadcastCache.invalidate(shuffleId))
+  }
+
+  def closeBroadcastCache(): Unit = {
+    Option(env).foreach(_.broadcastCache.close())
   }
 
   def getMultithreadedCatalog: Option[MultithreadedShuffleBufferCatalog] = {

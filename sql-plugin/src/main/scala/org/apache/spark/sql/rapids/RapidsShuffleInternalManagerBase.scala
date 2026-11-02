@@ -2171,6 +2171,7 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
   }
 
   def unregisterGpuShuffle(shuffleId: Int): Unit = {
+    GpuShuffleEnv.invalidateBroadcast(shuffleId)
     val catalog = GpuShuffleEnv.getCatalog
     if (catalog != null) {
       logInfo(s"Unregistering shuffle $shuffleId from shuffle buffer catalog")
@@ -2222,6 +2223,7 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
     wrapped.stop()
     if (!stopped) {
       stopped = true
+      GpuShuffleEnv.closeBroadcastCache()
       RapidsShuffleTransport.closeServerThenTransport(server, transport)
       if (rapidsConf.isMultiThreadedShuffleManagerMode) {
         RapidsShuffleInternalManagerBase.stopThreadPool()

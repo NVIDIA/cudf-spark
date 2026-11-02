@@ -1,0 +1,201 @@
+/*
+ * Copyright (c) 2026, NVIDIA CORPORATION.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.spark.sql.rapids.execution
+
+import java.util.concurrent.{Callable, CountDownLatch, Executors, TimeUnit}
+import java.util.concurrent.atomic.AtomicInteger
+
+import org.scalatest.funsuite.AnyFunSuite
+
+class ExecutorBroadcastCacheSuite extends AnyFunSuite {
+  private class Value {
+    private val refs = new AtomicInteger(1)
+    def retain(): Value = {
+      assert(refs.getAndIncrement() > 0, "Borrowed a released build")
+      this
+    }
+    def release(): Unit = assert(refs.decrementAndGet() >= 0)
+    def references: Int = refs.get()
+  }
+
+  private val noAction: () => Unit = () => ()
+
+  test("consumers share one build and keep independent references after invalidation") {
+    val cache = new ExecutorBroadcastCache[Value](_.release())
+    val value = new Value
+    val builds = new AtomicInteger()
+    def read(): Value = cache.getOrBuild(7, () => {
+      builds.incrementAndGet()
+      value
+    }, noAction, noAction)(_.retain())
+    try {
+      val first = read()
+      val second = read()
+      assert(builds.get() == 1)
+      assert(value.references == 3)
+      cache.invalidate(7)
+      assert(value.references == 2)
+      intercept[IllegalStateException](read())
+      assert(builds.get() == 1)
+      first.release()
+      second.release()
+      assert(value.references == 0)
+    } finally {
+      cache.close()
+    }
+  }
+
+  test("invalidation racing build publication releases the unpublished value") {
+    val cache = new ExecutorBroadcastCache[Value](_.release())
+    val pool = Executors.newSingleThreadExecutor()
+    val started = new CountDownLatch(1)
+    val finish = new CountDownLatch(1)
+    val value = new Value
+    try {
+      val result = pool.submit(new Callable[Boolean] {
+        override def call(): Boolean = {
+          intercept[IllegalStateException] {
+            cache.getOrBuild(8, () => {
+              started.countDown()
+              assert(finish.await(10, TimeUnit.SECONDS))
+              value
+            }, noAction, noAction)(_.retain())
+          }
+          true
+        }
+      })
+      assert(started.await(10, TimeUnit.SECONDS))
+      cache.invalidate(8)
+      finish.countDown()
+      assert(result.get(10, TimeUnit.SECONDS))
+      assert(value.references == 0)
+    } finally {
+      finish.countDown()
+      pool.shutdownNow()
+      cache.close()
+    }
+  }
+
+  test("concurrent consumers wait for one builder and borrow independent references") {
+    val cache = new ExecutorBroadcastCache[Value](_.release())
+    val pool = Executors.newFixedThreadPool(2)
+    val started = new CountDownLatch(1)
+    val waiting = new CountDownLatch(1)
+    val finish = new CountDownLatch(1)
+    val value = new Value
+    try {
+      val builder = pool.submit(new Callable[Value] {
+        override def call(): Value = cache.getOrBuild(12, () => {
+          started.countDown()
+          assert(finish.await(10, TimeUnit.SECONDS))
+          value
+        }, noAction, noAction)(_.retain())
+      })
+      assert(started.await(10, TimeUnit.SECONDS))
+      val waiter = pool.submit(new Callable[Value] {
+        override def call(): Value = cache.getOrBuild(12,
+          () => fail("Concurrent consumer must reuse the build"),
+          () => waiting.countDown(), noAction)(_.retain())
+      })
+      assert(waiting.await(10, TimeUnit.SECONDS))
+      finish.countDown()
+      val first = builder.get(10, TimeUnit.SECONDS)
+      val second = waiter.get(10, TimeUnit.SECONDS)
+      assert(value.references == 3)
+      cache.invalidate(12)
+      first.release()
+      second.release()
+      assert(value.references == 0)
+    } finally {
+      finish.countDown()
+      pool.shutdownNow()
+      cache.close()
+    }
+  }
+
+  test("application shutdown rejects late publication and new consumers") {
+    val cache = new ExecutorBroadcastCache[Value](_.release())
+    val value = new Value
+    intercept[IllegalStateException] {
+      cache.getOrBuild(13, () => {
+        cache.close()
+        value
+      }, noAction, noAction)(_.retain())
+    }
+    assert(value.references == 0)
+    intercept[IllegalArgumentException] {
+      cache.getOrBuild(14, () => fail("Closed cache must not build"),
+        noAction, noAction)(_.retain())
+    }
+  }
+
+  test("a cancelled waiter releases task resources and does not cancel another task's build") {
+    val cache = new ExecutorBroadcastCache[Value](_.release())
+    val pool = Executors.newSingleThreadExecutor()
+    val started = new CountDownLatch(1)
+    val finish = new CountDownLatch(1)
+    val released = new AtomicInteger()
+    val value = new Value
+    try {
+      val result = pool.submit(new Callable[Value] {
+        override def call(): Value = cache.getOrBuild(9, () => {
+          started.countDown()
+          assert(finish.await(10, TimeUnit.SECONDS))
+          value
+        }, noAction, noAction)(_.retain())
+      })
+      assert(started.await(10, TimeUnit.SECONDS))
+      intercept[InterruptedException] {
+        cache.getOrBuild(9, () => fail("A waiter must not build"),
+          () => { released.incrementAndGet(); () },
+          () => if (released.get() > 0) throw new InterruptedException)(_.retain())
+      }
+      assert(released.get() == 1)
+      finish.countDown()
+      val borrowed = result.get(10, TimeUnit.SECONDS)
+      assert(value.references == 2)
+      cache.close()
+      assert(value.references == 1)
+      borrowed.release()
+      assert(value.references == 0)
+    } finally {
+      finish.countDown()
+      pool.shutdownNow()
+      cache.close()
+    }
+  }
+
+  test("a failed build can be retried but an unregistered shuffle cannot be recreated") {
+    val cache = new ExecutorBroadcastCache[Value](_.release())
+    try {
+      intercept[IllegalArgumentException] {
+        cache.getOrBuild(10, () => throw new IllegalArgumentException,
+          noAction, noAction)(_.retain())
+      }
+      val value = cache.getOrBuild(10, () => new Value, noAction, noAction)(_.retain())
+      value.release()
+      cache.invalidate(11)
+      intercept[IllegalStateException] {
+        cache.getOrBuild(11, () => fail("Invalidated shuffle must not build"),
+          noAction, noAction)(_.retain())
+      }
+      cache.close()
+      assert(value.references == 0)
+    } finally {
+      cache.close()
+    }
+  }
+}
