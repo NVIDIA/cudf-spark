@@ -31,18 +31,16 @@ import org.apache.spark.shuffle.rapids.{RapidsShuffleSendPrepareException,
   ShuffleOutputGoneException}
 
 /**
- * A helper case class to maintain the server side state in response to a transfer
+ * A helper class to maintain the server side state in response to a transfer
  * request initiated by a peer.
  *
- * The class implements the Iterator interface.
- *
- * On next(), a set of RapidsBuffer are copied onto a bounce buffer, and a
+ * On `getBufferToSend()`, a set of buffers are copied onto a bounce buffer, and a
  * `MemoryBuffer` slice of the bounce buffer is returned. Buffers are copied to the bounce
  * buffer in `TransferRequest` order. The receiver has the same conventions.
  *
  * Synchronization with `serverStream` is outside of this class. It is assumed that the caller
- * has several `BufferSendState` iterators and on calling next on this collection, it will
- * perform a sync on `serverStream` before handing it off to the transport.
+ * has several `BufferSendState` instances and on calling `getBufferToSend()` on each, it will
+ * perform a sync on `serverStream` before handing the slices off to the transport.
  *
  * It also is AutoCloseable. close() should be called to free bounce buffers.
  *
@@ -51,7 +49,7 @@ import org.apache.spark.shuffle.rapids.{RapidsShuffleSendPrepareException,
  * {{{
  * request arrival -- lookup succeeds --> [live] -- success reply queues --> [Completed]
  *                                         | ^
- *                                         +-+ OOM before deadline
+ *                                         +-+ prepare failure retried
  *                                         |
  *     +-----------------------------------+
  *     +-- output gone ------> [MissingOutput] -+
@@ -67,6 +65,8 @@ import org.apache.spark.shuffle.rapids.{RapidsShuffleSendPrepareException,
  * transport stops. Failed in the final data callback gets no error reply.
  * Error replies require an open server and no loop-ending failure. The materialization OOM
  * deadline starts at request arrival and never resets when a window succeeds.
+ * A prepare failure other than an OOM, gone output or loop-ending failure can be retried too,
+ * but only if another state of its server batch prepared a window.
  *
  * @param transaction a request transaction
  * @param sendBounceBuffers - an object that contains a device and potentially a host
@@ -430,7 +430,7 @@ private[shuffle] class BufferLookupException(val tableIds: Seq[Int], cause: Thro
 
 object BufferSendState extends Logging {
   /**
-   * Lets a server queue its transfer responses, error replies included, only while it is open.
+   * Lets a server queue its error replies and transfer responses only while it is open.
    * The server shuts it before the transport closes, then waits until every reply it let through
    * is queued. UCX's progress thread runs no task queued after the transport's close, so a reply
    * queued later would never be sent or released.
@@ -444,7 +444,7 @@ object BufferSendState extends Logging {
   private[shuffle] case class ErrorReply(reason: String, gate: ReplyGate)
 
   /**
-   * Answers a failed transfer request with an error reply, through `gate`. The send's callback
+   * Answers a failed request with an error reply, through `gate`. The send's callback
    * releases the reply, whatever the send's status. This method releases it when the send cannot
    * start or the gate is shut. A reply that cannot be built or sent leaves its requester waiting
    * until it times out, as with no reply. The connection logs a failed send, and this method logs
@@ -458,9 +458,9 @@ object BufferSendState extends Logging {
       val response = try {
         reply
       } catch {
-        // Building the reply allocates on the send loop, a direct buffer included. Running out
-        // of memory there, heap or direct, leaves the request unanswered and the loop serving,
-        // since nothing has been sent yet.
+        // Building the reply allocates, a direct buffer included. Running out of memory there,
+        // heap or direct, leaves the request unanswered and the calling thread serving, since
+        // nothing has been sent yet.
         case oom: OutOfMemoryError =>
           throw new IllegalStateException("No memory to build the error reply", oom)
       }
