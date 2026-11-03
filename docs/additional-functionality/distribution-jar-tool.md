@@ -33,8 +33,8 @@ To extract a bundled native library, put the distribution JAR and `zstd-jni` on 
 classpath, then specify the library name and destination path. Spark supplies
 `zstd-jni` when the plugin runs inside Spark; standalone extraction needs the
 dependency JAR explicitly. Running
-`java -jar <dist.jar> extract <library-name> <destination>` prints the command
-to use.
+`java -jar <dist.jar> extract <library-name> <destination>` extracts conventional
+libraries directly and prints the classpath command for zstd-chunked libraries.
 
 ```shell
 java -cp "<dist.jar>:<zstd-jni.jar>" com.nvidia.spark.rapids.SparkRapidsJarTool \

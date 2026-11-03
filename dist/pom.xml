@@ -432,10 +432,13 @@
                                 <ac:if xmlns:ac="antlib:net.sf.antcontrib">
                                     <available file="${project.build.directory}/jni-archive/spark-rapids-jni-native.jar"/>
                                     <then>
-                                        <zip destfile="${dist.jar.name}" update="true" keepcompression="true">
-                                            <zipfileset src="${project.build.directory}/jni-archive/spark-rapids-jni-native.jar"
-                                                        includes="**/*.chunks/*"/>
-                                        </zip>
+                                        <scriptdef name="copyNativeChunks" language="jython"
+                                                   src="${spark.rapids.source.basedir}/${rapids.module}/build/copy-native-chunks.py">
+                                            <attribute name="jar_path"/>
+                                            <attribute name="archive_path"/>
+                                        </scriptdef>
+                                        <copyNativeChunks jar_path="${dist.jar.name}"
+                                            archive_path="${project.build.directory}/jni-archive/spark-rapids-jni-native.jar"/>
                                     </then>
                                     <else>
                                         <fail message="JNI chunk archive is missing; re-execute with -Drapids.jni.unpack.skip=false">
@@ -529,12 +532,7 @@
                                 <ac:trycatch xmlns:ac="antlib:net.sf.antcontrib">
                                     <ac:try>
                                         <mkdir dir="${project.build.directory}/native-extraction-smoke"/>
-                                        <java classname="com.nvidia.spark.rapids.SparkRapidsJarTool"
-                                              fork="true" failonerror="true">
-                                            <classpath>
-                                                <pathelement location="${dist.jar.name}"/>
-                                                <path refid="maven.compile.classpath"/>
-                                            </classpath>
+                                        <java jar="${dist.jar.name}" fork="true" failonerror="true">
                                             <arg value="extract"/>
                                             <arg value="cudfjni"/>
                                             <arg value="${project.build.directory}/native-extraction-smoke/cudfjni"/>
@@ -543,7 +541,7 @@
                                               fork="true" failonerror="true">
                                             <classpath>
                                                 <pathelement location="${dist.jar.name}"/>
-                                                <path refid="maven.compile.classpath"/>
+                                                <pathelement location="${project.build.directory}/jni-archive/zstd-jni.jar"/>
                                             </classpath>
                                             <arg value="extract"/>
                                             <arg value="cudf"/>
@@ -612,6 +610,11 @@ self.log("... OK")
                         <artifactId>javassist</artifactId>
                         <version>3.30.2-GA</version>
                     </dependency>
+                    <dependency>
+                        <groupId>org.apache.commons</groupId>
+                        <artifactId>commons-compress</artifactId>
+                        <version>1.21</version>
+                    </dependency>
                 </dependencies>
             </plugin>
             <plugin>
@@ -648,6 +651,13 @@ self.log("... OK")
                                     <classifier>${jni.classifier}</classifier>
                                     <outputDirectory>${project.build.directory}/jni-archive</outputDirectory>
                                     <destFileName>spark-rapids-jni-native.jar</destFileName>
+                                </artifactItem>
+                                <artifactItem>
+                                    <groupId>com.github.luben</groupId>
+                                    <artifactId>zstd-jni</artifactId>
+                                    <version>1.5.6-6</version>
+                                    <outputDirectory>${project.build.directory}/jni-archive</outputDirectory>
+                                    <destFileName>zstd-jni.jar</destFileName>
                                 </artifactItem>
                             </artifactItems>
                         </configuration>

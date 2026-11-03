@@ -118,11 +118,13 @@ public final class SparkRapidsJarTool {
     try (JarFile jar = new JarFile(getJarPath())) {
       packagedArchitecture = selectNativeArchitecture(
           nativeLibrariesByArchitecture(jar, os), args[1], hostArchitecture);
-    }
-    if (!zstdAvailable()) {
-      err.println("Native extraction needs zstd-jni on the classpath. Run:");
-      err.println("  " + EXTRACT_COMMAND);
-      return 1;
+      String manifest = packagedArchitecture + "/" + os + "/" +
+          System.mapLibraryName(args[1]) + CHUNK_MANIFEST_SUFFIX;
+      if (requiresZstd(jar, manifest) && !zstdAvailable()) {
+        err.println("Zstd native extraction needs zstd-jni on the classpath. Run:");
+        err.println("  " + EXTRACT_COMMAND);
+        return 1;
+      }
     }
     if (hostArchitecture.equals(packagedArchitecture)) {
       NativeDepUtil.main(args);
@@ -135,6 +137,18 @@ public final class SparkRapidsJarTool {
       }
     }
     return 0;
+  }
+
+  static boolean requiresZstd(JarFile jar, String manifest) throws IOException {
+    JarEntry entry = jar.getJarEntry(manifest);
+    if (entry == null) {
+      return false;
+    }
+    Properties properties = new Properties();
+    try (InputStream in = jar.getInputStream(entry)) {
+      properties.load(in);
+    }
+    return "zstd".equals(properties.getProperty("chunk.compression", "none").trim());
   }
 
   private static boolean zstdAvailable() {

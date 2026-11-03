@@ -17,8 +17,10 @@
 package com.nvidia.spark.rapids;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -130,6 +132,26 @@ public class TestSparkRapidsJarTool {
             libraries, "cudfjni", "unknown"));
         assertThrows(IOException.class, () -> SparkRapidsJarTool.selectNativeArchitecture(
             libraries, "missing", "amd64"));
+      }
+    });
+  }
+
+  @Test
+  public void testZstdExtractionRequirement() throws IOException {
+    withTempDir(tempDir -> {
+      Path jarPath = tempDir.resolve("native-libraries.jar");
+      Map<String, byte[]> jarEntries = new LinkedHashMap<>();
+      String resource = "amd64/Linux/libcudf.so.chunks.properties";
+      jarEntries.put(resource, "chunk.compression=zstd\n".getBytes(StandardCharsets.UTF_8));
+      jarEntries.put("amd64/Linux/libplain.so.chunks.properties",
+          "chunk.compression=none\n".getBytes(StandardCharsets.UTF_8));
+      writeJar(jarPath, jarEntries, false, 1_600_000_000_000L);
+      try (JarFile jar = new JarFile(jarPath.toFile())) {
+        assertTrue(SparkRapidsJarTool.requiresZstd(jar, resource));
+        assertFalse(SparkRapidsJarTool.requiresZstd(jar,
+            "amd64/Linux/libplain.so.chunks.properties"));
+        assertFalse(SparkRapidsJarTool.requiresZstd(jar,
+            "amd64/Linux/libconventional.so.chunks.properties"));
       }
     });
   }
