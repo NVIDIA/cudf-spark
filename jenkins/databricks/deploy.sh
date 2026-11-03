@@ -40,13 +40,14 @@ fi
 VERSION_NUM=${BASE_SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS//.}
 SPARK_VERSION_STR=spark$VERSION_NUM
 SPARK_PLUGIN_JAR_VERSION=$($MVN help:evaluate -q -pl dist -Dexpression=project.version -DforceStdout)
-# Append 143 or 173 into the db shim version because Databricks 14.3.x and 15.4.x are both based on spark version 3.5.0
-# and Databricks 17.3 based on Spark 4.0.0
+# Append the runtime version to DB shims that need an exact Databricks line.
 if [[ "$DB_RUNTIME" == "14.3"* ]]; then
     DB_SHIM_NAME="${SPARK_VERSION_STR}db143"
 elif [[ "$DB_RUNTIME" == "17.3"* ]]; then
     # Databricks 17.3 based on Spark 4.0.0
     DB_SHIM_NAME="${SPARK_VERSION_STR}db173"
+elif [[ "$DB_RUNTIME" == "18.3"* ]]; then
+    DB_SHIM_NAME="${SPARK_VERSION_STR}db183"
 else
     DB_SHIM_NAME="${SPARK_VERSION_STR}db"
 fi
@@ -58,6 +59,16 @@ $MVN -B deploy:deploy-file $MVN_URM_MIRROR -Durl=$SERVER_URL -DrepositoryId=$SER
 DB_PLUGIN_API_JAR_PATH=./sql-plugin-api/target/${DB_SHIM_NAME}/rapids-4-spark-sql-plugin-api_$SCALA_VERSION-$SPARK_PLUGIN_JAR_VERSION-${DB_SHIM_NAME}.jar
 $MVN -B deploy:deploy-file $MVN_URM_MIRROR -Durl=$SERVER_URL -DrepositoryId=$SERVER_ID \
     -Dfile=$DB_PLUGIN_API_JAR_PATH -DpomFile=./sql-plugin-api/pom.xml -Dclassifier=$DB_SHIM_NAME
+# The distribution packager inspects these standalone helper jars for every shim.
+# Use its module list so newly extracted helpers are also published for Databricks.
+while read -r MODULE || [[ -n "$MODULE" ]]; do
+    case "$MODULE" in
+        ''|\#*) continue ;;
+    esac
+    DB_HELPER_JAR_PATH=./$MODULE/target/${DB_SHIM_NAME}/rapids-4-spark-${MODULE}_$SCALA_VERSION-$SPARK_PLUGIN_JAR_VERSION-${DB_SHIM_NAME}.jar
+    $MVN -B deploy:deploy-file $MVN_URM_MIRROR -Durl=$SERVER_URL -DrepositoryId=$SERVER_ID \
+        -Dfile=$DB_HELPER_JAR_PATH -DpomFile=./$MODULE/pom.xml -Dclassifier=$DB_SHIM_NAME
+done < dist/root-safe-module-classes.txt
 # Deploy the integration test jar
 DBINTTESTJARFPATH=./integration_tests/target/rapids-4-spark-integration-tests_$SCALA_VERSION-$SPARK_PLUGIN_JAR_VERSION-${DB_SHIM_NAME}.jar
 $MVN -B deploy:deploy-file $MVN_URM_MIRROR -Durl=$SERVER_URL -DrepositoryId=$SERVER_ID \

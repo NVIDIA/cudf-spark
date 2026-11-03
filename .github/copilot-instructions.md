@@ -1,8 +1,27 @@
 # GitHub Copilot Review Instructions for spark-rapids
 
-spark-rapids is a GPU acceleration plugin for Apache Spark.
-For full project context, coding conventions, and code examples,
-see [AGENTS.md](../AGENTS.md).
+cudf-spark is a GPU acceleration plugin for Apache Spark. Before generating or
+reviewing changes, read and follow [AGENTS.md](../AGENTS.md). It translates the
+agent-actionable requirements from [CONTRIBUTING.md](../CONTRIBUTING.md) and
+[CODE_REVIEW_GUIDELINES.md](../CODE_REVIEW_GUIDELINES.md); consult those source
+documents on demand when more process detail is needed. Tool-specific
+instructions must not weaken the repository policy.
+
+## Shim compatibility review
+
+For shim/shared-caller or Spark/Databricks matrix changes, follow
+[check-shim-compatibility](../.agents/skills/check-shim-compatibility/SKILL.md).
+Read the `shim-compatibility` and automatic `shim-related-prs` advisory reports;
+verify head/base. Report confirmed gaps with file/symbol/profile and observed
+evidence. Inspect advisory matches before attributing a defect. If discovery
+failed or peers moved, state that limitation without invalidating the core
+combined-tree result. Separate base debt; Drafts/associations alone are not defects.
+Prefer exact-head `NEW_INTERACTION_FINDINGS` with profile/symbol/file evidence;
+inspect `COMBINATION_CONFLICT`, `INCOMPLETE` and `NOT_CHECKED` separately. Existing
+individual findings are not cross-PR regressions. No new static interaction
+findings is not compilation or runtime proof; stale evidence requires refresh.
+Use the read-only helper when possible;
+state missing evidence. Static success is not compilation; rerun stale reports.
 
 ## Cross-repo References
 
@@ -10,7 +29,7 @@ When reviewing shim code or GPU operator implementations, cross-reference
 these upstream repositories to verify correctness:
 - **apache/spark** — verify GPU behavior matches the CPU implementation in the target Spark version (expression evaluation semantics, null handling, type coercion, catalog/partition behavior)
 - **rapidsai/cudf** — verify cuDF API usage (column operations, memory allocation semantics, null handling)
-- **NVIDIA/spark-rapids-jni** — verify JNI binding signatures, memory ownership rules, error codes
+- **NVIDIA/cudf-spark-jni** — verify JNI binding signatures, memory ownership rules, error codes
 
 ## Review Checklist
 
@@ -21,12 +40,13 @@ these upstream repositories to verify correctness:
 - [ ] C5: Resource lifecycle — SpillableColumnarBatch used after close or without retry handling
 - [ ] H1: Performance — unnecessary host-device copies, redundant materializations, avoidable data serialization
 - [ ] H2: Concurrency — missing GpuSemaphore.acquireIfNecessary(context), nested locks without ordering
-- [ ] H3: Fallback gaps — new operator in GpuOverrides without fallback declaration or test
+- [ ] H3: Fallback gaps — new replacement rule without a fallback declaration or test
 - [ ] H4: Test quality — no GPU execution verification, hardcoded sleeps, unseeded random data; GPU resource cleanup in afterAll/afterEach
 - [ ] H5: Configuration — new RapidsConf without docs/defaults; should use .internal() if not user-visible; new features default off
 - [ ] H6: Magic numbers — unexplained numeric literals without named constants or comments
 - [ ] H7: Pre-merge CI gaps — only selected shims run unit tests; [databricks] needed for DB CI; feature-gated tests need explicit enable; limited Scala 2.13 coverage
-- [ ] H8: Upstream dependencies — SNAPSHOT changes from spark-rapids-jni/cudf may break; verify API usage against upstream repos
+- [ ] H8: Upstream dependencies — SNAPSHOT changes from cudf-spark-jni/cudf may break; verify API usage against upstream repos
+- [ ] H10: Performance checklist — report `Performance: Not required` as a high-severity finding unless the PR is documentation-only or test-only, or its description gives a verifiable reason the change cannot affect runtime performance. A bug-fix label, small diff, or rarely used path is not by itself an exemption. When uncertain, flag
 
 ## Do NOT Comment On
 

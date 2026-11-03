@@ -75,7 +75,9 @@ case class GpuFileSourceScanExec(
     tableIdentifier: Option[TableIdentifier],
     disableBucketedScan: Boolean = false,
     queryUsesInputFile: Boolean = false,
-    requiredPartitionSchema: Option[StructType] = None)(@transient val rapidsConf: RapidsConf)
+    requiredPartitionSchema: Option[StructType] = None)(
+    @transient val rapidsConf: RapidsConf,
+    @transient val partitionPlanningScan: Option[FileSourceScanExec] = None)
     extends GpuDataSourceScanExec with GpuExec {
 
   import GpuMetric._
@@ -98,7 +100,7 @@ case class GpuFileSourceScanExec(
 
   private val isPerFileReadEnabled = gpuFormat.isPerFileReadEnabled(rapidsConf)
 
-  override def otherCopyArgs: Seq[AnyRef] = Seq(rapidsConf)
+  override def otherCopyArgs: Seq[AnyRef] = Seq(rapidsConf, partitionPlanningScan)
 
   // All expressions are filter expressions used on the CPU.
   override def gpuExpressions: Seq[Expression] = Nil
@@ -108,6 +110,14 @@ case class GpuFileSourceScanExec(
   }
 
   private lazy val driverMetrics: HashMap[String, Long] = HashMap.empty
+
+  private[sql] def updateDriverMetrics(values: Map[String, Long]): Unit = {
+    values.foreach { case (name, value) =>
+      if (metrics.contains(name)) {
+        driverMetrics(name) = value
+      }
+    }
+  }
 
   private var prefetchEagerly = false
 
@@ -399,6 +409,7 @@ case class GpuFileSourceScanExec(
     "metadataTime" -> createTimingMetric(ESSENTIAL_LEVEL, "metadata time"),
     "filesSize" -> createSizeMetric(ESSENTIAL_LEVEL, "size of files read"),
     GPU_DECODE_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_GPU_DECODE_TIME),
+    GPU_OUTPUT_BATCH_BYTES -> createSizeMetric(MODERATE_LEVEL, DESCRIPTION_GPU_OUTPUT_BATCH_BYTES),
     BUFFER_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_BUFFER_TIME),
     FILTER_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_FILTER_TIME),
     SCHEDULE_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_SCHEDULE_TIME),
@@ -557,7 +568,7 @@ case class GpuFileSourceScanExec(
   private def createNonBucketedReadRDD(
       readFile: Option[(PartitionedFile) => Iterator[InternalRow]],
       fsRelation: HadoopFsRelation): RDD[InternalRow] = {
-    val partitions = StaticPartitionShims.getStaticPartitions(fsRelation).getOrElse {
+    val partitions = StaticPartitionShims.getPartitions(this).getOrElse {
       val openCostInBytes = fsRelation.sparkSession.sessionState.conf.filesOpenCostInBytes
       val maxSplitBytes =
         FilePartition.maxSplitBytes(fsRelation.sparkSession, dynamicallySelectedPartitions)
@@ -612,7 +623,11 @@ case class GpuFileSourceScanExec(
       logDebug(s"Using Datasource RDD, files are: " +
         s"${prunedPartitions.flatMap(FilePartitionShims.getFiles).mkString(",")}")
       // note we use the v2 DataSourceRDD instead of FileScanRDD so we don't have to copy more code
-      GpuDataSourceRDD(relation.sparkSession.sparkContext, locatedPartitions, readerFactory)
+      GpuDataSourceRDD(
+        relation.sparkSession.sparkContext,
+        locatedPartitions,
+        readerFactory,
+        includeRefreshHint = true)
     }
   }
 

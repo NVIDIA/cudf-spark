@@ -72,14 +72,14 @@ class RapidsDatasetSuite
   // This test is modified to sort the results for consistent ordering
   testRapids("dropDuplicates") {
     val ds = Seq(("a", 1), ("a", 2), ("b", 1), ("a", 1)).toDS()
-    checkDataset(
+    checkDatasetUnorderly(
       ds.dropDuplicates("_1"),
       ("a", 1), ("b", 1))
-    checkDataset(
+    checkDatasetUnorderly(
       ds.dropDuplicates("_2"),
       ("a", 1), ("a", 2))
     // Sort the results for consistent ordering
-    val sortedCount = ds.dropDuplicates("_1", "_2").collect().sortBy { case (t1, _) => t1 }
+    val sortedCount = ds.dropDuplicates("_1", "_2").collect().sorted
     assert(sortedCount.toSeq === Seq(("a", 1), ("a", 2), ("b", 1)))
   }
 
@@ -91,8 +91,8 @@ class RapidsDatasetSuite
     // The dataset joined has two columns of the same name "_2".
     val joined = ds1.join(ds2, "_1").select(ds1("_2").as[Int], ds2("_2").as[Int])
 
-    val sortedCount = joined.dropDuplicates().collect().sortBy { case (t1, _) => t1 }
-    assert(sortedCount.toSeq === Seq((1, 2), (1, 1), (2, 1), (2, 2)))
+    val sortedCount = joined.dropDuplicates().collect().sorted
+    assert(sortedCount.toSeq === Seq((1, 1), (1, 2), (2, 1), (2, 2)))
   }
 
   // GPU-specific test for "SPARK-24762: typed agg on Option[Product] type"

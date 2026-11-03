@@ -57,7 +57,7 @@ sealed case class NvtxId private(name: String, color: NvtxColor, doc: String) {
   private val isEnabled = java.lang.Boolean.getBoolean("ai.rapids.cudf.nvtx.enabled")
   private val isDebug = java.lang.Boolean.getBoolean("ai.rapids.cudf.nvtx.debug")
 
-  def help(): Unit = println(s"$name|$doc")
+  def help(): Unit = ConsoleOutput.writeLine(s"$name|$doc")
 
   def push(): NvtxId = {
     if (isEnabled) {
@@ -327,6 +327,12 @@ object NvtxRegistry {
   val COMPILE_ASTS: NvtxId = NvtxId("Compile ASTs", NvtxColor.ORANGE,
     "Compiling abstract syntax trees for expression evaluation")
 
+  val PROJECT_AST_JIT: NvtxId = NvtxId("Project AST JIT", NvtxColor.CYAN,
+    "Applying JIT-compiled AST projection to batch")
+
+  val COMPILE_AST_JIT: NvtxId = NvtxId("Compile AST JIT", NvtxColor.ORANGE,
+    "Compiling an AST expression for JIT evaluation")
+
   // Aggregate operations
   val COMPUTE_AGGREGATE: NvtxId = NvtxId("computeAggregate", NvtxColor.CYAN,
     "Computing aggregation on input batch")
@@ -391,7 +397,10 @@ object NvtxRegistry {
     "Processing batch for existence join")
 
   val BUILD_JOIN_TABLE: NvtxId = NvtxId("build join table", NvtxColor.GREEN,
-    "Building hash table for join operation")
+    "Materializing broadcast build-side data for a join")
+
+  val HASH_TABLE_BUILD: NvtxId = NvtxId("hash table build",
+    NvtxColor.GREEN, "Building reusable cuDF hash state for a join")
 
   // Window operations
   val WINDOW: NvtxId = NvtxId("window", NvtxColor.CYAN,
@@ -672,19 +681,6 @@ object NvtxRegistry {
   val GPU_RANGE: NvtxId = NvtxId("GpuRange", NvtxColor.DARK_GREEN,
     "Generating range of values on GPU")
 
-  // Hybrid CPU/GPU operations
-  val WAIT_FOR_CPU: NvtxId = NvtxId("waitForCPU", NvtxColor.RED,
-    "Waiting for CPU batch in hybrid execution")
-
-  val GPU_ACQUIRE_C2C: NvtxId = NvtxId("gpuAcquireC2C", NvtxColor.GREEN,
-    "Acquiring GPU for coalesce-to-coalesce operation")
-
-  val PINNED_H2D: NvtxId = NvtxId("pinnedH2D", NvtxColor.DARK_GREEN,
-    "Copying from pinned host memory to device")
-
-  val PAGEABLE_H2D: NvtxId = NvtxId("PageableH2D", NvtxColor.GREEN,
-    "Copying from pageable host memory to device")
-
   def init(): Unit = {
     register(ACQUIRE_GPU)
     register(RELEASE_GPU)
@@ -759,6 +755,8 @@ object NvtxRegistry {
     register(PROJECT_EXEC)
     register(PROJECT_AST)
     register(COMPILE_ASTS)
+    register(PROJECT_AST_JIT)
+    register(COMPILE_AST_JIT)
     register(COMPUTE_AGGREGATE)
     register(FINALIZE_AGG)
     register(POST_PROCESS_AGG)
@@ -780,6 +778,7 @@ object NvtxRegistry {
     register(EXISTENCE_JOIN_SCATTER_MAP)
     register(EXISTENCE_JOIN_BATCH)
     register(BUILD_JOIN_TABLE)
+    register(HASH_TABLE_BUILD)
     register(WINDOW)
     register(RUNNING_WINDOW)
     register(DOUBLE_BATCHED_WINDOW_PRE)
@@ -866,24 +865,20 @@ object NvtxRegistry {
     register(DISK_SPILL)
     register(DEVICE_SPILL)
     register(GPU_RANGE)
-    register(WAIT_FOR_CPU)
-    register(GPU_ACQUIRE_C2C)
-    register(PINNED_H2D)
-    register(PAGEABLE_H2D)
   }
 }
 
 object NvtxRangeDocs {
   def helpCommon(): Unit = {
-    println("---")
-    println("layout: page")
-    println("title: NVTX Ranges")
-    println("nav_order: 5")
-    println("parent: Developer Overview")
-    println("---")
+    ConsoleOutput.writeLine("---")
+    ConsoleOutput.writeLine("layout: page")
+    ConsoleOutput.writeLine("title: NVTX Ranges")
+    ConsoleOutput.writeLine("nav_order: 5")
+    ConsoleOutput.writeLine("parent: Developer Overview")
+    ConsoleOutput.writeLine("---")
     MarkdownUtils.printApacheSparkVersion("NvtxRangeDocs.help")
     // scalastyle:off line.size.limit
-    println("""# RAPIDS Accelerator for Apache Spark Nvtx Range Glossary
+    ConsoleOutput.writeLine("""# NVIDIA cuDF plugin for Apache Spark Nvtx Range Glossary
               |The following is the list of Nvtx ranges that are used throughout
               |the plugin. To add your own Nvtx range to the code, create an NvtxId
               |entry in NvtxRangeWithDoc.scala and create an `NvtxRangeWithDoc` in the
@@ -893,9 +888,9 @@ object NvtxRangeDocs {
               |
               |""".stripMargin)
     // scalastyle:on line.size.limit
-    println("\n## Nvtx Ranges\n")
-    println("Name | Description")
-    println("-----|-------------")
+    ConsoleOutput.writeLine("\n## Nvtx Ranges\n")
+    ConsoleOutput.writeLine("Name | Description")
+    ConsoleOutput.writeLine("-----|-------------")
   }
 
   def main(args: Array[String]): Unit = {

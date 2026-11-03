@@ -18,11 +18,11 @@ from asserts import *
 from conftest import is_not_utc, is_supported_time_zone, is_dataproc_serverless_runtime
 from data_gen import *
 from spark_session import *
-from marks import allow_non_gpu, approximate_float, datagen_overrides, disable_ansi_mode, tz_sensitive_test
+from marks import (allow_non_gpu, approximate_float, disable_ansi_mode, tz_sensitive_test,
+                   validate_execs_in_gpu_plan)
 from pyspark.sql.types import *
 from spark_init_internal import spark_version
 from datetime import date, datetime, timedelta
-import math
 import pytz
 
 _decimal_gen_36_5 = DecimalGen(precision=36, scale=5)
@@ -75,6 +75,97 @@ def test_cast_string_to_boolean_invalid_ansi_on(invalid_value):
                            .selectExpr("CAST(str_col AS BOOLEAN) as bool_col").collect(),
         conf=ansi_enabled_conf,
         error_message="SparkRuntimeException")
+
+
+_ansi_cast_corner_case_params = [
+    pytest.param(BooleanGen(), StringType(), id='boolean-to-string'),
+    pytest.param(
+        ByteGen(special_cases=[BYTE_MIN, BYTE_MAX, 0, 1, -1]),
+        ShortType(),
+        id='byte-to-short'),
+    pytest.param(
+        ShortGen(special_cases=[SHORT_MIN, SHORT_MAX, 0, 1, -1]),
+        IntegerType(),
+        id='short-to-int'),
+    pytest.param(
+        IntegerGen(special_cases=[INT_MIN, INT_MAX, 0, 1, -1]),
+        LongType(),
+        id='int-to-long'),
+    pytest.param(
+        LongGen(special_cases=[LONG_MIN, LONG_MAX, 0, 1, -1]),
+        DecimalType(20, 0),
+        id='long-to-decimal'),
+    pytest.param(
+        RepeatSeqGen(
+            [None, FLOAT_MIN, FLOAT_MAX, 0.0, -0.0, 1.0, -1.0, float('nan')],
+            data_type=FloatType()),
+        DoubleType(),
+        id='float-to-double'),
+    pytest.param(
+        DoubleGen(
+            no_nans=True,
+            special_cases=[DOUBLE_MIN, DOUBLE_MAX, 0.0, -0.0, 1.0, -1.0, float('nan')]),
+        BooleanType(),
+        id='double-to-boolean'),
+    pytest.param(DecimalGen(precision=38, scale=10), StringType(), id='decimal-to-string'),
+    pytest.param(
+        StringGen('(| |true|hello|中文|😀)'),
+        BinaryType(),
+        id='string-to-binary'),
+    pytest.param(DateGen(), StringType(), id='date-to-string'),
+    pytest.param(TimestampGen(), DateType(), id='timestamp-to-date'),
+    pytest.param(
+        ArrayGen(
+            ByteGen(special_cases=[BYTE_MIN, BYTE_MAX, 0, 1, -1]),
+            min_length=0,
+            max_length=4),
+        ArrayType(LongType()),
+        id='array-byte-to-long'),
+    pytest.param(
+        MapGen(
+            ByteGen(nullable=False, special_cases=[BYTE_MIN, BYTE_MAX, 0, 1, -1]),
+            ShortGen(special_cases=[SHORT_MIN, SHORT_MAX, 0, 1, -1]),
+            min_length=0,
+            max_length=4),
+        MapType(IntegerType(), LongType()),
+        id='map-byte-short-to-int-long'),
+    pytest.param(
+        StructGen([
+            ('number', ByteGen(special_cases=[BYTE_MIN, BYTE_MAX, 0, 1, -1])),
+            ('text', StringGen('(| |hello|中文|😀)'))]),
+        StructType([
+            StructField('number', LongType()),
+            StructField('text', StringType())]),
+        id='struct-byte-string-to-long-string'),
+    pytest.param(
+        DayTimeIntervalGen(
+            special_cases=[
+                MIN_DAY_TIME_INTERVAL,
+                MAX_DAY_TIME_INTERVAL,
+                timedelta(seconds=0)]),
+        StringType(),
+        id='day-time-interval-to-string')]
+
+_ansi_cast_non_utc_allow = ['ProjectExec'] if is_not_utc() else []
+
+
+# YearMonthIntervalType is excluded because its ANSI casts are not GPU-supported in Spark 3.3.
+@allow_non_gpu(*_ansi_cast_non_utc_allow)
+@validate_execs_in_gpu_plan('GpuProjectExec')
+@pytest.mark.parametrize('data_gen,to_type', _ansi_cast_corner_case_params)
+def test_ansicast_corner_cases(data_gen, to_type):
+    # Includes null, finite numeric bounds, +/-0.0, NaN, empty string, and Unicode/emoji.
+    # Infinities are intentionally outside this corner-case milestone.
+    def do_cast(spark):
+        return unary_op_df(spark, data_gen).select(
+            f.col('a').cast(to_type).alias('result'))
+
+    (from_cpu, cpu_df), (from_gpu, gpu_df) = run_with_cpu_and_gpu(
+        do_cast, 'COLLECT_WITH_DATAFRAME', conf=ansi_enabled_conf)
+
+    assert_contains_ansi_cast(cpu_df)
+    assert_contains_ansi_cast(gpu_df)
+    assert_equal_with_signed_zero(from_cpu, from_gpu)
 
 # These tests are not intended to be exhaustive. The scala test CastOpSuite should cover
 # just about everything for non-nested values. This is intended to check that the
@@ -216,7 +307,6 @@ def test_ansi_cast_decimal_to(data_gen, to_type):
 
 
 @disable_ansi_mode  # With ANSI enabled, casting from wider to narrower types will fail.
-@datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids/issues/10050')
 @pytest.mark.parametrize('data_gen', [
     DecimalGen(7, 1),
     DecimalGen(9, 9),
@@ -237,7 +327,6 @@ def test_with_ansi_disabled_cast_decimal_to_decimal(data_gen, to_type):
             lambda spark : unary_op_df(spark, data_gen).select(f.col('a').cast(to_type), f.col('a')))
 
 
-@datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids/issues/10050')
 @pytest.mark.parametrize('data_gen', [
     DecimalGen(3, 0)], ids=meta_idfn('from:'))
 @pytest.mark.parametrize('to_type', [

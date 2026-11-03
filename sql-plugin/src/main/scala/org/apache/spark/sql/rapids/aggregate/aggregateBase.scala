@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,11 +19,10 @@ package org.apache.spark.sql.rapids.aggregate
 import ai.rapids.cudf
 import ai.rapids.cudf.GroupByAggregation
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.shims.{ShimExpression, ShimUnaryExpression}
+import com.nvidia.spark.rapids.shims.ShimExpression
 
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, AttributeSet, Expression, ExprId}
 import org.apache.spark.sql.catalyst.expressions.aggregate._
-import org.apache.spark.sql.catalyst.expressions.codegen.CodegenFallback
 import org.apache.spark.sql.types._
 
 /**
@@ -279,6 +278,39 @@ case class GpuAggregateExpression(origAggregateFunction: GpuAggregateFunction,
   override def sql: String = aggregateFunction.sql(isDistinct)
 }
 
+case class GpuAggregateExpressionMeta(
+    aggregateExpression: AggregateExpression,
+    override val conf: RapidsConf,
+    parentMeta: Option[RapidsMeta[_, _, _]],
+    rule: DataFromReplacementRule)
+    extends ExprMeta[AggregateExpression](aggregateExpression, conf, parentMeta, rule) {
+
+  private val filter: Option[BaseExprMeta[_]] =
+    aggregateExpression.filter.map(GpuOverrides.wrapExpr(_, conf, Some(this)))
+  private val childrenExprMeta: Seq[BaseExprMeta[Expression]] =
+    aggregateExpression.children.map(GpuOverrides.wrapExpr(_, conf, Some(this)))
+  override val childExprs: Seq[BaseExprMeta[_]] = childrenExprMeta ++ filter.toSeq
+
+  override def convertToGpuImpl(): GpuExpression = {
+    // Handle the case where AggregateExpression has the resultIds parameter containing a
+    // sequence of ExprIds instead of a single resultId.
+    val resultId = try {
+      val resultMethod = aggregateExpression.getClass.getMethod("resultId")
+      resultMethod.invoke(aggregateExpression).asInstanceOf[ExprId]
+    } catch {
+      case _: Exception =>
+        val resultMethod = aggregateExpression.getClass.getMethod("resultIds")
+        resultMethod.invoke(aggregateExpression).asInstanceOf[Seq[ExprId]].head
+    }
+    GpuAggregateExpression(
+      childExprs.head.convertToGpu().asInstanceOf[GpuAggregateFunction],
+      aggregateExpression.mode,
+      aggregateExpression.isDistinct,
+      filter.map(_.convertToGpu()),
+      resultId)
+  }
+}
+
 trait CudfAggregate extends Serializable {
   // we use this to get the ordinal of the bound reference, s.t. we can ask cudf to perform
   // the aggregate on that column
@@ -291,18 +323,4 @@ trait CudfAggregate extends Serializable {
   // the purpose of this attribute is for catalyst expressions that need to
   // refer to the output of a cuDF aggregate (`CudfAggregate`) in `postUpdate` or `postMerge`.
   final lazy val attr: AttributeReference = AttributeReference(name, dataType)()
-}
-
-trait CpuToGpuAggregateBufferConverter {
-  def createExpression(child: Expression): CpuToGpuBufferTransition
-}
-
-trait GpuToCpuAggregateBufferConverter {
-  def createExpression(child: Expression): GpuToCpuBufferTransition
-}
-
-trait CpuToGpuBufferTransition extends ShimUnaryExpression with CodegenFallback
-
-trait GpuToCpuBufferTransition extends ShimUnaryExpression with CodegenFallback {
-  override def dataType: DataType = BinaryType
 }

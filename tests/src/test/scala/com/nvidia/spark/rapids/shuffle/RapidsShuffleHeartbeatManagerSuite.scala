@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids.shuffle
 
-import com.nvidia.spark.rapids.{RapidsConf, RapidsExecutorUpdateMsg, RapidsShuffleHeartbeatEndpoint, RapidsShuffleHeartbeatHandler, RapidsShuffleHeartbeatManager}
+import com.nvidia.spark.rapids.{RapidsExecutorUpdateMsg, RapidsShuffleHeartbeatEndpoint, RapidsShuffleHeartbeatHandler, RapidsShuffleHeartbeatManager}
 import org.mockito.Mockito._
 
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
@@ -79,8 +79,10 @@ class RapidsShuffleHeartbeatManagerSuite extends RapidsShuffleTestHelper {
   }
 
   test("an executor tells heartbeat handler about new peers") {
-    val conf = new RapidsConf(Map[String, String]())
-    val hbEndpoint = new RapidsShuffleHeartbeatEndpoint(null, conf)
+    // updatePeers does not need a live endpoint. Avoid constructing one because its executor
+    // thread factory correctly requires the executor plugin to have selected a GPU device.
+    val hbEndpoint = org.mockito.Mockito.mock(
+      classOf[RapidsShuffleHeartbeatEndpoint], CALLS_REAL_METHODS)
     val exec1 = TrampolineUtil.newBlockManagerId("1", "peer", 123, Some("rapids=123"))
     val hbHandler = mock[RapidsShuffleHeartbeatHandler]
     hbEndpoint.updatePeers(hbHandler, Seq(exec1))

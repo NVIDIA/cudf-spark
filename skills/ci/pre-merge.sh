@@ -18,14 +18,6 @@ print_section() {
     echo "=================================================="
 }
 
-handle_error() {
-    echo ""
-    echo "❌ CI PIPELINE FAILED!"
-    echo "Error occurred in: $1"
-    echo "Please check the logs above for details."
-    exit 1
-}
-
 setup_python() {
     print_section "Setting up Python environment"
     python3 -m venv "${SKILLS_DIR}/.venv"
@@ -50,9 +42,9 @@ run_integration_tests() {
 }
 
 main() {
-    setup_python           || handle_error "Python setup"
-    run_unit_tests         || handle_error "Fast tests"
-    run_integration_tests  || handle_error "Integration tests"
+    setup_python
+    run_unit_tests
+    run_integration_tests
 
     print_section "🎉 All pre-merge checks passed!"
     echo "CI pipeline completed successfully!"

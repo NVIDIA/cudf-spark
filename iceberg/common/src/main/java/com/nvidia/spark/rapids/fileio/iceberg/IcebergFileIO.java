@@ -21,7 +21,6 @@ import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import com.nvidia.spark.rapids.jni.fileio.RapidsOutputFile;
 import org.apache.iceberg.aws.s3.IcebergS3InputFile;
 import org.apache.iceberg.io.FileIO;
-import org.apache.iceberg.io.InputFile;
 
 import java.io.IOException;
 import java.util.Objects;
@@ -49,19 +48,8 @@ public class IcebergFileIO implements RapidsFileIO {
 
 
   @Override
-  public RapidsInputFile newInputFile(String path) throws IOException {
-    InputFile inputFile = delegate.newInputFile(path);
-    return IcebergS3InputFile.maybeCreate(inputFile, delegate);
-  }
-
-  /**
-   * Always returns a plain {@link IcebergInputFile}, bypassing the S3 PerfIO
-   * fast-path. Use this from internal call sites that need the iceberg
-   * {@link InputFile} accessor on the read side (e.g. writers re-reading the
-   * footer of a just-written file) and do not benefit from PerfIO.
-   */
-  public IcebergInputFile newIcebergInputFile(String path) throws IOException {
-    return new IcebergInputFile(delegate.newInputFile(path));
+  public IcebergInputFile newInputFile(String path) throws IOException {
+    return IcebergS3InputFile.maybeCreate(delegate.newInputFile(path), delegate);
   }
 
   @Override

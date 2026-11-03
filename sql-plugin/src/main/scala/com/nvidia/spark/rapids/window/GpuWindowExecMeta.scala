@@ -142,7 +142,7 @@ abstract class GpuBaseWindowExecMeta[WindowExecType <: SparkPlan] (windowExec: W
     }
 
     val input = if (isPreNeeded) {
-      GpuProjectExec(pre.toList, childPlans.head.convertIfNeeded(), false)
+      GpuProjectExec(pre.toList, childPlans.head.convertIfNeeded(), false)()
     } else {
       childPlans.head.convertIfNeeded()
     }
@@ -165,9 +165,9 @@ abstract class GpuBaseWindowExecMeta[WindowExecType <: SparkPlan] (windowExec: W
     }
 
     if (isPostNeeded) {
-      GpuProjectExec(post.toList, windowExpr, false)
+      GpuProjectExec(post.toList, windowExpr, false)()
     } else if (windowExpr.output != windowExec.output) {
-      GpuProjectExec(windowExec.output.toList, windowExpr, false)
+      GpuProjectExec(windowExec.output.toList, windowExpr, false)()
     } else {
       windowExpr
     }
@@ -557,8 +557,10 @@ object GpuWindowExecMeta {
         false // Must be both unbounded, and have a group by specification.
       } else {
         func match {
-          case _: GpuUnboundedToUnboundedWindowAgg => true
-          case GpuAggregateExpression(_: GpuUnboundedToUnboundedWindowAgg, _, _, _, _) => true
+          case a: GpuUnboundedToUnboundedWindowAgg =>
+            a.supportsUnboundedToUnboundedWindowExec
+          case GpuAggregateExpression(a: GpuUnboundedToUnboundedWindowAgg, _, _, _, _) =>
+            a.supportsUnboundedToUnboundedWindowExec
           case _ => false
         }
       }

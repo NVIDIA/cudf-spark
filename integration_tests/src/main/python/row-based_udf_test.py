@@ -1,4 +1,4 @@
-# Copyright (c) 2021-2023, NVIDIA CORPORATION.
+# Copyright (c) 2021-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,12 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import pytest
-
 from asserts import assert_gpu_and_cpu_are_equal_sql
-from data_gen import *
-from spark_session import with_spark_session, is_spark_350_or_later
 from conftest import skip_unless_precommit_tests
+from data_gen import *
+from spark_session import with_spark_session
 
 def drop_udf(spark, udfname):
     spark.sql("DROP TEMPORARY FUNCTION IF EXISTS {}".format(udfname))
@@ -31,8 +29,6 @@ def load_hive_udf(spark, udfname, udfclass):
     # if UDF failed to load, throws AnalysisException, check if the udf class is in the class path
     spark.sql("CREATE TEMPORARY FUNCTION {} AS '{}'".format(udfname, udfclass))
 
-@pytest.mark.xfail(condition=is_spark_350_or_later(),
-                   reason='https://github.com/NVIDIA/spark-rapids/issues/9064')
 def test_hive_empty_simple_udf():
 
     with_spark_session(skip_if_no_hive)
@@ -44,7 +40,8 @@ def test_hive_empty_simple_udf():
         evalfn,
         "hive_simple_udf_test_table",
         "SELECT i, emptysimple(s, 'const_string') FROM hive_simple_udf_test_table",
-        conf={'spark.rapids.sql.rowBasedUDF.enabled': 'true'})
+        conf={'spark.rapids.sql.rowBasedUDF.enabled': 'true'},
+        validate_execs_in_gpu_plan=['GpuProjectExec'])
 
 def test_hive_empty_generic_udf():
     with_spark_session(skip_if_no_hive)

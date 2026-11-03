@@ -16,6 +16,9 @@
 package com.nvidia.spark.rapids
 
 import java.nio.charset.Charset
+import java.util.regex.Pattern
+
+import scala.util.Try
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims._
@@ -79,6 +82,17 @@ class RegularExpressionSuite extends SparkQueryCompareTestSuite {
     frame => frame.selectExpr("regexp_replace(strings,'','D')")
   }
 
+  testGpuFallback("String regexp_replace oversized quantifier cpu fall back",
+    "RegExpReplace",
+    nullableStringsFromCsv, execsAllowedNonGpu = Seq("ProjectExec", "Alias",
+      "RegExpReplace", "AttributeReference"), conf = conf) { frame =>
+    // JDK 11 accepts this pattern while newer JDKs reject it before RAPIDS parsing.
+    val pattern = "a{9999999999999999999999999999}"
+    assume(Try(Pattern.compile(pattern)).isSuccess,
+      "Java regex validation rejects the oversized quantifier")
+    frame.selectExpr(s"regexp_replace(strings, '$pattern', 'replacement')")
+  }
+
   testSparkResultsAreEqual("String regexp_replace regex 1",
     nullableStringsFromCsv, conf = conf) { frame =>
       assume(isUnicodeEnabled())
@@ -115,9 +129,8 @@ class RegularExpressionSuite extends SparkQueryCompareTestSuite {
       frame.selectExpr("regexp_replace(strings,'\\(foo\\)','D')")
   }
 
-  // #14856 / revans2: anchored alternation with a backref. With the old (\r\n)? workaround the
-  // synthetic group shifted (E) to group 2, so [$1] referenced the wrong group; once the
-  // workaround is dropped (cudf #22763) (E) stays group 1 and GPU must match CPU here.
+  // #14856 / revans2: anchored alternation with a backref. The line-anchor rewrite must not
+  // change Java-visible capture numbering, so (E) remains group 1 and GPU must match CPU here.
   testSparkResultsAreEqual("regexp_replace anchored alternation backref T$|(E)",
     spark => {
       import spark.implicits._

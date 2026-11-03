@@ -22,8 +22,8 @@ and issues that include the labels `bug`, `feature request`, `SQL`, `performance
 minus any issues with the labels `wontfix`, `invalid` or `duplicate`.
 
 For each project there should be an issue subsection for,
-Features: all issues with label `feature request` + `SQL`
-Performance: all issues with label `performance` + `shuffle`
+Features: all issues with label `feature request` + `SQL` + `shuffle`
+Performance: all issues with label `performance`
 Bugs fixed: all issues with label `bug`
 
 To deduplicate section, the priority should be `Bugs fixed > Performance > Features`
@@ -77,8 +77,8 @@ PRS = 'PRs'
 # Labels
 LABEL_WONTFIX, LABEL_INVALID, LABEL_DUPLICATE = 'wontfix', 'invalid', 'duplicate'
 LABEL_BUG = 'bug'
-LABEL_PERFORMANCE, LABEL_SHUFFLE = 'performance', 'shuffle'
-LABEL_FEATURE, LABEL_SQL = 'feature request', 'SQL'
+LABEL_PERFORMANCE = 'performance'
+LABEL_FEATURE, LABEL_SQL, LABEL_SHUFFLE = 'feature request', 'SQL', 'shuffle'
 # The release version from which the release branch changes (e.g., branch-YY.MM --> release/YY.MM)
 FROM_RELEASE = '25.12'
 # Queries
@@ -225,11 +225,10 @@ def get_commits(releases: set):
         else:
             from_branch = f"origin/release/{from_rel}"
 
-        # Get all the commit hashes, excluding those commits whose title contains '[bot]'
+        # Get all commit hashes. Automated PRs are filtered using the actual PR title later.
         git_log_args = [
             "git", "--no-pager", "log",
-            f"{from_branch}..{to_branch}", "--pretty=format:%h",
-            "--grep=[bot]", "-F", "--invert-grep"
+            f"{from_branch}..{to_branch}", "--pretty=format:%h"
         ]
 
         # Use check=True to raise exception if git fails, making errors explicit
@@ -397,9 +396,9 @@ def rules(labels: set):
         return INVALID
     if LABEL_BUG in labels:
         return BUGS_FIXED
-    if LABEL_PERFORMANCE in labels or LABEL_SHUFFLE in labels:
+    if LABEL_PERFORMANCE in labels:
         return PERFORMANCE
-    if LABEL_FEATURE in labels or LABEL_SQL in labels:
+    if LABEL_FEATURE in labels or LABEL_SQL in labels or LABEL_SHUFFLE in labels:
         return FEATURES
     return INVALID
 

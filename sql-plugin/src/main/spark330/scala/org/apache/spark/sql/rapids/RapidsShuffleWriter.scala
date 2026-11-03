@@ -17,15 +17,12 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark": "330"}
-{"spark": "330db"}
 {"spark": "331"}
 {"spark": "332"}
-{"spark": "332db"}
 {"spark": "333"}
 {"spark": "334"}
 {"spark": "340"}
 {"spark": "341"}
-{"spark": "341db"}
 {"spark": "342"}
 {"spark": "343"}
 {"spark": "344"}
@@ -38,13 +35,19 @@
 {"spark": "356"}
 {"spark": "357"}
 {"spark": "358"}
+{"spark": "359"}
 {"spark": "400"}
 {"spark": "401"}
 {"spark": "402"}
 {"spark": "403"}
+{"spark": "404"}
 {"spark": "411"}
 {"spark": "412"}
+{"spark": "413"}
+{"spark": "420"}
+{"spark": "500"}
 spark-rapids-shim-json-lines ***/
+
 package org.apache.spark.sql.rapids
 
 import scala.collection.mutable.ArrayBuffer
@@ -124,12 +127,15 @@ abstract class RapidsCachingWriterBase[K, V](
     with Logging {
   protected val numParts = handle.dependency.partitioner.numPartitions
   protected val sizes = new Array[Long](numParts)
+  /** The buffers this writer added to the catalog, the only ones it may remove on failure. */
+  protected val writtenBufferIds = new ArrayBuffer[ShuffleBufferId]()
 
   /**
    * Used to remove shuffle buffers when the writing task detects an error, calling `stop(false)`
    */
   private def cleanStorage(): Unit = {
-    catalog.removeCachedHandles()
+    catalog.removeCachedHandles(writtenBufferIds)
+    writtenBufferIds.clear()
   }
 
   override def stop(success: Boolean): Option[MapStatus] = {

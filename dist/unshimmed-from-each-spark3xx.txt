@@ -1,4 +1,5 @@
 com/nvidia/spark/rapids/*/RapidsShuffleManager.class
+org/apache/spark/shuffle/RapidsBlockingShuffleManagerBase.class
 com/nvidia/spark/rapids/AvroProvider.class
 com/nvidia/spark/rapids/HiveProvider.class
 com/nvidia/spark/rapids/iceberg/IcebergProvider.class

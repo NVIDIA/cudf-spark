@@ -16,15 +16,12 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark": "330"}
-{"spark": "330db"}
 {"spark": "331"}
 {"spark": "332"}
-{"spark": "332db"}
 {"spark": "333"}
 {"spark": "334"}
 {"spark": "340"}
 {"spark": "341"}
-{"spark": "341db"}
 {"spark": "342"}
 {"spark": "343"}
 {"spark": "344"}
@@ -37,6 +34,7 @@
 {"spark": "356"}
 {"spark": "357"}
 {"spark": "358"}
+{"spark": "359"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.execution.python.shims
 
@@ -51,7 +49,9 @@ object WritePythonUDFUtils {
       funcs: Seq[(ChainedPythonFunctions, Long)],
       argOffsets: Array[Array[Int]],
       argNames: Option[Array[Array[Option[String]]]] = None,
-      profiler: Option[String] = None): Unit = {
+      profiler: Option[String] = None,
+      udfLogMaxEntries: Int = 0,
+      udfLogLevel: String = "WARNING"): Unit = {
     PythonUDFRunner.writeUDFs(dataOut, funcs.map(_._1), argOffsets)
   }
 }

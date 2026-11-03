@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ package org.apache.spark.sql.rapids.utils
 
 import java.util.{Locale, TimeZone}
 
+import com.nvidia.spark.rapids.TestUtils
 import org.apache.hadoop.fs.FileUtil
 import org.scalactic.source.Position
 import org.scalatest.Tag
@@ -38,10 +39,17 @@ import org.apache.spark.sql.test.SharedSparkSession
 
 /** Basic trait for Rapids SQL test cases. */
 trait RapidsSQLTestsBaseTrait extends SharedSparkSession with RapidsTestsBaseTrait {
-  protected override def afterAll(): Unit = {
+  protected override def beforeAll(): Unit = {
+    TestUtils.clearCachedBatchSerializer()
+    super.beforeAll()
+  }
+
+  protected override def afterAll(): Unit = try {
     // SparkFunSuite will set this to true, and forget to reset to false
     System.clearProperty(IS_TESTING.key)
     super.afterAll()
+  } finally {
+    TestUtils.clearCachedBatchSerializer()
   }
 
   override protected def testFile(fileName: String): String = {

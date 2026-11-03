@@ -18,15 +18,23 @@ package com.nvidia.spark.rapids
 
 import java.math.RoundingMode
 
-import ai.rapids.cudf.{ColumnVector, Cuda, DType, Table}
+import ai.rapids.cudf.{ColumnVector, Cuda, DType, Scalar, Table}
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.RapidsConf.ShuffleKudoMode
+import com.nvidia.spark.rapids.jni.RmmSpark
+import com.nvidia.spark.rapids.shims.GpuHashPartitioning
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
 
-import org.apache.spark.SparkConf
+import org.apache.spark.{SparkConf, TaskContext}
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.expressions.{Expression, Literal, Murmur3Hash, Pmod}
+import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, RangePartitioning}
+import org.apache.spark.sql.functions.{col, count, lit}
 import org.apache.spark.sql.rapids.GpuShuffleEnv
-import org.apache.spark.sql.rapids.execution.TrampolineUtil
-import org.apache.spark.sql.types.{DecimalType, DoubleType, IntegerType, StringType}
+import org.apache.spark.sql.rapids.execution.{GpuShuffleExchangeExecBase, TrampolineUtil}
+import org.apache.spark.sql.types.{DataType, DecimalType, DoubleType, IntegerType, LongType,
+  StringType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class GpuPartitioningSuite extends AnyFunSuite with BeforeAndAfterEach {
@@ -50,7 +58,7 @@ class GpuPartitioningSuite extends AnyFunSuite with BeforeAndAfterEach {
    * them if needed so the results need to be closed.
    */
   private def extractColumnVectors(batch: ColumnarBatch): Array[ColumnVector] = {
-    if (GpuPackedTableColumn.isBatchPacked(batch)) {
+    if (TestUtils.isBatchPacked(batch)) {
       val packedColumn = batch.column(0).asInstanceOf[GpuPackedTableColumn]
       val table = packedColumn.getContiguousTable.getTable
       // The contiguous table is still responsible for closing these columns.
@@ -135,7 +143,7 @@ class GpuPartitioningSuite extends AnyFunSuite with BeforeAndAfterEach {
             }
             val expectedRows = endRow - startRow
             assertResult(expectedRows)(partBatch.numRows)
-            assert(GpuPackedTableColumn.isBatchPacked(partBatch))
+            assert(TestUtils.isBatchPacked(partBatch))
             withResource(buildSubBatch(batch, startRow, endRow)) { expectedBatch =>
               compareBatches(expectedBatch, partBatch)
             }
@@ -204,6 +212,197 @@ class GpuPartitioningSuite extends AnyFunSuite with BeforeAndAfterEach {
         assert(ex.getMessage.contains("exceeding the"))
         assert(ex.getMessage.contains("reduce spark.rapids.sql.batchSizeBytes"))
       }
+    }
+  }
+
+  /** Slices a rows-only batch and returns (partition, rows, columns) for each slice. */
+  private def sliceRowsOnly(gp: GpuPartitioning, numRows: Int,
+      partitionIndices: Array[Int]): Seq[(Int, Int, Int)] = {
+    val parts = gp.sliceInternalGpuOrCpuAndClose(numRows, partitionIndices,
+      Array.empty[GpuColumnVector])
+    withResource(parts.map(_._1)) { _ =>
+      parts.map { case (batch, partIndex) => (partIndex, batch.numRows, batch.numCols) }.toSeq
+    }
+  }
+
+  private def partitioning(n: Int): GpuPartitioning = new GpuPartitioning {
+    override val numPartitions: Int = n
+  }
+
+  /** Rows-only slicing that must hold in every shuffle mode. */
+  private def assertRowsOnlySlicing(): Unit = {
+    // The empty partition gets no slice, as on the CPU path.
+    assertResult(Seq((0, 3, 0), (2, 4, 0), (3, 3, 0)))(
+      sliceRowsOnly(partitioning(4), 10, Array(0, 3, 3, 7)))
+    // Leading and trailing empty partitions leave the other partitions' ids alone.
+    assertResult(Seq((1, 4, 0), (2, 6, 0)))(
+      sliceRowsOnly(partitioning(5), 10, Array(0, 0, 4, 10, 10)))
+    assertResult(Seq((0, 5, 0)))(sliceRowsOnly(partitioning(1), 5, Array(0)))
+    assertResult(Seq.empty)(sliceRowsOnly(partitioning(2), 0, Array(0, 0)))
+  }
+
+  private def cacheOnlyShuffleConf(): SparkConf = new SparkConf()
+      .set("spark.shuffle.manager", GpuShuffleEnv.RAPIDS_SHUFFLE_CLASS)
+      .set("spark.rapids.shuffle.mode", RapidsConf.RapidsShuffleManagerMode.CACHE_ONLY.toString)
+
+  test("GPU shuffle slices a rows-only batch by row count") {
+    TrampolineUtil.cleanupAnyExistingSession()
+    val conf = cacheOnlyShuffleConf()
+    TestUtils.withGpuSparkSession(conf) { _ =>
+      GpuShuffleEnv.init(new RapidsConf(conf))
+      val gp = partitioning(1)
+      assert(gp.usesGPUShuffle)
+      assert(!gp.usesKudoGPUSlicing)
+      assertRowsOnlySlicing()
+    }
+  }
+
+  test("GPU kudo slicing slices a rows-only batch by row count") {
+    TrampolineUtil.cleanupAnyExistingSession()
+    val conf = new SparkConf().set(RapidsConf.SHUFFLE_KUDO_WRITE_MODE.key, "GPU")
+    TestUtils.withGpuSparkSession(conf) { _ =>
+      GpuShuffleEnv.init(new RapidsConf(conf))
+      assert(partitioning(1).usesKudoGPUSlicing)
+      assertRowsOnlySlicing()
+    }
+  }
+
+  test("rows-only range partitioning round-trips through the GPU shuffle") {
+    TrampolineUtil.cleanupAnyExistingSession()
+    val conf = cacheOnlyShuffleConf().set("spark.sql.adaptive.enabled", "false")
+    TestUtils.withGpuSparkSession(conf) { spark =>
+      // The literal key folds into the partitioning, so the exchange's child has no columns.
+      val df = spark.range(0, 1000, 1, 4).select(lit(1L).as("k"))
+          .repartitionByRange(4, col("k")).agg(count(lit(1)))
+      val rowsOnlyRangeExchanges = df.queryExecution.executedPlan.collect {
+        case e: GpuShuffleExchangeExecBase
+            if e.outputPartitioning.isInstanceOf[RangePartitioning] && e.child.output.isEmpty => e
+      }
+      assert(rowsOnlyRangeExchanges.nonEmpty, df.queryExecution.executedPlan)
+      assertResult(1000L)(df.collect().head.getLong(0))
+    }
+  }
+
+  /** Hash partitions a rows-only batch and returns (partition, rows, columns) for each slice. */
+  private def hashPartitionRowsOnly(keys: Seq[Expression], numPartitions: Int,
+      numRows: Int): Seq[(Int, Int, Int)] = {
+    val parts = GpuHashPartitioning(keys, numPartitions)
+        .columnarEvalAny(new ColumnarBatch(Array.empty, numRows))
+        .asInstanceOf[Array[(ColumnarBatch, Int)]]
+    withResource(parts.map(_._1)) { _ =>
+      parts.map { case (batch, partIndex) => (partIndex, batch.numRows, batch.numCols) }.toSeq
+    }
+  }
+
+  /** The partition the CPU sends a row to when every key is a literal. */
+  private def cpuHashPartition(keys: Seq[Literal], numPartitions: Int): Int =
+    Pmod(new Murmur3Hash(keys), Literal(numPartitions)).eval(InternalRow.empty).asInstanceOf[Int]
+
+  test("hash partitioning sends every row of a rows-only batch to the CPU's partition") {
+    val kudoGpuWriteConf = new SparkConf().set(RapidsConf.SHUFFLE_KUDO_WRITE_MODE.key, "GPU")
+    Seq(new SparkConf(), cacheOnlyShuffleConf(), kudoGpuWriteConf).foreach { conf =>
+      TrampolineUtil.cleanupAnyExistingSession()
+      TestUtils.withGpuSparkSession(conf) { _ =>
+        GpuShuffleEnv.init(new RapidsConf(conf))
+        // Nil is a HashPartitioning without expressions, which hashes every row to the seed.
+        Seq(Seq(Literal(1L)), Seq(Literal(1L), Literal("a")), Seq(Literal(null, IntegerType)),
+            Nil).foreach { keys =>
+          val gpuKeys = keys.map(k => GpuLiteral(k.value, k.dataType))
+          Seq(1, 4, 200).foreach { n =>
+            // The other partitions receive no rows, so they get no slice.
+            assertResult(Seq((cpuHashPartition(keys, n), 1000, 0)), s"keys $keys, $n parts")(
+              hashPartitionRowsOnly(gpuKeys, n, 1000))
+          }
+        }
+        assertResult(Seq.empty)(hashPartitionRowsOnly(Seq(GpuLiteral(1L, LongType)), 4, 0))
+      }
+    }
+  }
+
+  /** A key that references no column and still differs from row to row: row i holds i. */
+  private case class RowIndexKey() extends GpuLeafExpression {
+    override def dataType: DataType = IntegerType
+    override def nullable: Boolean = false
+
+    override def columnarEval(batch: ColumnarBatch): GpuColumnVector =
+      withResource(Scalar.fromInt(0)) { zero =>
+        GpuColumnVector.from(ColumnVector.sequence(zero, batch.numRows), IntegerType)
+      }
+  }
+
+  test("hash partitioning splits a rows-only batch by each row's partition") {
+    TrampolineUtil.cleanupAnyExistingSession()
+    val conf = new SparkConf()
+    TestUtils.withGpuSparkSession(conf) { _ =>
+      GpuShuffleEnv.init(new RapidsConf(conf))
+      val gp = GpuHashPartitioning(Seq(RowIndexKey()), 4)
+      val numRows = 1000
+      // The expected offsets: the same rows partitioned with one column.
+      val withColumn = withResource(Scalar.fromInt(0)) { zero =>
+        GpuColumnVector.from(ColumnVector.sequence(zero, numRows), IntegerType)
+      }
+      val (expected, columns) =
+        gp.partitionInternalAndClose(new ColumnarBatch(Array(withColumn), numRows))
+      withResource(columns) { _ =>
+        val sizes = expected.indices.map { i =>
+          (if (i + 1 < expected.length) expected(i + 1) else numRows) - expected(i)
+        }
+        assert(sizes.count(_ > 0) > 1, s"the key should spread the rows, got $sizes")
+      }
+      val (rowsOnly, rowsOnlyColumns) =
+        gp.partitionInternalAndClose(new ColumnarBatch(Array.empty, numRows))
+      assert(rowsOnlyColumns.isEmpty)
+      assertResult(expected.toSeq)(rowsOnly.toSeq)
+    }
+  }
+
+  test("rows-only hash partitioning splits and retries in the shuffle exchange") {
+    TrampolineUtil.cleanupAnyExistingSession()
+    val conf = new SparkConf()
+    TestUtils.withGpuSparkSession(conf) { spark =>
+      GpuShuffleEnv.init(new RapidsConf(conf))
+      val numRows = 1000
+      val rdd = spark.sparkContext.parallelize(Seq(0), 1).mapPartitions { _ =>
+        Iterator(new ColumnarBatch(Array.empty, numRows))
+      }
+      val metrics = Map[String, GpuMetric]().withDefaultValue(NoopMetric)
+      val dependency = GpuShuffleExchangeExecBase.prepareBatchShuffleDependency(rdd, Seq.empty,
+        GpuHashPartitioning(Seq(GpuLiteral(1L, LongType)), 4), Array.empty,
+        new GpuColumnarBatchSerializer(metrics, Array.empty, ShuffleKudoMode.CPU,
+          useKudo = false, kudoMeasureBufferCopy = false),
+        useGPUShuffle = false, useMultiThreadedShuffle = false,
+        rangeInputBatchingEnabled = false, metrics, Map.empty, Map.empty,
+        enableOpTimeTrackingRdd = false)
+      RmmSpark.currentThreadIsDedicatedToTask(1)
+      val parts = try {
+        RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
+          RmmSpark.OomInjectionType.GPU.ordinal, 0)
+        dependency.rdd.partitions.toSeq.flatMap { p =>
+          dependency.rdd.iterator(p, TaskContext.get())
+              .map(pair => (pair._1, pair._2.numRows, pair._2.numCols)).toList
+        }
+      } finally {
+        RmmSpark.removeAllCurrentThreadAssociation()
+      }
+      assert(RmmSpark.getAndResetNumSplitRetryThrow(1) > 0)
+      val part = cpuHashPartition(Seq(Literal(1L)), 4)
+      assertResult(Seq((part, numRows / 2, 0), (part, numRows / 2, 0)))(parts)
+    }
+  }
+
+  test("rows-only hash partitioning round-trips through the GPU shuffle") {
+    TrampolineUtil.cleanupAnyExistingSession()
+    val conf = cacheOnlyShuffleConf().set("spark.sql.adaptive.enabled", "false")
+    TestUtils.withGpuSparkSession(conf) { spark =>
+      // The literal key folds into the partitioning, so the exchange's child has no columns.
+      val df = spark.range(0, 1000, 1, 4).select(lit(1L).as("k"))
+          .repartition(4, col("k")).agg(count(lit(1)))
+      val rowsOnlyHashExchanges = df.queryExecution.executedPlan.collect {
+        case e: GpuShuffleExchangeExecBase
+            if e.outputPartitioning.isInstanceOf[HashPartitioning] && e.child.output.isEmpty => e
+      }
+      assert(rowsOnlyHashExchanges.nonEmpty, df.queryExecution.executedPlan)
+      assertResult(1000L)(df.collect().head.getLong(0))
     }
   }
 

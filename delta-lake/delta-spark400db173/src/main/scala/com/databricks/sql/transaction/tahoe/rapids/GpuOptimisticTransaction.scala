@@ -35,6 +35,7 @@ import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
 import com.databricks.sql.transaction.tahoe.stats.AutoCompactPartitionStats
 import com.databricks.sql.transaction.tahoe.util.TestBarrier
 import com.nvidia.spark.rapids.{ColumnarFileFormat, RapidsConf}
+import com.nvidia.spark.rapids.delta.RapidsDeltaWriteExec
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 
@@ -42,7 +43,9 @@ import org.apache.spark.internal.io.FileCommitProtocol
 import org.apache.spark.sql.{Dataset, SparkSession}
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression, RuntimeReplaceable}
-import org.apache.spark.sql.execution.{QueryExecution, SparkPlan}
+import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.execution.{ApplyColumnarRulesAndInsertTransitions, QueryExecution, SparkPlan}
+import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec
 import org.apache.spark.sql.execution.datasources.FileFormatWriter
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.rapids.ColumnarWriteJobStatsTracker
@@ -73,6 +76,28 @@ class GpuOptimisticTransaction(
 
   def this(deltaLog: DeltaLog, rapidsConf: RapidsConf)(implicit clock: Clock) = {
     this(deltaLog, Option.empty[CatalogTable], deltaLog.update(), rapidsConf)
+  }
+
+  override protected def createWriteQueryExecution(
+      spark: SparkSession,
+      plan: LogicalPlan): QueryExecution = {
+    val session = spark.asInstanceOf[TrampolineConnectShims.SparkSession]
+    val queryExecution = new QueryExecution(session, plan,
+        shuffleCleanupMode = QueryExecution.determineShuffleCleanupMode(
+          session.sessionState.conf)) {
+      override lazy val executedPlan: SparkPlan = super.executedPlan match {
+        case write @ RapidsDeltaWriteExec(_: AdaptiveSparkPlanExec) =>
+          // DBR 17.3 stops physical preparations when AQE changes the plan, skipping the
+          // columnar rules for this outer command. Run the normal rules to preserve GPU
+          // eligibility and metadata-query fallback. Keep this QueryExecution as the AQE
+          // context owner so listeners and SQL metrics see the plan that actually executes.
+          ApplyColumnarRulesAndInsertTransitions(
+            session.sessionState.columnarRules, outputsColumnar = false).apply(write)
+        case other => other
+      }
+    }
+    queryExecution.assertAnalyzed()
+    queryExecution
   }
 
   override protected def normalizeGpuStatsColExpr(expr: Expression): Expression = {
@@ -164,7 +189,7 @@ class GpuOptimisticTransaction(
       additionalConstraints: Seq[Constraint],
       isCDCWritePhase: Boolean,
       context: Option[String]): Seq[FileAction] = {
-    if (isLiquidClustering || isCDCWritePhase) {
+    if (isCDCWritePhase) {
       super.writeFiles(inputData, writeOptions, isOptimize, isLiquidClustering,
         additionalConstraints, isCDCWritePhase, context)
     } else {
@@ -190,7 +215,7 @@ class GpuOptimisticTransaction(
       isCDCWritePhase: Boolean,
       context: Option[String],
       trailing: Boolean): (Seq[FileAction], QueryExecution) = {
-    if (isLiquidClustering || isCDCWritePhase) {
+    if (isCDCWritePhase) {
       super.writeFilesAndGetQueryExecution(
         inputData, writeOptions, isOptimize, isLiquidClustering,
         additionalConstraints, isCDCWritePhase, context, trailing)
@@ -214,30 +239,24 @@ class GpuOptimisticTransaction(
       additionalConstraints: Seq[Constraint],
       context: Option[String],
       trailing: Boolean): (Seq[FileAction], SparkPlan) = {
-    if (isLiquidClustering) {
-      super.writeFilesAndGetExecutedPlan(
-        inputData, writeOptions, isOptimize, isLiquidClustering,
-        additionalConstraints, context, trailing)
-    } else {
-      val deltaOpts = writeOptions match {
-        case Left(opt) => opt
-        case Right(opts) => Option(opts).flatMap(_.deltaOptions)
-      }
-      val forcePreserveInputOrder = writeOptions match {
-        case Left(_) => false
-        case Right(opts) => opts.forcePreserveInputOrder
-      }
-      val (fileActions, qe) =
-        gpuWriteFiles(
-          inputData,
-          deltaOpts,
-          additionalConstraints,
-          Some(isOptimize),
-          trailing,
-          forcePreserveInputOrder,
-          context)
-      (fileActions, qe.executedPlan)
+    val deltaOpts = writeOptions match {
+      case Left(opt) => opt
+      case Right(opts) => Option(opts).flatMap(_.deltaOptions)
     }
+    val forcePreserveInputOrder = writeOptions match {
+      case Left(_) => false
+      case Right(opts) => opts.forcePreserveInputOrder
+    }
+    val (fileActions, qe) =
+      gpuWriteFiles(
+        inputData,
+        deltaOpts,
+        additionalConstraints,
+        Some(isOptimize),
+        trailing,
+        forcePreserveInputOrder,
+        context)
+    (fileActions, qe.executedPlan)
   }
 }
 

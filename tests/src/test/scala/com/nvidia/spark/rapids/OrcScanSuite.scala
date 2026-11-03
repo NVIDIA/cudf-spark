@@ -16,9 +16,11 @@
 
 package com.nvidia.spark.rapids
 
-import java.io.FileNotFoundException
+import java.io.{File, FileNotFoundException}
 
 import org.apache.hadoop.fs.Path
+import org.apache.hadoop.hive.ql.exec.vector.StructColumnVector
+import org.apache.orc.{OrcFile, TypeDescription}
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.execution.FileSourceScanExec
@@ -42,6 +44,52 @@ class OrcScanSuite extends SparkQueryCompareTestSuite {
 
   testSparkResultsAreEqual("Test ORC count chunked by bytes", fileSplitsOrc,
     new SparkConf().set(RapidsConf.MAX_READER_BATCH_SIZE_BYTES.key, "100"))(frameCount)
+
+  // The read estimate is only consulted when there is no chunked reader, so the chunked reader
+  // is turned off here to keep covering the byte limit path.
+  testSparkResultsAreEqual("Test ORC count chunked by bytes using the read estimate",
+    fileSplitsOrc,
+    new SparkConf()
+      .set(RapidsConf.CHUNKED_READER.key, "false")
+      .set(RapidsConf.READER_USE_READ_ESTIMATE_FROM_SCHEMA.key, "true")
+      .set(RapidsConf.MAX_READER_BATCH_SIZE_BYTES.key, "100"))(frameCount)
+
+  testSparkResultsAreEqual("Test ORC count chunked by bytes skipping the read estimate",
+    fileSplitsOrc,
+    new SparkConf()
+      .set(RapidsConf.CHUNKED_READER.key, "false")
+      .set(RapidsConf.READER_USE_READ_ESTIMATE_FROM_SCHEMA.key, "false")
+      .set(RapidsConf.MAX_READER_BATCH_SIZE_BYTES.key, "100"))(frameCount)
+
+  testSparkResultsAreEqual("schema evolution with all top-level fields missing",
+    frameFromOrcWithSchema("schema-can-prune.orc", StructType(Seq(
+      StructField("missing", StringType))))) { frame => frame }
+
+  private def writeNestedEmptyStructOrc(spark: SparkSession, base: File): Unit = {
+    assert(base.mkdirs())
+    val schema = TypeDescription.createStruct().addField("name",
+      TypeDescription.createStruct()
+        .addField("empty", TypeDescription.createStruct()))
+    val writer = OrcFile.createWriter(new Path(base.getCanonicalPath, "part-00000.orc"),
+      OrcFile.writerOptions(spark.sparkContext.hadoopConfiguration).setSchema(schema))
+    try {
+      val batch = schema.createRowBatch()
+      batch.size = 2
+      val nameVector = batch.cols(0).asInstanceOf[StructColumnVector]
+      nameVector.noNulls = false
+      nameVector.isNull(1) = true
+      writer.addRowBatch(batch)
+    } finally {
+      writer.close()
+    }
+  }
+
+  testSparkReadResultsAreEqual("schema evolution through an empty physical struct",
+    file => spark => spark.read.schema(StructType(Seq(
+      StructField("name", StructType(Seq(StructField("missing", StringType)))))))
+      .orc(file.getCanonicalPath),
+    writeNestedEmptyStructOrc,
+    existClasses = "GpuFileSourceScanExec") { frame => frame }
 
   testSparkResultsAreEqual("schema-can-prune dis-order read schema",
     frameFromOrcWithSchema("schema-can-prune.orc", StructType(Seq(
@@ -241,6 +289,21 @@ class OrcScanSuite extends SparkQueryCompareTestSuite {
     // both cpu and gpu should return empty
     withGpuSparkSession(check, conf)
     withCpuSparkSession(check, conf)
+  }
+
+  test("gpuOutputBatchBytes metric is recorded for ORC scan") {
+    withGpuSparkSession({ spark =>
+      val df = frameFromOrc("file-splits.orc")(spark)
+      val rows = df.collect()
+      val scan = df.queryExecution.executedPlan
+        .find(_.metrics.contains(GpuMetric.GPU_OUTPUT_BATCH_BYTES))
+      assert(scan.isDefined)
+      // Physical device width per row from cudf; variable-width types report 0.
+      val bytesPerRow = df.schema.fields
+        .map(f => GpuColumnVector.getRapidsType(f.dataType).getSizeInBytes).sum
+      val minBytes = rows.length.toLong * bytesPerRow
+      assert(scan.get.metrics(GpuMetric.GPU_OUTPUT_BATCH_BYTES).value >= minBytes)
+    })
   }
 
 }

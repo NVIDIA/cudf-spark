@@ -16,7 +16,7 @@
 package org.apache.spark.sql.rapids.execution
 
 import com.nvidia.spark.rapids.{CoalesceGoal, GpuExec, GpuMetric}
-import com.nvidia.spark.rapids.shims.ShimUnaryExecNode
+import com.nvidia.spark.rapids.shims.{CoalescedHashPartitioningShim, ShimUnaryExecNode}
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
@@ -84,7 +84,7 @@ case class GpuCustomShuffleReaderExec(
       // partitions is changed.
       child.outputPartitioning match {
         case h: HashPartitioning =>
-          h.copy(numPartitions = partitionSpecs.length)
+          CoalescedHashPartitioningShim(h, partitionSpecs)
         case r: RangePartitioning =>
           r.copy(numPartitions = partitionSpecs.length)
         // This can only happen for `REBALANCE_PARTITIONS_BY_NONE`, which uses

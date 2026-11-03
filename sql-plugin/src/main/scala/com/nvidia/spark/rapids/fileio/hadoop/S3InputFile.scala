@@ -28,17 +28,21 @@ import com.nvidia.spark.rapids.jni.fileio.{RapidsInputFile, SeekableInputStream}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 
+import org.apache.spark.sql.rapids.GpuTaskMetrics
+
 /**
- * S3-backed {@link RapidsInputFile} for Hadoop-conf-driven (non-iceberg) reads.
+ * S3-backed `RapidsInputFile` for Hadoop-conf-driven (non-iceberg) reads.
  * {@code readVectored} issues batched byte-range GETs through the optimized
  * vectored-read path; the other operations delegate to the standard
- * {@link HadoopInputFile}.
+ * `HadoopInputFile`.
  */
 class S3InputFile private (
     delegate: HadoopInputFile,
     fileUri: URI,
     hadoopConf: Configuration)
   extends RapidsInputFile {
+
+  private val taskMetrics = GpuTaskMetrics.get
 
   override def path(): String = delegate.path()
 
@@ -59,14 +63,16 @@ class S3InputFile private (
       IntRangeWithOffset(r.getInputOffset, r.getLength, r.getOutputOffset)
     }.toSeq
     require(
-      PerfIO.readToHostMemory(hadoopConf, output, fileUri, ranges).isDefined,
+      PerfIO.readToHostMemory(
+        hadoopConf, output, fileUri, ranges,
+        taskMetrics.perfioS3RequestLimiterMetricsRecorder).isDefined,
       "expected to use PerfIO to read")
   }
 
   /**
    * Issue a single suffix-range {@code GetObject} ({@code Range: bytes=-N}) for
    * the last {@code length} bytes. Avoids the {@code getLength()} round-trip the
-   * default {@link RapidsInputFile#readTail} would make.
+   * default `RapidsInputFile#readTail` would make.
    */
   @throws[IOException]
   override def readTail(length: Long, output: HostMemoryBuffer): Unit = {
@@ -78,7 +84,9 @@ class S3InputFile private (
     }
     val ranges = Seq[RangeWithOffset](SuffixRangeWithOffset(length, /*destOffset*/ 0L))
     require(
-      PerfIO.readToHostMemory(hadoopConf, output, fileUri, ranges).isDefined,
+      PerfIO.readToHostMemory(
+        hadoopConf, output, fileUri, ranges,
+        taskMetrics.perfioS3RequestLimiterMetricsRecorder).isDefined,
       "expected to use PerfIO to read")
   }
 }

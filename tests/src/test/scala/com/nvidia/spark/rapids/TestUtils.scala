@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
+import org.apache.spark.sql.rapids.metrics.source.{MockTaskContext, MockTaskContextBase}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /** A collection of utility methods useful in tests. */
@@ -40,9 +41,42 @@ object TestUtils extends Assertions {
     conf
   }
 
+  def isBatchPacked(batch: ColumnarBatch): Boolean =
+    batch.numCols() == 1 && batch.column(0).isInstanceOf[GpuPackedTableColumn]
+
   def getTempDir(basename: String): File = new File(
     System.getProperty("test.build.data", System.getProperty("java.io.tmpdir", "/tmp")),
     basename)
+
+  def withTaskContext[T](
+      taskContext: MockTaskContextBase,
+      completesTask: Boolean = false)(body: => T): T = {
+    TrampolineUtil.setTaskContext(taskContext)
+    try {
+      body
+    } finally {
+      try {
+        if (completesTask) {
+          taskContext.markTaskComplete()
+        }
+      } finally {
+        TrampolineUtil.unsetTaskContext()
+        ScalableTaskCompletion.reset()
+      }
+    }
+  }
+
+  def withMockTaskContext[T](completesTask: Boolean = false)(body: => T): T = {
+    withTaskContext(new MockTaskContext(taskAttemptId = 1, partitionId = 0), completesTask)(body)
+  }
+
+  // Spark caches the configured serializer in a JVM-global singleton, so suites that select a
+  // different serializer must reset it at suite boundaries.
+  def clearCachedBatchSerializer(): Unit = {
+    val module = Class.forName("org.apache.spark.sql.execution.columnar.InMemoryRelation$")
+        .getField("MODULE$").get(null)
+    module.getClass.getMethod("clearSerializer").invoke(module)
+  }
 
   /** Compare the equality of two tables */
   def compareTables(expected: Table, actual: Table): Unit = {

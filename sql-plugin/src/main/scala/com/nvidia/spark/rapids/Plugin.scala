@@ -36,13 +36,14 @@ import com.nvidia.spark.rapids.filecache.{FileCache, FileCacheLocalityManager, F
 import com.nvidia.spark.rapids.io.async.TrafficController
 import com.nvidia.spark.rapids.jni.{GpuTimeZoneDB, Hash, JSONUtils, RmmSpark, TaskPriority}
 import com.nvidia.spark.rapids.python.PythonWorkerSemaphore
+import com.nvidia.spark.rapids.shims.ShuffleManagerShimUtils
 import org.apache.commons.lang3.exception.ExceptionUtils
 
 import org.apache.spark.{ExceptionFailure, SparkConf, SparkContext, TaskContext, TaskFailedReason}
 import org.apache.spark.api.plugin.{DriverPlugin, ExecutorPlugin, PluginContext, SparkPlugin}
 import org.apache.spark.internal.Logging
-import org.apache.spark.rapids.hybrid.HybridExecutionUtils
 import org.apache.spark.serializer.{JavaSerializer, KryoSerializer}
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.internal.StaticSQLConf
@@ -53,9 +54,26 @@ class PluginException(msg: String) extends RuntimeException(msg)
 
 case class CudfVersionMismatchException(errorMsg: String) extends PluginException(errorMsg)
 
-case class ColumnarOverrideRules() extends ColumnarRule with Logging {
-  lazy val overrides: Rule[SparkPlan] = GpuOverrides()
-  lazy val overrideTransitions: Rule[SparkPlan] = new GpuTransitionOverrides()
+object RapidsShuffleManagerAutoConfigurator {
+  private val SHUFFLE_MANAGER_KEY = "spark.shuffle.manager"
+  private val SHUFFLE_DATA_IO_PLUGIN_KEY = "spark.shuffle.sort.io.plugin.class"
+  private val RAPIDS_SHUFFLE_DATA_IO_CLASS_SUFFIX = "RapidsLocalDiskShuffleDataIO"
+  private val DATAPROC_ENGINE_KEY = "spark.dataproc.engine"
+
+  def configure(conf: SparkConf): Unit = {
+    if (ShuffleManagerShimUtils.supportsAutoConfiguration &&
+        !conf.contains(DATAPROC_ENGINE_KEY) &&
+        !conf.contains(SHUFFLE_MANAGER_KEY) &&
+        conf.getOption(SHUFFLE_DATA_IO_PLUGIN_KEY)
+          .forall(_.endsWith(RAPIDS_SHUFFLE_DATA_IO_CLASS_SUFFIX))) {
+      conf.set(SHUFFLE_MANAGER_KEY, ShimLoader.getRapidsShuffleManagerClass)
+    }
+  }
+}
+
+case class ColumnarOverrideRules(sparkSession: SparkSession) extends ColumnarRule with Logging {
+  lazy val overrides: Rule[SparkPlan] = GpuOverrides(sparkSession)
+  lazy val overrideTransitions: Rule[SparkPlan] = new GpuTransitionOverrides(sparkSession)
 
   override def preColumnarTransitions : Rule[SparkPlan] = overrides
 
@@ -64,9 +82,9 @@ case class ColumnarOverrideRules() extends ColumnarRule with Logging {
 
 object RapidsPluginUtils extends Logging {
   val CUDF_PROPS_FILENAME = "cudf-java-version-info.properties"
-  val JNI_PROPS_FILENAME = "spark-rapids-jni-version-info.properties"
+  val JNI_PROPS_FILENAME = "cudf-spark-jni-version-info.properties"
   val PLUGIN_PROPS_FILENAME = "rapids4spark-version-info.properties"
-  private val PRIVATE_PROPS_FILENAME = "rapids4spark-private-version-info.properties"
+  private val PRIVATE_PROPS_FILENAME = "cudf-spark-private-version-info.properties"
 
   private val SQL_PLUGIN_NAME = classOf[SQLExecPlugin].getName
   private val UDF_PLUGIN_NAME = "com.nvidia.spark.udf.Plugin"
@@ -137,11 +155,11 @@ object RapidsPluginUtils extends Logging {
     val possibleRapidsJarURLs = classloader.getResources(propName).asScala.toSet.toSeq.filter {
       url => {
         val urlPath = url.toString
-        // Filter out submodule jars, e.g. rapids-4-spark-aggregator_2.12-26.08.0-spark341.jar,
+        // Filter out submodule jars, e.g. rapids-4-spark-aggregator_2.12-26.12.0-spark341.jar,
         // and files stored under subdirs of '!/', e.g.
-        // rapids-4-spark_2.12-26.08.0-cuda12.jar!/spark330/rapids4spark-version-info.properties
+        // rapids-4-spark_2.12-26.12.0-cuda12.jar!/spark330/rapids4spark-version-info.properties
         // We only want to find the main jar, e.g.
-        // rapids-4-spark_2.12-26.08.0-cuda12.jar!/rapids4spark-version-info.properties
+        // rapids-4-spark_2.12-26.12.0-cuda12.jar!/rapids4spark-version-info.properties
         !urlPath.contains("rapids-4-spark-") && urlPath.endsWith("!/" + propName)
       }
     }
@@ -192,7 +210,7 @@ object RapidsPluginUtils extends Logging {
 
   def detectMultipleJars(conf: RapidsConf): Unit = {
     detectMultipleJar(PLUGIN_PROPS_FILENAME, "rapids-4-spark", conf)
-    detectMultipleJar(JNI_PROPS_FILENAME, "spark-rapids-jni", conf)
+    detectMultipleJar(JNI_PROPS_FILENAME, "cudf-spark-jni", conf)
     detectMultipleJar(CUDF_PROPS_FILENAME, "cudf", conf)
   }
 
@@ -232,6 +250,8 @@ object RapidsPluginUtils extends Logging {
   }
 
   def fixupConfigsOnDriver(conf: SparkConf): Unit = {
+    RapidsShuffleManagerAutoConfigurator.configure(conf)
+
     val plugins = Array(SQL_PLUGIN_NAME, UDF_PLUGIN_NAME, DFUDF_PLUGIN_NAME)
     // First add in the SQL executor plugin because that is what we need at a minimum
     if (conf.contains(SQL_PLUGIN_CONF_KEY)) {
@@ -348,7 +368,6 @@ object RapidsPluginUtils extends Logging {
 
   /**
    * Find spark-rapids-extra-plugins files, and create plugin instances by reflection.
-   * Note: If Hybrid jar is not in the classpath, then will not create Hybrid plugin.
    * @return plugin instances defined in spark-rapids-extra-plugins files.
    */
   private def getExtraPlugins: Seq[SparkPlugin] = {
@@ -644,11 +663,6 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
       // Fail if there are multiple plugin jars in the classpath.
       RapidsPluginUtils.detectMultipleJars(conf)
 
-      // Check Hybrid jar if needed.
-      if (conf.loadHybridBackend) {
-        HybridExecutionUtils.checkHybridJarInClassPath()
-      }
-
       // Compare if the cudf version mentioned in the classpath is equal to the version which
       // plugin expects. If there is a version mismatch, throw error. This check can be disabled
       // by setting this config spark.rapids.cudfVersionOverride=true
@@ -729,7 +743,7 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
       // and exit immediately.
       case e: CudaException =>
         logError("Exception in the executor plugin, shutting down!", e)
-        logGpuDebugInfoAndExit(systemExitCode = 1)
+        RapidsExecutorPlugin.logGpuDebugInfoAndExit(systemExitCode = 1)
       case e: Throwable =>
         logError("Exception in the executor plugin, shutting down!", e)
         RapidsExecutorPlugin.exitWithHaltOnTimeout(1)
@@ -787,43 +801,6 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
         s"JSONUtils.MAX_PATH_DEPTH (${JSONUtils.MAX_PATH_DEPTH})")
   }
 
-  // Wait for command spawned via Process
-  private def waitForProcess(cmd: Process, durationMs: Long): Option[Int] = {
-    val endTime = System.currentTimeMillis() + durationMs
-    do {
-      Thread.sleep(10)
-      if (!cmd.isAlive()) {
-        return Some(cmd.exitValue())
-      }
-    } while (System.currentTimeMillis() < endTime)
-    // Timed out
-    cmd.destroy()
-    None
-  }
-
-  // Try to run nvidia-smi when task fails due to a cuda exception.
-  private def logGpuDebugInfoAndExit(systemExitCode: Int) = synchronized {
-    try {
-      val nvidiaSmiStdout = new StringBuilder
-      val nvidiaSmiStderr = new StringBuilder
-      val cmd = "nvidia-smi -q".run(
-        ProcessLogger(s => nvidiaSmiStdout.append(s + "\n"), s => nvidiaSmiStderr.append(s + "\n")))
-      waitForProcess(cmd, 10000) match {
-        case Some(exitStatus) =>
-          if (exitStatus == 0) {
-            logWarning("nvidia-smi:\n" + nvidiaSmiStdout)
-          } else {
-            logWarning("nvidia-smi failed with: " + nvidiaSmiStdout + nvidiaSmiStderr)
-          }
-        case None => logWarning("nvidia-smi command timed out")
-      }
-    } catch {
-      case e: Throwable =>
-        logWarning("nvidia-smi process failed", e)
-    }
-    RapidsExecutorPlugin.exitWithHaltOnTimeout(systemExitCode)
-  }
-
   override def shutdown(): Unit = {
     RapidsPluginUtils.safeShutdown(
       Seq(
@@ -854,8 +831,7 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
           case Some(e) if containsCudaFatalException(e) =>
             logError("Stopping the Executor based on exception being a fatal CUDA error: " +
               s"${ef.toErrorString}")
-            GpuCoreDumpHandler.waitForDump(timeoutSecs = 60)
-            logGpuDebugInfoAndExit(systemExitCode = 20)
+            RapidsExecutorPlugin.exitOnCudaFatalError(20)
           case Some(_: CudaException) =>
             logDebug(s"Executor onTaskFailed because of a non-fatal CUDA error: " +
               s"${ef.toErrorString}")
@@ -913,6 +889,62 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
 }
 
 object RapidsExecutorPlugin extends Logging {
+  private def waitForProcess(cmd: Process, durationMs: Long): Option[Int] = {
+    val endTime = System.currentTimeMillis() + durationMs
+    do {
+      Thread.sleep(10)
+      if (!cmd.isAlive()) {
+        return Some(cmd.exitValue())
+      }
+    } while (System.currentTimeMillis() < endTime)
+    cmd.destroy()
+    None
+  }
+
+  private[rapids] def exitOnCudaFatalError(exitCode: Int): Unit = {
+    waitForGpuCoreDumpThenExit(
+      GpuCoreDumpHandler.waitForDump(timeoutSecs = 60),
+      logGpuDebugInfoAndExit(exitCode))
+  }
+
+  private[rapids] def waitForGpuCoreDumpThenExit(waitForDump: => Unit, exit: => Unit): Unit = {
+    // Clear an interrupt pending on entry so it cannot skip the dump wait or diagnostics.
+    var interrupted = Thread.interrupted()
+    try {
+      waitForDump
+    } catch {
+      case error: InterruptedException =>
+        interrupted = true
+        logWarning("Interrupted while waiting for GPU core dump", error)
+      case error: Throwable =>
+        logWarning("Error while waiting for GPU core dump", error)
+    } finally {
+      try exit finally if (interrupted) Thread.currentThread().interrupt()
+    }
+  }
+
+  private[rapids] def logGpuDebugInfoAndExit(systemExitCode: Int): Unit = synchronized {
+    try {
+      val nvidiaSmiStdout = new StringBuilder
+      val nvidiaSmiStderr = new StringBuilder
+      val cmd = "nvidia-smi -q".run(
+        ProcessLogger(s => nvidiaSmiStdout.append(s + "\n"), s => nvidiaSmiStderr.append(s + "\n")))
+      waitForProcess(cmd, 10000) match {
+        case Some(exitStatus) =>
+          if (exitStatus == 0) {
+            logWarning("nvidia-smi:\n" + nvidiaSmiStdout)
+          } else {
+            logWarning("nvidia-smi failed with: " + nvidiaSmiStdout + nvidiaSmiStderr)
+          }
+        case None => logWarning("nvidia-smi command timed out")
+      }
+    } catch {
+      case e: Throwable =>
+        logWarning("nvidia-smi process failed", e)
+    }
+    exitWithHaltOnTimeout(systemExitCode)
+  }
+
   /**
    * Calling System.exit will trigger shutdown hooks to run.
    * This code is intended to let them run, but then force

@@ -16,7 +16,6 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark": "330"}
-{"spark": "330db"}
 {"spark": "331"}
 {"spark": "332"}
 {"spark": "333"}
@@ -35,7 +34,7 @@ import org.apache.hadoop.mapreduce._
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat
 import org.apache.hadoop.mapreduce.task.TaskAttemptContextImpl
 
-import org.apache.spark.{SparkException, TaskContext}
+import org.apache.spark.{SparkException, TaskContext, TaskOutputFileAlreadyExistException}
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.io.{FileCommitProtocol, SparkHadoopWriterUtils}
 import org.apache.spark.shuffle.FetchFailedException
@@ -126,7 +125,7 @@ object GpuFileFormatWriter extends Logging {
       plan
     } else {
       val projectList = GpuV1WriteUtils.convertGpuEmptyToNull(plan.output, partitionSet)
-      if (projectList.nonEmpty) GpuProjectExec(projectList, plan) else plan
+      if (projectList.nonEmpty) GpuProjectExec(projectList, plan)() else plan
     }
 
     val writerBucketSpec = BucketingUtilsShim.getWriterBucketSpec(bucketSpec, dataColumns,
@@ -386,6 +385,8 @@ object GpuFileFormatWriter extends Logging {
         })
       } catch {
         case e: FetchFailedException =>
+          throw e
+        case e: TaskOutputFileAlreadyExistException =>
           throw e
         case t: Throwable =>
           throw new SparkException("Task failed while writing rows.", t)

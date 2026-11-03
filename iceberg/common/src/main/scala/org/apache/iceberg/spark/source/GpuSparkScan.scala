@@ -20,7 +20,7 @@ import scala.collection.JavaConverters._
 import scala.util.{Failure, Success, Try}
 
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.iceberg.ShimUtils
+import com.nvidia.spark.rapids.iceberg.{IcebergEncryptionSupport, IcebergFormatVersionSupport, ShimUtils}
 import org.apache.iceberg.ScanTaskGroup
 import org.apache.iceberg.spark.GpuSparkReadConf
 import org.apache.iceberg.types.Types
@@ -102,6 +102,14 @@ object GpuSparkScan {
         s"${RapidsConf.ENABLE_ICEBERG_READ} to true")
     }
 
+    Try {
+      IcebergFormatVersionSupport.tagForFormatVersion(
+        GpuSparkScanAccess.table(meta.wrapped), meta)
+    } match {
+      case Failure(e) => meta.willNotWorkOnGpu(s"error examining Iceberg table version: $e")
+      case _ =>
+    }
+
     FileFormatChecks.tag(meta, meta.wrapped.readSchema(), IcebergFormatType, ReadFileOp)
 
     Try {
@@ -114,7 +122,7 @@ object GpuSparkScan {
 
     gpuScan match {
       case Success(_) =>
-        // Nested types (map, list, struct) are now supported
+        IcebergEncryptionSupport.tagForScan(meta.wrapped, meta)
       case Failure(e) => meta.willNotWorkOnGpu(s"conversion to GPU scan failed: ${e.getMessage}")
     }
   }

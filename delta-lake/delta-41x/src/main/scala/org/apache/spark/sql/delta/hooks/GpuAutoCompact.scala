@@ -28,7 +28,9 @@ import org.apache.spark.sql.delta._
  * Delta 4.1 drives post-commit hooks via CommittedTransaction instead of the older live
  * transaction hook signature used by Delta 4.0.
  */
-case object GpuAutoCompact extends GpuAutoCompactBase {
+case object GpuAutoCompact41x extends GpuAutoCompactBase {
+
+  override protected def getTableId(deltaLog: DeltaLog): String = deltaLog.tableId
 
   override def run(
       spark: SparkSession,

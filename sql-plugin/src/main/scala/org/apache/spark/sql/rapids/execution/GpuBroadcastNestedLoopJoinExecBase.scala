@@ -23,6 +23,7 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingArray
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{withRestoreOnRetry, withRetry, withRetryNoSplit}
+import com.nvidia.spark.rapids.SplittableJoinIterator.PreparedJoinBatch
 import com.nvidia.spark.rapids.shims.{GpuBroadcastJoinMeta, ShimBinaryExecNode}
 
 import org.apache.spark.TaskContext
@@ -221,7 +222,7 @@ class ConditionalNestedLoopJoinIterator(
     condition: ast.CompiledExpression,
     opTime: GpuMetric,
     joinTime: GpuMetric)
-    extends SplittableJoinIterator(
+    extends SplittableJoinIterator[PreparedJoinBatch](
       NvtxRegistry.JOIN_GATHER,
       stream,
       streamAttributes,
@@ -237,24 +238,26 @@ class ConditionalNestedLoopJoinIterator(
     }
   }
 
-  override def computeNumJoinRows(scb: LazySpillableColumnarBatch): Long = {
-    scb.checkpoint()
-    builtBatch.checkpoint()
-    withRetryNoSplit {
-      withRestoreOnRetry(Seq(builtBatch, scb)) {
-        withResource(GpuColumnVector.from(builtBatch.getBatch)) { builtTable =>
-          withResource(GpuColumnVector.from(scb.getBatch)) { streamTable =>
-            val (left, right) = buildSide match {
-              case GpuBuildLeft => (builtTable, streamTable)
-              case GpuBuildRight => (streamTable, builtTable)
-            }
-            joinType match {
-              case _: InnerLike => left.conditionalInnerJoinRowCount(right, condition)
-              case LeftOuter => left.conditionalLeftJoinRowCount(right, condition)
-              case RightOuter => right.conditionalLeftJoinRowCount(left, condition)
-              case LeftSemi => left.conditionalLeftSemiJoinRowCount(right, condition)
-              case LeftAnti => left.conditionalLeftAntiJoinRowCount(right, condition)
-              case _ => throw new IllegalStateException(s"Unsupported join type $joinType")
+  override def prepareJoinBatch(scb: LazySpillableColumnarBatch): PreparedJoinBatch = {
+    PreparedJoinBatch {
+      scb.checkpoint()
+      builtBatch.checkpoint()
+      withRetryNoSplit {
+        withRestoreOnRetry(Seq(builtBatch, scb)) {
+          withResource(GpuColumnVector.from(builtBatch.getBatch)) { builtTable =>
+            withResource(GpuColumnVector.from(scb.getBatch)) { streamTable =>
+              val (left, right) = buildSide match {
+                case GpuBuildLeft => (builtTable, streamTable)
+                case GpuBuildRight => (streamTable, builtTable)
+              }
+              joinType match {
+                case _: InnerLike => left.conditionalInnerJoinRowCount(right, condition)
+                case LeftOuter => left.conditionalLeftJoinRowCount(right, condition)
+                case RightOuter => right.conditionalLeftJoinRowCount(left, condition)
+                case LeftSemi => left.conditionalLeftSemiJoinRowCount(right, condition)
+                case LeftAnti => left.conditionalLeftAntiJoinRowCount(right, condition)
+                case _ => throw new IllegalStateException(s"Unsupported join type $joinType")
+              }
             }
           }
         }
@@ -264,7 +267,8 @@ class ConditionalNestedLoopJoinIterator(
 
   override def createGatherer(
       cb: LazySpillableColumnarBatch,
-      numJoinRows: Option[Long]): Option[JoinGatherer] = {
+      prepared: Option[PreparedJoinBatch]): Option[JoinGatherer] = {
+    val numJoinRows = prepared.map(_.numJoinRows)
     if (numJoinRows.contains(0)) {
       // nothing matched
       return None
@@ -726,18 +730,20 @@ abstract class GpuBroadcastNestedLoopJoinExecBase(
       Some(buildDataSize))
   }
 
-  private def buildSidePostProjection: Option[ColumnarBatch => ColumnarBatch] = {
+  private[execution] def buildSidePostProjection: Option[ColumnarBatch => ColumnarBatch] = {
     buildPlan match {
       case p: GpuProjectExec =>
         // Need to manually do project columnar execution other than calling child's
         // internalDoExecuteColumnar. This is to workaround especial handle to build broadcast
         // batch.
         val proj = GpuBindReferences.bindGpuReferencesTiered(
-          postBuildCondition, p.child.output, conf, allMetrics)
-        val fn = (batch: ColumnarBatch) => {
-          withResource(batch)(proj.project)
+          postBuildCondition, p.child.output, conf, allMetrics,
+          enableAst = RapidsConf.ENABLE_PROJECT_AST.get(conf),
+          enableAstJit = RapidsConf.ENABLE_PROJECT_AST_JIT.get(conf))
+        Some { batch: ColumnarBatch =>
+          proj.projectAndCloseWithRetrySingleBatch(
+            SpillableColumnarBatch(batch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
         }
-        Some(fn)
       case _ =>
         None
     }

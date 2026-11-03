@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -86,7 +86,8 @@ object GpuPythonHelper extends Logging {
       // When semaphore is disabled or invalid, use the number of cpu task slots instead.
       // Spark does not throw exception even the value of CPUS_PER_TASK is negative, so
       // return 1 if it is less than zero to continue the task.
-      val cpuTaskSlots = sparkConf.get(EXECUTOR_CORES) / Math.max(1, sparkConf.get(CPUS_PER_TASK))
+      val cpusPerTask = Math.max(1.0, sparkConf.get(CPUS_PER_TASK).toDouble)
+      val cpuTaskSlots = Math.max(1, (sparkConf.get(EXECUTOR_CORES).toDouble / cpusPerTask).toInt)
       (initAllocTotal / cpuTaskSlots, maxAllocTotal / cpuTaskSlots)
     }
   }

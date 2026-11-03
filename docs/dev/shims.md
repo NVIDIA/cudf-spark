@@ -7,20 +7,150 @@ parent: Developer Overview
 
 # Shim Development
 
-RAPIDS Accelerator For Apache Spark supports multiple feature version lines of
-Apache Spark such as 3.3.x, 3.4.x, 3.5.x, 4.x and a number of vendor releases that contain
-a mix of patches from different upstream releases. These artifacts are generally
-incompatible between each other, at both source code level and even more often
-at the binary level. The role of the Shim layer is to hide these issues from the
-common code, maximize reuse, and minimize logic duplication.
+The NVIDIA cuDF plugin for Apache Spark supports multiple feature version lines of Apache Spark such
+as 3.3.x, 3.4.x, 3.5.x, 4.x and a number of vendor releases that contain a mix of patches from
+different upstream releases. These artifacts are generally incompatible between each other, at both
+source code level and even more often at the binary level. The role of the Shim layer is to hide
+these issues from the common code, maximize reuse, and minimize logic duplication.
 
 This is achieved by using a ServiceProvider pattern. All Shims implement the same API,
 the suitable Shim implementation is loaded after detecting the current Spark build version
 attempting to instantiate our plugin. We use the
-[ShimLoader](https://github.com/NVIDIA/spark-rapids/blob/main/sql-plugin-api/src/main/scala/com/nvidia/spark/rapids/ShimLoader.scala)
+[ShimLoader](https://github.com/NVIDIA/cudf-spark/blob/main/sql-plugin-api/src/main/scala/com/nvidia/spark/rapids/ShimLoader.scala)
 class as a tight entry point for interacting with the host Spark runtime.
 
 In the following we provide recipes for typical scenarios addressed by the Shim layer.
+
+## One-way Shim Module Boundary
+
+This section describes the shim-facing module boundary rather than the full project module layout.
+Shim source can be split between three layers when the implementation does not have to live
+in the same module as the Spark-version-specific API reference.
+
+1. `sql-plugin-api` contains the narrow shared types that both sides can see. These types must
+   not depend on `sql-plugin` implementation classes.
+2. `sql-plugin-shims` depends on `sql-plugin-api` and Spark. It may reference Spark classes whose
+   source or binary shape varies by build version, but it must not reference implementation types
+   such as `GpuOverrides`, `RapidsMeta`, `ExprRule`, `ExecRule`, or GPU meta classes.
+3. `sql-plugin` depends on `sql-plugin-shims`. It turns API-level shim descriptors into concrete
+   plugin rules and owns the RAPIDS metadata factories.
+
+For replacement rules, use descriptor objects when the shim only needs to identify a Spark class
+and provide stable rule metadata. For example, `ShimDataWritingCommandRule`,
+`ShimRunnableCommandRule`, and `ShimExecRule` live in `sql-plugin-api`; versioned objects in
+`sql-plugin-shims` instantiate those descriptors with Spark-specific class tags; `sql-plugin`
+then calls the corresponding `GpuOverrides.*FromShim` method and supplies the actual `RapidsMeta`
+factory. This keeps the call direction one-way: shared plugin code can consume shim descriptors,
+while shim code cannot call back into shared plugin implementation.
+
+Classes whose `spark-rapids-shim-json-lines` entries cover all build versions can be unshimmed
+into a common source root when there is no special-version sibling and the source is truly
+compatible across the supported Spark APIs. When a file has Databricks-specific, Spark 4.1-specific,
+or otherwise divergent siblings, keep the version-specific source and move only the API-safe part
+behind the one-way boundary.
+
+## Source Inheritance Metadata
+
+A build target profile may declare `shim.source.inherits` to name another target whose shim
+sources it will inherit. Shimplify validates these parent links and rejects missing parents or
+cycles. The first declared links are `359` to `358`, `402` to `401`, and Spark master `500` to
+`420`. The latter two targets exist only in the Scala 2.13 build tree.
+
+This is preparatory metadata: source generation still uses the exact
+`spark-rapids-shim-json-lines` membership lists. The parent does not change dependency resolution,
+generated package identity, binary deduplication, or runtime compatibility. Source selection will
+use the lineage only after an inheritance resolver and equivalence checks are in place.
+
+The source-inspection prototype can show the annotated shim files selected for one exact target
+without running Maven:
+
+```bash
+./build/shimpler sources --target 359
+./build/shimpler sources --target 359 --explain
+./build/shimpler sources --target 500 --format=json
+```
+
+It scans Scala and Java shim sources in all modules, including nested modules. `--module sql-plugin`
+restricts the output, and `--null` produces NUL-delimited paths for shell tools. The inspector
+derives candidate inheritance points from today's exact annotations and checks that they select the
+same physical files for the requested target. Non-contiguous memberships and versioned package
+paths remain exact. The reported introduction is relative to the source-parent links currently
+declared in Maven; it is not necessarily the target where the file was first written. Unannotated
+files under versioned directories are omitted from this annotated-source query.
+Shimplify's generated sources still use the existing exact annotations. Do not convert annotations
+to `introduced` or `only` yet; generation and the captured pre-conversion oracle are follow-up work.
+
+## Reducing Parallel-World Classes
+
+The long-term goal is to maximize bytecode in the conventional jar layout and shrink the amount
+of code that must be loaded through the parallel-world mechanism. A class can move from
+`spark-shared` to the conventional layout only when it has no static dependency path to
+Spark-version-specific bytecode. The dependency path matters transitively: a `spark-shared` class
+that calls another `spark-shared` class that eventually calls a `sparkXYZ` class is not root-safe.
+
+`dist/unshimmed-common-from-single-shim.txt` names classes and resources that are allowed to be
+stored in the conventional layout after the dist jar is assembled. During `binary-dedupe.sh`, files
+from that allowlist may be promoted out of `spark-shared` into the root layout before the final
+identity sanity check runs. The script then verifies that root-layout class files that require shared
+identity are present in the bitwise-identical `spark-shared` set, unless covered by a narrow
+compatibility exception in `unshimmed_class_needs_shared_identity`. This proves byte-for-byte
+identity; it does not replace analyzer-based dependency-path review for root-safety. This is
+important for profiles where the highest Spark build contributes only a stub module, while a lower
+Spark build contributes the real implementation. For example, root-safe Iceberg helpers can still be
+placed in the conventional layout even when the Spark 4.1 shim uses the Iceberg stub.
+
+Use a small bootstrap allowlist for classes that are allowed to refer to packages generated with
+`$_spark.version.classifier_`, such as `com.nvidia.spark.rapids.spark330.RapidsShuffleManager`.
+Ordinary shared implementation classes should not have direct static dependencies on those
+classifier packages. They should instead call through stable contracts in `sql-plugin-api` or
+through descriptor objects in `sql-plugin-shims`.
+
+For an inventory of a released artifact, download the complete dist jar from Maven Central and run
+the dependency analyzer directly against the jar:
+
+```bash
+VERSION=26.04.2
+curl -fL -o /tmp/rapids-4-spark_2.12-${VERSION}-cuda12.jar \
+  https://repo.maven.apache.org/maven2/com/nvidia/rapids-4-spark_2.12/${VERSION}/rapids-4-spark_2.12-${VERSION}-cuda12.jar
+
+python3 dist/scripts/analyze-parallel-world-deps.py \
+  /tmp/rapids-4-spark_2.12-${VERSION}-cuda12.jar \
+  --show-topo
+```
+
+Run the same command for the Scala 2.13 artifact when checking Spark 4.x coverage. Internal
+snapshot artifacts can be analyzed the same way after downloading a timestamped dist jar from the
+configured artifact repository; keep repository credentials in local Maven or environment
+configuration rather than embedding them in scripts or docs.
+
+For local branch validation, build representative two-shim dist jars that span the widest
+differences in each Scala line:
+
+```bash
+./build/buildall --profile=350,411 --scala213 --module=dist
+python3 dist/scripts/analyze-parallel-world-deps.py \
+  scala2.13/dist/target/parallel-world \
+  --show-topo
+
+./build/buildall --profile=330,358 --module=dist
+python3 dist/scripts/analyze-parallel-world-deps.py \
+  dist/target/parallel-world \
+  --show-topo
+```
+
+The analyzer reports:
+
+1. direct classifier-package dependencies, which should remain limited to bootstrap/facade code;
+2. root or `spark-shared` classes with transitive paths to version-specific classes;
+3. root-safe `spark-shared` strongly connected components in dependency-first order.
+
+Use `--format=json` when comparing safe components across artifacts or build outputs. JSON output
+keeps counts exact and bounds example sections with `--limit`.
+Shortest paths explain why a class is blocked and usually identify the adapter boundary to cut.
+Strongly connected components, not shortest paths, provide the migration ordering because classes in
+the same component have to move or be refactored together. See
+[Parallel World Unshimming Algorithm](parallel-world-unshimming.md) for the SCC model and migration
+workflow.
 
 ## Method signature discrepancies
 
@@ -58,11 +188,11 @@ inject an intermediate trait e.g. `com.nvidia.spark.rapids.shims.ShimExpression`
 has a varying source code depending on the Spark version we compile against to overcome this
 issue as you can see e.g., comparing shim implementations across versions:
 
-1. [Shim implementation for 3.3.0](https://github.com/NVIDIA/spark-rapids/blob/main/sql-plugin/src/main/spark330/scala/com/nvidia/spark/rapids/shims/Spark330PlusShims.scala)
-2. [Shim service provider for 3.5.1](https://github.com/NVIDIA/spark-rapids/blob/main/sql-plugin/src/main/spark351/scala/com/nvidia/spark/rapids/shims/spark351/SparkShimServiceProvider.scala)
+1. [Shim implementation for 3.3.0](https://github.com/NVIDIA/cudf-spark/blob/main/sql-plugin/src/main/spark330/scala/com/nvidia/spark/rapids/shims/Spark330PlusShims.scala)
+2. [Shim service provider for 3.5.1](https://github.com/NVIDIA/cudf-spark/blob/main/sql-plugin/src/main/spark351/scala/com/nvidia/spark/rapids/shims/spark351/SparkShimServiceProvider.scala)
 
 The `ShimExpression` and related traits themselves live in a single shared file,
-[TreeNode.scala](../../sql-plugin/src/main/scala/com/nvidia/spark/rapids/shims/TreeNode.scala),
+[TreeNode.scala](../../sql-plugin-api/src/main/scala/com/nvidia/spark/rapids/shims/TreeNode.scala),
 which is built as regular unshimmed source.
 
 This resolves compile-time problems, however, now we face the problem at run time.
@@ -82,18 +212,32 @@ Using JarURLConnection URLs we create a Parallel World of the current version wi
 Spark 3.3.0's URLs:
 
 ```text
-jar:file:/home/spark/rapids-4-spark_2.12-26.08.0.jar!/
-jar:file:/home/spark/rapids-4-spark_2.12-26.08.0.jar!/spark-shared/
-jar:file:/home/spark/rapids-4-spark_2.12-26.08.0.jar!/spark330/
+jar:file:/home/spark/rapids-4-spark_2.12-26.12.0.jar!/
+jar:file:/home/spark/rapids-4-spark_2.12-26.12.0.jar!/spark-shared/
+jar:file:/home/spark/rapids-4-spark_2.12-26.12.0.jar!/spark330/
 ```
 
 Spark 3.5.1's URLs:
 
 ```text
-jar:file:/home/spark/rapids-4-spark_2.12-26.08.0.jar!/
-jar:file:/home/spark/rapids-4-spark_2.12-26.08.0.jar!/spark-shared/
-jar:file:/home/spark/rapids-4-spark_2.12-26.08.0.jar!/spark351/
+jar:file:/home/spark/rapids-4-spark_2.12-26.12.0.jar!/
+jar:file:/home/spark/rapids-4-spark_2.12-26.12.0.jar!/spark-shared/
+jar:file:/home/spark/rapids-4-spark_2.12-26.12.0.jar!/spark351/
 ```
+
+### Classloader Coupling for Package-Private Integrations
+
+The cuDF Plugin directly accesses package-private APIs in some dependency runtimes, including
+Apache Iceberg. The JVM treats classes as members of the same runtime package only when they have
+the same package name and defining classloader. Therefore, the cuDF Plugin distribution jar and the
+dependency runtime jar must be deployed so the relevant classes are defined by the same classloader.
+
+For Iceberg, deploy both jars through `spark.driver.extraClassPath` and
+`spark.executor.extraClassPath`, or deploy both through `spark.jars`/`--jars`/`--packages`. Mixed
+deployment, with one jar on an extra classpath and the other added as a Spark jar, is unsupported for
+package-private access paths and can fail with `IllegalAccessError`. Placing an access bridge in the
+conventional root of the cuDF Plugin jar allows it to share the application classloader when both
+jars use an extra classpath; root placement does not remove the classloader-coupling requirement.
 
 ### Late Inheritance in Public Classes
 
@@ -125,7 +269,7 @@ has not been loaded yet. More accurately, it may not be strictly needed until la
 query can be run when the Spark SQL session and its extensions are initialized. It improves the
 user experience if the first query is not penalized beyond necessary though. By design, Plugin guarantees
 that the classloader is
-[set up at load time](https://github.com/NVIDIA/spark-rapids/blob/main/sql-plugin-api/src/main/scala/com/nvidia/spark/SQLPlugin.scala#L29)
+[set up at load time](https://github.com/NVIDIA/cudf-spark/blob/main/sql-plugin-api/src/main/scala/com/nvidia/spark/SQLPlugin.scala#L29)
 before the DriverPlugin and ExecutorPlugin instances are called the `init` method on.
 
 By making a visible class merely a wrapper of the real implementation where the real implementation

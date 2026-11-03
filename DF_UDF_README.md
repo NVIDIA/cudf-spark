@@ -7,7 +7,7 @@ are also used as a way to standardize processing logic across an organization or
 But UDFs come with some downsides. The biggest one is visibility into the processing being done. SQL is a language that
 can be highly optimized. But a UDF in most cases is a black box, that the SQL optimizer cannot do anything about.
 This can result in less than ideal query planning. Additionally, accelerated execution environments, like the
-RAPIDS Accelerator for Apache Spark have no easy way to replace UDFs with accelerated versions, which can result in
+NVIDIA cuDF plugin for Apache Spark have no easy way to replace UDFs with accelerated versions, which can result in
 slow performance.
 
 This attempts to add visibility to the code reuse use case by providing a way to implement a UDF in terms of dataframe
@@ -15,13 +15,13 @@ commands.
 
 ## Setup
 
-The dataframe UDF plugin is packaged in the same jar as the RAPIDS Accelerator for Apache Spark. This jar will need to
+The dataframe UDF plugin is packaged in the same jar as the cuDF plugin. This jar will need to
 be added as a compile time dependency for code that wants to use this feature as well as adding the jar to your Spark
 classpath just like you would do for GPU acceleration.
 
 If you plan to not use the GPU accelerated processing, but still want dataframe UDF support on CPU applications then
 add `com.nvidia.spark.DFUDFPlugin` to the `spark.sql.extensions` config. If you do use GPU accelerated processing
-the RAPIDS Plugin will enable this automatically. You don't need to set the `spark.sql.extensions` config, but it
+the cuDF plugin will enable this automatically. You don't need to set the `spark.sql.extensions` config, but it
 won't hurt anything if you do add it. Now you can implement a UDF in terms of Dataframe operations.
 
 ## Usage

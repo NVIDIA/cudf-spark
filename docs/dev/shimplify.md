@@ -28,7 +28,7 @@ time of this writing) have a new set of special sibling directories
 `src/(main|test)/spark${buildver}`.
 
 Previous `src/(main|test)/${buildver}` and
-version-range-with-exceptions directories such as `src/main/320until340-non330db` are deprecated and
+version-range-with-exceptions directories such as `src/main/320until330-noncdh` are deprecated and
 are being removed as a result of the conversion to the new structure.
 
 `shimplify` changes the way the source code is shared among shims by using an explicit
@@ -163,7 +163,7 @@ It is not expected to be really necessary but it is possible to convert a subset
 
 * Either by adding -Dshimplify.shims=buildver1,buildver2,... to the commands above
 * Or by specifying a list of directories you would like to delete to have a simpler directory
--Dshimplify.dirs=320until340-non330db,320until330-noncdh
+-Dshimplify.dirs=320until330-noncdh
 
 The latter is just a minor twist on the former. Instead of having an explicit list of shims, it
 first computes the list of all `buildver` values using provided directories. After this *all* the
@@ -260,10 +260,10 @@ its file with the list of buildvers.
 
 See [CPD user doc][7] for more details about the options you can pass inside `cpd.argLine`.
 
-[1]: https://github.com/NVIDIA/spark-rapids/issues/3223
-[2]: https://github.com/NVIDIA/spark-rapids/blob/b7b1a5d544b6a3ac35ed064b5c32ee0d63c78845/build/shimplify.py#L15-L79
-[3]: https://github.com/NVIDIA/spark-rapids/blob/74ce729ca1306db01359e68f7f0b7cc31cd3d850/pom.xml#L494-L500
+[1]: https://github.com/NVIDIA/cudf-spark/issues/3223
+[2]: https://github.com/NVIDIA/cudf-spark/blob/b7b1a5d544b6a3ac35ed064b5c32ee0d63c78845/build/shimplify.py#L15-L79
+[3]: https://github.com/NVIDIA/cudf-spark/blob/74ce729ca1306db01359e68f7f0b7cc31cd3d850/pom.xml#L494-L500
 [4]: https://jsonlines.org/
 [5]: https://spark.apache.org/versioning-policy.html
 [6]: https://plugins.jetbrains.com/plugin/16429-idea-resolve-symlinks
-[7]: https://docs.pmd-code.org/latest/pmd_userdocs_cpd.html
+[7]: https://pmd.github.io/pmd/pmd_userdocs_cpd.html

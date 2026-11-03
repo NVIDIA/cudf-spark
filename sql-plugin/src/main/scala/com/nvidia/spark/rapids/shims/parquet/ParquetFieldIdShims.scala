@@ -16,20 +16,27 @@
 
 package com.nvidia.spark.rapids.shims.parquet
 
+import com.nvidia.spark.rapids.shims.FileWriteOptionsShims
 import org.apache.hadoop.conf.Configuration
 
 import org.apache.spark.sql.internal.SQLConf
 
 object ParquetFieldIdShims {
-  /** Updates the Hadoop configuration with the Parquet field ID write setting from SQLConf */
+  /**
+   * Applies the SQLConf field ID setting without replacing a Spark 4.2+ per-write option.
+   * Older shims retain the original unconditional SQLConf behavior.
+   */
   def setupParquetFieldIdWriteConfig(conf: Configuration, sqlConf: SQLConf): Unit = {
-    conf.set(
+    FileWriteOptionsShims.setConfWithWriteOptionPrecedence(
+      conf,
       SQLConf.PARQUET_FIELD_ID_WRITE_ENABLED.key,
       sqlConf.parquetFieldIdWriteEnabled.toString)
   }
 
-  /** Get Parquet field ID write enabled configuration value */
+  /** Gets the field ID setting resolved in the Hadoop configuration. */
   def getParquetIdWriteEnabled(conf: Configuration, sqlConf: SQLConf): Boolean = {
-    sqlConf.parquetFieldIdWriteEnabled
+    conf.getBoolean(
+      SQLConf.PARQUET_FIELD_ID_WRITE_ENABLED.key,
+      sqlConf.parquetFieldIdWriteEnabled)
   }
 }

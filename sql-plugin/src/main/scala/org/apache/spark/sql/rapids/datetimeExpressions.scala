@@ -27,11 +27,14 @@ import com.nvidia.spark.rapids.Arm._
 import com.nvidia.spark.rapids.ExprMeta
 import com.nvidia.spark.rapids.GpuOverrides.{extractStringLit, getTimeParserPolicy}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
-import com.nvidia.spark.rapids.jni.{Arithmetic, CastStrings, DateTimeUtils, GpuTimeZoneDB}
-import com.nvidia.spark.rapids.shims.{NullIntolerantShim, ShimBinaryExpression, ShimExpression}
+import com.nvidia.spark.rapids.jni.{Arithmetic, CastException, CastStrings, DateTimeUtils,
+  GpuTimeZoneDB}
+import com.nvidia.spark.rapids.shims.{NullIntolerantShim, ShimBinaryExpression, ShimExpression,
+  TruncTimestampShims}
 
 import org.apache.spark.sql.catalyst.expressions.{BinaryExpression, ExpectsInputTypes, Expression, FromUnixTime, FromUTCTimestamp, ImplicitCastInputTypes, MonthsBetween, TimeZoneAwareExpression, ToUTCTimestamp, TruncDate, TruncTimestamp}
 import org.apache.spark.sql.catalyst.util.DateTimeConstants
+import org.apache.spark.sql.errors.QueryExecutionErrors
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -451,6 +454,14 @@ trait GpuNumberToTimestampUnaryExpression extends GpuUnaryExpression {
 
 case class GpuSecondsToTimestamp(child: Expression) extends GpuNumberToTimestampUnaryExpression {
 
+  // Overflow and decimal rounding checks can throw even when ANSI mode is disabled.
+  override def hasSideEffects: Boolean = super.hasSideEffects || (child.dataType match {
+    case LongType => true
+    // Up to 12 integer digits fit in Long microseconds; scales above 6 may need rounding.
+    case dt: DecimalType => dt.scale > 6 || dt.precision - dt.scale > 12
+    case _ => false
+  })
+
   override def nullable: Boolean = child.dataType match {
     case _: FloatType | _: DoubleType => true
     case _ => child.nullable
@@ -553,6 +564,9 @@ case class GpuSecondsToTimestamp(child: Expression) extends GpuNumberToTimestamp
 }
 
 case class GpuMillisToTimestamp(child: Expression) extends GpuNumberToTimestampUnaryExpression {
+  override def hasSideEffects: Boolean =
+    super.hasSideEffects || child.dataType == LongType
+
   protected lazy val convertTo: GpuColumnVector => ColumnVector = child.dataType match {
     case LongType =>
       (input: GpuColumnVector) => {
@@ -562,7 +576,6 @@ case class GpuMillisToTimestamp(child: Expression) extends GpuNumberToTimestampU
     case IntegerType | ShortType | ByteType =>
       (input: GpuColumnVector) => {
         withResource(input.getBase.castTo(DType.INT64)) { longs =>
-          checkLongMultiplicationOverflow(longs, DateTimeConstants.MICROS_PER_MILLIS)
           longs.asTimestampMilliseconds()
         }
       }
@@ -710,12 +723,25 @@ object GpuToTimestamp {
       sparkFormat: String,
       strfFormat: String,
       dtype: DType,
-      failOnError: Boolean): ColumnVector = {
+      failOnError: Boolean,
+      exceptionPolicy: Boolean): ColumnVector = {
 
     // `tsVector` will be closed in replaceSpecialDates
     val tsVector = if (isSimpleSparkFormat(sparkFormat, isLegacy = false)) {
       // Fused kernel skips the regex+length+cuDF-asTimestamp chain.
-      val parsed = CastStrings.parseTimestampWithFormat(lhs.getBase, sparkFormat, false)
+      val parsed = try {
+        val parserPolicy = if (exceptionPolicy) {
+          CastStrings.TIME_PARSER_POLICY_EXCEPTION
+        } else {
+          CastStrings.TIME_PARSER_POLICY_CORRECTED
+        }
+        CastStrings.parseTimestampWithFormat(
+          lhs.getBase, sparkFormat, parserPolicy)
+      } catch {
+        case e: CastException =>
+          throw QueryExecutionErrors.failToParseDateTimeInNewParserError(
+            e.getStringWithError, e)
+      }
       closeOnExcept(parsed) { _ =>
         if (failOnError && parsed.getNullCount > lhs.getBase.getNullCount) {
           // ANSI mode + a row that was non-null in input but failed to parse.
@@ -799,7 +825,7 @@ abstract class GpuToTimestamp
     val tmp = lhs.dataType match {
       case StringType =>
         // rhs is ignored we already parsed the format
-        val res = if (getTimeParserPolicy == LegacyTimeParserPolicy) {
+        val res = if (timeParserPolicy == LegacyTimeParserPolicy) {
           parseStringAsTimestampWithLegacyParserPolicy(lhs, sparkFormat)
         } else {
           parseStringAsTimestamp(
@@ -807,7 +833,8 @@ abstract class GpuToTimestamp
             sparkFormat,
             strfFormat,
             DType.TIMESTAMP_MICROSECONDS,
-            failOnError)
+            failOnError,
+            timeParserPolicy == ExceptionTimeParserPolicy)
         }
         if (GpuOverrides.isUTCTimezone(zoneId)) {
           res
@@ -892,7 +919,8 @@ case class GpuGetTimestamp(
     format: Expression,
     sparkFormat: String,
     strf: String,
-    timeZoneId: Option[String] = None) extends GpuToTimestamp {
+    timeZoneId: Option[String] = None,
+    override val failOnError: Boolean = SQLConf.get.ansiEnabled) extends GpuToTimestamp {
 
   override def strfFormat = strf
   override val downScaleFactor = 1
@@ -1324,31 +1352,39 @@ case class GpuMonthsBetween(ts1: Expression,
     }
 
     val zoneId = timeZoneId.map(s => ZoneId.of(s).normalized()).getOrElse(UTC)
-    withResource(convertToZoneAndClose(ts1.columnarEval(batch), zoneId)) { converted1 =>
+    val monthParts = withResource(convertToZoneAndClose(ts1.columnarEval(batch), zoneId)) {
+      converted1 =>
       withResource(convertToZoneAndClose(ts2.columnarEval(batch), zoneId)) { converted2 =>
-        withResource(calcMonthDiff(converted1, converted2)) { monthDiff =>
-          withResource(calcJustMonth(converted1, converted2)) { justMonthDiff =>
-            withResource(calcSecondsDiff(converted1, converted2)) { secondsDiff =>
-              val partialMonth = withResource(Scalar.fromDouble(DAYS.toSeconds(31))) {
-                secondsInMonth =>
+        val monthDiff = calcMonthDiff(converted1, converted2)
+        closeOnExcept(monthDiff) { _ =>
+          val justMonthDiff = calcJustMonth(converted1, converted2)
+          closeOnExcept(justMonthDiff) { _ =>
+            val partialMonth = withResource(calcSecondsDiff(converted1, converted2)) {
+              secondsDiff =>
+                withResource(Scalar.fromDouble(DAYS.toSeconds(31))) { secondsInMonth =>
                   secondsDiff.trueDiv(secondsInMonth)
-              }
-              val roundedPartialMonth = if (needsRoundOff.get) {
-                withResource(partialMonth) { _ =>
-                  Arithmetic.round(partialMonth, 8)
                 }
-              } else {
-                partialMonth
-              }
-              val diff = withResource(roundedPartialMonth) { _ =>
-                roundedPartialMonth.add(monthDiff)
-              }
-              withResource(diff) { _ =>
-                GpuColumnVector.from(justMonthDiff.ifElse(monthDiff, diff), dataType)
-              }
+            }
+            closeOnExcept(partialMonth) { _ =>
+              Seq(monthDiff, justMonthDiff, partialMonth)
             }
           }
         }
+      }
+    }
+    withResource(monthParts) { parts =>
+      val monthDiff = parts(0)
+      val justMonthDiff = parts(1)
+      val partialMonth = parts(2)
+      val diff = if (needsRoundOff.get) {
+        withResource(Arithmetic.round(partialMonth, 8)) { roundedPartialMonth =>
+          roundedPartialMonth.add(monthDiff)
+        }
+      } else {
+        partialMonth.add(monthDiff)
+      }
+      withResource(diff) { _ =>
+        GpuColumnVector.from(justMonthDiff.ifElse(monthDiff, diff), dataType)
       }
     }
   }
@@ -1533,6 +1569,59 @@ case class GpuTruncTimestamp(fmt: Expression, timestamp: Expression, timeZoneId:
   override def dataType: DataType = TimestampType
 
   override def prettyName: String = "date_trunc"
+
+  override protected def truncate(datetimeCol: GpuColumnVector, fmtCol: GpuColumnVector)
+      : ColumnVector = {
+    closeOnExcept(DateTimeUtils.truncate(datetimeCol.getBase, fmtCol.getBase)) { truncated =>
+      TruncTimestampShims.checkOverflow(datetimeCol.getBase, truncated)
+      truncated
+    }
+  }
+
+  override protected def truncate(datetimeVal: GpuScalar, fmtCol: GpuColumnVector): ColumnVector = {
+    // Keep the one-row scalar broadcast into JNI truncate, and compare the multi-row result
+    // against the scalar via TruncTimestampShims.checkOverflow(Scalar, ColumnVector).
+    withResource(ColumnVector.fromScalar(datetimeVal.getBase, 1)) { datetimeCol =>
+      closeOnExcept(DateTimeUtils.truncate(datetimeCol, fmtCol.getBase)) { truncated =>
+        TruncTimestampShims.checkOverflow(datetimeVal.getBase, truncated)
+        truncated
+      }
+    }
+  }
+
+  override protected def truncate(datetimeCol: GpuColumnVector, fmtVal: GpuScalar): ColumnVector = {
+    fmtStr match {
+      case Some(fmt) =>
+        closeOnExcept(DateTimeUtils.truncate(datetimeCol.getBase, fmt)) { truncated =>
+          TruncTimestampShims.checkOverflow(datetimeCol.getBase, truncated)
+          truncated
+        }
+      case None =>
+        GpuColumnVector.columnVectorFromNull(datetimeCol.getRowCount.toInt, dataType)
+    }
+  }
+
+  override protected def truncate(numRows: Int, datetimeVal: GpuScalar, fmtVal: GpuScalar)
+      : ColumnVector = {
+    fmtStr match {
+      case Some(fmt) =>
+        withResource(ColumnVector.fromScalar(datetimeVal.getBase, 1)) { datetimeCol =>
+          closeOnExcept(DateTimeUtils.truncate(datetimeCol, fmt)) { truncated =>
+            TruncTimestampShims.checkOverflow(datetimeVal.getBase, truncated)
+            if (numRows == 1) {
+              truncated
+            } else {
+              withResource(truncated) { _ =>
+                withResource(truncated.getScalarElement(0)) { truncatedScalar =>
+                  ColumnVector.fromScalar(truncatedScalar, numRows)
+                }
+              }
+            }
+          }
+        }
+      case None => GpuColumnVector.columnVectorFromNull(numRows, dataType)
+    }
+  }
 
   // Since the input order of this class is opposite compared to the `GpuTruncDate` class,
   // we need to switch `lhs` and `rhs` in the `doColumnar` methods below.

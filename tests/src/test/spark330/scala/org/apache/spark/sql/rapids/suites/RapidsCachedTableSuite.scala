@@ -21,12 +21,17 @@ package org.apache.spark.sql.rapids.suites
 
 import java.time.LocalDateTime
 
+import scala.collection.mutable.HashSet
+import scala.concurrent.duration._
+
+import org.apache.spark.CleanerListener
 import org.apache.spark.sql.{CachedTableSuite, Dataset, Row}
 import org.apache.spark.sql.catalyst.expressions.SubqueryExpression
 import org.apache.spark.sql.execution.{ExecSubqueryExpression, SparkPlan}
 import org.apache.spark.sql.execution.columnar.InMemoryRelation
 import org.apache.spark.sql.rapids.GpuInMemoryTableScanExec
 import org.apache.spark.sql.rapids.utils.RapidsSQLTestsTrait
+import org.apache.spark.util.AccumulatorContext
 
 class RapidsCachedTableSuite extends CachedTableSuite with RapidsSQLTestsTrait {
   import testImplicits._
@@ -56,6 +61,54 @@ class RapidsCachedTableSuite extends CachedTableSuite with RapidsSQLTestsTrait {
       case p =>
         getNumGpuInMemoryTablesInSubquery(p)
     }.sum
+  }
+
+  testRapids("Ensure accumulators to be cleared after GC when uncacheTable") {
+    withTempView("t1", "t2") {
+      sql("SELECT key FROM testData LIMIT 10").createOrReplaceTempView("t1")
+      sql("SELECT key FROM testData LIMIT 5").createOrReplaceTempView("t2")
+
+      spark.catalog.cacheTable("t1")
+      spark.catalog.cacheTable("t2")
+
+      sql("SELECT * FROM t1").count()
+      sql("SELECT * FROM t2").count()
+      sql("SELECT * FROM t1").count()
+      sql("SELECT * FROM t2").count()
+
+      // Keep only IDs so the test does not retain the cached plans or their accumulators.
+      val accIds = Seq("t1", "t2").map { tableName =>
+        spark.table(tableName).queryExecution.withCachedData.collect {
+          case cached: InMemoryRelation => cached.cacheBuilder.sizeInBytesStats.id
+        }.head
+      }
+      assert(accIds.distinct.size == 2, "Each cached table should have its own accumulator")
+      accIds.foreach(id => assert(AccumulatorContext.get(id).nonEmpty))
+
+      val toBeCleanedAccIds = new HashSet[Long] ++ accIds
+      spark.sparkContext.cleaner.get.attachListener(new CleanerListener {
+        override def rddCleaned(rddId: Int): Unit = {}
+        override def shuffleCleaned(shuffleId: Int): Unit = {}
+        override def broadcastCleaned(broadcastId: Long): Unit = {}
+        override def accumCleaned(accId: Long): Unit = {
+          toBeCleanedAccIds.synchronized { toBeCleanedAccIds -= accId }
+        }
+        override def checkpointCleaned(rddId: Long): Unit = {}
+      })
+
+      uncacheTable("t1")
+      uncacheTable("t2")
+
+      // QueryExecution listener events can retain cached plans after the actions return.
+      spark.sparkContext.listenerBus.waitUntilEmpty(10000)
+      eventually(timeout(30.seconds), interval(200.millis)) {
+        // GC is advisory; retry it while waiting for the actual cleaner callbacks.
+        System.gc()
+        val remaining = toBeCleanedAccIds.synchronized { toBeCleanedAccIds.toSet }
+        assert(remaining.isEmpty, s"Cache accumulators were not cleaned: $remaining")
+      }
+      accIds.foreach(id => assert(AccumulatorContext.get(id).isEmpty))
+    }
   }
 
   testRapids("InMemoryRelation statistics") {

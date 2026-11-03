@@ -178,6 +178,19 @@ abstract class CudfUnsafeRowBase(
     out
   }
 
+  // These Spark 4.x interface methods are outside the CudfUnsafeRow fast path today.
+  def getVariant(ordinal: Int) = {
+    throw new UnsupportedOperationException("VariantVal is not supported")
+  }
+
+  def getGeography(ordinal: Int) = {
+    throw new UnsupportedOperationException("GeographyVal is not supported")
+  }
+
+  def getGeometry(ordinal: Int) = {
+    throw new UnsupportedOperationException("GeometryVal is not supported")
+  }
+
   override def getInterval(ordinal: Int): CalendarInterval = {
     throw new IllegalArgumentException("NOT IMPLEMENTED YET")
   }

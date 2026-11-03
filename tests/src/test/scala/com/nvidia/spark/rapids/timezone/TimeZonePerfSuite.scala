@@ -19,7 +19,7 @@ package com.nvidia.spark.rapids.timezone
 import java.io.File
 import java.time.Instant
 
-import com.nvidia.spark.rapids.SparkQueryCompareTestSuite
+import com.nvidia.spark.rapids.{ConsoleOutput, SparkQueryCompareTestSuite}
 import com.nvidia.spark.rapids.jni.GpuTimeZoneDB
 import org.scalatest.BeforeAndAfterAll
 
@@ -141,7 +141,7 @@ class TimeZonePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAfterAl
       // by default skip perf test
       return None
     }
-    println(s"test,type,zone,used MS")
+    ConsoleOutput.writeLine(s"test,type,zone,used MS")
     for (zoneStr <- zones) {
       // run 6 rounds, but ignore the first round.
       val elapses = (1 to 6).map { i =>
@@ -154,7 +154,7 @@ class TimeZonePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAfterAl
         val endOnCpu = System.nanoTime()
         val elapseOnCpuMS = (endOnCpu - startOnCpu) / 1000000L
         if (i != 1) {
-          println(s"$testName,Cpu,$zoneStr,$elapseOnCpuMS")
+          ConsoleOutput.writeLine(s"$testName,Cpu,$zoneStr,$elapseOnCpuMS")
         }
 
         // run on Gpu
@@ -166,7 +166,7 @@ class TimeZonePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAfterAl
         val endOnGpu = System.nanoTime()
         val elapseOnGpuMS = (endOnGpu - startOnGpu) / 1000000L
         if (i != 1) {
-          println(s"$testName,Gpu,$zoneStr,$elapseOnGpuMS")
+          ConsoleOutput.writeLine(s"$testName,Gpu,$zoneStr,$elapseOnGpuMS")
           (elapseOnCpuMS, elapseOnGpuMS)
         } else {
           (0L, 0L) // skip the first round
@@ -175,7 +175,7 @@ class TimeZonePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAfterAl
       val meanCpu = elapses.map(_._1).sum / 5.0
       val meanGpu = elapses.map(_._2).sum / 5.0
       val speedup = meanCpu.toDouble / meanGpu.toDouble
-      println(f"$testName, $zoneStr: mean cpu time: $meanCpu%.2f ms, " +
+      ConsoleOutput.writeLine(f"$testName, $zoneStr: mean cpu time: $meanCpu%.2f ms, " +
           f"mean gpu time: $meanGpu%.2f ms, speedup: $speedup%.2f x")
     }
   }

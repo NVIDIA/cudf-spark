@@ -18,13 +18,6 @@ package com.nvidia.spark.rapids
 
 import org.apache.spark.scheduler.SparkListenerEvent
 
-case class SparkRapidsBuildInfoEvent(
-  sparkRapidsBuildInfo: Map[String, String],
-  sparkRapidsJniBuildInfo: Map[String, String],
-  cudfBuildInfo: Map[String, String],
-  sparkRapidsPrivateBuildInfo: Map[String, String]
-) extends SparkListenerEvent
-
 /**
  * Event posted when a shuffle is unregistered, containing disk I/O savings statistics.
  * This tracks how much data stayed in memory throughout the shuffle lifecycle,

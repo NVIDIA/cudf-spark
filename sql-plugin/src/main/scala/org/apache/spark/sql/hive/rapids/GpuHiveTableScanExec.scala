@@ -23,7 +23,7 @@ import scala.collection.immutable.HashSet
 import scala.collection.mutable
 
 import ai.rapids.cudf.{CaptureGroups, ColumnVector, DType, RegexProgram, Scalar, Schema, Table}
-import com.nvidia.spark.rapids.{ColumnarPartitionReaderWithPartitionValues, CSVPartitionReaderBase, DateUtils, GpuColumnVector, GpuExec, GpuMetric, HostStringColBufferer, HostStringColBuffererFactory, NvtxIdWithMetrics, NvtxRegistry, PartitionReaderIterator, PartitionReaderWithBytesRead, RapidsConf}
+import com.nvidia.spark.rapids.{ColumnarPartitionReaderWithPartitionValues, CSVPartitionReaderBase, DateUtils, GpuColumnVector, GpuExec, GpuMetric, HostStringColBufferer, HostStringColBuffererFactory, NvtxIdWithMetrics, NvtxRegistry, PartitionReaderIterator, RapidsConf}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingSeq
@@ -50,12 +50,12 @@ import org.apache.spark.sql.execution.rapids.shims.FilePartitionShims
 import org.apache.spark.sql.hive.client.HiveClientImpl
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.SparkSession
-import org.apache.spark.sql.types.{BooleanType, DataType, DecimalType, StructType}
+import org.apache.spark.sql.types.{BooleanType, DataType, DecimalType, StructField, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.util.SerializableConfiguration
 
 /**
- * RAPIDS replacement for the [[org.apache.spark.sql.hive.execution.HiveTableScanExec]],
+ * RAPIDS replacement for the `org.apache.spark.sql.hive.execution.HiveTableScanExec`,
  * for supporting reading Hive delimited text format.
  *
  * While the HiveTableScanExec supports all the data formats that Hive does,
@@ -181,6 +181,7 @@ case class GpuHiveTableScanExec(requestedAttributes: Seq[Attribute],
     "metadataTime" -> createTimingMetric(ESSENTIAL_LEVEL, "metadata time"),
     "filesSize" -> createSizeMetric(ESSENTIAL_LEVEL, "size of files read"),
     GPU_DECODE_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_GPU_DECODE_TIME),
+    GPU_OUTPUT_BATCH_BYTES -> createSizeMetric(MODERATE_LEVEL, DESCRIPTION_GPU_OUTPUT_BATCH_BYTES),
     BUFFER_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_BUFFER_TIME),
     FILTER_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_FILTER_TIME),
     BUFFER_TIME_BUBBLE -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_BUFFER_TIME_BUBBLE),
@@ -470,11 +471,10 @@ case class GpuHiveTextPartitionReaderFactory(sqlConf: SQLConf,
 
   override def buildColumnarReader(partFile: PartitionedFile): PartitionReader[ColumnarBatch] = {
     val conf = broadcastConf.value.value
-    val reader = new PartitionReaderWithBytesRead(
-                   new GpuHiveDelimitedTextPartitionReader(
-                     conf, csvOptions, params, partFile, inputFileSchema,
-                     requestedOutputDataSchema, maxReaderBatchSizeRows,
-                     maxReaderBatchSizeBytes, metrics))
+    val reader = new GpuHiveDelimitedTextPartitionReader(
+      conf, csvOptions, params, partFile, inputFileSchema,
+      requestedOutputDataSchema, maxReaderBatchSizeRows,
+      maxReaderBatchSizeBytes, metrics)
     new AlphabeticallyReorderingColumnPartitionReader(reader,
                                                       partFile.partitionValues,
                                                       partitionSchema,
@@ -583,9 +583,13 @@ class GpuHiveDelimitedTextPartitionReader(conf: Configuration,
   override def castStringToDecimal(input: ColumnVector, dt: DecimalType): ColumnVector =
     CastStrings.toDecimal(input, false, false, dt.precision, -dt.scale)
 
+  // Hive DATE conversion must keep LazySimpleSerDe semantics instead of CSV date parsing.
+  override def castStringToDate(input: ColumnVector, dt: DType,
+      field: StructField): ColumnVector = castStringToDate(input, dt)
+
   /**
-   * Override of [[com.nvidia.spark.rapids.GpuTextBasedPartitionReader.castStringToDate()]],
-   * to convert parsed string columns to Dates.
+   * Override of the two-argument `castStringToDate` in
+   * [[com.nvidia.spark.rapids.GpuTextBasedPartitionReader]] to convert string columns to Dates.
    * Two key differences from the base implementation, to comply with Hive LazySimpleSerDe
    * semantics:
    *   1. The input strings are not trimmed of whitespace.

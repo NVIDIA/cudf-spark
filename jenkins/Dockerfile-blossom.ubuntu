@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2020-2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@
 # Arguments:
 #       CUDA_VER=[12.X.Y,13.X.Y]
 #       UBUNTU_VER=[22.04,24.04]
-#       UCX_VER=1.19.1-rc2
+#       UCX_VER=1.22.0
 #       TARGETPLATFORM=[linux/amd64,linux/arm64]
 #       ARCH=[amd64,arm64]
 #       UCX_ARCH=[x86_64,aarch64]
@@ -29,7 +29,7 @@
 
 ARG CUDA_VER=13.0.1
 ARG UBUNTU_VER=22.04
-ARG UCX_VER=1.19.1-rc2
+ARG UCX_VER=1.22.0
 ARG TARGETPLATFORM=linux/amd64
 # multi-platform build with: docker buildx build --platform linux/arm64,linux/amd64 <ARGS> on either amd64 or arm64 host
 # check available official arm-based docker images at https://hub.docker.com/r/nvidia/cuda/tags (OS/ARCH)
@@ -48,18 +48,26 @@ RUN sed -i -e 's|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubu
 RUN find /etc/apt/sources.list.d/ -name '*.sources' -exec sed -i \
            -e "s|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g" \
            -e "s|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g" {} +
-# Install jdk-8, jdk-11, jdk-17, maven, docker image
+# Install jdk-8, jdk-11, jdk-17, docker image
 RUN apt-get update -y && \
     apt-get install -y software-properties-common rsync
 
 # libnuma1 and libgomp1 are required by ucx packaging
 RUN add-apt-repository ppa:deadsnakes/ppa && \
     apt-get update -y && \
-    DEBIAN_FRONTEND="noninteractive" apt-get install -y maven \
+    DEBIAN_FRONTEND="noninteractive" apt-get install -y \
     openjdk-8-jdk openjdk-11-jdk openjdk-17-jdk \
     python3 python3-pip python3-venv python3-setuptools \
     tzdata git zip unzip bzip2 wget parallel \
     inetutils-ping expect wget libnuma1 libgomp1 locales
+
+ARG MAVEN_VERSION=3.8.1
+ARG MAVEN_BASE_URL=https://archive.apache.org/dist/maven/maven-3
+RUN wget "${MAVEN_BASE_URL}/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" \
+        -O /tmp/apache-maven.tar.gz && \
+    tar xf /tmp/apache-maven.tar.gz -C /usr/local/ && \
+    rm -f /tmp/apache-maven.tar.gz && \
+    ln -sf "/usr/local/apache-maven-${MAVEN_VERSION}/bin/mvn" /usr/bin/mvn
 
 # avoid global environment conflicts since python 3.12+
 RUN python3 -m venv /opt/venv
@@ -77,7 +85,8 @@ RUN UCX_CUDA_VER=`echo ${CUDA_VER} | cut -d '.' -f1` && \
     cd /tmp/ucx && \
     wget https://github.com/openucx/ucx/releases/download/v${UCX_VER}/ucx-${UCX_VER}-ubuntu${UBUNTU_VER}-mofed5-cuda${UCX_CUDA_VER}-${UCX_ARCH}.tar.bz2 && \
     tar -xvf *.bz2 && \
-    apt install -y /tmp/ucx/*.deb && \
+    apt install -y --no-install-recommends $(ls /tmp/ucx/*.deb | grep -v ucx-cuda) && \
+    dpkg -i --force-depends /tmp/ucx/ucx-cuda-*.deb && \
     rm -rf /tmp/ucx
 
 # export JAVA_HOME for mvn option 'source-javadoc'

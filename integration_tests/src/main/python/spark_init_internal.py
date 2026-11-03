@@ -12,12 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import logging
 import os
 import pytest
 import re
+import socket
 import stat
+import subprocess
+import sys
 import traceback
+import weakref
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)-8s %(message)s",
@@ -54,6 +59,62 @@ spark_jars_env = {
 # Initialized in pytest_sessionstart; declared here so pytest_sessionfinish
 # does not raise NameError if session startup fails before assignment.
 _spark = None
+_spark_process_details = {}
+_spark_gateway_process = None
+
+_PY4J_STRONG_REF_WORKAROUND_MARKER = '_spark_rapids_strong_ref_workaround'
+
+
+def _java_member_uses_weak_container(java_member_class):
+    class _ProbeContainer:
+        pass
+
+    class _ProbeGatewayProperty:
+        pool = None
+
+    class _ProbeGatewayClient:
+        gateway_property = _ProbeGatewayProperty()
+        converters = ()
+
+    container = _ProbeContainer()
+    member = java_member_class(
+        '_spark_rapids_container_lifetime_probe', container, 'o0', _ProbeGatewayClient())
+    return isinstance(member.container, weakref.ReferenceType)
+
+
+def _apply_py4j_strong_ref_workaround_if_needed(java_member_class=None):
+    """Restore upstream JavaMember container lifetime semantics in this IT process."""
+    if java_member_class is None:
+        from py4j.java_gateway import JavaMember
+        java_member_class = JavaMember
+
+    original_init = java_member_class.__init__
+    if getattr(original_init, _PY4J_STRONG_REF_WORKAROUND_MARKER, False):
+        return False
+    try:
+        uses_weak_container = _java_member_uses_weak_container(java_member_class)
+    except Exception:
+        logging.exception(
+            "Could not probe Py4J JavaMember container lifetime; continuing without the "
+            "temporary integration-test workaround")
+        return False
+    if not uses_weak_container:
+        return False
+
+    @functools.wraps(original_init)
+    def strong_ref_init(self, name, container, target_id, gateway_client):
+        original_init(self, name, container, target_id, gateway_client)
+        if isinstance(self.container, weakref.ReferenceType):
+            self.container = container
+
+    setattr(strong_ref_init, _PY4J_STRONG_REF_WORKAROUND_MARKER, True)
+    java_member_class.__init__ = strong_ref_init
+    logging.warning(
+        "Detected weak Py4J JavaMember container references; applying the temporary "
+        "integration-test strong-reference workaround for the missing-target failures in "
+        "https://github.com/NVIDIA/cudf-spark/issues/15805")
+    return True
+
 
 def findspark_init():
     import findspark
@@ -120,6 +181,15 @@ def pytest_sessionstart(session):
     import pyspark
     from py4j.java_gateway import java_import
 
+    # Dataproc 2.2.86 can delete temporary JVM targets before chained Py4J calls complete.
+    # Keep this before SparkSession creation. The behavior probe makes it a no-op for upstream Py4J.
+    try:
+        _apply_py4j_strong_ref_workaround_if_needed()
+    except Exception:
+        logging.exception(
+            "Could not initialize the temporary Py4J integration-test workaround; "
+            "continuing without it")
+
     # Force the RapidsPlugin to be enabled, so it blows up if the classpath is not set properly
     # DO NOT SET ANY OTHER CONFIGS HERE!!!
     # due to bugs in pyspark/pytest it looks like any configs set here
@@ -162,6 +232,21 @@ def pytest_sessionstart(session):
     _s._jvm.org.apache.spark.rapids.tests.TimeoutSparkListener.init(_s._jsc)
     global _spark
     _spark = _s
+    # Cache identity while Spark is healthy; failure diagnostics must not call a dead JVM.
+    global _spark_process_details
+    global _spark_gateway_process
+    try:
+        _spark_gateway_process = _s.sparkContext._gateway.__dict__.get('proc')
+        _spark_process_details = {
+            'worker': os.environ.get('PYTEST_XDIST_WORKER', 'gw0'),
+            'host': socket.gethostname(),
+            'python_pid': os.getpid(),
+            'jvm_pid': getattr(_spark_gateway_process, 'pid', 'externally launched'),
+            'application_id': _s.sparkContext.applicationId,
+        }
+        logger.info("Spark process identity: %s", _spark_process_details)
+    except Exception:
+        logging.warning("Spark process identity unavailable", exc_info=True)
 
 
 def _handle_derby_dir(sb, driver_opts, wid):
@@ -184,10 +269,10 @@ def _get_driver_opts_for_worker_logs(_sb, wid):
     current_directory = os.path.abspath(os.path.curdir)
     log_file = '{}/{}_worker_logs.log'.format(current_directory, wid)
 
-    from conftest import get_std_input_path
-    std_input_path = get_std_input_path()
+    local_resources = os.path.abspath(os.path.join(
+        os.path.dirname(__file__), '..', '..', 'test', 'resources'))
     # This is not going to take effect when TEST_PARALLEL=1 as it's set as a conf when calling spark-submit
-    driver_opts = ' -Dlog4j.configuration=file://{}/pytest_log4j.properties '.format(std_input_path) + \
+    driver_opts = ' -Dlog4j.configuration=file://{}/pytest_log4j.properties '.format(local_resources) + \
         ' -Dlogfile={}'.format(log_file)
 
     # Set up Logging to the WORKERID_worker_logs
@@ -269,14 +354,41 @@ def log_test_name(request):
     logger.info("Running test '{}'".format(request.node.nodeid))
 
 
-def _set_job_timeout_and_crash_when_failed(spark_timeout, dump_threads):
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node, error):
+    if error is None:
+        return
+    # Runs in the surviving xdist coordinator, including after an abrupt worker exit.
+    try:
+        worker_id = node.gateway.id
+        worker_info = getattr(node, 'workerinfo', {})
+        print(f"\n----- pytest worker lost: {worker_id}, "
+              f"python_pid={worker_info.get('pid', 'unknown')}, error={error} -----",
+              file=sys.stderr, flush=True)
+        log_file = os.path.join(os.getcwd(), f'{worker_id}_worker_logs.log')
+        result = subprocess.run(['tail', '-c', '65536', log_file],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, errors='replace', timeout=5, check=False)
+        print('\n'.join(result.stdout.splitlines()[-200:]), file=sys.stderr, flush=True)
+    except Exception as diagnostic_error:
+        logging.warning("Worker-loss diagnostics unavailable: %s", diagnostic_error)
+
+
+def _set_job_timeout_and_crash_when_failed(spark_timeout, dump_threads, test_name):
     try:
         _spark._jvm.org.apache.spark.rapids.tests.TimeoutSparkListener.setSparkJobTimeout(
             spark_timeout,
             dump_threads
         )
     except Exception as e:
+        try:
+            _spark_process_details['jvm_exit'] = (
+                _spark_gateway_process.poll() if _spark_gateway_process is not None
+                else 'unavailable')
+        except Exception:
+            _spark_process_details['jvm_exit'] = 'unavailable'
         logger.error(f"""set_spark_job_timeout: Unusable Spark Driver JVM detected!
+                     Test: {test_name}; Spark process identity: {_spark_process_details}
                      Crashing pytest worker to mitigate: {traceback.format_exc()}""")
         os._exit(os.EX_UNAVAILABLE)
 
@@ -292,11 +404,11 @@ def set_spark_job_timeout(request):
         spark_timeout = default_timeout_seconds
         dump_threads = default_dump_threads
     # before the test
-    _set_job_timeout_and_crash_when_failed(spark_timeout, dump_threads)
+    _set_job_timeout_and_crash_when_failed(spark_timeout, dump_threads, request.node.nodeid)
     # yield for test
     yield
     # after the test
-    _set_job_timeout_and_crash_when_failed(spark_timeout, dump_threads)
+    _set_job_timeout_and_crash_when_failed(spark_timeout, dump_threads, request.node.nodeid)
 
 
 @pytest.hookimpl(trylast=True)

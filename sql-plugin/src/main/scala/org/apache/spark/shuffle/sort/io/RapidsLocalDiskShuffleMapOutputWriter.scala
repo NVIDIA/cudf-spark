@@ -46,7 +46,6 @@ class RapidsLocalDiskShuffleMapOutputWriter(
 
   private val partitionLengths = new Array[Long](numPartitions)
   private var lastPartitionId = -1
-  private var currChannelPosition = 0L
   private var bytesWrittenToMergedFile = 0L
 
   private val outputFile = blockResolver.getDataFile(shuffleId, mapId)
@@ -185,8 +184,6 @@ class RapidsLocalDiskShuffleMapOutputWriter(
     // Initialize storage on first partition
     ensureStorageInitialized()
 
-    // Record current position for partition length calculation
-    currChannelPosition = partialFileHandle.map(_.getTotalBytesWritten).getOrElse(0L)
     new RapidsPartitionWriter(reducePartitionId)
   }
 
@@ -316,11 +313,9 @@ class RapidsLocalDiskShuffleMapOutputWriter(
   private class PartitionWriterChannel(partitionId: Int)
     extends WritableByteChannelWrapper {
 
-    private val startPosition = currChannelPosition
+    private var count = 0L
 
-    def getCount: Long = {
-      partialFileHandle.map(_.getTotalBytesWritten).getOrElse(0L) - startPosition
-    }
+    def getCount: Long = count
 
     override def channel(): WritableByteChannel = new WritableByteChannel {
       private var channelOpen = true
@@ -333,6 +328,7 @@ class RapidsLocalDiskShuffleMapOutputWriter(
         val temp = new Array[Byte](remaining)
         src.get(temp)
         partialFileHandle.foreach(_.write(temp, 0, remaining))
+        count += remaining
         remaining
       }
 
@@ -353,4 +349,3 @@ class RapidsLocalDiskShuffleMapOutputWriter(
     }
   }
 }
-

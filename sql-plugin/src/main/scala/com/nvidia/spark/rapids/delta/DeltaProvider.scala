@@ -21,20 +21,23 @@ import com.nvidia.spark.rapids.{
   AtomicCreateTableAsSelectExecMeta,
   AtomicReplaceTableAsSelectExecMeta,
   CreatableRelationProviderRule,
+  DataWritingCommandRule,
   ExecRule,
   ExprRule,
   GpuExec,
   OverwriteByExpressionExecV1Meta,
   RapidsConf,
   RunnableCommandRule,
+  ScanRule,
   ShimLoaderTemp,
   SparkPlanMeta
 }
 
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.connector.catalog.{StagingTableCatalog, SupportsWrite}
+import org.apache.spark.sql.connector.read.Scan
 import org.apache.spark.sql.execution.{FileSourceScanExec, SparkPlan, SparkStrategy}
-import org.apache.spark.sql.execution.command.RunnableCommand
+import org.apache.spark.sql.execution.command.{DataWritingCommand, RunnableCommand}
 import org.apache.spark.sql.execution.datasources.{FileFormat, HadoopFsRelation}
 import org.apache.spark.sql.execution.datasources.v2.{AppendDataExecV1, AtomicCreateTableAsSelectExec, AtomicReplaceTableAsSelectExec, OverwriteByExpressionExecV1}
 import org.apache.spark.sql.sources.CreatableRelationProvider
@@ -46,6 +49,8 @@ trait DeltaProbe {
 
 /** Interfaces to avoid accessing the optional Delta Lake jars directly in common code. */
 trait DeltaProvider {
+  def getScans: Map[Class[_ <: Scan], ScanRule[_ <: Scan]] = Map.empty
+
   def getCreatableRelationRules: Map[Class[_ <: CreatableRelationProvider],
       CreatableRelationProviderRule[_ <: CreatableRelationProvider]]
 
@@ -53,6 +58,9 @@ trait DeltaProvider {
 
   def getRunnableCommandRules: Map[Class[_ <: RunnableCommand],
       RunnableCommandRule[_ <: RunnableCommand]]
+
+  def getDataWritingCommandRules: Map[Class[_ <: DataWritingCommand],
+      DataWritingCommandRule[_ <: DataWritingCommand]] = Map.empty
 
   def getStrategyRules: Seq[SparkStrategy]
 

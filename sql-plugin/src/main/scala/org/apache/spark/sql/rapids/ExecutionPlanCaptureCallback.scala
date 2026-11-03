@@ -24,7 +24,10 @@ import org.apache.spark.sql.util.QueryExecutionListener
 
 trait ExecutionPlanCaptureCallbackBase {
   def captureIfNeeded(qe: QueryExecution): Unit
+  def captureIfNeeded(plan: SparkPlan): Unit
   def startCapture(): Unit
+  /** Include final write plans in addition to the usual QueryExecution plans. */
+  def startCaptureWithWritePlans(): Unit
   def startCapture(timeoutMillis: Long): Unit
   def endCapture(): Unit
   def endCapture(timeoutMillis: Long): Unit
@@ -48,6 +51,18 @@ trait ExecutionPlanCaptureCallbackBase {
    * CPU expressions wrapped inside a GpuCpuBridgeExpression. */
   def didFallBack(plan: SparkPlan, fallbackCpuClass: String): Boolean
   def contains(gpuPlan: SparkPlan, className: String): Boolean
+  /** Returns true if an exchange of the named class has the requested shuffle origin. */
+  def containsShuffleExchangeWithOrigin(
+      plan: SparkPlan,
+      className: String,
+      shuffleOrigin: String): Boolean
+  /** Returns true if a shuffle query stage contains the requested exchange and origin. */
+  def containsShuffleQueryStageWithExchangeOrigin(
+      plan: SparkPlan,
+      className: String,
+      shuffleOrigin: String): Boolean
+  /** Returns true if the captured tree contains a final adaptive plan. */
+  def containsFinalAdaptivePlan(plan: SparkPlan): Boolean
 }
 
 object ExecutionPlanCaptureCallback extends ExecutionPlanCaptureCallbackBase {
@@ -56,8 +71,14 @@ object ExecutionPlanCaptureCallback extends ExecutionPlanCaptureCallbackBase {
   override def captureIfNeeded(qe: QueryExecution): Unit =
     impl.captureIfNeeded(qe)
 
+  override def captureIfNeeded(plan: SparkPlan): Unit =
+    impl.captureIfNeeded(plan)
+
   override def startCapture(): Unit =
     impl.startCapture()
+
+  override def startCaptureWithWritePlans(): Unit =
+    impl.startCaptureWithWritePlans()
 
   override def startCapture(timeoutMillis: Long): Unit =
     impl.startCapture(timeoutMillis)
@@ -115,6 +136,21 @@ object ExecutionPlanCaptureCallback extends ExecutionPlanCaptureCallbackBase {
 
   override def contains(gpuPlan: SparkPlan, className: String): Boolean =
     impl.contains(gpuPlan, className)
+
+  override def containsShuffleExchangeWithOrigin(
+      plan: SparkPlan,
+      className: String,
+      shuffleOrigin: String): Boolean =
+    impl.containsShuffleExchangeWithOrigin(plan, className, shuffleOrigin)
+
+  override def containsShuffleQueryStageWithExchangeOrigin(
+      plan: SparkPlan,
+      className: String,
+      shuffleOrigin: String): Boolean =
+    impl.containsShuffleQueryStageWithExchangeOrigin(plan, className, shuffleOrigin)
+
+  override def containsFinalAdaptivePlan(plan: SparkPlan): Boolean =
+    impl.containsFinalAdaptivePlan(plan)
 }
 
 /**

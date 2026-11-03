@@ -34,12 +34,15 @@
 {"spark": "356"}
 {"spark": "357"}
 {"spark": "358"}
+{"spark": "359"}
 {"spark": "400"}
 {"spark": "401"}
 {"spark": "402"}
 {"spark": "403"}
+{"spark": "404"}
 {"spark": "411"}
 spark-rapids-shim-json-lines ***/
+
 package com.nvidia.spark.rapids
 
 import ai.rapids.cudf.ColumnVector
@@ -56,6 +59,24 @@ import org.apache.spark.sql.types.{DayTimeIntervalType => DT}
  *
  */
 class GpuIntervalUtilsTest extends AnyFunSuite {
+
+  test("day-time interval strings preserve nulls for every field range") {
+    val values = Array[java.lang.Long](null, 0L, -1L, Long.MinValue, Long.MaxValue)
+    withResource(ColumnVector.fromBoxedLongs(values: _*)) { micros =>
+      for (from <- DT.DAY to DT.SECOND; to <- from to DT.SECOND) {
+        val expected = values.map { value =>
+          if (value == null) null else IntervalUtils.toDayTimeIntervalString(
+            value, IntervalStringStyles.ANSI_STYLE, from.toByte, to.toByte)
+        }
+        withResource(ColumnVector.fromStrings(expected: _*)) { cpu =>
+          withResource(GpuIntervalUtils.toDayTimeIntervalString(
+              micros, from.toByte, to.toByte)) { actual =>
+            CudfTestHelper.assertColumnsAreEqual(cpu, actual)
+          }
+        }
+      }
+    }
+  }
 
   def testDayTimeToString(fromField: Byte, endField: Byte,
       testData: Array[(Long, String)]): Unit = {

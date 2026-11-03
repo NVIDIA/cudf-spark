@@ -1,4 +1,4 @@
-# Copyright (c) 2023-2024, NVIDIA CORPORATION.
+# Copyright (c) 2023-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -84,6 +84,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 from functools import partial
 
 
@@ -303,6 +304,12 @@ def __makedirs(new_dir):
 
 def task_impl():
     """Ant task entry point """
+    sys.path.insert(0, os.path.join(__ant_proj_prop('spark.rapids.source.basedir'), 'build'))
+    from shimpler_source_graph import load_source_graph
+    try:
+        load_source_graph(os.path.join(__ant_proj_prop('spark.rapids.project.basedir'), 'pom.xml'))
+    except ValueError as error:
+        __fail('Invalid shim source inheritance: %s' % error)
     __log.info('# Starting Jython Task Shimplify #')
     config_format = """#   config:
 #           shimplify.src.baseDir=%s

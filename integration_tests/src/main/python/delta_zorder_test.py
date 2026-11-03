@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@ import pytest
 
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, assert_gpu_and_cpu_are_equal_collect
 from data_gen import *
-from delta_lake_utils import deletion_vector_values_with_350DB143_xfail_reasons
+from delta_lake_utils import deletion_vector_values_with_xfail_reasons
 from marks import allow_non_gpu, ignore_order, delta_lake
 from spark_session import is_databricks_runtime, with_cpu_session, with_gpu_session, is_databricks104_or_later, is_databricks113_or_later, supports_delta_lake_deletion_vectors
 from dpp_test import _exchange_reuse_conf
@@ -118,7 +118,7 @@ _statements = [
 @pytest.mark.skipif(not is_databricks104_or_later(), reason="Dynamic File Pruning is only supported in Databricks 10.4+")
 @pytest.mark.parametrize('s_index', list(range(len(_statements))), ids=idfn)
 @pytest.mark.parametrize('aqe_enabled', ['false', 'true'])
-@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_350DB143_xfail_reasons(
+@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
                             enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_dfp_reuse_broadcast_exchange(spark_tmp_table_factory, s_index, aqe_enabled, enable_deletion_vectors):
     fact_table, dim_table = spark_tmp_table_factory.get(), spark_tmp_table_factory.get()

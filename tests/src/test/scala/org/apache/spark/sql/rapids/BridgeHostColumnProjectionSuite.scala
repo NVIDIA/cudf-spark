@@ -21,7 +21,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import ai.rapids.cudf.{DType, HostColumnVector}
 import com.nvidia.spark.rapids.{GpuColumnVector, RapidsHostColumnBuilder}
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.shims.{GpuScalarSubqueryShims, ShimExpression}
+import com.nvidia.spark.rapids.shims.{GpuScalarSubqueryShims, ShimExpression, SparkShimImpl}
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.InternalRow
@@ -149,8 +149,14 @@ class BridgeHostColumnProjectionSuite extends AnyFunSuite {
     val seen = seenIds.iterator()
     val firstValueId = seen.next()
     val secondValueId = seen.next()
-    assert(firstValueId == secondValueId)
+    // Before SPARK-58204, references with the same exprId retain the same value reference.
+    if (!SparkShimImpl.isExpressionStateful(variable)) {
+      assert(firstValueId == secondValueId)
+    }
+    // Spark 4.3+ may fresh-copy each stateful NamedLambdaVariable independently during codegen.
+    // All versions must keep projection state isolated from the caller's expression tree.
     assert(firstValueId != originalValueId)
+    assert(secondValueId != originalValueId)
   }
 
   test("projection preserves prepared subquery state") {

@@ -17,8 +17,10 @@ from pyspark import BarrierTaskContext, TaskContext
 
 from conftest import is_at_least_precommit_run, is_databricks_runtime
 from spark_session import (is_before_spark_331, is_before_spark_350,
-                           is_databricks133_or_later, is_databricks143_or_later,
-                           is_spark_400_or_later, is_spark_411_or_later)
+                           is_databricks173_or_later,
+                           is_spark_400_or_later,
+                           is_spark_411_or_later, is_spark_420_or_later,
+                           with_cpu_session)
 
 from pyspark.sql.pandas.utils import require_minimum_pyarrow_version, require_minimum_pandas_version
 
@@ -169,6 +171,52 @@ def test_group_aggregate_udf_more_types(data_gen):
             conf=arrow_udf_conf)
 
 
+@ignore_order
+@allow_non_gpu('ArrowAggregatePythonExec')
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='grouped aggregate iterator UDFs are introduced in Spark 4.2.0')
+def test_group_aggregate_pandas_iter_udf_fallback():
+    from pyspark.sql.pandas.functions import PandasUDFType
+
+    @f.pandas_udf('long', functionType=PandasUDFType.GROUPED_AGG_ITER)
+    def pandas_sum_iter(to_process: Iterator[pd.Series]) -> int:
+        total = 0
+        for series in to_process:
+            total += series.sum()
+        return total
+
+    assert_gpu_fallback_collect(
+        lambda spark: binary_op_df(spark, LongGen(nullable=False), num_slices=4)
+                .groupBy('a')
+                .agg(pandas_sum_iter(f.col('b'))),
+        'ArrowAggregatePythonExec',
+        conf=arrow_udf_conf_unsafe)
+
+
+@ignore_order
+@allow_non_gpu('ArrowAggregatePythonExec')
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='grouped aggregate iterator UDFs are introduced in Spark 4.2.0')
+def test_group_aggregate_arrow_iter_udf_fallback():
+    from pyspark.sql.pandas.functions import ArrowUDFType
+    import pyarrow.compute as pc
+
+    @f.arrow_udf('long', functionType=ArrowUDFType.GROUPED_AGG_ITER)
+    def arrow_sum_iter(to_process: Iterator[pyarrow.Array]) -> int:
+        total = 0
+        for array in to_process:
+            value = pc.sum(array).as_py()
+            total += 0 if value is None else value
+        return total
+
+    assert_gpu_fallback_collect(
+        lambda spark: binary_op_df(spark, LongGen(nullable=False), num_slices=4)
+                .groupBy('a')
+                .agg(arrow_sum_iter(f.col('b'))),
+        'ArrowAggregatePythonExec',
+        conf=arrow_udf_conf_unsafe)
+
+
 # ======= Test window in Pandas =======
 # range frame is not supported yet.
 no_part_win = Window\
@@ -191,8 +239,8 @@ pre_cur_win = Window\
 low_upper_win = Window.partitionBy('a').orderBy('b').rowsBetween(-3, 3)
 
 running_win_param = pytest.param(pre_cur_win, marks=pytest.mark.xfail(
-    condition=is_databricks133_or_later(),
-    reason="DB13.3 and 14.3 wrongly use RunningWindowFunctionExec to evaluate a PythonUDAF \
+    condition=is_databricks_runtime(),
+    reason="Databricks wrongly uses RunningWindowFunctionExec to evaluate a PythonUDAF \
 and it will fail even on CPU"))
 
 udf_windows = [no_part_win, unbounded_win, cur_follow_win, running_win_param, low_upper_win]
@@ -217,6 +265,50 @@ def test_window_aggregate_udf(data_gen, window):
             pandas_sum(f.col('b')).over(window)),
         # use unsafe mode to avoid overflow
         conf=arrow_udf_conf_unsafe)
+
+
+@ignore_order
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="Databricks UDF logging requires DBR 17.3 or later")
+@pytest.mark.parametrize('logging_settings', [(0, 'WARNING'), (7, 'INFO')],
+                         ids=['default_logging', 'configured_logging'])
+@pytest.mark.parametrize('bounded', [False, True], ids=['unbounded', 'bounded'])
+@pytest.mark.parametrize('project_array', [False, True], ids=['scalar', 'array_projection'])
+def test_window_aggregate_udf_logging(logging_settings, bounded, project_array):
+    max_entries, log_level = logging_settings
+
+    def checked_sum(values):
+        from pyspark.sql.udf_logger import PySparkUDFLogger
+        # Verify the worker receives the settings, not just that the query returns results.
+        assert PySparkUDFLogger._max_entries == max_entries
+        assert PySparkUDFLogger._log_level == log_level
+        return int(values.sum())
+
+    if project_array:
+        @f.pandas_udf('array<long>')
+        def pandas_sum(values: pd.Series) -> list:
+            total = checked_sum(values)
+            return [total, total + 1]
+    else:
+        @f.pandas_udf('long')
+        def pandas_sum(values: pd.Series) -> int:
+            return checked_sum(values)
+
+    def query(spark):
+        df = spark.range(0, 32, 1, 2).withColumn('key', f.col('id') % 3)
+        window = Window.partitionBy('key')
+        if bounded:
+            window = window.orderBy('id').rowsBetween(-1, 1)
+        result = df.select('id', pandas_sum(f.col('id')).over(window).alias('value'))
+        if project_array:
+            result = result.select('id', f.col('value')[1].alias('value'))
+        return result
+
+    conf = copy_and_update(arrow_udf_conf, {
+        'spark.sql.pyspark.udf.logging.maxEntries': str(max_entries),
+        'spark.sql.pyspark.udf.logging.logLevel': log_level,
+    })
+    assert_gpu_and_cpu_are_equal_collect(query, conf=conf)
 
 
 @ignore_order
@@ -412,7 +504,7 @@ def test_map_arrow_apply_udf(data_gen):
         conf=conf)
 
 
-map_in_pandas_node_name = 'MapInArrowExec' if is_spark_400_or_later() or is_databricks143_or_later() \
+map_in_pandas_node_name = 'MapInArrowExec' if is_spark_400_or_later() or is_databricks_runtime() \
     else 'PythonMapInArrowExec'
 
 @pytest.mark.parametrize('data_type', ['string', 'binary'], ids=idfn)
@@ -455,9 +547,9 @@ def test_map_pandas_udf_with_empty_partitions():
                     reason='mapInPandas with barrier mode is introduced by Pyspark 3.5.0')
 @pytest.mark.parametrize('is_barrier', [True, False], ids=idfn)
 def test_map_in_pandas_with_barrier_mode(is_barrier):
-    # The "tc" here can be either a BarrierTaskContext or TaskContext on DB14.3,
+    # The "tc" here can be either a BarrierTaskContext or TaskContext on Databricks,
     # not sure any special change made by DB.
-    tc_types = (BarrierTaskContext, TaskContext) if is_databricks143_or_later() else BarrierTaskContext
+    tc_types = (BarrierTaskContext, TaskContext) if is_databricks_runtime() else BarrierTaskContext
 
     def func(iterator):
         tc = TaskContext.get()
@@ -478,9 +570,9 @@ def test_map_in_pandas_with_barrier_mode(is_barrier):
                     reason='mapInArrow with barrier mode is introduced by Pyspark 3.5.0')
 @pytest.mark.parametrize('is_barrier', [True, False], ids=idfn)
 def test_map_in_arrow_with_barrier_mode(is_barrier):
-    # The "tc" here can be either a BarrierTaskContext or TaskContext on DB14.3,
+    # The "tc" here can be either a BarrierTaskContext or TaskContext on Databricks,
     # not sure any special change made by DB.
-    tc_types = (BarrierTaskContext, TaskContext) if is_databricks143_or_later() else BarrierTaskContext
+    tc_types = (BarrierTaskContext, TaskContext) if is_databricks_runtime() else BarrierTaskContext
 
     def func(iterator):
         tc = TaskContext.get()
@@ -505,6 +597,22 @@ def test_pandas_udf_rows_only():
         lambda spark: unary_op_df(spark, int_gen, num_slices=4, length=52345)
             .select(my_udf(f.lit(0))),
         conf=arrow_udf_conf)
+
+
+def test_pandas_iter_udf_rows_only_spanning_batches():
+    # One output Series for all inputs makes the GPU join it back to several rows-only batches.
+    def concat_all(it: Iterator[pd.Series]) -> Iterator[pd.Series]:
+        parts = [s + 1 for s in it]
+        if parts:
+            yield pd.concat(parts, ignore_index=True)
+    my_udf = f.pandas_udf(concat_all, returnType=LongType())
+    # 8000 bytes makes GpuRangeExec emit 1000-row batches, above the 500-row Arrow batch target.
+    conf = copy_and_update(arrow_udf_conf, {
+        'spark.rapids.sql.batchSizeBytes': '8000',
+        'spark.sql.execution.arrow.maxRecordsPerBatch': '500'})
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.range(0, 4000, 1, 1).select(my_udf(f.lit(1).cast('long'))),
+        conf=conf)
 
 
 # Python UDFs support nondeterministic expressions from Spark 3.3.1.
@@ -541,3 +649,31 @@ def test_apply_in_pandas_iterator_basic():
         return df.groupby("id").applyInPandas(sum_udf, schema="v long")
 
     assert_gpu_and_cpu_are_equal_collect(test_func, conf=arrow_udf_conf_unsafe)
+
+
+# SPARK-56350 lets Spark 4.2 CPU ArrowEvalPythonExec consume columnar batches.
+# If the plugin leaves that CPU exec above a GPU scan, a host transition is
+# required so GpuColumnVector is not handed to Spark's CPU Arrow UDF path.
+@allow_non_gpu('ArrowEvalPythonExec', 'PythonUDF')
+def test_pandas_udf_cpu_arrow_eval_after_gpu_scan(spark_tmp_path):
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+
+    def add_one(a):
+        return a + 1
+
+    my_udf = f.pandas_udf(add_one, returnType=IntegerType())
+    # Spark 4.x converts pandas UDF output with Arrow's safe checker by default.
+    # int_gen includes Integer.MAX_VALUE, and pandas a+1 becomes float64 2^31
+    # which cannot be cast back to int32. Keep values that stay in int32 after +1.
+    plus_one_int_gen = IntegerGen(min_val=-1000, max_val=1000, special_cases=[0, 1, -1])
+    with_cpu_session(
+        lambda spark: unary_op_df(spark, plus_one_int_gen, length=200).write.parquet(data_path))
+
+    conf = copy_and_update(arrow_udf_conf, {
+        'spark.rapids.sql.exec.ArrowEvalPythonExec': 'false',
+    })
+    assert_gpu_fallback_collect(
+        lambda spark: spark.read.parquet(data_path).select(
+            f.col('a'), my_udf(f.col('a')).alias('u')),
+        'ArrowEvalPythonExec',
+        conf=conf)

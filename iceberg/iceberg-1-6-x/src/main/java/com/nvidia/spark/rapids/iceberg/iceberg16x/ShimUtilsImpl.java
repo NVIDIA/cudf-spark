@@ -17,24 +17,116 @@
 package com.nvidia.spark.rapids.iceberg.iceberg16x;
 
 import com.nvidia.spark.rapids.RapidsConf;
+import com.nvidia.spark.rapids.iceberg.IcebergDeletionVector;
 import com.nvidia.spark.rapids.iceberg.IcebergShimUtils;
+import com.nvidia.spark.rapids.iceberg.parquet.converter.ParquetUnshader;
+import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import org.apache.iceberg.*;
+import org.apache.iceberg.deletes.PositionDelete;
+import org.apache.iceberg.io.DataWriteResult;
+import org.apache.iceberg.io.DeleteWriteResult;
 import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.io.OutputFileFactory;
+import org.apache.iceberg.io.PartitioningWriter;
+import org.apache.iceberg.io.WriteResult;
+import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.spark.source.GpuBaseReader;
 import org.apache.iceberg.spark.source.GpuSparkCopyOnWriteV1Scan;
 import org.apache.iceberg.spark.source.GpuSparkScan;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.PartitionUtil;
+import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.read.Scan;
+import org.apache.spark.sql.connector.write.DeltaBatchWrite;
 
+import java.io.IOException;
 import java.util.Collections;
 import java.util.Map;
 
 /** Iceberg 1.6.x shim: uses {@code ContentFile.path()} and {@code GpuBaseReader::convertConstant}. */
 public class ShimUtilsImpl implements IcebergShimUtils {
+    private static final ParquetUnshader PARQUET_UNSHADER = new ParquetUnshaderImpl();
+
+    @Override
+    public ParquetUnshader getParquetUnshader() {
+        return PARQUET_UNSHADER;
+    }
+
+    @Override
+    public int formatVersion(Table table) {
+        Preconditions.checkArgument(null != table, "Invalid table: null");
+
+        if (table instanceof SerializableTable) {
+            SerializableTable serializableTable = (SerializableTable) table;
+            return serializableTable.operations().current().formatVersion();
+        } else if (table instanceof HasTableOperations) {
+            HasTableOperations ops = (HasTableOperations) table;
+            return ops.operations().current().formatVersion();
+        } else if (table instanceof BaseMetadataTable) {
+            BaseMetadataTable metadataTable = (BaseMetadataTable) table;
+            return metadataTable.table().operations().current().formatVersion();
+        } else {
+            throw new IllegalArgumentException(
+                    String.format(
+                            "%s does not have a format version",
+                            table.getClass().getSimpleName()));
+        }
+    }
+
     @Override
     public String locationOf(ContentFile<?> f) {
         return f.path().toString();
+    }
+
+    @Override
+    public boolean isDeletionVector(DeleteFile deleteFile) {
+        return false;
+    }
+
+    @Override
+    public boolean isPuffinFormat(FileFormat fileFormat) {
+        return false;
+    }
+
+    @Override
+    public RewritableDeletes broadcastRewritableDeletes(
+            DeltaBatchWrite write) {
+        throw new UnsupportedOperationException(
+                "Iceberg 1.6 does not support Puffin deletion vectors");
+    }
+
+    @Override
+    public PartitioningWriter<PositionDelete<InternalRow>, DeleteWriteResult>
+            newDeletionVectorWriter(
+                    Table table, OutputFileFactory fileFactory,
+                    RewritableDeletes rewritableDeletes) {
+        throw new UnsupportedOperationException(
+                "Iceberg 1.6 does not support Puffin deletion vectors");
+    }
+
+    @Override
+    public WriteResult positionDeltaWriteResult(
+            DataWriteResult dataResult, DeleteWriteResult deleteResult) {
+        return WriteResult.builder()
+                .addDataFiles(dataResult.dataFiles())
+                .addDeleteFiles(deleteResult.deleteFiles())
+                .addReferencedDataFiles(deleteResult.referencedDataFiles())
+                .build();
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void setPositionDelete(
+            PositionDelete<InternalRow> delete, CharSequence path, long position) {
+        delete.set(path, position, null);
+    }
+
+    @Override
+    public IcebergDeletionVector readDeletionVector(
+            DeleteFile deleteFile, RapidsInputFile inputFile, boolean validateCrc)
+            throws IOException {
+        throw new UnsupportedOperationException(
+                "Iceberg 1.6 does not support Puffin deletion vectors");
     }
 
     @Override

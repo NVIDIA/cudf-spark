@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -284,11 +284,9 @@ object ColumnCastUtil {
     }
 
     withResource(new ArrayBuffer[ColumnView]) { toClose =>
-      val tmp = convertTypeAToTypeB(cv, dataType, predicate, toClose)
-      if (tmp != cv) {
-        tmp.copyToColumnVector()
-      } else {
-        tmp.asInstanceOf[ColumnVector].incRefCount()
+      convertTypeAToTypeB(cv, dataType, predicate, toClose) match {
+        case vector: ColumnVector => vector.incRefCount()
+        case view => view.copyToColumnVector()
       }
     }
   }

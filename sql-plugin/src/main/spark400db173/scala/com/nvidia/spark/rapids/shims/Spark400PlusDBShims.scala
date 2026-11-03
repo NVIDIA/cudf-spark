@@ -16,6 +16,7 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark": "400db173"}
+{"spark": "410db183"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
@@ -25,14 +26,25 @@ import org.apache.spark.sql.{SparkSession => SqlSparkSession}
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.catalog.{CatalogTable, CatalogTablePartition}
 import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
-import org.apache.spark.sql.catalyst.expressions.Expression
+import org.apache.spark.sql.catalyst.expressions.{Expression, KnownNotContainsNull}
 import org.apache.spark.sql.catalyst.expressions.objects.Invoke
+import org.apache.spark.sql.catalyst.expressions.variant.VariantGet
 import org.apache.spark.sql.execution.datasources.{FilePartition, PartitionedFile}
 import org.apache.spark.sql.rapids.shims.InvokeExprMeta
 
 trait Spark400PlusDBShims extends Spark341PlusDBShims {
   override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
     val shimExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
+      GpuOverrides.expr[KnownNotContainsNull](
+        "Tags an array expression as known to not contain null elements (e.g. from array_compact).",
+        ExprChecks.unaryProjectInputMatchesOutput(
+          TypeSig.ARRAY.nested(TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL +
+            TypeSig.BINARY + TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.MAP),
+          TypeSig.ARRAY.nested(TypeSig.all)),
+        (a, conf, p, r) => new UnaryExprMeta[KnownNotContainsNull](a, conf, p, r) {
+          override def convertToGpu(child: Expression): GpuExpression =
+            GpuKnownNotContainsNull(child)
+        }),
       GpuOverrides.expr[Invoke](
         "Calls the specified function on an object. This is a wrapper to other expressions, so " +
           "can not know the details in advance. E.g.: between is replaced by " +
@@ -40,7 +52,17 @@ trait Spark400PlusDBShims extends Spark341PlusDBShims {
           "replaced by Invoke(Literal(StructsToJsonEvaluator), evaluate, string_type, arguments)",
         InvokeCheck,
         InvokeExprMeta)
-        .note("The supported types are not deterministic since it's a dynamic expression")
+        .note("The supported types are not deterministic since it's a dynamic expression"),
+      GpuOverrides.expr[VariantGet](
+        "Extracts a field from a Variant value by path",
+        ExprChecks.binaryProject(
+          TypeSig.integral + TypeSig.fp + TypeSig.BOOLEAN + TypeSig.STRING,
+          TypeSig.integral + TypeSig.fp + TypeSig.BOOLEAN + TypeSig.STRING,
+          ("variant", TypeSig.VARIANT, TypeSig.VARIANT),
+          ("path", TypeSig.lit(TypeEnum.STRING), TypeSig.STRING)),
+        GpuVariantGetMeta)
+        .incompat("cuDF Variant extraction currently decodes exact physical Variant types; " +
+          "Spark try_variant_get cast semantics can return different values")
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
     super.getExprs ++ shimExprs
   }

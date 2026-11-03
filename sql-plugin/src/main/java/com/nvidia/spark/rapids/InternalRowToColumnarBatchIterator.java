@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,6 +26,8 @@ import scala.Tuple2;
 import scala.collection.Iterator;
 
 import ai.rapids.cudf.*;
+import com.nvidia.spark.rapids.CoalesceSizeGoal;
+import com.nvidia.spark.rapids.GpuMetric;
 import com.nvidia.spark.rapids.jni.RowConversion;
 import com.nvidia.spark.rapids.shims.CudfUnsafeRow;
 

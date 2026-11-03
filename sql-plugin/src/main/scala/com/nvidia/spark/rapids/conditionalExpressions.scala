@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,7 +25,8 @@ import com.nvidia.spark.rapids.jni.CaseWhen
 import com.nvidia.spark.rapids.shims.ShimExpression
 
 import org.apache.spark.sql.catalyst.analysis.{TypeCheckResult, TypeCoercion}
-import org.apache.spark.sql.catalyst.expressions.{ComplexTypeMergingExpression, Expression}
+import org.apache.spark.sql.catalyst.expressions.{CaseWhen => CpuCaseWhen,
+  ComplexTypeMergingExpression, Expression, If => CpuIf}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.unsafe.types.UTF8String
@@ -69,15 +70,6 @@ object GpuExpressionWithSideEffectUtils {
     withResource(col.getBase.any()) { anyTrue =>
       // null values are considered false values in the context of nullsAsFalse true
       !anyTrue.getBoolean
-    }
-  }
-
-  def filterBatch(
-      tbl: Table,
-      pred: ColumnVector,
-      colTypes: Array[DataType]): ColumnarBatch = {
-    withResource(tbl.filter(pred)) { filteredData =>
-      GpuColumnVector.from(filteredData, colTypes)
     }
   }
 
@@ -272,42 +264,40 @@ case class GpuIf(
 
     val colTypes = GpuColumnVector.extractTypes(batch)
 
-    withResource(GpuColumnVector.from(batch)) { tbl =>
-      // Use boolInverted instead of NOT so null predicates become true,
-      // routing null-condition rows to the false branch (matching CPU
-      // semantics where null is treated as "not true").
-      withResource(boolInverted(pred.getBase)) { inverted =>
-        // evaluate true expression against true batch
-        val tt = withResource(filterBatch(tbl, pred.getBase, colTypes)) { trueBatch =>
-          gpuTrueExpr.columnarEvalAny(trueBatch)
+    // Use boolInverted instead of NOT so null predicates become true,
+    // routing null-condition rows to the false branch (matching CPU
+    // semantics where null is treated as "not true").
+    withResource(boolInverted(pred.getBase)) { inverted =>
+      // evaluate true expression against true batch
+      val tt = withResource(GpuColumnVector.filter(batch, colTypes, pred.getBase)) { trueBatch =>
+        gpuTrueExpr.columnarEvalAny(trueBatch)
+      }
+      withResourceIfAllowed(tt) { _ =>
+        // evaluate false expression against false batch
+        val ff = withResource(GpuColumnVector.filter(batch, colTypes, inverted)) { falseBatch =>
+          gpuFalseExpr.columnarEvalAny(falseBatch)
         }
-        withResourceIfAllowed(tt) { _ =>
-          // evaluate false expression against false batch
-          val ff = withResource(filterBatch(tbl, inverted, colTypes)) { falseBatch =>
-            gpuFalseExpr.columnarEvalAny(falseBatch)
-          }
-          withResourceIfAllowed(ff) { _ =>
-            val finalRet = (tt, ff) match {
-              case (t: GpuColumnVector, f: GpuColumnVector) =>
-                withResource(gather(pred.getBase, t)) { trueValues =>
-                  withResource(gather(inverted, f)) { falseValues =>
-                    pred.getBase.ifElse(trueValues, falseValues)
-                  }
-                }
-              case (t: GpuScalar, f: GpuColumnVector) =>
+        withResourceIfAllowed(ff) { _ =>
+          val finalRet = (tt, ff) match {
+            case (t: GpuColumnVector, f: GpuColumnVector) =>
+              withResource(gather(pred.getBase, t)) { trueValues =>
                 withResource(gather(inverted, f)) { falseValues =>
-                  pred.getBase.ifElse(t.getBase, falseValues)
+                  pred.getBase.ifElse(trueValues, falseValues)
                 }
-              case (t: GpuColumnVector, f: GpuScalar) =>
-                withResource(gather(pred.getBase, t)) { trueValues =>
-                  pred.getBase.ifElse(trueValues, f.getBase)
-                }
-              case (_: GpuScalar, _: GpuScalar) =>
-                throw new IllegalStateException(
-                  "scalar expressions can never have side effects")
-            }
-            GpuColumnVector.from(finalRet, dataType)
+              }
+            case (t: GpuScalar, f: GpuColumnVector) =>
+              withResource(gather(inverted, f)) { falseValues =>
+                pred.getBase.ifElse(t.getBase, falseValues)
+              }
+            case (t: GpuColumnVector, f: GpuScalar) =>
+              withResource(gather(pred.getBase, t)) { trueValues =>
+                pred.getBase.ifElse(trueValues, f.getBase)
+              }
+            case (_: GpuScalar, _: GpuScalar) =>
+              throw new IllegalStateException(
+                "scalar expressions can never have side effects")
           }
+          GpuColumnVector.from(finalRet, dataType)
         }
       }
     }
@@ -392,21 +382,21 @@ case class GpuCaseWhen(
         withResource(firstTrueIndex) { _ =>
           val thenElseScalars = (branches.map(_._2) ++ elseValue).map(_.columnarEvalAny(batch)
               .asInstanceOf[GpuScalar])
-          withResource(thenElseScalars) { _ =>
-            // 2. generate a column to store all scalars
-            withResource(createFromScalarList(thenElseScalars)) {
-              scalarCol =>
-                val finalRet = withResource(new Table(scalarCol)) { oneColumnTable =>
-                  // 3. execute final select
-                  // default gather OutOfBoundsPolicy is nullify,
-                  // If index is out of bound, return null
-                  withResource(oneColumnTable.gather(firstTrueIndex)) { resultTable =>
-                    resultTable.getColumn(0).incRefCount()
-                  }
-                }
-                // return final column vector
-                GpuColumnVector.from(finalRet, dataType)
+          // 2. copy scalar values into an owning column so the scalars can close before gather
+          val scalarCol = withResource(thenElseScalars) { _ =>
+            createFromScalarList(thenElseScalars)
+          }
+          withResource(scalarCol) { _ =>
+            val finalRet = withResource(new Table(scalarCol)) { oneColumnTable =>
+              // 3. execute final select
+              // default gather OutOfBoundsPolicy is nullify,
+              // If index is out of bound, return null
+              withResource(oneColumnTable.gather(firstTrueIndex)) { resultTable =>
+                resultTable.getColumn(0).incRefCount()
+              }
             }
+            // return final column vector
+            GpuColumnVector.from(finalRet, dataType)
           }
         }
       } else {
@@ -440,65 +430,62 @@ case class GpuCaseWhen(
     var currentValue: Option[GpuColumnVector] = None
 
     try {
-      withResource(GpuColumnVector.from(batch)) { tbl =>
+      // iterate over the WHEN THEN branches first
+      branches.foreach {
+        case (whenExpr, thenExpr) =>
+          // evaluate the WHEN predicate
+          withResource(whenExpr.columnarEval(batch)) { whenBool =>
+            // we only want to evaluate where this WHEN is true and no previous WHEN has been true
+            val firstTrueWhen = isFirstTrueWhen(cumulativePred, whenBool)
 
-        // iterate over the WHEN THEN branches first
-        branches.foreach {
-          case (whenExpr, thenExpr) =>
-            // evaluate the WHEN predicate
-            withResource(whenExpr.columnarEval(batch)) { whenBool =>
-              // we only want to evaluate where this WHEN is true and no previous WHEN has been true
-              val firstTrueWhen = isFirstTrueWhen(cumulativePred, whenBool)
+            withResource(firstTrueWhen) { _ =>
+              if (isAllTrue(firstTrueWhen)) {
+                // if this WHEN predicate is true for all rows and no previous predicate has
+                // been true then we can return immediately
+                return thenExpr.columnarEval(batch)
+              }
+              val thenValues = filterEvaluateWhenThen(colTypes, batch, firstTrueWhen.getBase,
+                thenExpr)
+              withResource(thenValues) { _ =>
+                currentValue = Some(calcCurrentValue(currentValue, firstTrueWhen, thenValues))
+              }
+              cumulativePred = Some(calcCumulativePredicate(
+                cumulativePred, whenBool, firstTrueWhen))
 
-              withResource(firstTrueWhen) { _ =>
-                if (isAllTrue(firstTrueWhen)) {
-                  // if this WHEN predicate is true for all rows and no previous predicate has
-                  // been true then we can return immediately
-                  return thenExpr.columnarEval(batch)
-                }
-                val thenValues = filterEvaluateWhenThen(colTypes, tbl, firstTrueWhen.getBase,
-                  thenExpr)
-                withResource(thenValues) { _ =>
-                  currentValue = Some(calcCurrentValue(currentValue, firstTrueWhen, thenValues))
-                }
-                cumulativePred = Some(calcCumulativePredicate(
-                  cumulativePred, whenBool, firstTrueWhen))
-
-                if (isAllTrue(cumulativePred.get)) {
-                  // no need to process any more branches or the else condition
-                  return currentValue.get.incRefCount()
-                }
+              if (isAllTrue(cumulativePred.get)) {
+                // no need to process any more branches or the else condition
+                return currentValue.get.incRefCount()
               }
             }
-        }
-
-        // invert the cumulative predicate to get the ELSE predicate
-        withResource(boolInverted(cumulativePred.get.getBase)) { elsePredNoNulls =>
-          elseValue match {
-            case Some(expr) =>
-              if (isAllFalse(cumulativePred.get)) {
-                expr.columnarEval(batch)
-              } else {
-                val elseValues = filterEvaluateWhenThen(colTypes, tbl, elsePredNoNulls, expr)
-                withResource(elseValues) { _ =>
-                  GpuColumnVector.from(elsePredNoNulls.ifElse(
-                    elseValues, currentValue.get.getBase), dataType)
-                }
-              }
-
-            case None =>
-              // if there is no ELSE condition then we return NULL for any rows not matched by
-              // previous branches
-              withResource(GpuScalar.from(null, dataType)) { nullScalar =>
-                if (isAllFalse(cumulativePred.get)) {
-                  GpuColumnVector.from(nullScalar, elsePredNoNulls.getRowCount.toInt, dataType)
-                } else {
-                  GpuColumnVector.from(
-                    elsePredNoNulls.ifElse(nullScalar, currentValue.get.getBase),
-                      dataType)
-                }
-              }
           }
+      }
+
+      // invert the cumulative predicate to get the ELSE predicate
+      withResource(boolInverted(cumulativePred.get.getBase)) { elsePredNoNulls =>
+        elseValue match {
+          case Some(expr) =>
+            if (isAllFalse(cumulativePred.get)) {
+              expr.columnarEval(batch)
+            } else {
+              val elseValues = filterEvaluateWhenThen(colTypes, batch, elsePredNoNulls, expr)
+              withResource(elseValues) { _ =>
+                GpuColumnVector.from(elsePredNoNulls.ifElse(
+                  elseValues, currentValue.get.getBase), dataType)
+              }
+            }
+
+          case None =>
+            // if there is no ELSE condition then we return NULL for any rows not matched by
+            // previous branches
+            withResource(GpuScalar.from(null, dataType)) { nullScalar =>
+              if (isAllFalse(cumulativePred.get)) {
+                GpuColumnVector.from(nullScalar, elsePredNoNulls.getRowCount.toInt, dataType)
+              } else {
+                GpuColumnVector.from(
+                  elsePredNoNulls.ifElse(nullScalar, currentValue.get.getBase),
+                    dataType)
+              }
+            }
         }
       }
     } finally {
@@ -513,10 +500,10 @@ case class GpuCaseWhen(
    */
   private def filterEvaluateWhenThen(
       colTypes: Array[DataType],
-      tbl: Table,
+      batch: ColumnarBatch,
       whenBool: ColumnVector,
       thenExpr: Expression): ColumnVector = {
-    val filteredBatch = filterBatch(tbl, whenBool, colTypes)
+    val filteredBatch = GpuColumnVector.filter(batch, colTypes, whenBool)
     val thenValues = withResource(filteredBatch) { trueBatch =>
       thenExpr.columnarEval(trueBatch)
     }
@@ -685,5 +672,39 @@ case class GpuCaseWhen(
     withResource(hcv) { _ =>
       hcv.copyToDevice()
     }
+  }
+}
+
+case class GpuCaseWhenMeta(
+    caseWhen: CpuCaseWhen,
+    override val conf: RapidsConf,
+    parentMeta: Option[RapidsMeta[_, _, _]],
+    rule: DataFromReplacementRule)
+    extends ExprMeta[CpuCaseWhen](caseWhen, conf, parentMeta, rule) {
+
+  override def convertToGpuImpl(): GpuExpression = {
+    val branches = childExprs.grouped(2).flatMap {
+      case Seq(condition, value) => Some((condition.convertToGpu(), value.convertToGpu()))
+      case Seq(_) => None
+    }.toArray.toSeq // force materialization to make the sequence serializable
+    val elseValue = if (childExprs.size % 2 != 0) {
+      Some(childExprs.last.convertToGpu())
+    } else {
+      None
+    }
+    GpuCaseWhen(branches, elseValue, conf.caseWhenFuseEnabled)
+  }
+}
+
+case class GpuIfMeta(
+    ifExpr: CpuIf,
+    override val conf: RapidsConf,
+    parentMeta: Option[RapidsMeta[_, _, _]],
+    rule: DataFromReplacementRule)
+    extends ExprMeta[CpuIf](ifExpr, conf, parentMeta, rule) {
+
+  override def convertToGpuImpl(): GpuExpression = {
+    val Seq(predicate, trueExpr, falseExpr) = childExprs.map(_.convertToGpu())
+    GpuIf(predicate, trueExpr, falseExpr)
   }
 }

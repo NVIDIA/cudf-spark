@@ -182,6 +182,7 @@ JsonToStructs,4
 JsonTuple,4
 Keep,4
 KnownFloatingPointNormalized,4
+KnownNotContainsNull,4
 KnownNotNull,4
 KnownNullable,4
 Lag,4
@@ -225,6 +226,7 @@ Multiply,4
 MultiplyDTInterval,4
 MultiplyYMInterval,4
 Murmur3Hash,4
+NTile,4
 NaNvl,4
 NamedLambdaVariable,4
 NormalizeNaNAndZero,4
@@ -316,12 +318,14 @@ UnaryMinus,4
 UnaryPositive,4
 UnboundedFollowing$,4
 UnboundedPreceding$,4
+Unhex,4
 UnixTimestamp,4
 UnscaledValue,4
 Upper,4
 Uuid,4
 VariancePop,4
 VarianceSamp,4
+VariantGet,4
 WeekDay,4
 WindowExpression,4
 WindowSpecDefinition,4

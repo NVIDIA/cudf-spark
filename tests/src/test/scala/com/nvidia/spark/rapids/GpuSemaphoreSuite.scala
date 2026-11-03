@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,7 +29,8 @@ import org.apache.spark.sql.SparkSession
 
 class GpuSemaphoreSuite extends AnyFunSuite
     with BeforeAndAfterEach with MockitoSugar with TimeLimits  with TimeLimitedTests {
-  val timeLimit: Span = Span(10, Seconds)
+  // SparkSession startup can exceed 10 seconds when multiple isolated test JVMs start together.
+  val timeLimit: Span = Span(30, Seconds)
 
   override def beforeEach(): Unit = {
     ScalableTaskCompletion.reset()

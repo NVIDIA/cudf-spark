@@ -19,10 +19,12 @@ package org.apache.spark.sql.rapids
 import java.util.Locale
 
 import com.nvidia.spark.rapids._
+import com.nvidia.spark.rapids.RowBasedShuffleChecksumConf
 import com.nvidia.spark.rapids.shims.ShuffleManagerShimUtils
 
 import org.apache.spark.{SparkConf, SparkEnv}
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{config, Logging}
+import org.apache.spark.sql.internal.SQLConf
 
 class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
   private var shuffleCatalog: ShuffleBufferCatalog = _
@@ -47,8 +49,8 @@ class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
 
   def init(): Unit = {
     if (isRapidsShuffleConfigured) {
-      shuffleCatalog =
-          new ShuffleBufferCatalog()
+      shuffleCatalog = new ShuffleBufferCatalog(
+        mapIdsCanRepeat = SparkEnv.get.conf.get(config.SHUFFLE_USE_OLD_FETCH_PROTOCOL))
       shuffleReceivedBufferCatalog =
           new ShuffleReceivedBufferCatalog()
       // Initialize MultithreadedShuffleBufferCatalog for MULTITHREADED mode when:
@@ -89,6 +91,7 @@ class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
   }
 }
 
+@scala.annotation.nowarn("cat=deprecation&origin=org.apache.spark.SparkEnv.shuffleManager")
 object GpuShuffleEnv extends Logging {
   def isUCXShuffleAndEarlyStart(conf: RapidsConf): Boolean = {
     conf.isUCXShuffleManagerMode &&
@@ -144,10 +147,7 @@ object GpuShuffleEnv extends Logging {
   // which is for IO-level corruption diagnosis and IS supported by RAPIDS shuffle.
   def isRowBasedChecksumEnabled: Boolean = {
     val conf = SparkEnv.get.conf
-    conf.getBoolean(
-      "spark.sql.shuffle.orderIndependentChecksum.enabled", false) ||
-    conf.getBoolean(
-      "spark.sql.shuffle.orderIndependentChecksum.enableFullRetryOnMismatch", false)
+    RowBasedShuffleChecksumConf.isEnabled(SQLConf.get, conf)
   }
 
   //

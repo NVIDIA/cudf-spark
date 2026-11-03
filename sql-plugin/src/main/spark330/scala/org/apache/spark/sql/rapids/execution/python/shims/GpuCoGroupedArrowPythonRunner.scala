@@ -16,10 +16,8 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark": "330"}
-{"spark": "330db"}
 {"spark": "331"}
 {"spark": "332"}
-{"spark": "332db"}
 {"spark": "333"}
 {"spark": "334"}
 {"spark": "340"}
@@ -36,6 +34,7 @@
 {"spark": "356"}
 {"spark": "357"}
 {"spark": "358"}
+{"spark": "359"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.execution.python.shims
 
@@ -68,6 +67,8 @@ class GpuCoGroupedArrowPythonRunner(
     conf: Map[String, String],
     batchSize: Int,
     override val pythonOutSchema: StructType,
+    udfLogMaxEntries: Int = 0,
+    udfLogLevel: String = "WARNING",
     jobArtifactUUID: Option[String] = None)
   extends GpuBasePythonRunner[(ColumnarBatch, ColumnarBatch)](funcs.map(_._1), evalType,
     argOffsets, jobArtifactUUID) with GpuArrowPythonOutput with GpuPythonRunnerCommon {
@@ -86,7 +87,8 @@ class GpuCoGroupedArrowPythonRunner(
           PythonRDD.writeUTF(k, dataOut)
           PythonRDD.writeUTF(v, dataOut)
         }
-        WritePythonUDFUtils.writeUDFs(dataOut, funcs, argOffsets)
+        WritePythonUDFUtils.writeUDFs(dataOut, funcs, argOffsets,
+          udfLogMaxEntries = udfLogMaxEntries, udfLogLevel = udfLogLevel)
       }
 
       protected override def writeIteratorToStream(dataOut: DataOutputStream): Unit = {

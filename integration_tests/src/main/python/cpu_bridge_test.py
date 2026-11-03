@@ -60,6 +60,47 @@ def test_cpu_bridge_add_fallback():
     assert_gpu_and_cpu_are_equal_collect(test_func, conf=conf)
 
 
+@allow_non_gpu('Subtract')
+@pytest.mark.parametrize('data_gen', [int_gen, long_gen], ids=idfn)
+@pytest.mark.parametrize('tiered', ['true', 'false'])
+@pytest.mark.parametrize('multi_output', ['true', 'false'])
+@pytest.mark.parametrize('backend', ['legacy', 'jit', 'both'])
+def test_cpu_bridge_with_ast_backends(data_gen, tiered, multi_output, backend):
+    def test_func(spark):
+        return binary_op_df(spark, data_gen).selectExpr(
+            "(a + b) * b as jit", "((a + b) * b) - b as bridged",
+            "(((a + b) * b) - b) * a + b as result")
+
+    conf = copy_and_update(create_cpu_bridge_fallback_conf(
+        ['Subtract'], ['org.apache.spark.sql.catalyst.expressions.Add']), {
+        'spark.rapids.sql.projectAstJitEnabled': str(backend != 'legacy').lower(),
+        'spark.rapids.sql.projectAstEnabled': str(backend != 'jit').lower(),
+        'spark.rapids.sql.tiered.project.enabled': tiered,
+        'spark.rapids.sql.projectAstJitMultiOutputEnabled': multi_output,
+    })
+    ast_pattern = r'AST\(' if backend == 'legacy' else 'AST_JIT'
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        test_func, exist_classes=rf'GpuProject.*{ast_pattern},GpuCpuBridgeExpression',
+        non_exist_classes='AST_JIT' if backend == 'legacy' else '', conf=conf)
+
+
+@allow_non_gpu('Cast')
+@pytest.mark.parametrize('backend', ['legacy', 'jit', 'both'])
+def test_cpu_bridge_short_circuit_with_ast_backends(backend):
+    # The bridged ANSI cast fails only on the first row, where AND skips it.
+    data = [(9, 'abc'), (-1, '5')]
+    def test_func(spark):
+        df = spark.createDataFrame(spark.sparkContext.parallelize(data), 'a long, s string')
+        return df.selectExpr('(a < 0) AND (CAST(s AS INT) > 0) AS result')
+
+    conf = copy_and_update(create_cpu_bridge_fallback_conf(['Cast']), ansi_enabled_conf, {
+        'spark.rapids.sql.projectAstJitEnabled': str(backend != 'legacy').lower(),
+        'spark.rapids.sql.projectAstEnabled': str(backend != 'jit').lower(),
+    })
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        test_func, exist_classes='GpuCpuBridgeExpression', conf=conf)
+
+
 # MIN_ROWS_PER_SUBBATCH is 500,000: these values exercise one and two sub-batch results.
 @allow_non_gpu('Add')
 @pytest.mark.parametrize('row_count', [500000, 500001], ids=idfn)
@@ -210,6 +251,97 @@ def test_cpu_bridge_higher_order_function_fallback():
     # Force Add to CPU bridge - this will affect expressions inside the lambda functions
     conf = create_cpu_bridge_fallback_conf(['Add'])
     assert_gpu_and_cpu_are_equal_collect(test_func, conf=conf)
+
+@allow_non_gpu('ArrayForAll', 'GreaterThan', 'LambdaFunction', 'NamedLambdaVariable', 'Size')
+def test_cpu_bridge_nested_hof_captures_gpu_lambda_variable():
+    def test_func(spark):
+        return spark.sql("""
+            SELECT transform(a2, x -> forall(x, y -> y > size(x))) AS result
+            FROM (SELECT array(array(1, 2, 3), array(4, 5)) AS a2)
+        """)
+
+    conf = create_cpu_bridge_fallback_conf([])
+    conf['spark.sql.adaptive.enabled'] = False
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        test_func, exist_classes='GpuCpuBridgeExpression', conf=conf)
+
+@allow_non_gpu('Add', 'Multiply', 'LambdaFunction', 'NamedLambdaVariable', 'Cast',
+               'ArrayTransform', 'AttributeReference', 'Literal', 'Alias')
+def test_cpu_bridge_capture_inside_gpu_lambda():
+    def test_func(spark):
+        return spark.range(3).selectExpr(
+            "array(1, 2, 3) AS arr", "cast(id as int) AS k").selectExpr(
+            "transform(arr, x -> (x + k) * 2) AS result")
+
+    conf = create_cpu_bridge_fallback_conf(['Add', 'Multiply'])
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        test_func, exist_classes='GpuCpuBridgeExpression', conf=conf)
+
+
+@allow_non_gpu('ProjectExec')
+def test_cpu_hof_does_not_capture_lambda_variable_in_gpu_hof():
+    def test_func(spark):
+        return spark.sql("""
+            SELECT forall(a2, x -> exists(x, y -> y > size(x))) AS result
+            FROM (SELECT array(array(1, 2, 3), array(4, 5)) AS a2)
+        """)
+
+    conf = {'spark.rapids.sql.expression.cpuBridge.enabled': False}
+    assert_gpu_fallback_collect(test_func, 'ProjectExec', conf=conf)
+
+@allow_non_gpu('ArrayFilter', 'ArrayTransform', 'ArraysZip', 'Sequence', 'Size',
+               'StringSplit', 'LambdaFunction', 'In', 'GetStructField',
+               'NamedLambdaVariable', 'AttributeReference')
+@pytest.mark.parametrize('disabled_gpu_expressions', [
+    ['ArrayFilter'],
+    ['ArrayFilter', 'ArrayTransform']
+], ids=idfn)
+def test_cpu_bridge_array_filter_with_captured_outer_reference(disabled_gpu_expressions):
+    def test_func(spark):
+        input_df = spark.range(1) \
+            .selectExpr("concat('a|b|c|', cast(id + 4 as string)) AS input_text") \
+            .repartition(1)
+
+        return input_df.selectExpr("""
+            transform(
+              filter(
+                arrays_zip(
+                  sequence(1, size(split(input_text, '[|]'))),
+                  split(input_text, '[|]')
+                ),
+                x -> x["0"] IN (
+                  1,
+                  2,
+                  3,
+                  size(split(input_text, '[|]'))
+                )
+              ),
+              x -> x["1"]
+            ) AS result
+        """)
+
+    conf = create_cpu_bridge_fallback_conf(disabled_gpu_expressions)
+    conf['spark.sql.adaptive.enabled'] = False
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        test_func, exist_classes='GpuCpuBridgeExpression', conf=conf)
+
+
+@allow_non_gpu('ArrayFilter', 'LambdaFunction', 'And', 'LessThanOrEqual',
+               'NamedLambdaVariable', 'AttributeReference')
+def test_cpu_bridge_array_filter_with_distinct_nullable_capture():
+    def test_func(spark):
+        input_df = spark.range(2).selectExpr(
+            "array(1, 2, 3) AS values",
+            "if(id = 0, cast(2 as int), cast(null as int)) AS upper")
+
+        return input_df.selectExpr(
+            "filter(values, x -> x <= upper AND upper <= 3) AS result")
+
+    conf = create_cpu_bridge_fallback_conf(['ArrayFilter'])
+    conf['spark.sql.adaptive.enabled'] = False
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        test_func, exist_classes='GpuCpuBridgeExpression', conf=conf)
+
 
 @allow_non_gpu('Add')
 def test_cpu_bridge_nondeterministic_works_next_to_bridge():

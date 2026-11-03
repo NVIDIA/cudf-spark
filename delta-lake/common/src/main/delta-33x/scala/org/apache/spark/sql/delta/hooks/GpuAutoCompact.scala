@@ -34,6 +34,8 @@ import org.apache.spark.sql.delta.rapids.GpuOptimisticTransactionBase
  */
 case object GpuAutoCompact extends GpuTransactionalAutoCompactBase {
 
+  override protected def getTableId(deltaLog: DeltaLog): String = deltaLog.tableId
+
   override def run(
       spark: SparkSession,
       txn: OptimisticTransactionImpl,
@@ -71,4 +73,3 @@ case object GpuAutoCompact extends GpuTransactionalAutoCompactBase {
       maxDeletedRowsRatio = None)
   }
 }
-

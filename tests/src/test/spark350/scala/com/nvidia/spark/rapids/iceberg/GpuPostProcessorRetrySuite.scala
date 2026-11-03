@@ -24,6 +24,7 @@
 {"spark": "356"}
 {"spark": "357"}
 {"spark": "358"}
+{"spark": "359"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.iceberg
 
@@ -34,7 +35,6 @@ import scala.collection.JavaConverters._
 import com.nvidia.spark.rapids.{GpuColumnVector, RmmSparkRetrySuiteBase}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.iceberg.parquet._
-import com.nvidia.spark.rapids.iceberg.parquet.converter.FromIcebergShaded.unshade
 import com.nvidia.spark.rapids.jni.RmmSpark
 import com.nvidia.spark.rapids.parquet.ParquetFileInfoWithBlockMeta
 import org.apache.hadoop.fs.Path
@@ -68,7 +68,7 @@ class GpuPostProcessorRetrySuite extends RmmSparkRetrySuiteBase {
   test("FetchRowPosition counters survive a retry when a later action OOMs") {
     val rowPosId = MetadataColumns.ROW_POSITION.fieldId()
     // A second projected field that does NOT exist in the file schema and is not in
-    // idToConstant. ActionBuildingVisitor lowers this to FillNull, whose execute() allocates
+    // idToConstant. BaseActionBuildingVisitor lowers this to FillNull, whose execute() allocates
     // a fresh GPU column. That second allocation is what we OOM, so FetchRowPosition is the
     // earlier action that has already committed counter state when the retry fires.
     // Use an ordinary non-metadata field id (1) — `rowPosId + 1` would collide with
@@ -91,7 +91,7 @@ class GpuPostProcessorRetrySuite extends RmmSparkRetrySuiteBase {
       filePath = new Path("/test/file.parquet"),
       blocks = blocks,
       partValues = InternalRow.empty,
-      schema = unshade(parquetSchema),
+      schema = ShimUtils.getParquetUnshader().unshade(parquetSchema),
       readSchema = StructType(Seq.empty),
       dateRebaseMode = null,
       timestampRebaseMode = null,

@@ -20,6 +20,7 @@ from datetime import date, datetime, timezone
 from data_gen import *
 from enum import Enum
 from marks import *
+from parquet_test_utils import assert_parquet_files_use_codec
 from pyspark.sql.types import *
 from spark_session import *
 
@@ -260,7 +261,7 @@ def test_all_null_int96(spark_tmp_path):
         data_path,
         conf=confs)
 
-parquet_write_compress_options = ['none', 'uncompressed', 'snappy']
+parquet_write_compress_options = ['none', 'uncompressed', 'snappy', 'gzip']
 # zstd is available in spark 3.2.0 and later.
 if not is_before_spark_320():
     parquet_write_compress_options.append('zstd')
@@ -269,11 +270,20 @@ if not is_before_spark_320():
 def test_compress_write_round_trip(spark_tmp_path, compress):
     data_path = spark_tmp_path + '/PARQUET_DATA'
     all_confs = {'spark.sql.parquet.compression.codec': compress}
+    def write_data(spark, path):
+        # The usual small input may leave GZIP chunks uncompressed in the footer.
+        data = spark.range(20000).selectExpr("id % 100 AS a", "id % 10 AS b") \
+            if compress == 'gzip' else binary_op_df(spark, long_gen)
+        data.coalesce(1).write.parquet(path)
+
     assert_gpu_and_cpu_writes_are_equal_collect(
-            lambda spark, path : binary_op_df(spark, long_gen).coalesce(1).write.parquet(path),
+            write_data,
             lambda spark, path : spark.read.parquet(path),
             data_path,
             conf=all_confs)
+    if compress == 'gzip':
+        with_cpu_session(lambda spark: assert_parquet_files_use_codec(
+            spark, spark.read.parquet(data_path + '/GPU'), 'GZIP'), conf=all_confs)
 
 @pytest.mark.order(2)
 @pytest.mark.parametrize('parquet_gens', parquet_write_gens_list, ids=idfn)
@@ -406,20 +416,14 @@ def test_parquet_write_encryption_hadoopconfig_fallback(spark_tmp_path, write_op
     finally:
         with_cpu_session(reset_hadoop_confs)
 
-@allow_non_gpu('DataWritingCommandExec,ExecutedCommandExec,WriteFilesExec')
-# note that others should fail as well but requires you to load the libraries for them
-# 'lzo', 'brotli', 'lz4', 'zstd' should all fallback
-@pytest.mark.parametrize('codec', ['gzip'])
-def test_parquet_write_compression_fallback(spark_tmp_path, codec, spark_tmp_table_factory):
-    gen = IntegerGen()
-    data_path = spark_tmp_path + '/PARQUET_DATA'
-    all_confs={'spark.sql.parquet.compression.codec': codec}
-    assert_gpu_fallback_write(
-            lambda spark, path: unary_op_df(spark, gen).coalesce(1).write.format("parquet").mode('overwrite').option("path", path).saveAsTable(spark_tmp_table_factory.get()),
-            lambda spark, path: spark.read.parquet(path),
-            data_path,
-            'DataWritingCommandExec',
-            conf=all_confs)
+def test_parquet_write_gzip_save_as_table(spark_tmp_table_factory):
+    _, gpu_table = assert_gpu_and_cpu_save_as_table_are_equal_collect(
+        spark_tmp_table_factory,
+        lambda spark, table: spark.range(20000).selectExpr("id % 100 AS value").coalesce(1).write
+            .format("parquet").saveAsTable(table),
+        conf={'spark.sql.parquet.compression.codec': 'gzip'})
+    with_cpu_session(lambda spark: assert_parquet_files_use_codec(
+        spark, spark.table(gpu_table), 'GZIP'))
 
 @allow_non_gpu('DataWritingCommandExec,ExecutedCommandExec,WriteFilesExec')
 def test_parquet_writeLegacyFormat_fallback(spark_tmp_path, spark_tmp_table_factory):
@@ -752,28 +756,36 @@ def test_fallback_to_single_writer_from_concurrent_writer(spark_tmp_path, aqe_en
         ))
 
 
-@pytest.mark.skipif(True, reason="currently not support write emtpy data: https://github.com/NVIDIA/spark-rapids/issues/6453")
+def _assert_write_empty_partitioned_data(spark_tmp_path, max_concurrent_writers):
+    schema = StructType(
+        [StructField("c1", StringType()), StructField("c2", IntegerType()), StructField("c3", IntegerType())])
+    data = []  # empty data
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+
+    def read_empty_data(spark, path):
+        # Empty partitioned output has no data files from which either writer can infer a schema.
+        with pytest.raises(pyspark.sql.utils.AnalysisException, match="Unable to infer schema for Parquet"):
+            spark.read.parquet(path)
+        result = spark.read.schema(schema).parquet(path)
+        assert result.schema == schema
+        return result
+
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        lambda spark, path: spark.createDataFrame(spark.sparkContext.parallelize(data), schema)
+            .write.mode("overwrite").partitionBy('c1', 'c2').parquet(path),
+        read_empty_data,
+        data_path,
+        conf={"spark.sql.maxConcurrentOutputFileWriters": max_concurrent_writers})
+
+
+@validate_execs_in_gpu_plan("GpuDataWritingCommandExec")
 def test_write_empty_data_concurrent_writer(spark_tmp_path):
-    schema = StructType(
-        [StructField("c1", StringType()), StructField("c2", IntegerType()), StructField("c3", IntegerType())])
-    data = []  # empty data
-    data_path = spark_tmp_path + '/PARQUET_DATA'
-    with_gpu_session(lambda spark: spark.createDataFrame(spark.sparkContext.parallelize(data), schema)
-                     .write.mode("overwrite").partitionBy('c1', 'c2').parquet(data_path),
-                     # concurrent writer
-                     {"spark.sql.maxConcurrentOutputFileWriters": 10})
-    with_cpu_session(lambda spark: spark.read.parquet(data_path).collect())
+    _assert_write_empty_partitioned_data(spark_tmp_path, 10)
 
 
-@pytest.mark.skipif(True, reason="currently not support write emtpy data: https://github.com/NVIDIA/spark-rapids/issues/6453")
+@validate_execs_in_gpu_plan("GpuDataWritingCommandExec")
 def test_write_empty_data_single_writer(spark_tmp_path):
-    schema = StructType(
-        [StructField("c1", StringType()), StructField("c2", IntegerType()), StructField("c3", IntegerType())])
-    data = []  # empty data
-    data_path = spark_tmp_path + '/PARQUET_DATA'
-    with_gpu_session(lambda spark: spark.createDataFrame(spark.sparkContext.parallelize(data), schema)
-                     .write.mode("overwrite").partitionBy('c1', 'c2').parquet(data_path))
-    with_cpu_session(lambda spark: spark.read.parquet(data_path).collect())
+    _assert_write_empty_partitioned_data(spark_tmp_path, 0)
 
 
 PartitionWriteMode = Enum('PartitionWriteMode', ['Static', 'Dynamic'])

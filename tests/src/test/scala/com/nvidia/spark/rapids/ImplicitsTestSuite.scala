@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,11 @@
 
 package com.nvidia.spark.rapids
 
+import java.io.{InterruptedIOException, IOException}
+import java.util.concurrent.{CountDownLatch, TimeUnit}
+
 import scala.collection.mutable.ArrayBuffer
+import scala.util.{Failure, Success, Try}
 
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import org.scalatest.flatspec.AnyFlatSpec
@@ -47,6 +51,78 @@ class ImplicitsTestSuite extends AnyFlatSpec with Matchers {
       refCount > 0
     }
   }
+
+  /** Records whether it was closed and whether its thread was interrupted at the time. */
+  private class CloseProbe(failure: Throwable = null) extends AutoCloseable {
+    var closed: Boolean = false
+    var interruptedAtClose: Boolean = false
+    override def close(): Unit = {
+      closed = true
+      interruptedAtClose = Thread.currentThread().isInterrupted
+      if (failure != null) {
+        throw failure
+      }
+    }
+  }
+
+  // A wait interrupted inside close() throws with the interrupt flag already cleared.
+  private def interruptedClose = new CloseProbe(new InterruptedException("interrupted close"))
+  private def failedClose = new CloseProbe(new IOException("failed close"))
+
+  private def interruptsIn(t: Throwable): Int =
+    t.getSuppressed.count(_.isInstanceOf[InterruptedException])
+
+  private val threadTimeoutMinutes = 1L
+
+  /**
+   * Runs `body` on a new thread, so an interrupt it leaves behind cannot reach the test thread,
+   * and returns its result and whether that thread was interrupted when `body` finished.
+   */
+  private def runOnNewThread[T](afterStart: Thread => Unit = _ => ())(
+      body: => T): (Try[T], Boolean) = {
+    var result: Try[T] = null
+    var interrupted = false
+    val thread = new Thread(() => {
+      // Not Try(body): Try does not catch InterruptedException.
+      result = try Success(body) catch { case t: Throwable => Failure(t) }
+      interrupted = Thread.currentThread().isInterrupted
+    })
+    thread.setDaemon(true)
+    thread.start()
+    try {
+      afterStart(thread)
+      thread.join(TimeUnit.MINUTES.toMillis(threadTimeoutMinutes))
+      assert(!thread.isAlive, "the closing thread did not finish")
+    } finally {
+      if (thread.isAlive) {
+        // Do not leave the thread blocked behind a failed test.
+        thread.interrupt()
+        thread.join(TimeUnit.SECONDS.toMillis(1))
+      }
+    }
+    (result, interrupted)
+  }
+
+  /**
+   * The ways safeClose suppresses a failed close: into the error a caller such as closeOnExcept
+   * passes, or into the first failed close, which it throws once the rest are closed. Each
+   * closes the resources and returns the exception holding what was suppressed.
+   */
+  private val suppressingCloses: Seq[(String, Seq[AutoCloseable] => Throwable)] = Seq(
+    ("Seq.safeClose(error)", (resources: Seq[AutoCloseable]) => {
+      val error = new IOException("caller error")
+      resources.safeClose(error)
+      error
+    }),
+    ("Seq.safeClose() after a failed close", (resources: Seq[AutoCloseable]) =>
+      intercept[IOException]((failedClose +: resources).safeClose())),
+    ("Array.safeClose(error)", (resources: Seq[AutoCloseable]) => {
+      val error = new IOException("caller error")
+      resources.toArray.safeClose(error)
+      error
+    }),
+    ("Array.safeClose() after a failed close", (resources: Seq[AutoCloseable]) =>
+      intercept[IOException]((failedClose +: resources).toArray.safeClose())))
 
   it should "handle exceptions within safeMap body" in {
     val resources = (0 until 10).map(new RefCountTest(_, false))
@@ -226,6 +302,132 @@ class ImplicitsTestSuite extends AnyFlatSpec with Matchers {
       }
     }
     assert(resources.forall(!_.leaked))
+  }
+
+  it should "keep the interrupt of a wait in a close after an earlier close failed" in {
+    val waiting = new CountDownLatch(1)
+    val last = new CloseProbe()
+    val resources = Seq[AutoCloseable](
+      failedClose,
+      () => {
+        waiting.countDown()
+        new CountDownLatch(1).await()
+      },
+      last)
+    val (result, interrupted) = runOnNewThread { closing =>
+      assert(waiting.await(threadTimeoutMinutes, TimeUnit.MINUTES))
+      closing.interrupt()
+    } {
+      intercept[IOException](resources.safeClose())
+    }
+    assert(interruptsIn(result.get) == 1)
+    assert(last.closed)
+    assert(interrupted)
+  }
+
+  suppressingCloses.foreach { case (name, closeAll) =>
+    it should s"restore a suppressed interrupt after the last close in $name" in {
+      val last = new CloseProbe()
+      val (result, interrupted) =
+        runOnNewThread()(closeAll(Seq(interruptedClose, failedClose, last)))
+      assert(interruptsIn(result.get) == 1)
+      assert(last.closed)
+      assert(!last.interruptedAtClose)
+      assert(interrupted)
+    }
+
+    it should s"stay interrupted after two suppressed interrupts in $name" in {
+      val (result, interrupted) =
+        runOnNewThread()(closeAll(Seq(interruptedClose, interruptedClose)))
+      assert(interruptsIn(result.get) == 2)
+      assert(interrupted)
+    }
+
+    it should s"not interrupt when it suppresses no interrupt in $name" in {
+      val (result, interrupted) = runOnNewThread()(closeAll(Seq(failedClose, new CloseProbe())))
+      assert(result.get.getSuppressed.nonEmpty)
+      assert(!interrupted)
+    }
+  }
+
+  it should "restore an interrupt that AutoCloseable.safeClose(error) suppresses" in {
+    val error = new IOException("caller error")
+    val (result, interrupted) = runOnNewThread()(interruptedClose.safeClose(error))
+    assert(result.isSuccess)
+    assert(interruptsIn(error) == 1)
+    assert(interrupted)
+  }
+
+  it should "not interrupt when AutoCloseable.safeClose(error) suppresses no interrupt" in {
+    val error = new IOException("caller error")
+    val (result, interrupted) = runOnNewThread()(failedClose.safeClose(error))
+    assert(result.isSuccess)
+    assert(error.getSuppressed.length == 1)
+    assert(!interrupted)
+  }
+
+  it should "throw an InterruptedException from the first failed close as before" in {
+    val (result, interrupted) = runOnNewThread()(interruptedClose.safeClose())
+    assert(result.failed.get.isInstanceOf[InterruptedException])
+    assert(!interrupted)
+
+    val closers = Seq[(String, Seq[AutoCloseable] => Unit)](
+      ("Seq.safeClose()", _.safeClose()),
+      ("Array.safeClose()", _.toArray.safeClose()))
+    closers.foreach { case (name, closeAll) =>
+      val last = new CloseProbe()
+      val (result, interrupted) = runOnNewThread()(closeAll(Seq(interruptedClose, last)))
+      withClue(name) {
+        assert(result.failed.get.isInstanceOf[InterruptedException])
+        assert(last.closed)
+        assert(!last.interruptedAtClose)
+        assert(!interrupted)
+      }
+    }
+  }
+
+  it should "restore at the end of each call, so later closes of an enclosing call see it" in {
+    val last = new CloseProbe()
+    val (result, interrupted) = runOnNewThread()(Seq[AutoCloseable](
+      () => Seq(failedClose, interruptedClose).safeClose(),
+      last).safeClose())
+    assert(result.failed.get.isInstanceOf[IOException])
+    assert(last.closed)
+    assert(last.interruptedAtClose)
+    assert(interrupted)
+  }
+
+  it should "not treat an InterruptedIOException or a wrapped interrupt as an interrupt" in {
+    val (result, interrupted) = runOnNewThread()(Seq[AutoCloseable](
+      failedClose,
+      new CloseProbe(new InterruptedIOException("timed out")),
+      new CloseProbe(new IOException(new InterruptedException("wrapped")))).safeClose())
+    assert(result.failed.get.getSuppressed.length == 2)
+    assert(!interrupted)
+  }
+
+  it should "restore a suppressed interrupt when the one it throws is also an interrupt" in {
+    val (result, interrupted) =
+      runOnNewThread()(Seq(interruptedClose, interruptedClose).safeClose())
+    assert(result.failed.get.isInstanceOf[InterruptedException])
+    assert(interruptsIn(result.failed.get) == 1)
+    assert(interrupted)
+  }
+
+  it should "not interrupt when the caller's error is the InterruptedException" in {
+    val closers = Seq[(String, (Seq[AutoCloseable], Throwable) => Unit)](
+      ("AutoCloseable.safeClose(error)", (resources, error) => resources.head.safeClose(error)),
+      ("Seq.safeClose(error)", (resources, error) => resources.safeClose(error)),
+      ("Array.safeClose(error)", (resources, error) => resources.toArray.safeClose(error)))
+    closers.foreach { case (name, closeAll) =>
+      val error = new InterruptedException("caller error")
+      val (result, interrupted) = runOnNewThread()(closeAll(Seq(failedClose), error))
+      withClue(name) {
+        assert(result.isSuccess)
+        assert(error.getSuppressed.length == 1)
+        assert(!interrupted)
+      }
+    }
   }
 }
 

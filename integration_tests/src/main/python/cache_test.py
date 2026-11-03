@@ -12,16 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from decimal import Decimal
+import os
+
 import pytest
 
-from asserts import assert_gpu_and_cpu_are_equal_collect, assert_equal
+from asserts import (assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect,
+    assert_cpu_and_gpu_are_equal_collect_with_capture, assert_equal)
 from conftest import is_not_utc
 from data_gen import *
 from pyspark import StorageLevel
 import pyspark.sql.functions as f
-from spark_session import with_cpu_session, with_gpu_session, is_spark_350_or_351
+from spark_session import with_cpu_session, with_gpu_session, is_spark_35x, is_spark_local_mode
 from join_test import create_df
-from marks import incompat, allow_non_gpu, allow_non_gpu_conditional, ignore_order, disable_ansi_mode
+from marks import (incompat, allow_non_gpu, ignore_order, disable_ansi_mode, inject_oom,
+    large_data_test)
 import pyspark.mllib.linalg as mllib
 import pyspark.ml.linalg as ml
 
@@ -286,6 +291,134 @@ def function_to_test_on_df(with_x_session, df_gen, func_on_df, test_conf):
 
     assert_equal(reg_result, cached_result)
 
+@pytest.mark.parametrize('aqe_enabled', ['true', 'false'])
+@allow_non_gpu('InMemoryTableScanExec', 'ColumnarToRowExec')
+def test_cache_project_partitioning(aqe_enabled):
+    cached_frames = []
+
+    def query(spark):
+        cached = (spark.range(0, 100, 1, 16).selectExpr('id % 10 AS k', 'id AS v')
+            .persist(StorageLevel.MEMORY_AND_DISK))
+        cached_frames.append(cached)
+        return cached.groupBy('k').agg(f.max('v').alias('max_v')).orderBy('k')
+
+    conf = {
+        'spark.sql.adaptive.enabled': aqe_enabled,
+        'spark.sql.shuffle.partitions': '4'}
+    try:
+        assert_gpu_and_cpu_are_equal_collect(query, conf=conf)
+    finally:
+        for cached in cached_frames:
+            cached.unpersist(blocking=True)
+
+
+def _assert_cached_project_aggregate_equal(projected_input, aqe_enabled, conf=None,
+        group_by='k', value='v'):
+    # The cached aggregate must shuffle again when equal grouping keys occur in
+    # different input partitions.
+    cached_frames = []
+
+    def query(spark):
+        cached = projected_input(spark).persist(StorageLevel.MEMORY_AND_DISK)
+        cached_frames.append(cached)
+        return cached.groupBy(group_by).agg(f.max(value).alias('max_v')).orderBy(group_by)
+
+    test_conf = copy_and_update({
+        'spark.sql.adaptive.enabled': aqe_enabled,
+        # Keep multiple partitions under AQE so coalescing cannot hide a missing shuffle.
+        'spark.sql.adaptive.coalescePartitions.enabled': 'false',
+        'spark.sql.shuffle.partitions': '4'}, conf or {})
+    try:
+        assert_gpu_and_cpu_are_equal_collect(query, conf=test_conf)
+    finally:
+        for cached in cached_frames:
+            cached.unpersist(blocking=True)
+
+
+@pytest.mark.parametrize('aqe_enabled', ['true', 'false'])
+@allow_non_gpu('InMemoryTableScanExec', 'ColumnarToRowExec')
+def test_cache_project_hash_partitioning(aqe_enabled):
+    def projected_input(spark):
+        source = gen_df(spark, [('id', LongGen(min_val=0, max_val=99, nullable=False))],
+            length=256, seed=0)
+        # Compute id on the GPU to keep the hash shuffle on the GPU.
+        partitioned = source.selectExpr('id + 1 AS id').repartition(4, 'id')
+        projected = partitioned.selectExpr('id % 10 AS k', 'id AS v')
+        if spark.conf.get('spark.rapids.sql.enabled') == 'true':
+            # AQE converts query stages to GPU during execution; inspect the completed plan.
+            assert projected.collect(), 'Expected non-empty projected input'
+            capture = spark._jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+            capture.assertContains(projected._jdf, 'GpuProjectExec')
+            capture.assertContains(projected._jdf, 'GpuShuffleExchangeExec')
+        return projected
+
+    _assert_cached_project_aggregate_equal(projected_input, aqe_enabled)
+
+
+@pytest.mark.parametrize('aqe_enabled', ['true', 'false'])
+@allow_non_gpu('InMemoryTableScanExec', 'ColumnarToRowExec')
+def test_cache_project_after_broadcast_join(aqe_enabled):
+    def projected_input(spark):
+        left = gen_df(spark, [('id', LongGen(min_val=0, max_val=99, nullable=False))],
+            length=256, seed=0).selectExpr('id + 1 AS id').repartition(4, 'id')
+        right = gen_df(spark, [('rid', LongGen(min_val=1, max_val=100, nullable=False))],
+            length=100, seed=1)
+        joined = left.join(f.broadcast(right), left.id == right.rid)
+        projected = joined.selectExpr('id % 10 AS k', 'id AS v')
+        if spark.conf.get('spark.rapids.sql.enabled') == 'true':
+            # AQE converts query stages to GPU during execution; inspect the completed plan.
+            assert projected.collect(), 'Expected non-empty projected input'
+            capture = spark._jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+            capture.assertContains(projected._jdf, 'GpuProjectExec')
+            capture.assertContains(projected._jdf, 'GpuShuffleExchangeExec')
+            capture.assertContains(projected._jdf, 'GpuBroadcastHashJoinExec')
+        return projected
+
+    _assert_cached_project_aggregate_equal(projected_input, aqe_enabled)
+
+
+@pytest.mark.parametrize('aqe_enabled', ['true', 'false'])
+@pytest.mark.parametrize('join_strategy,non_ast_side', [
+    ('broadcast', 'right'), ('shuffle', 'left')], ids=['broadcast_right', 'shuffle_left'])
+@allow_non_gpu('InMemoryTableScanExec', 'ColumnarToRowExec')
+def test_cache_project_after_split_condition_join(aqe_enabled, join_strategy, non_ast_side):
+    def projected_input(spark):
+        left = gen_df(spark, [
+            ('id', LongGen(min_val=0, max_val=99, nullable=False)),
+            ('probe', LongGen(min_val=0, max_val=99, nullable=False))],
+            length=256, seed=0).selectExpr('id', 'probe + 1 AS probe').repartition(4, 'id')
+        right = gen_df(spark, [
+            ('rid', LongGen(min_val=0, max_val=99, nullable=False)),
+            ('offset', LongGen(min_val=-1, max_val=1, nullable=False))],
+            length=100, seed=1).selectExpr('rid + 1 AS rid', 'offset')
+        # Force Add out of AST so the condition requires a pre-projection on this input.
+        residual = (left.probe + 1 < right.rid) if non_ast_side == 'left' else (
+            left.probe < right.rid + right['offset'])
+        condition = (left.id == right.rid) & residual
+        right = f.broadcast(right) if join_strategy == 'broadcast' else right.hint('merge')
+        joined = left.join(right, condition)
+        if spark.conf.get('spark.rapids.sql.enabled') == 'true':
+            # AQE converts query stages to GPU during execution; inspect the completed plan.
+            assert joined.collect(), 'Expected non-empty join output'
+            capture = spark._jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+            capture.assertContains(joined._jdf, 'GpuProjectExec')
+            capture.assertContains(joined._jdf, 'GpuShuffleExchangeExec')
+            join_exec = ('GpuBroadcastHashJoinExec' if join_strategy == 'broadcast' else
+                'GpuShuffledHashJoinExec')
+            capture.assertContains(joined._jdf, join_exec)
+            plan = joined._jdf.queryExecution().executedPlan().toString()
+            assert f'_agpu_non_ast_{non_ast_side[0]}_' in plan, (
+                'Expected join-condition pre-projection:\n' + plan)
+        return joined
+
+    _assert_cached_project_aggregate_equal(projected_input, aqe_enabled,
+        conf={'spark.rapids.sql.test.forceNonAst': 'Add',
+              'spark.rapids.sql.join.useShuffledSymmetricHashJoin': 'false',
+              'spark.sql.autoBroadcastJoinThreshold': '-1',
+              'spark.sql.adaptive.autoBroadcastJoinThreshold': '-1'},
+        group_by='offset', value='id')
+
+
 @pytest.mark.parametrize('data_gen', all_gen, ids=idfn)
 @pytest.mark.parametrize('with_x_session', [with_gpu_session, with_cpu_session])
 @pytest.mark.parametrize('enable_vectorized_conf', enable_vectorized_confs, ids=idfn)
@@ -320,19 +453,45 @@ def test_cache_map_and_array(data_gen, enable_vectorized):
 
     assert_gpu_and_cpu_are_equal_collect(helper)
 
-def test_cache_udt():
+@allow_non_gpu('InMemoryTableScanExec')
+@pytest.mark.parametrize('aqe_enabled', ['true', 'false'])
+def test_cache_udt(aqe_enabled):
+    schema = StructType([
+        StructField('mllib_v', mllib.VectorUDT(), nullable=True),
+        StructField('ml_v', ml.VectorUDT(), nullable=True),
+        StructField('ml_array', ArrayType(ml.VectorUDT(), containsNull=True), nullable=False),
+        StructField('ml_struct', StructType([
+            StructField('v', ml.VectorUDT(), nullable=True)]), nullable=False),
+        StructField('ml_map', MapType(StringType(), ml.VectorUDT(), valueContainsNull=True),
+            nullable=False),
+        StructField('decimal32', DecimalType(5, 2), nullable=False),
+        StructField('decimal64', DecimalType(12, 2), nullable=False)])
+    values = [
+        (mllib.DenseVector([1, ]), ml.DenseVector([1, ]),
+            [ml.DenseVector([1, ]), None], (ml.DenseVector([1, ]),),
+            {'dense': ml.DenseVector([1, ]), 'null': None},
+            Decimal('123.45'), Decimal('9876543210.12')),
+        (mllib.SparseVector(1, [0, ], [1, ]), ml.SparseVector(1, [0, ], [1, ]),
+            [ml.SparseVector(1, [0, ], [1, ])], (ml.SparseVector(1, [0, ], [1, ]),),
+            {'sparse': ml.SparseVector(1, [0, ], [1, ])},
+            Decimal('-12.34'), Decimal('-9876543210.12'))]
+
     def fun(spark):
-        df = spark.sparkContext.parallelize([
-            (mllib.DenseVector([1, ]), ml.DenseVector([1, ])),
-            (mllib.SparseVector(1, [0, ], [1, ]), ml.SparseVector(1, [0, ], [1, ]))
-        ]).toDF(["mllib_v", "ml_v"])
+        df = spark.createDataFrame(spark.sparkContext.parallelize(values), schema)
         df.cache().count()
-        return df.selectExpr("mllib_v", "ml_v").collect()
-    cpu_result = with_cpu_session(fun)
-    gpu_result = with_gpu_session(fun)
-    # assert_gpu_and_cpu_are_equal_collect method doesn't handle UDT so we just write a single
-    # statement here to compare
-    assert cpu_result == gpu_result, "not equal"
+        return df
+
+    def canonicalize(cpu_result, gpu_result):
+        # The generic result comparator does not handle vector UDT values. Check each round trip
+        # against the source first, then give it stable strings for its final CPU/GPU comparison.
+        assert cpu_result == values, "CPU result not equal to source values"
+        assert gpu_result == values, "GPU result not equal to source values"
+        return [repr(row) for row in cpu_result], [repr(row) for row in gpu_result]
+
+    assert_gpu_fallback_collect(
+        fun, 'InMemoryTableScanExec',
+        conf={'spark.sql.adaptive.enabled': aqe_enabled},
+        result_canonicalize_func_before_compare=canonicalize)
 
 @pytest.mark.parametrize('enable_vectorized_conf', enable_vectorized_confs, ids=idfn)
 @ignore_order(local=True)
@@ -372,7 +531,6 @@ def test_batch_no_cols(with_x_session):
 
 @ignore_order(local=True)
 @allow_non_gpu("ShuffleExchangeExec", "ColumnarToRowExec")
-@allow_non_gpu_conditional(is_spark_350_or_351(), "InMemoryTableScanExec")
 @pytest.mark.parametrize("data_gen", integral_gens, ids=idfn)
 @pytest.mark.parametrize('enable_vectorized_conf', enable_vectorized_confs, ids=idfn)
 def test_aqe_cache_version_specific_behavior(data_gen, enable_vectorized_conf):
@@ -395,7 +553,6 @@ def test_aqe_cache_version_specific_behavior(data_gen, enable_vectorized_conf):
 @ignore_order(local=True)
 @allow_non_gpu("CollectLimitExec", "ShuffleExchangeExec", "ColumnarToRowExec")
 @pytest.mark.parametrize('enable_vectorized_conf', enable_vectorized_confs, ids=idfn)
-@allow_non_gpu_conditional(is_spark_350_or_351(), "InMemoryTableScanExec")
 def test_persist_with_groupby_join_version_specific(enable_vectorized_conf):
     """
     Expected behavior:
@@ -431,7 +588,6 @@ def test_persist_with_groupby_join_version_specific(enable_vectorized_conf):
 # Ensure base allow list is a tuple to satisfy pytest hook concatenation
 @allow_non_gpu("")
 @pytest.mark.parametrize('enable_vectorized_conf', enable_vectorized_confs, ids=idfn)
-@allow_non_gpu_conditional(is_spark_350_or_351(), "InMemoryTableScanExec")
 def test_cached_groupby_sum_version_specific(enable_vectorized_conf):
     """
     Validate aggregation on a cached query works without errors across Spark versions.
@@ -453,3 +609,264 @@ def test_cached_groupby_sum_version_specific(enable_vectorized_conf):
         return df
 
     assert_gpu_and_cpu_are_equal_collect(do_it, conf=enable_vectorized_conf)
+
+_pcbs_serializer = 'com.nvidia.spark.ParquetCachedBatchSerializer'
+_pcbs_enabled = os.environ.get('PYSP_TEST_spark_sql_cache_serializer', '') == _pcbs_serializer
+
+# Each builder makes a single-partition frame (stable order) whose cached output carries NullType.
+_nulltype_cache_builders = {
+    'top_level': lambda spark: spark.range(0, 20, 1, 1).selectExpr('id', 'null as code'),
+    'struct_child': lambda spark: spark.range(0, 20, 1, 1).selectExpr(
+        'id', "named_struct('a', id, 'code', null) as properties"),
+    'array_child': lambda spark: spark.range(0, 20, 1, 1).selectExpr('id', 'array(null) as arr'),
+    'map_value': lambda spark: spark.range(0, 20, 1, 1).selectExpr('id', 'map(1, null) as m'),
+    # Doubly-nested cases: .nested() propagates NULL to every level, so these stay on GPU too.
+    'array_of_struct': lambda spark: spark.range(0, 20, 1, 1).selectExpr(
+        'id', "array(named_struct('a', id, 'code', null)) as arr_of_struct"),
+    'struct_of_array': lambda spark: spark.range(0, 20, 1, 1).selectExpr(
+        'id', "named_struct('a', id, 'arr', array(null)) as s"),
+    'struct_of_map': lambda spark: spark.range(0, 20, 1, 1).selectExpr(
+        'id', "named_struct('a', id, 'm', map(1, null)) as s"),
+    'map_of_struct': lambda spark: spark.range(0, 20, 1, 1).selectExpr(
+        'id', "map(1, named_struct('a', id, 'code', null)) as m"),
+    'array_of_array': lambda spark: spark.range(0, 20, 1, 1).selectExpr(
+        'id', 'array(array(null)) as arr_of_arr'),
+}
+
+@pytest.mark.skipif(not _pcbs_enabled,
+    reason="requires PCBS lane: "
+           "PYSP_TEST_spark_sql_cache_serializer=com.nvidia.spark.ParquetCachedBatchSerializer")
+# No @ignore_order: single-partition data already collects in a stable order, and its server-side
+# sort would push a CPU ShuffleExchangeExec and cannot order the MAP<INT, VOID> value. The trailing
+# collect transfers GPU columns to rows, so only that may be off the GPU.
+@allow_non_gpu('ColumnarToRowExec')
+@pytest.mark.parametrize('data_desc', list(_nulltype_cache_builders))
+@pytest.mark.parametrize('enable_vectorized_conf', enable_vectorized_confs, ids=idfn)
+def test_cache_nulltype_on_gpu(data_desc, enable_vectorized_conf):
+    build_df = _nulltype_cache_builders[data_desc]
+    def func(spark):
+        cached = build_df(spark).cache()
+        cached.count()  # populate the cache so the read hits InMemoryTableScanExec
+        return cached
+    # InMemoryTableScanExec is disabled by default on Spark 3.5.0/3.5.1 (AQE, #10603). Force it on
+    # and disable AQE so the scan stays on the GPU across all shims.
+    dyn_conf = copy_and_update(enable_vectorized_conf,
+        {'spark.rapids.sql.exec.InMemoryTableScanExec': 'true',
+         'spark.sql.adaptive.enabled': 'false'})
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        func, exist_classes='GpuInMemoryTableScanExec', conf=dyn_conf)
+
+
+@pytest.mark.skipif(not _pcbs_enabled,
+    reason="requires PCBS lane: "
+           "PYSP_TEST_spark_sql_cache_serializer=com.nvidia.spark.ParquetCachedBatchSerializer")
+@allow_non_gpu('ColumnarToRowExec')
+@inject_oom
+@pytest.mark.parametrize('enable_vectorized_conf', enable_vectorized_confs, ids=idfn)
+def test_cache_binary_on_gpu(enable_vectorized_conf):
+    schema = StructType([
+        StructField('id', IntegerType(), nullable=False),
+        StructField('payload', BinaryType(), nullable=True),
+        StructField('nested', StructType([
+            StructField('nested_payload', BinaryType(), nullable=True)]), nullable=False),
+        StructField('array_payload', ArrayType(BinaryType(), containsNull=True), nullable=True),
+        StructField('map_payload', MapType(IntegerType(), BinaryType(), valueContainsNull=True),
+            nullable=True)])
+    values = [
+        (0, bytes([1]), (bytes([0, 255]),),
+            [bytes([0, 255]), bytes(), None], {1: bytes([0, 255]), 2: bytes(), 3: None}),
+        (1, bytes(), (bytes(),), [], {}),
+        (2, None, (None,), None, None)]
+
+    def func(spark):
+        cached = spark.createDataFrame(
+            spark.sparkContext.parallelize(values, numSlices=1), schema).cache()
+        cached.count()  # populate the cache so the read hits InMemoryTableScanExec
+        return cached
+
+    dyn_conf = copy_and_update(enable_vectorized_conf,
+        {'spark.rapids.sql.exec.InMemoryTableScanExec': 'true',
+         'spark.sql.adaptive.enabled': 'false'})
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        func, exist_classes='GpuInMemoryTableScanExec', conf=dyn_conf)
+
+
+_requires_pcbs_enabled = pytest.mark.skipif(not _pcbs_enabled,
+    reason="requires PCBS: "
+           "PYSP_TEST_spark_sql_cache_serializer=com.nvidia.spark.ParquetCachedBatchSerializer")
+
+# Keeps the cached scan on the GPU across shims, as in the tests above.
+_pcbs_gpu_scan_conf = {'spark.rapids.sql.exec.InMemoryTableScanExec': 'true',
+                       'spark.sql.adaptive.enabled': 'false'}
+
+
+def _cached_relation(spark, df):
+    """Return the InMemoryRelation caching df. The serializer is handed rows, not columnar
+    batches, unless the relation's cachedPlan supports columnar output."""
+    cached = spark._jsparkSession.sharedState().cacheManager().lookupCachedData(df._jdf)
+    assert cached.isDefined(), 'the DataFrame is not cached'
+    return cached.get().cachedRepresentation()
+
+
+def _assert_read_on_gpu_scan(spark, df):
+    spark._jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.assertContains(
+        df._jdf, 'GpuInMemoryTableScanExec')
+
+
+def _padded_value_col(value_bytes):
+    """The id column zero-padded to 10 characters, then 'x' up to value_bytes."""
+    return f.rpad(f.lpad(f.col('id').cast('string'), 10, '0'), value_bytes, 'x')
+
+
+@_requires_pcbs_enabled
+@allow_non_gpu(any=True)
+@pytest.mark.parametrize('num_rows', [0, 5000], ids=idfn)
+def test_cache_zero_columns_from_rows(num_rows):
+    def check(spark):
+        # Built from an RDD, so the cached plan's root runs on the CPU and every shim hands
+        # the serializer rows.
+        df = spark.createDataFrame(spark.sparkContext.parallelize([()] * num_rows, 1),
+                                   StructType([])).cache()
+        relation = _cached_relation(spark, df)
+        assert not relation.cachedPlan().supportsColumnar()
+        assert df.count() == num_rows
+        spark.conf.set('spark.rapids.sql.enabled', 'false')
+        assert df.count() == num_rows
+
+    with_gpu_session(check, conf=_pcbs_gpu_scan_conf)
+
+
+@_requires_pcbs_enabled
+def test_cache_converted_rows_across_batches():
+    rows = 200
+
+    def check(spark):
+        # Built from an RDD, so the project that adds the interval runs in whole-stage codegen,
+        # and the interval makes the serializer convert each row before writing it.
+        df = spark.createDataFrame(spark.sparkContext.parallelize(range(rows), 1).map(
+            lambda i: (i,)), 'id long') \
+            .withColumn('s', _padded_value_col(100)) \
+            .withColumn('iv', f.expr('make_interval(0, 0, 0, 0, 0, 0, id)')).cache()
+        assert df.count() == rows
+        mismatched = f.substring('s', 1, 10) != f.lpad(f.col('id').cast('string'), 10, '0')
+        return [r.id for r in df.where(mismatched).select('id').collect()]
+
+    # The CPU session caches through the serializer's CPU writer whatever the plugin supports
+    # on the GPU. A 1 KiB budget puts a batch boundary every few dozen rows.
+    assert with_cpu_session(check, conf={'spark.rapids.sql.batchSizeBytes': '1k'}) == []
+
+
+# One partition of 2300 values of 1 MiB: 2411724800 bytes, more than a cuDF column can hold.
+_over_2gib_rows = 2300
+_over_2gib_value_bytes = 1024 * 1024
+# The default serializer's results for this data, recorded in a separate process because the
+# cache serializer is a static conf: count(); over both columns sum(length(c)),
+# sum(xxhash64(c)), sum(id) and the number of values not starting with their own id; then the
+# same sums over each column alone.
+_over_2gib_expected = [2300,
+                       (2411724800, 6297173105888965833, 2643850, 0),
+                       (2411724800, 6297173105888965833),
+                       (2643850,)]
+
+
+def _assert_host_buffer_checks_enabled(spark):
+    # Host buffer bounds are checked only under -ea, so without it a build that overflows a
+    # column corrupts memory instead of failing.
+    loader = spark._jvm.java.lang.Thread.currentThread().getContextClassLoader()
+    for name in ['com.nvidia.spark.rapids.RapidsHostColumnBuilder',
+                 'ai.rapids.cudf.MemoryBuffer']:
+        assert loader.loadClass(name).desiredAssertionStatus(), \
+            '{} needs JVM assertions enabled (-ea)'.format(name)
+
+
+def _over_2gib_from_rdd(spark, data_type):
+    rows = _over_2gib_rows
+    value_bytes = _over_2gib_value_bytes
+    as_binary = isinstance(data_type, BinaryType)
+
+    # Refers only to locals: a module-level helper would be pickled by reference, and the
+    # Python worker would have to import this module.
+    def gen(_):
+        for i in range(rows):
+            value = '%010d' % i + 'x' * (value_bytes - 10)
+            yield (i, bytearray(value.encode('ascii')) if as_binary else value)
+
+    schema = StructType([StructField('id', LongType(), False),
+                         StructField('c', data_type, False)])
+    return spark.createDataFrame(spark.sparkContext.parallelize([0], 1).flatMap(gen), schema)
+
+
+def _over_2gib_from_gpu_aggregate(spark, data_type):
+    # Range is ordered by id, so without the repartition the aggregate keeps Range's four
+    # partitions instead of shuffling into one.
+    df = spark.range(0, _over_2gib_rows, 1, 4) \
+        .withColumn('c', _padded_value_col(_over_2gib_value_bytes)) \
+        .repartition(4).groupBy('id').agg(f.max('c').alias('c'))
+    if isinstance(data_type, BinaryType):
+        # max does not take binary on the GPU, so the cast follows the aggregate.
+        df = df.select('id', f.col('c').cast('binary').alias('c'))
+    return df
+
+
+def _over_2gib_reads(spark, df, data_type, on_gpu):
+    """The reads _over_2gib_expected describes; with on_gpu, also check they use the GPU scan."""
+    prefix = f.substring('c', 1, 10)
+    if isinstance(data_type, BinaryType):
+        prefix = prefix.cast('string')
+    mismatched = prefix != f.lpad(f.col('id').cast('string'), 10, '0')
+    reads = [df.agg(f.sum(f.length('c')), f.sum(f.xxhash64('c')), f.sum('id'),
+                    f.count(f.when(mismatched, 1))),
+             df.agg(f.sum(f.length('c')), f.sum(f.xxhash64('c'))),
+             df.agg(f.sum('id'))]
+    results = [df.count()] + [tuple(read.collect()[0]) for read in reads]
+    if on_gpu:
+        for read in reads:
+            _assert_read_on_gpu_scan(spark, read)
+    return results
+
+
+@large_data_test
+@_requires_pcbs_enabled
+@disable_ansi_mode  # sum(xxhash64(c)) wraps around
+# Only the cache build and its scan matter here, and the scan is checked explicitly.
+@allow_non_gpu(any=True)
+@pytest.mark.parametrize('route', [
+    'rdd',
+    pytest.param('aqe_gpu', marks=pytest.mark.skipif(not is_spark_35x(),
+        reason='only Spark 3.5.x hands an AQE-wrapped cached plan to the serializer as rows'))])
+@pytest.mark.parametrize('data_type', [StringType(), BinaryType()], ids=idfn)
+def test_cache_partition_with_column_over_2gib(data_type, route):
+    if not is_spark_local_mode():
+        pytest.skip('needs Spark local mode, where the driver is the JVM that builds the cache')
+    if os.environ.get('PYTEST_XDIST_WORKER') is not None:
+        pytest.skip('needs a single pytest worker (TEST_PARALLEL=1); see tests/README.md')
+    # The cached plan's root names the route: an RDD scan on the CPU, or an aggregate whose
+    # shuffle makes AQE wrap the plan. Only the root is checked, not where the aggregate runs.
+    build_df, root = {
+        'rdd': (_over_2gib_from_rdd, 'Scan ExistingRDD'),
+        'aqe_gpu': (_over_2gib_from_gpu_aggregate, 'AdaptiveSparkPlan')}[route]
+
+    def check(spark):
+        pool = spark.conf.get('spark.rapids.memory.gpu.allocSize', None)
+        # The cached batch alone is about 2 GiB on the GPU, and slicing it copies it.
+        if pool is not None and \
+                spark._jvm.org.apache.spark.network.util.JavaUtils.byteStringAsBytes(pool) < 4 << 30:
+            pytest.skip('needs a GPU pool of more than {}; see tests/README.md'.format(pool))
+        _assert_host_buffer_checks_enabled(spark)
+        df = build_df(spark, data_type).cache()
+        plan = _cached_relation(spark, df).cachedPlan()
+        assert not plan.supportsColumnar(), \
+            'the cache takes the columnar entry: ' + plan.nodeName()
+        if plan.nodeName().startswith('WholeStageCodegen'):
+            plan = plan.child()
+        assert plan.nodeName().startswith(root), plan.nodeName()
+        assert df.count() == _over_2gib_rows
+        # Read as the tests above do; the cache is already built under the route's settings.
+        spark.conf.set('spark.rapids.sql.exec.InMemoryTableScanExec', 'true')
+        spark.conf.set('spark.sql.adaptive.enabled', 'false')
+        assert _over_2gib_reads(spark, df, data_type, True) == _over_2gib_expected
+        spark.conf.set('spark.rapids.sql.enabled', 'false')
+        assert _over_2gib_reads(spark, df, data_type, False) == _over_2gib_expected
+
+    with_gpu_session(check, conf={'spark.sql.adaptive.enabled': 'true',
+                                  'spark.sql.shuffle.partitions': '1'})

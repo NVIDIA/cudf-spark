@@ -44,6 +44,8 @@ trait ProxyShuffleReaderDelegate {
       endPartition: Int,
       context: TaskContext,
       metrics: ShuffleReadMetricsReporter): ShuffleReader[K, C]
+
+  def shuffleBlockResolver: ShuffleBlockResolver
 }
 
 /**
@@ -68,10 +70,11 @@ class ProxyRapidsShuffleInternalManagerBase(
   protected lazy val realImpl = ShimLoader.newInternalShuffleManager(conf, isDriver)
     .asInstanceOf[ShuffleManager]
 
-  // This function touches the lazy val `self` so we actually instantiate
+  // This function touches the lazy val `realImpl` so we actually instantiate
   // the manager. This is called from both the driver and executor.
-  // In the driver, it's mostly to display information on how to enable/disable the manager,
-  // in the executor, the UCXShuffleTransport starts and allocates memory at this time.
+  // In the driver, it's mostly to display information on how to enable/disable the manager.
+  // In the executor it does not start the UCXShuffleTransport: the transport and its bounce
+  // buffers are created on first use, after the RMM pool is sized.
   override def initialize: Unit = realImpl
 
   /**
@@ -128,7 +131,10 @@ class ProxyRapidsShuffleInternalManagerBase(
 
   def unregisterShuffle(shuffleId: Int): Boolean = realImpl.unregisterShuffle(shuffleId)
 
-  def shuffleBlockResolver: ShuffleBlockResolver = realImpl.shuffleBlockResolver
+  private lazy val realShuffleBlockResolver: ShuffleBlockResolver =
+    realImpl.asInstanceOf[ProxyShuffleReaderDelegate].shuffleBlockResolver
+
+  def shuffleBlockResolver: ShuffleBlockResolver = realShuffleBlockResolver
 
   def stop(): Unit = realImpl.stop()
 }

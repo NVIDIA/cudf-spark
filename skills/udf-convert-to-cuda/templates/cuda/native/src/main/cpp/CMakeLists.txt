@@ -3,7 +3,7 @@
 
 cmake_minimum_required(VERSION 3.30.4 FATAL_ERROR)
 
-set(RAPIDS_CMAKE_BRANCH "v26.04.00" CACHE STRING "rapids-cmake branch or tag")
+set(RAPIDS_CMAKE_BRANCH "v26.06.00" CACHE STRING "rapids-cmake branch or tag")
 if(RAPIDS_CMAKE_BRANCH MATCHES "^v(.+)")
   set(rapids-cmake-version "${CMAKE_MATCH_1}")
   set(rapids-cmake-tag "${RAPIDS_CMAKE_BRANCH}")
@@ -34,7 +34,7 @@ if(DEFINED GPU_ARCHS)
 endif()
 rapids_cuda_init_architectures(RAPIDSUDFJNI)
 
-project(RAPIDSUDFJNI VERSION 26.04.0 LANGUAGES C CXX CUDA)
+project(RAPIDSUDFJNI VERSION 26.06.0 LANGUAGES C CXX CUDA)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -85,7 +85,7 @@ if(USE_PREBUILT_CUDF)
   add_library(cudf::cudf ALIAS cudf_imported)
 else()
   rapids_cpm_init()
-  rapids_cpm_find(cudf 26.04.00
+  rapids_cpm_find(cudf 26.06.00
     CPM_ARGS
       GIT_REPOSITORY https://github.com/rapidsai/cudf.git
       GIT_TAG        ${RAPIDS_CMAKE_BRANCH}

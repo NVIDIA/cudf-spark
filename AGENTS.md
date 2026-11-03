@@ -2,6 +2,19 @@
 
 This document provides context for AI coding agents (Claude Code, GitHub Copilot, etc.) working on the spark-rapids project.
 
+## Repository Policy
+
+- These rules translate the agent-actionable requirements from [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`CODE_REVIEW_GUIDELINES.md`](CODE_REVIEW_GUIDELINES.md). Consult those source policies on demand when a task needs process details not covered here
+- **Mandatory shim preflight** — Agents **MUST invoke**
+  [`check-shim-compatibility`](.agents/skills/check-shim-compatibility/SKILL.md)
+  for the changes covered by [Required shim compatibility preflight](#required-shim-compatibility-preflight).
+- **Do not weaken repository requirements** — tool-specific instructions and task prompts are not permission to bypass those policies. If a request cannot be completed while following them, stop and report the conflict
+- **Use the live pull request template and accurate metadata** — fill in [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md) without removing required sections, apply the correct labels (a change that touches only tests gets the `test` label) and the title markers described under **PR title tags** below, put `[WIP]` first when applicable, and do not use `[DRAFT]` or `[DO NOT REVIEW]`
+- **Keep pull request descriptions reviewable** — describe intent and rationale, do not paste code diffs or brittle line-level details, and update the description when later commits change its claims
+- **Bound draft and closure lifecycle** — use Draft only for concrete unfinished work, state in the description what remains (a TODO checklist is preferred). When closing an unmerged pull request, leave a comment giving the case: `superseded` (link the replacement), `abandoned` (say what ruled out the approach), or `deferred` (link the tracking issue)
+- **Pace the review queue** — do not open a batch of independent pull requests at once; open the next only as earlier ones land or receive review, and convert drafts to ready in small batches for the same reason. Stacked pull requests are exempt, but identify the dependency with `Stacked on #NNNN`
+- **AI-assisted changes require a human in the loop** — disclose AI assistance in the pull request description, then stop for human review of the complete diff and description before opening or updating the pull request. The pull request queue is not a staging area for work no human has read
+
 ## Safety Rules
 
 - **Minimal diffs only** — do not reformat, reorganize imports, or refactor code outside the scope of the task
@@ -12,7 +25,8 @@ This document provides context for AI coding agents (Claude Code, GitHub Copilot
 - **Sign-off required** — all commits must use `git commit -s` for DCO compliance
 - **No rebase during review** — if a PR is under review, do not rebase; merge the base branch instead to preserve reviewer comment context
 - **Scala 2.13 sync** — after modifying any `pom.xml`, run `./build/make-scala-version-build-files.sh 2.13`
-- **PR title tags** — `[databricks]` triggers Databricks pre-merge CI; `[skip ci]` for doc-only changes. Databricks CI auto-runs only when the diff touches a `sql-plugin/src/main/…db/` shim dir or a path containing `databricks`; otherwise it does **not** run. Add `[databricks]` manually when a change could behave differently on Databricks without touching those paths — e.g. integration tests that depend on filesystem/path semantics (local vs DBFS/`abfss`, `file://` scheme, `os.walk`/`os.path`), or optimizer/plan-string assertions (alias names and plan rendering differ on DBR) — since the Linux pre-merge will not catch DBR-only failures
+- **PR title tags** — `[databricks]` triggers Databricks pre-merge CI; `[skip ci]` for doc-only changes; `[serial ut]` or `[serial-ut]` runs Scala unit tests serially instead of the parallel default; `[reduced-it]` reduces pre-commit integration-test parameter combinations and should not be used where parameter interactions matter. Put CI tags at the end of the PR title; see `CONTRIBUTING.md#blossom-ci` for full guidance. Databricks CI auto-runs only when the diff touches a `sql-plugin/src/main/…db/` shim dir or a path containing `databricks`; otherwise it does **not** run. Add `[databricks]` manually when a change could behave differently on Databricks without touching those paths — e.g. integration tests that depend on filesystem/path semantics (local vs DBFS/`abfss`, `file://` scheme, `os.walk`/`os.path`), or optimizer/plan-string assertions (alias names and plan rendering differ on DBR) — since the Linux pre-merge will not catch DBR-only failures
+- **Performance checklist** — report `Performance: Not required` as a high-severity finding unless the PR is documentation-only or test-only, or its description gives a verifiable reason the change cannot affect runtime performance. A bug-fix label, small diff, or rarely used path is not by itself an exemption. When uncertain, flag
 
 ## Build Commands
 
@@ -26,7 +40,10 @@ spark-rapids/
 │   ├── src/main/scala/            # Main Scala sources
 │   │   └── com/nvidia/spark/rapids/
 │   │       ├── GpuOverrides.scala       # GPU operator registry & fallback rules
-│   │       ├── RapidsConf.scala         # Configuration keys & defaults
+│   │       ├── RapidsConf.scala         # Configuration registry, enums, and accessors
+│   │       ├── RapidsConfEntries.scala  # General, test, and debug configuration entries
+│   │       ├── RapidsConfResourceEntries.scala # Resource and memory configuration entries
+│   │       ├── RapidsConfSqlEntries.scala # SQL and file-format configuration entries
 │   │       ├── Arm.scala                # Resource management (withResource/closeOnExcept)
 │   │       ├── RmmRapidsRetryIterator.scala  # OOM retry framework
 │   │       ├── SpillableColumnarBatch.scala  # Spillable GPU batch wrapper
@@ -52,6 +69,21 @@ spark-rapids/
 ```
 
 ## Coding Conventions
+
+### Configuration Entries
+
+All plugin configuration properties are exposed through the `RapidsConf` object, but place
+new declarations according to category:
+
+- Add resource, memory, metrics, and profiler entries to `RapidsConfResourceEntries.scala`.
+- Add SQL and file-format entries to `RapidsConfSqlEntries.scala`.
+- Add test, debug, and remaining general entries to `RapidsConfEntries.scala`.
+
+Keep the configuration registry and enumerations owned by `RapidsConf` in `RapidsConf.scala`
+to preserve their initialization order. Define independent enumerations and sealed value types
+in a module shared by their consumers, such as `sql-plugin-api` when the type is root-safe. See
+[`Adding Configuration Properties`](docs/dev/README.md#adding-configuration-properties) for
+the complete contributor guidance.
 
 ### Scala/Java
 
@@ -100,7 +132,6 @@ to via a JSON annotation block after the copyright header:
 ```
 /*** spark-rapids-shim-json-lines
 {"spark": "330"}
-{"spark": "330db"}
 spark-rapids-shim-json-lines ***/
 ```
 
@@ -113,13 +144,41 @@ spark-rapids-shim-json-lines ***/
 - When modifying a shim, update ALL related Spark version shims
   (the same logical change may need different adaptations per
   version — do not blindly copy-paste).
-- `db` suffix (e.g., `330db`, `341db`) = Databricks-specific shim.
+- `db` suffix (e.g., `350db143`, `400db173`) = Databricks-specific shim.
 - **Scala 2.12 vs 2.13**: `sql-plugin` shims work identically for
   both Scala versions. After modifying any `pom.xml`, run
   `./build/make-scala-version-build-files.sh 2.13` to sync.
 - **Delta Lake** uses version-specific Maven modules instead of the
-  JSON annotation (e.g., `delta-20x/`, `delta-spark330db/`). Each
+  JSON annotation (e.g., `delta-20x/`, `delta-spark350db143/`). Each
   module compiles only for its target Spark+Delta combination.
+
+#### Required shim compatibility preflight
+
+Agents **MUST invoke**
+[`check-shim-compatibility`](.agents/skills/check-shim-compatibility/SKILL.md).
+This applies when implementing or reviewing changes to versioned shims, shared
+shim callers, Spark/Databricks build profiles, or shim source-selection/build
+matrices, even when the user does not name the skill. Complete the preflight
+before declaring implementation or review complete, and before publishing,
+updating, or merging the PR. If the client cannot discover repository skills,
+read the linked `SKILL.md` and follow its workflow directly.
+
+Check source selection on the proposed combination with current main, and run
+the independent `advisory` command or read both current CI reports. Cross-PR
+discovery runs automatically as `shim-related-prs`; its failures or moving peers
+produce warnings without invalidating the core result. Report unavailable
+advisory evidence explicitly. The advisory excludes documentation-only overlaps
+and checks bounded peer combinations for new static interaction findings; inspect
+deferred, stale, and unmodelled cases as described in the skill. The offline
+entry point is `python3 build/check_shim_compatibility.py coverage`.
+Static results do not replace compilation of affected profiles, including
+newly added Databricks targets, or applicable CPU/GPU tests.
+During review, inspect both the `shim-compatibility` and `shim-related-prs`
+current-head reports.
+Distinguish new findings, unchanged base debt,
+and incomplete evidence; the shared skill describes the report and rerun rules.
+If required tools or GitHub access are unavailable, report `INCOMPLETE` with the
+reason; do not silently skip the preflight or claim a clean result.
 
 ### Python Integration Tests
 

@@ -18,21 +18,230 @@ package com.nvidia.spark.rapids
 
 import java.sql.Timestamp
 
+import ai.rapids.cudf.{ColumnVector => CudfColumnVector, DType, HostColumnVector, Rmm}
 import org.apache.spark
 
 import org.apache.spark.SparkConf
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.AnalysisException
-import org.apache.spark.sql.execution.{SparkPlan, WholeStageCodegenExec}
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, AttributeReference,
+  BindReferences, Expression, ExprId, Literal}
+import org.apache.spark.sql.catalyst.expressions.aggregate.{Final, Partial, Sum}
+import org.apache.spark.sql.execution.{LeafExecNode, SparkPlan, WholeStageCodegenExec}
 import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, BroadcastQueryStageExec, QueryStageExec, ShuffleQueryStageExec}
-import org.apache.spark.sql.execution.aggregate.SortAggregateExec
+import org.apache.spark.sql.execution.aggregate.{ObjectHashAggregateExec, SortAggregateExec}
 import org.apache.spark.sql.functions._
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+import org.apache.spark.sql.rapids.aggregate.{CudfAggregate, CudfMergeM2, GpuAggregateExpression,
+  GpuAggregateFunction, GpuCheckOverflowAfterSum}
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims._
-import org.apache.spark.sql.types.{DataType, DataTypes}
+import org.apache.spark.sql.types.{BooleanType, DataType, DataTypes, Decimal, DecimalType, IntegerType}
 
 class HashAggregatesSuite extends SparkQueryCompareTestSuite {
+  test("merge M2 reduction result") {
+    import Arm.withResource
+
+    val structType = new HostColumnVector.StructType(false,
+      new HostColumnVector.BasicType(false, DType.FLOAT64),
+      new HostColumnVector.BasicType(false, DType.FLOAT64),
+      new HostColumnVector.BasicType(false, DType.FLOAT64))
+    def partial(n: Double, mean: Double, m2: Double): HostColumnVector.StructData =
+      new HostColumnVector.StructData(Double.box(n), Double.box(mean), Double.box(m2))
+
+    val merged = withResource(CudfColumnVector.fromStructs(structType,
+      partial(2.0, 3.0, 2.0), partial(2.0, 5.0, 2.0))) { input =>
+      new CudfMergeM2().reductionAggregate(input)
+    }
+    withResource(merged) { _ =>
+      withResource(CudfColumnVector.fromScalar(merged, 1)) { result =>
+        withResource(result.copyToHost()) { host =>
+          for ((expected, index) <- Seq(4.0, 4.0, 8.0).zipWithIndex) {
+            withResource(host.getChildColumnView(index)) { child =>
+              assert(child.getDouble(0) == expected)
+            }
+          }
+        }
+      }
+    }
+  }
+
+  test("decimal sum overflow check keeps empty, null, and ANSI behavior") {
+    import Arm.withResource
+
+    // A previous suite in a persistent worker may have shut down RMM's tracking adaptor.
+    withGpuSparkSession(_ => ())
+    val inputType = DecimalType(16, 0)
+    val decimalType = DecimalType(15, 0)
+    val maxValue = 999999999999999L
+    val overflowValue = 1234567890123456L
+    val data = GpuBoundReference(0, inputType, nullable = true)(ExprId(0), "sum")
+    val isEmpty = GpuBoundReference(1, BooleanType, nullable = false)(ExprId(1), "isEmpty")
+    val allocatedBefore = Rmm.getTotalBytesAllocated
+    val cachedNullsBefore = GpuExpressionsUtils.cachedNullVectors.get.size()
+
+    def cpuValue(value: java.lang.Long, empty: Boolean, nullOnOverflow: Boolean): Any = {
+      val decimal = Option(value).map(v => Decimal(v.longValue())).orNull
+      val conf = new SQLConf
+      conf.setConf(SQLConf.ANSI_ENABLED, !nullOnOverflow)
+      SQLConf.withExistingConf(conf) {
+        // Let Spark supply its version-specific overflow expression and query context.
+        val sum = Sum(Literal.create(null, DecimalType(5, 0)))
+        assert(sum.dataType == decimalType)
+        BindReferences.bindReference(sum.evaluateExpression, sum.aggBufferAttributes)
+          .eval(InternalRow(decimal, empty))
+      }
+    }
+
+    def withBatch(values: Seq[java.lang.Long], empty: Seq[Boolean])(
+        f: org.apache.spark.sql.vectorized.ColumnarBatch => Unit): Unit = {
+      val sumValues = withResource(CudfColumnVector.fromBoxedLongs(values: _*)) { unscaled =>
+        unscaled.castTo(DType.create(DType.DTypeEnum.DECIMAL64, 0))
+      }
+      withResource(sumValues) { _ =>
+        withResource(CudfColumnVector.fromBooleans(empty: _*)) { emptyColumn =>
+          withResource(new org.apache.spark.sql.vectorized.ColumnarBatch(Array(
+              GpuColumnVector.from(sumValues.incRefCount(), inputType),
+              GpuColumnVector.from(emptyColumn.incRefCount(), BooleanType)),
+              values.size)) { batch =>
+            f(batch)
+          }
+        }
+      }
+    }
+
+    def checkRows(values: Seq[java.lang.Long], empty: Seq[Boolean],
+        nullOnOverflow: Boolean, expected: Seq[Option[Long]]): Unit = {
+      // Evaluate Spark's original post-SUM expression before the GPU equivalent.
+      val cpu = values.zip(empty).map { case (value, isEmptyRow) =>
+        Option(cpuValue(value, isEmptyRow, nullOnOverflow))
+          .map(_.asInstanceOf[Decimal].toUnscaledLong)
+      }
+      assert(cpu == expected)
+      withBatch(values, empty) { batch =>
+        withResource(GpuCheckOverflowAfterSum(data, isEmpty, decimalType, nullOnOverflow)
+            .columnarEval(batch)) { result =>
+          withResource(result.copyToHost()) { host =>
+            val gpu = values.indices.map { index =>
+              if (host.isNullAt(index)) None else Some(host.getLong(index))
+            }
+            assert(gpu == cpu)
+          }
+        }
+      }
+    }
+
+    checkRows(Seq[java.lang.Long](maxValue, overflowValue, null, 42L, null),
+      Seq(false, false, false, true, true), nullOnOverflow = true,
+      Seq(Some(maxValue), None, None, None, None))
+    checkRows(Seq[java.lang.Long](maxValue, 42L, null),
+      Seq(false, true, true), nullOnOverflow = false, Seq(Some(maxValue), None, None))
+
+    val cpuOverflow = intercept[ArithmeticException] {
+      cpuValue(overflowValue, empty = false, nullOnOverflow = false)
+    }
+    withBatch(Seq[java.lang.Long](maxValue, overflowValue, null),
+        Seq(false, false, true)) { batch =>
+      val gpuOverflow = intercept[ArithmeticException] {
+        withResource(GpuCheckOverflowAfterSum(data, isEmpty, decimalType, nullOnOverflow = false)
+            .columnarEval(batch)) { _ => () }
+      }
+      for (error <- Seq(cpuOverflow, gpuOverflow)) {
+        assert(error.getMessage.contains(overflowValue.toString))
+        assert(error.getMessage.toLowerCase.replace(" ", "").contains("decimal(15,0)"))
+      }
+    }
+
+    val cpuNullOverflow = intercept[ArithmeticException] {
+      cpuValue(null, empty = false, nullOnOverflow = false)
+    }
+    withBatch(Seq[java.lang.Long](maxValue, null), Seq(false, false)) { batch =>
+      val gpuNullOverflow = intercept[ArithmeticException] {
+        withResource(GpuCheckOverflowAfterSum(data, isEmpty, decimalType, nullOnOverflow = false)
+            .columnarEval(batch)) { _ => () }
+      }
+      for (error <- Seq(cpuNullOverflow, gpuNullOverflow)) {
+        assert(error.getMessage.toLowerCase.contains("overflow in sum of decimals"))
+      }
+    }
+    assert(GpuExpressionsUtils.cachedNullVectors.get.size() == cachedNullsBefore)
+    assert(Rmm.getTotalBytesAllocated == allocatedBefore)
+  }
+
   private def floatAggConf: SparkConf = enableCsvConf()
       .set(RapidsConf.ENABLE_FLOAT_AGG.key, "true")
+
+  test("incomplete positional typed aggregate result mapping fails closed") {
+    withCpuSparkSession({ spark =>
+      val plan = spark.range(10)
+        .groupBy((col("id") % 2).alias("key"))
+        .agg(collect_set(col("id")).alias("values"))
+        .queryExecution.sparkPlan
+
+      val partialAgg = plan.collectFirst {
+        case agg: ObjectHashAggregateExec
+            if agg.aggregateExpressions.exists(_.mode == Partial) => agg
+      }.getOrElse(fail(s"Expected a partial ObjectHashAggregateExec in:\n$plan"))
+
+      // Simulate the inconsistent positional layout from #15808: the typed aggregate still
+      // needs its shuffle-facing result type remapped, but that result expression is absent.
+      val malformedAgg = partialAgg.copy(
+        resultExpressions = partialAgg.resultExpressions.dropRight(1))
+      val meta = GpuOverrides.wrapPlan(
+        malformedAgg, new RapidsConf(Map.empty[String, String]), None)
+      meta.tagForGpu()
+
+      assert(!meta.canThisBeReplaced,
+        "An unresolved positional typed aggregate result must prevent GPU conversion")
+    }, new SparkConf().set("spark.sql.adaptive.enabled", "false"))
+  }
+
+  test("SPARK-55979: GPU aggregate references retain renamed input buffer attributes") {
+    val scanAggBufferAttr = AttributeReference("buf", IntegerType, nullable = true)()
+    // withName preserves exprId while changing the display name, matching the Spark regression.
+    val inputAggBufferAttr = scanAggBufferAttr.withName("renamed_buf")
+
+    // LocalTableScanExec has version-specific constructors; this keeps the test common-shim safe.
+    case class TestLeafExec(override val output: Seq[Attribute]) extends LeafExecNode {
+      override protected def doExecute(): RDD[InternalRow] =
+        throw new UnsupportedOperationException("TestLeafExec does not execute")
+    }
+
+    case class MyGpuAggregate() extends GpuAggregateFunction {
+      override def children: Seq[Expression] = Nil
+      override def nullable: Boolean = true
+      override def dataType: DataType = IntegerType
+      override def prettyName: String = "test_gpu_agg"
+      override val initialValues: Seq[Expression] = Seq(Literal(0))
+      override val inputProjection: Seq[Expression] = Nil
+      override val updateAggregates: Seq[CudfAggregate] = Nil
+      override val mergeAggregates: Seq[CudfAggregate] = Nil
+      override val evaluateExpression: Expression = inputAggBufferAttr
+      override def aggBufferAttributes: Seq[AttributeReference] = Seq(inputAggBufferAttr)
+      override def withNewChildrenInternal(
+          newChildren: IndexedSeq[Expression]): Expression = copy()
+    }
+
+    val aggregateExpression = GpuAggregateExpression(
+      MyGpuAggregate(), Final, isDistinct = false, filter = None, resultId = ExprId(1))
+    val aggregateResult = AttributeReference("result", IntegerType, nullable = true)()
+    val aggregate = GpuHashAggregateExec(
+      requiredChildDistributionExpressions = None,
+      groupingExpressions = Nil,
+      aggregateExpressions = Seq(aggregateExpression),
+      aggregateAttributes = Seq(aggregateResult),
+      resultExpressions = Seq(Alias(aggregateExpression, "result")()),
+      child = TestLeafExec(Seq(scanAggBufferAttr)),
+      configuredTargetBatchSize = 1L,
+      estimatedPreProcessGrowth = 1.0,
+      forceSinglePassAgg = false,
+      allowSinglePassAgg = true,
+      allowNonFullyAggregatedOutput = false,
+      skipAggPassReductionRatio = Double.MaxValue)()
+
+    assert(aggregate.references.contains(inputAggBufferAttr))
+  }
 
   def replaceHashAggMode(mode: String, conf: SparkConf = new SparkConf()): SparkConf = {
     // configures whether Plugin will replace certain aggregate exec nodes
@@ -323,7 +532,9 @@ class HashAggregatesSuite extends SparkQueryCompareTestSuite {
             if (df.sparkSession.conf.get(RapidsConf.ENABLE_FOLD_LOCAL_AGGREGATE.key) == "true") {
               assert(plan.children.head.isInstanceOf[GpuSortExec])
             } else {
-              assert(plan.children.head.isInstanceOf[GpuHashAggregateExec])
+              val child = plan.children.head
+              assert(child.isInstanceOf[GpuHashAggregateExec] ||
+                (cmpSparkVersion(5, 0, 0) >= 0 && child.isInstanceOf[GpuSortExec]))
             }
             assert(gpuPlan.find(_.isInstanceOf[SortAggregateExec]).isEmpty)
             assert(gpuPlan.children.forall(exec => exec.isInstanceOf[GpuExec]))

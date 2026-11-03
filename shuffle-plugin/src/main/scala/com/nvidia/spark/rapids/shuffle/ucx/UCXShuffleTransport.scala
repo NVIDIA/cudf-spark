@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -133,7 +133,8 @@ class UCXShuffleTransport(shuffleServerId: BlockManagerId, rapidsConf: RapidsCon
 
     val deviceAllocator: Long => BaseDeviceMemoryBuffer = (size: Long) => {
       // CUDA async allocator is not compatible with GPUDirectRDMA, so need to use `cudaMalloc`.
-      if (rapidsConf.rmmPool.equalsIgnoreCase("ASYNC")) {
+      // GpuDeviceManager.computeRmmPoolSize reserves this memory beside the pool.
+      if (GpuDeviceManager.ucxDeviceBounceBuffersOutsideRmm(rapidsConf)) {
         CudaMemoryBuffer.allocate(size)
       } else {
         DeviceMemoryBuffer.allocate(size)
@@ -304,6 +305,9 @@ class UCXShuffleTransport(shuffleServerId: BlockManagerId, rapidsConf: RapidsCon
       null,
       () => RmmSpark.removeAllCurrentThreadAssociation()))
 
+  // servers made here, whose sends still in flight at close are released by this transport
+  private[this] val servers = new ConcurrentLinkedQueue[RapidsShuffleServer]()
+
   /**
    * Construct a server instance
    *
@@ -311,7 +315,7 @@ class UCXShuffleTransport(shuffleServerId: BlockManagerId, rapidsConf: RapidsCon
    * @return the server instance
    */
   override def makeServer(requestHandler: RapidsShuffleRequestHandler): RapidsShuffleServer = {
-    new RapidsShuffleServer(
+    val server = new RapidsShuffleServer(
       this,
       ucx.getServerConnection,
       shuffleServerId,
@@ -319,6 +323,8 @@ class UCXShuffleTransport(shuffleServerId: BlockManagerId, rapidsConf: RapidsCon
       serverExecutor,
       bssExecutor,
       rapidsConf)
+    servers.add(server)
+    server
   }
 
   /**
@@ -588,6 +594,11 @@ class UCXShuffleTransport(shuffleServerId: BlockManagerId, rapidsConf: RapidsCon
     }
 
     ucx.close()
+    // If the progress thread terminated, no send callback can come after this, so the sends
+    // that never got one are released here, before their bounce buffers' pools are freed.
+    // Otherwise they are leaked, since UCX may still read those buffers.
+    val transportStopped = ucx.isProgressThreadTerminated
+    servers.forEach(_.releaseAbandoned(transportStopped))
     freeBounceBufferPools()
   }
 

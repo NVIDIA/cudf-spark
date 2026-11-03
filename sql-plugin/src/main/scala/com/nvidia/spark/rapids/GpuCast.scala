@@ -1167,17 +1167,18 @@ object GpuCast {
             }
           }
           // now wrap the string with `{` and `}`
-          withResource(jsonAttrs) { _ =>
+          val wrapped = withResource(jsonAttrs) { _ =>
             withResource(ArrayBuffer.empty[ColumnVector]) { columns =>
               columns += leftBrace.incRefCount()
               columns += jsonAttrs.incRefCount()
               columns += rightBrace.incRefCount()
-              withResource(ColumnVector.stringConcatenate(emptyScalar,
-                emptyScalar, columns.toArray, false))(
-                _.mergeAndSetValidity(BinaryOp.BITWISE_AND, input) // original whole row is null
-              )
+              ColumnVector.stringConcatenate(emptyScalar,
+                emptyScalar, columns.toArray, false)
             }
           }
+          withResource(wrapped)(
+            _.mergeAndSetValidity(BinaryOp.BITWISE_AND, input) // original whole row is null
+          )
       }
     }
   }
@@ -1207,27 +1208,6 @@ object GpuCast {
       withResource(Scalar.fromString("")) { emptyScalar =>
         withResource(Scalar.fromNull(DType.STRING)) { nullScalar =>
           ColumnVector.stringConcatenate(emptyScalar, nullScalar, columns.toArray)
-        }
-      }
-    }
-  }
-
-  private[rapids] def castFloatingTypeToString(input: ColumnView): ColumnVector = {
-    withResource(input.castTo(DType.STRING)) { cudfCast =>
-
-      // replace "e+" with "E"
-      val replaceExponent = withResource(Scalar.fromString("e+")) { cudfExponent =>
-        withResource(Scalar.fromString("E")) { sparkExponent =>
-          cudfCast.stringReplace(cudfExponent, sparkExponent)
-        }
-      }
-
-      // replace "Inf" with "Infinity"
-      withResource(replaceExponent) { replaceExponent =>
-        withResource(Scalar.fromString("Inf")) { cudfInf =>
-          withResource(Scalar.fromString("Infinity")) { sparkInfinity =>
-            replaceExponent.stringReplace(cudfInf, sparkInfinity)
-          }
         }
       }
     }
@@ -1432,11 +1412,7 @@ object GpuCast {
         if (input.getNullCount == 0) {
           casted.copyToColumnVector()
         } else {
-          withResource(input.isNull) { isNull =>
-            withResource(GpuScalar.from(null, to)) { nullVal =>
-              isNull.ifElse(nullVal, casted)
-            }
-          }
+          casted.mergeAndSetValidity(BinaryOp.BITWISE_AND, input)
         }
       }
     }

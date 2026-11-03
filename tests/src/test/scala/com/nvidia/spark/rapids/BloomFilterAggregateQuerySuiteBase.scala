@@ -27,8 +27,12 @@ import org.apache.spark.sql.rapids.shims.TrampolineConnectShims._
 
 trait BloomFilterAggregateQuerySuiteBase extends SparkQueryCompareTestSuite {
   val bloomFilterEnabledConf = new SparkConf()
-  val funcId_bloom_filter_agg = new FunctionIdentifier("bloom_filter_agg")
-  val funcId_might_contain = new FunctionIdentifier("might_contain")
+
+  // Spark 4.2 requires fully qualified function identifiers. Keep their construction overridable,
+  // and initialize them lazily so version-specific overrides run after subclass initialization.
+  protected def sessionFuncId(name: String): FunctionIdentifier = new FunctionIdentifier(name)
+  protected lazy val funcId_bloom_filter_agg = sessionFuncId("bloom_filter_agg")
+  protected lazy val funcId_might_contain = sessionFuncId("might_contain")
 
   protected def installSqlFuncs(spark: SparkSession): Unit = {
     spark.sessionState.functionRegistry.registerFunction(funcId_bloom_filter_agg,

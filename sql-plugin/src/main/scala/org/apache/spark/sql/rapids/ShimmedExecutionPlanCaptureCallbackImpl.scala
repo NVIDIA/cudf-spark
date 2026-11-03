@@ -18,6 +18,7 @@ package org.apache.spark.sql.rapids
 
 import scala.collection.convert.ImplicitConversions.`collection AsScalaIterable`
 import scala.collection.mutable.{ArrayBuffer, Map => MutableMap}
+import scala.util.Try
 import scala.util.matching.Regex
 
 import com.nvidia.spark.rapids.{GpuCpuBridgeExpression, PlanShims, PlanUtils, ShimLoaderTemp}
@@ -25,8 +26,9 @@ import com.nvidia.spark.rapids.{GpuCpuBridgeExpression, PlanShims, PlanUtils, Sh
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.execution.{ExecSubqueryExpression, QueryExecution, ReusedSubqueryExec, SparkPlan}
-import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, QueryStageExec}
-import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
+import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, QueryStageExec,
+  ShuffleQueryStageExec}
+import org.apache.spark.sql.execution.exchange.{ReusedExchangeExec, ShuffleExchangeLike}
 
 
 /**
@@ -36,6 +38,7 @@ import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
  */
 class ShimmedExecutionPlanCaptureCallbackImpl extends ExecutionPlanCaptureCallbackBase {
   private[this] var shouldCapture: Boolean = false
+  private[this] var includeWritePlans: Boolean = false
   private[this] val execPlans: ArrayBuffer[SparkPlan] = ArrayBuffer.empty
 
   override def captureIfNeeded(qe: QueryExecution): Unit = synchronized {
@@ -44,16 +47,28 @@ class ShimmedExecutionPlanCaptureCallbackImpl extends ExecutionPlanCaptureCallba
     }
   }
 
+  // Capture plans assembled after QueryExecution, such as Delta optimized-write exchanges.
+  override def captureIfNeeded(plan: SparkPlan): Unit = synchronized {
+    if (shouldCapture && includeWritePlans) {
+      execPlans.append(plan)
+    }
+  }
+
   // Avoiding the use of default arguments since this is called from Python
   override def startCapture(): Unit = startCapture(10000)
 
-  override def startCapture(timeoutMillis: Long): Unit = {
+  override def startCaptureWithWritePlans(): Unit = startCapture(10000, true)
+
+  override def startCapture(timeoutMillis: Long): Unit = startCapture(timeoutMillis, false)
+
+  private def startCapture(timeoutMillis: Long, captureWritePlans: Boolean): Unit = {
     SparkSession.getActiveSession.foreach { spark =>
       spark.sparkContext.listenerBus.waitUntilEmpty(timeoutMillis)
     }
     synchronized {
       execPlans.clear()
       shouldCapture = true
+      includeWritePlans = captureWritePlans
     }
   }
 
@@ -62,6 +77,7 @@ class ShimmedExecutionPlanCaptureCallbackImpl extends ExecutionPlanCaptureCallba
   override def endCapture(timeoutMillis: Long): Unit = synchronized {
     if (shouldCapture) {
       shouldCapture = false
+      includeWritePlans = false
       execPlans.clear()
     }
   }
@@ -76,6 +92,7 @@ class ShimmedExecutionPlanCaptureCallbackImpl extends ExecutionPlanCaptureCallba
     } finally {
       synchronized {
         shouldCapture = false
+        includeWritePlans = false
         execPlans.clear()
       }
     }
@@ -225,6 +242,47 @@ class ShimmedExecutionPlanCaptureCallbackImpl extends ExecutionPlanCaptureCallba
     containsPlan(gpuPlan, className)
   }
 
+  override def containsShuffleExchangeWithOrigin(
+      plan: SparkPlan,
+      className: String,
+      shuffleOrigin: String): Boolean = {
+    containsPlanMatching(extractExecutedPlan(plan), {
+      case exchange: ShuffleExchangeLike =>
+        PlanUtils.sameClass(exchange, className) &&
+            exchange.shuffleOrigin.toString == shuffleOrigin
+      case _ => false
+    })
+  }
+
+  override def containsFinalAdaptivePlan(plan: SparkPlan): Boolean = {
+    containsPlanMatching(plan, {
+      case adaptive: AdaptiveSparkPlanExec =>
+        // DBR exposes isExecutedPlanFinal while upstream Spark releases use isFinalPlan.
+        // Keep this test-only inspection helper source-compatible with both APIs.
+        Seq("isExecutedPlanFinal", "isFinalPlan").iterator
+          .flatMap(name => Try(adaptive.getClass.getMethod(name)).toOption)
+          .take(1)
+          .exists(_.invoke(adaptive).asInstanceOf[Boolean])
+      case _ => false
+    })
+  }
+
+  override def containsShuffleQueryStageWithExchangeOrigin(
+      plan: SparkPlan,
+      className: String,
+      shuffleOrigin: String): Boolean = {
+    containsPlanMatching(plan, {
+      case stage: ShuffleQueryStageExec =>
+        containsPlanMatching(stage.plan, {
+          case exchange: ShuffleExchangeLike =>
+            PlanUtils.sameClass(exchange, className) &&
+                exchange.shuffleOrigin.toString == shuffleOrigin
+          case _ => false
+        })
+      case _ => false
+    })
+  }
+
   private def containsExpression(exp: Expression, className: String,
       regexMap: MutableMap[String, Regex] // regex memoization
   ): Boolean = exp.find {
@@ -278,4 +336,3 @@ class ShimmedExecutionPlanCaptureCallbackImpl extends ExecutionPlanCaptureCallba
       p.children.exists(plan => containsPlanMatching(plan, f))
   }.nonEmpty
 }
-

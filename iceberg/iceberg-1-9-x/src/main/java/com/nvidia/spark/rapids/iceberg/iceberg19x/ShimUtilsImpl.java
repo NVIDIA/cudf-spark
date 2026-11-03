@@ -17,39 +17,52 @@
 package com.nvidia.spark.rapids.iceberg.iceberg19x;
 
 import com.nvidia.spark.rapids.RapidsConf;
-import com.nvidia.spark.rapids.iceberg.IcebergShimUtils;
+import com.nvidia.spark.rapids.iceberg.IcebergDeletionVector;
+import com.nvidia.spark.rapids.iceberg.Iceberg19PlusShimUtils;
+import com.nvidia.spark.rapids.iceberg.parquet.converter.ParquetUnshader;
+import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import org.apache.iceberg.*;
-import org.apache.iceberg.data.IdentityPartitionConverters;
-import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.io.*;
 import org.apache.iceberg.io.StorageCredential;
 import org.apache.iceberg.io.SupportsStorageCredentials;
+import org.apache.iceberg.spark.SparkUtil;
 import org.apache.iceberg.spark.source.GpuSparkCopyOnWriteV1Scan;
 import org.apache.iceberg.spark.source.GpuSparkScan;
-import org.apache.iceberg.spark.source.GpuStructInternalRow;
-import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.PartitionUtil;
 import org.apache.spark.sql.connector.read.Scan;
 
+import java.io.IOException;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
-/** Iceberg 1.9.x shim: uses {@code IdentityPartitionConverters::convertConstant}. */
-public class ShimUtilsImpl implements IcebergShimUtils {
+/** Iceberg 1.9.x shim: uses {@code SparkUtil::internalToSpark}. */
+public class ShimUtilsImpl extends Iceberg19PlusShimUtils {
+    private static final ParquetUnshader PARQUET_UNSHADER = new ParquetUnshaderImpl();
+
+    @Override
+    public ParquetUnshader getParquetUnshader() {
+        return PARQUET_UNSHADER;
+    }
+
+    @Override
+    public int formatVersion(Table table) {
+        return TableUtil.formatVersion(table);
+    }
+
     @Override
     public String locationOf(ContentFile<?> f) {
         return f.location();
     }
 
-    private static Object convertConstant(Type type, Object value) {
-        Object converted = IdentityPartitionConverters.convertConstant(type, value);
-        if (converted instanceof StructLike && type instanceof Types.StructType) {
-            GpuStructInternalRow row = new GpuStructInternalRow((Types.StructType) type);
-            row.setStruct((StructLike) converted);
-            return row;
-        }
-        return converted;
+    @Override
+    public IcebergDeletionVector readDeletionVector(
+            DeleteFile deleteFile, RapidsInputFile inputFile, boolean validateCrc)
+            throws IOException {
+        return IcebergDeletionVector.read(
+                inputFile, deleteFile.contentOffset(), deleteFile.contentSizeInBytes(),
+                deleteFile.recordCount(), validateCrc);
     }
 
     @Override
@@ -58,10 +71,10 @@ public class ShimUtilsImpl implements IcebergShimUtils {
             Types.StructType partitionType = Partitioning.partitionType(table);
             return PartitionUtil.constantsMap(task,
                     partitionType,
-                    ShimUtilsImpl::convertConstant);
+                    SparkUtil::internalToSpark);
         } else {
             return PartitionUtil.constantsMap(task,
-                    ShimUtilsImpl::convertConstant);
+                    SparkUtil::internalToSpark);
         }
     }
 

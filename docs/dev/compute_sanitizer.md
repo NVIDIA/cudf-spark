@@ -5,11 +5,11 @@ nav_order: 7
 parent: Developer Overview
 ---
 
-# Using Compute Sanitizer with the RAPIDS Accelerator for Apache Spark
+# Using Compute Sanitizer with the NVIDIA cuDF plugin for Apache Spark
 
 Compute Sanitizer is a functional correctness checking suite included in the CUDA toolkit.
 This suite contains multiple tools that can perform different type of checks. Of main interest to
-the RAPIDS Accelerator is the `memcheck` tool that is capable of precisely detecting and
+the cuDF plugin is the `memcheck` tool that is capable of precisely detecting and
 attributing out of bounds and misaligned memory access errors in CUDA applications.
 
 To use Compute Sanitizer with a single worker, you can start the worker with `compute-sanitizer`

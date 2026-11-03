@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids
 
 import java.util.Optional
 
+import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 import scala.language.implicitConversions
 
@@ -56,10 +57,26 @@ object SchemaUtils {
    * Convert a TypeDescription to a Catalyst StructType.
    */
   implicit def toCatalystSchema(schema: TypeDescription): StructType = {
-    // Here just follows the implementation of Spark3.0.x, so it does not replace the
-    // CharType/VarcharType with StringType. It is OK because GPU does not support
-    // these two char types yet.
-    CatalystSqlParser.parseDataType(schema.toString).asInstanceOf[StructType]
+    // Build complex types directly so ORC field names are preserved verbatim. Parse only
+    // primitive leaves to retain the existing CharType/VarcharType behavior.
+    def toCatalystType(orcType: TypeDescription): DataType = orcType.getCategory match {
+      case TypeDescription.Category.STRUCT => toStructType(orcType)
+      case TypeDescription.Category.LIST =>
+        ArrayType(toCatalystType(orcType.getChildren.get(0)))
+      case TypeDescription.Category.MAP =>
+        val Seq(keyType, valueType) = orcType.getChildren.asScala.toSeq
+        MapType(toCatalystType(keyType), toCatalystType(valueType))
+      case _ => CatalystSqlParser.parseDataType(orcType.toString)
+    }
+
+    def toStructType(orcType: TypeDescription): StructType = {
+      val fields = orcType.getFieldNames.asScala.zip(orcType.getChildren.asScala).map {
+        case (fieldName, fieldType) => StructField(fieldName, toCatalystType(fieldType))
+      }
+      StructType(fields.toSeq)
+    }
+
+    toStructType(schema)
   }
 
   private def getPrecisionsList(dt: DataType): Seq[Int] = dt match {

@@ -150,6 +150,7 @@ case class GpuOptimizeWriteExchangeExec(
       serializer,
       useGPUShuffle=actualPartitioning.usesGPUShuffle,
       useMultiThreadedShuffle=actualPartitioning.usesMultiThreadedShuffle,
+      rangeInputBatchingEnabled=false,
       metrics=allMetrics,
       writeMetrics=writeMetrics,
       additionalMetrics=additionalMetrics,

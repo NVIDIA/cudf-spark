@@ -375,13 +375,14 @@ private[rapids] object GpuArrayHofFusion {
 
   private[rapids] def project(
       batch: ColumnarBatch,
-      boundExprs: Seq[Expression]): Option[ColumnarBatch] = {
+      boundExprs: Seq[Expression],
+      evalColumn: Expression => ColumnVector): Option[ColumnarBatch] = {
     val fusedGroups = findFusedGroups(boundExprs)
     if (fusedGroups.isEmpty) {
       None
     } else {
       val groupsByStartIndex = fusedGroups.map(group => group.startIndex -> group).toMap
-      Some(projectWithFusedGroups(batch, boundExprs, groupsByStartIndex))
+      Some(projectWithFusedGroups(batch, boundExprs, groupsByStartIndex, evalColumn))
     }
   }
 
@@ -481,7 +482,8 @@ private[rapids] object GpuArrayHofFusion {
   private def projectWithFusedGroups(
       batch: ColumnarBatch,
       boundExprs: Seq[Expression],
-      groupsByStartIndex: Map[Int, HofGroup]): ColumnarBatch = {
+      groupsByStartIndex: Map[Int, HofGroup],
+      evalColumn: Expression => ColumnVector): ColumnarBatch = {
     val outputColumns = new Array[ColumnVector](boundExprs.length)
     closeOnExcept(outputColumns) { _ =>
       boundExprs.indices.foreach { index =>
@@ -490,7 +492,7 @@ private[rapids] object GpuArrayHofFusion {
             case Some(group) =>
               evaluateFusedGroup(batch, group, outputColumns)
             case None =>
-              outputColumns(index) = boundExprs(index).columnarEval(batch)
+              outputColumns(index) = evalColumn(boundExprs(index))
           }
         }
       }
@@ -689,7 +691,7 @@ case class GpuArrayFilter(
 
   override protected def transformListColumnView(lambdaTransformedCV: cudf.ColumnView,
                                                  arg: cudf.ColumnView): GpuColumnVector = {
-    closeOnExcept(arg.applyBooleanMask(lambdaTransformedCV)) { ret =>
+    closeOnExcept(arg.applyRetentionMask(lambdaTransformedCV)) { ret =>
       GpuColumnVector.from(ret, dataType)
     }
   }
@@ -1069,14 +1071,13 @@ case class GpuMapZipWith(
     boundIntermediate: Seq[GpuExpression] = Seq.empty)
     extends GpuMapTwoArgumentHigherOrderFunction {
 
-  @transient lazy val MapType(keyType1, valueType1, valueContainsNull1) = argument1.dataType
-  @transient lazy val MapType(keyType2, valueType2, valueContainsNull2) = argument2.dataType
+  @transient lazy val MapType(keyType1, _, _) = argument1.dataType
+  @transient lazy val MapType(keyType2, _, _) = argument2.dataType
 
   @transient lazy val keyType =
     TypeCoercion.findCommonTypeDifferentOnlyInNullFlags(keyType1, keyType2).get
 
-  override def dataType: DataType = MapType(keyType, function.dataType, 
-    valueContainsNull1 || valueContainsNull2)
+  override def dataType: DataType = MapType(keyType, function.dataType, function.nullable)
 
   override def prettyName: String = "map_zip_with"
 
@@ -1139,7 +1140,7 @@ case class GpuMapFilter(argument: Expression,
               // according to the `listOfBoolCv` column
               // `mapArg` is a map column containing no duplicate keys and null keys,
               // so no need to `assertNoNullKeys` and `assertNoDuplicateKeys` after the extraction
-              val retCv = mapArg.getBase.applyBooleanMask(listOfBoolCv)
+              val retCv = mapArg.getBase.applyRetentionMask(listOfBoolCv)
               GpuColumnVector.from(retCv, dataType)
           }
         }

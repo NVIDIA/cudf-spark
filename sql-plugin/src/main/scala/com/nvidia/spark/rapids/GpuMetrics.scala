@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids
 
 import scala.collection.immutable.TreeMap
 
+import ai.rapids.cudf.Table
 import com.nvidia.spark.rapids.metrics.GpuBubbleTimerManager
 
 import org.apache.spark.{SparkContext, TaskContext}
@@ -88,6 +89,12 @@ class GpuMetricFactory(metricsConf: MetricsLevel, context: SparkContext) {
 
 object GpuMetric extends Logging {
   // Metric names.
+  val AST_JIT_PROGRAM_BUILD_ATTEMPTS = "astJitProgramBuildAttempts"
+  val AST_JIT_PROGRAM_CACHE_HITS = "astJitProgramCacheHits"
+  val AST_JIT_PROGRAM_BUILD_TIME = "astJitProgramBuildTime"
+  val AST_JIT_EVAL_ATTEMPTS = "astJitEvalAttempts"
+  val AST_JIT_EVAL_ROWS = "astJitEvalRows"
+  val AST_JIT_EVAL_TIME = "astJitEvalTime"
   val BUFFER_TIME = "bufferTime"
   val BUFFER_TIME_BUBBLE = "bufferTimeBubble"
   val SCAN_TIME = "scanTime"
@@ -116,6 +123,9 @@ object GpuMetric extends Logging {
   val BUILD_DATA_SIZE = "buildDataSize"
   val BUILD_TIME = "buildTime"
   val STREAM_TIME = "streamTime"
+  val HASH_TABLE_BUILDS = "hashTableBuilds"
+  val HASH_TABLE_REBUILDS = "hashTableRebuilds"
+  val HASH_TABLE_REUSES = "hashTableReuses"
   val NUM_TASKS_FALL_BACKED = "numTasksFallBacked"
   val NUM_TASKS_REPARTITIONED = "numTasksRepartitioned"
   val NUM_TASKS_SKIPPED_AGG = "numTasksSkippedAgg"
@@ -143,6 +153,10 @@ object GpuMetric extends Logging {
   val ASYNC_READ_TIME = "shuffleAsyncReadTime"
   val ICEBERG_BUILD_ACTION_TIME = "icebergBuildActionTime"
   val ICEBERG_POST_PROCESS_TIME = "icebergPostProcessTime"
+  val GPU_OUTPUT_BATCH_BYTES = "gpuOutputBatchBytes"
+  val ICEBERG_DV_BYTES = "icebergDvBytes"
+  val ICEBERG_DV_POSITIONS = "icebergDvPositions"
+  val ICEBERG_DV_LOAD_TIME = "icebergDvLoadTime"
 
   // Metric Descriptions.
   val DESCRIPTION_BUFFER_TIME = "buffer time"
@@ -173,6 +187,9 @@ object GpuMetric extends Logging {
   val DESCRIPTION_BUILD_DATA_SIZE = "build side size"
   val DESCRIPTION_BUILD_TIME = "build time"
   val DESCRIPTION_STREAM_TIME = "stream time"
+  val DESCRIPTION_HASH_TABLE_BUILDS = "hash table builds"
+  val DESCRIPTION_HASH_TABLE_REBUILDS = "hash table rebuilds after eviction"
+  val DESCRIPTION_HASH_TABLE_REUSES = "hash table reuses"
   val DESCRIPTION_NUM_TASKS_FALL_BACKED = "number of sort fallback tasks"
   val DESCRIPTION_NUM_TASKS_REPARTITIONED = "number of tasks repartitioned for agg"
   val DESCRIPTION_NUM_TASKS_SKIPPED_AGG = "number of tasks skipped aggregation"
@@ -190,6 +207,7 @@ object GpuMetric extends Logging {
   val DESCRIPTION_FILECACHE_DATA_RANGE_READ_TIME = "cached data read time"
   val DESCRIPTION_DELETION_VECTOR_SCATTER_TIME = "deletion vector scatter time"
   val DESCRIPTION_DELETION_VECTOR_SIZE = "deletion vector size"
+  val DESCRIPTION_GPU_OUTPUT_BATCH_BYTES = "decoded batch bytes"
   val DESCRIPTION_CPU_BRIDGE_PROCESSING_TIME = "CPU bridge processing time"
   val DESCRIPTION_CPU_BRIDGE_WAIT_TIME = "CPU bridge elapsed time"
   val DESCRIPTION_COPY_TO_HOST_TIME = "deviceToHost memory copy time"
@@ -201,6 +219,9 @@ object GpuMetric extends Logging {
   val DESCRIPTION_ASYNC_READ_TIME = "async read time"
   val DESCRIPTION_ICEBERG_BUILD_ACTION_TIME = "iceberg build action tree time"
   val DESCRIPTION_ICEBERG_POST_PROCESS_TIME = "iceberg post process time"
+  val DESCRIPTION_ICEBERG_DV_BYTES = "Iceberg deletion vector bytes loaded"
+  val DESCRIPTION_ICEBERG_DV_POSITIONS = "Iceberg deletion vector positions loaded"
+  val DESCRIPTION_ICEBERG_DV_LOAD_TIME = "Iceberg deletion vector load time"
 
   /**
    * Determine if a GpuMetric wraps a TimingMetric or NanoTimingMetric.
@@ -232,6 +253,14 @@ object GpuMetric extends Logging {
     }
 
     TreeMap.apply((ret ++ companions).toSeq: _*)
+  }
+
+  /** Records decoded table bytes on the SQL metric and the task accumulator. */
+  def recordOutputBatchBytes(table: Table, metric: Option[GpuMetric]): Long = {
+    val bytes = GpuColumnVector.getTotalDeviceMemoryUsed(table)
+    metric.foreach(_ += bytes)
+    GpuTaskMetrics.get.recordOutputBatchBytes(bytes)
+    bytes
   }
 
   def wrap(input: SQLMetric): GpuMetric = WrappedGpuMetric(input)

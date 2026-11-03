@@ -29,13 +29,19 @@
 {"spark": "356"}
 {"spark": "357"}
 {"spark": "358"}
+{"spark": "359"}
 {"spark": "400"}
 {"spark": "401"}
 {"spark": "402"}
 {"spark": "403"}
+{"spark": "404"}
 {"spark": "411"}
 {"spark": "412"}
+{"spark": "413"}
+{"spark": "420"}
+{"spark": "500"}
 spark-rapids-shim-json-lines ***/
+
 package com.nvidia.spark.rapids.shims
 
 import com.nvidia.spark.rapids._
@@ -59,7 +65,10 @@ trait Spark340PlusNonDBShims extends Spark331PlusNonDBShims {
     case _ => expr.stateful && !isBridgeCloneSafeStatefulExpression(expr)
   }
 
-  private val shimExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = Seq(
+  // Keep this lazy to avoid a class-initialization cycle: building these rules calls
+  // GpuOverrides.exec, while GpuOverrides initialization calls SparkShimImpl.
+  // Eager evaluation can deadlock if the two singleton objects are initialized concurrently.
+  private lazy val shimExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = Seq(
     GpuOverrides.exec[GlobalLimitExec](
       "Limiting of results across partitions",
       ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL +
@@ -168,7 +177,7 @@ trait Spark340PlusNonDBShims extends Spark331PlusNonDBShims {
       ),
       GpuElementAtMeta.elementAtRule(true)
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
-    super.getExprs ++ shimExprs
+    super.getExprs ++ shimExprs ++ ProtobufExprShims.exprs
   }
 
   override def getDataWriteCmds: Map[Class[_ <: DataWritingCommand],

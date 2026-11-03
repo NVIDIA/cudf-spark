@@ -6,17 +6,23 @@ version it supports.
 
 # Iceberg Submodules
 
-The following table shows the mapping of Iceberg versions to their supported Spark version
-and the directory that contains the corresponding support code.
+The following table shows which Iceberg integration modules are packaged for each Spark
+version and the directory that contains the corresponding support code.
 
 | Iceberg Version | Spark Version              | Directory         |
 |-----------------|----------------------------|-------------------|
 | 1.6.x           | Spark 3.5.0-3.5.3          | `iceberg-1-6-x`  |
-| 1.9.x           | Spark 3.5.4-3.5.8          | `iceberg-1-9-x`  |
-| 1.10.x          | Spark 3.5.4-3.5.8, 4.0.x  | `iceberg-1-10-x` |
+| 1.9.x           | Spark 3.5.4-3.5.9          | `iceberg-1-9-x`  |
+| 1.10.x          | Spark 3.5.4-3.5.9, 4.0.x  | `iceberg-1-10-x` |
 | 1.11.x          | Spark 4.0.2+, 4.1.x        | `iceberg-1-11-x` |
 
 Iceberg GPU acceleration is currently supported on Spark 3.5.x, 4.0.x, and 4.1.x.
+The integration-test source of truth is maintained in
+[`scripts/iceberg-versions.json`](../scripts/iceberg-versions.json).
+
+Iceberg tables configured with `encryption.key-id` fall back to CPU for scans and writes,
+including when experimental v3 support is enabled. Encryption inspection failures also fall back
+to CPU. Iceberg's CPU implementation remains responsible for encryption and key management.
 
 For Spark 3.5.4+, both `iceberg-1-9-x` and `iceberg-1-10-x` modules are compiled into the
 build. The correct version-specific implementation is selected at runtime by probing the

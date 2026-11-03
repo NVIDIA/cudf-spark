@@ -16,6 +16,8 @@
 
 package com.nvidia.spark.rapids
 
+import java.util.{ArrayDeque, IdentityHashMap}
+
 import scala.annotation.tailrec
 import scala.collection.mutable.ArrayBuffer
 
@@ -38,7 +40,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
-import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, PartitioningCollection, RangePartitioning, SinglePartition, UnknownPartitioning}
+import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, RangePartitioning, SinglePartition, UnknownPartitioning}
 import org.apache.spark.sql.catalyst.util.{ArrayData, MapData}
 import org.apache.spark.sql.execution.{FilterExec, ProjectExec, SampleExec, SparkPlan}
 import org.apache.spark.sql.internal.SQLConf
@@ -55,30 +57,42 @@ class GpuProjectExecMeta(
     p: Option[RapidsMeta[_, _, _]],
     r: DataFromReplacementRule) extends SparkPlanMeta[ProjectExec](proj, conf, p, r)
     with Logging {
+  private def isTopLevelNullLiteral(expr: Expression): Boolean =
+    GpuExpressionsUtils.extractGpuLit(expr).exists(_.value == null)
+
   override def convertToGpu(): GpuExec = {
     // Force list to avoid recursive Java serialization of lazy list Seq implementation
     val gpuExprs = childExprs.map(_.convertToGpu().asInstanceOf[NamedExpression]).toList
     val gpuChild = childPlans.head.convertIfNeeded()
-    if (conf.isProjectAstEnabled) {
-      // cuDF requires return column is fixed width
-      val allReturnTypesFixedWidth = gpuExprs.forall(e => GpuBatchUtils.isFixedWidth(e.dataType))
-      if (allReturnTypesFixedWidth && childExprs.forall(_.canThisBeAst)) {
-        return GpuProjectAstExec(gpuExprs, gpuChild)
+    val projectList = GpuProjectAstPlanner.wrapProjectOutputs(
+      gpuExprs, proj.conf, conf.isProjectAstEnabled, conf.isProjectAstJitEnabled)
+        .map(_.asInstanceOf[NamedExpression]).toList
+    // Report original eligibility here and final backend selection after tiering.
+    if (conf.shouldExplain && conf.isProjectAstEnabled) {
+      val legacyExplain = childExprs.iterator.zip(projectList.iterator).flatMap {
+        case (meta, expression) if GpuAstJitExpression.extractTopLevel(expression).isEmpty =>
+          Some(meta.explainAst(conf.shouldExplainAll)).filter(_.nonEmpty)
+              .map(explanation => s"  Legacy Project AST eligibility:\n$explanation")
+        case _ => None
       }
-      // explain AST because this is optional and it is sometimes hard to debug
-      if (conf.shouldExplain) {
-        val explain = childExprs.map(_.explainAst(conf.shouldExplainAll))
-            .filter(_.nonEmpty)
-        if (explain.nonEmpty) {
-          logWarning(s"AST PROJECT\n$explain")
-        }
-        if (!allReturnTypesFixedWidth) {
-          logWarning(s"AST PROJECT\n  have non fixed return column, " +
-            s"return types: ${gpuExprs.map(_.dataType)}")
-        }
+      val regularExplain = gpuExprs.iterator.zip(projectList.iterator).collect {
+        case (expr, expression)
+            if GpuProjectAstExpressionBase.extractTopLevel(expression).isEmpty &&
+              !GpuBatchUtils.isFixedWidth(expr.dataType) =>
+          s"  $expr cannot be converted to legacy Project AST because its return type " +
+            s"${expr.dataType} is not fixed-width\n"
+        case (expr, expression)
+            if GpuProjectAstExpressionBase.extractTopLevel(expression).isEmpty &&
+              isTopLevelNullLiteral(expr) =>
+          s"  $expr will use the regular GPU projection instead of legacy Project AST so " +
+            "null outputs can reuse the cached null vector\n"
+      }
+      val explain = (legacyExplain ++ regularExplain).mkString
+      if (explain.nonEmpty) {
+        logWarning(s"LEGACY PROJECT AST\n$explain")
       }
     }
-    GpuProjectExec(gpuExprs, gpuChild)
+    GpuProjectExec(projectList, gpuChild)(Some(proj.projectList.toList))
   }
 }
 
@@ -132,9 +146,62 @@ object GpuProjectExec {
         // different vector length, thus not able to reuse cached vectors.
         GpuExpressionsUtils.cachedNullVectors.get.clear()
 
-        GpuArrayHofFusion.project(cb, boundExprs).getOrElse {
-          val newColumns = boundExprs.safeMap(_.columnarEval(cb)).toArray[ColumnVector]
-          new ColumnarBatch(newColumns, cb.numRows())
+        def projectWithEval(evalColumn: Expression => ColumnVector): ColumnarBatch = {
+          GpuArrayHofFusion.project(cb, boundExprs, evalColumn).getOrElse {
+            val newColumns = boundExprs.safeMap(evalColumn).toArray[ColumnVector]
+            new ColumnarBatch(newColumns, cb.numRows())
+          }
+        }
+
+        val astExpressions = boundExprs.flatMap(
+          GpuProjectAstExpressionBase.extractTopLevel)
+        if (astExpressions.nonEmpty) {
+          withResource(GpuProjectAstExpressionBase.tableFromBatch(cb)) { table =>
+            def evalWithoutJit(expression: Expression): GpuColumnVector =
+              GpuProjectAstExpressionBase.extractTopLevel(expression) match {
+                case Some(astExpression) => astExpression.computeColumn(table)
+                case None => expression.columnarEval(cb)
+              }
+
+            val jitExpressions = astExpressions.collect {
+              case jitExpression: GpuAstJitExpression => jitExpression
+            }
+            val jitGroups = GpuAstJitExpression.executionGroups(
+              jitExpressions,
+              RapidsConf.ENABLE_PROJECT_AST_JIT_MULTI_OUTPUT.get(SQLConf.get))
+            if (jitGroups.nonEmpty) {
+              val jitBatches = jitGroups.safeMap(
+                GpuAstJitExpression.computeColumns(_, table))
+              withResource(jitBatches) { _ =>
+                val jitColumns = new IdentityHashMap[
+                  GpuAstJitExpression, ArrayDeque[GpuColumnVector]]()
+                jitGroups.zip(jitBatches).foreach { case (group, batch) =>
+                  group.zipWithIndex.foreach { case (jitExpression, index) =>
+                    var columns = jitColumns.get(jitExpression)
+                    if (columns == null) {
+                      columns = new ArrayDeque[GpuColumnVector]()
+                      jitColumns.put(jitExpression, columns)
+                    }
+                    columns.addLast(batch.column(index).asInstanceOf[GpuColumnVector])
+                  }
+                }
+                projectWithEval { expression =>
+                  GpuAstJitExpression.extractTopLevel(expression) match {
+                    case Some(jitExpression) =>
+                      val columns = jitColumns.get(jitExpression)
+                      require(columns != null && !columns.isEmpty,
+                        s"Missing AST JIT program output for $jitExpression")
+                      columns.removeFirst().incRefCount()
+                    case None => evalWithoutJit(expression)
+                  }
+                }
+              }
+            } else {
+              projectWithEval(evalWithoutJit)
+            }
+          }
+        } else {
+          projectWithEval(_.columnarEval(cb))
         }
       } finally {
         GpuExpressionsUtils.cachedNullVectors.get.clear()
@@ -296,71 +363,6 @@ object GpuProjectExec {
   }
 }
 
-/**
- * Mirrors Spark's PartitioningPreservingUnaryExecNode trait behavior, which is used by
- * operators like Project, Filter, and HashAggregate that don't change partitioning.
- *
- * Subclasses can override buildAttributeMap() to customize how input attributes
- * are mapped to output attributes.
- */
-trait GpuPartitioningPreservingUnaryExecNode extends ShimUnaryExecNode {
-
-  /**
-   * Builds a mapping from child output attributes to this operator's output attributes.
-   */
-  protected def buildAttributeMap(): Map[Attribute, Attribute] = {
-    child.output.zip(output).toMap
-  }
-
-  /**
-   * Compute output partitioning, handling PartitioningCollection from joins.
-   *
-   * This matches Spark's PartitioningPreservingUnaryExecNode behavior:
-   * 1. Flatten any PartitioningCollection into individual partitionings
-   * 2. Filter to only keep partitionings whose attributes are in the output
-   * 3. Remap attributes through aliases
-   *
-   * This is critical for Spark 4.1+ where UnionExec uses outputPartitioning
-   * to decide between partitioner-aware union vs concatenation.
-   */
-  final override def outputPartitioning: Partitioning = {
-    val attributeMap = buildAttributeMap()
-    val outputSet = AttributeSet(output)
-
-    // Flatten a PartitioningCollection into individual partitionings
-    def flattenPartitioning(p: Partitioning): Seq[Partitioning] = p match {
-      case PartitioningCollection(childPartitionings) =>
-        childPartitionings.flatMap(flattenPartitioning)
-      case other => Seq(other)
-    }
-
-    def remapPartitioning(p: Partitioning): Partitioning = p match {
-      case e: Expression =>
-        e.transform {
-          case a: Attribute if attributeMap.contains(a) => attributeMap(a)
-        }.asInstanceOf[Partitioning]
-      case other => other
-    }
-
-    val partitionings = flattenPartitioning(child.outputPartitioning).flatMap {
-      case e: Expression =>
-        // Only keep partitionings whose attributes are all in the output
-        val remapped = remapPartitioning(e.asInstanceOf[Partitioning])
-        remapped match {
-          case re: Expression if re.references.subsetOf(outputSet) => Some(remapped)
-          case _ => None
-        }
-      case other => Some(other)
-    }
-
-    partitionings match {
-      case Seq() => UnknownPartitioning(child.outputPartitioning.numPartitions)
-      case Seq(single) => single
-      case multiple => PartitioningCollection(multiple)
-    }
-  }
-}
-
 object GpuProjectExecLike {
   def unapply(plan: SparkPlan): Option[(Seq[Expression], SparkPlan)] = plan match {
     case gpuProjectLike: GpuProjectExecLike =>
@@ -369,14 +371,12 @@ object GpuProjectExecLike {
   }
 }
 
-trait GpuProjectExecLike extends GpuPartitioningPreservingUnaryExecNode with GpuExec {
+trait GpuProjectExecLike extends GpuOrderPreservingUnaryExecNodeShim with GpuExec {
 
   def projectList: Seq[Expression]
 
   override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
     OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY))
-
-  override def outputOrdering: Seq[SortOrder] = child.outputOrdering
 
   override def doExecute(): RDD[InternalRow] =
     throw new IllegalStateException(s"Row-based execution should not occur for $this")
@@ -845,7 +845,34 @@ case class GpuProjectExec(
    //   immutable/List.scala#L516
    projectList: List[NamedExpression],
    child: SparkPlan,
-   enablePreSplit: Boolean = true) extends GpuProjectExecLike {
+   enablePreSplit: Boolean = true)(
+   // CPU forms of projectList entries, in the same order and with the same output exprIds,
+   // used by Spark's partitioning and ordering logic. None uses conservative alias conversion.
+   // Change projectList through withProjectList so these metadata expressions stay in sync.
+   val cpuProjectList: Option[List[NamedExpression]] = None) extends GpuProjectExecLike {
+
+  override def otherCopyArgs: Seq[AnyRef] = cpuProjectList :: Nil
+
+  override protected def cpuOutputExpressions: Seq[NamedExpression] =
+    cpuProjectList.getOrElse(GpuAliasAwareOutputExpressions.toCpuAliases(projectList))
+
+  // Preserve original CPU expressions for unchanged entries, including when reordered or pruned.
+  // New or changed GPU expressions use conservative alias conversion for metadata matching.
+  def withProjectList(
+      expressions: List[NamedExpression],
+      newChild: SparkPlan = child,
+      preSplit: Boolean = enablePreSplit): GpuProjectExec = {
+    val original = projectList.map(expr => expr.exprId -> expr).toMap
+    val cpuExpressions = cpuOutputExpressions.map(expr => expr.exprId -> expr).toMap
+    val updated = expressions.map { expr =>
+      if (original.get(expr.exprId).contains(expr)) {
+        cpuExpressions(expr.exprId)
+      } else {
+        GpuAliasAwareOutputExpressions.toCpuAliases(List(expr)).head
+      }
+    }
+    copy(projectList = expressions, child = newChild, enablePreSplit = preSplit)(Some(updated))
+  }
 
   override def output: Seq[Attribute] = projectList.map(_.toAttribute)
 
@@ -859,6 +886,12 @@ case class GpuProjectExec(
 
   override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
     KEY_NUM_PRE_SPLIT -> createMetric(DEBUG_LEVEL, "num pre-splits"),
+    AST_JIT_PROGRAM_BUILD_ATTEMPTS -> createMetric(DEBUG_LEVEL, "AST JIT program build attempts"),
+    AST_JIT_PROGRAM_CACHE_HITS -> createMetric(DEBUG_LEVEL, "AST JIT bound program cache hits"),
+    AST_JIT_PROGRAM_BUILD_TIME -> createNanoTimingMetric(DEBUG_LEVEL, "AST JIT program build time"),
+    AST_JIT_EVAL_ATTEMPTS -> createMetric(DEBUG_LEVEL, "AST JIT group evaluation attempts"),
+    AST_JIT_EVAL_ROWS -> createMetric(DEBUG_LEVEL, "AST JIT group input rows including retries"),
+    AST_JIT_EVAL_TIME -> createNanoTimingMetric(DEBUG_LEVEL, "AST JIT group evaluation time"),
     OP_TIME_LEGACY -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_OP_TIME_LEGACY),
     CPU_BRIDGE_PROCESSING_TIME -> createNanoTimingMetric(DEBUG_LEVEL, 
       DESCRIPTION_CPU_BRIDGE_PROCESSING_TIME),
@@ -870,8 +903,10 @@ case class GpuProjectExec(
     val opTime = gpuLongMetric(OP_TIME_LEGACY)
     val numPreSplit = gpuLongMetric(KEY_NUM_PRE_SPLIT)
     
-    val boundProjectList = GpuBindReferences.bindGpuReferencesTiered(projectList, child.output,
-      conf, allMetrics)
+    val boundProjectList = GpuBindReferences.bindGpuReferencesTiered(
+      projectList, child.output, conf, allMetrics,
+      enableAst = RapidsConf.ENABLE_PROJECT_AST.get(conf),
+      enableAstJit = RapidsConf.ENABLE_PROJECT_AST_JIT.get(conf))
     val localEnablePreSplit = enablePreSplit
 
     val rdd = child.executeColumnar()
@@ -906,106 +941,6 @@ case class GpuProjectExec(
             numOutputBatches += 1
             numOutputRows += ret.numRows()
             ret
-          }
-        }
-      }
-    }
-  }
-}
-
-/** Use cudf AST expressions to project columnar batches */
-case class GpuProjectAstExec(
-    // NOTE for Scala 2.12.x and below we enforce usage of (eager) List to prevent running
-    // into a deep recursion during serde of lazy lists. See
-    // https://github.com/NVIDIA/spark-rapids/issues/2036
-    //
-    // Whereas a similar issue https://issues.apache.org/jira/browse/SPARK-27100 is resolved
-    // using an Array, we opt in for List because it implements Seq while having non-recursive
-    // serde: https://github.com/scala/scala/blob/2.12.x/src/library/scala/collection/
-    //   immutable/List.scala#L516
-    projectList: List[Expression],
-    child: SparkPlan
-) extends GpuProjectExecLike {
-
-  override def output: Seq[Attribute] = {
-    projectList.collect { case ne: NamedExpression => ne.toAttribute }
-  }
-
-  override def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
-    child.executeColumnar().mapPartitions(buildRetryableAstIterator)
-  }
-
-  def buildRetryableAstIterator(
-      input: Iterator[ColumnarBatch]): GpuColumnarBatchIterator = {
-    val numOutputRows = gpuLongMetric(NUM_OUTPUT_ROWS)
-    val numOutputBatches = gpuLongMetric(NUM_OUTPUT_BATCHES)
-    val opTime = gpuLongMetric(OP_TIME_LEGACY)
-    val boundProjectList = GpuBindReferences.bindGpuReferences(projectList, child.output,
-      allMetrics)
-    val outputTypes = output.map(_.dataType).toArray
-    new GpuColumnarBatchIterator(true) {
-      private[this] var maybeSplittedItr: Iterator[ColumnarBatch] = Iterator.empty
-      private[this] var compiledAstExprs =
-        NvtxIdWithMetrics(NvtxRegistry.COMPILE_ASTS, opTime) {
-          boundProjectList.safeMap { expr =>
-            // Use intmax for the left table column count since there's only one input table here.
-            expr.convertToAst(Int.MaxValue).compile()
-          }
-        }
-
-      override def hasNext: Boolean = maybeSplittedItr.hasNext || {
-        if (input.hasNext) {
-          true
-        } else {
-          close()
-          false
-        }
-      }
-
-      override def next(): ColumnarBatch = {
-        if (!maybeSplittedItr.hasNext) {
-          val spillable = SpillableColumnarBatch(
-            input.next(), SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
-          // AST currently doesn't support non-deterministic expressions so it's not needed
-          // to check whether compiled expressions are retryable.
-          maybeSplittedItr = withRetry(spillable, splitSpillableInHalfByRows) { spillable =>
-            NvtxIdWithMetrics(NvtxRegistry.PROJECT_AST, opTime) {
-              withResource(spillable.getColumnarBatch()) { cb =>
-                val projectedTable = withResource(tableFromBatch(cb)) { table =>
-                  withResource(
-                    compiledAstExprs.safeMap(_.computeColumn(table))) { projectedColumns =>
-                    new Table(projectedColumns: _*)
-                  }
-                }
-                withResource(projectedTable) { _ =>
-                  GpuColumnVector.from(projectedTable, outputTypes)
-                }
-              }
-            }
-          }
-        }
-
-        val ret = maybeSplittedItr.next()
-        numOutputBatches += 1
-        numOutputRows += ret.numRows()
-        ret
-      }
-
-      override def doClose(): Unit = {
-        compiledAstExprs.safeClose()
-        compiledAstExprs = Nil
-      }
-
-      private def tableFromBatch(cb: ColumnarBatch): Table = {
-        if (cb.numCols != 0) {
-          GpuColumnVector.from(cb)
-        } else {
-          // Count-only batch but cudf Table cannot be created with no columns.
-          // Create the cheapest table we can to evaluate the AST expression.
-          withResource(Scalar.fromBool(false)) { falseScalar =>
-            withResource(cudf.ColumnVector.fromScalar(falseScalar, cb.numRows())) { falseColumn =>
-              new Table(falseColumn)
-            }
           }
         }
       }
@@ -1285,8 +1220,10 @@ object GpuFilter {
       numOutputRows: GpuMetric,
       numOutputBatches: GpuMetric,
       opTime: GpuMetric): Iterator[ColumnarBatch] = {
-    boundCondition.retryables.foreach(_.checkpoint())
     val ret = withRetry(input, splitSpillableInHalfByRows) { sb =>
+      // Checkpoint before each attempt, as the project's split-retry path does: a split that
+      // succeeded is committed, so a later split's retry must restore only its own attempt.
+      boundCondition.retryables.foreach(_.checkpoint())
       withResource(sb.getColumnarBatch()) { cb =>
         withRestoreOnRetry(boundCondition.retryables) {
           NvtxIdWithMetrics(NvtxRegistry.FILTER_BATCH, opTime) {
@@ -1468,15 +1405,16 @@ class GpuSampleExecMeta(
     with Logging {
   override def convertToGpu(): GpuExec = {
     val gpuChild = childPlans.head.convertIfNeeded()
+    val seed = SampleExecShims.resolvedSeed(sample)
     if (conf.isFastSampleEnabled) {
       // Use GPU sample JNI, this is faster, but the output is not the same as CPU produces
       GpuFastSampleExec(sample.lowerBound, sample.upperBound, sample.withReplacement,
-        sample.seed, gpuChild)
+        seed, gpuChild)
     } else {
       // The output is the same as CPU produces
       // First generates row indexes by CPU sampler, then use GPU to gathers
       GpuSampleExec(sample.lowerBound, sample.upperBound, sample.withReplacement,
-        sample.seed, gpuChild)
+        seed, gpuChild)
     }
   }
 }

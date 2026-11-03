@@ -16,6 +16,9 @@
 
 package com.nvidia.spark.rapids.spill
 
+import java.io.File
+import java.nio.channels.InterruptibleChannel
+
 import scala.collection.mutable.ArrayBuffer
 
 import ai.rapids.cudf._
@@ -344,6 +347,85 @@ class SpillFrameworkSuite extends SpillUnitTestBase with BeforeAndAfterAll {
     }
   }
 
+  test("host originated: materializeInto copies into a caller buffer at an offset") {
+    val len = 1L * 1024
+    val hmb = HostMemoryBuffer.allocate(len)
+    (0L until len).foreach(i => hmb.setByte(i, (i % 127).toByte))
+    val spillableBuffer = SpillableHostBuffer(hmb, len, SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+    withResource(spillableBuffer) { _ =>
+      val offset = 64L
+      withResource(HostMemoryBuffer.allocate(offset + len)) { dst =>
+        // poison the whole destination so a short or misplaced copy is visible
+        (0L until dst.getLength).foreach(i => dst.setByte(i, 0xFF.toByte))
+        spillableBuffer.materializeInto(dst, offset)
+        // bytes before the offset are untouched
+        (0L until offset).foreach { i =>
+          assertResult(0xFF.toByte)(dst.getByte(i))
+        }
+        // and the payload landed starting exactly at the offset
+        (0L until len).foreach { i =>
+          assertResult((i % 127).toByte)(dst.getByte(offset + i))
+        }
+      }
+    }
+    assertResult(0)(hmb.getRefCount)
+  }
+
+  test("host originated: materializeInto copies after spill to disk") {
+    val len = 1L * 1024
+    val hmb = HostMemoryBuffer.allocate(len)
+    (0L until len).foreach(i => hmb.setByte(i, (i % 127).toByte))
+    val spillableBuffer = SpillableHostBuffer(hmb, len, SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+    // force the handle onto disk, so materializeInto takes the slice/read path
+    SpillFramework.stores.hostStore.spill(len)
+    withResource(spillableBuffer) { _ =>
+      assertResult(0)(hmb.getRefCount)
+      val offset = 32L
+      withResource(HostMemoryBuffer.allocate(offset + len)) { dst =>
+        (0L until dst.getLength).foreach(i => dst.setByte(i, 0xFF.toByte))
+        spillableBuffer.materializeInto(dst, offset)
+        (0L until offset).foreach { i =>
+          assertResult(0xFF.toByte)(dst.getByte(i))
+        }
+        (0L until len).foreach { i =>
+          assertResult((i % 127).toByte)(dst.getByte(offset + i))
+        }
+      }
+    }
+  }
+
+  test("host originated: materializeInto packs several handles back to back") {
+    // this is the shape KudoGpuTableOperator.concat relies on: one destination
+    // buffer, each handle written at a running offset, no per-handle allocation
+    val len = 256L
+    val handles = (0 until 3).map { h =>
+      val hmb = HostMemoryBuffer.allocate(len)
+      (0L until len).foreach(i => hmb.setByte(i, (h * 10 + (i % 7)).toByte))
+      SpillableHostBuffer(hmb, len, SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+    }
+    // spill the middle one so the run mixes host-resident and disk-backed handles
+    SpillFramework.stores.hostStore.spill(len)
+    withResource(handles.head) { _ =>
+      withResource(handles(1)) { _ =>
+        withResource(handles(2)) { _ =>
+          withResource(HostMemoryBuffer.allocate(len * handles.length)) { dst =>
+            var offset = 0L
+            handles.foreach { h =>
+              h.materializeInto(dst, offset)
+              offset += len
+            }
+            assertResult(len * handles.length)(offset)
+            handles.indices.foreach { h =>
+              (0L until len).foreach { i =>
+                assertResult((h * 10 + (i % 7)).toByte)(dst.getByte(h * len + i))
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
   test("host originated: a buffer is not spillable when we leak it") {
     val hmb = HostMemoryBuffer.allocate(1L * 1024)
     withResource(SpillableHostBuffer(hmb, hmb.getLength,
@@ -640,94 +722,38 @@ class SpillFrameworkSuite extends SpillUnitTestBase with BeforeAndAfterAll {
     }
   }
 
-  test("Compression on with or without encryption for spill block using single batch") {
-    Seq("true", "false").foreach { encryptionEnabled =>
-      val conf = new SparkConf()
-      conf.set(RapidsConf.TEST_IO_ENCRYPTION.key, encryptionEnabled)
-      conf.set("spark.io.compression.codec", "zstd")
-      conf.set("spark.shuffle.spill.compress", "true")
-      conf.set("spark.shuffle.compress", "true")
-      readWriteTestWithBatches(conf, false)
+  for {
+    compressionEnabled <- Seq(false, true)
+    encryptionEnabled <- Seq(false, true)
+    numBatches <- Seq(1, 2)
+  } {
+    test(s"disk spill with compression=$compressionEnabled encryption=$encryptionEnabled " +
+        s"batches=$numBatches") {
+      val conf = new SparkConf(false)
+        .set(RapidsConf.TEST_IO_ENCRYPTION.key, encryptionEnabled.toString)
+        .set("spark.io.compression.codec", "zstd")
+        .set("spark.shuffle.spill.compress", compressionEnabled.toString)
+      readWriteTestWithBatches(conf, numBatches)
     }
   }
 
-  test("Compression off with or without encryption for spill block using single batch") {
-    Seq("true", "false").foreach { encryptionEnabled =>
-      val conf = new SparkConf()
-      conf.set(RapidsConf.TEST_IO_ENCRYPTION.key, encryptionEnabled)
-      conf.set("spark.shuffle.spill.compress", "false")
-      conf.set("spark.shuffle.compress", "false")
-      readWriteTestWithBatches(conf, false)
+  test("disk spill uses the configured compression codec") {
+    val conf = new SparkConf(false)
+      .set("spark.shuffle.spill.compress", "true")
+      .set("spark.io.compression.codec", "nonexistent.spill.CompressionCodec")
+    val error = intercept[IllegalArgumentException] {
+      readWriteTestWithBatches(conf, 1)
     }
+    assert(error.getMessage.contains("nonexistent.spill.CompressionCodec"))
   }
 
-  test("Compression on with or without encryption for spill block using multiple batches") {
-    Seq("true", "false").foreach { encryptionEnabled =>
-      val conf = new SparkConf()
-      conf.set(RapidsConf.TEST_IO_ENCRYPTION.key, encryptionEnabled)
-      conf.set("spark.io.compression.codec", "zstd")
-      conf.set("spark.shuffle.spill.compress", "true")
-      conf.set("spark.shuffle.compress", "true")
-      readWriteTestWithBatches(conf, false)
+  test("disk spill uses the configured encryption setting") {
+    val conf = new SparkConf(false)
+      .set(RapidsConf.TEST_IO_ENCRYPTION.key, "invalid")
+    val error = intercept[IllegalArgumentException] {
+      readWriteTestWithBatches(conf, 1)
     }
-  }
-
-  test("Compression off with or without encryption for spill block using multiple batches") {
-    Seq("true", "false").foreach { encryptionEnabled =>
-      val conf = new SparkConf()
-      conf.set(RapidsConf.TEST_IO_ENCRYPTION.key, encryptionEnabled)
-      conf.set("spark.shuffle.spill.compress", "false")
-      conf.set("spark.shuffle.compress", "false")
-      readWriteTestWithBatches(conf, false)
-    }
-  }
-
-  // ===== Tests for shuffle block =====
-
-  test("Compression on with or without encryption for shuffle block using single batch") {
-    Seq("true", "false").foreach { encryptionEnabled =>
-      val conf = new SparkConf()
-      conf.set(RapidsConf.TEST_IO_ENCRYPTION.key, encryptionEnabled)
-      conf.set("spark.io.compression.codec", "zstd")
-      conf.set("spark.shuffle.spill.compress", "true")
-      conf.set("spark.shuffle.compress", "true")
-      readWriteTestWithBatches(conf, true)
-    }
-  }
-
-  test("Compression off with or without encryption for shuffle block using single batch") {
-    Seq("true", "false").foreach { encryptionEnabled =>
-      val conf = new SparkConf()
-      conf.set(RapidsConf.TEST_IO_ENCRYPTION.key, encryptionEnabled)
-      conf.set("spark.shuffle.spill.compress", "false")
-      conf.set("spark.shuffle.compress", "false")
-      readWriteTestWithBatches(conf, true)
-    }
-  }
-
-  test("Compression on with or without encryption for shuffle block using multiple batches") {
-    Seq("true", "false").foreach { encryptionEnabled =>
-      val conf = new SparkConf()
-      conf.set(RapidsConf.TEST_IO_ENCRYPTION.key, encryptionEnabled)
-      conf.set("spark.io.compression.codec", "zstd")
-      conf.set("spark.shuffle.spill.compress", "true")
-      conf.set("spark.shuffle.compress", "true")
-      readWriteTestWithBatches(conf, true, true)
-    }
-  }
-
-  test("Compression off with or without encryption for shuffle block using multiple batches") {
-    Seq("true", "false").foreach { encryptionEnabled =>
-      val conf = new SparkConf()
-      conf.set(RapidsConf.TEST_IO_ENCRYPTION.key, encryptionEnabled)
-      conf.set("spark.shuffle.spill.compress", "false")
-      conf.set("spark.shuffle.compress", "false")
-      readWriteTestWithBatches(conf, true, true)
-    }
-  }
-
-  test("No encryption and compression for shuffle block using multiple batches") {
-    readWriteTestWithBatches(new SparkConf(), true, true)
+    assert(error.getMessage.contains("invalid"))
   }
 
   test("skip host: spill device memory buffer to disk") {
@@ -866,11 +892,49 @@ class SpillFrameworkSuite extends SpillUnitTestBase with BeforeAndAfterAll {
   }
 
   test("exclusive spill files are deleted when buffer deleted") {
-    testBufferFileDeletion(canShareDiskPaths = false)
+    testBufferFileDeletion()
   }
 
-  test("shared spill files are not deleted when a buffer is deleted") {
-    testBufferFileDeletion(canShareDiskPaths = true)
+  test("closing a spill file leaves another spilled batch readable") {
+    val (_, survivor, dataTypes) = addContiguousTableToFramework()
+    var survivorPath: File = null
+    withResource(survivor) { _ =>
+      val (_, first, _) = addContiguousTableToFramework()
+      var firstPath: File = null
+      withResource(first) { _ =>
+        SpillFramework.stores.deviceStore.spill(Long.MaxValue)
+        SpillFramework.stores.hostStore.spill(Long.MaxValue)
+        val diskStore = SpillFramework.stores.diskStore
+        firstPath = diskStore.getFile(first.host.flatMap(_.disk).get.blockId)
+        survivorPath = diskStore.getFile(survivor.host.flatMap(_.disk).get.blockId)
+        assert(firstPath != survivorPath)
+        assert(firstPath.exists() && survivorPath.exists())
+      }
+      assert(!firstPath.exists())
+      assert(survivorPath.exists())
+      val (table, _) = buildTable()
+      withResource(table) { _ =>
+        withResource(GpuColumnVector.from(table, dataTypes)) { expected =>
+          withResource(survivor.materialize(dataTypes)) { actual =>
+            TestUtils.compareBatches(expected, actual)
+          }
+        }
+      }
+    }
+    assert(!survivorPath.exists())
+  }
+
+  test("disk spill builder keeps the codec outside an interruptible channel") {
+    val builder = DiskHandleStore.makeBuilder
+    try {
+      withResource(builder) { writer =>
+        val channel = writer.getChannel
+        assert(channel.isInstanceOf[SpillOutputChannel])
+        assert(!channel.isInstanceOf[InterruptibleChannel])
+      }
+    } finally {
+      SpillFramework.stores.diskStore.deleteFile(builder.blockId)
+    }
   }
 
   test("a non-contiguous table close while spilling") {

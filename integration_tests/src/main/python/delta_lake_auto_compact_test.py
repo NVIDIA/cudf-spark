@@ -16,7 +16,7 @@ import pytest
 from asserts import assert_gpu_and_cpu_writes_are_equal_collect, with_gpu_session
 from data_gen import copy_and_update, idfn
 from delta_lake_utils import *
-from marks import allow_non_gpu, delta_lake
+from marks import allow_non_gpu, delta_lake, ignore_order
 from pyspark.sql.functions import *
 from spark_session import is_spark_353_or_later, is_databricks_runtime, \
     is_databricks104_or_later, is_databricks173_or_later, supports_delta_lake_deletion_vectors
@@ -25,7 +25,7 @@ _conf = {'spark.rapids.sql.explain': 'ALL',
          'spark.databricks.delta.autoCompact.minNumFiles': 3}  # Num files before compaction.
 
 _auto_compact_min_files_deletion_vector_values = deletion_vector_values \
-    if is_databricks173_or_later() else deletion_vector_values_with_350DB143_xfail_reasons(
+    if is_databricks173_or_later() else deletion_vector_values_with_xfail_reasons(
         enabled_xfail_reason="https://github.com/NVIDIA/spark-rapids/issues/12042")
 
 
@@ -40,7 +40,7 @@ def write_to_delta(enable_deletion_vectors, num_rows=30, is_partitioned=False, n
             else input_data.repartition(1)
         writer = input_data.write.format("delta").mode("append")
         if supports_delta_lake_deletion_vectors():
-           writer.option("delta.enableDeletionVectors", str(enable_deletion_vectors).lower())
+            writer.option("delta.enableDeletionVectors", str(enable_deletion_vectors).lower())
         for _ in range(num_writes):
             writer.save(table_path)
 
@@ -111,6 +111,8 @@ def test_auto_compact_dbr173_inline_uses_gpu(spark_tmp_path):
     with_cpu_session(lambda spark: assert_optimized(spark, data_path), {})
 
 
+# Auto-configured RapidsShuffleManager may change row ordering.
+@ignore_order(local=True)
 @delta_lake
 @allow_non_gpu(*delta_meta_allow)
 @pytest.mark.skipif(not is_databricks_runtime() and not is_spark_353_or_later(),
@@ -199,10 +201,8 @@ def test_auto_compact_partitioned(spark_tmp_path, auto_compact_conf, enable_dele
 
     def read_metadata(spark, table_path):
         assert_optimized(spark, table_path)
-        """
-        The snapshots might not look alike, in the partitioned case.
-        Ensure that auto compaction has occurred, even if it's not identical.
-        """
+        # The snapshots might not look alike, in the partitioned case.
+        # Ensure that auto compaction has occurred, even if it's not identical.
         input_table = DeltaTable.forPath(spark, table_path)
         table_history = input_table.history()
         return table_history.select(

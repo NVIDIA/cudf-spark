@@ -1,4 +1,4 @@
-// Copyright (c) 2020, NVIDIA CORPORATION.
+// Copyright (c) 2020-2026, NVIDIA CORPORATION.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,7 +21,10 @@ enum TransferState: byte {
   STARTED = 0,
 
   /// Data has been compressed and requires meta update
-  BUFFER_META_UPDATED = 1
+  BUFFER_META_UPDATED = 1,
+
+  /// The server will not send this buffer. The response's error says why.
+  FAILED = 2
 }
 
 table BufferTransferResponse {
@@ -37,8 +40,12 @@ table BufferTransferResponse {
 
 /// Flat buffer for Rapids UCX Shuffle Transfer Response.
 table TransferResponse {
-  /// array of buffer responses, one for each requested
+  /// array of buffer responses, one for each requested buffer. An error reply lists each
+  /// requested buffer the server will not send, or none when the server could not tell which.
   responses: [BufferTransferResponse];
+
+  /// set when the server failed the request
+  error: ResponseError;
 }
 
 root_type TransferResponse;

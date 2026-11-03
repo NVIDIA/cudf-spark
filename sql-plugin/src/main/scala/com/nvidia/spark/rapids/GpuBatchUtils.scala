@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -88,6 +88,12 @@ object GpuBatchUtils {
         dt.fields.map { f =>
           minGpuMemory(f.dataType, f.nullable, rowCount, includeOffset)
         }.sum
+      case dt if GpuColumnVector.isVariantType(dt) =>
+        if (includeOffset) {
+          calculateOffsetBufferSize(rowCount) * 2
+        } else {
+          0L
+        }
       case dt =>
         dt.defaultSize * rowCount
     }
@@ -122,6 +128,10 @@ object GpuBatchUtils {
         dt.fields.map { f =>
           estimateGpuMemory(f.dataType, f.nullable, rowCount)
         }.sum
+      case dt if GpuColumnVector.isVariantType(dt) =>
+        // Reuse Spark's 2-KiB Variant defaultSize estimate and account separately for both
+        // physical cuDF offset buffers.
+        calculateOffsetBufferSize(rowCount) * 2 + dt.defaultSize * rowCount
       case dt =>
         dt.defaultSize * rowCount
     }
@@ -165,6 +175,7 @@ object GpuBatchUtils {
   def isVariableWidth(dt: DataType): Boolean = !isFixedWidth(dt)
 
   def isFixedWidth(dt: DataType): Boolean = dt match {
+    case variantType if GpuColumnVector.isVariantType(variantType) => false
     case DataTypes.StringType | DataTypes.BinaryType => false
     case _: ArrayType  => false
     case _: StructType  => false
@@ -191,7 +202,15 @@ object GpuBatchUtils {
    */
   def concatSpillBatchesAndClose(
       spillBatches: Seq[SpillableColumnarBatch]): Option[SpillableColumnarBatch] = {
-    val retBatch = if (spillBatches.length >= 2) {
+    val numBatches = spillBatches.length
+    val retBatch = if (numBatches >= 2 && spillBatches.forall(isRowsOnly)) {
+      // cuDF cannot build a Table without columns, and rows-only batches concatenate by row count.
+      withResource(spillBatches) { _ =>
+        val numRows = spillBatches.iterator.map(_.numRows().toLong).sum
+        require(numRows <= Int.MaxValue, s"Cannot concatenate $numRows rows into one batch")
+        new JustRowsColumnarBatch(numRows.toInt)
+      }
+    } else if (numBatches >= 2) {
       // two or more batches, concatenate them
       val (concatTable, types) = RmmRapidsRetryIterator.withRetryNoSplit(spillBatches) { _ =>
         withResource(spillBatches.safeMap(_.getColumnarBatch())) { batches =>
@@ -206,11 +225,17 @@ object GpuBatchUtils {
         SpillableColumnarBatch(GpuColumnVector.from(concatTable, types),
           SpillPriorities.ACTIVE_BATCHING_PRIORITY)
       }
-    } else if (spillBatches.length == 1) {
+    } else if (numBatches == 1) {
       // only one batch
       spillBatches.head
     } else null
 
     Option(retBatch)
+  }
+
+  // A compressed batch reports null types but always has a column.
+  private def isRowsOnly(batch: SpillableColumnarBatch): Boolean = {
+    val types = batch.dataTypes
+    types != null && types.isEmpty
   }
 }

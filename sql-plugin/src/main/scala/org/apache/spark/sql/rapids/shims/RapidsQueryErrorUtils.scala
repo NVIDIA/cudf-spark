@@ -56,7 +56,7 @@ trait RapidsQueryErrorUtils {
   }
 
   def dataSchemaNotSpecifiedError(format: String, fileCatalog: String): Throwable = {
-    QueryCompilationErrors.dataSchemaNotSpecifiedError(format, fileCatalog)
+    RapidsQueryErrorUtilsShims.dataSchemaNotSpecifiedError(format, fileCatalog)
   }
 
   def invalidDataSourceError(className: String): Throwable = {

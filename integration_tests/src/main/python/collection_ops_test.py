@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
+
 import pytest
 
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error, \
@@ -163,7 +165,15 @@ def test_sort_array_lit(data_gen):
 # array_sort runs on the GPU for flat (non-nested) element types. A nested element type (array or
 # struct) falls back to the CPU: cudf's listSortRows applies one null order at every nesting level,
 # but Spark's array_sort needs null elements last and null sub-elements first.
-_array_sort_gens = non_nested_array_gens
+_array_sort_gens = non_nested_array_gens + [
+    ArrayGen(FloatGen(
+        no_nans=True,
+        special_cases=[FLOAT_MIN, FLOAT_MAX, 0.0, -0.0, float('nan')])),
+    ArrayGen(DoubleGen(
+        no_nans=True,
+        special_cases=[DOUBLE_MIN, DOUBLE_MAX, 0.0, -0.0, float('nan')])),
+    ArrayGen(StringGen(pattern='(| |hello|你好|🙂)')),
+]
 
 # array_sort(arr) with the default comparator (ascending, nulls last) must run on GPU.
 # Capture the plan so a silent CPU fallback (which still matches results) fails the test.
@@ -376,13 +386,17 @@ sequence_illegal_boundaries_integral_gens = [
         IntegerGen(min_val=0, max_val=0, special_cases=[]))
 ]
 
+# DBR 18.3 uses a structured error class while the GPU and other runtimes use legacy text.
+sequence_illegal_boundaries_error = re.compile(
+    r"Illegal sequence boundaries|ILLEGAL_SEQUENCE_BOUNDARIES")
+
 @pytest.mark.parametrize('start_gen,stop_gen,step_gen', sequence_illegal_boundaries_integral_gens, ids=idfn)
 @allow_non_gpu(*non_utc_allow)
 def test_sequence_illegal_boundaries(start_gen, stop_gen, step_gen):
     assert_gpu_and_cpu_error(
         lambda spark:three_col_df(spark, start_gen, stop_gen, step_gen).selectExpr(
             "sequence(a, b, c)").collect(),
-        conf = {}, error_message = "Illegal sequence boundaries")
+        conf = {}, error_message = sequence_illegal_boundaries_error)
 
 # Exceed the max length of a sequence
 #     "Too long sequence: xxxxxxxxxx. Should be <= 2147483632"

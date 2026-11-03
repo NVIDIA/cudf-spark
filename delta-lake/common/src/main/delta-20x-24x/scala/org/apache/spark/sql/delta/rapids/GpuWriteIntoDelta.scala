@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * This file was derived from WriteIntoDelta.scala
  * in the Delta Lake project at https://github.com/delta-io/delta.
@@ -30,7 +30,8 @@ import org.apache.spark.sql.execution.command.LeafRunnableCommand
 case class GpuWriteIntoDelta(
     gpuDeltaLog: GpuDeltaLog,
     cpuWrite: WriteIntoDelta)
-    extends LeafRunnableCommand {
+    extends LeafRunnableCommand
+      with GpuWriteIntoDeltaLike {
 
   override def run(sparkSession: SparkSession): Seq[Row] = {
     gpuDeltaLog.withNewTransaction { txn =>
