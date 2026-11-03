@@ -18,9 +18,10 @@ package com.nvidia.spark.rapids
 
 import java.math.RoundingMode
 
-import ai.rapids.cudf.{ColumnVector, Cuda, DefaultHostMemoryAllocator, DType, HostMemoryAllocator,
-  HostMemoryBuffer, Scalar, Table}
+import ai.rapids.cudf.{ColumnVector, Cuda, DType, HostMemoryAllocator, HostMemoryBuffer, Scalar,
+  Table}
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.CudfTestHelper.withHostAllocator
 import com.nvidia.spark.rapids.RapidsConf.ShuffleKudoMode
 import com.nvidia.spark.rapids.jni.RmmSpark
 import com.nvidia.spark.rapids.shims.GpuHashPartitioning
@@ -263,18 +264,13 @@ class GpuPartitioningSuite extends AnyFunSuite with BeforeAndAfterEach {
         withResource(buildBatch()) { batch =>
           GpuColumnVector.incRefCounts(batch)
           val columns = GpuColumnVector.extractColumns(batch)
-          val previous = DefaultHostMemoryAllocator.get()
-          val allocator = new TimerProbingHostAllocator(previous, copyTime)
-          DefaultHostMemoryAllocator.set(allocator)
-          val parts = try {
-            gp.sliceInternalGpuOrCpuAndClose(batch.numRows, partitionIndices, columns)
-          } finally {
-            DefaultHostMemoryAllocator.set(previous)
-          }
-          withResource(parts.map(_._1)) { _ =>
-            assert(allocator.allocations > 0)
-            assertResult(0)(allocator.untimedAllocations)
-            assert(copyTime.value > 0)
+          withHostAllocator(new TimerProbingHostAllocator(_, copyTime)) { allocator =>
+            val parts = gp.sliceInternalGpuOrCpuAndClose(batch.numRows, partitionIndices, columns)
+            withResource(parts.map(_._1)) { _ =>
+              assert(allocator.allocations > 0)
+              assertResult(0)(allocator.untimedAllocations)
+              assert(copyTime.value > 0)
+            }
           }
         }
       }
