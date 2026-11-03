@@ -304,29 +304,33 @@ class GpuVariantGetSuite extends AnyFunSuite {
     }
   }
 
-  test("decoded output outlives extraction and failed callbacks can be retried") {
+  test("decoded output outlives extraction and input remains reusable after callback failures") {
     withVariant(Seq(encodedValue)) { variant =>
       withResource(GpuVariantExtraction.withRawExtraction(variant, "$.id") { raw =>
         GpuVariantGet.decodeVariantField(raw, IntegerType)(noFallback)
       }) { result =>
         withResource(result.copyToHost())(host => assert(host.getInt(0) == 1))
       }
-      val failure = new IllegalStateException("callback failure")
-      var rawValue: ColumnVector = null
-      var rawStatus: ColumnVector = null
-      val actual = intercept[IllegalStateException] {
-        GpuVariantExtraction.withRawExtraction(variant, "$.id") { raw =>
-          rawValue = raw.getValue
-          rawStatus = raw.getStatus
-          throw failure
+      Seq[Throwable](new IllegalStateException("callback failure"),
+        new OutOfMemoryError("injected callback OOM"),
+        new NoClassDefFoundError("injected callback linkage error")).foreach { failure =>
+        var rawValue: ColumnVector = null
+        var rawStatus: ColumnVector = null
+        val actual = intercept[Throwable] {
+          GpuVariantExtraction.withRawExtraction(variant, "$.id") { raw =>
+            rawValue = raw.getValue
+            rawStatus = raw.getStatus
+            throw failure
+          }
         }
-      }
-      assert(actual eq failure)
-      assert(rawValue.getRefCount == 0)
-      assert(rawStatus.getRefCount == 0)
-      GpuVariantExtraction.withRawExtraction(variant, "$.id") { raw =>
-        withResource(GpuVariantGet.decodeVariantField(raw, IntegerType)(noFallback)) { result =>
-          withResource(result.copyToHost())(host => assert(host.getInt(0) == 1))
+        assert(actual eq failure)
+        assert(rawValue.getRefCount == 0)
+        assert(rawStatus.getRefCount == 0)
+        // This checks sequential reuse, not allocation OOM or the task retry machinery.
+        GpuVariantExtraction.withRawExtraction(variant, "$.id") { raw =>
+          withResource(GpuVariantGet.decodeVariantField(raw, IntegerType)(noFallback)) { result =>
+            withResource(result.copyToHost())(host => assert(host.getInt(0) == 1))
+          }
         }
       }
     }
