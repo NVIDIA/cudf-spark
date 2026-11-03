@@ -18,7 +18,8 @@ package org.apache.spark.sql.rapids.execution
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuite
 
-import org.apache.spark.{NarrowDependency, SparkConf, SparkContext}
+import org.apache.spark.{HashPartitioner, NarrowDependency, ShuffleDependency, SparkConf, SparkContext, SparkEnv, TaskContext}
+import org.apache.spark.shuffle.FetchFailedException
 
 class GpuShuffleBroadcastJoinRDDSuite extends AnyFunSuite with BeforeAndAfterAll {
   private var context: SparkContext = _
@@ -75,5 +76,26 @@ class GpuShuffleBroadcastJoinRDDSuite extends AnyFunSuite with BeforeAndAfterAll
       new GpuShuffleBroadcastJoinRDD[Int, Int, Int](stream, build,
         (input, _) => input)
     }
+  }
+
+  test("a build fetch failure resubmits the build dependency and completes the join") {
+    val stream = context.parallelize(Seq(1, 2, 3, 4), 2)
+    val shuffled = context.parallelize(Seq(0 -> 10, 1 -> 20), 2)
+      .partitionBy(new HashPartitioner(1))
+    val shuffleId = shuffled.dependencies.head.asInstanceOf[ShuffleDependency[_, _, _]].shuffleId
+    val build = shuffled.values
+    val joined = new GpuShuffleBroadcastJoinRDD[Int, Int, (Int, Int)](stream, build,
+      (input, openBuild) => {
+        val values = openBuild().toArray
+        val task = TaskContext.get()
+        if (task.partitionId() == 0 && task.stageAttemptNumber() == 0) {
+          throw new FetchFailedException(SparkEnv.get.blockManager.blockManagerId,
+            shuffleId, 0L, 0, 0, "Injected build fetch failure")
+        }
+        input.flatMap(value => values.iterator.map(sum => (value + sum, task.stageAttemptNumber())))
+      })
+    val result = joined.collect()
+    assert(result.map(_._1).sorted.sameElements(Array(11, 12, 13, 14, 21, 22, 23, 24)))
+    assert(result.filter(row => Set(11, 12, 21, 22).contains(row._1)).forall(_._2 > 0))
   }
 }

@@ -82,6 +82,16 @@ def main():
         assert len(expected) == 8192
         spark.conf.set('spark.rapids.sql.enabled', 'true')
 
+        frame = query(spark)
+        native = native_node(frame)
+        injected = sc._jvm.org.apache.spark.sql.rapids.testing.ExecutorBroadcastFaultSupport \
+            .removeBuildOutputs(spark._jsparkSession, frame._jdf, 8)
+        assert sorted(tuple(row) for row in frame.collect()) == expected
+        assert native.metrics().apply('executorBuilds').value() > 0
+        assert native.fallbackBroadcast().metrics().apply('dataSize').value() == 0
+        print(json.dumps(dict(case='missing-build-output', injection=injected,
+                              result='PASS', shuffle=cleanup(spark, native))), flush=True)
+
         @udf(LongType())
         def fail_once(value):
             context = TaskContext.get()
