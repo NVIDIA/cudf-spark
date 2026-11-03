@@ -544,7 +544,6 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
           .set("spark.sql.queryExecutionListeners",
             "org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback")
       val spark = SparkSession.builder().config(conf).getOrCreate()
-      spark.sparkContext.setLogLevel("ERROR")
       spark
     }
     try {
