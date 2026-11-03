@@ -19,13 +19,16 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.closeOnExcept
 
 import org.apache.spark.{SparkEnv, TaskContext}
+import org.apache.spark.internal.Logging
 import org.apache.spark.rapids.shims.GpuShuffleExchangeExec
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.plans.JoinType
 import org.apache.spark.sql.catalyst.plans.physical.{Distribution, UnspecifiedDistribution}
-import org.apache.spark.sql.execution.{ExecSubqueryExpression, SparkPlan}
+import org.apache.spark.sql.execution.{ExecSubqueryExpression, SparkPlan, SQLExecution}
+import org.apache.spark.sql.execution.adaptive.BroadcastQueryStageExec
 import org.apache.spark.sql.execution.exchange.{ENSURE_REQUIREMENTS, ReusedExchangeExec}
+import org.apache.spark.sql.execution.metric.SQLMetrics
 import org.apache.spark.sql.rapids.GpuShuffleEnv
 import org.apache.spark.sql.rapids.shims.SparkSessionUtils
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -70,7 +73,7 @@ case class GpuDriverlessBroadcastHashJoinExec(
     }
     val maxBytes = RapidsConf.DRIVERLESS_BROADCAST_MAX_SIZE.get(conf)
     // Spark incorporates successful map-task accumulator updates before completing this future.
-    // Table compression is excluded during planning, so map sizes cannot hide decompression growth.
+    // The writer metric records uncompressed bytes even when map-status sizes are compressed.
     val statistics = if (exchange.inputBatchRDD.getNumPartitions == 0) {
       None
     } else {
@@ -91,11 +94,20 @@ case class GpuDriverlessBroadcastHashJoinExec(
     val sizeBound = DriverlessBroadcastBuildAdmission.upperBound(
       partitionBytes, uncompressedBytes, rows, buildPlan.schema)
     val admitted = DriverlessBroadcastBuildAdmission.accepts(sizeBound, maxBytes)
-    logInfo(s"Executor broadcast shuffle ${exchange.shuffleId}: rows=$rows, bytes=$bytes, " +
+    val reason = if (admitted) "within build-size limit" else if (sizeBound.isEmpty) {
+      "no safe assembled-size bound"
+    } else {
+      "assembled-size bound exceeds limit"
+    }
+    logInfo(s"Driverless broadcast admission for join $id, shuffle ${exchange.shuffleId}: " +
+      s"rows=$rows, bytes=$bytes, " +
       s"uncompressedBytes=$uncompressedBytes, upperBound=$sizeBound, " +
-      s"maxBytes=$maxBytes, admitted=$admitted")
+      s"maxBytes=$maxBytes, admitted=$admitted, reason=$reason")
     if (!admitted) {
       gpuLongMetric("runtimeFallbacks") += 1
+      val executionId = sparkContext.getLocalProperty(SQLExecution.EXECUTION_ID_KEY)
+      SQLMetrics.postDriverMetricUpdates(sparkContext, executionId,
+        Seq(metrics("runtimeFallbacks")))
       sparkContext.cleaner.foreach(_.doCleanupShuffle(exchange.shuffleId, blocking = true))
       super.doColumnarBroadcastJoin()
     } else {
@@ -112,6 +124,9 @@ case class GpuDriverlessBroadcastHashJoinExec(
       val joinTime = gpuLongMetric(JOIN_TIME)
       val builds = gpuLongMetric("executorBuilds")
       val joinOptions = RapidsConf.getJoinOptions(conf, RapidsConf.GPU_BATCH_SIZE_BYTES.get(conf))
+      val rapidsConf = new RapidsConf(conf)
+      val codecConfigs = TableCompressionCodec.makeCodecConfig(rapidsConf)
+      val maxDecompressBatchMemory = rapidsConf.shuffleCompressionMaxBatchMemory
       new GpuDriverlessBroadcastJoinRDD[ColumnarBatch, ColumnarBatch, ColumnarBatch](
         stream, build, (input, openBuild) => {
           val context = TaskContext.get()
@@ -120,7 +135,7 @@ case class GpuDriverlessBroadcastHashJoinExec(
           val built = GpuShuffleEnv.getBroadcastCache.getOrBuild(shuffleId, () => {
             builds += 1
             val batch = GpuDriverlessBroadcastHelper.assemble(
-              openBuild(), schema, output, localMetrics)
+              openBuild(), schema, output, localMetrics, codecConfigs, maxDecompressBatchMemory)
             closeOnExcept(batch)(
               SpillableColumnarBatch(_, SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
           }, () => GpuSemaphore.releaseIfNecessary(context),
@@ -137,49 +152,94 @@ case class GpuDriverlessBroadcastHashJoinExec(
   }
 }
 
-object GpuDriverlessBroadcastHashJoinExec {
-  private def supportsGpuBuildReads(conf: RapidsConf): Boolean = {
-    Option(SparkEnv.get).exists { env =>
-      // The shuffle transport and codec are fixed when the application starts. A session
-      // override must not make compressed map bytes look like uncompressed GPU build bytes.
+object GpuDriverlessBroadcastHashJoinExec extends Logging {
+  def gpuBuildReadRejections(conf: RapidsConf): Seq[String] = {
+    Option(SparkEnv.get).map { env =>
+      // The transport is fixed at application startup. The build decoder handles the codec
+      // recorded in each batch, and admission uses the writer's uncompressed byte metric.
       val startup = new RapidsConf(env.conf)
-      startup.isDriverlessBroadcastEnabled && startup.isUCXShuffleManagerMode &&
-        startup.shuffleCompressionCodec.equalsIgnoreCase("none") &&
-        GpuShuffleEnv.useGPUShuffle(conf)
-    }
+      Seq(
+        if (!startup.isDriverlessBroadcastEnabled) Some("application-startup opt-in is disabled")
+          else None,
+        if (!startup.isUCXShuffleManagerMode) Some("UCX shuffle mode is required") else None,
+        if (!GpuShuffleEnv.useGPUShuffle(conf)) Some("GPU shuffle is unavailable") else None
+      ).flatten
+    }.getOrElse(Seq("SparkEnv is not initialized"))
   }
 
   /** Preserve the standard path for unsupported environments and exchange wrappers. */
   def rewrite(plan: SparkPlan, conf: RapidsConf): SparkPlan = {
-    if (!RapidsConf.DRIVERLESS_BROADCAST_ENABLED.get(plan.conf) ||
-        plan.conf.adaptiveExecutionEnabled || !supportsGpuBuildReads(conf) ||
-        SparkSessionUtils.sessionFromPlan(plan).sparkContext.cleaner.isEmpty ||
-        RapidsConf.HASH_TABLE_REUSE.get(plan.conf) ||
-        plan.exists {
-          case _: ReusedExchangeExec => true
-          case node => node.expressions.exists(_.exists(_.isInstanceOf[ExecSubqueryExpression]))
-        }) {
+    if (!RapidsConf.DRIVERLESS_BROADCAST_ENABLED.get(plan.conf)) {
       plan
     } else {
-      plan.transformUp {
-        case join: GpuBroadcastHashJoinExec if !join.isNullAwareAntiJoin =>
-          val build = join.buildSide match {
-            case GpuBuildLeft => join.left
-            case GpuBuildRight => join.right
-          }
-          build match {
-            case broadcast: GpuBroadcastExchangeExec
-                if DriverlessBroadcastBuildAdmission.supportsPlan(broadcast.child) =>
-              val shuffle = GpuShuffleExchangeExec(GpuSinglePartitioning, broadcast.child,
-                ENSURE_REQUIREMENTS)(GpuSinglePartitioning)
-              val (left, right) = join.buildSide match {
-                case GpuBuildLeft => (shuffle, join.right)
-                case GpuBuildRight => (join.left, shuffle)
+      val reasons = gpuBuildReadRejections(conf) ++ Seq(
+        if (SparkSessionUtils.sessionFromPlan(plan).sparkContext.cleaner.isEmpty) {
+          Some("Spark context cleaner is disabled")
+        } else None,
+        if (RapidsConf.HASH_TABLE_REUSE.get(plan.conf)) Some("hash-table reuse is enabled")
+          else None,
+        if (plan.exists(_.isInstanceOf[ReusedExchangeExec])) {
+          Some("plan contains a reused exchange")
+        } else None,
+        if (plan.exists(_.expressions.exists(_.exists(_.isInstanceOf[ExecSubqueryExpression])))) {
+          Some("plan contains a subquery")
+        } else None
+      ).flatten
+      if (reasons.nonEmpty) {
+        logInfo(s"Driverless broadcast not selected: ${reasons.mkString("; ")}")
+        plan
+      } else {
+        var sawBroadcastJoin = false
+        val rewritten = plan.transformUp {
+          case join: GpuBroadcastHashJoinExec =>
+            sawBroadcastJoin = true
+            val build = join.buildSide match {
+              case GpuBuildLeft => join.left
+              case GpuBuildRight => join.right
+            }
+            val broadcast = build match {
+              case direct: GpuBroadcastExchangeExec if !plan.conf.adaptiveExecutionEnabled =>
+                Some(direct)
+              case stage: BroadcastQueryStageExec => stage.plan match {
+                case direct: GpuBroadcastExchangeExec
+                    if direct.admittedDriverlessShuffle.isDefined => Some(direct)
+                case _ => None
               }
-              GpuDriverlessBroadcastHashJoinExec(join.leftKeys, join.rightKeys, join.joinType,
-                join.buildSide, join.condition, left, right, broadcast)
-            case _ => join
-          }
+              case _ => None
+            }
+            val rejection = if (join.isNullAwareAntiJoin) {
+              Some("null-aware anti join")
+            } else {
+              broadcast match {
+                case Some(exchange) =>
+                  DriverlessBroadcastBuildAdmission.rejectionReason(exchange.child)
+                case None => Some(s"no admitted driverless build: ${build.nodeName}")
+              }
+            }
+            rejection match {
+              case Some(reason) =>
+                logInfo(s"Driverless broadcast not selected for join ${join.id}: $reason")
+                join
+              case None =>
+                val exchange = broadcast.get
+                val shuffle = exchange.admittedDriverlessShuffle.getOrElse {
+                  GpuShuffleExchangeExec(GpuSinglePartitioning, exchange.child,
+                    ENSURE_REQUIREMENTS)(GpuSinglePartitioning)
+                }
+                val (left, right) = join.buildSide match {
+                  case GpuBuildLeft => (shuffle, join.right)
+                  case GpuBuildRight => (join.left, shuffle)
+                }
+                logInfo(s"Driverless broadcast planned for join ${join.id}; " +
+                  "execution requires runtime size admission")
+                GpuDriverlessBroadcastHashJoinExec(join.leftKeys, join.rightKeys, join.joinType,
+                  join.buildSide, join.condition, left, right, exchange)
+            }
+        }
+        if (!sawBroadcastJoin) {
+          logInfo("Driverless broadcast not selected: no GPU broadcast hash join in this plan")
+        }
+        rewritten
       }
     }
   }

@@ -17,11 +17,13 @@ package org.apache.spark.sql.rapids.execution
 
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 
+import com.nvidia.spark.rapids.{GpuMetric, GpuOpTimeTrackingRDD}
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.{HashPartitioner, NarrowDependency, ShuffleDependency, SparkConf, SparkContext, SparkEnv, TaskContext}
 import org.apache.spark.shuffle.FetchFailedException
+import org.apache.spark.sql.execution.metric.SQLMetrics
 
 private object BroadcastReplicaRetryState {
   @volatile var firstBuilt = new CountDownLatch(1)
@@ -148,6 +150,26 @@ class GpuDriverlessBroadcastJoinRDDSuite extends AnyFunSuite with BeforeAndAfter
     } finally {
       BroadcastReplicaRetryState.caches.foreach(_.close())
     }
+  }
+
+
+  test("operator timing includes initialization before the first output batch") {
+    val opTime = GpuMetric.wrap(SQLMetrics.createNanoTimingMetric(context, "join op time"))
+    val initializationTime = context.longAccumulator("join initialization")
+    val joined = new GpuDriverlessBroadcastJoinRDD[Int, Int, Int](
+      context.parallelize(Seq(1), 1), context.parallelize(Seq(2), 1),
+      (input, openBuild) => {
+        val start = System.nanoTime()
+        Thread.sleep(100)
+        val values = openBuild().toVector
+        initializationTime.add(System.nanoTime() - start)
+        input.map(_ + values.head)
+      })
+    val tracked = new GpuOpTimeTrackingRDD(joined, opTime, Seq.empty)
+    assert(tracked.collect().toSeq == Seq(3))
+    assert(initializationTime.value > 0)
+    assert(opTime.value >= initializationTime.value,
+      "Build/cache initialization must execute inside the iterator timing boundary")
   }
 
 }

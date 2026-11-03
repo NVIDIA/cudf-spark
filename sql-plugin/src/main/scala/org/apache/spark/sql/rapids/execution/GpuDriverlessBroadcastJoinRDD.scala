@@ -62,8 +62,17 @@ private[execution] class GpuDriverlessBroadcastJoinRDD[A: ClassTag, B: ClassTag,
 
   override def compute(split: Partition, context: TaskContext): Iterator[C] = {
     val part = split.asInstanceOf[GpuDriverlessBroadcastJoinPartition]
-    val stream = streamRdd.iterator(part.streamPartition, context)
-    join(stream, () => buildRdd.iterator(part.buildPartition, context))
+    // Operator timing wraps iterator consumption, not RDD.compute. Defer build/cache work
+    // until consumption so it is timed and unused consumers do not initialize a build.
+    new Iterator[C] {
+      private lazy val delegate = {
+        context.killTaskIfInterrupted()
+        val stream = streamRdd.iterator(part.streamPartition, context)
+        join(stream, () => buildRdd.iterator(part.buildPartition, context))
+      }
+      override def hasNext: Boolean = delegate.hasNext
+      override def next(): C = delegate.next()
+    }
   }
 
   override def getDependencies: Seq[Dependency[_]] = Seq(

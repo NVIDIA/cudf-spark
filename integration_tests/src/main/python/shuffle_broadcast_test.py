@@ -15,7 +15,7 @@
 import pytest
 from pyspark.sql.functions import broadcast
 
-from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, collect_plan_nodes
+from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture
 from marks import ignore_order, shuffle_test
 from spark_init_internal import get_spark_i_know_what_i_am_doing
 
@@ -27,9 +27,8 @@ def _require_ucx():
     startup = get_spark_i_know_what_i_am_doing().sparkContext.getConf()
     if not startup.get('spark.shuffle.manager', '').endswith('RapidsShuffleManager') or \
             startup.get('spark.rapids.shuffle.mode', 'MULTITHREADED').upper() != 'UCX' or \
-            startup.get('spark.rapids.shuffle.compression.codec', 'none').lower() != 'none' or \
             startup.get('spark.rapids.sql.driverlessBroadcast.enabled', 'false').lower() != 'true':
-        pytest.skip('Requires application startup opt-in and an uncompressed UCX shuffle manager')
+        pytest.skip('Requires application startup opt-in and a UCX shuffle manager')
 
 
 def _join(spark, join_type, build_side):
@@ -48,8 +47,21 @@ def _join(spark, join_type, build_side):
         (left.left_key == right.right_key) & (left.left_value > right.right_value), join_type)
 
 
+def _executed_nodes(plan):
+    name = plan.getClass().getSimpleName()
+    if name == 'AdaptiveSparkPlanExec':
+        return _executed_nodes(plan.executedPlan())
+    if name.endswith('QueryStageExec'):
+        return _executed_nodes(plan.plan())
+    nodes = [plan]
+    children = plan.children().iterator()
+    while children.hasNext():
+        nodes.extend(_executed_nodes(children.next()))
+    return nodes
+
+
 def _native_join(plan):
-    joins = [node for node in collect_plan_nodes(plan)
+    joins = [node for node in _executed_nodes(plan)
              if node.getClass().getSimpleName() == 'GpuDriverlessBroadcastHashJoinExec']
     assert len(joins) == 1, f'Expected one executor broadcast join:\n{plan}'
     return joins[0]
@@ -65,10 +77,12 @@ _conf = {
 
 
 @ignore_order(local=True)
+@pytest.mark.parametrize('aqe', ['false', 'true'])
 @pytest.mark.parametrize('join_type,build_side', [
     ('inner', 'left'), ('inner', 'right'), ('left_outer', 'right'),
     ('right_outer', 'left'), ('left_semi', 'right'), ('left_anti', 'right')])
-def test_executor_broadcast_preserves_null_duplicate_and_residual_semantics(join_type, build_side):
+def test_executor_broadcast_preserves_null_duplicate_and_residual_semantics(
+        join_type, build_side, aqe):
     _require_ucx()
 
     def check_native(cpu_plan, gpu_plan):
@@ -79,7 +93,8 @@ def test_executor_broadcast_preserves_null_duplicate_and_residual_semantics(join
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: _join(spark, join_type, build_side),
-        conf=_conf, gpu_plan_assertion=check_native, require_non_empty=True)
+        conf=dict(_conf, **{'spark.sql.adaptive.enabled': aqe}),
+        gpu_plan_assertion=check_native, require_non_empty=True)
 
 
 @ignore_order(local=True)
@@ -91,6 +106,17 @@ def test_executor_broadcast_rejects_oversized_build_before_executor_assembly():
         assert join.metrics().apply('runtimeFallbacks').value() == 1
         assert join.metrics().apply('executorBuilds').value() == 0
         assert join.fallbackBroadcast().metrics().apply('dataSize').value() > 0
+        spark = get_spark_i_know_what_i_am_doing()
+        spark.sparkContext._jsc.sc().listenerBus().waitUntilEmpty(30000)
+        store = spark._jsparkSession.sharedState().statusStore()
+        metric_id = join.metrics().apply('runtimeFallbacks').id()
+        published = []
+        executions = store.executionsList().iterator()
+        while executions.hasNext():
+            values = store.executionMetrics(executions.next().executionId())
+            if values.contains(metric_id):
+                published.append(values.apply(metric_id))
+        assert published == ['1'], f'Fallback count not published to SQL UI: {published}'
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: _join(spark, 'inner', 'right'),
@@ -134,3 +160,48 @@ def test_executor_broadcast_nondeterministic_build_keeps_standard_path():
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         query, conf=_conf, exist_classes='GpuBroadcastHashJoinExec',
         non_exist_classes='GpuDriverlessBroadcastHashJoinExec', require_non_empty=True)
+
+
+@ignore_order(local=True)
+def test_executor_broadcast_aqe_oversized_build_uses_real_standard_broadcast():
+    _require_ucx()
+
+    def check_fallback(cpu_plan, gpu_plan):
+        nodes = _executed_nodes(gpu_plan)
+        assert not any(node.getClass().getSimpleName() ==
+                       'GpuDriverlessBroadcastHashJoinExec' for node in nodes)
+        joins = [node for node in nodes
+                 if node.getClass().getSimpleName() == 'GpuBroadcastHashJoinExec']
+        assert len(joins) == 1
+        exchange = joins[0].broadcastExchange()
+        assert exchange.metrics().apply('driverlessStageFallbacks').value() == 1
+        assert exchange.metrics().apply('driverlessBuildBytes').value() == 0
+        assert exchange.metrics().apply('dataSize').value() > 0
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: _join(spark, 'inner', 'right'),
+        conf=dict(_conf, **{'spark.sql.adaptive.enabled': 'true',
+                           'spark.rapids.sql.driverlessBroadcast.maxSize': '1'}),
+        gpu_plan_assertion=check_fallback, require_non_empty=True)
+
+
+@ignore_order(local=True)
+def test_executor_broadcast_aqe_converts_an_initial_shuffle_join():
+    _require_ucx()
+
+    def query(spark):
+        left = spark.range(128, numPartitions=8).selectExpr('id % 11 AS key', 'id AS probe')
+        right = spark.range(24, numPartitions=4).selectExpr('id % 11 AS key', 'id AS build')
+        return left.join(right, 'key')
+
+    def check_native(cpu_plan, gpu_plan):
+        join = _native_join(gpu_plan)
+        assert join.metrics().apply('executorBuilds').value() > 0
+        assert join.fallbackBroadcast().metrics().apply('driverlessBuildBytes').value() > 0
+        assert join.fallbackBroadcast().metrics().apply('collectTime').value() == 0
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        query, conf=dict(_conf, **{'spark.sql.adaptive.enabled': 'true',
+                                  'spark.sql.autoBroadcastJoinThreshold': '-1',
+                                  'spark.sql.adaptive.autoBroadcastJoinThreshold': '1m'}),
+        gpu_plan_assertion=check_native, require_non_empty=True)

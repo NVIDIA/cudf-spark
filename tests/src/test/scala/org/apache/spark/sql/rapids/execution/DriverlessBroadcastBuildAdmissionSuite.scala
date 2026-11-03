@@ -41,6 +41,8 @@ class DriverlessBroadcastBuildAdmissionSuite extends AnyFunSuite {
     assert(DriverlessBroadcastBuildAdmission.supportsPlan(scan))
     val randomProject = ProjectExec(Seq(Alias(Rand(Literal(42L)), "value")()), scan)
     assert(!DriverlessBroadcastBuildAdmission.supportsPlan(randomProject))
+    assert(DriverlessBroadcastBuildAdmission.rejectionReason(randomProject)
+      .exists(_.contains("non-deterministic")))
     val randomFilter = FilterExec(LessThan(Rand(Literal(42L)), Literal(0.5d)), scan)
     val deterministicProject = ProjectExec(Seq(key), randomFilter)
     assert(!DriverlessBroadcastBuildAdmission.supportsPlan(deterministicProject))

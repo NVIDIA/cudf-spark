@@ -29,11 +29,14 @@ private[execution] object GpuDriverlessBroadcastHelper {
       input: Iterator[ColumnarBatch],
       schema: StructType,
       output: Seq[Attribute],
-      metrics: Map[String, GpuMetric]): ColumnarBatch = {
-    val coalesced = new GpuCoalesceIterator(input, GpuColumnVector.extractTypes(schema),
-      RequireSingleBatch, NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric,
+      metrics: Map[String, GpuMetric],
+      codecConfigs: TableCompressionCodecConfig,
+      maxDecompressBatchMemory: Long): ColumnarBatch = {
+    val coalesced = new GpuCompressionAwareCoalesceIterator(
+      input, GpuColumnVector.extractTypes(schema), RequireSingleBatch,
+      maxDecompressBatchMemory, NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric,
       metrics(GpuMetric.CONCAT_TIME), metrics(GpuMetric.OP_TIME_LEGACY),
-      "executor broadcast build") with AutoCloseable {
+      "executor broadcast build", codecConfigs) with AutoCloseable {
       override def cleanupConcatIsDone(): Unit = {
         // An input failure can leave earlier batches waiting for concatenation.
         try batches.safeClose() finally batches.clear()

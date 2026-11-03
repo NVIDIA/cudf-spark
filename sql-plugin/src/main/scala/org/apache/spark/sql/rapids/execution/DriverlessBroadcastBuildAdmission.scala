@@ -22,15 +22,22 @@ import org.apache.spark.sql.types._
 
 /** Admission uses completed shuffle metrics and a conservative bound on the assembled layout. */
 private[execution] object DriverlessBroadcastBuildAdmission {
-  def supportsPlan(plan: SparkPlan): Boolean =
-    supportsSchema(plan.schema) &&
-      !plan.exists { node =>
-        val opaqueSource = node match {
-          case _: RDDScanExec | _: ExternalRDDScanExec[_] => true
-          case _ => false
-        }
-        opaqueSource || node.expressions.exists(!_.deterministic)
-      }
+  def supportsPlan(plan: SparkPlan): Boolean = rejectionReason(plan).isEmpty
+
+  def rejectionReason(plan: SparkPlan): Option[String] = {
+    if (!supportsSchema(plan.schema)) {
+      Some(s"unsupported build schema: ${plan.schema.simpleString}")
+    } else if (plan.exists {
+      case _: RDDScanExec | _: ExternalRDDScanExec[_] => true
+      case _ => false
+    }) {
+      Some("opaque RDD build source")
+    } else if (plan.exists(_.expressions.exists(!_.deterministic))) {
+      Some("non-deterministic build expression")
+    } else {
+      None
+    }
+  }
 
   def waitTimeout(seconds: Long): Duration = {
     // SQLConf represents a disabled broadcast timeout as Long.MaxValue seconds.
