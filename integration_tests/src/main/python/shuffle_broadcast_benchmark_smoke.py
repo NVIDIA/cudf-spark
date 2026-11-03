@@ -36,6 +36,14 @@ def digit_sum(count):
     return total
 
 
+def task_devices(partition):
+    import socket
+    from pyspark import TaskContext
+    context = TaskContext.get()
+    assert 'gpu' in context.resources(), 'No GPU resource was assigned to a task'
+    yield socket.gethostname(), tuple(context.resources()['gpu'].addresses)
+
+
 def main():
     spark = SparkSession.builder.appName('executor-broadcast-large-build-ab').getOrCreate()
     try:
@@ -56,6 +64,18 @@ def main():
             'spark.sql.ansi.enabled': 'false',
         }.items():
             spark.conf.set(key, value)
+        if spark.sparkContext.getConf().get('spark.executor.resource.gpu.amount', '0') == '1':
+            assert spark.sparkContext.getConf().get('spark.task.resource.gpu.amount') == '0.5'
+            observations = spark.sparkContext.parallelize(
+                range(expected_builds * 2), expected_builds * 2).barrier() \
+                .mapPartitions(task_devices).collect()
+            devices = set(observations)
+            expected_hosts = int(os.environ['BROADCAST_BENCH_EXPECTED_NODES'])
+            assert len(devices) == expected_builds, devices
+            assert len({host for host, _ in devices}) == expected_hosts, devices
+            assert all(len(addresses) == 1 for _, addresses in devices), devices
+            print(json.dumps(dict(case='task-gpu-assignment', result='PASS',
+                                  devices=sorted(devices))), flush=True)
         for iteration in range(2):
             for enabled in (False, True):
                 spark.conf.set('spark.rapids.shuffle.broadcast.enabled', str(enabled).lower())
