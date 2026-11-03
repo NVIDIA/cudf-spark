@@ -96,10 +96,12 @@ def check_late_fallback_cancellation(spark, root):
                 Path(first_pass).write_text('initial build evaluated\n')
         return value
 
-    probe = spark.range(128, numPartitions=8).selectExpr('id AS key')
-    probe = probe.filter('key < (SELECT max(id) FROM range(96))')
-    build = spark.range(64, numPartitions=4).select(slow_second_build(col('id')).alias('bk'))
-    frame = probe.join(broadcast(build), probe.key == build.bk)
+    probe = spark.range(128, numPartitions=8).selectExpr('id % 11 AS key', 'id AS probe')
+    probe = probe.filter('probe < (SELECT max(id) FROM range(96))')
+    # Keep the pause UDF out of the join key: null filtering can duplicate a key UDF.
+    build = spark.range(64, numPartitions=4).select(
+        (col('id') % 11).alias('bk'), slow_second_build(col('id')).alias('payload'))
+    frame = probe.join(broadcast(build), probe.key == build.bk).select('key', 'payload')
     outcome = []
 
     def collect():
@@ -122,7 +124,8 @@ def check_late_fallback_cancellation(spark, root):
                      if node.getClass().getSimpleName() == 'GpuBroadcastExchangeExec']
         assert len(exchanges) == 1
         exchange = exchanges[0]
-        assert exchange.metrics().apply('driverlessBuildBytes').value() > 0
+        assert exchange.metrics().apply('driverlessBuildBytes').value() > 0, \
+            frame._jdf.queryExecution().executedPlan().toString()
         assert exchange.completionFuture().isCompleted(), 'The AQE token must be complete'
         future = exchange.relationFuture()
         assert not future.isDone(), 'Spark must see the pending standard fallback'
