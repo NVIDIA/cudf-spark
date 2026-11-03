@@ -82,6 +82,69 @@ def wait_idle(spark):
     raise AssertionError('Executors still report active tasks after query cancellation')
 
 
+def check_late_fallback_cancellation(spark, root):
+    first_pass = str(root / 'late-fallback-first-pass')
+    second_pass = str(root / 'late-fallback-second-pass')
+
+    @udf(LongType())
+    def slow_second_build(value):
+        if value == 0:
+            if Path(first_pass).exists():
+                Path(second_pass).write_text('standard fallback is rebuilding\n')
+                time.sleep(45)
+            else:
+                Path(first_pass).write_text('initial build evaluated\n')
+        return value
+
+    probe = spark.range(128, numPartitions=8).selectExpr('id AS key')
+    probe = probe.filter('key < (SELECT max(id) FROM range(96))')
+    build = spark.range(64, numPartitions=4).select(slow_second_build(col('id')).alias('bk'))
+    frame = probe.join(broadcast(build), probe.key == build.bk)
+    outcome = []
+
+    def collect():
+        try:
+            outcome.append(('success', frame.collect()))
+        except Exception as error:
+            outcome.append(('failure', str(error)))
+
+    worker = InheritableThread(target=collect, daemon=True)
+    worker.start()
+    exchange = None
+    future = None
+    try:
+        deadline = time.monotonic() + 40
+        while not Path(second_pass).exists() and time.monotonic() < deadline:
+            assert worker.is_alive(), outcome
+            time.sleep(0.1)
+        assert Path(second_pass).exists(), 'The test must reach the second build scan'
+        exchanges = [node for node in nodes(frame._jdf.queryExecution().executedPlan())
+                     if node.getClass().getSimpleName() == 'GpuBroadcastExchangeExec']
+        assert len(exchanges) == 1
+        exchange = exchanges[0]
+        assert exchange.metrics().apply('driverlessBuildBytes').value() > 0
+        assert exchange.completionFuture().isCompleted(), 'The AQE token must be complete'
+        future = exchange.relationFuture()
+        assert not future.isDone(), 'Spark must see the pending standard fallback'
+        stage = spark._jvm.org.apache.spark.sql.execution.adaptive.BroadcastQueryStageExec(
+            999, exchange, exchange.cpuCanonical())
+        stage.cancel()
+        worker.join(30)
+        assert future.isCancelled(), 'AQE did not cancel the actual fallback future'
+        assert not worker.is_alive(), 'The cancelled fallback still blocks the query'
+        assert len(outcome) == 1 and outcome[0][0] == 'failure', outcome
+        assert 'cancel' in outcome[0][1].lower() or 'interrupt' in outcome[0][1].lower()
+        wait_idle(spark)
+        shuffle_id = exchange.admittedDriverlessShuffle().get().shuffleId()
+        spark.sparkContext._jsc.sc().cleaner().get().doCleanupShuffle(shuffle_id, True)
+        print(json.dumps(dict(case='aqe-cancels-late-standard-fallback', result='PASS')),
+              flush=True)
+    finally:
+        if future is not None and not future.isDone():
+            future.cancel(True)
+        worker.join(5)
+
+
 def main():
     spark = SparkSession.builder.appName('executor-broadcast-failures').getOrCreate()
     sc = spark.sparkContext
@@ -231,6 +294,7 @@ def main():
             assert exchanges[0].metrics().apply('collectTime').value() == 0
             wait_idle(spark)
             print(json.dumps(dict(case='aqe-cancels-in-flight-build', result='PASS')), flush=True)
+            check_late_fallback_cancellation(spark, root)
 
         for iteration in range(3):
             frame = query(spark)
