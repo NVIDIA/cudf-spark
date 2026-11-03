@@ -31,7 +31,7 @@ class GpuShuffleBroadcastHelperSuite extends RmmSparkRetrySuiteBase {
     GpuMetric.CONCAT_TIME -> NoopMetric, GpuMetric.OP_TIME_LEGACY -> NoopMetric)
 
   private def batch(column: ColumnVector): ColumnarBatch =
-    new ColumnarBatch(Array(new GpuColumnVector(ByteType, column.incRefCount())),
+    new ColumnarBatch(Array(GpuColumnVector.from(column.incRefCount(), ByteType)),
       column.getRowCount.toInt)
 
   test("accept an actual build exactly at the byte ceiling") {
@@ -84,6 +84,7 @@ class GpuShuffleBroadcastHelperSuite extends RmmSparkRetrySuiteBase {
           assert(result.numRows() == 32769)
           GpuColumnVector.getTotalDeviceMemoryUsed(result)
         }
+        info(s"received bytes=$inputBytes, assembled bytes=$assembledBytes")
         assert(assembledBytes > inputBytes, "The test must exercise concatenation growth")
         val handles = SpillFramework.stores.deviceStore.numHandles
         val before = Rmm.getTotalBytesAllocated
