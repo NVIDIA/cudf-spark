@@ -135,6 +135,13 @@ class HostColumnarBatchWithRowRange private (
     var success = false
     try {
       dtype match {
+        // A zero-row slice reads no offsets. A child that never got a value has none, so build
+        // the slice the way the builder builds such a child: no offsets and no data.
+        case DType.LIST if numRows == 0 =>
+          children.add(sliceHostColumn(col.getChildColumnView(0), 0, 0))
+
+        case DType.STRING if numRows == 0 =>
+
         case DType.LIST =>
           // Offsets map rows -> child element indices
           val origOffsets = col.getOffsets

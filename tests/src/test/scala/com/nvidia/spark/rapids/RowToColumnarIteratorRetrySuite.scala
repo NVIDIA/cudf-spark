@@ -398,6 +398,67 @@ class RowToColumnarIteratorRetrySuite extends RmmSparkRetrySuiteBase {
     }
   }
 
+  test("test GPU OOM split and retry with array children that never got a value") {
+    // No array below holds a value at the level that matters, so the builder never appends to
+    // the child, which ends up with no rows and no offsets buffer. Nulls go on every 3rd, 4th
+    // and 5th row of the three columns.
+    val emptyChildSchema = StructType(Seq(
+      StructField("id", IntegerType),
+      StructField("strs", ArrayType(StringType)),
+      StructField("arrs", ArrayType(ArrayType(IntegerType))),
+      StructField("empty_strs", ArrayType(ArrayType(StringType)))))
+    def emptyArray: ArrayData = ArrayData.toArrayData(Array.empty[Any])
+    val numRows = 10
+    val rowIter: Iterator[InternalRow] = (1 to numRows).iterator.map { i =>
+      new GenericInternalRow(Array[Any](
+        i,
+        if (i % 3 == 0) null else emptyArray,
+        if (i % 4 == 0) null else emptyArray,
+        if (i % 5 == 0) null else ArrayData.toArrayData(Array[Any](emptyArray))))
+    }
+    val row2ColIter = new RowToColumnarIterator(rowIter, emptyChildSchema, TargetSize(batchSize),
+      batchSize, new GpuRowToColumnConverter(emptyChildSchema))
+
+    RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
+      RmmSpark.OomInjectionType.GPU.ordinal, 0)
+
+    val batches = new ArrayBuffer[ColumnarBatch]()
+    val ids = new ArrayBuffer[Int]()
+    try {
+      while (row2ColIter.hasNext) {
+        val batch = row2ColIter.next()
+        batches += batch
+        withHostColumns(batch) { cols =>
+          val innerStrs = cols(3).getChildColumnView(0)
+          (0 until batch.numRows()).foreach { r =>
+            val id = cols(0).getInt(r)
+            ids += id
+            assertResult(id % 3 == 0, s"strs null at row $id")(cols(1).isNull(r))
+            assertResult(id % 4 == 0, s"arrs null at row $id")(cols(2).isNull(r))
+            assertResult(id % 5 == 0, s"empty_strs null at row $id")(cols(3).isNull(r))
+            Seq(1, 2).foreach { c =>
+              assertResult(0, s"column $c length at row $id")(
+                cols(c).getEndListOffset(r) - cols(c).getStartListOffset(r))
+            }
+            if (id % 5 != 0) {
+              val start = cols(3).getStartListOffset(r)
+              assertResult(1, s"empty_strs length at row $id")(
+                cols(3).getEndListOffset(r) - start)
+              assertResult(0, s"empty_strs inner length at row $id")(
+                innerStrs.getEndListOffset(start) - innerStrs.getStartListOffset(start))
+            }
+          }
+        }
+      }
+
+      assert(batches.length >= 2,
+        s"Expected at least 2 batches after split, got ${batches.length}")
+      assertResult((1 to numRows).toSeq)(ids.toSeq)
+    } finally {
+      batches.foreach(_.close())
+    }
+  }
+
   Seq(true, false).foreach { retry =>
     test("a lowered string limit splits the cache build before the row that crosses it, " +
         retryMode(retry)) {
