@@ -49,7 +49,7 @@ def query(spark, transform=None):
 def native_node(frame):
     plan = frame._jdf.queryExecution().executedPlan()
     matches = [node for node in nodes(plan)
-               if node.getClass().getSimpleName() == 'GpuShuffleBroadcastHashJoinExec']
+               if node.getClass().getSimpleName() == 'GpuDriverlessBroadcastHashJoinExec']
     assert len(matches) == 1, plan.toString()
     return matches[0]
 
@@ -86,8 +86,8 @@ def main():
             'spark.sql.adaptive.enabled': 'false',
             'spark.sql.exchange.reuse': 'false',
             'spark.rapids.sql.join.hashTable.reuse': 'false',
-            'spark.rapids.shuffle.broadcast.enabled': 'true',
-            'spark.rapids.shuffle.broadcast.maxSize': '1g',
+            'spark.rapids.sql.driverlessBroadcast.enabled': 'true',
+            'spark.rapids.sql.driverlessBroadcast.maxSize': '1g',
         }.items():
             spark.conf.set(key, value)
         spark.conf.set('spark.rapids.sql.enabled', 'false')

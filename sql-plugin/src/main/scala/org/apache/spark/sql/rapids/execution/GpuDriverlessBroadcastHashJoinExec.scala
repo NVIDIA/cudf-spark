@@ -15,8 +15,6 @@
  */
 package org.apache.spark.sql.rapids.execution
 
-import scala.concurrent.duration.Duration
-
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.closeOnExcept
 
@@ -38,7 +36,7 @@ import org.apache.spark.util.ThreadUtils
  * The saved broadcast is not a child: preparing this plan must not collect its payload at
  * the driver. It is executed only if the completed shuffle fails runtime admission.
  */
-case class GpuShuffleBroadcastHashJoinExec(
+case class GpuDriverlessBroadcastHashJoinExec(
     leftKeys: Seq[Expression],
     rightKeys: Seq[Expression],
     joinType: JoinType,
@@ -70,7 +68,7 @@ case class GpuShuffleBroadcastHashJoinExec(
       case shuffle: GpuShuffleExchangeExec => shuffle
       case _ => throw new IllegalStateException("Expected a direct GPU build shuffle")
     }
-    val maxBytes = RapidsConf.SHUFFLE_BROADCAST_MAX_SIZE.get(conf)
+    val maxBytes = RapidsConf.DRIVERLESS_BROADCAST_MAX_SIZE.get(conf)
     // Spark incorporates successful map-task accumulator updates before completing this future.
     // Table compression is excluded during planning, so map sizes cannot hide decompression growth.
     val statistics = if (exchange.inputBatchRDD.getNumPartitions == 0) {
@@ -78,7 +76,8 @@ case class GpuShuffleBroadcastHashJoinExec(
     } else {
       val mapStage = sparkContext.submitMapStage(exchange.shuffleDependencyColumnar)
       try {
-        Some(ThreadUtils.awaitResult(mapStage, Duration(conf.broadcastTimeout, "seconds")))
+        val timeout = DriverlessBroadcastBuildAdmission.waitTimeout(conf.broadcastTimeout)
+        Some(ThreadUtils.awaitResult(mapStage, timeout))
       } finally {
         if (!mapStage.isCompleted) {
           mapStage.cancel()
@@ -89,9 +88,9 @@ case class GpuShuffleBroadcastHashJoinExec(
     val partitionBytes = statistics.map(_.bytesByPartitionId).getOrElse(Array.empty[Long])
     val bytes = partitionBytes.foldLeft(BigInt(0))(_ + _)
     val uncompressedBytes = exchange.metrics(GpuShuffleExchangeExecBase.METRIC_DATA_SIZE).value
-    val sizeBound = BroadcastBuildAdmission.upperBound(
+    val sizeBound = DriverlessBroadcastBuildAdmission.upperBound(
       partitionBytes, uncompressedBytes, rows, buildPlan.schema)
-    val admitted = BroadcastBuildAdmission.accepts(sizeBound, maxBytes)
+    val admitted = DriverlessBroadcastBuildAdmission.accepts(sizeBound, maxBytes)
     logInfo(s"Executor broadcast shuffle ${exchange.shuffleId}: rows=$rows, bytes=$bytes, " +
       s"uncompressedBytes=$uncompressedBytes, upperBound=$sizeBound, " +
       s"maxBytes=$maxBytes, admitted=$admitted")
@@ -113,20 +112,22 @@ case class GpuShuffleBroadcastHashJoinExec(
       val joinTime = gpuLongMetric(JOIN_TIME)
       val builds = gpuLongMetric("executorBuilds")
       val joinOptions = RapidsConf.getJoinOptions(conf, RapidsConf.GPU_BATCH_SIZE_BYTES.get(conf))
-      new GpuShuffleBroadcastJoinRDD[ColumnarBatch, ColumnarBatch, ColumnarBatch](
+      new GpuDriverlessBroadcastJoinRDD[ColumnarBatch, ColumnarBatch, ColumnarBatch](
         stream, build, (input, openBuild) => {
           val context = TaskContext.get()
           val streamIter = new CollectTimeIterator(
             NvtxRegistry.BROADCAST_JOIN_STREAM, input, streamTime)
           val built = GpuShuffleEnv.getBroadcastCache.getOrBuild(shuffleId, () => {
             builds += 1
-            val batch = GpuShuffleBroadcastHelper.assemble(
+            val batch = GpuDriverlessBroadcastHelper.assemble(
               openBuild(), schema, output, localMetrics)
             closeOnExcept(batch)(
               SpillableColumnarBatch(_, SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
           }, () => GpuSemaphore.releaseIfNecessary(context),
             () => context.killTaskIfInterrupted(),
-            () => GpuSemaphore.acquireIfNecessary(context)) { cached =>
+            () => GpuSemaphore.acquireIfNecessary(context),
+            generation = ExecutorBroadcastCache.generation(
+              context.stageId(), context.stageAttemptNumber())) { cached =>
             cached.getColumnarBatch()
           }
           doJoin(built, streamIter, joinOptions, numOutputRows, numOutputBatches,
@@ -136,13 +137,13 @@ case class GpuShuffleBroadcastHashJoinExec(
   }
 }
 
-object GpuShuffleBroadcastHashJoinExec {
+object GpuDriverlessBroadcastHashJoinExec {
   private def supportsGpuBuildReads(conf: RapidsConf): Boolean = {
     Option(SparkEnv.get).exists { env =>
       // The shuffle transport and codec are fixed when the application starts. A session
       // override must not make compressed map bytes look like uncompressed GPU build bytes.
       val startup = new RapidsConf(env.conf)
-      startup.isShuffleBroadcastEnabled && startup.isUCXShuffleManagerMode &&
+      startup.isDriverlessBroadcastEnabled && startup.isUCXShuffleManagerMode &&
         startup.shuffleCompressionCodec.equalsIgnoreCase("none") &&
         GpuShuffleEnv.useGPUShuffle(conf)
     }
@@ -150,7 +151,7 @@ object GpuShuffleBroadcastHashJoinExec {
 
   /** Preserve the standard path for unsupported environments and exchange wrappers. */
   def rewrite(plan: SparkPlan, conf: RapidsConf): SparkPlan = {
-    if (!RapidsConf.SHUFFLE_BROADCAST_ENABLED.get(plan.conf) ||
+    if (!RapidsConf.DRIVERLESS_BROADCAST_ENABLED.get(plan.conf) ||
         plan.conf.adaptiveExecutionEnabled || !supportsGpuBuildReads(conf) ||
         SparkSessionUtils.sessionFromPlan(plan).sparkContext.cleaner.isEmpty ||
         RapidsConf.HASH_TABLE_REUSE.get(plan.conf) ||
@@ -168,14 +169,14 @@ object GpuShuffleBroadcastHashJoinExec {
           }
           build match {
             case broadcast: GpuBroadcastExchangeExec
-                if BroadcastBuildAdmission.supportsSchema(broadcast.child.schema) =>
+                if DriverlessBroadcastBuildAdmission.supportsPlan(broadcast.child) =>
               val shuffle = GpuShuffleExchangeExec(GpuSinglePartitioning, broadcast.child,
                 ENSURE_REQUIREMENTS)(GpuSinglePartitioning)
               val (left, right) = join.buildSide match {
                 case GpuBuildLeft => (shuffle, join.right)
                 case GpuBuildRight => (join.left, shuffle)
               }
-              GpuShuffleBroadcastHashJoinExec(join.leftKeys, join.rightKeys, join.joinType,
+              GpuDriverlessBroadcastHashJoinExec(join.leftKeys, join.rightKeys, join.joinType,
                 join.buildSide, join.condition, left, right, broadcast)
             case _ => join
           }

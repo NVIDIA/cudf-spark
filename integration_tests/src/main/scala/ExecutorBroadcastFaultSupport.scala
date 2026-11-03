@@ -38,7 +38,7 @@ object ExecutorBroadcastFaultSupport {
     require(frame.schema.fields.map(_.dataType).toSeq == Seq(LongType, LongType),
       "This fixture checks complete rows with exactly two long columns")
     val joins = frame.queryExecution.executedPlan.collect {
-      case node if node.getClass.getSimpleName == "GpuShuffleBroadcastHashJoinExec" => node
+      case node if node.getClass.getSimpleName == "GpuDriverlessBroadcastHashJoinExec" => node
     }
     require(joins.size == 1, s"Expected one executor broadcast join, found ${joins.size}")
     val join = joins.head

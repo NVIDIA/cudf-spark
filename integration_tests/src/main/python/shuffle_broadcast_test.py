@@ -28,7 +28,7 @@ def _require_ucx():
     if not startup.get('spark.shuffle.manager', '').endswith('RapidsShuffleManager') or \
             startup.get('spark.rapids.shuffle.mode', 'MULTITHREADED').upper() != 'UCX' or \
             startup.get('spark.rapids.shuffle.compression.codec', 'none').lower() != 'none' or \
-            startup.get('spark.rapids.shuffle.broadcast.enabled', 'false').lower() != 'true':
+            startup.get('spark.rapids.sql.driverlessBroadcast.enabled', 'false').lower() != 'true':
         pytest.skip('Requires application startup opt-in and an uncompressed UCX shuffle manager')
 
 
@@ -50,7 +50,7 @@ def _join(spark, join_type, build_side):
 
 def _native_join(plan):
     joins = [node for node in collect_plan_nodes(plan)
-             if node.getClass().getSimpleName() == 'GpuShuffleBroadcastHashJoinExec']
+             if node.getClass().getSimpleName() == 'GpuDriverlessBroadcastHashJoinExec']
     assert len(joins) == 1, f'Expected one executor broadcast join:\n{plan}'
     return joins[0]
 
@@ -58,8 +58,8 @@ def _native_join(plan):
 _conf = {
     'spark.sql.adaptive.enabled': 'false',
     'spark.sql.exchange.reuse': 'false',
-    'spark.rapids.shuffle.broadcast.enabled': 'true',
-    'spark.rapids.shuffle.broadcast.maxSize': '1g',
+    'spark.rapids.sql.driverlessBroadcast.enabled': 'true',
+    'spark.rapids.sql.driverlessBroadcast.maxSize': '1g',
     'spark.rapids.sql.join.hashTable.reuse': 'false',
 }
 
@@ -94,7 +94,7 @@ def test_executor_broadcast_rejects_oversized_build_before_executor_assembly():
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: _join(spark, 'inner', 'right'),
-        conf=dict(_conf, **{'spark.rapids.shuffle.broadcast.maxSize': '1'}),
+        conf=dict(_conf, **{'spark.rapids.sql.driverlessBroadcast.maxSize': '1'}),
         gpu_plan_assertion=check_fallback, require_non_empty=True)
 
 
@@ -102,6 +102,35 @@ def test_executor_broadcast_rejects_oversized_build_before_executor_assembly():
 def test_executor_broadcast_disabled_keeps_standard_broadcast():
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: _join(spark, 'inner', 'right'),
-        conf=dict(_conf, **{'spark.rapids.shuffle.broadcast.enabled': 'false'}),
+        conf=dict(_conf, **{'spark.rapids.sql.driverlessBroadcast.enabled': 'false'}),
         exist_classes='GpuBroadcastHashJoinExec',
-        non_exist_classes='GpuShuffleBroadcastHashJoinExec', require_non_empty=True)
+        non_exist_classes='GpuDriverlessBroadcastHashJoinExec', require_non_empty=True)
+
+
+@ignore_order(local=True)
+def test_executor_broadcast_with_infinite_timeout():
+    _require_ucx()
+
+    def check_native(cpu_plan, gpu_plan):
+        join = _native_join(gpu_plan)
+        assert join.metrics().apply('executorBuilds').value() > 0
+        assert join.metrics().apply('runtimeFallbacks').value() == 0
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: _join(spark, 'inner', 'right'),
+        conf=dict(_conf, **{'spark.sql.broadcastTimeout': '-1'}),
+        gpu_plan_assertion=check_native, require_non_empty=True)
+
+
+@ignore_order(local=True)
+def test_executor_broadcast_nondeterministic_build_keeps_standard_path():
+    _require_ucx()
+
+    def query(spark):
+        left = spark.range(128, numPartitions=8).selectExpr('id % 11 AS key', 'id AS probe')
+        right = spark.range(24, numPartitions=4).selectExpr('id % 11 AS key', 'rand(17) AS value')
+        return left.join(broadcast(right), 'key')
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        query, conf=_conf, exist_classes='GpuBroadcastHashJoinExec',
+        non_exist_classes='GpuDriverlessBroadcastHashJoinExec', require_non_empty=True)

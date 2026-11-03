@@ -15,10 +15,33 @@
  */
 package org.apache.spark.sql.rapids.execution
 
+import scala.concurrent.duration.{Duration, SECONDS}
+
+import org.apache.spark.sql.execution.{ExternalRDDScanExec, RDDScanExec, SparkPlan}
 import org.apache.spark.sql.types._
 
 /** Admission uses completed shuffle metrics and a conservative bound on the assembled layout. */
-private[execution] object BroadcastBuildAdmission {
+private[execution] object DriverlessBroadcastBuildAdmission {
+  def supportsPlan(plan: SparkPlan): Boolean =
+    supportsSchema(plan.schema) &&
+      !plan.exists { node =>
+        val opaqueSource = node match {
+          case _: RDDScanExec | _: ExternalRDDScanExec[_] => true
+          case _ => false
+        }
+        opaqueSource || node.expressions.exists(!_.deterministic)
+      }
+
+  def waitTimeout(seconds: Long): Duration = {
+    // SQLConf represents a disabled broadcast timeout as Long.MaxValue seconds.
+    // Scala finite durations cannot represent more than Long.MaxValue nanoseconds.
+    if (seconds < 0 || seconds > Long.MaxValue / 1000000000L) {
+      Duration.Inf
+    } else {
+      Duration(seconds, SECONDS)
+    }
+  }
+
   private def supportsType(dataType: DataType): Boolean = dataType match {
     case BooleanType | ByteType | ShortType | IntegerType | LongType | FloatType | DoubleType |
          DateType | TimestampType | TimestampNTZType | NullType => true

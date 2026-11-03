@@ -31,7 +31,7 @@ import org.apache.spark.sql.rapids.execution.ExecutorBroadcastCache
 class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
   private[rapids] val broadcastCache = {
     val enabled = Option(SparkEnv.get).exists { env =>
-      new RapidsConf(env.conf).isShuffleBroadcastEnabled
+      new RapidsConf(env.conf).isDriverlessBroadcastEnabled
     }
     if (enabled) {
       Some(new ExecutorBroadcastCache[SpillableColumnarBatch](owned => {

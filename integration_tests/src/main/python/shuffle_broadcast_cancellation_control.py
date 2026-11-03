@@ -35,7 +35,7 @@ def main():
     try:
         spark.conf.set('spark.sql.adaptive.enabled', 'false')
         spark.conf.set('spark.rapids.sql.join.hashTable.reuse', 'false')
-        spark.conf.set('spark.rapids.shuffle.broadcast.enabled', 'false')
+        spark.conf.set('spark.rapids.sql.driverlessBroadcast.enabled', 'false')
         spark.conf.set('spark.rapids.sql.enabled', 'false')
         expected = sorted(tuple(row) for row in query(spark).collect())
         spark.conf.set('spark.rapids.sql.enabled', 'true')

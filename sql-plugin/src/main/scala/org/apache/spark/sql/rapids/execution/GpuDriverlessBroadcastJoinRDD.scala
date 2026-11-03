@@ -23,7 +23,7 @@ import org.apache.spark.{Dependency, NarrowDependency, OneToOneDependency, Parti
 import org.apache.spark.rdd.RDD
 import org.apache.spark.util.Utils
 
-private class GpuShuffleBroadcastJoinPartition(
+private class GpuDriverlessBroadcastJoinPartition(
     override val index: Int,
     @transient private val streamRdd: RDD[_],
     @transient private val buildRdd: RDD[_]) extends Partition {
@@ -42,26 +42,26 @@ private class GpuShuffleBroadcastJoinPartition(
  * Makes the single-partition build an explicit dependency of every streamed partition.
  * The consumer opens the build reader only when its executor needs to populate the build cache.
  */
-private[execution] class GpuShuffleBroadcastJoinRDD[A: ClassTag, B: ClassTag, C: ClassTag](
+private[execution] class GpuDriverlessBroadcastJoinRDD[A: ClassTag, B: ClassTag, C: ClassTag](
     private var streamRdd: RDD[A],
     private var buildRdd: RDD[B],
     join: (Iterator[A], () => Iterator[B]) => Iterator[C])
     extends RDD[C](streamRdd.context, Nil) {
 
   require(buildRdd.getNumPartitions == 1,
-    s"shuffle broadcast requires one build partition, found ${buildRdd.getNumPartitions}")
+    s"driverless broadcast requires one build partition, found ${buildRdd.getNumPartitions}")
 
   override protected def getPartitions: Array[Partition] = streamRdd.partitions.map { part =>
-    new GpuShuffleBroadcastJoinPartition(part.index, streamRdd, buildRdd)
+    new GpuDriverlessBroadcastJoinPartition(part.index, streamRdd, buildRdd)
   }
 
   override def getPreferredLocations(split: Partition): Seq[String] = {
-    val part = split.asInstanceOf[GpuShuffleBroadcastJoinPartition]
+    val part = split.asInstanceOf[GpuDriverlessBroadcastJoinPartition]
     streamRdd.preferredLocations(part.streamPartition)
   }
 
   override def compute(split: Partition, context: TaskContext): Iterator[C] = {
-    val part = split.asInstanceOf[GpuShuffleBroadcastJoinPartition]
+    val part = split.asInstanceOf[GpuDriverlessBroadcastJoinPartition]
     val stream = streamRdd.iterator(part.streamPartition, context)
     join(stream, () => buildRdd.iterator(part.buildPartition, context))
   }

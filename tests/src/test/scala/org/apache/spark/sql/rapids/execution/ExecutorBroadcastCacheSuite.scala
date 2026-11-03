@@ -33,6 +33,53 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
 
   private val noAction: () => Unit = () => ()
 
+  test("retired ordinary shuffles keep only compact IDs and reject late builders") {
+    val cache = new ExecutorBroadcastCache[Value](_.release())
+    try {
+      (0 until 100000).foreach(cache.invalidate)
+      assert(cache.activeEntryCount == 0)
+      assert(cache.retiredShuffleCount == 100000)
+      assert(cache.retiredStateBytes < 64 * 1024)
+      Seq(0, 50000, 99999).foreach { id =>
+        intercept[IllegalStateException] {
+          cache.getOrBuild(id, () => fail("Retired ID must not build"),
+            noAction, noAction)(_.retain())
+        }
+      }
+      cache.close()
+      assert(cache.retiredShuffleCount == 0)
+    } finally {
+      cache.close()
+    }
+  }
+
+  test("a new consumer stage attempt builds a fresh replica and cleanup releases both") {
+    val cache = new ExecutorBroadcastCache[Value](_.release())
+    val first = new Value
+    val retry = new Value
+    val originalGeneration = ExecutorBroadcastCache.generation(7, 0)
+    val retryGeneration = ExecutorBroadcastCache.generation(7, 1)
+    assert(originalGeneration != retryGeneration)
+    assert(retryGeneration != ExecutorBroadcastCache.generation(8, 0))
+    try {
+      val originalBorrow = cache.getOrBuild(42, () => first, noAction, noAction,
+        generation = originalGeneration)(_.retain())
+      val retryBorrow = cache.getOrBuild(42, () => retry, noAction, noAction,
+        generation = retryGeneration)(_.retain())
+      assert(originalBorrow eq first)
+      assert(retryBorrow eq retry)
+      assert(cache.activeEntryCount == 2)
+      cache.invalidate(42)
+      assert(cache.activeEntryCount == 0)
+      assert(first.references == 1 && retry.references == 1)
+      originalBorrow.release()
+      retryBorrow.release()
+      assert(first.references == 0 && retry.references == 0)
+    } finally {
+      cache.close()
+    }
+  }
+
   test("consumers share one build and keep independent references after invalidation") {
     val cache = new ExecutorBroadcastCache[Value](_.release())
     val value = new Value

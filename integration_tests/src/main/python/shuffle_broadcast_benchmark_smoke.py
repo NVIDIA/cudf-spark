@@ -60,7 +60,7 @@ def main():
             'spark.sql.adaptive.enabled': 'false',
             'spark.sql.exchange.reuse': 'false',
             'spark.rapids.sql.join.hashTable.reuse': 'false',
-            'spark.rapids.shuffle.broadcast.maxSize': '1g',
+            'spark.rapids.sql.driverlessBroadcast.maxSize': '1g',
             'spark.sql.ansi.enabled': 'false',
         }.items():
             spark.conf.set(key, value)
@@ -78,7 +78,7 @@ def main():
                                   devices=sorted(devices))), flush=True)
         for iteration in range(2):
             for enabled in (False, True):
-                spark.conf.set('spark.rapids.shuffle.broadcast.enabled', str(enabled).lower())
+                spark.conf.set('spark.rapids.sql.driverlessBroadcast.enabled', str(enabled).lower())
                 started = time.monotonic()
                 probe = spark.range(probe_rows, numPartitions=32).selectExpr(
                     'id', f'id % {build_rows} AS k')
@@ -91,7 +91,7 @@ def main():
                 actual = tuple(frame.collect()[0])
                 elapsed = time.monotonic() - started
                 assert actual == expected, (actual, expected)
-                name = 'GpuShuffleBroadcastHashJoinExec' if enabled else 'GpuBroadcastHashJoinExec'
+                name = 'GpuDriverlessBroadcastHashJoinExec' if enabled else 'GpuBroadcastHashJoinExec'
                 matches = [node for node in nodes(frame._jdf.queryExecution().executedPlan())
                            if node.getClass().getSimpleName() == name]
                 assert len(matches) == 1, frame._jdf.queryExecution().executedPlan().toString()

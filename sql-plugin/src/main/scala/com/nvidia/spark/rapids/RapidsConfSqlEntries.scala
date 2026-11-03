@@ -23,18 +23,19 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
 
   // ENABLE/DISABLE PROCESSING
 
-  val SHUFFLE_BROADCAST_ENABLED = conf("spark.rapids.shuffle.broadcast.enabled")
+  val DRIVERLESS_BROADCAST_ENABLED = conf("spark.rapids.sql.driverlessBroadcast.enabled")
     .doc("Use executor-to-executor GPU shuffle reads for eligible broadcast hash joins. " +
       "Must be enabled at application startup; it can then be disabled per query. " +
       "Requires UCX shuffle without table compression, AQE disabled, and hash-table reuse " +
       "disabled. Null-aware anti joins, reused exchanges, and plans containing subqueries " +
-      "retain the standard path. Only supported flat scalar build schemas are eligible. " +
+      "retain the standard path. Only deterministic builds with supported flat scalar schemas " +
+      "are eligible. Opaque RDD sources retain standard broadcast. " +
       "Builds without a safe assembled-size bound use standard broadcast.")
     .internal()
     .booleanConf
     .createWithDefault(false)
 
-  val SHUFFLE_BROADCAST_MAX_SIZE = conf("spark.rapids.shuffle.broadcast.maxSize")
+  val DRIVERLESS_BROADCAST_MAX_SIZE = conf("spark.rapids.sql.driverlessBroadcast.maxSize")
     .doc("Maximum conservative build-size bound admitted to executor-to-executor broadcast. " +
       "Completed shuffle bytes, full validity masks, and string offsets are included. " +
       "The driver selects standard broadcast if the bound exceeds this limit or is unavailable. " +

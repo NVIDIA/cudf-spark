@@ -24,7 +24,7 @@ import org.apache.spark.sql.catalyst.expressions.AttributeReference
 import org.apache.spark.sql.types.{ByteType, StringType, StructField, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
-class GpuShuffleBroadcastHelperSuite extends RmmSparkRetrySuiteBase {
+class GpuDriverlessBroadcastHelperSuite extends RmmSparkRetrySuiteBase {
   private val schema = StructType(Seq(StructField("value", ByteType)))
   private val output = Seq(AttributeReference("value", ByteType)())
   private val metrics: Map[String, GpuMetric] = Map(
@@ -36,7 +36,7 @@ class GpuShuffleBroadcastHelperSuite extends RmmSparkRetrySuiteBase {
 
   test("a single input keeps its data and releases borrowed references") {
     withResource(ColumnVector.fromBytes(1.toByte, 2.toByte)) { column =>
-      withResource(GpuShuffleBroadcastHelper.assemble(
+      withResource(GpuDriverlessBroadcastHelper.assemble(
           Iterator(batch(column)), schema, output, metrics)) { result =>
         assert(result.numRows() == 2)
         withResource(GpuColumnVector.extractBases(result).head.copyToHost()) { host =>
@@ -53,9 +53,9 @@ class GpuShuffleBroadcastHelperSuite extends RmmSparkRetrySuiteBase {
       withResource(ColumnVector.fromBytes(Array.fill[Byte](rows)(1): _*)) { nonNull =>
         withResource(ColumnVector.fromBoxedBytes(null.asInstanceOf[java.lang.Byte])) { nullable =>
           val inputBytes = nonNull.getDeviceMemorySize + nullable.getDeviceMemorySize
-          val bound = BroadcastBuildAdmission.upperBound(
+          val bound = DriverlessBroadcastBuildAdmission.upperBound(
             Array(inputBytes), inputBytes, rows + 1, schema)
-          withResource(GpuShuffleBroadcastHelper.assemble(
+          withResource(GpuDriverlessBroadcastHelper.assemble(
               Iterator(nonNull, nullable).map(batch), schema, output, metrics)) { result =>
             val actualBytes = GpuColumnVector.getTotalDeviceMemoryUsed(result)
             assert(result.numRows() == rows + 1)
@@ -63,8 +63,8 @@ class GpuShuffleBroadcastHelperSuite extends RmmSparkRetrySuiteBase {
             if (rows == 32768) {
               info(s"received bytes=$inputBytes, assembled bytes=$actualBytes, bound=$bound")
               assert(actualBytes > inputBytes, "This case must exercise concatenation growth")
-              assert(!BroadcastBuildAdmission.accepts(bound, inputBytes))
-              assert(BroadcastBuildAdmission.accepts(bound, bound.get.toLong))
+              assert(!DriverlessBroadcastBuildAdmission.accepts(bound, inputBytes))
+              assert(DriverlessBroadcastBuildAdmission.accepts(bound, bound.get.toLong))
             }
           }
           assert(nonNull.getRefCount == 1 && nullable.getRefCount == 1)
@@ -81,12 +81,13 @@ class GpuShuffleBroadcastHelperSuite extends RmmSparkRetrySuiteBase {
     withResource(ColumnVector.fromStrings("abc", "long string", "")) { first =>
       withResource(ColumnVector.fromStrings(null.asInstanceOf[String])) { second =>
         val inputBytes = first.getDeviceMemorySize + second.getDeviceMemorySize
-        val bound = BroadcastBuildAdmission.upperBound(Array(inputBytes), inputBytes, 4, strings)
+        val bound = DriverlessBroadcastBuildAdmission.upperBound(
+          Array(inputBytes), inputBytes, 4, strings)
         val input = Iterator(first, second).map { column =>
           new ColumnarBatch(Array(GpuColumnVector.from(column.incRefCount(), StringType)),
             column.getRowCount.toInt)
         }
-        withResource(GpuShuffleBroadcastHelper.assemble(input, strings, attributes, metrics)) {
+        withResource(GpuDriverlessBroadcastHelper.assemble(input, strings, attributes, metrics)) {
           result =>
             assert(result.numRows() == 4)
             assert(bound.exists(_ >= GpuColumnVector.getTotalDeviceMemoryUsed(result)))
@@ -110,7 +111,7 @@ class GpuShuffleBroadcastHelperSuite extends RmmSparkRetrySuiteBase {
         batch(column)
       }
       val error = intercept[IllegalArgumentException] {
-        GpuShuffleBroadcastHelper.assemble(input, schema, output, metrics)
+        GpuDriverlessBroadcastHelper.assemble(input, schema, output, metrics)
       }
       assert(error.getMessage == "injected input failure")
       assert(column.getRefCount == 1)

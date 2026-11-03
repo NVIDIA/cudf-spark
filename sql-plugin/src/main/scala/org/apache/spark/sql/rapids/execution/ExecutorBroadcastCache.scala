@@ -19,10 +19,18 @@ import java.util.concurrent.{CompletableFuture, ExecutionException, TimeoutExcep
 
 import scala.collection.mutable
 
+import org.roaringbitmap.RoaringBitmap
+
+private[rapids] object ExecutorBroadcastCache {
+  def generation(stageId: Int, attempt: Int): Long =
+    (stageId.toLong << 32) | (attempt.toLong & 0xffffffffL)
+}
+
 /**
- * Owns one build value per shuffle in an executor. A borrower must retain its own reference
- * before returning from `borrow`. Invalidated IDs remain until this cache's application ends,
- * preventing a late consumer from recreating a build after shuffle cleanup.
+ * Owns one build value per shuffle and consumer-stage attempt in an executor. A borrower
+ * must retain its own reference before returning from `borrow`. Compact invalidated IDs
+ * remain until the application ends, preventing late consumers from recreating cleaned data.
+ * Stage attempts use separate entries so retries cannot borrow a replica from an old attempt.
  */
 private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends AutoCloseable {
   private class Entry {
@@ -31,7 +39,20 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
     var invalidated = false
   }
 
-  private val entries = mutable.Map.empty[Int, Entry]
+  private val entries = mutable.Map.empty[Int, mutable.Map[Long, Entry]]
+  private val retired = new RoaringBitmap
+
+  private[execution] def activeEntryCount: Int = entries.synchronized {
+    entries.valuesIterator.map(_.size).sum
+  }
+
+  private[execution] def retiredShuffleCount: Int = entries.synchronized {
+    retired.getCardinality
+  }
+
+  private[execution] def retiredStateBytes: Int = entries.synchronized {
+    retired.getSizeInBytes
+  }
   private var closed = false
 
   private def removed(id: Int): IllegalStateException =
@@ -43,12 +64,16 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
       build: () => T,
       beforeWait: () => Unit,
       checkCancelled: () => Unit,
-      beforeBorrow: () => Unit = () => ())(borrow: T => B): B = {
+      beforeBorrow: () => Unit = () => (),
+      generation: Long = 0L)(borrow: T => B): B = {
     checkCancelled()
     var builder = false
     val entry = entries.synchronized {
       require(!closed, "Executor broadcast cache is closed")
-      entries.getOrElseUpdate(id, {
+      if (retired.contains(id)) {
+        throw removed(id)
+      }
+      entries.getOrElseUpdate(id, mutable.Map.empty).getOrElseUpdate(generation, {
         builder = true
         new Entry
       })
@@ -74,8 +99,15 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
           entry.ready.completeExceptionally(error)
           entries.synchronized {
             entry.synchronized {
-              if (!entry.invalidated && entries.get(id).contains(entry)) {
-                entries.remove(id)
+              if (!entry.invalidated) {
+                entries.get(id).foreach { generations =>
+                  if (generations.get(generation).contains(entry)) {
+                    generations.remove(generation)
+                    if (generations.isEmpty) {
+                      entries.remove(id)
+                    }
+                  }
+                }
               }
             }
           }
@@ -107,49 +139,56 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
     }
   }
 
-  def invalidate(id: Int): Unit = {
-    val entry = entries.synchronized {
-      if (closed) None else Some(entries.getOrElseUpdate(id, new Entry))
+  private def retireEntry(id: Int, entry: Entry): Option[T] = entry.synchronized {
+    entry.invalidated = true
+    val owned = entry.value
+    entry.value = None
+    // Only an in-flight builder has waiters that need an exception notification.
+    if (!entry.ready.isDone) {
+      entry.ready.completeExceptionally(removed(id))
     }
-    entry.foreach { value =>
-      val owned = value.synchronized {
-        value.invalidated = true
-        val owned = value.value
-        value.value = None
-        value.ready.completeExceptionally(removed(id))
-        owned
-      }
-      owned.foreach(dispose)
-    }
+    owned
   }
 
-  override def close(): Unit = {
-    val owned = entries.synchronized {
-      closed = true
-      val snapshot = entries.toSeq
-      entries.clear()
-      snapshot
-    }
+  private def disposeAll(values: Iterable[T]): Unit = {
     var failure: Throwable = null
-    owned.foreach { case (id, entry) =>
-      val value = entry.synchronized {
-        entry.invalidated = true
-        val value = entry.value
-        entry.value = None
-        entry.ready.completeExceptionally(removed(id))
-        value
-      }
-      value.foreach { v =>
-        try {
-          dispose(v)
-        } catch {
-          case error: Throwable =>
-            if (failure == null) failure = error else failure.addSuppressed(error)
-        }
+    values.foreach { value =>
+      try {
+        dispose(value)
+      } catch {
+        case error: Throwable =>
+          if (failure == null) failure = error else failure.addSuppressed(error)
       }
     }
     if (failure != null) {
       throw failure
     }
+  }
+
+  def invalidate(id: Int): Unit = {
+    val owned = entries.synchronized {
+      if (closed) {
+        Seq.empty[T]
+      } else {
+        // Compact tombstones reject late builders without retaining a future or exception
+        // for every ordinary shuffle that never populated this cache.
+        retired.add(id)
+        entries.remove(id).toSeq.flatMap(_.values).flatMap(retireEntry(id, _))
+      }
+    }
+    disposeAll(owned)
+  }
+
+  override def close(): Unit = {
+    val owned = entries.synchronized {
+      closed = true
+      val snapshot = entries.toSeq.flatMap { case (id, generations) =>
+        generations.values.flatMap(retireEntry(id, _))
+      }
+      entries.clear()
+      retired.clear()
+      snapshot
+    }
+    disposeAll(owned)
   }
 }

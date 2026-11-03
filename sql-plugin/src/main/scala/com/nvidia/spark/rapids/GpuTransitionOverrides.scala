@@ -41,7 +41,7 @@ import org.apache.spark.sql.execution.exchange.{BroadcastExchangeLike, ENSURE_RE
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec}
 import org.apache.spark.sql.rapids.{GpuDataSourceScanExec, GpuFileSourceScanExec, GpuShuffleEnv, GpuTaskMetrics}
 import org.apache.spark.sql.rapids.execution.{ExchangeMappingCache, GpuBroadcastExchangeExec, GpuBroadcastExchangeExecBase, GpuBroadcastToRowExec, GpuCustomShuffleReaderExec, GpuHashJoin, GpuShuffleExchangeExecBase, GpuSubqueryBroadcastExec}
-import org.apache.spark.sql.rapids.execution.GpuShuffleBroadcastHashJoinExec
+import org.apache.spark.sql.rapids.execution.GpuDriverlessBroadcastHashJoinExec
 import org.apache.spark.sql.types.StructType
 
 /**
@@ -979,7 +979,7 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
         if (rapidsConf.shuffledHashJoinOptimizeShuffle || rapidsConf.useShuffledSymmetricHashJoin) {
           updatedPlan = shuffledHashJoinOptimizeShuffle(updatedPlan)
         }
-        updatedPlan = GpuShuffleBroadcastHashJoinExec.rewrite(updatedPlan, rapidsConf)
+        updatedPlan = GpuDriverlessBroadcastHashJoinExec.rewrite(updatedPlan, rapidsConf)
         if (rapidsConf.exportColumnarRdd) {
           updatedPlan = detectAndTagFinalColumnarOutput(updatedPlan)
         }

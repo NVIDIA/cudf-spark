@@ -77,6 +77,8 @@ invoke_shuffle_integration_test() {
         # so that IPC regions are obtained using SysV API instead. This was done because of
         # intermittent test failures. See: https://github.com/NVIDIA/spark-rapids/issues/6572
         env_vars+="PYSP_TEST_spark_rapids_shuffle_mode=UCX "
+        # Arm executor caches at startup; tests enable the path per query.
+        env_vars+="PYSP_TEST_spark_rapids_sql_driverlessBroadcast_enabled=true "
         env_vars+="PYSP_TEST_spark_executorEnv_UCX_ERROR_SIGNALS=\"\" "
         env_vars+="PYSP_TEST_spark_executorEnv_UCX_TLS=\"^posix\" "
     elif [[ "$shuffle_mode" == "MULTITHREADED" ]]; then

@@ -15,13 +15,20 @@
  */
 package org.apache.spark.sql.rapids.execution
 
+import java.util.concurrent.{CountDownLatch, TimeUnit}
+
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.{HashPartitioner, NarrowDependency, ShuffleDependency, SparkConf, SparkContext, SparkEnv, TaskContext}
 import org.apache.spark.shuffle.FetchFailedException
 
-class GpuShuffleBroadcastJoinRDDSuite extends AnyFunSuite with BeforeAndAfterAll {
+private object BroadcastReplicaRetryState {
+  @volatile var firstBuilt = new CountDownLatch(1)
+  @volatile var caches = Array.fill(2)(new ExecutorBroadcastCache[Vector[Long]](_ => ()))
+}
+
+class GpuDriverlessBroadcastJoinRDDSuite extends AnyFunSuite with BeforeAndAfterAll {
   private var context: SparkContext = _
 
   override def beforeAll(): Unit = {
@@ -45,7 +52,7 @@ class GpuShuffleBroadcastJoinRDDSuite extends AnyFunSuite with BeforeAndAfterAll
   test("the scheduler materializes the build shuffle before running its consumers") {
     val stream = context.parallelize(Seq(1, 2, 3, 4), 2)
     val build = context.parallelize(Seq(10, 20), 2).repartition(1)
-    val joined = new GpuShuffleBroadcastJoinRDD[Int, Int, Int](stream, build,
+    val joined = new GpuDriverlessBroadcastJoinRDD[Int, Int, Int](stream, build,
       (input, openBuild) => {
         val values = openBuild().toArray
         input.flatMap(value => values.iterator.map(value + _))
@@ -63,7 +70,7 @@ class GpuShuffleBroadcastJoinRDDSuite extends AnyFunSuite with BeforeAndAfterAll
       reads.add(1)
       input
     }
-    val reused = new GpuShuffleBroadcastJoinRDD[Int, Int, Int](stream, build,
+    val reused = new GpuDriverlessBroadcastJoinRDD[Int, Int, Int](stream, build,
       (input, _) => input.map(_ + 10))
     assert(reused.collect().sorted.sameElements(Array(11, 12, 13, 14)))
     assert(reads.value == 0L)
@@ -73,7 +80,7 @@ class GpuShuffleBroadcastJoinRDDSuite extends AnyFunSuite with BeforeAndAfterAll
     val stream = context.parallelize(Seq(1), 1)
     val build = context.parallelize(Seq(10, 20), 2)
     intercept[IllegalArgumentException] {
-      new GpuShuffleBroadcastJoinRDD[Int, Int, Int](stream, build,
+      new GpuDriverlessBroadcastJoinRDD[Int, Int, Int](stream, build,
         (input, _) => input)
     }
   }
@@ -84,7 +91,7 @@ class GpuShuffleBroadcastJoinRDDSuite extends AnyFunSuite with BeforeAndAfterAll
       .partitionBy(new HashPartitioner(1))
     val shuffleId = shuffled.dependencies.head.asInstanceOf[ShuffleDependency[_, _, _]].shuffleId
     val build = shuffled.values
-    val joined = new GpuShuffleBroadcastJoinRDD[Int, Int, (Int, Int)](stream, build,
+    val joined = new GpuDriverlessBroadcastJoinRDD[Int, Int, (Int, Int)](stream, build,
       (input, openBuild) => {
         val values = openBuild().toArray
         val task = TaskContext.get()
@@ -98,4 +105,49 @@ class GpuShuffleBroadcastJoinRDDSuite extends AnyFunSuite with BeforeAndAfterAll
     assert(result.map(_._1).sorted.sameElements(Array(11, 12, 13, 14, 21, 22, 23, 24)))
     assert(result.filter(row => Set(11, 12, 21, 22).contains(row._1)).forall(_._2 > 0))
   }
+
+  test("a stage retry cannot mix an earlier replica with a recomputed build") {
+    BroadcastReplicaRetryState.firstBuilt = new CountDownLatch(1)
+    BroadcastReplicaRetryState.caches = Array.fill(2)(
+      new ExecutorBroadcastCache[Vector[Long]](_ => ()))
+    try {
+      // Changing map attempt IDs expose stale cache reuse after map output loss.
+      val source = context.parallelize(0 until 2, 2).mapPartitionsWithIndex {
+        case (index, _) => Iterator(index -> TaskContext.get().taskAttemptId())
+      }
+      val shuffled = source.partitionBy(new HashPartitioner(1))
+      val shuffleId = shuffled.dependencies.head.asInstanceOf[ShuffleDependency[_, _, _]].shuffleId
+      val joined = new GpuDriverlessBroadcastJoinRDD[Int, Long, (Vector[Long], Int)](
+        context.parallelize(0 until 2, 2), shuffled.values, (input, openBuild) => {
+          val task = TaskContext.get()
+          val consumer = task.partitionId()
+          if (task.stageAttemptNumber() == 0 && consumer == 1) {
+            assert(BroadcastReplicaRetryState.firstBuilt.await(10, TimeUnit.SECONDS))
+            throw new FetchFailedException(SparkEnv.get.blockManager.blockManagerId,
+              shuffleId, 0L, 0, 0, "Injected loss before the second replica reads")
+          }
+          val value = BroadcastReplicaRetryState.caches(consumer).getOrBuild(shuffleId,
+            () => openBuild().toVector.sorted, () => (), () => task.killTaskIfInterrupted(),
+            generation = ExecutorBroadcastCache.generation(
+              task.stageId(), task.stageAttemptNumber()))(identity)
+          if (task.stageAttemptNumber() == 0 && consumer == 0) {
+            BroadcastReplicaRetryState.firstBuilt.countDown()
+            // Hold the first result until the fetch failure cancels this attempt.
+            while (!task.isInterrupted()) {
+              Thread.sleep(10)
+            }
+            task.killTaskIfInterrupted()
+          }
+          input.map(_ => (value, task.stageAttemptNumber()))
+        })
+      val result = joined.collect()
+      assert(result.length == 2)
+      assert(result.forall(_._2 > 0))
+      assert(result.map(_._1).distinct.length == 1,
+        "Both consumers must use the recomputed build, not a cached earlier attempt")
+    } finally {
+      BroadcastReplicaRetryState.caches.foreach(_.close())
+    }
+  }
+
 }

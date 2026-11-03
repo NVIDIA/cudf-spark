@@ -24,7 +24,7 @@ import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
-private[execution] object GpuShuffleBroadcastHelper {
+private[execution] object GpuDriverlessBroadcastHelper {
   def assemble(
       input: Iterator[ColumnarBatch],
       schema: StructType,

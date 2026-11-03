@@ -65,15 +65,15 @@ def check_conservative_admission(spark, expected_builds):
     expected = sorted(repr(row) for row in growth_query().collect())
     assert len(expected) == 32769
     spark.conf.set('spark.rapids.sql.enabled', 'true')
-    spark.conf.set('spark.rapids.shuffle.broadcast.enabled', 'true')
+    spark.conf.set('spark.rapids.sql.driverlessBroadcast.enabled', 'true')
     fallback_ceiling = None
     for reject in [False, True]:
         ceiling = str(fallback_ceiling) if reject else '1g'
-        spark.conf.set('spark.rapids.shuffle.broadcast.maxSize', ceiling)
+        spark.conf.set('spark.rapids.sql.driverlessBroadcast.maxSize', ceiling)
         frame = growth_query()
         assert sorted(repr(row) for row in frame.collect()) == expected
         native = [node for node in plan_nodes(frame._jdf.queryExecution().executedPlan())
-                  if node.getClass().getSimpleName() == 'GpuShuffleBroadcastHashJoinExec']
+                  if node.getClass().getSimpleName() == 'GpuDriverlessBroadcastHashJoinExec']
         assert len(native) == 1, frame._jdf.queryExecution().executedPlan().toString()
         builds = native[0].metrics().apply('executorBuilds').value()
         fallbacks = native[0].metrics().apply('runtimeFallbacks').value()
@@ -102,12 +102,12 @@ def check_conservative_admission(spark, expected_builds):
         spark.conf.set('spark.rapids.sql.enabled', 'false')
         expected = sorted(repr(row) for row in unsupported_query().collect())
         spark.conf.set('spark.rapids.sql.enabled', 'true')
-        spark.conf.set('spark.rapids.shuffle.broadcast.maxSize', '1g')
+        spark.conf.set('spark.rapids.sql.driverlessBroadcast.maxSize', '1g')
         frame = unsupported_query()
         assert sorted(repr(row) for row in frame.collect()) == expected
         names = [node.getClass().getSimpleName()
                  for node in plan_nodes(frame._jdf.queryExecution().executedPlan())]
-        assert 'GpuShuffleBroadcastHashJoinExec' not in names, names
+        assert 'GpuDriverlessBroadcastHashJoinExec' not in names, names
         assert 'GpuBroadcastHashJoinExec' in names, names
         print(json.dumps(dict(case='unsupported-build-schema', payload=payload, result='PASS')),
               flush=True)
@@ -123,19 +123,19 @@ def main():
         }.items():
             spark.conf.set(key, value)
         startup_enabled = spark.sparkContext.getConf().get(
-            'spark.rapids.shuffle.broadcast.enabled', 'false').lower() == 'true'
+            'spark.rapids.sql.driverlessBroadcast.enabled', 'false').lower() == 'true'
         expected_builds = int(spark.sparkContext.getConf().get('spark.executor.instances', '1'))
         if not startup_enabled:
             spark.conf.set('spark.rapids.sql.enabled', 'false')
             expected = sorted(repr(row) for row in query(spark, 'inner', 'right').collect())
             spark.conf.set('spark.rapids.sql.enabled', 'true')
             for enabled in ['false', 'true']:
-                spark.conf.set('spark.rapids.shuffle.broadcast.enabled', enabled)
+                spark.conf.set('spark.rapids.sql.driverlessBroadcast.enabled', enabled)
                 frame = query(spark, 'inner', 'right')
                 assert sorted(repr(row) for row in frame.collect()) == expected
                 plan = frame._jdf.queryExecution().executedPlan()
                 names = [node.getClass().getSimpleName() for node in plan_nodes(plan)]
-                assert 'GpuShuffleBroadcastHashJoinExec' not in names, plan.toString()
+                assert 'GpuDriverlessBroadcastHashJoinExec' not in names, plan.toString()
                 assert 'GpuBroadcastHashJoinExec' in names, plan.toString()
             print('EXECUTOR_BROADCAST_DISABLED_APP_PASS', flush=True)
             return
@@ -152,14 +152,14 @@ def main():
             if not empty_build:
                 modes.append(('oversized', '1'))
             for mode, ceiling in modes:
-                spark.conf.set('spark.rapids.shuffle.broadcast.enabled', str(mode != 'disabled'))
-                spark.conf.set('spark.rapids.shuffle.broadcast.maxSize', ceiling)
+                spark.conf.set('spark.rapids.sql.driverlessBroadcast.enabled', str(mode != 'disabled'))
+                spark.conf.set('spark.rapids.sql.driverlessBroadcast.maxSize', ceiling)
                 frame = query(spark, kind, side, empty_build)
                 actual = sorted(repr(row) for row in frame.collect())
                 assert actual == expected, (kind, side, mode, len(expected), len(actual))
                 plan = frame._jdf.queryExecution().executedPlan()
                 native = [node for node in plan_nodes(plan)
-                          if node.getClass().getSimpleName() == 'GpuShuffleBroadcastHashJoinExec']
+                          if node.getClass().getSimpleName() == 'GpuDriverlessBroadcastHashJoinExec']
                 builds, fallbacks = 0, 0
                 driver_bytes = 0
                 remote_build_bytes = 0
