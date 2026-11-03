@@ -872,8 +872,8 @@ object GpuOverrides extends Logging {
     (IcebergFormatType, FileFormatChecks(
       cudfRead = (TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.STRUCT + TypeSig.BINARY +
           TypeSig.ARRAY + TypeSig.MAP +
-          GpuTypeShims.additionalParquetCommonSupportedTypes).nested() +
-          ParquetVariantShims.additionalIcebergReadSupportedTypes,
+          GpuTypeShims.additionalParquetCommonSupportedTypes +
+          ParquetVariantShims.additionalIcebergReadSupportedTypes).nested(),
       cudfWrite = (TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.STRUCT +
           TypeSig.ARRAY + TypeSig.MAP + TypeSig.BINARY +
           GpuTypeShims.additionalParquetCommonSupportedTypes).nested(),
