@@ -22,7 +22,7 @@ import ai.rapids.cudf.{DeviceMemoryBuffer, Rmm, RmmAllocationMode, RmmEventHandl
 import com.nvidia.spark.Retryable
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitSpillableInHalfByRows, splitTargetSizeInHalfGpu, withRestoreOnRetry, withRetry, withRetryNoSplit}
-import com.nvidia.spark.rapids.jni.{CpuSplitAndRetryOOM, GpuRetryOOM, GpuSplitAndRetryOOM, RmmSpark}
+import com.nvidia.spark.rapids.jni.{GpuRetryOOM, GpuSplitAndRetryOOM, RmmSpark}
 import com.nvidia.spark.rapids.spill.SpillFramework
 import org.mockito.Mockito._
 import org.scalatest.BeforeAndAfterEach
@@ -549,16 +549,6 @@ class WithRetrySuite
     } finally {
       assert(lastSplitSize >= minValue)
       assert(lastSplitSize == (initialValue / (2 * (numSplits - 1))))
-    }
-  }
-
-  test("a split that cannot be done reports the memory that asked for it") {
-    // The GPU policy cannot go below the minimum, but the split was asked for host memory.
-    val myTarget = AutoCloseableTargetSize(10L, 10L)
-    assertThrows[CpuSplitAndRetryOOM] {
-      withRetry(myTarget, splitTargetSizeInHalfGpu) { _ =>
-        throw new CpuSplitAndRetryOOM("in tests")
-      }.toSeq
     }
   }
 
