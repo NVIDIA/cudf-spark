@@ -17,39 +17,79 @@ package org.apache.spark.sql.rapids.execution
 
 import org.scalatest.funsuite.AnyFunSuite
 
+import org.apache.spark.sql.types._
+
 class BroadcastBuildAdmissionSuite extends AnyFunSuite {
-  test("actual byte checks accept the ceiling and reject overflow without wrapping") {
-    BroadcastBuildAdmission.checkActualBytes(BigInt(10), 10, "received build")
-    BroadcastBuildAdmission.checkActualBytes(BigInt(0), 10, "assembled build")
-    val error = intercept[IllegalStateException] {
-      BroadcastBuildAdmission.checkActualBytes(BigInt(Long.MaxValue) + 1,
-        Long.MaxValue, "received build")
-    }
-    assert(error.getMessage.contains("received build"))
-    assert(error.getMessage.contains("cannot fall back"))
-    intercept[IllegalStateException] {
-      BroadcastBuildAdmission.checkActualBytes(BigInt(-1), 10, "assembled build")
-    }
-    intercept[IllegalArgumentException] {
-      BroadcastBuildAdmission.checkActualBytes(BigInt(0), 0, "received build")
-    }
+  private val bytes = StructType(Seq(StructField("value", ByteType)))
+
+  test("the driver includes a full padded validity mask before admission") {
+    val bound = BroadcastBuildAdmission.upperBound(Array(4L, 6L), 10, 2, bytes)
+    assert(bound.contains(BigInt(74)))
+    assert(BroadcastBuildAdmission.accepts(bound, 74))
+    assert(!BroadcastBuildAdmission.accepts(bound, 73))
+    assert(!BroadcastBuildAdmission.accepts(bound, 10))
   }
 
-  test("accept empty input and a build exactly at the byte ceiling") {
-    assert(BroadcastBuildAdmission.accepts(Array.empty[Long], 0, 10))
-    assert(BroadcastBuildAdmission.accepts(Array(4L, 6L), 2, 10))
+  test("concatenation growth is rejected by the driver rather than executor assembly") {
+    val bound = BroadcastBuildAdmission.upperBound(Array(32833L), 32833, 32769, bytes)
+    assert(bound.contains(BigInt(36993)))
+    assert(!BroadcastBuildAdmission.accepts(bound, 32833))
+    assert(BroadcastBuildAdmission.accepts(bound, 36993))
   }
 
-  test("reject oversized builds without overflowing the size sum") {
-    assert(!BroadcastBuildAdmission.accepts(Array(4L, 7L), 2, 10))
-    assert(!BroadcastBuildAdmission.accepts(Array(Long.MaxValue, 1L), 2, Long.MaxValue))
+  test("string bounds include 64-bit offsets and masks even for non-nullable fields") {
+    val schema = StructType(Seq(StructField("text", StringType, nullable = false)))
+    val bound = BroadcastBuildAdmission.upperBound(Array(100L), 100, 10, schema)
+    assert(bound.contains(BigInt(252)))
+    assert(!BroadcastBuildAdmission.accepts(bound, 251))
+    assert(BroadcastBuildAdmission.accepts(bound, 252))
   }
 
-  test("reject unavailable or inconsistent row counts and cuDF row-count overflow") {
-    assert(!BroadcastBuildAdmission.accepts(Array(10L), 0, 10))
-    assert(!BroadcastBuildAdmission.accepts(Array.empty[Long], -1, 10))
-    assert(!BroadcastBuildAdmission.accepts(Array(10L), Int.MaxValue.toLong + 1, 10))
-    assert(!BroadcastBuildAdmission.accepts(Array(-1L), 2, 10))
-    assert(!BroadcastBuildAdmission.accepts(Array.empty[Long], 0, 0))
+  test("the uncompressed writer metric prevents compact map-status sizes hiding large builds") {
+    val bound = BroadcastBuildAdmission.upperBound(Array(10L), 100, 2, bytes)
+    assert(bound.contains(BigInt(164)))
+    assert(!BroadcastBuildAdmission.accepts(bound, 100))
+    val overflow = BroadcastBuildAdmission.upperBound(
+      Array(Long.MaxValue, 1L), Long.MaxValue, 2, bytes)
+    assert(overflow.exists(_ > Long.MaxValue))
+    assert(!BroadcastBuildAdmission.accepts(overflow, Long.MaxValue))
+  }
+
+  test("unknown child element counts and binary layouts retain standard broadcast") {
+    Seq[DataType](ArrayType(ByteType), MapType(IntegerType, LongType),
+      StructType(Seq(StructField("child", ByteType))), BinaryType).foreach { dataType =>
+      val schema = StructType(Seq(StructField("value", dataType)))
+      assert(!BroadcastBuildAdmission.supportsSchema(schema))
+      assert(BroadcastBuildAdmission.upperBound(Array(10L), 10, 2, schema).isEmpty)
+    }
+    assert(!BroadcastBuildAdmission.accepts(None, Long.MaxValue))
+  }
+
+  test("unavailable or inconsistent completed metrics decline the native path") {
+    assert(BroadcastBuildAdmission.upperBound(Array(-1L), 10, 2, bytes).isEmpty)
+    assert(BroadcastBuildAdmission.upperBound(Array(10L), -1, 2, bytes).isEmpty)
+    assert(BroadcastBuildAdmission.upperBound(Array(10L), 10, -1, bytes).isEmpty)
+    assert(BroadcastBuildAdmission.upperBound(Array(10L), 10, Int.MaxValue.toLong + 1,
+      bytes).isEmpty)
+    assert(BroadcastBuildAdmission.upperBound(Array(10L), 10, 0, bytes).isEmpty)
+    assert(BroadcastBuildAdmission.upperBound(Array(10L), 0, 2, bytes).isEmpty)
+    assert(!BroadcastBuildAdmission.accepts(Some(BigInt(0)), 0))
+  }
+
+  test("empty and rows-only builds remain eligible") {
+    val empty = BroadcastBuildAdmission.upperBound(Array.empty[Long], 0, 0, bytes)
+    assert(empty.contains(BigInt(0)))
+    assert(BroadcastBuildAdmission.accepts(empty, 1))
+    val rowsOnly = BroadcastBuildAdmission.upperBound(Array(100L), 0, 200, StructType(Nil))
+    assert(rowsOnly.contains(BigInt(100)))
+    assert(BroadcastBuildAdmission.accepts(rowsOnly, 100))
+  }
+
+  test("flat scalar schemas are eligible without relying on declared nullability") {
+    val schema = StructType(Seq(BooleanType, ByteType, ShortType, IntegerType, LongType,
+      FloatType, DoubleType, DateType, TimestampType, TimestampNTZType, NullType,
+      DecimalType(38, 5), StringType, YearMonthIntervalType(), DayTimeIntervalType())
+      .zipWithIndex.map { case (dataType, index) => StructField(s"c$index", dataType) })
+    assert(BroadcastBuildAdmission.supportsSchema(schema))
   }
 }

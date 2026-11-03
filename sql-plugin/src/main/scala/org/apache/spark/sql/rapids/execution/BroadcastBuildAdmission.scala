@@ -15,21 +15,50 @@
  */
 package org.apache.spark.sql.rapids.execution
 
-/** Admission uses completed, uncompressed map output sizes, never logical-plan estimates. */
+import org.apache.spark.sql.types._
+
+/** Admission uses completed shuffle metrics and a conservative bound on the assembled layout. */
 private[execution] object BroadcastBuildAdmission {
-  def checkActualBytes(bytes: BigInt, maxBytes: Long, phase: String): Unit = {
-    require(maxBytes > 0, "Broadcast build byte limit must be positive")
-    if (bytes < 0 || bytes > maxBytes) {
-      throw new IllegalStateException(s"Executor broadcast $phase size $bytes exceeds " +
-        s"spark.rapids.shuffle.broadcast.maxSize=$maxBytes. " +
-        "Disable spark.rapids.shuffle.broadcast.enabled to use standard broadcast; " +
-        "executor assembly cannot fall back to a different query plan.")
+  private def supportsType(dataType: DataType): Boolean = dataType match {
+    case BooleanType | ByteType | ShortType | IntegerType | LongType | FloatType | DoubleType |
+         DateType | TimestampType | TimestampNTZType | NullType => true
+    case _: DecimalType | _: StringType | _: YearMonthIntervalType | _: DayTimeIntervalType => true
+    case _ => false
+  }
+
+  def supportsSchema(schema: StructType): Boolean =
+    schema.fields.forall(f => supportsType(f.dataType))
+
+  /**
+   * Packed input already contains the value buffers. Concatenation can add validity masks
+   * for rows whose input batch had no nulls, and can widen string offsets to 64 bits.
+   * Charge a complete padded mask for every column, regardless of declared nullability,
+   * plus complete 64-bit offsets for every string column. Existing masks and offsets are
+   * not subtracted, so both a concatenated batch and an unchanged packed batch are covered.
+   * Nested children require their own element counts and are outside this bound.
+   */
+  def upperBound(
+      partitionBytes: Array[Long],
+      uncompressedBytes: Long,
+      rows: Long,
+      schema: StructType): Option[BigInt] = {
+    val reportedBytes = partitionBytes.foldLeft(BigInt(0))(_ + _)
+    if (!supportsSchema(schema) || partitionBytes.exists(_ < 0) || uncompressedBytes < 0 ||
+        rows < 0 || rows > Int.MaxValue ||
+        (reportedBytes > 0 && rows == 0) ||
+        (rows > 0 && schema.nonEmpty && uncompressedBytes == 0)) {
+      None
+    } else {
+      // MapStatus sizes can saturate. The completed writer's dataSize metric supplies the
+      // uncompressed payload total independently of Spark's compact block-size encoding.
+      val payload = reportedBytes.max(BigInt(uncompressedBytes))
+      val maskBytes = ((BigInt(rows) + 511) / 512) * 64
+      val stringColumns = schema.fields.count(_.dataType.isInstanceOf[StringType])
+      val offsets = (BigInt(rows) + 1) * 8 * stringColumns
+      Some(payload + maskBytes * schema.length + offsets)
     }
   }
 
-  def accepts(partitionBytes: Array[Long], rows: Long, maxBytes: Long): Boolean = {
-    val bytes = partitionBytes.foldLeft(BigInt(0))(_ + _)
-    partitionBytes.forall(_ >= 0) && maxBytes > 0 && bytes <= maxBytes &&
-      rows >= 0 && rows <= Int.MaxValue && (bytes == 0 || rows > 0)
-  }
+  def accepts(bound: Option[BigInt], maxBytes: Long): Boolean =
+    maxBytes > 0 && bound.exists(_ <= maxBytes)
 }

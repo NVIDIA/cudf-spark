@@ -88,8 +88,12 @@ case class GpuShuffleBroadcastHashJoinExec(
     val rows = exchange.metrics(NUM_OUTPUT_ROWS).value
     val partitionBytes = statistics.map(_.bytesByPartitionId).getOrElse(Array.empty[Long])
     val bytes = partitionBytes.foldLeft(BigInt(0))(_ + _)
-    val admitted = BroadcastBuildAdmission.accepts(partitionBytes, rows, maxBytes)
+    val uncompressedBytes = exchange.metrics(GpuShuffleExchangeExecBase.METRIC_DATA_SIZE).value
+    val sizeBound = BroadcastBuildAdmission.upperBound(
+      partitionBytes, uncompressedBytes, rows, buildPlan.schema)
+    val admitted = BroadcastBuildAdmission.accepts(sizeBound, maxBytes)
     logInfo(s"Executor broadcast shuffle ${exchange.shuffleId}: rows=$rows, bytes=$bytes, " +
+      s"uncompressedBytes=$uncompressedBytes, upperBound=$sizeBound, " +
       s"maxBytes=$maxBytes, admitted=$admitted")
     if (!admitted) {
       gpuLongMetric("runtimeFallbacks") += 1
@@ -117,7 +121,7 @@ case class GpuShuffleBroadcastHashJoinExec(
           val built = GpuShuffleEnv.getBroadcastCache.getOrBuild(shuffleId, () => {
             builds += 1
             val batch = GpuShuffleBroadcastHelper.assemble(
-              openBuild(), schema, output, localMetrics, maxBytes)
+              openBuild(), schema, output, localMetrics)
             closeOnExcept(batch)(
               SpillableColumnarBatch(_, SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
           }, () => GpuSemaphore.releaseIfNecessary(context),
@@ -163,7 +167,8 @@ object GpuShuffleBroadcastHashJoinExec {
             case GpuBuildRight => join.right
           }
           build match {
-            case broadcast: GpuBroadcastExchangeExec =>
+            case broadcast: GpuBroadcastExchangeExec
+                if BroadcastBuildAdmission.supportsSchema(broadcast.child.schema) =>
               val shuffle = GpuShuffleExchangeExec(GpuSinglePartitioning, broadcast.child,
                 ENSURE_REQUIREMENTS)(GpuSinglePartitioning)
               val (left, right) = join.buildSide match {

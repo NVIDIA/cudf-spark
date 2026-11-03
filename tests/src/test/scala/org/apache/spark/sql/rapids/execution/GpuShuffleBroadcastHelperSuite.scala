@@ -21,7 +21,7 @@ import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.spill.SpillFramework
 
 import org.apache.spark.sql.catalyst.expressions.AttributeReference
-import org.apache.spark.sql.types.{ByteType, StructField, StructType}
+import org.apache.spark.sql.types.{ByteType, StringType, StructField, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class GpuShuffleBroadcastHelperSuite extends RmmSparkRetrySuiteBase {
@@ -34,14 +34,11 @@ class GpuShuffleBroadcastHelperSuite extends RmmSparkRetrySuiteBase {
     new ColumnarBatch(Array(GpuColumnVector.from(column.incRefCount(), ByteType)),
       column.getRowCount.toInt)
 
-  test("accept an actual build exactly at the byte ceiling") {
+  test("a single input keeps its data and releases borrowed references") {
     withResource(ColumnVector.fromBytes(1.toByte, 2.toByte)) { column =>
-      val input = batch(column)
-      val bytes = GpuColumnVector.getTotalDeviceMemoryUsed(input)
       withResource(GpuShuffleBroadcastHelper.assemble(
-          Iterator(input), schema, output, metrics, bytes)) { result =>
+          Iterator(batch(column)), schema, output, metrics)) { result =>
         assert(result.numRows() == 2)
-        assert(GpuColumnVector.getTotalDeviceMemoryUsed(result) == bytes)
         withResource(GpuColumnVector.extractBases(result).head.copyToHost()) { host =>
           assert(host.getByte(0) == 1 && host.getByte(1) == 2)
         }
@@ -50,61 +47,54 @@ class GpuShuffleBroadcastHelperSuite extends RmmSparkRetrySuiteBase {
     }
   }
 
-  test("reject received bytes before reading the next batch and release accepted inputs") {
+  test("the driver bound covers real null-mask growth at allocation boundaries") {
     val allocated = Rmm.getTotalBytesAllocated
-    withResource(ColumnVector.fromBytes(1.toByte, 2.toByte)) { first =>
-      withResource(ColumnVector.fromBytes(3.toByte, 4.toByte)) { second =>
-        val baselineHandles = SpillFramework.stores.deviceStore.numHandles
-        var reads = 0
-        val input = Iterator(first, second, first).map { column =>
-          reads += 1
-          batch(column)
+    Seq(1, 511, 512, 513, 32768).foreach { rows =>
+      withResource(ColumnVector.fromBytes(Array.fill[Byte](rows)(1): _*)) { nonNull =>
+        withResource(ColumnVector.fromBoxedBytes(null.asInstanceOf[java.lang.Byte])) { nullable =>
+          val inputBytes = nonNull.getDeviceMemorySize + nullable.getDeviceMemorySize
+          val bound = BroadcastBuildAdmission.upperBound(
+            Array(inputBytes), inputBytes, rows + 1, schema)
+          withResource(GpuShuffleBroadcastHelper.assemble(
+              Iterator(nonNull, nullable).map(batch), schema, output, metrics)) { result =>
+            val actualBytes = GpuColumnVector.getTotalDeviceMemoryUsed(result)
+            assert(result.numRows() == rows + 1)
+            assert(bound.exists(_ >= actualBytes))
+            if (rows == 32768) {
+              info(s"received bytes=$inputBytes, assembled bytes=$actualBytes, bound=$bound")
+              assert(actualBytes > inputBytes, "This case must exercise concatenation growth")
+              assert(!BroadcastBuildAdmission.accepts(bound, inputBytes))
+              assert(BroadcastBuildAdmission.accepts(bound, bound.get.toLong))
+            }
+          }
+          assert(nonNull.getRefCount == 1 && nullable.getRefCount == 1)
         }
-        val error = intercept[IllegalStateException] {
-          GpuShuffleBroadcastHelper.assemble(input, schema, output, metrics,
-            first.getDeviceMemorySize)
-        }
-        assert(error.getMessage.contains("received build"))
-        assert(reads == 2)
-        assert(first.getRefCount == 1 && second.getRefCount == 1)
-        assert(SpillFramework.stores.deviceStore.numHandles == baselineHandles)
       }
     }
     assert(Rmm.getTotalBytesAllocated == allocated)
   }
 
-  test("reject concatenation growth before cache publication and permit a fresh build") {
+  test("string offsets and null masks fit the driver bound") {
     val allocated = Rmm.getTotalBytesAllocated
-    withResource(ColumnVector.fromBytes(Array.fill[Byte](32768)(1): _*)) { nonNull =>
-      withResource(ColumnVector.fromBoxedBytes(null.asInstanceOf[java.lang.Byte])) { nullable =>
-        def inputs: Iterator[ColumnarBatch] = Iterator(nonNull, nullable).map(batch)
-        val inputBytes = nonNull.getDeviceMemorySize + nullable.getDeviceMemorySize
-        val assembledBytes = withResource(GpuShuffleBroadcastHelper.assemble(
-            inputs, schema, output, metrics, Long.MaxValue)) { result =>
-          assert(result.numRows() == 32769)
-          GpuColumnVector.getTotalDeviceMemoryUsed(result)
+    val strings = StructType(Seq(StructField("value", StringType)))
+    val attributes = Seq(AttributeReference("value", StringType)())
+    withResource(ColumnVector.fromStrings("abc", "long string", "")) { first =>
+      withResource(ColumnVector.fromStrings(null.asInstanceOf[String])) { second =>
+        val inputBytes = first.getDeviceMemorySize + second.getDeviceMemorySize
+        val bound = BroadcastBuildAdmission.upperBound(Array(inputBytes), inputBytes, 4, strings)
+        val input = Iterator(first, second).map { column =>
+          new ColumnarBatch(Array(GpuColumnVector.from(column.incRefCount(), StringType)),
+            column.getRowCount.toInt)
         }
-        info(s"received bytes=$inputBytes, assembled bytes=$assembledBytes")
-        assert(assembledBytes > inputBytes, "The test must exercise concatenation growth")
-        val handles = SpillFramework.stores.deviceStore.numHandles
-        val before = Rmm.getTotalBytesAllocated
-        withResource(new ExecutorBroadcastCache[SpillableColumnarBatch](_.close())) { cache =>
-          var builds = 0
-          def read(limit: Long): ColumnarBatch = cache.getOrBuild(7, () => {
-            builds += 1
-            val result = GpuShuffleBroadcastHelper.assemble(inputs, schema, output, metrics, limit)
-            SpillableColumnarBatch(result, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
-          }, () => (), () => ())(_.getColumnarBatch())
-          val error = intercept[IllegalStateException](read(inputBytes))
-          assert(error.getMessage.contains("assembled build"))
-          assert(nonNull.getRefCount == 1 && nullable.getRefCount == 1)
-          assert(SpillFramework.stores.deviceStore.numHandles == handles)
-          assert(Rmm.getTotalBytesAllocated == before)
-          withResource(read(assembledBytes)) { result =>
-            assert(result.numRows() == 32769)
-          }
-          assert(builds == 2, "The failed build must not publish a cache entry")
+        withResource(GpuShuffleBroadcastHelper.assemble(input, strings, attributes, metrics)) {
+          result =>
+            assert(result.numRows() == 4)
+            assert(bound.exists(_ >= GpuColumnVector.getTotalDeviceMemoryUsed(result)))
+            withResource(GpuColumnVector.extractBases(result).head.copyToHost()) { host =>
+              assert(host.getJavaString(0) == "abc" && host.isNull(3))
+            }
         }
+        assert(first.getRefCount == 1 && second.getRefCount == 1)
       }
     }
     assert(Rmm.getTotalBytesAllocated == allocated)
@@ -120,7 +110,7 @@ class GpuShuffleBroadcastHelperSuite extends RmmSparkRetrySuiteBase {
         batch(column)
       }
       val error = intercept[IllegalArgumentException] {
-        GpuShuffleBroadcastHelper.assemble(input, schema, output, metrics, Long.MaxValue)
+        GpuShuffleBroadcastHelper.assemble(input, schema, output, metrics)
       }
       assert(error.getMessage == "injected input failure")
       assert(column.getRefCount == 1)

@@ -51,6 +51,68 @@ def query(spark, kind, side, empty_build=False):
         (left.left_key == right.right_key) & (left.left_value > right.right_value), kind)
 
 
+
+def check_conservative_admission(spark, expected_builds):
+    def growth_query():
+        build = spark.range(32768, numPartitions=1).selectExpr('CAST(id % 2 AS TINYINT) AS b')
+        null_row = spark.range(1, numPartitions=1).selectExpr('CAST(NULL AS TINYINT) AS b')
+        build = build.unionAll(null_row)
+        stream = spark.range(3, numPartitions=8).selectExpr(
+            'IF(id = 2, CAST(NULL AS TINYINT), CAST(id AS TINYINT)) AS s')
+        return stream.join(broadcast(build), stream.s.eqNullSafe(build.b)).select('s', 'b')
+
+    spark.conf.set('spark.rapids.sql.enabled', 'false')
+    expected = sorted(repr(row) for row in growth_query().collect())
+    assert len(expected) == 32769
+    spark.conf.set('spark.rapids.sql.enabled', 'true')
+    spark.conf.set('spark.rapids.shuffle.broadcast.enabled', 'true')
+    fallback_ceiling = None
+    for reject in [False, True]:
+        ceiling = str(fallback_ceiling) if reject else '1g'
+        spark.conf.set('spark.rapids.shuffle.broadcast.maxSize', ceiling)
+        frame = growth_query()
+        assert sorted(repr(row) for row in frame.collect()) == expected
+        native = [node for node in plan_nodes(frame._jdf.queryExecution().executedPlan())
+                  if node.getClass().getSimpleName() == 'GpuShuffleBroadcastHashJoinExec']
+        assert len(native) == 1, frame._jdf.queryExecution().executedPlan().toString()
+        builds = native[0].metrics().apply('executorBuilds').value()
+        fallbacks = native[0].metrics().apply('runtimeFallbacks').value()
+        driver_bytes = native[0].fallbackBroadcast().metrics().apply('dataSize').value()
+        packed_bytes = native[0].buildPlan().metrics().apply('dataSize').value()
+        if reject:
+            assert packed_bytes <= int(ceiling), (packed_bytes, ceiling)
+            assert builds == 0 and fallbacks == 1 and driver_bytes > 0
+        else:
+            assert builds == expected_builds and fallbacks == 0 and driver_bytes == 0
+            tracker = spark._jvm.org.apache.spark.SparkEnv.get().mapOutputTracker()
+            dependency = native[0].buildPlan().shuffleDependencyColumnar()
+            reported = tracker.getStatistics(dependency).bytesByPartitionId()
+            fallback_ceiling = max(sum(int(value) for value in reported), packed_bytes)
+            assert fallback_ceiling > 0
+        print(json.dumps(dict(case='concatenation-bound', ceiling=ceiling, result='PASS',
+                              rows=len(expected), packed_bytes=packed_bytes,
+                              builds=builds, fallbacks=fallbacks, driver_bytes=driver_bytes)),
+              flush=True)
+
+    for payload in ["named_struct('value', id) AS payload", 'CAST(id AS BINARY) AS payload']:
+        def unsupported_query():
+            build = spark.range(4, numPartitions=1).selectExpr('id AS key', payload)
+            stream = spark.range(8, numPartitions=2).selectExpr('id % 4 AS probe')
+            return stream.join(broadcast(build), stream.probe == build.key)
+        spark.conf.set('spark.rapids.sql.enabled', 'false')
+        expected = sorted(repr(row) for row in unsupported_query().collect())
+        spark.conf.set('spark.rapids.sql.enabled', 'true')
+        spark.conf.set('spark.rapids.shuffle.broadcast.maxSize', '1g')
+        frame = unsupported_query()
+        assert sorted(repr(row) for row in frame.collect()) == expected
+        names = [node.getClass().getSimpleName()
+                 for node in plan_nodes(frame._jdf.queryExecution().executedPlan())]
+        assert 'GpuShuffleBroadcastHashJoinExec' not in names, names
+        assert 'GpuBroadcastHashJoinExec' in names, names
+        print(json.dumps(dict(case='unsupported-build-schema', payload=payload, result='PASS')),
+              flush=True)
+
+
 def main():
     spark = SparkSession.builder.appName('executor-broadcast-smoke').getOrCreate()
     try:
@@ -127,6 +189,7 @@ def main():
                                       builds=builds, fallbacks=fallbacks,
                                       remote_build_bytes=remote_build_bytes,
                                       driver_broadcast_bytes=driver_bytes, result='PASS')), flush=True)
+        check_conservative_admission(spark, expected_builds)
         print('EXECUTOR_BROADCAST_SMOKE_PASS', flush=True)
     finally:
         spark.stop()
