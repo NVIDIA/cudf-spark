@@ -15,7 +15,7 @@
  */
 package org.apache.spark.sql.rapids.testing
 
-import org.apache.spark.{BarrierTaskContext, SparkEnv}
+import org.apache.spark.SparkEnv
 import org.apache.spark.sql.{Dataset, Row, SparkSession}
 import org.apache.spark.sql.execution.{SparkPlan, SQLExecution}
 import org.apache.spark.sql.types.LongType
@@ -49,7 +49,8 @@ object ExecutorBroadcastFaultSupport {
     val shuffleId = build.getClass.getMethod("shuffleId").invoke(build).asInstanceOf[Int]
     val observations = session.sparkContext.parallelize(0 until slots, slots).barrier()
       .mapPartitions { _ =>
-        BarrierTaskContext.get().barrier()
+        // Barrier scheduling reserves all slots, and the driver verifies that both executors
+        // were visited. No barrier synchronization request is needed to remove these outputs.
         // Resolve the catalog through the active shim loader, as the product does. This helper
         // depends only on Spark APIs and does not add a product dependency on testing code.
         val shim = Class.forName("com.nvidia.spark.rapids.ShimLoader$")

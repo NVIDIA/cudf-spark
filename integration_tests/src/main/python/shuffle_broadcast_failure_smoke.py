@@ -21,10 +21,9 @@ inject stream-side failures without adding fault-injection hooks to production c
 import json
 import os
 from pathlib import Path
-import threading
 import time
 
-from pyspark import TaskContext
+from pyspark import InheritableThread, TaskContext
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import broadcast, col, udf
 from pyspark.sql.types import LongType
@@ -61,6 +60,20 @@ def cleanup(spark, node):
     assert cleaner.isDefined(), 'A cleaner is required by executor broadcast'
     cleaner.get().doCleanupShuffle(shuffle_id, True)
     return shuffle_id
+
+
+def running_tasks(spark):
+    infos = spark.sparkContext._jsc.sc().statusTracker().getExecutorInfos()
+    return sum(info.numRunningTasks() for info in infos)
+
+
+def wait_idle(spark):
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        if running_tasks(spark) == 0:
+            return
+        time.sleep(0.2)
+    raise AssertionError('Executors still report active tasks after query cancellation')
 
 
 def main():
@@ -131,23 +144,26 @@ def main():
             finally:
                 sc.setLocalProperty('spark.jobGroup.id', None)
 
-        worker = threading.Thread(target=collect_cancellable, daemon=True)
+        worker = InheritableThread(target=collect_cancellable, daemon=True)
         worker.start()
         deadline = time.monotonic() + 40
         while time.monotonic() < deadline:
-            if Path(marker).exists() and native.metrics().apply('executorBuilds').value() > 0:
+            if Path(marker).exists() and native.metrics().apply('executorBuilds').value() > 0 \
+                    and running_tasks(spark) > 0:
                 break
             assert worker.is_alive(), outcome
             time.sleep(0.1)
         assert Path(marker).exists(), 'The cancellation never reached the running stream task'
         assert native.metrics().apply('executorBuilds').value() > 0, \
             'Cancellation must happen after another task has used the native cache'
+        assert running_tasks(spark) > 0, 'Cancellation requires an active executor task'
         sc.cancelJobGroup('native-broadcast-cancel')
         worker.join(30)
         assert not worker.is_alive(), 'The cancelled query did not return within 30 seconds'
         assert len(outcome) == 1 and outcome[0][0] == 'failure', outcome
         message = outcome[0][1].lower()
         assert 'cancel' in message or 'interrupt' in message, message
+        wait_idle(spark)
         print(json.dumps(dict(case='query-cancellation', result='PASS',
                               shuffle=cleanup(spark, native))), flush=True)
 
