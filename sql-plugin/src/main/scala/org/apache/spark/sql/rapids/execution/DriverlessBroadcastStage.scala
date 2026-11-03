@@ -15,6 +15,8 @@
  */
 package org.apache.spark.sql.rapids.execution
 
+import java.util.concurrent.Future
+
 import com.nvidia.spark.rapids.{GpuBuildLeft, GpuBuildRight, GpuMetric, GpuSinglePartitioning, RapidsConf}
 
 import org.apache.spark.{MapOutputStatistics, SparkContext}
@@ -85,28 +87,41 @@ private[execution] class DriverlessBroadcastStage(
 
   // A later AQE plan or unsupported consumer may require a real standard broadcast. Its
   // payload must never be confused with the token returned to AQE's stage completion future.
-  private lazy val standard = GpuBroadcastExchangeExec(exchange.mode, exchange.child)(
+  // An eager exchange lets cancellation access its future without acquiring the
+  // standardResult lazy-initialization lock held by a waiting broadcast consumer.
+  protected val standard = GpuBroadcastExchangeExec(exchange.mode, exchange.child)(
     exchange.cpuCanonical)
+
+  @volatile private var standardSelected = false
+
+  def activeBroadcastFuture: Option[Future[Broadcast[Any]]] =
+    if (standardSelected) Some(standard.relationFuture) else None
 
   private lazy val standardResult = {
     logInfo(s"Driverless AQE build for exchange ${exchange.id}, shuffle ${shuffle.shuffleId} " +
       "is consumed through standard broadcast")
+    exchange.metrics("driverlessStageFallbacks").add(1)
+    SQLMetrics.postDriverMetricUpdates(context,
+      context.getLocalProperty(SQLExecution.EXECUTION_ID_KEY),
+      Seq(exchange.metrics("driverlessStageFallbacks")))
     val result = standard.executeColumnarBroadcast[Any]()
     val updated = Seq(GpuMetric.NUM_OUTPUT_BATCHES, GpuMetric.COLLECT_TIME,
       GpuMetric.BUILD_TIME, "broadcastTime").flatMap { name =>
       exchange.gpuLongMetric(name).set(standard.gpuLongMetric(name).value)
       exchange.metrics.get(name)
     }
-    exchange.metrics("driverlessStageFallbacks").add(1)
     exchange.metrics("fallbackBroadcastBytes").set(standard.metrics("dataSize").value)
     SQLMetrics.postDriverMetricUpdates(context,
       context.getLocalProperty(SQLExecution.EXECUTION_ID_KEY),
-      updated ++ Seq(exchange.metrics("driverlessStageFallbacks"),
-        exchange.metrics("fallbackBroadcastBytes")))
+      updated :+ exchange.metrics("fallbackBroadcastBytes"))
     result
   }
 
-  def standardBroadcast(): Broadcast[Any] = standardResult
+  def standardBroadcast(): Broadcast[Any] = {
+    // Publish the cancellation owner before starting or waiting for the fallback build.
+    standardSelected = true
+    standardResult
+  }
 }
 
 object DriverlessBroadcastStage {

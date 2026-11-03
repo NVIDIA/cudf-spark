@@ -80,6 +80,16 @@ def _published_values(metric):
     return published
 
 
+def _assert_published_driver_value(metric):
+    spark = get_spark_i_know_what_i_am_doing()
+    gateway = spark.sparkContext._gateway
+    values = gateway.new_array(spark._jvm.long, 1)
+    values[0] = metric.value()
+    expected = spark._jvm.org.apache.spark.sql.execution.metric.SQLMetrics.stringValue(
+        metric.metricType(), values, gateway.new_array(spark._jvm.long, 0))
+    assert _published_values(metric) == [expected]
+
+
 _conf = {
     'spark.sql.adaptive.enabled': 'false',
     'spark.sql.exchange.reuse': 'false',
@@ -131,6 +141,11 @@ def test_executor_broadcast_preserves_null_duplicate_and_residual_semantics(
         assert join.metrics().apply('runtimeFallbacks').value() == 0
         exchange = join.fallbackBroadcast()
         assert exchange.metrics().apply('collectTime').value() == 0
+        assert join.metrics().apply('buildStageBytes').value() > 0
+        assert join.metrics().apply('buildStageTime').value() > 0
+        if join_type == 'inner' and build_side == 'right':
+            _assert_published_driver_value(join.metrics().apply('buildStageBytes'))
+            _assert_published_driver_value(join.metrics().apply('buildStageTime'))
         if aqe == 'true':
             assert exchange.metrics().apply('driverlessBuildBytes').value() > 0
             if join_type == 'inner' and build_side == 'right':
@@ -153,6 +168,8 @@ def test_executor_broadcast_rejects_oversized_build_before_executor_assembly():
         assert join.metrics().apply('runtimeFallbacks').value() == 1
         assert join.metrics().apply('executorBuilds').value() == 0
         assert join.fallbackBroadcast().metrics().apply('dataSize').value() > 0
+        _assert_published_driver_value(join.metrics().apply('buildStageBytes'))
+        _assert_published_driver_value(join.metrics().apply('buildStageTime'))
         published = _published_values(join.metrics().apply('runtimeFallbacks'))
         assert published == ['1'], f'Fallback count not published to SQL UI: {published}'
 

@@ -65,9 +65,14 @@ case class GpuDriverlessBroadcastHashJoinExec(
     CONCAT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_CONCAT_TIME),
     "executorBuilds" -> createMetric(ESSENTIAL_LEVEL, "executor broadcast builds"),
     "runtimeFallbacks" -> createMetric(ESSENTIAL_LEVEL, "runtime broadcast fallbacks"),
-    // AQE's final plan replaces the broadcast stage. Keep its driver metrics in that plan.
-    "buildStageTime" -> fallbackBroadcast.gpuLongMetric("driverlessStageTime"),
-    "buildStageBytes" -> fallbackBroadcast.gpuLongMetric("driverlessBuildBytes"))
+    // Preserve AQE stage metrics without posting them twice. Non-AQE preparation owns
+    // separate metrics because the saved exchange can also publish a standard fallback.
+    "buildStageTime" -> (if (conf.adaptiveExecutionEnabled) {
+      fallbackBroadcast.gpuLongMetric("driverlessStageTime")
+    } else createNanoTimingMetric(ESSENTIAL_LEVEL, "driverless shuffle build time")),
+    "buildStageBytes" -> (if (conf.adaptiveExecutionEnabled) {
+      fallbackBroadcast.gpuLongMetric("driverlessBuildBytes")
+    } else createSizeMetric(ESSENTIAL_LEVEL, "driverless build data size")))
 
   override protected def doColumnarBroadcastJoin(): RDD[ColumnarBatch] = {
     val exchange = buildPlan match {
@@ -83,18 +88,28 @@ case class GpuDriverlessBroadcastHashJoinExec(
     // AQE already completed and admitted this shuffle. Submitting the cached map stage again
     // is unnecessary and can produce duplicate job-end events on Spark 3.5.3.
     val statistics = preparedStatistics.getOrElse {
-      if (exchange.inputBatchRDD.getNumPartitions == 0) {
-        None
-      } else {
-        val mapStage = sparkContext.submitMapStage(exchange.shuffleDependencyColumnar)
-        try {
-          val timeout = DriverlessBroadcastBuildAdmission.waitTimeout(conf.broadcastTimeout)
-          Some(ThreadUtils.awaitResult(mapStage, timeout))
-        } finally {
-          if (!mapStage.isCompleted) {
-            mapStage.cancel()
+      val start = System.nanoTime()
+      try {
+        if (exchange.inputBatchRDD.getNumPartitions == 0) {
+          None
+        } else {
+          val mapStage = sparkContext.submitMapStage(exchange.shuffleDependencyColumnar)
+          try {
+            val timeout = DriverlessBroadcastBuildAdmission.waitTimeout(conf.broadcastTimeout)
+            Some(ThreadUtils.awaitResult(mapStage, timeout))
+          } finally {
+            if (!mapStage.isCompleted) {
+              mapStage.cancel()
+            }
           }
         }
+      } finally {
+        gpuLongMetric("buildStageTime") += System.nanoTime() - start
+        gpuLongMetric("buildStageBytes").set(
+          exchange.metrics(GpuShuffleExchangeExecBase.METRIC_DATA_SIZE).value)
+        SQLMetrics.postDriverMetricUpdates(sparkContext,
+          sparkContext.getLocalProperty(SQLExecution.EXECUTION_ID_KEY),
+          Seq(metrics("buildStageTime"), metrics("buildStageBytes")))
       }
     }
     val rows = exchange.metrics(NUM_OUTPUT_ROWS).value

@@ -412,6 +412,8 @@ abstract class GpuBroadcastExchangeExecBase(
 
   protected def resolveBroadcast(result: Broadcast[Any]): Broadcast[Any] = result
 
+  protected def activeBroadcastFuture: Option[Future[Broadcast[Any]]] = None
+
   override val outputRowsLevel: MetricsLevel = ESSENTIAL_LEVEL
   override val outputBatchesLevel: MetricsLevel = MODERATE_LEVEL
   override lazy val additionalMetrics = Map(
@@ -438,8 +440,11 @@ abstract class GpuBroadcastExchangeExecBase(
   // the value is assigned once.
   override val runId: UUID = UUID.randomUUID
 
+  override def relationFuture: Future[Broadcast[Any]] =
+    activeBroadcastFuture.getOrElse(materializationFuture)
+
   @transient
-  lazy val relationFuture: Future[Broadcast[Any]] = {
+  protected lazy val materializationFuture: Future[Broadcast[Any]] = {
     // relationFuture is used in "doExecute". Therefore we can get the execution id correctly here.
     val executionId = sparkContext.getLocalProperty(SQLExecution.EXECUTION_ID_KEY)
     val numOutputBatches = gpuLongMetric(NUM_OUTPUT_BATCHES)
@@ -811,6 +816,9 @@ case class GpuBroadcastExchangeExec(
 
   override protected def resolveBroadcast(result: Broadcast[Any]): Broadcast[Any] =
     driverlessStage.filter(_.isAdmitted).map(_.standardBroadcast()).getOrElse(result)
+
+  override protected def activeBroadcastFuture: Option[Future[Broadcast[Any]]] =
+    driverlessStage.flatMap(_.activeBroadcastFuture)
 
   private var _isGpuPlanningComplete = false
 
