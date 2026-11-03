@@ -171,12 +171,20 @@ def _setup_imported_variant_table(
               "TBLPROPERTIES ('format-version'='3')")
     if use_name_mapping:
         spark.sql(f"ALTER TABLE {table} DROP COLUMN unused")
-    spark.sql(f"""
-        SELECT id, {expression} AS v FROM (
-          SELECT id, parse_json(json) AS parsed
-          FROM VALUES (0, '{{"x":7}}'), (1, '{{"x":9}}'), (2, 'null'), (3, NULL)
-          AS source(id, json)) AS parsed_source
-        """).coalesce(1).write.parquet(data_path)
+    source = spark.sql("""
+        SELECT id, parse_json(json) AS parsed
+        FROM VALUES (0, '{"x":7}'), (1, '{"x":9}'), (2, 'null'), (3, NULL)
+        AS source(id, json)
+        """)
+    if shredded:
+        # Preserve a real shredded payload when nesting it, including inside collections.
+        # Read its physical struct to avoid depending on collection shredding support.
+        shredded_path = data_path + '_shredded_leaf'
+        source.coalesce(1).write.parquet(shredded_path)
+        source = spark.read.schema(
+            'id INT, parsed STRUCT<metadata: BINARY, value: BINARY, '
+            'typed_value: STRUCT<x: BIGINT>>').parquet(shredded_path)
+    source.selectExpr('id', f'{expression} AS v').coalesce(1).write.parquet(data_path)
 
     jvm = spark._jvm
     iceberg_table = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
