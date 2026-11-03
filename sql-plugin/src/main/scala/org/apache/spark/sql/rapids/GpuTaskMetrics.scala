@@ -328,6 +328,14 @@ class GpuTaskMetrics extends Serializable with Logging {
       case "crt"   => perfioS3CrtExecutors
       case _       => perfioS3S3aExecutors
     }
+    recordPerfioBackendOnce(acc)
+  }
+
+  /**
+   * Metric recording must never fail a task, so an accumulator that is not registered yet
+   * (AccumulatorV2.id throws) is ignored.
+   */
+  private def recordPerfioBackendOnce(acc: LongAccumulator): Unit = {
     try {
       if (PerfIO.reportedBackendAccIds.add(acc.id)) {
         acc.add(1L)
@@ -344,13 +352,7 @@ class GpuTaskMetrics extends Serializable with Logging {
       case "grpc" => perfioGcsGrpcExecutors
       case _      => perfioGcsHttpExecutors
     }
-    try {
-      if (PerfIO.reportedBackendAccIds.add(acc.id)) {
-        acc.add(1L)
-      }
-    } catch {
-      case _: IllegalArgumentException => // accumulator not yet registered; no-op
-    }
+    recordPerfioBackendOnce(acc)
   }
 
   def recordPerfioS3IcebergFallback(): Unit = {
