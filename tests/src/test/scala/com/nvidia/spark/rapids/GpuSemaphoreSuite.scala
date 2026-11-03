@@ -26,6 +26,7 @@ import org.scalatestplus.mockito.MockitoSugar
 
 import org.apache.spark.TaskContext
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class GpuSemaphoreSuite extends AnyFunSuite
     with BeforeAndAfterEach with MockitoSugar with TimeLimits  with TimeLimitedTests {
@@ -117,6 +118,44 @@ class GpuSemaphoreSuite extends AnyFunSuite
       GpuSemaphore.acquireIfNecessary(context1)
       assertNotAcquired(1, GpuSemaphore.tryAcquire(context2))
       assertNotAcquired(1, GpuSemaphore.tryAcquire(context2))
+    } finally {
+      GpuSemaphore.releaseIfNecessary(context1)
+      GpuSemaphore.releaseIfNecessary(context2)
+    }
+  }
+
+  test("HostColumnarToGpu releases the semaphore before pulling host batches") {
+    GpuDeviceManager.setRmmTaskInitEnabled(false)
+    val context1 = mockContext(1)
+    val context2 = mockContext(2)
+    // With one concurrent GPU task, task 2 gets the semaphore only if task 1 released it.
+    var calls = 0
+    def assertReleased(): Unit = {
+      calls += 1
+      assertAcquired(GpuSemaphore.tryAcquire(context2))
+      GpuSemaphore.releaseIfNecessary(context2)
+    }
+    val hostBatches = new Iterator[ColumnarBatch] {
+      private var remaining = 2
+      override def hasNext: Boolean = {
+        assertReleased()
+        remaining > 0
+      }
+      override def next(): ColumnarBatch = {
+        assertReleased()
+        remaining -= 1
+        new ColumnarBatch(Array.empty, 0)
+      }
+    }
+    try {
+      GpuSemaphore.acquireIfNecessary(context1)
+      val iter = HostColumnarToGpu.releasingSemaphore(hostBatches, context1)
+      while (iter.hasNext) {
+        iter.next()
+        // As the GPU batch built from the host batches would.
+        GpuSemaphore.acquireIfNecessary(context1)
+      }
+      assertResult(5)(calls)
     } finally {
       GpuSemaphore.releaseIfNecessary(context1)
       GpuSemaphore.releaseIfNecessary(context2)
