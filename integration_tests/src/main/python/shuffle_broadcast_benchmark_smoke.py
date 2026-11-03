@@ -40,6 +40,7 @@ def main():
     spark = SparkSession.builder.appName('executor-broadcast-large-build-ab').getOrCreate()
     try:
         build_rows = int(os.environ.get('BROADCAST_BENCH_BUILD_ROWS', str(2 ** 23)))
+        expected_builds = int(spark.sparkContext.getConf().get('spark.executor.instances', '2'))
         probe_rows = 2 * build_rows
         expected = (
             probe_rows,
@@ -80,7 +81,7 @@ def main():
                     driver_bytes = join.fallbackBroadcast().metrics().apply('dataSize').value()
                     builds = join.metrics().apply('executorBuilds').value()
                     shuffle_bytes = join.buildPlan().metrics().apply('dataSize').value()
-                    assert driver_bytes == 0 and builds == 2, (driver_bytes, builds)
+                    assert driver_bytes == 0 and builds == expected_builds, (driver_bytes, builds)
                     spark.sparkContext._jsc.sc().cleaner().get() \
                         .doCleanupShuffle(join.buildPlan().shuffleId(), True)
                 else:
