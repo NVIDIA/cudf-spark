@@ -67,7 +67,6 @@ The plugin is designed to work on NVIDIA Volta, Turing, Ampere, Ada Lovelace, Ho
 	Supported Dataproc Serverless versions:
 		Spark runtime 1.2 LTS
 		Spark runtime 2.2 LTS
-		Spark runtime 2.3 LTS
 		Spark runtime 3.0
 
 *These minimum driver versions follow the
