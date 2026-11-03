@@ -55,8 +55,8 @@ import com.nvidia.spark.rapids._
 
 import org.apache.spark.sql.catalyst.expressions.{Expression, UnaryExpression}
 import org.apache.spark.sql.rapids.GpuFromProtobuf
-import org.apache.spark.sql.rapids.protobuf.{FlattenedFieldDescriptor, FlattenedSchemaArrays,
-  ProtobufFieldInfo, ProtobufMessageDescriptor, ProtobufSchemaExtractor,
+import org.apache.spark.sql.rapids.protobuf.{FieldReads, FlattenedFieldDescriptor,
+  FlattenedSchemaArrays, ProtobufFieldInfo, ProtobufMessageDescriptor, ProtobufSchemaExtractor,
   ProtobufSchemaValidator}
 import org.apache.spark.sql.types._
 
@@ -114,9 +114,11 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
           plannerOptions <- SparkProtobufCompat.parsePlannerOptions(exprInfo.options)
           _ <- checkSupportedOptions(exprInfo.options)
           msgDesc <- SparkProtobufCompat.resolveMessageDescriptor(exprInfo)
-          // Every field is decoded and returned until schema projection is supported.
+          // Fields the query does not read are still validated, like Spark does, but are
+          // returned as nulls. Semantically equal copies read the union, so they stay equal.
+          reads = FieldReads.analyze(this, _.semanticEquals(e))
           flatFields <- flattenMessage(schema, msgDesc, exprInfo.messageName,
-            plannerOptions.enumsAsInts, parentIdx = -1, depth = 0, pathPrefix = "",
+            plannerOptions.enumsAsInts, reads, parentIdx = -1, depth = 0, pathPrefix = "",
             Vector.empty)
           arrays = ProtobufSchemaValidator.toFlattenedSchemaArrays(flatFields.toArray)
           // The JNI constructor validates the schema; fail here rather than on executors.
@@ -157,6 +159,7 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
             msgDesc: ProtobufMessageDescriptor,
             messageName: String,
             enumsAsInts: Boolean,
+            reads: FieldReads,
             parentIdx: Int,
             depth: Int,
             pathPrefix: String,
@@ -174,7 +177,7 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
             _ <- checkFieldsSupported(schema, fieldsInfoMap, pathOf)
             result <- schema.fields.foldLeft(empty) { (fields, sf) =>
               fields.flatMap(flattenField(sf, fieldsInfoMap(sf.name), msgDesc, messageName,
-                enumsAsInts, parentIdx, depth, pathOf(sf.name), _))
+                enumsAsInts, reads.child(sf.name), parentIdx, depth, pathOf(sf.name), _))
             }
           } yield result
         }
@@ -185,6 +188,7 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
             msgDesc: ProtobufMessageDescriptor,
             messageName: String,
             enumsAsInts: Boolean,
+            reads: Option[FieldReads],
             parentIdx: Int,
             depth: Int,
             path: String,
@@ -204,7 +208,7 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
             outputType <- outputTypeOpt.toRight(
               s"Unsupported Spark type for protobuf field '$path': ${sf.dataType}")
             flatField <- ProtobufSchemaValidator.toFlattenedFieldDescriptor(
-              path, sf, info, parentIdx, depth, outputType, isOutput = true)
+              path, sf, info, parentIdx, depth, outputType, isOutput = reads.isDefined)
             withField = flatFields :+ flatField
             result <- nestedSchema match {
               case Some(st) =>
@@ -212,8 +216,10 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
                   childDesc <- Try(msgDesc.findField(sf.name).flatMap(_.messageDescriptor))
                     .toOption.flatten.toRight(
                       s"Failed to resolve the message type of protobuf field '$path'")
+                  // The children of a field that is not read are not read either.
                   fields <- flattenMessage(st, childDesc, s"$messageName.${sf.name}",
-                    enumsAsInts, parentIdx = flatFields.size, depth + 1, path, withField)
+                    enumsAsInts, reads.getOrElse(FieldReads.Unread), parentIdx = flatFields.size,
+                    depth + 1, path, withField)
                 } yield fields
               case None => Right(withField)
             }
