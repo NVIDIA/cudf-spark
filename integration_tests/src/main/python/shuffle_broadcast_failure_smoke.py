@@ -205,9 +205,10 @@ def main():
             started = time.monotonic()
             try:
                 frame.collect()
-                raise AssertionError('The injected probe-stage failure did not fail the query')
             except Exception as error:
                 assert 'EXPECTED_ADAPTIVE_PROBE_FAILURE' in str(error), str(error)
+            else:
+                raise AssertionError('The injected probe-stage failure did not fail the query')
             assert Path(build_marker).exists(), 'The failure must overlap a running build'
             assert time.monotonic() - started < 40, 'AQE waited for the sleeping build to finish'
             exchanges = [node for node in nodes(frame._jdf.queryExecution().executedPlan())
@@ -217,10 +218,11 @@ def main():
             assert future.isDone(), 'The failed query left build materialization pending'
             try:
                 future.get()
-                raise AssertionError('The sleeping build completed instead of being cancelled')
             except Exception as error:
                 message = str(error).lower()
                 assert 'cancel' in message or 'interrupt' in message, message
+            else:
+                raise AssertionError('The sleeping build completed instead of being cancelled')
             deadline = time.monotonic() + 5
             while exchanges[0].metrics().apply('driverlessStageTime').value() == 0 \
                     and time.monotonic() < deadline:
