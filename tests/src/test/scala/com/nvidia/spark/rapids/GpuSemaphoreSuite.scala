@@ -151,6 +151,8 @@ class GpuSemaphoreSuite extends AnyFunSuite
       GpuSemaphore.acquireIfNecessary(context1)
       val iter = HostColumnarToGpu.releasingSemaphore(hostBatches, context1)
       while (iter.hasNext) {
+        // Held again before next(), so that its own release is checked.
+        GpuSemaphore.acquireIfNecessary(context1)
         iter.next()
         // As the GPU batch built from the host batches would.
         GpuSemaphore.acquireIfNecessary(context1)
