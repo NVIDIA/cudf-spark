@@ -28,7 +28,10 @@ import org.mockito.invocation.InvocationOnMock
 import org.mockito.stubbing.Answer
 import org.scalatestplus.mockito.MockitoSugar
 
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.expressions.AttributeReference
+import org.apache.spark.sql.rapids.execution.TrampolineUtil
+import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.types.{DataType, LongType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -161,6 +164,11 @@ class GeneratedInternalRowToCudfRowIteratorRetrySuite
       }
       batches
     }
+    assertMatchesBuildBatch(batches)
+  }
+
+  /** Checks that the batches, at least two after a split, together match buildBatch. */
+  private def assertMatchesBuildBatch(batches: ArrayBuffer[ColumnarBatch]): Unit = {
     assert(batches.length >= 2, s"Expected at least 2 batches after a split, got ${batches.length}")
     withResource(ConcatAndConsumeAll.buildNonEmptyBatchFromTypes(batches.toArray,
         Array[DataType](LongType))) { combined =>
@@ -184,6 +192,44 @@ class GeneratedInternalRowToCudfRowIteratorRetrySuite
         RmmSpark.OomInjectionType.GPU.ordinal, 0)
       assertSplitOutput(myIter)
       assertResult(0)(SpillFramework.stores.deviceStore.spill(1))
+    }
+  }
+
+  test("a split piece left for a later next() reacquires the GPU semaphore") {
+    val spark = SparkSession.builder()
+        .master("local[1]")
+        .appName("GeneratedInternalRowToCudfRowIteratorRetrySuite")
+        .getOrCreate()
+    val context = new MockTaskContext(taskAttemptId = 1, partitionId = 0)
+    TrampolineUtil.setTaskContext(context)
+    try {
+      val batchIter = Seq(buildBatch()).iterator
+      withResource(new ColumnarToRowIterator(batchIter, NoopMetric, NoopMetric, NoopMetric,
+        NoopMetric)) { ctriter =>
+        val schema = Array(AttributeReference("longcol", LongType)().toAttribute)
+        val myIter = GeneratedInternalRowToCudfRowIterator(
+          ctriter, schema, TargetSize(Int.MaxValue),
+          NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric)
+        RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
+          RmmSpark.OomInjectionType.GPU.ordinal, 0)
+        val batches = closeOnExcept(ArrayBuffer[ColumnarBatch]()) { batches =>
+          batches += myIter.next()
+          GpuSemaphore.releaseIfNecessary(context)
+          val (_, releasedAt) = GpuSemaphore.getLastSemAcqAndRelTime(context)
+          assert(releasedAt > 0)
+          batches += myIter.next()
+          val (reacquiredAt, _) = GpuSemaphore.getLastSemAcqAndRelTime(context)
+          assert(reacquiredAt > releasedAt)
+          assert(!myIter.hasNext)
+          batches
+        }
+        assertMatchesBuildBatch(batches)
+      }
+    } finally {
+      GpuSemaphore.releaseIfNecessary(context)
+      TrampolineUtil.unsetTaskContext()
+      ScalableTaskCompletion.reset()
+      spark.stop()
     }
   }
 
