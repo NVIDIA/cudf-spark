@@ -186,6 +186,7 @@ def test_executor_broadcast_aqe_oversized_build_uses_real_standard_broadcast():
         assert len(joins) == 1
         exchange = joins[0].broadcastExchange()
         assert exchange.metrics().apply('driverlessStageFallbacks').value() == 1
+        assert _published_values(exchange.metrics().apply('driverlessStageFallbacks')) == ['1']
         assert exchange.metrics().apply('driverlessBuildBytes').value() == 0
         assert exchange.metrics().apply('dataSize').value() > 0
 
@@ -242,6 +243,8 @@ def test_executor_broadcast_aqe_admitted_stage_has_real_payload_for_standard_con
         exchange = joins[0].broadcastExchange()
         assert exchange.metrics().apply('driverlessBuildBytes').value() > 0
         assert exchange.metrics().apply('driverlessStageFallbacks').value() == 1
+        assert exchange.metrics().apply('fallbackBroadcastBytes').value() > 0
+        assert _published_values(exchange.metrics().apply('driverlessStageFallbacks')) == ['1']
         assert exchange.metrics().apply('collectTime').value() > 0
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(

@@ -77,16 +77,23 @@ case class GpuDriverlessBroadcastHashJoinExec(
     val maxBytes = RapidsConf.DRIVERLESS_BROADCAST_MAX_SIZE.get(conf)
     // Spark incorporates successful map-task accumulator updates before completing this future.
     // The writer metric records uncompressed bytes even when map-status sizes are compressed.
-    val statistics = if (exchange.inputBatchRDD.getNumPartitions == 0) {
-      None
-    } else {
-      val mapStage = sparkContext.submitMapStage(exchange.shuffleDependencyColumnar)
-      try {
-        val timeout = DriverlessBroadcastBuildAdmission.waitTimeout(conf.broadcastTimeout)
-        Some(ThreadUtils.awaitResult(mapStage, timeout))
-      } finally {
-        if (!mapStage.isCompleted) {
-          mapStage.cancel()
+    val preparedStatistics = fallbackBroadcast.admittedDriverlessBuild.collect {
+      case (prepared, statistics) if prepared.shuffleId == exchange.shuffleId => statistics
+    }
+    // AQE already completed and admitted this shuffle. Submitting the cached map stage again
+    // is unnecessary and can produce duplicate job-end events on Spark 3.5.3.
+    val statistics = preparedStatistics.getOrElse {
+      if (exchange.inputBatchRDD.getNumPartitions == 0) {
+        None
+      } else {
+        val mapStage = sparkContext.submitMapStage(exchange.shuffleDependencyColumnar)
+        try {
+          val timeout = DriverlessBroadcastBuildAdmission.waitTimeout(conf.broadcastTimeout)
+          Some(ThreadUtils.awaitResult(mapStage, timeout))
+        } finally {
+          if (!mapStage.isCompleted) {
+            mapStage.cancel()
+          }
         }
       }
     }
@@ -106,9 +113,6 @@ case class GpuDriverlessBroadcastHashJoinExec(
       s"rows=$rows, bytes=$bytes, " +
       s"uncompressedBytes=$uncompressedBytes, upperBound=$sizeBound, " +
       s"maxBytes=$maxBytes, admitted=$admitted, reason=$reason")
-    SQLMetrics.postDriverMetricUpdates(sparkContext,
-      sparkContext.getLocalProperty(SQLExecution.EXECUTION_ID_KEY),
-      Seq(metrics("buildStageTime"), metrics("buildStageBytes")))
     if (!admitted) {
       gpuLongMetric("runtimeFallbacks") += 1
       val executionId = sparkContext.getLocalProperty(SQLExecution.EXECUTION_ID_KEY)

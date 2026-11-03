@@ -17,7 +17,7 @@ package org.apache.spark.sql.rapids.execution
 
 import com.nvidia.spark.rapids.{GpuBuildLeft, GpuBuildRight, GpuMetric, GpuSinglePartitioning, RapidsConf}
 
-import org.apache.spark.SparkContext
+import org.apache.spark.{MapOutputStatistics, SparkContext}
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.internal.Logging
 import org.apache.spark.rapids.shims.GpuShuffleExchangeExec
@@ -35,8 +35,10 @@ private[execution] class DriverlessBroadcastStage(
     GpuSinglePartitioning, exchange.child, ENSURE_REQUIREMENTS)(GpuSinglePartitioning)
 
   @volatile private var accepted = false
+  private var completedStatistics: Option[MapOutputStatistics] = None
 
   def isAdmitted: Boolean = accepted
+  def mapStatistics: Option[MapOutputStatistics] = completedStatistics
 
   def materialize(): Option[Broadcast[Any]] = {
     val statistics = if (shuffle.inputBatchRDD.getNumPartitions == 0) {
@@ -71,6 +73,7 @@ private[execution] class DriverlessBroadcastStage(
       exchange.metrics("dataSize").set(uncompressed)
       exchange.metrics("driverlessBuildBytes").set(uncompressed)
       val token = context.broadcast[Any](shuffle.shuffleId)
+      completedStatistics = statistics
       accepted = true
       Some(token)
     } else {
@@ -89,13 +92,17 @@ private[execution] class DriverlessBroadcastStage(
     logInfo(s"Driverless AQE build for exchange ${exchange.id}, shuffle ${shuffle.shuffleId} " +
       "is consumed through standard broadcast")
     val result = standard.executeColumnarBroadcast[Any]()
-    Seq("dataSize", GpuMetric.NUM_OUTPUT_ROWS, GpuMetric.NUM_OUTPUT_BATCHES,
-      GpuMetric.COLLECT_TIME, GpuMetric.BUILD_TIME, "broadcastTime").foreach { name =>
+    val updated = Seq(GpuMetric.NUM_OUTPUT_BATCHES, GpuMetric.COLLECT_TIME,
+      GpuMetric.BUILD_TIME, "broadcastTime").flatMap { name =>
       exchange.gpuLongMetric(name).set(standard.gpuLongMetric(name).value)
+      exchange.metrics.get(name)
     }
     exchange.metrics("driverlessStageFallbacks").add(1)
+    exchange.metrics("fallbackBroadcastBytes").set(standard.metrics("dataSize").value)
     SQLMetrics.postDriverMetricUpdates(context,
-      context.getLocalProperty(SQLExecution.EXECUTION_ID_KEY), exchange.metrics.values.toSeq)
+      context.getLocalProperty(SQLExecution.EXECUTION_ID_KEY),
+      updated ++ Seq(exchange.metrics("driverlessStageFallbacks"),
+        exchange.metrics("fallbackBroadcastBytes")))
     result
   }
 

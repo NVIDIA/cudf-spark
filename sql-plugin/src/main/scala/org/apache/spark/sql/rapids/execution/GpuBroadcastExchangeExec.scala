@@ -35,7 +35,7 @@ import com.nvidia.spark.rapids.lore.{GpuLoreDumpRDD, SimpleRDD}
 import com.nvidia.spark.rapids.lore.GpuLore.LORE_DUMP_RDD_TAG
 import com.nvidia.spark.rapids.shims.{BroadcastExchangeShims, ShimBroadcastExchangeLike, ShimUnaryExecNode, SparkShimImpl}
 
-import org.apache.spark.SparkException
+import org.apache.spark.{MapOutputStatistics, SparkException}
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.internal.Logging
 import org.apache.spark.launcher.SparkLauncher
@@ -420,6 +420,7 @@ abstract class GpuBroadcastExchangeExecBase(
     BUILD_TIME -> createNanoTimingMetric(ESSENTIAL_LEVEL, DESCRIPTION_BUILD_TIME),
     "broadcastTime" -> createNanoTimingMetric(ESSENTIAL_LEVEL, "time to broadcast"),
     "driverlessBuildBytes" -> createSizeMetric(ESSENTIAL_LEVEL, "driverless build data size"),
+    "fallbackBroadcastBytes" -> createSizeMetric(ESSENTIAL_LEVEL, "fallback broadcast data size"),
     "driverlessStageTime" -> createNanoTimingMetric(ESSENTIAL_LEVEL,
       "driverless shuffle build time"),
     "driverlessStageFallbacks" -> createMetric(ESSENTIAL_LEVEL, "driverless stage fallbacks"))
@@ -488,7 +489,11 @@ abstract class GpuBroadcastExchangeExecBase(
       // Setup a job group here so later it may get cancelled by groupId if necessary.
       sparkContext.setJobGroup(runId.toString, s"broadcast exchange (runId ${runId})",
         interruptOnCancel = true)
-      prepareDriverlessBuild().getOrElse(buildStandardBroadcast())
+      try {
+        prepareDriverlessBuild().getOrElse(buildStandardBroadcast())
+      } finally {
+        SQLMetrics.postDriverMetricUpdates(sparkContext, executionId, metrics.values.toSeq)
+      }
     }
 
     def buildStandardBroadcast(): Broadcast[Any] = {
@@ -520,7 +525,6 @@ abstract class GpuBroadcastExchangeExecBase(
           // Broadcast the relation
           sparkContext.broadcast(broadcastResult)
       }
-      SQLMetrics.postDriverMetricUpdates(sparkContext, executionId, metrics.values.toSeq)
       broadcasted
     }
 
@@ -786,8 +790,12 @@ case class GpuBroadcastExchangeExec(
     }
   }
 
+  private[execution] def admittedDriverlessBuild:
+      Option[(GpuShuffleExchangeExec, Option[MapOutputStatistics])] =
+    driverlessStage.filter(_.isAdmitted).map(stage => (stage.shuffle, stage.mapStatistics))
+
   private[execution] def admittedDriverlessShuffle: Option[GpuShuffleExchangeExec] =
-    driverlessStage.filter(_.isAdmitted).map(_.shuffle)
+    admittedDriverlessBuild.map(_._1)
 
   override protected def prepareDriverlessBuild(): Option[Broadcast[Any]] = {
     driverlessStage.flatMap { stage =>
@@ -797,8 +805,6 @@ case class GpuBroadcastExchangeExec(
       } finally {
         // This is driver wall time for stage preparation, separate from task operator time.
         gpuLongMetric("driverlessStageTime") += System.nanoTime() - start
-        val executionId = sparkContext.getLocalProperty(SQLExecution.EXECUTION_ID_KEY)
-        SQLMetrics.postDriverMetricUpdates(sparkContext, executionId, metrics.values.toSeq)
       }
     }
   }
