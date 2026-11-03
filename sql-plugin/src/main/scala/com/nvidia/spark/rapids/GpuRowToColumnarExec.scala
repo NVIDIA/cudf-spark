@@ -820,8 +820,9 @@ class RowToColumnarIterator(
 
         val ret = NvtxIdWithMetrics(NvtxRegistry.ROW_TO_COLUMNAR, opTime) {
           // Build host columns and wrap in HostColumnarBatchWithRowRange for split retry.
-          // A split can be requested for host memory pressure as well as GPU OOM, and
-          // finishing the transfer is how this task frees its host batch.
+          // A split can also be requested for host memory pressure. Splitting lets the task go
+          // on instead of failing, but frees no host memory: the host batch stays until its
+          // last piece is on the GPU.
           val hostColumns = RmmRapidsRetryIterator.withRetryNoSplit {
             builders.buildHostColumns()
           }
@@ -832,7 +833,6 @@ class RowToColumnarIterator(
           localGoal match {
             case _: RequireSingleBatchLike =>
               // Cannot split when a single batch is required
-              pendingBatchIter = Iterator.empty
               RmmRapidsRetryIterator.withRetryNoSplit(hostBatch) { batch =>
                 batch.copyToGpu()
               }

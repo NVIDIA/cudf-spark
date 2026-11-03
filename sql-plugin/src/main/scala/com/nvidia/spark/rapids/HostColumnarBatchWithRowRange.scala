@@ -347,10 +347,8 @@ object HostColumnarBatchWithRowRange {
       require(col.getRowCount.toInt == numRows,
         s"numRows ($numRows) must match hostColumns[$i] rowCount (${col.getRowCount})")
     }
-    // The builder that created these host columns owns the initial reference and will close it
-    // when the builder is closed. We increment the reference count here to take a new independent
-    // reference. This ensures the host columns remain valid for the lifetime of this
-    // HostColumnarBatchWithRowRange instance, even after the builder releases its reference.
+    // The caller keeps its own reference to the host columns and closes it. This instance takes
+    // another one, so the columns stay valid until it is closed.
     new HostColumnarBatchWithRowRange(hostColumns, 0, numRows, dataTypes)
   }
 }
