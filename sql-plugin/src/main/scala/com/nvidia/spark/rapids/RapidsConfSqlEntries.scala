@@ -26,8 +26,9 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
   val DRIVERLESS_BROADCAST_ENABLED = conf("spark.rapids.sql.driverlessBroadcast.enabled")
     .doc("Use executor-to-executor GPU shuffle reads for eligible broadcast hash joins. " +
       "Must be enabled at application startup; it can then be disabled per query. " +
-      "Supports UCX shuffle with uncompressed or compressed batches. Hash-table reuse " +
-      "must be disabled. Null-aware anti joins, reused exchanges, and subqueries " +
+      "Uses UCX GPU shuffle; the build decoder accepts uncompressed and compressed batches. " +
+      "Hash-table reuse must be disabled. Null-aware anti joins, skew-optimized joins, " +
+      "reused exchanges, and subqueries " +
       "retain the standard path. Only deterministic builds with supported flat scalar schemas " +
       "are eligible. Opaque RDD sources retain standard broadcast. " +
       "Builds without a safe assembled-size bound use standard broadcast.")

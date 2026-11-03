@@ -64,7 +64,10 @@ case class GpuDriverlessBroadcastHashJoinExec(
   override lazy val additionalMetrics: Map[String, GpuMetric] = broadcastJoinMetrics ++ Map(
     CONCAT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_CONCAT_TIME),
     "executorBuilds" -> createMetric(ESSENTIAL_LEVEL, "executor broadcast builds"),
-    "runtimeFallbacks" -> createMetric(ESSENTIAL_LEVEL, "runtime broadcast fallbacks"))
+    "runtimeFallbacks" -> createMetric(ESSENTIAL_LEVEL, "runtime broadcast fallbacks"),
+    // AQE's final plan replaces the broadcast stage. Keep its driver metrics in that plan.
+    "buildStageTime" -> fallbackBroadcast.gpuLongMetric("driverlessStageTime"),
+    "buildStageBytes" -> fallbackBroadcast.gpuLongMetric("driverlessBuildBytes"))
 
   override protected def doColumnarBroadcastJoin(): RDD[ColumnarBatch] = {
     val exchange = buildPlan match {
@@ -103,6 +106,9 @@ case class GpuDriverlessBroadcastHashJoinExec(
       s"rows=$rows, bytes=$bytes, " +
       s"uncompressedBytes=$uncompressedBytes, upperBound=$sizeBound, " +
       s"maxBytes=$maxBytes, admitted=$admitted, reason=$reason")
+    SQLMetrics.postDriverMetricUpdates(sparkContext,
+      sparkContext.getLocalProperty(SQLExecution.EXECUTION_ID_KEY),
+      Seq(metrics("buildStageTime"), metrics("buildStageBytes")))
     if (!admitted) {
       gpuLongMetric("runtimeFallbacks") += 1
       val executionId = sparkContext.getLocalProperty(SQLExecution.EXECUTION_ID_KEY)
