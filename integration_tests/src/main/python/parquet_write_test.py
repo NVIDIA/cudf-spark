@@ -991,3 +991,22 @@ def test_save_as_table_overwrite_existing(spark_tmp_table_factory):
     with_gpu_session(lambda spark: spark.range(5).write.format("parquet").mode("overwrite").saveAsTable(table))
     assert with_cpu_session(lambda spark: spark.table(table).count()) == 5
 
+def test_save_as_table_append_existing(spark_tmp_table_factory):
+    table = spark_tmp_table_factory.get()
+    with_cpu_session(lambda spark: spark.range(3).write.format("parquet").saveAsTable(table))
+    with_gpu_session(lambda spark: spark.range(5).write.format("parquet").mode("append").saveAsTable(table))
+    assert with_cpu_session(lambda spark: spark.table(table).count()) == 8
+
+def test_save_as_table_ignore_existing(spark_tmp_table_factory):
+    table = spark_tmp_table_factory.get()
+    with_cpu_session(lambda spark: spark.range(3).write.format("parquet").saveAsTable(table))
+    with_gpu_session(lambda spark: spark.range(5).write.format("parquet").mode("ignore").saveAsTable(table))
+    assert with_cpu_session(lambda spark: spark.table(table).count()) == 3
+
+def test_save_as_table_error_if_exists(spark_tmp_table_factory):
+    table = spark_tmp_table_factory.get()
+    with_cpu_session(lambda spark: spark.range(3).write.format("parquet").saveAsTable(table))
+    with pytest.raises(pyspark.sql.utils.AnalysisException, match=r".*already exists.*"):
+        with_gpu_session(lambda spark: spark.range(5).write.format("parquet").mode("errorIfExists").saveAsTable(table))
+    assert with_cpu_session(lambda spark: spark.table(table).count()) == 3
+

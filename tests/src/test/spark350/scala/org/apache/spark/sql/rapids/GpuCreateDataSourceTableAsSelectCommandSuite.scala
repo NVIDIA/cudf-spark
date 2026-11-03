@@ -42,7 +42,7 @@ package org.apache.spark.sql.rapids
 import com.nvidia.spark.rapids.{FunSuiteWithTempDir, RapidsConf, SparkQueryCompareTestSuite}
 
 import org.apache.spark.SparkConf
-import org.apache.spark.sql.{Row, SaveMode, SparkSession}
+import org.apache.spark.sql.{AnalysisException, Row, SaveMode, SparkSession}
 import org.apache.spark.sql.catalyst.expressions.FileSourceMetadataAttribute.FILE_SOURCE_METADATA_COL_ATTR_KEY
 import org.apache.spark.sql.connector.catalog.{Column, Identifier}
 import org.apache.spark.sql.connector.catalog.CatalogV2Implicits._
@@ -117,14 +117,33 @@ class GpuCreateDataSourceTableAsSelectCommandSuite
     }, conf)
   }
 
-  test("saveAsTable overwrite on existing table") {
-    val targetTable = "overwriteTargetTable"
-    withGpuSparkSession { spark =>
-      withTable(spark, targetTable) {
-        spark.range(3).write.format("parquet").saveAsTable(targetTable)
-        assert(spark.table(targetTable).count() == 3)
-        spark.range(5).write.format("parquet").mode(SaveMode.Overwrite).saveAsTable(targetTable)
-        assert(spark.table(targetTable).count() == 5)
+  test("saveAsTable on existing table across SaveModes for Parquet and ORC") {
+    Seq("parquet", "orc").foreach { fmt =>
+      val targetTable = s"ctasSaveModesTable_$fmt"
+      withGpuSparkSession { spark =>
+        withTable(spark, targetTable) {
+          // Initial table creation
+          spark.range(3).write.format(fmt).saveAsTable(targetTable)
+          assert(spark.table(targetTable).count() == 3)
+
+          // SaveMode.Ignore: should be a no-op when table exists
+          spark.range(5).write.format(fmt).mode(SaveMode.Ignore).saveAsTable(targetTable)
+          assert(spark.table(targetTable).count() == 3)
+
+          // SaveMode.ErrorIfExists: should throw an AnalysisException
+          intercept[AnalysisException] {
+            spark.range(5).write.format(fmt).mode(SaveMode.ErrorIfExists).saveAsTable(targetTable)
+          }
+          assert(spark.table(targetTable).count() == 3)
+
+          // SaveMode.Append: should append rows
+          spark.range(5).write.format(fmt).mode(SaveMode.Append).saveAsTable(targetTable)
+          assert(spark.table(targetTable).count() == 8)
+
+          // SaveMode.Overwrite: should drop and recreate table
+          spark.range(4).write.format(fmt).mode(SaveMode.Overwrite).saveAsTable(targetTable)
+          assert(spark.table(targetTable).count() == 4)
+        }
       }
     }
   }

@@ -28,6 +28,7 @@ from data_gen import *
 from marks import *
 from pyspark.sql.functions import col, lit
 from pyspark.sql.types import *
+from pyspark.sql.utils import AnalysisException
 
 pytestmark = pytest.mark.nightly_resource_consuming_test
 # Use every type except boolean, see https://github.com/NVIDIA/spark-rapids/issues/11762 and
@@ -606,4 +607,23 @@ def test_save_as_table_overwrite_existing(spark_tmp_table_factory):
     with_cpu_session(lambda spark: spark.range(3).write.format("orc").saveAsTable(table))
     with_gpu_session(lambda spark: spark.range(5).write.format("orc").mode("overwrite").saveAsTable(table))
     assert with_cpu_session(lambda spark: spark.table(table).count()) == 5
+
+def test_save_as_table_append_existing(spark_tmp_table_factory):
+    table = spark_tmp_table_factory.get()
+    with_cpu_session(lambda spark: spark.range(3).write.format("orc").saveAsTable(table))
+    with_gpu_session(lambda spark: spark.range(5).write.format("orc").mode("append").saveAsTable(table))
+    assert with_cpu_session(lambda spark: spark.table(table).count()) == 8
+
+def test_save_as_table_ignore_existing(spark_tmp_table_factory):
+    table = spark_tmp_table_factory.get()
+    with_cpu_session(lambda spark: spark.range(3).write.format("orc").saveAsTable(table))
+    with_gpu_session(lambda spark: spark.range(5).write.format("orc").mode("ignore").saveAsTable(table))
+    assert with_cpu_session(lambda spark: spark.table(table).count()) == 3
+
+def test_save_as_table_error_if_exists(spark_tmp_table_factory):
+    table = spark_tmp_table_factory.get()
+    with_cpu_session(lambda spark: spark.range(3).write.format("orc").saveAsTable(table))
+    with pytest.raises(AnalysisException, match=r".*already exists.*"):
+        with_gpu_session(lambda spark: spark.range(5).write.format("orc").mode("errorIfExists").saveAsTable(table))
+    assert with_cpu_session(lambda spark: spark.table(table).count()) == 3
 
