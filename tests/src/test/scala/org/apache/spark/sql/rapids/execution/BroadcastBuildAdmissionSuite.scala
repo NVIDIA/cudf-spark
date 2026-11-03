@@ -18,6 +18,23 @@ package org.apache.spark.sql.rapids.execution
 import org.scalatest.funsuite.AnyFunSuite
 
 class BroadcastBuildAdmissionSuite extends AnyFunSuite {
+  test("actual byte checks accept the ceiling and reject overflow without wrapping") {
+    BroadcastBuildAdmission.checkActualBytes(BigInt(10), 10, "received build")
+    BroadcastBuildAdmission.checkActualBytes(BigInt(0), 10, "assembled build")
+    val error = intercept[IllegalStateException] {
+      BroadcastBuildAdmission.checkActualBytes(BigInt(Long.MaxValue) + 1,
+        Long.MaxValue, "received build")
+    }
+    assert(error.getMessage.contains("received build"))
+    assert(error.getMessage.contains("cannot fall back"))
+    intercept[IllegalStateException] {
+      BroadcastBuildAdmission.checkActualBytes(BigInt(-1), 10, "assembled build")
+    }
+    intercept[IllegalArgumentException] {
+      BroadcastBuildAdmission.checkActualBytes(BigInt(0), 0, "received build")
+    }
+  }
+
   test("accept empty input and a build exactly at the byte ceiling") {
     assert(BroadcastBuildAdmission.accepts(Array.empty[Long], 0, 10))
     assert(BroadcastBuildAdmission.accepts(Array(4L, 6L), 2, 10))

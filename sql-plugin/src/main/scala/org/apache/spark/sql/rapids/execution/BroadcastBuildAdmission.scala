@@ -17,6 +17,16 @@ package org.apache.spark.sql.rapids.execution
 
 /** Admission uses completed, uncompressed map output sizes, never logical-plan estimates. */
 private[execution] object BroadcastBuildAdmission {
+  def checkActualBytes(bytes: BigInt, maxBytes: Long, phase: String): Unit = {
+    require(maxBytes > 0, "Broadcast build byte limit must be positive")
+    if (bytes < 0 || bytes > maxBytes) {
+      throw new IllegalStateException(s"Executor broadcast $phase size $bytes exceeds " +
+        s"spark.rapids.shuffle.broadcast.maxSize=$maxBytes. " +
+        "Disable spark.rapids.shuffle.broadcast.enabled to use standard broadcast; " +
+        "executor assembly cannot fall back to a different query plan.")
+    }
+  }
+
   def accepts(partitionBytes: Array[Long], rows: Long, maxBytes: Long): Boolean = {
     val bytes = partitionBytes.foldLeft(BigInt(0))(_ + _)
     partitionBytes.forall(_ >= 0) && maxBytes > 0 && bytes <= maxBytes &&

@@ -28,7 +28,8 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
       "Must be enabled at application startup; it can then be disabled per query. " +
       "Requires UCX shuffle without table compression, AQE disabled, and hash-table reuse " +
       "disabled. Null-aware anti joins, reused exchanges, and plans containing subqueries " +
-      "retain the standard path. Builds that exceed runtime limits use standard broadcast.")
+      "retain the standard path. Builds rejected before executor assembly use standard " +
+      "broadcast. Exceeding the byte limit during executor assembly fails the query.")
     .internal()
     .booleanConf
     .createWithDefault(false)
@@ -36,6 +37,7 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
   val SHUFFLE_BROADCAST_MAX_SIZE = conf("spark.rapids.shuffle.broadcast.maxSize")
     .doc("Maximum uncompressed build bytes admitted to executor-to-executor broadcast. " +
       "The completed build shuffle is checked before any executor assembles the full build. " +
+      "Executors also check received bytes and the assembled batch before caching it. " +
       "This limit does not reserve memory for the build, hash table, or concurrent tasks.")
     .internal()
     .bytesConf(ByteUnit.BYTE)

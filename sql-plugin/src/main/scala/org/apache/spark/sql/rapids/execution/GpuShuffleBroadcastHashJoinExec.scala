@@ -117,7 +117,7 @@ case class GpuShuffleBroadcastHashJoinExec(
           val built = GpuShuffleEnv.getBroadcastCache.getOrBuild(shuffleId, () => {
             builds += 1
             val batch = GpuShuffleBroadcastHelper.assemble(
-              openBuild(), schema, output, localMetrics)
+              openBuild(), schema, output, localMetrics, maxBytes)
             closeOnExcept(batch)(
               SpillableColumnarBatch(_, SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
           }, () => GpuSemaphore.releaseIfNecessary(context),
