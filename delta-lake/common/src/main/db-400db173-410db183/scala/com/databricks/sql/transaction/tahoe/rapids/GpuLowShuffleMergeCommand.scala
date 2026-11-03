@@ -173,6 +173,12 @@ case class GpuLowShuffleMergeCommand(
       "number of target rows updated when not matched by source"),
     "numTargetRowsNotMatchedBySourceDeleted" -> createMetric(sc,
       "number of target rows deleted when not matched by source"),
+    "numTargetDeletionVectorsAdded" ->
+      createMetric(sc, "number of deletion vectors added to target"),
+    "numTargetDeletionVectorsRemoved" ->
+      createMetric(sc, "number of deletion vectors removed from target"),
+    "numTargetDeletionVectorsUpdated" ->
+      createMetric(sc, "number of deletion vectors updated in target"),
     "numTargetFilesBeforeSkipping" -> createMetric(sc, "number of target files before skipping"),
     "numTargetFilesAfterSkipping" -> createMetric(sc, "number of target files after skipping"),
     "numTargetFilesRemoved" -> createMetric(sc, "number of files removed to target"),

@@ -95,7 +95,8 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
     assert(SparkProtobufCompat.parsePlannerOptions(Map("mode" -> "PERMISSIVE"),
       permissiveReturnsNullRow = false) == permissiveOnGpu)
     assert(SparkProtobufCompat.parsePlannerOptions(Map("mode" -> "PERMISSIVE"),
-      permissiveReturnsNullRow = true).left.toOption.exists(_.contains("PERMISSIVE")))
+      permissiveReturnsNullRow = true) == Right(ProtobufPlannerOptions(
+        enumsAsInts = false, failOnErrors = false, malformedRowsAsNullFields = true)))
     // FAILFAST never produces the struct of null fields.
     assert(SparkProtobufCompat.parsePlannerOptions(Map.empty[String, String],
       permissiveReturnsNullRow = true) ==
@@ -142,10 +143,12 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
       def fieldNames: Seq[String] = Seq("id", "empty")
     }
     val schema = StructType(Seq(StructField("id", IntegerType)))
-    assert(SparkProtobufCompat.checkNoFieldsMissingFromSchema(schema, descriptor) ==
-      Left("root message has fields missing from the Spark schema: empty"))
     assert(SparkProtobufCompat.checkNoFieldsMissingFromSchema(
-      schema.add("empty", StructType(Seq(StructField("x", IntegerType)))), descriptor).isRight)
+      schema, descriptor, "protobuf field 'child'") ==
+      Left("protobuf field 'child' has fields missing from the Spark schema: empty"))
+    assert(SparkProtobufCompat.checkNoFieldsMissingFromSchema(
+      schema.add("empty", StructType(Seq(StructField("x", IntegerType)))), descriptor,
+      "root message").isRight)
   }
 
   private def twoFieldSchemaArrays(): FlattenedSchemaArrays = FlattenedSchemaArrays(
@@ -169,9 +172,9 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
 
   test("GpuFromProtobuf semantic equality is content-based for schema arrays") {
     val expr1 = GpuFromProtobuf(outputSchema, twoFieldSchemaArrays(), failOnErrors = true,
-      FakeExprChild())
+      malformedRowsAsNullFields = false, FakeExprChild())
     val expr2 = GpuFromProtobuf(outputSchema, twoFieldSchemaArrays(), failOnErrors = true,
-      FakeExprChild())
+      malformedRowsAsNullFields = false, FakeExprChild())
 
     assert(expr1 == expr2)
     assert(expr1.hashCode() == expr2.hashCode())
@@ -182,7 +185,8 @@ class ProtobufExprShimsSuite extends AnyFunSuite {
 
   test("GpuFromProtobuf has side effects only when malformed input throws") {
     def expr(failOnErrors: Boolean) = GpuFromProtobuf(
-      outputSchema, twoFieldSchemaArrays(), failOnErrors, GpuLiteral(null, BinaryType))
+      outputSchema, twoFieldSchemaArrays(), failOnErrors, malformedRowsAsNullFields = false,
+      GpuLiteral(null, BinaryType))
 
     assert(expr(failOnErrors = true).hasSideEffects)
     assert(!expr(failOnErrors = false).hasSideEffects)

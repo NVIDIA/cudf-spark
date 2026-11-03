@@ -232,8 +232,9 @@ but their declarations are split by category:
 2. Add SQL and file-format entries to `RapidsConfSqlEntries.scala`.
 3. Add test, debug, and remaining general entries to `RapidsConfEntries.scala`.
 
-Keep enumeration definitions and the configuration registry in `RapidsConf.scala`
-so their singleton ownership and initialization order remain stable.
+Keep the configuration registry and enumerations owned by `RapidsConf` in `RapidsConf.scala`
+to preserve their initialization order. Define independent enumerations and sealed value types
+in a module shared by their consumers, such as `sql-plugin-api` when the type is root-safe.
 
 Every property needs well-written documentation, and this documentation is used
 to automatically generate the

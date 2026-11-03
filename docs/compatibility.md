@@ -40,6 +40,34 @@ setting [spark.rapids.sql.stableSort.enabled](additional-functionality/advanced_
 cuDF will try to sort all the data for a given task/partition at once on the GPU. This may change
 in the future to allow for a spillable stable sort.
 
+## Round-robin Shuffle Recovery
+
+A GPU round-robin exchange with more than one output partition, as used by `repartition(n)` and by
+Delta Lake optimized writes to unpartitioned tables, assigns rows by their position in a GPU batch.
+A rerun can cut batches differently, so Spark treats the exchange and stages that read it as
+indeterminate. This also affects a hash exchange downstream of the round-robin exchange.
+
+The map stage can retry a failure in its own input before any reader stage has been submitted.
+Once a stage that reads the shuffle has started, rerunning that part of the query plan could mix rows
+from different attempts. This remains true after an individual job ends: `take` and
+`toLocalIterator` can retain partial results across jobs, including results from cached intermediate
+output. The query plan therefore keeps its reader history until it is discarded. Even a later,
+independent action fails if it must recompute that shuffle after its output is lost. Intact
+shuffle output can still be reused. The query fails rather than return missing or duplicated rows,
+including when a result from the old attempt arrives late. The error contains one of these messages:
+
+- `Cannot retry a GPU round-robin shuffle`, from the plugin.
+- `A shuffle map stage with indeterminate output was failed and retried`, from Spark.
+- `Task with indeterminate results from old attempt succeeded`, from Spark 4.2.
+
+Rerun with a new DataFrame, unpersisting a cached one first. Checkpointing before the repartition
+does not avoid the failure, and neither does
+`spark.sql.execution.sortBeforeRepartition`. To avoid GPU round-robin recovery restrictions, set
+[`spark.rapids.sql.partitioning.RoundRobinPartitioning`](additional-functionality/advanced_configs.md#sql.partitioning.RoundRobinPartitioning)
+to `false` to run the exchange on the CPU. A query that calls `repartition(n)` can instead
+repartition by columns with `repartition(n, cols)`. Splitting and retrying a batch within the
+original map attempt remains supported.
+
 ## Floating Point
 
 For most basic floating-point operations like addition, subtraction, multiplication, and division
@@ -598,9 +626,7 @@ The following regular expression patterns are not yet supported on the GPU and w
 - Named capture groups: `(?<n>a)`
 - Empty groups: `()`
 - Inline flags other than case-insensitive matching, such as `(?m)`, `(?s)`, or `(?x)`
-- Case-insensitive matching (`(?i)`) whose scope would extend across a choice, such as `(?i)a|b`
-  or `a(?i)b|c` (in Java the flag applies to the end of the enclosing group, crossing `|`), or that
-  applies to a letter-valued escape, such as `(?i)\x61`
+- Case-insensitive matching (`(?i)`) that applies to a letter-valued escape, such as `(?i)\x61`
 - Case-insensitive matching of `\p{Lower}` and `\p{Upper}` (and their `\P` counterparts) on Spark versions
   below 4.0, to preserve pre-[JDK-8214245](https://bugs.openjdk.org/browse/JDK-8214245) behavior
 - Empty pattern: `""`
@@ -936,6 +962,23 @@ Also, the GPU does not support casting from strings containing hex values to flo
 
 This configuration is enabled by default. To disable this operation on the GPU set
 [`spark.rapids.sql.castStringToFloat.enabled`](additional-functionality/advanced_configs.md#sql.castStringToFloat.enabled) to `false`.
+
+### Hexadecimal to Binary
+
+The GPU supports `unhex` for string input. It returns binary data, treats an odd number of hex
+digits as if a leading zero were present, and returns null for invalid input. The permissive
+hexadecimal form of `to_binary` in Spark 3.3 is also supported. Error-raising hexadecimal
+`to_binary` in Spark 3.4 and later falls back to the CPU.
+`try_to_binary(..., 'hex')` also falls back to the CPU on Spark 3.4 and later.
+
+Spark 3.3.0 and 3.3.1 decode an odd number of hex digits incorrectly on the CPU
+([SPARK-40924](https://issues.apache.org/jira/browse/SPARK-40924)). This also affects Databricks
+runtimes, including 14.3 and 17.3. For example, `unhex('ABC')` returns `0xBC00` instead of
+`0x0ABC`. The GPU returns the corrected result for every Spark version, so results for
+odd-length input differ from the CPU on those runtimes. On Databricks 14.3, setting the internal
+configuration `spark.databricks.behaviorChange.SC114071UnhexConvertOddSymbol.enabled` to `true`
+(default: `false`) enables the corrected CPU behavior. The GPU behavior is unchanged by this
+setting.
 
 ### String to Date
 
