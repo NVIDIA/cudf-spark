@@ -67,6 +67,19 @@ def _native_join(plan):
     return joins[0]
 
 
+def _published_values(metric):
+    spark = get_spark_i_know_what_i_am_doing()
+    spark.sparkContext._jsc.sc().listenerBus().waitUntilEmpty(30000)
+    store = spark._jsparkSession.sharedState().statusStore()
+    published = []
+    executions = store.executionsList().iterator()
+    while executions.hasNext():
+        values = store.executionMetrics(executions.next().executionId())
+        if values.contains(metric.id()):
+            published.append(values.apply(metric.id()))
+    return published
+
+
 _conf = {
     'spark.sql.adaptive.enabled': 'false',
     'spark.sql.exchange.reuse': 'false',
@@ -93,6 +106,8 @@ def test_executor_broadcast_preserves_null_duplicate_and_residual_semantics(
         assert exchange.metrics().apply('collectTime').value() == 0
         if aqe == 'true':
             assert exchange.metrics().apply('driverlessBuildBytes').value() > 0
+            if join_type == 'inner' and build_side == 'right':
+                assert _published_values(exchange.metrics().apply('driverlessStageTime'))
         else:
             assert exchange.metrics().apply('dataSize').value() == 0
 
@@ -111,16 +126,7 @@ def test_executor_broadcast_rejects_oversized_build_before_executor_assembly():
         assert join.metrics().apply('runtimeFallbacks').value() == 1
         assert join.metrics().apply('executorBuilds').value() == 0
         assert join.fallbackBroadcast().metrics().apply('dataSize').value() > 0
-        spark = get_spark_i_know_what_i_am_doing()
-        spark.sparkContext._jsc.sc().listenerBus().waitUntilEmpty(30000)
-        store = spark._jsparkSession.sharedState().statusStore()
-        metric_id = join.metrics().apply('runtimeFallbacks').id()
-        published = []
-        executions = store.executionsList().iterator()
-        while executions.hasNext():
-            values = store.executionMetrics(executions.next().executionId())
-            if values.contains(metric_id):
-                published.append(values.apply(metric_id))
+        published = _published_values(join.metrics().apply('runtimeFallbacks'))
         assert published == ['1'], f'Fallback count not published to SQL UI: {published}'
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
@@ -200,6 +206,9 @@ def test_executor_broadcast_aqe_converts_an_initial_shuffle_join():
         return left.join(right, 'key')
 
     def check_native(cpu_plan, gpu_plan):
+        assert 'SortMergeJoin' in cpu_plan.initialPlan().toString()
+        assert any(node.getClass().getSimpleName() == 'BroadcastHashJoinExec'
+                   for node in _executed_nodes(cpu_plan)), cpu_plan.toString()
         join = _native_join(gpu_plan)
         assert join.metrics().apply('executorBuilds').value() > 0
         assert join.fallbackBroadcast().metrics().apply('driverlessBuildBytes').value() > 0
@@ -207,6 +216,7 @@ def test_executor_broadcast_aqe_converts_an_initial_shuffle_join():
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         query, conf=dict(_conf, **{'spark.sql.adaptive.enabled': 'true',
+                                  'spark.sql.shuffle.partitions': '4',
                                   'spark.sql.autoBroadcastJoinThreshold': '-1',
                                   'spark.sql.adaptive.autoBroadcastJoinThreshold': '1m'}),
         gpu_plan_assertion=check_native, require_non_empty=True)
