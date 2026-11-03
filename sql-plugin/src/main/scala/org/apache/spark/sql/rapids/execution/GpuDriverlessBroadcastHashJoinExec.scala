@@ -209,8 +209,8 @@ object GpuDriverlessBroadcastHashJoinExec extends Logging {
             }
             val rejection = if (join.isNullAwareAntiJoin) {
               Some("null-aware anti join")
-          } else if (join.isSkewJoin) {
-            Some("skew-optimized broadcast join")
+            } else if (join.isSkewJoin) {
+              Some("skew-optimized broadcast join")
             } else {
               broadcast match {
                 case Some(exchange) =>

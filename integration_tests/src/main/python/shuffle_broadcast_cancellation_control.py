@@ -33,7 +33,8 @@ def main():
     root = Path(os.environ['BROADCAST_FAILURE_MARKERS'])
     root.mkdir(parents=True, exist_ok=False)
     try:
-        spark.conf.set('spark.sql.adaptive.enabled', 'false')
+        spark.conf.set('spark.sql.adaptive.enabled', sc.getConf().get(
+            'spark.sql.adaptive.enabled', 'false'))
         spark.conf.set('spark.rapids.sql.join.hashTable.reuse', 'false')
         spark.conf.set('spark.rapids.sql.driverlessBroadcast.enabled', 'false')
         spark.conf.set('spark.rapids.sql.enabled', 'false')
@@ -49,10 +50,6 @@ def main():
             return value
 
         frame = query(spark, slow_first)
-        plan = frame._jdf.queryExecution().executedPlan()
-        joins = [node for node in nodes(plan)
-                 if node.getClass().getSimpleName() == 'GpuBroadcastHashJoinExec']
-        assert len(joins) == 1, plan.toString()
         outcome = []
 
         def collect_cancellable():
@@ -73,6 +70,10 @@ def main():
             assert worker.is_alive(), outcome
             time.sleep(0.1)
         assert Path(marker).exists() and running_tasks(spark) > 0
+        plan = frame._jdf.queryExecution().executedPlan()
+        joins = [node for node in nodes(plan)
+                 if node.getClass().getSimpleName() == 'GpuBroadcastHashJoinExec']
+        assert len(joins) == 1, plan.toString()
         assert joins[0].broadcastExchange().metrics().apply('dataSize').value() > 0
         sc.cancelJobGroup('standard-broadcast-cancel')
         worker.join(30)

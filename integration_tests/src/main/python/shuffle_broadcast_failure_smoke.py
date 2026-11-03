@@ -30,6 +30,12 @@ from pyspark.sql.types import LongType
 
 
 def nodes(plan):
+    if plan.getClass().getSimpleName() == 'AdaptiveSparkPlanExec':
+        yield from nodes(plan.executedPlan())
+        return
+    if plan.getClass().getSimpleName().endswith('QueryStageExec'):
+        yield from nodes(plan.plan())
+        return
     yield plan
     children = plan.children().iterator()
     while children.hasNext():
@@ -83,7 +89,7 @@ def main():
     root.mkdir(parents=True, exist_ok=False)
     try:
         for key, value in {
-            'spark.sql.adaptive.enabled': 'false',
+            'spark.sql.adaptive.enabled': sc.getConf().get('spark.sql.adaptive.enabled', 'false'),
             'spark.sql.exchange.reuse': 'false',
             'spark.rapids.sql.join.hashTable.reuse': 'false',
             'spark.rapids.sql.driverlessBroadcast.enabled': 'true',
@@ -96,13 +102,13 @@ def main():
         spark.conf.set('spark.rapids.sql.enabled', 'true')
 
         frame = query(spark)
-        native = native_node(frame)
         recovered = list(sc._jvm.org.apache.spark.sql.rapids.testing.ExecutorBroadcastFaultSupport
                          .collectAfterRemovingBuildOutputs(spark._jsparkSession, frame._jdf, 8))
+        native = native_node(frame)
         assert sorted(tuple(int(value) for value in row.split(':'))
                       for row in recovered[1:]) == expected
         assert native.metrics().apply('executorBuilds').value() > 0
-        assert native.fallbackBroadcast().metrics().apply('dataSize').value() == 0
+        assert native.fallbackBroadcast().metrics().apply('collectTime').value() == 0
         print(json.dumps(dict(case='missing-build-output', injection=recovered[0],
                               result='PASS', shuffle=cleanup(spark, native))), flush=True)
 
@@ -114,11 +120,11 @@ def main():
             return value
 
         frame = query(spark, fail_once)
-        native = native_node(frame)
         assert sorted(tuple(row) for row in frame.collect()) == expected
+        native = native_node(frame)
         assert native.metrics().apply('executorBuilds').value() > 0
         assert native.metrics().apply('runtimeFallbacks').value() == 0
-        assert native.fallbackBroadcast().metrics().apply('dataSize').value() == 0
+        assert native.fallbackBroadcast().metrics().apply('collectTime').value() == 0
         print(json.dumps(dict(case='stream-task-retry', result='PASS',
                               shuffle=cleanup(spark, native))), flush=True)
 
@@ -132,7 +138,7 @@ def main():
             return value
 
         frame = query(spark, slow_first)
-        native = native_node(frame)
+        native = None
         outcome = []
 
         def collect_cancellable():
@@ -148,12 +154,20 @@ def main():
         worker.start()
         deadline = time.monotonic() + 40
         while time.monotonic() < deadline:
-            if Path(marker).exists() and native.metrics().apply('executorBuilds').value() > 0 \
+            if native is None:
+                ready = [node for node in nodes(frame._jdf.queryExecution().executedPlan())
+                         if node.getClass().getSimpleName() ==
+                         'GpuDriverlessBroadcastHashJoinExec']
+                if len(ready) == 1:
+                    native = ready[0]
+            if native is not None and Path(marker).exists() \
+                    and native.metrics().apply('executorBuilds').value() > 0 \
                     and running_tasks(spark) > 0:
                 break
             assert worker.is_alive(), outcome
             time.sleep(0.1)
         assert Path(marker).exists(), 'The cancellation never reached the running stream task'
+        assert native is not None, 'Cancellation never reached a driverless broadcast plan'
         assert native.metrics().apply('executorBuilds').value() > 0, \
             'Cancellation must happen after another task has used the native cache'
         assert running_tasks(spark) > 0, 'Cancellation requires an active executor task'
@@ -169,10 +183,10 @@ def main():
 
         for iteration in range(3):
             frame = query(spark)
-            native = native_node(frame)
             assert sorted(tuple(row) for row in frame.collect()) == expected
+            native = native_node(frame)
             assert native.metrics().apply('runtimeFallbacks').value() == 0
-            assert native.fallbackBroadcast().metrics().apply('dataSize').value() == 0
+            assert native.fallbackBroadcast().metrics().apply('collectTime').value() == 0
             print(json.dumps(dict(case='query-after-cleanup', iteration=iteration,
                                   result='PASS', shuffle=cleanup(spark, native))), flush=True)
         expected_executors = int(sc.getConf().get('spark.executor.instances'))

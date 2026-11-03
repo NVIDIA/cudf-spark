@@ -23,6 +23,12 @@ from pyspark.sql.functions import broadcast
 
 
 def nodes(plan):
+    if plan.getClass().getSimpleName() == 'AdaptiveSparkPlanExec':
+        yield from nodes(plan.executedPlan())
+        return
+    if plan.getClass().getSimpleName().endswith('QueryStageExec'):
+        yield from nodes(plan.plan())
+        return
     yield plan
     children = plan.children().iterator()
     while children.hasNext():
@@ -57,7 +63,8 @@ def main():
             2 * (digit_sum(build_rows) + 48 * build_rows) + digit_sum(probe_rows),
         )
         for key, value in {
-            'spark.sql.adaptive.enabled': 'false',
+            'spark.sql.adaptive.enabled': spark.sparkContext.getConf().get(
+                'spark.sql.adaptive.enabled', 'false'),
             'spark.sql.exchange.reuse': 'false',
             'spark.rapids.sql.join.hashTable.reuse': 'false',
             'spark.rapids.sql.driverlessBroadcast.maxSize': '1g',
@@ -98,7 +105,11 @@ def main():
                 join = matches[0]
                 if enabled:
                     assert join.metrics().apply('runtimeFallbacks').value() == 0
-                    driver_bytes = join.fallbackBroadcast().metrics().apply('dataSize').value()
+                    exchange = join.fallbackBroadcast()
+                    assert exchange.metrics().apply('collectTime').value() == 0
+                    assert exchange.metrics().apply('driverlessStageFallbacks').value() == 0
+                    # AQE dataSize is the runtime build size, not bytes collected at the driver.
+                    driver_bytes = 0
                     builds = join.metrics().apply('executorBuilds').value()
                     shuffle_bytes = join.buildPlan().metrics().apply('dataSize').value()
                     assert driver_bytes == 0 and builds == expected_builds, (driver_bytes, builds)
