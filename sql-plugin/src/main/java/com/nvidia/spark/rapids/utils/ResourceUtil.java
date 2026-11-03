@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.nvidia.spark.rapids.reader;
+package com.nvidia.spark.rapids.utils;
 
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -26,8 +26,8 @@ import com.nvidia.spark.rapids.Arm$;
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator$;
 
 /** Java entry points to the existing resource and retry policies. */
-public final class ReaderResources {
-  private ReaderResources() {
+public final class ResourceUtil {
+  private ResourceUtil() {
   }
 
   /** Consume resource, preserving the operation's failure if cleanup also fails. */
@@ -87,7 +87,7 @@ public final class ReaderResources {
     }
   }
 
-  /** Preserve unchecked failures; retain a checked failure as the cause of the reader error. */
+  /** Preserve unchecked failures; retain a checked failure as the cause. */
   public static RuntimeException propagate(Throwable error) {
     if (error instanceof Error) {
       throw (Error) error;
@@ -95,6 +95,6 @@ public final class ReaderResources {
     if (error instanceof RuntimeException) {
       return (RuntimeException) error;
     }
-    return new IllegalStateException("Reader operation failed", error);
+    return new IllegalStateException("Operation failed", error);
   }
 }

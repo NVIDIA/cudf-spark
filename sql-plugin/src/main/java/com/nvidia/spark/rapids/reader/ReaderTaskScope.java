@@ -42,6 +42,8 @@ import com.nvidia.spark.rapids.io.async.MemoryBoundedAsyncRunner;
 import com.nvidia.spark.rapids.io.async.Pending$;
 import com.nvidia.spark.rapids.io.async.Running$;
 import com.nvidia.spark.rapids.io.async.UnboundedAsyncRunner;
+import com.nvidia.spark.rapids.utils.ResourceUtil;
+import com.nvidia.spark.rapids.utils.TaskContextUtil;
 
 import org.apache.spark.TaskContext;
 
@@ -82,8 +84,8 @@ public final class ReaderTaskScope implements AutoCloseable {
         return task;
       }
     } catch (Throwable error) {
-      ReaderResources.closeAll(error, this);
-      throw ReaderResources.propagate(error);
+      ResourceUtil.closeAll(error, this);
+      throw ResourceUtil.propagate(error);
     }
   }
 
@@ -107,7 +109,7 @@ public final class ReaderTaskScope implements AutoCloseable {
     for (Task<?> task : remaining) {
       task.cancel();
     }
-    ReaderResources.closeAll(null, remaining.toArray(new AutoCloseable[0]));
+    ResourceUtil.closeAll(null, remaining.toArray(new AutoCloseable[0]));
   }
 
   /** One operation; taking its result transfers both data and reservation out of the scope. */
@@ -180,7 +182,7 @@ public final class ReaderTaskScope implements AutoCloseable {
         worker = Thread.currentThread();
       }
       try {
-        T result = ReaderTaskContext.withContext(context, operation);
+        T result = TaskContextUtil.withContext(context, operation);
         synchronized (this) {
           produced = Objects.requireNonNull(result, "operation result");
         }
@@ -230,12 +232,12 @@ public final class ReaderTaskScope implements AutoCloseable {
         return new Result<>(result.data(), result);
       } catch (InterruptedException error) {
         Thread.currentThread().interrupt();
-        ReaderResources.closeAll(error, ReaderTaskScope.this);
-        throw ReaderResources.propagate(error);
+        ResourceUtil.closeAll(error, ReaderTaskScope.this);
+        throw ResourceUtil.propagate(error);
       } catch (ExecutionException error) {
         Throwable cause = error.getCause();
-        ReaderResources.closeAll(cause, ReaderTaskScope.this);
-        throw ReaderResources.propagate(cause);
+        ResourceUtil.closeAll(cause, ReaderTaskScope.this);
+        throw ResourceUtil.propagate(cause);
       }
     }
 
@@ -280,7 +282,7 @@ public final class ReaderTaskScope implements AutoCloseable {
           produced = null;
         }
         // produced also covers an allocation followed by a failing runner post-hook.
-        ReaderResources.closeAll(null, data, result, () -> runner.withStateLock(
+        ResourceUtil.closeAll(null, data, result, () -> runner.withStateLock(
             new AbstractFunction1<AsyncRunner<T>, BoxedUnit>() {
               @Override
               public BoxedUnit apply(AsyncRunner<T> value) {
@@ -330,7 +332,7 @@ public final class ReaderTaskScope implements AutoCloseable {
         data = null;
         reservation = null;
       }
-      ReaderResources.closeAll(null, value, release);
+      ResourceUtil.closeAll(null, value, release);
     }
   }
 }
