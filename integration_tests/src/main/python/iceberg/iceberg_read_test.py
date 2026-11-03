@@ -183,7 +183,7 @@ def _setup_imported_variant_table(
         source.coalesce(1).write.parquet(shredded_path)
         source = spark.read.schema(
             'id INT, parsed STRUCT<metadata: BINARY, value: BINARY, '
-            'typed_value: STRUCT<x: BIGINT>>').parquet(shredded_path)
+            'typed_value: STRUCT<x: STRUCT<value: BINARY, typed_value: BIGINT>>>').parquet(shredded_path)
     source.selectExpr('id', f'{expression} AS v').coalesce(1).write.parquet(data_path)
 
     jvm = spark._jvm
