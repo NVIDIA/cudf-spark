@@ -107,7 +107,7 @@ class GpuBroadcastNestedLoopJoinRetrySuite extends RmmSparkRetrySuiteBase {
     // x=[1,2,3], y=[4,5,6], z=[2,3,4]
     // [((x+y)*z)-x AS shared_minus_x, ((x+y)*z)-y AS shared_minus_y, x, y, z]
     val expressions = postBuildExpressions
-    val buildProject = GpuProjectExec(expressions, TestLeafExec(buildAttributes))
+    val buildProject = GpuProjectExec(expressions, TestLeafExec(buildAttributes))()
     val join = TestBroadcastNestedLoopJoin(
       TestLeafExec(Seq.empty), buildProject, expressions)
 

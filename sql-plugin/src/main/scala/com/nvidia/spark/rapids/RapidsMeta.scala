@@ -1321,6 +1321,9 @@ abstract class BaseExprMeta[INPUT <: Expression](
   private var taggedForAst = false
   private final def tagForAst(): Unit = {
     if (!taggedForAst) {
+      if (conf.isTestEnabled && conf.testingForceNonAst.contains(wrapped.getClass.getSimpleName)) {
+        willNotWorkInAst("AST disabled by test configuration")
+      }
       if (wrapped.foldable && !GpuOverrides.isLit(wrapped)) {
         willNotWorkInAst(s"Cannot convert to AST. Is ConstantFolding excluded? Expression " +
             s"$wrapped is foldable and operates on non literals")

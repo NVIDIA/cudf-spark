@@ -72,14 +72,18 @@ import org.apache.spark.sql.execution.datasources.v2.{
 }
 import org.apache.spark.sql.execution.datasources.v2.rapids.{
   GpuAtomicCreateTableAsSelectExec,
+  GpuAtomicDeltaWriteContext,
   GpuAtomicReplaceTableAsSelectExec
 }
 import org.apache.spark.sql.rapids.{GpuAnd, GpuEqualTo, GpuFileSourceScanExec, GpuNot}
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims
 import org.apache.spark.sql.sources.InsertableRelation
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{StructField, StructType}
 
 abstract class DatabricksDeltaProvider173183Base extends DatabricksDeltaProviderBase {
+
+  override protected def isNativeStagedDeltaWriteActive: Boolean =
+    GpuAtomicDeltaWriteContext.isActive
 
   override def getDataWritingCommandRules: Map[Class[_ <: DataWritingCommand],
       DataWritingCommandRule[_ <: DataWritingCommand]] = {
@@ -193,12 +197,28 @@ abstract class DatabricksDeltaProvider173183Base extends DatabricksDeltaProvider
     def pruneMetadataProject(
         project: GpuProjectExec,
         scan: GpuFileSourceScanExec): SparkPlan = {
-      project.copy(projectList = project.projectList.filterNot(_.name == "_metadata"))
+      // A table may have a real column with the same name as DBR's temporary row index.
+      val hasUserRowIndexColumn = scan.relation.fileFormat match {
+        case format: GpuDeltaParquetFileFormatBase =>
+          val resolver = scan.relation.sparkSession.sessionState.conf.resolver
+          format.referenceSchema.fieldNames.exists(
+            resolver(_, DeltaParquetFileFormat.ROW_INDEX_STRUCT_FIELD.name))
+        case _ => false
+      }
+      def isUnusedRowIndex(field: StructField): Boolean =
+        !hasUserRowIndexColumn &&
+          field.name == DeltaParquetFileFormat.ROW_INDEX_STRUCT_FIELD.name &&
+          !GpuDeltaParquetFileFormatBase.isGpuRowIndexColumn(field)
+
+      project.withProjectList(project.projectList.filterNot(_.name == "_metadata"))
         .withNewChildren(Seq(
           scan.copy(
-            originalOutput = scan.originalOutput.filterNot(_.name == "_tmp_metadata_row_index"),
+            originalOutput = scan.originalOutput.filterNot { attr =>
+              isUnusedRowIndex(StructField(
+                attr.name, attr.dataType, attr.nullable, attr.metadata))
+            },
             requiredSchema = StructType(
-              scan.requiredSchema.filterNot(_.name == "_tmp_metadata_row_index")
+              scan.requiredSchema.filterNot(isUnusedRowIndex)
             ))(scan.rapidsConf, scan.partitionPlanningScan)))
     }
 
@@ -441,7 +461,7 @@ private object DatabricksDVPredicatePushdown extends ShimPredicateHelper {
         case project @ ProjectExec(projectList, _) =>
           project.copy(projectList = projectList.filterNot(isDeletionVectorSkipRowColumnRef))
         case project @ GpuProjectExec(projectList, _, _) =>
-          project.copy(projectList = projectList.filterNot(isDeletionVectorSkipRowColumnRef))
+          project.withProjectList(projectList.filterNot(isDeletionVectorSkipRowColumnRef))
         case fsse: FileSourceScanExec =>
           fsse.copy(
             output = fsse.output.filterNot(attr => isDeletionVectorSkipRowColumn(attr.name)),
@@ -531,7 +551,8 @@ private object DatabricksDVPredicatePushdown extends ShimPredicateHelper {
         // identical projections: merging over an alias-computing child would drop the
         // alias's only producer ("Couldn't find <attr>"). Merge only pure pass-throughs.
         if (projSet1 == projSet2 && projList2.forall(_.isInstanceOf[AttributeReference])) {
-          GpuProjectExec(projList1, child, enablePreSplit1 && enablePreSplit2)
+          p.withProjectList(projList1, newChild = child,
+            preSplit = enablePreSplit1 && enablePreSplit2)
         } else {
           p
         }

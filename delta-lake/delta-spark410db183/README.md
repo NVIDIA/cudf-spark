@@ -4,7 +4,8 @@ The DBR 18.3 release profile compiles this module and includes it in the plugin 
 It contains the reader, transaction, catalog, and write implementations for this runtime.
 
 The provider base, write commands, low-shuffle MERGE command, and Parquet reader
-implementations are shared with DBR 17.3. Native staged-write handling remains runtime specific.
+implementations are shared with DBR 17.3. Native staged append handling is also shared with
+DBR 17.3; native staged overwrite handling remains runtime specific.
 Both classic and Edge MERGE commands select low-shuffle MERGE when enabled. Discovery and
 rewrite scans retain the established reader-mode mapping and classic GPU MERGE fallbacks
 for unsupported scan settings, row-tracking tables, and existing deletion vectors.
