@@ -91,6 +91,33 @@ _conf = {
 
 @ignore_order(local=True)
 @pytest.mark.parametrize('aqe', ['false', 'true'])
+def test_executor_broadcast_preserves_nan_signed_zero_decimal_and_timestamp(aqe):
+    _require_ucx()
+
+    def query(spark):
+        key = "CASE id % 4 WHEN 0 THEN CAST('NaN' AS DOUBLE) " \
+              "WHEN 1 THEN CAST('-0.0' AS DOUBLE) WHEN 2 THEN CAST('0.0' AS DOUBLE) " \
+              "ELSE CAST(NULL AS DOUBLE) END"
+        left = spark.range(16, numPartitions=4).selectExpr(f'{key} AS probe_key', 'id AS probe')
+        right = spark.range(8, numPartitions=4).selectExpr(
+            f'{key} AS build_key', 'id AS build', 'CAST(id AS DECIMAL(38, 18)) AS measure',
+            'timestamp_micros(id - 4) AS instant')
+        return left.join(broadcast(right), left.probe_key == right.build_key) \
+            .select('probe', 'build', 'measure', 'instant')
+
+    def check_native(cpu_plan, gpu_plan):
+        join = _native_join(gpu_plan)
+        assert join.metrics().apply('executorBuilds').value() > 0
+        assert join.metrics().apply('runtimeFallbacks').value() == 0
+        assert join.fallbackBroadcast().metrics().apply('collectTime').value() == 0
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        query, conf=dict(_conf, **{'spark.sql.adaptive.enabled': aqe}),
+        gpu_plan_assertion=check_native, require_non_empty=True)
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize('aqe', ['false', 'true'])
 @pytest.mark.parametrize('join_type,build_side', [
     ('inner', 'left'), ('inner', 'right'), ('left_outer', 'right'),
     ('right_outer', 'left'), ('left_semi', 'right'), ('left_anti', 'right')])
