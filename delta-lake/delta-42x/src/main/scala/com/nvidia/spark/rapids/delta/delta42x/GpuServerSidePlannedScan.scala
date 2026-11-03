@@ -23,6 +23,8 @@ import scala.util.control.NonFatal
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.parquet.{GpuParquetMultiFilePartitionReaderFactory,
   GpuParquetPartitionReaderFactory, GpuParquetScan}
+import com.nvidia.spark.rapids.shims.PartitionedFileUtilsShim
+import org.apache.hadoop.fs.FileStatus
 
 import org.apache.spark.paths.SparkPath
 import org.apache.spark.sql.SparkSession
@@ -31,7 +33,8 @@ import org.apache.spark.sql.connector.read._
 import org.apache.spark.sql.delta.serverSidePlanning.{ScanPlan, ServerSidePlannedFileInputPartition,
   ServerSidePlannedScan}
 import org.apache.spark.sql.execution.SparkPlan
-import org.apache.spark.sql.execution.datasources.{FilePartition, PartitionedFile}
+import org.apache.spark.sql.execution.datasources.{FilePartition, FileStatusWithMetadata,
+  PartitionedFile}
 import org.apache.spark.sql.execution.exchange.{BroadcastExchangeLike, ShuffleExchangeLike}
 import org.apache.spark.sql.types.{ArrayType, DataType, MapType, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -136,30 +139,32 @@ private[delta42x] case class GpuServerSidePlannedScan(
     Scan.ColumnarSupportMode.SUPPORTED
 
   override def planInputPartitions(): Array[InputPartition] = {
-    val planned = cpuScan.planInputPartitions()
-    val files = planned.collect {
-      case f: ServerSidePlannedFileInputPartition if f.fileFormat.equalsIgnoreCase("parquet") => f
+    // Delta fails only the tasks that open a non-Parquet file, so keep those partitions as
+    // they are and pack the Parquet files.
+    val (parquet, others) = cpuScan.planInputPartitions().partition {
+      case f: ServerSidePlannedFileInputPartition => f.fileFormat.equalsIgnoreCase("parquet")
+      case _ => false
     }
-    // Delta fails when a task opens a non-Parquet file; keep its partitions to preserve that.
-    if (files.length != planned.length) {
-      planned
-    } else {
-      val spark = access.spark
-      val openCost = spark.sessionState.conf.filesOpenCostInBytes
-      val maxSplitBytes = FilePartition.maxSplitBytes(
-        spark, files.map(_.fileSizeInBytes + openCost).sum)
-      // Parquet row groups are read by the split holding their midpoint, so ranges are safe.
-      val splitFiles = files.flatMap { f =>
-        val path = SparkPath.fromPathString(f.filePath)
-        val size = f.fileSizeInBytes
-        // A file within one split (including an empty one) is never dropped.
-        val starts = if (size <= maxSplitBytes) Seq(0L) else 0L until size by maxSplitBytes
-        starts.map { start =>
-          PartitionedFile(InternalRow.empty, path, start, math.min(maxSplitBytes, size - start))
-        }
-      }.sortBy(-_.length)
-      FilePartition.getFilePartitions(spark, splitFiles.toSeq, maxSplitBytes).toArray
-    }
+    val files = parquet.map(_.asInstanceOf[ServerSidePlannedFileInputPartition])
+    val spark = access.spark
+    val openCost = spark.sessionState.conf.filesOpenCostInBytes
+    // Spark returns 0 for small inputs when the open cost is 0, which cannot be a split step.
+    val maxSplitBytes = math.max(1L, FilePartition.maxSplitBytes(
+      spark, files.map(_.fileSizeInBytes + openCost).sum))
+    // Parquet row groups are read by the split holding their midpoint, so ranges are safe.
+    val splitFiles = files.flatMap { f =>
+      val path = SparkPath.fromPathString(f.filePath)
+      if (f.fileSizeInBytes == 0) {
+        // Spark's splitter drops empty files; keep it so the reader reports it as Delta does.
+        Seq(PartitionedFile(InternalRow.empty, path, 0, 0))
+      } else {
+        val status = FileStatusWithMetadata(
+          new FileStatus(f.fileSizeInBytes, false, 1, 0, 0, path.toPath))
+        PartitionedFileUtilsShim.splitFiles(
+          spark, status, isSplitable = true, maxSplitBytes, InternalRow.empty)
+      }
+    }.sortBy(-_.length)
+    FilePartition.getFilePartitions(spark, splitFiles.toSeq, maxSplitBytes).toArray ++ others
   }
   override def withInputFile(): GpuScan = this
 

@@ -283,16 +283,33 @@ class ServerSidePlannedScanSuite extends AnyFunSuite {
     }
   }
 
-  test("non-Parquet manifests keep Delta's partitions") {
-    withSpark() { spark =>
+  test("non-Parquet files keep Delta's partitions while Parquet files are packed") {
+    withSpark("spark.sql.files.minPartitionNum" -> "1") { spark =>
       val files = Seq(ScanFile("file:/t/a.parquet", 1, "parquet"),
-        ScanFile("file:/t/b.orc", 1, "orc"))
+        ScanFile("file:/t/b.parquet", 1, "PARQUET"), ScanFile("file:/t/c.orc", 1, "orc"))
       val cpu = new ServerSidePlannedScan(spark, "db", "table", schema,
         new Client(ScanPlan(files)), Array.empty, schema, None)
       val gpu = GpuServerSidePlannedScan(cpu, new ServerSidePlannedScanAccess(cpu),
         new RapidsConf(Map.empty[String, String]))
-      assert(gpu.planInputPartitions().forall(_.isInstanceOf[ServerSidePlannedFileInputPartition]))
-      assert(gpu.planInputPartitions().length == 2)
+      val partitions = gpu.planInputPartitions()
+      assert(partitions.length == 2)
+      assert(partitions(0).asInstanceOf[FilePartition].files.length == 2)
+      assert(partitions(1) == ServerSidePlannedFileInputPartition("file:/t/c.orc", 1, "orc"))
+    }
+  }
+
+  test("a zero open cost with a tiny input does not stall range splitting") {
+    // 5 bytes over 100 partitions gives Spark a split size of 0.
+    withSpark("spark.sql.files.openCostInBytes" -> "0",
+        "spark.sql.files.minPartitionNum" -> "100") { spark =>
+      val cpu = new ServerSidePlannedScan(spark, "db", "table", schema,
+        new Client(ScanPlan(Seq(ScanFile("file:/t/tiny.parquet", 5, "parquet")))), Array.empty,
+        schema, None)
+      val gpu = GpuServerSidePlannedScan(cpu, new ServerSidePlannedScanAccess(cpu),
+        new RapidsConf(Map.empty[String, String]))
+      val ranges = gpu.planInputPartitions().flatMap(_.asInstanceOf[FilePartition].files)
+      assert(ranges.map(_.length).sum == 5)
+      assert(ranges.map(_.start).sorted.toSeq == (0L until 5L))
     }
   }
 
