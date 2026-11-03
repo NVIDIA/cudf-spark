@@ -984,3 +984,10 @@ def test_parquet_append_with_downcast(spark_tmp_table_factory, spark_tmp_path):
         do_append,
         lambda spark, path: spark.read.parquet(path),
         data_path)
+
+def test_save_as_table_overwrite_existing(spark_tmp_table_factory):
+    table = spark_tmp_table_factory.get()
+    with_cpu_session(lambda spark: spark.range(3).write.format("parquet").saveAsTable(table))
+    with_gpu_session(lambda spark: spark.range(5).write.format("parquet").mode("overwrite").saveAsTable(table))
+    assert with_cpu_session(lambda spark: spark.table(table).count()) == 5
+

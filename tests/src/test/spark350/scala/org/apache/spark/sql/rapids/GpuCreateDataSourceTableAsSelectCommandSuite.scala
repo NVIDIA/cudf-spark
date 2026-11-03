@@ -42,7 +42,7 @@ package org.apache.spark.sql.rapids
 import com.nvidia.spark.rapids.{FunSuiteWithTempDir, RapidsConf, SparkQueryCompareTestSuite}
 
 import org.apache.spark.SparkConf
-import org.apache.spark.sql.{Row, SparkSession}
+import org.apache.spark.sql.{Row, SaveMode, SparkSession}
 import org.apache.spark.sql.catalyst.expressions.FileSourceMetadataAttribute.FILE_SOURCE_METADATA_COL_ATTR_KEY
 import org.apache.spark.sql.connector.catalog.{Column, Identifier}
 import org.apache.spark.sql.connector.catalog.CatalogV2Implicits._
@@ -115,6 +115,18 @@ class GpuCreateDataSourceTableAsSelectCommandSuite
         }
       }
     }, conf)
+  }
+
+  test("saveAsTable overwrite on existing table") {
+    val targetTable = "overwriteTargetTable"
+    withGpuSparkSession { spark =>
+      withTable(spark, targetTable) {
+        spark.range(3).write.format("parquet").saveAsTable(targetTable)
+        assert(spark.table(targetTable).count() == 3)
+        spark.range(5).write.format("parquet").mode(SaveMode.Overwrite).saveAsTable(targetTable)
+        assert(spark.table(targetTable).count() == 5)
+      }
+    }
   }
 
   private def withTable(spark: SparkSession, tableNames: String*)(f: => Unit): Unit = {
