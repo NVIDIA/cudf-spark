@@ -28,12 +28,12 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
  * A wrapper around HostColumnVector array that tracks a row range and supports splitting.
- * This is used for GPU OOM handling during Row-to-Columnar conversion.
+ * This is used for OOM handling during the Row-to-Columnar host-to-GPU transfer.
  *
- * When GPU OOM occurs during host-to-GPU transfer, we can split this batch in half
- * and retry with smaller chunks. During slicing, the data buffer for fixed-width columns
- * is logically sliced (shared memory), but validity and offset buffers are copied to ensure
- * correct semantics for the sliced row range.
+ * When the retry framework asks the transfer to split, for GPU OOM or for host memory
+ * pressure, we split this batch in half and retry with smaller chunks. During slicing, the
+ * data buffer for fixed-width columns is logically sliced (shared memory), but validity and
+ * offset buffers are copied to ensure correct semantics for the sliced row range.
  *
  * Memory management uses reference counting: each instance increments the reference count
  * of the host columns on construction and decrements it on close. The host columns are

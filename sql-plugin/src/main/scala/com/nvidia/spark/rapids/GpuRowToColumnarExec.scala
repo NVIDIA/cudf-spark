@@ -609,9 +609,9 @@ class RowToColumnarIterator(
   // its conversion.
   private var pendingRow: InternalRow = _
 
-  // For GPU OOM split retry: data types needed for HostColumnarBatchWithRowRange
+  // Data types needed to split the host-to-GPU transfer with HostColumnarBatchWithRowRange.
   private val dataTypes: Array[DataType] = localSchema.fields.map(_.dataType)
-  // Holds remaining split batches from a GPU OOM split retry during host-to-GPU transfer.
+  // Holds the remaining splits of a host-to-GPU transfer that was split on OOM.
   private var pendingBatchIter: Iterator[ColumnarBatch] = Iterator.empty
 
   override def hasNext: Boolean = {
@@ -631,14 +631,14 @@ class RowToColumnarIterator(
     if (pendingBatchIter.hasNext) {
       Option(TaskContext.get())
           .foreach(ctx => GpuSemaphore.acquireIfNecessary(ctx))
-      return recordOutput(NvtxIdWithMetrics(NvtxRegistry.ROW_TO_COLUMNAR, opTime) {
+      recordOutput(NvtxIdWithMetrics(NvtxRegistry.ROW_TO_COLUMNAR, opTime) {
         pendingBatchIter.next()
       })
-    }
-    if (!hasNext) {
+    } else if (!hasNext) {
       throw new NoSuchElementException
+    } else {
+      recordOutput(buildBatch())
     }
-    recordOutput(buildBatch())
   }
 
   private def recordOutput(batch: ColumnarBatch): ColumnarBatch = {
@@ -820,7 +820,8 @@ class RowToColumnarIterator(
 
         val ret = NvtxIdWithMetrics(NvtxRegistry.ROW_TO_COLUMNAR, opTime) {
           // Build host columns and wrap in HostColumnarBatchWithRowRange for split retry.
-          // On GPU OOM during transfer, the batch can be split in half and retried.
+          // A split can be requested for host memory pressure as well as GPU OOM, and
+          // finishing the transfer is how this task frees its host batch.
           val hostColumns = RmmRapidsRetryIterator.withRetryNoSplit {
             builders.buildHostColumns()
           }
@@ -859,7 +860,7 @@ class RowToColumnarIterator(
 
   /**
    * Split policy for HostColumnarBatchWithRowRange.
-   * When GPU OOM occurs during host-to-GPU transfer, split the batch in half by rows.
+   * When the host-to-GPU transfer is asked to split, split the batch in half by rows.
    */
   private val splitHostBatchInHalf
       : HostColumnarBatchWithRowRange => Seq[HostColumnarBatchWithRowRange] = {
