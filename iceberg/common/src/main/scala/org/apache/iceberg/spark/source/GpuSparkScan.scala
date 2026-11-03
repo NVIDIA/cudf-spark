@@ -27,10 +27,10 @@ import com.nvidia.spark.rapids.parquet.GpuParquetScan
 import org.apache.iceberg.{FileFormat, FileScanTask, ScanTaskGroup, TableProperties}
 import org.apache.iceberg.encryption.EncryptedFiles
 import org.apache.iceberg.mapping.NameMappingParser
-import org.apache.iceberg.parquet.GpuParquetIO
+import org.apache.iceberg.parquet.{GpuParquetIO, ParquetSchemaUtil}
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.iceberg.spark.{GpuSparkReadConf, SparkSchemaUtil}
-import org.apache.iceberg.types.Types
+import org.apache.iceberg.types.{Type, Types}
 
 import org.apache.spark.sql.connector.metric.{CustomMetric, CustomTaskMetric}
 import org.apache.spark.sql.connector.read.{Batch, Scan, Statistics, SupportsReportStatistics}
@@ -100,22 +100,43 @@ abstract class GpuSparkScan(val cpuScan: Scan,
           table.io().newInputFile(location, file.fileSizeInBytes()), file.keyMetadata()))
         val options = GpuIcebergParquetReaderUtils.buildReaderOptions(input, None)
         withResource(ParquetFileReader.open(GpuParquetIO.file(input), options)) { reader =>
+          val fileSchema = reader.getFileMetaData.getSchema
           val (_, projectedSchema) = GpuParquetIO.projectSchema(
-            reader.getFileMetaData.getSchema, requiredSchema, nameMapping)
-          val convertedSchema = converter.convert(
+            fileSchema, requiredSchema, nameMapping)
+          // Retain Spark's physical-layout validation, including annotated shredded input.
+          converter.convert(
             ShimUtils.getParquetUnshader().unshade(projectedSchema))
           // Without a Variant annotation, conversion can succeed as an ordinary struct even
-          // for shredded input. Match by Iceberg ID so renamed and name-mapped fields work.
-          projectedSchema.getFields.asScala.zip(convertedSchema.fields).foreach {
-            case (fileField, sparkField) =>
-              val requiredField = Option(fileField.getId)
-                .flatMap(id => Option(requiredSchema.findField(id.intValue())))
-              val expectsVariant = requiredField.exists { field =>
-                GpuColumnVector.isVariantType(SparkSchemaUtil.convert(field.`type`()))
+          // for shredded input. Use Iceberg's conversion to normalize LIST/MAP wrappers, then
+          // compare every projected logical leaf. Missing fields remain the post-processor's job.
+          val projectedType = ParquetSchemaUtil.convert(projectedSchema).asStruct()
+
+          def checkLayout(expected: Type, physical: Type): Unit = {
+            if (expected.isStructType) {
+              require(physical.isStructType, "Projected input has an incompatible struct layout")
+              val expectedStruct = expected.asStructType()
+              physical.asStructType().fields().asScala.foreach { field =>
+                Option(expectedStruct.field(field.fieldId())).foreach { required =>
+                  checkLayout(required.`type`(), field.`type`())
+                }
               }
-              require(!expectsVariant || GpuColumnVector.isVariantType(sparkField.dataType),
-                "Projected Variant input is missing a supported Variant annotation")
+            } else if (expected.isListType) {
+              require(physical.isListType, "Projected input has an incompatible list layout")
+              checkLayout(
+                  expected.asListType().elementType(), physical.asListType().elementType())
+            } else if (expected.isMapType) {
+              require(physical.isMapType, "Projected input has an incompatible map layout")
+              checkLayout(expected.asMapType().keyType(), physical.asMapType().keyType())
+              checkLayout(expected.asMapType().valueType(), physical.asMapType().valueType())
+            } else {
+              val expectsVariant =
+                GpuColumnVector.isVariantType(SparkSchemaUtil.convert(expected))
+              require(!expectsVariant ||
+                  GpuColumnVector.isVariantType(SparkSchemaUtil.convert(physical)),
+                  "Projected Variant input is missing a supported Variant annotation")
+            }
           }
+          checkLayout(requiredSchema.asStruct(), projectedType)
         }
       }
     }
