@@ -89,7 +89,12 @@ def test_executor_broadcast_preserves_null_duplicate_and_residual_semantics(
         join = _native_join(gpu_plan)
         assert join.metrics().apply('executorBuilds').value() > 0
         assert join.metrics().apply('runtimeFallbacks').value() == 0
-        assert join.fallbackBroadcast().metrics().apply('dataSize').value() == 0
+        exchange = join.fallbackBroadcast()
+        assert exchange.metrics().apply('collectTime').value() == 0
+        if aqe == 'true':
+            assert exchange.metrics().apply('driverlessBuildBytes').value() > 0
+        else:
+            assert exchange.metrics().apply('dataSize').value() == 0
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: _join(spark, join_type, build_side),
@@ -205,3 +210,30 @@ def test_executor_broadcast_aqe_converts_an_initial_shuffle_join():
                                   'spark.sql.autoBroadcastJoinThreshold': '-1',
                                   'spark.sql.adaptive.autoBroadcastJoinThreshold': '1m'}),
         gpu_plan_assertion=check_native, require_non_empty=True)
+
+
+@ignore_order(local=True)
+def test_executor_broadcast_aqe_admitted_stage_has_real_payload_for_standard_consumer():
+    _require_ucx()
+
+    def query(spark):
+        left = spark.range(128, numPartitions=8).selectExpr('id % 11 AS key', 'id AS probe')
+        left = left.filter('probe < (SELECT max(id) FROM range(96))')
+        right = spark.range(24, numPartitions=4).selectExpr('id % 11 AS key', 'id AS build')
+        return left.join(broadcast(right), 'key')
+
+    def check_fallback(cpu_plan, gpu_plan):
+        nodes = _executed_nodes(gpu_plan)
+        assert not any(node.getClass().getSimpleName() ==
+                       'GpuDriverlessBroadcastHashJoinExec' for node in nodes)
+        joins = [node for node in nodes
+                 if node.getClass().getSimpleName() == 'GpuBroadcastHashJoinExec']
+        assert len(joins) == 1
+        exchange = joins[0].broadcastExchange()
+        assert exchange.metrics().apply('driverlessBuildBytes').value() > 0
+        assert exchange.metrics().apply('driverlessStageFallbacks').value() == 1
+        assert exchange.metrics().apply('collectTime').value() > 0
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        query, conf=dict(_conf, **{'spark.sql.adaptive.enabled': 'true'}),
+        gpu_plan_assertion=check_fallback, require_non_empty=True)

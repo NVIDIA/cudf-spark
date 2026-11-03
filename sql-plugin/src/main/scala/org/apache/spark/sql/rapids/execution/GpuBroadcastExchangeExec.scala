@@ -420,6 +420,8 @@ abstract class GpuBroadcastExchangeExecBase(
     BUILD_TIME -> createNanoTimingMetric(ESSENTIAL_LEVEL, DESCRIPTION_BUILD_TIME),
     "broadcastTime" -> createNanoTimingMetric(ESSENTIAL_LEVEL, "time to broadcast"),
     "driverlessBuildBytes" -> createSizeMetric(ESSENTIAL_LEVEL, "driverless build data size"),
+    "driverlessStageTime" -> createNanoTimingMetric(ESSENTIAL_LEVEL,
+      "driverless shuffle build time"),
     "driverlessStageFallbacks" -> createMetric(ESSENTIAL_LEVEL, "driverless stage fallbacks"))
 
   override def outputPartitioning: Partitioning = BroadcastPartitioning(mode)
@@ -788,12 +790,17 @@ case class GpuBroadcastExchangeExec(
     driverlessStage.filter(_.isAdmitted).map(_.shuffle)
 
   override protected def prepareDriverlessBuild(): Option[Broadcast[Any]] = {
-    val result = driverlessStage.flatMap(_.materialize())
-    if (result.isDefined) {
-      val executionId = sparkContext.getLocalProperty(SQLExecution.EXECUTION_ID_KEY)
-      SQLMetrics.postDriverMetricUpdates(sparkContext, executionId, metrics.values.toSeq)
+    driverlessStage.flatMap { stage =>
+      val start = System.nanoTime()
+      try {
+        stage.materialize()
+      } finally {
+        // This is driver wall time for stage preparation, separate from task operator time.
+        gpuLongMetric("driverlessStageTime") += System.nanoTime() - start
+        val executionId = sparkContext.getLocalProperty(SQLExecution.EXECUTION_ID_KEY)
+        SQLMetrics.postDriverMetricUpdates(sparkContext, executionId, metrics.values.toSeq)
+      }
     }
-    result
   }
 
   override protected def resolveBroadcast(result: Broadcast[Any]): Broadcast[Any] =

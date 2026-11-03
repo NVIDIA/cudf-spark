@@ -22,8 +22,9 @@ import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.internal.Logging
 import org.apache.spark.rapids.shims.GpuShuffleExchangeExec
 import org.apache.spark.sql.catalyst.trees.TreeNodeTag
-import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.execution.{SparkPlan, SQLExecution}
 import org.apache.spark.sql.execution.exchange.{BroadcastExchangeExec, ENSURE_REQUIREMENTS}
+import org.apache.spark.sql.execution.metric.SQLMetrics
 import org.apache.spark.util.ThreadUtils
 
 /** AQE materializes the build shuffle, while its broadcast stage carries only a small token. */
@@ -56,9 +57,14 @@ private[execution] class DriverlessBroadcastStage(
       uncompressed, rows, exchange.schema)
     val limit = RapidsConf.DRIVERLESS_BROADCAST_MAX_SIZE.get(exchange.conf)
     val admitted = DriverlessBroadcastBuildAdmission.accepts(bound, limit)
+    val reason = if (admitted) "within build-size limit" else if (bound.isEmpty) {
+      "no safe assembled-size bound"
+    } else {
+      "assembled-size bound exceeds limit"
+    }
     logInfo(s"Driverless AQE build admission for exchange ${exchange.id}, " +
       s"shuffle ${shuffle.shuffleId}: rows=$rows, uncompressedBytes=$uncompressed, " +
-      s"upperBound=$bound, maxBytes=$limit, admitted=$admitted")
+      s"upperBound=$bound, maxBytes=$limit, admitted=$admitted, reason=$reason")
     if (admitted) {
       // AQE needs real runtime cardinality and bytes before replanning its parent joins.
       exchange.metrics(GpuMetric.NUM_OUTPUT_ROWS).set(rows)
@@ -79,7 +85,21 @@ private[execution] class DriverlessBroadcastStage(
   private lazy val standard = GpuBroadcastExchangeExec(exchange.mode, exchange.child)(
     exchange.cpuCanonical)
 
-  def standardBroadcast(): Broadcast[Any] = standard.executeColumnarBroadcast[Any]()
+  private lazy val standardResult = {
+    logInfo(s"Driverless AQE build for exchange ${exchange.id}, shuffle ${shuffle.shuffleId} " +
+      "is consumed through standard broadcast")
+    val result = standard.executeColumnarBroadcast[Any]()
+    Seq("dataSize", GpuMetric.NUM_OUTPUT_ROWS, GpuMetric.NUM_OUTPUT_BATCHES,
+      GpuMetric.COLLECT_TIME, GpuMetric.BUILD_TIME, "broadcastTime").foreach { name =>
+      exchange.gpuLongMetric(name).set(standard.gpuLongMetric(name).value)
+    }
+    exchange.metrics("driverlessStageFallbacks").add(1)
+    SQLMetrics.postDriverMetricUpdates(context,
+      context.getLocalProperty(SQLExecution.EXECUTION_ID_KEY), exchange.metrics.values.toSeq)
+    result
+  }
+
+  def standardBroadcast(): Broadcast[Any] = standardResult
 }
 
 object DriverlessBroadcastStage {
@@ -93,7 +113,7 @@ object DriverlessBroadcastStage {
         !RapidsConf.HASH_TABLE_REUSE.get(original.conf) &&
         GpuDriverlessBroadcastHashJoinExec.gpuBuildReadRejections(conf).isEmpty) {
       val candidates = converted.collect {
-        case join: GpuBroadcastHashJoinExec if !join.isNullAwareAntiJoin =>
+        case join: GpuBroadcastHashJoinExec if !join.isNullAwareAntiJoin && !join.isSkewJoin =>
           (join.buildSide match {
             case GpuBuildLeft => join.left
             case GpuBuildRight => join.right
