@@ -951,6 +951,7 @@ protected case class GpuParquetFileFilterHandler(
         dateRebaseModeForThisFile
       }
 
+      metrics.get(ROW_GROUPS_READ).foreach(_ += clipped.size)
       ParquetFileInfoWithBlockMeta(filePath, clipped, file.partitionValues,
         clippedSchema, readDataSchema, dateRebaseModeForThisFile,
         timestampRebaseModeForThisFile, hasInt96Timestamps)
@@ -1686,7 +1687,8 @@ case class GpuParquetPartitionReaderFactory(
   // Only set for an eligible read.
   private val hybridScanConfig = if (rapidsConf.isParquetHybridScanEnabled) {
     val config = HybridScanConfig(rapidsConf,
-      new HybridScanFilters(readDataSchema, isCaseSensitive, filters))
+      new HybridScanFilters(readDataSchema, isCaseSensitive,
+        if (sqlConf.parquetFilterPushDown) filters else Array.empty))
 
     val eligible = HybridScanPipeline.isEligible(
       rapidsConf.isParquetHybridScanEnabled, rapidsConf.testParquetHybridScanFailOnFallback,

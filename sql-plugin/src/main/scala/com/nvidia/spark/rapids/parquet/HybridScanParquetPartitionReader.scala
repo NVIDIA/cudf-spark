@@ -77,6 +77,11 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
 
   private def totalBytes(ranges: Array[ByteRange]): Long = ranges.map(_.size()).sum
 
+  private def addToMetric(name: String, value: Long): Unit =
+    execMetrics.get(name).foreach(_ += value)
+
+  private def metric(name: String): GpuMetric = execMetrics.getOrElse(name, NoopMetric)
+
   /**
    * The plan phase: prune the split's row groups with the pushed filter, and if anything survives
    * fetch its column chunks into host memory, off the GPU semaphore so the read does not hold the
@@ -89,15 +94,20 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       split: HybridScanSplit,
       reader: HybridScanReader,
       ast: Option[CompiledExpression]): Option[FetchedColumnChunks] = {
-    val rowGroups = selectRowGroups(split, reader, ast)
+    addToMetric(HYBRID_SCAN_SPLITS, 1)
+    val rowGroups = metric(FILTER_TIME).ns {
+      selectRowGroups(split, reader, ast)
+    }
     if (rowGroups.isEmpty || reader.totalRowsInRowGroups(rowGroups) == 0) {
       None
     } else {
+      addToMetric(ROW_GROUPS_READ, rowGroups.length)
       setDecodeFilter(reader, ast)
       val ranges = NvtxRegistry.HYBRID_SCAN_GET_BYTE_RANGES {
         reader.allColumnChunksByteRanges(rowGroups)
       }
-      val hostChunks = NvtxRegistry.HYBRID_SCAN_READ_DATA {
+      addToMetric(HYBRID_SCAN_BYTES_READ, totalBytes(ranges))
+      val hostChunks = NvtxIdWithMetrics(NvtxRegistry.HYBRID_SCAN_READ_DATA, metric(BUFFER_TIME)) {
         split.source.fetch(ranges)
       }
       Some(new FetchedColumnChunks(rowGroups, hostChunks))
@@ -131,14 +141,14 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       ast: Option[CompiledExpression]): Array[Int] = {
     ast.foreach(reader.setFilter)
     val inSplit = rowGroupsInScope(split, reader, reader.allRowGroups())
+    addToMetric(ROW_GROUPS_IN_INPUT, inSplit.length)
     if (inSplit.isEmpty || ast.isEmpty) {
       inSplit
     } else {
       val afterStats = NvtxRegistry.HYBRID_SCAN_FILTER_STATS {
         reader.filterRowGroupsWithStats(inSplit)
       }
-      logDebug(s"HybridScan statistics pruning: ${inSplit.length} -> ${afterStats.length} " +
-        "row groups")
+      addToMetric(ROW_GROUPS_PRUNED_BY_STATS, inSplit.length - afterStats.length)
       if (afterStats.isEmpty) {
         afterStats
       } else if (!scanFilters.pushed.exists(FilterToAstConverter.canPruneWithDictionary)) {
@@ -192,11 +202,11 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
     if (totalBytes(dictRanges) == 0) {
       rowGroups
     } else {
+      addToMetric(HYBRID_SCAN_BYTES_READ, totalBytes(dictRanges))
       val afterDict = withResource(source.fetch(dictRanges)) { hostPages =>
         compareDictionaryPages(reader, rowGroups, hostPages)
       }
-      logDebug(s"HybridScan dictionary pruning: ${rowGroups.length} -> ${afterDict.length} " +
-        "row groups")
+      addToMetric(ROW_GROUPS_PRUNED_BY_DICT, rowGroups.length - afterDict.length)
       afterDict
     }
   }
@@ -246,7 +256,8 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       // Before the output filter, which references columns by index.
       checkDecodedSchema(t)
       outputAst.flatMap { compiled =>
-        NvtxRegistry.HYBRID_SCAN_OUTPUT_FILTER {
+        NvtxIdWithMetrics(NvtxRegistry.HYBRID_SCAN_OUTPUT_FILTER,
+            metric(HYBRID_SCAN_OUTPUT_FILTER_TIME)) {
           // The decoded table outlives each attempt, so a retry filters it again.
           withRetryNoSplit[Option[Table]] {
             applyOutputFilter(t, compiled)
@@ -283,7 +294,7 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       reader: HybridScanReader,
       fetched: FetchedColumnChunks): Table = {
     GpuSemaphore.acquireIfNecessary(TaskContext.get())
-    NvtxRegistry.HYBRID_SCAN_MATERIALIZE {
+    NvtxIdWithMetrics(NvtxRegistry.HYBRID_SCAN_MATERIALIZE, metric(GPU_DECODE_TIME)) {
       // The host chunks outlive each attempt, so a retry copies them again.
       withRetryNoSplit[Table] {
         withResource(copyToDevice(fetched.hostChunks)) { deviceChunks =>
@@ -403,8 +414,9 @@ object HybridScanPipeline extends Logging {
   /** Parse the footer into a reader. The caller owns and closes both the reader and the footer. */
   private[parquet] def openReader(
       footer: HostMemoryBuffer,
-      parquetOptions: ParquetOptions): HybridScanReader = {
-    NvtxRegistry.HYBRID_SCAN_PARSE_FOOTER {
+      parquetOptions: ParquetOptions,
+      parseTime: GpuMetric): HybridScanReader = {
+    NvtxIdWithMetrics(NvtxRegistry.HYBRID_SCAN_PARSE_FOOTER, parseTime) {
       new HybridScanReader(footer, parquetOptions)
     }
   }
@@ -617,17 +629,22 @@ private[parquet] class HybridScanPerFileParquetPartitionReader(
   private val pipeline = new HybridScanPipeline(context)
   private var batchIter: GpuColumnarBatchIterator = _
   private var footerClosed = false
+  // Set before the read starts, so a read that threw or a closed reader never runs it again
+  // against the freed footer.
+  private var isDone = false
 
   override def next(): Boolean = {
-    if (batchIter == null) {
+    if (batchIter == null && !isDone) {
+      isDone = true
       batchIter = readBatch()
     }
-    batchIter.hasNext
+    batchIter != null && batchIter.hasNext
   }
 
   override def get(): ColumnarBatch = batchIter.next()
 
   override def close(): Unit = {
+    isDone = true
     if (batchIter != null) {
       batchIter.close()
       batchIter = null
@@ -659,7 +676,8 @@ private[parquet] class HybridScanPerFileParquetPartitionReader(
   private def readTable(): Option[Table] = {
     NvtxRegistry.PARQUET_READ_BATCH {
       withResource(context.scanFilters.ast.map(_.compile())) { ast =>
-        withResource(openReader(footer, parquetOptions)) { reader =>
+        withResource(openReader(footer, parquetOptions,
+            context.execMetrics.getOrElse(HYBRID_SCAN_FOOTER_PARSE_TIME, NoopMetric))) { reader =>
           // The footer bytes are only read while the reader is being constructed.
           closeFooter()
           pipeline.planAndFetch(split, reader, ast)

@@ -543,12 +543,11 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
   val PARQUET_HYBRID_SCAN_ENABLED =
     conf("spark.rapids.sql.format.parquet.hybridScan.enabled")
       .doc("Internal temporary configuration to let Parquet reads use the libcudf hybrid scan " +
-          "reader while it is under development. It does not have the checks needed to be " +
-          "correct on every file and must not be used in production. When true, the reader " +
-          "bypasses parquet-mr: it parses only the footer, prunes row groups with the hybrid " +
-          "scan reader, and reads only the column chunk byte ranges the read needs. It applies " +
-          "only to non-chunked PERFILE reads; any other read falls back to the " +
-          "parquet-mr path.")
+          "reader while it is under development; it is not yet supported in production. When " +
+          "true, the reader bypasses parquet-mr: it parses only the footer, prunes row groups " +
+          "with the hybrid scan reader, and reads only the column chunk byte ranges the read " +
+          "needs. It applies only to non-chunked PERFILE reads of a schema it handles; any " +
+          "other read falls back to the parquet-mr path.")
       .internal()
       .booleanConf
       .createWithDefault(false)
