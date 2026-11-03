@@ -41,7 +41,8 @@ from pyspark.sql.types import StringType
 
 try:
     from google.protobuf import descriptor_pb2
-except ModuleNotFoundError:
+# A stray google/protobuf directory without the package raises a plain ImportError.
+except ImportError:
     descriptor_pb2 = None
 
 pytestmark = [
