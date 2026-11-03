@@ -59,6 +59,13 @@ public abstract class InternalRowToColumnarBatchIterator implements Iterator<Col
   protected final GpuMetric numInputRows;
   protected final GpuMetric numOutputRows;
   protected final GpuMetric numOutputBatches;
+  private final boolean requireSingleBatch;
+  // When a retry splits a batch, the remaining pieces of its host-to-GPU transfer and the
+  // remaining conversions of the current piece wait here, one output batch per next().
+  private Iterator<SpillableColumnarBatch> pendingRows = null;
+  private Iterator<ColumnarBatch> pendingBatches = null;
+  private static final DataType[] ROWS_TYPES =
+      new DataType[] {ArrayType.apply(DataTypes.ByteType, false)};
 
   protected InternalRowToColumnarBatchIterator(
       Iterator<InternalRow> input,
@@ -84,6 +91,7 @@ public abstract class InternalRowToColumnarBatchIterator implements Iterator<Col
     this.numInputRows = numInputRows;
     this.numOutputRows = numOutputRows;
     this.numOutputBatches = numOutputBatches;
+    this.requireSingleBatch = goal instanceof RequireSingleBatchLike;
   }
 
   private int calcNumRowsEstimate(long targetBytes) {
@@ -102,6 +110,9 @@ public abstract class InternalRowToColumnarBatchIterator implements Iterator<Col
 
   @Override
   public boolean hasNext() {
+    if (hasPendingOutput()) {
+      return true;
+    }
     boolean ret = true;
     if (pending == null) {
       long start = System.nanoTime();
@@ -112,15 +123,43 @@ public abstract class InternalRowToColumnarBatchIterator implements Iterator<Col
     return ret;
   }
 
+  private boolean hasPendingOutput() {
+    return (pendingBatches != null && pendingBatches.hasNext()) ||
+        (pendingRows != null && pendingRows.hasNext());
+  }
+
   @Override
   public ColumnarBatch next() {
     if (!hasNext()) {
       throw new NoSuchElementException();
     }
+    if (!hasPendingOutput()) {
+      collectRows();
+    }
+    // Grab the semaphore because we are about to put data onto the GPU.
+    GpuSemaphore$.MODULE$.acquireIfNecessary(TaskContext.get());
+    try (NvtxRange ignored = NvtxWithMetrics.apply("RowToColumnar: build", NvtxColor.GREEN,
+        Option.apply(opTime))) {
+      while (pendingBatches == null || !pendingBatches.hasNext()) {
+        pendingBatches = convertFromRowsWithRetry(pendingRows.next());
+      }
+      ColumnarBatch ret = pendingBatches.next();
+      if (numOutputRows != null) {
+        numOutputRows.add(ret.numRows());
+      }
+      if (numOutputBatches != null) {
+        numOutputBatches.add(1);
+      }
+      return ret;
+    }
+  }
 
-
+  /**
+   * Collect the next rows into host memory and set up their transfer to the GPU, which
+   * next() runs one piece at a time.
+   */
+  private void collectRows() {
     long collectStart = System.nanoTime();
-    Tuple2<SpillableColumnarBatch, NvtxRange> batchAndRange;
     AutoCloseableTargetSize numRowsWrapper =
         new AutoCloseableTargetSize(numRowsEstimate, 1);
     Tuple2<SpillableHostBuffer, AutoCloseableTargetSize> sBufAndNumRows;
@@ -160,12 +199,6 @@ public abstract class InternalRowToColumnarBatchIterator implements Iterator<Col
         if (numInputRows != null) {
           numInputRows.add(currentRow);
         }
-        if (numOutputRows != null) {
-          numOutputRows.add(currentRow);
-        }
-        if (numOutputBatches != null) {
-          numOutputBatches.add(1);
-        }
         // Now that we have filled the buffers with the data, we need to turn them into a
         // HostColumnVector and copy them to the device so the GPU can turn it into a Table.
         // To do this we first need to make a HostColumnCoreVector for the data, and then
@@ -174,35 +207,50 @@ public abstract class InternalRowToColumnarBatchIterator implements Iterator<Col
         // APIs.
         dataBuffer.incRefCount();
         offsetsBuffer.incRefCount();
-        try (HostColumnVectorCore dataCv =
-                 new HostColumnVectorCore(DType.INT8, dataOffset, Optional.of(0L),
-                     dataBuffer, null, null, new ArrayList<>());
-             HostColumnVector hostColumn = new HostColumnVector(DType.LIST,
-                 currentRow, Optional.of(0L), null, null,
-                 offsetsBuffer, Collections.singletonList(dataCv))) {
-
+        // Only hostColumn closes dataCv: closing a HostColumnVectorCore frees its data at once,
+        // and pieces that are not on the GPU yet still read it after this method returns.
+        HostColumnVectorCore dataCv = new HostColumnVectorCore(DType.INT8, dataOffset,
+            Optional.of(0L), dataBuffer, null, null, new ArrayList<>());
+        HostColumnVector hostColumn = null;
+        try {
+          hostColumn = new HostColumnVector(DType.LIST, currentRow, Optional.of(0L), null, null,
+              offsetsBuffer, Collections.singletonList(dataCv));
+        } finally {
+          if (hostColumn == null) {
+            dataCv.close();
+            offsetsBuffer.close();
+          }
+        }
+        try (HostColumnVector rowsColumn = hostColumn) {
           long ct = System.nanoTime() - collectStart;
           streamTime.add(ct);
 
-          // Grab the semaphore because we are about to put data onto the GPU.
-          GpuSemaphore$.MODULE$.acquireIfNecessary(TaskContext.get());
-          NvtxRange range = NvtxWithMetrics.apply("RowToColumnar: build", NvtxColor.GREEN,
-              Option.apply(opTime));
-          ColumnVector devColumn =
-              RmmRapidsRetryIterator.withRetryNoSplit(hostColumn::copyToDevice);
-          batchAndRange = Tuple2.apply(makeSpillableBatch(devColumn), range);
+          // Each piece goes to the GPU as a spillable batch, so the conversion can roll back
+          // and retry.
+          pendingRows = RmmRapidsRetryIterator.withRetry(
+              HostColumnarBatchWithRowRange.apply(new HostColumnVector[] {rowsColumn},
+                  currentRow, ROWS_TYPES),
+              requireSingleBatch ? null : HostColumnarBatchWithRowRange::splitInHalf,
+              (piece) -> SpillableColumnarBatch.apply(piece.copyToGpu(),
+                  SpillPriorities.ACTIVE_ON_DECK_PRIORITY()));
         }
       }
     }
-    try (NvtxRange ignored = batchAndRange._2;
-         Table tab =
-           RmmRapidsRetryIterator.withRetryNoSplit(batchAndRange._1, (attempt) -> {
-             try (ColumnarBatch cb = attempt.getColumnarBatch()) {
-               return convertFromRowsUnderRetry(cb);
-             }
-           })) {
-      return GpuColumnVector.from(tab, outputTypes);
-    }
+  }
+
+  /**
+   * Convert one piece of rows on the GPU. A split request splits the rows in half by rows,
+   * unless a single batch is required.
+   */
+  private Iterator<ColumnarBatch> convertFromRowsWithRetry(SpillableColumnarBatch rows) {
+    return RmmRapidsRetryIterator.withRetry(rows,
+        requireSingleBatch ? null : RmmRapidsRetryIterator.splitSpillableInHalfByRows(),
+        (attempt) -> {
+          try (ColumnarBatch cb = attempt.getColumnarBatch();
+               Table tab = convertFromRowsUnderRetry(cb)) {
+            return GpuColumnVector.from(tab, outputTypes);
+          }
+        });
   }
 
   private HostMemoryBuffer[] getHostBuffersWithRetry(
@@ -238,29 +286,6 @@ public abstract class InternalRowToColumnarBatchIterator implements Iterator<Col
         hBuf.close();
       }
     }
-  }
-
-  /**
-   * Take our device column of encoded rows and turn it into a spillable columnar batch.
-   * This allows us to go into a retry block and be able to roll back our work.
-   */
-  private SpillableColumnarBatch makeSpillableBatch(ColumnVector devColumn) {
-    // this is kind of ugly, but we make up a batch to hold this device column such that
-    // we can make it spillable
-    GpuColumnVector gpuCV = null;
-    try {
-      gpuCV = GpuColumnVector.from(devColumn,
-          ArrayType.apply(DataTypes.ByteType, false));
-    } finally {
-      if (gpuCV == null) {
-        devColumn.close();
-      }
-    }
-    return SpillableColumnarBatch.apply(
-        new ColumnarBatch(
-            new org.apache.spark.sql.vectorized.ColumnVector[]{gpuCV},
-            (int)gpuCV.getRowCount()),
-        SpillPriorities.ACTIVE_ON_DECK_PRIORITY());
   }
 
   /**
