@@ -181,6 +181,55 @@ def main():
         print(json.dumps(dict(case='query-cancellation', result='PASS',
                               shuffle=cleanup(spark, native))), flush=True)
 
+        if spark.conf.get('spark.sql.adaptive.enabled').lower() == 'true':
+            build_marker = str(root / 'slow-build-entered')
+
+            @udf(LongType())
+            def slow_build(value):
+                if value == 0:
+                    Path(build_marker).write_text('build task is running\n')
+                    time.sleep(45)
+                return value
+
+            @udf(LongType())
+            def fail_probe(value):
+                deadline = time.monotonic() + 15
+                while not Path(build_marker).exists() and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                raise RuntimeError('EXPECTED_ADAPTIVE_PROBE_FAILURE')
+
+            probe = spark.range(128, numPartitions=8).select(fail_probe(col('id')).alias('key')) \
+                .repartition(8, 'key')
+            build = spark.range(64, numPartitions=4).select(slow_build(col('id')).alias('bk'))
+            frame = probe.join(broadcast(build), probe.key == build.bk)
+            started = time.monotonic()
+            try:
+                frame.collect()
+                raise AssertionError('The injected probe-stage failure did not fail the query')
+            except Exception as error:
+                assert 'EXPECTED_ADAPTIVE_PROBE_FAILURE' in str(error), str(error)
+            assert Path(build_marker).exists(), 'The failure must overlap a running build'
+            assert time.monotonic() - started < 40, 'AQE waited for the sleeping build to finish'
+            exchanges = [node for node in nodes(frame._jdf.queryExecution().executedPlan())
+                         if node.getClass().getSimpleName() == 'GpuBroadcastExchangeExec']
+            assert len(exchanges) == 1
+            future = exchanges[0].relationFuture()
+            assert future.isDone(), 'The failed query left build materialization pending'
+            try:
+                future.get()
+                raise AssertionError('The sleeping build completed instead of being cancelled')
+            except Exception as error:
+                message = str(error).lower()
+                assert 'cancel' in message or 'interrupt' in message, message
+            deadline = time.monotonic() + 5
+            while exchanges[0].metrics().apply('driverlessStageTime').value() == 0 \
+                    and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert exchanges[0].metrics().apply('driverlessStageTime').value() > 0
+            assert exchanges[0].metrics().apply('collectTime').value() == 0
+            wait_idle(spark)
+            print(json.dumps(dict(case='aqe-cancels-in-flight-build', result='PASS')), flush=True)
+
         for iteration in range(3):
             frame = query(spark)
             assert sorted(tuple(row) for row in frame.collect()) == expected
