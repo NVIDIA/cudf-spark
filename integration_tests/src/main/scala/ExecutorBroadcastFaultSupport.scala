@@ -18,21 +18,33 @@ package org.apache.spark.sql.rapids.testing
 import org.apache.spark.{BarrierTaskContext, SparkEnv}
 import org.apache.spark.sql.{Dataset, Row, SparkSession}
 import org.apache.spark.sql.execution.{SparkPlan, SQLExecution}
+import org.apache.spark.sql.types.LongType
 
 /** Test-only injection, compiled separately from the product JAR with Spark's Scala compiler. */
 object ExecutorBroadcastFaultSupport {
-  def removeBuildOutputs(session: SparkSession, frame: Dataset[Row], slots: Int): String = {
+  def collectAfterRemovingBuildOutputs(
+      session: SparkSession,
+      frame: Dataset[Row],
+      slots: Int): Array[String] = session.withActive {
+    SQLExecution.withNewExecutionId(frame.queryExecution, Some("lost-broadcast-build-output")) {
+      collectWithMissingBuild(session, frame, slots)
+    }
+  }
+
+  private def collectWithMissingBuild(
+      session: SparkSession,
+      frame: Dataset[Row],
+      slots: Int): Array[String] = {
+    require(frame.schema.fields.map(_.dataType).toSeq == Seq(LongType, LongType),
+      "This fixture checks complete rows with exactly two long columns")
     val joins = frame.queryExecution.executedPlan.collect {
       case node if node.getClass.getSimpleName == "GpuShuffleBroadcastHashJoinExec" => node
     }
     require(joins.size == 1, s"Expected one executor broadcast join, found ${joins.size}")
     val join = joins.head
-    // This completes and admits the map stage without opening any executor build reader.
-    session.withActive {
-      SQLExecution.withSQLConfPropagated(session) {
-        join.executeColumnar()
-      }
-    }
+    // Build the actual output RDD once. Creating it completes and admits the build map stage;
+    // collecting this same RDD after deletion must fetch and recover the missing build output.
+    val result = frame.queryExecution.executedPlan.execute()
     val build = join.getClass.getMethod("buildPlan").invoke(join).asInstanceOf[SparkPlan]
     val shuffleId = build.getClass.getMethod("shuffleId").invoke(build).asInstanceOf[Int]
     val observations = session.sparkContext.parallelize(0 until slots, slots).barrier()
@@ -59,6 +71,7 @@ object ExecutorBroadcastFaultSupport {
     require(observations.map(_._1).distinct.length == 2,
       s"Injection did not visit two executors: ${observations.toSeq}")
     require(observations.exists(_._2), "The injected shuffle had no registered output")
-    s"shuffle=$shuffleId,observations=${observations.toSeq}"
+    val rows = result.map(row => s"${row.getLong(0)}:${row.getLong(1)}").collect()
+    Array(s"shuffle=$shuffleId,observations=${observations.toSeq}") ++ rows
   }
 }

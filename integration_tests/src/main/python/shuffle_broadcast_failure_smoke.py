@@ -84,12 +84,13 @@ def main():
 
         frame = query(spark)
         native = native_node(frame)
-        injected = sc._jvm.org.apache.spark.sql.rapids.testing.ExecutorBroadcastFaultSupport \
-            .removeBuildOutputs(spark._jsparkSession, frame._jdf, 8)
-        assert sorted(tuple(row) for row in frame.collect()) == expected
+        recovered = list(sc._jvm.org.apache.spark.sql.rapids.testing.ExecutorBroadcastFaultSupport
+                         .collectAfterRemovingBuildOutputs(spark._jsparkSession, frame._jdf, 8))
+        assert sorted(tuple(int(value) for value in row.split(':'))
+                      for row in recovered[1:]) == expected
         assert native.metrics().apply('executorBuilds').value() > 0
         assert native.fallbackBroadcast().metrics().apply('dataSize').value() == 0
-        print(json.dumps(dict(case='missing-build-output', injection=injected,
+        print(json.dumps(dict(case='missing-build-output', injection=recovered[0],
                               result='PASS', shuffle=cleanup(spark, native))), flush=True)
 
         @udf(LongType())
