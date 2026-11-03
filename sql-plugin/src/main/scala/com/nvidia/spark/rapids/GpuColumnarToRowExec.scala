@@ -144,7 +144,7 @@ class AcceleratedColumnarToRowIterator(
     if (scb.numRows() > 0) {
       NvtxIdWithMetrics(NvtxRegistry.COLUMNAR_TO_ROW_BATCH, opTime) {
         val it = RmmRapidsRetryIterator.withRetry(scb, splitSpillableInHalfByRows) { attempt =>
-          withResource(attempt.getColumnarBatch()) { attemptCb =>
+          val rowsCvs = withResource(attempt.getColumnarBatch()) { attemptCb =>
             withResource(rearrangeRows(attemptCb)) { table =>
               // The fixed-width-optimized kernel beats the generic transpose for narrow
               // (< 100 cols) all-fixed-width schemas, but rejects STRING/BINARY and any row
@@ -162,15 +162,16 @@ class AcceleratedColumnarToRowIterator(
               }
             }
           }
+          // The host copy allocates host memory, so it must run inside the attempt: a host
+          // OOM then rolls back and retries, or splits the input, instead of failing the task.
+          withResource(rowsCvs) { _ =>
+            rowsCvs.safeMap(_.copyToHost())
+          }
         }
         assertInTests(
           it.hasNext, "Got an unexpected empty iterator after setting up batch with retry")
-        it.foreach { rowsCvList =>
-          withResource(rowsCvList) { _ =>
-            rowsCvList.foreach { rowsCv =>
-              pendingCvs += rowsCv.copyToHost()
-            }
-          }
+        it.foreach { hostCvs =>
+          pendingCvs ++= hostCvs
         }
         setCurrentBatch(pendingCvs.dequeue())
         true

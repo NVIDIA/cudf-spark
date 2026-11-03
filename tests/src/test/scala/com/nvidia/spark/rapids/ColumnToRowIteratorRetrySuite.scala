@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -61,6 +61,27 @@ class ColumnToRowIteratorRetrySuite extends RmmSparkRetrySuiteBase {
       numRows += 1
     }
     assertResult(NUM_ROWS)(numRows)
+  }
+
+  // The first host allocation of a batch is in the copy of the converted rows to the host.
+  test("Accelerated columnar to row with CPU retry OOM during the host copy") {
+    val aCol2RowIter = new AcceleratedColumnarToRowIterator(
+      attrs,
+      Iterator(buildBatch),
+      NoopMetric, NoopMetric, NoopMetric, NoopMetric)
+    RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
+      RmmSpark.OomInjectionType.CPU.ordinal, 0)
+    assertResult((0 until NUM_ROWS).toList)(aCol2RowIter.map(_.getInt(0)).toList)
+  }
+
+  test("Accelerated columnar to row with CPU split and retry OOM during the host copy") {
+    val aCol2RowIter = new AcceleratedColumnarToRowIterator(
+      attrs,
+      Iterator(buildBatch),
+      NoopMetric, NoopMetric, NoopMetric, NoopMetric)
+    RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
+      RmmSpark.OomInjectionType.CPU.ordinal, 0)
+    assertResult((0 until NUM_ROWS).toList)(aCol2RowIter.map(_.getInt(0)).toList)
   }
 
 }
