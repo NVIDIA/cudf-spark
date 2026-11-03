@@ -25,6 +25,7 @@ import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 
 import com.nvidia.spark.rapids.utils.CloseableIterator;
+import com.nvidia.spark.rapids.utils.ResourceUtil;
 
 import org.apache.spark.TaskContext;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
@@ -61,8 +62,8 @@ public final class UnifiedReader<S extends ReadSource, I extends CombineInput,
       try {
         context.addTaskCompletionListener((TaskCompletionListener) ignored -> close());
       } catch (Throwable error) {
-        ReaderResources.closeAll(error, this);
-        throw ReaderResources.propagate(error);
+        ResourceUtil.closeAll(error, this);
+        throw ResourceUtil.propagate(error);
       }
     }
   }
@@ -101,8 +102,8 @@ public final class UnifiedReader<S extends ReadSource, I extends CombineInput,
       }
       return false;
     } catch (Throwable error) {
-      ReaderResources.closeAll(error, this);
-      throw ReaderResources.propagate(error);
+      ResourceUtil.closeAll(error, this);
+      throw ResourceUtil.propagate(error);
     }
   }
 
@@ -114,8 +115,8 @@ public final class UnifiedReader<S extends ReadSource, I extends CombineInput,
       }
       return currentBatches.next();
     } catch (Throwable error) {
-      ReaderResources.closeAll(error, this);
-      throw ReaderResources.propagate(error);
+      ResourceUtil.closeAll(error, this);
+      throw ResourceUtil.propagate(error);
     }
   }
 
@@ -127,7 +128,7 @@ public final class UnifiedReader<S extends ReadSource, I extends CombineInput,
       H handle = currentHandle;
       currentBatches = null;
       currentHandle = null;
-      ReaderResources.closeAll(null, batches, handle, scheduler);
+      ResourceUtil.closeAll(null, batches, handle, scheduler);
     }
   }
 }

@@ -14,16 +14,16 @@
  * limitations under the License.
  */
 
-package com.nvidia.spark.rapids.reader;
+package com.nvidia.spark.rapids.utils;
 
 import java.util.function.Supplier;
 
 import org.apache.spark.TaskContext;
 import org.apache.spark.sql.rapids.execution.TrampolineUtil$;
 
-/** Confines Spark's thread-local context interoperability to the reader boundary. */
-public final class ReaderTaskContext {
-  private ReaderTaskContext() {
+/** Java access to Spark's thread-local task context with scoped restoration. */
+public final class TaskContextUtil {
+  private TaskContextUtil() {
   }
 
   /** Restore a pooled worker's previous context on both normal and exceptional exit. */

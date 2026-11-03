@@ -27,6 +27,8 @@ import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
 
+import com.nvidia.spark.rapids.utils.ResourceUtil;
+
 /**
  * Bounded ready-handle delivery for a scheduler's logical reads.
  *
@@ -85,14 +87,14 @@ public final class ReadyReadQueue<H extends ReadHandle<?>>
           wait();
         }
         if (failure != null) {
-          throw ReaderResources.propagate(failure);
+          throw ResourceUtil.propagate(failure);
         }
         return !ready.isEmpty();
       }
     } catch (InterruptedException error) {
       Thread.currentThread().interrupt();
       fail(error);
-      throw ReaderResources.propagate(error);
+      throw ResourceUtil.propagate(error);
     }
   }
 
@@ -123,7 +125,7 @@ public final class ReadyReadQueue<H extends ReadHandle<?>>
       failure = error;
       cleanup = drain();
     }
-    ReaderResources.closeAll(error, cleanup.toArray(new AutoCloseable[0]));
+    ResourceUtil.closeAll(error, cleanup.toArray(new AutoCloseable[0]));
   }
 
   @Override
@@ -132,7 +134,7 @@ public final class ReadyReadQueue<H extends ReadHandle<?>>
     synchronized (this) {
       cleanup = drain();
     }
-    ReaderResources.closeAll(null, cleanup.toArray(new AutoCloseable[0]));
+    ResourceUtil.closeAll(null, cleanup.toArray(new AutoCloseable[0]));
   }
 
   private List<H> drain() {
@@ -181,11 +183,11 @@ public final class ReadyReadQueue<H extends ReadHandle<?>>
         }
       } catch (Throwable error) {
         if (!duplicate) {
-          ReaderResources.closeAll(error, value);
+          ResourceUtil.closeAll(error, value);
         }
-        throw ReaderResources.propagate(error);
+        throw ResourceUtil.propagate(error);
       }
-      ReaderResources.closeAll(null, value);
+      ResourceUtil.closeAll(null, value);
       return false;
     }
 
@@ -204,7 +206,7 @@ public final class ReadyReadQueue<H extends ReadHandle<?>>
         active.remove(this);
         ReadyReadQueue.this.notifyAll();
       }
-      ReaderResources.closeAll(null, cleanup);
+      ResourceUtil.closeAll(null, cleanup);
     }
   }
 }
