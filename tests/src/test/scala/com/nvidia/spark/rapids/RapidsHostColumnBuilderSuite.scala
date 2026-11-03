@@ -16,6 +16,8 @@
 
 package com.nvidia.spark.rapids
 
+import java.io.ByteArrayOutputStream
+import java.nio.{ByteBuffer, ByteOrder}
 import java.nio.charset.StandardCharsets
 import java.util.function.Supplier
 
@@ -586,6 +588,196 @@ class RapidsHostColumnBuilderSuite extends AnyFunSuite {
       thread.join()
       assert(accepted.get)
       assert(!acceptsString(smallLimit + 1))
+    }
+  }
+
+  test("a data size estimate sizes the string bytes or list children up front") {
+    withResource(new RapidsHostColumnBuilder(stringType, 4, 64)) { b =>
+      b.appendUTF8String(letters(10))
+      b.appendUTF8String(letters(30))
+      withResource(b.build()) { v =>
+        assertResult(64L)(v.getData.getLength)
+        assertResult(letters(30).toSeq)(v.getJavaString(1).getBytes(StandardCharsets.UTF_8).toSeq)
+      }
+    }
+    withResource(new RapidsHostColumnBuilder(binaryType, 4, 64)) { b =>
+      b.appendByteList(letters(10))
+      b.appendByteList(letters(30))
+      withResource(b.build()) { v =>
+        assertResult(64L)(v.getChildColumnView(0).getData.getLength)
+        assert(v.getBytesFromList(1).sameElements(letters(30)))
+      }
+    }
+  }
+
+  // Chunks of 8, 5, 6 and 11 rows start at aligned and unaligned rows of the validity mask, and
+  // the last one spans two of its bytes. The third one has no nulls.
+  private def chunksOf[T](value: (Int, Int) => T): Seq[Seq[Option[T]]] =
+    Seq(8, 5, 6, 11).zipWithIndex.map { case (size, c) =>
+      (0 until size).map(i => if (c != 2 && (i + c) % 3 == 0) None else Some(value(c, i)))
+    }
+
+  /** An Arrow validity bitmap of the chunk, or null when it has no nulls. */
+  private def validityOf(chunk: Seq[Option[Any]]): ByteBuffer =
+    if (chunk.forall(_.isDefined)) {
+      null
+    } else {
+      val bits = new Array[Byte]((chunk.length + 7) / 8)
+      chunk.zipWithIndex.foreach { case (v, i) =>
+        if (v.isDefined) {
+          bits(i / 8) = (bits(i / 8) | 1 << (i % 8)).toByte
+        }
+      }
+      ByteBuffer.wrap(bits)
+    }
+
+  /** Arrow offsets and data of the chunk, the data starting a few bytes in for odd sizes. */
+  private def variableWidth(chunk: Seq[Option[Array[Byte]]]): (ByteBuffer, ByteBuffer) = {
+    val skip = chunk.length % 2 * 3
+    val offsets = ByteBuffer.allocate((chunk.length + 1) * 4).order(ByteOrder.LITTLE_ENDIAN)
+    val data = new ByteArrayOutputStream()
+    data.write(new Array[Byte](skip), 0, skip)
+    offsets.putInt(0, skip)
+    chunk.zipWithIndex.foreach { case (v, i) =>
+      v.foreach(bytes => data.write(bytes, 0, bytes.length))
+      offsets.putInt((i + 1) * 4, data.size())
+    }
+    (offsets, ByteBuffer.wrap(data.toByteArray))
+  }
+
+  /**
+   * Appends the chunks to one builder in bulk and to another row by row, and checks that both
+   * build the same column. The bulk builder also gets every other chunk row by row, as a column
+   * that switched to row-by-row copies does.
+   */
+  private def assertBulkAppendsMatch[T](dataType: DataType, chunks: Seq[Seq[Option[T]]])(
+      appendBulk: (RapidsHostColumnBuilder, Seq[Option[T]], ByteBuffer, Long) => Long)(
+      appendRow: (RapidsHostColumnBuilder, T) => Any)(
+      read: (HostColumnVector, Int) => Any): Unit = {
+    def appendByRow(b: RapidsHostColumnBuilder, chunk: Seq[Option[T]]): Unit = chunk.foreach {
+      case Some(v) => appendRow(b, v)
+      case None => b.appendNull()
+    }
+    for (estimate <- estimates; interleave <- Seq(false, true)) {
+      withResource(new RapidsHostColumnBuilder(dataType, estimate)) { bulk =>
+        withResource(new RapidsHostColumnBuilder(dataType, estimate)) { byRow =>
+          chunks.zipWithIndex.foreach { case (chunk, c) =>
+            if (interleave && c % 2 == 0) {
+              appendByRow(bulk, chunk)
+            } else {
+              appendBulk(bulk, chunk, validityOf(chunk), chunk.count(_.isEmpty))
+            }
+            appendByRow(byRow, chunk)
+          }
+          withResource(byRow.build()) { expected =>
+            withResource(bulk.build()) { actual =>
+              assertResult(expected.getRowCount)(actual.getRowCount)
+              assertResult(expected.getNullCount)(actual.getNullCount)
+              assertNullCountsMatchMasks(actual)
+              (0 until expected.getRowCount.toInt).foreach { i =>
+                assertResult(expected.isNull(i), s"row $i")(actual.isNull(i))
+                if (!expected.isNull(i)) {
+                  assertResult(read(expected, i), s"row $i")(read(actual, i))
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  test("appendFixedWidth builds what append builds") {
+    assertBulkAppendsMatch(intType, chunksOf((c, i) => c * 100 - i)) {
+      (b, chunk, validity, nulls) =>
+        val values = ByteBuffer.allocate(chunk.length * 4).order(ByteOrder.LITTLE_ENDIAN)
+        chunk.zipWithIndex.foreach { case (v, i) => values.putInt(i * 4, v.getOrElse(0)) }
+        b.appendFixedWidth(values, validity, chunk.length, nulls)
+    } { (b, v) => b.append(v) } { (v, i) => v.getInt(i) }
+  }
+
+  test("appendBooleanBits builds what append builds") {
+    val boolType = new BasicType(true, DType.BOOL8)
+    assertBulkAppendsMatch(boolType, chunksOf((c, i) => (i + c) % 2 == 0)) {
+      (b, chunk, validity, nulls) =>
+        val bits = new Array[Byte]((chunk.length + 7) / 8)
+        chunk.zipWithIndex.foreach { case (v, i) =>
+          if (v.contains(true)) {
+            bits(i / 8) = (bits(i / 8) | 1 << (i % 8)).toByte
+          }
+        }
+        b.appendBooleanBits(ByteBuffer.wrap(bits), validity, chunk.length, nulls)
+    } { (b, v) => b.append(v) } { (v, i) => v.getBoolean(i) }
+  }
+
+  test("appendStrings builds what appendUTF8String builds") {
+    assertBulkAppendsMatch(stringType, chunksOf((c, i) => "x" * ((i + c) % 3) + "é" * (i % 2))) {
+      (b, chunk, validity, nulls) =>
+        val (offsets, chars) =
+          variableWidth(chunk.map(_.map(_.getBytes(StandardCharsets.UTF_8))))
+        b.appendStrings(offsets, chars, validity, chunk.length, nulls)
+    } { (b, v) => b.appendUTF8String(v.getBytes(StandardCharsets.UTF_8)) } {
+      (v, i) => v.getJavaString(i)
+    }
+  }
+
+  test("appendByteLists builds what appendByteList builds") {
+    val bytes = chunksOf((c, i) => Array.tabulate[Byte]((i + c) % 3)(j => (i * j - c).toByte))
+    assertBulkAppendsMatch(binaryType, bytes) { (b, chunk, validity, nulls) =>
+      val (offsets, data) = variableWidth(chunk)
+      b.appendByteLists(offsets, data, validity, chunk.length, nulls)
+    } { (b, v) => b.appendByteList(v) } { (v, i) => v.getBytesFromList(i).toSeq }
+  }
+
+  test("the bulk appends check the column type and the null count without assertions") {
+    val values = ByteBuffer.allocate(16)
+    // Row 1 of 3 is null.
+    val validity = ByteBuffer.wrap(Array[Byte](5))
+    withResource(new RapidsHostColumnBuilder(intType, 4)) { b =>
+      intercept[IllegalStateException](b.appendBooleanBits(values, null, 3, 0))
+      intercept[IllegalStateException](b.appendStrings(values, values, null, 3, 0))
+      intercept[IllegalStateException](b.appendByteLists(values, values, null, 3, 0))
+      intercept[IllegalArgumentException](b.appendFixedWidth(values, validity, 3, 0))
+      intercept[IllegalArgumentException](b.appendFixedWidth(values, validity, 3, 2))
+      intercept[IllegalArgumentException](b.appendFixedWidth(values, null, 3, 1))
+      // The rejected appends left the builder as it was.
+      b.appendFixedWidth(values, validity, 3, 1)
+      withResource(b.build()) { v =>
+        assertResult(3L)(v.getRowCount)
+        assertResult(1L)(v.getNullCount)
+        assertNullCountsMatchMasks(v)
+      }
+    }
+    withResource(new RapidsHostColumnBuilder(stringType, 4)) { b =>
+      intercept[IllegalStateException](b.appendFixedWidth(values, null, 3, 0))
+    }
+  }
+
+  test("a bulk append that would cross a limit is rejected before it changes the builder") {
+    val limit = 6
+    withLimits(limits(fixedWidthElements = limit)) {
+      withResource(new RapidsHostColumnBuilder(intType, 1)) { b =>
+        assertRejects(elementsMessage(limit + 1L, limit, DType.INT32)) {
+          b.appendFixedWidth(ByteBuffer.allocate((limit + 1) * 4), null, limit + 1, 0)
+        }
+        assertResult(0)(b.getCurrentIndex)
+      }
+    }
+    withLimits(limits(offsetRows = 2)) {
+      withResource(new RapidsHostColumnBuilder(binaryType, 1)) { b =>
+        val (offsets, bytes) = variableWidth(Seq(Some(Array[Byte](1, 2))))
+        b.appendByteLists(offsets, bytes, null, 1, 0)
+        // The parent rejects the rows before its child takes their bytes.
+        val (more, moreBytes) = variableWidth(Seq(Some(Array[Byte](3)), Some(Array[Byte](4))))
+        assertRejects(rowsMessage(3, 2, DType.LIST)) {
+          b.appendByteLists(more, moreBytes, null, 2, 0)
+        }
+        withResource(b.build()) { v =>
+          assertResult(1L)(v.getRowCount)
+          assertResult(2L)(v.getChildColumnView(0).getRowCount)
+          assert(v.getBytesFromList(0).sameElements(Array[Byte](1, 2)))
+        }
+      }
     }
   }
 }
