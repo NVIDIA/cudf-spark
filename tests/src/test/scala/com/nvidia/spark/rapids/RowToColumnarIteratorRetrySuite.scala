@@ -21,13 +21,13 @@ import java.nio.charset.StandardCharsets
 import scala.collection.mutable.ArrayBuffer
 
 import ai.rapids.cudf.{DType, HostColumnVector}
-import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsHostColumnBuilderSuite._
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingArray
 import com.nvidia.spark.rapids.jni.{GpuSplitAndRetryOOM, RmmSpark}
 
-import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.{Row, SparkSession}
+import org.apache.spark.sql.catalyst.{CatalystTypeConverters, InternalRow}
 import org.apache.spark.sql.catalyst.expressions.{GenericInternalRow, UnsafeProjection}
 import org.apache.spark.sql.catalyst.util.{ArrayBasedMapData, ArrayData, GenericArrayData}
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
@@ -331,7 +331,7 @@ class RowToColumnarIteratorRetrySuite extends RmmSparkRetrySuiteBase {
       )))
     ))
     val numRows = 10
-    val rowIter: Iterator[InternalRow] = (1 to numRows).map { i =>
+    def nestedRows(): Iterator[InternalRow] = (1 to numRows).iterator.map { i =>
       val str = UTF8String.fromString(s"test_string_$i")
       val arr = ArrayData.toArrayData(Array(i, i + 1, null, i + 2))
       val nestedStruct = new GenericInternalRow(
@@ -358,44 +358,28 @@ class RowToColumnarIteratorRetrySuite extends RmmSparkRetrySuiteBase {
 
       new GenericInternalRow(Array[Any](
         i, str, arr, nestedStruct, mapData, arrOfStruct, arrOfArr, structOfArr))
-    }.iterator
+    }
 
-    val goal = TargetSize(batchSize)
-    val row2ColIter = new RowToColumnarIterator(
-      rowIter, nestedSchema, goal, batchSize, new GpuRowToColumnConverter(nestedSchema))
+    // Without an OOM the rows convert in one batch, which the split batches must match row by
+    // row, including every nested offset.
+    val expected = toScalaRows(
+      r2c(nestedRows(), nestedSchema, TargetSize(batchSize), batchSize, true).toList,
+      nestedSchema)
+    assertResult(numRows)(expected.length)
 
+    val row2ColIter =
+      r2c(nestedRows(), nestedSchema, TargetSize(batchSize), batchSize, true)
     RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
       RmmSpark.OomInjectionType.GPU.ordinal, 0)
-
-    val batches = new ArrayBuffer[ColumnarBatch]()
-    val idValues = new ArrayBuffer[Int]()
-    val strValues = new ArrayBuffer[String]()
-    try {
+    val batches = closeOnExcept(ArrayBuffer[ColumnarBatch]()) { batches =>
       while (row2ColIter.hasNext) {
-        val batch = row2ColIter.next()
-        batches += batch
-        withResource(batch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { hostCol =>
-          for (i <- 0 until batch.numRows()) {
-            idValues += hostCol.getInt(i)
-          }
-        }
-        withResource(batch.column(1).asInstanceOf[GpuColumnVector].copyToHost()) { hostCol =>
-          for (i <- 0 until batch.numRows()) {
-            strValues += hostCol.getBase.getJavaString(i)
-          }
-        }
+        batches += row2ColIter.next()
       }
-
-      assert(batches.length >= 2,
-        s"Expected at least 2 batches after split with nested types, got ${batches.length}")
-      assertResult(numRows)(idValues.length)
-      assertResult(numRows)(strValues.length)
-      assertResult((1 to numRows).toSeq)(idValues.toSeq)
-      val expectedStrings = (1 to numRows).map(i => s"test_string_$i")
-      assertResult(expectedStrings)(strValues.toSeq)
-    } finally {
-      batches.foreach(_.close())
+      batches
     }
+    assert(batches.length >= 2,
+      s"Expected at least 2 batches after split with nested types, got ${batches.length}")
+    assertResult(expected)(toScalaRows(batches.toList, nestedSchema))
   }
 
   test("test GPU OOM split and retry with array children that never got a value") {
@@ -608,6 +592,15 @@ class RowToColumnarIteratorRetrySuite extends RmmSparkRetrySuiteBase {
       enableRetry: Boolean): RowToColumnarIterator =
     new RowToColumnarIterator(rows, rowSchema, goal, batchSizeBytes,
       new GpuRowToColumnConverter(rowSchema), enableRetry)
+
+  /** Reads the batches back as Scala rows, closing them. */
+  private def toScalaRows(batches: Seq[ColumnarBatch], rowSchema: StructType): Seq[Row] = {
+    val toScala = CatalystTypeConverters.createToScalaConverter(rowSchema)
+    withResource(new ColumnarToRowIterator(batches.iterator, NoopMetric, NoopMetric,
+        NoopMetric, NoopMetric)) { rows =>
+      rows.map(row => toScala(row).asInstanceOf[Row]).toList
+    }
+  }
 
   private def singleRowMessage(what: String, attempted: Long, limit: Long,
       dType: DType): String =
