@@ -18,7 +18,7 @@ package org.apache.spark.sql.rapids.execution
 import java.util.concurrent.{CountDownLatch, Executors, TimeUnit}
 import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 
-import com.nvidia.spark.rapids.{GpuRangeExec, GpuSinglePartitioning, GpuTransitionOverrides, JustRowsColumnarBatch, RapidsConf, ShuffleBufferCatalog, SpillableColumnarBatch}
+import com.nvidia.spark.rapids.{GpuRangeExec, GpuSinglePartitioning, GpuTransitionOverrides, JustRowsColumnarBatch, RapidsConf, RowBasedShuffleChecksumConf, ShimLoader, ShuffleBufferCatalog, SpillableColumnarBatch}
 import com.nvidia.spark.rapids.Arm.withResource
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuite
@@ -57,7 +57,14 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
   override def beforeAll(): Unit = {
     super.beforeAll()
     session = SparkSession.builder().master("local[2]")
-      .appName(getClass.getSimpleName).config("spark.ui.enabled", "false").getOrCreate()
+      .appName(getClass.getSimpleName).config("spark.ui.enabled", "false")
+      .config("spark.sql.adaptive.enabled", "false")
+      .config("spark.shuffle.manager", ShimLoader.getRapidsShuffleManagerClass)
+      .config("spark.rapids.shuffle.mode", "UCX")
+      .config("spark.rapids.sql.join.hashTable.reuse", "false")
+      .config(RowBasedShuffleChecksumConf.ChecksumEnabledKey, "false")
+      .config(RowBasedShuffleChecksumConf.ChecksumMismatchFullRetryKey, "false")
+      .getOrCreate()
   }
 
   override def afterAll(): Unit = {
@@ -190,6 +197,46 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
         val blocked = GpuDriverlessBroadcastHashJoinExec.sharedBuilds(UnionExec(consumers))
         assert(blocked.exists(_.fastEquals(cpu.canonicalized)))
       }
+    }
+  }
+
+  test("enabled rewrite preserves CPU joins while converting an eligible GPU join") {
+    session.withActive {
+      val key = AttributeReference("key", LongType)()
+      val probe = GpuRangeExec(0, 4, 1, 1, Seq(key), 1024)
+      val child = GpuRangeExec(0, 2, 1, 1, Seq(key.newInstance()), 1024)
+      val cpu = BroadcastExchangeExec(IdentityBroadcastMode, child)
+      val gpu = DriverlessBroadcastTestShim.join(probe,
+        GpuBroadcastExchangeExec(IdentityBroadcastMode, child)(cpu))
+      val standard = BroadcastHashJoinExec(Seq(key), cpu.output, Inner, BuildRight,
+        None, probe, cpu, false)
+      val conf = new RapidsConf(Map(
+        "spark.rapids.sql.driverlessBroadcast.enabled" -> "true",
+        "spark.rapids.shuffle.mode" -> "UCX",
+        "spark.rapids.sql.join.hashTable.reuse" -> "false"))
+      assert(GpuDriverlessBroadcastHashJoinExec.planRejections(gpu, conf).isEmpty)
+      assert(GpuDriverlessBroadcastHashJoinExec.rewrite(gpu, conf)
+        .isInstanceOf[GpuDriverlessBroadcastHashJoinExec])
+      assert(GpuDriverlessBroadcastHashJoinExec.rewrite(standard, conf) eq standard)
+    }
+  }
+
+  test("driverless policy follows each row-based checksum flag and its reset") {
+    session.withActive {
+      val conf = new RapidsConf(Map("spark.rapids.shuffle.mode" -> "UCX"))
+      val keys = Seq(RowBasedShuffleChecksumConf.ChecksumEnabledKey,
+        RowBasedShuffleChecksumConf.ChecksumMismatchFullRetryKey)
+      assert(DriverlessBroadcastPolicy.rejections(conf).isEmpty)
+      keys.foreach { key =>
+        session.conf.set(key, "true")
+        try {
+          assert(DriverlessBroadcastPolicy.rejections(conf)
+            .exists(_.contains("row-based shuffle checksums")))
+        } finally {
+          session.conf.set(key, "false")
+        }
+      }
+      assert(DriverlessBroadcastPolicy.rejections(conf).isEmpty)
     }
   }
 

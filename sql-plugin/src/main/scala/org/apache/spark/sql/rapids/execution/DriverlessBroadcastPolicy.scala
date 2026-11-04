@@ -21,6 +21,7 @@ import com.nvidia.spark.rapids.RapidsConf
 
 import org.apache.spark.{SparkContext, SparkEnv, SparkException}
 import org.apache.spark.internal.Logging
+import org.apache.spark.sql.rapids.GpuShuffleEnv
 import org.apache.spark.storage.BlockManagerId
 
 /** Application transport settings are immutable; SQL policy limits are captured per query. */
@@ -49,6 +50,9 @@ private[execution] object DriverlessBroadcastPolicy extends Logging {
     Seq(
       // The build reader consumes GPU shuffle blocks, not disk-shuffle ManagedBuffers.
       if (!startup.isUCXShuffleManagerMode) Some("UCX GPU shuffle mode is required") else None,
+      if (GpuShuffleEnv.isRowBasedChecksumEnabled) {
+        Some("row-based shuffle checksums require standard shuffle")
+      } else None,
       if (env.conf.getBoolean("spark.dynamicAllocation.enabled", false)) {
         Some("dynamic allocation is unsupported by driverless broadcast")
       } else None,

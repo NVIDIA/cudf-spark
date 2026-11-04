@@ -356,6 +356,78 @@ def test_driverless_broadcast_duplicate_build_respects_exchange_reuse(aqe):
         gpu_plan_assertion=check_reuse, require_non_empty=True)
 
 
+@ignore_order(local=True)
+@allow_non_gpu('BroadcastExchangeExec', 'BroadcastHashJoinExec', 'RLike')
+@pytest.mark.parametrize('aqe', ['false', 'true'])
+def test_driverless_broadcast_shared_build_with_cpu_join_keeps_standard_path(aqe):
+    _require_ucx()
+
+    def query(spark):
+        return spark.sql('''
+            WITH d AS (
+                SELECT id AS k, id AS b, CAST(id % 2 AS STRING) AS pattern
+                FROM range(0, 8, 1, 4)
+            )
+            SELECT /*+ BROADCAST(d) */ f.id AS p, d.b, d.pattern
+            FROM range(0, 128, 1, 8) f JOIN d ON f.id % 8 = d.k
+            UNION ALL
+            SELECT /*+ BROADCAST(d) */ f.id + 1000 AS p, d.b, d.pattern
+            FROM range(0, 128, 1, 8) f LEFT JOIN d
+            ON f.id % 8 = d.k AND CAST(f.id % 3 AS STRING) RLIKE d.pattern
+        ''')
+
+    def check_standard(cpu_plan, gpu_plan):
+        nodes = _executed_nodes(gpu_plan)
+        names = [node.getClass().getSimpleName() for node in nodes]
+        assert 'BroadcastHashJoinExec' in names, gpu_plan.toString()
+        assert 'GpuBroadcastHashJoinExec' in names, gpu_plan.toString()
+        assert 'GpuDriverlessBroadcastHashJoinExec' not in names, gpu_plan.toString()
+        exchanges = [node for node in nodes
+                     if node.getClass().getSimpleName() == 'GpuBroadcastExchangeExec']
+        assert exchanges, gpu_plan.toString()
+        for exchange in exchanges:
+            assert exchange.metrics().apply('driverlessBuildBytes').value() == 0
+            assert exchange.metrics().apply('driverlessStageFallbacks').value() == 0
+            assert exchange.metrics().apply('dataSize').value() > 0
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        query, conf=dict(_conf, **{
+            'spark.sql.adaptive.enabled': aqe,
+            'spark.sql.exchange.reuse': 'true',
+            'spark.rapids.sql.expression.RLike': 'false'}),
+        gpu_plan_assertion=check_standard, require_non_empty=True)
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize('aqe', ['false', 'true'])
+@pytest.mark.parametrize('checksum_key', [
+    'spark.sql.shuffle.orderIndependentChecksum.enabled',
+    'spark.sql.shuffle.orderIndependentChecksum.enableFullRetryOnMismatch'])
+def test_driverless_broadcast_row_checksum_keeps_standard_path(aqe, checksum_key):
+    _require_ucx()
+
+    def check_standard(cpu_plan, gpu_plan):
+        nodes = _executed_nodes(gpu_plan)
+        assert not any(node.getClass().getSimpleName() ==
+                       'GpuDriverlessBroadcastHashJoinExec' for node in nodes)
+        joins = [node for node in nodes if node.getClass().getSimpleName() ==
+                 'GpuBroadcastHashJoinExec']
+        assert len(joins) == 1, gpu_plan.toString()
+        exchange = joins[0].broadcastExchange()
+        assert exchange.metrics().apply('driverlessBuildBytes').value() == 0
+        assert exchange.metrics().apply('driverlessStageFallbacks').value() == 0
+        assert exchange.metrics().apply('dataSize').value() > 0
+
+    conf = dict(_conf, **{
+        'spark.sql.adaptive.enabled': aqe,
+        'spark.sql.shuffle.orderIndependentChecksum.enabled': 'false',
+        'spark.sql.shuffle.orderIndependentChecksum.enableFullRetryOnMismatch': 'false'})
+    conf[checksum_key] = 'true'
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda session: _join(session, 'inner', 'right'), conf=conf,
+        gpu_plan_assertion=check_standard, require_non_empty=True)
+
+
 def _rows(frame):
     return sorted(tuple(row) for row in frame.collect())
 
