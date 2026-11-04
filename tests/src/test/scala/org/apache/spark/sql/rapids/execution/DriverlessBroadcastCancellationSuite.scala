@@ -21,8 +21,9 @@ import java.util.concurrent.atomic.AtomicReference
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuite
 
-import com.nvidia.spark.rapids.GpuBuildRight
+import com.nvidia.spark.rapids.{GpuBuildRight, GpuRangeExec, GpuSinglePartitioning, GpuTransitionOverrides, RapidsConf}
 
+import org.apache.spark.rapids.shims.GpuShuffleExchangeExec
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.SparkSession
@@ -33,7 +34,7 @@ import org.apache.spark.sql.catalyst.plans.Inner
 import org.apache.spark.sql.catalyst.plans.physical.IdentityBroadcastMode
 import org.apache.spark.sql.execution.{LeafExecNode, SparkPlan, UnionExec}
 import org.apache.spark.sql.execution.adaptive.BroadcastQueryStageExec
-import org.apache.spark.sql.execution.exchange.{BroadcastExchangeExec, ReusedExchangeExec}
+import org.apache.spark.sql.execution.exchange.{BroadcastExchangeExec, ENSURE_REQUIREMENTS, ReusedExchangeExec}
 import org.apache.spark.sql.execution.joins.BroadcastHashJoinExec
 import org.apache.spark.sql.types.LongType
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -109,6 +110,25 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
         val blocked = GpuDriverlessBroadcastHashJoinExec.sharedBuilds(UnionExec(consumers))
         assert(blocked.exists(_.fastEquals(cpu.canonicalized)))
       }
+    }
+  }
+
+  test("GPU validation descends through reuse and still rejects a CPU subtree") {
+    session.withActive {
+      val key = AttributeReference("key", LongType)()
+      val gpu = GpuRangeExec(0, 4, 1, 1, Seq(key), 1024)
+      val shuffle = GpuShuffleExchangeExec(GpuSinglePartitioning, gpu,
+        ENSURE_REQUIREMENTS)(GpuSinglePartitioning)
+      val conf = new RapidsConf(Map.empty[String, String])
+      GpuTransitionOverrides.assertIsOnTheGpu(
+        ReusedExchangeExec(Seq(key.newInstance()), shuffle), conf)
+      val cpu = session.range(4).queryExecution.sparkPlan
+      val invalid = GpuShuffleExchangeExec(GpuSinglePartitioning, cpu,
+        ENSURE_REQUIREMENTS)(GpuSinglePartitioning)
+      val error = intercept[IllegalArgumentException] {
+        GpuTransitionOverrides.assertIsOnTheGpu(ReusedExchangeExec(cpu.output, invalid), conf)
+      }
+      assert(error.getMessage.contains("Part of the plan is not columnar"))
     }
   }
 

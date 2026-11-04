@@ -723,6 +723,9 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
     }
     val isAdaptiveEnabled = plan.conf.adaptiveExecutionEnabled
     plan match {
+      case reused: ReusedExchangeExec =>
+        // Reuse is a leaf wrapper; validate the actual exchange and its subtree.
+        assertIsOnTheGpu(reused.child, conf)
       case _: BroadcastExchangeLike if isAdaptiveEnabled =>
         // broadcasts are left on CPU for now when AQE is enabled
       case _: BroadcastHashJoinExec | _: BroadcastNestedLoopJoinExec
