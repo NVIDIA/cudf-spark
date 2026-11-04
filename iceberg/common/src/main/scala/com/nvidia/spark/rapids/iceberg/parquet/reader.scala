@@ -151,7 +151,14 @@ case class GpuIcebergParquetReaderConf(
 )
 
 object GpuIcebergParquetReader {
-  /** Decode helper leaves by physical type: only their definition/repetition levels are used. */
+  /**
+   * Prepare the file read schema for Spark's Parquet schema converter. Projection may retain
+   * unrequested helper fields to preserve the validity and cardinality of requested containers,
+   * including fields needed by deletion-vector reads. Only the helpers' definition and repetition
+   * levels are used; their values are not part of the requested output. Decode them by physical
+   * type so unsupported logical annotations do not prevent reading an otherwise supported query.
+   * Fields in the original required schema retain their logical types.
+   */
   private[iceberg] def physicalHelperSchema(
       readSchema: ShadedMessageType,
       requiredSchema: Schema): ShadedMessageType = {
@@ -160,6 +167,12 @@ object GpuIcebergParquetReader {
       PhysicalParquetSchemaVisitor.visitFields(readSchema, visitor).asJava)
   }
 
+  /**
+   * Rewrites unrequested physical fields while preserving requested fields and the Parquet
+   * LIST/MAP wrappers needed to interpret their structure. Removes unsupported logical annotations
+   * from helper leaves and opaque helper groups, and assigns unused IDs to unmapped helper fields
+   * so they cannot be mistaken for requested Iceberg fields during schema conversion.
+   */
   private class PhysicalHelperVisitor(readSchema: ShadedMessageType, requiredSchema: Schema)
       extends PhysicalParquetSchemaVisitor[ShadedType] {
     private val usedIds = mutable.HashSet.empty[Int]
