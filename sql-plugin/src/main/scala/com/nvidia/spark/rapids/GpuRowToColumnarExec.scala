@@ -632,6 +632,18 @@ class RowToColumnarIterator(
     case other => rowCopyProjection.apply(other).copy()
   }
 
+  /**
+   * Halve the builders' reservation after a split request on the first row. Later batches
+   * keep the smaller reservation, since they would meet the same memory pressure.
+   */
+  private def shrinkReservation(builders: GpuColumnarBatchBuilder, split: Throwable): Unit = {
+    if (initialRows <= 1) {
+      throw split
+    }
+    initialRows = initialRows / 2
+    builders.resetEmpty(initialRows)
+  }
+
   /** Consume the pending row if available, otherwise advance the iterator. */
   private def nextRow(): InternalRow = {
     if (pendingRow != null) {
@@ -649,8 +661,11 @@ class RowToColumnarIterator(
    *
    * OOM strategy (retry enabled):
    *  - Has rows to emit (and not RequireSingleBatch) → emit partial batch, save failed row
-   *  - No rows yet + RetryOOM → block until memory freed, then while loop retries
-   *  - No rows yet + SplitAndRetryOOM → propagate (can't split a single row)
+   *  - No rows yet + RetryOOM → free the builders' reservation, block until memory is freed,
+   *    then the while loop retries
+   *  - No rows yet + SplitAndRetryOOM, from the allocation or the wait → halve the
+   *    reservation and retry; propagate only when a one-row reservation cannot take the row
+   *  - An OOM from the input iterator → block and retry, or propagate a split
    *
    * In both modes a row that would take a column past its size limit ends the batch before
    * it, unless the batch is empty or the goal requires a single batch (see splitAtColumnLimit).
@@ -697,6 +712,23 @@ class RowToColumnarIterator(
                   pendingRow = copyRow(row)
                 }
                 batchDone = true
+              } else if (rowCount == 0 && row != null) {
+                // Most of what the first row asks for is the reservation for initialRows
+                // rows, so free it before waiting, and shrink it on a split, whether the
+                // allocation or the wait asks for it.
+                pendingRow = copyRow(row)
+                oom match {
+                  case _: CpuSplitAndRetryOOM | _: GpuSplitAndRetryOOM =>
+                    shrinkReservation(builders, oom)
+                  case _ =>
+                    builders.resetEmpty(initialRows)
+                    try {
+                      RmmRapidsRetryIterator.blockUntilMemoryFreed()
+                    } catch {
+                      case split @ (_: CpuSplitAndRetryOOM | _: GpuSplitAndRetryOOM) =>
+                        shrinkReservation(builders, split)
+                    }
+                }
               } else {
                 // No rows to emit — must retry or fail.
                 oom match {
