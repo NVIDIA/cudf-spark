@@ -133,27 +133,29 @@ case class GpuChecksumExpression(
   private def productModulo(values: ColumnVector, mod: Scalar): Long = {
     var current = values.incRefCount()
     while (current.getRowCount > 1) {
-      val rows = current.getRowCount.toInt
-      val half = rows / 2
-      current = withResource(current) { cur =>
-        val carried = rows % 2
-        withResource(cur.slice(0, half, half + carried, rows)) { halves =>
-          withResource(halves(0).mul(halves(1))) { product =>
-            withResource(product.mod(mod)) { reduced =>
-              if (carried == 0) {
-                reduced.incRefCount()
-              } else {
-                withResource(cur.slice(half, half + 1)) { middle =>
-                  ColumnVector.concatenate(reduced, middle(0))
-                }
-              }
-            }
-          }
-        }
-      }
+      current = withResource(current)(halve(_, mod))
     }
     withResource(current) { last =>
       withResource(last.copyToHost())(_.getLong(0))
+    }
+  }
+
+  /** One halving step of productModulo, which leaves ceil(rows / 2) values. */
+  private def halve(cur: ColumnVector, mod: Scalar): ColumnVector = {
+    val rows = cur.getRowCount.toInt
+    val half = rows / 2
+    val carried = rows % 2
+    val reduced = withResource(cur.slice(0, half, half + carried, rows)) { halves =>
+      withResource(halves(0).mul(halves(1)))(_.mod(mod))
+    }
+    if (carried == 0) {
+      reduced
+    } else {
+      withResource(reduced) { r =>
+        withResource(cur.slice(half, half + 1)) { middle =>
+          ColumnVector.concatenate(r, middle(0))
+        }
+      }
     }
   }
 }
