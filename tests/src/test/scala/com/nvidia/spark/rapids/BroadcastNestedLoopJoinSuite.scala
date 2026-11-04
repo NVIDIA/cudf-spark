@@ -16,6 +16,8 @@
 
 package com.nvidia.spark.rapids
 
+import scala.collection.mutable.ArrayBuffer
+
 import ai.rapids.cudf.ColumnVector
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.shims.OperatorsUtilShims
@@ -85,6 +87,16 @@ class BroadcastNestedLoopJoinSuite extends SparkQueryCompareTestSuite {
     override def nullable: Boolean = false
     override def columnarEval(batch: ColumnarBatch): GpuColumnVector =
       fail(s"the join evaluated its condition over ${batch.numRows()} rows")
+  }
+
+  // Records the rows of each batch the join evaluates it on, then evaluates the condition.
+  private case class RecordEvaluations(rows: ArrayBuffer[Int]) extends GpuLeafExpression {
+    override def dataType: DataType = BooleanType
+    override def nullable: Boolean = true
+    override def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
+      rows += batch.numRows()
+      condition.columnarEval(batch)
+    }
   }
 
   // The join types and build sides that nestedLoopJoin handles with a condition
@@ -190,6 +202,16 @@ class BroadcastNestedLoopJoinSuite extends SparkQueryCompareTestSuite {
       assertResult(sorted(expected))(sorted(actual))
     }
 
+    // The outer joins' rows-only stream path filters the build before it reads the stream.
+    if (joinType != LeftOuter && joinType != RightOuter) {
+      test(s"$name $buildSide nested loop join skips the condition when the stream has no batch") {
+        // Spark tests the condition only against a stream row.
+        val actual = nestedLoopJoin(joinType, buildSide, intBatch(Seq[Integer](null, 0, 6)),
+          Seq.empty, streamHasColumns = false, boundCondition = FailIfEvaluated())
+        assertResult(Seq.empty)(actual)
+      }
+    }
+
     test(s"$name $buildSide nested loop join accepts a rows-only stream") {
       val streamRows = Seq(5, 0, 2)
       for (build <- Seq(Seq.empty[Integer], Seq[Integer](null, 0, 5),
@@ -206,10 +228,13 @@ class BroadcastNestedLoopJoinSuite extends SparkQueryCompareTestSuite {
             case ExistenceJoin(_) => Seq.fill(streamRows.sum)(Seq(matched.nonEmpty))
             case _ => Seq.empty
           }
+          val evaluated = ArrayBuffer[Int]()
           val actual = nestedLoopJoin(joinType, buildSide, intBatch(build),
             streamRows.map(rows => () => new ColumnarBatch(Array.empty, rows)),
-            streamHasColumns = false)
+            streamHasColumns = false, boundCondition = RecordEvaluations(evaluated))
           assertResult(sorted(expected))(sorted(actual))
+          // The join filters the build once for all stream batches.
+          assertResult(Seq(build.length))(evaluated)
         }
       }
     }
