@@ -274,6 +274,9 @@ def test_driverless_broadcast_aqe_dpp_uses_only_standard_build(spark_tmp_path):
         dimension = session.read.parquet(dimension_path).filter('tag = 1')
         return fact.join(broadcast(dimension), 'k').select('k', 'v')
 
+    expected = sorted((value % 8, value) for value in range(128) if value % 8 % 3 == 1)
+    assert with_cpu_session(lambda session: _rows(query(session))) == expected
+
     def check_standard(cpu_plan, gpu_plan):
         assert 'dynamicpruning' in gpu_plan.toString().lower(), gpu_plan.toString()
         nodes = _executed_nodes(gpu_plan)
