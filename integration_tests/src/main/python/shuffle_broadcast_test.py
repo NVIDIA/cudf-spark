@@ -98,6 +98,8 @@ _conf = {
     'spark.sql.adaptive.enabled': 'false',
     'spark.rapids.sql.driverlessBroadcast.enabled': 'true',
     'spark.rapids.sql.join.hashTable.reuse': 'false',
+    'spark.sql.shuffle.orderIndependentChecksum.enabled': 'false',
+    'spark.sql.shuffle.orderIndependentChecksum.enableFullRetryOnMismatch': 'false',
 }
 
 
@@ -365,7 +367,7 @@ def test_driverless_broadcast_shared_build_with_cpu_join_keeps_standard_path(aqe
     def query(spark):
         return spark.sql('''
             WITH d AS (
-                SELECT id AS k, id AS b, CAST(id % 2 AS STRING) AS pattern
+                SELECT id AS k, id AS b, IF(id % 2 = 0, '0', '1') AS pattern
                 FROM range(0, 8, 1, 4)
             )
             SELECT /*+ BROADCAST(d) */ f.id AS p, d.b, d.pattern
@@ -377,6 +379,7 @@ def test_driverless_broadcast_shared_build_with_cpu_join_keeps_standard_path(aqe
         ''')
 
     def check_standard(cpu_plan, gpu_plan):
+        assert 'ReusedExchange' in cpu_plan.toString(), cpu_plan.toString()
         nodes = _executed_nodes(gpu_plan)
         names = [node.getClass().getSimpleName() for node in nodes]
         assert 'BroadcastHashJoinExec' in names, gpu_plan.toString()
