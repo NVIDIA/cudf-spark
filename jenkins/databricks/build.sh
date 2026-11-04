@@ -25,7 +25,8 @@
 # - build for DB10.4/Spark 3.2.1:
 #       `BASE_SPARK_VERSION=3.2.1 ./jenkins/databricks/build.sh`
 # The Databricks runtime jars are not installed into the local Maven repository. Instead,
-# build/gen-spark-home-deps.py renders shim-deps/databricks/pom.xml.template into a BOM that references
+# thirdparty/spark-rapids-common/spark-home-deps/gen-spark-home-deps.py renders
+# shim-deps/databricks/pom.xml.template into a BOM that references
 # every jar under /databricks/jars as a system-scoped dependency.
 
 set -ex
@@ -175,13 +176,14 @@ initialize()
 generate_dependencies()
 {
     local pomDir=$(dirname $POM_FILE)
-    python build/gen-spark-home-deps.py \
-        --output-pom "$pomDir/shim-deps/databricks/pom.xml" \
+    local generatedPom="$pomDir/shim-deps/databricks/pom.xml"
+    python thirdparty/spark-rapids-common/spark-home-deps/gen-spark-home-deps.py \
+        --output-pom "$generatedPom" \
         --project-pom "$POM_FILE" \
         --scala-binary-version "$SCALA_VERSION" \
-        --buildver "$BUILDVER" \
         --jar-dir "$JARDIR" \
         shim-deps/databricks/pom.xml.template
+    sed -i "s|<!--DATABRICKS_BUILDVER_PROPERTY-->|<rapids.audit.databricks.buildver>${BUILDVER}</rapids.audit.databricks.buildver>|" "$generatedPom"
 }
 
 ##########################
@@ -193,6 +195,7 @@ if [ -n "$EXTRA_ENVS" ]; then
 fi
 
 initialize
+./build/prepare-common-submodule.sh
 generate_dependencies
 
 if [[ "$WITH_BLOOP" == "1" ]]; then

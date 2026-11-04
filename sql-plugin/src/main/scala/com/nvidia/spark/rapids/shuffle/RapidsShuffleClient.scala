@@ -37,7 +37,8 @@ import org.apache.spark.storage.ShuffleBlockBatchId
 trait RapidsShuffleFetchHandler {
   /**
    * After a response for shuffle metadata is received, the expected number of columnar
-   * batches is communicated back to the caller via this method.
+   * batches is communicated back to the caller via this method. An error reply to a metadata
+   * request calls `metadataError` instead.
    * @param expectedBatches - number of columnar batches
    */
   def start(expectedBatches: Int): Unit
@@ -57,6 +58,15 @@ trait RapidsShuffleFetchHandler {
    * @param errorMessage - a string containing an error message
    */
   def transferError(errorMessage: String, throwable: Throwable = null): Unit
+
+  /**
+   * Called when the server answers the metadata request with an error reply.
+   *
+   * @param errorMessage - a string containing an error message
+   * @param failedBlock - the index, in the requested blocks, of the block whose lookup failed on
+   *                    the server, or -1 when no single block failed
+   */
+  def metadataError(errorMessage: String, failedBlock: Int): Unit
 
   /**
    * Called to get the task attempt ids that this shuffle handler is for.
@@ -227,18 +237,24 @@ class RapidsShuffleClient(
             withResource(tx.releaseMessage()) { resp =>
               NvtxRegistry.CLIENT_HANDLE_META {
                 try {
-                  // start the receives
+                  // report the server's error reply, or start the receives
                   val metadataResponse =
                     ShuffleMetadata.getMetadataResponse(resp.getBuffer())
 
                   logDebug(s"Received from ${tx} response: \n:" +
                     s"${ShuffleMetadata.printResponse("received response", metadataResponse)}")
 
-                  // signal to the handler how many batches are expected
-                  handler.start(metadataResponse.tableMetasLength())
+                  val error = metadataResponse.error()
+                  if (error != null) {
+                    handler.metadataError(s"Executor ${connection.getPeerExecutorId} failed " +
+                      s"the metadata request: ${error.reason()}", metadataResponse.failedBlock())
+                  } else {
+                    // signal to the handler how many batches are expected
+                    handler.start(metadataResponse.tableMetasLength())
 
-                  // queue up the receives
-                  queueTransferRequests(metadataResponse, handler)
+                    // queue up the receives
+                    queueTransferRequests(metadataResponse, handler)
+                  }
                 } catch {
                   case t: Throwable =>
                     handler.transferError("Error occurred while handling metadata", t)
