@@ -100,7 +100,9 @@ class ParquetScanSuite extends SparkQueryCompareTestSuite {
   for (readerType <- Seq("PERFILE", "COALESCING", "MULTITHREADED");
       (name, extra) <- Seq(
         "byte target" -> Seq.empty[(String, String)],
-        "row limit" -> Seq(RapidsConf.MAX_READER_BATCH_SIZE_ROWS.key -> "700"),
+        // A byte target large enough that the row limit, not the bytes, sets the cap
+        "row limit" -> Seq(RapidsConf.MAX_READER_BATCH_SIZE_ROWS.key -> "700",
+          RapidsConf.GPU_BATCH_SIZE_BYTES.key -> "1g"),
         "OOM injection" -> Seq(RapidsConf.TEST_RETRY_OOM_INJECTION_MODE.key -> "type=GPU"))) {
     test(s"metadata-only Parquet reads are capped, $readerType, $name") {
       withMissingColsData { path =>
@@ -123,6 +125,9 @@ class ParquetScanSuite extends SparkQueryCompareTestSuite {
           val cap = GpuNullBatchIterator.maxRows(missingColsSchema,
             rapidsConf.maxReadBatchSizeRows, rapidsConf.gpuTargetBatchSizeBytes)
           assert(cap < 3000, s"the test needs a cap below the file size, got $cap")
+          if (name == "row limit") {
+            assert(cap == 700, s"the row limit should set the cap, got $cap")
+          }
           // Before the fix this was one batch per file, or one for everything.
           val batchRows = scan.executeColumnar().mapPartitions(
             _.map { b => try b.numRows() finally b.close() }).collect()
