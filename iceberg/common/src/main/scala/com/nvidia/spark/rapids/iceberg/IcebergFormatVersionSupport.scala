@@ -32,10 +32,16 @@ object IcebergFormatVersionSupport {
     Type.TypeID.DOUBLE, Type.TypeID.DATE, Type.TypeID.TIMESTAMP, Type.TypeID.STRING,
     Type.TypeID.BINARY, Type.TypeID.DECIMAL)
 
+  /** Tag unsupported table versions and initial defaults in the full table schema. */
   def tagForFormatVersion(table: Table, meta: RapidsMeta[_, _, _]): Unit = {
     tagForFormatVersion(table, table.schema(), meta)
   }
 
+  /**
+   * Tag unsupported table versions and, when v3 is enabled, initial defaults in schemaToCheck.
+   * Callers select the schema relevant to the operation, such as a scan's required fields or a
+   * write's output fields. Unsupported cases are recorded on meta for CPU fallback.
+   */
   def tagForFormatVersion(
       table: Table,
       schemaToCheck: Schema,
@@ -50,6 +56,7 @@ object IcebergFormatVersionSupport {
     }
   }
 
+  /** Tag unsupported format versions from table properties, defaulting to v2 when absent. */
   def tagForFormatVersion(
       properties: Map[String, String],
       meta: RapidsMeta[_, _, _]): Unit = {
@@ -97,6 +104,12 @@ object IcebergFormatVersionSupport {
     }
   }
 
+  /**
+   * Extend an expected schema with top-level fields required by equality deletes, so their
+   * defaults are included in planning checks even when the query does not project them. Already
+   * projected fields are not duplicated. Throws if a required field ID is missing from the table
+   * schema or identifies a nested field, which the GPU delete filter cannot currently handle.
+   */
   def withRequiredFields(
       tableSchema: Schema,
       expectedSchema: Schema,
