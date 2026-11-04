@@ -15,14 +15,59 @@
  */
 package org.apache.spark.sql.rapids.testing
 
-import org.apache.spark.SparkEnv
+import scala.collection.mutable
+import scala.concurrent.duration._
+
+import org.apache.spark.{ShuffleDependency, SparkEnv}
+import org.apache.spark.scheduler.{SparkListener, SparkListenerTaskEnd, SparkListenerTaskStart}
 import org.apache.spark.sql.{Dataset, Row, SparkSession}
 import org.apache.spark.sql.execution.{SparkPlan, SQLExecution}
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec
 import org.apache.spark.sql.types.LongType
+import org.apache.spark.util.ThreadUtils
 
 /** Test-only missing-output injection for the two-executor shuffle integration suite. */
 object ExecutorBroadcastFaultSupport {
+  /** Uses real task intervals to verify that independent build stages can overlap. */
+  def collectWithParallelBuilds(session: SparkSession, frame: Dataset[Row]): Array[String] = {
+    val context = session.sparkContext
+    val lock = new Object
+    val tasks = mutable.Map.empty[Long, (Int, Long, Long)]
+    val listener = new SparkListener {
+      override def onTaskStart(event: SparkListenerTaskStart): Unit = lock.synchronized {
+        tasks(event.taskInfo.taskId) = (event.stageId, event.taskInfo.launchTime, Long.MaxValue)
+      }
+      override def onTaskEnd(event: SparkListenerTaskEnd): Unit = lock.synchronized {
+        tasks(event.taskInfo.taskId) =
+          (event.stageId, event.taskInfo.launchTime, event.taskInfo.finishTime)
+      }
+    }
+    context.addSparkListener(listener)
+    val group = "driverless-parallel-builds"
+    context.setJobGroup(group, "Verify parallel build upstreams")
+    try {
+      val result = frame.queryExecution.toRdd
+      result.getNumPartitions
+      context.listenerBus.waitUntilEmpty(30000)
+      require(context.statusTracker.getJobIdsForGroup(group).isEmpty,
+        "Constructing the join RDD must not submit or wait for a build job")
+      val rows = frame.collect().map(row => s"${row.getLong(0)}:${row.getLong(1)}:${row.getLong(2)}")
+      context.listenerBus.waitUntilEmpty(30000)
+      val singleTaskStages = lock.synchronized {
+        tasks.values.toSeq.groupBy(_._1).values.filter(_.size == 1).map(_.head).toSeq
+      }
+      require(singleTaskStages.size == 2,
+        s"Expected two single-task build stages: $singleTaskStages")
+      val Seq(first, second) = singleTaskStages.sortBy(_._2)
+      require(second._2 < first._3 && first._2 < second._3,
+        s"Independent build tasks did not overlap: $singleTaskStages")
+      rows
+    } finally {
+      context.removeSparkListener(listener)
+      context.clearJobGroup()
+    }
+  }
+
   def collectAfterRemovingBuildOutputs(
       session: SparkSession,
       frame: Dataset[Row],
@@ -48,10 +93,13 @@ object ExecutorBroadcastFaultSupport {
     }
     require(joins.size == 1, s"Expected one executor broadcast join, found ${joins.size}")
     val join = joins.head
-    // Build the actual output RDD once. Creating it completes and admits the build map stage;
-    // collecting this same RDD after deletion must fetch and recover the missing build output.
+    // Construct the real output RDD without executing the result stage. Materialize only
+    // its build dependency so deletion happens before any consumer can populate its cache.
     val result = finalPlan.execute()
     val build = join.getClass.getMethod("buildPlan").invoke(join).asInstanceOf[SparkPlan]
+    val dependency = build.getClass.getMethod("shuffleDependencyColumnar").invoke(build)
+      .asInstanceOf[ShuffleDependency[Any, Any, Any]]
+    ThreadUtils.awaitResult(session.sparkContext.submitMapStage(dependency), 30.seconds)
     val shuffleId = build.getClass.getMethod("shuffleId").invoke(build).asInstanceOf[Int]
     val observations = session.sparkContext.parallelize(0 until slots, slots).barrier()
       .mapPartitions { _ =>

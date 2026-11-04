@@ -20,7 +20,7 @@ import scala.concurrent.duration.{Duration, SECONDS}
 import org.apache.spark.sql.execution.{ExternalRDDScanExec, RDDScanExec, SparkPlan}
 import org.apache.spark.sql.types._
 
-/** Admission uses completed shuffle metrics and a conservative bound on the assembled layout. */
+/** Planning eligibility and timeout conversion for the driverless build path. */
 private[execution] object DriverlessBroadcastBuildAdmission {
   def supportsPlan(plan: SparkPlan): Boolean = rejectionReason(plan).isEmpty
 
@@ -59,36 +59,4 @@ private[execution] object DriverlessBroadcastBuildAdmission {
   def supportsSchema(schema: StructType): Boolean =
     schema.fields.forall(f => supportsType(f.dataType))
 
-  /**
-   * Packed input already contains the value buffers. Concatenation can add validity masks
-   * for rows whose input batch had no nulls, and can widen string offsets to 64 bits.
-   * Charge a complete padded mask for every column, regardless of declared nullability,
-   * plus complete 64-bit offsets for every string column. Existing masks and offsets are
-   * not subtracted, so both a concatenated batch and an unchanged packed batch are covered.
-   * Nested children require their own element counts and are outside this bound.
-   */
-  def upperBound(
-      partitionBytes: Array[Long],
-      uncompressedBytes: Long,
-      rows: Long,
-      schema: StructType): Option[BigInt] = {
-    val reportedBytes = partitionBytes.foldLeft(BigInt(0))(_ + _)
-    if (!supportsSchema(schema) || partitionBytes.exists(_ < 0) || uncompressedBytes < 0 ||
-        rows < 0 || rows > Int.MaxValue ||
-        (reportedBytes > 0 && rows == 0) ||
-        (rows > 0 && schema.nonEmpty && uncompressedBytes == 0)) {
-      None
-    } else {
-      // MapStatus sizes can saturate. The completed writer's dataSize metric supplies the
-      // uncompressed payload total independently of Spark's compact block-size encoding.
-      val payload = reportedBytes.max(BigInt(uncompressedBytes))
-      val maskBytes = ((BigInt(rows) + 511) / 512) * 64
-      val stringColumns = schema.fields.count(_.dataType.isInstanceOf[StringType])
-      val offsets = (BigInt(rows) + 1) * 8 * stringColumns
-      Some(payload + maskBytes * schema.length + offsets)
-    }
-  }
-
-  def accepts(bound: Option[BigInt], maxBytes: Long): Boolean =
-    maxBytes > 0 && bound.exists(_ < maxBytes)
 }

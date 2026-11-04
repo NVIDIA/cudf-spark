@@ -31,11 +31,23 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
       "reused exchanges, and subqueries " +
       "retain the standard path. Only deterministic builds with supported flat scalar schemas " +
       "are eligible. Opaque RDD sources retain standard broadcast. " +
-      "Builds without a safe assembled-size bound below the standard broadcast limit " +
-      "use standard broadcast.")
+      "Dynamic allocation is unsupported. Compressed-batch decoding is supported, but " +
+      "compressed UCX transport requires independent lifetime and platform qualification.")
     .internal()
     .booleanConf
     .createWithDefault(false)
+
+  val DRIVERLESS_BROADCAST_MAX_NODES = conf("spark.rapids.sql.driverlessBroadcast.maxNodes")
+    .doc("Maximum number of registered executor hosts for driverless broadcast. " +
+      "The driver retains standard broadcast when this limit is exceeded. Executors check " +
+      "the limit before fetching a build; growth beyond the limit after planning fails " +
+      "that execution. Dynamic allocation is unsupported. Values above 20 require " +
+      "scale qualification and improvements such as hierarchical or peer-forwarded " +
+      "distribution; raising this setting does not change the fan-out algorithm.")
+    .internal()
+    .integerConf
+    .checkValue(_ > 0, "must be positive")
+    .createWithDefault(20)
 
   val SQL_ENABLED = conf("spark.rapids.sql.enabled")
     .doc("Enable (true) or disable (false) sql operations on the GPU")

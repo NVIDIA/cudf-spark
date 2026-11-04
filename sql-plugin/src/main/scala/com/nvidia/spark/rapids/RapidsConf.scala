@@ -901,6 +901,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val shuffleCompressionCodec: String = get(SHUFFLE_COMPRESSION_CODEC)
 
+  lazy val driverlessBroadcastMaxNodes: Int = get(DRIVERLESS_BROADCAST_MAX_NODES)
+
   lazy val isDriverlessBroadcastEnabled: Boolean = get(DRIVERLESS_BROADCAST_ENABLED)
 
   lazy val shuffleCompressionLz4ChunkSize: Long = get(SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE)

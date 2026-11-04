@@ -17,7 +17,6 @@ package org.apache.spark.sql.rapids.execution
 
 import java.util.concurrent.Future
 
-import com.nvidia.spark.rapids.shims.BroadcastExchangeShims
 import com.nvidia.spark.rapids.{GpuBuildLeft, GpuBuildRight, GpuMetric, GpuSinglePartitioning, RapidsConf}
 
 import org.apache.spark.{MapOutputStatistics, SparkContext}
@@ -57,33 +56,17 @@ private[execution] class DriverlessBroadcastStage(
     }
     val rows = shuffle.metrics(GpuMetric.NUM_OUTPUT_ROWS).value
     val uncompressed = shuffle.metrics(GpuShuffleExchangeExecBase.METRIC_DATA_SIZE).value
-    val bound = DriverlessBroadcastBuildAdmission.upperBound(
-      statistics.map(_.bytesByPartitionId).getOrElse(Array.empty[Long]),
-      uncompressed, rows, exchange.schema)
-    val limit = BroadcastExchangeShims.getMaxBroadcastTableBytes(exchange.conf)
-    val admitted = DriverlessBroadcastBuildAdmission.accepts(bound, limit)
-    val reason = if (admitted) "within build-size limit" else if (bound.isEmpty) {
-      "no safe assembled-size bound"
-    } else {
-      "assembled-size bound exceeds limit"
-    }
-    logInfo(s"Driverless AQE build admission for exchange ${exchange.id}, " +
-      s"shuffle ${shuffle.shuffleId}: rows=$rows, uncompressedBytes=$uncompressed, " +
-      s"upperBound=$bound, maxBytes=$limit, admitted=$admitted, reason=$reason")
-    if (admitted) {
-      // AQE needs real runtime cardinality and bytes before replanning its parent joins.
-      exchange.metrics(GpuMetric.NUM_OUTPUT_ROWS).set(rows)
-      exchange.metrics("dataSize").set(uncompressed)
-      exchange.metrics("driverlessBuildBytes").set(uncompressed)
-      val token = context.broadcast[Any](shuffle.shuffleId)
-      completedStatistics = statistics
-      accepted = true
-      Some(token)
-    } else {
-      exchange.metrics("driverlessStageFallbacks").add(1)
-      context.cleaner.foreach(_.doCleanupShuffle(shuffle.shuffleId, blocking = true))
-      None
-    }
+    // AQE requires materialization and runtime statistics before replanning its consumers.
+    // No separate size policy changes the broadcast strategy Spark has already selected.
+    exchange.metrics(GpuMetric.NUM_OUTPUT_ROWS).set(rows)
+    exchange.metrics("dataSize").set(uncompressed)
+    exchange.metrics("driverlessBuildBytes").set(uncompressed)
+    val token = context.broadcast[Any](shuffle.shuffleId)
+    completedStatistics = statistics
+    accepted = true
+    logInfo(s"Driverless AQE build ready for exchange ${exchange.id}, " +
+      s"shuffle ${shuffle.shuffleId}: rows=$rows, uncompressedBytes=$uncompressed")
+    Some(token)
   }
 
   // A later AQE plan or unsupported consumer may require a real standard broadcast. Its
@@ -133,16 +116,18 @@ object DriverlessBroadcastStage {
     val conf = new RapidsConf(original.conf)
     if (original.conf.adaptiveExecutionEnabled &&
         conf.isDriverlessBroadcastEnabled &&
-        !RapidsConf.HASH_TABLE_REUSE.get(original.conf) &&
-        GpuDriverlessBroadcastHashJoinExec.gpuBuildReadRejections(conf).isEmpty) {
+        GpuDriverlessBroadcastHashJoinExec.planRejections(original, conf).isEmpty) {
+      val shared = GpuDriverlessBroadcastHashJoinExec.sharedBuilds(original)
       val candidates = converted.collect {
-        case join: GpuBroadcastHashJoinExec if !join.isNullAwareAntiJoin && !join.isSkewJoin =>
+        case join: GpuBroadcastHashJoinExec
+            if GpuDriverlessBroadcastHashJoinExec.joinRejections(join).isEmpty =>
           (join.buildSide match {
             case GpuBuildLeft => join.left
             case GpuBuildRight => join.right
           }) match {
             case build: GpuBroadcastExchangeExec
-                if DriverlessBroadcastBuildAdmission.supportsPlan(build.child) =>
+                if DriverlessBroadcastBuildAdmission.supportsPlan(build.child) &&
+                  !shared.exists(_.fastEquals(build.cpuCanonical.canonicalized)) =>
               Some(build.cpuCanonical)
             case _ => None
           }

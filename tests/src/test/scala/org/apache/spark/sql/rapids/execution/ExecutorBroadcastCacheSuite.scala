@@ -15,13 +15,14 @@
  */
 package org.apache.spark.sql.rapids.execution
 
-import java.util.concurrent.{Callable, CountDownLatch, Executors, TimeUnit}
+import java.util.concurrent.{Callable, CountDownLatch, Executors, ExecutionException, TimeUnit}
 import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.funsuite.AnyFunSuite
 
 import com.nvidia.spark.rapids.RapidsConf
 
+import org.apache.spark.TaskKilledException
 import org.apache.spark.sql.rapids.GpuShuffleEnv
 
 class ExecutorBroadcastCacheSuite extends AnyFunSuite {
@@ -282,4 +283,89 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
       cache.close()
     }
   }
+
+  Seq[Throwable](new InterruptedException("builder cancelled"),
+    new TaskKilledException("builder cancelled")).foreach { cancellation =>
+    test(s"a healthy waiter rebuilds after ${cancellation.getClass.getSimpleName}") {
+      val cache = new ExecutorBroadcastCache[Value](_.release())
+      val pool = Executors.newFixedThreadPool(2)
+      val building = new CountDownLatch(1)
+      val waiting = new CountDownLatch(1)
+      val failBuilder = new CountDownLatch(1)
+      val builds = new AtomicInteger()
+      val value = new Value
+      try {
+        val builder = pool.submit(new Callable[Value] {
+          override def call(): Value = cache.getOrBuild(77, () => {
+            builds.incrementAndGet()
+            building.countDown()
+            assert(failBuilder.await(10, TimeUnit.SECONDS))
+            throw cancellation
+          }, noAction, noAction)(_.retain())
+        })
+        assert(building.await(10, TimeUnit.SECONDS))
+        val waiter = pool.submit(new Callable[Value] {
+          override def call(): Value = cache.getOrBuild(77, () => {
+            builds.incrementAndGet()
+            value
+          }, () => waiting.countDown(), noAction)(_.retain())
+        })
+        assert(waiting.await(10, TimeUnit.SECONDS))
+        failBuilder.countDown()
+        val failure = intercept[ExecutionException] {
+          builder.get(10, TimeUnit.SECONDS)
+        }
+        assert(failure.getCause eq cancellation)
+        val borrowed = waiter.get(10, TimeUnit.SECONDS)
+        assert(borrowed eq value)
+        assert(builds.get() == 2)
+        borrowed.release()
+        cache.invalidate(77)
+        assert(value.references == 0)
+      } finally {
+        failBuilder.countDown()
+        pool.shutdownNow()
+        cache.close()
+      }
+    }
+  }
+
+  test("invalidation does not wait for materialization and defers disposal until borrow ends") {
+    val cache = new ExecutorBroadcastCache[Value](_.release())
+    val pool = Executors.newFixedThreadPool(2)
+    val reading = new CountDownLatch(1)
+    val finish = new CountDownLatch(1)
+    val value = new Value
+    try {
+      val borrower = pool.submit(new Callable[Value] {
+        override def call(): Value = cache.getOrBuild(78, () => value,
+          noAction, noAction) { owned =>
+          reading.countDown()
+          assert(finish.await(10, TimeUnit.SECONDS))
+          assert(owned.references == 1)
+          owned.retain()
+        }
+      })
+      assert(reading.await(10, TimeUnit.SECONDS))
+      val invalidation = pool.submit(new Callable[Unit] {
+        override def call(): Unit = cache.invalidate(78)
+      })
+      invalidation.get(5, TimeUnit.SECONDS)
+      assert(value.references == 1)
+      intercept[IllegalStateException] {
+        cache.getOrBuild(78, () => fail("Retired build must not run"),
+          noAction, noAction)(_.retain())
+      }
+      finish.countDown()
+      val borrowed = borrower.get(10, TimeUnit.SECONDS)
+      assert(value.references == 1)
+      borrowed.release()
+      assert(value.references == 0)
+    } finally {
+      finish.countDown()
+      pool.shutdownNow()
+      cache.close()
+    }
+  }
+
 }

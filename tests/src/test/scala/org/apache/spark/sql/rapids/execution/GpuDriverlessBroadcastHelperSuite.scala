@@ -18,6 +18,7 @@ package org.apache.spark.sql.rapids.execution
 import ai.rapids.cudf.{ColumnVector, Cuda, Rmm, Table}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.jni.RmmSpark
 import com.nvidia.spark.rapids.spill.SpillFramework
 
 import org.apache.spark.sql.catalyst.expressions.AttributeReference
@@ -36,6 +37,35 @@ class GpuDriverlessBroadcastHelperSuite extends RmmSparkRetrySuiteBase {
     new ColumnarBatch(Array(GpuColumnVector.from(column.incRefCount(), ByteType)),
       column.getRowCount.toInt)
 
+  test("a spilled cached build retries GPU allocation without rebuilding its input") {
+    val allocated = Rmm.getTotalBytesAllocated
+    withResource(new ExecutorBroadcastCache[SpillableColumnarBatch](_.close())) { cache =>
+      var builds = 0
+      def read(): ColumnarBatch = cache.getOrBuild(42, () => {
+        builds += 1
+        withResource(ColumnVector.fromBytes(1.toByte, 2.toByte)) { column =>
+          SpillableColumnarBatch(batch(column), SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+        }
+      }, () => (), () => ())(GpuDriverlessBroadcastHelper.borrow)
+      withResource(read()) { result => assert(result.numRows() == 2) }
+      assert(SpillFramework.stores.deviceStore.spill(Long.MaxValue) > 0)
+      RmmSpark.getAndResetNumRetryThrow(1)
+      RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 2,
+        RmmSpark.OomInjectionType.GPU.ordinal, 0)
+      withResource(read()) { result =>
+        assert(result.numRows() == 2)
+        withResource(GpuColumnVector.extractBases(result).head.copyToHost()) { host =>
+          assert(host.getByte(0) == 1 && host.getByte(1) == 2)
+        }
+      }
+      assert(RmmSpark.getAndResetNumRetryThrow(1) >= 2)
+      assert(builds == 1)
+      cache.invalidate(42)
+      assert(cache.activeEntryCount == 0)
+    }
+    assert(Rmm.getTotalBytesAllocated == allocated)
+  }
+
   test("a single input keeps its data and releases borrowed references") {
     withResource(ColumnVector.fromBytes(1.toByte, 2.toByte)) { column =>
       withResource(GpuDriverlessBroadcastHelper.assemble(
@@ -50,26 +80,23 @@ class GpuDriverlessBroadcastHelperSuite extends RmmSparkRetrySuiteBase {
     }
   }
 
-  test("the driver bound covers real null-mask growth at allocation boundaries") {
+  test("concatenation preserves nulls when its layout grows beyond input bytes") {
     val allocated = Rmm.getTotalBytesAllocated
     Seq(1, 511, 512, 513, 32768).foreach { rows =>
       withResource(ColumnVector.fromBytes(Array.fill[Byte](rows)(1): _*)) { nonNull =>
         withResource(ColumnVector.fromBoxedBytes(null.asInstanceOf[java.lang.Byte])) { nullable =>
           val inputBytes = nonNull.getDeviceMemorySize + nullable.getDeviceMemorySize
-          val bound = DriverlessBroadcastBuildAdmission.upperBound(
-            Array(inputBytes), inputBytes, rows + 1, schema)
           withResource(GpuDriverlessBroadcastHelper.assemble(
               Iterator(nonNull, nullable).map(batch), schema, output, metrics,
               codecConfigs, Long.MaxValue)) { result =>
             val actualBytes = GpuColumnVector.getTotalDeviceMemoryUsed(result)
             assert(result.numRows() == rows + 1)
-            assert(bound.exists(_ >= actualBytes))
             if (rows == 32768) {
-              info(s"received bytes=$inputBytes, assembled bytes=$actualBytes, bound=$bound")
+              info(s"received bytes=$inputBytes, assembled bytes=$actualBytes")
               assert(actualBytes > inputBytes, "This case must exercise concatenation growth")
-              assert(!DriverlessBroadcastBuildAdmission.accepts(bound, inputBytes))
-              assert(!DriverlessBroadcastBuildAdmission.accepts(bound, bound.get.toLong))
-              assert(DriverlessBroadcastBuildAdmission.accepts(bound, bound.get.toLong + 1))
+              withResource(GpuColumnVector.extractBases(result).head.copyToHost()) { host =>
+                assert(host.getByte(0) == 1 && host.isNull(rows))
+              }
             }
           }
           assert(nonNull.getRefCount == 1 && nullable.getRefCount == 1)
@@ -79,15 +106,12 @@ class GpuDriverlessBroadcastHelperSuite extends RmmSparkRetrySuiteBase {
     assert(Rmm.getTotalBytesAllocated == allocated)
   }
 
-  test("string offsets and null masks fit the driver bound") {
+  test("string concatenation preserves offsets and nulls") {
     val allocated = Rmm.getTotalBytesAllocated
     val strings = StructType(Seq(StructField("value", StringType)))
     val attributes = Seq(AttributeReference("value", StringType)())
     withResource(ColumnVector.fromStrings("abc", "long string", "")) { first =>
       withResource(ColumnVector.fromStrings(null.asInstanceOf[String])) { second =>
-        val inputBytes = first.getDeviceMemorySize + second.getDeviceMemorySize
-        val bound = DriverlessBroadcastBuildAdmission.upperBound(
-          Array(inputBytes), inputBytes, 4, strings)
         val input = Iterator(first, second).map { column =>
           new ColumnarBatch(Array(GpuColumnVector.from(column.incRefCount(), StringType)),
             column.getRowCount.toInt)
@@ -96,7 +120,6 @@ class GpuDriverlessBroadcastHelperSuite extends RmmSparkRetrySuiteBase {
           input, strings, attributes, metrics, codecConfigs, Long.MaxValue)) {
           result =>
             assert(result.numRows() == 4)
-            assert(bound.exists(_ >= GpuColumnVector.getTotalDeviceMemoryUsed(result)))
             withResource(GpuColumnVector.extractBases(result).head.copyToHost()) { host =>
               assert(host.getJavaString(0) == "abc" && host.isNull(3))
             }
@@ -141,16 +164,13 @@ class GpuDriverlessBroadcastHelperSuite extends RmmSparkRetrySuiteBase {
   }
 
   Seq("copy", "lz4").foreach { codec =>
-    test(s"$codec build batches are decoded and admitted using uncompressed bytes") {
+    test(s"$codec build batches are decoded before concatenation") {
       val allocated = Rmm.getTotalBytesAllocated
       val rows = 100000
-      var packedBytes = 0L
-      var uncompressedBytes = 0L
       val input = Iterator[Byte](7, 9).map { value =>
         val cb = compressedBatch(value, rows, codec)
         val cv = cb.column(0).asInstanceOf[GpuCompressedColumnVector]
-        packedBytes += cv.getTableBuffer.getLength
-        uncompressedBytes += cv.getTableMeta.bufferMeta().uncompressedSize()
+        assert(cv.getTableMeta.bufferMeta().uncompressedSize() > 0)
         cb
       }
       withResource(GpuDriverlessBroadcastHelper.assemble(
@@ -161,13 +181,6 @@ class GpuDriverlessBroadcastHelperSuite extends RmmSparkRetrySuiteBase {
           (0 until 2 * rows).foreach { i =>
             assert(host.getByte(i) == (if (i < rows) 7.toByte else 9.toByte))
           }
-        }
-        val bound = DriverlessBroadcastBuildAdmission.upperBound(
-          Array(packedBytes), uncompressedBytes, 2L * rows, schema)
-        assert(bound.exists(_ >= GpuColumnVector.getTotalDeviceMemoryUsed(result)))
-        if (codec == "lz4") {
-          assert(packedBytes < uncompressedBytes, "The fixture must really compress")
-          assert(!DriverlessBroadcastBuildAdmission.accepts(bound, packedBytes))
         }
       }
       assert(Rmm.getTotalBytesAllocated == allocated)

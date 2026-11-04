@@ -21,6 +21,8 @@ import scala.collection.mutable
 
 import org.roaringbitmap.RoaringBitmap
 
+import org.apache.spark.TaskKilledException
+
 private[rapids] object ExecutorBroadcastCache {
   def generation(stageId: Int, attempt: Int): Long =
     (stageId.toLong << 32) | (attempt.toLong & 0xffffffffL)
@@ -37,6 +39,7 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
     val ready = new CompletableFuture[Unit]()
     var value: Option[T] = None
     var invalidated = false
+    var borrowers = 0
   }
 
   private val entries = mutable.Map.empty[Int, mutable.Map[Long, Entry]]
@@ -66,83 +69,110 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
       checkCancelled: () => Unit,
       beforeBorrow: () => Unit = () => (),
       generation: Long = 0L)(borrow: T => B): B = {
-    checkCancelled()
-    var builder = false
-    val entry = entries.synchronized {
-      require(!closed, "Executor broadcast cache is closed")
-      if (retired.contains(id)) {
-        throw removed(id)
+    var result: Option[B] = None
+    while (result.isEmpty) {
+      checkCancelled()
+      var builder = false
+      val entry = entries.synchronized {
+        require(!closed, "Executor broadcast cache is closed")
+        if (retired.contains(id)) throw removed(id)
+        entries.getOrElseUpdate(id, mutable.Map.empty).getOrElseUpdate(generation, {
+          builder = true
+          new Entry
+        })
       }
-      entries.getOrElseUpdate(id, mutable.Map.empty).getOrElseUpdate(generation, {
-        builder = true
-        new Entry
-      })
-    }
-    if (builder) {
-      try {
-        val value = build()
-        val accepted = entry.synchronized {
-          if (entry.invalidated) {
-            false
-          } else {
-            entry.value = Some(value)
-            entry.ready.complete(())
-            true
+      if (builder) {
+        try {
+          val value = build()
+          val accepted = entry.synchronized {
+            if (entry.invalidated) {
+              false
+            } else {
+              entry.value = Some(value)
+              entry.ready.complete(())
+              true
+            }
           }
-        }
-        if (!accepted) {
-          dispose(value)
-          throw removed(id)
-        }
-      } catch {
-        case error: Throwable =>
-          entry.ready.completeExceptionally(error)
-          entries.synchronized {
-            entry.synchronized {
+          if (!accepted) {
+            dispose(value)
+            throw removed(id)
+          }
+        } catch {
+          case error: Throwable =>
+            // Detach the failed attempt before waking waiters that may elect a new builder.
+            entries.synchronized {
               if (!entry.invalidated) {
                 entries.get(id).foreach { generations =>
                   if (generations.get(generation).contains(entry)) {
                     generations.remove(generation)
-                    if (generations.isEmpty) {
-                      entries.remove(id)
-                    }
+                    if (generations.isEmpty) entries.remove(id)
                   }
                 }
               }
             }
-          }
-          throw error
+            entry.ready.completeExceptionally(error)
+            throw error
+        }
+      } else if (!entry.ready.isDone) {
+        beforeWait()
       }
-    } else if (!entry.ready.isDone) {
-      beforeWait()
-    }
 
-    var ready = false
-    while (!ready) {
-      checkCancelled()
-      try {
-        entry.ready.get(100, TimeUnit.MILLISECONDS)
-        ready = true
-      } catch {
-        case _: TimeoutException =>
-        case failure: ExecutionException => throw failure.getCause
+      var ready = false
+      var retryBuilder = false
+      while (!ready) {
+        checkCancelled()
+        try {
+          entry.ready.get(100, TimeUnit.MILLISECONDS)
+          ready = true
+        } catch {
+          case _: TimeoutException =>
+          case failure: ExecutionException =>
+            failure.getCause match {
+              case _: TaskKilledException | _: InterruptedException =>
+                // A peer task's cancellation does not cancel this task. Invalidation and
+                // shutdown are checked when re-entering the cache before another build.
+                checkCancelled()
+                retryBuilder = true
+                ready = true
+              case other => throw other
+            }
+        }
+      }
+      if (!retryBuilder) {
+        checkCancelled()
+        beforeBorrow()
+        val value = entry.synchronized {
+          if (entry.invalidated) throw removed(id)
+          entry.borrowers += 1
+          entry.value.get
+        }
+        try {
+          // Materialization may allocate or copy from host. A lease keeps the owner alive
+          // without holding the entry lock across GPU work, retry, or synchronization.
+          result = Some(borrow(value))
+        } finally {
+          val released = entry.synchronized {
+            entry.borrowers -= 1
+            if (entry.invalidated && entry.borrowers == 0) {
+              val owned = entry.value
+              entry.value = None
+              owned
+            } else None
+          }
+          released.foreach(dispose)
+        }
       }
     }
-    checkCancelled()
-    // Do not wait for task resources while holding the entry's ownership lock.
-    beforeBorrow()
-    entry.synchronized {
-      if (entry.invalidated) {
-        throw removed(id)
-      }
-      borrow(entry.value.get)
-    }
+    result.get
   }
 
   private def retireEntry(id: Int, entry: Entry): Option[T] = entry.synchronized {
     entry.invalidated = true
-    val owned = entry.value
-    entry.value = None
+    val owned = if (entry.borrowers == 0) {
+      val value = entry.value
+      entry.value = None
+      value
+    } else None
     // Only an in-flight builder has waiters that need an exception notification.
     if (!entry.ready.isDone) {
       entry.ready.completeExceptionally(removed(id))

@@ -18,6 +18,7 @@ package org.apache.spark.sql.rapids.execution
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
+import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 
 import org.apache.spark.TaskContext
 import org.apache.spark.sql.catalyst.expressions.Attribute
@@ -25,6 +26,9 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 private[execution] object GpuDriverlessBroadcastHelper {
+  def borrow(cached: SpillableColumnarBatch): ColumnarBatch =
+    withRetryNoSplit[ColumnarBatch] { cached.getColumnarBatch() }
+
   def assemble(
       input: Iterator[ColumnarBatch],
       schema: StructType,

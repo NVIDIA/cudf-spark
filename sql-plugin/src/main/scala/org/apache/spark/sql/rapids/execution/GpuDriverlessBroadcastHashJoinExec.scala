@@ -15,30 +15,33 @@
  */
 package org.apache.spark.sql.rapids.execution
 
+import java.lang.{Boolean => JBoolean}
+import java.util.{Collections, IdentityHashMap}
+
+import scala.collection.mutable.ArrayBuffer
+
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.closeOnExcept
-import com.nvidia.spark.rapids.shims.BroadcastExchangeShims
 
-import org.apache.spark.{SparkEnv, TaskContext}
+import org.apache.spark.TaskContext
 import org.apache.spark.internal.Logging
 import org.apache.spark.rapids.shims.GpuShuffleExchangeExec
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.plans.JoinType
 import org.apache.spark.sql.catalyst.plans.physical.{Distribution, UnspecifiedDistribution}
-import org.apache.spark.sql.execution.{ExecSubqueryExpression, SparkPlan, SQLExecution}
+import org.apache.spark.sql.execution.{ExecSubqueryExpression, SparkPlan}
 import org.apache.spark.sql.execution.adaptive.BroadcastQueryStageExec
-import org.apache.spark.sql.execution.exchange.{ENSURE_REQUIREMENTS, ReusedExchangeExec}
-import org.apache.spark.sql.execution.metric.SQLMetrics
+import org.apache.spark.sql.execution.exchange.{BroadcastExchangeExec, ENSURE_REQUIREMENTS, ReusedExchangeExec}
 import org.apache.spark.sql.rapids.GpuShuffleEnv
 import org.apache.spark.sql.rapids.shims.SparkSessionUtils
 import org.apache.spark.sql.vectorized.ColumnarBatch
-import org.apache.spark.util.ThreadUtils
 
 /**
  * Each consumer reads reducer zero, containing all mapper shards, through GPU shuffle.
  * The saved broadcast is not a child: preparing this plan must not collect its payload at
- * the driver. It is executed only if the completed shuffle fails runtime admission.
+ * the driver. It retains AQE stage metadata; a standard AQE consumer resolves its payload
+ * through the original exchange. Non-AQE execution does not invoke the saved exchange.
  */
 case class GpuDriverlessBroadcastHashJoinExec(
     leftKeys: Seq[Expression],
@@ -65,131 +68,117 @@ case class GpuDriverlessBroadcastHashJoinExec(
   override lazy val additionalMetrics: Map[String, GpuMetric] = broadcastJoinMetrics ++ Map(
     CONCAT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_CONCAT_TIME),
     "executorBuilds" -> createMetric(ESSENTIAL_LEVEL, "executor broadcast builds"),
-    "runtimeFallbacks" -> createMetric(ESSENTIAL_LEVEL, "runtime broadcast fallbacks"),
-    // Preserve AQE stage metrics without posting them twice. Non-AQE preparation owns
-    // separate metrics because the saved exchange can also publish a standard fallback.
-    "buildStageTime" -> (if (conf.adaptiveExecutionEnabled) {
-      fallbackBroadcast.gpuLongMetric("driverlessStageTime")
-    } else createNanoTimingMetric(ESSENTIAL_LEVEL, "driverless shuffle build time")),
-    "buildStageBytes" -> (if (conf.adaptiveExecutionEnabled) {
-      fallbackBroadcast.gpuLongMetric("driverlessBuildBytes")
-    } else createSizeMetric(ESSENTIAL_LEVEL, "driverless build data size")))
+    "runtimeFallbacks" -> createMetric(ESSENTIAL_LEVEL, "runtime broadcast fallbacks")) ++
+    (if (conf.adaptiveExecutionEnabled) Map(
+      "buildStageTime" -> fallbackBroadcast.gpuLongMetric("driverlessStageTime"),
+      "buildStageBytes" -> fallbackBroadcast.gpuLongMetric("driverlessBuildBytes"))
+    else Map.empty[String, GpuMetric])
 
   override protected def doColumnarBroadcastJoin(): RDD[ColumnarBatch] = {
     val exchange = buildPlan match {
       case shuffle: GpuShuffleExchangeExec => shuffle
       case _ => throw new IllegalStateException("Expected a direct GPU build shuffle")
     }
-    val maxBytes = BroadcastExchangeShims.getMaxBroadcastTableBytes(conf)
-    // Spark incorporates successful map-task accumulator updates before completing this future.
-    // The writer metric records uncompressed bytes even when map-status sizes are compressed.
-    val preparedStatistics = fallbackBroadcast.admittedDriverlessBuild.collect {
-      case (prepared, statistics) if prepared.shuffleId == exchange.shuffleId => statistics
-    }
-    // AQE already completed and admitted this shuffle. Submitting the cached map stage again
-    // is unnecessary and can produce duplicate job-end events on Spark 3.5.3.
-    val statistics = preparedStatistics.getOrElse {
-      val start = System.nanoTime()
-      try {
-        if (exchange.inputBatchRDD.getNumPartitions == 0) {
-          None
-        } else {
-          val mapStage = sparkContext.submitMapStage(exchange.shuffleDependencyColumnar)
-          try {
-            val timeout = DriverlessBroadcastBuildAdmission.waitTimeout(conf.broadcastTimeout)
-            Some(ThreadUtils.awaitResult(mapStage, timeout))
-          } finally {
-            if (!mapStage.isCompleted) {
-              mapStage.cancel()
-            }
-          }
-        }
-      } finally {
-        gpuLongMetric("buildStageTime") += System.nanoTime() - start
-        gpuLongMetric("buildStageBytes").set(
-          exchange.metrics(GpuShuffleExchangeExecBase.METRIC_DATA_SIZE).value)
-        SQLMetrics.postDriverMetricUpdates(sparkContext,
-          sparkContext.getLocalProperty(SQLExecution.EXECUTION_ID_KEY),
-          Seq(metrics("buildStageTime"), metrics("buildStageBytes")))
-      }
-    }
-    val rows = exchange.metrics(NUM_OUTPUT_ROWS).value
-    val partitionBytes = statistics.map(_.bytesByPartitionId).getOrElse(Array.empty[Long])
-    val bytes = partitionBytes.foldLeft(BigInt(0))(_ + _)
-    val uncompressedBytes = exchange.metrics(GpuShuffleExchangeExecBase.METRIC_DATA_SIZE).value
-    val sizeBound = DriverlessBroadcastBuildAdmission.upperBound(
-      partitionBytes, uncompressedBytes, rows, buildPlan.schema)
-    val admitted = DriverlessBroadcastBuildAdmission.accepts(sizeBound, maxBytes)
-    val reason = if (admitted) "within build-size limit" else if (sizeBound.isEmpty) {
-      "no safe assembled-size bound"
-    } else {
-      "assembled-size bound exceeds limit"
-    }
-    logInfo(s"Driverless broadcast admission for join $id, shuffle ${exchange.shuffleId}: " +
-      s"rows=$rows, bytes=$bytes, " +
-      s"uncompressedBytes=$uncompressedBytes, upperBound=$sizeBound, " +
-      s"maxBytes=$maxBytes, admitted=$admitted, reason=$reason")
-    if (!admitted) {
-      gpuLongMetric("runtimeFallbacks") += 1
-      val executionId = sparkContext.getLocalProperty(SQLExecution.EXECUTION_ID_KEY)
-      SQLMetrics.postDriverMetricUpdates(sparkContext, executionId,
-        Seq(metrics("runtimeFallbacks")))
-      sparkContext.cleaner.foreach(_.doCleanupShuffle(exchange.shuffleId, blocking = true))
-      super.doColumnarBroadcastJoin()
-    } else {
-      val build = exchange.executeColumnar()
-      val stream = streamedPlan.executeColumnar()
-      val shuffleId = exchange.shuffleId
-      val schema = buildPlan.schema
-      val output = buildPlan.output
-      val localMetrics = allMetrics
-      val numOutputRows = gpuLongMetric(NUM_OUTPUT_ROWS)
-      val numOutputBatches = gpuLongMetric(NUM_OUTPUT_BATCHES)
-      val opTime = gpuLongMetric(OP_TIME_LEGACY)
-      val streamTime = gpuLongMetric(STREAM_TIME)
-      val joinTime = gpuLongMetric(JOIN_TIME)
-      val builds = gpuLongMetric("executorBuilds")
-      val joinOptions = RapidsConf.getJoinOptions(conf, RapidsConf.GPU_BATCH_SIZE_BYTES.get(conf))
-      val rapidsConf = new RapidsConf(conf)
-      val codecConfigs = TableCompressionCodec.makeCodecConfig(rapidsConf)
-      val maxDecompressBatchMemory = rapidsConf.shuffleCompressionMaxBatchMemory
-      new GpuDriverlessBroadcastJoinRDD[ColumnarBatch, ColumnarBatch, ColumnarBatch](
-        stream, build, (input, openBuild) => {
-          val context = TaskContext.get()
-          val streamIter = new CollectTimeIterator(
-            NvtxRegistry.BROADCAST_JOIN_STREAM, input, streamTime)
-          val built = GpuShuffleEnv.getBroadcastCache.getOrBuild(shuffleId, () => {
-            builds += 1
-            val batch = GpuDriverlessBroadcastHelper.assemble(
-              openBuild(), schema, output, localMetrics, codecConfigs, maxDecompressBatchMemory)
-            closeOnExcept(batch)(
-              SpillableColumnarBatch(_, SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
-          }, () => GpuSemaphore.releaseIfNecessary(context),
-            () => context.killTaskIfInterrupted(),
-            () => GpuSemaphore.acquireIfNecessary(context),
-            generation = ExecutorBroadcastCache.generation(
-              context.stageId(), context.stageAttemptNumber())) { cached =>
-            cached.getColumnarBatch()
-          }
-          doJoin(built, streamIter, joinOptions, numOutputRows, numOutputBatches,
-            opTime, joinTime)
-        })
-    }
+    // Both upstreams belong to this RDD graph. The scheduler can submit independent map
+    // stages together; constructing this plan must not wait for the build map stage.
+    val build = exchange.executeColumnar()
+    val stream = streamedPlan.executeColumnar()
+    val shuffleId = exchange.shuffleId
+    val rapidsConf = new RapidsConf(conf)
+    val maxNodes = rapidsConf.driverlessBroadcastMaxNodes
+    val schema = buildPlan.schema
+    val output = buildPlan.output
+    val localMetrics = allMetrics
+    val numOutputRows = gpuLongMetric(NUM_OUTPUT_ROWS)
+    val numOutputBatches = gpuLongMetric(NUM_OUTPUT_BATCHES)
+    val opTime = gpuLongMetric(OP_TIME_LEGACY)
+    val streamTime = gpuLongMetric(STREAM_TIME)
+    val joinTime = gpuLongMetric(JOIN_TIME)
+    val builds = gpuLongMetric("executorBuilds")
+    val joinOptions = RapidsConf.getJoinOptions(conf, RapidsConf.GPU_BATCH_SIZE_BYTES.get(conf))
+    val codecConfigs = TableCompressionCodec.makeCodecConfig(rapidsConf)
+    val maxDecompressBatchMemory = rapidsConf.shuffleCompressionMaxBatchMemory
+    new GpuDriverlessBroadcastJoinRDD[ColumnarBatch, ColumnarBatch, ColumnarBatch](
+      stream, build, (input, openBuild) => {
+        val context = TaskContext.get()
+        val streamIter = new CollectTimeIterator(
+          NvtxRegistry.BROADCAST_JOIN_STREAM, input, streamTime)
+        val built = GpuShuffleEnv.getBroadcastCache.getOrBuild(shuffleId, () => {
+          DriverlessBroadcastPolicy.checkExecutorLimit(maxNodes)
+          builds += 1
+          val batch = GpuDriverlessBroadcastHelper.assemble(
+            openBuild(), schema, output, localMetrics, codecConfigs, maxDecompressBatchMemory)
+          closeOnExcept(batch)(
+            SpillableColumnarBatch(_, SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
+        }, () => GpuSemaphore.releaseIfNecessary(context),
+          () => context.killTaskIfInterrupted(),
+          () => GpuSemaphore.acquireIfNecessary(context),
+          generation = ExecutorBroadcastCache.generation(
+            context.stageId(), context.stageAttemptNumber()))(GpuDriverlessBroadcastHelper.borrow)
+        doJoin(built, streamIter, joinOptions, numOutputRows, numOutputBatches,
+          opTime, joinTime)
+      })
   }
 }
 
 object GpuDriverlessBroadcastHashJoinExec extends Logging {
-  def gpuBuildReadRejections(conf: RapidsConf): Seq[String] = {
-    Option(SparkEnv.get).map { env =>
-      // The transport is fixed at application startup. The build decoder handles the codec
-      // recorded in each batch, and admission uses the writer's uncompressed byte metric.
-      val mode = env.conf.get(RapidsConf.SHUFFLE_MANAGER_MODE.key, "MULTITHREADED")
-      Seq(
-        // The executor build reader consumes GPU shuffle blocks from the UCX manager.
-        if (!mode.equalsIgnoreCase("UCX")) Some("UCX shuffle mode is required") else None,
-        if (!GpuShuffleEnv.useGPUShuffle(conf)) Some("GPU shuffle is unavailable") else None
-      ).flatten
-    }.getOrElse(Seq("SparkEnv is not initialized"))
+  def gpuBuildReadRejections(conf: RapidsConf): Seq[String] =
+    DriverlessBroadcastPolicy.rejections(conf) ++
+      (if (!GpuShuffleEnv.useGPUShuffle(conf)) Seq("GPU shuffle is unavailable") else Seq.empty)
+
+  private[execution] def planRejections(plan: SparkPlan, conf: RapidsConf): Seq[String] = {
+    gpuBuildReadRejections(conf) ++ Seq(
+      // ContextCleaner unregisters build shuffles and retires executor cache entries.
+      if (SparkSessionUtils.sessionFromPlan(plan).sparkContext.cleaner.isEmpty) {
+        Some("Spark context cleaner is disabled")
+      } else None,
+      if (conf.get(RapidsConf.HASH_TABLE_REUSE)) Some("hash-table reuse is enabled") else None
+    ).flatten
+  }
+
+  private[execution] def joinRejections(join: GpuBroadcastHashJoinExec): Seq[String] = Seq(
+    // The custom RDD does not execute the base join's empty/all-null NAAJ handling.
+    if (join.isNullAwareAntiJoin) Some("null-aware anti join") else None,
+    if (join.isSkewJoin) Some("skew-optimized broadcast join") else None,
+    if (join.exists(_.isInstanceOf[ReusedExchangeExec])) Some("join contains a reused exchange")
+      else None,
+    if (join.exists(_.expressions.exists(_.exists(_.isInstanceOf[ExecSubqueryExpression])))) {
+      Some("join contains a subquery")
+    } else None
+  ).flatten
+
+  /** Reused and subquery consumers need a real broadcast payload, not an AQE token. */
+  private[execution] def sharedBuilds(plan: SparkPlan): Seq[SparkPlan] = {
+    val blocked = ArrayBuffer.empty[SparkPlan]
+    val normal = Collections.newSetFromMap(
+      new IdentityHashMap[SparkPlan, JBoolean]())
+    val subqueries = Collections.newSetFromMap(
+      new IdentityHashMap[SparkPlan, JBoolean]())
+    def canonical(build: SparkPlan): Unit = build match {
+      case exchange: GpuBroadcastExchangeExec => blocked += exchange.cpuCanonical.canonicalized
+      case exchange: BroadcastExchangeExec =>
+        blocked += exchange.canonicalized
+      case stage: BroadcastQueryStageExec => canonical(stage.plan)
+      case reused: ReusedExchangeExec => canonical(reused.child)
+      case _ =>
+    }
+    def visit(node: SparkPlan, inSubquery: Boolean): Unit = {
+      val seen = if (inSubquery) subqueries else normal
+      if (seen.add(node)) {
+        if (inSubquery || node.isInstanceOf[ReusedExchangeExec]) canonical(node)
+        node match {
+          case stage: BroadcastQueryStageExec => visit(stage.plan, inSubquery)
+          case _ =>
+        }
+        node.expressions.foreach(_.foreach {
+          case subquery: ExecSubqueryExpression => visit(subquery.plan, inSubquery = true)
+          case _ =>
+        })
+        node.children.foreach(visit(_, inSubquery))
+      }
+    }
+    visit(plan, inSubquery = false)
+    blocked.toSeq
   }
 
   /** Preserve the standard path for unsupported environments and exchange wrappers. */
@@ -197,21 +186,8 @@ object GpuDriverlessBroadcastHashJoinExec extends Logging {
     if (!conf.isDriverlessBroadcastEnabled) {
       plan
     } else {
-      val reasons = gpuBuildReadRejections(conf) ++ Seq(
-        // ContextCleaner unregisters the build shuffle, which retires executor cache entries.
-        // Without it a completed join would retain its replica until executor shutdown.
-        if (SparkSessionUtils.sessionFromPlan(plan).sparkContext.cleaner.isEmpty) {
-          Some("Spark context cleaner is disabled")
-        } else None,
-        if (RapidsConf.HASH_TABLE_REUSE.get(plan.conf)) Some("hash-table reuse is enabled")
-          else None,
-        if (plan.exists(_.isInstanceOf[ReusedExchangeExec])) {
-          Some("plan contains a reused exchange")
-        } else None,
-        if (plan.exists(_.expressions.exists(_.exists(_.isInstanceOf[ExecSubqueryExpression])))) {
-          Some("plan contains a subquery")
-        } else None
-      ).flatten
+      val reasons = planRejections(plan, conf)
+      val shared = sharedBuilds(plan)
       if (reasons.nonEmpty) {
         logInfo(s"Driverless broadcast not selected: ${reasons.mkString("; ")}")
         plan
@@ -234,17 +210,14 @@ object GpuDriverlessBroadcastHashJoinExec extends Logging {
               }
               case _ => None
             }
-            val rejection = if (join.isNullAwareAntiJoin) {
-              // The base implementation handles empty/all-null builds and null probe keys
-              // through a dedicated path that this custom RDD does not execute.
-              Some("null-aware anti join")
-            } else if (join.isSkewJoin) {
-              Some("skew-optimized broadcast join")
-            } else {
+            val rejection = joinRejections(join).headOption.orElse {
               broadcast match {
+                case Some(exchange)
+                    if shared.exists(_.fastEquals(exchange.cpuCanonical.canonicalized)) =>
+                  Some("broadcast has a reused or subquery consumer")
                 case Some(exchange) =>
                   DriverlessBroadcastBuildAdmission.rejectionReason(exchange.child)
-                case None => Some(s"no admitted driverless build: ${build.nodeName}")
+                case None => Some(s"no driverless build stage: ${build.nodeName}")
               }
             }
             rejection match {
@@ -261,8 +234,7 @@ object GpuDriverlessBroadcastHashJoinExec extends Logging {
                   case GpuBuildLeft => (shuffle, join.right)
                   case GpuBuildRight => (join.left, shuffle)
                 }
-                logInfo(s"Driverless broadcast planned for join ${join.id}; " +
-                  "execution requires runtime size admission")
+                logInfo(s"Driverless broadcast planned for join ${join.id}")
                 GpuDriverlessBroadcastHashJoinExec(join.leftKeys, join.rightKeys, join.joinType,
                   join.buildSide, join.condition, left, right, exchange)
             }

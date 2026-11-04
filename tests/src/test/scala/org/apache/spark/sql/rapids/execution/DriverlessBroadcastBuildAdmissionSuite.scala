@@ -19,6 +19,8 @@ import scala.concurrent.duration.Duration
 
 import org.scalatest.funsuite.AnyFunSuite
 
+import com.nvidia.spark.rapids.RapidsConf
+
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Alias, AttributeReference, LessThan, Literal, Rand}
 import org.apache.spark.sql.execution.{FilterExec, LocalTableScanExec, ProjectExec}
@@ -48,73 +50,6 @@ class DriverlessBroadcastBuildAdmissionSuite extends AnyFunSuite {
     assert(!DriverlessBroadcastBuildAdmission.supportsPlan(deterministicProject))
   }
 
-  private val bytes = StructType(Seq(StructField("value", ByteType)))
-
-  test("the driver includes a full padded validity mask before admission") {
-    val bound = DriverlessBroadcastBuildAdmission.upperBound(Array(4L, 6L), 10, 2, bytes)
-    assert(bound.contains(BigInt(74)))
-    assert(DriverlessBroadcastBuildAdmission.accepts(bound, 75))
-    assert(!DriverlessBroadcastBuildAdmission.accepts(bound, 74))
-    assert(!DriverlessBroadcastBuildAdmission.accepts(bound, 73))
-    assert(!DriverlessBroadcastBuildAdmission.accepts(bound, 10))
-  }
-
-  test("concatenation growth is rejected by the driver rather than executor assembly") {
-    val bound = DriverlessBroadcastBuildAdmission.upperBound(Array(32833L), 32833, 32769, bytes)
-    assert(bound.contains(BigInt(36993)))
-    assert(!DriverlessBroadcastBuildAdmission.accepts(bound, 32833))
-    assert(DriverlessBroadcastBuildAdmission.accepts(bound, 36994))
-  }
-
-  test("string bounds include 64-bit offsets and masks even for non-nullable fields") {
-    val schema = StructType(Seq(StructField("text", StringType, nullable = false)))
-    val bound = DriverlessBroadcastBuildAdmission.upperBound(Array(100L), 100, 10, schema)
-    assert(bound.contains(BigInt(252)))
-    assert(!DriverlessBroadcastBuildAdmission.accepts(bound, 251))
-    assert(DriverlessBroadcastBuildAdmission.accepts(bound, 253))
-  }
-
-  test("the uncompressed writer metric prevents compact map-status sizes hiding large builds") {
-    val bound = DriverlessBroadcastBuildAdmission.upperBound(Array(10L), 100, 2, bytes)
-    assert(bound.contains(BigInt(164)))
-    assert(!DriverlessBroadcastBuildAdmission.accepts(bound, 100))
-    val overflow = DriverlessBroadcastBuildAdmission.upperBound(
-      Array(Long.MaxValue, 1L), Long.MaxValue, 2, bytes)
-    assert(overflow.exists(_ > Long.MaxValue))
-    assert(!DriverlessBroadcastBuildAdmission.accepts(overflow, Long.MaxValue))
-  }
-
-  test("unknown child element counts and binary layouts retain standard broadcast") {
-    Seq[DataType](ArrayType(ByteType), MapType(IntegerType, LongType),
-      StructType(Seq(StructField("child", ByteType))), BinaryType).foreach { dataType =>
-      val schema = StructType(Seq(StructField("value", dataType)))
-      assert(!DriverlessBroadcastBuildAdmission.supportsSchema(schema))
-      assert(DriverlessBroadcastBuildAdmission.upperBound(Array(10L), 10, 2, schema).isEmpty)
-    }
-    assert(!DriverlessBroadcastBuildAdmission.accepts(None, Long.MaxValue))
-  }
-
-  test("unavailable or inconsistent completed metrics decline the native path") {
-    assert(DriverlessBroadcastBuildAdmission.upperBound(Array(-1L), 10, 2, bytes).isEmpty)
-    assert(DriverlessBroadcastBuildAdmission.upperBound(Array(10L), -1, 2, bytes).isEmpty)
-    assert(DriverlessBroadcastBuildAdmission.upperBound(Array(10L), 10, -1, bytes).isEmpty)
-    assert(DriverlessBroadcastBuildAdmission.upperBound(Array(10L), 10, Int.MaxValue.toLong + 1,
-      bytes).isEmpty)
-    assert(DriverlessBroadcastBuildAdmission.upperBound(Array(10L), 10, 0, bytes).isEmpty)
-    assert(DriverlessBroadcastBuildAdmission.upperBound(Array(10L), 0, 2, bytes).isEmpty)
-    assert(!DriverlessBroadcastBuildAdmission.accepts(Some(BigInt(0)), 0))
-  }
-
-  test("empty and rows-only builds remain eligible") {
-    val empty = DriverlessBroadcastBuildAdmission.upperBound(Array.empty[Long], 0, 0, bytes)
-    assert(empty.contains(BigInt(0)))
-    assert(DriverlessBroadcastBuildAdmission.accepts(empty, 1))
-    val rowsOnly = DriverlessBroadcastBuildAdmission.upperBound(
-      Array(100L), 0, 200, StructType(Nil))
-    assert(rowsOnly.contains(BigInt(100)))
-    assert(DriverlessBroadcastBuildAdmission.accepts(rowsOnly, 101))
-  }
-
   test("flat scalar schemas are eligible without relying on declared nullability") {
     val schema = StructType(Seq(BooleanType, ByteType, ShortType, IntegerType, LongType,
       FloatType, DoubleType, DateType, TimestampType, TimestampNTZType, NullType,
@@ -122,4 +57,18 @@ class DriverlessBroadcastBuildAdmissionSuite extends AnyFunSuite {
       .zipWithIndex.map { case (dataType, index) => StructField(s"c$index", dataType) })
     assert(DriverlessBroadcastBuildAdmission.supportsSchema(schema))
   }
+
+  test("node admission counts hosts rather than executor instances") {
+    val hosts = (1 to 20).map(i => s"host-$i").toSet
+    assert(DriverlessBroadcastPolicy.nodeRejection(hosts, 20).isEmpty)
+    assert(DriverlessBroadcastPolicy.nodeRejection(hosts + "host-21", 20).isDefined)
+    assert(DriverlessBroadcastPolicy.nodeRejection(hosts + "host-1", 20).isEmpty)
+    val conf = new RapidsConf(Map.empty[String, String])
+    assert(conf.driverlessBroadcastMaxNodes == 20)
+    intercept[IllegalArgumentException] {
+      new RapidsConf(Map("spark.rapids.sql.driverlessBroadcast.maxNodes" -> "0"))
+        .driverlessBroadcastMaxNodes
+    }
+  }
+
 }
