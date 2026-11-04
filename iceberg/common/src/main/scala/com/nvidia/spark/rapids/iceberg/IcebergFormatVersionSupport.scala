@@ -20,7 +20,7 @@ import scala.collection.JavaConverters._
 
 import com.nvidia.spark.rapids.{RapidsConf, RapidsMeta}
 import org.apache.iceberg.{Schema, Table, TableProperties}
-import org.apache.iceberg.types.{Types, TypeUtil}
+import org.apache.iceberg.types.{Type, Types, TypeUtil}
 
 import org.apache.spark.sql.execution.SparkPlan
 
@@ -28,8 +28,9 @@ import org.apache.spark.sql.execution.SparkPlan
 object IcebergFormatVersionSupport {
   private val MaxSupportedFormatVersion = 2
   private val SupportedDefaultTypeIds = Set(
-    "BOOLEAN", "INTEGER", "LONG", "FLOAT", "DOUBLE", "DATE", "TIMESTAMP",
-    "STRING", "BINARY", "DECIMAL")
+    Type.TypeID.BOOLEAN, Type.TypeID.INTEGER, Type.TypeID.LONG, Type.TypeID.FLOAT,
+    Type.TypeID.DOUBLE, Type.TypeID.DATE, Type.TypeID.TIMESTAMP, Type.TypeID.STRING,
+    Type.TypeID.BINARY, Type.TypeID.DECIMAL)
 
   def tagForFormatVersion(table: Table, meta: RapidsMeta[_, _, _]): Unit = {
     tagForFormatVersion(table, table.schema(), meta)
@@ -79,7 +80,7 @@ object IcebergFormatVersionSupport {
 
         val unsupportedTimestampNtz = fieldType == Types.TimestampType.withoutZone()
         if (hasDefault && fieldType.isPrimitiveType &&
-            (!SupportedDefaultTypeIds.contains(fieldType.typeId().name()) ||
+            (!SupportedDefaultTypeIds.contains(fieldType.typeId()) ||
               unsupportedTimestampNtz)) {
           Some(path -> fieldType.toString)
         } else if (hasDefault && !fieldType.isPrimitiveType && !fieldType.isStructType) {
