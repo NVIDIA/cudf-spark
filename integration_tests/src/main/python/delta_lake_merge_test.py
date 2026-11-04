@@ -24,7 +24,7 @@ from spark_session import (is_before_spark_320, is_databricks_runtime, spark_ver
                            supports_delta_lake_deletion_vectors, is_before_spark_353,
                            is_spark_400_or_later, is_databricks143,
                            is_databricks173_or_later, is_spark_41x,
-                           supports_delta_lake_row_tracking)
+                           supports_delta_lake_row_tracking, with_cpu_session, with_gpu_session)
 
 delta_merge_enabled_conf = copy_and_update(delta_writes_enabled_conf,
                                            {"spark.rapids.sql.command.MergeIntoCommand": "true",
@@ -1508,6 +1508,45 @@ def test_delta_merge_cpu_command_checksum_expression_types_db173(
                          use_cdf=False, enable_deletion_vectors=False,
                          src_table_func=src_table_func, dest_table_func=dest_table_func,
                          merge_sql=merge_sql, check_func=checker)
+
+
+@delta_lake
+@inject_oom
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="GPU ChecksumExpression coverage for Databricks 17.3+")
+@pytest.mark.parametrize("batch_size_bytes", ["1g", "20000"], ids=["one_batch", "many_batches"])
+def test_checksum_expression_metric_matches_cpu_db173(spark_tmp_path, batch_size_bytes):
+    # Evaluates one ChecksumExpression (same seed, same input) on the CPU and on the GPU and
+    # compares the value of the multiplication metric it accumulates, without going through a
+    # MERGE. With tiny batches the GPU multiplies the checksums of many batches into the metric.
+    data_path = spark_tmp_path + "/PARQUET_DATA"
+    with_cpu_session(lambda spark: gen_df(spark, _checksum_source_gens, length=3000, seed=3,
+                                          num_slices=1).write.parquet(data_path))
+
+    def checksum_metric(spark):
+        jvm = spark._jvm
+        df = spark.read.parquet(data_path)
+        attrs = df._jdf.queryExecution().analyzed().output()
+        children = jvm.scala.jdk.javaapi.CollectionConverters.asScala(
+            jvm.java.util.ArrayList([attrs.apply(i) for i in range(attrs.size())])).toSeq()
+        metric = jvm.org.apache.spark.sql.execution.metric.SQLLastAttemptMetrics \
+            .createMultiplicationMetric(spark.sparkContext._jsc.sc(), "checksum", False)
+        initial = metric.value()
+        expr = jvm.com.databricks.sql.transaction.tahoe.commands.merge.checksum \
+            .ChecksumExpression(children, metric, 20260101, False)
+        filtered = df._jdf.filter(jvm.org.apache.spark.sql.classic.ExpressionUtils.column(expr))
+        plan = filtered.queryExecution().executedPlan().toString()
+        # The expression is always true, so every row passes the filter.
+        assert filtered.count() == 3000
+        assert metric.value() != initial, "the checksum metric was not updated"
+        return metric.value(), plan
+
+    conf = {"spark.rapids.sql.batchSizeBytes": batch_size_bytes}
+    cpu_value, cpu_plan = with_cpu_session(checksum_metric, conf=conf)
+    gpu_value, gpu_plan = with_gpu_session(checksum_metric, conf=conf)
+    assert "gpu_checksum_expression" not in cpu_plan
+    assert "GpuFilter" in gpu_plan and "gpu_checksum_expression" in gpu_plan, gpu_plan
+    assert gpu_value == cpu_value
 
 
 @allow_non_gpu("ExecutedCommandExec,BroadcastHashJoinExec,ColumnarToRowExec,BroadcastExchangeExec,DataWritingCommandExec,RowToColumnarExec,ChecksumExpression", delta_write_fallback_allow, *delta_meta_allow)
