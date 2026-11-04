@@ -96,7 +96,6 @@ def _assert_published_driver_value(metric):
 
 _conf = {
     'spark.sql.adaptive.enabled': 'false',
-    'spark.sql.exchange.reuse': 'false',
     'spark.rapids.sql.driverlessBroadcast.enabled': 'true',
     'spark.rapids.sql.join.hashTable.reuse': 'false',
 }
@@ -121,7 +120,6 @@ def test_executor_broadcast_preserves_nan_signed_zero_decimal_and_timestamp(aqe)
     def check_native(cpu_plan, gpu_plan):
         join = _native_join(gpu_plan)
         assert join.metrics().apply('executorBuilds').value() > 0
-        assert join.metrics().apply('runtimeFallbacks').value() == 0
         assert join.fallbackBroadcast().metrics().apply('collectTime').value() == 0
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
@@ -141,7 +139,6 @@ def test_executor_broadcast_preserves_null_duplicate_and_residual_semantics(
     def check_native(cpu_plan, gpu_plan):
         join = _native_join(gpu_plan)
         assert join.metrics().apply('executorBuilds').value() > 0
-        assert join.metrics().apply('runtimeFallbacks').value() == 0
         exchange = join.fallbackBroadcast()
         assert exchange.metrics().apply('collectTime').value() == 0
         if aqe == 'true':
@@ -179,7 +176,6 @@ def test_executor_broadcast_with_infinite_timeout():
     def check_native(cpu_plan, gpu_plan):
         join = _native_join(gpu_plan)
         assert join.metrics().apply('executorBuilds').value() > 0
-        assert join.metrics().apply('runtimeFallbacks').value() == 0
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: _join(spark, 'inner', 'right'),
@@ -304,6 +300,64 @@ def _lifecycle_query(spark, transform=None):
     probe = probe.withColumn('v', col('id') if transform is None else transform(col('id')))
     build = spark.range(64, numPartitions=4).selectExpr('id AS b', 'id % 16 AS bk')
     return probe.join(broadcast(build), probe.k == build.bk).select('v', 'b')
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize('aqe', ['false', 'true'])
+def test_driverless_broadcast_duplicate_build_respects_exchange_reuse(aqe):
+    _require_ucx()
+
+    def query(spark):
+        return spark.sql('''
+            WITH d AS (
+                SELECT IF(id % 7 = 0, CAST(NULL AS BIGINT), id % 11) AS k, id AS b
+                FROM range(0, 24, 1, 4)
+            )
+            SELECT /*+ BROADCAST(d) */ f.id AS p, d.b
+            FROM range(0, 128, 1, 8) f JOIN d ON f.id % 11 = d.k
+            UNION ALL
+            SELECT /*+ BROADCAST(d) */ f.id + 1000 AS p, d.b
+            FROM range(0, 128, 1, 8) f JOIN d ON f.id % 11 = d.k
+        ''')
+
+    expected = sorted((probe + shift, build) for probe in range(128) for build in range(24)
+                      for shift in [0, 1000] if build % 7 != 0 and probe % 11 == build % 11)
+    assert with_cpu_session(lambda session: _rows(query(session))) == expected
+
+    def check_reuse(cpu_plan, gpu_plan):
+        assert 'ReusedExchange' in gpu_plan.toString(), gpu_plan.toString()
+        nodes = _executed_nodes(gpu_plan)
+        native = [node for node in nodes if node.getClass().getSimpleName() ==
+                  'GpuDriverlessBroadcastHashJoinExec']
+        if aqe == 'true':
+            assert not native
+            joins = [node for node in nodes if node.getClass().getSimpleName() ==
+                     'GpuBroadcastHashJoinExec']
+            assert len(joins) == 2
+            for join in joins:
+                exchange = join.broadcastExchange()
+                assert exchange.metrics().apply('driverlessBuildBytes').value() == 0
+                assert exchange.metrics().apply('driverlessStageFallbacks').value() == 0
+                assert exchange.metrics().apply('collectTime').value() > 0
+        else:
+            assert len(native) == 2
+            shuffle_ids = set()
+            for join in native:
+                build = join.buildPlan()
+                if build.getClass().getSimpleName() == 'ReusedExchangeExec':
+                    build = build.child()
+                shuffle_ids.add(build.shuffleId())
+                assert join.fallbackBroadcast().metrics().apply('collectTime').value() == 0
+            assert len(shuffle_ids) == 1
+            builds = sum(join.metrics().apply('executorBuilds').value() for join in native)
+            executors = max(1, get_spark_i_know_what_i_am_doing().sparkContext
+                            ._jsc.sc().getExecutorMemoryStatus().size() - 1)
+            assert 0 < builds <= executors
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        query, conf=dict(_conf, **{'spark.sql.adaptive.enabled': aqe,
+                                  'spark.sql.exchange.reuse': 'true'}),
+        gpu_plan_assertion=check_reuse, require_non_empty=True)
 
 
 def _rows(frame):

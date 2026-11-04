@@ -128,10 +128,10 @@ class GpuDriverlessBroadcastJoinRDDSuite extends AnyFunSuite with BeforeAndAfter
             throw new FetchFailedException(SparkEnv.get.blockManager.blockManagerId,
               shuffleId, 0L, 0, 0, "Injected loss before the second replica reads")
           }
-          val value = BroadcastReplicaRetryState.caches(consumer).getOrBuild(shuffleId,
+          val value = BroadcastReplicaRetryState.caches(consumer).getOrBuild[Vector[Long]](shuffleId,
             () => openBuild().toVector.sorted, () => (), () => task.killTaskIfInterrupted(),
             generation = ExecutorBroadcastCache.generation(
-              task.stageId(), task.stageAttemptNumber()))(identity)
+              task.stageId(), task.stageAttemptNumber()))(identity, _ => ())
           if (task.stageAttemptNumber() == 0 && consumer == 0) {
             BroadcastReplicaRetryState.firstBuilt.countDown()
             // Hold the first result until the fetch failure cancels this attempt.

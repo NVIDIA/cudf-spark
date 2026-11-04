@@ -28,8 +28,9 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
       "Can be enabled or disabled per query. " +
       "Uses UCX GPU shuffle; the build decoder accepts uncompressed and compressed batches. " +
       "Hash-table reuse must be disabled. Null-aware anti joins, skew-optimized joins, " +
-      "reused exchanges, and subqueries " +
-      "retain the standard path. Only deterministic builds with supported flat scalar schemas " +
+      "and joins containing subqueries retain the standard path. Non-AQE joins can share " +
+      "a reused GPU build shuffle. Known duplicate AQE builds retain standard " +
+      "broadcast before materialization. Only deterministic builds with flat scalar schemas " +
       "are eligible. Opaque RDD sources retain standard broadcast. " +
       "Dynamic allocation is unsupported. Compressed-batch decoding is supported, but " +
       "compressed UCX transport requires independent lifetime and platform qualification.")
@@ -43,7 +44,8 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
       "the limit before fetching a build; growth beyond the limit after planning fails " +
       "that execution. Dynamic allocation is unsupported. Values above 20 require " +
       "scale qualification and improvements such as hierarchical or peer-forwarded " +
-      "distribution; raising this setting does not change the fan-out algorithm.")
+      "distribution; raising this setting does not change the fan-out algorithm. " +
+      "The count is by host, while replicated network traffic grows with reader executors.")
     .internal()
     .integerConf
     .checkValue(_ > 0, "must be positive")

@@ -113,11 +113,21 @@ object DriverlessBroadcastStage {
 
   /** Tag only exchanges whose original parent was successfully converted to a GPU hash join. */
   def tagEligibleBuilds(original: SparkPlan, converted: SparkPlan): Unit = {
-    val conf = new RapidsConf(original.conf)
     if (original.conf.adaptiveExecutionEnabled &&
-        conf.isDriverlessBroadcastEnabled &&
-        GpuDriverlessBroadcastHashJoinExec.planRejections(original, conf).isEmpty) {
-      val shared = GpuDriverlessBroadcastHashJoinExec.sharedBuilds(original)
+        RapidsConf.DRIVERLESS_BROADCAST_ENABLED.get(original.conf)) {
+      original.foreach {
+        case build: BroadcastExchangeExec => build.unsetTagValue(eligible)
+        case _ =>
+      }
+      val conf = new RapidsConf(original.conf)
+      if (GpuDriverlessBroadcastHashJoinExec.planRejections(original, conf).nonEmpty) return
+      // AQE introduces exchange reuse after this preparation rule. Preserve real broadcast
+      // payloads for duplicate builds before submitting a token-producing shuffle stage.
+      val duplicates = if (original.conf.exchangeReuseEnabled) {
+        original.collect { case exchange: BroadcastExchangeExec => exchange.canonicalized }
+          .groupBy(identity).collect { case (build, copies) if copies.size > 1 => build }.toSeq
+      } else Seq.empty[SparkPlan]
+      val shared = GpuDriverlessBroadcastHashJoinExec.sharedBuilds(original) ++ duplicates
       val candidates = converted.collect {
         case join: GpuBroadcastHashJoinExec
             if GpuDriverlessBroadcastHashJoinExec.joinRejections(join).isEmpty =>

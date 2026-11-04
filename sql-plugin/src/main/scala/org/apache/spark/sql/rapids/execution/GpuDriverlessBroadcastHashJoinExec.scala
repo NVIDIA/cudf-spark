@@ -21,7 +21,7 @@ import java.util.{Collections, IdentityHashMap}
 import scala.collection.mutable.ArrayBuffer
 
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.Arm.closeOnExcept
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 
 import org.apache.spark.TaskContext
 import org.apache.spark.internal.Logging
@@ -67,8 +67,7 @@ case class GpuDriverlessBroadcastHashJoinExec(
 
   override lazy val additionalMetrics: Map[String, GpuMetric] = broadcastJoinMetrics ++ Map(
     CONCAT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_CONCAT_TIME),
-    "executorBuilds" -> createMetric(ESSENTIAL_LEVEL, "executor broadcast builds"),
-    "runtimeFallbacks" -> createMetric(ESSENTIAL_LEVEL, "runtime broadcast fallbacks")) ++
+    "executorBuilds" -> createMetric(ESSENTIAL_LEVEL, "executor broadcast builds")) ++
     (if (conf.adaptiveExecutionEnabled) Map(
       "buildStageTime" -> fallbackBroadcast.gpuLongMetric("driverlessStageTime"),
       "buildStageBytes" -> fallbackBroadcast.gpuLongMetric("driverlessBuildBytes"))
@@ -77,11 +76,12 @@ case class GpuDriverlessBroadcastHashJoinExec(
   override protected def doColumnarBroadcastJoin(): RDD[ColumnarBatch] = {
     val exchange = buildPlan match {
       case shuffle: GpuShuffleExchangeExec => shuffle
+      case ReusedExchangeExec(_, shuffle: GpuShuffleExchangeExec) => shuffle
       case _ => throw new IllegalStateException("Expected a direct GPU build shuffle")
     }
     // Both upstreams belong to this RDD graph. The scheduler can submit independent map
     // stages together; constructing this plan must not wait for the build map stage.
-    val build = exchange.executeColumnar()
+    val build = buildPlan.executeColumnar()
     val stream = streamedPlan.executeColumnar()
     val shuffleId = exchange.shuffleId
     val rapidsConf = new RapidsConf(conf)
@@ -103,7 +103,7 @@ case class GpuDriverlessBroadcastHashJoinExec(
         val context = TaskContext.get()
         val streamIter = new CollectTimeIterator(
           NvtxRegistry.BROADCAST_JOIN_STREAM, input, streamTime)
-        val built = GpuShuffleEnv.getBroadcastCache.getOrBuild(shuffleId, () => {
+        val built = GpuShuffleEnv.getBroadcastCache.getOrBuild[ColumnarBatch](shuffleId, () => {
           DriverlessBroadcastPolicy.checkExecutorLimit(maxNodes)
           builds += 1
           val batch = GpuDriverlessBroadcastHelper.assemble(
@@ -114,7 +114,8 @@ case class GpuDriverlessBroadcastHashJoinExec(
           () => context.killTaskIfInterrupted(),
           () => GpuSemaphore.acquireIfNecessary(context),
           generation = ExecutorBroadcastCache.generation(
-            context.stageId(), context.stageAttemptNumber()))(GpuDriverlessBroadcastHelper.borrow)
+            context.stageId(), context.stageAttemptNumber()))(
+          GpuDriverlessBroadcastHelper.borrow, batch => withResource(batch)(_ => ()))
         doJoin(built, streamIter, joinOptions, numOutputRows, numOutputBatches,
           opTime, joinTime)
       })

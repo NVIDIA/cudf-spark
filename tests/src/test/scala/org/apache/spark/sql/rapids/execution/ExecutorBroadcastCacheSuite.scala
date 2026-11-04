@@ -45,7 +45,7 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
     assert(env.broadcastCache eq cache)
     try {
       val failure = intercept[IllegalStateException] {
-        cache.getOrBuild[Int](1, () => throw expected, noAction, noAction)(_ => 0)
+        cache.getOrBuild[Int](1, () => throw expected, noAction, noAction)(_ => 0, _ => ())
       }
       assert(failure eq expected)
     } finally {
@@ -59,12 +59,12 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
     try {
       intercept[IllegalStateException] {
         env.broadcastCache.getOrBuild[Int](1, () => fail("Retired build must not run"),
-          noAction, noAction)(_ => 0)
+          noAction, noAction)(_ => 0, _ => ())
       }
       env.broadcastCache.close()
       intercept[IllegalArgumentException] {
         env.broadcastCache.getOrBuild[Int](2, () => fail("Closed cache must not build"),
-          noAction, noAction)(_ => 0)
+          noAction, noAction)(_ => 0, _ => ())
       }
     } finally {
       env.broadcastCache.close()
@@ -80,8 +80,8 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
       assert(cache.retiredStateBytes < 64 * 1024)
       Seq(0, 50000, 99999).foreach { id =>
         intercept[IllegalStateException] {
-          cache.getOrBuild(id, () => fail("Retired ID must not build"),
-            noAction, noAction)(_.retain())
+          cache.getOrBuild[Value](id, () => fail("Retired ID must not build"),
+            noAction, noAction)(_.retain(), _.release())
         }
       }
       cache.close()
@@ -100,10 +100,10 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
     assert(originalGeneration != retryGeneration)
     assert(retryGeneration != ExecutorBroadcastCache.generation(8, 0))
     try {
-      val originalBorrow = cache.getOrBuild(42, () => first, noAction, noAction,
-        generation = originalGeneration)(_.retain())
-      val retryBorrow = cache.getOrBuild(42, () => retry, noAction, noAction,
-        generation = retryGeneration)(_.retain())
+      val originalBorrow = cache.getOrBuild[Value](42, () => first, noAction, noAction,
+        generation = originalGeneration)(_.retain(), _.release())
+      val retryBorrow = cache.getOrBuild[Value](42, () => retry, noAction, noAction,
+        generation = retryGeneration)(_.retain(), _.release())
       assert(originalBorrow eq first)
       assert(retryBorrow eq retry)
       assert(cache.activeEntryCount == 2)
@@ -122,10 +122,10 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
     val cache = new ExecutorBroadcastCache[Value](_.release())
     val value = new Value
     val builds = new AtomicInteger()
-    def read(): Value = cache.getOrBuild(7, () => {
+    def read(): Value = cache.getOrBuild[Value](7, () => {
       builds.incrementAndGet()
       value
-    }, noAction, noAction)(_.retain())
+    }, noAction, noAction)(_.retain(), _.release())
     try {
       val first = read()
       val second = read()
@@ -153,11 +153,11 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
       val result = pool.submit(new Callable[Boolean] {
         override def call(): Boolean = {
           intercept[IllegalStateException] {
-            cache.getOrBuild(8, () => {
+            cache.getOrBuild[Value](8, () => {
               started.countDown()
               assert(finish.await(10, TimeUnit.SECONDS))
               value
-            }, noAction, noAction)(_.retain())
+            }, noAction, noAction)(_.retain(), _.release())
           }
           true
         }
@@ -183,17 +183,17 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
     val value = new Value
     try {
       val builder = pool.submit(new Callable[Value] {
-        override def call(): Value = cache.getOrBuild(12, () => {
+        override def call(): Value = cache.getOrBuild[Value](12, () => {
           started.countDown()
           assert(finish.await(10, TimeUnit.SECONDS))
           value
-        }, noAction, noAction)(_.retain())
+        }, noAction, noAction)(_.retain(), _.release())
       })
       assert(started.await(10, TimeUnit.SECONDS))
       val waiter = pool.submit(new Callable[Value] {
-        override def call(): Value = cache.getOrBuild(12,
+        override def call(): Value = cache.getOrBuild[Value](12,
           () => fail("Concurrent consumer must reuse the build"),
-          () => waiting.countDown(), noAction)(_.retain())
+          () => waiting.countDown(), noAction)(_.retain(), _.release())
       })
       assert(waiting.await(10, TimeUnit.SECONDS))
       finish.countDown()
@@ -215,15 +215,15 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
     val cache = new ExecutorBroadcastCache[Value](_.release())
     val value = new Value
     intercept[IllegalStateException] {
-      cache.getOrBuild(13, () => {
+      cache.getOrBuild[Value](13, () => {
         cache.close()
         value
-      }, noAction, noAction)(_.retain())
+      }, noAction, noAction)(_.retain(), _.release())
     }
     assert(value.references == 0)
     intercept[IllegalArgumentException] {
-      cache.getOrBuild(14, () => fail("Closed cache must not build"),
-        noAction, noAction)(_.retain())
+      cache.getOrBuild[Value](14, () => fail("Closed cache must not build"),
+        noAction, noAction)(_.retain(), _.release())
     }
   }
 
@@ -236,17 +236,17 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
     val value = new Value
     try {
       val result = pool.submit(new Callable[Value] {
-        override def call(): Value = cache.getOrBuild(9, () => {
+        override def call(): Value = cache.getOrBuild[Value](9, () => {
           started.countDown()
           assert(finish.await(10, TimeUnit.SECONDS))
           value
-        }, noAction, noAction)(_.retain())
+        }, noAction, noAction)(_.retain(), _.release())
       })
       assert(started.await(10, TimeUnit.SECONDS))
       intercept[InterruptedException] {
-        cache.getOrBuild(9, () => fail("A waiter must not build"),
+        cache.getOrBuild[Value](9, () => fail("A waiter must not build"),
           () => { released.incrementAndGet(); () },
-          () => if (released.get() > 0) throw new InterruptedException)(_.retain())
+          () => if (released.get() > 0) throw new InterruptedException)(_.retain(), _.release())
       }
       assert(released.get() == 1)
       finish.countDown()
@@ -267,15 +267,15 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
     val cache = new ExecutorBroadcastCache[Value](_.release())
     try {
       intercept[IllegalArgumentException] {
-        cache.getOrBuild(10, () => throw new IllegalArgumentException,
-          noAction, noAction)(_.retain())
+        cache.getOrBuild[Value](10, () => throw new IllegalArgumentException,
+          noAction, noAction)(_.retain(), _.release())
       }
-      val value = cache.getOrBuild(10, () => new Value, noAction, noAction)(_.retain())
+      val value = cache.getOrBuild[Value](10, () => new Value, noAction, noAction)(_.retain(), _.release())
       value.release()
       cache.invalidate(11)
       intercept[IllegalStateException] {
-        cache.getOrBuild(11, () => fail("Invalidated shuffle must not build"),
-          noAction, noAction)(_.retain())
+        cache.getOrBuild[Value](11, () => fail("Invalidated shuffle must not build"),
+          noAction, noAction)(_.retain(), _.release())
       }
       cache.close()
       assert(value.references == 0)
@@ -296,19 +296,19 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
       val value = new Value
       try {
         val builder = pool.submit(new Callable[Value] {
-          override def call(): Value = cache.getOrBuild(77, () => {
+          override def call(): Value = cache.getOrBuild[Value](77, () => {
             builds.incrementAndGet()
             building.countDown()
             assert(failBuilder.await(10, TimeUnit.SECONDS))
             throw cancellation
-          }, noAction, noAction)(_.retain())
+          }, noAction, noAction)(_.retain(), _.release())
         })
         assert(building.await(10, TimeUnit.SECONDS))
         val waiter = pool.submit(new Callable[Value] {
-          override def call(): Value = cache.getOrBuild(77, () => {
+          override def call(): Value = cache.getOrBuild[Value](77, () => {
             builds.incrementAndGet()
             value
-          }, () => waiting.countDown(), noAction)(_.retain())
+          }, () => waiting.countDown(), noAction)(_.retain(), _.release())
         })
         assert(waiting.await(10, TimeUnit.SECONDS))
         failBuilder.countDown()
@@ -338,13 +338,13 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
     val value = new Value
     try {
       val borrower = pool.submit(new Callable[Value] {
-        override def call(): Value = cache.getOrBuild(78, () => value,
-          noAction, noAction) { owned =>
+        override def call(): Value = cache.getOrBuild[Value](78, () => value,
+          noAction, noAction)({ owned =>
           reading.countDown()
           assert(finish.await(10, TimeUnit.SECONDS))
           assert(owned.references == 1)
           owned.retain()
-        }
+        }, _.release())
       })
       assert(reading.await(10, TimeUnit.SECONDS))
       val invalidation = pool.submit(new Callable[Unit] {
@@ -353,8 +353,8 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
       invalidation.get(5, TimeUnit.SECONDS)
       assert(value.references == 1)
       intercept[IllegalStateException] {
-        cache.getOrBuild(78, () => fail("Retired build must not run"),
-          noAction, noAction)(_.retain())
+        cache.getOrBuild[Value](78, () => fail("Retired build must not run"),
+          noAction, noAction)(_.retain(), _.release())
       }
       finish.countDown()
       val borrowed = borrower.get(10, TimeUnit.SECONDS)
@@ -366,6 +366,146 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
       pool.shutdownNow()
       cache.close()
     }
+  }
+
+  test("retirement failure preserves the original borrow failure") {
+    val value = new Value
+    val primary = new IllegalStateException("borrow failed")
+    val cleanup = new IllegalArgumentException("owner disposal failed")
+    val cache = new ExecutorBroadcastCache[Value](owned => {
+      owned.release()
+      throw cleanup
+    })
+    try {
+      val error = intercept[IllegalStateException] {
+        cache.getOrBuild[Value](79, () => value, noAction, noAction)({ _ =>
+          cache.invalidate(79)
+          throw primary
+        }, _.release())
+      }
+      assert(error eq primary)
+      assert(error.getSuppressed.toSeq == Seq(cleanup))
+      assert(value.references == 0)
+      assert(cache.activeEntryCount == 0)
+    } finally {
+      cache.close()
+    }
+  }
+
+  test("retirement failure releases a result that cannot reach its caller") {
+    val value = new Value
+    val cleanup = new IllegalArgumentException("owner disposal failed")
+    val cache = new ExecutorBroadcastCache[Value](owned => {
+      owned.release()
+      throw cleanup
+    })
+    try {
+      val error = intercept[IllegalArgumentException] {
+        cache.getOrBuild[Value](80, () => value, noAction, noAction)({ owned =>
+          val borrowed = owned.retain()
+          cache.invalidate(80)
+          borrowed
+        }, _.release())
+      }
+      assert(error eq cleanup)
+      assert(value.references == 0)
+      assert(cache.activeEntryCount == 0)
+    } finally {
+      cache.close()
+    }
+  }
+
+  test("borrowed-result cleanup failure is suppressed under the retirement failure") {
+    val value = new Value
+    val cleanup = new IllegalArgumentException("owner disposal failed")
+    val borrowedCleanup = new IllegalStateException("borrowed disposal failed")
+    val cache = new ExecutorBroadcastCache[Value](owned => {
+      owned.release()
+      throw cleanup
+    })
+    try {
+      val error = intercept[IllegalArgumentException] {
+        cache.getOrBuild[Value](81, () => value, noAction, noAction)({ owned =>
+          val borrowed = owned.retain()
+          cache.invalidate(81)
+          borrowed
+        }, borrowed => {
+          borrowed.release()
+          throw borrowedCleanup
+        })
+      }
+      assert(error eq cleanup)
+      assert(error.getSuppressed.toSeq == Seq(borrowedCleanup))
+      assert(value.references == 0)
+    } finally {
+      cache.close()
+    }
+  }
+
+  test("suppressed interruption during retirement restores the interrupt status") {
+    val value = new Value
+    val primary = new IllegalStateException("borrow failed")
+    val cleanup = new InterruptedException("owner disposal interrupted")
+    val cache = new ExecutorBroadcastCache[Value](owned => {
+      owned.release()
+      throw cleanup
+    })
+    try {
+      val error = intercept[IllegalStateException] {
+        cache.getOrBuild[Value](82, () => value, noAction, noAction)({ _ =>
+          cache.invalidate(82)
+          throw primary
+        }, _.release())
+      }
+      assert(error eq primary)
+      assert(error.getSuppressed.toSeq == Seq(cleanup))
+      assert(Thread.currentThread().isInterrupted)
+      assert(value.references == 0)
+    } finally {
+      Thread.interrupted()
+      cache.close()
+    }
+  }
+
+  test("rejected publication retains its unregister error when disposal fails") {
+    val value = new Value
+    val cleanup = new IllegalArgumentException("owner disposal failed")
+    val cache = new ExecutorBroadcastCache[Value](owned => {
+      owned.release()
+      throw cleanup
+    })
+    try {
+      val error = intercept[IllegalStateException] {
+        cache.getOrBuild[Value](83, () => {
+          cache.invalidate(83)
+          value
+        }, noAction, noAction)(_.retain(), _.release())
+      }
+      assert(error.getMessage.contains("unregistered"))
+      assert(error.getSuppressed.toSeq == Seq(cleanup))
+      assert(value.references == 0)
+    } finally {
+      cache.close()
+    }
+  }
+
+  test("shutdown attempts every owner even when disposers throw the same exception") {
+    val values = Seq(new Value, new Value)
+    val cleanup = new IllegalArgumentException("owner disposal failed")
+    val cache = new ExecutorBroadcastCache[Value](owned => {
+      owned.release()
+      throw cleanup
+    })
+    values.zipWithIndex.foreach { case (value, index) =>
+      val borrowed = cache.getOrBuild[Value](index, () => value,
+        noAction, noAction)(_.retain(), _.release())
+      borrowed.release()
+    }
+    val error = intercept[IllegalArgumentException](cache.close())
+    assert(error eq cleanup)
+    assert(error.getSuppressed.isEmpty)
+    assert(values.forall(_.references == 0))
+    assert(cache.activeEntryCount == 0)
   }
 
 }

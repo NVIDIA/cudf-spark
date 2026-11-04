@@ -61,14 +61,17 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
   private def removed(id: Int): IllegalStateException =
     new IllegalStateException(s"Broadcast build shuffle $id has been unregistered")
 
-  /** `beforeWait` releases task resources; `checkCancelled` must throw for a cancelled task. */
+  /**
+   * `beforeWait` releases task resources; `checkCancelled` throws for a cancelled task.
+   * `releaseBorrowed` releases a borrowed result if retirement fails before it can be returned.
+   */
   def getOrBuild[B](
       id: Int,
       build: () => T,
       beforeWait: () => Unit,
       checkCancelled: () => Unit,
       beforeBorrow: () => Unit = () => (),
-      generation: Long = 0L)(borrow: T => B): B = {
+      generation: Long = 0L)(borrow: T => B, releaseBorrowed: B => Unit): B = {
     var result: Option[B] = None
     while (result.isEmpty) {
       checkCancelled()
@@ -94,8 +97,11 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
             }
           }
           if (!accepted) {
-            dispose(value)
-            throw removed(id)
+            val rejection = removed(id)
+            try dispose(value) catch {
+              case cleanup: Throwable => suppress(rejection, cleanup)
+            }
+            throw rejection
           }
         } catch {
           case error: Throwable =>
@@ -146,10 +152,15 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
           entry.borrowers += 1
           entry.value.get
         }
+        var failure: Throwable = null
         try {
           // Materialization may allocate or copy from host. A lease keeps the owner alive
           // without holding the entry lock across GPU work, retry, or synchronization.
           result = Some(borrow(value))
+        } catch {
+          case error: Throwable =>
+            failure = error
+            throw error
         } finally {
           val released = entry.synchronized {
             entry.borrowers -= 1
@@ -159,11 +170,31 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
               owned
             } else None
           }
-          released.foreach(dispose)
+          try {
+            released.foreach(dispose)
+          } catch {
+            case cleanup: Throwable =>
+              if (failure != null) {
+                suppress(failure, cleanup)
+              } else {
+                // Ownership has not reached the caller when retirement fails.
+                result.foreach { borrowed =>
+                  try releaseBorrowed(borrowed) catch {
+                    case secondary: Throwable => suppress(cleanup, secondary)
+                  }
+                }
+                throw cleanup
+              }
+          }
         }
       }
     }
     result.get
+  }
+
+  private def suppress(primary: Throwable, secondary: Throwable): Unit = {
+    if (primary ne secondary) primary.addSuppressed(secondary)
+    if (secondary.isInstanceOf[InterruptedException]) Thread.currentThread().interrupt()
   }
 
   private def retireEntry(id: Int, entry: Entry): Option[T] = entry.synchronized {
@@ -187,7 +218,7 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
         dispose(value)
       } catch {
         case error: Throwable =>
-          if (failure == null) failure = error else failure.addSuppressed(error)
+          if (failure == null) failure = error else suppress(failure, error)
       }
     }
     if (failure != null) {
