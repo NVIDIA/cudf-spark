@@ -83,6 +83,8 @@ class AcceleratedColumnarToRowIterator(
       .map(_._2)
 
   private val outputRow = new CudfUnsafeRow(packMap.map(schema(_)), unpackMap)
+  // Spark type for a column of JCUDF rows, a list of bytes per row.
+  private val rowsType = ArrayType(ByteType, containsNull = false)
   private var baseDataAddress: Long = -1
   private var at: Int = 0
   private var total: Int = 0
@@ -162,16 +164,30 @@ class AcceleratedColumnarToRowIterator(
               }
             }
           }
-          // The host copy allocates host memory, so it must run inside the attempt: a host
-          // OOM then rolls back and retries, or splits the input, instead of failing the task.
+          // Keep the rows spillable on the GPU, so that a host OOM while copying them to the
+          // host retries or splits only the copy, not the conversion.
           withResource(rowsCvs) { _ =>
-            rowsCvs.safeMap(_.copyToHost())
+            rowsCvs.safeMap { rowsCv =>
+              SpillableColumnarBatch(
+                new ColumnarBatch(Array(GpuColumnVector.from(rowsCv.incRefCount(), rowsType)),
+                  rowsCv.getRowCount.toInt),
+                SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+            }
           }
         }
         assertInTests(
           it.hasNext, "Got an unexpected empty iterator after setting up batch with retry")
-        it.foreach { hostCvs =>
-          pendingCvs ++= hostCvs
+        it.foreach { rowsBatches =>
+          rowsBatches.indices.foreach { i =>
+            closeOnExcept(rowsBatches.drop(i + 1)) { _ =>
+              RmmRapidsRetryIterator.withRetry(rowsBatches(i), splitSpillableInHalfByRows) {
+                attempt =>
+                  withResource(attempt.getColumnarBatch()) { rowsCb =>
+                    GpuColumnVector.extractBases(rowsCb).head.copyToHost()
+                  }
+              }.foreach(pendingCvs += _)
+            }
+          }
         }
         setCurrentBatch(pendingCvs.dequeue())
         true
