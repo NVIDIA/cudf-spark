@@ -120,13 +120,13 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
       val shuffle = GpuShuffleExchangeExec(GpuSinglePartitioning, gpu,
         ENSURE_REQUIREMENTS)(GpuSinglePartitioning)
       val conf = new RapidsConf(Map.empty[String, String])
-      GpuTransitionOverrides.assertIsOnTheGpu(
+      (new GpuTransitionOverrides).assertIsOnTheGpu(
         ReusedExchangeExec(Seq(key.newInstance()), shuffle), conf)
       val cpu = session.range(4).queryExecution.sparkPlan
       val invalid = GpuShuffleExchangeExec(GpuSinglePartitioning, cpu,
         ENSURE_REQUIREMENTS)(GpuSinglePartitioning)
       val error = intercept[IllegalArgumentException] {
-        GpuTransitionOverrides.assertIsOnTheGpu(ReusedExchangeExec(cpu.output, invalid), conf)
+        (new GpuTransitionOverrides).assertIsOnTheGpu(ReusedExchangeExec(cpu.output, invalid), conf)
       }
       assert(error.getMessage.contains("Part of the plan is not columnar"))
     }
