@@ -68,10 +68,11 @@ def test_timestamp_format_corrected(separator, fraction, offset, zone):
     def query(spark):
         df = spark.createDataFrame([(v,) for v in values], 'a string')
         return df.select('a', f.to_timestamp('a', pattern),
-                         f.unix_timestamp('a', pattern), f.to_date('a', pattern))
+                         f.unix_timestamp('a', pattern), f.to_date('a', pattern),
+                         f.expr('to_unix_timestamp(a, "{}")'.format(pattern)))
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
-        query, exist_classes='GpuGetTimestamp,GpuUnixTimestamp',
+        query, exist_classes='GpuGetTimestamp,GpuUnixTimestamp,GpuToUnixTimestamp',
         non_exist_classes='GpuCpuBridgeExpression',
         conf=dict(_CONF, **{'spark.sql.session.timeZone': zone}))
 
