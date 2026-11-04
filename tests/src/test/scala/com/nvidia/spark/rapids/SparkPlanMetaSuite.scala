@@ -56,6 +56,8 @@ class SparkPlanMetaSuite extends SparkQueryCompareTestSuite {
       assert(converted.getTagValue(opaqueTag).contains("carried-value"))
       assert(converted.getTagValue(GpuTransitionOverrides.aqeQueryStageExchange).contains(true))
       assert(converted.getTagValue(SparkPlan.LOGICAL_PLAN_TAG).exists(_ eq logical))
+      assert(converted.children.head.getTagValue(SparkPlan.LOGICAL_PLAN_INHERITED_TAG)
+        .exists(_ eq logical))
     }
   }
 
@@ -98,5 +100,20 @@ class SparkPlanMetaSuite extends SparkQueryCompareTestSuite {
     assert(converted eq gpu)
     assert(converted.getTagValue(opaqueTag).contains("carried-value"))
     assert(converted.getTagValue(SparkPlan.LOGICAL_PLAN_TAG).exists(_ eq logical))
+
+    // A conversion can return an existing child. Its tags must retain their original meaning.
+    val sourceOnlyTag = TreeNodeTag[String]("test.source.only.tag")
+    cpu.setTagValue(sourceOnlyTag, "source-only-value")
+    val existingGpu = TestGpuExec()
+    val existingLogical = LocalRelation()
+    existingGpu.setTagValue(opaqueTag, "existing-value")
+    existingGpu.setLogicalLink(existingLogical)
+    val existingMeta = new TestMeta(cpu, new RapidsConf(Map.empty[String, String]), existingGpu)
+    existingMeta.tagForGpu()
+    val existingConverted = existingMeta.convertIfNeeded()
+    assert(existingConverted eq existingGpu)
+    assert(existingConverted.getTagValue(opaqueTag).contains("existing-value"))
+    assert(existingConverted.getTagValue(sourceOnlyTag).isEmpty)
+    assert(existingConverted.getTagValue(SparkPlan.LOGICAL_PLAN_TAG).exists(_ eq existingLogical))
   }
 }
