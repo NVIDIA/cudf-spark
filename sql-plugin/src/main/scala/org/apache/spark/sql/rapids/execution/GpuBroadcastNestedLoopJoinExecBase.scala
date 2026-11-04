@@ -30,7 +30,7 @@ import org.apache.spark.TaskContext
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression, NamedExpression}
+import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression, Literal, NamedExpression}
 import org.apache.spark.sql.catalyst.plans.{ExistenceJoin, FullOuter, InnerLike, JoinType, LeftAnti, LeftExistence, LeftOuter, LeftSemi, RightOuter}
 import org.apache.spark.sql.catalyst.plans.physical.{BroadcastDistribution, Distribution, IdentityBroadcastMode, Partitioning, UnspecifiedDistribution}
 import org.apache.spark.sql.execution.SparkPlan
@@ -94,6 +94,12 @@ abstract class GpuBroadcastNestedLoopJoinMetaBase(
     }
   }
 
+  // A literal true condition runs as an unconditional join on the GPU.
+  private def hasCondition: Boolean = join.condition.exists {
+    case Literal(true, BooleanType) => false
+    case _ => true
+  }
+
   override def tagPlanForGpu(): Unit = {
     JoinTypeChecks.tagForGpu(join.joinType, this)
     join.joinType match {
@@ -107,6 +113,10 @@ abstract class GpuBroadcastNestedLoopJoinMetaBase(
     join.joinType match {
       case LeftOuter | LeftSemi | LeftAnti if gpuBuildSide == GpuBuildLeft =>
         willNotWorkOnGpu(s"build left not supported for ${join.joinType}")
+      // The existence iterators take the stream as the outer side. doUnconditionalExistenceJoin
+      // handles building left.
+      case ExistenceJoin(_) if gpuBuildSide == GpuBuildLeft && hasCondition =>
+        willNotWorkOnGpu(s"build left not supported for ${join.joinType} with a condition")
       case RightOuter if gpuBuildSide == GpuBuildRight =>
         willNotWorkOnGpu(s"build right not supported for ${join.joinType}")
       case _ =>
@@ -369,10 +379,12 @@ object GpuBroadcastNestedLoopJoinExecBase {
         opTime, joinTime)
     } else {
       if (joinType.isInstanceOf[ExistenceJoin]) {
+        // The existence iterators take the stream as the outer side.
+        requireSupported(buildSide == GpuBuildRight, joinType, buildSide, builtBatch,
+          streamAttributes)
         if (builtBatch.numCols == 0) {
           degenerateExistsJoinIterator(stream, builtBatch, boundCondition.get)
-        } else if (streamAttributes.isEmpty && buildSide == GpuBuildRight) {
-          // Only a build on the right makes the stream the outer side.
+        } else if (streamAttributes.isEmpty) {
           degenerateJoinIterator(joinType, buildSide, builtBatch, stream, streamAttributes,
             targetSize, sizeEstimateThreshold, boundCondition.get, opTime, joinTime)
         } else {
@@ -402,6 +414,20 @@ object GpuBroadcastNestedLoopJoinExecBase {
         numOutputRows += cb.numRows()
         numOutputBatches += 1
         cb
+    }
+  }
+
+  // tagPlanForGpu keeps an unsupported join off the GPU, so one that arrives here is a bug. It
+  // fails naming the join, rather than join the wrong way.
+  private def requireSupported(
+      supported: Boolean,
+      joinType: JoinType,
+      buildSide: GpuBuildSide,
+      builtBatch: LazySpillableColumnarBatch,
+      streamAttrs: Seq[Attribute]): Unit = {
+    closeOnExcept(builtBatch) { _ =>
+      require(supported, s"unsupported nested loop join: $joinType, $buildSide, " +
+        s"${streamAttrs.size} stream and ${builtBatch.numCols} build columns")
     }
   }
 
