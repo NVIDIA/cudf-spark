@@ -697,6 +697,18 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
     .toSequence
     .createOptional
 
+  val INPUT_FILE_PROVIDER_CLASSES =
+    conf(com.nvidia.spark.rapids.fileio.hadoop.HadoopFileIO.INPUT_FILE_PROVIDER_CLASSES_KEY)
+      .doc("Comma separated list of com.nvidia.spark.rapids.fileio.RapidsInputFileProvider " +
+        "implementation classes, highest priority first. When a file is opened for reading, the " +
+        "first provider that supports its path creates the input file, letting a separate jar " +
+        "add an optimized reader for a Hadoop compatible filesystem. Paths no provider supports " +
+        "use the built-in readers. The classes must be on the executor classpath, e.g. added " +
+        "with spark.jars.")
+      .stringConf
+      .toSequence
+      .createOptional
+
   val PARQUET_MULTITHREAD_READ_NUM_THREADS =
     conf("spark.rapids.sql.format.parquet.multiThreadedRead.numThreads")
       .doc("The maximum number of threads, on the executor, to use for reading small " +

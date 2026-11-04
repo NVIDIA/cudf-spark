@@ -472,6 +472,7 @@ object ConfVersionInfo {
     "spark.rapids.sql.input.JsonScan" -> "v22.02.0",
     "spark.rapids.sql.input.OrcScan" -> "v0.1.0",
     "spark.rapids.sql.input.ParquetScan" -> "v0.1.0",
+    "spark.rapids.sql.inputFileProviderClasses" -> "Unreleased",
     "spark.rapids.sql.join.cross.enabled" -> "v21.06.0",
     "spark.rapids.sql.join.existence.enabled" -> "v22.04.0",
     "spark.rapids.sql.join.fullOuter.enabled" -> "v21.06.0",
