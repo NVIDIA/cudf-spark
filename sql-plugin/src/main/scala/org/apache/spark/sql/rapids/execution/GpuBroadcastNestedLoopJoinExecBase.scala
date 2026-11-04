@@ -104,6 +104,11 @@ abstract class GpuBroadcastNestedLoopJoinMetaBase(
     JoinTypeChecks.tagForGpu(join.joinType, this)
     join.joinType match {
       case _: InnerLike =>
+        // With no columns on either side, no GPU iterator can join the two batches.
+        if (hasCondition && join.left.output.isEmpty && join.right.output.isEmpty) {
+          willNotWorkOnGpu(
+            s"${join.joinType} with a condition and no columns on either side is not supported")
+        }
       case LeftOuter | RightOuter | LeftSemi | LeftAnti | ExistenceJoin(_) =>
         // First to check whether can be split if not ast-able. If false, then check requireAst to
         // send not-work-on-GPU reason if not replace-able.
