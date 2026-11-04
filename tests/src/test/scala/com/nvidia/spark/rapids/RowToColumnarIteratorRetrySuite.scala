@@ -188,6 +188,16 @@ class RowToColumnarIteratorRetrySuite extends RmmSparkRetrySuiteBase {
     }
   }
 
+  test("the first row reserves for a bounded batch, not for batchSizeBytes") {
+    val rowIter: Iterator[InternalRow] = (1 to 10).map(InternalRow(_)).iterator
+    val row2ColIter = new RowToColumnarIterator(
+      rowIter, schema, TargetSize(batchSize), batchSize, new GpuRowToColumnConverter(schema))
+    // An INT reservation sized from the 1 GiB batchSizeBytes cannot fit this limit, but one
+    // sized for a 128 MiB batch can.
+    HostAlloc.initialize(160L * 1024 * 1024)
+    assertResult((1 to 10).toSeq)(firstColumnInts(row2ColIter))
+  }
+
   // SplitAndRetryOOM with rowCount > 0 (emit-early) is covered by the test below.
 
   test("test CPU SplitAndRetryOOM emit-early for non-RequireSingleBatch") {

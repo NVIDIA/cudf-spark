@@ -600,6 +600,10 @@ class RowToColumnarIterator(
 
   private val targetSizeBytes = localGoal.targetSizeBytes
   private var initialRows = 0
+  // The builders reserve host memory for initialRows rows when a batch starts, and nothing
+  // can reclaim it until the batch ends, so size it for a batch of at most this much and let
+  // the builders grow by doubling beyond it.
+  private val maxInitialReservationBytes = 128L * 1024 * 1024
   private var targetRows = 0
   private var totalOutputBytes: Long = 0
   private var totalOutputRows: Long = 0
@@ -795,7 +799,8 @@ class RowToColumnarIterator(
         val sampleRows = GpuBatchUtils.VALIDITY_BUFFER_BOUNDARY_ROWS
         val sampleBytes = GpuBatchUtils.estimateGpuMemory(localSchema, sampleRows)
         targetRows = GpuBatchUtils.estimateRowCount(targetSizeBytes, sampleBytes, sampleRows)
-        initialRows = GpuBatchUtils.estimateRowCount(batchSizeBytes, sampleBytes, sampleRows)
+        initialRows = GpuBatchUtils.estimateRowCount(
+          math.min(batchSizeBytes, maxInitialReservationBytes), sampleBytes, sampleRows)
       }
     }
   }
