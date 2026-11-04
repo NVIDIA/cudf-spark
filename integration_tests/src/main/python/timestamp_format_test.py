@@ -60,6 +60,10 @@ def test_timestamp_format_corrected(separator, fraction, offset, zone):
     valid = '2024-01-01' + sep + '12:34:56' + tail
     values += [valid, valid.lower(), valid + ' ', ' ' + valid, valid + 'tail',
                valid.replace(sep, 'T' if sep == ' ' else ' ', 1)]
+    if not offset:
+        # Exercise local-time resolution inside New York's DST gap and overlap.
+        for date, time in [('2024-03-10', '02:30:00'), ('2024-11-03', '01:30:00')]:
+            values.append(date + sep + time + tail)
 
     def query(spark):
         df = spark.createDataFrame([(v,) for v in values], 'a string')
