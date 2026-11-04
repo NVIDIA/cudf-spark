@@ -910,6 +910,25 @@ def test_read_parquet_with_empty_clipped_schema(spark_tmp_path, v1_enabled_list,
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.schema(schema).parquet(data_path), conf=all_confs)
 
+@pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
+@pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
+def test_read_parquet_with_empty_clipped_schema_small_batches(
+        spark_tmp_path, v1_enabled_list, reader_confs):
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+    with_cpu_session(
+        lambda spark: spark.range(0, 5000, numPartitions=2)
+            .selectExpr('CAST(id % 3 AS INT) AS key', 'CAST(id AS INT) AS a')
+            .write.partitionBy('key').parquet(data_path))
+    schema = StructType([StructField('b', LongType()), StructField('c', StringType()),
+                         StructField('key', IntegerType())])
+    # The requested data columns are missing, so the null batches must still be capped by the
+    # batch size, and the partition values must follow the batch boundaries.
+    all_confs = copy_and_update(reader_confs, {
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        'spark.rapids.sql.batchSizeBytes': '2048'})
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(schema).parquet(data_path), conf=all_confs)
+
 @pytest.mark.parametrize('reader_confs', reader_opt_confs)
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
 def test_parquet_input_meta(spark_tmp_path, v1_enabled_list, reader_confs):

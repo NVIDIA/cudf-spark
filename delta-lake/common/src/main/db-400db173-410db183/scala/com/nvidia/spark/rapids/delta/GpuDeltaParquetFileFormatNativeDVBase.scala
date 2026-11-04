@@ -428,9 +428,9 @@ abstract class GpuDeltaParquetFileFormatNativeDVBase(
       }
       new DeltaParquetPartitionReader(fileIO, conf, file, singleFileInfo.filePath,
         singleFileInfo.blocks, singleFileInfo.schema, isCaseSensitive, readDataSchema,
-        debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows, maxReadBatchSizeBytes,
-        targetSizeBytes, useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes,
-        skipReadEstimate, compressCfg,
+        partitionSchema, debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows,
+        maxReadBatchSizeBytes, targetSizeBytes, useChunkedReader,
+        maxChunkedReaderMemoryUsageSizeBytes, skipReadEstimate, compressCfg,
         metrics, singleFileInfo.dateRebaseMode, singleFileInfo.timestampRebaseMode,
         singleFileInfo.hasInt96Timestamps, readUseFieldId, deletionVectorReadInfo, tablePathOpt)
     }
@@ -445,6 +445,7 @@ abstract class GpuDeltaParquetFileFormatNativeDVBase(
       clippedParquetSchema: MessageType,
       override val isSchemaCaseSensitive: Boolean,
       readDataSchema: StructType,
+      partitionSchema: StructType,
       debugDumpPrefix: Option[String],
       debugDumpAlways: Boolean,
       maxReadBatchSizeRows: Integer,
@@ -463,8 +464,9 @@ abstract class GpuDeltaParquetFileFormatNativeDVBase(
       tablePathOpt: Option[String])
     extends AbstractParquetPartitionReader(
     fileIO, conf, split, filePath, clippedBlocks, clippedParquetSchema, isSchemaCaseSensitive,
-    readDataSchema, debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows, maxReadBatchSizeBytes,
-    skipReadEstimate, compressCfg, execMetrics, useFieldId) {
+    readDataSchema, partitionSchema, debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows,
+    maxReadBatchSizeBytes, targetBatchSizeBytes, skipReadEstimate, compressCfg, execMetrics,
+    useFieldId) {
 
     override protected def readBuffer(
         parquetOpts: ParquetOptions,
@@ -525,14 +527,14 @@ abstract class GpuDeltaParquetFileFormatNativeDVBase(
 
     override protected def computeNumRowsAlive(
         totalNumRows: Long,
-        chunkedBlocks: Seq[BlockMetaData]): Int = {
+        chunkedBlocks: Seq[BlockMetaData]): Long = {
       if (totalNumRows == 0 || tablePathOpt.isEmpty) {
-        Math.toIntExact(totalNumRows)
+        totalNumRows
       } else {
         val dv = RapidsDeletionVectors.lookupDeletionVector(split, deletionVectorReadInfo)
         if (dv.dvDescriptor.isEmpty && dv.filterType.isEmpty &&
             dv.rowIndexFilterProvider.isEmpty) {
-          Math.toIntExact(totalNumRows)
+          totalNumRows
         } else {
           withResource(RapidsDeletionVectors.loadDeletionVector(
               conf, split, tablePathOpt.get, deletionVectorReadInfo)) { serializedBitmap =>
@@ -543,7 +545,7 @@ abstract class GpuDeltaParquetFileFormatNativeDVBase(
             require(numDeletedRows <= totalNumRows,
               s"Deletion vector cardinality ($numDeletedRows) exceeds " +
                 s"file row count ($totalNumRows)")
-            Math.toIntExact(totalNumRows - numDeletedRows)
+            totalNumRows - numDeletedRows
           }
         }
       }
@@ -1352,7 +1354,7 @@ abstract class GpuDeltaParquetFileFormatNativeDVBase(
     override protected def computeNumRowsAlive(
         totalNumRows: Long,
         metadata: HostMemoryBuffersWithMetaDataBase
-    ): Int = {
+    ): Long = {
       // totalNumRows can be 0 if the file is not found but ignoreMissingFiles is true,
       // or the file is empty.
       if (totalNumRows == 0) {
@@ -1387,7 +1389,7 @@ abstract class GpuDeltaParquetFileFormatNativeDVBase(
       require(numDeletedRows <= totalNumRows,
         s"Deletion vector cardinality ($numDeletedRows) exceeds " +
           s"partition row count ($totalNumRows)")
-      Math.toIntExact(totalNumRows - numDeletedRows)
+      totalNumRows - numDeletedRows
     }
   }
 

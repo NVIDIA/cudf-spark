@@ -28,6 +28,7 @@ import org.apache.parquet.hadoop.metadata.BlockMetaData
 import org.apache.parquet.schema.{MessageType, MessageTypeParser, Type}
 
 import org.apache.spark.TaskContext
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.execution.datasources.PartitionedFile
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
@@ -43,6 +44,9 @@ class ParquetCombineSuite extends RmmSparkRetrySuiteBase {
 
   override def beforeEach(): Unit = {
     super.beforeEach()
+    // Metadata-only batches hold the GPU semaphore, which needs a SparkEnv to initialize
+    SparkSession.builder.appName("parquetCombineTests").master("local[1]").getOrCreate()
+    GpuDeviceManager.setRmmTaskInitEnabled(false)
     taskContext = new MockTaskContext(1, 0) {
       private var completed = false
 
@@ -115,7 +119,7 @@ class ParquetCombineSuite extends RmmSparkRetrySuiteBase {
     }
 
     override protected def computeNumRowsAlive(rows: Long,
-        metadata: HostMemoryBuffersWithMetaDataBase): Int = {
+        metadata: HostMemoryBuffersWithMetaDataBase): Long = {
       if (failRowCount) {
         assert(pending.isEmpty, "leftovers must not be published before combining succeeds")
       }
@@ -137,6 +141,9 @@ class ParquetCombineSuite extends RmmSparkRetrySuiteBase {
     meta.allPartValues.map(_.map(_._2.getInt(0)).toSeq)
       .getOrElse(Seq(meta.partitionedFile.partitionValues.getInt(0)))
 
+  // The reader's batchSizeRows is 1000, so metadata-only batches are capped at 1000 rows.
+  private val batchRowCap = 1000
+
   private def readRowCount(reader: Reader, meta: HostMemoryBuffersWithMetaDataBase): Int = {
     val batches = reader.readBatches(meta)
     assert(batches.hasNext)
@@ -144,6 +151,9 @@ class ParquetCombineSuite extends RmmSparkRetrySuiteBase {
     assert(!batches.hasNext)
     rows
   }
+
+  private def readRowCounts(reader: Reader, meta: HostMemoryBuffersWithMetaDataBase): List[Int] =
+    reader.readBatches(meta).map(withResource(_)(_.numRows())).toList
 
   for (ordered <- Seq(true, false)) {
     test(s"consecutive metadata-only files combine and preserve partitions, ordered=$ordered") {
@@ -199,15 +209,15 @@ class ParquetCombineSuite extends RmmSparkRetrySuiteBase {
       }
     }
 
-    test(s"metadata-only groups accept exactly Int.MaxValue rows, ordered=$ordered") {
+    test(s"metadata-only groups accept exactly the batch row cap, ordered=$ordered") {
       withResource(new Reader(ordered)) { reader =>
         // A count-only schema exercises batch construction without allocating row data.
         val countSchema = new StructType()
         val input = Array[HostMemoryBuffersWithMetaDataBase](
-          reader.empty(0, Int.MaxValue.toLong - 1, countSchema), reader.empty(1, 0),
+          reader.empty(0, batchRowCap - 1L, countSchema), reader.empty(1, 0),
           reader.empty(2, 1, countSchema))
         withResource(reader.combineHMBs(input)) { combined =>
-          assert(readRowCount(reader, combined) == Int.MaxValue)
+          assert(readRowCount(reader, combined) == batchRowCap)
           assert(keys(combined) == Seq(0, 1, 2))
         }
         assert(reader.pending.isEmpty)
@@ -217,13 +227,13 @@ class ParquetCombineSuite extends RmmSparkRetrySuiteBase {
     test(s"metadata-only overflow is deferred without losing rows, ordered=$ordered") {
       withResource(new Reader(ordered)) { reader =>
         val countSchema = new StructType()
-        val n1 = reader.empty(0, Int.MaxValue.toLong - 10, countSchema)
+        val n1 = reader.empty(0, batchRowCap - 10L, countSchema)
         val n2 = reader.empty(1, 11, countSchema)
         val zero = reader.empty(2, 0)
         val n3 = reader.empty(3, 10, countSchema)
         val firstRows = withResource(reader.combineHMBs(Array(n1, n2, zero, n3))) { combined =>
           val rows = readRowCount(reader, combined)
-          assert(rows == (if (ordered) Int.MaxValue - 10 else Int.MaxValue))
+          assert(rows == (if (ordered) batchRowCap - 10 else batchRowCap))
           assert(keys(combined) == (if (ordered) Seq(0) else Seq(0, 2, 3)))
           assert(reader.pending.toSeq == (if (ordered) Seq(n2, zero, n3) else Seq(n2)))
           rows
@@ -232,55 +242,23 @@ class ParquetCombineSuite extends RmmSparkRetrySuiteBase {
           assert(keys(combined) == (if (ordered) Seq(1, 2, 3) else Seq(1)))
           readRowCount(reader, combined)
         }
-        assert(firstRows.toLong + remainingRows == Int.MaxValue.toLong + 11)
+        assert(firstRows + remainingRows == batchRowCap + 11)
         assert(reader.pending.isEmpty)
       }
     }
 
-    for (layout <- Seq("singleton", "zero-prefix", "buffered-suffix")) {
-      test(s"oversized metadata-only files fail, ordered=$ordered, layout=$layout") {
-        withResource(new Reader(ordered)) { reader =>
-          val oversized = reader.empty(0, Int.MaxValue.toLong + 1)
-          val input: Array[HostMemoryBuffersWithMetaDataBase] = layout match {
-            case "singleton" => Array(oversized)
-            case "zero-prefix" => Array(reader.empty(1, 0), oversized)
-            case "buffered-suffix" => Array(oversized, reader.data(1, 10))
-          }
-          var released = 0
-          input.foreach(_.addReleaseResourceCallback(() => released += 1))
-          val error = intercept[ArithmeticException] {
-            withResource(reader.combineHMBs(input)) { _ => () }
-          }
-          assert(error.getMessage.contains(oversized.partitionedFile.filePath.toString()))
-          assert(error.getMessage.contains(s"row count ${oversized.numRows}"))
-          assert(error.getMessage.contains(
-            s"maximum supported batch row count of ${Int.MaxValue}"))
-          assert(released == input.length)
-          assert(reader.pending.isEmpty)
-        }
-      }
-    }
-
-    test(s"a deferred oversized metadata-only file fails on its own, ordered=$ordered") {
+    test(s"an oversized metadata-only file is streamed in capped batches, ordered=$ordered") {
       withResource(new Reader(ordered)) { reader =>
-        val first = reader.empty(0, 10)
-        val oversized = reader.empty(1, Int.MaxValue.toLong + 1)
-        var released = false
-        oversized.addReleaseResourceCallback(() => released = true)
-        withResource(reader.combineHMBs(Array(first, oversized))) { combined =>
-          assert(combined eq first)
+        val oversized = reader.empty(1, 2500, new StructType())
+        val small = reader.empty(0, 10, new StructType())
+        withResource(reader.combineHMBs(Array(small, oversized))) { combined =>
           assert(reader.pending.toSeq == Seq(oversized))
-          assert(!released)
+          assert(readRowCounts(reader, combined) == List(10))
         }
-        val error = intercept[ArithmeticException] {
-          withResource(reader.combinePending()) { _ => () }
+        withResource(reader.combinePending()) { combined =>
+          assert(combined eq oversized)
+          assert(readRowCounts(reader, combined) == List(1000, 1000, 500))
         }
-        assert(error.getMessage.contains(oversized.partitionedFile.filePath.toString()))
-        assert(error.getMessage.contains(s"row count ${oversized.numRows}"))
-        assert(error.getMessage.contains(
-          s"maximum supported batch row count of ${Int.MaxValue}"))
-        assert(released)
-        assert(reader.pending.isEmpty)
       }
     }
 
@@ -302,13 +280,13 @@ class ParquetCombineSuite extends RmmSparkRetrySuiteBase {
     }
   }
 
-  test("metadata-only file reading preserves oversized row counts for validation") {
+  test("metadata-only splits over Int.MaxValue rows stream capped batches") {
     val rows = Int.MaxValue.toLong + 1
     val block = new BlockMetaData()
     block.setRowCount(rows)
     val filter = (file: PartitionedFile) => ParquetFileInfoWithBlockMeta(
       new Path(file.filePath.toString()), Seq(block), file.partitionValues, emptySchema,
-      readSchema, DateTimeRebaseCorrected, DateTimeRebaseCorrected, false)
+      new StructType(), DateTimeRebaseCorrected, DateTimeRebaseCorrected, false)
     withResource(new Reader(ordered = true, filterFunc = filter)) { reader =>
       val file = PartitionedFileUtilsShim.newPartitionedFile(
         InternalRow(0), "file:///tmp/oversized", 0, 1)
@@ -317,13 +295,12 @@ class ParquetCombineSuite extends RmmSparkRetrySuiteBase {
       withResource(CompletableFuture.supplyAsync(() => runner.call()).get()) { result =>
         withResource(result.data) { metadata =>
           assert(metadata.memBuffersAndSizes.map(_.numRows).sum == rows)
-          val error = intercept[ArithmeticException] {
-            withResource(reader.combineHMBs(Array(metadata))) { _ => () }
+          withResource(reader.combineHMBs(Array(metadata))) { combined =>
+            // Stop after the first batch, as LIMIT does, and nothing else is left allocated.
+            val batches = reader.readBatches(combined)
+            withResource(batches.next())(b => assert(b.numRows() == batchRowCap))
+            assert(batches.hasNext)
           }
-          assert(error.getMessage.contains(file.filePath.toString()))
-          assert(error.getMessage.contains(s"row count $rows"))
-          assert(error.getMessage.contains(
-            s"maximum supported batch row count of ${Int.MaxValue}"))
         }
       }
     }
@@ -349,17 +326,8 @@ class ParquetCombineSuite extends RmmSparkRetrySuiteBase {
       }
       withResource(reader) { _ =>
         assert(!reader.canUseCombine)
-        if (rows > Int.MaxValue) {
-          val error = intercept[ArithmeticException](reader.next())
-          assert(error.getMessage.contains(file.filePath.toString()))
-          assert(error.getMessage.contains(s"row count $rows"))
-          assert(error.getMessage.contains(
-            s"maximum supported batch row count of ${Int.MaxValue}"))
-        } else {
-          assert(reader.next())
-          withResource(reader.get()) { batch => assert(batch.numRows().toLong == rows) }
-          assert(!reader.next())
-        }
+        assert(reader.next())
+        withResource(reader.get()) { batch => assert(batch.numRows() == batchRowCap) }
         assert(released == 1)
       }
       assert(released == 1)
@@ -427,6 +395,31 @@ class ParquetCombineSuite extends RmmSparkRetrySuiteBase {
       intercept[IllegalArgumentException] { reader.combineHMBs(input) }
       assert(released == 3)
       assert(reader.pending.isEmpty)
+    }
+  }
+
+  test("per-file metadata-only reads of the largest row groups are capped") {
+    // A row group can have at most Int.MaxValue rows, and a chunk of the per-file reader never
+    // exceeds it, so this is the largest metadata-only chunk the per-file reader can see.
+    val rowGroup = new BlockMetaData()
+    rowGroup.setRowCount(Int.MaxValue)
+    val partitionSchema = new StructType().add("p", IntegerType)
+    val targetBytes = 8000L
+    val cap = GpuNullBatchIterator.maxRows(
+      StructType(readSchema.fields ++ partitionSchema.fields), 1000, targetBytes)
+    assert(cap < 1000, s"the test needs the byte target to set the cap, got $cap")
+    val split = PartitionedFileUtilsShim.newPartitionedFile(
+      InternalRow.empty, "file:///tmp/part-0", 0, 0)
+    withResource(new ParquetPartitionReader(null, new Configuration(false), split,
+        new Path("file:///tmp/part-0"), Seq(rowGroup, rowGroup), emptySchema, true, readSchema,
+        partitionSchema, None, false, 1000, 1L << 20, targetBytes, false, 0, true,
+        CpuCompressionConfig.disabled(), Map.empty, DateTimeRebaseCorrected,
+        DateTimeRebaseCorrected, false, false)) { reader =>
+      assert(reader.next())
+      withResource(reader.get()) { batch =>
+        assert(batch.numRows() == cap)
+      }
+      assert(reader.next())
     }
   }
 }
