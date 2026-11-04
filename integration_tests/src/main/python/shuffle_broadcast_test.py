@@ -359,7 +359,8 @@ def test_driverless_broadcast_duplicate_build_respects_exchange_reuse(aqe):
 
 
 @ignore_order(local=True)
-@allow_non_gpu('BroadcastExchangeExec', 'BroadcastHashJoinExec', 'RLike', 'ProjectExec', 'RangeExec')
+@allow_non_gpu('BroadcastExchangeExec', 'BroadcastHashJoinExec', 'RLike', 'ProjectExec',
+               'RangeExec', 'WholeStageCodegenExec', 'InputAdapter')
 @pytest.mark.parametrize('aqe', ['false', 'true'])
 @pytest.mark.parametrize('cpu_build', [False, True])
 def test_driverless_broadcast_with_cpu_join_consumers(aqe, cpu_build):
