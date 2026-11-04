@@ -22,8 +22,8 @@ import java.util.concurrent.{Future, TimeUnit}
 import scala.collection.mutable.ArrayBuffer
 import scala.reflect.ClassTag
 
-import ai.rapids.cudf.{DeviceMemoryBuffer, HostMemoryBuffer, JCudfSerialization,
-  MemoryBuffer, NvtxColor, NvtxRange}
+import ai.rapids.cudf.{Cuda, DeviceMemoryBuffer, HostMemoryBuffer, JCudfSerialization,
+  MemoryBuffer, NvtxColor, NvtxRange, PageableMemoryPool}
 import ai.rapids.cudf.JCudfSerialization.HostConcatResult
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.FileUtils.createTempFile
@@ -418,7 +418,14 @@ class KudoGpuTableOperator(dataTypes: Array[DataType])
         acc + skt.header.getTotalDataLen + skt.header.getSerializedSize
       }
       val offsetsBufSize = 8L * (spillables.length + 1)
-      val dataHostBuf = HostMemoryBuffer.allocate(dataBufSize)
+      val stagedH2d = java.lang.Boolean.getBoolean(
+        "ai.rapids.cudf.pageable.staged.copy.h2d.enabled")
+      val dataHostBuf = if (stagedH2d && dataBufSize > 0) {
+        Option(PageableMemoryPool.tryAllocate(dataBufSize))
+          .getOrElse(HostMemoryBuffer.allocate(dataBufSize))
+      } else {
+        HostMemoryBuffer.allocate(dataBufSize)
+      }
       val hostBuffers = closeOnExcept(dataHostBuf) { _ =>
         KudoBuffers(dataHostBuf, HostMemoryBuffer.allocate(offsetsBufSize))
       }
@@ -437,7 +444,12 @@ class KudoGpuTableOperator(dataTypes: Array[DataType])
           KudoBuffers(dataDevBuf, DeviceMemoryBuffer.allocate(offsetsHost.getLength))
         }
         withResource(devBuffers) { case KudoBuffers(dataDev, offsetsDev) =>
-          dataDev.copyFromHostBuffer(dataHost)
+          if (stagedH2d && PageableMemoryPool.isPageablePoolBuffer(dataHost)) {
+            PageableMemoryPool.copyPageableHostToDevice(dataDev, 0, dataHost, 0,
+              dataHost.getLength, Cuda.DEFAULT_STREAM)
+          } else {
+            dataDev.copyFromHostBuffer(dataHost)
+          }
           offsetsDev.copyFromHostBuffer(offsetsHost)
 
           val schema = GpuColumnVector.from(dataTypes)
@@ -953,4 +965,3 @@ class GpuShuffleCoalesceIterator(iter: Iterator[CoalescedHostResult],
     }
   }
 }
-

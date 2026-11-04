@@ -287,6 +287,50 @@ class GpuDeviceManagerSuite extends AnyFunSuite with BeforeAndAfter {
     assertResult(0)(nonPinnedSize)
   }
 
+  test("pageable pool is reserved from non-pinned off-heap limit") {
+    val deviceCount = 1
+    val offHeapLimit = toBytes("16g")
+    val pinnedSize = toBytes("2g")
+    val pageableSize = toBytes("8g")
+    val totalOverhead = toBytes("15m")
+    val sparkConf = new SparkConf()
+    val rapidsConf = new RapidsConf(Map(
+      RapidsConf.OFF_HEAP_LIMIT_ENABLED.key -> "true",
+      RapidsConf.OFF_HEAP_LIMIT_SIZE.key -> offHeapLimit.toString,
+      RapidsConf.PINNED_POOL_SIZE.key -> pinnedSize.toString,
+      RapidsConf.PAGEABLE_POOL_SIZE.key -> pageableSize.toString))
+
+    val (actualPinned, actualPageable, nonPinnedSize) =
+      GpuDeviceManager.getHostPoolAndOffHeapLimits(rapidsConf, sparkConf, deviceCount,
+        TestMemoryChecker)
+
+    assertResult(pinnedSize)(actualPinned)
+    assertResult(pageableSize)(actualPageable)
+    assertResult(offHeapLimit - totalOverhead - pinnedSize - pageableSize)(nonPinnedSize)
+  }
+
+  test("pageable pool is capped by remaining off-heap limit") {
+    val deviceCount = 1
+    val offHeapLimit = toBytes("4g")
+    val pinnedSize = toBytes("2g")
+    val configuredPageableSize = toBytes("8g")
+    val totalOverhead = toBytes("15m")
+    val sparkConf = new SparkConf()
+    val rapidsConf = new RapidsConf(Map(
+      RapidsConf.OFF_HEAP_LIMIT_ENABLED.key -> "true",
+      RapidsConf.OFF_HEAP_LIMIT_SIZE.key -> offHeapLimit.toString,
+      RapidsConf.PINNED_POOL_SIZE.key -> pinnedSize.toString,
+      RapidsConf.PAGEABLE_POOL_SIZE.key -> configuredPageableSize.toString))
+
+    val (actualPinned, actualPageable, nonPinnedSize) =
+      GpuDeviceManager.getHostPoolAndOffHeapLimits(rapidsConf, sparkConf, deviceCount,
+        TestMemoryChecker)
+
+    assertResult(pinnedSize)(actualPinned)
+    assertResult(offHeapLimit - totalOverhead - pinnedSize)(actualPageable)
+    assertResult(0)(nonPinnedSize)
+  }
+
   test("get host memory limits zero config with host mem with heap size set") {
     val deviceCount = 1
     val pySparkOverheadStr = "2g"

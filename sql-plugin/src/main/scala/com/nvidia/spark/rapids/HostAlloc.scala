@@ -17,11 +17,11 @@
 package com.nvidia.spark.rapids
 
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.LongAdder
+import java.util.concurrent.atomic.{AtomicLong, LongAdder}
 
 import scala.collection.mutable
 
-import ai.rapids.cudf.{DefaultHostMemoryAllocator, HostMemoryAllocator, HostMemoryBuffer, MemoryBuffer, PinnedMemoryPool}
+import ai.rapids.cudf.{DefaultHostMemoryAllocator, HostMemoryAllocator, HostMemoryBuffer, MemoryBuffer, PageableMemoryPool, PinnedMemoryPool}
 import com.nvidia.spark.rapids.HostAlloc.bookkeepHostMemoryFree
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{BOOKKEEP_MEMORY, BOOKKEEP_MEMORY_CALLSTACK}
 import com.nvidia.spark.rapids.jni.{CpuRetryOOM, RmmSpark}
@@ -33,32 +33,125 @@ import org.apache.spark.sql.rapids.GpuTaskMetrics
 
 case class HostAllocResult(buffer: HostMemoryBuffer, isPinned: Boolean)
 
-private class HostAlloc(nonPinnedLimit: Long) extends HostMemoryAllocator with Logging {
+private class HostAlloc(
+    nonPinnedLimit: Long,
+    replacePinnedHostAllocWithPageable: Boolean) extends HostMemoryAllocator with Logging {
   private var currentNonPinnedAllocated: Long = 0L
-  private val pinnedLimit: Long = PinnedMemoryPool.getTotalPoolSizeBytes
-  // For now we are going to assume that we are the only ones calling into the pinned pool
-  // That is not really true, but should be okay.
-  private var currentPinnedAllocated: Long = 0L
   private val isUnlimited = nonPinnedLimit < 0
   private val isPinnedOnly = nonPinnedLimit == 0
+  private val debugSummaryEvery = java.lang.Long.getLong(
+    "ai.rapids.cudf.hostalloc.debug.summary.every", 0L)
+  private val allocationDecisions = new AtomicLong()
+  private val pinnedAttempts = new AtomicLong()
+  private val pinnedSuccess = new AtomicLong()
+  private val pinnedMiss = new AtomicLong()
+  private val pinnedClose = new AtomicLong()
+  private val pinnedLiveBytes = new AtomicLong()
+  private val pinnedMaxLiveBytes = new AtomicLong()
+  private val pageableAttempts = new AtomicLong()
+  private val pageableSuccess = new AtomicLong()
+  private val pageableMiss = new AtomicLong()
+  private val pageableClose = new AtomicLong()
+  private val pageableLiveBytes = new AtomicLong()
+  private val pageableMaxLiveBytes = new AtomicLong()
+  private val rawAttempts = new AtomicLong()
+  private val rawSuccess = new AtomicLong()
+  private val rawLimitFailure = new AtomicLong()
+  private val preferTrueAttempts = new AtomicLong()
+  private val preferTrueRequestBytes = new AtomicLong()
+  private val preferTrueMaxRequestBytes = new AtomicLong()
+  private val preferFalseAttempts = new AtomicLong()
+  private val preferFalseRequestBytes = new AtomicLong()
+  private val preferFalseMaxRequestBytes = new AtomicLong()
+  private val pinnedBytesPreferTrue = new AtomicLong()
+  private val pinnedBytesPreferFalse = new AtomicLong()
+  private val pageableBytesPreferTrue = new AtomicLong()
+  private val pageableBytesPreferFalse = new AtomicLong()
+  private val rawBytesPreferTrue = new AtomicLong()
+  private val rawBytesPreferFalse = new AtomicLong()
+  private val rawLivePreferTrue = new AtomicLong()
+  private val rawLivePreferFalse = new AtomicLong()
+  private val rawMaxLivePreferTrue = new AtomicLong()
+  private val rawMaxLivePreferFalse = new AtomicLong()
+  private val spillAttemptsPreferTrue = new AtomicLong()
+  private val spillAttemptsPreferFalse = new AtomicLong()
+  private val spillRequestedBytesPreferTrue = new AtomicLong()
+  private val spillRequestedBytesPreferFalse = new AtomicLong()
+  private val spillActualBytesPreferTrue = new AtomicLong()
+  private val spillActualBytesPreferFalse = new AtomicLong()
+  private val spillZeroResultsPreferTrue = new AtomicLong()
+  private val spillZeroResultsPreferFalse = new AtomicLong()
 
-  // Expose for usage ratio calculation
-  def getCurrentAllocated: Long = synchronized {
-    currentNonPinnedAllocated + currentPinnedAllocated
+  private def updateMax(target: AtomicLong, value: Long): Unit = {
+    var previous = target.get()
+    while (value > previous && !target.compareAndSet(previous, value)) {
+      previous = target.get()
+    }
   }
 
-  def getTotalLimit: Long = {
-    if (isUnlimited) Long.MaxValue
-    else pinnedLimit + nonPinnedLimit
+  private def recordRawSuccess(amount: Long, preferPinned: Boolean): Unit = {
+    val (bytes, live, maxLive) = if (preferPinned) {
+      (rawBytesPreferTrue, rawLivePreferTrue, rawMaxLivePreferTrue)
+    } else {
+      (rawBytesPreferFalse, rawLivePreferFalse, rawMaxLivePreferFalse)
+    }
+    bytes.addAndGet(amount)
+    updateMax(maxLive, live.addAndGet(amount))
   }
 
-  /**
-   * A callback class so we know when a non-pinned host buffer was released
-   */
-  private class OnCloseCallback(ptr: Long, amount: Long) extends MemoryBuffer.EventHandler {
+  private def maybeLogDebugSummary(): Unit = {
+    val decisions = allocationDecisions.incrementAndGet()
+    if (debugSummaryEvery > 0 && (decisions == 1 || decisions % debugSummaryEvery == 0)) {
+      val rawLive = synchronized { currentNonPinnedAllocated }
+      logWarning(s"HostAlloc debug summary: decisions=$decisions " +
+        s"modeReplacePinned=$replacePinnedHostAllocWithPageable " +
+        s"totalLimit=$getTotalLimit nonPinnedLimit=$nonPinnedLimit rawLive=$rawLive " +
+        s"pinnedPoolBytes=${PinnedMemoryPool.getTotalPoolSizeBytes} " +
+        s"pinnedAttempts=${pinnedAttempts.get} pinnedSuccess=${pinnedSuccess.get} " +
+        s"pinnedMiss=${pinnedMiss.get} pinnedClose=${pinnedClose.get} " +
+        s"pinnedLive=${pinnedLiveBytes.get} pinnedMaxLive=${pinnedMaxLiveBytes.get} " +
+        s"pageablePoolBytes=${PageableMemoryPool.getTotalPoolSizeBytes} " +
+        s"pageableAttempts=${pageableAttempts.get} pageableSuccess=${pageableSuccess.get} " +
+        s"pageableMiss=${pageableMiss.get} pageableClose=${pageableClose.get} " +
+        s"pageableLive=${pageableLiveBytes.get} pageableMaxLive=${pageableMaxLiveBytes.get} " +
+        s"rawAttempts=${rawAttempts.get} rawSuccess=${rawSuccess.get} " +
+        s"rawLimitFailure=${rawLimitFailure.get} " +
+        s"preferTrueAttempts=${preferTrueAttempts.get} " +
+        s"preferTrueRequestBytes=${preferTrueRequestBytes.get} " +
+        s"preferTrueMaxRequestBytes=${preferTrueMaxRequestBytes.get} " +
+        s"preferFalseAttempts=${preferFalseAttempts.get} " +
+        s"preferFalseRequestBytes=${preferFalseRequestBytes.get} " +
+        s"preferFalseMaxRequestBytes=${preferFalseMaxRequestBytes.get} " +
+        s"pinnedBytesPreferTrue=${pinnedBytesPreferTrue.get} " +
+        s"pinnedBytesPreferFalse=${pinnedBytesPreferFalse.get} " +
+        s"pageableBytesPreferTrue=${pageableBytesPreferTrue.get} " +
+        s"pageableBytesPreferFalse=${pageableBytesPreferFalse.get} " +
+        s"rawBytesPreferTrue=${rawBytesPreferTrue.get} " +
+        s"rawBytesPreferFalse=${rawBytesPreferFalse.get} " +
+        s"rawLivePreferTrue=${rawLivePreferTrue.get} " +
+        s"rawLivePreferFalse=${rawLivePreferFalse.get} " +
+        s"rawMaxLivePreferTrue=${rawMaxLivePreferTrue.get} " +
+        s"rawMaxLivePreferFalse=${rawMaxLivePreferFalse.get} " +
+        s"spillAttemptsPreferTrue=${spillAttemptsPreferTrue.get} " +
+        s"spillAttemptsPreferFalse=${spillAttemptsPreferFalse.get} " +
+        s"spillRequestedBytesPreferTrue=${spillRequestedBytesPreferTrue.get} " +
+        s"spillRequestedBytesPreferFalse=${spillRequestedBytesPreferFalse.get} " +
+        s"spillActualBytesPreferTrue=${spillActualBytesPreferTrue.get} " +
+        s"spillActualBytesPreferFalse=${spillActualBytesPreferFalse.get} " +
+        s"spillZeroResultsPreferTrue=${spillZeroResultsPreferTrue.get} " +
+        s"spillZeroResultsPreferFalse=${spillZeroResultsPreferFalse.get}")
+    }
+  }
+
+  private class OnPinnedClose(ptr: Long, amount: Long) extends MemoryBuffer.EventHandler {
     override def onClosed(refCount: Int): Unit = {
       if (refCount == 0) {
-        releaseNonPinned(ptr, amount)
+        pinnedClose.incrementAndGet()
+        pinnedLiveBytes.addAndGet(-amount)
+        val metrics = GpuTaskMetrics.get
+        metrics.decHostBytesAllocated(amount, isPinned = true)
+        logTrace(getHostAllocMetricsLogStr(metrics))
+        RmmSpark.cpuDeallocate(ptr, amount)
         if (BOOKKEEP_MEMORY) {
           bookkeepHostMemoryFree(ptr, amount)
         }
@@ -66,13 +159,44 @@ private class HostAlloc(nonPinnedLimit: Long) extends HostMemoryAllocator with L
     }
   }
 
+  // Expose for usage ratio calculation
+  def getCurrentAllocated: Long = synchronized {
+    currentNonPinnedAllocated
+  }
+
+  def getTotalLimit: Long = {
+    if (isUnlimited) Long.MaxValue
+    else PinnedMemoryPool.getTotalPoolSizeBytes +
+      PageableMemoryPool.getTotalPoolSizeBytes + nonPinnedLimit
+  }
+
+  private def getPreferredPoolSize: Long = {
+    if (replacePinnedHostAllocWithPageable) {
+      PageableMemoryPool.getTotalPoolSizeBytes
+    } else {
+      PinnedMemoryPool.getTotalPoolSizeBytes
+    }
+  }
+
   /**
-   * A callback so we know when a pinned host buffer was released.
+   * A callback class so we know when a non-pinned host buffer was released
    */
-  private class OnPinnedCloseCallback(ptr: Long, amount: Long) extends MemoryBuffer.EventHandler {
+  private class OnCloseCallback(
+      ptr: Long,
+      amount: Long,
+      countsTowardNonPinnedLimit: Boolean,
+      preferPinned: Boolean) extends MemoryBuffer.EventHandler {
     override def onClosed(refCount: Int): Unit = {
       if (refCount == 0) {
-        releasePinned(ptr, amount)
+        if (!countsTowardNonPinnedLimit) {
+          pageableClose.incrementAndGet()
+          pageableLiveBytes.addAndGet(-amount)
+        } else if (preferPinned) {
+          rawLivePreferTrue.addAndGet(-amount)
+        } else {
+          rawLivePreferFalse.addAndGet(-amount)
+        }
+        releaseNonPinned(ptr, amount, countsTowardNonPinnedLimit)
         if (BOOKKEEP_MEMORY) {
           bookkeepHostMemoryFree(ptr, amount)
         }
@@ -89,19 +213,14 @@ private class HostAlloc(nonPinnedLimit: Long) extends HostMemoryAllocator with L
     }.getOrElse("allocated memory outside of a task context")
   }
 
-  private def releasePinned(ptr: Long, amount: Long): Unit = {
-    synchronized {
-      currentPinnedAllocated -= amount
-    }
-    val metrics = GpuTaskMetrics.get
-    metrics.decHostBytesAllocated(amount, isPinned = true)
-    logTrace(getHostAllocMetricsLogStr(metrics))
-    RmmSpark.cpuDeallocate(ptr, amount)
-  }
-
-  private def releaseNonPinned(ptr: Long, amount: Long): Unit = {
-    synchronized {
-      currentNonPinnedAllocated -= amount
+  private def releaseNonPinned(
+      ptr: Long,
+      amount: Long,
+      countsTowardNonPinnedLimit: Boolean): Unit = {
+    if (countsTowardNonPinnedLimit) {
+      synchronized {
+        currentNonPinnedAllocated -= amount
+      }
     }
     val metrics = GpuTaskMetrics.get
     metrics.decHostBytesAllocated(amount, isPinned = false)
@@ -109,53 +228,114 @@ private class HostAlloc(nonPinnedLimit: Long) extends HostMemoryAllocator with L
     RmmSpark.cpuDeallocate(ptr, amount)
   }
 
-  private def tryAllocPinned(amount: Long): Option[HostMemoryBuffer] = {
-    val ret = Option(PinnedMemoryPool.tryAllocate(amount))
-    ret.foreach { b =>
-      synchronized {
-        currentPinnedAllocated += amount
-      }
-      HostAlloc.addEventHandler(b, new OnPinnedCloseCallback(b.getAddress, amount))
+  private def tryAllocPinned(amount: Long, preferPinned: Boolean): Option[HostMemoryBuffer] = {
+    pinnedAttempts.incrementAndGet()
+    val pinned = Option(PinnedMemoryPool.tryAllocate(amount))
+    pinned match {
+      case Some(buffer) =>
+        pinnedSuccess.incrementAndGet()
+        (if (preferPinned) pinnedBytesPreferTrue else pinnedBytesPreferFalse).addAndGet(amount)
+        updateMax(pinnedMaxLiveBytes, pinnedLiveBytes.addAndGet(amount))
+        HostAlloc.addEventHandler(buffer, new OnPinnedClose(buffer.getAddress, amount))
+      case None => pinnedMiss.incrementAndGet()
     }
-    ret
+    pinned
   }
 
-  private def tryAllocNonPinned(amount: Long): Option[HostMemoryBuffer] = {
-    val ret = if (isUnlimited) {
-      synchronized {
-        currentNonPinnedAllocated += amount
-      }
-      Some(HostMemoryBuffer.allocateRaw(amount))
+  private def tryAllocPageablePool(amount: Long, preferPinned: Boolean,
+      stageDeviceToHost: Boolean): Option[HostMemoryBuffer] = {
+    pageableAttempts.incrementAndGet()
+    val pageable = Option(if (stageDeviceToHost) {
+      PageableMemoryPool.tryAllocateForDeviceToHost(amount)
     } else {
-      synchronized {
-        if ((currentNonPinnedAllocated + amount) <= nonPinnedLimit) {
+      PageableMemoryPool.tryAllocate(amount)
+    })
+    pageable match {
+      case Some(buffer) =>
+        pageableSuccess.incrementAndGet()
+        (if (preferPinned) pageableBytesPreferTrue else pageableBytesPreferFalse).addAndGet(amount)
+        updateMax(pageableMaxLiveBytes, pageableLiveBytes.addAndGet(amount))
+        // The pageable pool's full resident size is reserved from the off-heap limit at startup.
+        // Its sub-allocations participate in retry/metrics callbacks but are not charged again.
+        HostAlloc.addEventHandler(buffer,
+          new OnCloseCallback(buffer.getAddress, amount,
+            countsTowardNonPinnedLimit = false, preferPinned))
+      case None => pageableMiss.incrementAndGet()
+    }
+    pageable
+  }
+
+  private def tryAllocNonPinned(amount: Long, preferPinned: Boolean,
+      stageDeviceToHost: Boolean = false):
+      Option[HostMemoryBuffer] = {
+    // The pool is reserved from the non-pinned budget at startup. Make that reservation
+    // available to all non-pinned allocations before consuming the remaining raw budget.
+    val fromPool = tryAllocPageablePool(amount, preferPinned, stageDeviceToHost)
+    def allocateRaw(): HostMemoryBuffer = {
+      val buffer = try {
+        if (stageDeviceToHost) PageableMemoryPool.allocateRawForDeviceToHost(amount)
+        else HostMemoryBuffer.allocateRaw(amount)
+      } catch {
+        case t: Throwable =>
+          synchronized { currentNonPinnedAllocated -= amount }
+          throw t
+      }
+      rawSuccess.incrementAndGet()
+      recordRawSuccess(amount, preferPinned)
+      buffer
+    }
+    if (fromPool.isEmpty) {
+      rawAttempts.incrementAndGet()
+    }
+    val (ret, countsTowardNonPinnedLimit): (Option[HostMemoryBuffer], Boolean) =
+      if (fromPool.isDefined) {
+        // The pageable pool's full resident size is reserved from the off-heap limit at startup.
+        // Charging sub-allocations here would count the same memory twice.
+        (fromPool, false)
+      } else if (isUnlimited) {
+        synchronized {
           currentNonPinnedAllocated += amount
-          Some(HostMemoryBuffer.allocateRaw(amount))
-        } else {
-          None
+        }
+        (Some(allocateRaw()), true)
+      } else {
+        synchronized {
+          if ((currentNonPinnedAllocated + amount) <= nonPinnedLimit) {
+            currentNonPinnedAllocated += amount
+            (Some(allocateRaw()), true)
+          } else {
+            rawLimitFailure.incrementAndGet()
+            (None, false)
+          }
         }
       }
-    }
-    ret.foreach { b =>
-      HostAlloc.addEventHandler(b, new OnCloseCallback(b.getAddress, amount))
+    if (countsTowardNonPinnedLimit) {
+      ret.foreach { b =>
+        HostAlloc.addEventHandler(b,
+          new OnCloseCallback(b.getAddress, amount,
+            countsTowardNonPinnedLimit = true, preferPinned))
+      }
     }
     ret
   }
 
   private def canNeverSucceed(amount: Long, preferPinned: Boolean): Boolean = synchronized {
-    val pinnedFailed = (isPinnedOnly || preferPinned) && (amount > pinnedLimit)
+    val preferredPoolFailed = (isPinnedOnly || preferPinned) && (amount > getPreferredPoolSize)
     val nonPinnedFailed = isPinnedOnly || (amount > nonPinnedLimit)
-    !isUnlimited && pinnedFailed && nonPinnedFailed
+    val pageablePoolFailed = amount > PageableMemoryPool.getTotalPoolSizeBytes
+    !isUnlimited && preferredPoolFailed && nonPinnedFailed && pageablePoolFailed
   }
 
   private def checkSize(amount: Long, preferPinned: Boolean): Unit = synchronized {
     if (canNeverSucceed(amount, preferPinned)) {
       throw new IllegalArgumentException(s"The amount requested $amount is larger than the " +
-          s"maximum pool size ${math.max(pinnedLimit, nonPinnedLimit)}")
+          s"maximum pool size $getTotalLimit")
     }
   }
 
-  private def spillAndCheckRetry(allocSize: Long, retryCount: Long): Boolean = {
+  private def spillAndCheckRetry(
+      allocSize: Long,
+      retryCount: Long,
+      preferPinned: Boolean): Boolean = {
     // check arguments for good measure
     require(allocSize >= 0,
       s"spillAndCheckRetry invoked with invalid allocSize $allocSize")
@@ -165,7 +345,7 @@ private class HostAlloc(nonPinnedLimit: Long) extends HostMemoryAllocator with L
 
     val store = SpillFramework.stores.hostStore
     val totalSize: Long = synchronized {
-      currentPinnedAllocated + currentNonPinnedAllocated
+      currentNonPinnedAllocated
     }
 
     val attemptMsg = if (retryCount > 0) {
@@ -174,9 +354,20 @@ private class HostAlloc(nonPinnedLimit: Long) extends HostMemoryAllocator with L
       "First attempt"
     }
 
+    val (attempts, requested, actual, zeroResults) = if (preferPinned) {
+      (spillAttemptsPreferTrue, spillRequestedBytesPreferTrue,
+        spillActualBytesPreferTrue, spillZeroResultsPreferTrue)
+    } else {
+      (spillAttemptsPreferFalse, spillRequestedBytesPreferFalse,
+        spillActualBytesPreferFalse, spillZeroResultsPreferFalse)
+    }
+    attempts.incrementAndGet()
+    requested.addAndGet(allocSize)
     val amountSpilled = store.spill(allocSize)
+    actual.addAndGet(amountSpilled)
 
     if (amountSpilled == 0) {
+      zeroResults.incrementAndGet()
       val shouldRetry = store.numHandles > 0
       val exhaustedMsg = s"Host store exhausted, unable to allocate $allocSize bytes. " +
           s"Total host allocated is $totalSize bytes. $attemptMsg."
@@ -194,7 +385,17 @@ private class HostAlloc(nonPinnedLimit: Long) extends HostMemoryAllocator with L
 
   private def tryAllocInternal(amount: Long,
       preferPinned: Boolean,
-      blocking: Boolean): (Option[HostMemoryBuffer], Boolean) = {
+      blocking: Boolean,
+      pageableSpillOnly: Boolean = false): (Option[HostMemoryBuffer], Boolean) = {
+    if (preferPinned) {
+      preferTrueAttempts.incrementAndGet()
+      preferTrueRequestBytes.addAndGet(amount)
+      updateMax(preferTrueMaxRequestBytes, amount)
+    } else {
+      preferFalseAttempts.incrementAndGet()
+      preferFalseRequestBytes.addAndGet(amount)
+      updateMax(preferFalseMaxRequestBytes, amount)
+    }
     var retryCount = 0L
     var ret = Option.empty[HostAllocResult]
     var shouldRetry = false
@@ -203,21 +404,60 @@ private class HostAlloc(nonPinnedLimit: Long) extends HostMemoryAllocator with L
     var allocAttemptFinishedWithoutException = false
     try {
       do {
-        ret = (
-          if (preferPinned) {
-            tryAllocPinned(amount).map(HostAllocResult(_, isPinned = true))
+        ret = if (pageableSpillOnly) {
+          tryAllocNonPinned(amount, preferPinned, stageDeviceToHost = true)
+            .map(HostAllocResult(_, isPinned = false))
+        } else if (preferPinned) {
+          if (replacePinnedHostAllocWithPageable) {
+            val result = tryAllocNonPinned(amount, preferPinned = preferPinned)
+              .map(HostAllocResult(_, isPinned = false))
+            result
           } else {
-            tryAllocNonPinned(amount).map(HostAllocResult(_, isPinned = false))
-          }).orElse {
-          if (preferPinned) {
-            tryAllocNonPinned(amount).map(HostAllocResult(_, isPinned = false))
-          } else {
-            tryAllocPinned(amount).map(HostAllocResult(_, isPinned = true))
+            val pinned = tryAllocPinned(amount, preferPinned)
+            if (pinned.isDefined) {
+              pinned.map(HostAllocResult(_, isPinned = true))
+            } else {
+              val result = tryAllocNonPinned(amount, preferPinned = preferPinned)
+                .map(HostAllocResult(_, isPinned = false))
+              result
+            }
+          }
+        } else {
+          val nonPinned = tryAllocNonPinned(amount, preferPinned = preferPinned)
+            .map(HostAllocResult(_, isPinned = false))
+          nonPinned.orElse {
+            if (replacePinnedHostAllocWithPageable) {
+              None
+            } else {
+              tryAllocPinned(amount, preferPinned)
+                .map(HostAllocResult(_, isPinned = true))
+            }
           }
         }
         if (ret.isEmpty) {
           // We could not make it work so try and spill enough to make it work
-          shouldRetryInternal = spillAndCheckRetry(amount, retryCount)
+          // Experiment diagnostics only: reuse the existing opt-in debug switch.
+          // Pool state is a nearby snapshot; concurrent allocations may change it.
+          val diagnose = debugSummaryEvery > 0
+          val started = if (diagnose) System.nanoTime() else 0L
+          if (diagnose) {
+            val rawLive = synchronized { currentNonPinnedAllocated }
+            val context = Option(TaskContext.get())
+            logWarning(s"HostAlloc spill begin: requestBytes=$amount retry=$retryCount " +
+              s"pageableOnly=$pageableSpillOnly preferPinned=$preferPinned " +
+              s"stage=${context.map(_.stageId()).getOrElse(-1)} " +
+              s"task=${context.map(_.taskAttemptId()).getOrElse(-1L)} " +
+              s"rawLive=$rawLive rawLimit=$nonPinnedLimit " +
+              s"pinnedLive=${pinnedLiveBytes.get} " +
+              s"pinnedPoolBytes=${PinnedMemoryPool.getTotalPoolSizeBytes}")
+            PageableMemoryPool.logPoolState()
+          }
+          shouldRetryInternal = spillAndCheckRetry(amount, retryCount, preferPinned)
+          if (diagnose) {
+            logWarning(s"HostAlloc spill end: requestBytes=$amount retry=$retryCount " +
+              s"pageableOnly=$pageableSpillOnly shouldRetry=$shouldRetryInternal " +
+              s"elapsedNs=${System.nanoTime() - started}")
+          }
           if (shouldRetryInternal) {
             retryCount += 1
           }
@@ -241,6 +481,7 @@ private class HostAlloc(nonPinnedLimit: Long) extends HostMemoryAllocator with L
           shouldRetry = RmmSpark.postCpuAllocFailed(allocAttemptFinishedWithoutException,
             blocking, isRecursive)
       }
+      maybeLogDebugSummary()
     }
     (ret.map(_.buffer), shouldRetry)
   }
@@ -257,6 +498,38 @@ private class HostAlloc(nonPinnedLimit: Long) extends HostMemoryAllocator with L
       shouldRetry = sr
     }
     ret
+  }
+
+  def tryAllocPageableForDeviceToHost(amount: Long): Option[HostMemoryBuffer] = {
+    if (!isUnlimited && amount > PageableMemoryPool.getTotalPoolSizeBytes &&
+        amount > nonPinnedLimit) {
+      return None
+    }
+    var shouldRetry = true
+    var ret = Option.empty[HostMemoryBuffer]
+    while (shouldRetry) {
+      val (r, sr) = tryAllocInternal(amount, preferPinned = true,
+        blocking = false, pageableSpillOnly = true)
+      ret = r
+      shouldRetry = sr
+    }
+    ret
+  }
+
+  def allocPageableForDeviceToHost(amount: Long): HostMemoryBuffer = {
+    require(isUnlimited || amount <= PageableMemoryPool.getTotalPoolSizeBytes ||
+      amount <= nonPinnedLimit,
+      s"Device-to-host allocation $amount exceeds both pageable pool and raw limits")
+    var ret = Option.empty[HostMemoryBuffer]
+    var count = 0
+    while (ret.isEmpty && count < 1000) {
+      val (r, _) = tryAllocInternal(amount, preferPinned = true,
+        blocking = true, pageableSpillOnly = true)
+      ret = r
+      count += 1
+    }
+    ret.getOrElse(throw new CpuRetryOOM(
+      "Could not allocate pageable device-to-host buffer after 1000 retries"))
   }
 
   def alloc(amount: Long, preferPinned: Boolean = true): HostMemoryBuffer = {
@@ -288,19 +561,37 @@ private class HostAlloc(nonPinnedLimit: Long) extends HostMemoryAllocator with L
  * A new API for host memory allocation. This can be used to limit the amount of host memory.
  */
 object HostAlloc extends Logging {
-  private var singleton: HostAlloc = new HostAlloc(-1)
+  private var singleton: HostAlloc = new HostAlloc(-1, replacePinnedHostAllocWithPageable = false)
+
+  val pageableDeviceToHostAllocator: HostMemoryAllocator = new HostMemoryAllocator {
+    override def allocate(amount: Long): HostMemoryBuffer =
+      allocPageableForDeviceToHost(amount)
+
+    override def allocate(amount: Long, preferPinned: Boolean): HostMemoryBuffer =
+      allocPageableForDeviceToHost(amount)
+  }
 
   private def getSingleton: HostAlloc = synchronized {
     singleton
   }
 
-  def initialize(nonPinnedLimit: Long): Unit = synchronized {
-    singleton = new HostAlloc(nonPinnedLimit)
+  def initialize(
+      nonPinnedLimit: Long,
+      replacePinnedHostAllocWithPageable: Boolean = false): Unit = synchronized {
+    singleton = new HostAlloc(nonPinnedLimit, replacePinnedHostAllocWithPageable)
     DefaultHostMemoryAllocator.set(singleton)
   }
 
   def tryAlloc(amount: Long, preferPinned: Boolean = true): Option[HostMemoryBuffer] = {
     getSingleton.tryAlloc(amount, preferPinned)
+  }
+
+  def tryAllocPageableForDeviceToHost(amount: Long): Option[HostMemoryBuffer] = {
+    getSingleton.tryAllocPageableForDeviceToHost(amount)
+  }
+
+  def allocPageableForDeviceToHost(amount: Long): HostMemoryBuffer = {
+    getSingleton.allocPageableForDeviceToHost(amount)
   }
 
   def alloc(amount: Long, preferPinned: Boolean = true): HostMemoryBuffer = {

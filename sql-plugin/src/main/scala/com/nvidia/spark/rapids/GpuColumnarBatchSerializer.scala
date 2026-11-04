@@ -22,7 +22,7 @@ import java.nio.ByteBuffer
 import scala.collection.mutable.ArrayBuffer
 import scala.reflect.ClassTag
 
-import ai.rapids.cudf.{Cuda, HostColumnVector, HostMemoryBuffer, JCudfSerialization}
+import ai.rapids.cudf.{Cuda, HostColumnVector, HostMemoryBuffer, JCudfSerialization, NvtxColor, NvtxRange, PageableMemoryPool}
 import ai.rapids.cudf.JCudfSerialization.SerializedTableHeader
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.KudoSerializedTableColumn.SER_CHECK_SCHEMA
@@ -430,10 +430,16 @@ private class KudoSerializerInstance(
               columns(i) = batch.column(i).asInstanceOf[SlicedGpuColumnVector].getBase
             }
           } else {
+            val stagedD2H = PageableMemoryPool.isDeviceToHostStagingEnabled
             for (i <- 0 until numColumns) {
               batch.column(i) match {
                 case gpu: GpuColumnVector =>
-                  val cpu = gpu.copyToHostAsync(Cuda.DEFAULT_STREAM)
+                  val cpu = if (stagedD2H) {
+                    gpu.copyToHostAsync(Cuda.DEFAULT_STREAM,
+                      HostAlloc.pageableDeviceToHostAllocator)
+                  } else {
+                    gpu.copyToHostAsync(Cuda.DEFAULT_STREAM)
+                  }
                   toClose += cpu
                   columns(i) = cpu.getBase
                 case cpu: RapidsHostColumnVector =>
@@ -552,6 +558,8 @@ private class KudoGpuSerializerInstance(
   private val serTime = metrics(METRIC_SHUFFLE_SER_STREAM_TIME)
   private val deserTime = metrics(METRIC_SHUFFLE_DESER_STREAM_TIME)
   private val stalledByInputStream = metrics(METRIC_SHUFFLE_STALLED_BY_INPUT_STREAM)
+  private val traceWriterBreakdown =
+    java.lang.Boolean.getBoolean("ai.rapids.cudf.pageable.staged.copy.trace.writer")
 
   override def serializeStream(out: OutputStream): SerializationStream = new SerializationStream {
 
@@ -568,14 +576,32 @@ private class KudoGpuSerializerInstance(
               var remaining = dataLen.toInt
               val temp = new Array[Byte](math.min(8192, remaining))
               var at = 0
+              var readNs = 0L
+              var writeNs = 0L
               while (remaining > 0) {
                 val read = math.min(remaining, temp.length)
-                data.getBytes(temp, 0, at, read)
-                out.write(temp, 0, read)
+                if (traceWriterBreakdown) {
+                  val readStart = System.nanoTime()
+                  data.getBytes(temp, 0, at, read)
+                  val writeStart = System.nanoTime()
+                  out.write(temp, 0, read)
+                  readNs += writeStart - readStart
+                  writeNs += System.nanoTime() - writeStart
+                } else {
+                  data.getBytes(temp, 0, at, read)
+                  out.write(temp, 0, read)
+                }
                 at = at + read
                 remaining = remaining - read
               }
+              val flushStart = if (traceWriterBreakdown) System.nanoTime() else 0L
               flush()
+              if (traceWriterBreakdown) {
+                val flushNs = System.nanoTime() - flushStart
+                withResource(new NvtxRange(
+                  s"gpuKudoWriteBreakdown bytes=$dataLen readNs=$readNs " +
+                    s"writeNs=$writeNs flushNs=$flushNs", NvtxColor.CYAN)) { _ => }
+              }
             case _ =>
           }
         } else {

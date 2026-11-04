@@ -936,11 +936,18 @@ class SpillableHostBufferHandle private (
     if (hostBuffer != null) {
       GpuTaskMetrics.get.readSpillFromHostTime {
         withResource(hostBuffer) { _ =>
-          dmb.copyFromHostBuffer(
-            /*dstOffset*/ 0,
-            /*src*/ hostBuffer,
-            /*srcOffset*/ 0,
-            /*length*/ hostBuffer.getLength)
+          if (java.lang.Boolean.getBoolean(
+              "ai.rapids.cudf.pageable.staged.copy.h2d.enabled") &&
+              PageableMemoryPool.isPageablePoolBuffer(hostBuffer)) {
+            PageableMemoryPool.copyPageableHostToDevice(dmb, 0, hostBuffer, 0,
+              hostBuffer.getLength, Cuda.DEFAULT_STREAM)
+          } else {
+            dmb.copyFromHostBuffer(
+              /*dstOffset*/ 0,
+              /*src*/ hostBuffer,
+              /*srcOffset*/ 0,
+              /*length*/ hostBuffer.getLength)
+          }
         }
       }
     } else {
@@ -2023,7 +2030,12 @@ class SpillableHostStore(val maxSize: Option[Long] = None)
   def makeBuilder(handle: SpillableHostBufferHandle): SpillableHostBufferHandleBuilder = {
     var builder: Option[SpillableHostBufferHandleBuilder] = None
     if (handle.sizeInBytes <= maxSize.getOrElse(Long.MaxValue)) {
-      HostAlloc.tryAlloc(handle.sizeInBytes).foreach { hmb =>
+      val hostBuffer = if (PageableMemoryPool.isDeviceToHostStagingEnabled) {
+        HostAlloc.tryAllocPageableForDeviceToHost(handle.sizeInBytes)
+      } else {
+        HostAlloc.tryAlloc(handle.sizeInBytes)
+      }
+      hostBuffer.foreach { hmb =>
         withResource(hmb) { _ =>
           if (trackInternal(handle)) {
             hmb.incRefCount()
@@ -2071,12 +2083,12 @@ class SpillableHostStore(val maxSize: Option[Long] = None)
     private var copied = 0L
 
     override def copyNext(mb: DeviceMemoryBuffer, len: Long, stream: Cuda.Stream): Unit = {
-      singleShotBuffer.copyFromMemoryBuffer(
-        copied,
-        mb,
-        0,
-        len,
-        stream)
+      // Both pool and raw destinations from the D2H allocator must use staging.
+      if (PageableMemoryPool.isDeviceToHostStagingEnabled) {
+        PageableMemoryPool.copyDeviceToPageableHost(singleShotBuffer, copied, mb, 0, len, stream)
+      } else {
+        singleShotBuffer.copyFromMemoryBuffer(copied, mb, 0, len, stream)
+      }
       copied += len
     }
 

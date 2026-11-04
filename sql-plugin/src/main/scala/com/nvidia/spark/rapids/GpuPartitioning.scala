@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids
 
 import scala.collection.mutable.ArrayBuffer
 
-import ai.rapids.cudf.{ContiguousTable, Cuda, DeviceMemoryBuffer, HostMemoryBuffer, Table}
+import ai.rapids.cudf.{ContiguousTable, Cuda, DeviceMemoryBuffer, HostMemoryBuffer, PageableMemoryPool, Table}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
@@ -136,9 +136,17 @@ trait GpuPartitioning extends Partitioning {
     // because the copyToHostAsync calls above are not guaranteed to be asynchronous (e.g.: when
     // the copy is from pageable memory, and we're not guaranteed to be using pinned memory).
     val hostPartColumns = NvtxIdWithMetrics(NvtxRegistry.PARTITION_D2H, memCopyTime) {
+      val stagedD2H = PageableMemoryPool.isDeviceToHostStagingEnabled
       val hostColumns = withResource(partitionColumns) { _ =>
         withRetryNoSplit {
-          partitionColumns.safeMap(_.copyToHostAsync(Cuda.DEFAULT_STREAM))
+          partitionColumns.safeMap { column =>
+            if (stagedD2H) {
+              column.copyToHostAsync(Cuda.DEFAULT_STREAM,
+                HostAlloc.pageableDeviceToHostAllocator)
+            } else {
+              column.copyToHostAsync(Cuda.DEFAULT_STREAM)
+            }
+          }
         }
       }
       closeOnExcept(hostColumns) { _ =>
@@ -222,16 +230,33 @@ trait GpuPartitioning extends Partitioning {
             s"GPU-serialized shuffle batch is ${data.getLength} bytes, exceeding the " +
             s"$maxGpuSerializedSliceBytes-byte (2GB) limit addressable by the Int " +
             s"serialized-slice offsets; reduce spark.rapids.sql.batchSizeBytes")
-          closeOnExcept(Seq(HostMemoryBuffer.allocate(data.getLength),
-            HostMemoryBuffer.allocate(offsets.getLength))) { seq =>
-            val dataHost = seq(0)
-            val offsetsHost = seq(1)
-            NvtxRegistry.GPU_KUDO_COPY_TO_HOST {
-              dataHost.copyFromDeviceBufferAsync(data, Cuda.DEFAULT_STREAM)
-              offsetsHost.copyFromDeviceBufferAsync(offsets, Cuda.DEFAULT_STREAM)
-              Cuda.DEFAULT_STREAM.sync()
+          val stagedD2H = PageableMemoryPool.isDeviceToHostStagingEnabled
+          val dataHost = if (stagedD2H) {
+            HostAlloc.allocPageableForDeviceToHost(data.getLength)
+          } else {
+            HostMemoryBuffer.allocate(data.getLength)
+          }
+          closeOnExcept(dataHost) { _ =>
+            val offsetsHost = if (stagedD2H) {
+              HostAlloc.allocPageableForDeviceToHost(offsets.getLength)
+            } else {
+              HostMemoryBuffer.allocate(offsets.getLength)
             }
-            (dataHost, offsetsHost)
+            closeOnExcept(offsetsHost) { _ =>
+              NvtxRegistry.GPU_KUDO_COPY_TO_HOST {
+                if (stagedD2H) {
+                  PageableMemoryPool.copyDeviceToPageableHost(dataHost, 0, data, 0,
+                    data.getLength, Cuda.DEFAULT_STREAM)
+                  PageableMemoryPool.copyDeviceToPageableHost(offsetsHost, 0, offsets, 0,
+                    offsets.getLength, Cuda.DEFAULT_STREAM)
+                } else {
+                  dataHost.copyFromDeviceBufferAsync(data, Cuda.DEFAULT_STREAM)
+                  offsetsHost.copyFromDeviceBufferAsync(offsets, Cuda.DEFAULT_STREAM)
+                  Cuda.DEFAULT_STREAM.sync()
+                }
+              }
+              (dataHost, offsetsHost)
+            }
           }
         }
       }
