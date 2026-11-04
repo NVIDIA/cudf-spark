@@ -31,7 +31,7 @@ import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.plans.JoinType
 import org.apache.spark.sql.catalyst.plans.physical.{Distribution, UnspecifiedDistribution}
 import org.apache.spark.sql.execution.{ExecSubqueryExpression, SparkPlan}
-import org.apache.spark.sql.execution.adaptive.BroadcastQueryStageExec
+import org.apache.spark.sql.execution.adaptive.{BroadcastQueryStageExec, QueryStageExec}
 import org.apache.spark.sql.execution.exchange.{BroadcastExchangeExec, ENSURE_REQUIREMENTS, ReusedExchangeExec}
 import org.apache.spark.sql.rapids.GpuShuffleEnv
 import org.apache.spark.sql.rapids.shims.SparkSessionUtils
@@ -167,7 +167,7 @@ object GpuDriverlessBroadcastHashJoinExec extends Logging {
       if (seen.add(node)) {
         if (inSubquery || node.isInstanceOf[ReusedExchangeExec]) canonical(node)
         node match {
-          case stage: BroadcastQueryStageExec => visit(stage.plan, inSubquery)
+          case stage: QueryStageExec => visit(stage.plan, inSubquery)
           case _ =>
         }
         node.expressions.foreach(_.foreach {
