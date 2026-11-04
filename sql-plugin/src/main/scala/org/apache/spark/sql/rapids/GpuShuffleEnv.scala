@@ -29,20 +29,14 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.execution.ExecutorBroadcastCache
 
 class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
-  private[rapids] val broadcastCache = {
-    val enabled = Option(SparkEnv.get).exists { env =>
-      new RapidsConf(env.conf).isDriverlessBroadcastEnabled
-    }
-    if (enabled) {
-      Some(new ExecutorBroadcastCache[SpillableColumnarBatch](owned => {
-        // Unregister can run on an RPC thread that has not selected this executor's device.
-        GpuDeviceManager.getDeviceId().foreach(Cuda.setDevice)
-        Arm.withResource(owned)(_ => ())
-      }))
-    } else {
-      None
-    }
-  }
+  // Cleanup and first use share this owner, including its closed state and retired IDs.
+  // Constructing it allocates no GPU buffers; builds are materialized by getOrBuild.
+  private[rapids] lazy val broadcastCache =
+    new ExecutorBroadcastCache[SpillableColumnarBatch](owned => {
+      // Unregister can run on an RPC thread that has not selected this executor's device.
+      GpuDeviceManager.getDeviceId().foreach(Cuda.setDevice)
+      Arm.withResource(owned)(_ => ())
+    })
   private var shuffleCatalog: ShuffleBufferCatalog = _
   private var shuffleReceivedBufferCatalog: ShuffleReceivedBufferCatalog = _
   private var multithreadedCatalog: MultithreadedShuffleBufferCatalog = _
@@ -236,16 +230,15 @@ object GpuShuffleEnv extends Logging {
 
   private[rapids] def getBroadcastCache: ExecutorBroadcastCache[SpillableColumnarBatch] = {
     require(env != null, "GPU shuffle environment has not been initialized")
-    env.broadcastCache.getOrElse(throw new IllegalStateException(
-      "Executor broadcast must be enabled when the application starts"))
+    env.broadcastCache
   }
 
   def invalidateBroadcast(shuffleId: Int): Unit = {
-    Option(env).foreach(_.broadcastCache.foreach(_.invalidate(shuffleId)))
+    Option(env).foreach(_.broadcastCache.invalidate(shuffleId))
   }
 
   def closeBroadcastCache(): Unit = {
-    Option(env).foreach(_.broadcastCache.foreach(_.close()))
+    Option(env).foreach(_.broadcastCache.close())
   }
 
   def getMultithreadedCatalog: Option[MultithreadedShuffleBufferCatalog] = {

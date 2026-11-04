@@ -17,6 +17,7 @@ package org.apache.spark.sql.rapids.execution
 
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.closeOnExcept
+import com.nvidia.spark.rapids.shims.BroadcastExchangeShims
 
 import org.apache.spark.{SparkEnv, TaskContext}
 import org.apache.spark.internal.Logging
@@ -79,7 +80,7 @@ case class GpuDriverlessBroadcastHashJoinExec(
       case shuffle: GpuShuffleExchangeExec => shuffle
       case _ => throw new IllegalStateException("Expected a direct GPU build shuffle")
     }
-    val maxBytes = RapidsConf.DRIVERLESS_BROADCAST_MAX_SIZE.get(conf)
+    val maxBytes = BroadcastExchangeShims.getMaxBroadcastTableBytes(conf)
     // Spark incorporates successful map-task accumulator updates before completing this future.
     // The writer metric records uncompressed bytes even when map-status sizes are compressed.
     val preparedStatistics = fallbackBroadcast.admittedDriverlessBuild.collect {
@@ -182,11 +183,10 @@ object GpuDriverlessBroadcastHashJoinExec extends Logging {
     Option(SparkEnv.get).map { env =>
       // The transport is fixed at application startup. The build decoder handles the codec
       // recorded in each batch, and admission uses the writer's uncompressed byte metric.
-      val startup = new RapidsConf(env.conf)
+      val mode = env.conf.get(RapidsConf.SHUFFLE_MANAGER_MODE.key, "MULTITHREADED")
       Seq(
-        if (!startup.isDriverlessBroadcastEnabled) Some("application-startup opt-in is disabled")
-          else None,
-        if (!startup.isUCXShuffleManagerMode) Some("UCX shuffle mode is required") else None,
+        // The executor build reader consumes GPU shuffle blocks from the UCX manager.
+        if (!mode.equalsIgnoreCase("UCX")) Some("UCX shuffle mode is required") else None,
         if (!GpuShuffleEnv.useGPUShuffle(conf)) Some("GPU shuffle is unavailable") else None
       ).flatten
     }.getOrElse(Seq("SparkEnv is not initialized"))
@@ -194,10 +194,12 @@ object GpuDriverlessBroadcastHashJoinExec extends Logging {
 
   /** Preserve the standard path for unsupported environments and exchange wrappers. */
   def rewrite(plan: SparkPlan, conf: RapidsConf): SparkPlan = {
-    if (!RapidsConf.DRIVERLESS_BROADCAST_ENABLED.get(plan.conf)) {
+    if (!conf.isDriverlessBroadcastEnabled) {
       plan
     } else {
       val reasons = gpuBuildReadRejections(conf) ++ Seq(
+        // ContextCleaner unregisters the build shuffle, which retires executor cache entries.
+        // Without it a completed join would retain its replica until executor shutdown.
         if (SparkSessionUtils.sessionFromPlan(plan).sparkContext.cleaner.isEmpty) {
           Some("Spark context cleaner is disabled")
         } else None,
@@ -233,6 +235,8 @@ object GpuDriverlessBroadcastHashJoinExec extends Logging {
               case _ => None
             }
             val rejection = if (join.isNullAwareAntiJoin) {
+              // The base implementation handles empty/all-null builds and null probe keys
+              // through a dedicated path that this custom RDD does not execute.
               Some("null-aware anti join")
             } else if (join.isSkewJoin) {
               Some("skew-optimized broadcast join")

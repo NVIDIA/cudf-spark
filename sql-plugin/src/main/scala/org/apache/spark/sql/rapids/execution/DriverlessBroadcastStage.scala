@@ -17,6 +17,7 @@ package org.apache.spark.sql.rapids.execution
 
 import java.util.concurrent.Future
 
+import com.nvidia.spark.rapids.shims.BroadcastExchangeShims
 import com.nvidia.spark.rapids.{GpuBuildLeft, GpuBuildRight, GpuMetric, GpuSinglePartitioning, RapidsConf}
 
 import org.apache.spark.{MapOutputStatistics, SparkContext}
@@ -59,7 +60,7 @@ private[execution] class DriverlessBroadcastStage(
     val bound = DriverlessBroadcastBuildAdmission.upperBound(
       statistics.map(_.bytesByPartitionId).getOrElse(Array.empty[Long]),
       uncompressed, rows, exchange.schema)
-    val limit = RapidsConf.DRIVERLESS_BROADCAST_MAX_SIZE.get(exchange.conf)
+    val limit = BroadcastExchangeShims.getMaxBroadcastTableBytes(exchange.conf)
     val admitted = DriverlessBroadcastBuildAdmission.accepts(bound, limit)
     val reason = if (admitted) "within build-size limit" else if (bound.isEmpty) {
       "no safe assembled-size bound"
@@ -131,7 +132,7 @@ object DriverlessBroadcastStage {
   def tagEligibleBuilds(original: SparkPlan, converted: SparkPlan): Unit = {
     val conf = new RapidsConf(original.conf)
     if (original.conf.adaptiveExecutionEnabled &&
-        RapidsConf.DRIVERLESS_BROADCAST_ENABLED.get(original.conf) &&
+        conf.isDriverlessBroadcastEnabled &&
         !RapidsConf.HASH_TABLE_REUSE.get(original.conf) &&
         GpuDriverlessBroadcastHashJoinExec.gpuBuildReadRejections(conf).isEmpty) {
       val candidates = converted.collect {

@@ -21,7 +21,7 @@ import org.apache.spark.sql.execution.{SparkPlan, SQLExecution}
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec
 import org.apache.spark.sql.types.LongType
 
-/** Test-only injection, compiled separately from the product JAR with Spark's Scala compiler. */
+/** Test-only missing-output injection for the two-executor shuffle integration suite. */
 object ExecutorBroadcastFaultSupport {
   def collectAfterRemovingBuildOutputs(
       session: SparkSession,

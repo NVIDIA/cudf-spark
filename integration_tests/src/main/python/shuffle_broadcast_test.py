@@ -12,12 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import time
+
 import pytest
-from pyspark.sql.functions import broadcast
+from pyspark import InheritableThread, TaskContext
+from pyspark.sql.functions import broadcast, col, udf
+from pyspark.sql.types import LongType
 
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture
-from marks import ignore_order, shuffle_test
+from marks import allow_non_gpu, ignore_order, shuffle_test
 from spark_init_internal import get_spark_i_know_what_i_am_doing
+from spark_session import with_cpu_session, with_gpu_session
 
 
 pytestmark = [shuffle_test]
@@ -26,9 +31,8 @@ pytestmark = [shuffle_test]
 def _require_ucx():
     startup = get_spark_i_know_what_i_am_doing().sparkContext.getConf()
     if not startup.get('spark.shuffle.manager', '').endswith('RapidsShuffleManager') or \
-            startup.get('spark.rapids.shuffle.mode', 'MULTITHREADED').upper() != 'UCX' or \
-            startup.get('spark.rapids.sql.driverlessBroadcast.enabled', 'false').lower() != 'true':
-        pytest.skip('Requires application startup opt-in and a UCX shuffle manager')
+            startup.get('spark.rapids.shuffle.mode', 'MULTITHREADED').upper() != 'UCX':
+        pytest.skip('Requires a UCX shuffle manager')
 
 
 def _join(spark, join_type, build_side):
@@ -94,7 +98,6 @@ _conf = {
     'spark.sql.adaptive.enabled': 'false',
     'spark.sql.exchange.reuse': 'false',
     'spark.rapids.sql.driverlessBroadcast.enabled': 'true',
-    'spark.rapids.sql.driverlessBroadcast.maxSize': '1g',
     'spark.rapids.sql.join.hashTable.reuse': 'false',
 }
 
@@ -160,26 +163,6 @@ def test_executor_broadcast_preserves_null_duplicate_and_residual_semantics(
 
 
 @ignore_order(local=True)
-def test_executor_broadcast_rejects_oversized_build_before_executor_assembly():
-    _require_ucx()
-
-    def check_fallback(cpu_plan, gpu_plan):
-        join = _native_join(gpu_plan)
-        assert join.metrics().apply('runtimeFallbacks').value() == 1
-        assert join.metrics().apply('executorBuilds').value() == 0
-        assert join.fallbackBroadcast().metrics().apply('dataSize').value() > 0
-        _assert_published_driver_value(join.metrics().apply('buildStageBytes'))
-        _assert_published_driver_value(join.metrics().apply('buildStageTime'))
-        published = _published_values(join.metrics().apply('runtimeFallbacks'))
-        assert published == ['1'], f'Fallback count not published to SQL UI: {published}'
-
-    assert_cpu_and_gpu_are_equal_collect_with_capture(
-        lambda spark: _join(spark, 'inner', 'right'),
-        conf=dict(_conf, **{'spark.rapids.sql.driverlessBroadcast.maxSize': '1'}),
-        gpu_plan_assertion=check_fallback, require_non_empty=True)
-
-
-@ignore_order(local=True)
 def test_executor_broadcast_disabled_keeps_standard_broadcast():
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: _join(spark, 'inner', 'right'),
@@ -215,30 +198,6 @@ def test_executor_broadcast_nondeterministic_build_keeps_standard_path():
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         query, conf=_conf, exist_classes='GpuBroadcastHashJoinExec',
         non_exist_classes='GpuDriverlessBroadcastHashJoinExec', require_non_empty=True)
-
-
-@ignore_order(local=True)
-def test_executor_broadcast_aqe_oversized_build_uses_real_standard_broadcast():
-    _require_ucx()
-
-    def check_fallback(cpu_plan, gpu_plan):
-        nodes = _executed_nodes(gpu_plan)
-        assert not any(node.getClass().getSimpleName() ==
-                       'GpuDriverlessBroadcastHashJoinExec' for node in nodes)
-        joins = [node for node in nodes
-                 if node.getClass().getSimpleName() == 'GpuBroadcastHashJoinExec']
-        assert len(joins) == 1
-        exchange = joins[0].broadcastExchange()
-        assert exchange.metrics().apply('driverlessStageFallbacks').value() == 1
-        assert _published_values(exchange.metrics().apply('driverlessStageFallbacks')) == ['1']
-        assert exchange.metrics().apply('driverlessBuildBytes').value() == 0
-        assert exchange.metrics().apply('dataSize').value() > 0
-
-    assert_cpu_and_gpu_are_equal_collect_with_capture(
-        lambda spark: _join(spark, 'inner', 'right'),
-        conf=dict(_conf, **{'spark.sql.adaptive.enabled': 'true',
-                           'spark.rapids.sql.driverlessBroadcast.maxSize': '1'}),
-        gpu_plan_assertion=check_fallback, require_non_empty=True)
 
 
 @ignore_order(local=True)
@@ -294,3 +253,204 @@ def test_executor_broadcast_aqe_admitted_stage_has_real_payload_for_standard_con
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         query, conf=dict(_conf, **{'spark.sql.adaptive.enabled': 'true'}),
         gpu_plan_assertion=check_fallback, require_non_empty=True)
+
+
+def _lifecycle_query(spark, transform=None):
+    probe = spark.range(2048, numPartitions=8).selectExpr('id', 'id % 16 AS k')
+    probe = probe.withColumn('v', col('id') if transform is None else transform(col('id')))
+    build = spark.range(64, numPartitions=4).selectExpr('id AS b', 'id % 16 AS bk')
+    return probe.join(broadcast(build), probe.k == build.bk).select('v', 'b')
+
+
+def _rows(frame):
+    return sorted(tuple(row) for row in frame.collect())
+
+
+@allow_non_gpu('BatchEvalPythonExec', 'PythonUDF')
+@pytest.mark.parametrize('aqe', ['false', 'true'])
+def test_driverless_broadcast_recovers_after_probe_task_retry(aqe):
+    _require_ucx()
+    spark = get_spark_i_know_what_i_am_doing()
+    # A local master without an explicit failure allowance aborts after the first failure.
+    if spark.sparkContext.master.startswith('local') and \
+            not spark.sparkContext.master.startswith('local['):
+        pytest.skip('Task retry requires a master with multiple task attempts')
+    if spark.sparkContext.master.startswith('local[') and \
+            ',' not in spark.sparkContext.master:
+        pytest.skip('Use local[threads,failures] or the shuffle CI standalone cluster')
+    expected = with_cpu_session(lambda session: _rows(_lifecycle_query(session)))
+
+    @udf(LongType())
+    def fail_once(value):
+        if value == 0 and TaskContext.get().attemptNumber() == 0:
+            raise RuntimeError('EXPECTED_DRIVERLESS_BROADCAST_PROBE_RETRY')
+        return value
+
+    def check(session):
+        frame = _lifecycle_query(session, fail_once)
+        assert _rows(frame) == expected
+        join = _native_join(frame._jdf.queryExecution().executedPlan())
+        assert join.metrics().apply('executorBuilds').value() > 0
+        assert join.fallbackBroadcast().metrics().apply('collectTime').value() == 0
+        assert _rows(_lifecycle_query(session)) == expected
+
+    with_gpu_session(check, conf=dict(_conf, **{'spark.sql.adaptive.enabled': aqe}))
+
+
+@allow_non_gpu('BatchEvalPythonExec', 'PythonUDF')
+@pytest.mark.parametrize('aqe', ['false', 'true'])
+@pytest.mark.parametrize('enabled', ['false', 'true'])
+def test_driverless_broadcast_cancellation_releases_query_and_allows_next_query(aqe, enabled):
+    _require_ucx()
+    expected = with_cpu_session(lambda session: _rows(_lifecycle_query(session)))
+
+    @udf(LongType())
+    def slow_probe(value):
+        if value == 0:
+            time.sleep(45)
+        return value
+
+    def check(session):
+        sc = session.sparkContext
+        group = 'driverless-broadcast-cancellation'
+        frame = _lifecycle_query(session, slow_probe)
+        outcome = []
+
+        def collect():
+            sc.setJobGroup(group, 'Cancel broadcast join with an active probe task', True)
+            try:
+                outcome.append(('success', frame.collect()))
+            except Exception as error:
+                outcome.append(('failure', str(error)))
+            finally:
+                sc.setLocalProperty('spark.jobGroup.id', None)
+                sc.setLocalProperty('spark.job.interruptOnCancel', None)
+
+        worker = InheritableThread(target=collect, daemon=True)
+        worker.start()
+        try:
+            deadline = time.monotonic() + 40
+            reached = False
+            while time.monotonic() < deadline:
+                plan = frame._jdf.queryExecution().executedPlan()
+                joins = [node for node in _executed_nodes(plan)
+                         if node.getClass().getSimpleName() == (
+                             'GpuDriverlessBroadcastHashJoinExec' if enabled == 'true'
+                             else 'GpuBroadcastHashJoinExec')]
+                active = sum(info.numRunningTasks()
+                             for info in sc._jsc.sc().statusTracker().getExecutorInfos())
+                metric = 'executorBuilds' if enabled == 'true' else None
+                built = len(joins) == 1 and (
+                    joins[0].metrics().apply(metric).value() > 0 if metric else
+                    joins[0].broadcastExchange().metrics().apply('dataSize').value() > 0)
+                if built and active > 0:
+                    reached = True
+                    break
+                assert worker.is_alive(), outcome
+                time.sleep(0.1)
+            assert reached, 'Cancellation must reach a built join with an active task'
+            sc.cancelJobGroup(group)
+            worker.join(30)
+            assert not worker.is_alive(), 'Cancellation did not release the query'
+            assert len(outcome) == 1 and outcome[0][0] == 'failure', outcome
+            message = outcome[0][1].lower()
+            assert 'cancel' in message or 'interrupt' in message, message
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                if not any(info.numRunningTasks() for info in
+                           sc._jsc.sc().statusTracker().getExecutorInfos()):
+                    break
+                time.sleep(0.1)
+            assert not any(info.numRunningTasks() for info in
+                           sc._jsc.sc().statusTracker().getExecutorInfos())
+            assert _rows(_lifecycle_query(session)) == expected
+        finally:
+            if worker.is_alive():
+                sc.cancelJobGroup(group)
+                worker.join(30)
+
+    with_gpu_session(check, conf=dict(_conf, **{
+        'spark.sql.adaptive.enabled': aqe,
+        'spark.rapids.sql.driverlessBroadcast.enabled': enabled}))
+
+
+def test_driverless_broadcast_missing_build_output_is_recomputed():
+    _require_ucx()
+    spark = get_spark_i_know_what_i_am_doing()
+    executors = spark.sparkContext._jsc.sc().getExecutorMemoryStatus().size() - 1
+    if executors != 2:
+        pytest.skip('Missing-output injection requires the two-executor shuffle CI cluster')
+    expected = with_cpu_session(lambda session: _rows(_lifecycle_query(session)))
+
+    def check(session):
+        frame = _lifecycle_query(session)
+        recovered = list(session.sparkContext._jvm.org.apache.spark.sql.rapids.testing
+                         .ExecutorBroadcastFaultSupport.collectAfterRemovingBuildOutputs(
+                             session._jsparkSession, frame._jdf,
+                             session.sparkContext.defaultParallelism))
+        assert sorted(tuple(int(value) for value in row.split(':'))
+                      for row in recovered[1:]) == expected
+        join = _native_join(frame._jdf.queryExecution().executedPlan())
+        assert join.metrics().apply('executorBuilds').value() > 0
+        assert join.fallbackBroadcast().metrics().apply('collectTime').value() == 0
+
+    with_gpu_session(check, conf=_conf)
+
+
+def test_driverless_broadcast_can_be_enabled_after_application_startup():
+    _require_ucx()
+    spark = get_spark_i_know_what_i_am_doing()
+    assert spark.sparkContext.getConf().get(
+        'spark.rapids.sql.driverlessBroadcast.enabled', 'false').lower() == 'false', \
+        'Run shuffle CI with the default startup setting to test first-use initialization'
+    expected = with_cpu_session(lambda session: _rows(_lifecycle_query(session)))
+    for enabled in ['false', 'true', 'false', 'true']:
+        def check(session):
+            frame = _lifecycle_query(session)
+            assert _rows(frame) == expected
+            nodes = _executed_nodes(frame._jdf.queryExecution().executedPlan())
+            driverless = [node for node in nodes if node.getClass().getSimpleName() ==
+                          'GpuDriverlessBroadcastHashJoinExec']
+            if enabled == 'true':
+                assert len(driverless) == 1
+                assert driverless[0].metrics().apply('executorBuilds').value() > 0
+                assert driverless[0].fallbackBroadcast().metrics().apply('collectTime').value() == 0
+            else:
+                assert not driverless
+                assert any(node.getClass().getSimpleName() == 'GpuBroadcastHashJoinExec'
+                           for node in nodes)
+        with_gpu_session(check, conf=dict(_conf, **{
+            'spark.rapids.sql.driverlessBroadcast.enabled': enabled}))
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize('aqe', ['false', 'true'])
+def test_driverless_broadcast_nested_build_retains_standard_path(aqe):
+    _require_ucx()
+
+    def query(spark):
+        probe = spark.range(32, numPartitions=4).selectExpr('id % 4 AS key', 'id AS probe')
+        build = spark.range(8, numPartitions=4).selectExpr('id % 4 AS key', 'array(id, id + 1) AS v')
+        return probe.join(broadcast(build), 'key')
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        query, conf=dict(_conf, **{'spark.sql.adaptive.enabled': aqe}),
+        exist_classes='GpuBroadcastHashJoinExec',
+        non_exist_classes='GpuDriverlessBroadcastHashJoinExec', require_non_empty=True)
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize('aqe', ['false', 'true'])
+@pytest.mark.parametrize('join_type', ['inner', 'left_outer', 'left_semi', 'left_anti'])
+def test_driverless_broadcast_all_null_build_preserves_results(aqe, join_type):
+    _require_ucx()
+
+    def query(spark):
+        probe = spark.range(32, numPartitions=4).selectExpr(
+            'IF(id % 7 = 0, CAST(NULL AS BIGINT), id % 4) AS pk', 'id AS probe')
+        build = spark.range(8, numPartitions=4).selectExpr(
+            'IF(id >= 0, CAST(NULL AS BIGINT), id) AS bk', 'id AS build')
+        return probe.join(broadcast(build), probe.pk == build.bk, join_type)
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        query, conf=dict(_conf, **{'spark.sql.adaptive.enabled': aqe}))

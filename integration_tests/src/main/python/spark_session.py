@@ -41,7 +41,6 @@ _orig_conf_keys = _orig_conf.keys()
 # Some of these are redundant with default settings for the configs but are set here explicitly
 # to ensure any cluster settings do not interfere with the tests.
 _default_conf = {
-    'spark.rapids.sql.driverlessBroadcast.enabled': 'false',
     'spark.rapids.sql.test.retryContextCheck.enabled': 'true',
     'spark.rapids.sql.castDecimalToFloat.enabled': 'false',
     'spark.rapids.sql.castFloatToDecimal.enabled': 'false',

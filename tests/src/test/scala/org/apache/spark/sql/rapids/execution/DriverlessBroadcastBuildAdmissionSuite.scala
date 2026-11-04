@@ -53,7 +53,8 @@ class DriverlessBroadcastBuildAdmissionSuite extends AnyFunSuite {
   test("the driver includes a full padded validity mask before admission") {
     val bound = DriverlessBroadcastBuildAdmission.upperBound(Array(4L, 6L), 10, 2, bytes)
     assert(bound.contains(BigInt(74)))
-    assert(DriverlessBroadcastBuildAdmission.accepts(bound, 74))
+    assert(DriverlessBroadcastBuildAdmission.accepts(bound, 75))
+    assert(!DriverlessBroadcastBuildAdmission.accepts(bound, 74))
     assert(!DriverlessBroadcastBuildAdmission.accepts(bound, 73))
     assert(!DriverlessBroadcastBuildAdmission.accepts(bound, 10))
   }
@@ -62,7 +63,7 @@ class DriverlessBroadcastBuildAdmissionSuite extends AnyFunSuite {
     val bound = DriverlessBroadcastBuildAdmission.upperBound(Array(32833L), 32833, 32769, bytes)
     assert(bound.contains(BigInt(36993)))
     assert(!DriverlessBroadcastBuildAdmission.accepts(bound, 32833))
-    assert(DriverlessBroadcastBuildAdmission.accepts(bound, 36993))
+    assert(DriverlessBroadcastBuildAdmission.accepts(bound, 36994))
   }
 
   test("string bounds include 64-bit offsets and masks even for non-nullable fields") {
@@ -70,7 +71,7 @@ class DriverlessBroadcastBuildAdmissionSuite extends AnyFunSuite {
     val bound = DriverlessBroadcastBuildAdmission.upperBound(Array(100L), 100, 10, schema)
     assert(bound.contains(BigInt(252)))
     assert(!DriverlessBroadcastBuildAdmission.accepts(bound, 251))
-    assert(DriverlessBroadcastBuildAdmission.accepts(bound, 252))
+    assert(DriverlessBroadcastBuildAdmission.accepts(bound, 253))
   }
 
   test("the uncompressed writer metric prevents compact map-status sizes hiding large builds") {
@@ -111,7 +112,7 @@ class DriverlessBroadcastBuildAdmissionSuite extends AnyFunSuite {
     val rowsOnly = DriverlessBroadcastBuildAdmission.upperBound(
       Array(100L), 0, 200, StructType(Nil))
     assert(rowsOnly.contains(BigInt(100)))
-    assert(DriverlessBroadcastBuildAdmission.accepts(rowsOnly, 100))
+    assert(DriverlessBroadcastBuildAdmission.accepts(rowsOnly, 101))
   }
 
   test("flat scalar schemas are eligible without relying on declared nullability") {

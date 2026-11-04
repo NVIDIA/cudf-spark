@@ -20,6 +20,10 @@ import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.funsuite.AnyFunSuite
 
+import com.nvidia.spark.rapids.RapidsConf
+
+import org.apache.spark.sql.rapids.GpuShuffleEnv
+
 class ExecutorBroadcastCacheSuite extends AnyFunSuite {
   private class Value {
     private val refs = new AtomicInteger(1)
@@ -32,6 +36,39 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
   }
 
   private val noAction: () => Unit = () => ()
+
+  test("first use needs no startup opt-in and retains the same cache owner") {
+    val env = new GpuShuffleEnv(new RapidsConf(Map.empty[String, String]))
+    val expected = new IllegalStateException("expected build failure")
+    val cache = env.broadcastCache
+    assert(env.broadcastCache eq cache)
+    try {
+      val failure = intercept[IllegalStateException] {
+        cache.getOrBuild[Int](1, () => throw expected, noAction, noAction)(_ => 0)
+      }
+      assert(failure eq expected)
+    } finally {
+      cache.close()
+    }
+  }
+
+  test("cleanup before first build prevents late use from recreating state") {
+    val env = new GpuShuffleEnv(new RapidsConf(Map.empty[String, String]))
+    env.broadcastCache.invalidate(1)
+    try {
+      intercept[IllegalStateException] {
+        env.broadcastCache.getOrBuild[Int](1, () => fail("Retired build must not run"),
+          noAction, noAction)(_ => 0)
+      }
+      env.broadcastCache.close()
+      intercept[IllegalArgumentException] {
+        env.broadcastCache.getOrBuild[Int](2, () => fail("Closed cache must not build"),
+          noAction, noAction)(_ => 0)
+      }
+    } finally {
+      env.broadcastCache.close()
+    }
+  }
 
   test("retired ordinary shuffles keep only compact IDs and reject late builders") {
     val cache = new ExecutorBroadcastCache[Value](_.release())

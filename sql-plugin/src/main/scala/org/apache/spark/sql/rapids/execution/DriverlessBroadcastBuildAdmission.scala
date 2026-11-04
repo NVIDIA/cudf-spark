@@ -90,5 +90,5 @@ private[execution] object DriverlessBroadcastBuildAdmission {
   }
 
   def accepts(bound: Option[BigInt], maxBytes: Long): Boolean =
-    maxBytes > 0 && bound.exists(_ <= maxBytes)
+    maxBytes > 0 && bound.exists(_ < maxBytes)
 }
