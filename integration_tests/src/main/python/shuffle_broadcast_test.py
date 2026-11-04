@@ -94,6 +94,18 @@ def _assert_published_driver_value(metric):
     assert _published_values(metric) == [expected]
 
 
+def _assert_aqe_build_metric_owner(join):
+    build = join.buildPlan()
+    assert build.getClass().getSimpleName() == 'ReusedExchangeExec'
+    producer = join.fallbackBroadcast().admittedDriverlessShuffle().get()
+    read_metric = producer.metrics().apply('opTimeNewShuffleRead')
+    assert build.child().metrics().apply('opTimeNewShuffleRead').id() == read_metric.id()
+    assert join.getDescendantOpTimeMetrics().contains(
+        producer.gpuLongMetric('opTimeNewShuffleRead'))
+    assert read_metric.value() > 0
+    assert _published_values(read_metric), 'Executed build read metric is missing from the SQL UI'
+
+
 _conf = {
     'spark.sql.adaptive.enabled': 'false',
     'spark.rapids.sql.driverlessBroadcast.enabled': 'true',
@@ -396,6 +408,8 @@ def test_driverless_broadcast_with_cpu_join_consumers(aqe, cpu_build):
     def check_eligible_control(cpu_plan, gpu_plan):
         join = _native_join(gpu_plan)
         assert join.metrics().apply('executorBuilds').value() > 0
+        if aqe == 'true':
+            _assert_aqe_build_metric_owner(join)
 
     expected = with_cpu_session(lambda spark: _rows(query(spark, False)))
     standard_conf = dict(conf, **{'spark.rapids.sql.driverlessBroadcast.enabled': 'false'})

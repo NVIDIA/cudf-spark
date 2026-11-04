@@ -40,8 +40,8 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 /**
  * Each consumer reads reducer zero, containing all mapper shards, through GPU shuffle.
  * The saved broadcast is not a child: preparing this plan must not collect its payload at
- * the driver. It retains the materialized AQE producer and stage metadata; a standard AQE
- * consumer resolves its payload through the original exchange. Non-AQE reads the visible shuffle.
+ * the driver. It retains AQE stage metadata; a standard AQE consumer resolves its payload
+ * through the original exchange. Materialized AQE shuffles stay behind a reuse wrapper.
  */
 case class GpuDriverlessBroadcastHashJoinExec(
     leftKeys: Seq[Expression],
@@ -81,13 +81,9 @@ case class GpuDriverlessBroadcastHashJoinExec(
     }
     // Both upstreams belong to this RDD graph. The scheduler can submit independent map
     // stages together; constructing this plan must not wait for the build map stage.
-    // AQE has already materialized this producer. Later physical rules can copy the visible
-    // shuffle and its codegen subtree; use the original dependency, including its retry lineage.
-    val admitted = fallbackBroadcast.admittedDriverlessShuffle
-    val producer = admitted.getOrElse(exchange)
-    val build = if (admitted.isDefined) producer.executeColumnar() else buildPlan.executeColumnar()
+    val build = buildPlan.executeColumnar()
     val stream = streamedPlan.executeColumnar()
-    val shuffleId = producer.shuffleId
+    val shuffleId = exchange.shuffleId
     val rapidsConf = new RapidsConf(conf)
     val maxExecutors = rapidsConf.driverlessBroadcastMaxExecutors
     val schema = buildPlan.schema
@@ -244,11 +240,10 @@ object GpuDriverlessBroadcastHashJoinExec extends Logging {
                   GpuShuffleExchangeExec(GpuSinglePartitioning, exchange.child,
                     ENSURE_REQUIREMENTS)(GpuSinglePartitioning)
                 }
-                // AQE reuse changes expression IDs without changing the build's column order.
-                // Keep that consumer mapping when replacing its broadcast stage with a shuffle.
+                // A materialized producer is opaque to later physical rewrites. Reuse keeps its
+                // original dependency and metrics while preserving each consumer's attributes.
                 val gpuBuild = build match {
-                  case stage: BroadcastQueryStageExec
-                      if stage.plan.isInstanceOf[ReusedExchangeExec] =>
+                  case stage: BroadcastQueryStageExec =>
                     ReusedExchangeExec(stage.output, shuffle)
                   case _ => shuffle
                 }

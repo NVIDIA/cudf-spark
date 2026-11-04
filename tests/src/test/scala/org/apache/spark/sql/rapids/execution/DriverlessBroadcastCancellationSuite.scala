@@ -18,7 +18,7 @@ package org.apache.spark.sql.rapids.execution
 import java.util.concurrent.{CountDownLatch, Executors, TimeUnit}
 import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 
-import com.nvidia.spark.rapids.{GpuRangeExec, GpuSinglePartitioning, GpuTransitionOverrides, JustRowsColumnarBatch, RapidsConf, RowBasedShuffleChecksumConf, ShimLoader, ShuffleBufferCatalog, SpillableColumnarBatch}
+import com.nvidia.spark.rapids.{GpuCoalesceBatches, GpuMetric, GpuRangeExec, GpuSinglePartitioning, GpuTransitionOverrides, JustRowsColumnarBatch, RapidsConf, RowBasedShuffleChecksumConf, ShimLoader, ShuffleBufferCatalog, SpillableColumnarBatch, TargetSize}
 import com.nvidia.spark.rapids.Arm.withResource
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuite
@@ -32,7 +32,7 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference}
 import org.apache.spark.sql.catalyst.optimizer.BuildRight
 import org.apache.spark.sql.catalyst.plans.Inner
 import org.apache.spark.sql.catalyst.plans.physical.IdentityBroadcastMode
-import org.apache.spark.sql.execution.{LeafExecNode, SparkPlan, UnionExec}
+import org.apache.spark.sql.execution.{DriverlessBroadcastPlanInfoTestSupport, LeafExecNode, SparkPlan, UnionExec}
 import org.apache.spark.sql.execution.adaptive.BroadcastQueryStageExec
 import org.apache.spark.sql.execution.exchange.{BroadcastExchangeExec, ENSURE_REQUIREMENTS, ReusedExchangeExec}
 import org.apache.spark.sql.execution.joins.BroadcastHashJoinExec
@@ -237,6 +237,58 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
         }
       }
       assert(DriverlessBroadcastPolicy.rejections(conf).isEmpty)
+    }
+  }
+
+  test("AQE build reuse preserves the executed producer and its published read metric") {
+    session.withActive {
+      val enabled = "spark.rapids.sql.driverlessBroadcast.enabled"
+      val adaptive = "spark.sql.adaptive.enabled"
+      val previous = Seq(enabled, adaptive).map(key => key -> session.conf.getOption(key))
+      session.conf.set(enabled, "true")
+      session.conf.set(adaptive, "true")
+      try {
+        val key = AttributeReference("key", LongType)()
+        val child = EmptyColumnarPlan(Seq(key.newInstance()))
+        val cpu = BroadcastExchangeExec(IdentityBroadcastMode, child)
+        val exchange = GpuBroadcastExchangeExec(IdentityBroadcastMode, child)(cpu)
+        exchange.setTagValue(DriverlessBroadcastStage.eligible, true)
+        val token = exchange.relationFuture.get(30, TimeUnit.SECONDS)
+        try {
+          val producer = exchange.admittedDriverlessShuffle.get
+          val probe = GpuRangeExec(0, 4, 1, 1, Seq(key), 1024)
+          val stage = BroadcastQueryStageExec(1, exchange, cpu.canonicalized)
+          val join = DriverlessBroadcastTestShim.join(probe, stage)
+          val conf = new RapidsConf(session.conf.getAll)
+          val native = GpuDriverlessBroadcastHashJoinExec.rewrite(join, conf)
+            .asInstanceOf[GpuDriverlessBroadcastHashJoinExec]
+          val build = native.right.asInstanceOf[ReusedExchangeExec]
+          assert(build.child eq producer)
+
+          var rewrittenProducers = 0
+          val transformed = native.transformUp {
+            case shuffle: GpuShuffleExchangeExec =>
+              rewrittenProducers += 1
+              shuffle.withNewChildren(Seq(GpuCoalesceBatches(shuffle.child, TargetSize(1024))))
+          }.asInstanceOf[GpuDriverlessBroadcastHashJoinExec]
+          assert(rewrittenProducers == 0)
+          assert(transformed.right.asInstanceOf[ReusedExchangeExec].child eq producer)
+
+          val readMetric = producer.getOpTimeNewMetric.get
+          readMetric.set(17)
+          assert(transformed.getDescendantOpTimeMetrics.contains(readMetric))
+          assert(transformed.getDescendantOpTimeMetrics.find(_ eq readMetric).get.value == 17)
+          val metricId = producer.metrics(GpuMetric.OP_TIME_NEW_SHUFFLE_READ).id
+          assert(DriverlessBroadcastPlanInfoTestSupport.metricIds(transformed).contains(metricId))
+        } finally {
+          token.destroy()
+        }
+      } finally {
+        previous.foreach {
+          case (key, Some(value)) => session.conf.set(key, value)
+          case (key, None) => session.conf.unset(key)
+        }
+      }
     }
   }
 
