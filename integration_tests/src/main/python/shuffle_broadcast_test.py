@@ -397,9 +397,17 @@ def test_driverless_broadcast_with_cpu_join_consumers(aqe, cpu_build):
         join = _native_join(gpu_plan)
         assert join.metrics().apply('executorBuilds').value() > 0
 
-    assert_cpu_and_gpu_are_equal_collect_with_capture(
-        lambda spark: query(spark, False), conf=conf,
-        gpu_plan_assertion=check_eligible_control, require_non_empty=True)
+    expected = with_cpu_session(lambda spark: _rows(query(spark, False)))
+    standard_conf = dict(conf, **{'spark.rapids.sql.driverlessBroadcast.enabled': 'false'})
+    assert with_gpu_session(lambda spark: _rows(query(spark, False)), conf=standard_conf) == expected
+    try:
+        assert_cpu_and_gpu_are_equal_collect_with_capture(
+            lambda spark: query(spark, False), conf=conf,
+            gpu_plan_assertion=check_eligible_control, require_non_empty=True)
+    except Exception as error:
+        if hasattr(error, 'stackTrace'):
+            raise AssertionError(error.stackTrace) from error
+        raise
 
     def check_consumers(cpu_plan, gpu_plan):
         assert 'ReusedExchange' in cpu_plan.toString(), cpu_plan.toString()
