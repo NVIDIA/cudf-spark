@@ -17,15 +17,15 @@ package org.apache.spark.sql.rapids.execution
 
 import scala.concurrent.duration.Duration
 
-import org.scalatest.funsuite.AnyFunSuite
-
 import com.nvidia.spark.rapids.RapidsConf
+import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Alias, AttributeReference, LessThan, Literal, Rand}
-import org.apache.spark.sql.execution.{FilterExec, LocalTableScanExec, ProjectExec}
+import org.apache.spark.sql.execution.{FilterExec, ProjectExec}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
+import org.apache.spark.storage.BlockManagerId
 
 class DriverlessBroadcastBuildAdmissionSuite extends AnyFunSuite {
   test("disabled broadcast timeout and huge positive timeouts remain infinite") {
@@ -39,7 +39,7 @@ class DriverlessBroadcastBuildAdmissionSuite extends AnyFunSuite {
 
   test("non-determinism in a build projection or filter declines the driverless path") {
     val key = AttributeReference("key", IntegerType)()
-    val scan = LocalTableScanExec(Seq(key), Seq(InternalRow(1)))
+    val scan = DriverlessBroadcastTestShim.scan(Seq(key), Seq(InternalRow(1)))
     assert(DriverlessBroadcastBuildAdmission.supportsPlan(scan))
     val randomProject = ProjectExec(Seq(Alias(Rand(Literal(42L)), "value")()), scan)
     assert(!DriverlessBroadcastBuildAdmission.supportsPlan(randomProject))
@@ -58,16 +58,22 @@ class DriverlessBroadcastBuildAdmissionSuite extends AnyFunSuite {
     assert(DriverlessBroadcastBuildAdmission.supportsSchema(schema))
   }
 
-  test("node admission counts hosts rather than executor instances") {
-    val hosts = (1 to 20).map(i => s"host-$i").toSet
-    assert(DriverlessBroadcastPolicy.nodeRejection(hosts, 20).isEmpty)
-    assert(DriverlessBroadcastPolicy.nodeRejection(hosts + "host-21", 20).isDefined)
-    assert(DriverlessBroadcastPolicy.nodeRejection(hosts + "host-1", 20).isEmpty)
+  test("executor admission counts replicas independently of host placement") {
+    val colocated = Seq(BlockManagerId("driver", "same-host", 1000),
+      BlockManagerId("executor-1", "same-host", 1001),
+      BlockManagerId("executor-2", "same-host", 1002))
+    val ids = DriverlessBroadcastPolicy.executorIds(colocated.iterator)
+    assert(ids == Set("executor-1", "executor-2"))
+    assert(DriverlessBroadcastPolicy.executorRejection(ids, 1).isDefined)
+    val executors = (1 to 32).map(i => s"executor-$i").toSet
+    assert(DriverlessBroadcastPolicy.executorRejection(executors, 32).isEmpty)
+    assert(DriverlessBroadcastPolicy.executorRejection(executors + "executor-33", 32).isDefined)
+    assert(DriverlessBroadcastPolicy.executorRejection(executors + "executor-1", 32).isEmpty)
     val conf = new RapidsConf(Map.empty[String, String])
-    assert(conf.driverlessBroadcastMaxNodes == 20)
+    assert(conf.driverlessBroadcastMaxExecutors == 32)
     intercept[IllegalArgumentException] {
-      new RapidsConf(Map("spark.rapids.sql.driverlessBroadcast.maxNodes" -> "0"))
-        .driverlessBroadcastMaxNodes
+      new RapidsConf(Map("spark.rapids.sql.driverlessBroadcast.maxExecutors" -> "0"))
+        .driverlessBroadcastMaxExecutors
     }
   }
 

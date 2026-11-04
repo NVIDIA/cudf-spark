@@ -21,6 +21,7 @@ import com.nvidia.spark.rapids.RapidsConf
 
 import org.apache.spark.{SparkContext, SparkEnv, SparkException}
 import org.apache.spark.internal.Logging
+import org.apache.spark.storage.BlockManagerId
 
 /** Application transport settings are immutable; SQL policy limits are captured per query. */
 private[execution] object DriverlessBroadcastPolicy extends Logging {
@@ -30,13 +31,16 @@ private[execution] object DriverlessBroadcastPolicy extends Logging {
     configurations.getOrElseUpdate(env, new RapidsConf(env.conf))
   }
 
-  private def hosts(env: SparkEnv): Set[String] =
-    env.blockManager.master.getMemoryStatus.keysIterator
-      .filterNot(_.executorId == SparkContext.DRIVER_IDENTIFIER).map(_.host).toSet
+  private[execution] def executorIds(managers: Iterator[BlockManagerId]): Set[String] =
+    managers
+      .filterNot(_.executorId == SparkContext.DRIVER_IDENTIFIER).map(_.executorId).toSet
 
-  private[execution] def nodeRejection(hosts: Set[String], limit: Int): Option[String] = {
-    if (hosts.size > limit) {
-      Some(s"${hosts.size} executor hosts exceed driverlessBroadcast.maxNodes=$limit")
+  private def executors(env: SparkEnv): Set[String] =
+    executorIds(env.blockManager.master.getMemoryStatus.keysIterator)
+
+  private[execution] def executorRejection(executors: Set[String], limit: Int): Option[String] = {
+    if (executors.size > limit) {
+      Some(s"${executors.size} executors exceed driverlessBroadcast.maxExecutors=$limit")
     } else None
   }
 
@@ -48,15 +52,15 @@ private[execution] object DriverlessBroadcastPolicy extends Logging {
       if (env.conf.getBoolean("spark.dynamicAllocation.enabled", false)) {
         Some("dynamic allocation is unsupported by driverless broadcast")
       } else None,
-      nodeRejection(hosts(env), conf.driverlessBroadcastMaxNodes)
+      executorRejection(executors(env), conf.driverlessBroadcastMaxExecutors)
     ).flatten
   }.getOrElse(Seq("SparkEnv is not initialized"))
 
   def checkExecutorLimit(limit: Int): Unit = {
     val env = SparkEnv.get
-    nodeRejection(hosts(env), limit).foreach { reason =>
+    executorRejection(executors(env), limit).foreach { reason =>
       throw new SparkException(s"Driverless broadcast cannot fetch a build: $reason. " +
-        "Executor hosts grew beyond the supported limit after planning. Disable driverless " +
+        "Registered executors grew beyond the supported limit after planning. Disable driverless " +
         "broadcast or qualify a larger limit before executing the query.")
     }
   }

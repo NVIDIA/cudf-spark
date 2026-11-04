@@ -46,7 +46,8 @@ class GpuDriverlessBroadcastHelperSuite extends RmmSparkRetrySuiteBase {
         withResource(ColumnVector.fromBytes(1.toByte, 2.toByte)) { column =>
           SpillableColumnarBatch(batch(column), SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
         }
-      }, () => (), () => ())(GpuDriverlessBroadcastHelper.borrow, result => withResource(result)(_ => ()))
+      }, () => (), () => ())(
+        GpuDriverlessBroadcastHelper.borrow, result => withResource(result)(_ => ()))
       withResource(read()) { result => assert(result.numRows() == 2) }
       assert(SpillFramework.stores.deviceStore.spill(Long.MaxValue) > 0)
       RmmSpark.getAndResetNumRetryThrow(1)

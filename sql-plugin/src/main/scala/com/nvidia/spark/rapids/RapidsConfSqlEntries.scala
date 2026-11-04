@@ -38,18 +38,18 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
     .booleanConf
     .createWithDefault(false)
 
-  val DRIVERLESS_BROADCAST_MAX_NODES = conf("spark.rapids.sql.driverlessBroadcast.maxNodes")
-    .doc("Maximum number of registered executor hosts for driverless broadcast. " +
+  val DRIVERLESS_BROADCAST_MAX_EXECUTORS = conf("spark.rapids.sql.driverlessBroadcast.maxExecutors")
+    .doc("Maximum registered executors, excluding the driver, for driverless broadcast. " +
       "The driver retains standard broadcast when this limit is exceeded. Executors check " +
       "the limit before fetching a build; growth beyond the limit after planning fails " +
-      "that execution. Dynamic allocation is unsupported. Values above 20 require " +
+      "that execution. Dynamic allocation is unsupported. Values above 32 require " +
       "scale qualification and improvements such as hierarchical or peer-forwarded " +
       "distribution; raising this setting does not change the fan-out algorithm. " +
-      "The count is by host, while replicated network traffic grows with reader executors.")
+      "Executors on the same host count separately because each can fetch a full build replica.")
     .internal()
     .integerConf
     .checkValue(_ > 0, "must be positive")
-    .createWithDefault(20)
+    .createWithDefault(32)
 
   val SQL_ENABLED = conf("spark.rapids.sql.enabled")
     .doc("Enable (true) or disable (false) sql operations on the GPU")

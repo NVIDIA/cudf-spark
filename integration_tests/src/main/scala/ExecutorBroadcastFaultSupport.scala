@@ -51,7 +51,9 @@ object ExecutorBroadcastFaultSupport {
       context.listenerBus.waitUntilEmpty(30000)
       require(context.statusTracker.getJobIdsForGroup(group).isEmpty,
         "Constructing the join RDD must not submit or wait for a build job")
-      val rows = frame.collect().map(row => s"${row.getLong(0)}:${row.getLong(1)}:${row.getLong(2)}")
+      val rows = frame.collect().map { row =>
+        s"${row.getLong(0)}:${row.getLong(1)}:${row.getLong(2)}"
+      }
       context.listenerBus.waitUntilEmpty(30000)
       val singleTaskStages = lock.synchronized {
         tasks.values.toSeq.groupBy(_._1).values.filter(_.size == 1).map(_.head).toSeq
@@ -84,8 +86,10 @@ object ExecutorBroadcastFaultSupport {
     require(frame.schema.fields.map(_.dataType).toSeq == Seq(LongType, LongType),
       "This fixture checks complete rows with exactly two long columns")
     val executed = frame.queryExecution.executedPlan
+    // Constructing the adaptive output RDD finalizes its plan without running result tasks.
+    val result = executed.execute()
     val finalPlan = executed match {
-      case adaptive: AdaptiveSparkPlanExec => adaptive.finalPhysicalPlan
+      case adaptive: AdaptiveSparkPlanExec => adaptive.executedPlan
       case other => other
     }
     val joins = finalPlan.collect {
@@ -95,7 +99,6 @@ object ExecutorBroadcastFaultSupport {
     val join = joins.head
     // Construct the real output RDD without executing the result stage. Materialize only
     // its build dependency so deletion happens before any consumer can populate its cache.
-    val result = finalPlan.execute()
     val build = join.getClass.getMethod("buildPlan").invoke(join).asInstanceOf[SparkPlan]
     val dependency = build.getClass.getMethod("shuffleDependencyColumnar").invoke(build)
       .asInstanceOf[ShuffleDependency[Any, Any, Any]]

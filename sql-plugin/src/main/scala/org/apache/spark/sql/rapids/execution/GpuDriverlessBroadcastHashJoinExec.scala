@@ -85,7 +85,7 @@ case class GpuDriverlessBroadcastHashJoinExec(
     val stream = streamedPlan.executeColumnar()
     val shuffleId = exchange.shuffleId
     val rapidsConf = new RapidsConf(conf)
-    val maxNodes = rapidsConf.driverlessBroadcastMaxNodes
+    val maxExecutors = rapidsConf.driverlessBroadcastMaxExecutors
     val schema = buildPlan.schema
     val output = buildPlan.output
     val localMetrics = allMetrics
@@ -104,7 +104,7 @@ case class GpuDriverlessBroadcastHashJoinExec(
         val streamIter = new CollectTimeIterator(
           NvtxRegistry.BROADCAST_JOIN_STREAM, input, streamTime)
         val built = GpuShuffleEnv.getBroadcastCache.getOrBuild[ColumnarBatch](shuffleId, () => {
-          DriverlessBroadcastPolicy.checkExecutorLimit(maxNodes)
+          DriverlessBroadcastPolicy.checkExecutorLimit(maxExecutors)
           builds += 1
           val batch = GpuDriverlessBroadcastHelper.assemble(
             openBuild(), schema, output, localMetrics, codecConfigs, maxDecompressBatchMemory)

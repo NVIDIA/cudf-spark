@@ -128,17 +128,20 @@ class GpuDriverlessBroadcastJoinRDDSuite extends AnyFunSuite with BeforeAndAfter
             throw new FetchFailedException(SparkEnv.get.blockManager.blockManagerId,
               shuffleId, 0L, 0, 0, "Injected loss before the second replica reads")
           }
-          val value = BroadcastReplicaRetryState.caches(consumer).getOrBuild[Vector[Long]](shuffleId,
+          val value = BroadcastReplicaRetryState.caches(consumer).getOrBuild[Vector[Long]](
+            shuffleId,
             () => openBuild().toVector.sorted, () => (), () => task.killTaskIfInterrupted(),
             generation = ExecutorBroadcastCache.generation(
               task.stageId(), task.stageAttemptNumber()))(identity, _ => ())
           if (task.stageAttemptNumber() == 0 && consumer == 0) {
             BroadcastReplicaRetryState.firstBuilt.countDown()
             // Hold the first result until the fetch failure cancels this attempt.
-            while (!task.isInterrupted()) {
-              Thread.sleep(10)
+            try {
+              new CountDownLatch(1).await(10, TimeUnit.SECONDS)
+              throw new AssertionError("The first replica task did not receive cancellation")
+            } catch {
+              case _: InterruptedException => task.killTaskIfInterrupted()
             }
-            task.killTaskIfInterrupted()
           }
           input.map(_ => (value, task.stageAttemptNumber()))
         })
@@ -160,8 +163,10 @@ class GpuDriverlessBroadcastJoinRDDSuite extends AnyFunSuite with BeforeAndAfter
       context.parallelize(Seq(1), 1), context.parallelize(Seq(2), 1),
       (input, openBuild) => {
         val start = System.nanoTime()
-        Thread.sleep(100)
         val values = openBuild().toVector
+        // Deterministic work makes initialization measurable without timing-based coordination.
+        val checksum = (0 until 1000000).foldLeft(0L)(_ + _)
+        require(checksum == 499999500000L)
         initializationTime.add(System.nanoTime() - start)
         input.map(_ + values.head)
       })

@@ -15,12 +15,11 @@
  */
 package org.apache.spark.sql.rapids.execution
 
-import java.util.concurrent.{Callable, CountDownLatch, Executors, ExecutionException, TimeUnit}
+import java.util.concurrent.{Callable, CountDownLatch, ExecutionException, Executors, TimeUnit}
 import java.util.concurrent.atomic.AtomicInteger
 
-import org.scalatest.funsuite.AnyFunSuite
-
 import com.nvidia.spark.rapids.RapidsConf
+import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.TaskKilledException
 import org.apache.spark.sql.rapids.GpuShuffleEnv
@@ -270,7 +269,8 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
         cache.getOrBuild[Value](10, () => throw new IllegalArgumentException,
           noAction, noAction)(_.retain(), _.release())
       }
-      val value = cache.getOrBuild[Value](10, () => new Value, noAction, noAction)(_.retain(), _.release())
+      val value = cache.getOrBuild[Value](10, () => new Value, noAction, noAction)(
+        _.retain(), _.release())
       value.release()
       cache.invalidate(11)
       intercept[IllegalStateException] {

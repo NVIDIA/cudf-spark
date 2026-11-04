@@ -397,18 +397,18 @@ def test_driverless_broadcast_independent_builds_overlap():
 
 @ignore_order(local=True)
 @pytest.mark.parametrize('aqe', ['false', 'true'])
-def test_driverless_broadcast_node_limit_keeps_standard_path(aqe):
+def test_driverless_broadcast_executor_limit_keeps_standard_path(aqe):
     _require_ucx()
     spark = get_spark_i_know_what_i_am_doing()
-    hosts = spark.sparkContext._jsc.sc().env().blockManager().master().getMemoryStatus() \
+    executors = spark.sparkContext._jsc.sc().env().blockManager().master().getMemoryStatus() \
         .keysIterator()
     workers = set()
-    while hosts.hasNext():
-        block_manager = hosts.next()
+    while executors.hasNext():
+        block_manager = executors.next()
         if block_manager.executorId() != 'driver':
-            workers.add(block_manager.host())
+            workers.add(block_manager.executorId())
     if len(workers) < 2:
-        pytest.skip('Node limit test requires executors on at least two distinct hosts')
+        pytest.skip('Executor limit test requires at least two executors, including on the same host')
 
     def check_standard(cpu_plan, gpu_plan):
         nodes = _executed_nodes(gpu_plan)
@@ -425,7 +425,7 @@ def test_driverless_broadcast_node_limit_keeps_standard_path(aqe):
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda session: _join(session, 'inner', 'right'),
         conf=dict(_conf, **{'spark.sql.adaptive.enabled': aqe,
-                           'spark.rapids.sql.driverlessBroadcast.maxNodes': '1'}),
+                           'spark.rapids.sql.driverlessBroadcast.maxExecutors': '1'}),
         gpu_plan_assertion=check_standard, require_non_empty=True)
 
 

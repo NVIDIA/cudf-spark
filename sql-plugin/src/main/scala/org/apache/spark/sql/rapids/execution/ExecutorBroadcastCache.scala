@@ -42,6 +42,8 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
     var borrowers = 0
   }
 
+  // Nested locking always acquires entries before an Entry. Never acquire entries while
+  // holding an Entry lock; GPU materialization and disposal run outside both locks.
   private val entries = mutable.Map.empty[Int, mutable.Map[Long, Entry]]
   private val retired = new RoaringBitmap
 
