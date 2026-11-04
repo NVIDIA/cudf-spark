@@ -15,16 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "350"}
-{"spark": "351"}
-{"spark": "352"}
-{"spark": "353"}
-{"spark": "354"}
-{"spark": "355"}
-{"spark": "356"}
-{"spark": "357"}
-{"spark": "358"}
-{"spark": "359"}
+{"spark":["350","400","411"],"carryForward":"sameMinor"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.iceberg
 
@@ -1421,6 +1412,28 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
 
     assertBatch(numRows = 2, firstPosition = 500L)
     assertBatch(numRows = 4, firstPosition = 502L)
+  }
+
+  test("Metadata-only partition constants prevent incompatible file combining") {
+    val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(1, "a", Types.LongType.get()))
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema)
+
+    def processor(value: Long): GpuParquetReaderPostProcessor = {
+      val constants = new JHashMap[Integer, Any]()
+      constants.put(1, value)
+      new GpuParquetReaderPostProcessor(
+        parquetInfo, constants, expectedSchema, shadedSchema, Map.empty)
+    }
+
+    val first = processor(10L)
+    val same = processor(10L)
+    val different = processor(20L)
+    assert(first.compatibleForCombining(same))
+    assert(same.compatibleForCombining(first))
+    assert(!first.compatibleForCombining(different))
+    assert(!different.compatibleForCombining(first))
   }
 
   test("Physical lineage constants prevent incompatible file combining") {

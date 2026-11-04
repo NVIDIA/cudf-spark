@@ -29,9 +29,11 @@ import tempfile
 import time
 
 from get_buildvers import _get_buildvers
+from shimpler_source_graph import load_source_graph, source_lineage
+from shimpler_source_resolver import resolve_sources_with_ties, scan_module_sources
+from shimpler_source_targets import EXTERNAL_EXACT_TARGETS
 
 
-SHIM_TAG = "spark-rapids-shim-json-lines"
 MAX_PEER_CHECKS = 5
 VERSIONED = re.compile(r"^(.*)/src/main/spark([^/]+)/(scala|java)/(.+)$")
 PACKAGE = re.compile(r"(?m)^\s*package\s+([\w.]+)")
@@ -40,6 +42,18 @@ DECLARATION = re.compile(
     r"|public|sealed|abstract|final|case)\s+)*"
     r"(?:class|object|trait|interface|enum)\s+(\w+)")
 IMPORT = re.compile(r"(?m)^\s*import\s+([^\n;{]+(?:\{[^}]*\}[^\n;]*)?)")
+LEGACY_EXACT = re.compile(
+    rb'(?m)^([ \t]*)\{[ \t]*"spark"[ \t]*:[ \t]*"([^"]+)"[ \t]*\}([ \t]*)$')
+LEGACY_DESCENDANTS = re.compile(rb'"includeDescendantShims"\s*:\s*(true|false)')
+
+
+def normalize_legacy_exact(source):
+    source = LEGACY_EXACT.sub(
+        lambda match: match[1] + b'{"spark":["' + match[2] +
+        b'"],"carryForward":"none"}' + match[3], source)
+    return LEGACY_DESCENDANTS.sub(
+        lambda match: b'"carryForward":"all"' if match[1] == b'true'
+        else b'"carryForward":"none"', source)
 
 
 class PreflightError(Exception):
@@ -78,25 +92,6 @@ def without_comments(source):
     token = re.compile(r'"""[\s\S]*?"""|"(?:\\.|[^"\\])*"|/\*[\s\S]*?\*/|//[^\n]*')
     return token.sub(lambda m: "\n" * m[0].count("\n") + " "
                      if m[0].startswith(("/", '"')) else m[0], source)
-
-
-def annotations(source, path, required=False):
-    if SHIM_TAG not in source:
-        if required:
-            raise PreflightError("{}: missing shim annotation".format(path))
-        return None
-    blocks = re.findall(r"/\*\*\* " + SHIM_TAG + r"\n(.*?)\n" + SHIM_TAG + r" \*\*\*/",
-                        source, re.DOTALL)
-    if len(blocks) != 1 or source.count(SHIM_TAG) != 2:
-        raise PreflightError("{}: malformed shim annotation".format(path))
-    try:
-        versions = [json.loads(line)["spark"] for line in blocks[0].splitlines()]
-    except (ValueError, KeyError, TypeError) as error:
-        raise PreflightError("{}: invalid shim JSON".format(path)) from error
-    if (not versions or any(not isinstance(v, str) or not v for v in versions)
-            or versions != sorted(set(versions))):
-        raise PreflightError("{}: shim versions must be nonempty, unique and sorted".format(path))
-    return set(versions)
 
 
 def named_imports(source):
@@ -141,12 +136,49 @@ def coverage(root, modules, requested):
         if unknown:
             raise PreflightError("Unknown or excluded build profiles: " + ", ".join(sorted(unknown)))
         versions &= set(requested)
+    try:
+        graphs = [load_source_graph(str(root / 'pom.xml'))]
+        scala_213 = root / 'scala2.13/pom.xml'
+        if scala_213.is_file():
+            graphs.append(load_source_graph(str(scala_213)))
+        for target in set.intersection(*(set(graph) for graph in graphs)):
+            if any(source_lineage(graph, target) != source_lineage(graphs[0], target)
+                   for graph in graphs[1:]):
+                raise PreflightError('Different source parents for %s across Scala trees' % target)
+    except ValueError as error:
+        raise PreflightError('Invalid shim source graph: %s' % error) from error
+    graph_by_target = {target: graph for graph in graphs for target in graph}
     findings, skipped, checked = [], set(), set()
     for module in modules:
         main = root / module / "src/main"
         if not main.is_dir():
             raise PreflightError("Missing module source directory: " + str(main))
-        providers, destinations, callers = defaultdict(list), defaultdict(list), []
+        try:
+            variants, unannotated = scan_module_sources(
+                str(root / module), set(graph_by_target), EXTERNAL_EXACT_TARGETS)
+        except ValueError as error:
+            raise PreflightError('Invalid shim selectors in %s: %s' % (module, error)) from error
+        unannotated_main = [path for path in unannotated if '/src/main/' in path]
+        if unannotated_main:
+            raise PreflightError('%s: missing shim annotation' % unannotated_main[0])
+        main_variants = [variant for variant in variants
+                         if variant.logical_path.startswith('src/main/')]
+        selected_by_path = defaultdict(set)
+        for version in sorted(versions):
+            graph = graph_by_target.get(version)
+            if graph is None:
+                raise PreflightError('No source graph for build profile %s' % version)
+            selected, ties = resolve_sources_with_ties(graph, main_variants, version)
+            for logical, paths in sorted(ties.items()):
+                findings.append(dict(kind='duplicate_source', module=module, buildver=version,
+                                     source=logical[len('src/main/'):],
+                                     providers=sorted(Path(path).relative_to(root).as_posix()
+                                                      for path in paths)))
+            for source in selected.values():
+                selected_by_path[Path(source.physical_path).relative_to(root).as_posix()].add(version)
+        variant_by_path = {Path(variant.physical_path).relative_to(root).as_posix(): variant
+                           for variant in main_variants}
+        providers, callers = defaultdict(list), []
         versioned_symbols = set()
         # Source roots only: never inspect target/, generated links or dependencies.
         for source_root in sorted(main.iterdir()):
@@ -159,8 +191,7 @@ def coverage(root, modules, requested):
                 relative = path.relative_to(root).as_posix()
                 source = path.read_text(encoding="utf-8")
                 versioned = VERSIONED.fullmatch(relative)
-                enabled = annotations(source, relative, required=True) if versioned else None
-                active = versions if enabled is None else versions & enabled
+                active = selected_by_path[relative] if versioned else versions
                 callers.append((relative, source, active))
                 code = without_comments(source)
                 package = PACKAGE.search(code)
@@ -171,17 +202,12 @@ def coverage(root, modules, requested):
                         if versioned:
                             versioned_symbols.add(qualified)
                 if versioned:
-                    if versioned[2] != min(enabled):
+                    variant = variant_by_path[relative]
+                    owner = min(target for selector in variant.selectors
+                                for target in selector.targets)
+                    if versioned[2] != owner:
                         raise PreflightError("{}: owner directory must be spark{}".format(
-                            relative, min(enabled)))
-                    destination = versioned[3] + "/" + versioned[4]
-                    destinations[destination].append((relative, active))
-        for destination, implementations in sorted(destinations.items()):
-            for version in sorted(versions):
-                selected = [p for p, active in implementations if version in active]
-                if len(selected) > 1:
-                    findings.append(dict(kind="duplicate_source", module=module,
-                                         buildver=version, source=destination, providers=selected))
+                            relative, owner))
         for path, source, active in callers:
             if not active:
                 continue
@@ -321,7 +347,7 @@ def path_signals(paths):
     families = {m[3] + "/" + m[4] for p in paths
                 if p.endswith((".scala", ".java")) and (m := VERSIONED.fullmatch(p))}
     matrix = any(p in ("pom.xml", "scala2.13/pom.xml", "build/get_buildvers.py",
-                       "build/shimplify.py", "build/dyn_shim_detection.py", "build/buildall",
+                       "build/shim_source_task.py", "build/dyn_shim_detection.py", "build/buildall",
                        "jenkins/version-def.sh", "jenkins/spark-premerge-build.sh",
                        ".github/workflows/mvn-verify-check.yml")
                  or p.startswith("shim-deps/") or p.startswith("scala2.13/shim-deps/")
@@ -441,7 +467,7 @@ def related_prs(root, repo, base_ref, head_ref, validated_base, branch, own_pr,
 
 
 def source_snapshot(root, tree, destination):
-    """Export data only: do not check out or execute build hooks from either tree."""
+    """Export source data, normalizing pre-migration exact tags for comparison."""
     paths = ("pom.xml", "scala2.13/pom.xml", "sql-plugin/src/main")
     entries = []
     for record in run(["git", "ls-tree", "-rz", tree, "--", *paths], root).split("\0"):
@@ -468,6 +494,9 @@ def source_snapshot(root, tree, destination):
         if not path.resolve().is_relative_to(destination.resolve()):
             raise PreflightError("Invalid source path")
         path.parent.mkdir(parents=True, exist_ok=True)
+        if relative.endswith((".scala", ".java")) and b'spark-rapids-shim-json-lines' in data:
+            # The strict selector parser still needs to compare older base/peer trees.
+            data = normalize_legacy_exact(data)
         path.write_bytes(data)
 
 
@@ -711,7 +740,8 @@ def annotation_location(root, head, finding, changed=()):
                          if re.search(r"\b" + re.escape(token) + r"\b", text)), 1)
         else:
             line = next((i for i, text in enumerate(original.splitlines(), 1)
-                         if re.search(r'"spark"\s*:\s*"' + re.escape(finding["buildver"]) + '"',
+                         if re.search(r'"spark"\s*:\s*\[[^\]]*"' +
+                                      re.escape(finding["buildver"]) + '"',
                                       text)), 1)
         return path, line
     return None

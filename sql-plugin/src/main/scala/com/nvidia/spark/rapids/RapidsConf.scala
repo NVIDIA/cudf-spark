@@ -32,11 +32,6 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.RapidsPrivateUtil
 import org.apache.spark.sql.rapids.execution.{JoinBuildSideSelection, JoinOptions, JoinStrategy}
 
-object RapidsReaderType extends Enumeration {
-  type RapidsReaderType = Value
-  val AUTO, COALESCING, MULTITHREADED, PERFILE = Value
-}
-
 object RapidsConf extends Logging with RapidsConfEntries {
   object RapidsShuffleManagerMode extends Enumeration {
     val UCX, CACHE_ONLY, MULTITHREADED = Value
@@ -63,6 +58,12 @@ object RapidsConf extends Logging with RapidsConfEntries {
   def conf(key: String): ConfBuilder = {
     new ConfBuilder(key, register)
   }
+
+  private[rapids] def shouldExplain(explain: String): Boolean =
+    !explain.equalsIgnoreCase("NONE")
+
+  private[rapids] def shouldExplainAll(explain: String): Boolean =
+    explain.equalsIgnoreCase("ALL")
 
   // default value for the OOM injection logic (no injection, for regular operation)
   private val noInjection = OomInjectionConf(
@@ -473,6 +474,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val isTestEnabled: Boolean = get(TEST_CONF)
 
+  lazy val testingForceNonAst: Set[String] = get(TEST_FORCE_NON_AST).toSet
+
   lazy val isRetryContextCheckEnabled: Boolean = get(TEST_RETRY_CONTEXT_CHECK_ENABLED)
 
   lazy val isFoldableNonLitAllowed: Boolean = get(FOLDABLE_NON_LIT_ALLOWED)
@@ -571,9 +574,9 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val explain: String = get(EXPLAIN)
 
-  lazy val shouldExplain: Boolean = !explain.equalsIgnoreCase("NONE")
+  lazy val shouldExplain: Boolean = RapidsConf.shouldExplain(explain)
 
-  lazy val shouldExplainAll: Boolean = explain.equalsIgnoreCase("ALL")
+  lazy val shouldExplainAll: Boolean = RapidsConf.shouldExplainAll(explain)
 
   lazy val chunkedReaderEnabled: Boolean = get(CHUNKED_READER)
 
@@ -670,6 +673,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val isCastFloatToIntegralTypesEnabled: Boolean = get(ENABLE_CAST_FLOAT_TO_INTEGRAL_TYPES)
 
   lazy val isProjectAstEnabled: Boolean = get(ENABLE_PROJECT_AST)
+
+  lazy val isProjectAstJitEnabled: Boolean = get(ENABLE_PROJECT_AST_JIT)
 
   lazy val isTieredProjectEnabled: Boolean = get(ENABLE_TIERED_PROJECT)
 

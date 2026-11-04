@@ -79,8 +79,9 @@ new declarations according to category:
 - Add SQL and file-format entries to `RapidsConfSqlEntries.scala`.
 - Add test, debug, and remaining general entries to `RapidsConfEntries.scala`.
 
-Keep enumeration definitions and the configuration registry in `RapidsConf.scala` so their
-singleton ownership and initialization order remain stable. See
+Keep the configuration registry and enumerations owned by `RapidsConf` in `RapidsConf.scala`
+to preserve their initialization order. Define independent enumerations and sealed value types
+in a module shared by their consumers, such as `sql-plugin-api` when the type is root-safe. See
 [`Adding Configuration Properties`](docs/dev/README.md#adding-configuration-properties) for
 the complete contributor guidance.
 
@@ -130,26 +131,28 @@ to via a JSON annotation block after the copyright header:
 
 ```
 /*** spark-rapids-shim-json-lines
-{"spark": "330"}
-{"spark": "330db"}
+{"spark":["330"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 ```
 
 **Key rules:**
 - The annotation controls which build profiles include the file.
   Files **without** the annotation compile for **all** versions.
+- `carryForward` is required: `none` names exact targets, `sameMinor` includes
+  descendants in the same Spark major/minor line, and `all` includes every
+  descendant. A nearer source variant wins.
 - By convention the file lives under the alphabetically earliest
   version directory it supports:
   `sql-plugin/src/main/<lowest_buildver>/scala/...`
 - When modifying a shim, update ALL related Spark version shims
   (the same logical change may need different adaptations per
   version — do not blindly copy-paste).
-- `db` suffix (e.g., `330db`, `350db143`) = Databricks-specific shim.
+- `db` suffix (e.g., `350db143`, `400db173`) = Databricks-specific shim.
 - **Scala 2.12 vs 2.13**: `sql-plugin` shims work identically for
   both Scala versions. After modifying any `pom.xml`, run
   `./build/make-scala-version-build-files.sh 2.13` to sync.
 - **Delta Lake** uses version-specific Maven modules instead of the
-  JSON annotation (e.g., `delta-20x/`, `delta-spark330db/`). Each
+  JSON annotation (e.g., `delta-20x/`, `delta-spark350db143/`). Each
   module compiles only for its target Spark+Delta combination.
 
 #### Required shim compatibility preflight

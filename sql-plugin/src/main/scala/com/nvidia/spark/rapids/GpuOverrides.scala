@@ -406,40 +406,6 @@ trait GpuOverridesListener {
       costOptimizations: Seq[Optimization]): Unit
 }
 
-sealed trait FileFormatType
-object CsvFormatType extends FileFormatType {
-  override def toString = "CSV"
-}
-object HiveDelimitedTextFormatType extends FileFormatType {
-  override def toString = "HiveText"
-}
-object ParquetFormatType extends FileFormatType {
-  override def toString = "Parquet"
-}
-object OrcFormatType extends FileFormatType {
-  override def toString = "ORC"
-}
-object JsonFormatType extends FileFormatType {
-  override def toString = "JSON"
-}
-object AvroFormatType extends FileFormatType {
-  override def toString = "Avro"
-}
-object IcebergFormatType extends FileFormatType {
-  override def toString = "Iceberg"
-}
-object DeltaFormatType extends FileFormatType {
-  override def toString = "Delta"
-}
-
-sealed trait FileFormatOp
-object ReadFileOp extends FileFormatOp {
-  override def toString = "read"
-}
-object WriteFileOp extends FileFormatOp {
-  override def toString = "write"
-}
-
 object GpuOverrides extends Logging {
   val FLOAT_DIFFERS_GROUP_INCOMPAT =
     "when enabling these, there may be extra groups produced for floating point grouping " +
@@ -1167,8 +1133,7 @@ object GpuOverrides extends Logging {
     } else {
       wrap.runAfterTagRules()
       wrap.tagForExplain()
-      val shouldExplainAll = explain.equalsIgnoreCase("ALL")
-      wrap.explain(shouldExplainAll)
+      wrap.explain(RapidsConf.shouldExplainAll(explain))
     }
   }
 
