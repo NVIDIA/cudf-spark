@@ -72,9 +72,8 @@ object IcebergFormatVersionSupport {
   }
 
   private[iceberg] def unsupportedDefault(schema: Schema): Option[(String, String)] = {
-    def find(fields: Seq[Types.NestedField], parent: String): Option[(String, String)] = {
+    def find(fields: Seq[Types.NestedField]): Option[Types.NestedField] = {
       fields.iterator.map { field =>
-        val path = if (parent.isEmpty) field.name() else s"$parent.${field.name()}"
         val hasDefault = ShimUtils.hasInitialDefault(field)
         val fieldType = field.`type`()
 
@@ -82,18 +81,20 @@ object IcebergFormatVersionSupport {
         if (hasDefault && fieldType.isPrimitiveType &&
             (!SupportedDefaultTypeIds.contains(fieldType.typeId()) ||
               unsupportedTimestampNtz)) {
-          Some(path -> fieldType.toString)
+          Some(field)
         } else if (hasDefault && !fieldType.isPrimitiveType && !fieldType.isStructType) {
-          Some(path -> fieldType.toString)
+          Some(field)
         } else if (fieldType.isNestedType) {
-          find(fieldType.asNestedType().fields().asScala.toSeq, path)
+          find(fieldType.asNestedType().fields().asScala.toSeq)
         } else {
           None
         }
-      }.collectFirst { case Some(value) => value }
+      }.collectFirst { case Some(field) => field }
     }
 
-    find(schema.columns().asScala.toSeq, "")
+    find(schema.columns().asScala.toSeq).map { field =>
+      schema.findColumnName(field.fieldId()) -> field.`type`().toString
+    }
   }
 
   def withRequiredFields(
