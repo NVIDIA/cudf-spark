@@ -537,8 +537,15 @@ object GpuBroadcastNestedLoopJoinExecBase {
     }
   }
 
-  // A side with no columns adds no attributes, so the condition reads only the other side,
-  // and its bound ordinals index that side's batch directly.
+  /**
+   * Joins a side that has no columns with the other side. A side with no columns adds no
+   * attributes, so the condition reads only the other side, and its bound ordinals index that
+   * side's batch directly. It takes:
+   *  - Inner and Cross, building either side, with no columns on exactly one side.
+   *  - LeftSemi and LeftAnti, building right, with no columns on either side or on both.
+   *  - ExistenceJoin, building right, with no columns on the stream only.
+   * Every other input fails, naming the join type, build side and column counts.
+   */
   private def degenerateJoinIterator(
       joinType: JoinType,
       buildSide: GpuBuildSide,
@@ -550,11 +557,21 @@ object GpuBroadcastNestedLoopJoinExecBase {
       boundCondition: GpuExpression,
       opTime: GpuMetric,
       joinTime: GpuMetric): Iterator[ColumnarBatch] = {
+    val streamHasColumns = streamAttrs.nonEmpty
+    val buildHasColumns = builtBatch.numCols > 0
+    requireSupported(joinType match {
+      case _: InnerLike => streamHasColumns != buildHasColumns
+      case LeftSemi | LeftAnti =>
+        buildSide == GpuBuildRight && !(streamHasColumns && buildHasColumns)
+      case ExistenceJoin(_) => buildSide == GpuBuildRight && !streamHasColumns && buildHasColumns
+      case _ => false
+    }, joinType, buildSide, builtBatch, streamAttrs)
     (joinType, streamAttrs.isEmpty) match {
       case (_: InnerLike | LeftSemi | LeftAnti | ExistenceJoin(_), true)
           if !closeOnExcept(builtBatch)(_ => stream.hasNext) =>
         // Spark tests the condition only against a stream row, so a stream with no batch leaves
-        // the build unfiltered.
+        // the build unfiltered. A zero-row batch is still a batch, so a stream of them filters
+        // the build once.
         withResource(builtBatch)(_ => Iterator.empty)
       case (_: InnerLike, false) =>
         // Each stream row that meets the condition joins every build row. Spark tests the
