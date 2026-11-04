@@ -49,7 +49,7 @@ import org.apache.spark.storage.{BlockId, BlockManagerId, ShuffleBlockBatchId}
  * wrapper drops whatever the client's callback throws. The suite is in the ucx package so that
  * it can answer a request through the response handler the connection registers, as UCX does.
  */
-class RapidsShuffleErrorReplySuite extends RapidsShuffleTestHelper {
+class UCXShuffleRequestLifecycleSuite extends RapidsShuffleTestHelper {
   private val awaitSeconds = 30L
 
   private val reason = "the shuffle output it asked for is gone"
