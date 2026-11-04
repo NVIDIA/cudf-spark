@@ -16,7 +16,6 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark": "330"}
-{"spark": "330db"}
 {"spark": "331"}
 {"spark": "332"}
 {"spark": "333"}
@@ -126,7 +125,7 @@ object GpuFileFormatWriter extends Logging {
       plan
     } else {
       val projectList = GpuV1WriteUtils.convertGpuEmptyToNull(plan.output, partitionSet)
-      if (projectList.nonEmpty) GpuProjectExec(projectList, plan) else plan
+      if (projectList.nonEmpty) GpuProjectExec(projectList, plan)() else plan
     }
 
     val writerBucketSpec = BucketingUtilsShim.getWriterBucketSpec(bucketSpec, dataColumns,

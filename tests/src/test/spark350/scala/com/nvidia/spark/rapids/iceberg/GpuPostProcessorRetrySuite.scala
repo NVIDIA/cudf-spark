@@ -68,7 +68,7 @@ class GpuPostProcessorRetrySuite extends RmmSparkRetrySuiteBase {
   test("FetchRowPosition counters survive a retry when a later action OOMs") {
     val rowPosId = MetadataColumns.ROW_POSITION.fieldId()
     // A second projected field that does NOT exist in the file schema and is not in
-    // idToConstant. ActionBuildingVisitor lowers this to FillNull, whose execute() allocates
+    // idToConstant. BaseActionBuildingVisitor lowers this to FillNull, whose execute() allocates
     // a fresh GPU column. That second allocation is what we OOM, so FetchRowPosition is the
     // earlier action that has already committed counter state when the retry fires.
     // Use an ordinary non-metadata field id (1) — `rowPosId + 1` would collide with

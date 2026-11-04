@@ -136,7 +136,6 @@ class DynamicPruningSuite
 
       val filter = spark.sql("select filter from dim").first()(0)
 
-      ExecutionPlanCaptureCallback.startCapture()
       val df = spark.sql(s"""
           SELECT fact.key, sum(fact.value)
           FROM fact
@@ -164,7 +163,6 @@ class DynamicPruningSuite
 
       val filter = spark.sql("select filter from dim").first()(0)
 
-      ExecutionPlanCaptureCallback.startCapture()
       val df = spark.sql(s"""
           SELECT fact.key, sum(fact.value)
           FROM fact
