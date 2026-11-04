@@ -24,8 +24,8 @@ import com.nvidia.spark.rapids.shims.OperatorsUtilShims
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, ExprId}
-import org.apache.spark.sql.catalyst.plans.{Cross, ExistenceJoin, Inner, InnerLike, JoinType,
-  LeftAnti, LeftOuter, LeftSemi, RightOuter}
+import org.apache.spark.sql.catalyst.plans.{Cross, ExistenceJoin, FullOuter, Inner, InnerLike,
+  JoinType, LeftAnti, LeftOuter, LeftSemi, RightOuter}
 import org.apache.spark.sql.functions.broadcast
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.GpuGreaterThan
@@ -76,10 +76,15 @@ class BroadcastNestedLoopJoinSuite extends SparkQueryCompareTestSuite {
   }
 
   private val streamAttr = AttributeReference("a", IntegerType, nullable = true)()
-  private val condition = GpuGreaterThan(
-    GpuBoundReference(0, IntegerType, nullable = true)(ExprId(0), "a"),
-    GpuLiteral(5, IntegerType))
   private val existsAttr = AttributeReference("exists", BooleanType, nullable = false)()
+
+  private def column(ordinal: Int, name: String): GpuExpression =
+    GpuBoundReference(ordinal, IntegerType, nullable = true)(ExprId(ordinal), name)
+
+  // With columns on one side only, the condition reads that side's column at ordinal 0.
+  private val condition = GpuGreaterThan(column(0, "a"), GpuLiteral(5, IntegerType))
+
+  private def matches(v: Integer): Boolean = v != null && v > 5
 
   // Fails the test if the join evaluates it.
   private case class FailIfEvaluated() extends GpuLeafExpression {
@@ -99,7 +104,7 @@ class BroadcastNestedLoopJoinSuite extends SparkQueryCompareTestSuite {
     }
   }
 
-  // The join types and build sides that nestedLoopJoin handles with a condition
+  // The join types and build sides that tagPlanForGpu runs on the GPU with a condition
   private val joinShapes = Seq[(String, JoinType, GpuBuildSide)](
     ("Inner", Inner, GpuBuildLeft),
     ("Inner", Inner, GpuBuildRight),
@@ -111,9 +116,40 @@ class BroadcastNestedLoopJoinSuite extends SparkQueryCompareTestSuite {
     ("LeftAnti", LeftAnti, GpuBuildRight),
     ("ExistenceJoin", ExistenceJoin(existsAttr), GpuBuildRight))
 
+  // The join types and build sides that tagPlanForGpu sends to the CPU. ExistenceJoin building
+  // left, and Inner and Cross with no columns on either side, have tests of their own.
+  private val unsupportedShapes = Seq[(String, JoinType, GpuBuildSide)](
+    ("LeftOuter", LeftOuter, GpuBuildLeft),
+    ("RightOuter", RightOuter, GpuBuildRight),
+    ("FullOuter", FullOuter, GpuBuildLeft),
+    ("FullOuter", FullOuter, GpuBuildRight),
+    ("LeftSemi", LeftSemi, GpuBuildLeft),
+    ("LeftAnti", LeftAnti, GpuBuildLeft))
+
+  // Which sides have columns, as (stream, build)
+  private val columnPresences = Seq(
+    "a rows-only build" -> ((true, false)),
+    "a rows-only stream" -> ((false, true)),
+    "no columns on either side" -> ((false, false)),
+    "columns on both sides" -> ((true, true)))
+
+  private val streams = Seq(
+    "no stream batch" -> Seq.empty[Seq[Integer]],
+    "only zero-row stream batches" -> Seq(Seq.empty[Integer], Seq.empty[Integer]),
+    "mixed stream batches" ->
+      Seq(Seq[Integer](null, 0, 5, 6, 9), Seq.empty[Integer], Seq[Integer](6, 9)))
+
+  // An empty build, one with no row above 5, and one with two
+  private val builds = Seq(Seq.empty[Integer], Seq[Integer](null, 0, 5),
+    Seq[Integer](null, 6, 0, 9))
+
   private def intBatch(values: Seq[Integer]): ColumnarBatch =
     new ColumnarBatch(Array(GpuColumnVector.from(
       ColumnVector.fromBoxedInts(values: _*), IntegerType)), values.length)
+
+  // A side without columns keeps only the number of values.
+  private def batch(values: Seq[Integer], hasColumns: Boolean): ColumnarBatch =
+    if (hasColumns) intBatch(values) else new ColumnarBatch(Array.empty, values.length)
 
   private def rowsOf(cb: ColumnarBatch): Seq[Seq[Any]] = {
     val columns = (0 until cb.numCols()).map { i =>
@@ -133,20 +169,72 @@ class BroadcastNestedLoopJoinSuite extends SparkQueryCompareTestSuite {
     (0 until cb.numRows()).map(r => columns.map(_(r)))
   }
 
+  // The condition binds to the first table's columns, then the second's. The first table is the
+  // right one for RightOuter and the left one otherwise.
+  private def firstIsStream(joinType: JoinType, buildSide: GpuBuildSide): Boolean =
+    (joinType == RightOuter) == (buildSide == GpuBuildLeft)
+
+  // The conditions to join with for each mix of columns, and which stream and build values each
+  // matches. With no columns on either side, the condition reads nothing.
+  private def conditions(
+      joinType: JoinType,
+      buildSide: GpuBuildSide,
+      streamHasColumns: Boolean,
+      buildHasColumns: Boolean): Seq[(String, GpuExpression, (Integer, Integer) => Boolean)] =
+    (streamHasColumns, buildHasColumns) match {
+      case (true, false) => Seq(("stream > 5", condition, (s, _) => matches(s)))
+      case (false, true) => Seq(("build > 5", condition, (_, b) => matches(b)))
+      case (false, false) => Seq[Any](true, false, null).map { value =>
+        val matched = (_: Integer, _: Integer) => value == true
+        (s"literal $value", GpuLiteral(value, BooleanType), matched)
+      }
+      case (true, true) =>
+        val (s, b) = if (firstIsStream(joinType, buildSide)) (0, 1) else (1, 0)
+        Seq(("stream > build", GpuGreaterThan(column(s, "a"), column(b, "b")),
+          (sv, bv) => sv != null && bv != null && sv > bv))
+    }
+
+  // Spark's result: a stream row and a build row join when `matched` holds for them. The output
+  // takes the left side's columns, then the right side's, and a side without columns adds none.
+  private def expected(
+      joinType: JoinType,
+      buildSide: GpuBuildSide,
+      stream: Seq[Integer],
+      streamHasColumns: Boolean,
+      build: Seq[Integer],
+      buildHasColumns: Boolean,
+      matched: (Integer, Integer) => Boolean): Seq[Seq[Any]] = {
+    def side(v: Integer, hasColumns: Boolean): Seq[Any] = if (hasColumns) Seq(v) else Seq.empty
+    stream.flatMap { s =>
+      val buildMatches = build.filter(b => matched(s, b))
+      def joined(b: Integer): Seq[Any] = if (buildSide == GpuBuildLeft) {
+        side(b, buildHasColumns) ++ side(s, streamHasColumns)
+      } else {
+        side(s, streamHasColumns) ++ side(b, buildHasColumns)
+      }
+      joinType match {
+        case _: InnerLike => buildMatches.map(joined)
+        case LeftOuter | RightOuter =>
+          if (buildMatches.isEmpty) Seq(joined(null)) else buildMatches.map(joined)
+        case LeftSemi => if (buildMatches.nonEmpty) Seq(side(s, streamHasColumns)) else Seq.empty
+        case LeftAnti => if (buildMatches.isEmpty) Seq(side(s, streamHasColumns)) else Seq.empty
+        case _ => Seq(side(s, streamHasColumns) :+ buildMatches.nonEmpty)
+      }
+    }
+  }
+
   private def nestedLoopJoin(
       joinType: JoinType,
       buildSide: GpuBuildSide,
       build: => ColumnarBatch,
       stream: Seq[() => ColumnarBatch],
       streamHasColumns: Boolean,
-      boundCondition: GpuExpression = condition): Seq[Seq[Any]] = {
-    // The condition binds to the first table's columns, then the second's. The side with no
-    // columns adds none, so the condition reads ordinal 0 of the side that has the column.
-    val firstIsStream = (joinType == RightOuter) == (buildSide == GpuBuildLeft)
-    val numFirstTableColumns = if (firstIsStream == streamHasColumns) 1 else 0
+      boundCondition: GpuExpression): Seq[Seq[Any]] = {
     val streamAttrs = if (streamHasColumns) Seq(streamAttr) else Seq.empty
     withGpuSparkSession { _ =>
       withResource(build) { buildCb =>
+        val numFirstTableColumns =
+          if (firstIsStream(joinType, buildSide)) streamAttrs.size else buildCb.numCols()
         withResource(LazySpillableColumnarBatch(buildCb, "build")) { builtBatch =>
           val streamBatches = stream.iterator.map { make =>
             withResource(make())(LazySpillableColumnarBatch(_, "stream"))
@@ -162,33 +250,44 @@ class BroadcastNestedLoopJoinSuite extends SparkQueryCompareTestSuite {
     }
   }
 
-  private def matches(v: Integer): Boolean = v != null && v > 5
-
   private def sorted(rows: Seq[Seq[Any]]): Seq[Seq[Any]] = rows.sortBy(_.toString)
 
-  for ((name, joinType, buildSide) <- joinShapes) {
-    test(s"$name $buildSide nested loop join accepts a rows-only build") {
-      val streamValues = Seq(Seq[Integer](null, 0, 5, 6, 9), Seq.empty[Integer], Seq[Integer](6, 9))
-      val stream = streamValues.flatten
-      for (buildRows <- Seq(0, 1, 3)) {
-        withClue(s"build rows $buildRows: ") {
-          val matched = (v: Integer) => buildRows > 0 && matches(v)
-          val expected = joinType match {
-            case _: InnerLike => stream.filter(matched).flatMap(v => Seq.fill(buildRows)(Seq(v)))
-            case LeftOuter | RightOuter =>
-              stream.flatMap(v => Seq.fill(if (matched(v)) buildRows else 1)(Seq(v)))
-            case LeftSemi => stream.filter(matched).map(Seq(_))
-            case LeftAnti => stream.filterNot(matched).map(Seq(_))
-            case _ => stream.map(v => Seq(v, matched(v)))
-          }
-          val actual = nestedLoopJoin(joinType, buildSide,
-            new ColumnarBatch(Array.empty, buildRows),
-            streamValues.map(values => () => intBatch(values)), streamHasColumns = true)
-          assertResult(sorted(expected))(sorted(actual))
+  // tagPlanForGpu sends these joins to the CPU. If one reaches nestedLoopJoin, it fails naming
+  // the join type and build side, before it reads either side.
+  private def assertRejected(
+      joinType: JoinType,
+      buildSide: GpuBuildSide,
+      streamHasColumns: Boolean,
+      buildHasColumns: Boolean,
+      boundCondition: GpuExpression): Unit = {
+    val e = intercept[IllegalArgumentException] {
+      nestedLoopJoin(joinType, buildSide, batch(Seq[Integer](0, 6), buildHasColumns),
+        Seq(() => batch(Seq[Integer](0, 6), streamHasColumns)), streamHasColumns,
+        boundCondition)
+    }
+    assert(e.getMessage.contains(s"$joinType") && e.getMessage.contains(s"$buildSide"),
+      e.getMessage)
+  }
+
+  for ((name, joinType, buildSide) <- joinShapes;
+       (presence, (streamHasColumns, buildHasColumns)) <- columnPresences
+       if streamHasColumns || buildHasColumns || !joinType.isInstanceOf[InnerLike]) {
+    test(s"$name $buildSide nested loop join with $presence") {
+      for ((streamName, stream) <- streams; build <- builds;
+           (conditionName, cond, matched) <-
+             conditions(joinType, buildSide, streamHasColumns, buildHasColumns)) {
+        withClue(s"$streamName, build $build, $conditionName: ") {
+          val want = expected(joinType, buildSide, stream.flatten, streamHasColumns, build,
+            buildHasColumns, matched)
+          val actual = nestedLoopJoin(joinType, buildSide, batch(build, buildHasColumns),
+            stream.map(values => () => batch(values, streamHasColumns)), streamHasColumns, cond)
+          assertResult(sorted(want))(sorted(actual))
         }
       }
     }
+  }
 
+  for ((name, joinType, buildSide) <- joinShapes) {
     test(s"$name $buildSide nested loop join skips the condition over an empty rows-only build") {
       // Spark tests the condition only against a build row.
       val stream = Seq[Integer](null, 0, 6)
@@ -202,60 +301,60 @@ class BroadcastNestedLoopJoinSuite extends SparkQueryCompareTestSuite {
       assertResult(sorted(expected))(sorted(actual))
     }
 
+    test(s"$name $buildSide nested loop join with a rows-only build skips the condition " +
+        "when the stream has no batch") {
+      // Spark tests the condition only against a stream row.
+      val actual = nestedLoopJoin(joinType, buildSide, new ColumnarBatch(Array.empty, 3),
+        Seq.empty, streamHasColumns = true, boundCondition = FailIfEvaluated())
+      assertResult(Seq.empty)(actual)
+    }
+
     // The outer joins' rows-only stream path filters the build before it reads the stream.
     if (joinType != LeftOuter && joinType != RightOuter) {
-      test(s"$name $buildSide nested loop join skips the condition when the stream has no batch") {
-        // Spark tests the condition only against a stream row.
+      test(s"$name $buildSide nested loop join with a rows-only stream skips the condition " +
+          "when the stream has no batch") {
         val actual = nestedLoopJoin(joinType, buildSide, intBatch(Seq[Integer](null, 0, 6)),
           Seq.empty, streamHasColumns = false, boundCondition = FailIfEvaluated())
         assertResult(Seq.empty)(actual)
       }
     }
 
-    test(s"$name $buildSide nested loop join accepts a rows-only stream") {
-      val streamRows = Seq(5, 0, 2)
-      for (build <- Seq(Seq.empty[Integer], Seq[Integer](null, 0, 5),
-          Seq[Integer](null, 6, 0, 9))) {
-        withClue(s"build $build: ") {
-          val matched = build.filter(matches)
-          val expected = joinType match {
-            case _: InnerLike => matched.flatMap(v => Seq.fill(streamRows.sum)(Seq(v)))
-            case LeftOuter | RightOuter =>
-              (if (matched.isEmpty) Seq[Integer](null) else matched)
-                .flatMap(v => Seq.fill(streamRows.sum)(Seq(v)))
-            case LeftSemi if matched.nonEmpty => Seq.fill(streamRows.sum)(Seq.empty)
-            case LeftAnti if matched.isEmpty => Seq.fill(streamRows.sum)(Seq.empty)
-            case ExistenceJoin(_) => Seq.fill(streamRows.sum)(Seq(matched.nonEmpty))
-            case _ => Seq.empty
-          }
+    test(s"$name $buildSide nested loop join filters the build once for a rows-only stream") {
+      // A zero-row batch is still a batch, so a stream of them filters the build once too.
+      val build = Seq[Integer](null, 6, 0, 9)
+      for (streamRows <- Seq(Seq(5, 0, 2), Seq(0, 0))) {
+        withClue(s"stream batches of $streamRows rows: ") {
           val evaluated = ArrayBuffer[Int]()
-          val actual = nestedLoopJoin(joinType, buildSide, intBatch(build),
+          nestedLoopJoin(joinType, buildSide, intBatch(build),
             streamRows.map(rows => () => new ColumnarBatch(Array.empty, rows)),
             streamHasColumns = false, boundCondition = RecordEvaluations(evaluated))
-          assertResult(sorted(expected))(sorted(actual))
-          // The join filters the build once for all stream batches.
           assertResult(Seq(build.length))(evaluated)
         }
       }
     }
   }
 
-  // A NOT EXISTS subquery whose predicate folds to false plans a LEFT ANTI join with that condition
-  // over two sides with no columns.
-  for ((name, joinType) <- Seq(("LeftSemi", LeftSemi), ("LeftAnti", LeftAnti))) {
-    test(s"$name GpuBuildRight nested loop join accepts rows-only build and stream") {
-      val streamRows = Seq(5, 0, 2)
-      for (buildRows <- Seq(0, 3)) {
-        withClue(s"build rows $buildRows: ") {
-          val expected =
-            if (joinType == LeftAnti) Seq.fill(streamRows.sum)(Seq.empty) else Seq.empty
-          val actual = nestedLoopJoin(joinType, GpuBuildRight,
-            new ColumnarBatch(Array.empty, buildRows),
-            streamRows.map(rows => () => new ColumnarBatch(Array.empty, rows)),
-            streamHasColumns = false, boundCondition = GpuLiteral(false, BooleanType))
-          assertResult(expected)(actual)
-        }
-      }
+  for ((name, joinType, buildSide) <- unsupportedShapes;
+       (presence, (streamHasColumns, buildHasColumns)) <- columnPresences
+       if streamHasColumns != buildHasColumns) {
+    test(s"$name $buildSide nested loop join with $presence is rejected") {
+      assertRejected(joinType, buildSide, streamHasColumns, buildHasColumns, condition)
+    }
+  }
+
+  for ((name, joinType, buildSide) <- joinShapes if joinType.isInstanceOf[InnerLike]) {
+    test(s"$name $buildSide nested loop join with no columns on either side is rejected") {
+      assertRejected(joinType, buildSide, streamHasColumns = false, buildHasColumns = false,
+        GpuLiteral(false, BooleanType))
+    }
+  }
+
+  // The existence join's iterators take the stream as the outer side, which only building right
+  // gives.
+  for ((presence, (streamHasColumns, buildHasColumns)) <- columnPresences) {
+    test(s"ExistenceJoin GpuBuildLeft nested loop join with $presence is rejected") {
+      assertRejected(ExistenceJoin(existsAttr), GpuBuildLeft, streamHasColumns, buildHasColumns,
+        FailIfEvaluated())
     }
   }
 }
