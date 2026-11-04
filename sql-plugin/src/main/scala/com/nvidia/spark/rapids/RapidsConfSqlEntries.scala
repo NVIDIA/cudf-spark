@@ -28,9 +28,9 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
       "Can be enabled or disabled per query. " +
       "Uses UCX GPU shuffle; the build decoder accepts uncompressed and compressed batches. " +
       "Hash-table reuse must be disabled. Null-aware anti joins, skew-optimized joins, " +
-      "and joins containing subqueries retain the standard path. Non-AQE joins can share " +
-      "a reused GPU build shuffle. Known duplicate AQE builds retain standard " +
-      "broadcast before materialization. Only deterministic builds with flat scalar schemas " +
+      "and joins containing subqueries retain the standard path. Eligible GPU joins can " +
+      "share a build shuffle with or without AQE. Builds shared with standard broadcast " +
+      "consumers retain standard broadcast before materialization. Deterministic flat schemas " +
       "are eligible. Opaque RDD sources retain standard broadcast. " +
       "Dynamic allocation is unsupported. Compressed-batch decoding is supported, but " +
       "compressed UCX transport requires independent lifetime and platform qualification.")

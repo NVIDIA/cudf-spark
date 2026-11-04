@@ -121,13 +121,9 @@ object DriverlessBroadcastStage {
       }
       val conf = new RapidsConf(original.conf)
       if (GpuDriverlessBroadcastHashJoinExec.planRejections(original, conf).nonEmpty) return
-      // AQE introduces exchange reuse after this preparation rule. Preserve real broadcast
-      // payloads for duplicate builds before submitting a token-producing shuffle stage.
-      val duplicates = if (original.conf.exchangeReuseEnabled) {
-        original.collect { case exchange: BroadcastExchangeExec => exchange.canonicalized }
-          .groupBy(identity).collect { case (build, copies) if copies.size > 1 => build }.toSeq
-      } else Seq.empty[SparkPlan]
-      val shared = GpuDriverlessBroadcastHashJoinExec.sharedBuilds(original) ++ duplicates
+      // Equivalent exchanges may share a token only when every visible consumer can use
+      // the GPU build. CPU joins and subqueries still require a real broadcast payload.
+      val shared = GpuDriverlessBroadcastHashJoinExec.sharedBuilds(converted)
       val candidates = converted.collect {
         case join: GpuBroadcastHashJoinExec
             if GpuDriverlessBroadcastHashJoinExec.joinRejections(join).isEmpty =>

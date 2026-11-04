@@ -21,15 +21,21 @@ import java.util.concurrent.atomic.AtomicReference
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuite
 
+import com.nvidia.spark.rapids.GpuBuildRight
+
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.Attribute
+import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference}
+import org.apache.spark.sql.catalyst.optimizer.BuildRight
+import org.apache.spark.sql.catalyst.plans.Inner
 import org.apache.spark.sql.catalyst.plans.physical.IdentityBroadcastMode
-import org.apache.spark.sql.execution.{LeafExecNode, SparkPlan}
+import org.apache.spark.sql.execution.{LeafExecNode, SparkPlan, UnionExec}
 import org.apache.spark.sql.execution.adaptive.BroadcastQueryStageExec
-import org.apache.spark.sql.execution.exchange.BroadcastExchangeExec
+import org.apache.spark.sql.execution.exchange.{BroadcastExchangeExec, ReusedExchangeExec}
+import org.apache.spark.sql.execution.joins.BroadcastHashJoinExec
+import org.apache.spark.sql.types.LongType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 object DriverlessBroadcastCancellationSuite {
@@ -66,6 +72,44 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
       initial: GpuBroadcastExchangeExecBase.BroadcastFuture[Broadcast[Any]])
       extends GpuBroadcastExchangeExec(IdentityBroadcastMode, childPlan)(cpu) {
     override protected lazy val materializationFuture = initial
+  }
+
+  test("pure GPU consumers can share a reused AQE build with distinct output attributes") {
+    session.withActive {
+      val key = AttributeReference("key", LongType)()
+      val probe = EmptyColumnarPlan(Seq(key))
+      val child = EmptyColumnarPlan(Seq(key.newInstance()))
+      val cpu = BroadcastExchangeExec(IdentityBroadcastMode, child)
+      val exchange = GpuBroadcastExchangeExec(IdentityBroadcastMode, child)(cpu)
+      val stage = BroadcastQueryStageExec(1, exchange, cpu.canonicalized)
+      val reused = stage.newReuseInstance(2, Seq(child.output.head.newInstance()))
+      val first = GpuBroadcastHashJoinExec(Seq(key), stage.output, Inner, GpuBuildRight,
+        None, probe, stage, false)
+      val second = GpuBroadcastHashJoinExec(Seq(key), reused.output, Inner, GpuBuildRight,
+        None, probe, reused, false)
+      assert(stage.output.head.exprId != reused.output.head.exprId)
+      assert(GpuDriverlessBroadcastHashJoinExec.sharedBuilds(
+        UnionExec(Seq(first, second))).isEmpty)
+    }
+  }
+
+  test("a CPU consumer keeps an equivalent shared GPU build on standard broadcast") {
+    session.withActive {
+      val key = AttributeReference("key", LongType)()
+      val probe = EmptyColumnarPlan(Seq(key))
+      val child = EmptyColumnarPlan(Seq(key.newInstance()))
+      val cpu = BroadcastExchangeExec(IdentityBroadcastMode, child)
+      val exchange = GpuBroadcastExchangeExec(IdentityBroadcastMode, child)(cpu)
+      val gpu = GpuBroadcastHashJoinExec(Seq(key), exchange.output, Inner, GpuBuildRight,
+        None, probe, exchange, false)
+      val reused = ReusedExchangeExec(Seq(child.output.head.newInstance()), cpu)
+      val standard = BroadcastHashJoinExec(Seq(key), reused.output, Inner, BuildRight,
+        None, probe, reused, false)
+      Seq(Seq(gpu, standard), Seq(standard, gpu)).foreach { consumers =>
+        val blocked = GpuDriverlessBroadcastHashJoinExec.sharedBuilds(UnionExec(consumers))
+        assert(blocked.exists(_.fastEquals(cpu.canonicalized)))
+      }
+    }
   }
 
   test("AQE cancellation retains the standard incomplete-broadcast behavior") {

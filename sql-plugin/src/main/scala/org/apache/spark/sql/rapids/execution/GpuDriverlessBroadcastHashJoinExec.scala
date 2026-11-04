@@ -141,19 +141,19 @@ object GpuDriverlessBroadcastHashJoinExec extends Logging {
     // The custom RDD does not execute the base join's empty/all-null NAAJ handling.
     if (join.isNullAwareAntiJoin) Some("null-aware anti join") else None,
     if (join.isSkewJoin) Some("skew-optimized broadcast join") else None,
-    if (join.exists(_.isInstanceOf[ReusedExchangeExec])) Some("join contains a reused exchange")
-      else None,
     if (join.exists(_.expressions.exists(_.exists(_.isInstanceOf[ExecSubqueryExpression])))) {
       Some("join contains a subquery")
     } else None
   ).flatten
 
-  /** Reused and subquery consumers need a real broadcast payload, not an AQE token. */
+  /** Broadcast consumers other than eligible GPU joins require a real payload, not a token. */
   private[execution] def sharedBuilds(plan: SparkPlan): Seq[SparkPlan] = {
     val blocked = ArrayBuffer.empty[SparkPlan]
     val normal = Collections.newSetFromMap(
       new IdentityHashMap[SparkPlan, JBoolean]())
     val subqueries = Collections.newSetFromMap(
+      new IdentityHashMap[SparkPlan, JBoolean]())
+    val builds = Collections.newSetFromMap(
       new IdentityHashMap[SparkPlan, JBoolean]())
     def canonical(build: SparkPlan): Unit = build match {
       case exchange: GpuBroadcastExchangeExec => blocked += exchange.cpuCanonical.canonicalized
@@ -163,19 +163,26 @@ object GpuDriverlessBroadcastHashJoinExec extends Logging {
       case reused: ReusedExchangeExec => canonical(reused.child)
       case _ =>
     }
-    def visit(node: SparkPlan, inSubquery: Boolean): Unit = {
-      val seen = if (inSubquery) subqueries else normal
+    def visit(node: SparkPlan, inSubquery: Boolean, gpuBuild: Boolean = false): Unit = {
+      val seen = if (inSubquery) subqueries else if (gpuBuild) builds else normal
       if (seen.add(node)) {
-        if (inSubquery || node.isInstanceOf[ReusedExchangeExec]) canonical(node)
+        if (inSubquery || !gpuBuild) canonical(node)
         node match {
-          case stage: QueryStageExec => visit(stage.plan, inSubquery)
-          case _ =>
+          case join: GpuBroadcastHashJoinExec if joinRejections(join).isEmpty =>
+            val (build, stream) = join.buildSide match {
+              case GpuBuildLeft => (join.left, join.right)
+              case GpuBuildRight => (join.right, join.left)
+            }
+            visit(build, inSubquery, gpuBuild = true)
+            visit(stream, inSubquery)
+          case stage: QueryStageExec => visit(stage.plan, inSubquery, gpuBuild)
+          case reused: ReusedExchangeExec => visit(reused.child, inSubquery, gpuBuild)
+          case _ => node.children.foreach(visit(_, inSubquery))
         }
         node.expressions.foreach(_.foreach {
           case subquery: ExecSubqueryExpression => visit(subquery.plan, inSubquery = true)
           case _ =>
         })
-        node.children.foreach(visit(_, inSubquery))
       }
     }
     visit(plan, inSubquery = false)
@@ -207,6 +214,8 @@ object GpuDriverlessBroadcastHashJoinExec extends Logging {
               case stage: BroadcastQueryStageExec => stage.plan match {
                 case direct: GpuBroadcastExchangeExec
                     if direct.admittedDriverlessShuffle.isDefined => Some(direct)
+                case ReusedExchangeExec(_, direct: GpuBroadcastExchangeExec)
+                    if direct.admittedDriverlessShuffle.isDefined => Some(direct)
                 case _ => None
               }
               case _ => None
@@ -231,9 +240,17 @@ object GpuDriverlessBroadcastHashJoinExec extends Logging {
                   GpuShuffleExchangeExec(GpuSinglePartitioning, exchange.child,
                     ENSURE_REQUIREMENTS)(GpuSinglePartitioning)
                 }
+                // AQE reuse changes expression IDs without changing the build's column order.
+                // Keep that consumer mapping when replacing its broadcast stage with a shuffle.
+                val gpuBuild = build match {
+                  case stage: BroadcastQueryStageExec
+                      if stage.plan.isInstanceOf[ReusedExchangeExec] =>
+                    ReusedExchangeExec(stage.output, shuffle)
+                  case _ => shuffle
+                }
                 val (left, right) = join.buildSide match {
-                  case GpuBuildLeft => (shuffle, join.right)
-                  case GpuBuildRight => (join.left, shuffle)
+                  case GpuBuildLeft => (gpuBuild, join.right)
+                  case GpuBuildRight => (join.left, gpuBuild)
                 }
                 logInfo(s"Driverless broadcast planned for join ${join.id}")
                 GpuDriverlessBroadcastHashJoinExec(join.leftKeys, join.rightKeys, join.joinType,
