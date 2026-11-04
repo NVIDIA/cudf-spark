@@ -83,7 +83,8 @@ class AcceleratedColumnarToRowIterator(
       .map(_._2)
 
   private val outputRow = new CudfUnsafeRow(packMap.map(schema(_)), unpackMap)
-  // Spark type for a column of JCUDF rows, a list of bytes per row.
+  // Spark type for a column of JCUDF rows, a list of bytes per row. No byte is null: a null
+  // field is a bit in the row's validity bytes. The type only lets the rows be spillable.
   private val rowsType = ArrayType(ByteType, containsNull = false)
   private var baseDataAddress: Long = -1
   private var at: Int = 0
