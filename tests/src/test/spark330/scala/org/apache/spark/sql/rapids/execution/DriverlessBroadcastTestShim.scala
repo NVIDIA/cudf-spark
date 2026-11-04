@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 /*** spark-rapids-shim-json-lines
-{"spark":["330","350","350db143"],"carryForward":"all"}
+{"spark":["330","350"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.execution
 
@@ -34,6 +34,9 @@ object DriverlessBroadcastTestShim {
   def join(probe: SparkPlan, build: SparkPlan): GpuBroadcastHashJoinExec =
     GpuBroadcastHashJoinExec(probe.output, build.output, Inner, GpuBuildRight,
       None, probe, build, false)
+
+  def stage(plan: SparkPlan, canonicalized: SparkPlan): BroadcastQueryStageExec =
+    BroadcastQueryStageExec(1, plan, canonicalized)
 
   def cancel(stage: BroadcastQueryStageExec): Unit = stage.cancel()
 }

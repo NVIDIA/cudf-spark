@@ -35,6 +35,9 @@ object DriverlessBroadcastTestShim {
     GpuBroadcastHashJoinExec(probe.output, build.output, Inner, GpuBuildRight,
       None, probe, build, false, false)
 
+  def stage(plan: SparkPlan, canonicalized: SparkPlan): BroadcastQueryStageExec =
+    BroadcastQueryStageExec(1, plan, canonicalized)
+
   def cancel(stage: BroadcastQueryStageExec): Unit =
     stage.cancel("Driverless broadcast cancellation regression")
 }

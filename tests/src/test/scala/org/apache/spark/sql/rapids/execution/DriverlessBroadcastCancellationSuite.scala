@@ -33,7 +33,6 @@ import org.apache.spark.sql.catalyst.optimizer.BuildRight
 import org.apache.spark.sql.catalyst.plans.Inner
 import org.apache.spark.sql.catalyst.plans.physical.IdentityBroadcastMode
 import org.apache.spark.sql.execution.{DriverlessBroadcastPlanInfoTestSupport, LeafExecNode, SparkPlan, UnionExec}
-import org.apache.spark.sql.execution.adaptive.BroadcastQueryStageExec
 import org.apache.spark.sql.execution.exchange.{BroadcastExchangeExec, ENSURE_REQUIREMENTS, ReusedExchangeExec}
 import org.apache.spark.sql.execution.joins.BroadcastHashJoinExec
 import org.apache.spark.sql.rapids.GpuShuffleEnv
@@ -172,7 +171,7 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
       val child = EmptyColumnarPlan(Seq(key.newInstance()))
       val cpu = BroadcastExchangeExec(IdentityBroadcastMode, child)
       val exchange = GpuBroadcastExchangeExec(IdentityBroadcastMode, child)(cpu)
-      val stage = BroadcastQueryStageExec(1, exchange, cpu.canonicalized)
+      val stage = DriverlessBroadcastTestShim.stage(exchange, cpu.canonicalized)
       val reused = stage.newReuseInstance(2, Seq(child.output.head.newInstance()))
       val first = DriverlessBroadcastTestShim.join(probe, stage)
       val second = DriverlessBroadcastTestShim.join(probe, reused)
@@ -257,7 +256,7 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
         try {
           val producer = exchange.admittedDriverlessShuffle.get
           val probe = GpuRangeExec(0, 4, 1, 1, Seq(key), 1024)
-          val stage = BroadcastQueryStageExec(1, exchange, cpu.canonicalized)
+          val stage = DriverlessBroadcastTestShim.stage(exchange, cpu.canonicalized)
           val join = DriverlessBroadcastTestShim.join(probe, stage)
           val conf = new RapidsConf(session.conf.getAll)
           val native = GpuDriverlessBroadcastHashJoinExec.rewrite(join, conf)
@@ -319,7 +318,7 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
       val exchange = new ControlledExchange(child, cpu, pending)
       assert(exchange.relationFuture eq pending)
       DriverlessBroadcastTestShim.cancel(
-        BroadcastQueryStageExec(1, exchange, cpu.canonicalized))
+        DriverlessBroadcastTestShim.stage(exchange, cpu.canonicalized))
       assert(pending.isCancelled)
     }
   }
@@ -364,7 +363,7 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
         assert(exchange.relationFuture eq pending)
         assert(!pending.isDone && waiter.isAlive, Option(failure.get()).toString)
         DriverlessBroadcastTestShim.cancel(
-          BroadcastQueryStageExec(1, exchange, cpu.canonicalized))
+          DriverlessBroadcastTestShim.stage(exchange, cpu.canonicalized))
         waiter.join(5000)
         assert(pending.isCancelled)
         assert(!waiter.isAlive && failure.get() != null)
