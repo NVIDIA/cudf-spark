@@ -224,6 +224,55 @@ class SourceResolverTest(unittest.TestCase):
                     selected = resolve_sources(graph, variants, target)[logical]
                     self.assertIn('/src/main/%s/' % owner, selected.physical_path)
 
+    def test_representative_repository_provider_maps(self):
+        graphs = (load_source_graph(str(ROOT / 'pom.xml')),
+                  load_source_graph(str(ROOT / 'scala2.13' / 'pom.xml')))
+        variants, _ = scan_module_sources(str(ROOT / 'sql-plugin'),
+                                          set().union(*graphs), EXTERNAL_EXACT_TARGETS)
+        selections = {}
+        for target in ('359', '413', '350db143', '400db173', '410db183', '500'):
+            graph = next(graph for graph in graphs if target in graph)
+            selections[target] = resolve_sources(graph, variants, target)
+
+        baseline = ROOT / 'build' / 'tests' / 'shimpler_source_provider_baseline.tsv'
+        for line in baseline.read_text().splitlines():
+            if line.startswith('#') or not line:
+                continue
+            targets, logical, provider = line.split('\t')
+            for target in targets.split(','):
+                with self.subTest(target=target, logical=logical):
+                    self.assertIn(logical, selections[target])
+                    actual = Path(selections[target][logical].physical_path)
+                    self.assertEqual(actual.relative_to(ROOT).as_posix(), provider)
+
+    def test_interval_and_writer_suites_cover_later_spark4(self):
+        graphs = (load_source_graph(str(ROOT / 'pom.xml')),
+                  load_source_graph(str(ROOT / 'scala2.13' / 'pom.xml')))
+        variants, _ = scan_module_sources(str(ROOT / 'tests'),
+                                          set().union(*graphs), EXTERNAL_EXACT_TARGETS)
+        suite_names = {
+            'IntervalCastSuite.scala', 'IntervalDivisionSuite.scala',
+            'IntervalMultiplySuite.scala', 'GpuIntervalUtilsTest.scala',
+            'ConcurrentWriterMetricsSuite.scala', 'OrcEncryptionSuite.scala',
+            'RapidsShuffleThreadedWriterSuite.scala',
+        }
+        for target in ('400', '411', '412', '413', '420', '500'):
+            graph = next(graph for graph in graphs if target in graph)
+            selected = resolve_sources(graph, variants, target)
+            found = {Path(logical).name for logical in selected if
+                     Path(logical).name in suite_names}
+            self.assertEqual(found, suite_names, target)
+
+    def test_failed_generation_cannot_leave_a_valid_cache_marker(self):
+        for pom in (ROOT / 'pom.xml', ROOT / 'scala2.13' / 'pom.xml'):
+            contents = pom.read_text()
+            marker_delete = '<fileset dir="${spark.shim.dest}" includes=".shim-sources-*"/>'
+            generation = '<generateShimSources/>'
+            marker_create = '<touch file="${rapids.shim.sources.cache.marker}"/>'
+            self.assertEqual(contents.count(marker_delete), 1, pom)
+            self.assertLess(contents.index(marker_delete), contents.index(generation), pom)
+            self.assertLess(contents.index(generation), contents.index(marker_create), pom)
+
     def test_source_inspector_reports_actual_selection_and_infers_scala_tree(self):
         command = [str(ROOT / 'build' / 'shimpler'), 'sources', '--target', '359',
                    '--module', 'sql-plugin', '--format=json']
