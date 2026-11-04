@@ -359,46 +359,70 @@ def test_driverless_broadcast_duplicate_build_respects_exchange_reuse(aqe):
 
 
 @ignore_order(local=True)
-@allow_non_gpu('BroadcastExchangeExec', 'BroadcastHashJoinExec', 'RLike')
+@allow_non_gpu('BroadcastExchangeExec', 'BroadcastHashJoinExec', 'RLike', 'ProjectExec', 'RangeExec')
 @pytest.mark.parametrize('aqe', ['false', 'true'])
-def test_driverless_broadcast_shared_build_with_cpu_join_keeps_standard_path(aqe):
+@pytest.mark.parametrize('cpu_build', [False, True])
+def test_driverless_broadcast_with_cpu_join_consumers(aqe, cpu_build):
     _require_ucx()
 
-    def query(spark):
-        return spark.sql('''
+    def query(spark, include_cpu=True):
+        sql = """
             WITH d AS (
                 SELECT id AS k, id AS b, IF(id % 2 = 0, '0', '1') AS pattern
                 FROM range(0, 8, 1, 4)
             )
             SELECT /*+ BROADCAST(d) */ f.id AS p, d.b, d.pattern
             FROM range(0, 128, 1, 8) f JOIN d ON f.id % 8 = d.k
-            UNION ALL
-            SELECT /*+ BROADCAST(d) */ f.id + 1000 AS p, d.b, d.pattern
-            FROM range(0, 128, 1, 8) f LEFT JOIN d
-            ON f.id % 8 = d.k AND CAST(f.id % 3 AS STRING) RLIKE d.pattern
-        ''')
+        """
+        if include_cpu:
+            sql += """
+                UNION ALL
+                SELECT /*+ BROADCAST(d) */ f.id + 1000 AS p, d.b, d.pattern
+                FROM range(0, 128, 1, 8) f LEFT JOIN d
+                ON f.id % 8 = d.k AND CAST(f.id % 3 AS STRING) RLIKE d.pattern
+            """
+        return spark.sql(sql)
 
-    def check_standard(cpu_plan, gpu_plan):
+    conf = dict(_conf, **{
+        'spark.sql.adaptive.enabled': aqe,
+        'spark.sql.exchange.reuse': 'true',
+        'spark.rapids.sql.expression.RLike': 'false'})
+    if cpu_build:
+        # Keep producer plans on CPU so the CPU exchange preserves the same canonical build.
+        conf.update({'spark.rapids.sql.exec.ProjectExec': 'false',
+                     'spark.rapids.sql.exec.RangeExec': 'false'})
+
+    def check_eligible_control(cpu_plan, gpu_plan):
+        join = _native_join(gpu_plan)
+        assert join.metrics().apply('executorBuilds').value() > 0
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: query(spark, False), conf=conf,
+        gpu_plan_assertion=check_eligible_control, require_non_empty=True)
+
+    def check_consumers(cpu_plan, gpu_plan):
         assert 'ReusedExchange' in cpu_plan.toString(), cpu_plan.toString()
         nodes = _executed_nodes(gpu_plan)
         names = [node.getClass().getSimpleName() for node in nodes]
         assert 'BroadcastHashJoinExec' in names, gpu_plan.toString()
-        assert 'GpuBroadcastHashJoinExec' in names, gpu_plan.toString()
-        assert 'GpuDriverlessBroadcastHashJoinExec' not in names, gpu_plan.toString()
-        exchanges = [node for node in nodes
-                     if node.getClass().getSimpleName() == 'GpuBroadcastExchangeExec']
-        assert exchanges, gpu_plan.toString()
-        for exchange in exchanges:
-            assert exchange.metrics().apply('driverlessBuildBytes').value() == 0
-            assert exchange.metrics().apply('driverlessStageFallbacks').value() == 0
-            assert exchange.metrics().apply('dataSize').value() > 0
+        if cpu_build:
+            assert 'GpuBroadcastHashJoinExec' in names, gpu_plan.toString()
+            assert 'GpuDriverlessBroadcastHashJoinExec' not in names, gpu_plan.toString()
+            exchanges = [node for node in nodes
+                         if node.getClass().getSimpleName() == 'GpuBroadcastExchangeExec']
+            assert exchanges, gpu_plan.toString()
+            for exchange in exchanges:
+                assert exchange.metrics().apply('driverlessBuildBytes').value() == 0
+                assert exchange.metrics().apply('driverlessStageFallbacks').value() == 0
+                assert exchange.metrics().apply('dataSize').value() > 0
+        else:
+            # GPU conversion separates the CPU and GPU build representations.
+            join = _native_join(gpu_plan)
+            assert join.metrics().apply('executorBuilds').value() > 0
+            assert join.fallbackBroadcast().metrics().apply('collectTime').value() == 0
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
-        query, conf=dict(_conf, **{
-            'spark.sql.adaptive.enabled': aqe,
-            'spark.sql.exchange.reuse': 'true',
-            'spark.rapids.sql.expression.RLike': 'false'}),
-        gpu_plan_assertion=check_standard, require_non_empty=True)
+        query, conf=conf, gpu_plan_assertion=check_consumers, require_non_empty=True)
 
 
 @ignore_order(local=True)
