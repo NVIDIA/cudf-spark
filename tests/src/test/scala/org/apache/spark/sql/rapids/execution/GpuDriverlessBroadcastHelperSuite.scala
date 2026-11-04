@@ -68,7 +68,8 @@ class GpuDriverlessBroadcastHelperSuite extends RmmSparkRetrySuiteBase {
               info(s"received bytes=$inputBytes, assembled bytes=$actualBytes, bound=$bound")
               assert(actualBytes > inputBytes, "This case must exercise concatenation growth")
               assert(!DriverlessBroadcastBuildAdmission.accepts(bound, inputBytes))
-              assert(DriverlessBroadcastBuildAdmission.accepts(bound, bound.get.toLong))
+              assert(!DriverlessBroadcastBuildAdmission.accepts(bound, bound.get.toLong))
+              assert(DriverlessBroadcastBuildAdmission.accepts(bound, bound.get.toLong + 1))
             }
           }
           assert(nonNull.getRefCount == 1 && nullable.getRefCount == 1)
