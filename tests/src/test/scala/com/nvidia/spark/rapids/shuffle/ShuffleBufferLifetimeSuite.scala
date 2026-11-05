@@ -146,7 +146,9 @@ class ShuffleBufferLifetimeSuite extends RapidsShuffleTestHelper {
     }
     val cached = closeOnExcept(device) { _ =>
       closeOnExcept(bytes) { _ =>
-        Cached(blockId, catalog.addContiguousTable(blockId, ct, -1).tableId, device, bytes)
+        withResource(ct) { _ =>
+          Cached(blockId, catalog.addContiguousTable(blockId, ct, -1).tableId, device, bytes)
+        }
       }
     }
     cleanups += (() => cached.close())
