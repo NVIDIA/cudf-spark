@@ -568,9 +568,9 @@ object GpuBroadcastNestedLoopJoinExecBase {
       case ExistenceJoin(_) => buildSide == GpuBuildRight && !streamHasColumns && buildHasColumns
       case _ => false
     }, joinType, buildSide, builtBatch, streamAttrs)
+    val noStreamBatch = streamAttrs.isEmpty && !closeOnExcept(builtBatch)(_ => stream.hasNext)
     (joinType, streamAttrs.isEmpty) match {
-      case (_: InnerLike | LeftSemi | LeftAnti | ExistenceJoin(_), true)
-          if !closeOnExcept(builtBatch)(_ => stream.hasNext) =>
+      case _ if noStreamBatch =>
         // Spark tests the condition only against a stream row, so a stream with no batch leaves
         // the build unfiltered. A zero-row batch is still a batch, so a stream of them filters
         // the build once.
