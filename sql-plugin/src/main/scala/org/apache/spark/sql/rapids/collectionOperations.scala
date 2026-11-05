@@ -982,7 +982,7 @@ case class GpuFloatArrayMin(child: Expression) extends GpuArrayMin(child) {
     val base = input.getBase()
 
     withResource(base.getChildColumnView(0)) { child =>
-      val (allNanOrNull, trueOption) = withResource(child.isNan()) { childIsNan =>
+      val (allNanOrNull, anyNan) = withResource(child.isNan()) { childIsNan =>
         // if all values in each list are nans or nulls
         val allNanOrNull = {
           val childIsNanOrNull = withResource(child.isNull()) {_.or(childIsNan)}
@@ -993,29 +993,29 @@ case class GpuFloatArrayMin(child: Expression) extends GpuArrayMin(child) {
           }
         }
         closeOnExcept(allNanOrNull) { _ =>
-          // return nan if the list contains nan, else return null
-          val trueOption = {
-            val anyNan = withResource(base.replaceListChild(childIsNan)) {
-              _.listReduce(listAny)
-            }
-            withResource(anyNan) { _ =>
-              withResource(getNanScalar) { nanScalar =>
-                // with-resource-lint: allow-deep-nesting -- #15997 keep ifElse inputs alive.
-                withResource(getNullScalar) { nullScalar =>
-                  anyNan.ifElse(nanScalar, nullScalar)
-                }
-              }
-            }
+          val anyNan = withResource(base.replaceListChild(childIsNan)) {
+            _.listReduce(listAny)
           }
-          (allNanOrNull, trueOption)
+          (allNanOrNull, anyNan)
         }
       }
-      // The per-element NaN mask is no longer needed when building the minimum option.
+      // The per-element NaN mask is no longer needed after the two reductions.
       withResource(allNanOrNull) { _ =>
+        // return nan if the list contains nan, else return null
+        val trueOption = withResource(anyNan) { _ =>
+          withResource(getNanScalar) { nanScalar =>
+            // The child view borrows data; allNanOrNull is needed by the final ifElse.
+            // with-resource-lint: allow-deep-nesting -- #15997 other owners are ifElse operands.
+            withResource(getNullScalar) { nullScalar =>
+              anyNan.ifElse(nanScalar, nullScalar)
+            }
+          }
+        }
         withResource(trueOption) { _ =>
           // replace all nans to nulls, and then find the min value.
           val falseOption = withResource(child.nansToNulls()) { nanToNullChild =>
-            // with-resource-lint: allow-deep-nesting -- #15997 keep reduction inputs alive.
+            // Both result columns are needed by the final ifElse; the child view borrows data.
+            // with-resource-lint: allow-deep-nesting -- #15997 normalized child backs this view.
             withResource(base.replaceListChild(nanToNullChild)) { nanToNullList =>
               nanToNullList.listReduce(SegmentedReductionAggregation.min())
             }
@@ -1346,19 +1346,9 @@ case class GpuArraysZip(children: Seq[Expression]) extends GpuExpression with Sh
     withResource(padded.safeMap(_.getChildColumnView(0))) { children =>
       // Put them into a struct column view
       withResource(ColumnView.makeStructView(children: _*)) { structView =>
-        // Make the struct a list using the input's offsets and validity
-        // in the cheapest way possible.
-        val proto = padded.head
-        withResource(proto.getValid) { valid =>
-          withResource(proto.getOffsets) { offsets =>
-            // with-resource-lint: allow-deep-nesting -- #15997 keep views live for copying.
-            withResource(new ColumnView(DType.LIST, proto.getRowCount,
-              java.util.Optional.of[java.lang.Long](proto.getNullCount),
-              valid, offsets, Array(structView))) { retView =>
-              // Finally copy the result out to a ColumnVector so we can return it
-              retView.copyToColumnVector()
-            }
-          }
+        // Reuse the input's offsets and validity, then copy into an owning result.
+        withResource(padded.head.replaceListChild(structView)) { retView =>
+          retView.copyToColumnVector()
         }
       }
     }
@@ -1796,7 +1786,9 @@ case class GpuArrayRemove(left: Expression, right: Expression) extends GpuBinary
           if (lhs.getType == DType.FLOAT32 || lhs.getType == DType.FLOAT64) {
             // Compare NaN values for arrays with float or double type
             withResource(boolMaskNoNans) { _ =>
-              // with-resource-lint: allow-deep-nesting -- #15997 keep both masks live for or.
+              // Offsets borrow input data. Splitting the comparisons would require passing
+              // both masks out together and separately protecting them on exceptions.
+              // with-resource-lint: allow-deep-nesting -- #15997 keep comparison cleanup together.
               withResource(booleanMaskNansOnly(lhs, rhs)) { boolMaskNansOnly =>
                 boolMaskNoNans.or(boolMaskNansOnly)
               }
