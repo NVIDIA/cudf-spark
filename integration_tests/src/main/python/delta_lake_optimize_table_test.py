@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 
 import pytest
 
@@ -314,6 +313,14 @@ def _assert_gpu_optimize_executed(plan_callback, captured_plans, require_gpu_wri
                 plan_callback, captured_plans, class_name, "OPTIMIZE write")
 
 
+def _assert_gpu_zorder_clustering(plan_callback, captured_plans, require_shuffle=False):
+    """The write can be on the GPU while the clustering projection or shuffle is on the CPU."""
+    for class_name in ["GpuInterleaveBits", "GpuPartitionerExpr"] + (
+            ["GpuShuffleExchangeExec"] if require_shuffle else []):
+        _assert_captured_plan_contains(
+            plan_callback, captured_plans, class_name, "Z-order clustering")
+
+
 def _setup_tables(enable_deletion_vectors, cpu_path, gpu_path, partition_columns, clustering_columns,
                   conf, post_setup_func=None, write_func=_write_many_small_files):
     def setup_cpu(spark):
@@ -366,6 +373,8 @@ def _assert_optimize_parity(enable_deletion_vectors, spark_tmp_path, partition_c
         captured_plans = plan_callback.getResultsWithTimeout(10000)
         _assert_gpu_optimize_executed(
             plan_callback, captured_plans, require_gpu_write=require_gpu_write)
+        if zorder_columns:
+            _assert_gpu_zorder_clustering(plan_callback, captured_plans)
     finally:
         plan_callback.endCapture()
     # Validate the returned path for each run; metrics object is not stable across JVMs
@@ -711,9 +720,14 @@ def _delete_zorder_rows_with_deletion_vectors(spark, path):
 
 # The generated dates and timestamps include values before the Gregorian cutover, which Spark 3.x
 # refuses to write to Parquet unless the rebase mode is set.
+# Delta's Z-order clustering adds a random salt, cast(rand() ... AS tinyint), and the test harness
+# turns off GPU float-to-integral casts by default. Without them the clustering projection (and the
+# interleave-bits expression in it) silently runs on the CPU.
 _zorder_conf = copy_and_update(_optimize_conf, {
     "spark.sql.parquet.datetimeRebaseModeInWrite": "CORRECTED",
-    "spark.sql.parquet.int96RebaseModeInWrite": "CORRECTED"
+    "spark.sql.parquet.int96RebaseModeInWrite": "CORRECTED",
+    "spark.rapids.sql.castFloatToIntegralTypes.enabled": "true",
+    "spark.rapids.sql.castFloatToString.enabled": "true"
 })
 
 _zorder_dv_conf = copy_and_update(_zorder_conf, {
@@ -751,8 +765,12 @@ def test_delta_optimize_zorder_with_deletion_vectors(spark_tmp_path, partition_c
     def check(spark):
         for engine in ["CPU", "GPU"]:
             path = spark_tmp_path + "/DELTA_OPTIMIZE/" + engine
-            latest = sorted(f for f in os.listdir(path + "/_delta_log") if f.endswith(".json"))[-1]
-            lines = spark.read.text(path + "/_delta_log/" + latest)
+            # Read the log through Spark so this also works on hdfs:// and s3a:// temp paths.
+            log = spark.read.text(path + "/_delta_log/*.json") \
+                .selectExpr("value", "_metadata.file_name AS file_name") \
+                .where("file_name RLIKE '^[0-9]{20}[.]json$'")
+            latest = log.selectExpr("max(file_name)").first()[0]
+            lines = log.where(f"file_name = '{latest}'")
             def count_with_dv(action):
                 return lines.where(
                     f"get_json_object(value, '$.{action}.deletionVector') IS NOT NULL").count()
@@ -829,7 +847,15 @@ def test_delta_optimize_zorder_multiple_output_files(spark_tmp_path):
     _setup_tables(False, cpu_path, gpu_path, None, None, conf, write_func=_write_zorder_files)
     sql = lambda path: f"OPTIMIZE delta.`{path}` ZORDER BY (a, b)"
     with_cpu_session(lambda s: s.sql(sql(cpu_path)).collect(), conf=conf)
-    with_gpu_session(lambda s: s.sql(sql(gpu_path)).collect(), conf=conf)
+    plan_callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    plan_callback.startCapture()
+    try:
+        with_gpu_session(lambda s: s.sql(sql(gpu_path)).collect(), conf=conf)
+        captured_plans = plan_callback.getResultsWithTimeout(10000)
+        _assert_gpu_optimize_executed(plan_callback, captured_plans)
+        _assert_gpu_zorder_clustering(plan_callback, captured_plans, require_shuffle=True)
+    finally:
+        plan_callback.endCapture()
     cpu_data = with_cpu_session(lambda s: _read_sorted(s, cpu_path).collect(), conf=conf)
     gpu_data = with_cpu_session(lambda s: _read_sorted(s, gpu_path).collect(), conf=conf)
     assert_equal(cpu_data, gpu_data)
