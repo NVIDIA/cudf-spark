@@ -1200,7 +1200,7 @@ _keep_false_join_conf = {
             'PruneFilters', 'PropagateEmptyRelation', 'PushDownPredicates',
             'PushPredicateThroughJoin'])}
 
-def _false_condition_join(spark_tmp_table_factory, join_type, build_side):
+def _false_condition_join(spark_tmp_table_factory, join_type, build_side, select='count(*)'):
     left_table_name = spark_tmp_table_factory.get()
     right_table_name = spark_tmp_table_factory.get()
 
@@ -1208,21 +1208,23 @@ def _false_condition_join(spark_tmp_table_factory, join_type, build_side):
         spark.range(0, 4).createOrReplaceTempView(left_table_name)
         spark.range(0, 3).createOrReplaceTempView(right_table_name)
         return spark.sql(
-            'SELECT /*+ BROADCAST({}) */ count(*) FROM {} AS l {} JOIN {} AS r ON false'.format(
-                build_side, left_table_name, join_type, right_table_name))
+            'SELECT /*+ BROADCAST({}) */ {} FROM {} AS l {} JOIN {} AS r ON false'.format(
+                build_side, select, left_table_name, join_type, right_table_name))
     return do_join
 
 # With no columns on either side, an inner join's condition reads nothing, and the plugin sends
-# the join to the CPU.
+# the join to the CPU. Databricks counts a side below the join, which gives that side a column,
+# so this selects a literal.
 @allow_non_gpu('BroadcastExchangeExec', 'BroadcastNestedLoopJoinExec', *non_utc_allow)
 @pytest.mark.parametrize('build_side', ['l', 'r'], ids=idfn)
 def test_broadcast_nested_loop_join_rows_only_sides_inner_fallback(
         spark_tmp_table_factory, build_side):
     assert_gpu_fallback_collect(
-        _false_condition_join(spark_tmp_table_factory, 'INNER', build_side),
+        _false_condition_join(spark_tmp_table_factory, 'INNER', build_side, select='1'),
         'BroadcastNestedLoopJoinExec',
         conf=_keep_false_join_conf)
 
+# On Databricks the left side is counted below the join, and a merge count reads the join's output.
 @pytest.mark.parametrize('join_type', ['LEFT SEMI', 'LEFT ANTI'], ids=idfn)
 def test_broadcast_nested_loop_join_rows_only_sides_false_condition(
         spark_tmp_table_factory, join_type):

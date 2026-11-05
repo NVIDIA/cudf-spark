@@ -223,13 +223,14 @@ class BroadcastNestedLoopJoinSuite extends SparkQueryCompareTestSuite {
     }
   }
 
-  private def nestedLoopJoin(
+  // The rows of each batch the join emits
+  private def joinBatches(
       joinType: JoinType,
       buildSide: GpuBuildSide,
       build: => ColumnarBatch,
       stream: Seq[() => ColumnarBatch],
       streamHasColumns: Boolean,
-      boundCondition: GpuExpression): Seq[Seq[Any]] = {
+      boundCondition: GpuExpression): Seq[Seq[Seq[Any]]] = {
     val streamAttrs = if (streamHasColumns) Seq(streamAttr) else Seq.empty
     withGpuSparkSession { _ =>
       withResource(build) { buildCb =>
@@ -244,11 +245,20 @@ class BroadcastNestedLoopJoinSuite extends SparkQueryCompareTestSuite {
           GpuBroadcastNestedLoopJoinExecBase.nestedLoopJoin(joinType, buildSide,
             numFirstTableColumns, builtBatch, streamBatches, streamAttrs, 16, 0.75,
             Some(boundCondition), NoopMetric, NoopMetric, NoopMetric, NoopMetric)
-            .flatMap(cb => withResource(cb)(rowsOf)).toList
+            .map(cb => withResource(cb)(rowsOf)).toList
         }
       }
     }
   }
+
+  private def nestedLoopJoin(
+      joinType: JoinType,
+      buildSide: GpuBuildSide,
+      build: => ColumnarBatch,
+      stream: Seq[() => ColumnarBatch],
+      streamHasColumns: Boolean,
+      boundCondition: GpuExpression): Seq[Seq[Any]] =
+    joinBatches(joinType, buildSide, build, stream, streamHasColumns, boundCondition).flatten
 
   private def sorted(rows: Seq[Seq[Any]]): Seq[Seq[Any]] = rows.sortBy(_.toString)
 
@@ -331,6 +341,19 @@ class BroadcastNestedLoopJoinSuite extends SparkQueryCompareTestSuite {
           assertResult(Seq(build.length))(evaluated)
         }
       }
+    }
+  }
+
+  // A GPU merge reduction right above the join, which Databricks plans for count(*), reads a
+  // zero-row batch as a null result. Every stream batch but the last keeps no row here.
+  for ((name, joinType, dropped, kept) <- Seq(
+      ("LeftSemi", LeftSemi, Seq[Integer](null, 0, 5), 6),
+      ("LeftAnti", LeftAnti, Seq[Integer](6, 9), 0))) {
+    test(s"$name GpuBuildRight nested loop join with a rows-only build emits no zero-row batch") {
+      val stream = Seq(Seq.empty[Integer], dropped, Seq[Integer](0, 6))
+      val batches = joinBatches(joinType, GpuBuildRight, new ColumnarBatch(Array.empty, 3),
+        stream.map(values => () => intBatch(values)), streamHasColumns = true, condition)
+      assertResult(Seq(Seq(Seq(kept))))(batches)
     }
   }
 
