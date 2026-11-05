@@ -141,17 +141,18 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
   /**
    * Allocates a buffer id for `blockId` and passes it to `register`. The caller learns the id
    * only if this returns, so any failure once the id exists removes what was registered under it.
-   * A removal of the shuffle since the id was listed is such a failure, since that removal may
-   * have missed what `register` tracked. The adds borrow their input: each takes a reference of
-   * its own for the handle it registers, and the producer closes the input.
+   * A removal of the shuffle, or of the block's list, since the id was listed is such a failure,
+   * since that removal may have missed what `register` tracked. The adds borrow their input:
+   * each takes a reference of its own for the handle it registers, and the producer closes the
+   * input.
    */
   private def registerBuffer(blockId: ShuffleBlockId)(
       register: ShuffleBufferId => Unit): ShuffleBufferId = {
-    val (bufferId, registration) = nextShuffleBufferId(blockId)
+    val (bufferId, registration, blockBufferIds) = nextShuffleBufferId(blockId)
     val rollback: AutoCloseable = () => removeCachedHandles(Seq(bufferId))
     closeOnExcept(rollback) { _ =>
       register(bufferId)
-      checkStillListed(bufferId, registration)
+      checkStillListed(bufferId, registration, blockBufferIds)
     }
     bufferId
   }
@@ -214,10 +215,10 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
   def addDegenerateRapidsBuffer(
       blockId: ShuffleBlockId,
       meta: TableMeta): ShuffleBufferId = {
-    val (bufferId, registration) = nextShuffleBufferId(blockId)
+    val (bufferId, registration, blockBufferIds) = nextShuffleBufferId(blockId)
     trackDegenerate(bufferId, meta)
     val rollback: AutoCloseable = () => removeCachedHandles(Seq(bufferId))
-    closeOnExcept(rollback)(_ => checkStillListed(bufferId, registration))
+    closeOnExcept(rollback)(_ => checkStillListed(bufferId, registration, blockBufferIds))
     bufferId
   }
 
@@ -481,10 +482,11 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
 
   /**
    * Allocate a new shuffle buffer identifier and update the shuffle block mapping. Returns the
-   * registration the id was listed in too, so the add can check that no removal took it since.
+   * registration and the block's list the id was listed in too, so the add can check that no
+   * removal took either since.
    */
-  private def nextShuffleBufferId(
-      blockId: ShuffleBlockId): (ShuffleBufferId, ShuffleRegistration) = {
+  private def nextShuffleBufferId(blockId: ShuffleBlockId)
+      : (ShuffleBufferId, ShuffleRegistration, ArrayBuffer[ShuffleBufferId]) = {
     val info = activeShuffles.get(blockId.shuffleId)
     if (info == null) {
       throw new IllegalStateException(s"unknown shuffle ${blockId.shuffleId}")
@@ -499,26 +501,32 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
 
     // associate this new buffer with the shuffle block, inside compute so that
     // removeCachedHandles cannot drop the block's list while the id is being added
-    info.blocks.compute(blockId, (_, existing) => {
+    val listed = info.blocks.compute(blockId, (_, existing) => {
       val blockBufferIds = if (existing == null) new ArrayBuffer[ShuffleBufferId] else existing
       blockBufferIds.synchronized {
         blockBufferIds.append(id)
       }
       blockBufferIds
     })
-    (id, info)
+    (id, info, listed)
   }
 
   /**
-   * Fails an add whose shuffle was removed after `nextShuffleBufferId` listed its buffer, since
-   * the removal may have collected the buffer's id before the add tracked its handle.
+   * Fails an add whose shuffle, or whose block's list, was removed after `nextShuffleBufferId`
+   * listed its buffer, since the removal may have collected the buffer's id before the add
+   * tracked its handle.
    */
   private def checkStillListed(
       bufferId: ShuffleBufferId,
-      registration: ShuffleRegistration): Unit = {
+      registration: ShuffleRegistration,
+      blockBufferIds: ArrayBuffer[ShuffleBufferId]): Unit = {
     if (activeShuffles.get(bufferId.shuffleId) ne registration) {
       throw new IllegalStateException(
         s"shuffle ${bufferId.shuffleId} was removed during an add to ${bufferId.blockId}")
+    }
+    if (registration.blocks.get(bufferId.blockId) ne blockBufferIds) {
+      throw new IllegalStateException(
+        s"the buffers of ${bufferId.blockId} were removed during an add to it")
     }
   }
 
