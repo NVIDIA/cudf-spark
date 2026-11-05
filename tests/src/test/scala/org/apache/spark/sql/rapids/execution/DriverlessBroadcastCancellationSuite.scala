@@ -172,11 +172,11 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
       val cpu = BroadcastExchangeExec(IdentityBroadcastMode, child)
       val exchange = GpuBroadcastExchangeExec(IdentityBroadcastMode, child)(cpu)
       val stage = DriverlessBroadcastTestShim.stage(exchange, cpu.canonicalized)
-      val reused = stage.newReuseInstance(2, Seq(child.output.head.newInstance()))
+      val reused = DriverlessBroadcastTestShim.reuse(stage, Seq(child.output.head.newInstance()))
       val first = DriverlessBroadcastTestShim.join(probe, stage)
       val second = DriverlessBroadcastTestShim.join(probe, reused)
       assert(stage.output.head.exprId != reused.output.head.exprId)
-      assert(GpuDriverlessBroadcastHashJoinExec.sharedBuilds(
+      assert(DriverlessBroadcastEligibility.sharedBuilds(
         UnionExec(Seq(first, second))).isEmpty)
     }
   }
@@ -193,7 +193,7 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
       val standard = BroadcastHashJoinExec(Seq(key), reused.output, Inner, BuildRight,
         None, probe, reused, false)
       Seq(Seq(gpu, standard), Seq(standard, gpu)).foreach { consumers =>
-        val blocked = GpuDriverlessBroadcastHashJoinExec.sharedBuilds(UnionExec(consumers))
+        val blocked = DriverlessBroadcastEligibility.sharedBuilds(UnionExec(consumers))
         assert(blocked.exists(_.fastEquals(cpu.canonicalized)))
       }
     }
@@ -213,7 +213,7 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
         "spark.rapids.sql.driverlessBroadcast.enabled" -> "true",
         "spark.rapids.shuffle.mode" -> "UCX",
         "spark.rapids.sql.join.hashTable.reuse" -> "false"))
-      assert(GpuDriverlessBroadcastHashJoinExec.planRejections(gpu, conf).isEmpty)
+      assert(DriverlessBroadcastEligibility.planRejections(gpu, conf).isEmpty)
       assert(GpuDriverlessBroadcastHashJoinExec.rewrite(gpu, conf)
         .isInstanceOf[GpuDriverlessBroadcastHashJoinExec])
       assert(GpuDriverlessBroadcastHashJoinExec.rewrite(standard, conf) eq standard)
@@ -307,6 +307,19 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
         (new GpuTransitionOverrides).assertIsOnTheGpu(ReusedExchangeExec(cpu.output, invalid), conf)
       }
       assert(error.getMessage.contains("Part of the plan is not columnar"))
+    }
+  }
+
+  test("AQE rejects oversized materialized row counts before publishing a build token") {
+    session.withActive {
+      val child = EmptyColumnarPlan()
+      val cpu = BroadcastExchangeExec(IdentityBroadcastMode, child)
+      val exchange = GpuBroadcastExchangeExec(IdentityBroadcastMode, child)(cpu)
+      val stage = new DriverlessBroadcastStage(exchange, session.sparkContext)
+      stage.shuffle.metrics(GpuMetric.NUM_OUTPUT_ROWS).set(Int.MaxValue.toLong + 1)
+      val error = intercept[IllegalArgumentException] { stage.materialize() }
+      assert(error.getMessage.contains("single cuDF batch"))
+      assert(!stage.isAdmitted && stage.mapStatistics.isEmpty)
     }
   }
 

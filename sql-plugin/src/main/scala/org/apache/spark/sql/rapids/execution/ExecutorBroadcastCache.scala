@@ -125,27 +125,7 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
         beforeWait()
       }
 
-      var ready = false
-      var retryBuilder = false
-      while (!ready) {
-        checkCancelled()
-        try {
-          entry.ready.get(100, TimeUnit.MILLISECONDS)
-          ready = true
-        } catch {
-          case _: TimeoutException =>
-          case failure: ExecutionException =>
-            failure.getCause match {
-              case _: TaskKilledException | _: InterruptedException =>
-                // A peer task's cancellation does not cancel this task. Invalidation and
-                // shutdown are checked when re-entering the cache before another build.
-                checkCancelled()
-                retryBuilder = true
-                ready = true
-              case other => throw other
-            }
-        }
-      }
+      val retryBuilder = awaitReady(entry, checkCancelled)
       if (!retryBuilder) {
         checkCancelled()
         beforeBorrow()
@@ -154,41 +134,74 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
           entry.borrowers += 1
           entry.value.get
         }
-        var failure: Throwable = null
-        try {
-          // Materialization may allocate or copy from host. A lease keeps the owner alive
-          // without holding the entry lock across GPU work, retry, or synchronization.
-          result = Some(borrow(value))
-        } catch {
-          case error: Throwable =>
-            failure = error
-            throw error
-        } finally {
-          val released = entry.synchronized {
-            entry.borrowers -= 1
-            if (entry.invalidated && entry.borrowers == 0) {
-              val owned = entry.value
-              entry.value = None
-              owned
-            } else None
+        result = Some(borrowEntry(entry, value, borrow, releaseBorrowed))
+      }
+    }
+    result.get
+  }
+
+  /** A cancelled peer permits this task to compete for a fresh cache entry. */
+  private def awaitReady(entry: Entry, checkCancelled: () => Unit): Boolean = {
+    var ready = false
+    var retryBuilder = false
+    while (!ready) {
+      checkCancelled()
+      try {
+        entry.ready.get(100, TimeUnit.MILLISECONDS)
+        ready = true
+      } catch {
+        case _: TimeoutException =>
+        case failure: ExecutionException =>
+          failure.getCause match {
+            case _: TaskKilledException | _: InterruptedException =>
+              // A peer task's cancellation does not cancel this task. Invalidation and
+              // shutdown are checked when re-entering the cache before another build.
+              checkCancelled()
+              retryBuilder = true
+              ready = true
+            case other => throw other
           }
-          try {
-            released.foreach(dispose)
-          } catch {
-            case cleanup: Throwable =>
-              if (failure != null) {
-                suppress(failure, cleanup)
-              } else {
-                // Ownership has not reached the caller when retirement fails.
-                result.foreach { borrowed =>
-                  try releaseBorrowed(borrowed) catch {
-                    case secondary: Throwable => suppress(cleanup, secondary)
-                  }
-                }
-                throw cleanup
+      }
+    }
+    retryBuilder
+  }
+
+  private def borrowEntry[B](entry: Entry, value: T, borrow: T => B,
+      releaseBorrowed: B => Unit): B = {
+    var result: Option[B] = None
+    var failure: Throwable = null
+    try {
+      // Materialization may allocate or copy from host. A lease keeps the owner alive
+      // without holding the entry lock across GPU work, retry, or synchronization.
+      result = Some(borrow(value))
+    } catch {
+      case error: Throwable =>
+        failure = error
+        throw error
+    } finally {
+      val released = entry.synchronized {
+        entry.borrowers -= 1
+        if (entry.invalidated && entry.borrowers == 0) {
+          val owned = entry.value
+          entry.value = None
+          owned
+        } else None
+      }
+      try {
+        released.foreach(dispose)
+      } catch {
+        case cleanup: Throwable =>
+          if (failure != null) {
+            suppress(failure, cleanup)
+          } else {
+            // Ownership has not reached the caller when retirement fails.
+            result.foreach { borrowed =>
+              try releaseBorrowed(borrowed) catch {
+                case secondary: Throwable => suppress(cleanup, secondary)
               }
+            }
+            throw cleanup
           }
-        }
       }
     }
     result.get

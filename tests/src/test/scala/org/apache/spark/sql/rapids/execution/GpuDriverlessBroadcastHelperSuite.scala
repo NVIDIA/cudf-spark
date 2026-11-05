@@ -39,7 +39,8 @@ class GpuDriverlessBroadcastHelperSuite extends RmmSparkRetrySuiteBase {
 
   test("a spilled cached build retries GPU allocation without rebuilding its input") {
     val allocated = Rmm.getTotalBytesAllocated
-    withResource(new ExecutorBroadcastCache[SpillableColumnarBatch](_.close())) { cache =>
+    withResource(new ExecutorBroadcastCache[SpillableColumnarBatch](
+        owned => withResource(owned)(_ => ()))) { cache =>
       var builds = 0
       def read(): ColumnarBatch = cache.getOrBuild[ColumnarBatch](42, () => {
         builds += 1

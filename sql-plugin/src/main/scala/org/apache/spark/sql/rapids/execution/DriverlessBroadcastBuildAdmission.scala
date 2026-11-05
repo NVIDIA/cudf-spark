@@ -22,6 +22,12 @@ import org.apache.spark.sql.types._
 
 /** Planning eligibility and timeout conversion for the driverless build path. */
 private[execution] object DriverlessBroadcastBuildAdmission {
+  def requireSupportedRowCount(rows: Long): Unit = {
+    require(rows >= 0 && rows <= Int.MaxValue,
+      s"Driverless broadcast requires a single cuDF batch, but its build contains $rows rows; " +
+        s"the row limit is ${Int.MaxValue}.")
+  }
+
   def supportsPlan(plan: SparkPlan): Boolean = rejectionReason(plan).isEmpty
 
   def rejectionReason(plan: SparkPlan): Option[String] = {

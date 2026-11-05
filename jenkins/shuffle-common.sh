@@ -76,6 +76,7 @@ invoke_shuffle_integration_test() {
         # The UCX_TLS=^posix config removes posix from the list of memory transports
         # so that IPC regions are obtained using SysV API instead. This was done because of
         # intermittent test failures. See: https://github.com/NVIDIA/spark-rapids/issues/6572
+        env_vars+="REQUIRE_DRIVERLESS_PARALLEL_BUILD_TEST=1 "
         env_vars+="PYSP_TEST_spark_rapids_shuffle_mode=UCX "
         env_vars+="PYSP_TEST_spark_executorEnv_UCX_ERROR_SIGNALS=\"\" "
         env_vars+="PYSP_TEST_spark_executorEnv_UCX_TLS=\"^posix\" "

@@ -18,8 +18,9 @@ package org.apache.spark.sql.rapids.testing
 import scala.collection.mutable
 import scala.concurrent.duration._
 
-import org.apache.spark.{ShuffleDependency, SparkEnv}
-import org.apache.spark.scheduler.{SparkListener, SparkListenerTaskEnd, SparkListenerTaskStart}
+import org.apache.spark.{ShuffleDependency, SparkEnv, TaskContext}
+import org.apache.spark.rpc.{RpcCallContext, RpcEnv, RpcTimeout, ThreadSafeRpcEndpoint}
+import org.apache.spark.scheduler.{SparkListener, SparkListenerBlockManagerAdded, SparkListenerExecutorAdded, SparkListenerTaskEnd, SparkListenerTaskStart}
 import org.apache.spark.sql.{Dataset, Row, SparkSession}
 import org.apache.spark.sql.execution.{SparkPlan, SQLExecution}
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec
@@ -28,8 +29,68 @@ import org.apache.spark.util.ThreadUtils
 
 /** Test-only missing-output injection for the two-executor shuffle integration suite. */
 object ExecutorBroadcastFaultSupport {
-  /** Uses real task intervals to verify that independent build stages can overlap. */
-  def collectWithParallelBuilds(session: SparkSession, frame: Dataset[Row]): Array[String] = {
+  private case class BuildStarted(stageId: Int)
+
+  private class ParallelBuildGate(override val rpcEnv: RpcEnv) extends ThreadSafeRpcEndpoint {
+    private val waiting = mutable.Map.empty[Int, RpcCallContext]
+    override def receiveAndReply(context: RpcCallContext): PartialFunction[Any, Unit] = {
+      case BuildStarted(stageId) =>
+        if (waiting.contains(stageId)) {
+          context.sendFailure(new IllegalStateException("Expected one task per build stage"))
+        } else {
+          waiting(stageId) = context
+          if (waiting.size == 2) waiting.values.foreach(_.reply(true))
+        }
+    }
+    override def onStop(): Unit = {
+      if (waiting.size < 2) {
+        waiting.values.foreach(_.sendFailure(
+          new IllegalStateException("Parallel build test ended before both builds started")))
+      }
+    }
+  }
+
+  private def awaitParallelBuildSlots(session: SparkSession): Unit = {
+    val context = session.sparkContext
+    val taskCores = context.getConf.getInt("spark.task.cpus", 1)
+    if (context.isLocal) {
+      require(context.defaultParallelism >= 2 * taskCores,
+        "Parallel build test requires two local CPU task slots")
+    } else {
+      val executorCores = context.getConf.getInt("spark.executor.cores", 1)
+      val required = (2 * taskCores + executorCores - 1) / executorCores
+      val lock = new Object
+      val listener = new SparkListener {
+        override def onExecutorAdded(event: SparkListenerExecutorAdded): Unit =
+          lock.synchronized { lock.notifyAll() }
+        override def onBlockManagerAdded(event: SparkListenerBlockManagerAdded): Unit =
+          lock.synchronized { lock.notifyAll() }
+      }
+      def registered: Int = SparkEnv.get.blockManager.master.getMemoryStatus.keysIterator
+        .map(_.executorId).filter(_ != "driver").toSet.size
+      context.addSparkListener(listener)
+      val deadline = System.nanoTime() + 60.seconds.toNanos
+      try lock.synchronized {
+        while (registered < required) {
+          val remaining = deadline - System.nanoTime()
+          require(remaining > 0,
+            s"Parallel build test environment not ready: need $required registered executors")
+          lock.wait(math.max(1L, remaining / 1000000L))
+        }
+      } finally {
+        context.removeSparkListener(listener)
+      }
+    }
+  }
+
+  /**
+   * The Python overlap test supplies two one-partition builds calling the temporary
+   * driverless_parallel_build_gate UDF. Two CPU task slots must be ready before use;
+   * both task bodies must enter the gate before either can finish. No GPU work may
+   * precede the gate in a shared executor, so the fixture uses CPU range sources.
+   */
+  def collectWithParallelBuilds(session: SparkSession, sql: String): Array[String] = {
+    awaitParallelBuildSlots(session)
     val context = session.sparkContext
     val lock = new Object
     val tasks = mutable.Map.empty[Long, (Int, Long, Long)]
@@ -43,9 +104,25 @@ object ExecutorBroadcastFaultSupport {
       }
     }
     context.addSparkListener(listener)
+    val rpc = SparkEnv.get.rpcEnv
+    val gate = rpc.setupEndpoint(s"driverless-build-gate-${System.nanoTime()}",
+      new ParallelBuildGate(rpc))
+    val timeout = new RpcTimeout(60.seconds, "driverless parallel-build test timeout")
+    val function = "driverless_parallel_build_gate"
     val group = "driverless-parallel-builds"
     context.setJobGroup(group, "Verify parallel build upstreams")
     try {
+      session.udf.register(function, (value: Long) => {
+        gate.askSync[Boolean](BuildStarted(TaskContext.get().stageId()), timeout)
+        value
+      })
+      val frame = session.sql(sql)
+      require(frame.schema.fields.map(_.dataType).toSeq == Seq(LongType, LongType, LongType),
+        "Parallel build fixture must return exactly three long columns")
+      val nativeJoins = frame.queryExecution.executedPlan.collect {
+        case node if node.getClass.getSimpleName == "GpuDriverlessBroadcastHashJoinExec" => node
+      }
+      require(nativeJoins.size == 2, "Expected two driverless joins in the overlap fixture")
       val result = frame.queryExecution.toRdd
       result.getNumPartitions
       context.listenerBus.waitUntilEmpty(30000)
@@ -65,8 +142,14 @@ object ExecutorBroadcastFaultSupport {
         s"Independent build tasks did not overlap: $singleTaskStages")
       rows
     } finally {
-      context.removeSparkListener(listener)
-      context.clearJobGroup()
+      try {
+        context.cancelJobGroup(group)
+      } finally {
+        rpc.stop(gate)
+        context.removeSparkListener(listener)
+        context.clearJobGroup()
+        session.sql(s"DROP TEMPORARY FUNCTION IF EXISTS $function")
+      }
     }
   }
 

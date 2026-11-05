@@ -38,6 +38,9 @@ object DriverlessBroadcastTestShim {
   def stage(plan: SparkPlan, canonicalized: SparkPlan): BroadcastQueryStageExec =
     BroadcastQueryStageExec(1, plan, canonicalized)
 
+  def reuse(stage: BroadcastQueryStageExec, output: Seq[Attribute]): BroadcastQueryStageExec =
+    stage.newReuseInstance(2, output).asInstanceOf[BroadcastQueryStageExec]
+
   def cancel(stage: BroadcastQueryStageExec): Unit =
     stage.cancel("Driverless broadcast cancellation regression")
 }

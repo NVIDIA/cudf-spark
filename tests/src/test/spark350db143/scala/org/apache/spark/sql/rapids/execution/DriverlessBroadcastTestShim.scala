@@ -21,12 +21,14 @@ package org.apache.spark.sql.rapids.execution
 import scala.collection.concurrent.TrieMap
 
 import com.nvidia.spark.rapids.GpuBuildRight
+import com.nvidia.spark.rapids.shims.QueryStageExecShims
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.Inner
 import org.apache.spark.sql.execution.{LocalTableScanExec, SparkPlan}
 import org.apache.spark.sql.execution.adaptive.{BroadcastQueryStageExec, ExchangeQueryStageExec}
+import org.apache.spark.sql.execution.exchange.{Exchange, ReusedExchangeExec}
 
 /** Isolates Spark constructor and cancellation differences used by the shared tests. */
 object DriverlessBroadcastTestShim {
@@ -39,6 +41,11 @@ object DriverlessBroadcastTestShim {
 
   def stage(plan: SparkPlan, canonicalized: SparkPlan): BroadcastQueryStageExec =
     BroadcastQueryStageExec(1, plan, canonicalized, isSparkExchange = false)
+
+  def reuse(stage: BroadcastQueryStageExec, output: Seq[Attribute]): BroadcastQueryStageExec =
+    QueryStageExecShims.createBroadcastQueryStageExec(stage, 2,
+      ReusedExchangeExec(output, stage.plan.asInstanceOf[Exchange]),
+      stage.originalPlan, stage.isSparkExchange)
 
   def cancel(stage: BroadcastQueryStageExec): Unit =
     stage.cancel(TrieMap.empty[(SparkPlan, Boolean), ExchangeQueryStageExec], None)

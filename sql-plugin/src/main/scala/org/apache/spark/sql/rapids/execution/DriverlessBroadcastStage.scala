@@ -43,18 +43,16 @@ private[execution] class DriverlessBroadcastStage(
   def mapStatistics: Option[MapOutputStatistics] = completedStatistics
 
   def materialize(): Option[Broadcast[Any]] = {
-    val statistics = if (shuffle.inputBatchRDD.getNumPartitions == 0) {
-      None
-    } else {
-      val stage = context.submitMapStage(shuffle.shuffleDependencyColumnar)
-      try {
-        Some(ThreadUtils.awaitResult(stage,
-          DriverlessBroadcastBuildAdmission.waitTimeout(exchange.conf.broadcastTimeout)))
-      } finally {
-        if (!stage.isCompleted) stage.cancel()
-      }
+    val future = shuffle.mapOutputStatisticsFuture
+    val statistics = try {
+      Option(ThreadUtils.awaitResult(future,
+        DriverlessBroadcastBuildAdmission.waitTimeout(exchange.conf.broadcastTimeout)))
+    } finally {
+      // The exchange sets this job group before starting its build future.
+      if (!future.isCompleted) context.cancelJobGroup(exchange.runId.toString)
     }
     val rows = shuffle.metrics(GpuMetric.NUM_OUTPUT_ROWS).value
+    DriverlessBroadcastBuildAdmission.requireSupportedRowCount(rows)
     val uncompressed = shuffle.metrics(GpuShuffleExchangeExecBase.METRIC_DATA_SIZE).value
     // AQE requires materialization and runtime statistics before replanning its consumers.
     // No separate size policy changes the broadcast strategy Spark has already selected.
@@ -94,10 +92,10 @@ private[execution] class DriverlessBroadcastStage(
       exchange.gpuLongMetric(name).set(standard.gpuLongMetric(name).value)
       exchange.metrics.get(name)
     }
-    exchange.metrics("fallbackBroadcastBytes").set(standard.metrics("dataSize").value)
+    exchange.gpuLongMetric("fallbackBroadcastBytes").set(standard.metrics("dataSize").value)
     SQLMetrics.postDriverMetricUpdates(context,
       context.getLocalProperty(SQLExecution.EXECUTION_ID_KEY),
-      updated :+ exchange.metrics("fallbackBroadcastBytes"))
+      updated ++ exchange.metrics.get("fallbackBroadcastBytes"))
     result
   }
 
@@ -120,20 +118,19 @@ object DriverlessBroadcastStage {
         case _ =>
       }
       val conf = new RapidsConf(original.conf)
-      if (GpuDriverlessBroadcastHashJoinExec.planRejections(original, conf).nonEmpty) return
+      val eligibility = DriverlessBroadcastEligibility.analyze(converted, conf)
+      if (eligibility.reasons.nonEmpty) return
       // Equivalent exchanges may share a token only when every visible consumer can use
       // the GPU build. CPU joins and subqueries still require a real broadcast payload.
-      val shared = GpuDriverlessBroadcastHashJoinExec.sharedBuilds(converted)
       val candidates = converted.collect {
         case join: GpuBroadcastHashJoinExec
-            if GpuDriverlessBroadcastHashJoinExec.joinRejections(join).isEmpty =>
+            if DriverlessBroadcastEligibility.joinRejections(join).isEmpty =>
           (join.buildSide match {
             case GpuBuildLeft => join.left
             case GpuBuildRight => join.right
           }) match {
             case build: GpuBroadcastExchangeExec
-                if DriverlessBroadcastBuildAdmission.supportsPlan(build.child) &&
-                  !shared.exists(_.fastEquals(build.cpuCanonical.canonicalized)) =>
+                if eligibility.rejection(join, Some(build)).isEmpty =>
               Some(build.cpuCanonical)
             case _ => None
           }

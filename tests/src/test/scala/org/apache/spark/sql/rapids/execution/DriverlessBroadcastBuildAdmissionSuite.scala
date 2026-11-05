@@ -28,6 +28,17 @@ import org.apache.spark.sql.types._
 import org.apache.spark.storage.BlockManagerId
 
 class DriverlessBroadcastBuildAdmissionSuite extends AnyFunSuite {
+  test("single-batch row admission accepts the boundary and rejects overflow") {
+    Seq(0L, 1L, Int.MaxValue.toLong).foreach(
+      DriverlessBroadcastBuildAdmission.requireSupportedRowCount)
+    Seq(-1L, Int.MaxValue.toLong + 1, Long.MaxValue).foreach { rows =>
+      val error = intercept[IllegalArgumentException] {
+        DriverlessBroadcastBuildAdmission.requireSupportedRowCount(rows)
+      }
+      assert(error.getMessage.contains(rows.toString))
+    }
+  }
+
   test("disabled broadcast timeout and huge positive timeouts remain infinite") {
     val conf = new SQLConf
     conf.setConfString("spark.sql.broadcastTimeout", "-1")

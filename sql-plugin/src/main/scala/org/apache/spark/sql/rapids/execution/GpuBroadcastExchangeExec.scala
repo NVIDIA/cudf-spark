@@ -422,7 +422,7 @@ abstract class GpuBroadcastExchangeExecBase(
     BUILD_TIME -> createNanoTimingMetric(ESSENTIAL_LEVEL, DESCRIPTION_BUILD_TIME),
     "broadcastTime" -> createNanoTimingMetric(ESSENTIAL_LEVEL, "time to broadcast"),
     "driverlessBuildBytes" -> createSizeMetric(ESSENTIAL_LEVEL, "driverless build data size"),
-    "fallbackBroadcastBytes" -> createSizeMetric(ESSENTIAL_LEVEL, "fallback broadcast data size"),
+    "fallbackBroadcastBytes" -> createSizeMetric(DEBUG_LEVEL, "fallback broadcast data size"),
     "driverlessStageTime" -> createNanoTimingMetric(ESSENTIAL_LEVEL,
       "driverless shuffle build time"),
     "driverlessStageFallbacks" -> createMetric(ESSENTIAL_LEVEL, "driverless stage fallbacks"))

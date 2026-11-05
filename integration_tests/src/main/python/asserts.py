@@ -548,19 +548,38 @@ def assert_gpu_fallback_write_sql(write_func,
         jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.endCapture()
 
 
-def collect_plan_nodes(plan):
-    """Flatten a JVM SparkPlan into a list of nodes, parents before children.
+def collect_plan_nodes(plan, include_wrapped=False, deduplicate=False):
+    """Flatten a JVM SparkPlan, parents before children.
 
-    Intended for the gpu_plan_assertion callback of
-    assert_cpu_and_gpu_are_equal_collect_with_capture. This does not descend into
-    AdaptiveSparkPlanExec or QueryStageExec, so a caller that needs the whole tree should
-    disable AQE.
+    include_wrapped follows final adaptive plans, query stages and reused exchanges.
+    By default a shared producer is visited once per consumer; deduplicate visits
+    each (node class, plan ID) once. Existing callers retain plain children traversal.
     """
-    nodes = [plan]
-    children = plan.children().iterator()
-    while children.hasNext():
-        nodes.extend(collect_plan_nodes(children.next()))
+    nodes = []
+    seen = set()
+
+    def visit(node):
+        name = node.getClass().getSimpleName()
+        if deduplicate:
+            identity = (node.getClass().getName(), node.id())
+            if identity in seen:
+                return
+            seen.add(identity)
+        nodes.append(node)
+        if include_wrapped and name == 'AdaptiveSparkPlanExec':
+            visit(node.executedPlan())
+        elif include_wrapped and name.endswith('QueryStageExec'):
+            visit(node.plan())
+        elif include_wrapped and name == 'ReusedExchangeExec':
+            visit(node.child())
+        else:
+            children = node.children().iterator()
+            while children.hasNext():
+                visit(children.next())
+
+    visit(plan)
     return nodes
+
 
 def plan_metric(node, name):
     """Value of a named metric on a JVM plan node, or None if the node has no such metric.
