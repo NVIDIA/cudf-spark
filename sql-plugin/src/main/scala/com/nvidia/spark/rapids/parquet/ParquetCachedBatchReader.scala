@@ -90,7 +90,8 @@ private[rapids] object ParquetCachedBatchReader {
 
 /**
  * Stages cache records one at a time and bundles them independently of their stored size.
- * Encoded and decoded-size estimates limit combining, but an indivisible record always progresses.
+ * Full encoded host bytes and projected read estimates limit combining. An indivisible record
+ * always progresses; one staged lookahead record and reader/footer overhead are additional.
  */
 private[rapids] final class ParquetCachedBatchReader(
     input: Iterator[CachedBatch],
@@ -152,20 +153,27 @@ private[rapids] final class ParquetCachedBatchReader(
         closeOnExcept(ArrayBuffer(file)) { files =>
           var rows = file.info.rows.toLong
           var encoded = file.info.projectedEncodedBytes
+          // logicalFile borrows full parent buffers, even when only a few columns are read.
+          // Reuse the output batch target as a simple, practical bound on these host inputs,
+          // rather than introducing another setting or trying to predict total reader memory.
+          // Encoded inputs and decoded output differ in size; this is only a batching limit.
+          var hostBytes = file.info.encodedBytes.toLong
           var estimated = file.info.estimatedDecodedBytes
           var continue = true
           while (continue && rows < Int.MaxValue && encoded < targetBytes &&
-              estimated < targetBytes && input.hasNext) {
+              hostBytes < targetBytes && estimated < targetBytes && input.hasNext) {
             stageNext() match {
               case Left(emptyRows) =>
                 pendingEmpty = Some(emptyRows)
                 continue = false
               case Right(nextFile) =>
-                if (fits(rows, encoded, estimated, nextFile.info, targetBytes) &&
+                if (nextFile.info.encodedBytes <= targetBytes - hostBytes &&
+                    fits(rows, encoded, estimated, nextFile.info, targetBytes) &&
                     nextFile.info.parquetSchema == file.info.parquetSchema) {
                   files += nextFile
                   rows += nextFile.info.rows
                   encoded += nextFile.info.projectedEncodedBytes
+                  hostBytes += nextFile.info.encodedBytes
                   estimated += nextFile.info.estimatedDecodedBytes
                 } else {
                   pendingFile = Some(nextFile)

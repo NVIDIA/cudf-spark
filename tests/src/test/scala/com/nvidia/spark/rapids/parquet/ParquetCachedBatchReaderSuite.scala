@@ -169,7 +169,7 @@ class ParquetCachedBatchReaderSuite extends AnyFunSuite with BeforeAndAfterEach 
       val selected = StructType(schema.fields.filter(_.name == "id"))
       val info = ParquetCachedBatchFiles.describe(first, selected)
       val secondInfo = ParquetCachedBatchFiles.describe(second, selected)
-      val target = math.max(info.projectedEncodedBytes + secondInfo.projectedEncodedBytes,
+      val target = math.max(first.buffer.length.toLong + second.buffer.length,
         info.estimatedDecodedBytes + secondInfo.estimatedDecodedBytes)
       val full = ParquetCachedBatchFiles.describe(first, schema)
       assert(full.encodedBytes > info.projectedEncodedBytes)
@@ -184,6 +184,33 @@ class ParquetCachedBatchReaderSuite extends AnyFunSuite with BeforeAndAfterEach 
         assert(!reader.hasNext)
       }
     }
+  }
+
+  test("narrow projections bound full encoded host buffers and release staged lookahead") {
+    val count = 4
+    val record = encoded(0, count, dictionary = false)
+    val selected = StructType(schema.fields.filter(_.name == "id"))
+    val info = ParquetCachedBatchFiles.describe(record, selected)
+    val target = record.buffer.length.toLong + 1
+    assert(info.projectedEncodedBytes * 2 < target)
+    assert(info.estimatedDecodedBytes * 2 < target)
+    assert(record.buffer.length.toLong * 2 > target)
+    withResource(new ParquetCachedBatchReader(
+        Iterator.fill[CachedBatch](20)(record), selected, options, target, 0)) { reader =>
+      var batches = 0
+      while (reader.hasNext) {
+        withResource(reader.next()) { batch =>
+          assert(batch.numRows == count)
+          // Only this full record and at most one staged lookahead may remain registered.
+          assert(SpillFramework.stores.hostStore.numHandles <= 2)
+          assert(readValues(batch.producer.get) == (0L until count.toLong))
+        }
+        assert(SpillFramework.stores.hostStore.numHandles <= 1)
+        batches += 1
+      }
+      assert(batches == 20)
+    }
+    assert(SpillFramework.stores.hostStore.numHandles == 0)
   }
 
   test("oversize singleton progresses without consuming a following record") {
