@@ -507,7 +507,10 @@ def test_driverless_broadcast_independent_builds_overlap():
             session._jsparkSession, query('driverless_parallel_build_gate')))
         assert sorted(tuple(int(value) for value in row.split(':')) for row in rows) == expected
 
-    with_gpu_session(check, conf=dict(_conf, **{'spark.rapids.sql.exec.RangeExec': 'false'}))
+    # Keep the blocking handshake on CPUs before the first GPU semaphore acquisition.
+    with_gpu_session(check, conf=dict(_conf, **{
+        'spark.rapids.sql.exec.RangeExec': 'false',
+        'spark.rapids.sql.expression.cpuBridge.enabled': 'false'}))
 
 
 @ignore_order(local=True)
