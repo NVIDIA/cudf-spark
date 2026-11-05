@@ -19,7 +19,7 @@ from pyspark.sql.types import *
 from asserts import (assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_row_counts_equal,
                      assert_gpu_fallback_collect, assert_cpu_and_gpu_are_equal_collect_with_capture,
                      assert_cpu_and_gpu_are_equal_sql_with_capture, assert_gpu_and_cpu_are_equal_sql,
-                     collect_plan_nodes)
+                     assert_gpu_and_cpu_error, collect_plan_nodes)
 from conftest import is_dataproc_runtime, is_dataproc_serverless_runtime, is_emr_runtime
 from data_gen import *
 from marks import (allow_non_gpu, disable_ansi_mode, ignore_order, incompat, shuffle_test,
@@ -1231,7 +1231,8 @@ _keep_false_join_conf = {
             'PruneFilters', 'PropagateEmptyRelation', 'PushDownPredicates',
             'PushPredicateThroughJoin'])}
 
-def _false_condition_join(spark_tmp_table_factory, join_type, build_side, select='count(*)'):
+def _literal_condition_join(spark_tmp_table_factory, join_type, build_side, condition='false',
+                            select='count(*)'):
     left_table_name = spark_tmp_table_factory.get()
     right_table_name = spark_tmp_table_factory.get()
 
@@ -1239,8 +1240,8 @@ def _false_condition_join(spark_tmp_table_factory, join_type, build_side, select
         spark.range(0, 4).createOrReplaceTempView(left_table_name)
         spark.range(0, 3).createOrReplaceTempView(right_table_name)
         return spark.sql(
-            'SELECT /*+ BROADCAST({}) */ {} FROM {} AS l {} JOIN {} AS r ON false'.format(
-                build_side, select, left_table_name, join_type, right_table_name))
+            'SELECT /*+ BROADCAST({}) */ {} FROM {} AS l {} JOIN {} AS r ON {}'.format(
+                build_side, select, left_table_name, join_type, right_table_name, condition))
     return do_join
 
 # With no columns on either side, an inner join's condition reads nothing, and the plugin sends
@@ -1251,17 +1252,64 @@ def _false_condition_join(spark_tmp_table_factory, join_type, build_side, select
 def test_broadcast_nested_loop_join_rows_only_sides_inner_fallback(
         spark_tmp_table_factory, build_side):
     assert_cpu_and_gpu_are_equal_collect_with_capture(
-        _false_condition_join(spark_tmp_table_factory, 'INNER', build_side, select='1'),
+        _literal_condition_join(spark_tmp_table_factory, 'INNER', build_side, select='1'),
         conf=_keep_false_join_conf,
         gpu_plan_assertion=_nested_loop_join_shape('BroadcastNestedLoopJoinExec', True, False,
                                                    False))
+
+# With a literal true condition, an inner join with no columns on either side runs as an
+# unconditional join, which stays on the GPU.
+@pytest.mark.parametrize('build_side', ['l', 'r'], ids=idfn)
+def test_broadcast_nested_loop_join_rows_only_sides_inner_true_condition(
+        spark_tmp_table_factory, build_side):
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        _literal_condition_join(spark_tmp_table_factory, 'INNER', build_side, condition='true',
+                                select='1'),
+        conf=_keep_false_join_conf,
+        gpu_plan_assertion=_nested_loop_join_shape('GpuBroadcastNestedLoopJoinExec', True, False,
+                                                   False))
+
+# Without whole-stage codegen, Spark skips the stream of a semi or anti join with no condition
+# that keeps no stream row, and the GPU does the same. With codegen, Spark's stream loop reads every
+# row, so these tests turn it off. A stream that raises shows whether a join reads it.
+_raising_stream_conf = {'spark.sql.adaptive.enabled': 'false',
+                        'spark.sql.codegen.wholeStage': 'false'}
+
+def _raising_stream_join(spark_tmp_table_factory, join_type, build_length):
+    stream_table_name = spark_tmp_table_factory.get()
+    build_table_name = spark_tmp_table_factory.get()
+
+    def do_join(spark):
+        spark.range(0, 10).createOrReplaceTempView(stream_table_name)
+        gen_df(spark, [('b', int_gen)], length=build_length, num_slices=1) \
+            .createOrReplaceTempView(build_table_name)
+        return spark.sql(
+            "SELECT /*+ BROADCAST(b) */ 1 FROM (SELECT * FROM {} "
+            "WHERE raise_error(concat('boom ', id)) IS NULL) AS s {} JOIN {} AS b".format(
+                stream_table_name, join_type, build_table_name))
+    return do_join
+
+@pytest.mark.parametrize('join_type,build_length', [('LEFT ANTI', 3), ('LEFT SEMI', 0)], ids=idfn)
+def test_broadcast_nested_loop_join_count_only_skips_raising_stream(
+        spark_tmp_table_factory, join_type, build_length):
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        _raising_stream_join(spark_tmp_table_factory, join_type, build_length),
+        conf=_raising_stream_conf,
+        gpu_plan_assertion=_nested_loop_join_shape('GpuBroadcastNestedLoopJoinExec', False, False,
+                                                   False))
+
+@pytest.mark.parametrize('join_type', ['INNER', 'LEFT OUTER'], ids=idfn)
+def test_broadcast_nested_loop_join_count_only_reads_raising_stream(
+        spark_tmp_table_factory, join_type):
+    do_join = _raising_stream_join(spark_tmp_table_factory, join_type, 3)
+    assert_gpu_and_cpu_error(lambda spark: do_join(spark).collect(), _raising_stream_conf, 'boom')
 
 # On Databricks the left side is counted below the join, and a merge count reads the join's output.
 @pytest.mark.parametrize('join_type', ['LEFT SEMI', 'LEFT ANTI'], ids=idfn)
 def test_broadcast_nested_loop_join_rows_only_sides_false_condition(
         spark_tmp_table_factory, join_type):
     assert_cpu_and_gpu_are_equal_collect_with_capture(
-        _false_condition_join(spark_tmp_table_factory, join_type, 'r'),
+        _literal_condition_join(spark_tmp_table_factory, join_type, 'r'),
         exist_classes='GpuBroadcastNestedLoopJoinExec',
         conf=_keep_false_join_conf)
 
@@ -1596,15 +1644,11 @@ def test_broadcast_nested_loop_existence_join_one_sided_sequence_condition(
                                                    True))
 
 # Spark builds an existence join's left side when only the outer table is small enough to
-# broadcast. The plugin's iterators take the stream as the outer side, so such a join with a
-# condition falls back to the CPU.
-@ignore_order(local=True)
-@allow_non_gpu('BroadcastExchangeExec', 'BroadcastNestedLoopJoinExec', 'LessThan',
-               *non_utc_allow)
-@pytest.mark.parametrize('form', ['where', 'select'], ids=idfn)
-def test_broadcast_nested_loop_existence_join_build_left_fallback(spark_tmp_table_factory, form):
-    if form == 'select' and is_before_spark_340():
-        pytest.skip('EXISTS in a select list needs Spark 3.4, SPARK-30220')
+# broadcast.
+_existence_join_build_left_conf = {'spark.sql.adaptive.enabled': 'false',
+                                   'spark.sql.autoBroadcastJoinThreshold': '1024'}
+
+def _existence_join_build_left(spark_tmp_table_factory, form, predicate):
     outer_table_name = spark_tmp_table_factory.get()
     sub_table_name = spark_tmp_table_factory.get()
 
@@ -1613,14 +1657,40 @@ def test_broadcast_nested_loop_existence_join_build_left_fallback(spark_tmp_tabl
             .createOrReplaceTempView(outer_table_name)
         spark.range(0, 1000).selectExpr('CAST(id AS INT) AS b') \
             .createOrReplaceTempView(sub_table_name)
-        exists = 'EXISTS (SELECT 1 FROM {} AS s WHERE s.b < t.a)'.format(sub_table_name)
+        exists = 'EXISTS (SELECT 1 FROM {} AS s WHERE {})'.format(sub_table_name, predicate)
         if form == 'where':
             return spark.sql('SELECT * FROM {} AS t WHERE t.c > 5 OR {}'.format(
                 outer_table_name, exists))
         return spark.sql('SELECT t.a, {} AS e FROM {} AS t'.format(exists, outer_table_name))
-    assert_gpu_fallback_collect(do_join, 'BroadcastNestedLoopJoinExec',
-                                conf={'spark.sql.adaptive.enabled': 'false',
-                                      'spark.sql.autoBroadcastJoinThreshold': '1024'})
+    return do_join
+
+# The plugin's iterators take the stream as the outer side, so an existence join building left
+# with a condition falls back to the CPU.
+@ignore_order(local=True)
+@allow_non_gpu('BroadcastExchangeExec', 'BroadcastNestedLoopJoinExec', 'LessThan',
+               *non_utc_allow)
+@pytest.mark.parametrize('form', ['where', 'select'], ids=idfn)
+def test_broadcast_nested_loop_existence_join_build_left_fallback(spark_tmp_table_factory, form):
+    if form == 'select' and is_before_spark_340():
+        pytest.skip('EXISTS in a select list needs Spark 3.4, SPARK-30220')
+    assert_gpu_fallback_collect(
+        _existence_join_build_left(spark_tmp_table_factory, form, 's.b < t.a'),
+        'BroadcastNestedLoopJoinExec',
+        conf=_existence_join_build_left_conf)
+
+# t.a <= t.a folds to a literal true condition, so the existence join building left runs as an
+# unconditional join, which stays on the GPU.
+@ignore_order(local=True)
+@pytest.mark.parametrize('form', ['where', 'select'], ids=idfn)
+def test_broadcast_nested_loop_existence_join_build_left_true_condition(
+        spark_tmp_table_factory, form):
+    if form == 'select' and is_before_spark_340():
+        pytest.skip('EXISTS in a select list needs Spark 3.4, SPARK-30220')
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        _existence_join_build_left(spark_tmp_table_factory, form, 't.a <= t.a'),
+        conf=_existence_join_build_left_conf,
+        gpu_plan_assertion=_nested_loop_join_shape('GpuBroadcastNestedLoopJoinExec', True, True,
+                                                   False))
 
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', [StringGen(), IntegerGen()], ids=idfn)
