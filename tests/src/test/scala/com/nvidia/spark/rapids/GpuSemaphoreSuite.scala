@@ -16,6 +16,9 @@
 
 package com.nvidia.spark.rapids
 
+import scala.collection.mutable.ArrayBuffer
+
+import com.nvidia.spark.rapids.Arm.withResource
 import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito._
 import org.scalatest.BeforeAndAfterEach
@@ -26,6 +29,8 @@ import org.scalatestplus.mockito.MockitoSugar
 
 import org.apache.spark.TaskContext
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
+import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class GpuSemaphoreSuite extends AnyFunSuite
@@ -124,43 +129,58 @@ class GpuSemaphoreSuite extends AnyFunSuite
     }
   }
 
-  test("HostColumnarToGpu releases the semaphore before pulling host batches") {
+  test("HostToGpuCoalesceIterator releases the semaphore only while next() pulls host batches") {
     GpuDeviceManager.setRmmTaskInitEnabled(false)
-    val context1 = mockContext(1)
+    val context1 = new MockTaskContext(taskAttemptId = 1, partitionId = 0)
     val context2 = mockContext(2)
     // With one concurrent GPU task, task 2 gets the semaphore only if task 1 released it.
-    var calls = 0
-    def assertReleased(): Unit = {
-      calls += 1
-      assertAcquired(GpuSemaphore.tryAcquire(context2))
-      GpuSemaphore.releaseIfNecessary(context2)
+    def released: Boolean = GpuSemaphore.tryAcquire(context2) match {
+      case SemaphoreAcquired =>
+        GpuSemaphore.releaseIfNecessary(context2)
+        true
+      case AcquireFailed(_) => false
     }
+    var inNext = false
+    // Whether each pull of a host batch happened in next() and with the semaphore released
+    val pulls = ArrayBuffer[(Boolean, Boolean)]()
+    // Rows without columns, as for a count(), so that the GPU batches hold no device memory
     val hostBatches = new Iterator[ColumnarBatch] {
-      private var remaining = 2
+      private var remaining = 3
       override def hasNext: Boolean = {
-        assertReleased()
+        pulls += ((inNext, released))
         remaining > 0
       }
       override def next(): ColumnarBatch = {
-        assertReleased()
+        pulls += ((inNext, released))
         remaining -= 1
-        new ColumnarBatch(Array.empty, 0)
+        new ColumnarBatch(Array.empty, 1)
       }
     }
-    try {
-      GpuSemaphore.acquireIfNecessary(context1)
-      val iter = HostColumnarToGpu.releasingSemaphore(hostBatches, context1)
-      while (iter.hasNext) {
-        // Held again before next(), so that its own release is checked.
+    TestUtils.withTaskContext(context1) {
+      try {
+        val iter = new HostToGpuCoalesceIterator(hostBatches, TargetSize(1024), new StructType(),
+          NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric,
+          NoopMetric, "test", useArrowCopyOpt = false)
+        // As an operator above that still uses the GPU when it asks for more
         GpuSemaphore.acquireIfNecessary(context1)
-        iter.next()
-        // As the GPU batch built from the host batches would.
-        GpuSemaphore.acquireIfNecessary(context1)
+        var rows = 0
+        while (iter.hasNext) {
+          inNext = true
+          withResource(iter.next()) { batch =>
+            inNext = false
+            assert(!released, "the semaphore is not held for the GPU batch")
+            rows += batch.numRows()
+          }
+        }
+        assertResult(3)(rows)
+        assert(pulls.exists(_._1) && pulls.exists(!_._1), pulls)
+        assert(pulls.forall { case (pulledInNext, wasReleased) => pulledInNext == wasReleased },
+          pulls)
+      } finally {
+        GpuSemaphore.releaseIfNecessary(context1)
+        GpuSemaphore.releaseIfNecessary(context2)
+        TaskRegistryTracker.clearRegistry()
       }
-      assertResult(5)(calls)
-    } finally {
-      GpuSemaphore.releaseIfNecessary(context1)
-      GpuSemaphore.releaseIfNecessary(context2)
     }
   }
 }

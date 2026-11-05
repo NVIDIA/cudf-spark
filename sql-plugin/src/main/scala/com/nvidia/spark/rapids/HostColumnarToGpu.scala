@@ -42,25 +42,6 @@ import org.apache.spark.sql.vectorized.{ArrowColumnVector, ColumnarBatch, Column
 object HostColumnarToGpu extends Logging {
 
   /**
-   * Releases the task's GPU semaphore before each call to `iter`. Producing host batches is CPU
-   * work, such as decoding a file, and holding the semaphore meanwhile would keep other tasks
-   * off the GPU until this task's next batch is ready.
-   */
-  def releasingSemaphore(
-      iter: Iterator[ColumnarBatch],
-      context: TaskContext): Iterator[ColumnarBatch] = new Iterator[ColumnarBatch] {
-    override def hasNext: Boolean = {
-      GpuSemaphore.releaseIfNecessary(context)
-      iter.hasNext
-    }
-
-    override def next(): ColumnarBatch = {
-      GpuSemaphore.releaseIfNecessary(context)
-      iter.next()
-    }
-  }
-
-  /**
    * Copies an Arrow vector in bulk when cuDF shares its layout for the given type, into the
    * builder that `builderFor` returns for the bytes of the values or of their variable-width
    * data. Returns -1 without asking for a builder when the vector cannot be copied in bulk.
@@ -333,6 +314,14 @@ class HostToGpuCoalesceIterator(iter: Iterator[ColumnarBatch],
 
   override def hasAnyToConcat: Boolean = totalRows > 0
 
+  // Pulling the host batches of a GPU batch is CPU work, such as decoding a file, so next()
+  // gives up the semaphore while it does that, and concatAllAndPutOnGPU acquires it again.
+  // hasNext leaves it alone, as operators above may call it while they still use the GPU.
+  override def next(): ColumnarBatch = {
+    GpuSemaphore.releaseIfNecessary(TaskContext.get())
+    super.next()
+  }
+
   override def concatAllAndPutOnGPU(): ColumnarBatch = {
     // About to place data back on the GPU
     GpuSemaphore.acquireIfNecessary(TaskContext.get())
@@ -436,8 +425,7 @@ case class HostColumnarToGpu(child: SparkPlan, goal: CoalesceSizeGoal)
 
     val confUseArrow = new RapidsConf(child.conf).useArrowCopyOptimization
     batches.mapPartitions { iter =>
-      new HostToGpuCoalesceIterator(
-        HostColumnarToGpu.releasingSemaphore(iter, TaskContext.get()), goal, outputSchema,
+      new HostToGpuCoalesceIterator(iter, goal, outputSchema,
         numInputRows, numInputBatches, numOutputRows, numOutputBatches,
         streamTime, concatTime, copyBufTime, opTime,
         "HostColumnarToGpu", confUseArrow)
