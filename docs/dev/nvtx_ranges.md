@@ -39,7 +39,6 @@ GpuGenerate project split|Splitting projection in generate operation
 parquet parse filter footer|Parsing and filtering Parquet footer by range
 Compile ASTs|Compiling abstract syntax trees for expression evaluation
 parquet filter blocks|Filtering Parquet row group blocks based on predicates
-PageableH2D|Copying from pageable host memory to device
 TOP N|Computing top N rows
 zstd post process|Post-processing ZSTD compressed data
 split input batch|Splitting input batch for sorting
@@ -65,6 +64,7 @@ computeAggregate|Computing aggregation on input batch
 concat pending|Concatenating pending batches
 RepartitionAggregateIterator.next|Fetching next batch from repartition aggregate iterator
 copy compressed buffers|Copying compressed buffer data
+hash table build|Building reusable cuDF hash state for a join
 GpuCoalesceBatches: collect|GPU combining of small batches post-kernel processing
 Round robin partition|Partitioning data using round-robin strategy
 Sub-join part|Hash partitioning for sub-join operation
@@ -120,7 +120,6 @@ get batch|Getting join batch
 Spark Task|Spark task execution range for stage and task tracking
 reduction merge m2|Merging M2 values during variance/stddev reduction
 HILBERT INDEX|Computing Hilbert index
-gpuAcquireC2C|Acquiring GPU for coalesce-to-coalesce operation
 ParallelDeserializerIterator.next|Calling next on the MT shuffle reader iterator
 Bring back to host|Copying GPU data back to host memory
 limit and offset|Applying limit and offset to data
@@ -143,7 +142,6 @@ AbstractGpuCoalesceIterator|Default range for a code path in the AbstractGpuCoal
 Client.fetch|Fetching data from shuffle server
 Columnar batch serialize|Serializing columnar batch for shuffle or storage
 Read Batch|Reading serialized batch data
-pinnedH2D|Copying from pinned host memory to device
 sliceInternalOnGpu|Slicing partition data on GPU
 file format readBatch|Reading batch of data from file format (Parquet/ORC/Avro/CSV/JSON)
 batch decompress|Decompressing batch data
@@ -164,7 +162,7 @@ Handle Meta Request|Handling metadata request on shuffle server
 filter batch|Filtering rows from a columnar batch
 shuffle fetch first batch|Fetching first batch in shuffle coalesce operation
 windowExec|Executing window operation on batch
-build join table|Building hash table for join operation
+build join table|Materializing broadcast build-side data for a join
 join first stream batch|Fetching and processing first batch from stream side of join
 GpuGenerateIterator|Iterating through generated data
 finalize agg|Finalizing aggregation results
@@ -187,7 +185,6 @@ Calculate part|Calculating hash partition assignments
 RunningWindow|Computing running window aggregation
 GpuGenerateExec|Executing generate operation on GPU
 Join gather|Gathering join results
-waitForCPU|Waiting for CPU batch in hybrid execution
 parquet get blocks with filter|Retrieving Parquet blocks after applying filters
 dynamic sort heuristic|Applying dynamic sort heuristic for aggregation
 shuffle concat load batch|Concatenating and loading batch in shuffle operation

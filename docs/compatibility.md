@@ -251,12 +251,30 @@ See https://github.com/NVIDIA/cudf-spark/issues/7246
 ## ORC
 
 The ORC format has fairly complete support for both reads and writes. There are only a few known
-issues. The first is for reading timestamps and dates around the transition between Julian and
-Gregorian calendars as described [here](https://github.com/NVIDIA/cudf-spark/issues/131). A
-similar issue exists for writing dates as described
+issues. The reader supports rebasing legacy-calendar ORC timestamps, including Spark 2.4 files,
+to Spark's proleptic Gregorian calendar. Rebasing follows the reader JVM's default timezone
+after applying the file's writer timezone; `spark.sql.session.timeZone` does not select the
+rebase timezone. This also applies to timestamps nested in arrays and structs. Values before
+the Common Era and timezones absent from Spark's rebase map use Spark's CPU implementation
+within the GPU reader.
+
+This addresses the legacy timestamp case in [#15471](https://github.com/NVIDIA/cudf-spark/issues/15471).
+The broader set of historical date/timestamp reading limitations remains tracked in
+[#131](https://github.com/NVIDIA/cudf-spark/issues/131). In particular, proleptic Gregorian ORC
+timestamps near the October 1582 cutover can still differ from CPU when the writer and reader
+use different timezones. A similar issue exists for writing dates as described
 [here](https://github.com/NVIDIA/cudf-spark/issues/139). Writing timestamps, however only appears
 to work for dates after the epoch as described
 [here](https://github.com/NVIDIA/cudf-spark/issues/140).
+
+ORC writes containing `DATE` columns, including nested `DATE` columns, use the CPU writer by
+default. The cuDF ORC writer does not record calendar metadata in the file footer, so readers
+can interpret dates before October 15, 1582 incorrectly. Applications that guarantee **every**
+written `DATE` value is on or after October 15, 1582 can set
+`spark.rapids.sql.format.orc.write.dateType.enabled=true` to allow the GPU writer. The plugin
+does not inspect values to enforce this guarantee. Keep the default CPU writer if the data may
+include older dates; the opt-in does not add calendar metadata to ORC files. The metadata fix is
+tracked in [cuDF #23794](https://github.com/NVIDIA/cudf/issues/23794).
 
 The plugin supports reading `uncompressed`, `snappy`, `zlib` and `zstd` ORC files and writing
  `uncompressed`, `snappy` and `zstd` ORC files.  At this point, the plugin does not have the 
@@ -312,10 +330,12 @@ satisfy the query, the ORC read falls back to the CPU as it is a metadata-only q
 ## Parquet
 
 The Parquet format has more configs because there are multiple versions with some compatibility
-issues between them. Dates and timestamps are where the known issues exist.  For reads when
-`spark.sql.legacy.parquet.datetimeRebaseModeInWrite` is set to `CORRECTED`
-[timestamps](https://github.com/NVIDIA/cudf-spark/issues/132) before the transition between the
-Julian and Gregorian calendars are wrong, but dates are fine. When
+issues between them. Dates and timestamps are where the known issues exist. For files written
+by the CPU on supported Spark versions with both
+`spark.sql.parquet.datetimeRebaseModeInWrite` and `spark.sql.parquet.int96RebaseModeInWrite`
+set to `CORRECTED`, GPU reads support timestamps before the transition between the Julian
+and Gregorian calendars. This does not change LEGACY rebasing or INT96 timestamp-conversion
+limitations. When
 `spark.sql.legacy.parquet.datetimeRebaseModeInWrite` is set to `LEGACY`, the read may fail for
 values occurring before the transition between the Julian and Gregorian calendars, i.e.: date <= 1582-10-04.
 
@@ -327,6 +347,29 @@ The plugin supports reading `uncompressed`, `snappy`, `gzip` and `zstd` Parquet 
 ability to
 fall back to the CPU when reading an unsupported compression format, and will error out in that
 case.
+
+## Delta Lake low shuffle merge on Databricks Runtime 17.3
+
+Low shuffle merge is disabled by default. To enable it on Databricks Runtime 17.3, set
+`spark.rapids.sql.delta.lowShuffleMerge.enabled=true` and the Parquet reader to `PERFILE`.
+The default remains disabled because Delta Lake 2.4 does not support low shuffle merge
+with change data feed enabled.
+
+On Databricks Runtime 17.3, tables with existing deletion vectors fall back to classic
+GPU merge before low shuffle merge builds temporary deletion vectors. The existing
+CPU fallback for MERGE operations configured to write persistent deletion vectors
+is unchanged.
+
+Tables with row tracking enabled fall back to classic GPU merge, even when
+[`spark.rapids.sql.delta.lowShuffleMerge.enabled`](additional-functionality/advanced_configs.md#sql.delta.lowShuffleMerge.enabled)
+is `true`. Databricks Runtime 17.3 exposes nullable row-tracking metadata fields that
+the GPU scans required by low shuffle merge cannot currently replace. The classic
+merge path preserves row IDs and row commit versions; enabling low shuffle merge
+does not provide the low-shuffle optimization for these tables.
+
+The row-tracking regression currently verifies this fallback, not native low-shuffle
+row-tracking execution. Supporting that execution path and adding a regression that
+forbids fallback remain follow-up work under [#11079](https://github.com/NVIDIA/cudf-spark/issues/11079).
 
 ## JSON
 
@@ -507,9 +550,19 @@ The following regular expression patterns are not yet supported on the GPU and w
 - Line and string anchors are not supported by `string_split` and `str_to_map`
 - Lazy quantifiers within a choice block such as `(2|\u2029??)+` 
 - Possessive quantifiers, such as `a*+`
+- Repetition counts greater than 999, such as `a{1000}`
 - Character classes that use union, intersection, or subtraction semantics, such as `[a-d[m-p]]`, `[a-z&&[def]]`,
   or `[a-z&&[^bc]]`
+- Lookahead/lookbehind groups: `(?=a)`, `(?!a)`, `(?<=a)`, `(?<!a)`
+- Independent groups: `(?>a)`
+- Named capture groups: `(?<n>a)`
 - Empty groups: `()`
+- Inline flags other than case-insensitive matching, such as `(?m)`, `(?s)`, or `(?x)`
+- Case-insensitive matching (`(?i)`) whose scope would extend across a choice, such as `(?i)a|b`
+  or `a(?i)b|c` (in Java the flag applies to the end of the enclosing group, crossing `|`), or that
+  applies to a letter-valued escape, such as `(?i)\x61`
+- Case-insensitive matching of `\p{Lower}` and `\p{Upper}` (and their `\P` counterparts) on Spark versions
+  below 4.0, to preserve pre-[JDK-8214245](https://bugs.openjdk.org/browse/JDK-8214245) behavior
 - Empty pattern: `""`
 
 Work is ongoing to increase the range of regular expressions that can run on the GPU.
@@ -891,6 +944,14 @@ The GPU implementation of `approximate_percentile` uses
 distribution. The results are not bit-for-bit identical with the Apache Spark implementation of
 `approximate_percentile`. This feature is enabled by default and can be disabled by setting
 `spark.rapids.sql.expression.ApproximatePercentile=false`.
+
+## Exact Percentile
+
+On Spark 5.0 and later, exact `percentile` aggregation over `FLOAT` or `DOUBLE` input falls back
+to CPU. Spark 5.0 changed its interpolation formula, and the GPU implementation does not yet match
+the resulting `NaN` and infinity semantics. Exact `percentile` over integral input remains GPU
+accelerated. Native GPU support for the Spark 5.0 interpolation behavior is tracked by
+[issue-15516](https://github.com/NVIDIA/cudf-spark/issues/15516).
 
 ## Conditionals and operations with side effects (ANSI mode)
 
