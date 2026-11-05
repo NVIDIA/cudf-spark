@@ -18,23 +18,32 @@ public final class TransferResponse extends Table {
   public TransferResponse __assign(int _i, ByteBuffer _bb) { __init(_i, _bb); return this; }
 
   /**
-   * array of buffer responses, one for each requested
+   * array of buffer responses, one for each requested buffer. An error reply lists each
+   * requested buffer the server will not send, or none when the server could not tell which.
    */
   public BufferTransferResponse responses(int j) { return responses(new BufferTransferResponse(), j); }
   public BufferTransferResponse responses(BufferTransferResponse obj, int j) { int o = __offset(4); return o != 0 ? obj.__assign(__indirect(__vector(o) + j * 4), bb) : null; }
   public int responsesLength() { int o = __offset(4); return o != 0 ? __vector_len(o) : 0; }
+  /**
+   * set when the server failed the request
+   */
+  public ResponseError error() { return error(new ResponseError()); }
+  public ResponseError error(ResponseError obj) { int o = __offset(6); return o != 0 ? obj.__assign(__indirect(o + bb_pos), bb) : null; }
 
   public static int createTransferResponse(FlatBufferBuilder builder,
-      int responsesOffset) {
-    builder.startObject(1);
+      int responsesOffset,
+      int errorOffset) {
+    builder.startObject(2);
+    TransferResponse.addError(builder, errorOffset);
     TransferResponse.addResponses(builder, responsesOffset);
     return TransferResponse.endTransferResponse(builder);
   }
 
-  public static void startTransferResponse(FlatBufferBuilder builder) { builder.startObject(1); }
+  public static void startTransferResponse(FlatBufferBuilder builder) { builder.startObject(2); }
   public static void addResponses(FlatBufferBuilder builder, int responsesOffset) { builder.addOffset(0, responsesOffset, 0); }
   public static int createResponsesVector(FlatBufferBuilder builder, int[] data) { builder.startVector(4, data.length, 4); for (int i = data.length - 1; i >= 0; i--) builder.addOffset(data[i]); return builder.endVector(); }
   public static void startResponsesVector(FlatBufferBuilder builder, int numElems) { builder.startVector(4, numElems, 4); }
+  public static void addError(FlatBufferBuilder builder, int errorOffset) { builder.addOffset(1, errorOffset, 0); }
   public static int endTransferResponse(FlatBufferBuilder builder) {
     int o = builder.endObject();
     return o;

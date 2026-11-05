@@ -36,6 +36,10 @@
         <rapids.compressed.artifact>false</rapids.compressed.artifact>
         <rapids.default.jar.excludePattern>**/*</rapids.default.jar.excludePattern>
         <rapids.shim.jar.phase>package</rapids.shim.jar.phase>
+        <!-- Delta 4.3 exposes a Scala-protected method through a Java bridge. Spark's
+             compiled interfaces contain malformed Deprecated annotations, so suppress
+             only classfile lint for this module's javac invocation. -->
+        <scala.javac.args>-Xlint:all,-serial,-path,-try,-processing,-classfile,-options|-Werror</scala.javac.args>
     </properties>
 
     <dependencies>

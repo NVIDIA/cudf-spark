@@ -23,6 +23,7 @@
 # Options:
 #   --port N          client port, the server binds its REST API at N+1 (default 18080)
 #   --uc-version V    Unity Catalog version; this suite is pinned to 0.6.0 (default 0.6.0)
+#   --delta-version V Delta Lake version, either 4.2.0 or 4.3.0 (default 4.2.0)
 #   --run-dir DIR     parent for the server's scratch directory (default $TMPDIR or /tmp)
 #   --refresh         re-resolve the cached classpaths before starting
 #
@@ -39,7 +40,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 UC_VERSION=${UNITY_CATALOG_VERSION:-'0.6.0'}
-DELTA_VERSION='4.2.0'
+DELTA_VERSION=${DELTA_VERSION:-'4.2.0'}
 UC_PORT=${UNITY_CATALOG_PORT:-'18080'}
 RUN_DIR_BASE=${TMPDIR:-/tmp}
 REFRESH=0
@@ -86,6 +87,7 @@ Usage:
 Options:
   --port N          client port, the server binds its REST API at N+1 (default 18080)
   --uc-version V    Unity Catalog version; this suite is pinned to 0.6.0 (default 0.6.0)
+  --delta-version V Delta Lake version, either 4.2.0 or 4.3.0 (default 4.2.0)
   --run-dir DIR     parent for the server's scratch directory (default $TMPDIR or /tmp)
   --refresh         re-resolve the cached classpaths before starting
 EOF
@@ -95,6 +97,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --port) UC_PORT="$2"; shift 2 ;;
     --uc-version) UC_VERSION="$2"; shift 2 ;;
+    --delta-version) DELTA_VERSION="$2"; shift 2 ;;
     --run-dir) RUN_DIR_BASE="$2"; shift 2 ;;
     --refresh) REFRESH=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -133,6 +136,10 @@ SPARK_LINE=${SPARK_VER%.*}
 # somebody asked for it explicitly, so silence would be the wrong answer.
 [[ "$SCALA_BINARY_VER" == "2.13" ]] ||
   die "Delta Lake $DELTA_VERSION requires Scala 2.13, found $SCALA_BINARY_VER"
+case "$DELTA_VERSION" in
+  4.2.0|4.3.0) ;;
+  *) die "Unity Catalog tests support Delta Lake 4.2.0 and 4.3.0, found $DELTA_VERSION" ;;
+esac
 case "$SPARK_VER" in
   4.0.1|4.1.1) ;;
   *) die "Delta Lake $DELTA_VERSION is only tested against Spark 4.0.1 and 4.1.1, found $SPARK_VER" ;;
@@ -224,7 +231,7 @@ resolve_classpath "$SERVER_CP_FILE" "io.unitycatalog:unitycatalog-server:$UC_VER
 # The Spark session only needs the Delta and Unity Catalog connector jars. Jackson and Hadoop come
 # from Spark itself and the GCS connector is unused, so those groups are excluded rather than
 # pinning Unity Catalog's transitive versions by hand.
-SPARK_CP_FILE="$CACHE_DIR/spark-$UC_VERSION-$SPARK_LINE-$SCALA_BINARY_VER.classpath"
+SPARK_CP_FILE="$CACHE_DIR/spark-$UC_VERSION-delta-$DELTA_VERSION-$SPARK_LINE-$SCALA_BINARY_VER.classpath"
 # unitycatalog-client is declared explicitly because delta-storage depends on 0.4.1 at the same
 # depth as unitycatalog-spark depends on the current one. Maven breaks a depth tie by declaration
 # order, so without this the old client wins and classes added since 0.4.1 are missing at runtime.

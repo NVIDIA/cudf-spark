@@ -17,7 +17,10 @@ import logging
 import os
 import pytest
 import re
+import socket
 import stat
+import subprocess
+import sys
 import traceback
 import weakref
 
@@ -56,6 +59,8 @@ spark_jars_env = {
 # Initialized in pytest_sessionstart; declared here so pytest_sessionfinish
 # does not raise NameError if session startup fails before assignment.
 _spark = None
+_spark_process_details = {}
+_spark_gateway_process = None
 
 _PY4J_STRONG_REF_WORKAROUND_MARKER = '_spark_rapids_strong_ref_workaround'
 
@@ -227,6 +232,21 @@ def pytest_sessionstart(session):
     _s._jvm.org.apache.spark.rapids.tests.TimeoutSparkListener.init(_s._jsc)
     global _spark
     _spark = _s
+    # Cache identity while Spark is healthy; failure diagnostics must not call a dead JVM.
+    global _spark_process_details
+    global _spark_gateway_process
+    try:
+        _spark_gateway_process = _s.sparkContext._gateway.__dict__.get('proc')
+        _spark_process_details = {
+            'worker': os.environ.get('PYTEST_XDIST_WORKER', 'gw0'),
+            'host': socket.gethostname(),
+            'python_pid': os.getpid(),
+            'jvm_pid': getattr(_spark_gateway_process, 'pid', 'externally launched'),
+            'application_id': _s.sparkContext.applicationId,
+        }
+        logger.info("Spark process identity: %s", _spark_process_details)
+    except Exception:
+        logging.warning("Spark process identity unavailable", exc_info=True)
 
 
 def _handle_derby_dir(sb, driver_opts, wid):
@@ -334,14 +354,41 @@ def log_test_name(request):
     logger.info("Running test '{}'".format(request.node.nodeid))
 
 
-def _set_job_timeout_and_crash_when_failed(spark_timeout, dump_threads):
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node, error):
+    if error is None:
+        return
+    # Runs in the surviving xdist coordinator, including after an abrupt worker exit.
+    try:
+        worker_id = node.gateway.id
+        worker_info = getattr(node, 'workerinfo', {})
+        print(f"\n----- pytest worker lost: {worker_id}, "
+              f"python_pid={worker_info.get('pid', 'unknown')}, error={error} -----",
+              file=sys.stderr, flush=True)
+        log_file = os.path.join(os.getcwd(), f'{worker_id}_worker_logs.log')
+        result = subprocess.run(['tail', '-c', '65536', log_file],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, errors='replace', timeout=5, check=False)
+        print('\n'.join(result.stdout.splitlines()[-200:]), file=sys.stderr, flush=True)
+    except Exception as diagnostic_error:
+        logging.warning("Worker-loss diagnostics unavailable: %s", diagnostic_error)
+
+
+def _set_job_timeout_and_crash_when_failed(spark_timeout, dump_threads, test_name):
     try:
         _spark._jvm.org.apache.spark.rapids.tests.TimeoutSparkListener.setSparkJobTimeout(
             spark_timeout,
             dump_threads
         )
     except Exception as e:
+        try:
+            _spark_process_details['jvm_exit'] = (
+                _spark_gateway_process.poll() if _spark_gateway_process is not None
+                else 'unavailable')
+        except Exception:
+            _spark_process_details['jvm_exit'] = 'unavailable'
         logger.error(f"""set_spark_job_timeout: Unusable Spark Driver JVM detected!
+                     Test: {test_name}; Spark process identity: {_spark_process_details}
                      Crashing pytest worker to mitigate: {traceback.format_exc()}""")
         os._exit(os.EX_UNAVAILABLE)
 
@@ -357,11 +404,11 @@ def set_spark_job_timeout(request):
         spark_timeout = default_timeout_seconds
         dump_threads = default_dump_threads
     # before the test
-    _set_job_timeout_and_crash_when_failed(spark_timeout, dump_threads)
+    _set_job_timeout_and_crash_when_failed(spark_timeout, dump_threads, request.node.nodeid)
     # yield for test
     yield
     # after the test
-    _set_job_timeout_and_crash_when_failed(spark_timeout, dump_threads)
+    _set_job_timeout_and_crash_when_failed(spark_timeout, dump_threads, request.node.nodeid)
 
 
 @pytest.hookimpl(trylast=True)

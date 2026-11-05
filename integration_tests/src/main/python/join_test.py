@@ -22,7 +22,7 @@ from asserts import (assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_ro
                      collect_plan_nodes)
 from conftest import is_dataproc_runtime, is_dataproc_serverless_runtime, is_emr_runtime
 from data_gen import *
-from marks import (allow_non_gpu, disable_ansi_mode, ignore_order, incompat,
+from marks import (allow_non_gpu, disable_ansi_mode, ignore_order, incompat, shuffle_test,
                    validate_execs_in_gpu_plan)
 from spark_session import (with_cpu_session, is_databricks_runtime, is_spark_400_or_later,
                            is_spark_411_or_later, spark_version)
@@ -386,13 +386,15 @@ def test_broadcast_join_right_table(data_gen, join_type):
 
 @ignore_order(local=True)
 @validate_execs_in_gpu_plan('GpuBroadcastHashJoinExec')
-def test_broadcast_hash_join_reuses_build_across_stream_partitions():
+@pytest.mark.parametrize('join_type', ['Inner', 'LeftSemi', 'LeftAnti'], ids=idfn)
+def test_broadcast_hash_join_reuses_build_across_stream_partitions(join_type):
     def do_join(spark):
+        # Stream keys 128-159 have no build-side match, so anti joins produce rows.
         stream = spark.range(0, 4096, 1, 8).select(
-            (col('id') % 128).alias('key'), col('id').alias('stream_value'))
+            (col('id') % 160).alias('key'), col('id').alias('stream_value'))
         build = spark.range(0, 256, 1, 1).select(
             (col('id') % 128).alias('key'), col('id').alias('build_value'))
-        return stream.join(broadcast(build), 'key')
+        return stream.join(broadcast(build), 'key', join_type)
 
     conf = {
         'spark.sql.adaptive.enabled': 'false',
@@ -1100,9 +1102,22 @@ def test_half_cache_join(join_type, cache_side, cpu_side):
         'spark.sql.autoBroadcastJoinThreshold': '1',
     })
 
-# A null-safe equality with a literal leaves the build side with no columns, which reaches the
-# hash joins as several rows-only batches. A GPU exchange of that side fails earlier, so the
-# shuffles stay on the CPU.
+# Tests a GPU hash exchange of rows-only batches: the null-safe join on a literal leaves the
+# right side with no columns.
+@shuffle_test
+@ignore_order(local=True)
+@pytest.mark.parametrize('join_type', ['LeftOuter', 'LeftAnti'], ids=idfn)
+def test_null_safe_literal_key_join_rows_only_exchange(join_type):
+    def do_join(spark):
+        left = spark.range(0, 30).selectExpr('CAST(id % 3 AS BIGINT) AS a')
+        right = gen_df(spark, [('b', int_gen)], length=5000)
+        return left.join(right, left.a.eqNullSafe(lit(1)), join_type).select(left.a)
+    assert_gpu_and_cpu_are_equal_collect(do_join, conf={
+        'spark.sql.autoBroadcastJoinThreshold': '-1',
+        'spark.sql.adaptive.autoBroadcastJoinThreshold': '-1',
+        'spark.sql.adaptive.coalescePartitions.enabled': 'false'})
+
+# Tests the GPU hash join on rows-only build batches that come from a CPU shuffle.
 @allow_non_gpu('ShuffleExchangeExec', 'HashPartitioning', 'Coalesce', 'IsNull')
 @ignore_order(local=True)
 @pytest.mark.parametrize('join_type', ['LeftOuter', 'LeftAnti'], ids=idfn)
@@ -1641,36 +1656,45 @@ def test_distinct_join(join_type, batch_size):
 
 @validate_execs_in_gpu_plan("GpuShuffledHashJoinExec")
 @ignore_order(local=True)
+@pytest.mark.inject_oom
+@pytest.mark.parametrize("use_condition", [False, True], ids=["EQUI", "CONDITION"])
 @pytest.mark.parametrize(
     "build_side", ["left", "right"], ids=["BUILD_LEFT", "BUILD_RIGHT"])
-def test_distinct_full_outer_join(build_side):
+@pytest.mark.parametrize(
+    "unmatched_build_rows", [False, True], ids=["ALL_KEYS_MATCH", "SOME_KEYS_UNMATCHED"])
+def test_distinct_full_outer_join(build_side, unmatched_build_rows, use_condition):
     join_conf = {
+        # The residual addition must use GPU AST; ANSI overflow checks are unsupported there.
+        "spark.sql.ansi.enabled": "false",
         "spark.sql.adaptive.enabled": "false",
         "spark.sql.autoBroadcastJoinThreshold": "-1",
         "spark.sql.join.preferSortMergeJoin": "false",
-        "spark.sql.shuffle.partitions": "2",
+        "spark.sql.shuffle.partitions": "1",
         # Exercise the stream-side iterator across multiple batches.
         "spark.rapids.sql.batchSizeBytes": "1",
         "spark.rapids.sql.join.useShuffledSymmetricHashJoin": "false",
     }
 
     def do_join(spark):
-        left_df = spark.createDataFrame([
-            (None, "left_null"),
-            (1, "left_match"),
-            (2, "left_only"),
-            (4, "left_match_2"),
-        ], ["join_key", "left_value"])
-        right_df = spark.createDataFrame([
-            (None, "right_null"),
-            (1, "right_match"),
-            (3, "right_only"),
-            (4, "right_match_2"),
-        ], ["join_key", "right_value"])
+        if unmatched_build_rows:
+            left_rows = [(None, "left_null"), (1, "left_match"),
+                         (2, "left_only"), (4, "left_match_2")]
+            right_rows = [(None, "right_null"), (1, "right_match"),
+                          (3, "right_only"), (4, "right_match_2")]
+        else:
+            left_rows = [(1, "left_match"), (2, "left_match_2")]
+            right_rows = [(1, "right_match"), (2, "right_match_2")]
+        left_df = spark.createDataFrame(left_rows, ["join_key", "left_value"])
+        right_df = spark.createDataFrame(right_rows, ["join_key", "right_value"])
         if build_side == "left":
             left_df = left_df.hint("SHUFFLE_HASH")
         else:
             right_df = right_df.hint("SHUFFLE_HASH")
+        if use_condition:
+            # Key 1 matches the equi-join but fails the residual condition.
+            condition = ((left_df.join_key == right_df.join_key) &
+                         (left_df.join_key + right_df.join_key > 2))
+            return left_df.join(right_df, condition, "fullouter")
         return left_df.join(right_df, ["join_key"], "fullouter")
 
     assert_gpu_and_cpu_are_equal_collect(do_join, conf=join_conf)

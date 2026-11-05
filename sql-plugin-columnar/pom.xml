@@ -35,7 +35,7 @@
         <rapids.compressed.artifact>false</rapids.compressed.artifact>
         <rapids.default.jar.excludePattern>**/*</rapids.default.jar.excludePattern>
         <rapids.shim.jar.phase>package</rapids.shim.jar.phase>
-        <rapids.shimplify.skip>true</rapids.shimplify.skip>
+        <rapids.shim.sources.skip>true</rapids.shim.sources.skip>
     </properties>
 
     <dependencies>
@@ -49,12 +49,6 @@
             <artifactId>rapids-4-spark-sql-plugin-format_${scala.binary.version}</artifactId>
             <version>${project.version}</version>
             <classifier>${spark.version.classifier}</classifier>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.spark</groupId>
-            <artifactId>spark-sql_${scala.binary.version}</artifactId>
-            <version>${spark.version}</version>
-            <scope>provided</scope>
         </dependency>
     </dependencies>
 

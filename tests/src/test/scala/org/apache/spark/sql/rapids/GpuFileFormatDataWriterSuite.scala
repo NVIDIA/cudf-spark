@@ -15,17 +15,25 @@
  */
 package org.apache.spark.sql.rapids
 
+import java.io.{IOException, OutputStream}
+import java.net.URI
+import java.util.concurrent.{ExecutorService, TimeUnit}
+
 import ai.rapids.cudf.{CudaFatalException, HostMemoryBuffer, Rmm, RmmAllocationMode, Table,
   TableWriter}
 import com.nvidia.spark.rapids.{ColumnarOutputWriter, ColumnarOutputWriterFactory, GpuColumnVector, GpuLiteral, NvtxId, NvtxRegistry, RapidsConf, ScalableTaskCompletion, SpillableColumnarBatch}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.SpillPriorities.ACTIVE_ON_DECK_PRIORITY
+import com.nvidia.spark.rapids.io.async.{AsyncOutputStream, HostMemoryThrottle, ThrottlingExecutor, TrafficController}
 import com.nvidia.spark.rapids.jni.{CpuRetryOOM, GpuRetryOOM, GpuSplitAndRetryOOM}
 import com.nvidia.spark.rapids.spill.SpillFramework
 import org.apache.commons.lang3.exception.ExceptionUtils
 import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.FSDataOutputStream
+import org.apache.hadoop.fs.{FileStatus, FileSystem, FSDataInputStream, FSDataOutputStream, Path}
+import org.apache.hadoop.fs.permission.FsPermission
 import org.apache.hadoop.mapred.TaskAttemptContext
+import org.apache.hadoop.util.Progressable
 import org.mockito.ArgumentCaptor
 import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito._
@@ -39,6 +47,8 @@ import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.catalyst.expressions.{Ascending, AttributeReference, ExprId, SortOrder}
 import org.apache.spark.sql.execution.datasources.WriteTaskStats
 import org.apache.spark.sql.rapids.GpuFileFormatWriter.GpuConcurrentOutputWriterSpec
+import org.apache.spark.sql.rapids.execution.TrampolineUtil
+import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.types.{IntegerType, StringType, StructField, StructType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
@@ -97,6 +107,137 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
       throwOnce = Some(exception)
     }
 
+  }
+
+  /** Records what reaches it and the thread that closed it; can fail its writes or its close. */
+  class RecordingOutputStream(
+      writeFailure: IOException = null,
+      closeFailure: Throwable = null) extends OutputStream {
+    @volatile var bytesWritten: Int = 0
+    @volatile var closeCount: Int = 0
+    @volatile var closeThread: Thread = _
+    @volatile var interruptedAtClose: Boolean = false
+
+    override def write(b: Int): Unit = write(Array(b.toByte), 0, 1)
+
+    override def write(b: Array[Byte], off: Int, len: Int): Unit = {
+      if (writeFailure != null) {
+        throw writeFailure
+      }
+      bytesWritten += len
+    }
+
+    override def close(): Unit = {
+      closeCount += 1
+      closeThread = Thread.currentThread()
+      interruptedAtClose = Thread.currentThread().isInterrupted
+      if (closeFailure != null) {
+        throw closeFailure
+      }
+    }
+  }
+
+  // ColumnarOutputWriter opens its stream in its constructor, before a subclass's own fields
+  // are set, so StreamOutputWriter takes the stream from here.
+  private var nextWriterStream: OutputStream = _
+
+  /** A writer over a given stream that encodes nothing, so closing it needs no GPU work. */
+  class StreamOutputWriter(debugPath: Option[String] = None) extends ColumnarOutputWriter(
+      mockTaskAttemptContext,
+      StructType(Seq.empty),
+      NvtxRegistry.FILE_FORMAT_WRITE,
+      false,
+      Seq.empty,
+      debugPath,
+      rapidsFileIO = mockJobDescription.fileIO) {
+    override val tableWriter: TableWriter = mock[TableWriter]
+    override def getOutputStream: OutputStream = nextWriterStream
+    override def path(): String = null
+    override def bufferBatchAndClose(batch: ColumnarBatch): Long = {
+      batch.close()
+      0L
+    }
+
+    /** Buffers `len` bytes, which close() writes to the stream before closing it. */
+    def bufferBytes(len: Int): Unit = handleBuffer(HostMemoryBuffer.allocate(len), len)
+
+    /** Closes the way a writer that returns its footer does. */
+    def closeReturning(footer: AutoCloseable): AutoCloseable = closeAndReturn(footer)
+
+    /** Encodes `batch` as a real writer does, which also writes it to the debug stream. */
+    def encode(batch: ColumnarBatch): Long = super.bufferBatchAndClose(batch)
+  }
+
+  /** A writer over `stream`, with `debugStream` as its debug dump when that is set. */
+  def streamOutputWriter(
+      stream: OutputStream,
+      debugStream: OutputStream = null): StreamOutputWriter = {
+    resetMocks()
+    nextWriterStream = stream
+    if (debugStream == null) {
+      new StreamOutputWriter
+    } else {
+      // The writer opens its debug dump through the task's Hadoop configuration.
+      val conf = new Configuration(false)
+      conf.setClass("fs.probe.impl", classOf[DebugStreamFileSystem], classOf[FileSystem])
+      conf.setBoolean("fs.probe.impl.disable.cache", true)
+      when(mockTaskAttemptContext.getConfiguration).thenReturn(conf)
+      DebugStreamFileSystem.nextStream = debugStream
+      new StreamOutputWriter(Some("probe:/debug"))
+    }
+  }
+
+  private val asyncWriterThreadName = "GpuFileFormatDataWriterSuite async output"
+
+  /** The pools asyncOutputStream made in this test, stopped afterwards in case no close did. */
+  private var asyncPools: List[ExecutorService] = Nil
+
+  /** An async stream over `delegate`, with the pool that runs its writes and its close. */
+  def asyncOutputStream(delegate: OutputStream): (AsyncOutputStream, ExecutorService) = {
+    val pool = TrampolineUtil.newDaemonSingleThreadExecutor(asyncWriterThreadName)
+    asyncPools ::= pool
+    val throttle = new TrafficController(new HostMemoryThrottle(Long.MaxValue)) {}
+    (new AsyncOutputStream(() => delegate, new ThrottlingExecutor(pool, throttle, _ => ())), pool)
+  }
+
+  def assertClosedOnWriterThread(delegate: RecordingOutputStream, pool: ExecutorService): Unit = {
+    assert(delegate.closeCount == 1)
+    assert(delegate.closeThread.getName == asyncWriterThreadName)
+    assert(pool.isTerminated)
+  }
+
+  /**
+   * Runs `body` on a new thread, interrupted first if `interruptFirst`, so the test runner's own
+   * interrupt status is never touched. Returns what `body` threw, and whether the thread was
+   * interrupted when `body` finished.
+   */
+  def runOnNewThread(interruptFirst: Boolean)(body: => Unit): (Option[Throwable], Boolean) = {
+    var thrown: Option[Throwable] = None
+    var interruptedAfter = false
+    val thread = new Thread(() => {
+      if (interruptFirst) {
+        Thread.currentThread().interrupt()
+      }
+      try {
+        body
+      } catch {
+        case t: Throwable => thrown = Some(t)
+      }
+      interruptedAfter = Thread.currentThread().isInterrupted
+    })
+    thread.setDaemon(true)
+    thread.start()
+    try {
+      thread.join(TimeUnit.MINUTES.toMillis(1))
+      assert(!thread.isAlive, "the closing thread did not finish")
+    } finally {
+      if (thread.isAlive) {
+        // Do not leave the thread blocked behind a failed test.
+        thread.interrupt()
+        thread.join(TimeUnit.SECONDS.toMillis(1))
+      }
+    }
+    (thrown, interruptedAfter)
   }
 
   def mockOutputWriter(types: StructType, includeRetry: Boolean): Unit = {
@@ -193,8 +334,15 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
   }
 
   override def afterEach(): Unit = {
-    SpillFramework.shutdown()
-    Rmm.shutdown()
+    try {
+      // A test that failed before its writer closed would otherwise leave its pool running.
+      asyncPools.foreach(_.shutdownNow())
+      asyncPools.foreach(_.awaitTermination(10, TimeUnit.SECONDS))
+    } finally {
+      asyncPools = Nil
+      SpillFramework.shutdown()
+      Rmm.shutdown()
+    }
   }
 
   def buildEmptyBatch: ColumnarBatch =
@@ -854,4 +1002,232 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
       }
     }
   }
+
+  test("close closes the output stream when writing the buffered data fails") {
+    val writeFailure = new IOException("write failed")
+    val stream = new RecordingOutputStream(writeFailure = writeFailure)
+    val writer = streamOutputWriter(stream)
+    writer.bufferBytes(16)
+    val thrown = intercept[IOException](writer.close())
+    assert(thrown eq writeFailure)
+    assert(stream.closeCount == 1)
+  }
+
+  test("close keeps the write failure when closing the output stream also fails") {
+    val writeFailure = new IOException("write failed")
+    val closeFailure = new IOException("close failed")
+    val stream = new RecordingOutputStream(writeFailure, closeFailure)
+    val writer = streamOutputWriter(stream)
+    writer.bufferBytes(16)
+    val thrown = intercept[IOException](writer.close())
+    assert(thrown eq writeFailure)
+    assert(thrown.getSuppressed.toSeq == Seq(closeFailure))
+    assert(stream.closeCount == 1)
+  }
+
+  test("an interrupt set before close stops the buffered write, not the async close") {
+    val delegate = new RecordingOutputStream()
+    val (stream, pool) = asyncOutputStream(delegate)
+    val writer = streamOutputWriter(stream)
+    writer.bufferBytes(16)
+    val (thrown, interrupted) = runOnNewThread(interruptFirst = true)(writer.close())
+    assert(thrown.exists(_.isInstanceOf[InterruptedException]))
+    // The wait that threw consumed the interrupt, and the exception carries it to the caller.
+    assert(!interrupted)
+    assert(delegate.bytesWritten == 0)
+    assertClosedOnWriterThread(delegate, pool)
+  }
+
+  test("an interrupt set before close does not stop the async close with nothing to write") {
+    val delegate = new RecordingOutputStream()
+    val (stream, pool) = asyncOutputStream(delegate)
+    val writer = streamOutputWriter(stream)
+    val (thrown, interrupted) = runOnNewThread(interruptFirst = true)(writer.close())
+    assert(thrown.isEmpty)
+    assert(interrupted)
+    assertClosedOnWriterThread(delegate, pool)
+  }
+
+  test("close throws the output stream's close failure after a clean write") {
+    // The same type self-suppression throws, which the writer must not hide either.
+    val closeFailure = new IllegalArgumentException("close failed")
+    val stream = new RecordingOutputStream(closeFailure = closeFailure)
+    val writer = streamOutputWriter(stream)
+    writer.bufferBytes(16)
+    val thrown = intercept[IllegalArgumentException](writer.close())
+    assert(thrown eq closeFailure)
+    assert(stream.bytesWritten == 16)
+    assert(stream.closeCount == 1)
+  }
+
+  test("close suppresses an interrupted close behind a write failure and restores it") {
+    val writeFailure = new IOException("write failed")
+    val interruptedClose = new InterruptedException("interrupted close")
+    val stream = new RecordingOutputStream(writeFailure, interruptedClose)
+    val writer = streamOutputWriter(stream)
+    writer.bufferBytes(16)
+    val (thrown, interrupted) = runOnNewThread(interruptFirst = false)(writer.close())
+    assert(thrown.exists(_ eq writeFailure))
+    assert(writeFailure.getSuppressed.toSeq == Seq(interruptedClose))
+    assert(interrupted)
+    assert(stream.closeCount == 1)
+  }
+
+  test("an interrupt from the output stream's close waits until the debug stream closes") {
+    val writeFailure = new IOException("write failed")
+    val interruptedClose = new InterruptedException("interrupted close")
+    val stream = new RecordingOutputStream(writeFailure, interruptedClose)
+    val debugStream = new RecordingOutputStream()
+    val writer = streamOutputWriter(stream, debugStream)
+    // The writer opens its debug stream at the first batch it encodes, which needs a task.
+    TrampolineUtil.setTaskContext(new MockTaskContext(taskAttemptId = 1, partitionId = 0))
+    try {
+      writer.encode(buildBatchWithPartitionedCol(1))
+    } finally {
+      TrampolineUtil.unsetTaskContext()
+    }
+    assert(debugStream.bytesWritten > 0)
+    writer.bufferBytes(16)
+    val (thrown, interrupted) = runOnNewThread(interruptFirst = false)(writer.close())
+    assert(thrown.exists(_ eq writeFailure))
+    assert(writeFailure.getSuppressed.toSeq == Seq(interruptedClose))
+    assert(interrupted)
+    assert(stream.closeCount == 1)
+    assert(debugStream.closeCount == 1)
+    assert(!debugStream.interruptedAtClose)
+  }
+
+  test("close keeps the write failure when the output stream rethrows it from close") {
+    val writeFailure = new IOException("write failed")
+    val stream = new RecordingOutputStream(writeFailure, writeFailure)
+    val writer = streamOutputWriter(stream)
+    writer.bufferBytes(16)
+    val (thrown, interrupted) = runOnNewThread(interruptFirst = false)(writer.close())
+    assert(thrown.exists(_ eq writeFailure))
+    assert(writeFailure.getSuppressed.isEmpty)
+    assert(!interrupted)
+    assert(stream.closeCount == 1)
+  }
+
+  Seq(false, true).foreach { closeFails =>
+    test(s"close keeps a cached async write failure, closeFails=$closeFails") {
+      val writeFailure = new IOException("write failed")
+      val closeFailure = new IOException("close failed")
+      val delegate =
+        new RecordingOutputStream(writeFailure, if (closeFails) closeFailure else null)
+      val (stream, pool) = asyncOutputStream(delegate)
+      val writer = streamOutputWriter(stream)
+      // The async stream caches a failed write, then rethrows that object from later writes,
+      // from flush and from close.
+      stream.write(1)
+      assert(intercept[IOException](stream.flush()) eq writeFailure)
+      writer.bufferBytes(16)
+      val (thrown, interrupted) = runOnNewThread(interruptFirst = false)(writer.close())
+      assert(thrown.exists(_ eq writeFailure))
+      assert(writeFailure.getSuppressed.toSeq ==
+        (if (closeFails) Seq(closeFailure) else Seq.empty))
+      assert(!interrupted)
+      // The cached failure refused the writer's own buffered write too.
+      assert(delegate.bytesWritten == 0)
+      assertClosedOnWriterThread(delegate, pool)
+    }
+  }
+
+  test("closeAndReturn keeps a cached async write failure and closes the footer once") {
+    val writeFailure = new IOException("write failed")
+    val delegate = new RecordingOutputStream(writeFailure)
+    val (stream, pool) = asyncOutputStream(delegate)
+    val writer = streamOutputWriter(stream)
+    stream.write(1)
+    assert(intercept[IOException](stream.flush()) eq writeFailure)
+    writer.bufferBytes(16)
+    var footerCloses = 0
+    val footer: AutoCloseable = () => footerCloses += 1
+    val (thrown, interrupted) = runOnNewThread(interruptFirst = false) {
+      writer.closeReturning(footer)
+      ()
+    }
+    assert(thrown.exists(_ eq writeFailure))
+    assert(writeFailure.getSuppressed.isEmpty)
+    assert(!interrupted)
+    assert(footerCloses == 1)
+    assertClosedOnWriterThread(delegate, pool)
+  }
+
+  test("close keeps a cached async write failure that the delegate rethrows from close") {
+    val writeFailure = new IOException("write failed")
+    val delegate = new RecordingOutputStream(writeFailure, writeFailure)
+    val (stream, pool) = asyncOutputStream(delegate)
+    val writer = streamOutputWriter(stream)
+    stream.write(1)
+    assert(intercept[IOException](stream.flush()) eq writeFailure)
+    writer.bufferBytes(16)
+    val (thrown, interrupted) = runOnNewThread(interruptFirst = false)(writer.close())
+    assert(thrown.exists(_ eq writeFailure))
+    assert(writeFailure.getSuppressed.isEmpty)
+    assert(!interrupted)
+    assertClosedOnWriterThread(delegate, pool)
+  }
+
+  test("a writer closed after a nested safeClose restored an interrupt closes its output") {
+    val delegate = new RecordingOutputStream()
+    val (stream, pool) = asyncOutputStream(delegate)
+    val writer = streamOutputWriter(stream)
+    writer.bufferBytes(16)
+    val earlierFailure = new IOException("earlier close failed")
+    val resources = Seq[AutoCloseable](
+      // Its own safeClose suppresses the interrupt and so restores it before the writer closes.
+      () => Seq[AutoCloseable](
+        () => throw earlierFailure,
+        () => throw new InterruptedException("interrupted close")).safeClose(),
+      () => writer.close())
+    val (thrown, interrupted) = runOnNewThread(interruptFirst = false)(resources.safeClose())
+    assert(thrown.contains(earlierFailure))
+    // One from the nested safeClose, one from the writer's buffered write that saw it restored.
+    assert(earlierFailure.getSuppressed.count(_.isInstanceOf[InterruptedException]) == 2)
+    assert(interrupted)
+    assert(delegate.bytesWritten == 0)
+    assertClosedOnWriterThread(delegate, pool)
+  }
+}
+
+/** A file system whose files are all the stream a test set, to see how a writer closes it. */
+class DebugStreamFileSystem extends FileSystem {
+  private def unsupported: Nothing = throw new UnsupportedOperationException()
+
+  override def getUri: URI = URI.create("probe:///")
+
+  override def create(
+      f: Path,
+      permission: FsPermission,
+      overwrite: Boolean,
+      bufferSize: Int,
+      replication: Short,
+      blockSize: Long,
+      progress: Progressable): FSDataOutputStream =
+    new FSDataOutputStream(DebugStreamFileSystem.nextStream, null)
+
+  override def open(f: Path, bufferSize: Int): FSDataInputStream = unsupported
+
+  override def append(f: Path, bufferSize: Int, progress: Progressable): FSDataOutputStream =
+    unsupported
+
+  override def rename(src: Path, dst: Path): Boolean = unsupported
+
+  override def delete(f: Path, recursive: Boolean): Boolean = unsupported
+
+  override def listStatus(f: Path): Array[FileStatus] = unsupported
+
+  override def setWorkingDirectory(dir: Path): Unit = unsupported
+
+  override def getWorkingDirectory: Path = new Path("probe:///")
+
+  override def mkdirs(f: Path, permission: FsPermission): Boolean = unsupported
+
+  override def getFileStatus(f: Path): FileStatus = unsupported
+}
+
+object DebugStreamFileSystem {
+  /** The stream that every file this file system creates writes to. */
+  @volatile var nextStream: OutputStream = _
 }

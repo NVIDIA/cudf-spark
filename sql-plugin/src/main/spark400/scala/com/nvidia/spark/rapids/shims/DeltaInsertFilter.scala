@@ -14,16 +14,8 @@
  * limitations under the License.
  */
 /*** spark-rapids-shim-json-lines
-{"spark": "400"}
-{"spark": "401"}
-{"spark": "402"}
-{"spark": "403"}
-{"spark": "404"}
-{"spark": "411"}
-{"spark": "412"}
-{"spark": "413"}
-{"spark": "420"}
-{"spark": "500"}
+{"spark":["400","420"],"carryForward":"all"}
+{"spark":["410db183"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
@@ -36,18 +28,11 @@ import org.apache.spark.sql.catalyst.util.RowDeltaUtils.{INSERT_OPERATION, REINS
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 object DeltaInsertFilter {
+  val reinsertOperation: Option[Int] = Some(REINSERT_OPERATION)
+
   def filterInsertRows(batch: ColumnarBatch): CudfColumnVector = {
-    val opCol = batch.column(0).asInstanceOf[GpuColumnVector].getBase
-    val insertMatch = withResource(CudfScalar.fromInt(INSERT_OPERATION)) { s =>
-      opCol.equalTo(s)
-    }
-    withResource(insertMatch) { _ =>
-      val reinsertMatch = withResource(CudfScalar.fromInt(REINSERT_OPERATION)) { s =>
-        opCol.equalTo(s)
-      }
-      withResource(reinsertMatch) { _ =>
-        insertMatch.or(reinsertMatch)
-      }
+    withResource(CudfScalar.fromInt(INSERT_OPERATION)) { s =>
+      batch.column(0).asInstanceOf[GpuColumnVector].getBase.equalTo(s)
     }
   }
 }

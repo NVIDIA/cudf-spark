@@ -51,7 +51,7 @@ class DefaultDeleteLoader(
 
     val inputFile = inputFiles.getOrElse(locationOf(delete),
       throw new IllegalArgumentException(
-        s"No decrypted input file was provided for deletion vector ${locationOf(delete)}"))
+        s"No input file was provided for deletion vector ${locationOf(delete)}"))
     val loadTime = parquetConf.metrics.getOrElse(ICEBERG_DV_LOAD_TIME, NoopMetric)
     val deletionVector = loadTime.ns {
       ShimUtils.readDeletionVector(delete, inputFile, parquetConf.validateDeletionVectorCrc)

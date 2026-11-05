@@ -25,12 +25,14 @@ import org.apache.spark.sql.SaveMode
 import org.apache.spark.sql.classic.{DataFrameWriter, SparkSession}
 import org.apache.spark.sql.connector.catalog.StagingTableCatalog
 import org.apache.spark.sql.delta.{DeltaOperations, DeltaOptions}
+import org.apache.spark.sql.delta.{TableFeature, VariantShreddingPreviewTableFeature}
 import org.apache.spark.sql.delta.actions.{FileAction, Metadata}
 import org.apache.spark.sql.delta.catalog.DeltaCatalog
 import org.apache.spark.sql.delta.commands.{DMLWithDeletionVectorsHelper, TouchedFileWithDV,
   WriteIntoDelta}
 import org.apache.spark.sql.delta.hooks.GpuAutoCompact40x
-import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShimBase, DMLWithDeletionVectorsRuntimeShim,
+import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShimBase, DeltaVariantShreddingShim,
+  DMLWithDeletionVectorsRuntimeShim,
   GpuDeltaLog,
   GpuOptimisticTransaction, GpuOptimisticTransactionBase, GpuWriteIntoDelta,
   GpuWriteIntoDeltaLike, StartTransactionArg}
@@ -40,7 +42,11 @@ import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShimBase, DMLWithDeletionV
  *
  * @note This class is instantiated via reflection from DeltaProbeImpl
  */
-class Delta40xRuntimeShim extends DeltaRuntimeShimBase with DMLWithDeletionVectorsRuntimeShim {
+class Delta40xRuntimeShim extends DeltaRuntimeShimBase
+    with DeltaVariantShreddingShim with DMLWithDeletionVectorsRuntimeShim {
+
+  override protected def variantShreddingFeatures: Set[TableFeature] =
+    Set(VariantShreddingPreviewTableFeature)
 
   override def processUnmodifiedData(
       spark: SparkSession,

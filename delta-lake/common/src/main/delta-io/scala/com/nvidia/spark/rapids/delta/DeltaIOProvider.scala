@@ -49,6 +49,9 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
  */
 abstract class DeltaIOProvider extends DeltaProviderImplBase {
 
+  // Native Delta inserts use this internal option to fill omitted nullable columns.
+  private val USE_NULL_AS_DEFAULT_OPTION = "__use_null_as_default"
+
   override def isSupportedFormat(format: Class[_ <: FileFormat]): Boolean = {
     // We need to check if the DeltaParquetFileFormat class is loadable
     // because we can run into a case where a customer runs with an
@@ -111,7 +114,7 @@ abstract class DeltaIOProvider extends DeltaProviderImplBase {
   private case class DeltaWriteV1Config(
       deltaLog: DeltaLog,
       forceOverwrite: Boolean,
-      options: mutable.HashMap[String, String],
+      options: Map[String, String],
       catalogTable: Option[CatalogTable],
       recachePlan: LogicalPlan,
       refreshTableName: Option[String])
@@ -181,13 +184,23 @@ abstract class DeltaIOProvider extends DeltaProviderImplBase {
           "org$apache$spark$sql$delta$catalog$WriteIntoDeltaBuilder$$options").map { f =>
           f.get(outerObj).asInstanceOf[mutable.HashMap[String, String]]
         }
+        // Older Delta builders do not expose this flag.
+        val nullAsDefault = getField(outerClass,
+          "org$apache$spark$sql$delta$catalog$WriteIntoDeltaBuilder$$nullAsDefault")
+          .exists(_.getBoolean(outerObj))
         val writeBuilderCatalogTable = getField(outerClass,
           "org$apache$spark$sql$delta$catalog$WriteIntoDeltaBuilder$$table")
           .map(_.get(outerObj).asInstanceOf[DeltaTableV2])
           .flatMap(getCatalogTableForV1Write)
         if (forceOverwrite.isDefined && options.isDefined) {
+          val writeOptions = options.get.toMap
+          val effectiveOptions = if (nullAsDefault) {
+            writeOptions + (USE_NULL_AS_DEFAULT_OPTION -> "true")
+          } else {
+            writeOptions
+          }
           Some(DeltaWriteV1Config(
-            deltaLog, forceOverwrite.get, options.get,
+            deltaLog, forceOverwrite.get, effectiveOptions,
             writeBuilderCatalogTable.orElse(catalogTable), recachePlan, refreshTableName))
         } else {
           meta.willNotWorkOnGpu(s"write class has unsupported outer class $outerClass")
@@ -212,11 +225,11 @@ abstract class DeltaIOProvider extends DeltaProviderImplBase {
     }
     val deltaTable = cpuExec.table.asInstanceOf[DeltaTableV2]
     val deltaLog = getDeltaLogForV1Write(cpuExec.session, deltaTable)
-    RapidsDeltaUtils.tagForDeltaWrite(meta, cpuExec.plan.schema, Some(deltaLog),
-      deltaTable.options, cpuExec.session)
     extractWriteV1Config(meta, deltaLog, getCatalogTableForV1Write(deltaTable),
       getRecachePlanForV1Write(deltaLog, deltaTable),
       getRefreshTableNameForV1Write(deltaTable), cpuExec.write).foreach { writeConfig =>
+      RapidsDeltaUtils.tagForDeltaWrite(meta, cpuExec.plan.schema, Some(deltaLog),
+        writeConfig.options, cpuExec.session)
       meta.setCustomTaggingData(writeConfig)
     }
   }
@@ -241,11 +254,11 @@ abstract class DeltaIOProvider extends DeltaProviderImplBase {
     }
     val deltaTable = cpuExec.table.asInstanceOf[DeltaTableV2]
     val deltaLog = getDeltaLogForV1Write(cpuExec.session, deltaTable)
-    RapidsDeltaUtils.tagForDeltaWrite(meta, cpuExec.plan.schema, Some(deltaLog),
-      deltaTable.options, cpuExec.session)
     extractWriteV1Config(meta, deltaLog, getCatalogTableForV1Write(deltaTable),
       getRecachePlanForV1Write(deltaLog, deltaTable),
       getRefreshTableNameForV1Write(deltaTable), cpuExec.write).foreach { writeConfig =>
+      RapidsDeltaUtils.tagForDeltaWrite(meta, cpuExec.plan.schema, Some(deltaLog),
+        writeConfig.options, cpuExec.session)
       meta.setCustomTaggingData(writeConfig)
     }
   }
@@ -284,7 +297,7 @@ abstract class DeltaIOProvider extends DeltaProviderImplBase {
           val cpuWrite = createWriteIntoDelta(
             deltaLog,
             if (writeConfig.forceOverwrite) SaveMode.Overwrite else SaveMode.Append,
-            new DeltaOptions(writeConfig.options.toMap, session.sessionState.conf),
+            new DeltaOptions(writeConfig.options, session.sessionState.conf),
             DeltaRuntimeShim.unsafeVolatileSnapshotFromLog(deltaLog).metadata.configuration,
             data,
             writeConfig.catalogTable)

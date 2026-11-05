@@ -578,11 +578,6 @@ case class PercentileRuleMeta(
     r: DataFromReplacementRule)
   extends TypedImperativeAggExprMeta[Percentile](c, conf, p, r) {
   override def tagAggForGpu(): Unit = {
-    if (!SparkShimImpl.isExactPercentileInputTypeSupported(c.child.dataType)) {
-      willNotWorkOnGpu(
-        "exact percentile for floating-point inputs does not match Spark 5 interpolation semantics")
-    }
-
     // Check if the input percentage can be supported on GPU.
     GpuOverrides.extractLit(childExprs(1).wrapped.asInstanceOf[Expression]) match {
       case None =>
@@ -612,7 +607,7 @@ case class PercentileRuleMeta(
         s"Invalid aggregation context: ${exprMeta.context}")
     }
     GpuPercentile(childExprs.head, childExprs(1).asInstanceOf[GpuLiteral], childExprs(2),
-      isReduction)
+      isReduction, c.reverse)
   }
   // Declare the data type of the internal buffer so it can be serialized and
   // deserialized correctly during shuffling.

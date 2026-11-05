@@ -13,8 +13,10 @@
 # limitations under the License.
 import math
 import pytest
+import re
 
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_are_equal_sql, assert_gpu_and_cpu_error, assert_gpu_fallback_collect, assert_gpu_sql_fallback_collect
+from conftest import is_apache_runtime
 from data_gen import *
 from marks import *
 from pyspark.sql.types import *
@@ -3084,7 +3086,12 @@ def spark_bugs_in_decimal_sorting():
     :return: True, if Apache Spark version does not sort Decimal(>20, >2) correctly. False, otherwise.
     """
     v = spark_version()
-    return v < "3.1.4" or v < "3.3.1" or v < "3.2.3" or v < "3.4.0"
+    # SPARK-40089 was backported to Apache Spark 3.3.1. Only narrow the guard for
+    # Apache 3.3 releases; retain the existing guard for older and vendor runtimes.
+    apache_33 = re.fullmatch(r"3\.3\.([0-9]+)", v)
+    if apache_33 and is_apache_runtime():
+        return int(apache_33[1]) == 0
+    return v < "3.4.0"
 
 
 @ignore_order(local=True)

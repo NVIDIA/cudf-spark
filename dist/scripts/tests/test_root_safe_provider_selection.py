@@ -31,6 +31,7 @@ NEWER_ONLY = "org/apache/iceberg/NewerOnly.class"
 OLDER_ONLY = "org/apache/iceberg/OlderOnly.class"
 NEWER_IMPL = "org/apache/iceberg/NewerImpl.class"
 OLDER_IMPL = "org/apache/iceberg/OlderImpl.class"
+PRIVATE_BUILD_INFO = "cudf-spark-private-version-info.properties"
 BUILD_INFO_EVENT = "com/nvidia/spark/rapids/SparkRapidsBuildInfoEvent.class"
 
 
@@ -61,6 +62,7 @@ def create_artifacts(base_dir):
         SHARED: b"aggregator-shared-413",
         NEWER_ONLY: b"aggregator-newer-only",
         NEWER_IMPL: b"aggregator-newer-impl",
+        PRIVATE_BUILD_INFO: b"version=1.0\nrevision=abc123\ndate=newer\n",
     })
     write_jar(artifact_path(base_dir, "iceberg-common", "353"), {
         SHARED: b"module-shared-353",
@@ -70,6 +72,7 @@ def create_artifacts(base_dir):
         SHARED: b"aggregator-shared-353",
         OLDER_ONLY: b"aggregator-older-only",
         OLDER_IMPL: b"aggregator-older-impl",
+        PRIVATE_BUILD_INFO: b"version=1.0\nrevision=abc123\ndate=older\n",
     })
 
 
@@ -85,9 +88,10 @@ class FakeAttributes:
 
 
 class FakeProject:
-    def __init__(self, source_dir, project_dir, target_dir, repository_dir):
+    def __init__(self, source_dir, project_dir, target_dir, repository_dir,
+                 buildvers="353,413", conventional=False):
         self.properties = {
-            "included_buildvers": "353,413",
+            "included_buildvers": buildvers,
             "spark.rapids.source.basedir": str(source_dir),
             "spark.rapids.project.basedir": str(project_dir),
             "project.version": "1.0",
@@ -95,7 +99,7 @@ class FakeProject:
             "project.build.directory": str(target_dir),
             "env.ART_URL": "",
             "maven.local.repository": str(repository_dir),
-            "should.build.conventional.jar": False,
+            "should.build.conventional.jar": conventional,
         }
 
     def getProperty(self, name):
@@ -136,18 +140,22 @@ class RootSafeProviderSelectionTest(unittest.TestCase):
             "\n"
             "def coordinates(zip_handle, buildver, scala_version, get_property):\n"
             "    return []\n")
+        (self.config_dir / "build" / "build_info.py").write_text(
+            (DIST_DIR / "build" / "build_info.py").read_text())
         create_artifacts(self.project_dir)
 
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def assemble_standard(self):
-        target_dir = self.root / "standard-target"
+    def assemble_standard(self, buildvers="353,413", conventional=False,
+                          target_name="standard-target"):
+        target_dir = self.root / target_name
         (target_dir / "deps").mkdir(parents=True)
         globals_dict = {
             "attributes": FakeAttributes(),
             "project": FakeProject(
-                self.source_dir, self.project_dir, target_dir, self.root / "repository"),
+                self.source_dir, self.project_dir, target_dir, self.root / "repository",
+                buildvers, conventional),
             "execfile": execfile_compat,
             "self": self,
         }
@@ -174,6 +182,11 @@ class RootSafeProviderSelectionTest(unittest.TestCase):
         self.assertFalse((parallel_world / OLDER_IMPL).exists())
         self.assertTrue((parallel_world / "spark413" / NEWER_IMPL).is_file())
         self.assertTrue((parallel_world / "spark353" / OLDER_IMPL).is_file())
+        self.assertEqual(
+            b"version=1.0\nrevision=abc123\ndate=newer\n",
+            read_bytes(parallel_world, PRIVATE_BUILD_INFO))
+        self.assertFalse((parallel_world / "spark413" / PRIVATE_BUILD_INFO).exists())
+        self.assertFalse((parallel_world / "spark353" / PRIVATE_BUILD_INFO).exists())
 
     def run_dedupe(self, target_dir):
         parallel_world = target_dir / "parallel-world"
@@ -220,6 +233,42 @@ class RootSafeProviderSelectionTest(unittest.TestCase):
                 result = self.run_dedupe(target_dir)
                 self.assertEqual(0, result.returncode, result.stdout + result.stderr)
                 self.assert_final_layout(target_dir)
+
+    def test_rejects_mixed_private_revisions_for_both_assemblers(self):
+        older_aggregator = artifact_path(self.project_dir, "aggregator", "353")
+        with zipfile.ZipFile(older_aggregator) as jar:
+            entries = {name: jar.read(name) for name in jar.namelist()}
+        entries[PRIVATE_BUILD_INFO] = b"version=1.0\nrevision=different\n"
+        write_jar(older_aggregator, entries)
+
+        for name, assemble in (
+                ("standard", self.assemble_standard),
+                ("fast", self.assemble_fast)):
+            with self.subTest(assembler=name):
+                with self.assertRaisesRegex(Exception, "revision differs"):
+                    assemble()
+
+    def test_rejects_incomplete_private_build_info_in_conventional_jar(self):
+        aggregator = artifact_path(self.project_dir, "aggregator", "413")
+        for missing_key in ("version", "revision"):
+            with self.subTest(missing_key=missing_key):
+                with zipfile.ZipFile(aggregator) as jar:
+                    entries = {name: jar.read(name) for name in jar.namelist()}
+                properties = {
+                    "version": "1.0",
+                    "revision": "abc123",
+                }
+                del properties[missing_key]
+                entries[PRIVATE_BUILD_INFO] = "".join(
+                    "%s=%s\n" % item for item in properties.items()).encode()
+                write_jar(aggregator, entries)
+
+                with self.assertRaisesRegex(Exception, "missing %s" % missing_key):
+                    self.assemble_standard(
+                        buildvers="413", conventional=True,
+                        target_name="conventional-%s-target" % missing_key)
+
+                create_artifacts(self.project_dir)
 
     def test_dedupe_rejects_runtime_dependent_build_info_event(self):
         target_dir = self.assemble_standard()

@@ -37,6 +37,8 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.execution.datasources.SQLHadoopMapReduceCommitProtocol
 import org.apache.spark.sql.functions.input_file_name
 import org.apache.spark.sql.hive.rapids.GpuHiveParquetFileFormat
+import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.internal.SQLConf.ParquetOutputTimestampType
 import org.apache.spark.sql.rapids.BasicColumnarWriteJobStatsTracker
 import org.apache.spark.sql.rapids.shims.SparkUpgradeExceptionShims
 import org.apache.spark.sql.types.StructType
@@ -149,6 +151,26 @@ class ParquetWriterSuite extends SparkQueryCompareTestSuite {
 
       assertResult(rowGroupSizeBytes) {
         factory.partitionFlushSize(context)
+      }
+    }, conf)
+  }
+
+  test("explicit parquet timestamp settings override session config") {
+    val conf = new SparkConf()
+      .set(SQLConf.PARQUET_OUTPUT_TIMESTAMP_TYPE.key, "INT96")
+    withGpuSparkSession(spark => {
+      val job = Job.getInstance(spark.sparkContext.hadoopConfiguration)
+      new GpuParquetFileFormat().prepareWriteWithTimestampOverrides(
+        spark,
+        job,
+        Map(SQLConf.PARQUET_OUTPUT_TIMESTAMP_TYPE.key ->
+          ParquetOutputTimestampType.TIMESTAMP_MILLIS.toString),
+        new StructType(),
+        ParquetOutputTimestampType.TIMESTAMP_MICROS,
+        DateTimeRebaseCorrected)
+
+      assertResult(ParquetOutputTimestampType.TIMESTAMP_MICROS.toString) {
+        job.getConfiguration.get(SQLConf.PARQUET_OUTPUT_TIMESTAMP_TYPE.key)
       }
     }, conf)
   }

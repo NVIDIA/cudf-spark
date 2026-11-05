@@ -16,7 +16,9 @@
 
 package com.nvidia.spark.rapids
 
-import ai.rapids.cudf.ColumnVector
+import ai.rapids.cudf.{ColumnVector, Rmm}
+import com.nvidia.spark.rapids.jni.{GpuRetryOOM, RmmSpark}
+import com.nvidia.spark.rapids.spill.SpillFramework
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Ascending, AttributeReference, ExprId, SortOrder}
@@ -64,6 +66,62 @@ class SamplingUtilsSuite extends RmmSparkRetrySuiteBase {
     val sample = SamplingUtils.randomResample(
       (0 until 300).grouped(100).map(batch), 0.6, sorter, converter, 7L)
     checkSample(sample, 180, 300)
+  }
+
+  test("randomResample preserves fixed-seed results across batches and fraction boundaries") {
+    // Expected rows were captured from the implementation before shortening resource lifetimes.
+    val expectedSamples = Seq(
+      0.0 -> Seq.empty[Int],
+      0.25 -> Seq(18, 19, 9, 12, 0, 3),
+      0.75 -> Seq(16, 17, 20, 21, 22, 23, 8, 10, 11, 13, 14, 15, 1, 2, 4, 5, 6, 7),
+      1.0 -> ((16 until 24) ++ (8 until 16) ++ (0 until 8)))
+    for ((fraction, expected) <- expectedSamples) {
+      val sample = SamplingUtils.randomResample(
+        (0 until 24).grouped(8).map(batch), fraction, sorter, converter, 7L)
+      checkSample(sample, (24 * fraction).toInt, 24)
+      assert(sample.map(_.getInt(0)).sorted.toSeq === expected.sorted)
+    }
+  }
+
+  test("reservoirSampleAndCount preserves fixed-seed results with and without dropping rows") {
+    for (count <- Seq(0, 4, 32)) {
+      val (sample, numRows) = SamplingUtils.reservoirSampleAndCount(
+        (0 until 24).grouped(8).map(batch), count, sorter, converter, 7L)
+      assert(numRows === 24L)
+      checkSample(sample, math.min(count, 24), 24)
+      // Set iteration order can differ between Scala versions; the same seed must be repeatable.
+      val (repeated, repeatedNumRows) = SamplingUtils.reservoirSampleAndCount(
+        (0 until 24).grouped(8).map(batch), count, sorter, converter, 7L)
+      assert(repeatedNumRows === numRows)
+      assert(sample.map(_.getInt(0)).toSeq === repeated.map(_.getInt(0)).toSeq)
+    }
+  }
+
+  for (resample <- Seq(false, true)) {
+    test(s"sampling releases both inputs when concatenation fails: resample=$resample") {
+      val allocatedBefore = Rmm.getTotalBytesAllocated
+      val handlesBefore = SpillFramework.stores.deviceStore.numHandles
+      val input = (0 until 16).grouped(8).zipWithIndex.map { case (values, index) =>
+        val cb = batch(values)
+        if (index == 1) {
+          // Selecting every row requires no allocation. Fail the following concatenation.
+          RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
+            RmmSpark.OomInjectionType.GPU.ordinal, 0)
+        }
+        cb
+      }
+      val error = intercept[GpuRetryOOM] {
+        if (resample) {
+          SamplingUtils.randomResample(input, 1.0, sorter, converter, 7L)
+        } else {
+          SamplingUtils.reservoirSampleAndCount(input, 32, sorter, converter, 7L)
+        }
+      }
+      assert(error.getStackTrace.exists(frame =>
+        frame.getClassName == "ai.rapids.cudf.Table" && frame.getMethodName == "concatenate"))
+      assert(SpillFramework.stores.deviceStore.numHandles === handlesBefore)
+      assert(Rmm.getTotalBytesAllocated === allocatedBefore)
+    }
   }
 
   test("reservoirSampleAndCount retains the requested rows from the previous sample") {

@@ -313,11 +313,51 @@ abstract class ColumnarOutputWriter(context: TaskAttemptContext,
 
   private def finishClose(): Unit = {
     GpuSemaphore.releaseIfNecessary(TaskContext.get())
-    writeBufferedData()
-    outputStream.close()
-    debugDumpOutputStream.foreach { os =>
-      os.close()
+    try {
+      writeBufferedData()
+    } catch {
+      case t: Throwable =>
+        closeOutputStreams(t)
+        throw t
     }
+    closeOutputStreams(null)
+  }
+
+  /**
+   * Closes the output streams, adding their failures to `error` as suppressed when it is set.
+   * An interrupt still set from earlier cleanup on this thread, such as one a safeClose
+   * restored, would stop an async stream before it closes its delegate, so it is cleared for
+   * the close and set again afterwards. The buffered write before this still sees it. An
+   * interrupt that the output stream's close leaves set is held the same way until the debug
+   * stream has closed, so it cannot stop that close either.
+   */
+  private def closeOutputStreams(error: Throwable): Unit = {
+    val interruptedBeforeClose = Thread.interrupted()
+    var interruptedDuringMainClose = false
+    try {
+      closeOutputStream(outputStream, error)
+      interruptedDuringMainClose = Thread.interrupted()
+      debugDumpOutputStream.foreach(closeOutputStream(_, error))
+    } finally {
+      if (interruptedBeforeClose || interruptedDuringMainClose) {
+        Thread.currentThread().interrupt()
+      }
+    }
+  }
+
+  /**
+   * Closes `stream`, suppressing its close failure into `error` when that is set. A stream that
+   * keeps its write failure, as HDFS and the async stream do, can rethrow that same `error` from
+   * close, and adding an exception to itself would throw instead.
+   */
+  private def closeOutputStream(stream: OutputStream, error: Throwable): Unit = {
+    val closeExceptError: AutoCloseable = () =>
+      try {
+        stream.close()
+      } catch {
+        case t: Throwable if t eq error =>
+      }
+    closeExceptError.safeClose(error)
   }
 
   protected final def closeAndReturn[T <: AutoCloseable](closeWriter: => T): T = {

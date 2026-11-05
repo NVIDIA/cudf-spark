@@ -222,4 +222,44 @@ class SharedRecomputableHandleSuite extends SpillUnitTestBase {
 
     assertResult(Seq(1, 2))(closedIds.sorted.toSeq)
   }
+
+  test("reacquirable lease unpins on release and reacquires on access") {
+    val closedIds = ArrayBuffer[Int]()
+    var buildCount = 0
+    var rebuildCallbacks = 0
+
+    def buildResource(): TestResource = {
+      buildCount += 1
+      new TestResource(buildCount, closedIds)
+    }
+
+    withResource(
+      new SharedRecomputableHandle(1024L, buildResource(), () => buildResource())) {
+      handle =>
+        SpillFramework.stores.deviceStore.track(handle)
+        val lease = new SharedRecomputableHandle.ReacquirableLease(handle,
+          () => rebuildCallbacks += 1)
+        withResource(lease) { _ =>
+          assertResult(1)(lease.resource.id)
+          assert(!handle.spillable)
+
+          lease.release()
+          lease.release()
+          assert(handle.spillable)
+          assertResult(handle.approxSizeInBytes)(handle.spill())
+          handle.releaseSpilled()
+          assertResult(Seq(1))(closedIds.toSeq)
+          assertResult(0)(rebuildCallbacks)
+
+          assertResult(2)(lease.resource.id)
+          assertResult(2)(lease.resource.id)
+          assertResult(2)(buildCount)
+          assertResult(1)(rebuildCallbacks)
+          assert(!handle.spillable)
+        }
+        assert(handle.spillable)
+    }
+
+    assertResult(Seq(1, 2))(closedIds.sorted.toSeq)
+  }
 }

@@ -625,3 +625,33 @@ def test_delta_optimize_clustered_table_gpu_write_repeated(spark_tmp_path):
 def test_delta_optimize_clustered_row_tracking_table_gpu_write(spark_tmp_path):
     _assert_liquid_optimize_gpu_write_parity(
         spark_tmp_path, write_func=_write_many_small_liquid_row_tracking_files)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_42_or_43(), reason="Requires Delta 4.2+ CDF writes")
+def test_delta_optimize_cdf_non_data_changing(spark_tmp_path):
+    def write(spark, enable_deletion_vectors, path, partition_columns, clustering_columns):
+        gen_df(spark, [("id", long_gen)], length=64, num_slices=4) \
+            .write.format("delta").option("delta.enableChangeDataFeed", "true") \
+            .option("delta.enableDeletionVectors", "false").save(path)
+        assert len(spark.read.format("delta").load(path).inputFiles()) == 4
+
+    conf = copy_and_update(_optimize_conf, {
+        "spark.databricks.delta.optimizeWrite.enabled": "false"
+    })
+    _assert_optimize_parity(False, spark_tmp_path, conf=conf, write_func=write)
+
+    def check(spark):
+        cdf_results = []
+        for engine in ["CPU", "GPU"]:
+            path = spark_tmp_path + "/DELTA_OPTIMIZE/" + engine
+            cdf_results.append(assert_delta_non_data_changing_commit(spark, path, {"add", "remove"}))
+            initial = spark.read.format("delta").option("versionAsOf", 0).load(path)
+            assert_equal(initial.sort("id").collect(), _read_sorted(spark, path).collect())
+            assert len(spark.read.format("delta").load(path).inputFiles()) == 1
+        assert_equal(*cdf_results)
+        assert_gpu_and_cpu_delta_logs_equivalent(spark, spark_tmp_path + "/DELTA_OPTIMIZE")
+
+    with_cpu_session(check, conf=conf)

@@ -25,6 +25,7 @@ import scala.collection.JavaConverters._
 import ai.rapids.cudf
 import ai.rapids.cudf.{ColumnVector, DType, HostMemoryBuffer, Scalar, Schema, Table}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.jni.{CastStrings, GpuSplitAndRetryOOM}
 import com.nvidia.spark.rapids.shims.{ColumnDefaultValuesShims, ShimFilePartitionReaderFactory}
 import org.apache.hadoop.conf.Configuration
@@ -43,7 +44,7 @@ import org.apache.spark.sql.execution.datasources.csv.CSVDataSource
 import org.apache.spark.sql.execution.datasources.v2._
 import org.apache.spark.sql.execution.datasources.v2.csv.CSVScan
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.LegacyTimeParserPolicy
+import org.apache.spark.sql.rapids.{CorrectedTimeParserPolicy, LegacyTimeParserPolicy}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -210,6 +211,22 @@ object GpuCSVScan extends Logging {
     // parsedOptions.maxColumns was originally a performance optimization but is not used any more
 
     val types = readSchema.map(_.dataType).toSet
+    if (supportsCorrectedDateParsing(parsedOptions)) {
+      // Empty projections still decode the smallest data field to obtain the row count.
+      val fields = if (readSchema.isEmpty && dataSchema != null && dataSchema.nonEmpty) {
+        Array(dataSchema.min(Ordering.by[StructField, Integer](_.dataType.defaultSize)))
+      } else {
+        readSchema.fields
+      }
+      fields.filter(_.dataType == DateType).foreach { field =>
+        GpuCsvUtils.dateFormatInRead(parsedOptions, field.metadata).foreach { format =>
+          if (!correctedDateFormats.contains(format)) {
+            meta.willNotWorkOnGpu(
+                s"CSV date format '$format' for column '${field.name}' is not supported")
+          }
+        }
+      }
+    }
     if (GpuOverrides.getTimeParserPolicy == LegacyTimeParserPolicy &&
         (types.contains(DateType) ||
         types.contains(TimestampType))) {
@@ -220,20 +237,36 @@ object GpuCSVScan extends Logging {
     }
 
     if (types.contains(DateType)) {
-      GpuTextBasedDateUtils.tagCudfFormat(meta,
-        GpuCsvUtils.dateFormatInRead(parsedOptions), parseString = true)
+      if (!supportsCorrectedDateParsing(parsedOptions)) {
+        GpuTextBasedDateUtils.tagCudfFormat(meta,
+          GpuCsvUtils.dateFormatInRead(parsedOptions), parseString = true)
+      }
 
-      // For date type, timezone needs to be checked also. This is because JVM timezone is used
-      // to get days offset before rebasing Julian to Gregorian in Spark while not in Rapids.
+      if (supportsCorrectedDateParsing(parsedOptions) &&
+          (parsedOptions.ignoreLeadingWhiteSpaceInRead ||
+            parsedOptions.ignoreTrailingWhiteSpaceInRead)) {
+        // Univocity trims only unquoted fields. cuDF returns the same string for quoted
+        // and unquoted whitespace, so the date parser cannot recover that distinction.
+        meta.willNotWorkOnGpu("GPU CSV date parsing does not support " +
+          "ignoreLeadingWhiteSpace or ignoreTrailingWhiteSpace")
+      }
+
+      // For date type, whether the timezone needs to be checked depends on the time parser policy.
       //
-      // In details, for CSV data format, Spark uses dateFormatter to parse string as date data
-      // type which utilizes [[org.apache.spark.sql.catalyst.DateFormatter]]. And CSV format
-      // (e.g., [[UnivocityParser]]), it uses [[LegacyFastDateFormatter]] which is based on
-      // Apache Commons FastDateFormat. It parse string into Java util.Date base on JVM default
-      // timezone. From Java util.Date, it's converted into java.sql.Date type.
-      // By leveraging [[JavaDateTimeUtils]], it finally do `rebaseJulianToGregorianDays`
-      // considering its offset to UTC timezone.
-      if (!GpuOverrides.isUTCTimezone(parsedOptions.zoneId)) {
+      // In CSV, Spark's UnivocityParser uses DateFormatter to parse a string as DateType. Under
+      // CORRECTED, DateFormatter parses directly to proleptic Gregorian epoch days. It does not
+      // convert through java.util.Date, so the session timezone has no effect.
+      //
+      // Under LEGACY, DateFormatter uses LegacyFastDateFormatter, which is based on Apache Commons
+      // FastDateFormat. It parses into java.util.Date based on the JVM default timezone, then
+      // converts it to java.sql.Date. Spark's date conversion utilities finally rebase Julian days
+      // to proleptic Gregorian days considering the offset to UTC, so timezone can affect the
+      // result.
+      //
+      // EXCEPTION may also invoke the legacy formatter when comparing parser behavior. Therefore,
+      // keep the conservative non-UTC fallback for LEGACY and EXCEPTION.
+      if (GpuOverrides.getTimeParserPolicy != CorrectedTimeParserPolicy &&
+          !GpuOverrides.isUTCTimezone(parsedOptions.zoneId)) {
         meta.willNotWorkOnGpu(s"Not supported timezone type ${parsedOptions.zoneId}.")
       }
     }
@@ -249,7 +282,8 @@ object GpuCSVScan extends Logging {
     // TODO parsedOptions.emptyValueInRead
 
     if (GpuCsvUtils.enableDateTimeParsingFallback(parsedOptions) &&
-        (types.contains(DateType) || types.contains(TimestampType))) {
+        (types.contains(TimestampType) ||
+          (types.contains(DateType) && !supportsCorrectedDateParsing(parsedOptions)))) {
       meta.willNotWorkOnGpu(s"GpuCSVScan does not support enableDateTimeParsingFallback")
     }
 
@@ -278,6 +312,29 @@ object GpuCSVScan extends Logging {
 
     FileFormatChecks.tag(meta, readSchema, CsvFormatType, ReadFileOp)
   }
+
+  // CSV formats require independent validation. Adding an expression format must not
+  // implicitly enable it for CSV date parsing.
+  private val correctedDateFormats: Set[String] = Set(
+    "yyyy-MM-dd",
+    "yyyy/MM/dd",
+    "yyyy-MM",
+    "yyyy/MM",
+    "dd/MM/yyyy",
+    "yyyy-MM-dd HH:mm:ss",
+    "MM-dd",
+    "MM/dd",
+    "dd-MM",
+    "dd/MM",
+    "MM/yyyy",
+    "MM-yyyy",
+    "MM/dd/yyyy",
+    "MM-dd-yyyy",
+    "MMyyyy")
+
+  def supportsCorrectedDateParsing(options: CSVOptions): Boolean =
+    GpuOverrides.getTimeParserPolicy == CorrectedTimeParserPolicy &&
+      options.dateFormatInRead.forall(correctedDateFormats.contains)
 }
 
 case class GpuCSVScan(
@@ -385,6 +442,34 @@ abstract class CSVPartitionReaderBase[BUFF <: LineBufferer, FACT <: LineBufferer
       dataSchema, readDataSchema, parsedOptions.lineSeparatorInRead, maxRowsPerChunk,
       maxBytesPerChunk, execMetrics, bufferFactory, Charset.forName(parsedOptions.charset)) {
 
+  override protected def readToTables(
+      dataBuffer: BUFF,
+      cudfDataSchema: Schema,
+      readDataSchema: StructType,
+      cudfReadDataSchema: Schema,
+      isFirstChunk: Boolean,
+      decodeTime: GpuMetric): Iterator[Table] = {
+    Iterator.single(readToTable(dataBuffer, cudfDataSchema, readDataSchema,
+      cudfReadDataSchema, isFirstChunk, decodeTime))
+  }
+
+  /**
+   * Read the host buffer to GPU table
+   * @param dataBuffer where the data is buffered
+   * @param cudfDataSchema the cudf schema of the data
+   * @param readDataSchema the Spark schema describing what will be read
+   * @param cudfReadDataSchema the cudf schema of just the data we want to read.
+   * @param isFirstChunk if it is the first chunk
+   * @return table
+   */
+  def readToTable(
+    dataBuffer: BUFF,
+    cudfDataSchema: Schema,
+    readDataSchema: StructType,
+    cudfReadDataSchema: Schema,
+    isFirstChunk: Boolean,
+    decodeTime: GpuMetric): Table
+
   /**
    * File format short name used for logging and other things to uniquely identity
    * which file format is being used.
@@ -436,6 +521,20 @@ abstract class CSVPartitionReaderBase[BUFF <: LineBufferer, FACT <: LineBufferer
 
   override def dateFormat: Option[String] = Some(GpuCsvUtils.dateFormatInRead(parsedOptions))
   override def timestampFormat: String = GpuCsvUtils.timestampFormatInRead(parsedOptions)
+
+  private lazy val enableDateParsingFallback = GpuCsvUtils.enableDateParsingFallback(parsedOptions)
+
+  override def castStringToDate(input: ColumnVector, dt: DType,
+      field: StructField): ColumnVector = {
+    if (GpuCSVScan.supportsCorrectedDateParsing(parsedOptions)) {
+      CastStrings.parseCsvDate(
+          input, GpuCsvUtils.dateFormatInRead(parsedOptions, field.metadata).orNull,
+          enableDateParsingFallback,
+          GpuTextBasedDateUtils.dateParsingTrimsControls)
+    } else {
+      super.castStringToDate(input, dt)
+    }
+  }
 }
 
 
@@ -456,6 +555,9 @@ object CSVPartitionReader {
   private def headerStart(buffer: HostMemoryBuffer, size: Long, comment: Byte): Long = {
     // cuDF ignores a UTF-8 BOM before checking for leading comments and the header.
     var pos = if (startsWithBom(buffer, 0, size)) 3L else 0L
+    while (pos < size && buffer.getByte(pos) == '\n'.toByte) {
+      pos += 1
+    }
     while (pos < size && comment != 0 && buffer.getByte(pos) == comment) {
       pos = offsetAfterLine(buffer, size, pos)
     }
@@ -468,14 +570,6 @@ object CSVPartitionReader {
       comment: Byte) extends AutoCloseable {
     override def close(): Unit = buffer.close()
 
-    private def previousLineBoundary(start: Long, headerEnd: Long): Long = {
-      var pos = start
-      while (pos >= headerEnd && buffer.getByte(pos) != '\n'.toByte) {
-        pos -= 1
-      }
-      pos + 1
-    }
-
     private def splitOffsets: (Long, Long) = {
       val size = buffer.getLength
       val headerEnd = if (hasHeader) {
@@ -483,13 +577,7 @@ object CSVPartitionReader {
       } else {
         0L
       }
-      val midpoint = math.max(size / 2, headerEnd)
-      val nextLineBoundary = offsetAfterLine(buffer, size, midpoint)
-      val leftEnd = if (nextLineBoundary < size) {
-        nextLineBoundary
-      } else {
-        previousLineBoundary(midpoint - 1, headerEnd)
-      }
+      val leftEnd = GpuTextBasedPartitionReader.findSplitOffset(buffer, headerEnd)
       // Keep the preceding newline so cuDF cannot strip an interior U+FEFF as a file BOM.
       val rightStart = if (startsWithBom(buffer, leftEnd, size)) {
         leftEnd - 1
@@ -518,28 +606,50 @@ object CSVPartitionReader {
       csvOpts: Boolean => cudf.CSVOptions,
       hasHeader: Boolean,
       comment: Byte,
-      partFile: PartitionedFile): Iterator[Table] with AutoCloseable = {
-    val size = dataBufferer.getLength
-    val buffer = withResource(dataBufferer.getBufferAndRelease)(_.slice(0, size))
-    val chunks = closeOnExcept(buffer) { _ =>
-      RmmRapidsRetryIterator.withRetry(CsvReadChunk(buffer, hasHeader, comment),
-        (chunk: CsvReadChunk) => chunk.split()) { chunk =>
-        NvtxIdWithMetrics(NvtxRegistry.CSV_DECODE, decodeTime) {
-          Table.readCSV(cudfSchema, csvOpts(chunk.hasHeader), chunk.buffer, 0,
-            chunk.buffer.getLength)
-        }
+      partFile: PartitionedFile,
+      readColumnIndices: Seq[Int] = Seq.empty): Iterator[Table] with AutoCloseable = {
+    var firstRow = dataBufferer match {
+      case csv: CsvHostLineBufferer => csv.firstRow.map { row =>
+        val indices = if (readColumnIndices.isEmpty) row.indices else readColumnIndices
+        indices.map(row(_)).toArray
       }
+      case _ => None
+    }
+    val size = dataBufferer.getLength
+    val chunks = if (size == 0) None else {
+      val buffer = withResource(dataBufferer.getBufferAndRelease)(_.slice(0, size))
+      Some(closeOnExcept(buffer) { _ =>
+        RmmRapidsRetryIterator.withRetry(CsvReadChunk(buffer, hasHeader, comment),
+          (chunk: CsvReadChunk) => chunk.split()) { chunk =>
+          NvtxIdWithMetrics(NvtxRegistry.CSV_DECODE, decodeTime) {
+            Table.readCSV(cudfSchema, csvOpts(chunk.hasHeader), chunk.buffer, 0,
+              chunk.buffer.getLength)
+          }
+        }
+      })
     }
     new Iterator[Table] with AutoCloseable {
-      override def hasNext: Boolean = chunks.hasNext
+      override def hasNext: Boolean = firstRow.nonEmpty || chunks.exists(_.hasNext)
       override def next(): Table = {
         try {
-          chunks.next()
+          firstRow match {
+            case Some(row) =>
+              firstRow = None
+              RmmRapidsRetryIterator.withRetryNoSplit {
+                withResource(row.safeMap(value => ColumnVector.fromStrings(value))) { columns =>
+                  new Table(columns: _*)
+                }
+              }
+            case None => chunks.get.next()
+          }
         } catch {
           case e: Exception => throw new IOException(s"Error when processing file [$partFile]", e)
         }
       }
-      override def close(): Unit = chunks.close()
+      override def close(): Unit = {
+        firstRow = None
+        chunks.foreach(_.close())
+      }
     }
   }
 
@@ -580,7 +690,8 @@ class CSVPartitionReader(
     // In multiLine mode, empty lines within quoted fields are
     // legitimate data and must not be filtered out.
     if (parsedOptions.multiLine) HostLineBuffererFactory
-    else FilterCsvEmptyHostLineBuffererFactory) {
+    else new FilterCsvEmptyHostLineBuffererFactory(parsedOptions, dataSchema.length,
+      partFile.start == 0 && parsedOptions.headerFlag)) {
 
   private var headerPending = partFile.start == 0 && parsedOptions.headerFlag
 
@@ -604,7 +715,8 @@ class CSVPartitionReader(
       }
       CSVPartitionReader.readToTables(dataBufferer, cudfDataSchema, decodeTime,
         hasHeader => buildCsvOptions(parsedOptions, readDataSchema, hasHeader).build(),
-        hasHeader, parsedOptions.comment.toByte, partFile)
+        hasHeader, parsedOptions.comment.toByte, partFile,
+        readDataSchema.fieldNames.map(dataSchema.fieldIndex).toSeq)
     }
   }
 

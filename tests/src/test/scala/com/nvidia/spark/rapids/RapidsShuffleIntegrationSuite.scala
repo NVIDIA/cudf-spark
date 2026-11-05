@@ -16,14 +16,25 @@
 
 package com.nvidia.spark.rapids
 
+import java.util.concurrent.{ConcurrentHashMap, ConcurrentLinkedQueue}
+
+import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 
+import com.nvidia.spark.rapids.shims.SparkShimImpl
 import org.scalatest.BeforeAndAfterEach
+import org.scalatest.concurrent.Eventually.eventually
+import org.scalatest.concurrent.PatienceConfiguration.Timeout
 import org.scalatest.funsuite.AnyFunSuite
+import org.scalatest.time.{Seconds, Span}
 
-import org.apache.spark.SparkConf
-import org.apache.spark.scheduler.{SparkListener, SparkListenerEvent}
+import org.apache.spark.{FetchFailed, SparkConf, Success, TaskContext}
+import org.apache.spark.scheduler.{SparkListener, SparkListenerEvent, SparkListenerTaskEnd}
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.execution.exchange.ShuffleExchangeExec
+import org.apache.spark.sql.functions.{col, sum, udf}
+import org.apache.spark.sql.rapids.GpuShuffleEnv
+import org.apache.spark.sql.rapids.execution.GpuShuffleExchangeExecBase
 
 /**
  * Listener to capture SparkRapidsShuffleDiskSavingsEvent during tests.
@@ -58,11 +69,19 @@ class ShuffleDiskSavingsEventListener extends SparkListener {
  * - Validates forced file-only mode for finalMergeWriter
  *
  * Uses SparkRapidsShuffleDiskSavingsEvent for verification instead of log messages.
+ *
+ * Also checks that CACHE_ONLY reads one attempt per map under spark.shuffle.useOldFetchProtocol,
+ * and that a local read of a shuffle the executor no longer holds reruns its map stage.
  */
 class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach {
 
   private var spark: SparkSession = _
   private var eventListener: ShuffleDiskSavingsEventListener = _
+
+  private def shuffleManagerClass: String = {
+    val shimVersion = ShimLoader.getShimVersion
+    s"com.nvidia.spark.rapids.spark${shimVersion.toString.replace(".", "")}.RapidsShuffleManager"
+  }
 
   /**
    * Create SparkSession with custom configuration.
@@ -83,11 +102,6 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
       spark.stop()
     }
     SparkSession.clearActiveSession()
-
-    val shimVersion = ShimLoader.getShimVersion
-    val shuffleManagerClass = s"com.nvidia.spark.rapids.spark" +
-      s"${shimVersion.toString.replace(".", "")}." +
-      "RapidsShuffleManager"
 
     val conf = new SparkConf()
       .setMaster("local[4]")
@@ -333,4 +347,104 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
     runMultiSegmentShuffleTest(Some("zstd"))
   }
 
+  test("with the old fetch protocol, a map retried on the same executor is read once") {
+    // spark.shuffle.useOldFetchProtocol makes every attempt of a map write the same blocks, and
+    // local mode has one executor, so the retry always runs where the first attempt cached its
+    // output. local[2,4] allows four attempts per task. The UDF runs on the CPU, so
+    // spark.rapids.sql.test.enabled stays off.
+    val conf = new SparkConf()
+      .setMaster("local[2,4]")
+      .setAppName("RapidsShuffleIntegrationTest")
+      .set("spark.plugins", "com.nvidia.spark.SQLPlugin")
+      .set("spark.rapids.sql.enabled", "true")
+      .set("spark.shuffle.manager", shuffleManagerClass)
+      .set("spark.rapids.shuffle.mode", "CACHE_ONLY")
+      .set("spark.shuffle.useOldFetchProtocol", "true")
+    spark = SparkSession.builder().config(conf).getOrCreate()
+    RapidsShuffleIntegrationSuite.failedTasks.clear()
+    // fails the first attempt of map 0 once its shuffle write has returned
+    val failAfterWrite = udf { (id: Long) =>
+      val tc = TaskContext.get()
+      if (tc.partitionId() == 0 && tc.attemptNumber() == 0 &&
+          RapidsShuffleIntegrationSuite.failedTasks.add(tc.taskAttemptId())) {
+        tc.addTaskCompletionListener[Unit] { _ =>
+          throw new IllegalStateException("injected failure after the shuffle write")
+        }
+      }
+      id
+    }
+    val numRows = 100000L
+    val query = spark.range(0, numRows, 1, 4).select(failAfterWrite(col("id")).as("id"))
+      .selectExpr("id % 97 AS k").repartition(8, col("k")).groupBy("k").count()
+      .agg(sum("count"))
+    val total = query.collect().head.getLong(0)
+    // Spark's own shuffle also keeps one attempt per map, so the count proves nothing unless the
+    // shuffles stayed on the GPU while the UDF fell back to the CPU
+    val plan = query.queryExecution.executedPlan
+    assert(SparkShimImpl.findOperators(plan, _.isInstanceOf[ShuffleExchangeExec]).isEmpty,
+      s"a shuffle fell back to the CPU:\n$plan")
+    assert(SparkShimImpl.findOperators(plan, _.isInstanceOf[GpuShuffleExchangeExecBase]).nonEmpty,
+      s"no GPU shuffle in:\n$plan")
+    assertResult(1, "first attempts that failed after their write")(
+      RapidsShuffleIntegrationSuite.failedTasks.size())
+    assertResult(numRows)(total)
+  }
+
+  test("a local read of an unregistered shuffle reruns the map stage that wrote it") {
+    // A local master starts no transport, so every read is local. The fetch failure names
+    // executor driver, whose block manager cannot register again on Spark 3.3.2 and later: the
+    // session must stop soon after, as afterEach does, and every task result stays far below
+    // spark.task.maxDirectResultSize, since a larger one would be stored in that block manager.
+    // AQE is off so that both collects run one unchanged physical plan.
+    val conf = new SparkConf()
+      .setMaster("local[2]")
+      .setAppName("RapidsShuffleIntegrationTest")
+      .set("spark.plugins", "com.nvidia.spark.SQLPlugin")
+      .set("spark.rapids.sql.enabled", "true")
+      .set("spark.shuffle.manager", shuffleManagerClass)
+      .set("spark.rapids.shuffle.mode", "UCX")
+      .set("spark.sql.adaptive.enabled", "false")
+      // Spark 4.1+ removes a classic query's shuffles in testing mode, and Spark 4.2 turns on
+      // checksums that the GPU shuffle does not compute
+      .set("spark.sql.classic.shuffleDependency.fileCleanup.enabled", "false")
+      .set(RowBasedShuffleChecksumConf.ChecksumEnabledKey, "false")
+      .set(RowBasedShuffleChecksumConf.ChecksumMismatchFullRetryKey, "false")
+    spark = SparkSession.builder().config(conf).getOrCreate()
+    val taskEnds = new ConcurrentLinkedQueue[SparkListenerTaskEnd]()
+    spark.sparkContext.addSparkListener(new SparkListener {
+      override def onTaskEnd(taskEnd: SparkListenerTaskEnd): Unit = taskEnds.add(taskEnd)
+    })
+    // hash partitioning, since a round-robin repartition can move rows when its maps rerun
+    val df = spark.range(0, 1000, 1, 4).selectExpr("id", "id % 7 AS k").repartition(8, col("k"))
+    val firstRows = df.collect().map(_.toString).sorted
+    val plan = df.queryExecution.executedPlan
+    assert(SparkShimImpl.findOperators(plan, _.isInstanceOf[ShuffleExchangeExec]).isEmpty,
+      s"the shuffle fell back to the CPU:\n$plan")
+    val exchanges = SparkShimImpl.findOperators(plan, _.isInstanceOf[GpuShuffleExchangeExecBase])
+    assertResult(1, s"GPU shuffles in:\n$plan")(exchanges.size)
+    val shuffleId =
+      exchanges.head.asInstanceOf[GpuShuffleExchangeExecBase].shuffleDependencyColumnar.shuffleId
+    GpuShuffleEnv.getCatalog.unregisterShuffle(shuffleId)
+    taskEnds.clear()
+    assertResult(firstRows)(df.collect().map(_.toString).sorted)
+    // the rerun's writers registered the shuffle again, on the GPU
+    assert(GpuShuffleEnv.getCatalog.hasActiveShuffle(shuffleId))
+    eventually(Timeout(Span(30, Seconds))) {
+      val ends = taskEnds.asScala.toList
+      assert(ends.exists(_.reason match {
+        case f: FetchFailed => f.shuffleId == shuffleId
+        case _ => false
+      }), s"no fetch failure of shuffle $shuffleId in ${ends.map(_.reason)}")
+      // the first collect ran the map stage as attempt 0, and its events may arrive late
+      assert(ends.exists(e => e.taskType == "ShuffleMapTask" && e.stageAttemptId > 0 &&
+        e.reason == Success),
+        s"the map stage did not run again: " +
+          s"${ends.map(e => (e.taskType, e.stageAttemptId, e.reason))}")
+    }
+  }
+}
+
+object RapidsShuffleIntegrationSuite {
+  /** Task attempts that the injected failure has armed, shared with the session's tasks. */
+  val failedTasks: java.util.Set[Long] = ConcurrentHashMap.newKeySet[Long]()
 }

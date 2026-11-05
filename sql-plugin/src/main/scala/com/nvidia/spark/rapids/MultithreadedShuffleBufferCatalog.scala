@@ -307,8 +307,9 @@ class MultithreadedShuffleBufferCatalog extends Logging {
    * Publish a map task's output for the writer, which reports the returned lengths in its
    * MapStatus: the lengths of the output the catalog keeps, an earlier attempt's if one exists.
    *
-   * @throws IllegalStateException if the shuffle was cleaned up before the publish, so the task
-   *                               is retried instead of advertising data the catalog discarded
+   * @throws java.lang.IllegalStateException if the shuffle was cleaned up before the publish, so
+   *                                         the task is retried instead of advertising data the
+   *                                         catalog discarded
    */
   def publishMapOutputOrFail(
       shuffleId: Int,

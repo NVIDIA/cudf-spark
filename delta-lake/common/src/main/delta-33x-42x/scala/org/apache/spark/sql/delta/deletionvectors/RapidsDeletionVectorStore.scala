@@ -31,7 +31,7 @@ import org.roaringbitmap.RoaringBitmap
 import org.apache.spark.sql.delta.DeltaErrors
 
 /**
- * RAPIDS version of [[DeletionVectorStore]]. It is simplified to only include the APIs needed
+ * RAPIDS version of `DeletionVectorStore`. It is simplified to only include the APIs needed
  * to load serialized deletion vectors into host memory.
  */
 trait RapidsDeletionVectorStore {
@@ -79,7 +79,7 @@ private[deletionvectors] object RapidsInMemoryDeletionVectorStore {
 /**
  * Trait for the "Delta" roaring bitmap serialization format loaders. Delta supports two
  * serialization formats for roaring bitmaps: "portable" and "native".
- * See [[RoaringBitmapArraySerializationFormat]] for details.
+ * See `RoaringBitmapArraySerializationFormat` for details.
  */
 private sealed trait DeltaSerializedBitmapLoader {
   /**

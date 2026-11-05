@@ -35,9 +35,9 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.serializer.Serializer
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, UnknownPartitioning}
-import org.apache.spark.sql.execution.{CoalescedPartitionSpec, ShufflePartitionSpec, SparkPlan, SQLExecution}
+import org.apache.spark.sql.execution.{CoalescedPartitionSpec, ShufflePartitionSpec, SparkPlan}
 import org.apache.spark.sql.execution.exchange.Exchange
-import org.apache.spark.sql.execution.metric.{SQLMetrics, SQLShuffleReadMetricsReporter, SQLShuffleWriteMetricsReporter}
+import org.apache.spark.sql.execution.metric.{SQLShuffleReadMetricsReporter, SQLShuffleWriteMetricsReporter}
 import org.apache.spark.sql.rapids.execution.{GpuShuffleExchangeExecBase, ShuffledBatchRDD}
 import org.apache.spark.sql.rapids.execution.GpuShuffleExchangeExecBase.createAdditionalExchangeMetrics
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -130,10 +130,8 @@ case class GpuOptimizeWriteExchangeExec(
       additionalMetrics=additionalMetrics,
       opTimeNewShuffleWrite=opTimeNewShuffleWriteMetric,
       descendantOpTimeMetrics=descendantOpTimeMetrics)
-    metrics("numPartitions").set(dep.partitioner.numPartitions)
-    val executionId = sparkContext.getLocalProperty(SQLExecution.EXECUTION_ID_KEY)
-    SQLMetrics.postDriverMetricUpdates(
-      sparkContext, executionId, metrics("numPartitions") :: Nil)
+    // ShuffledBatchRDD counts read partitions in tasks. Posting that same metric on the
+    // driver conflicts with Databricks SQL task-metric aggregation.
     dep
   }
 

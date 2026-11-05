@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_are_equal_sql, assert_gpu_and_cpu_sql_writes_are_equal_collect, assert_gpu_fallback_collect
+from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture
 from conftest import get_non_gpu_allowed, is_not_utc
 from data_gen import *
 from enum import Enum
@@ -211,6 +212,24 @@ def test_basic_hive_text_read(std_input_path, name, schema, spark_tmp_table_fact
     assert_gpu_and_cpu_are_equal_collect(read_hive_text_sql(std_input_path + '/' + name,
                                                             schema, spark_tmp_table_factory, options),
                                          conf=hive_text_enabled_conf)
+
+
+@pytest.mark.skipif(is_spark_cdh(), reason="Hive text reads are disabled on CDH")
+@pytest.mark.parametrize('time_parser_policy', ['CORRECTED', 'EXCEPTION', 'LEGACY'])
+@pytest.mark.parametrize('ansi_enabled', ['true', 'false'])
+@allow_non_gpu(*non_utc_allow_for_test_basic_hive_text_read)
+def test_hive_text_date_parser_policy(std_input_path, spark_tmp_table_factory,
+                                     time_parser_policy, ansi_enabled):
+    # This fixture contains valid dates, whitespace, incomplete dates, and invalid values.
+    # Hive returns null for invalid fields regardless of CSV parser policy or ANSI mode.
+    conf = copy_and_update(hive_text_enabled_conf, {
+        'spark.sql.legacy.timeParserPolicy': time_parser_policy,
+        'spark.sql.ansi.enabled': ansi_enabled})
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        read_hive_text_sql(std_input_path + '/hive-delim-text/date', date_schema,
+                           spark_tmp_table_factory),
+        exist_classes=None if is_not_utc() else 'GpuHiveTableScanExec',
+        conf=conf)
 
 
 @pytest.mark.skipif(is_spark_cdh(),

@@ -1726,24 +1726,6 @@ _exact_percentile_strict_skip_reason = \
 _exact_percentile_tolerance_reason = \
     f'{_exact_percentile_issue}: Spark 5 exact percentile result tolerance'
 
-_exact_percentile_spark500_fallback_classes = (
-    'ObjectHashAggregateExec', 'SortAggregateExec', 'ShuffleExchangeExec', 'HashPartitioning',
-    'AggregateExpression', 'Alias', 'Cast', 'Literal', 'ProjectExec', 'Percentile')
-
-def _is_exact_percentile_fp_data_gen(data_gen):
-    return isinstance(dict(data_gen)['val'].data_type, (FloatType, DoubleType))
-
-def _exact_percentile_spark500_param(data_gen):
-    if _is_exact_percentile_fp_data_gen(data_gen):
-        return pytest.param(
-            data_gen,
-            marks=allow_non_gpu(*_exact_percentile_spark500_fallback_classes))
-    return data_gen
-
-exact_percentile_reduction_spark500_data_gen = [
-    _exact_percentile_spark500_param(data_gen)
-    for data_gen in exact_percentile_reduction_data_gen]
-
 @pytest.mark.skipif(is_spark_500_or_later(),
                     reason=_exact_percentile_strict_skip_reason)
 @pytest.mark.parametrize('data_gen', exact_percentile_reduction_data_gen, ids=idfn)
@@ -1754,15 +1736,94 @@ def test_exact_percentile_reduction(data_gen):
 @pytest.mark.skipif(not is_spark_500_or_later(),
                     reason=_exact_percentile_tolerance_reason)
 @approximate_float
-@pytest.mark.parametrize('data_gen', exact_percentile_reduction_spark500_data_gen, ids=idfn)
+@pytest.mark.parametrize('data_gen', exact_percentile_reduction_data_gen, ids=idfn)
 def test_exact_percentile_reduction_spark500(data_gen):
-    def query(spark):
-        return exact_percentile_reduction(gen_df(spark, data_gen))
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: exact_percentile_reduction(gen_df(spark, data_gen)))
 
-    if _is_exact_percentile_fp_data_gen(data_gen):
-        assert_gpu_fallback_collect(query, 'Percentile')
-    else:
-        assert_gpu_and_cpu_are_equal_collect(query)
+@pytest.mark.skipif(not is_spark_500_or_later(),
+                    reason=_exact_percentile_tolerance_reason)
+def test_exact_percentile_endpoint_delta_reduction_spark500():
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.createDataFrame(
+            [(-math.inf,), (10.0,)], 'val double')
+        .selectExpr('percentile(val, 0.2)'))
+
+def test_exact_percentile_descending():
+    data = [(0.0,), (100.0,), (None,)]
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.createDataFrame(data, 'val double')
+        .selectExpr(
+            'percentile_cont(0.0) WITHIN GROUP (ORDER BY val DESC)',
+            'percentile_cont(0.1) WITHIN GROUP (ORDER BY val DESC)',
+            'percentile_cont(1.0) WITHIN GROUP (ORDER BY val DESC)'))
+
+@ignore_order(local=True)
+def test_exact_percentile_descending_groupby():
+    data = [
+        (0, -math.inf), (0, 10.0), (0, None),
+        (1, 10.0), (1, math.inf), (1, None),
+        (2, 1.0), (2, math.nan), (2, None),
+        (3, 0.0), (3, 100.0), (3, 100.0)]
+    schema = StructType([
+        StructField('key', IntegerType(), nullable=False),
+        StructField('val', DoubleType(), nullable=True)])
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.createDataFrame(data, schema)
+        .groupby('key')
+        .agg(
+            f.expr('percentile_cont(0.0) WITHIN GROUP (ORDER BY val DESC)'),
+            f.expr('percentile_cont(0.2) WITHIN GROUP (ORDER BY val DESC)'),
+            f.expr('percentile_cont(1.0) WITHIN GROUP (ORDER BY val DESC)')))
+
+def test_exact_percentile_null_frequency():
+    data = [(10.0, 1), (20.0, None), (None, -1), (30.0, 0)]
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.createDataFrame(data, 'val double, freq long')
+        .selectExpr(
+            'percentile(val, 0.5, freq)',
+            'percentile(val, array(0.0, 0.5, 1.0), freq)'))
+
+@ignore_order(local=True)
+def test_exact_percentile_null_frequency_groupby():
+    data = [
+        (0, 10.0, 1), (0, 20.0, None), (0, None, -1), (0, 30.0, 0),
+        (1, 40.0, None), (1, None, -1),
+        (2, 50.0, 2), (2, 70.0, 1), (2, None, 1)]
+    schema = StructType([
+        StructField('key', IntegerType(), nullable=False),
+        StructField('val', DoubleType(), nullable=True),
+        StructField('freq', LongType(), nullable=True)])
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.createDataFrame(data, schema)
+        .groupby('key')
+        .agg(
+            f.expr('percentile(val, 0.5, freq)'),
+            f.expr('percentile(val, array(0.0, 0.5, 1.0), freq)')))
+
+def test_exact_percentile_negative_nullable_frequency():
+    schema = StructType([
+        StructField('val', DoubleType(), nullable=False),
+        StructField('freq', LongType(), nullable=True)])
+    assert_gpu_and_cpu_error(
+        lambda spark: spark.createDataFrame([(10.0, -1), (20.0, None)], schema)
+        .selectExpr('percentile(val, 0.5, freq)')
+        .collect(),
+        conf={},
+        error_message=re.compile('negative', re.IGNORECASE))
+
+def test_exact_percentile_negative_nullable_frequency_groupby():
+    schema = StructType([
+        StructField('key', IntegerType(), nullable=False),
+        StructField('val', DoubleType(), nullable=False),
+        StructField('freq', LongType(), nullable=True)])
+    assert_gpu_and_cpu_error(
+        lambda spark: spark.createDataFrame([(0, 10.0, -1), (0, 20.0, None)], schema)
+        .groupby('key')
+        .agg(f.expr('percentile(val, 0.5, freq)'))
+        .collect(),
+        conf={},
+        error_message=re.compile('negative', re.IGNORECASE))
 
 exact_percentile_reduction_cpu_fallback_data_gen = [
     [('val', data_gen),
@@ -1777,9 +1838,7 @@ def _assert_exact_percentile_reduction_partial_fallback_to_cpu(
     # For aggregations without distinct, Databricks runtime removes the partial Aggregate stage (
     # map-side combine). There only exists an AggregateExec in Databricks runtimes. So, we need to
     # set the expected exist_classes according to runtime.
-    if is_spark_500_or_later() and _is_exact_percentile_fp_data_gen(data_gen):
-        exist_clz, non_exist_clz = cpu_clz, gpu_clz
-    elif is_databricks_runtime():
+    if is_databricks_runtime():
         if replace_mode == 'partial':
             exist_clz, non_exist_clz = cpu_clz, gpu_clz
         else:
@@ -1835,19 +1894,8 @@ def _exact_percentile_groupby_gen(data_gen):
             ('freq', LongGen(min_val=0, max_val=1000000, nullable=False)
                      .with_special_case(0, weight=100))]
 
-def _exact_percentile_groupby_spark500_data_gen(data_gen):
-    gen = [('key', RepeatSeqGen(IntegerGen(), length=100)),
-           ('val', data_gen),
-           ('freq', LongGen(min_val=0, max_val=1000000, nullable=False)
-                    .with_special_case(0, weight=100))]
-    return _exact_percentile_spark500_param(gen)
-
 exact_percentile_groupby_data_gen = [
     _exact_percentile_groupby_gen(data_gen)
-    for data_gen in exact_percentile_data_gen]
-
-exact_percentile_groupby_spark500_data_gen = [
-    _exact_percentile_groupby_spark500_data_gen(data_gen)
     for data_gen in exact_percentile_data_gen]
 
 def exact_percentile_groupby(df):
@@ -1883,15 +1931,29 @@ def test_exact_percentile_groupby(data_gen):
 @pytest.mark.skipif(not is_spark_500_or_later(),
                     reason=_exact_percentile_tolerance_reason)
 @approximate_float
-@pytest.mark.parametrize('data_gen', exact_percentile_groupby_spark500_data_gen, ids=idfn)
+@pytest.mark.parametrize('data_gen', exact_percentile_groupby_data_gen, ids=idfn)
 def test_exact_percentile_groupby_spark500(data_gen):
-    def query(spark):
-        return exact_percentile_groupby(gen_df(spark, data_gen))
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: exact_percentile_groupby(gen_df(spark, data_gen)))
 
-    if _is_exact_percentile_fp_data_gen(data_gen):
-        assert_gpu_fallback_collect(query, 'Percentile')
-    else:
-        assert_gpu_and_cpu_are_equal_collect(query)
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_spark_500_or_later(),
+                    reason=_exact_percentile_tolerance_reason)
+def test_exact_percentile_endpoint_delta_groupby_frequency_spark500():
+    # The first group distinguishes endpoint-delta from weighted-endpoints across -Inf. The second
+    # pins Spark's non-FMA rounding, while the frequency column and nulls exercise the grouped
+    # frequency path and null value handling.
+    data = [
+        (0, -math.inf, 1), (0, 10.0, 1), (0, None, 1),
+        (1, -100.0, 1), (1, -99.3, 1), (1, None, 1)]
+    schema = StructType([
+        StructField('key', IntegerType(), nullable=False),
+        StructField('val', DoubleType(), nullable=True),
+        StructField('freq', LongType(), nullable=False)])
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.createDataFrame(data, schema)
+        .groupby('key')
+        .agg(f.expr('percentile(val, 0.1, freq)')))
 
 def _exact_percentile_groupby_cpu_fallback_gen(data_gen):
     return [('key', RepeatSeqGen(IntegerGen(), length=100)),
@@ -1899,19 +1961,8 @@ def _exact_percentile_groupby_cpu_fallback_gen(data_gen):
             ('freq', LongGen(min_val=0, max_val=1000000, nullable=False)
              .with_special_case(0, weight=100))]
 
-def _exact_percentile_groupby_cpu_fallback_spark500_data_gen(data_gen):
-    gen = [('key', RepeatSeqGen(IntegerGen(), length=100)),
-           ('val', data_gen),
-           ('freq', LongGen(min_val=0, max_val=1000000, nullable=False)
-            .with_special_case(0, weight=100))]
-    return _exact_percentile_spark500_param(gen)
-
 exact_percentile_groupby_cpu_fallback_data_gen = [
     _exact_percentile_groupby_cpu_fallback_gen(data_gen)
-    for data_gen in [IntegerGen(), _exact_percentile_fp_gen(DoubleGen)]]
-
-exact_percentile_groupby_cpu_fallback_spark500_data_gen = [
-    _exact_percentile_groupby_cpu_fallback_spark500_data_gen(data_gen)
     for data_gen in [IntegerGen(), _exact_percentile_fp_gen(DoubleGen)]]
 
 @ignore_order
@@ -1957,8 +2008,7 @@ def test_exact_percentile_groupby_partial_fallback_to_cpu(data_gen, replace_mode
 @allow_non_gpu('ObjectHashAggregateExec', 'SortAggregateExec', 'ShuffleExchangeExec', 'HashPartitioning',
                'AggregateExpression', 'Alias', 'Cast', 'Literal', 'ProjectExec',
                'Percentile')
-@pytest.mark.parametrize('data_gen', exact_percentile_groupby_cpu_fallback_spark500_data_gen,
-                         ids=idfn)
+@pytest.mark.parametrize('data_gen', exact_percentile_groupby_cpu_fallback_data_gen, ids=idfn)
 @pytest.mark.parametrize('replace_mode', ['partial', 'final|complete'], ids=idfn)
 @pytest.mark.parametrize('use_obj_hash_agg', ['false', 'true'], ids=idfn)
 @pytest.mark.xfail(condition=is_databricks104_or_later(),
@@ -1967,9 +2017,7 @@ def test_exact_percentile_groupby_partial_fallback_to_cpu_spark500(
         data_gen, replace_mode, use_obj_hash_agg):
     cpu_clz, gpu_clz = ['Percentile'], ['GpuPercentileDefault']
     exist_clz, non_exist_clz = [], []
-    if _is_exact_percentile_fp_data_gen(data_gen):
-        exist_clz, non_exist_clz = cpu_clz, gpu_clz
-    elif is_databricks_runtime():
+    if is_databricks_runtime():
         if replace_mode == 'partial':
             exist_clz, non_exist_clz = cpu_clz, gpu_clz
         else:
@@ -3188,7 +3236,10 @@ gens_for_max_min = [byte_gen, short_gen, int_gen, long_gen,
     date_gen, timestamp_gen,
     DecimalGen(precision=12, scale=2),
     DecimalGen(precision=36, scale=5),
-    null_gen] + array_gens_sample + struct_gens_sample
+    null_gen, binary_gen,
+    StructGen([('b', binary_gen)]),
+    ArrayGen(binary_gen),
+    StructGen([('a', ArrayGen(binary_gen))])] + array_gens_sample + struct_gens_sample
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen',  gens_for_max_min, ids=idfn)
 @allow_non_gpu(*non_utc_allow)
@@ -3218,6 +3269,32 @@ def test_min_max_in_groupby_and_reduction(data_gen):
         "hash_agg_table",
         'select min(a) from hash_agg_table',
         copy_and_update(_float_conf, {}))
+
+@ignore_order(local=True)
+@pytest.mark.parametrize('values', [
+    [b'\x00', b'\x7f', b'\x80', b'\xff', None],
+    [b'\x80', b'\x80\x00', b'\x80\x00\xff', b'\x80\x01', None],
+    [b'', b'\x00', b'\xff', None],
+    [None],
+    # AQE may replace an empty grouped result with Spark's EmptyRelationExec.
+    pytest.param([], marks=allow_non_gpu('EmptyRelationExec'))],
+    ids=['unsigned', 'prefix', 'empty_binary', 'all_null', 'empty_input'])
+@pytest.mark.parametrize('grouped', [False, True], ids=['reduction', 'groupby'])
+@pytest.mark.parametrize('aqe_enabled', ['false', 'true'], ids=['no_aqe', 'aqe'])
+@pytest.mark.parametrize('batch_size', ['250', '1g'], ids=['small_batches', 'single_batch'])
+def test_min_max_binary(values, grouped, aqe_enabled, batch_size):
+    def do_it(spark):
+        # Exercise both single-buffer and multi-buffer partial aggregation across partitions.
+        rows = [(key, value) for _ in range(128) for key in range(3) for value in values]
+        schema = StructType([StructField('key', IntegerType(), False),
+                             StructField('value', BinaryType(), True)])
+        df = spark.createDataFrame(spark.sparkContext.parallelize(rows, 4), schema)
+        agg = df.groupBy('key') if grouped else df
+        return agg.agg(f.min('value'), f.max('value'))
+
+    assert_gpu_and_cpu_are_equal_collect(do_it, conf={
+        'spark.rapids.sql.batchSizeBytes': batch_size,
+        'spark.sql.adaptive.enabled': aqe_enabled})
 
 # Some Spark implementations will optimize this aggregation as a
 # complete aggregation (i.e.: only one aggregation node in the plan)

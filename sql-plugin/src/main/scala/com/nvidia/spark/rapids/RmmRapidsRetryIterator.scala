@@ -21,7 +21,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import scala.annotation.tailrec
 import scala.collection.mutable
 
-import ai.rapids.cudf.CudfColumnSizeOverflowException
+import ai.rapids.cudf.{ContiguousTable, CudfColumnSizeOverflowException}
 import com.nvidia.spark.Retryable
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
@@ -32,6 +32,7 @@ import com.nvidia.spark.rapids.spill.SpillFramework
 
 import org.apache.spark.TaskContext
 import org.apache.spark.internal.Logging
+import org.apache.spark.sql.types.DataType
 
 object RmmRapidsRetryIterator extends Logging {
 
@@ -729,22 +730,12 @@ object RmmRapidsRetryIterator extends Logging {
           RapidsConf.testRetryOOMInjectionMode() match {
             case mode if !injectedOOM && mode.numOoms > 0 =>
               injectedOOM = true
-              // ensure we have associated our thread with the running task, as
-              // `forceRetryOOM` requires a prior association.
-              var threadAssociated = true
-              if (!RmmSpark.isThreadWorkingOnTaskAsPoolThread) {
-                // If RmmSpark isn't aware of this thread, we are going to
-                // try to find the TaskContext and use it to register it for a taskID.
-                // However, TaskContext is not going to work for a pool thread that isn't
-                // managed by Spark, so we are going to skip registration, and skip the OOM.
-                // This is a temporary workaround, see:
-                // https://github.com/NVIDIA/spark-rapids/issues/13098
-                threadAssociated = false
-                Option(TaskContext.get()).foreach { tc =>
-                  threadAssociated = true
-                  RmmSpark.currentThreadIsDedicatedToTask(tc.taskAttemptId())
-                }
-              }
+              // forceRetryOOM requires a prior association. A TaskContext alone is insufficient
+              // because a helper thread can carry one before its pool association is installed.
+              // See https://github.com/NVIDIA/spark-rapids/issues/13098.
+              val threadAssociated =
+                RmmSpark.isThreadWorkingOnTaskAsPoolThread ||
+                  TaskRegistryTracker.isCurrentThreadRegisteredAsDedicatedTaskThread
               if (threadAssociated) {
                 if (mode.withSplit) {
                   RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId,
@@ -758,7 +749,7 @@ object RmmRapidsRetryIterator extends Logging {
                     mode.skipCount)
                 }
               } else {
-                log.warn("pool thread not registered with RmmSpark, cannot inject OOM. See " +
+                log.warn("thread not registered with RmmSpark, cannot inject OOM. See " +
                   "https://github.com/NVIDIA/spark-rapids/issues/13098")
               }
             case _ => ()
@@ -846,44 +837,59 @@ object RmmRapidsRetryIterator extends Logging {
    */
   def splitSpillableInHalfByRows: SpillableColumnarBatch => Seq[SpillableColumnarBatch] = {
     (spillable: SpillableColumnarBatch) => {
-      withResource(spillable) { _ =>
-        val toSplitRows = spillable.numRows()
-        if (toSplitRows <= 1) {
-          throw new GpuSplitAndRetryOOM(
-            s"GPU OutOfMemory: a batch of $toSplitRows cannot be split!")
-        }
-        val (firstHalf, secondHalf) = withResource(spillable.getColumnarBatch()) { src =>
-          if (src.numCols() == 0) {
-            // A rows-only batch carries nothing but its row count, and a cudf table needs at
-            // least one column to hold it, so cut the count instead. The cut matches the
-            // contiguousSplit below so both paths halve a batch the same way.
-            val splitIx = toSplitRows / 2
-            (new JustRowsColumnarBatch(splitIx),
-                new JustRowsColumnarBatch(toSplitRows - splitIx))
-          } else {
-            withResource(GpuColumnVector.from(src)) { tbl =>
-              val splitIx = (tbl.getRowCount / 2).toInt
-              withResource(tbl.contiguousSplit(splitIx)) { cts =>
-                val tables = cts.map(_.getTable)
-                withResource(tables.safeMap(GpuColumnVector.from(_, spillable.dataTypes))) {
-                  batches =>
-                    val spillables = batches.safeMap { b =>
-                      SpillableColumnarBatch(
-                        GpuColumnVector.incRefCounts(b),
-                        SpillPriorities.ACTIVE_BATCHING_PRIORITY)
-                    }
-                    closeOnExcept(spillables) { _ =>
-                      require(spillables.length == 2,
-                        s"Contiguous split returned ${spillables.length} tables but two were " +
-                            s"expected!")
-                    }
-                    (spillables.head, spillables.last)
-                }
+      // A contiguous split owns its buffers independently of the input. Keep it protected if
+      // closing the source or the consumed spillable fails before ownership reaches the outputs.
+      var cts: Array[ContiguousTable] = null
+      val split: Either[Seq[SpillableColumnarBatch], Array[DataType]] = try {
+        withResource(spillable) { _ =>
+          val toSplitRows = spillable.numRows()
+          if (toSplitRows <= 1) {
+            throw new GpuSplitAndRetryOOM(
+              s"GPU OutOfMemory: a batch of $toSplitRows cannot be split!")
+          }
+          withResource(spillable.getColumnarBatch()) { src =>
+            if (src.numCols() == 0) {
+              // A rows-only batch carries nothing but its row count, and a cudf table needs at
+              // least one column to hold it, so cut the count instead. The cut matches the
+              // contiguousSplit below so both paths halve a batch the same way.
+              val splitIx = toSplitRows / 2
+              Left(Seq(new JustRowsColumnarBatch(splitIx),
+                new JustRowsColumnarBatch(toSplitRows - splitIx)))
+            } else {
+              withResource(GpuColumnVector.from(src)) { tbl =>
+                val splitIx = (tbl.getRowCount / 2).toInt
+                cts = tbl.contiguousSplit(splitIx)
               }
+              Right(spillable.dataTypes)
             }
           }
         }
-        Seq(firstHalf, secondHalf)
+      } catch {
+        case t: Throwable =>
+          if (cts != null) {
+            cts.safeClose(t)
+          }
+          throw t
+      }
+      split match {
+        case Left(halves) => halves
+        case Right(dataTypes) =>
+          withResource(cts) { _ =>
+            val tables = cts.map(_.getTable)
+            withResource(tables.safeMap(GpuColumnVector.from(_, dataTypes))) { batches =>
+              val spillables = batches.safeMap { b =>
+                SpillableColumnarBatch(
+                  GpuColumnVector.incRefCounts(b),
+                  SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+              }
+              closeOnExcept(spillables) { _ =>
+                require(spillables.length == 2,
+                  s"Contiguous split returned ${spillables.length} tables but two were " +
+                      s"expected!")
+              }
+              Seq(spillables.head, spillables.last)
+            }
+          }
       }
     }
   }
@@ -918,7 +924,7 @@ object RmmRapidsRetryIterator extends Logging {
    * A common split function for an AutoCloseableTargetSize, which just divides the target size
    * in half, and creates a seq with just one element representing the new target size.
    * @return a Seq[AutoCloseableTargetSize] with 1 element.
-   * @throws GpuSplitAndRetryOOM if it reaches the split limit.
+   * @note the returned function throws `GpuSplitAndRetryOOM` if it reaches the split limit.
    */
   def splitTargetSizeInHalfGpu: AutoCloseableTargetSize => Seq[AutoCloseableTargetSize] =
     (target: AutoCloseableTargetSize) => {
@@ -930,7 +936,7 @@ object RmmRapidsRetryIterator extends Logging {
    * in half, and creates a seq with just one element representing the new target size.
    *
    * @return a Seq[AutoCloseableTargetSize] with 1 element.
-   * @throws CpuSplitAndRetryOOM if it reaches the split limit.
+   * @note the returned function throws `CpuSplitAndRetryOOM` if it reaches the split limit.
    */
   def splitTargetSizeInHalfCpu: AutoCloseableTargetSize => Seq[AutoCloseableTargetSize] =
     (target: AutoCloseableTargetSize) => {

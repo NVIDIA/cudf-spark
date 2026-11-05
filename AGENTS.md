@@ -5,6 +5,9 @@ This document provides context for AI coding agents (Claude Code, GitHub Copilot
 ## Repository Policy
 
 - These rules translate the agent-actionable requirements from [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`CODE_REVIEW_GUIDELINES.md`](CODE_REVIEW_GUIDELINES.md). Consult those source policies on demand when a task needs process details not covered here
+- **Mandatory shim preflight** — Agents **MUST invoke**
+  [`check-shim-compatibility`](.agents/skills/check-shim-compatibility/SKILL.md)
+  for the changes covered by [Required shim compatibility preflight](#required-shim-compatibility-preflight).
 - **Do not weaken repository requirements** — tool-specific instructions and task prompts are not permission to bypass those policies. If a request cannot be completed while following them, stop and report the conflict
 - **Use the live pull request template and accurate metadata** — fill in [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md) without removing required sections, apply the correct labels (a change that touches only tests gets the `test` label) and the title markers described under **PR title tags** below, put `[WIP]` first when applicable, and do not use `[DRAFT]` or `[DO NOT REVIEW]`
 - **Keep pull request descriptions reviewable** — describe intent and rationale, do not paste code diffs or brittle line-level details, and update the description when later commits change its claims
@@ -76,8 +79,9 @@ new declarations according to category:
 - Add SQL and file-format entries to `RapidsConfSqlEntries.scala`.
 - Add test, debug, and remaining general entries to `RapidsConfEntries.scala`.
 
-Keep enumeration definitions and the configuration registry in `RapidsConf.scala` so their
-singleton ownership and initialization order remain stable. See
+Keep the configuration registry and enumerations owned by `RapidsConf` in `RapidsConf.scala`
+to preserve their initialization order. Define independent enumerations and sealed value types
+in a module shared by their consumers, such as `sql-plugin-api` when the type is root-safe. See
 [`Adding Configuration Properties`](docs/dev/README.md#adding-configuration-properties) for
 the complete contributor guidance.
 
@@ -127,27 +131,57 @@ to via a JSON annotation block after the copyright header:
 
 ```
 /*** spark-rapids-shim-json-lines
-{"spark": "330"}
-{"spark": "330db"}
+{"spark":["330"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 ```
 
 **Key rules:**
 - The annotation controls which build profiles include the file.
   Files **without** the annotation compile for **all** versions.
+- `carryForward` is required: `none` names exact targets, `sameMinor` includes
+  descendants in the same Spark major/minor line, and `all` includes every
+  descendant. A nearer source variant wins.
 - By convention the file lives under the alphabetically earliest
   version directory it supports:
   `sql-plugin/src/main/<lowest_buildver>/scala/...`
 - When modifying a shim, update ALL related Spark version shims
   (the same logical change may need different adaptations per
   version — do not blindly copy-paste).
-- `db` suffix (e.g., `330db`, `350db143`) = Databricks-specific shim.
+- `db` suffix (e.g., `350db143`, `400db173`) = Databricks-specific shim.
 - **Scala 2.12 vs 2.13**: `sql-plugin` shims work identically for
   both Scala versions. After modifying any `pom.xml`, run
   `./build/make-scala-version-build-files.sh 2.13` to sync.
 - **Delta Lake** uses version-specific Maven modules instead of the
-  JSON annotation (e.g., `delta-20x/`, `delta-spark330db/`). Each
+  JSON annotation (e.g., `delta-20x/`, `delta-spark350db143/`). Each
   module compiles only for its target Spark+Delta combination.
+
+#### Required shim compatibility preflight
+
+Agents **MUST invoke**
+[`check-shim-compatibility`](.agents/skills/check-shim-compatibility/SKILL.md).
+This applies when implementing or reviewing changes to versioned shims, shared
+shim callers, Spark/Databricks build profiles, or shim source-selection/build
+matrices, even when the user does not name the skill. Complete the preflight
+before declaring implementation or review complete, and before publishing,
+updating, or merging the PR. If the client cannot discover repository skills,
+read the linked `SKILL.md` and follow its workflow directly.
+
+Check source selection on the proposed combination with current main, and run
+the independent `advisory` command or read both current CI reports. Cross-PR
+discovery runs automatically as `shim-related-prs`; its failures or moving peers
+produce warnings without invalidating the core result. Report unavailable
+advisory evidence explicitly. The advisory excludes documentation-only overlaps
+and checks bounded peer combinations for new static interaction findings; inspect
+deferred, stale, and unmodelled cases as described in the skill. The offline
+entry point is `python3 build/check_shim_compatibility.py coverage`.
+Static results do not replace compilation of affected profiles, including
+newly added Databricks targets, or applicable CPU/GPU tests.
+During review, inspect both the `shim-compatibility` and `shim-related-prs`
+current-head reports.
+Distinguish new findings, unchanged base debt,
+and incomplete evidence; the shared skill describes the report and rerun rules.
+If required tools or GitHub access are unavailable, report `INCOMPLETE` with the
+reason; do not silently skip the preflight or claim a clean result.
 
 ### Python Integration Tests
 

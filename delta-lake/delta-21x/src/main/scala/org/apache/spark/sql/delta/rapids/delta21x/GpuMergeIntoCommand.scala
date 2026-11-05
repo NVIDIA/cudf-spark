@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * This file was derived from MergeIntoCommand.scala
  * in the Delta Lake project at https://github.com/delta-io/delta.
@@ -207,7 +207,7 @@ object GpuMergeStats {
  *
  * Phase 1: Find the input files in target that are touched by the rows that satisfy
  *    the condition and verify that no two source rows match with the same target row.
- *    This is implemented as an inner-join using the given condition. See [[findTouchedFiles]]
+ *    This is implemented as an inner-join using the given condition. See `findTouchedFiles`
  *    for more details.
  *
  * Phase 2: Read the touched files again and write new files with updated and/or inserted rows.

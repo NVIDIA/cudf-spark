@@ -66,6 +66,87 @@
 
 set -ex
 
+print_spark_failure_diagnostics() {
+    local started=$1
+    shift
+    # Run on the test host before cluster cleanup; no dependency on bundle uploads.
+    if ! timeout --kill-after=5s 45s bash -s -- \
+        "$started" "${SPARK_WORKER_DIR:-$SPARK_HOME/work}" "$@" <<'SPARK_DIAGNOSTICS'
+set +x
+started=$1
+worker_dir=$2
+shift 2
+log_files=()
+crash_dirs=("$PWD")
+found_executor_logs=false
+for log in "$@"; do
+    [[ -f "$log" ]] || continue
+    if (( ${#log_files[@]} >= 16 )); then
+        echo "Additional worker logs omitted from console diagnostics"
+        break
+    fi
+    log_files+=("$log")
+    # Shutdown thread dumps can push the initiating error out of the tail.
+    printf '\n----- First Spark failure records: %s (bounded context) -----\n' "$log"
+    timeout --kill-after=1s 3s grep -m 3 -E -A 35 \
+        '\[ERROR\]|(^|[[:space:]])ERROR[[:space:]]|Exception in the executor plugin|cudaError' \
+        "$log" | head -c 65536 || true
+    printf '\n----- Spark driver/pytest log: %s (last 200 lines, at most 64 KiB) -----\n' "$log"
+    timeout --kill-after=1s 3s tail -c 65536 "$log" | tail -n 200 || true
+    # Include both default Spark and pytest file-log formats.
+    printf '\n----- Spark process identity and master/worker lifecycle -----\n'
+    timeout --kill-after=1s 3s grep -E -C 3 \
+        'Spark process identity:|[ .](Master|Worker|ExecutorRunner|StandaloneAppClient|StandaloneSchedulerBackend|TaskSchedulerImpl)[: ]' \
+        "$log" | tail -c 65536 | tail -n 200 || true
+done
+if (( ${#log_files[@]} > 0 )) &&
+    grep -qE '15002|Could not start Spark Connect GRPC service' "${log_files[@]}"; then
+    printf '\n----- Spark Connect port 15002 listener ownership -----\n'
+    timeout --kill-after=1s 3s ss -ltnp 'sport = :15002' || true
+fi
+if (( ${#log_files[@]} > 0 )); then
+    # Restrict executor logs to application IDs in this run's logs.
+    while IFS= read -r app_id; do
+        for executor_dir in "$worker_dir/$app_id"/*; do
+            [[ -d "$executor_dir" ]] || continue
+            crash_dirs+=("$executor_dir")
+            for stream in stdout stderr; do
+                [[ -f "$executor_dir/$stream" ]] || continue
+                found_executor_logs=true
+                printf '\n----- Spark executor %s (last 200 lines, at most 64 KiB) -----\n' "$executor_dir/$stream"
+                timeout --kill-after=1s 3s tail -c 65536 "$executor_dir/$stream" | tail -n 200 || true
+            done
+        done
+    done < <(grep -hoE 'app-[0-9]+-[0-9]+' "${log_files[@]}" | sort -u)
+fi
+if [[ "$found_executor_logs" == false ]]; then
+    echo "No local executor stdout/stderr found for application IDs in this run's logs"
+fi
+# Fatal-error headers only, scoped to this run; not full JVM dumps or environments.
+for directory in "${crash_dirs[@]}"; do
+    while IFS= read -r -d '' crash_log; do
+        printf '\n----- JVM fatal-error header: %s -----\n' "$crash_log"
+        timeout --kill-after=1s 3s grep -m 25 '^#' "$crash_log" || true
+    done < <(find "$directory" -maxdepth 1 -type f -name 'hs_err_pid*.log' \
+        -newermt "@$started" -print0)
+done
+SPARK_DIAGNOSTICS
+    then
+        echo "Spark failure diagnostics incomplete"
+    fi
+}
+
+run_integration_tests() {
+    local started status=0
+    started=$(date +%s)
+    "$@" || status=$?
+    if (( status != 0 )); then
+        echo "FAILED integration tests (exit=$status, run_dir=$RUN_DIR)"
+        print_spark_failure_diagnostics "$started" "$RUN_DIR"/*_worker_logs.log || true
+    fi
+    return "$status"
+}
+
 is_databricks_runtime_arg() {
     local expect_runtime_env_value=false
     local runtime_env=""
@@ -533,24 +614,23 @@ else
         # on failure. Previously stderr was discarded, which made CI failures
         # in this step opaque (the only signal was a non-zero grep exit).
         smoke_log=$(mktemp -t spark-shell-smoke.XXXXXX.log)
-        if <<< 'spark.range(100).agg(Map("id" -> "sum")).collect()' \
+        smoke_started=$(date +%s)
+        # Worker reports executor termination and exit status at INFO, even when
+        # the executor itself leaves no useful stderr. Keep this local to the smoke test.
+        if <<< 'sc.setLogLevel("INFO"); spark.range(100).agg(Map("id" -> "sum")).collect()' \
                 "${SPARK_HOME}"/bin/spark-shell "${SPARK_SHELL_ARGS_ARR[@]}" 2>&1 \
                 | tee "$smoke_log" \
                 | grep -F 'res0: Array[org.apache.spark.sql.Row] = Array([4950])'; then
+            smoke_statuses=("${PIPESTATUS[@]}")
+        else
+            smoke_statuses=("${PIPESTATUS[@]}")
+        fi
+        if (( smoke_statuses[0] == 0 && smoke_statuses[1] == 0 && smoke_statuses[2] == 0 )); then
             rm -f "$smoke_log"
             echo "SUCCESS spark-shell smoke test"
         else
-            shell_status=${PIPESTATUS[0]}
-            grep_status=${PIPESTATUS[2]}
-            echo "FAILED spark-shell smoke test (spark-shell exit=${shell_status}, grep exit=${grep_status})"
-            echo "----- spark-shell combined stdout/stderr (tail -n 300 of $smoke_log) -----"
-            tail -n 300 "$smoke_log" || true
-            echo "----- spark-shell executor stderr (tail -n 200 each) -----"
-            for f in "${SPARK_HOME}"/work/*/*/stderr; do
-                [[ -f "$f" ]] || continue
-                echo "=== $f ==="
-                tail -n 200 "$f" || true
-            done
+            echo "FAILED spark-shell smoke test (spark-shell exit=${smoke_statuses[0]}, tee exit=${smoke_statuses[1]}, grep exit=${smoke_statuses[2]})"
+            print_spark_failure_diagnostics "$smoke_started" "$smoke_log" || true
             rm -f "$smoke_log"
             exit 1
         fi
@@ -723,7 +803,7 @@ PY
         echo "SUCCESS Spark Connect smoke test"
     elif ((${#TEST_PARALLEL_OPTS[@]} > 0));
     then
-        exec python "${RUN_TESTS_COMMAND[@]}" "${TEST_PARALLEL_OPTS[@]}" "${TEST_COMMON_OPTS[@]}"
+        run_integration_tests python "${RUN_TESTS_COMMAND[@]}" "${TEST_PARALLEL_OPTS[@]}" "${TEST_COMMON_OPTS[@]}"
     else
         if [[ "$USE_WORKER_LOGS" == "1" ]]; then
           # Setting the extraJavaOptions again to set the log4j confs that will be needed for writing logs in the expected location
@@ -772,7 +852,7 @@ PY
         # Don't forget to set TEST_PARALLEL=1 to ensure local mode spark 
         # export SPARK_SUBMIT_OPTS="-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=5005"
 
-        exec "$SPARK_HOME"/bin/spark-submit "${jarOpts[@]}" \
+        run_integration_tests "$SPARK_HOME"/bin/spark-submit "${jarOpts[@]}" \
             --driver-java-options "$driverJavaOpts" \
             $SPARK_SUBMIT_FLAGS \
             --conf 'spark.rapids.memory.gpu.allocSize='"$gpuAllocSize" \

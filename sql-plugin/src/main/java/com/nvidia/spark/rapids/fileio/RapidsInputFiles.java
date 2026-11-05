@@ -17,7 +17,7 @@
 package com.nvidia.spark.rapids.fileio;
 
 /**
- * Static helpers shared by {@link com.nvidia.spark.rapids.jni.fileio.RapidsInputFile}
+ * Static helpers shared by {@code com.nvidia.spark.rapids.jni.fileio.RapidsInputFile}
  * implementations.
  */
 public final class RapidsInputFiles {

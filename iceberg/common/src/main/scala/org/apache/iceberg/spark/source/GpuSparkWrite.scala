@@ -21,13 +21,14 @@ import java.util.Locale
 import scala.collection.JavaConverters._
 import scala.util.{Failure, Success}
 
+import ai.rapids.cudf.{ColumnVector => CudfColumnVector}
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.Arm.closeOnExcept
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableSeq
 import com.nvidia.spark.rapids.SpillPriorities.ACTIVE_ON_DECK_PRIORITY
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
-import com.nvidia.spark.rapids.iceberg.{GpuIcebergSpecPartitioner, IcebergFormatVersionSupport,
-  ShimUtils}
+import com.nvidia.spark.rapids.iceberg.{GpuIcebergSpecPartitioner, IcebergEncryptionSupport,
+  IcebergFormatVersionSupport, ShimUtils}
 import com.nvidia.spark.rapids.shims.parquet.ParquetFieldIdShims
 import org.apache.hadoop.mapreduce.Job
 import org.apache.iceberg._
@@ -46,10 +47,11 @@ import org.apache.spark.sql.connector.write.{DataWriter, _}
 import org.apache.spark.sql.connector.write.streaming.StreamingWrite
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources.v2.{AtomicCreateTableAsSelectExec, AtomicReplaceTableAsSelectExec}
+import org.apache.spark.sql.internal.SQLConf.ParquetOutputTimestampType
 import org.apache.spark.sql.rapids.GpuWriteJobStatsTracker
 import org.apache.spark.sql.rapids.shims.SparkSessionUtils
-import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.vectorized.ColumnarBatch
+import org.apache.spark.sql.types.{LongType, StructType}
+import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 import org.apache.spark.util.SerializableConfiguration
 
 
@@ -65,7 +67,7 @@ class GpuSparkWrite(cpu: Write) extends GpuWrite with RequiresDistributionAndOrd
     // Iceberg's SparkWrite returns different implementations based on write mode:
     // - BatchAppend for append operations
     // - DynamicOverwrite for dynamic partition overwrite
-    // - BatchRewrite for copy-on-write operations (DELETE)
+    // - CopyOnWriteOperation for row-level copy-on-write operations
     // Since these are private classes, we check the class name to determine which GPU version
     // to use
     val cpuBatch = cpu.toBatch
@@ -129,11 +131,18 @@ class GpuSparkWrite(cpu: Write) extends GpuWrite with RequiresDistributionAndOrd
       tmpJob
     }
 
-    val outputWriterFactory = new GpuParquetFileFormat().prepareWrite(
+    // Iceberg's Parquet writers always encode timestamps as INT64 microseconds and preserve
+    // proleptic-Gregorian values; they do not inherit Spark's Parquet timestamp or rebase settings.
+    // The GPU path reuses Spark's Parquet writer, so force the equivalent physical type and rebase
+    // mode here. Otherwise, session settings such as INT96 or LEGACY would change Iceberg's file
+    // semantics.
+    val outputWriterFactory = new GpuParquetFileFormat().prepareWriteWithTimestampOverrides(
       SparkSession.active,
       job,
       GpuSparkWrite.translateIcebergWriteProperties(writeProps.asScala.toMap),
-      dsSchema
+      dsSchema,
+      ParquetOutputTimestampType.TIMESTAMP_MICROS,
+      DateTimeRebaseCorrected
     )
 
     val serializedHadoopConf = new SerializableConfiguration(job.getConfiguration)
@@ -280,6 +289,7 @@ object GpuSparkWrite {
     val partitionSpec = table.spec()
 
     IcebergFormatVersionSupport.tagForFormatVersion(table, meta)
+    IcebergEncryptionSupport.tagForWrite(table, meta)
 
     val dsSchema = GpuSparkWriteAccess.dsSchema(cpuWrite)
     val writeSchema = GpuSparkWriteAccess.writeSchema(cpuWrite)
@@ -306,9 +316,10 @@ object GpuSparkWrite {
       .rebuildCreateProperties(cpuExec.tableSpec.properties.asJava)
       .asScala.toMap
     // Catalog defaults and overrides are applied later when Iceberg stages the table. If they
-    // select v3, the nested append is tagged against that staged table and falls back to CPU, so
-    // only an explicit format version in the statement needs to be checked here.
+    // select unsupported features, the nested append is tagged against that staged table, so
+    // only explicit format version and encryption properties need to be checked here.
     IcebergFormatVersionSupport.tagForFormatVersion(properties, meta)
+    IcebergEncryptionSupport.tagForWrite(properties, meta)
     val fileFormatStr = properties.getOrElse(TableProperties.DEFAULT_FILE_FORMAT,
       TableProperties.DEFAULT_FILE_FORMAT_DEFAULT)
 
@@ -340,9 +351,10 @@ object GpuSparkWrite {
       .rebuildCreateProperties(cpuExec.tableSpec.properties.asJava)
       .asScala.toMap
     // Existing table metadata and catalog properties are resolved later while Iceberg stages the
-    // replacement. The nested write is then tagged against the resulting table and handles the v3
-    // fallback, so neither the catalog nor the existing table needs to be loaded here.
+    // replacement. The nested write is tagged against that table for format version and encryption
+    // support, so neither the catalog nor the existing table needs to be loaded here.
     IcebergFormatVersionSupport.tagForFormatVersion(properties, meta)
+    IcebergEncryptionSupport.tagForWrite(properties, meta)
     val fileFormatStr = properties.getOrElse(TableProperties.DEFAULT_FILE_FORMAT,
       TableProperties.DEFAULT_FILE_FORMAT_DEFAULT)
 
@@ -378,11 +390,18 @@ class GpuWriterFactory(val tableBroadcast: Broadcast[Table],
   val outputWriterFactory: ColumnarOutputWriterFactory,
   val statsTracker: GpuWriteJobStatsTracker,
   val hadoopConf: SerializableConfiguration
-) extends DataWriterFactory {
+) extends GpuDataWriterFactory {
 
   private lazy val fileIO: IcebergFileIO = new IcebergFileIO(tableBroadcast.value.io())
 
   override def createWriter(partitionId: Int, taskId: Long): DataWriter[InternalRow] = {
+    createWriter(partitionId, taskId, null)
+  }
+
+  override def createWriter(
+      partitionId: Int,
+      taskId: Long,
+      metadataSchema: StructType): DataWriter[InternalRow] = {
     val table = tableBroadcast.value
     val spec = table.specs().get(outputSpecId)
     val io = table.io()
@@ -406,12 +425,117 @@ class GpuWriterFactory(val tableBroadcast: Broadcast[Table],
       fileIO)
 
     if (spec.isUnpartitioned) {
-      new GpuUnpartitionedDataWriter(writerFactory, outputFileFactory, io, spec, targetFileSize)
+      new GpuUnpartitionedDataWriter(
+        writerFactory, outputFileFactory, io, spec, targetFileSize, metadataSchema)
         .asInstanceOf[DataWriter[InternalRow]]
     } else {
       new GpuPartitionedDataWriter(writerFactory, outputFileFactory, io, spec, writeSchema,
-        dsSchema, targetFileSize, useFanout)
+        dsSchema, targetFileSize, useFanout, metadataSchema)
         .asInstanceOf[DataWriter[InternalRow]]
+    }
+  }
+}
+
+trait GpuDataWriterWithRowLineage extends GpuDataWriter {
+  protected def dataSparkType: StructType
+  protected def metadataSchema: StructType
+
+  override def write(record: ColumnarBatch): Unit
+
+  override def write(
+      metadata: ColumnarBatch,
+      record: ColumnarBatch): Unit = {
+    write(GpuIcebergRowLineage.appendLineage(
+      record, metadata, dataSparkType, metadataSchema))
+  }
+}
+
+object GpuIcebergRowLineage {
+  val lineageColumnNames: Seq[String] = Seq("_row_id", "_last_updated_sequence_number")
+
+  /**
+   * Returns an owned physical row batch matching dataSparkType without consuming record, metadata,
+   * or reinsertMask. Records that already contain all physical columns keep their existing values.
+   * Otherwise, appends the missing _row_id and _last_updated_sequence_number columns at the end.
+   *
+   * Without metadata, both appended columns are null. With metadata, lineage columns are looked up
+   * by name in metadataSchema. If reinsertMask is absent, their values are copied for every row.
+   * With a mask, only REINSERT rows (true) copy metadata; INSERT rows (false) receive nulls even
+   * when their metadata contains values. Metadata nulls are preserved for Iceberg's lineage
+   * inheritance mechanism; this method does not assign row IDs or sequence numbers.
+   *
+   * For example, a batch containing a REINSERT followed by an INSERT:
+   * {{{
+   * record:
+   *   id  amount
+   *   1   200
+   *   2   300
+   *
+   * metadata:
+   *   _row_id  _last_updated_sequence_number
+   *   101      null
+   *   999      8
+   *
+   * reinsertMask: [true, false]
+   *
+   * result (columns in dataSparkType order):
+   *   id  amount  _row_id  _last_updated_sequence_number
+   *   1   200     101      null
+   *   2   300     null     null
+   * }}}
+   * The REINSERT preserves row ID 101; the INSERT ignores metadata values 999 and 8 so its lineage
+   * can be inherited. Input row order is unchanged.
+   */
+  def appendLineage(
+      record: ColumnarBatch,
+      metadata: ColumnarBatch,
+      dataSparkType: StructType,
+      metadataSchema: StructType,
+      reinsertMask: CudfColumnVector = null): ColumnarBatch = {
+    if (reinsertMask != null) {
+      require(reinsertMask.getRowCount == record.numRows(),
+        "Reinsert mask row count does not match record row count")
+    }
+    val missingColumnCount = dataSparkType.length - record.numCols()
+    if (missingColumnCount == 0) {
+      GpuColumnVector.combineColumns(record)
+    } else {
+      require(missingColumnCount == lineageColumnNames.length,
+        s"Expected ${lineageColumnNames.length} row lineage " +
+          s"columns but record is missing $missingColumnCount columns")
+      require(dataSparkType.takeRight(missingColumnCount).map(_.name).toSeq == lineageColumnNames,
+        "Expected row lineage columns at the end of the write schema")
+      if (metadata != null) {
+        require(metadata.numRows() == record.numRows(),
+          s"Metadata row count ${metadata.numRows()} does not match record row count " +
+            s"${record.numRows()}")
+      }
+
+      val lineageColumns = closeOnExcept(new Array[ColumnVector](missingColumnCount)) { columns =>
+        lineageColumnNames.zipWithIndex.foreach { case (name, index) =>
+          columns(index) = if (metadata == null) {
+            // Newly inserted rows inherit both lineage values from the Iceberg commit.
+            GpuColumnVector.fromNull(record.numRows(), LongType)
+          } else {
+            val column = metadata.column(metadataSchema.fieldIndex(name))
+              .asInstanceOf[GpuColumnVector]
+            if (reinsertMask == null) {
+              column.incRefCount()
+            } else {
+              // INSERT rows inherit lineage even when their metadata projection has values.
+              withResource(GpuScalar.from(null, LongType)) { nullValue =>
+                GpuColumnVector.from(
+                  reinsertMask.ifElse(column.getBase, nullValue), LongType)
+              }
+            }
+          }
+        }
+        columns
+      }
+
+      withResource(new ColumnarBatch(lineageColumns, record.numRows())) { lineage =>
+        GpuColumnVector.combineColumns(record, lineage)
+      }
     }
   }
 }
@@ -421,8 +545,11 @@ class GpuUnpartitionedDataWriter(
   val fileFactory: OutputFileFactory,
   val io: FileIO,
   val spec: PartitionSpec,
-  val targetFileSize: Long)
-  extends DataWriter[ColumnarBatch] {
+  val targetFileSize: Long,
+  override protected val metadataSchema: StructType)
+  extends GpuDataWriterWithRowLineage {
+  override protected def dataSparkType: StructType = fileWriterFactory.dataSparkType
+
   private val delegate = new GpuRollingDataWriter(
     fileWriterFactory,
     fileFactory,
@@ -464,10 +591,11 @@ class GpuPartitionedDataWriter(
   val io: FileIO,
   val spec: PartitionSpec,
   val dataSchema: Schema,
-  val dataSparkType: StructType,
+  override val dataSparkType: StructType,
   val targetFileSize: Long,
   val fanoutEnabled: Boolean,
-) extends DataWriter[ColumnarBatch] {
+  override protected val metadataSchema: StructType,
+) extends GpuDataWriterWithRowLineage {
 
   private val delegate: PartitioningWriter[SpillableColumnarBatch, DataWriteResult] =
     if (fanoutEnabled) {

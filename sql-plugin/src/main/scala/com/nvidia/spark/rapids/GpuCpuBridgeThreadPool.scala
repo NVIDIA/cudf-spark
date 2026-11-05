@@ -26,15 +26,6 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 
 /**
- * Scheduling priority of a CPU bridge task. Lower priority value runs first; ties break FIFO
- * by submitTime.
- */
-private[rapids] trait CpuBridgeTaskPriority {
-  def priority: Long
-  def submitTime: Long
-}
-
-/**
  * A task submitted to the CPU bridge thread pool with priority information.
  */
 case class PrioritizedCpuBridgeTask[T](
@@ -168,7 +159,7 @@ object GpuCpuBridgeThreadPool extends Logging {
    * Get the shared thread pool, creating it if necessary.
    * The pool size is based on configured task slots rather than CPU cores.
    * 
-   * @throws IllegalStateException if the thread pool has been shut down
+   * @throws java.lang.IllegalStateException if the thread pool has been shut down
    */
   def getThreadPool: ThreadPoolExecutor = {
     if (hasShutdown) {

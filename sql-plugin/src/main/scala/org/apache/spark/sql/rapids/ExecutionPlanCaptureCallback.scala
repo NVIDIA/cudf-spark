@@ -24,7 +24,10 @@ import org.apache.spark.sql.util.QueryExecutionListener
 
 trait ExecutionPlanCaptureCallbackBase {
   def captureIfNeeded(qe: QueryExecution): Unit
+  def captureIfNeeded(plan: SparkPlan): Unit
   def startCapture(): Unit
+  /** Include final write plans in addition to the usual QueryExecution plans. */
+  def startCaptureWithWritePlans(): Unit
   def startCapture(timeoutMillis: Long): Unit
   def endCapture(): Unit
   def endCapture(timeoutMillis: Long): Unit
@@ -68,8 +71,14 @@ object ExecutionPlanCaptureCallback extends ExecutionPlanCaptureCallbackBase {
   override def captureIfNeeded(qe: QueryExecution): Unit =
     impl.captureIfNeeded(qe)
 
+  override def captureIfNeeded(plan: SparkPlan): Unit =
+    impl.captureIfNeeded(plan)
+
   override def startCapture(): Unit =
     impl.startCapture()
+
+  override def startCaptureWithWritePlans(): Unit =
+    impl.startCaptureWithWritePlans()
 
   override def startCapture(timeoutMillis: Long): Unit =
     impl.startCapture(timeoutMillis)

@@ -34,8 +34,7 @@ def main():
   print("Master node address is: %s" % master_addr)
 
   print("Copying script")
-  ssh_args = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-              "-p", "2200", "-i", params.private_key_file]
+  ssh_args = ClusterUtils.get_ssh_options(params.private_key_file)
   rsync_ssh = shell_join(["ssh"] + ssh_args)
   rsync_command = ["rsync", "-I", "-Pave", rsync_ssh, "--", params.local_script,
                    "ubuntu@%s:%s" % (master_addr, params.script_dest)]

@@ -36,11 +36,12 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.SparkSession.setActiveSession
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference}
+import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, GenericInternalRow}
 import org.apache.spark.sql.columnar.CachedBatch
+import org.apache.spark.sql.execution.WholeStageCodegenExec
 import org.apache.spark.sql.execution.columnar.DefaultCachedBatchSerializer
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.PCBSSchemaHelper
+import org.apache.spark.sql.rapids.{PCBSSchemaHelper, TestPrimitiveUDT}
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.types._
@@ -152,6 +153,19 @@ class CachedBatchWriterSuite extends SparkQueryCompareTestSuite {
           CompressionType.NONE
         }) == opts.getCompressionType)
     }
+  }
+
+  test("PCBS schema conversion supports nested UDTs") {
+    val udt = new TestPrimitiveUDT
+    assert(PCBSSchemaHelper.getSupportedDataType(
+      ArrayType(udt, containsNull = true)) ===
+      ArrayType(IntegerType, containsNull = true))
+    assert(PCBSSchemaHelper.getSupportedDataType(
+      StructType(Seq(StructField("value", udt, nullable = true)))) ===
+      StructType(Seq(StructField("_col0", IntegerType, nullable = true))))
+    assert(PCBSSchemaHelper.getSupportedDataType(
+      MapType(StringType, udt, valueContainsNull = true)) ===
+      MapType(StringType, IntegerType, valueContainsNull = true))
   }
 
   test("cache empty columnar batch on GPU") {
@@ -347,6 +361,42 @@ class CachedBatchWriterSuite extends SparkQueryCompareTestSuite {
       assert(cached.map(_.numRows) == Seq(2, 2, 1))
       assert(decoded.flatten.map(_.getUTF8String(0).toString) == values)
     }, oneMiBBatchConf)
+  }
+
+  test("row entry carries a row into the next batch with its own values") {
+    withCpuSparkSession(spark => {
+      // Whole-stage codegen produces each row into one reused buffer when hasNext is called.
+      // Rows that are not UnsafeRows but read their values from that buffer, as converted rows
+      // do, need the writer to copy the one it carries into the next batch. Each value has the
+      // same width in every row, so a value read after the buffer moves on is the next row's.
+      val plan = spark.range(0, 20, 1, 1).selectExpr(
+        "id",
+        "lpad(cast(id as string), 4, '0') as s",
+        "cast(lpad(cast(id as string), 4, '0') as binary) as b",
+        "named_struct('s', lpad(cast(id as string), 4, '0')) as st",
+        "array(cast(lpad(cast(id as string), 4, '0') as binary)) as a"
+      ).queryExecution.executedPlan
+      assert(plan.isInstanceOf[WholeStageCodegenExec], plan)
+      val types = plan.output.map(_.dataType)
+      val input = plan.execute().map[InternalRow](row =>
+        new GenericInternalRow(row.toSeq(types).toArray))
+      val conf = TrampolineUtil.getSparkConf(spark)
+      val ser = new ParquetCachedBatchSerializer
+      val cached = ser.convertInternalRowToCachedBatch(input, plan.output, MEMORY_ONLY, conf)
+        .collect().toList
+      assert(cached.length > 2, "the rows should span several batches")
+      val decoded = ser.convertCachedBatchToInternalRow(
+        spark.sparkContext.parallelize(cached, numSlices = 1), plan.output, plan.output, conf)
+        .map(_.copy()).collect()
+      val sources = plan.executeCollect()
+      assert(decoded.length == sources.length)
+      def values(row: InternalRow) = (row.getLong(0), row.getUTF8String(1),
+        row.getBinary(2).toSeq, row.getStruct(3, 1).getUTF8String(0),
+        row.getArray(4).getBinary(0).toSeq)
+      decoded.zip(sources).foreach { case (row, source) =>
+        assert(values(row) == values(source))
+      }
+    }, new SparkConf().set(RapidsConf.GPU_BATCH_SIZE_BYTES.key, "1k"))
   }
 
   private def writeAndConsumeEmptyBatch(spark: SparkSession): Unit = {

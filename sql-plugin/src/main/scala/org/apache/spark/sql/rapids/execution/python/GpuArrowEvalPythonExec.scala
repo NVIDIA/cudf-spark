@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -399,6 +399,10 @@ case class GpuArrowEvalPythonExec(
     val runnerConf = pythonRunnerConf
     val timeZone = sessionLocalTimeZone
     val localMetrics = allMetrics
+    val udfLogMaxEntries =
+      conf.getConfString("spark.sql.pyspark.udf.logging.maxEntries", "0").toInt
+    val udfLogLevel =
+      conf.getConfString("spark.sql.pyspark.udf.logging.logLevel", "WARNING")
 
     val inputRDD = child.executeColumnar()
     inputRDD.mapPartitions { iter =>
@@ -438,7 +442,9 @@ case class GpuArrowEvalPythonExec(
           runnerConf,
           targetBatchSize,
           pythonOutputSchema,
-          udfArgs.argNames)
+          udfArgs.argNames,
+          udfLogMaxEntries,
+          udfLogLevel)
 
         val outputIterator = pyRunner.compute(pyInputIterator, context.partitionId(), context)
         new CombiningIterator(batchProducer.getBatchQueue, outputIterator, pyRunner, numOutputRows,

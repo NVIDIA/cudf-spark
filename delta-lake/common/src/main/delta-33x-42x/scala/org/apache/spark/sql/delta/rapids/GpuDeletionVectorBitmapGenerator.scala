@@ -27,7 +27,7 @@ private[rapids] case class GpuTargetScan(
     filePathColumn: Column,
     rowIndexColumn: Column)
 
-private[rapids] object GpuDeletionVectorBitmapGenerator extends GpuDeltaCommandLike {
+private[rapids] object GpuDeletionVectorBitmapGenerator {
 
   /**
    * Finds candidate files containing rows that satisfy `condition` and writes a replacement
@@ -53,7 +53,8 @@ private[rapids] object GpuDeletionVectorBitmapGenerator extends GpuDeltaCommandL
       condition: Column,
       nameToAddFileMap: Map[String, AddFile],
       operationName: String): Seq[TouchedFileWithDV] = {
-    recordDeltaOperation(txn.deltaLog, s"$operationName.findTouchedFiles") {
+    // Delta 4.3 changed the DeltaLogging signature; use the runtime-specific shim.
+    DeltaRuntimeShim33x.runDeltaOperation(txn.deltaLog, s"$operationName.findTouchedFiles") {
       val gpuTargetDf = DMLWithDeletionVectorsHelperShims.withGpuExecutionContext(
         spark, targetScan.dataFrame)
       val candidatesHaveDVs =

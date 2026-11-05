@@ -49,9 +49,9 @@ class GpuDeltaLog(val deltaLog: DeltaLog, rapidsConf: RapidsConf) {
    * any concurrent writes, and post-commit hooks can notify the table's catalog about schema
    * changes.
    *
-   * @param catalogTableOpt The [[CatalogTable]] for the table this transaction updates. Passing
+   * @param catalogTableOpt The `CatalogTable` for the table this transaction updates. Passing
    *                        None asserts this is a path-based table with no catalog entry.
-   * @param snapshotOpt     The [[Snapshot]] this transaction should use, if not latest.
+   * @param snapshotOpt     The `Snapshot` this transaction should use, if not latest.
    */
   def startTransaction(
       catalogTableOpt: Option[CatalogTable],
@@ -80,9 +80,9 @@ class GpuDeltaLog(val deltaLog: DeltaLog, rapidsConf: RapidsConf) {
   /**
    * Execute a piece of code within a new [[GpuOptimisticTransaction]].
    *
-   * @param catalogTableOpt The [[CatalogTable]] for the table this transaction updates. Passing
+   * @param catalogTableOpt The `CatalogTable` for the table this transaction updates. Passing
    *                        None asserts this is a path-based table with no catalog entry.
-   * @param snapshotOpt     The [[Snapshot]] this transaction should use, if not latest.
+   * @param snapshotOpt     The `Snapshot` this transaction should use, if not latest.
    */
   def withNewTransaction[T](
       catalogTableOpt: Option[CatalogTable],

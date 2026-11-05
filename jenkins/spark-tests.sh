@@ -29,7 +29,7 @@ SHUFFLE_SPARK_SHIM=$(get_shuffle_shim)
 WORKSPACE=${WORKSPACE:-`pwd`}
 
 ARTF_ROOT="$WORKSPACE/jars"
-WGET_CMD="wget -q -P $ARTF_ROOT -t 3"
+WGET_CMD="${WGET_CMD:-wget -q -P $ARTF_ROOT -t 3}"
 PROJECT_REPO_HOST=$(sed -E 's#^(.*://)?([^/@]*@)?([^/:]+).*#\3#' <<< "$PROJECT_REPO")
 
 download_maven_jars() {
@@ -166,7 +166,8 @@ fi
 tar xzf "$RAPIDS_INT_TESTS_TGZ" -C $ARTF_ROOT && rm -f "$RAPIDS_INT_TESTS_TGZ"
 
 . jenkins/hadoop-def.sh $SPARK_VER ${SCALA_BINARY_VER}
-$WGET_CMD $SPARK_REPO/org/apache/spark/$SPARK_VER/spark-$SPARK_VER-$BIN_HADOOP_VER.tgz
+SPARK_DIST_URL="${SPARK_DIST_URL:-$SPARK_REPO/org/apache/spark/$SPARK_VER}"
+$WGET_CMD "$SPARK_DIST_URL/spark-$SPARK_VER-$BIN_HADOOP_VER.tgz"
 
 export SPARK_HOME="$ARTF_ROOT/spark-$SPARK_VER-$BIN_HADOOP_VER"
 export PATH="$SPARK_HOME/bin:$SPARK_HOME/sbin:$PATH"
@@ -278,11 +279,11 @@ mkdir -p $TARGET_DIR
 run_delta_lake_tests() {
   echo "run_delta_lake_tests SPARK_VER = $SPARK_VER, SCALA_BINARY_VER = $SCALA_BINARY_VER"
   DELTA_LAKE_VERSIONS=""
-  SPARK_32X_PATTERN="(3\.2\.[0-9])"
-  SPARK_33X_PATTERN="(3\.3\.[0-9])"
-  SPARK_34X_PATTERN="(3\.4\.[0-9])"
-  SPARK_35X_PATTERN="(3\.5\.[3-9])"
-  SPARK_40X_PATTERN="(4\.0\.[0-9])"
+  SPARK_32X_PATTERN="(3\.2\.[0-9]+)"
+  SPARK_33X_PATTERN="(3\.3\.[0-9]+)"
+  SPARK_34X_PATTERN="(3\.4\.[0-9]+)"
+  SPARK_35X_PATTERN="(3\.5\.([3-9]|[1-9][0-9]+))"
+  SPARK_40X_PATTERN="(4\.0\.[0-9]+)"
   # Delta 4.1.0 is binary-incompatible with Spark 4.1.2+ after Spark changed internal
   # Catalyst and Parquet APIs. Keep coverage on the compatible Spark patch releases.
   SPARK_41_0_1_PATTERN="^(4\.1\.[0-1])$"
@@ -302,8 +303,21 @@ run_delta_lake_tests() {
   fi
 
   if [[ $SPARK_VER =~ $SPARK_35X_PATTERN ]]; then
-    # Delta 3.3.3 fixes staged-table truncate validation on Spark 3.5.6+.
-    DELTA_LAKE_VERSIONS="3.3.3"
+    local java_command="${JAVA_HOME:+$JAVA_HOME/bin/}java"
+    local java_specification_version
+    java_specification_version=$("$java_command" -XshowSettings:properties -version 2>&1 |
+      awk '$1 == "java.specification.version" {print $3}')
+    if [[ -z "$java_specification_version" ]]; then
+      echo "Cannot determine the Java version for Delta Lake tests" >&2
+      return 1
+    fi
+    if [[ "$java_specification_version" == "1.8" ]]; then
+      # Delta 3.3.3 bitmap deserialization calls a ByteBuffer API absent from Java 8.
+      DELTA_LAKE_VERSIONS="3.3.0"
+    else
+      # Delta 3.3.3 fixes staged-table truncate validation on Spark 3.5.6+.
+      DELTA_LAKE_VERSIONS="3.3.3"
+    fi
   fi
 
   if [[ $SPARK_VER =~ $SPARK_40X_PATTERN ]]; then
@@ -344,7 +358,7 @@ run_delta_lake_tests() {
         DELTA_MAIN_JAR="io.delta:delta-spark_${DELTA_SPARK_LINE}_${SCALA_BINARY_VER}:$v"
       elif [[ "$v" == "4.1.0" ]]; then
         DELTA_MAIN_JAR="io.delta:delta-spark_4.1_${SCALA_BINARY_VER}:$v"
-      elif [[ "$v" == "3.3.3" || "$v" == "4.0.0" || \
+      elif [[ "$v" == "3.3.0" || "$v" == "3.3.3" || "$v" == "4.0.0" || \
           "$v" == "4.0.1" ]]; then
         DELTA_MAIN_JAR="io.delta:delta-spark_${SCALA_BINARY_VER}:$v"
       else
@@ -353,13 +367,19 @@ run_delta_lake_tests() {
       # Delta Lake 1.2+ moved LogStore implementations into delta-storage.
       # All versions tested here are 2.0+, so include it explicitly.
       DELTA_JAR="${DELTA_MAIN_JAR},io.delta:delta-storage:$v"
-      env \
-        HOST_NAME=$PROJECT_REPO_HOST \
-        PYSP_TEST_spark_jars_packages=${DELTA_JAR} \
-        PYSP_TEST_spark_jars_ivySettings="${WORKSPACE}/jenkins/ivysettings.xml" \
-        PYSP_TEST_spark_sql_extensions="io.delta.sql.DeltaSparkSessionExtension" \
-        PYSP_TEST_spark_sql_catalog_spark__catalog="org.apache.spark.sql.delta.catalog.DeltaCatalog" \
-        ./run_pyspark_from_build.sh -m delta_lake --delta_lake
+      local delta_test_env=(env
+        "HOST_NAME=$PROJECT_REPO_HOST"
+        "PYSP_TEST_spark_jars_packages=${DELTA_JAR}"
+        "PYSP_TEST_spark_jars_ivySettings=${WORKSPACE}/jenkins/ivysettings.xml"
+        "PYSP_TEST_spark_sql_extensions=io.delta.sql.DeltaSparkSessionExtension"
+        "PYSP_TEST_spark_sql_catalog_spark__catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog")
+      if [[ "$v" == "3.3.0" || "$v" == "3.3.3" ]]; then
+        # Catch Delta/JDK linkage failures before running the full matrix.
+        "${delta_test_env[@]}" TEST= \
+          TESTS=delta_lake_test.py::test_delta_bitmap_serialization_java_compatibility \
+          ./run_pyspark_from_build.sh -m delta_lake --delta_lake || return 1
+      fi
+      "${delta_test_env[@]}" ./run_pyspark_from_build.sh -m delta_lake --delta_lake
     done
   fi
 }
@@ -371,12 +391,20 @@ run_delta_lake_tests() {
 # The server itself runs in its own JVM, so unitycatalog-server (Armeria, Vert.x, Hibernate,
 # Spring, ...) never reaches Spark at all.
 run_delta_lake_uc_tests() {
-  local delta_version='4.2.0'
-  local test_filter=${1:-}
+  local delta_version=${1:-'4.2.0'}
+  local test_file=${2:-'delta_lake_catalog_managed_test.py'}
+  local test_filter=${3:-}
+  local test_parallel=${TEST_PARALLEL:-}
 
-  # These conditions mirror the Delta Lake 4.2.0 rows of run_delta_lake_tests above: that Delta
-  # version is only exercised on Scala 2.13 with Spark 4.0.1 or 4.1.1. They are repeated rather
-  # than read from DELTA_LAKE_VERSIONS because that variable is assigned inside
+  # The REST safety module shares one UC server and includes failure-injection scenarios.
+  # Running it concurrently can terminate the shared server while another worker is using it.
+  if [[ "$test_file" == "delta_lake_catalog_rest_test.py" ]]; then
+    test_parallel=1
+  fi
+
+  # These conditions mirror the Delta Lake 4.2.0 and 4.3.0 rows of run_delta_lake_tests above:
+  # those versions are only exercised on Scala 2.13 with Spark 4.0.1 or 4.1.1. They are repeated
+  # rather than read from DELTA_LAKE_VERSIONS because that variable is assigned inside
   # run_delta_lake_tests, which TEST_MODE=DELTA_LAKE_UC_ONLY never runs. run_unity_catalog_server.sh
   # rejects the same combinations outright; CI skips them instead.
   if [[ "$SCALA_BINARY_VER" != "2.13" ]]; then
@@ -404,17 +432,24 @@ run_delta_lake_uc_tests() {
   # workspace. UNITY_CATALOG_VERSION and UNITY_CATALOG_PORT are read by the script directly.
   env \
     HOST_NAME=$PROJECT_REPO_HOST \
-    TESTS=delta_lake_catalog_managed_test.py \
+    TEST_PARALLEL="$test_parallel" \
+    TESTS="$test_file" \
     TEST="$test_filter" \
-    ./run_unity_catalog_server.sh --run-dir "$ARTF_ROOT" -- \
+    ./run_unity_catalog_server.sh --delta-version "$delta_version" \
+      --run-dir "$ARTF_ROOT" -- \
       ./run_pyspark_from_build.sh -m unity_catalog --delta_lake --unity_catalog
 }
 
+# Pipeline jobs supply ICEBERG_VERSIONS and ICEBERG_FAST_TEST (1=fast, 0=full,
+# unset defaults to 0) to choose their runtime(s) and suite. Other flag values
+# are rejected. TEST_TAGS adds a marker filter.
+# A single requested version runs only that version; this function does not add
+# or schedule other versions. Without overrides, run every JSON-selected version
+# with the full Iceberg suite. An unmatched marker filter
+# retains pytest's failure status (5); it is not a successful matrix skip.
 run_iceberg_tests() {
   # get the major/minor version of Spark
   ICEBERG_SPARK_VER=$(echo "$SPARK_VER" | cut -d. -f1,2)
-  # get the patch version of Spark
-  SPARK_PATCH_VER=$(echo "$SPARK_VER" | cut -d. -f3)
 
   # Spark 3.5 validates every optimizer rule's output when the spark.testing JVM property is
   # present. Iceberg V3 COW rewrites temporarily produce an unresolved ReplaceData plan while
@@ -431,66 +466,53 @@ run_iceberg_tests() {
     export SPARK_TESTING_ENABLED
   fi
 
-  if [[ "$ICEBERG_SPARK_VER" != "3.5" && "$ICEBERG_SPARK_VER" != "4.0" \
-        && "$ICEBERG_SPARK_VER" != "4.1" ]]; then
-    echo "!!!! Skipping Iceberg tests. GPU acceleration of Iceberg is not supported on $ICEBERG_SPARK_VER"
+  local test_type=${1:-'default'}
+  local iceberg_test_tags="iceberg"
+  if [[ -n "${TEST_TAGS:-}" ]]; then
+    iceberg_test_tags="iceberg and ($TEST_TAGS)"
+  fi
+  case "${ICEBERG_FAST_TEST-0}" in
+    0)
+      echo "Selected full Iceberg suite (TEST_TAGS=$iceberg_test_tags)"
+      ;;
+    1)
+      iceberg_test_tags="$iceberg_test_tags and iceberg_fast_test"
+      echo "Selected fast Iceberg suite (TEST_TAGS=$iceberg_test_tags)"
+      ;;
+    *)
+      echo "Invalid ICEBERG_FAST_TEST='$ICEBERG_FAST_TEST': expected 0, 1, or unset" >&2
+      return 1
+      ;;
+  esac
+
+  if [[ "$ICEBERG_SPARK_VER" == "4.0" || "$ICEBERG_SPARK_VER" == "4.1" ]]; then
+    if [[ "$SCALA_BINARY_VER" != "2.13" ]]; then
+      echo "!!!! Skipping Iceberg tests. Spark $ICEBERG_SPARK_VER Iceberg tests require Scala 2.13"
+      return 0
+    fi
+  fi
+
+  local matrix_reader="$WORKSPACE/scripts/get_iceberg_versions.py"
+  local iceberg_versions
+  # Runtime queries read only JSON; Maven packaging is checked once in premerge.
+  if [[ -n "${ICEBERG_VERSIONS:-}" ]]; then
+    iceberg_versions=$(
+      python "$matrix_reader" validate-requested \
+        --spark-version "$SPARK_VER" --requested-versions "$ICEBERG_VERSIONS"
+    ) || return 1
+    echo "Using user-specified ICEBERG_VERSIONS=$ICEBERG_VERSIONS"
+  else
+    iceberg_versions=$(
+      python "$matrix_reader" list --spark-version "$SPARK_VER"
+    ) || return 1
+  fi
+  if [[ -z "$iceberg_versions" ]]; then
+    # Profiles without a packaged Iceberg runtime have an empty selection.
+    echo "!!!! Skipping Iceberg tests. No supported Iceberg version found for Spark $SPARK_VER"
     return 0
   fi
 
-  # Supported Iceberg versions per Spark patch version:
-  # Spark 3.5.0-3.5.3 -> Iceberg 1.6.1
-  # Spark 3.5.4+       -> Iceberg 1.9.2, 1.10.1
-  # Spark 4.0.0-4.0.1 -> Iceberg 1.10.1
-  # Spark 4.0.2+       -> Iceberg 1.10.1, 1.11.0
-  # Spark 4.1.x        -> Iceberg 1.11.0
-  local supported_versions
-  if [[ "$ICEBERG_SPARK_VER" == "4.1" ]]; then
-    if [[ "$SCALA_BINARY_VER" != "2.13" ]]; then
-      echo "!!!! Skipping Iceberg tests. Spark 4.1 Iceberg tests require Scala 2.13"
-      return 0
-    fi
-    supported_versions="1.11.0"
-  elif [[ "$ICEBERG_SPARK_VER" == "4.0" ]]; then
-    if [[ "$SCALA_BINARY_VER" != "2.13" ]]; then
-      echo "!!!! Skipping Iceberg tests. Spark 4.0 Iceberg tests require Scala 2.13"
-      return 0
-    fi
-    if [[ "$SPARK_PATCH_VER" -ge 2 ]]; then
-      supported_versions="1.10.1 1.11.0"
-    else
-      supported_versions="1.10.1"
-    fi
-  elif [[ "$SPARK_PATCH_VER" -le 3 ]]; then
-    supported_versions="1.6.1"
-  else
-    supported_versions="1.9.2 1.10.1"
-  fi
-
-  local test_type=${1:-'default'}
-
-  if [[ -n "$ICEBERG_VERSIONS" ]]; then
-    for ver in $ICEBERG_VERSIONS; do
-      if ! echo "$supported_versions" | grep -qw "$ver"; then
-        echo "!!!! Error: Iceberg version $ver is not supported on Spark $SPARK_VER (supported: $supported_versions)"
-        return 1
-      fi
-    done
-    echo "Using user-specified ICEBERG_VERSIONS=$ICEBERG_VERSIONS"
-  else
-    # Default: test one representative version per Spark patch range
-    if [[ "$ICEBERG_SPARK_VER" == "4.1" ]]; then
-      ICEBERG_VERSIONS="1.11.0"
-    elif [[ "$ICEBERG_SPARK_VER" == "4.0" ]]; then
-      ICEBERG_VERSIONS="1.10.1"
-    elif [[ "$SPARK_PATCH_VER" -le 3 ]]; then
-      ICEBERG_VERSIONS="1.6.1"
-    elif [[ "$SPARK_PATCH_VER" -le 6 ]]; then
-      ICEBERG_VERSIONS="1.9.2"
-    else
-      ICEBERG_VERSIONS="1.10.1"
-    fi
-  fi
-  for ICEBERG_VERSION in $ICEBERG_VERSIONS; do
+  for ICEBERG_VERSION in $iceberg_versions; do
     echo "Running Iceberg tests for Iceberg version $ICEBERG_VERSION"
     if [[ "$test_type" == "default" ]]; then
       echo "!!! Running iceberg tests"
@@ -505,7 +527,7 @@ run_iceberg_tests() {
         PYSP_TEST_spark_sql_catalog_spark__catalog="org.apache.iceberg.spark.SparkSessionCatalog" \
         PYSP_TEST_spark_sql_catalog_spark__catalog_type="hadoop" \
         PYSP_TEST_spark_sql_catalog_spark__catalog_warehouse="/tmp/spark-warehouse-$RANDOM" \
-        ./run_pyspark_from_build.sh -m iceberg --iceberg
+        TEST_TAGS="$iceberg_test_tags" ./run_pyspark_from_build.sh --iceberg
     elif [[ "$test_type" == "rest" ]]; then
       echo "!!! Running iceberg tests with rest catalog"
       ICEBERG_REST_JARS="org.apache.iceberg:iceberg-spark-runtime-${ICEBERG_SPARK_VER}_${SCALA_BINARY_VER}:${ICEBERG_VERSION},\
@@ -531,7 +553,7 @@ org.apache.iceberg:iceberg-aws-bundle:${ICEBERG_VERSION}"
             "PYSP_TEST_spark_sql_catalog_spark__catalog_oauth2-server-uri=${ICEBERG_REST_OAUTH2_SERVER_URI:-http://localhost:8080/realms/iceberg/protocol/openid-connect/token}" \
             PYSP_TEST_spark_sql_catalog_spark__catalog_scope="${ICEBERG_REST_SCOPE:-lakekeeper}" \
             PYSP_TEST_spark_sql_catalog_spark__catalog_warehouse="${ICEBERG_REST_WAREHOUSE:-demo}" \
-            ./run_pyspark_from_build.sh -m iceberg --iceberg
+            TEST_TAGS="$iceberg_test_tags" ./run_pyspark_from_build.sh --iceberg
     elif [[ "$test_type" == "s3tables" ]]; then
       echo "!!! Running iceberg tests with s3tables"
       # AWS deps versions for Spark 3.5.x and 4.0.x
@@ -584,7 +606,7 @@ com.amazonaws:aws-java-sdk-bundle:${AWS_SDK_BUNDLE_VERSION}"
         PYSP_TEST_spark_sql_catalog_spark__catalog="org.apache.iceberg.spark.SparkSessionCatalog" \
         "PYSP_TEST_spark_sql_catalog_spark__catalog_catalog-impl=software.amazon.s3tables.iceberg.S3TablesCatalog" \
         PYSP_TEST_spark_sql_catalog_spark__catalog_warehouse="${S3TABLES_BUCKET_ARN}" \
-        ./run_pyspark_from_build.sh -s -m iceberg --iceberg
+        TEST_TAGS="$iceberg_test_tags" ./run_pyspark_from_build.sh -s --iceberg
     fi
   done
 }
@@ -686,20 +708,22 @@ if [[ $TEST_MODE == "DEFAULT" ]]; then
     ./run_pyspark_from_build.sh -k cache_test
 fi
 
-# Delta Lake tests. DEFAULT runs one end-to-end managed-table smoke for supported Spark/Scala
-# combinations in jobs that use this script. Blossom premerge runs the same smoke from
-# spark-premerge-build.sh. DELTA_LAKE_UC_ONLY is the strict full-suite entry point that external
-# jobs must schedule separately for Spark 4.0.1 and 4.1.1.
+# Delta Lake tests. DEFAULT runs a Delta 4.2 managed-table smoke and the complete Delta 4.3 REST
+# safety suite for supported Spark/Scala combinations. Blossom premerge follows the same split.
+# DELTA_LAKE_UC_ONLY remains the strict entry point for both complete catalog suites.
 if [[ "$TEST_MODE" == "DEFAULT" || "$TEST_MODE" == "DELTA_LAKE_ONLY" ]]; then
   run_delta_lake_tests
 fi
 if [[ "$TEST_MODE" == "DEFAULT" ]]; then
-  run_delta_lake_uc_tests "catalog_managed_ctas_insert_and_deletion_vector_scan"
+  run_delta_lake_uc_tests 4.2.0 delta_lake_catalog_managed_test.py \
+    "catalog_managed_ctas_insert_and_deletion_vector_scan"
+  run_delta_lake_uc_tests 4.3.0 delta_lake_catalog_rest_test.py
 fi
 
 # Delta Lake catalog-managed table tests
 if [[ "$TEST_MODE" == "DELTA_LAKE_UC_ONLY" ]]; then
-  run_delta_lake_uc_tests
+  run_delta_lake_uc_tests 4.2.0 delta_lake_catalog_managed_test.py
+  run_delta_lake_uc_tests 4.3.0 delta_lake_catalog_rest_test.py
 fi
 
 # Iceberg tests
@@ -733,7 +757,16 @@ if [[ "$TEST_MODE" == "DEFAULT" || "$TEST_MODE" == "MULTITHREADED_SHUFFLE" ]]; t
 fi
 
 if [[ "$TEST_MODE" == "UCX_SHUFFLE" ]]; then
-  invoke_shuffle_integration_test UCX ./run_pyspark_from_build.sh
+  # Disable pytest parallelism and use two single-core executors in the same
+  # application to exercise UCX remote fetches;
+  # parallel applications with one executor each cannot provide this coverage.
+  TEST_PARALLEL=0 \
+  PYSP_TEST_spark_cores_max=2 \
+  PYSP_TEST_spark_executor_cores=1 \
+    invoke_shuffle_integration_test UCX ./run_pyspark_from_build.sh
+
+  # UCX fetches from a peer executor (RapidsShuffleIterator INFO); 0 means none was logged
+  echo "UCX remote fetches: $(cat "$SPARK_HOME"/work/app-*/*/std* | grep -c 'triggered, for')"
 fi
 
 # cudf_udf test: this mostly depends on cudf-py, so we run it into an independent CI

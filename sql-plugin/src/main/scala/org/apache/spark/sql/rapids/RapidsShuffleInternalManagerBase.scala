@@ -31,9 +31,8 @@ import com.nvidia.spark.rapids.NvtxRegistry
 import com.nvidia.spark.rapids.RapidsConf
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
-import com.nvidia.spark.rapids.format.TableMeta
 import com.nvidia.spark.rapids.jni.kudo.OpenByteArrayOutputStream
-import com.nvidia.spark.rapids.shuffle.{RapidsShuffleRequestHandler, RapidsShuffleServer, RapidsShuffleTransport}
+import com.nvidia.spark.rapids.shuffle.{CatalogShuffleRequestHandler, RapidsShuffleServer, RapidsShuffleTransport}
 import com.nvidia.spark.rapids.spill.SpillablePartialFileHandle
 
 import org.apache.spark.{InterruptibleIterator, MapOutputTracker, ShuffleDependency, SparkConf, SparkEnv, TaskContext}
@@ -1771,6 +1770,11 @@ class RapidsCachingWriter[K, V](
       }
       metricsReporter.incBytesWritten(bytesWritten)
       metricsReporter.incRecordsWritten(recordsWritten)
+      if (catalog.mapIdsCanRepeat) {
+        catalog.commitMapOutput(handle.shuffleId, mapId, writtenBufferIds, sizes)
+        // the catalog owns these buffers now, and a later stop(false) must not remove them
+        writtenBufferIds.clear()
+      }
     }
   }
 
@@ -1942,17 +1946,7 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
   private[this] lazy val server: Option[RapidsShuffleServer] = {
     if (rapidsConf.isGPUShuffle && !isDriver) {
       val catalog = getCatalogOrThrow
-      val requestHandler = new RapidsShuffleRequestHandler() {
-        override def getShuffleHandle(tableId: Int): RapidsShuffleHandle = {
-          catalog.getShuffleBufferHandle(tableId)
-        }
-
-        override def getShuffleBufferMetas(sbbId: ShuffleBlockBatchId): Seq[TableMeta] = {
-          (sbbId.startReduceId to sbbId.endReduceId).flatMap(rid => {
-            catalog.blockIdToMetas(ShuffleBlockId(sbbId.shuffleId, sbbId.mapId, rid))
-          })
-        }
-      }
+      val requestHandler = new CatalogShuffleRequestHandler(catalog)
       val server = transport.get.makeServer(requestHandler)
       server.start()
       Some(server)
@@ -2050,7 +2044,7 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
               // cast the handle with specific generic types due to type-erasure
               gpuDep.asInstanceOf[GpuShuffleDependency[K, V, V]])
             // we need to track this mapId so we can clean it up later on unregisterShuffle
-            trackMapTaskForCleanup(handle.shuffleId, context.taskAttemptId())
+            trackMapTaskForCleanup(handle.shuffleId, mapId)
             // in most scenarios, the pools have already started, except for local mode
             // here we try to start them if we see they haven't
             RapidsShuffleInternalManagerBase.startThreadPoolIfNeeded(
@@ -2228,8 +2222,7 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
     wrapped.stop()
     if (!stopped) {
       stopped = true
-      server.foreach(_.close())
-      transport.foreach(_.close())
+      RapidsShuffleTransport.closeServerThenTransport(server, transport)
       if (rapidsConf.isMultiThreadedShuffleManagerMode) {
         RapidsShuffleInternalManagerBase.stopThreadPool()
       }

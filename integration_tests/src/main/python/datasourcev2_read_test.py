@@ -106,6 +106,35 @@ def test_arrow_source_pandas_udf():
         conf=arrow_udf_conf)
 
 
+@allow_non_gpu('ArrowEvalPythonExec', 'BatchScanExec', 'PythonUDF')
+@pytest.mark.skipif(not is_spark_420_or_later(),
+                    reason='CPU ArrowEvalPythonExec supports columnar output from Spark 4.2')
+def test_arrow_source_cpu_pandas_udf():
+    pytest.importorskip('pandas')
+    pytest.importorskip('pyarrow')
+
+    def add_one(a):
+        return a + 1
+
+    my_udf = f.pandas_udf(add_one, returnType=IntegerType())
+
+    def do_it(spark):
+        return _arrow_int_df(spark).select(
+            f.col('col1'), my_udf(f.col('col1')).alias('u')).orderBy('col1')
+
+    # PythonArrowOutput closes its allocator when the upstream iterator discovers end-of-stream.
+    # HostColumnarToGpu must copy this CPU exec's Arrow output into plugin-owned host buffers
+    # instead of retaining the Python allocator's buffers while looking for another input batch.
+    conf = copy_and_update(arrow_udf_conf, {
+        'spark.rapids.sql.exec.ArrowEvalPythonExec': 'false',
+    })
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        exist_classes='ArrowEvalPythonExec,HostColumnarToGpu',
+        non_exist_classes='GpuArrowEvalPythonExec',
+        conf=conf)
+
+
 @allow_non_gpu('BatchScanExec', 'PythonUDF')
 @pytest.mark.skipif(not is_spark_420_or_later(),
                     reason='Arrow-optimized regular Python UDFs use ArrowEvalPythonExec from Spark 4.2')

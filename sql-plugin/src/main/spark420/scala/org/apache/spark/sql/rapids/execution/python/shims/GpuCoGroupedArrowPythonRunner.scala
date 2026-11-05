@@ -14,8 +14,7 @@
  * limitations under the License.
  */
 /*** spark-rapids-shim-json-lines
-{"spark": "420"}
-{"spark": "500"}
+{"spark":["420"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.execution.python.shims
 
@@ -44,6 +43,8 @@ class GpuCoGroupedArrowPythonRunner(
     conf: Map[String, String],
     batchSize: Int,
     override val pythonOutSchema: StructType,
+    udfLogMaxEntries: Int = 0,
+    udfLogLevel: String = "WARNING",
     jobArtifactUUID: Option[String] = None)
   extends GpuBasePythonRunner[(ColumnarBatch, ColumnarBatch)](funcs.map(_._1), evalType,
     argOffsets, jobArtifactUUID) with GpuArrowPythonOutput with GpuPythonRunnerCommon {
@@ -59,7 +60,8 @@ class GpuCoGroupedArrowPythonRunner(
     new Writer(env, worker, inputIterator, partitionIndex, context) {
 
       protected override def writeCommand(dataOut: DataOutputStream): Unit = {
-        WritePythonUDFUtils.writeUDFs(dataOut, funcs, argOffsets)
+        WritePythonUDFUtils.writeUDFs(dataOut, funcs, argOffsets,
+          udfLogMaxEntries = udfLogMaxEntries, udfLogLevel = udfLogLevel)
       }
 
       override def writeNextInputToStream(dataOut: DataOutputStream): Boolean = {

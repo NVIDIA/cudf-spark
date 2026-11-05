@@ -72,36 +72,37 @@ object AnsiUtil {
     }
 
     // check max value
-    withResource(Scalar.fromLong(1000000L)) { microsPerSecondS =>
-      withResource(doubleInput.mul(microsPerSecondS)) { mul =>
-        //      if (Math.floor(x) <= Long.Max && Math.ceil(x) >= Long.min) {
-        //        x.toLong
-        //      else
-        //        SparkArithmeticException
-        withResource(Scalar.fromLong(Long.MaxValue)) { maxLongS =>
-          withResource(mul.floor()) { floorCv =>
-            withResource(floorCv.greaterThan(maxLongS)) { invalid =>
-              if (BoolUtils.isAnyValidTrue(invalid)) {
-                throwOverflowException
-              }
+    val mul = withResource(Scalar.fromLong(1000000L)) { microsPerSecondS =>
+      doubleInput.mul(microsPerSecondS)
+    }
+    withResource(mul) { _ =>
+      //      if (Math.floor(x) <= Long.Max && Math.ceil(x) >= Long.min) {
+      //        x.toLong
+      //      else
+      //        SparkArithmeticException
+      withResource(Scalar.fromLong(Long.MaxValue)) { maxLongS =>
+        withResource(mul.floor()) { floorCv =>
+          withResource(floorCv.greaterThan(maxLongS)) { invalid =>
+            if (BoolUtils.isAnyValidTrue(invalid)) {
+              throwOverflowException
             }
           }
         }
+      }
 
-        // check min value
-        withResource(Scalar.fromLong(Long.MinValue)) { minLongS =>
-          withResource(mul.ceil()) { ceil =>
-            withResource(ceil.lessThan(minLongS)) { invalid =>
-              if (BoolUtils.isAnyValidTrue(invalid)) {
-                throwOverflowException
-              }
+      // check min value
+      withResource(Scalar.fromLong(Long.MinValue)) { minLongS =>
+        withResource(mul.ceil()) { ceil =>
+          withResource(ceil.lessThan(minLongS)) { invalid =>
+            if (BoolUtils.isAnyValidTrue(invalid)) {
+              throwOverflowException
             }
           }
         }
+      }
 
-        withResource(mul.castTo(DType.INT64)) { inputTimesMicrosCv =>
-            inputTimesMicrosCv.castTo(GpuColumnVector.getNonNestedRapidsType(toType))
-        }
+      withResource(mul.castTo(DType.INT64)) { inputTimesMicrosCv =>
+        inputTimesMicrosCv.castTo(GpuColumnVector.getNonNestedRapidsType(toType))
       }
     }
   }

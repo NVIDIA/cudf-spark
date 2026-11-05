@@ -119,11 +119,12 @@ object GpuOrcFileFormat extends Logging {
     val hasDates = types.exists { dataType =>
       TrampolineUtil.dataTypeExistsRecursively(dataType, _.isInstanceOf[DateType])
     }
-    if (hasDates) {
+    if (hasDates && !meta.conf.isOrcDateWriteEnabled) {
       // The cuDF writer does not emit ORC calendar metadata. Without it, readers choose the
       // calendar from orc.proleptic.gregorian.default and can reinterpret pre-1582 dates.
       meta.willNotWorkOnGpu("Writing ORC dates is not supported on GPU because the cuDF " +
-        "writer does not emit calendar metadata")
+        "writer does not emit calendar metadata. To allow writes when every DATE value is " +
+        "on or after 1582-10-15, set " + RapidsConf.ENABLE_ORC_DATE_WRITE.key + " to true")
     }
 
     // cuDF resolves writer timezones under /usr/share/zoneinfo. Java custom offsets and some

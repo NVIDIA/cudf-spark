@@ -116,15 +116,17 @@ object SamplingUtils {
                 GpuColumnVector.from(selected, GpuColumnVector.extractTypes(cb)),
                 SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
             } else {
-              val concat = withResource(runningCb) { spb =>
+              // The table retains the columns before the previous batch and spillable close.
+              val table = withResource(runningCb) { spb =>
                 runningCb = null
                 withResource(spb.getColumnarBatch()) { cb =>
-                  withResource(GpuColumnVector.from(cb)) { table =>
-                    Table.concatenate(selected, table)
-                  }
+                  GpuColumnVector.from(cb)
                 }
               }
-              withResource(concat) { concat =>
+              val concat = withResource(table) { _ =>
+                Table.concatenate(selected, table)
+              }
+              withResource(concat) { _ =>
                 runningCb = SpillableColumnarBatch(
                   GpuColumnVector.from(concat, GpuColumnVector.extractTypes(cb)),
                   SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
@@ -209,24 +211,25 @@ object SamplingUtils {
                 GpuColumnVector.from(selected, GpuColumnVector.extractTypes(cb)),
                 SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
             } else {
-              withResource(runningCb) { spb =>
+              // The selected table owns its columns independently of the previous sample.
+              val filtered = withResource(runningCb) { spb =>
                 runningCb = null
                 withResource(spb.getColumnarBatch()) { cb =>
-                  val filtered = if (rowsToDrop > 0) {
+                  if (rowsToDrop > 0) {
                     selectWithoutReplacementFrom(cb.numRows() - rowsToDrop, rand, cb)
                   } else {
                     GpuColumnVector.from(cb)
                   }
-                  val concat = withResource(filtered) { filtered =>
-                    Table.concatenate(selected, filtered)
-                  }
-                  withResource(concat) { concat =>
-                    rowsSaved = concat.getRowCount
-                    runningCb = SpillableColumnarBatch(
-                      GpuColumnVector.from(concat, GpuColumnVector.extractTypes(cb)),
-                      SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
-                  }
                 }
+              }
+              val concat = withResource(filtered) { _ =>
+                Table.concatenate(selected, filtered)
+              }
+              withResource(concat) { _ =>
+                rowsSaved = concat.getRowCount
+                runningCb = SpillableColumnarBatch(
+                  GpuColumnVector.from(concat, GpuColumnVector.extractTypes(cb)),
+                  SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
               }
             }
           }
