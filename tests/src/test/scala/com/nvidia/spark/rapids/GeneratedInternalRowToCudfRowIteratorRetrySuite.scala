@@ -167,6 +167,29 @@ class GeneratedInternalRowToCudfRowIteratorRetrySuite
     assertMatchesBuildBatch(batches)
   }
 
+  /**
+   * Inject a GPU split into the first conversion of rows to a table. The first device-store
+   * track is the input batch that ColumnarToRowIterator makes spillable, and the second is the
+   * rows reaching the GPU, so the next GPU allocation is in the conversion. Returns whether the
+   * injection happened.
+   */
+  private def splitOnConversion(): () => Boolean = {
+    var tracks = 0
+    doAnswer(new Answer[Boolean]() {
+      override def answer(invocation: InvocationOnMock): Boolean = {
+        invocation.callRealMethod()
+        tracks += 1
+        if (tracks == 2) {
+          RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
+            RmmSpark.OomInjectionType.GPU.ordinal, 0)
+        }
+        true
+      }
+    }).when(SpillFramework.stores.deviceStore)
+      .track(any())
+    () => tracks >= 2
+  }
+
   /** Checks that the batches, at least two after a split, together match buildBatch. */
   private def assertMatchesBuildBatch(batches: ArrayBuffer[ColumnarBatch]): Unit = {
     assert(batches.length >= 2, s"Expected at least 2 batches after a split, got ${batches.length}")
@@ -236,20 +259,7 @@ class GeneratedInternalRowToCudfRowIteratorRetrySuite
   test("a split and retry when converting to a table is handled") {
     val batch = buildBatch()
     val batchIter = Seq(batch).iterator
-    // Split only the first conversion. The halves are tracked too and must convert normally.
-    var injected = false
-    doAnswer(new Answer[Boolean]() {
-      override def answer(invocation: InvocationOnMock): Boolean = {
-        invocation.callRealMethod()
-        if (!injected) {
-          injected = true
-          RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
-            RmmSpark.OomInjectionType.GPU.ordinal, 0)
-        }
-        true
-      }
-    }).when(SpillFramework.stores.deviceStore)
-      .track(any())
+    val injected = splitOnConversion()
 
     withResource(new ColumnarToRowIterator(batchIter, NoopMetric, NoopMetric, NoopMetric,
       NoopMetric)) { ctriter =>
@@ -258,7 +268,7 @@ class GeneratedInternalRowToCudfRowIteratorRetrySuite
         ctriter, schema, TargetSize(Int.MaxValue),
         NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric)
       assertSplitOutput(myIter)
-      assert(injected)
+      assert(injected())
       assertResult(0)(SpillFramework.stores.deviceStore.spill(1))
     }
   }
@@ -278,6 +288,42 @@ class GeneratedInternalRowToCudfRowIteratorRetrySuite
       assertThrows[GpuSplitAndRetryOOM] {
         myIter.next()
       }
+      assertResult(0)(SpillFramework.stores.deviceStore.spill(1))
+    }
+  }
+
+  test("a single batch required converts every row into one batch") {
+    val batchIter = Seq(buildBatch()).iterator
+    withResource(new ColumnarToRowIterator(batchIter, NoopMetric, NoopMetric, NoopMetric,
+      NoopMetric)) { ctriter =>
+      val schema = Array(AttributeReference("longcol", LongType)().toAttribute)
+      val myIter = GeneratedInternalRowToCudfRowIterator(
+        ctriter, schema, RequireSingleBatch,
+        NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric)
+      withResource(myIter.next()) { batch =>
+        withResource(buildBatch()) { expected =>
+          TestUtils.compareBatches(expected, batch)
+        }
+      }
+      assert(!myIter.hasNext)
+    }
+  }
+
+  test("a split and retry when converting to a table with a single batch required throws") {
+    val batch = buildBatch()
+    val batchIter = Seq(batch).iterator
+    val injected = splitOnConversion()
+
+    withResource(new ColumnarToRowIterator(batchIter, NoopMetric, NoopMetric, NoopMetric,
+      NoopMetric)) { ctriter =>
+      val schema = Array(AttributeReference("longcol", LongType)().toAttribute)
+      val myIter = GeneratedInternalRowToCudfRowIterator(
+        ctriter, schema, RequireSingleBatch,
+        NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric)
+      assertThrows[GpuSplitAndRetryOOM] {
+        myIter.next()
+      }
+      assert(injected())
       assertResult(0)(SpillFramework.stores.deviceStore.spill(1))
     }
   }

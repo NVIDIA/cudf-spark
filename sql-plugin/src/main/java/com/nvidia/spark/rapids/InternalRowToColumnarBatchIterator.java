@@ -95,8 +95,11 @@ public abstract class InternalRowToColumnarBatchIterator implements Iterator<Col
   }
 
   private int calcNumRowsEstimate(long targetBytes) {
-    return Math.max(1,
-        Math.min(Integer.MAX_VALUE - 1, (int) (targetBytes / sizePerRowEstimate)));
+    // A column of rows has int32 offsets, so it holds at most Integer.MAX_VALUE bytes. Bounding
+    // the target first also keeps a Long.MaxValue target (RequireSingleBatch) from overflowing
+    // the int cast.
+    long rows = Math.min(targetBytes, Integer.MAX_VALUE) / sizePerRowEstimate;
+    return (int) Math.max(1, Math.min(Integer.MAX_VALUE - 1, rows));
   }
 
   private long calcDataLengthEstimate(int numRows) {
