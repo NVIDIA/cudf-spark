@@ -544,7 +544,9 @@ object GpuBroadcastNestedLoopJoinExecBase {
    *  - Inner and Cross, building either side, with no columns on exactly one side.
    *  - LeftSemi and LeftAnti, building right, with no columns on either side or on both.
    *  - ExistenceJoin, building right, with no columns on the stream only.
-   * Every other input fails, naming the join type, build side and column counts.
+   * Every other input fails, naming the join type, build side and column counts. It emits no
+   * zero-row batch, as CrossJoinIterator does: a merge reduction right above the join, as
+   * Databricks plans for count(*), reads one as a null result.
    */
   private def degenerateJoinIterator(
       joinType: JoinType,
@@ -608,8 +610,6 @@ object GpuBroadcastNestedLoopJoinExecBase {
         } else {
           GpuNot(GpuEqualNullSafe(matched, GpuLiteral(true, BooleanType)))
         }
-        // A merge reduction right above the join, as Databricks plans for count(*), reads a
-        // zero-row batch as a null result, so drop one, as CrossJoinIterator does.
         stream.flatMap { scb =>
           val cb = filterAndClose(scb, keep)
           if (cb.numRows() > 0) Some(cb) else withResource(cb)(_ => None)
@@ -620,7 +620,7 @@ object GpuBroadcastNestedLoopJoinExecBase {
         val keepStream = anyMatch == (joinType == LeftSemi)
         stream.flatMap { scb =>
           withResource(scb) { _ =>
-            if (keepStream) {
+            if (keepStream && scb.numRows > 0) {
               Iterator.single(new ColumnarBatch(Array.empty, scb.numRows))
             } else {
               Iterator.empty
@@ -630,13 +630,17 @@ object GpuBroadcastNestedLoopJoinExecBase {
       case (ExistenceJoin(_), true) =>
         // Every stream row exists when some build row meets the condition.
         val exists = withResource(filterAndClose(builtBatch, boundCondition))(_.numRows > 0)
-        stream.map { scb =>
-          withRetryNoSplit(scb) { _ =>
-            val existsCol: ColumnVector = withResource(Scalar.fromBool(exists)) { existsScalar =>
-              GpuColumnVector.from(cudf.ColumnVector.fromScalar(existsScalar, scb.numRows),
-                BooleanType)
-            }
-            new ColumnarBatch(Array(existsCol), scb.numRows)
+        stream.flatMap { scb =>
+          if (scb.numRows == 0) {
+            withResource(scb)(_ => None)
+          } else {
+            Some(withRetryNoSplit(scb) { _ =>
+              val existsCol: ColumnVector = withResource(Scalar.fromBool(exists)) { scalar =>
+                GpuColumnVector.from(cudf.ColumnVector.fromScalar(scalar, scb.numRows),
+                  BooleanType)
+              }
+              new ColumnarBatch(Array(existsCol), scb.numRows)
+            })
           }
         }
       case _ => throw new IllegalStateException(s"Unsupported join type $joinType")
