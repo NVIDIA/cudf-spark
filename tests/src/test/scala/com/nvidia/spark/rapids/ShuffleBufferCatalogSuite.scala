@@ -244,8 +244,8 @@ class ShuffleBufferCatalogSuite
     val field = classOf[ShuffleBufferCatalog].getDeclaredField("activeShuffles")
     field.setAccessible(true)
     val shuffles = field.get(catalog).asInstanceOf[
-      java.util.Map[Any, java.util.Map[ShuffleBlockId, AnyRef]]]
-    shuffles.get(block.shuffleId).get(block)
+      java.util.Map[Any, ShuffleBufferCatalog.ShuffleRegistration]]
+    shuffles.get(block.shuffleId).blocks.get(block)
   }
 
   test("a removal that empties a block waits for an append to that block in flight") {
