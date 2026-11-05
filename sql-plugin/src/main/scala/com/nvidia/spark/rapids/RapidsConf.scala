@@ -458,6 +458,14 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val pageablePoolPretouchThreads: Int = get(PAGEABLE_POOL_PRETOUCH_THREADS)
 
+  lazy val pageablePoolNumaBind: Boolean = get(PAGEABLE_POOL_NUMA_BIND)
+
+  lazy val pageablePoolThpDeny: Boolean = get(PAGEABLE_POOL_THP_DENY)
+
+  lazy val pageablePoolAllocationStrategy: String = get(PAGEABLE_POOL_ALLOCATION_STRATEGY)
+
+  lazy val pageablePoolArenaCount: Int = get(PAGEABLE_POOL_ARENA_COUNT)
+
   lazy val pinnedPoolCuioDefault: Boolean = get(PINNED_POOL_SET_CUIO_DEFAULT)
 
   lazy val pinnedPoolParallelInitThreads: String = get(PINNED_POOL_PARALLEL_INIT_THREADS)
