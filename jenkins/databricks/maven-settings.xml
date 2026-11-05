@@ -15,7 +15,13 @@
   limitations under the License.
 -->
 <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">
-  <!-- Assembly loads dependency POMs through session-level repositories, not the project list. -->
+  <!--
+    Databricks builds need public repositories, unlike the internal Artifactory settings in
+    ../settings.xml. POM repository ordering alone is insufficient: Assembly loads dependency
+    POMs through Maven's session-level repositories. This active profile applies Google-first
+    ordering to those requests too. Use repository entries rather than a Central mirror so
+    Central remains available as a fallback.
+  -->
   <profiles>
     <profile>
       <id>public-repositories</id>
