@@ -167,9 +167,10 @@ class GpuBroadcastNestedLoopJoinRetrySuite extends RmmSparkRetrySuiteBase {
   }
 
   // Joins a rows-only side with the other side, building right, after forcing one GpuRetryOOM
-  // on the next GPU allocation. Before the iterator is built, that allocation filters the build.
-  // After it, the allocation handles the first stream batch. Returns the first column of every
-  // output batch, and checks that the join retried and freed what it allocated.
+  // on the next GPU allocation. Before the iterator is built, that allocation evaluates the
+  // condition over the build. After it, the allocation handles the first stream batch. Returns
+  // the first column of every output batch, and checks that the join retried and freed what it
+  // allocated.
   private def joinWithRetryOOM(
       joinType: JoinType,
       build: => ColumnarBatch,
@@ -210,7 +211,7 @@ class GpuBroadcastNestedLoopJoinRetrySuite extends RmmSparkRetrySuiteBase {
     assertResult(Seq(6, 6, 9, 9))(out.map(_.asInstanceOf[Int]).sorted)
   }
 
-  test("existence join with a rows-only stream retries its build filter on GpuRetryOOM") {
+  test("existence join with a rows-only stream retries its build condition on GpuRetryOOM") {
     val out = joinWithRetryOOM(ExistenceJoin(existsAttr), intBatch(null, 6, 0, 9),
       new ColumnarBatch(Array.empty, 2), streamHasColumns = false, injectBeforeIterator = true)
     assertResult(Seq(true, true))(out)

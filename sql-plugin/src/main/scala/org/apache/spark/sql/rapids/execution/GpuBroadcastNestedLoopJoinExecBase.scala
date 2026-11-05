@@ -572,8 +572,8 @@ object GpuBroadcastNestedLoopJoinExecBase {
     (joinType, streamAttrs.isEmpty) match {
       case _ if noStreamBatch =>
         // Spark tests the condition only against a stream row, so a stream with no batch leaves
-        // the build unfiltered. A zero-row batch is still a batch, so a stream of them filters
-        // the build once.
+        // the condition unevaluated. A zero-row batch is still a batch, so a stream of them
+        // evaluates the condition over the build once.
         withResource(builtBatch)(_ => Iterator.empty)
       case (_: InnerLike, false) =>
         // Each stream row that meets the condition joins every build row. Spark tests the

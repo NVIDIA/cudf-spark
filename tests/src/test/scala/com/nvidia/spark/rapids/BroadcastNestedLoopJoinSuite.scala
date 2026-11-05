@@ -344,8 +344,9 @@ class BroadcastNestedLoopJoinSuite extends SparkQueryCompareTestSuite {
       }
     }
 
-    test(s"$name $buildSide nested loop join filters the build once for a rows-only stream") {
-      // A zero-row batch is still a batch, so a stream of them filters the build once too.
+    test(s"$name $buildSide nested loop join evaluates the condition over the build once " +
+        "for a rows-only stream") {
+      // A zero-row batch is still a batch, so a stream of them evaluates the condition once too.
       val build = Seq[Integer](null, 6, 0, 9)
       for (streamRows <- Seq(Seq(5, 0, 2), Seq(0, 0))) {
         withClue(s"stream batches of $streamRows rows: ") {
