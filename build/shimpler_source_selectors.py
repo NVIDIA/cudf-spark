@@ -14,15 +14,15 @@
 
 """Parse Spark source selectors and check proposed inheritance against exact membership.
 
-This module is compatible with Shimplify's Jython 2.7 runtime. It does not
-change source generation; callers must compare inherited and legacy selections
-before making inherited selectors authoritative.
+This module is compatible with the shim-source build task's Jython 2.7 runtime. Source changes
+should compare inherited and legacy selections before converting annotations.
 """
 
 from collections import namedtuple
 import json
+import re
 
-from shimpler_source_graph import validate_source_graph
+from shimpler_source_graph import source_lineage, validate_source_graph
 
 
 try:
@@ -31,49 +31,52 @@ except NameError:
     string_types = (str,)
 
 
-SourceSelector = namedtuple('SourceSelector', 'kind targets other_components')
+SourceSelector = namedtuple('SourceSelector', 'kind targets')
 
 
-def parse_selector_line(line, graph, allow_unmapped_exact=False):
-    """Parse one shim JSON line, retaining any non-Spark component selectors.
+def spark_minor(target):
+    """Return the major/minor encoded by the repository's Spark buildver."""
+    match = re.match(r'^([0-9])([0-9])[0-9](?:[a-z][a-z0-9]*)?$', target)
+    if match is None:
+        raise ValueError('sameMinor requires a three-digit Spark build target: %s' % target)
+    return match.group(1), match.group(2)
+
+
+def parse_selector_line(line, graph, allowed_external_targets=()):
+    """Parse one shim JSON line, allowing only listed external exact targets.
 
     Public POMs do not define private/vendor targets already present in exact
-    annotations. A repository-wide public query may preserve those legacy
-    strings, but new inheritance selectors must name a known graph target.
+    annotations. A consumer may explicitly allow those legacy strings, but
+    inheritance selectors must name a known graph target.
     """
     entry = json.loads(line)
     if not isinstance(entry, dict) or 'spark' not in entry:
         raise ValueError('Shim selector must contain a spark field')
 
     spark = entry['spark']
-    if isinstance(spark, string_types):
-        kind = 'exact'
-        targets = (spark,)
-    elif isinstance(spark, dict):
-        if len(spark) != 1 or next(iter(spark)) not in ('introduced', 'only'):
-            raise ValueError('Spark selector must have exactly one of introduced or only')
-        kind = next(iter(spark))
-        value = spark[kind]
-        if isinstance(value, string_types):
-            targets = (value,)
-        elif kind == 'introduced' and isinstance(value, list):
-            targets = tuple(value)
-        else:
-            raise ValueError('%s selector must name a target%s' %
-                             (kind, ' or nonempty target list' if kind == 'introduced' else ''))
-    else:
-        raise ValueError('Spark selector must be a target or selector object')
+    carry_forward = entry.get('carryForward')
+    if not isinstance(spark, list) or carry_forward not in ('none', 'sameMinor', 'all'):
+        raise ValueError('Spark selector requires a target list and '
+                         'carryForward value none, sameMinor, or all')
+    if 'includeDescendantShims' in entry:
+        raise ValueError('Use carryForward instead of includeDescendantShims')
+    unknown_keys = set(entry) - {'spark', 'carryForward'}
+    if unknown_keys:
+        raise ValueError('Unknown shim selector fields: %s' % ', '.join(sorted(unknown_keys)))
+    kind = {'none': 'exact', 'sameMinor': 'minor',
+            'all': 'descendants'}[carry_forward]
+    targets = tuple(spark)
 
     if not targets or any(not isinstance(target, string_types) or not target for target in targets):
         raise ValueError('Spark selector targets must be nonempty strings')
     if len(set(targets)) != len(targets):
         raise ValueError('Duplicate Spark selector target')
     for target in targets:
-        if target not in graph and not (kind == 'exact' and allow_unmapped_exact):
+        if target not in graph and not (kind == 'exact' and
+                                        target in allowed_external_targets):
             raise ValueError('Unknown Spark selector target %s' % target)
 
-    other_components = dict((key, value) for key, value in entry.items() if key != 'spark')
-    return SourceSelector(kind, targets, other_components)
+    return SourceSelector(kind, targets)
 
 
 def derive_introductions(graph, exact_targets):
@@ -102,6 +105,21 @@ def inherited_membership(graph, introductions):
                 break
             current = graph[current]
     return membership
+
+
+def selector_membership(graph, selector):
+    """Expand a selector to its active build targets."""
+    if selector.kind == 'exact':
+        return set(selector.targets)
+    descendants = inherited_membership(graph, selector.targets)
+    if selector.kind == 'descendants':
+        return descendants
+    if selector.kind == 'minor':
+        return set(target for target in descendants
+                   if any(root in source_lineage(graph, target) and
+                          spark_minor(root) == spark_minor(target)
+                          for root in selector.targets))
+    raise ValueError('Unknown Spark selector kind %s' % selector.kind)
 
 
 def inheritance_mismatches(graph, exact_targets):
