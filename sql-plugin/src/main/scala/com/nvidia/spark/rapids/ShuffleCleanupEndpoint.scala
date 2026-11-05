@@ -35,22 +35,19 @@ import org.apache.spark.sql.rapids.GpuShuffleEnv
  *
  * @param pluginContext the plugin context for RPC communication
  * @param pollIntervalMs interval between polls to driver (in milliseconds)
+ * @param newReclaimer builds the backend's reclaimer from the plugin context and this
+ *                     endpoint's closed check
+ * @param executorService runs the polls, by default on one daemon thread on the executor's GPU
  */
 class ShuffleCleanupEndpoint(
     pluginContext: PluginContext,
-    pollIntervalMs: Long = 1000) extends Logging with AutoCloseable {
+    pollIntervalMs: Long = 1000,
+    newReclaimer: (PluginContext, () => Boolean) => CatalogReclaimer =
+      (_, _) => new CatalogReclaimer {},
+    executorService: ScheduledExecutorService = ShuffleCleanupEndpoint.newPollThread())
+  extends Logging with AutoCloseable {
 
   private val executorId: String = pluginContext.executorID()
-
-  private val executorService: ScheduledExecutorService =
-    Executors.newSingleThreadScheduledExecutor(
-      GpuDeviceManager.wrapThreadFactory(
-        new ThreadFactoryBuilder()
-          .setNameFormat("rapids-shuffle-cleanup")
-          .setDaemon(true)
-          .build(),
-        null,
-        () => RmmSpark.removeAllCurrentThreadAssociation()))
 
   private val pollTask = new Runnable {
     override def run(): Unit = {
@@ -65,6 +62,8 @@ class ShuffleCleanupEndpoint(
 
   @volatile private var shutdownHookAdded = false
   @volatile private var closed = false
+
+  private[rapids] def isShutdownHookAdded: Boolean = shutdownHookAdded
 
   /**
    * Start the periodic polling for shuffle cleanup.
@@ -260,3 +259,17 @@ class ShuffleCleanupEndpoint(
   }
 }
 
+object ShuffleCleanupEndpoint {
+  private def newPollThread(): ScheduledExecutorService =
+    Executors.newSingleThreadScheduledExecutor(
+      GpuDeviceManager.wrapThreadFactory(
+        new ThreadFactoryBuilder()
+          .setNameFormat("rapids-shuffle-cleanup")
+          .setDaemon(true)
+          .build(),
+        null,
+        () => RmmSpark.removeAllCurrentThreadAssociation()))
+}
+
+/** A backend's side of the cleanup protocol, which a `ShuffleCleanupEndpoint` runs. */
+trait CatalogReclaimer

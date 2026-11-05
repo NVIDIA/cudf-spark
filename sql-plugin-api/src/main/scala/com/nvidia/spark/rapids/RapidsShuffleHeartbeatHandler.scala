@@ -85,3 +85,83 @@ case class RapidsShuffleCleanupResponseMsg(shuffleIds: Array[Int])
  * @param stats cleanup statistics for each shuffle
  */
 case class RapidsShuffleCleanupStatsMsg(executorId: String, stats: Array[ShuffleCleanupStats])
+
+// ============================================================================
+// UCX Shuffle Reclaim RPC Messages
+// ============================================================================
+
+/** Which of four kinds of outcome one reclaim of a shuffle had on an executor. */
+sealed trait ShuffleReclaimOutcome extends Serializable
+
+object ShuffleReclaimOutcome {
+  /** The reclaim freed at least one buffer. */
+  case object REMOVED extends ShuffleReclaimOutcome
+
+  /**
+   * Map ids can repeat and a writer above the watermark registered the shuffle, so the reclaim
+   * freed nothing.
+   */
+  case object DEFERRED extends ShuffleReclaimOutcome
+
+  /** The executor held nothing of the shuffle at or below the watermark. */
+  case object ABSENT extends ShuffleReclaimOutcome
+
+  /** The reclaim threw, and the result's error names the exception. */
+  case object FAILED extends ShuffleReclaimOutcome
+}
+
+/**
+ * One shuffle the driver asks an executor to reclaim.
+ *
+ * @param shuffleId the shuffle to reclaim
+ * @param watermark the largest task attempt id whose output the reclaim may free
+ */
+case class ShuffleReclaimRequest(shuffleId: Int, watermark: Long)
+
+/**
+ * What one reclaim of a shuffle did on an executor.
+ *
+ * @param shuffleId the shuffle reclaimed
+ * @param watermark the watermark of the request this answers
+ * @param outcome what the reclaim did
+ * @param buffers how many buffers the reclaim freed, degenerate ones included
+ * @param bytes the size of the buffers the reclaim freed
+ * @param elapsedNanos how long the reclaim took
+ * @param error the exception's class and message, when the reclaim failed
+ */
+case class ShuffleReclaimResult(
+    shuffleId: Int,
+    watermark: Long,
+    outcome: ShuffleReclaimOutcome,
+    buffers: Int,
+    bytes: Long,
+    elapsedNanos: Long,
+    error: Option[String])
+
+object ShuffleReclaimResult {
+  /** A reclaim that found nothing of the shuffle to free. */
+  def absent(shuffleId: Int, watermark: Long): ShuffleReclaimResult =
+    ShuffleReclaimResult(shuffleId, watermark, ShuffleReclaimOutcome.ABSENT, 0, 0L, 0L, None)
+}
+
+/**
+ * Executor polls driver for shuffles to reclaim.
+ *
+ * @param executorId identifier for the executor
+ */
+case class RapidsShuffleReclaimPollMsg(executorId: String)
+
+/**
+ * Driver response with the reclaims released to the polling executor.
+ *
+ * @param requests the shuffles to reclaim, each with its watermark
+ */
+case class RapidsShuffleReclaimResponseMsg(requests: Array[ShuffleReclaimRequest])
+
+/**
+ * Executor reports the results of its reclaims.
+ *
+ * @param executorId identifier for the executor
+ * @param results the result of each reclaim
+ */
+case class RapidsShuffleReclaimResultMsg(executorId: String, results: Array[ShuffleReclaimResult])
