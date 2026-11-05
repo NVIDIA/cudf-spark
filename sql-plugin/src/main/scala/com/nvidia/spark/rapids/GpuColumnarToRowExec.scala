@@ -169,10 +169,11 @@ class AcceleratedColumnarToRowIterator(
           // host retries or splits only the copy, not the conversion.
           withResource(rowsCvs) { _ =>
             rowsCvs.safeMap { rowsCv =>
-              SpillableColumnarBatch(
+              closeOnExcept(
                 new ColumnarBatch(Array(GpuColumnVector.from(rowsCv.incRefCount(), rowsType)),
-                  rowsCv.getRowCount.toInt),
-                SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+                  rowsCv.getRowCount.toInt)) { rowsCb =>
+                SpillableColumnarBatch(rowsCb, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+              }
             }
           }
         }
