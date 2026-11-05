@@ -29,8 +29,9 @@ import org.scalatestplus.mockito.MockitoSugar
 
 import org.apache.spark.TaskContext
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.execution.vectorized.OnHeapColumnVector
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{IntegerType, StructField, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class GpuSemaphoreSuite extends AnyFunSuite
@@ -143,7 +144,10 @@ class GpuSemaphoreSuite extends AnyFunSuite
     var inNext = false
     // Whether each pull of a host batch happened in next() and with the semaphore released
     val pulls = ArrayBuffer[(Boolean, Boolean)]()
-    // Rows without columns, as for a count(), so that the GPU batches hold no device memory
+    val schema = StructType(Seq(StructField("i", IntegerType)))
+    val numRows = 100
+    // The producer closes its batches, not HostToGpuCoalesceIterator.
+    val produced = ArrayBuffer[ColumnarBatch]()
     val hostBatches = new Iterator[ColumnarBatch] {
       private var remaining = 3
       override def hasNext: Boolean = {
@@ -153,26 +157,34 @@ class GpuSemaphoreSuite extends AnyFunSuite
       override def next(): ColumnarBatch = {
         pulls += ((inNext, released))
         remaining -= 1
-        new ColumnarBatch(Array.empty, 1)
+        val ints = new OnHeapColumnVector(numRows, IntegerType)
+        (0 until numRows).foreach(i => ints.putInt(i, i))
+        produced += new ColumnarBatch(Array(ints), numRows)
+        produced.last
       }
     }
     TestUtils.withTaskContext(context1) {
       try {
-        val iter = new HostToGpuCoalesceIterator(hostBatches, TargetSize(1024), new StructType(),
+        // A target size below one host batch, so that each host batch is a GPU batch
+        val iter = new HostToGpuCoalesceIterator(hostBatches, TargetSize(1), schema,
           NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric,
           NoopMetric, "test", useArrowCopyOpt = false)
         // As an operator above that still uses the GPU when it asks for more
         GpuSemaphore.acquireIfNecessary(context1)
         var rows = 0
+        var gpuBatches = 0
         while (iter.hasNext) {
           inNext = true
           withResource(iter.next()) { batch =>
             inNext = false
             assert(!released, "the semaphore is not held for the GPU batch")
             rows += batch.numRows()
+            gpuBatches += 1
           }
         }
-        assertResult(3)(rows)
+        assertResult(3 * numRows)(rows)
+        // Released and acquired again for each GPU batch, with the next host batch on deck
+        assert(gpuBatches >= 2, s"$gpuBatches GPU batches")
         assert(pulls.exists(_._1) && pulls.exists(!_._1), pulls)
         assert(pulls.forall { case (pulledInNext, wasReleased) => pulledInNext == wasReleased },
           pulls)
@@ -180,6 +192,7 @@ class GpuSemaphoreSuite extends AnyFunSuite
         GpuSemaphore.releaseIfNecessary(context1)
         GpuSemaphore.releaseIfNecessary(context2)
         TaskRegistryTracker.clearRegistry()
+        produced.foreach(_.close())
       }
     }
   }
