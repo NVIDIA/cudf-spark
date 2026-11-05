@@ -29,9 +29,8 @@ import org.apache.orc.OrcFile
 import org.apache.orc.impl.RecordReaderImpl
 
 import org.apache.spark.SparkConf
-import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
-import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.SparkSession
+import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.{DataFrame, SparkSession}
 
 class OrcWriterTimezoneSuite extends SparkQueryCompareTestSuite {
   private val timezones =
