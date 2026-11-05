@@ -982,42 +982,47 @@ case class GpuFloatArrayMin(child: Expression) extends GpuArrayMin(child) {
     val base = input.getBase()
 
     withResource(base.getChildColumnView(0)) { child =>
-      withResource(child.isNan()){ childIsNan =>
+      val (allNanOrNull, trueOption) = withResource(child.isNan()) { childIsNan =>
         // if all values in each list are nans or nulls
         val allNanOrNull = {
           val childIsNanOrNull = withResource(child.isNull()) {_.or(childIsNan)}
-          withResource(childIsNanOrNull) { newChild =>
-            withResource(base.replaceListChild(newChild)) {
+          withResource(childIsNanOrNull) { _ =>
+            withResource(base.replaceListChild(childIsNanOrNull)) {
               _.listReduce(listAll)
             }
           }
         }
-        withResource(allNanOrNull){ allNanOrNull =>
+        closeOnExcept(allNanOrNull) { _ =>
           // return nan if the list contains nan, else return null
           val trueOption = {
             val anyNan = withResource(base.replaceListChild(childIsNan)) {
               _.listReduce(listAny)
             }
-            withResource(anyNan) { anyNan =>
+            withResource(anyNan) { _ =>
               withResource(getNanScalar) { nanScalar =>
+                // with-resource-lint: allow-deep-nesting -- #15997 keep ifElse inputs alive.
                 withResource(getNullScalar) { nullScalar =>
                   anyNan.ifElse(nanScalar, nullScalar)
                 }
               }
             }
           }
-          withResource(trueOption){ trueOption =>
-            // replace all nans to nulls, and then find the min value.
-            val falseOption = withResource(child.nansToNulls()) { nanToNullChild =>
-              withResource(base.replaceListChild(nanToNullChild)) { nanToNullList =>
-                nanToNullList.listReduce(SegmentedReductionAggregation.min())
-              }
+          (allNanOrNull, trueOption)
+        }
+      }
+      // The per-element NaN mask is no longer needed when building the minimum option.
+      withResource(allNanOrNull) { _ =>
+        withResource(trueOption) { _ =>
+          // replace all nans to nulls, and then find the min value.
+          val falseOption = withResource(child.nansToNulls()) { nanToNullChild =>
+            // with-resource-lint: allow-deep-nesting -- #15997 keep reduction inputs alive.
+            withResource(base.replaceListChild(nanToNullChild)) { nanToNullList =>
+              nanToNullList.listReduce(SegmentedReductionAggregation.min())
             }
-            // if a list contains values other than nan or null
-            // return `trueOption`, else return `falseOption`.
-            withResource(falseOption){ falseOption =>
-              allNanOrNull.ifElse(trueOption, falseOption)
-            }
+          }
+          // All-NaN/null lists use the NaN/null option; other lists use the minimum.
+          withResource(falseOption) { _ =>
+            allNanOrNull.ifElse(trueOption, falseOption)
           }
         }
       }
@@ -1346,6 +1351,7 @@ case class GpuArraysZip(children: Seq[Expression]) extends GpuExpression with Sh
         val proto = padded.head
         withResource(proto.getValid) { valid =>
           withResource(proto.getOffsets) { offsets =>
+            // with-resource-lint: allow-deep-nesting -- #15997 keep views live for copying.
             withResource(new ColumnView(DType.LIST, proto.getRowCount,
               java.util.Optional.of[java.lang.Long](proto.getNullCount),
               valid, offsets, Array(structView))) { retView =>
@@ -1783,26 +1789,28 @@ case class GpuArrayRemove(left: Expression, right: Expression) extends GpuBinary
 
   private def constructBooleanMask(lhs: ColumnView, rhs: ColumnView,
                                    offSets: ColumnView, rowCount: Long): ColumnVector = {
-    withResource(lhs) { lhs =>
-      withResource(rhs) { rhs =>
-        val boolMaskNoNans = lhs.equalToNullAware(rhs)
-        val boolMaskWithNans = if (lhs.getType == DType.FLOAT32 || lhs.getType == DType.FLOAT64) {
+    withResource(offSets) { _ =>
+      val boolMaskWithNans = withResource(lhs) { _ =>
+        withResource(rhs) { _ =>
+          val boolMaskNoNans = lhs.equalToNullAware(rhs)
+          if (lhs.getType == DType.FLOAT32 || lhs.getType == DType.FLOAT64) {
             // Compare NaN values for arrays with float or double type
-            withResource(booleanMaskNansOnly(lhs, rhs)) { boolMaskNansOnly =>
-              withResource(boolMaskNoNans) { boolMaskNoNans =>
+            withResource(boolMaskNoNans) { _ =>
+              // with-resource-lint: allow-deep-nesting -- #15997 keep both masks live for or.
+              withResource(booleanMaskNansOnly(lhs, rhs)) { boolMaskNansOnly =>
                 boolMaskNoNans.or(boolMaskNansOnly)
               }
             }
           } else {
             boolMaskNoNans
           }
-        withResource(boolMaskWithNans) { boolMaskWithNans =>
-          withResource(boolMaskWithNans.not) { boolMaskToKeep =>
-            withResource(offSets) { offSets =>
-              boolMaskToKeep.makeListFromOffsets(rowCount, offSets)
-            }
-          }
         }
+      }
+      val boolMaskToKeep = withResource(boolMaskWithNans) { _ =>
+        boolMaskWithNans.not
+      }
+      withResource(boolMaskToKeep) { _ =>
+        boolMaskToKeep.makeListFromOffsets(rowCount, offSets)
       }
     }
   }

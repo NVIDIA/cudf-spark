@@ -4,31 +4,6 @@
   "trackingIssue": "https://github.com/NVIDIA/cudf-spark/issues/11713",
   "entries": [
     {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/GpuCast.scala",
-      "fingerprint": "27fc2acfeb96c0d4259b",
-      "resource": "withResource(Scalar.fromString(<literal>))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/GpuCast.scala",
-      "fingerprint": "30f97b95c06ddf393ec9",
-      "resource": "withResource(doubles.mul(microsPerSec,DType.INT64))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/GpuCast.scala",
-      "fingerprint": "bdb37bbf3349a592b826",
-      "resource": "withResource(ColumnVector.fromStrings(escaped:_*))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/GpuCast.scala",
-      "fingerprint": "e4634875bb8707922115",
-      "resource": "withResource(input.replaceListChild(castKvStructColumn))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/GpuCast.scala",
-      "fingerprint": "e8da22f9b3068820cb15",
-      "resource": "withResource(valueColumn.isNull)"
-    },
-    {
       "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/window/GpuUnboundedToUnboundedAggWindowExec.scala",
       "fingerprint": "085fcea941ec509cb8e4",
       "resource": "withResource(cudf.ColumnVector.fromLongs(targetRows))"
@@ -57,41 +32,6 @@
       "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/window/GpuUnboundedToUnboundedAggWindowExec.scala",
       "fingerprint": "bff3c1ddc31981e7aaab",
       "resource": "withResource(counts.getBase.getScalarElement(indexToLookAt))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/collectionOperations.scala",
-      "fingerprint": "2a52c09d40c9a22298af",
-      "resource": "withResource(falseOption)"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/collectionOperations.scala",
-      "fingerprint": "3ada99ce85fab0abe3f3",
-      "resource": "withResource(base.replaceListChild(nanToNullChild))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/collectionOperations.scala",
-      "fingerprint": "3c0df7f4df83b9a3eb93",
-      "resource": "withResource(getNanScalar)"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/collectionOperations.scala",
-      "fingerprint": "4e084b9a5cb0ae4df4b5",
-      "resource": "withResource(child.nansToNulls())"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/collectionOperations.scala",
-      "fingerprint": "6b4013cd1f3d6508c072",
-      "resource": "withResource(newColumnView(DType.LIST,proto.getRowCount,java.util.Optional.of[java.lang.Long](proto.getNullCount),valid,offsets,Array(structView)))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/collectionOperations.scala",
-      "fingerprint": "e1fbf896f1148602c6ed",
-      "resource": "withResource(offSets)"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/collectionOperations.scala",
-      "fingerprint": "e4e7af8a9e767b6086fa",
-      "resource": "withResource(getNullScalar)"
     }
   ]
 }

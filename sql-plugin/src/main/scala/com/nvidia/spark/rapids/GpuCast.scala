@@ -493,24 +493,22 @@ object GpuCast {
           AnsiUtil.castFloatToTimestampAnsi(input, toDataType)
         } else {
           // non-Ansi mode, convert nan/inf to null
-          withResource(Scalar.fromInt(1000000)) { microsPerSec =>
+          val inputWithoutNanAndInfinity =
             withResource(input.nansToNulls()) { inputWithNansToNull =>
-              withResource(FloatUtils.infinityToNulls(inputWithNansToNull)) {
-                inputWithoutNanAndInfinity =>
-                  if (fromDataType == FloatType &&
-                      SparkShimImpl.hasCastFloatTimestampUpcast) {
-                    withResource(inputWithoutNanAndInfinity.castTo(DType.FLOAT64)) { doubles =>
-                      withResource(doubles.mul(microsPerSec, DType.INT64)) {
-                        inputTimesMicrosCv =>
-                          inputTimesMicrosCv.castTo(DType.TIMESTAMP_MICROSECONDS)
-                      }
-                    }
-                  } else {
-                    withResource(inputWithoutNanAndInfinity.mul(microsPerSec, DType.INT64)) {
-                      inputTimesMicrosCv =>
-                        inputTimesMicrosCv.castTo(DType.TIMESTAMP_MICROSECONDS)
-                    }
-                  }
+              FloatUtils.infinityToNulls(inputWithNansToNull)
+            }
+          withResource(inputWithoutNanAndInfinity) { _ =>
+            withResource(Scalar.fromInt(1000000)) { microsPerSec =>
+              val inputTimesMicrosCv = if (fromDataType == FloatType &&
+                  SparkShimImpl.hasCastFloatTimestampUpcast) {
+                withResource(inputWithoutNanAndInfinity.castTo(DType.FLOAT64)) { doubles =>
+                  doubles.mul(microsPerSec, DType.INT64)
+                }
+              } else {
+                inputWithoutNanAndInfinity.mul(microsPerSec, DType.INT64)
+              }
+              withResource(inputTimesMicrosCv) { _ =>
+                inputTimesMicrosCv.castTo(DType.TIMESTAMP_MICROSECONDS)
               }
             }
           }
@@ -947,6 +945,7 @@ object GpuCast {
           withResource(kvStructColumn.getChildColumnView(1)) { valueColumn =>
             withResource(castToString(valueColumn, from.valueType, options)) { valueStr =>
               withResource(Scalar.fromString("null")) { nullScalar =>
+                // with-resource-lint: allow-deep-nesting -- #15997 keep ifElse inputs alive.
                 withResource(valueColumn.isNull) { isNull =>
                   isNull.ifElse(nullScalar, valueStr)
                 }
@@ -1132,6 +1131,7 @@ object GpuCast {
             attrColumns += withResource(castToString(cv,
               inputSchema(fieldIndex).dataType, options)) { jsonAttr =>
               withResource(cv.isNull) { isNull =>
+                // with-resource-lint: allow-deep-nesting -- #15997 keep ifElse inputs alive.
                 withResource(Scalar.fromString("null")) { nullScalar =>
                   isNull.ifElse(nullScalar, jsonAttr)
                 }
@@ -1198,6 +1198,9 @@ object GpuCast {
             columns += quoteScalar.incRefCount()
 
             withResource(ColumnVector.fromStrings(chars: _*)) { search =>
+              // The quote column is retained in columns, so closing its wrapper earlier
+              // would not release its storage. Keep the replacement operands together.
+              // with-resource-lint: allow-deep-nesting -- #15997 preserve the replacement scope.
               withResource(ColumnVector.fromStrings(escaped: _*)) { replace =>
                 columns += cv.stringReplace(search, replace)
               }
@@ -1387,6 +1390,7 @@ object GpuCast {
           withResource(ColumnView.makeStructView(castKey, castValue)) { castKvStructColumn =>
             // We don't have to worry about null in the key/value struct because they are not
             // allowed for maps in Spark
+            // with-resource-lint: allow-deep-nesting -- #15997 keep view parents live for copying.
             withResource(input.replaceListChild(castKvStructColumn)) { replacedView =>
               replacedView.copyToColumnVector()
             }
