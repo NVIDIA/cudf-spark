@@ -30,20 +30,20 @@ import com.nvidia.spark.rapids.spill.{SpillableDeviceBufferHandle, SpillFramewor
 import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito._
 
-import org.apache.spark.storage.ShuffleBlockId
+import org.apache.spark.storage.{ShuffleBlockBatchId, ShuffleBlockId}
 
 /**
  * Deterministic interleavings of `ShuffleBufferCatalog.unregisterShuffle`, and of the server's
- * close, with the UCX shuffle server's send path.
+ * close, with the UCX shuffle server's metadata lookups and send path.
  *
  * Each test records what the requester receives, whether the server's send loop survives and
  * serves the next request, how each send state ends, and what happens to the catalog's device
  * buffer and to the send's bounce buffer and request transaction, with exact counts. The
  * outcomes are logged with `info` and then compared, in one assertion, against what the server
  * does, so a change to the ownership of these buffers shows up as the list of outcomes it
- * changed rather than as the first failed check. A request the server fails gets an error reply
- * naming the tables it will not send, unless its own receive failed, a data send failed, the
- * server closed, or the failure ends the send loop.
+ * changed rather than as the first failed check. A transfer request the server fails gets an
+ * error reply naming the tables it will not send, unless its own receive failed, a data send
+ * failed, the server closed, or the failure ends the send loop.
  */
 class ShuffleBufferLifetimeSuite extends RapidsShuffleTestHelper {
   private val awaitSeconds = 30L
@@ -288,6 +288,19 @@ class ShuffleBufferLifetimeSuite extends RapidsShuffleTestHelper {
     tx
   }
 
+  /** A metadata request for `block`, as a reader asks for one block. */
+  private def metadataRequest(peerId: Long, block: ShuffleBlockId): Transaction = {
+    val tx = mock[Transaction]
+    when(tx.peerExecutorId()).thenReturn(peerId)
+    when(tx.getStatus).thenReturn(TransactionStatus.Success)
+    val batch = ShuffleBlockBatchId(block.shuffleId, block.mapId, block.reduceId, block.reduceId)
+    // the message can be taken once, as from a UCX transaction
+    when(tx.releaseMessage()).thenReturn(new MetadataTransportBuffer(
+      new RefCountedDirectByteBuffer(ShuffleMetadata.buildShuffleMetadataRequest(Seq(batch)))))
+      .thenThrow(new NoSuchElementException("None.get"))
+    tx
+  }
+
   private def awaitClosed(tx: Transaction): Unit =
     assert(closedRequests.get(tx).await(awaitSeconds, TimeUnit.SECONDS),
       "the server never closed the request transaction")
@@ -315,6 +328,22 @@ class ShuffleBufferLifetimeSuite extends RapidsShuffleTestHelper {
           }
           s"error for ${failed.mkString(",")} of ${requested.size}: ${error.reason()}"
         })
+      }
+    }
+    if (replies.isEmpty) "none" else replies.mkString("; ")
+  }
+
+  /** What a metadata requester got: "none", or each reply's table count and error reason. */
+  private def metadataReply(tx: Transaction): String = {
+    val replies = new ArrayBuffer[String]()
+    val it = mockingDetails(tx).getInvocations.iterator()
+    while (it.hasNext) {
+      val invocation = it.next()
+      if (invocation.getMethod.getName == "respond") {
+        val response = ShuffleMetadata.getMetadataResponse(invocation.getArgument[ByteBuffer](0))
+        val tables = s"tables ${response.tableMetasLength()}"
+        val error = response.error()
+        replies += (if (error == null) tables else s"error, $tables: ${error.reason()}")
       }
     }
     if (replies.isEmpty) "none" else replies.mkString("; ")
@@ -1454,5 +1483,41 @@ class ShuffleBufferLifetimeSuite extends RapidsShuffleTestHelper {
       "request transaction closes" -> 1,
       "requester gets" -> "none",
       "send bounce buffers not returned" -> "0")
+  }
+
+  // Metadata path, through the server's request callback.
+
+  test("T18 metadata: a lookup after unregister gets the missing-output error reply") {
+    val outcomes = new Outcomes
+    val allocatedBefore = Rmm.getTotalBytesAllocated
+    withCleanup { cleanups =>
+      val catalog = newCatalog(cleanups, 1, 2)
+      val gone = cache(catalog, ShuffleBlockId(1, 1L, 0), 0, cleanups)
+      val live = cache(catalog, ShuffleBlockId(2, 1L, 0), 5000, cleanups)
+      val peer = new Peer(cleanups)
+      // the server's metadata executor runs a request on the thread that hands it over
+      newServer(new CatalogRequestHandler(catalog), peer)
+      def requested(block: ShuffleBlockId): Transaction = {
+        val tx = metadataRequest(2L, block)
+        peer.request(MessageType.MetadataRequest, tx)
+        tx
+      }
+      outcomes("a request before the unregister gets", metadataReply(requested(gone.blockId)))
+
+      catalog.unregisterShuffle(1)
+      val tx = requested(gone.blockId)
+      outcomes("requester gets", metadataReply(tx))
+      outcomes("request transaction closes", txCloses(tx))
+      outcomes("next request gets", metadataReply(requested(live.blockId)))
+      outcomes("buffers at the end", holding(catalog, gone, live))
+    }
+    outcomes("device bytes still allocated", Rmm.getTotalBytesAllocated - allocatedBefore)
+    outcomes.check(
+      "a request before the unregister gets" -> "tables 1",
+      "requester gets" -> s"error, tables 0: $goneReply: unknown shuffle 1 for block shuffle_1_1_0",
+      "request transaction closes" -> 1,
+      "next request gets" -> "tables 1",
+      "buffers at the end" -> "catalog=(1,1,1) spillStore=1 deviceRefs=0,1",
+      "device bytes still allocated" -> 0)
   }
 }
