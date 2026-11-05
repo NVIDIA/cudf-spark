@@ -40,26 +40,24 @@ def test_delta_partition_write_signed_zero(spark_tmp_path, float_type, max_write
     schema = StructType([StructField('id', LongType()),
                          StructField('f', FloatType() if float_type == 'FLOAT' else DoubleType())])
 
-    def write(spark):
+    def write(spark, output_path):
         (spark.createDataFrame([(i, 0.0 if i % 2 == 0 else -0.0) for i in range(400)], schema)
-         .coalesce(1).write.format('delta').mode('overwrite').partitionBy('f').save(path))
+         .coalesce(1).write.format('delta').mode('overwrite').partitionBy('f').save(output_path))
 
-    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
-    callback.startCapture()
     try:
-        with_gpu_session(write, conf=copy_and_update(_delta_confs, {
-            'spark.sql.maxConcurrentOutputFileWriters': max_writers,
-            'spark.rapids.sql.batchSizeBytes': 1024}))
-        plans = callback.getResultsWithTimeout(10000)
-        assert any(callback.contains(plan, 'GpuDataWritingCommandExec') or
-                   callback.contains(plan, 'RapidsDeltaWrite') for plan in plans), \
-            'Expected GPU Delta write'
+        assert_gpu_and_cpu_writes_are_equal_collect(
+            write,
+            lambda spark, output_path: spark.read.format('delta').load(output_path)
+                .selectExpr('id', 'CAST(f AS STRING) AS partition_value').orderBy('id'),
+            path,
+            conf=copy_and_update(_delta_confs, {
+                'spark.sql.maxConcurrentOutputFileWriters': max_writers,
+                'spark.rapids.sql.batchSizeBytes': 1024}))
     finally:
-        callback.endCapture()
         reset_spark_session_conf()
 
     def check(spark):
-        files = spark.sparkContext.wholeTextFiles(path + '/_delta_log/*.json').collect()
+        files = spark.sparkContext.wholeTextFiles(path + '/GPU/_delta_log/*.json').collect()
         actions = [json.loads(line) for _, content in files for line in content.splitlines()]
         adds = [a['add'] for a in actions if 'add' in a]
         counts = {}
