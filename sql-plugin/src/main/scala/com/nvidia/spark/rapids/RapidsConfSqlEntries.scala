@@ -629,7 +629,7 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
       "only when every DATE value written is on or after 1582-10-15. The plugin does not " +
       "validate the values; the application must guarantee this range. By default, these " +
       "writes fall back to the CPU writer.")
-    .sinceVersion("26.10.0")
+    .sinceVersion("26.10.1")
     .booleanConf
     .createWithDefault(false)
 
