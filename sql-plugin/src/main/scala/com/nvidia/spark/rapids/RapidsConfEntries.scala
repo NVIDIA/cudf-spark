@@ -76,6 +76,14 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
       .booleanConf
       .createWithDefault(false)
 
+  val TEST_FORCE_NON_AST = conf("spark.rapids.sql.test.forceNonAst")
+    .doc("Only for tests. Comma-separated Spark expression class names forced out of AST " +
+      s"when ${TEST_CONF.key} is enabled, while retaining GPU expression support.")
+    .internal()
+    .stringConf
+    .toSequence
+    .createWithDefault(Nil)
+
   val TEST_ALLOWED_NONGPU = conf("spark.rapids.sql.test.allowedNonGpu")
     .doc("Comma separate string of exec or expression class names that are allowed " +
       "to not be GPU accelerated for testing.")

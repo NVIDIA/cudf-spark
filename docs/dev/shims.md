@@ -51,15 +51,16 @@ behind the one-way boundary.
 
 ## Source Inheritance Metadata
 
-A build target profile may declare `shim.source.inherits` to name another target whose shim
-sources it will inherit. Shimplify validates these parent links and rejects missing parents or
-cycles. The first declared links are `359` to `358`, `402` to `401`, and Spark master `500` to
-`420`. The latter two targets exist only in the Scala 2.13 build tree.
+A build target profile declares `shim.source.inherits` to name the target whose shim sources it
+starts from. Source generation validates these parent links and rejects missing parents or cycles.
+Source selection walks that lineage and chooses the nearest matching physical source for each
+logical path. The parent changes source selection only; it does not change dependency resolution,
+generated package identity, binary deduplication, or runtime compatibility.
 
-This is preparatory metadata: source generation still uses the exact
-`spark-rapids-shim-json-lines` membership lists. The parent does not change dependency resolution,
-generated package identity, binary deduplication, or runtime compatibility. Source selection will
-use the lineage only after an inheritance resolver and equivalence checks are in place.
+Every shim source uses one selector form. `carryForward:"none"` selects only the listed targets,
+`sameMinor` also selects descendants in the same Spark major/minor line, and `all` selects every
+descendant. A nearer source overrides an inherited source with the same logical path. Files whose
+package path contains a versioned `sparkNNN` component must remain exact.
 
 The source-inspection prototype can show the annotated shim files selected for one exact target
 without running Maven:
@@ -70,15 +71,14 @@ without running Maven:
 ./build/shimpler sources --target 500 --format=json
 ```
 
-It scans Scala and Java shim sources in all modules, including nested modules. `--module sql-plugin`
-restricts the output, and `--null` produces NUL-delimited paths for shell tools. The inspector
-derives candidate inheritance points from today's exact annotations and checks that they select the
-same physical files for the requested target. Non-contiguous memberships and versioned package
-paths remain exact. The reported introduction is relative to the source-parent links currently
-declared in Maven; it is not necessarily the target where the file was first written. Unannotated
-files under versioned directories are omitted from this annotated-source query.
-Shimplify's generated sources still use the existing exact annotations. Do not convert annotations
-to `introduced` or `only` yet; generation and the captured pre-conversion oracle are follow-up work.
+It scans Java, Scala, and Scala-binary-specific shim sources in all modules, including nested
+modules. `--module sql-plugin` restricts the output, and `--null` produces NUL-delimited paths for
+shell tools. The reported introduction is relative to the source-parent links currently declared
+in Maven; it is not necessarily the target where the file was first written.
+
+Maven materializes the selected files as symlinks under the module's target directory. Add or
+remove a Maven profile and inheritance edge directly, then edit only new, overridden, or retired
+selectors. There is no command that rewrites the source layout.
 
 ## Reducing Parallel-World Classes
 

@@ -16,30 +16,51 @@
 
 package com.nvidia.spark.rapids.delta.shims
 
-import com.databricks.sql.transaction.tahoe.commands.DeletionVectorUtils
+import com.databricks.sql.transaction.tahoe.{DeltaTableUtils, RowTracking, Snapshot}
 import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
+import com.nvidia.spark.rapids.RapidsMeta
 import com.nvidia.spark.rapids.delta.{UpdateCommandEdgeMeta, UpdateCommandMeta}
+
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.catalyst.expressions.{Expression, Literal}
+import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.internal.SQLConf
 
 object UpdateCommandMetaShim {
   def tagForGpu(meta: UpdateCommandMeta): Unit = {
-    val deltaLog = meta.updateCmd.tahoeFileIndex.deltaLog
-    val dvFeatureEnabled =
-      DeletionVectorUtils.deletionVectorsWritable(deltaLog.unsafeVolatileSnapshot)
-
-    if (dvFeatureEnabled && meta.updateCmd.conf.getConf(
-      DeltaSQLConf.UPDATE_USE_PERSISTENT_DELETION_VECTORS)) {
-      meta.willNotWorkOnGpu("Deletion vector writes are not supported on GPU")
-    }
+    val cmd = meta.updateCmd
+    tagForGpuCommon(meta, cmd.conf, cmd.tahoeFileIndex.deltaLog.unsafeVolatileSnapshot,
+      cmd.target, cmd.condition, cmd.tahoeFileIndex.spark)
   }
 
   def tagForGpu(meta: UpdateCommandEdgeMeta): Unit = {
-    val deltaLog = meta.updateCmd.tahoeFileIndex.deltaLog
-    val dvFeatureEnabled =
-      DeletionVectorUtils.deletionVectorsWritable(deltaLog.unsafeVolatileSnapshot)
+    val cmd = meta.updateCmd
+    tagForGpuCommon(meta, cmd.conf, cmd.tahoeFileIndex.deltaLog.unsafeVolatileSnapshot,
+      cmd.target, cmd.condition, cmd.tahoeFileIndex.spark)
+  }
 
-    if (dvFeatureEnabled && meta.updateCmd.conf.getConf(
-      DeltaSQLConf.UPDATE_USE_PERSISTENT_DELETION_VECTORS)) {
-      meta.willNotWorkOnGpu("Deletion vector writes are not supported on GPU")
+  private def tagForGpuCommon(
+      meta: RapidsMeta[_, _, _],
+      sqlConf: SQLConf,
+      snapshot: Snapshot,
+      target: LogicalPlan,
+      condition: Option[Expression],
+      spark: SparkSession): Unit = {
+    val persistentDvEnabled = PersistentDeletionVectorMetaShim.tagForGpu(
+      meta, sqlConf, snapshot, DeltaSQLConf.UPDATE_USE_PERSISTENT_DELETION_VECTORS, target.schema)
+    if (persistentDvEnabled && RowTracking.isEnabled(snapshot.protocol, snapshot.metadata) &&
+        hasDataPredicate(condition, snapshot.metadata.partitionColumns, spark)) {
+      meta.willNotWorkOnGpu(
+        "Persistent deletion vector UPDATE with row tracking is not supported on GPU")
     }
+  }
+
+  private def hasDataPredicate(
+      condition: Option[Expression],
+      partitionColumns: Seq[String],
+      spark: SparkSession): Boolean = {
+    val (_, dataPredicates) = DeltaTableUtils.splitMetadataAndDataPredicates(
+      condition.getOrElse(Literal.TrueLiteral), partitionColumns, spark)
+    dataPredicates.nonEmpty
   }
 }

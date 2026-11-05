@@ -31,6 +31,7 @@ nightly_gpu_mem_consuming_case = pytest.mark.nightly_gpu_mem_consuming_case
 nightly_host_mem_consuming_case = pytest.mark.nightly_host_mem_consuming_case
 fuzz_test = pytest.mark.fuzz_test
 iceberg = pytest.mark.iceberg
+iceberg_fast_test = pytest.mark.iceberg_fast_test
 delta_lake = pytest.mark.delta_lake
 unity_catalog = pytest.mark.unity_catalog
 large_data_test = pytest.mark.large_data_test

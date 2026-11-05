@@ -1,0 +1,97 @@
+{
+  "iceberg_versions": [
+    {
+      "version": "1.6.1",
+      "upstream_minimums": {
+        "3.5": "3.5.1"
+      },
+      "spark_versions": [
+        {
+          "version": "3.5.0",
+          "supported": true,
+          "comment": "Legacy compatibility exception: retain the existing packaged implementation below the Spark 3.5.1 minimum test baseline. New Iceberg versions must not add below-baseline combinations."
+        },
+        {
+          "version": "3.5.1",
+          "supported": true
+        },
+        {
+          "version": "3.5.4",
+          "supported": false,
+          "reason": "Iceberg 1.6.x is not packaged for this Spark shim"
+        },
+        {
+          "version": "3.5.5",
+          "supported": false,
+          "reason": "Iceberg 1.6.x is not packaged for this Spark shim"
+        },
+        {
+          "version": "3.5.6",
+          "supported": false,
+          "reason": "Iceberg 1.6.x is not packaged for this Spark shim"
+        },
+        {
+          "version": "3.5.7",
+          "supported": false,
+          "reason": "Iceberg 1.6.x is not packaged for this Spark shim"
+        }
+      ]
+    },
+    {
+      "version": "1.9.2",
+      "upstream_minimums": {
+        "3.5": "3.5.5"
+      },
+      "spark_versions": [
+        {
+          "version": "3.5.4",
+          "supported": true,
+          "comment": "Legacy compatibility exception: retain the existing packaged implementation below the Spark 3.5.5 minimum test baseline. New Iceberg versions must not add below-baseline combinations."
+        },
+        {
+          "version": "3.5.5",
+          "supported": true
+        },
+        {
+          "version": "3.5.6",
+          "supported": true
+        },
+        {
+          "version": "3.5.7",
+          "supported": true
+        }
+      ]
+    },
+    {
+      "version": "1.10.1",
+      "upstream_minimums": {
+        "3.5": "3.5.6",
+        "4.0": "4.0.0"
+      },
+      "spark_versions": [
+        {
+          "version": "3.5.4",
+          "supported": true,
+          "comment": "Legacy compatibility exception: retain the existing packaged implementation below the Spark 3.5.6 minimum test baseline. New Iceberg versions must not add below-baseline combinations."
+        },
+        {
+          "version": "3.5.5",
+          "supported": true,
+          "comment": "Legacy compatibility exception: retain the existing packaged implementation below the Spark 3.5.6 minimum test baseline. New Iceberg versions must not add below-baseline combinations."
+        },
+        {
+          "version": "3.5.6",
+          "supported": true
+        },
+        {
+          "version": "3.5.7",
+          "supported": true
+        },
+        {
+          "version": "4.0.1",
+          "supported": true
+        }
+      ]
+    }
+  ]
+}
