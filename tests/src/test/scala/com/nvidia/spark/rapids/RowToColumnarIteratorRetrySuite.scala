@@ -382,6 +382,38 @@ class RowToColumnarIteratorRetrySuite extends RmmSparkRetrySuiteBase {
     assertResult(expected)(toScalaRows(batches.toList, nestedSchema))
   }
 
+  test("test GPU OOM split and retry with empty and all-null strings") {
+    // Each split piece of "empty" has no string bytes but some non-null rows, so its slice needs
+    // a one-byte data buffer. "nulls" has no non-null row, so its slices need no data buffer.
+    val stringSchema = StructType(Seq(
+      StructField("id", IntegerType),
+      StructField("empty", StringType),
+      StructField("nulls", StringType)))
+    val numRows = 10
+    def stringRows(): Iterator[InternalRow] = (1 to numRows).iterator.map { i =>
+      new GenericInternalRow(Array[Any](
+        i, if (i % 3 == 0) null else UTF8String.EMPTY_UTF8, null))
+    }
+    val expected = toScalaRows(
+      r2c(stringRows(), stringSchema, TargetSize(batchSize), batchSize, true).toList,
+      stringSchema)
+    assertResult(numRows)(expected.length)
+
+    val row2ColIter =
+      r2c(stringRows(), stringSchema, TargetSize(batchSize), batchSize, true)
+    RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
+      RmmSpark.OomInjectionType.GPU.ordinal, 0)
+    val batches = closeOnExcept(ArrayBuffer[ColumnarBatch]()) { batches =>
+      while (row2ColIter.hasNext) {
+        batches += row2ColIter.next()
+      }
+      batches
+    }
+    assert(batches.length >= 2,
+      s"Expected at least 2 batches after split, got ${batches.length}")
+    assertResult(expected)(toScalaRows(batches.toList, stringSchema))
+  }
+
   test("test GPU OOM split and retry with array children that never got a value") {
     // No array below holds a value at the level that matters, so the builder never appends to
     // the child, which ends up with no rows and no offsets buffer. Nulls go on every 3rd, 4th
