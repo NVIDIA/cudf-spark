@@ -2019,7 +2019,7 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
       case gpu: GpuShuffleHandle[_, _] if gpu.dependency.checksumFallback =>
         wrapped.getWriter(gpu.wrapped, mapId, context, metricsReporter)
       case gpu: GpuShuffleHandle[_, _] =>
-        registerGpuShuffle(handle.shuffleId)
+        registerGpuShuffle(handle.shuffleId, context.taskAttemptId())
         new RapidsCachingWriter(
           env.blockManager,
           gpu.asInstanceOf[GpuShuffleHandle[K, V]],
@@ -2037,7 +2037,7 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
             // use the threaded writer if the number of threads specified is 1 or above,
             // with 0 threads we fallback to the Spark-provided writer.
             // Register shuffle with MultithreadedShuffleBufferCatalog
-            registerGpuShuffle(handle.shuffleId)
+            registerGpuShuffle(handle.shuffleId, context.taskAttemptId())
             val handleWithMetrics = new ShuffleHandleWithMetrics(
               handle.shuffleId,
               gpuDep.metrics,
@@ -2156,12 +2156,17 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
     }
   }
 
-  def registerGpuShuffle(shuffleId: Int): Unit = {
+  /**
+   * Registers a shuffle for a writer task.
+   *
+   * @param writerTaskId the writer's task attempt id, which a reclaim's watermark is compared to
+   */
+  def registerGpuShuffle(shuffleId: Int, writerTaskId: Long): Unit = {
     val catalog = GpuShuffleEnv.getCatalog
     if (catalog != null) {
       // Note that in local mode this can be called multiple times.
       logInfo(s"Registering shuffle $shuffleId")
-      catalog.registerShuffle(shuffleId)
+      catalog.registerShuffle(shuffleId, writerTaskId)
     }
     // Also register with MultithreadedShuffleBufferCatalog if available
     GpuShuffleEnv.getMultithreadedCatalog.foreach { mtCatalog =>
@@ -2170,9 +2175,23 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
     }
   }
 
+  /** Runs `op` on the shuffle buffer catalog if it is initialized. Every removal goes here. */
+  private def withShuffleCatalog[T](op: ShuffleBufferCatalog => T): Option[T] =
+    Option(GpuShuffleEnv.getCatalog).map(op)
+
+  /**
+   * Frees what the shuffle buffer catalog holds of a shuffle for writers at or below
+   * `watermark`. A catalog that is not initialized yet holds nothing.
+   */
+  def reclaimGpuShuffle(shuffleId: Int, watermark: Long): ShuffleReclaimResult = {
+    withShuffleCatalog { catalog =>
+      logInfo(s"Reclaiming shuffle $shuffleId up to task $watermark from shuffle buffer catalog")
+      catalog.reclaimShuffle(shuffleId, watermark)
+    }.getOrElse(ShuffleReclaimResult.absent(shuffleId, watermark))
+  }
+
   def unregisterGpuShuffle(shuffleId: Int): Unit = {
-    val catalog = GpuShuffleEnv.getCatalog
-    if (catalog != null) {
+    withShuffleCatalog { catalog =>
       logInfo(s"Unregistering shuffle $shuffleId from shuffle buffer catalog")
       catalog.unregisterShuffle(shuffleId)
     }
