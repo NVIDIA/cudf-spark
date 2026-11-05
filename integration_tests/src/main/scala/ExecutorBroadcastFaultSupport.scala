@@ -107,13 +107,17 @@ object ExecutorBroadcastFaultSupport {
     val rpc = SparkEnv.get.rpcEnv
     val gate = rpc.setupEndpoint(s"driverless-build-gate-${System.nanoTime()}",
       new ParallelBuildGate(rpc))
+    val gateAddress = gate.address
+    val gateName = gate.name
     val timeout = new RpcTimeout(60.seconds, "driverless parallel-build test timeout")
     val function = "driverless_parallel_build_gate"
     val group = "driverless-parallel-builds"
     context.setJobGroup(group, "Verify parallel build upstreams")
     try {
       session.udf.register(function, (value: Long) => {
-        gate.askSync[Boolean](BuildStarted(TaskContext.get().stageId()), timeout)
+        // SQL UDF deserialization does not install an executor RPC environment on a captured ref.
+        val endpoint = SparkEnv.get.rpcEnv.setupEndpointRef(gateAddress, gateName)
+        endpoint.askSync[Boolean](BuildStarted(TaskContext.get().stageId()), timeout)
         value
       })
       val frame = session.sql(sql)
