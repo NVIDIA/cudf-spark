@@ -49,7 +49,7 @@ import org.apache.spark.sql.execution.datasources.WriteTaskStats
 import org.apache.spark.sql.rapids.GpuFileFormatWriter.GpuConcurrentOutputWriterSpec
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
-import org.apache.spark.sql.types.{IntegerType, StringType, StructField, StructType}
+import org.apache.spark.sql.types.{DoubleType, FloatType, IntegerType, StringType, StructField, StructType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
 class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
@@ -659,6 +659,25 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
           .writeSpillableAndClose(any())
         // three because we wrote 3 files (15 rows, limit was 5 rows per file)
         verify(mockOutputWriter, times(3)).close()
+      }
+    }
+  }
+
+  Seq(FloatType, DoubleType).foreach { dataType =>
+    test(s"dynamic partition data writer with an empty $dataType batch") {
+      resetMocks()
+      val schema = StructType(Seq(StructField("part", dataType),
+        StructField("data", IntegerType)))
+      val batches = Seq(GpuColumnVector.emptyBatch(schema))
+      withColumnarBatchesVerifyClosed(batches) {
+        val writer = prepareDynamicPartitionSingleWriter()
+        try {
+          writer.writeWithIterator(batches.iterator)
+          verify(writer, never()).newWriter(any(), any(), any())
+          verify(mockOutputWriter, never()).writeSpillableAndClose(any())
+        } finally {
+          writer.releaseResources()
+        }
       }
     }
   }

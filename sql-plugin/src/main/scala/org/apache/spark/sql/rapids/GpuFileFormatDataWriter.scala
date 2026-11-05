@@ -607,7 +607,7 @@ class GpuDynamicPartitionDataSingleWriter(
         val getPart = genGetPartValuesFunc(host)
         val getBucket = genGetBucketIdFunc(host)
         val splits = groups.getGroups
-        splits.indices.safeMap { i =>
+        (0 until host.numRows()).safeMap { i =>
           val part = getPart(i)
           val bucket = getBucket(i)
           val data = if (dataTypes.isEmpty) {
