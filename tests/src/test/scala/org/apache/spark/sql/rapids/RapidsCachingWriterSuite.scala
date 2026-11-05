@@ -21,10 +21,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 import scala.collection.mutable.ArrayBuffer
 import scala.util.{Failure, Success, Try}
 
-import ai.rapids.cudf.{Cuda, MemoryBuffer, Rmm}
-import com.nvidia.spark.rapids.{GpuCompressedColumnVector, GpuPackedTableColumn, RapidsConf,
-  RmmSparkRetrySuiteBase, ShuffleBufferCatalog, ShuffleBufferCatalogTestUtils,
-  TableCompressionCodec, WithTableBuffer}
+import ai.rapids.cudf.{Cuda, DeviceMemoryBuffer, MemoryBuffer, Rmm, Table}
+import com.nvidia.spark.rapids.{GpuColumnVector, GpuCompressedColumnVector, GpuPackedTableColumn,
+  MetaUtils, RapidsConf, RmmSparkRetrySuiteBase, ShuffleBufferCatalog,
+  ShuffleBufferCatalogTestUtils, TableCompressionCodec, TestUtils, WithTableBuffer}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.format.CodecType
@@ -67,8 +67,8 @@ class RapidsCachingWriterSuite extends RmmSparkRetrySuiteBase with MockitoSugar 
     }
   }
 
-  private def compressedBatch(rows: Int): ColumnarBatch = {
-    val codec = TableCompressionCodec.getCodec(CodecType.COPY,
+  private def compressedBatch(rows: Int, codecId: Byte = CodecType.COPY): ColumnarBatch = {
+    val codec = TableCompressionCodec.getCodec(codecId,
       TableCompressionCodec.makeCodecConfig(new RapidsConf(new SparkConf)))
     withResource(codec.createBatchCompressor(0, Cuda.DEFAULT_STREAM)) { compressor =>
       compressor.addTableToCompress(RapidsShuffleTestHelper.buildContiguousTable(rows))
@@ -477,5 +477,100 @@ class RapidsCachingWriterSuite extends RmmSparkRetrySuiteBase with MockitoSugar 
     assert(writer.stop(false).isEmpty)
     assertResult(0)(numDeviceHandles)
     assertConsistent(catalog, 0)
+  }
+
+  // the kinds of batch a writer caches on the device, with the codec of each compressed one
+  private val deviceKinds: Seq[(String, Option[Byte])] = Seq("packed" -> None,
+    "COPY" -> Some(CodecType.COPY), "LZ4" -> Some(CodecType.NVCOMP_LZ4),
+    "ZSTD" -> Some(CodecType.NVCOMP_ZSTD))
+
+  /** A batch of `rows` rows, packed or compressed with `codecId`, and its device buffer. */
+  private def deviceBatch(codecId: Option[Byte], rows: Int): (ColumnarBatch, DeviceMemoryBuffer) =
+    codecId match {
+      case None =>
+        val ct = RapidsShuffleTestHelper.buildContiguousTable(rows)
+        (GpuPackedTableColumn.from(ct), ct.getBuffer)
+      case Some(id) =>
+        val batch = compressedBatch(rows, id)
+        (batch, batch.column(0).asInstanceOf[GpuCompressedColumnVector].getTableBuffer)
+    }
+
+  /** Asserts that a batch read back, compressed or not, holds the rows it was built with. */
+  private def assertRows(batch: ColumnarBatch, rows: Int): Unit = {
+    def check(table: Table): Unit =
+      withResource(RapidsShuffleTestHelper.buildContiguousTable(rows)) { expected =>
+        TestUtils.compareColumns(expected.getTable.getColumn(0), table.getColumn(0))
+      }
+    if (GpuCompressedColumnVector.isBatchCompressed(batch)) {
+      val column = batch.column(0).asInstanceOf[GpuCompressedColumnVector]
+      val meta = column.getTableMeta
+      val codec = TableCompressionCodec.getCodec(meta.bufferMeta.codecBufferDescrs(0).codec,
+        TableCompressionCodec.makeCodecConfig(new RapidsConf(new SparkConf)))
+      withResource(codec.createBatchDecompressor(0, Cuda.DEFAULT_STREAM)) { decompressor =>
+        // the decompressor closes the buffer it is given
+        column.getTableBuffer.incRefCount()
+        decompressor.addBufferToDecompress(column.getTableBuffer, meta.bufferMeta)
+        withResource(decompressor.finishAsync()) { decoded =>
+          withResource(MetaUtils.getTableFromMeta(decoded.head, meta))(check)
+        }
+      }
+    } else {
+      withResource(GpuColumnVector.from(batch))(check)
+    }
+  }
+
+  /** Reads back the one batch map 10 of shuffle 1 cached for partition 0, and checks it. */
+  private def readBack(catalog: ShuffleBufferCatalog, rows: Int): String = Try {
+    val block = ShuffleBlockId(1, 10L, 0)
+    withResource(catalog.getColumnarBatchIterator(block, sparkTypes).toArray) { batches =>
+      assertResult(1)(batches.length)
+      assertRows(batches.head, rows)
+    }
+  }.fold(e => s"failed: $e", _ => "ok")
+
+  deviceKinds.foreach { case (kind, codecId) =>
+    test(s"a $kind batch the producer closed after the write reads back and removes cleanly") {
+      val rows = 1000
+      val deviceBytesBefore = Rmm.getTotalBytesAllocated
+      val catalog = new ShuffleBufferCatalog()
+      val writer = newWriter(catalog, 1, 10L)
+      val (batch, buffer) = deviceBatch(codecId, rows)
+      writer.write(Iterator(0 -> batch))
+      assert(writer.stop(true).isDefined)
+      // GpuShuffleExchangeExecBase's partNextBatch closes every batch it handed the writer
+      batch.close()
+      val afterProducerClose = buffer.getRefCount
+      // a freed buffer is not read, since that touches freed device memory
+      val read = if (afterProducerClose < 1) "skipped" else readBack(catalog, rows)
+      val unregister = Try(catalog.unregisterShuffle(1)).fold(e => s"threw: $e", _ => "ok")
+      val afterUnregister = buffer.getRefCount
+      val bytesLeft = Rmm.getTotalBytesAllocated - deviceBytesBefore
+      assertResult((1, "ok", "ok", 0, 0L), "(references after the producer's close, read, " +
+        "unregister, references after it, device bytes left)")(
+        (afterProducerClose, read, unregister, afterUnregister, bytesLeft))
+    }
+
+    test(s"a spill inside the write window keeps the $kind rows and the producer's close " +
+        "succeeds") {
+      val rows = 1000
+      val deviceBytesBefore = Rmm.getTotalBytesAllocated
+      val catalog = new ShuffleBufferCatalog()
+      val (batch, _) = deviceBatch(codecId, rows)
+      newWriter(catalog, 1, 10L).write(Iterator(0 -> batch))
+      val stores = SpillFramework.stores
+      val spilledAfterWrite = stores.deviceStore.spill(Long.MaxValue)
+      // GpuShuffleExchangeExecBase's partNextBatch closes every batch it handed the writer
+      val producerClose = Try(batch.close()).fold(e => s"threw: $e", _ => "ok")
+      val spilledAfterClose = stores.deviceStore.spill(Long.MaxValue)
+      info(s"spilled $spilledAfterWrite bytes after the write, $spilledAfterClose after the close")
+      val read = readBack(catalog, rows)
+      val unregister = Try(catalog.unregisterShuffle(1)).fold(e => s"threw: $e", _ => "ok")
+      val bytesLeft = Rmm.getTotalBytesAllocated - deviceBytesBefore
+      val handles = (stores.deviceStore.numHandles, stores.hostStore.numHandles)
+      assertResult((true, "ok", "ok", "ok", 0L, (0, 0)), "(a spill moved bytes, producer's " +
+        "close, read, unregister, device bytes left, (device handles, host handles))")(
+        (spilledAfterWrite + spilledAfterClose > 0, producerClose, read, unregister, bytesLeft,
+          handles))
+    }
   }
 }

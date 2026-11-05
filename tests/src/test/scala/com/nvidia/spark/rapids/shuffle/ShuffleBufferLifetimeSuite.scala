@@ -23,13 +23,15 @@ import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 import scala.collection.mutable.ArrayBuffer
 
 import ai.rapids.cudf.{ColumnVector, ContiguousTable, Cuda, CudaFatalException, DeviceMemoryBuffer, HostMemoryBuffer, MemoryBuffer, Rmm, Table}
-import com.nvidia.spark.rapids.{RapidsShuffleHandle, ShuffleBufferCatalog, ShuffleMetadata}
+import com.nvidia.spark.rapids.{GpuCompressedColumnVector, GpuPackedTableColumn, RapidsConf, RapidsShuffleHandle, ShuffleBufferCatalog, ShuffleMetadata, TableCompressionCodec}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
-import com.nvidia.spark.rapids.format.TransferState
+import com.nvidia.spark.rapids.format.{CodecType, TransferState}
 import com.nvidia.spark.rapids.spill.{SpillableDeviceBufferHandle, SpillFramework}
 import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito._
 
+import org.apache.spark.SparkConf
+import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.storage.{ShuffleBlockBatchId, ShuffleBlockId}
 
 /**
@@ -150,6 +152,25 @@ class ShuffleBufferLifetimeSuite extends RapidsShuffleTestHelper {
     cleanups += (() => cached.close())
     cached
   }
+
+  /**
+   * A 1000-row batch as the shuffle exchange hands one to the caching writer, packed or
+   * compressed with `codecId`, and its device buffer.
+   */
+  private def partitionBatch(codecId: Option[Byte]): (ColumnarBatch, DeviceMemoryBuffer) =
+    codecId match {
+      case None =>
+        val ct = contiguousTable(0, 1000)
+        (GpuPackedTableColumn.from(ct), ct.getBuffer)
+      case Some(id) =>
+        val codec = TableCompressionCodec.getCodec(id,
+          TableCompressionCodec.makeCodecConfig(new RapidsConf(new SparkConf)))
+        val batch = withResource(codec.createBatchCompressor(0, Cuda.DEFAULT_STREAM)) { c =>
+          c.addTableToCompress(contiguousTable(0, 1000))
+          withResource(c.finish())(tables => GpuCompressedColumnVector.from(tables.head))
+        }
+        (batch, batch.column(0).asInstanceOf[GpuCompressedColumnVector].getTableBuffer)
+    }
 
   private def newCatalog(cleanups: ArrayBuffer[() => Unit], shuffleIds: Int*)
       : ShuffleBufferCatalog = {
@@ -1051,6 +1072,62 @@ class ShuffleBufferLifetimeSuite extends RapidsShuffleTestHelper {
       "a second finish ends the state" -> false,
       "after a second finish and a close" -> "ended: MissingOutput, closes 1, bounce returned",
       "device bytes still allocated" -> 0)
+  }
+
+  Seq("packed" -> None, "COPY" -> Some(CodecType.COPY), "LZ4" -> Some(CodecType.NVCOMP_LZ4),
+      "ZSTD" -> Some(CodecType.NVCOMP_ZSTD)).foreach { case (kind, codecId) =>
+    test(s"T19 send: a cached $kind buffer whose producer closed it is sent intact") {
+      val outcomes = new Outcomes
+      val allocatedBefore = Rmm.getTotalBytesAllocated
+      withCleanup { cleanups =>
+        val catalog = newCatalog(cleanups, 1)
+        val block = ShuffleBlockId(1, 1L, 0)
+        val (batch, device) = partitionBatch(codecId)
+        val (bytes, bss) = closeOnExcept(batch) { _ =>
+          val tableId = codecId match {
+            case None => catalog.addContiguousTable(block,
+              batch.column(0).asInstanceOf[GpuPackedTableColumn].getContiguousTable, -1).tableId
+            case Some(_) => catalog.addCompressedBatch(block, batch, -1).tableId
+          }
+          val bytes = HostMemoryBuffer.allocate(device.getLength)
+          cleanups += (() => bytes.close())
+          bytes.copyFromDeviceBuffer(device)
+          // made before the producer's close, so that its bounce buffer cannot take a freed block
+          val bss = new BufferSendState(transferRequest(2L, Seq(tableId)),
+            sendBounceBuffer(device.getLength, cleanups), new CatalogRequestHandler(catalog))
+          cleanups += (() => bss.close())
+          (bytes, bss)
+        }
+        // GpuShuffleExchangeExecBase's partNextBatch closes every batch it handed the writer
+        batch.close()
+        val references = device.getRefCount
+        outcomes("references after the producer's close", references)
+        // a send of a freed buffer copies from freed device memory, so it is not made
+        outcomes("send window", if (references < 1) {
+          bss.close()
+          "not sent: the buffer was freed"
+        } else {
+          val matches = withResource(bss.getBufferToSend()) { window =>
+            Cuda.DEFAULT_STREAM.sync()
+            withResource(HostMemoryBuffer.allocate(window.getLength)) { copy =>
+              copy.copyFromDeviceBuffer(window.asInstanceOf[DeviceMemoryBuffer])
+              sameBytes(copy, bytes)
+            }
+          }
+          bss.finish(BufferSendState.Completed)
+          if (matches) "the cached bytes" else "other bytes"
+        })
+        outcomes("send state", ended(bss))
+        outcomes("unregister throws", describe(attempt(catalog.unregisterShuffle(1))))
+      }
+      outcomes("device bytes still allocated", Rmm.getTotalBytesAllocated - allocatedBefore)
+      outcomes.check(
+        "references after the producer's close" -> 1,
+        "send window" -> "the cached bytes",
+        "send state" -> "ended: Completed",
+        "unregister throws" -> "none",
+        "device bytes still allocated" -> 0)
+    }
   }
 
   test("a bounce buffer pool hands out nothing once it is closed") {
