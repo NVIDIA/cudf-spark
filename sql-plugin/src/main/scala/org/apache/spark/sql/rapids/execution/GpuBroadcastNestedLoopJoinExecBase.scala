@@ -608,7 +608,12 @@ object GpuBroadcastNestedLoopJoinExecBase {
         } else {
           GpuNot(GpuEqualNullSafe(matched, GpuLiteral(true, BooleanType)))
         }
-        stream.map(filterAndClose(_, keep))
+        // A merge reduction right above the join, as Databricks plans for count(*), reads a
+        // zero-row batch as a null result, so drop one, as CrossJoinIterator does.
+        stream.flatMap { scb =>
+          val cb = filterAndClose(scb, keep)
+          if (cb.numRows() > 0) Some(cb) else withResource(cb)(_ => None)
+        }
       case (LeftSemi | LeftAnti, true) =>
         // Every stream row has a match when some build row meets the condition.
         val anyMatch = withResource(filterAndClose(builtBatch, boundCondition))(_.numRows > 0)
