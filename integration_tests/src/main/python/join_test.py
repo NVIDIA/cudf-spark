@@ -1138,6 +1138,31 @@ def test_broadcast_nested_loop_join_rows_only_build(build_length, batch_size):
         conf={'spark.sql.adaptive.enabled': 'false',
               'spark.rapids.sql.batchSizeBytes': batch_size})
 
+# Checks the nested loop join a test means to reach, in the CPU and GPU plans: whether it has a
+# condition, and which sides have columns. Spark versions and Databricks plan some of these queries
+# differently, and a different join would still match the CPU.
+def _nested_loop_join_shape(gpu_join_class, has_condition, left_has_columns, right_has_columns):
+    want = (has_condition, left_has_columns, right_has_columns)
+
+    def check(cpu_plan, gpu_plan):
+        for plan_name, plan, join_class in [('CPU', cpu_plan, 'BroadcastNestedLoopJoinExec'),
+                                            ('GPU', gpu_plan, gpu_join_class)]:
+            joins = [node for node in collect_plan_nodes(plan)
+                     if node.getClass().getSimpleName() == join_class]
+            assert len(joins) == 1, \
+                f'Expected one {plan_name} {join_class}, found {len(joins)}:\n{plan}'
+            join = joins[0]
+            got = (join.condition().isDefined(), join.left().output().size() > 0,
+                   join.right().output().size() > 0)
+            assert got == want, \
+                f'Expected {plan_name} (condition, left columns, right columns) {want}:\n{plan}'
+    return check
+
+# Before Spark 4.0 the optimizer pushes a one-sided predicate below the join, except one that reads
+# the side LEFT ANTI or an outer join keeps, so only these cases keep a condition.
+_sequence_condition_kept_before_400 = [
+    ('LeftAnti', 'left'), ('LeftOuter', 'left'), ('RightOuter', 'right')]
+
 # Spark 4.0 keeps a predicate that can throw, such as sequence, in the join condition. A predicate
 # that reads one side then leaves the other side with rows and no columns.
 @ignore_order(local=True)
@@ -1150,6 +1175,10 @@ def test_broadcast_nested_loop_join_rows_only_build(build_length, batch_size):
 @pytest.mark.parametrize('batch_size', ['100', '1g'], ids=idfn)
 def test_broadcast_nested_loop_join_one_sided_sequence_condition(
         join_type, build_side, predicate_side, build_length, batch_size):
+    if (not is_spark_400_or_later() and
+            (join_type, predicate_side) not in _sequence_condition_kept_before_400):
+        pytest.skip('Spark before 4.0 pushes this predicate below the join, SPARK-46707')
+
     def do_join(spark):
         values = SetValuesGen(IntegerType(), [None, 0, 5, 6, 9])
         left = gen_df(spark, [('a', values)],
@@ -1167,9 +1196,11 @@ def test_broadcast_nested_loop_join_one_sided_sequence_condition(
         return joined.select([c for c in joined.columns if c == name])
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         do_join,
-        exist_classes='GpuBroadcastNestedLoopJoinExec',
         conf={'spark.sql.adaptive.enabled': 'false',
-              'spark.rapids.sql.batchSizeBytes': batch_size})
+              'spark.rapids.sql.batchSizeBytes': batch_size},
+        gpu_plan_assertion=_nested_loop_join_shape('GpuBroadcastNestedLoopJoinExec', True,
+                                                   predicate_side == 'left',
+                                                   predicate_side == 'right'))
 
 # A NOT EXISTS predicate that folds to false keeps its join, because Spark rewrites the subquery
 # after it drops joins with a false condition. Both sides then reach the join with no columns.
@@ -1219,10 +1250,11 @@ def _false_condition_join(spark_tmp_table_factory, join_type, build_side, select
 @pytest.mark.parametrize('build_side', ['l', 'r'], ids=idfn)
 def test_broadcast_nested_loop_join_rows_only_sides_inner_fallback(
         spark_tmp_table_factory, build_side):
-    assert_gpu_fallback_collect(
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
         _false_condition_join(spark_tmp_table_factory, 'INNER', build_side, select='1'),
-        'BroadcastNestedLoopJoinExec',
-        conf=_keep_false_join_conf)
+        conf=_keep_false_join_conf,
+        gpu_plan_assertion=_nested_loop_join_shape('BroadcastNestedLoopJoinExec', True, False,
+                                                   False))
 
 # On Databricks the left side is counted below the join, and a merge count reads the join's output.
 @pytest.mark.parametrize('join_type', ['LEFT SEMI', 'LEFT ANTI'], ids=idfn)
@@ -1542,8 +1574,8 @@ def test_degenerate_broadcast_nested_loop_existence_join(spark_tmp_table_factory
 # lets Databricks 17.3 plan the EXISTS as a scalar subquery with no join.
 @ignore_order(local=True)
 @allow_non_gpu(*non_utc_allow)
-@pytest.mark.skipif(is_before_spark_340(),
-                    reason='EXISTS in a select list needs Spark 3.4, SPARK-30220')
+@pytest.mark.skipif(not is_spark_400_or_later(),
+                    reason='Spark before 4.0 pushes this predicate below the join, SPARK-46707')
 @pytest.mark.parametrize('k', [0, 40], ids=idfn)
 def test_broadcast_nested_loop_existence_join_one_sided_sequence_condition(
         spark_tmp_table_factory, k):
@@ -1559,8 +1591,9 @@ def test_broadcast_nested_loop_existence_join_one_sided_sequence_condition(
             'FROM {} AS t'.format(sub_table_name, k, outer_table_name))
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         do_join,
-        exist_classes='GpuBroadcastNestedLoopJoinExec',
-        conf={'spark.sql.adaptive.enabled': 'false'})
+        conf={'spark.sql.adaptive.enabled': 'false'},
+        gpu_plan_assertion=_nested_loop_join_shape('GpuBroadcastNestedLoopJoinExec', True, False,
+                                                   True))
 
 # Spark builds an existence join's left side when only the outer table is small enough to
 # broadcast. The plugin's iterators take the stream as the outer side, so such a join with a
