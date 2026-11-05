@@ -616,7 +616,7 @@ object GpuBroadcastNestedLoopJoinExecBase {
         }
       case (LeftSemi | LeftAnti, true) =>
         // Every stream row has a match when some build row meets the condition.
-        val anyMatch = withResource(filterAndClose(builtBatch, boundCondition))(_.numRows > 0)
+        val anyMatch = anyRowMatchesAndClose(builtBatch, boundCondition)
         val keepStream = anyMatch == (joinType == LeftSemi)
         stream.flatMap { scb =>
           withResource(scb) { _ =>
@@ -629,7 +629,7 @@ object GpuBroadcastNestedLoopJoinExecBase {
         }
       case (ExistenceJoin(_), true) =>
         // Every stream row exists when some build row meets the condition.
-        val exists = withResource(filterAndClose(builtBatch, boundCondition))(_.numRows > 0)
+        val exists = anyRowMatchesAndClose(builtBatch, boundCondition)
         stream.flatMap { scb =>
           if (scb.numRows == 0) {
             withResource(scb)(_ => None)
@@ -654,6 +654,21 @@ object GpuBroadcastNestedLoopJoinExecBase {
     withRetryNoSplit(batch) { _ =>
       withRestoreOnRetry(batch) {
         GpuFilter(batch.getBatch, condition, NoopMetric, NoopMetric, NoopMetric)
+      }
+    }
+  }
+
+  // Whether some row meets the condition, a null counting as no. It reads only the condition,
+  // where a filter would copy every column of the matching rows.
+  private def anyRowMatchesAndClose(
+      batch: LazySpillableColumnarBatch,
+      condition: GpuExpression): Boolean = {
+    batch.checkpoint()
+    withRetryNoSplit(batch) { _ =>
+      withRestoreOnRetry(batch) {
+        withResource(condition.columnarEval(batch.getBatch)) { matched =>
+          withResource(matched.getBase.any())(any => any.isValid && any.getBoolean)
+        }
       }
     }
   }
