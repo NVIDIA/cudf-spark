@@ -85,11 +85,6 @@ case class GpuOptimizeTableCommand(
     // REORG was checked during GPU planning, but the table metadata may have changed since then.
     GpuOptimizeTableCommand.assertReorgSupported(snapshot, optimizeContext)
 
-    // Sanity checks
-    if (zOrderBy.nonEmpty) {
-      throw new IllegalStateException("Z-Order optimize should not run on GPU")
-    }
-
     val isClusteredTable = ClusteredTableUtils.isSupported(snapshot.protocol)
     if (isClusteredTable) {
       if (userPartitionPredicates.nonEmpty) {
@@ -115,6 +110,12 @@ case class GpuOptimizeTableCommand(
       predicates
     }
 
+    // Same validation as the CPU command: Z-order columns must exist, be non-partition columns,
+    // and have statistics collected. It is an OptimizeTableCommandBase method, and extending that
+    // class here would make this class's bytecode differ across Delta versions, so reuse the REORG
+    // command, which already extends it.
+    GpuDeltaReorgTableCommand(child)(Nil).validateZorderByColumns(
+      sparkSession, snapshot, zOrderBy)
     val zOrderByColumns = zOrderBy.map(_.name)
 
     new GpuOptimizeExecutor(
