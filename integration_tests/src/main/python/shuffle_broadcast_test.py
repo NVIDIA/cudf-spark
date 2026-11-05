@@ -641,7 +641,7 @@ def test_driverless_broadcast_cancellation_releases_query_and_allows_next_query(
                 metric = 'executorBuilds' if enabled == 'true' else None
                 built = len(joins) == 1 and (
                     plan_metric(joins[0], metric) > 0 if metric else
-                    joins[0].plan_metric(broadcastExchange(), 'dataSize') > 0)
+                    plan_metric(joins[0].broadcastExchange(), 'dataSize') > 0)
                 if built and active > 0:
                     reached = True
                     break
@@ -713,7 +713,7 @@ def test_driverless_broadcast_can_be_enabled_after_application_startup():
             if enabled == 'true':
                 assert len(driverless) == 1
                 assert plan_metric(driverless[0], 'executorBuilds') > 0
-                assert driverless[0].plan_metric(fallbackBroadcast(), 'collectTime') == 0
+                assert plan_metric(driverless[0].fallbackBroadcast(), 'collectTime') == 0
             else:
                 assert not driverless
                 assert any(node.getClass().getSimpleName() == 'GpuBroadcastHashJoinExec'
