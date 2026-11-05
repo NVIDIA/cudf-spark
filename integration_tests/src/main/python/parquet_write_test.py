@@ -736,6 +736,38 @@ def test_concurrent_writer(spark_tmp_path):
         ))
 
 
+@pytest.mark.parametrize('float_type', ['FLOAT', 'DOUBLE'])
+@pytest.mark.parametrize('max_writers', [0, 1, 8])
+@validate_execs_in_gpu_plan('GpuDataWritingCommandExec')
+def test_partition_write_signed_zero(spark_tmp_path, float_type, max_writers):
+    path = spark_tmp_path + '/signed-zero-partitions'
+
+    def write(spark):
+        schema = StructType([StructField('id', LongType()), StructField('p', IntegerType()),
+                             StructField('f', FloatType() if float_type == 'FLOAT' else DoubleType())])
+        values = [0.0, -0.0, float('nan'), None]
+        (spark.createDataFrame([(i, i % 3, values[i % 4])
+                                for i in range(400)], schema).coalesce(1)
+         .write.mode('overwrite').partitionBy('f', 'p').parquet(path))
+
+    try:
+        with_gpu_session(write, conf={
+            'spark.sql.maxConcurrentOutputFileWriters': max_writers,
+            'spark.rapids.sql.batchSizeBytes': 1024,
+            'spark.sql.files.maxRecordsPerFile': 20,
+            'spark.sql.adaptive.enabled': 'false'})
+    finally:
+        reset_spark_session_conf()
+
+    def check(spark):
+        for partition, offset in [('0.0', 0), ('-0.0', 1), ('NaN', 2),
+                                  ('__HIVE_DEFAULT_PARTITION__', 3)]:
+            rows = spark.read.parquet(f'{path}/f={partition}/*').select('id').collect()
+            assert sorted(r.id for r in rows) == list(range(offset, 400, 4))
+
+    with_cpu_session(check)
+
+
 @ignore_order
 @pytest.mark.skipif(is_before_spark_320(), reason="is only supported in Spark 320+")
 @allow_non_gpu(any=True)

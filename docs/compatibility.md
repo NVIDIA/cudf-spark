@@ -121,6 +121,10 @@ with Spark for operations, prior to Spark 3.1.0, like sorting, and distinct coun
 differences with [joins, and comparisons](https://github.com/NVIDIA/cudf-spark/issues/294) even
 after Spark 3.1.0.
 
+Partition keys for GPU writes distinguish `0.0` from `-0.0`. Iceberg equality-delete keys also
+distinguish the two zeros while treating all NaN values as equal. These key-specific semantics do
+not change the plugin's behavior for general floating-point comparisons or sorting.
+
 We do not disable operations that produce different results due to `-0.0` in the data because it is
 considered to be a rare occurrence.
 

@@ -31,6 +31,46 @@ from spark_session import *
 delta_write_gens = [x for sublist in parquet_write_gens_list for x in sublist]
 
 
+@delta_lake
+@allow_non_gpu(*delta_meta_allow)
+@pytest.mark.parametrize('float_type', ['FLOAT', 'DOUBLE'])
+@pytest.mark.parametrize('max_writers', [0, 8])
+def test_delta_partition_write_signed_zero(spark_tmp_path, float_type, max_writers):
+    path = spark_tmp_path + '/delta-signed-zero'
+    schema = StructType([StructField('id', LongType()),
+                         StructField('f', FloatType() if float_type == 'FLOAT' else DoubleType())])
+
+    def write(spark):
+        (spark.createDataFrame([(i, 0.0 if i % 2 == 0 else -0.0) for i in range(400)], schema)
+         .coalesce(1).write.format('delta').mode('overwrite').partitionBy('f').save(path))
+
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        with_gpu_session(write, conf=copy_and_update(_delta_confs, {
+            'spark.sql.maxConcurrentOutputFileWriters': max_writers,
+            'spark.rapids.sql.batchSizeBytes': 1024}))
+        plans = callback.getResultsWithTimeout(10000)
+        assert any(callback.contains(plan, 'GpuDataWritingCommandExec') or
+                   callback.contains(plan, 'RapidsDeltaWrite') for plan in plans), \
+            'Expected GPU Delta write'
+    finally:
+        callback.endCapture()
+        reset_spark_session_conf()
+
+    def check(spark):
+        files = spark.sparkContext.wholeTextFiles(path + '/_delta_log/*.json').collect()
+        actions = [json.loads(line) for _, content in files for line in content.splitlines()]
+        adds = [a['add'] for a in actions if 'add' in a]
+        counts = {}
+        for add in adds:
+            value = add['partitionValues']['f']
+            counts[value] = counts.get(value, 0) + json.loads(add['stats'])['numRecords']
+        assert counts == {'0.0': 200, '-0.0': 200}
+
+    with_cpu_session(check)
+
+
 delta_part_write_gens = [
     byte_gen,
     short_gen,

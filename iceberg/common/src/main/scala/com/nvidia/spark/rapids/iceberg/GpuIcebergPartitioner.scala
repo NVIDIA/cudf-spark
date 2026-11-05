@@ -73,7 +73,9 @@ class GpuIcebergPartitioner(
     val inputColIndices = (keys.numCols() until (keys.numCols() + values.numCols())).toArray
 
     // Combine keys and values into a single batch: [key columns, input columns]
-    val keysAndInputBatch = GpuColumnVector.combineColumns(keys, values)
+    val keysAndInputBatch = withResource(GpuFloatingPointKeyUtils.encode(keys)) { encoded =>
+      GpuColumnVector.combineColumns(encoded, values)
+    }
     
     withResource(keysAndInputBatch) { _ =>
       withResource(GpuColumnVector.from(keysAndInputBatch)) { keysAndInputTable =>
@@ -86,9 +88,12 @@ class GpuIcebergPartitioner(
         // Generate results
         withResource(splitRet) { _ =>
           // Generate the partition keys on the host side
-          val partitionKeys = GpuIcebergPartitioner.toPartitionKeys(keyType,
-            keySparkType,
-            splitRet.getUniqKeyTable)
+          val partitionKeys = withResource(GpuFloatingPointKeyUtils.decode(
+              splitRet.getUniqKeyTable, keySparkType.fields.map(_.dataType))) { decoded =>
+            withResource(GpuColumnVector.from(decoded)) { keyTable =>
+              GpuIcebergPartitioner.toPartitionKeys(keyType, keySparkType, keyTable)
+            }
+          }
 
           // Release unique table to save GPU memory
           splitRet.closeUniqKeyTable()
