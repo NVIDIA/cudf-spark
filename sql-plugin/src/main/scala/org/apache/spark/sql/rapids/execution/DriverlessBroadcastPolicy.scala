@@ -50,6 +50,9 @@ private[execution] object DriverlessBroadcastPolicy extends Logging {
     Seq(
       // The build reader consumes GPU shuffle blocks, not disk-shuffle ManagedBuffers.
       if (!startup.isUCXShuffleManagerMode) Some("UCX GPU shuffle mode is required") else None,
+      // Row-based checksums select SortShuffleManager even in UCX mode. Its reader returns
+      // serialized host batches, which the driverless GPU build assembler cannot consume.
+      // Spark 4.2 enables these checksums by default.
       if (GpuShuffleEnv.isRowBasedChecksumEnabled) {
         Some("row-based shuffle checksums require standard shuffle")
       } else None,

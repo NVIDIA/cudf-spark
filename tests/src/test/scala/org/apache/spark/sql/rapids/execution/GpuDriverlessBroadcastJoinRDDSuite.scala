@@ -18,6 +18,7 @@ package org.apache.spark.sql.rapids.execution
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 
 import com.nvidia.spark.rapids.{GpuMetric, GpuOpTimeTrackingRDD}
+import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -151,7 +152,7 @@ class GpuDriverlessBroadcastJoinRDDSuite extends AnyFunSuite with BeforeAndAfter
       assert(result.map(_._1).distinct.length == 1,
         "Both consumers must use the recomputed build, not a cached earlier attempt")
     } finally {
-      BroadcastReplicaRetryState.caches.foreach(_.close())
+      BroadcastReplicaRetryState.caches.toSeq.safeClose()
     }
   }
 

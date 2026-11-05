@@ -13,11 +13,10 @@
 # limitations under the License.
 
 import os
-import time
 
 import pytest
 from pyspark import InheritableThread, TaskContext
-from pyspark.sql.functions import broadcast, col, udf
+from pyspark.sql.functions import broadcast, col, expr, udf
 from pyspark.sql.types import LongType
 
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, collect_plan_nodes, plan_metric
@@ -599,82 +598,71 @@ def test_driverless_broadcast_recovers_after_probe_task_retry(aqe):
     with_gpu_session(check, conf=dict(_conf, **{'spark.sql.adaptive.enabled': aqe}))
 
 
-@allow_non_gpu('BatchEvalPythonExec', 'PythonUDF')
+@allow_non_gpu('ProjectExec', 'RangeExec', 'ScalaUDF')
 @pytest.mark.parametrize('aqe', ['false', 'true'])
 @pytest.mark.parametrize('enabled', ['false', 'true'])
 def test_driverless_broadcast_cancellation_releases_query_and_allows_next_query(aqe, enabled):
     _require_ucx()
     expected = with_cpu_session(lambda session: _rows(_lifecycle_query(session)))
 
-    @udf(LongType())
-    def slow_probe(value):
-        if value == 0:
-            time.sleep(45)
-        return value
-
     def check(session):
         sc = session.sparkContext
         group = 'driverless-broadcast-cancellation'
-        frame = _lifecycle_query(session, slow_probe)
+        helper = sc._jvm.org.apache.spark.sql.rapids.testing.ExecutorBroadcastFaultSupport
+        probe = helper.cancellationProbe(session._jsparkSession)
         outcome = []
-
-        def collect():
-            sc.setJobGroup(group, 'Cancel broadcast join with an active probe task', True)
-            try:
-                outcome.append(('success', frame.collect()))
-            except Exception as error:
-                outcome.append(('failure', str(error)))
-            finally:
-                sc.setLocalProperty('spark.jobGroup.id', None)
-                sc.setLocalProperty('spark.job.interruptOnCancel', None)
-
-        worker = InheritableThread(target=collect, daemon=True)
-        worker.start()
+        worker = None
         try:
-            deadline = time.monotonic() + 40
-            reached = False
-            while time.monotonic() < deadline:
-                plan = frame._jdf.queryExecution().executedPlan()
-                joins = [node for node in collect_plan_nodes(plan, include_wrapped=True)
-                         if node.getClass().getSimpleName() == (
-                             'GpuDriverlessBroadcastHashJoinExec' if enabled == 'true'
-                             else 'GpuBroadcastHashJoinExec')]
-                active = sum(info.numRunningTasks()
-                             for info in sc._jsc.sc().statusTracker().getExecutorInfos())
-                metric = 'executorBuilds' if enabled == 'true' else None
-                built = len(joins) == 1 and (
-                    plan_metric(joins[0], metric) > 0 if metric else
-                    plan_metric(joins[0].broadcastExchange(), 'dataSize') > 0)
-                if built and active > 0:
-                    reached = True
-                    break
-                assert worker.is_alive(), outcome
-                time.sleep(0.1)
-            assert reached, 'Cancellation must reach a built join with an active task'
+            frame = _lifecycle_query(session, lambda value: expr(f'{probe.functionName()}(id)'))
+
+            def collect():
+                sc.setJobGroup(group, 'Cancel broadcast join with an active probe task', True)
+                try:
+                    outcome.append(('success', frame.collect()))
+                except Exception as error:
+                    outcome.append(('failure', str(error)))
+                finally:
+                    sc.setLocalProperty('spark.jobGroup.id', None)
+                    sc.setLocalProperty('spark.job.interruptOnCancel', None)
+
+            worker = InheritableThread(target=collect, daemon=True)
+            worker.start()
+            assert probe.awaitEntered(60), f'Probe task did not reach cancellation gate: {outcome}'
+            plan = frame._jdf.queryExecution().executedPlan()
+            joins = [node for node in collect_plan_nodes(plan, include_wrapped=True)
+                     if node.getClass().getSimpleName() == (
+                         'GpuDriverlessBroadcastHashJoinExec' if enabled == 'true'
+                         else 'GpuBroadcastHashJoinExec')]
+            assert len(joins) == 1, plan.toString()
+            metric_node = joins[0] if enabled == 'true' else joins[0].broadcastExchange()
+            metric_name = 'executorBuilds' if enabled == 'true' else 'dataSize'
+            built = probe.awaitMetric(metric_node.metrics().apply(metric_name), 40)
+            assert built, 'Cancellation must reach a built join with an active probe task'
             sc.cancelJobGroup(group)
             worker.join(30)
             assert not worker.is_alive(), 'Cancellation did not release the query'
             assert len(outcome) == 1 and outcome[0][0] == 'failure', outcome
             message = outcome[0][1].lower()
             assert 'cancel' in message or 'interrupt' in message, message
-            deadline = time.monotonic() + 20
-            while time.monotonic() < deadline:
-                if not any(info.numRunningTasks() for info in
-                           sc._jsc.sc().statusTracker().getExecutorInfos()):
-                    break
-                time.sleep(0.1)
+            probe.awaitIdle(20)
             assert not any(info.numRunningTasks() for info in
                            sc._jsc.sc().statusTracker().getExecutorInfos())
-            assert _rows(_lifecycle_query(session)) == expected
         finally:
-            if worker.is_alive():
+            if worker is not None and worker.is_alive():
                 sc.cancelJobGroup(group)
-                worker.join(30)
+            try:
+                probe.close()
+            finally:
+                if worker is not None and worker.is_alive():
+                    worker.join(30)
+        assert _rows(_lifecycle_query(session)) == expected
 
+    # The blocking test UDF must run on CPUs, outside CPU bridge GPU expressions.
     with_gpu_session(check, conf=dict(_conf, **{
         'spark.sql.adaptive.enabled': aqe,
-        'spark.rapids.sql.driverlessBroadcast.enabled': enabled}))
-
+        'spark.rapids.sql.driverlessBroadcast.enabled': enabled,
+        'spark.rapids.sql.exec.RangeExec': 'false',
+        'spark.rapids.sql.expression.cpuBridge.enabled': 'false'}))
 
 def test_driverless_broadcast_missing_build_output_is_recomputed():
     _require_ucx()

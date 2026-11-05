@@ -15,21 +15,112 @@
  */
 package org.apache.spark.sql.rapids.testing
 
+import java.util.concurrent.{CountDownLatch, TimeUnit}
+
 import scala.collection.mutable
 import scala.concurrent.duration._
 
 import org.apache.spark.{ShuffleDependency, SparkEnv, TaskContext}
 import org.apache.spark.rpc.{RpcCallContext, RpcEnv, RpcTimeout, ThreadSafeRpcEndpoint}
-import org.apache.spark.scheduler.{SparkListener, SparkListenerBlockManagerAdded, SparkListenerExecutorAdded, SparkListenerTaskEnd, SparkListenerTaskStart}
+import org.apache.spark.scheduler.{SparkListener, SparkListenerBlockManagerAdded, SparkListenerExecutorAdded, SparkListenerExecutorMetricsUpdate, SparkListenerTaskEnd, SparkListenerTaskStart}
 import org.apache.spark.sql.{Dataset, Row, SparkSession}
 import org.apache.spark.sql.execution.{SparkPlan, SQLExecution}
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec
+import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.types.LongType
 import org.apache.spark.util.ThreadUtils
 
 /** Test-only missing-output injection for the two-executor shuffle integration suite. */
 object ExecutorBroadcastFaultSupport {
   private case class BuildStarted(stageId: Int)
+  private case object ProbeEntered
+
+  /** Holds the first probe row until cancellation; the Python test owns and closes this fixture. */
+  class CancellationProbe(session: SparkSession) extends AutoCloseable {
+    private val context = session.sparkContext
+    private val rpc = SparkEnv.get.rpcEnv
+    private val entered = new CountDownLatch(1)
+    private val lock = new Object
+    private val activeTasks = mutable.Set.empty[Long]
+    private val listener = new SparkListener {
+      override def onTaskStart(event: SparkListenerTaskStart): Unit = lock.synchronized {
+        activeTasks += event.taskInfo.taskId
+      }
+      override def onTaskEnd(event: SparkListenerTaskEnd): Unit = lock.synchronized {
+        activeTasks -= event.taskInfo.taskId
+        lock.notifyAll()
+      }
+      override def onExecutorMetricsUpdate(event: SparkListenerExecutorMetricsUpdate): Unit =
+        lock.synchronized { lock.notifyAll() }
+    }
+    val functionName: String = s"driverless_cancel_probe_${System.nanoTime()}"
+    private val gate = rpc.setupEndpoint(functionName, new ThreadSafeRpcEndpoint {
+      override val rpcEnv: RpcEnv = rpc
+      private val waiting = mutable.ArrayBuffer.empty[RpcCallContext]
+      override def receiveAndReply(call: RpcCallContext): PartialFunction[Any, Unit] = {
+        case ProbeEntered =>
+          waiting += call
+          entered.countDown()
+      }
+      override def onStop(): Unit = waiting.foreach(_.sendFailure(
+        new IllegalStateException("Cancellation probe fixture closed")))
+    })
+    context.addSparkListener(listener)
+    try {
+      // Capture only the address/name; the executor resolves its own RPC environment.
+      val target = gate.address
+      val name = gate.name
+      session.udf.register(functionName, (value: Long) => {
+        if (value == 0L) {
+          SparkEnv.get.rpcEnv.setupEndpointRef(target, name)
+            .askSync[Boolean](ProbeEntered, new RpcTimeout(300.seconds,
+              "driverless cancellation probe timeout"))
+        }
+        value
+      })
+    } catch {
+      case error: Throwable =>
+        rpc.stop(gate)
+        context.removeSparkListener(listener)
+        throw error
+    }
+
+    def awaitEntered(seconds: Long): Boolean = entered.await(seconds, TimeUnit.SECONDS)
+
+    def awaitMetric(metric: SQLMetric, seconds: Long): Boolean = {
+      val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(seconds)
+      lock.synchronized {
+        var remaining = deadline - System.nanoTime()
+        while (metric.value <= 0 && remaining > 0) {
+          lock.wait(math.max(1L, remaining / 1000000L))
+          remaining = deadline - System.nanoTime()
+        }
+        metric.value > 0
+      }
+    }
+
+    def awaitIdle(seconds: Long): Unit = {
+      context.listenerBus.waitUntilEmpty(TimeUnit.SECONDS.toMillis(seconds))
+      val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(seconds)
+      lock.synchronized {
+        while (activeTasks.nonEmpty) {
+          val remaining = deadline - System.nanoTime()
+          require(remaining > 0, s"Cancelled query still has active tasks: $activeTasks")
+          lock.wait(math.max(1L, remaining / 1000000L))
+        }
+      }
+      context.listenerBus.waitUntilEmpty(TimeUnit.SECONDS.toMillis(seconds))
+    }
+
+    override def close(): Unit = {
+      try rpc.stop(gate) finally {
+        context.removeSparkListener(listener)
+        session.sql(s"DROP TEMPORARY FUNCTION IF EXISTS $functionName")
+      }
+    }
+  }
+
+  def cancellationProbe(session: SparkSession): CancellationProbe = new CancellationProbe(session)
 
   private class ParallelBuildGate(override val rpcEnv: RpcEnv) extends ThreadSafeRpcEndpoint {
     private val waiting = mutable.Map.empty[Int, RpcCallContext]
