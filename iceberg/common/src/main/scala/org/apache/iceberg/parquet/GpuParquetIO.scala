@@ -20,12 +20,40 @@ import com.nvidia.spark.rapids.GpuMetric
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
 import com.nvidia.spark.rapids.iceberg.ShimUtils
 import org.apache.hadoop.fs.Path
+import org.apache.iceberg.Schema
 import org.apache.iceberg.io.InputFile
+import org.apache.iceberg.mapping.NameMapping
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.iceberg.shaded.org.apache.parquet.io.{InputFile => ShadedInputFile}
+import org.apache.iceberg.shaded.org.apache.parquet.schema.{MessageType => ShadedMessageType}
 
 object GpuParquetIO {
+  /**
+   * Assign field IDs where needed and prune a Parquet schema to the required Iceberg schema.
+   * Planning and execution use the same projection for files with IDs, a name mapping, or
+   * fallback IDs.
+   *
+   * @param fileSchema physical Parquet schema
+   * @param requiredSchema Iceberg schema to project
+   * @param nameMapping optional mapping used when the file schema has no field IDs
+   * @return the schema with field IDs and the pruned schema, in that order
+   */
+  def projectAndPruneSchema(
+      fileSchema: ShadedMessageType,
+      requiredSchema: Schema,
+      nameMapping: Option[NameMapping]): (ShadedMessageType, ShadedMessageType) = {
+    if (ParquetSchemaUtil.hasIds(fileSchema)) {
+      (fileSchema, ParquetSchemaUtil.pruneColumns(fileSchema, requiredSchema))
+    } else if (nameMapping.isDefined) {
+      val typeWithIds = ParquetSchemaUtil.applyNameMapping(fileSchema, nameMapping.get)
+      (typeWithIds, ParquetSchemaUtil.pruneColumns(typeWithIds, requiredSchema))
+    } else {
+      val typeWithIds = ParquetSchemaUtil.addFallbackIds(fileSchema)
+      (typeWithIds, ParquetSchemaUtil.pruneColumnsFallback(typeWithIds, requiredSchema))
+    }
+  }
+
   def file(file: InputFile): ShadedInputFile = {
     GpuParquetIOAccess.file(file)
   }
