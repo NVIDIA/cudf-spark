@@ -897,6 +897,12 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val shuffleUcxHostBounceBuffersCount: Int = get(SHUFFLE_UCX_BOUNCE_BUFFERS_HOST_COUNT)
 
+  lazy val shuffleUcxCleanupOnQueryEndEnabled: Boolean =
+    get(SHUFFLE_UCX_CLEANUP_ON_QUERY_END_ENABLED)
+
+  lazy val shuffleUcxCleanupOnQueryEndEventLogEnabled: Boolean =
+    get(SHUFFLE_UCX_CLEANUP_ON_QUERY_END_EVENT_LOG_ENABLED)
+
   lazy val shuffleMaxClientThreads: Int = get(SHUFFLE_MAX_CLIENT_THREADS)
 
   lazy val shuffleMaxClientTasks: Int = get(SHUFFLE_MAX_CLIENT_TASKS)

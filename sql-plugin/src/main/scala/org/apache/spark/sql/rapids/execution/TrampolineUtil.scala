@@ -21,7 +21,8 @@ import java.util.concurrent.{ExecutorService, ScheduledExecutorService, ThreadPo
 import org.apache.hadoop.conf.Configuration
 import org.json4s.JsonAST
 
-import org.apache.spark.{SparkConf, SparkContext, SparkEnv, SparkMasterRegex, SparkUpgradeException, TaskContext}
+import org.apache.spark.{MapOutputTrackerMaster, SparkConf, SparkContext, SparkEnv, SparkException,
+  SparkMasterRegex, SparkUpgradeException, TaskContext}
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.executor.InputMetrics
@@ -254,17 +255,35 @@ object TrampolineUtil {
 
   /**
    * Clears every map and merge output that the driver holds for a shuffle, and keeps the
-   * shuffle's status, so a later job reruns the map stage before it reads.
+   * shuffle's status, so a later job reruns the map stage before it reads. Call it on the
+   * driver, whose map output tracker is the master.
    *
    * @return true when the driver held the shuffle's status
    */
-  def clearMapOutputs(shuffleId: Int): Boolean = false
+  def clearMapOutputs(shuffleId: Int): Boolean = {
+    val tracker = SparkEnv.get.mapOutputTracker.asInstanceOf[MapOutputTrackerMaster]
+    if (tracker.containsShuffle(shuffleId)) {
+      try {
+        tracker.unregisterAllMapAndMergeOutput(shuffleId)
+        true
+      } catch {
+        // Spark's cleanup removed the status after the check
+        case _: SparkException => false
+      }
+    } else {
+      false
+    }
+  }
 
   /** Adds a listener to a listener bus queue of its own, which Spark creates on first use. */
-  def addListenerToQueue(sc: SparkContext, listener: SparkListener, queue: String): Unit = {}
+  def addListenerToQueue(sc: SparkContext, listener: SparkListener, queue: String): Unit = {
+    sc.listenerBus.addToQueue(listener, queue)
+  }
 
   /** How many events a listener bus queue has dropped since its SparkContext started. */
-  def listenerQueueDroppedEvents(sc: SparkContext, queue: String): Long = 0L
+  def listenerQueueDroppedEvents(sc: SparkContext, queue: String): Long = {
+    sc.listenerBus.metrics.metricRegistry.counter(s"queue.$queue.numDroppedEvents").getCount
+  }
 
   def getSparkHadoopUtilConf: Configuration = SparkHadoopUtil.get.conf
 
