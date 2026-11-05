@@ -64,6 +64,26 @@ class ParquetBufferConsumerSuite extends SparkQueryCompareTestSuite {
     }.toVector
   }
 
+  test("partial callback buffers spill only written bytes and release their allocation") {
+    withGpuSparkSession { _ =>
+      val bytes = parquetBytes()
+      val handles = SpillFramework.stores.hostStore.numHandles
+      withResource(new ParquetBufferConsumer(numRows = rows)) { consumer =>
+        val buffer = closeOnExcept(HostMemoryBuffer.allocate(bytes.length + 1024 * 1024)) {
+          allocated =>
+            allocated.setBytes(0, bytes, 0, bytes.length)
+            allocated
+        }
+        consumer.handleBuffer(buffer, bytes.length)
+        assert(SpillFramework.stores.hostStore.spill(Long.MaxValue) == bytes.length)
+        assert(buffer.getRefCount == 0)
+        val records = consumer.records.toList
+        assert(records.map(_.numRows).sum == rows)
+        assert(SpillFramework.stores.hostStore.numHandles == handles)
+      }
+    }
+  }
+
   test("malformed footer releases every callback region") {
     withGpuSparkSession { _ =>
       val handles = SpillFramework.stores.hostStore.numHandles

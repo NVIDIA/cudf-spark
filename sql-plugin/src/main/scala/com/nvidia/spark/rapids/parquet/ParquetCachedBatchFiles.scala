@@ -251,7 +251,7 @@ private[rapids] object ParquetCachedBatchFiles {
   }
 
   case class FileInfo(rows: Int, encodedBytes: Int, estimatedDecodedBytes: Long,
-      metadata: ParquetMetadata, footerStart: Long) {
+      metadata: ParquetMetadata, footerStart: Long, projectedEncodedBytes: Long) {
     def parquetSchema: MessageType =
       metadata.getFileMetaData.getSchema
     def rowGroups: Int = metadata.getBlocks.size
@@ -267,12 +267,21 @@ private[rapids] object ParquetCachedBatchFiles {
       Math.addExact(total, block.getRowCount)
     }
     require(rows == batch.numRows, "Cached rows differ from Parquet footer")
-    val uncompressed = metadata.getBlocks.asScala.foldLeft(0L) { (total, block) =>
-      Math.addExact(total, block.getTotalByteSize)
+    // Projection selects whole top-level columns, including every leaf of nested values.
+    val selectedNames = schema.fieldNames.toSet
+    val selectedChunks = metadata.getBlocks.asScala.flatMap(_.getColumns.asScala)
+      .filter(column => selectedNames.contains(column.getPath.toArray.head))
+    // PCBS owns both writers: parquet-mr and cuDF populate sizes for every leaf chunk,
+    // including nested leaves. Relocation and standalone footer writing preserve these sizes.
+    val uncompressed = selectedChunks.foldLeft(0L) { (total, column) =>
+      Math.addExact(total, column.getTotalUncompressedSize)
+    }
+    val encoded = selectedChunks.foldLeft(0L) { (total, column) =>
+      Math.addExact(total, column.getTotalSize)
     }
     val gpuEstimate = GpuBatchUtils.estimateGpuMemory(schema, rows)
     FileInfo(batch.numRows, batch.buffer.length, math.max(uncompressed, gpuEstimate), metadata,
-      footerStart(source))
+      footerStart(source), encoded)
   }
 
   /** Owns its spillable file; every materialized buffer reference belongs to its caller. */

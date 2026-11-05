@@ -265,6 +265,59 @@ class CachedBatchWriterSuite extends SparkQueryCompareTestSuite {
     }
   }
 
+  test("default CPU record target leaves room below an 8 MiB array") {
+    withCpuSparkSession(spark => {
+      val attrs: Seq[Attribute] = Seq(
+        AttributeReference("value", StringType, nullable = false)())
+      val cachedAttrs = PCBSSchemaHelper.getSupportedSchemaFromUnsupported(attrs)
+      val rowCount = 24000
+      val input = (0 until rowCount).iterator.map { id =>
+        InternalRow(UTF8String.fromString(id.toString + ("x" * 1024)))
+      }
+      val ser = new ParquetCachedBatchSerializer
+      val conf = TrampolineUtil.getSparkConf(spark)
+      val sharedConf = spark.sparkContext.broadcast(conf.getAllConfs)
+      var sizeChecks = 0
+      val format = new ParquetOutputFileFormat {
+        override def getRecordWriter(output: org.apache.parquet.io.OutputFile,
+            conf: org.apache.hadoop.conf.Configuration): SizedParquetRecordWriter = {
+          val writer = super.getRecordWriter(output, conf)
+          new SizedParquetRecordWriter {
+            override def getDataSize: Long = {
+              sizeChecks += 1
+              writer.getDataSize
+            }
+            override def write(key: Void, row: InternalRow): Unit = writer.write(key, row)
+            override def close(context: TaskAttemptContext): Unit = writer.close(context)
+          }
+        }
+      }
+      val records = try {
+        val producer = new ser.CachedBatchIteratorProducer[InternalRow](
+          input, cachedAttrs, attrs, sharedConf)
+        producer.hadoopConf.setBoolean("parquet.enable.dictionary", false)
+        withResource(new producer.InternalRowToCachedBatchIterator) { records =>
+          records.setParquetOutputFileFormat(format)
+          records.toList
+        }
+      } finally {
+        sharedConf.destroy()
+      }
+      assert(sizeChecks < rowCount / 10, s"too many column-size walks: $sizeChecks")
+      assert(records.length > 2)
+      assert(records.map(_.numRows).sum == rowCount)
+      // This is a soft target: indivisible large rows and pages may still exceed it.
+      assert(records.forall(_.sizeInBytes < 8L * 1024 * 1024))
+      val decoded = ser.convertCachedBatchToInternalRow(
+        spark.sparkContext.parallelize[CachedBatch](records, numSlices = 1),
+        attrs, attrs, conf).map(_.copy()).collect()
+      assert(decoded.length == rowCount)
+      decoded.zipWithIndex.foreach { case (row, id) =>
+        assert(row.getUTF8String(0).toString == id.toString + ("x" * 1024))
+      }
+    }, new SparkConf().set("spark.sql.inMemoryColumnarStorage.compressed", "false"))
+  }
+
   test("PCBS schema conversion supports nested UDTs") {
     val udt = new TestPrimitiveUDT
     assert(PCBSSchemaHelper.getSupportedDataType(

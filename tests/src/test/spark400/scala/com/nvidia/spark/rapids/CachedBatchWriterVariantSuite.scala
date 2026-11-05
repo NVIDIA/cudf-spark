@@ -33,9 +33,9 @@ import org.apache.spark.storage.StorageLevel.MEMORY_ONLY
 class CachedBatchWriterVariantSuite extends SparkQueryCompareTestSuite {
   import CachedBatchWriterVariantSuite._
 
-  // ColumnarBatchRow.copy() does not take Variant on Spark 4.0 and 4.1.0-4.1.1, so the
-  // columnar entry has to carry its row into the next batch without copying it.
-  test("columnar entry carries a Variant row into the next batch with its own values") {
+  // Exercise Variant values across CPU cache record boundaries without copying input rows:
+  // ColumnarBatchRow.copy() does not support Variant on Spark 4.0 and 4.1.0-4.1.1.
+  test("columnar entry preserves Variant values across cache record boundaries") {
     // Distinct 4 KiB payloads exceed the 16 KiB buffered-data budget across several records.
     val numRows = 30
     val attrs = Seq(AttributeReference("id", LongType, nullable = false)(),

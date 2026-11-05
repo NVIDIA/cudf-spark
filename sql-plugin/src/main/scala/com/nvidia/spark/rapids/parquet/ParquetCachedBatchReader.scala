@@ -52,7 +52,7 @@ private[rapids] object ParquetCachedBatchReader {
   private[parquet] def fits(
       rows: Long, encoded: Long, estimated: Long, next: FileInfo, target: Long): Boolean = {
     next.rows <= Int.MaxValue.toLong - rows &&
-      next.encodedBytes <= target - encoded &&
+      next.projectedEncodedBytes <= target - encoded &&
       next.estimatedDecodedBytes <= target - estimated
   }
 
@@ -94,7 +94,7 @@ private[rapids] object ParquetCachedBatchReader {
  */
 private[rapids] final class ParquetCachedBatchReader(
     input: Iterator[CachedBatch],
-    cacheSchema: StructType,
+    selectedSchema: StructType,
     options: ParquetOptions,
     targetBytes: Long,
     maxChunkReaderMemoryBytes: Long)
@@ -121,7 +121,7 @@ private[rapids] final class ParquetCachedBatchReader(
       if (batch.buffer.isEmpty) {
         Left(batch.numRows)
       } else {
-        val info = ParquetCachedBatchFiles.describe(batch, cacheSchema)
+        val info = ParquetCachedBatchFiles.describe(batch, selectedSchema)
         Right(ParquetCachedBatchFiles.stage(batch, info))
       }
     case other =>
@@ -151,7 +151,7 @@ private[rapids] final class ParquetCachedBatchReader(
       case Right(file) =>
         closeOnExcept(ArrayBuffer(file)) { files =>
           var rows = file.info.rows.toLong
-          var encoded = file.info.encodedBytes.toLong
+          var encoded = file.info.projectedEncodedBytes
           var estimated = file.info.estimatedDecodedBytes
           var continue = true
           while (continue && rows < Int.MaxValue && encoded < targetBytes &&
@@ -165,7 +165,7 @@ private[rapids] final class ParquetCachedBatchReader(
                     nextFile.info.parquetSchema == file.info.parquetSchema) {
                   files += nextFile
                   rows += nextFile.info.rows
-                  encoded += nextFile.info.encodedBytes
+                  encoded += nextFile.info.projectedEncodedBytes
                   estimated += nextFile.info.estimatedDecodedBytes
                 } else {
                   pendingFile = Some(nextFile)

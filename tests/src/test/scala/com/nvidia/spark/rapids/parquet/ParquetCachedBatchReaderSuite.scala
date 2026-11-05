@@ -22,8 +22,8 @@ import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 
 import ai.rapids.cudf.{ParquetOptions, Rmm, RmmAllocationMode, RmmEventHandler, Table}
+import com.nvidia.spark.rapids.{RapidsConf, RetryableTableProducer}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
-import com.nvidia.spark.rapids.RapidsConf
 import com.nvidia.spark.rapids.jni.{GpuRetryOOM, RmmSpark}
 import com.nvidia.spark.rapids.parquet.ParquetCachedBatchReader.TableProducer
 import com.nvidia.spark.rapids.spill.SpillFramework
@@ -107,7 +107,7 @@ class ParquetCachedBatchReaderSuite extends AnyFunSuite with BeforeAndAfterEach 
     }
   }
 
-  private def readValues(producer: TableProducer): Seq[Long] = {
+  private def readValues(producer: RetryableTableProducer): Seq[Long] = {
     val values = ArrayBuffer.empty[Long]
     while (producer.hasNext) {
       withResource(producer.next) { table =>
@@ -159,6 +159,30 @@ class ParquetCachedBatchReaderSuite extends AnyFunSuite with BeforeAndAfterEach 
         assert(expectedRow == 800)
       }
       assert(!reader.hasNext)
+    }
+  }
+
+  Seq(4, 400).foreach { count =>
+    test(s"projected column sizes allow bundling $count-row records") {
+      val first = encoded(0, count, dictionary = false)
+      val second = encoded(count, count, dictionary = false)
+      val selected = StructType(schema.fields.filter(_.name == "id"))
+      val info = ParquetCachedBatchFiles.describe(first, selected)
+      val secondInfo = ParquetCachedBatchFiles.describe(second, selected)
+      val target = math.max(info.projectedEncodedBytes + secondInfo.projectedEncodedBytes,
+        info.estimatedDecodedBytes + secondInfo.estimatedDecodedBytes)
+      val full = ParquetCachedBatchFiles.describe(first, schema)
+      assert(full.encodedBytes > info.projectedEncodedBytes)
+      assert(full.estimatedDecodedBytes > info.estimatedDecodedBytes)
+      val projectedOptions = ParquetOptions.builder().includeColumn(Seq("id").asJava).build()
+      withResource(new ParquetCachedBatchReader(
+          Iterator[CachedBatch](first, second), selected, projectedOptions, target, 0)) { reader =>
+        withResource(reader.next()) { batch =>
+          assert(batch.numRows == 2 * count)
+          assert(readValues(batch.producer.get) == (0L until 2L * count))
+        }
+        assert(!reader.hasNext)
+      }
     }
   }
 

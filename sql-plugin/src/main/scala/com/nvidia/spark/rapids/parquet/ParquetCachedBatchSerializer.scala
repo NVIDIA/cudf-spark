@@ -133,7 +133,13 @@ private class ParquetBufferConsumer(val numRows: Int) extends HostBufferConsumer
       require(!closed && !recordsCreated, "Parquet writer callback after consumption")
       require(len >= 0 && len <= buffer.getLength, "Invalid Parquet writer buffer length")
     }
-    closeOnExcept(SpillableHostBuffer(buffer, len, SpillPriorities.ACTIVE_BATCHING_PRIORITY)) {
+    // A slice retains the allocation without copying, but spills only the written bytes.
+    val usedBuffer = if (len < buffer.getLength) {
+      withResource(buffer)(_.slice(0, len))
+    } else {
+      buffer
+    }
+    closeOnExcept(SpillableHostBuffer(usedBuffer, len, SpillPriorities.ACTIVE_BATCHING_PRIORITY)) {
       spillable => regions += ((spillable, len))
     }
   }
@@ -507,7 +513,6 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
     } else {
       0L
     }
-    val cacheSchema = cacheAttributes.toStructType
     val outputTypes = originalSelectedAttributes.map(_.dataType).toArray
 
     // Keep the existing representation conversions after Parquet decoding.
@@ -545,7 +550,7 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
     input.mapPartitions { records =>
       val options = ParquetOptions.builder()
         .includeColumn(selectedAttributes.map(_.name).asJavaCollection).build()
-      val reader = new ParquetCachedBatchReader(records, cacheSchema, options,
+      val reader = new ParquetCachedBatchReader(records, selectedAttributes.toStructType, options,
         targetBytes, readerMemoryBytes)
       new GpuColumnarBatchIterator(true) {
         private var current: Option[GpuColumnarBatchIterator] = None
@@ -1251,13 +1256,29 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
             parquetOutputFileFormat.getRecordWriter(outputFile, hadoopConf)
           }
           withResource(recordWriter) { writer =>
-            // Parquet counts buffered encoded data, including variable-width values for generic
-            // and host-columnar rows. This is a soft target: the last row, page buffering and the
-            // footer can take a record over budget. Write at least one row to guarantee progress.
-            while (rows < Int.MaxValue && (rows == 0 ||
-                writer.getDataSize < bytesAllowedPerBatch) && rowIterator.hasNext) {
+            // Parquet counts actual buffered data, including generic and host-columnar values.
+            // Checking it walks every column. Start with one row, then check halfway toward the
+            // target based on the measured average, at most 10,000 rows apart as in parquet-mr.
+            // Check frequently near the target. A large row or page can still exceed this soft
+            // budget; always write at least one row, without reading ahead across a record
+            // boundary.
+            val maxRowsBetweenChecks = 10000L
+            var nextSizeCheck = 1L
+            var underBudget = true
+            while (rows < Int.MaxValue && underBudget && rowIterator.hasNext) {
               writer.write(null, rowIterator.next())
               rows += 1
+              if (rows >= nextSizeCheck) {
+                val size = writer.getDataSize
+                underBudget = size < bytesAllowedPerBatch
+                if (underBudget) {
+                  val averageRowBytes = math.max(1.0, size.toDouble / rows)
+                  val rowsUntilTarget = (bytesAllowedPerBatch - size) / averageRowBytes
+                  val interval = math.max(1L,
+                    math.min(maxRowsBetweenChecks, (rowsUntilTarget / 2).toLong))
+                  nextSizeCheck = rows.toLong + interval
+                }
+              }
             }
           }
           ParquetCachedBatch(rows, stream.toByteArray)

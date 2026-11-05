@@ -415,7 +415,11 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
       .bytesConf(ByteUnit.BYTE)
       .checkValue(v => v >= 1024L,
         "The Parquet cache row group size bytes must be at least 1024.")
-      .createWithDefault(8L * 1024 * 1024)
+      // With G1 and 8 MiB regions, a byte array just over 8 MiB occupies 16 MiB, while Spark
+      // accounts for only its length. Target 7.5 MiB (8 MiB minus 512 KiB) to leave room for
+      // row/page overshoot, the Parquet footer and the array header below that boundary.
+      // This remains a soft target: an indivisible large row/page can still exceed it.
+      .createWithDefault(8L * 1024 * 1024 - 512L * 1024)
 
   val PARQUET_WRITER_ROW_GROUP_SIZE_ROWS =
     conf("spark.rapids.sql.format.parquet.writer.rowGroupSizeRows")

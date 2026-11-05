@@ -15,6 +15,8 @@
  */
 package com.nvidia.spark.rapids.parquet
 
+import scala.collection.JavaConverters._
+
 import ai.rapids.cudf.{ColumnVector, CompressionType, HostMemoryBuffer,
   ParquetChunkedReader => CudfParquetChunkedReader, ParquetOptions, ParquetWriterOptions, Table}
 import com.nvidia.spark.rapids.{SparkQueryCompareTestSuite, SpillableHostBuffer, SpillPriorities}
@@ -22,12 +24,97 @@ import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.jni.{CpuRetryOOM, RmmSpark}
 import com.nvidia.spark.rapids.spill.SpillFramework
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.Path
+import org.apache.parquet.example.data.simple.SimpleGroupFactory
+import org.apache.parquet.hadoop.example.ExampleParquetWriter
+import org.apache.parquet.hadoop.metadata.CompressionCodecName
+import org.apache.parquet.schema.MessageTypeParser
 import org.mockito.Mockito.{doAnswer, spy, times, verify}
 import org.mockito.invocation.InvocationOnMock
 
-import org.apache.spark.sql.types.{LongType, StringType, StructType}
+import org.apache.spark.sql.types.{ArrayType, LongType, MapType, StringType, StructType}
 
 class ParquetCachedBatchFilesGpuSuite extends SparkQueryCompareTestSuite {
+  test("CPU and GPU nested chunk sizes survive splitting and recombining row groups") {
+    withGpuSparkSession { _ =>
+      withTempPath { cpuFile =>
+        withTempPath { gpuFile =>
+          val parquetSchema = MessageTypeParser.parseMessageType(
+            """message nested {
+              | required int64 id;
+              | optional group s { optional binary leaf (UTF8); }
+              | optional group a (LIST) {
+              |   repeated group list { optional group element { optional binary leaf (UTF8); } }
+              | }
+              | optional group m (MAP) {
+              |   repeated group key_value {
+              |     required binary key (UTF8);
+              |     optional group value { optional binary leaf (UTF8); }
+              |   }
+              | }
+              |}""".stripMargin)
+          val leaf = new StructType().add("leaf", StringType)
+          val nestedSchema = new StructType().add("id", LongType, nullable = false)
+            .add("s", leaf).add("a", ArrayType(leaf)).add("m", MapType(StringType, leaf))
+          val groups = new SimpleGroupFactory(parquetSchema)
+          withResource(ExampleParquetWriter.builder(new Path(cpuFile.toURI))
+              .withConf(new Configuration()).withType(parquetSchema).withRowGroupSize(8192L)
+              .withDictionaryEncoding(false).withCompressionCodec(CompressionCodecName.SNAPPY)
+              .build()) { writer =>
+            (0 until 12000).foreach { row =>
+              val group = groups.newGroup().append("id", row.toLong)
+              group.addGroup("s").append("leaf", "struct-" + row)
+              group.addGroup("a").addGroup("list").addGroup("element")
+                .append("leaf", "array-" + row)
+              val entry = group.addGroup("m").addGroup("key_value").append("key", "key-" + row)
+              entry.addGroup("value").append("leaf", "map-" + row)
+              writer.write(group)
+            }
+          }
+          val options = new ParquetCachedBatchSerializer()
+            .getParquetWriterOptions(false, nestedSchema, 8192L)
+          withResource(Table.readParquet(cpuFile)) { table =>
+            withResource(Table.writeParquetChunked(options, gpuFile))(_.write(table))
+          }
+          Seq(cpuFile, gpuFile).foreach { file =>
+            val bytes = java.nio.file.Files.readAllBytes(file.toPath)
+            val source = ParquetCachedBatchFiles.fromBytes(bytes)
+            val original = ParquetCachedBatchFiles.readFooter(source)
+            assert(original.getBlocks.size > 1)
+            def sizes(metadata: org.apache.parquet.hadoop.metadata.ParquetMetadata) =
+              metadata.getBlocks.asScala.map { block =>
+                (block.getTotalByteSize, block.getColumns.asScala.map { column =>
+                  assert(column.getTotalUncompressedSize > 0)
+                  (column.getPath.toArray.toVector, column.getTotalUncompressedSize)
+                }.toVector)
+              }.toVector
+            val expected = sizes(original)
+            assert(expected.head._2.exists(_._1.size > 1))
+            val records = ParquetCachedBatchFiles.split(source).toVector
+            val splitSizes = records.flatMap { record =>
+              sizes(ParquetCachedBatchFiles.readFooter(
+                ParquetCachedBatchFiles.fromBytes(record.buffer)))
+            }
+            assert(splitSizes == expected)
+            withResource(records.safeMap(ParquetCachedBatchFiles.stage(_, nestedSchema))) {
+              staged =>
+              withResource(ParquetCachedBatchFiles.logicalFile(staged)) { logical =>
+                val combined = logical.buffers.flatMap { buffer =>
+                  val data = new Array[Byte](buffer.getLength.toInt)
+                  buffer.getBytes(data, 0, 0, data.length)
+                  data
+                }
+                assert(sizes(ParquetCachedBatchFiles.readFooter(
+                  ParquetCachedBatchFiles.fromBytes(combined))) == expected)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
   test("spilled source reuses one region and evicts it before loading another") {
     withGpuSparkSession { _ =>
       val handles = SpillFramework.stores.hostStore.numHandles
