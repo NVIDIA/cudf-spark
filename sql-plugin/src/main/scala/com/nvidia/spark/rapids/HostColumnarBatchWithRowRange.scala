@@ -132,7 +132,6 @@ class HostColumnarBatchWithRowRange private (
     var dataSlice: HostMemoryBuffer = null
     var offsetsSlice: HostMemoryBuffer = null
     val children = new ArrayList[HostColumnVectorCore]()
-    var success = false
     try {
       dtype match {
         // A zero-row slice reads no offsets. A child that never got a value has none, so build
@@ -227,19 +226,12 @@ class HostColumnarBatchWithRowRange private (
         offsetsSlice,
         children
       )
-      success = true
       sliced
-    } finally {
-      if (!success) {
-        if (dataSlice != null) dataSlice.close()
-        if (validSlice != null) validSlice.close()
-        if (offsetsSlice != null) offsetsSlice.close()
-        val it = children.iterator()
-        while (it.hasNext) {
-          val c = it.next()
-          if (c != null) c.close()
-        }
-      }
+    } catch {
+      case t: Throwable =>
+        (Seq[AutoCloseable](dataSlice, validSlice, offsetsSlice) ++
+          (0 until children.size()).map(children.get)).safeClose(t)
+        throw t
     }
   }
 
