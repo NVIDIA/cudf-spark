@@ -503,6 +503,16 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
       .checkValues(Set("JAVA", "NATIVE", "AUTO"))
       .createWithDefault("AUTO")
 
+  val PARQUET_DICTIONARY_FILTER_PREFETCH =
+    conf("spark.rapids.sql.format.parquet.dictionaryFilterPrefetch.enabled")
+      .doc("When filters are pushed down to Parquet, prefetch the dictionary pages that " +
+        "row group dictionary filtering may read with one vectored read through the plugin " +
+        "file IO, instead of letting parquet-mr read them with serial seeks on a separate " +
+        "stream. This helps on filesystems with a high per-request latency. Any failure falls " +
+        "back to the original path.")
+      .booleanConf
+      .createWithDefault(false)
+
   // Deprecated legacy row-based UDF path. CPU bridge is the preferred replacement when it can
   // bridge the expression safely.
   val ENABLE_CPU_BASED_UDF = conf("spark.rapids.sql.rowBasedUDF.enabled")

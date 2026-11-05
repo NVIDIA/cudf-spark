@@ -635,6 +635,7 @@ protected case class GpuParquetFileFilterHandler(
   private val int96RebaseMode = SparkShimImpl.int96ParquetRebaseRead(sqlConf)
   private val readUseFieldId = ParquetSchemaClipShims.useFieldId(sqlConf)
   private val ignoreMissingParquetFieldId = ParquetSchemaClipShims.ignoreMissingIds(sqlConf)
+  private val dictFilterPrefetch = RapidsConf.PARQUET_DICTIONARY_FILTER_PREFETCH.get(sqlConf)
   private val returnNullStructIfAllFieldsMissing =
     ParquetMissingStructShims.returnNullStructIfAllFieldsMissing(sqlConf)
 
@@ -817,14 +818,45 @@ protected case class GpuParquetFileFilterHandler(
       fileIO: RapidsFileIO,
       file: PartitionedFile,
       conf : Configuration,
-      filePath: Path): ParquetMetadata = {
+      filePath: Path,
+      keepFooter: HostMemoryBuffer => Unit): ParquetMetadata = {
     //noinspection ScalaDeprecation
     NvtxRegistry.PARQUET_READ_FOOTER {
       val inputFile = fileIO.newInputFile(filePath)
       withResource(ParquetFooterUtils.getFooterBuffer(inputFile, metrics,
           readFooterBuffer(fileIO, filePath, conf))) { hmb =>
+        keepFooter(hmb)
         ParquetFileReader.readFooter(new HMBInputFile(hmb),
           ParquetMetadataConverter.range(file.start, file.start + file.length))
+      }
+    }
+  }
+
+  private def hostBytes(hmb: HostMemoryBuffer): Array[Byte] = {
+    val bytes = new Array[Byte](Math.toIntExact(hmb.getLength))
+    hmb.getBytes(bytes, 0, 0, bytes.length)
+    bytes
+  }
+
+  /** Reads byte ranges of `filePath` with one vectored read, for ParquetDictFilterPrefetch. */
+  private def rangeReader(
+      fileIO: RapidsFileIO,
+      filePath: Path): ParquetDictFilterPrefetch.RangeReader = {
+    lazy val inputFile = fileIO.newInputFile(filePath)
+    ranges => {
+      val copyRanges = new java.util.ArrayList[CopyRange](ranges.size)
+      var outOffset = 0L
+      ranges.foreach { case (offset, length) =>
+        copyRanges.add(new CopyRange(offset, length, outOffset))
+        outOffset += length
+      }
+      withResource(HostAlloc.alloc(outOffset, preferPinned = false)) { hmb =>
+        inputFile.readVectored(hmb, copyRanges)
+        copyRanges.asScala.map { r =>
+          val bytes = new Array[Byte](Math.toIntExact(r.getLength))
+          hmb.getBytes(bytes, 0, r.getOutputOffset, r.getLength)
+          bytes
+        }.toList
       }
     }
   }
@@ -847,10 +879,14 @@ protected case class GpuParquetFileFilterHandler(
           conf.unset(encryptConf)
         }
       }
+      val useNativeFooter =
+        GpuParquetFileFilterHandler.useNativeFooterReader(footerReader, readDataSchema)
+      // the footer as a minimal parquet file, for dictionary filtering without parquet-mr IO
+      val keepFooter = dictFilterPrefetch && enableParquetFilterPushDown && filters.nonEmpty
+      var footerFile: Array[Byte] = null
       val footer: ParquetMetadata = try {
         footerReader match {
-          case reader
-              if GpuParquetFileFilterHandler.useNativeFooterReader(reader, readDataSchema) =>
+          case _ if useNativeFooter =>
             val (serialized, rowIndexOffsets) = withResource(readAndFilterFooter(fileIO, file,
               conf, readDataSchema, filePath)) { tableFooter =>
                 if (tableFooter.getNumColumns <= 0) {
@@ -876,6 +912,9 @@ protected case class GpuParquetFileFilterHandler(
                 (tableFooter.serializeThriftFile(), tableFooter.getRowIndexOffsets)
             }
             val footer = withResource(serialized) { serialized =>
+              if (keepFooter) {
+                footerFile = hostBytes(serialized)
+              }
               NvtxRegistry.PARQUET_READ_FILTERED_FOOTER {
                 val inputFile = new HMBInputFile(serialized)
 
@@ -902,7 +941,8 @@ protected case class GpuParquetFileFilterHandler(
             }
             footer
           case _ =>
-            readAndSimpleFilterFooter(fileIO, file, conf, filePath)
+            readAndSimpleFilterFooter(fileIO, file, conf, filePath,
+              hmb => if (keepFooter) footerFile = hostBytes(hmb))
         }
       } catch {
         case e if GpuParquetCrypto.isColumnarCryptoException(e) =>
@@ -930,10 +970,23 @@ protected case class GpuParquetFileFilterHandler(
         NvtxRegistry.PARQUET_GET_BLOCKS_WITH_FILTER {
           // Use the ParquetFileReader to perform dictionary-level filtering
           ParquetInputFormat.setFilterPredicate(conf, pushedFilters.get)
-          //noinspection ScalaDeprecation
-          withResource(new ParquetFileReader(conf, footer.getFileMetaData, filePath,
-            footer.getBlocks, Collections.emptyList[ColumnDescriptor])) { parquetReader =>
-            parquetReader.getRowGroups
+          val pathBasedFilter = () => {
+            //noinspection ScalaDeprecation
+            withResource(new ParquetFileReader(conf, footer.getFileMetaData, filePath,
+              footer.getBlocks, Collections.emptyList[ColumnDescriptor])) { parquetReader =>
+              parquetReader.getRowGroups
+            }
+          }
+          if (footerFile != null) {
+            // the native footer holds exactly footer.getBlocks, the java one the whole file
+            val range = if (useNativeFooter) None else Some((file.start, file.start + file.length))
+            val filterColumns = filters.flatMap(_.references)
+              .map(_.replace("`", "").split('.').head.toLowerCase(Locale.ROOT)).toSet
+            ParquetDictFilterPrefetch.rowGroups(conf, filePath, footerFile, range,
+              footer.getBlocks, pushedFilters.get, filterColumns, rangeReader(fileIO, filePath),
+              pathBasedFilter)
+          } else {
+            pathBasedFilter()
           }
         }
       } else {
