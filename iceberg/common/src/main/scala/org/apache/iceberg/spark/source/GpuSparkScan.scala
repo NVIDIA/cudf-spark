@@ -101,7 +101,7 @@ abstract class GpuSparkScan(val cpuScan: Scan,
         val options = GpuIcebergParquetReaderUtils.buildReaderOptions(input, None)
         withResource(ParquetFileReader.open(GpuParquetIO.file(input), options)) { reader =>
           val fileSchema = reader.getFileMetaData.getSchema
-          val (_, projectedSchema) = GpuParquetIO.projectSchema(
+          val (_, projectedSchema) = GpuParquetIO.projectAndPruneSchema(
             fileSchema, requiredSchema, nameMapping)
           // Retain Spark's physical-layout validation, including annotated shredded input.
           converter.convert(

@@ -150,7 +150,7 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
   def projectSchema(fileSchema: ShadedMessageType, requiredSchema: Schema):
   (ShadedMessageType, ShadedMessageType) = {
     val (typeWithIds, fileReadSchema) =
-      GpuParquetIO.projectSchema(fileSchema, requiredSchema, conf.nameMapping)
+      GpuParquetIO.projectAndPruneSchema(fileSchema, requiredSchema, conf.nameMapping)
 
     logDebug(s"Doing project schema, parquet file schema:\n$fileSchema " +
       s"\niceberg required schema:\n$requiredSchema " +

@@ -29,8 +29,17 @@ import org.apache.iceberg.shaded.org.apache.parquet.io.{InputFile => ShadedInput
 import org.apache.iceberg.shaded.org.apache.parquet.schema.{MessageType => ShadedMessageType}
 
 object GpuParquetIO {
-  // Planning and execution must inspect the same field-ID/name-mapped projection.
-  def projectSchema(
+  /**
+   * Assign field IDs where needed and prune a Parquet schema to the required Iceberg schema.
+   * Planning and execution use the same projection for files with IDs, a name mapping, or
+   * fallback IDs.
+   *
+   * @param fileSchema physical Parquet schema
+   * @param requiredSchema Iceberg schema to project
+   * @param nameMapping optional mapping used when the file schema has no field IDs
+   * @return the schema with field IDs and the pruned schema, in that order
+   */
+  def projectAndPruneSchema(
       fileSchema: ShadedMessageType,
       requiredSchema: Schema,
       nameMapping: Option[NameMapping]): (ShadedMessageType, ShadedMessageType) = {
