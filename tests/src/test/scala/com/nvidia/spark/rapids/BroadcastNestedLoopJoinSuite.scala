@@ -262,6 +262,18 @@ class BroadcastNestedLoopJoinSuite extends SparkQueryCompareTestSuite {
 
   private def sorted(rows: Seq[Seq[Any]]): Seq[Seq[Any]] = rows.sortBy(_.toString)
 
+  // The inputs degenerateJoinIterator takes, which emit no zero-row batch. The older outer and
+  // existence paths pass a zero-row stream batch through.
+  private def isDegenerate(
+      joinType: JoinType,
+      streamHasColumns: Boolean,
+      buildHasColumns: Boolean): Boolean = joinType match {
+    case _: InnerLike => streamHasColumns != buildHasColumns
+    case LeftSemi | LeftAnti => !(streamHasColumns && buildHasColumns)
+    case ExistenceJoin(_) => !streamHasColumns && buildHasColumns
+    case _ => false
+  }
+
   // tagPlanForGpu sends these joins to the CPU. If one reaches nestedLoopJoin, it fails naming
   // the join type and build side, before it reads either side.
   private def assertRejected(
@@ -289,9 +301,12 @@ class BroadcastNestedLoopJoinSuite extends SparkQueryCompareTestSuite {
         withClue(s"$streamName, build $build, $conditionName: ") {
           val want = expected(joinType, buildSide, stream.flatten, streamHasColumns, build,
             buildHasColumns, matched)
-          val actual = nestedLoopJoin(joinType, buildSide, batch(build, buildHasColumns),
+          val batches = joinBatches(joinType, buildSide, batch(build, buildHasColumns),
             stream.map(values => () => batch(values, streamHasColumns)), streamHasColumns, cond)
-          assertResult(sorted(want))(sorted(actual))
+          assertResult(sorted(want))(sorted(batches.flatten))
+          if (isDegenerate(joinType, streamHasColumns, buildHasColumns)) {
+            assert(batches.forall(_.nonEmpty), s"batch row counts ${batches.map(_.size)}")
+          }
         }
       }
     }
