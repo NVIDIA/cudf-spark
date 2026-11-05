@@ -577,48 +577,50 @@ class GpuDynamicPartitionDataSingleWriter(
     val dataTypes = description.dataColumns.map(_.dataType).toArray
     val keyTypes = description.partitionColumns.map(_.dataType).toArray ++
       (if (isBucketed) Array[DataType](IntegerType) else Array.empty[DataType])
-    val groups = withResource(batch) { _ =>
+    val combined = withResource(batch) { _ =>
       withResource(getKeysBatch(batch)) { keys =>
         withResource(GpuFloatingPointKeyUtils.encode(keys)) { encoded =>
           withResource(getDataColumnsAsBatch(batch)) { data =>
-            withResource(GpuColumnVector.combineColumns(encoded, data)) { combined =>
-              withResource(GpuColumnVector.from(combined)) { table =>
-                val dataIndices = if (dataTypes.isEmpty) {
-                  Array(0)
-                } else {
-                  (keyTypes.length until combined.numCols()).toArray
-                }
-                table.groupBy(keyTypes.indices: _*).contiguousSplitGroupsAndGenUniqKeys(
-                  dataIndices)
-              }
-            }
+            GpuColumnVector.combineColumns(encoded, data)
           }
         }
       }
     }
-    withResource(groups) { _ =>
-      withResource(GpuFloatingPointKeyUtils.decode(groups.getUniqKeyTable, keyTypes)) { decoded =>
-        withResource(GpuColumnVector.from(decoded)) { table =>
-          withResource(copyToHostAsBatch(table, keyTypes)) { host =>
-            val getPart = genGetPartValuesFunc(host)
-            val getBucket = genGetBucketIdFunc(host)
-            val splits = groups.getGroups
-            splits.indices.safeMap { i =>
-              val part = getPart(i)
-              val bucket = getBucket(i)
-              val data = if (dataTypes.isEmpty) {
-                new ColumnarBatch(Array.empty[org.apache.spark.sql.vectorized.ColumnVector],
-                  splits(i).getRowCount.toInt)
-              } else {
-                withResource(splits(i).getTable) { table =>
-                  GpuColumnVector.from(table, dataTypes)
-                }
-              }
-              SplitPack(SpillableColumnarBatch(data,
-                SpillPriorities.ACTIVE_ON_DECK_PRIORITY), part, bucket)
-            }.toArray
-          }
+    val groups = withResource(combined) { _ =>
+      withResource(GpuColumnVector.from(combined)) { table =>
+        val dataIndices = if (dataTypes.isEmpty) {
+          Array(0)
+        } else {
+          (keyTypes.length until combined.numCols()).toArray
         }
+        table.groupBy(keyTypes.indices: _*).contiguousSplitGroupsAndGenUniqKeys(dataIndices)
+      }
+    }
+    withResource(groups) { _ =>
+      val hostBatch = withResource(
+          GpuFloatingPointKeyUtils.decode(groups.getUniqKeyTable, keyTypes)) { decoded =>
+        withResource(GpuColumnVector.from(decoded)) { table =>
+          copyToHostAsBatch(table, keyTypes)
+        }
+      }
+      withResource(hostBatch) { host =>
+        val getPart = genGetPartValuesFunc(host)
+        val getBucket = genGetBucketIdFunc(host)
+        val splits = groups.getGroups
+        splits.indices.safeMap { i =>
+          val part = getPart(i)
+          val bucket = getBucket(i)
+          val data = if (dataTypes.isEmpty) {
+            new ColumnarBatch(Array.empty[org.apache.spark.sql.vectorized.ColumnVector],
+              splits(i).getRowCount.toInt)
+          } else {
+            withResource(splits(i).getTable) { table =>
+              GpuColumnVector.from(table, dataTypes)
+            }
+          }
+          SplitPack(SpillableColumnarBatch(data,
+            SpillPriorities.ACTIVE_ON_DECK_PRIORITY), part, bucket)
+        }.toArray
       }
     }
   }
