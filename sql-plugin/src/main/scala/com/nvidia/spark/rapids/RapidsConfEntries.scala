@@ -67,6 +67,14 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
       .booleanConf
       .createWithDefault(false)
 
+  val TEST_PARQUET_HYBRID_SCAN_FAIL_ON_FALLBACK =
+    conf("spark.rapids.sql.test.format.parquet.hybridScan.failOnFallback")
+      .doc("Only to be used in tests. When true and the hybrid scan reader is enabled, fail a " +
+        "PERFILE Parquet scan that would fall back to the parquet-mr path instead of reading it.")
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
+
   val TEST_DELTA_LOW_SHUFFLE_MERGE_FAILED_ON_NOT_METADATA_ONLY =
     conf("spark.rapids.sql.test.delta.lowShuffleMerge.failedOnNotMetadataOnly")
       .doc("Only for tests on Databricks Runtime 17.3. When true and " +
