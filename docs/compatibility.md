@@ -40,6 +40,34 @@ setting [spark.rapids.sql.stableSort.enabled](additional-functionality/advanced_
 cuDF will try to sort all the data for a given task/partition at once on the GPU. This may change
 in the future to allow for a spillable stable sort.
 
+## Round-robin Shuffle Recovery
+
+A GPU round-robin exchange with more than one output partition, as used by `repartition(n)` and by
+Delta Lake optimized writes to unpartitioned tables, assigns rows by their position in a GPU batch.
+A rerun can cut batches differently, so Spark treats the exchange and stages that read it as
+indeterminate. This also affects a hash exchange downstream of the round-robin exchange.
+
+The map stage can retry a failure in its own input before any reader stage has been submitted.
+Once a stage that reads the shuffle has started, rerunning that part of the query plan could mix rows
+from different attempts. This remains true after an individual job ends: `take` and
+`toLocalIterator` can retain partial results across jobs, including results from cached intermediate
+output. The query plan therefore keeps its reader history until it is discarded. Even a later,
+independent action fails if it must recompute that shuffle after its output is lost. Intact
+shuffle output can still be reused. The query fails rather than return missing or duplicated rows,
+including when a result from the old attempt arrives late. The error contains one of these messages:
+
+- `Cannot retry a GPU round-robin shuffle`, from the plugin.
+- `A shuffle map stage with indeterminate output was failed and retried`, from Spark.
+- `Task with indeterminate results from old attempt succeeded`, from Spark 4.2.
+
+Rerun with a new DataFrame, unpersisting a cached one first. Checkpointing before the repartition
+does not avoid the failure, and neither does
+`spark.sql.execution.sortBeforeRepartition`. To avoid GPU round-robin recovery restrictions, set
+[`spark.rapids.sql.partitioning.RoundRobinPartitioning`](additional-functionality/advanced_configs.md#sql.partitioning.RoundRobinPartitioning)
+to `false` to run the exchange on the CPU. A query that calls `repartition(n)` can instead
+repartition by columns with `repartition(n, cols)`. Splitting and retrying a batch within the
+original map attempt remains supported.
+
 ## Floating Point
 
 For most basic floating-point operations like addition, subtraction, multiplication, and division

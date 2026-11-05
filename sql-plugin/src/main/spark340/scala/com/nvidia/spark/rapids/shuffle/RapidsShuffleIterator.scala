@@ -15,34 +15,9 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "340"}
-{"spark": "341"}
-{"spark": "342"}
-{"spark": "343"}
-{"spark": "344"}
-{"spark": "350"}
-{"spark": "350db143"}
-{"spark": "351"}
-{"spark": "352"}
-{"spark": "353"}
-{"spark": "354"}
-{"spark": "355"}
-{"spark": "356"}
-{"spark": "357"}
-{"spark": "358"}
-{"spark": "359"}
-{"spark": "400"}
-{"spark": "400db173"}
-{"spark": "401"}
-{"spark": "402"}
-{"spark": "403"}
-{"spark": "404"}
-{"spark": "410db183"}
-{"spark": "411"}
-{"spark": "412"}
-{"spark": "413"}
-{"spark": "420"}
-{"spark": "500"}
+{"spark":["340"],"carryForward":"sameMinor"}
+{"spark":["350","400","420"],"carryForward":"all"}
+{"spark":["350db143","400db173","410db183"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shuffle
@@ -132,7 +107,7 @@ class RapidsShuffleIterator(
 
   // Batches expected is a moving target of batches this iterator will see. The target is moved, by
   // [[RapidsShuffleFetchHandler]]'s start method, as metadata responses are received from
-  // [[RapidsShuffleServer]]s.
+  // [[RapidsShuffleServer]]s. An error reply to a metadata request calls `metadataError` instead.
   private[this] var totalBatchesExpected: Long = 0L
 
   // As batches are received this counter is updated. When all is said and done,
@@ -287,13 +262,29 @@ class RapidsShuffleIterator(
             }
           }
 
-          override def transferError(errorMessage: String, throwable: Throwable): Unit = {
+          override def transferError(errorMessage: String, throwable: Throwable): Unit =
+            failRequest(errorMessage, throwable, failedBlock = -1)
+
+          override def metadataError(errorMessage: String, failedBlock: Int): Unit =
+            failRequest(errorMessage, null, failedBlock)
+
+          // Queues an error for each block of the request. `next()` throws for the first one it
+          // takes, so the block at `failedBlock`, when it is one of them, goes first.
+          private def failRequest(
+              errorMessage: String,
+              throwable: Throwable,
+              failedBlock: Int): Unit = {
             resolvedBatches.synchronized {
               if (!clientDone) {
                 // If Spark detects a single fetch failure, the whole task has failed
-                // as per `FetchFailedException`. In the future `mapIndex` will come from the
-                // error callback.
-                shuffleRequestsMapIndex.map { case BlockIdMapIndex(id, mapIndex) =>
+                // as per `FetchFailedException`.
+                val blocks = if (failedBlock >= 0 && failedBlock < shuffleRequestsMapIndex.size) {
+                  shuffleRequestsMapIndex(failedBlock) +:
+                    shuffleRequestsMapIndex.patch(failedBlock, Nil, 1)
+                } else {
+                  shuffleRequestsMapIndex
+                }
+                blocks.foreach { case BlockIdMapIndex(id, mapIndex) =>
                   resolvedBatches.offer(TransferError(
                     blockManagerId, id, mapIndex, errorMessage, throwable))
                 }
