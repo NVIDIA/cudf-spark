@@ -25,7 +25,7 @@ from iceberg import (
     iceberg_full_gens_list, iceberg_nested_write_gens_list, get_full_table_name,
     iceberg_write_enabled_conf, iceberg_unsupported_mark, _build_tblprops, rtas_partition_transforms,
     supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON, row_lineage_df)
-from marks import iceberg, ignore_order, allow_non_gpu, allow_non_gpu_conditional, datagen_overrides
+from marks import iceberg, ignore_order, allow_non_gpu, allow_non_gpu_conditional, datagen_overrides, iceberg_fast_test
 from spark_session import with_gpu_session, with_cpu_session, is_spark_400_or_later
 
 pytestmark = [
@@ -96,6 +96,7 @@ def _assert_gpu_equals_cpu_rtas(spark_tmp_table_factory,
     assert_equal_with_local_sort(cpu_data, gpu_data)
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.parametrize("format_version", iceberg_format_versions)
@@ -132,6 +133,7 @@ def test_rtas_encryption_fallback(spark_tmp_table_factory):
         base_table_name, ["AtomicReplaceTableAsSelectExec"], conf=iceberg_write_enabled_conf)
 
 
+@iceberg_fast_test
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)
@@ -173,6 +175,7 @@ def _do_test_rtas_partitioned_table(
                                 partition_col_sql=partition_col_sql)
 
 
+@iceberg_fast_test
 @iceberg
 @datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids-jni/issues/4016')
 @ignore_order(local=True)
@@ -199,6 +202,7 @@ def test_rtas_partitioned_table_full_coverage(format_version, spark_tmp_table_fa
     _do_test_rtas_partitioned_table(spark_tmp_table_factory, partition_col_sql, format_version=format_version)
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @allow_non_gpu_conditional(is_spark_400_or_later(), "EmptyRelationExec")
@@ -414,6 +418,7 @@ def test_rtas_from_values(format_version, spark_tmp_table_factory,
     assert_equal_with_local_sort(cpu_data, gpu_data)
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.parametrize("partition_col_sql", [

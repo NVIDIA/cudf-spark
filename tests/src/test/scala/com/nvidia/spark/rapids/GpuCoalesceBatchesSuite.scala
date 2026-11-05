@@ -17,15 +17,22 @@
 package com.nvidia.spark.rapids
 
 import java.io.File
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 
 import scala.collection.JavaConverters._
 
-import ai.rapids.cudf.{ColumnVector, ContiguousTable, Cuda, HostColumnVector, Table}
+import ai.rapids.cudf.{ColumnVector, ContiguousTable, Cuda, HostColumnVector, PinnedMemoryPool,
+  Table}
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.CudfTestHelper.withRecordedHostAllocations
+import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.format.CodecType
-import org.apache.arrow.memory.RootAllocator
-import org.apache.arrow.vector.IntVector
+import org.apache.arrow.memory.{BufferAllocator, RootAllocator}
+import org.apache.arrow.vector.{BaseFixedWidthVector, BaseLargeVariableWidthVector,
+  BaseVariableWidthVector, BigIntVector, BitVector, DateDayVector, FieldVector, Float4Vector,
+  Float8Vector, IntVector, LargeVarBinaryVector, LargeVarCharVector, SmallIntVector,
+  TimeStampMicroTZVector, TinyIntVector, VarBinaryVector, VarCharVector}
 import org.apache.arrow.vector.complex.ListVector
 import org.apache.arrow.vector.complex.MapVector
 import org.apache.arrow.vector.types.{DateUnit, FloatingPointPrecision, TimeUnit}
@@ -35,6 +42,7 @@ import org.apache.spark.SparkConf
 import org.apache.spark.sql.catalyst.expressions.ExprId
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.metric.SQLMetric
+import org.apache.spark.sql.execution.vectorized.OnHeapColumnVector
 import org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.types._
@@ -347,7 +355,439 @@ class GpuCoalesceBatchesSuite extends SparkQueryCompareTestSuite {
       isInstanceOf[GpuColumnVector.GpuColumnarBatchBuilder])
   }
 
-  test("test GpuArrowColumnarBatchBuilder retains reference of ArrowBuf") {
+  private def setArrowValue(vector: FieldVector, i: Int, value: Any): Unit = (vector, value) match {
+    case (v: BaseFixedWidthVector, null) => v.setNull(i)
+    case (v: BaseVariableWidthVector, null) => v.setNull(i)
+    case (v: BaseLargeVariableWidthVector, null) => v.setNull(i)
+    case (v: BitVector, b: Boolean) => v.setSafe(i, if (b) 1 else 0)
+    case (v: TinyIntVector, b: Byte) => v.setSafe(i, b)
+    case (v: SmallIntVector, s: Short) => v.setSafe(i, s)
+    case (v: IntVector, n: Int) => v.setSafe(i, n)
+    case (v: DateDayVector, n: Int) => v.setSafe(i, n)
+    case (v: BigIntVector, n: Long) => v.setSafe(i, n)
+    case (v: TimeStampMicroTZVector, n: Long) => v.setSafe(i, n)
+    case (v: Float4Vector, f: Float) => v.setSafe(i, f)
+    case (v: Float8Vector, d: Double) => v.setSafe(i, d)
+    case (v: VarCharVector, s: String) => v.setSafe(i, s.getBytes(StandardCharsets.UTF_8))
+    case (v: LargeVarCharVector, s: String) => v.setSafe(i, s.getBytes(StandardCharsets.UTF_8))
+    case (v: VarBinaryVector, b: Array[Byte]) => v.setSafe(i, b)
+    case (v: LargeVarBinaryVector, b: Array[Byte]) => v.setSafe(i, b)
+  }
+
+  private def arrowVector(
+      allocator: BufferAllocator,
+      field: StructField,
+      values: Seq[Any]): ArrowColumnVector = {
+    val vector = toArrowField(field.name, field.dataType, field.nullable, "UTC")
+      .createVector(allocator)
+    vector.allocateNew()
+    values.zipWithIndex.foreach { case (value, i) => setArrowValue(vector, i, value) }
+    vector.setValueCount(values.length)
+    new ArrowColumnVector(vector)
+  }
+
+  private def arrowBatch(
+      allocator: BufferAllocator,
+      schema: StructType,
+      columns: Seq[Seq[Any]]): ColumnarBatch = {
+    val vectors = schema.fields.toSeq.zip(columns).map { case (field, values) =>
+      arrowVector(allocator, field, values)
+    }
+    new ColumnarBatch(vectors.toArray, columns.head.length)
+  }
+
+  private def hostValue(cv: RapidsHostColumnVector, dataType: DataType, i: Int): Any = {
+    if (cv.isNullAt(i)) {
+      null
+    } else {
+      dataType match {
+        case BooleanType => cv.getBoolean(i)
+        case ByteType => cv.getByte(i)
+        case ShortType => cv.getShort(i)
+        case IntegerType | DateType => cv.getInt(i)
+        case LongType | TimestampType => cv.getLong(i)
+        case FloatType => cv.getFloat(i)
+        case DoubleType => cv.getDouble(i)
+        case StringType => cv.getUTF8String(i).toString
+        case BinaryType => cv.getBinary(i).toSeq
+      }
+    }
+  }
+
+  /** Checks each column of a GPU batch against the expected values of its rows. */
+  private def assertColumns(
+      schema: StructType,
+      expected: Seq[Seq[Any]],
+      gpuBatch: ColumnarBatch): Unit = {
+    assertResult(expected.head.length)(gpuBatch.numRows())
+    schema.fields.zip(expected).zipWithIndex.foreach { case ((field, values), c) =>
+      withResource(gpuBatch.column(c).asInstanceOf[GpuColumnVector].copyToHost()) { host =>
+        val normalized = values.map {
+          case b: Array[Byte] => b.toSeq
+          case v => v
+        }
+        assertResult(normalized, field.name)(values.indices.map(hostValue(host, field.dataType, _)))
+      }
+    }
+  }
+
+  private def arrowCoalesce(
+      batches: Iterator[ColumnarBatch],
+      schema: StructType): HostToGpuCoalesceIterator = {
+    new HostToGpuCoalesceIterator(batches, TargetSize(1024 * 1024), schema,
+      NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric,
+      NoopMetric, "testcoalesce", useArrowCopyOpt = true)
+  }
+
+  test("HostToGpuCoalesceIterator copies Arrow vectors with the Arrow builder") {
+    val schema = StructType(Seq(
+      StructField("bool", BooleanType), StructField("byte", ByteType),
+      StructField("short", ShortType), StructField("int", IntegerType),
+      StructField("long", LongType), StructField("float", FloatType),
+      StructField("double", DoubleType), StructField("date", DateType),
+      StructField("ts", TimestampType), StructField("str", StringType),
+      StructField("bin", BinaryType)))
+    def rows(n: Int, seed: Int): Seq[Seq[Any]] = {
+      // Every column has a null, in a different row for each, except in the last batch.
+      def column(c: Int)(value: Int => Any): Seq[Any] =
+        (0 until n).map(i => if (seed < 3 && (i + c) % n == 0) null else value(i))
+      Seq(
+        column(0)(i => (i + seed) % 2 == 0),
+        column(1)(i => (i + seed).toByte),
+        column(2)(i => (i * seed).toShort),
+        column(3)(i => i * seed - 7),
+        column(4)(i => i.toLong << 33 | seed),
+        column(5)(i => i * 0.5f + seed),
+        column(6)(i => i * 1.25 - seed),
+        column(7)(i => 18000 + i + seed),
+        column(8)(i => 1700000000000000L + i * 1000L + seed),
+        column(9)(i => "s" * (i % 3) + seed),
+        column(10)(i => Array.tabulate[Byte](i % 4)(j => (j + seed).toByte)))
+    }
+    // Sizes that do not divide into whole validity bytes.
+    val inputRows = Seq(rows(3, 1), rows(13, 2), rows(4, 3))
+    withResource(new RootAllocator(Long.MaxValue)) { allocator =>
+      val gpuBatch = withResource(inputRows.safeMap(arrowBatch(allocator, schema, _))) { input =>
+        val iter = arrowCoalesce(input.iterator, schema)
+        iter.initNewBatch(input.head)
+        assert(iter.batchBuilder.isInstanceOf[GpuColumnVector.GpuArrowColumnarBatchBuilder])
+        iter.cleanupConcatIsDone()
+        arrowCoalesce(input.iterator, schema).next()
+      }
+      withResource(gpuBatch) { _ =>
+        // The builder copied the Arrow data, so closing the input freed it.
+        assertResult(0L)(allocator.getAllocatedMemory)
+        val expected = schema.indices.map(c => inputRows.flatMap(_(c)))
+        assertColumns(schema, expected, gpuBatch)
+      }
+    }
+  }
+
+  test("HostToGpuCoalesceIterator lets an Arrow producer close its allocator at end of input") {
+    // Like a CPU ArrowEvalPythonExec, the producer frees each batch when asked for the next one
+    // and closes its allocator in the hasNext call that finds no more input.
+    val schema = StructType(Seq(StructField("int", IntegerType), StructField("str", StringType)))
+    val inputRows = (1 to 3).map(n => Seq(Seq(n, null, -n), Seq("a" * n, "b", null)))
+    val allocator = new RootAllocator(Long.MaxValue)
+    val input = new Iterator[ColumnarBatch] {
+      private val pending = inputRows.iterator
+      private var current: Option[ColumnarBatch] = None
+
+      override def hasNext: Boolean = {
+        current.foreach(_.close())
+        current = None
+        if (!pending.hasNext) {
+          allocator.close()
+        }
+        pending.hasNext
+      }
+
+      override def next(): ColumnarBatch = {
+        current = Some(arrowBatch(allocator, schema, pending.next()))
+        current.get
+      }
+    }
+    withResource(arrowCoalesce(input, schema).next()) { gpuBatch =>
+      val expected = schema.indices.map(c => inputRows.flatMap(_(c)))
+      assertColumns(schema, expected, gpuBatch)
+    }
+  }
+
+  test("HostToGpuCoalesceIterator copies Arrow vectors that the producer refills in place") {
+    // Like Spark's vectorized Parquet reader, the producer refills the vectors of the batch it
+    // returned when asked for the next one.
+    val schema = StructType(Seq(StructField("int", IntegerType), StructField("str", StringType)))
+    val inputRows = Seq(Seq(Seq(1, 2, 3), Seq("a", "bb", "ccc")),
+      Seq(Seq(4, 5, 6), Seq("x", "yy", "zzz")))
+    withResource(new RootAllocator(Long.MaxValue)) { allocator =>
+      withResource(new IntVector("int", allocator)) { ints =>
+        withResource(new VarCharVector("str", allocator)) { strs =>
+          val vectors = Seq(ints, strs)
+          vectors.foreach(_.allocateNew())
+          val batch = new ColumnarBatch(vectors.map(new ArrowColumnVector(_)).toArray)
+          val input = inputRows.iterator.map { columns =>
+            vectors.zip(columns).foreach { case (vector, values) =>
+              vector.reset()
+              values.zipWithIndex.foreach { case (value, i) => setArrowValue(vector, i, value) }
+              vector.setValueCount(values.length)
+            }
+            batch.setNumRows(columns.head.length)
+            batch
+          }
+          withResource(arrowCoalesce(input, schema).next()) { gpuBatch =>
+            assertColumns(schema, schema.indices.map(c => inputRows.flatMap(_(c))), gpuBatch)
+          }
+        }
+      }
+    }
+  }
+
+  test("HostToGpuCoalesceIterator copies Arrow strings by row when their nulls hold data") {
+    val schema = StructType(Seq(StructField("str", StringType)))
+    withResource(new RootAllocator(Long.MaxValue)) { allocator =>
+      val vector = new VarCharVector("str", allocator)
+      vector.allocateNew()
+      Seq("abc", "de", "f").zipWithIndex.foreach { case (value, i) =>
+        vector.setSafe(i, value.getBytes(StandardCharsets.UTF_8))
+      }
+      // The null row keeps its two bytes.
+      vector.setNull(1)
+      vector.setValueCount(3)
+      withResource(new ColumnarBatch(Array(new ArrowColumnVector(vector)), 3)) { batch =>
+        withResource(arrowCoalesce(Iterator.single(batch), schema).next()) { gpuBatch =>
+          assertColumns(schema, Seq(Seq("abc", null, "f")), gpuBatch)
+          assert(!gpuBatch.column(0).asInstanceOf[GpuColumnVector].getBase.hasNonEmptyNulls)
+        }
+      }
+    }
+  }
+
+  test("HostToGpuCoalesceIterator copies batches that mix Arrow and other column vectors") {
+    // A source can return Arrow vectors next to Spark's own, such as for partition values.
+    val schema = StructType(Seq(StructField("str", StringType), StructField("int", IntegerType)))
+    val values = Seq(Seq("a", null, "bc"), Seq(1, 2, 3))
+    withResource(new RootAllocator(Long.MaxValue)) { allocator =>
+      val ints = new OnHeapColumnVector(values(1).length, IntegerType)
+      values(1).zipWithIndex.foreach { case (v: Int, i) => ints.putInt(i, v) }
+      val strings = arrowVector(allocator, schema.fields(0), values.head)
+      withResource(new ColumnarBatch(Array(strings, ints), values(1).length)) { batch =>
+        withResource(arrowCoalesce(Iterator.single(batch), schema).next()) { gpuBatch =>
+          assertColumns(schema, values, gpuBatch)
+        }
+      }
+    }
+  }
+
+  test("HostToGpuCoalesceIterator copies Arrow vectors with 64-bit offsets by row") {
+    assume(cmpSparkVersion(3, 5, 0) >= 0, "Spark reads 64-bit offset vectors from 3.5.0 on")
+    val schema = StructType(Seq(StructField("str", StringType), StructField("bin", BinaryType),
+      StructField("int", IntegerType)))
+    val values = Seq(Seq("abc", null, "", "xyz"),
+      Seq(Array[Byte](1, 2), Array.emptyByteArray, null, Array[Byte](3)), Seq(1, 2, null, 4))
+    withResource(new RootAllocator(Long.MaxValue)) { allocator =>
+      val strings = new LargeVarCharVector("str", allocator)
+      val binary = new LargeVarBinaryVector("bin", allocator)
+      Seq(strings, binary).zip(values).foreach { case (vector, column) =>
+        vector.allocateNew()
+        column.zipWithIndex.foreach { case (value, i) => setArrowValue(vector, i, value) }
+        vector.setValueCount(column.length)
+      }
+      val ints = arrowVector(allocator, schema.fields(2), values(2))
+      withResource(new ColumnarBatch(Array(new ArrowColumnVector(strings),
+          new ArrowColumnVector(binary), ints), values.head.length)) { batch =>
+        withResource(arrowCoalesce(Iterator.single(batch), schema).next()) { gpuBatch =>
+          assertColumns(schema, values, gpuBatch)
+        }
+      }
+    }
+  }
+
+  test("HostToGpuCoalesceIterator copies many small Arrow batches into shared host columns") {
+    val schema = StructType(Seq(StructField("long", LongType), StructField("str", StringType),
+      StructField("bin", BinaryType)))
+    // Sizes and value lengths vary, so chunks fill up on rows in some batches and on bytes in
+    // others.
+    val numBatches = 60
+    val inputRows = (0 until numBatches).map { b =>
+      val n = 1 + (b * 7) % 11
+      val longs = (0 until n).map(i => if ((b + i) % 5 == 0) null else (b * 100 + i).toLong)
+      val strs = (0 until n).map(i => if ((b + i) % 4 == 0) null else "x" * ((b * i) % 37))
+      val bins = (0 until n).map(i => Array.fill[Byte]((b + i) % 23)(b.toByte))
+      Seq(longs, strs, bins)
+    }
+    withResource(new RootAllocator(Long.MaxValue)) { allocator =>
+      val (gpuBatch, hostAllocations) =
+        withResource(inputRows.safeMap(arrowBatch(allocator, schema, _))) { input =>
+          withRecordedHostAllocations { recorder =>
+            (arrowCoalesce(input.iterator, schema).next(), recorder.count)
+          }
+        }
+      withResource(gpuBatch) { _ =>
+        // A host column for each batch and column would take at least one allocation each.
+        assert(hostAllocations < numBatches * schema.length,
+          s"$hostAllocations host allocations for $numBatches batches")
+        assertResult(0L)(allocator.getAllocatedMemory)
+        val expected = schema.indices.map(c => inputRows.flatMap(_(c)))
+        assertColumns(schema, expected, gpuBatch)
+      }
+    }
+  }
+
+  test("HostToGpuCoalesceIterator coalesces Arrow batches of empty strings") {
+    // The bytes copied set how many rows an output batch takes. Empty strings copy only their
+    // offsets, so without them the limit would be one input batch.
+    val schema = StructType(Seq(StructField("str", StringType)))
+    val inputRows = Seq.fill(5)(Seq(Seq("", null, "")))
+    withResource(new RootAllocator(Long.MaxValue)) { allocator =>
+      val output = withResource(inputRows.safeMap(arrowBatch(allocator, schema, _))) { input =>
+        arrowCoalesce(input.iterator, schema).toList
+      }
+      withResource(output) { _ =>
+        assertResult(1, "output batches")(output.length)
+        assertColumns(schema, Seq(inputRows.flatMap(_.head)), output.head)
+      }
+    }
+  }
+
+  test("HostToGpuCoalesceIterator keeps row order across bulk and row-by-row Arrow batches") {
+    val schema = StructType(Seq(StructField("str", StringType)))
+    // A batch whose null rows hold bytes is copied row by row, into a host column that the
+    // batches after it append to, in bulk where they can.
+    val values = Seq(Seq("a", null, "bc"), Seq("g"), Seq("x", null, ""), Seq("d", "ef", null),
+      Seq(null, "y"))
+    val nullsHoldBytes = Seq(false, false, true, false, true)
+    withResource(new RootAllocator(Long.MaxValue)) { allocator =>
+      val input = values.zip(nullsHoldBytes).map { case (batchValues, dirty) =>
+        val vector = new VarCharVector("str", allocator)
+        vector.allocateNew()
+        batchValues.zipWithIndex.foreach {
+          case (null, i) if dirty =>
+            vector.setSafe(i, "dirty".getBytes(StandardCharsets.UTF_8))
+            vector.setNull(i)
+          case (value, i) => setArrowValue(vector, i, value)
+        }
+        vector.setValueCount(batchValues.length)
+        new ColumnarBatch(Array(new ArrowColumnVector(vector)), batchValues.length)
+      }
+      withResource(arrowCoalesce(input.iterator, schema).next()) { gpuBatch =>
+        assertColumns(schema, Seq(values.flatten), gpuBatch)
+      }
+      input.foreach(_.close())
+    }
+  }
+
+  test("HostToGpuCoalesceIterator bounds the host memory of a column whose Arrow batches " +
+      "alternate between bulk and row-by-row copies") {
+    // A batch whose null row keeps its bytes needs a row-by-row copy. Starting a host column at
+    // every switch would hold up to 16 MiB for each such batch.
+    val schema = StructType(Seq(StructField("str", StringType)))
+    val value = ("x" * 100).getBytes(StandardCharsets.UTF_8)
+    val numRows = 100
+    val numBatches = 20
+    val hostLimit = 1L << 30
+    HostAlloc.initialize(hostLimit)
+    try {
+      withResource(new RootAllocator(Long.MaxValue)) { allocator =>
+        val iter = arrowCoalesce(Iterator.empty, schema)
+        (0 until numBatches).foreach { b =>
+          val vector = new VarCharVector("str", allocator)
+          vector.allocateNew()
+          (0 until numRows).foreach(i => vector.setSafe(i, value))
+          if (b % 2 == 1) {
+            vector.setNull(0)
+          }
+          vector.setValueCount(numRows)
+          withResource(new ColumnarBatch(Array(new ArrowColumnVector(vector)), numRows)) {
+            batch =>
+              if (b == 0) {
+                iter.initNewBatch(batch)
+              }
+              iter.addBatchToConcat(batch)
+          }
+        }
+        // Only the plugin's host memory, not the Arrow input
+        val hostBytes =
+          HostAlloc.getUsageRatio() * (PinnedMemoryPool.getTotalPoolSizeBytes + hostLimit)
+        iter.cleanupConcatIsDone()
+        val dataBytes = numBatches * numRows * (value.length + 4L)
+        assert(hostBytes < 3 * dataBytes, s"$hostBytes host bytes for $dataBytes bytes of data")
+      }
+    } finally {
+      HostAlloc.initialize(-1)
+    }
+  }
+
+  test("arrowBulkCopy copies supported Arrow vectors and leaves the others to the caller") {
+    // Both copies build the same values, so only the return value shows which one ran. A
+    // vector left to the caller must not ask for a host column, which would count its rows.
+    def bulkCopy(cv: ArrowColumnVector, dataType: DataType, rows: Int): (Long, Int) = {
+      var calls = 0
+      val copied = withResource(new RapidsHostColumnBuilder(
+          GpuColumnVector.convertFrom(dataType, true), rows)) { builder =>
+        HostColumnarToGpu.arrowBulkCopy(cv, dataType, rows, (_: Long) => {
+          calls += 1
+          builder
+        })
+      }
+      (copied, calls)
+    }
+    def bytes(values: Seq[Any]): Seq[Any] =
+      values.map(v => if (v == null) null else v.toString.getBytes(StandardCharsets.UTF_8))
+    withResource(new RootAllocator(Long.MaxValue)) { allocator =>
+      Seq(
+        StructField("bool", BooleanType) -> Seq(true, null, false),
+        StructField("byte", ByteType) -> Seq(1.toByte, null, 3.toByte),
+        StructField("short", ShortType) -> Seq(1.toShort, null, 3.toShort),
+        StructField("int", IntegerType) -> Seq(1, null, 3),
+        StructField("long", LongType) -> Seq(1L, null, 3L),
+        StructField("float", FloatType) -> Seq(1.5f, null, 3f),
+        StructField("double", DoubleType) -> Seq(1.5, null, 3.0),
+        StructField("date", DateType) -> Seq(1, null, 3),
+        StructField("ts", TimestampType) -> Seq(1L, null, 3L),
+        StructField("str", StringType) -> Seq("a", null, "bc"),
+        StructField("bin", BinaryType) -> bytes(Seq("a", null, "bc"))
+      ).foreach { case (field, values) =>
+        withResource(arrowVector(allocator, field, values)) { cv =>
+          val (copied, calls) = bulkCopy(cv, field.dataType, values.length)
+          assert(copied >= 0 && calls == 1, s"${field.name}: copied $copied with $calls calls")
+        }
+      }
+
+      // Spark reads Arrow vectors with 64-bit offsets from 3.5.0 on.
+      val large: Seq[(String, ArrowColumnVector, DataType)] =
+        if (cmpSparkVersion(3, 5, 0) >= 0) {
+          val largeStrings = new LargeVarCharVector("str", allocator)
+          val largeBinary = new LargeVarBinaryVector("bin", allocator)
+          Seq(largeStrings, largeBinary).foreach { v =>
+            v.allocateNew()
+            v.setSafe(0, "a".getBytes(StandardCharsets.UTF_8))
+            v.setNull(1)
+            v.setValueCount(2)
+          }
+          Seq(("64-bit offsets", new ArrowColumnVector(largeStrings), StringType),
+            ("64-bit binary offsets", new ArrowColumnVector(largeBinary), BinaryType))
+        } else {
+          Seq.empty
+        }
+      val nullWithBytes = new VarCharVector("str", allocator)
+      nullWithBytes.allocateNew()
+      nullWithBytes.setSafe(0, "ab".getBytes(StandardCharsets.UTF_8))
+      nullWithBytes.setSafe(1, "c".getBytes(StandardCharsets.UTF_8))
+      nullWithBytes.setNull(0)
+      nullWithBytes.setValueCount(2)
+      val others = large ++ Seq(
+        ("a null holding bytes", new ArrowColumnVector(nullWithBytes), StringType),
+        ("more values than rows",
+          arrowVector(allocator, StructField("int", IntegerType), Seq(1, 2, 3)), IntegerType))
+      withResource(others.map(_._2)) { _ =>
+        others.foreach { case (name, cv, dataType) =>
+          assertResult((-1L, 0), name)(bulkCopy(cv, dataType, 2))
+        }
+      }
+    }
+  }
+
+  test("test GpuArrowColumnarBatchBuilder does not keep the Arrow buffers it copied") {
     val rootAllocator = new RootAllocator(Long.MaxValue)
     val allocator = rootAllocator.newChildAllocator("int", 0, Long.MaxValue)
     val vector1 = toArrowField("int", IntegerType, nullable = true, null)
@@ -360,6 +800,8 @@ class GpuCoalesceBatchesSuite extends SparkQueryCompareTestSuite {
       vector1.setSafe(i, i)
       vector2.setSafe(i, i)
     }
+    vector1.setValueCount(10)
+    vector2.setValueCount(10)
     val schema = StructType(Seq(StructField("int", IntegerType)))
     val batches = Seq(
       new ColumnarBatch(Array(new ArrowColumnVector(vector1)), vector1.getValueCount),
@@ -379,7 +821,6 @@ class GpuCoalesceBatchesSuite extends SparkQueryCompareTestSuite {
       "testcoalesce",
       useArrowCopyOpt = true)
 
-    val allocatedMemory = allocator.getAllocatedMemory
     hostToGpuCoalesceIterator.initNewBatch(batches.head)
     hostToGpuCoalesceIterator.addBatchToConcat(batches.head)
     hostToGpuCoalesceIterator.addBatchToConcat(batches(1))
@@ -387,12 +828,13 @@ class GpuCoalesceBatchesSuite extends SparkQueryCompareTestSuite {
     // Close columnar batches
     batches.foreach(cb => cb.close())
 
-    // Verify that buffers are not deallocated
-    assertResult(allocatedMemory)(allocator.getAllocatedMemory)
-
-    // Verify that buffers are deallocated after concat is done
-    hostToGpuCoalesceIterator.cleanupConcatIsDone()
+    // Verify that the buffers were deallocated with the batches
     assertResult(0L)(allocator.getAllocatedMemory)
+
+    withResource(hostToGpuCoalesceIterator.concatAllAndPutOnGPU()) { gpuBatch =>
+      assertColumns(schema, Seq((0 until 10) ++ (0 until 10)), gpuBatch)
+    }
+    hostToGpuCoalesceIterator.cleanupConcatIsDone()
   }
 
   test("test HostToGpuCoalesceIterator with arrow config off") {

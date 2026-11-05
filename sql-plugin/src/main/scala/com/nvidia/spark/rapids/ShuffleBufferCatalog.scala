@@ -263,7 +263,8 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
     } else {
       val info = activeShuffles.get(blockId.shuffleId)
       if (info == null) {
-        throw new ShuffleOutputGoneException(s"unknown shuffle ${blockId.shuffleId}")
+        throw new ShuffleOutputGoneException(
+          s"unknown shuffle ${blockId.shuffleId} for block $blockId")
       }
       val entries = info.get(blockId)
       if (entries == null) {
@@ -378,7 +379,8 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
   private def committedBufferIds(blockId: ShuffleBlockId): Array[ShuffleBufferId] = {
     val outputs = committedOutputs.get(blockId.shuffleId)
     if (outputs == null) {
-      throw new ShuffleOutputGoneException(s"unknown shuffle ${blockId.shuffleId}")
+      throw new ShuffleOutputGoneException(
+        s"unknown shuffle ${blockId.shuffleId} for block $blockId")
     }
     val output = outputs.get(blockId.mapId)
     val ids = if (output == null) None else output.bufferIds(blockId.reduceId)

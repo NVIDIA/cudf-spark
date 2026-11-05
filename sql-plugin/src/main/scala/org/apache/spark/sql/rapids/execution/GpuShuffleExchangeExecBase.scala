@@ -16,6 +16,8 @@
 
 package org.apache.spark.sql.rapids.execution
 
+import java.io.{ObjectInputStream, ObjectOutputStream}
+
 import scala.collection.AbstractIterator
 import scala.concurrent.Future
 
@@ -26,9 +28,9 @@ import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitSpillableInHalfByRow
 import com.nvidia.spark.rapids.SpillPriorities.ACTIVE_ON_DECK_PRIORITY
 import com.nvidia.spark.rapids.shims.{GpuHashPartitioning, GpuRangePartitioning, ShimUnaryExecNode, ShuffleOriginUtil, SparkShimImpl}
 
-import org.apache.spark.{MapOutputStatistics, ShuffleDependency}
+import org.apache.spark.{MapOutputStatistics, Partition, ShuffleDependency, SparkContext, SparkEnv, SparkException, TaskContext}
 import org.apache.spark.rapids.shims.GpuShuffleExchangeExec
-import org.apache.spark.rdd.RDD
+import org.apache.spark.rdd.{DeterministicLevel, MapPartitionsRDD, RDD, RDDCheckpointData}
 import org.apache.spark.serializer.Serializer
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, Expression, SortOrder}
@@ -39,7 +41,7 @@ import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec
 import org.apache.spark.sql.execution.exchange.{Exchange, ShuffleExchangeExec}
 import org.apache.spark.sql.execution.metric._
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.GpuShuffleDependency
+import org.apache.spark.sql.rapids.{GpuRoundRobinShuffleRetry, GpuShuffleDependency}
 import org.apache.spark.sql.rapids.execution.GpuShuffleExchangeExecBase.createAdditionalExchangeMetrics
 import org.apache.spark.sql.rapids.shims.SparkSessionUtils
 import org.apache.spark.sql.types.DataType
@@ -445,8 +447,9 @@ object GpuShuffleExchangeExecBase {
      * here sorts on the GPU over all columns of the table in ascending order and nulls as smallest.
      * This essentially means the results are not one to one w.r.t. the row hashcode based sort.
      * As long as we don't mix and match repartition() between CPU and GPU this should not be a
-     * concern. Latest spark behavior does not even require this sort as it fails the upstream
-     * task when indeterminate tasks re-run.
+     * concern. Sorting within each batch does not make round-robin partition assignments
+     * repeatable when batch boundaries change, including during split-and-retry. The map RDD
+     * below must therefore mark multi-partition round-robin output as indeterminate.
      */
     val newRdd = if (isRoundRobin && SQLConf.get.sortBeforeRepartition) {
       val boundReferences = outputAttributes.zipWithIndex.map { case (attr, index) =>
@@ -477,8 +480,10 @@ object GpuShuffleExchangeExecBase {
         partitioner.columnarEvalAny(batch)
       }
     }
-    val rddWithPartitionIds: RDD[Product2[Int, ColumnarBatch]] = {
-      newRdd.mapPartitions { iter =>
+    val isIndeterminate = isRoundRobin && newPartitioning.numPartitions > 1
+    val roundRobinRetryGuard = if (isIndeterminate) Some(new GpuRoundRobinShuffleRetry) else None
+    val rddWithPartitionIds: RDD[Product2[Int, ColumnarBatch]] = newRdd.withScope {
+      val partitionBatches = newRdd.sparkContext.clean { (iter: Iterator[ColumnarBatch]) =>
         val getParts = getPartitioned
         new AbstractIterator[Product2[Int, ColumnarBatch]] {
           private var partitionedIter: Iterator[Array[(ColumnarBatch, Int)]] =
@@ -548,6 +553,49 @@ object GpuShuffleExchangeExecBase {
           }
         }
       }
+      new MapPartitionsRDD[Product2[Int, ColumnarBatch], ColumnarBatch](
+        newRdd, (_, _, iter) => partitionBatches(iter)) {
+        // Fail closed outside Spark's task-binary serialization path. Each new map-stage
+        // attempt takes a fresh driver snapshot of this dependency's reader history.
+        @transient private var rejectMapRetry = true
+
+        private def writeObject(out: ObjectOutputStream): Unit = {
+          // DAGScheduler serializes each attempt under this lock on its event thread.
+          // ClosureCleaner pre-serialization does not hold it and must keep a rejecting snapshot.
+          val rejectRetry = !isIndeterminate || !Thread.holdsLock(RDDCheckpointData) ||
+            SparkEnv.get.executorId != SparkContext.DRIVER_IDENTIFIER ||
+            roundRobinRetryGuard.forall(_.hasSubmittedReader)
+          out.defaultWriteObject()
+          out.writeBoolean(rejectRetry)
+        }
+
+        private def readObject(in: ObjectInputStream): Unit = {
+          in.defaultReadObject()
+          rejectMapRetry = in.readBoolean()
+        }
+
+        override def compute(
+            split: Partition,
+            context: TaskContext): Iterator[Product2[Int, ColumnarBatch]] = {
+          // A reader submitted before the rerun may still return a result from the old output.
+          if (isIndeterminate && rejectMapRetry) {
+            throw new SparkException("Cannot retry a GPU round-robin shuffle with indeterminate " +
+              "output after a reader was submitted because batch boundaries can change between " +
+              "attempts. Rerun with a new DataFrame, unpersisting a cached one first, or set " +
+              "spark.rapids.sql.partitioning.RoundRobinPartitioning=false to repartition " +
+              "on the CPU.")
+          }
+          super.compute(split, context)
+        }
+
+        override protected def getOutputDeterministicLevel: DeterministicLevel.Value = {
+          if (isIndeterminate) {
+            DeterministicLevel.INDETERMINATE
+          } else {
+            super.getOutputDeterministicLevel
+          }
+        }
+      }
     }
 
     // Apply OP_TIME_NEW tracking to rddWithPartitionIds if opTimeNewMetric is provided
@@ -574,6 +622,7 @@ object GpuShuffleExchangeExecBase {
       useMultiThreadedShuffle = useMultiThreadedShuffle,
       metrics = GpuMetric.unwrap(additionalMetrics))
 
+    dependency.roundRobinRetryGuard = roundRobinRetryGuard
     dependency
   }
 

@@ -434,26 +434,139 @@ def test_delta_43_variant_shredding_fallback(spark_tmp_table_factory, write_mode
     assert "typed_value" in physical_schema
 
 
-# unsupported WriteIntoDeltaCommand tracked by https://github.com/NVIDIA/spark-rapids/issues/11169
-@allow_non_gpu_conditional(is_databricks_runtime(), "DataWritingCommandExec, WriteFilesExec")
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)
-@pytest.mark.xfail(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/13106")
-@pytest.mark.xfail(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/11169")
 @pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values, ids=idfn)
 def test_delta_write_round_trip_managed(spark_tmp_table_factory, enable_deletion_vectors):
     gen_list = [("c" + str(i), gen) for i, gen in enumerate(delta_write_gens)]
     conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+    native_staged_write = is_databricks173_or_later()
     (cpu_table, gpu_table) = assert_gpu_and_cpu_save_as_table_are_equal_collect(
         spark_tmp_table_factory,
         lambda spark, table: get_writer_with_deletion_vector_property_set(
             gen_df(spark, gen_list, length=delta_db173_wide_schema_gen_length)
                 .coalesce(1).write.format("delta"), enable_deletion_vectors)
             .saveAsTable(table),
-        conf=conf
+        conf=conf,
+        expected_command=("GpuAppendDataExecV1" if native_staged_write else None),
+        # DBR 17.3's staged write retains its native V1 commit writer, so validate the GPU
+        # query wrapper and nested data writer instead of requiring the standard
+        # RapidsDeltaWrite implementation.
+        required_gpu_classes=(
+            ["GpuDataWritingCommandExec", "GpuWriteFilesExec"]
+            if native_staged_write else None)
     )
     assert_delta_history_equal(conf, cpu_table, gpu_table)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_databricks143(), reason="DBR 14.3 Delta create-table path")
+@pytest.mark.parametrize("write_api", ["sql_rtas", "save_as_table_overwrite"])
+@pytest.mark.parametrize("txn_idempotency", [False, True])
+@pytest.mark.parametrize("enable_deletion_vectors", [None, False, True])
+def test_delta_db143_managed_replace(
+        spark_tmp_table_factory, write_api, txn_idempotency, enable_deletion_vectors):
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf, {
+        "spark.sql.sources.partitionOverwriteMode": "dynamic"
+    })
+    cpu_table = spark_tmp_table_factory.get() + '_cpu'
+    gpu_table = spark_tmp_table_factory.get() + '_gpu'
+    properties = ("" if enable_deletion_vectors is None else
+                  f" TBLPROPERTIES ('delta.enableDeletionVectors' = "
+                  f"'{str(enable_deletion_vectors).lower()}')")
+
+    def create_initial_tables(spark):
+        for table in [cpu_table, gpu_table]:
+            spark.sql(
+                f"CREATE TABLE {table} USING DELTA PARTITIONED BY (part){properties} AS "
+                "SELECT id, CAST(id % 2 AS INT) AS part, 'initial' AS value FROM range(4)")
+
+    def replace(spark, table, value="replaced"):
+        query = (
+            f"SELECT id, CAST(id % 2 AS INT) AS part, '{value}' AS value "
+            "FROM range(2, 6) WHERE id % 2 = 0")
+        if write_api == "save_as_table_overwrite":
+            writer = spark.sql(query).write.format("delta").mode("overwrite")
+            if enable_deletion_vectors is not None:
+                writer = get_writer_with_deletion_vector_property_set(
+                    writer, enable_deletion_vectors)
+            writer.partitionBy("part").saveAsTable(table)
+        else:
+            spark.sql(
+                f"CREATE OR REPLACE TABLE {table} USING DELTA PARTITIONED BY (part)"
+                f"{properties} AS {query}").collect()
+
+    def write_conf(version):
+        if not txn_idempotency:
+            return conf
+        return copy_and_update(conf, {
+            "spark.databricks.delta.write.txnAppId": cpu_table,
+            "spark.databricks.delta.write.txnVersion": str(version)
+        })
+
+    def write_tables(value, version):
+        current_conf = write_conf(version)
+        with_cpu_session(lambda spark: replace(spark, cpu_table, value), conf=current_conf)
+        assert_rapids_delta_write(
+            lambda spark: replace(spark, gpu_table, value), conf=current_conf,
+            expected_command="GpuAtomicReplaceTableAsSelectExec", require_non_empty=True)
+
+    with_cpu_session(create_initial_tables, conf=conf)
+    write_tables("replaced", 0)
+
+    def table_state(spark, table):
+        rows = spark.table(table).orderBy("id").collect()
+        detail = spark.sql(f"DESCRIBE DETAIL {table}").select(
+            "format", "partitionColumns", "properties").first()
+        return rows, (detail.format, detail.partitionColumns, sorted(detail.properties.items()))
+
+    def history_state(spark, table):
+        history = spark.sql(f"DESCRIBE HISTORY {table}").select(
+            "version", "operation", "operationParameters").orderBy("version").collect()
+        # Compare map contents explicitly, including properties, without dictionary assertions.
+        return [(row.version, row.operation, sorted(
+            (key, json.dumps(json.loads(value), sort_keys=True) if key == "properties" else value)
+            for key, value in row.operationParameters.items())) for row in history]
+
+    cpu_state = with_cpu_session(lambda spark: table_state(spark, cpu_table), conf=conf)
+    gpu_state = with_cpu_session(lambda spark: table_state(spark, gpu_table), conf=conf)
+    if write_api == "save_as_table_overwrite":
+        assert [row.id for row in cpu_state[0] if row.part == 1] == [1, 3]
+    assert_equal(cpu_state, gpu_state)
+    assert_delta_history_equal(conf, cpu_table, gpu_table)
+
+    cpu_history = with_cpu_session(lambda spark: history_state(spark, cpu_table), conf=conf)
+    gpu_history = with_cpu_session(lambda spark: history_state(spark, gpu_table), conf=conf)
+    assert_equal(cpu_history, gpu_history)
+
+    if txn_idempotency:
+        def replay_state(spark, table):
+            return table_state(spark, table), history_state(spark, table)
+
+        before = {
+            table: with_cpu_session(lambda spark: replay_state(spark, table), conf=conf)
+            for table in (cpu_table, gpu_table)
+        }
+        # Different data at the same application/version must not change rows or history.
+        with_cpu_session(lambda spark: replace(spark, cpu_table, "retry"), conf=write_conf(0))
+        with_gpu_session(lambda spark: replace(spark, gpu_table, "retry"), conf=write_conf(0))
+        for table in (cpu_table, gpu_table):
+            after = with_cpu_session(lambda spark: replay_state(spark, table), conf=conf)
+            assert_equal(before[table], after)
+
+        # A higher version must perform a real write and add exactly one commit.
+        write_tables("next", 1)
+        after_states = []
+        for table in (cpu_table, gpu_table):
+            after = with_cpu_session(lambda spark: replay_state(spark, table), conf=conf)
+            assert after[0][0] != before[table][0][0]
+            assert after[1][-1][0] == before[table][1][-1][0] + 1
+            after_states.append(after)
+        assert_equal(after_states[0], after_states[1])
+        assert_delta_history_equal(conf, cpu_table, gpu_table)
 
 
 @allow_non_gpu('AppendDataExecV1', 'AtomicCreateTableAsSelectExec',
@@ -605,6 +718,73 @@ def test_delta_db173_native_managed_ctas_rtas(
     assert_equal(cpu_state, gpu_state)
     assert_delta_history_equal(conf, cpu_table, gpu_table)
     with_cpu_session(check_delta_logs, conf=conf)
+
+
+@allow_non_gpu('AppendDataExecV1', 'OverwriteByExpressionExecV1',
+               'AtomicCreateTableAsSelectExec', 'AtomicReplaceTableAsSelectExec',
+               'DataWritingCommandExec', 'WriteFilesExec', *delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_databricks173_or_later(), reason="DBR 17.3 native write path")
+@pytest.mark.parametrize("write_api", ["sql_ctas", "sql_rtas", "save_as_table_overwrite"])
+def test_delta_db173_native_staged_write_cpu_atomic_fallback(
+        spark_tmp_table_factory, write_api):
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf, {
+        "spark.databricks.delta.optimizeWrite.enabled": "false",
+        "spark.sql.adaptive.enabled": "true",
+        "spark.rapids.sql.exec.AtomicCreateTableAsSelectExec": "false",
+        "spark.rapids.sql.exec.AtomicReplaceTableAsSelectExec": "false",
+    })
+    cpu_table = spark_tmp_table_factory.get() + '_cpu'
+    gpu_table = spark_tmp_table_factory.get() + '_gpu'
+    if write_api != "sql_ctas":
+        def setup_tables(spark):
+            for table in (cpu_table, gpu_table):
+                spark.sql(f"CREATE TABLE {table} USING DELTA AS SELECT -1L AS id").collect()
+
+        with_cpu_session(setup_tables, conf=conf)
+
+    def write_table(spark, table):
+        query = "SELECT id, IF(id % 3 = 0, NULL, id + 1) AS value FROM range(64)"
+        if write_api == "save_as_table_overwrite":
+            spark.sql(query).write.format("delta").mode("overwrite") \
+                .option("overwriteSchema", "true").saveAsTable(table)
+        else:
+            command = "CREATE TABLE" if write_api == "sql_ctas" else "CREATE OR REPLACE TABLE"
+            spark.sql(f"{command} {table} USING DELTA AS {query}").collect()
+
+    with_cpu_session(lambda spark: write_table(spark, cpu_table), conf=conf)
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        with_gpu_session(lambda spark: write_table(spark, gpu_table), conf=conf)
+        plans = callback.getResultsWithTimeout(10000)
+        expected_atomic = ("AtomicCreateTableAsSelectExec" if write_api == "sql_ctas"
+                           else "AtomicReplaceTableAsSelectExec")
+        for cls in (expected_atomic, "DataWritingCommandExec"):
+            assert any(callback.didFallBack(plan, cls) for plan in plans), \
+                f"CPU {cls} is missing from captured fallback plans"
+        expected_v1 = (
+            "OverwriteByExpressionExecV1"
+            if is_databricks_version_or_later(18, 3) and write_api != "sql_ctas"
+            else "AppendDataExecV1")
+        assert any(callback.didFallBack(plan, expected_v1) for plan in plans), \
+            f"CPU {expected_v1} is missing from captured fallback plans"
+        for cls in ("GpuAppendDataExecV1", "GpuOverwriteByExpressionExecV1",
+                    "GpuDataWritingCommandExec", "GpuWriteFilesExec"):
+            assert not any(callback.contains(plan, cls) for plan in plans), \
+                f"CPU atomic write unexpectedly contains {cls}"
+    finally:
+        callback.endCapture()
+
+    def table_state(spark, table):
+        df = spark.table(table)
+        return df.orderBy("id").collect(), df.schema.json()
+
+    cpu_state = with_cpu_session(lambda spark: table_state(spark, cpu_table), conf=conf)
+    gpu_state = with_cpu_session(lambda spark: table_state(spark, gpu_table), conf=conf)
+    assert_equal(cpu_state, gpu_state)
+    assert_delta_history_equal(conf, cpu_table, gpu_table)
 
 
 @allow_non_gpu('AppendDataExecV1', 'AtomicCreateTableAsSelectExec',
@@ -1411,6 +1591,52 @@ def test_delta_replace_where_save_as_table_preserves_partitioning(spark_tmp_tabl
         lambda spark: partition_columns(spark, gpu_table), conf=confs)
     assert cpu_partition_columns == ["region"]
     assert gpu_partition_columns == cpu_partition_columns
+
+
+@allow_non_gpu('DataWritingCommandExec', 'WriteFilesExec', *delta_meta_allow)
+@allow_non_gpu_conditional(is_databricks173_or_later(), 'AppendDataExecV1')
+@allow_non_gpu_conditional(is_databricks_runtime(), 'DeltaInvariantCheckerExec')
+@delta_lake
+@ignore_order(local=True)
+@delta_rtas_truncate_skip
+def test_delta_replace_where_save_as_table_preserves_unmatched_rows(spark_tmp_table_factory):
+    cpu_table = spark_tmp_table_factory.get()
+    gpu_table = spark_tmp_table_factory.get()
+    confs = copy_and_update(writer_confs, delta_writes_enabled_conf)
+
+    def create_initial_tables(spark):
+        for table in [cpu_table, gpu_table]:
+            spark.sql(
+                f"CREATE TABLE {table} (record_id BIGINT, region STRING, amount DOUBLE) "
+                "USING DELTA PARTITIONED BY (region)")
+            spark.sql(
+                f"INSERT INTO {table} VALUES (0L, 'NA', 10.0D), (1L, 'EMEA', 20.0D), "
+                "(2L, 'NA', 30.0D), (3L, 'APAC', 40.0D)")
+
+    def replace_na_partition(spark, table):
+        replacement = spark.sql(
+            "SELECT 100L AS record_id, 'NA' AS region, 100.0D AS amount")
+        # Leave partitionBy unspecified, as in the original overwrite regression.
+        (replacement.write.format("delta").mode("overwrite")
+         .option("replaceWhere", "region = 'NA'")
+         .saveAsTable(table))
+
+    with_cpu_session(create_initial_tables, conf=confs)
+    with_cpu_session(lambda spark: replace_na_partition(spark, cpu_table), conf=confs)
+    # DBR may use its native CPU writer for partitioned tables. Require the GPU
+    # atomic replacement on every runtime, and the GPU data writer on OSS Delta.
+    gpu_write_classes = ["GpuAtomicReplaceTableAsSelectExec"]
+    if not is_databricks_runtime():
+        gpu_write_classes += delta_write
+    assert_rapids_delta_write(
+        lambda spark: replace_na_partition(spark, gpu_table), conf=confs,
+        required_gpu_classes=gpu_write_classes, require_non_empty=True)
+
+    cpu_rows = with_cpu_session(
+        lambda spark: spark.table(cpu_table).orderBy("record_id").collect(), conf=confs)
+    gpu_rows = with_cpu_session(
+        lambda spark: spark.table(gpu_table).orderBy("record_id").collect(), conf=confs)
+    assert_equal(cpu_rows, gpu_rows)
 
 
 @allow_non_gpu(*delta_meta_allow)

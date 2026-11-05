@@ -32,7 +32,7 @@ from iceberg import (
     ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance,
     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df, read_parquet_schema)
 from marks import (iceberg, ignore_order, allow_non_gpu, allow_non_gpu_conditional,
-                   datagen_overrides)
+                   datagen_overrides, iceberg_fast_test)
 from spark_session import (with_gpu_session, with_cpu_session, is_spark_400_or_later,
                            is_spark_411_or_later)
 
@@ -115,6 +115,7 @@ def _assert_gpu_equals_cpu_ctas(spark_tmp_table_factory,
     return cpu_table, gpu_table
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.parametrize("format_version", iceberg_format_versions)
@@ -221,6 +222,7 @@ def test_ctas_encryption_fallback(spark_tmp_table_factory):
         base_table_name, ["AtomicCreateTableAsSelectExec"], conf=iceberg_write_enabled_conf)
 
 
+@iceberg_fast_test
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)
@@ -241,6 +243,7 @@ def test_ctas_v3_fallback(spark_tmp_table_factory):
         conf=copy_and_update(iceberg_write_enabled_conf, {"spark.rapids.sql.format.iceberg.v3.enabled": "false"}))
 
 
+@iceberg_fast_test
 @iceberg
 @pytest.mark.skipif(
     not supports_iceberg_row_lineage_inheritance,
@@ -469,6 +472,7 @@ def _do_test_ctas_partitioned_table(
                                 partition_col_sql=partition_col_sql)
 
 
+@iceberg_fast_test
 @iceberg
 @datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids-jni/issues/4016')
 @ignore_order(local=True)
@@ -637,6 +641,7 @@ def test_ctas_from_values(format_version, spark_tmp_table_factory,
     assert_equal_with_local_sort(cpu_data, gpu_data)
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.parametrize("partition_col_sql", [

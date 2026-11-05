@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2022, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,69 +19,21 @@
 // In order to have metrics and preferred locations work we need to be in a spark sql package
 package org.apache.spark.sql.rapids.execution
 
-import java.util.Arrays
+import java.io.ObjectOutputStream
 
 import com.nvidia.spark.rapids.GpuMetric
 
-import org.apache.spark.{Dependency, Partition, Partitioner, ShuffleDependency, TaskContext}
+import org.apache.spark.{Dependency, Partition, Partitioner, ShuffleDependency, SparkContext, SparkEnv, TaskContext}
 import org.apache.spark.rapids.shims.ShuffledBatchRDDUtil
-import org.apache.spark.rdd.RDD
+import org.apache.spark.rdd.{RDD, RDDCheckpointData}
 import org.apache.spark.shuffle.sort.SortShuffleManager
 import org.apache.spark.sql.execution.{CoalescedPartitioner, CoalescedPartitionSpec, ShufflePartitionSpec}
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLShuffleReadMetricsReporter}
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.rapids.GpuShuffleDependency
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 case class ShuffledBatchRDDPartition(index: Int, spec: ShufflePartitionSpec) extends Partition
-
-/**
- * A dummy partitioner for use with records whose partition ids have been pre-computed (i.e. for
- * use on RDDs of (Int, Row) pairs where the Int is a partition id in the expected range).
- */
-class BatchPartitionIdPassthrough(override val numPartitions: Int) extends Partitioner {
-  override def getPartition(key: Any): Int = key.asInstanceOf[Int]
-}
-
-/**
- * A Partitioner that might group together one or more partitions from the parent.
- *
- * @param parent a parent partitioner
- * @param partitionStartIndices indices of partitions in parent that should create new partitions
- *   in child (this should be an array of increasing partition IDs). For example, if we have a
- *   parent with 5 partitions, and partitionStartIndices is [0, 2, 4], we get three output
- *   partitions, corresponding to partition ranges [0, 1], [2, 3] and [4] of the parent partitioner.
- */
-class CoalescedBatchPartitioner(val parent: Partitioner, val partitionStartIndices: Array[Int])
-  extends Partitioner {
-
-  @transient private lazy val parentPartitionMapping: Array[Int] = {
-    val n = parent.numPartitions
-    val result = new Array[Int](n)
-    for (i <- 0 until partitionStartIndices.length) {
-      val start = partitionStartIndices(i)
-      val end = if (i < partitionStartIndices.length - 1) partitionStartIndices(i + 1) else n
-      for (j <- start until end) {
-        result(j) = i
-      }
-    }
-    result
-  }
-
-  override def numPartitions: Int = partitionStartIndices.length
-
-  override def getPartition(key: Any): Int = {
-    parentPartitionMapping(parent.getPartition(key))
-  }
-
-  override def equals(other: Any): Boolean = other match {
-    case c: CoalescedBatchPartitioner =>
-      c.parent == parent && Arrays.equals(c.partitionStartIndices, partitionStartIndices)
-    case _ =>
-      false
-  }
-
-  override def hashCode(): Int = 31 * parent.hashCode() + Arrays.hashCode(partitionStartIndices)
-}
 
 /**
  * This is a specialized version of `org.apache.spark.rdd.ShuffledRDD` that is optimized for
@@ -117,6 +69,20 @@ class ShuffledBatchRDD(
   dependency.rdd.context.setLocalProperty(
     SortShuffleManager.FETCH_SHUFFLE_BLOCKS_IN_BATCH_ENABLED_KEY,
     SQLConf.get.fetchShuffleBlocksInBatch.toString)
+
+  private def writeObject(out: ObjectOutputStream): Unit = {
+    // DAGScheduler serializes task binaries under this lock. ClosureCleaner checks outside
+    // that path must not count as submitted readers. Mark before a reader can return results.
+    if (Thread.holdsLock(RDDCheckpointData) &&
+        SparkEnv.get.executorId == SparkContext.DRIVER_IDENTIFIER) {
+      dependency match {
+        case gpu: GpuShuffleDependency[_, _, _] =>
+          gpu.roundRobinRetryGuard.foreach(_.markReaderSubmitted())
+        case _ =>
+      }
+    }
+    out.defaultWriteObject()
+  }
 
   override def getDependencies: Seq[Dependency[_]] = List(dependency)
 

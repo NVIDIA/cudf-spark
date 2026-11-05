@@ -351,13 +351,21 @@ def assert_gpu_and_cpu_writes_are_equal_iterator(write_func, read_func, base_pat
     """
     _assert_gpu_and_cpu_writes_are_equal(write_func, read_func, base_path, 'ITERATOR', conf=conf)
 
-def assert_gpu_and_cpu_save_as_table_are_equal_collect(table_name_factory, write_func, conf={}):
+def assert_gpu_and_cpu_save_as_table_are_equal_collect(
+        table_name_factory, write_func, conf=None, expected_command=None,
+        required_gpu_classes=None):
     """
     Assert when running write_func on both the CPU and the GPU and reading
     on the CPU that the results are equal.
     In this case the data is collected back to the driver and compared here, so be
     careful about the amount of data returned.
+    For strict Delta writes, expected_command also checks the captured GPU command.
+    required_gpu_classes overrides the standard Delta write classes when supplied.
+    Explicit command or non-empty required-class checks require a captured plan.
+    These plan checks apply only to Delta tests that do not allow non-GPU Delta writes.
     """
+    if conf is None:
+        conf = {}
     conf = _prep_incompat_conf(conf)
 
     print('### CPU RUN ###')
@@ -371,8 +379,13 @@ def assert_gpu_and_cpu_save_as_table_are_equal_collect(table_name_factory, write
     # Check if current test has delta_lake marker
     if current_test_has_delta_marker() and not current_test_allows_non_gpu_delta_write():
         print("Delta Lake test detected - applying Delta write validation")
-        from delta_lake_utils import assert_rapids_delta_write
-        assert_rapids_delta_write(lambda spark : write_func(spark, gpu_table), conf=conf)
+        from delta_lake_utils import assert_rapids_delta_write, delta_write
+        assert_rapids_delta_write(
+            lambda spark : write_func(spark, gpu_table), conf=conf,
+            expected_command=expected_command,
+            require_non_empty=(expected_command is not None or bool(required_gpu_classes)),
+            required_gpu_classes=(delta_write if required_gpu_classes is None
+                                  else required_gpu_classes))
     else:
         with_gpu_session(lambda spark : write_func(spark, gpu_table), conf=conf)
 
