@@ -331,8 +331,8 @@ else
 fi
 
 if [[ "$UNSHIM_PARALLEL_WORLD_ONLY" == "1" ]]; then
-  echo "Unshim parallel-world-only: preparing analyzer-only output and skipping JNI unpack, shimplify, and reduced POM generation"
-  MVN_FAST_SKIP_OPTS="$MVN_FAST_SKIP_OPTS -Drapids.jni.unpack.skip=true -Drapids.shimplify.skip=true -Drapids.parallel.world.skip.reduced.pom=true -Drapids.aggregator.downstream.refresh.skip=true"
+  echo "Unshim parallel-world-only: preparing analyzer-only output and skipping JNI unpack, shim source generation, and reduced POM generation"
+  MVN_FAST_SKIP_OPTS="$MVN_FAST_SKIP_OPTS -Drapids.jni.unpack.skip=true -Drapids.shim.sources.skip=true -Drapids.parallel.world.skip.reduced.pom=true -Drapids.aggregator.downstream.refresh.skip=true"
 elif [[ "$UNSHIM_FAST" == "1" && -d "$MVN_BASE_DIR/dist/target/jni-deps" ]]; then
   echo "Unshim fast: reusing existing JNI deps from $MVN_BASE_DIR/dist/target/jni-deps"
   MVN_FAST_SKIP_OPTS="$MVN_FAST_SKIP_OPTS -Drapids.jni.unpack.skip=true"

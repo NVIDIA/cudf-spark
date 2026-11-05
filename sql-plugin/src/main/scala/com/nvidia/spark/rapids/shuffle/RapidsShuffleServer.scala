@@ -91,7 +91,7 @@ class CatalogShuffleRequestHandler(catalog: ShuffleBufferCatalog)
  * A single command thread is used to orchestrate sends/receives and to remove
  * from transport's progress thread.
  *
- * Close shuts the transfer reply gate before waiting for admitted queue attempts. A reply
+ * Close shuts the reply gate before waiting for admitted queue attempts. A reply
  * decided while open still needs admission immediately before queueing.
  * {{{
  * [open] -- close --> [closing] -- queue attempts end --> [closed]
@@ -106,7 +106,7 @@ class CatalogShuffleRequestHandler(catalog: ShuffleBufferCatalog)
  *
  * No reply is admitted once closing starts. Close waits for admitted queue attempts, including
  * throws, then waits a bounded time for the send loop. Closed means close returned.
- * Close does not wait for delivery or callbacks. Metadata replies do not use this gate.
+ * Close does not wait for delivery or callbacks. Metadata success replies do not use this gate.
  *
  * @param transport the transport we were configured with
  * @param serverConnection a connection object, which contains functions to send/receive
@@ -143,7 +143,7 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
    */
   @volatile private[this] var started = true
 
-  // The transfer responses, error replies included, that `replyGate` let through and that are
+  // The error replies and transfer responses that `replyGate` let through and that are
   // still being queued. Guarded by the `bssExec` monitor, with `started`, so that close can wait
   // for them.
   private[this] var repliesQueueing = 0
@@ -403,32 +403,45 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
         pendingTransfer.arrivalNanos))
     } catch {
       case NonFatal(t) =>
-        val gone = isOutputGone(t)
-        if (gone) {
-          // expected after an unregister, possibly once per request, so the trace is debug only
-          logWarning(s"Unable to start transfer request ${pendingTransfer.tx}: the requested " +
-              s"shuffle output is gone (${t.getMessage}). It will not be retried.")
-          logDebug(s"Missing output for transfer request ${pendingTransfer.tx}", t)
-        } else {
-          logError(s"Unable to start transfer request ${pendingTransfer.tx}. " +
-              "It will not be retried.", t)
-        }
         closeQuietly("send bounce buffers", sendBounceBuffers)
-        // a request whose own receive failed has no header to answer
-        if (pendingTransfer.tx.getStatus == TransactionStatus.Success) {
+        answerFailedRequest("transfer request", pendingTransfer.tx, t) { reason =>
           val requested = t match {
             case e: BufferLookupException => e.tableIds
             case _ => Seq.empty
           }
-          errorReply(if (gone) BufferSendState.MissingOutput else BufferSendState.Failed, t)
-            .foreach { reply =>
-              BufferSendState.sendErrorReply(pendingTransfer.tx, reply.gate,
-                new RefCountedDirectByteBuffer(
-                  ShuffleMetadata.buildTransferErrorResponse(requested, reply.reason)))
-            }
+          new RefCountedDirectByteBuffer(
+            ShuffleMetadata.buildTransferErrorResponse(requested, reason))
         }
         closeQuietly("a transfer request", pendingTransfer.tx)
         None
+    }
+  }
+
+  /**
+   * Logs a request that failed with `cause` before anything was sent, and answers it with the
+   * error reply that `build` makes from the reason, if the server can. A request whose own
+   * receive failed gets no reply, since it may have no header to answer. Its caller closes the
+   * request transaction.
+   */
+  private def answerFailedRequest(what: String, tx: Transaction, cause: Throwable)(
+      build: String => RefCountedDirectByteBuffer): Unit = {
+    val gone = isOutputGone(cause)
+    if (gone) {
+      // expected after an unregister, possibly once per request, so the trace is debug only
+      logWarning(s"Unable to serve $what $tx: the requested shuffle output is gone " +
+          s"(${cause.getMessage}). It will not be retried.")
+      logDebug(s"Missing output for $what $tx", cause)
+    } else {
+      logError(s"Unable to serve $what $tx. It will not be retried.", cause)
+    }
+    if (tx.getStatus == TransactionStatus.Success) {
+      val outcome = if (gone) BufferSendState.MissingOutput else BufferSendState.Failed
+      errorReply(outcome, cause) match {
+        case Some(reply) => BufferSendState.sendErrorReply(tx, reply.gate, build(reply.reason))
+        case None =>
+          // the server is closing, or the failure must end the send loop
+          logDebug(s"Not answering $what $tx")
+      }
     }
   }
 
@@ -475,13 +488,18 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
   }
 
   /**
-   * The error reply for a request that ended with `outcome` because of `cause`. There is none
-   * when `cause` ends the send loop, since the executor then exits and the requester hears of it
-   * when its connection closes. There is none once the server is closing either, which saves
-   * building a reply that `replyGate` would not let through. The send loop can still be running
-   * then, since the server's close and the transport's each wait for it a bounded time. A caller
-   * that ends several states calls this once per state, since the server can close between two
-   * of them.
+   * The error reply for a request that ended with `outcome` because of `cause`. It is None in
+   * two cases:
+   *  - `cause` must end the send loop (`BufferSendState.endsSendLoop`). A caller that rethrows
+   *    it ends the loop, so that the Spark executor exits. The requester then hears of it when
+   *    its connection closes. A caller that does not rethrow it, as `issueSend`, `newSendState`
+   *    and a metadata request do, leaves the requester waiting until it times out.
+   *  - The server is closing, which saves building a reply that `replyGate` would not let
+   *    through. The send loop can still be running then, since the server's close and the
+   *    transport's each wait for it a bounded time.
+   *
+   * A caller that ends several states calls this method once per state, since the server can
+   * close between two of them.
    */
   private def errorReply(
       outcome: BufferSendState.Outcome,
@@ -569,36 +587,60 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
             // NOTE: MetaUtils will have a simpler/better way of handling creating a response.
             // That said, at this time, I see some issues with that approach from the flatbuffer
             // library, so the code to create the metadata response will likely change.
-            val responseTables = (0 until req.blockIdsLength()).flatMap { i =>
-              val blockId = req.blockIds(i)
-              // this is getting shuffle buffer ids
-              requestHandler.getShuffleBufferMetas(
-                ShuffleBlockBatchId(blockId.shuffleId(), blockId.mapId(),
-                  blockId.startReduceId(), blockId.endReduceId()))
+            val metadataResponse = try {
+              val responseTables = (0 until req.blockIdsLength()).flatMap { i =>
+                val blockId = req.blockIds(i)
+                try {
+                  // this is getting shuffle buffer ids
+                  requestHandler.getShuffleBufferMetas(
+                    ShuffleBlockBatchId(blockId.shuffleId(), blockId.mapId(),
+                      blockId.startReduceId(), blockId.endReduceId()))
+                } catch {
+                  case NonFatal(t) => throw new BlockLookupException(i, t)
+                }
+              }
+              ShuffleMetadata.buildMetaResponse(responseTables)
+            } catch {
+              case NonFatal(t) =>
+                // the block whose lookup failed, by its index in the request, or -1 for any
+                // other failure
+                val (cause, failedBlock) = t match {
+                  case e: BlockLookupException => (e.getCause, e.blockIndex)
+                  case _ => (t, -1)
+                }
+                // the reason adds the cause, which says what is gone or what failed
+                answerFailedRequest("metadata request", tx, cause) { reason =>
+                  val detail = Option(cause.getMessage).getOrElse(cause.getClass.getName)
+                  new RefCountedDirectByteBuffer(
+                    ShuffleMetadata.buildMetaErrorResponse(s"$reason: $detail", failedBlock))
+                }
+                null
             }
 
-            val metadataResponse =
-              ShuffleMetadata.buildMetaResponse(responseTables)
-            // Wrap the buffer so we keep a reference to it, and we destroy it later on .close
-            val respBuffer = new RefCountedDirectByteBuffer(metadataResponse)
-            val materializedResponse = ShuffleMetadata.getMetadataResponse(metadataResponse)
+            // null when the request failed, which `answerFailedRequest` has handled
+            if (metadataResponse != null) {
+              // Wrap the buffer so we keep a reference to it, and we destroy it later on .close
+              val respBuffer = new RefCountedDirectByteBuffer(metadataResponse)
+              val materializedResponse = ShuffleMetadata.getMetadataResponse(metadataResponse)
 
-            logDebug(s"Response will be at header ${TransportUtils.toHex(tx.getHeader)}:\n" +
-              s"${ShuffleMetadata.printResponse("responding", materializedResponse)}")
+              logDebug(s"Response will be at header ${TransportUtils.toHex(tx.getHeader)}:\n" +
+                s"${ShuffleMetadata.printResponse("responding", materializedResponse)}")
 
-            val responseTx = tx.respond(respBuffer.getBuffer(),
-              withResource(_) { responseTx =>
-                responseTx.getStatus match {
-                  case TransactionStatus.Success =>
-                    withResource(respBuffer) { _ =>
-                      val stats = responseTx.getStats
-                      logDebug(s"Sent metadata ${stats.sendSize} in ${stats.txTimeMs} ms")
+              val responseTx = tx.respond(respBuffer.getBuffer(),
+                withResource(_) { responseTx =>
+                  withResource(respBuffer) { _ =>
+                    responseTx.getStatus match {
+                      case TransactionStatus.Success =>
+                        val stats = responseTx.getStats
+                        logDebug(s"Sent metadata ${stats.sendSize} in ${stats.txTimeMs} ms")
+                      case _ =>
+                        // a failed send can report InProgress here rather than Error
+                        logError(s"Error sending metadata response in tx $tx")
                     }
-                  case TransactionStatus.Error =>
-                    logError(s"Error sending metadata response in tx $tx")
-                }
-              })
-            logDebug(s"Waiting for send metadata to complete: $responseTx")
+                  }
+                })
+              logDebug(s"Waiting for send metadata to complete: $responseTx")
+            }
           }
         }
       }
@@ -985,6 +1027,10 @@ class RapidsShuffleServer(transport: RapidsShuffleTransport,
   }
 }
 
+/** A metadata request whose block at `blockIndex`, in the request, could not be looked up. */
+private[shuffle] class BlockLookupException(val blockIndex: Int, cause: Throwable)
+    extends RuntimeException(cause.getMessage, cause)
+
 object RapidsShuffleServer {
   // how long close() waits for the send loop to exit
   private val CLOSE_WAIT_MILLIS = 500L
@@ -1004,7 +1050,7 @@ object RapidsShuffleServer {
   private[shuffle] def oomRetryNanos(readerWaitNanos: Long): Long =
     readerWaitNanos - math.min(OOM_REPLY_MARGIN_NANOS, readerWaitNanos / 2)
 
-  /** Why a transfer request ended with `outcome`, in the error reply its requester gets. */
+  /** Why a request ended with `outcome`, in the error reply its requester gets. */
   private[shuffle] def failureReason(outcome: BufferSendState.Outcome): String = outcome match {
     case BufferSendState.MissingOutput => "the shuffle output it asked for is gone"
     case BufferSendState.OomExpired =>
