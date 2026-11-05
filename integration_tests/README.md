@@ -30,9 +30,18 @@ disables caching at startup to keep fixture creation small.
 | CSV / JSON | Base, partition, filename | N/A: reader uses Hadoop line streams | N/A: reader uses Hadoop line streams |
 | Avro | Base, partition, filename | N/A: reader uses Hadoop streams | N/A: reader uses Hadoop streams |
 | Delta Parquet | Table root and partitions through Delta's file index | Table root and partitions | Table root and partitions |
-| Iceberg Parquet | Partitions through catalog FileIO | Partitions through S3FileIO | N/A: Iceberg FileIO has no PerfIO GCS adapter; catalog streams are tested |
+| Iceberg Parquet | Encoded partitions through catalog FileIO | Encoded partitions through S3FileIO | N/A: Iceberg FileIO has no PerfIO GCS adapter; catalog streams are tested |
 | Text / binaryFile / other CPU-only sources | N/A: no GPU file reader | N/A | N/A |
 | Iceberg ORC / Avro | N/A: no GPU table reader | N/A | N/A |
+
+`iceberg/iceberg_path_test.py` uses the five strings as partition values. Iceberg
+encodes them in data file paths: `a b` becomes `a+b`, `a+b` becomes `a%2Bb`,
+`a%20b` becomes `a%2520b`, `a%2Fb` becomes `a%252Fb`, and `路径` becomes
+`%E8%B7%AF%E5%BE%84`. The test prints the actual paths from the table's `files`
+metadata and asserts these encoded partition directories. This covers literal `+`
+and `%` in Iceberg paths; it does not construct raw spaces or Unicode in those
+directories. Raw special characters in Iceberg table roots require a separately
+configured warehouse location.
 
 All five ordinary file formats cover V1 and V2 scans. Parquet, ORC, and Avro cover
 PERFILE, COALESCING, and MULTITHREADED readers without crossing unrelated reader options.

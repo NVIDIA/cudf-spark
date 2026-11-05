@@ -40,6 +40,17 @@ def test_iceberg_path_characters(spark_tmp_table_factory, format_version, reader
         spark.sql(f'CREATE TABLE {table} USING iceberg PARTITIONED BY (p) '
                   f'{iceberg_table_properties_sql(format_version)} AS SELECT * FROM {view}')
 
+    def input_paths(spark):
+        files = [row.file_path for row in spark.sql(
+            f'SELECT file_path FROM {table}.files').collect()]
+        print('Iceberg data file paths:', files)
+        # Iceberg encodes partition values; these paths contain literal + and %,
+        # but the partition directories do not contain raw spaces or Unicode.
+        expected_partitions = {
+            'p=a+b', 'p=a%2Bb', 'p=a%2520b', 'p=a%252Fb', 'p=%E8%B7%AF%E5%BE%84'}
+        assert {path.rsplit('/', 2)[-2] for path in files} == expected_partitions, files
+        return files
+
     with_cpu_session(setup)
     assert_path_read(
         lambda spark: spark.sql(f'SELECT id, token, p FROM {table}'), PATH_ROWS,
@@ -48,5 +59,4 @@ def test_iceberg_path_characters(spark_tmp_table_factory, format_version, reader
         # Iceberg's FileIO adapter currently has a PerfIO implementation for S3,
         # while GCS uses the catalog's InputFile streams.
         perfio_backends=('s3-netty', 's3-crt'),
-        input_paths=lambda spark: [row.file_path for row in spark.sql(
-            f'SELECT file_path FROM {table}.files').collect()])
+        input_paths=input_paths)
