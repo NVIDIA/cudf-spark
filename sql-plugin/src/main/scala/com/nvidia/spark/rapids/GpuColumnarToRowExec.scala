@@ -180,14 +180,20 @@ class AcceleratedColumnarToRowIterator(
         assertInTests(
           it.hasNext, "Got an unexpected empty iterator after setting up batch with retry")
         it.foreach { rowsBatches =>
-          rowsBatches.indices.foreach { i =>
-            closeOnExcept(rowsBatches.drop(i + 1)) { _ =>
+          // withRetry owns rowsBatches(i) once called, so only the batches after it are left
+          // to close on a failure. The suffix is built only then, not once per batch.
+          var i = 0
+          closeOnExcept(new AutoCloseable {
+            override def close(): Unit = rowsBatches.drop(i + 1).safeClose()
+          }) { _ =>
+            while (i < rowsBatches.length) {
               RmmRapidsRetryIterator.withRetry(rowsBatches(i), splitSpillableInHalfByRows) {
                 attempt =>
                   withResource(attempt.getColumnarBatch()) { rowsCb =>
                     GpuColumnVector.extractBases(rowsCb).head.copyToHost()
                   }
               }.foreach(pendingCvs += _)
+              i += 1
             }
           }
         }
