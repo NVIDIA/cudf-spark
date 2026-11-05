@@ -18,11 +18,15 @@ package com.nvidia.spark.rapids
 
 import java.util.{Set => JSet}
 import java.util.concurrent.{ConcurrentHashMap, Executors, ScheduledExecutorService, TimeUnit}
+import java.util.concurrent.atomic.AtomicBoolean
 
 import scala.collection.mutable.ArrayBuffer
 
 import org.apache.spark.SparkContext
 import org.apache.spark.internal.Logging
+import org.apache.spark.scheduler.SparkListenerEvent
+import org.apache.spark.sql.rapids.{ShuffleCleanupListener, ShuffleReclaimDecision,
+  ShuffleReclaimHandoff, ShuffleReclaimRule}
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 
 /**
@@ -81,15 +85,40 @@ import org.apache.spark.sql.rapids.execution.TrampolineUtil
  * - No need to track executor list on driver side
  * - 1-second polling overhead is negligible
  *
- * @param sc SparkContext for posting events
+ * @param clock the current time in milliseconds
+ * @param postEvent posts an event to the listener bus
+ * @param driverStep clears a shuffle's map outputs on the driver, and returns true when the
+ *                   shuffle's status existed. It may throw.
+ * @param eventLogEnabled whether each SQL execution's reclaim event is posted
+ * @param disabled set once the UCX reclaim is disabled for the rest of the application
+ * @param droppedEvents how many events the UCX policy's listener queue has dropped
  * @param staleEntryMaxAgeMs maximum age for pending entries before they are removed
  * @param cleanupIntervalMs interval for running stale entry cleanup
  */
 class ShuffleCleanupManager(
-    sc: SparkContext,
+    clock: () => Long,
+    postEvent: SparkListenerEvent => Unit,
+    driverStep: Int => Boolean,
+    eventLogEnabled: Boolean,
+    disabled: AtomicBoolean,
+    droppedEvents: () => Long,
     staleEntryMaxAgeMs: Long = 300000,  // 5 minutes
     cleanupIntervalMs: Long = 60000     // 1 minute
-) extends Logging {
+) extends ShuffleReclaimHandoff with Logging {
+
+  /**
+   * Builds the manager that the driver plugin uses, from its SparkContext.
+   *
+   * @param sc SparkContext whose listener bus the manager posts events to
+   */
+  def this(sc: SparkContext) = this(
+    clock = () => System.currentTimeMillis(),
+    postEvent = event => TrampolineUtil.postEvent(sc, event),
+    driverStep = TrampolineUtil.clearMapOutputs,
+    eventLogEnabled = true,
+    disabled = new AtomicBoolean(false),
+    droppedEvents =
+      () => TrampolineUtil.listenerQueueDroppedEvents(sc, ShuffleCleanupListener.QUEUE_NAME))
 
   /**
    * Shuffles pending cleanup. Maps shuffleId -> timestamp when unregister was called.
@@ -119,7 +148,7 @@ class ShuffleCleanupManager(
     new Runnable {
       override def run(): Unit = {
         try {
-          cleanupStaleEntries(staleEntryMaxAgeMs)
+          runTick()
         } catch {
           case e: Exception =>
             logWarning("Error during stale entry cleanup", e)
@@ -191,7 +220,7 @@ class ShuffleCleanupManager(
           s"bytesFromMemory=${stat.bytesFromMemory}, bytesFromDisk=${stat.bytesFromDisk}")
 
         try {
-          TrampolineUtil.postEvent(sc,
+          postEvent(
             SparkRapidsShuffleDiskSavingsEvent(shuffleId, stat.bytesFromMemory, stat.bytesFromDisk,
               stat.numExpansions, stat.numSpills, stat.numForcedFileOnly))
         } catch {
@@ -234,6 +263,66 @@ class ShuffleCleanupManager(
     }
   }
 
+  /** The body of the periodic tick: MULTITHREADED's stale entries, then the UCX timeouts. */
+  private[rapids] def runTick(): Unit = {
+    cleanupStaleEntries(staleEntryMaxAgeMs)
+    checkReclaimTimeouts()
+  }
+
+  override def dispatch(
+      fenceId: Long,
+      shuffles: Seq[ShuffleReclaimDecision],
+      decidedAtMs: Long): Unit = {}
+
+  override def skip(shuffleId: Int, executionId: Long, rule: ShuffleReclaimRule): Unit = {}
+
+  override def executionClosed(executionId: Long, endedAtMs: Long, ownedIds: Seq[Int]): Unit = {}
+
+  override def executorRemoved(executorId: String): Unit = {}
+
+  override def release(fenceId: Long, shuffleId: Int): Unit = {}
+
+  override def withdraw(fenceId: Long, shuffleId: Int): Unit = {}
+
+  override def isDisabled: Boolean = disabled.get()
+
+  override def disable(reason: String): Unit = {}
+
+  /**
+   * Handle a UCX executor's poll for shuffles to reclaim.
+   *
+   * @param executorId the executor polling for work
+   * @return the released requests that the executor has not answered
+   */
+  def handleReclaimPoll(executorId: String): RapidsShuffleReclaimResponseMsg =
+    RapidsShuffleReclaimResponseMsg(Array.empty)
+
+  /**
+   * Handle the results of a UCX executor's reclaims, on the calling thread.
+   *
+   * @param executorId the executor reporting results
+   * @param results the result of each reclaim
+   */
+  def handleReclaimResult(executorId: String, results: Array[ShuffleReclaimResult]): Unit = {}
+
+  /** The body of a release, which `release` runs on the manager's thread. */
+  private[rapids] def applyRelease(fenceId: Long, shuffleId: Int): Unit = {}
+
+  /** The body of a withdrawal, which `withdraw` runs on the manager's thread. */
+  private[rapids] def applyWithdrawal(fenceId: Long, shuffleId: Int): Unit = {}
+
+  /** Withdraws each fence 10 minutes past its clear, and times out each silent target. */
+  private[rapids] def checkReclaimTimeouts(): Unit = {}
+
+  /** Makes each UCX poll leave every request out, until the release below. */
+  private[rapids] def holdReclaimPollsForTesting(): Unit = {}
+
+  /** Ends the hold that `holdReclaimPollsForTesting` set. */
+  private[rapids] def releaseReclaimPollsForTesting(): Unit = {}
+
+  /** Whether a fence released the shuffle while its request is open. */
+  private[rapids] def isReclaimReleasedForTesting(shuffleId: Int): Boolean = false
+
   /**
    * Shutdown the manager.
    */
@@ -273,4 +362,23 @@ object ShuffleCleanupManager {
       instance = null
     }
   }
+
+  /** The start of the one WARN for an executor that reports a failed reclaim. */
+  private[rapids] val FAILED_WARN_PREFIX: String = "UCX shuffle reclaim failed on an executor:"
+
+  /** The start of the one WARN for a driver step that threw. */
+  private[rapids] val DRIVER_STEP_WARN_PREFIX: String =
+    "UCX shuffle reclaim could not clear a shuffle on the driver:"
+
+  /** The start of the one WARN for a fence with no verdict 10 minutes after its clear. */
+  private[rapids] val FENCE_TIMEOUT_WARN_PREFIX: String =
+    "UCX shuffle reclaim withdrew a fence with no verdict:"
+
+  /** The start of the one WARN that lists an executor's timed-out shuffles by reason. */
+  private[rapids] val TIMEOUT_WARN_PREFIX: String =
+    "UCX shuffle reclaim timed out on an executor:"
+
+  /** The start of the INFO line for a result that settles no target. */
+  private[rapids] val IGNORED_RESULT_INFO_PREFIX: String =
+    "UCX shuffle reclaim ignored a result that settles nothing:"
 }

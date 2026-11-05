@@ -38,3 +38,52 @@ case class SparkRapidsShuffleDiskSavingsEvent(
   numSpills: Int = 0,
   numForcedFileOnly: Int = 0
 ) extends SparkListenerEvent
+
+/**
+ * Event posted once per SQL execution that owned a GPU shuffle, when the UCX shuffle reclaim
+ * has an outcome for every shuffle the execution owned. Each skipped list names the shuffles
+ * that wait for GC, by the rule that held each one back.
+ *
+ * @param executionId The SQL execution ID
+ * @param endedAtMs When the execution ended
+ * @param completedAtMs When the execution's last shuffle got its outcome, and no earlier than
+ *                      `endedAtMs`
+ * @param shuffles Number of GPU shuffles the execution owned
+ * @param reclaimed Number of those shuffles the reclaim released to their executors
+ * @param alreadyRemoved Number of those shuffles that GC or Spark's own cleanup removed first
+ * @param skippedShared Shuffles that another execution, a job outside any execution or a late
+ *                      job touched, or that the fence or the driver step left to GC
+ * @param skippedUnconsumed Shuffles that nothing of the succeeded execution read
+ * @param skippedCached Shuffles that a cached RDD depends on
+ * @param skippedIndeterminate Shuffles whose map stage Spark marks indeterminate
+ * @param executorsFailed Number of executor reclaims that failed
+ * @param executorsTimedOut Number of executors that timed out, for either reason
+ * @param executorsNeverPolled Number of the timed-out executors that were never handed the
+ *                             shuffle
+ * @param executorsDeferred Number of executors that deferred a reclaim, which may still hold
+ *                          the execution's output
+ * @param buffersFreed Number of buffers the executors freed
+ * @param bytesFreed Bytes the executors freed
+ * @param maxWaitMs Longest wait from the execution's end to a shuffle's dispatch
+ * @param maxRemoveMs Longest time from a dispatch to its request's completion
+ */
+case class SparkRapidsShuffleReclaimEvent(
+  executionId: Long,
+  endedAtMs: Long,
+  completedAtMs: Long,
+  shuffles: Int,
+  reclaimed: Int,
+  alreadyRemoved: Int,
+  skippedShared: Seq[Int],
+  skippedUnconsumed: Seq[Int],
+  skippedCached: Seq[Int],
+  skippedIndeterminate: Seq[Int],
+  executorsFailed: Int,
+  executorsTimedOut: Int,
+  executorsNeverPolled: Int,
+  executorsDeferred: Int,
+  buffersFreed: Long,
+  bytesFreed: Long,
+  maxWaitMs: Long,
+  maxRemoveMs: Long
+) extends SparkListenerEvent

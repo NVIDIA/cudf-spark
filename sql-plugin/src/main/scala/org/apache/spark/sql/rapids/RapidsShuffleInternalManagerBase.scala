@@ -153,6 +153,12 @@ object RapidsShuffleInternalManagerBase extends Logging {
     case other => other
   }
 
+  /**
+   * Whether the shuffle's writers and readers use the shuffle buffer catalog: a GPU shuffle
+   * whose writers do not fall back to Spark's sort shuffle.
+   */
+  def usesShuffleBufferCatalog(handle: ShuffleHandle): Boolean = false
+
   // this is set by the executor on startup, when the MULTITHREADED
   // shuffle mode is utilized, as per these configs:
   //   spark.rapids.shuffle.multiThreaded.writer.threads

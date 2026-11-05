@@ -47,7 +47,8 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.internal.StaticSQLConf
-import org.apache.spark.sql.rapids.{GpuShuffleEnv, ShuffleCleanupListener, XxHash64Utils}
+import org.apache.spark.sql.rapids.{GpuShuffleEnv, MultithreadedSqlEndPolicy,
+  ShuffleCleanupListener, XxHash64Utils}
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 
 class PluginException(msg: String) extends RuntimeException(msg)
@@ -544,7 +545,7 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
     if (conf.isMultiThreadedShuffleManagerMode && conf.isMultithreadedShuffleSkipMergeEnabled &&
         !isEssEnabledByConf && conf.offHeapLimitEnabled) {
       ShuffleCleanupManager.init(sc)
-      shuffleCleanupListener = new ShuffleCleanupListener()
+      shuffleCleanupListener = new ShuffleCleanupListener(new MultithreadedSqlEndPolicy())
       sc.addSparkListener(shuffleCleanupListener)
       logInfo("ShuffleCleanupManager and listener initialized for MULTITHREADED shuffle mode " +
         "(skipMerge enabled, ESS disabled, off-heap limits on)")

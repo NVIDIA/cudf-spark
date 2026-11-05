@@ -16,10 +16,12 @@
 
 package com.nvidia.spark.rapids
 
-import java.util.concurrent.{ConcurrentHashMap, ConcurrentLinkedQueue}
+import java.util.concurrent.{ConcurrentHashMap, ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
+import java.util.concurrent.atomic.{AtomicLong, AtomicReference}
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
+import scala.util.control.NonFatal
 
 import com.nvidia.spark.rapids.shims.SparkShimImpl
 import org.scalatest.BeforeAndAfterEach
@@ -29,13 +31,16 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.time.{Seconds, Span}
 
 import org.apache.spark.{FetchFailed, SparkConf, Success, TaskContext}
-import org.apache.spark.scheduler.{SparkListener, SparkListenerEvent, SparkListenerTaskEnd}
-import org.apache.spark.sql.SparkSession
+import org.apache.spark.scheduler.{SparkListener, SparkListenerEvent,
+  SparkListenerStageSubmitted, SparkListenerTaskEnd}
+import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, RoundRobinPartitioning}
 import org.apache.spark.sql.execution.exchange.ShuffleExchangeExec
 import org.apache.spark.sql.execution.ui.SparkListenerSQLExecutionStart
 import org.apache.spark.sql.functions.{col, sum, udf}
-import org.apache.spark.sql.rapids.GpuShuffleEnv
-import org.apache.spark.sql.rapids.execution.GpuShuffleExchangeExecBase
+import org.apache.spark.sql.rapids.{GpuShuffleEnv, GpuShuffleRegistry,
+  RapidsShuffleInternalManagerBase, TestTrampolineUtil}
+import org.apache.spark.sql.rapids.execution.{GpuShuffleExchangeExecBase, TrampolineUtil}
 
 /**
  * Listener to capture SparkRapidsShuffleDiskSavingsEvent during tests.
@@ -77,6 +82,9 @@ class ShuffleDiskSavingsEventListener extends SparkListener {
  * For MULTITHREADED with skip-merge, checks that the end of a SQL execution removes its shuffles
  * from the multithreaded catalog, and that a shuffle written outside one stays there through
  * session stop.
+ *
+ * For UCX, checks what the shuffle reclaim at the end of a SQL execution frees and what it keeps,
+ * with its gate on and off.
  */
 class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach {
 
@@ -514,9 +522,407 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
           s"${ends.map(e => (e.taskType, e.stageAttemptId, e.reason))}")
     }
   }
+
+  // ============================================================================
+  // UCX shuffle reclaim at the end of a SQL execution
+  // ============================================================================
+
+  /**
+   * Starts a session in UCX mode with the settings of the test of a local read of an
+   * unregistered shuffle, and with the UCX shuffle reclaim gate on or off.
+   *
+   * @param gateOn whether the session turns the reclaim gate on
+   * @param extraConf settings applied after all the others
+   * @return a listener that records the events the tests read
+   */
+  private def startUcxReclaimSession(
+      gateOn: Boolean,
+      extraConf: Map[String, String]): RapidsShuffleIntegrationSuite.ReclaimTestListener = {
+    val conf = new SparkConf()
+      .setMaster("local[2]")
+      .setAppName("RapidsShuffleIntegrationTest")
+      .set("spark.plugins", "com.nvidia.spark.SQLPlugin")
+      .set("spark.rapids.sql.enabled", "true")
+      .set("spark.shuffle.manager", shuffleManagerClass)
+      .set("spark.rapids.shuffle.mode", "UCX")
+      .set("spark.sql.adaptive.enabled", "false")
+      .set("spark.sql.classic.shuffleDependency.fileCleanup.enabled", "false")
+      .set(RowBasedShuffleChecksumConf.ChecksumEnabledKey, "false")
+      .set(RowBasedShuffleChecksumConf.ChecksumMismatchFullRetryKey, "false")
+      .set("spark.rapids.shuffle.ucx.cleanupOnQueryEnd.enabled", gateOn.toString)
+      .setAll(extraConf)
+    spark = SparkSession.builder().config(conf).getOrCreate()
+    val listener = new RapidsShuffleIntegrationSuite.ReclaimTestListener
+    spark.sparkContext.addSparkListener(listener)
+    listener
+  }
+
+  /** A DataFrame with one GPU hash shuffle and small results. */
+  private def oneShuffleQuery(): DataFrame =
+    spark.range(0, 1000, 1, 4).selectExpr("id", "id % 7 AS k").repartition(8, col("k"))
+
+  /** A DataFrame with two GPU hash shuffles and two result rows. */
+  private def twoShuffleQuery(): DataFrame = spark.range(0, 1000, 1, 4)
+    .selectExpr("id % 7 AS k", "id").repartition(8, col("k"))
+    .groupBy((col("k") % 2).as("p")).agg(sum("id"))
+
+  /** The GPU exchanges of a DataFrame's plan, after checking that no shuffle runs on the CPU. */
+  private def gpuExchanges(df: DataFrame): Seq[GpuShuffleExchangeExecBase] = {
+    val plan = df.queryExecution.executedPlan
+    assert(SparkShimImpl.findOperators(plan, _.isInstanceOf[ShuffleExchangeExec]).isEmpty,
+      s"a shuffle fell back to the CPU:\n$plan")
+    SparkShimImpl.findOperators(plan, _.isInstanceOf[GpuShuffleExchangeExecBase])
+      .map(_.asInstanceOf[GpuShuffleExchangeExecBase])
+  }
+
+  /** The shuffle id of the one GPU exchange in a DataFrame's plan. */
+  private def onlyGpuShuffle(df: DataFrame): Int = {
+    val exchanges = gpuExchanges(df)
+    assertResult(1, s"GPU shuffles in:\n${df.queryExecution.executedPlan}")(exchanges.size)
+    exchanges.head.shuffleDependencyColumnar.shuffleId
+  }
+
+  /** The reclaim manager that the driver plugin of a gate-on UCX session starts. */
+  private def reclaimManager(): ShuffleCleanupManager = Option(ShuffleCleanupManager.get)
+    .getOrElse(fail("the gate-on driver plugin started no reclaim manager"))
+
+  /** Waits until the listener has handled every event posted to the bus before this call. */
+  private def drain(listener: RapidsShuffleIntegrationSuite.ReclaimTestListener): Unit = {
+    val marker = new RapidsShuffleIntegrationSuite.ListenerDrainMarker
+    TrampolineUtil.postEvent(spark.sparkContext, marker)
+    eventually(Timeout(Span(30, Seconds))) {
+      assert(listener.hasHandled(marker), "the listener has not handled the drain marker")
+    }
+  }
+
+  /** Waits for the reclaim event of the session's `n`-th SQL execution, counting from 1. */
+  private def awaitReclaimEvent(
+      listener: RapidsShuffleIntegrationSuite.ReclaimTestListener,
+      n: Int): SparkRapidsShuffleReclaimEvent = {
+    eventually(Timeout(Span(30, Seconds))) {
+      val executions = listener.executions
+      assert(executions.size >= n, s"the session started ${executions.size} SQL executions")
+      val executionId = executions(n - 1)
+      listener.reclaimEvents.find(_.executionId == executionId).getOrElse(
+        fail(s"no reclaim event for SQL execution $executionId"))
+    }
+  }
+
+  /**
+   * Counts a DataFrame's rows once more outside SQL, and checks that the count ran no map task
+   * and failed no fetch, so it read the output that an earlier rerun left in the catalog.
+   */
+  private def assertReadsKeptOutput(
+      listener: RapidsShuffleIntegrationSuite.ReclaimTestListener,
+      df: DataFrame,
+      expectedRows: Long): Unit = {
+    drain(listener)
+    val taskMark = listener.taskEnds.size
+    assertResult(expectedRows, "rows of the read after the reclaim")(
+      df.queryExecution.toRdd.count())
+    drain(listener)
+    val ends = listener.taskEnds.drop(taskMark)
+    assertResult(Seq.empty, "map tasks of the read after the reclaim")(
+      ends.filter(_.taskType == "ShuffleMapTask").map(_.taskInfo.taskId))
+    assertResult(Seq.empty, "fetch failures of the read after the reclaim")(
+      ends.map(_.reason).filter(_.isInstanceOf[FetchFailed]))
+  }
+
+  test("the end of a SQL execution reclaims its UCX shuffles from the catalog and the driver") {
+    val listener = startUcxReclaimSession(gateOn = true, Map.empty)
+    val df = twoShuffleQuery()
+    val firstRows = df.collect().map(_.toString).sorted
+    val shuffleIds = gpuExchanges(df).map(_.shuffleDependencyColumnar.shuffleId)
+    assertResult(2, s"GPU shuffles in:\n${df.queryExecution.executedPlan}")(shuffleIds.size)
+    val event = awaitReclaimEvent(listener, 1)
+    assertResult(Seq.empty, "shuffles the catalog still holds")(
+      shuffleIds.filter(GpuShuffleEnv.getCatalog.hasActiveShuffle))
+    assertResult(shuffleIds.map(id => id -> Some(0)), "available map outputs on the driver")(
+      shuffleIds.map(id => id -> TestTrampolineUtil.availableMapOutputs(id)))
+    assertResult(0, s"timed-out executors in $event")(event.executorsTimedOut)
+    assert(event.buffersFreed > 0 && event.bytesFreed > 0, s"nothing freed in $event")
+    // the driver holds no output of either shuffle, so a second collect reruns both map stages
+    drain(listener)
+    val stageMark = listener.mapStageSubmissions.size
+    val taskMark = listener.taskEnds.size
+    assertResult(firstRows)(df.collect().map(_.toString).sorted)
+    drain(listener)
+    assertResult(shuffleIds.toSet, "shuffles whose map stage the second collect ran")(
+      listener.mapStageSubmissions.drop(stageMark).toSet)
+    assertResult(Seq.empty, "fetch failures of the second collect")(
+      listener.taskEnds.drop(taskMark).map(_.reason).filter(_.isInstanceOf[FetchFailed]))
+  }
+
+  test("with the UCX reclaim gate off, a SQL execution's shuffles stay in the catalog") {
+    startUcxReclaimSession(gateOn = false, Map.empty)
+    val df = twoShuffleQuery()
+    df.collect()
+    val shuffleIds = gpuExchanges(df).map(_.shuffleDependencyColumnar.shuffleId)
+    assertResult(2, s"GPU shuffles in:\n${df.queryExecution.executedPlan}")(shuffleIds.size)
+    assertResult(shuffleIds, "shuffles the catalog holds")(
+      shuffleIds.filter(GpuShuffleEnv.getCatalog.hasActiveShuffle))
+  }
+
+  test("with a row-checksum key on, the GPU shuffle registry admits exactly the shuffles " +
+      "whose writers use the catalog") {
+    startUcxReclaimSession(gateOn = true,
+      Map(RowBasedShuffleChecksumConf.ChecksumEnabledKey -> "true"))
+    assert(GpuShuffleEnv.isRowBasedChecksumEnabled,
+      "the plugin does not see the row-checksum key")
+    val manager = reclaimManager()
+    manager.holdReclaimPollsForTesting()
+    val shuffleIds = try {
+      val df = twoShuffleQuery()
+      df.collect()
+      val exchanges = gpuExchanges(df)
+      assert(exchanges.nonEmpty, s"no GPU shuffle in:\n${df.queryExecution.executedPlan}")
+      exchanges.map { exchange =>
+        val dep = exchange.shuffleDependencyColumnar
+        val admitted = Option(GpuShuffleRegistry.get).exists(_.contains(dep.shuffleId))
+        val held = GpuShuffleEnv.getCatalog.hasActiveShuffle(dep.shuffleId)
+        val usesCatalog =
+          RapidsShuffleInternalManagerBase.usesShuffleBufferCatalog(dep.shuffleHandle)
+        assert(admitted == held && held == usesCatalog, s"shuffle ${dep.shuffleId}: " +
+          s"admitted $admitted, in the catalog $held, usesShuffleBufferCatalog $usesCatalog")
+        dep.shuffleId
+      }
+    } finally {
+      manager.releaseReclaimPollsForTesting()
+    }
+    eventually(Timeout(Span(30, Seconds))) {
+      assertResult(Seq.empty, "shuffles the catalog still holds")(
+        shuffleIds.filter(GpuShuffleEnv.getCatalog.hasActiveShuffle))
+    }
+  }
+
+  test("a held UCX reclaim that arrives after a map-stage rerun outside SQL keeps the " +
+      "rerun's output") {
+    val listener = startUcxReclaimSession(gateOn = true, Map.empty)
+    val manager = reclaimManager()
+    val df = oneShuffleQuery()
+    manager.holdReclaimPollsForTesting()
+    val (shuffleId, rerunRows) = try {
+      df.collect()
+      val id = onlyGpuShuffle(df)
+      eventually(Timeout(Span(30, Seconds))) {
+        assert(manager.isReclaimReleasedForTesting(id), s"no fence released shuffle $id")
+      }
+      // a job outside SQL reruns the map stage above the watermark and never owns the shuffle
+      (id, df.queryExecution.toRdd.count())
+    } finally {
+      manager.releaseReclaimPollsForTesting()
+    }
+    val event = awaitReclaimEvent(listener, 1)
+    assertResult(1, s"reclaimed shuffles in $event")(event.reclaimed)
+    assert(event.buffersFreed > 0, s"nothing freed in $event")
+    assert(GpuShuffleEnv.getCatalog.hasActiveShuffle(shuffleId),
+      s"the reclaim removed the rerun's registration of shuffle $shuffleId")
+    assertReadsKeptOutput(listener, df, rerunRows)
+  }
+
+  test("a held UCX reclaim that arrives after a rerun writer registered, and before the " +
+      "writer's first add, keeps the writer's output") {
+    RapidsShuffleIntegrationSuite.holdWriters = false
+    RapidsShuffleIntegrationSuite.writerEntered = new CountDownLatch(1)
+    RapidsShuffleIntegrationSuite.releaseWriters = new CountDownLatch(1)
+    val listener = startUcxReclaimSession(gateOn = true, Map.empty)
+    val manager = reclaimManager()
+    // Spark calls getWriter before the writer reads its first row, so a writer that reaches this
+    // UDF has registered the shuffle with its own task id
+    val holdWriter = udf { (id: Long) =>
+      if (RapidsShuffleIntegrationSuite.holdWriters) {
+        RapidsShuffleIntegrationSuite.writerEntered.countDown()
+        RapidsShuffleIntegrationSuite.releaseWriters.await(30, TimeUnit.SECONDS)
+      }
+      id
+    }
+    val numRows = 1000L
+    val df = spark.range(0, numRows, 1, 4).select(holdWriter(col("id")).as("id"))
+      .selectExpr("id", "id % 7 AS k").repartition(8, col("k"))
+    val rerunRows = new AtomicLong(-1L)
+    val rerunError = new AtomicReference[Throwable]()
+    val rerun = new Thread(() => {
+      try {
+        rerunRows.set(df.queryExecution.toRdd.count())
+      } catch {
+        case NonFatal(e) => rerunError.set(e)
+      }
+    }, "ucx-reclaim-rerun")
+    rerun.setDaemon(true)
+    try {
+      manager.holdReclaimPollsForTesting()
+      val taskMark = try {
+        df.collect()
+        val shuffleId = onlyGpuShuffle(df)
+        eventually(Timeout(Span(30, Seconds))) {
+          assert(manager.isReclaimReleasedForTesting(shuffleId),
+            s"no fence released shuffle $shuffleId")
+        }
+        drain(listener)
+        val mark = listener.taskEnds.size
+        RapidsShuffleIntegrationSuite.holdWriters = true
+        rerun.start()
+        assert(RapidsShuffleIntegrationSuite.writerEntered.await(30, TimeUnit.SECONDS),
+          "no writer of the rerun reached the UDF")
+        mark
+      } finally {
+        manager.releaseReclaimPollsForTesting()
+      }
+      awaitReclaimEvent(listener, 1)
+      RapidsShuffleIntegrationSuite.releaseWriters.countDown()
+      rerun.join(TimeUnit.SECONDS.toMillis(60))
+      assert(!rerun.isAlive, "the rerun never ended")
+      Option(rerunError.get).foreach(e => fail("the rerun failed", e))
+      assertResult(numRows, "rows of the rerun")(rerunRows.get)
+      drain(listener)
+      assertResult(Seq.empty, "failed tasks of the rerun")(
+        listener.taskEnds.drop(taskMark).map(_.reason).filter(_ != Success))
+      assertReadsKeptOutput(listener, df, numRows)
+    } finally {
+      RapidsShuffleIntegrationSuite.releaseWriters.countDown()
+      RapidsShuffleIntegrationSuite.holdWriters = false
+      rerun.join(TimeUnit.SECONDS.toMillis(60))
+    }
+  }
+
+  test("a GPU round-robin shuffle and the shuffle after it wait for GC, and the shuffle before " +
+      "it is reclaimed") {
+    val listener = startUcxReclaimSession(gateOn = true,
+      Map("spark.sql.shuffle.partitions" -> "4"))
+    val df = spark.range(0, 1000, 1, 4).selectExpr("id % 7 AS k", "id").groupBy("k")
+      .agg(sum("id").as("s")).repartition(4).groupBy((col("k") % 2).as("p")).agg(sum("s"))
+    val firstRows = df.collect().map(_.toString).sorted
+    val plan = df.queryExecution.executedPlan
+    val exchanges = gpuExchanges(df)
+    assertResult(3, s"GPU shuffles in:\n$plan")(exchanges.size)
+    // findOperators lists the operators of this one-chain plan from the top down
+    val Seq(h2, r, h1) = exchanges
+    assert(r.outputPartitioning.isInstanceOf[RoundRobinPartitioning] &&
+      Seq(h1, h2).forall(_.outputPartitioning.isInstanceOf[HashPartitioning]),
+      s"no round-robin GPU shuffle between two hash GPU shuffles in:\n$plan")
+    val Seq(h1Id, rId, h2Id) = Seq(h1, r, h2).map(_.shuffleDependencyColumnar.shuffleId)
+    val event = awaitReclaimEvent(listener, 1)
+    assertResult((3, 1), s"owned and reclaimed shuffles in $event")(
+      (event.shuffles, event.reclaimed))
+    assertResult(Seq(rId, h2Id).sorted, s"indeterminate shuffles in $event")(
+      event.skippedIndeterminate.sorted)
+    assertResult(Seq(false, true, true), "whether the catalog holds H1, R and H2")(
+      Seq(h1Id, rId, h2Id).map(GpuShuffleEnv.getCatalog.hasActiveShuffle))
+    // the driver keeps every output of the two shuffles that wait for GC
+    val keptOutputs = Seq(r, h2).map(e => Some(e.shuffleDependencyColumnar.rdd.getNumPartitions))
+    assertResult(Some(0) +: keptOutputs, "available map outputs of H1, R and H2 on the driver")(
+      Seq(h1Id, rId, h2Id).map(TestTrampolineUtil.availableMapOutputs))
+    drain(listener)
+    val stageMark = listener.mapStageSubmissions.size
+    val taskMark = listener.taskEnds.size
+    assertResult(firstRows)(df.collect().map(_.toString).sorted)
+    drain(listener)
+    assertResult(Seq.empty, "shuffles whose map stage the second collect ran")(
+      listener.mapStageSubmissions.drop(stageMark))
+    assertResult(Seq.empty, "fetch failures of the second collect")(
+      listener.taskEnds.drop(taskMark).map(_.reason).filter(_.isInstanceOf[FetchFailed]))
+  }
+
+  test("each SQL execution that reruns a UCX shuffle's map stage reclaims the shuffle again") {
+    val listener = startUcxReclaimSession(gateOn = true, Map.empty)
+    val df = oneShuffleQuery()
+    val firstRows = df.collect().map(_.toString).sorted
+    val shuffleId = onlyGpuShuffle(df)
+    (1 to 3).foreach { round =>
+      if (round > 1) {
+        assertResult(firstRows, s"rows of round $round")(df.collect().map(_.toString).sorted)
+      }
+      val event = awaitReclaimEvent(listener, round)
+      assertResult((1, 1), s"owned and reclaimed shuffles in round $round: $event")(
+        (event.shuffles, event.reclaimed))
+      assert(event.buffersFreed > 0, s"round $round freed nothing: $event")
+      assertResult(round, s"map stages of shuffle $shuffleId by the end of round $round")(
+        listener.mapStageSubmissions.count(_ == shuffleId))
+    }
+    assert(!GpuShuffleEnv.getCatalog.hasActiveShuffle(shuffleId),
+      s"the catalog still holds shuffle $shuffleId")
+    assertResult(Seq.empty, "failed tasks")(listener.taskEnds.map(_.reason).filter(_ != Success))
+  }
+
+  test("with the UCX reclaim gate off, repeated collects reuse a shuffle's map output") {
+    val listener = startUcxReclaimSession(gateOn = false, Map.empty)
+    val df = oneShuffleQuery()
+    val firstRows = df.collect().map(_.toString).sorted
+    val shuffleId = onlyGpuShuffle(df)
+    (2 to 3).foreach { round =>
+      assertResult(firstRows, s"rows of round $round")(df.collect().map(_.toString).sorted)
+    }
+    drain(listener)
+    assertResult(1, s"map stages of shuffle $shuffleId")(
+      listener.mapStageSubmissions.count(_ == shuffleId))
+    assert(GpuShuffleEnv.getCatalog.hasActiveShuffle(shuffleId),
+      s"the catalog dropped shuffle $shuffleId")
+    assertResult(Seq.empty, "failed tasks")(listener.taskEnds.map(_.reason).filter(_ != Success))
+  }
+
+  test("with the UCX reclaim gate off, the driver has no GPU shuffle registry") {
+    startUcxReclaimSession(gateOn = false, Map.empty)
+    assert(GpuShuffleRegistry.get == null, "a gate-off driver plugin installed the registry")
+  }
+
+  test("a gate-on driver plugin keeps a GPU shuffle registry until its session stops") {
+    startUcxReclaimSession(gateOn = true, Map.empty)
+    assert(GpuShuffleRegistry.get != null, "the gate-on driver plugin installed no registry")
+    spark.stop()
+    spark = null
+    assert(GpuShuffleRegistry.get == null, "the stopped driver plugin left its registry")
+  }
 }
 
 object RapidsShuffleIntegrationSuite {
   /** Task attempts that the injected failure has armed, shared with the session's tasks. */
   val failedTasks: java.util.Set[Long] = ConcurrentHashMap.newKeySet[Long]()
+
+  /** Makes the held-writer test's UDF wait for `releaseWriters`, once set. */
+  @volatile var holdWriters: Boolean = false
+
+  /** Counted down by each held writer as it reaches the UDF. */
+  @volatile var writerEntered: CountDownLatch = new CountDownLatch(1)
+
+  /** Lets the held writers go on. */
+  @volatile var releaseWriters: CountDownLatch = new CountDownLatch(1)
+
+  /** An event that a test posts to learn when a listener has handled every earlier event. */
+  class ListenerDrainMarker extends SparkListenerEvent
+
+  /** Records the events of a session that the UCX shuffle reclaim tests read. */
+  class ReclaimTestListener extends SparkListener {
+    private val executionIds = new ConcurrentLinkedQueue[Long]()
+    private val reclaims = new ConcurrentLinkedQueue[SparkRapidsShuffleReclaimEvent]()
+    private val mapStages = new ConcurrentLinkedQueue[Int]()
+    private val ends = new ConcurrentLinkedQueue[SparkListenerTaskEnd]()
+    private val markers = ConcurrentHashMap.newKeySet[ListenerDrainMarker]()
+
+    override def onStageSubmitted(stageSubmitted: SparkListenerStageSubmitted): Unit =
+      TestTrampolineUtil.shuffleDepId(stageSubmitted.stageInfo).foreach(id => mapStages.add(id))
+
+    override def onTaskEnd(taskEnd: SparkListenerTaskEnd): Unit = ends.add(taskEnd)
+
+    override def onOtherEvent(event: SparkListenerEvent): Unit = event match {
+      case e: SparkListenerSQLExecutionStart => executionIds.add(e.executionId)
+      case e: SparkRapidsShuffleReclaimEvent => reclaims.add(e)
+      case m: ListenerDrainMarker => markers.add(m)
+      case _ =>
+    }
+
+    /** The id of each SQL execution that started, in order. */
+    def executions: Seq[Long] = executionIds.asScala.toList
+
+    /** Each reclaim event, in order. */
+    def reclaimEvents: Seq[SparkRapidsShuffleReclaimEvent] = reclaims.asScala.toList
+
+    /** The shuffle id of each map stage submitted, in order. */
+    def mapStageSubmissions: Seq[Int] = mapStages.asScala.toList
+
+    /** Each task end, in order. */
+    def taskEnds: Seq[SparkListenerTaskEnd] = ends.asScala.toList
+
+    /** Whether the listener has handled the marker. */
+    def hasHandled(marker: ListenerDrainMarker): Boolean = markers.contains(marker)
+  }
 }

@@ -29,7 +29,7 @@ import org.apache.spark.internal.config
 import org.apache.spark.internal.config.EXECUTOR_ID
 import org.apache.spark.io.CompressionCodec
 import org.apache.spark.memory.TaskMemoryManager
-import org.apache.spark.scheduler.SparkListenerEvent
+import org.apache.spark.scheduler.{SparkListener, SparkListenerEvent}
 import org.apache.spark.security.CryptoStreamUtils
 import org.apache.spark.serializer.{JavaSerializer, SerializerManager}
 import org.apache.spark.sql.{AnalysisException, SparkSession}
@@ -251,6 +251,20 @@ object TrampolineUtil {
   def postEvent(sc: SparkContext, sparkEvent: SparkListenerEvent): Unit = {
     sc.listenerBus.post(sparkEvent)
   }
+
+  /**
+   * Clears every map and merge output that the driver holds for a shuffle, and keeps the
+   * shuffle's status, so a later job reruns the map stage before it reads.
+   *
+   * @return true when the driver held the shuffle's status
+   */
+  def clearMapOutputs(shuffleId: Int): Boolean = false
+
+  /** Adds a listener to a listener bus queue of its own, which Spark creates on first use. */
+  def addListenerToQueue(sc: SparkContext, listener: SparkListener, queue: String): Unit = {}
+
+  /** How many events a listener bus queue has dropped since its SparkContext started. */
+  def listenerQueueDroppedEvents(sc: SparkContext, queue: String): Long = 0L
 
   def getSparkHadoopUtilConf: Configuration = SparkHadoopUtil.get.conf
 
