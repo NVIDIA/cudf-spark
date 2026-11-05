@@ -596,7 +596,7 @@ private[parquet] object GpuParquetFileFilterHandler {
     configuredReader == ParquetFooterReaderType.NATIVE && canUseNativeFooterReader(schema)
 
   private[parquet] val PARQUET_ENCRYPTION_CONFS = Seq("parquet.encryption.kms.client.class",
-    "parquet.encryption.kms.client.class", "parquet.crypto.factory.class")
+    "parquet.crypto.factory.class")
 
   /** Whether `conf` sets up Parquet decryption, which the GPU readers do not support. */
   def isDecryptionConfigured(conf: Configuration): Boolean =
