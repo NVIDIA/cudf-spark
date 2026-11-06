@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 import pytest
 
+from asserts import assert_gpu_and_cpu_error
 from data_gen import *
 from delta_lake_utils import *
 from marks import *
@@ -287,8 +289,9 @@ def _read_sorted(spark, path):
     return df.sort(df.columns)
 
 
-def _optimize_sql(path):
-    return f"OPTIMIZE delta.`{path}`"
+def _optimize_sql(path, zorder_columns=None):
+    zorder = f" ZORDER BY ({', '.join(zorder_columns)})" if zorder_columns else ""
+    return f"OPTIMIZE delta.`{path}`{zorder}"
 
 
 def _assert_captured_plan_contains(plan_callback, captured_plans, class_name, description):
@@ -310,6 +313,14 @@ def _assert_gpu_optimize_executed(plan_callback, captured_plans, require_gpu_wri
                 plan_callback, captured_plans, class_name, "OPTIMIZE write")
 
 
+def _assert_gpu_zorder_clustering(plan_callback, captured_plans, require_shuffle=False):
+    """The write can be on the GPU while the clustering projection or shuffle is on the CPU."""
+    for class_name in ["GpuInterleaveBits", "GpuPartitionerExpr"] + (
+            ["GpuShuffleExchangeExec"] if require_shuffle else []):
+        _assert_captured_plan_contains(
+            plan_callback, captured_plans, class_name, "Z-order clustering")
+
+
 def _setup_tables(enable_deletion_vectors, cpu_path, gpu_path, partition_columns, clustering_columns,
                   conf, post_setup_func=None, write_func=_write_many_small_files):
     def setup_cpu(spark):
@@ -324,32 +335,54 @@ def _setup_tables(enable_deletion_vectors, cpu_path, gpu_path, partition_columns
     with_cpu_session(setup_gpu, conf)
 
 
+# OPTIMIZE result metrics that do not depend on the (sampled) layout or size of the output files.
+_zorder_stable_metric_names = [
+    "numFilesAdded", "numFilesRemoved", "filesRemoved", "partitionsOptimized", "zOrderStats",
+    "numBins", "numBatches", "totalConsideredFiles", "totalFilesSkipped", "deletionVectorStats"]
+
+
+def _assert_zorder_metrics_equal(cpu_metrics, gpu_metrics):
+    cpu_dict = cpu_metrics.asDict(recursive=True)
+    gpu_dict = gpu_metrics.asDict(recursive=True)
+    for name in _zorder_stable_metric_names:
+        if name in cpu_dict:
+            assert_equal(cpu_dict[name], gpu_dict[name])
+    assert cpu_dict["zOrderStats"] is not None, "Expected Z-order stats in the OPTIMIZE metrics"
+
+
 def _assert_optimize_parity(enable_deletion_vectors, spark_tmp_path, partition_columns=None, clustering_columns=None,
                             conf=_optimize_conf, write_func=_write_many_small_files,
-                            require_gpu_write=True, use_gpu_test_mode=True, check_delta_log=True):
+                            require_gpu_write=True, use_gpu_test_mode=True, check_delta_log=True,
+                            zorder_columns=None, post_setup_func=None):
     data_path = spark_tmp_path + "/DELTA_OPTIMIZE"
     cpu_path = data_path + "/CPU"
     gpu_path = data_path + "/GPU"
 
     _setup_tables(enable_deletion_vectors, cpu_path, gpu_path, partition_columns, clustering_columns,
-                  conf, write_func=write_func)
+                  conf, post_setup_func=post_setup_func, write_func=write_func)
 
     # Run OPTIMIZE on each table and verify the returned path matches the target
-    cpu_result = with_cpu_session(lambda s: s.sql(_optimize_sql(cpu_path)).collect(), conf=conf)
+    cpu_result = with_cpu_session(
+        lambda s: s.sql(_optimize_sql(cpu_path, zorder_columns)).collect(), conf=conf)
     plan_callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
     plan_callback.startCapture()
     try:
         gpu_session = with_gpu_session if use_gpu_test_mode else _with_gpu_session_no_test
-        gpu_result = gpu_session(lambda s: s.sql(_optimize_sql(gpu_path)).collect(), conf=conf)
+        gpu_result = gpu_session(
+            lambda s: s.sql(_optimize_sql(gpu_path, zorder_columns)).collect(), conf=conf)
         captured_plans = plan_callback.getResultsWithTimeout(10000)
         _assert_gpu_optimize_executed(
             plan_callback, captured_plans, require_gpu_write=require_gpu_write)
+        if zorder_columns:
+            _assert_gpu_zorder_clustering(plan_callback, captured_plans)
     finally:
         plan_callback.endCapture()
     # Validate the returned path for each run; metrics object is not stable across JVMs
     # Compare only the suffix to avoid scheme differences like file: vs absolute path
     assert str(cpu_result[0][0]).rstrip('/').endswith('/CPU')
     assert str(gpu_result[0][0]).rstrip('/').endswith('/GPU')
+    if zorder_columns:
+        _assert_zorder_metrics_equal(cpu_result[0][1], gpu_result[0][1])
 
     # Compare table data after optimize (read via CPU)
     cpu_data = with_cpu_session(lambda s: _read_sorted(s, cpu_path).collect(), conf=conf)
@@ -655,3 +688,298 @@ def test_delta_optimize_cdf_non_data_changing(spark_tmp_path):
         assert_gpu_and_cpu_delta_logs_equivalent(spark, spark_tmp_path + "/DELTA_OPTIMIZE")
 
     with_cpu_session(check, conf=conf)
+
+
+_zorder_columns = ["a", "b", "c", "d", "e", "f", "g"]
+
+def _write_zorder_files(
+        spark, enable_deletion_vectors, path, partition_columns=None, clustering_columns=None):
+    """Many small files with mixed Z-order column types, plus a low-cardinality partition column."""
+    df = gen_df(spark, [
+        ("p", SetValuesGen(IntegerType(), range(4))),
+        ("a", int_gen), ("b", long_gen), ("c", string_gen), ("d", date_gen),
+        ("e", TimestampGen()), ("f", short_gen), ("g", double_gen)],
+        length=2048, num_slices=16)
+    writer = df.write.format("delta").mode("overwrite")
+    if partition_columns:
+        writer = writer.partitionBy(partition_columns)
+    if supports_delta_lake_deletion_vectors():
+        writer = writer.option("delta.enableDeletionVectors", str(enable_deletion_vectors).lower())
+    writer.save(path)
+    num_files = spark.read.format("delta").load(path).inputFiles()
+    assert len(num_files) > 3, f"Expected more than 3 files, but got {num_files}"
+
+
+def _delete_zorder_rows_with_deletion_vectors(spark, path):
+    num_deleted = spark.sql(f"DELETE FROM delta.`{path}` WHERE p = 1 OR f % 5 = 0").collect()[0][0]
+    assert num_deleted > 0, "Expected DELETE to create deletion vectors"
+    dv_adds = spark.read.json(path + "/_delta_log/*.json") \
+        .where("add.deletionVector IS NOT NULL").count()
+    assert dv_adds > 0, "Expected the table to contain deletion-vector AddFiles"
+
+
+# The generated dates and timestamps include values before the Gregorian cutover, which Spark 3.x
+# refuses to write to Parquet unless the rebase mode is set.
+# Delta's Z-order clustering adds a random salt, cast(rand() ... AS tinyint), and the test harness
+# turns off GPU float-to-integral casts by default. Without them the clustering projection (and the
+# interleave-bits expression in it) silently runs on the CPU.
+_zorder_conf = copy_and_update(_optimize_conf, {
+    "spark.sql.parquet.datetimeRebaseModeInWrite": "CORRECTED",
+    "spark.sql.parquet.int96RebaseModeInWrite": "CORRECTED",
+    "spark.rapids.sql.castFloatToIntegralTypes.enabled": "true",
+    "spark.rapids.sql.castFloatToString.enabled": "true"
+})
+
+_zorder_dv_conf = copy_and_update(_zorder_conf, {
+    "spark.databricks.delta.delete.deletionVectors.persistent": "true",
+    "spark.databricks.delta.delete.enableForceBackgroundAutoCompact": "false"
+})
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(is_databricks_runtime() or is_before_spark_353(),
+                    reason="GPU Z-order OPTIMIZE is supported on OSS Delta 3.3+")
+@pytest.mark.parametrize("partition_columns", [None, ["p"]], ids=idfn)
+@pytest.mark.parametrize("zorder_columns", [["a"], ["c", "b"], _zorder_columns], ids=idfn)
+def test_delta_optimize_zorder(spark_tmp_path, partition_columns, zorder_columns):
+    _assert_optimize_parity(
+        False, spark_tmp_path, partition_columns=partition_columns, write_func=_write_zorder_files,
+        zorder_columns=zorder_columns, conf=_zorder_conf)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(is_databricks_runtime() or is_before_spark_353(),
+                    reason="GPU Z-order OPTIMIZE is supported on OSS Delta 3.3+")
+@pytest.mark.skipif(not supports_delta_lake_deletion_vectors(), reason="Deletion vectors aren't supported")
+@pytest.mark.parametrize("partition_columns", [None, ["p"]], ids=idfn)
+def test_delta_optimize_zorder_with_deletion_vectors(spark_tmp_path, partition_columns):
+    _assert_optimize_parity(
+        True, spark_tmp_path, partition_columns=partition_columns, write_func=_write_zorder_files,
+        zorder_columns=["a", "c"], conf=_zorder_dv_conf,
+        post_setup_func=_delete_zorder_rows_with_deletion_vectors)
+    # Z-ORDER rewrites every file, so the OPTIMIZE commit removes DV-bearing files and adds none.
+    def check(spark):
+        for engine in ["CPU", "GPU"]:
+            path = spark_tmp_path + "/DELTA_OPTIMIZE/" + engine
+            # Read the log through Spark so this also works on hdfs:// and s3a:// temp paths.
+            log = spark.read.text(path + "/_delta_log/*.json") \
+                .selectExpr("value", "_metadata.file_name AS file_name") \
+                .where("file_name RLIKE '^[0-9]{20}[.]json$'")
+            latest = log.selectExpr("max(file_name)").first()[0]
+            lines = log.where(f"file_name = '{latest}'")
+            def count_with_dv(action):
+                return lines.where(
+                    f"get_json_object(value, '$.{action}.deletionVector') IS NOT NULL").count()
+            assert count_with_dv("remove") > 0, \
+                f"Expected OPTIMIZE to remove files with DVs in {path}"
+            assert count_with_dv("add") == 0, f"Z-ORDER must not add files with DVs in {path}"
+    with_cpu_session(check, conf=_zorder_dv_conf)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="Normalized timestamp partition grouping was added in Delta Lake 4.3")
+@pytest.mark.parametrize("normalize_partition_values_on_read", [False, True], ids=idfn)
+def test_delta_optimize_zorder_normalized_timestamp_partitions(
+        spark_tmp_path, normalize_partition_values_on_read):
+    data_path = spark_tmp_path + "/DELTA_OPTIMIZE"
+    conf = copy_and_update(_zorder_conf, {
+        "spark.sql.session.timeZone": "UTC",
+        "spark.databricks.delta.normalizePartitionValuesOnRead":
+            str(normalize_partition_values_on_read).lower()
+    })
+    _assert_optimize_parity(
+        False, spark_tmp_path, conf=conf, write_func=_write_mixed_timestamp_partition_files,
+        zorder_columns=["id"], check_delta_log=False)
+
+    expected_file_count = 1 if normalize_partition_values_on_read else 2
+
+    def assert_compacted_file_count(spark, path):
+        input_files = spark.read.format("delta").load(path).inputFiles()
+        assert len(input_files) == expected_file_count, \
+            f"Expected {expected_file_count} Z-ordered files, but got {input_files}"
+
+    with_cpu_session(lambda spark: assert_compacted_file_count(spark, data_path + "/CPU"), conf)
+    with_cpu_session(lambda spark: assert_compacted_file_count(spark, data_path + "/GPU"), conf)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(is_databricks_runtime() or is_before_spark_353(),
+                    reason="GPU Z-order OPTIMIZE is supported on OSS Delta 3.3+")
+def test_delta_optimize_zorder_partition_predicate(spark_tmp_path):
+    # Only the selected partition is rewritten; the other partitions keep their files.
+    data_path = spark_tmp_path + "/DELTA_OPTIMIZE"
+    cpu_path, gpu_path = data_path + "/CPU", data_path + "/GPU"
+    _setup_tables(False, cpu_path, gpu_path, ["p"], None, _zorder_conf,
+                  write_func=_write_zorder_files)
+    sql = lambda path: f"OPTIMIZE delta.`{path}` WHERE p = 1 ZORDER BY (a, c)"
+    cpu_metrics = with_cpu_session(lambda s: s.sql(sql(cpu_path)).collect()[0][1], conf=_zorder_conf)
+    gpu_metrics = with_gpu_session(lambda s: s.sql(sql(gpu_path)).collect()[0][1], conf=_zorder_conf)
+    _assert_zorder_metrics_equal(cpu_metrics, gpu_metrics)
+    cpu_data = with_cpu_session(lambda s: _read_sorted(s, cpu_path).collect(), conf=_zorder_conf)
+    gpu_data = with_cpu_session(lambda s: _read_sorted(s, gpu_path).collect(), conf=_zorder_conf)
+    assert_equal(cpu_data, gpu_data)
+    with_cpu_session(lambda s: assert_gpu_and_cpu_latest_delta_log_equivalent(s, data_path),
+                     conf=_zorder_conf)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(is_databricks_runtime() or is_before_spark_353(),
+                    reason="GPU Z-order OPTIMIZE is supported on OSS Delta 3.3+")
+def test_delta_optimize_zorder_multiple_output_files(spark_tmp_path):
+    # A small target file size makes Z-order range-partition into several files. The sampled
+    # range boundaries (and so the exact files) may differ from the CPU, so compare the data and
+    # require that the output is split into multiple files.
+    conf = copy_and_update(_zorder_conf, {
+        "spark.databricks.delta.optimize.maxFileSize": str(32 * 1024)})
+    data_path = spark_tmp_path + "/DELTA_OPTIMIZE"
+    cpu_path, gpu_path = data_path + "/CPU", data_path + "/GPU"
+    _setup_tables(False, cpu_path, gpu_path, None, None, conf, write_func=_write_zorder_files)
+    sql = lambda path: f"OPTIMIZE delta.`{path}` ZORDER BY (a, b)"
+    with_cpu_session(lambda s: s.sql(sql(cpu_path)).collect(), conf=conf)
+    plan_callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    plan_callback.startCapture()
+    try:
+        with_gpu_session(lambda s: s.sql(sql(gpu_path)).collect(), conf=conf)
+        captured_plans = plan_callback.getResultsWithTimeout(10000)
+        _assert_gpu_optimize_executed(plan_callback, captured_plans)
+        _assert_gpu_zorder_clustering(plan_callback, captured_plans, require_shuffle=True)
+    finally:
+        plan_callback.endCapture()
+    cpu_data = with_cpu_session(lambda s: _read_sorted(s, cpu_path).collect(), conf=conf)
+    gpu_data = with_cpu_session(lambda s: _read_sorted(s, gpu_path).collect(), conf=conf)
+    assert_equal(cpu_data, gpu_data)
+    gpu_files = with_cpu_session(
+        lambda s: s.read.format("delta").load(gpu_path).inputFiles(), conf=conf)
+    assert len(gpu_files) > 1, f"Expected several Z-ordered files, but got {gpu_files}"
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(is_databricks_runtime() or is_before_spark_353(),
+                    reason="GPU Z-order OPTIMIZE is supported on OSS Delta 3.3+")
+@pytest.mark.parametrize("zorder_column, error_message", [
+    ("p", "is a partition column"),
+    ("does_not_exist", "does_not_exist")], ids=idfn)
+def test_delta_optimize_zorder_invalid_columns(spark_tmp_path, zorder_column, error_message):
+    # The GPU command must reject the same Z-order columns the CPU command rejects.
+    path = spark_tmp_path + "/DELTA_OPTIMIZE"
+    with_cpu_session(lambda s: _write_zorder_files(s, False, path, ["p"]), conf=_zorder_conf)
+    assert_gpu_and_cpu_error(
+        lambda spark: spark.sql(f"OPTIMIZE delta.`{path}` ZORDER BY ({zorder_column})").collect(),
+        conf=_zorder_conf,
+        error_message=error_message)
+
+
+def _zorder_cpu_gpu(spark_tmp_path, conf, write_func, sql_func, partition_columns=None):
+    """Create identical CPU-written tables, then run `sql_func(path)` on the CPU and on the GPU."""
+    data_path = spark_tmp_path + "/DELTA_OPTIMIZE"
+    cpu_path, gpu_path = data_path + "/CPU", data_path + "/GPU"
+    _setup_tables(False, cpu_path, gpu_path, partition_columns, None, conf, write_func=write_func)
+    cpu_result = with_cpu_session(lambda s: sql_func(s, cpu_path), conf=conf)
+    gpu_result = with_gpu_session(lambda s: sql_func(s, gpu_path), conf=conf)
+    return data_path, cpu_path, gpu_path, cpu_result, gpu_result
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(is_databricks_runtime() or is_before_spark_353(),
+                    reason="GPU Z-order OPTIMIZE is supported on OSS Delta 3.3+")
+def test_delta_optimize_zorder_repeated(spark_tmp_path):
+    # Z-order rewrites every file each time, so a second run is not a no-op and must still match.
+    sql = lambda s, path: s.sql(f"OPTIMIZE delta.`{path}` ZORDER BY (a, c)").collect()[0][1]
+    data_path, cpu_path, gpu_path, cpu_first, gpu_first = _zorder_cpu_gpu(
+        spark_tmp_path, _zorder_conf, _write_zorder_files, sql)
+    _assert_zorder_metrics_equal(cpu_first, gpu_first)
+    cpu_second = with_cpu_session(lambda s: sql(s, cpu_path), conf=_zorder_conf)
+    gpu_second = with_gpu_session(lambda s: sql(s, gpu_path), conf=_zorder_conf)
+    _assert_zorder_metrics_equal(cpu_second, gpu_second)
+    cpu_data = with_cpu_session(lambda s: _read_sorted(s, cpu_path).collect(), conf=_zorder_conf)
+    gpu_data = with_cpu_session(lambda s: _read_sorted(s, gpu_path).collect(), conf=_zorder_conf)
+    assert_equal(cpu_data, gpu_data)
+    with_cpu_session(lambda s: assert_gpu_and_cpu_latest_delta_log_equivalent(s, data_path),
+                     conf=_zorder_conf)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(is_databricks_runtime() or is_before_spark_353(),
+                    reason="GPU Z-order OPTIMIZE is supported on OSS Delta 3.3+")
+def test_delta_optimize_zorder_empty_table(spark_tmp_path):
+    def write(spark, enable_deletion_vectors, path, partition_columns=None, clustering_columns=None):
+        spark.sql(f"CREATE TABLE delta.`{path}` (a INT, b BIGINT) USING DELTA")
+    sql = lambda s, path: s.sql(f"OPTIMIZE delta.`{path}` ZORDER BY (a, b)").collect()
+    _, cpu_path, gpu_path, _, _ = _zorder_cpu_gpu(spark_tmp_path, _zorder_conf, write, sql)
+    for path in [cpu_path, gpu_path]:
+        assert with_cpu_session(lambda s: s.sql(f"DESCRIBE HISTORY delta.`{path}`")
+                                .filter("operation = 'OPTIMIZE'").count(), conf=_zorder_conf) == 0
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(is_databricks_runtime() or is_before_spark_353(),
+                    reason="GPU Z-order OPTIMIZE is supported on OSS Delta 3.3+")
+def test_delta_optimize_zorder_row_tracking_preserves_row_ids(spark_tmp_path):
+    def write(spark, enable_deletion_vectors, path, partition_columns=None, clustering_columns=None):
+        gen_df(spark, [("a", int_gen), ("b", long_gen)], length=1024, num_slices=8) \
+            .write.format("delta").option("delta.enableRowTracking", "true").save(path)
+    sql = lambda s, path: s.sql(f"OPTIMIZE delta.`{path}` ZORDER BY (a, b)").collect()
+    def rows(spark, path):
+        return spark.read.format("delta").load(path) \
+            .selectExpr("a", "b", "_metadata.row_id AS row_id").orderBy("row_id").collect()
+    data_path = spark_tmp_path + "/DELTA_OPTIMIZE"
+    cpu_path, gpu_path = data_path + "/CPU", data_path + "/GPU"
+    _setup_tables(False, cpu_path, gpu_path, None, None, _zorder_conf, write_func=write)
+    before = with_cpu_session(lambda s: rows(s, cpu_path), conf=_zorder_conf)
+    with_cpu_session(lambda s: sql(s, cpu_path), conf=_zorder_conf)
+    with_gpu_session(lambda s: sql(s, gpu_path), conf=_zorder_conf)
+    # Row IDs must survive the rewrite on both engines.
+    assert_equal(before, with_cpu_session(lambda s: rows(s, cpu_path), conf=_zorder_conf))
+    assert_equal(before, with_cpu_session(lambda s: rows(s, gpu_path), conf=_zorder_conf))
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_42_or_43(), reason="Requires Delta 4.2+ CDF writes")
+def test_delta_optimize_zorder_cdf_non_data_changing(spark_tmp_path):
+    def write(spark, enable_deletion_vectors, path, partition_columns=None, clustering_columns=None):
+        gen_df(spark, [("a", long_gen), ("b", int_gen)], length=256, num_slices=4) \
+            .write.format("delta").option("delta.enableChangeDataFeed", "true").save(path)
+    sql = lambda s, path: s.sql(f"OPTIMIZE delta.`{path}` ZORDER BY (a, b)").collect()
+    data_path, cpu_path, gpu_path, _, _ = _zorder_cpu_gpu(
+        spark_tmp_path, _zorder_conf, write, sql)
+    def check(spark):
+        results = [assert_delta_non_data_changing_commit(spark, p, {"add", "remove"})
+                   for p in [cpu_path, gpu_path]]
+        assert_equal(*results)
+        assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path)
+    with_cpu_session(check, conf=_zorder_conf)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(is_databricks_runtime() or is_before_spark_353(),
+                    reason="Liquid clustering requires Delta 3.3+")
+def test_delta_optimize_zorder_clustered_table_error(spark_tmp_path):
+    # ZORDER is not allowed on a liquid-clustered table; the GPU command must fail like the CPU.
+    path = spark_tmp_path + "/DELTA_OPTIMIZE"
+    with_cpu_session(lambda s: _write_many_small_files(s, False, path, None, ["a"]),
+                     conf=_zorder_conf)
+    assert_gpu_and_cpu_error(
+        lambda spark: spark.sql(f"OPTIMIZE delta.`{path}` ZORDER BY (a)").collect(),
+        conf=_zorder_conf,
+        error_message="ZORDER")
