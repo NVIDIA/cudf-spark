@@ -356,6 +356,9 @@ class UcxReclaimPolicy(
   private val settledIndeterminate = new BitSet()
   // the largest task id seen, which each decision takes as its watermark
   private var maxTaskId = -1L
+  // the executors Spark removed. A TaskStart that Spark posts after its executor's removal must
+  // not make it a target again, and Spark never reuses an executor id
+  private val removedExecutors = new mutable.HashSet[String]()
   // whether a job listed the map stage of each shuffle in flight since its dispatch
   private val inFlight = new mutable.HashMap[Int, Boolean]()
   // the shuffles of each fence whose marker has not come, in the order the fence ids rise
@@ -493,8 +496,10 @@ class UcxReclaimPolicy(
     // stage's latest attempt. A stage the policy does not hold has no undecided shuffle.
     stages.get(taskStart.stageId).foreach { stage =>
       stage.runningTasks += task.taskId
-      stage.writes.foreach(shuffleId => shuffles(shuffleId).executors += task.executorId)
-      stage.reads.foreach(shuffleId => shuffles(shuffleId).executors += task.executorId)
+      if (!removedExecutors.contains(task.executorId)) {
+        stage.writes.foreach(shuffleId => shuffles(shuffleId).executors += task.executorId)
+        stage.reads.foreach(shuffleId => shuffles(shuffleId).executors += task.executorId)
+      }
     }
   }
 
@@ -569,6 +574,7 @@ class UcxReclaimPolicy(
           guarded("an executor removal") {
             // the manager drops the executor only from requests that exist, so a later decision
             // must not name it either
+            removedExecutors += executorId
             shuffles.values.foreach(_.executors -= executorId)
             handoff.executorRemoved(executorId)
           }
