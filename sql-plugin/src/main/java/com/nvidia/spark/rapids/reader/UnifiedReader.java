@@ -57,14 +57,14 @@ public final class UnifiedReader<S extends ReadSource, I extends CombineInput,
     this.combiner = Objects.requireNonNull(combiner, "combiner");
     this.decoder = Objects.requireNonNull(decoder, "decoder");
     this.executor = Objects.requireNonNull(executor, "executor");
-    TaskContext context = TaskContext.get();
-    if (context != null) {
-      try {
-        context.addTaskCompletionListener((TaskCompletionListener) ignored -> close());
-      } catch (Throwable error) {
-        ResourceUtil.closeAll(error, this);
-        throw ResourceUtil.propagate(error);
-      }
+    try {
+      // Task completion must still release resources when iteration stops early.
+      TaskContext context = Objects.requireNonNull(TaskContext.get(),
+          "UnifiedReader must be created in a Spark task");
+      context.addTaskCompletionListener((TaskCompletionListener) ignored -> close());
+    } catch (Throwable error) {
+      ResourceUtil.closeAll(error, this);
+      throw ResourceUtil.propagate(error);
     }
   }
 
