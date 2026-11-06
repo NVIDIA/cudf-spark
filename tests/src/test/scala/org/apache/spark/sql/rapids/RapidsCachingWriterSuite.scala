@@ -497,8 +497,7 @@ class RapidsCachingWriterSuite extends RmmSparkRetrySuiteBase with MockitoSugar 
         (afterProducerClose, read, unregister, afterUnregister, bytesLeft))
     }
 
-    test(s"a spill inside the write window keeps the $kind rows and the producer's close " +
-        "succeeds") {
+    test(s"a $kind batch spills only after the producer closes it, and its rows read back") {
       val rows = 1000
       val deviceBytesBefore = Rmm.getTotalBytesAllocated
       val catalog = new ShuffleBufferCatalog()
@@ -514,9 +513,10 @@ class RapidsCachingWriterSuite extends RmmSparkRetrySuiteBase with MockitoSugar 
       val unregister = Try(catalog.unregisterShuffle(1)).fold(e => s"threw: $e", _ => "ok")
       val bytesLeft = Rmm.getTotalBytesAllocated - deviceBytesBefore
       val handles = (stores.deviceStore.numHandles, stores.hostStore.numHandles)
-      assertResult((true, "ok", "ok", "ok", 0L, (0, 0)), "(a spill moved bytes, producer's " +
-        "close, read, unregister, device bytes left, (device handles, host handles))")(
-        (spilledAfterWrite + spilledAfterClose > 0, producerClose, read, unregister, bytesLeft,
+      assertResult((0L, "ok", true, "ok", "ok", 0L, (0, 0)), "(bytes spilled while the " +
+        "producer held the batch, producer's close, a spill after it moved bytes, read, " +
+        "unregister, device bytes left, (device handles, host handles))")(
+        (spilledAfterWrite, producerClose, spilledAfterClose > 0, read, unregister, bytesLeft,
           handles))
     }
   }
