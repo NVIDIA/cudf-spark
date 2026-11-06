@@ -136,8 +136,10 @@ initialize()
 
     # Now, we can set the WORKSPACE
     export WORKSPACE=$PWD
-    # set the retry count for mvn commands
-    MVN_CMD="mvn -Dmaven.wagon.http.retryHandler.count=3"
+    # Limit HTTP 429 backoff to 5 + 10 + 20 seconds before repository fallback.
+    MVN_CMD="mvn -s jenkins/databricks/maven-settings.xml \
+        -Dmaven.wagon.http.retryHandler.count=3 \
+        -Dmaven.wagon.httpconnectionManager.maxBackoffSeconds=30"
 
     # Determine which pom to use based on Scala version
     if [[ "$SCALA_BINARY_VER" == "2.13" ]]; then
