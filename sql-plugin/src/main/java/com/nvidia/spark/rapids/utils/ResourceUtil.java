@@ -23,23 +23,15 @@ import scala.runtime.AbstractFunction0;
 import scala.runtime.AbstractFunction1;
 
 import com.nvidia.spark.rapids.Arm$;
+import com.nvidia.spark.rapids.RapidsPluginImplicits$;
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator$;
 
-/** Java entry points to the existing resource and retry policies. */
+/**
+ * Java entry points for ownership transfer, retry, and closing multiple resources.
+ * Use try-with-resources for a scoped resource and its operation.
+ */
 public final class ResourceUtil {
   private ResourceUtil() {
-  }
-
-  /** Consume resource, preserving the operation's failure if cleanup also fails. */
-  public static <T extends AutoCloseable, R> R withResource(
-      T resource, Function<? super T, ? extends R> operation) {
-    R result = closeOnExcept(resource, operation);
-    return Arm$.MODULE$.withResource(resource, new AbstractFunction1<T, R>() {
-      @Override
-      public R apply(T ignored) {
-        return result;
-      }
-    });
   }
 
   /** Transfer resource on success; close it on failure using the existing ARM implementation. */
@@ -64,27 +56,12 @@ public final class ResourceUtil {
   }
 
   /**
-   * Attempt every cleanup. If primary is supplied, attach cleanup failures to it.
-   * Otherwise throw the first failure, retaining the others as suppressed exceptions.
+   * Close resources using Scala's safeClose policy, ignoring null arrays and elements.
+   * Attach cleanup failures to primary, or rethrow the first failure unchanged if primary is null.
+   * Suppressed interruptions are restored after all close attempts.
    */
   public static void closeAll(Throwable primary, AutoCloseable... resources) {
-    Throwable failure = primary;
-    for (AutoCloseable resource : resources) {
-      if (resource != null) {
-        try {
-          withResource(resource, ignored -> null);
-        } catch (Throwable error) {
-          if (failure == null) {
-            failure = error;
-          } else if (error != failure) {
-            failure.addSuppressed(error);
-          }
-        }
-      }
-    }
-    if (primary == null && failure != null) {
-      throw propagate(failure);
-    }
+    RapidsPluginImplicits$.MODULE$.AutoCloseableArray(resources).safeClose(primary);
   }
 
   /** Preserve unchecked failures; retain a checked failure as the cause. */
