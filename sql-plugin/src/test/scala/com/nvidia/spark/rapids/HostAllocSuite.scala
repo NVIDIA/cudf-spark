@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids
 
 import java.util.concurrent.{ExecutionException, Future, LinkedBlockingQueue, TimeoutException, TimeUnit}
 
-import ai.rapids.cudf.{HostMemoryBuffer, PinnedMemoryPool, Rmm, RmmAllocationMode}
+import ai.rapids.cudf.{HostMemoryBuffer, PageableMemoryPool, PinnedMemoryPool, Rmm, RmmAllocationMode}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.jni.{RmmSpark, RmmSparkThreadState, TaskPriority, ThreadStateRegistry}
 import com.nvidia.spark.rapids.spill._
@@ -327,6 +327,7 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
     SparkSession.getActiveSession.foreach(_.stop())
     SparkSession.clearActiveSession()
     SpillFramework.shutdown()
+    PageableMemoryPool.shutdown()
     if (Rmm.isInitialized) {
       rmmWasInitialized = true
       Rmm.shutdown()
@@ -349,6 +350,7 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
   override def afterAll(): Unit = {
     try {
       SpillFramework.shutdown()
+      PageableMemoryPool.shutdown()
       PinnedMemoryPool.shutdown()
       Rmm.shutdown()
       RmmSpark.clearEventHandler()
@@ -367,6 +369,34 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
         ConsoleOutput.writeErrorLine(t)
         t.printStackTrace(System.err)
         throw t
+    }
+  }
+
+  test("pageable pool serves non-pinned allocations before raw fallback") {
+    PinnedMemoryPool.initialize(4096)
+    PageableMemoryPool.initialize(8192, 1)
+    HostAlloc.initialize(4096)
+
+    withResource(HostAlloc.alloc(4096, preferPinned = true)) { pinned =>
+      assert(pinned.getLength == 4096)
+      withResource(HostAlloc.alloc(8192, preferPinned = false)) { pooled =>
+        // This exceeds the raw budget, so it must come from the pageable pool.
+        assert(pooled.getLength == 8192)
+        assert(HostAlloc.getUsageRatio() == 0.75)
+        withResource(HostAlloc.alloc(4096, preferPinned = false)) { raw =>
+          // The pool is full, so this allocation uses the remaining raw budget.
+          assert(raw.getLength == 4096)
+          assert(HostAlloc.getUsageRatio() == 1.0)
+          assert(HostAlloc.tryAlloc(1, preferPinned = false).isEmpty)
+        }
+      }
+    }
+    assert(HostAlloc.getUsageRatio() == 0.0)
+
+    // A zero raw budget must still allow allocations from the reserved pool.
+    HostAlloc.initialize(0)
+    withResource(HostAlloc.alloc(8192, preferPinned = false)) { pooled =>
+      assert(pooled.getLength == 8192)
     }
   }
 
