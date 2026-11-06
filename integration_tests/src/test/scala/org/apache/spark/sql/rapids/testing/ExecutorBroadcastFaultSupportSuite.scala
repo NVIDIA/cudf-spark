@@ -19,6 +19,7 @@ package org.apache.spark.sql.rapids.testing
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.rapids.shims.TrampolineUtilShim
 
 class ExecutorBroadcastFaultSupportSuite extends AnyFunSuite {
   Seq(
@@ -27,6 +28,8 @@ class ExecutorBroadcastFaultSupportSuite extends AnyFunSuite {
     (2, 4, 2, 1),
     (4, 1, 2, 2)).foreach { case (cores, parallelism, taskCores, expectedSlots) =>
     test(s"local[$cores], defaultParallelism=$parallelism, taskCores=$taskCores") {
+      // Each case needs its own context-level settings, regardless of preceding suites.
+      TrampolineUtilShim.cleanupAnyExistingSession()
       val session = SparkSession.builder().master(s"local[$cores]")
         .appName("driverless-local-task-capacity")
         .config("spark.default.parallelism", parallelism)
