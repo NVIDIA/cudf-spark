@@ -335,22 +335,22 @@ class ShuffleBufferCatalogSuite
       invocation.callRealMethod()
     }).when(SpillFramework.stores.deviceStore).track(any())
     val handlesBefore = SpillFramework.stores.deviceStore.numHandles
-    val table = RapidsShuffleTestHelper.buildContiguousTable(1000)
     val added = new AtomicReference[Try[ShuffleBufferId]]()
-    // the add borrows the table, so the test closes it once the add has ended
-    val adder = new Thread(() => added.set(Try(shuffleCatalog.addContiguousTable(
-      ShuffleBlockId(1, 7L, 0), table, -1))), "shuffle-add")
-    adder.setDaemon(true)
-    try {
-      adder.start()
-      assert(inTrack.await(awaitSeconds, TimeUnit.SECONDS), "the add never tracked its buffer")
-      shuffleCatalog.unregisterShuffle(1)
-    } finally {
-      resumeTrack.countDown()
-      adder.join(TimeUnit.SECONDS.toMillis(awaitSeconds))
-      table.close()
+    // the add borrows the table, so the table closes once the add has ended
+    withResource(RapidsShuffleTestHelper.buildContiguousTable(1000)) { table =>
+      val adder = new Thread(() => added.set(Try(shuffleCatalog.addContiguousTable(
+        ShuffleBlockId(1, 7L, 0), table, -1))), "shuffle-add")
+      adder.setDaemon(true)
+      try {
+        adder.start()
+        assert(inTrack.await(awaitSeconds, TimeUnit.SECONDS), "the add never tracked its buffer")
+        shuffleCatalog.unregisterShuffle(1)
+      } finally {
+        resumeTrack.countDown()
+        adder.join(TimeUnit.SECONDS.toMillis(awaitSeconds))
+      }
+      assert(!adder.isAlive)
     }
-    assert(!adder.isAlive)
     val outcome = added.get
     val handlesAfter = SpillFramework.stores.deviceStore.numHandles
     val bookkeepingAfter = shuffleCatalog.bookkeepingSizes
@@ -634,10 +634,11 @@ class ShuffleBufferCatalogSuite
     val catalog = new ShuffleBufferCatalog()
     catalog.registerShuffle(1, 5L)
     val handlesBefore = SpillFramework.stores.deviceStore.numHandles
-    val table = RapidsShuffleTestHelper.buildContiguousTable(1000)
-    val tableBytes = table.getBuffer.getLength
     // the add borrows the table, and the handle keeps the buffer
-    withResource(table)(catalog.addContiguousTable(ShuffleBlockId(1, 5L, 0), _, -1))
+    val tableBytes = withResource(RapidsShuffleTestHelper.buildContiguousTable(1000)) { table =>
+      catalog.addContiguousTable(ShuffleBlockId(1, 5L, 0), table, -1)
+      table.getBuffer.getLength
+    }
     catalog.addDegenerateRapidsBuffer(ShuffleBlockId(1, 5L, 1), mock[TableMeta])
     val result = catalog.reclaimShuffle(1, 5L)
     assertResult((0, 0, 0))(catalog.bookkeepingSizes)
@@ -832,23 +833,24 @@ class ShuffleBufferCatalogSuite
       invocation.callRealMethod()
     }).when(SpillFramework.stores.deviceStore).track(any())
     val handlesBefore = SpillFramework.stores.deviceStore.numHandles
-    val table = RapidsShuffleTestHelper.buildContiguousTable(1000)
     val added = new AtomicReference[Try[ShuffleBufferId]]()
-    // a late attempt of writer 5. The add borrows the table, so the test closes it once the add
+    // a late attempt of writer 5. The add borrows the table, so the table closes once the add
     // has ended
-    val adder = new Thread(() => added.set(Try(catalog.addContiguousTable(block, table, -1))),
-      "shuffle-add")
-    adder.setDaemon(true)
-    val reclaimed = try {
-      adder.start()
-      assert(inTrack.await(awaitSeconds, TimeUnit.SECONDS), "the add never tracked its buffer")
-      catalog.reclaimShuffle(1, 10L)
-    } finally {
-      resumeTrack.countDown()
-      adder.join(TimeUnit.SECONDS.toMillis(awaitSeconds))
-      table.close()
+    val reclaimed = withResource(RapidsShuffleTestHelper.buildContiguousTable(1000)) { table =>
+      val adder = new Thread(() => added.set(Try(catalog.addContiguousTable(block, table, -1))),
+        "shuffle-add")
+      adder.setDaemon(true)
+      val result = try {
+        adder.start()
+        assert(inTrack.await(awaitSeconds, TimeUnit.SECONDS), "the add never tracked its buffer")
+        catalog.reclaimShuffle(1, 10L)
+      } finally {
+        resumeTrack.countDown()
+        adder.join(TimeUnit.SECONDS.toMillis(awaitSeconds))
+      }
+      assert(!adder.isAlive)
+      result
     }
-    assert(!adder.isAlive)
     val outcome = added.get
     val handlesAfter = SpillFramework.stores.deviceStore.numHandles
     val bookkeepingAfter = catalog.bookkeepingSizes
