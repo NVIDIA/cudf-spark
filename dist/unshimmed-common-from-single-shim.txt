@@ -5,6 +5,14 @@ com/nvidia/spark/rapids/ExplainPlan.class
 com/nvidia/spark/rapids/ExplainPlan$.class
 com/nvidia/spark/rapids/ExplainPlanBase.class
 com/nvidia/spark/rapids/Optimizer.class
+# History API and bundled provider share one class identity across Spark shims.
+com/nvidia/spark/history/*
+META-INF/services/com.nvidia.spark.history.HistoryMetricsProvider
+# SQLite JNI classes and native resources must stay together, without relocation.
+org/sqlite/*
+META-INF/versions/*/org/sqlite/*
+META-INF/services/java.sql.Driver
+META-INF/maven/org.xerial/sqlite-jdbc/*
 com/nvidia/spark/rapids/optimizer/SQLOptimizerPlugin*
 com/nvidia/spark/rapids/ShimLoaderTemp*
 com/nvidia/spark/rapids/SparkShims*

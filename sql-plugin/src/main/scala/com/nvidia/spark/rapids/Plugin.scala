@@ -19,7 +19,7 @@ package com.nvidia.spark.rapids
 import java.lang.reflect.InvocationTargetException
 import java.net.URL
 import java.time.ZoneId
-import java.util.Properties
+import java.util.{HashMap, Map => JavaMap, Properties}
 import java.util.concurrent.ConcurrentHashMap
 
 import scala.collection.JavaConverters._
@@ -35,6 +35,7 @@ import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 import com.nvidia.spark.rapids.filecache.{FileCache, FileCacheLocalityManager, FileCacheLocalityMsg}
 import com.nvidia.spark.rapids.io.async.TrafficController
 import com.nvidia.spark.rapids.jni.{GpuTimeZoneDB, Hash, JSONUtils, RmmSpark, TaskPriority}
+import com.nvidia.spark.rapids.perf.HistoryHeuristics
 import com.nvidia.spark.rapids.python.PythonWorkerSemaphore
 import com.nvidia.spark.rapids.shims.ShuffleManagerShimUtils
 import org.apache.commons.lang3.exception.ExceptionUtils
@@ -482,6 +483,10 @@ object RapidsPluginUtils extends Logging {
 class RapidsDriverPlugin extends DriverPlugin with Logging {
   var rapidsShuffleHeartbeatManager: RapidsShuffleHeartbeatManager = null
   var shuffleCleanupListener: ShuffleCleanupListener = null
+  private val historyMetricsManager = new HistoryMetricsManager
+  private var historyMetricsSparkContext: SparkContext = _
+  private var historyMetricsConfiguration: JavaMap[String, String] = _
+  private var historyMetricsProviderName: String = _
   private lazy val extraDriverPlugins =
     RapidsPluginUtils.extraPlugins.map(_.driverPlugin()).filterNot(_ == null)
 
@@ -574,6 +579,13 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
     }
 
     FileCacheLocalityManager.init(sc)
+    historyMetricsSparkContext = sc
+    historyMetricsConfiguration =
+      new HashMap[String, String](sparkConf.getAll.toMap.asJava)
+    historyMetricsProviderName = conf.historyMetricsProvider
+    logInfo(s"History metrics: requested=$historyMetricsProviderName, " +
+      "activation deferred until Spark assigns the application ID")
+    HistoryHeuristics.start(sc, conf)
 
     logDebug("Loading extra driver plugins: " +
       s"${extraDriverPlugins.map(_.getClass.getName).mkString(",")}")
@@ -583,13 +595,46 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
   }
 
   override def registerMetrics(appId: String, pluginContext: PluginContext): Unit = {
+    val sc = historyMetricsSparkContext
+    if (sc != null) {
+      try {
+        val producerVersion =
+          buildInfoEvent.sparkRapidsBuildInfo.getOrElse("version", "UNKNOWN")
+        historyMetricsManager.initialize(
+          historyMetricsConfiguration,
+          appId,
+          sc.applicationAttemptId.orNull,
+          producerVersion,
+          historyMetricsProviderName)
+      } catch {
+        case failure if HistoryMetricsManager.isContained(failure) =>
+          logError("History metrics activation failed; history-backed heuristics remain disabled",
+            failure)
+      } finally {
+        HistoryHeuristics.activate()
+        historyMetricsConfiguration = null
+        historyMetricsProviderName = null
+      }
+    }
     extraDriverPlugins.foreach(_.registerMetrics(appId, pluginContext))
   }
 
   override def shutdown(): Unit = {
+    val sc = historyMetricsSparkContext
+    historyMetricsSparkContext = null
+    historyMetricsConfiguration = null
+    historyMetricsProviderName = null
     RapidsPluginUtils.safeShutdown(
       extraDriverPlugins.map(plugin => () => plugin.shutdown()) ++
         Seq(
+          () => historyMetricsManager.shutdown(() => {
+            // Spark 4 shuts plugins down before draining the listener bus. Allow pending
+            // callbacks to record observations before removing and closing the history store.
+            Option(sc).foreach(TrampolineUtil.waitForListenerEvents(_,
+              HistoryMetricsManager.LISTENER_SHUTDOWN_TIMEOUT.toMillis))
+          }),
+          // After the drain above, so pending executions still record.
+          () => HistoryHeuristics.stop(),
           () => FileCacheLocalityManager.shutdown(),
           // Shutdown listener first to trigger cleanup for any remaining jobs
           () => Option(shuffleCleanupListener).foreach(_.shutdown()),
