@@ -24,9 +24,58 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.expressions.{BoundReference, Literal}
 import org.apache.spark.sql.catalyst.expressions.variant.VariantGet
-import org.apache.spark.sql.types.{IntegerType, VariantType}
+import org.apache.spark.sql.types.{DataType, DecimalType, IntegerType, TimestampNTZType,
+  TimestampType, VariantType}
 
 class GpuVariantGetMetaSuite extends AnyFunSuite {
+  private def loadClass(name: String): Class[_] = Class.forName(name, false,
+    Thread.currentThread().getContextClassLoader)
+
+  test("status extraction capability rejects missing, legacy, and incomplete APIs") {
+    assert(GpuVariantExtraction.hasRequiredApis(loadClass))
+    assert(!GpuVariantExtraction.hasRequiredApis(_ => throw new ClassNotFoundException))
+    assert(!GpuVariantExtraction.hasRequiredApis { name =>
+      if (name == "ai.rapids.cudf.VariantUtils") classOf[String] else loadClass(name)
+    })
+    Seq("ai.rapids.cudf.VariantOperationResult", "ai.rapids.cudf.VariantOperationStatus")
+      .foreach { missing =>
+        assert(!GpuVariantExtraction.hasRequiredApis { name =>
+          if (name == missing) throw new ClassNotFoundException(name) else loadClass(name)
+        })
+      }
+    // Methods returning the real result must not satisfy a different/incomplete owner API.
+    assert(!GpuVariantExtraction.hasRequiredApis { name =>
+      if (name == "ai.rapids.cudf.VariantOperationResult") classOf[AutoCloseable]
+      else loadClass(name)
+    })
+    // A class can exist while one of its binary dependencies cannot be linked.
+    assert(!GpuVariantExtraction.hasRequiredApis(_ => throw new NoClassDefFoundError))
+  }
+
+  private def assertRejected(
+      targetType: DataType = IntegerType,
+      strict: Boolean = false,
+      bridge: Boolean = true,
+      incompatible: Boolean = true): Unit = {
+    val expression = VariantGet(BoundReference(0, VariantType, nullable = true),
+      Literal("$.id"), targetType, failOnError = strict, timeZoneId = Some("UTC"))
+    val conf = new RapidsConf(Map(
+      RapidsConf.ENABLE_CPU_BRIDGE.key -> bridge.toString,
+      RapidsConf.INCOMPATIBLE_OPS.key -> incompatible.toString))
+    val meta = GpuOverrides.wrapExpr(expression, conf, None)
+    meta.tagForGpu()
+    assert(!meta.canThisBeReplaced)
+  }
+
+  test("status APIs do not enable new target types, strict mode, or bypass existing gates") {
+    Seq(DecimalType(10, 2), TimestampType, TimestampNTZType).foreach { target =>
+      assertRejected(targetType = target)
+    }
+    assertRejected(strict = true)
+    assertRejected(bridge = false)
+    assertRejected(incompatible = false)
+  }
+
   test("Variant extraction is supported outside UTC") {
     val expression = VariantGet(
       BoundReference(0, VariantType, nullable = true),

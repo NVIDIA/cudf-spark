@@ -20,11 +20,10 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids
 
-import java.util.Optional
-
 import scala.util.Try
 
-import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Scalar, VariantUtils}
+import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Scalar, VariantOperationResult,
+  VariantOperationStatus, VariantUtils}
 import com.nvidia.spark.Retryable
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
@@ -68,7 +67,7 @@ case class GpuVariantGetMeta(
     }
 
     if (!GpuVariantGet.isVariantCudfAvailable) {
-      willNotWorkOnGpu("cuDF Java was built without Variant extraction APIs")
+      willNotWorkOnGpu("cuDF Java was built without Variant status extraction APIs")
     }
 
     if (!conf.isCpuBridgeEnabled) {
@@ -111,18 +110,9 @@ case class GpuVariantGet(
   }
 
   override def doColumnar(input: GpuColumnVector): ColumnVector = {
-    val variantStruct = input.getBase
-    require(variantStruct.getType == DType.STRUCT,
-      s"expected Variant struct input, got ${variantStruct.getType}")
-    require(variantStruct.getNumChildren == 2,
-      s"expected Variant struct with value and metadata children, got " +
-        s"${variantStruct.getNumChildren} children")
-
-    withResource(variantStruct.getChildColumnView(0)) { value =>
-      withResource(variantStruct.getChildColumnView(1)) { metadata =>
-        GpuVariantGet.withCudfVariantView(variantStruct, metadata, value) { cudfVariant =>
-          GpuVariantGet.extractVariantField(cudfVariant, path, dataType, input, fallbackBridge)
-        }
+    GpuVariantExtraction.withRawExtraction(input.getBase, path) { extraction =>
+      GpuVariantGet.decodeVariantField(extraction, dataType) {
+        GpuVariantGet.evaluateOnCpu(input, fallbackBridge)
       }
     }
   }
@@ -144,70 +134,69 @@ object GpuVariantGet {
   }
 
   def isVariantCudfAvailable: Boolean = {
-    try {
-      val variantUtils = Class.forName("ai.rapids.cudf.VariantUtils", true,
-        Thread.currentThread().getContextClassLoader)
-      variantUtils.getMethod("getVariantFieldValue", classOf[ColumnView], classOf[String])
-      variantUtils.getMethod("castVariantValue", classOf[ColumnView], classOf[DType])
-      true
-    } catch {
-      case _: ClassNotFoundException | _: NoSuchMethodException | _: LinkageError => false
+    GpuVariantExtraction.hasRequiredApis { name =>
+      Class.forName(name, false, Thread.currentThread().getContextClassLoader)
     }
   }
 
-  def extractVariantField(
-      cudfVariant: ColumnView,
-      path: String,
-      dt: DataType,
-      input: GpuColumnVector,
-      fallbackBridge: GpuCpuBridgeExpression): ColumnVector = {
-    withResource(VariantUtils.getVariantFieldValue(cudfVariant, path)) { rawValue =>
-      dt match {
-        case BooleanType => decodeExactType(rawValue, DType.BOOL8, input, fallbackBridge)
-        case FloatType => decodeExactType(rawValue, DType.FLOAT32, input, fallbackBridge)
-        case DoubleType => decodeExactType(rawValue, DType.FLOAT64, input, fallbackBridge)
-        case StringType => decodeExactType(rawValue, DType.STRING, input, fallbackBridge)
-        case ByteType | ShortType | IntegerType | LongType =>
-          val decoded = Seq(DType.INT8, DType.INT16, DType.INT32, DType.INT64).safeMap {
-            sourceType => VariantUtils.castVariantValue(rawValue, sourceType)
-          }
-          withResource(decoded) { decoded =>
-            if (allRowsCovered(rawValue, decoded)) {
-              withResource(normalizeIntegers(decoded)) { logicalLongs =>
-                narrowInteger(logicalLongs, dt)
-              }
-            } else {
-              evaluateOnCpu(input, fallbackBridge)
+  private[rapids] def decodeVariantField(
+      extraction: VariantOperationResult,
+      dt: DataType)(fallback: => ColumnVector): ColumnVector = {
+    dt match {
+      case BooleanType => decodeExactType(extraction, DType.BOOL8)(fallback)
+      case FloatType => decodeExactType(extraction, DType.FLOAT32)(fallback)
+      case DoubleType => decodeExactType(extraction, DType.FLOAT64)(fallback)
+      case StringType => decodeExactType(extraction, DType.STRING)(fallback)
+      case ByteType | ShortType | IntegerType | LongType =>
+        val decoded = Seq(DType.INT8, DType.INT16, DType.INT32, DType.INT64).safeMap {
+          sourceType => VariantUtils.castVariantValueWithStatus(
+            extraction.getValue, sourceType, extraction.getStatus)
+        }
+        withResource(decoded) { decoded =>
+          if (allRowsCovered(extraction.getStatus, decoded.map(_.getStatus))) {
+            withResource(normalizeIntegers(decoded.map(_.getValue))) { logicalLongs =>
+              narrowInteger(logicalLongs, dt)
             }
+          } else {
+            fallback
           }
-        case other =>
-          throw new IllegalArgumentException(s"unsupported variant target type: $other")
-      }
+        }
+      case other =>
+        throw new IllegalArgumentException(s"unsupported variant target type: $other")
     }
   }
 
   private def decodeExactType(
-      rawValue: ColumnView,
-      targetType: DType,
-      input: GpuColumnVector,
-      fallbackBridge: GpuCpuBridgeExpression): ColumnVector = {
-    withResource(VariantUtils.castVariantValue(rawValue, targetType)) { decoded =>
-      if (allRowsCovered(rawValue, Seq(decoded))) {
-        decoded.incRefCount()
+      extraction: VariantOperationResult,
+      targetType: DType)(fallback: => ColumnVector): ColumnVector = {
+    withResource(VariantUtils.castVariantValueWithStatus(
+        extraction.getValue, targetType, extraction.getStatus)) { decoded =>
+      if (allRowsCovered(extraction.getStatus, Seq(decoded.getStatus))) {
+        decoded.getValue.incRefCount()
       } else {
-        evaluateOnCpu(input, fallbackBridge)
+        fallback
       }
     }
   }
 
-  private def allRowsCovered(rawValue: ColumnView, decoded: Seq[ColumnView]): Boolean = {
-    withResource(new CloseableHolder(rawValue.isNull)) { covered =>
-      decoded.foreach { value =>
-        withResource(value.isNotNull) { decodedValue =>
-          covered.setAndCloseOld(covered.get.or(decodedValue))
+  private[rapids] def allRowsCovered(
+      extractionStatus: ColumnView,
+      decodedStatuses: Seq[ColumnView]): Boolean = {
+    // ROW_NULL is the parent struct's SQL-null mask. A null raw value alone can also mean a
+    // missing path or malformed encoding, neither of which proves Spark would return null.
+    withResource(Scalar.fromUnsignedByte(VariantOperationStatus.ROW_NULL.getNativeId.toByte)) {
+      rowNull =>
+        withResource(new CloseableHolder(extractionStatus.equalTo(rowNull))) { covered =>
+          decodedStatuses.foreach { status =>
+            withResource(Scalar.fromUnsignedByte(
+                VariantOperationStatus.SUCCESS.getNativeId.toByte)) { success =>
+              withResource(status.equalTo(success)) { decoded =>
+                covered.setAndCloseOld(covered.get.or(decoded))
+              }
+            }
+          }
+          BoolUtils.isAllValidTrue(covered.get)
         }
-      }
-      BoolUtils.isAllValidTrue(covered.get)
     }
   }
 
@@ -260,59 +249,13 @@ object GpuVariantGet {
     withResource(masked)(_.castTo(targetType))
   }
 
-  private def evaluateOnCpu(
+  private[rapids] def evaluateOnCpu(
       input: GpuColumnVector,
       fallbackBridge: GpuCpuBridgeExpression): ColumnVector = {
     val inputColumns = Array[org.apache.spark.sql.vectorized.ColumnVector](input.incRefCount())
     withResource(new ColumnarBatch(inputColumns, input.getBase.getRowCount.toInt)) { batch =>
       withResource(fallbackBridge.columnarEval(batch)) { result =>
         result.getBase.incRefCount()
-      }
-    }
-  }
-
-  private def withCudfVariantView[T](
-      variantStruct: ColumnView,
-      metadata: ColumnView,
-      value: ColumnView)(f: ColumnView => T): T = {
-    withByteList(metadata) { metadataBytes =>
-      withByteList(value) { valueBytes =>
-        withResource(makeCudfVariantView(variantStruct, metadataBytes, valueBytes))(f)
-      }
-    }
-  }
-
-  private def withByteList[T](cv: ColumnView)(f: ColumnView => T): T = {
-    cv.getType match {
-      case DType.LIST => f(cv)
-      case DType.STRING => withResource(toByteList(cv))(f)
-      case other =>
-        throw new IllegalArgumentException(
-          s"expected Variant physical binary child to be STRING or LIST, got $other")
-    }
-  }
-
-  private def makeCudfVariantView(
-      variantStruct: ColumnView,
-      metadata: ColumnView,
-      value: ColumnView): ColumnView = {
-    new ColumnView(DType.STRUCT, variantStruct.getRowCount,
-      Optional.of[java.lang.Long](variantStruct.getNullCount), variantStruct.getValid,
-      null.asInstanceOf[ai.rapids.cudf.BaseDeviceMemoryBuffer],
-      Array[ColumnView](metadata, value))
-  }
-
-  private def toByteList(cv: ColumnView): ColumnVector = {
-    require(cv.getType == DType.STRING,
-      s"expected Variant physical binary child to be STRING or LIST, got ${cv.getType}")
-
-    val dataBuf = Option(cv.getData)
-    withResource(new ColumnView(DType.UINT8, dataBuf.map(_.getLength).getOrElse(0L),
-      Optional.of(0L), dataBuf.orNull, null)) { data =>
-      withResource(new ColumnView(DType.LIST, cv.getRowCount,
-        Optional.of[java.lang.Long](cv.getNullCount),
-        cv.getValid, cv.getOffsets, Array(data))) { byteList =>
-        byteList.copyToColumnVector()
       }
     }
   }
