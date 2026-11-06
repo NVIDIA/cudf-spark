@@ -29,46 +29,6 @@
       "resource": "withResource(valueColumn.isNull)"
     },
     {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/higherOrderFunctions.scala",
-      "fingerprint": "7f869aeb1f10af718805",
-      "resource": "withResource(updatedMapView.getChildColumnView(0))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/higherOrderFunctions.scala",
-      "fingerprint": "b12699d8d247b786ecad",
-      "resource": "withResource(deduped.getChildColumnView(0))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/window/GpuUnboundedToUnboundedAggWindowExec.scala",
-      "fingerprint": "085fcea941ec509cb8e4",
-      "resource": "withResource(cudf.ColumnVector.fromLongs(targetRows))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/window/GpuUnboundedToUnboundedAggWindowExec.scala",
-      "fingerprint": "3d9189f1b0f6ad3f0af5",
-      "resource": "withResource(table.repeat(counts.getBase))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/window/GpuUnboundedToUnboundedAggWindowExec.scala",
-      "fingerprint": "4131b69c68fda39ff5b3",
-      "resource": "withResource(newcudf.Table(tr))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/window/GpuUnboundedToUnboundedAggWindowExec.scala",
-      "fingerprint": "7c9f1800424aa8bc556c",
-      "resource": "withResource(runningCount.getScalarElement(indexToLookAt))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/window/GpuUnboundedToUnboundedAggWindowExec.scala",
-      "fingerprint": "b24647205c6475714698",
-      "resource": "withResource(splitIndex.getScalarElement(0))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/com/nvidia/spark/rapids/window/GpuUnboundedToUnboundedAggWindowExec.scala",
-      "fingerprint": "bff3c1ddc31981e7aaab",
-      "resource": "withResource(counts.getBase.getScalarElement(indexToLookAt))"
-    },
-    {
       "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/collectionOperations.scala",
       "fingerprint": "2a52c09d40c9a22298af",
       "resource": "withResource(falseOption)"
@@ -102,21 +62,6 @@
       "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/collectionOperations.scala",
       "fingerprint": "e4e7af8a9e767b6086fa",
       "resource": "withResource(getNullScalar)"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/stringFunctions.scala",
-      "fingerprint": "42399f8595279597588c",
-      "resource": "withResource(extracted.replaceListChild(normalizedCaptures))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/stringFunctions.scala",
-      "fingerprint": "7b9dccff53f319d8207c",
-      "resource": "withResource(GpuListUtils.replaceListDataColumnAsView(listsOfStrings,structsCol))"
-    },
-    {
-      "path": "sql-plugin/src/main/scala/org/apache/spark/sql/rapids/stringFunctions.scala",
-      "fingerprint": "c75e489f83b3420cde00",
-      "resource": "withResource(captures.replaceNulls(emptyString))"
     }
   ]
 }

@@ -21,8 +21,8 @@ import os
 import sys
 
 from shimpler_source_graph import load_source_graph
-from shimpler_source_resolver import (candidate_inherited_sources, discover_shim_modules,
-                                     resolve_sources, scan_module_sources, validate_legacy_shadow)
+from shimpler_source_resolver import discover_shim_modules, resolve_sources, scan_module_sources
+from shimpler_source_targets import EXTERNAL_EXACT_TARGETS
 
 
 def main():
@@ -59,10 +59,8 @@ def main():
 
     rows = []
     for module in modules:
-        variants, _ = scan_module_sources(module, valid_targets)
-        validate_legacy_shadow(graph, variants, (args.target,))
-        candidate_variants, _ = candidate_inherited_sources(graph, variants)
-        selected = resolve_sources(graph, candidate_variants, args.target)
+        variants, _ = scan_module_sources(module, valid_targets, EXTERNAL_EXACT_TARGETS)
+        selected = resolve_sources(graph, variants, args.target)
         module_name = os.path.relpath(module, root)
         for logical, source in selected.items():
             rows.append({'logical_source': module_name + '/' + logical,
