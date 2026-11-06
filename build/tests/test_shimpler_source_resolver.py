@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 
@@ -235,15 +236,56 @@ class SourceResolverTest(unittest.TestCase):
             selections[target] = resolve_sources(graph, variants, target)
 
         baseline = ROOT / 'build' / 'tests' / 'shimpler_source_provider_baseline.tsv'
+        expected_paths = {target: set() for target in selections}
         for line in baseline.read_text().splitlines():
             if line.startswith('#') or not line:
                 continue
             targets, logical, provider = line.split('\t')
             for target in targets.split(','):
+                expected_paths[target].add(logical)
                 with self.subTest(target=target, logical=logical):
                     self.assertIn(logical, selections[target])
                     actual = Path(selections[target][logical].physical_path)
                     self.assertEqual(actual.relative_to(ROOT).as_posix(), provider)
+        baselined_paths = set().union(*expected_paths.values())
+        for target, expected in expected_paths.items():
+            self.assertEqual(set(selections[target]) & baselined_paths, expected, target)
+
+    def test_other_changed_selectors_keep_their_targets(self):
+        graphs = (load_source_graph(str(ROOT / 'pom.xml')),
+                  load_source_graph(str(ROOT / 'scala2.13' / 'pom.xml')))
+        targets = set().union(*graphs)
+        cases = (
+            ('iceberg/iceberg-1-11-x',
+             'src/main/scala/com/nvidia/spark/rapids/iceberg/iceberg111x/'
+             'IcebergProviderImpl.scala', 'spark402',
+             ('402', '403', '404'), ('400', '401', '402', '403', '404', '411')),
+            ('tests', 'src/test/scala/com/nvidia/spark/rapids/WindowGroupLimitExecSuite.scala',
+             'spark350', ('400', '401', '402', '403', '404'),
+             ('400', '401', '402', '403', '404', '411')),
+            ('tests', 'src/test/scala/com/nvidia/spark/rapids/shims/'
+             'Spark40GpuDataSourceCustomMetricsSuite.scala', 'spark350db143',
+             ('350db143', '400', '400db173', '401', '402', '403', '404',
+              '410db183', '411'),
+             ('350db143', '400', '400db173', '401', '402', '403', '404',
+              '410db183', '411', '412', '413', '420', '500')),
+        )
+        for module, logical, owner, expected, checked in cases:
+            variants, _ = scan_module_sources(str(ROOT / module), targets,
+                                              EXTERNAL_EXACT_TARGETS)
+            for target in checked:
+                graph = next(graph for graph in graphs if target in graph)
+                selected = resolve_sources(graph, variants, target).get(logical)
+                with self.subTest(module=module, logical=logical, target=target):
+                    if target in expected:
+                        self.assertIsNotNone(selected)
+                        self.assertIn('/src/%s/%s/' % (
+                            'test' if module == 'tests' else 'main', owner),
+                            selected.physical_path)
+                    elif selected is not None:
+                        self.assertNotIn('/src/%s/%s/' % (
+                            'test' if module == 'tests' else 'main', owner),
+                            selected.physical_path)
 
     def test_interval_and_writer_suites_cover_later_spark4(self):
         graphs = (load_source_graph(str(ROOT / 'pom.xml')),
@@ -264,14 +306,33 @@ class SourceResolverTest(unittest.TestCase):
             self.assertEqual(found, suite_names, target)
 
     def test_failed_generation_cannot_leave_a_valid_cache_marker(self):
+        def local_tag(node):
+            return node.tag.rsplit('}', 1)[-1]
+
         for pom in (ROOT / 'pom.xml', ROOT / 'scala2.13' / 'pom.xml'):
-            contents = pom.read_text()
-            marker_delete = '<fileset dir="${spark.shim.dest}" includes=".shim-sources-*"/>'
-            generation = '<generateShimSources/>'
-            marker_create = '<touch file="${rapids.shim.sources.cache.marker}"/>'
-            self.assertEqual(contents.count(marker_delete), 1, pom)
-            self.assertLess(contents.index(marker_delete), contents.index(generation), pom)
-            self.assertLess(contents.index(generation), contents.index(marker_create), pom)
+            root = ET.parse(str(pom)).getroot()
+            execution = next(node for node in root.iter() if local_tag(node) == 'execution'
+                             and any(local_tag(child) == 'id' and
+                                     child.text == 'generate-inherited-shim-sources'
+                                     for child in node))
+            target = next((node for node in execution.iter() if local_tag(node) == 'target'),
+                          None)
+            self.assertIsNotNone(target, pom)
+            branches = [node for node in target.iter() if local_tag(node) == 'then']
+            generation_branch = next(branch for branch in branches
+                                     if any(local_tag(child) == 'generateShimSources'
+                                            for child in branch))
+            actions = list(generation_branch)
+            deletion = next(node for node in actions if local_tag(node) == 'delete'
+                            and any(local_tag(child) == 'fileset' and child.attrib == {
+                                'dir': '${spark.shim.dest}', 'includes': '.shim-sources-*'}
+                                    for child in node))
+            generation = next(node for node in actions
+                              if local_tag(node) == 'generateShimSources')
+            creation = next(node for node in actions if local_tag(node) == 'touch'
+                            and node.get('file') == '${rapids.shim.sources.cache.marker}')
+            self.assertLess(actions.index(deletion), actions.index(generation), pom)
+            self.assertLess(actions.index(generation), actions.index(creation), pom)
 
     def test_source_inspector_reports_actual_selection_and_infers_scala_tree(self):
         command = [str(ROOT / 'build' / 'shimpler'), 'sources', '--target', '359',

@@ -52,9 +52,11 @@ class OrcEncryptionSuite extends SparkQueryCompareTestSuite {
     frame =>
       // ORC encryption is only allowed in 3.2+
       val isValidTestForSparkVersion = ShimLoader.getShimVersion match {
-        case SparkShimVersion(major, minor, _) => major == 3 && minor != 1
-        case DatabricksShimVersion(major, minor, _, _) => major == 3 && minor != 1
-        case ClouderaShimVersion(major, minor, _, _) => major == 3 && minor != 1
+        case SparkShimVersion(major, minor, _) => major > 3 || (major == 3 && minor >= 2)
+        case DatabricksShimVersion(major, minor, _, _) =>
+          major > 3 || (major == 3 && minor >= 2)
+        case ClouderaShimVersion(major, minor, _, _) =>
+          major > 3 || (major == 3 && minor >= 2)
         case _ => true
       }
       assume(isValidTestForSparkVersion)
