@@ -57,10 +57,8 @@ case class GpuCreateDataSourceTableAsSelectCommand(
     val tableIdentWithDB = table.identifier.copy(database = Some(db))
     val tableName = tableIdentWithDB.unquotedString
 
-    if (sessionState.catalog.tableExists(tableIdentWithDB)) {
-      assert(mode != SaveMode.Overwrite,
-        s"Expect the table $tableName has been dropped when the save mode is Overwrite")
-
+    val tableExists = sessionState.catalog.tableExists(tableIdentWithDB)
+    if (tableExists && mode != SaveMode.Overwrite) {
       if (mode == SaveMode.ErrorIfExists) {
         throw RapidsErrorUtils.tableOrViewAlreadyExistsError(tableName)
       }
@@ -77,6 +75,11 @@ case class GpuCreateDataSourceTableAsSelectCommand(
         GpuDataWritingCommand.assertEmptyRootPath(p, mode, sparkSession.sessionState.newHadoopConf)
       }
       assert(table.schema.isEmpty)
+      if (tableExists) {
+        assert(mode == SaveMode.Overwrite,
+          s"Expect the save mode is Overwrite when the table $tableName exists")
+        sessionState.catalog.dropTable(tableIdentWithDB, ignoreIfNotExists = true, purge = false)
+      }
       sparkSession.sessionState.catalog.validateTableLocation(table)
       val tableLocation = if (table.tableType == CatalogTableType.MANAGED) {
         Some(sessionState.catalog.defaultTablePath(table.identifier))
