@@ -722,10 +722,29 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
 
   test("a held UCX reclaim that arrives after a rerun writer registered, and before the " +
       "writer's first add, keeps the writer's output") {
+    assertHeldReclaimKeepsRegisteredWriter(Map.empty, deferred = 0)
+  }
+
+  test("with the old fetch protocol, a held UCX reclaim that arrives after a rerun writer " +
+      "registered defers, and keeps the writer's output") {
+    // map ids are partition ids under this protocol, so only the writers' task ids can show
+    // that the rerun registered above the watermark
+    assertHeldReclaimKeepsRegisteredWriter(
+      Map("spark.shuffle.useOldFetchProtocol" -> "true"), deferred = 1)
+  }
+
+  /**
+   * Holds the executor's reclaim polls until a rerun writer of the reclaimed shuffle has
+   * registered and waits in a UDF, then lets the reclaim run before the writer's first add.
+   * `deferred` is how many executors the reclaim event says deferred.
+   */
+  private def assertHeldReclaimKeepsRegisteredWriter(
+      extraConf: Map[String, String],
+      deferred: Int): Unit = {
     RapidsShuffleIntegrationSuite.holdWriters = false
     RapidsShuffleIntegrationSuite.writerEntered = new CountDownLatch(1)
     RapidsShuffleIntegrationSuite.releaseWriters = new CountDownLatch(1)
-    val listener = startUcxReclaimSession(gateOn = true, Map.empty)
+    val listener = startUcxReclaimSession(gateOn = true, extraConf)
     val manager = reclaimManager()
     // Spark calls getWriter before the writer reads its first row, so a writer that reaches this
     // UDF has registered the shuffle with its own task id
@@ -751,7 +770,7 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
     rerun.setDaemon(true)
     try {
       manager.holdReclaimPollsForTesting()
-      val taskMark = try {
+      val (shuffleId, taskMark) = try {
         df.collect()
         val shuffleId = onlyGpuShuffle(df)
         eventually(Timeout(Span(30, Seconds))) {
@@ -764,11 +783,15 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
         rerun.start()
         assert(RapidsShuffleIntegrationSuite.writerEntered.await(30, TimeUnit.SECONDS),
           "no writer of the rerun reached the UDF")
-        mark
+        (shuffleId, mark)
       } finally {
         manager.releaseReclaimPollsForTesting()
       }
-      awaitReclaimEvent(listener, 1)
+      val event = awaitReclaimEvent(listener, 1)
+      assertResult(deferred, s"deferred executors in $event")(event.executorsDeferred)
+      // the held writer is above the watermark, so its registration stays
+      assert(GpuShuffleEnv.getCatalog.hasActiveShuffle(shuffleId),
+        s"the reclaim removed shuffle $shuffleId's registration")
       RapidsShuffleIntegrationSuite.releaseWriters.countDown()
       rerun.join(TimeUnit.SECONDS.toMillis(60))
       assert(!rerun.isAlive, "the rerun never ended")
