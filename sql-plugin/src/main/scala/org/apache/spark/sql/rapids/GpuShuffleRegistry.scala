@@ -22,7 +22,9 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * The driver's set of GPU shuffle ids that the UCX shuffle reclaim may reclaim. It exists only
  * while a driver plugin that admitted the reclaim runs. Spark's threads call `add` and `remove`
- * in every mode, so each does nothing without a registry and never throws.
+ * in every mode, so each does nothing without a registry and never throws. An id whose map
+ * stage never runs stays until the plugin stops, since Spark unregisters only a shuffle that its
+ * map output tracker knows.
  */
 object GpuShuffleRegistry {
   @volatile private var shuffleIds: JSet[Int] = _

@@ -35,7 +35,7 @@ import org.apache.spark.sql.rapids.execution.TrampolineUtil
 /**
  * Manager for coordinating shuffle cleanup between driver and executors.
  *
- * When a shuffle is unregistered on the driver, this manager:
+ * In MULTITHREADED mode, when a shuffle is unregistered on the driver, this manager:
  * 1. Records the shuffle ID for cleanup
  * 2. Responds to executor polls with the list of shuffles to clean up
  * 3. Posts SparkRapidsShuffleDiskSavingsEvent immediately when executor reports stats
@@ -82,10 +82,10 @@ import org.apache.spark.sql.rapids.execution.TrampolineUtil
  *
  * '''3. Benefits of Pull Model'''
  *
- * - Uses standard Plugin API, no dependency on Spark internals
+ * - Uses standard Plugin API for every message between the driver and the executors
  * - Safe timing: we control when cleanup happens (after SQL execution ends)
  * - Naturally handles executor failures (failed executors just stop polling)
- * - No need to track executor list on driver side
+ * - MULTITHREADED needs no executor list on the driver side
  * - 1-second polling overhead is negligible
  *
  * == UCX reclaim ==
@@ -93,7 +93,10 @@ import org.apache.spark.sql.rapids.execution.TrampolineUtil
  * In UCX mode the manager reclaims the GPU shuffles that `UcxReclaimPolicy` hands over. It
  * clears each shuffle's map outputs on the driver, keeps its request from the executors until
  * the policy's verdict at the fence's marker, and posts one `SparkRapidsShuffleReclaimEvent` per
- * SQL execution once each shuffle the execution owned has an outcome.
+ * SQL execution once each shuffle the execution owned has an outcome. Unlike MULTITHREADED's
+ * cleanup, it uses Spark internals: it clears map outputs through `MapOutputTrackerMaster` and
+ * keeps each shuffle's status, so a later job reruns the map stage. It also tracks the executors
+ * that each request waits for.
  *
  * @param clock the current time in milliseconds
  * @param postEvent posts an event to the listener bus
@@ -145,10 +148,10 @@ class ShuffleCleanupManager(
   private val reportedExecutors =
     new ConcurrentHashMap[Int, JSet[String]]()
 
-  // The UCX reclaim's state. The tracker's thread, the manager's thread, the plugin endpoint's
-  // thread and the stopping thread change it only under `lock`, which none of them holds across
-  // a driver step, an event post, a log call or an RPC, so no listener queue or endpoint call
-  // ever waits for one.
+  // The UCX reclaim's state. The policy's listener thread, the manager's thread, the plugin
+  // endpoint's thread and the stopping thread change it only under `lock`, which none of them
+  // holds across a driver step, an event post, a log call or an RPC. So no thread waits on the
+  // lock for another thread's post or log line, and each caller writes its own after it.
   private val lock = new Object
   private var stopped = false
   private var pollsHeld = false
@@ -162,7 +165,7 @@ class ShuffleCleanupManager(
   private val lastHeard = new mutable.HashMap[String, Long]()
   // what the event of each SQL execution counts, until the event posts
   private val executions = new mutable.HashMap[Long, ExecutionAccount]()
-  // the executions whose accounts the withdraw-all dropped. The tracker's handler in flight at
+  // the executions whose accounts the withdraw-all dropped. The policy's handler in flight at
   // the disable can still name one, and must not give it an account that never completes.
   private val withdrawnExecutions = new mutable.HashSet[Long]()
 
@@ -311,7 +314,7 @@ class ShuffleCleanupManager(
       shuffles: Seq[ShuffleReclaimDecision],
       decidedAtMs: Long): Unit = {
     // each request is recorded before its driver step, so that a skip, close or executor
-    // removal the tracker sends meanwhile finds it, and its execution's event waits for it
+    // removal the policy sends meanwhile finds it, and its execution's event waits for it
     val requests = lock.synchronized {
       if (stopped) {
         None
@@ -386,7 +389,7 @@ class ShuffleCleanupManager(
   override def isDisabled: Boolean = disabled.get()
 
   override def disable(reason: String): Unit = {
-    // the tracker's thread and the manager's thread can both disable, and only the one that
+    // the policy's thread and the manager's thread can both disable, and only the one that
     // sets the flag warns and withdraws
     if (!isStopped && disabled.compareAndSet(false, true)) {
       logWarning(s"UCX shuffle reclaim is disabled for the rest of the application: $reason")
@@ -631,7 +634,7 @@ class ShuffleCleanupManager(
 
   /**
    * Withdraws every fenced request once the reclaim is disabled, and drops the events of the
-   * executions that cannot complete, since the tracker closes and decides nothing more.
+   * executions that cannot complete, since the policy closes and decides nothing more.
    */
   private def withdrawAll(): Unit = {
     val out = new Outbox()
@@ -699,6 +702,7 @@ class ShuffleCleanupManager(
     }
     request.buffers += result.buffers
     request.bytes += result.bytes
+    request.maxElapsedNanos = math.max(request.maxElapsedNanos, result.elapsedNanos)
     closeTarget(request, executorId, target, out)
   }
 
@@ -832,7 +836,8 @@ class ShuffleCleanupManager(
       s"$line$waited, settled ${now - r.decidedAtMs} ms after the decision, executors " +
         s"removed ${r.removed}, absent ${r.absent}, deferred ${r.deferred}, failed " +
         s"${r.failed}, timed out ${r.timeouts.size} [${r.timeouts.mkString(", ")}], " +
-        s"${r.buffers} buffers, ${r.bytes} bytes"
+        s"${r.buffers} buffers, ${r.bytes} bytes, longest executor reclaim " +
+        s"${TimeUnit.NANOSECONDS.toMillis(r.maxElapsedNanos)} ms"
     }
   }
 
@@ -859,7 +864,7 @@ class ShuffleCleanupManager(
     try {
       postEvent(event)
     } catch {
-      // a failed post must not fail the tracker's or the endpoint's call that settled the event
+      // a failed post must not fail the policy's or the endpoint's call that settled the event
       case NonFatal(e) =>
         logWarning(s"Failed to post the shuffle reclaim event of SQL execution " +
           s"${event.executionId}", e)
@@ -1041,6 +1046,7 @@ object ShuffleCleanupManager {
     var neverPolled = 0
     var buffers = 0L
     var bytes = 0L
+    var maxElapsedNanos = 0L
     // each target that timed out, with its reason
     val timeouts = new ArrayBuffer[String]()
   }
@@ -1054,7 +1060,7 @@ object ShuffleCleanupManager {
 
   /** What one SQL execution's reclaim event counts, until the event posts. */
   private final class ExecutionAccount {
-    // the shuffles that the tracker dispatched or skipped, and those with an outcome
+    // the shuffles that the policy dispatched or skipped, and those with an outcome
     val decided = new mutable.HashSet[Int]()
     val settled = new mutable.HashSet[Int]()
     private var closed = false
@@ -1073,7 +1079,7 @@ object ShuffleCleanupManager {
     private var bytesFreed = 0L
     private var maxRemoveMs = 0L
 
-    /** When the execution ended, once the tracker closed it. */
+    /** When the execution ended, once the policy closed it. */
     def endedAt: Option[Long] = if (closed) Some(endedAtMs) else None
 
     /** Whether the event can still post: the execution is closed and each shuffle decided. */

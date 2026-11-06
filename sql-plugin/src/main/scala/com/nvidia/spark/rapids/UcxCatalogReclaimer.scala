@@ -61,7 +61,7 @@ class UcxCatalogReclaimer(
    * reclaim starts. Once the endpoint closes, the rest of the reply gets no reclaim and no
    * result, since the driver drops a leaving executor from every request.
    */
-  def reclaimRequests(requests: Array[ShuffleReclaimRequest]): Unit = {
+  private[rapids] def reclaimRequests(requests: Array[ShuffleReclaimRequest]): Unit = {
     val pending = requests.iterator
     while (pending.hasNext && !isClosed()) {
       send(reclaimOne(pending.next()))

@@ -2186,23 +2186,20 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
     }
   }
 
-  /** Runs `op` on the shuffle buffer catalog if it is initialized. Every removal goes here. */
-  private def withShuffleCatalog[T](op: ShuffleBufferCatalog => T): Option[T] =
-    Option(GpuShuffleEnv.getCatalog).map(op)
-
   /**
    * Frees what the shuffle buffer catalog holds of a shuffle for writers at or below
    * `watermark`. A catalog that is not initialized yet holds nothing.
    */
   def reclaimGpuShuffle(shuffleId: Int, watermark: Long): ShuffleReclaimResult = {
-    withShuffleCatalog { catalog =>
+    Option(GpuShuffleEnv.getCatalog).map { catalog =>
       logInfo(s"Reclaiming shuffle $shuffleId up to task $watermark from shuffle buffer catalog")
       catalog.reclaimShuffle(shuffleId, watermark)
     }.getOrElse(ShuffleReclaimResult.absent(shuffleId, watermark))
   }
 
   def unregisterGpuShuffle(shuffleId: Int): Unit = {
-    withShuffleCatalog { catalog =>
+    val catalog = GpuShuffleEnv.getCatalog
+    if (catalog != null) {
       logInfo(s"Unregistering shuffle $shuffleId from shuffle buffer catalog")
       catalog.unregisterShuffle(shuffleId)
     }

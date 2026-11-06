@@ -82,9 +82,7 @@ class ShuffleCleanupListener(policy: ShuffleCleanupPolicy) extends SparkListener
     }
   }
 
-  /**
-   * Called during shutdown to cleanup any remaining execution -> shuffle mappings.
-   */
+  /** Passes the driver plugin's shutdown to the policy. */
   def shutdown(): Unit = policy.shutdown()
 }
 
@@ -311,6 +309,15 @@ case class RapidsShuffleReclaimFence(fenceId: Long) extends SparkListenerEvent {
  * shuffle waits for GC. A shuffle handed over stays in flight until its fence's marker, which
  * releases it, or withdraws it when a job listed its map stage first. A dropped event or a
  * handler that throws disables the reclaim for the rest of the application.
+ *
+ * Comments and DEBUG lines name the rules by number:
+ *  - R1, ownership: the live execution that submits a shuffle's map stage owns it.
+ *  - R2, sharing: a job of another execution, of an ended one or of none touched it.
+ *  - R3, the owner's end: the owner has ended and none of its jobs lists the shuffle.
+ *  - R4, consumption: the owner read the shuffle or failed.
+ *  - R5, caching: no stage that reads the shuffle persists an RDD.
+ *  - R6, quiescence: no stage that writes or reads the shuffle has a live attempt or a task.
+ *  - R7, determinism: Spark does not mark the map stage indeterminate.
  *
  * @param handoff the reclaim manager
  * @param clock the current time in milliseconds
@@ -612,7 +619,10 @@ class UcxReclaimPolicy(
     }
   }
 
-  /** What the policy holds, apart from the shuffles in flight to their fence's marker. */
+  /**
+   * What the policy holds, apart from the shuffles in flight to their fence's marker. Only tests
+   * read it, from a thread of their own, which is why the handlers take `lock`.
+   */
   private[rapids] def heldState: HeldState = lock.synchronized {
     HeldState(
       stages = stages.keySet.toSet,
@@ -750,7 +760,10 @@ class UcxReclaimPolicy(
     }
   }
 
-  /** R7 reads the stage's own RDD, which heads its list, and counts an empty list as one. */
+  /**
+   * R7 reads the stage's own RDD, which heads its list, and counts an empty list as
+   * indeterminate.
+   */
   private def isIndeterminate(info: StageInfo): Boolean =
     !info.rddInfos.headOption.exists(
       _.outputDeterministicLevel != DeterministicLevel.INDETERMINATE)

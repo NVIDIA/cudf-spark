@@ -65,6 +65,7 @@ class ShuffleCleanupEndpoint(
 
   private val reclaimer = newReclaimer(pluginContext, () => closed)
 
+  /** Whether `start` added the JVM shutdown hook, for tests. */
   private[rapids] def isShutdownHookAdded: Boolean = shutdownHookAdded
 
   /**

@@ -376,7 +376,7 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
     val shuffleIds = SparkShimImpl.findOperators(plan, _.isInstanceOf[GpuShuffleExchangeExecBase])
       .map(_.asInstanceOf[GpuShuffleExchangeExecBase].shuffleDependencyColumnar.shuffleId)
     assert(shuffleIds.nonEmpty, s"no GPU shuffle in:\n$plan")
-    eventually(Timeout(Span(30, Seconds))) {
+    eventually(Timeout(Span(RapidsShuffleIntegrationSuite.WaitSeconds, Seconds))) {
       assertResult(Set.empty, "shuffles with no disk savings event")(
         shuffleIds.toSet -- eventListener.getEvents.map(_.shuffleId))
     }
@@ -413,7 +413,7 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
       assert(sqlExecutions.isEmpty, s"the session ran SQL executions $sqlExecutions")
       // LocalSchedulerBackend.stop only asks its executor to stop. Waiting for the env reset
       // keeps this check independent of the RPC shutdown that drains that request.
-      eventually(Timeout(Span(30, Seconds))) {
+      eventually(Timeout(Span(RapidsShuffleIntegrationSuite.WaitSeconds, Seconds))) {
         assert(GpuShuffleEnv.getMultithreadedCatalog.isEmpty, "the executor has not shut down")
       }
       val remaining = catalog.getActiveShuffleIds
@@ -509,7 +509,7 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
     assertResult(firstRows)(df.collect().map(_.toString).sorted)
     // the rerun's writers registered the shuffle again, on the GPU
     assert(GpuShuffleEnv.getCatalog.hasActiveShuffle(shuffleId))
-    eventually(Timeout(Span(30, Seconds))) {
+    eventually(Timeout(Span(RapidsShuffleIntegrationSuite.WaitSeconds, Seconds))) {
       val ends = taskEnds.asScala.toList
       assert(ends.exists(_.reason match {
         case f: FetchFailed => f.shuffleId == shuffleId
@@ -590,7 +590,7 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
   private def drain(listener: RapidsShuffleIntegrationSuite.ReclaimTestListener): Unit = {
     val marker = new RapidsShuffleIntegrationSuite.ListenerDrainMarker
     TrampolineUtil.postEvent(spark.sparkContext, marker)
-    eventually(Timeout(Span(30, Seconds))) {
+    eventually(Timeout(Span(RapidsShuffleIntegrationSuite.WaitSeconds, Seconds))) {
       assert(listener.hasHandled(marker), "the listener has not handled the drain marker")
     }
   }
@@ -599,7 +599,7 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
   private def awaitReclaimEvent(
       listener: RapidsShuffleIntegrationSuite.ReclaimTestListener,
       n: Int): SparkRapidsShuffleReclaimEvent = {
-    eventually(Timeout(Span(30, Seconds))) {
+    eventually(Timeout(Span(RapidsShuffleIntegrationSuite.WaitSeconds, Seconds))) {
       val executions = listener.executions
       assert(executions.size >= n, s"the session started ${executions.size} SQL executions")
       val executionId = executions(n - 1)
@@ -689,7 +689,7 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
     } finally {
       manager.releaseReclaimPollsForTesting()
     }
-    eventually(Timeout(Span(30, Seconds))) {
+    eventually(Timeout(Span(RapidsShuffleIntegrationSuite.WaitSeconds, Seconds))) {
       assertResult(Seq.empty, "shuffles the catalog still holds")(
         shuffleIds.filter(GpuShuffleEnv.getCatalog.hasActiveShuffle))
     }
@@ -704,7 +704,7 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
     val (shuffleId, rerunRows) = try {
       df.collect()
       val id = onlyGpuShuffle(df)
-      eventually(Timeout(Span(30, Seconds))) {
+      eventually(Timeout(Span(RapidsShuffleIntegrationSuite.WaitSeconds, Seconds))) {
         assert(manager.isReclaimReleasedForTesting(id), s"no fence released shuffle $id")
       }
       // a job outside SQL reruns the map stage above the watermark and never owns the shuffle
@@ -751,7 +751,8 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
     val holdWriter = udf { (id: Long) =>
       if (RapidsShuffleIntegrationSuite.holdWriters) {
         RapidsShuffleIntegrationSuite.writerEntered.countDown()
-        RapidsShuffleIntegrationSuite.releaseWriters.await(30, TimeUnit.SECONDS)
+        RapidsShuffleIntegrationSuite.releaseWriters.await(
+          RapidsShuffleIntegrationSuite.WaitSeconds, TimeUnit.SECONDS)
       }
       id
     }
@@ -773,7 +774,7 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
       val (shuffleId, taskMark) = try {
         df.collect()
         val shuffleId = onlyGpuShuffle(df)
-        eventually(Timeout(Span(30, Seconds))) {
+        eventually(Timeout(Span(RapidsShuffleIntegrationSuite.WaitSeconds, Seconds))) {
           assert(manager.isReclaimReleasedForTesting(shuffleId),
             s"no fence released shuffle $shuffleId")
         }
@@ -781,7 +782,8 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
         val mark = listener.taskEnds.size
         RapidsShuffleIntegrationSuite.holdWriters = true
         rerun.start()
-        assert(RapidsShuffleIntegrationSuite.writerEntered.await(30, TimeUnit.SECONDS),
+        assert(RapidsShuffleIntegrationSuite.writerEntered.await(
+          RapidsShuffleIntegrationSuite.WaitSeconds, TimeUnit.SECONDS),
           "no writer of the rerun reached the UDF")
         (shuffleId, mark)
       } finally {
@@ -793,7 +795,7 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
       assert(GpuShuffleEnv.getCatalog.hasActiveShuffle(shuffleId),
         s"the reclaim removed shuffle $shuffleId's registration")
       RapidsShuffleIntegrationSuite.releaseWriters.countDown()
-      rerun.join(TimeUnit.SECONDS.toMillis(60))
+      rerun.join(TimeUnit.SECONDS.toMillis(RapidsShuffleIntegrationSuite.JoinSeconds))
       assert(!rerun.isAlive, "the rerun never ended")
       Option(rerunError.get).foreach(e => fail("the rerun failed", e))
       assertResult(numRows, "rows of the rerun")(rerunRows.get)
@@ -804,7 +806,7 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
     } finally {
       RapidsShuffleIntegrationSuite.releaseWriters.countDown()
       RapidsShuffleIntegrationSuite.holdWriters = false
-      rerun.join(TimeUnit.SECONDS.toMillis(60))
+      rerun.join(TimeUnit.SECONDS.toMillis(RapidsShuffleIntegrationSuite.JoinSeconds))
     }
   }
 
@@ -898,6 +900,12 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
 }
 
 object RapidsShuffleIntegrationSuite {
+  /** How long a test waits for an event, a latch or a condition. */
+  val WaitSeconds = 30L
+
+  /** How long a test waits for a thread it started to end. */
+  val JoinSeconds = 60L
+
   /** Task attempts that the injected failure has armed, shared with the session's tasks. */
   val failedTasks: java.util.Set[Long] = ConcurrentHashMap.newKeySet[Long]()
 
