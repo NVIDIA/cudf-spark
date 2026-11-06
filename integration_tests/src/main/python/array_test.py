@@ -998,6 +998,26 @@ def test_arrays_overlap_before_spark313(data_gen):
             'arrays_overlap(array(), array(1, 2))')
     )
 
+@pytest.mark.skipif(not is_spark_405(),
+                    reason="Spark 4.0.5 normalizes floating-point array set operations")
+@pytest.mark.parametrize('element_type', ['float', 'double'])
+@validate_execs_in_gpu_plan('GpuProjectExec')
+def test_array_set_ops_float_normalization_spark_405(element_type):
+    data = [
+        ([0.0, -0.0, float('nan'), float('nan')],
+         [-0.0, float('nan'), 1.0]),
+        ([float('nan'), -0.0], [0.0, float('nan')])
+    ]
+
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.createDataFrame(
+            data, f'a array<{element_type}>, b array<{element_type}>').selectExpr(
+                'sort_array(array_distinct(a))',
+                'sort_array(array_intersect(a, b))',
+                'sort_array(array_union(a, b))',
+                'sort_array(array_except(a, b))',
+                'arrays_overlap(a, b)'))
+
 @pytest.mark.parametrize('data_gen', [ByteGen(special_cases=[-10, 0, 10]), ShortGen(special_cases=[-10, 0, 10]), 
                                       IntegerGen(special_cases=[-10, 0, 10]), LongGen(special_cases=[-10, 0, 10])], ids=idfn)
 def test_array_remove_scalar(data_gen):
