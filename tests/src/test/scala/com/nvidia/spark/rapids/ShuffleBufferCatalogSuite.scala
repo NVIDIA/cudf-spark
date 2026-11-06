@@ -337,7 +337,7 @@ class ShuffleBufferCatalogSuite
     val handlesBefore = SpillFramework.stores.deviceStore.numHandles
     val table = RapidsShuffleTestHelper.buildContiguousTable(1000)
     val added = new AtomicReference[Try[ShuffleBufferId]]()
-    // the catalog closes the table it is given
+    // the add borrows the table, so the test closes it once the add has ended
     val adder = new Thread(() => added.set(Try(shuffleCatalog.addContiguousTable(
       ShuffleBlockId(1, 7L, 0), table, -1))), "shuffle-add")
     adder.setDaemon(true)
@@ -348,6 +348,7 @@ class ShuffleBufferCatalogSuite
     } finally {
       resumeTrack.countDown()
       adder.join(TimeUnit.SECONDS.toMillis(awaitSeconds))
+      table.close()
     }
     assert(!adder.isAlive)
     val outcome = added.get
@@ -635,8 +636,8 @@ class ShuffleBufferCatalogSuite
     val handlesBefore = SpillFramework.stores.deviceStore.numHandles
     val table = RapidsShuffleTestHelper.buildContiguousTable(1000)
     val tableBytes = table.getBuffer.getLength
-    // the catalog closes the table it is given
-    catalog.addContiguousTable(ShuffleBlockId(1, 5L, 0), table, -1)
+    // the add borrows the table, and the handle keeps the buffer
+    withResource(table)(catalog.addContiguousTable(ShuffleBlockId(1, 5L, 0), _, -1))
     catalog.addDegenerateRapidsBuffer(ShuffleBlockId(1, 5L, 1), mock[TableMeta])
     val result = catalog.reclaimShuffle(1, 5L)
     assertResult((0, 0, 0))(catalog.bookkeepingSizes)
@@ -831,7 +832,8 @@ class ShuffleBufferCatalogSuite
     val handlesBefore = SpillFramework.stores.deviceStore.numHandles
     val table = RapidsShuffleTestHelper.buildContiguousTable(1000)
     val added = new AtomicReference[Try[ShuffleBufferId]]()
-    // a late attempt of writer 5, whose table the catalog closes
+    // a late attempt of writer 5. The add borrows the table, so the test closes it once the add
+    // has ended
     val adder = new Thread(() => added.set(Try(catalog.addContiguousTable(block, table, -1))),
       "shuffle-add")
     adder.setDaemon(true)
@@ -842,6 +844,7 @@ class ShuffleBufferCatalogSuite
     } finally {
       resumeTrack.countDown()
       adder.join(TimeUnit.SECONDS.toMillis(awaitSeconds))
+      table.close()
     }
     assert(!adder.isAlive)
     val outcome = added.get
@@ -945,9 +948,9 @@ class ShuffleBufferCatalogSuite
     }
     val catalog = new ShuffleBufferCatalog()
     catalog.registerShuffle(1, 5L)
-    // the catalog closes the table it is given
-    catalog.addContiguousTable(ShuffleBlockId(1, 5L, 0),
-      RapidsShuffleTestHelper.buildContiguousTable(1000), -1)
+    // the add borrows the table, and the handle keeps the buffer
+    withResource(RapidsShuffleTestHelper.buildContiguousTable(1000))(
+      catalog.addContiguousTable(ShuffleBlockId(1, 5L, 0), _, -1))
     val reclaim = new Thread(() => catalog.reclaimShuffle(1, 5L), "shuffle-reclaim")
     reclaim.setDaemon(true)
     try {
