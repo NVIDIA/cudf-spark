@@ -907,6 +907,45 @@ class ShuffleCleanupManagerSuite extends AnyFunSuite with BeforeAndAfterEach {
       (event.completedAtMs, event.maxWaitMs, event.maxRemoveMs))
   }
 
+  test("a release whose targets have all left settles its request at once and posts the " +
+      "execution's event") {
+    val h = new Harness(_ => true, eventLogEnabled = true)
+    h.manager.executionClosed(execution1, 0L, Seq(shuffle1))
+    h.dispatch(1L, decision(shuffle1, execution1, w1, "e1"))
+    h.awaitFence(1L)
+    h.manager.executorRemoved("e1")
+    h.manager.applyRelease(1L, shuffle1)
+    val event = h.takeEvent()
+    assertResult((execution1, 1, 0))((event.executionId, event.reclaimed, event.executorsTimedOut))
+    assert(!h.manager.isReclaimReleasedForTesting(shuffle1), "the request is still open")
+    assert(h.poll("e1").isEmpty, "a removed executor got the shuffle")
+  }
+
+  test("a release with no target, as a map stage that launched no task leaves, settles its " +
+      "request at once and posts the execution's event") {
+    val h = new Harness(_ => true, eventLogEnabled = true)
+    h.manager.executionClosed(execution2, 0L, Seq(shuffle2))
+    h.dispatch(1L, decision(shuffle2, execution2, w1))
+    h.awaitFence(1L)
+    h.manager.applyRelease(1L, shuffle2)
+    val event = h.takeEvent()
+    assertResult((execution2, 1))((event.executionId, event.reclaimed))
+    assert(!h.manager.isReclaimReleasedForTesting(shuffle2), "the request is still open")
+  }
+
+  test("a target's silence counts from its release when its executor was last heard earlier") {
+    val h = new Harness(_ => true, eventLogEnabled = true)
+    val timeline = h.everyMinute(0 to 15) {
+      case 0 =>
+        h.manager.executionClosed(execution1, 0L, Seq(shuffle1, shuffle2))
+        h.dispatchAndRelease(1L, decision(shuffle1, execution1, w1, "e1"))
+        assertResult(Seq(ShuffleReclaimRequest(shuffle1, w1)))(h.poll("e1"))
+      case 5 => h.dispatchAndRelease(2L, decision(shuffle2, execution1, w2, "e1"))
+      case _ =>
+    }
+    assertResult(Seq(10, 15))(timeoutWarnings(timeline).map(_._1))
+  }
+
   test("a target released while its executor is busy reaches it at its next poll without " +
       "timing out") {
     val h = new Harness(_ => true, eventLogEnabled = true)

@@ -676,6 +676,8 @@ class ShuffleBufferCatalogSuite
         catalog.registerShuffle(1, 5L)
         catalog.addDegenerateRapidsBuffer(ShuffleBlockId(1, 5L, 0), mock[TableMeta])
         catalog.registerShuffle(1, 11L)
+        // a writer that registers after a higher one leaves the registration's largest id
+        catalog.registerShuffle(1, 7L)
         val laterBlock = ShuffleBlockId(1, 11L, 0)
         val laterMeta = mock[TableMeta]
         if (addedBeforeReclaim) {

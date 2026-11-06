@@ -323,6 +323,21 @@ class UcxReclaimPolicySuite extends AnyFunSuite {
     assertResult(Seq(Skip(0, 1L, ShuffleReclaimRule.R2)), f.sink.calls)(f.sink.skips)
   }
 
+  test("a retry of a settled indeterminate map stage under a later execution is skipped for " +
+      "that execution") {
+    val (f, _) = runR7Case(Seq(rddInfo(30, DeterministicLevel.INDETERMINATE)))
+    // execution 2 reads shuffle 0's kept output, and a fetch failure resubmits map stage 30
+    val stage30 = mapStage(30, 0, Nil, Seq(rddInfo(30, DeterministicLevel.INDETERMINATE)))
+    val stage32 = resultStage(32, parentIds = Seq(30))
+    f.policy.onExecutionStart(2)
+    f.policy.onJobStart(jobStart(1, 2, Seq(stage30, stage32)))
+    f.policy.onStageSubmitted(stageSubmitted(stage32, 2))
+    f.policy.onStageSubmitted(stageSubmitted(stage30, 2))
+    assertResult(Seq(Skip(0, 1L, ShuffleReclaimRule.R7), Skip(0, 2L, ShuffleReclaimRule.R7)),
+      f.sink.calls)(f.sink.skips)
+    assert(f.sink.dispatches.isEmpty, f.sink.calls)
+  }
+
   test("an indeterminate shuffle that a later job of its execution reads leaves no state") {
     val f = new Fixture(Set(0))
     val stage10 = mapStage(10, 0, Nil, Seq(rddInfo(10, DeterministicLevel.INDETERMINATE)))
