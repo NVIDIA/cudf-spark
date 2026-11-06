@@ -18,6 +18,7 @@ package org.apache.spark.sql.rapids
 
 import java.util.Locale
 
+import ai.rapids.cudf.Cuda
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.RowBasedShuffleChecksumConf
 import com.nvidia.spark.rapids.shims.ShuffleManagerShimUtils
@@ -25,8 +26,34 @@ import com.nvidia.spark.rapids.shims.ShuffleManagerShimUtils
 import org.apache.spark.{SparkConf, SparkEnv}
 import org.apache.spark.internal.{config, Logging}
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.rapids.execution.ExecutorBroadcastCache
+import org.apache.spark.util.Utils
 
 class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
+  // Cleanup and first use share this owner, including its closed state and retired IDs.
+  // Constructing it allocates no GPU buffers; builds are materialized by getOrBuild.
+  private[rapids] lazy val broadcastCache =
+    new ExecutorBroadcastCache[SpillableColumnarBatch](owned => {
+      // Unregister can run on an RPC thread that has not selected this executor's device.
+      GpuDeviceManager.getDeviceId().foreach(Cuda.setDevice)
+      Arm.withResource(owned)(_ => ())
+    })
+  private[rapids] def invalidateBroadcastAndThen(id: Int)(cleanup: => Unit): Unit = {
+    Utils.tryWithSafeFinally {
+      broadcastCache.invalidate(id)
+    } {
+      cleanup
+    }
+  }
+
+  private[rapids] def closeBroadcastCacheAndThen(cleanup: => Unit): Unit = {
+    Utils.tryWithSafeFinally {
+      broadcastCache.close()
+    } {
+      cleanup
+    }
+  }
+
   private var shuffleCatalog: ShuffleBufferCatalog = _
   private var shuffleReceivedBufferCatalog: ShuffleReceivedBufferCatalog = _
   private var multithreadedCatalog: MultithreadedShuffleBufferCatalog = _
@@ -216,6 +243,26 @@ object GpuShuffleEnv extends Logging {
     null
   } else {
     env.getCatalog
+  }
+
+  private[rapids] def getBroadcastCache: ExecutorBroadcastCache[SpillableColumnarBatch] = {
+    require(env != null, "GPU shuffle environment has not been initialized")
+    env.broadcastCache
+  }
+
+  def invalidateBroadcastAndThen(shuffleId: Int)(cleanup: => Unit): Unit = {
+    Option(env) match {
+      case Some(current) => current.invalidateBroadcastAndThen(shuffleId)(cleanup)
+      case None => cleanup
+    }
+  }
+
+  /** Retire cached builds before teardown, preserving errors while still running cleanup. */
+  def closeBroadcastCacheAndThen(cleanup: => Unit): Unit = {
+    Option(env) match {
+      case Some(current) => current.closeBroadcastCacheAndThen(cleanup)
+      case None => cleanup
+    }
   }
 
   def getMultithreadedCatalog: Option[MultithreadedShuffleBufferCatalog] = {

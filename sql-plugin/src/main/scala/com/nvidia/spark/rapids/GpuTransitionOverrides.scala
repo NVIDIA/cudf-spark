@@ -41,6 +41,7 @@ import org.apache.spark.sql.execution.exchange.{BroadcastExchangeLike, ENSURE_RE
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec}
 import org.apache.spark.sql.rapids.{GpuDataSourceScanExec, GpuFileSourceScanExec, GpuShuffleEnv, GpuTaskMetrics}
 import org.apache.spark.sql.rapids.execution.{ExchangeMappingCache, GpuBroadcastExchangeExec, GpuBroadcastExchangeExecBase, GpuBroadcastToRowExec, GpuCustomShuffleReaderExec, GpuHashJoin, GpuShuffleExchangeExecBase, GpuSubqueryBroadcastExec}
+import org.apache.spark.sql.rapids.execution.GpuDriverlessBroadcastHashJoinExec
 import org.apache.spark.sql.types.StructType
 
 /**
@@ -722,6 +723,12 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
     }
     val isAdaptiveEnabled = plan.conf.adaptiveExecutionEnabled
     plan match {
+      case reused: ReusedExchangeExec =>
+        // Reuse is a leaf wrapper; validate the actual exchange and its subtree.
+        assertIsOnTheGpu(reused.child, conf)
+      case _: WholeStageCodegenExec | _: InputAdapter =>
+        // Materialized reused stages can wrap permitted CPU nodes in codegen containers.
+        // Their children still undergo the GPU and allowed-CPU checks below.
       case _: BroadcastExchangeLike if isAdaptiveEnabled =>
         // broadcasts are left on CPU for now when AQE is enabled
       case _: BroadcastHashJoinExec | _: BroadcastNestedLoopJoinExec
@@ -978,6 +985,7 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
         if (rapidsConf.shuffledHashJoinOptimizeShuffle || rapidsConf.useShuffledSymmetricHashJoin) {
           updatedPlan = shuffledHashJoinOptimizeShuffle(updatedPlan)
         }
+        updatedPlan = GpuDriverlessBroadcastHashJoinExec.rewrite(updatedPlan, rapidsConf)
         if (rapidsConf.exportColumnarRdd) {
           updatedPlan = detectAndTagFinalColumnarOutput(updatedPlan)
         }
