@@ -142,6 +142,41 @@ class UcxReclaimPolicySuite extends AnyFunSuite {
     assertResult(Seq(Seq((0, 1L, Set("e1")))), f.sink.calls)(ownersAndTargets(f))
   }
 
+  test("with the event key off, a shuffle whose failed job ended before its execution is " +
+      "dispatched at the execution's end, with no skip or close") {
+    val f = new Fixture(_ => true, eventLogEnabled = false)
+    failResultStage(f, submitResultStage(f))
+    f.policy.onJobEnd(jobEnd(0, jobFailed))
+    assert(f.sink.dispatches.isEmpty, f.sink.calls)
+    f.policy.onExecutionEnd(1)
+    assertResult(Seq(Seq((0, 1L, Set("e1")))), f.sink.calls)(ownersAndTargets(f))
+    assert(f.sink.calls.forall(_.isInstanceOf[Dispatch]), f.sink.calls)
+  }
+
+  test("with the event key off, a shuffle that another execution's job reads is never " +
+      "dispatched, and the policy sends nothing") {
+    val f = new Fixture(Set(0), eventLogEnabled = false)
+    val stage11 = submitResultStage(f)
+    f.policy.onTaskStart(taskStart(11, 0, 2, "e1"))
+    f.policy.onTaskEnd(taskEnd(11, 0, 2, "e1", Success))
+    f.policy.onStageCompleted(stageCompleted(stage11))
+    f.policy.onJobEnd(jobEnd(0, JobSucceeded))
+    // execution 2 reads shuffle 0's kept output, with its map stage skipped, before
+    // execution 1 ends
+    val stage10 = mapStage(10, shuffleId = 0, parentIds = Nil)
+    val stage13 = resultStage(13, parentIds = Seq(10))
+    f.policy.onExecutionStart(2)
+    f.policy.onJobStart(jobStart(1, 2, Seq(stage10, stage13)))
+    f.policy.onStageSubmitted(stageSubmitted(stage13, 2))
+    f.policy.onTaskStart(taskStart(13, 0, 3, "e1"))
+    f.policy.onExecutionEnd(1)
+    f.policy.onTaskEnd(taskEnd(13, 0, 3, "e1", Success))
+    f.policy.onStageCompleted(stageCompleted(stage13))
+    f.policy.onJobEnd(jobEnd(1, JobSucceeded))
+    f.policy.onExecutionEnd(2)
+    assert(f.sink.calls.isEmpty, f.sink.calls)
+  }
+
   test("a task that starts after its job failed, but before the decision, holds the shuffle " +
       "until it ends, is named by the R6 WARN and becomes a target") {
     assertLateTaskStartHoldsTheShuffle(lateStageAttemptId = 0)
@@ -376,13 +411,13 @@ object UcxReclaimPolicySuite {
   }
 
   /**
-   * A policy over a recording sink, with the event key on, since the policy sends no skip or
-   * close with it off. The clock moves only when a test moves it.
+   * A policy over a recording sink, with the event key on unless a case turns it off. With it
+   * off the policy sends no skip or close. The clock moves only when a test moves it.
    */
-  private class Fixture(isCandidate: Int => Boolean) {
+  private class Fixture(isCandidate: Int => Boolean, eventLogEnabled: Boolean = true) {
     var nowMs = 0L
     val sink = new RecordingSink
-    val policy = new UcxReclaimPolicy(sink, () => nowMs, isCandidate, eventLogEnabled = true,
+    val policy = new UcxReclaimPolicy(sink, () => nowMs, isCandidate, eventLogEnabled,
       droppedEvents = () => 0L)
   }
 }

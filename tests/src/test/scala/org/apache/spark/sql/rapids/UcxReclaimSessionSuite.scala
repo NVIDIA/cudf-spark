@@ -990,6 +990,10 @@ class UcxReclaimSessionSuite extends AnyFunSuite with BeforeAndAfterEach {
       assert(!pollDriver(t).exists(_.shuffleId == s1), s"a poll listed shuffle $s1")
       assertDisabledOnce(t, logged)
       settle(t)
+      // the second execution had an entry when its handler threw, and the disable drops it
+      val held = t.policy.heldState
+      assert(held.stages.isEmpty && held.jobs.isEmpty && held.executions.isEmpty &&
+        held.shuffles.isEmpty, held)
       val s2 = single(ownedBy(t, executionOf(t, "second")), "shuffles the second query owns")
       assert(t.calls.decisionsFor(s2).isEmpty, t.calls.all)
     }
