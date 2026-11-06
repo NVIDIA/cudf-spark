@@ -17,7 +17,6 @@
 package com.nvidia.spark.rapids.timezone
 
 import java.io.File
-import java.sql.Timestamp
 import java.time.Instant
 import java.util.TimeZone
 
@@ -39,6 +38,15 @@ class OrcWriterTimezoneSuite extends SparkQueryCompareTestSuite {
   private def dataFrame(spark: SparkSession): DataFrame = {
     import spark.implicits._
     val instants = Seq(
+      "1500-01-01T00:00:00.123456Z",
+      "1582-10-04T23:59:59.999999Z",
+      "1582-10-15T00:00:00Z",
+      "1590-01-01T00:00:00.123456Z",
+      "1800-01-01T00:00:00Z",
+      "1883-11-18T16:59:59.999999Z",
+      "1883-11-18T17:00:00Z",
+      "1899-12-31T23:59:59.999999Z",
+      "1900-01-01T00:00:00Z",
       "1901-01-01T00:00:00Z",
       "1969-12-31T23:59:58.999999Z",
       "1969-12-31T23:59:59Z",
@@ -54,8 +62,14 @@ class OrcWriterTimezoneSuite extends SparkQueryCompareTestSuite {
       "2020-11-01T06:00:00Z",
       "2400-07-01T12:00:00Z",
       "9999-12-30T12:00:00Z")
-    val timestamps = instants.map(value => Timestamp.from(Instant.parse(value))) :+ null
-    timestamps.zipWithIndex.map { case (ts, id) => (id, ts) }.toDF("id", "ts")
+    // Construct internal timestamp values directly: Timestamp encoders themselves rebase
+    // historical instants through the JVM timezone and would obscure the writer boundaries.
+    val micros = instants.map { value =>
+      val instant = Instant.parse(value)
+      java.lang.Long.valueOf(instant.getEpochSecond * 1000000L + instant.getNano / 1000)
+    } :+ null
+    micros.zipWithIndex.map { case (ts, id) => (id, ts) }.toDF("id", "micros")
+      .selectExpr("id", "timestamp_micros(micros) AS ts")
       .selectExpr("id", "ts", "named_struct('value', ts) AS struct_ts",
         "array(ts, CAST(NULL AS TIMESTAMP)) AS array_ts",
         "map('value', ts) AS map_ts")

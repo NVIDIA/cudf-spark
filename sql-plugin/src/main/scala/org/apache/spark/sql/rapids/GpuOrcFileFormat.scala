@@ -40,6 +40,7 @@ import org.apache.spark.sql.execution.datasources.FileFormat
 import org.apache.spark.sql.execution.datasources.orc.{OrcFileFormat, OrcOptions, OrcUtils}
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.types._
+import org.apache.spark.sql.vectorized.ColumnarBatch
 
 object GpuOrcFileFormat extends Logging {
   // The classname used when Spark is configured to use the Hive implementation for ORC.
@@ -296,14 +297,26 @@ class GpuOrcWriter(
   // this change, because the JNI buffer count cannot detect unflushed native state changes.
   override protected def canRetryGpuOomFromNativeWrite: Boolean = true
 
+  private val hasTimestamps =
+    dataSchema.exists(field => GpuOverrides.isOrContainsTimestamp(field.dataType))
+  private val writerTimezone = GpuOrcFileFormat.writerTimezoneId
+
+  override def transformAndClose(batch: ColumnarBatch): ColumnarBatch = {
+    if (hasTimestamps) {
+      GpuOrcTimezoneUtils.rebaseOrcTimestampsForWrite(batch, writerTimezone)
+    } else {
+      batch
+    }
+  }
+
   override val tableWriter: TableWriter = {
     val builder = SchemaUtils
       .writerOptionsFromSchema(ORCWriterOptions.builder(), dataSchema, nullable = false)
       .withMetadata(SPARK_VERSION_METADATA_KEY, SPARK_VERSION_SHORT)
       .withCompressionType(CompressionType.valueOf(OrcConf.COMPRESS.getString(conf)))
-    if (dataSchema.exists(field => GpuOverrides.isOrContainsTimestamp(field.dataType))) {
+    if (hasTimestamps) {
       // Apache ORC uses the executor JVM timezone, independently of Spark's session timezone.
-      builder.withWriterTimezone(GpuOrcFileFormat.writerTimezoneId)
+      builder.withWriterTimezone(writerTimezone)
     }
     orcStripeSizeRows.foreach { ss =>
       builder.withStripeSizeRows(ss)

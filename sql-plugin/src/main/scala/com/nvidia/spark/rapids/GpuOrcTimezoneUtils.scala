@@ -23,10 +23,37 @@ import scala.collection.mutable.ArrayBuffer
 
 import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Table}
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingSeq
+import com.nvidia.spark.rapids.RapidsPluginImplicits.{AutoCloseableProducingArray, AutoCloseableProducingSeq}
 import com.nvidia.spark.rapids.jni.{DateTimeRebase, GpuTimeZoneDB}
 
+import org.apache.spark.sql.vectorized.ColumnarBatch
+
 object GpuOrcTimezoneUtils {
+
+  /**
+   * Match Spark's toJavaTimestamp conversion before writing a legacy-calendar ORC file.
+   * This includes historical java.time versus java.util.TimeZone differences, even after
+   * the Gregorian cutover. cuDF writes the supplied instants without this Spark conversion.
+   * The input batch is closed; modern and all-null columns retain their existing buffers.
+   */
+  def rebaseOrcTimestampsForWrite(input: ColumnarBatch, timeZoneId: String): ColumnarBatch = {
+    withResource(input) { _ =>
+      withResource(new GpuTimestampRebaseUtils.LazyGregorianToJulianMicrosContext(timeZoneId)) {
+        rebase =>
+          val columns = GpuColumnVector.extractColumns(input).safeMap { column =>
+            val rebased = ColumnCastUtil.deepTransform(column.getBase) {
+              case (view, _) if view.getType == DType.TIMESTAMP_MICROSECONDS &&
+                  rebase.isRebaseNeeded(view) =>
+                rebase.rebaseLegacy(view)
+            }
+            GpuColumnVector.from(rebased, column.dataType())
+              .asInstanceOf[org.apache.spark.sql.vectorized.ColumnVector]
+          }
+          new ColumnarBatch(columns, input.numRows())
+      }
+    }
+  }
+
 
   /** Resolve an ORC stripe footer timezone once at the metadata boundary. */
   private[rapids] def resolveWriterTimezone(writerTimezone: String): ZoneId = {
