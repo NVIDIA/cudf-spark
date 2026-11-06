@@ -515,21 +515,26 @@ class ShuffleCleanupManager(
 
   /** Runs the driver step of each shuffle of one dispatch, then posts the dispatch's marker. */
   private def clearAndFence(fenceId: Long, requests: Seq[ReclaimRequest]): Unit = {
-    requests.foreach { request =>
-      if (!isStopped) {
-        clearOnDriver(request)
+    try {
+      requests.foreach { request =>
+        if (!isStopped) {
+          clearOnDriver(request)
+        }
       }
-    }
-    val running = lock.synchronized {
-      if (!stopped) {
-        val now = clock()
-        fences.get(fenceId).foreach(fence => fence.clearedAtMs = Some(now))
+    } finally {
+      // runs after a fatal error in a step too, so the fence's timeout still settles what the
+      // error left unfenced
+      val running = lock.synchronized {
+        if (!stopped) {
+          val now = clock()
+          fences.get(fenceId).foreach(fence => fence.clearedAtMs = Some(now))
+        }
+        !stopped
       }
-      !stopped
-    }
-    // posted even when nothing was fenced, since the policy holds each shuffle until a marker
-    if (running) {
-      postFence(fenceId)
+      // posted even when nothing was fenced, since the policy holds each shuffle until a marker
+      if (running) {
+        postFence(fenceId)
+      }
     }
   }
 
