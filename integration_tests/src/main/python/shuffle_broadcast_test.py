@@ -489,11 +489,15 @@ def test_driverless_broadcast_independent_builds_overlap():
     _require_ucx()
     spark = get_spark_i_know_what_i_am_doing()
     startup = spark.sparkContext.getConf()
-    cores = spark.sparkContext.defaultParallelism
-    configured_max = int(startup.get('spark.cores.max', '0'))
-    if configured_max > 0:
-        cores = min(cores, configured_max)
-    slots = cores // int(startup.get('spark.task.cpus', '1'))
+    if spark.sparkContext._jsc.sc().isLocal():
+        helper = spark.sparkContext._jvm.org.apache.spark.sql.rapids.testing.ExecutorBroadcastFaultSupport
+        slots = helper.localTaskSlots(spark._jsparkSession)
+    else:
+        cores = spark.sparkContext.defaultParallelism
+        configured_max = int(startup.get('spark.cores.max', '0'))
+        if configured_max > 0:
+            cores = min(cores, configured_max)
+        slots = cores // int(startup.get('spark.task.cpus', '1'))
     required = os.environ.get('REQUIRE_DRIVERLESS_PARALLEL_BUILD_TEST') == '1'
     if slots < 2:
         reason = 'Parallel-build overlap requires at least two CPU task slots'

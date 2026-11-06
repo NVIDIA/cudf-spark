@@ -23,6 +23,7 @@ import scala.concurrent.duration._
 import org.apache.spark.{ShuffleDependency, SparkEnv, TaskContext}
 import org.apache.spark.rpc.{RpcCallContext, RpcEnv, RpcTimeout, ThreadSafeRpcEndpoint}
 import org.apache.spark.scheduler.{SparkListener, SparkListenerBlockManagerAdded, SparkListenerExecutorAdded, SparkListenerExecutorMetricsUpdate, SparkListenerTaskEnd, SparkListenerTaskStart}
+import org.apache.spark.scheduler.local.LocalSchedulerBackend
 import org.apache.spark.sql.{Dataset, Row, SparkSession}
 import org.apache.spark.sql.execution.{SparkPlan, SQLExecution}
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec
@@ -141,11 +142,19 @@ object ExecutorBroadcastFaultSupport {
     }
   }
 
-  private def awaitParallelBuildSlots(session: SparkSession): Unit = {
+  def localTaskSlots(session: SparkSession): Int = {
+    val context = session.sparkContext
+    require(context.isLocal, "Local task capacity requires a local Spark scheduler")
+    // defaultParallelism controls partition counts and can differ from scheduler capacity.
+    val cores = context.schedulerBackend.asInstanceOf[LocalSchedulerBackend].totalCores
+    cores / context.getConf.getInt("spark.task.cpus", 1)
+  }
+
+  private[testing] def awaitParallelBuildSlots(session: SparkSession): Unit = {
     val context = session.sparkContext
     val taskCores = context.getConf.getInt("spark.task.cpus", 1)
     if (context.isLocal) {
-      require(context.defaultParallelism >= 2 * taskCores,
+      require(localTaskSlots(session) >= 2,
         "Parallel build test requires two local CPU task slots")
     } else {
       val executorCores = context.getConf.getInt("spark.executor.cores", 1)
