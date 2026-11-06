@@ -298,7 +298,23 @@ class ServerSidePlannedScanSuite extends AnyFunSuite {
     }
   }
 
-  test("a zero open cost with a tiny input does not stall range splitting") {
+  test("a pushed limit keeps one whole file per partition") {
+    withSpark("spark.sql.files.maxPartitionBytes" -> "100",
+        "spark.sql.files.openCostInBytes" -> "10",
+        "spark.sql.files.minPartitionNum" -> "1") { spark =>
+      val files = Seq(ScanFile("file:/t/big.parquet", 250, "parquet"),
+        ScanFile("file:/t/a.parquet", 30, "parquet"), ScanFile("file:/t/b.parquet", 30, "parquet"))
+      val cpu = new ServerSidePlannedScan(spark, "db", "table", schema,
+        new Client(ScanPlan(files)), Array.empty, schema, Some(10))
+      val gpu = GpuServerSidePlannedScan(cpu, new ServerSidePlannedScanAccess(cpu),
+        new RapidsConf(Map.empty[String, String]))
+      val partitions = gpu.planInputPartitions().map(_.asInstanceOf[FilePartition])
+      assert(partitions.map(_.files.map(f => (f.start, f.length)).toSeq).toSeq ==
+        Seq(Seq((0L, 250L)), Seq((0L, 30L)), Seq((0L, 30L))))
+    }
+  }
+
+  test("a zero open cost with a tiny input plans without stalling") {
     // 5 bytes over 100 partitions gives Spark a split size of 0.
     withSpark("spark.sql.files.openCostInBytes" -> "0",
         "spark.sql.files.minPartitionNum" -> "100") { spark =>
@@ -308,8 +324,23 @@ class ServerSidePlannedScanSuite extends AnyFunSuite {
       val gpu = GpuServerSidePlannedScan(cpu, new ServerSidePlannedScanAccess(cpu),
         new RapidsConf(Map.empty[String, String]))
       val ranges = gpu.planInputPartitions().flatMap(_.asInstanceOf[FilePartition].files)
-      assert(ranges.map(_.length).sum == 5)
-      assert(ranges.map(_.start).sorted.toSeq == (0L until 5L))
+      assert(ranges.map(r => (r.start, r.length)).toSeq == Seq((0L, 5L)))
+    }
+  }
+
+  test("parallelism shrinks packing but not the file ranges") {
+    // The split size Spark derives is 10 bytes, far below the 100 byte maximum.
+    withSpark("spark.sql.files.maxPartitionBytes" -> "100",
+        "spark.sql.files.openCostInBytes" -> "0",
+        "spark.sql.files.minPartitionNum" -> "10") { spark =>
+      val cpu = new ServerSidePlannedScan(spark, "db", "table", schema,
+        new Client(ScanPlan(Seq(ScanFile("file:/t/big.parquet", 250, "parquet")))), Array.empty,
+        schema, None)
+      val gpu = GpuServerSidePlannedScan(cpu, new ServerSidePlannedScanAccess(cpu),
+        new RapidsConf(Map.empty[String, String]))
+      val ranges = gpu.planInputPartitions().flatMap(_.asInstanceOf[FilePartition].files)
+      assert(ranges.map(r => (r.start, r.length)).sorted.toSeq ==
+        Seq((0L, 100L), (100L, 100L), (200L, 50L)))
     }
   }
 

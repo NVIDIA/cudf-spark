@@ -50,6 +50,7 @@ private[delta42x] class ServerSidePlannedScanAccess(scan: ServerSidePlannedScan)
 
   val spark: SparkSession = field("spark").get(scan).asInstanceOf[SparkSession]
   val tableSchema: StructType = field("tableSchema").get(scan).asInstanceOf[StructType]
+  val limit: Option[Int] = field("limit").get(scan).asInstanceOf[Option[Int]]
   private val planMethod = classOf[ServerSidePlannedScan].getDeclaredMethod("scanPlan")
   planMethod.setAccessible(true)
 
@@ -141,30 +142,43 @@ private[delta42x] case class GpuServerSidePlannedScan(
   override def planInputPartitions(): Array[InputPartition] = {
     // Delta fails only the tasks that open a non-Parquet file, so keep those partitions as
     // they are and pack the Parquet files.
-    val (parquet, others) = cpuScan.planInputPartitions().partition {
-      case f: ServerSidePlannedFileInputPartition => f.fileFormat.equalsIgnoreCase("parquet")
-      case _ => false
+    val (files, others) = cpuScan.planInputPartitions().partitionMap {
+      case f: ServerSidePlannedFileInputPartition if f.fileFormat.equalsIgnoreCase("parquet") =>
+        Left(f)
+      case other => Right(other)
     }
-    val files = parquet.map(_.asInstanceOf[ServerSidePlannedFileInputPartition])
     val spark = access.spark
     val openCost = spark.sessionState.conf.filesOpenCostInBytes
-    // Spark returns 0 for small inputs when the open cost is 0, which cannot be a split step.
+    // Spark runs partition 0 first for a limit, so with one it must hold data: split ranges
+    // that hold no row group would force extra jobs. Keep one partition per file instead.
+    val limited = access.limit.isDefined
+    // Spark returns 0 for small inputs when the open cost is 0, which cannot be a packing size.
     val maxSplitBytes = math.max(1L, FilePartition.maxSplitBytes(
       spark, files.map(_.fileSizeInBytes + openCost).sum))
+    // Only packing shrinks with parallelism. Ranges stay at maxPartitionBytes because a file
+    // with few, large row groups gains nothing from smaller ones: the extra ranges hold no
+    // row group yet each still opens the file.
+    val rangeBytes = math.max(1L, spark.sessionState.conf.filesMaxPartitionBytes)
     // Parquet row groups are read by the split holding their midpoint, so ranges are safe.
     val splitFiles = files.flatMap { f =>
       val path = SparkPath.fromPathString(f.filePath)
-      if (f.fileSizeInBytes == 0) {
-        // Spark's splitter drops empty files; keep it so the reader reports it as Delta does.
-        Seq(PartitionedFile(InternalRow.empty, path, 0, 0))
+      if (f.fileSizeInBytes == 0 || limited) {
+        // Spark's splitter drops empty files; keep them so the reader reports them as Delta
+        // does. A pushed limit also keeps each file whole.
+        Seq(PartitionedFile(InternalRow.empty, path, 0, f.fileSizeInBytes))
       } else {
         val status = FileStatusWithMetadata(
           new FileStatus(f.fileSizeInBytes, false, 1, 0, 0, path.toPath))
         PartitionedFileUtilsShim.splitFiles(
-          spark, status, isSplitable = true, maxSplitBytes, InternalRow.empty)
+          spark, status, isSplitable = true, rangeBytes, InternalRow.empty)
       }
     }.sortBy(-_.length)
-    FilePartition.getFilePartitions(spark, splitFiles.toSeq, maxSplitBytes).toArray ++ others
+    val packed = if (limited) {
+      splitFiles.zipWithIndex.toSeq.map { case (f, i) => FilePartition(i, Array(f)) }
+    } else {
+      FilePartition.getFilePartitions(spark, splitFiles.toSeq, maxSplitBytes)
+    }
+    packed.toArray ++ others
   }
   override def withInputFile(): GpuScan = this
 
