@@ -662,7 +662,8 @@ class UcxReclaimPolicy(
       dispatchDecided()
     } catch {
       case NonFatal(e) =>
-        logDebug(s"The UCX shuffle reclaim policy failed to handle $event", e)
+        // the manager's own WARN carries no stack, and none when its thread disabled first
+        logWarning(s"The UCX shuffle reclaim policy failed to handle $event", e)
         disable(s"the policy failed to handle $event: $e")
     }
   }
