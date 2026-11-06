@@ -344,6 +344,9 @@ class UcxReclaimPolicy(
   private val shuffles = new mutable.HashMap[Int, ShuffleState]()
   // the shuffles left to GC for good, and Spark never reuses a shuffle id, so no bit is cleared
   private val excluded = new BitSet()
+  // the shuffles R7 settled, which later jobs list with their map stage skipped. Only a rerun of
+  // that stage, through resubmitSettled, settles one again
+  private val settledIndeterminate = new BitSet()
   // the largest task id seen, which each decision takes as its watermark
   private var maxTaskId = -1L
   // whether a job listed the map stage of each shuffle in flight since its dispatch
@@ -387,7 +390,10 @@ class UcxReclaimPolicy(
     val writes = new mutable.HashMap[Int, Int]()
     infos.foreach { info =>
       info.shuffleDepId.foreach { shuffleId =>
-        if (!excluded.get(shuffleId) && isCandidate(shuffleId)) {
+        // a held shuffle stays tracked after Spark's own cleanup drops it from the registry,
+        // since a later job can register it again and rerun its map stage
+        if (!excluded.get(shuffleId) && !settledIndeterminate.get(shuffleId) &&
+            (shuffles.contains(shuffleId) || isCandidate(shuffleId))) {
           writes(info.stageId) = shuffleId
         }
       }
@@ -714,7 +720,7 @@ class UcxReclaimPolicy(
             val ownerState = executions(owner)
             ownerState.owned += shuffle.shuffleId
             if (isIndeterminate(info)) {
-              // R7 records nothing, so a later owner after a rerun settles the shuffle again
+              settledIndeterminate.set(shuffle.shuffleId)
               skip(shuffle.shuffleId, owner, ShuffleReclaimRule.R7)
               drop(shuffle)
             } else {

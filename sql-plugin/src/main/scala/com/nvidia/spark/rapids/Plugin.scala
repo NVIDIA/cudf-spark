@@ -628,7 +628,8 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
     TrampolineUtil.addListenerToQueue(sc, shuffleCleanupListener,
       ShuffleCleanupListener.QUEUE_NAME)
     logInfo("ShuffleCleanupManager and listener initialized for UCX shuffle reclaim")
-    // keys by name, since Spark 3 has none of them
+    // keys by name, since Spark 3 has none of them. A session can still turn the classic key on
+    // later, and it defaults to on under spark.testing, which no startup check sees
     val sparkCleanupKeys = Seq(
       "spark.sql.shuffleDependency.fileCleanup.enabled",
       "spark.sql.classic.shuffleDependency.fileCleanup.enabled",
@@ -636,10 +637,11 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
       "spark.sql.thriftserver.shuffleDependency.fileCleanup.enabled")
       .filter(key => sparkConf.getOption(key).exists(_.trim.equalsIgnoreCase("true")))
     if (sparkCleanupKeys.nonEmpty) {
-      logInfo("Spark's own shuffle cleanup at the end of a SQL execution is on " +
-        s"(${sparkCleanupKeys.mkString(", ")}). It removes a shuffle's status on the driver, " +
-        "which is unsafe for a shuffle that another action shares, and the UCX shuffle reclaim " +
-        "then finds those shuffles already removed.")
+      logInfo("Spark's own shuffle cleanup at the end of a SQL execution is on for the " +
+        s"sessions these keys cover: ${sparkCleanupKeys.mkString(", ")}. It removes a shuffle's " +
+        "status on the driver, which is unsafe for a shuffle that another action shares. The " +
+        "UCX shuffle reclaim finds such a shuffle already removed, or leaves it to GC when a " +
+        "later action registers it again.")
     }
   }
 
