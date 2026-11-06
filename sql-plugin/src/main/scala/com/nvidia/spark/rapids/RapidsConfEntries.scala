@@ -316,9 +316,15 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
       "outputs. It takes effect only when spark.rapids.shuffle.mode is UCX and the RAPIDS " +
       "Shuffle Manager is configured, and never on Databricks. Any other setup logs one " +
       "warning and reclaims nothing. A shuffle whose map stage Spark marks indeterminate, such " +
-      "as the shuffle of a repartition(n) without columns, waits for Spark's own cleanup when " +
-      "it is garbage collected, as it does when this is false. So does a shuffle that another " +
-      "query shares, that a cached DataFrame depends on, or that nothing read.")
+      "as the shuffle of a repartition(n) without columns, waits for Spark's own cleanup, as " +
+      "it does when this is false. So does a shuffle that another query reads before the " +
+      "reclaim, that a cached DataFrame depends on, or that nothing read in a query that " +
+      "succeeded. A second action on the same DataFrame reruns the map stage of each " +
+      "reclaimed shuffle. A shuffle whose map side computes values that depend on row order, " +
+      "such as rand(), uuid(), a sample, or row_number() over ties, is still reclaimed. A " +
+      "rerun of such a shuffle can return a different result. A second action on the same " +
+      "DataFrame that starts while such a shuffle is reclaimed can combine two computations " +
+      "of it and return duplicated or missing rows. Keep this key off for such workloads.")
     .startupOnly()
     .booleanConf
     .createWithDefault(false)

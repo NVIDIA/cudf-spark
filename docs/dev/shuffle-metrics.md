@@ -74,8 +74,10 @@ typically not an issue as there is enough time between queries for cleanup to co
 
 When using UCX shuffle mode with `spark.rapids.shuffle.ucx.cleanupOnQueryEnd.enabled=true`, the
 plugin reclaims a GPU shuffle once the SQL execution that wrote it has ended and no task that
-reads or writes it is still running. It emits one `SparkRapidsShuffleReclaimEvent` to the Spark
-event log for each SQL execution that wrote a GPU shuffle. Setting
+reads or writes it is still running. A second action on the same DataFrame reruns the map stage
+of each reclaimed shuffle. The documentation of that key names the queries that should keep the
+reclaim off. The plugin emits one `SparkRapidsShuffleReclaimEvent` to the Spark event log for
+each SQL execution that wrote a GPU shuffle. Setting
 `spark.rapids.shuffle.ucx.cleanupOnQueryEnd.eventLog.enabled=false` turns the event off and
 leaves the reclaim as it is.
 
@@ -115,8 +117,8 @@ Event format in eventlog (JSON):
 | `executorsDeferred` | Executors that kept the execution's output under `spark.shuffle.useOldFetchProtocol=true`, because a later task wrote to the same shuffle |
 | `buffersFreed` | Buffers the executors freed |
 | `bytesFreed` | Bytes the executors freed |
-| `maxWaitMs` | Longest wait from the execution's end to a shuffle's reclaim, which running tasks cause |
-| `maxRemoveMs` | Longest time from a shuffle's reclaim until every executor reported, timed out or left |
+| `maxWaitMs` | Longest wait from the execution's end to the decision to reclaim a shuffle, which running tasks cause |
+| `maxRemoveMs` | Longest time from the decision to reclaim a shuffle to its outcome: every executor reported, timed out or left, or the reclaim withdrew the shuffle or found it removed |
 
 The shuffles in `skippedShared`, `skippedUnconsumed`, `skippedCached` and `skippedIndeterminate`
 wait for Spark's own cleanup, as they do with the reclaim off. The executor counts are summed
@@ -142,9 +144,15 @@ grep "SparkRapidsShuffleReclaimEvent" eventlog | \
   }'
 ```
 
+Both recipes in this file read an uncompressed event log. Spark 4.0 and later compress event logs
+by default, with zstd, so decompress such a log first, for example with `zstd -dc`, or set
+`spark.eventLog.compress=false`.
+
 ## Timing Considerations
 
 A shuffle's outcome waits for each executor that ran one of its tasks to free it and report. An
 executor that stays silent for 10 minutes, or that is handed the shuffle twice with no result,
 times out. An application that stops before an execution's last outcome posts no event for that
-execution.
+execution. Once the reclaim turns itself off, which one WARN line reports, it posts no event for
+an execution that had not ended by then, or that still had a shuffle waiting on its tasks or
+jobs, nor for any later execution.
