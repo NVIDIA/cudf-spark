@@ -475,6 +475,12 @@ class ShuffleCleanupManagerSuite extends AnyFunSuite with BeforeAndAfterEach {
     assertLastTargetPostsOnce(timedOut = 1)(_.now.set(11 * minuteMs))(_.manager.runTick())
   }
 
+  test("the removal of an executor that already answered leaves its request open, and the " +
+      "other target's removal posts the event once, and with the event key off nothing") {
+    assertLastTargetPostsOnce(timedOut = 0)(_.manager.executorRemoved("e1"))(
+      _.manager.executorRemoved("e2"))
+  }
+
   test("an execution's event lists a repeated R7 skip once, and each rule's skips in that " +
       "rule's list") {
     val h = new Harness(_ => true, eventLogEnabled = true)
@@ -496,8 +502,10 @@ class ShuffleCleanupManagerSuite extends AnyFunSuite with BeforeAndAfterEach {
     h.manager.skip(shuffle3, execution2, ShuffleReclaimRule.R2)
     h.manager.skip(shuffle4, execution2, ShuffleReclaimRule.R4)
     h.manager.skip(shuffle5, execution2, ShuffleReclaimRule.R5)
-    h.manager.executionClosed(execution2, 0L, Seq(shuffle3, shuffle4, shuffle5))
+    // skips settled at 0 add no cleanup time, so the event completes at the end
+    h.manager.executionClosed(execution2, 5 * minuteMs, Seq(shuffle3, shuffle4, shuffle5))
     val byRule = h.takeEvent()
+    assertResult((5 * minuteMs, 5 * minuteMs))((byRule.endedAtMs, byRule.completedAtMs))
     assertResult((execution2, 3, 0))((byRule.executionId, byRule.shuffles, byRule.reclaimed))
     assertResult((Seq(shuffle3), Seq(shuffle4), Seq(shuffle5), Seq.empty[Int]))(
       (byRule.skippedShared, byRule.skippedUnconsumed, byRule.skippedCached,
@@ -533,13 +541,46 @@ class ShuffleCleanupManagerSuite extends AnyFunSuite with BeforeAndAfterEach {
     val h = new Harness(_ => true, eventLogEnabled = true)
     h.manager.shutdown()
     h.manager.skip(shuffle2, execution1, ShuffleReclaimRule.R4)
-    h.manager.executionClosed(execution1, 0L, Seq(shuffle1, shuffle2))
+    // shuffle 2 is all that execution 1 owns, so a manager that took these calls would post
+    h.manager.executionClosed(execution1, 0L, Seq(shuffle2))
     h.dispatch(1L, decision(shuffle1, execution1, w1, "1"))
     h.manager.executorRemoved("1")
     assert(h.poll("1").isEmpty, "a stopped manager handed out a request")
     h.report("1", removed(shuffle1, w1, 1, 10L))
     assert(h.steps.isEmpty, "a stopped manager ran a driver step")
     assert(h.fences.isEmpty && h.events.isEmpty && h.others.isEmpty, "a stopped manager posted")
+    h.manager.disable("the test disabled a stopped manager")
+    assert(!h.disabled.get, "a stopped manager took a disable")
+  }
+
+  test("an interrupted shutdown restores the interrupt status of the thread that called it") {
+    val entered = new CountDownLatch(1)
+    val release = new CountDownLatch(1)
+    // the driver step keeps the manager's thread busy, so the shutdown's wait meets a live pool
+    val h = new Harness(_ => {
+      entered.countDown()
+      release.await(awaitSeconds, TimeUnit.SECONDS)
+      true
+    }, eventLogEnabled = true)
+    val interruptedAfterShutdown = new AtomicReference[Option[Boolean]](None)
+    val stopper = new Thread(() => {
+      // set before the wait, which then throws on entry
+      Thread.currentThread().interrupt()
+      h.manager.shutdown()
+      interruptedAfterShutdown.set(Some(Thread.currentThread().isInterrupted))
+    }, "shuffle-cleanup-manager-stop")
+    stopper.setDaemon(true)
+    try {
+      h.dispatch(1L, decision(shuffle1, execution1, w1, "e1"))
+      assert(entered.await(awaitSeconds, TimeUnit.SECONDS), "the driver step never started")
+      stopper.start()
+      stopper.join(TimeUnit.SECONDS.toMillis(awaitSeconds))
+      assert(!stopper.isAlive, "shutdown() never returned")
+      assertResult(Some(true), "the interrupt status after shutdown()")(
+        interruptedAfterShutdown.get)
+    } finally {
+      release.countDown()
+    }
   }
 
   test("the driver plugin answers a UCX reclaim poll with a reclaim response, and a reclaim " +
@@ -828,6 +869,9 @@ class ShuffleCleanupManagerSuite extends AnyFunSuite with BeforeAndAfterEach {
     assertResult(Seq(11))(postingMinutes(timeline))
     val event = timeline.flatMap(_.posted).head
     assertResult((1, 1))((event.executorsTimedOut, event.executorsNeverPolled))
+    // decided at 0, released at 1 and settled by the timeout at 11
+    assertResult((0L, 11 * minuteMs, 0L, 11 * minuteMs))(
+      (event.endedAtMs, event.completedAtMs, event.maxWaitMs, event.maxRemoveMs))
   }
 
   test("a handed target times out as polled, no result after 10 silent minutes, and its late " +
@@ -858,6 +902,9 @@ class ShuffleCleanupManagerSuite extends AnyFunSuite with BeforeAndAfterEach {
     val event = timeline.flatMap(_.posted).head
     assertResult((1, 0, 7L, 700L))((event.executorsTimedOut, event.executorsNeverPolled,
       event.buffersFreed, event.bytesFreed))
+    // shuffle 2 was decided at 11, and shuffle 1's timeout at 10 is the longest removal
+    assertResult((13 * minuteMs, 11 * minuteMs, 10 * minuteMs))(
+      (event.completedAtMs, event.maxWaitMs, event.maxRemoveMs))
   }
 
   test("a target released while its executor is busy reaches it at its next poll without " +
