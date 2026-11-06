@@ -26,7 +26,7 @@ import scala.collection.mutable.ListBuffer
 import ai.rapids.cudf._
 import ai.rapids.cudf.ParquetWriterOptions.StatisticsFrequency
 import com.nvidia.spark.GpuCachedBatchSerializer
-import com.nvidia.spark.rapids.{ByteBufferInputStream, ColumnCastUtil, DecimalUtil, GpuColumnVector, GpuRowToColumnConverter, GpuSemaphore, RapidsConf, RowToColumnarIterator, SchemaUtils, TargetSize}
+import com.nvidia.spark.rapids.{ByteBufferInputStream, ColumnCastUtil, DecimalUtil, GpuColumnVector, GpuRowToColumnConverter, GpuSemaphore, RapidsConf, RowToColumnarIterator, SchemaUtils, TargetSize, VersionUtils}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.GpuColumnVector.GpuColumnarBatchBuilder
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
@@ -58,6 +58,7 @@ import org.apache.spark.sql.execution.datasources.parquet.{ParquetReadSupport, P
 import org.apache.spark.sql.execution.datasources.parquet.rapids.ParquetRecordMaterializer
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.PCBSSchemaHelper
+import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.storage.StorageLevel
@@ -213,7 +214,14 @@ private case class CloseableColumnBatchIterator(iter: Iterator[ColumnarBatch]) e
  */
 class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
 
-  override def supportsColumnarInput(schema: Seq[Attribute]): Boolean = true
+  override def supportsColumnarInput(schema: Seq[Attribute]): Boolean = {
+    // Spark 4 and Databricks mark cached AQE plans columnar and can insert a row-to-columnar
+    // transition. Neither Spark's nor the GPU converter supports UDTs, so use the row cache path.
+    (!VersionUtils.isSpark400OrLater && !VersionUtils.isDataBricks) || !schema.exists { attribute =>
+      TrampolineUtil.dataTypeExistsRecursively(attribute.dataType,
+        _.isInstanceOf[UserDefinedType[_]])
+    }
+  }
 
   override def supportsColumnarOutput(schema: StructType): Boolean = schema.fields.forall { f =>
     // only check spark b/c if we are on the GPU then we will be calling the gpu method regardless

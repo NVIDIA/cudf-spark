@@ -453,9 +453,13 @@ def test_cache_map_and_array(data_gen, enable_vectorized):
 
     assert_gpu_and_cpu_are_equal_collect(helper)
 
-@allow_non_gpu('InMemoryTableScanExec')
+# UDT-bearing input operators and cached scans intentionally stay on the CPU.
+@allow_non_gpu('InMemoryTableScanExec', 'ShuffleExchangeExec', 'ProjectExec',
+    'SortAggregateExec', 'SortExec')
 @pytest.mark.parametrize('aqe_enabled', ['true', 'false'])
-def test_cache_udt(aqe_enabled):
+@pytest.mark.parametrize('cache_input', ['rows', 'repartition', 'aggregate'])
+@pytest.mark.parametrize('udt_column', ['all', 'mllib_v', 'ml_v', 'ml_array', 'ml_struct', 'ml_map'])
+def test_cache_udt(aqe_enabled, cache_input, udt_column):
     schema = StructType([
         StructField('mllib_v', mllib.VectorUDT(), nullable=True),
         StructField('ml_v', ml.VectorUDT(), nullable=True),
@@ -474,23 +478,40 @@ def test_cache_udt(aqe_enabled):
         (mllib.SparseVector(1, [0, ], [1, ]), ml.SparseVector(1, [0, ], [1, ]),
             [ml.SparseVector(1, [0, ], [1, ])], (ml.SparseVector(1, [0, ], [1, ]),),
             {'sparse': ml.SparseVector(1, [0, ], [1, ])},
-            Decimal('-12.34'), Decimal('-9876543210.12'))]
+            Decimal('-12.34'), Decimal('-9876543210.12')),
+        (None, None, [None], (None,), {'null': None}, Decimal('0.00'), Decimal('0.00'))]
 
     def fun(spark):
         df = spark.createDataFrame(spark.sparkContext.parallelize(values), schema)
+        if udt_column != 'all':
+            # Check each nested shape independently so a top-level UDT cannot mask a missing
+            # recursive schema check. Keep decimal columns alongside each UDT.
+            df = df.select(udt_column, 'decimal32', 'decimal64')
+        if cache_input == 'repartition':
+            df = df.repartition(2)
+        elif cache_input == 'aggregate':
+            columns = df.columns
+            df = df.withColumn('key', f.monotonically_increasing_id()).groupBy('key').agg(
+                *[f.first(c).alias(c) for c in columns]).select(*columns)
         df.cache().count()
         return df
 
     def canonicalize(cpu_result, gpu_result):
         # The generic result comparator does not handle vector UDT values. Check each round trip
         # against the source first, then give it stable strings for its final CPU/GPU comparison.
-        assert cpu_result == values, "CPU result not equal to source values"
-        assert gpu_result == values, "GPU result not equal to source values"
+        expected = values if udt_column == 'all' else [
+            (row[schema.fieldNames().index(udt_column)], row[-2], row[-1]) for row in values]
+        # Shuffle output order is unspecified; compare the complete values in a stable order.
+        expected = sorted(expected, key=lambda row: row[-2])
+        cpu_result = sorted(cpu_result, key=lambda row: row[-2])
+        gpu_result = sorted(gpu_result, key=lambda row: row[-2])
+        assert cpu_result == expected, "CPU result not equal to source values"
+        assert gpu_result == expected, "GPU result not equal to source values"
         return [repr(row) for row in cpu_result], [repr(row) for row in gpu_result]
 
     assert_gpu_fallback_collect(
         fun, 'InMemoryTableScanExec',
-        conf={'spark.sql.adaptive.enabled': aqe_enabled},
+        conf={'spark.sql.adaptive.enabled': aqe_enabled, 'spark.sql.shuffle.partitions': '2'},
         result_canonicalize_func_before_compare=canonicalize)
 
 @pytest.mark.parametrize('enable_vectorized_conf', enable_vectorized_confs, ids=idfn)
