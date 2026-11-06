@@ -88,4 +88,10 @@ class UcxReclaimAdmissionSuite extends AnyFunSuite {
     val shuffleOff = base.clone.set("spark.rapids.shuffle.enabled", "false")
     assertResult(None)(refusal(shuffleOff, isDataBricks = false))
   }
+
+  test("explainOnly mode refuses, with a reason that names spark.rapids.sql.mode") {
+    // no GPU is set up in this mode, so the endpoint's poll thread could not start
+    val explainOnly = base.clone.set("spark.rapids.sql.mode", "explainOnly")
+    assertRefusalNames(refusal(explainOnly, isDataBricks = false), "spark.rapids.sql.mode")
+  }
 }

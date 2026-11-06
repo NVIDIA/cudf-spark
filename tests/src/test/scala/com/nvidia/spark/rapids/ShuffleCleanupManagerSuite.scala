@@ -28,9 +28,12 @@ import com.nvidia.spark.rapids.ShuffleCleanupManager.{DRIVER_STEP_WARN_PREFIX,
   FAILED_WARN_PREFIX, FENCE_TIMEOUT_WARN_PREFIX, IGNORED_RESULT_INFO_PREFIX,
   TIMEOUT_WARN_PREFIX}
 import com.nvidia.spark.rapids.ShuffleReclaimOutcome.{DEFERRED, FAILED, REMOVED}
+import org.mockito.Mockito.when
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
+import org.scalatestplus.mockito.MockitoSugar.mock
 
+import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.scheduler.SparkListenerEvent
 import org.apache.spark.sql.rapids.{RapidsShuffleReclaimFence, ShuffleCleanupListener,
   ShuffleReclaimDecision, ShuffleReclaimHandoff, ShuffleReclaimRule}
@@ -551,6 +554,55 @@ class ShuffleCleanupManagerSuite extends AnyFunSuite with BeforeAndAfterEach {
     assert(h.fences.isEmpty && h.events.isEmpty && h.others.isEmpty, "a stopped manager posted")
     h.manager.disable("the test disabled a stopped manager")
     assert(!h.disabled.get, "a stopped manager took a disable")
+  }
+
+  test("a driver step that throws a fatal error still posts its dispatch's marker, and the " +
+      "fence's timeout settles the requests it left unfenced") {
+    val h = new Harness(shuffleId =>
+      if (shuffleId == shuffle1) {
+        throw new LinkageError("injected fatal driver step failure")
+      } else {
+        true
+      }, eventLogEnabled = true)
+    h.manager.executionClosed(execution1, 0L, Seq(shuffle1, shuffle2))
+    h.dispatch(1L, decision(shuffle1, execution1, w1, "e1"),
+      decision(shuffle2, execution1, w1, "e1"))
+    h.awaitFence(1L)
+    // the error ended the dispatch's steps, so shuffle 2 never had one
+    assertResult(List(shuffle1))(h.steps.asScala.toList)
+    h.manager.applyRelease(1L, shuffle1)
+    h.manager.applyRelease(1L, shuffle2)
+    assert(h.poll("e1").isEmpty, "a request with no finished driver step reached its executor")
+    h.now.set(tenMinutesMs + 1L)
+    val lines = capture(h.manager.runTick())
+    val warned = lines.filter(_.startsWith(FENCE_TIMEOUT_WARN_PREFIX))
+    assertResult(1, lines.mkString("\n"))(warned.length)
+    assert(names(warned.head, shuffle1, shuffle2), warned.head)
+    val event = h.takeEvent()
+    assertResult((execution1, Seq(shuffle1, shuffle2), 0))(
+      (event.executionId, event.skippedShared.sorted, event.reclaimed))
+  }
+
+  test("init replaces a manager that another SparkContext built, as when that context's plugin " +
+      "init failed before Spark could shut the plugin down") {
+    def context(): SparkContext = {
+      val sc = mock[SparkContext]
+      when(sc.getConf).thenReturn(new SparkConf(false))
+      sc
+    }
+    val first = context()
+    val second = context()
+    try {
+      ShuffleCleanupManager.init(first)
+      val firstManager = ShuffleCleanupManager.get
+      ShuffleCleanupManager.init(first)
+      assert(ShuffleCleanupManager.get eq firstManager, "init replaced its own context's manager")
+      ShuffleCleanupManager.init(second)
+      assert(ShuffleCleanupManager.get ne firstManager,
+        "the next SparkContext got the manager of a context that never shut it down")
+    } finally {
+      ShuffleCleanupManager.shutdown()
+    }
   }
 
   test("an interrupted shutdown restores the interrupt status of the thread that called it") {

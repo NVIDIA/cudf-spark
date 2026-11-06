@@ -224,6 +224,24 @@ class UcxReclaimPolicySuite extends AnyFunSuite {
     assert(f.sink.calls.contains(ExecutorRemoved("e2")), f.sink.calls)
   }
 
+  test("a task start that Spark posts after its executor's removal does not make the removed " +
+      "executor a target") {
+    val f = new Fixture(Set(0))
+    val stage11 = submitResultStage(f)
+    // the driver endpoint posts the removal while the scheduler's event loop still holds the
+    // task's start
+    f.policy.onExecutorRemoved(executorRemoved("e2"))
+    f.policy.onTaskStart(taskStart(11, 0, 2, "e2"))
+    f.policy.onTaskEnd(taskEnd(11, 0, 2, "e2", taskKilled))
+    f.policy.onTaskStart(taskStart(11, 0, 3, "e1"))
+    f.policy.onTaskEnd(taskEnd(11, 0, 3, "e1", Success))
+    f.policy.onStageCompleted(stageCompleted(stage11))
+    f.policy.onJobEnd(jobEnd(0, JobSucceeded))
+    f.policy.onExecutionEnd(1)
+    assertResult(Seq(Seq(ShuffleReclaimDecision(0, 1L, 3L, Set("e1")))), f.sink.calls)(
+      f.sink.dispatches)
+  }
+
   test("a stage attempt that completes twice leaves no live attempt, so its shuffle is " +
       "dispatched") {
     val f = new Fixture(Set(0))

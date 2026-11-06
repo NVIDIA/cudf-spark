@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids
 
 import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, ScheduledThreadPoolExecutor,
   TimeUnit}
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong, AtomicReference}
 
 import scala.collection.JavaConverters._
 
@@ -58,8 +58,13 @@ class ShuffleCleanupEndpointSuite extends AnyFunSuite {
   private val twoRequests = RapidsShuffleReclaimResponseMsg(
     Array(ShuffleReclaimRequest(7, watermark), ShuffleReclaimRequest(8, watermark)))
 
-  /** One daemon poll thread, whose shutdown counts down `shutdownCalled`. */
-  private def newScheduler(shutdownCalled: CountDownLatch): ScheduledThreadPoolExecutor = {
+  /**
+   * One daemon poll thread, whose shutdown counts down `shutdownCalled`, and which runs
+   * `afterPoll` on itself after each poll.
+   */
+  private def newScheduler(
+      shutdownCalled: CountDownLatch,
+      afterPoll: () => Unit = () => ()): ScheduledThreadPoolExecutor = {
     val threads = new ThreadFactoryBuilder()
       .setNameFormat("shuffle-cleanup-endpoint-test")
       .setDaemon(true)
@@ -68,6 +73,11 @@ class ShuffleCleanupEndpointSuite extends AnyFunSuite {
       override def shutdown(): Unit = {
         super.shutdown()
         shutdownCalled.countDown()
+      }
+
+      override def afterExecute(r: Runnable, t: Throwable): Unit = {
+        super.afterExecute(r, t)
+        afterPoll()
       }
     }
   }
@@ -209,5 +219,76 @@ class ShuffleCleanupEndpointSuite extends AnyFunSuite {
       scheduler.awaitTermination(awaitSeconds, TimeUnit.SECONDS)
       scheduler.shutdownNow()
     }
+  }
+
+  test("a poll that close() interrupts while it waits for the driver keeps the poll thread's " +
+      "interrupt status, and logs no warning") {
+    val asked = new CountDownLatch(1)
+    val reply = new CountDownLatch(1)
+    val shutdownCalled = new CountDownLatch(1)
+    val interruptedAfterPoll = new AtomicReference[Option[Boolean]](None)
+    val ctx = mock[PluginContext]
+    when(ctx.executorID()).thenReturn("1")
+    // the poll waits for the driver's reply, as an ask does, and an interrupt ends the wait
+    doAnswer(_ => {
+      asked.countDown()
+      reply.await(awaitSeconds, TimeUnit.SECONDS)
+      RapidsShuffleReclaimResponseMsg(Array.empty)
+    }).when(ctx).ask(any[AnyRef]())
+    val scheduler = newScheduler(shutdownCalled, () =>
+      interruptedAfterPoll.compareAndSet(None, Some(Thread.currentThread().isInterrupted)))
+    val endpoint = new ShuffleCleanupEndpoint(ctx, pollIntervalMs = 10,
+      newReclaimer = ucxReclaimer(_ => ()), executorService = scheduler)
+    val closer = new Thread(() => endpoint.close(), "shuffle-cleanup-endpoint-close")
+    closer.setDaemon(true)
+    val lines = LogCaptureUtils.captureLogsFrom(Seq(classOf[ShuffleCleanupEndpoint].getName)) {
+      try {
+        endpoint.start()
+        assert(asked.await(awaitSeconds, TimeUnit.SECONDS), "the poll never asked the driver")
+        closer.start()
+        assert(shutdownCalled.await(awaitSeconds, TimeUnit.SECONDS),
+          "close() never stopped the polls")
+        // close() then waits for the poll, and an interrupt makes it interrupt the poll thread
+        closer.interrupt()
+        closer.join(TimeUnit.SECONDS.toMillis(awaitSeconds))
+        assert(!closer.isAlive, "close() never returned")
+        assert(scheduler.awaitTermination(awaitSeconds, TimeUnit.SECONDS),
+          "the poll thread never ended")
+      } finally {
+        reply.countDown()
+        endpoint.close()
+        scheduler.shutdownNow()
+      }
+    }
+    assertResult(Some(true), "the poll thread's interrupt status after its poll")(
+      interruptedAfterPoll.get)
+    assert(!lines.exists(_.contains("Error during shuffle cleanup poll")), lines.mkString("\n"))
+  }
+
+  test("a poll that throws a fatal error logs it once") {
+    val polled = new CountDownLatch(1)
+    val ctx = mockContext(RapidsShuffleReclaimResponseMsg(Array.empty),
+      new ConcurrentLinkedQueue[AnyRef]())
+    val failing: (PluginContext, () => Boolean) => CatalogReclaimer = (_, _) =>
+      new CatalogReclaimer {
+        override def poll(executorId: String, ask: AnyRef => AnyRef): Unit =
+          throw new LinkageError("injected fatal poll failure")
+
+        override def finalStep: Option[() => Unit] = None
+      }
+    val scheduler = newScheduler(new CountDownLatch(1), () => polled.countDown())
+    val endpoint = new ShuffleCleanupEndpoint(ctx, pollIntervalMs = 10, newReclaimer = failing,
+      executorService = scheduler)
+    val lines = LogCaptureUtils.captureLogsFrom(Seq(classOf[ShuffleCleanupEndpoint].getName)) {
+      try {
+        endpoint.start()
+        assert(polled.await(awaitSeconds, TimeUnit.SECONDS), "the endpoint never polled")
+      } finally {
+        endpoint.close()
+        scheduler.shutdownNow()
+      }
+    }
+    assertResult(1, lines.mkString("\n"))(
+      lines.count(_.contains("stops after a fatal error")))
   }
 }
