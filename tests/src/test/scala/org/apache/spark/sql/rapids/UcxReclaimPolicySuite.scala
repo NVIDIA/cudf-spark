@@ -263,6 +263,54 @@ class UcxReclaimPolicySuite extends AnyFunSuite {
       rddInfo(29, DeterministicLevel.INDETERMINATE)))
     assertResult(Seq(Seq(0)), f.sink.calls)(f.sink.dispatches.map(_.map(_.shuffleId)))
   }
+
+  test("a held shuffle that Spark's own cleanup drops, and a later job registers again, is " +
+      "left to GC, and no decision covers that job's writers") {
+    val candidates = scala.collection.mutable.Set(0)
+    val f = new Fixture(candidates)
+    val stage11 = submitResultStage(f)
+    // task 2 of the reading stage outlives execution 1, so R6 holds shuffle 0 at its end
+    f.policy.onTaskStart(taskStart(11, 0, 2, "e1"))
+    f.policy.onStageCompleted(stageFailed(stage11))
+    f.policy.onJobEnd(jobEnd(0, jobFailed))
+    f.policy.onExecutionEnd(1)
+    // Spark's cleanup unregisters shuffle 0, and the registry loses it
+    candidates -= 0
+    // execution 2 runs the same plan, registers shuffle 0 again and reruns its map stage
+    val stage12 = mapStage(12, shuffleId = 0, parentIds = Nil)
+    val stage13 = resultStage(13, parentIds = Seq(12))
+    f.policy.onExecutionStart(2)
+    f.policy.onJobStart(jobStart(1, 2, Seq(stage12, stage13)))
+    f.policy.onStageSubmitted(stageSubmitted(stage12, 2))
+    f.policy.onTaskStart(taskStart(12, 0, 3, "e1"))
+    f.policy.onTaskEnd(taskEnd(11, 0, 2, "e1", taskKilled))
+    assert(f.sink.dispatches.isEmpty, f.sink.calls)
+    assertResult(Seq(Skip(0, 1L, ShuffleReclaimRule.R2)), f.sink.calls)(f.sink.skips)
+  }
+
+  test("an indeterminate shuffle that a later job of its execution reads leaves no state") {
+    val f = new Fixture(Set(0))
+    val stage10 = mapStage(10, 0, Nil, Seq(rddInfo(10, DeterministicLevel.INDETERMINATE)))
+    val stage11 = resultStage(11, parentIds = Seq(10))
+    f.policy.onExecutionStart(1)
+    f.policy.onJobStart(jobStart(0, 1, Seq(stage10)))
+    f.policy.onStageSubmitted(stageSubmitted(stage10, 1))
+    f.policy.onTaskStart(taskStart(10, 0, 1, "e1"))
+    f.policy.onTaskEnd(taskEnd(10, 0, 1, "e1", Success))
+    f.policy.onStageCompleted(stageCompleted(stage10))
+    f.policy.onJobEnd(jobEnd(0, JobSucceeded))
+    // AQE's next job lists the map stage again, skipped, and submits the stage that reads it
+    f.policy.onJobStart(jobStart(1, 1, Seq(stage10, stage11)))
+    f.policy.onStageSubmitted(stageSubmitted(stage11, 1))
+    f.policy.onTaskStart(taskStart(11, 0, 2, "e1"))
+    f.policy.onTaskEnd(taskEnd(11, 0, 2, "e1", Success))
+    f.policy.onStageCompleted(stageCompleted(stage11))
+    f.policy.onJobEnd(jobEnd(1, JobSucceeded))
+    f.policy.onExecutionEnd(1)
+    assertResult(Seq(Skip(0, 1L, ShuffleReclaimRule.R7)), f.sink.calls)(f.sink.skips)
+    val held = f.policy.heldState
+    assert(held.stages.isEmpty && held.shuffles.isEmpty, held)
+  }
 }
 
 object UcxReclaimPolicySuite {

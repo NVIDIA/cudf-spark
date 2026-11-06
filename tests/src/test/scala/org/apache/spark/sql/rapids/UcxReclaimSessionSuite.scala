@@ -595,10 +595,14 @@ class UcxReclaimSessionSuite extends AnyFunSuite with BeforeAndAfterEach {
     assert(t.calls.decisionsFor(s).isEmpty, t.calls.all)
   }
 
-  test("indeterminate map stages wait for GC, and the determinate shuffle before them is " +
-      "reclaimed") {
+  /**
+   * Collects a query twice whose round-robin repartition makes two map stages indeterminate,
+   * after a determinate one. Later jobs list the indeterminate stages again, skipped, and none of
+   * them leaves state in the tracker.
+   */
+  private def assertIndeterminateStagesWaitForGc(aqe: Boolean): Unit = {
     // with both checksum keys off, a 4.2 CPU exchange carries no retry flag, as GPU ones never do
-    val t = startTracker("local[2]", AqeKey -> "false", PartitionsKey -> "4",
+    val t = startTracker("local[2]", AqeKey -> aqe.toString, PartitionsKey -> "4",
       "spark.sql.execution.sortBeforeRepartition" -> "false",
       RowBasedShuffleChecksumConf.ChecksumEnabledKey -> "false",
       RowBasedShuffleChecksumConf.ChecksumMismatchFullRetryKey -> "false")
@@ -608,6 +612,9 @@ class UcxReclaimSessionSuite extends AnyFunSuite with BeforeAndAfterEach {
     val firstRows = tagged("first")(rowsOf(df))
     settle(t)
     val e = executionOf(t, "first")
+    if (aqe) {
+      assertPlannedAdaptively(t, e)
+    }
     val owned = ownedBy(t, e)
     assertResult(3, "shuffles the execution owns")(owned.size)
     val levels =
@@ -642,6 +649,19 @@ class UcxReclaimSessionSuite extends AnyFunSuite with BeforeAndAfterEach {
       case c: Closed => c.executionId == again
       case _ => false
     }, t.calls.all)
+    val held = t.policy.heldState
+    assert(held.stages.isEmpty && held.shuffles.isEmpty, held)
+  }
+
+  test("indeterminate map stages wait for GC, and the determinate shuffle before them is " +
+      "reclaimed") {
+    assertIndeterminateStagesWaitForGc(aqe = false)
+  }
+
+  test("indeterminate map stages wait for GC, and the determinate shuffle before them is " +
+      "reclaimed, with AQE on") {
+    // each AQE stage is a job of its own, and the next one lists the stages before it again
+    assertIndeterminateStagesWaitForGc(aqe = true)
   }
 
   test("an AQE join with an empty side reclaims the side it reads only after its execution and " +
