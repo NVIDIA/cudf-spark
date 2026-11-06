@@ -520,7 +520,12 @@ class GpuDynamicPartitionDataSingleWriter(
    */
   private def splitBatchByKeyAndClose(batch: ColumnarBatch): Array[SplitPack] = {
     if (hasFloatingPartition) {
-      return splitFloatingPartitionBatchAndClose(batch)
+      val input = closeOnExcept(batch) { _ =>
+        SpillableColumnarBatch(batch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+      }
+      return withRetryNoSplit(input) { scb =>
+        splitFloatingPartitionBatchAndClose(scb.getColumnarBatch())
+      }
     }
     val (keysCb, dataCb) = withResource(batch) { _ =>
       closeOnExcept(getDataColumnsAsBatch(batch)) { data =>

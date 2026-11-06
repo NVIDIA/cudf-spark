@@ -49,7 +49,7 @@ import org.apache.spark.sql.execution.datasources.WriteTaskStats
 import org.apache.spark.sql.rapids.GpuFileFormatWriter.GpuConcurrentOutputWriterSpec
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
-import org.apache.spark.sql.types.{DoubleType, FloatType, IntegerType, StringType, StructField, StructType}
+import org.apache.spark.sql.types.{DataType, DoubleType, FloatType, IntegerType, StringType, StructField, StructType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
 class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
@@ -664,6 +664,56 @@ class GpuFileFormatDataWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
   }
 
   Seq(FloatType, DoubleType).foreach { dataType =>
+    test(s"dynamic partition data writer retries a $dataType partition split") {
+      resetMocks()
+      val batch = withResource(ai.rapids.cudf.ColumnVector.fromDoubles(
+          -0.0d, -0.0d, 0.0d, 0.0d)) { doubles =>
+        val dtype = GpuColumnVector.getNonNestedRapidsType(dataType)
+        closeOnExcept(GpuColumnVector.from(doubles.castTo(dtype), dataType)) { parts =>
+          val data = GpuColumnVector.from(
+            ai.rapids.cudf.ColumnVector.fromInts(10, 11, 20, 21), IntegerType)
+          new ColumnarBatch(Array[ColumnVector](parts, data), 4)
+        }
+      }
+      withColumnarBatchesVerifyClosed(Seq(batch)) {
+        when(mockJobDescription.customPartitionLocations)
+          .thenReturn(Map.empty[TablePartitionSpec, String])
+        var attempts = 0
+        val writer = spy(new GpuDynamicPartitionDataSingleWriter(
+            mockJobDescription, mockTaskAttemptContext, mockCommitter, None) {
+          override protected def copyToHostAsBatch(
+              input: Table, colTypes: Array[DataType]): ColumnarBatch = {
+            attempts += 1
+            if (attempts == 1) {
+              throw new GpuRetryOOM("retry after floating partition grouping")
+            }
+            super.copyToHostAsBatch(input, colTypes)
+          }
+        })
+        var writtenRows = Seq.empty[Int]
+        doAnswer { invocation =>
+          val input = invocation.getArgument[SpillableColumnarBatch](0)
+          withResource(input.getColumnarBatch()) { cb =>
+            withResource(GpuColumnVector.extractBases(cb).head.copyToHost()) { host =>
+              writtenRows ++= (0 until cb.numRows()).map(i => host.getInt(i))
+            }
+          }
+          invocation.callRealMethod()
+        }.when(mockOutputWriter).writeSpillableAndClose(any())
+        try {
+          writer.writeWithIterator(Iterator(batch))
+          writer.commit()
+          assert(attempts == 2)
+          assert(writtenRows.sorted == Seq(10, 11, 20, 21))
+          verify(writer, times(2)).newWriter(any(), any(), any())
+          verify(mockOutputWriter, times(2)).writeSpillableAndClose(any())
+          verify(mockOutputWriter, times(2)).close()
+        } finally {
+          writer.releaseResources()
+        }
+      }
+    }
+
     test(s"dynamic partition data writer with an empty $dataType batch") {
       resetMocks()
       val schema = StructType(Seq(StructField("part", dataType),
