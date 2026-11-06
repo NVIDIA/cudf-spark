@@ -875,6 +875,7 @@ abstract class SparkPlanMeta[INPUT <: SparkPlan](plan: INPUT,
   /**
    * If this is enabled to be converted to a GPU version convert it and return the result, else
    * do what is needed to possibly convert the rest of the plan.
+   * Plan conversion callers should use this entry point so replacement nodes preserve Spark tags.
    */
   final def convertIfNeeded(): SparkPlan = {
     if (shouldThisBeRemoved) {
@@ -886,7 +887,11 @@ abstract class SparkPlanMeta[INPUT <: SparkPlan](plan: INPUT,
       childPlans.head.convertIfNeeded()
     } else {
       if (canThisBeReplaced) {
-        convertToGpu()
+        val converted = convertToGpu()
+        // Match Spark's tree rewrites: carry tags to a fresh replacement, while preserving
+        // the tags of an existing node when conversion returns one (for example, a child).
+        converted.copyTagsFrom(wrapped)
+        converted
       } else {
         convertToCpu()
       }

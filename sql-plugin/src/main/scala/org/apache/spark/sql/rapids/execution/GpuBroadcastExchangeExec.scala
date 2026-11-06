@@ -393,10 +393,8 @@ class GpuBroadcastMeta(
   }
 
   override def convertToGpu(): GpuExec = {
-    val gpuBroadcast = GpuBroadcastExchangeExec(exchange.mode, childPlans.head.convertIfNeeded())(
+    GpuBroadcastExchangeExec(exchange.mode, childPlans.head.convertIfNeeded())(
       exchange.canonicalized.asInstanceOf[BroadcastExchangeExec])
-    GpuTransitionOverrides.copyAqeQueryStageExchangeTag(exchange, gpuBroadcast)
-    gpuBroadcast
   }
 }
 
