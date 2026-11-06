@@ -24,7 +24,7 @@ from asserts import (assert_cpu_and_gpu_are_equal_collect_with_capture, assert_m
                      collect_plan_nodes, plan_metric)
 from marks import allow_non_gpu, ignore_order, shuffle_test
 from spark_init_internal import get_spark_i_know_what_i_am_doing
-from spark_session import with_cpu_session, with_gpu_session
+from spark_session import is_spark_400_or_later, with_cpu_session, with_gpu_session
 
 
 pytestmark = [shuffle_test]
@@ -79,7 +79,9 @@ def _assert_published_driver_value(metric):
     gateway = spark.sparkContext._gateway
     values = gateway.new_array(spark._jvm.long, 1)
     values[0] = metric.value()
-    expected = spark._jvm.org.apache.spark.sql.execution.metric.SQLMetrics.stringValue(
+    formatter = (spark._jvm.org.apache.spark.util.MetricUtils if is_spark_400_or_later()
+                 else spark._jvm.org.apache.spark.sql.execution.metric.SQLMetrics)
+    expected = formatter.stringValue(
         metric.metricType(), values, gateway.new_array(spark._jvm.long, 0))
     assert _published_values(metric) == [expected]
 
@@ -766,6 +768,8 @@ def test_driverless_broadcast_nested_build_retains_standard_path(aqe):
 
 
 @ignore_order(local=True)
+# Spark 4 AQE can replace a join with no matching keys by an empty result.
+@allow_non_gpu('EmptyRelationExec')
 @pytest.mark.parametrize('aqe', ['false', 'true'])
 @pytest.mark.parametrize('join_type', ['inner', 'left_outer', 'left_semi', 'left_anti'])
 def test_driverless_broadcast_all_null_build_preserves_results(aqe, join_type):
