@@ -49,41 +49,7 @@ private[rapids] trait RapidsConfResourceEntries {
     .startupOnly()
     .internal()
     .integerConf
-    .checkValue(_ > 0, "Pageable pool pre-touch threads must be positive")
     .createWithDefault(16)
-
-  val PAGEABLE_POOL_NUMA_BIND = conf("spark.rapids.memory.pageablePool.numaBind")
-    .doc("Bind the pageable pool to the GPU-local NUMA node when available. Binding is " +
-      "best-effort and is disabled by default.")
-    .startupOnly()
-    .internal()
-    .booleanConf
-    .createWithDefault(false)
-
-  val PAGEABLE_POOL_THP_DENY = conf("spark.rapids.memory.pageablePool.thpDeny")
-    .doc("Request that transparent huge pages not be used for the pageable pool.")
-    .startupOnly()
-    .internal()
-    .booleanConf
-    .createWithDefault(false)
-
-  val PAGEABLE_POOL_ALLOCATION_STRATEGY =
-    conf("spark.rapids.memory.pageablePool.allocationStrategy")
-      .doc("Pageable pool allocation strategy: list (default), indexed, or arena. Arena " +
-        "partitions capacity and may fall back to raw memory for requests larger than one arena.")
-      .startupOnly()
-      .internal()
-      .stringConf
-      .checkValues(Set("list", "indexed", "arena"))
-      .createWithDefault("list")
-
-  val PAGEABLE_POOL_ARENA_COUNT = conf("spark.rapids.memory.pageablePool.arenaCount")
-    .doc("Number of shards when the pageable pool allocation strategy is arena.")
-    .startupOnly()
-    .internal()
-    .integerConf
-    .checkValue(_ > 0, "Pageable pool arena count must be positive")
-    .createWithDefault(8)
 
   val PINNED_POOL_SET_CUIO_DEFAULT = conf("spark.rapids.memory.pinnedPool.setCuioDefault")
     .doc("If set to true, the pinned pool configured for the plugin will be shared with " +

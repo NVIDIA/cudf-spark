@@ -513,15 +513,7 @@ object GpuDeviceManager extends Logging {
     if (!PageableMemoryPool.isInitialized && pageableSize > 0) {
       logInfo(s"Initializing pre-touched pageable memory pool " +
         s"(${pageableSize / 1024 / 1024.0} MiB, ${conf.pageablePoolPretouchThreads} threads)")
-      val strategy = conf.pageablePoolAllocationStrategy match {
-        case "list" => PageableMemoryPool.AllocationStrategy.LIST
-        case "indexed" => PageableMemoryPool.AllocationStrategy.INDEXED
-        case "arena" => PageableMemoryPool.AllocationStrategy.ARENA
-      }
-      PageableMemoryPool.initialize(pageableSize, conf.pageablePoolPretouchThreads,
-        conf.pageablePoolNumaBind, gpuId, strategy, conf.pageablePoolArenaCount,
-        conf.pageablePoolThpDeny ||
-          "deny" == System.getenv("SPARK_RAPIDS_PAGEABLE_POOL_THP"))
+      PageableMemoryPool.initialize(pageableSize, conf.pageablePoolPretouchThreads)
     }
     // Host memory limits must be set after the pinned memory pool is initialized
     HostAlloc.initialize(nonPinnedLimit)

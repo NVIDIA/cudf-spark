@@ -309,24 +309,6 @@ class GpuDeviceManagerSuite extends AnyFunSuite with BeforeAndAfter {
     assertResult(offHeapLimit - totalOverhead - pinnedSize - pageableSize)(nonPinnedSize)
   }
 
-  test("pageable pool allocator options retain the list defaults") {
-    val defaults = new RapidsConf(Map.empty[String, String])
-    assertResult("list")(defaults.pageablePoolAllocationStrategy)
-    assertResult(8)(defaults.pageablePoolArenaCount)
-    assertResult(false)(defaults.pageablePoolNumaBind)
-    assertResult(false)(defaults.pageablePoolThpDeny)
-
-    val configured = new RapidsConf(Map(
-      RapidsConf.PAGEABLE_POOL_ALLOCATION_STRATEGY.key -> "arena",
-      RapidsConf.PAGEABLE_POOL_ARENA_COUNT.key -> "4",
-      RapidsConf.PAGEABLE_POOL_NUMA_BIND.key -> "true",
-      RapidsConf.PAGEABLE_POOL_THP_DENY.key -> "true"))
-    assertResult("arena")(configured.pageablePoolAllocationStrategy)
-    assertResult(4)(configured.pageablePoolArenaCount)
-    assertResult(true)(configured.pageablePoolNumaBind)
-    assertResult(true)(configured.pageablePoolThpDeny)
-  }
-
   test("pageable pool is capped by remaining off-heap limit") {
     val deviceCount = 1
     val offHeapLimit = toBytes("4g")
