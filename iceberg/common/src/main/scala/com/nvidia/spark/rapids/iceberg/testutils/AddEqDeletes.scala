@@ -95,7 +95,8 @@ class AddEqDeletes extends UDF3[String, String, String, Unit] with Logging {
             outputFile,
             partitionValue.orNull,
             deleteRecords.map(_.asInstanceOf[Record]).asJava,
-            parquetFileInfo.deleteSchema)
+            parquetFileInfo.deleteSchema,
+            parquetFileInfo.equalityFieldIds.toArray)
         }.foldLeft(table.newRowDelta())(_.addDeletes(_))
         .commit()
 
@@ -107,9 +108,21 @@ class AddEqDeletes extends UDF3[String, String, String, Unit] with Logging {
 object AddEqDeletes extends Logging {
   private val PartitionColId = MetadataColumns.PARTITION_COLUMN_ID - 20000
 
+  private def primitiveFieldIds(field: NestedField): Seq[Int] = {
+    if (field.`type`().isPrimitiveType) {
+      Seq(field.fieldId())
+    } else if (field.`type`().isStructType) {
+      field.`type`().asStructType().fields().asScala.flatMap(primitiveFieldIds).toSeq
+    } else {
+      throw new IllegalArgumentException(
+        s"Equality-delete field ${field.name()} must be primitive or nested in a struct")
+    }
+  }
+
   case class ParquetFileInfo(
       fileSchema: ShadedMessageType,
       deleteSchema: Schema,
+      equalityFieldIds: Seq[Int],
       partitionSchema: Option[StructType]) {
     val readSchema: Schema = partitionSchema match {
       case Some(p) =>
@@ -127,13 +140,22 @@ object AddEqDeletes extends Logging {
       GenericParquetReaders.buildReader(readSchema, fileSchema)
 
     def nameMapping: NameMapping = {
+      def toMappedField(field: NestedField): MappedField = {
+        if (field.`type`().isStructType) {
+          val nestedFields = field.`type`().asStructType().fields().asScala.map(toMappedField)
+          MappedField.of(field.fieldId(), field.name(), MappedFields.of(nestedFields.toSeq: _*))
+        } else {
+          MappedField.of(field.fieldId(), field.name())
+        }
+      }
+
       val deleteFieldsMapping = deleteSchema
         .columns()
         .asScala
-        .map(f => MappedField.of(f.fieldId(), f.name()))
+        .map(toMappedField)
 
       val partitionFieldsMapping = partitionSchema
-        .map(_.fields().asScala.map(f => MappedField.of(f.fieldId(), f.name())))
+        .map(_.fields().asScala.map(toMappedField))
         .map(fields => MappedField.of(PartitionColId, MetadataColumns.PARTITION_COLUMN_NAME,
           MappedFields.of(fields.toSeq: _*)))
 
@@ -150,20 +172,23 @@ object AddEqDeletes extends Logging {
     withResource(icebergPartitionedFile.newReader()) { reader =>
       logDebug(s"Reading eq delete parquet file $parquetFile, " +
         s"schema:\n${reader.getFileMetaData.getSchema}")
-      val colNames = reader
+      val columnPaths = reader
         .getFileMetaData
         .getSchema
         .getColumns
         .asScala
-        .map(_.getPath.head)
-        .filterNot(MetadataColumns.isMetadataColumn)
+        .map(_.getPath)
+        .filterNot(path => MetadataColumns.isMetadataColumn(path.head))
+        .map(_.mkString("."))
         .toSeq
 
-      val deleteSchema = tableSchema.select(colNames: _*)
+      val deleteSchema = tableSchema.select(columnPaths: _*)
+      val equalityFieldIds = deleteSchema.columns().asScala.flatMap(primitiveFieldIds).toSeq
       val partitionSchema = Option(table.spec()).map(_.partitionType())
 
       ParquetFileInfo(reader.getFileMetaData.getSchema,
         deleteSchema,
+        equalityFieldIds,
         partitionSchema)
     }
   }
