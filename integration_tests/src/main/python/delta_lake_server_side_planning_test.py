@@ -172,3 +172,94 @@ def test_server_side_planned_scan_missing_required_column(planned_scan_conf, rea
     assert_gpu_and_cpu_error(
         lambda spark: spark.sql("SELECT absent FROM " + catalog + ".db.required").collect(),
         conf=conf, error_message="Required column is missing")
+
+
+def _gpu_scan_partitions(spark, df, check):
+    # Only the GPU run plans packed partitions; the CPU run keeps one partition per file.
+    if spark.conf.get("spark.rapids.sql.enabled") == "true":
+        partitions = df.rdd.getNumPartitions()
+        assert check(partitions), partitions
+
+
+@ignore_order
+@pytest.mark.parametrize("reader", ["PERFILE", "MULTITHREADED", "COALESCING"])
+def test_server_side_planned_scan_file_partitioning(planned_scan_conf, reader):
+    catalog, settings = planned_scan_conf
+    # Both files fit one partition only with a small open cost and no minimum partition count.
+    conf = dict(settings, **{"spark.sql.files.maxPartitionBytes": "134217728",
+                            "spark.sql.files.openCostInBytes": "1024",
+                            "spark.sql.files.minPartitionNum": "1",
+                            "spark.rapids.sql.format.parquet.reader.type": reader})
+
+    def read(spark):
+        df = spark.sql("SELECT id, amount, nested FROM " + catalog + ".db.table")
+        assert sorted(row.id for row in df.collect()) == list(range(30))
+        _gpu_scan_partitions(spark, df, lambda n: n == 1)
+        return df
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        read, exist_classes="GpuBatchScanExec", conf=conf)
+
+
+@ignore_order
+@pytest.mark.parametrize("reader", ["PERFILE", "MULTITHREADED", "COALESCING"])
+def test_server_side_planned_scan_many_files_one_partition(spark_tmp_path, reader):
+    def write(spark):
+        spark.range(0, 3200).repartition(16).write.parquet(spark_tmp_path + "/selected")
+
+    with_cpu_session(write)
+    catalog = "planned_" + uuid.uuid4().hex
+    conf = {
+        "spark.sql.catalog." + catalog:
+            "com.nvidia.spark.rapids.tests.delta.ServerSidePlannedTestCatalog",
+        "spark.sql.catalog." + catalog + ".path": spark_tmp_path,
+        "spark.sql.adaptive.enabled": "false",
+        "spark.sql.files.minPartitionNum": "1",
+        "spark.sql.files.openCostInBytes": "1024",
+        "spark.rapids.sql.format.parquet.reader.type": reader,
+    }
+
+    def read(spark):
+        df = spark.sql("SELECT sum(id), count(*) FROM " + catalog + ".db.table")
+        assert df.collect()[0][1] == 3200
+        # Sixteen files with rows are packed into one multi-file partition.
+        _gpu_scan_partitions(spark, spark.sql("SELECT id FROM " + catalog + ".db.table"),
+                             lambda n: n == 1)
+        return df
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        read, exist_classes="GpuBatchScanExec", conf=conf)
+
+
+@ignore_order
+@pytest.mark.parametrize("reader", ["PERFILE", "MULTITHREADED", "COALESCING"])
+def test_server_side_planned_scan_row_group_ranges(spark_tmp_path, reader):
+    def write(spark):
+        # Small row groups so that a byte range holds some row groups but not others.
+        spark.range(0, 200000).selectExpr("id", "concat('k', cast(id % 1000 as string)) s") \
+            .repartition(2).write.option("parquet.block.size", 64 * 1024) \
+            .parquet(spark_tmp_path + "/selected")
+
+    with_cpu_session(write)
+    catalog = "planned_" + uuid.uuid4().hex
+    conf = {
+        "spark.sql.catalog." + catalog:
+            "com.nvidia.spark.rapids.tests.delta.ServerSidePlannedTestCatalog",
+        "spark.sql.catalog." + catalog + ".path": spark_tmp_path,
+        "spark.sql.adaptive.enabled": "false",
+        "spark.sql.files.maxPartitionBytes": "65536",
+        "spark.sql.files.openCostInBytes": "0",
+        "spark.rapids.sql.format.parquet.reader.type": reader,
+    }
+
+    def read(spark):
+        df = spark.sql("SELECT count(*), count(DISTINCT id), sum(id) FROM " + catalog +
+                       ".db.table")
+        assert df.collect()[0][0] == 200000  # no row group is dropped or read twice
+        # Two files of about 24 row groups each are split into several 64 KB ranges.
+        _gpu_scan_partitions(spark, spark.sql("SELECT id FROM " + catalog + ".db.table"),
+                             lambda n: n > 2)
+        return df
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        read, exist_classes="GpuBatchScanExec", conf=conf)
