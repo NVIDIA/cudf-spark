@@ -130,6 +130,9 @@ object GpuShuffleEnv extends Logging {
       Some(s"$notRun: spark.shuffle.manager is $manager, and it needs $RAPIDS_SHUFFLE_CLASS")
     } else if (isDataBricks) {
       Some(s"$notRun on Databricks")
+    } else if (!conf.isSqlExecuteOnGPU) {
+      // no GPU is set up then, so the executor's reclaim endpoint could not start its thread
+      Some(s"$notRun: ${RapidsConf.SQL_MODE.key} is not executeOnGPU")
     } else {
       None
     }
