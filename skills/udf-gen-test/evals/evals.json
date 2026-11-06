@@ -1,0 +1,44 @@
+{
+  "skill_name": "udf-gen-test",
+  "evals": [
+    {
+      "id": "udf-gen-test__array-segment-sum",
+      "prompt": "Generate a unit-test project for the Spark UDF at input/array-segment-sum/ArraySegmentSumUDF.scala, and confirm the tests pass on the CPU.",
+      "expected_skill": "udf-gen-test",
+      "expected_script": null,
+      "files": [
+        "evals/files/array-segment-sum/ArraySegmentSumUDF.scala"
+      ],
+      "expected_output": "A unit-test project that registers and runs the actual UDF and asserts its real outputs across the UDF's edge cases, with a code-coverage report showing the UDF's branches are well covered; the test compiles and passes on the CPU.",
+      "assertions": [
+        "Loads the udf-gen-test skill",
+        "Writes a unit test that registers and executes the actual UDF, with assertions reflecting its real outputs (not hardcoded/tautological values)",
+        "Covers the UDF's edge cases: bounded dynamic slicing, clipping at array end, null array/start/length, out-of-range start, non-positive length, empty array, null elements in the segment, and ordinary zero/negative elements",
+        "Runs the test on the CPU and it passes",
+        "Runs a code-coverage report and confirms the UDF's lines/branches are well covered, adding cases for any gaps (or documenting ones that are out of scope)"
+      ]
+    },
+    {
+      "id": "udf-gen-test__negative-config",
+      "prompt": "What does the spark.sql.shuffle.partitions setting control?",
+      "expected_skill": null,
+      "expected_script": null,
+      "files": [],
+      "expected_output": "A one-line conceptual Spark-config answer; not a request to generate a UDF unit test, so udf-gen-test should not activate.",
+      "assertions": [
+        "Does not load the udf-gen-test skill"
+      ]
+    },
+    {
+      "id": "udf-gen-test__negative-unrelated",
+      "prompt": "Write a Python regex that validates email addresses.",
+      "expected_skill": null,
+      "expected_script": null,
+      "files": [],
+      "expected_output": "Unrelated to Spark UDFs or GPU conversion; no UDF skill should activate.",
+      "assertions": [
+        "Does not load the udf-gen-test skill"
+      ]
+    }
+  ]
+}

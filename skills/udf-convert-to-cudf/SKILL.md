@@ -22,7 +22,8 @@ model: inherit
 
 ## Prerequisites
 
-- Project directory from Step 1 (udf-gen-test) with passing unit test
+- Project directory from Step 1 (`udf-gen-test`) with a passing unit test
+  - If the user provides their own tests, inline it into the project template's test harness.
 
 Derive `<CamelName>` and `<snake_name>` from the UDF class name.
 

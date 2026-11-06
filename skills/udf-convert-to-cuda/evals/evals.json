@@ -1,0 +1,47 @@
+{
+  "skill_name": "udf-convert-to-cuda",
+  "evals": [
+    {
+      "id": "udf-convert-to-cuda__array-segment-sum",
+      "prompt": "Convert the Spark UDF at input/array-segment-sum/ArraySegmentSumUDF.scala to a native CUDA RapidsUDF and verify the GPU output matches the CPU UDF. A passing unit test is provided at input/array-segment-sum/UnitTest.scala.",
+      "expected_skill": "udf-convert-to-cuda",
+      "expected_script": null,
+      "files": [
+        "evals/files/array-segment-sum/ArraySegmentSumUDF.scala",
+        "evals/files/array-segment-sum/UnitTest.scala"
+      ],
+      "expected_output": "A native CUDA RapidsUDF (JVM wrapper + JNI + .cu libcudf kernel) that builds against libcudf matching the spark-rapids version and whose GPU output matches the CPU UDF in schema and values on the unit-test data, running on the GPU with no CPU fallback.",
+      "assertions": [
+        "Loads the udf-convert-to-cuda skill",
+        "Implements a native CUDA RapidsUDF: a JVM RapidsUDF wrapper calling JNI plus C++/CUDA (.cu) sources using libcudf, covering every branch of the CPU UDF and preserving the bigint result",
+        "Keeps the GPU path free of host transfers - no copyToHost or host-side per-row logic",
+        "Builds the native library against libcudf matching the spark-rapids version",
+        "Asserts the native RapidsUDF output is identical in schema and values to the CPU UDF on the same unit-test data",
+        "Confirms the RapidsUDF executes on the GPU with no CPU fallback",
+        "Keeps the implementation general - no hardcoded test values or row-specific branches"
+      ]
+    },
+    {
+      "id": "udf-convert-to-cuda__negative-config",
+      "prompt": "What's the difference between repartition() and coalesce() in Spark?",
+      "expected_skill": null,
+      "expected_script": null,
+      "files": [],
+      "expected_output": "A one-line conceptual Spark answer; not a request to write a native CUDA RapidsUDF, so udf-convert-to-cuda should not activate.",
+      "assertions": [
+        "Does not load the udf-convert-to-cuda skill"
+      ]
+    },
+    {
+      "id": "udf-convert-to-cuda__negative-unrelated",
+      "prompt": "Recommend an AWS GPU instance type for running Spark.",
+      "expected_skill": null,
+      "expected_script": null,
+      "files": [],
+      "expected_output": "Infrastructure/sizing question, unrelated to writing a native CUDA RapidsUDF; no UDF skill should activate.",
+      "assertions": [
+        "Does not load the udf-convert-to-cuda skill"
+      ]
+    }
+  ]
+}
