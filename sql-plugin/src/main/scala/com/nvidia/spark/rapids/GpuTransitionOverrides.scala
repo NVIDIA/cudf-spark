@@ -726,6 +726,9 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
       case reused: ReusedExchangeExec =>
         // Reuse is a leaf wrapper; validate the actual exchange and its subtree.
         assertIsOnTheGpu(reused.child, conf)
+      case _: WholeStageCodegenExec | _: InputAdapter =>
+        // Materialized reused stages can wrap permitted CPU nodes in codegen containers.
+        // Their children still undergo the GPU and allowed-CPU checks below.
       case _: BroadcastExchangeLike if isAdaptiveEnabled =>
         // broadcasts are left on CPU for now when AQE is enabled
       case _: BroadcastHashJoinExec | _: BroadcastNestedLoopJoinExec

@@ -32,7 +32,7 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference}
 import org.apache.spark.sql.catalyst.optimizer.BuildRight
 import org.apache.spark.sql.catalyst.plans.Inner
 import org.apache.spark.sql.catalyst.plans.physical.IdentityBroadcastMode
-import org.apache.spark.sql.execution.{DriverlessBroadcastPlanInfoTestSupport, LeafExecNode, SparkPlan, UnionExec}
+import org.apache.spark.sql.execution.{DriverlessBroadcastPlanInfoTestSupport, InputAdapter, LeafExecNode, SparkPlan, UnionExec, WholeStageCodegenExec}
 import org.apache.spark.sql.execution.exchange.{BroadcastExchangeExec, ENSURE_REQUIREMENTS, ReusedExchangeExec}
 import org.apache.spark.sql.execution.joins.BroadcastHashJoinExec
 import org.apache.spark.sql.rapids.GpuShuffleEnv
@@ -83,6 +83,55 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
     override protected lazy val materializationFuture = {
       started()
       initial
+    }
+  }
+
+  test("reused codegen stages validate their permitted CPU leaves") {
+    session.withActive {
+      val cpu = session.range(4).queryExecution.executedPlan
+      assert(cpu.isInstanceOf[WholeStageCodegenExec])
+      val validator = new GpuTransitionOverrides(session)
+      Seq(cpu, InputAdapter(cpu)).foreach { child =>
+        val shuffle = GpuShuffleExchangeExec(GpuSinglePartitioning, child,
+          ENSURE_REQUIREMENTS)(GpuSinglePartitioning)
+        val reused = ReusedExchangeExec(shuffle.output, shuffle)
+        val allowed = new RapidsConf(Map("spark.rapids.sql.test.allowedNonGpu" -> "RangeExec"))
+        validator.assertIsOnTheGpu(reused, allowed)
+        val error = intercept[IllegalArgumentException] {
+          validator.assertIsOnTheGpu(reused, new RapidsConf(Map.empty[String, String]))
+        }
+        assert(error.getMessage.contains("RangeExec"))
+      }
+    }
+  }
+
+  test("broadcast exchanges register driverless metrics only with opt-in") {
+    session.withActive {
+      val key = "spark.rapids.sql.driverlessBroadcast.enabled"
+      val previous = session.conf.getOption(key)
+      val driverless = Set("driverlessBuildBytes", "fallbackBroadcastBytes",
+        "driverlessStageTime", "driverlessStageFallbacks")
+      try {
+        val exchanges = Seq(false, true, false).map { enabled =>
+          session.conf.set(key, enabled.toString)
+          val child = EmptyColumnarPlan()
+          val cpu = BroadcastExchangeExec(IdentityBroadcastMode, child)
+          val exchange = GpuBroadcastExchangeExec(IdentityBroadcastMode, child)(cpu)
+          enabled -> exchange
+        }
+        session.conf.set(key, "false")
+        exchanges.foreach { case (enabled, exchange) =>
+          val names = exchange.additionalMetrics.keySet
+          assert(Set("dataSize", GpuMetric.COLLECT_TIME, GpuMetric.BUILD_TIME,
+            "broadcastTime").subsetOf(names))
+          assert(names.intersect(driverless) == (if (enabled) driverless else Set.empty))
+        }
+      } finally {
+        previous match {
+          case Some(value) => session.conf.set(key, value)
+          case None => session.conf.unset(key)
+        }
+      }
     }
   }
 
@@ -311,11 +360,13 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
   }
 
   test("AQE rejects oversized materialized row counts before publishing a build token") {
-    session.withActive {
+    val enabledSession = session.newSession()
+    enabledSession.conf.set("spark.rapids.sql.driverlessBroadcast.enabled", "true")
+    enabledSession.withActive {
       val child = EmptyColumnarPlan()
       val cpu = BroadcastExchangeExec(IdentityBroadcastMode, child)
       val exchange = GpuBroadcastExchangeExec(IdentityBroadcastMode, child)(cpu)
-      val stage = new DriverlessBroadcastStage(exchange, session.sparkContext)
+      val stage = new DriverlessBroadcastStage(exchange, enabledSession.sparkContext)
       stage.shuffle.metrics(GpuMetric.NUM_OUTPUT_ROWS).set(Int.MaxValue.toLong + 1)
       val error = intercept[IllegalArgumentException] { stage.materialize() }
       assert(error.getMessage.contains("single cuDF batch"))
@@ -337,7 +388,9 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
   }
 
   test("AQE cancellation reaches a late standard fallback after token completion") {
-    session.withActive {
+    val enabledSession = session.newSession()
+    enabledSession.conf.set("spark.rapids.sql.driverlessBroadcast.enabled", "true")
+    enabledSession.withActive {
       val child = EmptyColumnarPlan()
       val cpu = BroadcastExchangeExec(IdentityBroadcastMode, child)
       val token = new GpuBroadcastExchangeExecBase.BroadcastFuture[Broadcast[Any]]
@@ -346,7 +399,7 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
       val fallbackStarted = new CountDownLatch(1)
       val fallback = new ControlledExchange(child, cpu, pending,
         () => fallbackStarted.countDown())
-      val stage = new DriverlessBroadcastStage(exchange, session.sparkContext) {
+      val stage = new DriverlessBroadcastStage(exchange, enabledSession.sparkContext) {
         override protected val standard: GpuBroadcastExchangeExec = fallback
       }
       val tokenValue = stage.materialize().get
@@ -362,7 +415,7 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
       assert(exchange.relationFuture eq token)
       val failure = new AtomicReference[Throwable]()
       val waiter = new Thread(new Runnable {
-        override def run(): Unit = session.withActive {
+        override def run(): Unit = enabledSession.withActive {
           try {
             stage.standardBroadcast()
           } catch {

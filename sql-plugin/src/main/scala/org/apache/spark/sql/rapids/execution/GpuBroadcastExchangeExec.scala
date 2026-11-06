@@ -414,18 +414,23 @@ abstract class GpuBroadcastExchangeExecBase(
 
   protected def activeBroadcastFuture: Option[Future[Broadcast[Any]]] = None
 
+  // Metrics can be inspected after the session restores a different query's configuration.
+  private val driverlessMetricsEnabled = RapidsConf.DRIVERLESS_BROADCAST_ENABLED.get(conf)
+
   override val outputRowsLevel: MetricsLevel = ESSENTIAL_LEVEL
   override val outputBatchesLevel: MetricsLevel = MODERATE_LEVEL
   override lazy val additionalMetrics = Map(
     "dataSize" -> createSizeMetric(ESSENTIAL_LEVEL, "data size"),
     COLLECT_TIME -> createNanoTimingMetric(ESSENTIAL_LEVEL, DESCRIPTION_COLLECT_TIME),
     BUILD_TIME -> createNanoTimingMetric(ESSENTIAL_LEVEL, DESCRIPTION_BUILD_TIME),
-    "broadcastTime" -> createNanoTimingMetric(ESSENTIAL_LEVEL, "time to broadcast"),
-    "driverlessBuildBytes" -> createSizeMetric(ESSENTIAL_LEVEL, "driverless build data size"),
-    "fallbackBroadcastBytes" -> createSizeMetric(DEBUG_LEVEL, "fallback broadcast data size"),
-    "driverlessStageTime" -> createNanoTimingMetric(ESSENTIAL_LEVEL,
-      "driverless shuffle build time"),
-    "driverlessStageFallbacks" -> createMetric(ESSENTIAL_LEVEL, "driverless stage fallbacks"))
+    "broadcastTime" -> createNanoTimingMetric(ESSENTIAL_LEVEL, "time to broadcast")) ++
+    (if (driverlessMetricsEnabled) Map(
+      "driverlessBuildBytes" -> createSizeMetric(ESSENTIAL_LEVEL, "driverless build data size"),
+      "fallbackBroadcastBytes" -> createSizeMetric(DEBUG_LEVEL, "fallback broadcast data size"),
+      "driverlessStageTime" -> createNanoTimingMetric(ESSENTIAL_LEVEL,
+        "driverless shuffle build time"),
+      "driverlessStageFallbacks" -> createMetric(ESSENTIAL_LEVEL, "driverless stage fallbacks"))
+    else Map.empty[String, GpuMetric])
 
   override def outputPartitioning: Partitioning = BroadcastPartitioning(mode)
 

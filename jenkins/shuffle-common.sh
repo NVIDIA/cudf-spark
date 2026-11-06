@@ -96,6 +96,13 @@ invoke_shuffle_integration_test() {
         env_vars+="PYSP_TEST_spark_sql_shuffle_orderIndependentChecksum_enableFullRetryOnMismatch=false "
     fi
 
-    # Execute the test
-    eval "$env_vars $pyspark_script -m shuffle_test"
+    if [[ "$shuffle_mode" == "UCX" ]]; then
+        # Keep fail-fast behavior for ordinary tests. Failure injection needs its own
+        # Spark application because task retry limits are fixed at context creation.
+        local retry_test="test_driverless_broadcast_recovers_after_probe_task_retry"
+        eval "$env_vars $pyspark_script -m shuffle_test -k 'not $retry_test'" || return $?
+        eval "$env_vars SPARK_TASK_MAXFAILURES=2 PYSP_TEST_spark_task_maxFailures=2 $pyspark_script -m shuffle_test -k '$retry_test'"
+    else
+        eval "$env_vars $pyspark_script -m shuffle_test"
+    fi
 }

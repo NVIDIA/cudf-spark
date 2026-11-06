@@ -593,6 +593,13 @@ def plan_metric(node, name):
         return None
     return metrics.apply(name).value()
 
+
+def assert_metric_unset_or_zero(node, name):
+    """Require a registered metric containing Spark's -1 initial value or zero."""
+    value = plan_metric(node, name)
+    assert value in (-1, 0), f'Expected no recorded {name}, got {value}'
+
+
 def assert_cpu_and_gpu_are_equal_collect_with_capture(func,
         exist_classes='',
         non_exist_classes='',
