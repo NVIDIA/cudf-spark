@@ -258,10 +258,18 @@ class ShuffleCleanupManager(
 
 object ShuffleCleanupManager {
   @volatile private var instance: ShuffleCleanupManager = _
+  // the context that built `instance`. A context whose plugin init failed never shuts its
+  // plugins down, so the next context replaces the manager it left.
+  private var instanceContext: SparkContext = _
 
   def init(sc: SparkContext): Unit = synchronized {
+    if (instance != null && (instanceContext ne sc)) {
+      instance.shutdown()
+      instance = null
+    }
     if (instance == null) {
       instance = new ShuffleCleanupManager(sc)
+      instanceContext = sc
     }
   }
 
@@ -271,6 +279,7 @@ object ShuffleCleanupManager {
     if (instance != null) {
       instance.shutdown()
       instance = null
+      instanceContext = null
     }
   }
 }
