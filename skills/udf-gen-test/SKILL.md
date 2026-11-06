@@ -38,7 +38,7 @@ cp -r templates/scala <project_root>/<CamelName>/
 
 This provides a complete Maven project with all test and benchmark infrastructure.
 
-When selecting a different plugin version, update `rapids4spark.version` and `rapids4spark.artifactId` together in the generated `pom.xml`. The `26.06.0` default uses `rapids-4-spark_${scala.binary.version}`; use `cudf-spark_${scala.binary.version}` for `26.12.0` and later. Follow the [version update guide](../docs/dev/VERSIONS.md) for the local snapshot command and the other version properties to align.
+When selecting a different plugin version, update `rapids4spark.version` and `rapids4spark.artifactId` together in the generated `pom.xml`. The `26.06.0` default uses `rapids-4-spark_${scala.binary.version}`; use `cudf-spark_${scala.binary.version}` for `26.12.0` and later.
 
 ### 1b. Copy or extract the UDF source
 
