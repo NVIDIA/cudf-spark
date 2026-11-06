@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids
 
 import ai.rapids.cudf.{ColumnVector, DType, Table}
 import ai.rapids.cudf.ast.{AstExpression, AstJitProgram, CompiledExpression}
+import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.ProjectAstTestUtils.collectExpressions
 import org.mockito.Mockito.{doThrow, mock, times, verify, when}
@@ -27,9 +28,11 @@ import org.apache.spark.TaskContext
 import org.apache.spark.sql.catalyst.expressions.{Abs, Attribute, AttributeReference, BoundReference,
   Expression, NamedExpression}
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.{GpuAdd, GpuGreatest, GpuMultiply, GpuSubtract}
+import org.apache.spark.sql.rapids.{GpuAbs, GpuAdd, GpuBitwiseAnd, GpuGreatest, GpuMultiply,
+  GpuSubtract, GpuUnaryMinus}
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
-import org.apache.spark.sql.types.{FloatType, IntegerType, LongType}
+import org.apache.spark.sql.types.{ByteType, DataType, FloatType, IntegerType, LongType,
+  ShortType}
 import org.apache.spark.util.TaskCompletionListener
 
 class GpuProjectAstJitSuite extends AnyFunSuite {
@@ -143,17 +146,16 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     val left = reference(0, IntegerType)
     val right = reference(1, IntegerType)
     val expression = alias(
-      GpuSubtract(
+      GpuGreatest(Seq(
         GpuAdd(left, right, failOnError = false)(),
-        GpuMultiply(left, right, failOnError = false)(),
-        failOnError = false)(),
+        GpuMultiply(left, right, failOnError = false)())),
       "result")
 
     val wrapped = wrapOutputs(Seq(expression))
-    val subtract = wrapped.head.asInstanceOf[GpuAlias].child.asInstanceOf[GpuSubtract]
+    val greatest = wrapped.head.asInstanceOf[GpuAlias].child.asInstanceOf[GpuGreatest]
     assert(wrapped.forall(GpuAstJitExpression.extractTopLevel(_).isEmpty))
-    assert(subtract.left.isInstanceOf[GpuAdd])
-    assert(subtract.right.isInstanceOf[GpuMultiply])
+    assert(greatest.children.head.isInstanceOf[GpuAdd])
+    assert(greatest.children(1).isInstanceOf[GpuMultiply])
   }
 
   test("cross-backend sharing takes precedence over a complete legacy root") {
@@ -162,10 +164,9 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     val third = reference(2, IntegerType)
     val fourth = reference(3, IntegerType)
     val shared = GpuAdd(left, right, failOnError = false)()
-    // [AST((left+right)-third) AS legacy, greatest(left+right, fourth) AS regular]
+    // [AST((left+right)&third) AS legacy, greatest(left+right, fourth) AS regular]
     val expressions = Seq(
-      GpuProjectAstExpression.wrap(
-        alias(GpuSubtract(shared, third, failOnError = false)(), "legacy")),
+      GpuProjectAstExpression.wrap(alias(GpuBitwiseAnd(shared, third), "legacy")),
       alias(GpuGreatest(Seq(shared, fourth)), "regular"))
 
     val tiered = bindProject(
@@ -174,13 +175,13 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     // The regular consumer materializes left+right anyway, so the legacy root reuses it.
     // after wave planning:
     // tier 0: [AST_JIT(left+right) AS t1]
-    // tier 1: [t1-third AS legacy, greatest(t1, fourth) AS regular]
+    // tier 1: [AST(t1&third) AS legacy, greatest(t1, fourth) AS regular]
     val jitExpressionTiers = tiered.exprTiers.map(collectExpressions[GpuAstJitExpression])
     assertResult(Seq(1, 0))(jitExpressionTiers.map(_.size))
     assert(jitExpressionTiers.head.head.child.isInstanceOf[GpuAdd])
     val legacyTiers = tiered.exprTiers.map(collectExpressions[GpuProjectAstExpression])
-    assert(legacyTiers.flatten.isEmpty)
-    assertResult(1)(collectExpressions[GpuSubtract](tiered.exprTiers.last).size)
+    assertResult(Seq(0, 1))(legacyTiers.map(_.size))
+    assertResult(1)(collectExpressions[GpuBitwiseAnd](tiered.exprTiers.last).size)
     assert(collectExpressions[GpuAdd](tiered.exprTiers.last).isEmpty)
     val waveExprId = tiered.exprTiers.head.collectFirst {
       case alias: GpuAlias if GpuAstJitExpression.extractTopLevel(alias).isDefined => alias.exprId
@@ -360,10 +361,9 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     val left = reference(0, IntegerType)
     val right = reference(1, IntegerType)
     val expression = alias(
-      GpuSubtract(
+      GpuGreatest(Seq(
         GpuAdd(left, right, failOnError = false)(),
-        GpuMultiply(left, right, failOnError = false)(),
-        failOnError = false)(),
+        GpuMultiply(left, right, failOnError = false)())),
       "result")
 
     val tiered = bindProject(
@@ -372,7 +372,7 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
 
     assertResult(2)(tiered.exprTiers.size)
     assertResult(Seq(2, 0))(jitTiers.map(_.size))
-    assert(collectExpressions[GpuSubtract](tiered.exprTiers.last).nonEmpty)
+    assert(collectExpressions[GpuGreatest](tiered.exprTiers.last).nonEmpty)
   }
 
   test("JIT selection crosses a CPU bridge without a shared output") {
@@ -419,8 +419,8 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     val fourth = reference(3, IntegerType)
     val shared = GpuAdd(left, right, failOnError = false)()
     val expressions = Seq(
-      alias(GpuSubtract(shared, third, failOnError = false)(), "first"),
-      alias(GpuSubtract(shared, fourth, failOnError = false)(), "second"))
+      alias(GpuGreatest(Seq(shared, third)), "first"),
+      alias(GpuGreatest(Seq(shared, fourth)), "second"))
 
     val tiered = bindProject(
       expressions, Seq(left, right, third, fourth), projectConf())
@@ -435,20 +435,22 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
       GpuAstJitExpression.explainFinalSelections(tiered.exprTiers, all = false))
   }
 
-  test("project JIT takes precedence while standalone subtraction stays regular") {
+  test("project JIT takes precedence while standalone float subtraction stays regular") {
     val left = reference(0, IntegerType)
     val right = reference(1, IntegerType)
+    val floatLeft = reference(2, FloatType)
+    val floatRight = reference(3, FloatType)
     val jitCandidate = GpuProjectAstExpression.wrap(
-      alias(GpuAdd(left, right, failOnError = false)(), "jit"))
+      alias(GpuSubtract(left, right, failOnError = false)(), "jit"))
     val legacyCandidate = GpuProjectAstExpression.wrap(
-      alias(GpuSubtract(left, right, failOnError = false)(), "legacy"))
+      alias(GpuSubtract(floatLeft, floatRight, failOnError = false)(), "legacy"))
 
-    val tiered = bindProject(
-      Seq(jitCandidate, legacyCandidate), Seq(left, right), projectConf(legacy = true))
+    val tiered = bindProject(Seq(jitCandidate, legacyCandidate),
+      Seq(left, right, floatLeft, floatRight), projectConf(legacy = true))
     val outputs = tiered.exprTiers.last
 
     assert(GpuAstJitExpression.extractTopLevel(outputs.head).isDefined)
-    assert(GpuProjectAstExpression.extractTopLevel(outputs(1)).isEmpty)
+    assert(GpuProjectAstExpressionBase.extractTopLevel(outputs(1)).isEmpty)
     assertResult(1)(collectExpressions[GpuSubtract](Seq(outputs(1))).size)
   }
 
@@ -504,6 +506,39 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
 
     val wrapped = wrapOutputs(Seq(ansiAdd, floatMultiply))
     assert(wrapped.forall(_.find(_.isInstanceOf[GpuAstJitExpression]).isEmpty))
+  }
+
+  for (dataType <- Seq(ByteType, ShortType, IntegerType, LongType)) {
+    test(s"project AST JIT supports non-ANSI $dataType arithmetic") {
+      val left = reference(0, dataType)
+      val right = reference(1, dataType)
+      val expressions = Seq(
+        GpuAdd(left, right, failOnError = false)(),
+        GpuSubtract(left, right, failOnError = false)(),
+        GpuMultiply(left, right, failOnError = false)(),
+        GpuUnaryMinus(left, failOnError = false),
+        GpuAbs(left, failOnError = false))
+      val wrapped = wrapOutputs(expressions.zipWithIndex.map { case (e, i) => alias(e, s"o$i") })
+
+      wrapped.zip(expressions).foreach { case (output, expression) =>
+        assert(GpuAstJitExpression.extractTopLevel(output).exists(_.child == expression), output)
+      }
+    }
+  }
+
+  test("project AST JIT inlines integral widening casts but does not compile one alone") {
+    val narrow = reference(0, IntegerType)
+    val wide = reference(1, LongType)
+    val widened = GpuCast(narrow, LongType)()
+    val narrowed = GpuCast(wide, IntegerType)()
+    val expressions = Seq(
+      alias(GpuAdd(widened, wide, failOnError = false)(), "widened_sum"),
+      alias(widened, "widened"),
+      alias(GpuAdd(narrowed, narrow, failOnError = false)(), "narrowed_sum"))
+
+    val wrapped = wrapOutputs(expressions)
+    assertResult(Seq(true, false, false))(
+      wrapped.map(GpuAstJitExpression.extractTopLevel(_).isDefined))
   }
 
   test("project AST JIT does not compile a literal or pass-through") {
@@ -788,4 +823,122 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
       verify(compiled, times(1)).close()
     }
   }
+
+  private def boundRef(ordinal: Int, dataType: DataType): GpuBoundReference =
+    GpuBoundReference(ordinal, dataType, nullable = true)(NamedExpression.newExprId, s"c$ordinal")
+
+
+  private def longs(values: java.lang.Long*): Seq[java.lang.Long] = values
+
+  /** Builds a table that owns `columns`. */
+  private def gpuTable(columns: ColumnVector*): Table =
+    withResource(columns) { _ => new Table(columns: _*) }
+
+  private def collectLongs(column: ai.rapids.cudf.ColumnView): Seq[java.lang.Long] =
+    withResource(column.copyToHost()) { host =>
+      (0 until host.getRowCount.toInt).map { row =>
+        if (host.isNull(row)) {
+          null
+        } else {
+          java.lang.Long.valueOf(column.getType match {
+            case DType.INT8 => host.getByte(row).toLong
+            case DType.INT16 => host.getShort(row).toLong
+            case DType.INT32 => host.getInt(row).toLong
+            case _ => host.getLong(row)
+          })
+        }
+      }
+    }
+
+  /** Runs only the JIT program for the expressions and collects its outputs. */
+  private def jitOnly(expressions: Seq[GpuExpression], table: Table): Seq[Seq[java.lang.Long]] = {
+    val roots = expressions.map(GpuAstJitExpression(_))
+    try {
+      withResource(roots.head.getJitProgram(roots, table).computeTable(table)) { result =>
+        (0 until result.getNumberOfColumns).map(i => collectLongs(result.getColumn(i)))
+      }
+    } finally {
+      roots.foreach(_.close())
+    }
+  }
+
+  test("non-ANSI AST JIT wraps like the regular GPU path") {
+    val values = Seq(Long.MinValue, -1L, 0L, Long.MaxValue)
+    withResource(gpuTable(
+        ColumnVector.fromLongs(values: _*), ColumnVector.fromLongs(1L, 2L, 3L, -1L))) { input =>
+      val left = boundRef(0, LongType)
+      val right = boundRef(1, LongType)
+      val expressions = Seq(
+        GpuAdd(left, right, failOnError = false)(),
+        GpuSubtract(left, right, failOnError = false)(),
+        GpuMultiply(left, right, failOnError = false)(),
+        GpuUnaryMinus(left, failOnError = false),
+        GpuAbs(left, failOnError = false))
+      val jit = jitOnly(expressions, input)
+      val batch = GpuColumnVector.from(input, Array[DataType](LongType, LongType))
+      withResource(batch) { _ =>
+        expressions.zip(jit).foreach { case (expression, jitValues) =>
+          val regular = withResource(expression.columnarEval(batch)) { c =>
+            collectLongs(c.getBase)
+          }
+          assertResult(regular, expression)(jitValues)
+        }
+      }
+    }
+  }
+
+  test("AST JIT inlines an integral widening cast") {
+    withResource(gpuTable(
+        ColumnVector.fromBoxedInts(Int.MaxValue, null, -3),
+        ColumnVector.fromLongs(1L, 2L, 3L))) { input =>
+      val widened = GpuCast(boundRef(0, IntegerType), LongType)()
+      val sum = GpuAdd(widened, boundRef(1, LongType), failOnError = false)()
+      assert(GpuAstJitExpression.canUseAstJit(sum))
+      assert(!GpuAstJitExpression.canUseAstJit(widened))
+      assertResult(Seq(longs(Int.MaxValue + 1L, null, 0L)))(jitOnly(Seq(sum), input))
+    }
+  }
+
+  // Spark wraps byte and short arithmetic at every step. A kernel that kept a promoted intermediate
+  // would differ for abs of a wrapped value.
+  for ((dataType, min, max) <- Seq(
+      (ByteType, Byte.MinValue.toLong, Byte.MaxValue.toLong),
+      (ShortType, Short.MinValue.toLong, Short.MaxValue.toLong))) {
+    def column(values: Long*): ColumnVector = dataType match {
+      case ByteType => ColumnVector.fromBytes(values.map(_.toByte): _*)
+      case _ => ColumnVector.fromShorts(values.map(_.toShort): _*)
+    }
+
+    test(s"non-ANSI AST JIT wraps $dataType at each operation like the regular GPU path") {
+      withResource(gpuTable(
+          column(max, min, max - 27, -1L, 0L, 3L),
+          column(1L, -1L, max - 27, min, 5L, -7L))) { input =>
+        val left = boundRef(0, dataType)
+        val right = boundRef(1, dataType)
+        val sum = GpuAdd(left, right, failOnError = false)()
+        val expressions = Seq(
+          sum,
+          GpuSubtract(left, right, failOnError = false)(),
+          GpuMultiply(left, right, failOnError = false)(),
+          GpuUnaryMinus(left, failOnError = false),
+          GpuAbs(left, failOnError = false),
+          GpuAbs(sum, failOnError = false),
+          GpuSubtract(GpuMultiply(sum, right, failOnError = false)(), left,
+            failOnError = false)())
+        val jit = jitOnly(expressions, input)
+        val batch = GpuColumnVector.from(input, Array[DataType](dataType, dataType))
+        withResource(batch) { _ =>
+          expressions.zip(jit).foreach { case (expression, jitValues) =>
+            val regular = withResource(expression.columnarEval(batch)) { c =>
+              collectLongs(c.getBase)
+            }
+            assertResult(regular, expression)(jitValues)
+          }
+        }
+      }
+    }
+
+  }
+
+
 }
