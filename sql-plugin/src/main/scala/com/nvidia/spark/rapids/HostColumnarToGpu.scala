@@ -314,6 +314,14 @@ class HostToGpuCoalesceIterator(iter: Iterator[ColumnarBatch],
 
   override def hasAnyToConcat: Boolean = totalRows > 0
 
+  // Pulling the host batches of a GPU batch is CPU work, such as decoding a file, so next()
+  // gives up the semaphore while it does that, and concatAllAndPutOnGPU acquires it again.
+  // hasNext leaves it alone, as operators above may call it while they still use the GPU.
+  override def next(): ColumnarBatch = {
+    GpuSemaphore.releaseIfNecessary(TaskContext.get())
+    super.next()
+  }
+
   override def concatAllAndPutOnGPU(): ColumnarBatch = {
     // About to place data back on the GPU
     GpuSemaphore.acquireIfNecessary(TaskContext.get())
