@@ -24,7 +24,7 @@ import ai.rapids.cudf.{DType, HostColumnVector}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsHostColumnBuilderSuite._
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingArray
-import com.nvidia.spark.rapids.jni.{GpuSplitAndRetryOOM, RmmSpark}
+import com.nvidia.spark.rapids.jni.{CpuSplitAndRetryOOM, GpuSplitAndRetryOOM, RmmSpark}
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{GenericInternalRow, UnsafeProjection}
@@ -136,10 +136,68 @@ class RowToColumnarIteratorRetrySuite extends RmmSparkRetrySuiteBase {
     }
   }
 
-  // Note: SplitAndRetryOOM with rowCount == 0 is propagated directly (can't split a single
-  // row). A dedicated CpuSplitAndRetryOOM test for per-row convert() with rowCount == 0 is not
-  // feasible because RMM allocator-level OOM injection cannot reliably target it — it tends to
-  // hit builders.tryBuild() instead. The GPU split-and-retry test below verifies propagation.
+  // A batchSizeBytes below one sample's size reserves VALIDITY_BUFFER_BOUNDARY_ROWS (512) rows,
+  // so nine splits shrink the first row's reservation to one row.
+  private val tinyBatchBytes = 1L
+  private val splitsToOneRow = 9
+
+  private def firstColumnInts(iter: Iterator[ColumnarBatch]): Seq[Int] = {
+    val values = ArrayBuffer[Int]()
+    while (iter.hasNext) {
+      withResource(iter.next()) { batch =>
+        withResource(batch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { col =>
+          (0 until batch.numRows()).foreach(i => values += col.getInt(i))
+        }
+      }
+    }
+    values.toSeq
+  }
+
+  Seq(TargetSize(batchSize), RequireSingleBatch).foreach { goal =>
+    test(s"first-row CPU SplitAndRetryOOM halves the reservation down to one row, $goal") {
+      val rowIter: Iterator[InternalRow] = (1 to 10).map(InternalRow(_)).iterator
+      val row2ColIter = new RowToColumnarIterator(
+        rowIter, schema, goal, tinyBatchBytes, new GpuRowToColumnConverter(schema))
+      // skipCount=0 fires each split on the first row's data buffer, the first host allocation.
+      RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, splitsToOneRow,
+        RmmSpark.OomInjectionType.CPU.ordinal, 0)
+      assertResult((1 to 10).toSeq)(firstColumnInts(row2ColIter))
+    }
+
+    test(s"first-row CPU SplitAndRetryOOM propagates once the reservation is one row, $goal") {
+      val rowIter: Iterator[InternalRow] = (1 to 10).map(InternalRow(_)).iterator
+      val row2ColIter = new RowToColumnarIterator(
+        rowIter, schema, goal, tinyBatchBytes, new GpuRowToColumnConverter(schema))
+      RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, splitsToOneRow + 1,
+        RmmSpark.OomInjectionType.CPU.ordinal, 0)
+      assertThrows[CpuSplitAndRetryOOM] {
+        row2ColIter.next()
+      }
+    }
+
+    test(s"first row over the host limit frees its reservation and shrinks it, $goal") {
+      val intIntSchema = StructType(Seq(
+        StructField("a", IntegerType), StructField("b", IntegerType)))
+      val rowIter: Iterator[InternalRow] = (1 to 10).map(i => InternalRow(i, i)).iterator
+      val row2ColIter = new RowToColumnarIterator(
+        rowIter, intIntSchema, goal, tinyBatchBytes, new GpuRowToColumnConverter(intIntSchema))
+      // Column a's 512-row reservation (2 KiB) fits but column b's does not. With one task, the
+      // state machine answers with a retry, and then with a split from the wait that follows it.
+      HostAlloc.initialize(3 * 1024)
+      assertResult((1 to 10).toSeq)(firstColumnInts(row2ColIter))
+    }
+  }
+
+  test("the first row reserves for a bounded batch, not for batchSizeBytes") {
+    val rowIter: Iterator[InternalRow] = (1 to 10).map(InternalRow(_)).iterator
+    val row2ColIter = new RowToColumnarIterator(
+      rowIter, schema, TargetSize(batchSize), batchSize, new GpuRowToColumnConverter(schema))
+    // An INT reservation sized from the 1 GiB batchSizeBytes cannot fit this limit, but one
+    // sized for a 128 MiB batch can.
+    HostAlloc.initialize(160L * 1024 * 1024)
+    assertResult((1 to 10).toSeq)(firstColumnInts(row2ColIter))
+  }
+
   // SplitAndRetryOOM with rowCount > 0 (emit-early) is covered by the test below.
 
   test("test CPU SplitAndRetryOOM emit-early for non-RequireSingleBatch") {
