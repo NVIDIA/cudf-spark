@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -87,26 +87,23 @@ class BatchedNvcompLZ4Decompressor(maxBatchMemory: Long,
     require(inputBuffers.length == bufferMetas.length,
       s"number of input buffers (${inputBuffers.length}) does not equal number of metadata " +
           s"buffers (${bufferMetas.length}")
-    val outputBuffers = allocateOutputBuffers(inputBuffers, bufferMetas)
-    BatchedLZ4Decompressor.decompressAsync(
-      codecConfigs.lz4ChunkSize,
-      inputBuffers,
-      outputBuffers.asInstanceOf[Array[BaseDeviceMemoryBuffer]],
-      stream)
+    // Increment the ref counts because the cudf decompressor closes its inputs, even when it
+    // throws, and the caller also closes inputBuffers.
+    val compressedBuffers = DeviceBuffersUtils.incRefCount(inputBuffers)
+    val outputBuffers = closeOnExcept(compressedBuffers)(_ => allocateOutputBuffers(bufferMetas))
+    closeOnExcept(outputBuffers) { _ =>
+      BatchedLZ4Decompressor.decompressAsync(
+        codecConfigs.lz4ChunkSize,
+        compressedBuffers,
+        outputBuffers.asInstanceOf[Array[BaseDeviceMemoryBuffer]],
+        stream)
+    }
     outputBuffers
   }
 
-  private def allocateOutputBuffers(
-      inputBuffers: Array[BaseDeviceMemoryBuffer],
-      bufferMetas: Array[BufferMeta]): Array[DeviceMemoryBuffer] = {
+  private def allocateOutputBuffers(bufferMetas: Array[BufferMeta]): Array[DeviceMemoryBuffer] = {
     NvtxRegistry.ALLOC_OUTPUT_BUFS {
-      bufferMetas.zip(inputBuffers).safeMap { case (meta, input) =>
-        // cudf decompressor guarantees that close will be called for 'inputBuffers' and will not
-        // throw before doing so, but this interface does not close inputs so we need to increment
-        // the ref count.
-        input.incRefCount()
-        DeviceMemoryBuffer.allocate(meta.uncompressedSize())
-      }
+      bufferMetas.safeMap(meta => DeviceMemoryBuffer.allocate(meta.uncompressedSize()))
     }
   }
 }
