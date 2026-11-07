@@ -128,8 +128,10 @@ case class GpuBatchScanExec(
           case Some(projectionPositions) => projectionPositions.map(i => k.expressions(i))
           case _ => k.expressions
         }
-        KeyGroupedPartitioningShim.copyWithNewPartitionValues(
-          k.copy(expressions = expressions),
+        KeyGroupedPartitioningShim.copyForOutputPartitioning(
+          k,
+          expressions,
+          spjParams.joinKeyPositions,
           newPartValues,
           spjParams.applyPartialClustering)
       case p => p

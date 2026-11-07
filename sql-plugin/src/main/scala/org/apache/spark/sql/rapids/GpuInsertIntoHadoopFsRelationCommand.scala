@@ -19,7 +19,7 @@ package org.apache.spark.sql.rapids
 import java.io.IOException
 
 import com.nvidia.spark.rapids.{ColumnarFileFormat, GpuDataWritingCommand, RapidsConf}
-import com.nvidia.spark.rapids.shims.SparkShimImpl
+import com.nvidia.spark.rapids.shims.{GpuFileWriteJobShim, SparkShimImpl}
 import org.apache.hadoop.fs.{FileSystem, Path}
 
 import org.apache.spark.internal.io.FileCommitProtocol
@@ -121,6 +121,7 @@ case class GpuInsertIntoHadoopFsRelationCommand(
       outputPath = outputPath.toString,
       dynamicPartitionOverwrite = dynamicPartitionOverwrite)
 
+    var deleteMatchingOutput = false
     val doInsertion = if (mode == SaveMode.Append) {
       true
     } else {
@@ -134,8 +135,13 @@ case class GpuInsertIntoHadoopFsRelationCommand(
           } else if (dynamicPartitionOverwrite) {
             // For dynamic partition overwrite, do not delete partition directories ahead.
             true
+          } else if (GpuFileWriteJobShim.shouldDelayOverwriteDeletion) {
+            // Delete only after the writer's driver-side schema and option checks pass.
+            deleteMatchingOutput = true
+            true
           } else {
-            deleteMatchingPartitions(fs, qualifiedOutputPath, customPartitionLocations, committer)
+            deleteMatchingPartitions(
+              fs, qualifiedOutputPath, customPartitionLocations, committer)
             true
           }
         case (SaveMode.Overwrite, _) | (SaveMode.ErrorIfExists, false) =>
@@ -191,7 +197,14 @@ case class GpuInsertIntoHadoopFsRelationCommand(
           concurrentWriterPartitionFlushSize = concurrentWriterPartitionFlushSize,
           forceHiveHashForBucketing = forceHiveHashForBucketing,
           numStaticPartitionCols = staticPartitions.size,
-          baseDebugOutputPath = baseDebugOutputPath)
+          baseDebugOutputPath = baseDebugOutputPath,
+          beforeSetupJob = () => {
+            GpuFileWriteJobShim.runBeforeWriteJob(this)
+            if (deleteMatchingOutput) {
+              deleteMatchingPartitions(
+                fs, qualifiedOutputPath, customPartitionLocations, committer)
+            }
+          })
 
 
       // update metastore partition metadata

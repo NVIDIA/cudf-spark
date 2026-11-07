@@ -24,7 +24,7 @@ from pyspark.sql.types import *
 from string_test import mk_str_gen
 import pyspark.sql.functions as f
 import pyspark.sql.utils
-from spark_session import with_cpu_session, with_gpu_session, is_before_spark_334, is_before_spark_342, is_before_spark_340, is_databricks_version_or_later, is_spark_350, is_spark_400_or_later
+from spark_session import with_cpu_session, with_gpu_session, is_before_spark_334, is_before_spark_342, is_before_spark_340, is_databricks_version_or_later, is_spark_350, is_spark_400_or_later, is_spark_405
 from conftest import get_datagen_seed
 from marks import allow_non_gpu
 
@@ -419,6 +419,27 @@ def test_sequence_too_long_sequence(stop_gen):
         lambda spark:unary_op_df(spark, stop_gen, 1).selectExpr(
             "sequence(0, a)").collect(),
         conf = {}, error_message = msg)
+
+@pytest.mark.skipif(not is_spark_405(),
+                    reason="Tests the Spark 4.0.5 sequence overflow fix")
+def test_sequence_long_subtraction_overflow():
+    data = [
+        (-(1 << 63), (1 << 63) - 1, (1 << 63) - 1),
+        ((1 << 63) - 1, -(1 << 63), -((1 << 63) - 1))
+    ]
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.createDataFrame(
+            data, "start long, stop long, step long").selectExpr(
+                "sequence(start, stop, step)"))
+
+@pytest.mark.skipif(not is_spark_405(),
+                    reason="Tests the Spark 4.0.5 sequence overflow fix")
+def test_sequence_long_subtraction_overflow_too_long():
+    assert_gpu_and_cpu_error(
+        lambda spark: spark.range(1).selectExpr(
+            "sequence(cast(-9223372036854775808 as long), "
+            "cast(9223372036854775807 as long), cast(1 as long))").collect(),
+        conf={}, error_message="Can't create array")
 
 def get_sequence_cases_mixed_df(spark, length=2048):
     # Generate the sequence data following the 3 rules mixed in a single dataset.

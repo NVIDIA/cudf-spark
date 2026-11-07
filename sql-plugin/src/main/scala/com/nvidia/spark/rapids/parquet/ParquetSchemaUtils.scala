@@ -23,6 +23,7 @@ import scala.collection.JavaConverters._
 import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Table}
 import com.nvidia.spark.rapids.{CastOptions, GpuCast, GpuColumnVector, SchemaUtils}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.shims.parquet.ParquetFieldRequestShims
 import com.nvidia.spark.rapids.shims.parquet.ParquetSchemaClipShims
 import com.nvidia.spark.rapids.shims.parquet.ParquetUnknownTypeAnnotationShims
 import org.apache.parquet.schema._
@@ -481,15 +482,18 @@ object ParquetSchemaUtils {
     }
 
     val shouldMatchById = useFieldId && ParquetSchemaClipShims.hasFieldIds(structType)
-    structType.flatMap { f =>
-      if (shouldMatchById && ParquetSchemaClipShims.hasFieldId(f)) {
-        matchIdField(f)
+    val clippedFields = structType.flatMap { field =>
+      val clippedField = if (shouldMatchById && ParquetSchemaClipShims.hasFieldId(field)) {
+        matchIdField(field)
       } else if (caseSensitive) {
-        matchCaseSensitiveField(f)
+        matchCaseSensitiveField(field)
       } else {
-        matchCaseInsensitiveField(f)
+        matchCaseInsensitiveField(field)
       }
+      clippedField.map(field -> _)
     }
+    ParquetFieldRequestShims.checkNoFieldRequestedMoreThanOnce(clippedFields)
+    clippedFields.map(_._2)
   }
 
   /**
