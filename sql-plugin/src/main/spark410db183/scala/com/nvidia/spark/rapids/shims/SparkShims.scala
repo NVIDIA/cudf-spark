@@ -31,19 +31,76 @@ import org.apache.spark.sql.execution.datasources.v2.MergeRowsExec
 
 object SparkShimImpl extends Spark400PlusDBShims with HyperbolicExpressionShims {
 
+  private def createOneRowRelationExecMeta(
+      exec: OneRowRelationExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      rule: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuOneRowRelationExecMeta(exec, conf, parent, rule)
+
+  private def createMergeRowsExecMeta(
+      exec: MergeRowsExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      rule: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuMergeRowsExecMeta(exec, conf, parent, rule)
+
+  private def createKeepMeta(
+      keep: Keep,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      rule: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuKeepInstructionMeta(keep, conf, parent, rule)
+
+  private def createDiscardMeta(
+      discard: Discard,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      rule: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuDiscardInstructionMeta(discard, conf, parent, rule)
+
+  private def createSplitMeta(
+      split: Split,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      rule: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuSplitInstructionMeta(split, conf, parent, rule)
+
+  private class DeltaOptimizedWritePartitioningMetaImpl(
+      partitioning: DeltaOptimizedWritePartitioning,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      rule: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends PartMeta[DeltaOptimizedWritePartitioning](
+              partitioning, conf, parent, rule) {
+            // Preserve DBR's marker for its optimized-write AQE and skew rules while the
+            // converted exchange executes the equivalent physical hash partitioning on GPU.
+            override val childParts: Seq[PartMeta[_]] = Seq(GpuOverrides.wrapPart(
+              partitioning.getPhysicalPartitioning, this.conf, Some(this)))
+
+            override def convertToGpu(): GpuPartitioning = childParts.head.convertToGpu()
+          }
+
+  private def createDeltaOptimizedWritePartitioningMeta(
+      partitioning: DeltaOptimizedWritePartitioning,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      rule: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new DeltaOptimizedWritePartitioningMetaImpl(partitioning, conf, parent, rule)
+
   override def getExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = {
     val shimExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = Seq(
       GpuOverrides.exec[OneRowRelationExec](
         "Single row relation for literal queries without FROM clause",
         ExecChecks(TypeSig.all, TypeSig.all),
-        (exec, conf, parent, rule) => new GpuOneRowRelationExecMeta(exec, conf, parent, rule)),
+        createOneRowRelationExecMeta),
       GpuOverrides.exec[MergeRowsExec](
         "Process merge rows for copy-on-write MERGE operations",
         ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
           TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
           GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
           TypeSig.all),
-        (exec, conf, parent, rule) => new GpuMergeRowsExecMeta(exec, conf, parent, rule))
+        createMergeRowsExecMeta)
     ).map(rule => (rule.getClassFor.asSubclass(classOf[SparkPlan]), rule)).toMap
     super.getExecs ++ shimExecs
   }
@@ -65,15 +122,14 @@ object SparkShimImpl extends Spark400PlusDBShims with HyperbolicExpressionShims 
           TypeSig.all,
           Seq(ParamCheck("condition", TypeSig.all, TypeSig.all)),
           Some(RepeatingParamCheck("outputs", TypeSig.all, TypeSig.all))),
-        (keep, conf, parent, rule) => new GpuKeepInstructionMeta(keep, conf, parent, rule)),
+        createKeepMeta),
       GpuOverrides.expr[Discard](
         "Discard instruction for MERGE operations - discards rows based on condition",
         ExprChecks.projectOnly(
           TypeSig.all,
           TypeSig.all,
           Seq(ParamCheck("condition", TypeSig.all, TypeSig.all))),
-        (discard, conf, parent, rule) =>
-          new GpuDiscardInstructionMeta(discard, conf, parent, rule)),
+        createDiscardMeta),
       GpuOverrides.expr[Split](
         "Split instruction for MERGE operations - splits rows into multiple outputs",
         ExprChecks.projectOnly(
@@ -81,7 +137,7 @@ object SparkShimImpl extends Spark400PlusDBShims with HyperbolicExpressionShims 
           TypeSig.all,
           Seq(ParamCheck("condition", TypeSig.all, TypeSig.all)),
           Some(RepeatingParamCheck("outputs", TypeSig.all, TypeSig.all))),
-        (split, conf, parent, rule) => new GpuSplitInstructionMeta(split, conf, parent, rule))
+        createSplitMeta)
     ).map(rule => (rule.getClassFor.asSubclass(classOf[Expression]), rule)).toMap
     super.getExprs ++ shimExprs
   }
@@ -92,16 +148,7 @@ object SparkShimImpl extends Spark400PlusDBShims with HyperbolicExpressionShims 
       GpuOverrides.part[DeltaOptimizedWritePartitioning](
         "Delta optimized write partitioning",
         PartChecks(),
-        (partitioning, conf, parent, rule) =>
-          new PartMeta[DeltaOptimizedWritePartitioning](
-              partitioning, conf, parent, rule) {
-            // Preserve DBR's marker for its optimized-write AQE and skew rules while the
-            // converted exchange executes the equivalent physical hash partitioning on GPU.
-            override val childParts: Seq[PartMeta[_]] = Seq(GpuOverrides.wrapPart(
-              partitioning.getPhysicalPartitioning, this.conf, Some(this)))
-
-            override def convertToGpu(): GpuPartitioning = childParts.head.convertToGpu()
-          })
+        createDeltaOptimizedWritePartitioningMeta)
     ).map(rule => (rule.getClassFor.asSubclass(classOf[Partitioning]), rule)).toMap
     super.getPartitionings ++ shimPartitionings
   }

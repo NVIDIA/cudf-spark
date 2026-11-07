@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,18 +21,32 @@ import com.nvidia.spark.rapids.{ExecChecks, ExecRule, GpuOverrides, TypeSig}
 import org.apache.spark.sql.execution.{SparkPlan, SparkStrategy}
 
 abstract class DeltaProviderImplBase extends DeltaProvider {
+  private def createRapidsProcessDeltaMergeJoinMeta(
+    wrapped: RapidsProcessDeltaMergeJoinExec,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new RapidsProcessDeltaMergeJoinMeta(wrapped, conf, p, r)
+
+  private def createRapidsDeltaWriteExecMeta(
+    wrapped: RapidsDeltaWriteExec,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new RapidsDeltaWriteExecMeta(wrapped, conf, p, r)
+
 
   override def getExecRules: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = {
     Seq(
       GpuOverrides.exec[RapidsProcessDeltaMergeJoinExec](
         "Post-processing of join as part of Delta Lake table merge",
         ExecChecks(TypeSig.all, TypeSig.all),
-        (wrapped, conf, p, r) => new RapidsProcessDeltaMergeJoinMeta(wrapped, conf, p, r)
+        createRapidsProcessDeltaMergeJoinMeta
       ),
       GpuOverrides.exec[RapidsDeltaWriteExec](
         "GPU write into a Delta Lake table",
         ExecChecks.hiddenHack(),
-        (wrapped, conf, p, r) => new RapidsDeltaWriteExecMeta(wrapped, conf, p, r)).invisible()
+        createRapidsDeltaWriteExecMeta).invisible()
     ).collect { case r if r != null => (r.getClassFor.asSubclass(classOf[SparkPlan]), r) }.toMap
   }
 

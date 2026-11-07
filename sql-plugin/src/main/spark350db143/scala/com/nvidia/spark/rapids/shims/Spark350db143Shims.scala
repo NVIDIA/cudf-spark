@@ -25,18 +25,13 @@ import com.nvidia.spark.rapids._
 import org.apache.spark.sql.execution.{SparkPlan, UnionExec}
 
 trait Spark350db143Shims extends Spark341PlusDBShims {
-  // Keep this lazy to avoid a class-initialization cycle: building these rules calls
-  // GpuOverrides.exec, while GpuOverrides initialization calls SparkShimImpl.
-  // Eager evaluation can deadlock if the two singleton objects are initialized concurrently.
-  private lazy val shimExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = Seq(
-    GpuOverrides.exec[UnionExec](
-      "The backend for the union operator",
-      ExecChecks((TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 +
-          TypeSig.MAP + TypeSig.ARRAY + TypeSig.STRUCT).nested()
-        .withPsNote(TypeEnum.STRUCT,
-          "unionByName will not optionally impute nulls for missing struct fields " +
-          "when the column is a struct and there are non-overlapping fields"), TypeSig.all),
-      (union, conf, p, r) => new SparkPlanMeta[UnionExec](union, conf, p, r) {
+
+  private class UnionExecMetaImpl(
+      union: UnionExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule)
+      extends SparkPlanMeta[UnionExec](union, conf, p, r) {
         private def hasUnionWithLocalDataExecParent: Boolean =
           p.exists(_.wrapped.isInstanceOf[UnionWithLocalDataExec])
 
@@ -59,7 +54,26 @@ trait Spark350db143Shims extends Spark341PlusDBShims {
 
         override def convertToGpu(): GpuExec =
           GpuUnionExec(childPlans.map(_.convertIfNeeded()))
-      })
+      }
+
+  private def createUnionExecMeta(
+      union: UnionExec,
+      conf: com.nvidia.spark.rapids.RapidsConf,
+      p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+      r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new UnionExecMetaImpl(union, conf, p, r)
+  // Keep this lazy to avoid a class-initialization cycle: building these rules calls
+  // GpuOverrides.exec, while GpuOverrides initialization calls SparkShimImpl.
+  // Eager evaluation can deadlock if the two singleton objects are initialized concurrently.
+  private lazy val shimExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = Seq(
+    GpuOverrides.exec[UnionExec](
+      "The backend for the union operator",
+      ExecChecks((TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 +
+          TypeSig.MAP + TypeSig.ARRAY + TypeSig.STRUCT).nested()
+        .withPsNote(TypeEnum.STRUCT,
+          "unionByName will not optionally impute nulls for missing struct fields " +
+          "when the column is a struct and there are non-overlapping fields"), TypeSig.all),
+      createUnionExecMeta)
   ).map(r => (r.getClassFor.asSubclass(classOf[SparkPlan]), r)).toMap
 
   override def getExecs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] =

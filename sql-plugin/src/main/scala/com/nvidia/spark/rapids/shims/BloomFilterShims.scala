@@ -26,30 +26,27 @@ import org.apache.spark.sql.rapids.aggregate.{CpuToGpuAggregateBufferConverter,
   GpuToCpuAggregateBufferConverter, GpuToCpuBloomFilterBufferConverter}
 
 object BloomFilterShims {
-  val exprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
-    Seq(
-      GpuOverrides.expr[BloomFilterMightContain](
-        "Bloom filter query",
-        ExprChecks.binaryProject(
-          TypeSig.BOOLEAN,
-          TypeSig.BOOLEAN,
-          ("lhs", TypeSig.BINARY + TypeSig.NULL, TypeSig.BINARY + TypeSig.NULL),
-          ("rhs", TypeSig.LONG + TypeSig.NULL, TypeSig.LONG + TypeSig.NULL)),
-        (a, conf, p, r) => new BinaryExprMeta[BloomFilterMightContain](a, conf, p, r) {
+  private class BloomFilterMightContainMetaImpl(
+      a: BloomFilterMightContain,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) extends BinaryExprMeta[BloomFilterMightContain](a, conf, p, r) {
           override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
             GpuBloomFilterMightContain(lhs, rhs)
-        }),
-      GpuOverrides.expr[BloomFilterAggregate](
-        "Bloom filter build",
-        ExprChecksImpl(Map(
-          (ReductionAggExprContext,
-            ContextChecks(TypeSig.BINARY, TypeSig.BINARY,
-              Seq(ParamCheck("child", TypeSig.LONG, TypeSig.LONG),
-                ParamCheck("estimatedItems",
-                  TypeSig.lit(TypeEnum.LONG), TypeSig.lit(TypeEnum.LONG)),
-                ParamCheck("numBits",
-                  TypeSig.lit(TypeEnum.LONG), TypeSig.lit(TypeEnum.LONG))))))),
-        (a, conf, p, r) => new TypedImperativeAggExprMeta[BloomFilterAggregate](a, conf, p, r) {
+        }
+
+  private def createBloomFilterMightContainMeta(
+      a: BloomFilterMightContain,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) = new BloomFilterMightContainMetaImpl(a, conf, p, r)
+
+  private class BloomFilterAggregateMetaImpl(
+      a: BloomFilterAggregate,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule)
+      extends TypedImperativeAggExprMeta[BloomFilterAggregate](a, conf, p, r) {
           private lazy val estimatedNumItems =
             GpuBloomFilterAggregate.clampEstimatedNumItems(
               a.estimatedNumItemsExpression.eval().asInstanceOf[Number].longValue)
@@ -84,7 +81,36 @@ object BloomFilterShims {
             GpuToCpuBloomFilterBufferConverter(estimatedNumItems, numBits)
 
           override val supportBufferConversion: Boolean = true
-        })
+        }
+
+  private def createBloomFilterAggregateMeta(
+      a: BloomFilterAggregate,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) =
+    new BloomFilterAggregateMetaImpl(a, conf, p, r)
+
+  val exprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
+    Seq(
+      GpuOverrides.expr[BloomFilterMightContain](
+        "Bloom filter query",
+        ExprChecks.binaryProject(
+          TypeSig.BOOLEAN,
+          TypeSig.BOOLEAN,
+          ("lhs", TypeSig.BINARY + TypeSig.NULL, TypeSig.BINARY + TypeSig.NULL),
+          ("rhs", TypeSig.LONG + TypeSig.NULL, TypeSig.LONG + TypeSig.NULL)),
+        createBloomFilterMightContainMeta),
+      GpuOverrides.expr[BloomFilterAggregate](
+        "Bloom filter build",
+        ExprChecksImpl(Map(
+          (ReductionAggExprContext,
+            ContextChecks(TypeSig.BINARY, TypeSig.BINARY,
+              Seq(ParamCheck("child", TypeSig.LONG, TypeSig.LONG),
+                ParamCheck("estimatedItems",
+                  TypeSig.lit(TypeEnum.LONG), TypeSig.lit(TypeEnum.LONG)),
+                ParamCheck("numBits",
+                  TypeSig.lit(TypeEnum.LONG), TypeSig.lit(TypeEnum.LONG))))))),
+        createBloomFilterAggregateMeta)
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
   }
 }
