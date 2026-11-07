@@ -17,7 +17,7 @@
 package com.nvidia.spark.rapids.parquet
 
 import ai.rapids.cudf.ByteRange
-import com.nvidia.spark.rapids.parquet.HybridScanParquetPartitionReader.{hostBufferLayout, HostBufferLayout}
+import com.nvidia.spark.rapids.parquet.HybridScanBase.{hostBufferLayout, HostBufferLayout}
 import org.scalatest.funsuite.AnyFunSuite
 
 /**
