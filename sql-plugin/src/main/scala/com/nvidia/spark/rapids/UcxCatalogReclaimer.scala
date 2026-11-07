@@ -29,7 +29,8 @@ import org.apache.spark.sql.rapids.{ProxyRapidsShuffleInternalManagerBase,
  * `ShuffleBufferCatalog`, and sends each result as its reclaim ends. It has no final step, so
  * its endpoint adds no JVM shutdown hook.
  *
- * @param isClosed the endpoint's closed check. Once it reads true, no further reclaim starts.
+ * @param isClosed the endpoint's closed check. Once it reads true, no further reclaim starts,
+ *                 and the one in flight frees no further buffer.
  * @param reclaim frees what the executor holds of a shuffle for writers at or below a watermark,
  *                and frees no further buffer once its stop check reads true
  * @param send sends one result to the driver
@@ -73,7 +74,7 @@ class UcxCatalogReclaimer(
   private def reclaimOne(request: ShuffleReclaimRequest): ShuffleReclaimResult = {
     val startNanos = System.nanoTime()
     try {
-      reclaim(request.shuffleId, request.watermark, () => false)
+      reclaim(request.shuffleId, request.watermark, isClosed)
     } catch {
       case NonFatal(e) =>
         logWarning(s"Failed to reclaim shuffle ${request.shuffleId}", e)
@@ -103,7 +104,7 @@ object UcxCatalogReclaimer {
     Option(SparkEnv.get).map(_.shuffleManager) match {
       case Some(proxy: ProxyRapidsShuffleInternalManagerBase) =>
         proxy.getRealImpl.asInstanceOf[RapidsShuffleInternalManagerBase]
-          .reclaimGpuShuffle(shuffleId, watermark)
+          .reclaimGpuShuffle(shuffleId, watermark, isStopped)
       case _ =>
         ShuffleReclaimResult.absent(shuffleId, watermark)
     }

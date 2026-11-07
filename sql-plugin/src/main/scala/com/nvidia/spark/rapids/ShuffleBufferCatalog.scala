@@ -106,11 +106,14 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
 
   /**
    * Removes the lookup entries of buffers already detached from their blocks, then closes
-   * every removed handle, even if one close fails.
+   * every removed handle, even if one close fails. Once `isStopped` reads true it closes no
+   * further handle, and the spill framework's shutdown closes the rest.
    *
-   * @return how many lookup entries this removed, and the size of the handles it closed
+   * @return how many lookup entries this removed, and the size of the handles it removed
    */
-  private def removeAndCloseBuffers(bufferIds: Iterable[ShuffleBufferId]): (Int, Long) = {
+  private def removeAndCloseBuffers(
+      bufferIds: Iterable[ShuffleBufferId],
+      isStopped: () => Boolean = () => false): (Int, Long) = {
     val handles = new ArrayBuffer[SpillableDeviceBufferHandle]()
     var removed = 0
     bufferIds.foreach { id =>
@@ -123,7 +126,8 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
       }
     }
     val bytes = handles.iterator.map(_.sizeInBytes).sum
-    handles.safeClose()
+    // each close checks for a stop first, so a stop ends the frees at the next handle
+    handles.map(handle => (() => if (!isStopped()) handle.close()): AutoCloseable).safeClose()
     (removed, bytes)
   }
 
@@ -292,7 +296,7 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
       freed ++= listedBufferIds(detached)
     }
     // frees are slow, so they run outside every map lock
-    val (buffers, bytes) = removeAndCloseBuffers(freed)
+    val (buffers, bytes) = removeAndCloseBuffers(freed, isStopped)
     val outcome = if (deferred) {
       ShuffleReclaimOutcome.DEFERRED
     } else if (buffers > 0) {

@@ -880,8 +880,8 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
         () => GpuTimeZoneDB.shutdown(),
         () => GpuSemaphore.shutdown(),
         () => PythonWorkerSemaphore.shutdown(),
-        // Closed before the device teardown, so no reclaim starts during it, and close() waits
-        // for the one in flight.
+        // Closed before the device teardown, so no reclaim starts during it, and the one in
+        // flight stops at its next free, which close() waits for.
         () => Option(ucxReclaimEndpoint).foreach(_.close()),
         () => GpuDeviceManager.shutdown(),
         () => ProfilerOnExecutor.shutdown(),

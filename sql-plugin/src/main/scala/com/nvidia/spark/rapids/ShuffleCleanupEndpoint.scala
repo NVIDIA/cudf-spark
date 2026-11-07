@@ -134,14 +134,25 @@ class ShuffleCleanupEndpoint(
         logWarning("Error during final shuffle cleanup", e)
     }
 
-    try {
-      if (!executorService.awaitTermination(5, TimeUnit.SECONDS)) {
-        executorService.shutdownNow()
+    // A UCX reclaim frees no further buffer once `closed` is set, so for UCX this waits for one
+    // free or one ask at most. An interrupt does not end the wait, since the UCX endpoint closes
+    // right before device shutdown, which must not overlap a free. The status is restored after.
+    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+    var terminated = false
+    var interrupted = false
+    while (!terminated && deadline - System.nanoTime() > 0) {
+      try {
+        terminated = executorService.awaitTermination(deadline - System.nanoTime(),
+          TimeUnit.NANOSECONDS)
+      } catch {
+        case _: InterruptedException => interrupted = true
       }
-    } catch {
-      case _: InterruptedException =>
-        executorService.shutdownNow()
-        Thread.currentThread().interrupt()
+    }
+    if (!terminated) {
+      executorService.shutdownNow()
+    }
+    if (interrupted) {
+      Thread.currentThread().interrupt()
     }
   }
 
