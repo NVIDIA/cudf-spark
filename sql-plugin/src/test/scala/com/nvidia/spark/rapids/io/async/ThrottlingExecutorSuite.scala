@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -47,8 +47,11 @@ class ThrottlingExecutorSuite extends AnyFunSuite with BeforeAndAfterEach {
   val taskMetrics: Map[String, GpuMetric] = GpuWriteJobStatsTracker.taskMetrics
 
   class TestTask extends Callable[Unit] {
+    val started = new CountDownLatch(1)
     val latch = new CountDownLatch(1)
+
     override def call(): Unit = {
+      started.countDown()
       latch.await()
     }
   }
@@ -71,6 +74,7 @@ class ThrottlingExecutorSuite extends AnyFunSuite with BeforeAndAfterEach {
   test("tasks submitted should update the state") {
     val task1 = new TestTask
     val future1 = executor.submit(task1, 10)
+    assert(task1.started.await(longTimeoutSec, TimeUnit.SECONDS))
     assertResult(1)(trafficController.numScheduledTasks)
     assertResult(10)(throttle.getTotalHostMemoryBytes)
 
@@ -158,6 +162,53 @@ class ThrottlingExecutorSuite extends AnyFunSuite with BeforeAndAfterEach {
     assertCause(e1, classOf[InterruptedException])
     val e2 = intercept[ExecutionException](future2.get())
     assertCause(e2, classOf[RejectedExecutionException])
+  }
+
+  test("rejected task releases throttle admission") {
+    executor.shutdownNow(longTimeoutSec, TimeUnit.SECONDS)
+
+    intercept[RejectedExecutionException] {
+      executor.submit(() => (), 30)
+    }
+
+    assertResult(0)(trafficController.numScheduledTasks)
+    assertResult(0)(throttle.getTotalHostMemoryBytes)
+  }
+
+  test("shutdown releases throttle admission for queued tasks") {
+    val started = new CountDownLatch(1)
+    val release = new CountDownLatch(1)
+
+    try {
+      executor.submit(() => {
+        started.countDown()
+        var waiting = true
+        while (waiting) {
+          try {
+            release.await()
+            waiting = false
+          } catch {
+            case _: InterruptedException =>
+          }
+        }
+      }, 10)
+      executor.submit(() => (), 20)
+
+      assert(started.await(longTimeoutSec, TimeUnit.SECONDS))
+      assertResult(2)(trafficController.numScheduledTasks)
+      assertResult(30)(throttle.getTotalHostMemoryBytes)
+
+      executor.shutdownNow(100, TimeUnit.MILLISECONDS)
+
+      assertResult(1)(trafficController.numScheduledTasks)
+      assertResult(10)(throttle.getTotalHostMemoryBytes)
+    } finally {
+      release.countDown()
+    }
+
+    executor.shutdownNow(longTimeoutSec, TimeUnit.SECONDS)
+    assertResult(0)(trafficController.numScheduledTasks)
+    assertResult(0)(throttle.getTotalHostMemoryBytes)
   }
 
   test("task metrics") {
