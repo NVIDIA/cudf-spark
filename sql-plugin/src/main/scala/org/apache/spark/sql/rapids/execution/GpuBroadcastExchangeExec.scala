@@ -17,6 +17,8 @@
 package org.apache.spark.sql.rapids.execution
 
 import java.io._
+import java.nio.ByteBuffer
+import java.nio.channels.Channels
 import java.util.UUID
 import java.util.concurrent._
 
@@ -25,15 +27,19 @@ import scala.concurrent.ExecutionContext
 import scala.ref.WeakReference
 import scala.util.control.NonFatal
 
-import ai.rapids.cudf.{HostMemoryBuffer, JCudfSerialization}
+import ai.rapids.cudf.{DeviceMemoryBuffer, HostMemoryBuffer, JCudfSerialization}
 import ai.rapids.cudf.JCudfSerialization.HostConcatResult
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
+import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.lore.{GpuLoreDumpRDD, SimpleRDD}
 import com.nvidia.spark.rapids.lore.GpuLore.LORE_DUMP_RDD_TAG
 import com.nvidia.spark.rapids.shims.{BroadcastExchangeShims, ShimBroadcastExchangeLike, ShimUnaryExecNode, SparkShimImpl}
+import com.nvidia.spark.rapids.spill.SpillFramework
+import org.apache.commons.io.IOUtils
+import org.apache.commons.io.output.CountingOutputStream
 
 import org.apache.spark.SparkException
 import org.apache.spark.broadcast.Broadcast
@@ -82,6 +88,15 @@ class SerializeConcatHostBuffersDeserializeBatch(
   @transient private var batchInternal: SpillableColumnarBatch = null
   // executor-local cache for build-side hash join state
   @transient private var hashBuildCacheInternal: HashBuildCache = null
+  // packed table bytes and metadata read back after an executor evicted a materialized batch
+  @transient private var packedData: HostMemoryBuffer = null
+  @transient private var packedMeta: Array[Byte] = null
+  // Serializes building and reading the GPU batch, and guards `data` and `packedData` against
+  // release. GPU work must not hold this object's monitor, because `doWriteObject` needs the
+  // monitor while Spark holds its memory lock. `doWriteObject` does not take this lock.
+  // Lock order: `materializeLock`, then this object's monitor. `closeInternal` holds both while
+  // it waits for hash builders, so builders must not call `batch` or `hostBatch`.
+  @transient private lazy val materializeLock = new Object
 
   private def maybeGpuBatch: Option[SpillableColumnarBatch] = Option(batchInternal)
 
@@ -92,37 +107,63 @@ class SerializeConcatHostBuffersDeserializeBatch(
     hashBuildCacheInternal
   }
 
-  def batch: SpillableColumnarBatch = this.synchronized {
-    maybeGpuBatch.getOrElse {
-      NvtxRegistry.BROADCAST_MANIFEST_BATCH {
-        val spillable =
-          if (data == null || data.getTableHeader.getNumColumns == 0) {
-            // If `data` is null or there are no columns, this is a rows-only batch
-            SpillableColumnarBatch(
-              new ColumnarBatch(Array.empty, numRows),
-              SpillPriorities.ACTIVE_BATCHING_PRIORITY)
-          } else if (data.getTableHeader.getNumRows == 0) {
-            // If we have columns but no rows, we can use the emptyBatchFromTypes optimization
-            SpillableColumnarBatch(
-              GpuColumnVector.emptyBatchFromTypes(dataTypes),
-              SpillPriorities.ACTIVE_BATCHING_PRIORITY)
-          } else {
-            // Regular GPU batch with rows/cols
-            SpillableColumnarBatch(
-              data.toContiguousTable,
-              dataTypes,
-              SpillPriorities.ACTIVE_BATCHING_PRIORITY)
-          }
+  def batch: SpillableColumnarBatch = this.synchronized(maybeGpuBatch).getOrElse {
+    materializeLock.synchronized {
+      this.synchronized(maybeGpuBatch).getOrElse(NvtxRegistry.BROADCAST_MANIFEST_BATCH {
+        val spillable = buildGpuBatch()
         // At this point we no longer need the host data and should not need to touch it again.
         // Note that we don't close this using `withResources` around the creation of the
         // `SpillableColumnarBatch`. That is because if a retry exception is thrown we want to
         // still be able to recreate this broadcast batch, so we can't close the host data
         // until we are at this line.
-        data.safeClose()
-        data = null
-        batchInternal = spillable
+        this.synchronized {
+          Seq(data, packedData).safeClose()
+          data = null
+          packedData = null
+          packedMeta = null
+          batchInternal = spillable
+        }
         spillable
-      }
+      })
+    }
+  }
+
+  /**
+   * Build the GPU batch from `packedData` or `data`. Called by `batch` while holding
+   * `materializeLock` but not this object's monitor. Protected for tests that pause it.
+   */
+  protected def buildGpuBatch(): SpillableColumnarBatch = {
+    if (packedData != null) {
+      SpillableColumnarBatch(packedDeviceBatch, SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+    } else if (data == null || data.getTableHeader.getNumColumns == 0) {
+      // If `data` is null or there are no columns, this is a rows-only batch
+      SpillableColumnarBatch(
+        new ColumnarBatch(Array.empty, numRows),
+        SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+    } else if (data.getTableHeader.getNumRows == 0) {
+      // If we have columns but no rows, we can use the emptyBatchFromTypes optimization
+      SpillableColumnarBatch(
+        GpuColumnVector.emptyBatchFromTypes(dataTypes),
+        SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+    } else {
+      // Regular GPU batch with rows/cols
+      SpillableColumnarBatch(
+        data.toContiguousTable,
+        dataTypes,
+        SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+    }
+  }
+
+  /** Copy `packedData` to the device and unpack it. The caller must close the result. */
+  private def packedDeviceBatch: ColumnarBatch = {
+    val devBuffer = closeOnExcept(DeviceMemoryBuffer.allocate(packedData.getLength)) { dmb =>
+      dmb.copyFromHostBuffer(packedData)
+      dmb
+    }
+    val meta = MetaUtils.buildTableMeta(0, packedData.getLength,
+      ByteBuffer.wrap(packedMeta), numRows)
+    withResource(devBuffer) { _ =>
+      MetaUtils.getBatchFromMeta(devBuffer, meta, dataTypes)
     }
   }
 
@@ -133,15 +174,23 @@ class SerializeConcatHostBuffersDeserializeBatch(
    *
    * NOTE: The caller is responsible to release these host columnar batches.
    */
-  def hostBatch: ColumnarBatch = this.synchronized {
-    maybeGpuBatch.map { spillable =>
-      withResource(spillable.getColumnarBatch()) { batch =>
-        val hostColumns: Array[ColumnVector] = GpuColumnVector
-          .extractColumns(batch)
-          .safeMap(_.copyToHost())
-        new ColumnarBatch(hostColumns, numRows)
+  def hostBatch: ColumnarBatch = materializeLock.synchronized {
+    def copyToHost(batch: ColumnarBatch): ColumnarBatch = {
+      val hostColumns: Array[ColumnVector] = GpuColumnVector
+        .extractColumns(batch)
+        .safeMap(_.copyToHost())
+      new ColumnarBatch(hostColumns, numRows)
+    }
+    // Device reads hold only `materializeLock`, which keeps `packedData` valid
+    this.synchronized(maybeGpuBatch).map { spillable =>
+      withRetryNoSplit[ColumnarBatch](withResource(spillable.getColumnarBatch())(copyToHost))
+    }.orElse {
+      // Only a JVM that materialized the batch on its GPU writes packed data, so this device
+      // read is no different from the read of `batchInternal` above
+      this.synchronized(Option(packedData)).map { _ =>
+        withRetryNoSplit[ColumnarBatch](withResource(packedDeviceBatch)(copyToHost))
       }
-    }.getOrElse {
+    }.getOrElse(this.synchronized {
       NvtxRegistry.BROADCAST_MANIFEST_BATCH {
         if (data == null) {
           new ColumnarBatch(Array.empty, numRows)
@@ -154,7 +203,7 @@ class SerializeConcatHostBuffersDeserializeBatch(
           new ColumnarBatch(hostColumns.toArray, rowCount)
         }
       }
-    }
+    })
   }
 
   /**
@@ -180,7 +229,7 @@ class SerializeConcatHostBuffersDeserializeBatch(
       prepareBatch: Option[ColumnarBatch => ColumnarBatch],
       metrics: HashBuildMetrics): HashBackendProvider = {
     // Resolve the broadcast batch before capturing it in the build closure. closeInternal holds
-    // the monitor while waiting for builders, so the build must not call batch to avoid deadlock.
+    // the locks while waiting for builders, so the build must not call batch or hostBatch.
     val buildBatch = batch
     val key = HashBuildKey.fromExpressions(
       sourceProjection, boundBuiltKeys, compareNullsEqual, filterOutNulls)
@@ -210,72 +259,159 @@ class SerializeConcatHostBuffersDeserializeBatch(
    *
    * The driver will have `data` populated on construction and the executor will deserialize
    * the object and, as part of the deserialization, invoke `doReadObject`.
-   * This will populate `data` before any task has had a chance to call `.batch` on this class.
+   * This will populate `data`, or `packedData` for a block this executor evicted, before any
+   * task has had a chance to call `.batch` on this class.
    *
-   * If `batchInternal` is defined we are in the executor, and there is no work to be done.
-   * This broadcast has been materialized on the GPU/spill store, and it is completely
-   * managed by the plugin.
+   * If `batchInternal` is defined we are in the executor, and this broadcast has been
+   * materialized on the GPU/spill store. Spark calls this method while holding its memory
+   * manager lock, which GPU tasks may also need, so this path writes the packed table bytes
+   * without waiting on the GPU semaphore, a device allocation, or `materializeLock`.
+   * A reloaded broadcast that no task has materialized writes its `packedData` again.
    *
    * Public for unit tests.
    *
    * @param out the stream to write to
    */
-  def doWriteObject(out: ObjectOutputStream): Unit = this.synchronized {
-    maybeGpuBatch.map {
-      case justRows: JustRowsColumnarBatch =>
-        JCudfSerialization.writeRowsToStream(out, justRows.numRows())
-      case scb: SpillableColumnarBatch =>
-        val table = withResource(scb.getColumnarBatch()) { cb =>
-          GpuColumnVector.from(cb)
+  def doWriteObject(out: ObjectOutputStream): Unit = {
+    // Take a short snapshot, then write without holding this object's monitor. The references
+    // taken keep `closeInternal` from freeing the data while it is written.
+    var gpuBatch: SpillableColumnarBatch = null
+    var header: JCudfSerialization.SerializedTableHeader = null
+    var hostBuffer: HostMemoryBuffer = null
+    var hostPackedMeta: Array[Byte] = null
+    this.synchronized {
+      gpuBatch = maybeGpuBatch.map(_.incRefCount()).orNull
+      if (gpuBatch == null) {
+        if (packedData != null) {
+          hostBuffer = packedData
+          hostPackedMeta = packedMeta
+        } else if (data != null) {
+          header = data.getTableHeader
+          hostBuffer = data.getHostBuffer
         }
-        withResource(table) { _ =>
-          JCudfSerialization.writeToStream(table, out, 0, table.getRowCount)
+        Option(hostBuffer).foreach(_.incRefCount())
+      }
+    }
+    withResource(Seq[AutoCloseable](gpuBatch, hostBuffer).filter(_ != null)) { _ =>
+      Option(gpuBatch).map {
+        case justRows: JustRowsColumnarBatch =>
+          writeEmpty(out, justRows.numRows(), Array.empty)
+        case scb if scb.numRows() == 0 =>
+          writeEmpty(out, 0, dataTypes)
+        case scb: SpillableColumnarBatchFromBufferImpl =>
+          writePacked(out, scb.sizeInBytes) { dataOut =>
+            scb.writePackedTo(dataOut).packedMetaAsByteBuffer()
+          }
+        case scb =>
+          throw new IllegalStateException(s"Unexpected materialized broadcast batch $scb")
+      }.getOrElse {
+        if (hostPackedMeta != null) {
+          writePacked(out, hostBuffer.getLength) { dataOut =>
+            SpillFramework.writeBuffers(
+              new HostByteBufferIterator(hostBuffer), Channels.newChannel(dataOut))
+            ByteBuffer.wrap(hostPackedMeta)
+          }
+        } else if (header == null || header.getNumColumns == 0) {
+          writeEmpty(out, numRows, Array.empty)
+        } else if (numRows == 0) {
+          writeEmpty(out, 0, dataTypes)
+        } else {
+          out.writeByte(SerializeConcatHostBuffersDeserializeBatch.JCUDF_FORMAT)
+          JCudfSerialization.writeConcatedStream(Array(header), Array(hostBuffer), out)
+          out.writeObject(dataTypes)
         }
-        out.writeObject(dataTypes)
-    }.getOrElse {
-      if (data == null || data.getTableHeader.getNumColumns == 0) {
-        JCudfSerialization.writeRowsToStream(out, numRows)
-      } else if (numRows == 0) {
-        // We didn't get any data back, but we need to write out an empty table that matches
-        withResource(GpuColumnVector.emptyHostColumns(dataTypes)) { hostVectors =>
-          JCudfSerialization.writeToStream(hostVectors, out, 0, 0)
-        }
-        out.writeObject(dataTypes)
-      } else {
-        val headers = Array(data.getTableHeader)
-        val buffers = Array(data.getHostBuffer)
-        JCudfSerialization.writeConcatedStream(headers, buffers, out)
-        out.writeObject(dataTypes)
       }
     }
   }
 
+  private def writeEmpty(out: ObjectOutputStream, rows: Int, types: Array[DataType]): Unit = {
+    out.writeByte(SerializeConcatHostBuffersDeserializeBatch.JCUDF_FORMAT)
+    if (types.isEmpty) {
+      JCudfSerialization.writeRowsToStream(out, rows)
+    } else {
+      // We didn't get any data back, but we need to write out an empty table that matches
+      withResource(GpuColumnVector.emptyHostColumns(types)) { hostVectors =>
+        JCudfSerialization.writeToStream(hostVectors, out, 0, 0)
+      }
+      out.writeObject(types)
+    }
+  }
+
   /**
-   * Deserializes a broadcast result in the host into `data`, `numRows` and `dataLen`.
+   * Write packed table bytes followed by the cudf metadata needed to unpack them.
+   * @param writeData writes `len` bytes to its stream and returns the packed metadata
+   */
+  private def writePacked(out: ObjectOutputStream, len: Long)
+      (writeData: OutputStream => ByteBuffer): Unit = {
+    out.writeByte(SerializeConcatHostBuffersDeserializeBatch.PACKED_FORMAT)
+    out.writeInt(numRows)
+    out.writeLong(len)
+    val dataOut = new CountingOutputStream(out)
+    val meta = writeData(dataOut)
+    if (dataOut.getByteCount != len) {
+      throw new IllegalStateException(
+        s"Expected to write $len packed bytes, but wrote ${dataOut.getByteCount} bytes")
+    }
+    val metaBytes = new Array[Byte](meta.remaining())
+    meta.get(metaBytes)
+    out.writeInt(metaBytes.length)
+    out.write(metaBytes)
+    out.writeObject(dataTypes)
+  }
+
+  /**
+   * Deserializes a broadcast result in the host into `data` or `packedData`, `numRows` and
+   * `dataLen`.
    *
    * Public for unit tests.
    */
   def doReadObject(in: ObjectInputStream): Unit = this.synchronized {
-    // no-op if we already have `batchInternal` or `data` set
-    if (batchInternal == null && data == null) {
+    // no-op if we already have `batchInternal`, `data`, or `packedData` set
+    if (batchInternal == null && data == null && packedData == null) {
       NvtxRegistry.DESERIALIZE_BATCH {
-        val (header, buffer) = SerializedHostTableUtils.readTableHeaderAndBuffer(in)
-        withResource(buffer) { _ =>
-          dataTypes = if (header.getNumColumns > 0) {
-            in.readObject().asInstanceOf[Array[DataType]]
-          } else {
-            Array.empty
-          }
-          // for a rowsOnly broadcast, null out the `data` member.
-          val rowsOnly = dataTypes.isEmpty
-          numRows = header.getNumRows
-          dataLen = header.getDataLen
-          data = if (!rowsOnly) {
-            JCudfSerialization.concatToHostBuffer(Array(header), Array(buffer))
-          } else {
-            null
-          }
+        in.readByte() match {
+          case SerializeConcatHostBuffersDeserializeBatch.PACKED_FORMAT =>
+            numRows = in.readInt()
+            dataLen = in.readLong()
+            packedData = closeOnExcept(HostMemoryBuffer.allocate(dataLen)) { hmb =>
+              withResource(new HostMemoryOutputStream(hmb)) { hmos =>
+                val copied = IOUtils.copyLarge(in, hmos, 0, dataLen)
+                if (copied != dataLen) {
+                  throw new IllegalStateException(
+                    s"Expected to read $dataLen bytes, but got $copied bytes")
+                }
+              }
+              val meta = new Array[Byte](in.readInt())
+              in.readFully(meta)
+              dataTypes = in.readObject().asInstanceOf[Array[DataType]]
+              packedMeta = meta
+              hmb
+            }
+          case SerializeConcatHostBuffersDeserializeBatch.JCUDF_FORMAT =>
+            readJCudfObject(in)
+          case format =>
+            throw new IllegalStateException(s"Unknown broadcast stream format $format")
         }
+      }
+    }
+  }
+
+  private def readJCudfObject(in: ObjectInputStream): Unit = {
+    val (header, buffer) = SerializedHostTableUtils.readTableHeaderAndBuffer(in)
+    withResource(buffer) { _ =>
+      dataTypes = if (header.getNumColumns > 0) {
+        in.readObject().asInstanceOf[Array[DataType]]
+      } else {
+        Array.empty
+      }
+      // for a rowsOnly broadcast, null out the `data` member.
+      val rowsOnly = dataTypes.isEmpty
+      numRows = header.getNumRows
+      dataLen = header.getDataLen
+      data = if (!rowsOnly) {
+        JCudfSerialization.concatToHostBuffer(Array(header), Array(buffer))
+      } else {
+        null
       }
     }
   }
@@ -291,11 +427,15 @@ class SerializeConcatHostBuffersDeserializeBatch(
    *
    * Public for tests.
    */
-  def closeInternal(): Unit = this.synchronized {
-    Seq(hashBuildCacheInternal, data, batchInternal).safeClose()
-    data = null
-    batchInternal = null
-    hashBuildCacheInternal = null
+  def closeInternal(): Unit = materializeLock.synchronized {
+    this.synchronized {
+      Seq(hashBuildCacheInternal, data, packedData, batchInternal).safeClose()
+      data = null
+      packedData = null
+      packedMeta = null
+      batchInternal = null
+      hashBuildCacheInternal = null
+    }
   }
 
   @scala.annotation.nowarn("msg=method finalize in class Object is deprecated")
@@ -305,6 +445,12 @@ class SerializeConcatHostBuffersDeserializeBatch(
   }
 }
 // scalastyle:on no.finalize
+
+object SerializeConcatHostBuffersDeserializeBatch {
+  // Stream formats written by `doWriteObject`
+  private[execution] val JCUDF_FORMAT: Byte = 0
+  private[execution] val PACKED_FORMAT: Byte = 1
+}
 
 // scalastyle:off no.finalize
 /**
