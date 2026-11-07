@@ -165,19 +165,20 @@ class LargeHostMemorySuite extends SparkQueryCompareTestSuite {
     val expected = expectedDigest(columns, LIMIT_CROSSING_ROWS)
     // The host build ends its first batch at the column limit, after 2047 rows, and the default
     // slice budget of 1,068,373,114 bytes cuts it every 1018 rows of 1,048,580 GPU bytes.
+    // Cache records can split these slices further, and GPU reads can combine small records.
     val cachedRows = Seq(1018, 1018, 11, 253)
     withGpuSparkSession { spark =>
       setActiveSession(spark)
       withResource(new RowEntryCache(spark.sparkContext, TrampolineUtil.getSparkConf(spark),
           columns, LIMIT_CROSSING_ROWS)) { cache =>
-        assertResult(cachedRows)(cache.batchRows)
+        assertRecordLayout(cachedRows, cache.batchRows)
         assertPayloadsFit(cache)
         val gpuScan = cache.gpuScan()
         assertResult(expected)(gpuScan.digest)
-        assertResult(cachedRows)(gpuScan.batchRows)
+        assertReadLayout(LIMIT_CROSSING_ROWS, columns, cache.conf, gpuScan.batchRows)
         assertResult(expected)(cache.read(columns, cache.conf).digest)
         assertResult(expected)(cache.readRowsPluginOff(columns))
-        assertResult(cachedRows)(cache.countRead())
+        assertReadLayout(LIMIT_CROSSING_ROWS, Seq.empty, cache.conf, cache.countRead())
       }
     }
   }
@@ -193,13 +194,45 @@ class LargeHostMemorySuite extends SparkQueryCompareTestSuite {
           columns, rows)) { cache =>
         val budget = math.min(cache.serializer.getBytesAllowedPerBatch(cache.conf),
           GPU_SLICE_BUDGET_CEILING)
-        assertResult(hostBatches.flatMap(sliceRows(columns, _, budget)))(cache.batchRows)
+        val slices = hostBatches.flatMap(sliceRows(columns, _, budget))
+        assertRecordLayout(slices, cache.batchRows)
         assertPayloadsFit(cache)
         val read = cache.read(columns, cache.conf)
         assertResult(expected)(read.digest)
-        assertResult(cache.batchRows)(read.batchRows)
+        assertReadLayout(rows, columns, cache.conf, read.batchRows)
       }
     }, conf)
+  }
+
+  /** Records may subdivide writer slices, but must preserve every slice boundary and row. */
+  private def assertRecordLayout(slices: Seq[Int], records: Seq[Int]): Unit = {
+    assert(records.forall(_ > 0))
+    assertResult(slices.sum)(records.sum)
+    val recordEnds = records.scanLeft(0)(_ + _).tail.toSet
+    slices.scanLeft(0)(_ + _).tail.foreach { end =>
+      assert(recordEnds.contains(end), s"a cache record crosses writer slice boundary $end")
+    }
+  }
+
+  /** Read batches obey the read target and column limits independently of writer slices. */
+  private def assertReadLayout(
+      rows: Int,
+      columns: Seq[ValueColumn],
+      conf: SQLConf,
+      batches: Seq[Int]): Unit = {
+    assertResult(rows)(batches.sum)
+    val targetBytes = new RapidsConf(conf).gpuTargetBatchSizeBytes
+    batches.foreach { batchRows =>
+      assert(batchRows > 0)
+      val columnBytes = columns.map { column =>
+        val valueBytes = batchRows.toLong * column.valueBytes
+        val limit = if (column.dataType == StringType) MAX_STRING_BYTES else MAX_ELEMENTS
+        assert(valueBytes <= limit, s"read column has $valueBytes value bytes, limit $limit")
+        valueBytes + (batchRows.toLong + 1) * OFFSET_BYTES
+      }
+      assert(columnBytes.sum <= targetBytes,
+        s"read batch has ${columnBytes.sum} bytes, target $targetBytes")
+    }
   }
 
   /** Runs `append`, which must be rejected at a limit before it changes `builder`. */
