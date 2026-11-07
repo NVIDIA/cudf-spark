@@ -30,12 +30,14 @@ import org.apache.spark.sql.rapids.{ProxyRapidsShuffleInternalManagerBase,
  * its endpoint adds no JVM shutdown hook.
  *
  * @param isClosed the endpoint's closed check. Once it reads true, no further reclaim starts.
- * @param reclaim frees what the executor holds of a shuffle for writers at or below a watermark
+ * @param reclaim frees what the executor holds of a shuffle for writers at or below a watermark,
+ *                and frees no further buffer once its stop check reads true
  * @param send sends one result to the driver
  */
 class UcxCatalogReclaimer(
     isClosed: () => Boolean,
-    reclaim: (Int, Long) => ShuffleReclaimResult = UcxCatalogReclaimer.reclaimOnShuffleManager,
+    reclaim: (Int, Long, () => Boolean) => ShuffleReclaimResult =
+      UcxCatalogReclaimer.reclaimOnShuffleManager,
     send: ShuffleReclaimResult => Unit) extends CatalogReclaimer with Logging {
 
   override def poll(executorId: String, ask: AnyRef => AnyRef): Unit = {
@@ -71,7 +73,7 @@ class UcxCatalogReclaimer(
   private def reclaimOne(request: ShuffleReclaimRequest): ShuffleReclaimResult = {
     val startNanos = System.nanoTime()
     try {
-      reclaim(request.shuffleId, request.watermark)
+      reclaim(request.shuffleId, request.watermark, () => false)
     } catch {
       case NonFatal(e) =>
         logWarning(s"Failed to reclaim shuffle ${request.shuffleId}", e)
@@ -94,7 +96,10 @@ object UcxCatalogReclaimer {
    * executor without one holds nothing to reclaim.
    */
   @scala.annotation.nowarn("cat=deprecation&origin=org.apache.spark.SparkEnv.shuffleManager")
-  private def reclaimOnShuffleManager(shuffleId: Int, watermark: Long): ShuffleReclaimResult = {
+  private def reclaimOnShuffleManager(
+      shuffleId: Int,
+      watermark: Long,
+      isStopped: () => Boolean): ShuffleReclaimResult = {
     Option(SparkEnv.get).map(_.shuffleManager) match {
       case Some(proxy: ProxyRapidsShuffleInternalManagerBase) =>
         proxy.getRealImpl.asInstanceOf[RapidsShuffleInternalManagerBase]

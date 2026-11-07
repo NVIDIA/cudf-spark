@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids
 
 import java.lang.management.ManagementFactory
 import java.util.concurrent.{CountDownLatch, TimeUnit}
-import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 
 import scala.collection.mutable.ArrayBuffer
 import scala.util.Try
@@ -647,6 +647,25 @@ class ShuffleBufferCatalogSuite
       (result.shuffleId, result.watermark, result.outcome, result.buffers, result.bytes,
         result.error))
     assert(result.elapsedNanos > 0)
+  }
+
+  test("a reclaim stopped between frees frees no further buffer, and leaves the rest to the " +
+      "spill framework's shutdown") {
+    val catalog = new ShuffleBufferCatalog()
+    catalog.registerShuffle(1, 5L)
+    val handlesBefore = SpillFramework.stores.deviceStore.numHandles
+    (0 until 3).foreach { reduceId =>
+      // the add borrows the table, and the handle keeps the buffer
+      withResource(RapidsShuffleTestHelper.buildContiguousTable(1000))(
+        catalog.addContiguousTable(ShuffleBlockId(1, 5L, reduceId), _, -1))
+    }
+    // the endpoint closes while the reclaim frees its first buffer
+    val stopChecks = new AtomicInteger()
+    catalog.reclaimShuffle(1, 5L, () => stopChecks.incrementAndGet() > 1)
+    assertResult((0, 0, 0))(catalog.bookkeepingSizes)
+    // the device store still tracks the two handles the reclaim left, which afterEach closes
+    assertResult(handlesBefore + 2, "handles the device store tracks")(
+      SpillFramework.stores.deviceStore.numHandles)
   }
 
   test("a reclaim removes a shuffle whose writers are all at or below its watermark") {

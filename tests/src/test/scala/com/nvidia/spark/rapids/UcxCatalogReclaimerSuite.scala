@@ -34,7 +34,7 @@ class UcxCatalogReclaimerSuite extends AnyFunSuite {
     val record = new ArrayBuffer[String]()
     val sent = new ArrayBuffer[ShuffleReclaimResult]()
     val reclaimer = new UcxCatalogReclaimer(() => false,
-      (shuffleId, w) => {
+      (shuffleId, w, _) => {
         record += s"reclaim $shuffleId"
         removed(shuffleId, w)
       },
@@ -52,7 +52,7 @@ class UcxCatalogReclaimerSuite extends AnyFunSuite {
       "the next reclaim still runs") {
     val sent = new ArrayBuffer[ShuffleReclaimResult]()
     val reclaimer = new UcxCatalogReclaimer(() => false,
-      (shuffleId, w) =>
+      (shuffleId, w, _) =>
         if (shuffleId == 1) {
           throw new IllegalStateException("the catalog is gone")
         } else {

@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids
 
 import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, ScheduledThreadPoolExecutor,
   TimeUnit}
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong, AtomicReference}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicLong, AtomicReference}
 
 import scala.collection.JavaConverters._
 
@@ -32,8 +32,11 @@ import org.apache.spark.api.plugin.PluginContext
 class ShuffleCleanupEndpointSuite extends AnyFunSuite {
   private val awaitSeconds = 30L
   private val watermark = 100L
-  // under the 5 s that close() waits for the poll thread, so a close() this fast did not time out
+  // under the 5 s that close() waits for the poll thread, so a close() this fast did not time out,
+  // and one this slow did not stop waiting early
   private val closeBoundSeconds = 4L
+  // one free of a reclaim that the tests time, so that three outlast close()'s wait
+  private val freeSeconds = 2L
 
   /**
    * A plugin context for executor 1, whose first UCX poll returns `firstReply` and whose later
@@ -86,19 +89,22 @@ class ShuffleCleanupEndpointSuite extends AnyFunSuite {
   private def ucxReclaimer(
       onReclaim: Int => Unit): (PluginContext, () => Boolean) => CatalogReclaimer =
     (context, isClosed) => new UcxCatalogReclaimer(isClosed,
-      (shuffleId, w) => {
+      (shuffleId, w, _) => {
         onReclaim(shuffleId)
         ShuffleReclaimResult.absent(shuffleId, w)
       },
       UcxCatalogReclaimer.sendTo(context))
 
-  /** Waits for `latch` as the catalog's frees do, keeping an interrupt for when it is done. */
-  private def awaitIgnoringInterrupts(latch: CountDownLatch): Unit = {
+  /**
+   * Waits up to `seconds` for `latch` as the catalog's frees do, keeping an interrupt for when it
+   * is done.
+   */
+  private def awaitIgnoringInterrupts(latch: CountDownLatch, seconds: Long = awaitSeconds): Unit = {
     var interrupted = false
     var waiting = true
     while (waiting) {
       try {
-        latch.await(awaitSeconds, TimeUnit.SECONDS)
+        latch.await(seconds, TimeUnit.SECONDS)
         waiting = false
       } catch {
         case _: InterruptedException => interrupted = true
@@ -177,12 +183,56 @@ class ShuffleCleanupEndpointSuite extends AnyFunSuite {
     }
   }
 
-  test("an interrupted close restores the interrupt status of the thread that called it") {
+  test("a closed UCX endpoint stops the reclaim in flight at its next free, and close() waits " +
+      "for that free") {
+    val freeing = new CountDownLatch(1)
+    val closeReturned = new AtomicBoolean(false)
+    val freesAfterClose = new AtomicInteger(0)
+    val ctx = mockContext(
+      RapidsShuffleReclaimResponseMsg(Array(ShuffleReclaimRequest(7, watermark))),
+      new ConcurrentLinkedQueue[AnyRef]())
+    val scheduler = newScheduler(new CountDownLatch(1))
+    // three frees that together outlast close()'s wait, each ignoring an interrupt as the
+    // catalog's frees do
+    val threeFrees: (PluginContext, () => Boolean) => CatalogReclaimer = (context, isClosed) =>
+      new UcxCatalogReclaimer(isClosed,
+        (shuffleId, w, isStopped) => {
+          var freed = 0
+          while (freed < 3 && !isStopped()) {
+            freeing.countDown()
+            awaitIgnoringInterrupts(new CountDownLatch(1), freeSeconds)
+            if (closeReturned.get) {
+              freesAfterClose.incrementAndGet()
+            }
+            freed += 1
+          }
+          ShuffleReclaimResult.absent(shuffleId, w)
+        },
+        UcxCatalogReclaimer.sendTo(context))
+    val endpoint = new ShuffleCleanupEndpoint(ctx, pollIntervalMs = 10,
+      newReclaimer = threeFrees, executorService = scheduler)
+    try {
+      endpoint.start()
+      assert(freeing.await(awaitSeconds, TimeUnit.SECONDS), "the reclaim never started freeing")
+      endpoint.close()
+      closeReturned.set(true)
+      assert(scheduler.awaitTermination(awaitSeconds, TimeUnit.SECONDS),
+        "the poll thread never ended")
+      assertResult(0, "frees that ended after close() returned")(freesAfterClose.get)
+    } finally {
+      endpoint.close()
+      scheduler.shutdownNow()
+    }
+  }
+
+  test("an interrupted close still waits up to its bound for the reclaim in flight, and " +
+      "restores the interrupt status of the thread that called it") {
     val started = new CountDownLatch(1)
     val release = new CountDownLatch(1)
     val shutdownCalled = new CountDownLatch(1)
     val ctx = mockContext(twoRequests, new ConcurrentLinkedQueue[AnyRef]())
     val scheduler = newScheduler(shutdownCalled)
+    // the reclaim of shuffle 7 is one free that outlasts close()'s wait
     val endpoint = new ShuffleCleanupEndpoint(ctx, pollIntervalMs = 10,
       newReclaimer = ucxReclaimer { shuffleId =>
         if (shuffleId == 7) {
@@ -210,9 +260,9 @@ class ShuffleCleanupEndpointSuite extends AnyFunSuite {
       closer.interrupt()
       closer.join(TimeUnit.SECONDS.toMillis(awaitSeconds))
       assert(!closer.isAlive, "close() never returned")
+      assert(closeNanos.get >= TimeUnit.SECONDS.toNanos(closeBoundSeconds),
+        s"close() stopped waiting for the reclaim in flight after ${closeNanos.get} ns")
       assert(interruptedAfterClose.get, "close() cleared the interrupt")
-      assert(closeNanos.get < TimeUnit.SECONDS.toNanos(closeBoundSeconds),
-        s"close() took ${closeNanos.get} ns")
     } finally {
       release.countDown()
       endpoint.close()
@@ -248,7 +298,8 @@ class ShuffleCleanupEndpointSuite extends AnyFunSuite {
         closer.start()
         assert(shutdownCalled.await(awaitSeconds, TimeUnit.SECONDS),
           "close() never stopped the polls")
-        // close() then waits for the poll, and an interrupt makes it interrupt the poll thread
+        // close() waits up to its bound for the poll, interrupted or not, and then interrupts
+        // the poll thread
         closer.interrupt()
         closer.join(TimeUnit.SECONDS.toMillis(awaitSeconds))
         assert(!closer.isAlive, "close() never returned")

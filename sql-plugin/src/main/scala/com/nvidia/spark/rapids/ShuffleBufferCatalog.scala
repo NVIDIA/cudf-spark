@@ -252,9 +252,15 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
    *
    * @param shuffleId the shuffle to reclaim
    * @param watermark the largest task attempt id whose output may be freed
+   * @param isStopped read before each buffer's free. Once it reads true, the reclaim frees no
+   *                  further buffer, and the spill framework's shutdown closes the rest, which
+   *                  the reclaim has already removed from the catalog and still counts.
    * @return what the reclaim freed
    */
-  def reclaimShuffle(shuffleId: Int, watermark: Long): ShuffleReclaimResult = {
+  def reclaimShuffle(
+      shuffleId: Int,
+      watermark: Long,
+      isStopped: () => Boolean = () => false): ShuffleReclaimResult = {
     val startNanos = System.nanoTime()
     val freed = new ArrayBuffer[ShuffleBufferId]()
     var detached: ShuffleRegistration = null
