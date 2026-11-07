@@ -29,42 +29,53 @@ import org.apache.spark.sql.rapids.GpuShuffleEnv
 /**
  * Executor-side endpoint for shuffle cleanup coordination.
  *
- * This endpoint periodically polls the driver for shuffles that need cleanup,
- * performs the cleanup on the executor's MultithreadedShuffleBufferCatalog,
- * and reports statistics back to the driver.
+ * This endpoint periodically polls the driver for shuffles that need cleanup, through its
+ * backend's reclaimer, which cleans up the backend's catalog on this executor and reports
+ * back to the driver.
  *
  * @param pluginContext the plugin context for RPC communication
  * @param pollIntervalMs interval between polls to driver (in milliseconds)
+ * @param newReclaimer builds the backend's reclaimer from the plugin context and this
+ *                     endpoint's closed check, MULTITHREADED's by default
+ * @param executorService runs the polls, by default on one daemon thread on the executor's GPU
  */
 class ShuffleCleanupEndpoint(
     pluginContext: PluginContext,
-    pollIntervalMs: Long = 1000) extends Logging with AutoCloseable {
+    pollIntervalMs: Long = 1000,
+    newReclaimer: (PluginContext, () => Boolean) => CatalogReclaimer =
+      (context, _) => new MultithreadedCatalogReclaimer(context),
+    executorService: ScheduledExecutorService = ShuffleCleanupEndpoint.newPollThread())
+  extends Logging with AutoCloseable {
 
   private val executorId: String = pluginContext.executorID()
-
-  private val executorService: ScheduledExecutorService =
-    Executors.newSingleThreadScheduledExecutor(
-      GpuDeviceManager.wrapThreadFactory(
-        new ThreadFactoryBuilder()
-          .setNameFormat("rapids-shuffle-cleanup")
-          .setDaemon(true)
-          .build(),
-        null,
-        () => RmmSpark.removeAllCurrentThreadAssociation()))
 
   private val pollTask = new Runnable {
     override def run(): Unit = {
       try {
         pollAndCleanup()
       } catch {
+        // close() interrupts a poll that outlives its wait, and the pool is ending then
+        case _: InterruptedException =>
+          Thread.currentThread().interrupt()
         case e: Exception =>
           logWarning("Error during shuffle cleanup poll", e)
+        // a throwable that leaves a periodic task ends it for good, and its future keeps the
+        // throwable unread
+        case t: Throwable =>
+          logError(s"Shuffle cleanup polling on executor $executorId stops after a fatal error",
+            t)
+          throw t
       }
     }
   }
 
   @volatile private var shutdownHookAdded = false
   @volatile private var closed = false
+
+  private val reclaimer = newReclaimer(pluginContext, () => closed)
+
+  /** Whether `start` added the JVM shutdown hook, for tests. */
+  private[rapids] def isShutdownHookAdded: Boolean = shutdownHookAdded
 
   /**
    * Start the periodic polling for shuffle cleanup.
@@ -80,7 +91,7 @@ class ShuffleCleanupEndpoint(
     
     // Add shutdown hook to ensure finalCleanup is called on JVM termination
     synchronized {
-    if (!shutdownHookAdded) {
+    if (!shutdownHookAdded && reclaimer.finalStep.isDefined) {
       shutdownHookAdded = true
       Runtime.getRuntime.addShutdownHook(new Thread("rapids-shuffle-cleanup-shutdown") {
         override def run(): Unit = {
@@ -102,9 +113,103 @@ class ShuffleCleanupEndpoint(
   /**
    * Poll driver for shuffles to clean up and process them.
    */
-  private def pollAndCleanup(): Unit = {
+  private def pollAndCleanup(): Unit = reclaimer.poll(executorId, pluginContext.ask)
+
+  override def close(): Unit = {
+    if (closed) {
+      return
+    }
+    closed = true
+    logInfo(s"Shutting down ShuffleCleanupEndpoint on executor $executorId")
+
+    // Stop the scheduled polling first
+    executorService.shutdown()
+
+    // Perform a final cleanup of any remaining data in the catalog
+    // This ensures no data is left behind when executor shuts down
+    try {
+      finalCleanup()
+    } catch {
+      case e: Exception =>
+        logWarning("Error during final shuffle cleanup", e)
+    }
+
+    // A UCX reclaim frees no further buffer once `closed` is set, so for UCX this waits for one
+    // free or one ask at most. An interrupt does not end the wait, since the UCX endpoint closes
+    // right before device shutdown, which must not overlap a free. The status is restored after.
+    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+    var terminated = false
+    var interrupted = false
+    while (!terminated && deadline - System.nanoTime() > 0) {
+      try {
+        terminated = executorService.awaitTermination(deadline - System.nanoTime(),
+          TimeUnit.NANOSECONDS)
+      } catch {
+        case _: InterruptedException => interrupted = true
+      }
+    }
+    if (!terminated) {
+      executorService.shutdownNow()
+    }
+    if (interrupted) {
+      Thread.currentThread().interrupt()
+    }
+  }
+
+  /**
+   * Runs the reclaimer's final cleanup, if it has one, during executor shutdown, so that no data
+   * is left behind.
+   */
+  private def finalCleanup(): Unit = reclaimer.finalStep.foreach(step => step())
+}
+
+object ShuffleCleanupEndpoint {
+  private def newPollThread(): ScheduledExecutorService =
+    Executors.newSingleThreadScheduledExecutor(
+      GpuDeviceManager.wrapThreadFactory(
+        new ThreadFactoryBuilder()
+          .setNameFormat("rapids-shuffle-cleanup")
+          .setDaemon(true)
+          .build(),
+        null,
+        () => RmmSpark.removeAllCurrentThreadAssociation()))
+}
+
+/** A backend's side of the cleanup protocol, which a `ShuffleCleanupEndpoint` runs. */
+trait CatalogReclaimer {
+  /**
+   * Polls the driver once and does the work its reply names, on the endpoint's poll thread.
+   *
+   * @param executorId this executor's id, which the poll names
+   * @param ask sends a message to the driver and returns its reply
+   */
+  def poll(executorId: String, ask: AnyRef => AnyRef): Unit
+
+  /** The cleanup that close() and the JVM shutdown hook run, if the backend has one. */
+  def finalStep: Option[() => Unit]
+}
+
+/**
+ * MULTITHREADED's reclaimer: removes the shuffles the driver names from the executor's
+ * MultithreadedShuffleBufferCatalog, and reports statistics back to the driver.
+ *
+ * @param pluginContext the plugin context the statistics go through
+ */
+class MultithreadedCatalogReclaimer(pluginContext: PluginContext)
+  extends CatalogReclaimer with Logging {
+
+  // log settings that name the endpoint's logger cover these cleanup lines too
+  override protected def logName: String = classOf[ShuffleCleanupEndpoint].getName
+
+  // equals the id poll is given, and finalCleanup's stats need it outside a poll
+  private val executorId: String = pluginContext.executorID()
+
+  /**
+   * Poll driver for shuffles to clean up and process them.
+   */
+  override def poll(executorId: String, ask: AnyRef => AnyRef): Unit = {
     // Ask driver for shuffles that need cleanup
-    val response = pluginContext.ask(RapidsShuffleCleanupPollMsg(executorId))
+    val response = ask(RapidsShuffleCleanupPollMsg(executorId))
 
     response match {
       case RapidsShuffleCleanupResponseMsg(shuffleIds) if shuffleIds.nonEmpty =>
@@ -180,34 +285,7 @@ class ShuffleCleanupEndpoint(
     }
   }
 
-  override def close(): Unit = {
-    if (closed) {
-      return
-    }
-    closed = true
-    logInfo(s"Shutting down ShuffleCleanupEndpoint on executor $executorId")
-
-    // Stop the scheduled polling first
-    executorService.shutdown()
-
-    // Perform a final cleanup of any remaining data in the catalog
-    // This ensures no data is left behind when executor shuts down
-    try {
-      finalCleanup()
-    } catch {
-      case e: Exception =>
-        logWarning("Error during final shuffle cleanup", e)
-    }
-
-    try {
-      if (!executorService.awaitTermination(5, TimeUnit.SECONDS)) {
-        executorService.shutdownNow()
-      }
-    } catch {
-      case _: InterruptedException =>
-        executorService.shutdownNow()
-    }
-  }
+  override def finalStep: Option[() => Unit] = Some(() => finalCleanup())
 
   /**
    * Perform final cleanup of all shuffles in the catalog.
@@ -259,4 +337,3 @@ class ShuffleCleanupEndpoint(
     }
   }
 }
-

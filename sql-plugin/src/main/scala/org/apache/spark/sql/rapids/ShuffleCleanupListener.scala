@@ -24,16 +24,107 @@ import scala.collection.mutable
 import com.nvidia.spark.rapids.ShuffleCleanupManager
 
 import org.apache.spark.internal.Logging
-import org.apache.spark.scheduler.{SparkListener, SparkListenerEvent, SparkListenerJobStart}
+import org.apache.spark.scheduler.{SparkListener, SparkListenerEvent,
+  SparkListenerExecutorMetricsUpdate, SparkListenerExecutorRemoved, SparkListenerJobEnd,
+  SparkListenerJobStart, SparkListenerStageCompleted, SparkListenerStageSubmitted,
+  SparkListenerTaskEnd, SparkListenerTaskStart}
 import org.apache.spark.sql.execution.SQLExecution
-import org.apache.spark.sql.execution.ui.SparkListenerSQLExecutionEnd
+import org.apache.spark.sql.execution.ui.{SparkListenerSQLExecutionEnd,
+  SparkListenerSQLExecutionStart}
 
 /**
- * A SparkListener that triggers shuffle cleanup when a SQL query completes.
+ * A SparkListener that passes the scheduler and SQL events it receives to the cleanup policy
+ * of the shuffle backend in use.
  *
- * This listener solves the problem of GC-based shuffle cleanup being unreliable
+ * Note: This file is placed in org.apache.spark.sql.rapids package to access
+ * the private[spark] shuffleDepId field in StageInfo.
+ *
+ * @param policy the backend's policy, which handles each event on this listener's thread
+ */
+class ShuffleCleanupListener(policy: ShuffleCleanupPolicy) extends SparkListener {
+
+  override def onJobStart(jobStart: SparkListenerJobStart): Unit = policy.onJobStart(jobStart)
+
+  override def onJobEnd(jobEnd: SparkListenerJobEnd): Unit = policy.onJobEnd(jobEnd)
+
+  override def onStageSubmitted(stageSubmitted: SparkListenerStageSubmitted): Unit =
+    policy.onStageSubmitted(stageSubmitted)
+
+  override def onStageCompleted(stageCompleted: SparkListenerStageCompleted): Unit =
+    policy.onStageCompleted(stageCompleted)
+
+  override def onTaskStart(taskStart: SparkListenerTaskStart): Unit =
+    policy.onTaskStart(taskStart)
+
+  override def onTaskEnd(taskEnd: SparkListenerTaskEnd): Unit = policy.onTaskEnd(taskEnd)
+
+  override def onExecutorMetricsUpdate(
+      executorMetricsUpdate: SparkListenerExecutorMetricsUpdate): Unit =
+    policy.onExecutorMetricsUpdate(executorMetricsUpdate)
+
+  override def onExecutorRemoved(executorRemoved: SparkListenerExecutorRemoved): Unit =
+    policy.onExecutorRemoved(executorRemoved)
+
+  override def onOtherEvent(event: SparkListenerEvent): Unit = {
+    // match by type, since the SQL events' extractors change arity between Spark versions
+    event match {
+      case e: SparkListenerSQLExecutionStart => policy.onExecutionStart(e.executionId)
+      case e: SparkListenerSQLExecutionEnd => policy.onExecutionEnd(e.executionId)
+      case e: RapidsShuffleReclaimFence => policy.onFence(e.fenceId)
+      case _ => // ignore other events
+    }
+  }
+
+  /** Passes the driver plugin's shutdown to the policy. */
+  def shutdown(): Unit = policy.shutdown()
+}
+
+object ShuffleCleanupListener {
+  /** The listener bus queue that keeps the UCX policy's listener apart from other listeners. */
+  val QUEUE_NAME: String = "rapids-shuffle-cleanup"
+}
+
+/**
+ * A shuffle backend's handling of the events that a `ShuffleCleanupListener` receives, on the
+ * listener's thread. A handler that the backend does not override does nothing.
+ */
+trait ShuffleCleanupPolicy {
+  def onJobStart(jobStart: SparkListenerJobStart): Unit = {}
+
+  def onJobEnd(jobEnd: SparkListenerJobEnd): Unit = {}
+
+  def onStageSubmitted(stageSubmitted: SparkListenerStageSubmitted): Unit = {}
+
+  def onStageCompleted(stageCompleted: SparkListenerStageCompleted): Unit = {}
+
+  def onTaskStart(taskStart: SparkListenerTaskStart): Unit = {}
+
+  def onTaskEnd(taskEnd: SparkListenerTaskEnd): Unit = {}
+
+  def onExecutorMetricsUpdate(
+      executorMetricsUpdate: SparkListenerExecutorMetricsUpdate): Unit = {}
+
+  def onExecutorRemoved(executorRemoved: SparkListenerExecutorRemoved): Unit = {}
+
+  /** A SQL execution started. */
+  def onExecutionStart(executionId: Long): Unit = {}
+
+  /** A SQL execution ended. */
+  def onExecutionEnd(executionId: Long): Unit = {}
+
+  /** The marker of a reclaim fence reached the listener. */
+  def onFence(fenceId: Long): Unit = {}
+
+  /** Called when the driver plugin shuts down. */
+  def shutdown(): Unit
+}
+
+/**
+ * MULTITHREADED's policy, which triggers shuffle cleanup when a SQL query completes.
+ *
+ * This policy solves the problem of GC-based shuffle cleanup being unreliable
  * for short-running queries. Instead of waiting for ShuffleDependency objects to be
- * garbage collected, this listener proactively triggers cleanup when a query ends.
+ * garbage collected, this policy proactively triggers cleanup when a query ends.
  *
  * Using SQL execution completion (not job completion) ensures that:
  * 1. All jobs within the query have completed
@@ -44,11 +135,11 @@ import org.apache.spark.sql.execution.ui.SparkListenerSQLExecutionEnd
  * 1. On JobStart: Extract shuffle IDs from stageInfos and associate with SQL execution ID
  * 2. On SQLExecutionEnd: Look up all shuffle IDs for this execution and register for cleanup
  * 3. ShuffleCleanupManager handles the RPC to executors for actual cleanup
- *
- * Note: This file is placed in org.apache.spark.sql.rapids package to access
- * the private[spark] shuffleDepId field in StageInfo.
  */
-class ShuffleCleanupListener extends SparkListener with Logging {
+class MultithreadedSqlEndPolicy extends ShuffleCleanupPolicy with Logging {
+
+  // log settings that name the listener's logger cover these lines too
+  override protected def logName: String = classOf[ShuffleCleanupListener].getName
 
   /**
    * Maps SQL execution ID to the set of shuffle IDs associated with that execution.
@@ -83,19 +174,11 @@ class ShuffleCleanupListener extends SparkListener with Logging {
     }
   }
 
-  override def onOtherEvent(event: SparkListenerEvent): Unit = {
-    event match {
-      case e: SparkListenerSQLExecutionEnd =>
-        onSQLExecutionEnd(e)
-      case _ => // ignore other events
-    }
-  }
-
-  private def onSQLExecutionEnd(event: SparkListenerSQLExecutionEnd): Unit = {
-    val shuffleIds = Option(executionShuffles.remove(event.executionId))
+  override def onExecutionEnd(executionId: Long): Unit = {
+    val shuffleIds = Option(executionShuffles.remove(executionId))
     shuffleIds.foreach { ids =>
       if (ids.nonEmpty) {
-        logDebug(s"SQL execution ${event.executionId} ended, triggering cleanup for " +
+        logDebug(s"SQL execution $executionId ended, triggering cleanup for " +
           s"${ids.size} shuffle(s): ${ids.mkString(", ")}")
 
         val cleanupManager = ShuffleCleanupManager.get
@@ -113,7 +196,7 @@ class ShuffleCleanupListener extends SparkListener with Logging {
   /**
    * Called during shutdown to cleanup any remaining execution -> shuffle mappings.
    */
-  def shutdown(): Unit = {
+  override def shutdown(): Unit = {
     val remainingExecutions = executionShuffles.keySet().asScala.toSeq
     if (remainingExecutions.nonEmpty) {
       logInfo(s"Shutdown: ${remainingExecutions.size} executions still have " +

@@ -308,6 +308,40 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .integerConf
     .createWithDefault(32)
 
+  val SHUFFLE_UCX_CLEANUP_ON_QUERY_END_ENABLED =
+    conf("spark.rapids.shuffle.ucx.cleanupOnQueryEnd.enabled")
+    .doc("When set to true, the RAPIDS Shuffle Manager in UCX mode reclaims a GPU shuffle once " +
+      "the SQL query that wrote it has ended and no task that reads or writes it is still " +
+      "running: the executors free the shuffle's buffers, and the driver clears its map " +
+      "outputs. It takes effect only when spark.rapids.shuffle.mode is UCX and the RAPIDS " +
+      "Shuffle Manager is configured, and never on Databricks. Any other setup logs one " +
+      "warning and reclaims nothing. A shuffle whose map stage Spark marks indeterminate, such " +
+      "as the shuffle of a repartition(n) without columns, waits for Spark's own cleanup, as " +
+      "it does when this is false. So does a shuffle that another query reads before the " +
+      "reclaim, that a cached DataFrame depends on, or that nothing read in a query that " +
+      "succeeded. A second action on the same DataFrame reruns the map stage of each " +
+      "reclaimed shuffle. A shuffle whose map side computes values that depend on row order, " +
+      "such as rand(), uuid(), a sample, or row_number() over ties, is still reclaimed. A " +
+      "rerun of such a shuffle can return a different result. A second action on the same " +
+      "DataFrame that starts while such a shuffle is reclaimed can combine two computations " +
+      "of it and return duplicated or missing rows. Keep this key off for such workloads.")
+    .startupOnly()
+    .booleanConf
+    .createWithDefault(false)
+
+  val SHUFFLE_UCX_CLEANUP_ON_QUERY_END_EVENT_LOG_ENABLED =
+    conf("spark.rapids.shuffle.ucx.cleanupOnQueryEnd.eventLog.enabled")
+    .doc("When set to true, the reclaim that " +
+      s"${SHUFFLE_UCX_CLEANUP_ON_QUERY_END_ENABLED.key} turns on posts one " +
+      "SparkRapidsShuffleReclaimEvent to the Spark event log for each SQL query that wrote a " +
+      "GPU shuffle, once each of its shuffles has an outcome. When set to false, no event is " +
+      "posted. The reclaim and its WARN lines are unchanged, and its per-shuffle DEBUG lines " +
+      "cover only the shuffles it tries to reclaim. It has no effect while " +
+      s"${SHUFFLE_UCX_CLEANUP_ON_QUERY_END_ENABLED.key} is false.")
+    .startupOnly()
+    .booleanConf
+    .createWithDefault(true)
+
   val SHUFFLE_MAX_CLIENT_THREADS = conf("spark.rapids.shuffle.maxClientThreads")
     .doc("The maximum number of threads that the shuffle client should be allowed to start")
     .internal()

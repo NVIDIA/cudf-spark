@@ -98,6 +98,46 @@ object GpuShuffleEnv extends Logging {
       conf.shuffleTransportEarlyStart
   }
 
+  /**
+   * Why the UCX shuffle reclaim must not run, or None when it may. The driver plugin and the
+   * executor plugin both call this, so the two sides agree. It reads the configured shuffle
+   * manager, since Spark 4 has not built one when the driver plugin starts.
+   *
+   * @param conf the RAPIDS configuration
+   * @param sparkConf the Spark configuration, which names the shuffle manager
+   * @param isDataBricks whether the plugin runs on a Databricks shim
+   * @return the first check that failed, with the configured value it found, or None
+   */
+  def ucxReclaimRefusal(
+      conf: RapidsConf,
+      sparkConf: SparkConf,
+      isDataBricks: Boolean): Option[String] = {
+    val gateKey = RapidsConf.SHUFFLE_UCX_CLEANUP_ON_QUERY_END_ENABLED.key
+    val notRun = s"$gateKey is true, but the UCX shuffle reclaim does not run"
+    if (!conf.shuffleUcxCleanupOnQueryEndEnabled) {
+      Some(s"$gateKey is false")
+    } else if (!conf.isUCXShuffleManagerMode) {
+      val reason = s"$notRun: ${RapidsConf.SHUFFLE_MANAGER_MODE.key} is " +
+        s"${conf.shuffleManagerMode}, and it runs only in UCX mode"
+      if (conf.isCacheOnlyShuffleManagerMode) {
+        Some(s"$reason, which on the same local master uses the same shuffle catalog and " +
+          "local reads")
+      } else {
+        Some(reason)
+      }
+    } else if (!isRapidsShuffleConfigured(sparkConf)) {
+      val manager = sparkConf.getOption("spark.shuffle.manager").getOrElse("unset")
+      Some(s"$notRun: spark.shuffle.manager is $manager, and it needs $RAPIDS_SHUFFLE_CLASS")
+    } else if (isDataBricks) {
+      Some(s"$notRun on Databricks")
+    } else if (!conf.isSqlExecuteOnGPU) {
+      // no GPU is set up then, so the executor's reclaim endpoint could not start its thread
+      Some(s"$notRun: ${RapidsConf.SQL_MODE.key} is not executeOnGPU")
+    } else {
+      None
+    }
+  }
+
   val RAPIDS_SHUFFLE_CLASS: String = ShimLoader.getRapidsShuffleManagerClass
 
   /**
