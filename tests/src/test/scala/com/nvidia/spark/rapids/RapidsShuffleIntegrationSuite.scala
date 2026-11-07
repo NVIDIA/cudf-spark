@@ -24,6 +24,7 @@ import scala.collection.mutable.ArrayBuffer
 import scala.util.control.NonFatal
 
 import com.nvidia.spark.rapids.shims.SparkShimImpl
+import com.nvidia.spark.rapids.spill.SpillFramework
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.concurrent.Eventually.eventually
 import org.scalatest.concurrent.PatienceConfiguration.Timeout
@@ -661,6 +662,27 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
     assertResult(2, s"GPU shuffles in:\n${df.queryExecution.executedPlan}")(shuffleIds.size)
     assertResult(shuffleIds, "shuffles the catalog holds")(
       shuffleIds.filter(GpuShuffleEnv.getCatalog.hasActiveShuffle))
+  }
+
+  test("a UCX reclaim through the shuffle manager frees no further buffer once its endpoint " +
+      "closes, and leaves the rest to the spill framework") {
+    startUcxReclaimSession(gateOn = false, Map.empty)
+    val df = oneShuffleQuery()
+    df.collect()
+    val shuffleId = onlyGpuShuffle(df)
+    val store = SpillFramework.stores.deviceStore
+    val handlesBefore = store.numHandles
+    assert(handlesBefore > 1, s"the device store tracks $handlesBefore handles")
+    val sent = new ArrayBuffer[ShuffleReclaimResult]()
+    // the endpoint closes once the reclaim has freed one buffer
+    val reclaimer = new UcxCatalogReclaimer(() => store.numHandles < handlesBefore,
+      send = result => sent += result)
+    reclaimer.reclaimRequests(Array(ShuffleReclaimRequest(shuffleId, Long.MaxValue)))
+    assertResult(Seq(shuffleId), "shuffles whose reclaim sent a result")(sent.map(_.shuffleId))
+    // the session's stop shuts the spill framework down, which closes the handles left
+    assertResult(handlesBefore - 1, "handles the device store tracks")(store.numHandles)
+    // keeps its shuffle reachable, so GC cannot remove it mid-test.
+    df.hashCode()
   }
 
   test("with a row-checksum key on, the GPU shuffle registry admits exactly the shuffles " +
