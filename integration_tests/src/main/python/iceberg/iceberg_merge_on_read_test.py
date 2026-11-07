@@ -13,10 +13,12 @@
 # limitations under the License.
 import json
 import logging
+import os
 import tempfile
 
 import pyspark.sql.functions as f
 import pytest
+from pyspark.sql.types import DoubleType, FloatType, IntegerType, StructField, StructType
 
 from asserts import assert_gpu_and_cpu_are_equal_collect
 from conftest import is_iceberg_remote_catalog
@@ -95,6 +97,61 @@ def test_iceberg_v2_eq_deletes_reader_types(spark_tmp_table_factory, spark_tmp_p
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.table(table_name),
         conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.parametrize('float_type', ['FLOAT', 'DOUBLE'])
+@pytest.mark.parametrize('delete_id', [0, 1, 2, 3], ids=['positive-zero', 'negative-zero',
+                                                        'nan', 'null'])
+@pytest.mark.parametrize('composite', [False, True], ids=['single-key', 'composite-key'])
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="S3tables catalog is managed")
+@validate_execs_in_gpu_plan('GpuBatchScanExec')
+def test_iceberg_eq_delete_float_signed_zero(spark_tmp_table_factory, spark_tmp_path, reader_type,
+                                            float_type, delete_id, composite,
+                                            register_iceberg_add_eq_deletes_udf):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+
+    def setup(spark):
+        spark.sql(f"CREATE TABLE {table_name} (id INT, f {float_type}, p INT, g INT) "
+                  "USING ICEBERG PARTITIONED BY (p) TBLPROPERTIES ('format-version'='2')")
+        # Keep both zeros in one data file so Iceberg cannot prune the opposite sign by bounds.
+        schema = StructType([StructField('id', IntegerType()), StructField(
+            'f', FloatType() if float_type == 'FLOAT' else DoubleType()),
+            StructField('p', IntegerType()), StructField('g', IntegerType())])
+        values = [0.0, -0.0, float('nan'), None]
+        (spark.createDataFrame([(i + 4 * g, value, 1, g)
+                                for g in range(2) for i, value in enumerate(values)], schema)
+         .coalesce(1).writeTo(table_name).append())
+        assert spark.table(f'{table_name}.files').count() == 1
+
+        delete_dir = tempfile.mkdtemp(dir=spark_tmp_path)
+        delete_cols = ['f', 'g'] if composite else ['f']
+        (spark.table(table_name).where(f'id = {delete_id}').select(*(delete_cols + ['_partition']))
+         .coalesce(1).write.mode('overwrite').parquet(delete_dir))
+        parquet_files = [name for name in os.listdir(delete_dir) if name.endswith('.parquet')]
+        assert len(parquet_files) == 1
+        warehouse = spark.conf.get('spark.sql.catalog.spark_catalog.warehouse')
+        delete_file = os.path.join(delete_dir, parquet_files[0])
+        spark.sql(f"SELECT iceberg_add_eq_deletes('{warehouse}', '{table_name}', "
+                  f"'{delete_file}')").collect()
+        spark.sql(f'REFRESH TABLE {table_name}')
+
+    with_cpu_session(setup)
+    expected = [i for i in range(8)
+                if i != delete_id and (composite or i != delete_id + 4)]
+
+    def read(spark):
+        return spark.table(table_name).select('id')
+
+    try:
+        assert sorted(row.id for row in with_cpu_session(
+            lambda spark: read(spark).collect())) == expected
+        assert_gpu_and_cpu_are_equal_collect(
+            read, conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
+    finally:
+        reset_spark_session_conf()
 
 
 @iceberg_fast_test

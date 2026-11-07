@@ -73,38 +73,41 @@ class GpuIcebergPartitioner(
     val inputColIndices = (keys.numCols() until (keys.numCols() + values.numCols())).toArray
 
     // Combine keys and values into a single batch: [key columns, input columns]
-    val keysAndInputBatch = GpuColumnVector.combineColumns(keys, values)
-    
-    withResource(keysAndInputBatch) { _ =>
+    val keysAndInputBatch = withResource(GpuFloatingPointKeyUtils.encode(keys)) { encoded =>
+      GpuColumnVector.combineColumns(encoded, values)
+    }
+
+    val splitRet = withResource(keysAndInputBatch) { _ =>
       withResource(GpuColumnVector.from(keysAndInputBatch)) { keysAndInputTable =>
         // Split the input columns by the key columns using the efficient JNI API
-        val splitRet = withResource(keysAndInputTable) { _ =>
-          keysAndInputTable.groupBy(keyColIndices: _*)
-            .contiguousSplitGroupsAndGenUniqKeys(inputColIndices)
-        }
+        keysAndInputTable.groupBy(keyColIndices: _*)
+          .contiguousSplitGroupsAndGenUniqKeys(inputColIndices)
+      }
+    }
 
-        // Generate results
-        withResource(splitRet) { _ =>
-          // Generate the partition keys on the host side
-          val partitionKeys = GpuIcebergPartitioner.toPartitionKeys(keyType,
-            keySparkType,
-            splitRet.getUniqKeyTable)
-
-          // Release unique table to save GPU memory
-          splitRet.closeUniqKeyTable()
-
-          // Get the partitions
-          val partitions = splitRet.getGroups
-
-          // Combine the partition keys and partitioned tables
-          partitionKeys.zip(partitions).map { case (partKey, partition) =>
-            ColumnarBatchWithPartition(SpillableColumnarBatch(partition,
-              valueSparkType,
-              SpillPriorities.ACTIVE_BATCHING_PRIORITY),
-              partKey)
-          }.toSeq
+    // Generate results
+    withResource(splitRet) { _ =>
+      // Generate the partition keys on the host side
+      val partitionKeys = withResource(GpuFloatingPointKeyUtils.decode(
+          splitRet.getUniqKeyTable, keySparkType.fields.map(_.dataType))) { decoded =>
+        withResource(GpuColumnVector.from(decoded)) { keyTable =>
+          GpuIcebergPartitioner.toPartitionKeys(keyType, keySparkType, keyTable)
         }
       }
+
+      // Release unique table to save GPU memory
+      splitRet.closeUniqKeyTable()
+
+      // Get the partitions
+      val partitions = splitRet.getGroups
+
+      // Combine the partition keys and partitioned tables
+      partitionKeys.zip(partitions).map { case (partKey, partition) =>
+        ColumnarBatchWithPartition(SpillableColumnarBatch(partition,
+          valueSparkType,
+          SpillPriorities.ACTIVE_BATCHING_PRIORITY),
+          partKey)
+      }.toSeq
     }
   }
 }

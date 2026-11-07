@@ -373,6 +373,14 @@ class GpuDynamicPartitionDataSingleWriter(
   /** Flag saying whether or not the data to be written out is partitioned. */
   protected val isPartitioned: Boolean = description.partitionColumns.nonEmpty
 
+  private val hasFloatingPartition = description.partitionColumns.exists { col =>
+    col.dataType == FloatType || col.dataType == DoubleType
+  }
+
+  // Equal numeric zeros can alternate in the input sort order. When a partition is revisited,
+  // its next file must have a new counter to avoid overwriting an earlier file from this task.
+  private val nextFileCounters = mutable.HashMap.empty[(Option[InternalRow], Option[Int]), Int]
+
   /** Flag saying whether or not the data to be written out is bucketed. */
   protected val isBucketed: Boolean = description.bucketSpec.isDefined
 
@@ -472,8 +480,9 @@ class GpuDynamicPartitionDataSingleWriter(
       // support on the GPU right now
       import scala.collection.JavaConverters._
       val partCols = description.partitionColumns.indices.map(keyHostCb.column)
+      val projection = UnsafeProjection.create(description.partitionColumns.map(_.dataType).toArray)
       val iter = new ColumnarBatch(partCols.toArray, keyHostCb.numRows()).rowIterator()
-        .asScala.map(_.copy())
+        .asScala.map(row => projection(row).copy())
       _ => Some(iter.next)
     } else {
       _ => None
@@ -510,6 +519,14 @@ class GpuDynamicPartitionDataSingleWriter(
    * paths and bucket ids to use to write each partition and(or) bucket file.
    */
   private def splitBatchByKeyAndClose(batch: ColumnarBatch): Array[SplitPack] = {
+    if (hasFloatingPartition) {
+      val input = closeOnExcept(batch) { _ =>
+        SpillableColumnarBatch(batch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+      }
+      return withRetryNoSplit(input) { scb =>
+        splitFloatingPartitionBatchAndClose(scb.getColumnarBatch())
+      }
+    }
     val (keysCb, dataCb) = withResource(batch) { _ =>
       closeOnExcept(getDataColumnsAsBatch(batch)) { data =>
         (getKeysBatch(batch), data)
@@ -556,6 +573,58 @@ class GpuDynamicPartitionDataSingleWriter(
                 SpillPriorities.ACTIVE_BATCHING_PRIORITY),
               getNextPartValues(idx), getBucketId(idx))
           }
+        }.toArray
+      }
+    }
+  }
+
+  private def splitFloatingPartitionBatchAndClose(batch: ColumnarBatch): Array[SplitPack] = {
+    val dataTypes = description.dataColumns.map(_.dataType).toArray
+    val keyTypes = description.partitionColumns.map(_.dataType).toArray ++
+      (if (isBucketed) Array[DataType](IntegerType) else Array.empty[DataType])
+    val combined = withResource(batch) { _ =>
+      withResource(getKeysBatch(batch)) { keys =>
+        withResource(GpuFloatingPointKeyUtils.encode(keys)) { encoded =>
+          withResource(getDataColumnsAsBatch(batch)) { data =>
+            GpuColumnVector.combineColumns(encoded, data)
+          }
+        }
+      }
+    }
+    val groups = withResource(combined) { _ =>
+      withResource(GpuColumnVector.from(combined)) { table =>
+        val dataIndices = if (dataTypes.isEmpty) {
+          Array(0)
+        } else {
+          (keyTypes.length until combined.numCols()).toArray
+        }
+        table.groupBy(keyTypes.indices: _*).contiguousSplitGroupsAndGenUniqKeys(dataIndices)
+      }
+    }
+    withResource(groups) { _ =>
+      val hostBatch = withResource(
+          GpuFloatingPointKeyUtils.decode(groups.getUniqKeyTable, keyTypes)) { decoded =>
+        withResource(GpuColumnVector.from(decoded)) { table =>
+          copyToHostAsBatch(table, keyTypes)
+        }
+      }
+      withResource(hostBatch) { host =>
+        val getPart = genGetPartValuesFunc(host)
+        val getBucket = genGetBucketIdFunc(host)
+        val splits = groups.getGroups
+        (0 until host.numRows()).safeMap { i =>
+          val part = getPart(i)
+          val bucket = getBucket(i)
+          val data = if (dataTypes.isEmpty) {
+            new ColumnarBatch(Array.empty[org.apache.spark.sql.vectorized.ColumnVector],
+              splits(i).getRowCount.toInt)
+          } else {
+            withResource(splits(i).getTable) { table =>
+              GpuColumnVector.from(table, dataTypes)
+            }
+          }
+          SplitPack(SpillableColumnarBatch(data,
+            SpillPriorities.ACTIVE_ON_DECK_PRIORITY), part, bucket)
         }.toArray
       }
     }
@@ -682,6 +751,10 @@ class GpuDynamicPartitionDataSingleWriter(
         val hasDiffPart = partVals != currentWriterId.partitionValues
         val hasDiffBucket = bucketId != currentWriterId.bucketId
         if (hasDiffPart || hasDiffBucket) {
+          if (hasFloatingPartition && currentWriterStatus.writer != null) {
+            nextFileCounters((currentWriterId.partitionValues, currentWriterId.bucketId)) =
+              currentWriterStatus.fileCounter + 1
+          }
           preUpdateCurrentWriterStatus(currentWriterId)
           if (hasDiffPart) {
             currentWriterId.partitionValues = partVals
@@ -690,7 +763,11 @@ class GpuDynamicPartitionDataSingleWriter(
           if (hasDiffBucket) {
             currentWriterId.bucketId = bucketId
           }
-          currentWriterStatus.fileCounter = 0
+          currentWriterStatus.fileCounter = if (hasFloatingPartition) {
+            nextFileCounters.getOrElse((partVals, bucketId), 0)
+          } else {
+            0
+          }
           setupCurrentWriter(currentWriterId, currentWriterStatus)
         }
         splitPacks(i) = null
@@ -880,7 +957,9 @@ class GpuDynamicPartitionDataConcurrentWriter(
     // Split batch to groups by sort columns, [partition and(or) bucket id column].
     val (keysAndGroups, keyTypes) = withResource(batch) { _ =>
       val (opBatch, keyTypes) = withResource(getKeysBatch(batch)) { keysBatch =>
-        val combinedCb = GpuColumnVector.combineColumns(keysBatch, batch)
+        val combinedCb = withResource(GpuFloatingPointKeyUtils.encode(keysBatch)) { encoded =>
+          GpuColumnVector.combineColumns(encoded, batch)
+        }
         (combinedCb, GpuColumnVector.extractTypes(keysBatch))
       }
       withResource(opBatch) { _ =>
@@ -894,7 +973,13 @@ class GpuDynamicPartitionDataConcurrentWriter(
     val (keyHostCb, groups) = withResource(keysAndGroups) { _ =>
       // groups number should equal to uniq keys number
       assert(keysAndGroups.getGroups.length == keysAndGroups.getUniqKeyTable.getRowCount)
-      closeOnExcept(copyToHostAsBatch(keysAndGroups.getUniqKeyTable, keyTypes)) { keyHostCb =>
+      val keyHost = withResource(GpuFloatingPointKeyUtils.decode(
+          keysAndGroups.getUniqKeyTable, keyTypes)) { decoded =>
+        withResource(GpuColumnVector.from(decoded)) { table =>
+          copyToHostAsBatch(table, keyTypes)
+        }
+      }
+      closeOnExcept(keyHost) { keyHostCb =>
         keysAndGroups.closeUniqKeyTable()
         val allTypes = description.allColumns.map(_.dataType).toArray
         val allColsIds = allTypes.indices.map(_ + keyTypes.length)

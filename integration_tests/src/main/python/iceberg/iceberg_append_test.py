@@ -11,13 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import math
 from typing import Callable, Any
 
 import pytest
+from pyspark.sql.types import DoubleType, FloatType, LongType, StructField, StructType
 
-from asserts import assert_equal_with_local_sort, assert_gpu_fallback_collect, \
-    assert_gpu_fallback_write_sql
-from conftest import is_iceberg_remote_catalog
+from asserts import assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect, \
+    assert_gpu_fallback_collect, assert_gpu_fallback_write_sql
+from conftest import is_iceberg_remote_catalog, spark_jvm
 from data_gen import DEFAULT_DATA_GEN_LENGTH, gen_df, copy_and_update
 from iceberg import (
     assert_gpu_and_cpu_lineage_writes_are_equal, iceberg_format_versions, create_iceberg_table,
@@ -28,9 +30,69 @@ from iceberg import (
     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, iceberg_table_properties_sql,
     row_lineage_df)
 from marks import iceberg, ignore_order, allow_non_gpu, datagen_overrides, iceberg_fast_test
-from spark_session import with_gpu_session, with_cpu_session
+from spark_session import with_gpu_session, with_cpu_session, reset_spark_session_conf
 
 pytestmark = iceberg_unsupported_mark
+
+
+@iceberg
+@allow_non_gpu('BatchScanExec', 'ColumnarToRowExec')
+@pytest.mark.parametrize('float_type', ['FLOAT', 'DOUBLE'])
+def test_iceberg_append_signed_zero_partitions(spark_tmp_table_factory, float_type):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+    cpu_table_name = get_full_table_name(spark_tmp_table_factory)
+    for name in (cpu_table_name, table_name):
+        with_cpu_session(lambda spark: spark.sql(
+            f'CREATE TABLE {name} (id BIGINT, f {float_type}) USING ICEBERG '
+            "PARTITIONED BY (f) TBLPROPERTIES ('format-version'='2')").collect())
+
+    def input_rows(spark):
+        schema = StructType([StructField('id', LongType()), StructField(
+            'f', FloatType() if float_type == 'FLOAT' else DoubleType())])
+        return spark.createDataFrame([(i, 0.0 if i % 2 == 0 else -0.0)
+                                      for i in range(400)], schema).coalesce(1)
+
+    rows = with_gpu_session(lambda spark: input_rows(spark).collect())
+    assert {math.copysign(1.0, r.f) for r in rows} == {-1.0, 1.0}
+
+    def write(spark):
+        input_rows(spark).writeTo(table_name).append()
+
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        with_gpu_session(write, conf=iceberg_write_enabled_conf)
+        plans = callback.getResultsWithTimeout(10000)
+        assert any(callback.contains(plan, 'GpuAppendDataExec') for plan in plans), \
+            'Expected GPU Iceberg append'
+    finally:
+        callback.endCapture()
+        reset_spark_session_conf()
+
+    def check(spark):
+        files = spark.sql(f'SELECT partition, record_count FROM {table_name}.files').collect()
+        counts = {math.copysign(1.0, r.partition.f): r.record_count for r in files}
+        assert counts == {-1.0: 200, 1.0: 200}
+        assert sorted(r.id for r in spark.table(table_name).select('id').collect()) == list(range(400))
+
+    with_cpu_session(check)
+    with_cpu_session(lambda spark: input_rows(spark).writeTo(cpu_table_name).append(),
+                     conf=iceberg_write_enabled_conf)
+
+    def read_rows(spark):
+        name = table_name if spark.conf.get('spark.rapids.sql.enabled') == 'true' else cpu_table_name
+        return spark.table(name).select('id', 'f', '_partition')
+
+    def canonicalize(cpu_rows, gpu_rows):
+        def signed_rows(rows):
+            return sorted((r.id, math.copysign(1.0, r.f),
+                           math.copysign(1.0, r._partition.f)) for r in rows)
+        return signed_rows(cpu_rows), signed_rows(gpu_rows)
+
+    # Read both tables on CPU so this comparison isolates the partition write behavior.
+    assert_gpu_and_cpu_are_equal_collect(
+        read_rows, conf={'spark.rapids.sql.format.iceberg.read.enabled': 'false'},
+        result_canonicalize_func_before_compare=canonicalize)
 
 
 def do_test_insert_into_table_sql(spark_tmp_table_factory,
