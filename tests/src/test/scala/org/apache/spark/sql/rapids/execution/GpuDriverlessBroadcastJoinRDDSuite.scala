@@ -22,13 +22,22 @@ import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuite
 
-import org.apache.spark.{HashPartitioner, NarrowDependency, ShuffleDependency, SparkConf, SparkContext, SparkEnv, TaskContext}
+import org.apache.spark.{FetchFailed, HashPartitioner, NarrowDependency, ShuffleDependency, SparkConf, SparkContext, SparkEnv, SparkException, TaskContext}
+import org.apache.spark.scheduler.{SparkListener, SparkListenerTaskEnd}
 import org.apache.spark.shuffle.FetchFailedException
 import org.apache.spark.sql.execution.metric.SQLMetrics
+import org.apache.spark.sql.rapids.ShuffleReadSnapshot
 
 private object BroadcastReplicaRetryState {
   @volatile var firstBuilt = new CountDownLatch(1)
   @volatile var caches = Array.fill(2)(new ExecutorBroadcastCache[Vector[Long]](_ => ()))
+}
+
+private object BroadcastWaiterRetryState {
+  @volatile var cache = new ExecutorBroadcastCache[Vector[Int]](_ => ())
+  @volatile var builderStarted = new CountDownLatch(1)
+  @volatile var waiterStarted = new CountDownLatch(1)
+  @volatile var waiterReported = new CountDownLatch(1)
 }
 
 class GpuDriverlessBroadcastJoinRDDSuite extends AnyFunSuite with BeforeAndAfterAll {
@@ -109,6 +118,36 @@ class GpuDriverlessBroadcastJoinRDDSuite extends AnyFunSuite with BeforeAndAfter
     assert(result.filter(row => Set(11, 12, 21, 22).contains(row._1)).forall(_._2 > 0))
   }
 
+  test("repeated actions share the same source-output replica across consumer stages") {
+    BroadcastReplicaRetryState.caches = Array(new ExecutorBroadcastCache[Vector[Long]](_ => ()))
+    val builds = context.longAccumulator("unchanged-build-replicas")
+    try {
+      val shuffled = context.parallelize(Seq(0 -> 10L, 1 -> 20L), 2)
+        .partitionBy(new HashPartitioner(1))
+      val shuffleId = shuffled.dependencies.head.asInstanceOf[ShuffleDependency[_, _, _]].shuffleId
+      val joined = new GpuDriverlessBroadcastJoinRDD[Int, Long, Long](
+        context.parallelize(Seq(1, 2), 2), shuffled.values, (input, openBuild) => {
+          val task = TaskContext.get()
+          val snapshot = ShuffleReadSnapshot(SparkEnv.get.mapOutputTracker
+            .getMapSizesByExecutorId(shuffleId, 0, Int.MaxValue, 0, 1).map {
+              case (address, blocks) => address -> blocks.toVector
+            }.toVector)
+          val values = BroadcastReplicaRetryState.caches(0).getOrBuild[Vector[Long]](shuffleId,
+            () => { builds.add(1); openBuild().toVector }, () => (),
+            () => task.killTaskIfInterrupted(), identity = snapshot.buildIdentity(shuffleId))(
+            identity, _ => ())
+          input.flatMap(value => values.iterator.map(_ + value))
+        })
+      val expected = Array(11L, 12L, 21L, 22L)
+      assert(joined.collect().sorted.sameElements(expected))
+      assert(builds.value == 1L)
+      assert(joined.collect().sorted.sameElements(expected))
+      assert(builds.value == 1L, "A new consumer stage must not create another replica")
+    } finally {
+      BroadcastReplicaRetryState.caches.toSeq.safeClose()
+    }
+  }
+
   test("a stage retry cannot mix an earlier replica with a recomputed build") {
     BroadcastReplicaRetryState.firstBuilt = new CountDownLatch(1)
     BroadcastReplicaRetryState.caches = Array.fill(2)(
@@ -132,8 +171,10 @@ class GpuDriverlessBroadcastJoinRDDSuite extends AnyFunSuite with BeforeAndAfter
           val value = BroadcastReplicaRetryState.caches(consumer).getOrBuild[Vector[Long]](
             shuffleId,
             () => openBuild().toVector.sorted, () => (), () => task.killTaskIfInterrupted(),
-            generation = ExecutorBroadcastCache.generation(
-              task.stageId(), task.stageAttemptNumber()))(identity, _ => ())
+            identity = ShuffleReadSnapshot(SparkEnv.get.mapOutputTracker
+              .getMapSizesByExecutorId(shuffleId, 0, Int.MaxValue, 0, 1).map {
+                case (address, blocks) => address -> blocks.toVector
+              }.toVector).buildIdentity(shuffleId))(identity, _ => ())
           if (task.stageAttemptNumber() == 0 && consumer == 0) {
             BroadcastReplicaRetryState.firstBuilt.countDown()
             // Hold the first result until the fetch failure cancels this attempt.
@@ -156,6 +197,68 @@ class GpuDriverlessBroadcastJoinRDDSuite extends AnyFunSuite with BeforeAndAfter
     }
   }
 
+
+  Seq(false, true).foreach { wrapped =>
+    test(s"a waiting task reports fetch failure with one allowed failure, wrapped=$wrapped") {
+      BroadcastWaiterRetryState.cache = new ExecutorBroadcastCache[Vector[Int]](_ => ())
+      BroadcastWaiterRetryState.builderStarted = new CountDownLatch(1)
+      BroadcastWaiterRetryState.waiterStarted = new CountDownLatch(1)
+      BroadcastWaiterRetryState.waiterReported = new CountDownLatch(1)
+      val listener = new SparkListener {
+        override def onTaskEnd(event: SparkListenerTaskEnd): Unit = {
+          if (event.taskInfo.index == 1 && event.reason.isInstanceOf[FetchFailed]) {
+            BroadcastWaiterRetryState.waiterReported.countDown()
+          }
+        }
+      }
+      context.addSparkListener(listener)
+      try {
+        val shuffled = context.parallelize(Seq(0 -> 10, 1 -> 20), 2)
+          .partitionBy(new HashPartitioner(1))
+        val dependency = shuffled.dependencies.head.asInstanceOf[ShuffleDependency[_, _, _]]
+        val shuffleId = dependency.shuffleId
+        val joined = new GpuDriverlessBroadcastJoinRDD[Int, Int, Int](
+          context.parallelize(Seq(1, 2), 2), shuffled.values, (input, openBuild) => {
+            val task = TaskContext.get()
+            if (task.stageAttemptNumber() == 0 && task.partitionId() == 1) {
+              assert(BroadcastWaiterRetryState.builderStarted.await(10, TimeUnit.SECONDS))
+            }
+            val values = try {
+              BroadcastWaiterRetryState.cache.getOrBuild[Vector[Int]](shuffleId, () => {
+                if (task.stageAttemptNumber() == 0) {
+                  BroadcastWaiterRetryState.builderStarted.countDown()
+                  assert(BroadcastWaiterRetryState.waiterStarted.await(10, TimeUnit.SECONDS))
+                  val failure = new FetchFailedException(SparkEnv.get.blockManager.blockManagerId,
+                    shuffleId, 0L, 0, 0, "Injected builder fetch failure")
+                  if (wrapped) throw new SparkException("Wrapped builder fetch failure", failure)
+                  throw failure
+                }
+                openBuild().toVector
+              }, () => BroadcastWaiterRetryState.waiterStarted.countDown(),
+                () => task.killTaskIfInterrupted())(identity, _ => ())
+            } catch {
+              case failure: Exception =>
+                if (task.partitionId() == 0 && task.stageAttemptNumber() == 0) {
+                  // Make the driver handle the waiter's failure before the builder's failure.
+                  try {
+                    assert(BroadcastWaiterRetryState.waiterReported.await(10, TimeUnit.SECONDS))
+                  } catch {
+                    case _: InterruptedException =>
+                  }
+                }
+                throw failure
+            }
+            input.flatMap(value => values.iterator.map(_ + value))
+          })
+        assert(joined.collect().sorted.sameElements(Array(11, 12, 21, 22)))
+        assert(BroadcastWaiterRetryState.waiterReported.getCount == 0)
+      } finally {
+        context.removeSparkListener(listener)
+        BroadcastWaiterRetryState.cache.close()
+      }
+    }
+
+  }
 
   test("operator timing includes initialization before the first output batch") {
     val opTime = GpuMetric.wrap(SQLMetrics.createNanoTimingMetric(context, "join op time"))

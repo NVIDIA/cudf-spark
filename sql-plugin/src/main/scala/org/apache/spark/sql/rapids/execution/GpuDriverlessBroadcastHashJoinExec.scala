@@ -16,9 +16,7 @@
 package org.apache.spark.sql.rapids.execution
 
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 
-import org.apache.spark.TaskContext
 import org.apache.spark.internal.Logging
 import org.apache.spark.rapids.shims.GpuShuffleExchangeExec
 import org.apache.spark.rdd.RDD
@@ -28,7 +26,6 @@ import org.apache.spark.sql.catalyst.plans.physical.{Distribution, UnspecifiedDi
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.adaptive.BroadcastQueryStageExec
 import org.apache.spark.sql.execution.exchange.{ENSURE_REQUIREMENTS, ReusedExchangeExec}
-import org.apache.spark.sql.rapids.GpuShuffleEnv
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
@@ -61,7 +58,8 @@ case class GpuDriverlessBroadcastHashJoinExec(
 
   override lazy val additionalMetrics: Map[String, GpuMetric] = broadcastJoinMetrics ++ Map(
     CONCAT_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_CONCAT_TIME),
-    "executorBuilds" -> createMetric(ESSENTIAL_LEVEL, "executor broadcast builds")) ++
+    "executorBuilds" -> createMetric(ESSENTIAL_LEVEL, "executor broadcast builds"),
+    "executorBuildCacheHits" -> createMetric(ESSENTIAL_LEVEL, "executor broadcast cache hits")) ++
     (if (conf.adaptiveExecutionEnabled) Map(
       "buildStageTime" -> fallbackBroadcast.gpuLongMetric("driverlessStageTime"),
       "buildStageBytes" -> fallbackBroadcast.gpuLongMetric("driverlessBuildBytes"))
@@ -75,11 +73,8 @@ case class GpuDriverlessBroadcastHashJoinExec(
     }
     // Both upstreams belong to this RDD graph. The scheduler can submit independent map
     // stages together; constructing this plan must not wait for the build map stage.
-    val build = buildPlan.executeColumnar()
     val stream = streamedPlan.executeColumnar()
-    val shuffleId = exchange.shuffleId
     val rapidsConf = new RapidsConf(conf)
-    val maxExecutors = rapidsConf.driverlessBroadcastMaxExecutors
     val schema = buildPlan.schema
     val output = buildPlan.output
     val localMetrics = allMetrics
@@ -88,28 +83,13 @@ case class GpuDriverlessBroadcastHashJoinExec(
     val opTime = gpuLongMetric(OP_TIME_LEGACY)
     val streamTime = gpuLongMetric(STREAM_TIME)
     val joinTime = gpuLongMetric(JOIN_TIME)
-    val builds = gpuLongMetric("executorBuilds")
     val joinOptions = RapidsConf.getJoinOptions(conf, RapidsConf.GPU_BATCH_SIZE_BYTES.get(conf))
-    val codecConfigs = TableCompressionCodec.makeCodecConfig(rapidsConf)
-    val maxDecompressBatchMemory = rapidsConf.shuffleCompressionMaxBatchMemory
+    val build = exchange.executeDriverlessBroadcastBuild(schema, output, localMetrics, rapidsConf)
     new GpuDriverlessBroadcastJoinRDD[ColumnarBatch, ColumnarBatch, ColumnarBatch](
       stream, build, (input, openBuild) => {
-        val context = TaskContext.get()
         val streamIter = new CollectTimeIterator(
           NvtxRegistry.BROADCAST_JOIN_STREAM, input, streamTime)
-        val built = GpuShuffleEnv.getBroadcastCache.getOrBuild[ColumnarBatch](shuffleId, () => {
-          DriverlessBroadcastPolicy.checkExecutorLimit(maxExecutors)
-          builds += 1
-          val batch = GpuDriverlessBroadcastHelper.assemble(
-            openBuild(), schema, output, localMetrics, codecConfigs, maxDecompressBatchMemory)
-          closeOnExcept(batch)(
-            SpillableColumnarBatch(_, SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
-        }, () => GpuSemaphore.releaseIfNecessary(context),
-          () => context.killTaskIfInterrupted(),
-          () => GpuSemaphore.acquireIfNecessary(context),
-          generation = ExecutorBroadcastCache.generation(
-            context.stageId(), context.stageAttemptNumber()))(
-          GpuDriverlessBroadcastHelper.borrow, batch => withResource(batch)(_ => ()))
+        val built = openBuild().next()
         doJoin(built, streamIter, joinOptions, numOutputRows, numOutputBatches,
           opTime, joinTime)
       })
@@ -163,7 +143,9 @@ object GpuDriverlessBroadcastHashJoinExec extends Logging {
                 // original dependency and metrics while preserving each consumer's attributes.
                 val gpuBuild = build match {
                   case stage: BroadcastQueryStageExec =>
-                    ReusedExchangeExec(stage.output, shuffle)
+                    val reused = ReusedExchangeExec(stage.output, shuffle)
+                    stage.logicalLink.foreach(reused.setLogicalLink)
+                    reused
                   case _ => shuffle
                 }
                 val (left, right) = join.buildSide match {

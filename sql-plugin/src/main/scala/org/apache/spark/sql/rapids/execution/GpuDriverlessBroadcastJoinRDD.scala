@@ -40,7 +40,7 @@ private class GpuDriverlessBroadcastJoinPartition(
 
 /**
  * Makes the single-partition build an explicit dependency of every streamed partition.
- * The consumer opens the build reader only when its executor needs to populate the build cache.
+ * Payload is fetched only when the executor needs to populate its build cache.
  */
 private[execution] class GpuDriverlessBroadcastJoinRDD[A: ClassTag, B: ClassTag, C: ClassTag](
     private var streamRdd: RDD[A],

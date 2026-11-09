@@ -82,6 +82,33 @@ class GpuDriverlessBroadcastHelperSuite extends RmmSparkRetrySuiteBase {
     }
   }
 
+  test("invalidation preserves a borrowed GPU batch while the same key is rebuilt") {
+    val allocated = Rmm.getTotalBytesAllocated
+    withResource(new ExecutorBroadcastCache[SpillableColumnarBatch](
+        owned => withResource(owned)(_ => ()))) { cache =>
+      def read(value: Byte): ColumnarBatch = cache.getOrBuild[ColumnarBatch](42, () => {
+        withResource(ColumnVector.fromBytes(value)) { column =>
+          SpillableColumnarBatch(batch(column), SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+        }
+      }, () => (), () => ())(
+        GpuDriverlessBroadcastHelper.borrow, result => withResource(result)(_ => ()))
+      withResource(read(1.toByte)) { original =>
+        cache.invalidate(42)
+        assert(cache.activeEntryCount == 0)
+        withResource(read(2.toByte)) { replacement =>
+          withResource(GpuColumnVector.extractBases(original).head.copyToHost()) { host =>
+            assert(host.getByte(0) == 1)
+          }
+          withResource(GpuColumnVector.extractBases(replacement).head.copyToHost()) { host =>
+            assert(host.getByte(0) == 2)
+          }
+          assert(cache.activeEntryCount == 1)
+        }
+      }
+    }
+    assert(Rmm.getTotalBytesAllocated == allocated)
+  }
+
   test("concatenation preserves nulls when its layout grows beyond input bytes") {
     val allocated = Rmm.getTotalBytesAllocated
     Seq(1, 511, 512, 513, 32768).foreach { rows =>

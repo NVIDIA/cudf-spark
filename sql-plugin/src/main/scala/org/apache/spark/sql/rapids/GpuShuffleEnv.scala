@@ -30,7 +30,7 @@ import org.apache.spark.sql.rapids.execution.ExecutorBroadcastCache
 import org.apache.spark.util.Utils
 
 class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
-  // Cleanup and first use share this owner, including its closed state and retired IDs.
+  // Cleanup and first use share this owner, including its application-shutdown state.
   // Constructing it allocates no GPU buffers; builds are materialized by getOrBuild.
   private[rapids] lazy val broadcastCache =
     new ExecutorBroadcastCache[SpillableColumnarBatch](owned => {

@@ -22,7 +22,8 @@ import com.nvidia.spark.rapids.RapidsConf
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.TaskKilledException
-import org.apache.spark.sql.rapids.GpuShuffleEnv
+import org.apache.spark.sql.rapids.{GpuShuffleEnv, ShuffleReadSnapshot}
+import org.apache.spark.storage.{BlockManagerId, ShuffleBlockId}
 
 class ExecutorBroadcastCacheSuite extends AnyFunSuite {
   private class Value {
@@ -52,57 +53,61 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
     }
   }
 
-  test("cleanup before first build prevents late use from recreating state") {
-    val env = new GpuShuffleEnv(new RapidsConf(Map.empty[String, String]))
-    env.broadcastCache.invalidate(1)
-    try {
-      intercept[IllegalStateException] {
-        env.broadcastCache.getOrBuild[Int](1, () => fail("Retired build must not run"),
-          noAction, noAction)(_ => 0, _ => ())
-      }
-      env.broadcastCache.close()
-      intercept[IllegalArgumentException] {
-        env.broadcastCache.getOrBuild[Int](2, () => fail("Closed cache must not build"),
-          noAction, noAction)(_ => 0, _ => ())
-      }
-    } finally {
-      env.broadcastCache.close()
-    }
-  }
-
-  test("retired ordinary shuffles keep only compact IDs and reject late builders") {
+  test("cleanup without a cached build retains no state and allows a later build") {
     val cache = new ExecutorBroadcastCache[Value](_.release())
     try {
       (0 until 100000).foreach(cache.invalidate)
       assert(cache.activeEntryCount == 0)
-      assert(cache.retiredShuffleCount == 100000)
-      assert(cache.retiredStateBytes < 64 * 1024)
-      Seq(0, 50000, 99999).foreach { id =>
-        intercept[IllegalStateException] {
-          cache.getOrBuild[Value](id, () => fail("Retired ID must not build"),
-            noAction, noAction)(_.retain(), _.release())
-        }
-      }
+      val value = cache.getOrBuild[Value](1, () => new Value,
+        noAction, noAction)(_.retain(), _.release())
+      assert(cache.activeEntryCount == 1)
+      value.release()
       cache.close()
-      assert(cache.retiredShuffleCount == 0)
+      assert(value.references == 0)
+      intercept[IllegalArgumentException] {
+        cache.getOrBuild[Value](1, () => fail("Closed cache must not build"),
+          noAction, noAction)(_.retain(), _.release())
+      }
     } finally {
       cache.close()
     }
   }
 
-  test("a new consumer stage attempt builds a fresh replica and cleanup releases both") {
+  test("output identity is independent of address and block enumeration order") {
+    val a = BlockManagerId("a", "host-a", 1000)
+    val b = BlockManagerId("b", "host-b", 1001)
+    val first = ShuffleReadSnapshot(Vector(
+      a -> Vector((ShuffleBlockId(42, 1001L, 0), 10L, 0),
+        (ShuffleBlockId(42, 1003L, 0), 30L, 2)),
+      b -> Vector((ShuffleBlockId(42, 1002L, 0), 20L, 1))))
+    val reordered = ShuffleReadSnapshot(first.blocks.reverse.map { case (address, blocks) =>
+      address -> blocks.reverse
+    })
+    assert(first.buildIdentity(42) == reordered.buildIdentity(42))
+    assert(first.buildIdentity(42).hashCode() == reordered.buildIdentity(42).hashCode())
+    assert(first.buildIdentity(42).outputs.map(_.mapIndex) == Vector(0, 1, 2))
+    intercept[IllegalArgumentException] {
+      ShuffleReadSnapshot(first.blocks ++ first.blocks).buildIdentity(42)
+    }
+    intercept[IllegalArgumentException](first.buildIdentity(43))
+    assert(ShuffleReadSnapshot(Vector.empty).buildIdentity(42) == BroadcastBuildIdentity.empty)
+  }
+
+  test("unchanged outputs share a replica and recomputed outputs build a new one") {
     val cache = new ExecutorBroadcastCache[Value](_.release())
+    val address = BlockManagerId("a", "host-a", 1000)
+    def identity(attempt: Long): BroadcastBuildIdentity = BroadcastBuildIdentity(Seq(
+      BroadcastBuildIdentity.MapOutput(0, attempt, address)))
     val first = new Value
     val retry = new Value
-    val originalGeneration = ExecutorBroadcastCache.generation(7, 0)
-    val retryGeneration = ExecutorBroadcastCache.generation(7, 1)
-    assert(originalGeneration != retryGeneration)
-    assert(retryGeneration != ExecutorBroadcastCache.generation(8, 0))
     try {
       val originalBorrow = cache.getOrBuild[Value](42, () => first, noAction, noAction,
-        generation = originalGeneration)(_.retain(), _.release())
+        identity = identity(1001))( _.retain(), _.release())
+      val repeatedBorrow = cache.getOrBuild[Value](42, () => fail("Outputs have not changed"),
+        noAction, noAction, identity = identity(1001))(_.retain(), _.release())
+      repeatedBorrow.release()
       val retryBorrow = cache.getOrBuild[Value](42, () => retry, noAction, noAction,
-        generation = retryGeneration)(_.retain(), _.release())
+        identity = identity(1101))(_.retain(), _.release())
       assert(originalBorrow eq first)
       assert(retryBorrow eq retry)
       assert(cache.activeEntryCount == 2)
@@ -132,8 +137,10 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
       assert(value.references == 3)
       cache.invalidate(7)
       assert(value.references == 2)
-      intercept[IllegalStateException](read())
-      assert(builds.get() == 1)
+      val replacement = cache.getOrBuild[Value](7, () => new Value, noAction, noAction)(
+        _.retain(), _.release())
+      assert(replacement ne value)
+      replacement.release()
       first.release()
       second.release()
       assert(value.references == 0)
@@ -210,6 +217,43 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
     }
   }
 
+  test("an invalidated builder cannot publish over or remove a same-key replacement") {
+    val cache = new ExecutorBroadcastCache[Value](_.release())
+    val pool = Executors.newSingleThreadExecutor()
+    val started = new CountDownLatch(1)
+    val finish = new CountDownLatch(1)
+    val old = new Value
+    val replacement = new Value
+    try {
+      val builder = pool.submit(new Callable[Value] {
+        override def call(): Value = cache.getOrBuild[Value](9, () => {
+          started.countDown()
+          assert(finish.await(10, TimeUnit.SECONDS))
+          old
+        }, noAction, noAction)(_.retain(), _.release())
+      })
+      assert(started.await(10, TimeUnit.SECONDS))
+      cache.invalidate(9)
+      val borrowed = cache.getOrBuild[Value](9, () => replacement,
+        noAction, noAction)(_.retain(), _.release())
+      borrowed.release()
+      finish.countDown()
+      assert(intercept[ExecutionException](builder.get(10, TimeUnit.SECONDS))
+        .getCause.isInstanceOf[IllegalStateException])
+      assert(old.references == 0)
+      val reused = cache.getOrBuild[Value](9, () => fail("Replacement must survive"),
+        noAction, noAction)(_.retain(), _.release())
+      assert(reused eq replacement)
+      reused.release()
+      assert(cache.activeEntryCount == 1)
+    } finally {
+      finish.countDown()
+      pool.shutdownNow()
+      cache.close()
+    }
+    assert(replacement.references == 0)
+  }
+
   test("application shutdown rejects late publication and new consumers") {
     val cache = new ExecutorBroadcastCache[Value](_.release())
     val value = new Value
@@ -262,7 +306,7 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
     }
   }
 
-  test("a failed build can be retried but an unregistered shuffle cannot be recreated") {
+  test("failed and invalidated builds can be recreated while the cache is open") {
     val cache = new ExecutorBroadcastCache[Value](_.release())
     try {
       intercept[IllegalArgumentException] {
@@ -273,10 +317,9 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
         _.retain(), _.release())
       value.release()
       cache.invalidate(11)
-      intercept[IllegalStateException] {
-        cache.getOrBuild[Value](11, () => fail("Invalidated shuffle must not build"),
-          noAction, noAction)(_.retain(), _.release())
-      }
+      val rebuilt = cache.getOrBuild[Value](11, () => new Value,
+        noAction, noAction)(_.retain(), _.release())
+      rebuilt.release()
       cache.close()
       assert(value.references == 0)
     } finally {
@@ -352,10 +395,9 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
       })
       invalidation.get(5, TimeUnit.SECONDS)
       assert(value.references == 1)
-      intercept[IllegalStateException] {
-        cache.getOrBuild[Value](78, () => fail("Retired build must not run"),
-          noAction, noAction)(_.retain(), _.release())
-      }
+      val replacement = cache.getOrBuild[Value](78, () => new Value,
+        noAction, noAction)(_.retain(), _.release())
+      replacement.release()
       finish.countDown()
       val borrowed = borrower.get(10, TimeUnit.SECONDS)
       assert(value.references == 1)
@@ -467,7 +509,7 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
     }
   }
 
-  test("rejected publication retains its unregister error when disposal fails") {
+  test("rejected publication retains its invalidation error when disposal fails") {
     val value = new Value
     val cleanup = new IllegalArgumentException("owner disposal failed")
     val cache = new ExecutorBroadcastCache[Value](owned => {
@@ -481,7 +523,7 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
           value
         }, noAction, noAction)(_.retain(), _.release())
       }
-      assert(error.getMessage.contains("unregistered"))
+      assert(error.getMessage.contains("invalidated"))
       assert(error.getSuppressed.toSeq == Seq(cleanup))
       assert(value.references == 0)
     } finally {

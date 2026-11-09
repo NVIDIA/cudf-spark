@@ -20,9 +20,11 @@ import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 
 import com.nvidia.spark.rapids.{GpuCoalesceBatches, GpuMetric, GpuRangeExec, GpuSinglePartitioning, GpuTransitionOverrides, JustRowsColumnarBatch, RapidsConf, RowBasedShuffleChecksumConf, ShimLoader, ShuffleBufferCatalog, SpillableColumnarBatch, TargetSize}
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.shims.BroadcastExchangeShims
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuite
 
+import org.apache.spark.{SparkEnv, SparkException}
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rapids.shims.GpuShuffleExchangeExec
 import org.apache.spark.rdd.RDD
@@ -35,7 +37,9 @@ import org.apache.spark.sql.catalyst.plans.physical.IdentityBroadcastMode
 import org.apache.spark.sql.execution.{DriverlessBroadcastPlanInfoTestSupport, InputAdapter, LeafExecNode, SparkPlan, UnionExec, WholeStageCodegenExec}
 import org.apache.spark.sql.execution.exchange.{BroadcastExchangeExec, ENSURE_REQUIREMENTS, ReusedExchangeExec}
 import org.apache.spark.sql.execution.joins.BroadcastHashJoinExec
+import org.apache.spark.sql.execution.metric.SQLMetrics
 import org.apache.spark.sql.rapids.GpuShuffleEnv
+import org.apache.spark.sql.rapids.testing.ExecutorBroadcastFaultSupport
 import org.apache.spark.sql.types.LongType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -306,12 +310,15 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
           val producer = exchange.admittedDriverlessShuffle.get
           val probe = GpuRangeExec(0, 4, 1, 1, Seq(key), 1024)
           val stage = DriverlessBroadcastTestShim.stage(exchange, cpu.canonicalized)
+          val logical = session.range(0).queryExecution.logical
+          stage.setLogicalLink(logical)
           val join = DriverlessBroadcastTestShim.join(probe, stage)
           val conf = new RapidsConf(session.conf.getAll)
           val native = GpuDriverlessBroadcastHashJoinExec.rewrite(join, conf)
             .asInstanceOf[GpuDriverlessBroadcastHashJoinExec]
           val build = native.right.asInstanceOf[ReusedExchangeExec]
           assert(build.child eq producer)
+          assert(build.logicalLink.contains(logical))
 
           var rewrittenProducers = 0
           val transformed = native.transformUp {
@@ -371,6 +378,94 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
       val error = intercept[IllegalArgumentException] { stage.materialize() }
       assert(error.getMessage.contains("single cuDF batch"))
       assert(!stage.isAdmitted && stage.mapStatistics.isEmpty)
+    }
+  }
+
+  test("AQE enforces the standard byte limit before publishing a build token") {
+    val enabledSession = session.newSession()
+    enabledSession.conf.set("spark.rapids.sql.driverlessBroadcast.enabled", "true")
+    enabledSession.withActive {
+      val child = EmptyColumnarPlan()
+      val cpu = BroadcastExchangeExec(IdentityBroadcastMode, child)
+      val exchange = GpuBroadcastExchangeExec(IdentityBroadcastMode, child)(cpu)
+      val stage = new DriverlessBroadcastStage(exchange, enabledSession.sparkContext)
+      val maximum = BroadcastExchangeShims
+        .getMaxBroadcastTableBytes(enabledSession.sessionState.conf)
+      stage.shuffle.metrics(GpuShuffleExchangeExecBase.METRIC_DATA_SIZE).set(maximum)
+      val error = intercept[SparkException] { stage.materialize() }
+      assert(error.getMessage.contains("Cannot broadcast the table"))
+      assert(!stage.isAdmitted && stage.mapStatistics.isEmpty)
+    }
+  }
+
+  test("non-AQE retains standard broadcast when the logical build estimate exceeds its limit") {
+    session.withActive {
+      val key = AttributeReference("key", LongType)()
+      val probe = GpuRangeExec(0, 4, 1, 1, Seq(key), 1024)
+      val child = GpuRangeExec(0, 2, 1, 1, Seq(key.newInstance()), 1024)
+      val cpuChild = EmptyColumnarPlan(child.output)
+      cpuChild.setLogicalLink(session.range(100000000000L).queryExecution.logical)
+      val cpu = BroadcastExchangeExec(IdentityBroadcastMode, cpuChild)
+      val exchange = GpuBroadcastExchangeExec(IdentityBroadcastMode, child)(cpu)
+      DriverlessBroadcastEligibility.preserveBuildEstimate(cpu, exchange)
+      assert(child.logicalLink.isEmpty)
+      val join = DriverlessBroadcastTestShim.join(probe, exchange)
+      val conf = new RapidsConf(Map("spark.rapids.sql.driverlessBroadcast.enabled" -> "true",
+        "spark.rapids.shuffle.mode" -> "UCX", "spark.rapids.sql.join.hashTable.reuse" -> "false"))
+      val analysis = DriverlessBroadcastEligibility.analyze(join, conf)
+      assert(analysis.rejection(join, Some(exchange)).exists(_.contains("byte limit")))
+      assert(GpuDriverlessBroadcastHashJoinExec.rewrite(join, conf) eq join)
+    }
+  }
+
+  test("cancellation readiness accepts a completed build or a completed cache borrower") {
+    session.withActive {
+      withResource(ExecutorBroadcastFaultSupport.cancellationProbe(session)) { probe =>
+        val builds = SQLMetrics.createMetric(session.sparkContext, "builds")
+        val hits = SQLMetrics.createMetric(session.sparkContext, "hits")
+        assert(!probe.awaitBuildMetric(builds, hits, 0))
+        hits.set(1)
+        assert(probe.awaitBuildMetric(builds, hits, 0))
+        hits.set(0)
+        builds.set(1)
+        assert(probe.awaitBuildMetric(builds, hits, 0))
+        builds.set(0)
+        assert(!probe.awaitBuildMetric(builds, hits, 0))
+      }
+    }
+  }
+
+  test("old fetch protocol is checked from the application when a session enables driverless") {
+    session.withActive {
+      val appConf = SparkEnv.get.conf
+      val key = "spark.shuffle.useOldFetchProtocol"
+      val previous = appConf.getOption(key)
+      try {
+        appConf.set(key, "true")
+        val attribute = AttributeReference("key", LongType)()
+        val probe = GpuRangeExec(0, 4, 1, 1, Seq(attribute), 1024)
+        val build = GpuRangeExec(0, 2, 1, 1, Seq(attribute.newInstance()), 1024)
+        val cpu = BroadcastExchangeExec(IdentityBroadcastMode, build)
+        val join = DriverlessBroadcastTestShim.join(probe,
+          GpuBroadcastExchangeExec(IdentityBroadcastMode, build)(cpu))
+        val enabled = new RapidsConf(Map("spark.rapids.sql.driverlessBroadcast.enabled" -> "true",
+          "spark.rapids.shuffle.mode" -> "UCX",
+          "spark.rapids.sql.join.hashTable.reuse" -> "false"))
+        assert(GpuDriverlessBroadcastHashJoinExec.rewrite(join,
+          new RapidsConf(Map.empty[String, String])) eq join)
+        val error = intercept[SparkException] {
+          GpuDriverlessBroadcastHashJoinExec.rewrite(join, enabled)
+        }
+        assert(error.getMessage.contains(key + "=true"))
+        appConf.set(key, "false")
+        assert(GpuDriverlessBroadcastHashJoinExec.rewrite(join, enabled)
+          .isInstanceOf[GpuDriverlessBroadcastHashJoinExec])
+      } finally {
+        previous match {
+          case Some(value) => appConf.set(key, value)
+          case None => appConf.remove(key)
+        }
+      }
     }
   }
 

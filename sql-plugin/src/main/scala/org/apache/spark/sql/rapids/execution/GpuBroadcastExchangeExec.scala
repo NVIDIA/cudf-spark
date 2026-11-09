@@ -396,6 +396,9 @@ class GpuBroadcastMeta(
   override def convertToGpu(): GpuExec = {
     val gpuBroadcast = GpuBroadcastExchangeExec(exchange.mode, childPlans.head.convertIfNeeded())(
       exchange.canonicalized.asInstanceOf[BroadcastExchangeExec])
+    if (conf.isDriverlessBroadcastEnabled) {
+      DriverlessBroadcastEligibility.preserveBuildEstimate(exchange, gpuBroadcast)
+    }
     GpuTransitionOverrides.copyAqeQueryStageExchangeTag(exchange, gpuBroadcast)
     exchange.getTagValue(DriverlessBroadcastStage.eligible).foreach { value =>
       gpuBroadcast.setTagValue(DriverlessBroadcastStage.eligible, value)
@@ -724,8 +727,8 @@ object GpuBroadcastExchangeExecBase {
     }
   }
 
-  protected def checkSizeLimit(sizeInBytes: Long, conf: SQLConf) = {
-    // Spark restricts the size of broadcast relations
+  private[execution] def checkSizeLimit(sizeInBytes: Long, conf: SQLConf): Unit = {
+    // Spark restricts the size of broadcast relations.
     val maxBytes = BroadcastExchangeShims.getMaxBroadcastTableBytes(conf)
     if (sizeInBytes >= maxBytes) {
       throw new SparkException(

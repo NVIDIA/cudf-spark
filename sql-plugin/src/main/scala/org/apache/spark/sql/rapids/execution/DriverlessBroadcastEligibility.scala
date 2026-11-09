@@ -21,7 +21,10 @@ import java.util.{Collections, IdentityHashMap}
 import scala.collection.mutable.ArrayBuffer
 
 import com.nvidia.spark.rapids.{GpuBuildLeft, GpuBuildRight, RapidsConf}
+import com.nvidia.spark.rapids.shims.BroadcastExchangeShims
 
+import org.apache.spark.{SparkEnv, SparkException}
+import org.apache.spark.sql.catalyst.trees.TreeNodeTag
 import org.apache.spark.sql.execution.{ExecSubqueryExpression, SparkPlan}
 import org.apache.spark.sql.execution.adaptive.{BroadcastQueryStageExec, QueryStageExec}
 import org.apache.spark.sql.execution.exchange.{BroadcastExchangeExec, ReusedExchangeExec}
@@ -30,13 +33,22 @@ import org.apache.spark.sql.rapids.shims.SparkSessionUtils
 
 /** Shared planning checks; each planning phase analyzes its current consumer graph. */
 private[execution] object DriverlessBroadcastEligibility {
+  private val estimatedBuildBytes = TreeNodeTag[BigInt]("driverlessEstimatedBuildBytes")
+
+  def preserveBuildEstimate(cpu: BroadcastExchangeExec, gpu: GpuBroadcastExchangeExec): Unit = {
+    // GPU conversion and canonicalization need not retain the child's logical link.
+    cpu.child.logicalLink.foreach { logical =>
+      gpu.setTagValue(estimatedBuildBytes, logical.stats.sizeInBytes)
+    }
+  }
+
   def gpuBuildReadRejections(conf: RapidsConf): Seq[String] =
     DriverlessBroadcastPolicy.rejections(conf) ++
       (if (!GpuShuffleEnv.useGPUShuffle(conf)) Seq("GPU shuffle is unavailable") else Seq.empty)
 
   private[execution] def planRejections(plan: SparkPlan, conf: RapidsConf): Seq[String] = {
     gpuBuildReadRejections(conf) ++ Seq(
-      // ContextCleaner unregisters build shuffles and retires executor cache entries.
+      // ContextCleaner unregisters build shuffles and invalidates cached replicas.
       if (SparkSessionUtils.sessionFromPlan(plan).sparkContext.cleaner.isEmpty) {
         Some("Spark context cleaner is disabled")
       } else None,
@@ -103,7 +115,23 @@ private[execution] object DriverlessBroadcastEligibility {
         exchange match {
           case Some(build) if blocked.exists(_.fastEquals(build.cpuCanonical.canonicalized)) =>
             Some("broadcast has a standard-payload consumer")
-          case Some(build) => DriverlessBroadcastBuildAdmission.rejectionReason(build.child)
+          case Some(build) =>
+            val planRejection = DriverlessBroadcastBuildAdmission.rejectionReason(build.child)
+            if (planRejection.isEmpty && SparkEnv.get.conf.getBoolean(
+                "spark.shuffle.useOldFetchProtocol", false)) {
+              throw new SparkException("Driverless broadcast cannot identify recomputed map " +
+                "outputs with spark.shuffle.useOldFetchProtocol=true. Restart the application " +
+                "with the normal fetch protocol, or disable driverless broadcast and review " +
+                "the broadcast threshold before using standard broadcast.")
+            }
+            planRejection.orElse {
+              if (!join.conf.adaptiveExecutionEnabled &&
+                  build.getTagValue(estimatedBuildBytes)
+                    .orElse(build.child.logicalLink.map(_.stats.sizeInBytes)).exists(_ >=
+                    BroadcastExchangeShims.getMaxBroadcastTableBytes(join.conf))) {
+                Some("estimated build exceeds the standard broadcast byte limit")
+              } else None
+            }
           case None => Some("no eligible driverless build exchange")
         }
       }

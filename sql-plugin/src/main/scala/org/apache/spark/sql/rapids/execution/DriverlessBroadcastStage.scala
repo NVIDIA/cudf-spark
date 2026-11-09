@@ -54,8 +54,8 @@ private[execution] class DriverlessBroadcastStage(
     val rows = shuffle.metrics(GpuMetric.NUM_OUTPUT_ROWS).value
     DriverlessBroadcastBuildAdmission.requireSupportedRowCount(rows)
     val uncompressed = shuffle.metrics(GpuShuffleExchangeExecBase.METRIC_DATA_SIZE).value
-    // AQE requires materialization and runtime statistics before replanning its consumers.
-    // No separate size policy changes the broadcast strategy Spark has already selected.
+    GpuBroadcastExchangeExecBase.checkSizeLimit(uncompressed, exchange.conf)
+    // AQE receives a token only after the standard broadcast byte limit is checked.
     exchange.metrics(GpuMetric.NUM_OUTPUT_ROWS).set(rows)
     exchange.metrics("dataSize").set(uncompressed)
     exchange.metrics("driverlessBuildBytes").set(uncompressed)

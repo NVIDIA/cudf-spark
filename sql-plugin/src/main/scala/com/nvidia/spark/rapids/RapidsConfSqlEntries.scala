@@ -25,7 +25,10 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
 
   val DRIVERLESS_BROADCAST_ENABLED = conf("spark.rapids.sql.driverlessBroadcast.enabled")
     .doc("Use executor-to-executor GPU shuffle reads for eligible broadcast hash joins. " +
-      "Can be enabled or disabled per query. " +
+      "Can be enabled or disabled per query. Cached replicas are shared while source map " +
+      "outputs remain unchanged; recomputed outputs use a new replica. " +
+      "The old fetch protocol (spark.shuffle.useOldFetchProtocol=true) is unsupported and " +
+      "causes a planning error for an otherwise eligible driverless join. " +
       "Uses UCX GPU shuffle; the build decoder accepts uncompressed and compressed batches. " +
       "Hash-table reuse must be disabled. Null-aware anti joins, skew-optimized joins, " +
       "and joins containing subqueries retain the standard path. Eligible GPU joins can " +

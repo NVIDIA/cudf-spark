@@ -20,7 +20,7 @@ import java.util.concurrent.{CountDownLatch, TimeUnit}
 import scala.collection.mutable
 import scala.concurrent.duration._
 
-import org.apache.spark.{ShuffleDependency, SparkEnv, TaskContext}
+import org.apache.spark.{ShuffleDependency, SparkEnv, Success, TaskContext}
 import org.apache.spark.rpc.{RpcCallContext, RpcEnv, RpcTimeout, ThreadSafeRpcEndpoint}
 import org.apache.spark.scheduler.{SparkListener, SparkListenerBlockManagerAdded, SparkListenerExecutorAdded, SparkListenerExecutorMetricsUpdate, SparkListenerTaskEnd, SparkListenerTaskStart}
 import org.apache.spark.scheduler.local.LocalSchedulerBackend
@@ -31,7 +31,7 @@ import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.types.LongType
 import org.apache.spark.util.ThreadUtils
 
-/** Test-only missing-output injection for the two-executor shuffle integration suite. */
+/** Test fixtures for driverless-broadcast scheduling, cancellation, and recovery. */
 object ExecutorBroadcastFaultSupport {
   private case class BuildStarted(stageId: Int)
   private case object ProbeEntered
@@ -88,15 +88,21 @@ object ExecutorBroadcastFaultSupport {
 
     def awaitEntered(seconds: Long): Boolean = entered.await(seconds, TimeUnit.SECONDS)
 
-    def awaitMetric(metric: SQLMetric, seconds: Long): Boolean = {
+    def awaitMetric(metric: SQLMetric, seconds: Long): Boolean =
+      awaitMetrics(Seq(metric), seconds)
+
+    def awaitBuildMetric(builds: SQLMetric, hits: SQLMetric, seconds: Long): Boolean =
+      awaitMetrics(Seq(builds, hits), seconds)
+
+    private def awaitMetrics(metrics: Seq[SQLMetric], seconds: Long): Boolean = {
       val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(seconds)
       lock.synchronized {
         var remaining = deadline - System.nanoTime()
-        while (metric.value <= 0 && remaining > 0) {
+        while (!metrics.exists(_.value > 0) && remaining > 0) {
           lock.wait(math.max(1L, remaining / 1000000L))
           remaining = deadline - System.nanoTime()
         }
-        metric.value > 0
+        metrics.exists(_.value > 0)
       }
     }
 
@@ -264,6 +270,35 @@ object ExecutorBroadcastFaultSupport {
     SQLExecution.withNewExecutionId(frame.queryExecution, Some("lost-broadcast-build-output")) {
       collectWithMissingBuild(session, frame, slots)
     }
+  }
+
+  /** Records map attempts during an action, before SQL-end cleanup can remove their metadata. */
+  def collectWithMapAttempts(session: SparkSession, frame: Dataset[Row]): Array[String] = {
+    require(frame.schema.fields.map(_.dataType).toSeq == Seq(LongType, LongType),
+      "This fixture checks complete rows with exactly two long columns")
+    val context = session.sparkContext
+    context.listenerBus.waitUntilEmpty(10000)
+    val attempts = mutable.ArrayBuffer.empty[Long]
+    val listener = new SparkListener {
+      override def onTaskEnd(event: SparkListenerTaskEnd): Unit = {
+        if (event.taskType == "ShuffleMapTask" && event.reason == Success) {
+          attempts.synchronized { attempts += event.taskInfo.taskId }
+        }
+      }
+    }
+    context.addSparkListener(listener)
+    try {
+      val rows = frame.collect().map(row => s"${row.getLong(0)}:${row.getLong(1)}")
+      context.listenerBus.waitUntilEmpty(10000)
+      Array(attempts.synchronized { attempts.sorted.mkString(",") }) ++ rows
+    } finally {
+      context.removeSparkListener(listener)
+    }
+  }
+
+  /** Blocking removal makes repeated-action recovery independent of asynchronous cleanup. */
+  def removeBuildOutputs(shuffleId: Int): Unit = {
+    SparkEnv.get.blockManager.master.removeShuffle(shuffleId, blocking = true)
   }
 
   private def collectWithMissingBuild(
