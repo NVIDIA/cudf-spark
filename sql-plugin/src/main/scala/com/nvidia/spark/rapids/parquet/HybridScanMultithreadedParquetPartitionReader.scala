@@ -19,8 +19,7 @@ package com.nvidia.spark.rapids.parquet
 import java.io.FileNotFoundException
 import java.net.URI
 
-import ai.rapids.cudf.{ByteRange, HostMemoryBuffer, HybridScanReader, ParquetOptions, Table}
-import ai.rapids.cudf.ast.CompiledExpression
+import ai.rapids.cudf.{HostMemoryBuffer, ParquetOptions, Table}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
@@ -67,7 +66,10 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
     keepReadsInOrder: Boolean)
   extends MultiFileCloudPartitionReaderBase(conf, files, poolConf, maxNumFileProcessed, null,
     execMetrics, maxReadBatchSizeRows, maxReadBatchSizeBytes, keepReadsInOrder = keepReadsInOrder)
-  with MultiFileReaderFunctions with HybridScanBase {
+  with MultiFileReaderFunctions {
+
+  private val pipeline = new HybridScanPipeline(HybridScanContext(readDataSchema, config.filters,
+    config.filterKeepThreshold, execMetrics))
 
   /**
    * A file's fetched column chunks and its footer, handed from the pool thread to the task thread,
@@ -125,11 +127,10 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
     case _ => throw new RuntimeException("Wrong HostMemoryBuffersWithMetaData")
   }
 
-  private def hybridFile(file: PartitionedFile): HybridScanFile = {
+  private def hybridSplit(file: PartitionedFile): HybridScanSplit = {
     val filePath = new Path(new URI(file.filePath.toString()))
-    val source = new HybridScanFileByteSource(fileIO, filePath, execMetrics)
-    HybridScanFile(source, file.start, file.length, parquetOptions, readDataSchema,
-      config.filters, config.filterKeepThreshold, execMetrics)
+    HybridScanSplit(new HybridScanFileByteSource(fileIO, filePath, execMetrics), file.start,
+      file.length)
   }
 
   private class ReadBatchRunner(
@@ -199,12 +200,12 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
      */
     private def planAndFetchForPool(
         footer: HostMemoryBuffer): Option[(FetchedColumnChunks, Long)] = {
-      withResource(HybridScanBase.openReader(footer, parquetOptions)) { reader =>
+      withResource(HybridScanPipeline.openReader(footer, parquetOptions)) { reader =>
         withResource(config.filters.ast.map(_.compile())) { ast =>
-          planAndFetch(hybridFile(file), reader, ast, allowDictionaryPruning = false).map {
-            fetched =>
+          pipeline.planAndFetch(hybridSplit(file), reader, ast, allowDictionaryPruning = false)
+            .map { fetched =>
               closeOnExcept(fetched)(f => (f, reader.totalRowsInRowGroups(f.rowGroups)))
-          }
+            }
         }
       }
     }
@@ -238,108 +239,28 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
   private def decodeResult(result: HybridFileResult): Option[Table] = {
     val chunks = result.memBuffersAndSizes.head.hmbs
     withResource(result.footer.getDataHostBuffer()) { footer =>
-      decodeFetched(hybridFile(result.partitionedFile), footer,
+      decodeFetched(footer,
         new FetchedColumnChunks(result.rowGroups, chunks.safeMap(_.getDataHostBuffer())))
     }
   }
 
   /**
-   * The task phase, the counterpart to a pool thread's [[planAndFetch]]: parse the footer into a
-   * fresh reader, since the plan phase's reader is on another thread, prune the fetched chunks
-   * with the dictionaries the pool could not compare, and decode what survives. Takes `fetched`;
-   * the footer stays the caller's to close.
+   * The task phase, the counterpart to a pool thread's [[HybridScanPipeline.planAndFetch]]: parse
+   * the footer into a fresh reader, since the plan phase's reader is on another thread, prune the
+   * fetched chunks with the dictionaries the pool could not compare, and decode what survives.
+   * Takes `fetched`; the footer stays the caller's to close.
    */
   private def decodeFetched(
-      file: HybridScanFile,
       footer: HostMemoryBuffer,
       fetched: FetchedColumnChunks): Option[Table] = {
-    val ast = closeOnExcept(fetched)(_ => file.scanFilters.ast.map(_.compile()))
+    val ast = closeOnExcept(fetched)(_ => config.filters.ast.map(_.compile()))
     withResource(ast) { _ =>
-      val parsed = closeOnExcept(fetched)(_ => HybridScanBase.openReader(footer,
-        file.parquetOptions))
+      val parsed = closeOnExcept(fetched)(_ => HybridScanPipeline.openReader(footer,
+        parquetOptions))
       withResource(parsed) { reader =>
-        pruneFetchedWithDictionaries(file, reader, ast, fetched)
-          .flatMap(materializeFetched(file, reader, ast, _))
+        pipeline.pruneFetchedWithDictionaries(reader, ast, fetched)
+          .flatMap(pipeline.materializeFetched(reader, ast, _))
       }
     }
-  }
-
-  /**
-   * Prune already-fetched chunks to the row groups the filter's dictionaries cannot rule out,
-   * slicing the dictionary pages out of the chunks rather than reading them again. The pruned row
-   * groups' IO is already spent, but their device copy and decode are saved. Takes `fetched` and
-   * returns what to decode: `fetched` itself when nothing is pruned, the surviving chunks when
-   * some are, or None when no row group survives.
-   */
-  private def pruneFetchedWithDictionaries(
-      file: HybridScanFile,
-      reader: HybridScanReader,
-      ast: Option[CompiledExpression],
-      fetched: FetchedColumnChunks): Option[FetchedColumnChunks] = {
-    if (ast.isEmpty ||
-        !file.scanFilters.pushed.exists(FilterToAstConverter.canPruneWithDictionary)) {
-      Some(fetched)
-    } else {
-      val survivors = closeOnExcept(fetched) { f =>
-        ast.foreach(reader.setFilter)
-        NvtxRegistry.HYBRID_SCAN_FILTER_DICT {
-          filterRowGroupsWithDictionaries(reader, f.rowGroups,
-            sliceDictPagesFromChunks(reader, f.rowGroups, f.hostChunks, _))
-        }
-      }
-      if (survivors.length == fetched.rowGroups.length) {
-        Some(fetched)
-      } else {
-        withResource(fetched) { f =>
-          if (survivors.isEmpty) None else Some(selectSurvivingChunks(f, survivors))
-        }
-      }
-    }
-  }
-
-  /**
-   * The dictionary pages for `dictRanges`, sliced from the fetched chunks. A dictionary page is
-   * the first page of its column chunk, so a non-empty range starts where exactly one chunk does
-   * and is that chunk's leading bytes. An empty range (a chunk the reader will not prune with)
-   * keeps its slot as an empty buffer, since the reader matches buffers to ranges by position.
-   * The slices are the caller's to close.
-   */
-  private def sliceDictPagesFromChunks(
-      reader: HybridScanReader,
-      rowGroups: Array[Int],
-      chunks: Array[HostMemoryBuffer],
-      dictRanges: Array[ByteRange]): Array[HostMemoryBuffer] = {
-    val chunkRanges = reader.allColumnChunksByteRanges(rowGroups)
-    require(chunkRanges.length == chunks.length,
-      "hybrid scan column chunk count does not match the fetched buffers")
-    val chunkByOffset = chunkRanges.indices.map(i => chunkRanges(i).offset() -> i).toMap
-    dictRanges.safeMap { r =>
-      if (r.size() == 0) {
-        chunks.head.slice(0, 0)
-      } else {
-        chunks(chunkByOffset(r.offset())).slice(0, r.size())
-      }
-    }
-  }
-
-  /**
-   * The chunks of the surviving row groups, in row group order, as new slices that own their own
-   * references, so `fetched` can be closed independently. Every selected column has one chunk in
-   * every row group, so each row group's run of chunks is the same length.
-   */
-  private def selectSurvivingChunks(
-      fetched: FetchedColumnChunks,
-      survivors: Array[Int]): FetchedColumnChunks = {
-    val numRowGroups = fetched.rowGroups.length
-    val chunksPerRowGroup = fetched.hostChunks.length / numRowGroups
-    require(chunksPerRowGroup * numRowGroups == fetched.hostChunks.length,
-      "hybrid scan column chunks do not divide evenly into row groups")
-    val survivorSet = survivors.toSet
-    val kept = fetched.rowGroups.indices.filter(i => survivorSet.contains(fetched.rowGroups(i)))
-    val keptChunks = kept.flatMap { i =>
-      fetched.hostChunks.slice(i * chunksPerRowGroup, (i + 1) * chunksPerRowGroup)
-    }.toArray
-    new FetchedColumnChunks(kept.map(fetched.rowGroups(_)).toArray,
-      keptChunks.safeMap(c => c.slice(0, c.getLength)))
   }
 }

@@ -1338,7 +1338,7 @@ abstract class AbstractGpuParquetMultiFilePartitionReaderFactory(
     if (rapidsConf.isParquetHybridScanEnabled) {
       val config = HybridScanConfig(rapidsConf,
         new HybridScanFilters(readDataSchema, isCaseSensitive, filters))
-      val eligible = HybridScanBase.isEligible(
+      val eligible = HybridScanPipeline.isEligible(
         rapidsConf.isParquetHybridScanEnabled, rapidsConf.testParquetHybridScanFailOnFallback,
         readDataSchema, config.filters,
         useChunkedReader, compressCfg.decompressSnappyCpu || compressCfg.decompressZstdCpu,
@@ -1615,7 +1615,7 @@ case class GpuParquetMultiFilePartitionReaderFactory(
         }
       }
       new HybridScanMultithreadedParquetPartitionReader(fileIO, conf, files, config,
-        readDataSchema, HybridScanBase.parquetOptions(readDataSchema.fieldNames), readFooter,
+        readDataSchema, HybridScanPipeline.parquetOptions(readDataSchema.fieldNames), readFooter,
         maxReadBatchSizeRows, maxReadBatchSizeBytes, maxGpuColumnSizeBytes, execMetrics,
         partitionSchema, poolConf, maxNumFileProcessed, ignoreMissingFiles, keepReadsInOrder)
     case None => new MultiFileCloudParquetPartitionReader(
