@@ -50,7 +50,8 @@ class GpuVariantGetMetaSuite extends AnyFunSuite {
     try {
       thread.setContextClassLoader(new ClassLoader(null) {})
       val module = moduleClass.getField("MODULE$").get(null)
-      assert(moduleClass.getMethod("isVariantCudfAvailable").invoke(module) == java.lang.Boolean.TRUE)
+      val available = moduleClass.getMethod("isVariantCudfAvailable").invoke(module)
+      assert(available == java.lang.Boolean.TRUE)
     } finally {
       thread.setContextClassLoader(original)
     }
