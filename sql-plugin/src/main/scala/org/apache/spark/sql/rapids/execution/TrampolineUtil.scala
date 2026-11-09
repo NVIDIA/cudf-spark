@@ -256,6 +256,15 @@ object TrampolineUtil {
     sc.listenerBus.waitUntilEmpty(timeoutMillis)
   }
 
+  /**
+   * Clears every map and merge output that the driver holds for a shuffle, and keeps the
+   * shuffle's status, so a later job reruns the map stage before it reads. Call it on the
+   * driver, whose map output tracker is the master.
+   *
+   * @return true when the driver held the shuffle's status
+   */
+  def clearMapOutputs(shuffleId: Int): Boolean = false
+
   def getSparkHadoopUtilConf: Configuration = SparkHadoopUtil.get.conf
 
   def markTaskFailed(ctx: TaskContext, error: Throwable): Unit = {

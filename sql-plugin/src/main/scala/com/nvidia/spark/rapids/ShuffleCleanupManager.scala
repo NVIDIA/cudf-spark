@@ -23,6 +23,7 @@ import scala.collection.mutable.ArrayBuffer
 
 import org.apache.spark.SparkContext
 import org.apache.spark.internal.Logging
+import org.apache.spark.scheduler.SparkListenerEvent
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 
 /**
@@ -81,15 +82,36 @@ import org.apache.spark.sql.rapids.execution.TrampolineUtil
  * - No need to track executor list on driver side
  * - 1-second polling overhead is negligible
  *
- * @param sc SparkContext for posting events
+ * == UCX Shuffle Reclaim ==
+ *
+ * Under UCX, the manager clears the map outputs of each GPU shuffle that an ended SQL execution
+ * wrote, on its own thread, and keeps the shuffle registered. Each executor then gets the
+ * shuffle, with the execution's task-id watermark, at its polls until it reports a result.
+ *
+ * @param clock the current time in milliseconds
+ * @param postEvent posts an event to the listener bus
+ * @param driverStep clears a shuffle's map outputs on the driver, and returns true when the
+ *                   shuffle's status existed. It may throw.
  * @param staleEntryMaxAgeMs maximum age for pending entries before they are removed
  * @param cleanupIntervalMs interval for running stale entry cleanup
  */
 class ShuffleCleanupManager(
-    sc: SparkContext,
+    clock: () => Long,
+    postEvent: SparkListenerEvent => Unit,
+    driverStep: Int => Boolean,
     staleEntryMaxAgeMs: Long = 300000,  // 5 minutes
     cleanupIntervalMs: Long = 60000     // 1 minute
 ) extends Logging {
+
+  /**
+   * Builds the manager that the driver plugin uses, from its SparkContext.
+   *
+   * @param sc SparkContext whose listener bus the manager posts events to
+   */
+  def this(sc: SparkContext) = this(
+    clock = () => System.currentTimeMillis(),
+    postEvent = event => TrampolineUtil.postEvent(sc, event),
+    driverStep = TrampolineUtil.clearMapOutputs)
 
   /**
    * Shuffles pending cleanup. Maps shuffleId -> timestamp when unregister was called.
@@ -119,7 +141,7 @@ class ShuffleCleanupManager(
     new Runnable {
       override def run(): Unit = {
         try {
-          cleanupStaleEntries(staleEntryMaxAgeMs)
+          runTick()
         } catch {
           case e: Exception =>
             logWarning("Error during stale entry cleanup", e)
@@ -191,7 +213,7 @@ class ShuffleCleanupManager(
           s"bytesFromMemory=${stat.bytesFromMemory}, bytesFromDisk=${stat.bytesFromDisk}")
 
         try {
-          TrampolineUtil.postEvent(sc,
+          postEvent(
             SparkRapidsShuffleDiskSavingsEvent(shuffleId, stat.bytesFromMemory, stat.bytesFromDisk,
               stat.numExpansions, stat.numSpills, stat.numForcedFileOnly))
         } catch {
@@ -233,6 +255,48 @@ class ShuffleCleanupManager(
       }
     }
   }
+
+  /** The body of the periodic tick: MULTITHREADED's stale entries, then UCX's. */
+  private[rapids] def runTick(): Unit = {
+    cleanupStaleEntries(staleEntryMaxAgeMs)
+  }
+
+  /**
+   * Clears the map outputs of an ended SQL execution's UCX shuffles on the driver, and asks
+   * every executor to reclaim each one that the driver held up to `watermark`. It returns at
+   * once, and the manager's thread does the work.
+   *
+   * @param executionId the SQL execution that wrote the shuffles
+   * @param shuffleIds the shuffles to reclaim
+   * @param watermark the largest task id seen before the execution ended
+   */
+  def reclaimAfterExecution(executionId: Long, shuffleIds: Seq[Int], watermark: Long): Unit = {}
+
+  /**
+   * Handle a UCX executor's poll for shuffles to reclaim.
+   *
+   * @param executorId the executor polling for work
+   * @return the requests that the executor has not reported a result for
+   */
+  def handleReclaimPoll(executorId: String): RapidsShuffleReclaimResponseMsg =
+    RapidsShuffleReclaimResponseMsg(Array.empty)
+
+  /**
+   * Handle the results of a UCX executor's reclaims.
+   *
+   * @param executorId the executor reporting results
+   * @param results the result of each reclaim
+   */
+  def handleReclaimResult(executorId: String, results: Array[ShuffleReclaimResult]): Unit = {}
+
+  /** Makes each UCX poll hand out no request, until the release below. */
+  private[rapids] def holdReclaimPollsForTesting(): Unit = {}
+
+  /** Ends the hold that `holdReclaimPollsForTesting` set. */
+  private[rapids] def releaseReclaimPollsForTesting(): Unit = {}
+
+  /** The watermark of a shuffle's open request, and the executors that reported a result. */
+  private[rapids] def pendingReclaimForTesting(shuffleId: Int): Option[(Long, Set[String])] = None
 
   /**
    * Shutdown the manager.

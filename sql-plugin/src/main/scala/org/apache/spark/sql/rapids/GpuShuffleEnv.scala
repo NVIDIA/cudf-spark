@@ -150,6 +150,20 @@ object GpuShuffleEnv extends Logging {
       conf.shuffleTransportEarlyStart
   }
 
+  /**
+   * Why the UCX shuffle reclaim must not run, or None when it may. The driver plugin and the
+   * executor plugin both call this, so the two sides agree.
+   *
+   * @param conf the RAPIDS configuration
+   * @param sparkConf the Spark configuration, which names the shuffle manager
+   * @param isDataBricks whether the plugin runs on a Databricks shim
+   * @return the first check that failed, with the configured value it found, or None
+   */
+  def ucxReclaimRefusal(
+      conf: RapidsConf,
+      sparkConf: SparkConf,
+      isDataBricks: Boolean): Option[String] = Some("not implemented")
+
   val RAPIDS_SHUFFLE_CLASS: String = ShimLoader.getRapidsShuffleManagerClass
 
   /**
