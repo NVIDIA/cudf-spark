@@ -24,7 +24,8 @@ from asserts import (assert_cpu_and_gpu_are_equal_collect_with_capture, assert_m
                      collect_plan_nodes, plan_metric)
 from marks import allow_non_gpu, ignore_order, shuffle_test
 from spark_init_internal import get_spark_i_know_what_i_am_doing
-from spark_session import is_spark_400_or_later, with_cpu_session, with_gpu_session
+from spark_session import (is_databricks_runtime, is_spark_400_or_later,
+                           with_cpu_session, with_gpu_session)
 
 
 pytestmark = [shuffle_test]
@@ -172,16 +173,36 @@ def test_executor_broadcast_preserves_null_duplicate_and_residual_semantics(
 @pytest.mark.parametrize('enabled', [None, 'false'])
 def test_executor_broadcast_disabled_keeps_standard_broadcast(aqe, enabled):
     def check_standard(cpu_plan, gpu_plan):
-        exchanges = [node for node in collect_plan_nodes(gpu_plan, include_wrapped=True)
-                     if node.getClass().getSimpleName() == 'GpuBroadcastExchangeExec']
-        assert exchanges, gpu_plan.toString()
-        for exchange in exchanges:
-            assert exchange.metrics().contains('collectTime')
-            assert plan_metric(exchange, 'collectTime') > 0
+        nodes = collect_plan_nodes(gpu_plan, include_wrapped=True)
+        joins = [node for node in nodes
+                 if node.getClass().getSimpleName() == 'GpuBroadcastHashJoinExec']
+        assert len(joins) == 1, gpu_plan.toString()
+        executor_broadcast = False
+        if is_databricks_runtime():
+            cpu_joins = [node for node in collect_plan_nodes(cpu_plan, include_wrapped=True)
+                         if node.getClass().getSimpleName() == 'BroadcastHashJoinExec']
+            assert len(cpu_joins) == 1, cpu_plan.toString()
+            executor_broadcast = cpu_joins[0].isExecutorBroadcast()
+            assert joins[0].isExecutorBroadcast() == executor_broadcast
+        if executor_broadcast:
+            # Databricks AQE uses its native executor broadcast, without a BroadcastExchange.
+            exchange = joins[0].shuffleExchange()
+            assert exchange.shuffleOrigin().toString() == 'EXECUTOR_BROADCAST'
+            assert exchange.outputPartitioning().numPartitions() == 1
             assert plan_metric(exchange, 'dataSize') > 0
+            assert plan_metric(exchange, 'shuffleBytesWritten') > 0
+        else:
+            exchanges = [node for node in nodes
+                         if node.getClass().getSimpleName() == 'GpuBroadcastExchangeExec']
+            assert exchanges, gpu_plan.toString()
+            for exchange in exchanges:
+                assert plan_metric(exchange, 'collectTime') > 0
+                assert plan_metric(exchange, 'dataSize') > 0
+        for node in nodes:
             for name in ('driverlessBuildBytes', 'fallbackBroadcastBytes',
-                         'driverlessStageTime', 'driverlessStageFallbacks'):
-                assert not exchange.metrics().contains(name), name
+                         'driverlessStageTime', 'driverlessStageFallbacks',
+                         'executorBuilds', 'executorBuildCacheHits'):
+                assert not node.metrics().contains(name), name
 
     conf = {'spark.sql.adaptive.enabled': aqe}
     if enabled is not None:
