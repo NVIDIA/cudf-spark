@@ -65,7 +65,7 @@ private[rapids] object GpuVariantExtraction {
 
   // Keep physical access separate from extraction policy: is_variant_null, for example, must not
   // validate metadata or traverse a path.
-  def withCudfVariantView[T](variantStruct: ColumnView)(f: ColumnView => T): T = {
+  private def withCudfVariantView[T](variantStruct: ColumnView)(f: ColumnView => T): T = {
     require(variantStruct.getType == DType.STRUCT,
       s"expected Variant struct input, got ${variantStruct.getType}")
     require(variantStruct.getNumChildren == 2,

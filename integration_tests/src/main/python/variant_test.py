@@ -185,7 +185,7 @@ def test_variant_cpu_rows_convert_to_gpu():
 
 @incompat
 @allow_non_gpu('RDDScanExec')
-@validate_execs_in_gpu_plan('GpuProjectExec')
+@validate_execs_in_gpu_plan('GpuProjectExec', 'GpuVariantGet')
 @pytest.mark.parametrize('value,error', [
     pytest.param(b'', 'MALFORMED_VARIANT', id='empty-value'),
     pytest.param(b'\xfc', 'UNKNOWN_PRIMITIVE_TYPE_IN_VARIANT', id='unknown-primitive'),

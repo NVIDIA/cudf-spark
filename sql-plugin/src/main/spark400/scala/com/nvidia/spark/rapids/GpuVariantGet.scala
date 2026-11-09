@@ -133,9 +133,11 @@ object GpuVariantGet {
     case _ => false
   }
 
-  def isVariantCudfAvailable: Boolean = {
+  // The defining loader also resolves this expression's cuDF classes. Cache against that stable
+  // loader rather than the tagging thread's potentially different context loader.
+  lazy val isVariantCudfAvailable: Boolean = {
     GpuVariantExtraction.hasRequiredApis { name =>
-      Class.forName(name, false, Thread.currentThread().getContextClassLoader)
+      Class.forName(name, false, getClass.getClassLoader)
     }
   }
 
@@ -186,16 +188,16 @@ object GpuVariantGet {
     // missing path or malformed encoding, neither of which proves Spark would return null.
     withResource(Scalar.fromUnsignedByte(VariantOperationStatus.ROW_NULL.getNativeId.toByte)) {
       rowNull =>
-        withResource(new CloseableHolder(extractionStatus.equalTo(rowNull))) { covered =>
-          decodedStatuses.foreach { status =>
-            withResource(Scalar.fromUnsignedByte(
-                VariantOperationStatus.SUCCESS.getNativeId.toByte)) { success =>
-              withResource(status.equalTo(success)) { decoded =>
-                covered.setAndCloseOld(covered.get.or(decoded))
+        withResource(Scalar.fromUnsignedByte(VariantOperationStatus.SUCCESS.getNativeId.toByte)) {
+          success =>
+            withResource(new CloseableHolder(extractionStatus.equalTo(rowNull))) { covered =>
+              decodedStatuses.foreach { status =>
+                withResource(status.equalTo(success)) { decoded =>
+                  covered.setAndCloseOld(covered.get.or(decoded))
+                }
               }
+              BoolUtils.isAllValidTrue(covered.get)
             }
-          }
-          BoolUtils.isAllValidTrue(covered.get)
         }
     }
   }
