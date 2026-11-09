@@ -41,7 +41,7 @@ class HybridScanEligibilitySuite extends AnyFunSuite {
       decryptionConfigured: Boolean = false,
       dateRebaseMode: DateTimeRebaseMode = DateTimeRebaseException,
       int96RebaseMode: DateTimeRebaseMode = DateTimeRebaseException): Option[String] = {
-    HybridScanBase.ineligibleReason(enabled, schema,
+    HybridScanPipeline.ineligibleReason(enabled, schema,
       new HybridScanFilters(schema, isCaseSensitive, filters),
       useChunkedReader, decompressAnyCpu, useFieldId, ignoreCorruptFiles, decryptionConfigured,
       dateRebaseMode, int96RebaseMode)
@@ -182,7 +182,7 @@ class HybridScanEligibilitySuite extends AnyFunSuite {
 
   test("a read that falls back throws when fallback is set to fail") {
     def check(enabled: Boolean, useChunkedReader: Boolean): Boolean =
-      HybridScanBase.isEligible(enabled, failOnFallback = true, flatSchema,
+      HybridScanPipeline.isEligible(enabled, failOnFallback = true, flatSchema,
         new HybridScanFilters(flatSchema, true, Array(GreaterThan("int_col", 5))),
         useChunkedReader, decompressAnyCpu = false, useFieldId = false,
         ignoreCorruptFiles = false, decryptionConfigured = false, DateTimeRebaseException,
