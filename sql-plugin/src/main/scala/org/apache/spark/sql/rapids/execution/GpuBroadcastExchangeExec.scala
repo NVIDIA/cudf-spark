@@ -398,11 +398,11 @@ class GpuBroadcastMeta(
       exchange.canonicalized.asInstanceOf[BroadcastExchangeExec])
     if (conf.isDriverlessBroadcastEnabled) {
       DriverlessBroadcastEligibility.preserveBuildEstimate(exchange, gpuBroadcast)
+      exchange.getTagValue(DriverlessBroadcastStage.eligible).foreach { value =>
+        gpuBroadcast.setTagValue(DriverlessBroadcastStage.eligible, value)
+      }
     }
     GpuTransitionOverrides.copyAqeQueryStageExchangeTag(exchange, gpuBroadcast)
-    exchange.getTagValue(DriverlessBroadcastStage.eligible).foreach { value =>
-      gpuBroadcast.setTagValue(DriverlessBroadcastStage.eligible, value)
-    }
     gpuBroadcast
   }
 }

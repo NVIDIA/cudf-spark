@@ -723,10 +723,10 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
     }
     val isAdaptiveEnabled = plan.conf.adaptiveExecutionEnabled
     plan match {
-      case reused: ReusedExchangeExec =>
+      case reused: ReusedExchangeExec if conf.isDriverlessBroadcastEnabled =>
         // Reuse is a leaf wrapper; validate the actual exchange and its subtree.
         assertIsOnTheGpu(reused.child, conf)
-      case _: WholeStageCodegenExec | _: InputAdapter =>
+      case _: WholeStageCodegenExec | _: InputAdapter if conf.isDriverlessBroadcastEnabled =>
         // Materialized reused stages can wrap permitted CPU nodes in codegen containers.
         // Their children still undergo the GPU and allowed-CPU checks below.
       case _: BroadcastExchangeLike if isAdaptiveEnabled =>

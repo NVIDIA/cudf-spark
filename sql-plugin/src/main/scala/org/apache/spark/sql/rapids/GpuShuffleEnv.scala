@@ -30,25 +30,50 @@ import org.apache.spark.sql.rapids.execution.ExecutorBroadcastCache
 import org.apache.spark.util.Utils
 
 class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
-  // Cleanup and first use share this owner, including its application-shutdown state.
-  // Constructing it allocates no GPU buffers; builds are materialized by getOrBuild.
-  private[rapids] lazy val broadcastCache =
+  private var initializedBroadcastCache:
+      Option[ExecutorBroadcastCache[SpillableColumnarBatch]] = None
+  private var broadcastCacheClosed = false
+
+  protected def createBroadcastCache(): ExecutorBroadcastCache[SpillableColumnarBatch] =
     new ExecutorBroadcastCache[SpillableColumnarBatch](owned => {
       // Unregister can run on an RPC thread that has not selected this executor's device.
       GpuDeviceManager.getDeviceId().foreach(Cuda.setDevice)
       Arm.withResource(owned)(_ => ())
     })
+
+  private[rapids] def broadcastCache:
+      ExecutorBroadcastCache[SpillableColumnarBatch] = synchronized {
+    require(!broadcastCacheClosed, "Executor broadcast cache is closed")
+    initializedBroadcastCache.getOrElse {
+      val cache = createBroadcastCache()
+      initializedBroadcastCache = Some(cache)
+      cache
+    }
+  }
+
+  private[rapids] def isBroadcastCacheInitialized: Boolean = synchronized {
+    initializedBroadcastCache.nonEmpty
+  }
+
   private[rapids] def invalidateBroadcastAndThen(id: Int)(cleanup: => Unit): Unit = {
+    // Cleanup must not initialize an unused feature, or consult task-local SQL configuration.
+    val cache = synchronized { initializedBroadcastCache }
     Utils.tryWithSafeFinally {
-      broadcastCache.invalidate(id)
+      cache.foreach(_.invalidate(id))
     } {
       cleanup
     }
   }
 
   private[rapids] def closeBroadcastCacheAndThen(cleanup: => Unit): Unit = {
+    val cache = synchronized {
+      broadcastCacheClosed = true
+      val initialized = initializedBroadcastCache
+      initializedBroadcastCache = None
+      initialized
+    }
     Utils.tryWithSafeFinally {
-      broadcastCache.close()
+      cache.foreach(_.close())
     } {
       cleanup
     }

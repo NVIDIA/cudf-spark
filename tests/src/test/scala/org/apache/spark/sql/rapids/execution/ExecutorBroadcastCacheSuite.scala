@@ -18,7 +18,7 @@ package org.apache.spark.sql.rapids.execution
 import java.util.concurrent.{Callable, CountDownLatch, ExecutionException, Executors, TimeUnit}
 import java.util.concurrent.atomic.AtomicInteger
 
-import com.nvidia.spark.rapids.RapidsConf
+import com.nvidia.spark.rapids.{RapidsConf, SpillableColumnarBatch}
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.TaskKilledException
@@ -38,10 +38,39 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
 
   private val noAction: () => Unit = () => ()
 
+  test("unused feature cleanup creates no cache and shutdown prevents first use") {
+    val creations = new AtomicInteger(0)
+    val env = new GpuShuffleEnv(new RapidsConf(Map.empty[String, String])) {
+      override protected def createBroadcastCache():
+          ExecutorBroadcastCache[SpillableColumnarBatch] = {
+        creations.incrementAndGet()
+        super.createBroadcastCache()
+      }
+    }
+    var cleanups = 0
+    assert(!env.isBroadcastCacheInitialized)
+    (0 until 100).foreach { id =>
+      env.invalidateBroadcastAndThen(id) { cleanups += 1 }
+    }
+    assert(cleanups == 100)
+    assert(!env.isBroadcastCacheInitialized && creations.get() == 0)
+    env.closeBroadcastCacheAndThen { cleanups += 1 }
+    assert(cleanups == 101 && creations.get() == 0)
+    val error = intercept[IllegalArgumentException] { env.broadcastCache }
+    assert(error.getMessage.contains("closed"))
+    assert(!env.isBroadcastCacheInitialized && creations.get() == 0)
+    env.closeBroadcastCacheAndThen { cleanups += 1 }
+    assert(cleanups == 102 && creations.get() == 0)
+  }
+
   test("first use needs no startup opt-in and retains the same cache owner") {
     val env = new GpuShuffleEnv(new RapidsConf(Map.empty[String, String]))
     val expected = new IllegalStateException("expected build failure")
+    assert(!env.isBroadcastCacheInitialized)
+    env.invalidateBroadcastAndThen(1) { () }
+    assert(!env.isBroadcastCacheInitialized)
     val cache = env.broadcastCache
+    assert(env.isBroadcastCacheInitialized)
     assert(env.broadcastCache eq cache)
     try {
       val failure = intercept[IllegalStateException] {
@@ -49,8 +78,10 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
       }
       assert(failure eq expected)
     } finally {
-      cache.close()
+      env.closeBroadcastCacheAndThen { () }
     }
+    assert(!env.isBroadcastCacheInitialized)
+    intercept[IllegalArgumentException] { env.broadcastCache }
   }
 
   test("cleanup without a cached build retains no state and allows a later build") {

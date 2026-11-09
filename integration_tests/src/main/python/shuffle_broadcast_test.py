@@ -168,20 +168,27 @@ def test_executor_broadcast_preserves_null_duplicate_and_residual_semantics(
 
 
 @ignore_order(local=True)
-def test_executor_broadcast_disabled_keeps_standard_broadcast():
+@pytest.mark.parametrize('aqe', ['false', 'true'])
+@pytest.mark.parametrize('enabled', [None, 'false'])
+def test_executor_broadcast_disabled_keeps_standard_broadcast(aqe, enabled):
     def check_standard(cpu_plan, gpu_plan):
         exchanges = [node for node in collect_plan_nodes(gpu_plan, include_wrapped=True)
                      if node.getClass().getSimpleName() == 'GpuBroadcastExchangeExec']
         assert exchanges, gpu_plan.toString()
         for exchange in exchanges:
             assert exchange.metrics().contains('collectTime')
+            assert plan_metric(exchange, 'collectTime') > 0
+            assert plan_metric(exchange, 'dataSize') > 0
             for name in ('driverlessBuildBytes', 'fallbackBroadcastBytes',
                          'driverlessStageTime', 'driverlessStageFallbacks'):
                 assert not exchange.metrics().contains(name), name
 
+    conf = {'spark.sql.adaptive.enabled': aqe}
+    if enabled is not None:
+        conf['spark.rapids.sql.driverlessBroadcast.enabled'] = enabled
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: _join(spark, 'inner', 'right'),
-        conf=dict(_conf, **{'spark.rapids.sql.driverlessBroadcast.enabled': 'false'}),
+        conf=conf,
         exist_classes='GpuBroadcastHashJoinExec',
         non_exist_classes='GpuDriverlessBroadcastHashJoinExec', require_non_empty=True,
         gpu_plan_assertion=check_standard)

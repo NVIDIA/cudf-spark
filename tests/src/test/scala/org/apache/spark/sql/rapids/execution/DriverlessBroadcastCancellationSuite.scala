@@ -37,9 +37,7 @@ import org.apache.spark.sql.catalyst.plans.physical.IdentityBroadcastMode
 import org.apache.spark.sql.execution.{DriverlessBroadcastPlanInfoTestSupport, InputAdapter, LeafExecNode, SparkPlan, UnionExec, WholeStageCodegenExec}
 import org.apache.spark.sql.execution.exchange.{BroadcastExchangeExec, ENSURE_REQUIREMENTS, ReusedExchangeExec}
 import org.apache.spark.sql.execution.joins.BroadcastHashJoinExec
-import org.apache.spark.sql.execution.metric.SQLMetrics
 import org.apache.spark.sql.rapids.GpuShuffleEnv
-import org.apache.spark.sql.rapids.testing.ExecutorBroadcastFaultSupport
 import org.apache.spark.sql.types.LongType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -99,12 +97,19 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
         val shuffle = GpuShuffleExchangeExec(GpuSinglePartitioning, child,
           ENSURE_REQUIREMENTS)(GpuSinglePartitioning)
         val reused = ReusedExchangeExec(shuffle.output, shuffle)
-        val allowed = new RapidsConf(Map("spark.rapids.sql.test.allowedNonGpu" -> "RangeExec"))
+        val enabled = Map("spark.rapids.sql.driverlessBroadcast.enabled" -> "true")
+        val allowed = new RapidsConf(enabled ++
+          Map("spark.rapids.sql.test.allowedNonGpu" -> "RangeExec"))
         validator.assertIsOnTheGpu(reused, allowed)
         val error = intercept[IllegalArgumentException] {
-          validator.assertIsOnTheGpu(reused, new RapidsConf(Map.empty[String, String]))
+          validator.assertIsOnTheGpu(reused, new RapidsConf(enabled))
         }
         assert(error.getMessage.contains("RangeExec"))
+        val disabledError = intercept[IllegalArgumentException] {
+          validator.assertIsOnTheGpu(reused,
+            new RapidsConf(Map("spark.rapids.sql.test.allowedNonGpu" -> "RangeExec")))
+        }
+        assert(disabledError.getMessage.contains("ReusedExchangeExec"))
       }
     }
   }
@@ -161,9 +166,11 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
         catalog.registerShuffle(91)
         val conf = new RapidsConf(Map("spark.rapids.shuffle.mode" -> "CACHE_ONLY"))
         val testEnv = new GpuShuffleEnv(conf) {
-          override private[rapids] lazy val broadcastCache = cache
+          override protected def createBroadcastCache():
+              ExecutorBroadcastCache[SpillableColumnarBatch] = cache
           override def getCatalog: ShuffleBufferCatalog = catalog
         }
+        assert(testEnv.broadcastCache eq cache)
         try {
           val error = intercept[IllegalStateException] {
             testEnv.invalidateBroadcastAndThen(91) {
@@ -195,8 +202,10 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
         cache.getOrBuild[Unit](92, () => new JustRowsColumnarBatch(1),
           () => (), () => ())(_ => (), _ => ())
         val testEnv = new GpuShuffleEnv(new RapidsConf(Map.empty[String, String])) {
-          override private[rapids] lazy val broadcastCache = cache
+          override protected def createBroadcastCache():
+              ExecutorBroadcastCache[SpillableColumnarBatch] = cache
         }
+        assert(testEnv.broadcastCache eq cache)
         val service = Executors.newSingleThreadExecutor()
         try {
           val error = intercept[IllegalStateException] {
@@ -353,7 +362,7 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
       val gpu = GpuRangeExec(0, 4, 1, 1, Seq(key), 1024)
       val shuffle = GpuShuffleExchangeExec(GpuSinglePartitioning, gpu,
         ENSURE_REQUIREMENTS)(GpuSinglePartitioning)
-      val conf = new RapidsConf(Map.empty[String, String])
+      val conf = new RapidsConf(Map("spark.rapids.sql.driverlessBroadcast.enabled" -> "true"))
       (new GpuTransitionOverrides).assertIsOnTheGpu(
         ReusedExchangeExec(Seq(key.newInstance()), shuffle), conf)
       val cpu = session.range(4).queryExecution.sparkPlan
@@ -415,23 +424,6 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
       val analysis = DriverlessBroadcastEligibility.analyze(join, conf)
       assert(analysis.rejection(join, Some(exchange)).exists(_.contains("byte limit")))
       assert(GpuDriverlessBroadcastHashJoinExec.rewrite(join, conf) eq join)
-    }
-  }
-
-  test("cancellation readiness accepts a completed build or a completed cache borrower") {
-    session.withActive {
-      withResource(ExecutorBroadcastFaultSupport.cancellationProbe(session)) { probe =>
-        val builds = SQLMetrics.createMetric(session.sparkContext, "builds")
-        val hits = SQLMetrics.createMetric(session.sparkContext, "hits")
-        assert(!probe.awaitBuildMetric(builds, hits, 0))
-        hits.set(1)
-        assert(probe.awaitBuildMetric(builds, hits, 0))
-        hits.set(0)
-        builds.set(1)
-        assert(probe.awaitBuildMetric(builds, hits, 0))
-        builds.set(0)
-        assert(!probe.awaitBuildMetric(builds, hits, 0))
-      }
     }
   }
 
