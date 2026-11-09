@@ -22,8 +22,9 @@ import java.util.Objects
 
 import scala.collection.JavaConverters._
 
-import com.nvidia.spark.rapids.{CombineConf, DateTimeRebaseCorrected, GpuMetric, ThreadPoolConfBuilder}
+import com.nvidia.spark.rapids.{CombineConf, DateTimeRebaseCorrected, GpuMetric, NoopMetric, ThreadPoolConfBuilder}
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.GpuMetric.ICEBERG_DICT_FILTER_TIME
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
 import com.nvidia.spark.rapids.iceberg.ShimUtils
 import com.nvidia.spark.rapids.parquet.{GpuParquetUtils, ParquetFileInfoWithBlockMeta}
@@ -182,10 +183,13 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
         f,
         conf.caseSensitive)
 
+      val dictFilterTime = conf.metrics.getOrElse(ICEBERG_DICT_FILTER_TIME, NoopMetric)
       blocks.filter { case (rowGroup, _) =>
-          statsFilter.shouldRead(typeWithIds, rowGroup) &&
-            dictFilter.shouldRead(typeWithIds, rowGroup, reader.getDictionaryReader(rowGroup)) &&
-            bloomFilter.shouldRead(typeWithIds, rowGroup, reader.getBloomFilterDataReader(rowGroup))
+        statsFilter.shouldRead(typeWithIds, rowGroup) &&
+          dictFilterTime.ns {
+            dictFilter.shouldRead(typeWithIds, rowGroup, reader.getDictionaryReader(rowGroup))
+          } &&
+          bloomFilter.shouldRead(typeWithIds, rowGroup, reader.getBloomFilterDataReader(rowGroup))
       }
     }.getOrElse(blocks)
       .toSeq
