@@ -24,13 +24,11 @@ application. The provider stamps application provenance, but does not decide the
 granularity or reduce task metrics. Summary requests combine matching stored observations; the
 heuristic chooses the dimensions, time window, limit, and whether the result is useful.
 
-The exact `MetricVersionId` is the opaque stand-in for the metric's complete semantic contract.
-Observed quantity, unit, occurrence, producer-side reduction, timestamp meaning, and every other
-meaning-bearing property belong to that exact version. These properties are intentionally not modeled
-exhaustively in `MetricSchema`: the framework cannot enumerate or infer every way a metric's meaning
-can change. The metric owner defines, reviews, and enforces this association. A provider validates the
-structural declaration but cannot detect a developer assigning incompatible semantics to the same
-metric version. Any semantic change requires a new metric version.
+Each `MetricVersionId` identifies the complete meaning of a metric: its quantity, unit, occurrence,
+producer-side reduction, timestamp meaning, and dimensions. Define and review these properties before
+recording observations. The API validates structure, so the metric owner must ensure that all
+observations under one version have compatible meanings. Any semantic change requires a new metric
+version.
 
 The provider validates the structural representation, isolates exact versions, stamps provenance,
 stores accepted observations, enforces its effective retention, applies request windows, dimensions,
@@ -47,46 +45,13 @@ There are three distinct roles:
 - An operator enables the feature and supplies only operational settings that the embedding plugin
   deliberately exposes.
 
-The RAPIDS driver plugin selects one provider by its stable name. Provider jars advertise a
-`HistoryMetricsProvider` through Java service metadata, but discovery does not enable them. The
-Java API is kept at the distribution root so application-classpath providers and parallel-world
-implementations share one API class identity. RAPIDS constructs only the explicitly configured
-provider, installs its store, owns its deadline-bounded shutdown, and keeps the built-in no-op store
-when selection or initialization fails.
+The RAPIDS driver plugin selects one provider by its stable name and manages its lifecycle.
+Heuristics use `MetricStores.current()` to access the selected store. When history is disabled or
+provider initialization fails, this returns a no-op store.
 
-## Artifact roles
-
-The private repository contains a standalone Maven subproject with four Java 8 artifacts. They do
-not inherit the private repository's Spark shim, Scala, or classified-output build settings:
-
-| Artifact | Role | Dependency direction |
-| --- | --- | --- |
-| `cudf-spark-history-metrics-api` | Planning contract, governed production catalog, no-op store, installation/registration holder, and provider SPI | Consumer-facing base with no Spark or Scala dependency |
-| `cudf-spark-history-metrics-relational-core` | Database-neutral relational history semantics | Depends on the metrics API |
-| `cudf-spark-history-metrics-local` | SQLite-backed provider with isolated memory and durable local-file modes | Depends on the metrics API, relational core and SQLite JDBC; has no Spark or Scala dependency |
-| `cudf-spark-history-metrics-tck` | Reusable provider-conformance fixtures and suites | Test dependency for provider implementations |
-
-Use artifacts built from a compatible private-project revision. The unsuffixed, unclassified
-artifacts are built once from their standalone subproject and shared by both Scala builds. The RAPIDS
-distribution bundles the API, local provider, relational core and SQLite JDBC runtime, including its
-native libraries and service metadata. The TCK is test support and is not bundled. No additional
-history jars are required to use the bundled local provider. Packaging does not enable it:
-`MetricStores.current()` remains on its non-null no-op implementation until a provider is selected
-and successfully initialized.
-
-The history project belongs to neither private Scala reactor. Private developers verify or install it
-directly with `mvn -f history-metrics/pom.xml clean verify` or `clean install`.
-`spark-rapids-private/build/buildall` performs the install once as a workspace convenience; it does
-not define publication ordering. CI/CD must deploy the standalone reactor exactly once, outside the
-Spark shim and Scala matrices. Both public Scala builds then resolve the same exact
-`history-metrics.version`. Release coordinates are immutable, and stacked development builds need a
-unique snapshot coordinate so an older local or remote snapshot cannot satisfy the dependency
-silently.
-
-The standalone local artifact is thin. Its qualified MVP runtime dependency is
-`org.xerial:sqlite-jdbc:3.53.4.0`. The RAPIDS distribution packages that dependency without relocating
-its JNI classes or native-library resources. Applications using the standalone provider outside the
-RAPIDS distribution must resolve its runtime dependencies themselves.
+The RAPIDS distribution includes the history metrics API and local provider. No additional history
+jars are required to use the bundled provider. The Java API has no Spark or Scala dependency and can
+be used with either the Scala 2.12 or 2.13 distribution.
 
 ## Select and configure the local provider
 
@@ -98,26 +63,19 @@ bundled local provider, set:
 spark.rapids.sql.history.metrics.provider=local
 ```
 
-The Java SPI receives a defensive, unmodifiable copy of the Spark configuration plus the application
-ID, optional application-attempt ID, and RAPIDS producer version. The map may contain sensitive
-configuration, so a provider is trusted in-process code and must not log or persist the map wholesale.
-The API does not filter it or define keys for other providers. It has no direct Spark or Scala
-dependency, so the same artifact is binary-compatible with the Scala 2.12 and 2.13 distributions.
-Provider jars must not bundle Spark or the history metrics API.
-
 Custom providers may be placed in the application jar or supplied before driver startup through `--jars`,
 `spark.jars`, `--packages`, `--driver-class-path`, `spark.driver.extraClassPath`, or an
 equivalent cluster library mechanism. The provider and RAPIDS distribution must be visible through
 compatible driver class loaders. In particular, do not put the provider only on the parent driver
 class path while supplying the RAPIDS distribution only through `--jars`: the parent cannot resolve
 the history metrics API from its child loader. Supplying both jars through the same mechanism avoids
-that asymmetry. Adding a provider later with `SparkContext.addJar()` cannot enable it, because
-provider selection occurs during driver startup in `DriverPlugin.registerMetrics`. A jar on the
-classpath is only discoverable; it is never selected implicitly. Missing, duplicate, incompatible,
-or failing providers leave the no-op store installed.
+that asymmetry. Supply providers before driver startup; adding one later with
+`SparkContext.addJar()` cannot enable it. Provider jars must advertise a `HistoryMetricsProvider`
+through Java service metadata and must not bundle Spark or the history metrics API. Explicitly
+select the provider by name. Missing, duplicate, incompatible, or failing providers leave the no-op
+store installed.
 
-The local provider has one provider-specific key. It is intentionally owned and parsed by the
-provider rather than registered in `RapidsConf`:
+To retain history across driver restarts, set the local provider's database path:
 
 ```
 spark.rapids.sql.history.metrics.local.path=/protected/local/history.db
@@ -129,28 +87,12 @@ survive driver restarts through that file. The local mode supports local or bloc
 provider process. URI-like values such as `file:` or `hdfs:`, and syntactic UNC paths, are rejected.
 A path on an arbitrary network-mounted filesystem can still look like an ordinary local path to Java
 and cannot be detected reliably. Such mounts are unsupported; the deployer is responsible for
-selecting local or block storage. Fresh databases deliberately retain SQLite's default rollback
-journal for this single-owner MVP; behavioral abrupt-process and external-lock tests validate crash
-recovery and locking. The provider does not override an existing database's journal mode. New
-database files use owner-only permissions where the filesystem supports them, but the database is
-not encrypted.
+selecting local or block storage. New database files use owner-only permissions where the filesystem
+supports them, but the database is not encrypted.
 
-The current production catalog is empty until the first governed metric family is added, so the local
-provider does not yet accept application declarations. This is intentional: tests use test-only
-catalog fixtures, and the storage MVP does not invent a production metric merely to demonstrate
-persistence.
-
-The local backend's initial unreleased on-disk schema is version 1. It stores the ordered
-declaration structure in a canonical versioned blob, and each observation stores zero through eight
-typed dimensions inline by declaration ordinal. This is an internal file-format choice, not a new
-heuristic contract: integrations continue to bind reviewed dimension names and values through the
-API. There is no earlier durable SQLite format to migrate. Normal open validates structural schema
-and declaration blobs and enables foreign-key enforcement for future writes. It does not decode
-every observation payload or run a full foreign-key scan; that scan belongs to an explicit integrity
-check. Corrupt observation payloads fail an affected read or that check. Future format changes
-require explicit versioned migrations, but none is implemented for the initial MVP. The inline layout
-was selected from measured local and PostgreSQL workloads spanning recurrent and high-cardinality
-dimensions. Integrations must still benchmark their own request shapes against their planning budget.
+The current production catalog is empty. Before using the local provider to record observations,
+add a governed metric family as described below. Enabling the provider alone does not collect metrics
+or change planning decisions.
 
 ## Govern the metric before integrating it
 
@@ -166,8 +108,8 @@ review, together:
 - the observation timestamp meaning and recommended retention;
 - the planning request shapes and their cost;
 - the consumer's evidence, staleness, and static-fallback policy;
-- the selected Spark owner and production metric-emission and request-building planning hooks,
-  including failure-injection tests for both boundaries.
+- where the heuristic records observations and consults history, including its behavior when either
+  operation fails.
 
 A family ID/name association is permanent. Retire it in source rather than reusing it. Increment the
 positive family-scoped contract version when the contract changes in an incompatible way, including
@@ -204,8 +146,9 @@ if (declared.code() != SchemaStatus.Code.ACCEPTED) {
 }
 ```
 
-Those retention values are example inputs, not policy guidance. `declare` and `summarize` are
-synchronous but bounded by their relative operation budgets. Do not record under a version whose
+Those retention values are example inputs, not policy guidance. `operationBudget` is a `Duration`
+chosen by the heuristic to bound each call. `declare` and `summarize` are synchronous but bounded by
+their relative operation budgets. Do not record under a version whose
 declaration was not accepted. Each observation is one scalar occurrence defined by the heuristic. It
 supplies every declared dimension, a finite value, and an observation-time timestamp. If task-level
 inputs need to be combined, the heuristic does so before this call.
@@ -228,12 +171,15 @@ SummaryRequest exact = SummaryRequest.builder(metric)
     .window(windowStartMs, windowEndMs)
     .limit(5)
     .build();
+
+List<SummaryResponse> responses =
+    store.summarize(Collections.singletonList(exact), operationBudget);
 ```
 
 Omitting a dimension makes it a deliberate equality wildcard. It is not a fuzzy or pattern match.
 Independently, `limit(0)` means all eligible rows subject to the request deadline, not an invented
-cap. Dimension order is a one-time contract and an access-order choice. Benchmark every declared
-request shape before putting it on a planning path.
+cap. Keep dimension order consistent with the declared schema. Benchmark every declared request
+shape before putting it on a planning path.
 
 The request belongs to the heuristic. One heuristic may use the latest matching observation while
 another uses several observations or the entire bounded window. The store provides selection and
@@ -262,32 +208,21 @@ request construction fails before the store can be called. Record the realized d
 the consumer's existing bounded telemetry without putting raw dimensions, provenance, provider text,
 or paths into it.
 
-This query-safety boundary contains ordinary `RuntimeException` and compatibility `LinkageError`
-failures, including failures in strict construction before the store and provider/store calls inside
-the boundary. It intentionally does not convert `VirtualMachineError`, `ThreadDeath`, or any
-non-`LinkageError` `Error`, including `AssertionError`, into `UNAVAILABLE`, a dropped
-observation, or static fallback; those errors escape. The selected Spark consumer owns the production
-emission and request-building adapters at its co-developed hooks. Its first heuristic must pass
-failure-injection tests for both boundaries.
+Handle `RuntimeException` and compatibility `LinkageError` failures around request construction and
+store calls by retaining the static decision. Do not catch other `Error` types, including
+`VirtualMachineError`, `ThreadDeath`, and `AssertionError`, to turn them into static fallback or
+dropped observations. Test the heuristic's fallback behavior for failures when constructing requests,
+recording observations, and consulting history.
 
 ## Persistence and shutdown
 
-SQLite commits durable-file writes continuously at transaction boundaries; persistence does not
-depend on a shutdown export. A later driver using the same file can read committed declarations and
-observations. Observation provenance retains the application and attempt identity supplied when the
-provider stamped that write.
+With a configured local database path, a later driver using the same file can read committed
+declarations and observations. In-memory history is lost when the provider shuts down. Observations
+retain the application and attempt identity from when they were recorded.
 
-When a provider is active, the embedding plugin first waits up to ten seconds for pending Spark
-listener callbacks to finish recording observations. Empty listener queues return immediately. This
-best-effort wait handles Spark 4 shutting plugins down before draining listener events; timeout or
-listener-wait failure is logged and cleanup proceeds. Events posted by other plugins after this wait
-are not covered. The embedding plugin then removes the installed store and calls the provider's
-`shutdown(Duration)`. Repeated shutdown calls are harmless. Successful shutdown means admission is
-closed and every previously admitted observation reached an attempted terminal backend outcome:
-confirmed acceptance, validation rejection, or backend failure. It does not promise that every
-admitted observation persisted. A `false` result means shutdown did not complete within the budget;
-the caller reports that outcome but must not wait indefinitely. Heuristic code does not own or shut
-down the provider.
+The RAPIDS driver plugin manages provider shutdown. Heuristic code must not shut down the provider.
+Record observations while the application is active: recording is best-effort, and shutdown does not
+guarantee that every offered observation was persisted.
 
 The local SQLite database may contain dimensions and application provenance. Protect its directory,
 supply only permitted and redacted values, and manage the file according to local-data policy.
