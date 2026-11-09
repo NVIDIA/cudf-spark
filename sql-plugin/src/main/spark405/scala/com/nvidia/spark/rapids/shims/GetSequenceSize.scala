@@ -61,20 +61,8 @@ object GetSequenceSize {
       }
     }
     closeOnExcept(delta) { _ =>
-      withResource(Scalar.fromLong(Long.MinValue)) { longMin =>
-        withResource(delta.equalTo(longMin)) { hasLongMin =>
-          withResource(Scalar.fromInt(-1)) { minusOne =>
-            withResource(step.equalTo(minusOne)) { stepEqualsMinusOne =>
-              withResource(hasLongMin.and(stepEqualsMinusOne)) { overflow =>
-                withResource(overflow.any()) { result =>
-                  if (result.isValid && result.getBoolean) {
-                    throw new ArithmeticException("Long overflow (Long.MinValue / -1)")
-                  }
-                }
-              }
-            }
-          }
-        }
+      if (hasLongMinAndStepMinusOne(delta, step)) {
+        throw new ArithmeticException("Long overflow (Long.MinValue / -1)")
       }
     }
     val quotient = withResource(delta) { _ =>
@@ -87,6 +75,26 @@ object GetSequenceSize {
         closeOnExcept(quotient.add(one, DType.INT64)) { ret =>
           AddOverflowChecks.basicOpOverflowCheck(quotient, one, ret)
           ret
+        }
+      }
+    }
+  }
+
+  private def hasLongMinAndStepMinusOne(
+      delta: ColumnVector,
+      step: ColumnVector): Boolean = {
+    val hasLongMin = withResource(Scalar.fromLong(Long.MinValue)) { longMin =>
+      delta.equalTo(longMin)
+    }
+    withResource(hasLongMin) { hasLongMin =>
+      val stepEqualsMinusOne = withResource(Scalar.fromInt(-1)) { minusOne =>
+        step.equalTo(minusOne)
+      }
+      withResource(stepEqualsMinusOne) { stepEqualsMinusOne =>
+        withResource(hasLongMin.and(stepEqualsMinusOne)) { overflow =>
+          withResource(overflow.any()) { result =>
+            result.isValid && result.getBoolean
+          }
         }
       }
     }
@@ -115,15 +123,20 @@ object GetSequenceSize {
     // Values beyond Spark's maximum array length only need to remain recognizably too large.
     // Clamp them before casting back to INT64 so lengths above Long.MaxValue cannot wrap.
     withResource(exactSize) { _ =>
+      clampAndCast(exactSize)
+    }
+  }
+
+  private def clampAndCast(exactSize: ColumnVector): ColumnVector = {
+    val tooLong = withResource(Scalar.fromDecimal(
+        0, BigInteger.valueOf(MAX_ROUNDED_ARRAY_LENGTH.toLong))) { maxLength =>
+      exactSize.greaterThan(maxLength)
+    }
+    withResource(tooLong) { tooLong =>
       withResource(Scalar.fromDecimal(
-          0, BigInteger.valueOf(MAX_ROUNDED_ARRAY_LENGTH.toLong))) { maxLength =>
-        withResource(exactSize.greaterThan(maxLength)) { tooLong =>
-          withResource(Scalar.fromDecimal(
-              0, BigInteger.valueOf(MAX_ROUNDED_ARRAY_LENGTH.toLong + 1L))) { overflowLength =>
-            withResource(tooLong.ifElse(overflowLength, exactSize)) { boundedSize =>
-              boundedSize.castTo(DType.INT64)
-            }
-          }
+          0, BigInteger.valueOf(MAX_ROUNDED_ARRAY_LENGTH.toLong + 1L))) { overflowLength =>
+        withResource(tooLong.ifElse(overflowLength, exactSize)) { boundedSize =>
+          boundedSize.castTo(DType.INT64)
         }
       }
     }
