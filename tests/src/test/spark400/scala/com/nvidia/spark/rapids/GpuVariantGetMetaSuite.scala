@@ -22,6 +22,7 @@ package com.nvidia.spark.rapids
 
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.VariantApiTestFixtures._
+import org.apache.commons.io.IOUtils
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.expressions.{BoundReference, Literal}
@@ -38,7 +39,7 @@ class GpuVariantGetMetaSuite extends AnyFunSuite {
     val parent = classOf[GpuVariantGet].getClassLoader
     val resource = parent.getResourceAsStream(moduleName.replace('.', '/') + ".class")
     assert(resource != null)
-    val definition = withResource(resource)(_.readAllBytes())
+    val definition = withResource(resource)(IOUtils.toByteArray)
     class FreshModuleLoader extends ClassLoader(parent) {
       def defineModule(): Class[_] = defineClass(moduleName, definition, 0, definition.length)
     }
