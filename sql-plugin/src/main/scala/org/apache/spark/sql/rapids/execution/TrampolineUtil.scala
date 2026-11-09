@@ -21,7 +21,8 @@ import java.util.concurrent.{ExecutorService, ScheduledExecutorService, ThreadPo
 import org.apache.hadoop.conf.Configuration
 import org.json4s.JsonAST
 
-import org.apache.spark.{SparkConf, SparkContext, SparkEnv, SparkMasterRegex, SparkUpgradeException, TaskContext}
+import org.apache.spark.{MapOutputTrackerMaster, SparkConf, SparkContext, SparkEnv, SparkException,
+  SparkMasterRegex, SparkUpgradeException, TaskContext}
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.executor.InputMetrics
@@ -263,7 +264,20 @@ object TrampolineUtil {
    *
    * @return true when the driver held the shuffle's status
    */
-  def clearMapOutputs(shuffleId: Int): Boolean = false
+  def clearMapOutputs(shuffleId: Int): Boolean = {
+    val tracker = SparkEnv.get.mapOutputTracker.asInstanceOf[MapOutputTrackerMaster]
+    if (tracker.containsShuffle(shuffleId)) {
+      try {
+        tracker.unregisterAllMapAndMergeOutput(shuffleId)
+        true
+      } catch {
+        // Spark's cleanup removed the status after the check
+        case _: SparkException => false
+      }
+    } else {
+      false
+    }
+  }
 
   def getSparkHadoopUtilConf: Configuration = SparkHadoopUtil.get.conf
 

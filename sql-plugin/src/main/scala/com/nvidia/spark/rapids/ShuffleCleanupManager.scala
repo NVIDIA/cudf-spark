@@ -17,9 +17,12 @@
 package com.nvidia.spark.rapids
 
 import java.util.{Set => JSet}
-import java.util.concurrent.{ConcurrentHashMap, Executors, ScheduledExecutorService, TimeUnit}
+import java.util.concurrent.{ConcurrentHashMap, Executors, RejectedExecutionException,
+  ScheduledExecutorService, TimeUnit}
 
+import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
+import scala.util.control.NonFatal
 
 import org.apache.spark.SparkContext
 import org.apache.spark.internal.Logging
@@ -125,6 +128,15 @@ class ShuffleCleanupManager(
    */
   private val reportedExecutors =
     new ConcurrentHashMap[Int, JSet[String]]()
+
+  /**
+   * UCX shuffles whose map outputs the driver cleared, by shuffle id, until each request
+   * expires. A later execution's clear of the same shuffle replaces its request.
+   */
+  private val pendingReclaims = new ConcurrentHashMap[Int, ShuffleCleanupManager.PendingReclaim]()
+
+  /** Set while a test holds the UCX polls. */
+  @volatile private var reclaimPollsHeld = false
 
   /**
    * Scheduled executor for periodic stale entry cleanup.
@@ -259,6 +271,7 @@ class ShuffleCleanupManager(
   /** The body of the periodic tick: MULTITHREADED's stale entries, then UCX's. */
   private[rapids] def runTick(): Unit = {
     cleanupStaleEntries(staleEntryMaxAgeMs)
+    expireReclaims()
   }
 
   /**
@@ -270,7 +283,43 @@ class ShuffleCleanupManager(
    * @param shuffleIds the shuffles to reclaim
    * @param watermark the largest task id seen before the execution ended
    */
-  def reclaimAfterExecution(executionId: Long, shuffleIds: Seq[Int], watermark: Long): Unit = {}
+  def reclaimAfterExecution(executionId: Long, shuffleIds: Seq[Int], watermark: Long): Unit = {
+    try {
+      cleanupExecutor.execute(() => shuffleIds.foreach(clearOnDriver(executionId, _, watermark)))
+    } catch {
+      // the manager has stopped
+      case _: RejectedExecutionException =>
+        logDebug(s"Dropped the UCX shuffle reclaim of SQL execution $executionId at shutdown")
+    }
+  }
+
+  /**
+   * Clears one shuffle's map outputs on the driver, and opens its request when the driver held
+   * the shuffle. A shuffle the driver no longer holds is already removed, by GC or by Spark.
+   */
+  private def clearOnDriver(executionId: Long, shuffleId: Int, watermark: Long): Unit = {
+    try {
+      if (driverStep(shuffleId)) {
+        pendingReclaims.put(shuffleId,
+          new ShuffleCleanupManager.PendingReclaim(watermark, clock()))
+        logDebug(s"Cleared the map outputs of shuffle $shuffleId of SQL execution " +
+          s"$executionId, which executors reclaim up to task $watermark")
+      } else {
+        logDebug(s"Shuffle $shuffleId of SQL execution $executionId is already removed")
+      }
+    } catch {
+      // without this catch the throwable stays in the future that `execute` discards
+      case NonFatal(e) =>
+        logWarning(s"UCX shuffle reclaim could not clear shuffle $shuffleId of SQL execution " +
+          s"$executionId on the driver, so it waits for GC", e)
+      // shutdownNow interrupts the manager's thread, and its pool is ending then
+      case e: InterruptedException => throw e
+      case t: Throwable =>
+        logError(s"UCX shuffle reclaim of SQL execution $executionId stops at shuffle " +
+          s"$shuffleId after a fatal error", t)
+        throw t
+    }
+  }
 
   /**
    * Handle a UCX executor's poll for shuffles to reclaim.
@@ -278,8 +327,24 @@ class ShuffleCleanupManager(
    * @param executorId the executor polling for work
    * @return the requests that the executor has not reported a result for
    */
-  def handleReclaimPoll(executorId: String): RapidsShuffleReclaimResponseMsg =
-    RapidsShuffleReclaimResponseMsg(Array.empty)
+  def handleReclaimPoll(executorId: String): RapidsShuffleReclaimResponseMsg = {
+    val requests = new ArrayBuffer[ShuffleReclaimRequest]()
+    if (!reclaimPollsHeld) {
+      val iter = pendingReclaims.entrySet().iterator()
+      while (iter.hasNext) {
+        val entry = iter.next()
+        val pending = entry.getValue
+        if (!pending.reported.contains(executorId)) {
+          requests += ShuffleReclaimRequest(entry.getKey, pending.watermark)
+        }
+      }
+    }
+    if (requests.nonEmpty) {
+      logDebug(s"Sending ${requests.size} shuffles to executor $executorId to reclaim: " +
+        s"${requests.map(_.shuffleId).mkString(", ")}")
+    }
+    RapidsShuffleReclaimResponseMsg(requests.toArray)
+  }
 
   /**
    * Handle the results of a UCX executor's reclaims.
@@ -287,16 +352,61 @@ class ShuffleCleanupManager(
    * @param executorId the executor reporting results
    * @param results the result of each reclaim
    */
-  def handleReclaimResult(executorId: String, results: Array[ShuffleReclaimResult]): Unit = {}
+  def handleReclaimResult(executorId: String, results: Array[ShuffleReclaimResult]): Unit = {
+    results.foreach { result =>
+      val pending = pendingReclaims.get(result.shuffleId)
+      // a result for a watermark that a later request replaced leaves that request open
+      if (pending != null && pending.watermark == result.watermark) {
+        pending.reported.add(executorId)
+      }
+      if (result.outcome == ShuffleReclaimOutcome.FAILED) {
+        logWarning(s"UCX shuffle reclaim failed on executor $executorId for shuffle " +
+          s"${result.shuffleId}, which waits for GC there: ${result.error.getOrElse("")}")
+      } else {
+        logDebug(s"Executor $executorId reclaimed shuffle ${result.shuffleId} up to task " +
+          s"${result.watermark}: ${result.outcome}, ${result.buffers} buffers, " +
+          s"${result.bytes} bytes")
+      }
+    }
+  }
+
+  /** Removes each UCX request older than `staleEntryMaxAgeMs`, answered or not. */
+  private def expireReclaims(): Unit = {
+    val now = clock()
+    val iter = pendingReclaims.entrySet().iterator()
+    while (iter.hasNext) {
+      val entry = iter.next()
+      val pending = entry.getValue
+      val ageMs = now - pending.registeredAtMs
+      if (ageMs > staleEntryMaxAgeMs) {
+        val numReported = pending.reported.size()
+        if (numReported > 0) {
+          logDebug(s"Removing the UCX reclaim request of shuffle ${entry.getKey} " +
+            s"(registered ${ageMs}ms ago, $numReported executor(s) reported)")
+        } else {
+          logWarning(s"Removing the UCX reclaim request of shuffle ${entry.getKey} with NO " +
+            s"executor result reported (registered ${ageMs}ms ago). Its executors may still " +
+            "hold its buffers until GC.")
+        }
+        // by value, so a later request for the shuffle stays
+        pendingReclaims.remove(entry.getKey, pending)
+      }
+    }
+  }
 
   /** Makes each UCX poll hand out no request, until the release below. */
-  private[rapids] def holdReclaimPollsForTesting(): Unit = {}
+  private[rapids] def holdReclaimPollsForTesting(): Unit = {
+    reclaimPollsHeld = true
+  }
 
   /** Ends the hold that `holdReclaimPollsForTesting` set. */
-  private[rapids] def releaseReclaimPollsForTesting(): Unit = {}
+  private[rapids] def releaseReclaimPollsForTesting(): Unit = {
+    reclaimPollsHeld = false
+  }
 
   /** The watermark of a shuffle's open request, and the executors that reported a result. */
-  private[rapids] def pendingReclaimForTesting(shuffleId: Int): Option[(Long, Set[String])] = None
+  private[rapids] def pendingReclaimForTesting(shuffleId: Int): Option[(Long, Set[String])] =
+    Option(pendingReclaims.get(shuffleId)).map(p => (p.watermark, p.reported.asScala.toSet))
 
   /**
    * Shutdown the manager.
@@ -317,6 +427,7 @@ class ShuffleCleanupManager(
 
     pendingCleanup.clear()
     reportedExecutors.clear()
+    pendingReclaims.clear()
   }
 }
 
@@ -345,5 +456,17 @@ object ShuffleCleanupManager {
       instance = null
       instanceContext = null
     }
+  }
+
+  /**
+   * A UCX shuffle whose map outputs the driver cleared, which each executor reclaims up to
+   * `watermark`.
+   *
+   * @param watermark the largest task id seen before the shuffle's SQL execution ended
+   * @param registeredAtMs when the driver cleared the shuffle
+   */
+  private final class PendingReclaim(val watermark: Long, val registeredAtMs: Long) {
+    /** The executors that reported a result for this watermark. */
+    val reported: JSet[String] = ConcurrentHashMap.newKeySet[String]()
   }
 }
