@@ -85,3 +85,51 @@ case class RapidsShuffleCleanupResponseMsg(shuffleIds: Array[Int])
  * @param stats cleanup statistics for each shuffle
  */
 case class RapidsShuffleCleanupStatsMsg(executorId: String, stats: Array[ShuffleCleanupStats])
+
+// ============================================================================
+// UCX Shuffle Reclaim RPC Messages
+// ============================================================================
+
+/** Which of four kinds of outcome one reclaim of a shuffle had on an executor. */
+sealed trait ShuffleReclaimOutcome extends Serializable
+
+object ShuffleReclaimOutcome {
+  /** The reclaim removed at least one buffer from the catalog. */
+  case object REMOVED extends ShuffleReclaimOutcome
+
+  /** A writer above the watermark registered the shuffle, so the reclaim freed nothing. */
+  case object DEFERRED extends ShuffleReclaimOutcome
+
+  /** The executor held nothing of the shuffle at or below the watermark. */
+  case object ABSENT extends ShuffleReclaimOutcome
+
+  /** The reclaim threw, and the result's error names the exception. */
+  case object FAILED extends ShuffleReclaimOutcome
+}
+
+/**
+ * What one reclaim of a shuffle did on an executor.
+ *
+ * @param shuffleId the shuffle reclaimed
+ * @param watermark the watermark of the request this answers
+ * @param outcome what the reclaim did
+ * @param buffers how many buffers the reclaim removed from the catalog, degenerate ones included,
+ *                whether it closed them or a stop left them to the spill framework's shutdown
+ * @param bytes the size of the buffers the reclaim removed
+ * @param elapsedNanos how long the reclaim took
+ * @param error the exception's class and message, when the reclaim failed
+ */
+case class ShuffleReclaimResult(
+    shuffleId: Int,
+    watermark: Long,
+    outcome: ShuffleReclaimOutcome,
+    buffers: Int,
+    bytes: Long,
+    elapsedNanos: Long,
+    error: Option[String])
+
+object ShuffleReclaimResult {
+  /** A reclaim that found nothing of the shuffle to free. */
+  def absent(shuffleId: Int, watermark: Long): ShuffleReclaimResult =
+    ShuffleReclaimResult(shuffleId, watermark, ShuffleReclaimOutcome.ABSENT, 0, 0L, 0L, None)
+}

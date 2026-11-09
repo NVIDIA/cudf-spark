@@ -213,10 +213,32 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
    * Register a new shuffle.
    * This must be called before any buffer identifiers associated with this shuffle can be tracked.
    * @param shuffleId shuffle identifier
+   * @param writerTaskId the task attempt id of the map task that writes through the registration
    */
-  def registerShuffle(shuffleId: Int): Unit = {
+  def registerShuffle(shuffleId: Int, writerTaskId: Long): Unit = {
     activeShuffles.computeIfAbsent(shuffleId, _ => new ShuffleRegistration(mapIdsCanRepeat))
   }
+
+  /**
+   * Registers a shuffle for a caller with no task, such as a test, as a writer above every
+   * watermark, so a reclaim never removes the registration. An overload, unlike a default
+   * argument, lets `registerShuffle` still pass as a function of the shuffle id.
+   */
+  def registerShuffle(shuffleId: Int): Unit = registerShuffle(shuffleId, Long.MaxValue)
+
+  /**
+   * Frees what this executor holds of a shuffle for writers at or below `watermark`.
+   *
+   * @param shuffleId the shuffle to reclaim
+   * @param watermark the largest task attempt id whose output may be freed
+   * @param isStopped read before each buffer's free
+   * @return what the reclaim freed
+   */
+  def reclaimShuffle(
+      shuffleId: Int,
+      watermark: Long,
+      isStopped: () => Boolean = () => false): ShuffleReclaimResult =
+    ShuffleReclaimResult.absent(shuffleId, watermark)
 
   /** Frees all buffers that correspond to the specified shuffle. */
   def unregisterShuffle(shuffleId: Int): Unit = {
