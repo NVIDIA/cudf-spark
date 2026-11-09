@@ -154,7 +154,10 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
   def projectSchema(fileSchema: ShadedMessageType, requiredSchema: Schema):
   (ShadedMessageType, ShadedMessageType) = {
     val (typeWithIds, fileReadSchema) =
-      GpuParquetIO.projectAndPruneSchema(fileSchema, requiredSchema, conf.nameMapping)
+      GpuParquetIO.projectAndPruneSchema(fileSchema, requiredSchema, conf.nameMapping, schema => {
+        val normalized = normalizeVariantLayout(schema, requiredSchema.asStruct()).asGroupType()
+        new ShadedMessageType(schema.getName, normalized.getFields)
+      })
 
     logDebug(s"Doing project schema, parquet file schema:\n$fileSchema " +
       s"\niceberg required schema:\n$requiredSchema " +
@@ -163,24 +166,37 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
   }
 
   /**
-   * Validate Variant leaves using the physical-layout check shared with the Parquet reader.
-   * The execution reader has already loaded and projected this schema, including field IDs
-   * assigned through name mapping. Keep each Variant group intact and perform no extra file I/O.
+   * Validate Variant leaves with the Raw Parquet predicate and normalize their child order.
+   * Field IDs, including those from name mapping, have already been assigned. Run before
+   * Iceberg pruning so even a primitive stored in a Variant field gets an actionable error.
+   * This transforms only in-memory schema objects and performs no additional file I/O.
    */
-  private def checkVariantLayout(physical: ShadedType, expected: Type): Unit = {
+  private def normalizeVariantLayout(physical: ShadedType, expected: Type): ShadedType = {
     if (expected.isStructType && !physical.isPrimitive) {
-      physical.asGroupType().getFields.asScala.foreach { field =>
+      val fields = physical.asGroupType().getFields.asScala.map { field =>
         Option(field.getId).flatMap { id =>
           Option(expected.asStructType().field(id.intValue()))
-        }.foreach { required => checkVariantLayout(field, required.`type`()) }
+        }.map { required => normalizeVariantLayout(field, required.`type`()) }.getOrElse(field)
       }
+      physical.asGroupType().withNewFields(fields.asJava)
     } else if (expected.isListType && !physical.isPrimitive) {
-      checkVariantLayout(ParquetSchemaUtil.determineListElementType(physical.asGroupType()),
-        expected.asListType().elementType())
+      val group = physical.asGroupType()
+      val repeated = group.getType(0)
+      val element = ParquetSchemaUtil.determineListElementType(group)
+      val normalized = normalizeVariantLayout(element, expected.asListType().elementType())
+      // Preserve both legacy LIST encodings and the standard three-level wrapper.
+      val child = if (repeated eq element) {
+        normalized
+      } else {
+        repeated.asGroupType().withNewFields(normalized)
+      }
+      group.withNewFields(child)
     } else if (expected.isMapType && !physical.isPrimitive) {
-      val keyValue = physical.asGroupType().getType(0).asGroupType()
-      checkVariantLayout(keyValue.getType(0), expected.asMapType().keyType())
-      checkVariantLayout(keyValue.getType(1), expected.asMapType().valueType())
+      val group = physical.asGroupType()
+      val keyValue = group.getType(0).asGroupType()
+      group.withNewFields(keyValue.withNewFields(
+        normalizeVariantLayout(keyValue.getType(0), expected.asMapType().keyType()),
+        normalizeVariantLayout(keyValue.getType(1), expected.asMapType().valueType())))
     } else if (!expected.isNestedType &&
         GpuColumnVector.isVariantType(SparkSchemaUtil.convert(expected))) {
       val unshaded = ShimUtils.getParquetUnshader().unshade(physical)
@@ -191,6 +207,10 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
             "named value and metadata. Set spark.rapids.sql.format.iceberg.read.enabled=false " +
             "and rerun the query to read Variant with the CPU reader.")
       }
+      val group = physical.asGroupType()
+      group.withNewFields(group.getType("value"), group.getType("metadata"))
+    } else {
+      physical
     }
   }
 
@@ -253,8 +273,6 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
         } else {
           initialProjection
         }
-      // Reject unsupported layouts before Spark converts the schema or cuDF decodes data.
-      checkVariantLayout(fileReadSchema, requiredSchema.asStruct())
       val filteredBlocks = filterRowGroups(reader, requiredSchema, typeWithIds, file.filter)
       val blockFirstRowIndices: Seq[Long] = if (needsRowPosition || hasDeletionVector) {
         // `_pos` and inherited `_row_id` are file-global. When file.split is set the reader is

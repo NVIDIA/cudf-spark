@@ -32,23 +32,29 @@ object GpuParquetIO {
   /**
    * Assign field IDs where needed and prune a Parquet schema to the required Iceberg schema.
    * Execution uses this projection for files with IDs, a name mapping, or fallback IDs.
+   * Prepare the schema after ID assignment and before pruning it to the requested columns.
    *
    * @param fileSchema physical Parquet schema
    * @param requiredSchema Iceberg schema to project
    * @param nameMapping optional mapping used when the file schema has no field IDs
-   * @return the schema with field IDs and the pruned schema, in that order
+   * @param prepareSchema validate and normalize requested fields before Iceberg pruning
+   * @return the prepared schema with field IDs and the pruned schema, in that order
    */
   def projectAndPruneSchema(
       fileSchema: ShadedMessageType,
       requiredSchema: Schema,
-      nameMapping: Option[NameMapping]): (ShadedMessageType, ShadedMessageType) = {
+      nameMapping: Option[NameMapping],
+      prepareSchema: ShadedMessageType => ShadedMessageType = schema => schema):
+      (ShadedMessageType, ShadedMessageType) = {
     if (ParquetSchemaUtil.hasIds(fileSchema)) {
-      (fileSchema, ParquetSchemaUtil.pruneColumns(fileSchema, requiredSchema))
+      val prepared = prepareSchema(fileSchema)
+      (prepared, ParquetSchemaUtil.pruneColumns(prepared, requiredSchema))
     } else if (nameMapping.isDefined) {
-      val typeWithIds = ParquetSchemaUtil.applyNameMapping(fileSchema, nameMapping.get)
+      val typeWithIds = prepareSchema(
+        ParquetSchemaUtil.applyNameMapping(fileSchema, nameMapping.get))
       (typeWithIds, ParquetSchemaUtil.pruneColumns(typeWithIds, requiredSchema))
     } else {
-      val typeWithIds = ParquetSchemaUtil.addFallbackIds(fileSchema)
+      val typeWithIds = prepareSchema(ParquetSchemaUtil.addFallbackIds(fileSchema))
       (typeWithIds, ParquetSchemaUtil.pruneColumnsFallback(typeWithIds, requiredSchema))
     }
   }
