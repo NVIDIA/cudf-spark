@@ -18,6 +18,8 @@ package org.apache.spark.sql.rapids
 
 import java.util.Optional
 
+import scala.collection.mutable.ArrayBuffer
+
 import ai.rapids.cudf
 import ai.rapids.cudf.{BinaryOp, ColumnVector, ColumnView, DType, DuplicateKeepOption, ReductionAggregation, Scalar, SegmentedReductionAggregation, Table}
 import com.nvidia.spark.rapids._
@@ -27,8 +29,8 @@ import com.nvidia.spark.rapids.BoolUtils.isAllValidTrue
 import com.nvidia.spark.rapids.GpuListUtils
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.jni.{GpuListSliceUtils, MapUtils, StringUtils}
-import com.nvidia.spark.rapids.shims.{GetSequenceSize, NullIntolerantShim, ShimExpression,
-  SparkShimImpl}
+import com.nvidia.spark.rapids.shims.{ArraySetOpsShims, GetSequenceSize, NullIntolerantShim,
+  ShimExpression, SparkShimImpl}
 
 import org.apache.spark.sql.catalyst.analysis.{TypeCheckResult, TypeCoercion}
 import org.apache.spark.sql.catalyst.expressions.{ArraySort, ElementAt, ExpectsInputTypes, Expression,
@@ -1359,6 +1361,78 @@ case class GpuArraysZip(children: Seq[Expression]) extends GpuExpression with Sh
   }
 }
 
+private object GpuArraySetOps {
+  def normalizeFloatingPointOutputIfNeeded(
+      result: ColumnVector,
+      dataType: DataType): ColumnVector = {
+    val shouldNormalize = ArraySetOpsShims.shouldNormalizeFloatingPointOutput &&
+      containsFloatingPoint(dataType)
+    if (shouldNormalize) {
+      withResource(result) { result =>
+        withResource(new ArrayBuffer[ColumnView]) { toClose =>
+          normalizeFloatingPointRecursively(result, dataType, toClose).copyToColumnVector()
+        }
+      }
+    } else {
+      result
+    }
+  }
+
+  private def normalizeFloatingPointRecursively(
+      column: ColumnView,
+      dataType: DataType,
+      toClose: ArrayBuffer[ColumnView]): ColumnView = dataType match {
+    case FloatType | DoubleType =>
+      addToClose(column.normalizeNANsAndZeros(), toClose)
+    case ArrayType(elementType, _) =>
+      val child = addToClose(column.getChildColumnView(0), toClose)
+      val normalizedChild = normalizeFloatingPointRecursively(child, elementType, toClose)
+      if (normalizedChild eq child) {
+        column
+      } else {
+        addToClose(column.replaceListChild(normalizedChild), toClose)
+      }
+    case structType: StructType =>
+      val childIndices = new ArrayBuffer[Int]
+      val normalizedChildren = new ArrayBuffer[ColumnView]
+      structType.fields.indices.foreach { index =>
+        val child = addToClose(column.getChildColumnView(index), toClose)
+        val normalizedChild =
+          normalizeFloatingPointRecursively(child, structType(index).dataType, toClose)
+        if (normalizedChild ne child) {
+          childIndices += index
+          normalizedChildren += normalizedChild
+        }
+      }
+      if (normalizedChildren.isEmpty) {
+        column
+      } else {
+        addToClose(column.replaceChildrenWithViews(
+          childIndices.toArray, normalizedChildren.toArray), toClose)
+      }
+    case _ =>
+      column
+  }
+
+  private def containsFloatingPoint(dataType: DataType): Boolean = dataType match {
+    case FloatType | DoubleType =>
+      true
+    case ArrayType(elementType, _) =>
+      containsFloatingPoint(elementType)
+    case structType: StructType =>
+      structType.fields.exists(field => containsFloatingPoint(field.dataType))
+    case _ =>
+      false
+  }
+
+  private def addToClose[T <: ColumnView](
+      column: T,
+      toClose: ArrayBuffer[ColumnView]): T = {
+    toClose += column
+    column
+  }
+}
+
 // Base class for GpuArrayExcept, GpuArrayUnion, GpuArrayIntersect
 trait GpuArrayBinaryLike extends GpuComplexTypeMergingExpression with NullIntolerantShim {
   val left: Expression
@@ -1413,7 +1487,9 @@ case class GpuArrayExcept(left: Expression, right: Expression)
   override def nullable: Boolean = true
 
   override def doColumnar(lhs: GpuColumnVector, rhs: GpuColumnVector): ColumnVector = {
-    ColumnView.listsDifferenceDistinct(lhs.getBase, rhs.getBase)
+    GpuArraySetOps.normalizeFloatingPointOutputIfNeeded(
+      ColumnView.listsDifferenceDistinct(lhs.getBase, rhs.getBase),
+      dataType)
   }
 
   override def doColumnar(lhs: GpuScalar, rhs: GpuColumnVector): ColumnVector = {
@@ -1458,7 +1534,9 @@ case class GpuArrayIntersect(left: Expression, right: Expression)
   override def nullable: Boolean = true
 
   override def doColumnar(lhs: GpuColumnVector, rhs: GpuColumnVector): ColumnVector = {
-    ColumnView.listsIntersectDistinct(lhs.getBase, rhs.getBase)
+    GpuArraySetOps.normalizeFloatingPointOutputIfNeeded(
+      ColumnView.listsIntersectDistinct(lhs.getBase, rhs.getBase),
+      dataType)
   }
 
   override def doColumnar(lhs: GpuScalar, rhs: GpuColumnVector): ColumnVector = {
@@ -1503,7 +1581,9 @@ case class GpuArrayUnion(left: Expression, right: Expression)
   override def nullable: Boolean = true
 
   override def doColumnar(lhs: GpuColumnVector, rhs: GpuColumnVector): ColumnVector = {
-    ColumnView.listsUnionDistinct(lhs.getBase, rhs.getBase)
+    GpuArraySetOps.normalizeFloatingPointOutputIfNeeded(
+      ColumnView.listsUnionDistinct(lhs.getBase, rhs.getBase),
+      dataType)
   }
 
   override def doColumnar(lhs: GpuScalar, rhs: GpuColumnVector): ColumnVector = {
@@ -1861,7 +1941,9 @@ case class GpuArrayDistinct(child: Expression) extends GpuUnaryExpression with N
   override def dataType: DataType = child.dataType
 
   override def doColumnar(input: GpuColumnVector): ColumnVector = {
-    input.getBase.dropListDuplicates(DuplicateKeepOption.KEEP_FIRST)
+    GpuArraySetOps.normalizeFloatingPointOutputIfNeeded(
+      input.getBase.dropListDuplicates(DuplicateKeepOption.KEEP_FIRST),
+      dataType)
   }
 }
 

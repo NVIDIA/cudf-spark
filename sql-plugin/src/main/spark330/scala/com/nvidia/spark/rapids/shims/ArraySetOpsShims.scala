@@ -23,4 +23,5 @@ package com.nvidia.spark.rapids.shims
 
 object ArraySetOpsShims {
   val hasCompatibleFloatingPointSemantics: Boolean = false
+  val shouldNormalizeFloatingPointOutput: Boolean = false
 }
