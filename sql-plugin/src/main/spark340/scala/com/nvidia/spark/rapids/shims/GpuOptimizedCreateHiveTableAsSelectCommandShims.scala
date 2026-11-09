@@ -59,8 +59,7 @@ trait GpuCreateHiveTableAsSelectBase extends GpuRunnableCommand {
     val catalog = sparkSession.sessionState.catalog
     val tableExists = catalog.tableExists(tableIdentifier)
 
-    if (tableExists &&
-        (mode != SaveMode.Overwrite || !GpuFileWriteJobShim.shouldDelayOverwriteDeletion)) {
+    if (tableExists) {
       assert(mode != SaveMode.Overwrite,
         s"Expect the table $tableIdentifier has been dropped when the save mode is Overwrite")
 
@@ -78,9 +77,6 @@ trait GpuCreateHiveTableAsSelectBase extends GpuRunnableCommand {
     } else {
       tableDesc.storage.locationUri.foreach { p =>
         GpuDataWritingCommand.assertEmptyRootPath(p, mode, sparkSession.sessionState.newHadoopConf)
-      }
-      if (tableExists) {
-        catalog.dropTable(tableIdentifier, ignoreIfNotExists = true, purge = false)
       }
       // TODO ideally, we should get the output data ready first and then
       // add the relation into catalog, just in case of failure occurs while data

@@ -41,7 +41,6 @@ class KeyGroupedPartitioning405ShimSuite extends AnyFunSuite with FQSuiteName {
 
     val copied = KeyGroupedPartitioningShim.copyForOutputPartitioning(
       partitioning,
-      expressions = Seq(expressions(1)),
       joinKeyPositions = Some(Seq(1)),
       partitionValues = newPartitionValues,
       isPartiallyClustered = false)

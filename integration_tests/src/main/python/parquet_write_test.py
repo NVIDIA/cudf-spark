@@ -95,55 +95,18 @@ parquet_write_gens_list = [[binary_gen], parquet_basic_gen, decimal_gens] +  [ [
 parquet_ts_write_options = ['INT96', 'TIMESTAMP_MICROS', 'TIMESTAMP_MILLIS']
 
 @pytest.mark.skipif(not is_spark_405(),
-                    reason="Tests the Spark 4.0.5 overwrite validation fix")
-def test_failed_static_overwrite_preserves_existing_data(spark_tmp_path):
-    data_path = spark_tmp_path + '/PARQUET_OVERWRITE_VALIDATION'
-    with_cpu_session(
-        lambda spark: spark.range(3).write.format("parquet").save(data_path))
-
-    def overwrite(spark):
-        with pytest.raises(Exception, match="CODEC_NOT_AVAILABLE"):
-            spark.range(5).write.mode("overwrite").format("parquet") \
-                .option("compression", "bogus").save(data_path)
-
-    with_gpu_session(overwrite)
-    with_cpu_session(
-        lambda spark: assert_equal(
-            [row.id for row in spark.read.parquet(data_path).orderBy("id").collect()],
-            [0, 1, 2]))
-
-@pytest.mark.skipif(not is_spark_405(),
-                    reason="Tests the Spark 4.0.5 saveAsTable validation fix")
-def test_failed_save_as_table_overwrite_preserves_existing_table(spark_tmp_table_factory):
+                    reason="Tests Spark 4.0.5 saveAsTable overwrite")
+def test_save_as_table_overwrite(spark_tmp_table_factory):
     table_name = spark_tmp_table_factory.get()
     with_cpu_session(
         lambda spark: spark.range(3).write.format("parquet").saveAsTable(table_name))
 
-    def overwrite(spark):
-        with pytest.raises(Exception, match="CODEC_NOT_AVAILABLE"):
-            spark.range(5).write.mode("overwrite").format("parquet") \
-                .option("compression", "bogus").saveAsTable(table_name)
-
-    with_gpu_session(overwrite)
-    with_cpu_session(
-        lambda spark: assert_equal(
-            [row.id for row in spark.table(table_name).orderBy("id").collect()],
-            [0, 1, 2]))
-
-@pytest.mark.skipif(not is_spark_405(),
-                    reason="Tests Spark 4.0.5 saveAsTable overwrite")
-@pytest.mark.parametrize('table_format', ['parquet', 'hive'])
-def test_save_as_table_overwrite(spark_tmp_table_factory, table_format):
-    table_name = spark_tmp_table_factory.get()
-    with_cpu_session(
-        lambda spark: spark.range(3).write.format(table_format).saveAsTable(table_name))
-
     callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
-    callback.startCapture()
+    callback.startCaptureWithWritePlans()
     try:
         with_gpu_session(
             lambda spark: spark.range(3, 5).write.mode("overwrite")
-                .format(table_format).saveAsTable(table_name))
+                .format("parquet").saveAsTable(table_name))
         plans = callback.getResultsWithTimeout(10000)
         assert any(callback.contains(plan, "GpuDataWritingCommandExec") for plan in plans)
     finally:

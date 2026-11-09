@@ -124,13 +124,8 @@ case class GpuBatchScanExec(
         val newPartValues = spjParams.commonPartitionValues.get.flatMap {
           case (partValue, numSplits) => Seq.fill(numSplits)(partValue)
         }
-        val expressions = spjParams.joinKeyPositions match {
-          case Some(projectionPositions) => projectionPositions.map(i => k.expressions(i))
-          case _ => k.expressions
-        }
         KeyGroupedPartitioningShim.copyForOutputPartitioning(
           k,
-          expressions,
           spjParams.joinKeyPositions,
           newPartValues,
           spjParams.applyPartialClustering)

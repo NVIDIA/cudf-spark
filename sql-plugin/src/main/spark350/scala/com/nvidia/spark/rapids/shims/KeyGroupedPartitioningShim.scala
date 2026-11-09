@@ -21,7 +21,6 @@ spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.plans.physical.KeyGroupedPartitioning
 
 object KeyGroupedPartitioningShim {
@@ -34,10 +33,12 @@ object KeyGroupedPartitioningShim {
 
   def copyForOutputPartitioning(
       p: KeyGroupedPartitioning,
-      expressions: Seq[Expression],
       joinKeyPositions: Option[Seq[Int]],
       partitionValues: Seq[InternalRow],
       isPartiallyClustered: Boolean): KeyGroupedPartitioning = {
+    val expressions = joinKeyPositions
+      .map(_.map(p.expressions(_)))
+      .getOrElse(p.expressions)
     p.copy(
       expressions = expressions,
       numPartitions = partitionValues.length,

@@ -18,8 +18,6 @@ package org.apache.spark.sql.rapids
 
 import java.util.Optional
 
-import scala.collection.mutable.ArrayBuffer
-
 import ai.rapids.cudf
 import ai.rapids.cudf.{BinaryOp, ColumnVector, ColumnView, DType, DuplicateKeepOption, ReductionAggregation, Scalar, SegmentedReductionAggregation, Table}
 import com.nvidia.spark.rapids._
@@ -1365,71 +1363,16 @@ private object GpuArraySetOps {
   def normalizeFloatingPointOutputIfNeeded(
       result: ColumnVector,
       dataType: DataType): ColumnVector = {
-    val shouldNormalize = ArraySetOpsShims.shouldNormalizeFloatingPointOutput &&
-      containsFloatingPoint(dataType)
-    if (shouldNormalize) {
+    if (ArraySetOpsShims.shouldNormalizeFloatingPointOutput) {
       withResource(result) { result =>
-        withResource(new ArrayBuffer[ColumnView]) { toClose =>
-          normalizeFloatingPointRecursively(result, dataType, toClose).copyToColumnVector()
+        ColumnCastUtil.deepTransform(result, Some(dataType)) {
+          case (cv, Some(FloatType | DoubleType)) =>
+            cv.normalizeNANsAndZeros()
         }
       }
     } else {
       result
     }
-  }
-
-  private def normalizeFloatingPointRecursively(
-      column: ColumnView,
-      dataType: DataType,
-      toClose: ArrayBuffer[ColumnView]): ColumnView = dataType match {
-    case FloatType | DoubleType =>
-      addToClose(column.normalizeNANsAndZeros(), toClose)
-    case ArrayType(elementType, _) =>
-      val child = addToClose(column.getChildColumnView(0), toClose)
-      val normalizedChild = normalizeFloatingPointRecursively(child, elementType, toClose)
-      if (normalizedChild eq child) {
-        column
-      } else {
-        addToClose(column.replaceListChild(normalizedChild), toClose)
-      }
-    case structType: StructType =>
-      val childIndices = new ArrayBuffer[Int]
-      val normalizedChildren = new ArrayBuffer[ColumnView]
-      structType.fields.indices.foreach { index =>
-        val child = addToClose(column.getChildColumnView(index), toClose)
-        val normalizedChild =
-          normalizeFloatingPointRecursively(child, structType(index).dataType, toClose)
-        if (normalizedChild ne child) {
-          childIndices += index
-          normalizedChildren += normalizedChild
-        }
-      }
-      if (normalizedChildren.isEmpty) {
-        column
-      } else {
-        addToClose(column.replaceChildrenWithViews(
-          childIndices.toArray, normalizedChildren.toArray), toClose)
-      }
-    case _ =>
-      column
-  }
-
-  private def containsFloatingPoint(dataType: DataType): Boolean = dataType match {
-    case FloatType | DoubleType =>
-      true
-    case ArrayType(elementType, _) =>
-      containsFloatingPoint(elementType)
-    case structType: StructType =>
-      structType.fields.exists(field => containsFloatingPoint(field.dataType))
-    case _ =>
-      false
-  }
-
-  private def addToClose[T <: ColumnView](
-      column: T,
-      toClose: ArrayBuffer[ColumnView]): T = {
-    toClose += column
-    column
   }
 }
 

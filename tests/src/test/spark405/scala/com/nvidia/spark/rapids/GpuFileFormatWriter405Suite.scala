@@ -20,7 +20,9 @@ spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids
 
+import com.nvidia.spark.rapids.shims.GpuFileWriteJobShim
 import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.Path
 import org.apache.hadoop.mapreduce.Job
 
 import org.apache.spark.sql.{SaveMode, SparkSession}
@@ -32,24 +34,25 @@ import org.apache.spark.sql.execution.datasources.{
   InsertIntoHadoopFsRelationCommand,
   SQLHadoopMapReduceCommitProtocol
 }
-import org.apache.spark.sql.rapids.GpuFileFormatWriter
+import org.apache.spark.sql.rapids.{GpuFileFormatWriter, GpuInsertIntoHadoopFsRelationCommand}
 import org.apache.spark.sql.types.StructType
 
 class GpuFileFormatWriter405Suite extends SparkQueryCompareTestSuite {
   private class PrepareWriteFailure extends RuntimeException
 
+  private class GpuPrepareWriteFailureFormat extends GpuParquetFileFormat {
+    override def prepareWrite(
+        sparkSession: SparkSession,
+        job: Job,
+        options: Map[String, String],
+        dataSchema: StructType): ColumnarOutputWriterFactory = {
+      throw new PrepareWriteFailure
+    }
+  }
+
   test("beforeSetupJob is not called when prepareWrite fails") {
     withGpuSparkSession { spark =>
       var callbackCalled = false
-      val fileFormat = new GpuParquetFileFormat() {
-        override def prepareWrite(
-            sparkSession: SparkSession,
-            job: Job,
-            options: Map[String, String],
-            dataSchema: StructType): ColumnarOutputWriterFactory = {
-          throw new PrepareWriteFailure
-        }
-      }
 
       withTempPath { outputPath =>
         val plan = spark.range(1).queryExecution.executedPlan
@@ -57,7 +60,7 @@ class GpuFileFormatWriter405Suite extends SparkQueryCompareTestSuite {
           GpuFileFormatWriter.write(
             sparkSession = spark,
             plan = plan,
-            fileFormat = fileFormat,
+            fileFormat = new GpuPrepareWriteFailureFormat,
             committer = new SQLHadoopMapReduceCommitProtocol(
               "prepare-write-failure", outputPath.getAbsolutePath, false),
             outputSpec = FileFormatWriter.OutputSpec(
@@ -75,6 +78,91 @@ class GpuFileFormatWriter405Suite extends SparkQueryCompareTestSuite {
       }
 
       assert(!callbackCalled)
+    }
+  }
+
+  test("static overwrite preserves existing data when GPU prepareWrite fails") {
+    withGpuSparkSession { spark =>
+      withTempPath { outputPath =>
+        spark.range(3).write.parquet(outputPath.getAbsolutePath)
+        val input = spark.range(5)
+        val command = GpuInsertIntoHadoopFsRelationCommand(
+          outputPath = new Path(outputPath.toURI),
+          staticPartitions = Map.empty,
+          ifPartitionNotExists = false,
+          partitionColumns = Seq.empty,
+          bucketSpec = None,
+          fileFormat = new GpuPrepareWriteFailureFormat,
+          options = Map.empty,
+          query = input.queryExecution.analyzed,
+          mode = SaveMode.Overwrite,
+          catalogTable = None,
+          fileIndex = None,
+          outputColumnNames = input.columns.toSeq,
+          useStableSort = false,
+          concurrentWriterPartitionFlushSize = 0L,
+          baseDebugOutputPath = None)
+
+        intercept[PrepareWriteFailure] {
+          command.runColumnar(spark, input.queryExecution.executedPlan)
+        }
+
+        assert(spark.read.parquet(outputPath.getAbsolutePath)
+          .orderBy("id").collect().map(_.getLong(0)).toSeq === Seq(0L, 1L, 2L))
+      }
+    }
+  }
+
+  test("saveAsTable overwrite preserves existing table when prepareWrite fails") {
+    withGpuSparkSession { spark =>
+      object PlanWriteWithPrepareFailure extends SparkStrategy {
+        override def apply(plan: LogicalPlan): Seq[SparkPlan] = plan match {
+          case command: InsertIntoHadoopFsRelationCommand
+              if command.getTagValue(
+                InsertIntoHadoopFsRelationCommand.BEFORE_WRITE_JOB).isDefined =>
+            val replacement = GpuInsertIntoHadoopFsRelationCommand(
+              command.outputPath,
+              command.staticPartitions,
+              command.ifPartitionNotExists,
+              command.partitionColumns,
+              command.bucketSpec,
+              new GpuPrepareWriteFailureFormat,
+              command.options,
+              command.query,
+              command.mode,
+              command.catalogTable,
+              command.fileIndex,
+              command.outputColumnNames,
+              useStableSort = false,
+              concurrentWriterPartitionFlushSize = 0L,
+              baseDebugOutputPath = None)
+            GpuFileWriteJobShim.copyBeforeWriteJob(command, replacement)
+            GpuDataWritingCommandExec(replacement, planLater(command.query)) :: Nil
+          case _ => Nil
+        }
+      }
+
+      val tableName = "gpu_file_format_writer_405_prepare_write_failure"
+      spark.sql(s"DROP TABLE IF EXISTS $tableName")
+      try {
+        spark.range(3).write.saveAsTable(tableName)
+        val originalStrategies = spark.experimental.extraStrategies
+        try {
+          spark.experimental.extraStrategies = PlanWriteWithPrepareFailure +: originalStrategies
+          withSQLConf("spark.sql.optimizer.plannedWrite.enabled" -> "false") {
+            intercept[PrepareWriteFailure] {
+              spark.range(5).write.mode(SaveMode.Overwrite).saveAsTable(tableName)
+            }
+          }
+        } finally {
+          spark.experimental.extraStrategies = originalStrategies
+        }
+
+        assert(spark.table(tableName).orderBy("id")
+          .collect().map(_.getLong(0)).toSeq === Seq(0L, 1L, 2L))
+      } finally {
+        spark.sql(s"DROP TABLE IF EXISTS $tableName")
+      }
     }
   }
 
