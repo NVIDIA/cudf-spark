@@ -59,7 +59,11 @@ trait GpuCreateHiveTableAsSelectBase extends GpuRunnableCommand {
     val catalog = sparkSession.sessionState.catalog
     val tableExists = catalog.tableExists(tableIdentifier)
 
-    if (tableExists && mode != SaveMode.Overwrite) {
+    if (tableExists &&
+        (mode != SaveMode.Overwrite || !GpuFileWriteJobShim.shouldDelayOverwriteDeletion)) {
+      assert(mode != SaveMode.Overwrite,
+        s"Expect the table $tableIdentifier has been dropped when the save mode is Overwrite")
+
       if (mode == SaveMode.ErrorIfExists) {
         throw RapidsErrorUtils.tableIdentifierExistsError(tableIdentifier)
       }

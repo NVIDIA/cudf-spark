@@ -27,7 +27,11 @@ import java.net.URI
 
 import com.nvidia.spark.rapids.AssertUtils.assertInTests
 import com.nvidia.spark.rapids.GpuDataWritingCommand
-import com.nvidia.spark.rapids.shims.{CharVarcharUtilsShims, SparkShimImpl}
+import com.nvidia.spark.rapids.shims.{
+  CharVarcharUtilsShims,
+  GpuFileWriteJobShim,
+  SparkShimImpl
+}
 
 import org.apache.spark.sql.{AnalysisException, Row, SaveMode, SparkSession}
 import org.apache.spark.sql.catalyst.catalog._
@@ -58,7 +62,11 @@ case class GpuCreateDataSourceTableAsSelectCommand(
     val tableName = tableIdentWithDB.unquotedString
     val tableExists = sessionState.catalog.tableExists(tableIdentWithDB)
 
-    if (tableExists && mode != SaveMode.Overwrite) {
+    if (tableExists &&
+        (mode != SaveMode.Overwrite || !GpuFileWriteJobShim.shouldDelayOverwriteDeletion)) {
+      assert(mode != SaveMode.Overwrite,
+        s"Expect the table $tableName has been dropped when the save mode is Overwrite")
+
       if (mode == SaveMode.ErrorIfExists) {
         throw RapidsErrorUtils.tableOrViewAlreadyExistsError(tableName)
       }

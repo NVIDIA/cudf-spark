@@ -1038,6 +1038,23 @@ def test_array_distinct_nested_float_normalization_spark_405(element_type):
     assert_equal_with_signed_zero(cpu, gpu)
 
 @pytest.mark.skipif(not is_spark_405(),
+                    reason="Spark 4.0.5 normalizes floating-point fields in array structs")
+@pytest.mark.parametrize('element_type', ['float', 'double'])
+@validate_execs_in_gpu_plan('GpuProjectExec')
+def test_array_distinct_struct_float_normalization_spark_405(element_type):
+    data = [([
+        (-0.0, 1), (0.0, 2), (float('nan'), 3),
+        (float('nan'), 3), (None, 4), None
+    ],)]
+
+    cpu, gpu = run_with_cpu_and_gpu(
+        lambda spark: spark.createDataFrame(
+            data, f'a array<struct<x:{element_type},tag:int>>').selectExpr(
+                'array_distinct(a)'),
+        'COLLECT')
+    assert_equal_with_signed_zero(cpu, gpu)
+
+@pytest.mark.skipif(not is_spark_405(),
                     reason="Spark 4.0.5 normalizes floating-point array set operations")
 @allow_non_gpu('ArrayUnion')
 def test_array_union_nested_float_fallback_spark_405():

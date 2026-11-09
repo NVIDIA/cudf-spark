@@ -26,7 +26,32 @@ import com.nvidia.spark.rapids.shims.GetSequenceSize
 
 import org.apache.spark.unsafe.array.ByteArrayMethods.MAX_ROUNDED_ARRAY_LENGTH
 
-class GetSequenceSize405Suite extends RmmSparkRetrySuiteBase {
+class GetSequenceSizeSuite extends RmmSparkRetrySuiteBase {
+  test("sequence sizes preserve descending ranges, long boundaries and nulls") {
+    val starts = Array[java.lang.Long](0L, 4L, Long.MinValue, null)
+    val stops = Array[java.lang.Long](4L, -4L, Long.MinValue, 4L)
+    val steps = Array[java.lang.Long](2L, -2L, 1L, 1L)
+    val expected = starts.zip(stops).zip(steps).map { case ((start, stop), step) =>
+      if (start == null || stop == null || step == null) {
+        null
+      } else {
+        java.lang.Long.valueOf(Math.addExact(1L, Math.subtractExact(stop, start) / step))
+      }
+    }
+
+    withResource(ColumnVector.fromBoxedLongs(starts: _*)) { start =>
+      withResource(ColumnVector.fromBoxedLongs(stops: _*)) { stop =>
+        withResource(ColumnVector.fromBoxedLongs(steps: _*)) { step =>
+          withResource(ColumnVector.fromBoxedLongs(expected: _*)) { cpu =>
+            withResource(GetSequenceSize(start, stop, step)) { actual =>
+              CudfTestHelper.assertColumnsAreEqual(cpu, actual)
+            }
+          }
+        }
+      }
+    }
+  }
+
   test("sequence sizes use exact arithmetic after long subtraction overflow") {
     val starts = Array[java.lang.Long](Long.MinValue, Long.MinValue, Long.MaxValue, null)
     val stops = Array[java.lang.Long](Long.MaxValue, 0L, Long.MinValue, 0L)
@@ -48,16 +73,23 @@ class GetSequenceSize405Suite extends RmmSparkRetrySuiteBase {
   }
 
   test("oversized exact sequence lengths remain above the array limit without leaking") {
-    withResource(ColumnVector.fromLongs(Long.MinValue)) { start =>
-      withResource(ColumnVector.fromLongs(Long.MaxValue)) { stop =>
-        withResource(ColumnVector.fromLongs(1L)) { step =>
-          val before = Rmm.getTotalBytesAllocated
-          withResource(GetSequenceSize(start, stop, step)) { actual =>
-            withResource(ColumnVector.fromLongs(MAX_ROUNDED_ARRAY_LENGTH.toLong + 1L)) { expected =>
-              CudfTestHelper.assertColumnsAreEqual(expected, actual)
+    val cases = Seq(
+      (0L, Long.MinValue, -1L),
+      (0L, Long.MaxValue, 1L),
+      (Long.MinValue, Long.MaxValue, 1L))
+    for ((first, last, increment) <- cases) {
+      withResource(ColumnVector.fromLongs(first)) { start =>
+        withResource(ColumnVector.fromLongs(last)) { stop =>
+          withResource(ColumnVector.fromLongs(increment)) { step =>
+            val before = Rmm.getTotalBytesAllocated
+            withResource(GetSequenceSize(start, stop, step)) { actual =>
+              withResource(
+                  ColumnVector.fromLongs(MAX_ROUNDED_ARRAY_LENGTH.toLong + 1L)) { expected =>
+                CudfTestHelper.assertColumnsAreEqual(expected, actual)
+              }
             }
+            assert(Rmm.getTotalBytesAllocated == before)
           }
-          assert(Rmm.getTotalBytesAllocated == before)
         }
       }
     }
