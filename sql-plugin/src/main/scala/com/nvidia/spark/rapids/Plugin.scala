@@ -150,21 +150,16 @@ object RapidsPluginUtils extends Logging {
     }
   }
 
+  private[rapids] def isMainJarResource(url: URL, propName: String): Boolean = {
+    val path = url.toString
+    val submoduleJar = """.*(cudf-spark|rapids-4-spark)-[^/!]*_2\.(12|13)-[^/!]*\.jar!/.*"""
+    path.endsWith(s"!/$propName") && !path.matches(submoduleJar)
+  }
+
   private def detectMultipleJar(propName: String, jarName: String, conf: RapidsConf): Unit = {
     val classloader = ShimLoader.getShimClassLoader()
-    val possibleRapidsJarURLs = classloader.getResources(propName).asScala.toSet.toSeq.filter {
-      url => {
-        val urlPath = url.toString
-        // Filter out submodule jars, e.g. cudf-spark-aggregator_2.12-26.12.0-spark341.jar,
-        // and files stored under subdirs of '!/', e.g.
-        // cudf-spark_2.12-26.12.0-cuda12.jar!/spark330/rapids4spark-version-info.properties
-        // We only want to find the main jar, e.g.
-        // cudf-spark_2.12-26.12.0-cuda12.jar!/rapids4spark-version-info.properties
-        !urlPath.matches(
-          ".*(?:rapids-4-spark|cudf-spark)-[^/!]*_2[.](?:12|13)-[^/!]*[.]jar!/.*") &&
-          urlPath.endsWith("!/" + propName)
-      }
-    }
+    val possibleRapidsJarURLs = classloader.getResources(propName).asScala.toSet.toSeq
+      .filter(isMainJarResource(_, propName))
     val revisionRegex = "revision=(.*)".r
     val revisionMap: Map[String, Seq[URL]] = possibleRapidsJarURLs.map { url =>
       val versionInfo = scala.io.Source.fromURL(url).getLines().toSeq
