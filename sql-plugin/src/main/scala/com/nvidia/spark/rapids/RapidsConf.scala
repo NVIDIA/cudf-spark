@@ -756,8 +756,6 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val maxNumParquetFilesParallel: Int = get(PARQUET_MULTITHREAD_READ_MAX_NUM_FILES_PARALLEL)
 
-  lazy val variantHasNoShredding: Boolean = get(VARIANT_HAS_NO_SHREDDING)
-
   lazy val isParquetReadEnabled: Boolean = get(ENABLE_PARQUET_READ)
 
   lazy val getMultithreadedCombineThreshold: Long =

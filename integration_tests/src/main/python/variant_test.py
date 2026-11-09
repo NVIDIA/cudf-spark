@@ -24,15 +24,13 @@ from conftest import is_databricks_runtime, is_not_utc, spark_jvm
 from data_gen import idfn
 from marks import allow_non_gpu, allow_non_gpu_conditional, ignore_order, incompat
 from spark_session import (is_before_spark_400, is_databricks173_or_later, is_spark_40x,
-                           is_spark_410_or_later, is_spark_411_or_later, with_cpu_session,
-                           with_gpu_session)
+                           is_spark_410_or_later, is_spark_411_or_later, with_cpu_session)
 
 pytestmark = pytest.mark.skipif(
     is_databricks_runtime() and not is_databricks173_or_later(),
     reason='Variant extraction is supported for Databricks 17.3+')
 
 _variant_parquet_conf = {
-    'spark.rapids.sql.variant.hasNoShredding': 'true',
     'spark.rapids.sql.format.parquet.enabled': 'true',
     'spark.rapids.sql.format.parquet.read.enabled': 'true',
     'spark.rapids.sql.format.parquet.write.enabled': 'true',
@@ -807,68 +805,3 @@ def test_variant_try_get_cpu_bridge_disabled_falls_back(spark_tmp_path):
     conf = dict(_variant_parquet_conf)
     conf['spark.rapids.sql.expression.cpuBridge.enabled'] = 'false'
     assert_gpu_fallback_collect(do_it, 'VariantGet', conf=conf)
-
-
-@incompat
-@ignore_order(local=True)
-@allow_non_gpu('FileSourceScanExec', 'BatchScanExec', 'ColumnarToRowExec', 'ProjectExec', 'VariantGet')
-@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
-@pytest.mark.parametrize('use_v1,scan_class', [('parquet', 'FileSourceScanExec'), ('', 'BatchScanExec')])
-@pytest.mark.parametrize('no_shredding', [None, 'false', 'true'], ids=['default', 'disabled', 'enabled'])
-def test_parquet_variant_no_shredding_guarantee(spark_tmp_path, use_v1, scan_class,
-                                               no_shredding):
-    path = spark_tmp_path + '/VARIANT_OPT_IN'
-    _with_cpu_variant_session(lambda spark: _write_variant_parquet(spark, path))
-    conf = dict(_variant_parquet_conf)
-    conf.pop('spark.rapids.sql.variant.hasNoShredding')
-    conf.update({'spark.sql.sources.useV1SourceList': use_v1,
-                 'spark.sql.adaptive.enabled': 'false'})
-    if no_shredding is not None:
-        conf['spark.rapids.sql.variant.hasNoShredding'] = no_shredding
-    enabled = no_shredding == 'true'
-    gpu_scan = 'GpuFileSourceScanExec' if use_v1 else 'GpuBatchScanExec'
-    assert_cpu_and_gpu_are_equal_collect_with_capture(
-        lambda spark: spark.read.parquet(path).selectExpr("try_variant_get(v, '$.x', 'int') AS x"),
-        exist_classes=f'{gpu_scan},GpuVariantGet' if enabled else scan_class,
-        non_exist_classes=scan_class if enabled else f'{gpu_scan},GpuVariantGet',
-        conf=conf, require_non_empty=True)
-
-
-@incompat
-@pytest.mark.skipif(not is_spark_411_or_later(), reason='Requires Spark Variant shredding support')
-@pytest.mark.parametrize('reader_type', ['PERFILE', 'MULTITHREADED', 'COALESCING'])
-@pytest.mark.parametrize('use_v1', ['parquet', ''])
-@pytest.mark.parametrize('query', ['raw', 'extract'])
-def test_parquet_variant_misconfigured_no_shredding(spark_tmp_path, reader_type, use_v1, query):
-    path = spark_tmp_path + '/MISCONFIGURED_SHREDDED_VARIANT'
-    with_cpu_session(lambda spark: spark.range(4).selectExpr('id',
-        "parse_json(concat('{\"x\":', id, '}')) AS v").coalesce(1).write.parquet(path), conf={
-            'spark.sql.variant.writeShredding.enabled': 'true',
-            'spark.sql.variant.forceShreddingSchemaForTest': 'STRUCT<x: BIGINT>',
-        })
-    conf = dict(_variant_parquet_conf)
-    conf.update({'spark.sql.sources.useV1SourceList': use_v1,
-                 'spark.rapids.sql.format.parquet.reader.type': reader_type,
-                 # Direct session calls need the setting normally supplied by the assert helper.
-                 'spark.rapids.sql.incompatibleOps.enabled': 'true'})
-
-    def read(spark):
-        # Supply the logical schema so Spark's own schema inference does not reject the file
-        # before the GPU execution reader encounters the incorrectly declared input.
-        df = spark.read.schema('id LONG, v VARIANT').parquet(path)
-        if query == 'extract':
-            df = df.selectExpr("try_variant_get(v, '$.x', 'int') AS x")
-        if spark.conf.get('spark.rapids.sql.enabled') == 'true':
-            callback = spark._jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
-            callback.assertContains(df._jdf, 'GpuFileSourceScanExec' if use_v1 else 'GpuBatchScanExec')
-            if query == 'extract':
-                callback.assertContains(df._jdf, 'GpuVariantGet')
-        return df.collect()
-
-    cpu_conf = dict(conf, **{'spark.sql.variant.allowReadingShredded': 'true'})
-    with_cpu_session(read, conf=cpu_conf)
-    with pytest.raises(Exception) as error:
-        with_gpu_session(read, conf=conf)
-    assert 'java.lang.UnsupportedOperationException: GPU Variant reader does not support ' \
-        'shredded Variant input' in str(error.value)
-    assert 'spark.rapids.sql.variant.hasNoShredding=false' in str(error.value)

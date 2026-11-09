@@ -31,9 +31,7 @@ pytestmark = [
 
 _shredding_features = {'variantShredding-preview', 'variantShredding'}
 _table_states = ['unshredded', 'feature_only', 'shredded', 'disabled', 'mixed']
-# Opt in so the existing protocol and Spark-setting guards are exercised independently.
 _read_conf = {'spark.sql.variant.pushVariantIntoScan': 'false',
-              'spark.rapids.sql.variant.hasNoShredding': 'true',
               'spark.sql.adaptive.enabled': 'true',
               'spark.sql.shuffle.partitions': '2'}
 # OSS Spark 4.0 requires opting in; DBR 17.3 and Spark 4.1 use the native reader default.
@@ -197,25 +195,3 @@ def test_delta_stable_variant_shredding(spark_tmp_path, state, query):
         non_exist_classes='FileSourceScanExec' if use_gpu_scan else
             'GpuFileSourceScanExec,GpuVariantGet',
         conf=_read_conf)
-
-
-@ignore_order(local=True)
-@incompat
-@allow_non_gpu(*delta_meta_allow, 'FileSourceScanExec', 'ProjectExec', 'VariantGet',
-               'ColumnarToRowExec')
-@pytest.mark.parametrize('no_shredding', [None, 'false', 'true'], ids=['default', 'disabled', 'enabled'])
-@pytest.mark.parametrize('query', ['raw', 'nested', 'ordinary'])
-def test_delta_variant_no_shredding_guarantee(spark_tmp_path, no_shredding, query):
-    path = spark_tmp_path + '/DELTA_VARIANT_OPT_IN'
-    with_cpu_session(lambda spark: _write_table(spark, path, 'unshredded'))
-    conf = dict(_read_conf)
-    conf.pop('spark.rapids.sql.variant.hasNoShredding')
-    if no_shredding is not None:
-        conf['spark.rapids.sql.variant.hasNoShredding'] = no_shredding
-    enabled = no_shredding == 'true' or query == 'ordinary'
-    assert_cpu_and_gpu_are_equal_collect_with_capture(
-        lambda spark: _read_query(spark, path, query),
-        exist_classes='GpuFileSourceScanExec' if enabled else 'FileSourceScanExec',
-        non_exist_classes='FileSourceScanExec' if enabled else
-            'GpuFileSourceScanExec,GpuVariantGet',
-        conf=conf, require_non_empty=True)

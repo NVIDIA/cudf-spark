@@ -40,28 +40,25 @@ Iceberg releases cannot be used with Spark 4.1.
 
 ## Variant Reads
 
-GPU Variant reads are disabled by default. The global setting
-`spark.rapids.sql.variant.hasNoShredding=true` opts in for Parquet, Delta and Iceberg,
-including Variant values nested in structs, arrays and maps. Enable it only when all
-input files are guaranteed to contain no shredded Variant values, including existing
-and imported files. Query planning does not open data files or inspect Parquet footers
-to verify this guarantee. Changing current write properties does not establish the
-layout of existing files. Leave the setting false for shredded, mixed or unknown input.
-
-Iceberg Variant reads also require a supported Spark/Iceberg runtime,
+Iceberg Variant reads require a supported Spark/Iceberg runtime,
 `spark.rapids.sql.format.iceberg.v3.enabled=true`,
 `spark.sql.variant.allowReadingShredded=false` and
-`spark.sql.variant.pushVariantIntoScan=false`. The opt-in does not override other
-fallback checks or enable GPU Variant writes. Queries that do not project Variant
-columns remain eligible for GPU scans without the opt-in.
+`spark.sql.variant.pushVariantIntoScan=false`. Allowing shredded reads keeps Variant
+scans and their consumers on CPU. GPU Variant writes remain unsupported.
 
-An incorrect opt-in fails during execution when a requested Variant column is shredded,
-including annotated or unannotated imported input and mixed snapshots. The reader throws
-`UnsupportedOperationException` with `GPU Variant reader does not support shredded Variant input`
-and a remediation: `Set spark.rapids.sql.variant.hasNoShredding=false and rerun the query to read Variant on CPU.`
-Spark may wrap it in a task/stage failure. There is no automatic CPU retry after execution
-has started. The check reuses the projected schema already in memory; it does not open
-additional files or inspect footers during planning.
+The GPU execution reader reuses the Raw Parquet physical-layout predicate to validate
+every projected Variant leaf: exactly two `REQUIRED BINARY` children named `value` and
+`metadata`. Checks preserve complete Variant groups and field-ID/name-mapping resolution
+through structs, lists and maps. They use the schema already loaded by the execution
+reader, with no additional file opens and no planning-time data-file inspection.
+
+Shredded or incompatible input throws `UnsupportedOperationException` with
+`GPU Iceberg reader does not support shredded or incompatible Variant input` and
+instructions to set `spark.rapids.sql.format.iceberg.read.enabled=false` and rerun with
+the CPU Iceberg reader. Spark may wrap this in a task/stage failure. No automatic CPU
+retry occurs after GPU execution starts. Raw reads, extraction, imported files and
+mixed snapshots use the same validation. Queries that do not project Variant columns
+remain eligible for GPU scans.
 
 ## Code Shared Between Modules
 

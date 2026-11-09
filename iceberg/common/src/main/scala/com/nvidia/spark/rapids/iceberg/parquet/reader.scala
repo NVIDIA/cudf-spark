@@ -163,29 +163,33 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
   }
 
   /**
-   * Reject shredded Variant leaves in the schema already read by the execution reader.
-   * Field IDs have been assigned before this check, including imported files with name mapping.
-   * This performs no file I/O and is never called during planning.
+   * Validate Variant leaves using the physical-layout check shared with the Parquet reader.
+   * The execution reader has already loaded and projected this schema, including field IDs
+   * assigned through name mapping. Keep each Variant group intact and perform no extra file I/O.
    */
-  private def checkVariantShredding(physical: ShadedType, expected: Type): Unit = {
-    if (!physical.isPrimitive) {
-      val group = physical.asGroupType()
-      if (expected.isStructType) {
-        group.getFields.asScala.foreach { field =>
-          Option(field.getId).flatMap { id =>
-            Option(expected.asStructType().field(id.intValue()))
-          }.foreach { required => checkVariantShredding(field, required.`type`()) }
-        }
-      } else if (expected.isListType) {
-        checkVariantShredding(ParquetSchemaUtil.determineListElementType(group),
-          expected.asListType().elementType())
-      } else if (expected.isMapType) {
-        val keyValue = group.getType(0).asGroupType()
-        checkVariantShredding(keyValue.getType(0), expected.asMapType().keyType())
-        checkVariantShredding(keyValue.getType(1), expected.asMapType().valueType())
-      } else if (GpuColumnVector.isVariantType(SparkSchemaUtil.convert(expected)) &&
-          group.containsField("typed_value")) {
-        ParquetSchemaUtils.throwUnsupportedShreddedVariant(physical.getName)
+  private def checkVariantLayout(physical: ShadedType, expected: Type): Unit = {
+    if (expected.isStructType && !physical.isPrimitive) {
+      physical.asGroupType().getFields.asScala.foreach { field =>
+        Option(field.getId).flatMap { id =>
+          Option(expected.asStructType().field(id.intValue()))
+        }.foreach { required => checkVariantLayout(field, required.`type`()) }
+      }
+    } else if (expected.isListType && !physical.isPrimitive) {
+      checkVariantLayout(ParquetSchemaUtil.determineListElementType(physical.asGroupType()),
+        expected.asListType().elementType())
+    } else if (expected.isMapType && !physical.isPrimitive) {
+      val keyValue = physical.asGroupType().getType(0).asGroupType()
+      checkVariantLayout(keyValue.getType(0), expected.asMapType().keyType())
+      checkVariantLayout(keyValue.getType(1), expected.asMapType().valueType())
+    } else if (!expected.isNestedType &&
+        GpuColumnVector.isVariantType(SparkSchemaUtil.convert(expected))) {
+      val unshaded = ShimUtils.getParquetUnshader().unshade(physical)
+      if (!ParquetSchemaUtils.isVariantPhysicalType(unshaded)) {
+        throw new UnsupportedOperationException(
+          s"GPU Iceberg reader does not support shredded or incompatible Variant input " +
+            s"(column: ${physical.getName}). Expected exactly two REQUIRED BINARY fields " +
+            "named value and metadata. Set spark.rapids.sql.format.iceberg.read.enabled=false " +
+            "and rerun the query to read Variant with the CPU reader.")
       }
     }
   }
@@ -249,8 +253,8 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
         } else {
           initialProjection
         }
-      // Validate the user's guarantee before Spark converts the schema or cuDF decodes data.
-      checkVariantShredding(fileReadSchema, requiredSchema.asStruct())
+      // Reject unsupported layouts before Spark converts the schema or cuDF decodes data.
+      checkVariantLayout(fileReadSchema, requiredSchema.asStruct())
       val filteredBlocks = filterRowGroups(reader, requiredSchema, typeWithIds, file.filter)
       val blockFirstRowIndices: Seq[Long] = if (needsRowPosition || hasDeletionVector) {
         // `_pos` and inherited `_row_id` are file-global. When file.split is set the reader is

@@ -58,7 +58,6 @@ _NO_FANOUT = _BASE_TBLPROPS_SQL
 pytestmark = iceberg_unsupported_mark
 
 _ICEBERG_VARIANT_READ_CONF = {
-    "spark.rapids.sql.variant.hasNoShredding": "true",
     "spark.rapids.sql.format.iceberg.v3.enabled": "true",
     "spark.sql.adaptive.enabled": "false",
     "spark.sql.variant.allowReadingShredded": "false",
@@ -918,14 +917,11 @@ def _read_iceberg_variant_table(spark, table):
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @pytest.mark.skipif(not is_spark_411_or_later(),
                     reason="Iceberg Variant requires Spark 4.1.1+")
-@pytest.mark.parametrize("allow_reading_shredded", ["false", "true"])
-def test_iceberg_v3_shredded_variant_read_fallback(
-        spark_tmp_table_factory, allow_reading_shredded):
+def test_iceberg_v3_shredded_variant_read_fallback(spark_tmp_table_factory):
     table = get_full_table_name(spark_tmp_table_factory)
     conf = copy_and_update(
         _ICEBERG_VARIANT_READ_CONF,
-        {"spark.sql.variant.allowReadingShredded": allow_reading_shredded,
-         "spark.rapids.sql.variant.hasNoShredding": "false"})
+        {"spark.sql.variant.allowReadingShredded": "true"})
 
     def setup_table(spark):
         spark.sql(
@@ -953,7 +949,7 @@ def test_iceberg_v3_shredded_variant_read_fallback(
                 assert variant.containsField("typed_value"), "Fixture must contain shredded Variant"
             finally:
                 reader.close()
-        # Disabling new shredded writes does not establish the no-shredding guarantee.
+        # Existing shredded files remain readable by the CPU after new shredded writes are disabled.
         spark.sql(f"ALTER TABLE {table} SET TBLPROPERTIES ('write.parquet.shred-variants'='false')")
 
     with_cpu_session(setup_table, conf=conf)
