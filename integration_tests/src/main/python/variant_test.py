@@ -185,7 +185,7 @@ def test_variant_cpu_rows_convert_to_gpu():
 
 @incompat
 @allow_non_gpu('RDDScanExec')
-@validate_execs_in_gpu_plan('GpuProjectExec', 'GpuVariantGet')
+@validate_execs_in_gpu_plan('GpuProjectExec')
 @pytest.mark.parametrize('value,error', [
     pytest.param(b'', 'MALFORMED_VARIANT', id='empty-value'),
     pytest.param(b'\xfc', 'UNKNOWN_PRIMITIVE_TYPE_IN_VARIANT', id='unknown-primitive'),
@@ -194,18 +194,25 @@ def test_variant_cpu_rows_convert_to_gpu():
 def test_variant_try_get_malformed_input_preserves_error(value, error):
     from pyspark.sql.types import VariantVal
 
-    def do_it(spark):
+    def do_it(spark, require_gpu=False):
         # Local rows preserve the encoded bytes without a Parquet writer validating them.
         # The unknown primitive is a cuDF missing-path result, not a malformed status:
         # Spark must still inspect its type and throw, even for try_variant_get.
-        return spark.createDataFrame(
+        df = spark.createDataFrame(
             [(VariantVal(value, b'\x01\x00\x00'),)], 'v variant').selectExpr(
-                "try_variant_get(v, '$[0]', 'bigint') AS x").collect()
+                "try_variant_get(v, '$[0]', 'bigint') AS x")
+        if require_gpu:
+            # The validate_execs marker checks plan nodes only; this helper also checks
+            # expressions. Assert before collection, which is expected to fail.
+            spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.assertContains(
+                df._jdf, 'GpuVariantGet')
+        return df.collect()
 
     conf = {'spark.sql.adaptive.enabled': 'false',
             'spark.rapids.sql.incompatibleOps.enabled': 'true'}
     assert_spark_exception(lambda: with_cpu_session(do_it, conf=conf), error)
-    assert_spark_exception(lambda: with_gpu_session(do_it, conf=conf), error)
+    assert_spark_exception(
+        lambda: with_gpu_session(lambda spark: do_it(spark, require_gpu=True), conf=conf), error)
 
 
 @incompat

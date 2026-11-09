@@ -20,6 +20,7 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids
 
+import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.VariantApiTestFixtures._
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -33,11 +34,22 @@ class GpuVariantGetMetaSuite extends AnyFunSuite {
     Thread.currentThread().getContextClassLoader)
 
   test("cached status capability uses the expression loader rather than the context loader") {
+    val moduleName = "com.nvidia.spark.rapids.GpuVariantGet$"
+    val parent = classOf[GpuVariantGet].getClassLoader
+    val resource = parent.getResourceAsStream(moduleName.replace('.', '/') + ".class")
+    assert(resource != null)
+    val definition = withResource(resource)(_.readAllBytes())
+    class FreshModuleLoader extends ClassLoader(parent) {
+      def defineModule(): Class[_] = defineClass(moduleName, definition, 0, definition.length)
+    }
+    // A fresh companion avoids inheriting a cached true from a different suite in the same JVM.
+    val moduleClass = new FreshModuleLoader().defineModule()
     val thread = Thread.currentThread()
     val original = thread.getContextClassLoader
     try {
       thread.setContextClassLoader(new ClassLoader(null) {})
-      assert(GpuVariantGet.isVariantCudfAvailable)
+      val module = moduleClass.getField("MODULE$").get(null)
+      assert(moduleClass.getMethod("isVariantCudfAvailable").invoke(module) == java.lang.Boolean.TRUE)
     } finally {
       thread.setContextClassLoader(original)
     }
