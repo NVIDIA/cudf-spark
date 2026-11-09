@@ -308,6 +308,26 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .integerConf
     .createWithDefault(32)
 
+  val SHUFFLE_UCX_CLEANUP_ON_QUERY_END_ENABLED =
+    conf("spark.rapids.shuffle.ucx.cleanupOnQueryEnd.enabled")
+    .doc("When set to true, the RAPIDS Shuffle Manager in UCX mode reclaims each GPU shuffle " +
+      "once the SQL query that wrote it has ended: the executors free the shuffle's buffers, " +
+      "and the driver clears its map outputs and keeps the shuffle registered. It takes " +
+      "effect only when spark.rapids.shuffle.mode is UCX, the RAPIDS Shuffle Manager is " +
+      "configured and spark.rapids.sql.mode is executeOnGPU, and never on Databricks. Any " +
+      "other setup, CACHE_ONLY mode included, logs one warning and reclaims nothing. A " +
+      "shuffle whose map stage Spark marks indeterminate, such as the shuffle of a " +
+      "repartition(n) without columns, waits for Spark's own cleanup, as it does when this " +
+      "is false. A later action that reuses a DataFrame, computes cache partitions it has not " +
+      "stored, or reads it through a lazy iterator such as toLocalIterator reruns the map " +
+      "stage of each reclaimed shuffle it reads, and a rerun map stage whose output depends " +
+      "on input order, such as one computing first(), can return different values. An action " +
+      "that reads a shuffle while an executor frees it fails a fetch, and Spark then reruns " +
+      "every map output of that executor.")
+    .startupOnly()
+    .booleanConf
+    .createWithDefault(false)
+
   val SHUFFLE_MAX_CLIENT_THREADS = conf("spark.rapids.shuffle.maxClientThreads")
     .doc("The maximum number of threads that the shuffle client should be allowed to start")
     .internal()
