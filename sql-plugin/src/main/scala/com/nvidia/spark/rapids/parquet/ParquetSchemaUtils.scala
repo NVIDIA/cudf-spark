@@ -21,7 +21,7 @@ import java.util.{Locale, Optional}
 import scala.collection.JavaConverters._
 
 import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Table}
-import com.nvidia.spark.rapids.{CastOptions, GpuCast, GpuColumnVector, SchemaUtils}
+import com.nvidia.spark.rapids.{CastOptions, GpuCast, GpuColumnVector, RapidsConf, SchemaUtils}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.shims.parquet.ParquetSchemaClipShims
 import com.nvidia.spark.rapids.shims.parquet.ParquetUnknownTypeAnnotationShims
@@ -109,8 +109,20 @@ object ParquetSchemaUtils {
     }
   }
 
+  /** Reject a violated no-shredding guarantee when the execution reader encounters it. */
+  def throwUnsupportedShreddedVariant(column: String): Nothing = {
+    throw new UnsupportedOperationException(
+      s"GPU Variant reader does not support shredded Variant input (column: $column). " +
+        s"${RapidsConf.VARIANT_HAS_NO_SHREDDING}=true requires all input Variant values " +
+        s"to be unshredded. Set ${RapidsConf.VARIANT_HAS_NO_SHREDDING}=false " +
+        "and rerun the query to read Variant on CPU.")
+  }
+
   /** Normalize an unshredded Variant group to Spark's value/metadata child order. */
   private def normalizeVariantFieldOrder(parquetType: Type): Type = {
+    if (!parquetType.isPrimitive && parquetType.asGroupType().containsField("typed_value")) {
+      throwUnsupportedShreddedVariant(parquetType.getName)
+    }
     if (isVariantPhysicalType(parquetType)) {
       val groupType = parquetType.asGroupType()
       groupType.withNewFields(Seq(

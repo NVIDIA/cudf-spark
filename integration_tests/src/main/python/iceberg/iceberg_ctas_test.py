@@ -273,7 +273,7 @@ def test_ctas_v3_row_lineage(spark_tmp_table_factory):
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @pytest.mark.skipif(not is_spark_411_or_later(),
-                    reason="Variant shredding is enabled by default in Spark 4.1.1+")
+                    reason="Iceberg Variant requires Spark 4.1.1+")
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Requires a local Hadoop catalog")
 @ignore_order(local=True)
 @allow_non_gpu("AtomicCreateTableAsSelectExec", "CreateTableAsSelectExec", "AppendDataExec",
@@ -281,7 +281,7 @@ def test_ctas_v3_row_lineage(spark_tmp_table_factory):
                "ShuffleExchangeExec", "SortExec", "VariantGet")
 def test_ctas_v3_variant_cpu_rows_convert_to_gpu(
         spark_tmp_path, spark_tmp_table_factory, request):
-    source_path = spark_tmp_path + "/SHREDDED_VARIANT_PARQUET"
+    source_path = spark_tmp_path + "/UNSHREDDED_VARIANT_PARQUET"
     target_table = f"variant_test.default.{spark_tmp_table_factory.get()}"
     extracted_table = f"variant_test.default.{spark_tmp_table_factory.get()}"
 
@@ -299,12 +299,13 @@ def test_ctas_v3_variant_cpu_rows_convert_to_gpu(
             .write.mode("overwrite").parquet(source_path)
 
     with_cpu_session(write_source, conf={
-        "spark.sql.variant.writeShredding.enabled": "true"
+        "spark.sql.variant.writeShredding.enabled": "false"
     })
 
     props_sql = _props_to_sql(_build_tblprops({
         "format-version": "3",
         "write.format.default": "parquet",
+        "write.parquet.shred-variants": "false",
     }))
     conf = copy_and_update(iceberg_write_enabled_conf, {
         "spark.sql.sources.useV1SourceList": "parquet",
@@ -338,6 +339,7 @@ def test_ctas_v3_variant_cpu_rows_convert_to_gpu(
     # CPU Iceberg scan; the supported Variant settings keep extraction eligible.
     cpu_read_conf = copy_and_update(conf, {
         "spark.rapids.sql.format.iceberg.read.enabled": "false",
+        "spark.rapids.sql.variant.hasNoShredding": "true",
         "spark.sql.variant.pushVariantIntoScan": "false",
         "spark.sql.variant.allowReadingShredded": "false",
     })

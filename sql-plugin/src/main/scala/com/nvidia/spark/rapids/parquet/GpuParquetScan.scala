@@ -203,6 +203,18 @@ object GpuParquetScan {
       meta: RapidsMeta[_, _, _],
       sqlConf: SQLConf,
       mayContainShreddedVariant: Option[Boolean]): Unit = {
+    // This is a user guarantee for all files, not a claim derived from current write settings.
+    // In particular, Iceberg can read shredded files even when Spark disallows Parquet shredding.
+    // Do not open data files or read footers here: tagging runs during query planning.
+    val schemaHasVariant = readSchema.exists { field =>
+      TrampolineUtil.dataTypeExistsRecursively(field.dataType, GpuColumnVector.isVariantType)
+    }
+    if (schemaHasVariant && !meta.conf.variantHasNoShredding) {
+      tagVariantScanPrefixForCpu(meta,
+        s"GPU Variant reads require ${RapidsConf.VARIANT_HAS_NO_SHREDDING}=true. " +
+          "Enable only when all input files are guaranteed to contain no shredded Variant values")
+    }
+
     val schemaHasPushedVariant = readSchema.exists { field =>
       TrampolineUtil.dataTypeExistsRecursively(
         field.dataType, ParquetVariantShims.isPushedVariantStruct)

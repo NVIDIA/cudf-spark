@@ -38,6 +38,31 @@ For Spark 4.1.x, only `iceberg-1-11-x` is compiled during the build. Apache Iceb
 publishes the `iceberg-spark-runtime-4.1` artifact starting at version 1.11.0, so earlier
 Iceberg releases cannot be used with Spark 4.1.
 
+## Variant Reads
+
+GPU Variant reads are disabled by default. The global setting
+`spark.rapids.sql.variant.hasNoShredding=true` opts in for Parquet, Delta and Iceberg,
+including Variant values nested in structs, arrays and maps. Enable it only when all
+input files are guaranteed to contain no shredded Variant values, including existing
+and imported files. Query planning does not open data files or inspect Parquet footers
+to verify this guarantee. Changing current write properties does not establish the
+layout of existing files. Leave the setting false for shredded, mixed or unknown input.
+
+Iceberg Variant reads also require a supported Spark/Iceberg runtime,
+`spark.rapids.sql.format.iceberg.v3.enabled=true`,
+`spark.sql.variant.allowReadingShredded=false` and
+`spark.sql.variant.pushVariantIntoScan=false`. The opt-in does not override other
+fallback checks or enable GPU Variant writes. Queries that do not project Variant
+columns remain eligible for GPU scans without the opt-in.
+
+An incorrect opt-in fails during execution when a requested Variant column is shredded,
+including annotated or unannotated imported input and mixed snapshots. The reader throws
+`UnsupportedOperationException` with `GPU Variant reader does not support shredded Variant input`
+and a remediation: `Set spark.rapids.sql.variant.hasNoShredding=false and rerun the query to read Variant on CPU.`
+Spark may wrap it in a task/stage failure. There is no automatic CPU retry after execution
+has started. The check reuses the projected schema already in memory; it does not open
+additional files or inspect footers during planning.
+
 ## Code Shared Between Modules
 
 The `common` directory contains code that is shared across some or all of the Iceberg

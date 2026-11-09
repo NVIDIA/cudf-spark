@@ -31,8 +31,7 @@ import org.apache.iceberg.shaded.org.apache.parquet.schema.{MessageType => Shade
 object GpuParquetIO {
   /**
    * Assign field IDs where needed and prune a Parquet schema to the required Iceberg schema.
-   * Planning and execution use the same projection for files with IDs, a name mapping, or
-   * fallback IDs.
+   * Execution uses this projection for files with IDs, a name mapping, or fallback IDs.
    *
    * @param fileSchema physical Parquet schema
    * @param requiredSchema Iceberg schema to project

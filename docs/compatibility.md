@@ -357,6 +357,32 @@ ORC file, they will be read properly by both the CPU and the GPU.
 To take advantage of the aggregate query optimization, where only the ORC metadata is read to
 satisfy the query, the ORC read falls back to the CPU as it is a metadata-only query.
 
+## Variant Reads
+
+GPU reads of Variant columns in Parquet, Delta and Iceberg are disabled by default,
+including Variant values nested in structs, arrays and maps. Enable
+[`spark.rapids.sql.variant.hasNoShredding`](additional-functionality/advanced_configs.md#sql.variant.hasNoShredding)
+only when all input files are guaranteed to contain no shredded Variant values.
+This guarantee includes existing and imported files; changing write settings does not
+establish their layout. Query planning does not inspect data-file footers to verify it.
+Shredded, mixed or unknown input must leave this setting false. Existing restrictions
+on Variant extraction pushdown, Spark reader settings and Delta protocols still apply.
+This setting does not enable GPU Variant writes or disable scans of non-Variant columns.
+
+If this setting is incorrectly enabled and a requested Variant column is shredded,
+the GPU execution reader throws `java.lang.UnsupportedOperationException`:
+
+```text
+GPU Variant reader does not support shredded Variant input (column: <column>). spark.rapids.sql.variant.hasNoShredding=true requires all input Variant values to be unshredded. Set spark.rapids.sql.variant.hasNoShredding=false and rerun the query to read Variant on CPU.
+```
+
+Spark may wrap this exception in a task/stage failure or `SparkException`. The query fails;
+it does not switch to CPU after GPU execution has started. Set
+`spark.rapids.sql.variant.hasNoShredding=false` and rerun it. Detection uses the projected
+schema already loaded by the execution reader, without additional file opens or a planning
+scan. It covers requested columns in files actually read; pruning every Variant column
+still permits GPU reads of ordinary columns.
+
 ## Parquet
 
 The Parquet format has more configs because there are multiple versions with some compatibility

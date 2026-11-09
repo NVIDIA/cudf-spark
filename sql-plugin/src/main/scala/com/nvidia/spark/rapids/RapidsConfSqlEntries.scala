@@ -631,6 +631,17 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
       .checkValue(v => v > 0, "The maximum number of files must be greater than 0.")
       .createWithDefault(Integer.MAX_VALUE)
 
+  val VARIANT_HAS_NO_SHREDDING = conf("spark.rapids.sql.variant.hasNoShredding")
+    .doc("Enables GPU Variant reads only when the user guarantees that all input files, " +
+      "including existing and imported files, contain no shredded Variant values. Applies " +
+      "to Parquet, Delta and Iceberg, including nested Variant columns. File layouts are not " +
+      "inspected during planning. Leave false unless the absence of shredding is certain; " +
+      "enabling this with shredded input is unsupported. Other Variant read restrictions " +
+      "still apply. Does not enable GPU Variant writes.")
+    .sinceVersion("26.12.0")
+    .booleanConf
+    .createWithDefault(false)
+
   val ENABLE_PARQUET_READ = conf("spark.rapids.sql.format.parquet.read.enabled")
     .doc("When set to false disables parquet input acceleration")
     .booleanConf

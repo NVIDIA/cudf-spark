@@ -22,7 +22,8 @@ import java.util.Objects
 
 import scala.collection.JavaConverters._
 
-import com.nvidia.spark.rapids.{CombineConf, DateTimeRebaseCorrected, GpuMetric, ThreadPoolConfBuilder}
+import com.nvidia.spark.rapids.{CombineConf, DateTimeRebaseCorrected, GpuColumnVector, GpuMetric,
+  ThreadPoolConfBuilder}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
 import com.nvidia.spark.rapids.iceberg.ShimUtils
@@ -39,7 +40,10 @@ import org.apache.iceberg.parquet._
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.metadata.{BlockMetaData => ShadedBlockMetaData}
-import org.apache.iceberg.shaded.org.apache.parquet.schema.{MessageType => ShadedMessageType}
+import org.apache.iceberg.shaded.org.apache.parquet.schema.{MessageType => ShadedMessageType,
+  Type => ShadedType}
+import org.apache.iceberg.spark.SparkSchemaUtil
+import org.apache.iceberg.types.Type
 import org.apache.parquet.hadoop.metadata.BlockMetaData
 import org.apache.parquet.schema.MessageType
 
@@ -158,6 +162,34 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
     (typeWithIds, fileReadSchema)
   }
 
+  /**
+   * Reject shredded Variant leaves in the schema already read by the execution reader.
+   * Field IDs have been assigned before this check, including imported files with name mapping.
+   * This performs no file I/O and is never called during planning.
+   */
+  private def checkVariantShredding(physical: ShadedType, expected: Type): Unit = {
+    if (!physical.isPrimitive) {
+      val group = physical.asGroupType()
+      if (expected.isStructType) {
+        group.getFields.asScala.foreach { field =>
+          Option(field.getId).flatMap { id =>
+            Option(expected.asStructType().field(id.intValue()))
+          }.foreach { required => checkVariantShredding(field, required.`type`()) }
+        }
+      } else if (expected.isListType) {
+        checkVariantShredding(ParquetSchemaUtil.determineListElementType(group),
+          expected.asListType().elementType())
+      } else if (expected.isMapType) {
+        val keyValue = group.getType(0).asGroupType()
+        checkVariantShredding(keyValue.getType(0), expected.asMapType().keyType())
+        checkVariantShredding(keyValue.getType(1), expected.asMapType().valueType())
+      } else if (GpuColumnVector.isVariantType(SparkSchemaUtil.convert(expected)) &&
+          group.containsField("typed_value")) {
+        ParquetSchemaUtils.throwUnsupportedShreddedVariant(physical.getName)
+      }
+    }
+  }
+
   def filterRowGroups(reader: ParquetFileReader,
       requiredSchema: Schema,
       typeWithIds: ShadedMessageType,
@@ -217,6 +249,8 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
         } else {
           initialProjection
         }
+      // Validate the user's guarantee before Spark converts the schema or cuDF decodes data.
+      checkVariantShredding(fileReadSchema, requiredSchema.asStruct())
       val filteredBlocks = filterRowGroups(reader, requiredSchema, typeWithIds, file.filter)
       val blockFirstRowIndices: Seq[Long] = if (needsRowPosition || hasDeletionVector) {
         // `_pos` and inherited `_row_id` are file-global. When file.split is set the reader is

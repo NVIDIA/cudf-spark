@@ -58,6 +58,7 @@ _NO_FANOUT = _BASE_TBLPROPS_SQL
 pytestmark = iceberg_unsupported_mark
 
 _ICEBERG_VARIANT_READ_CONF = {
+    "spark.rapids.sql.variant.hasNoShredding": "true",
     "spark.rapids.sql.format.iceberg.v3.enabled": "true",
     "spark.sql.adaptive.enabled": "false",
     "spark.sql.variant.allowReadingShredded": "false",
@@ -923,7 +924,8 @@ def test_iceberg_v3_shredded_variant_read_fallback(
     table = get_full_table_name(spark_tmp_table_factory)
     conf = copy_and_update(
         _ICEBERG_VARIANT_READ_CONF,
-        {"spark.sql.variant.allowReadingShredded": allow_reading_shredded})
+        {"spark.sql.variant.allowReadingShredded": allow_reading_shredded,
+         "spark.rapids.sql.variant.hasNoShredding": "false"})
 
     def setup_table(spark):
         spark.sql(
@@ -951,7 +953,7 @@ def test_iceberg_v3_shredded_variant_read_fallback(
                 assert variant.containsField("typed_value"), "Fixture must contain shredded Variant"
             finally:
                 reader.close()
-        # A write-property check would miss these existing shredded files.
+        # Disabling new shredded writes does not establish the no-shredding guarantee.
         spark.sql(f"ALTER TABLE {table} SET TBLPROPERTIES ('write.parquet.shred-variants'='false')")
 
     with_cpu_session(setup_table, conf=conf)
