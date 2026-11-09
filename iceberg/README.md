@@ -24,10 +24,6 @@ Iceberg tables configured with `encryption.key-id` fall back to CPU for scans an
 including when experimental v3 support is enabled. Encryption inspection failures also fall back
 to CPU. Iceberg's CPU implementation remains responsible for encryption and key management.
 
-At the `MODERATE` or `DEBUG` metrics level, GPU scans report dictionary-filter time
-in the SQL UI. The time includes reading dictionary pages and evaluating the dictionary
-predicate for row groups that pass the statistics filter.
-
 For Spark 3.5.4+, both `iceberg-1-9-x` and `iceberg-1-10-x` modules are compiled into the
 build. The correct version-specific implementation is selected at runtime by probing the
 `iceberg-spark-runtime` jar on the classpath. Version-specific code lives in distinct
