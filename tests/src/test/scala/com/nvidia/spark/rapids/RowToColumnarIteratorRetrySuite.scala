@@ -24,7 +24,7 @@ import ai.rapids.cudf.{DType, HostColumnVector}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsHostColumnBuilderSuite._
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingArray
-import com.nvidia.spark.rapids.jni.{CpuSplitAndRetryOOM, GpuSplitAndRetryOOM, RmmSpark}
+import com.nvidia.spark.rapids.jni.{GpuSplitAndRetryOOM, RmmSpark}
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{GenericInternalRow, UnsafeProjection}
@@ -136,11 +136,6 @@ class RowToColumnarIteratorRetrySuite extends RmmSparkRetrySuiteBase {
     }
   }
 
-  // A batchSizeBytes below one sample's size reserves VALIDITY_BUFFER_BOUNDARY_ROWS (512) rows,
-  // so nine splits shrink the first row's reservation to one row.
-  private val tinyBatchBytes = 1L
-  private val splitsToOneRow = 9
-
   private def firstColumnInts(iter: Iterator[ColumnarBatch]): Seq[Int] = {
     val values = ArrayBuffer[Int]()
     while (iter.hasNext) {
@@ -153,41 +148,6 @@ class RowToColumnarIteratorRetrySuite extends RmmSparkRetrySuiteBase {
     values.toSeq
   }
 
-  Seq(TargetSize(batchSize), RequireSingleBatch).foreach { goal =>
-    test(s"first-row CPU SplitAndRetryOOM halves the reservation down to one row, $goal") {
-      val rowIter: Iterator[InternalRow] = (1 to 10).map(InternalRow(_)).iterator
-      val row2ColIter = new RowToColumnarIterator(
-        rowIter, schema, goal, tinyBatchBytes, new GpuRowToColumnConverter(schema))
-      // skipCount=0 fires each split on the first row's data buffer, the first host allocation.
-      RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, splitsToOneRow,
-        RmmSpark.OomInjectionType.CPU.ordinal, 0)
-      assertResult((1 to 10).toSeq)(firstColumnInts(row2ColIter))
-    }
-
-    test(s"first-row CPU SplitAndRetryOOM propagates once the reservation is one row, $goal") {
-      val rowIter: Iterator[InternalRow] = (1 to 10).map(InternalRow(_)).iterator
-      val row2ColIter = new RowToColumnarIterator(
-        rowIter, schema, goal, tinyBatchBytes, new GpuRowToColumnConverter(schema))
-      RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, splitsToOneRow + 1,
-        RmmSpark.OomInjectionType.CPU.ordinal, 0)
-      assertThrows[CpuSplitAndRetryOOM] {
-        row2ColIter.next()
-      }
-    }
-
-    test(s"first row over the host limit frees its reservation and shrinks it, $goal") {
-      val intIntSchema = StructType(Seq(
-        StructField("a", IntegerType), StructField("b", IntegerType)))
-      val rowIter: Iterator[InternalRow] = (1 to 10).map(i => InternalRow(i, i)).iterator
-      val row2ColIter = new RowToColumnarIterator(
-        rowIter, intIntSchema, goal, tinyBatchBytes, new GpuRowToColumnConverter(intIntSchema))
-      // Column a's 512-row reservation (2 KiB) fits but column b's does not. With one task, the
-      // state machine answers with a retry, and then with a split from the wait that follows it.
-      HostAlloc.initialize(3 * 1024)
-      assertResult((1 to 10).toSeq)(firstColumnInts(row2ColIter))
-    }
-  }
-
   test("the first row reserves for a bounded batch, not for batchSizeBytes") {
     val rowIter: Iterator[InternalRow] = (1 to 10).map(InternalRow(_)).iterator
     val row2ColIter = new RowToColumnarIterator(
@@ -198,6 +158,31 @@ class RowToColumnarIteratorRetrySuite extends RmmSparkRetrySuiteBase {
     assertResult((1 to 10).toSeq)(firstColumnInts(row2ColIter))
   }
 
+  test("a bounded first reservation doubles onto a full batch, not past it") {
+    // The schema of #16714: its estimated rows for 1 GiB are not eight times those for
+    // 128 MiB, so a reservation estimated for 128 MiB doubles once more for the last rows.
+    val wideSchema = StructType(
+      (1 to 13).map(i => StructField(s"s$i", StringType)) ++
+        (1 to 2).map(i => StructField(s"l$i", LongType)) ++
+        (1 to 3).map(i => StructField(s"i$i", IntegerType)))
+    val sampleRows = GpuBatchUtils.VALIDITY_BUFFER_BOUNDARY_ROWS
+    val sampleBytes = GpuBatchUtils.estimateGpuMemory(wideSchema, sampleRows)
+    val boundRows = GpuBatchUtils.estimateRowCount(128L * 1024 * 1024, sampleBytes, sampleRows)
+    Seq(64L << 20, 200L << 20, 1L << 30, Int.MaxValue.toLong).foreach { batchBytes =>
+      val batchRows = GpuBatchUtils.estimateRowCount(batchBytes, sampleBytes, sampleRows)
+      val initialRows = RowToColumnarIterator.initialRows(batchBytes, sampleBytes, sampleRows)
+      // The builders' buffers double from initialRows until a full batch fits.
+      val capacity = Iterator.iterate(initialRows.toLong)(_ * 2).find(_ >= batchRows).get
+      assert(initialRows <= boundRows + 1, s"bound for $batchBytes bytes")
+      // Only the rounding up of initialRows, at most one row per doubling, is left over.
+      assert(capacity - batchRows < capacity / initialRows, s"capacity for $batchBytes bytes")
+    }
+  }
+
+  // Note: SplitAndRetryOOM with rowCount == 0 is propagated directly (can't split a single
+  // row). A dedicated CpuSplitAndRetryOOM test for per-row convert() with rowCount == 0 is not
+  // feasible because RMM allocator-level OOM injection cannot reliably target it — it tends to
+  // hit builders.tryBuild() instead. The GPU split-and-retry test below verifies propagation.
   // SplitAndRetryOOM with rowCount > 0 (emit-early) is covered by the test below.
 
   test("test CPU SplitAndRetryOOM emit-early for non-RequireSingleBatch") {

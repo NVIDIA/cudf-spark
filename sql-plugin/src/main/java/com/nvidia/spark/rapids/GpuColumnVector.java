@@ -434,22 +434,6 @@ public class GpuColumnVector extends GpuColumnVectorBase {
     }
 
     /**
-     * Replace every column builder with an empty one that reserves room for initialRows rows,
-     * freeing the buffers the old builders allocated. Only valid before any row is kept.
-     */
-    public void resetEmpty(int initialRows) {
-      for (int i = 0; i < builders.length; i++) {
-        if (builders[i] != null) {
-          builders[i].close();
-          builders[i] = null;
-        }
-        StructField field = fields[i];
-        builders[i] =
-            new RapidsHostColumnBuilder(convertFrom(field.dataType(), field.nullable()), initialRows);
-      }
-    }
-
-    /**
      * Restore all column builders to a previously captured state.
      * @param snapshots the snapshots captured via {@link #captureState()}
      */
