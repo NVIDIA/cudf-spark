@@ -15,33 +15,9 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "330"}
-{"spark": "331"}
-{"spark": "332"}
-{"spark": "333"}
-{"spark": "334"}
-{"spark": "340"}
-{"spark": "341"}
-{"spark": "342"}
-{"spark": "343"}
-{"spark": "344"}
-{"spark": "350"}
-{"spark": "350db143"}
-{"spark": "351"}
-{"spark": "352"}
-{"spark": "353"}
-{"spark": "354"}
-{"spark": "355"}
-{"spark": "356"}
-{"spark": "357"}
-{"spark": "358"}
-{"spark": "359"}
-{"spark": "400"}
-{"spark": "401"}
-{"spark": "402"}
-{"spark": "403"}
-{"spark": "404"}
-{"spark": "411"}
+{"spark":["330","350"],"carryForward":"all"}
+{"spark":["350db143","400","401","402","403","411"],"carryForward":"none"}
+{"spark":["404"],"carryForward":"sameMinor"}
 spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.rapids
@@ -105,11 +81,13 @@ class FailingTestColumnarBatchSerializer extends TestColumnarBatchSerializer {
 }
 
 class InterruptingTestColumnarBatchSerializer extends TestColumnarBatchSerializer {
+  val injected = new InterruptedException("injected interruption during serialization")
+
   override def newInstance(): SerializerInstance = new TestColumnarBatchSerializerInstance() {
     override def serializeStream(s: OutputStream): SerializationStream =
       new TestColumnarBatchSerializationStream(s) {
         override def writeValue[T: ClassTag](value: T): SerializationStream =
-          throw new InterruptedException("injected interruption during serialization")
+          throw injected
       }
   }
 }
@@ -1156,13 +1134,30 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
     }
   }
 
+  // Number of getCause hops from `t` to `target` (compared by reference), or -1 if `target` is
+  // not within 16 levels. The depth depends on whether the producer or the merger observes
+  // the compression failure first, so the chain is searched instead of checking a fixed depth.
+  private def causeDepth(t: Throwable, target: Throwable): Int = {
+    var cur = t
+    var depth = 0
+    while (cur != null && depth < 16) {
+      if (cur eq target) {
+        return depth
+      }
+      cur = cur.getCause
+      depth += 1
+    }
+    -1
+  }
+
   test("InterruptedException in compression releases bytes-in-flight quota") {
     // Same deadlock scenario as the IOException test: record 0 acquires 64 bytes,
     // record 1 (65 bytes) blocks because 64+65=129 > maxBytesInFlight=100.
     // The compression task throws InterruptedException. The quota for record 0
-    // must be released to unblock the producer, and the IOException must wrap
-    // the original InterruptedException.
-    when(dependency.serializer).thenReturn(new InterruptingTestColumnarBatchSerializer())
+    // must be released to unblock the producer, and the IOException's cause chain
+    // must contain the original InterruptedException.
+    val interruptingSerializer = new InterruptingTestColumnarBatchSerializer()
+    when(dependency.serializer).thenReturn(interruptingSerializer)
     val writer = new RapidsShuffleThreadedWriter[Int, ColumnarBatch](
       blockManager, shuffleHandle, 0L, conf,
       new ThreadSafeShuffleWriteMetricsReporter(taskContext.taskMetrics().shuffleWriteMetrics),
@@ -1187,8 +1182,11 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
         "expected write() to throw after injected InterruptedException")
       assert(writeFailure.isInstanceOf[IOException],
         s"expected IOException but got ${writeFailure.getClass.getName}")
-      assert(writeFailure.getCause.isInstanceOf[InterruptedException],
-        "expected IOException to wrap the original InterruptedException")
+      val depth = causeDepth(writeFailure, interruptingSerializer.injected)
+      // depth 1: producer saw the compression failure directly; depth 2: producer woke in
+      // acquireOrBlock after the merger called signalFailure.
+      assert(depth >= 0,
+        s"expected the injected InterruptedException in the cause chain of $writeFailure")
       assert(writer.getBytesInFlight == 0,
         s"bytes in flight leaked after InterruptedException: ${writer.getBytesInFlight}")
     } finally {

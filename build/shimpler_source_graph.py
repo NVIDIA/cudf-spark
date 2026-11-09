@@ -14,9 +14,9 @@
 
 """Read and validate source-parent relationships from Maven build target profiles.
 
-This module is shared with Shimplify's Jython 2.7 build task. A source parent
-does not change the child's dependencies, generated identity, or selected
-sources until the inheritance resolver is enabled in a later step.
+This module is shared with the Jython 2.7 shim-source build task. A source parent
+changes source selection only where an annotated source uses an introduction
+selector; it does not change dependencies or the generated Spark identity.
 """
 
 import xml.etree.ElementTree as ET
@@ -35,10 +35,16 @@ def load_source_graph(pom_path):
 
     for profile in profiles.findall(POM_NAMESPACE + 'profile'):
         profile_id = profile.findtext(POM_NAMESPACE + 'id')
+        activation = profile.find(POM_NAMESPACE + 'activation/' + POM_NAMESPACE + 'property')
         if profile_id and profile_id.startswith('release'):
             target = profile_id[len('release'):]
+            if activation is not None:
+                activation_name = (activation.findtext(POM_NAMESPACE + 'name') or '').strip()
+                activation_value = (activation.findtext(POM_NAMESPACE + 'value') or '').strip()
+                if activation_name != 'buildver' or activation_value != target:
+                    raise ValueError('Profile %s must activate buildver %s, not %s=%s' %
+                                     (profile_id, target, activation_name, activation_value))
         else:
-            activation = profile.find(POM_NAMESPACE + 'activation/' + POM_NAMESPACE + 'property')
             if activation is None or activation.findtext(POM_NAMESPACE + 'name') != 'buildver':
                 continue
             target = (activation.findtext(POM_NAMESPACE + 'value') or '').strip()
@@ -47,7 +53,7 @@ def load_source_graph(pom_path):
         if target in graph:
             raise ValueError('Duplicate build target %s in %s' % (target, pom_path))
         properties = profile.find(POM_NAMESPACE + 'properties')
-        if properties is not None and not (profile_id and profile_id.startswith('release')):
+        if properties is not None:
             declared_buildver = properties.findtext(POM_NAMESPACE + 'buildver')
             if declared_buildver is not None and declared_buildver.strip() != target:
                 raise ValueError('Profile %s activates buildver %s but declares %s' %

@@ -508,6 +508,34 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
     .checkValues(RapidsReaderType.values.map(_.toString))
     .createWithDefault(RapidsReaderType.AUTO.toString)
 
+  val PARQUET_HYBRID_SCAN_ENABLED =
+    conf("spark.rapids.sql.format.parquet.hybridScan.enabled")
+      .doc("Internal temporary configuration to let Parquet reads use the libcudf hybrid scan " +
+          "reader while it is under development. It does not have the checks needed to be " +
+          "correct on every file and must not be used in production. When true, the reader " +
+          "bypasses parquet-mr: it parses only the footer, prunes row groups with the hybrid " +
+          "scan reader, and reads only the column chunk byte ranges the read needs. It applies " +
+          "only to non-chunked PERFILE reads; any other read falls back to the " +
+          "parquet-mr path.")
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
+
+  val PARQUET_HYBRID_SCAN_SINGLE_STAGE_FILTER_KEEP_THRESHOLD =
+    conf("spark.rapids.sql.format.parquet.hybridScan.singleStage.filterKeepThreshold")
+      .doc("Largest fraction of rows the pushed filter may keep for a single-stage hybrid scan " +
+          "read to still apply it. A single-stage read decodes every projected column whatever " +
+          "the filter says, so applying it cannot save any decoding; it only shrinks the batch " +
+          "leaving the scan, at the cost of evaluating the filter and copying the rows that " +
+          "survive. A filter that rejects almost nothing therefore costs more than the smaller " +
+          "batch saves. Above this fraction the rows are all returned and Spark's own filter " +
+          "above the scan removes the rest, which it does regardless. 1 always applies the " +
+          s"filter. Only used when ${PARQUET_HYBRID_SCAN_ENABLED.key} is true.")
+      .internal()
+      .doubleConf
+      .checkValue(v => v > 0 && v <= 1, "The keep threshold must be in the range (0, 1].")
+      .createWithDefault(0.9)
+
   val PARQUET_DECOMPRESS_CPU =
     conf("spark.rapids.sql.format.parquet.decompressCpu")
       .doc("If true then the CPU is eligible to decompress Parquet data rather than the GPU. " +
