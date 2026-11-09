@@ -47,7 +47,8 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.internal.StaticSQLConf
-import org.apache.spark.sql.rapids.{GpuShuffleEnv, ShuffleCleanupListener, XxHash64Utils}
+import org.apache.spark.sql.rapids.{GpuShuffleEnv, GpuShuffleRegistry, ShuffleCleanupListener,
+  UcxSqlEndListener, XxHash64Utils}
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 
 class PluginException(msg: String) extends RuntimeException(msg)
@@ -479,6 +480,7 @@ object RapidsPluginUtils extends Logging {
 class RapidsDriverPlugin extends DriverPlugin with Logging {
   var rapidsShuffleHeartbeatManager: RapidsShuffleHeartbeatManager = null
   var shuffleCleanupListener: ShuffleCleanupListener = null
+  var ucxReclaimListener: UcxSqlEndListener = null
   private val historyMetricsManager = new HistoryMetricsManager
   private var historyMetricsSparkContext: SparkContext = _
   private var historyMetricsConfiguration: JavaMap[String, String] = _
@@ -519,6 +521,20 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
           manager.handleStats(executorId, stats)
         }
         null // No response needed for stats report
+      // UCX shuffle reclaim RPC messages
+      case RapidsShuffleReclaimPollMsg(executorId) =>
+        val manager = ShuffleCleanupManager.get
+        if (manager != null) {
+          manager.handleReclaimPoll(executorId)
+        } else {
+          RapidsShuffleReclaimResponseMsg(Array.empty)
+        }
+      case RapidsShuffleReclaimResultMsg(executorId, results) =>
+        val manager = ShuffleCleanupManager.get
+        if (manager != null) {
+          manager.handleReclaimResult(executorId, results)
+        }
+        null // No response needed for reclaim results
       case m => throw new IllegalStateException(s"Unknown message $m")
     }
   }
@@ -559,6 +575,15 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
         "Set spark.rapids.memory.host.offHeapLimit.enabled=true to use skipMerge feature.")
     }
 
+    // The executors start their reclaim endpoint on the same check, so both sides agree.
+    GpuShuffleEnv.ucxReclaimRefusal(conf, sparkConf, VersionUtils.isDataBricks) match {
+      case None => startUcxReclaim(sc)
+      case Some(reason) =>
+        if (conf.shuffleUcxCleanupOnQueryEndEnabled) {
+          logWarning(reason)
+        }
+    }
+
     if (GpuShuffleEnv.isRapidsShuffleAvailable(conf)) {
       GpuShuffleEnv.initShuffleManager()
     }
@@ -587,6 +612,25 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
     extraDriverPlugins.foreach(_.init(sc, pluginContext))
     TrampolineUtil.postEvent(sc, buildInfoEvent)
     conf.rapidsConfMap
+  }
+
+  /**
+   * Starts the UCX shuffle reclaim on the driver: the manager, the GPU shuffle registry, and the
+   * UCX listener on the shared listener queue, as MULTITHREADED's listener is.
+   */
+  private def startUcxReclaim(sc: SparkContext): Unit = {
+    ShuffleCleanupManager.init(sc)
+    GpuShuffleRegistry.init()
+    ucxReclaimListener = new UcxSqlEndListener(
+      isCandidate = shuffleId => {
+        val shuffleIds = GpuShuffleRegistry.get
+        shuffleIds != null && shuffleIds.contains(shuffleId)
+      },
+      reclaim = (executionId, shuffleIds, watermark) =>
+        Option(ShuffleCleanupManager.get).foreach(
+          _.reclaimAfterExecution(executionId, shuffleIds, watermark)))
+    sc.addSparkListener(ucxReclaimListener)
+    logInfo("ShuffleCleanupManager and listener initialized for UCX shuffle reclaim")
   }
 
   override def registerMetrics(appId: String, pluginContext: PluginContext): Unit = {
@@ -630,7 +674,9 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
           () => FileCacheLocalityManager.shutdown(),
           // Shutdown listener first to trigger cleanup for any remaining jobs
           () => Option(shuffleCleanupListener).foreach(_.shutdown()),
-          () => ShuffleCleanupManager.shutdown()))
+          () => Option(ucxReclaimListener).foreach(_.shutdown()),
+          () => ShuffleCleanupManager.shutdown(),
+          () => GpuShuffleRegistry.shutdown()))
   }
 }
 
@@ -666,6 +712,7 @@ case class ActiveTaskMetrics(
 class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
   var rapidsShuffleHeartbeatEndpoint: RapidsShuffleHeartbeatEndpoint = null
   var shuffleCleanupEndpoint: ShuffleCleanupEndpoint = null
+  var ucxReclaimEndpoint: ShuffleCleanupEndpoint = null
   private lazy val extraExecutorPlugins =
     RapidsPluginUtils.extraPlugins.map(_.executorPlugin()).filterNot(_ == null)
 
@@ -740,6 +787,14 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
           logInfo("Initializing shuffle manager heartbeats")
           rapidsShuffleHeartbeatEndpoint = new RapidsShuffleHeartbeatEndpoint(pluginContext, conf)
           rapidsShuffleHeartbeatEndpoint.registerShuffleHeartbeat()
+        }
+        // The driver starts the reclaim manager on the same check, so its polls find one. With
+        // the test-only per-task RMM init no endpoint starts, and the driver's requests expire.
+        if (GpuShuffleEnv.ucxReclaimRefusal(conf, sparkConf, VersionUtils.isDataBricks).isEmpty) {
+          logInfo("Initializing shuffle reclaim endpoint for UCX mode")
+          ucxReclaimEndpoint = new ShuffleCleanupEndpoint(pluginContext, ucxReclaimer =
+            Some(new UcxCatalogReclaimer(send = UcxCatalogReclaimer.sendTo(pluginContext))))
+          ucxReclaimEndpoint.start()
         }
         if (GpuShuffleEnv.isRapidsShuffleAvailable(conf)) {
           // Initialize ShuffleCleanupEndpoint for MULTITHREADED mode when
@@ -844,6 +899,9 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
         () => GpuTimeZoneDB.shutdown(),
         () => GpuSemaphore.shutdown(),
         () => PythonWorkerSemaphore.shutdown(),
+        // Closed before the device teardown, so no reclaim starts during it, and the one in
+        // flight stops at its next free, which close() waits for.
+        () => Option(ucxReclaimEndpoint).foreach(_.close()),
         () => GpuDeviceManager.shutdown(),
         () => ProfilerOnExecutor.shutdown(),
         () => if (isAsyncProfilerEnabled) {

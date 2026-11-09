@@ -2029,7 +2029,7 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
           if !RapidsShuffleInternalManagerBase.usesShuffleBufferCatalog(gpu) =>
         wrapped.getWriter(gpu.wrapped, mapId, context, metricsReporter)
       case gpu: GpuShuffleHandle[_, _] =>
-        registerGpuShuffle(handle.shuffleId)
+        registerGpuShuffle(handle.shuffleId, context.taskAttemptId())
         new RapidsCachingWriter(
           env.blockManager,
           gpu.asInstanceOf[GpuShuffleHandle[K, V]],
@@ -2047,7 +2047,7 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
             // use the threaded writer if the number of threads specified is 1 or above,
             // with 0 threads we fallback to the Spark-provided writer.
             // Register shuffle with MultithreadedShuffleBufferCatalog
-            registerGpuShuffle(handle.shuffleId)
+            registerGpuShuffle(handle.shuffleId, context.taskAttemptId())
             val handleWithMetrics = new ShuffleHandleWithMetrics(
               handle.shuffleId,
               gpuDep.metrics,
@@ -2167,12 +2167,17 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
     }
   }
 
-  def registerGpuShuffle(shuffleId: Int): Unit = {
+  /**
+   * Registers a shuffle for a writer task.
+   *
+   * @param writerTaskId the writer's task attempt id, which a reclaim's watermark is compared to
+   */
+  def registerGpuShuffle(shuffleId: Int, writerTaskId: Long): Unit = {
     val catalog = GpuShuffleEnv.getCatalog
     if (catalog != null) {
       // Note that in local mode this can be called multiple times.
       logInfo(s"Registering shuffle $shuffleId")
-      catalog.registerShuffle(shuffleId)
+      catalog.registerShuffle(shuffleId, writerTaskId)
     }
     // Also register with MultithreadedShuffleBufferCatalog if available
     GpuShuffleEnv.getMultithreadedCatalog.foreach { mtCatalog =>
