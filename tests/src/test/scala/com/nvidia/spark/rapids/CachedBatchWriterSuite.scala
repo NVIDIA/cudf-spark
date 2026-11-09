@@ -155,21 +155,28 @@ class CachedBatchWriterSuite extends SparkQueryCompareTestSuite {
     }
   }
 
-  test("PCBS columnar input avoids UDT row transitions on Spark 4 and Databricks") {
+  test("PCBS columnar input avoids unsupported row-to-columnar transitions") {
     val ser = new ParquetCachedBatchSerializer
-    val udt = new TestPrimitiveUDT
-    val udtTypes = Seq(udt, ArrayType(udt),
-      StructType(Seq(StructField("value", udt))),
-      MapType(StringType, udt), MapType(udt, IntegerType),
-      ArrayType(StructType(Seq(StructField("value", MapType(StringType, udt))))))
-    udtTypes.foreach { dataType =>
-      val schema = Seq(AttributeReference("value", dataType)())
-      val supportsUdtInput = !VersionUtils.isSpark400OrLater && !VersionUtils.isDataBricks
-      assert(ser.supportsColumnarInput(schema) === supportsUdtInput,
-        s"Unexpected columnar input support for $dataType")
+    val unsupportedInputTypes = Seq(new TestPrimitiveUDT, CalendarIntervalType,
+      DataType.fromJson("\"timestamp_ntz\""))
+    unsupportedInputTypes.foreach { unsupported =>
+      val unsupportedTypes = Seq(unsupported, ArrayType(unsupported),
+        StructType(Seq(StructField("value", unsupported))),
+        MapType(StringType, unsupported), MapType(unsupported, IntegerType),
+        ArrayType(StructType(Seq(StructField("value", MapType(StringType, unsupported))))))
+      unsupportedTypes.foreach { dataType =>
+        val schema = Seq(AttributeReference("value", dataType)())
+        assert(!ser.supportsColumnarInput(schema),
+          s"Unexpected columnar input support for $dataType")
+      }
     }
-    val ordinarySchema = Seq(AttributeReference("value",
-      ArrayType(StructType(Seq(StructField("value", IntegerType)))))())
+    val ordinarySchema = Seq[DataType](BooleanType, ByteType, ShortType, IntegerType, LongType,
+      FloatType, DoubleType, DateType, TimestampType, StringType, BinaryType, NullType,
+      DecimalType(12, 2), DayTimeIntervalType(), YearMonthIntervalType(),
+      ArrayType(StructType(Seq(StructField("value", IntegerType)))),
+      MapType(StringType, ArrayType(LongType))).zipWithIndex.map { case (dataType, index) =>
+      AttributeReference(s"value$index", dataType)()
+    }
     assert(ser.supportsColumnarInput(ordinarySchema))
     assert(ser.supportsColumnarInput(Seq.empty))
   }

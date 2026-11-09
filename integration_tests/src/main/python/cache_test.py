@@ -23,7 +23,8 @@ from conftest import is_not_utc
 from data_gen import *
 from pyspark import StorageLevel
 import pyspark.sql.functions as f
-from spark_session import with_cpu_session, with_gpu_session, is_spark_35x, is_spark_local_mode
+from spark_session import (with_cpu_session, with_gpu_session, is_spark_35x, is_spark_local_mode,
+    is_before_spark_340)
 from join_test import create_df
 from marks import (incompat, allow_non_gpu, ignore_order, disable_ansi_mode, inject_oom,
     large_data_test)
@@ -385,6 +386,31 @@ def test_cache_udt(aqe_enabled, cache_input, udt_column):
         fun, 'InMemoryTableScanExec',
         conf={'spark.sql.adaptive.enabled': aqe_enabled, 'spark.sql.shuffle.partitions': '2'},
         result_canonicalize_func_before_compare=canonicalize)
+
+# These SQL-generated types need the row cache path and a string projection because PySpark
+# cannot collect CalendarIntervalType values. Unlike test_cache_additional_types, materialize
+# the complete cache before projecting, and cover the AQE transition after a shuffle.
+@allow_non_gpu('InMemoryTableScanExec', 'ShuffleExchangeExec', 'ProjectExec', 'ColumnarToRowExec')
+@ignore_order(local=True)
+@pytest.mark.parametrize('aqe_enabled', ['true', 'false'])
+@pytest.mark.parametrize('cache_input', ['rows', 'repartition'])
+@pytest.mark.parametrize('value_expr', [
+    'make_interval(1, 2, 0, cast(id as int), 4, 5, 6.123456)',
+    pytest.param("cast('2024-01-02 03:04:05.123456' as timestamp_ntz)",
+        marks=pytest.mark.skipif(is_before_spark_340(),
+            reason='SQL TIMESTAMP_NTZ syntax requires Spark 3.4 or newer'))],
+    ids=['calendar_interval', 'timestamp_ntz'])
+def test_cache_unsupported_row_to_columnar_types(aqe_enabled, cache_input, value_expr):
+    def fun(spark):
+        df = spark.range(4).selectExpr('id',
+            'case when id = 0 then null else {} end as value'.format(value_expr))
+        if cache_input == 'repartition':
+            df = df.repartition(2)
+        df.cache().count()
+        return df.selectExpr('id', 'cast(value as string) as value')
+
+    assert_gpu_fallback_collect(fun, 'InMemoryTableScanExec',
+        conf={'spark.sql.adaptive.enabled': aqe_enabled, 'spark.sql.shuffle.partitions': '2'})
 
 @pytest.mark.parametrize('enable_vectorized_conf', enable_vectorized_confs, ids=idfn)
 @ignore_order(local=True)
