@@ -23,8 +23,14 @@ import org.apache.spark.sql.catalyst.expressions.{Ascending, SortOrder}
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources.v2.GroupPartitionsExec
 
+// Spark 5 makes the GroupPartitionsExec companion private[sql]. Keeping this test-only
+// trampoline under org.apache.spark.sql lets the shared Spark 4.2/5.0 suite use Spark's factory
+// without duplicating the suite or assembling the factory's derived planning state.
 object GroupPartitionsExecTestShim {
   def apply(child: SparkPlan, enableSortedMerge: Boolean): GroupPartitionsExec = {
+    // Spark requires a non-empty frozen ordering when sorted merge is enabled. The suite stubs
+    // outputOrdering and does not assert the synthetic ordering, so use the child's first output
+    // to satisfy the constructor invariant.
     val sortedMergeOrdering = if (enableSortedMerge) {
       Some(Seq(SortOrder(child.output.head, Ascending)))
     } else {
