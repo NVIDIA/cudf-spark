@@ -86,17 +86,24 @@ object GetSequenceSize {
     val hasLongMin = withResource(Scalar.fromLong(Long.MinValue)) { longMin =>
       delta.equalTo(longMin)
     }
-    withResource(hasLongMin) { hasLongMin =>
-      val stepEqualsMinusOne = withResource(Scalar.fromInt(-1)) { minusOne =>
-        step.equalTo(minusOne)
+    val overflow = withResource(hasLongMin) { hasLongMin =>
+      andStepEqualsMinusOne(hasLongMin, step)
+    }
+    withResource(overflow) { overflow =>
+      withResource(overflow.any()) { result =>
+        result.isValid && result.getBoolean
       }
-      withResource(stepEqualsMinusOne) { stepEqualsMinusOne =>
-        withResource(hasLongMin.and(stepEqualsMinusOne)) { overflow =>
-          withResource(overflow.any()) { result =>
-            result.isValid && result.getBoolean
-          }
-        }
-      }
+    }
+  }
+
+  private def andStepEqualsMinusOne(
+      hasLongMin: ColumnVector,
+      step: ColumnVector): ColumnVector = {
+    val stepEqualsMinusOne = withResource(Scalar.fromInt(-1)) { minusOne =>
+      step.equalTo(minusOne)
+    }
+    withResource(stepEqualsMinusOne) { stepEqualsMinusOne =>
+      hasLongMin.and(stepEqualsMinusOne)
     }
   }
 
@@ -122,12 +129,15 @@ object GetSequenceSize {
 
     // Values beyond Spark's maximum array length only need to remain recognizably too large.
     // Clamp them before casting back to INT64 so lengths above Long.MaxValue cannot wrap.
-    withResource(exactSize) { _ =>
-      clampAndCast(exactSize)
+    val boundedSize = withResource(exactSize) { exactSize =>
+      clampToArrayLimit(exactSize)
+    }
+    withResource(boundedSize) { boundedSize =>
+      boundedSize.castTo(DType.INT64)
     }
   }
 
-  private def clampAndCast(exactSize: ColumnVector): ColumnVector = {
+  private def clampToArrayLimit(exactSize: ColumnVector): ColumnVector = {
     val tooLong = withResource(Scalar.fromDecimal(
         0, BigInteger.valueOf(MAX_ROUNDED_ARRAY_LENGTH.toLong))) { maxLength =>
       exactSize.greaterThan(maxLength)
@@ -135,9 +145,7 @@ object GetSequenceSize {
     withResource(tooLong) { tooLong =>
       withResource(Scalar.fromDecimal(
           0, BigInteger.valueOf(MAX_ROUNDED_ARRAY_LENGTH.toLong + 1L))) { overflowLength =>
-        withResource(tooLong.ifElse(overflowLength, exactSize)) { boundedSize =>
-          boundedSize.castTo(DType.INT64)
-        }
+        tooLong.ifElse(overflowLength, exactSize)
       }
     }
   }
