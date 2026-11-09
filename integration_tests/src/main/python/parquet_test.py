@@ -931,6 +931,26 @@ def test_parquet_input_meta(spark_tmp_path, v1_enabled_list, reader_confs):
                         'input_file_block_length()'),
             conf=all_confs)
 
+# input_file_name() needs rows * path bytes of string data in one batch, which cudf caps at 2 GiB.
+# The internal conf lowers that cap (to ~6 MiB of string data, ~40K rows for these paths) so a
+# single large row group has to be sliced without needing gigabytes of GPU memory.
+@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+def test_parquet_input_file_name_sliced_large_batch(spark_tmp_path, reader_confs):
+    paths = [spark_tmp_path + '/PARQUET_DATA/' + 'a' * 150 + '/f1',
+             spark_tmp_path + '/PARQUET_DATA/b/f2']
+    num_rows = 200000
+    for path in paths:
+        with_cpu_session(lambda spark: spark.range(num_rows).coalesce(1).write.parquet(path))
+    conf = copy_and_update(reader_confs, {
+        'spark.sql.sources.useV1SourceList': 'parquet',
+        'spark.rapids.sql.test.inputFileName.maxStringBytes': str((1 << 20) + 6000000)})
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: spark.read.parquet(*paths)
+                .select('id', input_file_name().alias('f'))
+                .groupBy('f').agg(count('*').alias('c'), sum('id').alias('s'),
+                                  min('id').alias('lo'), max('id').alias('hi')),
+            conf=conf)
+
 @allow_non_gpu('ProjectExec', 'Alias', 'InputFileName', 'InputFileBlockStart', 'InputFileBlockLength',
                'FilterExec', 'And', 'IsNotNull', 'GreaterThan', 'Literal',
                'FileSourceScanExec', 'ColumnarToRowExec',

@@ -93,6 +93,16 @@ object InputFileBlockRule {
     case e => e.children.exists(hasInputFileExpression)
   }
 
+  private def hasInputFileNameExpression(expr: Expression): Boolean = expr match {
+    case _: InputFileName | _: GpuInputFileName => true
+    case e => e.children.exists(hasInputFileNameExpression)
+  }
+
+  /** Whether a plan has an InputFileName expression, which builds a string column. */
+  def hasInputFileNameExpression(plan: SparkPlan): Boolean = {
+    plan.expressions.exists(hasInputFileNameExpression)
+  }
+
   /** Whether a plan has any InputFile{Name, BlockStart, BlockLength} expression. */
   def hasInputFileExpression(plan: SparkPlan): Boolean = {
     plan.expressions.exists(hasInputFileExpression)

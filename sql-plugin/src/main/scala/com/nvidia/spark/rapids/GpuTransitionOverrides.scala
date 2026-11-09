@@ -415,7 +415,8 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
   // InputFileBlockStart, or InputFileBlockLength when we use a Parquet read because
   // we can't support the coalesce file reader optimization when this is used.
   private def updateScansForInputAndOrder(plan: SparkPlan,
-      disableUntilInput: Boolean = false): SparkPlan = {
+      disableUntilInput: Boolean = false,
+      nameUntilInput: Boolean = false): SparkPlan = {
     plan match {
       case batchScan: GpuBatchScanExec =>
         if (disableUntilInput || disableScanUntilInput(batchScan)) {
@@ -430,15 +431,22 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
         }
       case fileSourceScan: GpuFileSourceScanExec =>
         if ((disableUntilInput || disableScanUntilInput(fileSourceScan))) {
-          fileSourceScan.copy(queryUsesInputFile = true)(
+          // Only input_file_name() builds a string column that can overflow, so only it
+          // needs the scan to slice big batches.
+          val usesName = nameUntilInput ||
+            InputFileBlockRule.hasInputFileNameExpression(fileSourceScan)
+          fileSourceScan.copy(queryUsesInputFile = true, queryUsesInputFileName = usesName)(
             fileSourceScan.rapidsConf, fileSourceScan.partitionPlanningScan)
         } else {
           fileSourceScan
         }
       case p =>
-        val planDisableUntilInput = disableScanUntilInput(p) && hasDirectLineToInput(p)
+        val directLine = hasDirectLineToInput(p)
+        val planDisableUntilInput = disableScanUntilInput(p) && directLine
+        val planNameUntilInput = InputFileBlockRule.hasInputFileNameExpression(p) && directLine
         p.withNewChildren(p.children.map(c => {
-          updateScansForInputAndOrder(c, planDisableUntilInput || disableUntilInput)
+          updateScansForInputAndOrder(c, planDisableUntilInput || disableUntilInput,
+            planNameUntilInput || nameUntilInput)
         }))
     }
   }

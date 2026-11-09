@@ -2247,6 +2247,32 @@ def test_delta_merge_dataframe_api(spark_tmp_path, use_cdf, num_slices, enable_d
         with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
 
 
+# MERGE adds input_file_name() itself. The internal conf lowers the string cap so the scan has to
+# slice the one big file batch, which would otherwise need over 2 GiB of string data.
+# Verified on OSS Delta (V1 file scan); the Databricks run decides whether it is covered there too.
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
+def test_delta_merge_input_file_name_sliced_large_batch(spark_tmp_path):
+    from delta.tables import DeltaTable
+    num_rows = 200000
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    dest_table_func = lambda spark: spark.range(num_rows).selectExpr(
+        "cast(id as int) as a", "cast(id as string) as b").coalesce(1)
+    with_cpu_session(lambda spark: setup_delta_dest_tables(spark, data_path, dest_table_func, False, False))
+    def do_merge(spark, path):
+        src_df = spark.range(0, num_rows + 100, 1000).selectExpr(
+            "cast(id as int) as a", "'merged' as b")
+        DeltaTable.forPath(spark, path).alias("dest").merge(src_df.alias("src"), "dest.a == src.a") \
+            .whenMatchedUpdateAll() \
+            .whenNotMatchedInsertAll() \
+            .execute()
+    conf = copy_and_update(delta_merge_enabled_conf, {
+        "spark.rapids.sql.test.inputFileName.maxStringBytes": str((1 << 20) + 6000000)})
+    assert_gpu_and_cpu_writes_are_equal_collect(do_merge, read_delta_path, data_path, conf=conf)
+
+
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @pytest.mark.skipif(is_databricks_runtime() or is_before_spark_353(),
