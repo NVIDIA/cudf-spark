@@ -18,7 +18,7 @@ import pytest
 from pyspark.sql.types import DoubleType, FloatType, LongType, StructField, StructType
 
 from asserts import assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect, \
-    assert_gpu_fallback_collect, assert_gpu_fallback_write_sql
+    assert_gpu_fallback_collect, assert_gpu_fallback_write_sql, collect_plan_nodes, plan_metric
 from conftest import is_iceberg_remote_catalog, spark_jvm
 from data_gen import DEFAULT_DATA_GEN_LENGTH, gen_df, copy_and_update
 from iceberg import (
@@ -38,19 +38,27 @@ pytestmark = iceberg_unsupported_mark
 @iceberg
 @allow_non_gpu('BatchScanExec', 'ColumnarToRowExec')
 @pytest.mark.parametrize('float_type', ['FLOAT', 'DOUBLE'])
-def test_iceberg_append_signed_zero_partitions(spark_tmp_table_factory, float_type):
+@pytest.mark.parametrize('fanout_enabled, row_count, batch_size', [
+    ('true', 400, '100m'),
+    ('false', 400, '100m'),
+    ('false', 8192, '16k')], ids=['fanout', 'clustered-single-batch', 'clustered-multi-batch'])
+def test_iceberg_append_signed_zero_partitions(
+        spark_tmp_table_factory, float_type, fanout_enabled, row_count, batch_size):
     table_name = get_full_table_name(spark_tmp_table_factory)
     cpu_table_name = get_full_table_name(spark_tmp_table_factory)
-    for name in (cpu_table_name, table_name):
+    # Use fanout for the independent CPU reference: Spark's numeric sort does not
+    # distinguish signed zeros, so it cannot establish Iceberg's clustered ordering.
+    for name, fanout in ((cpu_table_name, 'true'), (table_name, fanout_enabled)):
         with_cpu_session(lambda spark: spark.sql(
             f'CREATE TABLE {name} (id BIGINT, f {float_type}) USING ICEBERG '
-            "PARTITIONED BY (f) TBLPROPERTIES ('format-version'='2')").collect())
+            "PARTITIONED BY (f) TBLPROPERTIES ('format-version'='2', "
+            f"'write.spark.fanout.enabled'='{fanout}')").collect())
 
     def input_rows(spark):
         schema = StructType([StructField('id', LongType()), StructField(
             'f', FloatType() if float_type == 'FLOAT' else DoubleType())])
         return spark.createDataFrame([(i, 0.0 if i % 2 == 0 else -0.0)
-                                      for i in range(400)], schema).coalesce(1)
+                                      for i in range(row_count)], schema).coalesce(1)
 
     rows = with_gpu_session(lambda spark: input_rows(spark).collect())
     assert {math.copysign(1.0, r.f) for r in rows} == {-1.0, 1.0}
@@ -61,10 +69,26 @@ def test_iceberg_append_signed_zero_partitions(spark_tmp_table_factory, float_ty
     callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
     callback.startCapture()
     try:
-        with_gpu_session(write, conf=iceberg_write_enabled_conf)
+        with_gpu_session(write, conf=copy_and_update(iceberg_write_enabled_conf, {
+            'spark.sql.adaptive.enabled': 'false',
+            'spark.rapids.sql.stableSort.enabled': 'false',
+            'spark.rapids.sql.metrics.level': 'DEBUG',
+            'spark.rapids.sql.batchSizeBytes': batch_size}))
         plans = callback.getResultsWithTimeout(10000)
         assert any(callback.contains(plan, 'GpuAppendDataExec') for plan in plans), \
             'Expected GPU Iceberg append'
+        if row_count > 400:
+            writes = [node for plan in plans for node in collect_plan_nodes(plan)
+                      if node.getClass().getSimpleName() == 'GpuAppendDataExec']
+            batch_counts = []
+            for write in writes:
+                query = write.query()
+                # V2 writes execute the columnar child directly, bypassing the row wrapper.
+                if query.getClass().getSimpleName() == 'GpuColumnarToRowExec':
+                    query = query.child()
+                batch_counts.append(plan_metric(query, 'numOutputBatches') or 0)
+            assert any(count > 1 for count in batch_counts), \
+                f'Expected multiple batches in the single write task, got {batch_counts}'
     finally:
         callback.endCapture()
         reset_spark_session_conf()
@@ -72,8 +96,9 @@ def test_iceberg_append_signed_zero_partitions(spark_tmp_table_factory, float_ty
     def check(spark):
         files = spark.sql(f'SELECT partition, record_count FROM {table_name}.files').collect()
         counts = {math.copysign(1.0, r.partition.f): r.record_count for r in files}
-        assert counts == {-1.0: 200, 1.0: 200}
-        assert sorted(r.id for r in spark.table(table_name).select('id').collect()) == list(range(400))
+        assert counts == {-1.0: row_count // 2, 1.0: row_count // 2}
+        assert sorted(r.id for r in spark.table(table_name).select('id').collect()) == \
+            list(range(row_count))
 
     with_cpu_session(check)
     with_cpu_session(lambda spark: input_rows(spark).writeTo(cpu_table_name).append(),

@@ -36,6 +36,7 @@ import org.apache.iceberg.io._
 import org.apache.iceberg.spark.{GpuTypeToSparkType, Spark3Util, SparkSchemaUtil}
 import org.apache.iceberg.spark.functions.{GpuFieldTransform, GpuTransform}
 import org.apache.iceberg.spark.source.GpuWriteContext.positionDeleteSparkType
+import org.apache.iceberg.types.Type.TypeID
 
 import org.apache.spark.api.java.JavaSparkContext
 import org.apache.spark.broadcast.Broadcast
@@ -597,8 +598,16 @@ class GpuPartitionedDataWriter(
   override protected val metadataSchema: StructType,
 ) extends GpuDataWriterWithRowLineage {
 
+  private val hasFloatingPartition = spec.partitionType().fields().asScala.exists { field =>
+    val typeId = field.`type`().typeId()
+    typeId == TypeID.FLOAT || typeId == TypeID.DOUBLE
+  }
+
   private val delegate: PartitioningWriter[SpillableColumnarBatch, DataWriteResult] =
-    if (fanoutEnabled) {
+    // Spark's numeric ordering treats signed zeros as equal, while Iceberg partitions
+    // distinguish them. Batch-local grouping can therefore revisit a partition even
+    // with sorted input, so floating partition keys require a writer that permits revisits.
+    if (fanoutEnabled || hasFloatingPartition) {
       new GpuFanoutDataWriter(writerFactory, fileFactory, io,
         targetFileSize)
     } else {
