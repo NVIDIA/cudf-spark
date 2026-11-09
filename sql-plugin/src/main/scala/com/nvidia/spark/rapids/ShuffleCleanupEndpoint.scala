@@ -35,22 +35,18 @@ import org.apache.spark.sql.rapids.GpuShuffleEnv
  *
  * @param pluginContext the plugin context for RPC communication
  * @param pollIntervalMs interval between polls to driver (in milliseconds)
+ * @param ucxReclaimer when set, the endpoint polls for UCX reclaims through it, in place of the
+ *                     MULTITHREADED cleanup
+ * @param executorService runs the polls, by default on one daemon thread on the executor's GPU
  */
 class ShuffleCleanupEndpoint(
     pluginContext: PluginContext,
-    pollIntervalMs: Long = 1000) extends Logging with AutoCloseable {
+    pollIntervalMs: Long = 1000,
+    ucxReclaimer: Option[UcxCatalogReclaimer] = None,
+    executorService: ScheduledExecutorService = ShuffleCleanupEndpoint.newPollThread())
+  extends Logging with AutoCloseable {
 
   private val executorId: String = pluginContext.executorID()
-
-  private val executorService: ScheduledExecutorService =
-    Executors.newSingleThreadScheduledExecutor(
-      GpuDeviceManager.wrapThreadFactory(
-        new ThreadFactoryBuilder()
-          .setNameFormat("rapids-shuffle-cleanup")
-          .setDaemon(true)
-          .build(),
-        null,
-        () => RmmSpark.removeAllCurrentThreadAssociation()))
 
   private val pollTask = new Runnable {
     override def run(): Unit = {
@@ -74,6 +70,9 @@ class ShuffleCleanupEndpoint(
 
   @volatile private var shutdownHookAdded = false
   @volatile private var closed = false
+
+  /** Whether `start` added the JVM shutdown hook, for tests. */
+  private[rapids] def isShutdownHookAdded: Boolean = shutdownHookAdded
 
   /**
    * Start the periodic polling for shuffle cleanup.
@@ -269,3 +268,17 @@ class ShuffleCleanupEndpoint(
   }
 }
 
+object ShuffleCleanupEndpoint {
+  /** How long `close()` waits for the poll thread to end. */
+  private[rapids] val CLOSE_WAIT_SECONDS = 5L
+
+  private def newPollThread(): ScheduledExecutorService =
+    Executors.newSingleThreadScheduledExecutor(
+      GpuDeviceManager.wrapThreadFactory(
+        new ThreadFactoryBuilder()
+          .setNameFormat("rapids-shuffle-cleanup")
+          .setDaemon(true)
+          .build(),
+        null,
+        () => RmmSpark.removeAllCurrentThreadAssociation()))
+}

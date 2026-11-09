@@ -133,3 +133,33 @@ object ShuffleReclaimResult {
   def absent(shuffleId: Int, watermark: Long): ShuffleReclaimResult =
     ShuffleReclaimResult(shuffleId, watermark, ShuffleReclaimOutcome.ABSENT, 0, 0L, 0L, None)
 }
+
+/**
+ * One shuffle the driver asks an executor to reclaim.
+ *
+ * @param shuffleId the shuffle to reclaim
+ * @param watermark the largest task attempt id whose output the reclaim may free
+ */
+case class ShuffleReclaimRequest(shuffleId: Int, watermark: Long)
+
+/**
+ * Executor polls driver for shuffles to reclaim.
+ *
+ * @param executorId identifier for the executor
+ */
+case class RapidsShuffleReclaimPollMsg(executorId: String)
+
+/**
+ * Driver response with the shuffles the polling executor has not reclaimed yet.
+ *
+ * @param requests the shuffles to reclaim, each with its watermark
+ */
+case class RapidsShuffleReclaimResponseMsg(requests: Array[ShuffleReclaimRequest])
+
+/**
+ * Executor reports the results of its reclaims.
+ *
+ * @param executorId identifier for the executor
+ * @param results the result of each reclaim
+ */
+case class RapidsShuffleReclaimResultMsg(executorId: String, results: Array[ShuffleReclaimResult])
