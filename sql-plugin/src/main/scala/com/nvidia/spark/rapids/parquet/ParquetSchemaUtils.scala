@@ -19,6 +19,7 @@ package com.nvidia.spark.rapids.parquet
 import java.util.{Locale, Optional}
 
 import scala.collection.JavaConverters._
+import scala.collection.mutable.ArrayBuffer
 
 import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Table}
 import com.nvidia.spark.rapids.{CastOptions, GpuCast, GpuColumnVector, SchemaUtils}
@@ -419,7 +420,10 @@ object ParquetSchemaUtils {
     lazy val idToParquetFieldMap =
       parquetRecord.getFields.asScala.filter(_.getId != null).groupBy(f => f.getId.intValue())
 
+    val matchedFields = new ArrayBuffer[(StructField, Type)]
+
     def clipMatchedField(parquetType: Type, sparkField: StructField): Option[Type] = {
+      matchedFields += sparkField -> parquetType
       if (returnNullStructIfAllFieldsMissing && sparkField.dataType.isInstanceOf[StructType]) {
         var hasPhysicalLeaf = false
         val clipped = clipParquetType(parquetType, sparkField.dataType, caseSensitive, useFieldId,
@@ -492,7 +496,7 @@ object ParquetSchemaUtils {
       }
       clippedField.map(field -> _)
     }
-    ParquetFieldRequestShims.checkNoFieldRequestedMoreThanOnce(clippedFields)
+    ParquetFieldRequestShims.checkNoFieldRequestedMoreThanOnce(matchedFields.toSeq)
     clippedFields.map(_._2)
   }
 

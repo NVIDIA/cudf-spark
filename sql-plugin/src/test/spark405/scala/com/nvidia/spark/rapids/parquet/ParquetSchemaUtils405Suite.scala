@@ -47,4 +47,29 @@ class ParquetSchemaUtils405Suite extends AnyFunSuite with FQSuiteName {
     }
     assert(error.getCondition === "PARQUET_FIELD_REQUESTED_MORE_THAN_ONCE")
   }
+
+  test("reject duplicate physical group when one request is dropped by nested clipping") {
+    val fileSchema = Types.buildMessage()
+      .optionalGroup().id(1)
+        .optional(INT32).named("present")
+      .named("A")
+      .named("root")
+    val idMetadata = new MetadataBuilder()
+      .putLong("parquet.field.id", 1L)
+      .build()
+    val requestedSchema = StructType(Seq(
+      StructField("alias",
+        StructType(Seq(StructField("missing", IntegerType, nullable = true))),
+        nullable = true,
+        metadata = idMetadata),
+      StructField("A",
+        StructType(Seq(StructField("present", IntegerType, nullable = true))),
+        nullable = true)))
+
+    val error = intercept[SparkThrowable] {
+      ParquetSchemaUtils.clipParquetSchema(
+        fileSchema, requestedSchema, caseSensitive = true, useFieldId = true)
+    }
+    assert(error.getCondition === "PARQUET_FIELD_REQUESTED_MORE_THAN_ONCE")
+  }
 }
