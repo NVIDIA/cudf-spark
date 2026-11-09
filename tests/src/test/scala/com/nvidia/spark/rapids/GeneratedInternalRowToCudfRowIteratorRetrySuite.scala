@@ -20,7 +20,7 @@ import scala.collection.mutable.ArrayBuffer
 
 import ai.rapids.cudf.{HostMemoryBuffer, Table}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
-import com.nvidia.spark.rapids.jni.{GpuSplitAndRetryOOM, RmmSpark}
+import com.nvidia.spark.rapids.jni.RmmSpark
 import com.nvidia.spark.rapids.spill.{SpillableColumnarBatchHandle, SpillableDeviceStore, SpillFramework}
 import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito.{doAnswer, spy}
@@ -273,59 +273,14 @@ class GeneratedInternalRowToCudfRowIteratorRetrySuite
     }
   }
 
-  test("a split and retry when a single batch is required is not handled, and we throw") {
-    val batch = buildBatch()
-    val batchIter = Seq(batch).iterator
-
-    withResource(new ColumnarToRowIterator(batchIter, NoopMetric, NoopMetric, NoopMetric,
-      NoopMetric)) { ctriter =>
-      val schema = Array(AttributeReference("longcol", LongType)().toAttribute)
-      val myIter = GeneratedInternalRowToCudfRowIterator(
-        ctriter, schema, RequireSingleBatch,
+  test("the generated iterator rejects a single batch goal, which goes to RowToColumnarIterator") {
+    val schema = Array(AttributeReference("longcol", LongType)().toAttribute)
+    assertThrows[IllegalArgumentException] {
+      GeneratedInternalRowToCudfRowIterator(Iterator.empty, schema, RequireSingleBatch,
         NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric)
-      RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
-        RmmSpark.OomInjectionType.GPU.ordinal, 0)
-      assertThrows[GpuSplitAndRetryOOM] {
-        myIter.next()
-      }
-      assertResult(0)(SpillFramework.stores.deviceStore.spill(1))
     }
-  }
-
-  test("a single batch required converts every row into one batch") {
-    val batchIter = Seq(buildBatch()).iterator
-    withResource(new ColumnarToRowIterator(batchIter, NoopMetric, NoopMetric, NoopMetric,
-      NoopMetric)) { ctriter =>
-      val schema = Array(AttributeReference("longcol", LongType)().toAttribute)
-      val myIter = GeneratedInternalRowToCudfRowIterator(
-        ctriter, schema, RequireSingleBatch,
-        NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric)
-      withResource(myIter.next()) { batch =>
-        withResource(buildBatch()) { expected =>
-          TestUtils.compareBatches(expected, batch)
-        }
-      }
-      assert(!myIter.hasNext)
-    }
-  }
-
-  test("a split and retry when converting to a table with a single batch required throws") {
-    val batch = buildBatch()
-    val batchIter = Seq(batch).iterator
-    val injected = splitOnConversion()
-
-    withResource(new ColumnarToRowIterator(batchIter, NoopMetric, NoopMetric, NoopMetric,
-      NoopMetric)) { ctriter =>
-      val schema = Array(AttributeReference("longcol", LongType)().toAttribute)
-      val myIter = GeneratedInternalRowToCudfRowIterator(
-        ctriter, schema, RequireSingleBatch,
-        NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric)
-      assertThrows[GpuSplitAndRetryOOM] {
-        myIter.next()
-      }
-      assert(injected())
-      assertResult(0)(SpillFramework.stores.deviceStore.spill(1))
-    }
+    assert(GpuRowToColumnarExec.usesGeneratedIterator(schema, TargetSize(Int.MaxValue)))
+    assert(!GpuRowToColumnarExec.usesGeneratedIterator(schema, RequireSingleBatch))
   }
 
   test("a retry when allocating host buffer for data and offsets is handled") {

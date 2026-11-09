@@ -145,6 +145,23 @@ class RowToColumnarIteratorRetrySuite extends RmmSparkRetrySuiteBase {
   // hit builders.tryBuild() instead. The GPU split-and-retry test below verifies propagation.
   // SplitAndRetryOOM with rowCount > 0 (emit-early) is covered by the test below.
 
+  test("a single batch goal under a host limit builds one batch") {
+    val longSchema = StructType(Seq(StructField("l", LongType)))
+    val rowIter: Iterator[InternalRow] = (1 to 4).map(i => InternalRow(i.toLong)).iterator
+    // The builders reserve for batchSizeBytes and grow from there, so the reservation fits a
+    // host limit above it, unlike a fixed buffer sized for any partition.
+    HostAlloc.initialize(128L * 1024 * 1024)
+    val row2ColIter = new RowToColumnarIterator(rowIter, longSchema, RequireSingleBatch,
+      64L * 1024 * 1024, new GpuRowToColumnConverter(longSchema))
+    withResource(row2ColIter.next()) { batch =>
+      assertResult(4)(batch.numRows())
+      withResource(batch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { col =>
+        assertResult((1L to 4L).toSeq)((0 until 4).map(i => col.getLong(i)))
+      }
+    }
+    assert(!row2ColIter.hasNext)
+  }
+
   test("test CPU SplitAndRetryOOM emit-early for non-RequireSingleBatch") {
     // Same injection as "test CPU OOM retry preserves all rows" but with SplitAndRetryOOM:
     // skipCount=3 reliably fires inside convertRows after at least one row is committed,

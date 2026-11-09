@@ -59,7 +59,6 @@ public abstract class InternalRowToColumnarBatchIterator implements Iterator<Col
   protected final GpuMetric numInputRows;
   protected final GpuMetric numOutputRows;
   protected final GpuMetric numOutputBatches;
-  private final boolean requireSingleBatch;
   // When a retry splits a batch, the remaining pieces of its host-to-GPU transfer and the
   // remaining conversions of the current piece wait here, one output batch per next().
   private Iterator<SpillableColumnarBatch> pendingRows = null;
@@ -76,6 +75,12 @@ public abstract class InternalRowToColumnarBatchIterator implements Iterator<Col
       GpuMetric numInputRows,
       GpuMetric numOutputRows,
       GpuMetric numOutputBatches) {
+    // The row buffers have a fixed size and do not grow, so a batch that must hold a whole
+    // partition would have to reserve for the largest one up front.
+    if (goal instanceof RequireSingleBatchLike) {
+      throw new IllegalArgumentException(
+          "The generated row to columnar iterator cannot require a single batch");
+    }
     this.input = input;
     sizePerRowEstimate = CudfUnsafeRow.getRowSizeEstimate(schema);
     numRowsEstimate = calcNumRowsEstimate(goal.targetSizeBytes());
@@ -91,13 +96,11 @@ public abstract class InternalRowToColumnarBatchIterator implements Iterator<Col
     this.numInputRows = numInputRows;
     this.numOutputRows = numOutputRows;
     this.numOutputBatches = numOutputBatches;
-    this.requireSingleBatch = goal instanceof RequireSingleBatchLike;
   }
 
   private int calcNumRowsEstimate(long targetBytes) {
     // A column of rows has int32 offsets, so it holds at most Integer.MAX_VALUE bytes. Bounding
-    // the target first also keeps a Long.MaxValue target (RequireSingleBatch) from overflowing
-    // the int cast.
+    // the target first also keeps a larger target from overflowing the int cast.
     long rows = Math.min(targetBytes, Integer.MAX_VALUE) / sizePerRowEstimate;
     return (int) Math.max(1, Math.min(Integer.MAX_VALUE - 1, rows));
   }
@@ -233,7 +236,7 @@ public abstract class InternalRowToColumnarBatchIterator implements Iterator<Col
           pendingRows = RmmRapidsRetryIterator.withRetry(
               HostColumnarBatchWithRowRange.apply(new HostColumnVector[] {rowsColumn},
                   currentRow, ROWS_TYPES),
-              requireSingleBatch ? null : HostColumnarBatchWithRowRange::splitInHalf,
+              HostColumnarBatchWithRowRange::splitInHalf,
               (piece) -> SpillableColumnarBatch.apply(piece.copyToGpu(),
                   SpillPriorities.ACTIVE_ON_DECK_PRIORITY()));
         }
@@ -242,12 +245,11 @@ public abstract class InternalRowToColumnarBatchIterator implements Iterator<Col
   }
 
   /**
-   * Convert one piece of rows on the GPU. A split request splits the rows in half by rows,
-   * unless a single batch is required.
+   * Convert one piece of rows on the GPU. A split request splits the rows in half by rows.
    */
   private Iterator<ColumnarBatch> convertFromRowsWithRetry(SpillableColumnarBatch rows) {
     return RmmRapidsRetryIterator.withRetry(rows,
-        requireSingleBatch ? null : RmmRapidsRetryIterator.splitSpillableInHalfByRows(),
+        RmmRapidsRetryIterator.splitSpillableInHalfByRows(),
         (attempt) -> {
           try (ColumnarBatch cb = attempt.getColumnarBatch();
                Table tab = convertFromRowsUnderRetry(cb)) {

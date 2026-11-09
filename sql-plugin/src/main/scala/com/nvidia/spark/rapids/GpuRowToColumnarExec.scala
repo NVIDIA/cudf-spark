@@ -1053,6 +1053,19 @@ object GeneratedInternalRowToCudfRowIterator extends Logging {
 /**
  * GPU version of row to columnar transition.
  */
+object GpuRowToColumnarExec {
+  /**
+   * Whether the generated iterator converts rows of this schema for this goal. Its row buffers
+   * have a fixed size and do not grow, so a goal that requires a single batch, which can hold a
+   * whole partition, goes to RowToColumnarIterator, whose builders grow as rows arrive.
+   */
+  private[rapids] def usesGeneratedIterator(output: Seq[Attribute],
+      goal: CoalesceSizeGoal): Boolean =
+    (1 until 100000000).contains(output.length) &&
+      CudfRowTransitions.areAllR2CSupported(output) &&
+      !goal.isInstanceOf[RequireSingleBatchLike]
+}
+
 case class GpuRowToColumnarExec(child: SparkPlan, goal: CoalesceSizeGoal)
   extends ShimUnaryExecNode with GpuExec {
   import GpuMetric._
@@ -1098,8 +1111,7 @@ case class GpuRowToColumnarExec(child: SparkPlan, goal: CoalesceSizeGoal)
     // We are being conservative by only allowing 100M columns until we feel the need to
     // increase this number. Spark by default limits codegen to 100 fields
     // "spark.sql.codegen.maxFields".
-    if ((1 until 100000000).contains(output.length) &&
-        CudfRowTransitions.areAllR2CSupported(output)) {
+    if (GpuRowToColumnarExec.usesGeneratedIterator(output, localGoal)) {
       val localOutput = output
       rowBased.mapPartitions(rowIter => GeneratedInternalRowToCudfRowIterator(
         rowIter, localOutput.toArray, localGoal, streamTime, opTime,
