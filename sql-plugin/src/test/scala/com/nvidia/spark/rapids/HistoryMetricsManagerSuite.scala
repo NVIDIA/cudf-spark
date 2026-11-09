@@ -48,10 +48,14 @@ class HistoryMetricsManagerSuite extends AnyFunSuite {
     val manager = new HistoryMetricsManager(() =>
       throw new AssertionError("provider discovery should not run"))
 
-    initialize(manager, "none")
+    try {
+      initialize(manager, "none")
 
-    assert(MetricStores.current() eq initial)
-    manager.shutdown(() => throw new AssertionError("disabled history should not wait"))
+      assert(MetricStores.current() eq initial)
+      manager.shutdown(() => throw new AssertionError("disabled history should not wait"))
+    } finally {
+      manager.shutdown()
+    }
   }
 
   test("selected provider is installed and shut down") {
@@ -94,13 +98,14 @@ class HistoryMetricsManagerSuite extends AnyFunSuite {
     val release = new CountDownLatch(1)
     val waiting = new CountDownLatch(1)
     val executor = Executors.newSingleThreadExecutor()
-    val sc = new SparkContext(new SparkConf(false)
-      .setMaster("local[1]")
-      .setAppName("history-metrics-shutdown")
-      .set("spark.ui.enabled", "false")
-      .set("spark.driver.host", "127.0.0.1")
-      .set("spark.driver.bindAddress", "127.0.0.1"))
+    var sc: SparkContext = null
     try {
+      sc = new SparkContext(new SparkConf(false)
+        .setMaster("local[1]")
+        .setAppName("history-metrics-shutdown")
+        .set("spark.ui.enabled", "false")
+        .set("spark.driver.host", "127.0.0.1")
+        .set("spark.driver.bindAddress", "127.0.0.1"))
       initialize(manager, "local")
       sc.addSparkListener(new SparkListener {
         override def onJobEnd(event: SparkListenerJobEnd): Unit = {
@@ -134,8 +139,11 @@ class HistoryMetricsManagerSuite extends AnyFunSuite {
       try {
         assert(executor.awaitTermination(10, TimeUnit.SECONDS))
       } finally {
-        manager.shutdown()
-        sc.stop()
+        try {
+          manager.shutdown()
+        } finally {
+          Option(sc).foreach(_.stop())
+        }
       }
     }
   }
@@ -163,12 +171,16 @@ class HistoryMetricsManagerSuite extends AnyFunSuite {
     val provider = new TestProvider("database", new DelegatingStore(initial))
     val manager = new HistoryMetricsManager(() => Seq(provider))
 
-    initialize(manager, "local")
+    try {
+      initialize(manager, "local")
 
-    assert(provider.openCalls == 0)
-    assert(MetricStores.current() eq initial)
-    manager.shutdown()
-    assert(provider.shutdownCalls == 0)
+      assert(provider.openCalls == 0)
+      assert(MetricStores.current() eq initial)
+      manager.shutdown()
+      assert(provider.shutdownCalls == 0)
+    } finally {
+      manager.shutdown()
+    }
   }
 
   test("failed provider is cleaned up and leaves the no-op store") {
@@ -176,14 +188,18 @@ class HistoryMetricsManagerSuite extends AnyFunSuite {
     val provider = new TestProvider("local", new DelegatingStore(initial), failOpen = true)
     val manager = new HistoryMetricsManager(() => Seq(provider))
 
-    initialize(manager, "local")
+    try {
+      initialize(manager, "local")
 
-    assert(provider.openCalls == 1)
-    assert(provider.shutdownCalls == 1)
-    assert(provider.shutdownTimeout == HistoryMetricsManager.PROVIDER_SHUTDOWN_TIMEOUT)
-    assert(MetricStores.current() eq initial)
-    manager.shutdown()
-    assert(provider.shutdownCalls == 1)
+      assert(provider.openCalls == 1)
+      assert(provider.shutdownCalls == 1)
+      assert(provider.shutdownTimeout == HistoryMetricsManager.PROVIDER_SHUTDOWN_TIMEOUT)
+      assert(MetricStores.current() eq initial)
+      manager.shutdown()
+      assert(provider.shutdownCalls == 1)
+    } finally {
+      manager.shutdown()
+    }
   }
 
   test("duplicate provider names are rejected without opening either provider") {
@@ -192,21 +208,25 @@ class HistoryMetricsManagerSuite extends AnyFunSuite {
     val second = new TestProvider("LOCAL", new DelegatingStore(initial))
     val manager = new HistoryMetricsManager(() => Seq(first, second))
 
-    initialize(manager, "local")
+    try {
+      initialize(manager, "local")
 
-    assert(first.openCalls == 0)
-    assert(second.openCalls == 0)
-    assert(MetricStores.current() eq initial)
-    manager.shutdown()
+      assert(first.openCalls == 0)
+      assert(second.openCalls == 0)
+      assert(MetricStores.current() eq initial)
+    } finally {
+      manager.shutdown()
+    }
   }
 
   test("discovery finds application providers in a child context loader") {
     val apiClass = classOf[HistoryMetricsProvider]
     val providerClass = classOf[HistoryMetricsDiscoveryTestProvider]
     val directory = Files.createTempDirectory("history-metrics-services")
-    val services = Files.createDirectories(directory.resolve("META-INF/services"))
+    val services = directory.resolve("META-INF/services")
     val serviceFile = services.resolve(apiClass.getName)
     try {
+      Files.createDirectories(services)
       Files.write(serviceFile, providerClass.getName.getBytes(StandardCharsets.UTF_8))
       val urls = Array(directory.toUri.toURL,
         providerClass.getProtectionDomain.getCodeSource.getLocation)
