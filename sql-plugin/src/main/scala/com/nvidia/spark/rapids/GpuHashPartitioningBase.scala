@@ -62,10 +62,15 @@ trait GpuHashPartitioner extends Serializable {
         ColumnVector.fromScalar(partLit, cb.numRows)
       }
     } else {
-      withResource(hashFunc.columnarEval(cb)) { hash =>
-        withResource(GpuScalar.from(numPartitions, IntegerType)) { partsLit =>
-          hash.getBase.pmod(partsLit, DType.INT32)
-        }
+      hashFunc match {
+        case GpuMurmur3Hash(keys, seed) =>
+          GpuMurmur3Hash.computePartitionIds(cb, keys, seed, numPartitions)
+        case other =>
+          withResource(other.columnarEval(cb)) { hash =>
+            withResource(GpuScalar.from(numPartitions, IntegerType)) { partsLit =>
+              hash.getBase.pmod(partsLit, DType.INT32)
+            }
+          }
       }
     }
   }
