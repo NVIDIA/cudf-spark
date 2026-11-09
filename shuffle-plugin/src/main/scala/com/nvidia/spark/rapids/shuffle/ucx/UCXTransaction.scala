@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2021, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,9 +29,11 @@ import org.apache.spark.internal.Logging
 
 /**
  * Helper enum to describe transaction types supported in UCX
- * request = is a send and a receive, with the callback happening after the receive
- * send = is a send of 1 or more messages (callback at the end)
- * receive is a receive of 1 or more messages (callback at the end)
+ * request = a client's request and its reply, with the callback after the reply's receive or
+ *   after a failed send. A reply to a withdrawn request calls nothing. The server also uses it
+ *   for a received request and for its reply, each one message with the callback at its end.
+ * send = is a send of one message (callback at the end)
+ * receive is a receive of one message (callback at the end)
  */
 private[ucx] object UCXTransactionType extends Enumeration {
   val Request, Send, Receive = Value
@@ -62,6 +64,11 @@ private[ucx] class UCXTransaction(conn: UCXConnection, val txId: Long)
   private val pendingMessages = new ConcurrentLinkedQueue[UcpRequest]()
 
   private var hadError: Boolean = false
+
+  // A request's response and the callback registered for it, so that the request can be
+  // withdrawn. The client's map of waiting requests publishes them to the withdrawing thread.
+  private[ucx] var responseAm: UCXActiveMessage = _
+  private[ucx] var responseCallback: UCXAmCallback = _
 
   private var txCallback: TransactionStatus.Value => Unit = _
 
