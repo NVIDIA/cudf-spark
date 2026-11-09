@@ -33,6 +33,8 @@ import org.apache.spark.sql.rapids.GpuShuffleEnv
  * performs the cleanup on the executor's MultithreadedShuffleBufferCatalog,
  * and reports statistics back to the driver.
  *
+ * With a UCX reclaimer, it reclaims UCX shuffles from the shuffle buffer catalog instead.
+ *
  * @param pluginContext the plugin context for RPC communication
  * @param pollIntervalMs interval between polls to driver (in milliseconds)
  * @param ucxReclaimer when set, the endpoint polls for UCX reclaims through it, in place of the
@@ -51,7 +53,10 @@ class ShuffleCleanupEndpoint(
   private val pollTask = new Runnable {
     override def run(): Unit = {
       try {
-        pollAndCleanup()
+        ucxReclaimer match {
+          case Some(reclaimer) => reclaimer.poll(executorId, pluginContext.ask, () => closed)
+          case None => pollAndCleanup()
+        }
       } catch {
         // close() interrupts a poll that outlives its wait, and the pool is ending then
         case _: InterruptedException =>
@@ -86,9 +91,10 @@ class ShuffleCleanupEndpoint(
       pollIntervalMs,
       TimeUnit.MILLISECONDS)
     
-    // Add shutdown hook to ensure finalCleanup is called on JVM termination
+    // Add shutdown hook to ensure finalCleanup is called on JVM termination. A UCX endpoint has
+    // no final cleanup, so it adds no hook.
     synchronized {
-    if (!shutdownHookAdded) {
+    if (!shutdownHookAdded && ucxReclaimer.isEmpty) {
       shutdownHookAdded = true
       Runtime.getRuntime.addShutdownHook(new Thread("rapids-shuffle-cleanup-shutdown") {
         override def run(): Unit = {
@@ -201,19 +207,56 @@ class ShuffleCleanupEndpoint(
     // Perform a final cleanup of any remaining data in the catalog
     // This ensures no data is left behind when executor shuts down
     try {
-      finalCleanup()
+      // UCX mode builds no multithreaded catalog, so a UCX endpoint has no final cleanup
+      if (ucxReclaimer.isEmpty) {
+        finalCleanup()
+      }
     } catch {
       case e: Exception =>
         logWarning("Error during final shuffle cleanup", e)
     }
 
-    try {
-      if (!executorService.awaitTermination(5, TimeUnit.SECONDS)) {
-        executorService.shutdownNow()
+    if (ucxReclaimer.isDefined) {
+      awaitPollThreadThroughInterrupts()
+    } else {
+      // MULTITHREADED's endpoint closes after device shutdown, so its wait guards no free, and
+      // an interrupt may end it
+      try {
+        if (!executorService.awaitTermination(ShuffleCleanupEndpoint.CLOSE_WAIT_SECONDS,
+            TimeUnit.SECONDS)) {
+          executorService.shutdownNow()
+        }
+      } catch {
+        case _: InterruptedException =>
+          executorService.shutdownNow()
       }
-    } catch {
-      case _: InterruptedException =>
-        executorService.shutdownNow()
+    }
+  }
+
+  /**
+   * Waits up to `CLOSE_WAIT_SECONDS` for the poll thread to end, and then stops it. A UCX reclaim
+   * frees no further buffer once `closed` is set, so this waits for one free or one ask at most.
+   * An interrupt does not end the wait, since the UCX endpoint closes right before device
+   * shutdown, which must not overlap a free. The interrupt status is restored after.
+   */
+  private def awaitPollThreadThroughInterrupts(): Unit = {
+    val deadline =
+      System.nanoTime() + TimeUnit.SECONDS.toNanos(ShuffleCleanupEndpoint.CLOSE_WAIT_SECONDS)
+    var terminated = false
+    var interrupted = false
+    while (!terminated && deadline - System.nanoTime() > 0) {
+      try {
+        terminated = executorService.awaitTermination(deadline - System.nanoTime(),
+          TimeUnit.NANOSECONDS)
+      } catch {
+        case _: InterruptedException => interrupted = true
+      }
+    }
+    if (!terminated) {
+      executorService.shutdownNow()
+    }
+    if (interrupted) {
+      Thread.currentThread().interrupt()
     }
   }
 

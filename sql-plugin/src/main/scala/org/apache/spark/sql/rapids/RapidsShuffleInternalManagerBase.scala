@@ -2170,6 +2170,29 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
     }
   }
 
+  /**
+   * Frees what the shuffle buffer catalog holds of a shuffle for writers at or below
+   * `watermark`, and frees no further buffer once `isStopped` reads true. A catalog that is not
+   * initialized yet holds nothing.
+   */
+  def reclaimGpuShuffle(
+      shuffleId: Int,
+      watermark: Long,
+      isStopped: () => Boolean): ShuffleReclaimResult = {
+    val catalog = GpuShuffleEnv.getCatalog
+    if (catalog != null) {
+      val result = catalog.reclaimShuffle(shuffleId, watermark, isStopped)
+      def line = s"Reclaimed shuffle $shuffleId up to task $watermark from shuffle buffer " +
+        s"catalog: ${result.outcome}, ${result.buffers} buffers, ${result.bytes} bytes in " +
+        s"${TimeUnit.NANOSECONDS.toMillis(result.elapsedNanos)} ms"
+      // every executor is asked to reclaim every shuffle, so most hold none of it
+      if (result.outcome == ShuffleReclaimOutcome.ABSENT) logDebug(line) else logInfo(line)
+      result
+    } else {
+      ShuffleReclaimResult.absent(shuffleId, watermark)
+    }
+  }
+
   def unregisterGpuShuffle(shuffleId: Int): Unit = {
     GpuShuffleEnv.invalidateBroadcastAndThen(shuffleId) {
       val catalog = GpuShuffleEnv.getCatalog
