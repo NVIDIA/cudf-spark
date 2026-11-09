@@ -2249,7 +2249,6 @@ def test_delta_merge_dataframe_api(spark_tmp_path, use_cdf, num_slices, enable_d
 
 # MERGE adds input_file_name() itself. The internal conf lowers the string cap so the scan has to
 # slice the one big file batch, which would otherwise need over 2 GiB of string data.
-# Verified on OSS Delta (V1 file scan); the Databricks run decides whether it is covered there too.
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order

@@ -25,6 +25,12 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 object InputFileNameBatchSlicer {
   // Safety margin below the 2 GiB cudf string limit. The limit applies to the character data;
   // offsets and validity live in separate buffers, so this is only a cushion.
+  //
+  // Limitation: the cap only guarantees that the bare input_file_name() column fits. An expression
+  // that builds a longer string from the name, such as concat(input_file_name(), 'x') or
+  // upper(...), can still overflow. At ~16M rows per slice, concatenating a 1 byte literal adds
+  // ~16 MB, far more than this headroom. Delta MERGE uses the bare expression, which is the
+  // case this stopgap targets.
   private[rapids] val HEADROOM_BYTES = 1L << 20
 
   /**
