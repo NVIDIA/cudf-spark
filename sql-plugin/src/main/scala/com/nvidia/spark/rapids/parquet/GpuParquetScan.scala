@@ -344,6 +344,38 @@ object GpuParquetScan {
     }
   }
 
+  private[parquet] def coalesceReads(ranges: Seq[CopyRange]): Seq[CopyRange] = {
+    val coalesced = new ArrayBuffer[CopyRange](ranges.length)
+    var currentRange: CopyRange = null
+    var currentRangeEnd = 0L
+
+    def addCurrentRange(): Unit = {
+      if (currentRange != null) {
+        val rangeLength = currentRangeEnd - currentRange.getInputOffset
+        if (rangeLength == currentRange.getLength) {
+          coalesced += currentRange
+        } else {
+          coalesced += new CopyRange(
+            currentRange.getInputOffset, rangeLength, currentRange.getOutputOffset)
+        }
+        currentRange = null
+        currentRangeEnd = 0L
+      }
+    }
+
+    ranges.foreach { c =>
+      if (c.getInputOffset == currentRangeEnd) {
+        currentRangeEnd += c.getLength
+      } else {
+        addCurrentRange()
+        currentRange = c
+        currentRangeEnd = c.getInputOffset + c.getLength
+      }
+    }
+    addCurrentRange()
+    coalesced.toSeq
+  }
+
   def throwIfRebaseNeededInExceptionMode(table: Table, dateRebaseMode: DateTimeRebaseMode,
       timestampRebaseMode: DateTimeRebaseMode): Unit = {
     (0 until table.getNumberOfColumns).foreach { i =>
@@ -562,6 +594,13 @@ private[parquet] object GpuParquetFileFilterHandler {
       configuredReader: ParquetFooterReaderType.Value,
       schema: StructType): Boolean =
     configuredReader == ParquetFooterReaderType.NATIVE && canUseNativeFooterReader(schema)
+
+  private[parquet] val PARQUET_ENCRYPTION_CONFS = Seq("parquet.encryption.kms.client.class",
+    "parquet.encryption.kms.client.class", "parquet.crypto.factory.class")
+
+  /** Whether `conf` sets up Parquet decryption, which the GPU readers do not support. */
+  def isDecryptionConfigured(conf: Configuration): Boolean =
+    PARQUET_ENCRYPTION_CONFS.exists(conf.get(_) != null)
 }
 
 protected case class GpuParquetFileFilterHandler(
@@ -584,9 +623,6 @@ protected case class GpuParquetFileFilterHandler(
   private val ignoreMissingParquetFieldId = ParquetSchemaClipShims.ignoreMissingIds(sqlConf)
   private val returnNullStructIfAllFieldsMissing =
     ParquetMissingStructShims.returnNullStructIfAllFieldsMissing(sqlConf)
-
-  private val PARQUET_ENCRYPTION_CONFS = Seq("parquet.encryption.kms.client.class",
-    "parquet.encryption.kms.client.class", "parquet.crypto.factory.class")
 
   private def isParquetTimeInInt96(parquetType: Type): Boolean = {
     parquetType match {
@@ -638,6 +674,25 @@ protected case class GpuParquetFileFilterHandler(
         readFooterBuffer(fileIO, filePath, conf))) { hmb =>
       // buffer includes header and trailing length and magic, stripped here
       hmb.slice(MAGIC.length, hmb.getLength - Integer.BYTES - MAGIC.length)
+    }
+  }
+
+  /**
+   * Read the Thrift footer of a Parquet file: the footer bytes alone, without the leading magic
+   * or the trailing footer length and magic that readFooterBuffer returns. This is what the
+   * hybrid scan reader takes.
+   */
+  def readThriftFooter(
+      fileIO: RapidsFileIO,
+      filePath: Path,
+      conf: Configuration): HostMemoryBuffer = {
+    val inputFile = fileIO.newInputFile(filePath)
+    withResource(ParquetFooterUtils.getFooterBuffer(inputFile, metrics,
+        readFooterBuffer(fileIO, filePath, conf))) { buf =>
+      // Drop the leading magic, and the trailing footer length and magic, to leave the thrift
+      // metadata the hybrid scan reader expects.
+      val thriftFooterLength = buf.getLength - MAGIC.length - FOOTER_LENGTH_SIZE - MAGIC.length
+      buf.slice(MAGIC.length, thriftFooterLength)
     }
   }
 
@@ -773,7 +828,7 @@ protected case class GpuParquetFileFilterHandler(
       // Make sure we aren't trying to read encrypted files. For now, remove the related
       // parquet confs from the hadoop configuration and try to catch the resulting
       // exception and print a useful message
-      PARQUET_ENCRYPTION_CONFS.foreach { encryptConf =>
+      GpuParquetFileFilterHandler.PARQUET_ENCRYPTION_CONFS.foreach { encryptConf =>
         if (conf.get(encryptConf) != null) {
           conf.unset(encryptConf)
         }
@@ -1628,11 +1683,64 @@ case class GpuParquetPartitionReaderFactory(
     sqlConf, broadcastedConf, dataSchema, readDataSchema, partitionSchema,
     rapidsConf, metrics, params) with Logging {
 
+  // Only set for an eligible read.
+  private val hybridScanConfig = if (rapidsConf.isParquetHybridScanEnabled) {
+    val config = HybridScanConfig(rapidsConf,
+      new HybridScanFilters(readDataSchema, isCaseSensitive, filters))
+
+    val eligible = HybridScanParquetPartitionReader.isEligible(
+      rapidsConf.isParquetHybridScanEnabled, rapidsConf.testParquetHybridScanFailOnFallback,
+      readDataSchema, config.filters,
+      useChunkedReader, compressCfg.decompressSnappyCpu || compressCfg.decompressZstdCpu,
+      readUseFieldId, sqlConf.ignoreCorruptFiles,
+      GpuParquetFileFilterHandler.isDecryptionConfigured(broadcastedConf.value.value),
+      DateTimeRebaseMode.fromName(SparkShimImpl.parquetRebaseRead(sqlConf)),
+      DateTimeRebaseMode.fromName(SparkShimImpl.int96ParquetRebaseRead(sqlConf)))
+      
+    if (eligible) Some(config) else None
+  } else {
+    None
+  }
+
   override protected def buildBaseColumnarParquetReader(
       file: PartitionedFile): PartitionReader[ColumnarBatch] = {
     // we need to copy the Hadoop Configuration because filter push down can mutate it,
     // which can affect other tasks.
     val conf = new Configuration(broadcastedConf.value.value)
+    hybridScanConfig match {
+      case Some(config) => buildHybridScanReader(file, conf, config)
+      case None => buildParquetMrReader(file, conf)
+    }
+  }
+
+  /**
+   * Read the split with the hybrid scan reader. Only the footer is parsed here; which row groups
+   * and column chunks to read is decided by the reader itself, from the pushed filter if any.
+   */
+  private def buildHybridScanReader(
+      file: PartitionedFile,
+      conf: Configuration,
+      config: HybridScanConfig): PartitionReader[ColumnarBatch] = {
+    val filePath = new Path(new URI(file.filePath.toString()))
+    val startTime = System.nanoTime()
+    val footer = NvtxRegistry.HYBRID_SCAN_READ_FOOTER {
+      filterHandler.readThriftFooter(fileIO, filePath, conf)
+    }
+    metrics.get(FILTER_TIME).foreach {
+      _ += (System.nanoTime() - startTime)
+    }
+    closeOnExcept(footer) { _ =>
+      val byteSource = new HybridScanFileByteSource(fileIO, filePath, metrics)
+      val options = HybridScanParquetPartitionReader.parquetOptions(readDataSchema.fieldNames)
+      new HybridScanParquetPartitionReader(
+        byteSource, file.start, file.length, footer, options,
+        readDataSchema, config.filters, config.filterKeepThreshold, metrics)
+    }
+  }
+
+  private def buildParquetMrReader(
+      file: PartitionedFile,
+      conf: Configuration): PartitionReader[ColumnarBatch] = {
     val startTime = System.nanoTime()
     val singleFileInfo = filterHandler.filterBlocks(fileIO, footerReadType, file, conf, filters,
       readDataSchema)
@@ -2237,7 +2345,7 @@ trait ParquetPartitionReaderBase extends Logging with ScanWithMetrics
       return 0L
     }
 
-    val coalescedRanges = coalesceReads(remoteCopies)
+    val coalescedRanges = GpuParquetScan.coalesceReads(remoteCopies)
     val scheme = filePath.toUri.getScheme
     if (scheme != null && scheme.startsWith("s3")) {
       GpuTaskMetrics.get.recordPerfioS3BackendOnce()
@@ -2258,38 +2366,6 @@ trait ParquetPartitionReaderBase extends Logging with ScanWithMetrics
       }
     }
     totalBytesCopied
-  }
-
-  private def coalesceReads(ranges: Seq[CopyRange]): Seq[CopyRange] = {
-    val coalesced = new ArrayBuffer[CopyRange](ranges.length)
-    var currentRange: CopyRange = null
-    var currentRangeEnd = 0L
-
-    def addCurrentRange(): Unit = {
-      if (currentRange != null) {
-        val rangeLength = currentRangeEnd - currentRange.getInputOffset
-        if (rangeLength == currentRange.getLength) {
-          coalesced += currentRange
-        } else {
-          coalesced += new CopyRange(
-            currentRange.getInputOffset, rangeLength, currentRange.getOutputOffset)
-        }
-        currentRange = null
-        currentRangeEnd = 0L
-      }
-    }
-
-    ranges.foreach { c =>
-      if (c.getInputOffset == currentRangeEnd) {
-        currentRangeEnd += c.getLength
-      } else {
-        addCurrentRange()
-        currentRange = c
-        currentRangeEnd = c.getInputOffset + c.getLength
-      }
-    }
-    addCurrentRange()
-    coalesced.toSeq
   }
 
   private def copyLocal(
