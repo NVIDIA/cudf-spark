@@ -180,12 +180,19 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
       val filterTime = System.nanoTime() - filterStartTime
       val bufferStartTime = System.nanoTime()
       val result = withResource(footer) { _ =>
-        val planned = planAndFetchForPool(footer)
+        // A closed reader discards this result, so neither fetch for it nor hand it buffers.
+        val planned = if (isDone) None else planAndFetchForPool(footer)
         val bytesRead = fileSystemBytesRead() - startingBytesRead
         planned match {
           case None => EmptyHybridFileResult(file, bytesRead)
           case Some((fetched, numRows)) =>
-            withResource(fetched)(toSpillableResult(footer, _, numRows, bytesRead))
+            withResource(fetched) { _ =>
+              if (isDone) {
+                EmptyHybridFileResult(file, bytesRead)
+              } else {
+                toSpillableResult(footer, fetched, numRows, bytesRead)
+              }
+            }
         }
       }
       result.setExecutionTime(filterTime, System.nanoTime() - bufferStartTime)
