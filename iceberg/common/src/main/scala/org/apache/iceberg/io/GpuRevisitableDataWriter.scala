@@ -19,9 +19,9 @@ package org.apache.iceberg.io
 import java.util.ArrayList
 
 import com.nvidia.spark.rapids.SpillableColumnarBatch
-import org.apache.iceberg.{DataFile, PartitionSpec, StructLike}
+import org.apache.iceberg.{DataFile, PartitionData, PartitionSpec, StructLike}
 import org.apache.iceberg.spark.source.GpuSparkFileWriterFactory
-import org.apache.iceberg.util.{StructLikeUtil, StructLikeWrapper}
+import org.apache.iceberg.util.StructLikeWrapper
 
 /** Keeps one partition writer open and creates a new file when a partition is revisited. */
 class GpuRevisitableDataWriter(
@@ -53,7 +53,7 @@ class GpuRevisitableDataWriter(
       currentSpecId = spec.specId()
       // Keep a snapshot: callers may reuse their partition object for the next batch.
       currentPartition = StructLikeWrapper.forType(spec.partitionType())
-        .set(StructLikeUtil.copy(partition))
+        .set(new PartitionData(spec.partitionType()).copyFor(partition))
       currentWriter = newWriter(spec, currentPartition.get())
     }
     currentWriter.write(batch)
