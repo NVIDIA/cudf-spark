@@ -326,6 +326,9 @@ case class InsertIntoHadoopFsRelationCommandMeta(
 
   private var fileFormat: Option[ColumnarFileFormat] = None
 
+  override def checkTimeZone(): Boolean =
+    !GpuOrcFileFormat.isSparkOrcFormat(cmd.fileFormat.getClass)
+
   override def tagSelfForGpuInternal(): Unit = {
     if (BucketingUtilsShim.isHiveHashBucketing(cmd.options)) {
       BucketingUtilsShim.tagForHiveBucketingWrite(this, cmd.bucketSpec, cmd.outputColumns,
@@ -1240,7 +1243,8 @@ case class GpuQueryStagePrepOverrides(sparkSession: SparkSession)
       GpuTransitionOverrides.tagAqeQueryStageExchanges(plan)
       // Note that we disregard the GPU plan returned here and instead rely on side effects of
       // tagging the underlying SparkPlan.
-      GpuOverrides().applyWithContext(plan, Some("AQE Query Stage Prep"))
+      val converted = GpuOverrides().applyWithContext(plan, Some("AQE Query Stage Prep"))
+      DriverlessBroadcastStage.tagEligibleBuilds(plan, converted)
       // return the original plan which is now modified as a side-effect of invoking GpuOverrides
       plan
     }(sparkPlan)

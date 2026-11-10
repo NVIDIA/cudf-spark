@@ -19,11 +19,15 @@ package com.nvidia.spark.rapids
 import java.lang.management.ManagementFactory
 import java.util.concurrent.TimeUnit
 
-import ai.rapids.cudf.Cuda
+import scala.util.Try
+
+import ai.rapids.cudf.{Cuda, DeviceMemoryBuffer, Table}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.format.{CodecType, TableMeta}
 import com.nvidia.spark.rapids.shuffle.RapidsShuffleTestHelper
-import com.nvidia.spark.rapids.spill.SpillFramework
+import com.nvidia.spark.rapids.spill.{SpillableDeviceStore, SpillFramework}
+import org.mockito.ArgumentMatchers.any
+import org.mockito.Mockito.{doThrow, spy}
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.concurrent.Eventually.eventually
 import org.scalatest.concurrent.PatienceConfiguration.Timeout
@@ -78,7 +82,7 @@ class ShuffleBufferCatalogSuite
     val ct = RapidsShuffleTestHelper.buildContiguousTable(1000)
     shuffleCatalog.registerShuffle(1)
     assertResult(0)(SpillFramework.stores.deviceStore.numHandles)
-    shuffleCatalog.addContiguousTable(ShuffleBlockId(1, 1L, 1), ct, -1)
+    withResource(ct)(shuffleCatalog.addContiguousTable(ShuffleBlockId(1, 1L, 1), _, -1))
     assertResult(1)(SpillFramework.stores.deviceStore.numHandles)
     val storedMetas = shuffleCatalog.blockIdToMetas(ShuffleBlockId(1, 1L, 1))
     assertResult(1)(storedMetas.size)
@@ -91,11 +95,147 @@ class ShuffleBufferCatalogSuite
     val block = ShuffleBlockId(1, 1L, 1)
     // a packed batch is not compressed, so the add throws once the id is in the block's list
     val packed = GpuPackedTableColumn.from(RapidsShuffleTestHelper.buildContiguousTable(10))
-    assertThrows[ClassCastException](shuffleCatalog.addCompressedBatch(block, packed, -1))
+    val buffer = packed.column(0).asInstanceOf[GpuPackedTableColumn].getTableBuffer
+    val refsBefore = buffer.getRefCount
+    withResource(packed) { _ =>
+      assertThrows[ClassCastException](shuffleCatalog.addCompressedBatch(block, packed, -1))
+      assertResult(refsBefore)(buffer.getRefCount)
+    }
     assertResult((0, 0, 0))(shuffleCatalog.bookkeepingSizes)
     assertResult(0)(SpillFramework.stores.deviceStore.numHandles)
     assertThrows[NoSuchElementException](shuffleCatalog.blockIdToMetas(block))
     shuffleCatalog.unregisterShuffle(1)
+  }
+
+  /** A batch of `numRows` rows compressed with `codecId`, as the shuffle exchange makes one. */
+  private def compressedBatch(numRows: Int, codecId: Byte = CodecType.COPY): ColumnarBatch = {
+    val codec = TableCompressionCodec.getCodec(codecId,
+      TableCompressionCodec.makeCodecConfig(new RapidsConf(new SparkConf)))
+    withResource(codec.createBatchCompressor(0, Cuda.DEFAULT_STREAM)) { c =>
+      c.addTableToCompress(RapidsShuffleTestHelper.buildContiguousTable(numRows))
+      withResource(c.finish())(tables => GpuCompressedColumnVector.from(tables.head))
+    }
+  }
+
+  /** Reads the one batch of `block` back through the local read path and checks its rows. */
+  private def assertReadsBack(
+      catalog: ShuffleBufferCatalog,
+      block: ShuffleBlockId,
+      numRows: Int): Unit = {
+    def check(table: Table): Unit =
+      withResource(RapidsShuffleTestHelper.buildContiguousTable(numRows)) { expected =>
+        TestUtils.compareColumns(expected.getTable.getColumn(0), table.getColumn(0))
+      }
+    withResource(catalog.getColumnarBatchIterator(block, Array[DataType](IntegerType)).toArray) {
+      batches =>
+        assertResult(1)(batches.length)
+        batches.head.column(0) match {
+          case column: GpuCompressedColumnVector =>
+            val meta = column.getTableMeta
+            val codec = TableCompressionCodec.getCodec(meta.bufferMeta.codecBufferDescrs(0).codec,
+              TableCompressionCodec.makeCodecConfig(new RapidsConf(new SparkConf)))
+            withResource(codec.createBatchDecompressor(0, Cuda.DEFAULT_STREAM)) { decompressor =>
+              // the decompressor closes the buffer it is given
+              column.getTableBuffer.incRefCount()
+              decompressor.addBufferToDecompress(column.getTableBuffer, meta.bufferMeta)
+              withResource(decompressor.finishAsync()) { decoded =>
+                withResource(MetaUtils.getTableFromMeta(decoded.head, meta))(check)
+              }
+            }
+          case _ => withResource(GpuColumnVector.from(batches.head))(check)
+        }
+    }
+  }
+
+  test("each add borrows its input") {
+    val numRows = 1000
+    val catalog = new ShuffleBufferCatalog()
+    catalog.registerShuffle(1)
+    val tableBlock = ShuffleBlockId(1, 1L, 1)
+    val batchBlock = ShuffleBlockId(1, 1L, 2)
+    val table = RapidsShuffleTestHelper.buildContiguousTable(numRows)
+    val tableBuffer = table.getBuffer
+    val batch = compressedBatch(numRows)
+    val batchBuffer = batch.column(0).asInstanceOf[GpuCompressedColumnVector].getTableBuffer
+    def refs: (Int, Int) = (tableBuffer.getRefCount, batchBuffer.getRefCount)
+    // the input keeps the producer's reference, and the catalog takes one of its own
+    val refsAfterAdds = withResource(table) { _ =>
+      withResource(batch) { _ =>
+        catalog.addContiguousTable(tableBlock, table, -1)
+        catalog.addCompressedBatch(batchBlock, batch, -1)
+        refs
+      }
+    }
+    val refsAfterCloses = refs
+    // a freed buffer is not read, since that touches freed device memory
+    def read(block: ShuffleBlockId, buffer: DeviceMemoryBuffer): String =
+      if (buffer.getRefCount < 1) {
+        "skipped"
+      } else {
+        Try(assertReadsBack(catalog, block, numRows)).fold(e => s"failed: $e", _ => "ok")
+      }
+    val tableRead = read(tableBlock, tableBuffer)
+    val batchRead = read(batchBlock, batchBuffer)
+    val unregister = Try(catalog.unregisterShuffle(1)).fold(e => s"threw: $e", _ => "ok")
+    val refsAfterUnregister = refs
+    val handles = SpillFramework.stores.deviceStore.numHandles
+    assertResult(((2, 2), (1, 1), "ok", "ok", "ok", (0, 0), 0), "(references after the adds, " +
+      "after the producer's closes, table read, batch read, unregister, references after it, " +
+      "device handles)")(
+      (refsAfterAdds, refsAfterCloses, tableRead, batchRead, unregister, refsAfterUnregister,
+        handles))
+  }
+
+  test("an add to an unregistered shuffle leaves its input with the producer") {
+    val catalog = new ShuffleBufferCatalog()
+    catalog.registerShuffle(1)
+    catalog.unregisterShuffle(1)
+    val block = ShuffleBlockId(1, 1L, 1)
+    val sizesBefore = catalog.bookkeepingSizes
+    val table = RapidsShuffleTestHelper.buildContiguousTable(10)
+    val batch = compressedBatch(10)
+    val tableBuffer = table.getBuffer
+    val batchBuffer = batch.column(0).asInstanceOf[GpuCompressedColumnVector].getTableBuffer
+    // the class of what an add threw
+    def thrown(add: => ShuffleBufferId): String =
+      Try(add).failed.map(_.getClass.getSimpleName).getOrElse("nothing")
+    val adds = (thrown(catalog.addContiguousTable(block, table, -1)),
+      thrown(catalog.addCompressedBatch(block, batch, -1)))
+    val refs = (tableBuffer.getRefCount, batchBuffer.getRefCount)
+    val sizes = catalog.bookkeepingSizes
+    val closes = (Try(table.close()).fold(e => s"threw: $e", _ => "ok"),
+      Try(batch.close()).fold(e => s"threw: $e", _ => "ok"))
+    assertResult((("IllegalStateException", "IllegalStateException"), (1, 1), ("ok", "ok"),
+      sizesBefore), "(what the adds threw, references after them, the producer's closes, " +
+      "bookkeeping sizes)")((adds, refs, closes, sizes))
+  }
+
+  test("a handle factory that throws releases the catalog's reference") {
+    val catalog = new ShuffleBufferCatalog()
+    catalog.registerShuffle(1)
+    val block = ShuffleBlockId(1, 1L, 1)
+    val table = RapidsShuffleTestHelper.buildContiguousTable(10)
+    val batch = compressedBatch(10)
+    // a device store that refuses to track a handle makes SpillableDeviceBufferHandle throw
+    SpillFramework.storesInternal.deviceStore.close()
+    val store = spy(new SpillableDeviceStore)
+    SpillFramework.storesInternal.deviceStore = store
+    val adds = Seq[(AutoCloseable, DeviceMemoryBuffer, () => ShuffleBufferId)](
+      (table, table.getBuffer, () => catalog.addContiguousTable(block, table, -1)),
+      (batch, batch.column(0).asInstanceOf[GpuCompressedColumnVector].getTableBuffer,
+        () => catalog.addCompressedBatch(block, batch, -1)))
+    val outcomes = adds.map { case (input, buffer, add) =>
+      doThrow(new IllegalStateException("injected")).doCallRealMethod().when(store).track(any())
+      val thrown = Try(add()).failed.map(_.getMessage).getOrElse("nothing")
+      val refsAfterAdd = buffer.getRefCount
+      val handles = SpillFramework.stores.deviceStore.numHandles
+      val producerClose = Try(input.close()).fold(e => s"threw: $e", _ => "ok")
+      (thrown, refsAfterAdd, handles, producerClose, buffer.getRefCount)
+    }
+    catalog.unregisterShuffle(1)
+    assertResult(Seq.fill(2)(("injected", 1, 0, "ok", 0)), "packed, then COPY: (what the add " +
+      "threw, references after the add, device handles, the producer's close, references " +
+      "after it)")(outcomes)
   }
 
   /** A block's list of buffer ids, which the catalog keeps private and locks for every change. */
@@ -181,7 +321,7 @@ class ShuffleBufferCatalogSuite
     val tableMeta = RapidsShuffleTestHelper.mockTableMeta(0)
     shuffleCatalog.addDegenerateRapidsBuffer(ShuffleBlockId(1, 1L, 1), tableMeta)
     val ct = RapidsShuffleTestHelper.buildContiguousTable(1000)
-    shuffleCatalog.addContiguousTable(ShuffleBlockId(1, 1L, 1), ct, -1)
+    withResource(ct)(shuffleCatalog.addContiguousTable(ShuffleBlockId(1, 1L, 1), _, -1))
     val iter =
       shuffleCatalog.getColumnarBatchIterator(
         ShuffleBlockId(1, 1L, 1), Array[DataType](IntegerType))
@@ -202,30 +342,28 @@ class ShuffleBufferCatalogSuite
     val shuffleCatalog = new ShuffleBufferCatalog()
     shuffleCatalog.registerShuffle(1)
     val block = ShuffleBlockId(1, 1L, 1)
-    val compressed = withResource(codec.createBatchCompressor(0, Cuda.DEFAULT_STREAM)) { c =>
-      c.addTableToCompress(RapidsShuffleTestHelper.buildContiguousTable(numRows))
-      withResource(c.finish())(tables => GpuCompressedColumnVector.from(tables.head))
-    }
-    // the catalog closes the batch it is given
-    shuffleCatalog.addCompressedBatch(block, compressed, -1)
-    withResource(shuffleCatalog.getColumnarBatchIterator(
-        block, Array[DataType](IntegerType)).toArray) { batches =>
-      assertResult(1)(batches.length)
-      assert(GpuCompressedColumnVector.isBatchCompressed(batches.head))
-      val column = batches.head.column(0).asInstanceOf[GpuCompressedColumnVector]
-      val meta = column.getTableMeta
-      withResource(codec.createBatchDecompressor(0, Cuda.DEFAULT_STREAM)) {
-        decompressor =>
-          // the decompressor closes the buffer it is given
-          column.getTableBuffer.incRefCount()
-          decompressor.addBufferToDecompress(column.getTableBuffer, meta.bufferMeta)
-          withResource(decompressor.finishAsync()) { decoded =>
-            withResource(MetaUtils.getTableFromMeta(decoded.head, meta)) { table =>
-              withResource(RapidsShuffleTestHelper.buildContiguousTable(numRows)) { expected =>
-                TestUtils.compareColumns(expected.getTable.getColumn(0), table.getColumn(0))
+    // the read comes before the producer's close, which frees the buffer if an add also closed it
+    withResource(compressedBatch(numRows, CodecType.NVCOMP_LZ4)) { compressed =>
+      shuffleCatalog.addCompressedBatch(block, compressed, -1)
+      withResource(shuffleCatalog.getColumnarBatchIterator(
+          block, Array[DataType](IntegerType)).toArray) { batches =>
+        assertResult(1)(batches.length)
+        assert(GpuCompressedColumnVector.isBatchCompressed(batches.head))
+        val column = batches.head.column(0).asInstanceOf[GpuCompressedColumnVector]
+        val meta = column.getTableMeta
+        withResource(codec.createBatchDecompressor(0, Cuda.DEFAULT_STREAM)) {
+          decompressor =>
+            // the decompressor closes the buffer it is given
+            column.getTableBuffer.incRefCount()
+            decompressor.addBufferToDecompress(column.getTableBuffer, meta.bufferMeta)
+            withResource(decompressor.finishAsync()) { decoded =>
+              withResource(MetaUtils.getTableFromMeta(decoded.head, meta)) { table =>
+                withResource(RapidsShuffleTestHelper.buildContiguousTable(numRows)) { expected =>
+                  TestUtils.compareColumns(expected.getTable.getColumn(0), table.getColumn(0))
+                }
               }
             }
-          }
+        }
       }
     }
     shuffleCatalog.unregisterShuffle(1)
@@ -245,10 +383,12 @@ class ShuffleBufferCatalogSuite
       metaRows
     }
     val first = Seq(
-      catalog.addContiguousTable(blocks(0), RapidsShuffleTestHelper.buildContiguousTable(10), -1),
+      withResource(RapidsShuffleTestHelper.buildContiguousTable(10))(
+        catalog.addContiguousTable(blocks(0), _, -1)),
       catalog.addDegenerateRapidsBuffer(blocks(0),
         MetaUtils.buildDegenerateTableMeta(new ColumnarBatch(Array.empty, 11))),
-      catalog.addContiguousTable(blocks(1), RapidsShuffleTestHelper.buildContiguousTable(5), -1))
+      withResource(RapidsShuffleTestHelper.buildContiguousTable(5))(
+        catalog.addContiguousTable(blocks(1), _, -1)))
     // an attempt is not read before it commits
     blocks.foreach(block => assertThrows[NoSuchElementException](catalog.blockIdToMetas(block)))
     val firstSizes = Array(200L, 100L, 0L)
@@ -256,8 +396,10 @@ class ShuffleBufferCatalogSuite
     assertResult(Seq(200L, 100L, 0L))(firstSizes.toSeq)
 
     val second = Seq(
-      catalog.addContiguousTable(blocks(0), RapidsShuffleTestHelper.buildContiguousTable(20), -1),
-      catalog.addContiguousTable(blocks(2), RapidsShuffleTestHelper.buildContiguousTable(30), -1))
+      withResource(RapidsShuffleTestHelper.buildContiguousTable(20))(
+        catalog.addContiguousTable(blocks(0), _, -1)),
+      withResource(RapidsShuffleTestHelper.buildContiguousTable(30))(
+        catalog.addContiguousTable(blocks(2), _, -1)))
     assertResult(Seq(10L, 11L))(rowCounts(blocks(0)))
     val secondSizes = Array(400L, 0L, 300L)
     catalog.commitMapOutput(1, 7L, second, secondSizes)
@@ -304,8 +446,8 @@ class ShuffleBufferCatalogSuite
     val catalog = new ShuffleBufferCatalog(mapIdsCanRepeat = true)
     catalog.registerShuffle(1)
     val block = ShuffleBlockId(1, 7L, 0)
-    val ids = Seq(
-      catalog.addContiguousTable(block, RapidsShuffleTestHelper.buildContiguousTable(10), -1))
+    val ids = Seq(withResource(RapidsShuffleTestHelper.buildContiguousTable(10))(
+      catalog.addContiguousTable(block, _, -1)))
     catalog.commitMapOutput(1, 7L, ids, Array(100L))
     // the committed output keeps its ids, so both reads find ids with no entries
     catalog.removeCachedHandles(ids)
@@ -318,8 +460,8 @@ class ShuffleBufferCatalogSuite
     val catalog = new ShuffleBufferCatalog(mapIdsCanRepeat = true)
     catalog.registerShuffle(1)
     val block = ShuffleBlockId(1, 7L, 0)
-    val ids = Seq(
-      catalog.addContiguousTable(block, RapidsShuffleTestHelper.buildContiguousTable(10), -1))
+    val ids = Seq(withResource(RapidsShuffleTestHelper.buildContiguousTable(10))(
+      catalog.addContiguousTable(block, _, -1)))
     catalog.unregisterShuffle(1)
     // the map's MapStatus would name output the executor no longer has
     assertThrows[IllegalStateException](catalog.commitMapOutput(1, 7L, ids, Array(100L)))

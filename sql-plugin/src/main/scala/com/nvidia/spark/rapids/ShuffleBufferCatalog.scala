@@ -141,15 +141,16 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
   }
 
   /**
-   * Allocates a buffer id for `blockId`, passes it to `register`, then closes `input`. The caller
-   * learns the id only if this returns, so any failure once the id exists, closing `input`
-   * included, removes what was registered under it.
+   * Allocates a buffer id for `blockId` and passes it to `register`. The caller learns the id
+   * only if this returns, so any failure once the id exists removes what was registered under it.
+   * The adds borrow their input: each takes a reference of its own for the handle it registers,
+   * and the producer closes the input.
    */
-  private def registerAndClose(blockId: ShuffleBlockId, input: AutoCloseable)(
+  private def registerBuffer(blockId: ShuffleBlockId)(
       register: ShuffleBufferId => Unit): ShuffleBufferId = {
-    val bufferId = closeOnExcept(input)(_ => nextShuffleBufferId(blockId))
+    val bufferId = nextShuffleBufferId(blockId)
     val rollback: AutoCloseable = () => removeCachedHandles(Seq(bufferId))
-    closeOnExcept(rollback)(_ => withResource(input)(_ => register(bufferId)))
+    closeOnExcept(rollback)(_ => register(bufferId))
     bufferId
   }
 
@@ -167,17 +168,20 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
   def addContiguousTable(blockId: ShuffleBlockId,
                          contigTable: ContiguousTable,
                          initialSpillPriority: Long): ShuffleBufferId = {
-    registerAndClose(blockId, contigTable) { bufferId =>
+    registerBuffer(blockId) { bufferId =>
       val tableMeta = MetaUtils.buildTableMeta(bufferId.tableId, contigTable)
       val buff = contigTable.getBuffer
       buff.incRefCount()
-      val handle = SpillableDeviceBufferHandle(buff, initialSpillPriority)
+      val handle = closeOnExcept(buff)(_ => SpillableDeviceBufferHandle(buff, initialSpillPriority))
       trackCachedHandle(bufferId, handle, tableMeta)
     }
   }
 
   /**
-   * Adds a buffer to the device storage, taking ownership of the buffer.
+   * Adds a compressed batch to the device storage. This does NOT take ownership of the
+   * compressed batch, so it is the responsibility of the caller to close it.
+   * The refcount of the underlying device buffer will be incremented so the compressed batch
+   * can be closed before this buffer is destroyed.
    *
    * @param blockId              Spark's `ShuffleBlockId` that identifies this buffer
    * @param compressedBatch      Compressed ColumnarBatch
@@ -188,14 +192,14 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
     blockId: ShuffleBlockId,
     compressedBatch: ColumnarBatch,
     initialSpillPriority: Long): ShuffleBufferId = {
-    registerAndClose(blockId, compressedBatch) { bufferId =>
+    registerBuffer(blockId) { bufferId =>
       val compressed = compressedBatch.column(0).asInstanceOf[GpuCompressedColumnVector]
       val tableMeta = compressed.getTableMeta
       // update the table metadata for the buffer ID generated above
       tableMeta.bufferMeta().mutateId(bufferId.tableId)
       val buff = compressed.getTableBuffer
       buff.incRefCount()
-      val handle = SpillableDeviceBufferHandle(buff, initialSpillPriority)
+      val handle = closeOnExcept(buff)(_ => SpillableDeviceBufferHandle(buff, initialSpillPriority))
       trackCachedHandle(bufferId, handle, tableMeta)
     }
   }

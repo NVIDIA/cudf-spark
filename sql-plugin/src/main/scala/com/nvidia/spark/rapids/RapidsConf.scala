@@ -738,6 +738,14 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
     }
   }
 
+  lazy val isParquetHybridScanEnabled: Boolean = get(PARQUET_HYBRID_SCAN_ENABLED)
+
+  lazy val testParquetHybridScanFailOnFallback: Boolean =
+    get(TEST_PARQUET_HYBRID_SCAN_FAIL_ON_FALLBACK)
+
+  lazy val hybridScanSingleStageFilterKeepThreshold: Double =
+    get(PARQUET_HYBRID_SCAN_SINGLE_STAGE_FILTER_KEEP_THRESHOLD)
+
   lazy val isParquetPerFileReadEnabled: Boolean =
     RapidsReaderType.withName(get(PARQUET_READER_TYPE)) == RapidsReaderType.PERFILE
 
@@ -902,6 +910,10 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val shuffleMaxMetadataSize: Long = get(SHUFFLE_MAX_METADATA_SIZE)
 
   lazy val shuffleCompressionCodec: String = get(SHUFFLE_COMPRESSION_CODEC)
+
+  lazy val driverlessBroadcastMaxExecutors: Int = get(DRIVERLESS_BROADCAST_MAX_EXECUTORS)
+
+  lazy val isDriverlessBroadcastEnabled: Boolean = get(DRIVERLESS_BROADCAST_ENABLED)
 
   lazy val shuffleCompressionLz4ChunkSize: Long = get(SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE)
 
