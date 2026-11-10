@@ -226,7 +226,8 @@ class HostToGpuCoalesceIterator(iter: Iterator[ColumnarBatch],
     copyBufTime: GpuMetric,
     opTime: GpuMetric,
     opName: String,
-    useArrowCopyOpt: Boolean)
+    useArrowCopyOpt: Boolean,
+    releaseSemaphoreWhilePulling: Boolean = false)
   extends AbstractGpuCoalesceIterator(iter,
     goal,
     numInputRows,
@@ -315,10 +316,14 @@ class HostToGpuCoalesceIterator(iter: Iterator[ColumnarBatch],
   override def hasAnyToConcat: Boolean = totalRows > 0
 
   // Pulling the host batches of a GPU batch is CPU work, such as decoding a file, so next()
-  // gives up the semaphore while it does that, and concatAllAndPutOnGPU acquires it again.
+  // can give up the semaphore while it does that, and concatAllAndPutOnGPU acquires it again.
   // hasNext leaves it alone, as operators above may call it while they still use the GPU.
+  // Off by default: the released task keeps its device memory, which the GPU concurrency
+  // does not account for.
   override def next(): ColumnarBatch = {
-    GpuSemaphore.releaseIfNecessary(TaskContext.get())
+    if (releaseSemaphoreWhilePulling) {
+      GpuSemaphore.releaseIfNecessary(TaskContext.get())
+    }
     super.next()
   }
 
@@ -423,12 +428,14 @@ case class HostColumnarToGpu(child: SparkPlan, goal: CoalesceSizeGoal)
 
     val batches = child.executeColumnar()
 
-    val confUseArrow = new RapidsConf(child.conf).useArrowCopyOptimization
+    val rapidsConf = new RapidsConf(child.conf)
+    val confUseArrow = rapidsConf.useArrowCopyOptimization
+    val releaseSemaphore = rapidsConf.hostColumnarToGpuReleaseSemaphore
     batches.mapPartitions { iter =>
       new HostToGpuCoalesceIterator(iter, goal, outputSchema,
         numInputRows, numInputBatches, numOutputRows, numOutputBatches,
         streamTime, concatTime, copyBufTime, opTime,
-        "HostColumnarToGpu", confUseArrow)
+        "HostColumnarToGpu", confUseArrow, releaseSemaphore)
     }
   }
 }

@@ -130,7 +130,18 @@ class GpuSemaphoreSuite extends AnyFunSuite
     }
   }
 
-  test("HostToGpuCoalesceIterator releases the semaphore only while next() pulls host batches") {
+  Seq(true, false).foreach { enabled =>
+    val behavior = if (enabled) {
+      "releases the semaphore only while next() pulls host batches"
+    } else {
+      "keeps the semaphore while it pulls host batches when the release is disabled"
+    }
+    test(s"HostToGpuCoalesceIterator $behavior") {
+      hostToGpuCoalesceIteratorPulls(enabled)
+    }
+  }
+
+  private def hostToGpuCoalesceIteratorPulls(releaseSemaphore: Boolean): Unit = {
     GpuDeviceManager.setRmmTaskInitEnabled(false)
     val context1 = new MockTaskContext(taskAttemptId = 1, partitionId = 0)
     val context2 = mockContext(2)
@@ -168,7 +179,8 @@ class GpuSemaphoreSuite extends AnyFunSuite
         // A target size below one host batch, so that each host batch is a GPU batch
         val iter = new HostToGpuCoalesceIterator(hostBatches, TargetSize(1), schema,
           NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric,
-          NoopMetric, "test", useArrowCopyOpt = false)
+          NoopMetric, "test", useArrowCopyOpt = false,
+          releaseSemaphoreWhilePulling = releaseSemaphore)
         // As an operator above that still uses the GPU when it asks for more
         GpuSemaphore.acquireIfNecessary(context1)
         var rows = 0
@@ -186,8 +198,9 @@ class GpuSemaphoreSuite extends AnyFunSuite
         // Released and acquired again for each GPU batch, with the next host batch on deck
         assert(gpuBatches >= 2, s"$gpuBatches GPU batches")
         assert(pulls.exists(_._1) && pulls.exists(!_._1), pulls)
-        assert(pulls.forall { case (pulledInNext, wasReleased) => pulledInNext == wasReleased },
-          pulls)
+        assert(pulls.forall { case (pulledInNext, wasReleased) =>
+          wasReleased == (releaseSemaphore && pulledInNext)
+        }, pulls)
       } finally {
         GpuSemaphore.releaseIfNecessary(context1)
         GpuSemaphore.releaseIfNecessary(context2)

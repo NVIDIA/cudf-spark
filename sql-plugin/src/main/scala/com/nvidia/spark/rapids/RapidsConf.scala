@@ -1009,6 +1009,9 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val useArrowCopyOptimization: Boolean = get(USE_ARROW_OPT)
 
+  lazy val hostColumnarToGpuReleaseSemaphore: Boolean =
+    get(HOST_COLUMNAR_TO_GPU_RELEASE_SEMAPHORE)
+
   lazy val getCloudSchemes: Seq[String] =
     DEFAULT_CLOUD_SCHEMES ++ get(CLOUD_SCHEMES).getOrElse(Seq.empty)
 
