@@ -35,7 +35,7 @@ import org.apache.iceberg.types.Types.NestedField
 import org.apache.iceberg.types.TypeUtil.getProjectedIds
 
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.catalyst.expressions.{ExprId, Expression}
+import org.apache.spark.sql.catalyst.expressions.{Expression, ExprId}
 import org.apache.spark.sql.rapids.execution.HashedExistenceJoinIterator
 import org.apache.spark.sql.types.{BooleanType, DataType, DoubleType, FloatType, IntegerType, LongType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
