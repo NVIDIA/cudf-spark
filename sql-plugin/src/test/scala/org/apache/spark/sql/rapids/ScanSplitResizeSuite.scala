@@ -29,7 +29,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.execution.datasources.{FilePartition, InMemoryFileIndex}
 import org.apache.spark.sql.execution.datasources.v2.parquet.ParquetScan
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{IntegerType, LongType, StringType, StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 /**
@@ -40,15 +40,20 @@ class ScanSplitResizeSuite extends AnyFunSuite {
 
   /** A Spark Parquet scan whose partitions come from our override. */
   private class HistoryParquetScan(
-      spark: SparkSession, index: InMemoryFileIndex, schema: StructType)
+      spark: SparkSession, index: InMemoryFileIndex, schema: StructType,
+      readPartitions: StructType = StructType(Nil))
     extends ParquetScan(spark, spark.sessionState.newHadoopConf(), index, schema, schema,
-      StructType(Nil), Array.empty, CaseInsensitiveStringMap.empty())
+      readPartitions, Array.empty, CaseInsensitiveStringMap.empty())
       with HistorySizedFileScan
 
-  private def plan(scan: ParquetScan): Seq[(Int, Seq[(String, Long, Long)])] =
+  /** Each partition's index and files as (path, start, length, partition values). */
+  private def plan(scan: ParquetScan, partitionColumns: StructType = StructType(Nil))
+    : Seq[(Int, Seq[(String, Long, Long, Seq[Any])])] =
     scan.planInputPartitions().toSeq.map { p =>
       val fp = p.asInstanceOf[FilePartition]
-      (fp.index, fp.files.toSeq.map(f => (f.filePath.toString, f.start, f.length)))
+      (fp.index, fp.files.toSeq.map { f =>
+        (f.filePath.toString, f.start, f.length, f.partitionValues.toSeq(partitionColumns))
+      })
     }
 
   private def withScans(
@@ -72,9 +77,11 @@ class ScanSplitResizeSuite extends AnyFunSuite {
   private def newIndex(spark: SparkSession, out: Path) =
     new InMemoryFileIndex(spark, Seq(out), Map.empty, None)
 
-  private def newSparkScan(spark: SparkSession, out: Path, schema: StructType) =
+  private def newSparkScan(
+      spark: SparkSession, out: Path, schema: StructType,
+      readPartitions: StructType = StructType(Nil)) =
     ParquetScan(spark, spark.sessionState.newHadoopConf(), newIndex(spark, out), schema, schema,
-      StructType(Nil), Array.empty, CaseInsensitiveStringMap.empty())
+      readPartitions, Array.empty, CaseInsensitiveStringMap.empty())
 
   test("with history on but nothing recorded the partitions are Spark's own") {
     withScans() { (spark, out, schema) =>
@@ -97,6 +104,32 @@ class ScanSplitResizeSuite extends AnyFunSuite {
       assert(!ScanSplitHeuristic.isEnabled)
       assert(plan(new HistoryParquetScan(spark, newIndex(spark, out), schema)) ==
         plan(newSparkScan(spark, out, schema)))
+    }
+  }
+
+  test("reading some partition columns gives Spark's partition values and splits") {
+    withScans() { (spark, out, _) =>
+      val table = new Path(out.getParent, "partitioned")
+      spark.range(0, 6000).selectExpr("id", "cast(id as string) s", "cast(id % 3 as int) a",
+        "case when id % 2 = 0 then 'even' else 'odd' end b")
+        .repartition(3).write.partitionBy("a", "b").parquet(table.toString)
+      val data = StructType(Seq(StructField("id", LongType), StructField("s", StringType)))
+      val a = StructField("a", IntegerType)
+      val b = StructField("b", StringType)
+      val registration = MetricStores.install(new FakeMetricStore)
+      ScanSplitHeuristic.enable(HistoryPolicy(Duration.ofMillis(100), Duration.ofSeconds(5)))
+      try {
+        // One column, and two in the opposite order to the table's own.
+        Seq(StructType(Seq(a)), StructType(Seq(b, a))).foreach { read =>
+          val ours = plan(new HistoryParquetScan(spark, newIndex(spark, table), data, read), read)
+          val sparkPlan = plan(newSparkScan(spark, table, data, read), read)
+          assert(sparkPlan.flatMap(_._2).map(_._4).toSet.size > 1, "values must differ by file")
+          assert(ours == sparkPlan, s"read columns ${read.fieldNames.mkString(",")}")
+        }
+      } finally {
+        ScanSplitHeuristic.disable()
+        registration.close()
+      }
     }
   }
 
