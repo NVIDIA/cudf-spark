@@ -520,4 +520,27 @@ class RapidsCachingWriterSuite extends RmmSparkRetrySuiteBase with MockitoSugar 
           handles))
     }
   }
+
+  test("when map ids repeat, a commit after unregisterShuffle fails even if the shuffle was " +
+      "registered again") {
+    // another map task of the shuffle can register it again before a zombie task commits
+    val catalog = new ShuffleBufferCatalog(mapIdsCanRepeat = true)
+    val writer = newWriter(catalog, 1, 7L)
+    assertThrows[IllegalStateException](write(writer, firstAttempt, afterLastBatch = () => {
+      catalog.unregisterShuffle(1)
+      catalog.registerShuffle(1)
+    }))
+    assertResult(firstAttempt.size)(writer.numRecordedBuffers)
+    assert(writer.stop(false).isEmpty)
+    assertResult(0)(numDeviceHandles)
+    assertConsistent(catalog, 0)
+    val later = newWriter(catalog, 1, 7L)
+    succeed(later, laterAttempt)
+    assertReadable(catalog, 1, 7L, laterAttempt)
+    // a record of the failed commit would be served instead, with no output for partition 2
+    assert(later.partitionSizes(2) > 0)
+    catalog.unregisterShuffle(1)
+    assertResult(0)(numDeviceHandles)
+    assertConsistent(catalog, 0)
+  }
 }

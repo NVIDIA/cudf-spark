@@ -17,7 +17,8 @@
 package com.nvidia.spark.rapids
 
 import java.lang.management.ManagementFactory
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.{CountDownLatch, TimeUnit}
+import java.util.concurrent.atomic.AtomicReference
 
 import scala.util.Try
 
@@ -27,7 +28,7 @@ import com.nvidia.spark.rapids.format.{CodecType, TableMeta}
 import com.nvidia.spark.rapids.shuffle.RapidsShuffleTestHelper
 import com.nvidia.spark.rapids.spill.{SpillableDeviceStore, SpillFramework}
 import org.mockito.ArgumentMatchers.any
-import org.mockito.Mockito.{doThrow, spy}
+import org.mockito.Mockito.{doAnswer, doThrow, spy}
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.concurrent.Eventually.eventually
 import org.scalatest.concurrent.PatienceConfiguration.Timeout
@@ -243,8 +244,8 @@ class ShuffleBufferCatalogSuite
     val field = classOf[ShuffleBufferCatalog].getDeclaredField("activeShuffles")
     field.setAccessible(true)
     val shuffles = field.get(catalog).asInstanceOf[
-      java.util.Map[Any, java.util.Map[ShuffleBlockId, AnyRef]]]
-    shuffles.get(block.shuffleId).get(block)
+      java.util.Map[Any, ShuffleBufferCatalog.ShuffleRegistration]]
+    shuffles.get(block.shuffleId).blocks.get(block)
   }
 
   test("a removal that empties a block waits for an append to that block in flight") {
@@ -312,6 +313,96 @@ class ShuffleBufferCatalogSuite
     assert(!unregister.isAlive)
     assert(!shuffleCatalog.hasActiveShuffle(1))
     assertResult((0, 0, 0))(shuffleCatalog.bookkeepingSizes)
+  }
+
+  test("an add whose shuffle is unregistered while the add is in flight fails and leaves " +
+      "nothing behind") {
+    val awaitSeconds = 30
+    val shuffleCatalog = new ShuffleBufferCatalog()
+    shuffleCatalog.registerShuffle(1)
+    val inTrack = new CountDownLatch(1)
+    val resumeTrack = new CountDownLatch(1)
+    // the store tracks a new handle after the catalog lists its buffer and before the catalog
+    // maps the buffer to it
+    SpillFramework.storesInternal.deviceStore.close()
+    SpillFramework.storesInternal.deviceStore = spy(new SpillableDeviceStore)
+    doAnswer(invocation => {
+      inTrack.countDown()
+      resumeTrack.await(awaitSeconds, TimeUnit.SECONDS)
+      invocation.callRealMethod()
+    }).when(SpillFramework.stores.deviceStore).track(any())
+    val handlesBefore = SpillFramework.stores.deviceStore.numHandles
+    val added = new AtomicReference[Try[ShuffleBufferId]]()
+    // the add borrows the table, so the table closes once the add has ended
+    withResource(RapidsShuffleTestHelper.buildContiguousTable(1000)) { table =>
+      val adder = new Thread(() => added.set(Try(shuffleCatalog.addContiguousTable(
+        ShuffleBlockId(1, 7L, 0), table, -1))), "shuffle-add")
+      adder.setDaemon(true)
+      try {
+        adder.start()
+        assert(inTrack.await(awaitSeconds, TimeUnit.SECONDS), "the add never tracked its buffer")
+        shuffleCatalog.unregisterShuffle(1)
+      } finally {
+        resumeTrack.countDown()
+        adder.join(TimeUnit.SECONDS.toMillis(awaitSeconds))
+      }
+      assert(!adder.isAlive)
+    }
+    val outcome = added.get
+    val handlesAfter = SpillFramework.stores.deviceStore.numHandles
+    val bookkeepingAfter = shuffleCatalog.bookkeepingSizes
+    // an add that returns hands its buffer to the caller
+    outcome.foreach(id => shuffleCatalog.removeCachedHandles(Seq(id)))
+    assert(outcome.failed.toOption.exists(_.isInstanceOf[IllegalStateException]),
+      s"the add returned $outcome, leaving $bookkeepingAfter " +
+        "(bufferIdToHandle, tableMap, block lists)")
+    assertResult(handlesBefore)(handlesAfter)
+    assertResult((0, 0, 0))(bookkeepingAfter)
+    assert(!shuffleCatalog.hasActiveShuffle(1))
+  }
+
+  test("a degenerate add whose shuffle is unregistered and registered again while the add is " +
+      "in flight fails and leaves nothing behind") {
+    val awaitSeconds = 30
+    val shuffleCatalog = new ShuffleBufferCatalog()
+    shuffleCatalog.registerShuffle(1)
+    val block = ShuffleBlockId(1, 7L, 0)
+    shuffleCatalog.addDegenerateRapidsBuffer(block, mock[TableMeta])
+    val meta = mock[TableMeta]
+    val added = new AtomicReference[Try[ShuffleBufferId]]()
+    val adder = new Thread(() => added.set(Try(shuffleCatalog.addDegenerateRapidsBuffer(block,
+      meta))), "shuffle-add")
+    adder.setDaemon(true)
+    val threads = ManagementFactory.getThreadMXBean
+    val list = blockBufferIds(shuffleCatalog, block)
+    try {
+      list.synchronized {
+        adder.start()
+        eventually(Timeout(Span(awaitSeconds, Seconds))) {
+          val info = threads.getThreadInfo(adder.getId)
+          assert(info != null && info.getThreadState == Thread.State.BLOCKED &&
+            info.getLockInfo.getIdentityHashCode == System.identityHashCode(list),
+            "the add never reached the block's list")
+        }
+        // This thread holds the list's lock, so the removal copies the list without the add's
+        // id. A later writer of the shuffle then registers it again before the add checks.
+        shuffleCatalog.unregisterShuffle(1)
+        shuffleCatalog.registerShuffle(1)
+      }
+    } finally {
+      adder.join(TimeUnit.SECONDS.toMillis(awaitSeconds))
+    }
+    assert(!adder.isAlive)
+    val outcome = added.get
+    val bookkeepingAfter = shuffleCatalog.bookkeepingSizes
+    // an add that returns hands its buffer to the caller
+    outcome.foreach(id => shuffleCatalog.removeCachedHandles(Seq(id)))
+    assert(outcome.failed.toOption.exists(_.isInstanceOf[IllegalStateException]),
+      s"the add returned $outcome, leaving $bookkeepingAfter " +
+        "(bufferIdToHandle, tableMap, block lists)")
+    assertResult((0, 0, 0))(bookkeepingAfter)
+    assert(shuffleCatalog.hasActiveShuffle(1))
+    shuffleCatalog.unregisterShuffle(1)
   }
 
   test("get a columnar batch iterator from catalog") {
@@ -466,6 +557,73 @@ class ShuffleBufferCatalogSuite
     // the map's MapStatus would name output the executor no longer has
     assertThrows[IllegalStateException](catalog.commitMapOutput(1, 7L, ids, Array(100L)))
     assertResult(0)(SpillFramework.stores.deviceStore.numHandles)
+    assertResult((0, 0, 0))(catalog.bookkeepingSizes)
+  }
+
+  test("when map ids repeat, a commit fails if the shuffle's registration does not list its " +
+      "buffers") {
+    val awaitSeconds = 30
+    val catalog = new ShuffleBufferCatalog(mapIdsCanRepeat = true)
+    catalog.registerShuffle(1)
+    val block = ShuffleBlockId(1, 7L, 0)
+    val late = Seq(catalog.addDegenerateRapidsBuffer(block, mock[TableMeta]))
+    val unregister = new Thread(() => catalog.unregisterShuffle(1), "shuffle-unregister")
+    unregister.setDaemon(true)
+    val threads = ManagementFactory.getThreadMXBean
+    val list = blockBufferIds(catalog, block)
+    try {
+      list.synchronized {
+        unregister.start()
+        eventually(Timeout(Span(awaitSeconds, Seconds))) {
+          val info = threads.getThreadInfo(unregister.getId)
+          assert(info != null && info.getThreadState == Thread.State.BLOCKED &&
+            info.getLockInfo.getIdentityHashCode == System.identityHashCode(list),
+            "unregisterShuffle did not wait for the block's list")
+        }
+        // The removal has taken the registration but not yet freed its buffers, and a later
+        // writer of the shuffle registers it again before the late writer commits.
+        assert(!catalog.hasActiveShuffle(1))
+        catalog.registerShuffle(1)
+        assertThrows[IllegalStateException](catalog.commitMapOutput(1, 7L, late, Array(100L)))
+      }
+    } finally {
+      unregister.join(TimeUnit.SECONDS.toMillis(awaitSeconds))
+    }
+    assert(!unregister.isAlive)
+    // as the late writer's stop(false) would
+    catalog.removeCachedHandles(late)
+    val freshMeta = mock[TableMeta]
+    val fresh = Seq(catalog.addDegenerateRapidsBuffer(block, freshMeta))
+    val freshSizes = Array(200L)
+    catalog.commitMapOutput(1, 7L, fresh, freshSizes)
+    assertResult(Seq(200L))(freshSizes.toSeq)
+    assertResult(Seq(freshMeta))(catalog.blockIdToMetas(block))
+    assertResult((1, 1, 1))(catalog.bookkeepingSizes)
+    catalog.unregisterShuffle(1)
+    assertResult((0, 0, 0))(catalog.bookkeepingSizes)
+  }
+
+  test("when map ids repeat, a commit fails if the shuffle's registration lists its block but " +
+      "not its buffers") {
+    val catalog = new ShuffleBufferCatalog(mapIdsCanRepeat = true)
+    catalog.registerShuffle(1)
+    val block = ShuffleBlockId(1, 7L, 0)
+    val late = Seq(catalog.addDegenerateRapidsBuffer(block, mock[TableMeta]))
+    catalog.unregisterShuffle(1)
+    // a later attempt of the map registers the shuffle again and writes the same block before
+    // the late attempt commits
+    catalog.registerShuffle(1)
+    val freshMeta = mock[TableMeta]
+    val fresh = Seq(catalog.addDegenerateRapidsBuffer(block, freshMeta))
+    assertThrows[IllegalStateException](catalog.commitMapOutput(1, 7L, late, Array(100L)))
+    // as the late writer's stop(false) would
+    catalog.removeCachedHandles(late)
+    val freshSizes = Array(200L)
+    catalog.commitMapOutput(1, 7L, fresh, freshSizes)
+    assertResult(Seq(200L))(freshSizes.toSeq)
+    assertResult(Seq(freshMeta))(catalog.blockIdToMetas(block))
+    assertResult((1, 1, 1))(catalog.bookkeepingSizes)
+    catalog.unregisterShuffle(1)
     assertResult((0, 0, 0))(catalog.bookkeepingSizes)
   }
 }
