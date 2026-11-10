@@ -22,7 +22,7 @@ import java.util.Objects
 
 import scala.collection.JavaConverters._
 
-import com.nvidia.spark.rapids.{CombineConf, DateTimeRebaseCorrected, GpuMetric, NoopMetric, ThreadPoolConfBuilder}
+import com.nvidia.spark.rapids.{CombineConf, DateTimeRebaseCorrected, GpuMetric, LocalGpuMetric, NoopMetric, ThreadPoolConfBuilder}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.GpuMetric.ICEBERG_DICT_FILTER_TIME
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
@@ -184,12 +184,24 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
         conf.caseSensitive)
 
       val dictFilterTime = conf.metrics.getOrElse(ICEBERG_DICT_FILTER_TIME, NoopMetric)
-      blocks.filter { case (rowGroup, _) =>
-        statsFilter.shouldRead(typeWithIds, rowGroup) &&
-          dictFilterTime.ns {
-            dictFilter.shouldRead(typeWithIds, rowGroup, reader.getDictionaryReader(rowGroup))
-          } &&
-          bloomFilter.shouldRead(typeWithIds, rowGroup, reader.getBloomFilterDataReader(rowGroup))
+      // GpuMetric.ns has mutable timer state, so each file needs its own timer.
+      val localDictFilterTime = if (dictFilterTime == NoopMetric) NoopMetric else new LocalGpuMetric
+      try {
+        blocks.filter { case (rowGroup, _) =>
+          statsFilter.shouldRead(typeWithIds, rowGroup) &&
+            localDictFilterTime.ns {
+              dictFilter.shouldRead(typeWithIds, rowGroup, reader.getDictionaryReader(rowGroup))
+            } &&
+            bloomFilter.shouldRead(typeWithIds, rowGroup, reader.getBloomFilterDataReader(rowGroup))
+        }
+      } finally {
+        if (dictFilterTime != NoopMetric) {
+          dictFilterTime.synchronized {
+            dictFilterTime += localDictFilterTime.value
+            // Dictionary filtering does not acquire the GPU semaphore.
+            dictFilterTime.companionGpuMetric.foreach(_ += localDictFilterTime.value)
+          }
+        }
       }
     }.getOrElse(blocks)
       .toSeq
