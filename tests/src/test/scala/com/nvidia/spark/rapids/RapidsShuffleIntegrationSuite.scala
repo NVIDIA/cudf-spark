@@ -39,7 +39,7 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, RoundRobinPartitioning}
 import org.apache.spark.sql.execution.exchange.ShuffleExchangeExec
 import org.apache.spark.sql.execution.ui.SparkListenerSQLExecutionStart
-import org.apache.spark.sql.functions.{col, sum, udf}
+import org.apache.spark.sql.functions.{col, hash, lit, pmod, rand, sum, udf}
 import org.apache.spark.sql.rapids.{GpuShuffleEnv, GpuShuffleRegistry,
   RapidsShuffleInternalManagerBase, TestTrampolineUtil}
 import org.apache.spark.sql.rapids.execution.{GpuShuffleExchangeExecBase, TrampolineUtil}
@@ -741,6 +741,48 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
     awaitReclaimed(shuffleIds)
   }
 
+  /** Whether the GPU shuffle registry admitted each GPU exchange of a DataFrame, top down. */
+  private def admittedShuffles(df: DataFrame): Seq[Boolean] = gpuExchanges(df).map { exchange =>
+    Option(GpuShuffleRegistry.get).exists(_.contains(exchange.shuffleDependencyColumnar.shuffleId))
+  }
+
+  /** Whether a GPU node of a DataFrame's plan holds an expression of the named class. */
+  private def gpuNodeHolds(df: DataFrame, expressionClass: String): Boolean =
+    df.queryExecution.executedPlan.exists { node =>
+      node.isInstanceOf[GpuExec] &&
+        node.expressions.exists(_.exists(_.getClass.getSimpleName == expressionClass))
+    }
+
+  test("the GPU shuffle registry refuses a shuffle below a GPU rand(), and admits one below a " +
+      "bridged deterministic UDF") {
+    startUcxReclaimSession(gateOn = true, Map.empty)
+    val withRand = spark.range(0, 1000, 1, 4).select(col("id"), rand(7).as("r"))
+      .repartition(4, col("id"))
+    withRand.collect()
+    assert(gpuNodeHolds(withRand, "GpuRand"), withRand.queryExecution.executedPlan)
+    assertResult(Seq(false), "admitted below rand()")(admittedShuffles(withRand))
+    val plusOne = udf((id: Long) => id + 1)
+    val bridged = spark.range(0, 1000, 1, 4).select(plusOne(col("id")).as("v"))
+      .repartition(4, col("v"))
+    bridged.collect()
+    assert(gpuNodeHolds(bridged, "GpuCpuBridgeExpression"), bridged.queryExecution.executedPlan)
+    assertResult(Seq(true), "admitted below the bridged UDF")(admittedShuffles(bridged))
+  }
+
+  test("the GPU shuffle registry refuses a shuffle above a GPU sample, and admits the shuffle " +
+      "below it") {
+    startUcxReclaimSession(gateOn = true, Map.empty)
+    Seq(false -> "GpuSampleExec", true -> "GpuFastSampleExec").foreach { case (fast, node) =>
+      spark.conf.set("spark.rapids.sql.fast.sample", fast.toString)
+      val df = spark.range(0, 1000, 1, 4).toDF().repartition(4, col("id"))
+        .sample(false, 0.5, 7L).repartition(2, col("id"))
+      df.collect()
+      val plan = df.queryExecution.executedPlan
+      assert(plan.exists(_.getClass.getSimpleName == node), s"no $node in:\n$plan")
+      assertResult(Seq(false, true), s"admitted above and below the $node")(admittedShuffles(df))
+    }
+  }
+
   test("a held UCX reclaim that arrives after a map-stage rerun outside SQL keeps the " +
       "rerun's output") {
     val listener = startUcxReclaimSession(gateOn = true, Map.empty)
@@ -922,6 +964,103 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
     }
   }
 
+  /**
+   * Collects A, then collects B, which judges A's GPU shuffle S available before the driver
+   * clears it. The clear waits until B's first reduce task has read S and waits in
+   * `holdWriterUdf`, and the executor frees S before B's second reduce task reads. A session on
+   * one core runs B's reduce tasks one at a time.
+   *
+   * @param df the query of A and B, whose one GPU shuffle feeds `holdWriterUdf`
+   * @param beforeClear runs once B's first reduce task waits
+   * @return the ids that A and B returned, S, whether the registry admitted S, and B's task ends
+   */
+  private def crossTheClear(
+      listener: RapidsShuffleIntegrationSuite.ReclaimTestListener,
+      df: DataFrame,
+      beforeClear: () => Unit): (Seq[Long], Seq[Long], Int, Boolean, Seq[SparkListenerTaskEnd]) = {
+    resetHeldWriters()
+    val manager = reclaimManager()
+    val rowsB = new AtomicReference[Seq[Long]]()
+    val errorB = new AtomicReference[Throwable]()
+    val jobB = new Thread(() => {
+      try {
+        rowsB.set(df.collect().map(_.getLong(0)).toSeq)
+      } catch {
+        case NonFatal(e) => errorB.set(e)
+      }
+    }, "ucx-reclaim-job-b")
+    jobB.setDaemon(true)
+    manager.holdDriverStepsForTesting()
+    try {
+      val rowsA = df.collect().map(_.getLong(0)).toSeq
+      val shuffleId = onlyGpuShuffle(df)
+      val admitted = Option(GpuShuffleRegistry.get).exists(_.contains(shuffleId))
+      drain(listener)
+      val taskMark = listener.taskEnds.size
+      startHoldingWriters()
+      jobB.start()
+      assert(RapidsShuffleIntegrationSuite.writerEntered.await(
+        RapidsShuffleIntegrationSuite.WaitSeconds, TimeUnit.SECONDS),
+        "no reduce task of B reached the UDF")
+      beforeClear()
+      manager.releaseDriverStepsForTesting()
+      if (admitted) {
+        awaitRequest(manager, shuffleId)
+        awaitReclaimed(Seq(shuffleId))
+      }
+      RapidsShuffleIntegrationSuite.releaseWriters.countDown()
+      jobB.join(TimeUnit.SECONDS.toMillis(RapidsShuffleIntegrationSuite.JoinSeconds))
+      assert(!jobB.isAlive, "B never ended")
+      Option(errorB.get).foreach(e => fail("B failed", e))
+      drain(listener)
+      (rowsA, rowsB.get, shuffleId, admitted, listener.taskEnds.drop(taskMark))
+    } finally {
+      manager.releaseDriverStepsForTesting()
+      RapidsShuffleIntegrationSuite.releaseWriters.countDown()
+      RapidsShuffleIntegrationSuite.holdWriters = false
+      jobB.join(TimeUnit.SECONDS.toMillis(RapidsShuffleIntegrationSuite.JoinSeconds))
+    }
+  }
+
+  test("a job that judged a reclaimed shuffle available before the driver's clear fails a " +
+      "fetch, reruns the map stage and returns the right rows") {
+    val listener = startUcxReclaimSession(gateOn = true, Map("spark.master" -> "local[1]"))
+    val df = spark.range(0, 1000, 1, 4).repartition(2, col("id"))
+      .select(holdWriterUdf(col("id")).as("id"))
+    val (rowsA, rowsB, shuffleId, admitted, endsB) = crossTheClear(listener, df, () => ())
+    assert(admitted, s"the registry did not admit shuffle $shuffleId")
+    assertResult(0L until 1000L, "ids of A")(rowsA.sorted)
+    assertResult(rowsA.sorted, "ids of B")(rowsB.sorted)
+    assert(endsB.exists(_.reason.isInstanceOf[FetchFailed]), "no fetch of B failed")
+    assertResult(2, s"map stages of shuffle $shuffleId")(
+      listener.mapStageSubmissions.count(_ == shuffleId))
+  }
+
+  test("a job over a shuffle whose map side is nondeterministic keeps the shuffle's output, " +
+      "since the registry does not admit the shuffle") {
+    val listener = startUcxReclaimSession(gateOn = true, Map("spark.master" -> "local[1]"))
+    // a key for each reduce partition, so flipping the keys moves every row to the other one
+    val partitionOfKey = spark.range(0, 16).select(col("id"), pmod(hash(col("id")), lit(2)))
+      .collect().map(r => r.getInt(1) -> r.getLong(0)).toMap
+    val Seq(k0, k1) = Seq(0, 1).map(p =>
+      partitionOfKey.getOrElse(p, fail(s"no key in 0 to 15 hashes to partition $p")))
+    val keyOf = udf { (id: Long) =>
+      if ((id % 2 == 0) != RapidsShuffleIntegrationSuite.flipKeys) k0 else k1
+    }.asNondeterministic()
+    val df = spark.range(0, 1000, 1, 4).select(keyOf(col("id")).as("k"), col("id"))
+      .repartition(2, col("k")).select(holdWriterUdf(col("id")).as("id"))
+    RapidsShuffleIntegrationSuite.flipKeys = false
+    try {
+      // a rerun after the clear would send B's second reduce task the rows its first one read
+      val (rowsA, rowsB, shuffleId, admitted, _) =
+        crossTheClear(listener, df, () => RapidsShuffleIntegrationSuite.flipKeys = true)
+      assertResult(rowsA.sorted, "ids of B")(rowsB.sorted)
+      assert(!admitted, s"the registry admitted shuffle $shuffleId")
+    } finally {
+      RapidsShuffleIntegrationSuite.flipKeys = false
+    }
+  }
+
   test("a GPU round-robin shuffle and the shuffle after it wait for GC, and the shuffle before " +
       "it is reclaimed") {
     val listener = startUcxReclaimSession(gateOn = true,
@@ -1018,6 +1157,9 @@ object RapidsShuffleIntegrationSuite {
 
   /** When the held writers stop waiting for `releaseWriters`, in `System.nanoTime` terms. */
   @volatile var holdDeadlineNanos: Long = 0L
+
+  /** Swaps the keys of the nondeterministic map side's two reduce partitions, once set. */
+  @volatile var flipKeys: Boolean = false
 
   /** Counted down by each held writer as it reaches the UDF. */
   @volatile var writerEntered: CountDownLatch = new CountDownLatch(1)

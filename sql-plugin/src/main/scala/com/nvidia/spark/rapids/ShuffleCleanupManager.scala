@@ -17,8 +17,8 @@
 package com.nvidia.spark.rapids
 
 import java.util.{Set => JSet}
-import java.util.concurrent.{ConcurrentHashMap, Executors, RejectedExecutionException,
-  ScheduledExecutorService, TimeUnit}
+import java.util.concurrent.{ConcurrentHashMap, CountDownLatch, Executors,
+  RejectedExecutionException, ScheduledExecutorService, TimeUnit}
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
@@ -134,9 +134,6 @@ class ShuffleCleanupManager(
    * expires. A later execution's clear of the same shuffle replaces its request.
    */
   private val pendingReclaims = new ConcurrentHashMap[Int, ShuffleCleanupManager.PendingReclaim]()
-
-  /** Set while a test holds the UCX polls. */
-  @volatile private var reclaimPollsHeld = false
 
   /**
    * Scheduled executor for periodic stale entry cleanup.
@@ -285,7 +282,11 @@ class ShuffleCleanupManager(
    */
   def reclaimAfterExecution(executionId: Long, shuffleIds: Seq[Int], watermark: Long): Unit = {
     try {
-      cleanupExecutor.execute(() => shuffleIds.foreach(clearOnDriver(executionId, _, watermark)))
+      cleanupExecutor.execute(() => {
+        // open at once, unless a test holds the driver's clears
+        driverStepsOpen.await()
+        shuffleIds.foreach(clearOnDriver(executionId, _, watermark))
+      })
     } catch {
       // the manager has stopped
       case _: RejectedExecutionException =>
@@ -394,20 +395,6 @@ class ShuffleCleanupManager(
     }
   }
 
-  /** Makes each UCX poll hand out no request, until the release below. */
-  private[rapids] def holdReclaimPollsForTesting(): Unit = {
-    reclaimPollsHeld = true
-  }
-
-  /** Ends the hold that `holdReclaimPollsForTesting` set. */
-  private[rapids] def releaseReclaimPollsForTesting(): Unit = {
-    reclaimPollsHeld = false
-  }
-
-  /** The watermark of a shuffle's open request, and the executors that reported a result. */
-  private[rapids] def pendingReclaimForTesting(shuffleId: Int): Option[(Long, Set[String])] =
-    Option(pendingReclaims.get(shuffleId)).map(p => (p.watermark, p.reported.asScala.toSet))
-
   /**
    * Shutdown the manager.
    */
@@ -429,6 +416,41 @@ class ShuffleCleanupManager(
     reportedExecutors.clear()
     pendingReclaims.clear()
   }
+
+  // Test hooks for the UCX reclaim. The driver's clear, the executors' polls and a running job
+  // race each other, so a test that pins one order holds a step until the job is where the
+  // order needs it: the clear until a job has judged its shuffle available, and the polls until
+  // a rerun writer has registered. Nothing outside tests holds a step.
+
+  /** Set while a test holds the UCX polls. */
+  @volatile private var reclaimPollsHeld = false
+
+  /** Open unless a test holds the driver's clears. */
+  @volatile private var driverStepsOpen = new CountDownLatch(0)
+
+  /** Makes each UCX poll hand out no request, until the release below. */
+  private[rapids] def holdReclaimPollsForTesting(): Unit = {
+    reclaimPollsHeld = true
+  }
+
+  /** Ends the hold that `holdReclaimPollsForTesting` set. */
+  private[rapids] def releaseReclaimPollsForTesting(): Unit = {
+    reclaimPollsHeld = false
+  }
+
+  /** Makes the manager's thread wait before its next driver clear, until the release below. */
+  private[rapids] def holdDriverStepsForTesting(): Unit = {
+    driverStepsOpen = new CountDownLatch(1)
+  }
+
+  /** Ends the hold that `holdDriverStepsForTesting` set. */
+  private[rapids] def releaseDriverStepsForTesting(): Unit = {
+    driverStepsOpen.countDown()
+  }
+
+  /** The watermark of a shuffle's open request, and the executors that reported a result. */
+  private[rapids] def pendingReclaimForTesting(shuffleId: Int): Option[(Long, Set[String])] =
+    Option(pendingReclaims.get(shuffleId)).map(p => (p.watermark, p.reported.asScala.toSet))
 }
 
 object ShuffleCleanupManager {
