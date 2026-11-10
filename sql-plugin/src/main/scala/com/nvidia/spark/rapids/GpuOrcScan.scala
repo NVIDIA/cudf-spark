@@ -1709,7 +1709,8 @@ private case class GpuOrcFileFilterHandler(
       // Compare the resolved timezones by rule-equivalence so semantically equivalent IDs
       // across stripes don't trigger a spurious failure.
       val resolvedTzs = distinctTzIds.map(GpuOrcTimezoneUtils.resolveWriterTimezone)
-      val writerTz = distinctTzIds.headOption.getOrElse(ZoneId.systemDefault().getId)
+      val writerTz = distinctTzIds.headOption.filter(_.nonEmpty)
+        .getOrElse(ZoneId.systemDefault().getId)
       if (!GpuOrcTimezoneUtils.writerTimezonesShareRules(resolvedTzs)) {
         throw new IOException(
           s"ORC file has stripes with different writer timezones: " +
