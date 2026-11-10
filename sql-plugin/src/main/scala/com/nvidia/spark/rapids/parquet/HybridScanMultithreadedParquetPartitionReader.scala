@@ -245,7 +245,7 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
   }
 
   /**
-   * The task phase, the counterpart to a pool thread's [[HybridScanPipeline.planAndFetch]]: parse
+   * The task phase, the counterpart to a pool thread's `HybridScanPipeline.planAndFetch`: parse
    * the footer into a fresh reader, since the plan phase's reader is on another thread, prune the
    * fetched chunks with the dictionaries the pool could not compare, and decode what survives.
    * Takes `fetched`; the footer stays the caller's to close.
