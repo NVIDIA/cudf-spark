@@ -107,6 +107,33 @@ def _assert_variant_execution_error(read, conf):
     assert 'spark.rapids.sql.format.iceberg.read.enabled=false' in message
 
 
+def _assert_shredded_variant_reads(table, column, variant_path, conf):
+    raw_query = f"SELECT id, {column} FROM {table}"
+    extract_query = f"SELECT id, try_variant_get({variant_path}, '$.x', 'int') AS x FROM {table}"
+    # Share setup, but check both raw reads and extraction through each reader independently.
+    for query in [raw_query, extract_query]:
+        def read(spark):
+            return _collect_with_gpu_scan_check(spark, query, extract=query == extract_query)
+
+        with_cpu_session(read, conf=conf)
+        _assert_variant_execution_error(read, conf)
+
+    # Check automatic CPU planning and explicit CPU-reader recovery on the same shredded input.
+    for overrides, excluded in [
+        ({'spark.sql.variant.allowReadingShredded': 'true'}, 'GpuBatchScanExec,GpuVariantGet'),
+        ({'spark.rapids.sql.format.iceberg.read.enabled': 'false'}, 'GpuBatchScanExec'),
+    ]:
+        assert_cpu_and_gpu_are_equal_collect_with_capture(
+            lambda spark: spark.sql(extract_query),
+            exist_classes='BatchScanExec', non_exist_classes=excluded,
+            conf=copy_and_update(conf, overrides), require_non_empty=True)
+    # Pruning Variant must still allow GPU reads, even when a file contains shredded values.
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.sql(f"SELECT id FROM {table}"),
+        exist_classes='GpuBatchScanExec', non_exist_classes='BatchScanExec',
+        conf=conf, require_non_empty=True)
+
+
 def _assert_variant_empty_projection(table, reader_type):
     conf = copy_and_update(_ICEBERG_VARIANT_READ_CONF, {
         'spark.rapids.sql.format.parquet.reader.type': reader_type,
@@ -388,67 +415,6 @@ def test_iceberg_v3_imported_variant_read(
 
 @ignore_order(local=True)
 @incompat
-@allow_non_gpu('BatchScanExec', 'ColumnarToRowExec', 'ProjectExec', 'VariantGet')
-@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Imported files require a local catalog")
-@requires_variant
-@pytest.mark.parametrize('container', list(_IMPORTED_VARIANT_CONTAINERS))
-@pytest.mark.parametrize('variant_column', ['v', 'renamed_v'])
-def test_iceberg_v3_unannotated_shredded_variant_read_fallback(
-        spark_tmp_table_factory, spark_tmp_path, container, variant_column):
-    table = get_full_table_name(spark_tmp_table_factory)
-
-    conf = copy_and_update(_ICEBERG_VARIANT_READ_CONF, {
-        **_SHREDDED_WRITE_CONF,
-    })
-    with_cpu_session(lambda spark: _setup_imported_variant_table(
-        spark, table, spark_tmp_path + '/unannotated_variant', container, variant_column,
-        use_name_mapping=container != 'top', shredded=True), conf=conf)
-    assert_cpu_and_gpu_are_equal_collect_with_capture(
-        lambda spark: _read_imported_variant_table(spark, table, container, variant_column),
-        exist_classes='BatchScanExec',
-        non_exist_classes='GpuBatchScanExec,GpuVariantGet',
-        conf=copy_and_update(_ICEBERG_VARIANT_READ_CONF, {'spark.sql.variant.allowReadingShredded': 'true'}),
-        require_non_empty=True)
-
-
-@ignore_order(local=True)
-@incompat
-@allow_non_gpu('BatchScanExec', 'ColumnarToRowExec', 'ProjectExec', 'VariantGet')
-@requires_variant
-def test_iceberg_v3_mixed_variant_layout_read_fallback(spark_tmp_table_factory):
-    table = get_full_table_name(spark_tmp_table_factory)
-
-    def setup_table(spark):
-        spark.sql(f"CREATE TABLE {table} (id INT, v VARIANT) USING ICEBERG "
-                  "TBLPROPERTIES ('format-version'='3', 'write.parquet.shred-variants'='false')")
-        spark.sql(f"INSERT INTO {table} SELECT /*+ COALESCE(1) */ 0, parse_json('{{\"x\":7}}')")
-        spark.sql(f"ALTER TABLE {table} SET TBLPROPERTIES ("
-                  "'write.parquet.shred-variants'='true', "
-                  "'write.parquet.variant-inference-buffer-size'='2')")
-        spark.sql(f"""
-            INSERT INTO {table} SELECT /*+ COALESCE(1) */ id, parse_json(json)
-            FROM VALUES (1, '{{"x":8}}'), (2, '{{"x":9}}'), (3, '{{"x":10}}')
-            AS source(id, json)
-            """)
-        spark.sql(f"ALTER TABLE {table} SET TBLPROPERTIES ('write.parquet.shred-variants'='false')")
-        iceberg_table = _load_iceberg_table(spark, table)
-        layouts = {}
-        for row in spark.sql(f"SELECT file_path FROM {table}.files").collect():
-            schema = _parquet_schema(spark, iceberg_table, row.file_path)
-            layouts[row.file_path] = schema.getType('v').asGroupType().containsField('typed_value')
-        assert sorted(layouts.values()) == [False, True], "Fixture must contain both layouts"
-
-    with_cpu_session(setup_table, conf=_ICEBERG_VARIANT_READ_CONF)
-    # Allowing shredded reads keeps the scan on CPU without inspecting file layouts in planning.
-    assert_cpu_and_gpu_are_equal_collect_with_capture(
-        lambda spark: spark.sql(f"SELECT id, try_variant_get(v, '$.x', 'int') AS x FROM {table}"),
-        exist_classes='BatchScanExec', non_exist_classes='GpuBatchScanExec,GpuVariantGet',
-        conf=copy_and_update(_ICEBERG_VARIANT_READ_CONF, {'spark.sql.variant.allowReadingShredded': 'true'}),
-        require_non_empty=True)
-
-
-@ignore_order(local=True)
-@incompat
 @requires_variant
 def test_iceberg_v3_variant_scalar_and_null_read(spark_tmp_table_factory):
     table = get_full_table_name(spark_tmp_table_factory)
@@ -551,9 +517,8 @@ def test_iceberg_variant_planning_does_not_open_data_files(spark_tmp_table_facto
 @requires_variant
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @pytest.mark.parametrize('container', list(_IMPORTED_VARIANT_CONTAINERS))
-@pytest.mark.parametrize('query', ['raw', 'extract'])
-def test_iceberg_unannotated_shredded_variant_execution_error(
-        spark_tmp_table_factory, spark_tmp_path, reader_type, container, query):
+def test_iceberg_unannotated_shredded_variant_reads(
+        spark_tmp_table_factory, spark_tmp_path, reader_type, container):
     table = get_full_table_name(spark_tmp_table_factory)
     conf = copy_and_update(_ICEBERG_VARIANT_READ_CONF, {
         'spark.rapids.sql.format.parquet.reader.type': reader_type,
@@ -565,21 +530,8 @@ def test_iceberg_unannotated_shredded_variant_execution_error(
         spark, table, spark_tmp_path + '/shredded_variant', container, 'renamed_v',
         use_name_mapping=True, shredded=True), conf=conf)
 
-    def read(spark):
-        path = 'renamed_v' + _IMPORTED_VARIANT_CONTAINERS[container][2]
-        columns = 'id, renamed_v' if query == 'raw' else \
-            f"id, try_variant_get({path}, '$.x', 'int') AS x"
-        return _collect_with_gpu_scan_check(
-            spark, f"SELECT {columns} FROM {table}", extract=query == 'extract')
-
-    # Iceberg CPU can read this input independently of the Spark Parquet reader setting.
-    with_cpu_session(read, conf=conf)
-    _assert_variant_execution_error(read, conf)
-    assert_cpu_and_gpu_are_equal_collect_with_capture(
-        lambda spark: _read_imported_variant_table(spark, table, container, 'renamed_v'),
-        exist_classes='BatchScanExec', non_exist_classes='GpuBatchScanExec',
-        conf=copy_and_update(conf, {'spark.rapids.sql.format.iceberg.read.enabled': 'false'}),
-        require_non_empty=True)
+    path = 'renamed_v' + _IMPORTED_VARIANT_CONTAINERS[container][2]
+    _assert_shredded_variant_reads(table, 'renamed_v', path, conf)
 
 
 @ignore_order(local=True)
@@ -587,9 +539,8 @@ def test_iceberg_unannotated_shredded_variant_execution_error(
 @allow_non_gpu('BatchScanExec', 'ColumnarToRowExec', 'ProjectExec', 'VariantGet')
 @requires_variant
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
-@pytest.mark.parametrize('query', ['raw', 'extract'])
-def test_iceberg_annotated_shredded_variant_execution_error(
-        spark_tmp_table_factory, reader_type, query):
+def test_iceberg_mixed_shredded_variant_reads(
+        spark_tmp_table_factory, reader_type):
     table = get_full_table_name(spark_tmp_table_factory)
     conf = copy_and_update(_ICEBERG_VARIANT_READ_CONF, {
         'spark.rapids.sql.format.parquet.reader.type': reader_type,
@@ -613,20 +564,14 @@ def test_iceberg_annotated_shredded_variant_execution_error(
         # Include an old unshredded file to ensure every reader handles mixed input.
         spark.sql(f"ALTER TABLE {table} SET TBLPROPERTIES ('write.parquet.shred-variants'='false')")
         spark.sql(f"INSERT INTO {table} SELECT 3, parse_json('{{\"x\":10}}')")
+        schemas = [_parquet_schema(spark, iceberg_table, row.file_path) for row in
+                   spark.sql(f"SELECT file_path FROM {table}.files").collect()]
+        assert sorted(schema.getType('v').asGroupType().containsField('typed_value')
+                      for schema in schemas) == [False, True]
 
     with_cpu_session(setup_table, conf=conf)
 
-    def read(spark):
-        columns = 'id, v' if query == 'raw' else "id, try_variant_get(v, '$.x', 'int') AS x"
-        return _collect_with_gpu_scan_check(
-            spark, f"SELECT {columns} FROM {table}", extract=query == 'extract')
-
-    with_cpu_session(read, conf=conf)
-    _assert_variant_execution_error(read, conf)
-    assert_cpu_and_gpu_are_equal_collect_with_capture(
-        lambda spark: spark.sql(f"SELECT id FROM {table}"),
-        exist_classes='GpuBatchScanExec', non_exist_classes='BatchScanExec', conf=conf,
-        require_non_empty=True)
+    _assert_shredded_variant_reads(table, 'v', 'v', conf)
 
 
 @ignore_order(local=True)
