@@ -934,6 +934,10 @@ def test_parquet_input_meta(spark_tmp_path, v1_enabled_list, reader_confs):
 # input_file_name() needs rows * path bytes of string data in one batch, which cudf caps at 2 GiB.
 # The internal conf lowers that cap (to ~6 MiB of string data, ~40K rows for these paths) so a
 # single large row group has to be sliced without needing gigabytes of GPU memory.
+# The scan settings put both files in one task, so the reader moves from a sliced file to another
+# file with a different path inside the same task. Whether slicing actually happens is checked by
+# the batch counts in InputFileNameLongPathSuite; this test checks results end to end.
+@ignore_order(local=True)
 @pytest.mark.parametrize('reader_confs', reader_opt_confs)
 def test_parquet_input_file_name_sliced_large_batch(spark_tmp_path, reader_confs):
     paths = [spark_tmp_path + '/PARQUET_DATA/' + 'a' * 150 + '/f1',
@@ -943,6 +947,8 @@ def test_parquet_input_file_name_sliced_large_batch(spark_tmp_path, reader_confs
         with_cpu_session(lambda spark: spark.range(num_rows).coalesce(1).write.parquet(path))
     conf = copy_and_update(reader_confs, {
         'spark.sql.sources.useV1SourceList': 'parquet',
+        'spark.sql.files.maxPartitionBytes': '1g',
+        'spark.sql.files.openCostInBytes': str(1 << 30),
         'spark.rapids.sql.test.inputFileName.maxStringBytes': str((1 << 20) + 6000000)})
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark: spark.read.parquet(*paths)

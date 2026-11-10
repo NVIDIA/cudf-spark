@@ -44,9 +44,10 @@ object InputFileNameBatchSlicer {
   }
 
   /**
-   * Slice the row range `[start, end)` out of `batch`. The slices are zero-copy views that share
-   * the source buffers, so the source stays resident while any slice is alive. A zero column
-   * batch only has a row count, so it naturally yields a zero column batch of `end - start` rows.
+   * Slice the row range `[start, end)` out of `batch`. `subVector` goes through cudf `slice`, which
+   * copies the rows into new buffers, so each slice owns its memory and the source batch can be
+   * closed or spilled independently of the slices. A zero column batch only has a row count, so it
+   * naturally yields a zero column batch of `end - start` rows.
    */
   def slice(batch: ColumnarBatch, start: Int, end: Int): ColumnarBatch = {
     closeOnExcept(new Array[ColumnVector](batch.numCols())) { cols =>

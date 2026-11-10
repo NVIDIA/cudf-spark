@@ -42,7 +42,9 @@ class InputFileNameBatchSlicerSuite extends RmmSparkRetrySuiteBase {
   test("maxRowsPerBatch boundaries") {
     val path = 135
     val max = InputFileNameBatchSlicer.maxRowsPerBatch(path)
-    assert(max.toLong * path <= Int.MaxValue)
+    // (Int.MaxValue - 1 MiB headroom) / 135, so dropping the headroom changes this value
+    assertResult(15899519)(max)
+    assert(max.toLong * path <= Int.MaxValue - InputFileNameBatchSlicer.HEADROOM_BYTES)
     assert((max + 1L) * path > Int.MaxValue - (1L << 20))
     assert(InputFileNameBatchSlicer.maxRowsPerBatch(0) > 0)
     assertResult(1)(InputFileNameBatchSlicer.maxRowsPerBatch(Int.MaxValue))
@@ -99,22 +101,28 @@ class InputFileNameBatchSlicerSuite extends RmmSparkRetrySuiteBase {
   }
 
   test("source is not advanced while slices are pending") {
-    var pulled = 0
+    // Readers move InputFileBlockHolder to the next file in hasNext as well as in next, so neither
+    // may be called on the source while slices of the current batch are pending.
+    var nextCalls = 0
+    var hasNextCalls = 0
     val src = new Iterator[ColumnarBatch] {
-      def hasNext: Boolean = pulled < 2
-      def next(): ColumnarBatch = { pulled += 1; intBatch(0, 25) }
+      def hasNext: Boolean = { hasNextCalls += 1; nextCalls < 2 }
+      def next(): ColumnarBatch = { nextCalls += 1; intBatch(0, 25) }
     }
     val iter = new InputFileNameSlicingIterator(src, () => 100, Limit)
+    withResource(iter.next())(_ => ()) // first of 3 slices: 10, 10, 5 rows
+    val baseline = hasNextCalls
+    (1 to 2).foreach { _ =>
+      assert(iter.hasNext)
+      assertResult(baseline)(hasNextCalls)
+      withResource(iter.next())(_ => ())
+      assertResult(baseline)(hasNextCalls)
+      assertResult(1)(nextCalls)
+    }
+    assert(iter.hasNext) // all slices are out, so this asks the source about the second batch
+    assertResult(baseline + 1)(hasNextCalls)
     withResource(iter.next())(_ => ())
-    assertResult(1)(pulled)
-    withResource(iter.next())(_ => ())
-    assert(iter.hasNext)
-    assertResult(1)(pulled)
-    withResource(iter.next())(_ => ())
-    assertResult(1)(pulled)
-    assert(iter.hasNext) // the second source batch
-    withResource(iter.next())(_ => ())
-    assertResult(2)(pulled)
+    assertResult(2)(nextCalls)
   }
 
   private def deviceHandles: Int = SpillFramework.stores.deviceStore.numHandles

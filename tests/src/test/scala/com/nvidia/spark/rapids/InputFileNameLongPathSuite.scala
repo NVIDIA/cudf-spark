@@ -18,11 +18,17 @@ package com.nvidia.spark.rapids
 
 import java.io.File
 
+import ai.rapids.cudf.ColumnVector
+import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.spill.SpillFramework
+
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.rapids.GpuFileSourceScanExec
+import org.apache.spark.sql.types.IntegerType
+import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
  * End to end checks for slicing scan batches that `input_file_name()` could not materialize as one
@@ -95,26 +101,92 @@ class InputFileNameLongPathSuite extends SparkQueryCompareTestSuite {
     }
   }
 
-  test("two files with different path lengths, first one split") {
-    withTempPath { root =>
-      val paths = Seq("x" * 150, "y").map { d =>
-        val dir = new File(root, d)
-        assert(dir.mkdirs())
-        writeFile(dir)
+  // The second directory name is multi-byte so the path length differs between characters and
+  // UTF-8 bytes as well as between the two files.
+  Seq("PERFILE", "MULTITHREADED", "COALESCING").foreach { readerType =>
+    test(s"two files with different path lengths, first one split, $readerType reader") {
+      withTempPath { root =>
+        val paths = Seq("x" * 150, "\u65e5\u672c\u8a9e").map { d =>
+          val dir = new File(root, d)
+          assert(dir.mkdirs())
+          writeFile(dir)
+        }
+        def run(gpu: Boolean): Seq[(String, Long, Long, Long, Long)] = {
+          val f = (spark: SparkSession) => spark.read.parquet(paths: _*)
+            .groupBy(input_file_name().as("f"))
+            .agg(count("*"), sum("id"), min("id"), max("id")).collect()
+            .map(r => (r.getString(0), r.getLong(1), r.getLong(2), r.getLong(3), r.getLong(4)))
+            .sortBy(_._1).toSeq
+          if (gpu) {
+            withGpuSparkSession(f, conf(LimitBytes)
+              .set(RapidsConf.PARQUET_READER_TYPE.key, readerType))
+          } else {
+            withCpuSparkSession(f)
+          }
+        }
+        val cpu = run(gpu = false)
+        assertResult(2)(cpu.size)
+        assert(cpu.forall(_._2 == NumRows))
+        assertResult(cpu)(run(gpu = true))
       }
-      def run(gpu: Boolean): Seq[(String, Long, Long, Long, Long)] = {
-        val f = (spark: SparkSession) => spark.read.parquet(paths: _*)
-          .groupBy(input_file_name().as("f"))
-          .agg(count("*"), sum("id"), min("id"), max("id")).collect()
-          .map(r => (r.getString(0), r.getLong(1), r.getLong(2), r.getLong(3), r.getLong(4)))
-          .sortBy(_._1).toSeq
-        if (gpu) withGpuSparkSession(f, conf(LimitBytes)) else withCpuSparkSession(f)
-      }
-      val cpu = run(gpu = false)
-      assertResult(2)(cpu.size)
-      assert(cpu.forall(_._2 == NumRows))
-      assertResult(cpu)(run(gpu = true))
     }
+  }
+
+  test("slice size follows the UTF-8 byte length of the path, not its character count") {
+    withTempPath { root =>
+      val dir = new File(root, "\u00e9" * 75) // 75 characters, 150 bytes
+      assert(dir.mkdirs())
+      val path = writeFile(dir)
+      withGpuSparkSession({ spark =>
+        val df = spark.read.parquet(path).select(col("id"), input_file_name().as("f"))
+        val (rows, batches) = run(df)
+        val name = rows.head.getString(1)
+        val pathBytes = name.getBytes(java.nio.charset.StandardCharsets.UTF_8).length
+        assert(pathBytes > name.length, "the path should have multi-byte characters")
+        val maxRows = InputFileNameBatchSlicer.maxRowsPerBatch(pathBytes, LimitBytes)
+        assertResult((NumRows + maxRows - 1) / maxRows)(batches)
+      }, conf(LimitBytes))
+    }
+  }
+
+  test("input_file_name() above an inner project still slices the scan") {
+    // The shape Delta MERGE produces: an inner project adds monotonically_increasing_id() and
+    // the project above it adds input_file_name(), so the scan only hears about the name from
+    // the plan above its direct parent.
+    withTempPath { root =>
+      val path = writeFile(root)
+      withGpuSparkSession({ spark =>
+        val df = spark.read.parquet(path)
+          .select(col("id"), monotonically_increasing_id().as("m"))
+          .select(col("id"), col("m"), input_file_name().as("f"))
+        val (rows, _) = run(df)
+        assertResult(NumRows)(rows.length)
+        val scan = find(df) { case s: GpuFileSourceScanExec => s }.head
+        assert(scan.queryUsesInputFileName)
+        val projects = find(df) { case p: GpuExec if p.nodeName == "GpuProject" => p }
+        assertResult(2)(projects.size) // the two projects were not collapsed into one
+        assert(projects.head.metrics("numOutputBatches").value > 1, "expected the scan to slice")
+      }, conf(LimitBytes))
+    }
+  }
+
+  test("task completion releases the pending batch of a dropped slicing iterator") {
+    // Needs a Spark session: reading a spillable batch inside a task goes through the GPU
+    // semaphore, which looks at SparkEnv.
+    withGpuSparkSession({ _ =>
+      val handles = () => SpillFramework.stores.deviceStore.numHandles
+      val before = handles()
+      TestUtils.withMockTaskContext(completesTask = true) {
+        val batch = new ColumnarBatch(
+          Array(GpuColumnVector.from(ColumnVector.fromInts(0 until 25: _*), IntegerType)), 25)
+        val iter = new InputFileNameSlicingIterator(
+          Iterator(batch), () => 100, InputFileNameBatchSlicer.HEADROOM_BYTES + 1000L)
+        withResource(iter.next())(_ => ())
+        assertResult(before + 1)(handles()) // the rest of the source batch is pending
+        // The iterator is dropped without close(); only the task completion hook releases it.
+      }
+      assertResult(before)(handles())
+    }, conf(LimitBytes))
   }
 
   test("rows-only batches (all columns pruned) are sliced by count") {
