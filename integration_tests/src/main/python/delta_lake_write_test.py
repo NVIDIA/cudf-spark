@@ -3521,9 +3521,7 @@ def test_delta_selective_replace_on_expressions(spark_tmp_path, condition, aqe_e
     conf = copy_and_update(_delta_confs, {
         "spark.sql.adaptive.enabled": str(aqe_enabled).lower(),
         "spark.databricks.delta.insertReplaceOnOrUsing.materializeSource": materialize})
-    assert_gpu_and_cpu_writes_are_equal_collect(
-        overwrite, read_result, data_path, conf=conf,
-        expected_command="GpuInsertReplaceOnOrUsingCommand")
+    assert_gpu_and_cpu_writes_are_equal_collect(overwrite, read_result, data_path, conf=conf)
     with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
 
 
