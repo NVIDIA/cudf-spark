@@ -309,6 +309,11 @@ class GpuDeviceManagerSuite extends AnyFunSuite with BeforeAndAfter {
     assertResult(offHeapLimit - totalOverhead - pinnedSize - pageableSize)(nonPinnedSize)
   }
 
+  test("pageable pool size must not be negative") {
+    val rapidsConf = new RapidsConf(Map(RapidsConf.PAGEABLE_POOL_SIZE.key -> "-8g"))
+    assertThrows[IllegalArgumentException](rapidsConf.pageablePoolSize)
+  }
+
   test("pageable pool is capped by remaining off-heap limit") {
     val deviceCount = 1
     val offHeapLimit = toBytes("4g")

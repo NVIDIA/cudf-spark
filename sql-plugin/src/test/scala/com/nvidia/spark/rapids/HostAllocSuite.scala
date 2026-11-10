@@ -561,6 +561,35 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
     }
   }
 
+  test("pageable pool blocking alloc resumes when another task closes its buffer") {
+    PinnedMemoryPool.initialize(0)
+    PageableMemoryPool.initialize(4 * 1024, 1)
+    HostAlloc.initialize(0)
+
+    failAfter(Span(10, Seconds)) {
+      val thread1 = new TaskThread("thread1", 1)
+      thread1.initialize()
+      val thread2 = new TaskThread("thread2", 2)
+      thread2.initialize()
+
+      try {
+        withResource(new AllocOnAnotherThread(thread1, 4 * 1024, preferPinned = false)) { held =>
+          held.waitForAlloc()
+          withResource(new AllocOnAnotherThread(thread2, 1, preferPinned = false)) { waiting =>
+            thread2.waitForBlockedOnAlloc()
+            held.freeOnThread()
+            waiting.waitForAlloc()
+            waiting.assertAllocSize(1)
+            waiting.freeAndWait()
+          }
+        }
+      } finally {
+        thread1.done.get(1, TimeUnit.SECONDS)
+        thread2.done.get(1, TimeUnit.SECONDS)
+      }
+    }
+  }
+
   test("simple mixed blocking alloc") {
     PinnedMemoryPool.initialize(4 * 1024)
     HostAlloc.initialize(4 * 1024)
@@ -665,6 +694,37 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
 
             a.freeOnThread()
             a2.freeAndWait()
+          }
+        }
+      } finally {
+        thread1.done.get(1, TimeUnit.SECONDS)
+        thread2.done.get(1, TimeUnit.SECONDS)
+      }
+    }
+  }
+
+  test("pageable pool blocking alloc spills another task's buffer") {
+    PinnedMemoryPool.initialize(0)
+    PageableMemoryPool.initialize(4 * 1024, 1)
+    HostAlloc.initialize(0)
+
+    failAfter(Span(10, Seconds)) {
+      val thread1 = new TaskThread("thread1", 1)
+      thread1.initialize()
+      val thread2 = new TaskThread("thread2", 2)
+      thread2.initialize()
+
+      try {
+        withResource(new AllocOnAnotherThread(thread1, 4 * 1024, preferPinned = false)) { held =>
+          held.waitForAlloc()
+          held.makeSpillableOnThread()
+          held.waitForSpillable()
+
+          withResource(new AllocOnAnotherThread(thread2, 1, preferPinned = false)) { next =>
+            next.waitForAlloc()
+            next.assertAllocSize(1)
+            held.freeOnThread()
+            next.freeAndWait()
           }
         }
       } finally {

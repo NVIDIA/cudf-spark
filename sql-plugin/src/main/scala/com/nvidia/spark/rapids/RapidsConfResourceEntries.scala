@@ -42,6 +42,7 @@ private[rapids] trait RapidsConfResourceEntries {
     .startupOnly()
     .internal()
     .bytesConf(ByteUnit.BYTE)
+    .checkValue(_ >= 0, "Pageable pool size must be non-negative")
     .createWithDefault(0)
 
   val PAGEABLE_POOL_PRETOUCH_THREADS = conf("spark.rapids.memory.pageablePool.pretouchThreads")
