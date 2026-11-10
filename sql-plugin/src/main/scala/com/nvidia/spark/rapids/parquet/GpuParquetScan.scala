@@ -1694,7 +1694,8 @@ case class GpuParquetPartitionReaderFactory(
       rapidsConf.isParquetHybridScanEnabled, rapidsConf.testParquetHybridScanFailOnFallback,
       readDataSchema, config.filters,
       useChunkedReader, compressCfg.decompressSnappyCpu || compressCfg.decompressZstdCpu,
-      readUseFieldId, sqlConf.ignoreCorruptFiles,
+      readUseFieldId && ParquetSchemaClipShims.hasFieldIds(readDataSchema),
+      sqlConf.ignoreCorruptFiles,
       GpuParquetFileFilterHandler.isDecryptionConfigured(broadcastedConf.value.value),
       DateTimeRebaseMode.fromName(SparkShimImpl.parquetRebaseRead(sqlConf)),
       DateTimeRebaseMode.fromName(SparkShimImpl.int96ParquetRebaseRead(sqlConf)))

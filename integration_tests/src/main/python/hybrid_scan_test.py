@@ -406,11 +406,10 @@ def test_hybrid_scan_supported_types(spark_tmp_path):
 
 @pytest.mark.parametrize('overrides', [
     {'spark.rapids.sql.reader.chunked': 'true'},
-    {'spark.sql.parquet.fieldId.read.enabled': 'true'},
     {'spark.rapids.sql.format.parquet.reader.type': 'MULTITHREADED'},
     {'spark.rapids.sql.format.parquet.reader.type': 'COALESCING'},
     {'spark.rapids.sql.format.parquet.decompressCpu': 'true'},
-], ids=['chunked', 'field_id', 'multithreaded', 'coalescing', 'decompress_cpu'])
+], ids=['chunked', 'multithreaded', 'coalescing', 'decompress_cpu'])
 def test_hybrid_scan_ineligible_reads_are_still_correct(spark_tmp_path, overrides):
     """Anything the hybrid path does not take has to come back from parquet-mr unchanged."""
     data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
@@ -418,6 +417,33 @@ def test_hybrid_scan_ineligible_reads_are_still_correct(spark_tmp_path, override
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.parquet(data_path).filter('sorted_int < 500'),
         conf=fallback_conf(**overrides))
+
+
+def test_hybrid_scan_field_id_read_schema_falls_back(spark_tmp_path):
+    """The read schema renames the columns and finds them by field ID; only parquet-mr does that."""
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    write_schema = StructType([
+        StructField('sorted_int', IntegerType(), metadata={'parquet.field.id': 1}),
+        StructField('payload_long', LongType(), metadata={'parquet.field.id': 2})])
+    read_schema = StructType([
+        StructField('a', IntegerType(), metadata={'parquet.field.id': 1}),
+        StructField('b', LongType(), metadata={'parquet.field.id': 2})])
+    with_cpu_session(
+        lambda spark: spark.createDataFrame([(i, i * 2) for i in range(1000)], write_schema)
+            .repartition(1).write.parquet(data_path),
+        conf=enable_parquet_field_id_write)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(read_schema).parquet(data_path).filter('a < 500'),
+        conf=fallback_conf(**enable_parquet_field_id_read))
+
+
+def test_hybrid_scan_field_id_read_enabled_without_field_ids(spark_tmp_path):
+    """Field ID reads are on by default on Databricks; a schema with no field IDs stays hybrid."""
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(lambda spark: write_test_data(spark, data_path))
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(data_path).filter('sorted_int < 500'),
+        conf=hybrid_conf(**enable_parquet_field_id_read))
 
 
 def test_hybrid_scan_nested_column_read_is_still_correct(spark_tmp_path):

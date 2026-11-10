@@ -507,7 +507,8 @@ object HybridScanPipeline extends Logging {
    * @param scanFilters       the data filters Spark pushed to the scan
    * @param useChunkedReader  whether the read may be split into several batches
    * @param decompressAnyCpu  whether any codec is set to decompress on the CPU
-   * @param useFieldId        whether columns are matched by Parquet field ID
+   * @param useFieldId        whether columns are matched by Parquet field ID: field ID reads are
+   *                          enabled and the read schema carries field IDs
    * @param ignoreCorruptFiles whether a file that fails to read is skipped rather than failing
    *                          the query
    * @param decryptionConfigured whether the Hadoop configuration sets up Parquet decryption
