@@ -44,7 +44,7 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.{GpuRoundRobinShuffleRetry, GpuShuffleDependency}
 import org.apache.spark.sql.rapids.execution.GpuShuffleExchangeExecBase.createAdditionalExchangeMetrics
 import org.apache.spark.sql.rapids.shims.SparkSessionUtils
-import org.apache.spark.sql.types.DataType
+import org.apache.spark.sql.types.{DataType, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.util.MutablePair
 
@@ -313,6 +313,17 @@ abstract class GpuShuffleExchangeExecBase(
 
   protected override def doExecute(): RDD[InternalRow] =
     throw new IllegalStateException(s"Row-based execution should not occur for $this")
+
+  private[execution] def executeDriverlessBroadcastBuild(
+      schema: StructType,
+      output: Seq[Attribute],
+      joinMetrics: Map[String, GpuMetric],
+      conf: RapidsConf): RDD[ColumnarBatch] = executeQuery {
+    SparkShimImpl.attachTreeIfSupported(this, "execute") {
+      executeColumnarRDD(new DriverlessBroadcastBuildRDD(shuffleDependencyColumnar,
+        metrics ++ readMetrics, schema, output, joinMetrics, conf))
+    }
+  }
 
   override def internalDoExecuteColumnar(): RDD[ColumnarBatch] = SparkShimImpl
     .attachTreeIfSupported(this, "execute") {
