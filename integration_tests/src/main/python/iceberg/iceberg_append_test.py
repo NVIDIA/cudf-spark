@@ -95,7 +95,10 @@ def test_iceberg_append_signed_zero_partitions(
 
     def check(spark):
         files = spark.sql(f'SELECT partition, record_count FROM {table_name}.files').collect()
-        counts = {math.copysign(1.0, r.partition.f): r.record_count for r in files}
+        counts = {}
+        for r in files:
+            sign = math.copysign(1.0, r.partition.f)
+            counts[sign] = counts.get(sign, 0) + r.record_count
         assert counts == {-1.0: row_count // 2, 1.0: row_count // 2}
         assert sorted(r.id for r in spark.table(table_name).select('id').collect()) == \
             list(range(row_count))

@@ -604,11 +604,13 @@ class GpuPartitionedDataWriter(
   }
 
   private val delegate: PartitioningWriter[SpillableColumnarBatch, DataWriteResult] =
-    // Spark's numeric ordering treats signed zeros as equal, while Iceberg partitions
-    // distinguish them. Batch-local grouping can therefore revisit a partition even
-    // with sorted input, so floating partition keys require a writer that permits revisits.
-    if (fanoutEnabled || hasFloatingPartition) {
+    if (fanoutEnabled) {
       new GpuFanoutDataWriter(writerFactory, fileFactory, io,
+        targetFileSize)
+    } else if (hasFloatingPartition) {
+      // Spark's sort treats signed zeros as equal, so batch-local grouping can revisit
+      // Iceberg partitions. Close completed writers but allow a new file on each revisit.
+      new GpuRevisitableDataWriter(writerFactory, fileFactory, io,
         targetFileSize)
     } else {
       new GpuClusteredDataWriter(writerFactory, fileFactory, io,
