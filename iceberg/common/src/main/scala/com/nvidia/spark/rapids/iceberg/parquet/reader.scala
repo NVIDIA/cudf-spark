@@ -183,9 +183,10 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
         f,
         conf.caseSensitive)
 
-      val dictFilterTime = conf.metrics.getOrElse(ICEBERG_DICT_FILTER_TIME, NoopMetric)
+      val needRecordDictFilterTimer =
+        conf.metrics.get(ICEBERG_DICT_FILTER_TIME).exists(GpuMetric.isTimeMetric)
       // GpuMetric.ns has mutable timer state, so each file needs its own timer.
-      val localDictFilterTime = if (dictFilterTime == NoopMetric) NoopMetric else new LocalGpuMetric
+      val localDictFilterTime = if (needRecordDictFilterTimer) new LocalGpuMetric else NoopMetric
       try {
         blocks.filter { case (rowGroup, _) =>
           statsFilter.shouldRead(typeWithIds, rowGroup) &&
@@ -195,19 +196,16 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
             bloomFilter.shouldRead(typeWithIds, rowGroup, reader.getBloomFilterDataReader(rowGroup))
         }
       } finally {
-        if (dictFilterTime != NoopMetric) {
-          addDictFilterTime(localDictFilterTime.value)
+        if (needRecordDictFilterTimer) {
+          addTimeByMetric(ICEBERG_DICT_FILTER_TIME, localDictFilterTime.value)
         }
       }
     }.getOrElse(blocks)
       .toSeq
   }
 
-  protected def addDictFilterTime(time: Long): Unit = {
-    val metric = conf.metrics.getOrElse(ICEBERG_DICT_FILTER_TIME, NoopMetric)
-    metric += time
-    // Dictionary filtering does not acquire the GPU semaphore.
-    metric.companionGpuMetric.foreach(_ += time)
+  protected def addTimeByMetric(metricName: String, value: Long): Unit = {
+    conf.metrics.getOrElse(metricName, NoopMetric) += value
   }
 
   def clipBlocksToSchema(fileReadSchema: ShadedMessageType,

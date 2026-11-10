@@ -17,7 +17,8 @@
 package com.nvidia.spark.rapids.iceberg.parquet
 
 import java.util.{Map => JMap}
-import java.util.concurrent.{ConcurrentHashMap, ConcurrentLinkedQueue, ConcurrentMap}
+import java.util.concurrent.{ConcurrentHashMap, ConcurrentMap}
+import java.util.concurrent.atomic.AtomicLong
 
 import scala.collection.JavaConverters._
 
@@ -47,7 +48,9 @@ class GpuMultiThreadIcebergParquetReader(
   = new ConcurrentHashMap[IcebergPartitionedFile, GpuParquetReaderPostProcessor](files.size)
   private val deletionVectors: ConcurrentMap[IcebergPartitionedFile, IcebergDeletionVector] =
     new ConcurrentHashMap[IcebergPartitionedFile, IcebergDeletionVector](files.size)
-  private val pendingDictFilterTimes = new ConcurrentLinkedQueue[java.lang.Long]()
+  // Shared SQL metrics are not thread-safe. Reader threads accumulate elapsed times atomically
+  // here so that only the task thread updates the published metrics.
+  private val pendingTimers = new ConcurrentHashMap[String, AtomicLong]()
 
   private var inited = false
   // Visible for testing
@@ -59,7 +62,7 @@ class GpuMultiThreadIcebergParquetReader(
         withResource(reader) { _ => }
       }
     } finally {
-      flushDictFilterTimes()
+      flushTimeMetrics()
       deletionVectors.values().asScala.toSeq.safeClose()
     }
   }
@@ -68,22 +71,24 @@ class GpuMultiThreadIcebergParquetReader(
     try {
       reader.next()
     } finally {
-      flushDictFilterTimes()
+      flushTimeMetrics()
     }
   }
 
   override def next(): ColumnarBatch = reader.get()
 
-  override protected def addDictFilterTime(time: Long): Unit = {
-    pendingDictFilterTimes.add(time)
+  override protected def addTimeByMetric(metricName: String, value: Long): Unit = {
+    pendingTimers.computeIfAbsent(metricName, _ => new AtomicLong()).addAndGet(value)
   }
 
   // Publish completed file timings on the task thread, including files with no surviving rows.
-  private def flushDictFilterTimes(): Unit = {
-    var time = pendingDictFilterTimes.poll()
-    while (time != null) {
-      super.addDictFilterTime(time.longValue())
-      time = pendingDictFilterTimes.poll()
+  private def flushTimeMetrics(): Unit = {
+    pendingTimers.asScala.foreach { case (metricName, time) =>
+      // Atomically take the current total; later additions remain for the next flush.
+      val value = time.getAndSet(0L)
+      if (value != 0L) {
+        super.addTimeByMetric(metricName, value)
+      }
     }
   }
 
