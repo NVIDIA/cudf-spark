@@ -1871,12 +1871,7 @@ def test_delta_merge_cpu_command_checksum_expression_db173(spark_tmp_path, spark
             captured_plans = callback.getResultsWithTimeout(10000)
         finally:
             callback.endCapture()
-        plan_strings = [plan.toString() for plan in captured_plans]
-        gpu_filter_lines = [line for s in plan_strings for line in s.split("\n")
-                            if "GpuFilter" in line and "gpu_checksum_expression" in line]
-        assert gpu_filter_lines, \
-            "no GpuFilter with a GPU ChecksumExpression in the captured MERGE plans:\n" + \
-            "\n".join(plan_strings)
+        _assert_checksum_filters_on_gpu([plan.toString() for plan in captured_plans])
 
     delta_sql_merge_test(spark_tmp_path, spark_tmp_table_factory,
                          use_cdf=False, enable_deletion_vectors=False,
@@ -1893,6 +1888,22 @@ _checksum_source_gens = [
     ('b', IntegerGen()), ('c', LongGen()), ('d', StringGen()), ('e', DecimalGen(12, 2)),
     ('f', DoubleGen()), ('g', DateGen()), ('h', TimestampGen()), ('i', BooleanGen()),
     ('j', ShortGen()), ('k', ByteGen()), ('l', FloatGen())]
+
+
+def _assert_checksum_filters_on_gpu(plan_strings):
+    # The merge filters its source with ChecksumExpression in more than one step, and every one
+    # of those filters must be on the GPU, or the row/columnar transitions around it come back.
+    # The captured plans also include the CPU run of the comparison, which has no GPU operator.
+    gpu_plans = [s for s in plan_strings if "Gpu" in s]
+    assert any("GpuFilter" in line and "gpu_checksum_expression" in line
+               for s in gpu_plans for line in s.split("\n")), \
+        "no GpuFilter with a GPU ChecksumExpression in the captured MERGE plans:\n" + \
+        "\n".join(plan_strings)
+    cpu_filters = [line for s in gpu_plans for line in s.split("\n")
+                   if re.search(r"(?<![A-Za-z])Filter\b.*\bchecksum\(", line)]
+    assert not cpu_filters, \
+        "a CPU Filter with ChecksumExpression is left in a GPU MERGE plan:\n" + \
+        "\n".join(cpu_filters)
 
 
 @allow_non_gpu("ExecutedCommandExec,BroadcastHashJoinExec,ColumnarToRowExec,BroadcastExchangeExec,DataWritingCommandExec", delta_write_fallback_allow, *delta_meta_allow)
@@ -1938,11 +1949,7 @@ def test_delta_merge_cpu_command_checksum_expression_types_db173(
             captured_plans = callback.getResultsWithTimeout(10000)
         finally:
             callback.endCapture()
-        plan_strings = [plan.toString() for plan in captured_plans]
-        assert any("GpuFilter" in line and "gpu_checksum_expression" in line
-                   for s in plan_strings for line in s.split("\n")), \
-            "no GpuFilter with a GPU ChecksumExpression in the captured MERGE plans:\n" + \
-            "\n".join(plan_strings)
+        _assert_checksum_filters_on_gpu([plan.toString() for plan in captured_plans])
 
     delta_sql_merge_test(spark_tmp_path, spark_tmp_table_factory,
                          use_cdf=False, enable_deletion_vectors=False,
