@@ -2785,8 +2785,12 @@ if is_spark_340_or_later() or is_databricks_runtime():
 @delta_lake
 @ignore_order
 @pytest.mark.parametrize("mapping", column_mappings)
+@pytest.mark.parametrize("optimized_write", [False, True], ids=idfn)
+@pytest.mark.parametrize("aqe_enabled", [False, True], ids=idfn)
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
-def test_delta_write_column_name_mapping(spark_tmp_path, mapping):
+def test_delta_write_column_name_mapping(spark_tmp_path, mapping, optimized_write, aqe_enabled):
+    if optimized_write and not is_databricks_runtime() and is_before_spark_353():
+        pytest.skip("Delta Lake optimized writes require Spark 3.5.3 or later on Apache Spark")
     gen_list = [("a", int_gen),
                 ("b", SetValuesGen(StringType(), ["x", "y", "z"])),
                 ("c", string_gen),
@@ -2797,10 +2801,15 @@ def test_delta_write_column_name_mapping(spark_tmp_path, mapping):
         "spark.databricks.delta.properties.defaults.columnMapping.mode": mapping,
         "spark.databricks.delta.properties.defaults.minReaderVersion": "2",
         "spark.databricks.delta.properties.defaults.minWriterVersion": "5",
-        "spark.sql.parquet.fieldId.read.enabled": "true"
+        "spark.sql.parquet.fieldId.read.enabled": "true",
+        "spark.databricks.delta.optimizeWrite.enabled": str(optimized_write).lower(),
+        "spark.sql.adaptive.enabled": str(aqe_enabled).lower(),
+        "spark.sql.shuffle.partitions": "4"
     })
+    # Multiple input partitions exercise the optimized-write shuffle with physical column names.
+    # Regression coverage for https://github.com/NVIDIA/cudf-spark/issues/16796.
     assert_gpu_and_cpu_writes_are_equal_collect(
-        lambda spark, path: gen_df(spark, gen_list).coalesce(1).write.format("delta") \
+        lambda spark, path: gen_df(spark, gen_list).repartition(4).write.format("delta") \
             .partitionBy("b", "d") \
             .save(path),
         lambda spark, path: spark.read.format("delta").load(path),
