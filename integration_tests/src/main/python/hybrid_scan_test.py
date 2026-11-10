@@ -199,8 +199,41 @@ def test_hybrid_scan_retry_oom(spark_tmp_path, reader_confs):
         conf=reader_confs)
 
 
+def write_partial_dict_data(spark, path):
+    """One file of many row groups where the dictionaries rule out only some of them.
+
+    In the first half `dict_int` is only 0 or 2, so those row groups' statistics span 1 but their
+    dictionaries do not hold it; in the second half it is 0, 1 or 2. `plain_str` is written without
+    a dictionary, so the reader reports an empty dictionary range for it.
+    """
+    spark.range(0, 20000, 1, 1).selectExpr(
+        'CAST(id AS INT) AS sorted_int',
+        'CAST(CASE WHEN id < 10000 THEN (id % 2) * 2 ELSE id % 3 END AS INT) AS dict_int',
+        "CONCAT('plain_', CAST(id AS STRING)) AS plain_str",
+        'CAST(id * 2 AS LONG) AS payload_long'
+    ).write.option('parquet.block.size', 8192) \
+        .option('parquet.enable.dictionary#plain_str', 'false').parquet(path)
+
+
+@pytest.mark.parametrize('where', [
+    'dict_int = 1',
+    # A conjunct on a column with no dictionary leaves an empty slot among the dictionary pages.
+    "dict_int = 1 AND plain_str != 'none'",
+], ids=['some_survive_dict', 'with_non_dict_column'])
+@pytest.mark.parametrize('reader_confs', hybrid_reader_confs)
+def test_hybrid_scan_partial_dictionary_pruning(spark_tmp_path, where, reader_confs):
+    """Dictionaries drop some of a file's row groups but not all. MULTITHREADED prunes chunks it
+    already fetched, so it must keep exactly the surviving row groups' chunks."""
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(lambda spark: write_partial_dict_data(spark, data_path))
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(data_path).filter(where),
+        conf=reader_confs)
+
+
 @inject_oom('num_ooms=1,skip=1,type=GPU')
-def test_hybrid_scan_retry_oom_in_reader(spark_tmp_path):
+@pytest.mark.parametrize('reader_confs', hybrid_reader_confs)
+def test_hybrid_scan_retry_oom_in_reader(spark_tmp_path, reader_confs):
     """An OOM inside the reader's own calls is retried on the same reader.
 
     One file of one row group, filtered and projected on one column, makes each retry block copy
@@ -212,7 +245,7 @@ def test_hybrid_scan_retry_oom_in_reader(spark_tmp_path):
         spark, data_path, num_rows=1000, row_group_size=128 * 1024 * 1024))
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.parquet(data_path).filter('filter_int = 7').select('filter_int'),
-        conf=hybrid_conf())
+        conf=reader_confs)
 
 
 @pytest.mark.skipif(is_not_utc(), reason="LEGACY datetime rebase mode is only supported for UTC timezone")
