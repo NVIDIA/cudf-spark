@@ -14,12 +14,12 @@
  * limitations under the License.
  */
 
-package org.apache.spark.sql.rapids
+package com.nvidia.spark.rapids
 
-import com.nvidia.spark.rapids.RapidsConf
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.SparkConf
+import org.apache.spark.sql.rapids.GpuShuffleEnv
 
 /**
  * The check that both plugins run before they start the UCX shuffle reclaim. Each test changes
@@ -37,7 +37,7 @@ class UcxReclaimAdmissionSuite extends AnyFunSuite {
     .set(gateKey, "true")
 
   private def refusal(conf: SparkConf, isDataBricks: Boolean): Option[String] =
-    GpuShuffleEnv.ucxReclaimRefusal(new RapidsConf(conf), conf, isDataBricks)
+    UcxShuffleReclaim.refusal(new RapidsConf(conf), conf, isDataBricks)
 
   private def assertRefusalNames(refused: Option[String], names: String*): Unit = {
     assert(refused.isDefined, "the setup was admitted")
