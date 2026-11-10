@@ -153,10 +153,19 @@ class ParquetScanSuite extends SparkQueryCompareTestSuite {
     test(s"LIMIT on a metadata-only Parquet read stops early, $readerType") {
       withMissingColsData { path =>
         withGpuSparkSession({ spark =>
-          val hostHandlesBefore = SpillFramework.stores.hostStore.numHandles
           val df = spark.read.schema(missingColsSchema).parquet(path).limit(1)
+          val plan = df.queryExecution.executedPlan
+          val scans = plan.collect { case scan: GpuFileSourceScanExec => scan }
+          assert(scans.length == 1, plan.toString)
+          assert(scans.head.inputRDD.getNumPartitions == 1, plan.toString)
+          val rapidsConf = new RapidsConf(spark.sessionState.conf)
+          val cap = GpuNullBatchIterator.maxRows(missingColsSchema,
+            rapidsConf.maxReadBatchSizeRows, rapidsConf.gpuTargetBatchSizeBytes)
+          assert(cap < 9000, s"the test needs a cap below the row count, got $cap")
           assert(df.collect().length == 1)
-          assert(SpillFramework.stores.hostStore.numHandles == hostHandlesBefore)
+          // The scan has 9000 rows, but LIMIT 1 only needed the first capped batch
+          val rows = scans.head.metrics(GpuMetric.NUM_OUTPUT_ROWS).value
+          assert(rows >= 1 && rows <= cap, s"$rows rows produced for LIMIT 1 with a cap of $cap")
         }, missingColsConf(readerType)
           .set("spark.rapids.sql.exec.CollectLimitExec", "false")
           .set(RapidsConf.TEST_ALLOWED_NONGPU.key, "CollectLimitExec"))

@@ -39,11 +39,23 @@ class GpuNullBatchIteratorSuite extends AnyFunSuite with BeforeAndAfterEach {
   }
 
   test("the row cap is the lesser of the row limit and the rows fitting the byte target") {
-    val bytesPerRow = GpuBatchUtils.estimateGpuMemory(longs, 1 << 20) / (1 << 20).toDouble
-    val rowsInTarget = (1000000 / bytesPerRow).toLong
-    assert(GpuNullBatchIterator.maxRows(longs, Int.MaxValue, 1000000) == rowsInTarget)
     assert(GpuNullBatchIterator.maxRows(longs, 100, 1000000) == 100)
     assert(GpuNullBatchIterator.maxRows(longs, 100, Long.MaxValue / 4) == 100)
+    val rows = GpuNullBatchIterator.maxRows(longs, Int.MaxValue, 1000000)
+    assert(rows < Int.MaxValue)
+    assert(GpuBatchUtils.estimateGpuMemory(longs, rows) <= 1000000)
+  }
+
+  test("the estimated size of a capped batch fits the byte target") {
+    // Validity buffers are padded, so a linear scaling alone overshoots a small target: for two
+    // nullable longs and 2000 bytes it gives 123 rows, estimated at 2096 bytes.
+    for (target <- Seq(2000L, 2001L, 4096L, 10000L, 1L << 20, 1L << 30)) {
+      val rows = GpuNullBatchIterator.maxRows(longs, Int.MaxValue, target)
+      assert(GpuBatchUtils.estimateGpuMemory(longs, rows) <= target, s"target $target, $rows rows")
+      // And the cap is not needlessly small: a few more rows would no longer fit.
+      assert(GpuBatchUtils.estimateGpuMemory(longs, rows + 16L) > target,
+        s"target $target, $rows rows")
+    }
   }
 
   test("the row cap is at least one row") {

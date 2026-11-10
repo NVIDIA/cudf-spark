@@ -30,13 +30,14 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkVect
  */
 object GpuNullBatchIterator {
   // Row count used to measure the per-row size of a schema; large enough that validity buffer
-  // padding is negligible. GpuBatchUtils.estimateRowCount is not used because it requires a
-  // non-zero row count and returns 0 for a schema with no columns.
+  // padding is negligible. GpuBatchUtils.estimateRowCount is not used because it extrapolates
+  // from the measured size of an existing batch, and here there is only a schema.
   private val PROBE_ROWS = 1 << 20
 
   /**
    * The maximum rows of a batch with the given schema: the lesser of `maxReadBatchSizeRows`
-   * and the rows that fit in `targetBatchSizeBytes`. Always at least 1.
+   * and the rows whose estimated size fits in `targetBatchSizeBytes`. Always at least 1, so a
+   * single row larger than the target still makes progress.
    */
   def maxRows(
       outputSchema: StructType,
@@ -48,7 +49,15 @@ object GpuNullBatchIterator {
     } else {
       (targetBatchSizeBytes.toDouble / probeBytes * PROBE_ROWS).toLong
     }
-    math.max(1L, math.min(maxReadBatchSizeRows.toLong, rowsForBytes)).toInt
+    var rows = math.max(1L, math.min(maxReadBatchSizeRows.toLong, rowsForBytes))
+    // The estimate scales linearly from the probe, but validity buffers are padded, so it can
+    // land slightly over the target for a small one. Shrink until the estimate fits.
+    var bytes = GpuBatchUtils.estimateGpuMemory(outputSchema, rows)
+    while (rows > 1 && bytes > targetBatchSizeBytes) {
+      rows = math.max(1L, math.min(rows - 1, (rows.toDouble * targetBatchSizeBytes / bytes).toLong))
+      bytes = GpuBatchUtils.estimateGpuMemory(outputSchema, rows)
+    }
+    rows.toInt
   }
 
   /** Batches of `readSchema` null columns totalling `totalRows` rows, each of <= `maxRows`. */

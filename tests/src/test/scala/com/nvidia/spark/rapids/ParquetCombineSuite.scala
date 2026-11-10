@@ -41,6 +41,8 @@ class ParquetCombineSuite extends RmmSparkRetrySuiteBase {
   private val emptySchema = new MessageType("test", java.util.Collections.emptyList[Type]())
   private val readSchema = new StructType().add("b", IntegerType)
   private var taskContext: MockTaskContext = _
+  // The reader's batchSizeRows is 1000, so metadata-only batches are capped at 1000 rows.
+  private val batchRowCap = 1000
 
   override def beforeEach(): Unit = {
     super.beforeEach()
@@ -81,10 +83,13 @@ class ParquetCombineSuite extends RmmSparkRetrySuiteBase {
       files: Array[PartitionedFile] = Array.empty,
       ignoreCorrupt: Boolean = false,
       queryUsesInputFile: Boolean = false,
-      combineThreshold: Long = 1L << 20) extends MultiFileCloudParquetPartitionReader(
+      combineThreshold: Long = 1L << 20,
+      partitionSchema: StructType = new StructType(),
+      targetBatchSizeBytes: Long = 1L << 20,
+      maxBatchRows: Int = batchRowCap) extends MultiFileCloudParquetPartitionReader(
       null, new Configuration(false), files, filterFunc,
-      true, None, false, 1000, 1L << 20, 1L << 20, 1L << 20, false, 0,
-      false, CpuCompressionConfig.disabled(), Map.empty, new StructType(),
+      true, None, false, maxBatchRows, 1L << 20, targetBatchSizeBytes, 1L << 20, false, 0,
+      false, CpuCompressionConfig.disabled(), Map.empty, partitionSchema,
       new ThreadPoolConfBuilder(1, true, 1L << 20, 10000L, false).build(),
       1, false, ignoreCorrupt, false, queryUsesInputFile, ordered,
       CombineConf(combineThreshold, 0)) {
@@ -141,15 +146,24 @@ class ParquetCombineSuite extends RmmSparkRetrySuiteBase {
     meta.allPartValues.map(_.map(_._2.getInt(0)).toSeq)
       .getOrElse(Seq(meta.partitionedFile.partitionValues.getInt(0)))
 
-  // The reader's batchSizeRows is 1000, so metadata-only batches are capped at 1000 rows.
-  private val batchRowCap = 1000
-
   private def readRowCount(reader: Reader, meta: HostMemoryBuffersWithMetaDataBase): Int = {
     val batches = reader.readBatches(meta)
     assert(batches.hasNext)
     val rows = withResource(batches.next())(_.numRows())
     assert(!batches.hasNext)
     rows
+  }
+
+  /** The partition column values of every row the metadata-only entry produces, in order. */
+  private def partitionKeys(reader: Reader, meta: HostMemoryBuffersWithMetaDataBase): Seq[Int] = {
+    reader.readBatches(meta).flatMap { batch =>
+      withResource(batch) { _ =>
+        // The partition column follows the single null read column
+        withResource(GpuColumnVector.extractBases(batch)(1).copyToHost()) { host =>
+          (0 until batch.numRows()).map(i => host.getInt(i.toLong))
+        }
+      }
+    }.toList
   }
 
   private def readRowCounts(reader: Reader, meta: HostMemoryBuffersWithMetaDataBase): List[Int] =
@@ -288,6 +302,35 @@ class ParquetCombineSuite extends RmmSparkRetrySuiteBase {
       }
     }
 
+    test(s"partition columns can make the byte target limit a metadata-only group, " +
+        s"ordered=$ordered") {
+      // An int column and an int partition column are about 4.125 bytes per row each, so 2000
+      // bytes hold 484 rows of the first alone, but only 242 rows of both.
+      val partitionSchema = new StructType().add("key", IntegerType)
+      withResource(new Reader(ordered, targetBatchSizeBytes = 2000)) { reader =>
+        val input = (0 until 3).map(reader.empty(_, 100)).toArray[HostMemoryBuffersWithMetaDataBase]
+        withResource(reader.combineHMBs(input)) { combined =>
+          assert(keys(combined) == Seq(0, 1, 2), "300 rows fit without partition columns")
+        }
+      }
+      withResource(new Reader(ordered, partitionSchema = partitionSchema,
+          targetBatchSizeBytes = 2000)) { reader =>
+        val input = (0 until 3).map(reader.empty(_, 100)).toArray[HostMemoryBuffersWithMetaDataBase]
+        withResource(reader.combineHMBs(input)) { combined =>
+          assert(keys(combined) == Seq(0, 1))
+          assert(combined.allPartValues.get.map(_._1).toSeq == Seq(100L, 100L))
+          assert(reader.pending.toSeq == Seq(input(2)))
+          assert(partitionKeys(reader, combined) ==
+            Seq.fill(100)(0) ++ Seq.fill(100)(1))
+        }
+        withResource(reader.combinePending()) { combined =>
+          assert(keys(combined) == Seq(2))
+          assert(partitionKeys(reader, combined) == Seq.fill(100)(2))
+        }
+        assert(reader.pending.isEmpty)
+      }
+    }
+
     test(s"an oversized metadata-only file is streamed in capped batches, ordered=$ordered") {
       withResource(new Reader(ordered)) { reader =>
         val oversized = reader.empty(1, 2500, new StructType())
@@ -328,7 +371,9 @@ class ParquetCombineSuite extends RmmSparkRetrySuiteBase {
     val filter = (file: PartitionedFile) => ParquetFileInfoWithBlockMeta(
       new Path(file.filePath.toString()), Seq(block), file.partitionValues, emptySchema,
       new StructType(), DateTimeRebaseCorrected, DateTimeRebaseCorrected, false)
-    withResource(new Reader(ordered = true, filterFunc = filter)) { reader =>
+    // A cap this large keeps the number of batches small while the total exceeds an Int
+    val cap = 1 << 28
+    withResource(new Reader(ordered = true, filterFunc = filter, maxBatchRows = cap)) { reader =>
       val file = PartitionedFileUtilsShim.newPartitionedFile(
         InternalRow(0), "file:///tmp/oversized", 0, 1)
       val runner = reader.getBatchRunner(new MockTaskContext(1, 0), file, reader.conf, Array.empty)
@@ -337,10 +382,13 @@ class ParquetCombineSuite extends RmmSparkRetrySuiteBase {
         withResource(result.data) { metadata =>
           assert(metadata.memBuffersAndSizes.map(_.numRows).sum == rows)
           withResource(reader.combineHMBs(Array(metadata))) { combined =>
-            // Stop after the first batch, as LIMIT does, and nothing else is left allocated.
+            // Consume everything: every batch is capped and no row is dropped or repeated.
             val batches = reader.readBatches(combined)
-            withResource(batches.next())(b => assert(b.numRows() == batchRowCap))
-            assert(batches.hasNext)
+            val sizes = batches.map(withResource(_)(_.numRows())).toList
+            assert(sizes.forall(_ <= cap), s"batches over the cap of $cap: $sizes")
+            assert(sizes.map(_.toLong).sum == rows)
+            assert(sizes.size == rows / cap)
+            assert(!batches.hasNext)
           }
         }
       }
