@@ -778,8 +778,9 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
   private def holdWriterUdf = udf { (id: Long) =>
     if (RapidsShuffleIntegrationSuite.holdWriters) {
       RapidsShuffleIntegrationSuite.writerEntered.countDown()
+      // one deadline for every row, so a writer that is never released waits WaitSeconds in all
       RapidsShuffleIntegrationSuite.releaseWriters.await(
-        RapidsShuffleIntegrationSuite.WaitSeconds, TimeUnit.SECONDS)
+        RapidsShuffleIntegrationSuite.holdDeadlineNanos - System.nanoTime(), TimeUnit.NANOSECONDS)
     }
     id
   }
@@ -789,6 +790,13 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
     RapidsShuffleIntegrationSuite.holdWriters = false
     RapidsShuffleIntegrationSuite.writerEntered = new CountDownLatch(1)
     RapidsShuffleIntegrationSuite.releaseWriters = new CountDownLatch(1)
+  }
+
+  /** Makes `holdWriterUdf` hold each writer until a release, or `WaitSeconds` from now. */
+  private def startHoldingWriters(): Unit = {
+    RapidsShuffleIntegrationSuite.holdDeadlineNanos =
+      System.nanoTime() + TimeUnit.SECONDS.toNanos(RapidsShuffleIntegrationSuite.WaitSeconds)
+    RapidsShuffleIntegrationSuite.holdWriters = true
   }
 
   /**
@@ -822,7 +830,7 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
         awaitRequest(manager, shuffleId)
         drain(listener)
         val mark = listener.taskEnds.size
-        RapidsShuffleIntegrationSuite.holdWriters = true
+        startHoldingWriters()
         rerun.start()
         assert(RapidsShuffleIntegrationSuite.writerEntered.await(
           RapidsShuffleIntegrationSuite.WaitSeconds, TimeUnit.SECONDS),
@@ -851,47 +859,52 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
     }
   }
 
-  test("a failed query's writer that outlives the query's end leaves no buffer once the " +
-      "reclaim removes its shuffle") {
+  test("a cancelled query's writer that outlives the query's end leaves no catalog entry once " +
+      "the reclaim removes its shuffle") {
     resetHeldWriters()
-    // Spark 4 interrupts a failed query's running tasks by default, and the held writer stands
-    // for one that the interrupt does not stop
+    // Spark 4 interrupts a cancelled query's running tasks by default, and the held writer
+    // stands for one that the interrupt does not stop
     val listener = startUcxReclaimSession(gateOn = true,
-      Map("spark.sql.autoBroadcastJoinThreshold" -> "-1",
-        "spark.sql.execution.interruptOnCancel" -> "false"))
+      Map("spark.sql.execution.interruptOnCancel" -> "false"))
     val store = SpillFramework.stores.deviceStore
     val handlesBefore = store.numHandles
-    // fails its map task once the other side's writer has registered and waits
-    val failWriter = udf { (id: Long) =>
-      if (RapidsShuffleIntegrationSuite.writerEntered.await(
-          RapidsShuffleIntegrationSuite.WaitSeconds, TimeUnit.SECONDS)) {
-        throw new IllegalStateException("injected failure of a map task")
-      }
-      id
-    }
-    val failing = spark.range(0, 100, 1, 1).select(failWriter(col("id")).as("a"))
-      .repartition(2, col("a"))
-    val held = spark.range(0, 100, 1, 1).select(holdWriterUdf(col("id")).as("b"))
+    // one map task, so no task waits for another and no GPU semaphore permit can block the test
+    val df = spark.range(0, 100, 1, 1).select(holdWriterUdf(col("id")).as("b"))
       .repartition(2, col("b"))
-    val df = failing.join(held, col("a") === col("b"))
     def mapTaskEnds: Int = listener.taskEnds.count(_.taskType == "ShuffleMapTask")
-    RapidsShuffleIntegrationSuite.holdWriters = true
+    val group = "ucx-reclaim-cancelled-query"
+    val queryError = new AtomicReference[Throwable]()
+    val query = new Thread(() => {
+      spark.sparkContext.setJobGroup(group, group, interruptOnCancel = false)
+      try {
+        df.collect()
+      } catch {
+        case NonFatal(e) => queryError.set(e)
+      }
+    }, group)
+    query.setDaemon(true)
+    startHoldingWriters()
     try {
-      val e = intercept[SparkException](df.collect())
-      assert(e.getMessage.contains("injected failure of a map task"), e.getMessage)
-      val heldId = gpuExchanges(df).find(_.output.exists(_.name == "b"))
-        .getOrElse(fail(s"no GPU shuffle of b in:\n${df.queryExecution.executedPlan}"))
-        .shuffleDependencyColumnar.shuffleId
-      // the held writer registered the shuffle before the query ended, so the reclaim of the
-      // query's shuffles removes its registration while the writer still runs
+      query.start()
+      assert(RapidsShuffleIntegrationSuite.writerEntered.await(
+        RapidsShuffleIntegrationSuite.WaitSeconds, TimeUnit.SECONDS),
+        "the query's writer never reached the UDF")
+      val heldId = onlyGpuShuffle(df)
+      // the writer registered the shuffle before its first row, and its task started before the
+      // query ended, so the reclaim of the query's shuffles removes its registration
+      spark.sparkContext.cancelJobGroup(group)
+      query.join(TimeUnit.SECONDS.toMillis(RapidsShuffleIntegrationSuite.JoinSeconds))
+      assert(!query.isAlive, "the cancelled query never returned")
+      assert(queryError.get.isInstanceOf[SparkException], s"the query ended with ${queryError.get}")
       awaitReclaimed(Seq(heldId))
       drain(listener)
-      assertResult(1, "map tasks that ended before the held writer's release")(mapTaskEnds)
+      assertResult(0, "map tasks that ended before the held writer's release")(mapTaskEnds)
       RapidsShuffleIntegrationSuite.releaseWriters.countDown()
       eventually(Timeout(Span(RapidsShuffleIntegrationSuite.WaitSeconds, Seconds))) {
         drain(listener)
-        assertResult(2, "map tasks that ended")(mapTaskEnds)
+        assertResult(1, "map tasks that ended")(mapTaskEnds)
       }
+      // this checks the catalog and the device store, not the exchange's current split
       assert(!GpuShuffleEnv.getCatalog.hasActiveShuffle(heldId),
         s"the held writer registered shuffle $heldId again")
       assertResult((0, 0, 0), "bufferIdToHandle, tableMap and block lists")(
@@ -900,10 +913,11 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
     } finally {
       RapidsShuffleIntegrationSuite.releaseWriters.countDown()
       RapidsShuffleIntegrationSuite.holdWriters = false
+      query.join(TimeUnit.SECONDS.toMillis(RapidsShuffleIntegrationSuite.JoinSeconds))
       // afterEach stops the session, whose GPU shutdown must not run under the released writer,
       // so a failure above waits for its task too, without hiding that failure
       Try(eventually(Timeout(Span(RapidsShuffleIntegrationSuite.JoinSeconds, Seconds))) {
-        assert(mapTaskEnds >= 2, "the held writer's task never ended")
+        assert(mapTaskEnds >= 1, "the held writer's task never ended")
       })
     }
   }
@@ -1001,6 +1015,9 @@ object RapidsShuffleIntegrationSuite {
 
   /** Makes the held-writer tests' UDF wait for `releaseWriters`, once set. */
   @volatile var holdWriters: Boolean = false
+
+  /** When the held writers stop waiting for `releaseWriters`, in `System.nanoTime` terms. */
+  @volatile var holdDeadlineNanos: Long = 0L
 
   /** Counted down by each held writer as it reaches the UDF. */
   @volatile var writerEntered: CountDownLatch = new CountDownLatch(1)
