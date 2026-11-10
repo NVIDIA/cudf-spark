@@ -36,18 +36,22 @@ pytestmark = iceberg_unsupported_mark
 @pytest.mark.parametrize('reader_type', ['PERFILE', 'MULTITHREADED'])
 @pytest.mark.parametrize('layout', ['variant_first', 'variant_only', 'struct', 'array', 'map'])
 def test_iceberg_shredded_variant_deletion_vector_empty_projection(
-        spark_tmp_table_factory, reader_type, layout):
+        spark_tmp_table_factory, spark_tmp_path, reader_type, layout):
+    nested = layout in ['struct', 'array', 'map']
+    if nested and is_iceberg_remote_catalog():
+        pytest.skip("Imported files require a local catalog")
     table = get_full_table_name(spark_tmp_table_factory)
     variant = "IF(id IN (3, 5), NULL, parse_json(concat('{\"x\":', id, '}')))"
+    payload = 'parsed' if nested else variant
     value_type, value, path = {
         'variant_first': ('VARIANT', variant, 'v'),
         'variant_only': ('VARIANT', variant, 'v'),
         'struct': ('STRUCT<child: VARIANT>',
-                   f"IF(id = 3, NULL, named_struct('child', {variant}))", 'v.child'),
+                   f"IF(id = 3, NULL, named_struct('child', {payload}))", 'v.child'),
         'array': ('ARRAY<VARIANT>',
-                  f"IF(id = 0, array(), IF(id = 3, NULL, array({variant})))", 'get(v, 0)'),
+                  f"IF(id = 0, array(), IF(id = 3, NULL, array({payload})))", 'get(v, 0)'),
         'map': ('MAP<STRING, VARIANT>',
-                f"IF(id = 0, map(), IF(id = 3, NULL, map('k', {variant})))", "v['k']"),
+                f"IF(id = 0, map(), IF(id = 3, NULL, map('k', {payload})))", "v['k']"),
     }[layout]
     conf = copy_and_update(_ICEBERG_VARIANT_READ_CONF, {
         'spark.rapids.sql.format.parquet.reader.type': reader_type,
@@ -60,25 +64,53 @@ def test_iceberg_shredded_variant_deletion_vector_empty_projection(
                   "TBLPROPERTIES ('format-version'='3', 'write.delete.mode'='merge-on-read', "
                   "'write.parquet.shred-variants'='true', "
                   "'write.parquet.variant-inference-buffer-size'='2')")
-        spark.sql(f"INSERT INTO {table} SELECT /*+ COALESCE(1) */ {value}{other_value} "
-                  "FROM range(6)")
         jvm = spark._jvm
         iceberg_table = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
             spark._jsparkSession, table)
+        if nested:
+            # Iceberg's writer does not shred these nested leaves. Generate a shredded leaf
+            # first, then preserve its physical struct while nesting and importing it.
+            leaf_path = spark_tmp_path + '/shredded_leaf'
+            data_path = spark_tmp_path + '/nested_shredded'
+            spark.sql(f"SELECT id, {variant} AS parsed FROM range(6)") \
+                .coalesce(1).write.parquet(leaf_path)
+            source = spark.read.schema(
+                'id BIGINT, parsed STRUCT<metadata: BINARY, value: BINARY, '
+                'typed_value: STRUCT<x: STRUCT<value: BINARY, typed_value: BIGINT>>>') \
+                .parquet(leaf_path)
+            source.selectExpr(f'{value} AS v').coalesce(1).write.parquet(data_path)
+            mapping = jvm.org.apache.iceberg.mapping.MappingUtil.create(iceberg_table.schema())
+            mapping_json = jvm.org.apache.iceberg.mapping.NameMappingParser.toJson(mapping)
+            iceberg_table.updateProperties().set('schema.name-mapping.default', mapping_json).commit()
+            data = jvm.org.apache.hadoop.fs.Path(data_path + '/*.parquet')
+            files = data.getFileSystem(spark.sparkContext._jsc.hadoopConfiguration()).globStatus(data)
+            assert len(files) == 1
+            file = files[0]
+            data_file = (jvm.org.apache.iceberg.DataFiles.builder(iceberg_table.spec())
+                         .withPath(file.getPath().toString()).withFormat('PARQUET')
+                         .withFileSizeInBytes(file.getLen()).withRecordCount(6).build())
+            iceberg_table.newAppend().appendFile(data_file).commit()
+            spark.sql(f"REFRESH TABLE {table}")
+        else:
+            spark.sql(f"INSERT INTO {table} SELECT /*+ COALESCE(1) */ {value}{other_value} "
+                      "FROM range(6)")
         files = spark.sql(f"SELECT file_path FROM {table}.files").collect()
         assert len(files) == 1
         reader = jvm.org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader.open(
             jvm.org.apache.iceberg.parquet.GpuParquetIOAccess.file(
                 iceberg_table.io().newInputFile(files[0].file_path)))
         try:
-            physical = reader.getFileMetaData().getSchema().getType(0).asGroupType()
+            file_schema = reader.getFileMetaData().getSchema()
+            if nested:
+                assert not jvm.org.apache.iceberg.parquet.ParquetSchemaUtil.hasIds(file_schema)
+            physical = file_schema.getType(0).asGroupType()
             if layout == 'struct':
                 physical = physical.getType('child').asGroupType()
             elif layout == 'array':
                 physical = physical.getType(0).asGroupType().getType(0).asGroupType()
             elif layout == 'map':
                 physical = physical.getType(0).asGroupType().getType('value').asGroupType()
-            assert physical.getLogicalTypeAnnotation() is not None
+            assert (physical.getLogicalTypeAnnotation() is None) == nested
             assert physical.containsField('typed_value'), "Fixture must contain shredded Variant"
         finally:
             reader.close()
@@ -91,7 +123,13 @@ def test_iceberg_shredded_variant_deletion_vector_empty_projection(
         assert [row[0] for row in spark.sql(f"SELECT _pos FROM {table} ORDER BY _pos")
                 .collect()] == [0, 2, 3, 5]
 
-    with_cpu_session(setup_table, conf=conf)
+    setup_conf = copy_and_update(conf, {
+        'spark.sql.parquet.variant.annotateLogicalType.enabled': 'false',
+        'spark.sql.parquet.fieldId.write.enabled': 'false',
+        'spark.sql.variant.writeShredding.enabled': 'true',
+        'spark.sql.variant.forceShreddingSchemaForTest': 'STRUCT<x: BIGINT>',
+    }) if nested else conf
+    with_cpu_session(setup_table, conf=setup_conf)
     # Both queries have no projected physical data columns. The native row index must survive
     # deletion filtering, while the temporary physical carrier must not appear in the result.
     for query in ['count(*)', '_pos, _row_id']:
