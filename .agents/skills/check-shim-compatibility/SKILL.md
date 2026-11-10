@@ -119,17 +119,39 @@ range. It compares actual changed paths, explicit
 imports in our changed sources, shim families across version directories, and
 matrix/implementation interactions. Pure documentation/tooling file overlaps,
 such as two changes to `AGENTS.md`, do not create an association.
-A matrix path match is deliberately broad. A shim/profile change also flags
-peer shared-source changes conservatively because discovery does not read their imports;
+Path associations are refined conservatively using immutable Git input blobs.
+POM formatting, ordinary comments, project metadata and reporting-only edits can
+be excluded when neither PR's build configuration or metadata aliases reference
+the changed metadata. Metadata edits are retained when the other PR's impact is
+unbounded.
+Scala-generation comment directives remain semantic inputs. For existing profiles,
+configuration edits and versioned sources can be excluded only when their bounded
+profile sets are disjoint, including inheritance and both sides of selector changes.
+The before/after source graphs must match the current target in both Scala POMs;
+profile activation must be limited to its exact buildver property. New/deleted
+profiles, graph drift, changed versioned declaration identities, shared production
+callers, global build changes and unparseable inputs retain the candidate with an
+uncertainty reason. A new or removed declaration can change import modelling in
+other profiles, so disjoint selector sets alone do not establish independence. An absent
+explicit import is not proof of independence.
+
+Excluded candidates are recorded separately in `filtered_prs` with their reasons,
+profile evidence and exact observed head/base identities; they are not completed
+checks. The report lists their count and details. Filtered heads and own head/base
+are revalidated even when every candidate was excluded. Stale or unverifiable
+filtering evidence restores those peers as unchecked and makes the advisory
+`INCOMPLETE`. Initial discovery still retains broad shared-source associations;
 inspect those diffs to establish whether a caller actually depends on the change.
 The scan records each related PR's observed head and reports advisory `INCOMPLETE` on
 API failure, truncated file lists,
 or base/open-head movement during discovery. In CI this produces a warning and
 retains the core result. The lower-level `related-prs` command stops at association.
 
-The automatic `advisory` command additionally checks up to five related open
-peers with shim/profile signals, prioritizing explicit family matches, then
-shim/matrix changes and newer PR numbers. It fetches
+The automatic `advisory` command checks related open peers with shim/profile
+signals in priority order within a 150-second joint-check start budget, without
+a fixed peer-count limit. It prioritizes explicit family matches, then
+shim/matrix changes and newer PR numbers. A conflict or incomplete check is
+recorded before proceeding to the next peer while time remains. It fetches
 immutable observed heads without changing refs or the worktree, exports source
 blobs, and compares three snapshots: current PR plus target, peer plus target,
 and both PRs plus target. Synthetic Git commit objects preserve ancestry for
@@ -141,9 +163,13 @@ destination/providers. Existing individual defects are retained separately.
 Merged peers are `ALREADY_IN_TARGET`; inspect the core report for that combination.
 `COMBINATION_CONFLICT` means the two changes cannot be combined automatically.
 API/fetch failures or changed peer identities produce `INCOMPLETE` evidence.
-Candidates beyond the five-peer limit, or not started within the 150-second
-joint-check budget, remain explicitly `NOT_CHECKED`. These states warn without
-changing the core result.
+No new peer starts after the budget expires; remaining candidates are explicitly
+`NOT_CHECKED`. An in-progress check may finish after the budget. The report opens
+with counts of related PRs, open candidates, attempted and completed static checks,
+conflicts, incomplete evidence, unchecked peers, already-merged peers, and filtered
+candidates. Completed counts exclude filtered candidates, conflicts and incomplete
+evidence, including stale results found by
+the final revalidation. These states warn without changing the core result.
 
 `NO_NEW_INTERACTION_FINDINGS` reports only the modelled `sql-plugin` checks; it
 does not establish API/signature or runtime compatibility. Such results and

@@ -16,7 +16,7 @@
 """Read-only shim preflight. Static coverage is deliberately narrower than compilation."""
 
 import argparse
-from collections import defaultdict
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 import html
 import io
@@ -29,12 +29,14 @@ import tempfile
 import time
 
 from get_buildvers import _get_buildvers
+from shim_compatibility_impact import analyze_impact
 from shimpler_source_graph import load_source_graph, source_lineage
 from shimpler_source_resolver import resolve_sources_with_ties, scan_module_sources
 from shimpler_source_targets import EXTERNAL_EXACT_TARGETS
 
 
-MAX_PEER_CHECKS = 5
+PEER_CHECK_BUDGET_SECONDS = 150
+ROOT_POMS = ("pom.xml", "scala2.13/pom.xml")
 VERSIONED = re.compile(r"^(.*)/src/main/spark([^/]+)/(scala|java)/(.+)$")
 PACKAGE = re.compile(r"(?m)^\s*package\s+([\w.]+)")
 DECLARATION = re.compile(
@@ -346,7 +348,12 @@ def candidate_files(root, owner, name, pr):
 def path_signals(paths):
     families = {m[3] + "/" + m[4] for p in paths
                 if p.endswith((".scala", ".java")) and (m := VERSIONED.fullmatch(p))}
+    # Shimpler implementation changes affect source selection even when no
+    # profile or versioned source changes in the same PR.
     matrix = any(p in ("pom.xml", "scala2.13/pom.xml", "build/get_buildvers.py",
+                       "build/shimpler_source_graph.py", "build/shimpler_source_selectors.py",
+                       "build/shimpler_source_resolver.py", "build/shimpler_source_generator.py",
+                       "build/shimpler_source_targets.py",
                        "build/shim_source_task.py", "build/dyn_shim_detection.py", "build/buildall",
                        "jenkins/version-def.sh", "jenkins/spark-premerge-build.sh",
                        ".github/workflows/mvn-verify-check.yml")
@@ -410,6 +417,126 @@ def overlap_reasons(current, other, references=()):
     return reasons
 
 
+def git_texts(root, revision, paths):
+    """Read immutable regular blobs without checking out or executing peer files."""
+    result = dict.fromkeys(paths)
+    entries = []
+    for record in run(["git", "ls-tree", "-rz", revision, "--", *sorted(paths)], root).split("\0"):
+        if not record:
+            continue
+        metadata, path = record.split("\t", 1)
+        mode, kind, oid = metadata.split()
+        if kind != "blob" or mode not in ("100644", "100755"):
+            raise PreflightError("Source-selection input is not a regular blob")
+        entries.append((oid, path))
+    if not entries:
+        return result
+    blobs = subprocess.run(["git", "cat-file", "--batch"], cwd=root,
+                           input="".join(oid + "\n" for oid, _ in entries).encode(),
+                           capture_output=True, timeout=90)
+    if blobs.returncode:
+        raise PreflightError("Cannot read source-selection input blobs")
+    stream = io.BytesIO(blobs.stdout)
+    for oid, path in entries:
+        actual, kind, size = stream.readline().decode().split()
+        data = stream.read(int(size))
+        if actual != oid or kind != "blob" or len(data) != int(size) or stream.read(1) != b"\n":
+            raise PreflightError("Truncated source-selection input blobs")
+        result[path] = data.decode("utf-8")
+    return result
+
+
+def revision_impact(root, base, head, reference_poms):
+    common = git(root, "merge-base", base, head)
+    paths = git_paths(root, "diff", "--name-only", "--no-renames", common, head)
+    inputs = paths | set(ROOT_POMS)
+    before, after = git_texts(root, common, inputs), git_texts(root, head, inputs)
+    impact = analyze_impact(before, after, reference_poms)
+    if impact["status"] == "KNOWN":
+        # A new/removed declaration changes which imports the checker models in
+        # every profile, even when that declaration selects only one profile.
+        for path in paths:
+            if not VERSIONED.fullmatch(path):
+                continue
+            identities = []
+            for text in (before.get(path), after.get(path)):
+                code = without_comments(text or "")
+                package = PACKAGE.search(code)
+                declarations = frozenset(DECLARATION.findall(code))
+                identities.append((package[1], declarations) if package and declarations else None)
+            if None in identities or identities[0] != identities[1]:
+                impact = dict(status="UNKNOWN", profiles=[], reason="Changed versioned declaration "
+                              "identities can affect import checks across profiles: " + path)
+                break
+    impact["comparison_base"] = common
+    return impact
+
+
+def candidate_filter(root, repo, base, current_impact, peer, paths, reference_poms):
+    evidence = dict(status="RETAINED_UNCERTAIN", base=base, head=peer["headRefOid"],
+                    current_profiles=current_impact.get("profiles")
+                    if current_impact["status"] == "KNOWN" else None)
+    if (current_impact["status"] == "KNOWN" and not current_impact["profiles"]
+            and not current_impact.get("metadata_fields_changed")):
+        evidence.update(status="FILTERED", reason="Current PR has no source-selection effect: "
+                        + current_impact["reason"])
+        return evidence
+    # Shared callers and global tools have unmodelled effects. Keep them without
+    # spending network time on a profile proof that cannot establish independence.
+    if any(re.search(r"/src/main/(?:scala|java)/.*\.(?:scala|java)$", path)
+           or (review_scope({path}) and path not in ROOT_POMS and not VERSIONED.fullmatch(path))
+           for path in paths):
+        evidence["reason"] = "Shared production sources or global tooling require joint review"
+        return evidence
+    if current_impact["status"] != "KNOWN" and not set(ROOT_POMS).intersection(paths):
+        evidence["reason"] = "Current PR impact is not bounded; retain this candidate"
+        return evidence
+    try:
+        head = fetch_peer(root, repo, peer["headRefOid"])
+        impact = revision_impact(root, base, head, reference_poms)
+        evidence["comparison_base"] = impact.get("comparison_base")
+        if impact["status"] != "KNOWN":
+            evidence["reason"] = impact["reason"]
+            return evidence
+        evidence["peer_profiles"] = impact["profiles"]
+        current_fields = set(current_impact.get("metadata_fields_changed", []))
+        peer_fields = set(impact.get("metadata_fields_changed", []))
+        current_refs = set(current_impact.get("metadata_references", []))
+        peer_refs = set(impact.get("metadata_references", []))
+        evidence.update(current_metadata_fields=sorted(current_fields),
+                        peer_metadata_fields=sorted(peer_fields),
+                        current_metadata_references=sorted(current_refs),
+                        peer_metadata_references=sorted(peer_refs))
+        if peer_fields and current_impact["status"] != "KNOWN":
+            evidence["reason"] = "Unbounded current changes may use the peer's changed POM metadata"
+            return evidence
+        if ((current_fields and (current_fields & peer_refs or "*" in peer_refs))
+                or (peer_fields and (peer_fields & current_refs or "*" in current_refs))):
+            evidence.update(status="RETAINED", reason="Changed POM metadata is referenced by "
+                            "the other PR's build configuration")
+            return evidence
+        if current_impact["status"] == "KNOWN" and not current_impact["profiles"]:
+            evidence.update(status="FILTERED", reason="Current PR has no source-selection effect "
+                            "in the peer's known build context")
+        elif not impact["profiles"]:
+            evidence.update(status="FILTERED", reason="Peer has no source-selection effect: "
+                            + impact["reason"])
+        elif current_impact["status"] == "KNOWN":
+            if set(current_impact["profiles"]).isdisjoint(impact["profiles"]):
+                evidence.update(status="FILTERED", reason="Disjoint affected profiles, including "
+                                "inheritance: current [%s]; peer [%s]" %
+                                (", ".join(current_impact["profiles"]),
+                                 ", ".join(impact["profiles"])))
+            else:
+                evidence.update(status="RETAINED", reason="Affected profile sets overlap")
+        else:
+            evidence["reason"] = "Current PR impact is not bounded; retain this candidate"
+    except (PreflightError, OSError, ValueError, KeyError, TypeError,
+            subprocess.TimeoutExpired):
+        evidence["reason"] = "Immutable source-selection inputs could not be analyzed; retain candidate"
+    return evidence
+
+
 def related_prs(root, repo, base_ref, head_ref, validated_base, branch, own_pr,
                 include_worktree=True, require_pr_head=False):
     owner, name = repo.split("/")
@@ -429,6 +556,15 @@ def related_prs(root, repo, base_ref, head_ref, validated_base, branch, own_pr,
         current.update(git_paths(root, "diff", "--name-only", "--no-renames", "HEAD"))
         current.update(git_paths(root, "ls-files", "--others", "--exclude-standard"))
     references = changed_imports(root, current, head, dirty)
+    try:
+        reference_poms = git_texts(root, base, set(ROOT_POMS))
+        current_impact = (dict(status="UNKNOWN", profiles=[], reason="Uncommitted work is retained")
+                          if dirty else revision_impact(root, base, head, reference_poms))
+    except (PreflightError, OSError, ValueError, KeyError, TypeError,
+            subprocess.TimeoutExpired):
+        reference_poms = {}
+        current_impact = dict(status="UNKNOWN", profiles=[],
+                              reason="Current source-selection inputs could not be analyzed")
     commits = git(root, "rev-list", start + ".." + base).splitlines()
     candidates = list(open_prs(root, owner, name, branch))
     if require_pr_head and own_pr is not None:
@@ -438,7 +574,7 @@ def related_prs(root, repo, base_ref, head_ref, validated_base, branch, own_pr,
                                  "refresh the PR and rerun")
     open_heads = {(pr["number"], pr["headRefOid"]) for pr in candidates}
     candidates += merged_prs(root, owner, name, commits, branch)
-    related = []
+    related, filtered = [], []
     candidates = sorted((p for p in candidates if p["number"] != own_pr), key=lambda p: p["number"])
     # Each read is independent; keep API concurrency bounded.
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -448,12 +584,18 @@ def related_prs(root, repo, base_ref, head_ref, validated_base, branch, own_pr,
                 raise PreflightError("PR head changed during scan; retry")
             reasons = overlap_reasons(current, paths, references)
             if reasons:
-                related.append(dict(number=pr["number"], title=pr["title"], url=pr["url"],
-                                    state=pr["state"], head=live_head, draft=pr["isDraft"],
-                                    reasons=reasons, files=sorted(paths),
-                                    joint_candidate=bool(path_signals(current)[0]
-                                                         or path_signals(current)[1]
-                                                         or references)))
+                item = dict(number=pr["number"], title=pr["title"], url=pr["url"],
+                            state=pr["state"], head=live_head, draft=pr["isDraft"],
+                            reasons=reasons, files=sorted(paths),
+                            joint_candidate=bool(path_signals(current)[0]
+                                                 or path_signals(current)[1] or references))
+                if pr["state"] == "OPEN":
+                    item["filter"] = candidate_filter(root, repo, base, current_impact, pr,
+                                                       paths, reference_poms)
+                    if item["filter"]["status"] == "FILTERED":
+                        filtered.append(item)
+                        continue
+                related.append(item)
     if git(root, "rev-parse", base_ref) != base or git(root, "rev-parse", head_ref) != head:
         raise PreflightError("Local base/head refs changed during scan; retry")
     live_open = open_prs(root, owner, name, branch)
@@ -463,6 +605,7 @@ def related_prs(root, repo, base_ref, head_ref, validated_base, branch, own_pr,
     return dict(status="NEEDS_REVIEW" if related else "NO_RELATED_PRS", base=base, head=head,
                 history_start=start, history_commits=len(commits), dirty=dirty,
                 changed_files=sorted(current), candidates_scanned=len(candidates), related=related,
+                filtered_prs=filtered, current_impact=current_impact,
                 scope="local fetched base and observed PR heads; association is not a confirmed defect")
 
 
@@ -513,7 +656,8 @@ def review_scope(paths):
     families, matrix = path_signals(paths)
     return bool(families or matrix or any(
         re.search(r"/src/main/(?:scala|java)/.*\.(?:scala|java)$", path)
-        or path in ("build/check_shim_compatibility.py", ".github/workflows/shim-compatibility.yml")
+        or path in ("build/check_shim_compatibility.py", "build/shim_compatibility_impact.py",
+                    ".github/workflows/shim-compatibility.yml")
         or path.startswith(".agents/skills/check-shim-compatibility/") for path in paths))
 
 
@@ -579,6 +723,22 @@ def review(root, repo, base_ref, head_ref, branch, own_pr):
     return report
 
 
+def verify_filtered_prs(root, repo, report):
+    peers = report.get("filtered_prs", [])
+    if not peers:
+        return
+    owner, name = repo.split("/")
+    query = ('query($owner:String!, $name:String!) { repository(owner:$owner,name:$name) {'
+             + " ".join('p%d: pullRequest(number:%d) { state headRefOid baseRefName }'
+                        % (peer["number"], peer["number"]) for peer in peers) + "} }")
+    live = graphql(root, query, owner=owner, name=name)
+    for peer in peers:
+        pr = live.get("p" + str(peer["number"]))
+        if (not pr or pr["state"] != "OPEN" or pr["headRefOid"] != peer["head"]
+                or pr["baseRefName"] != report["base_branch"]):
+            raise PreflightError("Filtered PR changed during verification; refresh the advisory")
+
+
 def advisory(root, repo, base_ref, head_ref, validated_base, branch, own_pr):
     """Collect peer evidence independently, retaining a report when discovery fails."""
     report = dict(status="INCOMPLETE", scope="cross-PR associations; independent of the core "
@@ -595,12 +755,28 @@ def advisory(root, repo, base_ref, head_ref, validated_base, branch, own_pr):
         report.update(related_prs(root, repo, base_ref, head_ref, validated_base, branch,
                                   own_pr, include_worktree=False, require_pr_head=True))
         report["scope"] = "cross-PR associations and bounded joint source-selection checks; not compilation"
-        if check_peer_combinations(root, repo, report):
+        attempted = check_peer_combinations(root, repo, report)
+        verify_filtered_prs(root, repo, report)
+        if attempted or report.get("filtered_prs"):
             verify_review_refs(root, repo, base_ref, head_ref, base, head, branch, own_pr)
     except (PreflightError, OSError, ValueError, KeyError, TypeError,
             subprocess.TimeoutExpired) as error:
         report["status"] = "INCOMPLETE"
         report["error"] = str(error)
+        # Unverified exclusions are retained as unchecked, never as independent.
+        for peer in report.pop("filtered_prs", []):
+            peer["filter"].update(status="RETAINED_UNCERTAIN",
+                                  reason="Filtering evidence could not be revalidated")
+            peer["joint_check"] = dict(status="NOT_CHECKED",
+                                      reason="Filtering evidence could not be revalidated")
+            report.setdefault("related", []).append(peer)
+        # A changed base/own head also invalidates every completed peer result.
+        for peer in report.get("related", []):
+            joint = peer.get("joint_check", {})
+            if joint.get("status") in ("NEW_INTERACTION_FINDINGS", "NO_NEW_INTERACTION_FINDINGS",
+                                       "COMBINATION_CONFLICT"):
+                joint.update(status="INCOMPLETE", error="Advisory inputs could not be verified; "
+                             "refresh this advisory before using the joint result")
     return report
 
 
@@ -668,7 +844,7 @@ def check_peer_combinations(root, repo, report):
     report["joint_scope"] = ("sql-plugin explicit imports and generated source collisions; "
                              "compare joint findings against each PR combined with target; "
                              "not compilation, signatures, runtime validation, or merge readiness")
-    report["joint_check_limit"] = MAX_PEER_CHECKS
+    report["joint_check_budget_seconds"] = PEER_CHECK_BUDGET_SECONDS
     candidates = []
     for peer in report["related"]:
         if peer["state"] == "MERGED":
@@ -678,16 +854,14 @@ def check_peer_combinations(root, repo, report):
             peer["joint_check"] = dict(status="NOT_CHECKED",
                                       reason="Shared-source overlap without a shim/profile signal")
         else:
+            peer["joint_check"] = dict(status="NOT_CHECKED", reason="Joint check not started")
             candidates.append(peer)
     # Prefer explicit family associations over broad path/matrix matches.
     candidates.sort(key=lambda p: (not any(r.startswith("same shim family:") for r in p["reasons"]),
                                    not any(path_signals(p["files"])), -p["number"]))
-    for peer in candidates[MAX_PEER_CHECKS:]:
-        peer["joint_check"] = dict(status="NOT_CHECKED", reason="Per-run joint-check limit reached")
-    selected = candidates[:MAX_PEER_CHECKS]
-    if not selected:
+    if not candidates:
         return False
-    deadline = time.monotonic() + 150
+    deadline = time.monotonic() + PEER_CHECK_BUDGET_SECONDS
     base, head = report["base"], report["head"]
     current_tree = merge_snapshot(root, base, head)
     report["current_tree"] = current_tree
@@ -695,21 +869,34 @@ def check_peer_combinations(root, repo, report):
     current_commit = git(root, "-c", "commit.gpgsign=false", "-c", "user.name=Shim preflight", "-c",
                          "user.email=shim-preflight@example.invalid", "commit-tree", current_tree,
                          "-p", base, "-p", head, "-m", "Temporary shim source-selection combination")
+    attempted = []
     with tempfile.TemporaryDirectory(prefix="shim-peers-") as directory:
         temporary, cache = Path(directory), {}
         current_coverage = tree_coverage(root, current_tree, temporary, cache)
-        for peer in selected:
+        for index, peer in enumerate(candidates):
             if time.monotonic() >= deadline:
-                peer["joint_check"] = dict(status="NOT_CHECKED", reason="Joint-check time budget reached")
-                continue
+                for pending in candidates[index:]:
+                    pending["joint_check"] = dict(status="NOT_CHECKED",
+                                                 reason="Joint-check time budget reached")
+                break
             peer["joint_check"] = peer_combination(root, repo, base, current_commit,
                                                   current_coverage, peer, temporary, cache)
+            attempted.append(peer)
+    if not attempted:
+        return True
     owner, name = repo.split("/")
     query = ('query($owner:String!, $name:String!) { repository(owner:$owner,name:$name) {'
              + " ".join('p%d: pullRequest(number:%d) { state headRefOid baseRefName }'
-                        % (p["number"], p["number"]) for p in selected) + "} }")
-    live = graphql(root, query, owner=owner, name=name)
-    for peer in selected:
+                        % (p["number"], p["number"]) for p in attempted) + "} }")
+    try:
+        live = graphql(root, query, owner=owner, name=name)
+    except (PreflightError, OSError, ValueError, KeyError, TypeError,
+            subprocess.TimeoutExpired):
+        for peer in attempted:
+            peer["joint_check"].update(status="INCOMPLETE", error="Peer freshness could not be "
+                                      "verified after joint checking; refresh this advisory")
+        raise
+    for peer in attempted:
         pr = live.get("p" + str(peer["number"]))
         if (not pr or pr["state"] != "OPEN" or pr["headRefOid"] != peer["head"]
                 or pr["baseRefName"] != report["base_branch"]):
@@ -790,12 +977,38 @@ def write_review(root, report, output, github_actions=False):
             print("::error title=Shim compatibility::" + actions_escape(report["error"]))
 
 
+def joint_check_summary(report):
+    peers = report.get("related", [])
+    counts = Counter(peer.get("joint_check", {}).get("status", "NOT_CHECKED") for peer in peers)
+    completed = counts["NEW_INTERACTION_FINDINGS"] + counts["NO_NEW_INTERACTION_FINDINGS"]
+    return dict(related=len(peers),
+                candidates=sum(peer["state"] == "OPEN" and peer["joint_candidate"] for peer in peers),
+                attempted=completed + counts["COMBINATION_CONFLICT"] + counts["INCOMPLETE"],
+                completed=completed, conflicts=counts["COMBINATION_CONFLICT"],
+                incomplete=counts["INCOMPLETE"], not_checked=counts["NOT_CHECKED"],
+                already_in_target=counts["ALREADY_IN_TARGET"],
+                filtered=len(report.get("filtered_prs", [])))
+
+
 def write_advisory(report, output, github_actions=False):
+    if "related" in report:
+        report["joint_check_summary"] = joint_check_summary(report)
     output.mkdir(parents=True, exist_ok=True)
     (output / "report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n",
                                       encoding="utf-8")
     lines = ["# Related PR advisory: " + report["status"], "",
              "This advisory does not change the core shim-compatibility result.", ""]
+    if "joint_check_summary" in report:
+        summary = report["joint_check_summary"]
+        lines += ["| Joint-check coverage | PRs |", "| --- | ---: |"]
+        for key, title in (("related", "Related PRs"), ("candidates", "Open candidates"),
+                           ("attempted", "Attempted"), ("completed", "Completed static checks"),
+                           ("conflicts", "Combination conflicts"), ("incomplete", "Incomplete"),
+                           ("not_checked", "Not checked"), ("already_in_target", "Already in target"),
+                           ("filtered", "Filtered before joint checks")):
+            lines.append("| {} | {} |".format(title, summary[key]))
+        lines += ["", "Completed checks include results with and without new interaction findings; "
+                  "conflicts and incomplete evidence are counted separately.", ""]
     for key in ("head", "base", "history_start", "candidates_scanned"):
         if key in report:
             lines.append("- {}: `{}`".format(key, report[key]))
@@ -806,8 +1019,9 @@ def write_advisory(report, output, github_actions=False):
         lines += ["", report["reason"]]
     if "joint_scope" in report:
         lines += ["", html.escape(report["joint_scope"]),
-                  "Joint-check limit: {} open peers; unverified peers remain explicit.".
-                  format(report["joint_check_limit"])]
+                  "Joint-check start budget: {} seconds; no new peer starts after it expires. "
+                  "An in-progress check may finish after the budget.".
+                  format(report["joint_check_budget_seconds"])]
     for pr in report.get("related", []):
         lines += ["", "- [#{}]({}): {} ({})".format(
             pr["number"], pr["url"], html.escape(pr["title"]), pr["state"]),
@@ -818,8 +1032,16 @@ def write_advisory(report, output, github_actions=False):
             lines += ["  Joint check: `{}`. {}".format(
                 joint["status"], html.escape(joint.get("error", joint.get("reason", ""))))]
             lines += ["  - " + html.escape(finding_message(f)) for f in joint.get("new_findings", [])]
+    if report.get("filtered_prs"):
+        lines += ["", "## Filtered PRs", "", "Excluded from joint source-selection checks:"]
+        for pr in report["filtered_prs"]:
+            evidence = pr["filter"]
+            lines += ["", "- [#{}]({}): {}".format(pr["number"], pr["url"],
+                                                   html.escape(pr["title"])),
+                      "  " + html.escape(evidence["reason"]),
+                      "  Observed head: `{}`; target: `{}`.".format(pr["head"], evidence["base"])]
     if report["status"] == "NO_RELATED_PRS":
-        lines += ["", "No related PRs found in this scan."]
+        lines += ["", "No related PRs retained by this scan."]
     lines += ["", "Associations require diff inspection. Joint findings are static source-selection "
               "evidence; matching compilation and semantic validation remain necessary. "
               "No new static interaction findings does not prove compatibility. "
