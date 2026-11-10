@@ -174,15 +174,18 @@ class GpuSemaphoreSuite extends AnyFunSuite
         produced.last
       }
     }
-    TestUtils.withTaskContext(context1) {
-      try {
+    try {
+      // As an operator above that still uses the GPU when it asks for more. The first acquire
+      // of each task is outside the mock task context: GpuSemaphore sizes the permits of a
+      // stage from SQLConf.get then, which in that context misses concurrentGpuTasks=1.
+      GpuSemaphore.acquireIfNecessary(context1)
+      assert(!released)
+      TestUtils.withTaskContext(context1) {
         // A target size below one host batch, so that each host batch is a GPU batch
         val iter = new HostToGpuCoalesceIterator(hostBatches, TargetSize(1), schema,
           NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric, NoopMetric,
           NoopMetric, "test", useArrowCopyOpt = false,
           releaseSemaphoreWhilePulling = releaseSemaphore)
-        // As an operator above that still uses the GPU when it asks for more
-        GpuSemaphore.acquireIfNecessary(context1)
         var rows = 0
         var gpuBatches = 0
         while (iter.hasNext) {
@@ -201,12 +204,12 @@ class GpuSemaphoreSuite extends AnyFunSuite
         assert(pulls.forall { case (pulledInNext, wasReleased) =>
           wasReleased == (releaseSemaphore && pulledInNext)
         }, pulls)
-      } finally {
-        GpuSemaphore.releaseIfNecessary(context1)
-        GpuSemaphore.releaseIfNecessary(context2)
-        TaskRegistryTracker.clearRegistry()
-        produced.foreach(_.close())
       }
+    } finally {
+      GpuSemaphore.releaseIfNecessary(context1)
+      GpuSemaphore.releaseIfNecessary(context2)
+      TaskRegistryTracker.clearRegistry()
+      produced.foreach(_.close())
     }
   }
 }
