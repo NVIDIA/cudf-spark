@@ -15,10 +15,54 @@
  */
 package org.apache.spark.sql.rapids.execution
 
-import org.apache.spark.sql.execution.SparkPlan
+import com.nvidia.spark.rapids.{GpuFastSampleExec, GpuSampleExec}
+
+import org.apache.spark.ShuffleDependency
+import org.apache.spark.internal.Logging
+import org.apache.spark.sql.execution.{ExternalRDDScanExec, RDDScanExec, SampleExec, SparkPlan}
+import org.apache.spark.sql.execution.adaptive.{BroadcastQueryStageExec, QueryStageExec}
+import org.apache.spark.sql.execution.exchange.{BroadcastExchangeLike, ReusedExchangeExec}
+import org.apache.spark.sql.rapids.{GpuShuffleRegistry, RapidsShuffleInternalManagerBase}
 
 /** Which GPU shuffles the UCX shuffle reclaim may free. */
-private[execution] object UcxShuffleReclaimAdmission {
-  /** Whether a rerun of the exchange's map side reproduces its output. */
-  def mapSideIsReproducible(exchange: SparkPlan): Boolean = true
+private[execution] object UcxShuffleReclaimAdmission extends Logging {
+  /**
+   * Makes a GPU shuffle a candidate for the UCX shuffle reclaim when the driver plugin started
+   * the reclaim, the shuffle's writers use the shuffle buffer catalog, and a rerun of its map side
+   * reproduces its output. Call it once the dependency is built: registerShuffle and the
+   * dependency's initializer both write checksumFallback, and admission must read the value that
+   * the writers read.
+   */
+  def admit(exchange: SparkPlan, dependency: ShuffleDependency[_, _, _]): Unit = {
+    if (GpuShuffleRegistry.get != null &&
+        RapidsShuffleInternalManagerBase.usesShuffleBufferCatalog(dependency.shuffleHandle)) {
+      if (mapSideIsReproducible(exchange)) {
+        GpuShuffleRegistry.add(dependency.shuffleId)
+      } else {
+        logDebug(s"Shuffle ${dependency.shuffleId} waits for GC, since a rerun of its map side " +
+          "may not reproduce its output")
+      }
+    }
+  }
+
+  /**
+   * Whether a rerun of a plan's map side reproduces its output. A job that judged a reclaimed
+   * shuffle available reruns part of its map stage after a fetch failure, and that failure can
+   * drop an earlier shuffle's outputs on the same executor too. So the walk goes through earlier
+   * shuffles and query stages, and stops only at a broadcast, whose value Spark builds once.
+   *
+   * It refuses a nondeterministic expression, a sample, which picks rows by their position in
+   * its input, and a scan of an RDD, whose rerun the plan cannot see. It cannot see a value that
+   * depends on the order rows arrive in under a deterministic expression, such as first() or a
+   * floating-point sum.
+   */
+  def mapSideIsReproducible(plan: SparkPlan): Boolean = plan match {
+    case _: BroadcastExchangeLike | _: BroadcastQueryStageExec => true
+    case _: SampleExec | _: GpuSampleExec | _: GpuFastSampleExec => false
+    case _: RDDScanExec | _: ExternalRDDScanExec[_] => false
+    case stage: QueryStageExec => mapSideIsReproducible(stage.plan)
+    case reused: ReusedExchangeExec => mapSideIsReproducible(reused.child)
+    case node =>
+      node.expressions.forall(_.deterministic) && node.children.forall(mapSideIsReproducible)
+  }
 }

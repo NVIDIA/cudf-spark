@@ -41,8 +41,7 @@ import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec
 import org.apache.spark.sql.execution.exchange.{Exchange, ShuffleExchangeExec}
 import org.apache.spark.sql.execution.metric._
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.{GpuRoundRobinShuffleRetry, GpuShuffleDependency,
-  GpuShuffleRegistry, RapidsShuffleInternalManagerBase}
+import org.apache.spark.sql.rapids.{GpuRoundRobinShuffleRetry, GpuShuffleDependency}
 import org.apache.spark.sql.rapids.execution.GpuShuffleExchangeExecBase.createAdditionalExchangeMetrics
 import org.apache.spark.sql.rapids.shims.SparkSessionUtils
 import org.apache.spark.sql.types.{DataType, StructType}
@@ -289,7 +288,7 @@ abstract class GpuShuffleExchangeExecBase(
     val shuffleOutputPartitioning =
       gpuOutputPartitioningForShuffle(inputBatchRDD.getNumPartitions)
     
-    GpuShuffleExchangeExecBase.prepareBatchShuffleDependency(
+    val dependency = GpuShuffleExchangeExecBase.prepareBatchShuffleDependency(
       inputBatchRDD,
       child.output,
       shuffleOutputPartitioning,
@@ -305,6 +304,8 @@ abstract class GpuShuffleExchangeExecBase(
       descendantOpTimeMetrics,
       enableOpTimeTrackingRdd,
       rangeBoundaryPlan)
+    UcxShuffleReclaimAdmission.admit(this, dependency)
+    dependency
   }
 
   /**
@@ -635,11 +636,6 @@ object GpuShuffleExchangeExecBase {
       metrics = GpuMetric.unwrap(additionalMetrics))
 
     dependency.roundRobinRetryGuard = roundRobinRetryGuard
-    // Admit only after construction: registerShuffle and the dependency's initializer both
-    // write checksumFallback, and admission must read the value that the writers read.
-    if (RapidsShuffleInternalManagerBase.usesShuffleBufferCatalog(dependency.shuffleHandle)) {
-      GpuShuffleRegistry.add(dependency.shuffleId)
-    }
     dependency
   }
 
