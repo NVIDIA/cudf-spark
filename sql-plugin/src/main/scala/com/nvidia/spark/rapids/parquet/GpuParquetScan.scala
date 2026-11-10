@@ -1337,7 +1337,8 @@ abstract class AbstractGpuParquetMultiFilePartitionReaderFactory(
   protected val hybridScanConfig: Option[HybridScanConfig] =
     if (rapidsConf.isParquetHybridScanEnabled) {
       val config = HybridScanConfig(rapidsConf,
-        new HybridScanFilters(readDataSchema, isCaseSensitive, filters))
+        new HybridScanFilters(readDataSchema, isCaseSensitive,
+          if (sqlConf.parquetFilterPushDown) filters else Array.empty))
       val eligible = HybridScanPipeline.isEligible(
         rapidsConf.isParquetHybridScanEnabled, rapidsConf.testParquetHybridScanFailOnFallback,
         readDataSchema, config.filters,
