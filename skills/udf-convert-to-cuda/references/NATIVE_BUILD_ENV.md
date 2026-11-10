@@ -15,7 +15,7 @@ The profile first tries the CUDA-classified artifact (e.g. `-cuda12`) and then t
 
 ## Required Tools
 
-- CUDA toolkit matching spark-rapids build and a compatible NVIDIA driver
+- CUDA toolkit matching cudf-spark build and a compatible NVIDIA driver
 - CMake 3.30.4+
 - C++ compiler compatible with the selected CUDA toolkit
 - JDK 17
@@ -27,7 +27,7 @@ The profile first tries the CUDA-classified artifact (e.g. `-cuda12`) and then t
 
 The native build compiles against the prebuilt libcudf in the cuDF Spark JAR, so the local CUDA toolkit must match the version used to build that JAR.
 
-1. Get the CUDA version(s) spark-rapids is built against:
+1. Get the CUDA version(s) cudf-spark is built against:
 
 ```bash
 curl -fsSL https://nvidia.github.io/cudf-spark/docs/download.html \
