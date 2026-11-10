@@ -266,10 +266,9 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
         // the surviving row count; the post-processor drops it from the requested output.
         if (hasDeletionVector && initialProjection._2.getFieldCount == 0 &&
             fileSchema.getFieldCount > 0) {
-          val firstFileField = ParquetSchemaUtil.convert(initialProjection._1).columns().get(0)
-          val projectionFields = requiredSchema.columns().asScala
-            .filterNot(_.fieldId() == firstFileField.fieldId()) :+ firstFileField
-          projectSchema(fileSchema, new Schema(projectionFields.asJava))
+          // The carrier is not a requested Iceberg value. Project its physical leaves directly
+          // so an unrequested shredded Variant does not require validation or reconstruction.
+          (initialProjection._1, GpuParquetIO.projectRowCountSchema(initialProjection._1))
         } else {
           initialProjection
         }

@@ -30,6 +30,79 @@ pytestmark = iceberg_unsupported_mark
 
 
 @iceberg
+@incompat
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.skipif(not is_spark_411_or_later(), reason="Iceberg Variant requires Spark 4.1.1+")
+@pytest.mark.parametrize('reader_type', ['PERFILE', 'MULTITHREADED'])
+@pytest.mark.parametrize('layout', ['variant_first', 'variant_only', 'struct', 'array', 'map'])
+def test_iceberg_shredded_variant_deletion_vector_empty_projection(
+        spark_tmp_table_factory, reader_type, layout):
+    table = get_full_table_name(spark_tmp_table_factory)
+    variant = "IF(id IN (3, 5), NULL, parse_json(concat('{\"x\":', id, '}')))"
+    value_type, value, path = {
+        'variant_first': ('VARIANT', variant, 'v'),
+        'variant_only': ('VARIANT', variant, 'v'),
+        'struct': ('STRUCT<child: VARIANT>',
+                   f"IF(id = 3, NULL, named_struct('child', {variant}))", 'v.child'),
+        'array': ('ARRAY<VARIANT>',
+                  f"IF(id = 0, array(), IF(id = 3, NULL, array({variant})))", 'get(v, 0)'),
+        'map': ('MAP<STRING, VARIANT>',
+                f"IF(id = 0, map(), IF(id = 3, NULL, map('k', {variant})))", "v['k']"),
+    }[layout]
+    conf = copy_and_update(_ICEBERG_VARIANT_READ_CONF, {
+        'spark.rapids.sql.format.parquet.reader.type': reader_type,
+    })
+
+    def setup_table(spark):
+        other_column = ', id BIGINT' if layout == 'variant_first' else ''
+        other_value = ', id' if layout == 'variant_first' else ''
+        spark.sql(f"CREATE TABLE {table} (v {value_type}{other_column}) USING ICEBERG "
+                  "TBLPROPERTIES ('format-version'='3', 'write.delete.mode'='merge-on-read', "
+                  "'write.parquet.shred-variants'='true', "
+                  "'write.parquet.variant-inference-buffer-size'='2')")
+        spark.sql(f"INSERT INTO {table} SELECT /*+ COALESCE(1) */ {value}{other_value} "
+                  "FROM range(6)")
+        jvm = spark._jvm
+        iceberg_table = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
+            spark._jsparkSession, table)
+        files = spark.sql(f"SELECT file_path FROM {table}.files").collect()
+        assert len(files) == 1
+        reader = jvm.org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader.open(
+            jvm.org.apache.iceberg.parquet.GpuParquetIOAccess.file(
+                iceberg_table.io().newInputFile(files[0].file_path)))
+        try:
+            physical = reader.getFileMetaData().getSchema().getType(0).asGroupType()
+            if layout == 'struct':
+                physical = physical.getType('child').asGroupType()
+            elif layout == 'array':
+                physical = physical.getType(0).asGroupType().getType(0).asGroupType()
+            elif layout == 'map':
+                physical = physical.getType(0).asGroupType().getType('value').asGroupType()
+            assert physical.getLogicalTypeAnnotation() is not None
+            assert physical.containsField('typed_value'), "Fixture must contain shredded Variant"
+        finally:
+            reader.close()
+        spark.sql(f"DELETE FROM {table} WHERE try_variant_get({path}, '$.x', 'int') IN (1, 4)")
+        delete_files = {(row.content, row.file_format) for row in
+                        spark.sql(f"SELECT content, file_format FROM {table}.delete_files")
+                        .collect()}
+        assert delete_files == {(1, 'PUFFIN')}, "Fixture must contain a deletion vector"
+        assert spark.sql(f"SELECT count(*) FROM {table}").first()[0] == 4
+        assert [row[0] for row in spark.sql(f"SELECT _pos FROM {table} ORDER BY _pos")
+                .collect()] == [0, 2, 3, 5]
+
+    with_cpu_session(setup_table, conf=conf)
+    # Both queries have no projected physical data columns. The native row index must survive
+    # deletion filtering, while the temporary physical carrier must not appear in the result.
+    for query in ['count(*)', '_pos, _row_id']:
+        order = ' ORDER BY _pos' if query.startswith('_pos') else ''
+        assert_cpu_and_gpu_are_equal_collect_with_capture(
+            lambda spark: spark.sql(f"SELECT {query} FROM {table}{order}"),
+            exist_classes='GpuBatchScanExec', non_exist_classes='BatchScanExec', conf=conf,
+            require_non_empty=True)
+
+
+@iceberg
 @ignore_order(local=True)
 @pytest.mark.parametrize('reader_type,with_deletion_vector',
     [(reader, False) for reader in rapids_reader_types] + [
