@@ -18,7 +18,7 @@ package org.apache.spark.sql.rapids.execution
 import java.util.concurrent.{CountDownLatch, Executors, TimeUnit}
 import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 
-import com.nvidia.spark.rapids.{GpuCoalesceBatches, GpuMetric, GpuRangeExec, GpuSinglePartitioning, GpuTransitionOverrides, JustRowsColumnarBatch, RapidsConf, RowBasedShuffleChecksumConf, ShimLoader, ShuffleBufferCatalog, SpillableColumnarBatch, TargetSize}
+import com.nvidia.spark.rapids.{DatabricksShimVersion, GpuCoalesceBatches, GpuMetric, GpuRangeExec, GpuSinglePartitioning, GpuTransitionOverrides, JustRowsColumnarBatch, RapidsConf, RowBasedShuffleChecksumConf, ShimLoader, ShuffleBufferCatalog, SpillableColumnarBatch, TargetSize}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.shims.BroadcastExchangeShims
 import org.scalatest.BeforeAndAfterAll
@@ -54,6 +54,9 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
   import DriverlessBroadcastCancellationSuite.EmptyColumnarPlan
 
   private var session: SparkSession = _
+
+  private def isDatabricks: Boolean =
+    ShimLoader.getShimVersion.isInstanceOf[DatabricksShimVersion]
 
   override def beforeAll(): Unit = {
     super.beforeAll()
@@ -275,9 +278,15 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
         "spark.rapids.sql.driverlessBroadcast.enabled" -> "true",
         "spark.rapids.shuffle.mode" -> "UCX",
         "spark.rapids.sql.join.hashTable.reuse" -> "false"))
-      assert(DriverlessBroadcastEligibility.planRejections(gpu, conf).isEmpty)
-      assert(GpuDriverlessBroadcastHashJoinExec.rewrite(gpu, conf)
-        .isInstanceOf[GpuDriverlessBroadcastHashJoinExec])
+      if (isDatabricks) {
+        assert(DriverlessBroadcastEligibility.planRejections(gpu, conf)
+          .exists(_.contains("Databricks")))
+        assert(GpuDriverlessBroadcastHashJoinExec.rewrite(gpu, conf) eq gpu)
+      } else {
+        assert(DriverlessBroadcastEligibility.planRejections(gpu, conf).isEmpty)
+        assert(GpuDriverlessBroadcastHashJoinExec.rewrite(gpu, conf)
+          .isInstanceOf[GpuDriverlessBroadcastHashJoinExec])
+      }
       assert(GpuDriverlessBroadcastHashJoinExec.rewrite(standard, conf) eq standard)
     }
   }
@@ -287,7 +296,9 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
       val conf = new RapidsConf(Map("spark.rapids.shuffle.mode" -> "UCX"))
       val keys = Seq(RowBasedShuffleChecksumConf.ChecksumEnabledKey,
         RowBasedShuffleChecksumConf.ChecksumMismatchFullRetryKey)
-      assert(DriverlessBroadcastPolicy.rejections(conf).isEmpty)
+      val baseline = DriverlessBroadcastPolicy.rejections(conf)
+      assert(baseline.exists(_.contains("Databricks")) == isDatabricks)
+      assert(baseline.forall(_.contains("Databricks")))
       keys.foreach { key =>
         session.conf.set(key, "true")
         try {
@@ -297,7 +308,27 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
           session.conf.set(key, "false")
         }
       }
-      assert(DriverlessBroadcastPolicy.rejections(conf).isEmpty)
+      assert(DriverlessBroadcastPolicy.rejections(conf) == baseline)
+    }
+  }
+
+  test("AQE build tagging respects platform admission before materialization") {
+    val enabledSession = session.newSession()
+    enabledSession.conf.set("spark.rapids.sql.driverlessBroadcast.enabled", "true")
+    enabledSession.conf.set("spark.sql.adaptive.enabled", "true")
+    enabledSession.withActive {
+      val key = AttributeReference("key", LongType)()
+      val probe = EmptyColumnarPlan(Seq(key))
+      val child = EmptyColumnarPlan(Seq(key.newInstance()))
+      val cpu = BroadcastExchangeExec(IdentityBroadcastMode, child)
+      val original = BroadcastHashJoinExec(Seq(key), cpu.output, Inner, BuildRight,
+        None, probe, cpu, false)
+      val exchange = GpuBroadcastExchangeExec(IdentityBroadcastMode, child)(
+        cpu.canonicalized.asInstanceOf[BroadcastExchangeExec])
+      val converted = DriverlessBroadcastTestShim.join(probe, exchange)
+      DriverlessBroadcastStage.tagEligibleBuilds(original, converted)
+      assert(cpu.getTagValue(DriverlessBroadcastStage.eligible).contains(true) == !isDatabricks)
+      assert(exchange.admittedDriverlessShuffle.isEmpty)
     }
   }
 
@@ -323,27 +354,31 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
           stage.setLogicalLink(logical)
           val join = DriverlessBroadcastTestShim.join(probe, stage)
           val conf = new RapidsConf(session.conf.getAll)
-          val native = GpuDriverlessBroadcastHashJoinExec.rewrite(join, conf)
-            .asInstanceOf[GpuDriverlessBroadcastHashJoinExec]
-          val build = native.right.asInstanceOf[ReusedExchangeExec]
-          assert(build.child eq producer)
-          assert(build.logicalLink.contains(logical))
+          val rewritten = GpuDriverlessBroadcastHashJoinExec.rewrite(join, conf)
+          if (isDatabricks) {
+            assert(rewritten eq join)
+          } else {
+            val native = rewritten.asInstanceOf[GpuDriverlessBroadcastHashJoinExec]
+            val build = native.right.asInstanceOf[ReusedExchangeExec]
+            assert(build.child eq producer)
+            assert(build.logicalLink.contains(logical))
 
-          var rewrittenProducers = 0
-          val transformed = native.transformUp {
-            case shuffle: GpuShuffleExchangeExec =>
-              rewrittenProducers += 1
-              shuffle.withNewChildren(Seq(GpuCoalesceBatches(shuffle.child, TargetSize(1024))))
-          }.asInstanceOf[GpuDriverlessBroadcastHashJoinExec]
-          assert(rewrittenProducers == 0)
-          assert(transformed.right.asInstanceOf[ReusedExchangeExec].child eq producer)
+            var rewrittenProducers = 0
+            val transformed = native.transformUp {
+              case shuffle: GpuShuffleExchangeExec =>
+                rewrittenProducers += 1
+                shuffle.withNewChildren(Seq(GpuCoalesceBatches(shuffle.child, TargetSize(1024))))
+            }.asInstanceOf[GpuDriverlessBroadcastHashJoinExec]
+            assert(rewrittenProducers == 0)
+            assert(transformed.right.asInstanceOf[ReusedExchangeExec].child eq producer)
 
-          val readMetric = producer.getOpTimeNewMetric.get
-          readMetric.set(17)
-          assert(transformed.getDescendantOpTimeMetrics.contains(readMetric))
-          assert(transformed.getDescendantOpTimeMetrics.find(_ eq readMetric).get.value == 17)
-          val metricId = producer.metrics(GpuMetric.OP_TIME_NEW_SHUFFLE_READ).id
-          assert(DriverlessBroadcastPlanInfoTestSupport.metricIds(transformed).contains(metricId))
+            val readMetric = producer.getOpTimeNewMetric.get
+            readMetric.set(17)
+            assert(transformed.getDescendantOpTimeMetrics.contains(readMetric))
+            assert(transformed.getDescendantOpTimeMetrics.find(_ eq readMetric).get.value == 17)
+            val metricId = producer.metrics(GpuMetric.OP_TIME_NEW_SHUFFLE_READ).id
+            assert(DriverlessBroadcastPlanInfoTestSupport.metricIds(transformed).contains(metricId))
+          }
         } finally {
           token.destroy()
         }
@@ -422,7 +457,8 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
       val conf = new RapidsConf(Map("spark.rapids.sql.driverlessBroadcast.enabled" -> "true",
         "spark.rapids.shuffle.mode" -> "UCX", "spark.rapids.sql.join.hashTable.reuse" -> "false"))
       val analysis = DriverlessBroadcastEligibility.analyze(join, conf)
-      assert(analysis.rejection(join, Some(exchange)).exists(_.contains("byte limit")))
+      val expectedReason = if (isDatabricks) "Databricks" else "byte limit"
+      assert(analysis.rejection(join, Some(exchange)).exists(_.contains(expectedReason)))
       assert(GpuDriverlessBroadcastHashJoinExec.rewrite(join, conf) eq join)
     }
   }
@@ -445,13 +481,21 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
           "spark.rapids.sql.join.hashTable.reuse" -> "false"))
         assert(GpuDriverlessBroadcastHashJoinExec.rewrite(join,
           new RapidsConf(Map.empty[String, String])) eq join)
-        val error = intercept[SparkException] {
-          GpuDriverlessBroadcastHashJoinExec.rewrite(join, enabled)
+        if (isDatabricks) {
+          assert(GpuDriverlessBroadcastHashJoinExec.rewrite(join, enabled) eq join)
+        } else {
+          val error = intercept[SparkException] {
+            GpuDriverlessBroadcastHashJoinExec.rewrite(join, enabled)
+          }
+          assert(error.getMessage.contains(key + "=true"))
         }
-        assert(error.getMessage.contains(key + "=true"))
         appConf.set(key, "false")
-        assert(GpuDriverlessBroadcastHashJoinExec.rewrite(join, enabled)
-          .isInstanceOf[GpuDriverlessBroadcastHashJoinExec])
+        val rewritten = GpuDriverlessBroadcastHashJoinExec.rewrite(join, enabled)
+        if (isDatabricks) {
+          assert(rewritten eq join)
+        } else {
+          assert(rewritten.isInstanceOf[GpuDriverlessBroadcastHashJoinExec])
+        }
       } finally {
         previous match {
           case Some(value) => appConf.set(key, value)

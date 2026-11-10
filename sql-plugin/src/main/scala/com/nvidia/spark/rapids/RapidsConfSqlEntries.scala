@@ -25,6 +25,7 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
 
   val DRIVERLESS_BROADCAST_ENABLED = conf("spark.rapids.sql.driverlessBroadcast.enabled")
     .doc("Use executor-to-executor GPU shuffle reads for eligible broadcast hash joins. " +
+      "Databricks retains its existing broadcast path even when this setting is true. " +
       "Can be enabled or disabled per query. Cached replicas are shared while source map " +
       "outputs remain unchanged; recomputed outputs use a new replica. " +
       "The old fetch protocol (spark.shuffle.useOldFetchProtocol=true) is unsupported and " +

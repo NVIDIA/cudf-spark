@@ -17,7 +17,7 @@ package org.apache.spark.sql.rapids.execution
 
 import scala.collection.mutable
 
-import com.nvidia.spark.rapids.RapidsConf
+import com.nvidia.spark.rapids.{DatabricksShimVersion, RapidsConf, ShimLoader, ShimVersion}
 
 import org.apache.spark.{SparkContext, SparkEnv, SparkException}
 import org.apache.spark.internal.Logging
@@ -45,9 +45,15 @@ private[execution] object DriverlessBroadcastPolicy extends Logging {
     } else None
   }
 
+  private[execution] def platformRejection(version: ShimVersion): Option[String] = version match {
+    case _: DatabricksShimVersion => Some("Databricks is not supported by driverless broadcast")
+    case _ => None
+  }
+
   def rejections(conf: RapidsConf): Seq[String] = Option(SparkEnv.get).map { env =>
     val startup = applicationConf(env)
     Seq(
+      platformRejection(ShimLoader.getShimVersion),
       // The build reader consumes GPU shuffle blocks, not disk-shuffle ManagedBuffers.
       if (!startup.isUCXShuffleManagerMode) Some("UCX GPU shuffle mode is required") else None,
       // Row-based checksums select SortShuffleManager even in UCX mode. Its reader returns

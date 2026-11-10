@@ -32,6 +32,8 @@ pytestmark = [shuffle_test]
 
 
 def _require_ucx():
+    if is_databricks_runtime():
+        pytest.skip('Driverless broadcast is unsupported on Databricks')
     startup = get_spark_i_know_what_i_am_doing().sparkContext.getConf()
     if not startup.get('spark.shuffle.manager', '').endswith('RapidsShuffleManager') or \
             startup.get('spark.rapids.shuffle.mode', 'MULTITHREADED').upper() != 'UCX':
@@ -168,10 +170,7 @@ def test_executor_broadcast_preserves_null_duplicate_and_residual_semantics(
         gpu_plan_assertion=check_native, require_non_empty=True)
 
 
-@ignore_order(local=True)
-@pytest.mark.parametrize('aqe', ['false', 'true'])
-@pytest.mark.parametrize('enabled', [None, 'false'])
-def test_executor_broadcast_disabled_keeps_standard_broadcast(aqe, enabled):
+def _assert_existing_broadcast_path(aqe, enabled):
     def check_standard(cpu_plan, gpu_plan):
         nodes = collect_plan_nodes(gpu_plan, include_wrapped=True)
         joins = [node for node in nodes
@@ -189,8 +188,9 @@ def test_executor_broadcast_disabled_keeps_standard_broadcast(aqe, enabled):
             exchange = joins[0].shuffleExchange()
             assert exchange.shuffleOrigin().toString() == 'EXECUTOR_BROADCAST'
             assert exchange.outputPartitioning().numPartitions() == 1
+            # The DBR shim's shuffleBytesWritten is separate from the writer's counter.
+            # dataSize records the actual build payload, independently of those write metrics.
             assert plan_metric(exchange, 'dataSize') > 0
-            assert plan_metric(exchange, 'shuffleBytesWritten') > 0
         else:
             exchanges = [node for node in nodes
                          if node.getClass().getSimpleName() == 'GpuBroadcastExchangeExec']
@@ -202,7 +202,10 @@ def test_executor_broadcast_disabled_keeps_standard_broadcast(aqe, enabled):
             for name in ('driverlessBuildBytes', 'fallbackBroadcastBytes',
                          'driverlessStageTime', 'driverlessStageFallbacks',
                          'executorBuilds', 'executorBuildCacheHits'):
-                assert not node.metrics().contains(name), name
+                if enabled == 'true':
+                    assert plan_metric(node, name) in (None, -1, 0), name
+                else:
+                    assert not node.metrics().contains(name), name
 
     conf = {'spark.sql.adaptive.enabled': aqe}
     if enabled is not None:
@@ -213,6 +216,20 @@ def test_executor_broadcast_disabled_keeps_standard_broadcast(aqe, enabled):
         exist_classes='GpuBroadcastHashJoinExec',
         non_exist_classes='GpuDriverlessBroadcastHashJoinExec', require_non_empty=True,
         gpu_plan_assertion=check_standard)
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize('aqe', ['false', 'true'])
+@pytest.mark.parametrize('enabled', [None, 'false'])
+def test_executor_broadcast_disabled_keeps_standard_broadcast(aqe, enabled):
+    _assert_existing_broadcast_path(aqe, enabled)
+
+
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_databricks_runtime(), reason='Databricks-specific feature exclusion')
+@pytest.mark.parametrize('aqe', ['false', 'true'])
+def test_driverless_broadcast_databricks_opt_in_keeps_existing_path(aqe):
+    _assert_existing_broadcast_path(aqe, 'true')
 
 
 @ignore_order(local=True)

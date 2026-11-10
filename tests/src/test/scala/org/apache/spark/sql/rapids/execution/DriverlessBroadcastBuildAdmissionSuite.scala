@@ -17,7 +17,7 @@ package org.apache.spark.sql.rapids.execution
 
 import scala.concurrent.duration.Duration
 
-import com.nvidia.spark.rapids.RapidsConf
+import com.nvidia.spark.rapids.{DatabricksShimVersion, RapidsConf, SparkShimVersion}
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.InternalRow
@@ -28,6 +28,18 @@ import org.apache.spark.sql.types._
 import org.apache.spark.storage.BlockManagerId
 
 class DriverlessBroadcastBuildAdmissionSuite extends AnyFunSuite {
+  test("driverless platform admission excludes Databricks without excluding Apache Spark") {
+    Seq(DatabricksShimVersion(3, 5, 0, "14.3"),
+      DatabricksShimVersion(4, 0, 0, "17.3"),
+      DatabricksShimVersion(4, 1, 0, "18.3")).foreach { version =>
+      assert(DriverlessBroadcastPolicy.platformRejection(version).exists(_.contains("Databricks")))
+    }
+    Seq(SparkShimVersion(3, 3, 0), SparkShimVersion(3, 5, 3),
+      SparkShimVersion(4, 1, 3), SparkShimVersion(4, 2, 0)).foreach { version =>
+      assert(DriverlessBroadcastPolicy.platformRejection(version).isEmpty)
+    }
+  }
+
   test("single-batch row admission accepts the boundary and rejects overflow") {
     Seq(0L, 1L, Int.MaxValue.toLong).foreach(
       DriverlessBroadcastBuildAdmission.requireSupportedRowCount)
