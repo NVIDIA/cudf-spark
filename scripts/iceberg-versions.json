@@ -169,10 +169,6 @@
         {
           "version": "4.0.4",
           "supported": true
-        },
-        {
-          "version": "4.0.5",
-          "supported": true
         }
       ]
     },
@@ -210,10 +206,6 @@
         },
         {
           "version": "4.0.4",
-          "supported": true
-        },
-        {
-          "version": "4.0.5",
           "supported": true
         },
         {
