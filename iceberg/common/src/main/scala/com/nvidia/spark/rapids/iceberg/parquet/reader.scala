@@ -196,15 +196,18 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
         }
       } finally {
         if (dictFilterTime != NoopMetric) {
-          dictFilterTime.synchronized {
-            dictFilterTime += localDictFilterTime.value
-            // Dictionary filtering does not acquire the GPU semaphore.
-            dictFilterTime.companionGpuMetric.foreach(_ += localDictFilterTime.value)
-          }
+          addDictFilterTime(localDictFilterTime.value)
         }
       }
     }.getOrElse(blocks)
       .toSeq
+  }
+
+  protected def addDictFilterTime(time: Long): Unit = {
+    val metric = conf.metrics.getOrElse(ICEBERG_DICT_FILTER_TIME, NoopMetric)
+    metric += time
+    // Dictionary filtering does not acquire the GPU semaphore.
+    metric.companionGpuMetric.foreach(_ += time)
   }
 
   def clipBlocksToSchema(fileReadSchema: ShadedMessageType,

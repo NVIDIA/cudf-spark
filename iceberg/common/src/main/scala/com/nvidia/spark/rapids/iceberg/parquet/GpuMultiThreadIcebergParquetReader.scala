@@ -17,7 +17,7 @@
 package com.nvidia.spark.rapids.iceberg.parquet
 
 import java.util.{Map => JMap}
-import java.util.concurrent.{ConcurrentHashMap, ConcurrentMap}
+import java.util.concurrent.{ConcurrentHashMap, ConcurrentLinkedQueue, ConcurrentMap}
 
 import scala.collection.JavaConverters._
 
@@ -47,7 +47,7 @@ class GpuMultiThreadIcebergParquetReader(
   = new ConcurrentHashMap[IcebergPartitionedFile, GpuParquetReaderPostProcessor](files.size)
   private val deletionVectors: ConcurrentMap[IcebergPartitionedFile, IcebergDeletionVector] =
     new ConcurrentHashMap[IcebergPartitionedFile, IcebergDeletionVector](files.size)
-
+  private val pendingDictFilterTimes = new ConcurrentLinkedQueue[java.lang.Long]()
 
   private var inited = false
   // Visible for testing
@@ -59,13 +59,33 @@ class GpuMultiThreadIcebergParquetReader(
         withResource(reader) { _ => }
       }
     } finally {
+      flushDictFilterTimes()
       deletionVectors.values().asScala.toSeq.safeClose()
     }
   }
 
-  override def hasNext: Boolean = reader.next()
+  override def hasNext: Boolean = {
+    try {
+      reader.next()
+    } finally {
+      flushDictFilterTimes()
+    }
+  }
 
   override def next(): ColumnarBatch = reader.get()
+
+  override protected def addDictFilterTime(time: Long): Unit = {
+    pendingDictFilterTimes.add(time)
+  }
+
+  // Publish completed file timings on the task thread, including files with no surviving rows.
+  private def flushDictFilterTimes(): Unit = {
+    var time = pendingDictFilterTimes.poll()
+    while (time != null) {
+      super.addDictFilterTime(time.longValue())
+      time = pendingDictFilterTimes.poll()
+    }
+  }
 
   private def findIcebergFile(f: PartitionedFile): IcebergPartitionedFile = {
     val path = f.filePath.toString()
