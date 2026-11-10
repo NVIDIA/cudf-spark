@@ -16,7 +16,7 @@
 
 package org.apache.spark.sql.rapids.execution
 
-import ai.rapids.cudf.Table
+import ai.rapids.cudf.{ColumnVector, Rmm, Table}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.ProjectAstTestUtils.collectExpressions
@@ -25,11 +25,12 @@ import com.nvidia.spark.rapids.jni.RmmSpark
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, NamedExpression}
-import org.apache.spark.sql.catalyst.plans.Inner
+import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, ExprId,
+  NamedExpression}
+import org.apache.spark.sql.catalyst.plans.{ExistenceJoin, Inner, JoinType, LeftSemi}
 import org.apache.spark.sql.execution.{LeafExecNode, SparkPlan}
-import org.apache.spark.sql.rapids.{GpuAdd, GpuMultiply, GpuSubtract}
-import org.apache.spark.sql.types.IntegerType
+import org.apache.spark.sql.rapids.{GpuAdd, GpuGreaterThan, GpuMultiply, GpuSubtract}
+import org.apache.spark.sql.types.{BooleanType, IntegerType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class GpuBroadcastNestedLoopJoinRetrySuite extends RmmSparkRetrySuiteBase {
@@ -142,5 +143,83 @@ class GpuBroadcastNestedLoopJoinRetrySuite extends RmmSparkRetrySuiteBase {
       assert(RmmSpark.getAndResetNumRetryThrow(taskId) > 0)
       assertResult(0)(RmmSpark.getAndResetNumSplitRetryThrow(taskId))
     }
+  }
+
+  private val streamAttr = AttributeReference("a", IntegerType, nullable = true)()
+  private val existsAttr = AttributeReference("exists", BooleanType, nullable = false)()
+
+  // With columns on one side only, the condition reads that side's column at ordinal 0.
+  private val aboveFive = GpuGreaterThan(
+    GpuBoundReference(0, IntegerType, nullable = true)(ExprId(0), "a"),
+    GpuLiteral(5, IntegerType))
+
+  private def intBatch(values: Integer*): ColumnarBatch =
+    new ColumnarBatch(Array(GpuColumnVector.from(
+      ColumnVector.fromBoxedInts(values: _*), IntegerType)), values.length)
+
+  private def firstColumn(batch: ColumnarBatch): Seq[Any] = {
+    val column = batch.column(0).asInstanceOf[GpuColumnVector]
+    withResource(column.getBase.copyToHost()) { host =>
+      (0 until batch.numRows()).map { row =>
+        if (column.dataType() == BooleanType) host.getBoolean(row) else host.getInt(row)
+      }
+    }
+  }
+
+  // Joins a rows-only side with the other side, building right, after forcing one GpuRetryOOM
+  // on the next GPU allocation. Before the iterator is built, that allocation evaluates the
+  // condition over the build. After it, the allocation handles the first stream batch. Returns
+  // the first column of every output batch, and checks that the join retried and freed what it
+  // allocated.
+  private def joinWithRetryOOM(
+      joinType: JoinType,
+      build: => ColumnarBatch,
+      stream: => ColumnarBatch,
+      streamHasColumns: Boolean,
+      injectBeforeIterator: Boolean): Seq[Any] = {
+    SparkSession.builder().master("local[1]").appName(getClass.getSimpleName).getOrCreate()
+    val allocatedBefore = Rmm.getTotalBytesAllocated
+    val values = TestUtils.withMockTaskContext(completesTask = true) {
+      val builtBatch = withResource(build)(LazySpillableColumnarBatch(_, "build"))
+      val streamBatch = withResource(stream)(LazySpillableColumnarBatch(_, "stream"))
+      val streamAttrs = if (streamHasColumns) Seq(streamAttr) else Seq.empty
+      def inject(): Unit = RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
+        RmmSpark.OomInjectionType.GPU.ordinal, 0)
+      RmmSpark.getAndResetNumRetryThrow(taskId)
+      if (injectBeforeIterator) inject()
+      val joined = GpuBroadcastNestedLoopJoinExecBase.nestedLoopJoin(joinType, GpuBuildRight,
+        streamAttrs.size, builtBatch, Iterator(streamBatch), streamAttrs, 1024L, 0.75,
+        Some(aboveFive), NoopMetric, NoopMetric, NoopMetric, NoopMetric)
+      if (!injectBeforeIterator) inject()
+      val out = joined.flatMap(cb => withResource(cb)(firstColumn)).toList
+      assert(RmmSpark.getAndResetNumRetryThrow(taskId) > 0, "the join did not retry")
+      out
+    }
+    assertResult(allocatedBefore)(Rmm.getTotalBytesAllocated)
+    values
+  }
+
+  test("LEFT SEMI with a rows-only build retries its stream filter on GpuRetryOOM") {
+    val out = joinWithRetryOOM(LeftSemi, new ColumnarBatch(Array.empty, 3),
+      intBatch(null, 0, 6, 9), streamHasColumns = true, injectBeforeIterator = false)
+    assertResult(Seq(6, 9))(out)
+  }
+
+  test("INNER with a rows-only stream retries its build filter on GpuRetryOOM") {
+    val out = joinWithRetryOOM(Inner, intBatch(null, 6, 0, 9), new ColumnarBatch(Array.empty, 2),
+      streamHasColumns = false, injectBeforeIterator = true)
+    assertResult(Seq(6, 6, 9, 9))(out.map(_.asInstanceOf[Int]).sorted)
+  }
+
+  test("existence join with a rows-only stream retries its build condition on GpuRetryOOM") {
+    val out = joinWithRetryOOM(ExistenceJoin(existsAttr), intBatch(null, 6, 0, 9),
+      new ColumnarBatch(Array.empty, 2), streamHasColumns = false, injectBeforeIterator = true)
+    assertResult(Seq(true, true))(out)
+  }
+
+  test("existence join with a rows-only stream retries its exists column on GpuRetryOOM") {
+    val out = joinWithRetryOOM(ExistenceJoin(existsAttr), intBatch(null, 6, 0, 9),
+      new ColumnarBatch(Array.empty, 2), streamHasColumns = false, injectBeforeIterator = false)
+    assertResult(Seq(true, true))(out)
   }
 }

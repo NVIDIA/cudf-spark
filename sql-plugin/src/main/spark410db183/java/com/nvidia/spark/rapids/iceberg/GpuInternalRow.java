@@ -14,10 +14,8 @@
  * limitations under the License.
  */
 /*** spark-rapids-shim-json-lines
-{"spark": "410db183"}
-{"spark": "411"}
-{"spark": "412"}
-{"spark": "413"}
+{"spark":["410db183"],"carryForward":"none"}
+{"spark":["411"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.iceberg;

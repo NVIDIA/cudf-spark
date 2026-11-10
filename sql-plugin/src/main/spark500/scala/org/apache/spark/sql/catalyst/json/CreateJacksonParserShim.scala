@@ -15,24 +15,21 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "400db173"}
-{"spark": "410db183"}
+{"spark":["500"],"carryForward":"sameMinor"}
 spark-rapids-shim-json-lines ***/
-package org.apache.spark.sql.execution.datasources.parquet
 
-import org.apache.spark.memory.MemoryMode
-import org.apache.spark.sql.execution.vectorized.WritableColumnVector
+package org.apache.spark.sql.catalyst.json
 
-object ShimParquetColumnVector {
-  def apply(
-    column: ParquetColumn,
-    vector: WritableColumnVector,
-    capacity: Int,
-    memoryMode: MemoryMode,
-    missingColumns: java.util.Set[ParquetColumn],
-    isTopLevel: Boolean,
-    defaultValue: Any): ParquetColumnVector = {
-    new ParquetColumnVector(column, vector, capacity, missingColumns, isTopLevel,
-      defaultValue, "")
+import com.fasterxml.jackson.core.{JsonFactory, JsonParser}
+import org.apache.hadoop.io.Text
+
+object CreateJacksonParserShim {
+  def text(
+      encoding: String,
+      options: JSONOptions,
+      jsonFactory: JsonFactory,
+      record: Text): JsonParser = {
+    CreateJacksonParser.text(encoding, options.legacyJavaCharsets,
+      options.legacyCodingErrorAction, jsonFactory, record)
   }
 }
