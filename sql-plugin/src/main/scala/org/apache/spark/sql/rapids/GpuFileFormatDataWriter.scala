@@ -954,44 +954,50 @@ class GpuDynamicPartitionDataConcurrentWriter(
   }
 
   private def splitBatchToCacheAndClose(batch: ColumnarBatch): Unit = {
-    // Split batch to groups by sort columns, [partition and(or) bucket id column].
-    val (keysAndGroups, keyTypes) = withResource(batch) { _ =>
-      val (opBatch, keyTypes) = withResource(getKeysBatch(batch)) { keysBatch =>
-        val combinedCb = withResource(GpuFloatingPointKeyUtils.encode(keysBatch)) { encoded =>
-          GpuColumnVector.combineColumns(encoded, batch)
-        }
-        (combinedCb, GpuColumnVector.extractTypes(keysBatch))
-      }
-      withResource(opBatch) { _ =>
-        withResource(GpuColumnVector.from(opBatch)) { opTable =>
-          (opTable.groupBy(keyTypes.indices: _*).contiguousSplitGroupsAndGenUniqKeys(),
-            keyTypes)
-        }
-      }
+    val input = closeOnExcept(batch) { _ =>
+      SpillableColumnarBatch(batch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
     }
-    // Copy keys table to host and make group batches spillable
-    val (keyHostCb, groups) = withResource(keysAndGroups) { _ =>
-      // groups number should equal to uniq keys number
-      assert(keysAndGroups.getGroups.length == keysAndGroups.getUniqKeyTable.getRowCount)
-      val keyHost = withResource(GpuFloatingPointKeyUtils.decode(
-          keysAndGroups.getUniqKeyTable, keyTypes)) { decoded =>
-        withResource(GpuColumnVector.from(decoded)) { table =>
-          copyToHostAsBatch(table, keyTypes)
+    // Finish retryable GPU work before opening writers or updating their caches.
+    val (keyHostCb, groups) = withRetryNoSplit(input) { scb =>
+      // Split batch to groups by sort columns, [partition and(or) bucket id column].
+      val (keysAndGroups, keyTypes) = withResource(scb.getColumnarBatch()) { batch =>
+        val (opBatch, keyTypes) = withResource(getKeysBatch(batch)) { keysBatch =>
+          val combinedCb = withResource(GpuFloatingPointKeyUtils.encode(keysBatch)) { encoded =>
+            GpuColumnVector.combineColumns(encoded, batch)
+          }
+          (combinedCb, GpuColumnVector.extractTypes(keysBatch))
         }
-      }
-      closeOnExcept(keyHost) { keyHostCb =>
-        keysAndGroups.closeUniqKeyTable()
-        val allTypes = description.allColumns.map(_.dataType).toArray
-        val allColsIds = allTypes.indices.map(_ + keyTypes.length)
-        val gps = keysAndGroups.getGroups.safeMap { gp =>
-          withResource(gp.getTable) { gpTable =>
-            withResource(new Table(allColsIds.map(gpTable.getColumn): _*)) { allTable =>
-              SpillableColumnarBatch(GpuColumnVector.from(allTable, allTypes),
-                SpillPriorities.ACTIVE_BATCHING_PRIORITY)
-            }
+        withResource(opBatch) { _ =>
+          withResource(GpuColumnVector.from(opBatch)) { opTable =>
+            (opTable.groupBy(keyTypes.indices: _*).contiguousSplitGroupsAndGenUniqKeys(),
+              keyTypes)
           }
         }
-        (keyHostCb, gps)
+      }
+      // Copy keys table to host and make group batches spillable
+      withResource(keysAndGroups) { _ =>
+        // groups number should equal to uniq keys number
+        assert(keysAndGroups.getGroups.length == keysAndGroups.getUniqKeyTable.getRowCount)
+        val keyHost = withResource(GpuFloatingPointKeyUtils.decode(
+            keysAndGroups.getUniqKeyTable, keyTypes)) { decoded =>
+          withResource(GpuColumnVector.from(decoded)) { table =>
+            copyToHostAsBatch(table, keyTypes)
+          }
+        }
+        closeOnExcept(keyHost) { keyHostCb =>
+          keysAndGroups.closeUniqKeyTable()
+          val allTypes = description.allColumns.map(_.dataType).toArray
+          val allColsIds = allTypes.indices.map(_ + keyTypes.length)
+          val gps = keysAndGroups.getGroups.safeMap { gp =>
+            withResource(gp.getTable) { gpTable =>
+              withResource(new Table(allColsIds.map(gpTable.getColumn): _*)) { allTable =>
+                SpillableColumnarBatch(GpuColumnVector.from(allTable, allTypes),
+                  SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+              }
+            }
+          }
+          (keyHostCb, gps)
+        }
       }
     }
     // Cache the result to either the map or the pending queue.
