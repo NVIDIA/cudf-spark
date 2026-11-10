@@ -315,15 +315,20 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
       "and the driver clears its map outputs and keeps the shuffle registered. It takes " +
       "effect only when spark.rapids.shuffle.mode is UCX, the RAPIDS Shuffle Manager is " +
       "configured and spark.rapids.sql.mode is executeOnGPU, and never on Databricks. Any " +
-      "other setup, CACHE_ONLY mode included, logs one warning and reclaims nothing. A " +
-      "shuffle whose map stage Spark marks indeterminate, such as the shuffle of a " +
-      "repartition(n) without columns, waits for Spark's own cleanup, as it does when this " +
-      "is false. A later action that reuses a DataFrame, computes cache partitions it has not " +
-      "stored, or reads it through a lazy iterator such as toLocalIterator reruns the map " +
-      "stage of each reclaimed shuffle it reads, and a rerun map stage whose output depends " +
-      "on input order, such as one computing first(), can return different values. An action " +
-      "that reads a shuffle while an executor frees it fails a fetch, and Spark then reruns " +
-      "every map output of that executor.")
+      "other setup, CACHE_ONLY mode included, logs one warning and reclaims nothing. Enable " +
+      "it only when queries neither run concurrently nor share DataFrames, as in a power test " +
+      "that runs independent queries one after another. A shuffle waits for Spark's own " +
+      "cleanup, as it does when this is false, when Spark marks its map stage indeterminate, " +
+      "as for repartition(n) without columns, or when its query computes it from a " +
+      "nondeterministic expression such as rand() or uuid(), a sample, or an RDD. A later " +
+      "action that reuses a DataFrame reruns the map stage of each reclaimed shuffle it reads. " +
+      "An action that Spark schedules just before a query ends, such as a second action on " +
+      "the same DataFrame or a concurrent query that shares it, can read part of a reclaimed " +
+      "shuffle's old output and rerun the rest. It then returns duplicated or missing rows if " +
+      "the shuffle depends on input order, as first(), last(), row_number() over ties or " +
+      "limit without an order can. Its fetch failure also makes Spark drop every map output " +
+      "on that executor, so a concurrent query that reads a GPU round-robin shuffle there " +
+      "fails. Keep this key off for such workloads.")
     .startupOnly()
     .booleanConf
     .createWithDefault(false)
