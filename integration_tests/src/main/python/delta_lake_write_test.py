@@ -2807,7 +2807,6 @@ def test_delta_write_column_name_mapping(spark_tmp_path, mapping, optimized_writ
         "spark.sql.shuffle.partitions": "4"
     })
     # Multiple input partitions exercise the optimized-write shuffle with physical column names.
-    # Regression coverage for https://github.com/NVIDIA/cudf-spark/issues/16796.
     assert_gpu_and_cpu_writes_are_equal_collect(
         lambda spark, path: gen_df(spark, gen_list).repartition(4).write.format("delta") \
             .partitionBy("b", "d") \

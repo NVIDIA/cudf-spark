@@ -483,7 +483,7 @@ def test_delta_update_disabled_fallback(spark_tmp_path, disable_conf, enable_del
 @pytest.mark.parametrize("mapping", ["name", "id"])
 @pytest.mark.parametrize("aqe_enabled", [False, True], ids=idfn)
 def test_delta_update_optimized_column_mapping_cdf(spark_tmp_path, mapping, aqe_enabled):
-    # Regression coverage for #16796, including the synthetic __is_cdc partition column.
+    # Include the synthetic __is_cdc partition column.
     data_path = spark_tmp_path + "/DELTA_DATA"
     conf = copy_and_update(delta_update_enabled_conf, {
         "spark.databricks.delta.properties.defaults.columnMapping.mode": mapping,
