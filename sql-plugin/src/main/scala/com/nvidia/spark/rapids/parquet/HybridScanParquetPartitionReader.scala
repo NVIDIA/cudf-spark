@@ -484,8 +484,10 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
 }
 
 /**
- * The hybrid scan logic that does not need a pipeline instance: parsing the footer, laying out
- * byte ranges, and deciding on the driver whether a scan may take the hybrid path at all.
+ * The parts of the hybrid scan that take no per-scan state, so they are called without
+ * constructing a [[HybridScanPipeline]]: parsing the footer, choosing the columns the reader
+ * decodes, laying out byte ranges, and deciding on the driver whether a scan may take the hybrid
+ * path at all.
  */
 object HybridScanPipeline extends Logging {
 
