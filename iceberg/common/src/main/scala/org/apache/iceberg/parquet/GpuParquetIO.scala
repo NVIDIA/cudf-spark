@@ -55,10 +55,13 @@ object GpuParquetIO {
           case _ if mapEntries => fields.map(project(_))
           case _ => fields.take(1).map(project(_))
         }
-        // The legacy annotation preserves LIST/MAP while dropping VARIANT. Its first physical
-        // child (normally metadata) is read as an ordinary field, including for shredded input.
-        val projected = new ShadedGroupType(
-          group.getRepetition, group.getName, group.getOriginalType, children.asJava)
+        // Preserve LIST/MAP annotations, but use an ordinary group for VARIANT. Its first
+        // physical child (normally metadata) needs no reconstruction, even for shredded input.
+        val projected = if (group.getOriginalType == null) {
+          new ShadedGroupType(group.getRepetition, group.getName, children.asJava)
+        } else {
+          group.withNewFields(children.asJava)
+        }
         Option(group.getId).map(id => projected.withId(id.intValue())).getOrElse(projected)
       }
     }
