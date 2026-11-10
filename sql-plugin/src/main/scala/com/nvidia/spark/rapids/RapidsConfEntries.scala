@@ -316,19 +316,22 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
       "effect only when spark.rapids.shuffle.mode is UCX, the RAPIDS Shuffle Manager is " +
       "configured and spark.rapids.sql.mode is executeOnGPU, and never on Databricks. Any " +
       "other setup, CACHE_ONLY mode included, logs one warning and reclaims nothing. Enable " +
-      "it only when queries neither run concurrently nor share DataFrames, as in a power test " +
-      "that runs independent queries one after another. A shuffle waits for Spark's own " +
-      "cleanup, as it does when this is false, when Spark marks its map stage indeterminate, " +
-      "as for repartition(n) without columns, or when its query computes it from a " +
+      "it only when queries run one at a time, share no DataFrame and return no results " +
+      "through toLocalIterator, as in a power test that runs independent queries one after " +
+      "another. A shuffle waits for Spark's own cleanup, as it does when this is false, when " +
+      "Spark marks its map stage indeterminate, as for repartition(n) without columns, when " +
+      "Delta Lake's optimized write builds it, or when its query computes it from a " +
       "nondeterministic expression such as rand() or uuid(), a sample, or an RDD. A later " +
       "action that reuses a DataFrame reruns the map stage of each reclaimed shuffle it reads. " +
-      "An action that Spark schedules just before a query ends, such as a second action on " +
-      "the same DataFrame or a concurrent query that shares it, can read part of a reclaimed " +
-      "shuffle's old output and rerun the rest. It then returns duplicated or missing rows if " +
-      "the shuffle depends on input order, as first(), last(), row_number() over ties or " +
-      "limit without an order can. Its fetch failure also makes Spark drop every map output " +
-      "on that executor, so a concurrent query that reads a GPU round-robin shuffle there " +
-      "fails. Keep this key off for such workloads.")
+      "The driver clears a shuffle's map outputs shortly after its query ends, and an action " +
+      "that judged the shuffle available before that clear can read part of its old output " +
+      "and rerun the rest. Such an action can be a second action on the same DataFrame, a " +
+      "concurrent query that shares it, or toLocalIterator, whose jobs run after its query " +
+      "ends. That action then returns duplicated or missing rows if the shuffle depends on " +
+      "input order, as first(), last(), row_number() over ties or limit without an order " +
+      "can. Its fetch failure can also make Spark drop every map output on that executor, so " +
+      "a concurrent query that reads a GPU round-robin shuffle there can fail. Keep this key " +
+      "off for such workloads.")
     .startupOnly()
     .booleanConf
     .createWithDefault(false)
