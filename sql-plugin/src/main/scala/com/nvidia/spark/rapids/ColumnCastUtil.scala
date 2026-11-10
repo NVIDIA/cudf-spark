@@ -111,8 +111,10 @@ object ColumnCastUtil {
                   }
                   if (childrenUpdated) {
                     withResource(cv.getValid) { valid =>
-                      val ret = closeOnExcept(new ColumnView(DType.STRUCT, cv.getRowCount,
-                        Optional.empty[java.lang.Long](), valid, null, newChildren.toArray)) { ret =>
+                      val ret = closeOnExcept(
+                          new ColumnView(DType.STRUCT, cv.getRowCount,
+                            Optional.empty[java.lang.Long](), valid, null,
+                            newChildren.toArray)) { ret =>
                         needsClosing += ret
                         ret
                       }

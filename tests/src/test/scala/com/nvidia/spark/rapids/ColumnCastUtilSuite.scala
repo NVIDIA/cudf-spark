@@ -20,8 +20,9 @@ import java.util.Arrays
 
 import ai.rapids.cudf.{ColumnVector, ColumnView, DType, HostColumnVector}
 import com.nvidia.spark.rapids.Arm.withResource
-import org.apache.spark.sql.types.{ArrayType, DataType, DoubleType, StructField, StructType}
 import org.scalatest.funsuite.AnyFunSuite
+
+import org.apache.spark.sql.types.{ArrayType, DataType, DoubleType, StructField, StructType}
 
 class ColumnCastUtilSuite extends AnyFunSuite {
   private val normalizeDoubles:
