@@ -101,6 +101,26 @@ class SparkPlanMetaSuite extends SparkQueryCompareTestSuite {
     assert(converted.getTagValue(opaqueTag).contains("carried-value"))
     assert(converted.getTagValue(SparkPlan.LOGICAL_PLAN_TAG).exists(_ eq logical))
 
+    // Custom tags are added after the CPU tags, and may deliberately override a copied value.
+    val customTag = TreeNodeTag[String]("test.custom.gpu.tag")
+    val customGpu = TestGpuExec()
+    val customMeta = new TestMeta(cpu, new RapidsConf(Map.empty[String, String]), customGpu) {
+      override protected def tagConvertedPlan(converted: GpuExec): Unit = {
+        assert(converted.getTagValue(opaqueTag).contains("carried-value"))
+        assert(converted.getTagValue(SparkPlan.LOGICAL_PLAN_TAG).exists(_ eq logical))
+        converted.setTagValue(opaqueTag, "custom-value")
+        converted.setTagValue(customTag, "gpu-only-value")
+      }
+    }
+    customMeta.tagForGpu()
+    val customConverted = customMeta.convertIfNeeded()
+    assert(customConverted eq customGpu)
+    assert(customConverted.getTagValue(opaqueTag).contains("custom-value"))
+    assert(customConverted.getTagValue(customTag).contains("gpu-only-value"))
+    assert(customConverted.getTagValue(SparkPlan.LOGICAL_PLAN_TAG).exists(_ eq logical))
+    assert(cpu.getTagValue(opaqueTag).contains("carried-value"))
+    assert(cpu.getTagValue(customTag).isEmpty)
+
     // A conversion can return an existing child. Its tags must retain their original meaning.
     val sourceOnlyTag = TreeNodeTag[String]("test.source.only.tag")
     cpu.setTagValue(sourceOnlyTag, "source-only-value")

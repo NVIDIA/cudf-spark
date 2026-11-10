@@ -873,6 +873,14 @@ abstract class SparkPlanMeta[INPUT <: SparkPlan](plan: INPUT,
   def tagPlanForGpu(): Unit = {}
 
   /**
+   * Add or update tags on the converted GPU plan after Spark tags have been copied from `wrapped`.
+   * Set custom tags here rather than in `convertToGpu`: Spark's `copyTagsFrom` skips a destination
+   * that already has tags. Conversion can return an existing node, whose tags are preserved by
+   * that copy; implementations should take care when updating such a node.
+   */
+  protected def tagConvertedPlan(converted: GpuExec): Unit = {}
+
+  /**
    * If this is enabled to be converted to a GPU version convert it and return the result, else
    * do what is needed to possibly convert the rest of the plan.
    * Plan conversion callers should use this entry point so replacement nodes preserve Spark tags.
@@ -891,6 +899,7 @@ abstract class SparkPlanMeta[INPUT <: SparkPlan](plan: INPUT,
         // Match Spark's tree rewrites: carry tags to a fresh replacement, while preserving
         // the tags of an existing node when conversion returns one (for example, a child).
         converted.copyTagsFrom(wrapped)
+        tagConvertedPlan(converted)
         converted
       } else {
         convertToCpu()

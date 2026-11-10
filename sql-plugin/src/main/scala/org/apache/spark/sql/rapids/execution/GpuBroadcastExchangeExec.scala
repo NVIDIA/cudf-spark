@@ -35,10 +35,11 @@ import com.nvidia.spark.rapids.lore.{GpuLoreDumpRDD, SimpleRDD}
 import com.nvidia.spark.rapids.lore.GpuLore.LORE_DUMP_RDD_TAG
 import com.nvidia.spark.rapids.shims.{BroadcastExchangeShims, ShimBroadcastExchangeLike, ShimUnaryExecNode, SparkShimImpl}
 
-import org.apache.spark.SparkException
+import org.apache.spark.{MapOutputStatistics, SparkException}
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.internal.Logging
 import org.apache.spark.launcher.SparkLauncher
+import org.apache.spark.rapids.shims.GpuShuffleExchangeExec
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression}
@@ -396,11 +397,27 @@ class GpuBroadcastMeta(
     GpuBroadcastExchangeExec(exchange.mode, childPlans.head.convertIfNeeded())(
       exchange.canonicalized.asInstanceOf[BroadcastExchangeExec])
   }
+
+  override protected def tagConvertedPlan(converted: GpuExec): Unit = {
+    if (conf.isDriverlessBroadcastEnabled) {
+      DriverlessBroadcastEligibility.preserveBuildEstimate(
+        exchange, converted.asInstanceOf[GpuBroadcastExchangeExec])
+    }
+  }
 }
 
 abstract class GpuBroadcastExchangeExecBase(
     mode: BroadcastMode,
     child: SparkPlan) extends ShimBroadcastExchangeLike with ShimUnaryExecNode with GpuExec {
+
+  protected def prepareDriverlessBuild(): Option[Broadcast[Any]] = None
+
+  protected def resolveBroadcast(result: Broadcast[Any]): Broadcast[Any] = result
+
+  protected def activeBroadcastFuture: Option[Future[Broadcast[Any]]] = None
+
+  // Metrics can be inspected after the session restores a different query's configuration.
+  private val driverlessMetricsEnabled = RapidsConf.DRIVERLESS_BROADCAST_ENABLED.get(conf)
 
   override val outputRowsLevel: MetricsLevel = ESSENTIAL_LEVEL
   override val outputBatchesLevel: MetricsLevel = MODERATE_LEVEL
@@ -408,7 +425,14 @@ abstract class GpuBroadcastExchangeExecBase(
     "dataSize" -> createSizeMetric(ESSENTIAL_LEVEL, "data size"),
     COLLECT_TIME -> createNanoTimingMetric(ESSENTIAL_LEVEL, DESCRIPTION_COLLECT_TIME),
     BUILD_TIME -> createNanoTimingMetric(ESSENTIAL_LEVEL, DESCRIPTION_BUILD_TIME),
-    "broadcastTime" -> createNanoTimingMetric(ESSENTIAL_LEVEL, "time to broadcast"))
+    "broadcastTime" -> createNanoTimingMetric(ESSENTIAL_LEVEL, "time to broadcast")) ++
+    (if (driverlessMetricsEnabled) Map(
+      "driverlessBuildBytes" -> createSizeMetric(ESSENTIAL_LEVEL, "driverless build data size"),
+      "fallbackBroadcastBytes" -> createSizeMetric(DEBUG_LEVEL, "fallback broadcast data size"),
+      "driverlessStageTime" -> createNanoTimingMetric(ESSENTIAL_LEVEL,
+        "driverless shuffle build time"),
+      "driverlessStageFallbacks" -> createMetric(ESSENTIAL_LEVEL, "driverless stage fallbacks"))
+    else Map.empty[String, GpuMetric])
 
   override def outputPartitioning: Partitioning = BroadcastPartitioning(mode)
 
@@ -423,8 +447,11 @@ abstract class GpuBroadcastExchangeExecBase(
   // the value is assigned once.
   override val runId: UUID = UUID.randomUUID
 
+  override def relationFuture: Future[Broadcast[Any]] =
+    activeBroadcastFuture.getOrElse(materializationFuture)
+
   @transient
-  lazy val relationFuture: Future[Broadcast[Any]] = {
+  protected lazy val materializationFuture: Future[Broadcast[Any]] = {
     // relationFuture is used in "doExecute". Therefore we can get the execution id correctly here.
     val executionId = sparkContext.getLocalProperty(SQLExecution.EXECUTION_ID_KEY)
     val numOutputBatches = gpuLongMetric(NUM_OUTPUT_BATCHES)
@@ -474,6 +501,14 @@ abstract class GpuBroadcastExchangeExecBase(
       // Setup a job group here so later it may get cancelled by groupId if necessary.
       sparkContext.setJobGroup(runId.toString, s"broadcast exchange (runId ${runId})",
         interruptOnCancel = true)
+      try {
+        prepareDriverlessBuild().getOrElse(buildStandardBroadcast())
+      } finally {
+        SQLMetrics.postDriverMetricUpdates(sparkContext, executionId, metrics.values.toSeq)
+      }
+    }
+
+    def buildStandardBroadcast(): Broadcast[Any] = {
       val broadcastResult = {
         val collected =
           NvtxIdWithMetrics(NvtxRegistry.BROADCAST_COLLECT, collectTime) {
@@ -502,7 +537,6 @@ abstract class GpuBroadcastExchangeExecBase(
           // Broadcast the relation
           sparkContext.broadcast(broadcastResult)
       }
-      SQLMetrics.postDriverMetricUpdates(sparkContext, executionId, metrics.values.toSeq)
       broadcasted
     }
 
@@ -551,7 +585,7 @@ abstract class GpuBroadcastExchangeExecBase(
 
   override protected[sql] def doExecuteBroadcast[T](): Broadcast[T] = {
     try {
-      relationFuture.get(timeout, TimeUnit.SECONDS).asInstanceOf[Broadcast[T]]
+      resolveBroadcast(relationFuture.get(timeout, TimeUnit.SECONDS)).asInstanceOf[Broadcast[T]]
     } catch {
       case ex: TimeoutException =>
         logError(s"Could not execute broadcast in $timeout secs.", ex)
@@ -571,7 +605,7 @@ abstract class GpuBroadcastExchangeExecBase(
       throw new IllegalStateException("A canonicalized plan is not supposed to be executed.")
     }
     try {
-      val ret = relationFuture.get(timeout, TimeUnit.SECONDS)
+      val ret = resolveBroadcast(relationFuture.get(timeout, TimeUnit.SECONDS))
       doLoreDump(ret)
       ret.asInstanceOf[Broadcast[T]]
     } catch {
@@ -692,8 +726,8 @@ object GpuBroadcastExchangeExecBase {
     }
   }
 
-  protected def checkSizeLimit(sizeInBytes: Long, conf: SQLConf) = {
-    // Spark restricts the size of broadcast relations
+  private[execution] def checkSizeLimit(sizeInBytes: Long, conf: SQLConf): Unit = {
+    // Spark restricts the size of broadcast relations.
     val maxBytes = BroadcastExchangeShims.getMaxBroadcastTableBytes(conf)
     if (sizeInBytes >= maxBytes) {
       throw new SparkException(
@@ -758,6 +792,40 @@ case class GpuBroadcastExchangeExec(
     (val cpuCanonical: BroadcastExchangeExec)
     extends GpuBroadcastExchangeExecBase(mode, child) {
   override def otherCopyArgs: Seq[AnyRef] = Seq(cpuCanonical)
+
+  @transient private lazy val driverlessStage = {
+    if (getTagValue(DriverlessBroadcastStage.eligible).contains(true) &&
+        RapidsConf.DRIVERLESS_BROADCAST_ENABLED.get(conf) && sparkContext.cleaner.nonEmpty) {
+      Some(new DriverlessBroadcastStage(this, sparkContext))
+    } else {
+      None
+    }
+  }
+
+  private[execution] def admittedDriverlessBuild:
+      Option[(GpuShuffleExchangeExec, Option[MapOutputStatistics])] =
+    driverlessStage.filter(_.isAdmitted).map(stage => (stage.shuffle, stage.mapStatistics))
+
+  private[execution] def admittedDriverlessShuffle: Option[GpuShuffleExchangeExec] =
+    admittedDriverlessBuild.map(_._1)
+
+  override protected def prepareDriverlessBuild(): Option[Broadcast[Any]] = {
+    driverlessStage.flatMap { stage =>
+      val start = System.nanoTime()
+      try {
+        stage.materialize()
+      } finally {
+        // This is driver wall time for stage preparation, separate from task operator time.
+        gpuLongMetric("driverlessStageTime") += System.nanoTime() - start
+      }
+    }
+  }
+
+  override protected def resolveBroadcast(result: Broadcast[Any]): Broadcast[Any] =
+    driverlessStage.filter(_.isAdmitted).map(_.standardBroadcast()).getOrElse(result)
+
+  override protected def activeBroadcastFuture: Option[Future[Broadcast[Any]]] =
+    driverlessStage.flatMap(_.activeBroadcastFuture)
 
   private var _isGpuPlanningComplete = false
 

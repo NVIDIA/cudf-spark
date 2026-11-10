@@ -26,7 +26,7 @@ import com.nvidia.spark.rapids.shims.DateTimeUtilsShims
 
 import org.apache.spark.sql.catalyst.util.DateTimeUtils.localDateToDays
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.{GpuToTimestamp, LegacyTimeParserPolicy}
+import org.apache.spark.sql.rapids.{CorrectedTimeParserPolicy, GpuToTimestamp, LegacyTimeParserPolicy}
 
 /**
  * Class for helper functions for Date
@@ -229,7 +229,15 @@ object DateUtils {
       GpuToTimestamp.LEGACY_COMPATIBLE_FORMATS
     }
     var strfFormat: String = null
-    if (GpuOverrides.getTimeParserPolicy == LegacyTimeParserPolicy) {
+    if (parseString && GpuToTimestamp.CORRECTED_TIMESTAMP_FORMATS.contains(formatToConvert)) {
+      // JNI consumes the Spark pattern directly; there is no equivalent cuDF format for
+      // variable-width fractions and strict X/XX/XXX offsets. Do not use the incompatible
+      // cuDF path for these formats, even when incompatibleDateFormats is enabled.
+      if (GpuOverrides.getTimeParserPolicy != CorrectedTimeParserPolicy) {
+        meta.willNotWorkOnGpu(s"Parsing format '$sparkFormat' requires CORRECTED " +
+          "timeParserPolicy on the GPU.")
+      }
+    } else if (GpuOverrides.getTimeParserPolicy == LegacyTimeParserPolicy) {
       try {
         // try and convert the format to cuDF format - this will throw an exception if
         // the format contains unsupported characters or words
@@ -259,10 +267,20 @@ object DateUtils {
       try {
         // try and convert the format to cuDF format - this will throw an exception if
         // the format contains unsupported characters or words
-        strfFormat = toStrf(formatToConvert, parseString)
+        val formattingPattern = if (!parseString &&
+            GpuToTimestamp.CORRECTED_FORMATTING_FORMATS.contains(formatToConvert)) {
+          formatToConvert.replace("'T'", "T")
+        } else {
+          formatToConvert
+        }
+        strfFormat = toStrf(formattingPattern, parseString)
         // format parsed ok, so it is either compatible (tested/certified) or incompatible
-        if (!GpuToTimestamp.CORRECTED_COMPATIBLE_FORMATS.contains(formatToConvert) &&
-          !meta.conf.incompatDateFormats) {
+        val compatibleFormats = if (parseString) {
+          GpuToTimestamp.CORRECTED_COMPATIBLE_FORMATS
+        } else {
+          GpuToTimestamp.CORRECTED_FORMATTING_FORMATS
+        }
+        if (!compatibleFormats.contains(formatToConvert) && !meta.conf.incompatDateFormats) {
           meta.willNotWorkOnGpu(s"CORRECTED format '$sparkFormat' on the GPU is not guaranteed " +
             s"to produce the same results as Spark on CPU. Set " +
             s"${RapidsConf.INCOMPATIBLE_DATE_FORMATS.key}=true to force onto GPU.")

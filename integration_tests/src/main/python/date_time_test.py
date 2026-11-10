@@ -1016,7 +1016,7 @@ def test_date_format_f_incompat(data_gen, date_format):
         'DateFormatClass', conf)
 
 maybe_supported_date_formats = ['dd-MM-yyyy', 'yyyy-MM-dd HH:mm:ss.SSS', 'yyyy-MM-dd HH:mm:ss.SSSSSS']
-@pytest.mark.parametrize('date_format', maybe_supported_date_formats, ids=idfn)
+@pytest.mark.parametrize('date_format', ['dd-MM-yyyy', 'yyyy-MM-dd HH:mm:ss.SSSSSS'], ids=idfn)
 @pytest.mark.parametrize('data_gen', date_n_time_gens, ids=idfn)
 @allow_non_gpu('DateFormatClass', 'Cast')
 def test_date_format_maybe(data_gen, date_format):
