@@ -554,6 +554,31 @@ object NvtxRegistry {
   val PARQUET_READ_BATCH: NvtxId = NvtxId("Parquet readBatch", NvtxColor.GREEN,
     "Reading Parquet batch")
 
+  // Stages of a Parquet hybrid scan read
+  val HYBRID_SCAN_READ_FOOTER: NvtxId = NvtxId("HybridScan read footer", NvtxColor.CYAN,
+    "Reading Parquet footer bytes for a hybrid scan read")
+
+  val HYBRID_SCAN_PARSE_FOOTER: NvtxId = NvtxId("HybridScan parse footer", NvtxColor.BLUE,
+    "Parsing the Parquet footer in the hybrid scan reader")
+
+  val HYBRID_SCAN_FILTER_STATS: NvtxId = NvtxId("HybridScan filter stats", NvtxColor.PURPLE,
+    "Pruning row groups using row group statistics")
+
+  val HYBRID_SCAN_FILTER_DICT: NvtxId = NvtxId("HybridScan filter dict", NvtxColor.ORANGE,
+    "Pruning row groups using dictionary pages")
+
+  val HYBRID_SCAN_GET_BYTE_RANGES: NvtxId = NvtxId("HybridScan get byte ranges",
+    NvtxColor.YELLOW, "Planning the column chunk byte ranges a hybrid scan read needs")
+
+  val HYBRID_SCAN_READ_DATA: NvtxId = NvtxId("HybridScan read data", NvtxColor.DARK_GREEN,
+    "Reading column chunk byte ranges into host memory")
+
+  val HYBRID_SCAN_MATERIALIZE: NvtxId = NvtxId("HybridScan materialize", NvtxColor.RED,
+    "Materializing a table from column chunk data")
+
+  val HYBRID_SCAN_OUTPUT_FILTER: NvtxId = NvtxId("HybridScan output filter", NvtxColor.WHITE,
+    "Applying the pushed filter to a hybrid scan read's decoded table")
+
   val AVRO_READ_BATCH: NvtxId = NvtxId("Avro readBatch", NvtxColor.GREEN,
     "Reading Avro batch")
 
@@ -827,6 +852,14 @@ object NvtxRegistry {
     register(BUFFER_FILE_SPLIT_TEXT)
     register(ORC_READ_BATCHES)
     register(PARQUET_READ_BATCH)
+    register(HYBRID_SCAN_READ_FOOTER)
+    register(HYBRID_SCAN_PARSE_FOOTER)
+    register(HYBRID_SCAN_FILTER_STATS)
+    register(HYBRID_SCAN_FILTER_DICT)
+    register(HYBRID_SCAN_GET_BYTE_RANGES)
+    register(HYBRID_SCAN_READ_DATA)
+    register(HYBRID_SCAN_MATERIALIZE)
+    register(HYBRID_SCAN_OUTPUT_FILTER)
     register(AVRO_READ_BATCH)
     register(READ_PYTHON_BATCH)
     register(WRITE_PYTHON_BATCH)

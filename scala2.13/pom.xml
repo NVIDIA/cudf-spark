@@ -1119,6 +1119,7 @@
         <cudf-spark-jni.version>26.12.0-SNAPSHOT</cudf-spark-jni.version>
         <cudf-spark-jni.artifactId>cudf-spark-jni</cudf-spark-jni.artifactId>
         <cudf-spark-private.version>26.12.0-SNAPSHOT</cudf-spark-private.version>
+        <history-metrics.version>26.12.0-SNAPSHOT</history-metrics.version>
         <cudf-spark-private.artifactId>cudf-spark-private_${scala.binary.version}</cudf-spark-private.artifactId>
         <scala.binary.version>2.13</scala.binary.version>
         <scala.recompileMode>incremental</scala.recompileMode>
@@ -1569,13 +1570,13 @@
                                         <ac:if>
                                             <not><isset property="rapids.shim.sources.cache.hit"/></not>
                                             <then>
+                                                <delete quiet="true">
+                                                    <fileset dir="${spark.shim.dest}" includes=".shim-sources-*"/>
+                                                </delete>
                                                 <script language="jython" src="${spark.rapids.source.basedir}/build/dyn_shim_detection.py"/>
                                                 <scriptdef name="generateShimSources" language="jython"
                                                            src="${spark.rapids.source.basedir}/build/shim_source_task.py"/>
                                                 <generateShimSources/>
-                                                <delete quiet="true">
-                                                    <fileset dir="${spark.shim.dest}" includes=".shim-sources-*"/>
-                                                </delete>
                                                 <mkdir dir="${spark.shim.dest}"/>
                                                 <touch file="${rapids.shim.sources.cache.marker}"/>
                                             </then>
@@ -2438,6 +2439,13 @@ This will force full Scala code rebuild in downstream modules.
             </snapshots>
         </repository>
         <repository>
+            <id>google-maven-central</id>
+            <url>https://maven-central.storage-download.googleapis.com/maven2/</url>
+            <snapshots>
+                <enabled>false</enabled>
+            </snapshots>
+        </repository>
+        <repository>
             <id>central</id>
             <name>Maven Repository Switchboard</name>
             <layout>default</layout>
@@ -2468,6 +2476,13 @@ This will force full Scala code rebuild in downstream modules.
         </repository>
     </repositories>
     <pluginRepositories>
+        <pluginRepository>
+            <id>google-maven-central</id>
+            <url>https://maven-central.storage-download.googleapis.com/maven2/</url>
+            <snapshots>
+                <enabled>false</enabled>
+            </snapshots>
+        </pluginRepository>
         <pluginRepository>
             <id>central</id>
             <url>https://repo1.maven.org/maven2</url>
