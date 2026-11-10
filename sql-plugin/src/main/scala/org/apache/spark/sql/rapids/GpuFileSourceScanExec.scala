@@ -22,6 +22,7 @@ import scala.collection.mutable.HashMap
 
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.filecache.FileCacheLocalityManager
+import com.nvidia.spark.rapids.perf.ScanSplitHeuristic
 import com.nvidia.spark.rapids.shims.{GpuDataSourceRDD, PartitionedFileUtilsShim, SparkShimImpl, StaticPartitionShims}
 import org.apache.hadoop.fs.Path
 
@@ -43,7 +44,7 @@ import org.apache.spark.sql.execution.rapids.shims.FilePartitionShims
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
-import org.apache.spark.util.SerializableConfiguration
+import org.apache.spark.util.{CollectionAccumulator, SerializableConfiguration}
 import org.apache.spark.util.collection.BitSet
 
 /**
@@ -481,15 +482,23 @@ case class GpuFileSourceScanExec(
   override protected def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
     val numOutputRows = gpuLongMetric(NUM_OUTPUT_ROWS)
     val scanTime = gpuLongMetric(SCAN_TIME)
-    inputRDD.asInstanceOf[RDD[ColumnarBatch]].mapPartitionsInternal { batches =>
+    val decoded = gpuLongMetric(GPU_OUTPUT_BATCH_BYTES)
+    val rdd = inputRDD.asInstanceOf[RDD[ColumnarBatch]]
+    val splits = splitBytes
+    // Per execution: a re-run plan reuses `inputRDD`.
+    ScanSplitHeuristic.registerFileScan(historyKey, plannedListed, splits, sparkContext)
+    rdd.mapPartitionsWithIndexInternal { (index, batches) =>
+      val record = splits.map(
+        ScanSplitHeuristic.recordSplitOnExhaustion(index, 0L, decoded, _))
       new Iterator[ColumnarBatch] {
 
         override def hasNext: Boolean = {
           // The `FileScanRDD` returns an iterator which scans the file during the `hasNext` call.
-          scanTime.ns {
-            val res = batches.hasNext
-            res
+          val res = scanTime.ns {
+            batches.hasNext
           }
+          record.foreach(_(res))
+          res
         }
 
         override def next(): ColumnarBatch = {
@@ -570,8 +579,9 @@ case class GpuFileSourceScanExec(
       fsRelation: HadoopFsRelation): RDD[InternalRow] = {
     val partitions = StaticPartitionShims.getPartitions(this).getOrElse {
       val openCostInBytes = fsRelation.sparkSession.sessionState.conf.filesOpenCostInBytes
-      val maxSplitBytes =
-        FilePartition.maxSplitBytes(fsRelation.sparkSession, dynamicallySelectedPartitions)
+      val maxSplitBytes = ScanSplitHeuristic.learnedFileSplit(historyKey, fsRelation.sparkSession,
+        dynamicallySelectedPartitions.map(_.files.map(_.getLen).sum).sum,
+        FilePartition.maxSplitBytes(fsRelation.sparkSession, dynamicallySelectedPartitions))
       logInfo(s"Planning scan with bin packing, max size: $maxSplitBytes bytes, " +
         s"open cost is considered as scanning $openCostInBytes bytes.")
 
@@ -582,6 +592,17 @@ case class GpuFileSourceScanExec(
     }
     getFinalRDD(readFile, partitions)
   }
+
+  /** History key: catalog name, else "path:" roots; None while history is off or unusable. */
+  @transient private lazy val historyKey: Option[String] = ScanSplitHeuristic.historyKey(
+    tableIdentifier.map(_.unquotedString), relation.location.rootPaths)
+
+  /** (partition, decoded, listed) per partition read; keyed scans only. */
+  @transient private lazy val splitBytes: Option[CollectionAccumulator[(Int, Long, Long)]] =
+    historyKey.map(_ => sparkContext.collectionAccumulator[(Int, Long, Long)])
+
+  /** Listed bytes of each planned partition; RDD partition i reads partition i. */
+  @transient private var plannedListed: Array[Long] = Array.empty
 
   private def getFinalRDD(
       readFile: Option[(PartitionedFile) => Iterator[InternalRow]],
@@ -615,6 +636,8 @@ case class GpuFileSourceScanExec(
       FilePartitionShims.copyWithFiles(partition, newFiles)
     }
 
+    plannedListed =
+      locatedPartitions.map(p => FilePartitionShims.getFiles(p).map(_.length).sum).toArray
     if (isPerFileReadEnabled) {
       logInfo("Using the original per file reader")
       SparkShimImpl.getFileScanRDD(relation.sparkSession, readFile.get, locatedPartitions,

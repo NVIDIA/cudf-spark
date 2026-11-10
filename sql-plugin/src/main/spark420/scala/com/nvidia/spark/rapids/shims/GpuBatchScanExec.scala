@@ -23,6 +23,7 @@ import scala.collection.immutable.ArraySeq
 
 import com.google.common.base.Objects
 import com.nvidia.spark.rapids.{GpuBatchScanExecMetrics, GpuMetric, GpuScan}
+import com.nvidia.spark.rapids.perf.HistorySizedFileScan
 
 import org.apache.spark.SparkException
 import org.apache.spark.rdd.RDD
@@ -180,7 +181,10 @@ case class GpuBatchScanExec(
 
   override def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
     val numOutputRows = longMetric("numOutputRows")
-    inputRDD.asInstanceOf[RDD[ColumnarBatch]].map { b =>
+    val rdd = inputRDD.asInstanceOf[RDD[ColumnarBatch]]
+    // Per execution: a re-run plan reuses `inputRDD`. The partitions are planned by now.
+    HistorySizedFileScan.registerForExecution(scan, sparkContext)
+    rdd.map { b =>
       numOutputRows += b.numRows()
       b
     }

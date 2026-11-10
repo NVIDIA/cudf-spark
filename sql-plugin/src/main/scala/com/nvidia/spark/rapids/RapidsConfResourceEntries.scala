@@ -396,6 +396,59 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .checkValue(v => v.trim.nonEmpty, "History metrics provider name must not be empty")
     .createWithDefault("none")
 
+  val HISTORY_PLANNING_TIMEOUT_MS = conf("spark.rapids.sql.history.planningTimeoutMillis")
+    .doc("Budget for one history lookup on the query planning path. A lookup that does not " +
+      "answer within it leaves the static planning decision in place.")
+    .internal()
+    .startupOnly()
+    .integerConf
+    .checkValue(v => v > 0, "History planning timeout must be positive")
+    .createWithDefault(100)
+
+  val HISTORY_DECLARE_TIMEOUT_MS = conf("spark.rapids.sql.history.declareTimeoutMillis")
+    .doc("Budget for declaring each history metric family to the store, once per store. A " +
+      "declaration that does not answer within it leaves the static planning decision in place.")
+    .internal()
+    .startupOnly()
+    .integerConf
+    .checkValue(v => v > 0, "History declare timeout must be positive")
+    .createWithDefault(5000)
+
+  val HISTORY_SCAN_SPLIT_ENABLED = conf("spark.rapids.sql.history.scanSplit.enabled")
+    .doc("When a history metrics provider is set, sizes scan splits from the decode-expansion " +
+      "ratio recorded by earlier runs. When false, scan splits keep their static size and no " +
+      "ratio is recorded.")
+    .sinceVersion(ConfVersionInfo.UNRELEASED_VERSION)
+    .startupOnly()
+    .booleanConf
+    .createWithDefault(true)
+
+  val HISTORY_SCAN_SPLIT_MAX_AGE_DAYS = conf("spark.rapids.sql.history.scanSplit.maxAgeDays")
+    .doc("How old, in days, the last recorded decode-expansion ratio of a table may be and " +
+      "still size its scan splits. An older ratio is ignored and the scan keeps its static " +
+      "split. Values above the history store's retention, 14 days, have the same effect as 14. " +
+      "This only changes the lookup; it does not change what is stored.")
+    .sinceVersion(ConfVersionInfo.UNRELEASED_VERSION)
+    .integerConf
+    .checkValue(v => v > 0, "Scan split maximum age must be positive")
+    .createWithDefault(7)
+
+  val HISTORY_SCAN_SPLIT_MAX_BYTES = conf("spark.rapids.sql.history.scanSplit.maxBytes")
+    .doc("Upper bound of a scan split sized from history. The split is also kept at or below " +
+      "the listed bytes divided by the minimum partition count, to retain parallelism.")
+    .sinceVersion(ConfVersionInfo.UNRELEASED_VERSION)
+    .bytesConf(ByteUnit.BYTE)
+    .checkValue(v => v > 0, "Scan split maximum must be positive")
+    .createWithDefault(4L * 1024 * 1024 * 1024)
+
+  val HISTORY_SCAN_SPLIT_MIN_BYTES = conf("spark.rapids.sql.history.scanSplit.minBytes")
+    .doc("Lower bound of a scan split sized from history. When the listed bytes divided by the " +
+      "minimum partition count is below it, the scan keeps its static split.")
+    .sinceVersion(ConfVersionInfo.UNRELEASED_VERSION)
+    .bytesConf(ByteUnit.BYTE)
+    .checkValue(v => v > 0, "Scan split minimum must be positive")
+    .createWithDefault(64L * 1024 * 1024)
+
   val CHUNKED_READER = conf("spark.rapids.sql.reader.chunked")
     .doc("Enable a chunked reader where possible. A chunked reader allows " +
       "reading highly compressed data that could not be read otherwise, but at the expense " +

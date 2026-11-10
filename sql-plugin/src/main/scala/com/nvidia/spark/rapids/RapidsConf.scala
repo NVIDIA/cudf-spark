@@ -564,6 +564,19 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val historyMetricsProvider: String = get(HISTORY_METRICS_PROVIDER)
 
+  lazy val historyPlanningTimeoutMs: Int = get(HISTORY_PLANNING_TIMEOUT_MS)
+
+  lazy val historyDeclareTimeoutMs: Int = get(HISTORY_DECLARE_TIMEOUT_MS)
+
+  lazy val historyScanSplitEnabled: Boolean = get(HISTORY_SCAN_SPLIT_ENABLED)
+
+  lazy val historyScanSplitMaxAge: java.time.Duration =
+    java.time.Duration.ofDays(get(HISTORY_SCAN_SPLIT_MAX_AGE_DAYS).toLong)
+
+  lazy val historyScanSplitMaxBytes: Long = get(HISTORY_SCAN_SPLIT_MAX_BYTES)
+
+  lazy val historyScanSplitMinBytes: Long = get(HISTORY_SCAN_SPLIT_MIN_BYTES)
+
   lazy val isWindowCollectListEnabled: Boolean = get(ENABLE_WINDOW_COLLECT_LIST)
 
   lazy val isWindowCollectSetEnabled: Boolean = get(ENABLE_WINDOW_COLLECT_SET)
