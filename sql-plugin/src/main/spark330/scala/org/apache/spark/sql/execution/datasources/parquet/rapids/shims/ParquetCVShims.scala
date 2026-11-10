@@ -33,7 +33,9 @@ object ParquetCVShims {
       capacity: Int,
       memoryMode: MemoryMode,
       missingColumns: java.util.Set[ParquetColumn],
-      isTopLevel: Boolean): ParquetColumnVector = {
-    new ParquetColumnVector(column, vector, capacity, memoryMode, missingColumns)
+      isTopLevel: Boolean): AnyRef = {
+    ParquetColumnVectorBridge330.newParquetColumnVector(
+      column, vector, capacity, memoryMode, missingColumns,
+      isTopLevel, null)
   }
 }

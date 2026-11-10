@@ -1596,13 +1596,13 @@
                                         <ac:if>
                                             <not><isset property="rapids.shim.sources.cache.hit"/></not>
                                             <then>
+                                                <delete quiet="true">
+                                                    <fileset dir="${spark.shim.dest}" includes=".shim-sources-*"/>
+                                                </delete>
                                                 <script language="jython" src="${spark.rapids.source.basedir}/build/dyn_shim_detection.py"/>
                                                 <scriptdef name="generateShimSources" language="jython"
                                                            src="${spark.rapids.source.basedir}/build/shim_source_task.py"/>
                                                 <generateShimSources/>
-                                                <delete quiet="true">
-                                                    <fileset dir="${spark.shim.dest}" includes=".shim-sources-*"/>
-                                                </delete>
                                                 <mkdir dir="${spark.shim.dest}"/>
                                                 <touch file="${rapids.shim.sources.cache.marker}"/>
                                             </then>

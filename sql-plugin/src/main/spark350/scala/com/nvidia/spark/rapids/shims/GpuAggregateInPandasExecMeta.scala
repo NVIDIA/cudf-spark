@@ -16,8 +16,8 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark":["350"],"carryForward":"all"}
-{"spark":["350db143","400","401","402","403"],"carryForward":"none"}
-{"spark":["404"],"carryForward":"sameMinor"}
+{"spark":["350db143"],"carryForward":"none"}
+{"spark":["400"],"carryForward":"sameMinor"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
