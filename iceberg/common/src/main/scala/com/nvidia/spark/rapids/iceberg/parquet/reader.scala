@@ -148,23 +148,7 @@ case class GpuIcebergParquetReaderConf(
     validateDeletionVectorCrc: Boolean,
 )
 
-trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable with Logging {
-  def conf: GpuIcebergParquetReaderConf
-
-  def projectSchema(fileSchema: ShadedMessageType, requiredSchema: Schema):
-  (ShadedMessageType, ShadedMessageType) = {
-    val (typeWithIds, fileReadSchema) =
-      GpuParquetIO.projectAndPruneSchema(fileSchema, requiredSchema, conf.nameMapping, schema => {
-        val normalized = normalizeVariantLayout(schema, requiredSchema.asStruct()).asGroupType()
-        new ShadedMessageType(schema.getName, normalized.getFields)
-      })
-
-    logDebug(s"Doing project schema, parquet file schema:\n$fileSchema " +
-      s"\niceberg required schema:\n$requiredSchema " +
-      s"\nfile reade schema:\n$fileReadSchema")
-    (typeWithIds, fileReadSchema)
-  }
-
+object GpuIcebergParquetReader {
   /**
    * Validate Variant leaves with the Raw Parquet predicate and normalize their child order.
    * Field IDs, including those from name mapping, have already been assigned. Run before
@@ -212,6 +196,25 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
     } else {
       physical
     }
+  }
+}
+
+trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable with Logging {
+  def conf: GpuIcebergParquetReaderConf
+
+  def projectSchema(fileSchema: ShadedMessageType, requiredSchema: Schema):
+  (ShadedMessageType, ShadedMessageType) = {
+    val (typeWithIds, fileReadSchema) =
+      GpuParquetIO.projectAndPruneSchema(fileSchema, requiredSchema, conf.nameMapping, schema => {
+        val normalized = GpuIcebergParquetReader.normalizeVariantLayout(
+            schema, requiredSchema.asStruct()).asGroupType()
+        new ShadedMessageType(schema.getName, normalized.getFields)
+      })
+
+    logDebug(s"Doing project schema, parquet file schema:\n$fileSchema " +
+      s"\niceberg required schema:\n$requiredSchema " +
+      s"\nfile reade schema:\n$fileReadSchema")
+    (typeWithIds, fileReadSchema)
   }
 
   def filterRowGroups(reader: ParquetFileReader,
