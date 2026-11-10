@@ -293,37 +293,55 @@ class ParquetCachedBatchReaderSuite extends AnyFunSuite with BeforeAndAfterEach 
     }
   }
 
-  test("retry after advancing native input replays only previously completed chunks") {
-    var readersOpened = 0
-    var readersClosed = 0
-    var resourceCloses = 0
-    var injected = false
-    val resource = new AutoCloseable {
-      override def close(): Unit = resourceCloses += 1
-    }
-    withResource(new TableProducer(() => {
-      readersOpened += 1
-      new ChunkedReader {
-        private var index = 0
-        override def hasNext: Boolean = index < 3
-        override def next: Table = {
-          val value = index
-          index += 1
-          if (value == 1 && !injected) {
-            injected = true
-            throw new GpuRetryOOM("after native progress")
-          }
-          new Table.TestBuilder().column(Array[java.lang.Long](value.toLong): _*).build()
-        }
-        override def close(): Unit = readersClosed += 1
+  Seq("decode", "conversion").foreach { failurePoint =>
+    test(s"retry during $failurePoint replays only previously completed chunks") {
+      var readersOpened = 0
+      var readersClosed = 0
+      var resourceCloses = 0
+      var injected = false
+      var failedColumn: Option[ai.rapids.cudf.ColumnVector] = None
+      val resource = new AutoCloseable {
+        override def close(): Unit = resourceCloses += 1
       }
-    }, Seq(resource))) { producer =>
-      assert(readValues(producer) == Seq(0L, 1L, 2L))
+      withResource(new TableProducer(() => {
+        failedColumn.foreach(column => assert(column.getRefCount == 0))
+        readersOpened += 1
+        new ChunkedReader {
+          private var index = 0
+          override def hasNext: Boolean = index < 3
+          override def next: Table = {
+            val value = index
+            index += 1
+            if (failurePoint == "decode" && value == 1 && !injected) {
+              injected = true
+              throw new GpuRetryOOM("after native progress")
+            }
+            new Table.TestBuilder().column(Array[java.lang.Long](value.toLong): _*).build()
+          }
+          override def close(): Unit = readersClosed += 1
+        }
+      }, Seq(resource), table => {
+        if (failurePoint == "conversion") {
+          closeOnExcept(table) { _ =>
+            val value = withResource(table.getColumn(0).copyToHost())(_.getLong(0))
+            if (value == 1 && !injected) {
+              injected = true
+              failedColumn = Some(table.getColumn(0))
+              throw new GpuRetryOOM("during conversion")
+            }
+            table
+          }
+        } else {
+          table
+        }
+      })) { producer =>
+        assert(readValues(producer) == Seq(0L, 1L, 2L))
+      }
+      assert(injected)
+      assert(readersOpened == 2)
+      assert(readersClosed == 2)
+      assert(resourceCloses == 1)
     }
-    assert(injected)
-    assert(readersOpened == 2)
-    assert(readersClosed == 2)
-    assert(resourceCloses == 1)
   }
 
   test("task completion releases both an active logical file and staged lookahead") {

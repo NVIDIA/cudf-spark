@@ -49,10 +49,9 @@ class CachedGpuBatchIterator private(pending: mutable.Queue[SpillableColumnarBat
  * of the disconnect in semantics between a GpuDataProducer and generally how we use
  * an Iterator[ColumnarBatch] pointing to GPU data this will drain the producer, converting the
  * data to columnar batches, and make them all spillable so the GpuSemaphore can be released
- * in between each call to next. There is one special case, if there is only one table from
- * the producer it will not be made spillable on the assumption that the semaphore is already
- * held and will not be released before the first table is consumed. This is also fitting with
- * the semantics of how we use an Iterator[ColumnarBatch] pointing to GPU data.
+ * in between each call to next. The first table must be spillable before probing hasNext,
+ * because the producer may allocate GPU memory while preparing its next chunk. If there is
+ * only one table, it is returned directly after that probe while the semaphore is still held.
  */
 object CachedGpuBatchIterator {
   private[this] def makeSpillableAndClose(table: Table,
@@ -77,17 +76,16 @@ object CachedGpuBatchIterator {
       dataTypes: Array[DataType]): GpuColumnarBatchIterator = {
     val result = closeOnExcept(producer) { _ =>
       if (producer.hasNext) {
-        // Special case for the first one.
-        val firstTable = producer.next
-        val hasMore = closeOnExcept(firstTable)(_ => producer.hasNext)
-        if (!hasMore) {
-          withResource(firstTable) { table =>
-            new SingleGpuColumnarBatchIterator(GpuColumnVector.from(table, dataTypes))
-          }
-        } else {
-          val pending = mutable.Queue.empty[SpillableColumnarBatch]
-          closeOnExcept(pending) { _ =>
-            pending += makeSpillableAndClose(firstTable, dataTypes)
+        val pending = mutable.Queue.empty[SpillableColumnarBatch]
+        closeOnExcept(pending) { _ =>
+          // hasNext can allocate and retry, so register the first output before calling it.
+          pending += makeSpillableAndClose(producer.next, dataTypes)
+          if (!producer.hasNext) {
+            val batch = RmmRapidsRetryIterator.withRetryNoSplit(pending.dequeue()) { spillable =>
+              spillable.getColumnarBatch()
+            }
+            closeOnExcept(batch)(new SingleGpuColumnarBatchIterator(_))
+          } else {
             producer.foreach { t =>
               pending += makeSpillableAndClose(t, dataTypes)
             }

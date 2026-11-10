@@ -29,7 +29,6 @@ import com.nvidia.spark.rapids.{ByteBufferInputStream, CachedGpuBatchIterator, C
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuColumnVector.GpuColumnarBatchBuilder
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
-import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 import com.nvidia.spark.rapids.shims.{LegacyBehaviorPolicyShim, ParquetVariantShims, SparkShimImpl}
 import com.nvidia.spark.rapids.shims.parquet.{ParquetFieldIdShims, ParquetLegacyNanoAsLongShims, ParquetTimestampNTZShims}
@@ -515,35 +514,33 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
     }
     val outputTypes = originalSelectedAttributes.map(_.dataType).toArray
 
-    // Keep the existing representation conversions after Parquet decoding.
+    // The producer retries decoding and conversion together, after closing failed input.
     def convertAndClose(table: Table): Table = withResource(table) { table =>
-      withRetryNoSplit {
-        withResource(new mutable.ArrayBuffer[ColumnVector]) { columns =>
-          for (i <- 0 until table.getNumberOfColumns) {
-            columns += ColumnCastUtil.ifTrueThenDeepConvertTypeAtoTypeB(table.getColumn(i),
-              originalSelectedAttributes(i).dataType,
-              (dataType, cv) => dataType match {
-                case BinaryType if cv.getType == DType.STRING => true
-                case d: DecimalType if d.scale < 0 => true
-                case _ => false
-              },
-              (dataType, cv) => {
-                dataType match {
-                  case BinaryType =>
-                    ParquetSchemaUtils.convertStringToBinary(cv)
-                  case d: DecimalType =>
-                    withResource(cv.bitCastTo(DecimalUtil.createCudfDecimal(d))) {
-                      _.copyToColumnVector()
-                    }
-                  case _ =>
-                    throw new IllegalStateException("We only cast STRING-backed BinaryType " +
-                        "and DecimalType with scale < 0")
-                }
+      withResource(new mutable.ArrayBuffer[ColumnVector]) { columns =>
+        for (i <- 0 until table.getNumberOfColumns) {
+          columns += ColumnCastUtil.ifTrueThenDeepConvertTypeAtoTypeB(table.getColumn(i),
+            originalSelectedAttributes(i).dataType,
+            (dataType, cv) => dataType match {
+              case BinaryType if cv.getType == DType.STRING => true
+              case d: DecimalType if d.scale < 0 => true
+              case _ => false
+            },
+            (dataType, cv) => {
+              dataType match {
+                case BinaryType =>
+                  ParquetSchemaUtils.convertStringToBinary(cv)
+                case d: DecimalType =>
+                  withResource(cv.bitCastTo(DecimalUtil.createCudfDecimal(d))) {
+                    _.copyToColumnVector()
+                  }
+                case _ =>
+                  throw new IllegalStateException("We only cast STRING-backed BinaryType " +
+                      "and DecimalType with scale < 0")
               }
-            )
-          }
-          new Table(columns.toArray: _*)
+            }
+          )
         }
+        new Table(columns.toArray: _*)
       }
     }
 
@@ -551,7 +548,7 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
       val options = ParquetOptions.builder()
         .includeColumn(selectedAttributes.map(_.name).asJavaCollection).build()
       val reader = new ParquetCachedBatchReader(records, selectedAttributes.toStructType, options,
-        targetBytes, readerMemoryBytes)
+        targetBytes, readerMemoryBytes, convertAndClose)
       new GpuColumnarBatchIterator(true) {
         private var current: Option[GpuColumnarBatchIterator] = None
         private var closed = false
@@ -580,7 +577,8 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
                       }
                     case Some(producer) =>
                       // Drain all native state before an RDD iterator may release the semaphore.
-                      CachedGpuBatchIterator(GpuDataProducer.wrap(producer)(convertAndClose),
+                      // Keep the wrapper so range batching cannot stream this cache reader.
+                      CachedGpuBatchIterator(GpuDataProducer.wrap(producer)(identity[Table]),
                         outputTypes)
                   }
                 })

@@ -59,9 +59,14 @@ private[rapids] object ParquetCachedBatchReader {
   /** Encoded inputs remain owned until the producer closes. */
   private[parquet] final class TableProducer(
       openReader: () => ChunkedReader,
-      resources: Seq[AutoCloseable]) extends ParquetChunkedTableProducer {
+      resources: Seq[AutoCloseable],
+      convertAndClose: Table => Table = identity) extends ParquetChunkedTableProducer {
     override protected def createReader(): ChunkedReader = openReader()
     override protected def readerResources: Seq[AutoCloseable] = resources
+
+    // Conversion must release the decoded table before restoring and retrying the reader.
+    override protected def readNext(reader: ChunkedReader): Table =
+      convertAndClose(decodeNext(reader))
 
     private def retry[T](body: => T): T = {
       checkpoint()
@@ -98,7 +103,8 @@ private[rapids] final class ParquetCachedBatchReader(
     selectedSchema: StructType,
     options: ParquetOptions,
     targetBytes: Long,
-    maxChunkReaderMemoryBytes: Long)
+    maxChunkReaderMemoryBytes: Long,
+    convertAndClose: Table => Table = identity)
     extends Iterator[ParquetCachedBatchReader.ReadBatch] with AutoCloseable {
   import ParquetCachedBatchReader._
 
@@ -186,7 +192,7 @@ private[rapids] final class ParquetCachedBatchReader(
             val producer = new TableProducer(
               () => ParquetChunkedReader(new CudfParquetChunkedReader(
                 targetBytes, maxChunkReaderMemoryBytes, options, logical.buffers: _*)),
-              Seq(logical) ++ files.toVector)
+              Seq(logical) ++ files.toVector, convertAndClose)
             new ReadBatch(rows.toInt, Some(producer))
           }
         }

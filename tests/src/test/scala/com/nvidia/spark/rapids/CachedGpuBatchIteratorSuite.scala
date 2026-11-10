@@ -34,7 +34,13 @@ class CachedGpuBatchIteratorSuite extends SparkQueryCompareTestSuite {
         var nextCalls = 0
         var closeCalls = 0
         val producer = new GpuDataProducer[Table] {
-          override def hasNext: Boolean = true
+          override def hasNext: Boolean = {
+            if (nextCalls == 1) {
+              assert(SpillFramework.stores.deviceStore.numHandles > handles,
+                "The first output must be spillable before probing the producer")
+            }
+            true
+          }
 
           override def next: Table = {
             nextCalls += 1
