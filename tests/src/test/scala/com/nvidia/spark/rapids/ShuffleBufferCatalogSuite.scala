@@ -642,9 +642,40 @@ class ShuffleBufferCatalogSuite
     assertResult((0, 0, 0))(catalog.bookkeepingSizes)
   }
 
+  /** A catalog holding shuffle 1, which writer 5 registered, with one degenerate buffer. */
+  private def catalogWithOneBuffer(
+      mapIdsCanRepeat: Boolean = false): (ShuffleBufferCatalog, ShuffleBufferId) = {
+    val catalog = new ShuffleBufferCatalog(mapIdsCanRepeat)
+    catalog.registerShuffle(1, 5L)
+    (catalog, catalog.addDegenerateRapidsBuffer(ShuffleBlockId(1, 5L, 0), mock[TableMeta]))
+  }
+
   /**
-   * Commits `ids` as map 7 of shuffle 1 on a thread that pauses once its lookup of the shuffle
-   * returns, runs `remove` during that pause, and returns what the commit did.
+   * Runs `work` on a thread named `name` while the test holds `monitor`, waits until the thread
+   * blocks on it, runs `whileBlocked`, and then releases the monitor and joins the thread.
+   */
+  private def whileBlockedOn(monitor: AnyRef, name: String)(work: => Unit)(
+      whileBlocked: Thread => Unit): Unit = {
+    val awaitSeconds = 30
+    val thread = new Thread(() => work, name)
+    thread.setDaemon(true)
+    try {
+      monitor.synchronized {
+        thread.start()
+        eventually(Timeout(Span(awaitSeconds, Seconds))) {
+          assert(isBlockedOn(thread, monitor), s"$name never waited for the monitor")
+        }
+        whileBlocked(thread)
+      }
+    } finally {
+      thread.join(TimeUnit.SECONDS.toMillis(awaitSeconds))
+    }
+    assert(!thread.isAlive, s"$name never ended")
+  }
+
+  /**
+   * Commits `ids` as their map of shuffle 1 on a thread that pauses once its lookup of the
+   * shuffle returns, runs `remove` during that pause, and returns what the commit did.
    */
   private def commitAcrossRemoval(
       catalog: ShuffleBufferCatalog,
@@ -666,8 +697,8 @@ class ShuffleBufferCatalogSuite
         }
       })
     val committed = new AtomicReference[Try[Unit]]()
-    val committer = new Thread(
-      () => committed.set(Try(catalog.commitMapOutput(1, 7L, ids, Array(100L)))), committerName)
+    val committer = new Thread(() => committed.set(Try(
+      catalog.commitMapOutput(1, ids.head.mapId, ids, Array(100L)))), committerName)
     committer.setDaemon(true)
     try {
       committer.start()
@@ -685,10 +716,8 @@ class ShuffleBufferCatalogSuite
 
   test("when map ids repeat, a commit whose shuffle is unregistered after the commit looked it " +
       "up fails") {
-    val catalog = new ShuffleBufferCatalog(mapIdsCanRepeat = true)
-    catalog.registerShuffle(1)
-    val ids = Seq(catalog.addDegenerateRapidsBuffer(ShuffleBlockId(1, 7L, 0), mock[TableMeta]))
-    val committed = commitAcrossRemoval(catalog, ids)(catalog.unregisterShuffle(1))
+    val (catalog, id) = catalogWithOneBuffer(mapIdsCanRepeat = true)
+    val committed = commitAcrossRemoval(catalog, Seq(id))(catalog.unregisterShuffle(1))
     // as a commit that looks the shuffle up after the removal does
     assert(committed.failed.toOption.exists(_.isInstanceOf[IllegalStateException]),
       s"the commit returned $committed")
@@ -697,10 +726,8 @@ class ShuffleBufferCatalogSuite
 
   test("when map ids repeat, a commit whose shuffle a reclaim removes after the commit looked " +
       "it up fails") {
-    val catalog = new ShuffleBufferCatalog(mapIdsCanRepeat = true)
-    catalog.registerShuffle(1, 5L)
-    val ids = Seq(catalog.addDegenerateRapidsBuffer(ShuffleBlockId(1, 7L, 0), mock[TableMeta]))
-    val committed = commitAcrossRemoval(catalog, ids) {
+    val (catalog, id) = catalogWithOneBuffer(mapIdsCanRepeat = true)
+    val committed = commitAcrossRemoval(catalog, Seq(id)) {
       assertResult(REMOVED)(catalog.reclaimShuffle(1, 10L).outcome)
     }
     // as a commit that looks the shuffle up after the removal does
@@ -715,41 +742,23 @@ class ShuffleBufferCatalogSuite
    * catalog, so a commit that holds the monitor records into a registration still listed.
    */
   private def assertMarkedBeforeUnlinked(catalog: ShuffleBufferCatalog)(remove: => Unit): Unit = {
-    val awaitSeconds = 30
-    val registration = activeShuffles(catalog).get(1)
-    val removal = new Thread(() => remove, "shuffle-removal")
-    removal.setDaemon(true)
-    try {
-      registration.synchronized {
-        removal.start()
-        eventually(Timeout(Span(awaitSeconds, Seconds))) {
-          assert(isBlockedOn(removal, registration),
-            "the removal never waited to mark the registration")
-        }
-        assert(catalog.hasActiveShuffle(1), "the removal unlinked the registration before " +
-          "marking it")
-      }
-    } finally {
-      removal.join(TimeUnit.SECONDS.toMillis(awaitSeconds))
+    whileBlockedOn(activeShuffles(catalog).get(1), "the removal")(remove) { _ =>
+      assert(catalog.hasActiveShuffle(1), "the removal unlinked the registration before " +
+        "marking it")
     }
-    assert(!removal.isAlive, "the removal never ended")
     assert(!catalog.hasActiveShuffle(1))
     assertResult((0, 0, 0))(catalog.bookkeepingSizes)
   }
 
   test("when map ids repeat, unregisterShuffle marks a registration removed before the " +
       "registration leaves the catalog") {
-    val catalog = new ShuffleBufferCatalog(mapIdsCanRepeat = true)
-    catalog.registerShuffle(1)
-    catalog.addDegenerateRapidsBuffer(ShuffleBlockId(1, 7L, 0), mock[TableMeta])
+    val (catalog, _) = catalogWithOneBuffer(mapIdsCanRepeat = true)
     assertMarkedBeforeUnlinked(catalog)(catalog.unregisterShuffle(1))
   }
 
   test("when map ids repeat, a reclaim marks a registration removed before the registration " +
       "leaves the catalog") {
-    val catalog = new ShuffleBufferCatalog(mapIdsCanRepeat = true)
-    catalog.registerShuffle(1, 5L)
-    catalog.addDegenerateRapidsBuffer(ShuffleBlockId(1, 7L, 0), mock[TableMeta])
+    val (catalog, _) = catalogWithOneBuffer(mapIdsCanRepeat = true)
     assertMarkedBeforeUnlinked(catalog)(catalog.reclaimShuffle(1, 10L))
   }
 
@@ -794,9 +803,7 @@ class ShuffleBufferCatalogSuite
   }
 
   test("a reclaim removes a shuffle whose writers are all at or below its watermark") {
-    val catalog = new ShuffleBufferCatalog()
-    catalog.registerShuffle(1, 5L)
-    catalog.addDegenerateRapidsBuffer(ShuffleBlockId(1, 5L, 0), mock[TableMeta])
+    val (catalog, _) = catalogWithOneBuffer()
     catalog.addDegenerateRapidsBuffer(ShuffleBlockId(1, 5L, 1), mock[TableMeta])
     val result = catalog.reclaimShuffle(1, 10L)
     assertResult((REMOVED, 2))((result.outcome, result.buffers))
@@ -1038,26 +1045,12 @@ class ShuffleBufferCatalogSuite
   }
 
   test("a reclaim marks its shuffle reclaimed before it removes the registration") {
-    val awaitSeconds = 30
-    val catalog = new ShuffleBufferCatalog()
-    catalog.registerShuffle(1, 5L)
-    catalog.addDegenerateRapidsBuffer(ShuffleBlockId(1, 5L, 0), mock[TableMeta])
-    val reclaimedIds = reclaimedShuffleIds(catalog)
-    val reclaim = new Thread(() => catalog.reclaimShuffle(1, 5L), "shuffle-reclaim")
-    reclaim.setDaemon(true)
-    try {
-      reclaimedIds.synchronized {
-        reclaim.start()
-        eventually(Timeout(Span(awaitSeconds, Seconds))) {
-          assert(isBlockedOn(reclaim, reclaimedIds), "the reclaim never waited to mark the shuffle")
-        }
+    val (catalog, _) = catalogWithOneBuffer()
+    whileBlockedOn(reclaimedShuffleIds(catalog), "the reclaim")(catalog.reclaimShuffle(1, 5L)) {
+      _ =>
         // so a removal that finds no registration finds the mark
         assert(catalog.hasActiveShuffle(1))
-      }
-    } finally {
-      reclaim.join(TimeUnit.SECONDS.toMillis(awaitSeconds))
     }
-    assert(!reclaim.isAlive)
     assert(!catalog.hasActiveShuffle(1))
     assertResult((0, 0, 0))(catalog.bookkeepingSizes)
   }
@@ -1065,21 +1058,14 @@ class ShuffleBufferCatalogSuite
   test("a writer that registers while a reclaim decides to remove the registration waits for " +
       "the removal, and registers the shuffle afresh") {
     val awaitSeconds = 30
-    val catalog = new ShuffleBufferCatalog()
-    val earlierBlock = ShuffleBlockId(1, 5L, 0)
-    catalog.registerShuffle(1, 5L)
-    catalog.addDegenerateRapidsBuffer(earlierBlock, mock[TableMeta])
-    val reclaimedIds = reclaimedShuffleIds(catalog)
-    val reclaim = new Thread(() => catalog.reclaimShuffle(1, 10L), "shuffle-reclaim")
+    val (catalog, earlier) = catalogWithOneBuffer()
+    val earlierBlock = earlier.blockId
     val register = new Thread(() => catalog.registerShuffle(1, 11L), "shuffle-register")
-    Seq(reclaim, register).foreach(_.setDaemon(true))
+    register.setDaemon(true)
     try {
       // the reclaim takes this monitor inside its decision, while it holds the shuffle's entry
-      reclaimedIds.synchronized {
-        reclaim.start()
-        eventually(Timeout(Span(awaitSeconds, Seconds))) {
-          assert(isBlockedOn(reclaim, reclaimedIds), "the reclaim never decided to remove")
-        }
+      whileBlockedOn(reclaimedShuffleIds(catalog), "the reclaim")(
+          catalog.reclaimShuffle(1, 10L)) { reclaim =>
         register.start()
         eventually(Timeout(Span(awaitSeconds, Seconds))) {
           val info = ManagementFactory.getThreadMXBean.getThreadInfo(register.getId)
@@ -1089,9 +1075,9 @@ class ShuffleBufferCatalogSuite
         }
       }
     } finally {
-      Seq(reclaim, register).foreach(_.join(TimeUnit.SECONDS.toMillis(awaitSeconds)))
+      register.join(TimeUnit.SECONDS.toMillis(awaitSeconds))
     }
-    assert(!reclaim.isAlive && !register.isAlive)
+    assert(!register.isAlive)
     // the writer registered after the removal, so its registration holds none of the earlier
     // output, and a reclaim at the same watermark keeps it
     assert(catalog.hasActiveShuffle(1))
