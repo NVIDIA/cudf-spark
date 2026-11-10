@@ -37,6 +37,7 @@ import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.adaptive.BroadcastQueryStageExec
 import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
 import org.apache.spark.sql.execution.joins.BroadcastNestedLoopJoinExec
+import org.apache.spark.sql.rapids.{GpuEqualNullSafe, GpuNot}
 import org.apache.spark.sql.types.{BooleanType, DataType, StructType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
@@ -93,17 +94,21 @@ abstract class GpuBroadcastNestedLoopJoinMetaBase(
     }
   }
 
+  // A literal true condition runs as an unconditional join on the GPU.
+  private def hasCondition: Boolean = join.condition.exists {
+    case Literal(true, BooleanType) => false
+    case _ => true
+  }
+
   override def tagPlanForGpu(): Unit = {
-    val needsConditionEvaluation = join.condition.exists {
-      case Literal(true, BooleanType) => false
-      case _ => true
-    }
-    if (needsConditionEvaluation && (join.left.output.isEmpty || join.right.output.isEmpty)) {
-      willNotWorkOnGpu("Conditional nested-loop joins with a rows-only input are not supported")
-    }
     JoinTypeChecks.tagForGpu(join.joinType, this)
     join.joinType match {
       case _: InnerLike =>
+        // With no columns on either side, no GPU iterator can join the two batches.
+        if (hasCondition && join.left.output.isEmpty && join.right.output.isEmpty) {
+          willNotWorkOnGpu(
+            s"${join.joinType} with a condition and no columns on either side is not supported")
+        }
       case LeftOuter | RightOuter | LeftSemi | LeftAnti | ExistenceJoin(_) =>
         // First to check whether can be split if not ast-able. If false, then check requireAst to
         // send not-work-on-GPU reason if not replace-able.
@@ -113,6 +118,10 @@ abstract class GpuBroadcastNestedLoopJoinMetaBase(
     join.joinType match {
       case LeftOuter | LeftSemi | LeftAnti if gpuBuildSide == GpuBuildLeft =>
         willNotWorkOnGpu(s"build left not supported for ${join.joinType}")
+      // The existence iterators take the stream as the outer side. doUnconditionalExistenceJoin
+      // handles building left.
+      case ExistenceJoin(_) if gpuBuildSide == GpuBuildLeft && hasCondition =>
+        willNotWorkOnGpu(s"build left not supported for ${join.joinType} with a condition")
       case RightOuter if gpuBuildSide == GpuBuildRight =>
         willNotWorkOnGpu(s"build right not supported for ${join.joinType}")
       case _ =>
@@ -375,8 +384,14 @@ object GpuBroadcastNestedLoopJoinExecBase {
         opTime, joinTime)
     } else {
       if (joinType.isInstanceOf[ExistenceJoin]) {
+        // The existence iterators take the stream as the outer side.
+        requireSupported(buildSide == GpuBuildRight, joinType, buildSide, builtBatch,
+          streamAttributes)
         if (builtBatch.numCols == 0) {
           degenerateExistsJoinIterator(stream, builtBatch, boundCondition.get)
+        } else if (streamAttributes.isEmpty) {
+          degenerateJoinIterator(joinType, buildSide, builtBatch, stream, streamAttributes,
+            targetSize, sizeEstimateThreshold, boundCondition.get, opTime, joinTime)
         } else {
           val compiledAst = boundCondition.get.convertToAst(numFirstTableColumns).compile()
           new ConditionalNestedLoopExistenceJoinIterator(
@@ -386,6 +401,12 @@ object GpuBroadcastNestedLoopJoinExecBase {
         if (isDegenerateLeftOuterJoin(joinType, buildSide, builtBatch, streamAttributes)) {
           degenerateLeftOuterJoinIterator(stream, streamAttributes, builtBatch,
             boundCondition.get)
+        } else if (builtBatch.numCols == 0 || streamAttributes.isEmpty) {
+          // With no columns on one side, the condition reads only the other side, so the
+          // degenerate path tests each of its rows once. ConditionalNestedLoopJoinIterator tests
+          // every pair, and cannot take a batch with no columns.
+          degenerateJoinIterator(joinType, buildSide, builtBatch, stream, streamAttributes,
+            targetSize, sizeEstimateThreshold, boundCondition.get, opTime, joinTime)
         } else {
           val compiledAst = boundCondition.get.convertToAst(numFirstTableColumns).compile()
           new ConditionalNestedLoopJoinIterator(joinType, buildSide, builtBatch,
@@ -398,6 +419,20 @@ object GpuBroadcastNestedLoopJoinExecBase {
         numOutputRows += cb.numRows()
         numOutputBatches += 1
         cb
+    }
+  }
+
+  // tagPlanForGpu keeps an unsupported join off the GPU, so one that arrives here is a bug. It
+  // fails naming the join, rather than join the wrong way.
+  private def requireSupported(
+      supported: Boolean,
+      joinType: JoinType,
+      buildSide: GpuBuildSide,
+      builtBatch: LazySpillableColumnarBatch,
+      streamAttrs: Seq[Attribute]): Unit = {
+    closeOnExcept(builtBatch) { _ =>
+      require(supported, s"unsupported nested loop join: $joinType, $buildSide, " +
+        s"${streamAttrs.size} stream and ${builtBatch.numCols} build columns")
     }
   }
 
@@ -497,6 +532,142 @@ object GpuBroadcastNestedLoopJoinExecBase {
             withResource(GpuColumnVector.from(scb.getBatch))(_.repeat(repeatCnts))
           }
           withResource(retTbl)(_ => GpuColumnVector.from(retTbl, scb.dataTypes))
+        }
+      }
+    }
+  }
+
+  /**
+   * Joins a side that has no columns with the other side. A side with no columns adds no
+   * attributes, so the condition reads only the other side, and its bound ordinals index that
+   * side's batch directly. It takes:
+   *  - Inner and Cross, building either side, with no columns on exactly one side.
+   *  - LeftSemi and LeftAnti, building right, with no columns on either side or on both.
+   *  - ExistenceJoin, building right, with no columns on the stream only.
+   * Every other input fails, naming the join type, build side and column counts. It emits no
+   * zero-row batch, as CrossJoinIterator does: a merge reduction right above the join, as
+   * Databricks plans for count(*), reads one as a null result.
+   */
+  private def degenerateJoinIterator(
+      joinType: JoinType,
+      buildSide: GpuBuildSide,
+      builtBatch: LazySpillableColumnarBatch,
+      stream: Iterator[LazySpillableColumnarBatch],
+      streamAttrs: Seq[Attribute],
+      targetSize: Long,
+      sizeEstimateThreshold: Double,
+      boundCondition: GpuExpression,
+      opTime: GpuMetric,
+      joinTime: GpuMetric): Iterator[ColumnarBatch] = {
+    val streamHasColumns = streamAttrs.nonEmpty
+    val buildHasColumns = builtBatch.numCols > 0
+    requireSupported(joinType match {
+      case _: InnerLike => streamHasColumns != buildHasColumns
+      case LeftSemi | LeftAnti =>
+        buildSide == GpuBuildRight && !(streamHasColumns && buildHasColumns)
+      case ExistenceJoin(_) => buildSide == GpuBuildRight && !streamHasColumns && buildHasColumns
+      case _ => false
+    }, joinType, buildSide, builtBatch, streamAttrs)
+    val noStreamBatch = streamAttrs.isEmpty && !closeOnExcept(builtBatch)(_ => stream.hasNext)
+    (joinType, streamAttrs.isEmpty) match {
+      case _ if noStreamBatch =>
+        // Spark tests the condition only against a stream row, so a stream with no batch leaves
+        // the condition unevaluated. A zero-row batch is still a batch, so a stream of them
+        // evaluates the condition over the build once.
+        withResource(builtBatch)(_ => Iterator.empty)
+      case (_: InnerLike, false) =>
+        // Each stream row that meets the condition joins every build row. Spark tests the
+        // condition only against a build row, so an empty build leaves the stream unfiltered.
+        val matchedStream = if (builtBatch.numRows == 0) {
+          stream
+        } else {
+          stream.map { scb =>
+            withResource(filterAndClose(scb, boundCondition)) {
+              LazySpillableColumnarBatch(_, "stream_batch")
+            }
+          }
+        }
+        new CrossJoinIterator(builtBatch, matchedStream, targetSize, sizeEstimateThreshold,
+          buildSide, opTime, joinTime)
+      case (_: InnerLike, true) =>
+        // Every stream row joins each build row that meets the condition.
+        val matchedBuild = withResource(filterAndClose(builtBatch, boundCondition)) {
+          LazySpillableColumnarBatch(_, "built_batch")
+        }
+        closeOnExcept(matchedBuild) { _ =>
+          new CrossJoinIterator(matchedBuild, stream, targetSize, sizeEstimateThreshold,
+            buildSide, opTime, joinTime)
+        }
+      case (LeftSemi | LeftAnti, false) =>
+        // A stream row has a match when the build has rows and the condition is true for it.
+        val matched = if (withResource(builtBatch)(_.numRows > 0)) {
+          boundCondition
+        } else {
+          GpuLiteral(false, BooleanType)
+        }
+        val keep = if (joinType == LeftSemi) {
+          matched
+        } else {
+          GpuNot(GpuEqualNullSafe(matched, GpuLiteral(true, BooleanType)))
+        }
+        stream.flatMap { scb =>
+          val cb = filterAndClose(scb, keep)
+          if (cb.numRows() > 0) Some(cb) else withResource(cb)(_ => None)
+        }
+      case (LeftSemi | LeftAnti, true) =>
+        // Every stream row has a match when some build row meets the condition.
+        val anyMatch = anyRowMatchesAndClose(builtBatch, boundCondition)
+        val keepStream = anyMatch == (joinType == LeftSemi)
+        stream.flatMap { scb =>
+          withResource(scb) { _ =>
+            if (keepStream && scb.numRows > 0) {
+              Iterator.single(new ColumnarBatch(Array.empty, scb.numRows))
+            } else {
+              Iterator.empty
+            }
+          }
+        }
+      case (ExistenceJoin(_), true) =>
+        // Every stream row exists when some build row meets the condition.
+        val exists = anyRowMatchesAndClose(builtBatch, boundCondition)
+        stream.flatMap { scb =>
+          if (scb.numRows == 0) {
+            withResource(scb)(_ => None)
+          } else {
+            Some(withRetryNoSplit(scb) { _ =>
+              val existsCol: ColumnVector = withResource(Scalar.fromBool(exists)) { scalar =>
+                GpuColumnVector.from(cudf.ColumnVector.fromScalar(scalar, scb.numRows),
+                  BooleanType)
+              }
+              new ColumnarBatch(Array(existsCol), scb.numRows)
+            })
+          }
+        }
+      case _ => throw new IllegalStateException(s"Unsupported join type $joinType")
+    }
+  }
+
+  private def filterAndClose(
+      batch: LazySpillableColumnarBatch,
+      condition: GpuExpression): ColumnarBatch = {
+    batch.checkpoint()
+    withRetryNoSplit(batch) { _ =>
+      withRestoreOnRetry(batch) {
+        GpuFilter(batch.getBatch, condition, NoopMetric, NoopMetric, NoopMetric)
+      }
+    }
+  }
+
+  // Whether some row meets the condition, a null counting as no. It reads only the condition,
+  // where a filter would copy every column of the matching rows.
+  private def anyRowMatchesAndClose(
+      batch: LazySpillableColumnarBatch,
+      condition: GpuExpression): Boolean = {
+    batch.checkpoint()
+    withRetryNoSplit(batch) { _ =>
+      withRestoreOnRetry(batch) {
+        withResource(condition.columnarEval(batch.getBatch)) { matched =>
+          withResource(matched.getBase.any())(any => any.isValid && any.getBoolean)
         }
       }
     }
@@ -737,18 +908,20 @@ abstract class GpuBroadcastNestedLoopJoinExecBase(
       Some(buildDataSize))
   }
 
-  private def buildSidePostProjection: Option[ColumnarBatch => ColumnarBatch] = {
+  private[execution] def buildSidePostProjection: Option[ColumnarBatch => ColumnarBatch] = {
     buildPlan match {
       case p: GpuProjectExec =>
         // Need to manually do project columnar execution other than calling child's
         // internalDoExecuteColumnar. This is to workaround especial handle to build broadcast
         // batch.
         val proj = GpuBindReferences.bindGpuReferencesTiered(
-          postBuildCondition, p.child.output, conf, allMetrics)
-        val fn = (batch: ColumnarBatch) => {
-          withResource(batch)(proj.project)
+          postBuildCondition, p.child.output, conf, allMetrics,
+          enableAst = RapidsConf.ENABLE_PROJECT_AST.get(conf),
+          enableAstJit = RapidsConf.ENABLE_PROJECT_AST_JIT.get(conf))
+        Some { batch: ColumnarBatch =>
+          proj.projectAndCloseWithRetrySingleBatch(
+            SpillableColumnarBatch(batch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY))
         }
-        Some(fn)
       case _ =>
         None
     }
@@ -892,29 +1065,48 @@ abstract class GpuBroadcastNestedLoopJoinExecBase(
   private def doUnconditionalJoinRowCount(relation: Any): RDD[ColumnarBatch] = {
     val buildTime = gpuLongMetric(BUILD_TIME)
     val buildDataSize = gpuLongMetric(BUILD_DATA_SIZE)
-    lazy val buildCount = {
-      val rows = computeBuildRowCount(relation, buildTime, buildDataSize)
+    // The output rows for each stream row. Only an existence join keeps every stream row
+    // whatever the build holds, so the others read the build row count. It is lazy, so each
+    // task computes it when it first needs it.
+    lazy val rowsPerStreamRow: Long = {
+      lazy val buildRows = computeBuildRowCount(relation, buildTime, buildDataSize)
       joinType match {
-        // Semi/anti joins depend on whether the build side has rows, even when both
-        // sides have no columns. An empty source must not create a replacement match.
-        case LeftSemi => if (rows > 0) 1 else 0
-        case LeftAnti => if (rows == 0) 1 else 0
         case _: ExistenceJoin => 1
-        case _ => rows
+        // With no condition, semi keeps a stream row when the build has any row, and anti
+        // keeps it when the build has none.
+        case LeftSemi => if (buildRows > 0) 1 else 0
+        case LeftAnti => if (buildRows > 0) 0 else 1
+        // A stream row matches every build row. Over an empty build it still appears once,
+        // padded with nulls.
+        case LeftOuter | RightOuter => math.max(buildRows, 1)
+        case _ => buildRows
       }
     }
 
+    // A count needs no GPU memory, so the task gives up the GPU semaphore after each stream
+    // batch. divideIntoBatches takes it again before it hands a batch downstream.
     def getRowCountAndClose(cb: ColumnarBatch): Long = {
-      val ret = withResource(cb)(_.numRows().toLong)
+      val ret = cb.numRows()
+      cb.close()
       GpuSemaphore.releaseIfNecessary(TaskContext.get())
       ret
     }
 
     val numOutputRows = gpuLongMetric(NUM_OUTPUT_ROWS)
     val numOutputBatches = gpuLongMetric(NUM_OUTPUT_BATCHES)
-    val counts = streamed.executeColumnar().map(getRowCountAndClose)
+    val leftExistence = joinType == LeftSemi || joinType == LeftAnti
+    val counts = streamed.executeColumnar().mapPartitions { iter =>
+      // A semi or anti join that keeps no stream row skips the stream, as leftExistenceJoin
+      // does. Other joins still compute it, as Spark does, so an error that the stream raises
+      // still fails the query.
+      if (leftExistence && rowsPerStreamRow == 0) {
+        Iterator.empty
+      } else {
+        iter.map(cb => getRowCountAndClose(cb) * rowsPerStreamRow)
+      }
+    }
     GpuBroadcastNestedLoopJoinExecBase.divideIntoBatches(
-      counts.map(s => s * buildCount),
+      counts,
       targetSizeBytes,
       numOutputRows,
       numOutputBatches)

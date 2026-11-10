@@ -28,7 +28,7 @@ from iceberg import (
     _BASE_TBLPROPS_SQL, create_iceberg_table, iceberg_write_enabled_conf, supports_iceberg_v3,
     ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance,
     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df)
-from marks import allow_non_gpu, iceberg, ignore_order
+from marks import allow_non_gpu, iceberg, ignore_order, iceberg_fast_test
 from spark_session import is_databricks_runtime, is_spark_35x, is_spark_400_or_later, \
     is_spark_40x, is_spark_41x, spark_version, with_cpu_session, with_gpu_session
 
@@ -158,6 +158,7 @@ def _collect_with_plan_assertion(spark, query, plan_assertion):
     return result
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(
@@ -222,6 +223,7 @@ def test_iceberg_spj_partial_clustering_distinct(format_version, spark_tmp_table
         gpu_plan_assertion=_assert_partial_clustering_spj_plan)
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(
@@ -374,6 +376,7 @@ def _assert_partition_filter_runtime_filter_plan(plan, left_table):
         f"Expected SPJ intersection {{1, 2}}, found {planned_values}:\n{plan}"
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(
@@ -398,6 +401,7 @@ def test_iceberg_spj_partition_filter_with_runtime_filter(spark_tmp_table_factor
         gpu_plan_assertion=assert_plan)
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(
@@ -426,6 +430,7 @@ def test_iceberg_spj_partition_filter_with_runtime_filter_cpu_fails_gpu_succeeds
     assert_equal_with_local_sort([Row(id=1, price=40.0, value="a")], gpu_result)
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(
@@ -536,6 +541,7 @@ _spj_reducible_transforms = [
 ]
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(
@@ -600,6 +606,7 @@ def test_iceberg_spj_reducible_transforms(format_version, spark_tmp_table_factor
             plan, allow_compatible_transforms))
 
 
+@iceberg_fast_test
 @allow_non_gpu("BatchScanExec")
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
@@ -617,6 +624,7 @@ def test_iceberg_fallback_not_unsafe_row(format_version, spark_tmp_table_factory
     )
 
 
+@iceberg_fast_test
 @iceberg
 @pytest.mark.parametrize("format_version", iceberg_format_versions)
 def test_iceberg_scan_from_background_thread(format_version, spark_tmp_table_factory):
@@ -643,6 +651,7 @@ def test_iceberg_scan_from_background_thread(format_version, spark_tmp_table_fac
 
     with_gpu_session(scan_iceberg_table, conf=iceberg_read_enabled_conf)
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(is_databricks_runtime(),
@@ -666,6 +675,7 @@ def test_iceberg_aqe_dpp(format_version, spark_tmp_table_factory, reader_type):
               "spark.rapids.sql.format.parquet.reader.type": reader_type,
               "spark.sql.optimizer.dynamicPartitionPruning.enabled": "true"})
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
 @pytest.mark.parametrize("data_gens", iceberg_gens_list, ids=idfn)
@@ -687,6 +697,7 @@ def test_iceberg_parquet_read_round_trip_select_one(
         lambda spark : spark.sql(f"SELECT _c0 FROM {full_table}"),
         conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
 @pytest.mark.parametrize("data_gens", iceberg_primitive_gens_list, ids=idfn)
@@ -706,6 +717,7 @@ def test_iceberg_parquet_read_round_trip(format_version, spark_tmp_table_factory
         lambda spark : spark.sql(f"SELECT * FROM {full_table}"),
         conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
 @pytest.mark.parametrize("data_gens", iceberg_gens_list, ids=idfn)
@@ -726,6 +738,7 @@ def test_iceberg_parquet_read_round_trip_all_types(
         lambda spark : spark.sql(f"SELECT * FROM {full_table}"),
         conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
+@iceberg_fast_test
 @iceberg
 @pytest.mark.parametrize("data_gens", [[long_gen]], ids=idfn)
 @pytest.mark.parametrize("iceberg_format", ["orc", "avro"], ids=idfn)
@@ -751,6 +764,7 @@ def test_iceberg_unsupported_formats(
             conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type}),
         "UnsupportedOperationException")
 
+@iceberg_fast_test
 @iceberg
 @allow_non_gpu("BatchScanExec", "ColumnarToRowExec")
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
@@ -770,6 +784,7 @@ def test_iceberg_read_fallback(format_version, spark_tmp_table_factory, disable_
         conf = {**iceberg_read_enabled_conf, disable_conf : "false"})
 
 
+@iceberg_fast_test
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)
@@ -788,6 +803,7 @@ def test_iceberg_encryption_read_fallback(spark_tmp_table_factory):
         "BatchScanExec", conf=iceberg_write_enabled_conf)
 
 
+@iceberg_fast_test
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @allow_non_gpu("BatchScanExec", "ColumnarToRowExec")
@@ -809,6 +825,7 @@ def test_iceberg_v3_read_fallback(spark_tmp_table_factory):
         "BatchScanExec")
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(
@@ -853,6 +870,7 @@ def test_iceberg_v3_row_lineage_read(spark_tmp_table_factory, reader_type):
         conf=read_conf)
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(
@@ -886,6 +904,7 @@ def test_iceberg_v3_row_lineage_rewrite_data_files(spark_tmp_table_factory):
         })
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
 # Compression codec to test and whether the codec is supported by cudf
@@ -921,6 +940,7 @@ def test_iceberg_read_parquet_compression_codec(format_version, spark_tmp_table_
     else:
         assert_gpu_and_cpu_are_equal_collect(lambda spark : spark.sql(query), conf={**iceberg_read_enabled_conf, **read_conf})
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
 @pytest.mark.parametrize("key_gen", [int_gen, long_gen, string_gen, boolean_gen, date_gen, timestamp_gen, decimal_gen_64bit], ids=idfn)
@@ -941,6 +961,7 @@ def test_iceberg_read_partition_key(format_version, spark_tmp_table_factory, key
         lambda spark : spark.sql(f"SELECT a FROM {full_table}"),
         conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
@@ -962,6 +983,7 @@ def test_iceberg_input_meta(format_version, spark_tmp_table_factory, reader_type
             f"FROM {full_table}"),
         conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
@@ -979,6 +1001,7 @@ def test_iceberg_disorder_read_schema(format_version, spark_tmp_table_factory, r
         lambda spark : spark.sql(f"SELECT b,c,a FROM {full_table}"),
         conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
 @pytest.mark.parametrize("format_version", iceberg_format_versions)
@@ -997,6 +1020,7 @@ def test_iceberg_read_appended_table(format_version, spark_tmp_table_factory):
     with_cpu_session(setup_iceberg_table)
     assert_gpu_and_cpu_are_equal_collect(lambda spark : spark.sql(f"SELECT * FROM {full_table}"), conf=iceberg_read_enabled_conf)
 
+@iceberg_fast_test
 @iceberg
 # Some metadata files have types that are not supported on the GPU yet (e.g.: BinaryType)
 @allow_non_gpu("BatchScanExec", "ProjectExec")
@@ -1022,6 +1046,7 @@ def test_iceberg_read_metadata_fallback(format_version, spark_tmp_table_factory)
             lambda spark : spark.read.format("iceberg").load(f"{full_table}.{subtable}"),
             "BatchScanExec", conf=iceberg_read_enabled_conf)
 
+@iceberg_fast_test
 @iceberg
 # Some metadata files have types that are not supported on the GPU yet (e.g.: BinaryType)
 @allow_non_gpu("BatchScanExec", "ProjectExec")
@@ -1045,6 +1070,7 @@ def test_iceberg_read_metadata_count(format_version, spark_tmp_table_factory):
         assert_gpu_and_cpu_row_counts_equal(
             lambda spark : spark.read.format("iceberg").load(f"{full_table}.{subtable}"), conf=iceberg_read_enabled_conf)
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
@@ -1069,6 +1095,7 @@ def test_iceberg_read_timetravel(format_version, spark_tmp_table_factory, reader
             .format("iceberg").load("{}".format(full_table)),
         conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
@@ -1100,6 +1127,7 @@ def test_iceberg_incremental_read(format_version, spark_tmp_table_factory, reade
             .format("iceberg").load("{}".format(full_table)),
         conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
@@ -1122,6 +1150,7 @@ def test_iceberg_reorder_columns(format_version, spark_tmp_table_factory, reader
         lambda spark : spark.sql("SELECT * FROM {}".format(table)),
         conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
@@ -1144,6 +1173,7 @@ def test_iceberg_rename_column(format_version, spark_tmp_table_factory, reader_t
         lambda spark : spark.sql("SELECT * FROM {}".format(table)),
         conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
@@ -1168,6 +1198,7 @@ def test_iceberg_column_names_swapped(format_version, spark_tmp_table_factory, r
         lambda spark : spark.sql("SELECT * FROM {}".format(table)),
         conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
@@ -1218,6 +1249,7 @@ def test_iceberg_alter_column_type(format_version, spark_tmp_table_factory, read
         require_non_empty=True,
         conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
@@ -1240,6 +1272,7 @@ def test_iceberg_add_column(format_version, spark_tmp_table_factory, reader_type
         lambda spark : spark.sql("SELECT * FROM {}".format(table)),
         conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
@@ -1262,6 +1295,7 @@ def test_iceberg_remove_column(format_version, spark_tmp_table_factory, reader_t
         lambda spark : spark.sql("SELECT * FROM {}".format(table)),
         conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
@@ -1284,6 +1318,7 @@ def test_iceberg_add_partition_field(format_version, spark_tmp_table_factory, re
         lambda spark : spark.sql("SELECT * FROM {}".format(table)),
         conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
@@ -1307,6 +1342,7 @@ def test_iceberg_drop_partition_field(format_version, spark_tmp_table_factory, r
         lambda spark : spark.sql("SELECT * FROM {}".format(table)),
         conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
@@ -1324,6 +1360,7 @@ def test_iceberg_v1_delete(spark_tmp_table_factory, reader_type):
         lambda spark : spark.sql("SELECT * FROM {}".format(table)),
         conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
@@ -1374,6 +1411,7 @@ def test_iceberg_read_with_filecache(format_version, spark_tmp_table_factory, re
     assert_equal_with_local_sort(cpu_result, gpu_result_1)
     assert_equal_with_local_sort(cpu_result, gpu_result_2)
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
@@ -1423,6 +1461,7 @@ def test_iceberg_parquet_read_from_uri_invalid_s3_path(format_version, spark_tmp
         lambda spark: spark.sql(f"SELECT * FROM {table}"),
         conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
@@ -1466,6 +1505,7 @@ def test_iceberg_read_metadata_columns_with_partition_evolution(
         conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
@@ -1496,6 +1536,7 @@ def test_iceberg_read_pos_with_split_file(format_version, spark_tmp_table_factor
         conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
@@ -1527,6 +1568,7 @@ def test_iceberg_read_mor_with_pos_deletes_split_file(spark_tmp_table_factory, r
         conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
@@ -1572,12 +1614,7 @@ def test_iceberg_small_file_combine_with_schema_evolution(format_version, spark_
         conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
 
-@iceberg
-@ignore_order(local=True)
-@pytest.mark.parametrize('reader_type', rapids_reader_types)
-@pytest.mark.parametrize("format_version", iceberg_read_format_versions)
-def test_iceberg_small_file_combine_with_partition_spec_evolution(
-        format_version,         spark_tmp_table_factory, reader_type):
+def _create_iceberg_partition_spec_evolution_table(format_version, spark_tmp_table_factory):
     table = get_full_table_name(spark_tmp_table_factory)
     partition_evolution_gens = [('a', long_gen), ('b', int_gen), ('c', string_gen)]
     base_seed = get_datagen_seed()
@@ -1621,18 +1658,10 @@ def test_iceberg_small_file_combine_with_partition_spec_evolution(
 
     with_cpu_session(setup_iceberg_table)
 
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.sql(f"SELECT a, b, c, _spec_id, _partition FROM {table}"),
-        conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
+    return table
 
 
-@iceberg
-@ignore_order(local=True)
-@pytest.mark.parametrize('reader_type', rapids_reader_types)
-@pytest.mark.skipif(is_iceberg_remote_catalog(), reason = "S3tables catalog is managed")
-@pytest.mark.parametrize("format_version", iceberg_read_format_versions)
-def test_iceberg_small_file_combine_with_add_files_identity_partition(
-        format_version,         spark_tmp_table_factory, reader_type):
+def _create_iceberg_add_files_identity_partition_table(format_version, spark_tmp_table_factory):
     target_table = get_full_table_name(spark_tmp_table_factory)
     source_table = get_full_table_name(spark_tmp_table_factory)
     create_iceberg_table(
@@ -1677,7 +1706,82 @@ def test_iceberg_small_file_combine_with_add_files_identity_partition(
 
     with_cpu_session(setup_imported_table)
 
+    return target_table
+
+
+def _set_iceberg_open_file_cost_to_zero(table):
+    def configure_scan(spark):
+        spark.sql(
+            f"ALTER TABLE {table} SET TBLPROPERTIES ('read.split.open-file-cost' = '0')")
+        spark.sql(f"REFRESH TABLE {table}")
+
+    with_cpu_session(configure_scan)
+
+
+def _assert_iceberg_metadata_only_small_file_combine(table, projection, reader_type):
+    def read_table(spark):
+        df = spark.sql(f"SELECT {projection} FROM {table}")
+        # Different per-file constants must share a scan task to exercise the split check.
+        assert df.rdd.getNumPartitions() == 1
+        return df
+
+    assert_gpu_and_cpu_are_equal_collect(
+        read_table,
+        conf={
+            **iceberg_read_enabled_conf,
+            'spark.rapids.sql.format.parquet.reader.type': reader_type,
+            'spark.rapids.sql.reader.multithreaded.combine.sizeBytes': '64m',
+            'spark.rapids.sql.reader.multithreaded.combine.waitTime': '1000'})
+
+
+@iceberg_fast_test
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.parametrize("format_version", iceberg_read_format_versions)
+def test_iceberg_small_file_combine_with_partition_spec_evolution(
+        format_version, spark_tmp_table_factory, reader_type):
+    table = _create_iceberg_partition_spec_evolution_table(format_version, spark_tmp_table_factory)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(f"SELECT a, b, c, _spec_id, _partition FROM {table}"),
+        conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.skipif(is_iceberg_remote_catalog(),
+                   reason="Requires control of Iceberg scan split planning")
+@pytest.mark.parametrize("format_version", iceberg_read_format_versions)
+def test_iceberg_metadata_only_with_partition_spec_evolution(
+        format_version, spark_tmp_table_factory, reader_type):
+    table = _create_iceberg_partition_spec_evolution_table(format_version, spark_tmp_table_factory)
+    _set_iceberg_open_file_cost_to_zero(table)
+    _assert_iceberg_metadata_only_small_file_combine(table, '_spec_id, _partition', reader_type)
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason = "S3tables catalog is managed")
+@pytest.mark.parametrize("format_version", iceberg_read_format_versions)
+def test_iceberg_small_file_combine_with_add_files_identity_partition(
+        format_version, spark_tmp_table_factory, reader_type):
+    table = _create_iceberg_add_files_identity_partition_table(format_version, spark_tmp_table_factory)
     # Imported partitioned Parquet files materialize `a` from the path, not the file payload.
     assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.sql(f"SELECT a, b FROM {target_table}"),
+        lambda spark: spark.sql(f"SELECT a, b FROM {table}"),
         conf={**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader_type})
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason = "S3tables catalog is managed")
+@pytest.mark.parametrize("format_version", iceberg_read_format_versions)
+def test_iceberg_metadata_only_with_add_files_identity_partition(
+        format_version, spark_tmp_table_factory, reader_type):
+    table = _create_iceberg_add_files_identity_partition_table(format_version, spark_tmp_table_factory)
+    _set_iceberg_open_file_cost_to_zero(table)
+    # Selecting only `a` requires no physical columns from the imported Parquet files.
+    _assert_iceberg_metadata_only_small_file_combine(table, 'a', reader_type)

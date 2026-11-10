@@ -15,34 +15,9 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "340"}
-{"spark": "341"}
-{"spark": "342"}
-{"spark": "343"}
-{"spark": "344"}
-{"spark": "350"}
-{"spark": "350db143"}
-{"spark": "351"}
-{"spark": "352"}
-{"spark": "353"}
-{"spark": "354"}
-{"spark": "355"}
-{"spark": "356"}
-{"spark": "357"}
-{"spark": "358"}
-{"spark": "359"}
-{"spark": "400"}
-{"spark": "400db173"}
-{"spark": "401"}
-{"spark": "402"}
-{"spark": "403"}
-{"spark": "404"}
-{"spark": "410db183"}
-{"spark": "411"}
-{"spark": "412"}
-{"spark": "413"}
-{"spark": "420"}
-{"spark": "500"}
+{"spark":["340"],"carryForward":"sameMinor"}
+{"spark":["350","400","420"],"carryForward":"all"}
+{"spark":["350db143","400db173","410db183"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.rapids
@@ -87,7 +62,17 @@ class RapidsCachingReader[K, C](
     transport: Option[RapidsShuffleTransport],
     catalog: ShuffleBufferCatalog,
     sparkTypes: Array[DataType])
-  extends ShuffleReader[K, C] with Logging {
+  extends ShuffleReader[K, C] with Logging with ShuffleReadSnapshotProvider {
+
+  private var preparedSnapshot: Option[ShuffleReadSnapshot] = None
+
+  override def snapshot: ShuffleReadSnapshot = preparedSnapshot.getOrElse {
+    val saved = ShuffleReadSnapshot(blocksByAddress.toVector.map { case (address, blocks) =>
+      address -> blocks.toVector
+    })
+    preparedSnapshot = Some(saved)
+    saved
+  }
 
   override def read(): Iterator[Product2[K, C]] = {
     NvtxRegistry.RAPIDS_CACHING_READER_READ.push()
@@ -96,7 +81,7 @@ class RapidsCachingReader[K, C](
           new ArrayBuffer[(BlockManagerId, collection.Seq[(BlockId, Long, Int)])]()
       var cachedBatchIterator: Iterator[ColumnarBatch] = Iterator.empty
       val blocksByAddressMap: Map[BlockManagerId, collection.Seq[(BlockId, Long, Int)]] =
-          blocksByAddress.toMap
+          preparedSnapshot.map(_.blocks.iterator).getOrElse(blocksByAddress).toMap
       var numCachedBlocks: Int = 0
 
       blocksByAddressMap.keys.foreach(blockManagerId => {
@@ -113,11 +98,13 @@ class RapidsCachingReader[K, C](
                   (sbbid.startReduceId to sbbid.endReduceId).iterator.flatMap { reduceId =>
                     val sbid = ShuffleBlockId(sbbid.shuffleId, sbbid.mapId, reduceId)
                     numCachedBlocks += 1
-                    catalog.getColumnarBatchIterator(sbid, sparkTypes)
+                    new LocalCachedShuffleBlockIterator(
+                      catalog, sbid, sparkTypes, blockManagerId, blockInfo._3)
                   }
                 case sbid: ShuffleBlockId =>
                   numCachedBlocks += 1
-                  catalog.getColumnarBatchIterator(sbid, sparkTypes)
+                  new LocalCachedShuffleBlockIterator(
+                    catalog, sbid, sparkTypes, blockManagerId, blockInfo._3)
                 case _ => throw new IllegalArgumentException(
                   s"${blockId.getClass} $blockId is not currently supported")
               }

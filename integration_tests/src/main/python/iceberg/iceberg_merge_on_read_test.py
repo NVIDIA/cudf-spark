@@ -30,7 +30,7 @@ from iceberg import rapids_reader_types, \
     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, runtime_iceberg_version
 from data_gen import disable_parquet_field_id_write, gen_df, get_datagen_seed, int_gen, \
     long_gen, string_gen
-from marks import iceberg, ignore_order, validate_execs_in_gpu_plan
+from marks import iceberg, ignore_order, validate_execs_in_gpu_plan, iceberg_fast_test
 from spark_session import with_gpu_session, with_cpu_session, reset_spark_session_conf
 
 pytestmark = iceberg_unsupported_mark
@@ -97,6 +97,7 @@ def test_iceberg_v2_eq_deletes_reader_types(spark_tmp_table_factory, spark_tmp_p
         conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
@@ -178,6 +179,7 @@ def test_iceberg_v2_mixed_deletes(spark_tmp_table_factory, spark_tmp_path, reade
         conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.parametrize(
@@ -219,6 +221,7 @@ def test_iceberg_v3_deletion_vector(
         is_cpu_first=False)
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.parametrize(
@@ -400,6 +403,7 @@ def _normalize_position_delete_df(df):
         f.col('c'))
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.parametrize('reader_type', rapids_reader_types)

@@ -26,13 +26,14 @@ import scala.util.Try
 import com.databricks.sql.transaction.tahoe._
 import com.databricks.sql.transaction.tahoe.actions.Metadata
 import com.databricks.sql.transaction.tahoe.commands.{
+  DeltaCommand,
   TableCreationModes,
   WriteIntoDelta,
   WriteIntoDeltaLike
 }
-import com.databricks.sql.transaction.tahoe.metering.DeltaLogging
 import com.databricks.sql.transaction.tahoe.schema.SchemaUtils
 import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
+import com.databricks.sql.transaction.tahoe.storage.dv.DeletionVectorEnablementHelper
 import com.nvidia.spark.rapids.RapidsConf
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileSystem, Path}
@@ -66,7 +67,7 @@ abstract class GpuCreateDeltaTableCommandBase(
     outputAttrs: Seq[Attribute],
     @transient protected val rapidsConf: RapidsConf)
   extends LeafRunnableCommand
-  with DeltaLogging {
+  with DeltaCommand {
 
   override def output: Seq[Attribute] = outputAttrs
 
@@ -134,24 +135,26 @@ abstract class GpuCreateDeltaTableCommandBase(
         }
         val queryPlan = query.get
         validateQueryPlan(queryPlan)
+        val v1Writer = isV1Writer
         // We are either appending/overwriting with saveAsTable, creating a new table with CTAS,
         // or creating a table as part of a RunnableCommand.
         queryPlan match {
           case writer: WriteIntoDeltaLike =>
-            // In the V2 Writer, methods like "replace" and "createOrReplace" implicitly mean that
-            // the metadata should be changed. This wasn't the behavior for DataFrameWriterV1.
-            val isV1WriterSaveAsTableOverwrite = isV1Writer
-            if (!isV1WriterSaveAsTableOverwrite) {
-              replaceMetadataIfNecessary(
-                txn, tableWithLocation, options, writer.data.schema.asNullable)
-            }
-            val isTableReplace =
-              (operation == TableCreationModes.Replace ||
-                operation == TableCreationModes.CreateOrReplace) &&
-                !isV1WriterSaveAsTableOverwrite
-            val actions = writer.write(txn, sparkSession, None, isTableReplace)
-            val op = getOperation(txn.metadata, isManagedTable, Some(options))
+            if (!hasBeenExecuted(txn, sparkSession, Some(options))) {
+              // In the V2 Writer, methods like "replace" and "createOrReplace" implicitly mean that
+              // the metadata should be changed. This wasn't the behavior for DataFrameWriterV1.
+              if (!v1Writer) {
+                replaceMetadataIfNecessary(
+                  txn, tableWithLocation, options, sparkSession, writer.data.schema.asNullable)
+              }
+              val isTableReplace =
+                (operation == TableCreationModes.Replace ||
+                  operation == TableCreationModes.CreateOrReplace) &&
+                  !v1Writer
+              val actions = writer.write(txn, sparkSession, None, isTableReplace)
+              val op = getOperation(txn.metadata, isManagedTable, Some(options))
               txn.commit(actions, op)
+            }
           case cmd: RunnableCommand =>
             result = cmd.run(sparkSession)
           case other =>
@@ -162,9 +165,9 @@ abstract class GpuCreateDeltaTableCommandBase(
 
             // In the V2 Writer, methods like "replace" and "createOrReplace" implicitly mean that
             // the metadata should be changed. This wasn't the behavior for DataFrameWriterV1.
-            if (!isV1Writer) {
+            if (!v1Writer) {
               replaceMetadataIfNecessary(
-                txn, tableWithLocation, options, other.schema.asNullable)
+                txn, tableWithLocation, options, sparkSession, other.schema.asNullable)
             }
 
             val actions = WriteIntoDelta(
@@ -224,7 +227,8 @@ abstract class GpuCreateDeltaTableCommandBase(
               throw DeltaErrors.schemaNotProvidedException
             }
             // We need to replace
-            replaceMetadataIfNecessary(txn, tableWithLocation, options, tableWithLocation.schema)
+            replaceMetadataIfNecessary(
+              txn, tableWithLocation, options, sparkSession, tableWithLocation.schema)
             // Truncate the table
             val operationTimestamp = System.currentTimeMillis()
             val removes = txn.filterFiles().map(_.removeWithTimestamp(operationTimestamp))
@@ -458,6 +462,7 @@ abstract class GpuCreateDeltaTableCommandBase(
       txn: OptimisticTransaction,
       tableDesc: CatalogTable,
       options: DeltaOptions,
+      sparkSession: SparkSession,
       schema: StructType): Unit = {
     val isReplace = (operation == TableCreationModes.CreateOrReplace ||
         operation == TableCreationModes.Replace)
@@ -471,7 +476,15 @@ abstract class GpuCreateDeltaTableCommandBase(
     if (txn.readVersion > -1L && isReplace && !dontOverwriteSchema) {
       // When a table already exists, and we're using the DataFrameWriterV2 API to replace
       // or createOrReplace a table, we blindly overwrite the metadata.
-      txn.updateMetadataForNewTable(getProvidedMetadata(table, schema.json))
+      val providedMetadata = getProvidedMetadata(table, schema.json)
+      val metadata = if (DeletionVectorEnablementHelper.shouldEnable(
+          sparkSession, providedMetadata.configuration, isReplace, txn.deltaLog,
+          Some(tableDesc), Some(txn.metadata.configuration))) {
+        DeletionVectorEnablementHelper.enableInMetadata(providedMetadata)
+      } else {
+        providedMetadata
+      }
+      txn.updateMetadataForNewTable(metadata)
     }
   }
 

@@ -344,6 +344,38 @@ object GpuParquetScan {
     }
   }
 
+  private[parquet] def coalesceReads(ranges: Seq[CopyRange]): Seq[CopyRange] = {
+    val coalesced = new ArrayBuffer[CopyRange](ranges.length)
+    var currentRange: CopyRange = null
+    var currentRangeEnd = 0L
+
+    def addCurrentRange(): Unit = {
+      if (currentRange != null) {
+        val rangeLength = currentRangeEnd - currentRange.getInputOffset
+        if (rangeLength == currentRange.getLength) {
+          coalesced += currentRange
+        } else {
+          coalesced += new CopyRange(
+            currentRange.getInputOffset, rangeLength, currentRange.getOutputOffset)
+        }
+        currentRange = null
+        currentRangeEnd = 0L
+      }
+    }
+
+    ranges.foreach { c =>
+      if (c.getInputOffset == currentRangeEnd) {
+        currentRangeEnd += c.getLength
+      } else {
+        addCurrentRange()
+        currentRange = c
+        currentRangeEnd = c.getInputOffset + c.getLength
+      }
+    }
+    addCurrentRange()
+    coalesced.toSeq
+  }
+
   def throwIfRebaseNeededInExceptionMode(table: Table, dateRebaseMode: DateTimeRebaseMode,
       timestampRebaseMode: DateTimeRebaseMode): Unit = {
     (0 until table.getNumberOfColumns).foreach { i =>
@@ -562,6 +594,13 @@ private[parquet] object GpuParquetFileFilterHandler {
       configuredReader: ParquetFooterReaderType.Value,
       schema: StructType): Boolean =
     configuredReader == ParquetFooterReaderType.NATIVE && canUseNativeFooterReader(schema)
+
+  private[parquet] val PARQUET_ENCRYPTION_CONFS = Seq("parquet.encryption.kms.client.class",
+    "parquet.crypto.factory.class")
+
+  /** Whether `conf` sets up Parquet decryption, which the GPU readers do not support. */
+  def isDecryptionConfigured(conf: Configuration): Boolean =
+    PARQUET_ENCRYPTION_CONFS.exists(conf.get(_) != null)
 }
 
 protected case class GpuParquetFileFilterHandler(
@@ -584,9 +623,6 @@ protected case class GpuParquetFileFilterHandler(
   private val ignoreMissingParquetFieldId = ParquetSchemaClipShims.ignoreMissingIds(sqlConf)
   private val returnNullStructIfAllFieldsMissing =
     ParquetMissingStructShims.returnNullStructIfAllFieldsMissing(sqlConf)
-
-  private val PARQUET_ENCRYPTION_CONFS = Seq("parquet.encryption.kms.client.class",
-    "parquet.encryption.kms.client.class", "parquet.crypto.factory.class")
 
   private def isParquetTimeInInt96(parquetType: Type): Boolean = {
     parquetType match {
@@ -638,6 +674,25 @@ protected case class GpuParquetFileFilterHandler(
         readFooterBuffer(fileIO, filePath, conf))) { hmb =>
       // buffer includes header and trailing length and magic, stripped here
       hmb.slice(MAGIC.length, hmb.getLength - Integer.BYTES - MAGIC.length)
+    }
+  }
+
+  /**
+   * Read the Thrift footer of a Parquet file: the footer bytes alone, without the leading magic
+   * or the trailing footer length and magic that readFooterBuffer returns. This is what the
+   * hybrid scan reader takes.
+   */
+  def readThriftFooter(
+      fileIO: RapidsFileIO,
+      filePath: Path,
+      conf: Configuration): HostMemoryBuffer = {
+    val inputFile = fileIO.newInputFile(filePath)
+    withResource(ParquetFooterUtils.getFooterBuffer(inputFile, metrics,
+        readFooterBuffer(fileIO, filePath, conf))) { buf =>
+      // Drop the leading magic, and the trailing footer length and magic, to leave the thrift
+      // metadata the hybrid scan reader expects.
+      val thriftFooterLength = buf.getLength - MAGIC.length - FOOTER_LENGTH_SIZE - MAGIC.length
+      buf.slice(MAGIC.length, thriftFooterLength)
     }
   }
 
@@ -773,7 +828,7 @@ protected case class GpuParquetFileFilterHandler(
       // Make sure we aren't trying to read encrypted files. For now, remove the related
       // parquet confs from the hadoop configuration and try to catch the resulting
       // exception and print a useful message
-      PARQUET_ENCRYPTION_CONFS.foreach { encryptConf =>
+      GpuParquetFileFilterHandler.PARQUET_ENCRYPTION_CONFS.foreach { encryptConf =>
         if (conf.get(encryptConf) != null) {
           conf.unset(encryptConf)
         }
@@ -1628,11 +1683,64 @@ case class GpuParquetPartitionReaderFactory(
     sqlConf, broadcastedConf, dataSchema, readDataSchema, partitionSchema,
     rapidsConf, metrics, params) with Logging {
 
+  // Only set for an eligible read.
+  private val hybridScanConfig = if (rapidsConf.isParquetHybridScanEnabled) {
+    val config = HybridScanConfig(rapidsConf,
+      new HybridScanFilters(readDataSchema, isCaseSensitive, filters))
+
+    val eligible = HybridScanPipeline.isEligible(
+      rapidsConf.isParquetHybridScanEnabled, rapidsConf.testParquetHybridScanFailOnFallback,
+      readDataSchema, config.filters,
+      useChunkedReader, compressCfg.decompressSnappyCpu || compressCfg.decompressZstdCpu,
+      readUseFieldId, sqlConf.ignoreCorruptFiles,
+      GpuParquetFileFilterHandler.isDecryptionConfigured(broadcastedConf.value.value),
+      DateTimeRebaseMode.fromName(SparkShimImpl.parquetRebaseRead(sqlConf)),
+      DateTimeRebaseMode.fromName(SparkShimImpl.int96ParquetRebaseRead(sqlConf)))
+      
+    if (eligible) Some(config) else None
+  } else {
+    None
+  }
+
   override protected def buildBaseColumnarParquetReader(
       file: PartitionedFile): PartitionReader[ColumnarBatch] = {
     // we need to copy the Hadoop Configuration because filter push down can mutate it,
     // which can affect other tasks.
     val conf = new Configuration(broadcastedConf.value.value)
+    hybridScanConfig match {
+      case Some(config) => buildHybridScanReader(file, conf, config)
+      case None => buildParquetMrReader(file, conf)
+    }
+  }
+
+  /**
+   * Read the split with the hybrid scan reader. Only the footer is parsed here; which row groups
+   * and column chunks to read is decided by the reader itself, from the pushed filter if any.
+   */
+  private def buildHybridScanReader(
+      file: PartitionedFile,
+      conf: Configuration,
+      config: HybridScanConfig): PartitionReader[ColumnarBatch] = {
+    val filePath = new Path(new URI(file.filePath.toString()))
+    val startTime = System.nanoTime()
+    val footer = NvtxRegistry.HYBRID_SCAN_READ_FOOTER {
+      filterHandler.readThriftFooter(fileIO, filePath, conf)
+    }
+    metrics.get(FILTER_TIME).foreach {
+      _ += (System.nanoTime() - startTime)
+    }
+    closeOnExcept(footer) { _ =>
+      val byteSource = new HybridScanFileByteSource(fileIO, filePath, metrics)
+      val options = HybridScanPipeline.parquetOptions(readDataSchema.fieldNames)
+      new HybridScanPerFileParquetPartitionReader(
+        HybridScanSplit(byteSource, file.start, file.length), footer, options,
+        HybridScanContext(readDataSchema, config.filters, config.filterKeepThreshold, metrics))
+    }
+  }
+
+  private def buildParquetMrReader(
+      file: PartitionedFile,
+      conf: Configuration): PartitionReader[ColumnarBatch] = {
     val startTime = System.nanoTime()
     val singleFileInfo = filterHandler.filterBlocks(fileIO, footerReadType, file, conf, filters,
       readDataSchema)
@@ -2237,7 +2345,7 @@ trait ParquetPartitionReaderBase extends Logging with ScanWithMetrics
       return 0L
     }
 
-    val coalescedRanges = coalesceReads(remoteCopies)
+    val coalescedRanges = GpuParquetScan.coalesceReads(remoteCopies)
     val scheme = filePath.toUri.getScheme
     if (scheme != null && scheme.startsWith("s3")) {
       GpuTaskMetrics.get.recordPerfioS3BackendOnce()
@@ -2258,38 +2366,6 @@ trait ParquetPartitionReaderBase extends Logging with ScanWithMetrics
       }
     }
     totalBytesCopied
-  }
-
-  private def coalesceReads(ranges: Seq[CopyRange]): Seq[CopyRange] = {
-    val coalesced = new ArrayBuffer[CopyRange](ranges.length)
-    var currentRange: CopyRange = null
-    var currentRangeEnd = 0L
-
-    def addCurrentRange(): Unit = {
-      if (currentRange != null) {
-        val rangeLength = currentRangeEnd - currentRange.getInputOffset
-        if (rangeLength == currentRange.getLength) {
-          coalesced += currentRange
-        } else {
-          coalesced += new CopyRange(
-            currentRange.getInputOffset, rangeLength, currentRange.getOutputOffset)
-        }
-        currentRange = null
-        currentRangeEnd = 0L
-      }
-    }
-
-    ranges.foreach { c =>
-      if (c.getInputOffset == currentRangeEnd) {
-        currentRangeEnd += c.getLength
-      } else {
-        addCurrentRange()
-        currentRange = c
-        currentRangeEnd = c.getInputOffset + c.getLength
-      }
-    }
-    addCurrentRange()
-    coalesced.toSeq
   }
 
   private def copyLocal(
@@ -2908,6 +2984,13 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
     )
   }
 
+  /**
+   * Whether metadata-only entries with positive row counts need separate batches.
+   * Formats with file-specific post-processing can override this compatibility check.
+   */
+  protected def checkIfNeedToSplitEmpty(current: HostMemoryEmptyMetaData,
+      next: HostMemoryEmptyMetaData): Boolean = false
+
   override def canUseCombine: Boolean = {
     if (queryUsesInputFile) {
       logDebug("Query uses input file name, can't use combine mode")
@@ -3013,6 +3096,7 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
     val toCombine = ArrayBuffer[HostMemoryBuffersWithMetaDataBase]()
     val leftOvers = ArrayBuffer[HostMemoryBuffersWithMetaDataBase]()
     var firstNonEmpty: HostMemoryBuffersWithMetaData = null
+    var firstEmpty: HostMemoryEmptyMetaData = null
     var emptyNumRows = 0L
     var needsSplit = false
     var iterLoc = 0
@@ -3026,7 +3110,8 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
           if (emptyNumRows == 0) {
             validateEmptyRowCount(empty)
           }
-          firstNonEmpty == null && empty.numRows <= Int.MaxValue.toLong - emptyNumRows
+          firstNonEmpty == null && empty.numRows <= Int.MaxValue.toLong - emptyNumRows &&
+            (firstEmpty == null || !checkIfNeedToSplitEmpty(firstEmpty, empty))
         case data: HostMemoryBuffersWithMetaData =>
           emptyNumRows == 0 && (firstNonEmpty == null || !checkIfNeedToSplit(firstNonEmpty, data))
         case _ => throw new RuntimeException("Unknown HostMemoryBuffersWithMetaDataBase")
@@ -3036,6 +3121,9 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
         result match {
           case empty: HostMemoryEmptyMetaData =>
             emptyNumRows += empty.numRows
+            if (empty.numRows > 0 && firstEmpty == null) {
+              firstEmpty = empty
+            }
           case data: HostMemoryBuffersWithMetaData if firstNonEmpty == null =>
             firstNonEmpty = data
           case _ =>
@@ -3107,6 +3195,13 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
             doCombineHMBs(combinedMeta)
           }
           closeOnExcept(result) { combined =>
+            if (combinedEmptyMeta.allEmpty && combinedEmptyMeta.emptyNumRows > 0) {
+              val expected = combinedEmptyMeta.metaForEmpty.partitionedFile
+              val actual = combined.partitionedFile
+              require(actual.filePath == expected.filePath && actual.start == expected.start &&
+                actual.length == expected.length,
+                "Combined metadata must retain the representative file split")
+            }
             combined.setExecutionTime(selected.map(_.getFilterTime).sum,
               selected.map(_.getBufferTime).sum)
             combined.setScheduleTime(selected.map(_.getScheduleTime).sum)
@@ -3123,10 +3218,9 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
   protected case class CombinedEmptyMeta(emptyNumRows: Long, emptyBufferSize: Long,
       emptyTotalBytesRead: Long, allEmpty: Boolean, emptyMetas: Array[HostMemoryEmptyMetaData]) {
     def metaForEmpty: HostMemoryEmptyMetaData = {
-      // we might have multiple EmptyMetaData results. If some are due to ignoring
-      // missing files and others are row counts, we want to make sure we
-      // take the metadata information from the ones with row counts because
-      // the ones from ignoring missing files has less information with it.
+      // Select the first entry with rows, or the first entry if all row counts are zero.
+      // Ignored missing files have less metadata and must not represent positive-row groups.
+      // The first positive-row entry is also the reference for checkIfNeedToSplitEmpty.
       emptyMetas.find(_.numRows > 0).orElse(emptyMetas.headOption).orNull
     }
   }
@@ -3168,6 +3262,17 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
       blocks: collection.Seq[BlockMetaData]
   ): HostMemoryEmptyMetaData
 
+  /**
+   * Constructs metadata for a combined group of metadata-only results.
+   *
+   * The result must retain emptyMeta.metaForEmpty.partitionedFile.
+   * metaForEmpty selects the first metadata entry with a positive row count,
+   * or the first entry if all row counts are zero.
+   *
+   * For positive-row groups, checkIfNeedToSplitEmpty checks compatibility
+   * against this representative. Any file-specific processing selected
+   * through it must be valid for every row in the combined result.
+   */
   protected def newCombinedHMEmptyMetadata(emptyMeta: CombinedEmptyMeta,
       nonEmptyMeta: CombinedMeta): HostMemoryEmptyMetaData
 
@@ -3347,6 +3452,12 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
    * @param fileBufsAndMeta the file HostMemoryBuffer read from a PartitionedFile
    * @return Option[ColumnarBatch]
    */
+  protected def readEmptySchemaBatch(meta: HostMemoryEmptyMetaData, rows: Int): ColumnarBatch = {
+    val nullColumns = meta.readSchema.fields.safeMap(f =>
+      GpuColumnVector.fromNull(rows, f.dataType).asInstanceOf[SparkVector])
+    new ColumnarBatch(nullColumns, rows)
+  }
+
   override def readBatches(fileBufsAndMeta: HostMemoryBuffersWithMetaDataBase):
   Iterator[ColumnarBatch] = fileBufsAndMeta match {
     case meta: HostMemoryEmptyMetaData => withResource(meta) { _ =>
@@ -3360,9 +3471,7 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
       } else {
         // Someone is going to process this data, even if it is just a row count
         GpuSemaphore.acquireIfNecessary(TaskContext.get())
-        val nullColumns = meta.readSchema.fields.safeMap(f =>
-          GpuColumnVector.fromNull(rows, f.dataType).asInstanceOf[SparkVector])
-        new ColumnarBatch(nullColumns, rows)
+        readEmptySchemaBatch(meta, rows)
       }
 
       // we have to add partition values here for this batch, we already verified that
@@ -3579,7 +3688,8 @@ class MultiFileCloudParquetPartitionReader(
   override protected def newCombinedHMEmptyMetadata(emptyMeta: CombinedEmptyMeta,
       nonEmptyMeta: CombinedMeta): HostMemoryEmptyMetaData = {
     val metaForEmpty = emptyMeta.metaForEmpty
-    ParquetHostMemoryEmptyMetaData(metaForEmpty.partitionedFile, // just pick one since not used
+    // Retain the compatible group's representative for file-specific post-processing.
+    ParquetHostMemoryEmptyMetaData(metaForEmpty.partitionedFile,
       emptyMeta.emptyBufferSize,
       emptyMeta.emptyTotalBytesRead,
       metaForEmpty.dateRebaseMode, // these shouldn't matter since data is empty
@@ -3914,9 +4024,7 @@ abstract class AbstractParquetPartitionReader(
         } else {
           // Someone is going to process this data, even if it is just a row count
           GpuSemaphore.acquireIfNecessary(TaskContext.get())
-          val nullColumns = readDataSchema.safeMap(f =>
-            GpuColumnVector.fromNull(numRows, f.dataType).asInstanceOf[SparkVector])
-          new SingleGpuColumnarBatchIterator(new ColumnarBatch(nullColumns.toArray, numRows))
+          readEmptySchemaBatches(currentChunkedBlocks, numRows)
         }
       } else {
         val colTypes = readDataSchema.fields.map(f => f.dataType)
@@ -3958,6 +4066,20 @@ abstract class AbstractParquetPartitionReader(
       totalNumRows: Long,
       chunkedBlocks: Seq[BlockMetaData]): Int = {
     Math.toIntExact(totalNumRows)
+  }
+
+  protected def readEmptySchemaBatch(
+      chunkedBlocks: Seq[BlockMetaData],
+      rows: Int): ColumnarBatch = {
+    val nullColumns = readDataSchema.safeMap(f =>
+      GpuColumnVector.fromNull(rows, f.dataType).asInstanceOf[SparkVector])
+    new ColumnarBatch(nullColumns.toArray, rows)
+  }
+
+  protected def readEmptySchemaBatches(
+      chunkedBlocks: Seq[BlockMetaData],
+      rows: Int): Iterator[ColumnarBatch] = {
+    new SingleGpuColumnarBatchIterator(readEmptySchemaBatch(chunkedBlocks, rows))
   }
 }
 

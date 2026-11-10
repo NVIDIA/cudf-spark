@@ -172,11 +172,3 @@ object GpuHashPartitioningBase extends Logging {
   }
 
 }
-
-sealed trait HashMode extends Serializable
-
-case object Murmur3Mode extends HashMode
-case object HiveMode extends HashMode
-case class UnsupportedMode(modeName: String) extends HashMode {
-  override def toString: String = modeName
-}
