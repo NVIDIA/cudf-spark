@@ -38,28 +38,6 @@ For Spark 4.1.x, only `iceberg-1-11-x` is compiled during the build. Apache Iceb
 publishes the `iceberg-spark-runtime-4.1` artifact starting at version 1.11.0, so earlier
 Iceberg releases cannot be used with Spark 4.1.
 
-## Variant Reads
-
-Iceberg Variant reads require a supported Spark/Iceberg runtime,
-`spark.rapids.sql.format.iceberg.v3.enabled=true`,
-`spark.sql.variant.allowReadingShredded=false` and
-`spark.sql.variant.pushVariantIntoScan=false`. Allowing shredded reads keeps Variant
-scans and their consumers on CPU. GPU Variant writes remain unsupported.
-
-The GPU execution reader reuses the Raw Parquet physical-layout predicate to validate
-every projected Variant leaf: exactly two `REQUIRED BINARY` children named `value` and
-`metadata`. Checks preserve complete Variant groups and field-ID/name-mapping resolution
-through structs, lists and maps. They use the schema already loaded by the execution
-reader, with no additional file opens and no planning-time data-file inspection.
-
-Shredded or incompatible input throws `UnsupportedOperationException` with
-`GPU Iceberg reader does not support shredded or incompatible Variant input` and
-instructions to set `spark.rapids.sql.format.iceberg.read.enabled=false` and rerun with
-the CPU Iceberg reader. Spark may wrap this in a task/stage failure. No automatic CPU
-retry occurs after GPU execution starts. Raw reads, extraction, imported files and
-mixed snapshots use the same validation. Queries that do not project Variant columns
-remain eligible for GPU scans.
-
 ## Code Shared Between Modules
 
 The `common` directory contains code that is shared across some or all of the Iceberg

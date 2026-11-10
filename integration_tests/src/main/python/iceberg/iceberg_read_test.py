@@ -86,9 +86,10 @@ def test_iceberg_unshredded_variant_read(spark_tmp_table_factory, reader_type, c
     # Read the CPU-written data both before and after renaming the Variant-bearing column.
     for column in ['v', 'renamed_v']:
         if column == 'renamed_v':
-            with_cpu_session(
-                lambda spark: spark.sql(f"ALTER TABLE {table} RENAME COLUMN v TO renamed_v"),
-                conf=conf)
+            def rename_column(spark):
+                spark.sql(f"ALTER TABLE {table} RENAME COLUMN v TO renamed_v")
+
+            with_cpu_session(rename_column, conf=conf)
         assert_cpu_and_gpu_are_equal_collect_with_capture(
             lambda spark: _read_variant(spark, table, container, column),
             exist_classes='GpuBatchScanExec,GpuVariantGet', non_exist_classes='BatchScanExec',
