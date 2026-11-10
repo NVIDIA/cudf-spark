@@ -178,12 +178,14 @@ initialize()
 generate_dependencies()
 {
     local pomDir=$(dirname $POM_FILE)
+    local generatedPom="$pomDir/shim-deps/databricks/pom.xml"
     python thirdparty/spark-rapids-common/spark-home-deps/gen-spark-home-deps.py \
-        --output-pom "$pomDir/shim-deps/databricks/pom.xml" \
+        --output-pom "$generatedPom" \
         --project-pom "$POM_FILE" \
         --scala-binary-version "$SCALA_VERSION" \
         --jar-dir "$JARDIR" \
         shim-deps/databricks/pom.xml.template
+    sed -i "s|<!--DATABRICKS_BUILDVER_PROPERTY-->|<rapids.audit.databricks.buildver>${BUILDVER}</rapids.audit.databricks.buildver>|" "$generatedPom"
 }
 
 ##########################
