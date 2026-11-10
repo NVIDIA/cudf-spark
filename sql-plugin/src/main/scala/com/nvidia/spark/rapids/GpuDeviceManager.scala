@@ -201,21 +201,23 @@ object GpuDeviceManager extends Logging {
     chunkedPackMemoryResource = None
     poolSizeLimit = 0L
 
-    SpillFramework.shutdown()
+    GpuShuffleEnv.closeBroadcastCacheAndThen {
+      SpillFramework.shutdown()
 
-    // If we close RMM resources in the shutdown hook in `MemoryCleaner`, will
-    // get segment fault, so close them here before shutdown hook starts.
-    // We assume all RMM resources should be closed at this point, or leaks occurs,
-    // because all Spark tasks/jobs are done at this point.
-    MemoryCleaner.cleanAllRmmBlockers()
+      // If we close RMM resources in the shutdown hook in `MemoryCleaner`, will
+      // get segment fault, so close them here before shutdown hook starts.
+      // We assume all RMM resources should be closed at this point, or leaks occurs,
+      // because all Spark tasks/jobs are done at this point.
+      MemoryCleaner.cleanAllRmmBlockers()
 
-    RmmSpark.clearEventHandler()
-    Rmm.clearEventHandler()
-    GpuShuffleEnv.shutdown()
+      RmmSpark.clearEventHandler()
+      Rmm.clearEventHandler()
+      GpuShuffleEnv.shutdown()
 
-    PageableMemoryPool.shutdown()
-    Rmm.shutdown()
-    singletonMemoryInitialized = Uninitialized
+      PageableMemoryPool.shutdown()
+      Rmm.shutdown()
+      singletonMemoryInitialized = Uninitialized
+    }
   }
 
   def getResourcesFromTaskContext: Map[String, ResourceInformation] = {

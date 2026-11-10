@@ -57,8 +57,17 @@ class ShuffleCleanupEndpoint(
       try {
         pollAndCleanup()
       } catch {
+        // close() interrupts a poll that outlives its wait, and the pool is ending then
+        case _: InterruptedException =>
+          Thread.currentThread().interrupt()
         case e: Exception =>
           logWarning("Error during shuffle cleanup poll", e)
+        // a throwable that leaves a periodic task ends it for good, and its future keeps the
+        // throwable unread
+        case t: Throwable =>
+          logError(s"Shuffle cleanup polling on executor $executorId stops after a fatal error",
+            t)
+          throw t
       }
     }
   }
