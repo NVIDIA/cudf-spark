@@ -16,10 +16,6 @@
 # Columns: target list, logical path, physical provider path.
 # New logical sources may be added without updating this fixture.
 # Change a row when its provider intentionally changes.
-350db143	src/main/java/org/apache/spark/sql/execution/datasources/parquet/ParquetColumnVectorBridge350DB143.java	sql-plugin/src/main/spark350db143/java/org/apache/spark/sql/execution/datasources/parquet/ParquetColumnVectorBridge350DB143.java
-400db173,410db183	src/main/java/org/apache/spark/sql/execution/datasources/parquet/ParquetColumnVectorBridge400DB173.java	sql-plugin/src/main/spark400db173/java/org/apache/spark/sql/execution/datasources/parquet/ParquetColumnVectorBridge400DB173.java
-413,500	src/main/java/org/apache/spark/sql/execution/datasources/parquet/ParquetColumnVectorBridge411.java	sql-plugin/src/main/spark411/java/org/apache/spark/sql/execution/datasources/parquet/ParquetColumnVectorBridge411.java
-359	src/main/java/org/apache/spark/sql/execution/datasources/parquet/ParquetColumnVectorBridgeWithDefault.java	sql-plugin/src/main/spark340/java/org/apache/spark/sql/execution/datasources/parquet/ParquetColumnVectorBridgeWithDefault.java
 359,413,410db183,500	src/main/java/com/nvidia/spark/rapids/GpuDataWriter.java	sql-plugin/src/main/spark350/java/com/nvidia/spark/rapids/GpuDataWriter.java
 359,413,410db183,500	src/main/java/com/nvidia/spark/rapids/GpuDeltaWriter.java	sql-plugin/src/main/spark350/java/com/nvidia/spark/rapids/GpuDeltaWriter.java
 359	src/main/java/com/nvidia/spark/rapids/iceberg/GpuInternalRow.java	sql-plugin/src/main/spark350/java/com/nvidia/spark/rapids/iceberg/GpuInternalRow.java

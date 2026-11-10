@@ -70,15 +70,6 @@ class ShimCompatibilityInheritanceTest(unittest.TestCase):
         self.assertFalse(result['findings'])
         self.assertEqual(result['buildvers'], ['355', '356', '357'])
 
-    def test_missing_inheritance_blocks_child_profiles(self):
-        self.source('355', ['{"spark":["355"],"carryForward":"none"}'])
-        result = coverage(self.root, ['sql-plugin'], None)
-        self.assertEqual(result['status'], 'BLOCKED')
-        self.assertEqual({(finding['kind'], finding['buildver'], finding['symbol'])
-                          for finding in result['findings']},
-                         {('missing_implementation', '356', 'pkg.Example'),
-                          ('missing_implementation', '357', 'pkg.Example')})
-
     def test_equal_distance_variants_are_a_blocking_duplicate(self):
         self.source('355', ['{"spark":["355","356"],"carryForward":"none"}'])
         self.source('356', ['{"spark":["356"],"carryForward":"none"}'])

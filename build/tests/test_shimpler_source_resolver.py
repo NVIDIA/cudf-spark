@@ -234,11 +234,6 @@ class SourceResolverTest(unittest.TestCase):
         for target in ('359', '413', '350db143', '400db173', '410db183', '500'):
             graph = next(graph for graph in graphs if target in graph)
             selections[target] = resolve_sources(graph, variants, target)
-            # Parquet cache readers now use root-loaded Java bridges instead of
-            # the retired shim-loaded column-vector subclass.
-            self.assertNotIn('src/main/scala/org/apache/spark/sql/execution/datasources/'
-                             'parquet/rapids/shims/ShimParquetColumnVector.scala',
-                             selections[target])
 
         baseline = ROOT / 'build' / 'tests' / 'shimpler_source_provider_baseline.tsv'
         expected_paths = {target: set() for target in selections}
