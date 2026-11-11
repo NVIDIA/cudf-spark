@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids
 
 import java.util.concurrent.{ExecutionException, Future, LinkedBlockingQueue, TimeoutException, TimeUnit}
 
-import ai.rapids.cudf.{HostMemoryBuffer, PageableMemoryPool, PinnedMemoryPool, Rmm, RmmAllocationMode}
+import ai.rapids.cudf.{DefaultHostMemoryAllocator, HostMemoryBuffer, PageableMemoryPool, PinnedMemoryPool, Rmm, RmmAllocationMode}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.jni.{RmmSpark, RmmSparkThreadState, TaskPriority, ThreadStateRegistry}
 import com.nvidia.spark.rapids.spill._
@@ -370,6 +370,15 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
         t.printStackTrace(System.err)
         throw t
     }
+  }
+
+  test("allocator implementation follows pageable pool configuration") {
+    HostAlloc.initialize(4096)
+    assert(DefaultHostMemoryAllocator.get().getClass.getSimpleName == "RawHostAlloc")
+
+    PageableMemoryPool.initialize(8192, 1)
+    HostAlloc.initialize(4096)
+    assert(DefaultHostMemoryAllocator.get().getClass.getSimpleName == "PooledHostAlloc")
   }
 
   test("pageable pool serves non-pinned allocations before raw fallback") {
