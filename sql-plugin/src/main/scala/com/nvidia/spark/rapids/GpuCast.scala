@@ -87,6 +87,60 @@ abstract class CastExprMetaBase[INPUT <: UnaryLike[Expression] with TimeZoneAwar
   val fromType: DataType = cast.child.dataType
   val toType: DataType = cast.dataType
 
+  private def isGpuDecimalScaleSupported(decimalType: DecimalType): Boolean = {
+    val cudfScale = -decimalType.scale.toLong
+    val wholeNumberPrecision = decimalType.precision.toLong - decimalType.scale.toLong
+    cudfScale.isValidInt && wholeNumberPrecision.isValidInt
+  }
+
+  private def isGpuDecimalScaleChangeSupported(
+      fromType: DecimalType,
+      toType: DecimalType): Boolean = {
+    val scaleChange = math.abs(fromType.scale.toLong - toType.scale.toLong)
+    scaleChange <= DecimalType.MAX_PRECISION
+  }
+
+  private def areGpuDecimalScalesSupported(dataType: DataType): Boolean = dataType match {
+    case decimalType: DecimalType => isGpuDecimalScaleSupported(decimalType)
+    case ArrayType(elementType, _) => areGpuDecimalScalesSupported(elementType)
+    case MapType(keyType, valueType, _) =>
+      areGpuDecimalScalesSupported(keyType) && areGpuDecimalScalesSupported(valueType)
+    case structType: StructType =>
+      structType.forall(field => areGpuDecimalScalesSupported(field.dataType))
+    case _ => true
+  }
+
+  private def areGpuDecimalScaleChangesSupported(
+      fromType: DataType,
+      toType: DataType): Boolean = (fromType, toType) match {
+    case (from: DecimalType, to: DecimalType) =>
+      isGpuDecimalScaleChangeSupported(from, to)
+    case (ArrayType(from, _), ArrayType(to, _)) =>
+      areGpuDecimalScaleChangesSupported(from, to)
+    case (MapType(fromKey, fromValue, _), MapType(toKey, toValue, _)) =>
+      areGpuDecimalScaleChangesSupported(fromKey, toKey) &&
+          areGpuDecimalScaleChangesSupported(fromValue, toValue)
+    case (from: StructType, to: StructType) =>
+      from.zip(to).forall { case (fromField, toField) =>
+        areGpuDecimalScaleChangesSupported(fromField.dataType, toField.dataType)
+      }
+    case _ => true
+  }
+
+  private def isGpuDecimalCastSupported(
+      fromType: DataType,
+      toType: DataType): Boolean = {
+    areGpuDecimalScalesSupported(fromType) &&
+        areGpuDecimalScalesSupported(toType) &&
+        areGpuDecimalScaleChangesSupported(fromType, toType)
+  }
+
+  override def isBridgeCompatible: Boolean = {
+    super.isBridgeCompatible &&
+        areGpuDecimalScalesSupported(fromType) &&
+        areGpuDecimalScalesSupported(toType)
+  }
+
   override def isTimeZoneSupported: Boolean = {
     (fromType, toType) match {
       case (TimestampType, DateType) => true // this is for to_date(...)
@@ -108,6 +162,10 @@ abstract class CastExprMetaBase[INPUT <: UnaryLike[Expression] with TimeZoneAwar
     if (depth > 0 &&
         !checks.gpuCanCast(fromDataType, toDataType)) {
       willNotWorkOnGpu(s"Casting child type $fromDataType to $toDataType is not supported")
+    }
+    if (depth == 0 && !isGpuDecimalCastSupported(fromDataType, toDataType)) {
+      willNotWorkOnGpu(s"Casting $fromDataType to $toDataType requires decimal scale arithmetic " +
+          "that is not supported on the GPU")
     }
 
     (fromDataType, toDataType) match {

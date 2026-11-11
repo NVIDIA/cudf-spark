@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
+
 import pytest
 
 from asserts import *
@@ -605,6 +607,61 @@ def test_cast_string_to_negative_scale_decimal_overflow(ansi_on):
     else:
         assert_gpu_and_cpu_are_equal_collect(test_overflow,
                                              conf=ansi_disabled_conf)
+
+
+def _decimal_scale_cast_conf(ansi_on):
+    return {
+        'spark.rapids.sql.expression.cpuBridge.enabled': 'true',
+        'spark.sql.ansi.enabled': str(ansi_on).lower(),
+        'spark.sql.legacy.allowNegativeScaleOfDecimal': 'true'
+    }
+
+
+@allow_non_gpu('Cast')
+@validate_execs_in_gpu_plan('GpuProjectExec')
+@pytest.mark.parametrize('ansi_on', [True, False], ids=idfn)
+@pytest.mark.parametrize('value', [
+    pytest.param('0e37', id='zero'),
+    pytest.param('1e37', id='nonzero')
+])
+def test_cast_large_decimal_scale_change_cpu_bridge(ansi_on, value):
+    def do_cast(spark):
+        return spark.createDataFrame([(value,)], 'a string').select(
+            f.col('a').cast(DecimalType(1, -37))
+                .cast(DecimalType(10, 2))
+                .alias('result')).collect()
+
+    assert_gpu_and_cpu_same_data_or_error(
+        do_cast, conf=_decimal_scale_cast_conf(ansi_on),
+        error_message=re.compile('(?i)(decimal|underflow|overflow)'))
+
+
+@allow_non_gpu('ProjectExec', 'Cast')
+@pytest.mark.parametrize('ansi_on', [True, False], ids=idfn)
+def test_cast_int_overflow_decimal_scale_fallback(ansi_on):
+    def do_cast(spark):
+        return spark.createDataFrame(
+            [('0e2147483647',), (None,)], 'a string').select(
+            f.col('a').cast(DecimalType(1, -2147483647))
+                .cast(DecimalType(10, 2))
+                .alias('result'))
+
+    assert_gpu_fallback_collect(
+        do_cast, 'ProjectExec', conf=_decimal_scale_cast_conf(ansi_on))
+
+
+@allow_non_gpu('ProjectExec', 'Cast')
+@pytest.mark.parametrize('ansi_on', [True, False], ids=idfn)
+def test_cast_int_overflow_decimal_scale_nonzero(ansi_on):
+    def do_cast(spark):
+        return spark.createDataFrame([('1e2147483647',)], 'a string').select(
+            f.col('a').cast(DecimalType(1, -2147483647))
+                .cast(DecimalType(10, 2))
+                .alias('result')).collect()
+
+    assert_gpu_and_cpu_same_data_or_error(
+        do_cast, conf=_decimal_scale_cast_conf(ansi_on),
+        error_message=re.compile('(?i)(decimal|underflow|overflow)'))
 
 
 @pytest.mark.parametrize('type', [DoubleType(), FloatType()], ids=idfn)
