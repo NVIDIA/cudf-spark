@@ -50,6 +50,41 @@ import org.apache.spark.sql.execution.datasources.v2.{AppendDataExecV1, AtomicCr
 import org.apache.spark.sql.internal.SQLConf
 
 object Delta43xProvider extends DeltaProviderBase with Logging {
+  private def createDeleteCommandMeta(
+    a: DeleteCommand,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new DeleteCommandMeta(a, conf, p, r)
+
+  private def createUpdateCommandMeta(
+    a: UpdateCommand,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new UpdateCommandMeta(a, conf, p, r)
+
+  private def createMergeIntoCommandMeta(
+    a: MergeIntoCommand,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new MergeIntoCommandMeta(a, conf, p, r)
+
+  private def createOptimizeTableCommandMeta(
+    a: OptimizeTableCommand,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new OptimizeTableCommandMeta(a, conf, p, r)
+
+  private def createDeltaDynamicPartitionOverwriteCommandMeta(
+    a: DeltaDynamicPartitionOverwriteCommand,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new DeltaDynamicPartitionOverwriteCommandMeta(a, conf, p, r)
+
 
   private val UNITY_CATALOG_CLASS_NAME = "io.unitycatalog.spark.UCSingleCatalog"
   private val REST_API_FALLBACK_REASON =
@@ -291,19 +326,19 @@ object Delta43xProvider extends DeltaProviderBase with Logging {
     Seq(
       GpuOverrides.runnableCmd[DeleteCommand](
           "Delete rows from a Delta Lake table",
-          (a, conf, p, r) => new DeleteCommandMeta(a, conf, p, r)),
+          createDeleteCommandMeta),
       GpuOverrides.runnableCmd[UpdateCommand](
           "Update rows from a Delta Lake table",
-          (a, conf, p, r) => new UpdateCommandMeta(a, conf, p, r)),
+          createUpdateCommandMeta),
       GpuOverrides.runnableCmd[MergeIntoCommand](
           "Merge of a source query/table into a Delta Lake table",
-          (a, conf, p, r) => new MergeIntoCommandMeta(a, conf, p, r)),
+          createMergeIntoCommandMeta),
       GpuOverrides.runnableCmd[OptimizeTableCommand](
           "Optimize a Delta Lake table",
-          (a, conf, p, r) => new OptimizeTableCommandMeta(a, conf, p, r)),
+          createOptimizeTableCommandMeta),
       GpuOverrides.runnableCmd[DeltaDynamicPartitionOverwriteCommand](
         "Dynamic partition overwrite to a Delta Lake table",
-        (a, conf, p, r) => new DeltaDynamicPartitionOverwriteCommandMeta(a, conf, p, r)),
+        createDeltaDynamicPartitionOverwriteCommandMeta),
       DeltaReorgTableCommandMeta.rule
     ).map(r => (r.getClassFor.asSubclass(classOf[RunnableCommand]), r)).toMap
   }

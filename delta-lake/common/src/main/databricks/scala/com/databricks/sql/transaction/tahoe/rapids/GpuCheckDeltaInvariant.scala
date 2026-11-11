@@ -127,6 +127,13 @@ case class GpuCheckDeltaInvariant(
 }
 
 object GpuCheckDeltaInvariant extends Logging {
+  private def createGpuCheckDeltaInvariantMeta(
+    c: CheckDeltaInvariant,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new GpuCheckDeltaInvariantMeta(c, conf, p, r)
+
   // Databricks 17.3 changed CheckDeltaInvariant from a unary expression to an expression
   // whose check child is followed by one extractor per referenced column. The extractor
   // expressions are only used to populate the CPU-side error message when the check fails,
@@ -137,7 +144,7 @@ object GpuCheckDeltaInvariant extends Logging {
       TypeSig.all,
       TypeSig.all,
       paramCheck = Seq(ParamCheck("input", TypeSig.all, TypeSig.all))),
-    (c, conf, p, r) => new GpuCheckDeltaInvariantMeta(c, conf, p, r))
+    createGpuCheckDeltaInvariantMeta)
 
   def maybeConvertToGpu(
       invariants: Seq[CheckDeltaInvariant],

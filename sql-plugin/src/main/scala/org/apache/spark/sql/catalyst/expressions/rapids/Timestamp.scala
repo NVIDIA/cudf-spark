@@ -17,7 +17,8 @@
 
 package org.apache.spark.sql.catalyst.expressions.rapids
 
-import com.nvidia.spark.rapids.{ExprChecks, ExprRule, GpuExpression, GpuOverrides, TypeEnum, TypeSig}
+import com.nvidia.spark.rapids.{DataFromReplacementRule, ExprChecks, ExprRule, GpuExpression,
+  GpuOverrides, RapidsConf, RapidsMeta, TypeEnum, TypeSig}
 
 import org.apache.spark.sql.catalyst.expressions.{Expression, GetTimestamp}
 import org.apache.spark.sql.rapids.{GpuGetTimestamp, UnixTimeExprMeta}
@@ -26,6 +27,23 @@ import org.apache.spark.sql.rapids.{GpuGetTimestamp, UnixTimeExprMeta}
  * GetTimestamp is marked as private so we had to put it in a place that could access it.
  */
 object TimeStamp {
+
+  private class GetTimestampMetaImpl(
+      a: GetTimestamp,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) extends UnixTimeExprMeta[GetTimestamp](a, conf, p, r) {
+        override def isTimeZoneSupported = true
+        override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression = {
+          GpuGetTimestamp(lhs, rhs, sparkFormat, strfFormat, a.timeZoneId, a.failOnError)
+        }
+      }
+
+  private def createGetTimestampMeta(
+      a: GetTimestamp,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) = new GetTimestampMetaImpl(a, conf, p, r)
 
   def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = Seq(
     GpuOverrides.expr[GetTimestamp](
@@ -37,11 +55,6 @@ object TimeStamp {
         ("format", TypeSig.lit(TypeEnum.STRING)
             .withPsNote(TypeEnum.STRING, "A limited number of formats are supported"),
             TypeSig.STRING)),
-      (a, conf, p, r) => new UnixTimeExprMeta[GetTimestamp](a, conf, p, r) {
-        override def isTimeZoneSupported = true
-        override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression = {
-          GpuGetTimestamp(lhs, rhs, sparkFormat, strfFormat, a.timeZoneId, a.failOnError)
-        }
-      })
+      createGetTimestampMeta)
   ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
 }

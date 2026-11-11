@@ -23,6 +23,13 @@ import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate._
 
 private[rapids] object GpuStringAndAggregateExpressionOverrides {
+  private def createGpuConvMeta(
+      convExpr: Conv,
+      conf: RapidsConf,
+      parentMetaOpt: Option[RapidsMeta[_, _, _]],
+      dataFromReplacementRule: DataFromReplacementRule) =
+    new GpuConvMeta(convExpr, conf, parentMetaOpt, dataFromReplacementRule)
+
   val rules: Seq[ExprRule[_ <: Expression]] = Seq(
     expr[StringLocate](
       "Substring search operator",
@@ -138,8 +145,7 @@ private[rapids] object GpuStringAndAggregateExpressionOverrides {
             cudf = TypeSig.INT,
             spark = TypeSig.INT)),
         sparkOutputSig = TypeSig.STRING),
-      (convExpr, conf, parentMetaOpt, dataFromReplacementRule) =>
-        new GpuConvMeta(convExpr, conf, parentMetaOpt, dataFromReplacementRule)
+      createGpuConvMeta
     ),
     expr[FormatNumber](
       "Formats the number x like '#,###,###.##', rounded to d decimal places.",

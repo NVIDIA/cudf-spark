@@ -46,6 +46,58 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
  * Common implementation of the DeltaProvider interface for all Databricks versions.
  */
 trait DatabricksDeltaProviderBase extends DeltaProviderImplBase {
+  private def createDeltaCreatableRelationProviderMeta(
+    a: DeltaDataSource,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    {
+      require(p.isDefined, "Must provide parent meta")
+      new DeltaCreatableRelationProviderMeta(a, conf, p, r)
+    }
+
+  private def createDeleteCommandMeta(
+    a: DeleteCommand,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new DeleteCommandMeta(a, conf, p, r)
+
+  private def createDeleteCommandEdgeMeta(
+    a: DeleteCommandEdge,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new DeleteCommandEdgeMeta(a, conf, p, r)
+
+  private def createMergeIntoCommandMeta(
+    a: MergeIntoCommand,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new MergeIntoCommandMeta(a, conf, p, r)
+
+  private def createMergeIntoCommandEdgeMeta(
+    a: MergeIntoCommandEdge,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new MergeIntoCommandEdgeMeta(a, conf, p, r)
+
+  private def createUpdateCommandMeta(
+    a: UpdateCommand,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new UpdateCommandMeta(a, conf, p, r)
+
+  private def createUpdateCommandEdgeMeta(
+    a: UpdateCommandEdge,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new UpdateCommandEdgeMeta(a, conf, p, r)
+
   protected def isNativeStagedDeltaTable(tableClass: Class[_]): Boolean = false
   protected def isNativeStagedDeltaWriteActive: Boolean = false
 
@@ -54,10 +106,7 @@ trait DatabricksDeltaProviderBase extends DeltaProviderImplBase {
     Seq(
       ExternalSource.toCreatableRelationProviderRule[DeltaDataSource](
         "Write to Delta Lake table",
-        (a, conf, p, r) => {
-          require(p.isDefined, "Must provide parent meta")
-          new DeltaCreatableRelationProviderMeta(a, conf, p, r)
-        })
+        createDeltaCreatableRelationProviderMeta)
     ).map(r => (r.getClassFor.asSubclass(classOf[CreatableRelationProvider]), r)).toMap
   }
 
@@ -66,27 +115,27 @@ trait DatabricksDeltaProviderBase extends DeltaProviderImplBase {
     Seq(
       GpuOverrides.runnableCmd[DeleteCommand](
         "Delete rows from a Delta Lake table",
-        (a, conf, p, r) => new DeleteCommandMeta(a, conf, p, r))
+        createDeleteCommandMeta)
         .disabledByDefault("Delta Lake delete support is experimental"),
       GpuOverrides.runnableCmd[DeleteCommandEdge](
         "Delete rows from a Delta Lake table",
-        (a, conf, p, r) => new DeleteCommandEdgeMeta(a, conf, p, r))
+        createDeleteCommandEdgeMeta)
         .disabledByDefault("Delta Lake delete support is experimental"),
       GpuOverrides.runnableCmd[MergeIntoCommand](
         "Merge of a source query/table into a Delta table",
-        (a, conf, p, r) => new MergeIntoCommandMeta(a, conf, p, r))
+        createMergeIntoCommandMeta)
           .disabledByDefault("Delta Lake merge support is experimental"),
       GpuOverrides.runnableCmd[MergeIntoCommandEdge](
         "Merge of a source query/table into a Delta table",
-        (a, conf, p, r) => new MergeIntoCommandEdgeMeta(a, conf, p, r))
+        createMergeIntoCommandEdgeMeta)
           .disabledByDefault("Delta Lake merge support is experimental"),
       GpuOverrides.runnableCmd[UpdateCommand](
         "Update rows in a Delta Lake table",
-        (a, conf, p, r) => new UpdateCommandMeta(a, conf, p, r))
+        createUpdateCommandMeta)
           .disabledByDefault("Delta Lake update support is experimental"),
       GpuOverrides.runnableCmd[UpdateCommandEdge](
         "Update rows in a Delta Lake table",
-        (a, conf, p, r) => new UpdateCommandEdgeMeta(a, conf, p, r))
+        createUpdateCommandEdgeMeta)
           .disabledByDefault("Delta Lake update support is experimental")
     ).map(r => (r.getClassFor.asSubclass(classOf[RunnableCommand]), r)).toMap
   }

@@ -70,6 +70,16 @@ case class GpuIncrementMetric(cpuInc: IncrementMetric, override val child: Expre
 }
 
 abstract class DeltaProviderBase extends DeltaIOProvider {
+  private def createDeltaCreatableRelationProviderMeta(
+    a: org.apache.spark.sql.delta.sources.DeltaDataSource,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    {
+      require(p.isDefined, "Must provide parent meta")
+      new DeltaCreatableRelationProviderMeta(a, conf, p, r)
+    }
+
 
   protected def getCDFRelationStrategy: SparkStrategy
 
@@ -82,10 +92,7 @@ abstract class DeltaProviderBase extends DeltaIOProvider {
       ExternalSource.toCreatableRelationProviderRule[
         org.apache.spark.sql.delta.sources.DeltaDataSource](
         "Write to Delta Lake table",
-        (a, conf, p, r) => {
-          require(p.isDefined, "Must provide parent meta")
-          new DeltaCreatableRelationProviderMeta(a, conf, p, r)
-        })
+        createDeltaCreatableRelationProviderMeta)
     ).map(r => (r.getClassFor.asSubclass(classOf[CreatableRelationProvider]), r)).toMap
   }
 
