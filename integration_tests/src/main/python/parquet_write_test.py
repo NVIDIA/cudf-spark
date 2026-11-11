@@ -94,7 +94,13 @@ parquet_map_gens = parquet_map_gens_sample + [
 parquet_write_gens_list = [[binary_gen], parquet_basic_gen, decimal_gens] +  [ [single_gen] for single_gen in parquet_struct_gen + parquet_array_gen + parquet_map_gens]
 parquet_ts_write_options = ['INT96', 'TIMESTAMP_MICROS', 'TIMESTAMP_MILLIS']
 
-@pytest.mark.skipif(not (is_spark_405() or spark_version_tuple() == (4, 1, 4)),
+def _spark_has_save_as_table_overwrite_fix():
+    version = spark_version_tuple()
+    return ((is_spark_40x() and version >= (4, 0, 5))
+            or (is_spark_41x() and version >= (4, 1, 4)))
+
+
+@pytest.mark.skipif(not _spark_has_save_as_table_overwrite_fix(),
                     reason="Tests saveAsTable overwrite in Spark maintenance releases")
 def test_save_as_table_overwrite(spark_tmp_table_factory):
     table_name = spark_tmp_table_factory.get()
