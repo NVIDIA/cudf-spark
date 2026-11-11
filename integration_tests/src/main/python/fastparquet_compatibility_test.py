@@ -370,7 +370,16 @@ def test_reading_file_written_with_fastparquet(column_gen, spark_tmp_path):
         #  TODO: (future) Compression settings?
         dataframe = gen_df(spark, data_gen, 2048)
         os.makedirs(name=local_base_path, exist_ok=True)
-        fastparquet.write(local_data_path, dataframe.toPandas())
+        pandas_df = dataframe.toPandas()
+        if isinstance(column_gen, StringGen):
+            # Fastparquet 2024.5.0 does not recognize pandas 3's inferred str dtype.
+            pandas_df['a'] = pandas_df['a'].astype(object)
+        elif isinstance(column_gen, ArrayGen):
+            # Arrow-backed toPandas returns ndarrays, while Fastparquet's JSON encoder
+            # accepts Python lists. Preserve the array values across either conversion path.
+            pandas_df['a'] = pandas_df['a'].map(
+                lambda value: value.tolist() if isinstance(value, np.ndarray) else value)
+        fastparquet.write(local_data_path, pandas_df)
         try:
             # Copy out to cluster's filesystem (possibly HDFS).
             copy_from_local(spark=spark, local_source=local_data_path, hdfs_target=data_path)

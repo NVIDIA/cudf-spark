@@ -61,11 +61,8 @@ if is_before_spark_340():
     _xfail_files["delta_length_byte_array.parquet"] = (
         "https://issues.apache.org/jira/browse/SPARK-40128")
 
-# Spark 3.5.0 adds support for lz4_raw compression codec, but we do not support that on GPU yet
-if is_spark_350_or_later():
-    _xfail_files["lz4_raw_compressed.parquet"] = "https://github.com/NVIDIA/spark-rapids/issues/9156"
-    _xfail_files["lz4_raw_compressed_larger.parquet"] = "https://github.com/NVIDIA/spark-rapids/issues/9156"
-else:
+# Spark's CPU reader supports LZ4_RAW starting in Spark 3.5.0.
+if not is_spark_350_or_later():
     _error_files["lz4_raw_compressed.parquet"] = "Exception"
     _error_files["lz4_raw_compressed_larger.parquet"] = "Exception"
 
