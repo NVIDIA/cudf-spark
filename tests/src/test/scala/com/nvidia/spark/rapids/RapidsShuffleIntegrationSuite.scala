@@ -32,6 +32,7 @@ import org.apache.spark.{FetchFailed, SparkConf, Success, TaskContext}
 import org.apache.spark.scheduler.{SparkListener, SparkListenerEvent, SparkListenerTaskEnd}
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.execution.exchange.ShuffleExchangeExec
+import org.apache.spark.sql.execution.ui.SparkListenerSQLExecutionStart
 import org.apache.spark.sql.functions.{col, sum, udf}
 import org.apache.spark.sql.rapids.GpuShuffleEnv
 import org.apache.spark.sql.rapids.execution.GpuShuffleExchangeExecBase
@@ -72,6 +73,10 @@ class ShuffleDiskSavingsEventListener extends SparkListener {
  *
  * Also checks that CACHE_ONLY reads one attempt per map under spark.shuffle.useOldFetchProtocol,
  * and that a local read of a shuffle the executor no longer holds reruns its map stage.
+ *
+ * For MULTITHREADED with skip-merge, checks that the end of a SQL execution removes its shuffles
+ * from the multithreaded catalog, and that a shuffle written outside one stays there through
+ * session stop.
  */
 class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach {
 
@@ -93,11 +98,13 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
    *                         - Some(codec): enable compression with specific codec
    *                         - None: explicitly disable compression
    * @param batchSize GPU batch size (default "5m")
+   * @param extraConf Settings applied after all the others
    */
   private def createSessionWithConfig(
       maxBufferSize: String,
       compressionCodec: Option[String] = null,
-      batchSize: String = "5m"): Unit = {
+      batchSize: String = "5m",
+      extraConf: Map[String, String] = Map.empty): Unit = {
     if (spark != null) {
       spark.stop()
     }
@@ -136,6 +143,7 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
     }
     // When compressionCodec is null, don't set any compression config (use Spark defaults)
 
+    conf.setAll(extraConf)
     spark = SparkSession.builder().config(conf).getOrCreate()
 
     // Add event listener to capture shuffle events
@@ -345,6 +353,70 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
 
   test("multi-segment shuffle with zstd compression") {
     runMultiSegmentShuffleTest(Some("zstd"))
+  }
+
+  test("the end of a SQL execution removes its shuffles from the multithreaded catalog") {
+    // An executor reports a shuffle's disk savings only after removing it from its catalog, so
+    // the event shows that the removal has happened.
+    createSessionWithConfig("6m")
+    val df = spark.range(0, 1000, 1, 4).selectExpr("id % 7 AS k", "id")
+      .repartition(8, col("k")).groupBy((col("k") % 2).as("p")).agg(sum("id"))
+    assertResult((0L until 1000L).sum)(df.collect().map(_.getLong(1)).sum)
+    val catalog = GpuShuffleEnv.getMultithreadedCatalog.getOrElse(
+      fail("the session has no multithreaded catalog"))
+    val plan = df.queryExecution.executedPlan
+    val shuffleIds = SparkShimImpl.findOperators(plan, _.isInstanceOf[GpuShuffleExchangeExecBase])
+      .map(_.asInstanceOf[GpuShuffleExchangeExecBase].shuffleDependencyColumnar.shuffleId)
+    assert(shuffleIds.nonEmpty, s"no GPU shuffle in:\n$plan")
+    eventually(Timeout(Span(30, Seconds))) {
+      assertResult(Set.empty, "shuffles with no disk savings event")(
+        shuffleIds.toSet -- eventListener.getEvents.map(_.shuffleId))
+    }
+    assertResult(Seq.empty, "shuffles the multithreaded catalog still holds")(
+      shuffleIds.filter(catalog.hasActiveShuffle))
+  }
+
+  test("a shuffle written outside any SQL execution stays in the multithreaded catalog " +
+      "through session stop") {
+    // A job outside any SQL execution gets no SQL-end cleanup, and the executor plugin resets
+    // the shuffle env before closing the cleanup endpoint, so the endpoint's final cleanup finds
+    // no catalog. Both checksum keys are off, so that on Spark 4.1+ no checksum fallback can send
+    // the write to Spark's sort shuffle.
+    createSessionWithConfig("6m", extraConf = Map(
+      RowBasedShuffleChecksumConf.ChecksumEnabledKey -> "false",
+      RowBasedShuffleChecksumConf.ChecksumMismatchFullRetryKey -> "false"))
+    val sqlExecutions = new ConcurrentLinkedQueue[Long]()
+    spark.sparkContext.addSparkListener(new SparkListener {
+      override def onOtherEvent(event: SparkListenerEvent): Unit = event match {
+        case e: SparkListenerSQLExecutionStart => sqlExecutions.add(e.executionId)
+        case _ =>
+      }
+    })
+    val df = spark.range(0, 1000, 1, 4).selectExpr("id % 7 AS k").repartition(8, col("k"))
+    assertResult(1000L)(df.queryExecution.toRdd.count())
+    val catalog = GpuShuffleEnv.getMultithreadedCatalog.getOrElse(
+      fail("the session has no multithreaded catalog"))
+    val ids = catalog.getActiveShuffleIds
+    try {
+      assert(ids.nonEmpty, "the job left no shuffle in the multithreaded catalog")
+      spark.stop()
+      spark = null
+      // the stop drained the listener bus, so every SQL execution start has arrived
+      assert(sqlExecutions.isEmpty, s"the session ran SQL executions $sqlExecutions")
+      // LocalSchedulerBackend.stop only asks its executor to stop. Waiting for the env reset
+      // keeps this check independent of the RPC shutdown that drains that request.
+      eventually(Timeout(Span(30, Seconds))) {
+        assert(GpuShuffleEnv.getMultithreadedCatalog.isEmpty, "the executor has not shut down")
+      }
+      val remaining = catalog.getActiveShuffleIds
+      assert(ids.forall(remaining.contains),
+        s"held ${ids.sorted} before the stop and ${remaining.sorted} after it")
+    } finally {
+      // Unregistering closes the file-backed handles that the stop leaves open. Reading df here
+      // keeps its shuffle reachable, so GC cannot remove it mid-test.
+      ids.foreach(catalog.unregisterShuffle)
+      df.hashCode()
+    }
   }
 
   test("with the old fetch protocol, a map retried on the same executor is read once") {

@@ -252,6 +252,10 @@ object TrampolineUtil {
     sc.listenerBus.post(sparkEvent)
   }
 
+  def waitForListenerEvents(sc: SparkContext, timeoutMillis: Long): Unit = {
+    sc.listenerBus.waitUntilEmpty(timeoutMillis)
+  }
+
   def getSparkHadoopUtilConf: Configuration = SparkHadoopUtil.get.conf
 
   def markTaskFailed(ctx: TaskContext, error: Throwable): Unit = {

@@ -27,7 +27,7 @@ import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.filecache.FileCache
 import com.nvidia.spark.rapids.jni.fileio.{RapidsFileIO, RapidsInputFile}
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile.CopyRange
-import com.nvidia.spark.rapids.parquet.HybridScanParquetPartitionReader.HostBufferLayout
+import com.nvidia.spark.rapids.parquet.HybridScanPipeline.HostBufferLayout
 import com.nvidia.spark.rapids.parquet.ParquetPartitionReader.LocalCopy
 import org.apache.hadoop.fs.Path
 
@@ -59,7 +59,7 @@ private[parquet] class HybridScanFileByteSource(
     if (ranges.isEmpty) {
       Array.empty
     } else {
-      val layout = HybridScanParquetPartitionReader.hostBufferLayout(ranges)
+      val layout = HybridScanPipeline.hostBufferLayout(ranges)
       val buffer = withRetryNoSplit[HostMemoryBuffer] {
         HostMemoryBuffer.allocate(layout.totalSize)
       }

@@ -596,7 +596,7 @@ private[parquet] object GpuParquetFileFilterHandler {
     configuredReader == ParquetFooterReaderType.NATIVE && canUseNativeFooterReader(schema)
 
   private[parquet] val PARQUET_ENCRYPTION_CONFS = Seq("parquet.encryption.kms.client.class",
-    "parquet.encryption.kms.client.class", "parquet.crypto.factory.class")
+    "parquet.crypto.factory.class")
 
   /** Whether `conf` sets up Parquet decryption, which the GPU readers do not support. */
   def isDecryptionConfigured(conf: Configuration): Boolean =
@@ -1688,7 +1688,7 @@ case class GpuParquetPartitionReaderFactory(
     val config = HybridScanConfig(rapidsConf,
       new HybridScanFilters(readDataSchema, isCaseSensitive, filters))
 
-    val eligible = HybridScanParquetPartitionReader.isEligible(
+    val eligible = HybridScanPipeline.isEligible(
       rapidsConf.isParquetHybridScanEnabled, rapidsConf.testParquetHybridScanFailOnFallback,
       readDataSchema, config.filters,
       useChunkedReader, compressCfg.decompressSnappyCpu || compressCfg.decompressZstdCpu,
@@ -1731,10 +1731,10 @@ case class GpuParquetPartitionReaderFactory(
     }
     closeOnExcept(footer) { _ =>
       val byteSource = new HybridScanFileByteSource(fileIO, filePath, metrics)
-      val options = HybridScanParquetPartitionReader.parquetOptions(readDataSchema.fieldNames)
-      new HybridScanParquetPartitionReader(
-        byteSource, file.start, file.length, footer, options,
-        readDataSchema, config.filters, config.filterKeepThreshold, metrics)
+      val options = HybridScanPipeline.parquetOptions(readDataSchema.fieldNames)
+      new HybridScanPerFileParquetPartitionReader(
+        HybridScanSplit(byteSource, file.start, file.length), footer, options,
+        HybridScanContext(readDataSchema, config.filters, config.filterKeepThreshold, metrics))
     }
   }
 

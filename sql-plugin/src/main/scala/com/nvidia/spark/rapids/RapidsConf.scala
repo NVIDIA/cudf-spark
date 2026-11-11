@@ -562,6 +562,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val gpuTargetBatchSizeBytes: Long = get(GPU_BATCH_SIZE_BYTES)
 
+  lazy val historyMetricsProvider: String = get(HISTORY_METRICS_PROVIDER)
+
   lazy val isWindowCollectListEnabled: Boolean = get(ENABLE_WINDOW_COLLECT_LIST)
 
   lazy val isWindowCollectSetEnabled: Boolean = get(ENABLE_WINDOW_COLLECT_SET)
@@ -909,6 +911,10 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val shuffleCompressionCodec: String = get(SHUFFLE_COMPRESSION_CODEC)
 
+  lazy val driverlessBroadcastMaxExecutors: Int = get(DRIVERLESS_BROADCAST_MAX_EXECUTORS)
+
+  lazy val isDriverlessBroadcastEnabled: Boolean = get(DRIVERLESS_BROADCAST_ENABLED)
+
   lazy val shuffleCompressionLz4ChunkSize: Long = get(SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE)
 
   lazy val shuffleCompressionZstdChunkSize: Long = get(SHUFFLE_COMPRESSION_ZSTD_CHUNK_SIZE)
@@ -1016,6 +1022,9 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val allowDisableEntirePlan: Boolean = get(ALLOW_DISABLE_ENTIRE_PLAN)
 
   lazy val useArrowCopyOptimization: Boolean = get(USE_ARROW_OPT)
+
+  lazy val hostColumnarToGpuReleaseSemaphore: Boolean =
+    get(HOST_COLUMNAR_TO_GPU_RELEASE_SEMAPHORE)
 
   lazy val getCloudSchemes: Seq[String] =
     DEFAULT_CLOUD_SCHEMES ++ get(CLOUD_SCHEMES).getOrElse(Seq.empty)

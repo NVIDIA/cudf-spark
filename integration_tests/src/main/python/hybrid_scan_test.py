@@ -295,7 +295,7 @@ def test_hybrid_scan_filter_on_missing_column(spark_tmp_path):
         lambda: with_gpu_session(
             lambda spark: spark.read.schema(_missing_col_schema).parquet(data_path)
                 .filter('sorted_int < 500').collect(),
-            conf=fallback_conf()),
+            conf=fallback_conf(**{'spark.sql.parquet.fieldId.read.enabled': False})),
         error_message='a column is missing from the file')
 
 
