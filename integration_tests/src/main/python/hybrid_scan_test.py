@@ -322,6 +322,20 @@ def test_hybrid_scan_retry_oom_in_reader(spark_tmp_path):
         conf=hybrid_conf())
 
 
+@inject_oom('num_ooms=1,type=GPU')
+def test_hybrid_scan_retry_oom_in_stats_pruning(spark_tmp_path):
+    """An OOM while statistics pruning evaluates the filter on the GPU is retried.
+
+    Statistics rule out every row group, so the statistics call is the only GPU work in the read
+    and the injected OOM lands there.
+    """
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(lambda spark: write_test_data(spark, data_path))
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(data_path).filter('sorted_int < 0'),
+        conf=hybrid_conf())
+
+
 @inject_oom('num_ooms=1,type=CPU')
 def test_hybrid_scan_retry_cpu_oom(spark_tmp_path):
     """A host OOM while fetching the column chunks is retried rather than failing the task."""
