@@ -229,6 +229,25 @@ def test_hybrid_scan_pruning_with_file_split_across_tasks(spark_tmp_path):
         gpu_plan_assertion=_assert_row_groups(4, 2, 0, 2, min_splits=2))
 
 
+@pytest.mark.parametrize('footer_reader', ['NATIVE', 'JAVA'])
+def test_parquet_scan_row_groups_read_without_columns(spark_tmp_path, footer_reader):
+    """A count reads no columns, so the hybrid reader falls back, and the native footer reader
+    merges the row groups into one block; the metric must still count all 4."""
+    def check(cpu_plan, gpu_plan):
+        scans = [node for node in collect_plan_nodes(gpu_plan)
+                 if node.getClass().getSimpleName() == 'GpuFileSourceScanExec']
+        assert len(scans) == 1, 'Expected one GPU Parquet scan in:\n{}'.format(gpu_plan)
+        assert plan_metric(scans[0], 'rowGroupsRead') == 4
+
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(lambda spark: write_pruning_data(spark, data_path))
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.read.parquet(data_path).selectExpr('COUNT(*)'),
+        conf=fallback_conf(**_pruning_metrics_conf, **{
+            'spark.rapids.sql.format.parquet.reader.footer.type': footer_reader}),
+        gpu_plan_assertion=check)
+
+
 @pytest.mark.parametrize('columns', [
     ['sorted_int'],                                 # the projection is only the filter column
     ['payload_str'],                                # the filter column is not projected

@@ -853,6 +853,8 @@ protected case class GpuParquetFileFilterHandler(
                     // offsets even for zero-column scans.
                     Seq.empty
                   }
+                  // One offset per selected row group; the synthetic block merges them.
+                  metrics.get(ROW_GROUPS_READ).foreach(_ += offsets.length)
                   val schema = new MessageType("root")
                   return ParquetFileInfoWithBlockMeta(filePath, blocks, file.partitionValues,
                     schema, readDataSchema, DateTimeRebaseLegacy, DateTimeRebaseLegacy,
