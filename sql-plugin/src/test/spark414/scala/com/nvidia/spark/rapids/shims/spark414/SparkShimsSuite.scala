@@ -35,6 +35,7 @@ class SparkShimsSuite extends AnyFunSuite with FQSuiteName {
   test("Spark 4.1.4 provider only matches Spark 4.1.4") {
     val provider = new com.nvidia.spark.rapids.shims.spark414.SparkShimServiceProvider()
     assert(provider.matchesVersion("4.1.4"))
+    assert(!provider.matchesVersion("4.1.4-SNAPSHOT"))
     assert(!provider.matchesVersion("4.1.3"))
     assert(!provider.matchesVersion("4.2.0"))
   }

@@ -16,6 +16,7 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark":["405"],"carryForward":"sameMinor"}
+{"spark":["414"],"carryForward":"sameMinor"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.parquet

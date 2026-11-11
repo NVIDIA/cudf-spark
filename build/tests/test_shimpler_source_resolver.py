@@ -287,6 +287,34 @@ class SourceResolverTest(unittest.TestCase):
                             'test' if module == 'tests' else 'main', owner),
                             selected.physical_path)
 
+    def test_iceberg_suites_stop_at_stub_profiles(self):
+        graphs = (load_source_graph(str(ROOT / 'pom.xml')),
+                  load_source_graph(str(ROOT / 'scala2.13' / 'pom.xml')))
+        variants, _ = scan_module_sources(str(ROOT / 'tests'),
+                                          set().union(*graphs), EXTERNAL_EXACT_TARGETS)
+        suite_names = {
+            'GpuIcebergVariantPostProcessorSuite.scala',
+            'GpuIcebergVariantSchemaSuite.scala',
+            'GpuMultiThreadIcebergParquetReaderSuite.scala',
+            'GpuPostProcessorSuite.scala',
+            'IcebergDeletionVectorSuite.scala',
+            'IcebergS3InputFileSuite.scala',
+        }
+        expected = {
+            '411': suite_names,
+            '412': suite_names,
+            '413': suite_names,
+            '414': {'IcebergDeletionVectorSuite.scala'},
+            '420': set(),
+            '500': set(),
+        }
+        for target, expected_suites in expected.items():
+            graph = next(graph for graph in graphs if target in graph)
+            selected = resolve_sources(graph, variants, target)
+            found = {Path(logical).name for logical in selected
+                     if Path(logical).name in suite_names}
+            self.assertEqual(found, expected_suites, target)
+
     def test_interval_and_writer_suites_cover_later_spark4(self):
         graphs = (load_source_graph(str(ROOT / 'pom.xml')),
                   load_source_graph(str(ROOT / 'scala2.13' / 'pom.xml')))
