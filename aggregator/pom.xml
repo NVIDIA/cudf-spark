@@ -172,6 +172,7 @@
                             <!-- These unclassified Java artifacts are packaged once at the dist root. -->
                             <exclude>com.nvidia:cudf-spark-history-metrics-api:*</exclude>
                             <exclude>com.nvidia:cudf-spark-history-metrics-backend-core:*</exclude>
+                            <exclude>com.nvidia:cudf-spark-history-metrics-provider-runtime:*</exclude>
                             <exclude>com.nvidia:cudf-spark-history-metrics-relational-core:*</exclude>
                             <exclude>com.nvidia:cudf-spark-history-metrics-local:*</exclude>
                             <exclude>org.xerial:sqlite-jdbc:*</exclude>
