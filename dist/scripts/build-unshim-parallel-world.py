@@ -32,9 +32,14 @@ import subprocess
 import sys
 import zipfile
 
+BUILD_HELPERS_DIR = Path(__file__).resolve().parents[1] / "build"
+sys.path.insert(0, str(BUILD_HELPERS_DIR))
+from build_info import read_build_info
+
 
 ARTIFACTS = ("sql-plugin-api", "aggregator")
 BUILDVER_RE = re.compile(r"^[0-9][0-9a-z]*$")
+PRIVATE_BUILD_INFO = "cudf-spark-private-version-info.properties"
 
 def read_patterns(path):
     with path.open() as fh:
@@ -188,6 +193,37 @@ def root_safe_module_class_members(
             ])
     return members
 
+def consolidate_private_build_info(parallel_world, sorted_buildvers):
+    paths = [
+        (buildver, parallel_world / ("spark%s" % buildver) / PRIVATE_BUILD_INFO)
+        for buildver in sorted_buildvers
+    ]
+    present = [(buildver, path) for buildver, path in paths if path.is_file()]
+    if len(present) != len(paths):
+        missing = [buildver for buildver, path in paths if not path.is_file()]
+        raise RuntimeError(
+            "cudf-spark-private build info is missing for: %s" % ", ".join(missing))
+
+    reference_buildver, reference_path = present[0]
+    reference_properties = read_build_info(reference_path)
+    for key in ("version", "revision"):
+        if not reference_properties.get(key):
+            raise RuntimeError(
+                "cudf-spark-private build info is missing %s: %s" %
+                (key, reference_path))
+    for buildver, path in present[1:]:
+        properties = read_build_info(path)
+        for key in ("version", "revision"):
+            if properties.get(key) != reference_properties[key]:
+                raise RuntimeError(
+                    "cudf-spark-private %s differs between spark%s and spark%s: %s != %s" %
+                    (key, reference_buildver, buildver,
+                     reference_properties[key], properties.get(key)))
+
+    shutil.copyfile(reference_path, parallel_world / PRIVATE_BUILD_INFO)
+    for _, path in present:
+        path.unlink()
+
 
 def copy_and_extract_jars(
         base_dir,
@@ -243,6 +279,8 @@ def copy_and_extract_jars(
                 patterns = from_single_shim + from_each
             members = matching_members(namelist, patterns)
             link_members(contents_dir, parallel_world, members)
+
+    consolidate_private_build_info(parallel_world, sorted_buildvers)
 
 
 def run_checked(command, cwd, env=None):

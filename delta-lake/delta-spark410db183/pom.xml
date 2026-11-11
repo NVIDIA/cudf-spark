@@ -40,6 +40,10 @@
 
     <dependencies>
         <dependency>
+            <groupId>org.roaringbitmap</groupId>
+            <artifactId>RoaringBitmap</artifactId>
+        </dependency>
+        <dependency>
             <groupId>com.nvidia</groupId>
             <artifactId>rapids-4-spark-sql_${scala.binary.version}</artifactId>
             <version>${project.version}</version>
@@ -50,6 +54,28 @@
 
     <build>
         <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>add-common-sources</id>
+                        <phase>generate-sources</phase>
+                        <goals>
+                            <goal>add-source</goal>
+                        </goals>
+                        <configuration>
+                            <sources>
+                                <source>${spark.rapids.source.basedir}/delta-lake/common/src/main/scala</source>
+                                <source>${spark.rapids.source.basedir}/delta-lake/common/src/main/databricks/scala</source>
+                                <source>${spark.rapids.source.basedir}/delta-lake/common/src/main/db-350db143-410db183/scala</source>
+                                <source>${spark.rapids.source.basedir}/delta-lake/common/src/main/db-400db173-410db183/scala</source>
+                                <source>${spark.rapids.source.basedir}/delta-lake/common/src/main/db-400db173-410db183/java</source>
+                            </sources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <groupId>net.alchim31.maven</groupId>
                 <artifactId>scala-maven-plugin</artifactId>

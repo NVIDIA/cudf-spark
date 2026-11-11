@@ -31,9 +31,9 @@ import org.apache.hadoop.fs.Path
 import org.apache.spark.sql.rapids.GpuTaskMetrics
 
 /**
- * GCS-backed {@link RapidsInputFile} for Hadoop-conf-driven (non-iceberg) reads.
+ * GCS-backed `RapidsInputFile` for Hadoop-conf-driven (non-iceberg) reads.
  * {@code readVectored} issues batched byte-range reads through the optimized
- * PerfIO path; the other operations delegate to the standard {@link HadoopInputFile}.
+ * PerfIO path; the other operations delegate to the standard `HadoopInputFile`.
  */
 class GCSInputFile private (
     delegate: HadoopInputFile,
@@ -64,7 +64,7 @@ class GCSInputFile private (
 
   /**
    * Issue a single suffix-range read for the last {@code length} bytes. Avoids
-   * the {@code getLength()} round-trip the default {@link RapidsInputFile#readTail}
+   * the {@code getLength()} round-trip the default `RapidsInputFile#readTail`
    * would make. PerfIO resolves the GCS suffix range internally.
    */
   @throws[IOException]

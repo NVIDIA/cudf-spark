@@ -19,8 +19,8 @@ package com.nvidia.spark.rapids.io.async
 import java.util.concurrent.Callable
 
 /**
- * Simple wrapper around a [[Callable]] that also keeps track of the host memory bytes used by
- * the task.
+ * Simple wrapper around a [[java.util.concurrent.Callable]] that also keeps track of the host
+ * memory bytes used by the task.
  *
  * Note: we may want to add more metadata to the task in the future, such as the device memory,
  * as we implement more throttling strategies.

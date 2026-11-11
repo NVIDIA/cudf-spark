@@ -50,7 +50,7 @@ abstract class GpuOptimizeExecutorBase(
 
   protected type PartitionedBin = (Map[String, String], Seq[AddFile])
 
-  /** Timestamp to use in [[FileAction]] */
+  /** Timestamp to use in `FileAction` */
   private val operationTimestamp = System.currentTimeMillis
 
   protected def deltaLog: DeltaLog
@@ -202,8 +202,8 @@ abstract class GpuOptimizeExecutorBase(
   /**
    * Utility method to run a Spark job to compact the files in given bin.
    *
-   * @param txn [[OptimisticTransaction]] instance in use to commit the changes to DeltaLog.
-   * @param partition Partition values of the partition that files in [[bin]] belongs to.
+   * @param txn `OptimisticTransaction` instance in use to commit the changes to DeltaLog.
+   * @param partition Partition values of the partition that files in `bin` belongs to.
    * @param bin List of files to compact into one large file.
    */
   private def runOptimizeBinJob(
@@ -246,7 +246,7 @@ abstract class GpuOptimizeExecutorBase(
    * detection logic to indicate it is safe to try again, by returning `true`.
    *
    * This function will continue to try to commit to the log as long as `f` returns `true`,
-   * otherwise throws a subclass of [[ConcurrentModificationException]].
+   * otherwise throws a subclass of `ConcurrentModificationException`.
    */
   @tailrec
   private def commitAndRetry(

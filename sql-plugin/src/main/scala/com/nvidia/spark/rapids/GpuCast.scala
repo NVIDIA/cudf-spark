@@ -493,26 +493,25 @@ object GpuCast {
           AnsiUtil.castFloatToTimestampAnsi(input, toDataType)
         } else {
           // non-Ansi mode, convert nan/inf to null
-          withResource(Scalar.fromInt(1000000)) { microsPerSec =>
+          val inputWithoutNanAndInfinity =
             withResource(input.nansToNulls()) { inputWithNansToNull =>
-              withResource(FloatUtils.infinityToNulls(inputWithNansToNull)) {
-                inputWithoutNanAndInfinity =>
-                  if (fromDataType == FloatType &&
-                      SparkShimImpl.hasCastFloatTimestampUpcast) {
-                    withResource(inputWithoutNanAndInfinity.castTo(DType.FLOAT64)) { doubles =>
-                      withResource(doubles.mul(microsPerSec, DType.INT64)) {
-                        inputTimesMicrosCv =>
-                          inputTimesMicrosCv.castTo(DType.TIMESTAMP_MICROSECONDS)
-                      }
-                    }
-                  } else {
-                    withResource(inputWithoutNanAndInfinity.mul(microsPerSec, DType.INT64)) {
-                      inputTimesMicrosCv =>
-                        inputTimesMicrosCv.castTo(DType.TIMESTAMP_MICROSECONDS)
-                    }
-                  }
-              }
+              FloatUtils.infinityToNulls(inputWithNansToNull)
             }
+          val operand = if (fromDataType == FloatType &&
+              SparkShimImpl.hasCastFloatTimestampUpcast) {
+            withResource(inputWithoutNanAndInfinity) { _ =>
+              inputWithoutNanAndInfinity.castTo(DType.FLOAT64)
+            }
+          } else {
+            inputWithoutNanAndInfinity
+          }
+          val inputTimesMicrosCv = withResource(operand) { _ =>
+            withResource(Scalar.fromInt(1000000)) { microsPerSec =>
+              operand.mul(microsPerSec, DType.INT64)
+            }
+          }
+          withResource(inputTimesMicrosCv) { _ =>
+            inputTimesMicrosCv.castTo(DType.TIMESTAMP_MICROSECONDS)
           }
         }
       case (FloatType | DoubleType, dt: DecimalType) =>
@@ -947,6 +946,8 @@ object GpuCast {
           withResource(kvStructColumn.getChildColumnView(1)) { valueColumn =>
             withResource(castToString(valueColumn, from.valueType, options)) { valueStr =>
               withResource(Scalar.fromString("null")) { nullScalar =>
+                // Outer views borrow input data; strKey must survive for the returned pair.
+                // with-resource-lint: allow-deep-nesting -- #15997 other owners feed ifElse.
                 withResource(valueColumn.isNull) { isNull =>
                   isNull.ifElse(nullScalar, valueStr)
                 }
@@ -1132,6 +1133,8 @@ object GpuCast {
             attrColumns += withResource(castToString(cv,
               inputSchema(fieldIndex).dataType, options)) { jsonAttr =>
               withResource(cv.isNull) { isNull =>
+                // The outer view borrows input data; attrColumns are retained for concatenation.
+                // with-resource-lint: allow-deep-nesting -- #15997 other owners feed ifElse.
                 withResource(Scalar.fromString("null")) { nullScalar =>
                   isNull.ifElse(nullScalar, jsonAttr)
                 }
@@ -1198,6 +1201,9 @@ object GpuCast {
             columns += quoteScalar.incRefCount()
 
             withResource(ColumnVector.fromStrings(chars: _*)) { search =>
+              // The quote column is retained in columns, so closing its wrapper earlier
+              // would not release its storage. Keep the replacement operands together.
+              // with-resource-lint: allow-deep-nesting -- #15997 columns retain quote storage.
               withResource(ColumnVector.fromStrings(escaped: _*)) { replace =>
                 columns += cv.stringReplace(search, replace)
               }
@@ -1208,27 +1214,6 @@ object GpuCast {
       withResource(Scalar.fromString("")) { emptyScalar =>
         withResource(Scalar.fromNull(DType.STRING)) { nullScalar =>
           ColumnVector.stringConcatenate(emptyScalar, nullScalar, columns.toArray)
-        }
-      }
-    }
-  }
-
-  private[rapids] def castFloatingTypeToString(input: ColumnView): ColumnVector = {
-    withResource(input.castTo(DType.STRING)) { cudfCast =>
-
-      // replace "e+" with "E"
-      val replaceExponent = withResource(Scalar.fromString("e+")) { cudfExponent =>
-        withResource(Scalar.fromString("E")) { sparkExponent =>
-          cudfCast.stringReplace(cudfExponent, sparkExponent)
-        }
-      }
-
-      // replace "Inf" with "Infinity"
-      withResource(replaceExponent) { replaceExponent =>
-        withResource(Scalar.fromString("Inf")) { cudfInf =>
-          withResource(Scalar.fromString("Infinity")) { sparkInfinity =>
-            replaceExponent.stringReplace(cudfInf, sparkInfinity)
-          }
         }
       }
     }
@@ -1408,6 +1393,7 @@ object GpuCast {
           withResource(ColumnView.makeStructView(castKey, castValue)) { castKvStructColumn =>
             // We don't have to worry about null in the key/value struct because they are not
             // allowed for maps in Spark
+            // with-resource-lint: allow-deep-nesting -- #15997 outer view owns no data.
             withResource(input.replaceListChild(castKvStructColumn)) { replacedView =>
               replacedView.copyToColumnVector()
             }

@@ -16,7 +16,6 @@
 
 package org.apache.iceberg.io
 
-import java.nio.ByteBuffer
 import java.util.{List => JList}
 
 import scala.collection.JavaConverters._
@@ -177,8 +176,7 @@ class GpuPositionDeleteFileWriter(
                                    val format: FileFormat,
                                    val location: String,
                                    val spec: PartitionSpec,
-                                   val partition: StructLike,
-                                   val keyMetadata: ByteBuffer)
+                                   val partition: StructLike)
   extends FileWriter[SpillableColumnarBatch, DeleteWriteResult] {
 
   val referencedDataFiles: CharSequenceSet = CharSequenceSet.empty()
@@ -213,7 +211,6 @@ class GpuPositionDeleteFileWriter(
         .withFormat(format)
         .withPath(location)
         .withPartition(partition)
-        .withEncryptionKeyMetadata(keyMetadata)
         .withSplitOffsets(appender.splitOffsets())
         .withFileSizeInBytes(appender.length())
         .withMetrics(metrics())

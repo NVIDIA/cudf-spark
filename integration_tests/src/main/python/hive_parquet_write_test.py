@@ -222,8 +222,9 @@ def _check_write_compressed_parquet_into_hive_table(spark_tmp_table_factory, com
         write_to_hive_sql,
         _write_to_hive_conf)
     if comp_type == 'GZIP':
+        # Read through the converted Parquet scan, whose input_file_name() is URL-encoded
         with_cpu_session(lambda spark: assert_parquet_files_use_codec(
-            spark, spark.table(gpu_table), 'GZIP'), conf=_write_to_hive_conf)
+            spark, spark.table(gpu_table), 'GZIP'))
 
 
 @allow_non_gpu(*non_utc_allow)

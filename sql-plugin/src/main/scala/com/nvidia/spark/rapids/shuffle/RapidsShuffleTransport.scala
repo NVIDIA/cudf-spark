@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import java.util.concurrent.atomic.AtomicInteger
 
 import ai.rapids.cudf.MemoryBuffer
 import com.nvidia.spark.rapids.{NvtxRegistry, RapidsConf, ShimReflectionUtils}
+import com.nvidia.spark.rapids.Arm.closeOnExcept
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.rapids.storage.RapidsStorageUtils
@@ -126,7 +127,8 @@ trait ClientConnection {
   /**
    * This performs a request/response for a message of type `MessageType`. The response
    * `Transaction` on completion will call the callback (`cb`). The caller of `request`
-   * must close, or consume the response in the transaction, otherwise we can leak.
+   * must close, or consume the response in the transaction, otherwise we can leak. A request
+   * that `cancelRequest` withdraws may never call `cb`.
    *
    * @param messageType value of the `MessageType` enum
    * @param request the populated request direct buffer `ByteBuffer`
@@ -150,6 +152,15 @@ trait ClientConnection {
    * @return the executorId as a long
    */
   def getPeerExecutorId: Long
+
+  /**
+   * Stops waiting for the response to `tx`, a request whose reader is done. The request's
+   * callback can still run, for a reply that took it first or for a failed send. The reader's
+   * cleaner calls this under the reader's lock, so it must not wait for the transport's threads,
+   * which can wait on that lock. A connection that cannot withdraw a request leaves it waiting.
+   * @param tx a transaction that `request` returned
+   */
+  def cancelRequest(tx: Transaction): Unit = {}
 }
 
 object TransactionStatus extends Enumeration {
@@ -341,7 +352,8 @@ trait RapidsShuffleTransport extends AutoCloseable {
   def getDirectByteBuffer(size: Long): RefCountedDirectByteBuffer
 
   /**
-   * (throttle) Adds a set of requests to be throttled as limits allowed.
+   * (throttle) Adds a set of requests to be throttled as limits allowed. A transport may drop
+   * the requests of a reader that `isDone`, since its task no longer waits for them.
    * @param reqs requests to add to the throttle queue
    */
   def queuePending(reqs: Seq[PendingTransferRequest]): Unit
@@ -585,5 +597,20 @@ object RapidsShuffleTransport extends Logging {
           s"to instantiate", t)
         throw t
     }
+  }
+
+  /**
+   * Closes an executor's shuffle server, then its transport, which stops UCX and frees the
+   * bounce-buffer pools. The transport closes even when the server's close throws, as when the
+   * stopping thread is interrupted, and the server's error is the one thrown. A reply that the
+   * interrupted server was still queueing may then never be sent.
+   */
+  def closeServerThenTransport(
+      server: Option[AutoCloseable],
+      transport: Option[AutoCloseable]): Unit = {
+    closeOnExcept(transport) { _ =>
+      server.foreach(_.close())
+    }
+    transport.foreach(_.close())
   }
 }

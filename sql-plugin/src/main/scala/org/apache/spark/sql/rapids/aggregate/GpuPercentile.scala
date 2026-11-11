@@ -16,10 +16,6 @@
 
 package org.apache.spark.sql.rapids.aggregate
 
-import java.io.{ByteArrayInputStream, ByteArrayOutputStream, DataInputStream, DataOutputStream}
-
-import scala.collection.mutable.ArrayBuffer
-
 import ai.rapids.cudf
 import ai.rapids.cudf.{DType, GroupByAggregation, ReductionAggregation}
 import com.nvidia.spark.rapids._
@@ -29,8 +25,7 @@ import com.nvidia.spark.rapids.jni.Histogram
 import com.nvidia.spark.rapids.jni.Histogram.ValueOrder
 import com.nvidia.spark.rapids.shims.{ShimExpression, SparkShimImpl}
 
-import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Expression,  UnsafeArrayData, UnsafeProjection, UnsafeRow}
+import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Expression}
 import org.apache.spark.sql.catalyst.util.{ArrayData, GenericArrayData}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -195,95 +190,6 @@ object GpuPercentile{
       case _  =>
         GpuPercentileWithFrequency(
           childExpr, percentageLit, frequencyExpr, isReduction, isInputOrderDescending)
-    }
-  }
-}
-
-/**
- * Convert the incoming byte stream received from Spark CPU into internal histogram buffer format.
- */
-case class CpuToGpuPercentileBufferConverter(elementType: DataType)
-  extends CpuToGpuAggregateBufferConverter {
-  override def createExpression(child: Expression): CpuToGpuBufferTransition =
-    CpuToGpuPercentileBufferTransition(child, elementType)
-}
-
-case class CpuToGpuPercentileBufferTransition(override val child: Expression, elementType: DataType)
-  extends CpuToGpuBufferTransition {
-  override def dataType: DataType =
-    ArrayType(StructType(Seq(StructField("value", elementType),
-      StructField("frequency", LongType))),
-      containsNull = false)
-
-  // Deserialization from the input byte stream into the internal histogram buffer format.
-  override protected def nullSafeEval(input: Any): ArrayData = {
-    val bytes = input.asInstanceOf[Array[Byte]]
-    val bis = new ByteArrayInputStream(bytes)
-    val ins = new DataInputStream(bis)
-
-    // Store a column of STRUCT<element, count>
-    val histogram = ArrayBuffer[InternalRow]()
-    val row = new UnsafeRow(2)
-
-    try {
-      var sizeOfNextRow = ins.readInt()
-      while (sizeOfNextRow >= 0) {
-        val bs = new Array[Byte](sizeOfNextRow)
-        ins.readFully(bs)
-        row.pointTo(bs, sizeOfNextRow)
-        val element = row.get(0, elementType)
-        val count = row.get(1, LongType).asInstanceOf[Long]
-        histogram.append(InternalRow.apply(element, count))
-        sizeOfNextRow = ins.readInt()
-      }
-      ArrayData.toArrayData(histogram)
-    } finally {
-      ins.close()
-      bis.close()
-    }
-  }
-}
-
-/**
- * Convert the internal histogram buffer into a byte stream that can be deserialized by Spark CPU.
- */
-case class GpuToCpuPercentileBufferConverter(elementType: DataType)
-  extends GpuToCpuAggregateBufferConverter {
-  override def createExpression(child: Expression): GpuToCpuBufferTransition =
-    GpuToCpuPercentileBufferTransition(child, elementType)
-}
-
-case class GpuToCpuPercentileBufferTransition(override val child: Expression, elementType: DataType)
-  extends GpuToCpuBufferTransition {
-  // Serialization the internal histogram buffer into a byte array.
-  override protected def nullSafeEval(input: Any): Array[Byte] = {
-    val buffer = new Array[Byte](4 << 10) // 4K
-    val bos = new ByteArrayOutputStream()
-    val out = new DataOutputStream(bos)
-
-    val histogram = input.asInstanceOf[UnsafeArrayData]
-    val projection = UnsafeProjection.create(Array[DataType](elementType, LongType))
-
-    try {
-      (0 until histogram.numElements()).foreach { i =>
-        val row = histogram.getStruct(i, 2)
-        val element = row.get(0, elementType)
-        // The internal histogram buffer may contain null elements.
-        // We need to skip them as the Spark CPU does not process nulls after
-        // the updateAggregates step.
-        if(element!= null) {
-          val unsafeRow = projection.apply(row)
-          out.writeInt(unsafeRow.getSizeInBytes)
-          unsafeRow.writeToStream(out, buffer)
-        }
-      }
-      // Need to write a negative integer to indicate the end of the stream.
-      out.writeInt(-1)
-      out.flush()
-      bos.toByteArray
-    } finally {
-      out.close()
-      bos.close()
     }
   }
 }

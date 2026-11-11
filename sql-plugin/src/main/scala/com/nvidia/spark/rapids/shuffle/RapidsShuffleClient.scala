@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package com.nvidia.spark.rapids.shuffle
 import java.util.concurrent.{ConcurrentHashMap, Executor}
 
 import scala.collection.mutable.ArrayBuffer
+import scala.util.control.NonFatal
 
 import ai.rapids.cudf.DeviceMemoryBuffer
 import com.nvidia.spark.rapids._
@@ -36,7 +37,8 @@ import org.apache.spark.storage.ShuffleBlockBatchId
 trait RapidsShuffleFetchHandler {
   /**
    * After a response for shuffle metadata is received, the expected number of columnar
-   * batches is communicated back to the caller via this method.
+   * batches is communicated back to the caller via this method. An error reply to a metadata
+   * request calls `metadataError` instead.
    * @param expectedBatches - number of columnar batches
    */
   def start(expectedBatches: Int): Unit
@@ -58,9 +60,25 @@ trait RapidsShuffleFetchHandler {
   def transferError(errorMessage: String, throwable: Throwable = null): Unit
 
   /**
+   * Called when the server answers the metadata request with an error reply.
+   *
+   * @param errorMessage - a string containing an error message
+   * @param failedBlock - the index, in the requested blocks, of the block whose lookup failed on
+   *                    the server, or -1 when no single block failed
+   */
+  def metadataError(errorMessage: String, failedBlock: Int): Unit
+
+  /**
    * Called to get the task attempt ids that this shuffle handler is for.
    */
   def getTaskIds: Array[Long]
+
+  /**
+   * Whether the reader's task has completed, after which the transport admits none of its
+   * transfers. It must not take the reader's lock, since the transport reads it under its
+   * queue lock, which the reader's cleaner takes while it holds the reader's lock.
+   */
+  def isDone: Boolean = false
 }
 
 /**
@@ -104,6 +122,11 @@ class RapidsShuffleClient(
   private val liveHandlers =
     ConcurrentHashMap.newKeySet[RapidsShuffleFetchHandler]()
 
+  // each reader's metadata request, until its response is handled or the reader is done. An
+  // entry that a response handled before `doFetch` added it is left for the reader's end.
+  // `close` leaves the entries, so that a reader's end still withdraws after a peer error.
+  private val pendingMetadata = new ConcurrentHashMap[RapidsShuffleFetchHandler, Transaction]()
+
   object ShuffleClientOps {
     /**
      * When a metadata response is received, this event is issued to handle it.
@@ -133,6 +156,15 @@ class RapidsShuffleClient(
      */
     case class HandleBounceBufferReceive(tx: Transaction,
                                          bufferReceiveState: BufferReceiveState)
+
+    /**
+     * When the server fails a transfer request, this event ends its receive state on the copy
+     * thread, after any window that thread still has to consume for it.
+     *
+     * @param bufferReceiveState the state of the failed request
+     * @param reason the error for the readers of its requests that will not arrive
+     */
+    case class HandleTransferFailure(bufferReceiveState: BufferReceiveState, reason: String)
   }
 
   import ShuffleClientOps._
@@ -146,6 +178,8 @@ class RapidsShuffleClient(
         doIssueBufferReceives(bufferReceiveState)
       case HandleBounceBufferReceive(tx, bufferReceiveState) =>
         doHandleBounceBufferReceive(tx, bufferReceiveState)
+      case HandleTransferFailure(bufferReceiveState, reason) =>
+        doHandleTransferFailure(bufferReceiveState, reason)
     }
   }
 
@@ -184,12 +218,14 @@ class RapidsShuffleClient(
             s"${ShuffleMetadata.printRequest(
               ShuffleMetadata.getMetadataRequest(metaReq.getBuffer()))}")
 
-        // make request
-        connection.request(MessageType.MetadataRequest, metaReq.acquire(), tx => {
+        // make request. A withdrawn request may never run this callback, which leaves metaReq to
+        // the collector. The send may still read it, and keeps it reachable until the send ends.
+        val request = connection.request(MessageType.MetadataRequest, metaReq.acquire(), tx => {
           withResource(metaReq) { _ =>
             asyncOrBlock(HandleMetadataResponse(tx, shuffleRequests, handler))
           }
         })
+        pendingMetadata.put(handler, request)
       }
     } catch {
       case t: Throwable =>
@@ -199,6 +235,9 @@ class RapidsShuffleClient(
 
   /**
    * Function to handle MetadataResponses, as a result of the [[HandleMetadataResponse]] event.
+   * It can run after the reader is done, for a request whose send failed, or that the reader's
+   * end did not withdraw before a reply took its callback. The transport refuses a done
+   * reader's transfers.
    *
    * @param tx live metadata response transaction to be closed in this handler
    * @param shuffleRequests blocks to fetch
@@ -208,6 +247,7 @@ class RapidsShuffleClient(
       tx: Transaction,
       shuffleRequests: Seq[ShuffleBlockBatchId],
       handler: RapidsShuffleFetchHandler): Unit = {
+    pendingMetadata.remove(handler, tx)
     try {
       withResource(tx) { _ =>
         tx.getStatus match {
@@ -215,18 +255,24 @@ class RapidsShuffleClient(
             withResource(tx.releaseMessage()) { resp =>
               NvtxRegistry.CLIENT_HANDLE_META {
                 try {
-                  // start the receives
+                  // report the server's error reply, or start the receives
                   val metadataResponse =
                     ShuffleMetadata.getMetadataResponse(resp.getBuffer())
 
                   logDebug(s"Received from ${tx} response: \n:" +
                     s"${ShuffleMetadata.printResponse("received response", metadataResponse)}")
 
-                  // signal to the handler how many batches are expected
-                  handler.start(metadataResponse.tableMetasLength())
+                  val error = metadataResponse.error()
+                  if (error != null) {
+                    handler.metadataError(s"Executor ${connection.getPeerExecutorId} failed " +
+                      s"the metadata request: ${error.reason()}", metadataResponse.failedBlock())
+                  } else {
+                    // signal to the handler how many batches are expected
+                    handler.start(metadataResponse.tableMetasLength())
 
-                  // queue up the receives
-                  queueTransferRequests(metadataResponse, handler)
+                    // queue up the receives
+                    queueTransferRequests(metadataResponse, handler)
+                  }
                 } catch {
                   case t: Throwable =>
                     handler.transferError("Error occurred while handling metadata", t)
@@ -301,15 +347,30 @@ class RapidsShuffleClient(
             withResource(tx.releaseMessage()) { mtb =>
               // make sure all bufferTxs are still valid (e.g. resp says that they have STARTED)
               val transferResponse = ShuffleMetadata.getTransferResponse(mtb.getBuffer())
-              (0 until transferResponse.responsesLength()).foreach(r => {
-                val response = transferResponse.responses(r)
-                if (response.state() != TransferState.STARTED) {
-                  // we could either re-issue the request, cancelling and releasing memory
-                  // or we could re-issue, and leave the old receive waiting
-                  // for now, leaving the old receive waiting.
-                  throw new IllegalStateException("NOT IMPLEMENTED")
-                }
-              })
+              val error = transferResponse.error()
+              if (error != null) {
+                // read before the response's buffer is released
+                val failedCount = transferResponse.responsesLength()
+                val named = (0 until math.min(failedCount, RapidsShuffleClient.MAX_BUFFERS_NAMED))
+                  .map(r => transferResponse.responses(r).bufferId())
+                val more =
+                  if (failedCount > named.size) s" and ${failedCount - named.size} more" else ""
+                val buffers =
+                  if (named.isEmpty) "" else s" for shuffle buffers ${named.mkString(", ")}$more"
+                asyncOnCopyThread(HandleTransferFailure(toIssue,
+                  s"Executor ${connection.getPeerExecutorId} failed the transfer request" +
+                    s"$buffers: ${error.reason()}"))
+              } else {
+                (0 until transferResponse.responsesLength()).foreach(r => {
+                  val response = transferResponse.responses(r)
+                  if (response.state() != TransferState.STARTED) {
+                    // we could either re-issue the request, cancelling and releasing memory
+                    // or we could re-issue, and leave the old receive waiting
+                    // for now, leaving the old receive waiting.
+                    throw new IllegalStateException("NOT IMPLEMENTED")
+                  }
+                })
+              }
             }
           case _ =>
             toIssue.errorOccurred(tx.getErrorMessage.getOrElse("TransferRequest failed"))
@@ -373,6 +434,7 @@ class RapidsShuffleClient(
    */
   def doHandleBounceBufferReceive(tx: Transaction, 
       bufferReceiveState: BufferReceiveState): Unit = {
+    var moreWindows = false
     try {
       withResource(tx) { _ =>
         tx.getStatus match {
@@ -408,6 +470,7 @@ class RapidsShuffleClient(
               } else {
                 logDebug(s"BufferReceiveState: " +
                   s"${TransportUtils.toHex(bufferReceiveState.id)} is NOT done, continuing.")
+                moreWindows = true
               }
             }
           case TransactionStatus.Error =>
@@ -423,6 +486,47 @@ class RapidsShuffleClient(
             s"Error while handling buffer receive for BRS: " +
             s"${TransportUtils.toHex(bufferReceiveState.id)}", t)
         }
+    }
+    if (moreWindows) {
+      // A request that the server failed while this window was on its way ends here, outside
+      // the catch above, which would close the state a second time.
+      endIfFailed(bufferReceiveState, bufferReceiveState.maybeTakeFailure())
+    }
+  }
+
+  /**
+   * Ends the receive state of a request that the server failed. While a window for it is left
+   * to consume, `doHandleBounceBufferReceive` ends the state after consuming the last one.
+   */
+  private[this] def doHandleTransferFailure(
+      bufferReceiveState: BufferReceiveState,
+      reason: String): Unit =
+    endIfFailed(bufferReceiveState, bufferReceiveState.serverFailed(reason))
+
+  /**
+   * Ends a receive state if `failure` hands over a failed transfer. A non-fatal error from
+   * ending it is logged, since the copy thread's handlers must not throw.
+   */
+  private[this] def endIfFailed(
+      bufferReceiveState: BufferReceiveState,
+      failure: => Option[FailedTransfer]): Unit = {
+    try {
+      failure.foreach(endFailedTransfer(bufferReceiveState, _))
+    } catch {
+      case NonFatal(t) =>
+        logError(s"Error while ending BRS ${TransportUtils.toHex(bufferReceiveState.id)}, " +
+          "whose request the server failed", t)
+    }
+  }
+
+  /** Releases a receive state that the server failed, failing each reader still waiting on it. */
+  private[this] def endFailedTransfer(
+      bufferReceiveState: BufferReceiveState,
+      failure: FailedTransfer): Unit = {
+    // the throttle reserved these bytes for the requests that will not arrive
+    transport.doneBytesInFlight(failure.notReceived.map(_.getLength).sum)
+    withResource(bufferReceiveState) { _ =>
+      failure.notReceived.map(_.handler).distinct.foreach(_.transferError(failure.reason))
     }
   }
 
@@ -463,13 +567,29 @@ class RapidsShuffleClient(
     liveHandlers.add(handler)
   }
 
+  /**
+   * Called once per reader, by its task-completion cleaner. Stops peer-error notices for
+   * `handler` and withdraws its unanswered metadata request. The transport then drops the
+   * handler's queued transfers and unregisters it.
+   */
   def unregisterPeerErrorListener(handler: RapidsShuffleFetchHandler): Unit = {
     logDebug(s"Unregister $handler from client for ${connection.getPeerExecutorId}")
     liveHandlers.remove(handler)
+    // The reader is done, so its metadata request stops waiting for a response. This comes
+    // before the cancel below, so that a cancel that throws cannot skip it.
+    val unanswered = pendingMetadata.remove(handler)
+    if (unanswered != null) {
+      connection.cancelRequest(unanswered)
+    }
     // Make sure we remove the handler from the transport as well, otherwise
     // we could have a host memory leak: https://github.com/NVIDIA/spark-rapids/issues/7997
-    // At this stage this should not cancel any requests because the task should have
-    // completed, but it will also remove `handler` from internal tracking in `transport`.
+    // A done reader normally has nothing queued here, unless the cancel in its task-completion
+    // cleaner threw, so this mostly removes `handler` from internal tracking in `transport`.
     transport.cancelPending(handler)
   }
+}
+
+object RapidsShuffleClient {
+  // how many failed buffers a reader's error names before it only counts the rest
+  private val MAX_BUFFERS_NAMED = 5
 }

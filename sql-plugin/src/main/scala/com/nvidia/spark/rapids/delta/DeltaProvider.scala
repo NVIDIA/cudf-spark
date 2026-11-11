@@ -28,12 +28,14 @@ import com.nvidia.spark.rapids.{
   OverwriteByExpressionExecV1Meta,
   RapidsConf,
   RunnableCommandRule,
+  ScanRule,
   ShimLoaderTemp,
   SparkPlanMeta
 }
 
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.connector.catalog.{StagingTableCatalog, SupportsWrite}
+import org.apache.spark.sql.connector.read.Scan
 import org.apache.spark.sql.execution.{FileSourceScanExec, SparkPlan, SparkStrategy}
 import org.apache.spark.sql.execution.command.{DataWritingCommand, RunnableCommand}
 import org.apache.spark.sql.execution.datasources.{FileFormat, HadoopFsRelation}
@@ -47,6 +49,8 @@ trait DeltaProbe {
 
 /** Interfaces to avoid accessing the optional Delta Lake jars directly in common code. */
 trait DeltaProvider {
+  def getScans: Map[Class[_ <: Scan], ScanRule[_ <: Scan]] = Map.empty
+
   def getCreatableRelationRules: Map[Class[_ <: CreatableRelationProvider],
       CreatableRelationProviderRule[_ <: CreatableRelationProvider]]
 

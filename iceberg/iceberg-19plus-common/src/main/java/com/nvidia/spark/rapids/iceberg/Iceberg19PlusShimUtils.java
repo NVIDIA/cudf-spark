@@ -22,7 +22,6 @@ import org.apache.iceberg.Table;
 import org.apache.iceberg.data.BaseDeleteLoader;
 import org.apache.iceberg.deletes.PositionDelete;
 import org.apache.iceberg.deletes.PositionDeleteIndex;
-import org.apache.iceberg.encryption.EncryptingFileIO;
 import org.apache.iceberg.io.DataWriteResult;
 import org.apache.iceberg.io.DeleteWriteResult;
 import org.apache.iceberg.io.OutputFileFactory;
@@ -94,8 +93,7 @@ public abstract class Iceberg19PlusShimUtils implements IcebergShimUtils {
         }
 
         BaseDeleteLoader deleteLoader = new BaseDeleteLoader(
-                deleteFile -> EncryptingFileIO.combine(table.io(), table.encryption())
-                        .newInputFile(deleteFile));
+                deleteFile -> table.io().newInputFile(deleteFile));
         return path -> {
             Set<DeleteFile> files = rewritableDeletes.get(path.toString());
             return files != null ? deleteLoader.loadPositionDeletes(files, path) : null;

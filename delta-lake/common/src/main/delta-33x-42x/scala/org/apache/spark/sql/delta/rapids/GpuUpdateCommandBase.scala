@@ -329,7 +329,7 @@ abstract class GpuUpdateCommandBase(
    * When CDF is enabled, includes the generation of CDC preimage and postimage columns for
    * changed rows.
    *
-   * @return the list of [[AddFile]]s and [[AddCDCFile]]s that have been written.
+   * @return the list of `AddFile`s and `AddCDCFile`s that have been written.
    */
   private def rewriteFiles(
       spark: OperationSparkSession,

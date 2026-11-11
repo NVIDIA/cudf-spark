@@ -162,7 +162,7 @@ object GpuLiquidOptimizeWriteIntoDeltaCommand {
 }
 
 /**
- * GPU file-writing equivalent of DBR's [[WriteIntoDeltaCommand]].
+ * GPU file-writing equivalent of DBR's `WriteIntoDeltaCommand`.
  *
  * The command deliberately reuses the native output specification and commit protocol. The
  * enclosing DBR transaction therefore remains responsible for AddFile creation, liquid domain

@@ -54,7 +54,7 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference,
 import org.apache.spark.sql.catalyst.expressions.codegen.GenerateUnsafeProjection
 import org.apache.spark.sql.catalyst.util.{ArrayBasedMapData, ArrayData, GenericArrayData, MapData}
 import org.apache.spark.sql.columnar.CachedBatch
-import org.apache.spark.sql.execution.datasources.parquet.{ParquetReadSupport, ParquetToSparkSchemaConverter, ParquetWriteSupport, ShimCurrentBatchIterator}
+import org.apache.spark.sql.execution.datasources.parquet.{ParquetCVShims, ParquetReadSupport, ParquetToSparkSchemaConverter, ParquetWriteSupport, RapidsVectorizedColumnReader, ShimCurrentBatchIterator}
 import org.apache.spark.sql.execution.datasources.parquet.rapids.ParquetRecordMaterializer
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.PCBSSchemaHelper
@@ -805,18 +805,26 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
           val listBuffer = new ListBuffer[InternalRow]()
           val supportedSchema =
             PCBSSchemaHelper.getSupportedDataType(dataType).asInstanceOf[StructType]
-          arrayData.foreach(supportedSchema, (_, data) => {
-            val structRow =
-              handleStruct(data.asInstanceOf[InternalRow], s, s)
-            listBuffer += structRow.copy()
+          arrayData.foreach(supportedSchema, (i, data) => {
+            if (arrayData.isNullAt(i)) {
+              listBuffer += null
+            } else {
+              val structRow =
+                handleStruct(data.asInstanceOf[InternalRow], s, s)
+              listBuffer += structRow.copy()
+            }
           })
           new GenericArrayData(listBuffer)
 
         case ArrayType(elementType, _) =>
           val arrayList = new ListBuffer[Any]()
           scala.Range(0, arrayData.numElements()).foreach { i =>
-            val subArrayData = arrayData.getArray(i)
-            arrayList.append(handleArray(elementType, subArrayData))
+            if (arrayData.isNullAt(i)) {
+              arrayList.append(null)
+            } else {
+              val subArrayData = arrayData.getArray(i)
+              arrayList.append(handleArray(elementType, subArrayData))
+            }
           }
           new GenericArrayData(arrayList)
 
@@ -824,8 +832,12 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
           val mapList =
             new ListBuffer[Any]()
           scala.Range(0, arrayData.numElements()).foreach { i =>
-            val mapData = arrayData.getMap(i)
-            mapList.append(handleMap(m.keyType, m.valueType, mapData))
+            if (arrayData.isNullAt(i)) {
+              mapList.append(null)
+            } else {
+              val mapData = arrayData.getMap(i)
+              mapList.append(handleMap(m.keyType, m.valueType, mapData))
+            }
           }
           new GenericArrayData(mapList)
 
@@ -895,10 +907,16 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
             List(new ColumnarBatch(null, cachedBatch.numRows)).iterator
           } else {
             new ShimCurrentBatchIterator(
-              cachedBatch,
-              conf,
-              selectedAttributes,
-              options, hadoopConf)
+              new ByteArrayInputFile(cachedBatch.buffer),
+              conf, selectedAttributes, options, hadoopConf,
+              ParquetTimestampNTZShims.setupTimestampNTZConfig _,
+              ParquetCVShims.newParquetCV _,
+              (column, required, pages, writerVersion) => RapidsVectorizedColumnReader(
+                column, required, pages, null,
+                LegacyBehaviorPolicyShim.CORRECTED_STR,
+                LegacyBehaviorPolicyShim.EXCEPTION_STR,
+                LegacyBehaviorPolicyShim.EXCEPTION_STR,
+                null, writerVersion))
           }
         }
       }
@@ -907,7 +925,18 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
         // go over the batch and get the next non-degenerate iterator
         // and return if it hasNext
         while ((iter == null || !iter.hasNext) && cbIter.hasNext) {
+          iter match {
+            case closeable: AutoCloseable => closeable.close()
+            case _ =>
+          }
           iter = getIterator
+        }
+        if (iter != null && !iter.hasNext) {
+          iter match {
+            case closeable: AutoCloseable => closeable.close()
+            case _ =>
+          }
+          iter = null
         }
         iter != null && iter.hasNext
       }

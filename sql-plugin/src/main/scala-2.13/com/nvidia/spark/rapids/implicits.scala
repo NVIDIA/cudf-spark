@@ -339,7 +339,7 @@ object RapidsPluginImplicits {
     /**
      * safeMap: implicit map on a Seq[A] that produces Seq[B], where B is a subclass of
      * AutoCloseable.
-     * See [[MapsSafely.safeMap]] for a more detailed explanation.
+     * See `IterableMapsSafely.safeMap` for a more detailed explanation.
      *
      * @param fn a function that takes A, and produces B (a subclass of AutoCloseable)
      * @tparam A the type of the elements in Seq
@@ -355,7 +355,7 @@ object RapidsPluginImplicits {
     /**
      * safeMap: implicit map on a Seq[A] that produces Seq[B], where B is a subclass of
      * AutoCloseable.
-     * See [[MapsSafely.safeMap]] for a more detailed explanation.
+     * See `ArrayMapsSafely.safeMap` for a more detailed explanation.
      *
      * @param fn a function that takes A, and produces B (a subclass of AutoCloseable)
      * @tparam A the type of the elements in Seq
@@ -373,7 +373,7 @@ object RapidsPluginImplicits {
      * of a batch as if the batch was a Seq[GpuColumnVector], iff safeMap's body is producing
      * AutoCloseable (otherwise, it is not defined).
      *
-     * See [[MapsSafely.safeMap]] for a more detailed explanation.
+     * See `IterableMapsSafely.safeMap` for a more detailed explanation.
      *
      * @param fn a function that takes GpuColumnVector, and returns a subclass of AutoCloseable
      * @tparam B the type of the elements produced in the safeMap (should be subclasses of

@@ -639,6 +639,9 @@ abstract class MultiFileCloudPartitionReaderBase(
    */
   def readBatches(fileBufsAndMeta: HostMemoryBuffersWithMetaDataBase): Iterator[ColumnarBatch]
 
+  /** Validate format limits that must fail even when corrupt files are ignored. */
+  protected def validateHostBuffers(fileHostBuffers: HostMemoryBuffersWithMetaDataBase): Unit = {}
+
   /**
    * File format short name used for logging and other things to uniquely identity
    * which file format is being used.
@@ -653,6 +656,8 @@ abstract class MultiFileCloudPartitionReaderBase(
    */
   private def readBuffersToBatch(fileHostBuffers: HostMemoryBuffersWithMetaDataBase,
       addTaskIfNeeded: Boolean): Unit = {
+    // Unsupported input must not be mistaken for corruption and silently skipped.
+    closeOnExcept(fileHostBuffers) { _ => validateHostBuffers(fileHostBuffers) }
     if (getNumRowsInHostBuffers(fileHostBuffers) == 0) {
       // Close the currentFileHostBuffers on the deck if it is the fileHostBuffers being passed
       // in, otherwise close the fileHostBuffers passed in. It assumes that we will always handle
@@ -669,8 +674,12 @@ abstract class MultiFileCloudPartitionReaderBase(
         readBatches(fileHostBuffers)
       } catch {
         case e@(_: RuntimeException | _: IOException) if ignoreCorruptFiles =>
-          logWarning(s"Skipped the corrupted file: $file", e)
-          EmptyGpuColumnarBatchIterator
+          // Skip the rest of this file and clear pending buffers before releasing them.
+          currentFileHostBuffers = None
+          withResource(fileHostBuffers) { _ =>
+            logWarning(s"Skipped the corrupted file: $file", e)
+            EmptyGpuColumnarBatchIterator
+          }
       }
       // the data is copied to GPU so submit another task if we were limited
       if (addTaskIfNeeded) addNextTaskIfNeeded()
@@ -760,27 +769,29 @@ abstract class MultiFileCloudPartitionReaderBase(
   private def getNextBuffersAndMetaAndCombine(): HostMemoryBuffersWithMetaDataBase = {
     var sizeRead = 0L
     var numRowsRead = 0L
-    val results = ArrayBuffer[HostMemoryBuffersWithMetaDataBase]()
-    readReadyFiles(0, 0, results)
-    if (results.isEmpty) {
-      // none were ready yet so wait as long as need for first one
-      val hostBuffersWithMeta = if (keepReadsInOrder) {
-        convertAsyncResult(tasks.poll().get())
-      } else {
-        val bufMetaFut = fcs.take()
-        tasks.remove(bufMetaFut)
-        convertAsyncResult(bufMetaFut.get())
-      }
-      sizeRead += hostBuffersWithMeta.memBuffersAndSizes.map(_.bytes).sum
-      numRowsRead += hostBuffersWithMeta.memBuffersAndSizes.map(_.numRows).sum
+    closeOnExcept(ArrayBuffer[HostMemoryBuffersWithMetaDataBase]()) { results =>
+      readReadyFiles(0, 0, results)
+      if (results.isEmpty) {
+        // none were ready yet so wait as long as need for first one
+        val hostBuffersWithMeta = if (keepReadsInOrder) {
+          convertAsyncResult(tasks.poll().get())
+        } else {
+          val bufMetaFut = fcs.take()
+          tasks.remove(bufMetaFut)
+          convertAsyncResult(bufMetaFut.get())
+        }
+        // Own the result before inspecting its metadata, which may itself throw.
+        results.append(hostBuffersWithMeta)
+        sizeRead += hostBuffersWithMeta.memBuffersAndSizes.map(_.bytes).sum
+        numRowsRead += hostBuffersWithMeta.memBuffersAndSizes.map(_.numRows).sum
 
-      filesToRead -= 1
-      results.append(hostBuffersWithMeta)
-      // since we had to wait for one to be ready,
-      // check if more are ready as well
-      readReadyFiles(sizeRead, numRowsRead, results)
+        filesToRead -= 1
+        // since we had to wait for one to be ready,
+        // check if more are ready as well
+        readReadyFiles(sizeRead, numRowsRead, results)
+      }
+      combineHMBs(results.toArray)
     }
-    combineHMBs(results.toArray)
   }
 
   private def getNextBuffersAndMetaSingleFile(): HostMemoryBuffersWithMetaDataBase = {
@@ -811,12 +822,14 @@ abstract class MultiFileCloudPartitionReaderBase(
     val leftOvers = combineLeftOverFiles.get
     // unset leftOverFiles because it will get reset in combineHMBs again if needed
     combineLeftOverFiles = None
-    val results = ArrayBuffer[HostMemoryBuffersWithMetaDataBase]()
-    val curSize = leftOvers.map(_.memBuffersAndSizes.map(_.bytes).sum).sum
-    val curNumRows = leftOvers.map(_.memBuffersAndSizes.map(_.numRows).sum).sum
-    readReadyFiles(curSize, curNumRows, results)
-    val allReady = leftOvers ++ results
-    val fileBufsAndMeta = combineHMBs(allReady)
+    val fileBufsAndMeta = closeOnExcept(leftOvers) { _ =>
+      closeOnExcept(ArrayBuffer[HostMemoryBuffersWithMetaDataBase]()) { results =>
+        val curSize = leftOvers.map(_.memBuffersAndSizes.map(_.bytes).sum).sum
+        val curNumRows = leftOvers.map(_.memBuffersAndSizes.map(_.numRows).sum).sum
+        readReadyFiles(curSize, curNumRows, results)
+        combineHMBs(leftOvers ++ results)
+      }
+    }
 
     TrampolineUtil.incBytesRead(inputMetrics, fileBufsAndMeta.bytesRead)
     // this is combine mode so input file shouldn't be used at all but update to
@@ -912,7 +925,9 @@ abstract class MultiFileCloudPartitionReaderBase(
           }
         }
 
-        if (batchIter.hasNext || filesToRead == 0 || isDone) {
+        val noPendingFiles = filesToRead == 0 && currentFileHostBuffers.isEmpty &&
+          combineLeftOverFiles.isEmpty
+        if (batchIter.hasNext || noPendingFiles || isDone) {
           continue = false
         }
       }
@@ -955,20 +970,41 @@ abstract class MultiFileCloudPartitionReaderBase(
     // this is more complicated because threads might still be processing files
     // in cases close got called early for like limit() calls
     isDone = true
-    closeCurrentFileHostBuffers()
     batchIter = EmptyGpuColumnarBatchIterator
 
     // clean up Async Readers being left over
     val needToClose = mutable.ArrayBuffer[BufferInfo]()
-    tasks.asScala.foreach {
-      case task if task.isCancelled => // Do nothing if already cancelled
-      case task if task.isDone => // Close all produced hmbs
-        needToClose += convertAsyncResult(task.get())
-      case task => // Task is still running
-        // Note we are not interrupting thread here so it
-        // will finish reading and then just discard. If we
-        // interrupt HDFS logs warnings about being interrupted.
-        task.cancel(false)
+    currentFileHostBuffers.foreach(needToClose += _)
+    currentFileHostBuffers = None
+    combineLeftOverFiles.foreach(needToClose ++= _)
+    combineLeftOverFiles = None
+    closeOnExcept(needToClose) { _ =>
+      var firstError: Throwable = null
+      var task = tasks.poll()
+      while (task != null) {
+        try {
+          task match {
+            case t if t.isCancelled => // Do nothing if already cancelled
+            case t if t.isDone => // Close all produced hmbs
+              needToClose += convertAsyncResult(t.get())
+            case t =>
+              // Let running reads observe isDone without interrupting file system operations.
+              // If completion wins the cancellation race, we still own the result.
+              if (!t.cancel(false) && !t.isCancelled) {
+                needToClose += convertAsyncResult(t.get())
+              }
+          }
+        } catch {
+          case t: Throwable =>
+            if (firstError == null) {
+              firstError = t
+            } else if (firstError ne t) {
+              firstError.addSuppressed(t)
+            }
+        }
+        task = tasks.poll()
+      }
+      if (firstError != null) throw firstError
     }
     needToClose.safeClose()
   }

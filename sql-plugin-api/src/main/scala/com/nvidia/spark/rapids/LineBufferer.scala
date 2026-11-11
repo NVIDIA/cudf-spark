@@ -31,6 +31,8 @@ trait LineBufferer extends AutoCloseable {
    */
   def getNumLines: Int
 
+  def hasData: Boolean = getLength != 0
+
   /**
    * Add a new line of bytes to the data to process.
    */
@@ -41,9 +43,11 @@ trait LineBufferer extends AutoCloseable {
   }
 
   def isEmpty(line: Array[Byte], lineOffset: Int, lineLen: Int): Boolean = {
-    (0 until lineLen).forall { idx =>
-      isWhiteSpace(line(lineOffset + idx))
+    var idx = 0
+    while (idx < lineLen && isWhiteSpace(line(lineOffset + idx))) {
+      idx += 1
     }
+    idx >= lineLen
   }
 }
 

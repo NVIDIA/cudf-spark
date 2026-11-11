@@ -20,18 +20,17 @@ import ai.rapids.cudf
 import ai.rapids.cudf.{Aggregation128Utils, BinaryOp, ColumnVector, DType, GroupByAggregation, GroupByScanAggregation, NaNEquality, NullEquality, NullPolicy, ReductionAggregation, ReplacePolicy, RollingAggregation, RollingAggregationOnColumn, Scalar, ScanAggregation}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.RapidsPluginImplicits.ReallyAGpuExpression
+import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.jni.Aggregation64Utils
 import com.nvidia.spark.rapids.shims.{GpuDeterministicFirstLastCollectShim, ShimExpression,
   TypeUtilsShims}
 import com.nvidia.spark.rapids.window._
 
-import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult.TypeCheckSuccess
-import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Expression, ImplicitCastInputTypes, Literal, UnsafeProjection, UnsafeRow}
+import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Expression, ImplicitCastInputTypes, Literal}
 import org.apache.spark.sql.catalyst.trees.{CurrentOrigin, Origin}
-import org.apache.spark.sql.catalyst.util.{ArrayData, GenericArrayData, TypeUtils}
+import org.apache.spark.sql.catalyst.util.{GenericArrayData, TypeUtils}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids._
 import org.apache.spark.sql.types._
@@ -261,7 +260,7 @@ class CudfMergeM2 extends CudfAggregate {
   override lazy val reductionAggregate: cudf.ColumnVector => cudf.Scalar =
     (col: cudf.ColumnVector) => {
       NvtxRegistry.REDUCTION_MERGE_M2 {
-        withResource(col.copyToHost()) { hcv =>
+        val (mergeN, mergeMean, mergeM2) = withResource(col.copyToHost()) { hcv =>
           withResource(hcv.getChildColumnView(0)) { partialN =>
             withResource(hcv.getChildColumnView(1)) { partialMean =>
               withResource(hcv.getChildColumnView(2)) { partialM2 =>
@@ -289,16 +288,15 @@ class CudfMergeM2 extends CudfAggregate {
                   }
                 }
 
-                withResource(ColumnVector.fromDoubles(mergeN)) { cvMergeN =>
-                  withResource(ColumnVector.fromDoubles(mergeMean)) { cvMergeMean =>
-                    withResource(ColumnVector.fromDoubles(mergeM2)) { cvMergeM2 =>
-                      Scalar.structFromColumnViews(cvMergeN, cvMergeMean, cvMergeM2)
-                    }
-                  }
-                }
+                (mergeN, mergeMean, mergeM2)
               }
             }
           }
+        }
+        withResource(Seq(mergeN, mergeMean, mergeM2)
+            .safeMap(value => ColumnVector.fromDoubles(value))) {
+          case Seq(cvMergeN, cvMergeMean, cvMergeM2) =>
+            Scalar.structFromColumnViews(cvMergeN, cvMergeMean, cvMergeM2)
         }
       }
     }
@@ -878,32 +876,31 @@ case class GpuCheckOverflowAfterSum(
 
   override def columnarEval(batch: ColumnarBatch): GpuColumnVector =
     CurrentOrigin.withOrigin(capturedOrigin) {
-      withResource(data.columnarEval(batch)) { dataCol =>
-        val dataBase = dataCol.getBase
-        withResource(GpuCast.checkNFixDecimalBounds(dataBase, dataType, !nullOnOverflow)) {
-          fixedData =>
-            withResource(isEmpty.columnarEval(batch)) { isEmptyCol =>
-              val isEmptyBase = isEmptyCol.getBase
-              if (!nullOnOverflow) {
-                // ANSI mode
-                val problem = withResource(fixedData.isNull) { isNull =>
-                  withResource(isEmptyBase.not()) { notEmpty =>
-                    isNull.and(notEmpty)
-                  }
-                }
-                withResource(problem) { problem =>
-                  withResource(problem.any()) { anyProblem =>
-                    if (anyProblem.isValid && anyProblem.getBoolean) {
-                      throw new ArithmeticException("Overflow in sum of decimals.")
-                    }
-                  }
-                }
-                // No problems fall through...
-              }
-              withResource(GpuScalar.from(null, dataType)) { nullScale =>
-                GpuColumnVector.from(isEmptyBase.ifElse(nullScale, fixedData), dataType)
+      val fixedData = withResource(data.columnarEval(batch)) { dataCol =>
+        GpuCast.checkNFixDecimalBounds(dataCol.getBase, dataType, !nullOnOverflow)
+      }
+      withResource(fixedData) { _ =>
+        withResource(isEmpty.columnarEval(batch)) { isEmptyCol =>
+          val isEmptyBase = isEmptyCol.getBase
+          if (!nullOnOverflow) {
+            // ANSI mode
+            val problem = withResource(fixedData.isNull) { isNull =>
+              withResource(isEmptyBase.not()) { notEmpty =>
+                isNull.and(notEmpty)
               }
             }
+            withResource(problem) { _ =>
+              withResource(problem.any()) { anyProblem =>
+                if (anyProblem.isValid && anyProblem.getBoolean) {
+                  throw new ArithmeticException("Overflow in sum of decimals.")
+                }
+              }
+            }
+            // No problems fall through...
+          }
+          withResource(GpuScalar.from(null, dataType)) { nullScale =>
+            GpuColumnVector.from(isEmptyBase.ifElse(nullScale, fixedData), dataType)
+          }
         }
       }
     }
@@ -2125,58 +2122,6 @@ case class GpuCollectSetBitKeysToValues(child: Expression) extends GpuUnaryExpre
         }
       }
     }
-  }
-}
-
-class CpuToGpuCollectBufferConverter(
-    elementType: DataType,
-    containsNull: Boolean = false) extends CpuToGpuAggregateBufferConverter {
-  def createExpression(child: Expression): CpuToGpuBufferTransition = {
-    CpuToGpuCollectBufferTransition(child, elementType, containsNull)
-  }
-}
-
-case class CpuToGpuCollectBufferTransition(
-    override val child: Expression,
-    private val elementType: DataType,
-    private val containsNull: Boolean) extends CpuToGpuBufferTransition {
-
-  private lazy val row = new UnsafeRow(1)
-
-  override def dataType: DataType = ArrayType(elementType, containsNull)
-
-  override protected def nullSafeEval(input: Any): ArrayData = {
-    // Converts binary buffer into UnSafeArrayData, according to the deserialize method of Collect.
-    // The input binary buffer is the binary view of a UnsafeRow, which only contains single field
-    // with ArrayType of elementType. Since array of elements exactly matches the GPU format, we
-    // don't need to do any conversion in memory level. Instead, we simply bind the binary data to
-    // a reused UnsafeRow. Then, fetch the only field as ArrayData.
-    val bytes = input.asInstanceOf[Array[Byte]]
-    row.pointTo(bytes, bytes.length)
-    row.getArray(0).copy()
-  }
-}
-
-class GpuToCpuCollectBufferConverter extends GpuToCpuAggregateBufferConverter {
-  def createExpression(child: Expression): GpuToCpuBufferTransition = {
-    GpuToCpuCollectBufferTransition(child)
-  }
-}
-
-case class GpuToCpuCollectBufferTransition(
-    override val child: Expression) extends GpuToCpuBufferTransition {
-
-  private lazy val projection = UnsafeProjection.create(Array(child.dataType))
-
-  override protected def nullSafeEval(input: Any): Array[Byte] = {
-    // Converts UnSafeArrayData into binary buffer, according to the serialize method of Collect.
-    // The binary buffer is the binary view of a UnsafeRow, which only contains single field
-    // with ArrayType of elementType. As Collect.serialize, we create an UnsafeProjection to
-    // transform ArrayData to binary view of the single field UnsafeRow. Unlike Collect.serialize,
-    // we don't have to build ArrayData from on-heap array, since the input is already formatted
-    // in ArrayData(UnsafeArrayData).
-    val arrayData = input.asInstanceOf[ArrayData]
-    projection.apply(InternalRow.apply(arrayData)).getBytes
   }
 }
 

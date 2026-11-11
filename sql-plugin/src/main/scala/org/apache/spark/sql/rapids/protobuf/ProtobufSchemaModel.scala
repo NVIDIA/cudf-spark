@@ -18,12 +18,15 @@ package org.apache.spark.sql.rapids.protobuf
 
 import java.util.{Arrays, Objects}
 
+import com.nvidia.spark.rapids.jni.ProtobufSchemaDescriptor
+
 import org.apache.spark.sql.types.DataType
 
 /** Planning flags for enum representation and malformed-message handling. */
 final case class ProtobufPlannerOptions(
     enumsAsInts: Boolean,
-    failOnErrors: Boolean)
+    failOnErrors: Boolean,
+    malformedRowsAsNullFields: Boolean = false)
 
 /** Extracted facts for one Spark field; unsupported fields retain a fallback reason. */
 final case class ProtobufFieldInfo(
@@ -114,6 +117,12 @@ final case class FlattenedSchemaArrays(
     defaultStrings: Array[Array[Byte]],
     enumValidValues: Array[Array[Int]],
     enumNames: Array[Array[Array[Byte]]]) {
+  /** Builds the JNI schema; its constructor rejects schemas the decoder cannot run. */
+  def toJniDescriptor: ProtobufSchemaDescriptor =
+    new ProtobufSchemaDescriptor(fieldNumbers, parentIndices, depthLevels, wireTypes,
+      outputTypeIds, encodings, isRepeated, isRequired, hasDefaultValue, isOutput, defaultInts,
+      defaultFloats, defaultBools, defaultStrings, enumValidValues, enumNames)
+
   override def equals(other: Any): Boolean = other match {
     case that: FlattenedSchemaArrays =>
       Arrays.equals(fieldNumbers, that.fieldNumbers) &&

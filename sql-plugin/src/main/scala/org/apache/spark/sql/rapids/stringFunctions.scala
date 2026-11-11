@@ -1076,7 +1076,7 @@ object GpuRegExpUtils {
   }
 
   /**
-   * Convert numbered `$group_index` back-reference symbols into cuDF's `${group_index}` form.
+   * Convert numbered `\$group_index` back-reference symbols into cuDF's `\${group_index}` form.
    * Java `Matcher#appendReplacement` treats `\digit` as the literal digit character, not as a
    * back-reference. Escaped pairs are kept verbatim here and are later normalized by
    * `unescapeReplaceString`.
@@ -1091,7 +1091,7 @@ object GpuRegExpUtils {
    * @param rep replacement string
    * @param numCaptureGroups number of capturing groups in the corresponding pattern; pass a
    *                         negative value to disable greedy-with-backoff
-   * @return A pair containing a boolean that indicates whether a raw numbered `$N`
+   * @return A pair containing a boolean that indicates whether a raw numbered `\$N`
    *         back-reference was converted, and the converted replacement.
    */
   def backrefConversion(rep: String, numCaptureGroups: Int): (Boolean, String) = {
@@ -1741,39 +1741,41 @@ case class GpuRegExpExtractAll(
         // returns one list element per regex match. Align the remaining result semantics with
         // Spark: an unmatched capture is an empty string, no matches is an empty list, and a
         // null input is a null list.
-        withResource(str.getBase.extractAllRecord(prog, 1)) { extracted =>
-          val noMatchesAsEmptyLists = withResource(GpuScalar.from(
+        val noMatchesAsEmptyLists = withResource(str.getBase.extractAllRecord(prog, 1)) {
+          extracted => withResource(GpuScalar.from(
             new GenericArrayData(Array.empty[Any]), dataType)) { emptyStringList =>
             // cuDF returns a zero-row list column when the entire input has no matches.
             // Restore the input row count before applying Spark's null-input semantics.
             if (extracted.getRowCount == 0) {
               ColumnVector.fromScalar(emptyStringList, rowCount.toInt)
             } else {
-              val capturesWithEmptyStrings = withResource(extracted.getChildColumnView(0)) {
-                captures =>
-                  withResource(Scalar.fromString("")) { emptyString =>
-                    withResource(captures.replaceNulls(emptyString)) { normalizedCaptures =>
-                      withResource(extracted.replaceListChild(normalizedCaptures)) {
-                        _.copyToColumnVector()
-                      }
-                    }
-                  }
-              }
-              withResource(capturesWithEmptyStrings) { normalized =>
-                withResource(normalized.isNull) { noMatchesOrNullInput =>
-                  noMatchesOrNullInput.ifElse(emptyStringList, normalized)
-                }
-              }
-            }
-          }
-          withResource(noMatchesAsEmptyLists) { normalized =>
-            withResource(GpuScalar.from(null, dataType)) { nullStringList =>
-              withResource(str.getBase.isNull) { isInputNull =>
-                isInputNull.ifElse(nullStringList, normalized)
-              }
+              normalizeCaptures(extracted, emptyStringList)
             }
           }
         }
+        withResource(noMatchesAsEmptyLists) { _ =>
+          withResource(GpuScalar.from(null, dataType)) { nullStringList =>
+            withResource(str.getBase.isNull) { isInputNull =>
+              isInputNull.ifElse(nullStringList, noMatchesAsEmptyLists)
+            }
+          }
+        }
+    }
+  }
+
+  private def normalizeCaptures(extracted: ColumnView, emptyStringList: Scalar): ColumnVector = {
+    val normalizedCaptures = withResource(extracted.getChildColumnView(0)) { captures =>
+      withResource(Scalar.fromString("")) { emptyString =>
+        captures.replaceNulls(emptyString)
+      }
+    }
+    withResource(normalizedCaptures) { _ =>
+      withResource(extracted.replaceListChild(normalizedCaptures)) { normalized =>
+        withResource(normalized.isNull) { noMatchesOrNullInput =>
+          // ifElse materializes the result while both owners of this view remain alive.
+          noMatchesOrNullInput.ifElse(emptyStringList, normalized)
+        }
+      }
     }
   }
 }
@@ -2124,44 +2126,44 @@ case class GpuStringToMap(strExpr: Expression,
     } else {
       str.getBase.stringSplitRecord(pairDelim)
     }
-    withResource(listsOfStrings) { listsOfStrings =>
+    withResource(listsOfStrings) { _ =>
       // Extract strings column from the output lists column.
-      withResource(listsOfStrings.getChildColumnView(0)) { stringsCol =>
+      val keysValuesTable = withResource(listsOfStrings.getChildColumnView(0)) { stringsCol =>
         // Split the key-value strings into pairs of strings of key-value (using limit = 2).
-        val keysValuesTable = if (isKeyValueDelimRegExp) {
+        if (isKeyValueDelimRegExp) {
           stringsCol.stringSplit(new RegexProgram(keyValueDelim,
             EnumSet.of(RegexFlag.EXT_NEWLINE), CaptureGroups.NON_CAPTURE), 2)
         } else {
           stringsCol.stringSplit(keyValueDelim, 2)
         }
-        withResource(keysValuesTable) { keysValuesTable =>
+      }
+      withResource(keysValuesTable) { _ =>
 
-          def toMapFromValues(values: ColumnVector): GpuColumnVector = {
-            // This code is safe, because the `keysValuesTable` always has at least one column
-            // (guarantee by `cudf::strings::split` implementation).
-            val keys = keysValuesTable.getColumn(0)
+        def toMapFromValues(values: ColumnVector): GpuColumnVector = {
+          // This code is safe, because the `keysValuesTable` always has at least one column
+          // (guarantee by `cudf::strings::split` implementation).
+          val keys = keysValuesTable.getColumn(0)
 
-            // Zip the key-value pairs into structs.
-            withResource(ColumnView.makeStructView(keys, values)) { structsCol =>
-              // Make a lists column from the new structs column, which will have the same shape
-              // as the previous lists of strings column.
-              withResource(GpuListUtils.replaceListDataColumnAsView(listsOfStrings, structsCol)) {
-                listsOfStructs =>
-                  GpuCreateMap.createMapFromKeysValuesAsStructs(dataType, listsOfStructs)
-              }
+          // Zip the key-value pairs into structs.
+          withResource(ColumnView.makeStructView(keys, values)) { structsCol =>
+            // Make a lists column from the new structs column, which will have the same shape
+            // as the previous lists of strings column.
+            withResource(GpuListUtils.replaceListDataColumnAsView(listsOfStrings, structsCol)) {
+              listsOfStructs =>
+                GpuCreateMap.createMapFromKeysValuesAsStructs(dataType, listsOfStructs)
             }
           }
+        }
 
-          // If the output from stringSplit has only one column (the map keys), we set all the
-          // output values to nulls.
-          if (keysValuesTable.getNumberOfColumns < 2) {
-            withResource(GpuColumnVector.columnVectorFromNull(
-              keysValuesTable.getRowCount.asInstanceOf[Int], StringType)) {
-              allNulls => toMapFromValues(allNulls)
-            }
-          } else {
-            toMapFromValues(keysValuesTable.getColumn(1))
+        // If the output from stringSplit has only one column (the map keys), we set all the
+        // output values to nulls.
+        if (keysValuesTable.getNumberOfColumns < 2) {
+          withResource(GpuColumnVector.columnVectorFromNull(
+            keysValuesTable.getRowCount.asInstanceOf[Int], StringType)) {
+            allNulls => toMapFromValues(allNulls)
           }
+        } else {
+          toMapFromValues(keysValuesTable.getColumn(1))
         }
       }
     }

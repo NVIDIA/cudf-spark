@@ -63,11 +63,13 @@ object GpuTypeToSparkType {
 /**
  * Iceberg-to-Spark schema visitor. Builds the Spark `StructType` and, using the visitor's
  * natural post-order traversal, threads each top-level `StructField`'s nested-id metadata
- * via a per-subtree stack:
+ * via a per-subtree stack. Each visited child type contributes exactly one stack entry:
  *
  *  - `primitive` and `struct` push `None` — primitives have no children, and a struct
  *    attaches each child's id to the inner `StructField`, so neither contributes nested ids
  *    to an enclosing list/map.
+ *  - `afterField` pushes `None` for non-primitive leaves, such as Variant, that bypass
+ *    `primitive`. Collection element/key/value hooks delegate to this same callback.
  *  - `list` / `map` consume the child entries on the stack, build a JSON-serialized
  *    `Metadata` containing the element / key / value ids (plus any popped nested-ids JSON
  *    under `_NESTED_IDS_METADATA_KEY`), and push that JSON.
@@ -86,6 +88,14 @@ class GpuTypeToSparkType extends TypeToSparkType {
 
   private def popNested(): Option[String] =
     nestedIdsStack.remove(nestedIdsStack.length - 1)
+
+  override def afterField(field: Types.NestedField): Unit = {
+    // Use the common Type API so this visitor also links against Iceberg without VariantType.
+    val fieldType = field.`type`()
+    if (!fieldType.isPrimitiveType && !fieldType.isNestedType) {
+      pushNested(None)
+    }
+  }
 
   private def jsonOrNone(builder: MetadataBuilder): Option[String] = {
     val json = builder.build().json

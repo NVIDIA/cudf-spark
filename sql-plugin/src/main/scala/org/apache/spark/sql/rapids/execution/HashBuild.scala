@@ -70,109 +70,6 @@ object HashBuildKey {
   }
 }
 
-/**
- * A request to execute one equi-hash join operation through [[HashProbeBackend]].
- * `requiredBuildSide` specifies whether the requested operation has a physical side constraint,
- * e.g. left or right outer/semi/anti or a known-distinct build side. `exactCountJoinType`
- * specifies when the backend can provide an exact output count before execution, and which
- * JoinType requests that count.
- */
-sealed trait BackendJoinRequest {
-  def requiredBuildSide: Option[GpuBuildSide]
-  def exactCountJoinType: Option[JoinType]
-}
-
-private[execution] object BackendJoinRequest {
-  case object Inner extends BackendJoinRequest {
-    override val requiredBuildSide: Option[GpuBuildSide] = None
-    override val exactCountJoinType: Option[JoinType] =
-      Some(org.apache.spark.sql.catalyst.plans.Inner)
-  }
-
-  case object LeftOuter extends BackendJoinRequest {
-    override val requiredBuildSide: Option[GpuBuildSide] = Some(GpuBuildRight)
-    override val exactCountJoinType: Option[JoinType] =
-      Some(org.apache.spark.sql.catalyst.plans.LeftOuter)
-  }
-
-  case object RightOuter extends BackendJoinRequest {
-    override val requiredBuildSide: Option[GpuBuildSide] = Some(GpuBuildLeft)
-    override val exactCountJoinType: Option[JoinType] =
-      Some(org.apache.spark.sql.catalyst.plans.RightOuter)
-  }
-
-  case object LeftSemi extends BackendJoinRequest {
-    override val requiredBuildSide: Option[GpuBuildSide] = Some(GpuBuildRight)
-    override val exactCountJoinType: Option[JoinType] = None
-  }
-
-  case object LeftAnti extends BackendJoinRequest {
-    override val requiredBuildSide: Option[GpuBuildSide] = Some(GpuBuildRight)
-    override val exactCountJoinType: Option[JoinType] = None
-  }
-
-  /** Request that executes using a build side whose join keys are known to be distinct. */
-  sealed trait Distinct extends BackendJoinRequest {
-    final override val exactCountJoinType: Option[JoinType] = None
-  }
-
-  object Distinct {
-    final case class Inner(buildSide: GpuBuildSide) extends Distinct {
-      override val requiredBuildSide: Option[GpuBuildSide] = Some(buildSide)
-    }
-
-    case object LeftOuter extends Distinct {
-      override val requiredBuildSide: Option[GpuBuildSide] = Some(GpuBuildRight)
-    }
-
-    case object RightOuter extends Distinct {
-      override val requiredBuildSide: Option[GpuBuildSide] = Some(GpuBuildLeft)
-    }
-
-    case object LeftSemi extends Distinct {
-      override val requiredBuildSide: Option[GpuBuildSide] = Some(GpuBuildRight)
-    }
-
-    case object LeftAnti extends Distinct {
-      override val requiredBuildSide: Option[GpuBuildSide] = Some(GpuBuildRight)
-    }
-
-    private def requestFor(
-        joinType: JoinType,
-        planBuildSide: GpuBuildSide): Option[Distinct] = joinType match {
-      case _: InnerLike => Some(Inner(planBuildSide))
-      case org.apache.spark.sql.catalyst.plans.LeftOuter => Some(LeftOuter)
-      case org.apache.spark.sql.catalyst.plans.RightOuter => Some(RightOuter)
-      case org.apache.spark.sql.catalyst.plans.LeftSemi => Some(LeftSemi)
-      case org.apache.spark.sql.catalyst.plans.LeftAnti => Some(LeftAnti)
-      case _ => None
-    }
-
-    def supports(joinType: JoinType, planBuildSide: GpuBuildSide): Boolean = {
-      requestFor(joinType, planBuildSide).exists(_.requiredBuildSide.contains(planBuildSide))
-    }
-
-    /** Map a Catalyst join type and its known-distinct build side to a backend request. */
-    def apply(joinType: JoinType, planBuildSide: GpuBuildSide): Distinct = {
-      val request = requestFor(joinType, planBuildSide).getOrElse {
-        throw new IllegalStateException(s"unsupported distinct backend join request $joinType")
-      }
-      require(request.requiredBuildSide.contains(planBuildSide),
-        s"$joinType distinct join does not support build side $planBuildSide")
-      request
-    }
-  }
-
-  /** Map a directly executed Catalyst join type to its backend request. */
-  def direct(joinType: JoinType): BackendJoinRequest = joinType match {
-    case _: InnerLike => Inner
-    case org.apache.spark.sql.catalyst.plans.LeftOuter => LeftOuter
-    case org.apache.spark.sql.catalyst.plans.RightOuter => RightOuter
-    case org.apache.spark.sql.catalyst.plans.LeftSemi => LeftSemi
-    case org.apache.spark.sql.catalyst.plans.LeftAnti => LeftAnti
-    case other => throw new IllegalStateException(s"unsupported backend join request $other")
-  }
-}
 
 /**
  * A hash operation resolved once for a stream batch. This owns the selected [[HashProbeBackend]].
@@ -555,9 +452,10 @@ private final class CachedFilteredProbeBackend(
 /**
  * Executor-local cache of reusable hash-build artifacts.
  *
- * The cache stores [[HashArtifact]] objects accessed by [[HashBuildKey]]. Upon the first get
+ * The cache stores `HashArtifact` objects accessed by [[HashBuildKey]]. Upon the first get
  * the cache ensures one builder at a time while other threads wait. The build produces a
- * [[SharedRecomputableHandle]] that is held by the constructed HashArtifact.
+ * [[com.nvidia.spark.rapids.spill.SharedRecomputableHandle]] that is held by the constructed
+ * HashArtifact.
  *
  * Additionally the cache tracks `demand`, a count of the number of probes and total probe rows
  * for a given hash build that has not been cached yet, tracked via `observeProbe`. This is used

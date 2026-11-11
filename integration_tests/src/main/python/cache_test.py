@@ -292,6 +292,134 @@ def function_to_test_on_df(with_x_session, df_gen, func_on_df, test_conf):
 
     assert_equal(reg_result, cached_result)
 
+@pytest.mark.parametrize('aqe_enabled', ['true', 'false'])
+@allow_non_gpu('InMemoryTableScanExec', 'ColumnarToRowExec')
+def test_cache_project_partitioning(aqe_enabled):
+    cached_frames = []
+
+    def query(spark):
+        cached = (spark.range(0, 100, 1, 16).selectExpr('id % 10 AS k', 'id AS v')
+            .persist(StorageLevel.MEMORY_AND_DISK))
+        cached_frames.append(cached)
+        return cached.groupBy('k').agg(f.max('v').alias('max_v')).orderBy('k')
+
+    conf = {
+        'spark.sql.adaptive.enabled': aqe_enabled,
+        'spark.sql.shuffle.partitions': '4'}
+    try:
+        assert_gpu_and_cpu_are_equal_collect(query, conf=conf)
+    finally:
+        for cached in cached_frames:
+            cached.unpersist(blocking=True)
+
+
+def _assert_cached_project_aggregate_equal(projected_input, aqe_enabled, conf=None,
+        group_by='k', value='v'):
+    # The cached aggregate must shuffle again when equal grouping keys occur in
+    # different input partitions.
+    cached_frames = []
+
+    def query(spark):
+        cached = projected_input(spark).persist(StorageLevel.MEMORY_AND_DISK)
+        cached_frames.append(cached)
+        return cached.groupBy(group_by).agg(f.max(value).alias('max_v')).orderBy(group_by)
+
+    test_conf = copy_and_update({
+        'spark.sql.adaptive.enabled': aqe_enabled,
+        # Keep multiple partitions under AQE so coalescing cannot hide a missing shuffle.
+        'spark.sql.adaptive.coalescePartitions.enabled': 'false',
+        'spark.sql.shuffle.partitions': '4'}, conf or {})
+    try:
+        assert_gpu_and_cpu_are_equal_collect(query, conf=test_conf)
+    finally:
+        for cached in cached_frames:
+            cached.unpersist(blocking=True)
+
+
+@pytest.mark.parametrize('aqe_enabled', ['true', 'false'])
+@allow_non_gpu('InMemoryTableScanExec', 'ColumnarToRowExec')
+def test_cache_project_hash_partitioning(aqe_enabled):
+    def projected_input(spark):
+        source = gen_df(spark, [('id', LongGen(min_val=0, max_val=99, nullable=False))],
+            length=256, seed=0)
+        # Compute id on the GPU to keep the hash shuffle on the GPU.
+        partitioned = source.selectExpr('id + 1 AS id').repartition(4, 'id')
+        projected = partitioned.selectExpr('id % 10 AS k', 'id AS v')
+        if spark.conf.get('spark.rapids.sql.enabled') == 'true':
+            # AQE converts query stages to GPU during execution; inspect the completed plan.
+            assert projected.collect(), 'Expected non-empty projected input'
+            capture = spark._jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+            capture.assertContains(projected._jdf, 'GpuProjectExec')
+            capture.assertContains(projected._jdf, 'GpuShuffleExchangeExec')
+        return projected
+
+    _assert_cached_project_aggregate_equal(projected_input, aqe_enabled)
+
+
+@pytest.mark.parametrize('aqe_enabled', ['true', 'false'])
+@allow_non_gpu('InMemoryTableScanExec', 'ColumnarToRowExec')
+def test_cache_project_after_broadcast_join(aqe_enabled):
+    def projected_input(spark):
+        left = gen_df(spark, [('id', LongGen(min_val=0, max_val=99, nullable=False))],
+            length=256, seed=0).selectExpr('id + 1 AS id').repartition(4, 'id')
+        right = gen_df(spark, [('rid', LongGen(min_val=1, max_val=100, nullable=False))],
+            length=100, seed=1)
+        joined = left.join(f.broadcast(right), left.id == right.rid)
+        projected = joined.selectExpr('id % 10 AS k', 'id AS v')
+        if spark.conf.get('spark.rapids.sql.enabled') == 'true':
+            # AQE converts query stages to GPU during execution; inspect the completed plan.
+            assert projected.collect(), 'Expected non-empty projected input'
+            capture = spark._jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+            capture.assertContains(projected._jdf, 'GpuProjectExec')
+            capture.assertContains(projected._jdf, 'GpuShuffleExchangeExec')
+            capture.assertContains(projected._jdf, 'GpuBroadcastHashJoinExec')
+        return projected
+
+    _assert_cached_project_aggregate_equal(projected_input, aqe_enabled)
+
+
+@pytest.mark.parametrize('aqe_enabled', ['true', 'false'])
+@pytest.mark.parametrize('join_strategy,non_ast_side', [
+    ('broadcast', 'right'), ('shuffle', 'left')], ids=['broadcast_right', 'shuffle_left'])
+@allow_non_gpu('InMemoryTableScanExec', 'ColumnarToRowExec')
+def test_cache_project_after_split_condition_join(aqe_enabled, join_strategy, non_ast_side):
+    def projected_input(spark):
+        left = gen_df(spark, [
+            ('id', LongGen(min_val=0, max_val=99, nullable=False)),
+            ('probe', LongGen(min_val=0, max_val=99, nullable=False))],
+            length=256, seed=0).selectExpr('id', 'probe + 1 AS probe').repartition(4, 'id')
+        right = gen_df(spark, [
+            ('rid', LongGen(min_val=0, max_val=99, nullable=False)),
+            ('offset', LongGen(min_val=-1, max_val=1, nullable=False))],
+            length=100, seed=1).selectExpr('rid + 1 AS rid', 'offset')
+        # Force Add out of AST so the condition requires a pre-projection on this input.
+        residual = (left.probe + 1 < right.rid) if non_ast_side == 'left' else (
+            left.probe < right.rid + right['offset'])
+        condition = (left.id == right.rid) & residual
+        right = f.broadcast(right) if join_strategy == 'broadcast' else right.hint('merge')
+        joined = left.join(right, condition)
+        if spark.conf.get('spark.rapids.sql.enabled') == 'true':
+            # AQE converts query stages to GPU during execution; inspect the completed plan.
+            assert joined.collect(), 'Expected non-empty join output'
+            capture = spark._jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+            capture.assertContains(joined._jdf, 'GpuProjectExec')
+            capture.assertContains(joined._jdf, 'GpuShuffleExchangeExec')
+            join_exec = ('GpuBroadcastHashJoinExec' if join_strategy == 'broadcast' else
+                'GpuShuffledHashJoinExec')
+            capture.assertContains(joined._jdf, join_exec)
+            plan = joined._jdf.queryExecution().executedPlan().toString()
+            assert f'_agpu_non_ast_{non_ast_side[0]}_' in plan, (
+                'Expected join-condition pre-projection:\n' + plan)
+        return joined
+
+    _assert_cached_project_aggregate_equal(projected_input, aqe_enabled,
+        conf={'spark.rapids.sql.test.forceNonAst': 'Add',
+              'spark.rapids.sql.join.useShuffledSymmetricHashJoin': 'false',
+              'spark.sql.autoBroadcastJoinThreshold': '-1',
+              'spark.sql.adaptive.autoBroadcastJoinThreshold': '-1'},
+        group_by='offset', value='id')
+
+
 @pytest.mark.parametrize('data_gen', all_gen, ids=idfn)
 @pytest.mark.parametrize('with_x_session', [with_gpu_session, with_cpu_session])
 @pytest.mark.parametrize('enable_vectorized_conf', enable_vectorized_confs, ids=idfn)
@@ -668,6 +796,50 @@ _requires_pcbs_enabled = pytest.mark.skipif(not _pcbs_enabled,
 # Keeps the cached scan on the GPU across shims, as in the tests above.
 _pcbs_gpu_scan_conf = {'spark.rapids.sql.exec.InMemoryTableScanExec': 'true',
                        'spark.sql.adaptive.enabled': 'false'}
+
+
+@_requires_pcbs_enabled
+def test_cache_cpu_columnar_read():
+    def find_cache_scan(plan):
+        if 'InMemoryTableScan' in plan.nodeName():
+            return plan
+        children = plan.children().iterator()
+        while children.hasNext():
+            scan = find_cache_scan(children.next())
+            if scan is not None:
+                return scan
+        return None
+
+    def check(spark):
+        source = spark.range(2000).selectExpr('id', 'cast(id as string) as value').cache()
+        assert source.count() == 2000
+        # Reading one cached relation while building another catches lost Hadoop settings.
+        derived = source.select('value').cache()
+        assert derived.count() == 2000
+        scan = find_cache_scan(source._jdf.queryExecution().executedPlan())
+        assert scan is not None and scan.supportsColumnar()
+        # executeColumnar reaches the Spark package-private ParquetColumnVector path.
+        assert scan.executeColumnar().count() > 0
+
+    with_cpu_session(check, conf={'spark.sql.adaptive.enabled': 'false',
+                                  'spark.rapids.sql.batchSizeBytes': '1k'})
+
+
+@_requires_pcbs_enabled
+@allow_non_gpu(any=True)
+@pytest.mark.skipif(not is_spark_35x(), reason='reproduces the Spark 3.5 CPU cache scan')
+def test_cache_cpu_scan_feeds_gpu_aggregate():
+    def check(spark):
+        cached = spark.range(10).selectExpr(
+            'cast(id as string) as s',
+            "cast('2026-01-01 00:00:00' as timestamp_ntz) as ts").cache()
+        assert cached.count() == 10
+        result = cached.groupBy('s').count()
+        assert len(result.collect()) == 10
+        spark._jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.assertContains(
+            result._jdf, 'HostColumnarToGpu')
+
+    with_gpu_session(check, conf={'spark.sql.adaptive.enabled': 'false'})
 
 
 def _cached_relation(spark, df):

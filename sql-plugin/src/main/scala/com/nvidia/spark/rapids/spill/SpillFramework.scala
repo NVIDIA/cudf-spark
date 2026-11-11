@@ -31,7 +31,7 @@ import ai.rapids.cudf._
 import com.nvidia.spark.rapids.{GpuColumnVector, GpuColumnVectorFromBuffer,
   GpuCompressedColumnVector, GpuDeviceManager, GpuSemaphore, HashedPriorityQueue, HostAlloc,
   HostMemoryOutputStream, MemoryBufferToHostByteBufferIterator, NvtxId, NvtxRegistry,
-  RapidsConf, RapidsHostColumnVector, SpillPriorities, TaskRegistryTracker}
+  RapidsConf, RapidsExecutorPlugin, RapidsHostColumnVector, SpillPriorities, TaskRegistryTracker}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableSeq
 import com.nvidia.spark.rapids.format.TableMeta
@@ -195,9 +195,13 @@ trait SpillableHandle extends StoreHandle with Logging {
    * thread will win and perform the spilling, and the other thread will make
    * no modification.
    *
-   * If the disk is full, or a spill failure occurs otherwise (eg. device issues),
-   * we make no attempt to handle it or restore state, as we expect to be in a non-recoverable
-   * state at the task/executor level.
+   * If the spill fails (e.g. the disk is full or a device error occurs), the exception
+   * propagates to the caller. The handle keeps its data and can be spilled again, unless it
+   * was closed during the spill, in which case the failed spill completes the close. A failed
+   * device spill instead leaves `spilling` set, as a successful one does, and `releaseSpilled`
+   * resets it and completes any close after the post-spill synchronize. A caller that spills
+   * a device handle directly must therefore synchronize the device and call `releaseSpilled`
+   * after `spill` returns a positive size, or after it throws with `spillFailed` set.
    *
    * @note The size returned from this method is only used by the spill framework
    *       to track the approximate size. It should just return `approxSizeInBytes`, as
@@ -231,9 +235,24 @@ trait SpillableHandle extends StoreHandle with Logging {
   private[spill] def doClose(): Unit
 
   /**
+   * Whether a failed spill keeps `spilling` set until `releaseSpilled`, which runs after the
+   * post-spill synchronize, instead of resetting it in the spilling thread.
+   */
+  protected def failedSpillAwaitsSync: Boolean = false
+
+  /**
+   * Set while a failed spill keeps `spilling` set for `releaseSpilled`. Only the thread that
+   * owns the spill sets it, and no other spill can start until `releaseSpilled` clears it.
+   */
+  private[spill] var spillFailed: Boolean = false
+
+  /**
    * Executes a spill operation while handling exceptions.
    * If an exception occurs during spilling (e.g. InterruptedException), this method
-   * catches it, logs a warning, resets the spilling state to false, and rethrows the exception.
+   * catches it, logs a warning, resets the spilling state to false, completes any close
+   * deferred to a spill that had not yet released `spilling`, and rethrows the exception.
+   * If `failedSpillAwaitsSync` is set, it instead keeps `spilling` set and sets
+   * `spillFailed`, leaving the reset and any close to `releaseSpilled`.
    *
    * Subclasses override this method to wrap the spill operation with appropriate metrics tracking:
    * - DeviceSpillableHandle tracks spillToHostTime and memory bytes spilled
@@ -250,8 +269,21 @@ trait SpillableHandle extends StoreHandle with Logging {
       } catch {
         case e: Throwable =>
           logWarning(s"Failed to spill $this", e)
-          synchronized {
-            spilling = false
+          val closeNow = synchronized {
+            // A block that already reset spilling has also handled any deferred close.
+            val ownsSpill = spilling
+            if (ownsSpill && failedSpillAwaitsSync) {
+              spillFailed = true
+              false
+            } else {
+              spilling = false
+              ownsSpill && closed
+            }
+          }
+          if (closeNow) {
+            try doClose() catch {
+              case t: Throwable => SpillFramework.addFailure(e, t)
+            }
           }
           throw e
       }
@@ -303,8 +335,7 @@ trait DeviceSpillableHandle[T <: AutoCloseable] extends DeviceStoreHandle {
   protected def releaseDeviceResource(): Unit = {
     SpillFramework.removeFromDeviceStore(this)
     synchronized {
-      dev.foreach(_.close())
-      dev = None
+      try dev.foreach(_.close()) finally dev = None
     }
   }
 
@@ -315,10 +346,36 @@ trait DeviceSpillableHandle[T <: AutoCloseable] extends DeviceStoreHandle {
    * materialized handle's refCount, and the spiller thread (the spiller thread cannot
    * free a device buffer that the worker thread isn't done with).
    * See https://github.com/NVIDIA/spark-rapids/issues/8610 for more info.
+   *
+   * Subclasses' `spill` must leave `spilling` set on success; this method clears it and
+   * completes any `close` deferred during the spill, only after the post-spill synchronize.
+   * A failed spill also leaves `spilling` set; this method then keeps the device data.
    */
   override def releaseSpilled(): Unit = {
-    releaseDeviceResource()
+    synchronized {
+      var failure: Throwable = null
+      if (spillFailed) {
+        spillFailed = false
+      } else {
+        try {
+          releaseDeviceResource()
+        } catch {
+          case t: Throwable => failure = t
+        }
+      }
+      spilling = false
+      if (closed) {
+        try {
+          doClose()
+        } catch {
+          case t: Throwable => failure = SpillFramework.addFailure(failure, t)
+        }
+      }
+      if (failure != null) throw failure
+    }
   }
+
+  override protected def failedSpillAwaitsSync: Boolean = true
 
   // Wrap spill execution with memory spill metrics tracking
   override protected def executeSpill(block: => Long): Long = {
@@ -584,11 +641,10 @@ class SharedRecomputableHandle[T <: AutoCloseable] private[spill] (
     // Logically evict the object under the handle lock but do not free it yet.
     // The thread that spills removes dev and sets spilling to true so that only
     // one thread spills.
-    var evicted: Option[T] = None
     val thisThreadSpills = synchronized {
       if (!closed && dev.isDefined && pinCount == 0 && !spilling) {
         spilling = true
-        evicted = dev
+        pendingRelease = pendingRelease ++ dev.toSeq
         dev = None
         SpillFramework.removeFromDeviceStore(this)
         true
@@ -598,17 +654,7 @@ class SharedRecomputableHandle[T <: AutoCloseable] private[spill] (
     }
     // spilling remains true until releaseSpilled() so that a newly rebuilt dev
     // isn't spilled before the pendingRelease passes through post-spill device sync.
-    if (thisThreadSpills) {
-      executeSpill {
-        synchronized {
-          pendingRelease = pendingRelease ++ evicted.toSeq
-        }
-        0L
-      }
-      approxSizeInBytes
-    } else {
-      0L
-    }
+    if (thisThreadSpills) approxSizeInBytes else 0L
   }
 
   override def releaseSpilled(): Unit = {
@@ -1010,11 +1056,9 @@ class SpillableDeviceBufferHandle private (
             var stagingHost: Option[SpillableHostBufferHandle] =
               Some(SpillableHostBufferHandle.createHostHandleFromDeviceBuff(buf, taskPriority))
             synchronized {
-              spilling = false
               if (closed) {
                 stagingHost.foreach(_.close())
                 stagingHost = None
-                doClose()
               } else {
                 host = stagingHost
               }
@@ -1121,11 +1165,9 @@ class SpillableColumnarBatchHandle private (
                 taskPriority))
             val actualBytes: Long = staging.map(_.sizeInBytes).getOrElse(0L)
             synchronized {
-              spilling = false
               if (closed) {
                 staging.foreach(_.close())
                 staging = None
-                doClose()
               } else {
                 host = staging
               }
@@ -1274,9 +1316,7 @@ class SpillableColumnarBatchFromBufferHandle private (
               Some(SpillableHostBufferHandle.createHostHandleFromDeviceBuff(
                 cvFromBuffer.getBuffer, taskPriority))
             synchronized {
-              spilling = false
               if (closed) {
-                doClose()
                 staging.foreach(_.close())
                 staging = None
               } else {
@@ -1391,9 +1431,8 @@ class SpillableCompressedColumnarBatchHandle private (
               Some(SpillableHostBufferHandle.createHostHandleFromDeviceBuff(
                 cvFromBuffer.getTableBuffer, taskPriority))
             synchronized {
-              spilling = false
               if (closed) {
-                doClose()
+                staging.foreach(_.close())
                 staging = None
               } else {
                 host = staging
@@ -1610,7 +1649,7 @@ class DiskHandle private(
    * @param mb the host memory buffer to copy data into. The buffer's capacity
    *           must be exactly equal to the decompressed data length. Note that this
    *           may differ from `sizeInBytes` since data on disk may be compressed.
-   * @throws IllegalStateException if the actual bytes read from disk does not match
+   * @throws java.lang.IllegalStateException if the actual bytes read from disk does not match
    *                               the buffer's length
    */
   def materializeToHostMemoryBuffer(mb: HostMemoryBuffer): Unit = {
@@ -1631,7 +1670,7 @@ class DiskHandle private(
    * @param dmb the device memory buffer to copy data into. The buffer's capacity
    *            must be exactly equal to the decompressed data length. Note that this
    *            may differ from `sizeInBytes` since data on disk may be compressed.
-   * @throws IllegalStateException if the actual bytes read from disk does not match
+   * @throws java.lang.IllegalStateException if the actual bytes read from disk does not match
    *                               the buffer's length
    */
   def materializeToDeviceMemoryBuffer(dmb: DeviceMemoryBuffer): Unit = {
@@ -1751,7 +1790,14 @@ trait SpillableStore[T <: SpillableHandle]
       val it = spillableHandles.iterator()
       while (it.hasNext) {
         val handle = it.next()
-        val spilled = handle.spill()
+        val spilled = try handle.spill() catch {
+          case t: Throwable =>
+            // postSpill calls releaseSpilled for a failed spill that awaits the synchronize
+            if (handle.synchronized(handle.spillFailed)) {
+              spilledHandles.add(handle)
+            }
+            throw t
+        }
         if (spilled > 0) {
           // this thread was successful at spilling handle.
           amountSpilled += spilled
@@ -1803,7 +1849,15 @@ trait SpillableStore[T <: SpillableHandle]
         com.nvidia.spark.rapids.jni.RmmSpark.spillRangeStart()
         try {
           val plan = makeSpillPlan(spillNeeded)
-          val amountSpilled = plan.trySpill()
+          val amountSpilled = try {
+            plan.trySpill()
+          } catch {
+            case t: Throwable =>
+              try postSpill(plan) catch {
+                case cleanupFailure: Throwable => SpillFramework.addFailure(t, cleanupFailure)
+              }
+              throw t
+          }
           postSpill(plan)
           amountSpilled
         } finally {
@@ -2107,12 +2161,33 @@ class SpillableHostStore(val maxSize: Option[Long] = None)
 class SpillableDeviceStore extends SpillableStore[DeviceStoreHandle] {
   override protected def spillNvtxRange: NvtxId = NvtxRegistry.DEVICE_SPILL
 
+  protected def synchronizeDevice(): Unit = Cuda.deviceSynchronize()
+
+  protected def failExecutorOnSyncFailure(): Unit = {
+    RapidsExecutorPlugin.exitOnCudaFatalError(20)
+  }
+
   override def postSpill(plan: SpillPlan): Unit = {
     // spillables is the list of handles that have to be closed
     // we synchronize every thread before we release what was spilled
-    Cuda.deviceSynchronize()
+    try {
+      synchronizeDevice()
+    } catch {
+      case error: Throwable =>
+        logError("Device spill synchronization failed, shutting down executor", error)
+        failExecutorOnSyncFailure()
+        throw error
+    }
     // this is safe to be called unconditionally if another thread spilled
-    plan.getSpilled.forEach(_.releaseSpilled())
+    var failure: Throwable = null
+    plan.getSpilled.forEach { handle =>
+      try {
+        handle.releaseSpilled()
+      } catch {
+        case t: Throwable => failure = SpillFramework.addFailure(failure, t)
+      }
+    }
+    if (failure != null) throw failure
   }
 }
 
@@ -2355,11 +2430,9 @@ class SpillableTableHandle private (
                 taskPriority))
             val actualBytes: Long = staging.map(_.sizeInBytes).getOrElse(0L)
             synchronized {
-              spilling = false
               if (closed) {
                 staging.foreach(_.close())
                 staging = None
-                doClose()
               } else {
                 host = staging
               }
@@ -2413,6 +2486,18 @@ object SpillableTableHandle {
 }
 
 object SpillFramework extends Logging {
+  /**
+   * Returns the first failure, recording `t` as suppressed unless it is that same failure.
+   */
+  private[spill] def addFailure(failure: Throwable, t: Throwable): Throwable = {
+    if (failure == null) {
+      t
+    } else {
+      if (failure ne t) failure.addSuppressed(t)
+      failure
+    }
+  }
+
   // public for tests. Some tests not in the `spill` package require setting this
   // because they need fine control over allocations.
   var storesInternal: SpillableStores = _

@@ -16,8 +16,6 @@
 
 package com.nvidia.spark.rapids
 
-import java.time.ZoneId
-
 import org.apache.orc.TypeDescription
 
 // Orc schema wrapper
@@ -28,5 +26,5 @@ private case class OrcSchemaWrapper(schema: TypeDescription) extends SchemaBase 
 /** Orc extra information containing the requested column ids for the current coalescing stripes */
 case class OrcExtraInfo(
     requestedMapping: Option[Array[Int]],
-    writerTimezone: ZoneId,
+    writerTimezone: String,
     writerUsedProlepticGregorian: Boolean) extends ExtraInfo
