@@ -29,14 +29,17 @@ import tempfile
 import time
 
 from get_buildvers import _get_buildvers
-from shim_compatibility_impact import analyze_impact
+from shim_compatibility_impact import POMS as ROOT_POMS, analyze_impact
 from shimpler_source_graph import load_source_graph, source_lineage
 from shimpler_source_resolver import resolve_sources_with_ties, scan_module_sources
 from shimpler_source_targets import EXTERNAL_EXACT_TARGETS
 
 
-PEER_CHECK_BUDGET_SECONDS = 150
-ROOT_POMS = ("pom.xml", "scala2.13/pom.xml")
+PEER_CHECK_BUDGET_SECONDS = 300
+FILTER_BUDGET_SECONDS = 30
+# Leave CI setup/upload headroom in the eight-minute advisory job.
+ADVISORY_BUDGET_SECONDS = 420
+FINALIZATION_RESERVE_SECONDS = 30
 VERSIONED = re.compile(r"^(.*)/src/main/spark([^/]+)/(scala|java)/(.+)$")
 PACKAGE = re.compile(r"(?m)^\s*package\s+([\w.]+)")
 DECLARATION = re.compile(
@@ -66,25 +69,35 @@ class MergeConflict(PreflightError):
     pass
 
 
-def run(command, root, timeout=90):
-    result = subprocess.run(command, cwd=root, text=True, capture_output=True, timeout=timeout)
+def operation_timeout(deadline, maximum=90):
+    if deadline is None:
+        return maximum
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise PreflightError("Advisory time budget reached")
+    return min(maximum, remaining)
+
+
+def run(command, root, timeout=90, deadline=None):
+    result = subprocess.run(command, cwd=root, text=True, capture_output=True,
+                            timeout=operation_timeout(deadline, timeout))
     if result.returncode:
         # Do not echo gh stderr: it may contain authentication diagnostics.
         raise PreflightError("{} failed (exit {})".format(command[0], result.returncode))
     return result.stdout
 
 
-def git(root, *args):
-    return run(["git", *args], root).strip()
+def git(root, *args, deadline=None):
+    return run(["git", *args], root, deadline=deadline).strip()
 
 
-def git_paths(root, *args):
-    return set(filter(None, run(["git", *args, "-z"], root).split("\0")))
+def git_paths(root, *args, deadline=None):
+    return set(filter(None, run(["git", *args, "-z"], root, deadline=deadline).split("\0")))
 
 
-def commit_sha(root, ref):
+def commit_sha(root, ref, deadline=None):
     try:
-        return git(root, "rev-parse", "--verify", ref + "^{commit}")
+        return git(root, "rev-parse", "--verify", ref + "^{commit}", deadline=deadline)
     except PreflightError as error:
         raise PreflightError("Cannot resolve commit {}; fetch its history and retry".format(ref)) from error
 
@@ -118,7 +131,7 @@ def named_imports(source):
 
 def supported_versions(root):
     result = set()
-    for relative in ("pom.xml", "scala2.13/pom.xml"):
+    for relative in ROOT_POMS:
         pom = root / relative
         if pom.is_file():
             try:
@@ -233,12 +246,12 @@ def coverage(root, modules, requested):
                                                             for p, i in sorted(skipped)])
 
 
-def graphql(root, query, **variables):
+def graphql(root, query, deadline=None, **variables):
     command = ["gh", "api", "graphql", "-f", "query=" + query]
     for name, value in variables.items():
         if value is not None:
             command.extend(["-F", "{}={}".format(name, value)])
-    payload = json.loads(run(command, root))
+    payload = json.loads(run(command, root, deadline=deadline))
     if payload.get("errors") or not payload.get("data"):
         raise PreflightError("GitHub returned incomplete GraphQL data")
     return payload["data"]["repository"]
@@ -255,17 +268,18 @@ def next_cursor(page, previous):
     return cursor
 
 
-def remote_base(root, owner, name, branch):
+def remote_base(root, owner, name, branch, deadline=None):
     query = """query($owner:String!, $name:String!, $ref:String!) {
       repository(owner:$owner, name:$name) { ref(qualifiedName:$ref) { target { oid } } }
     }"""
-    ref = graphql(root, query, owner=owner, name=name, ref="refs/heads/" + branch)["ref"]
+    ref = graphql(root, query, owner=owner, name=name, ref="refs/heads/" + branch,
+                  deadline=deadline)["ref"]
     if not ref:
         raise PreflightError("Target branch does not exist")
     return ref["target"]["oid"]
 
 
-def open_prs(root, owner, name, branch):
+def open_prs(root, owner, name, branch, deadline=None):
     query = """query($owner:String!, $name:String!, $branch:String!, $cursor:String) {
       repository(owner:$owner, name:$name) {
         pullRequests(states:OPEN, baseRefName:$branch, first:100, after:$cursor) {
@@ -278,14 +292,14 @@ def open_prs(root, owner, name, branch):
     result, cursor = [], None
     while True:
         page = graphql(root, query, owner=owner, name=name, branch=branch,
-                       cursor=cursor)["pullRequests"]
+                       cursor=cursor, deadline=deadline)["pullRequests"]
         result.extend(page["nodes"])
         if not page["pageInfo"]["hasNextPage"]:
             return result
         cursor = next_cursor(page, cursor)
 
 
-def merged_prs(root, owner, name, commits, branch):
+def merged_prs(root, owner, name, commits, branch, deadline=None):
     result = {}
     for start in range(0, len(commits), 40):
         fields = []
@@ -295,7 +309,7 @@ def merged_prs(root, owner, name, commits, branch):
                           % (index, sha, PR_FIELDS))
         query = ('query($owner:String!, $name:String!) { repository(owner:$owner,name:$name) {'
                  + " ".join(fields) + "} }")
-        data = graphql(root, query, owner=owner, name=name)
+        data = graphql(root, query, owner=owner, name=name, deadline=deadline)
         for commit in data.values():
             if commit is None:
                 raise PreflightError("GitHub could not read a base commit")
@@ -311,7 +325,7 @@ def merged_prs(root, owner, name, commits, branch):
     return list(result.values())
 
 
-def pr_files(root, owner, name, number):
+def pr_files(root, owner, name, number, deadline=None):
     query = """query($owner:String!, $name:String!, $number:Int!, $cursor:String) {
       repository(owner:$owner, name:$name) { pullRequest(number:$number) {
         headRefOid changedFiles files(first:100, after:$cursor) {
@@ -322,7 +336,7 @@ def pr_files(root, owner, name, number):
     paths, cursor, head = [], None, None
     while True:
         pr = graphql(root, query, owner=owner, name=name, number=number,
-                     cursor=cursor)["pullRequest"]
+                     cursor=cursor, deadline=deadline)["pullRequest"]
         if head is not None and head != pr["headRefOid"]:
             raise PreflightError("PR head changed during file pagination")
         head = pr["headRefOid"]
@@ -335,14 +349,14 @@ def pr_files(root, owner, name, number):
         cursor = next_cursor(page, cursor)
 
 
-def candidate_files(root, owner, name, pr):
+def candidate_files(root, owner, name, pr, deadline=None):
     page = pr.get("files")
     if page is not None and not page["pageInfo"]["hasNextPage"]:
         paths = {node["path"] for node in page["nodes"]}
         if len(paths) != pr["changedFiles"]:
             raise PreflightError("PR file list is truncated")
         return pr["headRefOid"], paths
-    return pr_files(root, owner, name, pr["number"])
+    return pr_files(root, owner, name, pr["number"], deadline=deadline)
 
 
 def path_signals(paths):
@@ -350,7 +364,7 @@ def path_signals(paths):
                 if p.endswith((".scala", ".java")) and (m := VERSIONED.fullmatch(p))}
     # Shimpler implementation changes affect source selection even when no
     # profile or versioned source changes in the same PR.
-    matrix = any(p in ("pom.xml", "scala2.13/pom.xml", "build/get_buildvers.py",
+    matrix = any(p in ROOT_POMS or p in ("build/get_buildvers.py",
                        "build/shimpler_source_graph.py", "build/shimpler_source_selectors.py",
                        "build/shimpler_source_resolver.py", "build/shimpler_source_generator.py",
                        "build/shimpler_source_targets.py",
@@ -376,7 +390,7 @@ def imported_families(source):
     return result
 
 
-def changed_imports(root, paths, head, dirty):
+def changed_imports(root, paths, head, dirty, deadline=None):
     result = set()
     for path in sorted(paths):
         if not re.search(r"/src/main/(?:scala|java|spark[^/]+/(?:scala|java))/", path):
@@ -387,8 +401,8 @@ def changed_imports(root, paths, head, dirty):
             source = root / path
             if source.is_file() and not source.is_symlink():
                 result.update(imported_families(source.read_text(encoding="utf-8")))
-        elif git(root, "ls-tree", "--name-only", head, "--", path):
-            result.update(imported_families(git(root, "show", head + ":" + path)))
+        elif git(root, "ls-tree", "--name-only", head, "--", path, deadline=deadline):
+            result.update(imported_families(git(root, "show", head + ":" + path, deadline=deadline)))
     return result
 
 
@@ -417,41 +431,53 @@ def overlap_reasons(current, other, references=()):
     return reasons
 
 
-def git_texts(root, revision, paths):
-    """Read immutable regular blobs without checking out or executing peer files."""
-    result = dict.fromkeys(paths)
+def git_blobs(root, revision, paths, strict=False, deadline=None):
+    """Yield immutable regular blobs, checking the batch framing in one place."""
     entries = []
-    for record in run(["git", "ls-tree", "-rz", revision, "--", *sorted(paths)], root).split("\0"):
+    for record in run(["git", "ls-tree", "-rz", revision, "--", *sorted(paths)], root,
+                      deadline=deadline).split("\0"):
         if not record:
             continue
         metadata, path = record.split("\t", 1)
         mode, kind, oid = metadata.split()
         if kind != "blob" or mode not in ("100644", "100755"):
-            raise PreflightError("Source-selection input is not a regular blob")
+            if strict:
+                raise PreflightError("Source-selection input is not a regular blob")
+            continue
         entries.append((oid, path))
     if not entries:
-        return result
+        return
     blobs = subprocess.run(["git", "cat-file", "--batch"], cwd=root,
                            input="".join(oid + "\n" for oid, _ in entries).encode(),
-                           capture_output=True, timeout=90)
+                           capture_output=True, timeout=operation_timeout(deadline))
     if blobs.returncode:
         raise PreflightError("Cannot read source-selection input blobs")
     stream = io.BytesIO(blobs.stdout)
     for oid, path in entries:
+        operation_timeout(deadline)
         actual, kind, size = stream.readline().decode().split()
         data = stream.read(int(size))
         if actual != oid or kind != "blob" or len(data) != int(size) or stream.read(1) != b"\n":
             raise PreflightError("Truncated source-selection input blobs")
-        result[path] = data.decode("utf-8")
+        yield path, data
+
+
+def git_texts(root, revision, paths, deadline=None):
+    """Read immutable inputs, retaining missing paths as None."""
+    result = dict.fromkeys(paths)
+    result.update((path, data.decode("utf-8")) for path, data in
+                  git_blobs(root, revision, paths, strict=True, deadline=deadline))
     return result
 
 
-def revision_impact(root, base, head, reference_poms):
-    common = git(root, "merge-base", base, head)
-    paths = git_paths(root, "diff", "--name-only", "--no-renames", common, head)
+def revision_impact(root, base, head, deadline=None):
+    # Target-side selector changes must be present in both sides of the proof.
+    combined = merge_snapshot(root, base, head, deadline=deadline)
+    paths = git_paths(root, "diff", "--name-only", "--no-renames", base, combined, deadline=deadline)
     inputs = paths | set(ROOT_POMS)
-    before, after = git_texts(root, common, inputs), git_texts(root, head, inputs)
-    impact = analyze_impact(before, after, reference_poms)
+    before = git_texts(root, base, inputs, deadline=deadline)
+    after = git_texts(root, combined, inputs, deadline=deadline)
+    impact = analyze_impact(before, after)
     if impact["status"] == "KNOWN":
         # A new/removed declaration changes which imports the checker models in
         # every profile, even when that declaration selects only one profile.
@@ -468,16 +494,17 @@ def revision_impact(root, base, head, reference_poms):
                 impact = dict(status="UNKNOWN", profiles=[], reason="Changed versioned declaration "
                               "identities can affect import checks across profiles: " + path)
                 break
-    impact["comparison_base"] = common
+    operation_timeout(deadline)
+    impact.update(comparison_base=base, combined_tree=combined)
     return impact
 
 
-def candidate_filter(root, repo, base, current_impact, peer, paths, reference_poms):
-    evidence = dict(status="RETAINED_UNCERTAIN", base=base, head=peer["headRefOid"],
+def candidate_filter(root, repo, base, current_impact, peer, deadline=None):
+    evidence = dict(status="RETAINED_UNCERTAIN", base=base, head=peer["head"],
                     current_profiles=current_impact.get("profiles")
                     if current_impact["status"] == "KNOWN" else None)
-    if (current_impact["status"] == "KNOWN" and not current_impact["profiles"]
-            and not current_impact.get("metadata_fields_changed")):
+    paths = set(peer["files"])
+    if current_impact["status"] == "KNOWN" and not current_impact["profiles"]:
         evidence.update(status="FILTERED", reason="Current PR has no source-selection effect: "
                         + current_impact["reason"])
         return evidence
@@ -492,33 +519,14 @@ def candidate_filter(root, repo, base, current_impact, peer, paths, reference_po
         evidence["reason"] = "Current PR impact is not bounded; retain this candidate"
         return evidence
     try:
-        head = fetch_peer(root, repo, peer["headRefOid"])
-        impact = revision_impact(root, base, head, reference_poms)
+        head = fetch_peer(root, repo, peer["head"], deadline=deadline)
+        impact = revision_impact(root, base, head, deadline=deadline)
         evidence["comparison_base"] = impact.get("comparison_base")
         if impact["status"] != "KNOWN":
             evidence["reason"] = impact["reason"]
             return evidence
         evidence["peer_profiles"] = impact["profiles"]
-        current_fields = set(current_impact.get("metadata_fields_changed", []))
-        peer_fields = set(impact.get("metadata_fields_changed", []))
-        current_refs = set(current_impact.get("metadata_references", []))
-        peer_refs = set(impact.get("metadata_references", []))
-        evidence.update(current_metadata_fields=sorted(current_fields),
-                        peer_metadata_fields=sorted(peer_fields),
-                        current_metadata_references=sorted(current_refs),
-                        peer_metadata_references=sorted(peer_refs))
-        if peer_fields and current_impact["status"] != "KNOWN":
-            evidence["reason"] = "Unbounded current changes may use the peer's changed POM metadata"
-            return evidence
-        if ((current_fields and (current_fields & peer_refs or "*" in peer_refs))
-                or (peer_fields and (peer_fields & current_refs or "*" in current_refs))):
-            evidence.update(status="RETAINED", reason="Changed POM metadata is referenced by "
-                            "the other PR's build configuration")
-            return evidence
-        if current_impact["status"] == "KNOWN" and not current_impact["profiles"]:
-            evidence.update(status="FILTERED", reason="Current PR has no source-selection effect "
-                            "in the peer's known build context")
-        elif not impact["profiles"]:
+        if not impact["profiles"]:
             evidence.update(status="FILTERED", reason="Peer has no source-selection effect: "
                             + impact["reason"])
         elif current_impact["status"] == "KNOWN":
@@ -537,48 +545,74 @@ def candidate_filter(root, repo, base, current_impact, peer, paths, reference_po
     return evidence
 
 
-def related_prs(root, repo, base_ref, head_ref, validated_base, branch, own_pr,
-                include_worktree=True, require_pr_head=False):
-    owner, name = repo.split("/")
-    base, head = commit_sha(root, base_ref), commit_sha(root, head_ref)
-    if remote_base(root, owner, name, branch) != base:
-        raise PreflightError("Fetched base differs from GitHub; fetch the target branch and retry")
-    start = commit_sha(root, validated_base) if validated_base else git(
-        root, "merge-base", base, head)
-    git(root, "merge-base", "--is-ancestor", start, base)
-    common = git(root, "merge-base", base, head)
-    current = git_paths(root, "diff", "--name-only", "--no-renames", common, head)
-    # Include work in progress when preparing a new PR; record that it is not an exact-head scan.
-    is_worktree_head = head == git(root, "rev-parse", "HEAD")
-    dirty = include_worktree and is_worktree_head and bool(
-        git(root, "status", "--porcelain", "--untracked-files=normal"))
-    if dirty:
-        current.update(git_paths(root, "diff", "--name-only", "--no-renames", "HEAD"))
-        current.update(git_paths(root, "ls-files", "--others", "--exclude-standard"))
-    references = changed_imports(root, current, head, dirty)
+def peer_priority(peer):
+    return (not any(r.startswith("same shim family:") for r in peer["reasons"]),
+            not any(path_signals(peer["files"])), -peer["number"])
+
+
+def filter_candidates(root, repo, report, deadline):
+    report["filtered_prs"] = []
+    candidates = sorted((p for p in report["related"] if p["state"] == "OPEN"), key=peer_priority)
+    if not candidates:
+        return
+    # Unfinished proofs remain visible and eligible for ordinary joint checking.
+    for peer in candidates:
+        peer["filter"] = dict(status="RETAINED_UNCERTAIN", base=report["base"], head=peer["head"],
+                              timed_out=True, reason="Filtering time budget reached")
+        peer["joint_check"] = dict(status="NOT_CHECKED", reason="Filtering time budget reached")
     try:
-        reference_poms = git_texts(root, base, set(ROOT_POMS))
-        current_impact = (dict(status="UNKNOWN", profiles=[], reason="Uncommitted work is retained")
-                          if dirty else revision_impact(root, base, head, reference_poms))
+        current_impact = revision_impact(root, report["base"], report["head"], deadline=deadline)
     except (PreflightError, OSError, ValueError, KeyError, TypeError,
             subprocess.TimeoutExpired):
-        reference_poms = {}
         current_impact = dict(status="UNKNOWN", profiles=[],
-                              reason="Current source-selection inputs could not be analyzed")
-    commits = git(root, "rev-list", start + ".." + base).splitlines()
-    candidates = list(open_prs(root, owner, name, branch))
+                              reason="Current combined source inputs could not be analyzed")
+    report["current_impact"] = current_impact
+    for peer in candidates:
+        if time.monotonic() >= deadline:
+            break
+        evidence = candidate_filter(root, repo, report["base"], current_impact, peer, deadline=deadline)
+        if time.monotonic() >= deadline:
+            break
+        peer["filter"] = evidence
+        if evidence["status"] == "FILTERED":
+            report["filtered_prs"].append(peer)
+            report["related"].remove(peer)
+    report["status"] = "NEEDS_REVIEW" if report["related"] else "NO_RELATED_PRS"
+
+
+def related_prs(root, repo, base_ref, head_ref, validated_base, branch, own_pr,
+                include_worktree=True, require_pr_head=False, deadline=None):
+    owner, name = repo.split("/")
+    base, head = commit_sha(root, base_ref, deadline), commit_sha(root, head_ref, deadline)
+    if remote_base(root, owner, name, branch, deadline=deadline) != base:
+        raise PreflightError("Fetched base differs from GitHub; fetch the target branch and retry")
+    start = commit_sha(root, validated_base, deadline) if validated_base else git(
+        root, "merge-base", base, head, deadline=deadline)
+    git(root, "merge-base", "--is-ancestor", start, base, deadline=deadline)
+    common = git(root, "merge-base", base, head, deadline=deadline)
+    current = git_paths(root, "diff", "--name-only", "--no-renames", common, head, deadline=deadline)
+    # Include work in progress when preparing a new PR; record that it is not an exact-head scan.
+    is_worktree_head = head == git(root, "rev-parse", "HEAD", deadline=deadline)
+    dirty = include_worktree and is_worktree_head and bool(
+        git(root, "status", "--porcelain", "--untracked-files=normal", deadline=deadline))
+    if dirty:
+        current.update(git_paths(root, "diff", "--name-only", "--no-renames", "HEAD", deadline=deadline))
+        current.update(git_paths(root, "ls-files", "--others", "--exclude-standard", deadline=deadline))
+    references = changed_imports(root, current, head, dirty, deadline=deadline)
+    commits = git(root, "rev-list", start + ".." + base, deadline=deadline).splitlines()
+    candidates = list(open_prs(root, owner, name, branch, deadline=deadline))
     if require_pr_head and own_pr is not None:
         own = next((pr for pr in candidates if pr["number"] == own_pr), None)
         if own is None or own["headRefOid"] != head:
             raise PreflightError("Requested PR is not open at the analyzed head/base; "
                                  "refresh the PR and rerun")
     open_heads = {(pr["number"], pr["headRefOid"]) for pr in candidates}
-    candidates += merged_prs(root, owner, name, commits, branch)
-    related, filtered = [], []
+    candidates += merged_prs(root, owner, name, commits, branch, deadline=deadline)
+    related = []
     candidates = sorted((p for p in candidates if p["number"] != own_pr), key=lambda p: p["number"])
     # Each read is independent; keep API concurrency bounded.
     with ThreadPoolExecutor(max_workers=4) as pool:
-        files = pool.map(lambda p: candidate_files(root, owner, name, p), candidates)
+        files = pool.map(lambda p: candidate_files(root, owner, name, p, deadline=deadline), candidates)
         for pr, (live_head, paths) in zip(candidates, files):
             if live_head != pr["headRefOid"]:
                 raise PreflightError("PR head changed during scan; retry")
@@ -589,50 +623,27 @@ def related_prs(root, repo, base_ref, head_ref, validated_base, branch, own_pr,
                             reasons=reasons, files=sorted(paths),
                             joint_candidate=bool(path_signals(current)[0]
                                                  or path_signals(current)[1] or references))
-                if pr["state"] == "OPEN":
-                    item["filter"] = candidate_filter(root, repo, base, current_impact, pr,
-                                                       paths, reference_poms)
-                    if item["filter"]["status"] == "FILTERED":
-                        filtered.append(item)
-                        continue
                 related.append(item)
-    if git(root, "rev-parse", base_ref) != base or git(root, "rev-parse", head_ref) != head:
+    if (git(root, "rev-parse", base_ref, deadline=deadline) != base
+            or git(root, "rev-parse", head_ref, deadline=deadline) != head):
         raise PreflightError("Local base/head refs changed during scan; retry")
-    live_open = open_prs(root, owner, name, branch)
-    if (remote_base(root, owner, name, branch) != base
+    live_open = open_prs(root, owner, name, branch, deadline=deadline)
+    if (remote_base(root, owner, name, branch, deadline=deadline) != base
             or {(pr["number"], pr["headRefOid"]) for pr in live_open} != open_heads):
         raise PreflightError("GitHub base or open PR heads changed during scan; retry")
     return dict(status="NEEDS_REVIEW" if related else "NO_RELATED_PRS", base=base, head=head,
                 history_start=start, history_commits=len(commits), dirty=dirty,
                 changed_files=sorted(current), candidates_scanned=len(candidates), related=related,
-                filtered_prs=filtered, current_impact=current_impact,
                 scope="local fetched base and observed PR heads; association is not a confirmed defect")
 
 
-def source_snapshot(root, tree, destination):
+def source_snapshot(root, tree, destination, deadline=None):
     """Export source data, normalizing pre-migration exact tags for comparison."""
-    paths = ("pom.xml", "scala2.13/pom.xml", "sql-plugin/src/main")
-    entries = []
-    for record in run(["git", "ls-tree", "-rz", tree, "--", *paths], root).split("\0"):
-        if record:
-            metadata, path = record.split("\t", 1)
-            mode, kind, oid = metadata.split()
-            if kind == "blob" and mode in ("100644", "100755"):
-                entries.append((oid, path))
-    if not entries:
-        raise PreflightError("No source-selection inputs in " + tree)
+    paths = (*ROOT_POMS, "sql-plugin/src/main")
+    found = False
     # Reading blobs bypasses export-ignore attributes and avoids executing either tree's code.
-    blobs = subprocess.run(["git", "cat-file", "--batch"], cwd=root,
-                           input="".join(oid + "\n" for oid, _ in entries).encode(),
-                           capture_output=True, timeout=90)
-    if blobs.returncode:
-        raise PreflightError("Cannot export source-selection inputs")
-    stream = io.BytesIO(blobs.stdout)
-    for oid, relative in entries:
-        actual, kind, size = stream.readline().decode().split()
-        data = stream.read(int(size))
-        if actual != oid or kind != "blob" or len(data) != int(size) or stream.read(1) != b"\n":
-            raise PreflightError("Truncated source snapshot")
+    for relative, data in git_blobs(root, tree, paths, deadline=deadline):
+        found = True
         path = destination / relative
         if not path.resolve().is_relative_to(destination.resolve()):
             raise PreflightError("Invalid source path")
@@ -641,6 +652,8 @@ def source_snapshot(root, tree, destination):
             # The strict selector parser still needs to compare older base/peer trees.
             data = normalize_legacy_exact(data)
         path.write_bytes(data)
+    if not found:
+        raise PreflightError("No source-selection inputs in " + tree)
 
 
 def finding_key(finding):
@@ -661,11 +674,11 @@ def review_scope(paths):
         or path.startswith(".agents/skills/check-shim-compatibility/") for path in paths))
 
 
-def verify_review_refs(root, repo, base_ref, head_ref, base, head, branch, own_pr):
+def verify_review_refs(root, repo, base_ref, head_ref, base, head, branch, own_pr, deadline=None):
     owner, name = repo.split("/")
-    if (commit_sha(root, base_ref), commit_sha(root, head_ref)) != (base, head):
+    if (commit_sha(root, base_ref, deadline), commit_sha(root, head_ref, deadline)) != (base, head):
         raise PreflightError("Local base/head refs changed during review; retry")
-    if remote_base(root, owner, name, branch) != base:
+    if remote_base(root, owner, name, branch, deadline=deadline) != base:
         raise PreflightError("Fetched base differs from GitHub; fetch the target branch and retry")
     if own_pr is not None:
         query = """query($owner:String!, $name:String!, $number:Int!) {
@@ -673,7 +686,7 @@ def verify_review_refs(root, repo, base_ref, head_ref, base, head, branch, own_p
             state headRefOid baseRefName baseRepository { nameWithOwner }
           } }
         }"""
-        pr = graphql(root, query, owner=owner, name=name, number=own_pr)["pullRequest"]
+        pr = graphql(root, query, owner=owner, name=name, number=own_pr, deadline=deadline)["pullRequest"]
         if (not pr or pr["state"] != "OPEN" or pr["headRefOid"] != head
                 or pr["baseRefName"] != branch
                 or pr["baseRepository"]["nameWithOwner"].lower() != repo.lower()):
@@ -723,7 +736,7 @@ def review(root, repo, base_ref, head_ref, branch, own_pr):
     return report
 
 
-def verify_filtered_prs(root, repo, report):
+def verify_filtered_prs(root, repo, report, deadline=None):
     peers = report.get("filtered_prs", [])
     if not peers:
         return
@@ -731,38 +744,55 @@ def verify_filtered_prs(root, repo, report):
     query = ('query($owner:String!, $name:String!) { repository(owner:$owner,name:$name) {'
              + " ".join('p%d: pullRequest(number:%d) { state headRefOid baseRefName }'
                         % (peer["number"], peer["number"]) for peer in peers) + "} }")
-    live = graphql(root, query, owner=owner, name=name)
+    live = graphql(root, query, owner=owner, name=name, deadline=deadline)
+    stable, moved = [], []
     for peer in peers:
         pr = live.get("p" + str(peer["number"]))
         if (not pr or pr["state"] != "OPEN" or pr["headRefOid"] != peer["head"]
                 or pr["baseRefName"] != report["base_branch"]):
-            raise PreflightError("Filtered PR changed during verification; refresh the advisory")
+            peer["filter"].update(status="RETAINED_UNCERTAIN", reason="Filtered PR changed during verification")
+            peer["joint_check"] = dict(status="NOT_CHECKED", reason="Filtered PR changed during verification")
+            report["related"].append(peer)
+            moved.append(peer["number"])
+        else:
+            stable.append(peer)
+    report["filtered_prs"] = stable
+    if moved:
+        report.update(status="INCOMPLETE", error="Filtered PRs changed during verification: "
+                      + ", ".join("#" + str(number) for number in moved))
 
 
 def advisory(root, repo, base_ref, head_ref, validated_base, branch, own_pr):
     """Collect peer evidence independently, retaining a report when discovery fails."""
     report = dict(status="INCOMPLETE", scope="cross-PR associations; independent of the core "
                   "source-selection check, not confirmed incompatibilities")
+    deadline = time.monotonic() + ADVISORY_BUDGET_SECONDS
+    work_deadline = deadline - FINALIZATION_RESERVE_SECONDS
     try:
-        base, head = commit_sha(root, base_ref), commit_sha(root, head_ref)
+        base, head = commit_sha(root, base_ref, work_deadline), commit_sha(root, head_ref, work_deadline)
         report.update(base=base, head=head, pr=own_pr, base_branch=branch)
-        common = git(root, "merge-base", base, head)
-        changed = git_paths(root, "diff", "--name-only", "--no-renames", common, head)
+        common = git(root, "merge-base", base, head, deadline=work_deadline)
+        changed = git_paths(root, "diff", "--name-only", "--no-renames", common, head,
+                            deadline=work_deadline)
         if not review_scope(changed):
             report.update(status="NOT_APPLICABLE", reason="No shim, shared JVM source, "
                           "profile/matrix, or preflight implementation changes")
             return report
         report.update(related_prs(root, repo, base_ref, head_ref, validated_base, branch,
-                                  own_pr, include_worktree=False, require_pr_head=True))
+                                  own_pr, include_worktree=False, require_pr_head=True,
+                                  deadline=work_deadline))
         report["scope"] = "cross-PR associations and bounded joint source-selection checks; not compilation"
-        attempted = check_peer_combinations(root, repo, report)
-        verify_filtered_prs(root, repo, report)
-        if attempted or report.get("filtered_prs"):
-            verify_review_refs(root, repo, base_ref, head_ref, base, head, branch, own_pr)
+        filter_candidates(root, repo, report, min(work_deadline, time.monotonic() + FILTER_BUDGET_SECONDS))
+        check_peer_combinations(root, repo, report, deadline=work_deadline,
+                                verification_deadline=deadline)
+        verify_filtered_prs(root, repo, report, deadline=deadline)
+        verify_review_refs(root, repo, base_ref, head_ref, base, head, branch, own_pr, deadline=deadline)
+        report["inputs_verified"] = True
     except (PreflightError, OSError, ValueError, KeyError, TypeError,
             subprocess.TimeoutExpired) as error:
         report["status"] = "INCOMPLETE"
         report["error"] = str(error)
+        report["inputs_verified"] = False
         # Unverified exclusions are retained as unchecked, never as independent.
         for peer in report.pop("filtered_prs", []):
             peer["filter"].update(status="RETAINED_UNCERTAIN",
@@ -780,9 +810,9 @@ def advisory(root, repo, base_ref, head_ref, validated_base, branch, own_pr):
     return report
 
 
-def merge_snapshot(root, left, right):
+def merge_snapshot(root, left, right, deadline=None):
     result = subprocess.run(["git", "merge-tree", "--write-tree", left, right], cwd=root,
-                            text=True, capture_output=True, timeout=30)
+                            text=True, capture_output=True, timeout=operation_timeout(deadline, 30))
     if result.returncode == 1:
         raise MergeConflict("Source trees have merge conflicts")
     if result.returncode:
@@ -790,38 +820,41 @@ def merge_snapshot(root, left, right):
     return result.stdout.splitlines()[0]
 
 
-def fetch_peer(root, repo, head):
+def fetch_peer(root, repo, head, deadline=None):
     if not re.fullmatch(r"[0-9a-f]{40}", head) or not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
         raise PreflightError("Invalid peer repository or commit identity")
     present = subprocess.run(["git", "cat-file", "-e", head + "^{commit}"], cwd=root,
-                             capture_output=True, timeout=30)
+                             capture_output=True, timeout=operation_timeout(deadline, 30))
     if present.returncode:
         # Fetch an immutable commit, without changing refs, FETCH_HEAD, or the worktree.
         run(["git", "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
-             "--no-recurse-submodules", "https://github.com/" + repo + ".git", head], root, timeout=30)
-    return commit_sha(root, head)
+             "--no-recurse-submodules", "https://github.com/" + repo + ".git", head], root,
+            timeout=30, deadline=deadline)
+    return commit_sha(root, head, deadline)
 
 
-def tree_coverage(root, tree, temporary, cache):
+def tree_coverage(root, tree, temporary, cache, deadline=None):
     if tree not in cache:
         snapshot = temporary / tree
-        source_snapshot(root, tree, snapshot)
+        source_snapshot(root, tree, snapshot, deadline=deadline)
         cache[tree] = coverage(snapshot, ["sql-plugin"], None)
+    operation_timeout(deadline)
     return cache[tree]
 
 
-def peer_combination(root, repo, base, current_commit, current_coverage, peer, temporary, cache):
+def peer_combination(root, repo, base, current_commit, current_coverage, peer, temporary, cache,
+                     deadline=None):
     result = dict(status="INCOMPLETE", base=base, peer_head=peer["head"], stage="fetch")
     try:
-        peer_head = fetch_peer(root, repo, peer["head"])
+        peer_head = fetch_peer(root, repo, peer["head"], deadline=deadline)
         result["stage"] = "peer_target"
-        peer_tree = merge_snapshot(root, base, peer_head)
+        peer_tree = merge_snapshot(root, base, peer_head, deadline=deadline)
         result["peer_tree"] = peer_tree
-        peer_coverage = tree_coverage(root, peer_tree, temporary, cache)
+        peer_coverage = tree_coverage(root, peer_tree, temporary, cache, deadline=deadline)
         result["stage"] = "joint"
-        joint_tree = merge_snapshot(root, current_commit, peer_head)
+        joint_tree = merge_snapshot(root, current_commit, peer_head, deadline=deadline)
         result["joint_tree"] = joint_tree
-        joint_coverage = tree_coverage(root, joint_tree, temporary, cache)
+        joint_coverage = tree_coverage(root, joint_tree, temporary, cache, deadline=deadline)
         # Existing current/peer defects are not new cross-PR interaction findings.
         existing = {finding_key(f) for r in (current_coverage, peer_coverage) for f in r["findings"]}
         result.update(current_findings=current_coverage["findings"],
@@ -840,7 +873,7 @@ def peer_combination(root, repo, base, current_commit, current_coverage, peer, t
     return result
 
 
-def check_peer_combinations(root, repo, report):
+def check_peer_combinations(root, repo, report, deadline=None, verification_deadline=None):
     report["joint_scope"] = ("sql-plugin explicit imports and generated source collisions; "
                              "compare joint findings against each PR combined with target; "
                              "not compilation, signatures, runtime validation, or merge readiness")
@@ -857,30 +890,35 @@ def check_peer_combinations(root, repo, report):
             peer["joint_check"] = dict(status="NOT_CHECKED", reason="Joint check not started")
             candidates.append(peer)
     # Prefer explicit family associations over broad path/matrix matches.
-    candidates.sort(key=lambda p: (not any(r.startswith("same shim family:") for r in p["reasons"]),
-                                   not any(path_signals(p["files"])), -p["number"]))
+    candidates.sort(key=peer_priority)
     if not candidates:
         return False
-    deadline = time.monotonic() + PEER_CHECK_BUDGET_SECONDS
+    start_deadline = time.monotonic() + PEER_CHECK_BUDGET_SECONDS
+    if deadline is not None:
+        start_deadline = min(start_deadline, deadline)
     base, head = report["base"], report["head"]
-    current_tree = merge_snapshot(root, base, head)
+    current_tree = report.get("current_impact", {}).get("combined_tree")
+    if current_tree is None:
+        current_tree = merge_snapshot(root, base, head, deadline=deadline)
     report["current_tree"] = current_tree
     # Synthetic commit objects provide ancestry for merge-tree; no refs or hooks change.
     current_commit = git(root, "-c", "commit.gpgsign=false", "-c", "user.name=Shim preflight", "-c",
                          "user.email=shim-preflight@example.invalid", "commit-tree", current_tree,
-                         "-p", base, "-p", head, "-m", "Temporary shim source-selection combination")
+                         "-p", base, "-p", head, "-m", "Temporary shim source-selection combination",
+                         deadline=deadline)
     attempted = []
     with tempfile.TemporaryDirectory(prefix="shim-peers-") as directory:
         temporary, cache = Path(directory), {}
-        current_coverage = tree_coverage(root, current_tree, temporary, cache)
+        current_coverage = tree_coverage(root, current_tree, temporary, cache, deadline=deadline)
         for index, peer in enumerate(candidates):
-            if time.monotonic() >= deadline:
+            if time.monotonic() >= start_deadline:
                 for pending in candidates[index:]:
                     pending["joint_check"] = dict(status="NOT_CHECKED",
                                                  reason="Joint-check time budget reached")
                 break
             peer["joint_check"] = peer_combination(root, repo, base, current_commit,
-                                                  current_coverage, peer, temporary, cache)
+                                                  current_coverage, peer, temporary, cache,
+                                                  deadline=deadline)
             attempted.append(peer)
     if not attempted:
         return True
@@ -889,7 +927,8 @@ def check_peer_combinations(root, repo, report):
              + " ".join('p%d: pullRequest(number:%d) { state headRefOid baseRefName }'
                         % (p["number"], p["number"]) for p in attempted) + "} }")
     try:
-        live = graphql(root, query, owner=owner, name=name)
+        live = graphql(root, query, owner=owner, name=name,
+                       deadline=verification_deadline if verification_deadline is not None else deadline)
     except (PreflightError, OSError, ValueError, KeyError, TypeError,
             subprocess.TimeoutExpired):
         for peer in attempted:
@@ -1013,14 +1052,16 @@ def write_advisory(report, output, github_actions=False):
         if key in report:
             lines.append("- {}: `{}`".format(key, report[key]))
     if "error" in report:
-        lines += ["", "Discovery incomplete: " + html.escape(report["error"]),
-                  "No conclusion about related PRs; refresh this advisory when needed."]
+        lines += ["", "Advisory incomplete: " + html.escape(report["error"]),
+                  ("Other independently verified peer results are retained; refresh the unchecked peers."
+                   if report.get("inputs_verified") else
+                   "Inputs could not be verified; refresh this advisory before using its results.")]
     if "reason" in report:
         lines += ["", report["reason"]]
     if "joint_scope" in report:
         lines += ["", html.escape(report["joint_scope"]),
                   "Joint-check start budget: {} seconds; no new peer starts after it expires. "
-                  "An in-progress check may finish after the budget.".
+                  "An in-progress check may finish after the start budget, within the overall deadline.".
                   format(report["joint_check_budget_seconds"])]
     for pr in report.get("related", []):
         lines += ["", "- [#{}]({}): {} ({})".format(
@@ -1055,7 +1096,7 @@ def write_advisory(report, output, github_actions=False):
             joint = pr.get("joint_check", {})
             if joint.get("status") in ("NO_NEW_INTERACTION_FINDINGS", "ALREADY_IN_TARGET"):
                 continue
-            if report["status"] == "INCOMPLETE":
+            if report["status"] == "INCOMPLETE" and not report.get("inputs_verified"):
                 continue
             details = ("; ".join(finding_message(f) for f in joint.get("new_findings", [])[:3])
                        if joint.get("status") == "NEW_INTERACTION_FINDINGS" else "")

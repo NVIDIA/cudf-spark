@@ -12,8 +12,10 @@ validation, review, and mutation requirements.
 The repository helper is `build/check_shim_compatibility.py` (Python 3.10+,
 standard library only). The online modes need authenticated
 `gh` and Git history; `review` and `advisory` require Git 2.38+ for
-`merge-tree --write-tree`. Advisory joint checks may fetch observed peer commits
-from the canonical GitHub repository over HTTPS.
+`merge-tree --write-tree`. Advisory filtering and joint checks may fetch observed
+peer commits from the canonical GitHub repository over HTTPS. The lower-level
+`related-prs` command discovers associations through the GitHub API without
+fetching peer commits, filtering associations, or checking joint trees.
 The helper never posts comments or changes GitHub state.
 
 ## Automated review evidence
@@ -115,47 +117,62 @@ combination caused #16404. The goal is to catch concurrent PRs that each pass
 their own checks but fail when combined.
 
 The helper paginates the open PRs and examines PRs merged in that base-commit
-range. It compares actual changed paths, explicit
-imports in our changed sources, shim families across version directories, and
-matrix/implementation interactions. Pure documentation/tooling file overlaps,
-such as two changes to `AGENTS.md`, do not create an association.
-Path associations are refined conservatively using immutable Git input blobs.
-POM formatting, ordinary comments, project metadata and reporting-only edits can
-be excluded when neither PR's build configuration or metadata aliases reference
-the changed metadata. Metadata edits are retained when the other PR's impact is
-unbounded.
-Scala-generation comment directives remain semantic inputs. For existing profiles,
-configuration edits and versioned sources can be excluded only when their bounded
-profile sets are disjoint, including inheritance and both sides of selector changes.
-The before/after source graphs must match the current target in both Scala POMs;
-profile activation must be limited to its exact buildver property. New/deleted
-profiles, graph drift, changed versioned declaration identities, shared production
-callers, global build changes and unparseable inputs retain the candidate with an
-uncertainty reason. A new or removed declaration can change import modelling in
-other profiles, so disjoint selector sets alone do not establish independence. An absent
-explicit import is not proof of independence.
+range. It compares actual changed paths, explicit imports in our changed sources,
+shim families across version directories, and matrix/implementation interactions.
+Pure documentation/tooling file overlaps, such as two changes to `AGENTS.md`, do
+not create an association. This API-based discovery records observed heads and
+checks for API failures, truncated file lists, and base/open-head movement. The
+lower-level `related-prs` command stops at these associations. It does not fetch
+peer commits or run the impact filters.
+
+After discovery returns, `advisory` refines open-peer associations using immutable
+Git input blobs. Each impact proof compares the current target with that PR's
+proposed combination with the target. A common-ancestor diff is not a substitute:
+changes already present in the target must not be attributed to the PR. If the
+combined tree or its inputs cannot be analyzed, retain the candidate as uncertain.
+
+POM formatting and ordinary comments can be excluded when their build semantics
+are unchanged. Root project metadata and reporting changes remain `UNKNOWN`;
+the filter does not infer independence by tracking metadata aliases.
+Scala-generation directives and their conditional XML payload remain semantic
+inputs. Conditional Scala-specific configuration and default-profile edits are
+conservatively retained. For existing profiles, configuration edits and versioned
+sources can be excluded only when their bounded profile sets are disjoint,
+including inheritance and both sides of selector changes. Source graphs must be
+stable in both Scala POMs, and profile activation must be limited to its exact
+buildver property. New/deleted profiles, graph drift, changed versioned declaration
+identities, shared production callers, global build changes and unparseable inputs
+retain the candidate with an uncertainty reason. A new or removed declaration can
+change import modelling in other profiles, so disjoint selector sets alone do not
+establish independence. An absent explicit import is not proof of independence.
 
 Excluded candidates are recorded separately in `filtered_prs` with their reasons,
 profile evidence and exact observed head/base identities; they are not completed
 checks. The report lists their count and details. Filtered heads and own head/base
-are revalidated even when every candidate was excluded. Stale or unverifiable
-filtering evidence restores those peers as unchecked and makes the advisory
-`INCOMPLETE`. Initial discovery still retains broad shared-source associations;
-inspect those diffs to establish whether a caller actually depends on the change.
-The scan records each related PR's observed head and reports advisory `INCOMPLETE` on
-API failure, truncated file lists,
-or base/open-head movement during discovery. In CI this produces a warning and
-retains the core result. The lower-level `related-prs` command stops at association.
+are revalidated even when every candidate was excluded. A moved filtered peer is
+restored individually as `RETAINED_UNCERTAIN` and `NOT_CHECKED`. Independently
+verified peer results and their warnings are preserved. A global API failure or
+failure to verify own head/base invalidates all evidence that depends on those
+inputs; report the advisory as `INCOMPLETE` and retain unverified exclusions.
 
-The automatic `advisory` command checks related open peers with shim/profile
-signals in priority order within a 150-second joint-check start budget, without
-a fixed peer-count limit. It prioritizes explicit family matches, then
-shim/matrix changes and newer PR numbers. A conflict or incomplete check is
-recorded before proceeding to the next peer while time remains. It fetches
-immutable observed heads without changing refs or the worktree, exports source
-blobs, and compares three snapshots: current PR plus target, peer plus target,
-and both PRs plus target. Synthetic Git commit objects preserve ancestry for
-`merge-tree`; no checkout, build hooks, or peer code are executed.
+The advisory establishes an overall deadline and reserves time for final
+revalidation and report output. Filtering uses a shorter sub-budget before joint
+checks; peer fetch and analysis timeouts must respect the remaining budget.
+Unfinished filters retain candidates as `RETAINED_UNCERTAIN`, never as independent.
+No new optional work starts after its deadline. Candidates not reached by joint
+checking remain explicitly `NOT_CHECKED`, with the reason retained in the report.
+A deadline must leave a report describing completed, incomplete and unchecked
+work rather than rely on the CI job's outer timeout to stop discovery.
+
+The automatic `advisory` command checks retained open peers with shim/profile
+signals in priority order within its 300-second joint-check start budget and remaining
+overall work time, without a fixed peer-count limit. It prioritizes explicit
+family matches, then shim/matrix changes and newer PR numbers. A conflict or
+incomplete check is recorded before proceeding to the next peer while time
+remains. It fetches immutable observed heads without changing refs or the worktree,
+exports source blobs, and compares three snapshots: current PR plus target, peer
+plus target, and both PRs plus target. Synthetic Git commit objects preserve
+ancestry for `merge-tree`; no checkout, build hooks, or peer code are executed.
 
 Only findings absent from both individual combinations are reported as
 `NEW_INTERACTION_FINDINGS`, with the affected profile, symbol/caller or duplicate
@@ -163,8 +180,9 @@ destination/providers. Existing individual defects are retained separately.
 Merged peers are `ALREADY_IN_TARGET`; inspect the core report for that combination.
 `COMBINATION_CONFLICT` means the two changes cannot be combined automatically.
 API/fetch failures or changed peer identities produce `INCOMPLETE` evidence.
-No new peer starts after the budget expires; remaining candidates are explicitly
-`NOT_CHECKED`. An in-progress check may finish after the budget. The report opens
+No new peer starts after the work budget expires; remaining candidates are
+explicitly `NOT_CHECKED`. Started operations remain bounded by the overall
+deadline and reserved finalization time. The report opens
 with counts of related PRs, open candidates, attempted and completed static checks,
 conflicts, incomplete evidence, unchecked peers, already-merged peers, and filtered
 candidates. Completed counts exclude filtered candidates, conflicts and incomplete

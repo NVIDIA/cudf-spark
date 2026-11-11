@@ -102,22 +102,10 @@ def _profile_target(profile):
     return None
 
 
-def _metadata_references(root, conditional_comments):
-    # Metadata may alias other metadata before a peer uses it in build configuration.
-    retained = ET.tostring(root, encoding='unicode')
-    retained += ''.join(text or '' for _, text in conditional_comments)
-    names = {name for name in METADATA if re.search(
-        r'\$\{\s*(?:(?:project|pom)\.)?' + re.escape(name) + r'(?:[.}]|\s)', retained)}
-    if re.search(r'\$\{[^{}]*\$\{', retained):
-        names.add('*')
-    return names
-
-
 def _pom_impact(before, after, graphs):
-    if _canonical(before, METADATA) == _canonical(after, METADATA):
+    if _canonical(before) == _canonical(after):
         return set()
-    if _canonical(before, METADATA | {'profiles'}) != _canonical(
-            after, METADATA | {'profiles'}):
+    if _canonical(before, {'profiles'}) != _canonical(after, {'profiles'}):
         raise ValueError('Global POM configuration changed')
     old = before.find(NS + 'profiles')
     new = after.find(NS + 'profiles')
@@ -188,66 +176,41 @@ def _irrelevant(path):
             or path.startswith('integration_tests/src/main/python/'))
 
 
-def analyze_impact(before, after, reference_poms):
-    """Return KNOWN profiles or UNKNOWN with a retained uncertainty reason.
+def analyze_impact(before, after):
+    """Bound changes between current-target and proposed combined snapshots.
 
     Both maps include complete root POMs plus every changed path (None for a
-    missing side). reference_poms contains the current fetched base's two POMs.
+    missing side). Metadata/reporting changes and unmodelled input stay UNKNOWN.
     No imported peer code, Git commands, file writes or network access is used.
     """
     try:
         changed = {path for path in set(before) | set(after)
                    if before.get(path) != after.get(path)}
-        roots, graphs, observed_graphs, comments = {}, {}, {}, {}
-        metadata_fields, references, enumeration = set(), set(), {}
+        roots, graphs = {}, {}
         for path in POMS:
-            comments[path] = _generation_comments(before.get(path))
-            if comments[path] != _generation_comments(after.get(path)):
+            if _generation_comments(before.get(path)) != _generation_comments(after.get(path)):
                 raise ValueError('Scala generation directive or conditional comment changed: ' + path)
             old_root, old_graph = _pom(before.get(path))
             new_root, new_graph = _pom(after.get(path))
-            reference_root, reference = _pom(reference_poms.get(path))
-            old_values, new_values = _enumeration_values(old_root), _enumeration_values(new_root)
-            if old_values != new_values:
+            if any(_canonical(old_root.find(NS + name)) != _canonical(new_root.find(NS + name))
+                   for name in METADATA):
+                raise ValueError('Root POM metadata or reporting changed: ' + path)
+            if _enumeration_values(old_root) != _enumeration_values(new_root):
                 raise ValueError('Global build-version enumeration inputs changed: ' + path)
-            enumeration[path] = new_values, _enumeration_values(reference_root)
-            metadata_fields.update(name for name in METADATA
-                                   if _canonical(old_root.find(NS + name)) !=
-                                   _canonical(new_root.find(NS + name)))
-            for root, source_comments in ((old_root, comments[path]),
-                                          (new_root, comments[path]),
-                                          (reference_root, _generation_comments(
-                                              reference_poms.get(path)))):
-                references.update(_metadata_references(root, source_comments))
+            if old_graph != new_graph:
+                raise ValueError('Source inheritance graph changed: ' + path)
             roots[path] = old_root, new_root
-            graphs[path] = reference
-            observed_graphs[path] = old_graph, new_graph
-        proof = dict(metadata_fields_changed=sorted(metadata_fields),
-                     metadata_references=sorted(references))
-        if metadata_fields and (metadata_fields & references or '*' in references):
-            raise ValueError('Changed project metadata is referenced by build configuration')
+            graphs[path] = old_graph
         graph_list = list(graphs.values())
-        for group in (graph_list, [pair[0] for pair in observed_graphs.values()],
-                      [pair[1] for pair in observed_graphs.values()]):
-            for target in set.intersection(*(set(graph) for graph in group)):
-                if any(source_lineage(graph, target) != source_lineage(group[0], target)
-                       for graph in group[1:]):
-                    raise ValueError('Ambiguous Scala source lineage: ' + target)
-        # A metadata-only edit changes no build inputs, even on an older branch.
+        for target in set.intersection(*(set(graph) for graph in graph_list)):
+            if any(source_lineage(graph, target) != source_lineage(graph_list[0], target)
+                   for graph in graph_list[1:]):
+                raise ValueError('Ambiguous Scala source lineage: ' + target)
         no_effect = all(_irrelevant(path) or (path in POMS and
-                        _canonical(roots[path][0], METADATA) ==
-                        _canonical(roots[path][1], METADATA)) for path in changed)
+                        _canonical(roots[path][0]) == _canonical(roots[path][1])) for path in changed)
         if no_effect:
-            for path in changed & set(POMS):
-                _pom_impact(*roots[path], graph_list)
-            return dict(status='KNOWN', profiles=[], **proof,
-                        reason='Only POM metadata/formatting or ordinary documentation/tests changed')
-        for path, (current, reference) in enumeration.items():
-            if current != reference:
-                raise ValueError('Build-version enumeration differs from current base: ' + path)
-        for path, (old_graph, new_graph) in observed_graphs.items():
-            if old_graph != new_graph or new_graph != graphs[path]:
-                raise ValueError('Source graph changed or differs from current base: ' + path)
+            return dict(status='KNOWN', profiles=[],
+                        reason='Only POM formatting or ordinary documentation/tests changed')
         affected = set()
         for path in sorted(changed):
             if path in POMS:
@@ -261,8 +224,8 @@ def analyze_impact(before, after, reference_poms):
                 affected.update(_source_impact(path, after.get(path), graph_list))
             else:
                 raise ValueError('Shared caller, global tooling or unmodelled changed path: ' + path)
-        return dict(status='KNOWN', profiles=sorted(affected), **proof,
+        return dict(status='KNOWN', profiles=sorted(affected),
                     reason=('Affected existing source profiles are bounded conservatively' if affected
-                            else 'Only POM metadata/formatting or ordinary documentation/tests changed'))
+                            else 'Only POM formatting or ordinary documentation/tests changed'))
     except (ValueError, TypeError, KeyError, AttributeError, ET.ParseError) as error:
         return dict(status='UNKNOWN', profiles=[], reason=str(error))

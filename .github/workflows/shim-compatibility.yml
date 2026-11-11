@@ -121,7 +121,7 @@ jobs:
     needs: shim-scope
     if: needs.shim-scope.outputs.relevant == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     # Advisory setup/API failures must not fail the core check or the workflow.
     continue-on-error: true
     env:
