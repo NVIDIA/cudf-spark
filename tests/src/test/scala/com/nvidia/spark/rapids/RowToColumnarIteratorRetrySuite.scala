@@ -182,8 +182,8 @@ class RowToColumnarIteratorRetrySuite extends RmmSparkRetrySuiteBase {
   test("a single batch goal under a host limit builds one batch") {
     val longSchema = StructType(Seq(StructField("l", LongType)))
     val rowIter: Iterator[InternalRow] = (1 to 4).map(i => InternalRow(i.toLong)).iterator
-    // The builders reserve for batchSizeBytes and grow from there, so the reservation fits a
-    // host limit above it, unlike a fixed buffer sized for any partition.
+    // The builders reserve for batchSizeBytes, up to a 128 MiB batch, and grow from there, so
+    // the reservation fits a host limit above it, unlike a fixed buffer sized for any partition.
     HostAlloc.initialize(128L * 1024 * 1024)
     val row2ColIter = new RowToColumnarIterator(rowIter, longSchema, RequireSingleBatch,
       64L * 1024 * 1024, new GpuRowToColumnConverter(longSchema))

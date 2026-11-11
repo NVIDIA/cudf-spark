@@ -870,9 +870,9 @@ class RowToColumnarIterator(
 
 object RowToColumnarIterator {
   // The builders reserve host memory for a batch's rows on its first row, and nothing can
-  // reclaim it until the batch ends, so they start with room for a batch of at most this much
-  // and grow by doubling beyond it.
-  private val maxInitialReservationBytes = 128L * 1024 * 1024
+  // reclaim it until the batch ends. Before any data is seen, they start with room for a batch
+  // of at most this much, as estimated from the schema, and grow by doubling beyond it.
+  private val maxInitialBatchBytes = 128L * 1024 * 1024
 
   /**
    * The rows the builders reserve when a batch starts. They are a full batch's rows divided
@@ -885,7 +885,7 @@ object RowToColumnarIterator {
       sampleRows: Long): Int = {
     val batchRows = GpuBatchUtils.estimateRowCount(batchSizeBytes, sampleBytes, sampleRows)
     var fraction = 1L
-    while (batchSizeBytes.toDouble / fraction > maxInitialReservationBytes) {
+    while (batchSizeBytes.toDouble / fraction > maxInitialBatchBytes) {
       fraction *= 2
     }
     ((batchRows + fraction - 1) / fraction).toInt
