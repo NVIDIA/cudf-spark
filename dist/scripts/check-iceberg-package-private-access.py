@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Require Iceberg package-private callers to be stored at the dist jar root."""
+"""Require Iceberg and Spark package-private callers to be stored at the dist jar root."""
 
 from __future__ import print_function
 
@@ -32,6 +32,7 @@ from javassist.bytecode.analysis import Analyzer, Type
 
 ICEBERG_PREFIX = "org/apache/iceberg/"
 ICEBERG_SHADED_PREFIX = "org/apache/iceberg/shaded/"
+SPARK_PREFIX = "org/apache/spark/"
 SHIM_DIR_RE = re.compile(r"^spark[0-9][0-9a-z]*$")
 DESCRIPTOR_CLASS_RE = re.compile(r"L([^;<>()\[\]]+);")
 BUILD_VERSION_RE = re.compile(r"^[0-9][0-9a-z]*$")
@@ -232,6 +233,7 @@ class LazyClassRepository(object):
         if not os.path.exists(path):
             raise IOError("class layout does not exist: %s" % path)
         self.path = path
+        self.paths = (path,)
         self.archive = JarFile(path) if os.path.isfile(path) else None
         self.entries = {}
         self.cache = {}
@@ -278,12 +280,46 @@ class LazyClassRepository(object):
             self.archive.close()
 
 
+class CombinedClassRepository(object):
+    """Resolve classes across all jars of one Spark runtime world."""
+
+    def __init__(self, paths, entry_predicate):
+        self.paths = tuple(paths)
+        self.repositories = []
+        try:
+            for path in paths:
+                self.repositories.append(LazyClassRepository(path, entry_predicate))
+        except (IOError, OSError, IOException):
+            self.close()
+            raise
+
+    def __len__(self):
+        return sum(len(repository) for repository in self.repositories)
+
+    def get(self, name, default=()):
+        matches = tuple(info for repository in self.repositories
+                        for info in repository.get(name, ()))
+        return matches or default
+
+    def close(self):
+        for repository in self.repositories:
+            repository.close()
+
+
 def _is_runtime_entry(entry):
     return entry.startswith(ICEBERG_PREFIX) and not entry.startswith(ICEBERG_SHADED_PREFIX)
 
 
 def _is_plugin_entry(entry):
     return ICEBERG_PREFIX in entry and ICEBERG_SHADED_PREFIX not in entry
+
+
+def _is_spark_entry(entry):
+    return entry.startswith(SPARK_PREFIX)
+
+
+def _is_spark_plugin_entry(entry):
+    return SPARK_PREFIX in entry
 
 
 def _classes_by_name(entries):
@@ -375,10 +411,9 @@ class ProtectedAccessAnalyzer(object):
             return self.pool
         self.pool = ClassPool(False)
         self.pool.appendSystemPath()
-        runtime_path = (os.path.join(self.runtime_classes.path, ".")
-                        if os.path.isdir(self.runtime_classes.path)
-                        else self.runtime_classes.path)
-        self.pool.insertClassPath(runtime_path)
+        for path in self.runtime_classes.paths:
+            runtime_path = os.path.join(path, ".") if os.path.isdir(path) else path
+            self.pool.insertClassPath(runtime_path)
         for _, info in self.layout_entries:
             self.pool.insertClassPath(ByteArrayClassPath(
                 info.name.replace("/", "."), info.bytecode))
@@ -448,9 +483,9 @@ def _is_root_entry(entry):
     return first != "spark-shared" and not SHIM_DIR_RE.match(first)
 
 
-def read_runtime_manifest(path):
+def read_runtime_manifest(path, family="Iceberg"):
     if not os.path.isfile(path):
-        raise RuntimeError("Iceberg runtime manifest is missing: %s" % path)
+        raise RuntimeError("%s runtime manifest is missing: %s" % (family, path))
     selections = []
     paths_by_build_version = collections.defaultdict(set)
     with open(path, "r") as manifest:
@@ -460,23 +495,24 @@ def read_runtime_manifest(path):
                 continue
             fields = line.split("\t")
             if len(fields) != 2 or not BUILD_VERSION_RE.match(fields[0]) or not fields[1]:
-                raise RuntimeError("invalid Iceberg runtime manifest line %d: %s" %
-                                   (line_number, line))
+                raise RuntimeError("invalid %s runtime manifest line %d: %s" %
+                                   (family, line_number, line))
             build_version, runtime_path = fields
             runtime_path = None if runtime_path == "-" else runtime_path
             seen_paths = paths_by_build_version[build_version]
             if runtime_path in seen_paths or (None in seen_paths and runtime_path is not None) or \
                     (runtime_path is None and seen_paths):
-                raise RuntimeError("conflicting or duplicate Iceberg runtime manifest line %d: %s" %
-                                   (line_number, line))
+                raise RuntimeError("conflicting or duplicate %s runtime manifest line %d: %s" %
+                                   (family, line_number, line))
             seen_paths.add(runtime_path)
             selections.append(RuntimeSelection(build_version, runtime_path))
     if not selections:
-        raise RuntimeError("Iceberg runtime manifest is empty: %s" % path)
+        raise RuntimeError("%s runtime manifest is empty: %s" % (family, path))
     return selections
 
 
-def find_package_private_access(layout_entries, runtime_classes, runtime_label):
+def find_package_private_access(layout_entries, runtime_classes, runtime_label,
+                                runtime_prefix=ICEBERG_PREFIX):
     plugin_classes = _classes_by_name(layout_entries)
     protected_access = ProtectedAccessAnalyzer(
         layout_entries, runtime_classes, plugin_classes)
@@ -489,10 +525,12 @@ def find_package_private_access(layout_entries, runtime_classes, runtime_label):
                 if not target.access & AccessFlag.PUBLIC:
                     caller_findings.add((target_name, "package-private class"))
         for reference in caller.member_refs:
-            if not reference.owner.startswith(ICEBERG_PREFIX):
+            if not reference.owner.startswith(runtime_prefix):
                 continue
             for declaring_class, member in _find_members(
                     runtime_classes, plugin_classes, reference.owner, reference):
+                if not runtime_classes.get(declaring_class, ()):
+                    continue
                 if _package_name(caller.name) != _package_name(declaring_class):
                     continue
                 reason = None
@@ -534,6 +572,7 @@ def main(argv=None):
     parser.add_argument("iceberg_runtime", nargs="*", help="Iceberg runtime jar(s)")
     parser.add_argument("--runtime-directory", action="append", default=[])
     parser.add_argument("--runtime-manifest")
+    parser.add_argument("--spark-runtime-manifest")
     parser.add_argument("--expected-build-versions")
     args = parser.parse_args(argv)
 
@@ -541,8 +580,12 @@ def main(argv=None):
         if not has_class_entries(args.layout):
             raise RuntimeError("assembled layout is missing or contains no class files: %s" %
                                args.layout)
-        layout_entries = load_classes(args.layout, _is_plugin_entry)
+        layout_entries = load_classes(
+            args.layout, lambda entry: _is_plugin_entry(entry) or
+            (args.spark_runtime_manifest and _is_spark_plugin_entry(entry)))
         runtime_selections = _runtime_paths(args)
+        spark_selections = (read_runtime_manifest(args.spark_runtime_manifest, "Spark")
+                            if args.spark_runtime_manifest else [])
         runtime_paths = [selection for selection in runtime_selections if selection.path]
         if args.expected_build_versions:
             if not args.runtime_manifest:
@@ -560,10 +603,23 @@ def main(argv=None):
                                    "expected build versions %s" %
                                    (sorted(manifest_build_versions),
                                     sorted(expected_build_versions)))
-        if runtime_paths and not layout_entries:
+            if args.spark_runtime_manifest:
+                spark_build_versions = set(selection.build_version
+                                           for selection in spark_selections)
+                if spark_build_versions != expected_build_versions:
+                    raise RuntimeError("Spark runtime manifest build versions %s do not match "
+                                       "expected build versions %s" %
+                                       (sorted(spark_build_versions),
+                                        sorted(expected_build_versions)))
+        if runtime_paths and not any(_is_plugin_entry(entry)
+                                     for entry, _ in layout_entries):
             raise RuntimeError("assembled layout contains no Iceberg plugin classes")
+        if spark_selections and not any(_is_spark_plugin_entry(entry)
+                                        for entry, _ in layout_entries):
+            raise RuntimeError("assembled layout contains no Spark plugin classes")
         callers = set()
         findings = set()
+        spark_findings = set()
         for selection in runtime_selections:
             runtime_path = selection.path
             if runtime_path is None:
@@ -573,7 +629,8 @@ def main(argv=None):
                 if not runtime_classes:
                     raise RuntimeError("runtime contains no Iceberg classes: %s" % runtime_path)
                 world_entries = _plugin_world(
-                    layout_entries, selection.build_version)
+                    [(entry, info) for entry, info in layout_entries
+                     if _is_plugin_entry(entry)], selection.build_version)
                 runtime_label = os.path.basename(runtime_path)
                 if selection.build_version:
                     runtime_label = "spark%s; %s" % (
@@ -584,14 +641,37 @@ def main(argv=None):
                 findings.update(runtime_findings)
             finally:
                 runtime_classes.close()
+        spark_by_version = collections.defaultdict(list)
+        for selection in spark_selections:
+            if not selection.path:
+                continue
+            spark_by_version[selection.build_version].append(selection.path)
+        for build_version, paths in sorted(spark_by_version.items()):
+            runtime_classes = CombinedClassRepository(paths, _is_spark_entry)
+            try:
+                if not runtime_classes:
+                    raise RuntimeError("runtime contains no Spark classes: %s" % paths)
+                world_entries = _plugin_world(
+                    [(entry, info) for entry, info in layout_entries
+                     if _is_spark_plugin_entry(entry)], build_version)
+                runtime_callers, runtime_findings = find_package_private_access(
+                    world_entries, runtime_classes, "spark%s" % build_version,
+                    SPARK_PREFIX)
+                callers.update(runtime_callers)
+                findings.update(runtime_findings)
+                spark_findings.update(runtime_findings)
+            finally:
+                runtime_classes.close()
     except (IOError, OSError, IOException, BadBytecode,
             NotFoundException, RuntimeError) as error:
-        print("Iceberg package-private access audit failed: %s" % error, file=sys.stderr)
+        print("Package-private access audit failed: %s" % error, file=sys.stderr)
         return 2
 
-    violations = sorted(finding for finding in findings if not _is_root_entry(finding.entry))
+    # A root class can still be loaded separately from Spark under --jars.
+    violations = sorted(finding for finding in findings
+                        if finding in spark_findings or not _is_root_entry(finding.entry))
     if violations:
-        print("Iceberg package-private access must be root-safe; found non-root callers:",
+        print("Package-private access must be classloader-safe; found unsafe callers:",
               file=sys.stderr)
         for entry in sorted(set(finding.entry for finding in violations)):
             entry_findings = [finding for finding in violations if finding.entry == entry]
@@ -601,12 +681,15 @@ def main(argv=None):
                 print("    -> %s [%s; %s]" % (finding.target.replace("/", "."),
                                                finding.reason, finding.runtime),
                       file=sys.stderr)
-        print("Move each caller to a module listed in dist/root-safe-module-classes.txt "
-              "or promote it with dist/unshimmed-common-from-single-shim.txt.", file=sys.stderr)
+        print("Use reflection for Spark package-private access. For Iceberg, move callers "
+              "to a root-safe module or promote them with "
+              "dist/unshimmed-common-from-single-shim.txt or "
+              "dist/unshimmed-from-each-spark3xx.txt.", file=sys.stderr)
         return 1
 
-    print("Iceberg package-private access audit passed: %d caller classes are at the jar root "
-          "across %d runtime world(s)" % (len(callers), len(runtime_paths)))
+    print("Package-private access audit passed: %d caller classes are at the jar root "
+          "across %d runtime world(s)" % (len(callers),
+                                             len(runtime_paths) + len(spark_by_version)))
     return 0
 
 

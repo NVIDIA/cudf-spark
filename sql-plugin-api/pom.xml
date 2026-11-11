@@ -38,6 +38,11 @@
     <dependencies>
         <dependency>
             <groupId>com.nvidia</groupId>
+            <artifactId>cudf-spark-history-metrics-api</artifactId>
+            <version>${history-metrics.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.nvidia</groupId>
             <artifactId>${cudf-spark-jni.artifactId}</artifactId>
             <classifier>${jni.classifier}</classifier>
         </dependency>

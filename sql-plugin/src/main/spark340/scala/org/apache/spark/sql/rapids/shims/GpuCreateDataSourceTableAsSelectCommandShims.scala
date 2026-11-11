@@ -27,7 +27,11 @@ import java.net.URI
 
 import com.nvidia.spark.rapids.AssertUtils.assertInTests
 import com.nvidia.spark.rapids.GpuDataWritingCommand
-import com.nvidia.spark.rapids.shims.{CharVarcharUtilsShims, SparkShimImpl}
+import com.nvidia.spark.rapids.shims.{
+  CharVarcharUtilsShims,
+  GpuFileWriteJobShim,
+  SparkShimImpl
+}
 
 import org.apache.spark.sql.{AnalysisException, Row, SaveMode, SparkSession}
 import org.apache.spark.sql.catalyst.catalog._
@@ -58,7 +62,11 @@ case class GpuCreateDataSourceTableAsSelectCommand(
     val tableName = tableIdentWithDB.unquotedString
     val tableExists = sessionState.catalog.tableExists(tableIdentWithDB)
 
-    if (tableExists && mode != SaveMode.Overwrite) {
+    if (tableExists &&
+        (mode != SaveMode.Overwrite || !GpuFileWriteJobShim.shouldDelayOverwriteDeletion)) {
+      assert(mode != SaveMode.Overwrite,
+        s"Expect the table $tableName has been dropped when the save mode is Overwrite")
+
       if (mode == SaveMode.ErrorIfExists) {
         throw RapidsErrorUtils.tableOrViewAlreadyExistsError(tableName)
       }
@@ -75,12 +83,16 @@ case class GpuCreateDataSourceTableAsSelectCommand(
         GpuDataWritingCommand.assertEmptyRootPath(p, mode, sparkSession.sessionState.newHadoopConf)
       }
       assert(table.schema.isEmpty)
-      if (tableExists) {
-        // SPARK-60387 moved the drop of the table SaveAsV1TableCommand replaces into the CTAS.
-        // Spark drops it after the write passes its driver-side checks; this keeps the old order.
-        sessionState.catalog.dropTable(tableIdentWithDB, ignoreIfNotExists = true, purge = false)
+      val beforeWrite = if (tableExists) {
+        () => {
+          sessionState.catalog.dropTable(
+            tableIdentWithDB, ignoreIfNotExists = true, purge = false)
+          sessionState.catalog.validateTableLocation(table)
+        }
+      } else {
+        sessionState.catalog.validateTableLocation(table)
+        () => ()
       }
-      sparkSession.sessionState.catalog.validateTableLocation(table)
       val tableLocation = if (table.tableType == CatalogTableType.MANAGED) {
         Some(sessionState.catalog.defaultTablePath(table.identifier))
       } else {
@@ -88,7 +100,7 @@ case class GpuCreateDataSourceTableAsSelectCommand(
       }
       val result = saveDataIntoTable(
         TrampolineConnectShims.getActiveSession, table, tableLocation, SaveMode.Overwrite,
-        tableExists = false)
+        tableExists = false, beforeWrite)
       val tableSchema = CharVarcharUtilsShims.getRawSchema(
         SchemaMetadataShims.getCleanedSchema(result.schema), sessionState.conf)
       val newTable = table.copy(
@@ -120,7 +132,8 @@ case class GpuCreateDataSourceTableAsSelectCommand(
       table: CatalogTable,
       tableLocation: Option[URI],
       mode: SaveMode,
-      tableExists: Boolean): BaseRelation = {
+      tableExists: Boolean,
+      beforeWrite: () => Unit = () => ()): BaseRelation = {
     // Create the relation based on the input logical plan: `query`.
     val pathOption = tableLocation.map("path" -> CatalogUtils.URIToString(_))
     val dataSource = GpuDataSource(
@@ -132,7 +145,7 @@ case class GpuCreateDataSourceTableAsSelectCommand(
       catalogTable = if (tableExists) Some(table) else None,
       origProvider = origProvider)
     try {
-      dataSource.writeAndRead(mode, query, outputColumnNames)
+      dataSource.writeAndRead(mode, query, outputColumnNames, beforeWrite)
     } catch {
       case ex: AnalysisException =>
         logError(s"Failed to write to table ${table.identifier.unquotedString}", ex)

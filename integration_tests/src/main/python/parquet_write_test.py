@@ -94,6 +94,29 @@ parquet_map_gens = parquet_map_gens_sample + [
 parquet_write_gens_list = [[binary_gen], parquet_basic_gen, decimal_gens] +  [ [single_gen] for single_gen in parquet_struct_gen + parquet_array_gen + parquet_map_gens]
 parquet_ts_write_options = ['INT96', 'TIMESTAMP_MICROS', 'TIMESTAMP_MILLIS']
 
+@pytest.mark.skipif(not is_spark_405(),
+                    reason="Tests Spark 4.0.5 saveAsTable overwrite")
+def test_save_as_table_overwrite(spark_tmp_table_factory):
+    table_name = spark_tmp_table_factory.get()
+    with_cpu_session(
+        lambda spark: spark.range(3).write.format("parquet").saveAsTable(table_name))
+
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCaptureWithWritePlans()
+    try:
+        with_gpu_session(
+            lambda spark: spark.range(3, 5).write.mode("overwrite")
+                .format("parquet").saveAsTable(table_name))
+        plans = callback.getResultsWithTimeout(10000)
+        assert any(callback.contains(plan, "GpuDataWritingCommandExec") for plan in plans)
+    finally:
+        callback.endCapture()
+
+    with_cpu_session(
+        lambda spark: assert_equal(
+            [row.id for row in spark.table(table_name).orderBy("id").collect()],
+            [3, 4]))
+
 @pytest.mark.order(1) # at the head of xdist worker queue if pytest-order is installed
 @pytest.mark.parametrize('parquet_gens', parquet_write_gens_list, ids=idfn)
 @allow_non_gpu(*non_utc_allow)

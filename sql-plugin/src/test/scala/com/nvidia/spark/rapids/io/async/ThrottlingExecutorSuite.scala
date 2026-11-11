@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,12 +19,11 @@ package com.nvidia.spark.rapids.io.async
 import java.util.concurrent.{Callable, CountDownLatch, ExecutionException, Executors, Future, RejectedExecutionException, TimeUnit}
 import java.util.concurrent.atomic.AtomicLong
 
-import com.nvidia.spark.rapids.{GpuMetric, RapidsConf}
+import com.nvidia.spark.rapids.{GpuMetric, LocalGpuMetric}
 import org.apache.hadoop.conf.Configuration
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
 
-import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.rapids.{GpuWriteJobStatsTracker, GpuWriteTaskStatsTracker}
 
 class ThrottlingExecutorSuite extends AnyFunSuite with BeforeAndAfterEach {
@@ -37,14 +36,8 @@ class ThrottlingExecutorSuite extends AnyFunSuite with BeforeAndAfterEach {
   var trafficController: TrafficController = _
   var executor: ThrottlingExecutor = _
 
-  // Initialize SparkSession to initialize the GpuMetrics.
-  SparkSession.builder
-       .master("local")
-       .appName("ThrottlingExecutorSuite")
-       .config(RapidsConf.METRICS_LEVEL.key, "DEBUG")
-       .getOrCreate()
-
-  val taskMetrics: Map[String, GpuMetric] = GpuWriteJobStatsTracker.taskMetrics
+  // These tests only update task-local throttle counters; no SparkContext is needed.
+  var taskMetrics: Map[String, GpuMetric] = _
 
   class TestTask extends Callable[Unit] {
     val latch = new CountDownLatch(1)
@@ -54,6 +47,12 @@ class ThrottlingExecutorSuite extends AnyFunSuite with BeforeAndAfterEach {
   }
 
   override def beforeEach(): Unit = {
+    taskMetrics = Seq(
+      GpuWriteJobStatsTracker.ASYNC_WRITE_TOTAL_THROTTLE_TIME_KEY,
+      GpuWriteJobStatsTracker.ASYNC_WRITE_AVG_THROTTLE_TIME_KEY,
+      GpuWriteJobStatsTracker.ASYNC_WRITE_MIN_THROTTLE_TIME_KEY,
+      GpuWriteJobStatsTracker.ASYNC_WRITE_MAX_THROTTLE_TIME_KEY
+    ).map(_ -> new LocalGpuMetric()).toMap
     throttle = new HostMemoryThrottle(100)
     trafficController = new TrafficController(throttle)
     executor = new ThrottlingExecutor(
