@@ -17,14 +17,16 @@ import pytest
 from asserts import (assert_cpu_and_gpu_are_equal_collect_with_capture,
                      assert_equal_with_signed_zero,
                      assert_gpu_and_cpu_are_equal_collect,
+                     assert_spark_exception,
                      assert_gpu_fallback_write,
                      assert_gpu_fallback_collect,
                      run_with_cpu_and_gpu)
 from conftest import is_databricks_runtime, spark_jvm
 from data_gen import idfn
-from marks import allow_non_gpu, ignore_order, incompat
+from marks import allow_non_gpu, ignore_order, incompat, validate_execs_in_gpu_plan
 from spark_session import (is_before_spark_400, is_databricks173_or_later, is_spark_40x,
-                           is_spark_410_or_later, is_spark_411_or_later, with_cpu_session)
+                           is_spark_410_or_later, is_spark_411_or_later, with_cpu_session,
+                           with_gpu_session)
 
 pytestmark = pytest.mark.skipif(
     is_databricks_runtime() and not is_databricks173_or_later(),
@@ -177,6 +179,56 @@ def test_variant_cpu_rows_convert_to_gpu():
         do_it,
         exist_classes='RDDScanExec,GpuRowToColumnarExec,GpuProjectExec,GpuVariantGet',
         non_exist_classes='HostColumnarToGpu',
+        conf={'spark.sql.adaptive.enabled': 'false'},
+        require_non_empty=True)
+
+
+@incompat
+@allow_non_gpu('RDDScanExec')
+@validate_execs_in_gpu_plan('GpuProjectExec')
+@pytest.mark.parametrize('value,error', [
+    pytest.param(b'', 'MALFORMED_VARIANT', id='empty-value'),
+    pytest.param(b'\xfc', 'UNKNOWN_PRIMITIVE_TYPE_IN_VARIANT', id='unknown-primitive'),
+])
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_variant_try_get_malformed_input_preserves_error(value, error):
+    from pyspark.sql.types import VariantVal
+
+    def do_it(spark, require_gpu=False):
+        # Local rows preserve the encoded bytes without a Parquet writer validating them.
+        # The unknown primitive is a cuDF missing-path result, not a malformed status:
+        # Spark must still inspect its type and throw, even for try_variant_get.
+        df = spark.createDataFrame(
+            [(VariantVal(value, b'\x01\x00\x00'),)], 'v variant').selectExpr(
+                "try_variant_get(v, '$[0]', 'bigint') AS x")
+        if require_gpu:
+            # The validate_execs marker checks plan nodes only; this helper also checks
+            # expressions. Assert before collection, which is expected to fail.
+            spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.assertContains(
+                df._jdf, 'GpuVariantGet')
+        return df.collect()
+
+    conf = {'spark.sql.adaptive.enabled': 'false',
+            'spark.rapids.sql.incompatibleOps.enabled': 'true'}
+    assert_spark_exception(lambda: with_cpu_session(do_it, conf=conf), error)
+    assert_spark_exception(
+        lambda: with_gpu_session(lambda spark: do_it(spark, require_gpu=True), conf=conf), error)
+
+
+@incompat
+@allow_non_gpu('RDDScanExec')
+@ignore_order(local=True)
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_variant_try_get_array_statuses_and_coercions():
+    from pyspark.sql.types import VariantVal
+
+    rows = [(i, VariantVal.parseJson(json) if json is not None else None)
+            for i, json in enumerate(['[7]', '[]', '[null]', None, '["42"]', '["bad"]'])]
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.createDataFrame(rows, 'id int, v variant').selectExpr(
+            'id', "try_variant_get(v, '$[0]', 'bigint') AS x"),
+        exist_classes='GpuRowToColumnarExec,GpuVariantGet',
         conf={'spark.sql.adaptive.enabled': 'false'},
         require_non_empty=True)
 
