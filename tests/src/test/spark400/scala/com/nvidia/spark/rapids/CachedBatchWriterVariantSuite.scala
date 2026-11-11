@@ -34,13 +34,39 @@ import com.nvidia.spark.rapids.parquet.ParquetCachedBatchSerializer
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.catalyst.expressions.AttributeReference
 import org.apache.spark.sql.execution.vectorized.OnHeapColumnVector
+import org.apache.spark.sql.rapids.execution.PCBSNullSafeRowToColumnarExec
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
-import org.apache.spark.sql.types.{LongType, StructField, StructType, VariantType}
+import org.apache.spark.sql.types.{LongType, MetadataBuilder, StructField, StructType, VariantType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 import org.apache.spark.storage.StorageLevel.MEMORY_ONLY
 
 class CachedBatchWriterVariantSuite extends SparkQueryCompareTestSuite {
   import CachedBatchWriterVariantSuite._
+
+  test("CPU columnar cache transition preserves Variant alongside NullType") {
+    withCpuSparkSession { spark =>
+      val source = spark.range(0, 4, 1, 2).selectExpr("id",
+        """parse_json(format_string('{"id": %d}', id)) as v""", "null as n")
+        .withMetadata("n", new MetadataBuilder().putString("origin", "null cache").build())
+      val plan = source.queryExecution.executedPlan
+      val expected = plan.executeCollect().map { row =>
+        val v = row.getVariant(1)
+        (row.getLong(0), v.getValue.toSeq, v.getMetadata.toSeq, row.isNullAt(2))
+      }.sortBy(_._1)
+      val transition = PCBSNullSafeRowToColumnarExec(plan)
+      assert(transition.schema == source.schema)
+      val actual = transition.executeColumnar().mapPartitions { batches =>
+        batches.flatMap { batch =>
+          (0 until batch.numRows()).iterator.map { index =>
+            val v = batch.column(1).getVariant(index)
+            (batch.column(0).getLong(index), v.getValue.toSeq, v.getMetadata.toSeq,
+              batch.column(2).isNullAt(index))
+          }
+        }
+      }.collect().sortBy(_._1)
+      assert(actual.toSeq == expected.toSeq)
+    }
+  }
 
   // ColumnarBatchRow.copy() does not take Variant on Spark 4.0 and 4.1.0-4.1.1, so the
   // columnar entry has to carry its row into the next batch without copying it.

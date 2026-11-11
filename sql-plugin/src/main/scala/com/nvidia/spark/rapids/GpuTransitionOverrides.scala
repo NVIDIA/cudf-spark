@@ -41,6 +41,7 @@ import org.apache.spark.sql.execution.exchange.{BroadcastExchangeLike, ENSURE_RE
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec}
 import org.apache.spark.sql.rapids.{GpuDataSourceScanExec, GpuFileSourceScanExec, GpuShuffleEnv, GpuTaskMetrics}
 import org.apache.spark.sql.rapids.execution.{ExchangeMappingCache, GpuBroadcastExchangeExec, GpuBroadcastExchangeExecBase, GpuBroadcastToRowExec, GpuCustomShuffleReaderExec, GpuHashJoin, GpuShuffleExchangeExecBase, GpuSubqueryBroadcastExec}
+import org.apache.spark.sql.rapids.execution.PCBSNullSafeRowToColumnarExec
 import org.apache.spark.sql.types.StructType
 
 /**
@@ -1016,7 +1017,7 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
         updatedPlan
       }
     } else {
-      plan
+      PCBSNullSafeRowToColumnarExec.replaceUnsupportedTransition(plan)
     }
     }(sparkPlan)
   }

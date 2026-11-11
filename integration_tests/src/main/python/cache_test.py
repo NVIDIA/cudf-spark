@@ -23,8 +23,8 @@ from conftest import is_not_utc
 from data_gen import *
 from pyspark import StorageLevel
 import pyspark.sql.functions as f
-from spark_session import (with_cpu_session, with_gpu_session, is_spark_35x, is_spark_local_mode,
-    is_before_spark_340)
+from spark_session import (with_cpu_session, with_gpu_session, with_spark_session, is_spark_35x,
+    is_spark_local_mode, is_before_spark_340)
 from join_test import create_df
 from marks import (incompat, allow_non_gpu, ignore_order, disable_ansi_mode, inject_oom,
     large_data_test)
@@ -387,20 +387,26 @@ def test_cache_udt(aqe_enabled, cache_input, udt_column):
         conf={'spark.sql.adaptive.enabled': aqe_enabled, 'spark.sql.shuffle.partitions': '2'},
         result_canonicalize_func_before_compare=canonicalize)
 
-# These SQL-generated types need the row cache path and a string projection because PySpark
-# cannot collect CalendarIntervalType values. Unlike test_cache_additional_types, materialize
-# the complete cache before projecting, and cover the AQE transition after a shuffle.
+# Generate these types in SQL and project strings because PySpark cannot collect calendar
+# intervals. NullType supports GPU columnar caching but not Spark's CPU row-to-columnar
+# conversion. Materialize the complete cache before projecting to exercise the AQE transition.
 @allow_non_gpu('InMemoryTableScanExec', 'ShuffleExchangeExec', 'ProjectExec', 'ColumnarToRowExec')
 @ignore_order(local=True)
 @pytest.mark.parametrize('aqe_enabled', ['true', 'false'])
 @pytest.mark.parametrize('cache_input', ['rows', 'repartition'])
-@pytest.mark.parametrize('value_expr', [
-    'make_interval(1, 2, 0, cast(id as int), 4, 5, 6.123456)',
-    pytest.param("cast('2024-01-02 03:04:05.123456' as timestamp_ntz)",
+@pytest.mark.parametrize('value_expr, gpu_cache', [
+    ('null', True),
+    ('array(null)', True),
+    ("named_struct('code', null)", True),
+    ('map(1, null)', True),
+    ("named_struct('same', 7, 'same', 'second', '_pcbs_0', null)", True),
+    ('make_interval(1, 2, 0, cast(id as int), 4, 5, 6.123456)', False),
+    pytest.param("cast('2024-01-02 03:04:05.123456' as timestamp_ntz)", False,
         marks=pytest.mark.skipif(is_before_spark_340(),
             reason='SQL TIMESTAMP_NTZ syntax requires Spark 3.4 or newer'))],
-    ids=['calendar_interval', 'timestamp_ntz'])
-def test_cache_unsupported_row_to_columnar_types(aqe_enabled, cache_input, value_expr):
+    ids=['null', 'array_null', 'struct_null', 'map_null', 'duplicate_struct_null',
+        'calendar_interval', 'timestamp_ntz'])
+def test_cache_unsupported_row_to_columnar_types(aqe_enabled, cache_input, value_expr, gpu_cache):
     def fun(spark):
         df = spark.range(4).selectExpr('id',
             'case when id = 0 then null else {} end as value'.format(value_expr))
@@ -409,8 +415,53 @@ def test_cache_unsupported_row_to_columnar_types(aqe_enabled, cache_input, value
         df.cache().count()
         return df.selectExpr('id', 'cast(value as string) as value')
 
-    assert_gpu_fallback_collect(fun, 'InMemoryTableScanExec',
-        conf={'spark.sql.adaptive.enabled': aqe_enabled, 'spark.sql.shuffle.partitions': '2'})
+    conf = {'spark.sql.adaptive.enabled': aqe_enabled, 'spark.sql.shuffle.partitions': '2'}
+    if gpu_cache:
+        conf['spark.rapids.sql.exec.InMemoryTableScanExec'] = 'true'
+        assert_cpu_and_gpu_are_equal_collect_with_capture(
+            fun, exist_classes='GpuInMemoryTableScanExec', conf=conf)
+    else:
+        assert_gpu_fallback_collect(fun, 'InMemoryTableScanExec', conf=conf)
+
+@pytest.mark.parametrize('value_expr', ['null', 'array(null)',
+    "named_struct('code', null)", 'map(1, null)'],
+    ids=['null', 'array_null', 'struct_null', 'map_null'])
+@pytest.mark.parametrize('materialization_mode', ['disabled', 'explainOnly', 'enabled'])
+def test_cache_nulltype_mode_change_before_materialization(value_expr, materialization_mode):
+    def oracle(spark):
+        expected = spark.range(4).selectExpr('id',
+            'cast({} as string) as value'.format(value_expr)).orderBy('id')
+        return expected.schema, expected.collect()
+
+    expected_schema, expected_rows = with_cpu_session(oracle)
+
+    def check(spark):
+        cached = spark.range(4).selectExpr('id', value_expr + ' as value').repartition(2).cache()
+        try:
+            # The cached AQE plan can capture a different execution mode at registration.
+            if materialization_mode == 'explainOnly':
+                spark.conf.set('spark.rapids.sql.mode', 'explainOnly')
+            else:
+                spark.conf.set('spark.rapids.sql.enabled',
+                    str(materialization_mode == 'enabled').lower())
+            assert cached.count() == 4
+            actual = cached.selectExpr('id', 'cast(value as string) as value').orderBy('id')
+            assert actual.schema == expected_schema
+            assert actual.collect() == expected_rows
+            if materialization_mode == 'enabled':
+                assert 'GpuInMemoryTableScan' in actual._jdf.queryExecution().executedPlan().toString()
+        finally:
+            cached.unpersist(blocking=True)
+
+    with_spark_session(check, conf={
+        'spark.rapids.sql.enabled': str(materialization_mode != 'enabled').lower(),
+        'spark.rapids.sql.mode': 'executeOnGPU',
+        'spark.rapids.sql.exec.InMemoryTableScanExec': 'true',
+        'spark.sql.adaptive.enabled': 'true',
+        'spark.sql.shuffle.partitions': '2',
+        # Keep the original session so execution observes the later mode change.
+        'spark.sql.sources.bucketing.autoBucketedScan.enabled': 'false',
+        'spark.sql.adaptive.applyFinalStageShuffleOptimizations': 'false'})
 
 @pytest.mark.parametrize('enable_vectorized_conf', enable_vectorized_confs, ids=idfn)
 @ignore_order(local=True)
