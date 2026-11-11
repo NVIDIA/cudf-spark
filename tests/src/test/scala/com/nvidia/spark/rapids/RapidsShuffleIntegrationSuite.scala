@@ -1061,6 +1061,36 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
     }
   }
 
+  test("with AQE on, toLocalIterator reads a reclaimed shuffle's old output, then reruns its " +
+      "map stage for the rest and returns the right rows") {
+    // AQE runs the map stage inside the query, and the iterator runs one job per result
+    // partition as the caller reads, after the query has ended
+    val listener = startUcxReclaimSession(gateOn = true, Map(
+      "spark.sql.adaptive.enabled" -> "true",
+      "spark.sql.adaptive.coalescePartitions.enabled" -> "false"))
+    val manager = reclaimManager()
+    // a key per row, so that every result partition holds rows
+    val df = spark.range(0, 1000, 1, 4).toDF().repartition(8, col("id"))
+    manager.holdDriverStepsForTesting()
+    val (shuffleId, ids) = try {
+      val rows = df.toLocalIterator()
+      val first = rows.next().getLong(0)
+      val id = onlyGpuShuffle(df)
+      drain(listener)
+      assertResult(1, s"map stages of shuffle $id before the driver's clear")(
+        listener.mapStageSubmissions.count(_ == id))
+      manager.releaseDriverStepsForTesting()
+      awaitRequest(manager, id)
+      (id, first +: rows.asScala.map(_.getLong(0)).toList)
+    } finally {
+      manager.releaseDriverStepsForTesting()
+    }
+    assertResult(0L until 1000L, "ids")(ids.sorted)
+    drain(listener)
+    assertResult(2, s"map stages of shuffle $shuffleId")(
+      listener.mapStageSubmissions.count(_ == shuffleId))
+  }
+
   test("a GPU round-robin shuffle and the shuffle after it wait for GC, and the shuffle before " +
       "it is reclaimed") {
     val listener = startUcxReclaimSession(gateOn = true,
