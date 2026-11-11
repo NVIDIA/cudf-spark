@@ -227,18 +227,18 @@ private[rapids] object GpuRangeBoundaryPlan {
       Some(wrapPostShuffleCoalesce(stage, rapidsConf))
 
     // Row-boundary islands (C2R → BatchEvalPython → R2C) are pass-through only when no range
-    // key depends on a Python UDF output and every UDF is deterministic: a UDF-dependent key
-    // would change the sampled values, and the boundary plan executes the subtree separately
-    // from the shuffle input, so both executions must agree on the keys.
+    // key depends on a Python UDF output. A project widens `required` to the expressions behind
+    // each required output and a filter adds its condition ids, so a UDF output that feeds a
+    // key or a filter is already in `required` and blocks the pass-through, while a UDF output
+    // nothing reads cannot change which rows are sampled. The boundary plan executes this
+    // subtree separately from the shuffle input, so both executions must agree on the keys.
     case python: BatchEvalPythonExec if pruneThroughOperators &&
-        python.udfs.forall(_.deterministic) &&
         required.intersect(python.resultAttrs.map(_.exprId).toSet).isEmpty =>
       prune(python.child, required, deterministicRequired, pruneThroughOperators, rapidsConf)
 
     // Same pass-through for the Arrow-batched Python island, so key-only collection also
     // composes with Arrow-optimized Python UDFs.
     case arrow: GpuArrowEvalPythonExec if pruneThroughOperators &&
-        arrow.udfs.forall(_.deterministic) &&
         required.intersect(arrow.resultAttrs.map(_.exprId).toSet).isEmpty =>
       prune(arrow.child, required, deterministicRequired, pruneThroughOperators, rapidsConf)
 

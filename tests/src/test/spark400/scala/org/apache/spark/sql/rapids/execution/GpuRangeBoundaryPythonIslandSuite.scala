@@ -24,8 +24,8 @@ package org.apache.spark.sql.rapids.execution
 import java.io.File
 
 import com.nvidia.spark.rapids.{
-  GpuColumnarToRowExec, GpuProjectExec, GpuRowToColumnarExec, GpuShuffleCoalesceExec,
-  RapidsConf, SparkQueryCompareTestSuite, TargetSize}
+  GpuColumnarToRowExec, GpuFilterExec, GpuIsNotNull, GpuProjectExec, GpuRowToColumnarExec,
+  GpuShuffleCoalesceExec, RapidsConf, SparkQueryCompareTestSuite, TargetSize}
 
 import org.apache.spark.SparkConf
 import org.apache.spark.api.python.{PythonBroadcast, PythonEvalType, SimplePythonFunction}
@@ -221,7 +221,7 @@ class GpuRangeBoundaryPythonIslandSuite extends SparkQueryCompareTestSuite {
     }
   }
 
-  test("island plan is not pruned when the udf is nondeterministic") {
+  test("island plan prunes through a nondeterministic udf no key or filter reads") {
     withTempPath { path =>
       withGpuSparkSession({ spark =>
         val scan = islandFixture(spark, path)
@@ -233,6 +233,29 @@ class GpuRangeBoundaryPythonIslandSuite extends SparkQueryCompareTestSuite {
           "client_version" -> LongType)
 
         val built = GpuRangeBoundaryPlan.build(island, ordering(boundKeys))
+        assert(built.isDefined)
+        val boundary = built.get
+        assert(!boundary.exists(_.isInstanceOf[BatchEvalPythonExec]))
+        assert(!boundary.exists(_.isInstanceOf[GpuRowToColumnarExec]))
+      }, conf(pruneThroughOperators = true))
+    }
+  }
+
+  test("island plan is not pruned when a filter reads the nondeterministic udf output") {
+    withTempPath { path =>
+      withGpuSparkSession({ spark =>
+        val scan = islandFixture(spark, path)
+        val (udf, resultAttr) = pythonUdfFixture("udf_result", deterministic = false)
+        val island = islandPlan(scan, udf, resultAttr)
+        val gpuResultAttr = AttributeReference(resultAttr.name, resultAttr.dataType,
+          resultAttr.nullable)(exprId = resultAttr.exprId)
+        val filtered = GpuFilterExec(GpuIsNotNull(gpuResultAttr), island)()
+
+        val boundKeys = bindKeysByName(scan.output,
+          "device_type_id" -> LongType, "country_iso_code" -> StringType,
+          "client_version" -> LongType)
+
+        val built = GpuRangeBoundaryPlan.build(filtered, ordering(boundKeys))
         assert(built.isEmpty)
       }, conf(pruneThroughOperators = true))
     }

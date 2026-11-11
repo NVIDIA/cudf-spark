@@ -46,11 +46,10 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
         "partitioning and their post-shuffle coalesce, materialized shuffle stages and AQE " +
         "custom shuffle readers over them, and asymmetric shuffled-hash LeftOuter joins " +
         "whose required keys resolve from the left leg. This skips Python UDF execution " +
-        "while collecting boundaries when the range keys do not depend on any UDF output; " +
-        "keys that depend on a UDF output, or that pass through a nondeterministic UDF, " +
-        "still fall back to full-width collection. It extends sampleKeysOnly, which " +
-        "still does the project, filter, batch-coalesce, and scan pruning; disabling this " +
-        "leaves that behavior unchanged.")
+        "while collecting boundaries when nothing above the island reads a UDF output; " +
+        "keys that depend on a UDF output still fall back to full-width collection. It " +
+        "extends sampleKeysOnly, which still does the project, filter, batch-coalesce, and " +
+        "scan pruning; disabling this leaves that behavior unchanged.")
       .internal()
       .booleanConf
       .createWithDefault(false)
