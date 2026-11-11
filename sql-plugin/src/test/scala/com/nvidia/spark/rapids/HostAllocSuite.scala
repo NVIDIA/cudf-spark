@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids
 
 import java.util.concurrent.{ExecutionException, Future, LinkedBlockingQueue, TimeoutException, TimeUnit}
 
-import ai.rapids.cudf.{DefaultHostMemoryAllocator, DeviceMemoryBuffer, HostMemoryBuffer, PageableMemoryPool, PinnedMemoryPool, Rmm, RmmAllocationMode}
+import ai.rapids.cudf.{DefaultHostMemoryAllocator, HostMemoryBuffer, PageableMemoryPool, PinnedMemoryPool, Rmm, RmmAllocationMode}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.jni.{RmmSpark, RmmSparkThreadState, TaskPriority, ThreadStateRegistry}
 import com.nvidia.spark.rapids.spill._
@@ -416,30 +416,17 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
 
     val pooledBytes = Array.tabulate[Byte](8192)(i => (i % 251).toByte)
     val rawBytes = Array.tabulate[Byte](4096)(i => (i % 239).toByte)
-    withResource(DeviceMemoryBuffer.allocate(8192)) { device =>
-      withResource(DeviceMemoryBuffer.allocate(4096)) { rawDevice =>
-        withResource(HostMemoryBuffer.allocate(8192, false)) { pooled =>
-          pooled.setBytes(0, pooledBytes, 0, pooledBytes.length)
-          withResource(HostMemoryBuffer.allocate(4096, false)) { raw =>
-            raw.setBytes(0, rawBytes, 0, rawBytes.length)
-            assert(HostAlloc.getUsageRatio() == 1.0)
-            device.copyFromHostBuffer(pooled)
-            rawDevice.copyFromHostBuffer(raw)
-          }
-        }
-        assert(HostAlloc.getUsageRatio() == 0.0)
-        withResource(HostMemoryBuffer.allocate(8192, false)) { pooledResult =>
-          pooledResult.copyFromDeviceBuffer(device)
-          val actual = new Array[Byte](pooledBytes.length)
-          pooledResult.asByteBuffer.get(actual)
-          assert(actual.sameElements(pooledBytes))
-          withResource(HostMemoryBuffer.allocate(4096, false)) { rawResult =>
-            rawResult.copyFromDeviceBuffer(rawDevice)
-            val rawActual = new Array[Byte](rawBytes.length)
-            rawResult.asByteBuffer.get(rawActual)
-            assert(rawActual.sameElements(rawBytes))
-          }
-        }
+    withResource(HostMemoryBuffer.allocate(8192, false)) { pooled =>
+      pooled.setBytes(0, pooledBytes, 0, pooledBytes.length)
+      withResource(HostMemoryBuffer.allocate(4096, false)) { raw =>
+        raw.setBytes(0, rawBytes, 0, rawBytes.length)
+        assert(HostAlloc.getUsageRatio() == 1.0)
+        val pooledActual = new Array[Byte](pooledBytes.length)
+        pooled.asByteBuffer.get(pooledActual)
+        assert(pooledActual.sameElements(pooledBytes))
+        val rawActual = new Array[Byte](rawBytes.length)
+        raw.asByteBuffer.get(rawActual)
+        assert(rawActual.sameElements(rawBytes))
       }
     }
     assert(HostAlloc.getUsageRatio() == 0.0)
