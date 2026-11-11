@@ -38,21 +38,22 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
       .booleanConf
       .createWithDefault(true)
 
-  val RANGE_PARTITIONING_PRUNE_THROUGH_PYTHON =
-    conf("spark.rapids.sql.rangePartitioning.pruneThroughPython")
-      .doc("When enabled along with sampleKeysOnly, range boundary collection may also step " +
-        "through row-boundary islands (columnar-to-row, BatchEvalPython, row-to-columnar), " +
-        "GPU shuffle exchanges of any partitioning and their post-shuffle coalesce, GPU " +
-        "shuffle stages and AQE readers over them, and asymmetric shuffled-hash LeftOuter " +
-        "joins with no additional join condition whose required keys resolve from the left " +
-        "leg. This skips Python UDF execution while collecting boundaries when the range " +
-        "keys do not depend on any UDF output; keys that depend on a UDF output, or that " +
-        "pass through a nondeterministic UDF, still fall back to full-width collection. " +
-        "Disabling this skips only these extra steps; the project, filter, batch-coalesce, " +
-        "and scan pruning enabled by sampleKeysOnly still applies.")
+  val RANGE_PARTITIONING_PRUNE_THROUGH_OPERATORS =
+    conf("spark.rapids.sql.rangePartitioning.pruneThroughOperators")
+      .doc("Disabled by default. When enabled along with sampleKeysOnly, range boundary " +
+        "collection may also step through row-boundary islands (columnar-to-row, " +
+        "BatchEvalPython or Arrow Python, row-to-columnar), GPU shuffle exchanges of any " +
+        "partitioning and their post-shuffle coalesce, materialized shuffle stages and AQE " +
+        "custom shuffle readers over them, and asymmetric shuffled-hash LeftOuter joins " +
+        "whose required keys resolve from the left leg. This skips Python UDF execution " +
+        "while collecting boundaries when the range keys do not depend on any UDF output; " +
+        "keys that depend on a UDF output, or that pass through a nondeterministic UDF, " +
+        "still fall back to full-width collection. It extends sampleKeysOnly, which " +
+        "still does the project, filter, batch-coalesce, and scan pruning; disabling this " +
+        "leaves that behavior unchanged.")
       .internal()
       .booleanConf
-      .createWithDefault(true)
+      .createWithDefault(false)
 
   val SQL_MODE = conf("spark.rapids.sql.mode")
     .doc("Set the mode for the cuDF plugin. The supported modes are explainOnly and " +

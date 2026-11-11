@@ -249,8 +249,7 @@ abstract class GpuShuffleExchangeExecBase(
     gpuOutputPartitioning match {
       case range: GpuRangePartitioning
           if RapidsConf.RANGE_PARTITIONING_SAMPLE_KEYS_ONLY.get(child.conf) =>
-        GpuRangeBoundaryPlan.build(child, range.gpuOrdering,
-          RapidsConf.RANGE_PARTITIONING_PRUNE_THROUGH_PYTHON.get(child.conf))
+        GpuRangeBoundaryPlan.build(child, range.gpuOrdering)
       case _ =>
         None
     }

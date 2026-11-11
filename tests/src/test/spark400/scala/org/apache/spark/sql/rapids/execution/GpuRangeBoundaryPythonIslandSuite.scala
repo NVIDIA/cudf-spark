@@ -33,7 +33,9 @@ package org.apache.spark.sql.rapids.execution
 
 import java.io.File
 
-import com.nvidia.spark.rapids.{GpuColumnarToRowExec, GpuProjectExec, GpuRowToColumnarExec, GpuShuffleCoalesceExec, SparkQueryCompareTestSuite, TargetSize}
+import com.nvidia.spark.rapids.{
+  GpuColumnarToRowExec, GpuProjectExec, GpuRowToColumnarExec, GpuShuffleCoalesceExec,
+  RapidsConf, SparkQueryCompareTestSuite, TargetSize}
 
 import org.apache.spark.SparkConf
 import org.apache.spark.api.python.{PythonBroadcast, PythonEvalType, SimplePythonFunction}
@@ -54,10 +56,17 @@ import org.apache.spark.sql.types.{LongType, StringType}
  * `GpuRangeBoundaryPlan.build`, so no Python runtime or UDF execution is involved.
  */
 class GpuRangeBoundaryPythonIslandSuite extends SparkQueryCompareTestSuite {
-  private val conf = new SparkConf()
-    .set("spark.sql.adaptive.enabled", "false")
-    .set("spark.sql.shuffle.partitions", "4")
-    .set("spark.sql.sources.useV1SourceList", "parquet")
+  private def conf(pruneThroughOperators: Boolean = false): SparkConf = {
+    val base = new SparkConf()
+      .set("spark.sql.adaptive.enabled", "false")
+      .set("spark.sql.shuffle.partitions", "4")
+      .set("spark.sql.sources.useV1SourceList", "parquet")
+    if (pruneThroughOperators) {
+      base.set(RapidsConf.RANGE_PARTITIONING_PRUNE_THROUGH_OPERATORS.key, "true")
+    } else {
+      base
+    }
+  }
 
   private def islandFixture(spark: SparkSession, path: File): GpuFileSourceScanExec = {
     spark.range(200)
@@ -142,16 +151,17 @@ class GpuRangeBoundaryPythonIslandSuite extends SparkQueryCompareTestSuite {
           "device_type_id" -> LongType, "country_iso_code" -> StringType,
           "client_version" -> LongType)
 
-        val built = GpuRangeBoundaryPlan.build(
-          island, ordering(boundKeys), pruneThroughPython = true)
+        val built = GpuRangeBoundaryPlan.build(island, ordering(boundKeys))
         assert(built.isDefined)
         val boundary = built.get
         assert(!boundary.exists(_.isInstanceOf[BatchEvalPythonExec]))
-      }, conf)
+        // The coalesce reads host-serialized shuffle batches, so it cannot stay over device ones.
+        assert(!boundary.exists(_.isInstanceOf[GpuShuffleCoalesceExec]))
+      }, conf(pruneThroughOperators = true))
     }
   }
 
-  test("island plan prunes to the scan by default") {
+  test("island plan is not pruned by default") {
     withTempPath { path =>
       withGpuSparkSession({ spark =>
         val scan = islandFixture(spark, path)
@@ -162,32 +172,47 @@ class GpuRangeBoundaryPythonIslandSuite extends SparkQueryCompareTestSuite {
           "device_type_id" -> LongType, "country_iso_code" -> StringType,
           "client_version" -> LongType)
 
-        val built = GpuRangeBoundaryPlan.build(
-          island, ordering(boundKeys), pruneThroughPython = true)
+        val built = GpuRangeBoundaryPlan.build(island, ordering(boundKeys))
+        assert(built.isEmpty)
+      }, conf())
+    }
+  }
+
+  test("island plan is not pruned when pruning is explicitly disabled") {
+    withTempPath { path =>
+      withGpuSparkSession({ spark =>
+        val scan = islandFixture(spark, path)
+        val (udf, resultAttr) = pythonUdfFixture("udf_result", deterministic = true)
+        val island = islandPlan(scan, udf, resultAttr)
+
+        val boundKeys = bindKeysByName(scan.output,
+          "device_type_id" -> LongType, "country_iso_code" -> StringType,
+          "client_version" -> LongType)
+
+        val built = GpuRangeBoundaryPlan.build(island, ordering(boundKeys))
+        assert(built.isEmpty)
+      }, conf().set(RapidsConf.RANGE_PARTITIONING_PRUNE_THROUGH_OPERATORS.key, "false"))
+    }
+  }
+
+  test("island plan prunes through the island to the scan") {
+    withTempPath { path =>
+      withGpuSparkSession({ spark =>
+        val scan = islandFixture(spark, path)
+        val (udf, resultAttr) = pythonUdfFixture("udf_result", deterministic = true)
+        val island = islandPlan(scan, udf, resultAttr)
+
+        val boundKeys = bindKeysByName(scan.output,
+          "device_type_id" -> LongType, "country_iso_code" -> StringType,
+          "client_version" -> LongType)
+
+        val built = GpuRangeBoundaryPlan.build(island, ordering(boundKeys))
         assert(built.isDefined)
         val boundary = built.get
         assert(!boundary.exists(_.isInstanceOf[GpuRowToColumnarExec]))
         assert(!boundary.exists(_.isInstanceOf[GpuColumnarToRowExec]))
         assert(!boundary.exists(_.isInstanceOf[BatchEvalPythonExec]))
-      }, conf)
-    }
-  }
-
-  test("island plan is not pruned when traversal is disabled by conf") {
-    withTempPath { path =>
-      withGpuSparkSession({ spark =>
-        val scan = islandFixture(spark, path)
-        val (udf, resultAttr) = pythonUdfFixture("udf_result", deterministic = true)
-        val island = islandPlan(scan, udf, resultAttr)
-
-        val boundKeys = bindKeysByName(scan.output,
-          "device_type_id" -> LongType, "country_iso_code" -> StringType,
-          "client_version" -> LongType)
-
-        val built = GpuRangeBoundaryPlan.build(
-          island, ordering(boundKeys), pruneThroughPython = false)
-        assert(built.isEmpty)
-      }, conf)
+      }, conf(pruneThroughOperators = true))
     }
   }
 
@@ -200,10 +225,9 @@ class GpuRangeBoundaryPythonIslandSuite extends SparkQueryCompareTestSuite {
 
         val udfKeyAttr = AttributeReference("udf_key", StringType, nullable = true)(
           exprId = resultAttr.exprId)
-        val built = GpuRangeBoundaryPlan.build(
-          island, ordering(Seq(udfKeyAttr)), pruneThroughPython = true)
+        val built = GpuRangeBoundaryPlan.build(island, ordering(Seq(udfKeyAttr)))
         assert(built.isEmpty)
-      }, conf)
+      }, conf(pruneThroughOperators = true))
     }
   }
 
@@ -218,10 +242,9 @@ class GpuRangeBoundaryPythonIslandSuite extends SparkQueryCompareTestSuite {
           "device_type_id" -> LongType, "country_iso_code" -> StringType,
           "client_version" -> LongType)
 
-        val built = GpuRangeBoundaryPlan.build(
-          island, ordering(boundKeys), pruneThroughPython = true)
+        val built = GpuRangeBoundaryPlan.build(island, ordering(boundKeys))
         assert(built.isEmpty)
-      }, conf)
+      }, conf(pruneThroughOperators = true))
     }
   }
 }
