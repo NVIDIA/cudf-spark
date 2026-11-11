@@ -276,11 +276,14 @@ def is_spark_40x():
 def is_spark_41x():
     return (4, 1, 0) <= spark_version_tuple() < (4, 2, 0)
 
+def is_spark_42x():
+    return (4, 2, 0) <= spark_version_tuple() < (4, 3, 0)
+
 def is_spark_420_or_later():
     return spark_version_tuple() >= (4, 2, 0)
 
 def is_spark_421_or_later():
-    return spark_version() >= "4.2.1"
+    return spark_version_tuple() >= (4, 2, 1)
 
 def is_spark_500_or_later():
     return spark_version_tuple() >= (5, 0, 0)

@@ -15,7 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark":["405"],"carryForward":"sameMinor"}
+{"spark":["405","421"],"carryForward":"sameMinor"}
 spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.errors
