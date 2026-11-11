@@ -870,8 +870,8 @@ class RowToColumnarIterator(
 
 object RowToColumnarIterator {
   // The builders reserve host memory for a batch's rows on its first row, and nothing can
-  // reclaim it until the batch ends. Before any data is seen, they start with room for a batch
-  // of at most this much, as estimated from the schema, and grow by doubling beyond it.
+  // reclaim it until the batch ends, so each batch starts with room for a batch of at most this
+  // much, as estimated from the schema, and grows by doubling beyond it.
   private val maxInitialBatchBytes = 128L * 1024 * 1024
 
   /**
