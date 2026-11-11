@@ -297,8 +297,11 @@ def is_spark_403():
 def is_spark_404():
     return spark_version_tuple() == (4, 0, 4)
 
-def is_spark_403_or_404():
-    return is_spark_403() or is_spark_404()
+def is_spark_405():
+    return spark_version_tuple() == (4, 0, 5)
+
+def is_spark_403_through_405():
+    return is_spark_403() or is_spark_404() or is_spark_405()
 
 def is_spark_410_or_later():
     return spark_version_tuple() >= (4, 1, 0)

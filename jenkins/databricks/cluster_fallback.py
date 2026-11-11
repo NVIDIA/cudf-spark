@@ -50,7 +50,8 @@ class PreparationError(Exception):
 
 def save_state(path, state):
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(state, sort_keys=True) + "\n")
+    with temporary.open("w") as output:
+        output.write(json.dumps(state, sort_keys=True) + "\n")
     temporary.replace(path)
 
 

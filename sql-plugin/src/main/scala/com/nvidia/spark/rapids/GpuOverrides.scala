@@ -361,7 +361,7 @@ case class InsertIntoHadoopFsRelationCommandMeta(
     val format = fileFormat.getOrElse(
       throw new IllegalStateException("fileFormat missing, tagSelfForGpu not called?"))
 
-    GpuInsertIntoHadoopFsRelationCommand(
+    val gpuCommand = GpuInsertIntoHadoopFsRelationCommand(
       cmd.outputPath,
       cmd.staticPartitions,
       cmd.ifPartitionNotExists,
@@ -377,6 +377,8 @@ case class InsertIntoHadoopFsRelationCommandMeta(
       conf.stableSort,
       conf.concurrentWriterPartitionFlushSize,
       conf.outputDebugDumpPrefix)
+    GpuFileWriteJobShim.copyBeforeWriteJob(cmd, gpuCommand)
+    gpuCommand
   }
 }
 

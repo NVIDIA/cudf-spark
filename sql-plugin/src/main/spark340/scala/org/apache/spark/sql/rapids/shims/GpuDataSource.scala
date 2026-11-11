@@ -23,7 +23,7 @@ spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.rapids
 
-import com.nvidia.spark.rapids.shims.LogicalPlanShims
+import com.nvidia.spark.rapids.shims.{GpuFileWriteJobShim, LogicalPlanShims}
 import org.apache.hadoop.fs.Path
 
 import org.apache.spark.sql.SaveMode
@@ -114,7 +114,8 @@ case class GpuDataSource(
   def writeAndRead(
       mode: SaveMode,
       data: LogicalPlan,
-      outputColumnNames: Seq[String]): BaseRelation = {
+      outputColumnNames: Seq[String],
+      beforeWrite: () => Unit = () => ()): BaseRelation = {
 
     val format = originalProvidingInstance()
     if (!format.isInstanceOf[FileFormat]) {
@@ -129,12 +130,8 @@ case class GpuDataSource(
     }
 
     val cmd = planForWritingFileFormat(format.asInstanceOf[FileFormat], mode, data)
-    // Spark 3.4 doesn't need the child physical plan for metrics anymore, this is now
-    // cleaned up, so we need to run the DataWritingCommand using SparkSession. This actually
-    // calls the plugin transformation process again for a new physical plan with the
-    // DataWritingCommandExec.
-    val qe = sparkSession.sessionState.executePlan(cmd)
-    qe.assertCommandExecuted()
+    GpuFileWriteJobShim.setBeforeWriteJob(cmd, beforeWrite)
+    GpuFileWriteJobShim.executeWriteCommand(sparkSession, cmd, beforeWrite)
   
     // Replace the schema with that of the DataFrame we just wrote out to avoid re-inferring
     copy(userSpecifiedSchema = Some(outputColumns.toStructType.asNullable)).resolveRelation()
