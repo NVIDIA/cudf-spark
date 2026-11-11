@@ -22,8 +22,8 @@ import java.util.Collections
 
 import scala.collection.JavaConverters._
 
-import com.nvidia.spark.history.{DimValue, HistoryMetricCatalog, MetricStore, MetricStores,
-  Observation, SchemaStatus, Status, SummaryResponse}
+import com.nvidia.spark.history.{DimValue, MetricStore, MetricStores, Observation, SchemaStatus,
+  Status, SummaryResponse}
 import com.nvidia.spark.rapids.{GpuMetric, LocalGpuMetric}
 import org.apache.hadoop.fs.Path
 import org.scalatest.funsuite.AnyFunSuite
@@ -78,10 +78,13 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
   private def scanContext(decoded: Long, listed: Long = 100 * MiB): ScanContext =
     ScanContext.forObservation(table, 1, () => Seq((0, decoded, listed)))
 
-  test("the metric is named from its production catalog entry") {
-    val entry = HistoryMetricCatalog.production().find(ScanExpansionRatio.id)
-    assert(entry.isPresent, s"metric ID ${ScanExpansionRatio.id} is not in the catalog")
+  test("the metric's id and name are permanent, and are in the catalog the plugin supplies") {
+    // Stored observations are keyed by the id, so changing either value is a breaking change.
+    assert(ScanExpansionRatio.id == 1)
     assert(ScanExpansionRatio.name == "scan.decode_expansion_ratio")
+    val entry = HistoryHeuristics.catalog.find(ScanExpansionRatio.id)
+    assert(entry.isPresent, s"metric ID ${ScanExpansionRatio.id} is not in the catalog")
+    assert(entry.get.name == ScanExpansionRatio.name)
     assert(!entry.get.retired())
   }
 

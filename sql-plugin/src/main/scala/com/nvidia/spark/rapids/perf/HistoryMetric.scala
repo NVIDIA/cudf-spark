@@ -18,28 +18,27 @@ package com.nvidia.spark.rapids.perf
 
 import java.util.Collections
 
+import scala.collection.JavaConverters._
+
 import com.nvidia.spark.history.{DimensionSpec, DimValue, HistoryMetricCatalog, MetricSchema,
   MetricVersionId, Retention}
 
 /**
- * Contract of one governed history metric family at one version: id, single dimension and
+ * Contract of one history metric family at one version: id, name, single dimension and
  * retention. No store access.
  *
  * Exactly one STRING dimension.
  */
 trait HistoryMetric {
 
-  /** Must match the API's production catalog entry. */
+  /**
+   * The family's permanent id. Stored observations are keyed by it, so it is never reused or
+   * changed, and no two families share one.
+   */
   def id: Int
 
-  /**
-   * From the production catalog entry for `id`. Absent or retired families are named by id; the
-   * store rejects their declaration.
-   */
-  final lazy val name: String = {
-    val entry = HistoryMetricCatalog.production().find(id)
-    if (entry.isPresent && !entry.get.retired()) entry.get.name() else s"uncatalogued-metric-$id"
-  }
+  /** The family's permanent name, shared by all of its versions. Used in logs. */
+  def name: String
 
   /** Any change in meaning needs a new version. */
   def version: Int
@@ -57,4 +56,17 @@ trait HistoryMetric {
     metric,
     Collections.singletonList(new DimensionSpec(dimension, DimValue.Kind.STRING)),
     retention)
+}
+
+object HistoryMetric {
+
+  /**
+   * The catalog the plugin gives its history provider: one entry per family, however many
+   * versions of it are given. Throws `IllegalArgumentException` if two families share an id or a
+   * name, or an id or name is invalid.
+   */
+  def catalogOf(metrics: Seq[HistoryMetric]): HistoryMetricCatalog =
+    HistoryMetricCatalog.of(metrics.map(m => (m.id, m.name)).distinct.map {
+      case (id, name) => new HistoryMetricCatalog.MetricDefinition(id, name, false)
+    }.asJava)
 }

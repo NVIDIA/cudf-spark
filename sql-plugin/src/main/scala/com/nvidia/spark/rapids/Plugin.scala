@@ -605,7 +605,8 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
           appId,
           sc.applicationAttemptId.orNull,
           producerVersion,
-          historyMetricsProviderName)
+          historyMetricsProviderName,
+          HistoryHeuristics.catalog)
       } catch {
         case failure if HistoryMetricsManager.isContained(failure) =>
           logError("History metrics activation failed; history-backed heuristics remain disabled",

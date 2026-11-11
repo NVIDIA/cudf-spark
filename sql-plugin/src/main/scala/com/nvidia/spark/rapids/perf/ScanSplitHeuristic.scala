@@ -53,8 +53,9 @@ import org.apache.spark.util.CollectionAccumulator
  */
 object ScanExpansionRatio extends HistoryMetric {
 
-  /** `scan.decode_expansion_ratio` in the production catalog. */
   override val id: Int = 1
+
+  override val name: String = "scan.decode_expansion_ratio"
 
   override val version: Int = 1
 

@@ -72,9 +72,12 @@ Store errors are logged once per JVM per reason and the decision falls back to s
 Code layers: `HistoryMetric` (family contract) -> `MetricHistory` (store access, `HistoryPolicy`)
 -> `HistoryHeuristic` (decide/observe cycle, lifecycle) -> `ScanSplitHeuristic`.
 
-1. Register a family id and name in the API's `HistoryMetricCatalog`.
-2. Define it: `object X extends HistoryMetric`.
-3. Extend `HistoryHeuristic` (key, static decision, formula, bounds, observation, and `enabled`,
+1. Define the family: `object X extends HistoryMetric`, with a permanent `id` and `name`. The
+   plugin gives every registered family to the history provider as its catalog
+   (`HistoryHeuristics.catalog`), which admits only those ids. An id or name is never reused or
+   changed, because stored observations are keyed by the id. A clash between two families makes
+   building the catalog fail, which leaves history off.
+2. Extend `HistoryHeuristic` (key, static decision, formula, bounds, observation, and `enabled`,
    which reads its own `spark.rapids.sql.history.<name>.enabled` switch) as a singleton over
    `MetricStores.current()`, and add it to the list in `HistoryHeuristics`.
-4. Call `decide` and `register` from the planning site.
+3. Call `decide` and `register` from the planning site.

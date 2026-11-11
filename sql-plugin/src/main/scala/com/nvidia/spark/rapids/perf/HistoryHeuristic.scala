@@ -22,7 +22,7 @@ import java.util.Locale
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
-import com.nvidia.spark.history.{MetricStore, MetricStores}
+import com.nvidia.spark.history.{HistoryMetricCatalog, MetricStore, MetricStores}
 import com.nvidia.spark.rapids.{HistoryMetricsManager, RapidsConf}
 
 import org.apache.spark.SparkContext
@@ -219,6 +219,12 @@ private[perf] class HistoryLifecycle(
   private var started: Seq[HistoryHeuristic] = Nil
 
   /**
+   * Every family these heuristics record, whether or not a heuristic is enabled, so the ids a
+   * provider admits do not depend on configuration.
+   */
+  def catalog: HistoryMetricCatalog = HistoryMetric.catalogOf(heuristics.flatMap(_.metrics))
+
+  /**
    * Enables the heuristics that `isOn` selects if a provider is requested. Stops any earlier
    * start first so nothing leaks across SparkContexts.
    *
@@ -290,6 +296,9 @@ object HistoryHeuristics {
         Duration.ofMillis(conf.historyDeclareTimeoutMs)),
       sc.addSparkListener,
       _.enabled(conf))
+
+  /** The catalog to open the history provider with. */
+  def catalog: HistoryMetricCatalog = lifecycle.catalog
 
   /** After the provider manager ran. */
   def activate(): Unit = lifecycle.activate()
