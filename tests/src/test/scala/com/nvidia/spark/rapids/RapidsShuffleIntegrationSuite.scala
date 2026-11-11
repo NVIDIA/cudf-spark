@@ -783,6 +783,20 @@ class RapidsShuffleIntegrationSuite extends AnyFunSuite with BeforeAndAfterEach 
     }
   }
 
+  test("the GPU shuffle registry refuses the shuffles above a GPU limit, and admits the shuffle " +
+      "below it") {
+    startUcxReclaimSession(gateOn = true, Map.empty)
+    val df = spark.range(0, 1000, 1, 4).toDF().repartition(4, col("id")).limit(500)
+      .repartition(2, col("id"))
+    df.collect()
+    val plan = df.queryExecution.executedPlan
+    Seq("GpuGlobalLimitExec", "GpuLocalLimitExec").foreach { node =>
+      assert(plan.exists(_.getClass.getSimpleName == node), s"no $node in:\n$plan")
+    }
+    assertResult(Seq(false, false, true), "admitted above, between and below the limits")(
+      admittedShuffles(df))
+  }
+
   test("a held UCX reclaim that arrives after a map-stage rerun outside SQL keeps the " +
       "rerun's output") {
     val listener = startUcxReclaimSession(gateOn = true, Map.empty)

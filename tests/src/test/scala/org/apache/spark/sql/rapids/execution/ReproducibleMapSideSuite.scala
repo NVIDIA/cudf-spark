@@ -96,6 +96,15 @@ class ReproducibleMapSideSuite extends SparkQueryCompareTestSuite {
     }
   }
 
+  test("a limit makes each exchange above it not reproducible, and leaves the one below it " +
+      "reproducible") {
+    withCpuSparkSession { spark =>
+      // the limit plans a local limit, a single-partition exchange and a global limit
+      val df = ids(spark).repartition(4, col("id")).limit(500).repartition(2, col("id"))
+      assertResult(Seq(false, false, true))(reproducible(df))
+    }
+  }
+
   test("rand() below an earlier exchange makes both exchanges not reproducible") {
     withCpuSparkSession { spark =>
       assertResult(Seq(false, false))(reproducible(randBelowEarlierShuffle(spark)))
