@@ -544,7 +544,8 @@ def test_cache_unsupported_row_to_columnar_types(aqe_enabled, cache_input, value
         return df.selectExpr('id', 'cast(value as string) as value')
 
     conf = {'spark.sql.adaptive.enabled': aqe_enabled, 'spark.sql.shuffle.partitions': '2'}
-    if gpu_cache:
+    # Spark's default serializer keeps cache scans on the CPU, including GPU-supported types.
+    if gpu_cache and _pcbs_enabled:
         conf['spark.rapids.sql.exec.InMemoryTableScanExec'] = 'true'
         assert_cpu_and_gpu_are_equal_collect_with_capture(
             fun, exist_classes='GpuInMemoryTableScanExec', conf=conf)
@@ -576,7 +577,7 @@ def test_cache_nulltype_mode_change_before_materialization(value_expr, materiali
             actual = cached.selectExpr('id', 'cast(value as string) as value').orderBy('id')
             assert actual.schema == expected_schema
             assert actual.collect() == expected_rows
-            if materialization_mode == 'enabled':
+            if materialization_mode == 'enabled' and _pcbs_enabled:
                 assert 'GpuInMemoryTableScan' in actual._jdf.queryExecution().executedPlan().toString()
         finally:
             cached.unpersist(blocking=True)
