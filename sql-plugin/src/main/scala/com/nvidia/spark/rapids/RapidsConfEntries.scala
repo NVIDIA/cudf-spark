@@ -321,17 +321,16 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
       "another. A shuffle waits for Spark's own cleanup, as it does when this is false, when " +
       "Spark marks its map stage indeterminate, as for repartition(n) without columns, when " +
       "Delta Lake's optimized write builds it, or when its query computes it from a " +
-      "nondeterministic expression such as rand() or uuid(), a sample, or an RDD. A later " +
-      "action that reuses a DataFrame reruns the map stage of each reclaimed shuffle it reads. " +
-      "The driver clears a shuffle's map outputs shortly after its query ends, and an action " +
-      "that judged the shuffle available before that clear can read part of its old output " +
-      "and rerun the rest. Such an action can be a second action on the same DataFrame, a " +
-      "concurrent query that shares it, or toLocalIterator, whose jobs run after its query " +
+      "nondeterministic expression such as rand() or uuid(), a sample, a limit, or an RDD. " +
+      "A later action that reuses a DataFrame reruns the map stage of each reclaimed shuffle " +
+      "it reads. The driver clears a shuffle's map outputs shortly after its query ends, and " +
+      "an action that judged the shuffle available before that clear can read part of its old " +
+      "output and rerun the rest. Such an action can be a second action on the same DataFrame, " +
+      "a concurrent query that shares it, or toLocalIterator, whose jobs run after its query " +
       "ends. That action then returns duplicated or missing rows if the shuffle depends on " +
-      "input order, as first(), last(), row_number() over ties or limit without an order " +
-      "can. Its fetch failure can also make Spark drop every map output on that executor, so " +
-      "a concurrent query that reads a GPU round-robin shuffle there can fail. Keep this key " +
-      "off for such workloads.")
+      "input order, as first(), last() or row_number() over ties can. Its fetch failure can " +
+      "also make Spark drop every map output on that executor, so a concurrent query that reads " +
+      "a GPU round-robin shuffle there can fail. Keep this key off for such workloads.")
     .startupOnly()
     .booleanConf
     .createWithDefault(false)

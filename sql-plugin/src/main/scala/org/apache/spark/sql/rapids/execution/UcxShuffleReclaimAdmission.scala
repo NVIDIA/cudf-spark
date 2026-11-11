@@ -15,11 +15,13 @@
  */
 package org.apache.spark.sql.rapids.execution
 
-import com.nvidia.spark.rapids.{GpuFastSampleExec, GpuSampleExec}
+import com.nvidia.spark.rapids.{GpuFastSampleExec, GpuGlobalLimitExec, GpuLocalLimitExec,
+  GpuSampleExec}
 
 import org.apache.spark.ShuffleDependency
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.execution.{ExternalRDDScanExec, RDDScanExec, SampleExec, SparkPlan}
+import org.apache.spark.sql.execution.{ExternalRDDScanExec, GlobalLimitExec, LocalLimitExec,
+  RDDScanExec, SampleExec, SparkPlan}
 import org.apache.spark.sql.execution.adaptive.{BroadcastQueryStageExec, QueryStageExec}
 import org.apache.spark.sql.execution.exchange.{BroadcastExchangeLike, ReusedExchangeExec}
 import org.apache.spark.sql.rapids.{GpuShuffleRegistry, RapidsShuffleInternalManagerBase}
@@ -51,14 +53,16 @@ private[execution] object UcxShuffleReclaimAdmission extends Logging {
    * drop an earlier shuffle's outputs on the same executor too. So the walk goes through earlier
    * shuffles and query stages, and stops only at a broadcast, whose value Spark builds once.
    *
-   * It refuses a nondeterministic expression, a sample, which picks rows by their position in
-   * its input, and a scan of an RDD, whose rerun the plan cannot see. It cannot see a value that
-   * depends on the order rows arrive in under a deterministic expression, such as first() or a
-   * floating-point sum.
+   * It refuses a nondeterministic expression, a scan of an RDD, whose rerun the plan cannot see,
+   * and a sample or a limit, each of which picks rows by their position in its input. It cannot
+   * see a value that depends on the order rows arrive in under a deterministic expression, such
+   * as first() or a floating-point sum.
    */
   def mapSideIsReproducible(plan: SparkPlan): Boolean = plan match {
     case _: BroadcastExchangeLike | _: BroadcastQueryStageExec => true
     case _: SampleExec | _: GpuSampleExec | _: GpuFastSampleExec => false
+    case _: LocalLimitExec | _: GlobalLimitExec | _: GpuLocalLimitExec | _: GpuGlobalLimitExec =>
+      false
     case _: RDDScanExec | _: ExternalRDDScanExec[_] => false
     case stage: QueryStageExec => mapSideIsReproducible(stage.plan)
     case reused: ReusedExchangeExec => mapSideIsReproducible(reused.child)
