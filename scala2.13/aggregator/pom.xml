@@ -22,13 +22,13 @@
     <parent>
         <groupId>com.nvidia</groupId>
         <artifactId>rapids-4-spark-parent_2.13</artifactId>
-        <version>26.10.0-SNAPSHOT</version>
+        <version>26.12.0-SNAPSHOT</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
     <artifactId>rapids-4-spark-aggregator_2.13</artifactId>
     <name>RAPIDS Accelerator for Apache Spark Aggregator</name>
     <description>Creates an aggregated shaded package of the RAPIDS plugin for Apache Spark</description>
-    <version>26.10.0-SNAPSHOT</version>
+    <version>26.12.0-SNAPSHOT</version>
 
     <properties>
         <rapids.module>aggregator</rapids.module>
@@ -169,6 +169,12 @@
                             <!-- excludes cudf-spark-jni and jucx, will package them in the dist submodule -->
                             <exclude>com.nvidia:${cudf-spark-jni.artifactId}:*</exclude>
                             <exclude>org.openucx:jucx:*</exclude>
+                            <!-- These unclassified Java artifacts are packaged once at the dist root. -->
+                            <exclude>com.nvidia:cudf-spark-history-metrics-api:*</exclude>
+                            <exclude>com.nvidia:cudf-spark-history-metrics-backend-core:*</exclude>
+                            <exclude>com.nvidia:cudf-spark-history-metrics-relational-core:*</exclude>
+                            <exclude>com.nvidia:cudf-spark-history-metrics-local:*</exclude>
+                            <exclude>org.xerial:sqlite-jdbc:*</exclude>
                         </excludes>
                     </artifactSet>
                     <transformers>

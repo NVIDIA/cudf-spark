@@ -29,13 +29,16 @@ import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.DateUtils.{toStrf, TimestampFormatConversionException}
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.jni.CastStrings
+import com.nvidia.spark.rapids.jni.GpuSplitAndRetryOOM
 import com.nvidia.spark.rapids.shims.GpuTypeShims
+import com.univocity.parsers.csv.CsvParser
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 import org.apache.hadoop.io.Text
 import org.apache.hadoop.io.compress.CompressionCodecFactory
 
 import org.apache.spark.TaskContext
+import org.apache.spark.sql.catalyst.csv.{CSVOptions, GpuCsvUtils}
 import org.apache.spark.sql.connector.read.PartitionReader
 import org.apache.spark.sql.execution.QueryExecutionException
 import org.apache.spark.sql.execution.datasources.{HadoopFileLinesReader, PartitionedFile}
@@ -43,44 +46,7 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.{ExceptionTimeParserPolicy, GpuToTimestamp, LegacyTimeParserPolicy}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
-
-/**
- * We read text files in one line at a time from Spark. This provides an abstraction in how those
- * lines are buffered before being processed on the GPU.
- */
-trait LineBufferer extends AutoCloseable {
-  /**
-   * Get the current size of the data that has been buffered.
-   */
-  def getLength: Long
-
-  /**
-   * Get the numnber of lines currently added to this that were not filtered out.
-   */
-  def getNumLines: Int
-
-  /**
-   * Add a new line of bytes to the data to process.
-   */
-  def add(line: Array[Byte], offset: Int, len: Int): Unit
-
-  def isWhiteSpace(b: Byte): Boolean = {
-    b == ' ' || b == '\t' || b == '\r' || b == '\n'
-  }
-
-  def isEmpty(line: Array[Byte], lineOffset: Int, lineLen: Int): Boolean = {
-    (0 until lineLen).forall { idx =>
-      isWhiteSpace(line(lineOffset + idx))
-    }
-  }
-}
-
-/**
- * Factory to create a LineBufferer instance that can be used to buffer lines being read in.
- */
-trait LineBuffererFactory[BUFF <: LineBufferer] {
-  def createBufferer(estimatedSize: Long, lineSeparatorInRead: Array[Byte]): BUFF
-}
+import org.apache.spark.unsafe.types.UTF8String
 
 object HostLineBuffererFactory extends LineBuffererFactory[HostLineBufferer] {
   override def createBufferer(estimatedSize: Long,
@@ -94,17 +60,74 @@ object FilterEmptyHostLineBuffererFactory extends LineBuffererFactory[HostLineBu
     new HostLineBufferer(estimatedSize, lineSeparatorInRead, true)
 }
 
+private[rapids] class CsvHostLineBufferer(size: Long, separator: Array[Byte])
+    extends HostLineBufferer(size, separator, false) {
+  var firstRow: Option[Array[String]] = None
+
+  override def getNumLines: Int = super.getNumLines + firstRow.size
+
+  override def hasData: Boolean = firstRow.nonEmpty || super.hasData
+}
+
 /**
  * Factory for CSV reading that filters empty lines using Java String.trim() compatible whitespace
  * (all chars <= 0x20). This matches Spark CPU's CSVExprUtils.filterCommentAndEmpty behavior which
  * uses line.trim.nonEmpty to filter blank lines.
  */
-object FilterCsvEmptyHostLineBuffererFactory extends LineBuffererFactory[HostLineBufferer] {
+class FilterCsvEmptyHostLineBuffererFactory(
+    parsedOptions: CSVOptions, numColumns: Int, hasHeader: Boolean)
+    extends LineBuffererFactory[HostLineBufferer] {
+  private var firstRecord = true
+
+  private[rapids] def parseBomRecord(
+      line: Array[Byte], offset: Int, len: Int): Array[String] = {
+    val settings = parsedOptions.asParserSettings
+    val parser = new CsvParser(settings)
+    try {
+      val fields = parser.parseLine(GpuCsvUtils.csvLineToParse(line, offset, len,
+        parsedOptions, settings.getFormat.getNormalizedNewline))
+      Array.tabulate(numColumns) { i =>
+        if (fields == null || i >= fields.length || fields(i) == parsedOptions.nullValue) null
+        else fields(i)
+      }
+    } finally {
+      parser.stopParsing()
+    }
+  }
+
   override def createBufferer(estimatedSize: Long,
       lineSeparatorInRead: Array[Byte]): HostLineBufferer =
-    new HostLineBufferer(estimatedSize, lineSeparatorInRead, true) {
+    new CsvHostLineBufferer(estimatedSize, lineSeparatorInRead) {
       // Match Java's String.trim() which treats all chars <= '\u0020' as whitespace.
       override def isWhiteSpace(b: Byte): Boolean = (b & 0xFF) <= 0x20
+
+      private def addPreservingBom(line: Array[Byte], offset: Int, len: Int): Unit = {
+        if (getLength == 0 && len >= 3 && line(offset) == 0xef.toByte &&
+            line(offset + 1) == 0xbb.toByte && line(offset + 2) == 0xbf.toByte) {
+          val protectedLine = new Array[Byte](len + 1)
+          protectedLine(0) = '\n'.toByte
+          System.arraycopy(line, offset, protectedLine, 1, len)
+          super.add(protectedLine, 0, protectedLine.length)
+        } else {
+          super.add(line, offset, len)
+        }
+      }
+
+      override def add(line: Array[Byte], offset: Int, len: Int): Unit = {
+        if (!isEmpty(line, offset, len)) {
+          val isComment = parsedOptions.isCommentSet &&
+            line(offset) == parsedOptions.comment.toByte
+          val isFirstRecord = firstRecord && !isComment
+          if (isFirstRecord) firstRecord = false
+          if (isFirstRecord && !hasHeader && len >= 3 && line(offset) == 0xef.toByte &&
+              line(offset + 1) == 0xbb.toByte && line(offset + 2) == 0xbf.toByte) {
+            // Spark's tokenizer strips a BOM once per partition, after filtering comments/blanks.
+            firstRow = Some(parseBomRecord(line, offset, len))
+          } else {
+            addPreservingBom(line, offset, len)
+          }
+        }
+      }
     }
 }
 
@@ -146,6 +169,9 @@ class HostLineBufferer(size: Long,
       location = location + separator.length
     }
   }
+
+  // Borrowed until this bufferer is modified or closed.
+  private[rapids] def getBuffer: HostMemoryBuffer = buffer
 
   def getBufferAndRelease: HostMemoryBuffer = {
     val ret = buffer
@@ -234,23 +260,61 @@ class HostStringColBufferer(size: Long, separator: Array[Byte]) extends LineBuff
 }
 
 object GpuTextBasedPartitionReader {
+  def findSplitOffset(buffer: HostMemoryBuffer, minSplitOffset: Long = 0): Long = {
+    val size = buffer.getLength
+    val midpoint = math.max(size / 2, minSplitOffset)
+    var pos = midpoint
+    while (pos < size && buffer.getByte(pos) != '\n'.toByte) {
+      pos += 1
+    }
+    val nextBoundary = math.min(pos + 1, size)
+    if (nextBoundary < size) {
+      nextBoundary
+    } else {
+      pos = midpoint - 1
+      while (pos >= minSplitOffset && buffer.getByte(pos) != '\n'.toByte) {
+        pos -= 1
+      }
+      pos + 1
+    }
+  }
+
+  case class LineDelimitedReadChunk(buffer: HostMemoryBuffer) extends AutoCloseable {
+    override def close(): Unit = buffer.close()
+
+    def split(): Seq[LineDelimitedReadChunk] = withResource(this) { _ =>
+      val splitOffset = findSplitOffset(buffer)
+      if (splitOffset <= 0 || splitOffset >= buffer.getLength) {
+        throw new GpuSplitAndRetryOOM("Text input cannot be split at a record boundary")
+      }
+      closeOnExcept(buffer.slice(0, splitOffset)) { left =>
+        val right = buffer.slice(splitOffset, buffer.getLength - splitOffset)
+        Seq(LineDelimitedReadChunk(left), LineDelimitedReadChunk(right))
+      }
+    }
+  }
+
   def castStringToTimestamp(
       lhs: ColumnVector,
       sparkFormat: String,
       dtype: DType): ColumnVector = {
 
-    val optionalSeconds = raw"(?:\:\d{2})?"
+    // Reject invalid time fields before trying cuDF's date-only format, which can accept
+    // a valid date even when a trailing time is malformed.
+    val optionalSeconds = raw"(?:\:[0-5]\d)?"
     val optionalMicros = raw"(?:\.\d{1,6})?"
     val twoDigits = raw"\d{2}"
     val fourDigits = raw"\d{4}"
+    val validHours = raw"(?:[01]\d|2[0-3])"
+    val validMinutes = raw"[0-5]\d"
 
     val regexRoot = sparkFormat
         .replace("'T'", "T")
         .replace("yyyy", fourDigits)
         .replace("MM", twoDigits)
         .replace("dd", twoDigits)
-        .replace("HH", twoDigits)
-        .replace("mm", twoDigits)
+        .replace("HH", validHours)
+        .replace("mm", validMinutes)
         .replace("[:ss]", optionalSeconds)
         .replace(":ss", optionalSeconds) // Spark always treats seconds portion as optional
         .replace("[.SSSXXX]", optionalMicros)
@@ -381,6 +445,7 @@ abstract class GpuTextBasedPartitionReader[BUFF <: LineBufferer, FACT <: LineBuf
   private val lineReader = new HadoopFileLinesReader(partFile, lineSeparatorInRead, conf)
   private var isFirstChunkForIterator: Boolean = true
   private var isExhausted: Boolean = false
+  private var pendingTables: Iterator[Table] = Iterator.empty
 
   metrics = execMetrics
 
@@ -519,7 +584,7 @@ abstract class GpuTextBasedPartitionReader[BUFF <: LineBufferer, FACT <: LineBuf
           case dt: DecimalType =>
             castStringToDecimal(table.getColumn(i), dt)
           case DataTypes.DateType =>
-            castStringToDate(table.getColumn(i), DType.TIMESTAMP_DAYS)
+            castStringToDate(table.getColumn(i), DType.TIMESTAMP_DAYS, readSchema.fields(i))
           case DataTypes.TimestampType =>
             castStringToTimestamp(table.getColumn(i),
               timestampFormat, DType.TIMESTAMP_MICROSECONDS)
@@ -534,45 +599,65 @@ abstract class GpuTextBasedPartitionReader[BUFF <: LineBufferer, FACT <: LineBuf
     }
   }
 
-  private def readToTable(isFirstChunk: Boolean): Option[Table] = {
-    val (dataBuffer, dataSize) = metrics(BUFFER_TIME).ns {
-      readPartFile()
-    }
-    try {
-      if (dataSize == 0) {
-        None
-      } else {
-        val newReadDataSchema: StructType = if (readDataSchema.isEmpty) {
-          val smallestField =
-            dataSchema.min(Ordering.by[StructField, Integer](_.dataType.defaultSize))
-          StructType(Seq(smallestField))
-        } else {
-          readDataSchema
-        }
-
-        val cudfSchema = getCudfSchema(dataSchema)
-        val cudfReadSchema = getCudfSchema(newReadDataSchema)
-
-        // about to start using the GPU
-        GpuSemaphore.acquireIfNecessary(TaskContext.get())
-
-        // The buffer that is sent down
-        val table = readToTable(dataBuffer, cudfSchema, newReadDataSchema, cudfReadSchema,
-          isFirstChunk, metrics(GPU_DECODE_TIME))
-
-        // parse boolean and numeric columns that were read as strings
-        val castTable =
-          castToOutputTypesWithRetryAndClose(table, newReadDataSchema)
-
-        handleResult(newReadDataSchema, castTable)
-      }
-    } finally {
-      dataBuffer.close()
+  private lazy val effectiveReadSchema: StructType = {
+    if (readDataSchema.isEmpty) {
+      val smallestField =
+        dataSchema.min(Ordering.by[StructField, Integer](_.dataType.defaultSize))
+      StructType(Seq(smallestField))
+    } else {
+      readDataSchema
     }
   }
 
+  private def closePendingTables(): Unit = {
+    val toClose = pendingTables
+    pendingTables = Iterator.empty
+    toClose match {
+      case closeable: AutoCloseable => withResource(closeable) { _ => () }
+      case _ => withResource(toClose.toVector) { _ => () }
+    }
+  }
+
+  private def ensurePendingTables(isFirstChunk: Boolean): Unit = {
+    if (!pendingTables.hasNext) {
+      closePendingTables()
+      val (dataBuffer, _) = metrics(BUFFER_TIME).ns {
+        readPartFile()
+      }
+      withResource(dataBuffer) { _ =>
+        if (dataBuffer.hasData) {
+          GpuSemaphore.acquireIfNecessary(TaskContext.get())
+          pendingTables = readToTables(dataBuffer, getCudfSchema(dataSchema), effectiveReadSchema,
+            getCudfSchema(effectiveReadSchema), isFirstChunk, metrics(GPU_DECODE_TIME))
+        }
+      }
+    }
+  }
+
+  private def readToTable(isFirstChunk: Boolean): Option[Table] = {
+    ensurePendingTables(isFirstChunk)
+    if (pendingTables.hasNext) {
+      GpuSemaphore.acquireIfNecessary(TaskContext.get())
+      val castTable = castToOutputTypesWithRetryAndClose(pendingTables.next(), effectiveReadSchema)
+      handleResult(effectiveReadSchema, castTable)
+    } else {
+      None
+    }
+  }
+
+  protected def readToTables(
+      dataBuffer: BUFF,
+      cudfDataSchema: Schema,
+      readDataSchema: StructType,
+      cudfReadDataSchema: Schema,
+      isFirstChunk: Boolean,
+      decodeTime: GpuMetric): Iterator[Table]
+
   def dateFormat: Option[String]
   def timestampFormat: String
+
+  def castStringToDate(input: ColumnVector, dt: DType, field: StructField): ColumnVector =
+    castStringToDate(input, dt)
 
   def castStringToDate(input: ColumnVector, dt: DType): ColumnVector = {
     val cudfFormat = DateUtils.toStrf(dateFormat.getOrElse("yyyy-MM-dd"), parseString = true)
@@ -622,23 +707,6 @@ abstract class GpuTextBasedPartitionReader[BUFF <: LineBufferer, FACT <: LineBuf
   }
 
   /**
-   * Read the host buffer to GPU table
-   * @param dataBuffer where the data is buffered
-   * @param cudfDataSchema the cudf schema of the data
-   * @param readDataSchema the Spark schema describing what will be read
-   * @param cudfReadDataSchema the cudf schema of just the data we want to read.
-   * @param isFirstChunk if it is the first chunk
-   * @return table
-   */
-  def readToTable(
-    dataBuffer: BUFF,
-    cudfDataSchema: Schema,
-    readDataSchema: StructType,
-    cudfReadDataSchema: Schema,
-    isFirstChunk: Boolean,
-    decodeTime: GpuMetric): Table
-
-  /**
    * File format short name used for logging and other things to uniquely identity
    * which file format is being used.
    *
@@ -682,12 +750,23 @@ abstract class GpuTextBasedPartitionReader[BUFF <: LineBufferer, FACT <: LineBuf
     }
   }
 
+  private def readNextBatch(): Option[ColumnarBatch] = {
+    var result: Option[ColumnarBatch] = None
+    while (result.isEmpty && (!isExhausted || pendingTables.hasNext)) {
+      result = readBatch()
+    }
+    result
+  }
+
   override def next(): Boolean = {
     batch.foreach(_.close())
-    batch = if (isExhausted) {
-      None
-    } else {
-      readBatch()
+    batch = None
+    batch = try {
+      readNextBatch()
+    } catch {
+      case t: Throwable =>
+        closePendingTables()
+        throw t
     }
 
     // NOTE: At this point, the task may not have yet acquired the semaphore if `batch` is `None`.
@@ -706,14 +785,23 @@ abstract class GpuTextBasedPartitionReader[BUFF <: LineBufferer, FACT <: LineBuf
   }
 
   override def close(): Unit = {
-    lineReader.close()
-    batch.foreach(_.close())
+    val toClose = batch
     batch = None
     isExhausted = true
+    withResource(lineReader) { _ =>
+      withResource(toClose) { _ =>
+        closePendingTables()
+      }
+    }
   }
 }
 
 object GpuTextBasedDateUtils {
+
+  // UTF8String.trimAll changed in patch releases and can be backported independently.
+  // Probe the runtime semantics instead of maintaining a Spark version allowlist.
+  lazy val dateParsingTrimsControls: Boolean = UTF8String.fromBytes(Array(0.toByte))
+      .trimAll().numBytes() == 0
 
   private val supportedDateFormats = Set(
     "yyyy-MM-dd",

@@ -37,6 +37,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, UnknownPartitioning}
 import org.apache.spark.sql.delta.DeltaLog
 import org.apache.spark.sql.delta.metering.DeltaLogging
+import org.apache.spark.sql.delta.rapids.DeltaRuntimeShim33x
 import org.apache.spark.sql.delta.sources.DeltaSQLConf
 import org.apache.spark.sql.execution.{CoalescedPartitionSpec, ShufflePartitionSpec, SparkPlan, SQLExecution}
 import org.apache.spark.sql.execution.exchange.Exchange
@@ -165,7 +166,7 @@ case class GpuOptimizeWriteExchangeExec(
       try {
         val partitionSpecs = rebalancePartitions(stats)
 
-        recordDeltaEvent(deltaLog,
+        DeltaRuntimeShim33x.emitDeltaEvent(deltaLog,
           "delta.optimizeWrite.planned",
           data = Map(
             "originalPartitions" -> childNumPartitions,

@@ -58,6 +58,40 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .booleanConf
     .createWithDefault(false)
 
+  val TEST_DELTA_LOW_SHUFFLE_MERGE_FAIL_ON_FALLBACK =
+    conf("spark.rapids.sql.test.delta.lowShuffleMerge.failOnFallback")
+      .doc("Only for tests on Databricks Runtime 17.3. When true and " +
+        s"${TEST_CONF.key} is enabled, fail if low shuffle merge falls back to the classic " +
+        "GPU merge executor.")
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
+
+  val TEST_PARQUET_HYBRID_SCAN_FAIL_ON_FALLBACK =
+    conf("spark.rapids.sql.test.format.parquet.hybridScan.failOnFallback")
+      .doc("Only to be used in tests. When true and the hybrid scan reader is enabled, fail a " +
+        "PERFILE Parquet scan that would fall back to the parquet-mr path instead of reading it.")
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
+
+  val TEST_DELTA_LOW_SHUFFLE_MERGE_FAILED_ON_NOT_METADATA_ONLY =
+    conf("spark.rapids.sql.test.delta.lowShuffleMerge.failedOnNotMetadataOnly")
+      .doc("Only for tests on Databricks Runtime 17.3. When true and " +
+        s"${TEST_CONF.key} is enabled, fail if a nonempty native low shuffle merge discovery " +
+        "read does not use the metadata-only path.")
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
+
+  val TEST_FORCE_NON_AST = conf("spark.rapids.sql.test.forceNonAst")
+    .doc("Only for tests. Comma-separated Spark expression class names forced out of AST " +
+      s"when ${TEST_CONF.key} is enabled, while retaining GPU expression support.")
+    .internal()
+    .stringConf
+    .toSequence
+    .createWithDefault(Nil)
+
   val TEST_ALLOWED_NONGPU = conf("spark.rapids.sql.test.allowedNonGpu")
     .doc("Comma separate string of exec or expression class names that are allowed " +
       "to not be GPU accelerated for testing.")
@@ -236,15 +270,6 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
       .bytesConf(ByteUnit.BYTE)
       .createWithDefault(1024 * 1024 * 1024)
 
-  val SHUFFLE_UCX_ACTIVE_MESSAGES_FORCE_RNDV =
-    conf("spark.rapids.shuffle.ucx.activeMessages.forceRndv")
-      .doc("Set to true to force 'rndv' mode for all UCX Active Messages. " +
-        "This should only be required with UCX 1.10.x. UCX 1.11.x deployments should " +
-        "set to false.")
-      .startupOnly()
-      .booleanConf
-      .createWithDefault(false)
-
   val SHUFFLE_UCX_USE_WAKEUP = conf("spark.rapids.shuffle.ucx.useWakeup")
     .doc("When set to true, use UCX's event-based progress (epoll) in order to wake up " +
       "the progress thread when needed, instead of a hot loop.")
@@ -254,20 +279,6 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
 
   val SHUFFLE_UCX_LISTENER_START_PORT = conf("spark.rapids.shuffle.ucx.listenerStartPort")
     .doc("Starting port to try to bind the UCX listener.")
-    .internal()
-    .startupOnly()
-    .integerConf
-    .createWithDefault(0)
-
-  val SHUFFLE_UCX_MGMT_SERVER_HOST = conf("spark.rapids.shuffle.ucx.managementServerHost")
-    .doc("The host to be used to start the management server")
-    .startupOnly()
-    .stringConf
-    .createWithDefault(null)
-
-  val SHUFFLE_UCX_MGMT_CONNECTION_TIMEOUT =
-    conf("spark.rapids.shuffle.ucx.managementConnectionTimeout")
-    .doc("The timeout for client connections to a remote peer")
     .internal()
     .startupOnly()
     .integerConf
@@ -640,6 +651,18 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .booleanConf
     .createWithDefault(true)
 
+  val HOST_COLUMNAR_TO_GPU_RELEASE_SEMAPHORE =
+    conf("spark.rapids.sql.hostColumnarToGpu.releaseSemaphore.enabled")
+      .doc("When true, HostColumnarToGpu releases the GPU semaphore while it pulls the host " +
+        "batches of the next GPU batch from its CPU child, and acquires it again before " +
+        "copying them to the GPU. This helps when the child does heavy CPU work, such as " +
+        "decoding in a CPU data source, and each task produces several GPU batches. The " +
+        "task still holds its device memory while released, so more tasks can have data on " +
+        "the GPU at once than the GPU concurrency allows.")
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
+
   val SPARK_GPU_RESOURCE_NAME = conf("spark.rapids.gpu.resourceName")
     .doc("The name of the Spark resource that represents a GPU that you want the plugin to use " +
       "if using custom resources with Spark.")
@@ -850,8 +873,11 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     conf("spark.rapids.sql.delta.lowShuffleMerge.enabled")
     .doc("Option to turn on the low shuffle merge for Delta Lake. Currently there are some " +
       "limitations for this feature: " +
-      "1. We only support Delta Lake 2.4. " +
-      s"2. The file scan mode must be set to ${RapidsReaderType.PERFILE} " +
+      "1. We support Delta Lake 2.4 and Databricks Runtime 17.3. " +
+      s"2. Delta Lake 2.4 requires the ${RapidsReaderType.PERFILE} file scan mode. " +
+      s"Databricks Runtime 17.3 also supports ${RapidsReaderType.MULTITHREADED}; " +
+      s"${RapidsReaderType.COALESCING} and ${RapidsReaderType.AUTO} discovery scans use the " +
+      s"${RapidsReaderType.MULTITHREADED} reader. " +
       "3. The deletion vector size must be smaller than " +
       s"${DELTA_LOW_SHUFFLE_MERGE_DEL_VECTOR_BROADCAST_THRESHOLD.key} ")
     .booleanConf
@@ -866,7 +892,11 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
         "the GPU filter operator will process it together with other filters. " +
         "This setting is effective only when " +
         "spark.databricks.delta.deletionVectors.useMetadataRowIndex is true. " +
-        "Otherwise, this setting is fixed to false regardless of its actual value.")
+        "Otherwise, this setting is fixed to false regardless of its actual value. " +
+        "On Databricks Runtime 17.3, low shuffle MERGE requires native filtering of temporary " +
+        "deletion vectors. Both settings must be true for every reader mode; otherwise MERGE " +
+        "falls back to the classic GPU executor. Ordinary reads retain their " +
+        "DV-setting-controlled reader selection.")
       .internal()
       .booleanConf
       .createWithDefault(true)

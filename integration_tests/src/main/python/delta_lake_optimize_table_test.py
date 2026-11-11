@@ -147,6 +147,39 @@ def _write_many_small_files(spark, enable_deletion_vectors, path, partition_colu
         assert len(num_files) > 63, f"Expected more than 63 files, but got {num_files}"
 
 
+def _write_mixed_timestamp_partition_files(
+        spark, enable_deletion_vectors, path, partition_columns=None, clustering_columns=None):
+    if enable_deletion_vectors or partition_columns or clustering_columns:
+        raise ValueError("Mixed timestamp partition coverage requires deletion vectors disabled "
+                         "and supplies its own timestamp partition column")
+
+    spark.sql(f"""
+        CREATE TABLE delta.`{path}` (id LONG, ts TIMESTAMP)
+        USING DELTA
+        TBLPROPERTIES ('delta.enableDeletionVectors' = 'false')
+        PARTITIONED BY (ts)
+    """)
+
+    utc_partition_conf = "spark.databricks.delta.write.utcTimestampPartitionValues"
+    previous_value = spark.conf.get(utc_partition_conf, None)
+    try:
+        spark.conf.set(utc_partition_conf, "false")
+        spark.sql(f"INSERT INTO delta.`{path}` VALUES (0, '2000-01-01 12:00:00')")
+        spark.sql(f"INSERT INTO delta.`{path}` VALUES (1, '2000-01-01 12:00:00')")
+
+        spark.conf.set(utc_partition_conf, "true")
+        spark.sql(f"INSERT INTO delta.`{path}` VALUES (2, '2000-01-01T12:00:00.000Z')")
+        spark.sql(f"INSERT INTO delta.`{path}` VALUES (3, '2000-01-01T12:00:00.000Z')")
+    finally:
+        if previous_value is None:
+            spark.conf.unset(utc_partition_conf)
+        else:
+            spark.conf.set(utc_partition_conf, previous_value)
+
+    input_files = spark.read.format("delta").load(path).inputFiles()
+    assert len(input_files) == 4, f"Expected 4 input files, but got {input_files}"
+
+
 def _write_many_small_row_tracking_files(
         spark, enable_deletion_vectors, path, partition_columns=None, clustering_columns=None):
     if enable_deletion_vectors:
@@ -293,7 +326,7 @@ def _setup_tables(enable_deletion_vectors, cpu_path, gpu_path, partition_columns
 
 def _assert_optimize_parity(enable_deletion_vectors, spark_tmp_path, partition_columns=None, clustering_columns=None,
                             conf=_optimize_conf, write_func=_write_many_small_files,
-                            require_gpu_write=True, use_gpu_test_mode=True):
+                            require_gpu_write=True, use_gpu_test_mode=True, check_delta_log=True):
     data_path = spark_tmp_path + "/DELTA_OPTIMIZE"
     cpu_path = data_path + "/CPU"
     gpu_path = data_path + "/GPU"
@@ -331,7 +364,8 @@ def _assert_optimize_parity(enable_deletion_vectors, spark_tmp_path, partition_c
     assert_equal(cpu_optimize_count, 1)
     assert_equal(gpu_optimize_count, 1)
 
-    with_cpu_session(lambda s: assert_gpu_and_cpu_latest_delta_log_equivalent(s, data_path))
+    if check_delta_log:
+        with_cpu_session(lambda s: assert_gpu_and_cpu_latest_delta_log_equivalent(s, data_path))
 
 
 def _assert_optimize_fallback(enable_deletion_vectors, spark_tmp_path, partition_columns=None,
@@ -501,6 +535,39 @@ def test_delta_optimize_partitioned_table(spark_tmp_path, enable_deletion_vector
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="Normalized timestamp partition grouping was added in Delta Lake 4.3")
+@pytest.mark.parametrize("normalize_partition_values_on_read", [False, True], ids=idfn)
+def test_delta_optimize_normalized_timestamp_partitions(
+        spark_tmp_path, normalize_partition_values_on_read):
+    data_path = spark_tmp_path + "/DELTA_OPTIMIZE"
+    conf = copy_and_update(_optimize_conf, {
+        "spark.sql.session.timeZone": "UTC",
+        "spark.databricks.delta.normalizePartitionValuesOnRead":
+            str(normalize_partition_values_on_read).lower()
+    })
+
+    _assert_optimize_parity(
+        False,
+        spark_tmp_path,
+        conf=conf,
+        write_func=_write_mixed_timestamp_partition_files,
+        check_delta_log=False)
+
+    expected_file_count = 1 if normalize_partition_values_on_read else 2
+
+    def assert_compacted_file_count(spark, path):
+        input_files = spark.read.format("delta").load(path).inputFiles()
+        assert len(input_files) == expected_file_count, \
+            f"Expected {expected_file_count} compacted files, but got {input_files}"
+
+    with_cpu_session(lambda spark: assert_compacted_file_count(spark, data_path + "/CPU"), conf)
+    with_cpu_session(lambda spark: assert_compacted_file_count(spark, data_path + "/GPU"), conf)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
 @pytest.mark.skipif(not is_databricks173_or_later(),
                     reason="Row-tracking OPTIMIZE coverage is for Databricks 17.3+")
 def test_delta_optimize_row_tracking_table(spark_tmp_path):
@@ -558,3 +625,33 @@ def test_delta_optimize_clustered_table_gpu_write_repeated(spark_tmp_path):
 def test_delta_optimize_clustered_row_tracking_table_gpu_write(spark_tmp_path):
     _assert_liquid_optimize_gpu_write_parity(
         spark_tmp_path, write_func=_write_many_small_liquid_row_tracking_files)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_42_or_43(), reason="Requires Delta 4.2+ CDF writes")
+def test_delta_optimize_cdf_non_data_changing(spark_tmp_path):
+    def write(spark, enable_deletion_vectors, path, partition_columns, clustering_columns):
+        gen_df(spark, [("id", long_gen)], length=64, num_slices=4) \
+            .write.format("delta").option("delta.enableChangeDataFeed", "true") \
+            .option("delta.enableDeletionVectors", "false").save(path)
+        assert len(spark.read.format("delta").load(path).inputFiles()) == 4
+
+    conf = copy_and_update(_optimize_conf, {
+        "spark.databricks.delta.optimizeWrite.enabled": "false"
+    })
+    _assert_optimize_parity(False, spark_tmp_path, conf=conf, write_func=write)
+
+    def check(spark):
+        cdf_results = []
+        for engine in ["CPU", "GPU"]:
+            path = spark_tmp_path + "/DELTA_OPTIMIZE/" + engine
+            cdf_results.append(assert_delta_non_data_changing_commit(spark, path, {"add", "remove"}))
+            initial = spark.read.format("delta").option("versionAsOf", 0).load(path)
+            assert_equal(initial.sort("id").collect(), _read_sorted(spark, path).collect())
+            assert len(spark.read.format("delta").load(path).inputFiles()) == 1
+        assert_equal(*cdf_results)
+        assert_gpu_and_cpu_delta_logs_equivalent(spark, spark_tmp_path + "/DELTA_OPTIMIZE")
+
+    with_cpu_session(check, conf=conf)

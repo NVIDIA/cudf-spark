@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright (c) 2025, NVIDIA CORPORATION.
+# Copyright (c) 2025-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -62,7 +62,7 @@ invoke_shuffle_integration_test() {
         env_vars+="PYSP_TEST_spark_rapids_memory_gpu_maxAllocFraction=0.1 "
         env_vars+="PYSP_TEST_spark_rapids_memory_gpu_allocFraction=0.1 "
     else
-        env_vars+="SPARK_SUBMIT_FLAGS=\"$SPARK_CONF\" "
+        env_vars+="SPARK_SUBMIT_FLAGS=\"${SPARK_CONF:-}\" "
     fi
 
     # Common shuffle manager
@@ -70,9 +70,13 @@ invoke_shuffle_integration_test() {
 
     # Mode-specific configs
     if [[ "$shuffle_mode" == "UCX" ]]; then
+        # Log the UCX version and build configuration
+        ucx_info -v
+
         # The UCX_TLS=^posix config removes posix from the list of memory transports
         # so that IPC regions are obtained using SysV API instead. This was done because of
         # intermittent test failures. See: https://github.com/NVIDIA/spark-rapids/issues/6572
+        env_vars+="REQUIRE_DRIVERLESS_PARALLEL_BUILD_TEST=1 "
         env_vars+="PYSP_TEST_spark_rapids_shuffle_mode=UCX "
         env_vars+="PYSP_TEST_spark_executorEnv_UCX_ERROR_SIGNALS=\"\" "
         env_vars+="PYSP_TEST_spark_executorEnv_UCX_TLS=\"^posix\" "
@@ -85,6 +89,20 @@ invoke_shuffle_integration_test() {
         return 1
     fi
 
-    # Execute the test
-    eval "$env_vars $pyspark_script -m shuffle_test"
+    if [[ "$(printf '%s\n' "4.2.0" "${spark_ver%-SNAPSHOT}" | sort -V | head -n1)" == "4.2.0" ]]; then
+        # Spark 4.2 turns on shuffle checksums that the RAPIDS shuffle does not compute yet.
+        # Turn them off so these smoke tests use the RAPIDS shuffle. Remove once it computes them.
+        env_vars+="PYSP_TEST_spark_sql_shuffle_orderIndependentChecksum_enabled=false "
+        env_vars+="PYSP_TEST_spark_sql_shuffle_orderIndependentChecksum_enableFullRetryOnMismatch=false "
+    fi
+
+    if [[ "$shuffle_mode" == "UCX" ]]; then
+        # Keep fail-fast behavior for ordinary tests. Failure injection needs its own
+        # Spark application because task retry limits are fixed at context creation.
+        local retry_test="test_driverless_broadcast_recovers_after_probe_task_retry"
+        eval "$env_vars $pyspark_script -m shuffle_test -k 'not $retry_test'" || return $?
+        eval "$env_vars SPARK_TASK_MAXFAILURES=2 PYSP_TEST_spark_task_maxFailures=2 $pyspark_script -m shuffle_test -k '$retry_test'"
+    else
+        eval "$env_vars $pyspark_script -m shuffle_test"
+    fi
 }

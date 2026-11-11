@@ -38,6 +38,7 @@ import org.apache.spark.sql.execution.exchange.{ReusedExchangeExec, ShuffleExcha
  */
 class ShimmedExecutionPlanCaptureCallbackImpl extends ExecutionPlanCaptureCallbackBase {
   private[this] var shouldCapture: Boolean = false
+  private[this] var includeWritePlans: Boolean = false
   private[this] val execPlans: ArrayBuffer[SparkPlan] = ArrayBuffer.empty
 
   override def captureIfNeeded(qe: QueryExecution): Unit = synchronized {
@@ -46,16 +47,28 @@ class ShimmedExecutionPlanCaptureCallbackImpl extends ExecutionPlanCaptureCallba
     }
   }
 
+  // Capture plans assembled after QueryExecution, such as Delta optimized-write exchanges.
+  override def captureIfNeeded(plan: SparkPlan): Unit = synchronized {
+    if (shouldCapture && includeWritePlans) {
+      execPlans.append(plan)
+    }
+  }
+
   // Avoiding the use of default arguments since this is called from Python
   override def startCapture(): Unit = startCapture(10000)
 
-  override def startCapture(timeoutMillis: Long): Unit = {
+  override def startCaptureWithWritePlans(): Unit = startCapture(10000, true)
+
+  override def startCapture(timeoutMillis: Long): Unit = startCapture(timeoutMillis, false)
+
+  private def startCapture(timeoutMillis: Long, captureWritePlans: Boolean): Unit = {
     SparkSession.getActiveSession.foreach { spark =>
       spark.sparkContext.listenerBus.waitUntilEmpty(timeoutMillis)
     }
     synchronized {
       execPlans.clear()
       shouldCapture = true
+      includeWritePlans = captureWritePlans
     }
   }
 
@@ -64,6 +77,7 @@ class ShimmedExecutionPlanCaptureCallbackImpl extends ExecutionPlanCaptureCallba
   override def endCapture(timeoutMillis: Long): Unit = synchronized {
     if (shouldCapture) {
       shouldCapture = false
+      includeWritePlans = false
       execPlans.clear()
     }
   }
@@ -78,6 +92,7 @@ class ShimmedExecutionPlanCaptureCallbackImpl extends ExecutionPlanCaptureCallba
     } finally {
       synchronized {
         shouldCapture = false
+        includeWritePlans = false
         execPlans.clear()
       }
     }

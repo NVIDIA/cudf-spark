@@ -69,8 +69,8 @@ private[rapids] final class ClosedPartialFileHandleException
  * @param capacityHintProvider Optional function that provides capacity hints based on
  *                             current bytes written and required capacity. When provided,
  *                             buffer expansion will use this hint instead of simple doubling.
- *                             The function signature is: (currentBytesWritten, requiredCapacity)
- *                             => suggestedCapacity
+ *                             The function signature is:
+ *                             `(currentBytesWritten, requiredCapacity) => suggestedCapacity`
  */
 class SpillablePartialFileHandle private (
     storageMode: PartialFileStorageMode.Value,

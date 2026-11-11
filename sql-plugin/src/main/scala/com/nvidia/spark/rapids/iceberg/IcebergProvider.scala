@@ -65,7 +65,7 @@ object IcebergProvider {
 
   /**
    * Returns the version-specific sub-package for the current Spark + Iceberg combination.
-   * Used by [[ShimUtils]] to load the correct shim classes.
+   * Used by `ShimUtils` to load the correct shim classes.
    */
   lazy val shimPackage: String = probe.shimPackage
 

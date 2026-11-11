@@ -15,13 +15,21 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "420"}
+{"spark":["420"],"carryForward":"sameMinor"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
+import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.datasources.v2.GroupPartitionsExec
 
 object GpuGroupPartitionsShims {
+  // Spark 4.2 re-derives the grouping when its child changes.
+  def plannedChildPartitioning(groupPartitions: GroupPartitionsExec): Option[Partitioning] = None
+
+  def expectedPartitionKeyCount(groupPartitions: GroupPartitionsExec): Option[Int] = {
+    groupPartitions.expectedPartitionKeys.map(_.size)
+  }
+
   // Spark 4.2.0 stores connector Reducer values. displayName is on Reducer.
   def reducerNames(groupPartitions: GroupPartitionsExec): Option[Seq[String]] = {
     groupPartitions.reducers.map(

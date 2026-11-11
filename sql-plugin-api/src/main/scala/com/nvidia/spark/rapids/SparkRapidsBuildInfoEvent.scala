@@ -18,9 +18,15 @@ package com.nvidia.spark.rapids
 
 import org.apache.spark.scheduler.SparkListenerEvent
 
+private[rapids] trait SparkRapidsBuildInfoEventShortToString {
+  def shortToString: String
+}
+
 case class SparkRapidsBuildInfoEvent(
   sparkRapidsBuildInfo: Map[String, String],
   sparkRapidsJniBuildInfo: Map[String, String],
   cudfBuildInfo: Map[String, String],
   sparkRapidsPrivateBuildInfo: Map[String, String]
-) extends SparkListenerEvent
+) extends SparkListenerEvent with SparkRapidsBuildInfoEventShortToString {
+  override def shortToString: String = toString
+}

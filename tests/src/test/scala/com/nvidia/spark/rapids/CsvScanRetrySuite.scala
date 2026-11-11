@@ -16,19 +16,468 @@
 
 package com.nvidia.spark.rapids
 
+import java.io.IOException
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 
-import ai.rapids.cudf.{CSVOptions, Table}
-import com.nvidia.spark.rapids.jni.RmmSpark
+import scala.collection.mutable.ArrayBuffer
+
+import ai.rapids.cudf.{CSVOptions, HostMemoryBuffer, Schema, Table}
+import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.jni.{GpuSplitAndRetryOOM, RmmSpark}
 import com.nvidia.spark.rapids.shims.PartitionedFileUtilsShim
 import org.apache.hadoop.conf.Configuration
+import org.mockito.Mockito.{doThrow, times, verify}
+import org.scalatestplus.mockito.MockitoSugar
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.csv.{CSVOptions => SparkCSVOptions}
 import org.apache.spark.sql.types._
 
-class CsvScanRetrySuite extends RmmSparkRetrySuiteBase {
+class CsvScanRetrySuite extends RmmSparkRetrySuiteBase with MockitoSugar {
+  private val stringSchema = StructType(Seq(
+    StructField("a", StringType), StructField("b", StringType)))
+
+  private def withCsvTables[T](lines: Seq[String], header: Boolean = false)
+      (fn: (Iterator[Table] with AutoCloseable) => T): T = {
+    val factory = new FilterCsvEmptyHostLineBuffererFactory(
+      new SparkCSVOptions(Map("comment" -> "#"), false, "UTC"), stringSchema.length, header)
+    withResource(factory.createBufferer(32,
+      Array('\n'.toByte))) { buffer =>
+      lines.foreach { line =>
+        val bytes = line.getBytes(StandardCharsets.UTF_8)
+        buffer.add(bytes, 0, bytes.length)
+      }
+      withResource(CSVPartitionReader.readToTables(buffer, GpuColumnVector.from(stringSchema),
+        NoopMetric, hasHeader => CSVOptions.builder().hasHeader(hasHeader)
+          .withComment('#').build(), header, '#'.toByte, null))(fn)
+    }
+  }
+
+  private def collectStrings(tables: Iterator[Table]): (Seq[Seq[String]], Int) = {
+    val rows = ArrayBuffer[Seq[String]]()
+    var batches = 0
+    tables.foreach { table =>
+      withResource(table) { _ =>
+        withResource(table.getColumn(0).copyToHost()) { a =>
+          withResource(table.getColumn(1).copyToHost()) { b =>
+            (0 until table.getRowCount.toInt).foreach { i =>
+              rows += Seq(a.getJavaString(i), b.getJavaString(i))
+            }
+          }
+        }
+      }
+      batches += 1
+    }
+    (rows.toSeq, batches)
+  }
+
+  for (header <- Seq(false, true)) {
+    test(s"CSV recursively splits host input on OOM, header=$header") {
+      val data = (0 until 16).map(i => s"""$i,"value,$i é"""")
+      val lines = if (header) Seq("# before header", "a,b") ++ data else data
+      withCsvTables(lines, header) { tables =>
+        RmmSpark.getAndResetNumSplitRetryThrow(1)
+        RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 2,
+          RmmSpark.OomInjectionType.GPU.ordinal, 0)
+        val (actual, batches) = collectStrings(tables)
+        assert(actual == (0 until 16).map(i => Seq(i.toString, s"value,$i é")))
+        assert(batches >= 3)
+        assert(RmmSpark.getAndResetNumSplitRetryThrow(1) >= 2)
+      }
+    }
+  }
+
+  for (header <- Seq(false, true); value <- Seq("\uFEFFx", "\uFEFF#x")) {
+    test(s"CSV split preserves an interior U+FEFF: header=$header, value=$value") {
+      val data = Seq("a" * 40 + ",0", s"$value,1")
+      val lines = if (header) Seq("\uFEFFa,b") ++ data else data
+      val expected = Seq(Seq("a" * 40, "0"), Seq(value, "1"))
+      withCsvTables(lines, header) { tables =>
+        assert(collectStrings(tables)._1 == expected)
+      }
+      withCsvTables(lines, header) { tables =>
+        RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
+          RmmSpark.OomInjectionType.GPU.ordinal, 0)
+        val (actual, batches) = collectStrings(tables)
+        assert(actual == expected)
+        assert(batches == 2)
+      }
+    }
+  }
+
+  test("CSV recursively splits chunks beginning with an interior U+FEFF") {
+    val values = Seq("a" * 80, "\uFEFF#x", "\uFEFFy", "\uFEFF#z")
+    val bytes = values.map(_ + ",1\n").mkString.getBytes(StandardCharsets.UTF_8)
+    val buffer = HostMemoryBuffer.allocate(bytes.length)
+    buffer.setBytes(0, bytes, 0, bytes.length)
+    val parts = CSVPartitionReader.CsvReadChunk(buffer, false, '#'.toByte).split()
+    withResource(parts.head) { left =>
+      withResource(parts.last.split()) { children =>
+        val actual = (Seq(left) ++ children).flatMap { chunk =>
+          collectStrings(Iterator.single(Table.readCSV(GpuColumnVector.from(stringSchema),
+            CSVOptions.builder().hasHeader(false).withComment('#').build(),
+            chunk.buffer, 0, chunk.buffer.getLength)))._1
+        }
+        assert(actual == values.map(v => Seq(v, "1")))
+      }
+    }
+    assert(buffer.getRefCount == 0)
+  }
+
+  test("CSV cannot repeatedly split the protective newline from one record") {
+    val bytes = "\n\uFEFFx,1\n".getBytes(StandardCharsets.UTF_8)
+    val buffer = HostMemoryBuffer.allocate(bytes.length)
+    buffer.setBytes(0, bytes, 0, bytes.length)
+    intercept[GpuSplitAndRetryOOM] {
+      withResource(CSVPartitionReader.CsvReadChunk(buffer, false, '#'.toByte).split()) { _ => () }
+    }
+    assert(buffer.getRefCount == 0)
+  }
+
+  test("CSV single record split failure is terminal") {
+    withCsvTables(Seq("one,two")) { tables =>
+      RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
+        RmmSpark.OomInjectionType.GPU.ordinal, 0)
+      val error = intercept[IOException](tables.next())
+      assert(error.getCause.isInstanceOf[GpuSplitAndRetryOOM])
+      assert(!tables.hasNext)
+    }
+  }
+
+  for (bom <- Seq("", "\ufeff")) {
+    test(s"CSV split preserves a header after leading comments, BOM=${bom.nonEmpty}") {
+      val prefix = bom + "# comment taking up most of the buffer\n# another comment\na,b\n"
+      val bytes = (prefix + "1,2\n").getBytes(StandardCharsets.UTF_8)
+      val buffer = HostMemoryBuffer.allocate(bytes.length)
+      buffer.setBytes(0, bytes, 0, bytes.length)
+      val chunk = CSVPartitionReader.CsvReadChunk(buffer, true, '#'.toByte)
+      withResource(chunk.split()) { parts =>
+        assert(parts.size == 2)
+        assert(parts.head.hasHeader)
+        assert(!parts.last.hasHeader)
+        assert(parts.head.buffer.getLength == prefix.getBytes(StandardCharsets.UTF_8).length)
+      }
+      assert(buffer.getRefCount == 0)
+    }
+  }
+
+  test("closing CSV retry input releases pending slices without parsing them") {
+    val bytes = "1,2\n3,4\n5,6\n7,8\n".getBytes(StandardCharsets.UTF_8)
+    val buffer = HostMemoryBuffer.allocate(bytes.length)
+    buffer.setBytes(0, bytes, 0, bytes.length)
+    var attempts = 0
+    val chunks = RmmRapidsRetryIterator.withRetry(
+      CSVPartitionReader.CsvReadChunk(buffer, false, 0.toByte),
+      (chunk: CSVPartitionReader.CsvReadChunk) => chunk.split()) { chunk =>
+      attempts += 1
+      if (attempts == 1) throw new GpuSplitAndRetryOOM("split for test")
+      chunk.buffer.getLength
+    }
+    withResource(chunks) { _ =>
+      assert(chunks.next() < bytes.length)
+      assert(chunks.hasNext)
+    }
+    assert(attempts == 2)
+    assert(buffer.getRefCount == 0)
+  }
+
+  private def withReader[T](text: String, readSchema: StructType, maxBytes: Long,
+      wrapTables: Iterator[Table] => Iterator[Table] = identity[Iterator[Table]] _,
+      header: Boolean = true, maxRows: Int = 1024, start: Long = 0)
+      (fn: CSVPartitionReader => T): T = {
+    val file = Files.createTempFile("csv-reader-retry", ".csv")
+    Files.write(file, text.getBytes(StandardCharsets.UTF_8))
+    try {
+      withResource(new CSVPartitionReader(new Configuration(),
+        PartitionedFileUtilsShim.newPartitionedFile(
+          InternalRow.empty, file.toString, start, Files.size(file) - start),
+        stringSchema, readSchema,
+        new SparkCSVOptions(Map("header" -> header.toString, "comment" -> "#"), false, "UTC"),
+        maxRows, maxBytes, Map[String, GpuMetric]().withDefaultValue(NoopMetric)) {
+        override protected def readToTables(
+            dataBufferer: HostLineBufferer,
+            cudfDataSchema: Schema,
+            readDataSchema: StructType,
+            cudfReadDataSchema: Schema,
+            isFirstChunk: Boolean,
+            decodeTime: GpuMetric): Iterator[Table] = {
+          wrapTables(super.readToTables(dataBufferer, cudfDataSchema, readDataSchema,
+            cudfReadDataSchema, isFirstChunk, decodeTime))
+        }
+      })(fn)
+    } finally {
+      Files.deleteIfExists(file)
+    }
+  }
+
+  private def collectReaderStrings(reader: CSVPartitionReader): (Seq[Seq[String]], Int) = {
+    val actual = ArrayBuffer[Seq[String]]()
+    var rows = 0
+    while (reader.next()) {
+      withResource(reader.get()) { batch =>
+        rows += batch.numRows()
+        if (batch.numCols() > 0) {
+          withResource(GpuColumnVector.from(batch)) { table =>
+            withResource(table.getColumn(0).copyToHost()) { a =>
+              withResource(table.getColumn(1).copyToHost()) { b =>
+                (0 until batch.numRows()).foreach { i =>
+                  actual += Seq(if (a.isNull(i)) null else a.getJavaString(i),
+                    if (b.isNull(i)) null else b.getJavaString(i))
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    (actual.toSeq, rows)
+  }
+
+  for (readSchema <- Seq(stringSchema, StructType(Seq.empty));
+      header <- Seq(false, true); byRows <- Seq(false, true)) {
+    test(s"CSV batches preserve interior U+FEFF: $readSchema, header=$header, rows=$byRows") {
+      val prefix = if (header) "# leading comment\n# another comment\na,b\n" else ""
+      val values = Seq("plain", "\uFEFFfirst", "\uFEFF#value", "\uFEFF", "normal")
+      val data = values.zipWithIndex.map { case (value, i) => s"$value,$i\n" }.mkString
+      withReader("\uFEFF" + prefix + data, readSchema,
+          if (byRows) 1024 else 1, header = header, maxRows = if (byRows) 1 else 1024) {
+        reader =>
+          val (actual, rows) = collectReaderStrings(reader)
+          assert(rows == values.size)
+          if (readSchema.nonEmpty) {
+            assert(actual == values.zipWithIndex.map { case (value, i) => Seq(value, i.toString) })
+          }
+      }
+    }
+  }
+
+  for (readSchema <- Seq(stringSchema, StructType(Seq.empty)); header <- Seq(false, true)) {
+    test(s"CSV partitions match CPU BOM handling: $readSchema, header=$header") {
+      val prefix = "\uFEFFa,b\nskipped,0\n"
+      val start = prefix.getBytes(StandardCharsets.UTF_8).length - 1L
+      withReader(prefix + "\uFEFF#first,1\n\uFEFFsecond,2\nnormal,3\n", readSchema,
+          1024, header = header, start = start) { reader =>
+        val (actual, rows) = collectReaderStrings(reader)
+        assert(rows == 3)
+        if (readSchema.nonEmpty) {
+          assert(actual == Seq(Seq(null, null), Seq("\uFEFFsecond", "2"),
+            Seq("normal", "3")))
+        }
+      }
+    }
+  }
+
+  for (prefix <- Seq("\n\t\u0001\n", "\uFEFF", "\uFEFF\n")) {
+    test(s"CSV matches CPU BOM handling after filtered empty lines: ${prefix.length}") {
+      withReader(prefix + "\uFEFF#data,1\n", stringSchema, 1024, header = false) { reader =>
+        val (actual, rows) = collectReaderStrings(reader)
+        assert(actual == Seq(Seq(null, null)))
+        assert(rows == 1)
+      }
+    }
+  }
+
+  test("CSV CPU-parsed first row applies the read projection in a row-only chunk") {
+    val readSchema = StructType(Seq(StructField("b", StringType)))
+    withReader("\uFEFF\uFEFFfirst,1\nsecond,2\n", readSchema, 1024,
+        header = false, maxRows = 1) { reader =>
+      val values = ArrayBuffer[String]()
+      while (reader.next()) {
+        withResource(reader.get()) { batch =>
+          assert(batch.numCols() == 1)
+          withResource(GpuColumnVector.from(batch)) { table =>
+            withResource(table.getColumn(0).copyToHost()) { column =>
+              (0 until batch.numRows()).foreach(i => values += column.getJavaString(i))
+            }
+          }
+        }
+      }
+      assert(values.toSeq == Seq("1", "2"))
+    }
+  }
+
+  test("CSV closing after a CPU-parsed first row releases pending native input") {
+    val factory = new FilterCsvEmptyHostLineBuffererFactory(
+      new SparkCSVOptions(Map("comment" -> "#"), false, "UTC"), 2, false)
+    withResource(factory.createBufferer(64, Array('\n'.toByte))) { buffer =>
+      Seq("\uFEFF#first,1", "second,2").foreach { line =>
+        val bytes = line.getBytes(StandardCharsets.UTF_8)
+        buffer.add(bytes, 0, bytes.length)
+      }
+      val input = buffer.getBuffer
+      withResource(CSVPartitionReader.readToTables(buffer, GpuColumnVector.from(stringSchema),
+        NoopMetric, _ => CSVOptions.builder().withComment('#').build(),
+        false, '#'.toByte, null)) { tables =>
+        withResource(tables.next()) { table =>
+          assert(table.getRowCount == 1)
+          withResource(table.getColumn(0).copyToHost())(column => assert(column.isNull(0)))
+        }
+        assert(tables.hasNext)
+      }
+      assert(input.getRefCount == 0)
+    }
+  }
+
+  test("CSV split retains a header after the protective newline") {
+    withReader("\n\uFEFFa,b\n" + "first,1\nsecond,2\n", stringSchema, 1024) { reader =>
+      RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
+        RmmSpark.OomInjectionType.GPU.ordinal, 0)
+      val (actual, rows) = collectReaderStrings(reader)
+      assert(actual == Seq(Seq("first", "1"), Seq("second", "2")))
+      assert(rows == 2)
+    }
+  }
+
+  test("CSV pending table cleanup continues after a close failure and clears ownership") {
+    val first = mock[Table]
+    val second = mock[Table]
+    val error = new IllegalStateException("close failed")
+    doThrow(error).when(first).close()
+    withReader("a,b\n1,2\n", stringSchema, 1024,
+      tables => tables ++ Iterator(first, second)) { reader =>
+      assert(reader.next())
+      assert(intercept[IllegalStateException](reader.close()) eq error)
+      reader.close()
+      verify(first, times(1)).close()
+      verify(second, times(1)).close()
+    }
+  }
+
+  test("CSV closes a pending retry iterator without consuming it after a close failure") {
+    val error = new IllegalStateException("close failed")
+    var closes = 0
+    withReader("a,b\n1,2\n", stringSchema, 1024, tables => {
+      new Iterator[Table] with AutoCloseable {
+        private var consumed = false
+        override def hasNext: Boolean = {
+          assert(!consumed, "Cleanup must not inspect pending retry input")
+          tables.hasNext
+        }
+        override def next(): Table = {
+          assert(!consumed, "Cleanup must not parse pending retry input")
+          consumed = true
+          tables.next()
+        }
+        override def close(): Unit = {
+          closes += 1
+          withResource(tables.asInstanceOf[AutoCloseable]) { _ => () }
+          throw error
+        }
+      }
+    }) { reader =>
+      assert(reader.next())
+      assert(intercept[IllegalStateException](reader.close()) eq error)
+      reader.close()
+      assert(closes == 1)
+    }
+  }
+
+  for (readSchema <- Seq(stringSchema, StructType(Seq.empty))) {
+    test(s"CSV continues after header-only and comment-only chunks: $readSchema") {
+      withReader("a,b\n# comment\n\n1,2\n# another comment\n3,4\n", readSchema, 1) { reader =>
+        var rows = 0
+        while (reader.next()) {
+          withResource(reader.get()) { batch => rows += batch.numRows() }
+        }
+        assert(rows == 2)
+      }
+    }
+  }
+
+  for (readSchema <- Seq(stringSchema, StructType(Seq.empty));
+      bom <- Seq("", "\uFEFF")) {
+    test(s"CSV header after comment chunks: $readSchema, ${bom.length}") {
+      withReader(bom + "# leading comment\n" * 8 + "a,b\n1,2\n3,4\n",
+        readSchema, 1) { reader =>
+        var rows = 0
+        val actual = ArrayBuffer[String]()
+        while (reader.next()) {
+          withResource(reader.get()) { batch =>
+            rows += batch.numRows()
+            if (batch.numCols() > 0) {
+              withResource(GpuColumnVector.from(batch)) { table =>
+                withResource(table.getColumn(0).copyToHost()) { host =>
+                  (0 until batch.numRows()).foreach(i => actual += host.getJavaString(i))
+                }
+              }
+            }
+          }
+        }
+        assert(rows == 2)
+        if (readSchema.nonEmpty) {
+          assert(actual.toSeq == Seq("1", "3"))
+        }
+      }
+    }
+  }
+
+  for (text <- Seq("", "# comment\n" * 8, "# comment\na,b\n")) {
+    test(s"CSV handles input without data rows: ${text.length}") {
+      withReader(text, stringSchema, 1) { reader =>
+        assert(!reader.next())
+      }
+    }
+  }
+
+  test("CSV reader drains all split outputs after the file is exhausted") {
+    withReader("a,b\n" + (0 until 16).map(i => s"$i,$i\n").mkString,
+      StructType(Seq(StructField("a", IntegerType), StructField("b", IntegerType))),
+      1024 * 1024) { reader =>
+      RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 2,
+        RmmSpark.OomInjectionType.GPU.ordinal, 0)
+      var rows = 0
+      var batches = 0
+      val actual = ArrayBuffer[Int]()
+      while (reader.next()) {
+        withResource(reader.get()) { batch =>
+          rows += batch.numRows()
+          withResource(GpuColumnVector.from(batch)) { table =>
+            withResource(table.getColumn(0).copyToHost()) { host =>
+              (0 until batch.numRows()).foreach(i => actual += host.getInt(i))
+            }
+          }
+        }
+        batches += 1
+      }
+      assert(rows == 16)
+      assert(actual.toSeq == (0 until 16))
+      assert(batches >= 3)
+    }
+  }
+
+  test("CSV reader continues after a split containing only comments and header") {
+    withReader("# long comment before header\n" * 8 + "a,b\n1,2\n3,4\n",
+      stringSchema, 1024 * 1024) { reader =>
+      RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
+        RmmSpark.OomInjectionType.GPU.ordinal, 0)
+      var rows = 0
+      while (reader.next()) {
+        withResource(reader.get()) { batch => rows += batch.numRows() }
+      }
+      assert(rows == 2)
+    }
+  }
+
+  test("CSV preserves input byte batching without OOM") {
+    val text = "a,b\n" + (0 until 32).map(i => s"$i,$i\n").mkString
+    withReader(text, stringSchema, 256) { reader =>
+      assert(reader.next())
+      withResource(reader.get()) { batch => assert(batch.numRows() == 32) }
+      assert(!reader.next())
+    }
+    withReader(text, stringSchema, 16) { reader =>
+      var rows = 0
+      var batches = 0
+      while (reader.next()) {
+        withResource(reader.get()) { batch => rows += batch.numRows() }
+        batches += 1
+      }
+      assert(rows == 32)
+      assert(batches > 1)
+    }
+  }
+
   test("test simple retry") {
     val bufferer = HostLineBuffererFactory.createBufferer(100, Array('\n'.toByte))
     bufferer.add("1,2".getBytes, 0, 3)

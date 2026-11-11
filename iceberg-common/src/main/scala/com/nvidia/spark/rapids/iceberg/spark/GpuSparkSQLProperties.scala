@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,8 +20,4 @@ object GpuSparkSQLProperties {
   // Controls whether reading/writing timestamps without timezones is allowed
   val HANDLE_TIMESTAMP_WITHOUT_TIMEZONE = "spark.sql.iceberg.handle-timestamp-without-timezone"
   val HANDLE_TIMESTAMP_WITHOUT_TIMEZONE_DEFAULT = false
-
-  // Controls whether to report available column statistics to Spark for query optimization.
-  val REPORT_COLUMN_STATS = "spark.sql.iceberg.report-column-stats"
-  val REPORT_COLUMN_STATS_DEFAULT = true
 }

@@ -164,9 +164,9 @@ case class GpuDeltaParquetFileFormat(
   /**
    * Modifies the data read from underlying Parquet reader by populating one or both of the
    * following metadata columns.
-   *   - [[IS_ROW_DELETED_COLUMN_NAME]] - row deleted status from deletion vector corresponding
+   *   - `IS_ROW_DELETED_COLUMN_NAME` - row deleted status from deletion vector corresponding
    *   to this file
-   *   - [[ROW_INDEX_COLUMN_NAME]] - index of the row within the file. Note, this column is only
+   *   - `ROW_INDEX_COLUMN_NAME` - index of the row within the file. Note, this column is only
    *     populated when we are not using _metadata.row_index column.
    */
   private def iteratorWithAdditionalMetadataColumns(path: String, partitionedFile: PartitionedFile,
@@ -277,7 +277,7 @@ object GpuDeltaParquetFileFormat {
     }
   }
 
-  /** Utility method to quietly close an [[AutoCloseable]] */
+  /** Utility method to quietly close an `AutoCloseable` */
   private def closeQuietly(closeable: AutoCloseable): Unit = {
     if (closeable != null) {
       try {

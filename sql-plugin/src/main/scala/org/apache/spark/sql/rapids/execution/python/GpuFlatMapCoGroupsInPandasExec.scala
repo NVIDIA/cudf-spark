@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -133,6 +133,10 @@ case class GpuFlatMapCoGroupsInPandasExec(
   override def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
     val (numInputRows, numInputBatches, numOutputRows, numOutputBatches) = commonGpuMetrics()
     lazy val isPythonOnGpuEnabled = GpuPythonHelper.isPythonOnGpuEnabled(conf)
+    val udfLogMaxEntries =
+      conf.getConfString("spark.sql.pyspark.udf.logging.maxEntries", "0").toInt
+    val udfLogLevel =
+      conf.getConfString("spark.sql.pyspark.udf.logging.logLevel", "WARNING")
     // Python wraps the resulting columns in a single struct column.
     val pythonOutputSchema = StructType(
       StructField("out_struct", DataTypeUtilsShim.fromAttributes(output)) :: Nil)
@@ -170,7 +174,9 @@ case class GpuFlatMapCoGroupsInPandasExec(
           pythonRunnerConf,
           // The whole group data should be written in a single call, so here is unlimited
           Int.MaxValue,
-          pythonOutputSchema)
+          pythonOutputSchema,
+          udfLogMaxEntries,
+          udfLogLevel)
 
         executePython(pyInputIter, output, pyRunner, numOutputRows, numOutputBatches)
       }

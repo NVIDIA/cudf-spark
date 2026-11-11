@@ -15,8 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "420"}
-{"spark": "500"}
+{"spark":["420"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids
 
@@ -30,13 +29,13 @@ import com.nvidia.spark.rapids.shims.{GpuGroupPartitionsExec, GpuGroupPartitions
 import com.nvidia.spark.rapids.shims.ShimLeafExecNode
 import org.mockito.Mockito.{doReturn, mock, spy, when}
 
-import org.apache.spark.SparkConf
+import org.apache.spark.{SparkConf, SparkException}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, AttributeReference,
   CurrentDatabase, Descending, NullsLast, SortOrder}
-import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, Partitioning,
-  UnknownPartitioning}
+import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, KeyedPartitioning,
+  Partitioning, UnknownPartitioning}
 import org.apache.spark.sql.connector.catalog.{Column, Identifier, InMemoryCatalog}
 import org.apache.spark.sql.connector.distributions.Distributions
 import org.apache.spark.sql.connector.expressions.Expressions
@@ -45,6 +44,7 @@ import org.apache.spark.sql.execution.datasources.v2.GroupPartitionsExec
 import org.apache.spark.sql.execution.exchange.Exchange
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.GpuAdd
+import org.apache.spark.sql.rapids.shims.GroupPartitionsExecTestShim
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.SparkSession
 import org.apache.spark.sql.types.{IntegerType, LongType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -56,6 +56,16 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
     .set(SQLConf.V2_BUCKETING_ENABLED.key, "true")
     .set(SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key, "-1")
     .set(SQLConf.ADAPTIVE_EXECUTION_ENABLED.key, "false")
+
+  private def newCpuGroupPartitions(
+      output: Seq[Attribute],
+      enableSortedMerge: Boolean): GroupPartitionsExec = {
+    val key = output.headOption.getOrElse(AttributeReference("key", IntegerType)())
+    val child = spy(LocalTableScanExec(if (output.nonEmpty) output else Seq(key), Nil, None))
+    doReturn(KeyedPartitioning(Seq(key), Seq(InternalRow(0))))
+      .when(child).outputPartitioning
+    GroupPartitionsExecTestShim(child, enableSortedMerge)
+  }
 
   override protected def filterCapturedPlans(plans: Array[SparkPlan]): Array[SparkPlan] = {
     super.filterCapturedPlans(plans).filter(_.exists {
@@ -107,6 +117,44 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
       s"Expected GpuRowToColumnarExec in plan:\n$gpuPlan")
     assert(gpuGroups.exists(_.partitionGroups.exists(_.size > 1)),
       "Expected grouping metadata from the original CPU child")
+    assert(gpuGroups.forall { group =>
+      group.groupInfo.plannedChildPartitioning.forall(_ == group.child.outputPartitioning)
+    }, "Expected the transitioned child to preserve its planned partitioning")
+  }
+
+  test("Spark 5 GPU execution rejects stale GroupPartitionsExec grouping") {
+    withGpuSparkSession { _ =>
+      val attr = AttributeReference("id", IntegerType, nullable = false)()
+      val originalChild = spy(LocalTableScanExec(Seq(attr), Nil, None))
+      val originalPartitioning = KeyedPartitioning(
+        Seq(attr),
+        Seq(InternalRow(1), InternalRow(1), InternalRow(2)))
+      doReturn(originalPartitioning).when(originalChild).outputPartitioning
+
+      val plannedCpu = GroupPartitionsExecTestShim(
+        originalChild,
+        enableSortedMerge = false)
+      val groupInfo = GpuGroupPartitionsExecInfo(plannedCpu, Seq.empty)
+      assume(groupInfo.plannedChildPartitioning.nonEmpty,
+        "SPARK-59289 child partitioning is only available in Spark 5")
+      assert(plannedCpu.groupedPartitions.map(_._2) == Seq(Seq(0, 1), Seq(2)))
+
+      val changedChild = GroupPartitionsTestGpuLeaf(
+        Seq(attr),
+        Seq(Seq[Integer](10), Seq[Integer](20), Seq[Integer](30), Seq[Integer](40)),
+        Seq.empty)
+      val staleCpu = plannedCpu.withNewChildren(Seq(changedChild))
+        .asInstanceOf[GroupPartitionsExec]
+      val cpuError = intercept[SparkException](staleCpu.executeColumnar())
+      assert(cpuError.getMessage.contains(
+        "no longer reports the partitioning it was planned over"))
+
+      val staleGpu = GpuGroupPartitionsExec(changedChild, groupInfo)
+      assert(staleGpu.outputPartitioning == UnknownPartitioning(2))
+      val gpuError = intercept[SparkException](staleGpu.executeColumnar())
+      assert(gpuError.getMessage.contains(
+        "no longer reports the partitioning it was planned over"))
+    }
   }
 
   test("GpuGroupPartitionsExec returns an empty RDD for an empty grouping plan") {
@@ -160,7 +208,7 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
     assert(GpuGroupPartitionsExec(targetSizeChild, groupInfo).outputBatching == target)
   }
 
-  test("GpuGroupPartitionsExec canonicalizes captured output expressions") {
+  test("GpuGroupPartitionsExec canonicalizes captured partitioning expressions") {
     def newPlan(): GpuGroupPartitionsExec = {
       val attr = AttributeReference("id", IntegerType, nullable = false)()
       GpuGroupPartitionsExec(
@@ -174,7 +222,10 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
           expectedPartitionKeyCount = None,
           reducerNames = None,
           distributePartitions = false,
-          enableSortedMerge = false))
+          enableSortedMerge = false,
+          plannedChildPartitioning = Some(KeyedPartitioning(
+            Seq(attr),
+            Seq(InternalRow(1), InternalRow(2))))))
     }
 
     val first = newPlan()
@@ -246,8 +297,8 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
       LongType,
       attr.nullable,
       attr.metadata)(attr.exprId, attr.qualifier)
-    val groupPartitions = GroupPartitionsExec(
-      LocalTableScanExec(Seq(attr), Nil, None),
+    val groupPartitions = newCpuGroupPartitions(
+      Seq(attr),
       enableSortedMerge = false)
     val originalMeta = new GpuGroupPartitionsExecMeta(
       groupPartitions,
@@ -267,9 +318,7 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
   }
 
   test("Unsupported sorted-merge ordering keeps the original CPU subtree") {
-    val groupPartitions = spy(GroupPartitionsExec(
-      LocalTableScanExec(Nil, Nil, None),
-      enableSortedMerge = true))
+    val groupPartitions = spy(newCpuGroupPartitions(Nil, enableSortedMerge = true))
     doReturn(Seq(SortOrder(CurrentDatabase(), Ascending)))
       .when(groupPartitions).outputOrdering
     val meta = GpuOverrides.wrapAndTagPlan(
@@ -288,9 +337,7 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
       attr,
       Ascending,
       sameOrderExpressions = Seq(CurrentDatabase())))
-    val groupPartitions = spy(GroupPartitionsExec(
-      LocalTableScanExec(Seq(attr), Nil, None),
-      enableSortedMerge = true))
+    val groupPartitions = spy(newCpuGroupPartitions(Seq(attr), enableSortedMerge = true))
     doReturn(outputOrdering).when(groupPartitions).outputOrdering
     doReturn(Seq.empty[(InternalRow, Seq[Int])]).when(groupPartitions).groupedPartitions
     val meta = GpuOverrides.wrapAndTagPlan(

@@ -155,6 +155,7 @@ private class SingleFileReader(
       conf.targetBatchSizeBytes,
       conf.useChunkedReader,
       conf.maxChunkedReaderMemoryUsageSizeBytes,
+      conf.skipReadEstimate,
       CpuCompressionConfig.disabled(),
       conf.metrics,
       DateTimeRebaseCorrected, // dateRebaseMode

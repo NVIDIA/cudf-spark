@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import builtins
 import os
 import re
 import shutil
@@ -76,7 +77,7 @@ parquet_gens_list = [[byte_gen, short_gen, int_gen, long_gen, float_gen, double_
     StructGen([['child0', ArrayGen(byte_gen)], ['child1', byte_gen], ['child2', float_gen], ['child3', decimal_gen_64bit]]),
     ArrayGen(StructGen([['child0', string_gen], ['child1', double_gen], ['child2', int_gen]]))] +
                      parquet_map_gens + decimal_gens,
-                     pytest.param([timestamp_gen], marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/132'))]
+                     [timestamp_gen]]
 
 # test with original parquet file reader, the multi-file parallel reader for cloud, and coalesce file reader for
 # non-cloud
@@ -140,6 +141,26 @@ reader_opt_confs_no_native = [original_parquet_file_reader_conf, multithreaded_p
 
 reader_opt_confs = reader_opt_confs_native + reader_opt_confs_no_native
 
+hybrid_fail_on_fallback_key = 'spark.rapids.sql.test.format.parquet.hybridScan.failOnFallback'
+# The hybrid scan reader, for reads it does not take yet: they must fall back unchanged.
+hybrid_fallback_parquet_file_reader_conf = {'spark.rapids.sql.format.parquet.reader.type': 'PERFILE',
+        'spark.rapids.sql.reader.chunked': False,
+        'spark.rapids.sql.format.parquet.hybridScan.enabled': True,
+        hybrid_fail_on_fallback_key: False}
+# The hybrid scan reader, for reads it takes: one that falls back fails instead. It only takes a
+# datetime column in EXCEPTION rebase mode, which Spark 4 does not default to.
+hybrid_parquet_file_reader_conf = copy_and_update(hybrid_fallback_parquet_file_reader_conf, {
+        hybrid_fail_on_fallback_key: True,
+        # Temporary workaround for https://github.com/NVIDIA/cudf-spark/issues/16771:
+        # the hybrid reader currently rejects reads whenever field ID matching is enabled.
+        'spark.sql.parquet.fieldId.read.enabled': False,
+        datetimeRebaseModeInReadKey: 'EXCEPTION',
+        int96RebaseModeInReadKey: 'EXCEPTION'})
+reader_opt_confs_with_hybrid = reader_opt_confs + [
+        pytest.param(hybrid_parquet_file_reader_conf, id='hybrid')]
+reader_opt_confs_with_hybrid_fallback = reader_opt_confs + [
+        pytest.param(hybrid_fallback_parquet_file_reader_conf, id='hybrid_fallback')]
+
 @pytest.mark.parametrize('parquet_gens', [[byte_gen, short_gen, int_gen, long_gen]], ids=idfn)
 @pytest.mark.parametrize('read_func', [read_parquet_df])
 @pytest.mark.parametrize('reader_confs', [coalesce_parquet_file_reader_multithread_filter_conf,
@@ -185,7 +206,7 @@ def test_parquet_read_avoid_coalesce_incompatible_files(spark_tmp_path, v1_enabl
 
 @pytest.mark.parametrize('parquet_gens', parquet_gens_list, ids=idfn)
 @pytest.mark.parametrize('read_func', [read_parquet_df, read_parquet_sql])
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid_fallback)
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
 @tz_sensitive_test
 @allow_non_gpu(*non_utc_allow)
@@ -244,6 +265,52 @@ def test_parquet_read_multithread_flow_ctrl_excessive_req(spark_tmp_path, keep_o
         'spark.rapids.sql.format.parquet.multithreaded.read.keepOrder': keep_order,
     }
     assert_gpu_and_cpu_are_equal_collect(read_parquet_sql(data_path), conf=tiny_pool_conf)
+
+
+def _scan_output_batches(plan):
+    """Batches the scan produced. Raises if no GPU scan is present, so CPU fallback fails."""
+    nodes = [plan]
+    while nodes:
+        node = nodes.pop()
+        metric = node.metrics().get('numOutputBatches')
+        if 'Scan' in node.nodeName() and metric.isDefined():
+            return metric.get().value()
+        children = node.children()
+        for i in range(children.size()):
+            nodes.append(children.apply(i))
+    raise AssertionError('no scan with numOutputBatches in plan')
+
+
+def test_parquet_read_estimate_limits_output_batches(spark_tmp_path):
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+    # Small row groups so one file holds many blocks for the reader to coalesce.
+    with_cpu_session(
+        lambda spark: gen_df(spark, [('a', long_gen)], length=8192).coalesce(1).write
+            .option('parquet.block.size', 4096).parquet(data_path),
+        conf=rebase_write_corrected_conf)
+
+    def batches_for(chunked, use_estimate):
+        """Batches the scan produced. use_estimate of None leaves the config unset."""
+        conf = {
+            'spark.sql.adaptive.enabled': 'false',
+            'spark.rapids.sql.metrics.level': 'DEBUG',
+            'spark.rapids.sql.reader.chunked': chunked,
+            'spark.rapids.sql.reader.batchSizeBytes': 4096}
+        if use_estimate is not None:
+            conf['spark.rapids.sql.reader.useReadEstimateFromSchema'] = use_estimate
+        captured = {}
+        assert_cpu_and_gpu_are_equal_collect_with_capture(
+            lambda spark: spark.read.parquet(data_path),
+            conf=conf,
+            gpu_plan_assertion=lambda cpu_plan, gpu_plan: captured.update(
+                {'batches': _scan_output_batches(gpu_plan)}))
+        return captured['batches']
+
+    # Without a chunked reader the estimate caps a batch before the byte limit is reached.
+    assert batches_for('false', 'true') > batches_for('false', 'false')
+    # Unset uses the estimate only when there is no chunked reader.
+    assert batches_for('false', None) == batches_for('false', 'true')
+    assert batches_for('true', None) == batches_for('true', 'false')
 
 
 """
@@ -319,7 +386,7 @@ def test_parquet_fallback(spark_tmp_path, read_func, disable_conf):
 
 @pytest.mark.parametrize('read_func', [read_parquet_df, read_parquet_sql])
 @pytest.mark.parametrize('binary_as_string', [True, False])
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid_fallback)
 @tz_sensitive_test
 def test_parquet_read_round_trip_binary(std_input_path, read_func, binary_as_string, reader_confs):
     data_path = std_input_path + '/binary_as_string.parquet'
@@ -369,7 +436,7 @@ def test_parquet_read_forced_binary_schema(std_input_path, v1_enabled_list):
             conf=all_confs)
 
 @pytest.mark.parametrize('read_func', [read_parquet_df, read_parquet_sql])
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid_fallback)
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
 @tz_sensitive_test
 def test_parquet_read_round_trip_binary_as_string(std_input_path, read_func, reader_confs, v1_enabled_list):
@@ -413,7 +480,7 @@ def write_mixed_encoding_parquet(spark, path):
         .option('parquet.block.size', 1024 * 1024) \
         .parquet(path)
 
-@pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid, ids=idfn)
 def test_parquet_read_mixed_dictionary_plain_encoding_gpu_writer(spark_tmp_path, reader_confs):
     """
     Test reading a Parquet file with mixed dictionary and plain encoded string columns.
@@ -440,7 +507,7 @@ def test_parquet_read_mixed_dictionary_plain_encoding_gpu_writer(spark_tmp_path,
         conf=all_confs
     )
 
-@pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid, ids=idfn)
 def test_parquet_read_mixed_dictionary_plain_encoding_cpu_writer(spark_tmp_path, reader_confs):
     """
     Test reading a Parquet file with mixed dictionary and plain encoded string columns.
@@ -475,7 +542,7 @@ if not is_before_spark_320():
 # https://github.com/NVIDIA/spark-rapids/issues/143
 
 @pytest.mark.parametrize('compress', parquet_compress_options)
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid)
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
 @pytest.mark.parametrize('cpu_decompress', [True, False])
 def test_parquet_compress_read_round_trip(spark_tmp_path, compress, v1_enabled_list, reader_confs, cpu_decompress):
@@ -488,7 +555,9 @@ def test_parquet_compress_read_round_trip(spark_tmp_path, compress, v1_enabled_l
         all_confs = copy_and_update(all_confs, {
             'spark.rapids.sql.format.parquet.decompressCpu' : 'true',
             'spark.rapids.sql.format.parquet.decompressCpu.snappy' : 'true',
-            'spark.rapids.sql.format.parquet.decompressCpu.zstd' : 'true'
+            'spark.rapids.sql.format.parquet.decompressCpu.zstd' : 'true',
+            # The hybrid reader does not decompress on the CPU.
+            hybrid_fail_on_fallback_key : False
         })
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : spark.read.parquet(data_path),
@@ -503,10 +572,13 @@ parquet_pred_push_gens = [
 
 @pytest.mark.parametrize('parquet_gen', parquet_pred_push_gens, ids=idfn)
 @pytest.mark.parametrize('read_func', [read_parquet_df, read_parquet_sql])
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid)
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
 @allow_non_gpu(*non_utc_allow)
 def test_parquet_pred_push_round_trip(spark_tmp_path, parquet_gen, read_func, v1_enabled_list, reader_confs):
+    if reader_confs is hybrid_parquet_file_reader_conf and parquet_gen is date_gen:
+        # The hybrid reader cannot read the file metadata that says an earlier date needs no rebase.
+        parquet_gen = DateGen(start=date(1582, 10, 15))
     data_path = spark_tmp_path + '/PARQUET_DATA'
     gen_list = [('a', RepeatSeqGen(parquet_gen, 100)), ('b', parquet_gen)]
     s0 = with_cpu_session(lambda spark: gen_scalar(parquet_gen, force_no_nulls=True))
@@ -516,7 +588,7 @@ def test_parquet_pred_push_round_trip(spark_tmp_path, parquet_gen, read_func, v1
     rf = read_func(data_path)
     all_confs = copy_and_update(reader_confs, {'spark.sql.sources.useV1SourceList': v1_enabled_list})
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark: rf(spark).select(f.col('a') >= s0),
+            lambda spark: rf(spark).filter(f.col('a') >= s0),
             conf=all_confs)
 
 @pytest.mark.skipif(is_not_utc(), reason="LEGACY datetime rebase mode is only supported for UTC timezone")
@@ -524,7 +596,7 @@ def test_parquet_pred_push_round_trip(spark_tmp_path, parquet_gen, read_func, v1
 @pytest.mark.parametrize('ts_type', parquet_ts_write_options)
 @pytest.mark.parametrize('ts_rebase_write', [('CORRECTED', 'LEGACY'), ('LEGACY', 'CORRECTED')])
 @pytest.mark.parametrize('ts_rebase_read', [('CORRECTED', 'LEGACY'), ('LEGACY', 'CORRECTED')])
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid_fallback)
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
 def test_parquet_read_roundtrip_datetime_with_legacy_rebase(spark_tmp_path, parquet_gens, ts_type,
                                                             ts_rebase_write, ts_rebase_read,
@@ -549,7 +621,7 @@ def test_parquet_read_roundtrip_datetime_with_legacy_rebase(spark_tmp_path, parq
 
 @pytest.mark.skipif(is_not_utc(), reason="LEGACY datetime rebase mode is only supported for UTC timezone")
 @pytest.mark.parametrize('parquet_gens', [parquet_datetime_gen_simple], ids=idfn)
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid_fallback)
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
 def test_parquet_read_roundtrip_datetime_with_legacy_rebase_mismatch_files(spark_tmp_path, parquet_gens,
                                                             reader_confs, v1_enabled_list):
@@ -595,7 +667,7 @@ def test_parquet_decimal_read_legacy(spark_tmp_path, parquet_gens, read_func, re
     assert_gpu_and_cpu_are_equal_collect(read_func(data_path), conf=all_confs)
 
 @pytest.mark.skipif(is_not_utc(), reason="LEGACY datetime rebase mode is only supported for UTC timezone")
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid)
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
 @pytest.mark.parametrize('batch_size', [100, INT_MAX])
 def test_parquet_simple_partitioned_read(spark_tmp_path, v1_enabled_list, reader_confs, batch_size):
@@ -628,7 +700,7 @@ def test_parquet_simple_partitioned_read(spark_tmp_path, v1_enabled_list, reader
 
 # In this we are reading the data, but only reading the key the data was partitioned by
 @pytest.mark.skipif(is_not_utc(), reason="LEGACY datetime rebase mode is only supported for UTC timezone")
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid_fallback)
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
 def test_parquet_partitioned_read_just_partitions(spark_tmp_path, v1_enabled_list, reader_confs):
     parquet_gens = [byte_gen]
@@ -683,6 +755,35 @@ def test_parquet_read_schema_missing_cols(spark_tmp_path, v1_enabled_list, reade
             lambda spark : spark.read.parquet(data_path),
             conf=all_confs)
 
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_confs', [combining_multithreaded_parquet_file_reader_conf_ordered,
+                                        combining_multithreaded_parquet_file_reader_conf_unordered])
+@pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
+@pytest.mark.parametrize('with_partitions', [True, False])
+@pytest.mark.parametrize('has_b', [(False, False, True, True, False),
+                                  (True, False, False, True)])
+def test_parquet_read_combine_files_missing_all_requested_cols(
+        spark_tmp_path, reader_confs, v1_enabled_list, with_partitions, has_b):
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+    for key, includes_b in enumerate(has_b):
+        gen_list = [('a', int_gen)] + ([('b', int_gen)] if includes_b else [])
+        with_cpu_session(
+            lambda spark: gen_df(spark, gen_list, 10 * (key + 1), num_slices=1)
+                .write.parquet(data_path + '/key=' + str(key)))
+
+    all_confs = copy_and_update(reader_confs, {
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        'spark.sql.files.maxPartitionBytes': '1g',
+        'spark.sql.files.minPartitionNum': '1',
+        'spark.sql.files.openCostInBytes': '1',
+        'spark.rapids.sql.reader.multithreaded.combine.waitTime': '10000'})
+    projected = ['b', 'key'] if with_partitions else ['b']
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.option('mergeSchema', 'true').parquet(data_path)
+            .select(*projected),
+        conf=all_confs)
+
+
 # To test https://github.com/NVIDIA/spark-rapids/pull/7405. Without the fix in that issue this test
 # throws an exception about can't allocate negative amount. To make this problem happen, we
 # read a bunch of empty parquet blocks by filtering on only things in the first and last of 1000 files.
@@ -703,7 +804,8 @@ def test_parquet_read_buffer_allocation_empty_blocks(spark_tmp_path, v1_enabled_
             conf=all_confs)
 
 
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+# The file-name queries read no data columns, which the hybrid reader does not take.
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid_fallback)
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
 @pytest.mark.skipif(is_databricks_runtime(), reason="https://github.com/NVIDIA/spark-rapids/issues/7733")
 def test_parquet_read_ignore_missing(spark_tmp_path, v1_enabled_list, reader_confs):
@@ -834,7 +936,7 @@ def test_read_parquet_with_empty_clipped_schema(spark_tmp_path, v1_enabled_list,
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.schema(schema).parquet(data_path), conf=all_confs)
 
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid)
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
 def test_parquet_input_meta(spark_tmp_path, v1_enabled_list, reader_confs):
     first_data_path = spark_tmp_path + '/PARQUET_DATA/key=0'
@@ -900,7 +1002,7 @@ def createBucketedTableAndJoin(spark, tbl_1, tbl_2):
 
 @ignore_order
 @allow_non_gpu('DataWritingCommandExec,ExecutedCommandExec,WriteFilesExec')
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid)
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
 # this test would be better if we could ensure exchanges didn't exist - ie used buckets
 def test_buckets(spark_tmp_path, v1_enabled_list, reader_confs, spark_tmp_table_factory):
@@ -1069,7 +1171,7 @@ _nested_pruning_schemas = [
         ]
 # TODO CHECK FOR DECIMAL??
 @pytest.mark.parametrize('data_gen,read_schema', _nested_pruning_schemas, ids=idfn)
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid_fallback)
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
 @pytest.mark.parametrize('nested_enabled', ["true", "false"])
 def test_nested_pruning_and_case_insensitive(spark_tmp_path, data_gen, read_schema, reader_confs, v1_enabled_list, nested_enabled):
@@ -1093,13 +1195,50 @@ def test_spark_32639(std_input_path):
         lambda spark: spark.read.schema(schema_str).parquet(data_path),
         conf=original_parquet_file_reader_conf)
 
+def _completed_stages(spark):
+    sc = spark.sparkContext._jsc.sc()
+    sc.listenerBus().waitUntilEmpty()
+    store = sc.statusStore()
+    completed = spark._jvm.java.util.Collections.singletonList(
+        spark._jvm.org.apache.spark.status.api.v1.StageStatus.COMPLETE)
+    stages = store.stageList(completed, False, False,
+        getattr(store, 'stageList$default$4')(),
+        getattr(store, 'stageList$default$5')()).iterator()
+    while stages.hasNext():
+        yield stages.next()
+
 @pytest.mark.parametrize('reader_type', ['COALESCING', 'MULTITHREADED', 'PERFILE'])
 def test_parquet_read_empty_arrow(std_input_path, reader_type):
     conf = {'spark.rapids.sql.format.parquet.reader.type': reader_type}
     data_path = "%s/empty_arrow.parquet" % (std_input_path)
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.read.parquet(data_path),
-        conf=conf)
+    read_parquet = lambda spark: spark.read.parquet(data_path)
+
+    if (data_path.startswith(('s3://', 's3a://')) and
+            os.environ.get('ASSERT_PERFIO_S3_BACKEND') == '1'):
+        spark = get_spark_i_know_what_i_am_doing()
+        last_stage_id = builtins.max(
+            (stage.stageId() for stage in _completed_stages(spark)), default=-1)
+        assert_cpu_and_gpu_are_equal_collect_with_capture(
+            read_parquet,
+            exist_classes=r'GpuFile(GpuScan|SourceScanExec)',
+            conf=conf)
+        backend_metrics = {
+            'perfio.s3.netty.executors': 0,
+            'perfio.s3.crt.executors': 0,
+            'perfio.s3.s3a.executors': 0,
+        }
+        for stage in _completed_stages(spark):
+            if stage.stageId() > last_stage_id:
+                updates = stage.accumulatorUpdates().iterator()
+                while updates.hasNext():
+                    metric = updates.next()
+                    if metric.name() in backend_metrics:
+                        backend_metrics[metric.name()] += int(metric.value())
+        assert backend_metrics['perfio.s3.s3a.executors'] == 0, backend_metrics
+        assert (backend_metrics['perfio.s3.netty.executors'] +
+            backend_metrics['perfio.s3.crt.executors']) > 0, backend_metrics
+    else:
+        assert_gpu_and_cpu_are_equal_collect(read_parquet, conf=conf)
 
 @pytest.mark.skipif(not is_before_spark_320(), reason='Spark 3.1.x does not need special handling')
 @pytest.mark.skipif(is_dataproc_runtime(), reason='https://github.com/NVIDIA/spark-rapids/issues/8074')
@@ -1109,10 +1248,16 @@ def test_parquet_read_nano_as_longs_31x(std_input_path):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.parquet(data_path))
 
+# Spark 5 enables nanosecond timestamp types by default when spark.testing is set. These tests
+# verify the legacy rejection behavior, so keep the preview feature disabled there.
+legacy_parquet_nanos_error_conf = copy_and_update(
+    original_parquet_file_reader_conf,
+    {'spark.sql.timestampNanosTypes.enabled': False} if is_spark_500_or_later() else {})
+
 @pytest.mark.skipif(is_before_spark_320(), reason='Spark 3.1.x supports reading timestamps in nanos')
 def test_parquet_read_nano_as_longs_false(std_input_path):
     data_path = "%s/timestamp-nanos.parquet" % (std_input_path)
-    conf = copy_and_update(original_parquet_file_reader_conf, {
+    conf = copy_and_update(legacy_parquet_nanos_error_conf, {
             'spark.sql.legacy.parquet.nanosAsLong': False })
     def read_timestamp_nano_parquet(spark):
         spark.read.parquet(data_path).collect()
@@ -1128,7 +1273,7 @@ def test_parquet_read_nano_as_longs_not_configured(std_input_path):
         spark.read.parquet(data_path).collect()
     assert_gpu_and_cpu_error(
         read_timestamp_nano_parquet,
-        conf=original_parquet_file_reader_conf,
+        conf=legacy_parquet_nanos_error_conf,
         error_message="Illegal Parquet type: INT64 (TIMESTAMP(NANOS,true))")
 
 @pytest.mark.skipif(is_before_spark_320(), reason='Spark 3.1.x supports reading timestamps in nanos')
@@ -1170,7 +1315,7 @@ def setup_parquet_file_with_column_names(spark, table_name):
     spark.sql(create_query).collect
     spark.sql(insert_query).collect
 
-@pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid_fallback, ids=idfn)
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
 def test_disorder_read_schema(spark_tmp_table_factory, reader_confs, v1_enabled_list):
     all_confs = copy_and_update(reader_confs, {'spark.sql.sources.useV1SourceList': v1_enabled_list})
@@ -1227,7 +1372,7 @@ filters = ["_1 = 500",
         "_1 >= 500 and _1 < 1000",
         "(_1 >= 500 and _1 < 1000) or (_1 >= 1500 and _1 < 1600)"]
 
-@pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid, ids=idfn)
 @pytest.mark.parametrize('enable_dictionary', ["true", "false"], ids=idfn)
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
 def test_parquet_reading_from_unaligned_pages_basic_filters(spark_tmp_path, reader_confs, enable_dictionary, v1_enabled_list):
@@ -1245,7 +1390,7 @@ def test_parquet_reading_from_unaligned_pages_basic_filters(spark_tmp_path, read
                 lambda spark : spark.read.parquet(data_path).filter(filter_str),
                 all_confs)
 
-@pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid, ids=idfn)
 @pytest.mark.parametrize('enable_dictionary', ["true", "false"], ids=idfn)
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
 @allow_non_gpu(*non_utc_allow)
@@ -1273,7 +1418,7 @@ def test_parquet_reading_from_unaligned_pages_all_types(spark_tmp_path, reader_c
                 lambda spark : spark.read.parquet(data_path).filter(filter_str),
                 all_confs)
 
-@pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid, ids=idfn)
 @pytest.mark.parametrize('enable_dictionary', ["true", "false"], ids=idfn)
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
 @allow_non_gpu(*non_utc_allow)
@@ -1303,7 +1448,7 @@ def test_parquet_reading_from_unaligned_pages_all_types_dict_optimized(spark_tmp
                 lambda spark : spark.read.parquet(data_path).filter(filter_str),
                 all_confs)
 
-@pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid, ids=idfn)
 @pytest.mark.parametrize('enable_dictionary', ["true", "false"], ids=idfn)
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
 def test_parquet_reading_from_unaligned_pages_basic_filters_with_nulls(spark_tmp_path, reader_confs, enable_dictionary, v1_enabled_list):
@@ -1387,7 +1532,7 @@ def test_parquet_scan_with_hidden_metadata_fallback(spark_tmp_path, metadata_col
 
 @ignore_order
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
-@pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid_fallback, ids=idfn)
 @pytest.mark.skipif(is_databricks_runtime(), reason="Databricks does not support ignoreCorruptFiles")
 def test_parquet_read_with_corrupt_files(spark_tmp_path, reader_confs, v1_enabled_list):
     first_data_path = spark_tmp_path + '/PARQUET_DATA/first'
@@ -1699,7 +1844,7 @@ def test_parquet_read_int_upcast(spark_tmp_path, reader_confs, v1_enabled_list, 
         lambda spark: spark.read.schema(f"id {load_type}").parquet(data_path),
         conf=conf)
 
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid_fallback)
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
 def test_parquet_nested_column_missing(spark_tmp_path, reader_confs, v1_enabled_list):
     data_path = spark_tmp_path + '/PARQUET_DATA'
@@ -1924,6 +2069,45 @@ def test_parquet_read_encryption(spark_tmp_path, reader_confs, v1_enabled_list):
         error_message='The GPU does not support reading encrypted Parquet files')
 
 
+@pytest.mark.parametrize('reader_type', ['PERFILE', 'COALESCING', 'MULTITHREADED'], ids=idfn)
+@pytest.mark.parametrize('chunked', [False, True], ids=idfn)
+@pytest.mark.parametrize('num_rows', [0, 4096], ids=idfn)
+def test_parquet_count_empty_splits(spark_tmp_path, reader_type, chunked, num_rows):
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+    split_size = 4096
+
+    def setup_data(spark):
+        spark.range(num_rows).selectExpr(
+            'id', 'sha2(CAST(id AS STRING), 256) AS payload'
+        ).coalesce(1).write.parquet(data_path)
+        files = spark.read.parquet(data_path).inputFiles()
+        assert len(files) == 1
+        midpoints = parquet_row_group_midpoints(spark, files[0])
+        if num_rows:
+            assert midpoints and builtins.min(midpoints) >= split_size
+        else:
+            assert not midpoints
+
+    with_cpu_session(setup_data)
+    conf = {
+        'spark.rapids.sql.format.parquet.reader.type': reader_type,
+        'spark.rapids.sql.format.parquet.reader.footer.type': 'NATIVE',
+        'spark.rapids.sql.reader.chunked': str(chunked).lower(),
+        'spark.sql.files.maxPartitionBytes': str(split_size),
+        'spark.sql.parquet.aggregatePushdown': 'false',
+    }
+
+    def read_count(spark):
+        df = spark.read.parquet(data_path).selectExpr('count(*) AS n')
+        assert df.collect() == [Row(n=num_rows)]
+        return df
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        read_count,
+        exist_classes=r'GpuFileGpuScan parquet .* ReadSchema: struct<>',
+        conf=conf)
+
+
 def test_parquet_read_count(spark_tmp_path):
     parquet_gens = [int_gen, string_gen, double_gen]
     gen_list = [('_c' + str(i), gen) for i, gen in enumerate(parquet_gens)]
@@ -1940,12 +2124,16 @@ def test_parquet_read_count(spark_tmp_path):
 
 @pytest.mark.parametrize('read_func', [read_parquet_df, read_parquet_sql])
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
-@pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid, ids=idfn)
 @pytest.mark.parametrize('col_name', ['K0', 'k0', 'K3', 'k3', 'V0', 'v0'], ids=idfn)
 @ignore_order
 def test_read_case_col_name(spark_tmp_path, read_func, v1_enabled_list, reader_confs, col_name):
     all_confs = copy_and_update(reader_confs, {
         'spark.sql.sources.useV1SourceList': v1_enabled_list})
+    if col_name.lower().startswith('k'):
+        # Only a partition column is read, and the hybrid reader does not take a read of no data
+        # columns.
+        all_confs = copy_and_update(all_confs, {hybrid_fail_on_fallback_key: False})
     gen_list =[('k0', LongGen(nullable=False, min_val=0, max_val=0)),
             ('k1', LongGen(nullable=False, min_val=1, max_val=1)),
             ('k2', LongGen(nullable=False, min_val=2, max_val=2)),
@@ -1965,7 +2153,7 @@ def test_read_case_col_name(spark_tmp_path, read_func, v1_enabled_list, reader_c
             lambda spark : reader(spark).selectExpr(col_name),
             conf=all_confs)
 
-@pytest.mark.parametrize("reader_confs", reader_opt_confs, ids=idfn)
+@pytest.mark.parametrize("reader_confs", reader_opt_confs_with_hybrid_fallback, ids=idfn)
 @ignore_order
 def test_parquet_column_name_with_dots(spark_tmp_path, reader_confs):
     data_path = spark_tmp_path + "/PARQUET_DATA"
@@ -2037,7 +2225,11 @@ def _write_parquet_unknown_null_table(
 # SPARK-56045 / SPARK-54220: Parquet UNKNOWN logical type annotation. PyArrow null columns are
 # written as INT32 physical + UNKNOWN/Null logical annotation.
 
-@pytest.mark.skipif(is_spark_411_or_later(),
+dbr_183_unknown_type_annotation_semantics = is_databricks_version(18, 3)
+unknown_type_annotation_412_semantics = \
+    is_spark_412_or_later() or dbr_183_unknown_type_annotation_semantics
+
+@pytest.mark.skipif(is_spark_411_or_later() or dbr_183_unknown_type_annotation_semantics,
                     reason='pre-SPARK-54220 physical-type behavior')
 @pytest.mark.parametrize('reader_confs', reader_opt_confs)
 def test_parquet_unknown_type_annotation_pre_411_physical(spark_tmp_path, reader_confs):
@@ -2053,7 +2245,7 @@ def test_parquet_unknown_type_annotation_pre_411_physical(spark_tmp_path, reader
     assert_gpu_and_cpu_are_equal_collect(read_and_check_schema, conf=reader_confs)
 
 
-@pytest.mark.skipif(not is_spark_412_or_later(),
+@pytest.mark.skipif(not unknown_type_annotation_412_semantics,
                     reason='SPARK-56045 requires Spark 4.1.2+')
 @pytest.mark.parametrize('reader_confs', reader_opt_confs)
 def test_parquet_unknown_type_annotation_default_physical(spark_tmp_path, reader_confs):
@@ -2073,7 +2265,8 @@ def test_parquet_unknown_type_annotation_default_physical(spark_tmp_path, reader
     assert_gpu_and_cpu_are_equal_collect(read_and_check_schema, conf=conf)
 
 
-@pytest.mark.skipif(not is_spark_411_or_later(),
+@pytest.mark.skipif(
+    not (is_spark_411_or_later() or dbr_183_unknown_type_annotation_semantics),
                     reason='SPARK-54220 requires Spark 4.1.1+')
 @pytest.mark.parametrize('reader_confs', reader_opt_confs)
 @allow_non_gpu('FileSourceScanExec', 'ColumnarToRowExec')
@@ -2083,7 +2276,7 @@ def test_parquet_unknown_type_annotation_respect_nulltype(spark_tmp_path, reader
 
     # Spark 4.1.1 always maps UNKNOWN to NullType; 4.1.2+ needs the conf enabled.
     conf = reader_confs
-    if is_spark_412_or_later():
+    if unknown_type_annotation_412_semantics:
         conf = copy_and_update(reader_confs, {
             'spark.sql.parquet.reader.respectUnknownTypeAnnotation.enabled': 'true',
         })
@@ -2098,7 +2291,7 @@ def test_parquet_unknown_type_annotation_respect_nulltype(spark_tmp_path, reader
     assert_gpu_fallback_collect(read_and_check_schema, 'FileSourceScanExec', conf=conf)
 
 
-@pytest.mark.skipif(not is_spark_412_or_later(),
+@pytest.mark.skipif(not unknown_type_annotation_412_semantics,
                     reason='SPARK-56045 requires Spark 4.1.2+')
 @pytest.mark.parametrize('reader_confs', reader_opt_confs)
 def test_parquet_unknown_type_annotation_explicit_int_schema(spark_tmp_path, reader_confs):
@@ -2123,9 +2316,9 @@ def test_parquet_unknown_type_annotation_explicit_int_schema(spark_tmp_path, rea
     assert_gpu_and_cpu_are_equal_collect(read_and_check_schema, conf=conf)
 
 
-@pytest.mark.skipif(not is_spark_412_or_later(),
+@pytest.mark.skipif(not unknown_type_annotation_412_semantics,
                     reason='SPARK-56045 requires Spark 4.1.2+')
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid_fallback)
 def test_parquet_unknown_type_annotation_preserves_field_id(spark_tmp_path, reader_confs):
     data_path = spark_tmp_path + '/PARQUET_UNKNOWN_FIELD_ID'
     _write_parquet_unknown_null_table(data_path, field_id=7)
@@ -2147,9 +2340,9 @@ def test_parquet_unknown_type_annotation_preserves_field_id(spark_tmp_path, read
     assert_gpu_and_cpu_are_equal_collect(read_and_check_schema, conf=conf)
 
 
-@pytest.mark.skipif(not is_spark_412_or_later(),
+@pytest.mark.skipif(not unknown_type_annotation_412_semantics,
                     reason='SPARK-56045 requires Spark 4.1.2+')
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid_fallback)
 def test_parquet_unknown_type_annotation_list_physical(spark_tmp_path, reader_confs):
     """Primitive-element lists bypass structural clipping; UNKNOWN must still be stripped."""
     data_path = spark_tmp_path + '/PARQUET_UNKNOWN_LIST'
@@ -2168,9 +2361,9 @@ def test_parquet_unknown_type_annotation_list_physical(spark_tmp_path, reader_co
     assert_gpu_and_cpu_are_equal_collect(read_and_check_schema, conf=conf)
 
 
-@pytest.mark.skipif(not is_spark_412_or_later(),
+@pytest.mark.skipif(not unknown_type_annotation_412_semantics,
                     reason='SPARK-56045 requires Spark 4.1.2+')
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid_fallback)
 def test_parquet_unknown_type_annotation_map_physical(spark_tmp_path, reader_confs):
     """Primitive-value maps bypass structural clipping; UNKNOWN must still be stripped."""
     data_path = spark_tmp_path + '/PARQUET_UNKNOWN_MAP'

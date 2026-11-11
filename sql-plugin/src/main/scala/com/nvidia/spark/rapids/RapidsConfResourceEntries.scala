@@ -242,7 +242,8 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .doc("The fraction of total GPU memory that limits the maximum size of the RMM pool. " +
         s"The value must be greater than or equal to the setting for $RMM_ALLOC_FRACTION. " +
         "Note that this limit will be reduced by the reserve memory configured in " +
-        s"$RMM_ALLOC_RESERVE_KEY.")
+        s"$RMM_ALLOC_RESERVE_KEY, and by the UCX shuffle's GPU bounce buffers when the RMM " +
+        "pool is ASYNC.")
     .startupOnly()
     .commonlyUsed()
     .doubleConf
@@ -260,7 +261,9 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
 
   val RMM_ALLOC_RESERVE = conf(RMM_ALLOC_RESERVE_KEY)
       .doc("The amount of GPU memory that should remain unallocated by RMM and left for " +
-          "system use such as memory needed for kernels and kernel launches.")
+          "system use such as memory needed for kernels and kernel launches. When " +
+          "spark.rapids.shuffle.mode is UCX and spark.rapids.memory.gpu.pool is ASYNC, the UCX " +
+          "shuffle's GPU bounce buffers are reserved additionally.")
       .startupOnly()
       .bytesConf(ByteUnit.BYTE)
       .createWithDefault(ByteUnit.MiB.toBytes(640))
@@ -383,6 +386,16 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .checkValue(v => v > 0, "Batch size must be positive")
     .createWithDefault(1 * 1024 * 1024 * 1024) // 1 GiB is the default
 
+  val HISTORY_METRICS_PROVIDER = conf("spark.rapids.sql.history.metrics.provider")
+    .doc("Selects the driver-side history metrics provider by name. The default 'none' uses " +
+      "the built-in no-op store. The local SQLite provider is bundled; other providers " +
+      "must be present on the driver classpath.")
+    .sinceVersion(ConfVersionInfo.UNRELEASED_VERSION)
+    .startupOnly()
+    .stringConf
+    .checkValue(v => v.trim.nonEmpty, "History metrics provider name must not be empty")
+    .createWithDefault("none")
+
   val CHUNKED_READER = conf("spark.rapids.sql.reader.chunked")
     .doc("Enable a chunked reader where possible. A chunked reader allows " +
       "reading highly compressed data that could not be read otherwise, but at the expense " +
@@ -443,6 +456,19 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .commonlyUsed()
     .bytesConf(ByteUnit.BYTE)
     .createWithDefault(Integer.MAX_VALUE)
+
+  val READER_USE_READ_ESTIMATE_FROM_SCHEMA =
+    conf("spark.rapids.sql.reader.useReadEstimateFromSchema")
+      .doc("Use a schema based estimate of GPU memory to limit a read batch. The estimate is a " +
+        s"worst case guess that ignores compression, so it can stop a batch short of " +
+        s"'${MAX_READER_BATCH_SIZE_BYTES.key}'. If unset, the estimate is used only when there " +
+        s"is no chunked reader (see '${CHUNKED_READER.key}'), since a chunked reader already " +
+        s"bounds its own output to '${GPU_BATCH_SIZE_BYTES.key}'. Set to true to use it " +
+        "everywhere, or false to use it nowhere and let batches fill up to the row and byte " +
+        "limits. Text based readers such as CSV and JSON never use it, they measure the bytes " +
+        "they actually read.")
+      .booleanConf
+      .createOptional
 
   val DRIVER_TIMEZONE = conf("spark.rapids.driver.user.timezone")
     .doc("This config is used to inform the executor plugin about the driver's timezone " +

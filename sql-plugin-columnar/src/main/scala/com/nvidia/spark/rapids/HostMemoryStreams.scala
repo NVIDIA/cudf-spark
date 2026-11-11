@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -136,12 +136,6 @@ trait HostMemoryInputStreamMixIn extends InputStream {
       pos += numBytes
       numBytes
     }
-  }
-
-  def readByteBuffer(length: Int): ByteBuffer = {
-    val bb = hmb.asByteBuffer(pos, length)
-    pos += length
-    bb
   }
 
   override def skip(count: Long): Long = {

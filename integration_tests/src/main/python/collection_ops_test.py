@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
+
 import pytest
 
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error, \
@@ -22,7 +24,7 @@ from pyspark.sql.types import *
 from string_test import mk_str_gen
 import pyspark.sql.functions as f
 import pyspark.sql.utils
-from spark_session import with_cpu_session, with_gpu_session, is_before_spark_334, is_before_spark_342, is_before_spark_340, is_databricks_version_or_later, is_spark_350, is_spark_400_or_later
+from spark_session import with_cpu_session, with_gpu_session, is_before_spark_334, is_before_spark_342, is_before_spark_340, is_databricks_version_or_later, is_spark_350, is_spark_400_or_later, is_spark_405
 from conftest import get_datagen_seed
 from marks import allow_non_gpu
 
@@ -384,13 +386,17 @@ sequence_illegal_boundaries_integral_gens = [
         IntegerGen(min_val=0, max_val=0, special_cases=[]))
 ]
 
+# DBR 18.3 uses a structured error class while the GPU and other runtimes use legacy text.
+sequence_illegal_boundaries_error = re.compile(
+    r"Illegal sequence boundaries|ILLEGAL_SEQUENCE_BOUNDARIES")
+
 @pytest.mark.parametrize('start_gen,stop_gen,step_gen', sequence_illegal_boundaries_integral_gens, ids=idfn)
 @allow_non_gpu(*non_utc_allow)
 def test_sequence_illegal_boundaries(start_gen, stop_gen, step_gen):
     assert_gpu_and_cpu_error(
         lambda spark:three_col_df(spark, start_gen, stop_gen, step_gen).selectExpr(
             "sequence(a, b, c)").collect(),
-        conf = {}, error_message = "Illegal sequence boundaries")
+        conf = {}, error_message = sequence_illegal_boundaries_error)
 
 # Exceed the max length of a sequence
 #     "Too long sequence: xxxxxxxxxx. Should be <= 2147483632"
@@ -413,6 +419,27 @@ def test_sequence_too_long_sequence(stop_gen):
         lambda spark:unary_op_df(spark, stop_gen, 1).selectExpr(
             "sequence(0, a)").collect(),
         conf = {}, error_message = msg)
+
+@pytest.mark.skipif(not is_spark_405(),
+                    reason="Tests the Spark 4.0.5 sequence overflow fix")
+def test_sequence_long_subtraction_overflow():
+    data = [
+        (-(1 << 63), (1 << 63) - 1, (1 << 63) - 1),
+        ((1 << 63) - 1, -(1 << 63), -((1 << 63) - 1))
+    ]
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.createDataFrame(
+            data, "start long, stop long, step long").selectExpr(
+                "sequence(start, stop, step)"))
+
+@pytest.mark.skipif(not is_spark_405(),
+                    reason="Tests the Spark 4.0.5 sequence overflow fix")
+def test_sequence_long_subtraction_overflow_too_long():
+    assert_gpu_and_cpu_error(
+        lambda spark: spark.range(1).selectExpr(
+            "sequence(cast(-9223372036854775808 as long), "
+            "cast(9223372036854775807 as long), cast(1 as long))").collect(),
+        conf={}, error_message="Can't create array")
 
 def get_sequence_cases_mixed_df(spark, length=2048):
     # Generate the sequence data following the 3 rules mixed in a single dataset.

@@ -19,11 +19,10 @@ package org.apache.spark.sql.rapids.aggregate
 import ai.rapids.cudf
 import ai.rapids.cudf.GroupByAggregation
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.shims.{ShimExpression, ShimUnaryExpression}
+import com.nvidia.spark.rapids.shims.ShimExpression
 
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, AttributeSet, Expression, ExprId}
 import org.apache.spark.sql.catalyst.expressions.aggregate._
-import org.apache.spark.sql.catalyst.expressions.codegen.CodegenFallback
 import org.apache.spark.sql.types._
 
 /**
@@ -324,18 +323,4 @@ trait CudfAggregate extends Serializable {
   // the purpose of this attribute is for catalyst expressions that need to
   // refer to the output of a cuDF aggregate (`CudfAggregate`) in `postUpdate` or `postMerge`.
   final lazy val attr: AttributeReference = AttributeReference(name, dataType)()
-}
-
-trait CpuToGpuAggregateBufferConverter {
-  def createExpression(child: Expression): CpuToGpuBufferTransition
-}
-
-trait GpuToCpuAggregateBufferConverter {
-  def createExpression(child: Expression): GpuToCpuBufferTransition
-}
-
-trait CpuToGpuBufferTransition extends ShimUnaryExpression with CodegenFallback
-
-trait GpuToCpuBufferTransition extends ShimUnaryExpression with CodegenFallback {
-  override def dataType: DataType = BinaryType
 }

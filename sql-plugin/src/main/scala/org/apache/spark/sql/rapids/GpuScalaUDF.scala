@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -613,7 +613,7 @@ case class GpuRowBasedScalaUDF(
 
 object GpuScalaUDF {
   /**
-   * Determine if the UDF function implements the [[com.nvidia.spark.RapidsUDF]] interface,
+   * Determine if the UDF function implements the `com.nvidia.spark.RapidsUDF` interface,
    * returning the instance if it does. The lambda wrapper that Spark applies to Java UDFs will be
    * inspected if necessary to locate the user's UDF instance.
    */

@@ -22,6 +22,8 @@ import scala.collection.mutable
 
 import ai.rapids.cudf.{ColumnVector, CompressionType, DType, ParquetTableWriter, Rmm, Table}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.CudfTestHelper.withRecordedHostAllocations
+import com.nvidia.spark.rapids.RapidsHostColumnBuilderSuite.{limits, withLimits}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableFromBatchColumns
 import com.nvidia.spark.rapids.parquet.{ParquetCachedBatchSerializer, ParquetOutputFileFormat}
 import org.apache.hadoop.mapreduce.{RecordWriter, TaskAttemptContext}
@@ -29,19 +31,23 @@ import org.mockito.ArgumentMatchers.{any, isA}
 import org.mockito.Mockito.{doAnswer, mock, mockStatic, spy, times, verify, when}
 import org.mockito.invocation.InvocationOnMock
 
+import org.apache.spark.SparkConf
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.SparkSession.setActiveSession
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference}
+import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, GenericInternalRow}
 import org.apache.spark.sql.columnar.CachedBatch
+import org.apache.spark.sql.execution.WholeStageCodegenExec
 import org.apache.spark.sql.execution.columnar.DefaultCachedBatchSerializer
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.PCBSSchemaHelper
+import org.apache.spark.sql.rapids.{PCBSSchemaHelper, TestPrimitiveUDT}
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.storage.StorageLevel.MEMORY_ONLY
+import org.apache.spark.unsafe.types.UTF8String
 
 
 /**
@@ -149,6 +155,19 @@ class CachedBatchWriterSuite extends SparkQueryCompareTestSuite {
     }
   }
 
+  test("PCBS schema conversion supports nested UDTs") {
+    val udt = new TestPrimitiveUDT
+    assert(PCBSSchemaHelper.getSupportedDataType(
+      ArrayType(udt, containsNull = true)) ===
+      ArrayType(IntegerType, containsNull = true))
+    assert(PCBSSchemaHelper.getSupportedDataType(
+      StructType(Seq(StructField("value", udt, nullable = true)))) ===
+      StructType(Seq(StructField("_col0", IntegerType, nullable = true))))
+    assert(PCBSSchemaHelper.getSupportedDataType(
+      MapType(StringType, udt, valueContainsNull = true)) ===
+      MapType(StringType, IntegerType, valueContainsNull = true))
+  }
+
   test("cache empty columnar batch on GPU") {
     withGpuSparkSession(writeAndConsumeEmptyBatch)
   }
@@ -224,6 +243,160 @@ class CachedBatchWriterSuite extends SparkQueryCompareTestSuite {
         context.markTaskComplete()
       }
     }
+  }
+
+  Seq("row", "columnar").foreach { entry =>
+    test(s"$entry entry caches rows larger than the slice budget as one-row batches") {
+      // Three 2 MiB values whose bytes depend on the row, so a reordered row is caught.
+      val values = (0 until 3).map { row =>
+        UTF8String.fromBytes(Array.tabulate(2 * 1024 * 1024)(j => ('a' + (row + j) % 26).toByte))
+      }
+      val attrs = Seq(AttributeReference("s", StringType, nullable = true)())
+      withGpuSparkSession(spark => {
+        val ser = new ParquetCachedBatchSerializer
+        val cachedRdd = if (entry == "row") {
+          val input = spark.sparkContext.parallelize(values.map(v => InternalRow(v)),
+            numSlices = 1)
+          ser.convertInternalRowToCachedBatch(input, attrs, MEMORY_ONLY,
+            TrampolineUtil.getSparkConf(spark))
+        } else {
+          val batch = closeOnExcept(ColumnVector.fromUTF8Strings(values.map(_.getBytes): _*)) {
+            cv => new ColumnarBatch(Array(GpuColumnVector.from(cv, StringType)), values.length)
+          }
+          cacheGpuBatch(spark, ser, batch, attrs)
+        }
+        val (cached, decoded) = buildAndReadBack(spark, ser, cachedRdd, attrs)
+        assert(cached.map(_.numRows) == Seq.fill(values.length)(1))
+        assert(decoded.map(_.length) == Seq.fill(values.length)(1))
+        decoded.flatten.zip(values).zipWithIndex.foreach { case ((row, value), i) =>
+          assert(!row.isNullAt(0), s"row $i is null")
+          // A plain comparison would print megabytes of value on failure.
+          val sameValue = row.getUTF8String(0) == value
+          assert(sameValue, s"row $i differs")
+        }
+      }, oneMiBBatchConf)
+    }
+  }
+
+  Seq(0, 5000).foreach { numRows =>
+    test(s"row entry caches $numRows rows of a zero-column schema as row counts only") {
+      withGpuSparkSession { spark =>
+        val ser = new ParquetCachedBatchSerializer
+        val input = spark.sparkContext.parallelize(Seq.fill(numRows)(InternalRow.empty),
+          numSlices = 1)
+        val cachedRdd = ser.convertInternalRowToCachedBatch(input, Seq.empty, MEMORY_ONLY,
+          TrampolineUtil.getSparkConf(spark))
+        val (cached, decoded) = buildAndReadBack(spark, ser, cachedRdd, Seq.empty)
+        assert(cached.map(_.numRows).sum == numRows)
+        assert(cached.forall(_.sizeInBytes == 0))
+        assert(decoded.map(_.length).sum == numRows)
+      }
+    }
+  }
+
+  test("columnar entry caches every row when the slicing quotient is a multiple of 2^32") {
+    val values = Seq(1L, -2L, 3L, Long.MaxValue, Long.MinValue)
+    val attrs = Seq(AttributeReference("l", LongType, nullable = false)())
+    // By the serializer's 0.5% metadata estimate this leaves a budget of 2^35 bytes, so an
+    // 8-byte row gives a quotient of 2^32, which narrows to an Int step of 0.
+    val conf = new SparkConf().set(RapidsConf.GPU_BATCH_SIZE_BYTES.key, "34532400370")
+    withGpuSparkSession(spark => {
+      val ser = new ParquetCachedBatchSerializer
+      val batch = closeOnExcept(ColumnVector.fromLongs(values: _*)) { cv =>
+        new ColumnarBatch(Array(GpuColumnVector.from(cv, LongType)), values.length)
+      }
+      closeOnExcept(batch) { _ =>
+        // The row size the serializer estimates for a batch: device bytes over rows.
+        val rowSize = batch.column(0).asInstanceOf[GpuColumnVector].getBase
+          .getDeviceMemorySize / batch.numRows()
+        val quotient = ser.getBytesAllowedPerBatch(TrampolineUtil.getSparkConf(spark)) / rowSize
+        assert(quotient > 0)
+        assert(quotient % (1L << 32) == 0)
+      }
+      val cachedRdd = cacheGpuBatch(spark, ser, batch, attrs)
+      val (cached, decoded) = buildAndReadBack(spark, ser, cachedRdd, attrs)
+      // The GPU budget stays below 2 GiB, so the rows stay one batch instead of a batch each.
+      assert(cached.map(_.numRows) == Seq(values.length))
+      assert(decoded.map(_.length) == cached.map(_.numRows))
+      assert(decoded.flatten.map(_.getLong(0)) == values)
+    }, conf)
+  }
+
+  test("row entry caches tiny rows correctly when batchSizeBytes is about 1e15") {
+    val expected = Seq(1L -> "a", -3L -> "bb")
+    val attrs = Seq(AttributeReference("l", LongType, nullable = true)(),
+      AttributeReference("s", StringType, nullable = true)())
+    val conf = new SparkConf().set(RapidsConf.GPU_BATCH_SIZE_BYTES.key, "1000000000000000")
+    withGpuSparkSession(spark => {
+      val ser = new ParquetCachedBatchSerializer
+      val rows = expected.map { case (l, s) => InternalRow(l, UTF8String.fromString(s)) }
+      val input = spark.sparkContext.parallelize(rows, numSlices = 1)
+      val cachedRdd = ser.convertInternalRowToCachedBatch(input, attrs, MEMORY_ONLY,
+        TrampolineUtil.getSparkConf(spark))
+      // The builders' first buffers follow the 1 GiB cap, about 256 MiB for the LONG column,
+      // not the setting, which would ask for Int.MaxValue rows.
+      val (decoded, largest) = withRecordedHostAllocations { recorder =>
+        val (_, decodedRows) = buildAndReadBack(spark, ser, cachedRdd, attrs)
+        (decodedRows, recorder.largest)
+      }
+      assert(largest <= (1L << 30), s"a host allocation of $largest bytes")
+      assert(decoded.flatten.map(r => (r.getLong(0), r.getUTF8String(1).toString)) == expected)
+    }, conf)
+  }
+
+  test("row entry splits a partition into batches at a column's size limit") {
+    // A 10-byte limit takes two of these 4-byte values per batch: a third would make 12.
+    val values = Seq("aaaa", "bbbb", "cccc", "dddd", "eeee")
+    val attrs = Seq(AttributeReference("s", StringType, nullable = true)())
+    withGpuSparkSession(spark => {
+      val ser = new ParquetCachedBatchSerializer
+      val input = spark.sparkContext.parallelize(
+        values.map(v => InternalRow(UTF8String.fromString(v))), numSlices = 1)
+      val cachedRdd = ser.convertInternalRowToCachedBatch(input, attrs, MEMORY_ONLY,
+        TrampolineUtil.getSparkConf(spark))
+      // The limit reaches the builders because buildAndReadBack computes the partition here.
+      val (cached, decoded) = withLimits(limits(stringBytes = 10)) {
+        buildAndReadBack(spark, ser, cachedRdd, attrs)
+      }
+      assert(cached.map(_.numRows) == Seq(2, 2, 1))
+      assert(decoded.flatten.map(_.getUTF8String(0).toString) == values)
+    }, oneMiBBatchConf)
+  }
+
+  test("row entry carries a row into the next batch with its own values") {
+    withCpuSparkSession(spark => {
+      // Whole-stage codegen produces each row into one reused buffer when hasNext is called.
+      // Rows that are not UnsafeRows but read their values from that buffer, as converted rows
+      // do, need the writer to copy the one it carries into the next batch. Each value has the
+      // same width in every row, so a value read after the buffer moves on is the next row's.
+      val plan = spark.range(0, 20, 1, 1).selectExpr(
+        "id",
+        "lpad(cast(id as string), 4, '0') as s",
+        "cast(lpad(cast(id as string), 4, '0') as binary) as b",
+        "named_struct('s', lpad(cast(id as string), 4, '0')) as st",
+        "array(cast(lpad(cast(id as string), 4, '0') as binary)) as a"
+      ).queryExecution.executedPlan
+      assert(plan.isInstanceOf[WholeStageCodegenExec], plan)
+      val types = plan.output.map(_.dataType)
+      val input = plan.execute().map[InternalRow](row =>
+        new GenericInternalRow(row.toSeq(types).toArray))
+      val conf = TrampolineUtil.getSparkConf(spark)
+      val ser = new ParquetCachedBatchSerializer
+      val cached = ser.convertInternalRowToCachedBatch(input, plan.output, MEMORY_ONLY, conf)
+        .collect().toList
+      assert(cached.length > 2, "the rows should span several batches")
+      val decoded = ser.convertCachedBatchToInternalRow(
+        spark.sparkContext.parallelize(cached, numSlices = 1), plan.output, plan.output, conf)
+        .map(_.copy()).collect()
+      val sources = plan.executeCollect()
+      assert(decoded.length == sources.length)
+      def values(row: InternalRow) = (row.getLong(0), row.getUTF8String(1),
+        row.getBinary(2).toSeq, row.getStruct(3, 1).getUTF8String(0),
+        row.getArray(4).getBinary(0).toSeq)
+      decoded.zip(sources).foreach { case (row, source) =>
+        assert(values(row) == values(source))
+      }
+    }, new SparkConf().set(RapidsConf.GPU_BATCH_SIZE_BYTES.key, "1k"))
   }
 
   private def writeAndConsumeEmptyBatch(spark: SparkSession): Unit = {
@@ -456,6 +629,49 @@ class CachedBatchWriterSuite extends SparkQueryCompareTestSuite {
         }
       }
       new ColumnarBatch(buf.toArray, numRows)
+    }
+  }
+
+  private def oneMiBBatchConf: SparkConf =
+    new SparkConf().set(RapidsConf.GPU_BATCH_SIZE_BYTES.key, "1m")
+
+  /** The columnar entry over one GPU batch, which the serializer closes as it consumes it. */
+  private def cacheGpuBatch(
+      spark: SparkSession,
+      ser: ParquetCachedBatchSerializer,
+      batch: ColumnarBatch,
+      attrs: Seq[Attribute]): RDD[CachedBatch] = {
+    closeOnExcept(batch) { _ =>
+      ser.convertColumnarBatchToCachedBatch(
+        spark.sparkContext.parallelize(Seq(batch), numSlices = 1), attrs, MEMORY_ONLY,
+        TrampolineUtil.getSparkConf(spark))
+    }
+  }
+
+  /**
+   * Computes the only partition of a cached RDD on this thread, as a task would, then decodes
+   * those cached batches on the GPU. Returns the cached batches and each decoded batch's rows.
+   */
+  private def buildAndReadBack(
+      spark: SparkSession,
+      ser: ParquetCachedBatchSerializer,
+      cachedRdd: RDD[CachedBatch],
+      attrs: Seq[Attribute]): (Seq[CachedBatch], Seq[Seq[InternalRow]]) = {
+    val context = new MockTaskContext(taskAttemptId = 1, partitionId = 0)
+    TrampolineUtil.setTaskContext(context)
+    try {
+      val cached = cachedRdd.compute(cachedRdd.partitions.head, context).toList
+      val decodedRdd = ser.convertCachedBatchToColumnarBatch(
+        spark.sparkContext.parallelize(cached, numSlices = 1), attrs, attrs,
+        TrampolineUtil.getSparkConf(spark))
+      // Rows are copied out because the iterator closes each batch when it moves past it.
+      val decoded = decodedRdd.compute(decodedRdd.partitions.head, context).map { cb =>
+        cb.rowIterator().asScala.map(_.copy()).toList
+      }.toList
+      (cached, decoded)
+    } finally {
+      TrampolineUtil.unsetTaskContext()
+      context.markTaskComplete()
     }
   }
 }

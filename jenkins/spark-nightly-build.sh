@@ -65,6 +65,8 @@ DIST_PROFILE_OPT=-Dincluded_buildvers=$(IFS=,; echo "${SPARK_SHIM_VERSIONS[*]}")
 DIST_INCLUDES_DATABRICKS=${DIST_INCLUDES_DATABRICKS:-"true"}
 if [[ "$DIST_INCLUDES_DATABRICKS" == "true" ]] && [[ -n ${SPARK_SHIM_VERSIONS_DATABRICKS[*]} ]]; then
     DIST_PROFILE_OPT="$DIST_PROFILE_OPT,"$(IFS=,; echo "${SPARK_SHIM_VERSIONS_DATABRICKS[*]}")
+    # The Databricks BOM and runtime jars exist only on a Databricks build cluster.
+    DIST_PROFILE_OPT="$DIST_PROFILE_OPT -Drapids.spark.audit.skip.buildvers="$(IFS=,; echo "${SPARK_SHIM_VERSIONS_DATABRICKS[*]}")
 fi
 
 # Make sure that the local m2 repo on the build machine has the same pom

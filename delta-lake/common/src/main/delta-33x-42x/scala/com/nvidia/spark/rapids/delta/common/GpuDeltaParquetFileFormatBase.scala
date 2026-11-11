@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids.delta.common
 
 import ai.rapids.cudf._
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.parquet._
 import org.apache.hadoop.conf.Configuration
@@ -41,7 +41,7 @@ import org.apache.spark.sql.execution.datasources.{FilePartition, PartitionedFil
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids._
 import org.apache.spark.sql.sources._
-import org.apache.spark.sql.types.{LongType, MetadataBuilder, StructType}
+import org.apache.spark.sql.types.{LongType, MetadataBuilder, StructField, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.util.SerializableConfiguration
 
@@ -74,6 +74,11 @@ class GpuDeltaParquetFileFormatBase(
   val columnMappingMode: DeltaColumnMappingMode = metadata.columnMappingMode
   val referenceSchema: StructType = metadata.schema
 
+  // Delta does not mark its synthetic deleted-row field in StructField metadata. A field
+  // present in the table schema is user data, even when it has the internal marker's name.
+  private val hasSyntheticRowDeletedColumn =
+    !referenceSchema.exists(_.name == IS_ROW_DELETED_COLUMN_NAME)
+
   if (columnMappingMode == IdMapping) {
     val requiredReadConf = SQLConf.PARQUET_FIELD_ID_READ_ENABLED
     require(SparkSession.getActiveSession.exists(_.sessionState.conf.getConf(requiredReadConf)),
@@ -88,8 +93,16 @@ class GpuDeltaParquetFileFormatBase(
    * key to remove from the metadata, which does not exist in earlier versions.
    */
   override def prepareSchema(inputSchema: StructType): StructType = {
-    val schema = DeltaColumnMapping.createPhysicalSchema(
-      inputSchema, referenceSchema, columnMappingMode)
+    def isInternalColumn(field: StructField): Boolean =
+      (hasSyntheticRowDeletedColumn && field.name == IS_ROW_DELETED_COLUMN_NAME) ||
+        GpuDeltaParquetFileFormatBase2.isGpuRowIndexColumn(field)
+    val dataSchema = StructType(inputSchema.fields.filterNot(
+      isInternalColumn))
+    val physicalDataFields = DeltaColumnMapping.createPhysicalSchema(
+      dataSchema, referenceSchema, columnMappingMode).fields.iterator
+    val schema = StructType(inputSchema.fields.map { field =>
+      if (isInternalColumn(field)) field else physicalDataFields.next()
+    })
     if (columnMappingMode == NameMapping) {
       SchemaMergingUtils.transformColumns(schema) { (_, field, _) =>
         field.copy(metadata = new MetadataBuilder()
@@ -182,14 +195,17 @@ class GpuDeltaParquetFileFormatBase(
       results.headOption.map(e => ColumnMetadata(e._2, e._1))
     }
 
-    val isRowDeletedColumn = findColumn(IS_ROW_DELETED_COLUMN_NAME)
-    val rowIndexColumnName = ROW_INDEX_COLUMN_NAME
-
-    val rowIndexColumn = findColumn(rowIndexColumnName)
+    val isRowDeletedColumn = if (hasSyntheticRowDeletedColumn) {
+      findColumn(IS_ROW_DELETED_COLUMN_NAME)
+    } else {
+      None
+    }
+    val rowIndexColumn = schemaWithIndices
+      .find(entry => GpuDeltaParquetFileFormatBase2.isGpuRowIndexColumn(entry._1))
+      .map(entry => ColumnMetadata(entry._2, entry._1))
 
     // We don't have any additional columns to generate, just return the original reader as is.
     if (isRowDeletedColumn.isEmpty && rowIndexColumn.isEmpty) return dataReader
-    if (isRowDeletedColumn.isEmpty) return dataReader
 
     require(useMetadataRowIndex || !optimizationsEnabled,
       "Cannot generate row index related metadata with file splitting or predicate pushdown")
@@ -234,12 +250,17 @@ class GpuDeltaParquetFileFormatBase(
       fileScan.rapidsConf,
       fileScan.allMetrics,
       useMetadataRowIndex = false,
+      hasSyntheticRowDeletedColumn,
       tablePath,
       // queryUsesInputFile is used to disable combining small files in the multi-threaded reader.
       // When it is true, combining small files is disabled. Since we don't currently support
       // combining small files with deletion vectors, we need to disable it when deletion vectors
       // exist (which is when tablePath is defined).
-      queryUsesInputFile = hasTablePath || fileScan.queryUsesInputFile)
+      // Explicit row indices must restart at zero for each input file. Treat these scans as
+      // input-file-sensitive so the multi-threaded reader does not combine files into a partition.
+      queryUsesInputFile = hasTablePath ||
+        GpuDeltaParquetFileFormatBase2.findGpuRowIndexColumn(fileScan.requiredSchema) >= 0 ||
+        fileScan.queryUsesInputFile)
   }
 }
 
@@ -255,6 +276,7 @@ class DeltaMultiFileReaderFactory(
     @transient rapidsConf: RapidsConf,
     metrics: Map[String, GpuMetric],
     useMetadataRowIndex: Boolean,
+    hasSyntheticRowDeletedColumn: Boolean,
     tablePath: Option[String],
     queryUsesInputFile: Boolean
     ) extends GpuParquetMultiFilePartitionReaderFactory(sqlConf, broadcastedConf,
@@ -272,10 +294,14 @@ class DeltaMultiFileReaderFactory(
     results.headOption.map(e => ColumnMetadata(e._2, e._1))
   }
 
-  private val isRowDeletedColumn = findColumn(IS_ROW_DELETED_COLUMN_NAME)
-  private val rowIndexColumnName = ROW_INDEX_COLUMN_NAME
-
-  private val rowIndexColumn = findColumn(rowIndexColumnName)
+  private val isRowDeletedColumn = if (hasSyntheticRowDeletedColumn) {
+    findColumn(IS_ROW_DELETED_COLUMN_NAME)
+  } else {
+    None
+  }
+  private val rowIndexColumn = schemaWithIndices
+    .find(entry => GpuDeltaParquetFileFormatBase2.isGpuRowIndexColumn(entry._1))
+    .map(entry => ColumnMetadata(entry._2, entry._1))
 
   override def createColumnarReader(p: InputPartition): PartitionReader[ColumnarBatch] = {
     val files = p.asInstanceOf[FilePartition].files
@@ -315,8 +341,12 @@ class DeltaMultiFileParquetPartitionReader(
 
   override def get(): ColumnarBatch = {
     val batch = reader.get()
-    if (isRowDeletedColumnOpt.isEmpty) {
+    if (isRowDeletedColumnOpt.isEmpty && rowIndexColumnOpt.isEmpty) {
       return batch
+    } else if (file == null && isRowDeletedColumnOpt.isEmpty && files.length == 1) {
+      file = files.head
+      rowIndex = 0
+      rowIndexFilterOpt = None
     } else if (file == null || !compareFile(file)) {
       file = filesMap(InputFileUtils.getCurInputFilePath())
       rowIndex = 0
@@ -340,14 +370,14 @@ class DeltaMultiFileParquetPartitionReader(
 object RapidsDeletionVectorUtils {
 
   /**
-   * Processes a {@link ColumnarBatch} by applying row deletion vectors and returns a new batch
+   * Processes a `ColumnarBatch` by applying row deletion vectors and returns a new batch
    * that includes additional metadata columns for row deletion status and row index, as specified.
    *
    * This function generates and adds new metadata columns using the given options and filter, then
    * replaces or augments the input batch with them. It is typically used to mark deleted rows and
    * propagate row index information for further processing or filtering.
    *
-   * @param batch                 The input {@link ColumnarBatch} to augment with metadata columns.
+   * @param batch                 The input `ColumnarBatch` to augment with metadata columns.
    * @param rowIndex              Starting row index for this batch in the overall dataset.
    * @param isRowDeletedColumnOpt Optional metadata describing the "is row deleted" column.
    * @param rowIndexFilterOpt     Optional filter to materialize the "is row deleted" vector for
@@ -355,7 +385,7 @@ object RapidsDeletionVectorUtils {
    * @param rowIndexColumnOpt     Optional metadata describing the row index column.
    * @param metrics               Map capturing GPU metric times for each major phase, keyed by
    *                              metric name.
-   * @return A new {@link ColumnarBatch} with additional or replaced metadata columns indicating
+   * @return A new `ColumnarBatch` with additional or replaced metadata columns indicating
    * deletion and row index.
    */
   def processBatchWithDeletionVector(
@@ -390,7 +420,8 @@ object RapidsDeletionVectorUtils {
    * @param serializableConf      Serializable Hadoop configuration for accessing file system.
    * @param metrics               Map for tracking GPU metric times by name.
    * @return Iterator yielding {@code ColumnarBatch} objects with added columns per batch.
-   * @throws RuntimeException If an unexpected row type is encountered in the input iterator.
+   * @throws java.lang.RuntimeException If an unexpected row type is encountered in the input
+   *                                    iterator.
    */
   def iteratorWithAdditionalMetadataColumns(
     partitionedFile: PartitionedFile,
@@ -434,7 +465,7 @@ object RapidsDeletionVectorUtils {
    * provided filter. Both columns are added or replaced in the input batch according to the
    * specified column metadata.
    *
-   * @param batch                  Input {@link ColumnarBatch} to be updated with replacement
+   * @param batch                  Input `ColumnarBatch` to be updated with replacement
    *                               columns.
    * @param size                   The number of rows in the batch.
    * @param rowIndexColumnOpt      Optional metadata for the row index column.
@@ -443,13 +474,17 @@ object RapidsDeletionVectorUtils {
    *                               status.
    * @param metrics                Map for tracking time spent in specific stages, keyed by metric
    *                               name.
-   * @return                       A new {@link ColumnarBatch} with replaced/added columns for
+   * @return                       A new `ColumnarBatch` with replaced/added columns for
    *                               row indices and deletion status.
    */
   private def replaceVectors(
     batch: ColumnarBatch,
     indexVectorTuples: (Int, org.apache.spark.sql.vectorized.ColumnVector) *): ColumnarBatch = {
     val vectors = ArrayBuffer[org.apache.spark.sql.vectorized.ColumnVector]()
+    val appendedVectors = indexVectorTuples.filter(_._1 >= batch.numCols()).sortBy(_._1)
+    require(appendedVectors.zipWithIndex.forall { case ((index, _), offset) =>
+      index == batch.numCols() + offset
+    }, "Generated metadata columns must be contiguous after the physical batch columns")
     for (i <- 0 until batch.numCols()) {
       var replaced: Boolean = false
       for (indexVectorTuple <- indexVectorTuples) {
@@ -464,6 +499,7 @@ object RapidsDeletionVectorUtils {
         vectors += batch.column(i)
       }
     }
+    appendedVectors.foreach { case (_, vector) => vectors += vector }
     new ColumnarBatch(vectors.toArray, batch.numRows())
   }
 
@@ -507,7 +543,7 @@ object RapidsDeletionVectorUtils {
   * provided filter. Both columns are added or replaced in the input batch according to the
   * specified column metadata.
   *
-  * @param batch                  Input {@link ColumnarBatch} to be updated with replacement
+  * @param batch                  Input `ColumnarBatch` to be updated with replacement
   *                               columns.
   * @param size                   The number of rows in the batch.
   * @param rowIndexColumnOpt      Optional metadata for the row index column.
@@ -516,7 +552,7 @@ object RapidsDeletionVectorUtils {
   *                               status.
   * @param metrics                Map for tracking time spent in specific stages, keyed by metric
   *                               name.
-  * @return                       A new {@link ColumnarBatch} with replaced/added columns for
+  * @return                       A new `ColumnarBatch` with replaced/added columns for
   *                               row indices and deletion status.
   */
   private def replaceBatch(rowIndex: Long,
@@ -528,7 +564,12 @@ object RapidsDeletionVectorUtils {
     metrics: Map[String, GpuMetric]): ColumnarBatch = {
 
     var startTime = System.nanoTime()
-    withResource(getRowIndexPosSimple(rowIndex, rowIndex + size)) { rowIndexGpuCol =>
+    val rowIndexGpuCol = closeOnExcept(batch) { _ =>
+      RmmRapidsRetryIterator.withRetryNoSplit[GpuColumnVector] {
+        getRowIndexPosSimple(rowIndex, rowIndex + size)
+      }
+    }
+    withResource(rowIndexGpuCol) { rowIndexGpuCol =>
       metrics("rowIndexColumnGenTime") += System.nanoTime() - startTime
       val indexVectorTuples = new ArrayBuffer[(Int, org.apache.spark.sql.vectorized.ColumnVector)]
       try {
@@ -536,9 +577,11 @@ object RapidsDeletionVectorUtils {
           indexVectorTuples += (rowIndexCol.index -> rowIndexGpuCol.incRefCount())
         }
         startTime = System.nanoTime()
-        val isRowDeletedVector = rowIndexFilterOpt.get.materializeIntoVector(rowIndexGpuCol)
-        metrics("isRowDeletedColumnGenTime") += System.nanoTime() - startTime
-        indexVectorTuples += (isRowDeletedColumnOpt.get.index -> isRowDeletedVector)
+        isRowDeletedColumnOpt.foreach { isRowDeletedColumn =>
+          val isRowDeletedVector = rowIndexFilterOpt.get.materializeIntoVector(rowIndexGpuCol)
+          metrics("isRowDeletedColumnGenTime") += System.nanoTime() - startTime
+          indexVectorTuples += (isRowDeletedColumn.index -> isRowDeletedVector)
+        }
         replaceVectors(batch, indexVectorTuples.toSeq: _*)
       } catch {
         case e: Throwable =>

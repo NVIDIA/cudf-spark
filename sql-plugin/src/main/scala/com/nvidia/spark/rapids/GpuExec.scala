@@ -20,6 +20,7 @@ import com.nvidia.spark.rapids.RapidsConf.LORE_SKIP_DUMPING_PLAN
 import com.nvidia.spark.rapids.filecache.FileCacheConf
 import com.nvidia.spark.rapids.lore.{GpuLore, GpuLoreDumpRDD}
 import com.nvidia.spark.rapids.lore.GpuLore.{loreIdOf, LORE_DUMP_PATH_TAG, LORE_DUMP_RDD_TAG}
+import com.nvidia.spark.rapids.shims.SparkShimImpl
 import org.apache.hadoop.fs.Path
 
 import org.apache.spark.{Partition, TaskContext}
@@ -304,6 +305,12 @@ trait GpuExec extends SparkPlan with Logging {
           case r: ReusedExchangeExec =>
             // A reused exchange similarly hides the real exchange behind a leaf node.
             collectChildOpTimeMetricsRecursive(r.child, newVisited)
+          case t if SparkShimImpl.getTableCacheNonQueryStagePlan(t).nonEmpty =>
+            // AQE wraps a cached-relation scan in a TableCacheQueryStageExec, a leaf node
+            // whose children are empty. Descend into the wrapped plan so the scan's op time
+            // is excluded from the consumers in this stage.
+            collectChildOpTimeMetricsRecursive(
+              SparkShimImpl.getTableCacheNonQueryStagePlan(t).get, newVisited)
           case other =>
             if (other.isInstanceOf[Exchange]) {
               // Do not recurse into Exchange children
@@ -351,10 +358,14 @@ trait GpuExec extends SparkPlan with Logging {
     }
   }
 
-  final override def doExecuteColumnar(): RDD[ColumnarBatch] = {
+  final override def doExecuteColumnar(): RDD[ColumnarBatch] =
+    executeColumnarRDD(internalDoExecuteColumnar())
+
+  /** Applies operator timing, LORE, and task-metric registration to a columnar RDD. */
+  protected final def executeColumnarRDD(rdd: => RDD[ColumnarBatch]): RDD[ColumnarBatch] = {
     this.dumpLoreMetaInfo()
     // this is the core of op time new
-    val origin = wrapWithTimeTrackingRDD(internalDoExecuteColumnar())
+    val origin = wrapWithTimeTrackingRDD(rdd)
     val wrappedForLORE = this.dumpLoreRDD(origin)
 
     val metrics = getTaskMetrics

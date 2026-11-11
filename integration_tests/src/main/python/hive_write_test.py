@@ -19,6 +19,7 @@ from conftest import is_utc
 from data_gen import *
 from datetime import date, datetime, timezone
 from marks import *
+from parquet_test_utils import assert_parquet_files_use_codec
 from spark_session import *
 
 # Using timestamps from 1970 to work around a cudf ORC bug
@@ -106,7 +107,6 @@ def test_optimized_hive_ctas_basic(gens, storage, spark_tmp_table_factory):
 @pytest.mark.parametrize("parquet_confs", [
     {"parquet.encryption.footer.key": "k1",
      "parquet.encryption.column.keys": "k2:a"},
-    {"spark.sql.parquet.compression.codec": "gzip"},
     {"spark.sql.parquet.writeLegacyFormat": "true"}
 ], ids=idfn)
 def test_optimized_hive_ctas_configs_fallback_parquet(gens, parquet_confs, spark_tmp_table_factory):
@@ -118,6 +118,20 @@ def test_optimized_hive_ctas_configs_fallback_parquet(gens, parquet_confs, spark
         lambda spark: spark.sql("CREATE TABLE {} STORED AS PARQUET AS SELECT * FROM {}".format(
             spark_tmp_table_factory.get(), data_table)),
         fallback_class, conf=parquet_confs)
+
+
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_hive_available(), reason="Hive is missing")
+def test_optimized_hive_ctas_gzip(spark_tmp_table_factory):
+    conf = {"spark.sql.parquet.compression.codec": "gzip"}
+    _, gpu_table = assert_gpu_and_cpu_sql_writes_are_equal_collect(
+        spark_tmp_table_factory,
+        lambda spark, table: "CREATE TABLE {} STORED AS PARQUET AS "
+            "SELECT /*+ COALESCE(1) */ CAST(id % 100 AS INT) AS value "
+            "FROM range(20000)".format(table),
+        conf=conf)
+    with_cpu_session(lambda spark: assert_parquet_files_use_codec(
+        spark, spark.table(gpu_table), 'GZIP'), conf=conf)
 
 
 @pytest.mark.skipif(not is_hive_available(), reason="Hive is missing")

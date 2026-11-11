@@ -1321,6 +1321,9 @@ abstract class BaseExprMeta[INPUT <: Expression](
   private var taggedForAst = false
   private final def tagForAst(): Unit = {
     if (!taggedForAst) {
+      if (conf.isTestEnabled && conf.testingForceNonAst.contains(wrapped.getClass.getSimpleName)) {
+        willNotWorkInAst("AST disabled by test configuration")
+      }
       if (wrapped.foldable && !GpuOverrides.isLit(wrapped)) {
         willNotWorkInAst(s"Cannot convert to AST. Is ConstantFolding excluded? Expression " +
             s"$wrapped is foldable and operates on non literals")
@@ -1418,7 +1421,11 @@ abstract class BaseExprMeta[INPUT <: Expression](
       // Propagate the origin from the CPU expression so that GPU expressions
       // inherit the SQL query context for error messages (e.g. ANSI overflow).
       CurrentOrigin.withOrigin(wrapped.origin) {
-        convertToGpuImpl()
+        val converted = convertToGpuImpl()
+        if (conf.isProjectAstEnabled) {
+          GpuProjectAstPlanner.tagLegacySupport(converted, canSelfBeAst)
+        }
+        converted
       }
     }
   }
@@ -1746,14 +1753,6 @@ abstract class RuntimeReplaceableUnaryExprMeta[INPUT <: RuntimeReplaceable](
     parent: Option[RapidsMeta[_, _, _]],
     rule: DataFromReplacementRule)
   extends UnaryExprMetaBase[INPUT](expr, conf, parent, rule)
-
-/** Base metadata class for RuntimeReplaceable expressions that support conversion to AST as well */
-abstract class RuntimeReplaceableUnaryAstExprMeta[INPUT <: RuntimeReplaceable](
-    expr: INPUT,
-    conf: RapidsConf,
-    parent: Option[RapidsMeta[_, _, _]],
-    rule: DataFromReplacementRule)
-  extends RuntimeReplaceableUnaryExprMeta[INPUT](expr, conf, parent, rule)
 
 /**
  * Base class for metadata around `UnaryExpression`.

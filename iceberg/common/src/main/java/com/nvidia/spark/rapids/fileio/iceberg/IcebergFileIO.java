@@ -21,7 +21,6 @@ import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import com.nvidia.spark.rapids.jni.fileio.RapidsOutputFile;
 import org.apache.iceberg.aws.s3.IcebergS3InputFile;
 import org.apache.iceberg.io.FileIO;
-import org.apache.iceberg.io.InputFile;
 
 import java.io.IOException;
 import java.util.Objects;
@@ -50,17 +49,7 @@ public class IcebergFileIO implements RapidsFileIO {
 
   @Override
   public IcebergInputFile newInputFile(String path) throws IOException {
-    return newInputFile(delegate.newInputFile(path));
-  }
-
-  /**
-   * Wraps an existing Iceberg input file, preserving any decryption performed by Iceberg.
-   *
-   * @param inputFile the Iceberg input file to wrap
-   */
-  public IcebergInputFile newInputFile(InputFile inputFile) {
-    Objects.requireNonNull(inputFile, "inputFile can't be null");
-    return IcebergS3InputFile.maybeCreate(inputFile, delegate);
+    return IcebergS3InputFile.maybeCreate(delegate.newInputFile(path), delegate);
   }
 
   @Override

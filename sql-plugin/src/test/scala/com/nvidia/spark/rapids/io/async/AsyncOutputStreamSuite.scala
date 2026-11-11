@@ -336,4 +336,124 @@ class AsyncOutputStreamSuite extends AnyFunSuite with BeforeAndAfterEach {
       "Close should fail with the exception thrown by the write failure",
       "Failed 1 times")
   }
+
+  /** Records what reaches it and the thread that closed it; can fail a write, flush or close. */
+  class RecordingOutputStream(
+      writeFailure: IOException = null,
+      flushFailure: IOException = null,
+      closeFailure: Throwable = null) extends OutputStream {
+    @volatile var bytesWritten: Int = 0
+    @volatile var closeCount: Int = 0
+    @volatile var closeThread: Thread = _
+
+    override def write(b: Int): Unit = write(Array(b.toByte), 0, 1)
+
+    override def write(b: Array[Byte], off: Int, len: Int): Unit = {
+      if (writeFailure != null) {
+        throw writeFailure
+      }
+      bytesWritten += len
+    }
+
+    override def flush(): Unit = {
+      if (flushFailure != null) {
+        throw flushFailure
+      }
+    }
+
+    override def close(): Unit = {
+      closeCount += 1
+      closeThread = Thread.currentThread()
+      if (closeFailure != null) {
+        throw closeFailure
+      }
+    }
+  }
+
+  private val writerThreadName = "AsyncOutputStreamSuite writer"
+
+  /** An async stream over `delegate`, with the pool that runs its writes and its close. */
+  def openOnPool(
+      delegate: OutputStream,
+      controller: TrafficController = trafficController): (AsyncOutputStream, ExecutorService) = {
+    val pool = TrampolineUtil.newDaemonSingleThreadExecutor(writerThreadName)
+    val executor = new ThrottlingExecutor(pool, controller, _ => ())
+    (new AsyncOutputStream(() => delegate, executor), pool)
+  }
+
+  test("close writes pending data, then closes the delegate once on the writer thread") {
+    val delegate = new RecordingOutputStream()
+    val (os, pool) = openOnPool(delegate)
+    os.write(buf)
+    os.write(buf)
+    os.close()
+    assertResult(2 * bufLen)(delegate.bytesWritten)
+    assertResult(1)(delegate.closeCount)
+    assertResult(writerThreadName)(delegate.closeThread.getName)
+    assert(pool.isTerminated)
+  }
+
+  test("close keeps a write or flush failure and closes the delegate once on the writer thread") {
+    Seq("write", "flush").foreach { failing =>
+      val failure = new IOException(s"$failing failed")
+      val closeFailure = new IOException("close failed")
+      val delegate = if (failing == "write") {
+        new RecordingOutputStream(writeFailure = failure, closeFailure = closeFailure)
+      } else {
+        new RecordingOutputStream(flushFailure = failure, closeFailure = closeFailure)
+      }
+      val (os, pool) = openOnPool(delegate)
+      os.write(buf)
+      withClue(failing) {
+        val thrown = intercept[IOException](os.close())
+        assert(thrown eq failure)
+        assert(thrown.getSuppressed.toSeq == Seq(closeFailure))
+        assertResult(1)(delegate.closeCount)
+        assertResult(writerThreadName)(delegate.closeThread.getName)
+        assert(pool.isTerminated)
+      }
+    }
+  }
+
+  test("close keeps a write failure that the delegate rethrows from its close") {
+    val failure = new IOException("write failed")
+    val delegate = new RecordingOutputStream(writeFailure = failure, closeFailure = failure)
+    val (os, pool) = openOnPool(delegate)
+    os.write(buf)
+    // close is the first call to see the failure: the writer thread runs the write first.
+    val thrown = intercept[IOException](os.close())
+    assert(thrown eq failure)
+    assert(thrown.getSuppressed.isEmpty)
+    assertResult(1)(delegate.closeCount)
+    assertResult(writerThreadName)(delegate.closeThread.getName)
+    assert(pool.isTerminated)
+  }
+
+  test("close keeps a write failure and releases its task when the delegate close is interrupted") {
+    val failure = new IOException("write failed")
+    val interrupted = new InterruptedException("close interrupted")
+    val delegate = new RecordingOutputStream(writeFailure = failure, closeFailure = interrupted)
+    // A controller of its own, so the count checked below is this stream's alone.
+    val controller = new TrafficController(new HostMemoryThrottle(bufLen * maxBufCount))
+    val (os, pool) = openOnPool(delegate, controller)
+    os.write(buf)
+    val thrown = intercept[IOException](os.close())
+    assert(thrown eq failure)
+    assert(thrown.getSuppressed.toSeq == Seq(interrupted))
+    assertResult(0)(controller.numScheduledTasks)
+    assertResult(1)(delegate.closeCount)
+    assert(pool.isTerminated)
+  }
+
+  test("close keeps a failed open as a cause and still stops the writer thread") {
+    val openFailure = new IOException("open failed")
+    val pool = TrampolineUtil.newDaemonSingleThreadExecutor(writerThreadName)
+    val os = new AsyncOutputStream(() => throw openFailure,
+      new ThrottlingExecutor(pool, trafficController, _ => ()))
+    os.write(buf)
+    val thrown = intercept[IOException](os.close())
+    val causes = Iterator.iterate[Throwable](thrown)(_.getCause).takeWhile(_ != null)
+    assert(causes.exists(_ eq openFailure))
+    assert(pool.isTerminated)
+  }
 }

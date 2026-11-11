@@ -49,6 +49,37 @@ compatible across the supported Spark APIs. When a file has Databricks-specific,
 or otherwise divergent siblings, keep the version-specific source and move only the API-safe part
 behind the one-way boundary.
 
+## Source Inheritance Metadata
+
+A build target profile declares `shim.source.inherits` to name the target whose shim sources it
+starts from. Source generation validates these parent links and rejects missing parents or cycles.
+Source selection walks that lineage and chooses the nearest matching physical source for each
+logical path. The parent changes source selection only; it does not change dependency resolution,
+generated package identity, binary deduplication, or runtime compatibility.
+
+Every shim source uses one selector form. `carryForward:"none"` selects only the listed targets,
+`sameMinor` also selects descendants in the same Spark major/minor line, and `all` selects every
+descendant. A nearer source overrides an inherited source with the same logical path. Files whose
+package path contains a versioned `sparkNNN` component must remain exact.
+
+The source-inspection prototype can show the annotated shim files selected for one exact target
+without running Maven:
+
+```bash
+./build/shimpler sources --target 359
+./build/shimpler sources --target 359 --explain
+./build/shimpler sources --target 500 --format=json
+```
+
+It scans Java, Scala, and Scala-binary-specific shim sources in all modules, including nested
+modules. `--module sql-plugin` restricts the output, and `--null` produces NUL-delimited paths for
+shell tools. The reported introduction is relative to the source-parent links currently declared
+in Maven; it is not necessarily the target where the file was first written.
+
+Maven materializes the selected files as symlinks under the module's target directory. Add or
+remove a Maven profile and inheritance edge directly, then edit only new, overridden, or retired
+selectors. There is no command that rewrites the source layout.
+
 ## Reducing Parallel-World Classes
 
 The long-term goal is to maximize bytecode in the conventional jar layout and shrink the amount
@@ -161,7 +192,7 @@ issue as you can see e.g., comparing shim implementations across versions:
 2. [Shim service provider for 3.5.1](https://github.com/NVIDIA/cudf-spark/blob/main/sql-plugin/src/main/spark351/scala/com/nvidia/spark/rapids/shims/spark351/SparkShimServiceProvider.scala)
 
 The `ShimExpression` and related traits themselves live in a single shared file,
-[TreeNode.scala](../../sql-plugin/src/main/scala/com/nvidia/spark/rapids/shims/TreeNode.scala),
+[TreeNode.scala](../../sql-plugin-api/src/main/scala/com/nvidia/spark/rapids/shims/TreeNode.scala),
 which is built as regular unshimmed source.
 
 This resolves compile-time problems, however, now we face the problem at run time.
@@ -181,17 +212,17 @@ Using JarURLConnection URLs we create a Parallel World of the current version wi
 Spark 3.3.0's URLs:
 
 ```text
-jar:file:/home/spark/rapids-4-spark_2.12-26.10.0.jar!/
-jar:file:/home/spark/rapids-4-spark_2.12-26.10.0.jar!/spark-shared/
-jar:file:/home/spark/rapids-4-spark_2.12-26.10.0.jar!/spark330/
+jar:file:/home/spark/rapids-4-spark_2.12-26.12.0.jar!/
+jar:file:/home/spark/rapids-4-spark_2.12-26.12.0.jar!/spark-shared/
+jar:file:/home/spark/rapids-4-spark_2.12-26.12.0.jar!/spark330/
 ```
 
 Spark 3.5.1's URLs:
 
 ```text
-jar:file:/home/spark/rapids-4-spark_2.12-26.10.0.jar!/
-jar:file:/home/spark/rapids-4-spark_2.12-26.10.0.jar!/spark-shared/
-jar:file:/home/spark/rapids-4-spark_2.12-26.10.0.jar!/spark351/
+jar:file:/home/spark/rapids-4-spark_2.12-26.12.0.jar!/
+jar:file:/home/spark/rapids-4-spark_2.12-26.12.0.jar!/spark-shared/
+jar:file:/home/spark/rapids-4-spark_2.12-26.12.0.jar!/spark351/
 ```
 
 ### Classloader Coupling for Package-Private Integrations

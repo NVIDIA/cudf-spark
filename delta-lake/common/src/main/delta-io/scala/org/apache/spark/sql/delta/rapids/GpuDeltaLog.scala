@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -52,12 +52,12 @@ class GpuDeltaLog(val deltaLog: DeltaLog, val rapidsConf: RapidsConf) {
    * of schema changes, etc.
    *
    * Note that all reads in a transaction must go through the returned transaction object, and not
-   * directly to the [[DeltaLog]] otherwise they will not be checked for conflicts.
+   * directly to the `DeltaLog` otherwise they will not be checked for conflicts.
    *
-   * @param catalogTableOpt The [[CatalogTable]] for the table this transaction updates. Passing
+   * @param catalogTableOpt The `CatalogTable` for the table this transaction updates. Passing
    * None asserts this is a path-based table with no catalog entry.
    *
-   * @param snapshotOpt THe [[Snapshot]] this transaction should use, if not latest.
+   * @param snapshotOpt THe `Snapshot` this transaction should use, if not latest.
    */
   def startTransaction(
       catalogTableOpt: Option[CatalogTable],
@@ -89,10 +89,10 @@ class GpuDeltaLog(val deltaLog: DeltaLog, val rapidsConf: RapidsConf) {
    * Reads/write sets will be recorded for this table, and all other tables will be read
    * at a snapshot that is pinned on the first access.
    *
-   * @param catalogTableOpt The [[CatalogTable]] for the table this transaction updates. Passing
+   * @param catalogTableOpt The `CatalogTable` for the table this transaction updates. Passing
    * None asserts this is a path-based table with no catalog entry.
    *
-   * @param snapshotOpt THe [[Snapshot]] this transaction should use, if not latest.
+   * @param snapshotOpt THe `Snapshot` this transaction should use, if not latest.
    * @note This uses thread-local variable to make the active transaction visible. So do not use
    *       multi-threaded code in the provided thunk.
    */

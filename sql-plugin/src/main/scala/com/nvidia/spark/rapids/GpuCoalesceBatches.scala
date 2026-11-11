@@ -66,6 +66,13 @@ object ConcatAndConsumeAll {
                                   dataTypes: Array[DataType]): ColumnarBatch = {
     if (arrayOfBatches.length == 1) {
       arrayOfBatches(0)
+    } else if (arrayOfBatches.length > 1 && arrayOfBatches.forall(_.numCols() == 0)) {
+      // cuDF cannot build a Table without columns, and rows-only batches concatenate by row count.
+      withResource(arrayOfBatches) { _ =>
+        val numRows = arrayOfBatches.iterator.map(_.numRows().toLong).sum
+        require(numRows <= Int.MaxValue, s"Cannot concatenate $numRows rows into one batch")
+        new ColumnarBatch(Array.empty, numRows.toInt)
+      }
     } else {
       val tables = arrayOfBatches.safeMap(GpuColumnVector.from)
       try {
@@ -169,18 +176,6 @@ sealed abstract class CoalesceSizeGoal extends CoalesceGoal {
 
   val targetSizeBytes: Long = Integer.MAX_VALUE
 }
-
-/**
- * Trait used for pattern matching for single batch coalesce goals.
- */
-trait RequireSingleBatchLike
-
-/**
- * Trait used for pattern matching for goals that could be split, as they
- * only specify that batches won't be too much bigger than a maximum target
- * size in bytes.
- */
-trait SplittableGoal
 
 /**
  * A single batch is required as the input to a node in the SparkPlan. This means

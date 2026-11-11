@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids
 
-import ai.rapids.cudf.{DeviceMemoryBuffer, Rmm}
+import ai.rapids.cudf.{CudaMemInfo, DeviceMemoryBuffer, Rmm}
 import com.nvidia.spark.rapids.Arm.withResource
 import org.scalatest.BeforeAndAfter
 import org.scalatest.funsuite.AnyFunSuite
@@ -24,6 +24,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.apache.spark.SparkConf
 import org.apache.spark.network.util.ByteUnit
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.rapids.GpuShuffleEnv
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 
 object TestMemoryChecker extends MemoryChecker {
@@ -40,10 +41,10 @@ object TestMemoryChecker extends MemoryChecker {
 object TestCudaMemInfo {
   import ai.rapids.cudf.CudaMemInfo
 
-  def create(free: Long, total: Long): CudaMemInfo = {
+  def create(total: Long, free: Long): CudaMemInfo = {
     val constructor = classOf[CudaMemInfo].getDeclaredConstructor(classOf[Long], classOf[Long])
     constructor.setAccessible(true)
-    constructor.newInstance(total.asInstanceOf[Object], free.asInstanceOf[Object])
+    constructor.newInstance(free.asInstanceOf[Object], total.asInstanceOf[Object])
   }
 }
 
@@ -404,6 +405,121 @@ class GpuDeviceManagerSuite extends AnyFunSuite with BeforeAndAfter {
       val poolSize = GpuDeviceManager.computeRmmPoolSize(rapidsConf, memInfo)
 
       assertResult(expectedPoolSize)(poolSize)
+    } finally {
+      GpuDeviceManager.resetForceIntegratedGpuForTesting()
+    }
+  }
+
+  private val mib = 1024L * 1024
+
+  // by default, two device pools (send and receive) of 40 bounce buffers of 2 MiB: 160 MiB
+  private def ucxConf(pool: String, allocFraction: String, maxAllocFraction: String,
+      minAllocFraction: String = "0.01",
+      mode: RapidsConf.RapidsShuffleManagerMode.Value = RapidsConf.RapidsShuffleManagerMode.UCX,
+      reserveMiB: Long = 512, bounceBufferMiB: Long = 2, deviceCount: Int = 40): RapidsConf =
+    new RapidsConf(Map(
+      RapidsConf.SHUFFLE_MANAGER_MODE.key -> mode.toString,
+      RapidsConf.RMM_POOL.key -> pool,
+      RapidsConf.RMM_ALLOC_FRACTION.key -> allocFraction,
+      RapidsConf.RMM_ALLOC_MAX_FRACTION.key -> maxAllocFraction,
+      RapidsConf.RMM_ALLOC_MIN_FRACTION.key -> minAllocFraction,
+      RapidsConf.RMM_ALLOC_RESERVE.key -> (reserveMiB * mib).toString,
+      RapidsConf.SHUFFLE_UCX_BOUNCE_BUFFERS_SIZE.key -> (bounceBufferMiB * mib).toString,
+      RapidsConf.SHUFFLE_UCX_BOUNCE_BUFFERS_DEVICE_COUNT.key -> deviceCount.toString))
+
+  // With the default bounce buffers, 2 x 32 x 4 MiB, set aside beside a 640 MiB reserve,
+  // 0.5 * (12288 - 896) MiB falls below the 0.35 * 16384 MiB minimum. Without them it does not.
+  private def minimumBoundaryConf(deviceCount: Int = 32): RapidsConf =
+    ucxConf("ASYNC", "0.5", "0.9", "0.35", reserveMiB = 640, bounceBufferMiB = 4,
+      deviceCount = deviceCount)
+
+  // the pool size on an executor that can start the UCX transport
+  private def executorPoolSize(conf: RapidsConf, info: CudaMemInfo): Long =
+    GpuDeviceManager.computeRmmPoolSize(conf, info, ucxTransportPossible = true)
+
+  test("computeRmmPoolSize reserves both UCX device bounce buffer pools under ASYNC") {
+    try {
+      GpuDeviceManager.setForceIntegratedGpuForTesting(false)
+      val memInfo = TestCudaMemInfo.create(total = 16384 * mib, free = 12288 * mib)
+      // 0.5 * (12288 MiB free - 512 MiB reserve - 160 MiB of bounce buffers)
+      assertResult(5808 * mib)(executorPoolSize(ucxConf("ASYNC", "0.5", "0.9"), memInfo))
+      // capped at 0.25 * 16384 MiB total - 512 MiB reserve - 160 MiB of bounce buffers
+      assertResult(3424 * mib)(executorPoolSize(ucxConf("ASYNC", "0.25", "0.25"),
+        TestCudaMemInfo.create(total = 16384 * mib, free = 15872 * mib)))
+      // equal fractions, but too little free memory for the cap: 0.25 * (8192 - 672) MiB
+      assertResult(1880 * mib)(executorPoolSize(ucxConf("ASYNC", "0.25", "0.25"),
+        TestCudaMemInfo.create(total = 16384 * mib, free = 8192 * mib)))
+      // no device bounce buffers, then one of 2 MiB in each of the two pools
+      assertResult(5888 * mib)(
+        executorPoolSize(ucxConf("ASYNC", "0.5", "0.9", deviceCount = 0), memInfo))
+      assertResult(5886 * mib)(
+        executorPoolSize(ucxConf("ASYNC", "0.5", "0.9", deviceCount = 1), memInfo))
+      // no bounce buffer reserve when they come from the pool, or without the UCX transport
+      assertResult(5888 * mib)(executorPoolSize(ucxConf("ARENA", "0.5", "0.9"), memInfo))
+      assertResult(5888 * mib)(executorPoolSize(ucxConf("ASYNC", "0.5", "0.9",
+        mode = RapidsConf.RapidsShuffleManagerMode.MULTITHREADED), memInfo))
+    } finally {
+      GpuDeviceManager.resetForceIntegratedGpuForTesting()
+    }
+  }
+
+  test("computeRmmPoolSize errors report the configured fractions and the UCX bounce buffers") {
+    try {
+      GpuDeviceManager.setForceIntegratedGpuForTesting(false)
+      val memInfo = TestCudaMemInfo.create(total = 16384 * mib, free = 12288 * mib)
+      val reserve =
+        s"${RapidsConf.RMM_ALLOC_RESERVE}: 512.0 MiB plus 160.0 MiB of UCX bounce buffers"
+      // 0.5 * (12288 - 672) MiB is below 0.4 * 16384 MiB
+      val belowMin = intercept[IllegalArgumentException] {
+        executorPoolSize(ucxConf("ASYNC", "0.5", "0.9", "0.4"), memInfo)
+      }
+      assert(belowMin.getMessage.contains(reserve), belowMin.getMessage)
+      // the 672 MiB reserve exceeds 0.04 * 16384 MiB
+      val aboveMax = intercept[IllegalArgumentException] {
+        executorPoolSize(ucxConf("ASYNC", "0.03", "0.04"), memInfo)
+      }
+      assert(aboveMax.getMessage.contains(s"${RapidsConf.RMM_ALLOC_MAX_FRACTION} (=0.04)"),
+        aboveMax.getMessage)
+      assert(aboveMax.getMessage.contains(reserve), aboveMax.getMessage)
+    } finally {
+      GpuDeviceManager.resetForceIntegratedGpuForTesting()
+    }
+  }
+
+  test("computeRmmPoolSize takes no UCX bounce buffer reserve on the driver") {
+    try {
+      GpuDeviceManager.setForceIntegratedGpuForTesting(false)
+      // local mode runs its executor on the driver, which never starts a UCX transport, even
+      // with the RAPIDS shuffle manager configured
+      SparkSession.builder().master("local[1]")
+        .config("spark.shuffle.manager", GpuShuffleEnv.RAPIDS_SHUFFLE_CLASS)
+        .getOrCreate()
+      assertResult(5824 * mib)(GpuDeviceManager.computeRmmPoolSize(minimumBoundaryConf(),
+        TestCudaMemInfo.create(total = 16384 * mib, free = 12288 * mib)))
+    } finally {
+      GpuDeviceManager.resetForceIntegratedGpuForTesting()
+    }
+  }
+
+  test("UCX bounce buffers are reserved only where a UCX transport can start") {
+    val rapidsShuffle = new SparkConf()
+      .set("spark.shuffle.manager", GpuShuffleEnv.RAPIDS_SHUFFLE_CLASS)
+    assert(GpuDeviceManager.ucxTransportCanStart("1", rapidsShuffle))
+    // without the early start, the transport can still start at the first shuffle
+    assert(GpuDeviceManager.ucxTransportCanStart("1",
+      rapidsShuffle.clone.set(RapidsConf.SHUFFLE_TRANSPORT_EARLY_START.key, "false")))
+    assert(!GpuDeviceManager.ucxTransportCanStart("driver", rapidsShuffle))
+    assert(!GpuDeviceManager.ucxTransportCanStart("1", new SparkConf()))
+    assert(!GpuDeviceManager.ucxTransportCanStart("1",
+      new SparkConf().set("spark.shuffle.manager", "sort")))
+    try {
+      GpuDeviceManager.setForceIntegratedGpuForTesting(false)
+      val memInfo = TestCudaMemInfo.create(total = 16384 * mib, free = 12288 * mib)
+      assertResult(5824 * mib)(GpuDeviceManager.computeRmmPoolSize(minimumBoundaryConf(),
+        memInfo, ucxTransportPossible = false))
+      // the old reserve, one 4 MiB buffer per pool, left 0.5 * (12288 - 648) MiB, above the minimum
+      assertResult(5820 * mib)(executorPoolSize(minimumBoundaryConf(deviceCount = 1), memInfo))
+      assertThrows[IllegalArgumentException](executorPoolSize(minimumBoundaryConf(), memInfo))
     } finally {
       GpuDeviceManager.resetForceIntegratedGpuForTesting()
     }

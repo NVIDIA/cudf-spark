@@ -283,7 +283,9 @@ def _assert_gpu_and_cpu_writes_are_equal(
         read_func,
         base_path,
         mode,
-        conf={}):
+        conf={},
+        expected_command=None,
+        required_gpu_classes=None):
     conf = _prep_incompat_conf(conf)
 
     print('### CPU RUN ###')
@@ -298,8 +300,12 @@ def _assert_gpu_and_cpu_writes_are_equal(
     # Check if current test has delta_lake marker
     if current_test_has_delta_marker() and not current_test_allows_non_gpu_delta_write():
         print("Delta Lake test detected - applying Delta write validation")
-        from delta_lake_utils import assert_rapids_delta_write
-        gpu_result = assert_rapids_delta_write(lambda spark: write_func(spark, gpu_path), conf=conf)
+        from delta_lake_utils import assert_rapids_delta_write, delta_write
+        gpu_result = assert_rapids_delta_write(
+            lambda spark: write_func(spark, gpu_path), conf=conf,
+            expected_command=expected_command,
+            required_gpu_classes=(delta_write if required_gpu_classes is None
+                                  else required_gpu_classes))
     else:
         gpu_result = with_gpu_session(lambda spark : write_func(spark, gpu_path), conf=conf)
     gpu_end = time.time()
@@ -319,14 +325,22 @@ def _assert_gpu_and_cpu_writes_are_equal(
 
     assert_equal(from_cpu, from_gpu)
 
-def assert_gpu_and_cpu_writes_are_equal_collect(write_func, read_func, base_path, conf={}):
+def assert_gpu_and_cpu_writes_are_equal_collect(
+        write_func, read_func, base_path, conf={}, expected_command=None,
+        required_gpu_classes=None):
     """
     Assert when running write_func on both the CPU and the GPU and reading using read_func
     on the CPU that the results are equal.
     In this case the data is collected back to the driver and compared here, so be
     careful about the amount of data returned.
+    For Delta writes, expected_command also checks the captured GPU command.
+    required_gpu_classes overrides the default RapidsDeltaWrite requirement, for example
+    when a persistent-DV DELETE scans on the GPU without writing replacement Parquet data.
+    An empty list requires no data-writing operator; expected_command is still checked.
     """
-    _assert_gpu_and_cpu_writes_are_equal(write_func, read_func, base_path, 'COLLECT', conf=conf)
+    _assert_gpu_and_cpu_writes_are_equal(
+        write_func, read_func, base_path, 'COLLECT', conf=conf,
+        expected_command=expected_command, required_gpu_classes=required_gpu_classes)
 
 def assert_gpu_and_cpu_writes_are_equal_iterator(write_func, read_func, base_path, conf={}):
     """
@@ -337,13 +351,21 @@ def assert_gpu_and_cpu_writes_are_equal_iterator(write_func, read_func, base_pat
     """
     _assert_gpu_and_cpu_writes_are_equal(write_func, read_func, base_path, 'ITERATOR', conf=conf)
 
-def assert_gpu_and_cpu_save_as_table_are_equal_collect(table_name_factory, write_func, conf={}):
+def assert_gpu_and_cpu_save_as_table_are_equal_collect(
+        table_name_factory, write_func, conf=None, expected_command=None,
+        required_gpu_classes=None):
     """
     Assert when running write_func on both the CPU and the GPU and reading
     on the CPU that the results are equal.
     In this case the data is collected back to the driver and compared here, so be
     careful about the amount of data returned.
+    For strict Delta writes, expected_command also checks the captured GPU command.
+    required_gpu_classes overrides the standard Delta write classes when supplied.
+    Explicit command or non-empty required-class checks require a captured plan.
+    These plan checks apply only to Delta tests that do not allow non-GPU Delta writes.
     """
+    if conf is None:
+        conf = {}
     conf = _prep_incompat_conf(conf)
 
     print('### CPU RUN ###')
@@ -357,8 +379,13 @@ def assert_gpu_and_cpu_save_as_table_are_equal_collect(table_name_factory, write
     # Check if current test has delta_lake marker
     if current_test_has_delta_marker() and not current_test_allows_non_gpu_delta_write():
         print("Delta Lake test detected - applying Delta write validation")
-        from delta_lake_utils import assert_rapids_delta_write
-        assert_rapids_delta_write(lambda spark : write_func(spark, gpu_table), conf=conf)
+        from delta_lake_utils import assert_rapids_delta_write, delta_write
+        assert_rapids_delta_write(
+            lambda spark : write_func(spark, gpu_table), conf=conf,
+            expected_command=expected_command,
+            require_non_empty=(expected_command is not None or bool(required_gpu_classes)),
+            required_gpu_classes=(delta_write if required_gpu_classes is None
+                                  else required_gpu_classes))
     else:
         with_gpu_session(lambda spark : write_func(spark, gpu_table), conf=conf)
 
@@ -387,6 +414,7 @@ def assert_gpu_and_cpu_sql_writes_are_equal_collect(table_name_factory, write_sq
     both resulting tables on the CPU that the results are equal.
     In this case the data is collected back to the driver and compared here, so be
     careful about the amount of data returned.
+    Return the CPU and GPU table names for additional assertions.
     """
     conf = _prep_incompat_conf(conf)
 
@@ -421,6 +449,8 @@ def assert_gpu_and_cpu_sql_writes_are_equal_collect(table_name_factory, write_sq
         _sort_locally(from_cpu, from_gpu)
 
     assert_equal(from_cpu, from_gpu)
+
+    return cpu_table, gpu_table
 
 def assert_gpu_fallback_write(write_func,
         read_func,
@@ -518,19 +548,38 @@ def assert_gpu_fallback_write_sql(write_func,
         jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.endCapture()
 
 
-def collect_plan_nodes(plan):
-    """Flatten a JVM SparkPlan into a list of nodes, parents before children.
+def collect_plan_nodes(plan, include_wrapped=False, deduplicate=False):
+    """Flatten a JVM SparkPlan, parents before children.
 
-    Intended for the gpu_plan_assertion callback of
-    assert_cpu_and_gpu_are_equal_collect_with_capture. This does not descend into
-    AdaptiveSparkPlanExec or QueryStageExec, so a caller that needs the whole tree should
-    disable AQE.
+    include_wrapped follows final adaptive plans, query stages and reused exchanges.
+    By default a shared producer is visited once per consumer; deduplicate visits
+    each (node class, plan ID) once. Existing callers retain plain children traversal.
     """
-    nodes = [plan]
-    children = plan.children().iterator()
-    while children.hasNext():
-        nodes.extend(collect_plan_nodes(children.next()))
+    nodes = []
+    seen = set()
+
+    def visit(node):
+        name = node.getClass().getSimpleName()
+        if deduplicate:
+            identity = (node.getClass().getName(), node.id())
+            if identity in seen:
+                return
+            seen.add(identity)
+        nodes.append(node)
+        if include_wrapped and name == 'AdaptiveSparkPlanExec':
+            visit(node.executedPlan())
+        elif include_wrapped and name.endswith('QueryStageExec'):
+            visit(node.plan())
+        elif include_wrapped and name == 'ReusedExchangeExec':
+            visit(node.child())
+        else:
+            children = node.children().iterator()
+            while children.hasNext():
+                visit(children.next())
+
+    visit(plan)
     return nodes
+
 
 def plan_metric(node, name):
     """Value of a named metric on a JVM plan node, or None if the node has no such metric.
@@ -543,6 +592,13 @@ def plan_metric(node, name):
     if not metrics.contains(name):
         return None
     return metrics.apply(name).value()
+
+
+def assert_metric_unset_or_zero(node, name):
+    """Require a registered metric containing Spark's -1 initial value or zero."""
+    value = plan_metric(node, name)
+    assert value in (-1, 0), f'Expected no recorded {name}, got {value}'
+
 
 def assert_cpu_and_gpu_are_equal_collect_with_capture(func,
         exist_classes='',

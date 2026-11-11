@@ -135,7 +135,7 @@ trait GpuPartitioning extends Partitioning {
     // We have to wrap the NvtxWithMetrics over both copyToHostAsync and corresponding CudaSync,
     // because the copyToHostAsync calls above are not guaranteed to be asynchronous (e.g.: when
     // the copy is from pageable memory, and we're not guaranteed to be using pinned memory).
-    val hostPartColumns = NvtxIdWithMetrics(NvtxRegistry.PARTITION_D2H, memCopyTime) {
+    val hostPartColumns = NvtxIdWithMetrics(NvtxRegistry.PARTITION_D2H, d2hCopyTime) {
       val hostColumns = withResource(partitionColumns) { _ =>
         withRetryNoSplit {
           partitionColumns.safeMap(_.copyToHostAsync(Cuda.DEFAULT_STREAM))
@@ -222,16 +222,17 @@ trait GpuPartitioning extends Partitioning {
             s"GPU-serialized shuffle batch is ${data.getLength} bytes, exceeding the " +
             s"$maxGpuSerializedSliceBytes-byte (2GB) limit addressable by the Int " +
             s"serialized-slice offsets; reduce spark.rapids.sql.batchSizeBytes")
-          closeOnExcept(Seq(HostMemoryBuffer.allocate(data.getLength),
-            HostMemoryBuffer.allocate(offsets.getLength))) { seq =>
-            val dataHost = seq(0)
-            val offsetsHost = seq(1)
-            NvtxRegistry.GPU_KUDO_COPY_TO_HOST {
-              dataHost.copyFromDeviceBufferAsync(data, Cuda.DEFAULT_STREAM)
-              offsetsHost.copyFromDeviceBufferAsync(offsets, Cuda.DEFAULT_STREAM)
-              Cuda.DEFAULT_STREAM.sync()
+          NvtxIdWithMetrics(NvtxRegistry.PARTITION_D2H, d2hCopyTime) {
+            closeOnExcept(HostMemoryBuffer.allocate(data.getLength)) { dataHost =>
+              closeOnExcept(HostMemoryBuffer.allocate(offsets.getLength)) { offsetsHost =>
+                NvtxRegistry.GPU_KUDO_COPY_TO_HOST {
+                  dataHost.copyFromDeviceBufferAsync(data, Cuda.DEFAULT_STREAM)
+                  offsetsHost.copyFromDeviceBufferAsync(offsets, Cuda.DEFAULT_STREAM)
+                  Cuda.DEFAULT_STREAM.sync()
+                }
+                (dataHost, offsetsHost)
+              }
             }
-            (dataHost, offsetsHost)
           }
         }
       }
@@ -271,10 +272,13 @@ trait GpuPartitioning extends Partitioning {
 
   def sliceInternalGpuOrCpuAndClose(numRows: Int, partitionIndexes: Array[Int],
       partitionColumns: Array[GpuColumnVector]): Array[(ColumnarBatch, Int)] = {
-    if (usesKudoGPUSlicing) {
+    // Both GPU slicers build a cuDF Table, which cannot hold a rows-only batch. The CPU
+    // slicer cuts one by row count, and every shuffle writer accepts its zero-column slices.
+    val rowsOnly = partitionColumns.isEmpty
+    if (usesKudoGPUSlicing && !rowsOnly) {
       sliceAndSerializeOnGpu(numRows, partitionIndexes, partitionColumns)
     } else {
-      val sliceOnGpu = usesGPUShuffle
+      val sliceOnGpu = usesGPUShuffle && !rowsOnly
       val nvtxId = if (sliceOnGpu) {
         NvtxRegistry.SLICE_INTERNAL_GPU
       } else {
@@ -343,13 +347,13 @@ trait GpuPartitioning extends Partitioning {
     }
   }
 
-  private var memCopyTime: GpuMetric = NoopMetric
+  private var d2hCopyTime: GpuMetric = NoopMetric
 
   /**
    * Setup sub-metrics for the performance debugging of GpuPartition. This method is expected to
    * be called at the query planning stage. Therefore, this method is NOT thread safe.
    */
   def setupDebugMetrics(metrics: Map[String, GpuMetric]): Unit = {
-    metrics.get(GpuMetric.COPY_TO_HOST_TIME).foreach(memCopyTime = _)
+    metrics.get(GpuMetric.COPY_TO_HOST_TIME).foreach(d2hCopyTime = _)
   }
 }

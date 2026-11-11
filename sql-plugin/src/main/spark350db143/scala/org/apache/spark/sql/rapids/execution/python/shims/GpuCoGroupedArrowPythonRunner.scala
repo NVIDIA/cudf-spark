@@ -15,16 +15,8 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "350db143"}
-{"spark": "400"}
-{"spark": "400db173"}
-{"spark": "401"}
-{"spark": "402"}
-{"spark": "403"}
-{"spark": "404"}
-{"spark": "411"}
-{"spark": "412"}
-{"spark": "413"}
+{"spark":["350db143","400db173"],"carryForward":"none"}
+{"spark":["400"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.rapids.execution.python.shims
@@ -56,6 +48,8 @@ class GpuCoGroupedArrowPythonRunner(
     conf: Map[String, String],
     batchSize: Int,
     override val pythonOutSchema: StructType,
+    private[shims] val udfLogMaxEntries: Int = 0,
+    private[shims] val udfLogLevel: String = "WARNING",
     jobArtifactUUID: Option[String] = None)
   extends GpuBasePythonRunner[(ColumnarBatch, ColumnarBatch)](funcs.map(_._1), evalType,
     argOffsets, jobArtifactUUID) with GpuArrowPythonOutput with GpuPythonRunnerCommon {
@@ -75,7 +69,8 @@ class GpuCoGroupedArrowPythonRunner(
           PythonRDD.writeUTF(k, dataOut)
           PythonRDD.writeUTF(v, dataOut)
         }
-        WritePythonUDFUtils.writeUDFs(dataOut, funcs, argOffsets)
+        WritePythonUDFUtils.writeUDFs(dataOut, funcs, argOffsets,
+          udfLogMaxEntries = udfLogMaxEntries, udfLogLevel = udfLogLevel)
       }
 
       override def writeNextInputToStream(dataOut: DataOutputStream): Boolean = {

@@ -19,7 +19,7 @@ import java.io.{File, FileOutputStream}
 import java.util
 
 import scala.collection.JavaConverters._
-import scala.collection.mutable.{HashMap, ListBuffer}
+import scala.collection.mutable.ListBuffer
 
 import ai.rapids.cudf.Cuda
 import com.nvidia.spark.rapids.jni.RmmSpark.OomInjectionType
@@ -28,296 +28,9 @@ import com.nvidia.spark.rapids.lore.{LoreId, OutputLoreId}
 
 import org.apache.spark.SparkConf
 import org.apache.spark.internal.Logging
-import org.apache.spark.network.util.{ByteUnit, JavaUtils}
-import org.apache.spark.sql.catalyst.analysis.FunctionRegistry
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.RapidsPrivateUtil
 import org.apache.spark.sql.rapids.execution.{JoinBuildSideSelection, JoinOptions, JoinStrategy}
-
-object ConfHelper {
-  def toBoolean(s: String, key: String): Boolean = {
-    try {
-      s.trim.toBoolean
-    } catch {
-      case _: IllegalArgumentException =>
-        throw new IllegalArgumentException(s"$key should be boolean, but was $s")
-    }
-  }
-
-  def toInteger(s: String, key: String): Integer = {
-    try {
-      s.trim.toInt
-    } catch {
-      case _: IllegalArgumentException =>
-        throw new IllegalArgumentException(s"$key should be integer, but was $s")
-    }
-  }
-
-  def toLong(s: String, key: String): Long = {
-    try {
-      s.trim.toLong
-    } catch {
-      case _: IllegalArgumentException =>
-        throw new IllegalArgumentException(s"$key should be long, but was $s")
-    }
-  }
-
-  def toDouble(s: String, key: String): Double = {
-    try {
-      s.trim.toDouble
-    } catch {
-      case _: IllegalArgumentException =>
-        throw new IllegalArgumentException(s"$key should be double, but was $s")
-    }
-  }
-
-  def stringToSeq(str: String): Seq[String] = {
-    // Here 'split' returns a mutable array, 'toList' will convert it into a immutable list
-    str.split(",").map(_.trim()).filter(_.nonEmpty).toList
-  }
-
-  def stringToSeq[T](str: String, converter: String => T): Seq[T] = {
-    stringToSeq(str).map(converter)
-  }
-
-  def seqToString[T](v: Seq[T], stringConverter: T => String): String = {
-    v.map(stringConverter).mkString(",")
-  }
-
-  def byteFromString(str: String, unit: ByteUnit): Long = {
-    val (input, multiplier) =
-      if (str.nonEmpty && str.head == '-') {
-        (str.substring(1), -1)
-      } else {
-        (str, 1)
-      }
-    multiplier * JavaUtils.byteStringAs(input, unit)
-  }
-
-  def makeConfAnchor(key: String, text: String = null): String = {
-    val t = if (text != null) text else key
-    // The anchor cannot be too long, so for now
-    val a = key.replaceFirst("spark.rapids.", "")
-    "<a name=\"" + s"$a" + "\"></a>" + t
-  }
-
-  def getSqlFunctionsForClass[T](exprClass: Class[T]): Option[Seq[String]] = {
-    sqlFunctionsByClass.get(exprClass.getCanonicalName)
-  }
-
-  lazy val sqlFunctionsByClass: Map[String, Seq[String]] = {
-    val functionsByClass = new HashMap[String, Seq[String]]
-    FunctionRegistry.expressions.foreach { case (sqlFn, (expressionInfo, _)) =>
-      val className = expressionInfo.getClassName
-      val fnSeq = functionsByClass.getOrElse(className, Seq[String]())
-      val fnCleaned = if (sqlFn != "|") {
-        sqlFn
-      } else {
-        "\\|"
-      }
-      functionsByClass.update(className, fnSeq :+ s"`$fnCleaned`")
-    }
-    functionsByClass.mapValues(_.sorted).toMap
-  }
-}
-
-abstract class ConfEntry[T](val key: String, val converter: String => T, val doc: String,
-    val isInternal: Boolean, val isStartUpOnly: Boolean, val isCommonlyUsed: Boolean) {
-
-  def get(conf: Map[String, String]): T
-  def get(conf: SQLConf): T
-  def help(asTable: Boolean = false): Unit
-
-  override def toString: String = key
-}
-
-class ConfEntryWithDefault[T](key: String, converter: String => T, doc: String,
-    isInternal: Boolean, isStartupOnly: Boolean, isCommonlyUsed: Boolean = false,
-    val defaultValue: T)
-  extends ConfEntry[T](key, converter, doc, isInternal, isStartupOnly, isCommonlyUsed) {
-
-  override def get(conf: Map[String, String]): T = {
-    conf.get(key).map(converter).getOrElse(defaultValue)
-  }
-
-  override def get(conf: SQLConf): T = {
-    val tmp = conf.getConfString(key, null)
-    if (tmp == null) {
-      defaultValue
-    } else {
-      converter(tmp)
-    }
-  }
-
-  override def help(asTable: Boolean = false): Unit = {
-    if (!isInternal) {
-      val startupOnlyStr = if (isStartupOnly) "Startup" else "Runtime"
-      if (asTable) {
-        import ConfHelper.makeConfAnchor
-        ConsoleOutput.writeLine(s"${makeConfAnchor(key)}|$doc|$defaultValue|$startupOnlyStr")
-      } else {
-        ConsoleOutput.writeLine(s"$key:")
-        ConsoleOutput.writeLine(s"\t$doc")
-        ConsoleOutput.writeLine(s"\tdefault $defaultValue")
-        ConsoleOutput.writeLine(s"\ttype $startupOnlyStr")
-        ConsoleOutput.writeLine()
-      }
-    }
-  }
-}
-
-class OptionalConfEntry[T](key: String, val rawConverter: String => T, doc: String,
-    isInternal: Boolean, isStartupOnly: Boolean, isCommonlyUsed: Boolean = false)
-  extends ConfEntry[Option[T]](key, s => Some(rawConverter(s)), doc, isInternal,
-  isStartupOnly, isCommonlyUsed) {
-
-  override def get(conf: Map[String, String]): Option[T] = {
-    conf.get(key).map(rawConverter)
-  }
-
-  override def get(conf: SQLConf): Option[T] = {
-    val tmp = conf.getConfString(key, null)
-    if (tmp == null) {
-      None
-    } else {
-      Some(rawConverter(tmp))
-    }
-  }
-
-  override def help(asTable: Boolean = false): Unit = {
-    if (!isInternal) {
-      val startupOnlyStr = if (isStartupOnly) "Startup" else "Runtime"
-      if (asTable) {
-        import ConfHelper.makeConfAnchor
-        ConsoleOutput.writeLine(s"${makeConfAnchor(key)}|$doc|None|$startupOnlyStr")
-      } else {
-        ConsoleOutput.writeLine(s"$key:")
-        ConsoleOutput.writeLine(s"\t$doc")
-        ConsoleOutput.writeLine("\tNone")
-        ConsoleOutput.writeLine(s"\ttype $startupOnlyStr")
-        ConsoleOutput.writeLine()
-      }
-    }
-  }
-}
-
-class TypedConfBuilder[T](
-    val parent: ConfBuilder,
-    val converter: String => T,
-    val stringConverter: T => String) {
-
-  def this(parent: ConfBuilder, converter: String => T) = {
-    this(parent, converter, Option(_).map(_.toString).orNull)
-  }
-
-  /** Apply a transformation to the user-provided values of the config entry. */
-  def transform(fn: T => T): TypedConfBuilder[T] = {
-    new TypedConfBuilder(parent, s => fn(converter(s)), stringConverter)
-  }
-
-  /** Checks if the user-provided value for the config matches the validator. */
-  def checkValue(validator: T => Boolean, errorMsg: String): TypedConfBuilder[T] = {
-    transform { v =>
-      if (!validator(v)) {
-        throw new IllegalArgumentException(errorMsg)
-      }
-      v
-    }
-  }
-
-  /** Check that user-provided values for the config match a pre-defined set. */
-  def checkValues(validValues: Set[T]): TypedConfBuilder[T] = {
-    transform { v =>
-      if (!validValues.contains(v)) {
-        throw new IllegalArgumentException(
-          s"The value of ${parent.key} should be one of ${validValues.mkString(", ")}, but was $v")
-      }
-      v
-    }
-  }
-
-  def createWithDefault(value: T): ConfEntryWithDefault[T] = {
-    // 'converter' will check the validity of default 'value', if it's not valid,
-    // then 'converter' will throw an exception
-    val transformedValue = converter(stringConverter(value))
-    val ret = new ConfEntryWithDefault[T](parent.key, converter,
-      parent.doc, parent.isInternal, parent.isStartupOnly, parent.isCommonlyUsed, transformedValue)
-    parent.register(ret)
-    ret
-  }
-
-  /** Turns the config entry into a sequence of values of the underlying type. */
-  def toSequence: TypedConfBuilder[Seq[T]] = {
-    new TypedConfBuilder(parent, ConfHelper.stringToSeq(_, converter),
-      ConfHelper.seqToString(_, stringConverter))
-  }
-
-  def createOptional: OptionalConfEntry[T] = {
-    val ret = new OptionalConfEntry[T](parent.key, converter,
-      parent.doc, parent.isInternal, parent.isStartupOnly, parent.isCommonlyUsed)
-    parent.register(ret)
-    ret
-  }
-}
-
-class ConfBuilder(val key: String, val register: ConfEntry[_] => Unit) {
-
-  import ConfHelper._
-
-  var doc: String = null
-  var isInternal: Boolean = false
-  var isStartupOnly: Boolean = false
-  var isCommonlyUsed: Boolean = false
-
-  def doc(data: String): ConfBuilder = {
-    this.doc = data
-    this
-  }
-
-  def internal(): ConfBuilder = {
-    this.isInternal = true
-    this
-  }
-
-  def startupOnly(): ConfBuilder = {
-    this.isStartupOnly = true
-    this
-  }
-
-  def commonlyUsed(): ConfBuilder = {
-    this.isCommonlyUsed = true
-    this
-  }
-
-  def booleanConf: TypedConfBuilder[Boolean] = {
-    new TypedConfBuilder[Boolean](this, toBoolean(_, key))
-  }
-
-  def bytesConf(unit: ByteUnit): TypedConfBuilder[Long] = {
-    new TypedConfBuilder[Long](this, byteFromString(_, unit))
-  }
-
-  def integerConf: TypedConfBuilder[Integer] = {
-    new TypedConfBuilder[Integer](this, toInteger(_, key))
-  }
-
-  def longConf: TypedConfBuilder[Long] = {
-    new TypedConfBuilder[Long](this, toLong(_, key))
-  }
-
-  def doubleConf: TypedConfBuilder[Double] = {
-    new TypedConfBuilder(this, toDouble(_, key))
-  }
-
-  def stringConf: TypedConfBuilder[String] = {
-    new TypedConfBuilder[String](this, identity[String])
-  }
-}
-
-object RapidsReaderType extends Enumeration {
-  type RapidsReaderType = Value
-  val AUTO, COALESCING, MULTITHREADED, PERFILE = Value
-}
 
 object RapidsConf extends Logging with RapidsConfEntries {
   object RapidsShuffleManagerMode extends Enumeration {
@@ -345,6 +58,12 @@ object RapidsConf extends Logging with RapidsConfEntries {
   def conf(key: String): ConfBuilder = {
     new ConfBuilder(key, register)
   }
+
+  private[rapids] def shouldExplain(explain: String): Boolean =
+    !explain.equalsIgnoreCase("NONE")
+
+  private[rapids] def shouldExplainAll(explain: String): Boolean =
+    explain.equalsIgnoreCase("ALL")
 
   // default value for the OOM injection logic (no injection, for regular operation)
   private val noInjection = OomInjectionConf(
@@ -426,14 +145,16 @@ object RapidsConf extends Logging with RapidsConfEntries {
 
   private def printToggleHeader(category: String): Unit = {
     printSectionHeader(category)
-    ConsoleOutput.writeLine("Name | Description | Default Value | Notes")
-    ConsoleOutput.writeLine("-----|-------------|---------------|------------------")
+    ConsoleOutput.writeLine("Name | Description | Default Value | Notes | Since Version")
+    ConsoleOutput.writeLine("-----|-------------|---------------|-------|--------------")
   }
 
   private def printToggleHeaderWithSqlFunction(category: String): Unit = {
     printSectionHeader(category)
-    ConsoleOutput.writeLine("Name | SQL Function(s) | Description | Default Value | Notes")
-    ConsoleOutput.writeLine("-----|-----------------|-------------|---------------|------")
+    ConsoleOutput.writeLine(
+      "Name | SQL Function(s) | Description | Default Value | Notes | Since Version")
+    ConsoleOutput.writeLine(
+      "-----|-----------------|-------------|---------------|-------|--------------")
   }
 
   def help(asTable: Boolean = false): Unit = {
@@ -456,7 +177,7 @@ object RapidsConf extends Logging with RapidsConfEntries {
         |On startup use: `--conf [conf key]=[conf value]`. For example:
         |
         |```
-        |${SPARK_HOME}/bin/spark-shell --jars rapids-4-spark_2.12-26.10.0-SNAPSHOT-cuda12.jar \
+        |${SPARK_HOME}/bin/spark-shell --jars rapids-4-spark_2.12-26.12.0-SNAPSHOT-cuda12.jar \
         |--conf spark.plugins=com.nvidia.spark.SQLPlugin \
         |--conf spark.rapids.sql.concurrentGpuTasks=2
         |```
@@ -471,11 +192,17 @@ object RapidsConf extends Logging with RapidsConfEntries {
         | work if they are set at runtime. Please check the column of "Applicable at" to see
         | when the config can be set. "Startup" means only valid on startup, "Runtime" means
         | valid on both startup and runtime.
+        |
+        |The "Since Version" column shows the first cuDF plugin release known to support
+        |the config. "Unreleased" means the config exists on this branch but is not in a tagged
+        |release yet. "Unknown" means the metadata has not been recorded yet.
         |""".stripMargin)
       // scalastyle:on line.size.limit
       ConsoleOutput.writeLine("\n## General Configuration\n")
-      ConsoleOutput.writeLine("Name | Description | Default Value | Applicable at")
-      ConsoleOutput.writeLine("-----|-------------|--------------|--------------")
+      ConsoleOutput.writeLine(
+        "Name | Description | Default Value | Applicable at | Since Version")
+      ConsoleOutput.writeLine(
+        "-----|-------------|--------------|---------------|--------------")
     } else {
       ConsoleOutput.writeLine("Commonly Used cuDF plugin Configs:")
     }
@@ -509,14 +236,20 @@ object RapidsConf extends Logging with RapidsConfEntries {
         |
         |The following configuration options are supported by the cuDF plugin.
         |
+        |The "Since Version" column shows the first cuDF plugin release known to support
+        |the config. "Unreleased" means the config exists on this branch but is not in a tagged
+        |release yet. "Unknown" means the metadata has not been recorded yet.
+        |
         |For commonly used configurations and examples of setting options, please refer to the
         |[NVIDIA cuDF plugin for Apache Spark Configuration](../configs.md) page.
         |""".stripMargin)
       // scalastyle:on line.size.limit
       ConsoleOutput.writeLine("\n## Advanced Configuration\n")
 
-      ConsoleOutput.writeLine("Name | Description | Default Value | Applicable at")
-      ConsoleOutput.writeLine("-----|-------------|--------------|--------------")
+      ConsoleOutput.writeLine(
+        "Name | Description | Default Value | Applicable at | Since Version")
+      ConsoleOutput.writeLine(
+        "-----|-------------|--------------|---------------|--------------")
     } else {
       ConsoleOutput.writeLine("Advanced cuDF Plugin Configs:")
     }
@@ -741,6 +474,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val isTestEnabled: Boolean = get(TEST_CONF)
 
+  lazy val testingForceNonAst: Set[String] = get(TEST_FORCE_NON_AST).toSet
+
   lazy val isRetryContextCheckEnabled: Boolean = get(TEST_RETRY_CONTEXT_CHECK_ENABLED)
 
   lazy val isFoldableNonLitAllowed: Boolean = get(FOLDABLE_NON_LIT_ALLOWED)
@@ -827,6 +562,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val gpuTargetBatchSizeBytes: Long = get(GPU_BATCH_SIZE_BYTES)
 
+  lazy val historyMetricsProvider: String = get(HISTORY_METRICS_PROVIDER)
+
   lazy val isWindowCollectListEnabled: Boolean = get(ENABLE_WINDOW_COLLECT_LIST)
 
   lazy val isWindowCollectSetEnabled: Boolean = get(ENABLE_WINDOW_COLLECT_SET)
@@ -839,9 +576,9 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val explain: String = get(EXPLAIN)
 
-  lazy val shouldExplain: Boolean = !explain.equalsIgnoreCase("NONE")
+  lazy val shouldExplain: Boolean = RapidsConf.shouldExplain(explain)
 
-  lazy val shouldExplainAll: Boolean = explain.equalsIgnoreCase("ALL")
+  lazy val shouldExplainAll: Boolean = RapidsConf.shouldExplainAll(explain)
 
   lazy val chunkedReaderEnabled: Boolean = get(CHUNKED_READER)
 
@@ -864,6 +601,20 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val maxReadBatchSizeRows: Int = get(MAX_READER_BATCH_SIZE_ROWS)
 
   lazy val maxReadBatchSizeBytes: Long = get(MAX_READER_BATCH_SIZE_BYTES)
+
+  /**
+   * Whether a reader should ignore the schema based GPU memory estimate when sizing a batch.
+   *
+   * @param chunkedReaderEnabled whether this reader has a chunked reader, which bounds its own
+   *                             GPU memory usage and so does not need the estimate. Pass false
+   *                             for formats that have no chunked reader.
+   */
+  def skipReadEstimate(chunkedReaderEnabled: Boolean): Boolean =
+    get(READER_USE_READ_ESTIMATE_FROM_SCHEMA) match {
+      case Some(true) => false
+      case Some(false) => true
+      case None => chunkedReaderEnabled
+    }
 
   lazy val maxGpuColumnSizeBytes: Long = get(MAX_GPU_COLUMN_SIZE_BYTES)
 
@@ -925,6 +676,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val isProjectAstEnabled: Boolean = get(ENABLE_PROJECT_AST)
 
+  lazy val isProjectAstJitEnabled: Boolean = get(ENABLE_PROJECT_AST_JIT)
+
   lazy val isTieredProjectEnabled: Boolean = get(ENABLE_TIERED_PROJECT)
 
   lazy val isCombinedExpressionsEnabled: Boolean = get(ENABLE_COMBINED_EXPRESSIONS)
@@ -985,6 +738,14 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
     }
   }
 
+  lazy val isParquetHybridScanEnabled: Boolean = get(PARQUET_HYBRID_SCAN_ENABLED)
+
+  lazy val testParquetHybridScanFailOnFallback: Boolean =
+    get(TEST_PARQUET_HYBRID_SCAN_FAIL_ON_FALLBACK)
+
+  lazy val hybridScanSingleStageFilterKeepThreshold: Double =
+    get(PARQUET_HYBRID_SCAN_SINGLE_STAGE_FILTER_KEEP_THRESHOLD)
+
   lazy val isParquetPerFileReadEnabled: Boolean =
     RapidsReaderType.withName(get(PARQUET_READER_TYPE)) == RapidsReaderType.PERFILE
 
@@ -1023,6 +784,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val isOrcReadEnabled: Boolean = get(ENABLE_ORC_READ)
 
   lazy val isOrcWriteEnabled: Boolean = get(ENABLE_ORC_WRITE)
+
+  lazy val isOrcDateWriteEnabled: Boolean = get(ENABLE_ORC_DATE_WRITE)
 
   lazy val isOrcFloatTypesToStringEnable: Boolean = get(ENABLE_ORC_FLOAT_TYPES_TO_STRING)
 
@@ -1126,15 +889,9 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val shuffleTransportMaxReceiveInflightBytes: Long = get(
     SHUFFLE_TRANSPORT_MAX_RECEIVE_INFLIGHT_BYTES)
 
-  lazy val shuffleUcxActiveMessagesForceRndv: Boolean = get(SHUFFLE_UCX_ACTIVE_MESSAGES_FORCE_RNDV)
-
   lazy val shuffleUcxUseWakeup: Boolean = get(SHUFFLE_UCX_USE_WAKEUP)
 
   lazy val shuffleUcxListenerStartPort: Int = get(SHUFFLE_UCX_LISTENER_START_PORT)
-
-  lazy val shuffleUcxMgmtHost: String = get(SHUFFLE_UCX_MGMT_SERVER_HOST)
-
-  lazy val shuffleUcxMgmtConnTimeout: Int = get(SHUFFLE_UCX_MGMT_CONNECTION_TIMEOUT)
 
   lazy val shuffleUcxBounceBuffersSize: Long = get(SHUFFLE_UCX_BOUNCE_BUFFERS_SIZE)
 
@@ -1153,6 +910,10 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val shuffleMaxMetadataSize: Long = get(SHUFFLE_MAX_METADATA_SIZE)
 
   lazy val shuffleCompressionCodec: String = get(SHUFFLE_COMPRESSION_CODEC)
+
+  lazy val driverlessBroadcastMaxExecutors: Int = get(DRIVERLESS_BROADCAST_MAX_EXECUTORS)
+
+  lazy val isDriverlessBroadcastEnabled: Boolean = get(DRIVERLESS_BROADCAST_ENABLED)
 
   lazy val shuffleCompressionLz4ChunkSize: Long = get(SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE)
 
@@ -1262,6 +1023,9 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val useArrowCopyOptimization: Boolean = get(USE_ARROW_OPT)
 
+  lazy val hostColumnarToGpuReleaseSemaphore: Boolean =
+    get(HOST_COLUMNAR_TO_GPU_RELEASE_SEMAPHORE)
+
   lazy val getCloudSchemes: Seq[String] =
     DEFAULT_CLOUD_SCHEMES ++ get(CLOUD_SCHEMES).getOrElse(Seq.empty)
 
@@ -1357,6 +1121,12 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val testGetJsonObjectSaveRows: Int = get(TEST_GET_JSON_OBJECT_SAVE_ROWS)
 
   lazy val isDeltaLowShuffleMergeEnabled: Boolean = get(ENABLE_DELTA_LOW_SHUFFLE_MERGE)
+
+  lazy val testDeltaLowShuffleMergeFailOnFallback: Boolean =
+    get(TEST_DELTA_LOW_SHUFFLE_MERGE_FAIL_ON_FALLBACK)
+
+  lazy val testDeltaLowShuffleMergeFailedOnNotMetadataOnly: Boolean =
+    get(TEST_DELTA_LOW_SHUFFLE_MERGE_FAILED_ON_NOT_METADATA_ONLY)
 
   lazy val isDeltaDeletionVectorPredicatePushdownEnabled: Boolean =
     get(DELTA_DELETION_VECTOR_PREDICATE_PUSHDOWN)

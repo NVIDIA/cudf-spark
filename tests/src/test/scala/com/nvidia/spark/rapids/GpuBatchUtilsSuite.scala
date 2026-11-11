@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package com.nvidia.spark.rapids
 import scala.collection.mutable
 import scala.util.Random
 
+import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.GpuColumnVector.GpuColumnarBatchBuilder
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -72,6 +73,24 @@ class GpuBatchUtilsSuite extends AnyFunSuite {
     StructField("c8", DataTypes.createDecimalType(15, 6), nullable = false),
     StructField("c8_nullable", DataTypes.createDecimalType(15, 6), nullable = true)
   ))
+
+  test("concatSpillBatchesAndClose sums the row counts of rows-only batches") {
+    val rowsOnly = Seq[SpillableColumnarBatch](
+      new JustRowsColumnarBatch(3), new JustRowsColumnarBatch(4))
+    withResource(GpuBatchUtils.concatSpillBatchesAndClose(rowsOnly).get) { concatenated =>
+      assertResult(7)(concatenated.numRows())
+      withResource(concatenated.getColumnarBatch()) { batch =>
+        assertResult(0)(batch.numCols())
+        assertResult(7)(batch.numRows())
+      }
+    }
+    val tooManyRows = Seq[SpillableColumnarBatch](
+      new JustRowsColumnarBatch(Int.MaxValue), new JustRowsColumnarBatch(1))
+    val e = intercept[IllegalArgumentException] {
+      GpuBatchUtils.concatSpillBatchesAndClose(tooManyRows)
+    }
+    assert(e.getMessage.contains("Cannot concatenate"), e.getMessage)
+  }
 
   test("Calculate GPU memory for batch of 64 rows with integers") {
     compareEstimateWithActual(intSchema, 64)

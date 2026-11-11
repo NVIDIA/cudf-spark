@@ -125,6 +125,15 @@ def is_iceberg_rest_catalog():
     v = os.environ.get('ICEBERG_TEST_CATALOG_TYPE')
     return v == "rest"
 
+def unity_catalog_uri():
+    return os.environ.get('DELTA_UC_URI')
+
+def unity_catalog_storage_root():
+    return os.environ.get('DELTA_UC_STORAGE_ROOT')
+
+def is_unity_catalog_configured():
+    return unity_catalog_uri() is not None
+
 # key is time zone, value is recorded boolean value
 _support_info_cache_for_time_zone = {}
 
@@ -385,6 +394,12 @@ def pytest_runtest_setup(item):
     if _current_test_has_delta_marker:
         if not item.config.getoption('delta_lake'):
             pytest.skip('delta lake tests not configured to run')
+
+    if item.get_closest_marker('unity_catalog'):
+        if not item.config.getoption('unity_catalog'):
+            pytest.skip('Unity Catalog tests not configured to run')
+        elif not is_unity_catalog_configured():
+            pytest.skip('DELTA_UC_URI is not set to a running Unity Catalog server')
 
     if item.get_closest_marker('large_data_test'):
         if not item.config.getoption('large_data_test'):
@@ -714,14 +729,14 @@ def spark_tmp_path(request):
     sc = get_spark_i_know_what_i_am_doing().sparkContext
     config = sc._jsc.hadoopConfiguration()
     path = sc._jvm.org.apache.hadoop.fs.Path(ret)
-    fs = sc._jvm.org.apache.hadoop.fs.FileSystem.get(config)
+    fs = path.getFileSystem(config)
     fs.mkdirs(path)
     yield ret
     if not debug:
         fs.delete(path)
 
-# Driver-local counterpart to spark_tmp_path; spark_tmp_path lives in the
-# default Hadoop FS, which is not local on distributed setups.
+# Driver-local counterpart to spark_tmp_path; spark_tmp_path may live on a
+# distributed filesystem, depending on the --tmp_path option.
 @pytest.fixture
 def local_tmp_path(request):
     debug = request.config.getoption('debug_tmp_path')

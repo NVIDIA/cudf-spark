@@ -16,10 +16,12 @@
 
 package com.nvidia.spark.rapids
 
-import ai.rapids.cudf.{Rmm, RmmAllocationMode, RmmEventHandler, Table}
+import java.util.concurrent.atomic.AtomicReference
+
+import ai.rapids.cudf.{DeviceMemoryBuffer, Rmm, RmmAllocationMode, RmmEventHandler, Table}
 import com.nvidia.spark.Retryable
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitTargetSizeInHalfGpu, withRestoreOnRetry, withRetry, withRetryNoSplit}
+import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitSpillableInHalfByRows, splitTargetSizeInHalfGpu, withRestoreOnRetry, withRetry, withRetryNoSplit}
 import com.nvidia.spark.rapids.jni.{GpuRetryOOM, GpuSplitAndRetryOOM, RmmSpark}
 import com.nvidia.spark.rapids.spill.SpillFramework
 import org.mockito.Mockito._
@@ -29,7 +31,11 @@ import org.scalatestplus.mockito.MockitoSugar
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.rapids.execution.TrampolineUtil
+import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.types.{DataType, LongType}
+import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
 
 class WithRetrySuite
     extends AnyFunSuite
@@ -44,7 +50,63 @@ class WithRetrySuite
       spy(SpillableColumnarBatch(cb, -1))
     }
   }
+
+  /** Column pruning can empty a batch while its row count still matters. */
+  private def buildRowsOnlyBatch(numRows: Int): SpillableColumnarBatch =
+    spy(SpillableColumnarBatch(new ColumnarBatch(Array.empty[SparkColumnVector], numRows), -1))
   
+  private def runOnNewTaskThread(taskAttemptId: Long)(body: => Unit): Unit = {
+    val failure = new AtomicReference[Throwable]()
+    val thread = new Thread(new Runnable {
+      override def run(): Unit = {
+        val context = new MockTaskContext(taskAttemptId, partitionId = 0)
+        TrampolineUtil.setTaskContext(context)
+        try {
+          body
+        } catch {
+          case t: Throwable => failure.set(t)
+        } finally {
+          try {
+            context.markTaskComplete()
+          } catch {
+            case t: Throwable => failure.compareAndSet(null, t)
+          }
+          RmmSpark.removeAllCurrentThreadAssociation()
+          TrampolineUtil.unsetTaskContext()
+        }
+      }
+    })
+    thread.start()
+    var timedOut = false
+    try {
+      thread.join(10000)
+      timedOut = thread.isAlive
+    } finally {
+      if (thread.isAlive) {
+        thread.interrupt()
+        thread.join()
+      }
+    }
+    assert(!timedOut, "task thread did not finish")
+    val thrown = failure.get()
+    if (thrown != null) {
+      throw thrown
+    }
+  }
+
+  private def countAttemptsWithInjectedGpuOOM(): Int = {
+    val sqlConf = new SQLConf()
+    sqlConf.setConfString(RapidsConf.TEST_RETRY_OOM_INJECTION_MODE.key, "type=GPU")
+    var attempts = 0
+    SQLConf.withExistingConf(sqlConf) {
+      withRetryNoSplit {
+        attempts += 1
+        withResource(DeviceMemoryBuffer.allocate(1))(_ => ())
+      }
+    }
+    attempts
+  }
+
   private var rmmWasInitialized = false
 
   override def beforeEach(): Unit = {
@@ -69,6 +131,37 @@ class WithRetrySuite
     }
   }
 
+  test("OOM injection does not classify an unknown task-context thread as dedicated") {
+    val taskAttemptId = 101L
+    runOnNewTaskThread(taskAttemptId) {
+      assert(!RmmSpark.isThreadWorkingOnTaskAsPoolThread)
+      assert(!TaskRegistryTracker.isCurrentThreadRegisteredAsDedicatedTaskThread)
+
+      val attempts = countAttemptsWithInjectedGpuOOM()
+
+      RmmSpark.poolThreadWorkingOnTask(taskAttemptId)
+      assert(RmmSpark.isThreadWorkingOnTaskAsPoolThread)
+      assertResult(1)(attempts)
+    }
+  }
+
+  test("OOM injection remains enabled on registered pool threads") {
+    val taskAttemptId = 102L
+    runOnNewTaskThread(taskAttemptId) {
+      RmmSpark.poolThreadWorkingOnTask(taskAttemptId)
+      assert(countAttemptsWithInjectedGpuOOM() > 1)
+    }
+  }
+
+  test("OOM injection remains enabled on registered dedicated task threads") {
+    val taskAttemptId = 103L
+    runOnNewTaskThread(taskAttemptId) {
+      TaskRegistryTracker.registerDedicatedThreadForRetry()
+      assert(TaskRegistryTracker.isCurrentThreadRegisteredAsDedicatedTaskThread)
+      assert(countAttemptsWithInjectedGpuOOM() > 1)
+    }
+  }
+
   test("withRetry closes input on failure") {
     val myItems = Seq(buildBatch, buildBatch)
     assertThrows[IllegalStateException] {
@@ -82,6 +175,50 @@ class WithRetrySuite
         verify(myItems.head, times(1)).close()
         verify(myItems.last, times(0)).close()
         myItems(1).close()
+      }
+    }
+  }
+
+  test("withRetry can close a single input before its first attempt") {
+    val input = mock[AutoCloseable]
+    withResource(withRetry(input, splitPolicy = null) { _ =>
+      fail("Closing an unused retry iterator must not execute the operation")
+    }) { attempts =>
+      assert(attempts.hasNext)
+      attempts.close()
+      assert(!attempts.hasNext)
+    }
+    verify(input, times(1)).close()
+  }
+
+  for (consume <- Seq(false, true)) {
+    test(s"withRetry closes from another task-completion callback, consumed=$consume") {
+      var completed = false
+      val context = new MockTaskContext(1, partitionId = 0) {
+        override def isCompleted(): Boolean = completed
+      }
+      TrampolineUtil.setTaskContext(context)
+      val input = mock[AutoCloseable]
+      try {
+        withResource(withRetry(input, splitPolicy = null)(_ => 1)) { attempts =>
+          ScalableTaskCompletion.onTaskCompletion(context) {
+            attempts.close()
+          }
+          if (consume) assert(attempts.next() == 1)
+          completed = true
+          context.markTaskComplete()
+          assert(!attempts.hasNext)
+        }
+        verify(input, times(1)).close()
+      } finally {
+        try {
+          if (!completed) {
+            completed = true
+            context.markTaskComplete()
+          }
+        } finally {
+          TrampolineUtil.unsetTaskContext()
+        }
       }
     }
   }
@@ -413,6 +550,109 @@ class WithRetrySuite
       assert(lastSplitSize >= minValue)
       assert(lastSplitSize == (initialValue / (2 * (numSplits - 1))))
     }
+  }
+
+  test("splitSpillableInHalfByRows preserves values and releases GPU allocations") {
+    val baseline = Rmm.getTotalBytesAllocated
+    val toSplit = withResource(new Table.TestBuilder()
+      .column(5L, null.asInstanceOf[java.lang.Long], 3L, 1L, 9L).build()) { table =>
+      spy(SpillableColumnarBatch(GpuColumnVector.from(table, Array[DataType](LongType)), -1))
+    }
+    withResource(splitSpillableInHalfByRows(toSplit)) { halves =>
+      verify(toSplit, times(1)).close()
+      assert(halves.map(_.numRows()) == Seq(2, 3))
+      val values = halves.flatMap { half =>
+        withResource(half.getColumnarBatch()) { batch =>
+          withResource(batch.column(0).asInstanceOf[GpuColumnVector].getBase.copyToHost()) { col =>
+            (0 until batch.numRows()).map(i => if (col.isNull(i)) None else Some(col.getLong(i)))
+          }
+        }
+      }
+      assert(values == Seq(Some(5L), None, Some(3L), Some(1L), Some(9L)))
+    }
+    assert(Rmm.getTotalBytesAllocated == baseline)
+  }
+
+  test("splitSpillableInHalfByRows releases split tables when type lookup fails") {
+    val baseline = Rmm.getTotalBytesAllocated
+    val toSplit = buildBatch
+    doThrow(new IllegalStateException("type lookup failed")).when(toSplit).dataTypes
+    intercept[IllegalStateException] {
+      splitSpillableInHalfByRows(toSplit)
+    }
+    verify(toSplit, times(1)).close()
+    assert(Rmm.getTotalBytesAllocated == baseline)
+  }
+
+  test("splitSpillableInHalfByRows releases split tables when input close fails") {
+    val baseline = Rmm.getTotalBytesAllocated
+    val toSplit = buildBatch
+    doAnswer(invocation => {
+      invocation.callRealMethod()
+      throw new IllegalStateException("input close failed")
+    }).when(toSplit).close()
+    intercept[IllegalStateException] {
+      splitSpillableInHalfByRows(toSplit)
+    }
+    verify(toSplit, times(1)).close()
+    assert(Rmm.getTotalBytesAllocated == baseline)
+  }
+
+  test("splitSpillableInHalfByRows closes a one-row GPU batch") {
+    val baseline = Rmm.getTotalBytesAllocated
+    val toSplit = withResource(new Table.TestBuilder()
+      .column(Array[java.lang.Long](5L): _*).build()) { table =>
+      spy(SpillableColumnarBatch(GpuColumnVector.from(table, Array[DataType](LongType)), -1))
+    }
+    intercept[GpuSplitAndRetryOOM] {
+      splitSpillableInHalfByRows(toSplit)
+    }
+    verify(toSplit, times(1)).close()
+    assert(Rmm.getTotalBytesAllocated == baseline)
+  }
+
+  test("splitSpillableInHalfByRows closes its input when splitting runs out of memory") {
+    val baseline = Rmm.getTotalBytesAllocated
+    val toSplit = buildBatch
+    RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
+      RmmSpark.OomInjectionType.GPU.ordinal, 0)
+    intercept[GpuRetryOOM] {
+      splitSpillableInHalfByRows(toSplit)
+    }
+    verify(toSplit, times(1)).close()
+    assert(Rmm.getTotalBytesAllocated == baseline)
+  }
+
+  test("splitSpillableInHalfByRows splits a rows-only batch by row count") {
+    val toSplit = buildRowsOnlyBatch(4001)
+    val halves = splitSpillableInHalfByRows(toSplit)
+    withResource(halves) { _ =>
+      // Odd on purpose: contiguousSplit cuts at rowCount/2, so the extra row belongs to the
+      // second half and the rows-only path has to agree with it.
+      assert(halves.map(_.numRows()) === Seq(2000, 2001))
+      assert(halves.forall(_.dataTypes.isEmpty))
+    }
+    verify(toSplit, times(1)).close()
+  }
+
+  test("splitSpillableInHalfByRows throws on a rows-only batch of one row") {
+    val toSplit = buildRowsOnlyBatch(1)
+    assertThrows[GpuSplitAndRetryOOM] {
+      splitSpillableInHalfByRows(toSplit)
+    }
+    verify(toSplit, times(1)).close()
+  }
+
+  test("withRetry splits a rows-only batch and runs the work on both halves") {
+    var doThrow = true
+    val rowCounts = withRetry(buildRowsOnlyBatch(4000), splitSpillableInHalfByRows) { attempt =>
+      if (doThrow) {
+        doThrow = false
+        throw new GpuSplitAndRetryOOM("in tests")
+      }
+      attempt.numRows()
+    }.toSeq
+    assert(rowCounts === Seq(2000, 2000))
   }
 
   private class BaseRmmEventHandler extends RmmEventHandler {

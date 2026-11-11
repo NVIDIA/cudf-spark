@@ -193,7 +193,7 @@ abstract class ReplacementRule[INPUT <: BASE, BASE, WRAP_TYPE <: RapidsMeta[INPU
         } else {
           ConsoleOutput.write("None")
         }
-        ConsoleOutput.writeLine("|")
+        ConsoleOutput.writeLine(s"|${ConfVersionInfo.forKey(confKey).sinceVersion}")
       } else {
         ConsoleOutput.writeLine(s"$confKey:")
         ConsoleOutput.writeLine(s"\tEnable (true) or disable (false) the $tag $operationName.")
@@ -326,6 +326,9 @@ case class InsertIntoHadoopFsRelationCommandMeta(
 
   private var fileFormat: Option[ColumnarFileFormat] = None
 
+  override def checkTimeZone(): Boolean =
+    !GpuOrcFileFormat.isSparkOrcFormat(cmd.fileFormat.getClass)
+
   override def tagSelfForGpuInternal(): Unit = {
     if (BucketingUtilsShim.isHiveHashBucketing(cmd.options)) {
       BucketingUtilsShim.tagForHiveBucketingWrite(this, cmd.bucketSpec, cmd.outputColumns,
@@ -358,7 +361,7 @@ case class InsertIntoHadoopFsRelationCommandMeta(
     val format = fileFormat.getOrElse(
       throw new IllegalStateException("fileFormat missing, tagSelfForGpu not called?"))
 
-    GpuInsertIntoHadoopFsRelationCommand(
+    val gpuCommand = GpuInsertIntoHadoopFsRelationCommand(
       cmd.outputPath,
       cmd.staticPartitions,
       cmd.ifPartitionNotExists,
@@ -374,6 +377,8 @@ case class InsertIntoHadoopFsRelationCommandMeta(
       conf.stableSort,
       conf.concurrentWriterPartitionFlushSize,
       conf.outputDebugDumpPrefix)
+    GpuFileWriteJobShim.copyBeforeWriteJob(cmd, gpuCommand)
+    gpuCommand
   }
 }
 
@@ -406,40 +411,6 @@ trait GpuOverridesListener {
       costOptimizations: Seq[Optimization]): Unit
 }
 
-sealed trait FileFormatType
-object CsvFormatType extends FileFormatType {
-  override def toString = "CSV"
-}
-object HiveDelimitedTextFormatType extends FileFormatType {
-  override def toString = "HiveText"
-}
-object ParquetFormatType extends FileFormatType {
-  override def toString = "Parquet"
-}
-object OrcFormatType extends FileFormatType {
-  override def toString = "ORC"
-}
-object JsonFormatType extends FileFormatType {
-  override def toString = "JSON"
-}
-object AvroFormatType extends FileFormatType {
-  override def toString = "Avro"
-}
-object IcebergFormatType extends FileFormatType {
-  override def toString = "Iceberg"
-}
-object DeltaFormatType extends FileFormatType {
-  override def toString = "Delta"
-}
-
-sealed trait FileFormatOp
-object ReadFileOp extends FileFormatOp {
-  override def toString = "read"
-}
-object WriteFileOp extends FileFormatOp {
-  override def toString = "write"
-}
-
 object GpuOverrides extends Logging {
   val FLOAT_DIFFERS_GROUP_INCOMPAT =
     "when enabling these, there may be extra groups produced for floating point grouping " +
@@ -448,12 +419,11 @@ object GpuOverrides extends Logging {
     "the Unicode version used by cuDF and the JVM may differ, resulting in some " +
     "corner-case characters not changing case correctly."
   val UTC_TIMEZONE_ID = ZoneId.of("UTC").normalized()
-  // Based on https://docs.oracle.com/javase/8/docs/api/java/util/regex/Pattern.html
   private[this] lazy val regexList: Seq[String] = Seq("\\", "\u0000", "\\x", "\t", "\n", "\r",
     "\f", "\\a", "\\e", "\\cx", "[", "]", "^", "&", ".", "*", "\\d", "\\D", "\\h", "\\H", "\\s",
     "\\S", "\\v", "\\V", "\\w", "\\w", "\\p", "$", "\\b", "\\B", "\\A", "\\G", "\\Z", "\\z", "\\R",
     "?", "+", "|", "(", ")", "{", "}", "\\k", "\\Q", "\\E", ":", "!", "<=", ">")
-  val regexMetaChars = ".$^[]\\|?*+(){}"
+  val regexMetaChars = RegexParser.regexMetaChars
   /**
    * Provides a way to log an info message about how long an operation took in milliseconds.
    */
@@ -1168,8 +1138,7 @@ object GpuOverrides extends Logging {
     } else {
       wrap.runAfterTagRules()
       wrap.tagForExplain()
-      val shouldExplainAll = explain.equalsIgnoreCase("ALL")
-      wrap.explain(shouldExplainAll)
+      wrap.explain(RapidsConf.shouldExplainAll(explain))
     }
   }
 
@@ -1276,7 +1245,8 @@ case class GpuQueryStagePrepOverrides(sparkSession: SparkSession)
       GpuTransitionOverrides.tagAqeQueryStageExchanges(plan)
       // Note that we disregard the GPU plan returned here and instead rely on side effects of
       // tagging the underlying SparkPlan.
-      GpuOverrides().applyWithContext(plan, Some("AQE Query Stage Prep"))
+      val converted = GpuOverrides().applyWithContext(plan, Some("AQE Query Stage Prep"))
+      DriverlessBroadcastStage.tagEligibleBuilds(plan, converted)
       // return the original plan which is now modified as a side-effect of invoking GpuOverrides
       plan
     }(sparkPlan)

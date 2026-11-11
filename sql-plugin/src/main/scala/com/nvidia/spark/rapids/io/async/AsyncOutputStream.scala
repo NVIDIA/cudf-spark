@@ -219,7 +219,15 @@ class AsyncOutputStream(openFn: Callable[OutputStream], executor: ThrottlingExec
                 delegate.flush()
               } catch {
                 case t: Throwable =>
-                  delegate.safeClose(t)
+                  // A delegate that keeps its write failure, as HDFS does, can rethrow that same
+                  // t from close, and adding an exception to itself would throw instead.
+                  val closeExceptError: AutoCloseable = () =>
+                    try {
+                      delegate.close()
+                    } catch {
+                      case e: Throwable if e eq t =>
+                    }
+                  closeExceptError.safeClose(t)
                   throw t
               }
               delegate.close()

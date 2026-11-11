@@ -15,20 +15,11 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "400"}
-{"spark": "400db173"}
-{"spark": "401"}
-{"spark": "402"}
-{"spark": "403"}
-{"spark": "404"}
-{"spark": "411"}
-{"spark": "412"}
-{"spark": "413"}
-{"spark": "420"}
-{"spark": "500"}
+{"spark":["400"],"carryForward":"all"}
+{"spark":["420"],"carryForward":"sameMinor"}
 spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.rapids.shims
 
-object RapidsErrorUtils extends RapidsErrorUtils340PlusBase
+object RapidsErrorUtils extends RapidsErrorUtils340To420Base
   with SequenceSizeExceededLimitErrorBuilder with ArrayInvalidArgumentErrorUtils

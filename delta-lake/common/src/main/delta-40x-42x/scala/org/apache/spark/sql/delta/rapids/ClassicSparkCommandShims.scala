@@ -48,6 +48,14 @@ trait ClassicSessionDeltaCommandShims extends DeltaCommandShims {
 
   override def exprToColumn(expr: Expression): Column = DFUDFShims.exprToColumn(expr)
 
+  override def processUnmodifiedData(
+      spark: OperationSparkSession,
+      touchedFiles: Seq[org.apache.spark.sql.delta.commands.TouchedFileWithDV],
+      txn: GpuOptimisticTransactionBase)
+      : (Seq[org.apache.spark.sql.delta.actions.FileAction], Map[String, Long]) = {
+    DMLWithDeletionVectorsHelperShims.processUnmodifiedData(spark, touchedFiles, txn)
+  }
+
   override def recacheByPlan(spark: ShimSparkSession, plan: LogicalPlan): Unit = {
     val classic = ClassicSparkSession.active
     classic.sharedState.cacheManager.recacheByPlan(classic, plan)

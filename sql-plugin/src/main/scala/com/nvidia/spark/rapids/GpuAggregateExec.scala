@@ -28,7 +28,7 @@ import com.nvidia.spark.rapids.GpuOverrides.pluginSupportedOrderableSig
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitSpillableInHalfByRows, withRetry, withRetryNoSplit}
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
-import com.nvidia.spark.rapids.shims.AggregationTagging
+import com.nvidia.spark.rapids.shims.{AggregationTagging, GpuPartitioningPreservingUnaryExecNodeShim}
 
 import org.apache.spark.TaskContext
 import org.apache.spark.internal.Logging
@@ -1425,7 +1425,7 @@ abstract class GpuBaseAggregateMeta[INPUT <: SparkPlan](
       allowSinglePassAgg,
       allowNonFullyAggregatedOutput,
       conf.skipAggPassReductionRatio
-    )
+    )(Some(agg.resultExpressions))
   }
 }
 
@@ -1447,8 +1447,10 @@ abstract class GpuTypedImperativeSupportedAggregateExecMeta[INPUT <: BaseAggrega
         (expr.mode == Partial || expr.mode == PartialMerge)
     }
 
-  // overriding data types of Aggregation Buffers if necessary
-  if (mayNeedAggBufferConversion) overrideAggBufTypes()
+  // Overriding data types happens before metadata tagging initializes replacement reasons, so
+  // retain any mapping failure and report it from tagPlanForGpu.
+  private val aggBufTypeOverrideFailure: Option[String] =
+    if (mayNeedAggBufferConversion) overrideAggBufTypes() else None
 
   override protected lazy val outputTypeMetas: Option[Seq[DataTypeMeta]] =
     if (mayNeedAggBufferConversion) {
@@ -1465,6 +1467,7 @@ abstract class GpuTypedImperativeSupportedAggregateExecMeta[INPUT <: BaseAggrega
 
   override def tagPlanForGpu(): Unit = {
     super.tagPlanForGpu()
+    aggBufTypeOverrideFailure.foreach(willNotWorkOnGpu)
 
     // If a typedImperativeAggregate function run across CPU and GPU (ex: Partial mode on CPU,
     // Merge mode on GPU), it will lead to a runtime crash. Because aggregation buffers produced
@@ -1512,7 +1515,7 @@ abstract class GpuTypedImperativeSupportedAggregateExecMeta[INPUT <: BaseAggrega
         forceSinglePassAgg = false,
         allowSinglePassAgg = false,
         allowNonFullyAggregatedOutput = false,
-        1)
+        1)(Some(retExpressions.map(_.wrapped.asInstanceOf[NamedExpression])))
 
     } else {
       super.convertToGpu()
@@ -1530,10 +1533,11 @@ abstract class GpuTypedImperativeSupportedAggregateExecMeta[INPUT <: BaseAggrega
    * At last, we traverse aggregateAttributes and resultExpressions, overriding data type in
    * RapidsMeta if necessary, in order to ensure TypeChecks tagging exact data types in runtime.
    */
-  private def overrideAggBufTypes(): Unit = {
+  private def overrideAggBufTypes(): Option[String] = {
     val desiredAggBufTypes = mutable.HashMap.empty[ExprId, DataType]
     val desiredInputAggBufTypes = mutable.HashMap.empty[ExprId, DataType]
     val desiredResultOutputTypes = mutable.HashMap.empty[ExprId, DataType]
+    var mappingFailure: Option[String] = None
     // Collects exprId from TypedImperativeAggBufferAttributes, and maps them to the data type
     // of `TypedImperativeAggExprMeta.aggBufferAttribute`.
     aggregateExpressions.map(_.childExprs.head).foreach {
@@ -1562,9 +1566,14 @@ abstract class GpuTypedImperativeSupportedAggregateExecMeta[INPUT <: BaseAggrega
         val bufferCount = aggExpr.aggregateFunction.inputAggBufferAttributes.length
         aggExprMeta.childExprs.head match {
           case aggMeta: TypedImperativeAggExprMeta[_] =>
-            resultExpressions.lift(resultOffset).foreach { resultMeta =>
-              val resultExpr = resultMeta.wrapped.asInstanceOf[NamedExpression]
-              desiredResultOutputTypes(resultExpr.exprId) = aggMeta.aggBufferAttribute.dataType
+            resultExpressions.lift(resultOffset) match {
+              case Some(resultMeta) =>
+                val resultExpr = resultMeta.wrapped.asInstanceOf[NamedExpression]
+                desiredResultOutputTypes(resultExpr.exprId) = aggMeta.aggBufferAttribute.dataType
+              case None =>
+                mappingFailure = Some(
+                  s"Typed imperative aggregate buffer result at offset $resultOffset is " +
+                    s"missing from ${resultExpressions.length} result expressions")
             }
           case _ =>
         }
@@ -1590,6 +1599,7 @@ abstract class GpuTypedImperativeSupportedAggregateExecMeta[INPUT <: BaseAggrega
         case _ =>
       }
     }
+    mappingFailure
   }
 }
 
@@ -2013,8 +2023,11 @@ case class GpuHashAggregateExec(
     forceSinglePassAgg: Boolean,
     allowSinglePassAgg: Boolean,
     allowNonFullyAggregatedOutput: Boolean,
-    skipAggPassReductionRatio: Double
-) extends GpuPartitioningPreservingUnaryExecNode with GpuExec with Logging {
+    skipAggPassReductionRatio: Double)(
+    val cpuResultExpressions: Option[Seq[NamedExpression]] = None
+) extends GpuPartitioningPreservingUnaryExecNodeShim with GpuExec with Logging {
+
+  override def otherCopyArgs: Seq[AnyRef] = cpuResultExpressions :: Nil
 
   // lifted directly from `BaseAggregateExec.inputAttributes`, edited comment.
   def inputAttributes: Seq[Attribute] =
@@ -2114,39 +2127,14 @@ case class GpuHashAggregateExec(
     }
   }
 
-  protected def outputExpressions: Seq[NamedExpression] = resultExpressions
+  override protected def cpuOutputExpressions: Seq[NamedExpression] =
+    cpuResultExpressions.getOrElse(GpuAliasAwareOutputExpressions.toCpuAliases(resultExpressions))
 
   //
   // This section is derived (copied in most cases) from HashAggregateExec
   //
   private[this] val aggregateBufferAttributes = {
     aggregateExpressions.flatMap(_.aggregateFunction.aggBufferAttributes)
-  }
-
-  /**
-   * Override buildAttributeMap to handle aggregate output semantics.
-   */
-  override protected def buildAttributeMap(): Map[Attribute, Attribute] = {
-    resultExpressions.collect {
-      case a @ GpuAlias(child: Attribute, _) => child -> a.toAttribute
-      case a @ Alias(child: Attribute, _) => child -> a.toAttribute
-    }.toMap
-  }
-
-  protected def hasAlias: Boolean = outputExpressions.collectFirst { case _: Alias => }.isDefined
-
-  protected def replaceAliases(exprs: Seq[Expression]): Seq[Expression] = {
-    exprs.map {
-      case a: AttributeReference => replaceAlias(a).getOrElse(a)
-      case other => other
-    }
-  }
-
-  protected def replaceAlias(attr: AttributeReference): Option[Attribute] = {
-    outputExpressions.collectFirst {
-      case a@Alias(child: AttributeReference, _) if child.semanticEquals(attr) =>
-        a.toAttribute
-    }
   }
 
   // Used in de-duping and optimizer rules.

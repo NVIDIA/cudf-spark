@@ -7,9 +7,9 @@ nav_order: 5
 # NVIDIA cuDF plugin for Apache Spark Compatibility with Apache Spark
 
 The SQL plugin tries to produce results that are bit for bit identical with Apache Spark.  There are
-a number of cases where there are some differences. In most cases operators that produce different
+a number of cases where there are some differences. In some cases operators that produce different
 results are off by default, and you can look at the [configs](configs.md) for more information on
-how to enable them.  In some cases we felt that enabling the incompatibility by default was worth
+how to enable them.  In many cases we felt that enabling the incompatibility by default was worth
 the performance gain. All of those operators can be disabled through configs if it becomes a
 problem. Please also look at the current list of
 [bugs](https://github.com/NVIDIA/cudf-spark/issues?q=is%3Aopen+is%3Aissue+label%3Abug) which are
@@ -40,6 +40,34 @@ setting [spark.rapids.sql.stableSort.enabled](additional-functionality/advanced_
 cuDF will try to sort all the data for a given task/partition at once on the GPU. This may change
 in the future to allow for a spillable stable sort.
 
+## Round-robin Shuffle Recovery
+
+A GPU round-robin exchange with more than one output partition, as used by `repartition(n)` and by
+Delta Lake optimized writes to unpartitioned tables, assigns rows by their position in a GPU batch.
+A rerun can cut batches differently, so Spark treats the exchange and stages that read it as
+indeterminate. This also affects a hash exchange downstream of the round-robin exchange.
+
+The map stage can retry a failure in its own input before any reader stage has been submitted.
+Once a stage that reads the shuffle has started, rerunning that part of the query plan could mix rows
+from different attempts. This remains true after an individual job ends: `take` and
+`toLocalIterator` can retain partial results across jobs, including results from cached intermediate
+output. The query plan therefore keeps its reader history until it is discarded. Even a later,
+independent action fails if it must recompute that shuffle after its output is lost. Intact
+shuffle output can still be reused. The query fails rather than return missing or duplicated rows,
+including when a result from the old attempt arrives late. The error contains one of these messages:
+
+- `Cannot retry a GPU round-robin shuffle`, from the plugin.
+- `A shuffle map stage with indeterminate output was failed and retried`, from Spark.
+- `Task with indeterminate results from old attempt succeeded`, from Spark 4.2.
+
+Rerun with a new DataFrame, unpersisting a cached one first. Checkpointing before the repartition
+does not avoid the failure, and neither does
+`spark.sql.execution.sortBeforeRepartition`. To avoid GPU round-robin recovery restrictions, set
+[`spark.rapids.sql.partitioning.RoundRobinPartitioning`](additional-functionality/advanced_configs.md#sql.partitioning.RoundRobinPartitioning)
+to `false` to run the exchange on the CPU. A query that calls `repartition(n)` can instead
+repartition by columns with `repartition(n, cols)`. Splitting and retrying a batch within the
+original map attempt remains supported.
+
 ## Floating Point
 
 For most basic floating-point operations like addition, subtraction, multiplication, and division
@@ -49,8 +77,15 @@ floating-point calculations. The ordering of operations to calculate the value m
 underlying JVM implementation used by the CPU and the C++ standard library implementation used by
 the GPU.
 
-In the case of `round` and `bround` the results can be off by more because they can enlarge the
-difference. This happens in cases where a binary floating-point representation cannot exactly
+For `FLOAT` and `DOUBLE` inputs, `round` and `bround` with a literal scale of zero (including an
+omitted scale) are compatible with Spark and run on the GPU even when
+[`spark.rapids.sql.incompatibleOps.enabled`](additional-functionality/advanced_configs.md#sql.incompatibleOps.enabled)
+is `false`. `round` uses `HALF_UP` rounding and `bround` uses `HALF_EVEN` rounding; both normalize
+negative zero to positive zero.
+
+At nonzero scales, GPU execution of floating-point `round` and `bround` requires
+`spark.rapids.sql.incompatibleOps.enabled=true`. Their results can be off by more because they can
+enlarge the difference. This happens in cases where a binary floating-point representation cannot exactly
 capture a decimal value. For example `1.025` cannot exactly be represented and ends up being closer
 to `1.02499`. The Spark implementation of `round` converts it first to a decimal value with complex
 logic to make it `1.025` and then does the rounding.  This results in `round(1.025, 2)` under pure
@@ -133,7 +168,8 @@ will produce a different result compared to the plugin.
 ## CSV Reading
 
 Spark allows for stripping leading and trailing white space using various options that are off by
-default. The plugin will strip leading and trailing space for all values except strings.
+default. For supported `CORRECTED` date formats, whitespace handling follows Spark as described
+below. The plugin strips leading and trailing space for other non-string values.
 
 There are also discrepancies/issues with specific types that are detailed below.
 
@@ -152,7 +188,34 @@ replacement character �.  Instead it just passes them through as described in 
 
 ### CSV Dates
 
-Only a limited set of formats are supported when parsing dates.
+With `spark.sql.legacy.timeParserPolicy=CORRECTED` (the default since Spark 4.0), CSV dates are
+parsed on the GPU with the same results as Spark, in any session time zone, when `dateFormat` is
+absent or is one of the following:
+
+- `yyyy-MM-dd`
+- `yyyy/MM/dd`
+- `yyyy-MM`
+- `yyyy/MM`
+- `dd/MM/yyyy`
+- `yyyy-MM-dd HH:mm:ss`
+- `MM-dd`
+- `MM/dd`
+- `dd-MM`
+- `dd/MM`
+- `MM/yyyy`
+- `MM-yyyy`
+- `MM/dd/yyyy`
+- `MM-dd-yyyy`
+- `MMyyyy`
+
+The scan falls back to the CPU for these dates when:
+
+- `ignoreLeadingWhiteSpace` or `ignoreTrailingWhiteSpace` is `true`. Spark trims only unquoted
+  fields, and the GPU parser cannot preserve that distinction.
+- On Databricks, the format detected for a date column is not in the list above.
+
+With `EXCEPTION` (the default before Spark 4.0), date parsing supports only the following formats.
+`LEGACY` falls back to the CPU.
 
 * `"yyyy-MM-dd"`
 * `"yyyy/MM/dd"`
@@ -184,8 +247,7 @@ portion followed by one of the following formats:
 * `HH:mm:ss.SSS`
 * `HH:mm:ss[.SSS]`
 
-Just like with dates all timestamp formats are actually supported at the same time.  The plugin will
-disable itself if it sees a format it cannot support.
+The plugin disables GPU timestamp parsing if the configured format is unsupported.
 
 Invalid timestamps in Spark, ones that have the correct format, but the numbers produce invalid
 dates or times, can result in an exception by default and how they are parsed can be controlled
@@ -251,12 +313,33 @@ See https://github.com/NVIDIA/cudf-spark/issues/7246
 ## ORC
 
 The ORC format has fairly complete support for both reads and writes. There are only a few known
-issues. The first is for reading timestamps and dates around the transition between Julian and
-Gregorian calendars as described [here](https://github.com/NVIDIA/cudf-spark/issues/131). A
-similar issue exists for writing dates as described
-[here](https://github.com/NVIDIA/cudf-spark/issues/139). Writing timestamps, however only appears
-to work for dates after the epoch as described
-[here](https://github.com/NVIDIA/cudf-spark/issues/140).
+issues. The reader supports rebasing legacy-calendar ORC timestamps, including Spark 2.4 files,
+to Spark's proleptic Gregorian calendar. Rebasing follows the reader JVM's default timezone
+after applying the file's writer timezone; `spark.sql.session.timeZone` does not select the
+rebase timezone. This also applies to timestamps nested in arrays and structs. Values before
+the Common Era and timezones absent from Spark's rebase map use Spark's CPU implementation
+within the GPU reader.
+
+This addresses the legacy timestamp case in [#15471](https://github.com/NVIDIA/cudf-spark/issues/15471).
+The broader set of historical date/timestamp reading limitations remains tracked in
+[#131](https://github.com/NVIDIA/cudf-spark/issues/131). In particular, proleptic Gregorian ORC
+timestamps near the October 1582 cutover can still differ from CPU when the writer and reader
+use different timezones. A similar issue exists for writing dates as described
+[here](https://github.com/NVIDIA/cudf-spark/issues/139). GPU timestamp writes in UTC are supported
+from 1590 onward. Timestamps in the last 999 milliseconds before the Unix epoch are read one second
+later, matching the Apache ORC format behavior documented in
+[NVIDIA/cudf#23391](https://github.com/NVIDIA/cudf/pull/23391). In non-UTC timezones, timestamp
+writes fall back to CPU as tracked in
+[#15385](https://github.com/NVIDIA/cudf-spark/issues/15385).
+
+ORC writes containing `DATE` columns, including nested `DATE` columns, use the CPU writer by
+default. The cuDF ORC writer does not record calendar metadata in the file footer, so readers
+can interpret dates before October 15, 1582 incorrectly. Applications that guarantee **every**
+written `DATE` value is on or after October 15, 1582 can set
+`spark.rapids.sql.format.orc.write.dateType.enabled=true` to allow the GPU writer. The plugin
+does not inspect values to enforce this guarantee. Keep the default CPU writer if the data may
+include older dates; the opt-in does not add calendar metadata to ORC files. The metadata fix is
+tracked in [cuDF #23794](https://github.com/NVIDIA/cudf/issues/23794).
 
 The plugin supports reading `uncompressed`, `snappy`, `zlib` and `zstd` ORC files and writing
  `uncompressed`, `snappy` and `zstd` ORC files.  At this point, the plugin does not have the 
@@ -294,6 +377,12 @@ file-statistics are missing (see [SPARK-34960 discussion](https://issues.apache.
 
 *Writing ORC Files*
 
+Timestamp writes use the JVM default timezone, independently of `spark.sql.session.timeZone`,
+to match the Apache ORC writer. Named timezones such as `Asia/Shanghai` and `America/New_York`
+support GPU writes. Named fixed-offset zones such as `Etc/GMT+5` and `EST` also support GPU
+writes when the system timezone database can resolve them. IDs without a resolvable timezone
+file, such as `GMT+05:30` and `SystemV/EST5`, fall back to CPU.
+
 There are issues writing ORC files with dates or timestamps that fall within the lost days during
 the switch from the Julian to Gregorian calendar, i.e.: between October 3rd, 1582 and October 15th,
 1582. Dates or timestamps that fall within the range of lost days will not always be written
@@ -312,21 +401,56 @@ satisfy the query, the ORC read falls back to the CPU as it is a metadata-only q
 ## Parquet
 
 The Parquet format has more configs because there are multiple versions with some compatibility
-issues between them. Dates and timestamps are where the known issues exist.  For reads when
-`spark.sql.legacy.parquet.datetimeRebaseModeInWrite` is set to `CORRECTED`
-[timestamps](https://github.com/NVIDIA/cudf-spark/issues/132) before the transition between the
-Julian and Gregorian calendars are wrong, but dates are fine. When
+issues between them. Dates and timestamps are where the known issues exist. For files written
+by the CPU on supported Spark versions with both
+`spark.sql.parquet.datetimeRebaseModeInWrite` and `spark.sql.parquet.int96RebaseModeInWrite`
+set to `CORRECTED`, GPU reads support timestamps before the transition between the Julian
+and Gregorian calendars. This does not change LEGACY rebasing or INT96 timestamp-conversion
+limitations. When
 `spark.sql.legacy.parquet.datetimeRebaseModeInWrite` is set to `LEGACY`, the read may fail for
 values occurring before the transition between the Julian and Gregorian calendars, i.e.: date <= 1582-10-04.
 
 When writing `spark.sql.legacy.parquet.datetimeRebaseModeInWrite` is currently ignored as described
 [here](https://github.com/NVIDIA/cudf-spark/issues/144).
 
-The plugin supports reading `uncompressed`, `snappy`, `gzip` and `zstd` Parquet files and writing
-`uncompressed`, `snappy` and `zstd` Parquet files.  At this point, the plugin does not have the 
-ability to
-fall back to the CPU when reading an unsupported compression format, and will error out in that
-case.
+The plugin supports reading and writing `uncompressed`, `snappy`, `gzip` and `zstd` Parquet files.
+At this point, the plugin cannot fall back to the CPU when reading an unsupported compression
+format, and will error out in that case.
+
+## Delta Lake low shuffle merge on Databricks Runtime 17.3
+
+Low shuffle merge is disabled by default because Delta Lake 2.4 does not support it
+with change data feed enabled. To enable it on Databricks Runtime 17.3, set
+`spark.rapids.sql.delta.lowShuffleMerge.enabled=true`. The Parquet reader can use `PERFILE`
+or `MULTITHREADED`. With `COALESCING` or `AUTO`, touched-file discovery uses the
+multithreaded reader to preserve file-relative row indices. OSS Delta Lake 2.4 still
+requires `PERFILE`.
+
+Low shuffle merge also requires both
+`spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled=true` and
+`spark.databricks.delta.deletionVectors.useMetadataRowIndex=true`. If either is `false`,
+MERGE falls back to classic GPU merge. In particular, remove the `useMetadataRowIndex=false`
+setting recommended for older runtimes when enabling low shuffle merge on Databricks Runtime 17.3.
+
+Tables with columns whose logical or physical name matches a deletion-vector skip-row marker
+use classic GPU merge to avoid corrupting those values during discovery and temporary-DV rewrites; see
+[the native reader column-collision issue](https://github.com/NVIDIA/cudf-spark/issues/16381).
+
+On Databricks Runtime 17.3, tables with existing deletion vectors fall back to classic
+GPU merge before low shuffle merge builds temporary deletion vectors. The existing
+CPU fallback for MERGE operations configured to write persistent deletion vectors
+is unchanged.
+
+Tables with row tracking enabled fall back to classic GPU merge, even when
+[`spark.rapids.sql.delta.lowShuffleMerge.enabled`](additional-functionality/advanced_configs.md#sql.delta.lowShuffleMerge.enabled)
+is `true`. Databricks Runtime 17.3 exposes nullable row-tracking metadata fields that
+the GPU scans required by low shuffle merge cannot currently replace. The classic
+merge path preserves row IDs and row commit versions; enabling low shuffle merge
+does not provide the low-shuffle optimization for these tables.
+
+The row-tracking regression currently verifies this fallback, not native low-shuffle
+row-tracking execution. Supporting that execution path and adding a regression that
+forbids fallback remain follow-up work under [#11079](https://github.com/NVIDIA/cudf-spark/issues/11079).
 
 ## JSON
 
@@ -515,9 +639,7 @@ The following regular expression patterns are not yet supported on the GPU and w
 - Named capture groups: `(?<n>a)`
 - Empty groups: `()`
 - Inline flags other than case-insensitive matching, such as `(?m)`, `(?s)`, or `(?x)`
-- Case-insensitive matching (`(?i)`) whose scope would extend across a choice, such as `(?i)a|b`
-  or `a(?i)b|c` (in Java the flag applies to the end of the enclosing group, crossing `|`), or that
-  applies to a letter-valued escape, such as `(?i)\x61`
+- Case-insensitive matching (`(?i)`) that applies to a letter-valued escape, such as `(?i)\x61`
 - Case-insensitive matching of `\p{Lower}` and `\p{Upper}` (and their `\P` counterparts) on Spark versions
   below 4.0, to preserve pre-[JDK-8214245](https://bugs.openjdk.org/browse/JDK-8214245) behavior
 - Empty pattern: `""`
@@ -712,6 +834,24 @@ on the GPU without requiring any additional settings.
 - `MM-dd-yyyy`
 - `MMyyyy`
 
+With `CORRECTED`, timestamp parsing also supports `yyyy-MM-dd` followed by a space or
+the quoted literal `'T'`, then `HH:mm:ss`, optionally followed by `.SSS` and an offset
+pattern `X`, `XX`, or `XXX`. For example, `yyyy-MM-dd HH:mm:ss.SSS` and
+`yyyy-MM-dd'T'HH:mm:ss.SSSXXX` run on the GPU without enabling incompatible formats.
+`SSS` accepts one to three fractional digits. `X` accepts `+08` or `+0830`, `XX`
+requires `+0830`, and `XXX` requires `+08:30`; all three also accept `Z` for UTC.
+`T` and `Z` are case-insensitive when parsing. On JDK 8, `XX` and `XXX` also accept
+optional offset seconds and an empty fractional part before an offset, matching Spark
+on that JDK.
+An explicit offset takes precedence over the session timezone. These additional
+parsing formats fall back to CPU under `LEGACY` and `EXCEPTION`, including when
+incompatible formats are enabled.
+
+Under `CORRECTED` and `EXCEPTION`, `date_format` and `from_unixtime` also support
+`yyyy-MM-dd HH:mm:ss.SSS`, `yyyy-MM-dd'T'HH:mm:ss`, and
+`yyyy-MM-dd'T'HH:mm:ss.SSS` without enabling incompatible formats. Formatting
+with `X`, `XX`, or `XXX` still falls back to CPU.
+
 Valid Spark date/time formats that do not appear in the list above may also be supported but have not been
 extensively tested and may produce different results compared to the CPU. Known issues include:
 
@@ -722,7 +862,8 @@ To attempt to use other formats on the GPU, set
 [`spark.rapids.sql.incompatibleDateFormats.enabled`](additional-functionality/advanced_configs.md#sql.incompatibleDateFormats.enabled)
 to `true`.
 
-Formats that contain any of the following characters are unsupported and will fall back to CPU:
+Except for the additional `CORRECTED` timestamp patterns above, formats containing any
+of the following characters are unsupported and will fall back to CPU:
 
 ```
 'k', 'K','z', 'V', 'c', 'F', 'W', 'Q', 'q', 'G', 'A', 'n', 'N',
@@ -735,7 +876,7 @@ Formats that contain any of the following words are unsupported and will fall ba
 "u", "uu", "uuu", "uuuu", "uuuuu", "uuuuuu", "uuuuuuu", "uuuuuuuu", "uuuuuuuuu", "uuuuuuuuuu",
 "y", "yy", yyy", "yyyyy", "yyyyyy", "yyyyyyy", "yyyyyyyy", "yyyyyyyyy", "yyyyyyyyyy",
 "D", "DD", "DDD", "s", "m", "H", "h", "M", "MMM", "MMMM", "MMMMM", "L", "LLL", "LLLL", "LLLLL",
-"d", "S", "SS", "SSS", "SSSS", "SSSSS", "SSSSSSSSS", "SSSSSSS", "SSSSSSSS"
+"d", "S", "SS", "SSSS", "SSSSS", "SSSSSSSSS", "SSSSSSS", "SSSSSSSS"
 ```
 
 ### LEGACY timeParserPolicy
@@ -854,6 +995,23 @@ Also, the GPU does not support casting from strings containing hex values to flo
 This configuration is enabled by default. To disable this operation on the GPU set
 [`spark.rapids.sql.castStringToFloat.enabled`](additional-functionality/advanced_configs.md#sql.castStringToFloat.enabled) to `false`.
 
+### Hexadecimal to Binary
+
+The GPU supports `unhex` for string input. It returns binary data, treats an odd number of hex
+digits as if a leading zero were present, and returns null for invalid input. The permissive
+hexadecimal form of `to_binary` in Spark 3.3 is also supported. Error-raising hexadecimal
+`to_binary` in Spark 3.4 and later falls back to the CPU.
+`try_to_binary(..., 'hex')` also falls back to the CPU on Spark 3.4 and later.
+
+Spark 3.3.0 and 3.3.1 decode an odd number of hex digits incorrectly on the CPU
+([SPARK-40924](https://issues.apache.org/jira/browse/SPARK-40924)). This also affects Databricks
+runtimes, including 14.3 and 17.3. For example, `unhex('ABC')` returns `0xBC00` instead of
+`0x0ABC`. The GPU returns the corrected result for every Spark version, so results for
+odd-length input differ from the CPU on those runtimes. On Databricks 14.3, setting the internal
+configuration `spark.databricks.behaviorChange.SC114071UnhexConvertOddSymbol.enabled` to `true`
+(default: `false`) enables the corrected CPU behavior. The GPU behavior is unchanged by this
+setting.
+
 ### String to Date
 
 The following formats/patterns are supported on the GPU. Timezone of UTC is assumed.
@@ -892,7 +1050,7 @@ data.  The cuDF plugin `get_json_object` operation on the GPU will return `None`
 updated in a future release to more closely match Spark.
 
 If the JSON has a single quote `'` in the path, the GPU query may fail with `ai.rapids.cudf.CudfException`.
-More examples are in [issue-12483](https://github.com/rapidsai/cudf/issues/12483).
+More examples are in [issue-12483](https://github.com/NVIDIA/cudf/issues/12483).
 
 ## Approximate Percentile
 

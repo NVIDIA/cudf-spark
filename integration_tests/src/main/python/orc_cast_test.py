@@ -15,7 +15,7 @@
 import pytest
 
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error
-from conftest import is_not_utc
+from conftest import get_test_tz, is_not_utc
 from data_gen import *
 from marks import (allow_non_gpu, datagen_overrides, tz_sensitive_test,
                    validate_execs_in_gpu_plan)
@@ -172,6 +172,33 @@ def test_non_utc_timestamp_regressions(spark_tmp_path):
     )
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.orc(physical_path)
+    )
+
+
+# Regression for ORC BIGINT-to-TIMESTAMP schema evolution at a historical overlap. The input is
+# interpreted as local wall-clock time 1883-11-18 12:02:00. America/New_York moved backward from
+# LMT (-04:56:02) to EST (-05:00)
+# at 17:00:00Z that day, so local times from 12:00:00 through 12:03:57 are ambiguous.
+#
+# CPU ORC's convertFromUtc subtracts the raw -05:00 offset before looking up the applicable offset.
+# It therefore probes 17:02:00Z, selects EST, and Spark preserves the original Calendar offset by
+# choosing withLaterOffsetAtOverlap(), producing -2717650680000000 microseconds. The GPU historical
+# path must preserve that ORC-selected instant through Spark's historical rebase.
+@tz_sensitive_test
+@pytest.mark.skipif(
+    get_test_tz() != 'America/New_York',
+    reason='requires the 1883 America/New_York LMT-to-EST overlap')
+@allow_non_gpu(*non_utc_allow_orc_scan)
+@validate_execs_in_gpu_plan('GpuFileSourceScanExec')
+def test_casting_from_bigint_to_timestamp_in_new_york_lmt_overlap(spark_tmp_path):
+    orc_path = spark_tmp_path + '/orc_bigint_timestamp_lmt_overlap'
+    with_cpu_session(
+        lambda spark: spark.createDataFrame([(-2717668680,)], 'a long')
+            .write.orc(orc_path)
+    )
+
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema('a timestamp').orc(orc_path)
     )
 
 

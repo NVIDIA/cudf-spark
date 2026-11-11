@@ -14,16 +14,8 @@
  * limitations under the License.
  */
 /*** spark-rapids-shim-json-lines
-{"spark": "350db143"}
-{"spark": "400"}
-{"spark": "400db173"}
-{"spark": "401"}
-{"spark": "402"}
-{"spark": "403"}
-{"spark": "404"}
-{"spark": "411"}
-{"spark": "412"}
-{"spark": "413"}
+{"spark":["350db143","400db173"],"carryForward":"none"}
+{"spark":["400"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.rapids.execution.python.shims
@@ -52,6 +44,8 @@ class GpuArrowPythonRunner(
     maxBatchSize: Long,
     override val pythonOutSchema: StructType,
     argNames: Option[Array[Array[Option[String]]]] = None,
+    private[shims] val udfLogMaxEntries: Int = 0,
+    private[shims] val udfLogLevel: String = "WARNING",
     jobArtifactUUID: Option[String] = None)
   extends GpuBasePythonRunner[ColumnarBatch](funcs.map(_._1), evalType, argOffsets,
     jobArtifactUUID) with GpuArrowPythonOutput with GpuPythonRunnerCommon {
@@ -66,7 +60,8 @@ class GpuArrowPythonRunner(
 
       val arrowWriter = new GpuArrowPythonWriter(pythonInSchema, maxBatchSize) {
         override protected def writeUDFs(dataOut: DataOutputStream): Unit = {
-          WritePythonUDFUtils.writeUDFs(dataOut, funcs, argOffsets, argNames)
+          WritePythonUDFUtils.writeUDFs(dataOut, funcs, argOffsets, argNames,
+            udfLogMaxEntries = udfLogMaxEntries, udfLogLevel = udfLogLevel)
         }
       }
       val isInputNonEmpty = inputIterator.nonEmpty

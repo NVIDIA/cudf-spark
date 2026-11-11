@@ -17,7 +17,7 @@
 package com.nvidia.spark.rapids
 
 import java.time.ZoneId
-import java.util.Locale
+import java.util.{HashMap, Locale, Map => JMap}
 
 import scala.util.Try
 
@@ -48,6 +48,42 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 
 object GpuParquetFileFormat {
   private val DefaultParquetBlockSize = ParquetWriter.DEFAULT_BLOCK_SIZE.toLong
+  private val SparkLegacyDateTimeMetadataKey = "org.apache.spark.legacyDateTime"
+  private val SparkLegacyInt96MetadataKey = "org.apache.spark.legacyINT96"
+  private val SparkTimeZoneMetadataKey = "org.apache.spark.timeZone"
+
+  private def setLegacyMetadata(
+      metadata: JMap[String, String],
+      key: String,
+      enabled: Boolean): Unit = {
+    if (enabled) {
+      metadata.put(key, "")
+    } else {
+      metadata.remove(key)
+    }
+  }
+
+  private[rapids] def rebaseMetadata(
+      metadata: JMap[String, String],
+      outputTimestampType: String,
+      dateTimeRebaseMode: DateTimeRebaseMode,
+      timestampRebaseMode: DateTimeRebaseMode): JMap[String, String] = {
+    // ParquetWriteSupport derives these keys from ambient SQLConf, which can differ from
+    // the effective modes when a caller explicitly overrides timestamp write settings.
+    val updated = new HashMap[String, String](metadata)
+    val legacyDateTime = dateTimeRebaseMode == DateTimeRebaseLegacy
+    val legacyInt96 = outputTimestampType == ParquetOutputTimestampType.INT96.toString &&
+      timestampRebaseMode == DateTimeRebaseLegacy
+
+    setLegacyMetadata(updated, SparkLegacyDateTimeMetadataKey, legacyDateTime)
+    setLegacyMetadata(updated, SparkLegacyInt96MetadataKey, legacyInt96)
+    if (legacyDateTime || legacyInt96) {
+      updated.put(SparkTimeZoneMetadataKey, SQLConf.get.sessionLocalTimeZone)
+    } else {
+      updated.remove(SparkTimeZoneMetadataKey)
+    }
+    updated
+  }
 
   private def isDefaultParquetBlockSize(value: String): Boolean =
     Try(value.trim.toLong).toOption.contains(DefaultParquetBlockSize)
@@ -199,6 +235,7 @@ object GpuParquetFileFormat {
     compressionType match {
       case "NONE" | "UNCOMPRESSED" => Some(CompressionType.NONE)
       case "SNAPPY" => Some(CompressionType.SNAPPY)
+      case "GZIP" => Some(CompressionType.GZIP)
       case "ZSTD" => Some(CompressionType.ZSTD)
       case _ => None
     }
@@ -222,14 +259,40 @@ class GpuParquetFileFormat extends ColumnarFileFormat with Logging {
    * here by setting the output committer class in the conf of
    * spark.sql.sources.outputCommitterClass.
    */
-  @scala.annotation.nowarn(
-    "msg=value ENABLE_JOB_SUMMARY in class ParquetOutputFormat is deprecated"
-  )
   override def prepareWrite(
       sparkSession: SparkSession,
       job: Job,
       options: Map[String, String],
       dataSchema: StructType): ColumnarOutputWriterFactory = {
+    prepareWriteInternal(sparkSession, job, options, dataSchema, None, None)
+  }
+
+  /**
+   * Prepares a write using the specified physical Parquet timestamp type and date/time rebase
+   * mode, independent of Spark's session configuration and per-write options.
+   */
+  def prepareWriteWithTimestampOverrides(
+      sparkSession: SparkSession,
+      job: Job,
+      options: Map[String, String],
+      dataSchema: StructType,
+      outputTimestampType: ParquetOutputTimestampType.Value,
+      dateTimeRebaseMode: DateTimeRebaseMode): ColumnarOutputWriterFactory = {
+    prepareWriteInternal(sparkSession, job, options, dataSchema,
+      Some(outputTimestampType), Some(dateTimeRebaseMode))
+  }
+
+  @scala.annotation.nowarn(
+    "msg=value ENABLE_JOB_SUMMARY in class ParquetOutputFormat is deprecated"
+  )
+  private def prepareWriteInternal(
+      sparkSession: SparkSession,
+      job: Job,
+      options: Map[String, String],
+      dataSchema: StructType,
+      outputTimestampTypeOverride: Option[ParquetOutputTimestampType.Value],
+      dateTimeRebaseModeOverride: Option[DateTimeRebaseMode])
+      : ColumnarOutputWriterFactory = {
     val sqlConf = sparkSession.sessionState.conf
     val parquetOptions = new ParquetOptions(options, sqlConf)
 
@@ -243,7 +306,10 @@ class GpuParquetFileFormat extends ColumnarFileFormat with Logging {
     FileWriteOptionsShims.setConfWithWriteOptionPrecedence(
       conf,
       SQLConf.PARQUET_OUTPUT_TIMESTAMP_TYPE.key,
-      sqlConf.parquetOutputTimestampType.toString)
+      outputTimestampTypeOverride.getOrElse(sqlConf.parquetOutputTimestampType).toString)
+    outputTimestampTypeOverride.foreach { timestampType =>
+      conf.set(SQLConf.PARQUET_OUTPUT_TIMESTAMP_TYPE.key, timestampType.toString)
+    }
     FileWriteOptionsShims.setupLegacyParquetNanosAsLong(conf, sqlConf)
 
     GpuParquetFileFormat.parquetBlockSizeWarning(conf, options).foreach { warning =>
@@ -258,13 +324,17 @@ class GpuParquetFileFormat extends ColumnarFileFormat with Logging {
       conf.get(
         SQLConf.PARQUET_OUTPUT_TIMESTAMP_TYPE.key,
         sqlConf.parquetOutputTimestampType.toString).toUpperCase(Locale.ROOT))
-    val dateTimeRebaseMode = DateTimeRebaseMode.fromName(
-      sparkSession.sqlContext.getConf(SparkShimImpl.parquetRebaseWriteKey))
-    val timestampRebaseMode = if (outputTimestampType.equals(ParquetOutputTimestampType.INT96)) {
+    val dateTimeRebaseMode = dateTimeRebaseModeOverride.getOrElse {
       DateTimeRebaseMode.fromName(
-        sparkSession.sqlContext.getConf(SparkShimImpl.int96ParquetRebaseWriteKey))
-    } else {
-      dateTimeRebaseMode
+        sparkSession.sqlContext.getConf(SparkShimImpl.parquetRebaseWriteKey))
+    }
+    val timestampRebaseMode = dateTimeRebaseModeOverride.getOrElse {
+      if (outputTimestampType.equals(ParquetOutputTimestampType.INT96)) {
+        DateTimeRebaseMode.fromName(
+          sparkSession.sqlContext.getConf(SparkShimImpl.int96ParquetRebaseWriteKey))
+      } else {
+        dateTimeRebaseMode
+      }
     }
 
     val committerClass =
@@ -401,6 +471,11 @@ class GpuParquetWriter(
     fileIO: RapidsFileIO)
   extends ColumnarOutputWriter(context, dataSchema, NvtxRegistry.FILE_FORMAT_WRITE, true,
     statsTrackers, debugDumpPath, holdGpuBetweenBatches, useAsyncWrite, fileIO) {
+  // cuDF encodes into temporary data before updating Parquet writer state or writing to the
+  // sink. With the JNI sink, GPU allocation failures can occur only during that first phase;
+  // host allocation failures can also occur after the writer state has advanced.
+  override protected def canRetryGpuOomFromNativeWrite: Boolean = true
+
   override def throwIfRebaseNeededInExceptionMode(batch: ColumnarBatch): Unit = {
     val cols = GpuColumnVector.extractBases(batch)
     cols.foreach { col =>
@@ -480,6 +555,8 @@ class GpuParquetWriter(
 
   override val tableWriter: ParquetTableWriter = {
     val writeContext = new ParquetWriteSupport().init(conf)
+    val metadata = GpuParquetFileFormat.rebaseMetadata(
+      writeContext.getExtraMetaData, outputTimestampType, dateRebaseMode, timestampRebaseMode)
     // Use the value resolved in prepareWrite. Reading SQLConf here would discard
     // a per-write option.
     val builder = SchemaUtils
@@ -487,7 +564,7 @@ class GpuParquetWriter(
         nullable = false,
         ParquetOutputTimestampType.INT96.toString == outputTimestampType,
         parquetFieldIdEnabled)
-      .withMetadata(writeContext.getExtraMetaData)
+      .withMetadata(metadata)
       .withCompressionType(compressionType)
     parquetWriterRowGroupSizeRows.foreach { rowGroupSizeRows =>
       builder.withRowGroupSizeRows(rowGroupSizeRows)

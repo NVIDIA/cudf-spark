@@ -21,19 +21,20 @@
     <parent>
       <groupId>com.nvidia</groupId>
       <artifactId>rapids-4-spark-shim-deps-parent_2.13</artifactId>
-      <version>26.10.0-SNAPSHOT</version>
+      <version>26.12.0-SNAPSHOT</version>
       <relativePath>../shim-deps/pom.xml</relativePath>
   </parent>
     <artifactId>rapids-4-spark-shuffle_2.13</artifactId>
     <name>RAPIDS Accelerator for Apache Spark Shuffle Plugin</name>
     <description>Accelerated shuffle plugin for the RAPIDS plugin for Apache Spark</description>
-    <version>26.10.0-SNAPSHOT</version>
+    <version>26.12.0-SNAPSHOT</version>
 
     <properties>
         <rapids.module>shuffle-plugin</rapids.module>
         <rapids.compressed.artifact>false</rapids.compressed.artifact>
         <rapids.default.jar.excludePattern>**/*</rapids.default.jar.excludePattern>
         <rapids.shim.jar.phase>package</rapids.shim.jar.phase>
+        <rapids.license.resources.phase>generate-resources</rapids.license.resources.phase>
     </properties>
 
     <dependencies>
@@ -71,35 +72,6 @@
           </resource>
         </resources>
         <plugins>
-            <plugin>
-                <groupId>org.codehaus.mojo</groupId>
-                <artifactId>build-helper-maven-plugin</artifactId>
-                <executions>
-                    <execution>
-                        <id>add-license-notice-resources</id>
-                        <phase>generate-resources</phase>
-                        <goals>
-                            <goal>add-resource</goal>
-                        </goals>
-                        <configuration>
-                            <resources>
-                                <resource>
-                                    <directory>${spark.rapids.source.basedir}</directory>
-                                    <targetPath>META-INF</targetPath>
-                                    <includes>
-                                        <!-- The NOTICE will be taken care of by the antrun task below -->
-                                        <include>LICENSE</include>
-                                        <include>NOTICE</include>
-                                    </includes>
-                                </resource>
-                                <resource>
-                                    <directory>${spark.rapids.source.basedir}/python</directory>
-                                </resource>
-                            </resources>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
             <plugin>
               <artifactId>maven-antrun-plugin</artifactId>
               <executions>

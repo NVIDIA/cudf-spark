@@ -454,6 +454,14 @@ trait GpuNumberToTimestampUnaryExpression extends GpuUnaryExpression {
 
 case class GpuSecondsToTimestamp(child: Expression) extends GpuNumberToTimestampUnaryExpression {
 
+  // Overflow and decimal rounding checks can throw even when ANSI mode is disabled.
+  override def hasSideEffects: Boolean = super.hasSideEffects || (child.dataType match {
+    case LongType => true
+    // Up to 12 integer digits fit in Long microseconds; scales above 6 may need rounding.
+    case dt: DecimalType => dt.scale > 6 || dt.precision - dt.scale > 12
+    case _ => false
+  })
+
   override def nullable: Boolean = child.dataType match {
     case _: FloatType | _: DoubleType => true
     case _ => child.nullable
@@ -556,6 +564,9 @@ case class GpuSecondsToTimestamp(child: Expression) extends GpuNumberToTimestamp
 }
 
 case class GpuMillisToTimestamp(child: Expression) extends GpuNumberToTimestampUnaryExpression {
+  override def hasSideEffects: Boolean =
+    super.hasSideEffects || child.dataType == LongType
+
   protected lazy val convertTo: GpuColumnVector => ColumnVector = child.dataType match {
     case LongType =>
       (input: GpuColumnVector) => {
@@ -565,7 +576,6 @@ case class GpuMillisToTimestamp(child: Expression) extends GpuNumberToTimestampU
     case IntegerType | ShortType | ByteType =>
       (input: GpuColumnVector) => {
         withResource(input.getBase.castTo(DType.INT64)) { longs =>
-          checkLongMultiplicationOverflow(longs, DateTimeConstants.MICROS_PER_MILLIS)
           longs.asTimestampMilliseconds()
         }
       }
@@ -620,6 +630,19 @@ object GpuToTimestamp {
     "MMyyyy"
   )
 
+  // These patterns use the JNI parser's fractional-second and offset tokens. Their
+  // SimpleDateFormat equivalents have different semantics, so only CORRECTED is supported.
+  val CORRECTED_TIMESTAMP_FORMATS: Set[String] = (for {
+    separator <- Set(" ", "'T'")
+    fraction <- Set("", ".SSS")
+    offset <- Set("", "X", "XX", "XXX")
+  } yield s"yyyy-MM-dd${separator}HH:mm:ss$fraction$offset") -- CORRECTED_COMPATIBLE_FORMATS
+
+  // Formatting fractions does not depend on timeParserPolicy. Offsets need a separate
+  // formatter: cuDF's %z would describe UTC even after shifting to the session timezone.
+  val CORRECTED_FORMATTING_FORMATS: Set[String] = CORRECTED_COMPATIBLE_FORMATS ++
+    CORRECTED_TIMESTAMP_FORMATS.filterNot(_.endsWith("X"))
+
   // We are compatible with Spark for these formats when the timeParserPolicy is LEGACY. It
   // is possible that other formats may be supported but these are the only ones that we have
   // tests for.
@@ -666,12 +689,12 @@ object GpuToTimestamp {
   }
 
   // True iff the fused JNI parser handles this (sparkFormat, policy) combination.
-  // Today the JNI accepts every entry in CORRECTED_COMPATIBLE_FORMATS / LEGACY_COMPATIBLE_FORMATS.
   private def isSimpleSparkFormat(sparkFormat: String, isLegacy: Boolean): Boolean = {
     if (isLegacy) {
       LEGACY_COMPATIBLE_FORMATS.contains(sparkFormat)
     } else {
-      CORRECTED_COMPATIBLE_FORMATS.contains(sparkFormat)
+      CORRECTED_COMPATIBLE_FORMATS.contains(sparkFormat) ||
+        CORRECTED_TIMESTAMP_FORMATS.contains(sparkFormat)
     }
   }
 
@@ -682,11 +705,8 @@ object GpuToTimestamp {
     // as interchangeable, but Spark's DateTimeFormatter requires an exact match.
     // We also use cuDF isTimestamp to reject truly unparseable strings.
     //
-    // NOTE: Formats like "yyyy-MM-dd HH:mm:ss.SSS" cannot be added to
-    // CORRECTED_COMPATIBLE_FORMATS because cuDF's %3f requires exactly 3
-    // fractional digits, while Java's DateTimeFormatter accepts 1-3 digits
-    // (e.g. "11:59:59.9" is valid on CPU but rejected by cuDF). The
-    // incompatible path here is the correct fallback for such formats.
+    // Compatible fractional formats use JNI for Spark's fraction-width and separator
+    // validation rather than the permissive cuDF parsing path.
     if (strfFormat.startsWith("%Y-%m-%d %H") || strfFormat.startsWith("%Y/%m/%d %H")) {
       // The 4 element-wise GPU kernels below (matchesRe, not, isTimestamp, and) add
       // negligible overhead compared to the downstream parseStringAsTimestamp which
@@ -714,7 +734,8 @@ object GpuToTimestamp {
       strfFormat: String,
       dtype: DType,
       failOnError: Boolean,
-      exceptionPolicy: Boolean): ColumnVector = {
+      exceptionPolicy: Boolean,
+      zoneId: ZoneId): ColumnVector = {
 
     // `tsVector` will be closed in replaceSpecialDates
     val tsVector = if (isSimpleSparkFormat(sparkFormat, isLegacy = false)) {
@@ -725,8 +746,13 @@ object GpuToTimestamp {
         } else {
           CastStrings.TIME_PARSER_POLICY_CORRECTED
         }
-        CastStrings.parseTimestampWithFormat(
-          lhs.getBase, sparkFormat, parserPolicy)
+        if (!exceptionPolicy && CORRECTED_TIMESTAMP_FORMATS.contains(sparkFormat)) {
+          // Resolve local seconds in the session zone before checked microsecond arithmetic.
+          // Numeric offsets in the input override that zone, matching Spark's formatter.
+          CastStrings.parseTimestampWithFormatChecked(lhs.getBase, sparkFormat, zoneId)
+        } else {
+          CastStrings.parseTimestampWithFormat(lhs.getBase, sparkFormat, parserPolicy)
+        }
       } catch {
         case e: CastException =>
           throw QueryExecutionErrors.failToParseDateTimeInNewParserError(
@@ -811,6 +837,13 @@ abstract class GpuToTimestamp
 
   val failOnError: Boolean = SQLConf.get.ansiEnabled
 
+  private def usesCheckedParser: Boolean = timeParserPolicy == CorrectedTimeParserPolicy &&
+    CORRECTED_TIMESTAMP_FORMATS.contains(sparkFormat)
+
+  // Spark propagates arithmetic overflow even when ANSI is disabled or for try_to_timestamp.
+  override def hasSideEffects: Boolean = super.hasSideEffects || failOnError ||
+    (left.dataType == StringType && usesCheckedParser)
+
   override def doColumnar(lhs: GpuColumnVector, rhs: GpuScalar): ColumnVector = {
     val tmp = lhs.dataType match {
       case StringType =>
@@ -824,9 +857,10 @@ abstract class GpuToTimestamp
             strfFormat,
             DType.TIMESTAMP_MICROSECONDS,
             failOnError,
-            timeParserPolicy == ExceptionTimeParserPolicy)
+            timeParserPolicy == ExceptionTimeParserPolicy,
+            zoneId)
         }
-        if (GpuOverrides.isUTCTimezone(zoneId)) {
+        if (GpuOverrides.isUTCTimezone(zoneId) || usesCheckedParser) {
           res
         } else {
           withResource(res) { _ =>
@@ -909,7 +943,8 @@ case class GpuGetTimestamp(
     format: Expression,
     sparkFormat: String,
     strf: String,
-    timeZoneId: Option[String] = None) extends GpuToTimestamp {
+    timeZoneId: Option[String] = None,
+    override val failOnError: Boolean = SQLConf.get.ansiEnabled) extends GpuToTimestamp {
 
   override def strfFormat = strf
   override val downScaleFactor = 1
