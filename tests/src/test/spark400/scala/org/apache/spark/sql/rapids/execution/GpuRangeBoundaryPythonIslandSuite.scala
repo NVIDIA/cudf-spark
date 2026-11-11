@@ -37,6 +37,7 @@ import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.python.BatchEvalPythonExec
 import org.apache.spark.sql.functions.{col, lit}
 import org.apache.spark.sql.rapids.GpuFileSourceScanExec
+import org.apache.spark.sql.rapids.execution.python.{GpuArrowEvalPythonExec, GpuPythonUDF}
 import org.apache.spark.sql.types.{LongType, StringType}
 
 /**
@@ -116,6 +117,34 @@ class GpuRangeBoundaryPythonIslandSuite extends SparkQueryCompareTestSuite {
           GpuProjectExec(islandProject, scan)()),
         TargetSize(1073741824)),
       exportColumnarRdd = false)
+  }
+
+  private def gpuPythonUdfFixture(resultAttrName: String, deterministic: Boolean)
+      : (GpuPythonUDF, AttributeReference) = {
+    val (pythonUdf, attr) = pythonUdfFixture(resultAttrName, deterministic)
+    // The island child projects the scan payload, so the udf consumes that column as a plain
+    // attribute; pruning only inspects the island's result attributes.
+    val payloadAttr = AttributeReference("payload", StringType, nullable = true)()
+    val udf = GpuPythonUDF(
+      pythonUdf.name,
+      pythonUdf.func,
+      StringType,
+      Seq(payloadAttr),
+      PythonEvalType.SQL_ARROW_BATCHED_UDF,
+      pythonUdf.udfDeterministic,
+      attr.exprId)
+    (udf, attr)
+  }
+
+  private def arrowIslandPlan(
+      scan: GpuFileSourceScanExec,
+      udf: GpuPythonUDF,
+      resultAttr: Attribute): SparkPlan = {
+    val islandProject = scan.output.map { attr =>
+      AttributeReference(attr.name, attr.dataType, attr.nullable)(exprId = attr.exprId)
+    }.toList
+    GpuArrowEvalPythonExec(Seq(udf), Seq(resultAttr), GpuProjectExec(islandProject, scan)(),
+      PythonEvalType.SQL_ARROW_BATCHED_UDF)
   }
 
   private def ordering(keys: Seq[AttributeReference]): Seq[SortOrder] =
@@ -247,6 +276,45 @@ class GpuRangeBoundaryPythonIslandSuite extends SparkQueryCompareTestSuite {
         val scan = islandFixture(spark, path)
         val (udf, resultAttr) = pythonUdfFixture("udf_result", deterministic = false)
         val island = islandPlan(scan, udf, resultAttr)
+        val gpuResultAttr = AttributeReference(resultAttr.name, resultAttr.dataType,
+          resultAttr.nullable)(exprId = resultAttr.exprId)
+        val filtered = GpuFilterExec(GpuIsNotNull(gpuResultAttr), island)()
+
+        val boundKeys = bindKeysByName(scan.output,
+          "device_type_id" -> LongType, "country_iso_code" -> StringType,
+          "client_version" -> LongType)
+
+        val built = GpuRangeBoundaryPlan.build(filtered, ordering(boundKeys))
+        assert(built.isEmpty)
+      }, conf(pruneThroughOperators = true))
+    }
+  }
+
+  test("arrow island plan prunes through a nondeterministic udf no key or filter reads") {
+    withTempPath { path =>
+      withGpuSparkSession({ spark =>
+        val scan = islandFixture(spark, path)
+        val (udf, resultAttr) = gpuPythonUdfFixture("udf_result", deterministic = false)
+        val island = arrowIslandPlan(scan, udf, resultAttr)
+
+        val boundKeys = bindKeysByName(scan.output,
+          "device_type_id" -> LongType, "country_iso_code" -> StringType,
+          "client_version" -> LongType)
+
+        val built = GpuRangeBoundaryPlan.build(island, ordering(boundKeys))
+        assert(built.isDefined)
+        val boundary = built.get
+        assert(!boundary.exists(_.isInstanceOf[GpuArrowEvalPythonExec]))
+      }, conf(pruneThroughOperators = true))
+    }
+  }
+
+  test("arrow island plan is not pruned when a filter reads the nondeterministic udf output") {
+    withTempPath { path =>
+      withGpuSparkSession({ spark =>
+        val scan = islandFixture(spark, path)
+        val (udf, resultAttr) = gpuPythonUdfFixture("udf_result", deterministic = false)
+        val island = arrowIslandPlan(scan, udf, resultAttr)
         val gpuResultAttr = AttributeReference(resultAttr.name, resultAttr.dataType,
           resultAttr.nullable)(exprId = resultAttr.exprId)
         val filtered = GpuFilterExec(GpuIsNotNull(gpuResultAttr), island)()
