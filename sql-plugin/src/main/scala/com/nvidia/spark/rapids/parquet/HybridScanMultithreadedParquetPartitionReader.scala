@@ -23,6 +23,7 @@ import ai.rapids.cudf.{HostMemoryBuffer, ParquetOptions, Table}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
+import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.io.async.{AsyncMetrics, AsyncRunner, DecayReleaseResult, MemoryBoundedAsyncRunner}
 import com.nvidia.spark.rapids.jni.RmmSpark
 import com.nvidia.spark.rapids.jni.fileio.RapidsFileIO
@@ -245,9 +246,19 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
   /** Decode a pool thread's result on the task thread. The result stays the caller's to close. */
   private def decodeResult(result: HybridFileResult): Option[Table] = {
     val chunks = result.memBuffersAndSizes.head.hmbs
-    withResource(result.footer.getDataHostBuffer()) { footer =>
-      decodeFetched(footer,
-        new FetchedColumnChunks(result.rowGroups, chunks.safeMap(_.getDataHostBuffer())))
+    // While waiting for the task, the footer and chunks may have been moved to disk to free host
+    // memory. Reading them back allocates host memory again, which can fail while it is still
+    // short, so retry: a failed attempt frees what it read back and waits for memory.
+    val (footer, hostChunks) = withRetryNoSplit {
+      closeOnExcept(result.footer.getDataHostBuffer()) { f =>
+        (f, chunks.safeMap(_.getDataHostBuffer()))
+      }
+    }
+    withResource(footer) { _ =>
+      val fetched = closeOnExcept(hostChunks) { _ =>
+        new FetchedColumnChunks(result.rowGroups, hostChunks)
+      }
+      decodeFetched(footer, fetched)
     }
   }
 

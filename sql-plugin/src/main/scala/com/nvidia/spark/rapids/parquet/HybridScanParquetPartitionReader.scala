@@ -139,8 +139,13 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
     if (inSplit.isEmpty || ast.isEmpty) {
       inSplit
     } else {
+      // Runs on the GPU without the semaphore, as it exists to bound large allocations. This
+      // only allocates a few bytes per row group and frees them before returning. 
+      // The retry covers an OOM when other tasks have filled the GPU.
       val afterStats = NvtxRegistry.HYBRID_SCAN_FILTER_STATS {
-        reader.filterRowGroupsWithStats(inSplit)
+        withRetryNoSplit[Array[Int]] {
+          reader.filterRowGroupsWithStats(inSplit)
+        }
       }
       logDebug(s"HybridScan statistics pruning: ${inSplit.length} -> ${afterStats.length} " +
         "row groups")
