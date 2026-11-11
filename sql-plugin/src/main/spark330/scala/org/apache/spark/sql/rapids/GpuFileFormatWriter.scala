@@ -15,12 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "330"}
-{"spark": "330db"}
-{"spark": "331"}
-{"spark": "332"}
-{"spark": "333"}
-{"spark": "334"}
+{"spark":["330"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids
 
@@ -99,7 +94,8 @@ object GpuFileFormatWriter extends Logging {
       concurrentWriterPartitionFlushSize: Long,
       forceHiveHashForBucketing: Boolean = false,
       numStaticPartitionCols: Int = 0,
-      baseDebugOutputPath: Option[String]): Set[String] = {
+      baseDebugOutputPath: Option[String],
+      beforeSetupJob: () => Unit = () => ()): Set[String] = {
     require(partitionColumns.size >= numStaticPartitionCols)
 
     val job = Job.getInstance(hadoopConf)
@@ -182,6 +178,8 @@ object GpuFileFormatWriter extends Logging {
     // propagate the description UUID into the jobs, so that committers
     // get an ID guaranteed to be unique.
     job.getConfiguration.set("spark.sql.sources.writeJobUUID", description.uuid)
+
+    beforeSetupJob()
 
     // This call shouldn't be put into the `try` block below because it only initializes and
     // prepares the job, any exception thrown from here shouldn't cause abortJob() to be called.

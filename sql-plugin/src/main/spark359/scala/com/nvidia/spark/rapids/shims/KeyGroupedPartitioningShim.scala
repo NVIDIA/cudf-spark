@@ -14,11 +14,8 @@
  * limitations under the License.
  */
 /*** spark-rapids-shim-json-lines
-{"spark": "359"}
-{"spark": "403"}
-{"spark": "404"}
-{"spark": "412"}
-{"spark": "413"}
+{"spark":["359"],"carryForward":"sameMinor"}
+{"spark":["403"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
@@ -32,6 +29,21 @@ object KeyGroupedPartitioningShim {
       partitionValues: Seq[InternalRow],
       isPartiallyClustered: Boolean): KeyGroupedPartitioning = {
     p.copy(
+      numPartitions = partitionValues.length,
+      partitionValues = partitionValues,
+      isPartiallyClustered = isPartiallyClustered)
+  }
+
+  def copyForOutputPartitioning(
+      p: KeyGroupedPartitioning,
+      joinKeyPositions: Option[Seq[Int]],
+      partitionValues: Seq[InternalRow],
+      isPartiallyClustered: Boolean): KeyGroupedPartitioning = {
+    val expressions = joinKeyPositions
+      .map(_.map(p.expressions(_)))
+      .getOrElse(p.expressions)
+    p.copy(
+      expressions = expressions,
       numPartitions = partitionValues.length,
       partitionValues = partitionValues,
       isPartiallyClustered = isPartiallyClustered)

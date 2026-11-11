@@ -16,15 +16,13 @@
 
 package org.apache.spark.sql.rapids
 
-import java.util.concurrent.atomic.AtomicBoolean
-
 import scala.collection.mutable.ArrayBuffer
 import scala.util.{Failure, Success, Try}
 
-import ai.rapids.cudf.{Cuda, MemoryBuffer, Rmm}
-import com.nvidia.spark.rapids.{GpuCompressedColumnVector, GpuPackedTableColumn, RapidsConf,
-  RmmSparkRetrySuiteBase, ShuffleBufferCatalog, ShuffleBufferCatalogTestUtils,
-  TableCompressionCodec, WithTableBuffer}
+import ai.rapids.cudf.{Cuda, DeviceMemoryBuffer, Rmm, Table}
+import com.nvidia.spark.rapids.{GpuColumnVector, GpuCompressedColumnVector, GpuPackedTableColumn,
+  MetaUtils, RapidsConf, RmmSparkRetrySuiteBase, ShuffleBufferCatalog,
+  ShuffleBufferCatalogTestUtils, TableCompressionCodec, TestUtils}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.format.CodecType
@@ -67,8 +65,8 @@ class RapidsCachingWriterSuite extends RmmSparkRetrySuiteBase with MockitoSugar 
     }
   }
 
-  private def compressedBatch(rows: Int): ColumnarBatch = {
-    val codec = TableCompressionCodec.getCodec(CodecType.COPY,
+  private def compressedBatch(rows: Int, codecId: Byte = CodecType.COPY): ColumnarBatch = {
+    val codec = TableCompressionCodec.getCodec(codecId,
       TableCompressionCodec.makeCodecConfig(new RapidsConf(new SparkConf)))
     withResource(codec.createBatchCompressor(0, Cuda.DEFAULT_STREAM)) { compressor =>
       compressor.addTableToCompress(RapidsShuffleTestHelper.buildContiguousTable(rows))
@@ -106,8 +104,7 @@ class RapidsCachingWriterSuite extends RmmSparkRetrySuiteBase with MockitoSugar 
    * Feeds `inputs` to the writer, building each batch when the writer asks for it, as an
    * upstream operator does, then fails the map task's input if `thenFail`. `afterFirstBatch` runs
    * once the first batch is cached, and `afterLastBatch` once every batch is. Afterwards the
-   * batches are closed as the shuffle exchange closes them, except compressed ones, which the
-   * catalog has already closed.
+   * batches are closed as the shuffle exchange closes them.
    */
   private def write(
       writer: RapidsCachingWriter[Int, ColumnarBatch],
@@ -139,7 +136,7 @@ class RapidsCachingWriterSuite extends RmmSparkRetrySuiteBase with MockitoSugar 
     try {
       writer.write(records ++ failure)
     } finally {
-      built.filterNot(GpuCompressedColumnVector.isBatchCompressed).safeClose()
+      built.safeClose()
     }
   }
 
@@ -356,56 +353,6 @@ class RapidsCachingWriterSuite extends RmmSparkRetrySuiteBase with MockitoSugar 
     assertConsistent(catalog, 0)
   }
 
-  Seq(Packed, Compressed).foreach { kind =>
-    test(s"a failed writer leaves nothing behind when closing its $kind input fails") {
-      val catalog = new ShuffleBufferCatalog()
-      val survivors = Seq(Input(0, 10, Packed), Input(1, 11, Compressed))
-      succeed(newWriter(catalog, 1, 10L), survivors)
-      // an earlier attempt that shares the map id, as with spark.shuffle.useOldFetchProtocol=true,
-      // also owns the block whose add fails
-      val committed = Seq(Input(0, 12, Packed))
-      succeed(newWriter(catalog, 1, 11L), committed)
-      val deviceHandlesBefore = numDeviceHandles
-      val deviceBytesBefore = Rmm.getTotalBytesAllocated
-      val failed = newWriter(catalog, 1, 11L)
-      val cachedInput = Input(1, 31, Compressed)
-      val closeFailsInput = Input(0, 30, kind)
-      val cached = cachedInput.build()
-      val closeFails = closeFailsInput.build()
-      val buffer = closeFails.column(0).asInstanceOf[WithTableBuffer].getTableBuffer
-      val armed = new AtomicBoolean(true)
-      buffer.setEventHandler(new MemoryBuffer.EventHandler {
-        override def onClosed(refCount: Int): Unit = {
-          if (armed.getAndSet(false)) {
-            throw new IllegalStateException("injected input close failure")
-          }
-        }
-      })
-      try {
-        val e = intercept[IllegalStateException] {
-          failed.write(Iterator(1 -> cached, 0 -> closeFails))
-        }
-        assertResult("injected input close failure")(e.getMessage)
-        assert(failed.stop(false).isEmpty)
-        assertResult(deviceHandlesBefore, "device buffers left after the cleanup")(
-          numDeviceHandles)
-        assertResult(0, "references left on the input whose close failed")(buffer.getRefCount)
-        assertResult(deviceBytesBefore)(Rmm.getTotalBytesAllocated)
-        assertConsistent(catalog, survivors.size + committed.size)
-        assertGone(catalog, 1, 11L, Seq(cachedInput))
-        assertReadable(catalog, 1, 11L, committed)
-        assertReadable(catalog, 1, 10L, survivors)
-      } finally {
-        // The adds closed both inputs, and the failing close dropped its reference before it
-        // threw, so neither input is closed again here.
-        buffer.setEventHandler(null)
-        catalog.unregisterShuffle(1)
-      }
-      assertResult(0)(numDeviceHandles)
-      assertConsistent(catalog, 0)
-    }
-  }
-
   // With spark.shuffle.useOldFetchProtocol=true every attempt of a map partition writes the same
   // blocks, and the executor serves the first attempt to commit, as Spark's sort shuffle does.
   private val firstAttempt = Seq(Input(0, 50, Packed), Input(0, 51, Compressed),
@@ -475,6 +422,124 @@ class RapidsCachingWriterSuite extends RmmSparkRetrySuiteBase with MockitoSugar 
       afterLastBatch = () => catalog.unregisterShuffle(1)))
     assertResult(firstAttempt.size)(writer.numRecordedBuffers)
     assert(writer.stop(false).isEmpty)
+    assertResult(0)(numDeviceHandles)
+    assertConsistent(catalog, 0)
+  }
+
+  // the kinds of batch a writer caches on the device, with the codec of each compressed one
+  private val deviceKinds: Seq[(String, Option[Byte])] = Seq("packed" -> None,
+    "COPY" -> Some(CodecType.COPY), "LZ4" -> Some(CodecType.NVCOMP_LZ4),
+    "ZSTD" -> Some(CodecType.NVCOMP_ZSTD))
+
+  /** A batch of `rows` rows, packed or compressed with `codecId`, and its device buffer. */
+  private def deviceBatch(codecId: Option[Byte], rows: Int): (ColumnarBatch, DeviceMemoryBuffer) =
+    codecId match {
+      case None =>
+        val ct = RapidsShuffleTestHelper.buildContiguousTable(rows)
+        (GpuPackedTableColumn.from(ct), ct.getBuffer)
+      case Some(id) =>
+        val batch = compressedBatch(rows, id)
+        (batch, batch.column(0).asInstanceOf[GpuCompressedColumnVector].getTableBuffer)
+    }
+
+  /** Asserts that a batch read back, compressed or not, holds the rows it was built with. */
+  private def assertRows(batch: ColumnarBatch, rows: Int): Unit = {
+    def check(table: Table): Unit =
+      withResource(RapidsShuffleTestHelper.buildContiguousTable(rows)) { expected =>
+        TestUtils.compareColumns(expected.getTable.getColumn(0), table.getColumn(0))
+      }
+    if (GpuCompressedColumnVector.isBatchCompressed(batch)) {
+      val column = batch.column(0).asInstanceOf[GpuCompressedColumnVector]
+      val meta = column.getTableMeta
+      val codec = TableCompressionCodec.getCodec(meta.bufferMeta.codecBufferDescrs(0).codec,
+        TableCompressionCodec.makeCodecConfig(new RapidsConf(new SparkConf)))
+      withResource(codec.createBatchDecompressor(0, Cuda.DEFAULT_STREAM)) { decompressor =>
+        // the decompressor closes the buffer it is given
+        column.getTableBuffer.incRefCount()
+        decompressor.addBufferToDecompress(column.getTableBuffer, meta.bufferMeta)
+        withResource(decompressor.finishAsync()) { decoded =>
+          withResource(MetaUtils.getTableFromMeta(decoded.head, meta))(check)
+        }
+      }
+    } else {
+      withResource(GpuColumnVector.from(batch))(check)
+    }
+  }
+
+  /** Reads back the one batch map 10 of shuffle 1 cached for partition 0, and checks it. */
+  private def readBack(catalog: ShuffleBufferCatalog, rows: Int): String = Try {
+    val block = ShuffleBlockId(1, 10L, 0)
+    withResource(catalog.getColumnarBatchIterator(block, sparkTypes).toArray) { batches =>
+      assertResult(1)(batches.length)
+      assertRows(batches.head, rows)
+    }
+  }.fold(e => s"failed: $e", _ => "ok")
+
+  deviceKinds.foreach { case (kind, codecId) =>
+    test(s"a $kind batch the producer closed after the write reads back and removes cleanly") {
+      val rows = 1000
+      val deviceBytesBefore = Rmm.getTotalBytesAllocated
+      val catalog = new ShuffleBufferCatalog()
+      val writer = newWriter(catalog, 1, 10L)
+      val (batch, buffer) = deviceBatch(codecId, rows)
+      writer.write(Iterator(0 -> batch))
+      assert(writer.stop(true).isDefined)
+      // GpuShuffleExchangeExecBase's partNextBatch closes every batch it handed the writer
+      batch.close()
+      val afterProducerClose = buffer.getRefCount
+      // a freed buffer is not read, since that touches freed device memory
+      val read = if (afterProducerClose < 1) "skipped" else readBack(catalog, rows)
+      val unregister = Try(catalog.unregisterShuffle(1)).fold(e => s"threw: $e", _ => "ok")
+      val afterUnregister = buffer.getRefCount
+      val bytesLeft = Rmm.getTotalBytesAllocated - deviceBytesBefore
+      assertResult((1, "ok", "ok", 0, 0L), "(references after the producer's close, read, " +
+        "unregister, references after it, device bytes left)")(
+        (afterProducerClose, read, unregister, afterUnregister, bytesLeft))
+    }
+
+    test(s"a $kind batch spills only after the producer closes it, and its rows read back") {
+      val rows = 1000
+      val deviceBytesBefore = Rmm.getTotalBytesAllocated
+      val catalog = new ShuffleBufferCatalog()
+      val (batch, _) = deviceBatch(codecId, rows)
+      newWriter(catalog, 1, 10L).write(Iterator(0 -> batch))
+      val stores = SpillFramework.stores
+      val spilledAfterWrite = stores.deviceStore.spill(Long.MaxValue)
+      // GpuShuffleExchangeExecBase's partNextBatch closes every batch it handed the writer
+      val producerClose = Try(batch.close()).fold(e => s"threw: $e", _ => "ok")
+      val spilledAfterClose = stores.deviceStore.spill(Long.MaxValue)
+      info(s"spilled $spilledAfterWrite bytes after the write, $spilledAfterClose after the close")
+      val read = readBack(catalog, rows)
+      val unregister = Try(catalog.unregisterShuffle(1)).fold(e => s"threw: $e", _ => "ok")
+      val bytesLeft = Rmm.getTotalBytesAllocated - deviceBytesBefore
+      val handles = (stores.deviceStore.numHandles, stores.hostStore.numHandles)
+      assertResult((0L, "ok", true, "ok", "ok", 0L, (0, 0)), "(bytes spilled while the " +
+        "producer held the batch, producer's close, a spill after it moved bytes, read, " +
+        "unregister, device bytes left, (device handles, host handles))")(
+        (spilledAfterWrite, producerClose, spilledAfterClose > 0, read, unregister, bytesLeft,
+          handles))
+    }
+  }
+
+  test("when map ids repeat, a commit after unregisterShuffle fails even if the shuffle was " +
+      "registered again") {
+    // another map task of the shuffle can register it again before a zombie task commits
+    val catalog = new ShuffleBufferCatalog(mapIdsCanRepeat = true)
+    val writer = newWriter(catalog, 1, 7L)
+    assertThrows[IllegalStateException](write(writer, firstAttempt, afterLastBatch = () => {
+      catalog.unregisterShuffle(1)
+      catalog.registerShuffle(1)
+    }))
+    assertResult(firstAttempt.size)(writer.numRecordedBuffers)
+    assert(writer.stop(false).isEmpty)
+    assertResult(0)(numDeviceHandles)
+    assertConsistent(catalog, 0)
+    val later = newWriter(catalog, 1, 7L)
+    succeed(later, laterAttempt)
+    assertReadable(catalog, 1, 7L, laterAttempt)
+    // a record of the failed commit would be served instead, with no output for partition 2
+    assert(later.partitionSizes(2) > 0)
+    catalog.unregisterShuffle(1)
     assertResult(0)(numDeviceHandles)
     assertConsistent(catalog, 0)
   }

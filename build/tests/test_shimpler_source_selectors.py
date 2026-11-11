@@ -29,26 +29,31 @@ class SourceSelectorTest(unittest.TestCase):
         self.graph = {'401': None, '402': '401', '402emr': '402',
                       '420': None, '500': '420'}
 
-    def test_legacy_exact_and_component_preservation(self):
-        selector = parse_selector_line('{"spark":"402", "iceberg":{"introduced":"19x"}}',
-                                       self.graph)
-        self.assertEqual(selector.kind, 'exact')
-        self.assertEqual(selector.targets, ('402',))
-        self.assertEqual(selector.other_components, {'iceberg': {'introduced': '19x'}})
+    def test_unknown_component_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'Unknown shim selector fields: iceberg'):
+            parse_selector_line('{"spark":["402"],"carryForward":"none",'
+                                '"iceberg":{"introduced":"19x"}}', self.graph)
 
-    def test_introduced_and_only(self):
-        introduced = parse_selector_line('{"spark":{"introduced":["401","420"]}}', self.graph)
-        only = parse_selector_line('{"spark":{"only":"402"}}', self.graph)
-        self.assertEqual(introduced.kind, 'introduced')
-        self.assertEqual(introduced.targets, ('401', '420'))
-        self.assertEqual(only.kind, 'only')
-        self.assertEqual(only.targets, ('402',))
+    def test_exact_and_descendant_membership(self):
+        descendants = parse_selector_line(
+            '{"spark":["401","420"],"carryForward":"all"}', self.graph)
+        exact = parse_selector_line(
+            '{"spark":["402","402emr"],"carryForward":"none"}', self.graph)
+        self.assertEqual(descendants.kind, 'descendants')
+        self.assertEqual(descendants.targets, ('401', '420'))
+        self.assertEqual(exact.kind, 'exact')
+        self.assertEqual(exact.targets, ('402', '402emr'))
 
     def test_rejects_unknown_or_ambiguous_selectors(self):
-        for line in ('{"spark":"999"}', '{"spark":{"introduced":"999"}}',
-                     '{"spark":{"introduced":"401","only":"402"}}',
-                     '{"spark":{"introduced":[]}}',
-                     '{"spark":{"introduced":["401","401"]}}'):
+        for line in ('{"spark":["999"],"carryForward":"none"}',
+                     '{"spark":{"introduced":"401"}}',
+                     '{"spark":{"only":"402"}}',
+                     '{"spark":[],"carryForward":"all"}',
+                     '{"spark":["401","401"],"carryForward":"all"}',
+                     '{"spark":["401","420"]}',
+                     '{"spark":["401"],"includeDescendantShims":1}',
+                     '{"spark":"401","carryForward":"all"}',
+                     '{"spark":"401"}'):
             with self.assertRaises(ValueError):
                 parse_selector_line(line, self.graph)
 
@@ -66,12 +71,16 @@ class SourceSelectorTest(unittest.TestCase):
             derive_introductions(self.graph, {'999'})
 
     def test_unmapped_legacy_target_can_be_preserved_during_public_scan(self):
-        selector = parse_selector_line('{"spark":"330db"}', self.graph,
-                                       allow_unmapped_exact=True)
+        selector = parse_selector_line(
+            '{"spark":["330db"],"carryForward":"none"}', self.graph,
+            {'330db'})
         self.assertEqual(selector.targets, ('330db',))
         with self.assertRaisesRegex(ValueError, 'Unknown Spark selector target 330db'):
-            parse_selector_line('{"spark":{"introduced":"330db"}}', self.graph,
-                                allow_unmapped_exact=True)
+            parse_selector_line('{"spark":["330db"],"carryForward":"all"}',
+                                self.graph, {'330db'})
+        with self.assertRaisesRegex(ValueError, 'Unknown Spark selector target 4O4'):
+            parse_selector_line('{"spark":["4O4"],"carryForward":"none"}',
+                                self.graph, {'330db'})
 
 
 if __name__ == '__main__':

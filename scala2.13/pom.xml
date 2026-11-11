@@ -125,6 +125,7 @@
             </activation>
             <properties>
                 <buildver>331</buildver>
+                <shim.source.inherits>330</shim.source.inherits>
                 <spark.version>${spark331.version}</spark.version>
                 <parquet.hadoop.version>1.12.2</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-21x</rapids.delta.artifactId1>
@@ -149,6 +150,7 @@
             </activation>
             <properties>
                 <buildver>332</buildver>
+                <shim.source.inherits>331</shim.source.inherits>
                 <spark.version>${spark332.version}</spark.version>
                 <parquet.hadoop.version>1.12.2</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-21x</rapids.delta.artifactId1>
@@ -173,6 +175,7 @@
             </activation>
             <properties>
                 <buildver>333</buildver>
+                <shim.source.inherits>332</shim.source.inherits>
                 <spark.version>${spark333.version}</spark.version>
                 <parquet.hadoop.version>1.12.2</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-21x</rapids.delta.artifactId1>
@@ -197,6 +200,7 @@
             </activation>
             <properties>
                 <buildver>334</buildver>
+                <shim.source.inherits>333</shim.source.inherits>
                 <spark.version>${spark334.version}</spark.version>
                 <parquet.hadoop.version>1.12.2</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-21x</rapids.delta.artifactId1>
@@ -221,6 +225,7 @@
             </activation>
             <properties>
                 <buildver>340</buildver>
+                <shim.source.inherits>334</shim.source.inherits>
                 <spark.version>${spark340.version}</spark.version>
                 <parquet.hadoop.version>1.12.3</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-24x</rapids.delta.artifactId1>
@@ -241,6 +246,7 @@
             </activation>
             <properties>
                 <buildver>341</buildver>
+                <shim.source.inherits>340</shim.source.inherits>
                 <spark.version>${spark341.version}</spark.version>
                 <parquet.hadoop.version>1.12.3</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-24x</rapids.delta.artifactId1>
@@ -261,6 +267,7 @@
             </activation>
             <properties>
                 <buildver>342</buildver>
+                <shim.source.inherits>341</shim.source.inherits>
                 <spark.version>${spark342.version}</spark.version>
                 <parquet.hadoop.version>1.12.3</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-24x</rapids.delta.artifactId1>
@@ -281,6 +288,7 @@
             </activation>
             <properties>
                 <buildver>343</buildver>
+                <shim.source.inherits>342</shim.source.inherits>
                 <spark.version>${spark343.version}</spark.version>
                 <parquet.hadoop.version>1.12.3</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-24x</rapids.delta.artifactId1>
@@ -301,6 +309,7 @@
             </activation>
             <properties>
                 <buildver>344</buildver>
+                <shim.source.inherits>343</shim.source.inherits>
                 <spark.version>${spark344.version}</spark.version>
                 <parquet.hadoop.version>1.12.3</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-24x</rapids.delta.artifactId1>
@@ -374,6 +383,7 @@
             </activation>
             <properties>
                 <buildver>351</buildver>
+                <shim.source.inherits>350</shim.source.inherits>
                 <spark.version>${spark351.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-stub</rapids.delta.artifactId1>
@@ -396,6 +406,7 @@
             </activation>
             <properties>
                 <buildver>352</buildver>
+                <shim.source.inherits>351</shim.source.inherits>
                 <spark.version>${spark352.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-stub</rapids.delta.artifactId1>
@@ -418,6 +429,7 @@
             </activation>
             <properties>
                 <buildver>353</buildver>
+                <shim.source.inherits>352</shim.source.inherits>
                 <spark.version>${spark353.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-33x</rapids.delta.artifactId1>
@@ -440,6 +452,7 @@
             </activation>
             <properties>
                 <buildver>354</buildver>
+                <shim.source.inherits>353</shim.source.inherits>
                 <spark.version>${spark354.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-33x</rapids.delta.artifactId1>
@@ -465,6 +478,7 @@
             </activation>
             <properties>
                 <buildver>355</buildver>
+                <shim.source.inherits>354</shim.source.inherits>
                 <spark.version>${spark355.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-33x</rapids.delta.artifactId1>
@@ -490,6 +504,7 @@
             </activation>
             <properties>
                 <buildver>356</buildver>
+                <shim.source.inherits>355</shim.source.inherits>
                 <spark.version>${spark356.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-33x</rapids.delta.artifactId1>
@@ -515,6 +530,7 @@
             </activation>
             <properties>
                 <buildver>357</buildver>
+                <shim.source.inherits>356</shim.source.inherits>
                 <spark.version>${spark357.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-33x</rapids.delta.artifactId1>
@@ -540,6 +556,7 @@
             </activation>
             <properties>
                 <buildver>358</buildver>
+                <shim.source.inherits>357</shim.source.inherits>
                 <spark.version>${spark358.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-33x</rapids.delta.artifactId1>
@@ -638,6 +655,7 @@
             </activation>
             <properties>
                 <buildver>401</buildver>
+                <shim.source.inherits>400</shim.source.inherits>
                 <spark.version>${spark401.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-40x</rapids.delta.artifactId1>
@@ -693,6 +711,7 @@
             </activation>
             <properties>
                 <buildver>403</buildver>
+                <shim.source.inherits>402</shim.source.inherits>
                 <spark.version>${spark403.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-40x</rapids.delta.artifactId1>
@@ -718,6 +737,7 @@
             </activation>
             <properties>
                 <buildver>404</buildver>
+                <shim.source.inherits>403</shim.source.inherits>
                 <spark.version>${spark404.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-40x</rapids.delta.artifactId1>
@@ -731,6 +751,29 @@
                 <module>delta-lake/delta-40x</module>
                 <module>iceberg/iceberg-1-10-x</module>
                 <module>iceberg/iceberg-1-11-x</module>
+            </modules>
+        </profile>
+        <profile>
+            <id>release405</id>
+            <activation>
+                <property>
+                    <name>buildver</name>
+                    <value>405</value>
+                </property>
+            </activation>
+            <properties>
+                <buildver>405</buildver>
+                <shim.source.inherits>404</shim.source.inherits>
+                <spark.version>${spark405.version}</spark.version>
+                <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
+                <rapids.delta.artifactId1>rapids-4-spark-delta-stub</rapids.delta.artifactId1>
+                <iceberg.artifact.suffix>${spark40x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
+                <iceberg.runtime.version>${iceberg.110x.version}</iceberg.runtime.version>
+                <slf4j.version>2.0.7</slf4j.version>
+            </properties>
+            <modules>
+                <module>delta-lake/delta-stub</module>
+                <module>iceberg/iceberg-stub</module>
             </modules>
         </profile>
         <profile>
@@ -781,6 +824,7 @@
             </activation>
             <properties>
                 <buildver>411</buildver>
+                <shim.source.inherits>404</shim.source.inherits>
                 <spark.version>${spark411.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-41x</rapids.delta.artifactId1>
@@ -829,6 +873,7 @@
             </activation>
             <properties>
                 <buildver>412</buildver>
+                <shim.source.inherits>411</shim.source.inherits>
                 <spark.version>${spark412.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-41x</rapids.delta.artifactId1>
@@ -871,6 +916,7 @@
             </activation>
             <properties>
                 <buildver>413</buildver>
+                <shim.source.inherits>412</shim.source.inherits>
                 <spark.version>${spark413.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
                 <rapids.delta.artifactId1>rapids-4-spark-delta-41x</rapids.delta.artifactId1>
@@ -1078,7 +1124,7 @@
         <rapids.module>.</rapids.module>
         <spark.rapids.product.name>RAPIDS Accelerator for Apache Spark</spark.rapids.product.name>
         <allowConventionalDistJar>false</allowConventionalDistJar>
-        <rapids.shimplify.skip>false</rapids.shimplify.skip>
+        <rapids.shim.sources.skip>false</rapids.shim.sources.skip>
         <rapids.build.info.skip>false</rapids.build.info.skip>
         <buildver>330</buildver>
         <spark.avro.copy.skip>false</spark.avro.copy.skip>
@@ -1096,6 +1142,7 @@
         <cudf-spark-jni.version>26.12.0-SNAPSHOT</cudf-spark-jni.version>
         <cudf-spark-jni.artifactId>cudf-spark-jni</cudf-spark-jni.artifactId>
         <cudf-spark-private.version>26.12.0-SNAPSHOT</cudf-spark-private.version>
+        <history-metrics.version>26.12.0-SNAPSHOT</history-metrics.version>
         <cudf-spark-private.artifactId>cudf-spark-private_${scala.binary.version}</cudf-spark-private.artifactId>
         <scala.binary.version>2.13</scala.binary.version>
         <scala.recompileMode>incremental</scala.recompileMode>
@@ -1178,6 +1225,7 @@
         <spark402.version>4.0.2</spark402.version>
         <spark403.version>4.0.3</spark403.version>
         <spark404.version>4.0.4</spark404.version>
+        <spark405.version>4.0.5</spark405.version>
         <spark410db183.version>4.1.0-databricks-183</spark410db183.version>
         <spark411.version>4.1.1</spark411.version>
         <spark412.version>4.1.2</spark412.version>
@@ -1204,7 +1252,7 @@
         <maven.clean.plugin.version>3.1.0</maven.clean.plugin.version>
         <maven.scaladoc.skip>false</maven.scaladoc.skip>
         <maven.scalastyle.skip>false</maven.scalastyle.skip>
-        <rapids.shimplify.skip>false</rapids.shimplify.skip>
+        <rapids.shim.sources.skip>false</rapids.shim.sources.skip>
         <dist.jar.compress>true</dist.jar.compress>
         <!--
         This property is used to in aggregator module to determine the artifactId of iceberg
@@ -1272,7 +1320,6 @@
             400,
             401
         </jdk17.scala213.buildvers>
-        <shimplify.shims/>
         <cpd.sourceType>main</cpd.sourceType>
         <!-- SPARK-36796 for JDK-17 test-->
         <extraJavaTestArgs>
@@ -1485,69 +1532,80 @@
                   <version>3.1.0</version>
                   <executions>
                     <execution>
-                        <id>shimplify-shim-sources</id>
+                        <id>generate-inherited-shim-sources</id>
                         <goals><goal>run</goal></goals>
                         <phase>generate-sources</phase>
                         <configuration>
-                            <skip>${rapids.shimplify.skip}</skip>
+                            <skip>${rapids.shim.sources.skip}</skip>
                             <target xmlns:ac="antlib:net.sf.antcontrib">
                                 <!-- Most modules have no versioned shim sources. Avoid loading Jython. -->
-                                <resourcecount property="rapids.shimplify.sources.count">
-                                    <fileset dir="${shimplify.src.basedir}">
+                                <resourcecount property="rapids.shim.sources.count">
+                                    <fileset dir="${shim.source.module.basedir}">
                                         <include name="src/main/spark*/**"/>
                                         <include name="src/test/spark*/**"/>
                                     </fileset>
                                 </resourcecount>
                                 <ac:if>
-                                    <equals arg1="${rapids.shimplify.sources.count}" arg2="0"/>
+                                    <equals arg1="${rapids.shim.sources.count}" arg2="0"/>
                                     <then>
-                                        <echo>No shim sources: skipping Shimplify</echo>
+                                        <echo>No versioned shim sources: skipping generation</echo>
                                     </then>
                                     <else>
                                         <!-- Include paths, contents, and generator scripts in the cache key.
                                              Keep checksum sidecars under target. -->
-                                        <checksum totalproperty="rapids.shimplify.sources.checksum"
+                                        <checksum totalproperty="rapids.shim.sources.checksum"
                                                   forceOverwrite="true"
-                                                  todir="${project.build.directory}/shimplify-checksums">
-                                            <fileset dir="${shimplify.src.basedir}">
+                                                  todir="${project.build.directory}/shim-source-checksums">
+                                            <fileset dir="${shim.source.module.basedir}">
                                                 <include name="src/main/spark*/**"/>
                                                 <include name="src/test/spark*/**"/>
                                             </fileset>
                                         </checksum>
                                         <checksum file="${spark.rapids.source.basedir}/build/dyn_shim_detection.py"
-                                                  property="rapids.shimplify.detection.checksum"/>
-                                        <checksum file="${spark.rapids.source.basedir}/build/shimplify.py"
-                                                  property="rapids.shimplify.generator.checksum"/>
-                                        <checksum file="${spark.rapids.source.basedir}/build/shimpler_source_graph.py"
-                                                  property="rapids.shimpler.source.graph.checksum"/>
+                                                  property="rapids.shim.sources.detection.checksum"/>
+                                        <checksum file="${spark.rapids.source.basedir}/build/shim_source_task.py"
+                                                  property="rapids.shim.sources.task.checksum"/>
+                                        <checksum totalproperty="rapids.shim.sources.tools.checksum"
+                                                  forceOverwrite="true"
+                                                  todir="${project.build.directory}/shim-source-checksums">
+                                            <fileset dir="${spark.rapids.source.basedir}">
+                                                <include name="build/shimpler_source_graph.py"/>
+                                                <include name="build/shimpler_source_selectors.py"/>
+                                                <include name="build/shimpler_source_resolver.py"/>
+                                                <include name="build/shimpler_source_generator.py"/>
+                                                <include name="build/shimpler_source_targets.py"/>
+                                            </fileset>
+                                        </checksum>
                                         <checksum file="${spark.rapids.source.basedir}/build/get_buildvers.py"
-                                                  property="rapids.shimplify.buildvers.checksum"/>
-                                        <checksum file="${spark.rapids.project.basedir}/pom.xml"
-                                                  property="rapids.shimplify.pom.checksum"/>
-                                        <property name="rapids.shimplify.cache.marker"
-                                                  value="${spark.shim.dest}/.shimplify-${rapids.shimplify.sources.checksum}-${rapids.shimplify.detection.checksum}-${rapids.shimplify.generator.checksum}-${rapids.shimpler.source.graph.checksum}-${rapids.shimplify.buildvers.checksum}-${rapids.shimplify.pom.checksum}"/>
-                                        <available file="${rapids.shimplify.cache.marker}"
-                                                   property="rapids.shimplify.cache.hit"/>
+                                                  property="rapids.shim.sources.buildvers.checksum"/>
+                                        <checksum totalproperty="rapids.shim.sources.pom.checksum"
+                                                  forceOverwrite="true"
+                                                  todir="${project.build.directory}/shim-source-checksums">
+                                            <fileset dir="${spark.rapids.source.basedir}">
+                                                <include name="pom.xml"/>
+                                                <include name="scala2.13/pom.xml"/>
+                                            </fileset>
+                                        </checksum>
+                                        <property name="rapids.shim.sources.cache.marker"
+                                                  value="${spark.shim.dest}/.shim-sources-${rapids.shim.sources.checksum}-${rapids.shim.sources.detection.checksum}-${rapids.shim.sources.task.checksum}-${rapids.shim.sources.tools.checksum}-${rapids.shim.sources.buildvers.checksum}-${rapids.shim.sources.pom.checksum}"/>
+                                        <available file="${rapids.shim.sources.cache.marker}"
+                                                   property="rapids.shim.sources.cache.hit"/>
                                         <property name="dyn.shim.buildver" value="all.buildvers"/>
                                         <ac:if>
-                                            <or>
-                                                <equals arg1="${shimplify}" arg2="true"/>
-                                                <not><isset property="rapids.shimplify.cache.hit"/></not>
-                                            </or>
+                                            <not><isset property="rapids.shim.sources.cache.hit"/></not>
                                             <then>
-                                                <script language="jython" src="${spark.rapids.source.basedir}/build/dyn_shim_detection.py"/>
-                                                <scriptdef name="shimplify" language="jython" src="${spark.rapids.source.basedir}/build/shimplify.py">
-                                                    <attribute name="if"/>
-                                                </scriptdef>
-                                                <shimplify if="shimplify"/>
                                                 <delete quiet="true">
-                                                    <fileset dir="${spark.shim.dest}" includes=".shimplify-*"/>
+                                                    <fileset dir="${spark.shim.dest}" includes=".shim-sources-*"/>
                                                 </delete>
+                                                <script language="jython" src="${spark.rapids.source.basedir}/build/dyn_shim_detection.py"/>
+                                                <scriptdef name="generateShimSources" language="jython"
+                                                           src="${spark.rapids.source.basedir}/build/shim_source_task.py"/>
+                                                <generateShimSources/>
                                                 <mkdir dir="${spark.shim.dest}"/>
-                                                <touch file="${rapids.shimplify.cache.marker}"/>
+                                                <touch file="${rapids.shim.sources.cache.marker}"/>
                                             </then>
                                             <else>
-                                                <echo>Shim sources unchanged: skipping Shimplify</echo>
+                                                <echo>Shim sources unchanged: skipping generation</echo>
                                             </else>
                                         </ac:if>
                                     </else>
@@ -1972,14 +2030,14 @@ This will force full Scala code rebuild in downstream modules.
                         <requireProperty>
                           <property>buildver</property>
                           <regex>^(33[0-4]|34[0-4]|35[0-9]|350db143)$</regex>
-                          <regexMessage>Unsupported buildver value ${buildver} for a Scala 2.12 build. Supported Scala 2.12 buildver values are: 330, 331, 332, 333, 334, 340, 341, 342, 343, 344, 350, 351, 352, 353, 354, 355, 356, 357, 358, 359, 350db143. For Scala 2.13/Spark 4.x builds, use -f scala2.13/pom.xml with a supported Scala 2.13 buildver such as 350, 400, 403, 404, 412, 413, or 420.</regexMessage>
+                          <regexMessage>Unsupported buildver value ${buildver} for a Scala 2.12 build. Supported Scala 2.12 buildver values are: 330, 331, 332, 333, 334, 340, 341, 342, 343, 344, 350, 351, 352, 353, 354, 355, 356, 357, 358, 359, 350db143. For Scala 2.13/Spark 4.x builds, use -f scala2.13/pom.xml with a supported Scala 2.13 buildver such as 350, 400, 403, 404, 405, 412, 413, or 420.</regexMessage>
                         </requireProperty>
                         --><!-- #endif scala-2.12 -->
                         <!-- #if scala-2.13 -->
                         <requireProperty>
                             <property>buildver</property>
-                            <regex>^(35[0-9]|40[0-4]|41[1-3]|420|500|400db173|410db183)$</regex>
-                            <regexMessage>Unsupported buildver value ${buildver} for a Scala 2.13 build. Supported Scala 2.13 buildver values are: 350, 351, 352, 353, 354, 355, 356, 357, 358, 359, 400, 401, 402, 403, 404, 411, 412, 413, 420, 500, 400db173, 410db183. Spark 3.3.x and 3.4.x builds use Scala 2.12; for example, build Spark 330 with the root pom.xml instead of scala2.13/pom.xml.</regexMessage>
+                            <regex>^(35[0-9]|40[0-5]|41[1-3]|420|500|400db173|410db183)$</regex>
+                            <regexMessage>Unsupported buildver value ${buildver} for a Scala 2.13 build. Supported Scala 2.13 buildver values are: 350, 351, 352, 353, 354, 355, 356, 357, 358, 359, 400, 401, 402, 403, 404, 405, 411, 412, 413, 420, 500, 400db173, 410db183. Spark 3.3.x and 3.4.x builds use Scala 2.12; for example, build Spark 330 with the root pom.xml instead of scala2.13/pom.xml.</regexMessage>
                         </requireProperty>
                         <!-- #endif scala-2.13 -->
                         <requireProperty>
@@ -2219,7 +2277,7 @@ This will force full Scala code rebuild in downstream modules.
                                     <failIfNoMatch>false</failIfNoMatch>
                                 </regexPropertySetting>
                                 <regexPropertySetting>
-                                    <name>shimplify.src.basedir</name>
+                                    <name>shim.source.module.basedir</name>
                                     <value>${project.basedir}</value>
                                     <regex>\/scala[0-9.]+</regex>
                                     <replacement></replacement>
@@ -2297,7 +2355,7 @@ This will force full Scala code rebuild in downstream modules.
                         </configuration>
                     </execution>
                     <execution>
-                        <id>add-shimple-sources</id>
+                        <id>add-generated-shim-sources</id>
                         <phase>generate-sources</phase>
                         <goals><goal>add-source</goal></goals>
                         <configuration>
@@ -2308,7 +2366,7 @@ This will force full Scala code rebuild in downstream modules.
                         </configuration>
                     </execution>
                     <execution>
-                        <id>add-shimple-test-sources</id>
+                        <id>add-generated-shim-test-sources</id>
                         <phase>generate-test-sources</phase>
                         <goals><goal>add-test-source</goal></goals>
                         <configuration>
@@ -2405,6 +2463,13 @@ This will force full Scala code rebuild in downstream modules.
             </snapshots>
         </repository>
         <repository>
+            <id>google-maven-central</id>
+            <url>https://maven-central.storage-download.googleapis.com/maven2/</url>
+            <snapshots>
+                <enabled>false</enabled>
+            </snapshots>
+        </repository>
+        <repository>
             <id>central</id>
             <name>Maven Repository Switchboard</name>
             <layout>default</layout>
@@ -2435,6 +2500,13 @@ This will force full Scala code rebuild in downstream modules.
         </repository>
     </repositories>
     <pluginRepositories>
+        <pluginRepository>
+            <id>google-maven-central</id>
+            <url>https://maven-central.storage-download.googleapis.com/maven2/</url>
+            <snapshots>
+                <enabled>false</enabled>
+            </snapshots>
+        </pluginRepository>
         <pluginRepository>
             <id>central</id>
             <url>https://repo1.maven.org/maven2</url>

@@ -1,0 +1,18 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+da001198ca60b5b67f069cd0cd5bb36f1722478f6c424d4c1c51882f0e01ddef  shimpler_source_graph.py
+920d363619785f7db41066c9a1b09f31c338866f5026a6ef2b23d44388209d0e  shimpler_source_selectors.py
+08b1c57cfacfdbe8826cade650dae283a8eacc52aeabf3b4b5764ad3b522b329  shimpler_source_resolver.py
+31fd588db9b02ebabb9f91becfe816b52e695ed0399a1902e5533aba19bce41a  shimpler_source_generator.py

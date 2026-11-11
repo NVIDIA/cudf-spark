@@ -40,6 +40,34 @@ setting [spark.rapids.sql.stableSort.enabled](additional-functionality/advanced_
 cuDF will try to sort all the data for a given task/partition at once on the GPU. This may change
 in the future to allow for a spillable stable sort.
 
+## Round-robin Shuffle Recovery
+
+A GPU round-robin exchange with more than one output partition, as used by `repartition(n)` and by
+Delta Lake optimized writes to unpartitioned tables, assigns rows by their position in a GPU batch.
+A rerun can cut batches differently, so Spark treats the exchange and stages that read it as
+indeterminate. This also affects a hash exchange downstream of the round-robin exchange.
+
+The map stage can retry a failure in its own input before any reader stage has been submitted.
+Once a stage that reads the shuffle has started, rerunning that part of the query plan could mix rows
+from different attempts. This remains true after an individual job ends: `take` and
+`toLocalIterator` can retain partial results across jobs, including results from cached intermediate
+output. The query plan therefore keeps its reader history until it is discarded. Even a later,
+independent action fails if it must recompute that shuffle after its output is lost. Intact
+shuffle output can still be reused. The query fails rather than return missing or duplicated rows,
+including when a result from the old attempt arrives late. The error contains one of these messages:
+
+- `Cannot retry a GPU round-robin shuffle`, from the plugin.
+- `A shuffle map stage with indeterminate output was failed and retried`, from Spark.
+- `Task with indeterminate results from old attempt succeeded`, from Spark 4.2.
+
+Rerun with a new DataFrame, unpersisting a cached one first. Checkpointing before the repartition
+does not avoid the failure, and neither does
+`spark.sql.execution.sortBeforeRepartition`. To avoid GPU round-robin recovery restrictions, set
+[`spark.rapids.sql.partitioning.RoundRobinPartitioning`](additional-functionality/advanced_configs.md#sql.partitioning.RoundRobinPartitioning)
+to `false` to run the exchange on the CPU. A query that calls `repartition(n)` can instead
+repartition by columns with `repartition(n, cols)`. Splitting and retrying a batch within the
+original map attempt remains supported.
+
 ## Floating Point
 
 For most basic floating-point operations like addition, subtraction, multiplication, and division
@@ -49,8 +77,15 @@ floating-point calculations. The ordering of operations to calculate the value m
 underlying JVM implementation used by the CPU and the C++ standard library implementation used by
 the GPU.
 
-In the case of `round` and `bround` the results can be off by more because they can enlarge the
-difference. This happens in cases where a binary floating-point representation cannot exactly
+For `FLOAT` and `DOUBLE` inputs, `round` and `bround` with a literal scale of zero (including an
+omitted scale) are compatible with Spark and run on the GPU even when
+[`spark.rapids.sql.incompatibleOps.enabled`](additional-functionality/advanced_configs.md#sql.incompatibleOps.enabled)
+is `false`. `round` uses `HALF_UP` rounding and `bround` uses `HALF_EVEN` rounding; both normalize
+negative zero to positive zero.
+
+At nonzero scales, GPU execution of floating-point `round` and `bround` requires
+`spark.rapids.sql.incompatibleOps.enabled=true`. Their results can be off by more because they can
+enlarge the difference. This happens in cases where a binary floating-point representation cannot exactly
 capture a decimal value. For example `1.025` cannot exactly be represented and ends up being closer
 to `1.02499`. The Spark implementation of `round` converts it first to a decimal value with complex
 logic to make it `1.025` and then does the rounding.  This results in `round(1.025, 2)` under pure
@@ -341,6 +376,12 @@ The Spark community is planning to work on a runtime fallback to read from actua
 file-statistics are missing (see [SPARK-34960 discussion](https://issues.apache.org/jira/browse/SPARK-34960)).
 
 *Writing ORC Files*
+
+Timestamp writes use the JVM default timezone, independently of `spark.sql.session.timeZone`,
+to match the Apache ORC writer. Named timezones such as `Asia/Shanghai` and `America/New_York`
+support GPU writes. Named fixed-offset zones such as `Etc/GMT+5` and `EST` also support GPU
+writes when the system timezone database can resolve them. IDs without a resolvable timezone
+file, such as `GMT+05:30` and `SystemV/EST5`, fall back to CPU.
 
 There are issues writing ORC files with dates or timestamps that fall within the lost days during
 the switch from the Julian to Gregorian calendar, i.e.: between October 3rd, 1582 and October 15th,
@@ -793,6 +834,24 @@ on the GPU without requiring any additional settings.
 - `MM-dd-yyyy`
 - `MMyyyy`
 
+With `CORRECTED`, timestamp parsing also supports `yyyy-MM-dd` followed by a space or
+the quoted literal `'T'`, then `HH:mm:ss`, optionally followed by `.SSS` and an offset
+pattern `X`, `XX`, or `XXX`. For example, `yyyy-MM-dd HH:mm:ss.SSS` and
+`yyyy-MM-dd'T'HH:mm:ss.SSSXXX` run on the GPU without enabling incompatible formats.
+`SSS` accepts one to three fractional digits. `X` accepts `+08` or `+0830`, `XX`
+requires `+0830`, and `XXX` requires `+08:30`; all three also accept `Z` for UTC.
+`T` and `Z` are case-insensitive when parsing. On JDK 8, `XX` and `XXX` also accept
+optional offset seconds and an empty fractional part before an offset, matching Spark
+on that JDK.
+An explicit offset takes precedence over the session timezone. These additional
+parsing formats fall back to CPU under `LEGACY` and `EXCEPTION`, including when
+incompatible formats are enabled.
+
+Under `CORRECTED` and `EXCEPTION`, `date_format` and `from_unixtime` also support
+`yyyy-MM-dd HH:mm:ss.SSS`, `yyyy-MM-dd'T'HH:mm:ss`, and
+`yyyy-MM-dd'T'HH:mm:ss.SSS` without enabling incompatible formats. Formatting
+with `X`, `XX`, or `XXX` still falls back to CPU.
+
 Valid Spark date/time formats that do not appear in the list above may also be supported but have not been
 extensively tested and may produce different results compared to the CPU. Known issues include:
 
@@ -803,7 +862,8 @@ To attempt to use other formats on the GPU, set
 [`spark.rapids.sql.incompatibleDateFormats.enabled`](additional-functionality/advanced_configs.md#sql.incompatibleDateFormats.enabled)
 to `true`.
 
-Formats that contain any of the following characters are unsupported and will fall back to CPU:
+Except for the additional `CORRECTED` timestamp patterns above, formats containing any
+of the following characters are unsupported and will fall back to CPU:
 
 ```
 'k', 'K','z', 'V', 'c', 'F', 'W', 'Q', 'q', 'G', 'A', 'n', 'N',
@@ -816,7 +876,7 @@ Formats that contain any of the following words are unsupported and will fall ba
 "u", "uu", "uuu", "uuuu", "uuuuu", "uuuuuu", "uuuuuuu", "uuuuuuuu", "uuuuuuuuu", "uuuuuuuuuu",
 "y", "yy", yyy", "yyyyy", "yyyyyy", "yyyyyyy", "yyyyyyyy", "yyyyyyyyy", "yyyyyyyyyy",
 "D", "DD", "DDD", "s", "m", "H", "h", "M", "MMM", "MMMM", "MMMMM", "L", "LLL", "LLLL", "LLLLL",
-"d", "S", "SS", "SSS", "SSSS", "SSSSS", "SSSSSSSSS", "SSSSSSS", "SSSSSSSS"
+"d", "S", "SS", "SSSS", "SSSSS", "SSSSSSSSS", "SSSSSSS", "SSSSSSSS"
 ```
 
 ### LEGACY timeParserPolicy

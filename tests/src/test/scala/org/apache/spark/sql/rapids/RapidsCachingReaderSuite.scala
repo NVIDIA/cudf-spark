@@ -88,8 +88,8 @@ class RapidsCachingReaderSuite extends RmmSparkRetrySuiteBase with MockitoSugar 
 
   test("a local read of a block whose cached output is gone ends in a fetch failure") {
     withCatalog { catalog =>
-      val ids = Seq(
-        catalog.addContiguousTable(block, RapidsShuffleTestHelper.buildContiguousTable(10), -1))
+      val ids = Seq(withResource(RapidsShuffleTestHelper.buildContiguousTable(10))(
+        catalog.addContiguousTable(block, _, -1)))
       // as a writer's cleanup removes what it added
       catalog.removeCachedHandles(ids)
       assertOutputGone(fetchFailure(read(catalog)))
@@ -98,8 +98,8 @@ class RapidsCachingReaderSuite extends RmmSparkRetrySuiteBase with MockitoSugar 
 
   test("a local fetch failure is recorded in the task's context") {
     withCatalog { catalog =>
-      val ids = Seq(
-        catalog.addContiguousTable(block, RapidsShuffleTestHelper.buildContiguousTable(10), -1))
+      val ids = Seq(withResource(RapidsShuffleTestHelper.buildContiguousTable(10))(
+        catalog.addContiguousTable(block, _, -1)))
       catalog.removeCachedHandles(ids)
       val context = TaskContext.empty()
       // Spark reports a fetch failure only when the context of the thread that built it has it
@@ -115,7 +115,8 @@ class RapidsCachingReaderSuite extends RmmSparkRetrySuiteBase with MockitoSugar 
 
   test("a local read of a shuffle this executor unregistered ends in a fetch failure") {
     withCatalog { catalog =>
-      catalog.addContiguousTable(block, RapidsShuffleTestHelper.buildContiguousTable(10), -1)
+      withResource(RapidsShuffleTestHelper.buildContiguousTable(10))(
+        catalog.addContiguousTable(block, _, -1))
       catalog.unregisterShuffle(block.shuffleId)
       assertOutputGone(fetchFailure(read(catalog)))
     }
@@ -124,9 +125,10 @@ class RapidsCachingReaderSuite extends RmmSparkRetrySuiteBase with MockitoSugar 
   test("a local read whose next buffer is removed after the block was looked up ends in a " +
       "fetch failure") {
     withCatalog { catalog =>
-      catalog.addContiguousTable(block, RapidsShuffleTestHelper.buildContiguousTable(10), -1)
-      val second =
-        catalog.addContiguousTable(block, RapidsShuffleTestHelper.buildContiguousTable(20), -1)
+      withResource(RapidsShuffleTestHelper.buildContiguousTable(10))(
+        catalog.addContiguousTable(block, _, -1))
+      val second = withResource(RapidsShuffleTestHelper.buildContiguousTable(20))(
+        catalog.addContiguousTable(block, _, -1))
       val it = read(catalog)
       // the first batch looks the block up, and with it both of its buffers
       withResource(it.next()._2) { first =>
@@ -140,10 +142,12 @@ class RapidsCachingReaderSuite extends RmmSparkRetrySuiteBase with MockitoSugar 
   test("a local read of a batch block ends in a fetch failure naming the reduce id whose " +
       "output is gone") {
     withCatalog { catalog =>
-      catalog.addContiguousTable(block, RapidsShuffleTestHelper.buildContiguousTable(10), -1)
+      withResource(RapidsShuffleTestHelper.buildContiguousTable(10))(
+        catalog.addContiguousTable(block, _, -1))
       val gone = ShuffleBlockId(block.shuffleId, block.mapId, block.reduceId + 1)
       catalog.removeCachedHandles(Seq(
-        catalog.addContiguousTable(gone, RapidsShuffleTestHelper.buildContiguousTable(20), -1)))
+        withResource(RapidsShuffleTestHelper.buildContiguousTable(20))(
+          catalog.addContiguousTable(gone, _, -1))))
       // Spark's end is exclusive, so this batch is the two reduce ids above
       val batch =
         ShuffleBlockBatchId(block.shuffleId, block.mapId, block.reduceId, gone.reduceId + 1)
@@ -159,8 +163,8 @@ class RapidsCachingReaderSuite extends RmmSparkRetrySuiteBase with MockitoSugar 
       "a fetch failure") {
     val awaitSeconds = 30
     withCatalog { catalog =>
-      val id =
-        catalog.addContiguousTable(block, RapidsShuffleTestHelper.buildContiguousTable(10), -1)
+      val id = withResource(RapidsShuffleTestHelper.buildContiguousTable(10))(
+        catalog.addContiguousTable(block, _, -1))
       // the catalog still owns the buffer, so this lookup is not closed
       val handle = catalog.getShuffleBufferHandle(id.tableId).spillable
       val outcome = new AtomicReference[Try[Unit]]()
@@ -197,8 +201,8 @@ class RapidsCachingReaderSuite extends RmmSparkRetrySuiteBase with MockitoSugar 
   test("a local read of a buffer closed while the catalog still holds it fails with the " +
       "original error") {
     withCatalog { catalog =>
-      val id =
-        catalog.addContiguousTable(block, RapidsShuffleTestHelper.buildContiguousTable(10), -1)
+      val id = withResource(RapidsShuffleTestHelper.buildContiguousTable(10))(
+        catalog.addContiguousTable(block, _, -1))
       // as executor shutdown closes the handles and leaves the catalog's entries in place
       catalog.getShuffleBufferHandle(id.tableId).spillable.close()
       val e = intercept[IllegalStateException] {

@@ -31,15 +31,24 @@ object RebaseDateTimeBridge {
   private lazy val julianToGregorianMicros =
     RebaseDateTime.loadRebaseRecords("julian-gregorian-rebase-micros.json")
 
+  private lazy val gregorianToJulianMicros =
+    RebaseDateTime.loadRebaseRecords("gregorian-julian-rebase-micros.json")
+
+  val lastSwitchGregorianTs: Long = RebaseDateTime.lastSwitchGregorianTs
+
   val lastSwitchJulianTs: Long = RebaseDateTime.lastSwitchJulianTs
 
-  private def lookupInfo(timeZoneId: String): Option[RebaseInfo] = {
-    julianToGregorianMicros.get(timeZoneId).map { info =>
+  def getJulianToGregorianMicros(timeZoneId: String): Option[RebaseInfo] =
+    getRebaseInfo(timeZoneId, toGregorian = true)
+
+  def getGregorianToJulianMicros(timeZoneId: String): Option[RebaseInfo] =
+    getRebaseInfo(timeZoneId, toGregorian = false)
+
+  private def getRebaseInfo(timeZoneId: String, toGregorian: Boolean): Option[RebaseInfo] = {
+    val records = if (toGregorian) julianToGregorianMicros else gregorianToJulianMicros
+    def lookupInfo(id: String): Option[RebaseInfo] = records.get(id).map { info =>
       RebaseInfo(info.switches, info.diffs)
     }
-  }
-
-  def getJulianToGregorianMicros(timeZoneId: String): Option[RebaseInfo] = {
     lookupInfo(timeZoneId).orElse {
       val zoneId = ZoneId.of(timeZoneId, ZoneId.SHORT_IDS)
       lookupInfo(zoneId.getId).orElse {
@@ -59,13 +68,18 @@ object RebaseDateTimeBridge {
     }
   }
 
-  def rebaseJulianToGregorianMicros(timeZoneId: String, micros: Long): Long = {
-    val sparkTimeZoneId = ZoneId.of(timeZoneId, ZoneId.SHORT_IDS) match {
+  private def sparkTimeZoneId(timeZoneId: String): String = {
+    ZoneId.of(timeZoneId, ZoneId.SHORT_IDS) match {
       // ZoneId normalizes short IDs such as EST to -05:00. Spark's Calendar fallback
       // uses TimeZone.getTimeZone(String), which silently treats that spelling as GMT.
       case offset: ZoneOffset => TimeZone.getTimeZone(offset).getID
       case _ => timeZoneId
     }
-    RebaseDateTime.rebaseJulianToGregorianMicros(sparkTimeZoneId, micros)
   }
+
+  def rebaseJulianToGregorianMicros(timeZoneId: String, micros: Long): Long =
+    RebaseDateTime.rebaseJulianToGregorianMicros(sparkTimeZoneId(timeZoneId), micros)
+
+  def rebaseGregorianToJulianMicros(timeZoneId: String, micros: Long): Long =
+    RebaseDateTime.rebaseGregorianToJulianMicros(sparkTimeZoneId(timeZoneId), micros)
 }
