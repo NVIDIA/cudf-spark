@@ -16,11 +16,7 @@
 
 
 /*** spark-rapids-shim-json-lines
-{"spark": "330"}
-{"spark": "331"}
-{"spark": "332"}
-{"spark": "333"}
-{"spark": "334"}
+{"spark":["330"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids
 
@@ -63,7 +59,17 @@ class RapidsCachingReader[K, C](
     transport: Option[RapidsShuffleTransport],
     catalog: ShuffleBufferCatalog,
     sparkTypes: Array[DataType])
-  extends ShuffleReader[K, C] with Logging {
+  extends ShuffleReader[K, C] with Logging with ShuffleReadSnapshotProvider {
+
+  private var preparedSnapshot: Option[ShuffleReadSnapshot] = None
+
+  override def snapshot: ShuffleReadSnapshot = preparedSnapshot.getOrElse {
+    val saved = ShuffleReadSnapshot(blocksByAddress.toVector.map { case (address, blocks) =>
+      address -> blocks.toVector
+    })
+    preparedSnapshot = Some(saved)
+    saved
+  }
 
   override def read(): Iterator[Product2[K, C]] = {
     NvtxRegistry.RAPIDS_CACHING_READER_READ.push()
@@ -72,7 +78,7 @@ class RapidsCachingReader[K, C](
           new ArrayBuffer[(BlockManagerId, Seq[(BlockId, Long, Int)])]()
       var cachedBatchIterator: Iterator[ColumnarBatch] = Iterator.empty
       val blocksByAddressMap: Map[BlockManagerId, Seq[(BlockId, Long, Int)]] = 
-          blocksByAddress.toMap
+          preparedSnapshot.map(_.blocks.iterator).getOrElse(blocksByAddress).toMap
       var numCachedBlocks: Int = 0
 
       blocksByAddressMap.keys.foreach(blockManagerId => {

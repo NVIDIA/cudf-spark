@@ -50,7 +50,7 @@ import org.apache.spark.sql.rapids.execution.GpuShuffleExchangeExecBase.{METRIC_
 import org.apache.spark.sql.rapids.shims.{GpuShuffleBlockResolver, RapidsShuffleThreadedReader, RapidsShuffleThreadedWriter}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.storage.{RapidsShuffleBlockFetcherIterator, _}
-import org.apache.spark.util.CompletionIterator
+import org.apache.spark.util.{CompletionIterator, Utils}
 import org.apache.spark.util.collection.{ExternalSorter, OpenHashSet}
 
 class GpuShuffleHandle[K, V](
@@ -2170,11 +2170,36 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
     }
   }
 
-  def unregisterGpuShuffle(shuffleId: Int): Unit = {
+  /**
+   * Frees what the shuffle buffer catalog holds of a shuffle for writers at or below
+   * `watermark`, and frees no further buffer once `isStopped` reads true. A catalog that is not
+   * initialized yet holds nothing.
+   */
+  def reclaimGpuShuffle(
+      shuffleId: Int,
+      watermark: Long,
+      isStopped: () => Boolean): ShuffleReclaimResult = {
     val catalog = GpuShuffleEnv.getCatalog
     if (catalog != null) {
-      logInfo(s"Unregistering shuffle $shuffleId from shuffle buffer catalog")
-      catalog.unregisterShuffle(shuffleId)
+      val result = catalog.reclaimShuffle(shuffleId, watermark, isStopped)
+      def line = s"Reclaimed shuffle $shuffleId up to task $watermark from shuffle buffer " +
+        s"catalog: ${result.outcome}, ${result.buffers} buffers, ${result.bytes} bytes in " +
+        s"${TimeUnit.NANOSECONDS.toMillis(result.elapsedNanos)} ms"
+      // every executor is asked to reclaim every shuffle, so most hold none of it
+      if (result.outcome == ShuffleReclaimOutcome.ABSENT) logDebug(line) else logInfo(line)
+      result
+    } else {
+      ShuffleReclaimResult.absent(shuffleId, watermark)
+    }
+  }
+
+  def unregisterGpuShuffle(shuffleId: Int): Unit = {
+    GpuShuffleEnv.invalidateBroadcastAndThen(shuffleId) {
+      val catalog = GpuShuffleEnv.getCatalog
+      if (catalog != null) {
+        logInfo(s"Unregistering shuffle $shuffleId from shuffle buffer catalog")
+        catalog.unregisterShuffle(shuffleId)
+      }
     }
     // For MultithreadedShuffleBufferCatalog:
     // Cleanup is triggered by ShuffleCleanupListener on job end, not here.
@@ -2189,42 +2214,55 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
   }
 
   override def unregisterShuffle(shuffleId: Int): Boolean = {
-    unregisterGpuShuffle(shuffleId)
-    // We need to remove old shuffle blocks when Spark GC's a shuffle Id upstream.
-    // In order to do so, we need to find the IndexShuffleBlockResolver in use.
-    // We have two scenarios:
-    // 1) We could be running in some compatibility mode where IndexShuffleBlockResolver
-    //    (which comes from Spark) is the resolver we are using.
-    // 2) We are using our own GpuShuffleBlockResolver, which can keep data in its own
-    //    internal catalog, and it will also use the block manager to write map output
-    //    to disk.
-    val isbr = shuffleBlockResolver match {
-      case isbr: IndexShuffleBlockResolver => isbr
-      case gpur: GpuShuffleBlockResolverBase => gpur.wrapped
-      case _ =>
-        throw new IllegalStateException(
-          "unregisterShuffle called with unexpected resolver " +
-            s"$shuffleBlockResolver and blocks left to be cleaned")
-    }
-    Option(taskIdMapsForShuffle.remove(shuffleId)).foreach { mapTaskIds =>
-      mapTaskIds.synchronized {
-        mapTaskIds.iterator.foreach { mapTaskId =>
-          isbr.removeDataByMap(shuffleId, mapTaskId)
+    var unregistered = false
+    Utils.tryWithSafeFinally {
+      unregisterGpuShuffle(shuffleId)
+    } {
+      // We need to remove old shuffle blocks when Spark GC's a shuffle Id upstream.
+      // In order to do so, we need to find the IndexShuffleBlockResolver in use.
+      // We have two scenarios:
+      // 1) We could be running in some compatibility mode where IndexShuffleBlockResolver
+      //    (which comes from Spark) is the resolver we are using.
+      // 2) We are using our own GpuShuffleBlockResolver, which can keep data in its own
+      //    internal catalog, and it will also use the block manager to write map output
+      //    to disk.
+      val isbr = shuffleBlockResolver match {
+        case isbr: IndexShuffleBlockResolver => isbr
+        case gpur: GpuShuffleBlockResolverBase => gpur.wrapped
+        case _ =>
+          throw new IllegalStateException(
+            "unregisterShuffle called with unexpected resolver " +
+              s"$shuffleBlockResolver and blocks left to be cleaned")
+      }
+      Option(taskIdMapsForShuffle.remove(shuffleId)).foreach { mapTaskIds =>
+        mapTaskIds.synchronized {
+          mapTaskIds.iterator.foreach { mapTaskId =>
+            isbr.removeDataByMap(shuffleId, mapTaskId)
+          }
         }
       }
+      unregistered = wrapped.unregisterShuffle(shuffleId)
     }
-    wrapped.unregisterShuffle(shuffleId)
+    unregistered
   }
 
   def shuffleBlockResolver: ShuffleBlockResolver = resolver
 
   override def stop(): Unit = synchronized {
-    wrapped.stop()
-    if (!stopped) {
-      stopped = true
-      RapidsShuffleTransport.closeServerThenTransport(server, transport)
-      if (rapidsConf.isMultiThreadedShuffleManagerMode) {
-        RapidsShuffleInternalManagerBase.stopThreadPool()
+    Utils.tryWithSafeFinally {
+      wrapped.stop()
+    } {
+      if (!stopped) {
+        stopped = true
+        GpuShuffleEnv.closeBroadcastCacheAndThen {
+          Utils.tryWithSafeFinally {
+            RapidsShuffleTransport.closeServerThenTransport(server, transport)
+          } {
+            if (rapidsConf.isMultiThreadedShuffleManagerMode) {
+              RapidsShuffleInternalManagerBase.stopThreadPool()
+            }
+          }
+        }
       }
     }
   }

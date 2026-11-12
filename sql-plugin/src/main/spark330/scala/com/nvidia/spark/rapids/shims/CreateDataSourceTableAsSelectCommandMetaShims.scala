@@ -15,11 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "330"}
-{"spark": "331"}
-{"spark": "332"}
-{"spark": "333"}
-{"spark": "334"}
+{"spark":["330"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
@@ -40,8 +36,13 @@ final class CreateDataSourceTableAsSelectCommandMeta(
     rule: DataFromReplacementRule)
   extends DataWritingCommandMeta[CreateDataSourceTableAsSelectCommand](cmd, conf, parent, rule) {
 
-  private var origProvider: Class[_] = _
+  private lazy val origProvider: Class[_] = GpuDataSourceBase.lookupDataSourceWithFallback(
+    cmd.table.provider.get, SparkSession.active.sessionState.conf)
   private var gpuProvider: Option[ColumnarFileFormat] = None
+
+  override def checkTimeZone(): Boolean = cmd.table.provider.isEmpty ||
+    !(classOf[FileFormat].isAssignableFrom(origProvider) &&
+      GpuOrcFileFormat.isSparkOrcFormat(origProvider.asInstanceOf[Class[_ <: FileFormat]]))
 
   override def tagSelfForGpuInternal(): Unit = {
     BucketIdMetaUtils.tagForBucketingWrite(this, cmd.table.bucketSpec, cmd.outputColumns)
@@ -50,8 +51,6 @@ final class CreateDataSourceTableAsSelectCommandMeta(
     }
 
     val spark = SparkSession.active
-    origProvider = GpuDataSourceBase.lookupDataSourceWithFallback(
-      cmd.table.provider.get, spark.sessionState.conf)
     // Note that the data source V2 always fallsback to the V1 currently.
     // If that changes then this will start failing because we don't have a mapping.
     gpuProvider = if (classOf[FileFormat].isAssignableFrom(origProvider) &&

@@ -19,7 +19,7 @@ package org.apache.spark.sql.rapids
 import java.io.IOException
 
 import com.nvidia.spark.rapids.{ColumnarFileFormat, GpuDataWritingCommand, RapidsConf}
-import com.nvidia.spark.rapids.shims.SparkShimImpl
+import com.nvidia.spark.rapids.shims.{GpuFileWriteJobShim, SparkShimImpl}
 import org.apache.hadoop.fs.{FileSystem, Path}
 
 import org.apache.spark.internal.io.FileCommitProtocol
@@ -34,7 +34,7 @@ import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.command.{AlterTableAddPartitionCommand, AlterTableDropPartitionCommand, CommandUtils}
 import org.apache.spark.sql.execution.datasources.{FileFormatWriter, FileIndex, PartitioningUtils}
 import org.apache.spark.sql.internal.SQLConf.PartitionOverwriteMode
-import org.apache.spark.sql.rapids.shims.{RapidsErrorUtils, SchemaUtilsShims}
+import org.apache.spark.sql.rapids.shims.{PartitioningUtilsShims, RapidsErrorUtils, SchemaUtilsShims}
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.SparkSession
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -121,6 +121,7 @@ case class GpuInsertIntoHadoopFsRelationCommand(
       outputPath = outputPath.toString,
       dynamicPartitionOverwrite = dynamicPartitionOverwrite)
 
+    var deleteMatchingOutput = false
     val doInsertion = if (mode == SaveMode.Append) {
       true
     } else {
@@ -134,8 +135,13 @@ case class GpuInsertIntoHadoopFsRelationCommand(
           } else if (dynamicPartitionOverwrite) {
             // For dynamic partition overwrite, do not delete partition directories ahead.
             true
+          } else if (GpuFileWriteJobShim.shouldDelayOverwriteDeletion) {
+            // Delete only after the writer's driver-side schema and option checks pass.
+            deleteMatchingOutput = true
+            true
           } else {
-            deleteMatchingPartitions(fs, qualifiedOutputPath, customPartitionLocations, committer)
+            deleteMatchingPartitions(
+              fs, qualifiedOutputPath, customPartitionLocations, committer)
             true
           }
         case (SaveMode.Overwrite, _) | (SaveMode.ErrorIfExists, false) =>
@@ -191,15 +197,22 @@ case class GpuInsertIntoHadoopFsRelationCommand(
           concurrentWriterPartitionFlushSize = concurrentWriterPartitionFlushSize,
           forceHiveHashForBucketing = forceHiveHashForBucketing,
           numStaticPartitionCols = staticPartitions.size,
-          baseDebugOutputPath = baseDebugOutputPath)
+          baseDebugOutputPath = baseDebugOutputPath,
+          beforeSetupJob = () => {
+            GpuFileWriteJobShim.runBeforeWriteJob(this)
+            if (deleteMatchingOutput) {
+              deleteMatchingPartitions(
+                fs, qualifiedOutputPath, customPartitionLocations, committer)
+            }
+          })
 
 
       // update metastore partition metadata
       if (updatedPartitionPaths.isEmpty && staticPartitions.nonEmpty
         && partitionColumns.length == staticPartitions.size) {
         // Avoid empty static partition can't loaded to datasource table.
-        val staticPathFragment =
-          PartitioningUtils.getPathFragment(staticPartitions, partitionColumns)
+        val staticPathFragment = PartitioningUtilsShims.getPathFragment(
+          staticPartitions, partitionColumns, conf.validatePartitionColumns)
         refreshUpdatedPartitions(Set(staticPathFragment))
       } else {
         refreshUpdatedPartitions(updatedPartitionPaths)
@@ -268,9 +281,11 @@ case class GpuInsertIntoHadoopFsRelationCommand(
       table: CatalogTable,
       qualifiedOutputPath: Path,
       partitions: Seq[CatalogTablePartition]): Map[TablePartitionSpec, String] = {
+    val validatePartitionColumns = conf.validatePartitionColumns
     partitions.flatMap { p =>
       val defaultLocation = qualifiedOutputPath.suffix(
-        "/" + PartitioningUtils.getPathFragment(p.spec, table.partitionSchema)).toString
+        "/" + PartitioningUtilsShims.getPathFragment(
+          p.spec, table.partitionSchema, validatePartitionColumns)).toString
       val catalogLocation = new Path(p.location).makeQualified(
         fs.getUri, fs.getWorkingDirectory).toString
       if (catalogLocation != defaultLocation) {

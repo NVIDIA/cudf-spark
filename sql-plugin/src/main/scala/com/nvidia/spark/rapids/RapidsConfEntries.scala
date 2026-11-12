@@ -67,6 +67,14 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
       .booleanConf
       .createWithDefault(false)
 
+  val TEST_PARQUET_HYBRID_SCAN_FAIL_ON_FALLBACK =
+    conf("spark.rapids.sql.test.format.parquet.hybridScan.failOnFallback")
+      .doc("Only to be used in tests. When true and the hybrid scan reader is enabled, fail a " +
+        "PERFILE Parquet scan that would fall back to the parquet-mr path instead of reading it.")
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
+
   val TEST_DELTA_LOW_SHUFFLE_MERGE_FAILED_ON_NOT_METADATA_ONLY =
     conf("spark.rapids.sql.test.delta.lowShuffleMerge.failedOnNotMetadataOnly")
       .doc("Only for tests on Databricks Runtime 17.3. When true and " +
@@ -536,7 +544,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
 
   val ALLOW_MULTIPLE_JARS = conf("spark.rapids.sql.allowMultipleJars")
     .startupOnly()
-    .doc("Allow multiple rapids-4-spark, cudf-spark-jni, and cudf jars on the classpath. " +
+    .doc("Allow multiple cudf-spark, cudf-spark-jni, and cudf jars on the classpath. " +
       "Spark will take the first one it finds, so the version may not be expected. Possible " +
       "values are ALWAYS: allow all jars, SAME_REVISION: only allow jars with the same " +
       "revision, NEVER: do not allow multiple jars at all.")
@@ -642,6 +650,18 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .internal()
     .booleanConf
     .createWithDefault(true)
+
+  val HOST_COLUMNAR_TO_GPU_RELEASE_SEMAPHORE =
+    conf("spark.rapids.sql.hostColumnarToGpu.releaseSemaphore.enabled")
+      .doc("When true, HostColumnarToGpu releases the GPU semaphore while it pulls the host " +
+        "batches of the next GPU batch from its CPU child, and acquires it again before " +
+        "copying them to the GPU. This helps when the child does heavy CPU work, such as " +
+        "decoding in a CPU data source, and each task produces several GPU batches. The " +
+        "task still holds its device memory while released, so more tasks can have data on " +
+        "the GPU at once than the GPU concurrency allows.")
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
 
   val SPARK_GPU_RESOURCE_NAME = conf("spark.rapids.gpu.resourceName")
     .doc("The name of the Spark resource that represents a GPU that you want the plugin to use " +

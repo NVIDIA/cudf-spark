@@ -15,34 +15,10 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "340"}
-{"spark": "341"}
-{"spark": "342"}
-{"spark": "343"}
-{"spark": "344"}
-{"spark": "350"}
-{"spark": "350db143"}
-{"spark": "351"}
-{"spark": "352"}
-{"spark": "353"}
-{"spark": "354"}
-{"spark": "355"}
-{"spark": "356"}
-{"spark": "357"}
-{"spark": "358"}
-{"spark": "359"}
-{"spark": "400"}
-{"spark": "400db173"}
-{"spark": "401"}
-{"spark": "402"}
-{"spark": "403"}
-{"spark": "404"}
-{"spark": "410db183"}
-{"spark": "411"}
-{"spark": "412"}
-{"spark": "413"}
-{"spark": "420"}
-{"spark": "500"}
+{"spark":["340"],"carryForward":"sameMinor"}
+{"spark":["350","400","420"],"carryForward":"all"}
+{"spark":["350db143","400db173"],"carryForward":"none"}
+{"spark":["410db183"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.rapids
@@ -111,7 +87,8 @@ trait GpuFileFormatWriterBase extends Serializable with Logging {
       concurrentWriterPartitionFlushSize: Long,
       forceHiveHashForBucketing: Boolean = false,
       numStaticPartitionCols: Int = 0,
-      baseDebugOutputPath: Option[String]): Set[String] = {
+      baseDebugOutputPath: Option[String],
+      beforeSetupJob: () => Unit = () => ()): Set[String] = {
     require(partitionColumns.size >= numStaticPartitionCols)
 
     val job = Job.getInstance(hadoopConf)
@@ -190,6 +167,9 @@ trait GpuFileFormatWriterBase extends Serializable with Logging {
     // propagate the description UUID into the jobs, so that committers
     // get an ID guaranteed to be unique.
     job.getConfiguration.set("spark.sql.sources.writeJobUUID", description.uuid)
+
+    // Run destructive overwrite callbacks only after the driver-side schema and option checks.
+    beforeSetupJob()
 
     if (writeFilesOpt.isDefined) {
       // Typically plan is like:
