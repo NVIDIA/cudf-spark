@@ -948,8 +948,13 @@ def test_parquet_input_file_name_sliced_large_batch(spark_tmp_path, reader_confs
     conf = copy_and_update(reader_confs, {
         'spark.sql.sources.useV1SourceList': 'parquet',
         'spark.sql.files.maxPartitionBytes': '1g',
-        'spark.sql.files.openCostInBytes': str(1 << 30),
+        'spark.sql.files.openCostInBytes': str(4 << 20),
+        'spark.sql.files.minPartitionNum': '1',
         'spark.rapids.sql.test.inputFileName.maxStringBytes': str((1 << 20) + 6000000)})
+    # Both files must be in the one task, otherwise the move from a sliced file to a file with a
+    # different path is not exercised.
+    assert with_cpu_session(
+        lambda spark: spark.read.parquet(*paths).rdd.getNumPartitions(), conf=conf) == 1
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark: spark.read.parquet(*paths)
                 .select('id', input_file_name().alias('f'))
