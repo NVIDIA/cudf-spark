@@ -61,7 +61,6 @@ _ICEBERG_VARIANT_READ_CONF = {
     "spark.rapids.sql.format.iceberg.v3.enabled": "true",
     "spark.sql.adaptive.enabled": "false",
     "spark.sql.variant.allowReadingShredded": "false",
-    "spark.sql.variant.pushVariantIntoScan": "false",
 }
 
 
