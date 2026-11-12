@@ -205,6 +205,13 @@ abstract class GpuBroadcastHashJoinExecBase(
       Option[ColumnarBatch => ColumnarBatch] = {
     val projects = splitBroadcastPlan(buildPlan)._2.reverse
     if (projects.nonEmpty) {
+      // These projects are evaluated manually below instead of through executeColumnar(),
+      // which normally waits for their scalar subqueries. Populate the results on the driver
+      // before binding either the per-task or cached projection and serializing it to tasks.
+      projects.foreach { project =>
+        project.prepare()
+        SparkPlanSubqueries.waitForSubqueries(project)
+      }
       val boundProjects = projects.map(bindProject)
       Some((batch: ColumnarBatch) => boundProjects.foldLeft(batch) {
         case (currentBatch, boundProject) =>
