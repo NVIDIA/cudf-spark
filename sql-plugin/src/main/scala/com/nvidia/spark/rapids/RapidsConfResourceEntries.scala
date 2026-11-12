@@ -394,22 +394,12 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .booleanConf
     .createWithDefault(true)
 
-  val CHUNKED_READER_MEMORY_USAGE_RATIO = conf("spark.rapids.sql.reader.chunked.memoryUsageRatio")
-    .doc("A value to compute soft limit on the internal memory usage of the chunked reader " +
-      "(if being used). Such limit is calculated as the multiplication of this value and " +
-      s"'${GPU_BATCH_SIZE_BYTES.key}'.")
-    .internal()
-    .startupOnly()
-    .doubleConf
-    .checkValue(v => v > 0, "The ratio value must be positive.")
-    .createWithDefault(4)
-
   val LIMIT_CHUNKED_READER_MEMORY_USAGE = conf("spark.rapids.sql.reader.chunked.limitMemoryUsage")
     .doc("Enable a soft limit on the internal memory usage of the chunked reader " +
-      "(if being used). Such limit is calculated as the multiplication of " +
-      s"'${GPU_BATCH_SIZE_BYTES.key}' and '${CHUNKED_READER_MEMORY_USAGE_RATIO.key}'." +
-      "For example, if batchSizeBytes is set to 1GB and memoryUsageRatio is 4, " +
-      "the chunked reader will try to keep its memory usage under 4GB.")
+      "(if being used). The limit is the same as " +
+      s"'${GPU_BATCH_SIZE_BYTES.key}', capped at 1/8 of the GPU memory pool, " +
+      "but no less than 256 MiB. For example, if batchSizeBytes is set to 1GB, the chunked " +
+      "reader will try to keep its internal memory usage under 1GB.")
     .booleanConf
     .createOptional
 

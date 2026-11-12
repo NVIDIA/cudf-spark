@@ -312,11 +312,7 @@ abstract class MultiFilePartitionReaderFactoryBase(
   protected val maxGpuColumnSizeBytes: Long = rapidsConf.maxGpuColumnSizeBytes
   protected val useChunkedReader: Boolean = rapidsConf.chunkedReaderEnabled
   protected val maxChunkedReaderMemoryUsageSizeBytes: Long =
-    if(rapidsConf.limitChunkedReaderMemoryUsage) {
-      (rapidsConf.chunkedReaderMemoryUsageRatio * targetBatchSizeBytes).toLong
-    } else {
-      0L
-    }
+    ChunkedReaderMemoryLimit.requested(rapidsConf, targetBatchSizeBytes)
   private val allCloudSchemes = rapidsConf.getCloudSchemes.toSet
 
   override def createReader(partition: InputPartition): PartitionReader[InternalRow] = {

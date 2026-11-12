@@ -800,11 +800,7 @@ case class GpuOrcPartitionReaderFactory(
   private val maxGpuColumnSizeBytes = rapidsConf.maxGpuColumnSizeBytes
   private val useChunkedReader = rapidsConf.chunkedReaderEnabled
   private val maxChunkedReaderMemoryUsageSizeBytes =
-    if(rapidsConf.limitChunkedReaderMemoryUsage) {
-      (rapidsConf.chunkedReaderMemoryUsageRatio * targetBatchSizeBytes).toLong
-    } else {
-      0L
-    }
+    ChunkedReaderMemoryLimit.requested(rapidsConf, targetBatchSizeBytes)
   private val skipReadEstimate = rapidsConf.skipReadEstimate(useChunkedReader)
   private val filterHandler = GpuOrcFileFilterHandler(sqlConf, metrics, broadcastedConf,
     pushedFilters, rapidsConf.isOrcFloatTypesToStringEnable)
@@ -3211,7 +3207,8 @@ case class OrcTableReader(
     writerUsedProlepticGregorian: Boolean) extends GpuDataProducer[Table] with Logging {
 
   private[this] val reader = new ORCChunkedReader(chunkSizeByteLimit,
-    maxChunkedReaderMemoryUsageSizeBytes, parseOpts, buffer, offset, bufferSize)
+    ChunkedReaderMemoryLimit.forReader(maxChunkedReaderMemoryUsageSizeBytes), parseOpts,
+    buffer, offset, bufferSize)
 
   private[this] lazy val catalystTableSchema = SchemaUtils.toCatalystSchema(tableSchema)
 

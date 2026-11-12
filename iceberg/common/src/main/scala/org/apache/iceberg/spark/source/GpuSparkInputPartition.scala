@@ -16,7 +16,7 @@
 
 package org.apache.iceberg.spark.source
 
-import com.nvidia.spark.rapids.RapidsConf
+import com.nvidia.spark.rapids.{ChunkedReaderMemoryLimit, RapidsConf}
 import org.apache.iceberg.{Schema, SchemaParser}
 
 import org.apache.spark.broadcast.Broadcast
@@ -47,14 +47,8 @@ class GpuSparkInputPartition(val cpuPartition: InputPartition,
   val parquetDebugDumpPrefix: Option[String] = rapidsConf.parquetDebugDumpPrefix
   val parquetDebugDumpAlways: Boolean = rapidsConf.parquetDebugDumpAlways
 
-  val maxChunkedReaderMemoryUsageSizeBytes: Long = {
-    if (rapidsConf.limitChunkedReaderMemoryUsage) {
-      val limitRatio = rapidsConf.chunkedReaderMemoryUsageRatio
-      (limitRatio * rapidsConf.gpuTargetBatchSizeBytes).toLong
-    } else {
-      0L
-    }
-  }
+  val maxChunkedReaderMemoryUsageSizeBytes: Long =
+    ChunkedReaderMemoryLimit.requested(rapidsConf, rapidsConf.gpuTargetBatchSizeBytes)
 
   val multiThreadReadNumThreads: Int = rapidsConf.multiThreadReadNumThreads
   val maxNumParquetFilesParallel: Int = rapidsConf.maxNumParquetFilesParallel

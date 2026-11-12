@@ -1641,11 +1641,7 @@ abstract class GpuParquetPartitionReaderFactoryBase(
   protected val useChunkedReader = rapidsConf.chunkedReaderEnabled
   protected val skipReadEstimate = rapidsConf.skipReadEstimate(useChunkedReader)
   protected val maxChunkedReaderMemoryUsageSizeBytes =
-    if(rapidsConf.limitChunkedReaderMemoryUsage) {
-      (rapidsConf.chunkedReaderMemoryUsageRatio * targetSizeBytes).toLong
-    } else {
-      0L
-    }
+    ChunkedReaderMemoryLimit.requested(rapidsConf, targetSizeBytes)
   protected val filterHandler = GpuParquetFileFilterHandler(sqlConf, metrics)
   protected val readUseFieldId = ParquetSchemaClipShims.useFieldId(sqlConf)
   protected val footerReadType = GpuParquetScan.footerReaderHeuristic(
@@ -3941,7 +3937,8 @@ case class ParquetTableReader(
   readDataSchema, clippedParquetSchema, splits, debugDumpPrefix, debugDumpAlways) {
 
   override protected def createReader(): ChunkedReader = ParquetChunkedReader(
-    new JniParquetChunkedReader(chunkSizeByteLimit, maxChunkedReaderMemoryUsageSizeBytes,
+    new JniParquetChunkedReader(chunkSizeByteLimit,
+      ChunkedReaderMemoryLimit.forReader(maxChunkedReaderMemoryUsageSizeBytes),
       opts, buffers:_*)
   )
 

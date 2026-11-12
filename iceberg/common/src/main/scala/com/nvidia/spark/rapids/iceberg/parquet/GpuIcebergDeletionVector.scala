@@ -188,8 +188,9 @@ private class ChunkedDeletionVectorProducer(
     debugDumpPrefix: Option[String],
     debugDumpAlways: Boolean,
     dvInfo: DeletionVector.DeletionVectorInfo) extends GpuDataProducer[Table] {
-  private val reader = DeletionVector.newParquetChunkedReader(
-    chunkSizeByteLimit, maxChunkedReaderMemoryUsageSizeBytes, opts, buffers, Array(dvInfo))
+  private val reader = DeletionVector.newParquetChunkedReader(chunkSizeByteLimit,
+    ChunkedReaderMemoryLimit.forReader(maxChunkedReaderMemoryUsageSizeBytes), opts, buffers,
+    Array(dvInfo))
 
   override def hasNext: Boolean = reader.hasNext
 

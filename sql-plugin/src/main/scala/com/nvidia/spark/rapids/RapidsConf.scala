@@ -594,8 +594,6 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
     hasLimit.getOrElse(deprecatedConf.getOrElse(true))
   }
 
-  lazy val chunkedReaderMemoryUsageRatio: Double = get(CHUNKED_READER_MEMORY_USAGE_RATIO)
-
   lazy val maxReadBatchSizeRows: Int = get(MAX_READER_BATCH_SIZE_ROWS)
 
   lazy val maxReadBatchSizeBytes: Long = get(MAX_READER_BATCH_SIZE_BYTES)
