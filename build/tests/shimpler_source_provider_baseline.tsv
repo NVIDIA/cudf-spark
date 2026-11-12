@@ -122,7 +122,8 @@
 400db173,410db183	src/main/scala/com/nvidia/spark/rapids/shims/GpuScalarSubqueryShims.scala	sql-plugin/src/main/spark400db173/scala/com/nvidia/spark/rapids/shims/GpuScalarSubqueryShims.scala
 359,413,350db143,400db173,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/GpuToPrettyString.scala	sql-plugin/src/main/spark350/scala/com/nvidia/spark/rapids/shims/GpuToPrettyString.scala
 359,350db143,400db173	src/main/scala/com/nvidia/spark/rapids/shims/GpuUnionExecShim.scala	sql-plugin/src/main/spark330/scala/com/nvidia/spark/rapids/shims/GpuUnionExecShim.scala
-413,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/GpuUnionExecShim.scala	sql-plugin/src/main/spark410db183/scala/com/nvidia/spark/rapids/shims/GpuUnionExecShim.scala
+413,410db183	src/main/scala/com/nvidia/spark/rapids/shims/GpuUnionExecShim.scala	sql-plugin/src/main/spark410db183/scala/com/nvidia/spark/rapids/shims/GpuUnionExecShim.scala
+500	src/main/scala/com/nvidia/spark/rapids/shims/GpuUnionExecShim.scala	sql-plugin/src/main/spark500/scala/com/nvidia/spark/rapids/shims/GpuUnionExecShim.scala
 359	src/main/scala/com/nvidia/spark/rapids/shims/GpuV2BatchWriteSummaryCommit.scala	sql-plugin/src/main/spark350/scala/com/nvidia/spark/rapids/shims/GpuV2BatchWriteSummaryCommit.scala
 413,410db183	src/main/scala/com/nvidia/spark/rapids/shims/GpuV2BatchWriteSummaryCommit.scala	sql-plugin/src/main/spark410db183/scala/com/nvidia/spark/rapids/shims/GpuV2BatchWriteSummaryCommit.scala
 359,413,350db143,400db173,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/GpuWindowGroupLimitExec.scala	sql-plugin/src/main/spark350/scala/com/nvidia/spark/rapids/shims/GpuWindowGroupLimitExec.scala
