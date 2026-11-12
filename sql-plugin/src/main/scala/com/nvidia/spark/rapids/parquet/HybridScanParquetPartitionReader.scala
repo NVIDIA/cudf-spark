@@ -16,13 +16,14 @@
 
 package com.nvidia.spark.rapids.parquet
 
-import ai.rapids.cudf.{ByteRange, DeviceMemoryBuffer, DType, HostMemoryBuffer, HybridScanReader, ParquetOptions, Table}
+import ai.rapids.cudf.{ByteRange, Cuda, DType, HostMemoryBuffer, HybridScanReader, ParquetOptions, Table}
 import ai.rapids.cudf.ast.{AstExpression, CompiledExpression}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
-import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
+import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitTargetSizeInHalfGpu, withRetry, withRetryNoSplit}
+import com.nvidia.spark.rapids.jni.PackedHostToDeviceCopy
 
 import org.apache.spark.TaskContext
 import org.apache.spark.internal.Logging
@@ -57,6 +58,8 @@ private[parquet] case class HybridScanContext(
     readDataSchema: StructType,
     scanFilters: HybridScanFilters,
     filterKeepThreshold: Double,
+    maxH2DPackSize: Long,
+    minH2DPackSize: Long,
     execMetrics: Map[String, GpuMetric])
 
 /** The part of one file a hybrid read owns: its row groups whose first byte is in the range. */
@@ -73,7 +76,8 @@ private[parquet] case class HybridScanSplit(
  * pruning and the decode take the GPU semaphore, so only the task thread may run them.
  */
 private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Logging {
-  import context.{execMetrics, filterKeepThreshold, readDataSchema, scanFilters}
+  import context.{execMetrics, filterKeepThreshold, maxH2DPackSize, minH2DPackSize,
+    readDataSchema, scanFilters}
 
   private def totalBytes(ranges: Array[ByteRange]): Long = ranges.map(_.size()).sum
 
@@ -213,8 +217,8 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
     GpuSemaphore.acquireIfNecessary(TaskContext.get())
     // The host pages outlive each attempt, so a retry copies them again.
     val kept = withRetryNoSplit[Array[Int]] {
-      withResource(copyToDevice(hostPages)) { dictPages =>
-        reader.filterRowGroupsWithDictionaryPages(dictPages, rowGroups)
+      withResource(stageOnDevice(hostPages)) { staged =>
+        reader.filterRowGroupsWithDictionaryPages(staged.getBuffers(), rowGroups)
       }
     }
     // Leaving the GPU for a while: what survives the pruning is a host-side list of row group
@@ -286,8 +290,8 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
     NvtxRegistry.HYBRID_SCAN_MATERIALIZE {
       // The host chunks outlive each attempt, so a retry copies them again.
       withRetryNoSplit[Table] {
-        withResource(copyToDevice(fetched.hostChunks)) { deviceChunks =>
-          reader.materializeAllColumns(fetched.rowGroups, deviceChunks)
+        withResource(stageOnDevice(fetched.hostChunks)) { staged =>
+          reader.materializeAllColumns(fetched.rowGroups, staged.getBuffers())
         }
       }
     }
@@ -378,19 +382,17 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
     if (filtersOnOutput(ast.isDefined)) reader.setFilter(null) else ast.foreach(reader.setFilter)
 
   /**
-   * Copy each host buffer to the device, one buffer for one. An empty chunk stays in place as an
-   * empty device buffer rather than being dropped, so the result stays aligned with the request.
+   * Queue the copy of `chunks` to the device on the default stream, packed into allocations of at
+   * most `maxH2DPackSize` bytes. An allocation that fails for want of a large enough free block is
+   * retried with half the pack size, down to `minH2DPackSize`. The decode that reads the result is
+   * queued on the same stream, so it is ordered after the copy.
    */
-  private def copyToDevice(hostChunks: Array[HostMemoryBuffer]): Array[DeviceMemoryBuffer] = {
-    hostChunks.safeMap { hostChunk =>
-      val length = hostChunk.getLength
-      closeOnExcept(DeviceMemoryBuffer.allocate(length)) { deviceChunk =>
-        if (length > 0) {
-          deviceChunk.copyFromHostBuffer(0, hostChunk, 0, length)
-        }
-        deviceChunk
-      }
-    }
+  private def stageOnDevice(chunks: Array[HostMemoryBuffer]): PackedHostToDeviceCopy = {
+    val packSize = AutoCloseableTargetSize(maxH2DPackSize, minH2DPackSize)
+    withRetry(packSize, splitTargetSizeInHalfGpu) { attempt =>
+      PackedHostToDeviceCopy.copyAsync(chunks, Cuda.DEFAULT_STREAM, attempt.targetSize,
+        HybridScanPipeline.copyEvent.get())
+    }.next()
   }
 }
 
@@ -399,6 +401,13 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
  * byte ranges, and deciding on the driver whether a scan may take the hybrid path at all.
  */
 object HybridScanPipeline extends Logging {
+
+  /**
+   * The event each host-to-device copy records. One per task thread, since an event can't be
+   * shared by two copies open at once, and only the task thread copies. Never closed; it lives as
+   * long as the thread.
+   */
+  private val copyEvent = ThreadLocal.withInitial[Cuda.Event](() => new Cuda.Event())
 
   /** Parse the footer into a reader. The caller owns and closes both the reader and the footer. */
   private[parquet] def openReader(
@@ -676,11 +685,14 @@ private[parquet] class HybridScanPerFileParquetPartitionReader(
  */
 case class HybridScanConfig(
     filters: HybridScanFilters,
-    filterKeepThreshold: Double)
+    filterKeepThreshold: Double,
+    maxH2DPackSize: Long,
+    minH2DPackSize: Long)
 
 object HybridScanConfig {
   def apply(rapidsConf: RapidsConf, filters: HybridScanFilters): HybridScanConfig = {
-    HybridScanConfig(filters, rapidsConf.hybridScanSingleStageFilterKeepThreshold)
+    HybridScanConfig(filters, rapidsConf.hybridScanSingleStageFilterKeepThreshold,
+      rapidsConf.hybridScanMaxH2DPackSize, rapidsConf.hybridScanMinH2DPackSize)
   }
 }
 

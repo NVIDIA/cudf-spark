@@ -746,6 +746,10 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val hybridScanSingleStageFilterKeepThreshold: Double =
     get(PARQUET_HYBRID_SCAN_SINGLE_STAGE_FILTER_KEEP_THRESHOLD)
 
+  lazy val hybridScanMaxH2DPackSize: Long = get(PARQUET_HYBRID_SCAN_MAX_H2D_PACK_SIZE)
+
+  lazy val hybridScanMinH2DPackSize: Long = get(PARQUET_HYBRID_SCAN_MIN_H2D_PACK_SIZE)
+
   lazy val isParquetPerFileReadEnabled: Boolean =
     RapidsReaderType.withName(get(PARQUET_READER_TYPE)) == RapidsReaderType.PERFILE
 
