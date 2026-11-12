@@ -617,6 +617,10 @@ def _decimal_scale_cast_conf(ansi_on):
     }
 
 
+_int_overflow_decimal_type = DecimalType(1, -2147483647)
+_regular_decimal_type = DecimalType(10, 2)
+
+
 @allow_non_gpu('Cast')
 @validate_execs_in_gpu_plan('GpuProjectExec')
 @pytest.mark.parametrize('ansi_on', [True, False], ids=idfn)
@@ -628,7 +632,7 @@ def test_cast_large_decimal_scale_change_cpu_bridge(ansi_on, value):
     def do_cast(spark):
         return spark.createDataFrame([(value,)], 'a string').select(
             f.col('a').cast(DecimalType(1, -37))
-                .cast(DecimalType(10, 2))
+                .cast(_regular_decimal_type)
                 .alias('result')).collect()
 
     assert_gpu_and_cpu_same_data_or_error(
@@ -642,8 +646,8 @@ def test_cast_int_overflow_decimal_scale_fallback(ansi_on):
     def do_cast(spark):
         return spark.createDataFrame(
             [('0e2147483647',), (None,)], 'a string').select(
-            f.col('a').cast(DecimalType(1, -2147483647))
-                .cast(DecimalType(10, 2))
+            f.col('a').cast(_int_overflow_decimal_type)
+                .cast(_regular_decimal_type)
                 .alias('result'))
 
     assert_gpu_fallback_collect(
@@ -655,13 +659,45 @@ def test_cast_int_overflow_decimal_scale_fallback(ansi_on):
 def test_cast_int_overflow_decimal_scale_nonzero(ansi_on):
     def do_cast(spark):
         return spark.createDataFrame([('1e2147483647',)], 'a string').select(
-            f.col('a').cast(DecimalType(1, -2147483647))
-                .cast(DecimalType(10, 2))
+            f.col('a').cast(_int_overflow_decimal_type)
+                .cast(_regular_decimal_type)
                 .alias('result')).collect()
 
     assert_gpu_and_cpu_same_data_or_error(
         do_cast, conf=_decimal_scale_cast_conf(ansi_on),
         error_message=re.compile('(?i)(decimal|underflow|overflow)'))
+
+
+@allow_non_gpu('ProjectExec', 'Cast')
+@pytest.mark.parametrize('data, schema, from_type, to_type', [
+    pytest.param(
+        [(['0e2147483647'],)],
+        'a array<string>',
+        ArrayType(_int_overflow_decimal_type),
+        ArrayType(_regular_decimal_type),
+        id='array'),
+    pytest.param(
+        [({'0e2147483647': '0e2147483647'},)],
+        'a map<string,string>',
+        MapType(_int_overflow_decimal_type, _int_overflow_decimal_type),
+        MapType(_regular_decimal_type, _regular_decimal_type),
+        id='map'),
+    pytest.param(
+        [(('0e2147483647',),)],
+        'a struct<x:string>',
+        StructType([StructField('x', _int_overflow_decimal_type)]),
+        StructType([StructField('x', _regular_decimal_type)]),
+        id='struct')
+])
+def test_cast_nested_int_overflow_decimal_scale_fallback(
+        data, schema, from_type, to_type):
+    def do_cast(spark):
+        return spark.createDataFrame(data, schema).select(
+            f.col('a').cast(from_type).cast(to_type).alias('result'))
+
+    # Spark permits string-to-decimal map-key casts only in ANSI mode.
+    assert_gpu_fallback_collect(
+        do_cast, 'ProjectExec', conf=_decimal_scale_cast_conf(True))
 
 
 @pytest.mark.parametrize('type', [DoubleType(), FloatType()], ids=idfn)
