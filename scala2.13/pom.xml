@@ -766,7 +766,7 @@
                 <shim.source.inherits>404</shim.source.inherits>
                 <spark.version>${spark405.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-stub</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-stub</rapids.delta.artifactId1>
                 <iceberg.artifact.suffix>${spark40x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.110x.version}</iceberg.runtime.version>
                 <slf4j.version>2.0.7</slf4j.version>
@@ -1003,7 +1003,7 @@
                 <shim.source.inherits>420</shim.source.inherits>
                 <spark.version>${spark421.version}</spark.version>
                 <parquet.hadoop.version>1.15.2</parquet.hadoop.version>
-                <rapids.delta.artifactId1>rapids-4-spark-delta-stub</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-stub</rapids.delta.artifactId1>
                 <iceberg.artifact.suffix>${spark41x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.111x.version}</iceberg.runtime.version>
                 <slf4j.version>2.0.7</slf4j.version>
