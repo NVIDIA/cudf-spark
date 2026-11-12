@@ -97,7 +97,8 @@ parquet_ts_write_options = ['INT96', 'TIMESTAMP_MICROS', 'TIMESTAMP_MILLIS']
 def _spark_has_save_as_table_overwrite_fix():
     version = spark_version_tuple()
     return ((is_spark_40x() and version >= (4, 0, 5))
-            or (is_spark_41x() and version >= (4, 1, 4)))
+            or (is_spark_41x() and version >= (4, 1, 4))
+            or ((4, 2, 1) <= version < (4, 3, 0)))
 
 
 @pytest.mark.skipif(not _spark_has_save_as_table_overwrite_fix(),
@@ -389,6 +390,38 @@ def test_ts_write_twice_fails_exception(spark_tmp_path, spark_tmp_table_factory)
             lambda spark : unary_op_df(spark, gen).coalesce(1).write.format("parquet").mode('overwrite').option("path", data_path).saveAsTable(table_name))
     with_gpu_session(
             lambda spark : writeParquetNoOverwriteCatchException(spark, unary_op_df(spark, gen), data_path, table_name))
+
+# Spark 4.2.1 (SPARK-51830) keeps a non-numeric value of a numeric partition column when
+# partition column validation is disabled, instead of failing the insert.
+@pytest.mark.skipif(not is_spark_421_or_later(), reason='SPARK-51830 is in Spark 4.2.1+')
+@pytest.mark.parametrize('insert', ['dynamic', 'static'])
+def test_insert_with_non_numeric_partition_value(spark_tmp_path, spark_tmp_table_factory, insert):
+    table_name = spark_tmp_table_factory.get()
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+    conf = {'spark.sql.legacy.skipTypeValidationOnAlterPartition': 'true',
+            'spark.sql.sources.validatePartitionColumns': 'false',
+            # Keeps the non-numeric static partition value out of an ANSI cast
+            'spark.sql.storeAssignmentPolicy': 'LEGACY'}
+    def create(spark):
+        spark.sql(f'CREATE TABLE {table_name} (c1 INT, p1 INT) USING parquet '
+                  f"PARTITIONED BY (p1) LOCATION '{data_path}'")
+        spark.sql(f"ALTER TABLE {table_name} ADD PARTITION (p1 = 'legacy_value')")
+    with_cpu_session(create, conf=conf)
+    if insert == 'dynamic':
+        # Collecting the custom partition locations computes the path of every existing partition
+        sql = f'INSERT INTO {table_name} SELECT id, id FROM range(1, 2)'
+        expected_partitions = ['p1=1', 'p1=legacy_value']
+    else:
+        # An empty insert into a static partition registers it from its path fragment
+        sql = f"INSERT INTO {table_name} PARTITION (p1 = 'legacy_value') SELECT id FROM range(0)"
+        expected_partitions = ['p1=legacy_value']
+    with_gpu_session(lambda spark: spark.sql(sql).collect(), conf=conf)
+    partitions = with_cpu_session(
+        lambda spark: spark.sql(f'SHOW PARTITIONS {table_name}').collect(), conf=conf)
+    assert sorted(r[0] for r in partitions) == expected_partitions
+    if insert == 'dynamic':
+        rows = with_cpu_session(lambda spark: spark.read.parquet(data_path + '/p1=1').collect())
+        assert [r['c1'] for r in rows] == [1]
 
 @allow_non_gpu('DataWritingCommandExec,ExecutedCommandExec,WriteFilesExec')
 @pytest.mark.parametrize('write_options', [{"parquet.encryption.footer.key": "k1"},
