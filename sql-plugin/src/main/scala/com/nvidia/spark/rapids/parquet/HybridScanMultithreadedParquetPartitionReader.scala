@@ -209,7 +209,7 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
     private def planAndFetchForPool(
         footer: HostMemoryBuffer): Option[(FetchedColumnChunks, Long)] = {
       withResource(HybridScanPipeline.openReader(footer, parquetOptions)) { reader =>
-        withResource(config.filters.ast.map(_.compile())) { ast =>
+        withResource(config.filters.ast.map(HybridScanPipeline.compileFilter)) { ast =>
           pipeline.planAndFetch(hybridSplit(file), reader, ast, allowDictionaryPruning = false)
             .map { fetched =>
               closeOnExcept(fetched)(f => (f, reader.totalRowsInRowGroups(f.rowGroups)))
@@ -271,7 +271,7 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
   private def decodeFetched(
       footer: HostMemoryBuffer,
       fetched: FetchedColumnChunks): Option[Table] = {
-    val ast = closeOnExcept(fetched)(_ => config.filters.ast.map(_.compile()))
+    val ast = closeOnExcept(fetched)(_ => config.filters.ast.map(HybridScanPipeline.compileFilter))
     withResource(ast) { _ =>
       val parsed = closeOnExcept(fetched)(_ => HybridScanPipeline.openReader(footer,
         parquetOptions))

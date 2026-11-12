@@ -453,7 +453,7 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
    */
   private def outputFilter(hasFilter: Boolean): Option[CompiledExpression] = {
     if (filtersOnOutput(hasFilter)) {
-      scanFilters.outputAst.map(_.compile())
+      scanFilters.outputAst.map(HybridScanPipeline.compileFilter)
     } else {
       None
     }
@@ -504,6 +504,10 @@ object HybridScanPipeline extends Logging {
       new HybridScanReader(footer, parquetOptions)
     }
   }
+
+  /** Compile a filter. Each literal allocates a GPU scalar, so an OOM here is retried. */
+  private[parquet] def compileFilter(expr: AstExpression): CompiledExpression =
+    withRetryNoSplit[CompiledExpression](expr.compile())
 
   /**
    * The reader's column selection. Only the projected columns are decoded, as microsecond
@@ -754,7 +758,7 @@ private[parquet] class HybridScanPerFileParquetPartitionReader(
    */
   private def readTable(): Option[Table] = {
     NvtxRegistry.PARQUET_READ_BATCH {
-      withResource(context.scanFilters.ast.map(_.compile())) { ast =>
+      withResource(context.scanFilters.ast.map(HybridScanPipeline.compileFilter)) { ast =>
         withResource(openReader(footer, parquetOptions)) { reader =>
           // The footer bytes are only read while the reader is being constructed.
           closeFooter()
