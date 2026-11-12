@@ -200,6 +200,7 @@ object GpuMurmur3Hash {
     computeWithHash(batch, boundExpr, columns => Hash.murmurHash32(seed, columns))
   }
 
+  /** Returns partition IDs in a caller-owned ColumnVector that the caller must close. */
   def computePartitionIds(batch: ColumnarBatch,
       boundExpr: Seq[Expression],
       seed: Int,
