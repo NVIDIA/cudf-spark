@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids
 
 import java.io.{File, FileNotFoundException, IOException}
 import java.net.{URI, URISyntaxException}
-import java.util.concurrent.{CompletionService, ConcurrentLinkedQueue, ExecutorCompletionService, Future, ThreadPoolExecutor, TimeUnit}
+import java.util.concurrent.{Callable, CompletionService, ConcurrentLinkedQueue, ExecutorCompletionService, Future, LinkedBlockingQueue, RunnableFuture, ThreadPoolExecutor, TimeUnit}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 
 import scala.annotation.tailrec
@@ -196,7 +196,13 @@ object MultiFileReaderThreadPool extends Logging {
     threadPool.get
   }
 
-  private def createThreadPool(name: String, conf: ThreadPoolConf): ThreadPoolExecutor = {
+  private[rapids] def createThreadPool(conf: ThreadPoolConf): ThreadPoolExecutor = {
+    createThreadPool("multithreaded file reader worker", conf)
+  }
+
+  private[rapids] def createThreadPool(
+      name: String,
+      conf: ThreadPoolConf): ThreadPoolExecutor = {
     // Determine the number of threads to use
     val maxThreads = conf.maxThreadNumber
     val numThreads = Math.max(maxThreads, GpuDeviceManager.getNumCores)
@@ -209,7 +215,34 @@ object MultiFileReaderThreadPool extends Logging {
     // Create the thread pool according to the memory bounded configuration
     val threadPoolExecutor = conf match {
       case _: DefaultThreadPoolConf =>
-        TrampolineUtil.newDaemonCachedThreadPool("multithreaded file reader worker", numThreads)
+        val executor = new ThreadPoolExecutor(
+          numThreads,
+          numThreads,
+          60L,
+          TimeUnit.SECONDS,
+          new LinkedBlockingQueue[Runnable](),
+          org.apache.spark.util.ThreadUtils.namedThreadFactory(name)
+        ) {
+          override protected def newTaskFor[T](callable: Callable[T]): RunnableFuture[T] = {
+            callable match {
+              case runner: AsyncRunner[_] =>
+                new RapidsFutureTask(runner).asInstanceOf[RunnableFuture[T]]
+              case _ =>
+                super.newTaskFor(callable)
+            }
+          }
+
+          override protected def newTaskFor[T](r: Runnable, result: T): RunnableFuture[T] = {
+            r match {
+              case futTask: RapidsFutureTask[_] =>
+                futTask.asInstanceOf[RunnableFuture[T]]
+              case _ =>
+                super.newTaskFor(r, result)
+            }
+          }
+        }
+        executor.allowCoreThreadTimeOut(true)
+        executor
       case boundedConf: MemoryBoundedPoolConf =>
         require(boundedConf.memoryCapacity > 0,
           "The memory capacity of ResourceBoundedThreadExecutor must be set before use")
@@ -566,7 +599,7 @@ abstract class MultiFileCloudPartitionReaderBase(
         case error => error
       }
       val metrics = GpuTaskMetrics.get
-      val taskId = tc.taskAttemptId()
+      val taskId = Option(tc).map(_.taskAttemptId()).getOrElse(-1L)
       runner.addPreHook(() => {
         val onFlightTasks = MultiFileReaderThreadPool.runningTaskNum.incrementAndGet()
         metrics.updateMultithreadReaderMaxParallelism(onFlightTasks)
@@ -972,6 +1005,10 @@ abstract class MultiFileCloudPartitionReaderBase(
     isDone = true
     batchIter = EmptyGpuColumnarBatchIterator
 
+    while (tasksToRun.nonEmpty) {
+      tasksToRun.dequeue().cancel()
+    }
+
     // clean up Async Readers being left over
     val needToClose = mutable.ArrayBuffer[BufferInfo]()
     currentFileHostBuffers.foreach(needToClose += _)
@@ -984,13 +1021,22 @@ abstract class MultiFileCloudPartitionReaderBase(
       while (task != null) {
         try {
           task match {
-            case t if t.isCancelled => // Do nothing if already cancelled
+            case t if t.isCancelled =>
+              t match {
+                case rft: RapidsFutureTask[_] => rft.runner.cleanUpResult()
+                case _ =>
+              }
             case t if t.isDone => // Close all produced hmbs
               needToClose += convertAsyncResult(t.get())
             case t =>
               // Let running reads observe isDone without interrupting file system operations.
               // If completion wins the cancellation race, we still own the result.
-              if (!t.cancel(false) && !t.isCancelled) {
+              if (t.cancel(false)) {
+                t match {
+                  case rft: RapidsFutureTask[_] => rft.runner.cleanUpResult()
+                  case _ =>
+                }
+              } else if (!t.isCancelled) {
                 needToClose += convertAsyncResult(t.get())
               }
           }

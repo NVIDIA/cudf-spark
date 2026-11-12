@@ -17,25 +17,30 @@
 package com.nvidia.spark.rapids
 
 import java.io.{FileNotFoundException, IOException}
-import java.util.concurrent.{CompletableFuture, ConcurrentLinkedQueue, ExecutionException, Executor, ExecutorCompletionService, Future, LinkedBlockingQueue}
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.{CancellationException, CompletableFuture, ConcurrentLinkedQueue, CountDownLatch, ExecutionException, Executor, ExecutorCompletionService, Future, LinkedBlockingQueue, TimeUnit}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 
 import scala.collection.mutable.ArrayBuffer
 
 import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
-import com.nvidia.spark.rapids.io.async.{AsyncMetrics, AsyncResult, AsyncRunner, FastReleaseResult}
+import com.nvidia.spark.rapids.io.async.{AsyncMetrics, AsyncResult, AsyncRunner, FastReleaseResult, RapidsFutureTask}
 import com.nvidia.spark.rapids.parquet._
 import com.nvidia.spark.rapids.shims.PartitionedFileUtilsShim
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 import org.apache.parquet.schema.{MessageType, Type}
+import org.scalatest.concurrent.Eventually.eventually
+import org.scalatest.concurrent.PatienceConfiguration.Timeout
 import org.scalatest.funsuite.AnyFunSuite
+import org.scalatest.time.{Seconds, Span}
 
 import org.apache.spark.TaskContext
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.execution.datasources.PartitionedFile
+import org.apache.spark.sql.rapids.execution.TrampolineUtil
+import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -403,6 +408,258 @@ class GpuMultiFileReaderSuite extends AnyFunSuite with RmmSparkRetrySuiteBase {
           assert(reader.hostBuffers.forall(_.getRefCount == 0))
         }
       }
+    }
+  }
+
+  test("async runner cancelled during completion releases buffer on DefaultThreadPoolConf") {
+    TrampolineUtil.setTaskContext(new MockTaskContext(taskAttemptId = 1, partitionId = 0))
+    try {
+      val hmb = HostMemoryBuffer.allocate(1024)
+      assert(hmb.getRefCount == 1)
+
+      val enteredPostHook = new CountDownLatch(1)
+      val proceedFromPostHook = new CountDownLatch(1)
+
+      val runner = AsyncRunner.newUnboundedTask[HostMemoryBuffer](() => hmb)
+      runner.addPostHook(() => {
+        enteredPostHook.countDown()
+        proceedFromPostHook.await(10, TimeUnit.SECONDS)
+      })
+
+      val pool = MultiFileReaderThreadPool.createThreadPool(
+        new ThreadPoolConfBuilder(
+          maxThreadNumber = 2,
+          isMemoryBounded = false,
+          memoryCapacityFromDriver = 0L,
+          timeoutMs = 10000L,
+          stageLevelPool = false
+        ).build()
+      )
+
+      try {
+        val future = pool.submit(runner)
+        assert(enteredPostHook.await(10, TimeUnit.SECONDS), "Runner did not reach post hook")
+        val cancelled = future.cancel(false)
+        assert(cancelled, "FutureTask cancel(false) failed")
+        proceedFromPostHook.countDown()
+
+        assert(future.isCancelled)
+        eventually(Timeout(Span(10, Seconds))) {
+          assert(hmb.getRefCount == 0)
+        }
+      } finally {
+        proceedFromPostHook.countDown()
+        pool.shutdownNow()
+        pool.awaitTermination(5, TimeUnit.SECONDS)
+      }
+    } finally {
+      TrampolineUtil.unsetTaskContext()
+    }
+  }
+
+  test("async runner cancelled during completion releases buffer on MemoryBoundedPoolConf") {
+    TrampolineUtil.setTaskContext(new MockTaskContext(taskAttemptId = 1, partitionId = 0))
+    try {
+      val hmb = HostMemoryBuffer.allocate(1024)
+      assert(hmb.getRefCount == 1)
+
+      val enteredPostHook = new CountDownLatch(1)
+      val proceedFromPostHook = new CountDownLatch(1)
+
+      val runner = AsyncRunner.newCpuTask[HostMemoryBuffer](() => hmb, memoryBytes = 1024L)
+      runner.addPostHook(() => {
+        enteredPostHook.countDown()
+        proceedFromPostHook.await(10, TimeUnit.SECONDS)
+      })
+
+      val pool = MultiFileReaderThreadPool.createThreadPool(
+        new ThreadPoolConfBuilder(
+          maxThreadNumber = 2,
+          isMemoryBounded = true,
+          memoryCapacityFromDriver = 10L * 1024 * 1024,
+          timeoutMs = 10000L,
+          stageLevelPool = false
+        ).build()
+      )
+
+      try {
+        val future = pool.submit(runner)
+        assert(enteredPostHook.await(10, TimeUnit.SECONDS), "Runner did not reach post hook")
+        val cancelled = future.cancel(false)
+        assert(cancelled, "FutureTask cancel(false) failed")
+        proceedFromPostHook.countDown()
+
+        assert(future.isCancelled)
+        eventually(Timeout(Span(10, Seconds))) {
+          assert(hmb.getRefCount == 0)
+        }
+      } finally {
+        proceedFromPostHook.countDown()
+        pool.shutdownNow()
+        pool.awaitTermination(5, TimeUnit.SECONDS)
+      }
+    } finally {
+      TrampolineUtil.unsetTaskContext()
+    }
+  }
+
+  for (ordered <- Seq(true, false)) {
+    test(s"cancellation of running file reader releases all buffers, ordered=$ordered") {
+      val hmb = HostMemoryBuffer.allocate(1024)
+      assert(hmb.getRefCount == 1)
+      val spillable = SpillableHostBuffer(hmb, 1024, SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+
+      val enteredPostHook = new CountDownLatch(1)
+      val proceedFromPostHook = new CountDownLatch(1)
+      val releaseCallbackCalled = new AtomicBoolean(false)
+      val readError = new AtomicReference[Option[Throwable]](None)
+
+      val poolConf = new ThreadPoolConfBuilder(
+        maxThreadNumber = 2,
+        isMemoryBounded = false,
+        memoryCapacityFromDriver = 0L,
+        timeoutMs = 10000L,
+        stageLevelPool = false
+      ).build()
+
+      val fakeFile = PartitionedFileUtilsShim.newPartitionedFile(
+        InternalRow.empty, "file:///tmp/test.parquet", 0, 1024)
+
+      val reader = new MultiFileCloudPartitionReaderBase(
+        new Configuration(false),
+        inputFiles = Array(fakeFile),
+        poolConf = poolConf,
+        maxNumFileProcessed = 1,
+        filters = Array.empty,
+        execMetrics = Map.empty,
+        maxReadBatchSizeRows = 1000,
+        maxReadBatchSizeBytes = 1L << 20,
+        keepReadsInOrder = ordered) {
+
+        override def getBatchRunner(
+            tc: TaskContext,
+            file: PartitionedFile,
+            conf: Configuration,
+            filters: Array[Filter]): AsyncRunner[HostMemoryBuffersWithMetaDataBase] = {
+          val runner = AsyncRunner.newUnboundedTask[HostMemoryBuffersWithMetaDataBase](() => {
+            val result = new HostMemoryBuffersWithMetaDataBase {
+              override def partitionedFile: PartitionedFile = file
+              override def memBuffersAndSizes: Array[SingleHMBAndMeta] =
+                Array(SingleHMBAndMeta(Array(spillable), 1024, 100, Seq.empty))
+              override def bytesRead: Long = 1024
+            }
+            result.addReleaseResourceCallback(() => releaseCallbackCalled.set(true))
+            result
+          })
+          runner.addPostHook(() => {
+            enteredPostHook.countDown()
+            proceedFromPostHook.await(10, TimeUnit.SECONDS)
+          })
+          runner
+        }
+
+        override def readBatches(h: HostMemoryBuffersWithMetaDataBase): Iterator[ColumnarBatch] =
+          EmptyGpuColumnarBatchIterator
+
+        override def getFileFormatShortName: String = "test"
+      }
+
+      val readThread = new Thread(() => {
+        TrampolineUtil.setTaskContext(new MockTaskContext(taskAttemptId = 1, partitionId = 0))
+        try {
+          reader.next()
+        } catch {
+          case t: Throwable => readError.set(Some(t))
+        } finally {
+          TrampolineUtil.unsetTaskContext()
+        }
+      }, "test-reader-thread")
+
+      try {
+        readThread.start()
+        assert(enteredPostHook.await(10, TimeUnit.SECONDS),
+          s"Reader runner did not reach post hook. Error: ${readError.get()}")
+
+        // Close the reader while runner is completing in background
+        reader.close()
+        proceedFromPostHook.countDown()
+
+        eventually(Timeout(Span(10, Seconds))) {
+          assert(hmb.getRefCount == 0)
+          assert(releaseCallbackCalled.get())
+        }
+      } finally {
+        proceedFromPostHook.countDown()
+        readThread.join(5000)
+        reader.close()
+      }
+    }
+  }
+
+  test("close cancels queued unstarted runners in tasksToRun") {
+    val poolConf = new ThreadPoolConfBuilder(
+      maxThreadNumber = 1,
+      isMemoryBounded = false,
+      memoryCapacityFromDriver = 0L,
+      timeoutMs = 10000L,
+      stageLevelPool = false
+    ).build()
+
+    val files = (0 until 3).map { i =>
+      PartitionedFileUtilsShim.newPartitionedFile(
+        InternalRow.empty, s"file:///tmp/test-$i.parquet", 0, 1024)
+    }.toArray
+
+    val createdRunners = ArrayBuffer[AsyncRunner[HostMemoryBuffersWithMetaDataBase]]()
+
+    def makeValidFile(file: PartitionedFile): HostMemoryBuffersWithMetaDataBase = {
+      new HostMemoryBuffersWithMetaDataBase {
+        override def partitionedFile: PartitionedFile = file
+        override def memBuffersAndSizes: Array[SingleHMBAndMeta] =
+          Array(SingleHMBAndMeta.empty(1))
+        override def bytesRead: Long = 0
+      }
+    }
+
+    val reader = new MultiFileCloudPartitionReaderBase(
+      new Configuration(false),
+      inputFiles = files,
+      poolConf = poolConf,
+      maxNumFileProcessed = 1,
+      filters = Array.empty,
+      execMetrics = Map.empty,
+      maxReadBatchSizeRows = 1000,
+      maxReadBatchSizeBytes = 1L << 20) {
+
+      override def getBatchRunner(
+          tc: TaskContext,
+          file: PartitionedFile,
+          conf: Configuration,
+          filters: Array[Filter]): AsyncRunner[HostMemoryBuffersWithMetaDataBase] = {
+        val runner = AsyncRunner.newUnboundedTask[HostMemoryBuffersWithMetaDataBase](() =>
+          makeValidFile(file))
+        createdRunners += runner
+        runner
+      }
+
+      override def readBatches(h: HostMemoryBuffersWithMetaDataBase): Iterator[ColumnarBatch] =
+        withResource(h) { _ =>
+          Iterator(new ColumnarBatch(Array.empty, 1))
+        }
+
+      override def getFileFormatShortName: String = "test"
+    }
+
+    TrampolineUtil.setTaskContext(new MockTaskContext(taskAttemptId = 1, partitionId = 0))
+    try {
+      assert(reader.next())
+      assert(createdRunners.size == 3)
+      reader.close()
+      // Runners in tasksToRun (runners 1 and 2) must be cancelled
+      assert(createdRunners.tail.forall(_.isCancelled))
+    } finally {
+      TrampolineUtil.unsetTaskContext()
+      reader.close()
     }
   }
 }
