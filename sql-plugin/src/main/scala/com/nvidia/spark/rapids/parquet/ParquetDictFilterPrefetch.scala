@@ -31,7 +31,7 @@ import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 import org.apache.parquet.HadoopReadOptions
 import org.apache.parquet.column.Encoding
-import org.apache.parquet.filter2.predicate.{FilterPredicate, LogicalInverseRewriter}
+import org.apache.parquet.filter2.predicate.{FilterPredicate, LogicalInverseRewriter, Operators}
 import org.apache.parquet.filter2.statisticslevel.StatisticsFilter
 import org.apache.parquet.hadoop.{ParquetFileReader, ParquetInputFormat}
 import org.apache.parquet.hadoop.ParquetFileWriter.MAGIC
@@ -69,7 +69,8 @@ object ParquetDictFilterPrefetch extends Logging {
    * @param range split range to apply when `footerFile` holds all row groups of the file,
    *              None when it holds exactly `blocks`
    * @param filterColumns lower case top level names of the columns the filters reference; their
-   *                      dictionary pages are prefetched, other reads are served on demand
+   *                      dictionary pages are prefetched when `predicate` has a predicate kind
+   *                      that dictionaryColumns does not know, other reads are served on demand
    */
   def rowGroups(
       conf: Configuration,
@@ -140,13 +141,14 @@ object ParquetDictFilterPrefetch extends Logging {
     } else {
       val useStats = conf.getBoolean(ParquetInputFormat.STATS_FILTERING_ENABLED, true)
       val pred = LogicalInverseRewriter.rewrite(predicate)
+      val columns = dictionaryColumns(pred).getOrElse(filterColumns)
       val ranges = new ArrayBuffer[(Long, Int)]
       blocks.asScala.foreach { block =>
         // row groups dropped by statistics never reach the dictionary level
         if (!(useStats && canDropByStats(pred, block))) {
           block.getColumns.asScala.foreach { c =>
             val name = c.getPath.toArray.headOption.map(_.toLowerCase(Locale.ROOT))
-            if (name.exists(filterColumns.contains) && c.hasDictionaryPage &&
+            if (name.exists(columns.contains) && c.hasDictionaryPage &&
                 !hasNonDictionaryPages(c)) {
               // readDictionary reads the page header and the page from the chunk start
               val len = c.getFirstDataPageOffset - c.getStartingPos
@@ -162,6 +164,34 @@ object ParquetDictFilterPrefetch extends Logging {
       } else {
         ranges.sortBy(_._1).toList
       }
+    }
+  }
+
+  /**
+   * Lower case top level names of the columns whose dictionaries DictionaryFilter may read for
+   * `pred`, or None when `pred` has a predicate kind this does not know.
+   */
+  private[parquet] def dictionaryColumns(pred: FilterPredicate): Option[Set[String]] = {
+    def name(c: Operators.Column[_]) = c.getColumnPath.toArray.head.toLowerCase(Locale.ROOT)
+    def both(l: FilterPredicate, r: FilterPredicate) =
+      for (a <- dictionaryColumns(l); b <- dictionaryColumns(r)) yield a ++ b
+    pred match {
+      case p: Operators.And => both(p.getLeft, p.getRight)
+      case p: Operators.Or => both(p.getLeft, p.getRight)
+      case p: Operators.Not => dictionaryColumns(p.getPredicate)
+      // DictionaryFilter answers null comparisons (IsNull / IsNotNull) without the dictionary
+      case p: Operators.Eq[_] if p.getValue == null => Some(Set.empty)
+      case p: Operators.NotEq[_] if p.getValue == null => Some(Set.empty)
+      case p: Operators.Eq[_] => Some(Set(name(p.getColumn)))
+      case p: Operators.NotEq[_] => Some(Set(name(p.getColumn)))
+      case p: Operators.Lt[_] => Some(Set(name(p.getColumn)))
+      case p: Operators.LtEq[_] => Some(Set(name(p.getColumn)))
+      case p: Operators.Gt[_] => Some(Set(name(p.getColumn)))
+      case p: Operators.GtEq[_] => Some(Set(name(p.getColumn)))
+      case p: Operators.In[_] => Some(Set(name(p.getColumn)))
+      case p: Operators.NotIn[_] => Some(Set(name(p.getColumn)))
+      case p: Operators.UserDefined[_, _] => Some(Set(name(p.getColumn)))
+      case _ => None
     }
   }
 

@@ -151,7 +151,9 @@ class ParquetDictFilterPrefetchSuite extends AnyFunSuite with BeforeAndAfterAll 
       FilterApi.eq(i, Integer.valueOf(30))), Set("s", "i")),
     ("s = b or i = 41", FilterApi.or(FilterApi.eq(s, str("b")),
       FilterApi.eq(i, Integer.valueOf(41))), Set("s", "i")),
-    ("not s = a", FilterApi.not(FilterApi.eq(s, str("a"))), Set("s")))
+    ("not s = a", FilterApi.not(FilterApi.eq(s, str("a"))), Set("s")),
+    ("s is not null and i = 32", FilterApi.and(FilterApi.notEq(s, null: Binary),
+      FilterApi.eq(i, Integer.valueOf(32))), Set("s", "i")))
 
   test("the test file has several row groups") {
     assert(footer(None).getBlocks.size >= 4)
@@ -197,6 +199,27 @@ class ParquetDictFilterPrefetchSuite extends AnyFunSuite with BeforeAndAfterAll 
     assert(reader.calls >= 1, "dictionary pages are read on demand")
     assertResult(pathBased(conf(p), f).asScala.map(_.getStartingPos))(
       kept.asScala.map(_.getStartingPos))
+  }
+
+  test("dictionaries of columns only checked for null are not prefetched") {
+    val p = FilterApi.and(FilterApi.notEq(s, null: Binary), FilterApi.notEq(i, null: Integer))
+    val f = footer(None)
+    val reader = new LocalReader
+    val kept = ParquetDictFilterPrefetch.rowGroups(conf(p), path, footerFile(), None,
+      f.getBlocks, p, Set("s", "i"), reader, () => fail("fell back"))
+    assert(reader.calls == 0)
+    assertResult(pathBased(conf(p), f).asScala.map(_.getStartingPos))(
+      kept.asScala.map(_.getStartingPos))
+  }
+
+  test("dictionary columns of a predicate") {
+    def cols(p: FilterPredicate) = ParquetDictFilterPrefetch.dictionaryColumns(p)
+    assertResult(Some(Set.empty))(cols(FilterApi.notEq(s, null: Binary)))
+    assertResult(Some(Set("s")))(cols(FilterApi.notEq(s, str("a"))))
+    assertResult(Some(Set("i")))(cols(FilterApi.lt(i, Integer.valueOf(3))))
+    assertResult(Some(Set("s", "i")))(cols(FilterApi.or(FilterApi.eq(s, str("a")),
+      FilterApi.and(FilterApi.eq(i, null: Integer), FilterApi.gtEq(i, Integer.valueOf(3))))))
+    assertResult(Some(Set("s")))(cols(FilterApi.in(s, Set(str("a"), str("b")).asJava)))
   }
 
   test("a failure falls back to the path based reader") {
