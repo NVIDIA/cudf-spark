@@ -17,14 +17,14 @@ import json
 import pytest
 
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
-    assert_gpu_and_cpu_are_equal_collect
+    assert_gpu_and_cpu_are_equal_collect, assert_spark_exception
 from conftest import is_iceberg_remote_catalog
 from data_gen import copy_and_update
 from iceberg import get_full_table_name, iceberg_unsupported_mark, rapids_reader_types, \
     supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON
 from iceberg.iceberg_test import _ICEBERG_VARIANT_READ_CONF
 from marks import allow_non_gpu, iceberg, ignore_order, incompat
-from spark_session import is_spark_411_or_later, with_cpu_session
+from spark_session import is_spark_411_or_later, with_cpu_session, with_gpu_session
 
 pytestmark = [iceberg_unsupported_mark, iceberg]
 
@@ -147,6 +147,46 @@ def test_iceberg_variant_read_configuration(spark_tmp_table_factory, container, 
         lambda spark: spark.sql(f"SELECT id FROM {table}"),
         exist_classes='GpuBatchScanExec', non_exist_classes='BatchScanExec',
         conf=conf, require_non_empty=True)
+
+
+@incompat
+@requires_variant
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+def test_iceberg_shredded_variant_read_and_count(spark_tmp_table_factory, reader_type):
+    table = get_full_table_name(spark_tmp_table_factory)
+    conf = copy_and_update(_ICEBERG_VARIANT_READ_CONF, {
+        'spark.rapids.sql.format.parquet.reader.type': reader_type,
+        'spark.rapids.sql.incompatibleOps.enabled': 'true',
+    })
+
+    def setup_table(spark):
+        spark.sql(f"CREATE TABLE {table} (v VARIANT, id BIGINT) USING ICEBERG "
+                  "TBLPROPERTIES ('format-version'='3', 'write.delete.mode'='merge-on-read', "
+                  "'write.parquet.shred-variants'='true', "
+                  "'write.parquet.variant-inference-buffer-size'='2')")
+        spark.sql(f"""
+            INSERT INTO {table}
+            SELECT /*+ COALESCE(1) */
+              IF(id = 3, NULL, parse_json(concat('{{\"x\":', id, '}}'))), id
+            FROM range(6)
+            """)
+        spark.sql(f"DELETE FROM {table} WHERE id IN (1, 4)")
+
+    with_cpu_session(setup_table, conf=conf)
+    assert with_cpu_session(lambda spark: spark.sql(
+        f"SELECT id, try_variant_get(v, '$.x', 'bigint') FROM {table} ORDER BY id").collect(),
+        conf=conf) == [(0, 0), (2, 2), (3, None), (5, 5)]
+    # Counting surviving rows must not require decoding the unrequested shredded Variant.
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.sql(f"SELECT count(*) FROM {table}"),
+        exist_classes='GpuBatchScanExec', non_exist_classes='BatchScanExec',
+        conf=conf, require_non_empty=True)
+    for projection in ['v', "try_variant_get(v, '$.x', 'bigint')"]:
+        assert_spark_exception(
+            lambda: with_gpu_session(
+                lambda spark: spark.sql(f"SELECT {projection} FROM {table}").collect(), conf=conf),
+            'java.lang.UnsupportedOperationException: GPU Iceberg reader does not support '
+            'shredded or incompatible Variant input')
 
 
 @incompat
