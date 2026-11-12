@@ -338,7 +338,6 @@ def test_ctas_v3_variant_cpu_rows_convert_to_gpu(
     # CPU Iceberg scan; the supported Variant settings keep extraction eligible.
     cpu_read_conf = copy_and_update(conf, {
         "spark.rapids.sql.format.iceberg.read.enabled": "false",
-        "spark.sql.variant.pushVariantIntoScan": "false",
         "spark.sql.variant.allowReadingShredded": "false",
     })
 
