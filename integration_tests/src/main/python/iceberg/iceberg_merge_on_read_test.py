@@ -14,8 +14,11 @@
 import json
 import logging
 import os
+import struct
 import tempfile
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pyspark.sql.functions as f
 import pytest
 from pyspark.sql.types import DoubleType, FloatType, IntegerType, StructField, StructType
@@ -141,6 +144,85 @@ def test_iceberg_eq_delete_float_signed_zero(spark_tmp_table_factory, spark_tmp_
     with_cpu_session(setup)
     expected = [i for i in range(8)
                 if i != delete_id and (composite or i != delete_id + 4)]
+
+    def read(spark):
+        return spark.table(table_name).select('id')
+
+    try:
+        assert sorted(row.id for row in with_cpu_session(
+            lambda spark: read(spark).collect())) == expected
+        assert_gpu_and_cpu_are_equal_collect(
+            read, conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
+    finally:
+        reset_spark_session_conf()
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.parametrize('float_type', ['FLOAT', 'DOUBLE'])
+@pytest.mark.parametrize('composite', [False, True], ids=['single-key', 'composite-key'])
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Requires a local catalog and files")
+@validate_execs_in_gpu_plan('GpuBatchScanExec')
+def test_iceberg_eq_delete_nan_payloads(
+        spark_tmp_table_factory, spark_tmp_path, reader_type, float_type, composite):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+    arrow_type, bits_format, nan_bits, one_bits = (
+        (pa.float32(), 'I', [0x7fc00001, 0xffc00002, 0x7fc00003], 0x3f800000)
+        if float_type == 'FLOAT' else
+        (pa.float64(), 'Q', [0x7ff8000000000001, 0xfff8000000000002,
+                            0x7ff8000000000003], 0x3ff0000000000000))
+
+    def float_array(bits, validity=None):
+        # Build the Arrow buffer directly: Python/Spark writers may canonicalize NaNs.
+        return pa.Array.from_buffers(arrow_type, len(bits), [
+            None if validity is None else pa.py_buffer(validity),
+            pa.py_buffer(struct.pack('<' + bits_format * len(bits), *bits))])
+
+    def setup(spark):
+        spark.sql(f"CREATE TABLE {table_name} (id INT, f {float_type}, g INT) "
+                  "USING ICEBERG TBLPROPERTIES ('format-version'='2')")
+        iceberg = spark._jvm.org.apache.iceberg
+        table = iceberg.spark.Spark3Util.loadIcebergTable(spark._jsparkSession, table_name)
+        field_ids = {name: table.schema().findField(name).fieldId() for name in ['id', 'f', 'g']}
+
+        def write_file(name, columns, arrays, expected_nan_bits):
+            schema = pa.schema([pa.field(col, array.type, metadata={
+                b'PARQUET:field_id': str(field_ids[col]).encode()})
+                for col, array in zip(columns, arrays)])
+            path = os.path.join(spark_tmp_path, name + '.parquet')
+            pq.write_table(pa.Table.from_arrays(arrays, schema=schema), path,
+                           use_dictionary=False)
+            # Verify the persisted payloads, so this cannot silently become a same-NaN test.
+            floats = pq.read_table(path, columns=['f']).column('f').combine_chunks()
+            raw_bits = struct.unpack('<' + bits_format * len(floats), floats.buffers()[1])
+            assert list(raw_bits[:len(expected_nan_bits)]) == expected_nan_bits
+            return path
+
+        # Each g has two NaN payloads, 1.0, and null; validity bits 0x77 mark rows 3/7 null.
+        data_file = write_file('nan-data', ['id', 'f', 'g'], [
+            pa.array(range(8), type=pa.int32()),
+            float_array([nan_bits[0], nan_bits[1], one_bits, 0] * 2, b'\x77'),
+            pa.array([0] * 4 + [1] * 4, type=pa.int32())], nan_bits[:2])
+        table.newAppend().appendFile(iceberg.DataFiles.builder(table.spec())
+            .withPath(data_file).withFormat('PARQUET')
+            .withFileSizeInBytes(os.path.getsize(data_file)).withRecordCount(8).build()).commit()
+
+        delete_cols = ['f', 'g'] if composite else ['f']
+        delete_arrays = [float_array([nan_bits[2]])]
+        if composite:
+            delete_arrays.append(pa.array([0], type=pa.int32()))
+        delete_file = write_file('nan-delete', delete_cols, delete_arrays, [nan_bits[2]])
+        equality_ids = spark.sparkContext._gateway.new_array(spark._jvm.int, len(delete_cols))
+        for i, col in enumerate(delete_cols):
+            equality_ids[i] = field_ids[col]
+        table.newRowDelta().addDeletes(iceberg.FileMetadata.deleteFileBuilder(table.spec())
+            .ofEqualityDeletes(equality_ids).withPath(delete_file).withFormat('PARQUET')
+            .withFileSizeInBytes(os.path.getsize(delete_file)).withRecordCount(1).build()).commit()
+        spark.sql(f'REFRESH TABLE {table_name}')
+
+    with_cpu_session(setup)
+    expected = [2, 3, 4, 5, 6, 7] if composite else [2, 3, 6, 7]
 
     def read(spark):
         return spark.table(table_name).select('id')
