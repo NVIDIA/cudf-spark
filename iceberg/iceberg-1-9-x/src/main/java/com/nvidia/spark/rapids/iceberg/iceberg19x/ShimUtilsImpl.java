@@ -90,9 +90,7 @@ public class ShimUtilsImpl extends Iceberg19PlusShimUtils {
         return result;
     }
 
-    // openParquetReader: inherits the no-cache default from IcebergShimUtils. The shaded
-    // ParquetFileReader in 1.9.x has no public API to inject pre-parsed footer metadata,
-    // so file-cache routing is not possible here.
+    // openParquetReader inherits the cached-footer stream adapter from IcebergShimUtils.
 
     @Override
     public GpuSparkScan newCopyOnWriteScan(

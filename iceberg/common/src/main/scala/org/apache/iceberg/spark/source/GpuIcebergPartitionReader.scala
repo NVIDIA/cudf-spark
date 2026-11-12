@@ -116,7 +116,7 @@ class GpuIcebergPartitionReader(
       .toSeq
 
     val inputFiles = tasks.flatMap(t => Seq(t.file()) ++ t.deletes().asScala)
-      .map(f => locationOf(f) -> rapidsFileIO.newInputFile(locationOf(f)))
+      .map(f => locationOf(f) -> rapidsFileIO.newInputFile(locationOf(f), f.fileSizeInBytes()))
       .toMap
 
     val taskMap = toMapStrict(tasks.map(t => {

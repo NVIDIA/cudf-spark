@@ -17,7 +17,6 @@
 package com.nvidia.spark.rapids.iceberg;
 
 import com.nvidia.spark.rapids.GpuMetric;
-import com.nvidia.spark.rapids.NoopMetric$;
 import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
 import com.nvidia.spark.rapids.iceberg.parquet.BaseActionBuildingVisitor;
@@ -47,7 +46,6 @@ import org.apache.iceberg.types.Type;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.connector.write.DeltaBatchWrite;
-import scala.Option;
 
 import java.io.IOException;
 import java.io.Serializable;
@@ -160,25 +158,16 @@ public interface IcebergShimUtils {
     /**
      * Open a shaded {@link ParquetFileReader} for an iceberg {@link IcebergInputFile}.
      *
-     * <p>The default impl opens via
-     * {@code ParquetFileReader.open(InputFile, ParquetReadOptions)} without footer caching
-     * and bumps the footer-miss counter on every call so dashboards see non-zero activity
-     * instead of silently interpreting "all zeros" as "everything was cached". This default
-     * is used by 1.6.x / 1.9.x whose shaded {@code ParquetFileReader} has no public API to
-     * inject pre-parsed footer metadata. 1.10.x overrides this to route through
-     * {@code FileCache} via the 4-arg
-     * {@code (InputFile, ParquetMetadata, ParquetReadOptions, SeekableInputStream)}
-     * constructor.
+     * <p>The default serves cached footer bytes through an input stream, including on
+     * 1.6.x / 1.9.x whose shaded Parquet reader cannot accept pre-parsed metadata.
+     * Newer versions override this to pass the parsed footer directly to the reader.
      */
     default ParquetFileReader openParquetReader(
             IcebergInputFile inputFile,
             Path filePath,
             ParquetReadOptions options,
             scala.collection.immutable.Map<String, GpuMetric> metrics) throws IOException {
-        Option<GpuMetric> opt = metrics.get(GpuMetric.FILECACHE_FOOTER_MISSES());
-        GpuMetric missCounter = opt.isDefined() ? opt.get() : NoopMetric$.MODULE$;
-        missCounter.$plus$eq(1L);
-        return ParquetFileReader.open(GpuParquetIO.file(inputFile.getDelegate()), options);
+        return GpuParquetIO.openReaderWithCachedFooter(inputFile, filePath, options, metrics);
     }
 
     /**
