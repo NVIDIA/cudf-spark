@@ -66,6 +66,29 @@
 
 set -ex
 
+find_rapids_jars() {
+    local jar_dir=$1
+    local jar_suffix=$2
+    local error_message=$3
+    local allow_missing=${4:-0}
+    local jars
+
+    # Follow symlinks, ignore directories, and prefer renamed artifacts.
+    jars=$(find -L "$jar_dir" -maxdepth 1 -type f -name "cudf-spark$jar_suffix" \
+        2>/dev/null | sort || true)
+    if [[ -z "$jars" ]]; then
+        jars=$(find -L "$jar_dir" -maxdepth 1 -type f -name "rapids-4-spark$jar_suffix" \
+            2>/dev/null | sort || true)
+    fi
+
+    if [[ -z "$jars" && "$allow_missing" == "0" ]]; then
+        printf 'ERROR: %s; searched %s and %s\n' "$error_message" \
+            "$jar_dir/cudf-spark$jar_suffix" "$jar_dir/rapids-4-spark$jar_suffix" >&2
+        return 1
+    fi
+    printf '%s' "$jars"
+}
+
 print_spark_failure_diagnostics() {
     local started=$1
     shift
@@ -212,7 +235,8 @@ else
     if [ -d "$LOCAL_JAR_PATH" ]; then
         AVRO_JARS=$(echo "$LOCAL_JAR_PATH"/spark-avro*.jar)
         PROTOBUF_JARS=$(echo "$LOCAL_JAR_PATH"/spark-protobuf*.jar)
-        PLUGIN_JAR=$(echo "$LOCAL_JAR_PATH"/rapids-4-spark_*.jar)
+        # Prefer renamed artifacts while accepting legacy JARs supplied by existing jobs.
+        PLUGIN_JAR=$(find_rapids_jars "$LOCAL_JAR_PATH" '_*.jar' 'No plugin JAR found')
         if [ -f $(echo $LOCAL_JAR_PATH/parquet-hadoop*.jar) ]; then
             export INCLUDE_PARQUET_HADOOP_TEST_JAR=true
             PARQUET_HADOOP_TESTS=$(echo $LOCAL_JAR_PATH/parquet-hadoop*.jar)
@@ -224,7 +248,11 @@ else
             PARQUET_HADOOP_TESTS=
         fi
         # the integration-test-spark3xx.jar, should not include the integration-test-spark3xxtest.jar
-        TEST_JARS=$(echo "$LOCAL_JAR_PATH"/rapids-4-spark-integration-tests*-$INTEGRATION_TEST_VERSION.jar)
+        # Integration-test helper JARs are optional for spark-shell smoke tests.
+        TEST_JARS=$(find_rapids_jars "$LOCAL_JAR_PATH" \
+            "-integration-tests*-$INTEGRATION_TEST_VERSION.jar" \
+            "No integration-tests JAR found for $INTEGRATION_TEST_VERSION" \
+            "${SPARK_SHELL_SMOKE_TEST:-0}")
     else
         [[ "$SCALA_VERSION" != "2.12"  ]] && TARGET_DIR=${TARGET_DIR/integration_tests/scala$SCALA_VERSION\/integration_tests}
         AVRO_JARS=$(echo "$TARGET_DIR"/dependency/spark-avro*.jar)
@@ -237,9 +265,14 @@ else
         # Make sure we have Parquet version >= 1.12 in the dependency
         LOWEST_PARQUET_JAR=$(echo -e "$MIN_PARQUET_JAR\n$PARQUET_HADOOP_TESTS" | sort -V | head -1)
         export INCLUDE_PARQUET_HADOOP_TEST_JAR=$([[ "$LOWEST_PARQUET_JAR" == "$MIN_PARQUET_JAR" ]] && echo true || echo false)
-        PLUGIN_JAR=${PLUGIN_JAR:-$(echo "$TARGET_DIR"/../../dist/target/rapids-4-spark_*.jar)}
+        PLUGIN_JAR=${PLUGIN_JAR:-$(find_rapids_jars "$TARGET_DIR/../../dist/target" \
+            '_*.jar' 'No plugin JAR found')}
         # the integration-test-spark3xx.jar, should not include the integration-test-spark3xxtest.jar
-        TEST_JARS=$(echo "$TARGET_DIR"/rapids-4-spark-integration-tests*-$INTEGRATION_TEST_VERSION.jar)
+        # Integration-test helper JARs are optional for spark-shell smoke tests.
+        TEST_JARS=$(find_rapids_jars "$TARGET_DIR" \
+            "-integration-tests*-$INTEGRATION_TEST_VERSION.jar" \
+            "No integration-tests JAR found for $INTEGRATION_TEST_VERSION" \
+            "${SPARK_SHELL_SMOKE_TEST:-0}")
     fi
 
     # `./run_pyspark_from_build.sh` runs all the tests excluding the avro tests in 'avro_test.py'.
