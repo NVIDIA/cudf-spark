@@ -31,6 +31,20 @@ object KeyGroupedPartitioningShim {
     p.copy(numPartitions = partitionValues.length, partitionValues = partitionValues)
   }
 
+  def copyForOutputPartitioning(
+      p: KeyGroupedPartitioning,
+      joinKeyPositions: Option[Seq[Int]],
+      partitionValues: Seq[InternalRow],
+      isPartiallyClustered: Boolean): KeyGroupedPartitioning = {
+    val expressions = joinKeyPositions
+      .map(_.map(p.expressions(_)))
+      .getOrElse(p.expressions)
+    p.copy(
+      expressions = expressions,
+      numPartitions = partitionValues.length,
+      partitionValues = partitionValues)
+  }
+
   def getUniquePartitions(p: KeyGroupedPartitioning): Seq[InternalRow] = {
     p.partitionValues
       .map(InternalRowComparableWrapper(_, p.expressions))

@@ -23,8 +23,9 @@ import java.util.Objects
 import scala.collection.JavaConverters._
 
 import com.nvidia.spark.rapids.{CombineConf, DateTimeRebaseCorrected, GpuColumnVector, GpuMetric,
-  ThreadPoolConfBuilder}
+  LocalGpuMetric, NoopMetric, ThreadPoolConfBuilder}
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.GpuMetric.ICEBERG_DICT_FILTER_TIME
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
 import com.nvidia.spark.rapids.iceberg.ShimUtils
 import com.nvidia.spark.rapids.parquet.{GpuParquetUtils, ParquetFileInfoWithBlockMeta,
@@ -236,13 +237,29 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
         f,
         conf.caseSensitive)
 
-      blocks.filter { case (rowGroup, _) =>
+      val needRecordDictFilterTimer =
+        conf.metrics.get(ICEBERG_DICT_FILTER_TIME).exists(GpuMetric.isTimeMetric)
+      // GpuMetric.ns has mutable timer state, so each file needs its own timer.
+      val localDictFilterTime = if (needRecordDictFilterTimer) new LocalGpuMetric else NoopMetric
+      try {
+        blocks.filter { case (rowGroup, _) =>
           statsFilter.shouldRead(typeWithIds, rowGroup) &&
-            dictFilter.shouldRead(typeWithIds, rowGroup, reader.getDictionaryReader(rowGroup)) &&
+            localDictFilterTime.ns {
+              dictFilter.shouldRead(typeWithIds, rowGroup, reader.getDictionaryReader(rowGroup))
+            } &&
             bloomFilter.shouldRead(typeWithIds, rowGroup, reader.getBloomFilterDataReader(rowGroup))
+        }
+      } finally {
+        if (needRecordDictFilterTimer) {
+          addTimeByMetric(ICEBERG_DICT_FILTER_TIME, localDictFilterTime.value)
+        }
       }
     }.getOrElse(blocks)
       .toSeq
+  }
+
+  protected def addTimeByMetric(metricName: String, value: Long): Unit = {
+    conf.metrics.getOrElse(metricName, NoopMetric) += value
   }
 
   def clipBlocksToSchema(fileReadSchema: MessageType,

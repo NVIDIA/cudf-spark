@@ -23,6 +23,38 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
 
   // ENABLE/DISABLE PROCESSING
 
+  val DRIVERLESS_BROADCAST_ENABLED = conf("spark.rapids.sql.driverlessBroadcast.enabled")
+    .doc("Use executor-to-executor GPU shuffle reads for eligible broadcast hash joins. " +
+      "Databricks retains its existing broadcast path even when this setting is true. " +
+      "Can be enabled or disabled per query. Cached replicas are shared while source map " +
+      "outputs remain unchanged; recomputed outputs use a new replica. " +
+      "The old fetch protocol (spark.shuffle.useOldFetchProtocol=true) is unsupported and " +
+      "causes a planning error for an otherwise eligible driverless join. " +
+      "Uses UCX GPU shuffle; the build decoder accepts uncompressed and compressed batches. " +
+      "Hash-table reuse must be disabled. Null-aware anti joins, skew-optimized joins, " +
+      "and joins containing subqueries retain the standard path. Eligible GPU joins can " +
+      "share a build shuffle with or without AQE. Builds shared with standard broadcast " +
+      "consumers retain standard broadcast before materialization. Deterministic flat schemas " +
+      "are eligible. Opaque RDD sources retain standard broadcast. " +
+      "Dynamic allocation is unsupported. Compressed-batch decoding is supported, but " +
+      "compressed UCX transport requires independent lifetime and platform qualification.")
+    .internal()
+    .booleanConf
+    .createWithDefault(false)
+
+  val DRIVERLESS_BROADCAST_MAX_EXECUTORS = conf("spark.rapids.sql.driverlessBroadcast.maxExecutors")
+    .doc("Maximum registered executors, excluding the driver, for driverless broadcast. " +
+      "The driver retains standard broadcast when this limit is exceeded. Executors check " +
+      "the limit before fetching a build; growth beyond the limit after planning fails " +
+      "that execution. Dynamic allocation is unsupported. Values above 32 require " +
+      "scale qualification and improvements such as hierarchical or peer-forwarded " +
+      "distribution; raising this setting does not change the fan-out algorithm. " +
+      "Executors on the same host count separately because each can fetch a full build replica.")
+    .internal()
+    .integerConf
+    .checkValue(_ > 0, "must be positive")
+    .createWithDefault(32)
+
   val SQL_ENABLED = conf("spark.rapids.sql.enabled")
     .doc("Enable (true) or disable (false) sql operations on the GPU")
     .commonlyUsed()
