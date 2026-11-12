@@ -26,7 +26,8 @@ import pytest
 from asserts import assert_equal_with_local_sort
 from conftest import is_iceberg_rest_catalog, spark_jvm
 from data_gen import *
-from spark_session import is_iceberg_supported_spark, with_cpu_session, with_gpu_session
+from spark_session import is_iceberg_supported_spark, is_spark_411_or_later, \
+    with_cpu_session, with_gpu_session
 
 iceberg_unsupported_mark = pytest.mark.skipif(
     not is_iceberg_supported_spark(),
@@ -306,6 +307,55 @@ iceberg_write_enabled_conf = {
     # for merge-on-read (MOR) DML operations (UPDATE/DELETE/MERGE with write.*.mode='merge-on-read')
     "spark.rapids.sql.exec.WriteDeltaExec": "true",
 }
+
+iceberg_variant_write_conf = {
+    **iceberg_write_enabled_conf,
+    **iceberg_variant_read_conf,
+    "spark.rapids.sql.format.iceberg.read.enabled": "true",
+    "spark.sql.parquet.fieldId.write.enabled": "true",
+}
+iceberg_variant_write_cases = [
+    pytest.param(container, marks=pytest.mark.skipif(
+        not supports_iceberg_v3 or not is_spark_411_or_later(),
+        reason="Iceberg Variant requires Iceberg v3 and Spark 4.1.1+"), id=container)
+    for container in ('top', 'struct', 'array', 'map')
+]
+_VARIANT_WRITE_CONTAINERS = {
+    'top': ('VARIANT', 'parsed', 'v'),
+    'struct': ('STRUCT<leaf: VARIANT>', "named_struct('leaf', parsed)", 'v.leaf'),
+    'array': ('ARRAY<VARIANT>', 'IF(id % 6 = 5, array(), array(parsed))', 'get(v, 0)'),
+    'map': ('MAP<STRING, VARIANT>', "IF(id % 6 = 5, map(), map('key', parsed))", "v['key']"),
+}
+
+
+def setup_iceberg_variant_write_table(
+        spark, table, container, mode='copy-on-write', start=0, value_offset=0):
+    column_type, expression, _ = _VARIANT_WRITE_CONTAINERS[container]
+    spark.sql(f"CREATE TABLE {table} (id INT, v {column_type}) USING ICEBERG "
+              "PARTITIONED BY (truncate(3, id)) "
+              "TBLPROPERTIES ('format-version'='3', 'write.parquet.shred-variants'='false', "
+              f"'write.delete.mode'='{mode}', 'write.update.mode'='{mode}', "
+              f"'write.merge.mode'='{mode}')")
+    spark.sql(f"""
+        INSERT INTO {table}
+        SELECT CAST(id AS INT), IF(id % 6 = 4, NULL, {expression})
+        FROM (
+          SELECT id, CASE WHEN id % 6 = 2 THEN parse_json('null')
+            WHEN id % 6 = 3 THEN NULL
+            ELSE parse_json(concat('{{"x":', id + {value_offset}, '}}')) END AS parsed
+          FROM range({start}, {start + 6})
+        )
+        """)
+
+
+def read_iceberg_variant_write_table(spark, table, container, expected_ids):
+    _, _, path = _VARIANT_WRITE_CONTAINERS[container]
+    assert sorted(row.id for row in spark.table(table).select('id').collect()) == sorted(expected_ids)
+    size = ', size(v) AS container_size' if container in ('array', 'map') else ''
+    return spark.sql(f"SELECT id, v IS NULL AS container_null, {path} IS NULL AS leaf_null, "
+                     f"is_variant_null({path}) AS json_null, CAST({path} AS STRING) AS value"
+                     f"{size} FROM {table}")
+
 
 def can_be_eq_delete_col(data_gen: DataGen) -> bool:
     return (not isinstance(data_gen.data_type, FloatType) and

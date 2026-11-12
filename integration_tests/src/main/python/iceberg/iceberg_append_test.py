@@ -26,8 +26,11 @@ from iceberg import (
     full_coverage_partition_transforms, assert_iceberg_files_use_codec, supports_iceberg_v3,
     ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance,
     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, iceberg_table_properties_sql,
-    row_lineage_df)
-from marks import iceberg, ignore_order, allow_non_gpu, datagen_overrides, iceberg_fast_test
+    row_lineage_df,
+    iceberg_variant_write_conf, iceberg_variant_write_cases,
+    setup_iceberg_variant_write_table, read_iceberg_variant_write_table)
+from marks import (iceberg, ignore_order, allow_non_gpu, datagen_overrides, iceberg_fast_test,
+    incompat)
 from spark_session import with_gpu_session, with_cpu_session
 
 pytestmark = iceberg_unsupported_mark
@@ -647,3 +650,29 @@ def test_insert_into_table_falls_back_on_unsupported_codec(format_version, spark
         return spark.sql(f"INSERT INTO {table_name} SELECT * FROM {view_name}")
 
     assert_gpu_fallback_collect(insert_data, "AppendDataExec", conf=iceberg_write_enabled_conf)
+
+
+@iceberg
+@incompat
+@ignore_order(local=True)
+@allow_non_gpu('AppendDataExec')
+@pytest.mark.parametrize('container', iceberg_variant_write_cases)
+def test_iceberg_append_variant_write_fallback(spark_tmp_table_factory, container):
+    base_table = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_tables(spark):
+        for suffix in ('_cpu', '_gpu'):
+            setup_iceberg_variant_write_table(spark, base_table + suffix, container)
+        setup_iceberg_variant_write_table(
+            spark, base_table + '_source', container, start=3, value_offset=100)
+
+    with_cpu_session(setup_tables, conf=iceberg_variant_write_conf)
+
+    def append_data(spark, table):
+        spark.table(base_table + '_source').writeTo(table).append()
+
+    assert_gpu_fallback_write_sql(
+        append_data,
+        lambda spark, table: read_iceberg_variant_write_table(
+            spark, table, container, list(range(6)) + list(range(3, 9))),
+        base_table, ['AppendDataExec'], conf=iceberg_variant_write_conf)

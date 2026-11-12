@@ -23,8 +23,11 @@ from iceberg import (
     iceberg_format_versions, create_iceberg_table, iceberg_base_table_cols, iceberg_gens_list,
     get_full_table_name, iceberg_full_gens_list, iceberg_nested_write_gens_list,
     iceberg_write_enabled_conf, iceberg_unsupported_mark, overwrite_dynamic_partition_transforms,
-    supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON, row_lineage_df)
-from marks import iceberg, ignore_order, allow_non_gpu, allow_non_gpu_conditional, datagen_overrides, iceberg_fast_test
+    supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON, row_lineage_df,
+    iceberg_variant_write_conf, iceberg_variant_write_cases,
+    setup_iceberg_variant_write_table, read_iceberg_variant_write_table)
+from marks import (iceberg, ignore_order, allow_non_gpu, allow_non_gpu_conditional,
+    datagen_overrides, iceberg_fast_test, incompat)
 from spark_session import with_gpu_session, with_cpu_session, is_spark_400_or_later
 
 pytestmark = iceberg_unsupported_mark
@@ -502,3 +505,33 @@ def test_insert_overwrite_dynamic_partitioned_fanout_enabled(format_version, spa
         spark_tmp_table_factory,
         "bucket(2, _c9)",
         table_prop={"format-version": format_version, "write.spark.fanout.enabled": "true"}, format_version=format_version)
+
+
+@iceberg
+@incompat
+@ignore_order(local=True)
+@allow_non_gpu('OverwritePartitionsDynamicExec')
+@pytest.mark.parametrize('container', iceberg_variant_write_cases)
+def test_iceberg_overwrite_dynamic_variant_write_fallback(spark_tmp_table_factory, container):
+    base_table = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_tables(spark):
+        for suffix in ('_cpu', '_gpu'):
+            setup_iceberg_variant_write_table(spark, base_table + suffix, container)
+        setup_iceberg_variant_write_table(
+            spark, base_table + '_source', container, start=3, value_offset=100)
+
+    with_cpu_session(setup_tables, conf=iceberg_variant_write_conf)
+
+    conf = copy_and_update(iceberg_variant_write_conf, {
+        'spark.sql.sources.partitionOverwriteMode': 'dynamic',
+    })
+
+    def overwrite_data(spark, table):
+        spark.sql(f"INSERT OVERWRITE TABLE {table} SELECT * FROM {base_table}_source").collect()
+
+    assert_gpu_fallback_write_sql(
+        overwrite_data,
+        lambda spark, table: read_iceberg_variant_write_table(
+            spark, table, container, list(range(9))),
+        base_table, ['OverwritePartitionsDynamicExec'], conf=conf)
