@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import re
+from decimal import Decimal
 
 import pytest
 
@@ -617,7 +618,9 @@ def _decimal_scale_cast_conf(ansi_on):
     }
 
 
+_large_scale_decimal_type = DecimalType(1, -37)
 _int_overflow_decimal_type = DecimalType(1, -2147483647)
+_parsed_exponent_overflow_decimal_type = DecimalType(1, -2147483000)
 _regular_decimal_type = DecimalType(10, 2)
 
 
@@ -631,13 +634,56 @@ _regular_decimal_type = DecimalType(10, 2)
 def test_cast_large_decimal_scale_change_cpu_bridge(ansi_on, value):
     def do_cast(spark):
         return spark.createDataFrame([(value,)], 'a string').select(
-            f.col('a').cast(DecimalType(1, -37))
+            f.col('a').cast(_large_scale_decimal_type)
                 .cast(_regular_decimal_type)
                 .alias('result')).collect()
 
     assert_gpu_and_cpu_same_data_or_error(
         do_cast, conf=_decimal_scale_cast_conf(ansi_on),
         error_message=re.compile('(?i)(decimal|underflow|overflow)'))
+
+
+@allow_non_gpu('Cast')
+@validate_execs_in_gpu_plan('GpuProjectExec')
+@pytest.mark.parametrize('data, schema, to_type', [
+    pytest.param(
+        [([Decimal('0E+37')],)],
+        StructType([StructField('a', ArrayType(_large_scale_decimal_type))]),
+        ArrayType(_regular_decimal_type),
+        id='array'),
+    pytest.param(
+        [({Decimal('0E+37'): Decimal('0E+37')},)],
+        StructType([StructField(
+            'a', MapType(_large_scale_decimal_type, _large_scale_decimal_type))]),
+        MapType(_regular_decimal_type, _regular_decimal_type),
+        id='map'),
+    pytest.param(
+        [((Decimal('0E+37'),),)],
+        StructType([StructField(
+            'a', StructType([StructField('x', _large_scale_decimal_type)]))]),
+        StructType([StructField('x', _regular_decimal_type)]),
+        id='struct')
+])
+def test_cast_nested_large_decimal_scale_change_cpu_bridge(data, schema, to_type):
+    def do_cast(spark):
+        return spark.createDataFrame(data, schema).select(
+            f.col('a').cast(to_type).alias('result'))
+
+    assert_gpu_fallback_collect(
+        do_cast, 'Cast', conf=_decimal_scale_cast_conf(True))
+
+
+@allow_non_gpu('Cast')
+@validate_execs_in_gpu_plan('GpuProjectExec')
+def test_cast_string_to_extreme_decimal_scale_cpu_bridge():
+    def do_cast(spark):
+        return spark.createDataFrame([('1e-1000',)], 'a string').select(
+            f.col('a').cast(_parsed_exponent_overflow_decimal_type)
+                .isNull()
+                .alias('result'))
+
+    assert_gpu_fallback_collect(
+        do_cast, 'Cast', conf=_decimal_scale_cast_conf(False))
 
 
 @allow_non_gpu('ProjectExec', 'Cast')

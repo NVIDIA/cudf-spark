@@ -19,9 +19,10 @@ package com.nvidia.spark.rapids
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.expressions.{Abs, Add, And, AttributeReference,
-  BoundReference, CaseWhen, GreaterThan, Literal, MonotonicallyIncreasingID, Multiply, ScalaUDF,
-  XxHash64}
-import org.apache.spark.sql.types.LongType
+  BoundReference, CaseWhen, Cast, GreaterThan, Literal, MonotonicallyIncreasingID, Multiply,
+  ScalaUDF, XxHash64}
+import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.types.{DataType, DecimalType, LongType, StringType}
 
 class GpuCpuBridgeOptimizerUnitSuite extends AnyFunSuite {
 
@@ -35,6 +36,47 @@ class GpuCpuBridgeOptimizerUnitSuite extends AnyFunSuite {
     val meta = GpuOverrides.wrapExpr(e, rapidsConf, None)
     meta.tagForGpu()
     meta
+  }
+
+  private def wrapCast(fromType: DataType, toType: DataType): BaseExprMeta[_] = {
+    val input = AttributeReference("a", fromType, nullable = false)()
+    wrap(Cast(input, toType))
+  }
+
+  private def withNegativeDecimalScales[T](body: => T): T = {
+    val sqlConf = new SQLConf
+    sqlConf.setConfString("spark.sql.legacy.allowNegativeScaleOfDecimal", "true")
+    SQLConf.withExistingConf(sqlConf)(body)
+  }
+
+  test("Cast CPU bridge rejects unsupported decimal endpoint scales independently") {
+    withNegativeDecimalScales {
+      val supported = DecimalType(10, 2)
+      val unsupported = DecimalType(1, Int.MinValue)
+
+      assert(!wrapCast(unsupported, supported).canMoveToCpuBridge,
+        "An unsupported source DecimalType must prevent CPU bridge execution")
+      assert(!wrapCast(supported, unsupported).canMoveToCpuBridge,
+        "An unsupported target DecimalType must prevent CPU bridge execution")
+    }
+  }
+
+  test("Cast CPU bridge accepts supported decimal endpoints with an unsupported scale delta") {
+    withNegativeDecimalScales {
+      val meta = wrapCast(DecimalType(1, -37), DecimalType(10, 2))
+
+      assert(!meta.canThisBeReplaced, "A decimal scale delta larger than 38 must fall back")
+      assert(meta.canMoveToCpuBridge, "Supported endpoint types should permit CPU bridge execution")
+    }
+  }
+
+  test("String to decimal with an extreme target scale uses the CPU bridge") {
+    withNegativeDecimalScales {
+      val meta = wrapCast(StringType, DecimalType(1, -2147483000))
+
+      assert(!meta.canThisBeReplaced, "Extreme scales are unsafe for GPU string parsing")
+      assert(meta.canMoveToCpuBridge, "The representable output type should permit the CPU bridge")
+    }
   }
 
   test("(a*2) + (a*3) prefers CPU multiplies under CPU add") {

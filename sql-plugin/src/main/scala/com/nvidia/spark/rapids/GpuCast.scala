@@ -127,12 +127,33 @@ abstract class CastExprMetaBase[INPUT <: UnaryLike[Expression] with TimeZoneAwar
     case _ => true
   }
 
+  private def areGpuStringToDecimalScalesSupported(
+      fromType: DataType,
+      toType: DataType): Boolean = (fromType, toType) match {
+    case (StringType, to: DecimalType) =>
+      // CastStrings performs Int arithmetic between the parsed exponent and the cuDF scale.
+      // Limit the scale to Spark's decimal precision range so extreme, but otherwise valid,
+      // DecimalTypes cannot overflow that arithmetic.
+      math.abs(to.scale.toLong) <= DecimalType.MAX_PRECISION
+    case (ArrayType(from, _), ArrayType(to, _)) =>
+      areGpuStringToDecimalScalesSupported(from, to)
+    case (MapType(fromKey, fromValue, _), MapType(toKey, toValue, _)) =>
+      areGpuStringToDecimalScalesSupported(fromKey, toKey) &&
+          areGpuStringToDecimalScalesSupported(fromValue, toValue)
+    case (from: StructType, to: StructType) =>
+      from.zip(to).forall { case (fromField, toField) =>
+        areGpuStringToDecimalScalesSupported(fromField.dataType, toField.dataType)
+      }
+    case _ => true
+  }
+
   private def isGpuDecimalCastSupported(
       fromType: DataType,
       toType: DataType): Boolean = {
     areGpuDecimalScalesSupported(fromType) &&
         areGpuDecimalScalesSupported(toType) &&
-        areGpuDecimalScaleChangesSupported(fromType, toType)
+        areGpuDecimalScaleChangesSupported(fromType, toType) &&
+        areGpuStringToDecimalScalesSupported(fromType, toType)
   }
 
   override def isBridgeCompatible: Boolean = {
