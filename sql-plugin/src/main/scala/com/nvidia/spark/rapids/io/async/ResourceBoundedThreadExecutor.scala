@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,25 +39,41 @@ import org.apache.spark.util.TaskCompletionListener
 class RapidsFutureTask[T](val runner: AsyncRunner[T])
     extends FutureTask[AsyncResult[T]](runner) with Logging {
 
+  runner.attachFuture(this)
+
+  override def cancel(mayInterruptIfRunning: Boolean): Boolean = {
+    val ret = super.cancel(mayInterruptIfRunning)
+    if (ret) {
+      runner.cancel()
+    }
+    ret
+  }
+
+  override def done(): Unit = {
+    if (isCancelled) {
+      runner.cancel()
+    }
+    super.done()
+  }
+
   override def run(): Unit = runner.withStateLock { rr =>
     rr.getState match {
-      case Running =>
+      case Running | _: Init =>
+        rr.setState(Running)
         // Pass the schedule time to the task metrics builder
         rr.metricsBuilder.setScheduleTimeMs(scheduleTime)
         scheduleTime = 0L
         super.run()
-        // Check if the runner completed successfully, since the exception shall be handled
-        // quietly by FutureTask and recorded internally by `setException`.
-        // Note: `super.isDone` is also true even if the task finished unsuccessfully. Therefore,
-        // we need to check `rr.result` as well to determine if the task completed successfully
-        if (rr.result.nonEmpty && super.isDone) {
+        // Check if the runner was cancelled first, since super.isDone is also true
+        // when cancelled, and an unconsumed result must be closed to avoid leaks.
+        if (isCancelled) {
+          rr.setState(Cancelled)
+          rr.cleanUpResult()
+        } else if (rr.result.nonEmpty && super.isDone) {
           // runner.call has completed successfully
           rr.setState(Completed)
         } else if (runner.getState.isInstanceOf[ExecFailed]) {
           // runner.call has failed and the exception has been caught by setException
-        } else if (isCancelled) {
-          // the FutureTask was cancelled during execution by `cancel()`
-          rr.setState(Cancelled)
         } else {
           // Failed due to unexpected exceptions
           val ex = new IllegalStateException("runner failed unexpectedly")
