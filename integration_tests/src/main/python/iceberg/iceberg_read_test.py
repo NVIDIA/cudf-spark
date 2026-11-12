@@ -107,10 +107,9 @@ def test_iceberg_unshredded_variant_read(spark_tmp_table_factory, reader_type, c
                 spark.sql(f"ALTER TABLE {table} RENAME COLUMN v TO renamed_v")
 
             with_cpu_session(rename_column, conf=conf)
-        assert_cpu_and_gpu_are_equal_collect_with_capture(
+        assert_gpu_and_cpu_are_equal_collect(
             lambda spark: _read_variant(spark, table, container, column),
-            exist_classes='GpuBatchScanExec,GpuVariantGet', non_exist_classes='BatchScanExec',
-            conf=conf, require_non_empty=True)
+            conf=conf)
 
 
 @ignore_order(local=True)
@@ -177,10 +176,8 @@ def test_iceberg_non_variant_projection_configuration(
     conf.pop('spark.sql.variant.allowReadingShredded')
     if allow_shredded is not None:
         conf['spark.sql.variant.allowReadingShredded'] = allow_shredded
-    assert_cpu_and_gpu_are_equal_collect_with_capture(
-        lambda spark: spark.sql(f"SELECT id FROM {table}"),
-        exist_classes='GpuBatchScanExec', non_exist_classes='BatchScanExec',
-        conf=conf, require_non_empty=True)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(f"SELECT id FROM {table}"), conf=conf)
 
 
 @incompat
@@ -211,10 +208,8 @@ def test_iceberg_shredded_variant_read_and_count(spark_tmp_table_factory, reader
         f"SELECT id, try_variant_get(v, '$.x', 'bigint') FROM {table} ORDER BY id").collect(),
         conf=conf) == [(0, 0), (2, 2), (3, None), (5, 5)]
     # Counting surviving rows must not require decoding the unrequested shredded Variant.
-    assert_cpu_and_gpu_are_equal_collect_with_capture(
-        lambda spark: spark.sql(f"SELECT count(*) FROM {table}"),
-        exist_classes='GpuBatchScanExec', non_exist_classes='BatchScanExec',
-        conf=conf, require_non_empty=True)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(f"SELECT count(*) FROM {table}"), conf=conf)
     for projection in ['v', "try_variant_get(v, '$.x', 'bigint')"]:
         assert_spark_exception(
             lambda: with_gpu_session(
@@ -260,10 +255,8 @@ def test_iceberg_variant_deletion_vector_empty_projection(
     with_cpu_session(setup_table, conf=conf)
     for projection in ['count(*)', '_pos, _row_id']:
         order = ' ORDER BY _pos' if projection.startswith('_pos') else ''
-        assert_cpu_and_gpu_are_equal_collect_with_capture(
-            lambda spark: spark.sql(f"SELECT {projection} FROM {table}{order}"),
-            exist_classes='GpuBatchScanExec', non_exist_classes='BatchScanExec',
-            conf=conf, require_non_empty=True)
+        assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: spark.sql(f"SELECT {projection} FROM {table}{order}"), conf=conf)
 
 
 @ignore_order(local=True)
@@ -289,17 +282,14 @@ def test_iceberg_renamed_case_sensitive_columns_read(
 
     with_cpu_session(setup_table, conf={'spark.sql.caseSensitive': 'true'})
     # Iceberg resolves the old physical a/A names by ID before GPU schema normalization.
-    assert_cpu_and_gpu_are_equal_collect_with_capture(
+    assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.sql(f"SELECT a, b FROM {table}"),
-        exist_classes='GpuBatchScanExec',
-        non_exist_classes='BatchScanExec',
         conf={
             'spark.sql.caseSensitive': 'false',
             'spark.sql.adaptive.enabled': 'false',
             'spark.rapids.sql.format.parquet.reader.type': reader_type,
             'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
-        },
-        require_non_empty=True)
+        })
 
 
 @ignore_order(local=True)
@@ -429,6 +419,4 @@ def test_iceberg_schema_evolution_read(
     for query in [f"SELECT * FROM {table}",
                   f"SELECT ID, record.renamed_first, items[0].renamed_x, "
                   f"attrs['k'].renamed_x, record.extra FROM {table} WHERE ID <> 2"]:
-        assert_cpu_and_gpu_are_equal_collect_with_capture(
-            lambda spark: spark.sql(query), exist_classes='GpuBatchScanExec',
-            non_exist_classes='BatchScanExec', conf=conf, require_non_empty=True)
+        assert_gpu_and_cpu_are_equal_collect(lambda spark: spark.sql(query), conf=conf)

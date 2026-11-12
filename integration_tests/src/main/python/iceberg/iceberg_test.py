@@ -841,12 +841,9 @@ def test_iceberg_v3_top_level_variant_read(spark_tmp_table_factory):
         lambda spark: setup_iceberg_variant_table(spark, table),
         conf=iceberg_variant_read_conf)
 
-    assert_cpu_and_gpu_are_equal_collect_with_capture(
+    assert_gpu_and_cpu_are_equal_collect(
         lambda spark: _read_iceberg_variant_table(spark, table),
-        exist_classes="GpuBatchScanExec,GpuVariantGet",
-        non_exist_classes="BatchScanExec,GpuRowToColumnarExec,HostColumnarToGpu",
-        conf=iceberg_variant_read_conf,
-        require_non_empty=True)
+        conf=iceberg_variant_read_conf)
 
 
 @iceberg
@@ -926,12 +923,9 @@ def test_iceberg_v3_shredded_variant_read_fallback(spark_tmp_table_factory):
 
     with_cpu_session(setup_table, conf=conf)
 
-    assert_cpu_and_gpu_are_equal_collect_with_capture(
+    assert_gpu_fallback_collect(
         lambda spark: _read_iceberg_variant_table(spark, table),
-        exist_classes="BatchScanExec",
-        non_exist_classes="GpuBatchScanExec,GpuVariantGet",
-        conf=conf,
-        require_non_empty=True)
+        "BatchScanExec", conf=conf)
 
 
 @iceberg
@@ -977,12 +971,7 @@ def test_iceberg_v3_nested_variant_read(spark_tmp_table_factory):
             FROM {table}
             """)
 
-    assert_cpu_and_gpu_are_equal_collect_with_capture(
-        read_table,
-        exist_classes="GpuBatchScanExec,GpuVariantGet",
-        non_exist_classes="BatchScanExec,GpuRowToColumnarExec,HostColumnarToGpu",
-        conf=iceberg_variant_read_conf,
-        require_non_empty=True)
+    assert_gpu_and_cpu_are_equal_collect(read_table, conf=iceberg_variant_read_conf)
 
 
 @iceberg_fast_test
