@@ -561,6 +561,7 @@ def test_cross_backend_shared_subtree(data_gen, legacy_expr):
         conf=_project_ast_jit_and_legacy_enabled_conf)
 
 
+@_xfail_ast_jit_on_dataproc_serverless
 @pytest.mark.parametrize('data_gen', [byte_gen, short_gen, int_gen, long_gen], ids=idfn)
 @disable_ansi_mode
 def test_jit_wrapping_integral_arithmetic(data_gen):
@@ -574,13 +575,18 @@ def test_jit_wrapping_integral_arithmetic(data_gen):
         non_exist_classes='GpuProjectAst',
         conf=_project_ast_jit_enabled_conf)
 
-@pytest.mark.parametrize('narrow_gen', [byte_gen, short_gen, int_gen], ids=idfn)
+@_xfail_ast_jit_on_dataproc_serverless
+@pytest.mark.parametrize('narrow_gen, wide_gen', [
+    (byte_gen, short_gen), (byte_gen, int_gen), (short_gen, int_gen),
+    (byte_gen, long_gen), (short_gen, long_gen), (int_gen, long_gen)], ids=idfn)
 @disable_ansi_mode
-def test_jit_integral_widening_cast(narrow_gen):
+def test_jit_integral_widening_cast(narrow_gen, wide_gen):
+    # Spark widens the narrower operand, so the cast runs inside the JIT program.
     assert_cpu_and_gpu_are_equal_collect_with_capture(
-        lambda spark: two_col_df(spark, narrow_gen, long_gen).selectExpr(
-            'a + b AS widened_sum', 'b * a AS widened_product'),
-        exist_classes=r'GpuProject.*AST_JIT.*AS widened_sum.*AST_JIT.*AS widened_product',
+        lambda spark: two_col_df(spark, narrow_gen, wide_gen).selectExpr(
+            'a + b AS widened_sum', 'b - a AS widened_difference', 'a * b AS widened_product'),
+        exist_classes=(r'GpuProject.*AST_JIT.*AS widened_sum.*AST_JIT.*AS widened_difference.*'
+                       r'AST_JIT.*AS widened_product'),
         non_exist_classes='GpuProjectAst',
         conf=_project_ast_jit_enabled_conf)
 

@@ -31,8 +31,8 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.{GpuAbs, GpuAdd, GpuBitwiseAnd, GpuGreatest, GpuMultiply,
   GpuSubtract, GpuUnaryMinus}
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
-import org.apache.spark.sql.types.{ByteType, DataType, FloatType, IntegerType, LongType,
-  ShortType}
+import org.apache.spark.sql.types.{ByteType, DataType, DoubleType, FloatType, IntegerType,
+  LongType, ShortType}
 import org.apache.spark.util.TaskCompletionListener
 
 class GpuProjectAstJitSuite extends AnyFunSuite {
@@ -494,30 +494,33 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     assertResult(2)(collectExpressions[GpuAstJitExpression](project.exprTiers.head).size)
   }
 
-  test("project AST JIT excludes ANSI and floating point arithmetic") {
-    val intLeft = reference(0, IntegerType)
-    val intRight = reference(1, IntegerType)
-    val floatLeft = reference(0, FloatType)
-    val floatRight = reference(1, FloatType)
+  private def jitArithmetic(
+      left: Expression,
+      right: Expression,
+      ansi: Boolean): Seq[GpuExpression] = Seq(
+    GpuAdd(left, right, ansi)(),
+    GpuSubtract(left, right, ansi)(),
+    GpuMultiply(left, right, ansi)(),
+    GpuUnaryMinus(left, ansi),
+    GpuAbs(left, ansi))
 
-    val ansiAdd = alias(GpuAdd(intLeft, intRight, failOnError = true)(), "ansi_sum")
-    val floatMultiply = alias(
-      GpuMultiply(floatLeft, floatRight, failOnError = false)(), "float_product")
+  // Each operator checks the mode and type on its own, so cover every operator in both modes.
+  for ((dataType, ansi) <- Seq(
+      (ByteType, true), (LongType, true), (FloatType, false), (DoubleType, false))) {
+    test(s"project AST JIT excludes $dataType arithmetic with ansi=$ansi") {
+      val expressions = jitArithmetic(reference(0, dataType), reference(1, dataType), ansi)
+      val wrapped = wrapOutputs(expressions.zipWithIndex.map { case (e, i) => alias(e, s"o$i") })
 
-    val wrapped = wrapOutputs(Seq(ansiAdd, floatMultiply))
-    assert(wrapped.forall(_.find(_.isInstanceOf[GpuAstJitExpression]).isEmpty))
+      wrapped.zip(expressions).foreach { case (output, expression) =>
+        assert(output.find(_.isInstanceOf[GpuAstJitExpression]).isEmpty, expression)
+      }
+    }
   }
 
   for (dataType <- Seq(ByteType, ShortType, IntegerType, LongType)) {
     test(s"project AST JIT supports non-ANSI $dataType arithmetic") {
-      val left = reference(0, dataType)
-      val right = reference(1, dataType)
-      val expressions = Seq(
-        GpuAdd(left, right, failOnError = false)(),
-        GpuSubtract(left, right, failOnError = false)(),
-        GpuMultiply(left, right, failOnError = false)(),
-        GpuUnaryMinus(left, failOnError = false),
-        GpuAbs(left, failOnError = false))
+      val expressions =
+        jitArithmetic(reference(0, dataType), reference(1, dataType), ansi = false)
       val wrapped = wrapOutputs(expressions.zipWithIndex.map { case (e, i) => alias(e, s"o$i") })
 
       wrapped.zip(expressions).foreach { case (output, expression) =>
@@ -539,6 +542,29 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     val wrapped = wrapOutputs(expressions)
     assertResult(Seq(true, false, false))(
       wrapped.map(GpuAstJitExpression.extractTopLevel(_).isDefined))
+  }
+
+  test("widening casts count toward the max operations of a JIT group") {
+    val left = reference(0, IntegerType)
+    val right = reference(1, IntegerType)
+    val wide = reference(2, LongType)
+    // Each output compiles a cast and an arithmetic operation.
+    val expressions = Seq(
+      alias(GpuAdd(GpuCast(left, LongType)(), wide, failOnError = false)(), "sum"),
+      alias(GpuMultiply(GpuCast(right, LongType)(), wide, failOnError = false)(), "product"))
+
+    def groupCount(maxOps: Int): Int = {
+      val tiered = bindProject(
+        expressions, Seq(left, right, wide), projectConf(maxGroupOps = maxOps))
+      // The casts stay inside the JIT roots instead of becoming an earlier tier.
+      assertResult(1)(tiered.exprTiers.size)
+      val jitExpressions = tiered.exprTiers.head.flatMap(GpuAstJitExpression.extractTopLevel)
+      assertResult(2)(jitExpressions.size)
+      jitExpressions.map(_.groupId).distinct.size
+    }
+
+    assertResult(2)(groupCount(maxOps = 3))
+    assertResult(1)(groupCount(maxOps = 4))
   }
 
   test("project AST JIT does not compile a literal or pass-through") {

@@ -205,10 +205,16 @@ trait GpuExpression extends Expression {
   def selfSupportsAstJit: Boolean = false
 
   /**
-   * Whether this node is an operation, rather than an AST-compatible leaf. Literals and references
-   * leave this false so they do not trigger compilation without useful work to JIT.
+   * Whether this node is an operation, rather than an AST-compatible leaf. Operations count toward
+   * the AST JIT group limits. Literals and references leave this false.
    */
   def selfIsAstJitOperator: Boolean = false
+
+  /**
+   * Whether this operation alone makes AST JIT worth compiling. An operation that only adapts its
+   * input, such as a widening cast, still counts toward the group limits.
+   */
+  def selfTriggersAstJit: Boolean = selfIsAstJitOperator
 
   /** Whether this node and its complete expression subtree support AST JIT. */
   final def supportsAstJit: Boolean = selfSupportsAstJit && children.forall {
@@ -218,7 +224,7 @@ trait GpuExpression extends Expression {
   }
 
   /** Whether this expression subtree contains an operation that makes AST JIT useful. */
-  final def containsAstJitOperator: Boolean = selfIsAstJitOperator || children.exists {
+  final def containsAstJitOperator: Boolean = selfTriggersAstJit || children.exists {
     case child: GpuExpression => child.containsAstJitOperator
     case _ => false
   }

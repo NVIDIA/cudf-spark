@@ -1713,7 +1713,7 @@ case class GpuCast(
   }
 
   // Integral widening is exact and cannot fail, so AST JIT can keep it inside a consumer's kernel
-  // instead of materializing the widened column. A cast alone is not worth compiling.
+  // instead of materializing the widened column.
   private def astJitCastOperator: Option[ast.JitOperator] = (child.dataType, dataType) match {
     case (ByteType, ShortType) => Some(ast.JitOperator.CAST_TO_INT16)
     case (ByteType | ShortType, IntegerType) => Some(ast.JitOperator.CAST_TO_INT32)
@@ -1722,6 +1722,11 @@ case class GpuCast(
   }
 
   override def selfSupportsAstJit: Boolean = astJitCastOperator.isDefined
+
+  override def selfIsAstJitOperator: Boolean = selfSupportsAstJit
+
+  // A cast alone is not worth compiling.
+  override def selfTriggersAstJit: Boolean = false
 
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     val jitOp = astJitCastOperator.getOrElse(
