@@ -59,9 +59,10 @@ the ordinary-file matrix so missing Avro support cannot silently skip those case
 The shared assertion reads task accumulators from stages completed by the GPU query,
 after the CPU query. It requires the selected PerfIO transport's counter to increase and
 rejects alternative transports, S3A fallback, and Iceberg S3 fallback. Iceberg S3 PerfIO
-runs also check the actual table FileIO is `S3FileIO` (including subclasses); a catalog
-using HadoopFileIO is not evidence of the Iceberg S3 adapter. Auto mode uses a Hadoop
-expectation for those catalogs and retains zero-PerfIO assertions. The incorrect metric
+runs also check that every actual data InputFile inherits Iceberg's `BaseS3File`,
+which the S3 adapter accepts. This includes direct `S3FileIO` and `ResolvingFileIO`
+delegation. A catalog returning Hadoop InputFiles is not evidence of the Iceberg S3 adapter.
+Auto mode uses a Hadoop expectation for those catalogs and retains zero-PerfIO assertions. The incorrect metric
 attribution tracked in #16846 may cause those assertions to fail; this test does not
 relax them. CSV/JSON/Avro and
 Iceberg GCS require all PerfIO transport counters to stay zero, as documented above.
@@ -105,8 +106,10 @@ do not install JARs, configure catalogs, or override supported runtime/version g
 Iceberg ignores `--tmp_path` for table data. Configure a catalog warehouse on the selected
 storage (for example `s3a://<bucket>/<warehouse-prefix>` for S3), along with the existing
 Spark Iceberg extensions, catalog class/type, and credentials. S3 PerfIO additionally requires
-`org.apache.iceberg.aws.s3.S3FileIO` as the actual table FileIO, typically configured with
-`spark.sql.catalog.<catalog>.io-impl`, plus the matching Iceberg AWS bundle and SDK classes.
+S3-backed InputFiles from the actual table FileIO, such as direct
+`org.apache.iceberg.aws.s3.S3FileIO` or S3 delegation through
+`org.apache.iceberg.io.ResolvingFileIO`. Configure the catalog with
+`spark.sql.catalog.<catalog>.io-impl` and the matching Iceberg AWS bundle and SDK classes.
 Set `EXPECTED_ICEBERG_VERSION` to the runtime JAR version (for example `1.10.1`); the existing
 version gates then select supported format versions. A local warehouse with an explicit
 S3 backend fails instead of testing a different storage backend.

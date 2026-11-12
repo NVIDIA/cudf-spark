@@ -51,26 +51,36 @@ def test_iceberg_path_characters(spark_tmp_table_factory, format_version, reader
         assert {path.rsplit('/', 2)[-2] for path in files} == expected_partitions, files
         return files
 
-    def setup_and_check_file_io(spark):
+    def setup_and_check_input_files(spark):
         setup(spark)
         iceberg_table = spark._jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
             spark._jsparkSession, table)
-        io_class = iceberg_table.io().getClass()
-        print('Iceberg table FileIO:', io_class.getName())
-        # Walk superclasses so S3FileIO subclasses satisfy the same contract,
-        # without loading the AWS class in catalogs that do not include it.
-        while io_class is not None:
-            if io_class.getName() == 'org.apache.iceberg.aws.s3.S3FileIO':
-                return True
-            io_class = io_class.getSuperclass()
-        return False
+        file_io = iceberg_table.io()
+        print('Iceberg table FileIO:', file_io.getClass().getName())
+        files = input_paths(spark)
+        assert files, 'Iceberg backend checks require non-empty data file paths'
+        s3_inputs = []
+        for file_path in files:
+            input_class = file_io.newInputFile(file_path).getClass()
+            print('Iceberg data InputFile:', file_path, input_class.getName())
+            # The adapter accepts BaseS3File inputs, including those returned by
+            # ResolvingFileIO delegates. Inspect actual inputs without loading
+            # AWS classes in catalogs that only have HadoopFileIO available.
+            is_s3_input = False
+            while input_class is not None:
+                if input_class.getName() == 'org.apache.iceberg.aws.s3.BaseS3File':
+                    is_s3_input = True
+                    break
+                input_class = input_class.getSuperclass()
+            s3_inputs.append(is_s3_input)
+        return all(s3_inputs)
 
-    s3_file_io = with_cpu_session(setup_and_check_file_io)
+    s3_input_files = with_cpu_session(setup_and_check_input_files)
     backend = request.config.getoption('path_backend')
     if backend.startswith('s3-'):
-        assert s3_file_io, 'Iceberg S3 PerfIO requires the table FileIO to be S3FileIO'
-    elif backend == 'auto' and not s3_file_io:
-        # Catalogs using HadoopFileIO cannot exercise the Iceberg S3 adapter.
+        assert s3_input_files, 'Iceberg S3 PerfIO requires BaseS3File data inputs'
+    elif backend == 'auto' and not s3_input_files:
+        # Non-S3 InputFiles cannot exercise the Iceberg S3 adapter.
         # Keep zero-PerfIO assertions: incorrect attribution is tracked in #16846.
         backend = 'hadoop'
     assert_path_read(
@@ -79,5 +89,5 @@ def test_iceberg_path_characters(spark_tmp_table_factory, format_version, reader
         'GpuBatchScanExec', backend=backend,
         # Iceberg's FileIO adapter currently has a PerfIO implementation for S3,
         # while GCS uses the catalog's InputFile streams.
-        perfio_backends=('s3-netty', 's3-crt') if s3_file_io else (),
+        perfio_backends=('s3-netty', 's3-crt') if s3_input_files else (),
         input_paths=input_paths)
