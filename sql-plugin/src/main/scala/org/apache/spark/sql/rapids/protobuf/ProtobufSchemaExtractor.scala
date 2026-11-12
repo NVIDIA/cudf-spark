@@ -148,7 +148,7 @@ object ProtobufSchemaExtractor {
   }
 
   /**
-   * Checks the Spark/protobuf type pairing, unwrapping repeated non-message fields.
+   * Checks the Spark/protobuf type pairing, unwrapping repeated fields.
    * Returns (supported, optional rejection reason, JNI encoding). Syntax, oneofs, defaults and
    * enum declarations are checked separately.
    */
@@ -158,8 +158,19 @@ object ProtobufSchemaExtractor {
       isRepeated: Boolean,
       enumsAsInts: Boolean): (Boolean, Option[String], Int) = {
 
-    if (protoTypeName == "MESSAGE" || protoTypeName == "GROUP") {
-      return (false, Some("protobuf message fields are not supported on GPU"), ENC_DEFAULT)
+    // Groups use their own wire types, which the GPU decoder does not parse.
+    if (protoTypeName == "GROUP") {
+      return (false, Some("protobuf group fields are not supported on GPU"), ENC_DEFAULT)
+    }
+
+    if (protoTypeName == "MESSAGE") {
+      return (sparkType, isRepeated) match {
+        case (_: StructType, false) | (ArrayType(_: StructType, _), true) =>
+          (true, None, ENC_DEFAULT)
+        case _ =>
+          (false, Some(s"unsupported Spark type for a protobuf message field: $sparkType"),
+            ENC_DEFAULT)
+      }
     }
 
     if (isRepeated) {

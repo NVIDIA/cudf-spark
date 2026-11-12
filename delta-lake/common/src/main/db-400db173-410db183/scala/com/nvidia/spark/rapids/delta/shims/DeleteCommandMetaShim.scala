@@ -16,26 +16,25 @@
 
 package com.nvidia.spark.rapids.delta.shims
 
-import com.databricks.sql.transaction.tahoe.commands.DeletionVectorUtils
 import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
 import com.nvidia.spark.rapids.delta.{DeleteCommandEdgeMeta, DeleteCommandMeta}
 
 object DeleteCommandMetaShim {
   def tagForGpu(meta: DeleteCommandMeta): Unit = {
-    val dvFeatureEnabled = DeletionVectorUtils.deletionVectorsWritable(
-      meta.deleteCmd.deltaLog.unsafeVolatileSnapshot)
-    if (dvFeatureEnabled && meta.deleteCmd.conf.getConf(
-        DeltaSQLConf.DELETE_USE_PERSISTENT_DELETION_VECTORS)) {
-      meta.willNotWorkOnGpu("Deletion vector writes are not supported on GPU")
-    }
+    PersistentDeletionVectorMetaShim.tagForGpu(
+      meta,
+      meta.deleteCmd.conf,
+      meta.deleteCmd.deltaLog.unsafeVolatileSnapshot,
+      DeltaSQLConf.DELETE_USE_PERSISTENT_DELETION_VECTORS,
+      meta.deleteCmd.target.schema)
   }
 
   def tagForGpu(meta: DeleteCommandEdgeMeta): Unit = {
-    val dvFeatureEnabled = DeletionVectorUtils.deletionVectorsWritable(
-      meta.deleteCmd.deltaLog.unsafeVolatileSnapshot)
-    if (dvFeatureEnabled && meta.deleteCmd.conf.getConf(
-        DeltaSQLConf.DELETE_USE_PERSISTENT_DELETION_VECTORS)) {
-      meta.willNotWorkOnGpu("Deletion vector writes are not supported on GPU")
-    }
+    PersistentDeletionVectorMetaShim.tagForGpu(
+      meta,
+      meta.deleteCmd.conf,
+      meta.deleteCmd.deltaLog.unsafeVolatileSnapshot,
+      DeltaSQLConf.DELETE_USE_PERSISTENT_DELETION_VECTORS,
+      meta.deleteCmd.target.schema)
   }
 }

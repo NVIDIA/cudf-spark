@@ -23,27 +23,29 @@ import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 import scala.collection.mutable.ArrayBuffer
 
 import ai.rapids.cudf.{ColumnVector, ContiguousTable, Cuda, CudaFatalException, DeviceMemoryBuffer, HostMemoryBuffer, MemoryBuffer, Rmm, Table}
-import com.nvidia.spark.rapids.{RapidsShuffleHandle, ShuffleBufferCatalog, ShuffleMetadata}
+import com.nvidia.spark.rapids.{GpuCompressedColumnVector, GpuPackedTableColumn, RapidsConf, RapidsShuffleHandle, ShuffleBufferCatalog, ShuffleMetadata, TableCompressionCodec}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
-import com.nvidia.spark.rapids.format.TransferState
+import com.nvidia.spark.rapids.format.{CodecType, TransferState}
 import com.nvidia.spark.rapids.spill.{SpillableDeviceBufferHandle, SpillFramework}
 import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito._
 
-import org.apache.spark.storage.ShuffleBlockId
+import org.apache.spark.SparkConf
+import org.apache.spark.sql.vectorized.ColumnarBatch
+import org.apache.spark.storage.{ShuffleBlockBatchId, ShuffleBlockId}
 
 /**
  * Deterministic interleavings of `ShuffleBufferCatalog.unregisterShuffle`, and of the server's
- * close, with the UCX shuffle server's send path.
+ * close, with the UCX shuffle server's metadata lookups and send path.
  *
  * Each test records what the requester receives, whether the server's send loop survives and
  * serves the next request, how each send state ends, and what happens to the catalog's device
  * buffer and to the send's bounce buffer and request transaction, with exact counts. The
  * outcomes are logged with `info` and then compared, in one assertion, against what the server
  * does, so a change to the ownership of these buffers shows up as the list of outcomes it
- * changed rather than as the first failed check. A request the server fails gets an error reply
- * naming the tables it will not send, unless its own receive failed, a data send failed, the
- * server closed, or the failure ends the send loop.
+ * changed rather than as the first failed check. A transfer request the server fails gets an
+ * error reply naming the tables it will not send, unless its own receive failed, a data send
+ * failed, the server closed, or the failure ends the send loop.
  */
 class ShuffleBufferLifetimeSuite extends RapidsShuffleTestHelper {
   private val awaitSeconds = 30L
@@ -144,12 +146,33 @@ class ShuffleBufferLifetimeSuite extends RapidsShuffleTestHelper {
     }
     val cached = closeOnExcept(device) { _ =>
       closeOnExcept(bytes) { _ =>
-        Cached(blockId, catalog.addContiguousTable(blockId, ct, -1).tableId, device, bytes)
+        withResource(ct) { _ =>
+          Cached(blockId, catalog.addContiguousTable(blockId, ct, -1).tableId, device, bytes)
+        }
       }
     }
     cleanups += (() => cached.close())
     cached
   }
+
+  /**
+   * A 1000-row batch as the shuffle exchange hands one to the caching writer, packed or
+   * compressed with `codecId`, and its device buffer.
+   */
+  private def partitionBatch(codecId: Option[Byte]): (ColumnarBatch, DeviceMemoryBuffer) =
+    codecId match {
+      case None =>
+        val ct = contiguousTable(0, 1000)
+        (GpuPackedTableColumn.from(ct), ct.getBuffer)
+      case Some(id) =>
+        val codec = TableCompressionCodec.getCodec(id,
+          TableCompressionCodec.makeCodecConfig(new RapidsConf(new SparkConf)))
+        val batch = withResource(codec.createBatchCompressor(0, Cuda.DEFAULT_STREAM)) { c =>
+          c.addTableToCompress(contiguousTable(0, 1000))
+          withResource(c.finish())(tables => GpuCompressedColumnVector.from(tables.head))
+        }
+        (batch, batch.column(0).asInstanceOf[GpuCompressedColumnVector].getTableBuffer)
+    }
 
   private def newCatalog(cleanups: ArrayBuffer[() => Unit], shuffleIds: Int*)
       : ShuffleBufferCatalog = {
@@ -288,6 +311,19 @@ class ShuffleBufferLifetimeSuite extends RapidsShuffleTestHelper {
     tx
   }
 
+  /** A metadata request for `block`, as a reader asks for one block. */
+  private def metadataRequest(peerId: Long, block: ShuffleBlockId): Transaction = {
+    val tx = mock[Transaction]
+    when(tx.peerExecutorId()).thenReturn(peerId)
+    when(tx.getStatus).thenReturn(TransactionStatus.Success)
+    val batch = ShuffleBlockBatchId(block.shuffleId, block.mapId, block.reduceId, block.reduceId)
+    // the message can be taken once, as from a UCX transaction
+    when(tx.releaseMessage()).thenReturn(new MetadataTransportBuffer(
+      new RefCountedDirectByteBuffer(ShuffleMetadata.buildShuffleMetadataRequest(Seq(batch)))))
+      .thenThrow(new NoSuchElementException("None.get"))
+    tx
+  }
+
   private def awaitClosed(tx: Transaction): Unit =
     assert(closedRequests.get(tx).await(awaitSeconds, TimeUnit.SECONDS),
       "the server never closed the request transaction")
@@ -315,6 +351,22 @@ class ShuffleBufferLifetimeSuite extends RapidsShuffleTestHelper {
           }
           s"error for ${failed.mkString(",")} of ${requested.size}: ${error.reason()}"
         })
+      }
+    }
+    if (replies.isEmpty) "none" else replies.mkString("; ")
+  }
+
+  /** What a metadata requester got: "none", or each reply's table count and error reason. */
+  private def metadataReply(tx: Transaction): String = {
+    val replies = new ArrayBuffer[String]()
+    val it = mockingDetails(tx).getInvocations.iterator()
+    while (it.hasNext) {
+      val invocation = it.next()
+      if (invocation.getMethod.getName == "respond") {
+        val response = ShuffleMetadata.getMetadataResponse(invocation.getArgument[ByteBuffer](0))
+        val tables = s"tables ${response.tableMetasLength()}"
+        val error = response.error()
+        replies += (if (error == null) tables else s"error, $tables: ${error.reason()}")
       }
     }
     if (replies.isEmpty) "none" else replies.mkString("; ")
@@ -1024,6 +1076,62 @@ class ShuffleBufferLifetimeSuite extends RapidsShuffleTestHelper {
       "device bytes still allocated" -> 0)
   }
 
+  Seq("packed" -> None, "COPY" -> Some(CodecType.COPY), "LZ4" -> Some(CodecType.NVCOMP_LZ4),
+      "ZSTD" -> Some(CodecType.NVCOMP_ZSTD)).foreach { case (kind, codecId) =>
+    test(s"T19 send: a cached $kind buffer whose producer closed it is sent intact") {
+      val outcomes = new Outcomes
+      val allocatedBefore = Rmm.getTotalBytesAllocated
+      withCleanup { cleanups =>
+        val catalog = newCatalog(cleanups, 1)
+        val block = ShuffleBlockId(1, 1L, 0)
+        val (batch, device) = partitionBatch(codecId)
+        val (bytes, bss) = closeOnExcept(batch) { _ =>
+          val tableId = codecId match {
+            case None => catalog.addContiguousTable(block,
+              batch.column(0).asInstanceOf[GpuPackedTableColumn].getContiguousTable, -1).tableId
+            case Some(_) => catalog.addCompressedBatch(block, batch, -1).tableId
+          }
+          val bytes = HostMemoryBuffer.allocate(device.getLength)
+          cleanups += (() => bytes.close())
+          bytes.copyFromDeviceBuffer(device)
+          // made before the producer's close, so that its bounce buffer cannot take a freed block
+          val bss = new BufferSendState(transferRequest(2L, Seq(tableId)),
+            sendBounceBuffer(device.getLength, cleanups), new CatalogRequestHandler(catalog))
+          cleanups += (() => bss.close())
+          (bytes, bss)
+        }
+        // GpuShuffleExchangeExecBase's partNextBatch closes every batch it handed the writer
+        batch.close()
+        val references = device.getRefCount
+        outcomes("references after the producer's close", references)
+        // a send of a freed buffer copies from freed device memory, so it is not made
+        outcomes("send window", if (references < 1) {
+          bss.close()
+          "not sent: the buffer was freed"
+        } else {
+          val matches = withResource(bss.getBufferToSend()) { window =>
+            Cuda.DEFAULT_STREAM.sync()
+            withResource(HostMemoryBuffer.allocate(window.getLength)) { copy =>
+              copy.copyFromDeviceBuffer(window.asInstanceOf[DeviceMemoryBuffer])
+              sameBytes(copy, bytes)
+            }
+          }
+          bss.finish(BufferSendState.Completed)
+          if (matches) "the cached bytes" else "other bytes"
+        })
+        outcomes("send state", ended(bss))
+        outcomes("unregister throws", describe(attempt(catalog.unregisterShuffle(1))))
+      }
+      outcomes("device bytes still allocated", Rmm.getTotalBytesAllocated - allocatedBefore)
+      outcomes.check(
+        "references after the producer's close" -> 1,
+        "send window" -> "the cached bytes",
+        "send state" -> "ended: Completed",
+        "unregister throws" -> "none",
+        "device bytes still allocated" -> 0)
+    }
+  }
+
   test("a bounce buffer pool hands out nothing once it is closed") {
     val pool = new BounceBufferManager[DeviceMemoryBuffer]("test", 1024, 2,
       size => DeviceMemoryBuffer.allocate(size))
@@ -1454,5 +1562,41 @@ class ShuffleBufferLifetimeSuite extends RapidsShuffleTestHelper {
       "request transaction closes" -> 1,
       "requester gets" -> "none",
       "send bounce buffers not returned" -> "0")
+  }
+
+  // Metadata path, through the server's request callback.
+
+  test("T18 metadata: a lookup after unregister gets the missing-output error reply") {
+    val outcomes = new Outcomes
+    val allocatedBefore = Rmm.getTotalBytesAllocated
+    withCleanup { cleanups =>
+      val catalog = newCatalog(cleanups, 1, 2)
+      val gone = cache(catalog, ShuffleBlockId(1, 1L, 0), 0, cleanups)
+      val live = cache(catalog, ShuffleBlockId(2, 1L, 0), 5000, cleanups)
+      val peer = new Peer(cleanups)
+      // the server's metadata executor runs a request on the thread that hands it over
+      newServer(new CatalogRequestHandler(catalog), peer)
+      def requested(block: ShuffleBlockId): Transaction = {
+        val tx = metadataRequest(2L, block)
+        peer.request(MessageType.MetadataRequest, tx)
+        tx
+      }
+      outcomes("a request before the unregister gets", metadataReply(requested(gone.blockId)))
+
+      catalog.unregisterShuffle(1)
+      val tx = requested(gone.blockId)
+      outcomes("requester gets", metadataReply(tx))
+      outcomes("request transaction closes", txCloses(tx))
+      outcomes("next request gets", metadataReply(requested(live.blockId)))
+      outcomes("buffers at the end", holding(catalog, gone, live))
+    }
+    outcomes("device bytes still allocated", Rmm.getTotalBytesAllocated - allocatedBefore)
+    outcomes.check(
+      "a request before the unregister gets" -> "tables 1",
+      "requester gets" -> s"error, tables 0: $goneReply: unknown shuffle 1 for block shuffle_1_1_0",
+      "request transaction closes" -> 1,
+      "next request gets" -> "tables 1",
+      "buffers at the end" -> "catalog=(1,1,1) spillStore=1 deviceRefs=0,1",
+      "device bytes still allocated" -> 0)
   }
 }

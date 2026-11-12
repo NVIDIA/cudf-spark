@@ -15,34 +15,9 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "340"}
-{"spark": "341"}
-{"spark": "342"}
-{"spark": "343"}
-{"spark": "344"}
-{"spark": "350"}
-{"spark": "350db143"}
-{"spark": "351"}
-{"spark": "352"}
-{"spark": "353"}
-{"spark": "354"}
-{"spark": "355"}
-{"spark": "356"}
-{"spark": "357"}
-{"spark": "358"}
-{"spark": "359"}
-{"spark": "400"}
-{"spark": "400db173"}
-{"spark": "401"}
-{"spark": "402"}
-{"spark": "403"}
-{"spark": "404"}
-{"spark": "410db183"}
-{"spark": "411"}
-{"spark": "412"}
-{"spark": "413"}
-{"spark": "420"}
-{"spark": "500"}
+{"spark":["340"],"carryForward":"sameMinor"}
+{"spark":["350","400","420"],"carryForward":"all"}
+{"spark":["350db143","400db173","410db183"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
@@ -50,12 +25,14 @@ package com.nvidia.spark.rapids.shims
 import scala.reflect.ClassTag
 import scala.util.Try
 
+import ai.rapids.cudf.DType
 import com.nvidia.spark.rapids._
 
 import org.apache.spark.sql.catalyst.expressions.{Expression, UnaryExpression}
 import org.apache.spark.sql.rapids.GpuFromProtobuf
 import org.apache.spark.sql.rapids.protobuf.{FlattenedFieldDescriptor, FlattenedSchemaArrays,
-  ProtobufFieldInfo, ProtobufSchemaExtractor, ProtobufSchemaValidator}
+  ProtobufFieldInfo, ProtobufMessageDescriptor, ProtobufSchemaExtractor,
+  ProtobufSchemaValidator}
 import org.apache.spark.sql.types._
 
 /**
@@ -92,6 +69,7 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
       (e, conf, p, r) => new UnaryExprMeta[UnaryExpression](e, conf, p, r) {
 
         private var failOnErrors: Boolean = _
+        private var malformedRowsAsNullFields: Boolean = _
         private var flatSchema: FlattenedSchemaArrays = _
 
         override def tagExprForGpu(): Unit = {
@@ -111,19 +89,18 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
           plannerOptions <- SparkProtobufCompat.parsePlannerOptions(exprInfo.options)
           _ <- checkSupportedOptions(exprInfo.options)
           msgDesc <- SparkProtobufCompat.resolveMessageDescriptor(exprInfo)
-          _ <- SparkProtobufCompat.checkNoFieldsMissingFromSchema(schema, msgDesc)
-          fieldsInfoMap <- ProtobufSchemaExtractor.analyzeAllFields(
-            schema, msgDesc, plannerOptions.enumsAsInts, exprInfo.messageName)
           // Every field is decoded and returned until schema projection is supported.
-          _ <- checkFieldsSupported(schema, fieldsInfoMap)
-          flatFields <- flattenTopLevelFields(schema, fieldsInfoMap)
-          arrays = ProtobufSchemaValidator.toFlattenedSchemaArrays(flatFields)
+          flatFields <- flattenMessage(schema, msgDesc, exprInfo.messageName,
+            plannerOptions.enumsAsInts, parentIdx = -1, depth = 0, pathPrefix = "",
+            Vector.empty)
+          arrays = ProtobufSchemaValidator.toFlattenedSchemaArrays(flatFields.toArray)
           // The JNI constructor validates the schema; fail here rather than on executors.
           _ <- Try(arrays.toJniDescriptor).toEither.left.map { t =>
             s"Protobuf schema is not supported by the GPU decoder: ${t.getMessage}"
           }
         } yield {
           failOnErrors = plannerOptions.failOnErrors
+          malformedRowsAsNullFields = plannerOptions.malformedRowsAsNullFields
           flatSchema = arrays
         }
 
@@ -135,39 +112,92 @@ object ProtobufExprShims extends org.apache.spark.internal.Logging {
 
         private def checkFieldsSupported(
             schema: StructType,
-            fieldsInfoMap: Map[String, ProtobufFieldInfo]): Either[String, Unit] = {
+            fieldsInfoMap: Map[String, ProtobufFieldInfo],
+            pathOf: String => String): Either[String, Unit] = {
           val reasons = schema.fields.flatMap { sf =>
             fieldsInfoMap.get(sf.name).filterNot(_.isSupported).map { info =>
-              s"${sf.name}: ${info.unsupportedReason.getOrElse("unknown reason")}"
+              s"${pathOf(sf.name)}: ${info.unsupportedReason.getOrElse("unknown reason")}"
             }
           }
           Either.cond(reasons.isEmpty, (),
             s"Fields not supported for from_protobuf: ${reasons.mkString(", ")}")
         }
 
-        // Only top-level fields are supported, so parentIdx == -1 and depth == 0.
-        private def flattenTopLevelFields(
+        /**
+         * Appends the fields of one message, each followed by the fields of its nested message,
+         * because the JNI decoder expects every child after its parent.
+         */
+        private def flattenMessage(
             schema: StructType,
-            fieldsInfoMap: Map[String, ProtobufFieldInfo])
-            : Either[String, Array[FlattenedFieldDescriptor]] = {
-          val empty: Either[String, Vector[FlattenedFieldDescriptor]] = Right(Vector.empty)
-          schema.fields.foldLeft(empty) { (flatFields, sf) =>
-            val outputTypeOpt = sf.dataType match {
-              case ArrayType(elemType, _) => GpuFromProtobuf.sparkTypeToCudfIdOpt(elemType)
-              case other => GpuFromProtobuf.sparkTypeToCudfIdOpt(other)
+            msgDesc: ProtobufMessageDescriptor,
+            messageName: String,
+            enumsAsInts: Boolean,
+            parentIdx: Int,
+            depth: Int,
+            pathPrefix: String,
+            flatFields: Vector[FlattenedFieldDescriptor])
+            : Either[String, Vector[FlattenedFieldDescriptor]] = {
+          def pathOf(name: String): String =
+            if (pathPrefix.isEmpty) name else s"$pathPrefix.$name"
+          val location =
+            if (pathPrefix.isEmpty) "root message" else s"protobuf field '$pathPrefix'"
+          val empty: Either[String, Vector[FlattenedFieldDescriptor]] = Right(flatFields)
+          for {
+            _ <- SparkProtobufCompat.checkNoFieldsMissingFromSchema(schema, msgDesc, location)
+            fieldsInfoMap <- ProtobufSchemaExtractor.analyzeAllFields(
+              schema, msgDesc, enumsAsInts, messageName)
+            _ <- checkFieldsSupported(schema, fieldsInfoMap, pathOf)
+            result <- schema.fields.foldLeft(empty) { (fields, sf) =>
+              fields.flatMap(flattenField(sf, fieldsInfoMap(sf.name), msgDesc, messageName,
+                enumsAsInts, parentIdx, depth, pathOf(sf.name), _))
             }
-            for {
-              fields <- flatFields
-              outputType <- outputTypeOpt.toRight(
-                s"Unsupported Spark type for protobuf field '${sf.name}': ${sf.dataType}")
-              flatField <- ProtobufSchemaValidator.toFlattenedFieldDescriptor(
-                sf.name, sf, fieldsInfoMap(sf.name), -1, 0, outputType, isOutput = true)
-            } yield fields :+ flatField
-          }.map(_.toArray)
+          } yield result
+        }
+
+        private def flattenField(
+            sf: StructField,
+            info: ProtobufFieldInfo,
+            msgDesc: ProtobufMessageDescriptor,
+            messageName: String,
+            enumsAsInts: Boolean,
+            parentIdx: Int,
+            depth: Int,
+            path: String,
+            flatFields: Vector[FlattenedFieldDescriptor])
+            : Either[String, Vector[FlattenedFieldDescriptor]] = {
+          val nestedSchema = sf.dataType match {
+            case st: StructType => Some(st)
+            case ArrayType(st: StructType, _) => Some(st)
+            case _ => None
+          }
+          val outputTypeOpt = sf.dataType match {
+            case _ if nestedSchema.isDefined => Some(DType.STRUCT.getTypeId.getNativeId)
+            case ArrayType(elemType, _) => GpuFromProtobuf.sparkTypeToCudfIdOpt(elemType)
+            case other => GpuFromProtobuf.sparkTypeToCudfIdOpt(other)
+          }
+          for {
+            outputType <- outputTypeOpt.toRight(
+              s"Unsupported Spark type for protobuf field '$path': ${sf.dataType}")
+            flatField <- ProtobufSchemaValidator.toFlattenedFieldDescriptor(
+              path, sf, info, parentIdx, depth, outputType, isOutput = true)
+            withField = flatFields :+ flatField
+            result <- nestedSchema match {
+              case Some(st) =>
+                for {
+                  childDesc <- Try(msgDesc.findField(sf.name).flatMap(_.messageDescriptor))
+                    .toOption.flatten.toRight(
+                      s"Failed to resolve the message type of protobuf field '$path'")
+                  fields <- flattenMessage(st, childDesc, s"$messageName.${sf.name}",
+                    enumsAsInts, parentIdx = flatFields.size, depth + 1, path, withField)
+                } yield fields
+              case None => Right(withField)
+            }
+          } yield result
         }
 
         override def convertToGpu(child: Expression): GpuExpression =
-          GpuFromProtobuf(e.dataType.asInstanceOf[StructType], flatSchema, failOnErrors, child)
+          GpuFromProtobuf(e.dataType.asInstanceOf[StructType], flatSchema, failOnErrors,
+            malformedRowsAsNullFields, child)
       }
     )
   }

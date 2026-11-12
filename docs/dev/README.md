@@ -14,6 +14,7 @@ following topics:
 * [How the Plugin Works](#how-the-rapids-plugin-works)
   * [Plugin Replacement Rules](#plugin-replacement-rules)
   * [Working with Data Sources](#working-with-data-sources)
+* [History Metrics Integration](history-metrics.md)
 * [Guidelines for Replacing Catalyst Executors and Expressions](#guidelines-for-replacing-catalyst-executors-and-expressions)
   * [Setting Up the Class](#setting-up-the-class)
   * [Expressions](#expressions)
@@ -232,8 +233,9 @@ but their declarations are split by category:
 2. Add SQL and file-format entries to `RapidsConfSqlEntries.scala`.
 3. Add test, debug, and remaining general entries to `RapidsConfEntries.scala`.
 
-Keep enumeration definitions and the configuration registry in `RapidsConf.scala`
-so their singleton ownership and initialization order remain stable.
+Keep the configuration registry and enumerations owned by `RapidsConf` in `RapidsConf.scala`
+to preserve their initialization order. Define independent enumerations and sealed value types
+in a module shared by their consumers, such as `sql-plugin-api` when the type is root-safe.
 
 Every property needs well-written documentation, and this documentation is used
 to automatically generate the
