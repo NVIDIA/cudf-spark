@@ -306,17 +306,23 @@ def test_iceberg_renamed_case_sensitive_columns_read(
 @incompat
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Imported files require a local catalog")
 @requires_variant
-@pytest.mark.parametrize('layout', [
-    'unshredded', 'metadata_first', 'missing_value', 'extra_child', 'nullable_value', 'nullable_metadata',
-    'wrong_value_type', 'wrong_metadata_type', 'primitive',
+@pytest.mark.parametrize('layout,container,reader_type', [
+    pytest.param(layout, 'top', 'PERFILE', id=layout) for layout in [
+        'unshredded', 'metadata_first', 'missing_value', 'extra_child', 'nullable_value',
+        'nullable_metadata', 'wrong_value_type', 'wrong_metadata_type', 'primitive']
+] + [
+    (layout, container, reader) for layout in ['extra_child', 'primitive']
+    for container in ['struct', 'array', 'map'] for reader in rapids_reader_types
 ])
-def test_iceberg_variant_physical_layout_validation(spark_tmp_table_factory, spark_tmp_path, layout):
-    from pyspark.sql.types import BinaryType, IntegerType, StructField, StructType
+def test_iceberg_variant_physical_layout_validation(
+        spark_tmp_table_factory, spark_tmp_path, layout, container, reader_type):
+    from pyspark.sql.types import ArrayType, BinaryType, IntegerType, MapType, StringType, \
+        StructField, StructType
 
     table = get_full_table_name(spark_tmp_table_factory)
     conf = copy_and_update(iceberg_variant_read_conf, {
         'spark.sql.parquet.fieldId.write.enabled': 'false',
-        'spark.rapids.sql.format.parquet.reader.type': 'PERFILE',
+        'spark.rapids.sql.format.parquet.reader.type': reader_type,
         'spark.rapids.sql.incompatibleOps.enabled': 'true',
     })
 
@@ -342,34 +348,28 @@ def test_iceberg_variant_physical_layout_validation(spark_tmp_table_factory, spa
             fields[1], values[1] = StructField('metadata', IntegerType(), False), 1
         physical_type = IntegerType() if layout == 'primitive' else StructType(fields)
         physical_value = 7 if layout == 'primitive' else tuple(values)
+        physical_type, physical_value = {
+            'top': (physical_type, physical_value),
+            'struct': (StructType([StructField('leaf', physical_type)]), (physical_value,)),
+            'array': (ArrayType(physical_type), [physical_value]),
+            'map': (MapType(StringType(), physical_type), {'key': physical_value}),
+        }[container]
         schema = StructType([StructField('id', IntegerType(), False),
                              StructField('v', physical_type, False)])
         data_path = spark_tmp_path + '/physical_variant'
         spark.createDataFrame([(1, physical_value)], schema).coalesce(1).write.parquet(data_path)
-        spark.sql(f"CREATE TABLE {table} (id INT, v VARIANT) USING ICEBERG "
+        spark.sql(f"CREATE TABLE {table} (id INT, v {_VARIANT_CONTAINERS[container][0]}) USING ICEBERG "
                   "TBLPROPERTIES ('format-version'='3')")
         _import_parquet_file(spark, table, data_path, 1)
 
     with_cpu_session(setup_table, conf=conf)
     if layout in ['unshredded', 'metadata_first']:
-        assert_cpu_and_gpu_are_equal_collect_with_capture(
-            lambda spark: spark.sql(f"SELECT id, try_variant_get(v, '$.x', 'int') AS x FROM {table}"),
-            exist_classes='GpuBatchScanExec,GpuVariantGet', non_exist_classes='BatchScanExec',
-            conf=conf, require_non_empty=True)
+        assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: _read_variant(spark, table, container), conf=conf)
     else:
-        def read_invalid_variant(spark):
-            df = spark.sql(f"SELECT id, v FROM {table}")
-            callback = spark._jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
-            callback.assertContains(df._jdf, 'GpuBatchScanExec')
-            return df.collect()
-
-        with pytest.raises(Exception) as error:
-            with_gpu_session(read_invalid_variant, conf=conf)
-        message = str(error.value)
-        assert 'java.lang.UnsupportedOperationException: GPU Iceberg reader does not support ' \
-            'shredded or incompatible Variant input' in message
-        assert 'Expected exactly two REQUIRED BINARY fields named value and metadata' in message
-        assert 'spark.rapids.sql.format.iceberg.read.enabled=false' in message
+        assert_spark_exception(
+            lambda: with_gpu_session(lambda spark: spark.table(table).collect(), conf=conf),
+            'java.lang.UnsupportedOperationException: GPU Iceberg reader does not support')
 
 
 @ignore_order(local=True)

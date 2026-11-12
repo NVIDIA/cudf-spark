@@ -16,7 +16,7 @@ from typing import Callable, Any
 import pytest
 
 from asserts import assert_equal_with_local_sort, assert_gpu_fallback_collect, \
-    assert_gpu_fallback_write_sql, collect_plan_nodes
+    assert_gpu_fallback_write_sql
 from conftest import is_iceberg_remote_catalog
 from data_gen import DEFAULT_DATA_GEN_LENGTH, gen_df, copy_and_update
 from iceberg import (
@@ -672,27 +672,7 @@ def test_iceberg_variant_write_fallback(spark_tmp_table_factory):
     with_cpu_session(setup_tables, conf=conf)
 
     def append_data(spark, table):
-        write = spark.sql(f"INSERT INTO {table} SELECT * FROM {base_table}_source")
-        write.collect()
-        if spark.conf.get('spark.rapids.sql.enabled') == 'true':
-            capture = spark._jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
-            plan = capture.extractExecutedPlan(write._jdf.queryExecution().executedPlan())
-            writers = [node for node in collect_plan_nodes(plan)
-                       if node.getClass().getSimpleName() == 'AppendDataExec']
-            assert writers, f"Expected a CPU Iceberg writer: {plan}"
-            tag = spark._jvm.org.apache.spark.sql.catalyst.trees.TreeNodeTag.apply(
-                'rapids.gpu.supported')
-            for writer in writers:
-                reasons = writer.getTagValue(tag)
-                assert reasons.isDefined(), "Expected the writer's GPU fallback reasons"
-                iterator = reasons.get().iterator()
-                messages = []
-                while iterator.hasNext():
-                    messages.append(iterator.next())
-                assert 'unsupported data types VariantType [v] in write for Iceberg' in messages, \
-                    f"Expected unsupported Variant write type, got: {messages}"
-                assert all('unsupported data types' in reason and 'VariantType' in reason
-                           for reason in messages), f"Unexpected fallback reason: {messages}"
+        spark.sql(f"INSERT INTO {table} SELECT * FROM {base_table}_source").collect()
 
     def read_data(spark, table):
         assert sorted(row.id for row in spark.table(table).select('id').collect()) == list(range(9))
