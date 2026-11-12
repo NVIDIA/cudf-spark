@@ -426,7 +426,8 @@ def test_broadcast_join_null_aware_anti(rows):
         conf=conf)
 
 
-# Spark 4.2.1 (SPARK-36082 follow-up) normalizes floating-point NAAJ keys, so -0.0 matches 0.0.
+# Spark 4.2.1 normalizes floating-point NAAJ keys, so -0.0 matches 0.0. This change is part of
+# the SPARK-36082 follow-up (apache/spark#58631) and has no dedicated JIRA.
 @pytest.mark.skipif(not is_spark_421_or_later(),
                     reason='Spark normalizes floating-point NAAJ keys since 4.2.1')
 @ignore_order(local=True)
@@ -479,7 +480,8 @@ def test_broadcast_join_null_aware_anti_build_left_fallback():
 
     # Spark estimates the two inputs at 8 and 800 bytes. Keeping only the left side below these
     # thresholds produces the BuildLeft nested-loop fallback. Spark 4.2.0 applies the general
-    # broadcast threshold to NAAJ; 4.2.1+ only falls back above the dedicated NAAJ threshold.
+    # broadcast threshold to NAAJ; 4.2.1+ falls back only when the right side exceeds both the
+    # dedicated NAAJ threshold and the general broadcast threshold.
     conf = {
         'spark.sql.adaptive.enabled': 'false',
         'spark.sql.autoBroadcastJoinThreshold': '100',
