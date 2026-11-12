@@ -142,6 +142,23 @@ def test_iceberg_variant_read_configuration(spark_tmp_table_factory, container, 
         exist_classes='GpuBatchScanExec,GpuVariantGet' if enabled else 'BatchScanExec',
         non_exist_classes='BatchScanExec' if enabled else 'GpuBatchScanExec,GpuVariantGet',
         conf=conf, require_non_empty=True)
+
+
+@ignore_order(local=True)
+@incompat
+@requires_variant
+@pytest.mark.parametrize('container', list(_VARIANT_CONTAINERS))
+@pytest.mark.parametrize('allow_shredded', [None, 'false', 'true'], ids=['default', 'unshredded', 'shredded'])
+def test_iceberg_non_variant_projection_configuration(
+        spark_tmp_table_factory, container, allow_shredded):
+    table = get_full_table_name(spark_tmp_table_factory)
+    with_cpu_session(
+        lambda spark: _setup_unshredded_variant_table(spark, table, container),
+        conf=iceberg_variant_read_conf)
+    conf = dict(iceberg_variant_read_conf)
+    conf.pop('spark.sql.variant.allowReadingShredded')
+    if allow_shredded is not None:
+        conf['spark.sql.variant.allowReadingShredded'] = allow_shredded
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.sql(f"SELECT id FROM {table}"),
         exist_classes='GpuBatchScanExec', non_exist_classes='BatchScanExec',
