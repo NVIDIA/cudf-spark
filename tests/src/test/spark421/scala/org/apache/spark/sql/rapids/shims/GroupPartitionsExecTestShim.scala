@@ -19,18 +19,18 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.shims
 
-import org.apache.spark.sql.catalyst.expressions.{Ascending, SortOrder}
+import org.apache.spark.sql.catalyst.expressions.SortOrder
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources.v2.GroupPartitionsExec
 
 object GroupPartitionsExecTestShim {
   // Spark 4.2.1 backports SPARK-60044, which replaces the enableSortedMerge field with the
-  // ordering frozen when the merge is planned. A planned merge requires a non-empty ordering.
-  def apply(child: SparkPlan, enableSortedMerge: Boolean): GroupPartitionsExec = {
-    val ordering = Option.when(enableSortedMerge) {
-      Some(child.outputOrdering).filter(_.nonEmpty)
-        .getOrElse(child.output.take(1).map(SortOrder(_, Ascending)))
-    }
-    GroupPartitionsExec(child, sortedMergeOrdering = ordering)
+  // ordering frozen when the merge is planned.
+  val freezesSortedMergeOrdering: Boolean = true
+
+  def apply(
+      child: SparkPlan,
+      sortedMergeOrdering: Option[Seq[SortOrder]]): GroupPartitionsExec = {
+    GroupPartitionsExec(child, sortedMergeOrdering = sortedMergeOrdering)
   }
 }

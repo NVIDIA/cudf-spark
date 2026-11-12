@@ -19,6 +19,7 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
+import org.apache.spark.sql.catalyst.expressions.SortOrder
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.datasources.v2.GroupPartitionsExec
 
@@ -38,5 +39,10 @@ object GpuGroupPartitionsShims {
   def reducerNames(groupPartitions: GroupPartitionsExec): Option[Seq[String]] = {
     groupPartitions.reducers.map(
       _.map(_.map(_.reducer.displayName()).getOrElse("identity")))
+  }
+
+  // SPARK-60044 freezes the merge ordering when the merge is planned.
+  def plannedMergeOrdering(groupPartitions: GroupPartitionsExec): Option[Seq[SortOrder]] = {
+    groupPartitions.sortedMergeOrdering
   }
 }
