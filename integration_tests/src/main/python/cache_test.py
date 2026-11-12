@@ -24,7 +24,7 @@ from data_gen import *
 from pyspark import StorageLevel
 import pyspark.sql.functions as f
 from spark_session import (with_cpu_session, with_gpu_session, with_spark_session, is_spark_35x,
-    is_spark_local_mode, is_before_spark_340, is_spark_350_or_351)
+    is_spark_local_mode, is_before_spark_340, is_spark_350_or_351, is_databricks173_or_later)
 from join_test import create_df
 from marks import (incompat, allow_non_gpu, ignore_order, disable_ansi_mode, inject_oom,
     large_data_test)
@@ -548,9 +548,10 @@ def test_cache_unsupported_row_to_columnar_types(aqe_enabled, cache_input, value
     gpu_cache_supported = gpu_cache and _pcbs_enabled
     if gpu_cache_supported:
         conf['spark.rapids.sql.exec.InMemoryTableScanExec'] = 'true'
-    # Spark 3.5.0/3.5.1 cannot wrap a GPU cache scan in an AQE table-cache query stage (#10603).
-    aqe_cache_fallback = (is_spark_350_or_351() and aqe_enabled == 'true' and
-                          cache_input == 'repartition')
+    # Spark 3.5.0/3.5.1 cannot wrap a GPU cache scan in a table-cache stage (#10603).
+    # Databricks 17.3+ has no GPU replacement for that stage and also keeps its cache scan on CPU.
+    aqe_cache_fallback = ((is_spark_350_or_351() or is_databricks173_or_later()) and
+                          aqe_enabled == 'true' and cache_input == 'repartition')
     if gpu_cache_supported and not aqe_cache_fallback:
         assert_cpu_and_gpu_are_equal_collect_with_capture(
             fun, exist_classes='GpuInMemoryTableScanExec', conf=conf)
@@ -584,7 +585,7 @@ def test_cache_nulltype_mode_change_before_materialization(value_expr, materiali
             assert actual.collect() == expected_rows
             if materialization_mode == 'enabled' and _pcbs_enabled:
                 plan = actual._jdf.queryExecution().executedPlan().toString()
-                if is_spark_350_or_351():
+                if is_spark_350_or_351() or is_databricks173_or_later():
                     # AQE table-cache query stages require a CPU cache scan on these versions.
                     spark._jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.assertDidFallBack(
                         actual._jdf, 'InMemoryTableScanExec')
