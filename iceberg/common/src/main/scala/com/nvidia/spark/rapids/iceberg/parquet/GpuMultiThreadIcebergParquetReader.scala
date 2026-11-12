@@ -93,7 +93,6 @@ class GpuMultiThreadIcebergParquetReader(
       conf.targetBatchSizeBytes,
       conf.maxGpuColumnSizeBytes,
       conf.useChunkedReader,
-      conf.maxChunkedReaderMemoryUsageSizeBytes,
       conf.skipReadEstimate,
       CpuCompressionConfig.disabled(),
       conf.metrics,
@@ -151,7 +150,6 @@ class GpuMultiThreadIcebergParquetReader(
             }
             val producer = GpuIcebergDeletionVector.makeProducer(
               GpuMultiThreadIcebergParquetReader.this.conf.useChunkedReader,
-              GpuMultiThreadIcebergParquetReader.this.conf.maxChunkedReaderMemoryUsageSizeBytes,
               GpuMultiThreadIcebergParquetReader.this.conf.conf,
               GpuMultiThreadIcebergParquetReader.this.conf.targetBatchSizeBytes,
               parseOptions, hostBufs, GpuMultiThreadIcebergParquetReader.this.conf.metrics,

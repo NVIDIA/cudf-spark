@@ -117,7 +117,6 @@ class GpuMultiThreadIcebergParquetReaderSuite
             targetBatchSizeBytes = 1L << 20,
             maxGpuColumnSizeBytes = defaultColumnBytes,
             useChunkedReader = false,
-            maxChunkedReaderMemoryUsageSizeBytes = 0,
             skipReadEstimate = true,
             parquetDebugDumpPrefix = None,
             parquetDebugDumpAlways = false,

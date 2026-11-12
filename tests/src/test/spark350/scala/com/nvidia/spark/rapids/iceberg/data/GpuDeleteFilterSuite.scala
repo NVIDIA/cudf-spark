@@ -531,7 +531,6 @@ private object TestGpuDeleteLoader {
         10000000,
         10000000,
         useChunkedReader = false,
-        10000000,
         skipReadEstimate = true,
         None,
         parquetDebugDumpAlways = false,

@@ -258,6 +258,25 @@ object MultiFileReaderThreadPool extends Logging {
 
 object MultiFileReaderUtils {
 
+  /** Smallest internal memory limit handed to the cudf chunked readers. */
+  private[rapids] val MIN_CHUNKED_READER_PASS_LIMIT_BYTES: Long = 256L * 1024 * 1024
+
+  /**
+   * Soft limit on the internal ("pass") memory of the cudf chunked Parquet and ORC readers. That
+   * memory holds the compressed and decompressed pages of the row groups decoded together and can
+   * be neither spilled nor split. It is sized like one output chunk, because a smaller limit only
+   * cuts the output into smaller batches and a larger one uses more memory without making decode
+   * faster, and it is capped at 1/8 of the GPU pool so that several tasks can decode at once.
+   * Must be called on an executor, where the GPU pool size is known.
+   */
+  def chunkedReaderPassLimit(chunkSizeBytes: Long): Long =
+    chunkedReaderPassLimit(chunkSizeBytes, GpuDeviceManager.getMemorySize)
+
+  private[rapids] def chunkedReaderPassLimit(chunkSizeBytes: Long, poolSizeBytes: Long): Long = {
+    val poolLimit = if (poolSizeBytes > 0) poolSizeBytes / 8 else chunkSizeBytes
+    math.max(MIN_CHUNKED_READER_PASS_LIMIT_BYTES, math.min(chunkSizeBytes, poolLimit))
+  }
+
   private implicit def toURI(path: String): URI = {
     try {
       val uri = new URI(path)
@@ -311,8 +330,6 @@ abstract class MultiFilePartitionReaderFactoryBase(
   protected val targetBatchSizeBytes: Long = rapidsConf.gpuTargetBatchSizeBytes
   protected val maxGpuColumnSizeBytes: Long = rapidsConf.maxGpuColumnSizeBytes
   protected val useChunkedReader: Boolean = rapidsConf.chunkedReaderEnabled
-  protected val maxChunkedReaderMemoryUsageSizeBytes: Long =
-    ChunkedReaderMemoryLimit.requested(rapidsConf, targetBatchSizeBytes)
   private val allCloudSchemes = rapidsConf.getCloudSchemes.toSet
 
   override def createReader(partition: InputPartition): PartitionReader[InternalRow] = {

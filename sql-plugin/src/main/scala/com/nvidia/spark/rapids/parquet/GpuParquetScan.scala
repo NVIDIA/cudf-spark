@@ -1353,7 +1353,6 @@ abstract class AbstractGpuParquetMultiFilePartitionReaderFactory(
       targetBatchSizeBytes: Long,
       maxGpuColumnSizeBytes: Long,
       useChunkedReader: Boolean,
-      maxChunkedReaderMemoryUsageSizeBytes: Long,
       skipReadEstimate: Boolean,
       compressCfg: CpuCompressionConfig,
       execMetrics: Map[String, GpuMetric],
@@ -1390,7 +1389,7 @@ abstract class AbstractGpuParquetMultiFilePartitionReaderFactory(
       isCaseSensitive,
       debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows, maxReadBatchSizeBytes,
       targetBatchSizeBytes, maxGpuColumnSizeBytes,
-      useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes, skipReadEstimate, compressCfg,
+      useChunkedReader, skipReadEstimate, compressCfg,
       metrics, partitionSchema,
       poolConf,
       maxNumFileProcessed, ignoreMissingFiles,
@@ -1529,7 +1528,7 @@ abstract class AbstractGpuParquetMultiFilePartitionReaderFactory(
     new MultiFileParquetPartitionReader(fileIO, conf, files, clippedBlocks.toSeq, isCaseSensitive,
       debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows, maxReadBatchSizeBytes,
       targetBatchSizeBytes, maxGpuColumnSizeBytes,
-      useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes, skipReadEstimate, compressCfg,
+      useChunkedReader, skipReadEstimate, compressCfg,
       metrics, partitionSchema, poolConf, ignoreMissingFiles, ignoreCorruptFiles,
       readUseFieldId)
   }
@@ -1572,7 +1571,6 @@ case class GpuParquetMultiFilePartitionReaderFactory(
       targetBatchSizeBytes: Long,
       maxGpuColumnSizeBytes: Long,
       useChunkedReader: Boolean,
-      maxChunkedReaderMemoryUsageSizeBytes: Long,
       skipReadEstimate: Boolean,
       compressCfg: CpuCompressionConfig,
       execMetrics: Map[String, GpuMetric],
@@ -1599,7 +1597,6 @@ case class GpuParquetMultiFilePartitionReaderFactory(
       targetBatchSizeBytes,
       maxGpuColumnSizeBytes,
       useChunkedReader,
-      maxChunkedReaderMemoryUsageSizeBytes,
       skipReadEstimate,
       compressCfg,
       execMetrics,
@@ -1640,8 +1637,6 @@ abstract class GpuParquetPartitionReaderFactoryBase(
   protected val maxGpuColumnSizeBytes = rapidsConf.maxGpuColumnSizeBytes
   protected val useChunkedReader = rapidsConf.chunkedReaderEnabled
   protected val skipReadEstimate = rapidsConf.skipReadEstimate(useChunkedReader)
-  protected val maxChunkedReaderMemoryUsageSizeBytes =
-    ChunkedReaderMemoryLimit.requested(rapidsConf, targetSizeBytes)
   protected val filterHandler = GpuParquetFileFilterHandler(sqlConf, metrics)
   protected val readUseFieldId = ParquetSchemaClipShims.useFieldId(sqlConf)
   protected val footerReadType = GpuParquetScan.footerReaderHeuristic(
@@ -1746,7 +1741,7 @@ case class GpuParquetPartitionReaderFactory(
     new ParquetPartitionReader(fileIO, conf, file, singleFileInfo.filePath, singleFileInfo.blocks,
       singleFileInfo.schema, isCaseSensitive, readDataSchema, debugDumpPrefix, debugDumpAlways,
       maxReadBatchSizeRows, maxReadBatchSizeBytes, targetSizeBytes,
-      useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes, skipReadEstimate, compressCfg,
+      useChunkedReader, skipReadEstimate, compressCfg,
       metrics, singleFileInfo.dateRebaseMode,
       singleFileInfo.timestampRebaseMode, singleFileInfo.hasInt96Timestamps, readUseFieldId)
   }
@@ -2803,8 +2798,6 @@ abstract class MultiFileCoalescingParquetPartitionReaderBase(
  * @param targetBatchSizeBytes the target size of a batch
  * @param maxGpuColumnSizeBytes the maximum size of a GPU column
  * @param useChunkedReader whether to read Parquet by chunks or read all at once
- * @param maxChunkedReaderMemoryUsageSizeBytes soft limit on the number of bytes of internal memory
- *                                             usage that the reader will use
  * @param skipReadEstimate whether to ignore the schema based GPU memory estimate for a batch
  * @param compressCfg which compression codecs to decompress on the CPU
  * @param execMetrics metrics
@@ -2827,7 +2820,6 @@ class MultiFileParquetPartitionReader(
     targetBatchSizeBytes: Long,
     maxGpuColumnSizeBytes: Long,
     useChunkedReader: Boolean,
-    maxChunkedReaderMemoryUsageSizeBytes: Long,
     skipReadEstimate: Boolean,
     compressCfg: CpuCompressionConfig,
     execMetrics: Map[String, GpuMetric],
@@ -2850,7 +2842,7 @@ class MultiFileParquetPartitionReader(
     // About to start using the GPU
     GpuSemaphore.acquireIfNecessary(TaskContext.get())
 
-    MakeParquetTableProducer(useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes,
+    MakeParquetTableProducer(useChunkedReader,
       conf, currentTargetBatchSize, parseOpts,
       Array(dataBuffer), metrics,
       extraInfo.dateRebaseMode, extraInfo.timestampRebaseMode,
@@ -2913,8 +2905,6 @@ trait HostMemoryBuffersWithMetaData extends HostMemoryBuffersWithMetaDataBase {
  * @param targetBatchSizeBytes the target size of the batch
  * @param maxGpuColumnSizeBytes the maximum size of a GPU column
  * @param useChunkedReader whether to read Parquet by chunks or read all at once
- * @param maxChunkedReaderMemoryUsageSizeBytes soft limit on the number of bytes of internal memory
- *                                             usage that the reader will use
  * @param skipReadEstimate whether to ignore the schema based GPU memory estimate for a batch
  * @param execMetrics metrics
  * @param partitionSchema Schema of partitions.
@@ -2942,7 +2932,6 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
     targetBatchSizeBytes: Long,
     maxGpuColumnSizeBytes: Long,
     useChunkedReader: Boolean,
-    maxChunkedReaderMemoryUsageSizeBytes: Long,
     skipReadEstimate: Boolean,
     override val compressCfg: CpuCompressionConfig,
     override val execMetrics: Map[String, GpuMetric],
@@ -3522,7 +3511,6 @@ class MultiFileCloudParquetPartitionReader(
     targetBatchSizeBytes: Long,
     maxGpuColumnSizeBytes: Long,
     useChunkedReader: Boolean,
-    maxChunkedReaderMemoryUsageSizeBytes: Long,
     skipReadEstimate: Boolean,
     override val compressCfg: CpuCompressionConfig,
     override val execMetrics: Map[String, GpuMetric],
@@ -3538,7 +3526,7 @@ class MultiFileCloudParquetPartitionReader(
   extends AbstractMultiFileCloudParquetPartitionReader(fileIO, conf, files, filterFunc,
     isSchemaCaseSensitive, debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows,
     maxReadBatchSizeBytes, targetBatchSizeBytes, maxGpuColumnSizeBytes, useChunkedReader,
-    maxChunkedReaderMemoryUsageSizeBytes, skipReadEstimate, compressCfg, execMetrics,
+    skipReadEstimate, compressCfg, execMetrics,
     partitionSchema, poolConf, maxNumFileProcessed, ignoreMissingFiles, ignoreCorruptFiles,
     useFieldId, queryUsesInputFile, keepReadsInOrder, combineConf) {
 
@@ -3570,7 +3558,6 @@ class MultiFileCloudParquetPartitionReader(
         GpuSemaphore.acquireIfNecessary(TaskContext.get())
 
         val tableReader = MakeParquetTableProducer(useChunkedReader,
-          maxChunkedReaderMemoryUsageSizeBytes,
           conf, targetBatchSizeBytes,
           parseOpts,
           hostBufs, metrics,
@@ -3708,7 +3695,6 @@ class MultiFileCloudParquetPartitionReader(
 object MakeParquetTableProducer extends Logging {
   def apply(
       useChunkedReader: Boolean,
-      maxChunkedReaderMemoryUsageSizeBytes: Long,
       conf: Configuration,
       chunkSizeByteLimit: Long,
       opts: ParquetOptions,
@@ -3732,7 +3718,7 @@ object MakeParquetTableProducer extends Logging {
       }
     }
     if (useChunkedReader) {
-      ParquetTableReader(conf, chunkSizeByteLimit, maxChunkedReaderMemoryUsageSizeBytes,
+      ParquetTableReader(conf, chunkSizeByteLimit,
         opts, buffers, metrics, dateRebaseMode, timestampRebaseMode,
         isSchemaCaseSensitive, useFieldId, readDataSchema, clippedParquetSchema,
         splits, debugDumpPrefix, debugDumpAlways)
@@ -3796,7 +3782,6 @@ case class ParquetChunkedReader(delegate: JniParquetChunkedReader) extends Chunk
 abstract class AbstractParquetTableReader(
     conf: Configuration,
     chunkSizeByteLimit: Long,
-    maxChunkedReaderMemoryUsageSizeBytes: Long,
     opts: ParquetOptions,
     buffers: Array[HostMemoryBuffer],
     metrics : Map[String, GpuMetric],
@@ -3919,7 +3904,6 @@ abstract class AbstractParquetTableReader(
 case class ParquetTableReader(
     conf: Configuration,
     chunkSizeByteLimit: Long,
-    maxChunkedReaderMemoryUsageSizeBytes: Long,
     opts: ParquetOptions,
     buffers: Array[HostMemoryBuffer],
     metrics : Map[String, GpuMetric],
@@ -3932,13 +3916,13 @@ case class ParquetTableReader(
     splits: Array[PartitionedFile],
     debugDumpPrefix: Option[String],
     debugDumpAlways: Boolean
-) extends AbstractParquetTableReader(conf, chunkSizeByteLimit, maxChunkedReaderMemoryUsageSizeBytes,
+) extends AbstractParquetTableReader(conf, chunkSizeByteLimit,
   opts, buffers, metrics, dateRebaseMode, timestampRebaseMode, isSchemaCaseSensitive, useFieldId,
   readDataSchema, clippedParquetSchema, splits, debugDumpPrefix, debugDumpAlways) {
 
   override protected def createReader(): ChunkedReader = ParquetChunkedReader(
     new JniParquetChunkedReader(chunkSizeByteLimit,
-      ChunkedReaderMemoryLimit.forReader(maxChunkedReaderMemoryUsageSizeBytes),
+      MultiFileReaderUtils.chunkedReaderPassLimit(chunkSizeByteLimit),
       opts, buffers:_*)
   )
 
@@ -4095,7 +4079,6 @@ class ParquetPartitionReader(
     maxReadBatchSizeBytes: Long,
     targetBatchSizeBytes: Long,
     useChunkedReader: Boolean,
-    maxChunkedReaderMemoryUsageSizeBytes: Long,
     skipReadEstimate: Boolean,
     override val compressCfg: CpuCompressionConfig,
     override val execMetrics: Map[String, GpuMetric],
@@ -4124,7 +4107,7 @@ class ParquetPartitionReader(
         // buffer is ready to not block CPU things.
         GpuSemaphore.acquireIfNecessary(TaskContext.get())
         val producer = MakeParquetTableProducer(
-          useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes, conf, targetBatchSizeBytes,
+          useChunkedReader, conf, targetBatchSizeBytes,
           parquetOpts, Array(hostBuf), execMetrics, dateRebaseMode, timestampRebaseMode,
           hasInt96Timestamps, isSchemaCaseSensitive, useFieldId, readDataSchema,
           clippedParquetSchema, Array(split), debugDumpPrefix, debugDumpAlways)

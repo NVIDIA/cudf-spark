@@ -66,14 +66,7 @@ __multithreaded_orc_file_reader_combine_unordered_conf_chunked = {
     'spark.rapids.sql.format.orc.reader.type': 'MULTITHREADED',
     'spark.rapids.sql.reader.multithreaded.combine.sizeBytes': '64m',
     'spark.rapids.sql.reader.multithreaded.read.keepOrder': False,
-    'spark.rapids.sql.reader.chunked': True,
-    'spark.rapids.sql.reader.chunked.limitMemoryUsage': False}
-__multithreaded_orc_file_reader_combine_unordered_conf_chunked_limited_memory = {
-    'spark.rapids.sql.format.orc.reader.type': 'MULTITHREADED',
-    'spark.rapids.sql.reader.multithreaded.combine.sizeBytes': '64m',
-    'spark.rapids.sql.reader.multithreaded.read.keepOrder': False,
-    'spark.rapids.sql.reader.chunked': True,
-    'spark.rapids.sql.reader.chunked.limitMemoryUsage': True}
+    'spark.rapids.sql.reader.chunked': True}
 __coalescing_orc_file_reader_conf = {'spark.rapids.sql.format.orc.reader.type': 'COALESCING'}
 __reader_opt_confs_common = [__original_orc_file_reader_conf, __multithreaded_orc_file_reader_conf,
                              __coalescing_orc_file_reader_conf,
@@ -82,15 +75,9 @@ __reader_opt_confs_no_chunked = [{**conf, 'spark.rapids.sql.reader.chunked': Fal
                                  for conf in __reader_opt_confs_common] + \
                                 [pytest.param(__multithreaded_orc_file_reader_combine_unordered_conf_no_chunked,
                                               marks=pytest.mark.ignore_order(local=True))]
-__reader_opt_confs_chunked = [{**conf, 'spark.rapids.sql.reader.chunked': True,
-                               'spark.rapids.sql.reader.chunked.limitMemoryUsage': True}
-                              for conf in __reader_opt_confs_common] + \
-                             [{**conf, 'spark.rapids.sql.reader.chunked': True,
-                               'spark.rapids.sql.reader.chunked.limitMemoryUsage': False}
+__reader_opt_confs_chunked = [{**conf, 'spark.rapids.sql.reader.chunked': True}
                               for conf in __reader_opt_confs_common] + \
                              [pytest.param(__multithreaded_orc_file_reader_combine_unordered_conf_chunked,
-                                           marks=pytest.mark.ignore_order(local=True))] + \
-                             [pytest.param(__multithreaded_orc_file_reader_combine_unordered_conf_chunked_limited_memory,
                                            marks=pytest.mark.ignore_order(local=True))]
 reader_opt_confs = __reader_opt_confs_no_chunked + __reader_opt_confs_chunked
 
@@ -959,7 +946,7 @@ def test_read_struct_without_stream(spark_tmp_path):
 # Dedicated to covering GpuMultiFileReader.getNextBuffersAndMetaAndCombine's unordered
 # wait path by letting readReadyFiles return an empty result.
 __unordered_combine_wait_reader_conf = {
-    **__multithreaded_orc_file_reader_combine_unordered_conf_chunked_limited_memory,
+    **__multithreaded_orc_file_reader_combine_unordered_conf_chunked,
     'spark.rapids.sql.reader.multithreaded.combine.waitTime': 0}
 
 read_with_more_columns_test_matrix = generate_reduced_test_matrix({

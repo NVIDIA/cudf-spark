@@ -394,22 +394,6 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .booleanConf
     .createWithDefault(true)
 
-  val LIMIT_CHUNKED_READER_MEMORY_USAGE = conf("spark.rapids.sql.reader.chunked.limitMemoryUsage")
-    .doc("Enable a soft limit on the internal memory usage of the chunked reader " +
-      "(if being used). The limit is the same as " +
-      s"'${GPU_BATCH_SIZE_BYTES.key}', capped at 1/8 of the GPU memory pool, " +
-      "but no less than 256 MiB. For example, if batchSizeBytes is set to 1GB, the chunked " +
-      "reader will try to keep its internal memory usage under 1GB.")
-    .booleanConf
-    .createOptional
-
-  val CHUNKED_SUBPAGE_READER = conf("spark.rapids.sql.reader.chunked.subPage")
-    .doc("Enable a chunked reader where possible for reading data that is smaller " +
-      "than the typical row group/page limit. Currently deprecated and replaced by " +
-      s"'${LIMIT_CHUNKED_READER_MEMORY_USAGE}'.")
-    .booleanConf
-    .createOptional
-
   val MAX_GPU_COLUMN_SIZE_BYTES = conf("spark.rapids.sql.columnSizeBytes")
     .doc("Limit the max number of bytes for a GPU column. It is same as the cudf " +
       "row count limit of a column. It is used by the multi-file readers. " +

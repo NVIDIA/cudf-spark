@@ -79,7 +79,7 @@ class ParquetCombineSuite extends RmmSparkRetrySuiteBase {
       queryUsesInputFile: Boolean = false,
       combineThreshold: Long = 1L << 20) extends MultiFileCloudParquetPartitionReader(
       null, new Configuration(false), files, filterFunc,
-      true, None, false, 1000, 1L << 20, 1L << 20, 1L << 20, false, 0,
+      true, None, false, 1000, 1L << 20, 1L << 20, 1L << 20, false,
       false, CpuCompressionConfig.disabled(), Map.empty, new StructType(),
       new ThreadPoolConfBuilder(1, true, 1L << 20, 10000L, false).build(),
       1, false, ignoreCorrupt, false, queryUsesInputFile, ordered,

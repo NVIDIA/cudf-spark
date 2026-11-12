@@ -154,7 +154,6 @@ private class SingleFileReader(
       conf.maxBatchSizeBytes,
       conf.targetBatchSizeBytes,
       conf.useChunkedReader,
-      conf.maxChunkedReaderMemoryUsageSizeBytes,
       conf.skipReadEstimate,
       CpuCompressionConfig.disabled(),
       conf.metrics,
@@ -174,7 +173,7 @@ private class SingleFileReader(
               GpuSemaphore.acquireIfNecessary(TaskContext.get())
             }
             val producer = GpuIcebergDeletionVector.makeProducer(
-              readerConf.useChunkedReader, readerConf.maxChunkedReaderMemoryUsageSizeBytes,
+              readerConf.useChunkedReader,
               readerConf.conf, readerConf.targetBatchSizeBytes, parquetOpts, Array(hostBuffer),
               readerConf.metrics, DateTimeRebaseCorrected, DateTimeRebaseCorrected,
               readerConf.caseSensitive,

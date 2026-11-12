@@ -703,7 +703,7 @@ case class GpuOrcMultiFilePartitionReaderFactory(
     val reader = new MultiFileCloudOrcPartitionReader(
       conf, files, dataSchema, readDataSchema, partitionSchema,
       maxReadBatchSizeRows, maxReadBatchSizeBytes, targetBatchSizeBytes, maxGpuColumnSizeBytes,
-      useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes, skipReadEstimate, poolConf,
+      useChunkedReader, skipReadEstimate, poolConf,
       maxNumFileProcessed,
       debugDumpPrefix, debugDumpAlways, filters, filterHandler, metrics, ignoreMissingFiles,
       ignoreCorruptFiles, queryUsesInputFile, keepReadsInOrder, combineConf)
@@ -766,7 +766,7 @@ case class GpuOrcMultiFilePartitionReaderFactory(
     new MultiFileOrcPartitionReader(conf, files, clippedStripes, readDataSchema,
       debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows, maxReadBatchSizeBytes,
       targetBatchSizeBytes, maxGpuColumnSizeBytes, useChunkedReader,
-      maxChunkedReaderMemoryUsageSizeBytes, skipReadEstimate,
+      skipReadEstimate,
       metrics, partitionSchema, poolConf, filterHandler.isCaseSensitive)
   }
 
@@ -799,8 +799,6 @@ case class GpuOrcPartitionReaderFactory(
   private val targetBatchSizeBytes = rapidsConf.gpuTargetBatchSizeBytes
   private val maxGpuColumnSizeBytes = rapidsConf.maxGpuColumnSizeBytes
   private val useChunkedReader = rapidsConf.chunkedReaderEnabled
-  private val maxChunkedReaderMemoryUsageSizeBytes =
-    ChunkedReaderMemoryLimit.requested(rapidsConf, targetBatchSizeBytes)
   private val skipReadEstimate = rapidsConf.skipReadEstimate(useChunkedReader)
   private val filterHandler = GpuOrcFileFilterHandler(sqlConf, metrics, broadcastedConf,
     pushedFilters, rapidsConf.isOrcFloatTypesToStringEnable)
@@ -826,7 +824,7 @@ case class GpuOrcPartitionReaderFactory(
       val reader = new GpuOrcPartitionReader(conf, partFile, ctx,
         readDataSchema, debugDumpPrefix, debugDumpAlways,  maxReadBatchSizeRows,
         maxReadBatchSizeBytes, targetBatchSizeBytes,
-        useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes, skipReadEstimate,
+        useChunkedReader, skipReadEstimate,
         metrics, filterHandler.isCaseSensitive)
       ColumnarPartitionReaderWithPartitionValues.newReader(partFile, reader, partitionSchema,
         maxGpuColumnSizeBytes)
@@ -1320,8 +1318,6 @@ trait OrcPartitionReaderBase extends OrcCommonFunctions with Logging
  * @param maxReadBatchSizeBytes maximum number of bytes to read in a batch
  * @param targetBatchSizeBytes the target size of a batch
  * @param useChunkedReader whether to read Parquet by chunks or read all at once
- * @param maxChunkedReaderMemoryUsageSizeBytes soft limit on the number of bytes of internal memory
- *                                             usage that the reader will use
  * @param skipReadEstimate whether to ignore the schema based GPU memory estimate for a batch
  * @param execMetrics metrics to update during read
  * @param isCaseSensitive whether the name check should be case sensitive or not
@@ -1337,7 +1333,6 @@ class GpuOrcPartitionReader(
     maxReadBatchSizeBytes: Long,
     targetBatchSizeBytes: Long,
     useChunkedReader: Boolean,
-    maxChunkedReaderMemoryUsageSizeBytes: Long,
     skipReadEstimate: Boolean,
     execMetrics : Map[String, GpuMetric],
     isCaseSensitive: Boolean) extends FilePartitionReaderBase(conf, execMetrics)
@@ -1398,7 +1393,7 @@ class GpuOrcPartitionReader(
               // buffer is ready to not block CPU things.
               GpuSemaphore.acquireIfNecessary(TaskContext.get())
               val producer = MakeOrcTableProducer(useChunkedReader,
-                maxChunkedReaderMemoryUsageSizeBytes, conf, targetBatchSizeBytes, parseOpts,
+                conf, targetBatchSizeBytes, parseOpts,
                 dataBuf, 0, dataSize, metrics, isCaseSensitive, readDataSchema,
                 tableSchema, Array(partFile), debugDumpPrefix, debugDumpAlways,
                 ctx.writerTimezone, ctx.writerUsedProlepticGregorian)
@@ -2274,8 +2269,6 @@ private object GpuOrcFileFilterHandler {
  * @param targetBatchSizeBytes the target size of a batch
  * @param maxGpuColumnSizeBytes maximum number of bytes for a GPU column
  * @param useChunkedReader whether to read Parquet by chunks or read all at once
- * @param maxChunkedReaderMemoryUsageSizeBytes soft limit on the number of bytes of internal memory
- *                                             usage that the reader will use
  * @param skipReadEstimate whether to ignore the schema based GPU memory estimate for a batch
  * @param poolConf thread pool configurations
  * @param maxNumFileProcessed threshold to control the maximum file number to be
@@ -2299,7 +2292,6 @@ class MultiFileCloudOrcPartitionReader(
     targetBatchSizeBytes: Long,
     maxGpuColumnSizeBytes: Long,
     useChunkedReader: Boolean,
-    maxChunkedReaderMemoryUsageSizeBytes: Long,
     skipReadEstimate: Boolean,
     poolConf: ThreadPoolConf,
     maxNumFileProcessed: Int,
@@ -2565,7 +2557,7 @@ class MultiFileCloudOrcPartitionReader(
       // buffer is ready to not block CPU things.
       GpuSemaphore.acquireIfNecessary(TaskContext.get())
       val producer = MakeOrcTableProducer(useChunkedReader,
-        maxChunkedReaderMemoryUsageSizeBytes, conf, targetBatchSizeBytes, parseOpts,
+        conf, targetBatchSizeBytes, parseOpts,
         dataBuf, 0, bufferSize, metrics, isCaseSensitive, readDataSchema,
         tableSchema, files, debugDumpPrefix, debugDumpAlways, writerTimezone,
         writerUsedProlepticGregorian)
@@ -2868,8 +2860,6 @@ private case class OrcSingleStripeMeta(
  * @param targetBatchSizeBytes  the target size of a batch
  * @param maxGpuColumnSizeBytes the maximum size of a GPU column
  * @param useChunkedReader      whether to read Parquet by chunks or read all at once
- * @param maxChunkedReaderMemoryUsageSizeBytes soft limit on the number of bytes of internal memory
- *                                             usage that the reader will use
  * @param skipReadEstimate      whether to ignore the schema based GPU memory estimate for a batch
  * @param execMetrics           metrics
  * @param partitionSchema       schema of partitions
@@ -2888,7 +2878,6 @@ class MultiFileOrcPartitionReader(
     targetBatchSizeBytes: Long,
     maxGpuColumnSizeBytes: Long,
     useChunkedReader: Boolean,
-    maxChunkedReaderMemoryUsageSizeBytes: Long,
     skipReadEstimate: Boolean,
     execMetrics: Map[String, GpuMetric],
     partitionSchema: StructType,
@@ -3069,7 +3058,7 @@ class MultiFileOrcPartitionReader(
     GpuSemaphore.acquireIfNecessary(TaskContext.get())
 
     MakeOrcTableProducer(useChunkedReader,
-      maxChunkedReaderMemoryUsageSizeBytes, conf, targetBatchSizeBytes, parseOpts,
+      conf, targetBatchSizeBytes, parseOpts,
       dataBuffer, 0, dataSize, metrics, isCaseSensitive, readDataSchema,
       tableSchema, files, debugDumpPrefix, debugDumpAlways,
       orcExtraInfo.writerTimezone, orcExtraInfo.writerUsedProlepticGregorian)
@@ -3123,7 +3112,6 @@ class MultiFileOrcPartitionReader(
 object MakeOrcTableProducer extends Logging {
   def apply(
       useChunkedReader: Boolean,
-      maxChunkedReaderMemoryUsageSizeBytes: Long,
       conf: Configuration,
       chunkSizeByteLimit: Long,
       parseOpts: ORCOptions,
@@ -3147,7 +3135,7 @@ object MakeOrcTableProducer extends Logging {
       }
     }
     if (useChunkedReader) {
-      OrcTableReader(conf, chunkSizeByteLimit, maxChunkedReaderMemoryUsageSizeBytes,
+      OrcTableReader(conf, chunkSizeByteLimit,
         parseOpts, buffer, offset, bufferSize, metrics,  isSchemaCaseSensitive, readDataSchema,
         tableSchema, splits, debugDumpPrefix, debugDumpAlways, writerTimezone,
         writerUsedProlepticGregorian)
@@ -3191,7 +3179,6 @@ object MakeOrcTableProducer extends Logging {
 case class OrcTableReader(
     conf: Configuration,
     chunkSizeByteLimit: Long,
-    maxChunkedReaderMemoryUsageSizeBytes: Long,
     parseOpts: ORCOptions,
     buffer: HostMemoryBuffer,
     offset: Long,
@@ -3207,7 +3194,7 @@ case class OrcTableReader(
     writerUsedProlepticGregorian: Boolean) extends GpuDataProducer[Table] with Logging {
 
   private[this] val reader = new ORCChunkedReader(chunkSizeByteLimit,
-    ChunkedReaderMemoryLimit.forReader(maxChunkedReaderMemoryUsageSizeBytes), parseOpts,
+    MultiFileReaderUtils.chunkedReaderPassLimit(chunkSizeByteLimit), parseOpts,
     buffer, offset, bufferSize)
 
   private[this] lazy val catalystTableSchema = SchemaUtils.toCatalystSchema(tableSchema)

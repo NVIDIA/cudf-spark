@@ -53,7 +53,6 @@ private[parquet] object GpuIcebergDeletionVector extends Logging {
    */
   def makeProducer(
       useChunkedReader: Boolean,
-      maxChunkedReaderMemoryUsageSizeBytes: Long,
       conf: Configuration,
       chunkSizeByteLimit: Long,
       opts: ParquetOptions,
@@ -87,7 +86,7 @@ private[parquet] object GpuIcebergDeletionVector extends Logging {
         val dvInfo = makeDeletionVectorInfo()
         closeOnExcept(dvInfo.serializedBitmap) { _ =>
           new ChunkedDeletionVectorProducer(
-            maxChunkedReaderMemoryUsageSizeBytes, conf, chunkSizeByteLimit, opts, buffers, metrics,
+            conf, chunkSizeByteLimit, opts, buffers, metrics,
             dateRebaseMode, timestampRebaseMode, isSchemaCaseSensitive, useFieldId,
             readDataSchema, clippedParquetSchema, splits, debugDumpPrefix, debugDumpAlways, dvInfo)
         }
@@ -172,7 +171,6 @@ private[parquet] object GpuIcebergDeletionVector extends Logging {
 }
 
 private class ChunkedDeletionVectorProducer(
-    maxChunkedReaderMemoryUsageSizeBytes: Long,
     conf: Configuration,
     chunkSizeByteLimit: Long,
     opts: ParquetOptions,
@@ -189,7 +187,7 @@ private class ChunkedDeletionVectorProducer(
     debugDumpAlways: Boolean,
     dvInfo: DeletionVector.DeletionVectorInfo) extends GpuDataProducer[Table] {
   private val reader = DeletionVector.newParquetChunkedReader(chunkSizeByteLimit,
-    ChunkedReaderMemoryLimit.forReader(maxChunkedReaderMemoryUsageSizeBytes), opts, buffers,
+    MultiFileReaderUtils.chunkedReaderPassLimit(chunkSizeByteLimit), opts, buffers,
     Array(dvInfo))
 
   override def hasNext: Boolean = reader.hasNext

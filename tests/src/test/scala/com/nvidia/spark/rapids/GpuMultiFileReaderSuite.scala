@@ -322,7 +322,7 @@ class GpuMultiFileReaderSuite extends AnyFunSuite with RmmSparkRetrySuiteBase {
       extends MultiFileCloudParquetPartitionReader(
         null, new Configuration(false), Array.empty,
         _ => throw new UnsupportedOperationException("All files are already pending"),
-        true, None, false, 1000, 1L << 20, 1L << 20, 1L << 20, false, 0,
+        true, None, false, 1000, 1L << 20, 1L << 20, 1L << 20, false,
         false, CpuCompressionConfig.disabled(), Map.empty, new StructType(),
         new ThreadPoolConfBuilder(1, true, 1L << 20, 10000L, false).build(),
         1, false, true, false, false, true, CombineConf(1L << 20, 0)) {

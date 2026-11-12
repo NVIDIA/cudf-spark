@@ -500,8 +500,6 @@ object ConfVersionInfo {
     "spark.rapids.sql.reader.batchSizeBytes" -> "v0.1.0",
     "spark.rapids.sql.reader.batchSizeRows" -> "v0.1.0",
     "spark.rapids.sql.reader.chunked" -> "v22.12.0",
-    "spark.rapids.sql.reader.chunked.limitMemoryUsage" -> "v24.06.0",
-    "spark.rapids.sql.reader.chunked.subPage" -> "v24.02.0",
     "spark.rapids.sql.reader.multithreaded.combine.sizeBytes" -> "v23.06.0",
     "spark.rapids.sql.reader.multithreaded.combine.waitTime" -> "v23.06.0",
     "spark.rapids.sql.reader.multithreaded.read.keepOrder" -> "v23.06.0",

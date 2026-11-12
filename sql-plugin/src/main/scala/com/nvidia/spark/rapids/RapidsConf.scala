@@ -580,20 +580,6 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val chunkedReaderEnabled: Boolean = get(CHUNKED_READER)
 
-  lazy val limitChunkedReaderMemoryUsage: Boolean = {
-    val hasLimit = get(LIMIT_CHUNKED_READER_MEMORY_USAGE)
-    val deprecatedConf = get(CHUNKED_SUBPAGE_READER)
-    if (deprecatedConf.isDefined) {
-      logWarning(s"'${CHUNKED_SUBPAGE_READER.key}' is deprecated and is replaced by " +
-        s"'${LIMIT_CHUNKED_READER_MEMORY_USAGE}'.")
-      if (hasLimit.isDefined && hasLimit.get != deprecatedConf.get) {
-        throw new IllegalStateException(s"Both '${CHUNKED_SUBPAGE_READER.key}' and " +
-          s"'${LIMIT_CHUNKED_READER_MEMORY_USAGE.key}' are set but using different values.")
-      }
-    }
-    hasLimit.getOrElse(deprecatedConf.getOrElse(true))
-  }
-
   lazy val maxReadBatchSizeRows: Int = get(MAX_READER_BATCH_SIZE_ROWS)
 
   lazy val maxReadBatchSizeBytes: Long = get(MAX_READER_BATCH_SIZE_BYTES)

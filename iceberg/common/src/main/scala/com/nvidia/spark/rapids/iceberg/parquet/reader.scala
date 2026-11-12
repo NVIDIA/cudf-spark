@@ -131,7 +131,6 @@ case class GpuIcebergParquetReaderConf(
     targetBatchSizeBytes: Long,
     maxGpuColumnSizeBytes: Long,
     useChunkedReader: Boolean,
-    maxChunkedReaderMemoryUsageSizeBytes: Long,
     skipReadEstimate: Boolean,
     parquetDebugDumpPrefix: Option[String],
     parquetDebugDumpAlways: Boolean,

@@ -573,7 +573,6 @@ abstract class GpuDeltaParquetFileFormatNativeDVBase(
         singleFileInfo.blocks, singleFileInfo.schema, isCaseSensitive, readDataSchema,
         debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows, maxReadBatchSizeBytes,
         targetSizeBytes, maxGpuColumnSizeBytes, useChunkedReader,
-        maxChunkedReaderMemoryUsageSizeBytes,
         skipReadEstimate, compressCfg,
         metrics, singleFileInfo.dateRebaseMode, singleFileInfo.timestampRebaseMode,
         singleFileInfo.hasInt96Timestamps, readUseFieldId, deletionVectorReadInfo, tablePathOpt)
@@ -596,7 +595,6 @@ abstract class GpuDeltaParquetFileFormatNativeDVBase(
       targetBatchSizeBytes: Long,
       maxGpuColumnSizeBytes: Long,
       useChunkedReader: Boolean,
-      maxChunkedReaderMemoryUsageSizeBytes: Long,
       skipReadEstimate: Boolean,
       override val compressCfg: CpuCompressionConfig,
       override val execMetrics: Map[String, GpuMetric],
@@ -639,7 +637,7 @@ abstract class GpuDeltaParquetFileFormatNativeDVBase(
               // MakeParquetTableWithDVProducer will try to close the hostBuf and dvInfo
               MakeParquetTableWithDVProducer(
                 useChunkedReader,
-                maxChunkedReaderMemoryUsageSizeBytes, conf,
+                conf,
                 targetBatchSizeBytes, parquetOpts,
                 Array(hostBuf), metrics,
                 dateRebaseMode, timestampRebaseMode,
@@ -653,7 +651,7 @@ abstract class GpuDeltaParquetFileFormatNativeDVBase(
             } else {
               // MakeParquetTableProducer will try to close the hostBuf
               MakeParquetTableProducer(useChunkedReader,
-                maxChunkedReaderMemoryUsageSizeBytes, conf,
+                conf,
                 targetBatchSizeBytes, parquetOpts,
                 Array(hostBuf), metrics,
                 dateRebaseMode, timestampRebaseMode,
@@ -907,7 +905,6 @@ abstract class GpuDeltaParquetFileFormatNativeDVBase(
         targetBatchSizeBytes: Long,
         maxGpuColumnSizeBytes: Long,
         useChunkedReader: Boolean,
-        maxChunkedReaderMemoryUsageSizeBytes: Long,
         skipReadEstimate: Boolean,
         compressCfg: CpuCompressionConfig,
         execMetrics: Map[String, GpuMetric],
@@ -934,7 +931,6 @@ abstract class GpuDeltaParquetFileFormatNativeDVBase(
         targetBatchSizeBytes,
         maxGpuColumnSizeBytes,
         useChunkedReader,
-        maxChunkedReaderMemoryUsageSizeBytes,
         skipReadEstimate,
         compressCfg,
         execMetrics,
@@ -1005,7 +1001,7 @@ abstract class GpuDeltaParquetFileFormatNativeDVBase(
       new MultiFileDeltaCoalescingParquetPartitionReader(fileIO, conf, files,
         clippedBlocks.toSeq, isCaseSensitive, debugDumpPrefix, debugDumpAlways,
         maxReadBatchSizeRows, maxReadBatchSizeBytes, targetBatchSizeBytes,
-        maxGpuColumnSizeBytes, useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes,
+        maxGpuColumnSizeBytes, useChunkedReader,
         skipReadEstimate, compressCfg, metrics, readDataSchema, partitionSchema, poolConf,
         ignoreMissingFiles, ignoreCorruptFiles, readUseFieldId, tablePathOpt)
     }
@@ -1024,7 +1020,6 @@ abstract class GpuDeltaParquetFileFormatNativeDVBase(
       targetBatchSizeBytes: Long,
       maxGpuColumnSizeBytes: Long,
       useChunkedReader: Boolean,
-      maxChunkedReaderMemoryUsageSizeBytes: Long,
       skipReadEstimate: Boolean,
       override val compressCfg: CpuCompressionConfig,
       override val execMetrics: Map[String, GpuMetric],
@@ -1044,7 +1039,7 @@ abstract class GpuDeltaParquetFileFormatNativeDVBase(
     extends AbstractMultiFileCloudParquetPartitionReader(fileIO, conf, files, filterFunc,
       isSchemaCaseSensitive, debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows,
       maxReadBatchSizeBytes, targetBatchSizeBytes, maxGpuColumnSizeBytes, useChunkedReader,
-      maxChunkedReaderMemoryUsageSizeBytes, skipReadEstimate, compressCfg, execMetrics,
+      skipReadEstimate, compressCfg, execMetrics,
       partitionSchema, poolConf, maxNumFileProcessed, ignoreMissingFiles, ignoreCorruptFiles,
       useFieldId, queryUsesInputFile, keepReadsInOrder, combineConf) {
 
@@ -1242,7 +1237,6 @@ abstract class GpuDeltaParquetFileFormatNativeDVBase(
               // The MakeParquetTableWithDVProducer will close the input buffers
               MakeParquetTableWithDVProducer(
                 useChunkedReader,
-                maxChunkedReaderMemoryUsageSizeBytes,
                 conf, targetBatchSizeBytes,
                 parseOpts,
                 hostBufs, metrics,
@@ -1254,7 +1248,6 @@ abstract class GpuDeltaParquetFileFormatNativeDVBase(
               // The MakeParquetTableProducer will close the input buffers
               MakeParquetTableProducer(
                 useChunkedReader,
-                maxChunkedReaderMemoryUsageSizeBytes,
                 conf, targetBatchSizeBytes,
                 parseOpts, hostBufs, metrics,
                 dateRebaseMode, timestampRebaseMode,
@@ -1676,7 +1669,6 @@ abstract class GpuDeltaParquetFileFormatNativeDVBase(
       targetBatchSizeBytes: Long,
       maxGpuColumnSizeBytes: Long,
       useChunkedReader: Boolean,
-      maxChunkedReaderMemoryUsageSizeBytes: Long,
       skipReadEstimate: Boolean,
       compressCfg: CpuCompressionConfig,
       execMetrics: Map[String, GpuMetric],
@@ -1911,7 +1903,7 @@ abstract class GpuDeltaParquetFileFormatNativeDVBase(
               false, entry.rowGroupOffsets, entry.rowGroupNumRows)
           }.toArray
         // MakeParquetTableWithDVProducer closes the dataBuffer and the bitmaps in dvInfos.
-        MakeParquetTableWithDVProducer(useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes,
+        MakeParquetTableWithDVProducer(useChunkedReader,
           conf, currentTargetBatchSize, parseOpts,
           Array(dataBuffer), metrics,
           batchExtra.dateRebaseMode, batchExtra.timestampRebaseMode,
@@ -1920,7 +1912,7 @@ abstract class GpuDeltaParquetFileFormatNativeDVBase(
           DeletionVectorOutputColumns.fromDmlSchema(readDataSchema))
       } else {
         // MakeParquetTableProducer closes the dataBuffer.
-        MakeParquetTableProducer(useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes,
+        MakeParquetTableProducer(useChunkedReader,
           conf, currentTargetBatchSize, parseOpts,
           Array(dataBuffer), metrics,
           batchExtra.dateRebaseMode, batchExtra.timestampRebaseMode,
@@ -1965,7 +1957,6 @@ private case class DeltaParquetChunkedReader(delegate: DeletionVector.ParquetChu
 private case class DeltaParquetTableReader(
     conf: Configuration,
     chunkSizeByteLimit: Long,
-    maxChunkedReaderMemoryUsageSizeBytes: Long,
     opts: ParquetOptions,
     buffers: Array[HostMemoryBuffer],
     metrics : Map[String, GpuMetric],
@@ -1980,7 +1971,7 @@ private case class DeltaParquetTableReader(
     debugDumpAlways: Boolean,
     dvInfos: Array[DeletionVector.DeletionVectorInfo],
     outputColumns: DeletionVectorOutputColumns) extends AbstractParquetTableReader(
-  conf, chunkSizeByteLimit, maxChunkedReaderMemoryUsageSizeBytes, opts, buffers, metrics,
+  conf, chunkSizeByteLimit, opts, buffers, metrics,
   dateRebaseMode, timestampRebaseMode, isSchemaCaseSensitive, useFieldId, readDataSchema,
   clippedParquetSchema, splits, debugDumpPrefix, debugDumpAlways
 ) {
@@ -1989,7 +1980,7 @@ private case class DeltaParquetTableReader(
 
   override protected def createReader(): ChunkedReader = DeltaParquetChunkedReader(
     DeletionVector.newParquetChunkedReader(chunkSizeByteLimit,
-      maxChunkedReaderMemoryUsageSizeBytes, opts, buffers, dvInfos)
+      MultiFileReaderUtils.chunkedReaderPassLimit(chunkSizeByteLimit), opts, buffers, dvInfos)
   )
 
   override protected def additionalResources: Seq[AutoCloseable] =
@@ -2109,7 +2100,6 @@ private object MakeParquetTableWithDVProducer extends Logging {
 
   def apply(
       useChunkedReader: Boolean,
-      maxChunkedReaderMemoryUsageSizeBytes: Long,
       conf: Configuration,
       chunkSizeByteLimit: Long,
       opts: ParquetOptions,
@@ -2138,7 +2128,7 @@ private object MakeParquetTableWithDVProducer extends Logging {
       }
     }
     if (useChunkedReader) {
-      DeltaParquetTableReader(conf, chunkSizeByteLimit, maxChunkedReaderMemoryUsageSizeBytes,
+      DeltaParquetTableReader(conf, chunkSizeByteLimit,
         opts, buffers, metrics, dateRebaseMode, timestampRebaseMode,
         isSchemaCaseSensitive, useFieldId, readDataSchema, clippedParquetSchema,
         splits, debugDumpPrefix, debugDumpAlways, deletionVectorInfos, outputColumns)
