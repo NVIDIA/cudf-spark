@@ -401,8 +401,7 @@ scan. Delta retains its protocol-based checks: shredding or unknown reader featu
 keep Variant reads on CPU.
 
 Iceberg Variant reads use the same Spark setting for GPU eligibility. Set
-`spark.sql.variant.allowReadingShredded=false` and
-`spark.sql.variant.pushVariantIntoScan=false` with the existing Iceberg v3 opt-in.
+`spark.sql.variant.allowReadingShredded=false` with the existing Iceberg v3 opt-in.
 Iceberg's CPU reader can read shredded input independently of Spark's Parquet setting,
 so the GPU execution reader also validates every projected Variant leaf against the
 physical-layout predicate used by the Raw Parquet reader. Exactly two children named
