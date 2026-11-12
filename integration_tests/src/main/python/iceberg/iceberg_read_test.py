@@ -21,8 +21,7 @@ from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
 from conftest import is_iceberg_remote_catalog
 from data_gen import copy_and_update
 from iceberg import get_full_table_name, iceberg_unsupported_mark, rapids_reader_types, \
-    supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON
-from iceberg.iceberg_test import _ICEBERG_VARIANT_READ_CONF
+    supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON, iceberg_variant_read_conf
 from marks import allow_non_gpu, iceberg, ignore_order, incompat
 from spark_session import is_spark_411_or_later, with_cpu_session, with_gpu_session
 
@@ -78,7 +77,7 @@ def _read_variant(spark, table, container, column='v'):
 @pytest.mark.parametrize('container', list(_VARIANT_CONTAINERS))
 def test_iceberg_unshredded_variant_read(spark_tmp_table_factory, reader_type, container):
     table = get_full_table_name(spark_tmp_table_factory)
-    conf = copy_and_update(_ICEBERG_VARIANT_READ_CONF, {
+    conf = copy_and_update(iceberg_variant_read_conf, {
         'spark.rapids.sql.format.parquet.reader.type': reader_type,
     })
     with_cpu_session(
@@ -103,7 +102,7 @@ def test_iceberg_variant_scalar_and_null_read(spark_tmp_table_factory):
     table = get_full_table_name(spark_tmp_table_factory)
     with_cpu_session(
         lambda spark: _setup_unshredded_variant_table(spark, table, 'top'),
-        conf=_ICEBERG_VARIANT_READ_CONF)
+        conf=iceberg_variant_read_conf)
 
     def canonicalize(cpu, gpu):
         def values(rows):
@@ -119,7 +118,7 @@ def test_iceberg_variant_scalar_and_null_read(spark_tmp_table_factory):
 
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.sql(f"SELECT id, v FROM {table}"),
-        conf=_ICEBERG_VARIANT_READ_CONF, result_canonicalize_func_before_compare=canonicalize)
+        conf=iceberg_variant_read_conf, result_canonicalize_func_before_compare=canonicalize)
 
 
 @ignore_order(local=True)
@@ -132,8 +131,8 @@ def test_iceberg_variant_read_configuration(spark_tmp_table_factory, container, 
     table = get_full_table_name(spark_tmp_table_factory)
     with_cpu_session(
         lambda spark: _setup_unshredded_variant_table(spark, table, container),
-        conf=_ICEBERG_VARIANT_READ_CONF)
-    conf = dict(_ICEBERG_VARIANT_READ_CONF)
+        conf=iceberg_variant_read_conf)
+    conf = dict(iceberg_variant_read_conf)
     conf.pop('spark.sql.variant.allowReadingShredded')
     if allow_shredded is not None:
         conf['spark.sql.variant.allowReadingShredded'] = allow_shredded
@@ -154,7 +153,7 @@ def test_iceberg_variant_read_configuration(spark_tmp_table_factory, container, 
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 def test_iceberg_shredded_variant_read_and_count(spark_tmp_table_factory, reader_type):
     table = get_full_table_name(spark_tmp_table_factory)
-    conf = copy_and_update(_ICEBERG_VARIANT_READ_CONF, {
+    conf = copy_and_update(iceberg_variant_read_conf, {
         'spark.rapids.sql.format.parquet.reader.type': reader_type,
         'spark.rapids.sql.incompatibleOps.enabled': 'true',
     })
@@ -220,7 +219,7 @@ def test_iceberg_variant_deletion_vector_empty_projection(
         assert [row[0] for row in spark.sql(f"SELECT _pos FROM {table} ORDER BY _pos").collect()] \
             == [0, 2, 3, 5]
 
-    conf = copy_and_update(_ICEBERG_VARIANT_READ_CONF, {
+    conf = copy_and_update(iceberg_variant_read_conf, {
         'spark.rapids.sql.format.parquet.reader.type': reader_type,
     })
     with_cpu_session(setup_table, conf=conf)

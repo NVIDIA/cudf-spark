@@ -27,7 +27,8 @@ from iceberg import (
     iceberg_table_properties_sql, get_full_table_name, iceberg_unsupported_mark, _build_tblprops,
     _BASE_TBLPROPS_SQL, create_iceberg_table, iceberg_write_enabled_conf, supports_iceberg_v3,
     ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance,
-    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df)
+    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df,
+    iceberg_variant_read_conf, setup_iceberg_variant_table)
 from marks import allow_non_gpu, allow_non_gpu_conditional, iceberg, ignore_order, iceberg_fast_test, incompat
 from spark_session import is_databricks_runtime, is_spark_35x, is_spark_400_or_later, \
     is_spark_40x, is_spark_41x, is_spark_411_or_later, spark_version, with_cpu_session, \
@@ -56,12 +57,6 @@ rapids_reader_types = ['PERFILE', 'MULTITHREADED', 'COALESCING']
 _NO_FANOUT = _BASE_TBLPROPS_SQL
 
 pytestmark = iceberg_unsupported_mark
-
-_ICEBERG_VARIANT_READ_CONF = {
-    "spark.rapids.sql.format.iceberg.v3.enabled": "true",
-    "spark.sql.adaptive.enabled": "false",
-    "spark.sql.variant.allowReadingShredded": "false",
-}
 
 
 def _is_spark_patch_at_least(version, minimum):
@@ -843,14 +838,14 @@ def test_iceberg_v3_top_level_variant_read(spark_tmp_table_factory):
     table = get_full_table_name(spark_tmp_table_factory)
 
     with_cpu_session(
-        lambda spark: _setup_iceberg_variant_table(spark, table),
-        conf=_ICEBERG_VARIANT_READ_CONF)
+        lambda spark: setup_iceberg_variant_table(spark, table),
+        conf=iceberg_variant_read_conf)
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: _read_iceberg_variant_table(spark, table),
         exist_classes="GpuBatchScanExec,GpuVariantGet",
         non_exist_classes="BatchScanExec,GpuRowToColumnarExec,HostColumnarToGpu",
-        conf=_ICEBERG_VARIANT_READ_CONF,
+        conf=iceberg_variant_read_conf,
         require_non_empty=True)
 
 
@@ -865,34 +860,13 @@ def test_iceberg_v3_variant_encryption_read_fallback(spark_tmp_table_factory):
     table = get_full_table_name(spark_tmp_table_factory)
 
     def setup_table(spark):
-        _setup_iceberg_variant_table(spark, table)
+        setup_iceberg_variant_table(spark, table)
         spark.sql(f"ALTER TABLE {table} SET TBLPROPERTIES ('encryption.key-id'='test-key')")
 
-    with_cpu_session(setup_table, conf=_ICEBERG_VARIANT_READ_CONF)
+    with_cpu_session(setup_table, conf=iceberg_variant_read_conf)
     assert_gpu_fallback_collect(
         lambda spark: _read_iceberg_variant_table(spark, table),
-        "BatchScanExec", conf=_ICEBERG_VARIANT_READ_CONF)
-
-
-def _setup_iceberg_variant_table(spark, table):
-    spark.sql(
-        f"CREATE TABLE {table} (id INT, v VARIANT) USING ICEBERG "
-        "TBLPROPERTIES ('format-version' = '3', 'write.parquet.shred-variants' = 'false')")
-    spark.sql(f"""
-        INSERT INTO {table}
-        SELECT id, parse_json(json)
-        FROM VALUES
-          (0, '{{"x":7,"s":"hi","b":true,"d":2.5,"empty_array":[],"empty_object":{{}}}}'),
-          (1, '[1,{{"x":2}}]'),
-          (2, '"scalar"'),
-          (3, '3.5'),
-          (4, 'true'),
-          (5, 'null'),
-          (6, NULL),
-          (7, '{{}}'),
-          (8, '[]')
-        AS source(id, json)
-        """)
+        "BatchScanExec", conf=iceberg_variant_read_conf)
 
 
 def _read_iceberg_variant_table(spark, table):
@@ -918,7 +892,7 @@ def _read_iceberg_variant_table(spark, table):
 def test_iceberg_v3_shredded_variant_read_fallback(spark_tmp_table_factory):
     table = get_full_table_name(spark_tmp_table_factory)
     conf = copy_and_update(
-        _ICEBERG_VARIANT_READ_CONF,
+        iceberg_variant_read_conf,
         {"spark.sql.variant.allowReadingShredded": "true"})
 
     def setup_table(spark):
@@ -990,7 +964,7 @@ def test_iceberg_v3_nested_variant_read(spark_tmp_table_factory):
                       attribute_object_json, attribute_array_json)
             """)
 
-    with_cpu_session(setup_table, conf=_ICEBERG_VARIANT_READ_CONF)
+    with_cpu_session(setup_table, conf=iceberg_variant_read_conf)
 
     def read_table(spark):
         return spark.sql(f"""
@@ -1007,7 +981,7 @@ def test_iceberg_v3_nested_variant_read(spark_tmp_table_factory):
         read_table,
         exist_classes="GpuBatchScanExec,GpuVariantGet",
         non_exist_classes="BatchScanExec,GpuRowToColumnarExec,HostColumnarToGpu",
-        conf=_ICEBERG_VARIANT_READ_CONF,
+        conf=iceberg_variant_read_conf,
         require_non_empty=True)
 
 
