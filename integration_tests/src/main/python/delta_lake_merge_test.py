@@ -207,6 +207,12 @@ def _create_empty_schema_target(spark, path):
     DeltaTable.create(spark).location(path).execute()
 
 
+def _create_plain_target(spark, path):
+    """Creates (id, value) with a single row, id = 0."""
+    spark.createDataFrame([(0, "old")], "id BIGINT, value STRING") \
+        .write.format("delta").save(path)
+
+
 def _create_generated_column_target(spark, path, column_kind):
     """Creates (id, value, gen) where `gen` is a "generated" or an "identity" column."""
     from delta.tables import DeltaTable, IdentityGenerator
@@ -218,44 +224,88 @@ def _create_generated_column_target(spark, path, column_kind):
         .execute()
 
 
-def _assert_merge_analysis_error(spark_tmp_path, spark_tmp_table_factory, create_target,
-                                 merge_sql, error_message, analysis_only, conf):
-    """Asserts CPU and GPU fail with the same error for a MERGE the Delta analyzer rejects.
-    `create_target(spark, path)` creates the MERGE target. With `analysis_only` the statement
-    is only analyzed, never executed, so the error cannot come from GPU command execution."""
+def _generated_column_target_creator(column_kind):
+    return lambda spark, path: _create_generated_column_target(spark, path, column_kind)
+
+
+_GPU_MERGE_COMMANDS = ("GpuMergeIntoCommand43x", "GpuMergeIntoCommand")
+
+
+def _merge_runner(spark_tmp_path, spark_tmp_table_factory, create_target, merge_sql):
+    """Returns `run(spark)`: creates the target, runs the MERGE and returns the final table."""
     source_view = spark_tmp_table_factory.get()
 
-    def do_merge(spark):
+    def run(spark):
         target_path = _target_path(spark, spark_tmp_path)
         create_target(spark, target_path)
         spark.createDataFrame([(1, "new")], "id INT, value STRING") \
             .createOrReplaceTempView(source_view)
-        statement = merge_sql.format(path=target_path, source=source_view)
-        if analysis_only:
-            jspark = spark._jsparkSession
-            jspark.sessionState().analyzer().execute(
-                jspark.sessionState().sqlParser().parsePlan(statement))
-        else:
-            spark.sql(statement).collect()
+        spark.sql(merge_sql.format(path=target_path, source=source_view)).collect()
+        result = spark.read.format("delta").load(target_path)
+        return result.schema.simpleString(), result.collect()
 
-    assert_gpu_and_cpu_error(do_merge, conf=conf, error_message=error_message)
+    return run
+
+
+def _assert_merge_error_before_gpu_command(
+        spark_tmp_path, spark_tmp_table_factory, create_target, merge_sql, error_message, conf):
+    """Asserts CPU and GPU fail with the same error for a MERGE the Delta analyzer rejects, and
+    that no MERGE command was planned for execution (the error is analyzer-owned)."""
+    run = _merge_runner(spark_tmp_path, spark_tmp_table_factory, create_target, merge_sql)
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        assert_gpu_and_cpu_error(run, conf=conf, error_message=error_message)
+        captured_plans = callback.getResultsWithTimeout(10000)
+    finally:
+        callback.endCapture()
+    for plan in captured_plans:
+        for command in _GPU_MERGE_COMMANDS + ("MergeIntoCommand",):
+            assert not callback.contains(plan, command), \
+                f"{command} was planned although the analyzer should have rejected the MERGE"
+
+
+def _assert_merge_succeeds_on_gpu_like_cpu(
+        spark_tmp_path, spark_tmp_table_factory, create_target, merge_sql, conf):
+    """Asserts the GPU MERGE command ran and produced the same schema and rows as the CPU."""
+    run = _merge_runner(spark_tmp_path, spark_tmp_table_factory, create_target, merge_sql)
+    cpu_schema, cpu_rows = with_cpu_session(run, conf=conf)
+    gpu_schema, gpu_rows = assert_rapids_gpu_merge_ran(
+        run, conf, expected_command=_GPU_MERGE_COMMANDS[0])
+    assert cpu_schema == gpu_schema
+    assert_equal_with_local_sort(cpu_rows, gpu_rows)
+
+
+empty_schema_error_merge_sqls = [
+    "MERGE INTO delta.`{path}` AS target USING {source} AS source ON target.id = source.id "
+    "WHEN NOT MATCHED THEN INSERT *",
+    "MERGE INTO delta.`{path}` AS target USING {source} AS source ON target.id = source.id "
+    "WHEN NOT MATCHED THEN INSERT (id, value) VALUES (source.id, source.value)",
+    "MERGE INTO delta.`{path}` AS target USING {source} AS source ON target.id = source.id "
+    "WHEN MATCHED THEN UPDATE SET *",
+    "MERGE INTO delta.`{path}` AS target USING {source} AS source ON target.id = source.id "
+    "WHEN MATCHED THEN DELETE",
+]
+
+duplicate_insert_columns_merge_sql = (
+    "MERGE INTO delta.`{path}` AS target USING {source} AS source ON target.id = source.id "
+    "WHEN NOT MATCHED THEN INSERT (id, ID, value) "
+    "VALUES (source.id, source.id, source.value)")
 
 
 @allow_non_gpu("CreateTableExec", *delta_meta_allow)
 @delta_lake
 @pytest.mark.skipif(not is_oss_delta_lake_43(),
                     reason="MERGE into an empty-schema target error was added in OSS Delta 4.3")
-@pytest.mark.parametrize("analysis_only", [True, False], ids=["analysis_only", "execute"])
+@pytest.mark.parametrize("merge_sql", empty_schema_error_merge_sqls,
+                         ids=["not_matched_insert_star", "not_matched_insert_columns",
+                              "matched_update_star", "matched_delete"])
 def test_delta_merge_empty_schema_target_error(
-        spark_tmp_path, spark_tmp_table_factory, analysis_only):
+        spark_tmp_path, spark_tmp_table_factory, merge_sql):
     # Without schema evolution, MERGE into a target with no columns must fail with a user error.
-    _assert_merge_analysis_error(
-        spark_tmp_path, spark_tmp_table_factory, _create_empty_schema_target,
-        """MERGE INTO delta.`{path}` AS target USING {source} AS source
-           ON target.id = source.id
-           WHEN NOT MATCHED THEN INSERT *""",
+    _assert_merge_error_before_gpu_command(
+        spark_tmp_path, spark_tmp_table_factory, _create_empty_schema_target, merge_sql,
         "DELTA_MERGE_INTO_EMPTY_SCHEMA_TARGET",
-        analysis_only,
         copy_and_update(delta_merge_no_cpu_bridge_conf, {
             "spark.databricks.delta.schema.autoMerge.enabled": "false"}))
 
@@ -264,19 +314,15 @@ def test_delta_merge_empty_schema_target_error(
 @delta_lake
 @pytest.mark.skipif(not is_oss_delta_lake_43(),
                     reason="Case-variant duplicate MERGE column check was added in OSS Delta 4.3")
-@pytest.mark.parametrize("analysis_only", [True, False], ids=["analysis_only", "execute"])
+@pytest.mark.parametrize("auto_merge", [False, True], ids=["no_schema_evolution", "schema_evolution"])
 @pytest.mark.parametrize("column_kind", ["generated", "identity"])
 def test_delta_merge_case_variant_duplicate_insert_columns_error(
-        spark_tmp_path, spark_tmp_table_factory, column_kind, analysis_only):
-    _assert_merge_analysis_error(
-        spark_tmp_path, spark_tmp_table_factory,
-        lambda spark, path: _create_generated_column_target(spark, path, column_kind),
-        """MERGE INTO delta.`{path}` AS target USING {source} AS source
-           ON target.id = source.id
-           WHEN NOT MATCHED THEN INSERT (id, ID, value) VALUES (source.id, source.id, source.value)""",
-        "DELTA_DUPLICATE_COLUMNS_ON_INSERT",
-        analysis_only,
-        delta_merge_no_cpu_bridge_conf)
+        spark_tmp_path, spark_tmp_table_factory, column_kind, auto_merge):
+    _assert_merge_error_before_gpu_command(
+        spark_tmp_path, spark_tmp_table_factory, _generated_column_target_creator(column_kind),
+        duplicate_insert_columns_merge_sql, "DELTA_DUPLICATE_COLUMNS_ON_INSERT",
+        copy_and_update(delta_merge_no_cpu_bridge_conf, {
+            "spark.databricks.delta.schema.autoMerge.enabled": str(auto_merge).lower()}))
 
 
 @allow_non_gpu("CreateTableExec", *delta_meta_allow)
@@ -286,49 +332,24 @@ def test_delta_merge_case_variant_duplicate_insert_columns_error(
 def test_delta_merge_empty_schema_target_with_schema_evolution(
         spark_tmp_path, spark_tmp_table_factory):
     # With schema evolution enabled the source schema is adopted instead of raising an error.
-    source_view = spark_tmp_table_factory.get()
-
-    def do_merge(spark):
-        target_path = _target_path(spark, spark_tmp_path)
-        _create_empty_schema_target(spark, target_path)
-        spark.createDataFrame([(1, "new")], "id INT, value STRING") \
-            .createOrReplaceTempView(source_view)
-        spark.sql(f"""
-            MERGE INTO delta.`{target_path}` AS target USING {source_view} AS source
-            ON 1 = 0
-            WHEN NOT MATCHED THEN INSERT *""").collect()
-        return spark.read.format("delta").load(target_path)
-
-    assert_gpu_and_cpu_are_equal_collect(
-        do_merge,
-        conf=copy_and_update(delta_merge_no_cpu_bridge_conf, {
+    _assert_merge_succeeds_on_gpu_like_cpu(
+        spark_tmp_path, spark_tmp_table_factory, _create_empty_schema_target,
+        "MERGE INTO delta.`{path}` AS target USING {source} AS source ON 1 = 0 "
+        "WHEN NOT MATCHED THEN INSERT *",
+        copy_and_update(delta_merge_no_cpu_bridge_conf, {
             "spark.databricks.delta.schema.autoMerge.enabled": "true"}))
 
 
 @allow_non_gpu("CreateTableExec", *delta_meta_allow)
 @delta_lake
-@ignore_order
 @pytest.mark.skipif(not is_oss_delta_lake_43(),
                     reason="Case-variant duplicate MERGE column check was added in OSS Delta 4.3")
 def test_delta_merge_case_variant_duplicate_insert_columns_plain_table(
         spark_tmp_path, spark_tmp_table_factory):
     # Tables without generated or identity columns keep tolerating case-variant duplicates.
-    source_view = spark_tmp_table_factory.get()
-
-    def do_merge(spark):
-        target_path = _target_path(spark, spark_tmp_path)
-        spark.createDataFrame([(0, "old")], "id BIGINT, value STRING") \
-            .write.format("delta").save(target_path)
-        spark.createDataFrame([(1, "new")], "id INT, value STRING") \
-            .createOrReplaceTempView(source_view)
-        spark.sql(f"""
-            MERGE INTO delta.`{target_path}` AS target USING {source_view} AS source
-            ON target.id = source.id
-            WHEN NOT MATCHED THEN INSERT (id, ID, value)
-            VALUES (source.id, source.id, source.value)""").collect()
-        return spark.read.format("delta").load(target_path)
-
-    assert_gpu_and_cpu_are_equal_collect(do_merge, conf=delta_merge_no_cpu_bridge_conf)
+    _assert_merge_succeeds_on_gpu_like_cpu(
+        spark_tmp_path, spark_tmp_table_factory, _create_plain_target,
+        duplicate_insert_columns_merge_sql, delta_merge_no_cpu_bridge_conf)
 
 
 @allow_non_gpu(delta_write_fallback_allow, *delta_meta_allow)
