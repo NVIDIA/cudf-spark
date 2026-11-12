@@ -62,7 +62,6 @@ _ICEBERG_VARIANT_READ_CONF = {
     "spark.sql.adaptive.enabled": "false",
     "spark.sql.variant.allowReadingShredded": "false",
     "spark.sql.variant.pushVariantIntoScan": "false",
-    "spark.sql.variant.writeShredding.enabled": "false",
 }
 
 
@@ -879,7 +878,7 @@ def test_iceberg_v3_variant_encryption_read_fallback(spark_tmp_table_factory):
 def _setup_iceberg_variant_table(spark, table):
     spark.sql(
         f"CREATE TABLE {table} (id INT, v VARIANT) USING ICEBERG "
-        "TBLPROPERTIES ('format-version' = '3')")
+        "TBLPROPERTIES ('format-version' = '3', 'write.parquet.shred-variants' = 'false')")
     spark.sql(f"""
         INSERT INTO {table}
         SELECT id, parse_json(json)
@@ -976,7 +975,7 @@ def test_iceberg_v3_nested_variant_read(spark_tmp_table_factory):
         spark.sql(
             f"CREATE TABLE {table} (id INT, payload STRUCT<v: VARIANT>, "
             "items ARRAY<VARIANT>, attributes MAP<STRING, VARIANT>) USING ICEBERG "
-            "TBLPROPERTIES ('format-version' = '3')")
+            "TBLPROPERTIES ('format-version' = '3', 'write.parquet.shred-variants' = 'false')")
         spark.sql(f"""
             INSERT INTO {table}
             SELECT id,
