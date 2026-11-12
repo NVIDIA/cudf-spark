@@ -217,7 +217,8 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
     GpuSemaphore.acquireIfNecessary(TaskContext.get())
     // The host pages outlive each attempt, so a retry copies them again.
     val kept = withRetryNoSplit[Array[Int]] {
-      withResource(stageOnDevice(hostPages)) { staged =>
+      withResource(HybridScanPipeline.stageOnDevice(hostPages, maxH2DPackSize,
+          minH2DPackSize)) { staged =>
         reader.filterRowGroupsWithDictionaryPages(staged.getBuffers(), rowGroups)
       }
     }
@@ -290,7 +291,8 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
     NvtxRegistry.HYBRID_SCAN_MATERIALIZE {
       // The host chunks outlive each attempt, so a retry copies them again.
       withRetryNoSplit[Table] {
-        withResource(stageOnDevice(fetched.hostChunks)) { staged =>
+        withResource(HybridScanPipeline.stageOnDevice(fetched.hostChunks, maxH2DPackSize,
+            minH2DPackSize)) { staged =>
           reader.materializeAllColumns(fetched.rowGroups, staged.getBuffers())
         }
       }
@@ -380,26 +382,9 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
    */
   private def setDecodeFilter(reader: HybridScanReader, ast: Option[CompiledExpression]): Unit =
     if (filtersOnOutput(ast.isDefined)) reader.setFilter(null) else ast.foreach(reader.setFilter)
-
-  /**
-   * Queue the copy of `chunks` to the device on the default stream, packed into allocations of at
-   * most `maxH2DPackSize` bytes. An allocation that fails for want of a large enough free block is
-   * retried with half the pack size, down to `minH2DPackSize`. The decode that reads the result is
-   * queued on the same stream, so it is ordered after the copy.
-   */
-  private def stageOnDevice(chunks: Array[HostMemoryBuffer]): PackedHostToDeviceCopy = {
-    val packSize = AutoCloseableTargetSize(maxH2DPackSize, minH2DPackSize)
-    withRetry(packSize, splitTargetSizeInHalfGpu) { attempt =>
-      PackedHostToDeviceCopy.copyAsync(chunks, Cuda.DEFAULT_STREAM, attempt.targetSize,
-        HybridScanPipeline.copyEvent.get())
-    }.next()
-  }
 }
 
-/**
- * The hybrid scan logic that does not need a pipeline instance: parsing the footer, laying out
- * byte ranges, and deciding on the driver whether a scan may take the hybrid path at all.
- */
+/** The hybrid scan logic that does not need a pipeline instance. */
 object HybridScanPipeline extends Logging {
 
   /**
@@ -416,6 +401,23 @@ object HybridScanPipeline extends Logging {
     NvtxRegistry.HYBRID_SCAN_PARSE_FOOTER {
       new HybridScanReader(footer, parquetOptions)
     }
+  }
+
+  /**
+   * Queue the copy of `chunks` to the device on the default stream, packed into allocations of at
+   * most `maxPackSize` bytes. An allocation that fails for want of a large enough free block is
+   * retried with half the pack size, down to `minPackSize`. The decode that reads the result is
+   * queued on the same stream, so it is ordered after the copy.
+   */
+  private[parquet] def stageOnDevice(
+      chunks: Array[HostMemoryBuffer],
+      maxPackSize: Long,
+      minPackSize: Long): PackedHostToDeviceCopy = {
+    val packSize = AutoCloseableTargetSize(maxPackSize, minPackSize)
+    withRetry(packSize, splitTargetSizeInHalfGpu) { attempt =>
+      PackedHostToDeviceCopy.copyAsync(chunks, Cuda.DEFAULT_STREAM, attempt.targetSize,
+        copyEvent.get())
+    }.next()
   }
 
   /**
