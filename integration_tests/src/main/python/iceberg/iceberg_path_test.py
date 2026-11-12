@@ -51,12 +51,33 @@ def test_iceberg_path_characters(spark_tmp_table_factory, format_version, reader
         assert {path.rsplit('/', 2)[-2] for path in files} == expected_partitions, files
         return files
 
-    with_cpu_session(setup)
+    def setup_and_check_file_io(spark):
+        setup(spark)
+        iceberg_table = spark._jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
+            spark._jsparkSession, table)
+        io_class = iceberg_table.io().getClass()
+        print('Iceberg table FileIO:', io_class.getName())
+        # Walk superclasses so S3FileIO subclasses satisfy the same contract,
+        # without loading the AWS class in catalogs that do not include it.
+        while io_class is not None:
+            if io_class.getName() == 'org.apache.iceberg.aws.s3.S3FileIO':
+                return True
+            io_class = io_class.getSuperclass()
+        return False
+
+    s3_file_io = with_cpu_session(setup_and_check_file_io)
+    backend = request.config.getoption('path_backend')
+    if backend.startswith('s3-'):
+        assert s3_file_io, 'Iceberg S3 PerfIO requires the table FileIO to be S3FileIO'
+    elif backend == 'auto' and not s3_file_io:
+        # Catalogs using HadoopFileIO cannot exercise the Iceberg S3 adapter.
+        # Keep zero-PerfIO assertions: incorrect attribution is tracked in #16846.
+        backend = 'hadoop'
     assert_path_read(
         lambda spark: spark.sql(f'SELECT id, token, p FROM {table}'), PATH_ROWS,
         {**iceberg_read_enabled_conf, 'spark.rapids.sql.format.parquet.reader.type': reader},
-        'GpuBatchScanExec', backend=request.config.getoption('path_backend'),
+        'GpuBatchScanExec', backend=backend,
         # Iceberg's FileIO adapter currently has a PerfIO implementation for S3,
         # while GCS uses the catalog's InputFile streams.
-        perfio_backends=('s3-netty', 's3-crt'),
+        perfio_backends=('s3-netty', 's3-crt') if s3_file_io else (),
         input_paths=input_paths)

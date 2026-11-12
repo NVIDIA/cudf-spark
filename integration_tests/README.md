@@ -31,6 +31,7 @@ disables caching at startup to keep fixture creation small.
 | Avro | Base, partition, filename | N/A: reader uses Hadoop streams | N/A: reader uses Hadoop streams |
 | Delta Parquet | Table root and partitions through Delta's file index | Table root and partitions | Table root and partitions |
 | Iceberg Parquet | Encoded partitions through catalog FileIO | Encoded partitions through S3FileIO | N/A: Iceberg FileIO has no PerfIO GCS adapter; catalog streams are tested |
+| Hive delimited text | Remaining #16340 coverage; GPU reader exists | Not covered here | Not covered here |
 | Text / binaryFile / other CPU-only sources | N/A: no GPU file reader | N/A | N/A |
 | Iceberg ORC / Avro | N/A: no GPU table reader | N/A | N/A |
 
@@ -52,20 +53,33 @@ filename renames are N/A for those table scans. Hadoop and remote managed Iceber
 also own table roots; arbitrary per-table locations are N/A. Configure a warehouse with
 unusual base-path characters to exercise the catalog's root policy. Iceberg tests cover
 supported format versions via the existing runtime/version gates. Avro requires the
-existing `INCLUDE_SPARK_AVRO_JAR=true` setup.
+existing `INCLUDE_SPARK_AVRO_JAR=true` setup; the backend runner enables it for
+the ordinary-file matrix so missing Avro support cannot silently skip those cases.
 
 The shared assertion reads task accumulators from stages completed by the GPU query,
 after the CPU query. It requires the selected PerfIO transport's counter to increase and
-rejects alternative transports, S3A fallback, and Iceberg S3 fallback. CSV/JSON/Avro and
+rejects alternative transports, S3A fallback, and Iceberg S3 fallback. Iceberg S3 PerfIO
+runs also check the actual table FileIO is `S3FileIO` (including subclasses); a catalog
+using HadoopFileIO is not evidence of the Iceberg S3 adapter. Auto mode uses a Hadoop
+expectation for those catalogs and retains zero-PerfIO assertions. The incorrect metric
+attribution tracked in #16846 may cause those assertions to fail; this test does not
+relax them. CSV/JSON/Avro and
 Iceberg GCS require all PerfIO transport counters to stay zero, as documented above.
 GCS gRPC is N/A for the current PerfIO default client: it constructs HTTP
 `StorageOptions`; a gRPC counter is still checked to detect unexpected transport changes.
 
-Existing EMR/Dataproc jobs discover `path_character_test.py`, Delta jobs select its
-`delta_lake` test, and Iceberg jobs discover `iceberg/iceberg_path_test.py`. By default,
-the expected backend is inferred from the input URI and the job's startup settings,
-then verified against observed task metrics. For an explicit backend matrix in those
-jobs, run each applicable command with the existing connector/SDK classpath and credentials:
+Test discovery does not establish cloud execution. The S3/GCS backend matrix is run
+manually for now; wiring these invocations into backend-specific jobs remains #16340
+work. Default local/DBFS temporary paths exercise Hadoop, not S3/GCS PerfIO. Premerge's
+separate Avro invocation selects `avro_test.py`, so it does not add the twelve Avro
+path-character cases; nightly jobs with Avro enabled can discover them.
+
+For ordinary remote reads, auto mode requires an explicit startup
+`spark.rapids.perfio.s3.enabled=true/false` or
+`spark.rapids.perfio.gcs.enabled=true/false`, or an explicit `--path_backend`.
+It does not predict an executor's opportunistic defaults from driver classes or runtime
+labels. Expected backends remain independent of the observed task counters.
+Use the existing connector/SDK classpath and credentials for each manual invocation:
 
 ```bash
 # Each invocation starts a separate Spark application with file cache disabled.
@@ -74,18 +88,34 @@ bash integration_tests/run_path_character_tests.sh s3-netty s3a://<bucket>/<test
 bash integration_tests/run_path_character_tests.sh s3-crt s3a://<bucket>/<test-prefix>
 bash integration_tests/run_path_character_tests.sh gcs-http gs://<bucket>/<test-prefix>
 
-# Use the existing Delta or Iceberg runtime/catalog configuration for table tests.
-TESTS=path_character_test.py bash integration_tests/run_path_character_tests.sh \
-    s3-netty s3a://<bucket>/<test-prefix> --delta_lake
+# Select table cases explicitly; the runner adds the corresponding enable flag.
+TESTS=path_character_test.py::test_delta_path_characters bash integration_tests/run_path_character_tests.sh \
+    s3-netty s3a://<bucket>/<test-prefix> -m delta_lake
 TESTS=iceberg/iceberg_path_test.py bash integration_tests/run_path_character_tests.sh \
-    s3-netty s3a://<bucket>/<test-prefix> --iceberg
+    s3-netty s3a://<bucket>/<test-prefix> -m iceberg
 ```
 
 The wrapper sets startup-only PerfIO flags before Spark starts; `--path_backend` declares
-the required backend independently. Missing classes, wrong URI schemes, or substituted
-transports fail the run instead of silently reducing the matrix. Normal temporary-path
-and table fixtures clean up the small datasets. Cloud credentials, connector dependencies,
-and Iceberg REST catalog setup remain those of the existing backend-specific jobs.
+the required backend independently. The default selection is the 44 ordinary-file cases.
+Selecting the whole `path_character_test.py` file also enables its 15 Delta cases; selecting
+the Delta test alone avoids repeating the ordinary-file matrix. Selecting the Iceberg file
+requires `EXPECTED_ICEBERG_VERSION` and automatically enables Iceberg. These enable flags
+do not install JARs, configure catalogs, or override supported runtime/version gates.
+
+Iceberg ignores `--tmp_path` for table data. Configure a catalog warehouse on the selected
+storage (for example `s3a://<bucket>/<warehouse-prefix>` for S3), along with the existing
+Spark Iceberg extensions, catalog class/type, and credentials. S3 PerfIO additionally requires
+`org.apache.iceberg.aws.s3.S3FileIO` as the actual table FileIO, typically configured with
+`spark.sql.catalog.<catalog>.io-impl`, plus the matching Iceberg AWS bundle and SDK classes.
+Set `EXPECTED_ICEBERG_VERSION` to the runtime JAR version (for example `1.10.1`); the existing
+version gates then select supported format versions. A local warehouse with an explicit
+S3 backend fails instead of testing a different storage backend.
+
+Missing dependencies or a wrong backend must be corrected before claiming that matrix row
+passed. Review the passed/skipped counts: unsupported runtime/version combinations can
+still skip through the shared test gates. Normal temporary-path and table fixtures clean up
+the small datasets. Cloud credentials and connector/catalog dependencies remain prerequisites
+of the selected runtime.
 
 ## Setting Up the Environment
 

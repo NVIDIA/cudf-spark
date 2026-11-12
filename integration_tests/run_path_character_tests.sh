@@ -42,7 +42,29 @@ case "$backend" in
     *) echo "Unknown path-test backend: $backend" >&2; exit 2 ;;
 esac
 
-export TESTS=${TESTS:-path_character_test.py}
+# Select the ordinary-file test by default; enabling a table format does not
+# select it, and selecting a table test without its enable flag silently skips it.
+export TESTS=${TESTS:-path_character_test.py::test_path_characters}
+pytest_options=("$@")
+read -ra selected_tests <<< "$TESTS"
+for selected_test in "${selected_tests[@]}"; do
+    case "$selected_test" in
+        iceberg/iceberg_path_test.py|iceberg/iceberg_path_test.py::*)
+            : "${EXPECTED_ICEBERG_VERSION:?Set EXPECTED_ICEBERG_VERSION to the installed Iceberg runtime version}"
+            pytest_options+=(--iceberg)
+            ;;
+        path_character_test.py)
+            export INCLUDE_SPARK_AVRO_JAR=true
+            pytest_options+=(--delta_lake)
+            ;;
+        path_character_test.py::test_delta_path_characters*)
+            pytest_options+=(--delta_lake)
+            ;;
+        path_character_test.py::test_path_characters*)
+            export INCLUDE_SPARK_AVRO_JAR=true
+            ;;
+    esac
+done
 script_dir=$(cd "$(dirname "$0")" && pwd)
 exec bash "$script_dir/run_pyspark_from_build.sh" \
-    --path_backend="$backend" --tmp_path="$tmp_path" "$@"
+    --path_backend="$backend" --tmp_path="$tmp_path" "${pytest_options[@]}"

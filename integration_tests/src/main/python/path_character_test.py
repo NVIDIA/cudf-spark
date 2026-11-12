@@ -24,7 +24,7 @@ from spark_session import with_cpu_session
 
 
 # CSV/JSON and Avro read through Hadoop streams; Parquet and ORC also have
-# PerfIO range readers. Each cloud job runs the same matrix against --tmp_path.
+# PerfIO range readers. Remote runs use the explicitly configured --tmp_path.
 _readers = [(fmt, reader) for fmt in ('parquet', 'orc', 'avro')
             for reader in ('PERFILE', 'COALESCING', 'MULTITHREADED')]
 _readers += [('csv', 'PERFILE'), ('json', 'PERFILE')]

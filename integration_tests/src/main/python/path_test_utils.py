@@ -17,11 +17,9 @@ from functools import reduce
 import uuid
 
 import pytest
-from py4j.protocol import Py4JJavaError
 from pyspark.sql.functions import lit
 
 from asserts import assert_equal_with_local_sort
-from conftest import is_dataproc_runtime
 from spark_init_internal import get_spark_i_know_what_i_am_doing
 from spark_session import with_cpu_session, with_gpu_session
 
@@ -37,18 +35,6 @@ BACKEND_METRICS = {
     'gcs-grpc': 'perfio.gcs.grpc.executors',
 }
 FALLBACK_METRICS = ('perfio.s3.s3a.executors', 'perfio.s3.iceberg.fallbacks')
-
-
-def _has_class(spark, name):
-    loader = spark._jvm.java.lang.Thread.currentThread().getContextClassLoader()
-    try:
-        loader.loadClass(name)
-        return True
-    except Py4JJavaError as error:
-        if error.java_exception.getClass().getSimpleName() in (
-                'ClassNotFoundException', 'NoClassDefFoundError'):
-            return False
-        raise
 
 
 def _completed_stages(spark):
@@ -75,31 +61,20 @@ def _expected_backend(spark, files, requested):
         elif requested.startswith('gcs-'):
             assert scheme in ('gs', 'gcs'), (requested, files)
         return requested
-    # Predict from the job's startup settings, independently of observed metrics.
-    # Explicit --path_backend also detects transport substitutions (e.g. CRT -> Netty).
-    if scheme in ('s3', 's3a', 's3n'):
-        enabled = startup.get('spark.rapids.perfio.s3.enabled', None)
-        client = startup.get('spark.rapids.perfio.s3.httpClient', 'NETTY').lower()
-        if enabled is None:
-            # Opportunistic startup is allowed to use Hadoop when the job only
-            # supplies SDK v1. Explicit backend runs never take this branch.
-            service = _has_class(spark, 'software.amazon.awssdk.services.s3.S3AsyncClient')
-            netty = _has_class(spark, 'software.amazon.awssdk.http.nio.netty.NettyNioAsyncHttpClient')
-            crt = _has_class(spark, 'software.amazon.awssdk.http.crt.AwsCrtAsyncHttpClient')
-            # NETTY does not fall back to CRT when its client is unavailable.
-            if not service or not (netty or crt) or (client == 'netty' and not netty):
-                return 'hadoop'
-            if client == 'crt' and not crt:
-                client = 'netty'
-        if enabled is None or enabled.lower() == 'true':
+    # Driver and executor classpaths may differ. Require an independent, explicit
+    # expectation for remote reads rather than predicting opportunistic startup.
+    if scheme in ('s3', 's3a', 's3n', 'gs', 'gcs'):
+        storage = 's3' if scheme.startswith('s3') else 'gcs'
+        enabled = startup.get('spark.rapids.perfio.' + storage + '.enabled', None)
+        assert enabled is not None and enabled.lower() in ('true', 'false'), (
+            'Remote path tests require --path_backend or an explicit startup '
+            'spark.rapids.perfio.' + storage + '.enabled=true/false', files)
+        if enabled.lower() == 'true':
+            if storage == 'gcs':
+                return 'gcs-http'
+            client = startup.get('spark.rapids.perfio.s3.httpClient', 'NETTY').lower()
+            assert client in ('netty', 'crt'), ('Unsupported S3 HTTP client', client)
             return 's3-' + client
-    if scheme in ('gs', 'gcs'):
-        enabled = startup.get('spark.rapids.perfio.gcs.enabled', None)
-        if enabled is not None:
-            return 'gcs-http' if enabled.lower() == 'true' else 'hadoop'
-        if is_dataproc_runtime() and _has_class(spark,
-                'com.google.cloud.hadoop.repackaged.gcs.com.google.cloud.storage.GrpcStorageOptions'):
-            return 'gcs-http'
     return 'hadoop'
 
 
