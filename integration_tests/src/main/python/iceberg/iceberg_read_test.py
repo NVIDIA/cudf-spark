@@ -65,6 +65,24 @@ def _setup_unshredded_variant_table(spark, table, container):
         """)
 
 
+def _import_parquet_file(spark, table, data_path, row_count):
+    jvm = spark._jvm
+    iceberg_table = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
+        spark._jsparkSession, table)
+    mapping = jvm.org.apache.iceberg.mapping.MappingUtil.create(iceberg_table.schema())
+    mapping_json = jvm.org.apache.iceberg.mapping.NameMappingParser.toJson(mapping)
+    iceberg_table.updateProperties().set('schema.name-mapping.default', mapping_json).commit()
+    path = jvm.org.apache.hadoop.fs.Path(data_path + '/*.parquet')
+    files = path.getFileSystem(spark.sparkContext._jsc.hadoopConfiguration()).globStatus(path)
+    assert len(files) == 1, "Expected one imported Parquet file"
+    file = files[0]
+    data_file = (jvm.org.apache.iceberg.DataFiles.builder(iceberg_table.spec())
+                 .withPath(file.getPath().toString()).withFormat('PARQUET')
+                 .withFileSizeInBytes(file.getLen()).withRecordCount(row_count).build())
+    iceberg_table.newAppend().appendFile(data_file).commit()
+    spark.sql(f"REFRESH TABLE {table}")
+
+
 def _read_variant(spark, table, container, column='v'):
     path = _VARIANT_CONTAINERS[container][2].format(column=column)
     return spark.sql(f"SELECT id, try_variant_get({path}, '$.x', 'int') AS x FROM {table}")
@@ -282,6 +300,76 @@ def test_iceberg_renamed_case_sensitive_columns_read(
             'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
         },
         require_non_empty=True)
+
+
+@ignore_order(local=True)
+@incompat
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Imported files require a local catalog")
+@requires_variant
+@pytest.mark.parametrize('layout', [
+    'unshredded', 'metadata_first', 'missing_value', 'extra_child', 'nullable_value', 'nullable_metadata',
+    'wrong_value_type', 'wrong_metadata_type', 'primitive',
+])
+def test_iceberg_variant_physical_layout_validation(spark_tmp_table_factory, spark_tmp_path, layout):
+    from pyspark.sql.types import BinaryType, IntegerType, StructField, StructType
+
+    table = get_full_table_name(spark_tmp_table_factory)
+    conf = copy_and_update(iceberg_variant_read_conf, {
+        'spark.sql.parquet.fieldId.write.enabled': 'false',
+        'spark.rapids.sql.format.parquet.reader.type': 'PERFILE',
+        'spark.rapids.sql.incompatibleOps.enabled': 'true',
+    })
+
+    def setup_table(spark):
+        variant = spark.sql("""SELECT parse_json('{"x":7}') AS v""").first().v
+        fields = [StructField('value', BinaryType(), False),
+                  StructField('metadata', BinaryType(), False)]
+        values = [variant.value, variant.metadata]
+        if layout == 'metadata_first':
+            fields, values = fields[::-1], values[::-1]
+        elif layout == 'missing_value':
+            fields, values = fields[1:], values[1:]
+        elif layout == 'extra_child':
+            fields.append(StructField('extra', IntegerType(), False))
+            values.append(1)
+        elif layout == 'nullable_value':
+            fields[0] = StructField('value', BinaryType(), True)
+        elif layout == 'nullable_metadata':
+            fields[1] = StructField('metadata', BinaryType(), True)
+        elif layout == 'wrong_value_type':
+            fields[0], values[0] = StructField('value', IntegerType(), False), 7
+        elif layout == 'wrong_metadata_type':
+            fields[1], values[1] = StructField('metadata', IntegerType(), False), 1
+        physical_type = IntegerType() if layout == 'primitive' else StructType(fields)
+        physical_value = 7 if layout == 'primitive' else tuple(values)
+        schema = StructType([StructField('id', IntegerType(), False),
+                             StructField('v', physical_type, False)])
+        data_path = spark_tmp_path + '/physical_variant'
+        spark.createDataFrame([(1, physical_value)], schema).coalesce(1).write.parquet(data_path)
+        spark.sql(f"CREATE TABLE {table} (id INT, v VARIANT) USING ICEBERG "
+                  "TBLPROPERTIES ('format-version'='3')")
+        _import_parquet_file(spark, table, data_path, 1)
+
+    with_cpu_session(setup_table, conf=conf)
+    if layout in ['unshredded', 'metadata_first']:
+        assert_cpu_and_gpu_are_equal_collect_with_capture(
+            lambda spark: spark.sql(f"SELECT id, try_variant_get(v, '$.x', 'int') AS x FROM {table}"),
+            exist_classes='GpuBatchScanExec,GpuVariantGet', non_exist_classes='BatchScanExec',
+            conf=conf, require_non_empty=True)
+    else:
+        def read_invalid_variant(spark):
+            df = spark.sql(f"SELECT id, v FROM {table}")
+            callback = spark._jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+            callback.assertContains(df._jdf, 'GpuBatchScanExec')
+            return df.collect()
+
+        with pytest.raises(Exception) as error:
+            with_gpu_session(read_invalid_variant, conf=conf)
+        message = str(error.value)
+        assert 'java.lang.UnsupportedOperationException: GPU Iceberg reader does not support ' \
+            'shredded or incompatible Variant input' in message
+        assert 'Expected exactly two REQUIRED BINARY fields named value and metadata' in message
+        assert 'spark.rapids.sql.format.iceberg.read.enabled=false' in message
 
 
 @ignore_order(local=True)
