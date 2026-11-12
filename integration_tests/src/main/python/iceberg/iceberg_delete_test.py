@@ -13,13 +13,14 @@
 # limitations under the License.
 
 import pytest
-from pyspark.sql import functions as f
+from pyspark.sql import Row, functions as f
 
 from asserts import (assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect,
-                     assert_gpu_fallback_write_sql)
-from conftest import is_iceberg_remote_catalog
+                     assert_gpu_fallback_collect, assert_gpu_fallback_write_sql)
+from conftest import is_iceberg_remote_catalog, spark_jvm
 from data_gen import *
 from iceberg import (
+    _add_eq_deletes_from_df,
     iceberg_cow_format_versions, iceberg_mor_format_versions, with_iceberg_dml_session,
     with_iceberg_format_versions, create_iceberg_table, get_full_table_name,
     iceberg_write_enabled_conf, iceberg_base_table_cols, iceberg_gens_list,
@@ -287,6 +288,48 @@ def test_iceberg_delete_v3_gpu_writes_and_merges_deletion_vectors(
 
 
 @iceberg_fast_test
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+def test_iceberg_delete_v3_ignores_unprojected_unsupported_default(
+        spark_tmp_table_factory):
+    base_table_name = get_full_table_name(spark_tmp_table_factory)
+    cpu_table_name = f"{base_table_name}_cpu"
+    gpu_table_name = f"{base_table_name}_gpu"
+
+    def setup_table(spark, table_name):
+        spark.sql(
+            f"CREATE TABLE {table_name} (id BIGINT) USING ICEBERG "
+            "TBLPROPERTIES ('format-version'='3', 'write.delete.mode'='merge-on-read')")
+        spark.createDataFrame([(1,), (2,)], "id BIGINT").coalesce(1).writeTo(table_name).append()
+
+        jvm = spark_jvm()
+        table = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
+            spark._jsparkSession, table_name)
+        uuid_type = jvm.org.apache.iceberg.types.Types.UUIDType.get()
+        default_value = jvm.org.apache.iceberg.expressions.Literal.of(
+            "123e4567-e89b-12d3-a456-426614174000").to(uuid_type)
+        table.updateSchema().addColumn("token", uuid_type, default_value).commit()
+        spark.sql(f"REFRESH TABLE {table_name}")
+
+    with_cpu_session(lambda spark: setup_table(spark, cpu_table_name))
+    with_cpu_session(lambda spark: setup_table(spark, gpu_table_name))
+
+    def delete_odd_id(spark, table_name):
+        spark.sql(f"DELETE FROM {table_name} WHERE id % 2 = 1").collect()
+
+    with_cpu_session(lambda spark: delete_odd_id(spark, cpu_table_name),
+                     conf=iceberg_delete_mor_enabled_conf)
+    with_iceberg_dml_session(
+        lambda spark: delete_odd_id(spark, gpu_table_name),
+        "3", "merge-on-read", conf=iceberg_delete_mor_enabled_conf)
+
+    cpu_data = with_cpu_session(lambda spark: spark.table(cpu_table_name).select("id").collect())
+    gpu_data = with_cpu_session(lambda spark: spark.table(gpu_table_name).select("id").collect())
+    assert cpu_data == [Row(2)]
+    assert_equal_with_local_sort(cpu_data, gpu_data)
+
+
 @iceberg
 # Iceberg metadata table scans are CPU-only; the DELETE command is still GPU-validated.
 @allow_non_gpu("BatchScanExec")
@@ -882,3 +925,282 @@ def test_mor_delete_falls_back_on_divergent_delete_codec(spark_tmp_table_factory
     assert_gpu_fallback_write_sql(
         write_func, read_func, base_table_name, ["WriteDeltaExec"],
         conf=iceberg_delete_mor_enabled_conf)
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Requires local equality-delete UDF")
+@allow_non_gpu("BatchScanExec", "ColumnarToRowExec")
+@ignore_order(local=True)
+def test_iceberg_v3_default_on_implicit_equality_delete_field(
+        spark_tmp_table_factory,
+        spark_tmp_path,
+        register_iceberg_add_eq_deletes_udf):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+    props = _build_tblprops({"format-version": "3"})
+    props_sql = ", ".join(f"'{key}' = '{value}'" for key, value in props.items())
+    initial_data_length = 2
+    current_id = None
+
+    def setup_table(spark):
+        nonlocal current_id
+        spark.sql(
+            f"CREATE TABLE {table_name} (id BIGINT) USING ICEBERG PARTITIONED BY (id) "
+            f"TBLPROPERTIES ({props_sql})")
+        initial_data = gen_df(
+            spark,
+            [("id", UniqueLongGen())],
+            length=initial_data_length).select(f.abs(f.col("id")).alias("id"))
+        target_id = initial_data.orderBy("id").first().id
+        initial_data.coalesce(1).writeTo(table_name).append()
+
+        jvm = spark_jvm()
+        table = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
+            spark._jsparkSession, table_name)
+        timestamp_ntz_type = jvm.org.apache.iceberg.types.Types.TimestampType.withoutZone()
+        default_value = jvm.org.apache.iceberg.expressions.Literal.of(
+            "2024-01-02T03:04:05").to(timestamp_ntz_type)
+        table.updateSchema().addColumn(
+            "_c9",
+            timestamp_ntz_type,
+            default_value).commit()
+        spark.sql(f"REFRESH TABLE {table_name}")
+        current_data = (gen_df(
+            spark,
+            [("id", UniqueLongGen()),
+             ("_c9", TimestampGen(nullable=False, tzinfo=None))],
+            length=1)
+            .select(
+                (f.abs(f.col("id")) + initial_data_length).alias("id"),
+                f.col("_c9")))
+        current_id = current_data.first().id
+        current_data.coalesce(1).writeTo(table_name).append()
+
+        # _c9 is intentionally omitted from the query below. The equality-delete file makes it an
+        # implicit required read field, and the old data file requires its initial default.
+        deletes = (spark.table(table_name)
+                   .where(f.col("id") == target_id)
+                   .select("_c9", "_partition")
+                   .coalesce(1))
+        _add_eq_deletes_from_df(spark, deletes, table_name, spark_tmp_path)
+
+    with_cpu_session(setup_table)
+    remaining_rows = with_cpu_session(
+        lambda spark: spark.sql(f"SELECT id FROM {table_name} ORDER BY id").collect())
+    assert len(remaining_rows) == initial_data_length
+    assert Row(current_id) in remaining_rows
+    assert_gpu_fallback_collect(
+        lambda spark: spark.sql(f"SELECT id FROM {table_name}"),
+        "BatchScanExec",
+        conf={"spark.rapids.sql.format.iceberg.v3.enabled": "true"})
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Requires local equality-delete UDF")
+@allow_non_gpu("BatchScanExec", "ColumnarToRowExec")
+@ignore_order(local=True)
+def test_iceberg_v3_nested_equality_delete_field_falls_back(
+        spark_tmp_table_factory,
+        spark_tmp_path,
+        register_iceberg_add_eq_deletes_udf):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+    props = _build_tblprops({"format-version": "3"})
+    props_sql = ", ".join(f"'{key}' = '{value}'" for key, value in props.items())
+    initial_data_length = 2
+    current_data_length = 1
+    current_ids = []
+
+    def setup_table(spark):
+        nonlocal current_ids
+        spark.sql(
+            f"CREATE TABLE {table_name} "
+            "(id BIGINT, payload STRUCT<existing: STRING>) USING ICEBERG PARTITIONED BY (id) "
+            f"TBLPROPERTIES ({props_sql})")
+        initial_data = gen_df(
+            spark,
+            [("id", UniqueLongGen()),
+             ("payload", StructGen(
+                 [("existing", StringGen(nullable=False))], nullable=False))],
+            length=initial_data_length).select(
+                f.abs(f.col("id")).alias("id"), f.col("payload"))
+        target_id = initial_data.orderBy("id").first().id
+        initial_data.coalesce(1).writeTo(table_name).append()
+
+        jvm = spark_jvm()
+        table = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
+            spark._jsparkSession, table_name)
+        string_type = jvm.org.apache.iceberg.types.Types.StringType.get()
+        default_value = jvm.org.apache.iceberg.expressions.Literal.of("legacy")
+        table.updateSchema().addColumn(
+            "payload", "delete_key", string_type, default_value).commit()
+        spark.sql(f"REFRESH TABLE {table_name}")
+        current_data = (gen_df(
+            spark,
+            [("id", UniqueLongGen()),
+             ("payload", StructGen([
+                 ("existing", StringGen(nullable=False)),
+                 ("delete_key", StringGen(pattern="current_[0-9]{4}", nullable=False))
+             ], nullable=False))],
+            length=current_data_length)
+            .select(
+                (f.abs(f.col("id")) + initial_data_length).alias("id"),
+                f.col("payload")))
+        current_ids = [row.id for row in current_data.select("id").collect()]
+        current_data.coalesce(1).writeTo(table_name).append()
+
+        # Keep the parent struct in the Parquet delete row so Iceberg can preserve the nested field
+        # ID. Only delete_key is included below, making it the equality field rather than payload.
+        deletes = (spark.table(table_name)
+                   .where(f.col("id") == target_id)
+                   .select(
+                       f.struct(f.col("payload.delete_key").alias("delete_key")).alias("payload"),
+                       f.col("_partition"))
+                   .coalesce(1))
+        _add_eq_deletes_from_df(spark, deletes, table_name, spark_tmp_path)
+
+    with_cpu_session(setup_table)
+    # Keep the nested equality field projected so the CPU baseline can apply the delete. The
+    # implicit-field fallback path is covered by GpuPostProcessorSuite.
+    read_query = f"SELECT id, payload.delete_key AS delete_key FROM {table_name}"
+    remaining_rows = with_cpu_session(
+        lambda spark: spark.sql(f"{read_query} ORDER BY id").collect())
+    assert len(remaining_rows) == initial_data_length - 1 + current_data_length
+    remaining_ids = {row.id for row in remaining_rows}
+    assert all(current_id in remaining_ids for current_id in current_ids)
+    assert_gpu_fallback_collect(
+        lambda spark: spark.sql(read_query),
+        "BatchScanExec",
+        conf={"spark.rapids.sql.format.iceberg.v3.enabled": "true"})
+
+
+def _add_supported_delete_defaults(spark, table_name):
+    jvm = spark_jvm()
+    table = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
+        spark._jsparkSession, table_name)
+    table.updateSchema().addColumn(
+        'delete_key', jvm.org.apache.iceberg.types.Types.IntegerType.get(),
+        jvm.org.apache.iceberg.expressions.Literal.of(11)).addColumn(
+        'string_key', jvm.org.apache.iceberg.types.Types.StringType.get(),
+        jvm.org.apache.iceberg.expressions.Literal.of('legacy')).commit()
+    spark.sql(f'REFRESH TABLE {table_name}')
+
+
+def _assert_delete_rows(expected):
+    def check(cpu_rows, gpu_rows):
+        for rows in (cpu_rows, gpu_rows):
+            assert sorted([tuple(row) for row in rows], key=repr) == sorted(expected, key=repr)
+        return cpu_rows, gpu_rows
+    return check
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason='Requires local equality-delete UDF')
+@pytest.mark.parametrize('reader_type', ['PERFILE', 'MULTITHREADED'])
+@pytest.mark.parametrize('project_keys', [False, True], ids=['implicit', 'projected'])
+@ignore_order(local=True)
+def test_iceberg_v3_supported_defaults_with_equality_deletes(
+        spark_tmp_table_factory, spark_tmp_path, register_iceberg_add_eq_deletes_udf,
+        reader_type, project_keys):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+
+    def setup(spark):
+        spark.sql(f'CREATE TABLE {table_name} (id BIGINT, p INT) USING ICEBERG PARTITIONED BY (p) '
+                  "TBLPROPERTIES ('format-version'='3')")
+        spark.createDataFrame([(0, 0), (1, 0), (2, 0)], 'id BIGINT, p INT') \
+            .coalesce(1).writeTo(table_name).append()
+        _add_supported_delete_defaults(spark, table_name)
+        spark.createDataFrame([(3, 0, None, None), (4, 0, 11, 'legacy'), (5, 0, 23, 'current')],
+            'id BIGINT, p INT, delete_key INT, string_key STRING') \
+            .coalesce(1).writeTo(table_name).append()
+        # A multi-column delete distinguishes rows sharing the same default. Delete one row
+        # whose key is synthesized and one whose matching key is physically present.
+        deletes = spark.table(table_name).where('id IN (0, 4)') \
+            .select('id', 'delete_key', 'string_key', '_partition').coalesce(1)
+        _add_eq_deletes_from_df(spark, deletes, table_name, spark_tmp_path)
+        files = spark.sql(f'SELECT content FROM {table_name}.delete_files').collect()
+        assert files and all(row.content == 2 for row in files)
+
+    with_cpu_session(setup)
+    columns = 'id, delete_key, string_key' if project_keys else 'id'
+    expected = ([(1, 11, 'legacy'), (2, 11, 'legacy'), (3, None, None), (5, 23, 'current')]
+                if project_keys else [(1,), (2,), (3,), (5,)])
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(f'SELECT {columns} FROM {table_name}'),
+        conf={'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
+              'spark.rapids.sql.format.parquet.reader.type': reader_type},
+        result_canonicalize_func_before_compare=_assert_delete_rows(expected))
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason='Requires local equality-delete UDF')
+@pytest.mark.parametrize('reader_type', ['PERFILE', 'MULTITHREADED'])
+@pytest.mark.parametrize('delete_kind', ['position', 'dv', 'dv-equality'])
+@ignore_order(local=True)
+def test_iceberg_v3_defaults_with_position_and_mixed_deletes(
+        spark_tmp_table_factory, spark_tmp_path, register_iceberg_add_eq_deletes_udf,
+        reader_type, delete_kind):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+
+    def setup(spark):
+        version = '2' if delete_kind == 'position' else '3'
+        spark.sql(f'CREATE TABLE {table_name} (id BIGINT, p INT) USING ICEBERG PARTITIONED BY (p) '
+                  f"TBLPROPERTIES ('format-version'='{version}', "
+                  "'write.delete.mode'='merge-on-read')")
+        spark.createDataFrame([(i, 0) for i in range(6)], 'id BIGINT, p INT') \
+            .coalesce(1).writeTo(table_name).append()
+        spark.sql(f'DELETE FROM {table_name} WHERE id = 0')
+        if delete_kind == 'position':
+            spark.sql(f"ALTER TABLE {table_name} SET TBLPROPERTIES ('format-version'='3')")
+        _add_supported_delete_defaults(spark, table_name)
+        spark.createDataFrame([(6, 0, None, None), (7, 0, 23, 'current')],
+            'id BIGINT, p INT, delete_key INT, string_key STRING') \
+            .coalesce(1).writeTo(table_name).append()
+        if delete_kind == 'dv-equality':
+            deletes = spark.table(table_name).where('id = 1') \
+                .select('id', 'delete_key', 'string_key', '_partition').coalesce(1)
+            _add_eq_deletes_from_df(spark, deletes, table_name, spark_tmp_path)
+        files = {(row.content, row.file_format) for row in
+                 spark.sql(f'SELECT content, file_format FROM {table_name}.delete_files').collect()}
+        expected = {(1, 'PARQUET')} if delete_kind == 'position' else {(1, 'PUFFIN')}
+        if delete_kind == 'dv-equality':
+            expected.add((2, 'PARQUET'))
+        assert files == expected
+
+    with_cpu_session(setup)
+    legacy_ids = list(range(2 if delete_kind == 'dv-equality' else 1, 6))
+    expected = [(i, 11, 'legacy') for i in legacy_ids] + [(6, None, None), (7, 23, 'current')]
+    conf = {'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
+            'spark.rapids.sql.format.parquet.reader.type': reader_type,
+            'spark.sql.adaptive.enabled': 'false'}
+
+    def read(spark, projection):
+        if spark.conf.get('spark.rapids.sql.enabled') != 'true':
+            # Iceberg 1.10.1 caches equality-delete rows in the first projection's field order.
+            # Keep the CPU oracle independent of that cache when changing projection order.
+            spark.conf.set('spark.sql.iceberg.executor-cache.delete-files.enabled', 'false')
+        return spark.sql(f'SELECT {projection} FROM {table_name}')
+
+    # Old files have no projected physical column here. The DV reader must retain a physical
+    # helper, apply native filtering, and size generated defaults to the surviving row count.
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: read(spark, 'delete_key, string_key'),
+        conf=conf,
+        result_canonicalize_func_before_compare=_assert_delete_rows([row[1:] for row in expected]))
+
+    def check_metadata(cpu_rows, gpu_rows):
+        for rows in (cpu_rows, gpu_rows):
+            assert sorted((row.id, row.delete_key, row.string_key) for row in rows) == expected
+        return cpu_rows, gpu_rows
+
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: read(
+            spark, 'id, delete_key, string_key, _pos, _row_id, _last_updated_sequence_number'),
+        conf=conf,
+        result_canonicalize_func_before_compare=check_metadata)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: read(spark, 'count(*)'),
+        conf=conf,
+        result_canonicalize_func_before_compare=_assert_delete_rows([(len(expected),)]))

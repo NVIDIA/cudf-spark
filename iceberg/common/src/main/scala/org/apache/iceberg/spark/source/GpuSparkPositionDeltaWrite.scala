@@ -186,12 +186,14 @@ object GpuSparkPositionDeltaWrite {
         s"but got: ${deltaWrite.getClass.getName}")
       return
     }
+    val command = GpuSparkWriteAccess.deltaCommand(deltaWrite)
     val context = GpuWriteContext(GpuSparkWriteAccess.deltaContext(deltaWrite))
 
     val table: Table = tableOf(deltaWrite)
     val partitionSpec = table.spec()
 
-    IcebergFormatVersionSupport.tagForFormatVersion(table, meta)
+    IcebergFormatVersionSupport.tagForFormatVersion(
+      table, dataWriterSchemaFor(command, context), meta)
     IcebergEncryptionSupport.tagForWrite(table, meta)
 
     // Iceberg's delta write is similar to normal write, but will write position deletes

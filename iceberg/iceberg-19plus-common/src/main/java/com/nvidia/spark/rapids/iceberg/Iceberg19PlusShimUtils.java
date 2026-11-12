@@ -28,7 +28,9 @@ import org.apache.iceberg.io.OutputFileFactory;
 import org.apache.iceberg.io.PartitioningDVWriter;
 import org.apache.iceberg.io.PartitioningWriter;
 import org.apache.iceberg.io.WriteResult;
+import org.apache.iceberg.spark.SparkUtil;
 import org.apache.iceberg.spark.source.GpuSparkPositionDeltaWriteAccess;
+import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.DeleteFileSet;
 import org.apache.spark.broadcast.Broadcast;
 import org.apache.spark.sql.catalyst.InternalRow;
@@ -38,8 +40,18 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
 
-/** Shared deletion-vector shim implementation for Iceberg 1.9 and later. */
+/** Shared initial-default and deletion-vector shim implementations for Iceberg 1.9 and later. */
 public abstract class Iceberg19PlusShimUtils implements IcebergShimUtils {
+    @Override
+    public boolean hasInitialDefault(Types.NestedField field) {
+        return field.initialDefaultLiteral() != null;
+    }
+
+    @Override
+    public Object initialDefaultToSpark(Types.NestedField field) {
+        return SparkUtil.internalToSpark(field.type(), field.initialDefault());
+    }
+
     @Override
     public boolean isDeletionVector(DeleteFile deleteFile) {
         return deleteFile.format() == FileFormat.PUFFIN;
