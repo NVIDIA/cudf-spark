@@ -8,8 +8,11 @@ Integration tests for the JVM skill templates.
 import os
 import shutil
 import stat
+import subprocess
 import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
 
@@ -334,6 +337,91 @@ def project_with_broken_schema():
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+class TestArtifactSelection:
+    """Keep Maven dependency resolution and native extraction on the same artifact."""
+
+    @pytest.mark.parametrize(
+        "artifact_id,version",
+        [
+            ("rapids-4-spark_2.12", "26.06.0"),
+            ("cudf-spark_2.12", "26.12.0-SNAPSHOT"),
+        ],
+    )
+    def test_maven_propagates_artifact_id(self, tmp_path, artifact_id, version):
+        shutil.copyfile(TEMPLATES_DIR / "pom.xml", tmp_path / "pom.xml")
+        effective_pom = tmp_path / "effective-pom.xml"
+        extra_args = ["-Pcuda-native-udf", f"-Doutput={effective_pom}"]
+        # The legacy case intentionally exercises the template defaults.
+        if artifact_id.startswith("cudf-spark_"):
+            extra_args.extend(
+                [
+                    f"-Drapids4spark.artifactId={artifact_id}",
+                    f"-Drapids4spark.version={version}",
+                ]
+            )
+        result = run_mvn(
+            str(tmp_path),
+            "org.apache.maven.plugins:maven-help-plugin:3.5.1:effective-pom",
+            extra_args=extra_args,
+            timeout=120,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        ns = {"m": "http://maven.apache.org/POM/4.0.0"}
+        pom = ET.parse(effective_pom)
+        dependencies = pom.findall(
+            "m:dependencies/m:dependency[m:groupId='com.nvidia']", ns
+        )
+        copies = pom.findall(
+            "m:build/m:plugins/m:plugin/m:executions/m:execution/"
+            "m:configuration/m:artifactItems/m:artifactItem",
+            ns,
+        )
+        assert len(dependencies) == 1
+        assert len(copies) == 2
+        for node in [*dependencies, *copies]:
+            assert node.findtext("m:artifactId", namespaces=ns) == artifact_id
+            assert node.findtext("m:version", namespaces=ns) == version
+        extraction_env = pom.find(
+            "m:build/m:plugins/m:plugin/m:executions/"
+            "m:execution[m:id='extract-cuda-native-dependencies']/"
+            "m:configuration/m:target/m:exec/"
+            "m:env[@key='RAPIDS4SPARK_ARTIFACT_ID']",
+            ns,
+        )
+        assert extraction_env is not None
+        assert extraction_env.get("value") == artifact_id
+
+    @pytest.mark.parametrize("artifact_id", ["rapids-4-spark_2.12", "cudf-spark_2.12"])
+    def test_extracts_selected_artifact(self, tmp_path, artifact_id):
+        version = "26.12.0-SNAPSHOT"
+        jar_dir = tmp_path / "rapids-jar"
+        jar_dir.mkdir()
+        for name in ["rapids-4-spark_2.12", "cudf-spark_2.12"]:
+            with ZipFile(jar_dir / f"{name}-{version}-cuda12.jar", "w") as jar:
+                jar.writestr("amd64/Linux/libcudf.so", name)
+                jar.writestr("amd64/Linux/libnvcomp.so", name)
+        # Supply headers locally so this check needs neither a GPU nor a cuDF clone.
+        (tmp_path / "cudf-repo/.git").mkdir(parents=True)
+        (tmp_path / "cudf-repo/cpp/include").mkdir(parents=True)
+        result = subprocess.run(
+            ["bash", str(CUDA_TEMPLATES_DIR / "native/scripts/extract-cudf-libs.sh")],
+            env={
+                **os.environ,
+                "TARGET_DIR": str(tmp_path),
+                "RAPIDS4SPARK_ARTIFACT_ID": artifact_id,
+                "RAPIDS4SPARK_VERSION": version,
+                "SCALA_VERSION": "2.12",
+                "CUDA_VERSION": "cuda12",
+            },
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        for library in ["libcudf.so", "libnvcomp.so"]:
+            assert (tmp_path / "native-deps" / library).read_text() == artifact_id
 
 
 class TestCompilation:
