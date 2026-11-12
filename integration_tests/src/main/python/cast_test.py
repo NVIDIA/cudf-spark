@@ -652,11 +652,17 @@ def test_cast_large_decimal_scale_change_cpu_bridge(ansi_on, value):
         ArrayType(_regular_decimal_type),
         id='array'),
     pytest.param(
-        [({Decimal('0E+37'): Decimal('0E+37')},)],
+        [({Decimal('0E+37'): 'value'},)],
         StructType([StructField(
-            'a', MapType(_large_scale_decimal_type, _large_scale_decimal_type))]),
-        MapType(_regular_decimal_type, _regular_decimal_type),
-        id='map'),
+            'a', MapType(_large_scale_decimal_type, StringType()))]),
+        MapType(_regular_decimal_type, StringType()),
+        id='map_key'),
+    pytest.param(
+        [({'key': Decimal('0E+37')},)],
+        StructType([StructField(
+            'a', MapType(StringType(), _large_scale_decimal_type))]),
+        MapType(StringType(), _regular_decimal_type),
+        id='map_value'),
     pytest.param(
         [((Decimal('0E+37'),),)],
         StructType([StructField(
@@ -723,11 +729,17 @@ def test_cast_int_overflow_decimal_scale_nonzero(ansi_on):
         ArrayType(_regular_decimal_type),
         id='array'),
     pytest.param(
-        [({'0e2147483647': '0e2147483647'},)],
+        [({'0e2147483647': 'value'},)],
         'a map<string,string>',
-        MapType(_int_overflow_decimal_type, _int_overflow_decimal_type),
-        MapType(_regular_decimal_type, _regular_decimal_type),
-        id='map'),
+        MapType(_int_overflow_decimal_type, StringType()),
+        MapType(_regular_decimal_type, StringType()),
+        id='map_key'),
+    pytest.param(
+        [({'key': '0e2147483647'},)],
+        'a map<string,string>',
+        MapType(StringType(), _int_overflow_decimal_type),
+        MapType(StringType(), _regular_decimal_type),
+        id='map_value'),
     pytest.param(
         [(('0e2147483647',),)],
         'a struct<x:string>',
