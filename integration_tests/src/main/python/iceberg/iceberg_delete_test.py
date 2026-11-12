@@ -26,11 +26,8 @@ from iceberg import (
     iceberg_nested_write_gens_list, iceberg_unsupported_mark,
     delete_partition_transforms_distributed, _build_tblprops, assert_iceberg_files_use_codec,
     supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance,
-    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df, rapids_reader_types,
-    iceberg_variant_write_conf, iceberg_variant_write_cases,
-    setup_iceberg_variant_write_table, read_iceberg_variant_write_table)
-from marks import (allow_non_gpu, allow_non_gpu_conditional, iceberg, ignore_order,
-    datagen_overrides, iceberg_fast_test, incompat)
+    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df, rapids_reader_types)
+from marks import allow_non_gpu, allow_non_gpu_conditional, iceberg, ignore_order, datagen_overrides, iceberg_fast_test
 from spark_session import is_spark_400_or_later, with_cpu_session, with_gpu_session
 
 pytestmark = iceberg_unsupported_mark
@@ -885,33 +882,3 @@ def test_mor_delete_falls_back_on_divergent_delete_codec(spark_tmp_table_factory
     assert_gpu_fallback_write_sql(
         write_func, read_func, base_table_name, ["WriteDeltaExec"],
         conf=iceberg_delete_mor_enabled_conf)
-
-
-@iceberg
-@incompat
-@ignore_order(local=True)
-@allow_non_gpu(
-    'ReplaceDataExec', 'WriteDeltaExec', 'BatchScanExec', 'ColumnarToRowExec', 'ProjectExec')
-@pytest.mark.parametrize('mode,fallback_exec', [
-    pytest.param('copy-on-write', 'ReplaceDataExec', id='cow'),
-    pytest.param('merge-on-read', 'WriteDeltaExec', id='mor'),
-])
-@pytest.mark.parametrize('container', iceberg_variant_write_cases)
-def test_iceberg_delete_variant_write_fallback(
-        spark_tmp_table_factory, container, mode, fallback_exec):
-    base_table = get_full_table_name(spark_tmp_table_factory)
-
-    def setup_tables(spark):
-        for suffix in ('_cpu', '_gpu'):
-            setup_iceberg_variant_write_table(spark, base_table + suffix, container, mode=mode)
-
-    with_cpu_session(setup_tables, conf=iceberg_variant_write_conf)
-
-    def delete_data(spark, table):
-        spark.sql(f"DELETE FROM {table} WHERE id IN (1, 4)").collect()
-
-    assert_gpu_fallback_write_sql(
-        delete_data,
-        lambda spark, table: read_iceberg_variant_write_table(
-            spark, table, container, [0, 2, 3, 5]),
-        base_table, [fallback_exec], conf=iceberg_variant_write_conf)

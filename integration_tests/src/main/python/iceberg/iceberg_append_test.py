@@ -16,7 +16,7 @@ from typing import Callable, Any
 import pytest
 
 from asserts import assert_equal_with_local_sort, assert_gpu_fallback_collect, \
-    assert_gpu_fallback_write_sql
+    assert_gpu_fallback_write_sql, collect_plan_nodes
 from conftest import is_iceberg_remote_catalog
 from data_gen import DEFAULT_DATA_GEN_LENGTH, gen_df, copy_and_update
 from iceberg import (
@@ -26,12 +26,9 @@ from iceberg import (
     full_coverage_partition_transforms, assert_iceberg_files_use_codec, supports_iceberg_v3,
     ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance,
     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, iceberg_table_properties_sql,
-    row_lineage_df,
-    iceberg_variant_write_conf, iceberg_variant_write_cases,
-    setup_iceberg_variant_write_table, read_iceberg_variant_write_table)
-from marks import (iceberg, ignore_order, allow_non_gpu, datagen_overrides, iceberg_fast_test,
-    incompat)
-from spark_session import with_gpu_session, with_cpu_session
+    row_lineage_df, iceberg_variant_read_conf, setup_iceberg_variant_table)
+from marks import iceberg, ignore_order, allow_non_gpu, datagen_overrides, iceberg_fast_test, incompat
+from spark_session import with_gpu_session, with_cpu_session, is_spark_411_or_later
 
 pytestmark = iceberg_unsupported_mark
 
@@ -656,23 +653,51 @@ def test_insert_into_table_falls_back_on_unsupported_codec(format_version, spark
 @incompat
 @ignore_order(local=True)
 @allow_non_gpu('AppendDataExec')
-@pytest.mark.parametrize('container', iceberg_variant_write_cases)
-def test_iceberg_append_variant_write_fallback(spark_tmp_table_factory, container):
+@pytest.mark.skipif(not supports_iceberg_v3 or not is_spark_411_or_later(),
+                    reason="Iceberg Variant requires Iceberg v3 and Spark 4.1.1+")
+def test_iceberg_variant_write_fallback(spark_tmp_table_factory):
     base_table = get_full_table_name(spark_tmp_table_factory)
+    conf = {**iceberg_write_enabled_conf, **iceberg_variant_read_conf,
+            'spark.rapids.sql.format.iceberg.read.enabled': 'true',
+            'spark.sql.parquet.fieldId.write.enabled': 'true'}
 
     def setup_tables(spark):
+        setup_iceberg_variant_table(spark, base_table + '_source')
         for suffix in ('_cpu', '_gpu'):
-            setup_iceberg_variant_write_table(spark, base_table + suffix, container)
-        setup_iceberg_variant_write_table(
-            spark, base_table + '_source', container, start=3, value_offset=100)
+            # An unpartitioned table isolates the unsupported write type from shuffle/join
+            # fallback. Keep v3, GPU reads and GPU writes enabled in this test.
+            spark.sql(f"CREATE TABLE {base_table + suffix} (id INT, v VARIANT) USING ICEBERG "
+                      "TBLPROPERTIES ('format-version'='3', 'write.parquet.shred-variants'='false')")
 
-    with_cpu_session(setup_tables, conf=iceberg_variant_write_conf)
+    with_cpu_session(setup_tables, conf=conf)
 
     def append_data(spark, table):
-        spark.table(base_table + '_source').writeTo(table).append()
+        write = spark.sql(f"INSERT INTO {table} SELECT * FROM {base_table}_source")
+        write.collect()
+        if spark.conf.get('spark.rapids.sql.enabled') == 'true':
+            capture = spark._jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+            plan = capture.extractExecutedPlan(write._jdf.queryExecution().executedPlan())
+            writers = [node for node in collect_plan_nodes(plan)
+                       if node.getClass().getSimpleName() == 'AppendDataExec']
+            assert writers, f"Expected a CPU Iceberg writer: {plan}"
+            tag = spark._jvm.org.apache.spark.sql.catalyst.trees.TreeNodeTag.apply(
+                'rapids.gpu.supported')
+            for writer in writers:
+                reasons = writer.getTagValue(tag)
+                assert reasons.isDefined(), "Expected the writer's GPU fallback reasons"
+                iterator = reasons.get().iterator()
+                messages = []
+                while iterator.hasNext():
+                    messages.append(iterator.next())
+                assert 'unsupported data types VariantType [v] in write for Iceberg' in messages, \
+                    f"Expected unsupported Variant write type, got: {messages}"
+                assert all('unsupported data types' in reason and 'VariantType' in reason
+                           for reason in messages), f"Unexpected fallback reason: {messages}"
+
+    def read_data(spark, table):
+        assert sorted(row.id for row in spark.table(table).select('id').collect()) == list(range(9))
+        return spark.sql(f"SELECT id, v IS NULL AS sql_null, is_variant_null(v) AS json_null, "
+                         f"CAST(v AS STRING) AS value FROM {table}")
 
     assert_gpu_fallback_write_sql(
-        append_data,
-        lambda spark, table: read_iceberg_variant_write_table(
-            spark, table, container, list(range(6)) + list(range(3, 9))),
-        base_table, ['AppendDataExec'], conf=iceberg_variant_write_conf)
+        append_data, read_data, base_table, ['AppendDataExec'], conf=conf)

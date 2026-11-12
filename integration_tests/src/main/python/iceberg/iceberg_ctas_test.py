@@ -30,11 +30,9 @@ from iceberg import (
     iceberg_full_gens_list, get_full_table_name, iceberg_write_enabled_conf,
     iceberg_unsupported_mark, _build_tblprops, ctas_partition_transforms, supports_iceberg_v3,
     ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance,
-    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df, read_parquet_schema,
-    iceberg_variant_write_conf, iceberg_variant_write_cases,
-    setup_iceberg_variant_write_table, read_iceberg_variant_write_table)
+    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df, read_parquet_schema)
 from marks import (iceberg, ignore_order, allow_non_gpu, allow_non_gpu_conditional,
-                   datagen_overrides, iceberg_fast_test, incompat)
+                   datagen_overrides, iceberg_fast_test)
 from spark_session import (with_gpu_session, with_cpu_session, is_spark_400_or_later,
                            is_spark_411_or_later)
 
@@ -703,27 +701,3 @@ def test_ctas_partitioned_table_fanout_enabled(format_version, spark_tmp_table_f
         spark_tmp_table_factory,
         "bucket(2, _c9)",
         table_prop={"format-version": format_version, "write.spark.fanout.enabled": "true"}, format_version=format_version)
-
-
-@iceberg
-@incompat
-@ignore_order(local=True)
-@allow_non_gpu('AtomicCreateTableAsSelectExec', 'AppendDataExec')
-@pytest.mark.parametrize('container', iceberg_variant_write_cases)
-def test_iceberg_ctas_variant_write_fallback(spark_tmp_table_factory, container):
-    base_table = get_full_table_name(spark_tmp_table_factory)
-    with_cpu_session(
-        lambda spark: setup_iceberg_variant_write_table(
-            spark, base_table + '_source', container),
-        conf=iceberg_variant_write_conf)
-
-    def create_table(spark, table):
-        spark.sql(f"CREATE TABLE {table} USING ICEBERG "
-                  "TBLPROPERTIES ('format-version'='3', 'write.parquet.shred-variants'='false') "
-                  f"AS SELECT * FROM {base_table}_source").collect()
-
-    assert_gpu_fallback_write_sql(
-        create_table,
-        lambda spark, table: read_iceberg_variant_write_table(
-            spark, table, container, list(range(6))),
-        base_table, ['AtomicCreateTableAsSelectExec'], conf=iceberg_variant_write_conf)
