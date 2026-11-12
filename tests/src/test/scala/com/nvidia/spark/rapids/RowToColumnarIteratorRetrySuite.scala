@@ -164,6 +164,28 @@ class RowToColumnarIteratorRetrySuite extends RmmSparkRetrySuiteBase {
     }
   }
 
+  test("the first reservation halves a batch for each time it is still over 128 MiB") {
+    val sampleRows = GpuBatchUtils.VALIDITY_BUFFER_BOUNDARY_ROWS
+    val sampleBytes = GpuBatchUtils.estimateGpuMemory(schema, sampleRows)
+    val mib = 1024L * 1024
+    Seq((128 * mib, 1), (128 * mib + 1, 2), (256 * mib, 2), (256 * mib + 1, 4)).foreach {
+      case (batchBytes, divisor) =>
+        val batchRows = GpuBatchUtils.estimateRowCount(batchBytes, sampleBytes, sampleRows)
+        assertResult((batchRows + divisor - 1) / divisor, s"$batchBytes bytes")(
+          RowToColumnarIterator.initialRows(batchBytes, sampleBytes, sampleRows))
+    }
+  }
+
+  test("the first reservation bounds sampled rows that are larger than a batch") {
+    val mib = 1024L * 1024
+    // estimateRowCount keeps all 512 sampled rows when they are larger than the batch. 400 MiB
+    // of them take a divisor of 4 to fit 128 MiB, whatever batchSizeBytes is.
+    assertResult(128)(RowToColumnarIterator.initialRows(200 * mib, 400 * mib, 512))
+    assertResult(128)(RowToColumnarIterator.initialRows(64 * mib, 400 * mib, 512))
+    // Only a single row estimated above the bound is reserved above it.
+    assertResult(1)(RowToColumnarIterator.initialRows(1024 * mib, 512 * 300 * mib, 512))
+  }
+
   test("a first-row CPU SplitAndRetryOOM propagates") {
     val rowIter: Iterator[InternalRow] = (1 to 10).map(InternalRow(_)).iterator
     val row2ColIter = new RowToColumnarIterator(
