@@ -1843,9 +1843,10 @@ def test_delta_merge_cpu_command_checksum_expression_db173(spark_tmp_path, spark
     # A Parquet source is materialized by the Databricks merge command, which filters it with
     # ChecksumExpression. The expression is always true and adds a checksum of the source rows to
     # a metric, so the plugin must keep that Filter on the GPU and leave the merge result alone.
-    # ASSERT mode makes the merge fail if the checksums of the source computed by its jobs differ,
-    # which checks the GPU checksum against the CPU one. The workspace enables the feature on DBR,
-    # but the defaults are OFF and Photon only.
+    # ASSERT mode makes the merge fail if the checksums of the source computed by its jobs differ.
+    # Every checksum Filter is on the GPU here, so this compares GPU jobs with each other; the
+    # comparison with the CPU expression is in test_checksum_expression_metric_matches_cpu_db173.
+    # The workspace enables the feature on DBR, but the defaults are OFF and Photon only.
     conf = copy_and_update(delta_merge_enabled_conf, _checksum_source_conf)
     merge_sql = "MERGE INTO {dest_table} " \
                 "USING {src_table} " \
@@ -1890,20 +1891,28 @@ _checksum_source_gens = [
     ('j', ShortGen()), ('k', ByteGen()), ('l', FloatGen())]
 
 
+# A CPU Filter (not a GpuFilter) whose condition holds the CPU ChecksumExpression. Depending on the
+# Databricks version it renders as checksum( or checksum_expression(, and a GPU one is prefixed gpu_.
+_CPU_CHECKSUM_FILTER = re.compile(r"(?<![A-Za-z])Filter\b.*(?<![A-Za-z_])checksum(_expression)?\(")
+
+
+def _cpu_checksum_filter_lines(plan_strings):
+    # The captured plans also include the CPU run of the comparison, which has no GPU operator, so
+    # only the plans of the GPU run are searched.
+    return [line for s in plan_strings if "Gpu" in s for line in s.split("\n")
+            if _CPU_CHECKSUM_FILTER.search(line)]
+
+
 def _assert_checksum_filters_on_gpu(plan_strings):
     # The merge filters its source with ChecksumExpression in more than one step, and every one
     # of those filters must be on the GPU, or the row/columnar transitions around it come back.
-    # The captured plans also include the CPU run of the comparison, which has no GPU operator.
     gpu_plans = [s for s in plan_strings if "Gpu" in s]
+    all_plans = "\n".join(gpu_plans)
     assert any("GpuFilter" in line and "gpu_checksum_expression" in line
                for s in gpu_plans for line in s.split("\n")), \
-        "no GpuFilter with a GPU ChecksumExpression in the captured MERGE plans:\n" + \
-        "\n".join(plan_strings)
-    cpu_filters = [line for s in gpu_plans for line in s.split("\n")
-                   if re.search(r"(?<![A-Za-z])Filter\b.*\bchecksum\(", line)]
-    assert not cpu_filters, \
-        "a CPU Filter with ChecksumExpression is left in a GPU MERGE plan:\n" + \
-        "\n".join(cpu_filters)
+        "no GpuFilter with a GPU ChecksumExpression in the captured MERGE plans:\n" + all_plans
+    assert not _cpu_checksum_filter_lines(plan_strings), \
+        "a CPU Filter with ChecksumExpression is left in a GPU MERGE plan:\n" + all_plans
 
 
 @allow_non_gpu("ExecutedCommandExec,BroadcastHashJoinExec,ColumnarToRowExec,BroadcastExchangeExec,DataWritingCommandExec", delta_write_fallback_allow, *delta_meta_allow)
@@ -1962,10 +1971,14 @@ def test_delta_merge_cpu_command_checksum_expression_types_db173(
 @pytest.mark.skipif(not is_databricks173_or_later(),
                     reason="GPU ChecksumExpression coverage for Databricks 17.3+")
 @pytest.mark.parametrize("batch_size_bytes", ["1g", "20000"], ids=["one_batch", "many_batches"])
-def test_checksum_expression_metric_matches_cpu_db173(spark_tmp_path, batch_size_bytes):
+@pytest.mark.parametrize("num_children", [1, 2, None],
+                         ids=["one_child", "two_children", "all_children"])
+def test_checksum_expression_metric_matches_cpu_db173(spark_tmp_path, batch_size_bytes,
+                                                      num_children):
     # Evaluates one ChecksumExpression (same seed, same input) on the CPU and on the GPU and
     # compares the value of the multiplication metric it accumulates, without going through a
     # MERGE. With tiny batches the GPU multiplies the checksums of many batches into the metric.
+    # A single child has nothing to fold, so it is covered separately from several children.
     data_path = spark_tmp_path + "/PARQUET_DATA"
     with_cpu_session(lambda spark: gen_df(spark, _checksum_source_gens, length=3000, seed=3,
                                           num_slices=1).write.parquet(data_path))
@@ -1975,7 +1988,7 @@ def test_checksum_expression_metric_matches_cpu_db173(spark_tmp_path, batch_size
         df = spark.read.parquet(data_path)
         attrs = df._jdf.queryExecution().analyzed().output()
         children = jvm.scala.jdk.javaapi.CollectionConverters.asScala(
-            jvm.java.util.ArrayList([attrs.apply(i) for i in range(attrs.size())])).toSeq()
+            jvm.java.util.ArrayList([attrs.apply(i) for i in range(num_children or attrs.size())])).toSeq()
         metric = jvm.org.apache.spark.sql.execution.metric.SQLLastAttemptMetrics \
             .createMultiplicationMetric(spark.sparkContext._jsc.sc(), "checksum", False)
         initial = metric.value()
@@ -2034,6 +2047,10 @@ def test_delta_merge_cpu_command_checksum_expression_disabled_db173(
         plan_strings = [plan.toString() for plan in captured_plans]
         assert not any("gpu_checksum_expression" in s for s in plan_strings), \
             "the GPU ChecksumExpression ran although its rule is disabled"
+        # The negative check of the GPU tests looks for this CPU Filter, so it must be found
+        # here, or that check would pass on any plan.
+        assert _cpu_checksum_filter_lines(plan_strings), \
+            "no CPU Filter with ChecksumExpression in the GPU plans:\n" + "\n".join(plan_strings)
 
     delta_sql_merge_test(spark_tmp_path, spark_tmp_table_factory,
                          use_cdf=False, enable_deletion_vectors=False,

@@ -111,12 +111,12 @@ case class GpuChecksumExpression(
       }
     }
     withResource(Scalar.fromLong(ChecksumMergeSource.MOD)) { mod =>
-      // Fold each child into the running product as soon as it is hashed, so that only two
-      // columns are alive at a time. Every factor is below MOD < 2^31, so a product fits in a long.
+      // Fold each child into the running product as soon as it is hashed, so that the peak does
+      // not grow with the number of children. Every factor is below MOD < 2^31, so a product fits
+      // in a long. The inputs are closed before the mod, which leaves three columns at the peak.
       val combined = hashedChildren.tail.foldLeft(factor(hashedChildren.head)) { (acc, h) =>
-        withResource(acc) { _ =>
-          withResource(factor(h))(f => withResource(acc.mul(f))(_.mod(mod)))
-        }
+        val product = withResource(acc)(_ => withResource(factor(h))(acc.mul(_)))
+        withResource(product)(_.mod(mod))
       }
       withResource(combined)(productModulo(_, mod))
     }
