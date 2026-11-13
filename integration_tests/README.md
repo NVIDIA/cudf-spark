@@ -7,6 +7,119 @@ verify that the plugin is doing the right thing in as many cases as possible.
 There are two sets of tests. The PySpark tests are described on this page. The scala tests are
 described [here](../tests/README.md).
 
+## Deterministic path-character coverage
+
+`path_character_test.py` writes five distinct payloads at literal paths containing `a b`,
+`a+b`, `a%20b`, `a%2Fb`, and `路径`. It checks each spelling in base directories and
+filenames, then in Spark-escaped partition directories and filenames. A fixed row oracle
+checks that the values remain distinct, in addition to CPU/GPU comparison and an executed
+GPU scan assertion. Static source labels and partition columns keep each requested path
+associated with its payload, so swapping two object reads cannot pass by preserving the
+overall row set. Fixtures use Hadoop APIs rather than driver-local filesystem APIs,
+so the same tests work with the backend jobs' writable `--tmp_path`.
+With the file cache disabled, immutable file fixtures are shared across reader parameters
+within a module, limiting the full file matrix to ten small datasets. When the startup
+file cache is enabled, each Parquet and ORC case gets fresh files so transport checks still
+require backend I/O; the full file matrix then writes thirty small datasets. The backend runner
+disables caching at startup to keep fixture creation small.
+
+| Reader | Hadoop FileSystem (local/HDFS/S3A/GCS connector) | PerfIO S3 Netty / CRT | PerfIO GCS HTTP |
+| --- | --- | --- | --- |
+| Parquet | Base, partition, filename | Base, partition, filename | Base, partition, filename |
+| ORC | Base, partition, filename | Base, partition, filename | Base, partition, filename |
+| CSV / JSON | Base, partition, filename | N/A: reader uses Hadoop line streams | N/A: reader uses Hadoop line streams |
+| Avro | Base, partition, filename | N/A: reader uses Hadoop streams | N/A: reader uses Hadoop streams |
+| Delta Parquet | Table root and partitions through Delta's file index | Table root and partitions | Table root and partitions |
+| Iceberg Parquet | Encoded partitions through catalog FileIO | Encoded partitions through S3FileIO | N/A: Iceberg FileIO has no PerfIO GCS adapter; catalog streams are tested |
+| Hive delimited text | Remaining #16340 coverage; GPU reader exists | Not covered here | Not covered here |
+| Text / binaryFile / other CPU-only sources | N/A: no GPU file reader | N/A | N/A |
+| Iceberg ORC / Avro | N/A: no GPU table reader | N/A | N/A |
+
+`iceberg/iceberg_path_test.py` uses the five strings as partition values. Iceberg
+encodes them in data file paths: `a b` becomes `a+b`, `a+b` becomes `a%2Bb`,
+`a%20b` becomes `a%2520b`, `a%2Fb` becomes `a%252Fb`, and `路径` becomes
+`%E8%B7%AF%E5%BE%84`. The test prints the actual paths from the table's `files`
+metadata and asserts these encoded partition directories. This covers literal `+`
+and `%` in Iceberg paths; it does not construct raw spaces or Unicode in those
+directories. Raw special characters in Iceberg table roots require a separately
+configured warehouse location.
+
+All five ordinary file formats cover V1 and V2 scans. Parquet, ORC, and Avro cover
+PERFILE, COALESCING, and MULTITHREADED readers without crossing unrelated reader options.
+CPU writes create the fixtures even when GPU writes are unavailable. Non-empty payload
+columns require data reads; Parquet/ORC additionally require their footer/tail reads.
+Delta and Iceberg own data filenames and transaction/manifest references, so arbitrary
+filename renames are N/A for those table scans. Hadoop and remote managed Iceberg catalogs
+also own table roots; arbitrary per-table locations are N/A. Configure a warehouse with
+unusual base-path characters to exercise the catalog's root policy. Iceberg tests cover
+supported format versions via the existing runtime/version gates. Avro requires the
+existing `INCLUDE_SPARK_AVRO_JAR=true` setup; the backend runner enables it for
+the ordinary-file matrix so missing Avro support cannot silently skip those cases.
+
+The shared assertion reads task accumulators from stages completed by the GPU query,
+after the CPU query. It requires the selected PerfIO transport's counter to increase and
+rejects alternative transports, S3A fallback, and Iceberg S3 fallback. Iceberg S3 PerfIO
+runs also check that every actual data InputFile inherits Iceberg's `BaseS3File`,
+which the S3 adapter accepts. This includes direct `S3FileIO` and `ResolvingFileIO`
+delegation. A catalog returning Hadoop InputFiles is not evidence of the Iceberg S3 adapter.
+Auto mode uses a Hadoop expectation for those catalogs and retains zero-PerfIO assertions. The incorrect metric
+attribution tracked in #16846 may cause those assertions to fail; this test does not
+relax them. CSV/JSON/Avro and
+Iceberg GCS require all PerfIO transport counters to stay zero, as documented above.
+GCS gRPC is N/A for the current PerfIO default client: it constructs HTTP
+`StorageOptions`; a gRPC counter is still checked to detect unexpected transport changes.
+
+Test discovery does not establish cloud execution. The S3/GCS backend matrix is run
+manually for now; wiring these invocations into backend-specific jobs remains #16340
+work. Default local/DBFS temporary paths exercise Hadoop, not S3/GCS PerfIO. Premerge's
+separate Avro invocation selects `avro_test.py`, so it does not add the twelve Avro
+path-character cases; nightly jobs with Avro enabled can discover them.
+
+For ordinary remote reads, auto mode requires an explicit startup
+`spark.rapids.perfio.s3.enabled=true/false` or
+`spark.rapids.perfio.gcs.enabled=true/false`, or an explicit `--path_backend`.
+It does not predict an executor's opportunistic defaults from driver classes or runtime
+labels. Expected backends remain independent of the observed task counters.
+Use the existing connector/SDK classpath and credentials for each manual invocation:
+
+```bash
+# Each invocation starts a separate Spark application with file cache disabled.
+bash integration_tests/run_path_character_tests.sh hadoop <writable-local-or-cloud-path>
+bash integration_tests/run_path_character_tests.sh s3-netty s3a://<bucket>/<test-prefix>
+bash integration_tests/run_path_character_tests.sh s3-crt s3a://<bucket>/<test-prefix>
+bash integration_tests/run_path_character_tests.sh gcs-http gs://<bucket>/<test-prefix>
+
+# Select table cases explicitly; the runner adds the corresponding enable flag.
+TESTS=path_character_test.py::test_delta_path_characters bash integration_tests/run_path_character_tests.sh \
+    s3-netty s3a://<bucket>/<test-prefix> -m delta_lake
+TESTS=iceberg/iceberg_path_test.py bash integration_tests/run_path_character_tests.sh \
+    s3-netty s3a://<bucket>/<test-prefix> -m iceberg
+```
+
+The wrapper sets startup-only PerfIO flags before Spark starts; `--path_backend` declares
+the required backend independently. The default selection is the 44 ordinary-file cases.
+Selecting the whole `path_character_test.py` file also enables its 15 Delta cases; selecting
+the Delta test alone avoids repeating the ordinary-file matrix. Selecting the Iceberg file
+requires `EXPECTED_ICEBERG_VERSION` and automatically enables Iceberg. These enable flags
+do not install JARs, configure catalogs, or override supported runtime/version gates.
+
+Iceberg ignores `--tmp_path` for table data. Configure a catalog warehouse on the selected
+storage (for example `s3a://<bucket>/<warehouse-prefix>` for S3), along with the existing
+Spark Iceberg extensions, catalog class/type, and credentials. S3 PerfIO additionally requires
+S3-backed InputFiles from the actual table FileIO, such as direct
+`org.apache.iceberg.aws.s3.S3FileIO` or S3 delegation through
+`org.apache.iceberg.io.ResolvingFileIO`. Configure the catalog with
+`spark.sql.catalog.<catalog>.io-impl` and the matching Iceberg AWS bundle and SDK classes.
+Set `EXPECTED_ICEBERG_VERSION` to the runtime JAR version (for example `1.10.1`); the existing
+version gates then select supported format versions. A local warehouse with an explicit
+S3 backend fails instead of testing a different storage backend.
+
+Missing dependencies or a wrong backend must be corrected before claiming that matrix row
+passed. Review the passed/skipped counts: unsupported runtime/version combinations can
+still skip through the shared test gates. Normal temporary-path and table fixtures clean up
+the small datasets. Cloud credentials and connector/catalog dependencies remain prerequisites
+of the selected runtime.
+
 ## Setting Up the Environment
 
 The tests are based off of `pyspark` and `pytest` running on Python 3. There really are
