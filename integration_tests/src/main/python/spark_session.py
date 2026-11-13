@@ -276,8 +276,14 @@ def is_spark_40x():
 def is_spark_41x():
     return (4, 1, 0) <= spark_version_tuple() < (4, 2, 0)
 
+def is_spark_42x():
+    return (4, 2, 0) <= spark_version_tuple() < (4, 3, 0)
+
 def is_spark_420_or_later():
     return spark_version_tuple() >= (4, 2, 0)
+
+def is_spark_421_or_later():
+    return spark_version_tuple() >= (4, 2, 1)
 
 def is_spark_500_or_later():
     return spark_version_tuple() >= (5, 0, 0)
@@ -297,8 +303,11 @@ def is_spark_403():
 def is_spark_404():
     return spark_version_tuple() == (4, 0, 4)
 
-def is_spark_403_or_404():
-    return is_spark_403() or is_spark_404()
+def is_spark_405():
+    return spark_version_tuple() == (4, 0, 5)
+
+def is_spark_403_through_405():
+    return is_spark_403() or is_spark_404() or is_spark_405()
 
 def is_spark_410_or_later():
     return spark_version_tuple() >= (4, 1, 0)

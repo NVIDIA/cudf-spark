@@ -544,7 +544,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
 
   val ALLOW_MULTIPLE_JARS = conf("spark.rapids.sql.allowMultipleJars")
     .startupOnly()
-    .doc("Allow multiple rapids-4-spark, cudf-spark-jni, and cudf jars on the classpath. " +
+    .doc("Allow multiple cudf-spark, cudf-spark-jni, and cudf jars on the classpath. " +
       "Spark will take the first one it finds, so the version may not be expected. Possible " +
       "values are ALWAYS: allow all jars, SAME_REVISION: only allow jars with the same " +
       "revision, NEVER: do not allow multiple jars at all.")
@@ -650,6 +650,18 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .internal()
     .booleanConf
     .createWithDefault(true)
+
+  val HOST_COLUMNAR_TO_GPU_RELEASE_SEMAPHORE =
+    conf("spark.rapids.sql.hostColumnarToGpu.releaseSemaphore.enabled")
+      .doc("When true, HostColumnarToGpu releases the GPU semaphore while it pulls the host " +
+        "batches of the next GPU batch from its CPU child, and acquires it again before " +
+        "copying them to the GPU. This helps when the child does heavy CPU work, such as " +
+        "decoding in a CPU data source, and each task produces several GPU batches. The " +
+        "task still holds its device memory while released, so more tasks can have data on " +
+        "the GPU at once than the GPU concurrency allows.")
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
 
   val SPARK_GPU_RESOURCE_NAME = conf("spark.rapids.gpu.resourceName")
     .doc("The name of the Spark resource that represents a GPU that you want the plugin to use " +
