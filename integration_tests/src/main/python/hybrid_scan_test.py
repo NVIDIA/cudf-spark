@@ -22,6 +22,7 @@ query instead; a test that is meant to fall back uses `fallback_conf`.
 import pytest
 
 from datetime import date, datetime, timezone
+from urllib.parse import urlparse
 
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_spark_exception
 from conftest import is_databricks_runtime, is_not_utc
@@ -388,6 +389,8 @@ def test_hybrid_scan_coalescing_reader_reports_fallback(spark_tmp_path, reader_t
     """The coalescing reader never runs hybrid, so a read it takes reports the fallback. AUTO
     chooses it for local files."""
     data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    if reader_type == 'AUTO' and urlparse(data_path).scheme not in ('', 'file', 'hdfs'):
+        pytest.skip('AUTO picks MULTITHREADED for cloud paths')
     with_cpu_session(lambda spark: write_test_data(spark, data_path))
     assert_spark_exception(
         lambda: with_gpu_session(
