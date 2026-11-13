@@ -16,19 +16,47 @@
 
 package com.nvidia.spark.rapids.iceberg
 
+import scala.collection.JavaConverters._
+
 import com.nvidia.spark.rapids.{RapidsConf, RapidsMeta}
-import org.apache.iceberg.{Table, TableProperties}
+import org.apache.iceberg.{Schema, Table, TableProperties}
+import org.apache.iceberg.types.{Type, Types, TypeUtil}
 
 import org.apache.spark.sql.execution.SparkPlan
 
 /** Common planning gate for Iceberg table format versions. */
 object IcebergFormatVersionSupport {
   private val MaxSupportedFormatVersion = 2
+  private val SupportedDefaultTypeIds = Set(
+    Type.TypeID.BOOLEAN, Type.TypeID.INTEGER, Type.TypeID.LONG, Type.TypeID.FLOAT,
+    Type.TypeID.DOUBLE, Type.TypeID.DATE, Type.TypeID.TIMESTAMP, Type.TypeID.STRING,
+    Type.TypeID.BINARY, Type.TypeID.DECIMAL)
 
+  /** Tag unsupported table versions and initial defaults in the full table schema. */
   def tagForFormatVersion(table: Table, meta: RapidsMeta[_, _, _]): Unit = {
-    tagForFormatVersion(ShimUtils.formatVersion(table), meta)
+    tagForFormatVersion(table, table.schema(), meta)
   }
 
+  /**
+   * Tag unsupported table versions and, when v3 is enabled, initial defaults in schemaToCheck.
+   * Callers select the schema relevant to the operation, such as a scan's required fields or a
+   * write's output fields. Unsupported cases are recorded on meta for CPU fallback.
+   */
+  def tagForFormatVersion(
+      table: Table,
+      schemaToCheck: Schema,
+      meta: RapidsMeta[_, _, _]): Unit = {
+    val formatVersion = ShimUtils.formatVersion(table)
+    tagForFormatVersion(formatVersion, meta)
+    if (formatVersion > MaxSupportedFormatVersion && meta.conf.isIcebergV3Enabled) {
+      unsupportedDefault(schemaToCheck).foreach { case (path, typeName) =>
+        meta.willNotWorkOnGpu(
+          s"Iceberg default for field '$path' with type $typeName is not supported on GPU")
+      }
+    }
+  }
+
+  /** Tag unsupported format versions from table properties, defaulting to v2 when absent. */
   def tagForFormatVersion(
       properties: Map[String, String],
       meta: RapidsMeta[_, _, _]): Unit = {
@@ -47,6 +75,71 @@ object IcebergFormatVersionSupport {
       // especially important with AQE, where the CPU V2 write and its query can be planned in
       // separate passes.
       tagMergeRowsAncestor(meta.parent, reason)
+    }
+  }
+
+  private[iceberg] def unsupportedDefault(schema: Schema): Option[(String, String)] = {
+    def find(fields: Seq[Types.NestedField]): Option[Types.NestedField] = {
+      fields.iterator.map { field =>
+        val hasDefault = ShimUtils.hasInitialDefault(field)
+        val fieldType = field.`type`()
+
+        val unsupportedTimestampNtz = fieldType == Types.TimestampType.withoutZone()
+        if (hasDefault && fieldType.isPrimitiveType &&
+            (!SupportedDefaultTypeIds.contains(fieldType.typeId()) ||
+              unsupportedTimestampNtz)) {
+          Some(field)
+        } else if (hasDefault && !fieldType.isPrimitiveType && !fieldType.isStructType) {
+          Some(field)
+        } else if (fieldType.isNestedType) {
+          find(fieldType.asNestedType().fields().asScala.toSeq)
+        } else {
+          None
+        }
+      }.collectFirst { case Some(field) => field }
+    }
+
+    find(schema.columns().asScala.toSeq).map { field =>
+      schema.findColumnName(field.fieldId()) -> field.`type`().toString
+    }
+  }
+
+  /**
+   * Extend an expected schema with top-level fields required by equality deletes, so their
+   * defaults are included in planning checks even when the query does not project them. Already
+   * projected fields are not duplicated. Throws if a required field ID is missing from the table
+   * schema or identifies a nested field, which the GPU delete filter cannot currently handle.
+   */
+  def withRequiredFields(
+      tableSchema: Schema,
+      expectedSchema: Schema,
+      requiredFieldIds: Seq[Int]): Schema = {
+    val projectedIds = TypeUtil.getProjectedIds(expectedSchema).asScala.map(_.toInt).toSet
+    val requiredFields = requiredFieldIds.distinct.map { fieldId =>
+      val field = Option(tableSchema.findField(fieldId)).getOrElse {
+        throw new IllegalArgumentException(s"Cannot find required field for ID $fieldId")
+      }
+
+      // Iceberg permits an equality-delete field to be a primitive nested in a struct. However,
+      // GpuDeleteFilter builds both its equality-delete schema and its probe expressions from the
+      // top-level columns in the table and required schemas. Adding a nested leaf as a top-level
+      // column here would make the planning check pass, but GpuDeleteFilter would later fail to
+      // resolve the field ID or bind it to the wrong input column. Validate every equality field,
+      // including fields already projected by the query, and fall back until GpuDeleteFilter can
+      // preserve and extract the complete nested path.
+      if (tableSchema.asStruct().field(fieldId) == null) {
+        throw new UnsupportedOperationException(
+          s"Nested equality-delete field '${field.name()}' with ID $fieldId is not supported " +
+            "on GPU")
+      }
+      field
+    }
+    val missingFields = requiredFields.filterNot(field => projectedIds.contains(field.fieldId()))
+
+    if (missingFields.isEmpty) {
+      expectedSchema
+    } else {
+      new Schema((expectedSchema.columns().asScala ++ missingFields).asJava)
     }
   }
 
