@@ -261,10 +261,10 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       // Before the output filter, which references columns by index.
       checkDecodedSchema(t)
       outputAst.flatMap { compiled =>
-        NvtxIdWithMetrics(NvtxRegistry.HYBRID_SCAN_OUTPUT_FILTER,
-            metric(HYBRID_SCAN_OUTPUT_FILTER_TIME)) {
-          // The decoded table outlives each attempt, so a retry filters it again.
-          withRetryNoSplit[Option[Table]] {
+        // The decoded table outlives each attempt, so a retry filters it again.
+        withRetryNoSplit[Option[Table]] {
+          NvtxIdWithMetrics(NvtxRegistry.HYBRID_SCAN_OUTPUT_FILTER,
+              metric(HYBRID_SCAN_OUTPUT_FILTER_TIME)) {
             applyOutputFilter(t, compiled)
           }
         }
@@ -299,9 +299,9 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       reader: HybridScanReader,
       fetched: FetchedColumnChunks): Table = {
     GpuSemaphore.acquireIfNecessary(TaskContext.get())
-    NvtxIdWithMetrics(NvtxRegistry.HYBRID_SCAN_MATERIALIZE, metric(GPU_DECODE_TIME)) {
-      // The host chunks outlive each attempt, so a retry copies them again.
-      withRetryNoSplit[Table] {
+    // The host chunks outlive each attempt, so a retry copies them again.
+    withRetryNoSplit[Table] {
+      NvtxIdWithMetrics(NvtxRegistry.HYBRID_SCAN_MATERIALIZE, metric(GPU_DECODE_TIME)) {
         withResource(copyToDevice(fetched.hostChunks)) { deviceChunks =>
           reader.materializeAllColumns(fetched.rowGroups, deviceChunks)
         }
