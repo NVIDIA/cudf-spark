@@ -28,7 +28,8 @@ import org.apache.spark.sql.execution.SparkPlan
 
 /** Common planning gate for Iceberg table format versions. */
 object IcebergFormatVersionSupport {
-  private val MaxSupportedFormatVersion = 2
+  /** Maximum table format version supported without enabling v3 support. */
+  val MaxSupportedFormatVersion = 2
   private val SupportedDefaultTypeIds = EnumSet.of(
     Type.TypeID.BOOLEAN, Type.TypeID.INTEGER, Type.TypeID.LONG, Type.TypeID.FLOAT,
     Type.TypeID.DOUBLE, Type.TypeID.DATE, Type.TypeID.TIMESTAMP, Type.TypeID.STRING,

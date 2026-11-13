@@ -108,7 +108,8 @@ object GpuSparkScan {
       val table = GpuSparkScanAccess.table(meta.wrapped)
       val expectedSchema = GpuSparkScanAccess.expectedSchema(meta.wrapped)
       val schemaToCheck =
-        if (ShimUtils.formatVersion(table) > 2 && meta.conf.isIcebergV3Enabled) {
+        if (ShimUtils.formatVersion(table) >
+            IcebergFormatVersionSupport.MaxSupportedFormatVersion && meta.conf.isIcebergV3Enabled) {
           val equalityDeleteFieldIds = GpuSparkScanAccess.taskGroups(meta.wrapped)
             .asScala
             .flatMap(_.tasks().asScala)
