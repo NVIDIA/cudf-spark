@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids.delta
 
 import java.math.BigInteger
 
-import ai.rapids.cudf.{ColumnVector, ColumnView, Scalar}
+import ai.rapids.cudf.{BinaryOp, ColumnVector, DType, Scalar}
 import com.databricks.sql.transaction.tahoe.commands.merge.checksum.{
   ChecksumExpression,
   ChecksumMergeSource
@@ -104,24 +104,21 @@ case class GpuChecksumExpression(
 
   /** Product modulo MOD over the rows of the batch of the per-row combined checksum. */
   private def batchChecksum(batch: ColumnarBatch): Long = {
-    // A hash of 0 counts as 1 so that it does not zero the product.
-    def nonZero(hash: ColumnView): ColumnVector = {
-      withResource(Scalar.fromLong(0L)) { zero =>
-        withResource(Scalar.fromLong(1L)) { one =>
-          withResource(hash.equalTo(zero))(_.ifElse(one, hash))
-        }
+    // pmod is never negative, and a hash of 0 counts as 1 so that it does not zero the product.
+    def factor(h: Expression): ColumnVector = {
+      withResource(h.columnarEval(batch)) { hash =>
+        withResource(Scalar.fromLong(1L))(hash.getBase.binaryOp(BinaryOp.NULL_MAX, _, DType.INT64))
       }
     }
     withResource(Scalar.fromLong(ChecksumMergeSource.MOD)) { mod =>
-      withResource(hashedChildren.safeMap { h =>
-        withResource(h.columnarEval(batch))(hash => nonZero(hash.getBase))
-      }) { factors =>
-        // Every factor is below MOD < 2^31, so a product fits in a long.
-        val combined = factors.tail.foldLeft(factors.head.incRefCount()) { (acc, factor) =>
-          withResource(acc)(_ => withResource(acc.mul(factor))(_.mod(mod)))
-        }
-        withResource(combined)(productModulo(_, mod))
+      // Fold each child into the running product as soon as it is hashed, so that the peak does
+      // not grow with the number of children. Every factor is below MOD < 2^31, so a product fits
+      // in a long. The inputs are closed before the mod, which leaves three columns at the peak.
+      val combined = hashedChildren.tail.foldLeft(factor(hashedChildren.head)) { (acc, h) =>
+        val product = withResource(acc)(_ => withResource(factor(h))(acc.mul(_)))
+        withResource(product)(_.mod(mod))
       }
+      withResource(combined)(productModulo(_, mod))
     }
   }
 
@@ -145,16 +142,13 @@ case class GpuChecksumExpression(
     val rows = cur.getRowCount.toInt
     val half = rows / 2
     val carried = rows % 2
-    val reduced = withResource(cur.slice(0, half, half + carried, rows)) { halves =>
-      withResource(halves(0).mul(halves(1)))(_.mod(mod))
-    }
-    if (carried == 0) {
-      reduced
-    } else {
-      withResource(reduced) { r =>
-        withResource(cur.slice(half, half + 1)) { middle =>
-          ColumnVector.concatenate(r, middle(0))
-        }
+    // Views of the first half, the middle value when the length is odd, and the last half.
+    withResource(cur.splitAsViews(half, half + carried)) { views =>
+      val reduced = withResource(views(0).mul(views(2)))(_.mod(mod))
+      if (carried == 0) {
+        reduced
+      } else {
+        withResource(reduced)(ColumnVector.concatenate(_, views(1)))
       }
     }
   }
