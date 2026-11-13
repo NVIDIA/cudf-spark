@@ -66,7 +66,7 @@ class RapidsFutureTask[T](val runner: AsyncRunner[T])
         super.run()
         // Check if the runner was cancelled first, since super.isDone is also true
         // when cancelled, and an unconsumed result must be closed to avoid leaks.
-        if (isCancelled) {
+        if (isCancelled || rr.isCancelled) {
           rr.setState(Cancelled)
           rr.cleanUpResult()
         } else if (rr.result.nonEmpty && super.isDone) {
@@ -95,6 +95,10 @@ class RapidsFutureTask[T](val runner: AsyncRunner[T])
 
       // Expected states to bypass the execution
       case Pending =>
+        if (isCancelled || rr.isCancelled) {
+          rr.setState(Cancelled)
+          rr.cleanUpResult()
+        }
 
       case _ =>
         throw new IllegalStateException(s"should NOT reach this line: $rr")
@@ -221,6 +225,11 @@ class ResourceBoundedThreadExecutor(mgr: ResourcePool,
         case  _ => // do nothing
       }
 
+      // Check if runner or future was cancelled before acquiring memory
+      if (futTask.isCancelled || rr.isCancelled) {
+        rr.setState(Cancelled)
+      }
+
       // Check the runner state
       rr.getState match {
         // Cancelled case: Cancelled -> ScheduleFailed
@@ -242,14 +251,24 @@ class ResourceBoundedThreadExecutor(mgr: ResourcePool,
           acqStatus match {
             // Proceed to execution: Pending -> Running
             case s: AcquireSuccessful =>
-              rr.setState(Running)
-              futTask.scheduleTime += s.elapsedTime
+              if (futTask.isCancelled || rr.isCancelled) {
+                rr.setState(Cancelled)
+                if (rr.isHoldingResource) {
+                  rr.releaseResourceCallback()
+                }
+              } else {
+                rr.setState(Running)
+                futTask.scheduleTime += s.elapsedTime
+              }
             // Fail the scheduling: Pending -> ScheduleFailed
             case AcquireExcepted(ex) =>
               rr.setState(ScheduleFailed(ex))
               logError(s"$ex [$rr]")
             // Bypass the execution: Pending -> Pending
             case AcquireFailed =>
+              if (futTask.isCancelled || rr.isCancelled) {
+                rr.setState(Cancelled)
+              }
           }
 
         // Unexpected states
@@ -282,6 +301,13 @@ class ResourceBoundedThreadExecutor(mgr: ResourcePool,
       }
 
       // Post execution state handling
+      if (futTask.isCancelled || rr.isCancelled) {
+        if (rr.getState != Cancelled && !rr.getState.isInstanceOf[ExecFailed] &&
+            rr.getState != Completed) {
+          rr.setState(Cancelled)
+        }
+      }
+
       rr.getState match {
         case Cancelled | // very rare case: cancelled between execution and afterExecute
              ExecFailed(_) => // failed execution (ScheduleFailed should be cast to ExecFailed)
@@ -302,18 +328,25 @@ class ResourceBoundedThreadExecutor(mgr: ResourcePool,
           }
 
         case Pending => // timeout during resource acquisition
-          // Only runners in (`Completed`, `ExecFailed`, `Cancelled`) may hold resource
-          require(!rr.isHoldingResource, s"Pending state should NOT hold Resource: $rr")
-          // Requeue runners which failed to acquire resource and bypassed the execution.
-          futTask.scheduleTime += timeoutMs * 1000000L
-          rr.setState(Init(firstTime = false)) // reset to Init state for re-scheduling
-          // Re-add the task to the work queue for re-execution
-          if (!workQueue.add(futTask)) {
-            // Fatal error
-            throw new RuntimeException(
-              s"Failed to re-add $futTask to the work queue after execution")
+          if (futTask.isCancelled || rr.isCancelled) {
+            rr.setState(Cancelled)
+            if (rr.isHoldingResource) {
+              rr.releaseResourceCallback()
+            }
+          } else {
+            // Only runners in (`Completed`, `ExecFailed`, `Cancelled`) may hold resource
+            require(!rr.isHoldingResource, s"Pending state should NOT hold Resource: $rr")
+            // Requeue runners which failed to acquire resource and bypassed the execution.
+            futTask.scheduleTime += timeoutMs * 1000000L
+            rr.setState(Init(firstTime = false)) // reset to Init state for re-scheduling
+            // Re-add the task to the work queue for re-execution
+            if (!workQueue.add(futTask)) {
+              // Fatal error
+              throw new RuntimeException(
+                s"Failed to re-add $futTask to the work queue after execution")
+            }
+            logDebug(s"Re-add timeout runner: $futTask")
           }
-          logDebug(s"Re-add timeout runner: $futTask")
 
         case _: Closed => // Do nothing since the runner has been closed
 
