@@ -23,7 +23,8 @@ from conftest import is_not_utc
 from data_gen import *
 from pyspark import StorageLevel
 import pyspark.sql.functions as f
-from spark_session import with_cpu_session, with_gpu_session, is_spark_35x, is_spark_local_mode
+from spark_session import (with_cpu_session, with_gpu_session, with_spark_session, is_spark_35x,
+    is_spark_local_mode, is_before_spark_340, is_spark_350_or_351, is_databricks173_or_later)
 from join_test import create_df
 from marks import (incompat, allow_non_gpu, ignore_order, disable_ansi_mode, inject_oom,
     large_data_test)
@@ -453,9 +454,13 @@ def test_cache_map_and_array(data_gen, enable_vectorized):
 
     assert_gpu_and_cpu_are_equal_collect(helper)
 
-@allow_non_gpu('InMemoryTableScanExec')
+# UDT-bearing input operators and cached scans intentionally stay on the CPU.
+@allow_non_gpu('InMemoryTableScanExec', 'ShuffleExchangeExec', 'ProjectExec',
+    'SortAggregateExec', 'SortExec')
 @pytest.mark.parametrize('aqe_enabled', ['true', 'false'])
-def test_cache_udt(aqe_enabled):
+@pytest.mark.parametrize('cache_input', ['rows', 'repartition', 'aggregate'])
+@pytest.mark.parametrize('udt_column', ['all', 'mllib_v', 'ml_v', 'ml_array', 'ml_struct', 'ml_map'])
+def test_cache_udt(aqe_enabled, cache_input, udt_column):
     schema = StructType([
         StructField('mllib_v', mllib.VectorUDT(), nullable=True),
         StructField('ml_v', ml.VectorUDT(), nullable=True),
@@ -474,24 +479,132 @@ def test_cache_udt(aqe_enabled):
         (mllib.SparseVector(1, [0, ], [1, ]), ml.SparseVector(1, [0, ], [1, ]),
             [ml.SparseVector(1, [0, ], [1, ])], (ml.SparseVector(1, [0, ], [1, ]),),
             {'sparse': ml.SparseVector(1, [0, ], [1, ])},
-            Decimal('-12.34'), Decimal('-9876543210.12'))]
+            Decimal('-12.34'), Decimal('-9876543210.12')),
+        (None, None, [None], (None,), {'null': None}, Decimal('0.00'), Decimal('0.00'))]
 
     def fun(spark):
         df = spark.createDataFrame(spark.sparkContext.parallelize(values), schema)
+        if udt_column != 'all':
+            # Check each nested shape independently so a top-level UDT cannot mask a missing
+            # recursive schema check. Keep decimal columns alongside each UDT.
+            df = df.select(udt_column, 'decimal32', 'decimal64')
+        if cache_input == 'repartition':
+            df = df.repartition(2)
+        elif cache_input == 'aggregate':
+            columns = df.columns
+            df = df.withColumn('key', f.monotonically_increasing_id()).groupBy('key').agg(
+                *[f.first(c).alias(c) for c in columns]).select(*columns)
         df.cache().count()
         return df
 
     def canonicalize(cpu_result, gpu_result):
         # The generic result comparator does not handle vector UDT values. Check each round trip
         # against the source first, then give it stable strings for its final CPU/GPU comparison.
-        assert cpu_result == values, "CPU result not equal to source values"
-        assert gpu_result == values, "GPU result not equal to source values"
+        expected = values if udt_column == 'all' else [
+            (row[schema.fieldNames().index(udt_column)], row[-2], row[-1]) for row in values]
+        # Shuffle output order is unspecified; compare the complete values in a stable order.
+        expected = sorted(expected, key=lambda row: row[-2])
+        cpu_result = sorted(cpu_result, key=lambda row: row[-2])
+        gpu_result = sorted(gpu_result, key=lambda row: row[-2])
+        assert cpu_result == expected, "CPU result not equal to source values"
+        assert gpu_result == expected, "GPU result not equal to source values"
         return [repr(row) for row in cpu_result], [repr(row) for row in gpu_result]
 
     assert_gpu_fallback_collect(
         fun, 'InMemoryTableScanExec',
-        conf={'spark.sql.adaptive.enabled': aqe_enabled},
+        conf={'spark.sql.adaptive.enabled': aqe_enabled, 'spark.sql.shuffle.partitions': '2'},
         result_canonicalize_func_before_compare=canonicalize)
+
+# Generate these types in SQL and project strings because PySpark cannot collect calendar
+# intervals. NullType supports GPU columnar caching but not Spark's CPU row-to-columnar
+# conversion. Materialize the complete cache before projecting to exercise the AQE transition.
+@allow_non_gpu('InMemoryTableScanExec', 'ShuffleExchangeExec', 'ProjectExec', 'ColumnarToRowExec')
+@ignore_order(local=True)
+@pytest.mark.parametrize('aqe_enabled', ['true', 'false'])
+@pytest.mark.parametrize('cache_input', ['rows', 'repartition'])
+@pytest.mark.parametrize('value_expr, gpu_cache', [
+    ('null', True),
+    ('array(null)', True),
+    ("named_struct('code', null)", True),
+    ('map(1, null)', True),
+    ("named_struct('same', 7, 'same', 'second', '_pcbs_0', null)", True),
+    ('make_interval(1, 2, 0, cast(id as int), 4, 5, 6.123456)', False),
+    pytest.param("cast('2024-01-02 03:04:05.123456' as timestamp_ntz)", False,
+        marks=pytest.mark.skipif(is_before_spark_340(),
+            reason='SQL TIMESTAMP_NTZ syntax requires Spark 3.4 or newer'))],
+    ids=['null', 'array_null', 'struct_null', 'map_null', 'duplicate_struct_null',
+        'calendar_interval', 'timestamp_ntz'])
+def test_cache_unsupported_row_to_columnar_types(aqe_enabled, cache_input, value_expr, gpu_cache):
+    def fun(spark):
+        df = spark.range(4).selectExpr('id',
+            'case when id = 0 then null else {} end as value'.format(value_expr))
+        if cache_input == 'repartition':
+            df = df.repartition(2)
+        df.cache().count()
+        return df.selectExpr('id', 'cast(value as string) as value')
+
+    conf = {'spark.sql.adaptive.enabled': aqe_enabled, 'spark.sql.shuffle.partitions': '2'}
+    # Spark's default serializer keeps cache scans on the CPU, including GPU-supported types.
+    gpu_cache_supported = gpu_cache and _pcbs_enabled
+    if gpu_cache_supported:
+        conf['spark.rapids.sql.exec.InMemoryTableScanExec'] = 'true'
+    # Spark 3.5.0/3.5.1 cannot wrap a GPU cache scan in a table-cache stage (#10603).
+    # Databricks 17.3+ has no GPU replacement for that stage and also keeps its cache scan on CPU.
+    aqe_cache_fallback = ((is_spark_350_or_351() or is_databricks173_or_later()) and
+                          aqe_enabled == 'true' and cache_input == 'repartition')
+    if gpu_cache_supported and not aqe_cache_fallback:
+        assert_cpu_and_gpu_are_equal_collect_with_capture(
+            fun, exist_classes='GpuInMemoryTableScanExec', conf=conf)
+    else:
+        assert_gpu_fallback_collect(fun, 'InMemoryTableScanExec', conf=conf)
+
+@pytest.mark.parametrize('value_expr', ['null', 'array(null)',
+    "named_struct('code', null)", 'map(1, null)'],
+    ids=['null', 'array_null', 'struct_null', 'map_null'])
+@pytest.mark.parametrize('materialization_mode', ['disabled', 'explainOnly', 'enabled'])
+def test_cache_nulltype_mode_change_before_materialization(value_expr, materialization_mode):
+    def oracle(spark):
+        expected = spark.range(4).selectExpr('id',
+            'cast({} as string) as value'.format(value_expr)).orderBy('id')
+        return expected.schema, expected.collect()
+
+    expected_schema, expected_rows = with_cpu_session(oracle)
+
+    def check(spark):
+        cached = spark.range(4).selectExpr('id', value_expr + ' as value').repartition(2).cache()
+        try:
+            # The cached AQE plan can capture a different execution mode at registration.
+            if materialization_mode == 'explainOnly':
+                spark.conf.set('spark.rapids.sql.mode', 'explainOnly')
+            else:
+                spark.conf.set('spark.rapids.sql.enabled',
+                    str(materialization_mode == 'enabled').lower())
+            assert cached.count() == 4
+            actual = cached.selectExpr('id', 'cast(value as string) as value').orderBy('id')
+            assert actual.schema == expected_schema
+            assert actual.collect() == expected_rows
+            if materialization_mode == 'enabled' and _pcbs_enabled:
+                plan = actual._jdf.queryExecution().executedPlan().toString()
+                if is_spark_350_or_351() or is_databricks173_or_later():
+                    # AQE table-cache query stages require a CPU cache scan on these versions.
+                    spark._jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.assertDidFallBack(
+                        actual._jdf, 'InMemoryTableScanExec')
+                    assert 'GpuInMemoryTableScan' not in plan
+                    assert 'GpuSort' in plan
+                else:
+                    assert 'GpuInMemoryTableScan' in plan
+        finally:
+            cached.unpersist(blocking=True)
+
+    with_spark_session(check, conf={
+        'spark.rapids.sql.enabled': str(materialization_mode != 'enabled').lower(),
+        'spark.rapids.sql.mode': 'executeOnGPU',
+        'spark.rapids.sql.exec.InMemoryTableScanExec': 'true',
+        'spark.sql.adaptive.enabled': 'true',
+        'spark.sql.shuffle.partitions': '2',
+        # Keep the original session so execution observes the later mode change.
+        'spark.sql.sources.bucketing.autoBucketedScan.enabled': 'false',
+        'spark.sql.adaptive.applyFinalStageShuffleOptimizations': 'false'})
 
 @pytest.mark.parametrize('enable_vectorized_conf', enable_vectorized_confs, ids=idfn)
 @ignore_order(local=True)

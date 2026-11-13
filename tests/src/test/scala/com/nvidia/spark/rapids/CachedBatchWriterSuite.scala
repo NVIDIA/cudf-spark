@@ -155,6 +155,32 @@ class CachedBatchWriterSuite extends SparkQueryCompareTestSuite {
     }
   }
 
+  test("PCBS columnar input avoids unsupported row-to-columnar transitions") {
+    val ser = new ParquetCachedBatchSerializer
+    val unsupportedInputTypes = Seq(new TestPrimitiveUDT, CalendarIntervalType,
+      DataType.fromJson("\"timestamp_ntz\""))
+    unsupportedInputTypes.foreach { unsupported =>
+      val unsupportedTypes = Seq(unsupported, ArrayType(unsupported),
+        StructType(Seq(StructField("value", unsupported))),
+        MapType(StringType, unsupported), MapType(unsupported, IntegerType),
+        ArrayType(StructType(Seq(StructField("value", MapType(StringType, unsupported))))))
+      unsupportedTypes.foreach { dataType =>
+        val schema = Seq(AttributeReference("value", dataType)())
+        assert(!ser.supportsColumnarInput(schema),
+          s"Unexpected columnar input support for $dataType")
+      }
+    }
+    val ordinarySchema = Seq[DataType](BooleanType, ByteType, ShortType, IntegerType, LongType,
+      FloatType, DoubleType, DateType, TimestampType, StringType, BinaryType, NullType,
+      DecimalType(12, 2), DayTimeIntervalType(), YearMonthIntervalType(),
+      ArrayType(StructType(Seq(StructField("value", IntegerType)))),
+      MapType(StringType, ArrayType(LongType))).zipWithIndex.map { case (dataType, index) =>
+      AttributeReference(s"value$index", dataType)()
+    }
+    assert(ser.supportsColumnarInput(ordinarySchema))
+    assert(ser.supportsColumnarInput(Seq.empty))
+  }
+
   test("PCBS schema conversion supports nested UDTs") {
     val udt = new TestPrimitiveUDT
     assert(PCBSSchemaHelper.getSupportedDataType(

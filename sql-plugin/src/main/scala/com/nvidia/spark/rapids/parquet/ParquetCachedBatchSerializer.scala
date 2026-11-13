@@ -213,7 +213,11 @@ private case class CloseableColumnBatchIterator(iter: Iterator[ColumnarBatch]) e
  */
 class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
 
-  override def supportsColumnarInput(schema: Seq[Attribute]): Boolean = true
+  override def supportsColumnarInput(schema: Seq[Attribute]): Boolean = {
+    // Cached AQE plans can insert a row-to-columnar transition. Only accept schemas the GPU
+    // converter can materialize, including nested types; use the row cache path otherwise.
+    schema.forall(attribute => GpuRowToColumnConverter.supportsType(attribute.dataType))
+  }
 
   override def supportsColumnarOutput(schema: StructType): Boolean = schema.fields.forall { f =>
     // only check spark b/c if we are on the GPU then we will be calling the gpu method regardless
