@@ -16,6 +16,8 @@
 
 package com.nvidia.spark.rapids.iceberg
 
+import java.util.EnumSet
+
 import scala.collection.JavaConverters._
 
 import com.nvidia.spark.rapids.{RapidsConf, RapidsMeta}
@@ -27,7 +29,7 @@ import org.apache.spark.sql.execution.SparkPlan
 /** Common planning gate for Iceberg table format versions. */
 object IcebergFormatVersionSupport {
   private val MaxSupportedFormatVersion = 2
-  private val SupportedDefaultTypeIds = Set(
+  private val SupportedDefaultTypeIds = EnumSet.of(
     Type.TypeID.BOOLEAN, Type.TypeID.INTEGER, Type.TypeID.LONG, Type.TypeID.FLOAT,
     Type.TypeID.DOUBLE, Type.TypeID.DATE, Type.TypeID.TIMESTAMP, Type.TypeID.STRING,
     Type.TypeID.BINARY, Type.TypeID.DECIMAL)
