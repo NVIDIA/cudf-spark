@@ -68,6 +68,12 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
   /** Tracks the next table identifier */
   private[this] val tableIdCounter = new AtomicInteger(0)
 
+  /**
+   * Shuffles a reclaim removed, for which a later unregister is expected. The set's own monitor
+   * guards it, as a leaf lock held for one read or write and never across a free.
+   */
+  private[this] val reclaimedShuffleIds = new java.util.BitSet()
+
   private def trackCachedHandle(
       bufferId: ShuffleBufferId,
       handle: SpillableDeviceBufferHandle,
@@ -100,19 +106,32 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
 
   /**
    * Removes the lookup entries of buffers already detached from their blocks, then closes
-   * every removed handle, even if one close fails.
+   * every removed handle, even if one close fails. Once `isStopped` reads true it closes no
+   * further handle, and the spill framework's shutdown closes the rest.
+   *
+   * @return how many lookup entries this removed, and the size of the handles it removed
    */
-  private def removeAndCloseBuffers(bufferIds: Iterable[ShuffleBufferId]): Unit = {
+  private def removeAndCloseBuffers(
+      bufferIds: Iterable[ShuffleBufferId],
+      isStopped: () => Boolean = () => false): (Int, Long) = {
     val handles = new ArrayBuffer[SpillableDeviceBufferHandle]()
+    var removed = 0
+    var bytes = 0L
     bufferIds.foreach { id =>
       // table ids wrap around, so only remove the mapping if it is still this buffer's
       tableMap.remove(id.tableId, id)
       val handleAndMeta = bufferIdToHandle.remove(id)
       if (handleAndMeta != null) {
-        handles ++= handleAndMeta._1
+        removed += 1
+        handleAndMeta._1.foreach { handle =>
+          handles += handle
+          bytes += handle.sizeInBytes
+        }
       }
     }
-    handles.safeClose()
+    // each close checks for a stop first, so a stop ends the frees at the next handle
+    handles.map(handle => (() => if (!isStopped()) handle.close()): AutoCloseable).safeClose()
+    (removed, bytes)
   }
 
   /** Entry counts of bufferIdToHandle, tableMap and the per-block lists, which agree. */
@@ -213,9 +232,68 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
    * Register a new shuffle.
    * This must be called before any buffer identifiers associated with this shuffle can be tracked.
    * @param shuffleId shuffle identifier
+   * @param writerTaskId the task attempt id of the map task that writes through the registration
    */
-  def registerShuffle(shuffleId: Int): Unit = {
-    activeShuffles.computeIfAbsent(shuffleId, _ => new ShuffleRegistration(mapIdsCanRepeat))
+  def registerShuffle(shuffleId: Int, writerTaskId: Long): Unit = {
+    activeShuffles.compute(shuffleId, (_, existing) => {
+      val registration =
+        if (existing == null) new ShuffleRegistration(mapIdsCanRepeat) else existing
+      registration.recordWriter(writerTaskId)
+      registration
+    })
+  }
+
+  /**
+   * Registers a shuffle for a caller that passes no task id, as a writer at `Long.MaxValue`, so
+   * only a reclaim at that watermark removes the registration. An overload, unlike a default
+   * argument, lets `registerShuffle` still pass as a function of the shuffle id.
+   */
+  def registerShuffle(shuffleId: Int): Unit = registerShuffle(shuffleId, Long.MaxValue)
+
+  /**
+   * Frees what this executor holds of a shuffle when every writer that registered it is at or
+   * below `watermark`, by removing the registration whole. While a writer above the watermark is
+   * registered, it frees nothing, since that writer's output shares the registration. Only a UCX
+   * shuffle cleanup endpoint reclaims, so a CACHE_ONLY catalog never does.
+   *
+   * @param shuffleId the shuffle to reclaim
+   * @param watermark the largest task attempt id whose output may be freed
+   * @param isStopped read before each buffer's free. Once it reads true, the reclaim frees no
+   *                  further buffer, and the spill framework's shutdown closes the rest, which
+   *                  the reclaim has already removed from the catalog and still counts.
+   * @return what the reclaim freed
+   */
+  def reclaimShuffle(
+      shuffleId: Int,
+      watermark: Long,
+      isStopped: () => Boolean = () => false): ShuffleReclaimResult = {
+    // the frees need the device, which a caller's thread may not have set
+    GpuDeviceManager.getDeviceId().foreach(Cuda.setDevice)
+    val startNanos = System.nanoTime()
+    var deferred = false
+    val detached = removeRegistration(shuffleId) { registration =>
+      val reclaimable = registration.mayReclaimAt(watermark)
+      if (reclaimable) {
+        // marked before the removal, so a removal that finds no registration finds the mark
+        reclaimedShuffleIds.synchronized(reclaimedShuffleIds.set(shuffleId))
+      } else {
+        deferred = true
+      }
+      reclaimable
+    }
+    // frees are slow, so they run outside every map lock
+    val (buffers, bytes) = detached
+      .map(registration => removeAndCloseBuffers(registration.listedBufferIds, isStopped))
+      .getOrElse((0, 0L))
+    val outcome = if (deferred) {
+      ShuffleReclaimOutcome.DEFERRED
+    } else if (buffers > 0) {
+      ShuffleReclaimOutcome.REMOVED
+    } else {
+      ShuffleReclaimOutcome.ABSENT
+    }
+    ShuffleReclaimResult(shuffleId, watermark, outcome, buffers, bytes,
+      System.nanoTime() - startNanos, None)
   }
 
   /** Frees all buffers that correspond to the specified shuffle. */
@@ -223,21 +301,40 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
     // This might be called on a background thread that has not set the device yet.
     GpuDeviceManager.getDeviceId().foreach(Cuda.setDevice)
 
-    val info = activeShuffles.remove(shuffleId)
-    if (info != null) {
-      val bufferIds = new ArrayBuffer[ShuffleBufferId]()
-      val idCollector: Consumer[ArrayBuffer[ShuffleBufferId]] = { blockBufferIds =>
-        // a failed writer of this shuffle can still be removing its own buffers
-        bufferIds ++= blockBufferIds.synchronized(blockBufferIds.toList)
-      }
-      info.blocks.forEachValue(Long.MaxValue, idCollector)
-      removeAndCloseBuffers(bufferIds)
-    } else {
-      // currently shuffle unregister can get called on the driver which never saw a register
-      if (!TrampolineUtil.isDriver(SparkEnv.get)) {
-        logWarning(s"Ignoring unregister of unknown shuffle $shuffleId")
-      }
+    removeRegistration(shuffleId)(_ => true) match {
+      case Some(info) =>
+        removeAndCloseBuffers(info.listedBufferIds)
+      case None =>
+        val reclaimed = reclaimedShuffleIds.synchronized(reclaimedShuffleIds.get(shuffleId))
+        if (reclaimed) {
+          logDebug(s"Ignoring unregister of reclaimed shuffle $shuffleId")
+        } else if (!TrampolineUtil.isDriver(SparkEnv.get)) {
+          // currently shuffle unregister can get called on the driver which never saw a register
+          logWarning(s"Ignoring unregister of unknown shuffle $shuffleId")
+        }
     }
+  }
+
+  /**
+   * Takes a shuffle's registration out of `activeShuffles` when `shouldRemove` approves it, and
+   * marks it removed first, inside the same map operation, so an old-protocol commit lands
+   * wholly before the removal or fails. Every removal of a registration goes through here.
+   *
+   * @return the registration removed, if any
+   */
+  private def removeRegistration(shuffleId: Int)(
+      shouldRemove: ShuffleRegistration => Boolean): Option[ShuffleRegistration] = {
+    var removed: ShuffleRegistration = null
+    activeShuffles.computeIfPresent(shuffleId, (_, registration) => {
+      if (shouldRemove(registration)) {
+        registration.markRemoved()
+        removed = registration
+        null
+      } else {
+        registration
+      }
+    })
+    Option(removed)
   }
 
   def hasActiveShuffle(shuffleId: Int): Boolean = activeShuffles.containsKey(shuffleId)
@@ -339,9 +436,10 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
    *
    * @param bufferIds every buffer the attempt added, which the catalog owns once this returns
    * @param sizes the attempt's size of each partition, as its MapStatus reports them
-   * @throws java.lang.IllegalStateException if the shuffle has no registration that lists every
-   *                                         buffer, as after an unregister, leaving the buffers
-   *                                         with the caller
+   * @throws java.lang.IllegalStateException if the shuffle's registration is gone, is removed
+   *                                         before the commit records its output, or does not
+   *                                         list every buffer, leaving the buffers with the
+   *                                         caller
    */
   def commitMapOutput(
       shuffleId: Int,
@@ -349,33 +447,14 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
       bufferIds: Iterable[ShuffleBufferId],
       sizes: Array[Long]): Unit = {
     val info = activeShuffles.get(shuffleId)
-    if (info == null || !listsAll(info, bufferIds)) {
-      throw new IllegalStateException(s"Shuffle $shuffleId was cleaned up on this executor " +
-        s"before map $mapId committed its output")
+    if (info == null) {
+      throw ShuffleBufferCatalog.cleanedUpBeforeCommit(shuffleId, mapId)
     }
-    val outputs = info.committedOutputs.get
-    val committed = outputs.putIfAbsent(mapId, new CommittedMapOutput(bufferIds, sizes))
-    if (committed != null) {
+    info.commitMapOutput(shuffleId, mapId, bufferIds, sizes).foreach { committed =>
       logInfo(s"Map $mapId of shuffle $shuffleId already has a committed output on this " +
         s"executor, discarding the ${bufferIds.size} buffers of a later attempt")
       committed.copySizesTo(sizes)
       removeCachedHandles(bufferIds)
-    }
-  }
-
-  /**
-   * Whether `info` lists every buffer in `bufferIds`. Each block's list is copied into a set once,
-   * since a map can add many batches to one block.
-   */
-  private def listsAll(
-      info: ShuffleRegistration,
-      bufferIds: Iterable[ShuffleBufferId]): Boolean = {
-    bufferIds.groupBy(_.blockId).forall { case (blockId, ids) =>
-      val blockBufferIds = info.blocks.get(blockId)
-      blockBufferIds != null && {
-        val listed = blockBufferIds.synchronized(blockBufferIds.toSet)
-        ids.forall(listed.contains)
-      }
     }
   }
 
@@ -386,9 +465,7 @@ class ShuffleBufferCatalog(val mapIdsCanRepeat: Boolean = false) extends Logging
       throw new ShuffleOutputGoneException(
         s"unknown shuffle ${blockId.shuffleId} for block $blockId")
     }
-    val outputs = info.committedOutputs.get
-    val output = outputs.get(blockId.mapId)
-    val ids = if (output == null) None else output.bufferIds(blockId.reduceId)
+    val ids = info.committedOutput(blockId.mapId).flatMap(_.bufferIds(blockId.reduceId))
     ids.getOrElse(throw new ShuffleOutputGoneException(s"unknown shuffle block $blockId"))
   }
 
@@ -510,6 +587,10 @@ object ShuffleBufferCatalog {
   /**
    * Information stored for each active shuffle. A removal takes all of it at once, so a later
    * registration of the shuffle starts with no blocks and no committed outputs.
+   *
+   * The registration's monitor orders commits against removals. A removal takes it inside the
+   * `activeShuffles` operation that removes the registration, and a commit holds it while it
+   * takes block-list monitors, so the locks nest in that order only.
    */
   private[rapids] final class ShuffleRegistration(mapIdsCanRepeat: Boolean) {
     /**
@@ -519,7 +600,86 @@ object ShuffleBufferCatalog {
     val blocks = new ConcurrentHashMap[ShuffleBlockId, ArrayBuffer[ShuffleBufferId]]
 
     /** Only when map ids can repeat: the output readers are served for each map id. */
-    val committedOutputs: Option[ConcurrentHashMap[Long, CommittedMapOutput]] =
+    private val committedOutputs: Option[ConcurrentHashMap[Long, CommittedMapOutput]] =
       if (mapIdsCanRepeat) Some(new ConcurrentHashMap[Long, CommittedMapOutput]) else None
+
+    /** Whether a removal took this registration. Guarded by this registration's monitor. */
+    private var removed = false
+
+    /**
+     * The largest task attempt id of a writer that registered the shuffle. `recordWriter` runs
+     * only inside `activeShuffles.compute` and `mayReclaimAt` only inside
+     * `activeShuffles.computeIfPresent`, for the same key, so the key's bin lock orders the two.
+     */
+    private var maxWriterTaskId: Long = Long.MinValue
+
+    private[ShuffleBufferCatalog] def recordWriter(taskId: Long): Unit =
+      maxWriterTaskId = math.max(maxWriterTaskId, taskId)
+
+    /** Whether every writer that registered the shuffle is at or below `watermark`. */
+    private[ShuffleBufferCatalog] def mayReclaimAt(watermark: Long): Boolean =
+      maxWriterTaskId <= watermark
+
+    /** Called by a removal before the registration leaves `activeShuffles`. */
+    private[ShuffleBufferCatalog] def markRemoved(): Unit = synchronized {
+      removed = true
+    }
+
+    /**
+     * Records an attempt's output for `mapId`, unless an earlier attempt's is already recorded.
+     * A commit then lands wholly before any removal of this registration, or fails.
+     *
+     * @return the output recorded earlier for the map, if there is one
+     * @throws java.lang.IllegalStateException if a removal took this registration, or it does
+     *                                         not list every buffer in `bufferIds`
+     */
+    private[ShuffleBufferCatalog] def commitMapOutput(
+        shuffleId: Int,
+        mapId: Long,
+        bufferIds: Iterable[ShuffleBufferId],
+        sizes: Array[Long]): Option[CommittedMapOutput] = {
+      // built before the monitor, which a removal waits for while it holds its map bin
+      val output = new CommittedMapOutput(bufferIds, sizes)
+      val idsByBlock = bufferIds.groupBy(_.blockId)
+      synchronized {
+        if (removed || !listsAll(idsByBlock)) {
+          throw cleanedUpBeforeCommit(shuffleId, mapId)
+        }
+        Option(committedOutputs.get.putIfAbsent(mapId, output))
+      }
+    }
+
+    /** The output readers are served for `mapId`, if one is committed. */
+    private[ShuffleBufferCatalog] def committedOutput(mapId: Long): Option[CommittedMapOutput] =
+      Option(committedOutputs.get.get(mapId))
+
+    /**
+     * Whether this registration lists every buffer in `idsByBlock`. Each block's list is copied
+     * into a set once, since a map can add many batches to one block.
+     */
+    private def listsAll(idsByBlock: Map[ShuffleBlockId, Iterable[ShuffleBufferId]]): Boolean =
+      idsByBlock.forall { case (blockId, ids) =>
+        val blockBufferIds = blocks.get(blockId)
+        blockBufferIds != null && {
+          val listed = blockBufferIds.synchronized(blockBufferIds.toSet)
+          ids.forall(listed.contains)
+        }
+      }
+
+    /** Every buffer this registration lists, once a removal has taken it out of the catalog. */
+    private[ShuffleBufferCatalog] def listedBufferIds: Iterable[ShuffleBufferId] = {
+      val bufferIds = new ArrayBuffer[ShuffleBufferId]()
+      val idCollector: Consumer[ArrayBuffer[ShuffleBufferId]] = { blockBufferIds =>
+        // a failed writer of this shuffle can still be removing its own buffers
+        bufferIds ++= blockBufferIds.synchronized(blockBufferIds.toList)
+      }
+      blocks.forEachValue(Long.MaxValue, idCollector)
+      bufferIds
+    }
   }
+
+  /** The failure of a commit that finds its shuffle's registration gone. */
+  private def cleanedUpBeforeCommit(shuffleId: Int, mapId: Long): IllegalStateException =
+    new IllegalStateException(s"Shuffle $shuffleId was cleaned up on this executor " +
+      s"before map $mapId committed its output")
 }
