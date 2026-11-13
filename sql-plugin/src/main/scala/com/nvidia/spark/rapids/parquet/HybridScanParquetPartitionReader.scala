@@ -23,23 +23,28 @@ import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
+import com.nvidia.spark.rapids.shims.SparkShimImpl
+import org.apache.hadoop.conf.Configuration
 
 import org.apache.spark.TaskContext
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.util.RebaseDateTime
 import org.apache.spark.sql.connector.read.PartitionReader
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
  * What the plan phase hands the materialize phase: the row groups the read kept and the
- * column-chunk bytes fetched for them, one host buffer per planned range in request order. The
- * host buffers are this object's to close, and closing it again does nothing.
+ * column-chunk bytes fetched for them, one host buffer per planned range in request order.
+ * `backing` is the one buffer the chunks slice, when they came straight from a fetch. The host
+ * buffers are this object's to close, and closing it again does nothing.
  */
 private[parquet] class FetchedColumnChunks(
     val rowGroups: Array[Int],
-    val hostChunks: Array[HostMemoryBuffer]) extends AutoCloseable {
+    val hostChunks: Array[HostMemoryBuffer],
+    val backing: Option[HostMemoryBuffer] = None) extends AutoCloseable {
   private var closed = false
 
   def isClosed: Boolean = closed
@@ -47,7 +52,7 @@ private[parquet] class FetchedColumnChunks(
   override def close(): Unit = {
     if (!closed) {
       closed = true
-      hostChunks.safeClose()
+      (hostChunks ++ backing).safeClose()
     }
   }
 }
@@ -101,10 +106,13 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       val ranges = NvtxRegistry.HYBRID_SCAN_GET_BYTE_RANGES {
         reader.allColumnChunksByteRanges(rowGroups)
       }
-      val hostChunks = NvtxRegistry.HYBRID_SCAN_READ_DATA {
-        split.source.fetch(ranges)
+      val buffer = NvtxRegistry.HYBRID_SCAN_READ_DATA {
+        split.source.fetchToBuffer(ranges)
       }
-      Some(new FetchedColumnChunks(rowGroups, hostChunks))
+      closeOnExcept(buffer) { _ =>
+        val hostChunks = HybridScanPipeline.sliceRanges(buffer, ranges)
+        Some(new FetchedColumnChunks(rowGroups, hostChunks, Some(buffer)))
+      }
     }
   }
 
@@ -549,6 +557,17 @@ object HybridScanPipeline extends Logging {
   }
 
   /**
+   * One slice per range of a buffer laid out by [[hostBufferLayout]], in the order requested.
+   * Each slice holds a reference to the buffer, which stays the caller's to close.
+   */
+  private[parquet] def sliceRanges(
+      buffer: HostMemoryBuffer,
+      ranges: Array[ByteRange]): Array[HostMemoryBuffer] = {
+    val layout = hostBufferLayout(ranges)
+    ranges.indices.toArray.safeMap(i => buffer.slice(layout.offsets(i), ranges(i).size()))
+  }
+
+  /**
    * Whether this scan's reads can go through the hybrid scan reader, reporting why not when they
    * cannot. Reported rather than left silent: the hybrid path is off by default and needs several
    * settings to line up, so a scan that quietly stays on parquet-mr is otherwise hard to tell
@@ -573,15 +592,59 @@ object HybridScanPipeline extends Logging {
       useChunkedReader, decompressAnyCpu, useFieldId, ignoreCorruptFiles, decryptionConfigured,
       dateRebaseMode, int96RebaseMode)
     if (hybridScanEnabled) {
-      reason.foreach { r =>
-        if (failOnFallback) {
-          throw new IllegalStateException(
-            s"Hybrid scan read fell back to the parquet-mr path: $r")
-        }
-        logWarning(s"Hybrid scan is enabled but this read stays on the parquet-mr path: $r")
-      }
+      reason.foreach(reportFallback(failOnFallback, _))
     }
     reason.isEmpty
+  }
+
+  /**
+   * The hybrid scan config for a scan, or None to keep it on parquet-mr. Both Parquet factories
+   * call this so they decide the same way. See [[isEligible]] for what makes a scan eligible.
+   *
+   * @param hybridScanAllowed whether the caller supports the hybrid scan for this scan
+   */
+  def configFor(
+      rapidsConf: RapidsConf,
+      sqlConf: SQLConf,
+      hadoopConf: Configuration,
+      hybridScanAllowed: Boolean,
+      readDataSchema: StructType,
+      filters: Array[Filter],
+      useChunkedReader: Boolean,
+      compressCfg: CpuCompressionConfig,
+      useFieldId: Boolean): Option[HybridScanConfig] = {
+    val failOnFallback = rapidsConf.testParquetHybridScanFailOnFallback
+    if (!rapidsConf.isParquetHybridScanEnabled) {
+      None
+    } else if (!hybridScanAllowed) {
+      reportFallback(failOnFallback, "the hybrid scan is not supported for this read in this " +
+        s"configuration, see ${RapidsConf.PARQUET_HYBRID_SCAN_ENABLED.key}")
+      None
+    } else {
+      val pushedFilters = if (sqlConf.parquetFilterPushDown) filters else Array.empty[Filter]
+      val config = HybridScanConfig(rapidsConf,
+        new HybridScanFilters(readDataSchema, sqlConf.caseSensitiveAnalysis, pushedFilters))
+      val eligible = isEligible(hybridScanEnabled = true, failOnFallback, readDataSchema,
+        config.filters, useChunkedReader,
+        compressCfg.decompressSnappyCpu || compressCfg.decompressZstdCpu, useFieldId,
+        sqlConf.ignoreCorruptFiles, GpuParquetFileFilterHandler.isDecryptionConfigured(hadoopConf),
+        DateTimeRebaseMode.fromName(SparkShimImpl.parquetRebaseRead(sqlConf)),
+        DateTimeRebaseMode.fromName(SparkShimImpl.int96ParquetRebaseRead(sqlConf)))
+      if (eligible) Some(config) else None
+    }
+  }
+
+  /** Whether the multi-file reader type can run the hybrid scan, which COALESCING cannot. */
+  def multiFileReaderTypeAllowsHybrid(rapidsConf: RapidsConf): Boolean =
+    !rapidsConf.isParquetCoalesceFileReadEnabled || rapidsConf.isParquetAutoReaderEnabled
+
+  /** Report that a read stays on the parquet-mr path although the hybrid scan is enabled. */
+  def reportFallback(failOnFallback: Boolean, reason: String): Unit = {
+    if (failOnFallback) {
+      throw new IllegalStateException(
+        s"Hybrid scan read fell back to the parquet-mr path: $reason")
+    }
+    logWarning(s"Hybrid scan is enabled but this read stays on the parquet-mr path: $reason")
   }
 
   /**

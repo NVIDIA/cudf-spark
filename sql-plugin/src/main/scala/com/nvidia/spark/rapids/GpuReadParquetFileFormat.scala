@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids
 
-import com.nvidia.spark.rapids.parquet.{GpuParquetMultiFilePartitionReaderFactory, GpuParquetPartitionReaderFactory, GpuParquetPartitionReaderFactoryBase, GpuParquetScan}
+import com.nvidia.spark.rapids.parquet.{GpuParquetMultiFilePartitionReaderFactory, GpuParquetPartitionReaderFactory, GpuParquetPartitionReaderFactoryBase, GpuParquetScan, HybridScanPipeline}
 import org.apache.hadoop.conf.Configuration
 
 import org.apache.spark.broadcast.Broadcast
@@ -37,6 +37,9 @@ import org.apache.spark.util.SerializableConfiguration
  * A FileFormat that allows reading Parquet files with the GPU.
  */
 class GpuReadParquetFileFormat extends ParquetFileFormat with GpuReadFileFormatWithMetrics {
+
+  // Delta's formats are the only subclasses of this one, and they inherit its factory methods.
+  private def isDeltaParquetSource = getClass != classOf[GpuReadParquetFileFormat]
 
   /**
    * Create a partition reader factory for the per-file reader.
@@ -59,7 +62,8 @@ class GpuReadParquetFileFormat extends ParquetFileFormat with GpuReadFileFormatW
       filters.toArray,
       rapidsConf,
       metrics,
-      options)
+      options,
+      !isDeltaParquetSource)
   }
 
   override def buildReaderWithPartitionValuesAndMetrics(
@@ -105,7 +109,9 @@ class GpuReadParquetFileFormat extends ParquetFileFormat with GpuReadFileFormatW
       fileScan.rapidsConf,
       poolConf,
       fileScan.allMetrics,
-      fileScan.queryUsesInputFile)
+      fileScan.queryUsesInputFile,
+      !isDeltaParquetSource &&
+        HybridScanPipeline.multiFileReaderTypeAllowsHybrid(fileScan.rapidsConf))
   }
 }
 

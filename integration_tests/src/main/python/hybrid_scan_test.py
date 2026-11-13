@@ -24,7 +24,7 @@ import pytest
 from datetime import date, datetime, timezone
 
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_spark_exception
-from conftest import is_not_utc
+from conftest import is_databricks_runtime, is_not_utc
 from data_gen import *
 from marks import allow_non_gpu, inject_oom
 from parquet_test import hybrid_fallback_parquet_file_reader_conf, hybrid_parquet_file_reader_conf, \
@@ -41,8 +41,8 @@ def fallback_conf(**overrides):
 
 
 def hybrid_mt_conf(**overrides):
-    """The hybrid conf on the MULTITHREADED reader. failOnFallback stays on, so a read that drops
-    to parquet-mr fails the query, proving the multithreaded hybrid path actually ran."""
+    """The hybrid conf on the MULTITHREADED reader. failOnFallback stays on, so a read the
+    eligibility check rejects fails the query instead of dropping to parquet-mr."""
     return hybrid_conf(**{'spark.rapids.sql.format.parquet.reader.type': 'MULTITHREADED',
                           **overrides})
 
@@ -253,8 +253,8 @@ def test_hybrid_scan_retry_oom_in_reader(spark_tmp_path, reader_confs):
 def test_hybrid_scan_retry_oom_in_stats_pruning(spark_tmp_path, reader_confs):
     """An OOM while statistics pruning evaluates the filter on the GPU is retried.
 
-    Statistics rule out every row group, so the statistics call is the only GPU work in the read
-    and the injected OOM lands there.
+    The injection arms an OOM in each retry block. Statistics rule out every row group, so the
+    statistics retry is the only one the read runs.
     """
     data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
     with_cpu_session(lambda spark: write_test_data(spark, data_path))
@@ -376,6 +376,24 @@ def test_hybrid_scan_ineligible_reads_are_still_correct(spark_tmp_path, override
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.parquet(data_path).filter('sorted_int < 500'),
         conf=fallback_conf(**overrides))
+
+
+@pytest.mark.parametrize('reader_type,error', [
+    ('COALESCING', 'the hybrid scan is not supported for this read in this configuration'),
+    pytest.param('AUTO', 'support the COALESCING reader, which the AUTO reader type chose',
+                 marks=pytest.mark.skipif(is_databricks_runtime(),
+                                          reason='AUTO picks MULTITHREADED for DBFS paths')),
+], ids=['coalescing', 'auto_local'])
+def test_hybrid_scan_coalescing_reader_reports_fallback(spark_tmp_path, reader_type, error):
+    """The coalescing reader never runs hybrid, so a read it takes reports the fallback. AUTO
+    chooses it for local files."""
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(lambda spark: write_test_data(spark, data_path))
+    assert_spark_exception(
+        lambda: with_gpu_session(
+            lambda spark: spark.read.parquet(data_path).filter('sorted_int < 500').collect(),
+            conf=hybrid_conf(**{'spark.rapids.sql.format.parquet.reader.type': reader_type})),
+        error_message=error)
 
 
 @pytest.mark.parametrize('reader_confs', fallback_reader_confs)

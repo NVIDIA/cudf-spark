@@ -19,7 +19,7 @@ package com.nvidia.spark.rapids.parquet
 import java.io.FileNotFoundException
 import java.net.URI
 
-import ai.rapids.cudf.{HostMemoryBuffer, ParquetOptions, Table}
+import ai.rapids.cudf.{HostMemoryBuffer, Table}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
@@ -52,36 +52,38 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
     fileIO: RapidsFileIO,
     conf: Configuration,
     files: Array[PartitionedFile],
-    config: HybridScanConfig,
-    readDataSchema: StructType,
-    parquetOptions: ParquetOptions,
+    context: HybridScanContext,
     readFooter: (PartitionedFile, Configuration) => HostMemoryBuffer,
     maxReadBatchSizeRows: Integer,
     maxReadBatchSizeBytes: Long,
     maxGpuColumnSizeBytes: Long,
-    execMetrics: Map[String, GpuMetric],
     partitionSchema: StructType,
     poolConf: ThreadPoolConf,
     maxNumFileProcessed: Int,
     ignoreMissingFiles: Boolean,
     keepReadsInOrder: Boolean)
   extends MultiFileCloudPartitionReaderBase(conf, files, poolConf, maxNumFileProcessed, null,
-    execMetrics, maxReadBatchSizeRows, maxReadBatchSizeBytes, keepReadsInOrder = keepReadsInOrder)
+    context.execMetrics, maxReadBatchSizeRows, maxReadBatchSizeBytes,
+    keepReadsInOrder = keepReadsInOrder)
   with MultiFileReaderFunctions {
 
-  private val pipeline = new HybridScanPipeline(HybridScanContext(readDataSchema, config.filters,
-    config.filterKeepThreshold, execMetrics))
+  private val parquetOptions =
+    HybridScanPipeline.parquetOptions(context.readDataSchema.fieldNames)
+  private val pipeline = new HybridScanPipeline(context)
 
   /**
    * A file's fetched column chunks and its footer, handed from the pool thread to the task thread,
    * which re-parses the footer since the pool's reader cannot cross threads. Both are spillable so
-   * the pool's memory budget covers them. `numRows` in `memBuffersAndSizes` is the surviving row
-   * groups' row count, so the framework does not mistake it for an empty result.
+   * the pool's memory budget covers them. The chunks are one buffer in `memBuffersAndSizes`, each
+   * at its offset and size. `numRows` in `memBuffersAndSizes` is the surviving row groups' row
+   * count, so the framework does not mistake it for an empty result.
    */
   private case class HybridFileResult(
       override val partitionedFile: PartitionedFile,
       footer: SpillableHostBuffer,
       rowGroups: Array[Int],
+      chunkOffsets: Array[Long],
+      chunkSizes: Array[Long],
       override val memBuffersAndSizes: Array[SingleHMBAndMeta],
       override val bytesRead: Long)
     extends HostMemoryBuffersWithMetaDataBase {
@@ -116,7 +118,7 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
       // The whole file decodes eagerly into one batch, so its host buffers are closed here.
       currentFileHostBuffers = None
       val table = withResource(result)(decodeResult)
-      val colTypes = readDataSchema.fields.map(_.dataType)
+      val colTypes = context.readDataSchema.fields.map(_.dataType)
       val batchIter: Iterator[ColumnarBatch] = table match {
         case Some(t) => Iterator.single(withResource(t)(GpuColumnVector.from(_, colTypes)))
         case None => Iterator.empty
@@ -130,8 +132,8 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
 
   private def hybridSplit(file: PartitionedFile): HybridScanSplit = {
     val filePath = new Path(new URI(file.filePath.toString()))
-    HybridScanSplit(new HybridScanFileByteSource(fileIO, filePath, execMetrics), file.start,
-      file.length)
+    HybridScanSplit(new HybridScanFileByteSource(fileIO, filePath, context.execMetrics),
+      file.start, file.length)
   }
 
   private class ReadBatchRunner(
@@ -209,7 +211,7 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
     private def planAndFetchForPool(
         footer: HostMemoryBuffer): Option[(FetchedColumnChunks, Long)] = {
       withResource(HybridScanPipeline.openReader(footer, parquetOptions)) { reader =>
-        withResource(config.filters.ast.map(HybridScanPipeline.compileFilter)) { ast =>
+        withResource(context.scanFilters.ast.map(HybridScanPipeline.compileFilter)) { ast =>
           pipeline.planAndFetch(hybridSplit(file), reader, ast, allowDictionaryPruning = false)
             .map { fetched =>
               closeOnExcept(fetched)(f => (f, reader.totalRowsInRowGroups(f.rowGroups)))
@@ -219,25 +221,29 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
     }
 
     /**
-     * Wrap the fetched chunks and the footer as spillables for the task thread. Each spillable
-     * owns an incremented reference; the caller closes the originals.
+     * Wrap the buffer the fetched chunks slice and the footer as spillables for the task thread.
+     * The buffer rather than each chunk is the spillable, as a spilled slice frees nothing while
+     * its siblings hold the buffer. Each spillable owns an incremented reference; the caller
+     * closes the originals.
      */
     private def toSpillableResult(
         footer: HostMemoryBuffer,
         fetched: FetchedColumnChunks,
         numRows: Long,
         bytesRead: Long): HybridFileResult = {
+      val buffer = fetched.backing.getOrElse(
+        throw new IllegalStateException("the fetched chunks do not slice one buffer"))
+      val chunkOffsets = fetched.hostChunks.map(_.getAddress - buffer.getAddress)
+      val chunkSizes = fetched.hostChunks.map(_.getLength)
       footer.incRefCount()
       closeOnExcept(SpillableHostBuffer(footer, footer.getLength,
           SpillPriorities.ACTIVE_BATCHING_PRIORITY)) { spillFooter =>
-        val spillChunks = fetched.hostChunks.safeMap { hmb =>
-          hmb.incRefCount()
-          SpillableHostBuffer(hmb, hmb.getLength, SpillPriorities.ACTIVE_BATCHING_PRIORITY)
-        }
-        closeOnExcept(spillChunks) { _ =>
-          val meta = SingleHMBAndMeta(spillChunks, spillChunks.map(_.length).sum, numRows,
-            Seq.empty)
-          HybridFileResult(file, spillFooter, fetched.rowGroups, Array(meta), bytesRead)
+        buffer.incRefCount()
+        closeOnExcept(SpillableHostBuffer(buffer, buffer.getLength,
+            SpillPriorities.ACTIVE_BATCHING_PRIORITY)) { spillBuffer =>
+          val meta = SingleHMBAndMeta(Array(spillBuffer), buffer.getLength, numRows, Seq.empty)
+          HybridFileResult(file, spillFooter, fetched.rowGroups, chunkOffsets, chunkSizes,
+            Array(meta), bytesRead)
         }
       }
     }
@@ -245,18 +251,23 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
 
   /** Decode a pool thread's result on the task thread. The result stays the caller's to close. */
   private def decodeResult(result: HybridFileResult): Option[Table] = {
-    val chunks = result.memBuffersAndSizes.head.hmbs
+    val spillBuffer = result.memBuffersAndSizes.head.hmbs.head
     // While waiting for the task, the footer and chunks may have been moved to disk to free host
     // memory. Reading them back allocates host memory again, which can fail while it is still
     // short, so retry: a failed attempt frees what it read back and waits for memory.
-    val (footer, hostChunks) = withRetryNoSplit {
+    val (footer, buffer) = withRetryNoSplit {
       closeOnExcept(result.footer.getDataHostBuffer()) { f =>
-        (f, chunks.safeMap(_.getDataHostBuffer()))
+        (f, spillBuffer.getDataHostBuffer())
       }
     }
     withResource(footer) { _ =>
-      val fetched = closeOnExcept(hostChunks) { _ =>
-        new FetchedColumnChunks(result.rowGroups, hostChunks)
+      val fetched = withResource(buffer) { _ =>
+        val hostChunks = result.chunkOffsets.indices.toArray.safeMap { i =>
+          buffer.slice(result.chunkOffsets(i), result.chunkSizes(i))
+        }
+        closeOnExcept(hostChunks) { _ =>
+          new FetchedColumnChunks(result.rowGroups, hostChunks)
+        }
       }
       decodeFetched(footer, fetched)
     }
@@ -271,7 +282,9 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
   private def decodeFetched(
       footer: HostMemoryBuffer,
       fetched: FetchedColumnChunks): Option[Table] = {
-    val ast = closeOnExcept(fetched)(_ => config.filters.ast.map(HybridScanPipeline.compileFilter))
+    val ast = closeOnExcept(fetched) { _ =>
+      context.scanFilters.ast.map(HybridScanPipeline.compileFilter)
+    }
     withResource(ast) { _ =>
       val parsed = closeOnExcept(fetched)(_ => HybridScanPipeline.openReader(footer,
         parquetOptions))
