@@ -221,7 +221,7 @@ object MultiFileReaderThreadPool extends Logging {
           60L,
           TimeUnit.SECONDS,
           new LinkedBlockingQueue[Runnable](),
-          org.apache.spark.util.ThreadUtils.namedThreadFactory(name)
+          TrampolineUtil.namedThreadFactory(name)
         ) {
           override protected def newTaskFor[T](callable: Callable[T]): RunnableFuture[T] = {
             callable match {
@@ -982,12 +982,14 @@ abstract class MultiFileCloudPartitionReaderBase(
   private def addNextTaskIfNeeded(): Unit = {
     if (tasksToRun.nonEmpty && !isDone) {
       val runner = tasksToRun.dequeue()
-      if (!keepReadsInOrder) {
-        val futureRunner = fcs.submit(runner)
-        tasks.add(futureRunner)
-      } else {
-        val threadPool = MultiFileReaderThreadPool.getOrCreateThreadPool(poolConf)
-        tasks.add(threadPool.submit(runner))
+      if (!runner.isCancelled) {
+        if (!keepReadsInOrder) {
+          val futureRunner = fcs.submit(runner)
+          tasks.add(futureRunner)
+        } else {
+          val threadPool = MultiFileReaderThreadPool.getOrCreateThreadPool(poolConf)
+          tasks.add(threadPool.submit(runner))
+        }
       }
     }
   }

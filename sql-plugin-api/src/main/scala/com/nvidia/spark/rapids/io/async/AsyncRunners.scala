@@ -195,6 +195,9 @@ trait AsyncRunner[T] extends Callable[AsyncResult[T]] {
     val startTime = System.nanoTime()
     val resultData = try {
       beforeExecuteHooks.foreach { hook => hook() }
+      if (isCancelled) {
+        throw new CancellationException(s"AsyncRunner $this was cancelled ahead of execution")
+      }
       callImpl()
     } catch {
       case NonFatal(error) => throw failureTransformer(error)

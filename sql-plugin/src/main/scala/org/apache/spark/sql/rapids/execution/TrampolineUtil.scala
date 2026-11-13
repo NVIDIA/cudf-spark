@@ -16,7 +16,8 @@
 
 package org.apache.spark.sql.rapids.execution
 
-import java.util.concurrent.{ExecutorService, ScheduledExecutorService, ThreadPoolExecutor}
+import java.util.concurrent.{ExecutorService, ScheduledExecutorService, ThreadFactory,
+  ThreadPoolExecutor}
 
 import org.apache.hadoop.conf.Configuration
 import org.json4s.JsonAST
@@ -238,6 +239,10 @@ object TrampolineUtil {
     // which gives us important Hadoop config variables that are needed for the
     // Unity Catalog authentication
     ThreadUtils.newDaemonCachedThreadPool(prefix, maxThreadNumber, keepAliveSeconds)
+  }
+
+  def namedThreadFactory(prefix: String): ThreadFactory = {
+    ThreadUtils.namedThreadFactory(prefix)
   }
 
   def newDaemonSingleThreadExecutor(threadName: String): ExecutorService = {

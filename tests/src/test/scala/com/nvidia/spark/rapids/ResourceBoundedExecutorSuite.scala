@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,7 +22,10 @@ import java.util.concurrent.locks.{Lock, ReentrantLock}
 import scala.collection.mutable
 
 import com.nvidia.spark.rapids.io.async._
+import org.scalatest.concurrent.Eventually.eventually
+import org.scalatest.concurrent.PatienceConfiguration.Timeout
 import org.scalatest.funsuite.AnyFunSuite
+import org.scalatest.time.{Seconds, Span}
 
 class ResourceBoundedExecutorSuite extends AnyFunSuite with RmmSparkRetrySuiteBase {
 
@@ -132,6 +135,42 @@ class ResourceBoundedExecutorSuite extends AnyFunSuite with RmmSparkRetrySuiteBa
     }
     (0 until results.length - 1).foreach { i =>
       require(results(i) < results(i + 1), s"Unexpected order of wallTime: ${results.toList}")
+    }
+  }
+
+  test("cancelled runner timed out waiting for memory is not re-queued") {
+    val pool = new HostMemoryPool(100L)
+    val executor = ResourceBoundedThreadExecutor[Long]("test-timeout-cancellation",
+      pool,
+      maxThreadNumber = 1,
+      waitResourceTimeoutMs = 50L)
+
+    val blocker = new ReentrantLock()
+    blocker.lock()
+    try {
+      val task1 = executor.submit(AsyncRunner.newCpuTask(() => {
+        blocker.lock()
+        try { 1L } finally { blocker.unlock() }
+      }, memoryBytes = 100L))
+
+      val runner2 = AsyncRunner.newCpuTask(() => 2L, memoryBytes = 100L)
+      val fut2 = executor.submit(runner2)
+
+      fut2.cancel(false)
+
+      blocker.unlock()
+      task1.get()
+
+      eventually(Timeout(Span(2, Seconds))) {
+        assert(fut2.isCancelled)
+        assert(runner2.isCancelled)
+        assert(executor.getQueue.isEmpty)
+      }
+    } finally {
+      if (blocker.isHeldByCurrentThread) {
+        blocker.unlock()
+      }
+      executor.shutdownNow()
     }
   }
 }
