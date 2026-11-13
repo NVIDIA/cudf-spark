@@ -19,11 +19,17 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.shims
 
+import org.apache.spark.sql.catalyst.expressions.SortOrder
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources.v2.GroupPartitionsExec
 
 object GroupPartitionsExecTestShim {
-  def apply(child: SparkPlan, enableSortedMerge: Boolean): GroupPartitionsExec = {
-    GroupPartitionsExec(child, enableSortedMerge = enableSortedMerge)
+  // Spark 4.2.0 merges by the child's live ordering, so callers make the child report it.
+  val freezesSortedMergeOrdering: Boolean = false
+
+  def apply(
+      child: SparkPlan,
+      sortedMergeOrdering: Option[Seq[SortOrder]]): GroupPartitionsExec = {
+    GroupPartitionsExec(child, enableSortedMerge = sortedMergeOrdering.isDefined)
   }
 }
