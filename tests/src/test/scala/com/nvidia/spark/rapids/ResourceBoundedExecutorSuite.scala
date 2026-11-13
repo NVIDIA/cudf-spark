@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids
 
-import java.util.concurrent.{Future => JFuture}
+import java.util.concurrent.{CountDownLatch, Future => JFuture, TimeUnit}
 import java.util.concurrent.locks.{Lock, ReentrantLock}
 
 import scala.collection.mutable
@@ -142,30 +142,88 @@ class ResourceBoundedExecutorSuite extends AnyFunSuite with RmmSparkRetrySuiteBa
     val pool = new HostMemoryPool(100L)
     val executor = ResourceBoundedThreadExecutor[Long]("test-timeout-cancellation",
       pool,
-      maxThreadNumber = 1,
-      waitResourceTimeoutMs = 50L)
+      maxThreadNumber = 2,
+      waitResourceTimeoutMs = 100L)
 
+    val task1Started = new CountDownLatch(1)
     val blocker = new ReentrantLock()
     blocker.lock()
     try {
       val task1 = executor.submit(AsyncRunner.newCpuTask(() => {
+        task1Started.countDown()
         blocker.lock()
         try { 1L } finally { blocker.unlock() }
       }, memoryBytes = 100L))
 
+      assert(task1Started.await(5, TimeUnit.SECONDS))
+
       val runner2 = AsyncRunner.newCpuTask(() => 2L, memoryBytes = 100L)
       val fut2 = executor.submit(runner2)
 
-      fut2.cancel(false)
+      eventually(Timeout(Span(2, Seconds))) {
+        assert(runner2.getState == Pending)
+      }
 
-      blocker.unlock()
-      task1.get()
+      fut2.cancel(false)
 
       eventually(Timeout(Span(2, Seconds))) {
         assert(fut2.isCancelled)
         assert(runner2.isCancelled)
+        assert(runner2.getState == Cancelled)
         assert(executor.getQueue.isEmpty)
       }
+
+      blocker.unlock()
+      assert(task1.get().data == 1L)
+    } finally {
+      if (blocker.isHeldByCurrentThread) {
+        blocker.unlock()
+      }
+      executor.shutdownNow()
+    }
+  }
+
+  test("cancelled runner acquiring memory before timeout releases resource and closes cleanly") {
+    val pool = new HostMemoryPool(100L)
+    val executor = ResourceBoundedThreadExecutor[Long]("test-acquire-cancellation",
+      pool,
+      maxThreadNumber = 2,
+      waitResourceTimeoutMs = 5000L)
+
+    val task1Started = new CountDownLatch(1)
+    val blocker = new ReentrantLock()
+    blocker.lock()
+    try {
+      val task1 = executor.submit(AsyncRunner.newCpuTask(() => {
+        task1Started.countDown()
+        blocker.lock()
+        try { 1L } finally { blocker.unlock() }
+      }, memoryBytes = 100L))
+
+      assert(task1Started.await(5, TimeUnit.SECONDS))
+
+      val runner2 = AsyncRunner.newCpuTask(() => 2L, memoryBytes = 100L)
+      val fut2 = executor.submit(runner2)
+
+      eventually(Timeout(Span(2, Seconds))) {
+        assert(runner2.getState == Pending)
+      }
+
+      fut2.cancel(false)
+
+      blocker.unlock()
+      assert(task1.get().data == 1L)
+
+      eventually(Timeout(Span(2, Seconds))) {
+        assert(fut2.isCancelled)
+        assert(runner2.isCancelled)
+        assert(runner2.getState.isInstanceOf[Closed])
+        assert(!runner2.isHoldingResource)
+        assert(executor.getQueue.isEmpty)
+      }
+
+      val task3 = executor.submit(AsyncRunner.newCpuTask(() => 3L, memoryBytes = 100L))
+      assert(task3.get().data == 3L)
     } finally {
       if (blocker.isHeldByCurrentThread) {
         blocker.unlock()
