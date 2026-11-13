@@ -1002,7 +1002,14 @@ def test_arrays_overlap_before_spark313(data_gen):
             'arrays_overlap(array(), array(1, 2))')
     )
 
-@pytest.mark.skipif(not (is_spark_405() or is_spark_42x()),
+def _spark_has_array_set_ops_float_normalization():
+    version = spark_version_tuple()
+    return ((is_spark_40x() and version >= (4, 0, 5))
+            or (is_spark_41x() and version >= (4, 1, 4))
+            or ((4, 2, 0) <= version < (4, 3, 0)))
+
+
+@pytest.mark.skipif(not _spark_has_array_set_ops_float_normalization(),
                     reason="This Spark version does not normalize array set operations")
 @pytest.mark.parametrize('element_type', ['float', 'double'])
 @validate_execs_in_gpu_plan('GpuProjectExec')
@@ -1024,7 +1031,7 @@ def test_array_set_ops_float_normalization(element_type):
         'COLLECT')
     assert_equal_with_signed_zero(cpu, gpu)
 
-@pytest.mark.skipif(not (is_spark_405() or is_spark_42x()),
+@pytest.mark.skipif(not _spark_has_array_set_ops_float_normalization(),
                     reason="This Spark version does not normalize array set operations")
 @pytest.mark.parametrize('element_type', ['float', 'double'])
 @validate_execs_in_gpu_plan('GpuProjectExec')
@@ -1037,7 +1044,7 @@ def test_array_distinct_nested_float_normalization(element_type):
         'COLLECT')
     assert_equal_with_signed_zero(cpu, gpu)
 
-@pytest.mark.skipif(not (is_spark_405() or is_spark_42x()),
+@pytest.mark.skipif(not _spark_has_array_set_ops_float_normalization(),
                     reason="This Spark version does not normalize array set operations")
 @pytest.mark.parametrize('element_type', ['float', 'double'])
 @validate_execs_in_gpu_plan('GpuProjectExec')
@@ -1054,7 +1061,7 @@ def test_array_distinct_struct_float_normalization(element_type):
         'COLLECT')
     assert_equal_with_signed_zero(cpu, gpu)
 
-@pytest.mark.skipif(not (is_spark_405() or is_spark_42x()),
+@pytest.mark.skipif(not _spark_has_array_set_ops_float_normalization(),
                     reason="This Spark version does not normalize array set operations")
 @allow_non_gpu('ArrayUnion')
 def test_array_union_nested_float_fallback():

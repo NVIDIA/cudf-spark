@@ -24,7 +24,7 @@ from pyspark.sql.types import *
 from string_test import mk_str_gen
 import pyspark.sql.functions as f
 import pyspark.sql.utils
-from spark_session import with_cpu_session, with_gpu_session, is_before_spark_334, is_before_spark_342, is_before_spark_340, is_databricks_version_or_later, is_spark_350, is_spark_400_or_later, is_spark_405, is_spark_42x, is_spark_421_or_later
+from spark_session import with_cpu_session, with_gpu_session, is_before_spark_334, is_before_spark_342, is_before_spark_340, is_databricks_version_or_later, is_spark_350, is_spark_400_or_later, is_spark_40x, is_spark_41x, spark_version_tuple
 from conftest import get_datagen_seed
 from marks import allow_non_gpu
 
@@ -420,8 +420,15 @@ def test_sequence_too_long_sequence(stop_gen):
             "sequence(0, a)").collect(),
         conf = {}, error_message = msg)
 
-@pytest.mark.skipif(not (is_spark_405() or (is_spark_42x() and is_spark_421_or_later())),
-                    reason="Tests the Spark 4.0.5 and 4.2.1 sequence overflow fix")
+def _spark_has_sequence_overflow_fix():
+    version = spark_version_tuple()
+    return ((is_spark_40x() and version >= (4, 0, 5))
+            or (is_spark_41x() and version >= (4, 1, 4))
+            or ((4, 2, 1) <= version < (4, 3, 0)))
+
+
+@pytest.mark.skipif(not _spark_has_sequence_overflow_fix(),
+                    reason="Tests the sequence overflow fix in Spark maintenance releases")
 def test_sequence_long_subtraction_overflow():
     data = [
         (-(1 << 63), (1 << 63) - 1, (1 << 63) - 1),
@@ -432,8 +439,8 @@ def test_sequence_long_subtraction_overflow():
             data, "start long, stop long, step long").selectExpr(
                 "sequence(start, stop, step)"))
 
-@pytest.mark.skipif(not (is_spark_405() or (is_spark_42x() and is_spark_421_or_later())),
-                    reason="Tests the Spark 4.0.5 and 4.2.1 sequence overflow fix")
+@pytest.mark.skipif(not _spark_has_sequence_overflow_fix(),
+                    reason="Tests the sequence overflow fix in Spark maintenance releases")
 def test_sequence_long_subtraction_overflow_too_long():
     assert_gpu_and_cpu_error(
         lambda spark: spark.range(1).selectExpr(
