@@ -100,6 +100,8 @@ class RapidsFutureTask[T](val runner: AsyncRunner[T])
           rr.cleanUpResult()
         }
 
+      case _: Closed =>
+
       case _ =>
         throw new IllegalStateException(s"should NOT reach this line: $rr")
     }
@@ -226,7 +228,7 @@ class ResourceBoundedThreadExecutor(mgr: ResourcePool,
       }
 
       // Check if runner or future was cancelled before acquiring memory
-      if (futTask.isCancelled || rr.isCancelled) {
+      if ((futTask.isCancelled || rr.isCancelled) && !rr.getState.isInstanceOf[Closed]) {
         rr.setState(Cancelled)
       }
 
@@ -271,6 +273,8 @@ class ResourceBoundedThreadExecutor(mgr: ResourcePool,
               }
           }
 
+        case _: Closed => // Do nothing since the runner has already been closed
+
         // Unexpected states
         case _ =>
           // If we throw an exception here, it will crash the ThreadWorker without signaling
@@ -303,7 +307,7 @@ class ResourceBoundedThreadExecutor(mgr: ResourcePool,
       // Post execution state handling
       if (futTask.isCancelled || rr.isCancelled) {
         if (rr.getState != Cancelled && !rr.getState.isInstanceOf[ExecFailed] &&
-            rr.getState != Completed) {
+            rr.getState != Completed && !rr.getState.isInstanceOf[Closed]) {
           rr.setState(Cancelled)
         }
       }
