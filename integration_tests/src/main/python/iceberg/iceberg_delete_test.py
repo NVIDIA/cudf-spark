@@ -12,12 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
+
 import pytest
 from pyspark.sql import functions as f
 
 from asserts import (assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect,
                      assert_gpu_fallback_write_sql)
-from conftest import is_iceberg_remote_catalog
+from conftest import is_iceberg_remote_catalog, spark_jvm
 from data_gen import *
 from iceberg import (
     iceberg_cow_format_versions, iceberg_mor_format_versions, with_iceberg_dml_session,
@@ -28,7 +30,7 @@ from iceberg import (
     supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance,
     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df, rapids_reader_types)
 from marks import allow_non_gpu, allow_non_gpu_conditional, iceberg, ignore_order, datagen_overrides, iceberg_fast_test
-from spark_session import is_spark_400_or_later, with_cpu_session, with_gpu_session
+from spark_session import is_spark_400_or_later, with_cpu_session, with_gpu_session, reset_spark_session_conf
 
 pytestmark = iceberg_unsupported_mark
 
@@ -46,6 +48,47 @@ iceberg_delete_mor_enabled_conf = copy_and_update(iceberg_write_enabled_conf, {}
 # would be DeleteFromTableExec.
 DELETE_TEST_SEED = 42
 DELETE_TEST_SEED_OVERRIDE_REASON = "Ensure reproducible test data for DELETE operations"
+
+
+@iceberg
+@allow_non_gpu('WriteDeltaExec', 'BatchScanExec', 'ShuffleExchangeExec', 'SortExec',
+               'ProjectExec', 'ColumnarToRowExec')
+@pytest.mark.parametrize('float_type', ['FLOAT', 'DOUBLE'])
+def test_iceberg_mor_delete_signed_zero_partitions(spark_tmp_table_factory, float_type):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+
+    def setup(spark):
+        spark.sql(f"CREATE TABLE {table_name} (id BIGINT, f {float_type}) USING ICEBERG "
+                  "PARTITIONED BY (f) TBLPROPERTIES ('format-version'='2', "
+                  "'write.delete.mode'='merge-on-read', 'read.split.open-file-cost'='0')")
+        for start, value in [(0, '0.0'), (1, '-CAST(0.0 AS DOUBLE)')]:
+            (spark.range(start, 20, 2, 1)
+             .selectExpr('id', f'CAST({value} AS {float_type}) AS f')
+             .writeTo(table_name).append())
+
+    with_cpu_session(setup)
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        with_gpu_session(lambda spark: spark.sql(
+            f'DELETE FROM {table_name} WHERE id % 4 < 2').collect(),
+            conf=copy_and_update(iceberg_delete_mor_enabled_conf, {
+                'spark.rapids.sql.format.parquet.reader.type': 'PERFILE'}))
+        plans = callback.getResultsWithTimeout(10000)
+        assert any(callback.contains(plan, 'GpuWriteDeltaExec') for plan in plans), \
+            'Expected GPU position-delete write'
+    finally:
+        callback.endCapture()
+        reset_spark_session_conf()
+
+    def check(spark):
+        assert sorted(r.id for r in spark.table(table_name).select('id').collect()) == \
+            [2, 3, 6, 7, 10, 11, 14, 15, 18, 19]
+        files = spark.sql(f'SELECT partition, record_count FROM {table_name}.delete_files').collect()
+        assert sorted(r.record_count for r in files) == [5, 5]
+        assert sorted(math.copysign(1.0, r.partition.f) for r in files) == [-1.0, 1.0]
+
+    with_cpu_session(check)
 
 def create_iceberg_table_with_data(table_name: str, 
                                    partition_col_sql=None,
