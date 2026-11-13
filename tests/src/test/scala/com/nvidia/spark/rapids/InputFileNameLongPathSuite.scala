@@ -101,38 +101,41 @@ class InputFileNameLongPathSuite extends SparkQueryCompareTestSuite {
     }
   }
 
-  // The second directory name is multi-byte so the path length differs between characters and
-  // UTF-8 bytes as well as between the two files.
-  Seq("PERFILE", "MULTITHREADED", "COALESCING").foreach { readerType =>
+  // COALESCING is not listed: with input_file_name() in the query the Parquet scan cannot use the
+  // coalescing reader and falls back to MULTITHREADED, so it would repeat that case.
+  Seq("PERFILE", "MULTITHREADED").foreach { readerType =>
     test(s"two files with different path lengths, first one split, $readerType reader") {
       withTempPath { root =>
-        val paths = Seq("x" * 150, "\u65e5\u672c\u8a9e").map { d =>
+        // The first path is long enough to be split, the second is much shorter
+        val paths = Seq("x" * 150, "y").map { d =>
           val dir = new File(root, d)
           assert(dir.mkdirs())
           writeFile(dir)
         }
-        def run(gpu: Boolean): Seq[(String, Long, Long, Long, Long)] = {
-          val f = (spark: SparkSession) => spark.read.parquet(paths: _*)
-            .groupBy(input_file_name().as("f"))
-            .agg(count("*"), sum("id"), min("id"), max("id")).collect()
-            .map(r => (r.getString(0), r.getLong(1), r.getLong(2), r.getLong(3), r.getLong(4)))
+        def query(spark: SparkSession): DataFrame = spark.read.parquet(paths: _*)
+          .groupBy(input_file_name().as("f"))
+          .agg(count("*"), sum("id"), min("id"), max("id"))
+        def tuples(rows: Array[Row]): Seq[(String, Long, Long, Long, Long)] =
+          rows.map(r => (r.getString(0), r.getLong(1), r.getLong(2), r.getLong(3), r.getLong(4)))
             .sortBy(_._1).toSeq
-          if (gpu) {
-            withGpuSparkSession(f, conf(LimitBytes)
-              .set(RapidsConf.PARQUET_READER_TYPE.key, readerType))
-          } else {
-            withCpuSparkSession(f)
-          }
-        }
-        val cpu = run(gpu = false)
+        val cpu = withCpuSparkSession(spark => tuples(query(spark).collect()))
         assertResult(2)(cpu.size)
         assert(cpu.forall(_._2 == NumRows))
-        assertResult(cpu)(run(gpu = true))
+        withGpuSparkSession({ spark =>
+          val (rows, batches) = run(query(spark))
+          assertResult(cpu)(tuples(rows))
+          // Without slicing each file is one batch, so the first file must have been split
+          assert(batches > 2, s"expected the first file to be sliced, got $batches batches")
+        }, conf(LimitBytes).set(RapidsConf.PARQUET_READER_TYPE.key, readerType))
       }
     }
   }
 
   test("slice size follows the UTF-8 byte length of the path, not its character count") {
+    // File names are encoded with sun.jnu.encoding, which follows the locale; under a C/POSIX
+    // locale a multi-byte directory name cannot be created. Do not use Charset.defaultCharset(),
+    // which is UTF-8 on JDK 18+ regardless of the locale.
+    assume(System.getProperty("sun.jnu.encoding") == "UTF-8")
     withTempPath { root =>
       val dir = new File(root, "\u00e9" * 75) // 75 characters, 150 bytes
       assert(dir.mkdirs())
