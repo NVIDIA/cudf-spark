@@ -110,10 +110,11 @@ def test_rtas_unpartitioned_table(format_version, spark_tmp_table_factory):
     _assert_gpu_equals_cpu_rtas(spark_tmp_table_factory, df_gen, table_prop)
 
 
+@iceberg_fast_test
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)
-@allow_non_gpu('AtomicReplaceTableAsSelectExec', 'OverwriteByExpressionExec')
+@allow_non_gpu('AtomicReplaceTableAsSelectExec', 'OverwriteByExpressionExec', 'AppendDataExec')
 def test_rtas_encryption_fallback(spark_tmp_table_factory):
     base_table_name = get_full_table_name(spark_tmp_table_factory)
     props = {"format-version": "3", "encryption.key-id": "test-key"}
