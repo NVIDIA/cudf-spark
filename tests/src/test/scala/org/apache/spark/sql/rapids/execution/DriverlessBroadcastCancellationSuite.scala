@@ -18,7 +18,7 @@ package org.apache.spark.sql.rapids.execution
 import java.util.concurrent.{CountDownLatch, Executors, TimeUnit}
 import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 
-import com.nvidia.spark.rapids.{DatabricksShimVersion, GpuCoalesceBatches, GpuMetric, GpuRangeExec, GpuSinglePartitioning, GpuTransitionOverrides, JustRowsColumnarBatch, RapidsConf, RowBasedShuffleChecksumConf, ShimLoader, ShuffleBufferCatalog, SpillableColumnarBatch, TargetSize}
+import com.nvidia.spark.rapids.{DatabricksShimVersion, GpuCoalesceBatches, GpuMetric, GpuOverrides, GpuRangeExec, GpuSinglePartitioning, GpuTransitionOverrides, JustRowsColumnarBatch, RapidsConf, RowBasedShuffleChecksumConf, ShimLoader, ShuffleBufferCatalog, SpillableColumnarBatch, TargetSize}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.shims.BroadcastExchangeShims
 import org.scalatest.BeforeAndAfterAll
@@ -33,8 +33,10 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference}
 import org.apache.spark.sql.catalyst.optimizer.BuildRight
 import org.apache.spark.sql.catalyst.plans.Inner
+import org.apache.spark.sql.catalyst.plans.logical.Range
 import org.apache.spark.sql.catalyst.plans.physical.IdentityBroadcastMode
-import org.apache.spark.sql.execution.{DriverlessBroadcastPlanInfoTestSupport, InputAdapter, LeafExecNode, SparkPlan, UnionExec, WholeStageCodegenExec}
+import org.apache.spark.sql.catalyst.trees.TreeNodeTag
+import org.apache.spark.sql.execution.{DriverlessBroadcastPlanInfoTestSupport, InputAdapter, LeafExecNode, RangeExec, SparkPlan, UnionExec, WholeStageCodegenExec}
 import org.apache.spark.sql.execution.exchange.{BroadcastExchangeExec, ENSURE_REQUIREMENTS, ReusedExchangeExec}
 import org.apache.spark.sql.execution.joins.BroadcastHashJoinExec
 import org.apache.spark.sql.rapids.GpuShuffleEnv
@@ -309,6 +311,32 @@ class DriverlessBroadcastCancellationSuite extends AnyFunSuite with BeforeAndAft
         }
       }
       assert(DriverlessBroadcastPolicy.rejections(conf) == baseline)
+    }
+  }
+
+  test("broadcast conversion preserves CPU tags before adding driverless tags") {
+    session.withActive {
+      Seq(false, true).foreach { enabled =>
+        val logical = Range(0L, 10L, 1L, Some(1))
+        val child = RangeExec(logical)
+        child.setLogicalLink(logical)
+        val cpu = BroadcastExchangeExec(IdentityBroadcastMode, child)
+        val opaqueTag = TreeNodeTag[String]("test.driverless.cpu.tag")
+        cpu.setTagValue(opaqueTag, "carried-value")
+        cpu.setTagValue(DriverlessBroadcastStage.eligible, true)
+        cpu.setTagValue(GpuTransitionOverrides.aqeQueryStageExchange, true)
+        cpu.setLogicalLink(logical)
+        val conf = new RapidsConf(Map(
+          "spark.rapids.sql.driverlessBroadcast.enabled" -> enabled.toString))
+        val meta = GpuOverrides.wrapPlan(cpu, conf, None)
+        meta.tagForGpu()
+        assert(meta.canThisBeReplaced)
+        val converted = meta.convertIfNeeded().asInstanceOf[GpuBroadcastExchangeExec]
+        assert(converted.getTagValue(opaqueTag).contains("carried-value"))
+        assert(converted.getTagValue(DriverlessBroadcastStage.eligible).contains(true))
+        assert(converted.getTagValue(GpuTransitionOverrides.aqeQueryStageExchange).contains(true))
+        assert(converted.getTagValue(SparkPlan.LOGICAL_PLAN_TAG).exists(_ eq logical))
+      }
     }
   }
 

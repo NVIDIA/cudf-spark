@@ -25,11 +25,15 @@ import org.apache.spark.SparkConf
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.{Dataset, Row, SaveMode, SparkSession}
 import org.apache.spark.sql.catalyst.expressions.{DynamicPruningExpression, Expression}
-import org.apache.spark.sql.execution.{ColumnarToRowExec, FileSourceScanExec, InSubqueryExec, SparkPlan, SubqueryBroadcastExec}
+import org.apache.spark.sql.catalyst.plans.logical.{LocalRelation, Range}
+import org.apache.spark.sql.catalyst.plans.physical.IdentityBroadcastMode
+import org.apache.spark.sql.catalyst.trees.TreeNodeTag
+import org.apache.spark.sql.execution.{ColumnarToRowExec, FileSourceScanExec, InSubqueryExec, RangeExec, SparkPlan, SubqueryBroadcastExec}
 import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, AdaptiveSparkPlanHelper, BroadcastQueryStageExec, ShuffleQueryStageExec}
+import org.apache.spark.sql.execution.exchange.BroadcastExchangeExec
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.{ExecutionPlanCaptureCallback, GpuFileSourceScanExec}
-import org.apache.spark.sql.rapids.execution.GpuSubqueryBroadcastExec
+import org.apache.spark.sql.rapids.execution.{GpuBroadcastExchangeExec, GpuSubqueryBroadcastExec}
 import org.apache.spark.sql.types._
 
 
@@ -38,6 +42,26 @@ class DynamicPruningSuite
     with AdaptiveSparkPlanHelper
     with FunSuiteWithTempDir
     with Logging {
+
+  test("non-AQE subquery broadcast conversion preserves exchange tags") {
+    val range = RangeExec(Range(0L, 10L, 1L, Some(1)))
+    val child = GpuRangeExec(0L, 10L, 1L, 1, range.output, 1024L)
+    val cpu = BroadcastExchangeExec(IdentityBroadcastMode, GpuColumnarToRowExec(child))
+    val opaqueTag = TreeNodeTag[String]("test.opaque.subquery.exchange.tag")
+    val logical = LocalRelation()
+    cpu.setTagValue(opaqueTag, "carried-value")
+    cpu.setLogicalLink(logical)
+    val subquery = SubqueryBroadcastExec("dpp", 0, child.output, cpu)
+    val meta = GpuOverrides.wrapPlan(subquery, new RapidsConf(Map.empty[String, String]), None)
+    meta.tagForGpu()
+    assert(meta.canThisBeReplaced)
+
+    val converted = meta.convertIfNeeded().asInstanceOf[GpuSubqueryBroadcastExec]
+    val broadcast = converted.child.asInstanceOf[GpuBroadcastExchangeExec]
+    assert(broadcast.child eq child)
+    assert(broadcast.getTagValue(opaqueTag).contains("carried-value"))
+    assert(broadcast.getTagValue(SparkPlan.LOGICAL_PLAN_TAG).exists(_ eq logical))
+  }
 
   // Replace the GpuSubqueryBroadcastExec with a (CPU) SubqueryBroadcastExec in the plan used
   // by InSubqueryExec. This requires us replacing the underlying DynamicPruningExpression

@@ -394,16 +394,15 @@ class GpuBroadcastMeta(
   }
 
   override def convertToGpu(): GpuExec = {
-    val gpuBroadcast = GpuBroadcastExchangeExec(exchange.mode, childPlans.head.convertIfNeeded())(
+    GpuBroadcastExchangeExec(exchange.mode, childPlans.head.convertIfNeeded())(
       exchange.canonicalized.asInstanceOf[BroadcastExchangeExec])
+  }
+
+  override protected def tagConvertedPlan(converted: GpuExec): Unit = {
     if (conf.isDriverlessBroadcastEnabled) {
-      DriverlessBroadcastEligibility.preserveBuildEstimate(exchange, gpuBroadcast)
-      exchange.getTagValue(DriverlessBroadcastStage.eligible).foreach { value =>
-        gpuBroadcast.setTagValue(DriverlessBroadcastStage.eligible, value)
-      }
+      DriverlessBroadcastEligibility.preserveBuildEstimate(
+        exchange, converted.asInstanceOf[GpuBroadcastExchangeExec])
     }
-    GpuTransitionOverrides.copyAqeQueryStageExchangeTag(exchange, gpuBroadcast)
-    gpuBroadcast
   }
 }
 
