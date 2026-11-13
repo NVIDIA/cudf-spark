@@ -17,7 +17,7 @@
 package com.nvidia.spark.rapids
 
 import java.io.{FileNotFoundException, IOException}
-import java.util.concurrent.{CancellationException, CompletableFuture, ConcurrentLinkedQueue, CountDownLatch, ExecutionException, Executor, ExecutorCompletionService, Future, LinkedBlockingQueue, TimeUnit}
+import java.util.concurrent.{CompletableFuture, ConcurrentLinkedQueue, CountDownLatch, ExecutionException, Executor, ExecutorCompletionService, Future, LinkedBlockingQueue, TimeUnit}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 
 import scala.collection.mutable.ArrayBuffer
@@ -25,7 +25,7 @@ import scala.collection.mutable.ArrayBuffer
 import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
-import com.nvidia.spark.rapids.io.async.{AsyncMetrics, AsyncResult, AsyncRunner, FastReleaseResult, RapidsFutureTask}
+import com.nvidia.spark.rapids.io.async.{AsyncMetrics, AsyncResult, AsyncRunner, FastReleaseResult}
 import com.nvidia.spark.rapids.parquet._
 import com.nvidia.spark.rapids.shims.PartitionedFileUtilsShim
 import org.apache.hadoop.conf.Configuration
