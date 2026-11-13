@@ -398,6 +398,37 @@ ORC file, they will be read properly by both the CPU and the GPU.
 To take advantage of the aggregate query optimization, where only the ORC metadata is read to
 satisfy the query, the ORC read falls back to the CPU as it is a metadata-only query.
 
+## Variant Reads
+
+GPU Variant reads support unshredded physical layouts only, including Variant values
+nested in structs, arrays and maps. Raw Parquet scans fall back to CPU when
+`spark.sql.variant.allowReadingShredded=true` or Variant extraction is pushed into the
+scan. Delta retains its protocol-based checks: shredding or unknown reader features
+keep Variant reads on CPU.
+
+Iceberg Variant reads use the same Spark setting for GPU eligibility. Set
+`spark.sql.variant.allowReadingShredded=false` with the existing Iceberg v3 opt-in.
+Iceberg's CPU reader can read shredded input independently of Spark's Parquet setting,
+so the GPU execution reader also validates every projected Variant leaf against the
+physical-layout predicate used by the Raw Parquet reader. Exactly two children named
+`value` and `metadata`, both `REQUIRED BINARY`, are required. Query planning does not
+open data files to check layouts. Execution reuses the already-loaded schema, without
+additional file opens, including for nested and imported files resolved by field ID.
+
+If an Iceberg file contains a requested shredded or incompatible Variant layout, the
+reader throws `java.lang.UnsupportedOperationException`:
+
+```text
+GPU Iceberg reader does not support shredded or incompatible Variant input (column: <column>). Expected exactly two REQUIRED BINARY fields named value and metadata. Set spark.rapids.sql.format.iceberg.read.enabled=false and rerun the query to read Variant with the CPU reader.
+```
+
+Spark may wrap this exception in a task/stage failure or `SparkException`. The query
+fails without an automatic CPU retry. Set
+`spark.rapids.sql.format.iceberg.read.enabled=false` and rerun to use the CPU Iceberg
+reader. Supported downstream operators may still execute on GPU. Queries that prune
+all Variant columns remain eligible for GPU scans even when the files contain shredded
+Variant data. GPU Variant writes remain unsupported.
+
 ## Parquet
 
 The Parquet format has more configs because there are multiple versions with some compatibility

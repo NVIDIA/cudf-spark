@@ -22,12 +22,14 @@ import java.util.Objects
 
 import scala.collection.JavaConverters._
 
-import com.nvidia.spark.rapids.{CombineConf, DateTimeRebaseCorrected, GpuMetric, LocalGpuMetric, NoopMetric, ThreadPoolConfBuilder}
+import com.nvidia.spark.rapids.{CombineConf, DateTimeRebaseCorrected, GpuColumnVector, GpuMetric,
+  LocalGpuMetric, NoopMetric, ThreadPoolConfBuilder}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.GpuMetric.ICEBERG_DICT_FILTER_TIME
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
 import com.nvidia.spark.rapids.iceberg.ShimUtils
-import com.nvidia.spark.rapids.parquet.{GpuParquetUtils, ParquetFileInfoWithBlockMeta}
+import com.nvidia.spark.rapids.parquet.{GpuParquetUtils, ParquetFileInfoWithBlockMeta,
+  ParquetSchemaUtils}
 import com.nvidia.spark.rapids.shims.PartitionedFileUtilsShim
 import com.nvidia.spark.rapids.shims.parquet.GpuParquetUtilsShims
 import org.apache.hadoop.conf.Configuration
@@ -39,8 +41,12 @@ import org.apache.iceberg.parquet._
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.metadata.{BlockMetaData => ShadedBlockMetaData}
-import org.apache.iceberg.shaded.org.apache.parquet.schema.{MessageType => ShadedMessageType}
+import org.apache.iceberg.shaded.org.apache.parquet.schema.{MessageType => ShadedMessageType,
+  Type => ShadedType}
+import org.apache.iceberg.spark.SparkSchemaUtil
+import org.apache.iceberg.types.Type
 import org.apache.parquet.hadoop.metadata.BlockMetaData
+import org.apache.parquet.schema.MessageType
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
@@ -143,20 +149,68 @@ case class GpuIcebergParquetReaderConf(
     validateDeletionVectorCrc: Boolean,
 )
 
+object GpuIcebergParquetReader {
+  /**
+   * Validate Variant leaves with the Raw Parquet predicate and normalize their child order.
+   * Field IDs, including those from name mapping, have already been assigned. Run before
+   * Iceberg pruning so even a primitive stored in a Variant field gets an actionable error.
+   * This transforms only in-memory schema objects and performs no additional file I/O.
+   */
+  private def normalizeVariantLayout(physical: ShadedType, expected: Type): ShadedType = {
+    if (expected.isStructType && !physical.isPrimitive) {
+      val fields = physical.asGroupType().getFields.asScala.map { field =>
+        Option(field.getId).flatMap { id =>
+          Option(expected.asStructType().field(id.intValue()))
+        }.map { required => normalizeVariantLayout(field, required.`type`()) }.getOrElse(field)
+      }
+      physical.asGroupType().withNewFields(fields.asJava)
+    } else if (expected.isListType && !physical.isPrimitive) {
+      val group = physical.asGroupType()
+      val repeated = group.getType(0)
+      val element = ParquetSchemaUtil.determineListElementType(group)
+      val normalized = normalizeVariantLayout(element, expected.asListType().elementType())
+      // Preserve both legacy LIST encodings and the standard three-level wrapper.
+      val child = if (repeated eq element) {
+        normalized
+      } else {
+        repeated.asGroupType().withNewFields(normalized)
+      }
+      group.withNewFields(child)
+    } else if (expected.isMapType && !physical.isPrimitive) {
+      val group = physical.asGroupType()
+      val keyValue = group.getType(0).asGroupType()
+      group.withNewFields(keyValue.withNewFields(
+        normalizeVariantLayout(keyValue.getType(0), expected.asMapType().keyType()),
+        normalizeVariantLayout(keyValue.getType(1), expected.asMapType().valueType())))
+    } else if (!expected.isNestedType &&
+        GpuColumnVector.isVariantType(SparkSchemaUtil.convert(expected))) {
+      val unshaded = ShimUtils.getParquetUnshader().unshade(physical)
+      if (!ParquetSchemaUtils.isVariantPhysicalType(unshaded)) {
+        throw new UnsupportedOperationException(
+          s"GPU Iceberg reader does not support shredded or incompatible Variant input " +
+            s"(column: ${physical.getName}). Expected exactly two REQUIRED BINARY fields " +
+            "named value and metadata. Set spark.rapids.sql.format.iceberg.read.enabled=false " +
+            "and rerun the query to read Variant with the CPU reader.")
+      }
+      val group = physical.asGroupType()
+      group.withNewFields(group.getType("value"), group.getType("metadata"))
+    } else {
+      physical
+    }
+  }
+}
+
 trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable with Logging {
   def conf: GpuIcebergParquetReaderConf
 
   def projectSchema(fileSchema: ShadedMessageType, requiredSchema: Schema):
   (ShadedMessageType, ShadedMessageType) = {
-    val (typeWithIds, fileReadSchema) = if (ParquetSchemaUtil.hasIds(fileSchema)) {
-      (fileSchema, ParquetSchemaUtil.pruneColumns(fileSchema, requiredSchema))
-    } else if (conf.nameMapping.isDefined) {
-      val typeWithIds = ParquetSchemaUtil.applyNameMapping(fileSchema, conf.nameMapping.get)
-      (typeWithIds, ParquetSchemaUtil.pruneColumns(typeWithIds, requiredSchema))
-    } else {
-      val typeWithIds = ParquetSchemaUtil.addFallbackIds(fileSchema)
-      (typeWithIds, ParquetSchemaUtil.pruneColumnsFallback(typeWithIds, requiredSchema))
-    }
+    val (typeWithIds, fileReadSchema) =
+      GpuParquetIO.projectAndPruneSchema(fileSchema, requiredSchema, conf.nameMapping, schema => {
+        val normalized = GpuIcebergParquetReader.normalizeVariantLayout(
+            schema, requiredSchema.asStruct()).asGroupType()
+        new ShadedMessageType(schema.getName, normalized.getFields)
+      })
 
     logDebug(s"Doing project schema, parquet file schema:\n$fileSchema " +
       s"\niceberg required schema:\n$requiredSchema " +
@@ -208,12 +262,12 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
     conf.metrics.getOrElse(metricName, NoopMetric) += value
   }
 
-  def clipBlocksToSchema(fileReadSchema: ShadedMessageType,
+  def clipBlocksToSchema(fileReadSchema: MessageType,
       blocks: Seq[ShadedBlockMetaData]): Seq[BlockMetaData] = {
     val unshader = ShimUtils.getParquetUnshader()
-    GpuParquetUtils.clipBlocksToSchema(unshader.unshade(fileReadSchema),
+    GpuParquetUtils.clipBlocksToSchema(fileReadSchema,
       blocks.map(unshader.unshade).asJava,
-      conf.caseSensitive)
+      isCaseSensitive = true)
   }
 
   def filterParquetBlocks(file: IcebergPartitionedFile,
@@ -232,10 +286,9 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
         // the surviving row count; the post-processor drops it from the requested output.
         if (hasDeletionVector && initialProjection._2.getFieldCount == 0 &&
             fileSchema.getFieldCount > 0) {
-          val firstFileField = ParquetSchemaUtil.convert(initialProjection._1).columns().get(0)
-          val projectionFields = requiredSchema.columns().asScala
-            .filterNot(_.fieldId() == firstFileField.fieldId()) :+ firstFileField
-          projectSchema(fileSchema, new Schema(projectionFields.asJava))
+          // The carrier is not a requested Iceberg value. Project its physical leaves directly
+          // so an unrequested shredded Variant does not require validation or reconstruction.
+          (initialProjection._1, GpuParquetIO.projectRowCountSchema(initialProjection._1))
         } else {
           initialProjection
         }
@@ -284,24 +337,34 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
           start
         }
       }
-      val blocks = clipBlocksToSchema(fileReadSchema, filteredBlocks.map(_._1))
-      blocks.zip(blockFirstRowIndices).foreach { case (block, firstRowIndex) =>
-        GpuParquetUtilsShims.setRowIndexOffset(block, firstRowIndex)
-      }
-
       val sqlConf = SQLConf.get
+      val unshadedFileReadSchema = ShimUtils.getParquetUnshader().unshade(fileReadSchema)
       val partReaderSparkSchema = new ParquetToSparkSchemaConverter(
         sqlConf.isParquetBinaryAsString,
         sqlConf.isParquetINT96AsTimestamp,
         conf.caseSensitive,
         sqlConf.parquetInferTimestampNTZEnabled,
         sqlConf.legacyParquetNanosAsLong
-      ).convert(ShimUtils.getParquetUnshader().unshade(fileReadSchema))
+      ).convert(unshadedFileReadSchema)
+      // Iceberg's Variant schema follows the Parquet spec's metadata/value child order. Spark's
+      // physical Variant column uses value/metadata, so apply the same normalization as the
+      // standard GPU Parquet reader after Iceberg has finished field-ID projection.
+      // These Spark names came from this physical schema; session name resolution must not
+      // conflate distinct physical names that Iceberg has already resolved by field ID.
+      val gpuFileReadSchema = ParquetSchemaUtils.clipParquetSchema(
+        unshadedFileReadSchema,
+        partReaderSparkSchema,
+        caseSensitive = true,
+        useFieldId = false)
+      val blocks = clipBlocksToSchema(gpuFileReadSchema, filteredBlocks.map(_._1))
+      blocks.zip(blockFirstRowIndices).foreach { case (block, firstRowIndex) =>
+        GpuParquetUtilsShims.setRowIndexOffset(block, firstRowIndex)
+      }
 
       val parquetFileInfo = ParquetFileInfoWithBlockMeta(file.path,
         blocks,
         InternalRow.empty, // Iceberg handles partition values but itself
-        ShimUtils.getParquetUnshader().unshade(fileReadSchema),
+        gpuFileReadSchema,
         partReaderSparkSchema,
         DateTimeRebaseCorrected,
         DateTimeRebaseCorrected,

@@ -334,6 +334,13 @@ def test_ctas_v3_variant_cpu_rows_convert_to_gpu(
 
     with_gpu_session(create_table, conf=conf)
 
+    # Exercise CPU Variant rows through the GPU projection. The read opt-out retains a
+    # CPU Iceberg scan; the supported Variant settings keep extraction eligible.
+    cpu_read_conf = copy_and_update(conf, {
+        "spark.rapids.sql.format.iceberg.read.enabled": "false",
+        "spark.sql.variant.allowReadingShredded": "false",
+    })
+
     def create_extracted_table(spark):
         spark.sql(f"DROP TABLE IF EXISTS {extracted_table}")
         callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
@@ -362,13 +369,14 @@ def test_ctas_v3_variant_cpu_rows_convert_to_gpu(
                                 for node in collect_plan_nodes(callback.extractExecutedPlan(plan)))]
         assert transition_plans, "Expected CPU Iceberg Variant rows converted to GPU in CTAS:\n{}" \
             .format("\n".join(str(plan) for plan in plans))
+        assert any(callback.contains(plan, "GpuAppendDataExec") for plan in transition_plans), \
+            "Expected a GPU Iceberg write above Variant row conversion:\n{}" \
+            .format("\n".join(str(plan) for plan in transition_plans))
         for plan in plans:
             callback.assertNotContain(plan, "HostColumnarToGpu")
 
-    # The raw Variant CTAS above intentionally stays on CPU for shredded input. Extract
-    # scalar outputs from the CPU Iceberg scan in a second CTAS to exercise conversion
-    # during the write itself, without the shredded Parquet CPU-prefix safeguard.
-    with_gpu_session(create_extracted_table, conf=conf)
+    # Extract scalar outputs from CPU Iceberg rows and verify conversion during CTAS.
+    with_gpu_session(create_extracted_table, conf=cpu_read_conf)
 
     def read_result(spark):
         return spark.sql(f"""SELECT product_id, partition_col,
@@ -382,13 +390,13 @@ def test_ctas_v3_variant_cpu_rows_convert_to_gpu(
         actual = spark.table(extracted_table).select(expected.columns)
         assert_equal_with_local_sort(expected.collect(), actual.collect())
 
-    with_cpu_session(validate_extracted_table, conf=conf)
+    with_cpu_session(validate_extracted_table, conf=cpu_read_conf)
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         read_result,
         exist_classes="BatchScanExec,GpuRowToColumnarExec,GpuProjectExec,GpuCpuBridgeExpression",
         non_exist_classes="HostColumnarToGpu",
-        conf=conf,
+        conf=cpu_read_conf,
         require_non_empty=True)
 
     result_path = spark_tmp_path + "/VARIANT_VALIDATION_OUTPUT"
@@ -401,7 +409,7 @@ def test_ctas_v3_variant_cpu_rows_convert_to_gpu(
         lambda spark, path: spark.read.parquet(path),
         result_path,
         ["BatchScanExec"],
-        conf=conf)
+        conf=cpu_read_conf)
 
     def validate_output(spark):
         actual = spark.read.parquet(result_path + "/GPU")
