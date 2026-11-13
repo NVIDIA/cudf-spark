@@ -14,7 +14,11 @@
 
 import pytest
 
-from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_are_equal_sql, assert_gpu_and_cpu_error, assert_gpu_and_cpu_same_data_or_error, assert_gpu_fallback_collect, assert_cpu_and_gpu_are_equal_collect_with_capture
+from asserts import (assert_cpu_and_gpu_are_equal_collect_with_capture,
+                     assert_equal_with_signed_zero, assert_gpu_and_cpu_are_equal_collect,
+                     assert_gpu_and_cpu_are_equal_sql, assert_gpu_and_cpu_error,
+                     assert_gpu_and_cpu_same_data_or_error, assert_gpu_fallback_collect,
+                     run_with_cpu_and_gpu)
 from data_gen import *
 from conftest import is_databricks_runtime
 from marks import incompat, allow_non_gpu, disable_ansi_mode, validate_execs_in_gpu_plan
@@ -997,6 +1001,70 @@ def test_arrays_overlap_before_spark313(data_gen):
             'arrays_overlap(array(3, 4), array(1, 2))',
             'arrays_overlap(array(), array(1, 2))')
     )
+
+@pytest.mark.skipif(not (is_spark_405() or is_spark_42x()),
+                    reason="This Spark version does not normalize array set operations")
+@pytest.mark.parametrize('element_type', ['float', 'double'])
+@validate_execs_in_gpu_plan('GpuProjectExec')
+def test_array_set_ops_float_normalization(element_type):
+    data = [
+        ([0.0, -0.0, float('nan'), float('nan')],
+         [-0.0, float('nan'), 1.0]),
+        ([float('nan'), -0.0], [0.0, float('nan')])
+    ]
+
+    cpu, gpu = run_with_cpu_and_gpu(
+        lambda spark: spark.createDataFrame(
+            data, f'a array<{element_type}>, b array<{element_type}>').selectExpr(
+                'sort_array(array_distinct(a))',
+                'sort_array(array_intersect(a, b))',
+                'sort_array(array_union(a, b))',
+                'sort_array(array_except(a, b))',
+                'arrays_overlap(a, b)'),
+        'COLLECT')
+    assert_equal_with_signed_zero(cpu, gpu)
+
+@pytest.mark.skipif(not (is_spark_405() or is_spark_42x()),
+                    reason="This Spark version does not normalize array set operations")
+@pytest.mark.parametrize('element_type', ['float', 'double'])
+@validate_execs_in_gpu_plan('GpuProjectExec')
+def test_array_distinct_nested_float_normalization(element_type):
+    data = [([[-0.0], [0.0], [float('nan')], [float('nan')]],)]
+
+    cpu, gpu = run_with_cpu_and_gpu(
+        lambda spark: spark.createDataFrame(
+            data, f'a array<array<{element_type}>>').selectExpr('array_distinct(a)'),
+        'COLLECT')
+    assert_equal_with_signed_zero(cpu, gpu)
+
+@pytest.mark.skipif(not (is_spark_405() or is_spark_42x()),
+                    reason="This Spark version does not normalize array set operations")
+@pytest.mark.parametrize('element_type', ['float', 'double'])
+@validate_execs_in_gpu_plan('GpuProjectExec')
+def test_array_distinct_struct_float_normalization(element_type):
+    data = [([
+        (-0.0, 1), (0.0, 2), (float('nan'), 3),
+        (float('nan'), 3), (None, 4), None
+    ],)]
+
+    cpu, gpu = run_with_cpu_and_gpu(
+        lambda spark: spark.createDataFrame(
+            data, f'a array<struct<x:{element_type},tag:int>>').selectExpr(
+                'array_distinct(a)'),
+        'COLLECT')
+    assert_equal_with_signed_zero(cpu, gpu)
+
+@pytest.mark.skipif(not (is_spark_405() or is_spark_42x()),
+                    reason="This Spark version does not normalize array set operations")
+@allow_non_gpu('ArrayUnion')
+def test_array_union_nested_float_fallback():
+    data = [([[-0.0]], [[0.0]])]
+
+    assert_gpu_fallback_collect(
+        lambda spark: spark.createDataFrame(
+            data, 'a array<array<double>>, b array<array<double>>').selectExpr(
+                'array_union(a, b)'),
+        'ArrayUnion')
 
 @pytest.mark.parametrize('data_gen', [ByteGen(special_cases=[-10, 0, 10]), ShortGen(special_cases=[-10, 0, 10]), 
                                       IntegerGen(special_cases=[-10, 0, 10]), LongGen(special_cases=[-10, 0, 10])], ids=idfn)

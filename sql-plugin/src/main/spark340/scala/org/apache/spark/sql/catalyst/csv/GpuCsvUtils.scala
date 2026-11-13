@@ -15,32 +15,8 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "340"}
-{"spark": "341"}
-{"spark": "342"}
-{"spark": "343"}
-{"spark": "344"}
-{"spark": "350"}
-{"spark": "351"}
-{"spark": "352"}
-{"spark": "353"}
-{"spark": "354"}
-{"spark": "355"}
-{"spark": "356"}
-{"spark": "357"}
-{"spark": "358"}
-{"spark": "359"}
-{"spark": "400"}
-{"spark": "401"}
-{"spark": "402"}
-{"spark": "403"}
-{"spark": "404"}
-{"spark": "410db183"}
-{"spark": "411"}
-{"spark": "412"}
-{"spark": "413"}
-{"spark": "420"}
-{"spark": "500"}
+{"spark":["340"],"carryForward":"sameMinor"}
+{"spark":["350","400","420"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.catalyst.csv
@@ -50,6 +26,8 @@ import java.nio.charset.StandardCharsets
 import com.nvidia.spark.rapids.shims.LegacyBehaviorPolicyShim
 
 import org.apache.spark.sql.catalyst.util.DateFormatter
+import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.types.Metadata
 
 object GpuCsvUtils {
   def csvLineToParse(line: Array[Byte], offset: Int, len: Int,
@@ -58,6 +36,10 @@ object GpuCsvUtils {
 
   def dateFormatInRead(options: CSVOptions): String =
     options.dateFormatInRead.getOrElse(DateFormatter.defaultPattern)
+
+  // Follow vanilla Spark's format-selection path, without consulting column metadata.
+  def dateFormatInRead(options: CSVOptions, metadata: Metadata): Option[String] =
+    options.dateFormatInRead
 
   def timestampFormatInRead(options: CSVOptions): String = options.timestampFormatInRead.getOrElse(
     if (LegacyBehaviorPolicyShim.isLegacyTimeParserPolicy()) {
@@ -68,4 +50,11 @@ object GpuCsvUtils {
 
   def enableDateTimeParsingFallback(options: CSVOptions): Boolean =
     options.enableDateTimeParsingFallback.getOrElse(false)
+
+  def enableDateParsingFallback(options: CSVOptions): Boolean =
+    options.enableDateTimeParsingFallback
+      .orElse(SQLConf.get.csvEnableDateTimeParsingFallback)
+      .getOrElse {
+        LegacyBehaviorPolicyShim.isLegacyTimeParserPolicy() || options.dateFormatOption.isEmpty
+      }
 }

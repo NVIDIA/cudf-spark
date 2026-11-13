@@ -21,7 +21,8 @@ from pyspark.sql.types import ArrayType, BinaryType, TimestampType
 
 from asserts import (assert_cpu_and_gpu_are_equal_collect_with_capture,
                      assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect,
-                     assert_gpu_fallback_collect, assert_gpu_fallback_write, collect_plan_nodes)
+                     assert_gpu_fallback_collect, assert_gpu_fallback_write,
+                     assert_gpu_fallback_write_sql, collect_plan_nodes)
 from conftest import is_iceberg_remote_catalog, spark_jvm
 from data_gen import gen_df, copy_and_update, long_gen, RepeatSeqGen
 from iceberg import (
@@ -31,7 +32,7 @@ from iceberg import (
     ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance,
     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df, read_parquet_schema)
 from marks import (iceberg, ignore_order, allow_non_gpu, allow_non_gpu_conditional,
-                   datagen_overrides)
+                   datagen_overrides, iceberg_fast_test)
 from spark_session import (with_gpu_session, with_cpu_session, is_spark_400_or_later,
                            is_spark_411_or_later)
 
@@ -114,6 +115,7 @@ def _assert_gpu_equals_cpu_ctas(spark_tmp_table_factory,
     return cpu_table, gpu_table
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.parametrize("format_version", iceberg_format_versions)
@@ -205,6 +207,25 @@ def test_ctas_gpu_timestamp_uses_iceberg_micros_and_has_metrics(
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)
+@allow_non_gpu('AtomicCreateTableAsSelectExec', 'AppendDataExec')
+def test_ctas_encryption_fallback(spark_tmp_table_factory):
+    base_table_name = get_full_table_name(spark_tmp_table_factory)
+
+    def run_ctas(spark, table):
+        _execute_ctas(
+            spark, table, spark_tmp_table_factory,
+            lambda sp: row_lineage_df(sp, length=128),
+            {"format-version": "3", "encryption.key-id": "test-key"}, ret=False)
+
+    assert_gpu_fallback_write_sql(
+        run_ctas, lambda spark, table: spark.table(table),
+        base_table_name, ["AtomicCreateTableAsSelectExec"], conf=iceberg_write_enabled_conf)
+
+
+@iceberg_fast_test
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@ignore_order(local=True)
 @allow_non_gpu("AtomicCreateTableAsSelectExec", "AppendDataExec")
 def test_ctas_v3_fallback(spark_tmp_table_factory):
     def run_ctas(spark):
@@ -222,6 +243,7 @@ def test_ctas_v3_fallback(spark_tmp_table_factory):
         conf=copy_and_update(iceberg_write_enabled_conf, {"spark.rapids.sql.format.iceberg.v3.enabled": "false"}))
 
 
+@iceberg_fast_test
 @iceberg
 @pytest.mark.skipif(
     not supports_iceberg_row_lineage_inheritance,
@@ -312,6 +334,13 @@ def test_ctas_v3_variant_cpu_rows_convert_to_gpu(
 
     with_gpu_session(create_table, conf=conf)
 
+    # Exercise CPU Variant rows through the GPU projection. The read opt-out retains a
+    # CPU Iceberg scan; the supported Variant settings keep extraction eligible.
+    cpu_read_conf = copy_and_update(conf, {
+        "spark.rapids.sql.format.iceberg.read.enabled": "false",
+        "spark.sql.variant.allowReadingShredded": "false",
+    })
+
     def create_extracted_table(spark):
         spark.sql(f"DROP TABLE IF EXISTS {extracted_table}")
         callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
@@ -340,13 +369,14 @@ def test_ctas_v3_variant_cpu_rows_convert_to_gpu(
                                 for node in collect_plan_nodes(callback.extractExecutedPlan(plan)))]
         assert transition_plans, "Expected CPU Iceberg Variant rows converted to GPU in CTAS:\n{}" \
             .format("\n".join(str(plan) for plan in plans))
+        assert any(callback.contains(plan, "GpuAppendDataExec") for plan in transition_plans), \
+            "Expected a GPU Iceberg write above Variant row conversion:\n{}" \
+            .format("\n".join(str(plan) for plan in transition_plans))
         for plan in plans:
             callback.assertNotContain(plan, "HostColumnarToGpu")
 
-    # The raw Variant CTAS above intentionally stays on CPU for shredded input. Extract
-    # scalar outputs from the CPU Iceberg scan in a second CTAS to exercise conversion
-    # during the write itself, without the shredded Parquet CPU-prefix safeguard.
-    with_gpu_session(create_extracted_table, conf=conf)
+    # Extract scalar outputs from CPU Iceberg rows and verify conversion during CTAS.
+    with_gpu_session(create_extracted_table, conf=cpu_read_conf)
 
     def read_result(spark):
         return spark.sql(f"""SELECT product_id, partition_col,
@@ -360,13 +390,13 @@ def test_ctas_v3_variant_cpu_rows_convert_to_gpu(
         actual = spark.table(extracted_table).select(expected.columns)
         assert_equal_with_local_sort(expected.collect(), actual.collect())
 
-    with_cpu_session(validate_extracted_table, conf=conf)
+    with_cpu_session(validate_extracted_table, conf=cpu_read_conf)
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         read_result,
         exist_classes="BatchScanExec,GpuRowToColumnarExec,GpuProjectExec,GpuCpuBridgeExpression",
         non_exist_classes="HostColumnarToGpu",
-        conf=conf,
+        conf=cpu_read_conf,
         require_non_empty=True)
 
     result_path = spark_tmp_path + "/VARIANT_VALIDATION_OUTPUT"
@@ -379,7 +409,7 @@ def test_ctas_v3_variant_cpu_rows_convert_to_gpu(
         lambda spark, path: spark.read.parquet(path),
         result_path,
         ["BatchScanExec"],
-        conf=conf)
+        conf=cpu_read_conf)
 
     def validate_output(spark):
         actual = spark.read.parquet(result_path + "/GPU")
@@ -450,6 +480,7 @@ def _do_test_ctas_partitioned_table(
                                 partition_col_sql=partition_col_sql)
 
 
+@iceberg_fast_test
 @iceberg
 @datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids-jni/issues/4016')
 @ignore_order(local=True)
@@ -618,6 +649,7 @@ def test_ctas_from_values(format_version, spark_tmp_table_factory,
     assert_equal_with_local_sort(cpu_data, gpu_data)
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.parametrize("partition_col_sql", [

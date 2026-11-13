@@ -511,7 +511,8 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                     // upload log only in case of build failure
                     def guardWords = ["gitlab.*?\\.com", "urm.*?\\.com",
                                       "artifactory.*?\\.com", "sonar.*?\\.com",
-                                      "dbc.*?azuredatabricks\\.net", "adb.*?databricks\\.com"]
+                                      "dbc.*?azuredatabricks\\.net", "adb.*?databricks\\.com",
+                                      "(?i)\\S*?\\.nvidia\\.com"]
                     // Keep host/cloud/GPU identities in Jenkins, not the public log upload.
                     // An interrupted diagnostic block is redacted through the end of the log.
                     guardWords.add('(?s)Spark readiness: pre-test host diagnostics.*?' +
@@ -606,7 +607,7 @@ boolean databricksTestNeeded() {
             # get merge BASE from merged pull request. Log message e.g. "Merge HEAD into BASE"
             BASE_REF=$(git --no-pager log --oneline -1 | awk '{ print $NF }')
             # Search for Databricks/Delta-related paths, including:
-            # - numbered shim directories such as spark330db/ and spark350db143/
+            # - numbered shim directories such as spark350db143/ and spark400db173/
             # - all Delta Lake paths such as delta-lake/delta-33x/ and scala2.13/delta-lake/
             # - any path containing "databricks", such as jenkins/databricks/
             git --no-pager diff --name-only ${BASE_REF} HEAD | grep -E 'sql-plugin/src/main/.*[0-9x-]db[0-9]*/|(^|/)delta-lake/|databricks' || true

@@ -27,8 +27,8 @@ import com.nvidia.spark.rapids.BoolUtils.isAllValidTrue
 import com.nvidia.spark.rapids.GpuListUtils
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.jni.{GpuListSliceUtils, MapUtils, StringUtils}
-import com.nvidia.spark.rapids.shims.{GetSequenceSize, NullIntolerantShim, ShimExpression,
-  SparkShimImpl}
+import com.nvidia.spark.rapids.shims.{ArraySetOpsShims, GetSequenceSize, NullIntolerantShim,
+  ShimExpression, SparkShimImpl}
 
 import org.apache.spark.sql.catalyst.analysis.{TypeCheckResult, TypeCoercion}
 import org.apache.spark.sql.catalyst.expressions.{ArraySort, ElementAt, ExpectsInputTypes, Expression,
@@ -982,42 +982,47 @@ case class GpuFloatArrayMin(child: Expression) extends GpuArrayMin(child) {
     val base = input.getBase()
 
     withResource(base.getChildColumnView(0)) { child =>
-      withResource(child.isNan()){ childIsNan =>
+      val (allNanOrNull, anyNan) = withResource(child.isNan()) { childIsNan =>
         // if all values in each list are nans or nulls
         val allNanOrNull = {
           val childIsNanOrNull = withResource(child.isNull()) {_.or(childIsNan)}
-          withResource(childIsNanOrNull) { newChild =>
-            withResource(base.replaceListChild(newChild)) {
+          withResource(childIsNanOrNull) { _ =>
+            withResource(base.replaceListChild(childIsNanOrNull)) {
               _.listReduce(listAll)
             }
           }
         }
-        withResource(allNanOrNull){ allNanOrNull =>
-          // return nan if the list contains nan, else return null
-          val trueOption = {
-            val anyNan = withResource(base.replaceListChild(childIsNan)) {
-              _.listReduce(listAny)
-            }
-            withResource(anyNan) { anyNan =>
-              withResource(getNanScalar) { nanScalar =>
-                withResource(getNullScalar) { nullScalar =>
-                  anyNan.ifElse(nanScalar, nullScalar)
-                }
-              }
+        closeOnExcept(allNanOrNull) { _ =>
+          val anyNan = withResource(base.replaceListChild(childIsNan)) {
+            _.listReduce(listAny)
+          }
+          (allNanOrNull, anyNan)
+        }
+      }
+      // The per-element NaN mask is no longer needed after the two reductions.
+      withResource(allNanOrNull) { _ =>
+        // return nan if the list contains nan, else return null
+        val trueOption = withResource(anyNan) { _ =>
+          withResource(getNanScalar) { nanScalar =>
+            // The child view borrows data; allNanOrNull is needed by the final ifElse.
+            // with-resource-lint: allow-deep-nesting -- #15997 other owners are ifElse operands.
+            withResource(getNullScalar) { nullScalar =>
+              anyNan.ifElse(nanScalar, nullScalar)
             }
           }
-          withResource(trueOption){ trueOption =>
-            // replace all nans to nulls, and then find the min value.
-            val falseOption = withResource(child.nansToNulls()) { nanToNullChild =>
-              withResource(base.replaceListChild(nanToNullChild)) { nanToNullList =>
-                nanToNullList.listReduce(SegmentedReductionAggregation.min())
-              }
+        }
+        withResource(trueOption) { _ =>
+          // replace all nans to nulls, and then find the min value.
+          val falseOption = withResource(child.nansToNulls()) { nanToNullChild =>
+            // Both result columns are needed by the final ifElse; the child view borrows data.
+            // with-resource-lint: allow-deep-nesting -- #15997 normalized child backs this view.
+            withResource(base.replaceListChild(nanToNullChild)) { nanToNullList =>
+              nanToNullList.listReduce(SegmentedReductionAggregation.min())
             }
-            // if a list contains values other than nan or null
-            // return `trueOption`, else return `falseOption`.
-            withResource(falseOption){ falseOption =>
-              allNanOrNull.ifElse(trueOption, falseOption)
-            }
+          }
+          // All-NaN/null lists use the NaN/null option; other lists use the minimum.
+          withResource(falseOption) { _ =>
+            allNanOrNull.ifElse(trueOption, falseOption)
           }
         }
       }
@@ -1341,20 +1346,28 @@ case class GpuArraysZip(children: Seq[Expression]) extends GpuExpression with Sh
     withResource(padded.safeMap(_.getChildColumnView(0))) { children =>
       // Put them into a struct column view
       withResource(ColumnView.makeStructView(children: _*)) { structView =>
-        // Make the struct a list using the input's offsets and validity
-        // in the cheapest way possible.
-        val proto = padded.head
-        withResource(proto.getValid) { valid =>
-          withResource(proto.getOffsets) { offsets =>
-            withResource(new ColumnView(DType.LIST, proto.getRowCount,
-              java.util.Optional.of[java.lang.Long](proto.getNullCount),
-              valid, offsets, Array(structView))) { retView =>
-              // Finally copy the result out to a ColumnVector so we can return it
-              retView.copyToColumnVector()
-            }
-          }
+        // Reuse the input's offsets and validity, then copy into an owning result.
+        withResource(padded.head.replaceListChild(structView)) { retView =>
+          retView.copyToColumnVector()
         }
       }
+    }
+  }
+}
+
+private object GpuArraySetOps {
+  def normalizeFloatingPointOutputIfNeeded(
+      result: ColumnVector,
+      dataType: DataType): ColumnVector = {
+    if (ArraySetOpsShims.shouldNormalizeFloatingPointOutput) {
+      withResource(result) { result =>
+        ColumnCastUtil.deepTransform(result, Some(dataType)) {
+          case (cv, Some(FloatType | DoubleType)) =>
+            cv.normalizeNANsAndZeros()
+        }
+      }
+    } else {
+      result
     }
   }
 }
@@ -1413,7 +1426,9 @@ case class GpuArrayExcept(left: Expression, right: Expression)
   override def nullable: Boolean = true
 
   override def doColumnar(lhs: GpuColumnVector, rhs: GpuColumnVector): ColumnVector = {
-    ColumnView.listsDifferenceDistinct(lhs.getBase, rhs.getBase)
+    GpuArraySetOps.normalizeFloatingPointOutputIfNeeded(
+      ColumnView.listsDifferenceDistinct(lhs.getBase, rhs.getBase),
+      dataType)
   }
 
   override def doColumnar(lhs: GpuScalar, rhs: GpuColumnVector): ColumnVector = {
@@ -1458,7 +1473,9 @@ case class GpuArrayIntersect(left: Expression, right: Expression)
   override def nullable: Boolean = true
 
   override def doColumnar(lhs: GpuColumnVector, rhs: GpuColumnVector): ColumnVector = {
-    ColumnView.listsIntersectDistinct(lhs.getBase, rhs.getBase)
+    GpuArraySetOps.normalizeFloatingPointOutputIfNeeded(
+      ColumnView.listsIntersectDistinct(lhs.getBase, rhs.getBase),
+      dataType)
   }
 
   override def doColumnar(lhs: GpuScalar, rhs: GpuColumnVector): ColumnVector = {
@@ -1503,7 +1520,9 @@ case class GpuArrayUnion(left: Expression, right: Expression)
   override def nullable: Boolean = true
 
   override def doColumnar(lhs: GpuColumnVector, rhs: GpuColumnVector): ColumnVector = {
-    ColumnView.listsUnionDistinct(lhs.getBase, rhs.getBase)
+    GpuArraySetOps.normalizeFloatingPointOutputIfNeeded(
+      ColumnView.listsUnionDistinct(lhs.getBase, rhs.getBase),
+      dataType)
   }
 
   override def doColumnar(lhs: GpuScalar, rhs: GpuColumnVector): ColumnVector = {
@@ -1783,26 +1802,30 @@ case class GpuArrayRemove(left: Expression, right: Expression) extends GpuBinary
 
   private def constructBooleanMask(lhs: ColumnView, rhs: ColumnView,
                                    offSets: ColumnView, rowCount: Long): ColumnVector = {
-    withResource(lhs) { lhs =>
-      withResource(rhs) { rhs =>
-        val boolMaskNoNans = lhs.equalToNullAware(rhs)
-        val boolMaskWithNans = if (lhs.getType == DType.FLOAT32 || lhs.getType == DType.FLOAT64) {
+    withResource(offSets) { _ =>
+      val boolMaskWithNans = withResource(lhs) { _ =>
+        withResource(rhs) { _ =>
+          val boolMaskNoNans = lhs.equalToNullAware(rhs)
+          if (lhs.getType == DType.FLOAT32 || lhs.getType == DType.FLOAT64) {
             // Compare NaN values for arrays with float or double type
-            withResource(booleanMaskNansOnly(lhs, rhs)) { boolMaskNansOnly =>
-              withResource(boolMaskNoNans) { boolMaskNoNans =>
+            withResource(boolMaskNoNans) { _ =>
+              // Offsets borrow input data. Splitting the comparisons would require passing
+              // both masks out together and separately protecting them on exceptions.
+              // with-resource-lint: allow-deep-nesting -- #15997 keep comparison cleanup together.
+              withResource(booleanMaskNansOnly(lhs, rhs)) { boolMaskNansOnly =>
                 boolMaskNoNans.or(boolMaskNansOnly)
               }
             }
           } else {
             boolMaskNoNans
           }
-        withResource(boolMaskWithNans) { boolMaskWithNans =>
-          withResource(boolMaskWithNans.not) { boolMaskToKeep =>
-            withResource(offSets) { offSets =>
-              boolMaskToKeep.makeListFromOffsets(rowCount, offSets)
-            }
-          }
         }
+      }
+      val boolMaskToKeep = withResource(boolMaskWithNans) { _ =>
+        boolMaskWithNans.not
+      }
+      withResource(boolMaskToKeep) { _ =>
+        boolMaskToKeep.makeListFromOffsets(rowCount, offSets)
       }
     }
   }
@@ -1861,7 +1884,9 @@ case class GpuArrayDistinct(child: Expression) extends GpuUnaryExpression with N
   override def dataType: DataType = child.dataType
 
   override def doColumnar(input: GpuColumnVector): ColumnVector = {
-    input.getBase.dropListDuplicates(DuplicateKeepOption.KEEP_FIRST)
+    GpuArraySetOps.normalizeFloatingPointOutputIfNeeded(
+      input.getBase.dropListDuplicates(DuplicateKeepOption.KEEP_FIRST),
+      dataType)
   }
 }
 

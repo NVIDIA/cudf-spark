@@ -74,7 +74,7 @@ object GpuDeltaParquetFileFormatBase2 {
  * are materialized into boolean columns and processed in a FilterExec, the deletion vectors
  * are passed to the Parquet reader and applied during reading with no materialization.
  *
- * Note that we do not support the DataSourceV2 API for Delta Lake tables yet.
+ * Both V1 file scans and Delta V2 batch scans use these readers.
  */
 class GpuDeltaParquetFileFormatBase2(
     protocol: Protocol,
@@ -275,9 +275,9 @@ class GpuDeltaParquetFileFormatBase2(
       }
       new DeltaParquetPartitionReader(fileIO, conf, file, singleFileInfo.filePath,
         singleFileInfo.blocks, singleFileInfo.schema, isCaseSensitive, readDataSchema,
-        debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows, maxReadBatchSizeBytes,
-        targetSizeBytes, useChunkedReader, maxChunkedReaderMemoryUsageSizeBytes,
-        skipReadEstimate, compressCfg,
+        partitionSchema, debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows,
+        maxReadBatchSizeBytes, targetSizeBytes, useChunkedReader,
+        maxChunkedReaderMemoryUsageSizeBytes, skipReadEstimate, compressCfg,
         metrics, singleFileInfo.dateRebaseMode, singleFileInfo.timestampRebaseMode,
         singleFileInfo.hasInt96Timestamps, readUseFieldId)
     }
@@ -292,6 +292,7 @@ class GpuDeltaParquetFileFormatBase2(
       clippedParquetSchema: MessageType,
       override val isSchemaCaseSensitive: Boolean,
       readDataSchema: StructType,
+      partitionSchema: StructType,
       debugDumpPrefix: Option[String],
       debugDumpAlways: Boolean,
       maxReadBatchSizeRows: Integer,
@@ -307,28 +308,29 @@ class GpuDeltaParquetFileFormatBase2(
       hasInt96Timestamps: Boolean,
       useFieldId: Boolean) extends AbstractParquetPartitionReader(
     fileIO, conf, split, filePath, clippedBlocks, clippedParquetSchema, isSchemaCaseSensitive,
-    readDataSchema, debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows, maxReadBatchSizeBytes,
-    skipReadEstimate, compressCfg, execMetrics, useFieldId) {
+    readDataSchema, partitionSchema, debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows,
+    maxReadBatchSizeBytes, targetBatchSizeBytes, skipReadEstimate, compressCfg, execMetrics,
+    useFieldId) {
 
     override protected def computeNumRowsAlive(
         totalNumRows: Long,
-        chunkedBlocks: Seq[BlockMetaData]): Int = {
+        chunkedBlocks: Seq[BlockMetaData]): Long = {
       if (totalNumRows == 0 || tablePath.isEmpty) {
-        Math.toIntExact(totalNumRows)
+        totalNumRows
       } else {
         val dvDescriptorOpt = split.otherConstantMetadataColumnValues
           .get(FILE_ROW_INDEX_FILTER_ID_ENCODED).asInstanceOf[Option[String]]
         val filterTypeOpt = split.otherConstantMetadataColumnValues
           .get(FILE_ROW_INDEX_FILTER_TYPE).asInstanceOf[Option[RowIndexFilterType]]
         if (dvDescriptorOpt.isEmpty && filterTypeOpt.isEmpty) {
-          Math.toIntExact(totalNumRows)
+          totalNumRows
         } else {
           withResource(RapidsDeletionVectors.loadDeletionVector(
               fileIO, dvDescriptorOpt, filterTypeOpt, tablePath.get)) { serializedBitmap =>
             val (rowGroupOffsets, rowGroupNumRows) =
               RapidsDeletionVectors.getRowGroupMetadata(chunkedBlocks)
-            Math.toIntExact(computeNumRowsAliveWithDeletionVector(serializedBitmap, filterTypeOpt,
-              rowGroupOffsets, rowGroupNumRows, maxReadBatchSizeRows))
+            computeNumRowsAliveWithDeletionVector(serializedBitmap, filterTypeOpt,
+              rowGroupOffsets, rowGroupNumRows, maxReadBatchSizeRows)
           }
         }
       }
@@ -457,6 +459,27 @@ class GpuDeltaParquetFileFormatBase2(
       poolConf,
       fileScan.allMetrics,
       fileScan.queryUsesInputFile)
+  }
+
+  /** Use the V2 connector's already planned files, without constructing a V1 file scan. */
+  def createV2ReaderFactory(
+      sqlConf: SQLConf,
+      broadcastedConf: Broadcast[SerializableConfiguration],
+      dataSchema: StructType,
+      readDataSchema: StructType,
+      partitionSchema: StructType,
+      filters: Array[Filter],
+      rapidsConf: RapidsConf,
+      metrics: Map[String, GpuMetric],
+      queryUsesInputFile: Boolean): PartitionReaderFactory = {
+    new GpuDeltaParquetMultiFilePartitionReaderFactory(
+      sqlConf, broadcastedConf, prepareSchema(dataSchema), prepareSchema(readDataSchema),
+      prepareSchema(partitionSchema), prepareFiltersForRead(filters).toArray, rapidsConf,
+      ThreadPoolConfBuilder(rapidsConf), metrics, queryUsesInputFile) {
+      // Delta's SparkPartitionReader visits files in their planned order. In particular,
+      // multithreaded reads must not return whichever file finishes first.
+      override protected val keepReadsInOrderFromConf: Boolean = true
+    }
   }
 
   /**
@@ -716,23 +739,21 @@ class GpuDeltaParquetFileFormatBase2(
       val allPartValues: Option[Array[(Long, InternalRow)]] = deltaBuffer.allPartValues
       val dvMetadata: DeletionVectorMetadata = deltaBuffer.dvMetadata.head
 
-      val parseOpts = closeOnExcept(hostBuffers) { _ =>
-        getParquetOptions(readDataSchema, clippedSchema, useFieldId)
-      }
-      val colTypes = readDataSchema.fields.map(f => f.dataType)
+      val (parseOpts, colTypes, dvInfos) = closeOnExcept(hostBuffers) { _ =>
+        val parsedOptions = getParquetOptions(readDataSchema, clippedSchema, useFieldId)
+        val columnTypes = readDataSchema.fields.map(f => f.dataType)
+        val deletionVectorInfos: Array[SpillableDeletionVectorInfo] = if (hasTablePath) {
+          val filteredDvInfos = dvMetadata.takeDvInfos()
 
-      val dvInfos: Array[SpillableDeletionVectorInfo] = if (hasTablePath) {
-        val filteredDvInfos = dvMetadata.metadatas
-          .filter(_.maybeDvInfo.isDefined)
-          .map(_.maybeDvInfo.get)
-
-        closeOnExcept(filteredDvInfos.map(_.serializedBitmap)) { _ =>
-          require(filteredDvInfos.length == dvMetadata.metadatas.length,
-            "Every DeletionVectorInfo must exist if tablePath is defined")
+          closeOnExcept(filteredDvInfos) { _ =>
+            require(filteredDvInfos.length == dvMetadata.metadatas.length,
+              "Every DeletionVectorInfo must exist if tablePath is defined")
+          }
+          filteredDvInfos
+        } else {
+          Array()
         }
-        filteredDvInfos
-      } else {
-        Array()
+        (parsedOptions, columnTypes, deletionVectorInfos)
       }
 
       withResource(hostBuffers) { _ =>
@@ -803,21 +824,39 @@ class GpuDeltaParquetFileFormatBase2(
 
     /**
      * Deletion vector metadata for a single host memory buffer containing a part of data.
+     * Original and combined metadata share this object, so taking the info clears ownership
+     * for both.
      */
-    private case class SingleBufferDVMetadata(
-        // maybeDvInfo is None only when the tablePath is not defined.
-        maybeDvInfo: Option[SpillableDeletionVectorInfo]
-    )
+    private class SingleBufferDVMetadata(
+        private var maybeDvInfo: Option[SpillableDeletionVectorInfo]) {
+      def peekDvInfo: Option[SpillableDeletionVectorInfo] = maybeDvInfo
+
+      def takeDvInfo(): Option[SpillableDeletionVectorInfo] = {
+        val ret = maybeDvInfo
+        maybeDvInfo = None
+        ret
+      }
+    }
 
     private case class DeletionVectorMetadata(
         metadatas: Array[SingleBufferDVMetadata]
-    )
+    ) extends AutoCloseable {
+      def takeDvInfos(): Array[SpillableDeletionVectorInfo] =
+        metadatas.flatMap(_.takeDvInfo())
+
+      def peekDvInfos: Array[SpillableDeletionVectorInfo] =
+        metadatas.flatMap(_.peekDvInfo)
+
+      override def close(): Unit = {
+        takeDvInfos().safeClose()
+      }
+    }
 
     private object DeletionVectorMetadata {
       def forSingleBuffer(maybeDvInfo: Option[SpillableDeletionVectorInfo]) = {
         DeletionVectorMetadata(
           Array(
-            SingleBufferDVMetadata(maybeDvInfo)
+            new SingleBufferDVMetadata(maybeDvInfo)
           )
         )
       }
@@ -839,7 +878,11 @@ class GpuDeltaParquetFileFormatBase2(
         numRows: Long,
         dvMetadata: Array[DeletionVectorMetadata],
         override val allPartValues: Option[Array[(Long, InternalRow)]] = None)
-      extends HostMemoryEmptyMetaData {}
+      extends HostMemoryEmptyMetaData {
+      override def close(): Unit = {
+        withResource(dvMetadata) { _ => super.close() }
+      }
+    }
 
     private case class DeltaParquetHostMemoryBuffersWithMetaData(
         override val partitionedFile: PartitionedFile,
@@ -855,6 +898,10 @@ class GpuDeltaParquetFileFormatBase2(
         // are present.
         dvMetadata: Array[DeletionVectorMetadata]
     ) extends HostMemoryBuffersWithMetaData {
+
+      override def close(): Unit = {
+        withResource(dvMetadata) { _ => super.close() }
+      }
 
       override def consumeHeadBuffer(): HostMemoryBuffersWithMetaData = {
         require(memBuffersAndSizes.nonEmpty,
@@ -930,7 +977,7 @@ class GpuDeltaParquetFileFormatBase2(
       val combinedDVMeta = DeletionVectorMetadata.combine(toCombine.flatMap(_.dvMetadata))
 
       DeltaParquetHostMemoryEmptyMetaData(
-        metaForEmpty.partitionedFile, // just pick one since not used
+        metaForEmpty.partitionedFile, // retain the combined group's representative
         emptyMeta.emptyBufferSize,
         emptyMeta.emptyTotalBytesRead,
         metaForEmpty.dateRebaseMode, // these shouldn't matter since data is empty
@@ -1017,7 +1064,7 @@ class GpuDeltaParquetFileFormatBase2(
     override protected def computeNumRowsAlive(
         totalNumRows: Long,
         metadata: HostMemoryBuffersWithMetaDataBase
-    ): Int = {
+    ): Long = {
       // totalNumRows can be 0 if the file is not found but ignoreMissingFiles is true,
       // or the file is empty.
       if (totalNumRows == 0) {
@@ -1026,9 +1073,9 @@ class GpuDeltaParquetFileFormatBase2(
 
       val dvInfos = metadata match {
         case emptyMeta: DeltaParquetHostMemoryEmptyMetaData =>
-          emptyMeta.dvMetadata.flatMap(_.metadatas).flatMap(_.maybeDvInfo)
+          emptyMeta.dvMetadata.flatMap(_.peekDvInfos)
         case buffersMeta: DeltaParquetHostMemoryBuffersWithMetaData =>
-          buffersMeta.dvMetadata.flatMap(_.metadatas).flatMap(_.maybeDvInfo)
+          buffersMeta.dvMetadata.flatMap(_.peekDvInfos)
         case _ =>
           throw new IllegalArgumentException(s"Unexpected metadata type ${metadata.getClass()}")
       }
@@ -1056,7 +1103,7 @@ class GpuDeltaParquetFileFormatBase2(
       require(numDeletedRows <= totalNumRows,
         s"Deletion vector cardinality ($numDeletedRows) exceeds " +
           s"partition row count ($totalNumRows)")
-      Math.toIntExact(totalNumRows - numDeletedRows)
+      totalNumRows - numDeletedRows
     }
   }
 

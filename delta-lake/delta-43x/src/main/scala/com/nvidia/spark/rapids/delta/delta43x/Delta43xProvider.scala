@@ -25,6 +25,7 @@ import com.nvidia.spark.rapids.delta.common.{DeleteCommandMeta,
   DeltaDynamicPartitionOverwriteCommandMeta, UpdateCommandMeta}
 import com.nvidia.spark.rapids.delta.common.{GpuDelta4xParquetFileFormat, GpuDeltaParquetFileFormat2}
 import com.nvidia.spark.rapids.delta.common.DeltaProviderBase
+import com.nvidia.spark.rapids.delta.delta42x.Delta42xProvider
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
@@ -32,6 +33,7 @@ import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.connector.catalog.{Identifier, StagingTableCatalog, SupportsWrite,
   TableCatalog}
+import org.apache.spark.sql.connector.read.Scan
 import org.apache.spark.sql.delta.{CatalogOwnedTableFeature, DeltaConfigs,
   DeltaDynamicPartitionOverwriteCommand, DeltaLog, DeltaOptions, DeltaParquetFileFormat,
   IcebergCompat, MaterializePartitionColumnsTableFeature}
@@ -58,6 +60,9 @@ object Delta43xProvider extends DeltaProviderBase with Logging {
     "Delta 4.3 non-Delta catalog writes must run on CPU"
 
   override protected def getCDFRelationStrategy = Delta43xCDFRelationStrategy
+
+  // Delta 4.3 uses the same server-side scan API as 4.2.
+  override def getScans: Map[Class[_ <: Scan], ScanRule[_ <: Scan]] = Delta42xProvider.getScans
 
   override protected def getDeltaLogForV1Write(
       spark: SparkSession,

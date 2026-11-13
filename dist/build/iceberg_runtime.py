@@ -56,7 +56,7 @@ def coordinates(zip_handle, buildver, scala_version, property_lookup):
     if artifact_suffix is not None:
         overrides["iceberg.artifact.suffix"] = artifact_suffix
     result = set()
-    prefix = "META-INF/maven/com.nvidia/rapids-4-spark-iceberg-"
+    prefix = "META-INF/maven/com.nvidia/cudf-spark-iceberg-"
     namespace = {"m": MAVEN_NS}
     real_modules = []
     stub_modules = []
@@ -66,11 +66,11 @@ def coordinates(zip_handle, buildver, scala_version, property_lookup):
             continue
         root = ET.fromstring(zip_handle.read(entry))
         module_artifact_id = root.findtext("m:artifactId", namespaces=namespace)
-        if module_artifact_id == "rapids-4-spark-iceberg-stub_%s" % scala_version:
+        if module_artifact_id == "cudf-spark-iceberg-stub_%s" % scala_version:
             stub_modules.append(module_artifact_id)
             continue
         if not module_artifact_id or not re.match(
-                r"^rapids-4-spark-iceberg-[0-9].*_%s$" % re.escape(scala_version),
+                r"^cudf-spark-iceberg-[0-9].*_%s$" % re.escape(scala_version),
                 module_artifact_id):
             continue
         real_modules.append(module_artifact_id)

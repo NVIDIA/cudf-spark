@@ -18,24 +18,18 @@ package com.nvidia.spark.rapids
 
 import ai.rapids.cudf.DType
 import com.nvidia.spark.rapids.jni.Protobuf._
-import com.nvidia.spark.rapids.jni.ProtobufSchemaDescriptor
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.rapids.protobuf._
 import org.apache.spark.sql.types._
 
 class ProtobufSchemaSuite extends AnyFunSuite {
-  private def toJniDescriptor(a: FlattenedSchemaArrays): ProtobufSchemaDescriptor =
-    new ProtobufSchemaDescriptor(a.fieldNumbers, a.parentIndices, a.depthLevels,
-      a.wireTypes, a.outputTypeIds, a.encodings, a.isRepeated, a.isRequired,
-      a.hasDefaultValue, a.isOutput, a.defaultInts, a.defaultFloats, a.defaultBools,
-      a.defaultStrings, a.enumValidValues, a.enumNames)
-
   private case class FakeMessageDescriptor(
       syntax: String,
       fields: Map[String, ProtobufFieldDescriptor],
       override val javaStringCheckUtf8: Boolean = false) extends ProtobufMessageDescriptor {
     override def findField(name: String): Option[ProtobufFieldDescriptor] = fields.get(name)
+    override def fieldNames: Seq[String] = fields.keys.toSeq
   }
 
   private case class FakeFieldDescriptor(
@@ -143,7 +137,7 @@ class ProtobufSchemaSuite extends AnyFunSuite {
       assert(schema.enumValidValues(0).sameElements(Array(0, 1)))
       assert(schema.enumNames(0).map(new String(_, "UTF-8"))
         .sameElements(Array("UNKNOWN", "EN")))
-      assert(toJniDescriptor(schema).numFields() == 1)
+      assert(schema.toJniDescriptor.numFields() == 1)
     }
   }
 
@@ -302,8 +296,8 @@ class ProtobufSchemaSuite extends AnyFunSuite {
     assert(flat.toOption.get.enumNames
       .map(new String(_, "UTF-8"))
       .sameElements(Array("UNKNOWN", "EN")))
-    assert(toJniDescriptor(ProtobufSchemaValidator.toFlattenedSchemaArrays(
-      Array(flat.toOption.get))).numFields() == 1)
+    assert(ProtobufSchemaValidator.toFlattenedSchemaArrays(
+      Array(flat.toOption.get)).toJniDescriptor.numFields() == 1)
   }
 
   test("validator rejects enum-string field without enum metadata") {
@@ -429,12 +423,18 @@ class ProtobufSchemaSuite extends AnyFunSuite {
     }
   }
 
-  test("extractor rejects messages, maps, proto3, and strict UTF-8 schemas") {
+  test("extractor accepts messages but rejects groups, maps, proto3, and strict UTF-8 schemas") {
     val nested = StructType(Seq(StructField("value", IntegerType)))
-    for (dataType <- Seq(nested, ArrayType(nested), MapType(StringType, IntegerType))) {
+    for (dataType <- Seq(nested, ArrayType(nested))) {
+      val repeated = dataType.isInstanceOf[ArrayType]
+      assert(ProtobufSchemaExtractor.checkFieldSupport(
+        dataType, "MESSAGE", repeated, enumsAsInts = false) == ((true, None, ENC_DEFAULT)))
       assert(!ProtobufSchemaExtractor.checkFieldSupport(
-        dataType, "MESSAGE", dataType.isInstanceOf[ArrayType], enumsAsInts = false)._1)
+        dataType, "GROUP", repeated, enumsAsInts = false)._1)
     }
+    // Spark decodes protobuf map fields, which are repeated messages, as MapType.
+    assert(!ProtobufSchemaExtractor.checkFieldSupport(
+      MapType(StringType, IntegerType), "MESSAGE", isRepeated = true, enumsAsInts = false)._1)
     val schema = StructType(Seq(StructField("value", StringType)))
     for (descriptor <- Seq(
       FakeMessageDescriptor("PROTO3", Map.empty),
@@ -448,22 +448,50 @@ class ProtobufSchemaSuite extends AnyFunSuite {
       StructField("status", StringType), field, enumsAsInts = false).toOption.get.isSupported)
   }
 
-  test("validator enforces top-level repeated-field capacity") {
+  test("nested extracted schemas satisfy the JNI descriptor contract") {
+    val childSchema = StructType(Seq(StructField("id", IntegerType)))
+    val childDescriptor = FakeMessageDescriptor("PROTO2",
+      Map("id" -> FakeFieldDescriptor("id", 1, "INT32")))
+    val schema = StructType(Seq(StructField("single", childSchema),
+      StructField("items", ArrayType(childSchema))))
+    val descriptor = FakeMessageDescriptor("PROTO2", Map(
+      "single" -> FakeFieldDescriptor("single", 1, "MESSAGE",
+        messageDescriptor = Some(childDescriptor), referencedTypeSyntax = Some("PROTO2")),
+      "items" -> FakeFieldDescriptor("items", 2, "MESSAGE", isRepeated = true,
+        messageDescriptor = Some(childDescriptor), referencedTypeSyntax = Some("PROTO2"))))
+    val infos = ProtobufSchemaExtractor.analyzeAllFields(
+      schema, descriptor, enumsAsInts = false, "test.Message").fold(fail(_), identity)
+    val childField = childSchema.fields.head
+    val childInfo = ProtobufSchemaExtractor.extractFieldInfo(childField,
+      childDescriptor.fields("id"), enumsAsInts = false).fold(fail(_), identity)
+    val fields = schema.fields.zipWithIndex.flatMap { case (field, index) =>
+      val parent = ProtobufSchemaValidator.toFlattenedFieldDescriptor(field.name,
+        field, infos(field.name), -1, 0, DType.STRUCT.getTypeId.getNativeId, isOutput = true)
+        .fold(fail(_), identity)
+      val child = ProtobufSchemaValidator.toFlattenedFieldDescriptor(s"${field.name}.id",
+        childField, childInfo, index * 2, 1, DType.INT32.getTypeId.getNativeId, isOutput = true)
+        .fold(fail(_), identity)
+      Array(parent, child)
+    }
+    val arrays = ProtobufSchemaValidator.toFlattenedSchemaArrays(fields)
+    assert(arrays.parentIndices.toSeq == Seq(-1, 0, -1, 2))
+    assert(arrays.depthLevels.toSeq == Seq(0, 1, 0, 1))
+    assert(arrays.isRepeated.toSeq == Seq(false, false, true, false))
+    assert(arrays.toJniDescriptor.numFields() == 4)
+  }
+
+  test("repeated fields per message are not capped by the occurrence-scan batch size") {
     val info = ProtobufFieldInfo(1, "INT32", ArrayType(IntegerType), ENC_DEFAULT,
       isSupported = true, None, isRequired = false, None, None, isRepeated = true)
     val flat = ProtobufSchemaValidator.toFlattenedFieldDescriptor("items",
       StructField("items", ArrayType(IntegerType)), info, -1, 0,
       DType.INT32.getTypeId.getNativeId, isOutput = true).toOption.get
-    val fields = (1 to 32).map(number => flat.copy(fieldNumber = number))
-    assert(ProtobufSchemaValidator.validateFlattenedSchema(fields).isRight)
-    assert(ProtobufSchemaValidator.validateFlattenedSchema(fields :+
-      flat.copy(fieldNumber = 33)).isLeft)
-    assert(ProtobufSchemaValidator.validateFlattenedSchema(
-      Seq(flat.copy(parentIdx = 0, depth = 1))).isLeft)
+    val fields = (1 to 33).map(number => flat.copy(fieldNumber = number))
     val arrays = ProtobufSchemaValidator.toFlattenedSchemaArrays(fields.toArray)
-    assert(arrays.fieldNumbers.toSeq == (1 to 32))
+    assert(arrays.fieldNumbers.toSeq == (1 to 33))
     assert(arrays.isRepeated.forall(identity))
     assert(arrays.parentIndices.forall(_ == -1))
+    assert(arrays.toJniDescriptor.numFields() == 33)
   }
 
   test("extractor rejects fixed32 widening to LongType") {
@@ -513,6 +541,7 @@ class ProtobufSchemaSuite extends AnyFunSuite {
       def syntax: String = "PROTO2"
       def findField(name: String): Option[ProtobufFieldDescriptor] =
         throw new UnsupportedOperationException("field lookup failed")
+      def fieldNames: Seq[String] = Seq("id")
     }
     val result = ProtobufSchemaExtractor.analyzeAllFields(
       StructType(Seq(StructField("id", IntegerType))), descriptor, false, "test.Message")
@@ -541,7 +570,6 @@ class ProtobufSchemaSuite extends AnyFunSuite {
       ProtobufSchemaValidator.toFlattenedFieldDescriptor(field.name, field, infos(field.name),
         -1, 0, dtype.getTypeId.getNativeId, isOutput = true).toOption.get
     }
-    assert(ProtobufSchemaValidator.validateFlattenedSchema(fields.toSeq).isRight)
     val arrays = ProtobufSchemaValidator.toFlattenedSchemaArrays(fields)
     assert(arrays.fieldNumbers.toSeq == Seq(1, 2, 3, 4))
     assert(arrays.defaultInts.toSeq == Seq(7L, 0L, 1L, 0L))
@@ -550,6 +578,6 @@ class ProtobufSchemaSuite extends AnyFunSuite {
     assert(arrays.isRepeated.toSeq == Seq(false, false, false, true))
     assert(arrays.encodings.toSeq == Seq(ENC_DEFAULT, ENC_DEFAULT, ENC_ENUM_STRING, ENC_ZIGZAG))
     assert(new String(arrays.defaultStrings(2), "UTF-8") == "EN")
-    assert(toJniDescriptor(arrays).numFields() == 4)
+    assert(arrays.toJniDescriptor.numFields() == 4)
   }
 }

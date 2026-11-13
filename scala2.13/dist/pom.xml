@@ -21,18 +21,18 @@
 
     <parent>
         <groupId>com.nvidia</groupId>
-        <artifactId>rapids-4-spark-parent_2.13</artifactId>
+        <artifactId>cudf-spark-parent_2.13</artifactId>
         <version>26.12.0-SNAPSHOT</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
-    <artifactId>rapids-4-spark_2.13</artifactId>
+    <artifactId>cudf-spark_2.13</artifactId>
     <name>RAPIDS Accelerator for Apache Spark Distribution</name>
     <description>Creates the distribution package of the RAPIDS plugin for Apache Spark</description>
     <version>26.12.0-SNAPSHOT</version>
     <dependencies>
         <dependency>
             <groupId>com.nvidia</groupId>
-            <artifactId>rapids-4-spark-aggregator_${scala.binary.version}</artifactId>
+            <artifactId>cudf-spark-aggregator_${scala.binary.version}</artifactId>
             <version>${project.version}</version>
             <classifier>${spark.version.classifier}</classifier>
             <scope>compile</scope>
@@ -61,6 +61,7 @@
             <properties>
                 <dyn.shim.include.buildvers.skip>false</dyn.shim.include.buildvers.skip>
                 <dyn.shim.buildver>no_snap_with_databricks</dyn.shim.buildver>
+                <rapids.spark.audit.skip.buildvers>databricks</rapids.spark.audit.skip.buildvers>
             </properties>
         </profile>
         <profile>
@@ -68,6 +69,7 @@
             <properties>
                 <dyn.shim.include.buildvers.skip>false</dyn.shim.include.buildvers.skip>
                 <dyn.shim.buildver>snap_and_no_snap_with_databricks</dyn.shim.buildver>
+                <rapids.spark.audit.skip.buildvers>databricks</rapids.spark.audit.skip.buildvers>
             </properties>
         </profile>
         <profile>
@@ -242,7 +244,16 @@
                             <goal>jar</goal>
                         </goals>
                         <configuration>
-                            <archive><compress>${dist.jar.compress}</compress></archive>
+                            <archive>
+                                <compress>${dist.jar.compress}</compress>
+                                <manifest>
+                                    <mainClass>com.nvidia.spark.rapids.SparkRapidsJarTool</mainClass>
+                                </manifest>
+                                <manifestEntries>
+                                    <Implementation-Title>${spark.rapids.product.name}</Implementation-Title>
+                                    <Multi-Release>true</Multi-Release>
+                                </manifestEntries>
+                            </archive>
                             <classesDirectory>${project.build.directory}/parallel-world</classesDirectory>
                             <classifier>${jni.classifier}</classifier>
                         </configuration>
@@ -254,7 +265,7 @@
                 <artifactId>maven-antrun-plugin</artifactId>
                 <executions>
                     <execution>
-                        <id>shimplify-shim-sources</id>
+                        <id>generate-inherited-shim-sources</id>
                         <phase>none</phase>
                     </execution>
                     <execution>
@@ -278,6 +289,8 @@
                                     <arg value="${spark.rapids.source.basedir}/${rapids.module}/scripts/check-iceberg-package-private-access.py"/>
                                     <arg value="--runtime-manifest"/>
                                     <arg value="${project.build.directory}/iceberg-audit-runtimes.txt"/>
+                                    <arg value="--spark-runtime-manifest"/>
+                                    <arg value="${project.build.directory}/spark-audit-runtimes.txt"/>
                                     <arg value="--expected-build-versions"/>
                                     <arg value="${included_buildvers}"/>
                                     <arg value="${project.build.directory}/parallel-world"/>
@@ -295,6 +308,8 @@
                         <configuration>
                             <target>
                                 <delete dir="${project.build.directory}/parallel-world"
+                                        includeemptydirs="true"/>
+                                <delete dir="${project.build.directory}/history-metrics-unpack-markers"
                                         includeemptydirs="true"/>
                                 <delete>
                                     <fileset dir="${project.build.directory}" includes="*.jar"/>
@@ -325,6 +340,31 @@
                                 >
                                     <reference refid="maven.project"/>
                                 </ant>
+                            </target>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>check-history-runtime-at-root</id>
+                        <phase>prepare-package</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <condition property="historyMetricsRuntimeAtRoot">
+                                    <and>
+                                        <available file="${project.build.directory}/parallel-world/com/nvidia/spark/history/HistoryMetricsProvider.class"/>
+                                        <available file="${project.build.directory}/parallel-world/com/nvidia/spark/history/backend/BackendMetricSupport.class"/>
+                                        <available file="${project.build.directory}/parallel-world/com/nvidia/spark/history/relational/RelationalJdbcSupport.class"/>
+                                        <available file="${project.build.directory}/parallel-world/com/nvidia/spark/history/local/LocalHistoryMetricsProvider.class"/>
+                                        <available file="${project.build.directory}/parallel-world/org/sqlite/JDBC.class"/>
+                                        <available file="${project.build.directory}/parallel-world/org/sqlite/native" type="dir"/>
+                                        <available file="${project.build.directory}/parallel-world/META-INF/services/com.nvidia.spark.history.HistoryMetricsProvider"/>
+                                        <available file="${project.build.directory}/parallel-world/META-INF/services/java.sql.Driver"/>
+                                        <available file="${project.build.directory}/parallel-world/META-INF/maven/org.xerial/sqlite-jdbc/pom.properties"/>
+                                        <available file="${project.build.directory}/parallel-world/META-INF/versions/9/org/sqlite/nativeimage/SqliteJdbcFeature.class"/>
+                                    </and>
+                                </condition>
+                                <fail unless="historyMetricsRuntimeAtRoot"
+                                      message="The history API, provider, backend and SQLite runtime must be at the distribution root"/>
                             </target>
                         </configuration>
                     </execution>
@@ -404,6 +444,94 @@
                         </configuration>
                     </execution>
                     <execution>
+                        <id>verify-dist-jar-main</id>
+                        <phase>verify</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <java jar="${dist.jar.name}" fork="true" failonerror="true"
+                                      output="${project.build.directory}/dist-jar-info.txt"/>
+                                <loadfile property="dist.jar.info"
+                                          srcFile="${project.build.directory}/dist-jar-info.txt"/>
+                                <fail message="Distribution JAR build report is incomplete">
+                                    <condition>
+                                        <not>
+                                            <and>
+                                                <contains string="${dist.jar.info}"
+                                                          substring="${spark.rapids.product.name}:"/>
+                                                <contains string="${dist.jar.info}"
+                                                          substring="scala_library_version: ${scala.version}"/>
+                                                <contains string="${dist.jar.info}"
+                                                          substring="java_bytecode_target: ${java.major.version}"/>
+                                                <contains string="${dist.jar.info}"
+                                                          substring="Compute the payload SHA-256 with:"/>
+                                                <contains string="${dist.jar.info}"
+                                                          substring="Packaged Spark versions:"/>
+                                                <contains string="${dist.jar.info}"
+                                                          substring="cuDF Spark JNI:"/>
+                                                <contains string="${dist.jar.info}"
+                                                          substring="cuDF Spark Private:"/>
+                                            </and>
+                                        </not>
+                                    </condition>
+                                </fail>
+                                <java jar="${dist.jar.name}" fork="true" failonerror="true"
+                                      output="${project.build.directory}/dist-jar-checksum.txt">
+                                    <arg value="checksum"/>
+                                </java>
+                                <loadfile property="dist.jar.checksum"
+                                          srcFile="${project.build.directory}/dist-jar-checksum.txt"/>
+                                <fail message="Distribution JAR payload checksum is invalid">
+                                    <condition>
+                                        <not>
+                                            <matches string="${dist.jar.checksum}"
+                                                     pattern="^[0-9a-f]{64}\s*$"/>
+                                        </not>
+                                    </condition>
+                                </fail>
+                                <fail message="Distribution JAR must contain exactly one cudf-spark-private build-info resource">
+                                    <condition>
+                                        <not>
+                                            <resourcecount count="1">
+                                                <zipfileset src="${dist.jar.name}"
+                                                            includes="**/cudf-spark-private-version-info.properties"/>
+                                            </resourcecount>
+                                        </not>
+                                    </condition>
+                                </fail>
+                                <fail message="Distribution JAR requires ai.rapids.cudf.NativeDepUtil; use a cuDF build containing NVIDIA/cudf#23854">
+                                    <condition>
+                                        <not>
+                                            <resourcecount count="1">
+                                                <zipfileset src="${dist.jar.name}"
+                                                            includes="ai/rapids/cudf/NativeDepUtil.class"/>
+                                            </resourcecount>
+                                        </not>
+                                    </condition>
+                                </fail>
+                                <taskdef resource="net/sf/antcontrib/antcontrib.properties"/>
+                                <ac:trycatch xmlns:ac="antlib:net.sf.antcontrib">
+                                    <ac:try>
+                                        <mkdir dir="${project.build.directory}/native-extraction-smoke"/>
+                                        <java jar="${dist.jar.name}" fork="true" failonerror="true">
+                                            <arg value="extract"/>
+                                            <arg value="cudfjni"/>
+                                            <arg value="${project.build.directory}/native-extraction-smoke/cudfjni"/>
+                                        </java>
+                                        <java jar="${dist.jar.name}" fork="true" failonerror="true">
+                                            <arg value="extract"/>
+                                            <arg value="cudf"/>
+                                            <arg value="${project.build.directory}/native-extraction-smoke/cudf"/>
+                                        </java>
+                                    </ac:try>
+                                    <ac:finally>
+                                        <delete dir="${project.build.directory}/native-extraction-smoke"/>
+                                    </ac:finally>
+                                </ac:trycatch>
+                            </target>
+                        </configuration>
+                    </execution>
+                    <execution>
                         <phase>verify</phase>
                         <goals>
                             <goal>run</goal>
@@ -449,7 +577,7 @@ self.log("... OK")
                 <dependencies>
                     <dependency>
                         <groupId>com.nvidia</groupId>
-                        <artifactId>rapids-4-spark-aggregator_${scala.binary.version}</artifactId>
+                        <artifactId>cudf-spark-aggregator_${scala.binary.version}</artifactId>
                         <version>${project.version}</version>
                         <classifier>${spark.version.classifier}</classifier>
                     </dependency>
@@ -481,6 +609,21 @@ self.log("... OK")
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-dependency-plugin</artifactId>
                 <executions>
+                    <execution>
+                        <id>unpack-history-metrics-at-root</id>
+                        <!-- Resolve versions through the SQL plugin's transitive runtime dependencies. -->
+                        <phase>generate-resources</phase>
+                        <goals>
+                            <goal>unpack-dependencies</goal>
+                        </goals>
+                        <configuration>
+                            <includeGroupIds>com.nvidia,org.xerial</includeGroupIds>
+                            <includeArtifactIds>cudf-spark-history-metrics-api,cudf-spark-history-metrics-backend-core,cudf-spark-history-metrics-relational-core,cudf-spark-history-metrics-local,sqlite-jdbc</includeArtifactIds>
+                            <includes>com/nvidia/spark/history/**,org/sqlite/**,META-INF/versions/*/org/sqlite/**,META-INF/native-image/org.xerial/sqlite-jdbc/**,META-INF/services/com.nvidia.spark.history.HistoryMetricsProvider,META-INF/services/java.sql.Driver,META-INF/maven/org.xerial/sqlite-jdbc/**</includes>
+                            <outputDirectory>${project.build.directory}/parallel-world</outputDirectory>
+                            <markersDirectory>${project.build.directory}/history-metrics-unpack-markers</markersDirectory>
+                        </configuration>
+                    </execution>
                     <execution>
                         <id>unpack-spark-rapids-jni-and-ucx</id>
                         <!-- run after `create-parallel-world`, the phase equals to the phase of the `create-parallel-world` -->

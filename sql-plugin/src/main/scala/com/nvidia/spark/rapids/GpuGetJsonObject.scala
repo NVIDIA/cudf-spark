@@ -82,16 +82,6 @@ object JsonPathParser {
     }.toArray
   }
 
-  def containsUnsupportedPath(instructions: List[PathInstruction]): Boolean = {
-    // Gpu GetJsonObject is not supported if JSON path contains wildcard [*]
-    // see https://github.com/NVIDIA/spark-rapids/issues/10216
-    instructions.exists {
-      case Wildcard => true
-      case Named("*")  => true
-      case _ => false
-    }
-  }
-
   def normalize(instructions: List[PathInstruction]): String = {
     // convert List[PathInstruction] to String
     "$" + instructions.map {

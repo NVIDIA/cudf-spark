@@ -175,15 +175,16 @@ object IntervalUtils {
         }
       }
 
-      withResource(Scalar.fromDouble(MIN_LONG_AS_DOUBLE)) { min =>
+      val invalid = withResource(Scalar.fromDouble(MIN_LONG_AS_DOUBLE)) { min =>
         withResource(min.sub(z)) { diff =>
           withResource(Scalar.fromDouble(1.0d)) { one =>
-            withResource(diff.greaterOrEqualTo(one)) { invalid =>
-              if (BoolUtils.isAnyValidTrue(invalid)) {
-                throw new ArithmeticException("Round double to long overflow")
-              }
-            }
+            diff.greaterOrEqualTo(one)
           }
+        }
+      }
+      withResource(invalid) { _ =>
+        if (BoolUtils.isAnyValidTrue(invalid)) {
+          throw new ArithmeticException("Round double to long overflow")
         }
       }
 
@@ -260,13 +261,14 @@ object IntervalUtils {
       withResource(Scalar.fromLong(-1L)) { negOneScalar =>
         (p, q) match {
           case (lCv: ColumnVector, rCv: ColumnVector) =>
-            withResource(lCv.equalTo(minScalar)) { isMin =>
+            val invalid = withResource(lCv.equalTo(minScalar)) { isMin =>
               withResource(rCv.equalTo(negOneScalar)) { isNegOne =>
-                withResource(isMin.and(isNegOne)) { invalid =>
-                  if (BoolUtils.isAnyValidTrue(invalid)) {
-                    throw RapidsErrorUtils.overflowInIntegralDivideError()
-                  }
-                }
+                isMin.and(isNegOne)
+              }
+            }
+            withResource(invalid) { _ =>
+              if (BoolUtils.isAnyValidTrue(invalid)) {
+                throw RapidsErrorUtils.overflowInIntegralDivideError()
               }
             }
           case (lCv: ColumnVector, rS: Scalar) =>

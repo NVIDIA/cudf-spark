@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -70,11 +70,6 @@ trait TableCompressionCodec {
       maxBatchMemorySize: Long,
       stream: Cuda.Stream): BatchedBufferDecompressor
 }
-
-/**
- * A small case class used to carry codec-specific settings.
- */
-case class TableCompressionCodecConfig(lz4ChunkSize: Long, zstdChunkSize: Long)
 
 object TableCompressionCodec extends Logging {
   private val codecNameToId = Map(

@@ -28,7 +28,7 @@ import com.nvidia.spark.rapids.GpuOverrides.pluginSupportedOrderableSig
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitSpillableInHalfByRows, withRetry, withRetryNoSplit}
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
-import com.nvidia.spark.rapids.shims.AggregationTagging
+import com.nvidia.spark.rapids.shims.{AggregationTagging, GpuPartitioningPreservingUnaryExecNodeShim}
 
 import org.apache.spark.TaskContext
 import org.apache.spark.internal.Logging
@@ -1425,7 +1425,7 @@ abstract class GpuBaseAggregateMeta[INPUT <: SparkPlan](
       allowSinglePassAgg,
       allowNonFullyAggregatedOutput,
       conf.skipAggPassReductionRatio
-    )
+    )(Some(agg.resultExpressions))
   }
 }
 
@@ -1515,7 +1515,7 @@ abstract class GpuTypedImperativeSupportedAggregateExecMeta[INPUT <: BaseAggrega
         forceSinglePassAgg = false,
         allowSinglePassAgg = false,
         allowNonFullyAggregatedOutput = false,
-        1)
+        1)(Some(retExpressions.map(_.wrapped.asInstanceOf[NamedExpression])))
 
     } else {
       super.convertToGpu()
@@ -2023,8 +2023,11 @@ case class GpuHashAggregateExec(
     forceSinglePassAgg: Boolean,
     allowSinglePassAgg: Boolean,
     allowNonFullyAggregatedOutput: Boolean,
-    skipAggPassReductionRatio: Double
-) extends GpuPartitioningPreservingUnaryExecNode with GpuExec with Logging {
+    skipAggPassReductionRatio: Double)(
+    val cpuResultExpressions: Option[Seq[NamedExpression]] = None
+) extends GpuPartitioningPreservingUnaryExecNodeShim with GpuExec with Logging {
+
+  override def otherCopyArgs: Seq[AnyRef] = cpuResultExpressions :: Nil
 
   // lifted directly from `BaseAggregateExec.inputAttributes`, edited comment.
   def inputAttributes: Seq[Attribute] =
@@ -2124,39 +2127,14 @@ case class GpuHashAggregateExec(
     }
   }
 
-  protected def outputExpressions: Seq[NamedExpression] = resultExpressions
+  override protected def cpuOutputExpressions: Seq[NamedExpression] =
+    cpuResultExpressions.getOrElse(GpuAliasAwareOutputExpressions.toCpuAliases(resultExpressions))
 
   //
   // This section is derived (copied in most cases) from HashAggregateExec
   //
   private[this] val aggregateBufferAttributes = {
     aggregateExpressions.flatMap(_.aggregateFunction.aggBufferAttributes)
-  }
-
-  /**
-   * Override buildAttributeMap to handle aggregate output semantics.
-   */
-  override protected def buildAttributeMap(): Map[Attribute, Attribute] = {
-    resultExpressions.collect {
-      case a @ GpuAlias(child: Attribute, _) => child -> a.toAttribute
-      case a @ Alias(child: Attribute, _) => child -> a.toAttribute
-    }.toMap
-  }
-
-  protected def hasAlias: Boolean = outputExpressions.collectFirst { case _: Alias => }.isDefined
-
-  protected def replaceAliases(exprs: Seq[Expression]): Seq[Expression] = {
-    exprs.map {
-      case a: AttributeReference => replaceAlias(a).getOrElse(a)
-      case other => other
-    }
-  }
-
-  protected def replaceAlias(attr: AttributeReference): Option[Attribute] = {
-    outputExpressions.collectFirst {
-      case a@Alias(child: AttributeReference, _) if child.semanticEquals(attr) =>
-        a.toAttribute
-    }
   }
 
   // Used in de-duping and optimizer rules.

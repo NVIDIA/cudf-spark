@@ -46,6 +46,7 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.{ExceptionTimeParserPolicy, GpuToTimestamp, LegacyTimeParserPolicy}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
+import org.apache.spark.unsafe.types.UTF8String
 
 object HostLineBuffererFactory extends LineBuffererFactory[HostLineBufferer] {
   override def createBufferer(estimatedSize: Long,
@@ -583,7 +584,7 @@ abstract class GpuTextBasedPartitionReader[BUFF <: LineBufferer, FACT <: LineBuf
           case dt: DecimalType =>
             castStringToDecimal(table.getColumn(i), dt)
           case DataTypes.DateType =>
-            castStringToDate(table.getColumn(i), DType.TIMESTAMP_DAYS)
+            castStringToDate(table.getColumn(i), DType.TIMESTAMP_DAYS, readSchema.fields(i))
           case DataTypes.TimestampType =>
             castStringToTimestamp(table.getColumn(i),
               timestampFormat, DType.TIMESTAMP_MICROSECONDS)
@@ -654,6 +655,9 @@ abstract class GpuTextBasedPartitionReader[BUFF <: LineBufferer, FACT <: LineBuf
 
   def dateFormat: Option[String]
   def timestampFormat: String
+
+  def castStringToDate(input: ColumnVector, dt: DType, field: StructField): ColumnVector =
+    castStringToDate(input, dt)
 
   def castStringToDate(input: ColumnVector, dt: DType): ColumnVector = {
     val cudfFormat = DateUtils.toStrf(dateFormat.getOrElse("yyyy-MM-dd"), parseString = true)
@@ -793,6 +797,11 @@ abstract class GpuTextBasedPartitionReader[BUFF <: LineBufferer, FACT <: LineBuf
 }
 
 object GpuTextBasedDateUtils {
+
+  // UTF8String.trimAll changed in patch releases and can be backported independently.
+  // Probe the runtime semantics instead of maintaining a Spark version allowlist.
+  lazy val dateParsingTrimsControls: Boolean = UTF8String.fromBytes(Array(0.toByte))
+      .trimAll().numBytes() == 0
 
   private val supportedDateFormats = Set(
     "yyyy-MM-dd",
