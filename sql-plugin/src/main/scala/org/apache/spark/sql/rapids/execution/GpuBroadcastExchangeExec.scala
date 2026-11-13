@@ -51,7 +51,7 @@ import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNes
 import org.apache.spark.sql.execution.metric.SQLMetrics
 import org.apache.spark.sql.internal.{SQLConf, StaticSQLConf}
 import org.apache.spark.sql.types.DataType
-import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
+import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
  * Class that is used to broadcast results (a contiguous host batch) to executors.
@@ -83,6 +83,11 @@ class SerializeConcatHostBuffersDeserializeBatch(
   @transient private var batchInternal: SpillableColumnarBatch = null
   // executor-local cache for build-side hash join state
   @transient private var hashBuildCacheInternal: HashBuildCache = null
+  // Serializes building the GPU batch. GPU work must not hold this object's monitor, because
+  // `doWriteObject` needs the monitor while Spark holds its memory manager lock.
+  // Lock order: `materializeLock`, then this object's monitor. `closeInternal` holds both while
+  // it waits for hash builders, so builders must not call `batch`.
+  @transient private lazy val materializeLock = new Object
 
   private def maybeGpuBatch: Option[SpillableColumnarBatch] = Option(batchInternal)
 
@@ -93,67 +98,64 @@ class SerializeConcatHostBuffersDeserializeBatch(
     hashBuildCacheInternal
   }
 
-  def batch: SpillableColumnarBatch = this.synchronized {
-    maybeGpuBatch.getOrElse {
-      NvtxRegistry.BROADCAST_MANIFEST_BATCH {
-        val spillable =
-          if (data == null || data.getTableHeader.getNumColumns == 0) {
-            // If `data` is null or there are no columns, this is a rows-only batch
-            SpillableColumnarBatch(
-              new ColumnarBatch(Array.empty, numRows),
-              SpillPriorities.ACTIVE_BATCHING_PRIORITY)
-          } else if (data.getTableHeader.getNumRows == 0) {
-            // If we have columns but no rows, we can use the emptyBatchFromTypes optimization
-            SpillableColumnarBatch(
-              GpuColumnVector.emptyBatchFromTypes(dataTypes),
-              SpillPriorities.ACTIVE_BATCHING_PRIORITY)
-          } else {
-            // Regular GPU batch with rows/cols
-            SpillableColumnarBatch(
-              data.toContiguousTable,
-              dataTypes,
-              SpillPriorities.ACTIVE_BATCHING_PRIORITY)
-          }
-        // At this point we no longer need the host data and should not need to touch it again.
-        // Note that we don't close this using `withResources` around the creation of the
-        // `SpillableColumnarBatch`. That is because if a retry exception is thrown we want to
-        // still be able to recreate this broadcast batch, so we can't close the host data
-        // until we are at this line.
-        data.safeClose()
-        data = null
-        batchInternal = spillable
+  /**
+   * The GPU batch, built from `data` by the first caller. `data` is kept after the GPU batch is
+   * built, so that `doWriteObject` and `hostBatch` never need the GPU.
+   */
+  def batch: SpillableColumnarBatch = this.synchronized(maybeGpuBatch).getOrElse {
+    materializeLock.synchronized {
+      this.synchronized(maybeGpuBatch).getOrElse(NvtxRegistry.BROADCAST_MANIFEST_BATCH {
+        val spillable = buildGpuBatch()
+        this.synchronized {
+          batchInternal = spillable
+        }
         spillable
-      }
+      })
     }
   }
 
   /**
-   * Create host columnar batches from either serialized buffers or device columnar batch. This
-   * method can be safely called in both driver node and executor nodes. For now, it is used on
-   * the driver side for reusing GPU broadcast results in the CPU.
+   * Build the GPU batch from `data`. Called by `batch` while holding `materializeLock` but not
+   * this object's monitor. Protected for tests that pause it.
+   */
+  protected def buildGpuBatch(): SpillableColumnarBatch = {
+    if (data == null || data.getTableHeader.getNumColumns == 0) {
+      // If `data` is null or there are no columns, this is a rows-only batch
+      SpillableColumnarBatch(
+        new ColumnarBatch(Array.empty, numRows),
+        SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+    } else if (data.getTableHeader.getNumRows == 0) {
+      // If we have columns but no rows, we can use the emptyBatchFromTypes optimization
+      SpillableColumnarBatch(
+        GpuColumnVector.emptyBatchFromTypes(dataTypes),
+        SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+    } else {
+      // Regular GPU batch with rows/cols
+      SpillableColumnarBatch(
+        data.toContiguousTable,
+        dataTypes,
+        SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+    }
+  }
+
+  /**
+   * Create host columnar batches from the serialized host buffers. This method can be safely
+   * called in both driver node and executor nodes. For now, it is used on the driver side for
+   * reusing GPU broadcast results in the CPU.
    *
    * NOTE: The caller is responsible to release these host columnar batches.
    */
   def hostBatch: ColumnarBatch = this.synchronized {
-    maybeGpuBatch.map { spillable =>
-      withResource(spillable.getColumnarBatch()) { batch =>
-        val hostColumns: Array[ColumnVector] = GpuColumnVector
-          .extractColumns(batch)
-          .safeMap(_.copyToHost())
-        new ColumnarBatch(hostColumns, numRows)
-      }
-    }.getOrElse {
-      NvtxRegistry.BROADCAST_MANIFEST_BATCH {
-        if (data == null) {
-          new ColumnarBatch(Array.empty, numRows)
-        } else {
-          val header = data.getTableHeader
-          val buffer = data.getHostBuffer
-          val hostColumns = SerializedHostTableUtils.buildHostColumns(
-            header, buffer, dataTypes)
-          val rowCount = header.getNumRows
-          new ColumnarBatch(hostColumns.toArray, rowCount)
-        }
+    NvtxRegistry.BROADCAST_MANIFEST_BATCH {
+      if (data == null) {
+        new ColumnarBatch(Array.empty, numRows)
+      } else {
+        val header = data.getTableHeader
+        val buffer = data.getHostBuffer
+        val hostColumns = SerializedHostTableUtils.buildHostColumns(
+          header, buffer, dataTypes)
+        val rowCount = header.getNumRows
+        new ColumnarBatch(hostColumns.toArray, rowCount)
       }
     }
   }
@@ -181,7 +183,7 @@ class SerializeConcatHostBuffersDeserializeBatch(
       prepareBatch: Option[ColumnarBatch => ColumnarBatch],
       metrics: HashBuildMetrics): HashBackendProvider = {
     // Resolve the broadcast batch before capturing it in the build closure. closeInternal holds
-    // the monitor while waiting for builders, so the build must not call batch to avoid deadlock.
+    // the locks while waiting for builders, so the build must not call batch or hostBatch.
     val buildBatch = batch
     val key = HashBuildKey.fromExpressions(
       sourceProjection, boundBuiltKeys, compareNullsEqual, filterOutNulls)
@@ -213,28 +215,26 @@ class SerializeConcatHostBuffersDeserializeBatch(
    * the object and, as part of the deserialization, invoke `doReadObject`.
    * This will populate `data` before any task has had a chance to call `.batch` on this class.
    *
-   * If `batchInternal` is defined we are in the executor, and there is no work to be done.
-   * This broadcast has been materialized on the GPU/spill store, and it is completely
-   * managed by the plugin.
+   * `data` is kept after the batch is loaded onto the GPU, so this method only reads host
+   * memory. Spark calls it while holding its memory manager lock, which GPU tasks may also need,
+   * so it must not wait on the GPU semaphore, a device allocation, or `materializeLock`.
    *
    * Public for unit tests.
    *
    * @param out the stream to write to
    */
-  def doWriteObject(out: ObjectOutputStream): Unit = this.synchronized {
-    maybeGpuBatch.map {
-      case justRows: JustRowsColumnarBatch =>
-        JCudfSerialization.writeRowsToStream(out, justRows.numRows())
-      case scb: SpillableColumnarBatch =>
-        val table = withResource(scb.getColumnarBatch()) { cb =>
-          GpuColumnVector.from(cb)
-        }
-        withResource(table) { _ =>
-          JCudfSerialization.writeToStream(table, out, 0, table.getRowCount)
-        }
-        out.writeObject(dataTypes)
-    }.getOrElse {
-      if (data == null || data.getTableHeader.getNumColumns == 0) {
+  def doWriteObject(out: ObjectOutputStream): Unit = {
+    // Take a short snapshot, then write without holding this object's monitor. The reference
+    // taken keeps `closeInternal` from freeing the buffer while it is written.
+    val (header, buffer) = this.synchronized {
+      Option(data).map { d =>
+        val buf = d.getHostBuffer
+        buf.incRefCount()
+        (d.getTableHeader, buf)
+      }.getOrElse((null, null))
+    }
+    withResource(buffer) { _ =>
+      if (header == null || header.getNumColumns == 0) {
         JCudfSerialization.writeRowsToStream(out, numRows)
       } else if (numRows == 0) {
         // We didn't get any data back, but we need to write out an empty table that matches
@@ -243,9 +243,7 @@ class SerializeConcatHostBuffersDeserializeBatch(
         }
         out.writeObject(dataTypes)
       } else {
-        val headers = Array(data.getTableHeader)
-        val buffers = Array(data.getHostBuffer)
-        JCudfSerialization.writeConcatedStream(headers, buffers, out)
+        JCudfSerialization.writeConcatedStream(Array(header), Array(buffer), out)
         out.writeObject(dataTypes)
       }
     }
@@ -292,11 +290,13 @@ class SerializeConcatHostBuffersDeserializeBatch(
    *
    * Public for tests.
    */
-  def closeInternal(): Unit = this.synchronized {
-    Seq(hashBuildCacheInternal, data, batchInternal).safeClose()
-    data = null
-    batchInternal = null
-    hashBuildCacheInternal = null
+  def closeInternal(): Unit = materializeLock.synchronized {
+    this.synchronized {
+      Seq(hashBuildCacheInternal, data, batchInternal).safeClose()
+      data = null
+      batchInternal = null
+      hashBuildCacheInternal = null
+    }
   }
 
   @scala.annotation.nowarn("msg=method finalize in class Object is deprecated")

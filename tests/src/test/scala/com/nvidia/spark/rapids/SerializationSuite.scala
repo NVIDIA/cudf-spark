@@ -181,8 +181,7 @@ class SerializationSuite extends AnyFunSuite
           withResource(broadcast.batch.getColumnarBatch) { materialized =>
             TestUtils.compareBatches(gpuBatch, materialized)
           }
-          // the host batch here is obtained from the GPU batch since
-          // we materialized
+          // the host batch is built from the host data kept after materialization
           withResource(broadcast.hostBatch) { hostBatch1 =>
             TestUtils.compareBatches(expectedHostBatch, hostBatch1)
             withBroadcast(SerializationUtils.clone(broadcast)) { clonedObj =>
