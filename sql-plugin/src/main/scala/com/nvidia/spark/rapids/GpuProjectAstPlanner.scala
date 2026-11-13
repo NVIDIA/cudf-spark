@@ -19,8 +19,10 @@ package com.nvidia.spark.rapids
 import java.util.IdentityHashMap
 
 import scala.collection.mutable
+import scala.util.Try
 
-import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Expression, Literal}
+import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Expression, Literal,
+  NamedExpression}
 import org.apache.spark.sql.catalyst.trees.TreeNodeTag
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.{GpuAdd, GpuMultiply, GpuSubtract}
@@ -62,8 +64,37 @@ private[rapids] object GpuProjectAstPlanner {
     LegacySignature(expression.getClass, expression.dataType, expression.children.map(_.dataType))
 
   def tagLegacySupport(expression: Expression, supported: Boolean): Unit = {
-    if (supported) expression.setTagValue(legacySupport, signature(expression))
-    else expression.unsetTagValue(legacySupport)
+    if (supported && convertsToAst(expression)) {
+      expression.setTagValue(legacySupport, signature(expression))
+    } else {
+      expression.unsetTagValue(legacySupport)
+    }
+  }
+
+  /** Tags a meta's conversion with the eligibility the meta computed for its CPU expression. */
+  def tagConvertedLegacySupport(
+      vetted: Expression,
+      converted: Expression,
+      supported: Boolean): Unit = {
+    // A meta can rewrite its node into another operator, such as instr(s, x) > 0 into
+    // contains(s, x). Its judgment covers only an operator over the types it checked.
+    tagLegacySupport(converted, supported && hasSameTypes(vetted, converted))
+  }
+
+  private def hasSameTypes(vetted: Expression, converted: Expression): Boolean =
+    vetted.dataType == converted.dataType &&
+      vetted.children.map(_.dataType) == converted.children.map(_.dataType)
+
+  // Eligibility applies only if the node itself has an AST form, which a rewritten operator can
+  // lack even when its types match.
+  private def convertsToAst(expression: Expression): Boolean = expression match {
+    case gpu: GpuExpression =>
+      val references = gpu.children.zipWithIndex.map { case (child, ordinal) =>
+        GpuBoundReference(ordinal, child.dataType, child.nullable)(NamedExpression.newExprId, "")
+      }
+      Try(gpu.withNewChildren(references).asInstanceOf[GpuExpression]
+          .convertToAst(Int.MaxValue)).isSuccess
+    case _ => false
   }
 
   private def selfSupportsLegacy(expression: Expression): Boolean =
