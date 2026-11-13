@@ -555,8 +555,8 @@ def assert_delta_row_tracking_dml(spark_tmp_path, dml_sql, conf,
     with_cpu_session(lambda spark: assert_gpu_and_cpu_latest_delta_log_equivalent(spark, data_path),
                      conf=conf)
 
-def _assert_oss_delta_dv_metadata_broadcasts(callback, captured_plans):
-    """Allow CPU broadcasts only for Delta's table-state/touched-file join."""
+def _assert_oss_delta_dv_metadata_joins(callback, captured_plans):
+    """Allow CPU joins/exchanges only for Delta's table-state/touched-file metadata."""
     subquery_expression_class = spark_jvm().java.lang.Class.forName(
         "org.apache.spark.sql.execution.ExecSubqueryExpression")
 
@@ -602,15 +602,21 @@ def _assert_oss_delta_dv_metadata_broadcasts(callback, captured_plans):
     def check(node, in_metadata_broadcast=False):
         name = class_name(node)
         node_children = children(node)
-        if name == "BroadcastHashJoinExec":
+        if name in ("BroadcastHashJoinExec", "SortMergeJoinExec"):
             assert len(node_children) == 2 and any(
                 class_name(child) == "RDDScanExec" and
                 "Delta Table State with Stats" in child.nodeName()
                 for child in physical_descendants(node_children[0])), \
-                "CPU broadcast join outside Delta table-state metadata"
-            assert sum(class_name(child) == "BroadcastExchangeExec"
-                       for child in physical_descendants(node_children[1])) == 1, \
-                "Expected one touched-file broadcast in Delta table-state metadata"
+                "CPU join outside Delta table-state metadata"
+            local_scans = [child for child in physical_descendants(node_children[1])
+                           if class_name(child) == "LocalTableScanExec"]
+            assert len(local_scans) == 1 and local_scans[0].output().size() == 1 and \
+                local_scans[0].output().apply(0).name() == "path", \
+                "Expected only touched-file paths on the metadata join's right side"
+            if name == "BroadcastHashJoinExec":
+                assert sum(class_name(child) == "BroadcastExchangeExec"
+                           for child in physical_descendants(node_children[1])) == 1, \
+                    "Expected one touched-file broadcast in Delta table-state metadata"
             check(node_children[0])
             check(node_children[1], in_metadata_broadcast=True)
             for subquery in subquery_plans(node):
@@ -631,7 +637,7 @@ def _assert_oss_delta_dv_metadata_broadcasts(callback, captured_plans):
     for plan in captured_plans:
         check(plan)
         # Fail closed if a plan wrapper hides a broadcast from the child traversal.
-        for class_to_check in ("BroadcastHashJoinExec", "BroadcastExchangeExec"):
+        for class_to_check in ("BroadcastHashJoinExec", "SortMergeJoinExec", "BroadcastExchangeExec"):
             assert callback.contains(plan, class_to_check) == any(
                 class_name(node) == class_to_check for node in descendants(plan)), \
                 f"Could not inspect all {class_to_check} nodes in captured Delta plan"
@@ -671,7 +677,7 @@ def assert_rapids_delta_write(
     captured_plans_out : list, optional
         Append captured plans to this list for inspection of executed SQL metrics.
     check_metadata_broadcasts : bool
-        Restrict allowed CPU broadcasts to Delta's table-state/touched-file metadata join.
+        Restrict allowed CPU joins/exchanges to Delta's table-state/touched-file metadata.
 
     Returns
     -------
@@ -699,7 +705,7 @@ def assert_rapids_delta_write(
                 is_oss_delta_lake_40_to_43()):
             # OSS Delta uses a CPU broadcast join to attach stats to the table-state
             # metadata during DV DML. Keep the allowance confined to that metadata query.
-            _assert_oss_delta_dv_metadata_broadcasts(callback, captured_plans)
+            _assert_oss_delta_dv_metadata_joins(callback, captured_plans)
         for cls in expected_classes or ():
             assert any(
                 callback.contains(plan, cls) for plan in captured_plans), \

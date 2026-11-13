@@ -39,7 +39,7 @@ import org.apache.spark.sql.delta.commands.{CreateDeltaTableLikeShims, DeltaInse
   DeltaReorgOperation, DMLWithDeletionVectorsHelper,
   InsertReplaceOnOrUsingAPIOrigin, TouchedFileWithDV, UpdateCommand, WriteIntoDelta}
 import org.apache.spark.sql.delta.hooks.GpuAutoCompact43x
-import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShimBase, DeltaVariantShreddingShim,
+import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShimBase, DeltaVariantShreddingShim, DeltaWriteOrigin,
   DMLWithDeletionVectorsRuntimeShim, GpuDeltaLog, GpuOptimisticTransactionBase,
   GpuWriteIntoDeltaLike, StartTransactionArg}
 import org.apache.spark.sql.delta.sources.DeltaSQLConf
@@ -205,6 +205,13 @@ class Delta43xRuntimeShim extends DeltaRuntimeShimBase
   override def createGpuWrite(
       gpuDeltaLog: GpuDeltaLog,
       cpuWrite: WriteIntoDelta): GpuWriteIntoDeltaLike = {
+    GpuWriteIntoDelta43x(gpuDeltaLog, cpuWrite)
+  }
+
+  override def createGpuWrite(
+      gpuDeltaLog: GpuDeltaLog,
+      cpuWrite: WriteIntoDelta,
+      origin: DeltaWriteOrigin): GpuWriteIntoDeltaLike = {
     if (cpuWrite.options.isReplaceOnOrUsingDefined) {
       val sqlConf = cpuWrite.data.sparkSession.sessionState.conf
       if (cpuWrite.options.replaceOn.isDefined &&
@@ -215,18 +222,16 @@ class Delta43xRuntimeShim extends DeltaRuntimeShimBase
         throw DeltaErrors.operationNotSupportedException("replaceUsing")
       }
     }
-    if (cpuWrite.options.isReplaceOnOrUsingDefined &&
-        (cpuWrite.mode == SaveMode.Overwrite || cpuWrite.catalogTableOpt.isEmpty)) {
-      val origin = if (cpuWrite.catalogTableOpt.isDefined) {
-        InsertReplaceOnOrUsingAPIOrigin.DFv1SaveAsTable
-      } else {
-        InsertReplaceOnOrUsingAPIOrigin.DFv1Save
+    if (cpuWrite.options.isReplaceOnOrUsingDefined) {
+      val apiOrigin = origin match {
+        case DeltaWriteOrigin.V1Save => InsertReplaceOnOrUsingAPIOrigin.DFv1Save
+        case DeltaWriteOrigin.V1SaveAsTable => InsertReplaceOnOrUsingAPIOrigin.DFv1SaveAsTable
       }
       val command = DeltaInsertReplaceOnOrUsingCommand.createCmdForSaveAndSaveAsTable(
         DeltaTableV2(
           cpuWrite.data.sparkSession, gpuDeltaLog.deltaLog.dataPath,
           catalogTable = cpuWrite.catalogTableOpt),
-        cpuWrite.data, cpuWrite, origin)
+        cpuWrite.data, cpuWrite, apiOrigin)
       GpuInsertReplaceOnOrUsingCommand(gpuDeltaLog, command)
     } else {
       GpuWriteIntoDelta43x(gpuDeltaLog, cpuWrite)

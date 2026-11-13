@@ -68,7 +68,7 @@ abstract class GpuWriteIntoDeltaBase(
 
   override protected val canOverwriteSchema: Boolean =
     cpuWrite.options.canOverwriteSchema && isOverwriteOperation &&
-      !isInsertAtomicReplaceOp
+      cpuWrite.options.replaceWhere.isEmpty
 
   /** Version-specific classification and expression resolution for atomic replacements. */
   protected def isInsertAtomicReplaceOp: Boolean = cpuWrite.options.replaceWhere.isDefined
@@ -191,8 +191,6 @@ abstract class GpuWriteIntoDeltaBase(
 
     require(txn.isInstanceOf[GpuOptimisticTransactionBase], "Only gpu transaction supported")
 
-    validateAtomicReplaceOptions()
-
     if (txn.readVersion > -1) {
       // This table already exists, check if the insert is valid.
       if (cpuWrite.mode == SaveMode.ErrorIfExists) {
@@ -279,6 +277,8 @@ abstract class GpuWriteIntoDeltaBase(
     if (useDynamicPartitionOverwriteMode && canOverwriteSchema) {
       throw DeltaErrors.overwriteSchemaUsedWithDynamicPartitionOverwrite()
     }
+
+    validateAtomicReplaceOptions()
 
     val (atomicReplaceExpressions, containsDataFilters) =
       getAtomicReplaceExpressions(sparkSession, txn, replaceOnDataColsEnabled)

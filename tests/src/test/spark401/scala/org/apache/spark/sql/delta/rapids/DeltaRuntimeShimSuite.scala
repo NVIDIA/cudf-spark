@@ -40,6 +40,12 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.{IntegerType, StructField, StructType, VariantType}
 
 class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
+  test("Delta 4.3 test profile selects the required runtime") {
+    if (java.lang.Boolean.getBoolean("rapids.test.delta43")) {
+      assert(io.delta.VERSION == "4.3.0", "delta43-tests must run against Delta 4.3.0")
+    }
+  }
+
   test("delta provider resolves from the installed Delta Lake version") {
     val provider = DeltaProvider()
     assert(provider ne NoDeltaProvider)
@@ -144,6 +150,22 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
     assert(accessor.invoke(gpuWrite) != null)
   }
 
+  test("Delta 4.3 schema overwrite eligibility matches the upstream writer") {
+    assume(io.delta.VERSION == "4.3.0")
+    val deltaLog = mock[DeltaLog]
+    Seq(Map.empty[String, String], Map("replaceWhere" -> "id = 1"),
+      Map("replaceOn" -> "target.id = source.id"), Map("replaceUsing" -> "id")).foreach {
+      options =>
+        val cpuWrite = WriteIntoDelta(deltaLog, SaveMode.Overwrite,
+          new DeltaOptions(options + ("overwriteSchema" -> "true"), new SQLConf),
+          Nil, Map.empty, mock[Dataset[Row]])
+        val gpuWrite = DeltaRuntimeShim.createGpuWrite(
+          new GpuDeltaLog(deltaLog, new RapidsConf(Map.empty[String, String])), cpuWrite)
+        val expected = cpuWrite.getClass.getMethod("canOverwriteSchema").invoke(cpuWrite)
+        assert(gpuWrite.getClass.getMethod("canOverwriteSchema").invoke(gpuWrite) == expected)
+    }
+  }
+
   test("Delta 4.3 uses Spark 4.1's V1 saveAsTable marker") {
     assume(io.delta.VERSION == "4.3.0" && org.apache.spark.SPARK_VERSION.startsWith("4.1."))
     val v1Options = new DeltaOptions(
@@ -198,7 +220,16 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
           new DeltaOptions(Map("replaceUsing" -> "id"), spark.sessionState.conf),
           Nil, Map.empty, spark.range(3).toDF())
         val gpuWrite = DeltaRuntimeShim.createGpuWrite(
-          new GpuDeltaLog(deltaLog, new RapidsConf(Map.empty[String, String])), cpuWrite)
+          new GpuDeltaLog(deltaLog, new RapidsConf(Map.empty[String, String])), cpuWrite,
+          DeltaWriteOrigin.V1Save)
+        for (mode <- Seq(SaveMode.Append, SaveMode.Overwrite);
+             options <- Seq(Map("replaceOn" -> "true"), Map("replaceUsing" -> "id"))) {
+          val plainCpuWrite = cpuWrite.copy(mode = mode,
+            options = new DeltaOptions(options, spark.sessionState.conf))
+          val plainWrite = DeltaRuntimeShim.createGpuWrite(
+            new GpuDeltaLog(deltaLog, new RapidsConf(Map.empty[String, String])), plainCpuWrite)
+          assert(plainWrite.getClass.getSimpleName == "GpuWriteIntoDelta43x")
+        }
         assert(gpuWrite.getClass.getSimpleName == "GpuInsertReplaceOnOrUsingCommand")
         val cpuCommand = gpuWrite.getClass.getMethod("cpuCommand").invoke(gpuWrite)
         assert(cpuCommand.getClass.getSimpleName == "DeltaInsertReplaceOnOrUsingCommand")
@@ -225,7 +256,8 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
             new DeltaOptions(Map("replaceUsing" -> "id"), spark.sessionState.conf),
             Nil, Map.empty, data)
           val gpuWrite = DeltaRuntimeShim.createGpuWrite(
-            new GpuDeltaLog(deltaLog, new RapidsConf(Map.empty[String, String])), cpuWrite)
+            new GpuDeltaLog(deltaLog, new RapidsConf(Map.empty[String, String])), cpuWrite,
+            DeltaWriteOrigin.V1Save)
           val adapt = gpuWrite.getClass.getDeclaredMethod("adaptedCommand")
           adapt.setAccessible(true)
           val command = adapt.invoke(gpuWrite)
