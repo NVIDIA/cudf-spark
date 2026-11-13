@@ -240,6 +240,39 @@ def test_delta_delete_with_deletion_vectors(
 @allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
+@pytest.mark.skipif(not supports_delta_lake_deletion_vectors() or is_oss_delta_lake_24() or
+                    is_databricks_runtime(),
+                    reason="Delta 2.4 runs this DELETE on the CPU, and Databricks reads deletion "
+                           "vectors through its own factory")
+def test_delta_delete_with_deletion_vectors_hybrid_scan_falls_back(spark_tmp_path):
+    """Delta reads do not take the hybrid scan: a DELETE that writes the table's first deletion
+    vector stays on parquet-mr, and a read of the table reports the fallback."""
+    conf = copy_and_update(delta_delete_enabled_conf, {
+        "spark.databricks.delta.delete.deletionVectors.persistent": "true",
+        "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true",
+        "spark.rapids.sql.format.parquet.reader.type": "MULTITHREADED",
+        "spark.rapids.sql.format.parquet.hybridScan.enabled": "true",
+        "spark.rapids.sql.test.format.parquet.hybridScan.failOnFallback": "false"})
+    assert_delta_sql_delete_collect(
+        spark_tmp_path,
+        use_cdf=False,
+        dest_table_func=lambda spark: unary_op_df(spark, int_gen),
+        delete_sql="DELETE FROM delta.`{path}` WHERE a = 0",
+        enable_deletion_vectors=True,
+        conf=conf,
+        assert_gpu_delete_command=True)
+
+    gpu_path = spark_tmp_path + "/DELTA_DATA/GPU"
+    fail_conf = copy_and_update(conf,
+        {"spark.rapids.sql.test.format.parquet.hybridScan.failOnFallback": "true"})
+    assert_spark_exception(
+        lambda: with_gpu_session(
+            lambda spark: spark.read.format("delta").load(gpu_path).collect(), conf=fail_conf),
+        error_message="the hybrid scan is not supported for this read in this configuration")
+
+@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
+@delta_lake
+@ignore_order
 @pytest.mark.skipif(not is_databricks173_or_later(),
                     reason="Persistent-DV command acceleration requires DBR 17.3+")
 def test_delta_delete_deletion_vector_full_file_data_predicate(spark_tmp_path):
