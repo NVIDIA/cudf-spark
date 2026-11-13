@@ -25,7 +25,8 @@ import com.nvidia.spark.rapids._
 import org.apache.spark.sql.catalyst.expressions.DynamicPruningExpression
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.datasources.HadoopFsRelation
-import org.apache.spark.sql.rapids.GpuFileSourceScanExec
+import org.apache.spark.sql.execution.datasources.parquet.ParquetFileFormat
+import org.apache.spark.sql.rapids.{ExternalSource, GpuFileSourceScanExec}
 
 class FileSourceScanExecMeta(plan: FileSourceScanExec,
     conf: RapidsConf,
@@ -63,7 +64,18 @@ class FileSourceScanExecMeta(plan: FileSourceScanExec,
   // partition filters and data filters are not run on the GPU
   override val childExprs: Seq[ExprMeta[_]] = Seq.empty
 
-  override def tagPlanForGpu(): Unit = ScanExecShims.tagGpuFileSourceScanExecSupport(this)
+  override def tagPlanForGpu(): Unit = {
+    ScanExecShims.tagGpuFileSourceScanExecSupport(this)
+    // A ParquetFileFormat subclass that no external source claims, e.g. DeltaParquetFileFormat
+    // without a supported Delta Lake runtime, can depend on format-specific features such as
+    // column mapping that a plain GPU Parquet scan would silently ignore.
+    val fmtCls = wrapped.relation.fileFormat.getClass
+    if (classOf[ParquetFileFormat].isAssignableFrom(fmtCls) &&
+        fmtCls != classOf[ParquetFileFormat] &&
+        !ExternalSource.isSupportedFormat(fmtCls)) {
+      willNotWorkOnGpu(s"unsupported file format: ${fmtCls.getCanonicalName}")
+    }
+  }
 
   override def convertToCpu(): SparkPlan = {
     val cpu = wrapped.copy(partitionFilters = partitionFilters)
