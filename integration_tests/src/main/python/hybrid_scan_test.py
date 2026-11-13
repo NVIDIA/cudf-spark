@@ -184,6 +184,18 @@ def test_hybrid_scan_retry_oom_in_reader(spark_tmp_path):
         conf=hybrid_conf())
 
 
+@pytest.mark.parametrize('max_pack', ['1', '64k'], ids=['pack_per_chunk', 'several_packs'])
+def test_hybrid_scan_small_h2d_packs(spark_tmp_path, max_pack):
+    """With a small pack cap the chunks span several device allocations, and every chunk
+    larger than the cap gets one of its own, so each must still map to its own slice."""
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(lambda spark: write_test_data(spark, data_path))
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(data_path).filter('filter_int = 7'),
+        conf=hybrid_conf(**{'spark.rapids.sql.format.parquet.hybridScan.maxH2DPackSize': max_pack,
+                            'spark.rapids.sql.format.parquet.hybridScan.minH2DPackSize': '1'}))
+
+
 @pytest.mark.skipif(is_not_utc(), reason="LEGACY datetime rebase mode is only supported for UTC timezone")
 def test_hybrid_scan_legacy_old_date_filter_throws(spark_tmp_path):
     """A LEGACY file stores pre-1582 dates in another calendar, which the reader cannot tell.
