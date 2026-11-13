@@ -208,31 +208,11 @@ spark-rapids-shim-json-lines ***/
 
 #### Required shim compatibility preflight
 
-Agents **MUST invoke**
-[`check-shim-compatibility`](.agents/skills/check-shim-compatibility/SKILL.md).
-This applies when implementing or reviewing changes to versioned shims, shared
-shim callers, Spark/Databricks build profiles, or shim source-selection/build
-matrices, even when the user does not name the skill. Complete the preflight
-before declaring implementation or review complete, and before publishing,
-updating, or merging the PR. If the client cannot discover repository skills,
-read the linked `SKILL.md` and follow its workflow directly.
-
-Check source selection on the proposed combination with current main, and run
-the independent `advisory` command or read both current CI reports. Cross-PR
-discovery runs automatically as `shim-related-prs`; its failures or moving peers
-produce warnings without invalidating the core result. Report unavailable
-advisory evidence explicitly. The advisory excludes documentation-only overlaps
-and checks bounded peer combinations for new static interaction findings; inspect
-deferred, stale, and unmodelled cases as described in the skill. The offline
-entry point is `python3 build/check_shim_compatibility.py coverage`.
-Static results do not replace compilation of affected profiles, including
-newly added Databricks targets, or applicable CPU/GPU tests.
-During review, inspect both the `shim-compatibility` and `shim-related-prs`
-current-head reports.
-Distinguish new findings, unchanged base debt,
-and incomplete evidence; the shared skill describes the report and rerun rules.
-If required tools or GitHub access are unavailable, report `INCOMPLETE` with the
-reason; do not silently skip the preflight or claim a clean result.
+When implementing or reviewing versioned shims, shared shim callers,
+Spark/Databricks build profiles, or shim source-selection/build matrices, agents
+**MUST follow** [check-shim-compatibility](.agents/skills/check-shim-compatibility/SKILL.md)
+before declaring the work complete or publishing/updating/merging the PR. If the
+client cannot discover repository skills, read the linked `SKILL.md` directly.
 
 ### Python Integration Tests
 

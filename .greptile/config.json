@@ -147,7 +147,7 @@
     },
     {
       "id": "shim-compatibility-preflight",
-      "rule": "For versioned sources, shared shim callers, and Spark/Databricks profile or matrix changes, follow .agents/skills/check-shim-compatibility/SKILL.md. Read the exact-head shim-compatibility and automatic shim-related-prs advisory summaries and artifacts, and verify their head/base identities. Cross-PR discovery runs independently and does not gate the core combined-tree check. Inspect advisory matches before attributing a defect; if discovery fails or peers move, state the missing evidence without invalidating the completed core result. Report confirmed new missing providers or source collisions with file, symbol, profile and observed evidence. Keep unchanged base debt separate. For bounded open-peer joint checks, prefer NEW_INTERACTION_FINDINGS with exact profile/symbol/file evidence; distinguish existing individual defects, combination conflicts and NOT_CHECKED candidates. No new static interaction findings is not full compatibility proof. INCOMPLETE means evidence is missing; do not attribute stale findings. Static success is not compilation. Relevant base/head movement requires a rerun.",
+      "rule": "Follow .agents/skills/check-shim-compatibility/SKILL.md for shim compatibility review.",
       "scope": [
         "**/src/main/**",
         "pom.xml",
