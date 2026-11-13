@@ -217,22 +217,12 @@ before declaring implementation or review complete, and before publishing,
 updating, or merging the PR. If the client cannot discover repository skills,
 read the linked `SKILL.md` and follow its workflow directly.
 
-Check source selection on the proposed combination with current main, and run
-the independent `advisory` command or read both current CI reports. Cross-PR
-discovery runs automatically as `shim-related-prs`; its failures or moving peers
-produce warnings without invalidating the core result. Report unavailable
-advisory evidence explicitly. The advisory excludes documentation-only overlaps
-and checks bounded peer combinations for new static interaction findings; inspect
-deferred, stale, and unmodelled cases as described in the skill. The offline
-entry point is `python3 build/check_shim_compatibility.py coverage`.
-Static results do not replace compilation of affected profiles, including
-newly added Databricks targets, or applicable CPU/GPU tests.
-During review, inspect both the `shim-compatibility` and `shim-related-prs`
-current-head reports.
-Distinguish new findings, unchanged base debt,
-and incomplete evidence; the shared skill describes the report and rerun rules.
-If required tools or GitHub access are unavailable, report `INCOMPLETE` with the
-reason; do not silently skip the preflight or claim a clean result.
+Use the agent workflow to trace source selection, callers, affected profiles,
+and concrete interactions with related PRs. Assess the proposed combination
+with the current target and record the reviewed revisions. Use applicable
+Blossom premerge evidence or targeted builds/tests to validate the affected
+profiles, including newly added Databricks targets. Report actual findings,
+validation, and gaps; refresh affected evidence when revisions change.
 
 ### Python Integration Tests
 

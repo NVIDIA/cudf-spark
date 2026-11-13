@@ -52,21 +52,7 @@
     },
     {
       "path": ".agents/skills/check-shim-compatibility/SKILL.md",
-      "description": "Shared shim review workflow, report semantics, limitations and rerun rules",
-      "scope": [
-        "**/src/main/**",
-        "pom.xml",
-        "scala2.13/pom.xml",
-        "build/**",
-        "shim-deps/**",
-        "scala2.13/shim-deps/**",
-        "jenkins/**",
-        ".github/workflows/**"
-      ]
-    },
-    {
-      "path": "build/check_shim_compatibility.py",
-      "description": "Read-only source-selection, base-comparison and related-PR checks",
+      "description": "Agent-guided shim, caller, profile and related-PR review with build/test evidence",
       "scope": [
         "**/src/main/**",
         "pom.xml",
