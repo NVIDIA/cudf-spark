@@ -79,29 +79,21 @@ object IcebergFormatVersionSupport {
   }
 
   private[iceberg] def unsupportedDefault(schema: Schema): Option[(String, String)] = {
-    def find(fields: Seq[Types.NestedField]): Option[Types.NestedField] = {
-      fields.iterator.map { field =>
-        val hasDefault = ShimUtils.hasInitialDefault(field)
+    schema.idToName().keySet().asScala.iterator
+      .map(id => schema.findField(id.intValue()))
+      .find { field =>
         val fieldType = field.`type`()
-
-        val unsupportedTimestampNtz = fieldType == Types.TimestampType.withoutZone()
-        if (hasDefault && fieldType.isPrimitiveType &&
-            (!SupportedDefaultTypeIds.contains(fieldType.typeId()) ||
-              unsupportedTimestampNtz)) {
-          Some(field)
-        } else if (hasDefault && !fieldType.isPrimitiveType && !fieldType.isStructType) {
-          Some(field)
-        } else if (fieldType.isNestedType) {
-          find(fieldType.asNestedType().fields().asScala.toSeq)
-        } else {
-          None
+        ShimUtils.hasInitialDefault(field) && {
+          if (fieldType.isPrimitiveType) {
+            !SupportedDefaultTypeIds.contains(fieldType.typeId()) ||
+              fieldType == Types.TimestampType.withoutZone()
+          } else {
+            !fieldType.isStructType
+          }
         }
-      }.collectFirst { case Some(field) => field }
-    }
-
-    find(schema.columns().asScala.toSeq).map { field =>
-      schema.findColumnName(field.fieldId()) -> field.`type`().toString
-    }
+      }.map { field =>
+        schema.findColumnName(field.fieldId()) -> field.`type`().toString
+      }
   }
 
   /**
