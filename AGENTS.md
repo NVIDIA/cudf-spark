@@ -208,21 +208,11 @@ spark-rapids-shim-json-lines ***/
 
 #### Required shim compatibility preflight
 
-Agents **MUST invoke**
-[`check-shim-compatibility`](.agents/skills/check-shim-compatibility/SKILL.md).
-This applies when implementing or reviewing changes to versioned shims, shared
-shim callers, Spark/Databricks build profiles, or shim source-selection/build
-matrices, even when the user does not name the skill. Complete the preflight
-before declaring implementation or review complete, and before publishing,
-updating, or merging the PR. If the client cannot discover repository skills,
-read the linked `SKILL.md` and follow its workflow directly.
-
-Use the agent workflow to trace source selection, callers, affected profiles,
-and concrete interactions with related PRs. Assess the proposed combination
-with the current target and record the reviewed revisions. Use applicable
-Blossom premerge evidence or targeted builds/tests to validate the affected
-profiles, including newly added Databricks targets. Report actual findings,
-validation, and gaps; refresh affected evidence when revisions change.
+When implementing or reviewing versioned shims, shared shim callers,
+Spark/Databricks build profiles, or shim source-selection/build matrices, agents
+**MUST follow** [check-shim-compatibility](.agents/skills/check-shim-compatibility/SKILL.md)
+before declaring the work complete or publishing/updating/merging the PR. If the
+client cannot discover repository skills, read the linked `SKILL.md` directly.
 
 ### Python Integration Tests
 

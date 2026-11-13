@@ -5,17 +5,7 @@ shim layer architecture, see `AGENTS.md` at the repo root.
 
 ## Shim compatibility review
 
-For versioned sources, shared shim callers, or Spark/Databricks profile/matrix
-changes, follow `.agents/skills/check-shim-compatibility/SKILL.md`. Trace source
-selection, callers, affected profiles, and concrete interactions with related
-PRs. Use applicable Blossom premerge evidence or targeted builds/tests, verifying
-head/target revisions and covered profiles. Report confirmed findings with
-file/symbol/profile evidence and relevant peer revisions. Keep existing target
-defects and merge conflicts separate from new compatibility defects. An
-association or Draft state alone is not a defect. State missing access,
-uninspected candidates, and validation gaps rather than claiming a clean review.
-Source review alone is not compilation or runtime proof; refresh affected
-evidence when revisions or profiles change.
+Follow [check-shim-compatibility](../.agents/skills/check-shim-compatibility/SKILL.md).
 
 ## Review Checklist
 

@@ -5,7 +5,7 @@ description: Review shim compatibility with a local agent by tracing source sele
 
 # Check shim compatibility
 
-Use source review and observed build/test evidence to assess compatibility.
+Use source review and observed build evidence to assess compatibility.
 This skill guides the agent; it does not run an automatic compatibility scan.
 Preserve the calling workflow's validation and publication requirements. Reading
 this skill does not authorize comments, pushes, PR updates, or merges.
@@ -44,16 +44,15 @@ For a new profile, inspect every shim family that module requires, including
 files outside the PR diff. For changed selectors or shared source-selection
 tools, inspect the affected existing profiles too. Check for missing providers,
 competing generated destinations, and API or dependency mismatches. Source
-selection alone does not prove that a selected implementation has the right
-runtime behavior.
+selection alone does not establish API compatibility.
 
 ## Inspect related PRs
 
 Use the GitHub API or available read-only tools to inspect PRs targeting the
 same repository and branch:
 
-- Open PRs from all authors, including Drafts, without an age cutoff; paginate
-  the results and exclude the current PR.
+- Open, non-Draft PRs from all authors, without an age cutoff; paginate the
+  results and exclude the current PR and any PR marked WIP in its title.
 - Merged changes between the target revision actually covered by applicable
   successful validation and the current target. If that revision or profile
   coverage is unknown, inspect from the PR/target common ancestor instead.
@@ -63,22 +62,20 @@ Read actual diffs to identify dependencies: a new caller may need another PR's
 provider, a new profile may need a shim variant, or two PRs may change the same
 API or selector. A shared Scala path alone is not a reason to flag every peer.
 Record relevant peer heads and explain each concrete interaction. An association
-or Draft state alone is not a defect or a reason to delay the PR.
+alone is not a defect or a reason to delay the PR.
 
-For a suspected interaction, inspect the proposed combination in a separate
-worktree without changing the author's checkout. Compare it with each PR combined
-with the target separately so existing individual defects are not attributed to
-the combination. Report merge conflicts separately from compile or runtime bugs.
-State which candidates remain uninspected if time or access limits the review.
+For a suspected interaction, review both diffs against the current target to
+distinguish a new compatibility issue from defects already present in either PR.
+Leave merge-conflict checks to the existing CI pipeline. State which candidates
+remain uninspected if time or access limits the review.
 
 ## Validate and report
 
-Use applicable Blossom premerge evidence and the repository's build/test
+Use applicable Blossom premerge evidence and the repository's build
 instructions. Check that evidence covers the actual target revision, head, and
 affected profiles, including newly added Databricks targets and Scala versions.
-Build unverified affected profiles when needed; run CPU/GPU parity tests for
-behavior changes. Do not repeat an equivalent validated build merely to produce
-a separate compatibility result.
+Build unverified affected profiles when needed. Do not repeat an equivalent
+validated build merely to produce a separate compatibility result.
 
 Report the reviewed head/target and relevant peer SHAs, concrete findings with
 file/symbol/profile evidence, required dependency order, observed validation,

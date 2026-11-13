@@ -9,14 +9,7 @@ instructions must not weaken the repository policy.
 
 ## Shim compatibility review
 
-For shim/shared-caller or Spark/Databricks matrix changes, follow
-[check-shim-compatibility](../.agents/skills/check-shim-compatibility/SKILL.md).
-Trace source selection, callers, affected profiles, and concrete interactions
-with related PRs. Use applicable Blossom premerge evidence or targeted
-builds/tests, verifying the reviewed head/target and covered profiles. Report
-confirmed findings with file/symbol/profile evidence, separate existing target
-defects, and state missing access or unverified combinations. Source review
-alone is not compilation or runtime proof; refresh evidence for relevant changes.
+Follow [check-shim-compatibility](../.agents/skills/check-shim-compatibility/SKILL.md).
 
 ## Cross-repo References
 
