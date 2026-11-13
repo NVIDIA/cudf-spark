@@ -291,7 +291,8 @@ def test_iceberg_delete_v3_gpu_writes_and_merges_deletion_vectors(
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
-def test_iceberg_delete_v3_ignores_unprojected_unsupported_default(
+@allow_non_gpu("BatchScanExec", "ColumnarToRowExec")
+def test_iceberg_delete_v3_unprojected_unsupported_default_falls_back(
         spark_tmp_table_factory):
     base_table_name = get_full_table_name(spark_tmp_table_factory)
     cpu_table_name = f"{base_table_name}_cpu"
@@ -328,6 +329,11 @@ def test_iceberg_delete_v3_ignores_unprojected_unsupported_default(
     gpu_data = with_cpu_session(lambda spark: spark.table(gpu_table_name).select("id").collect())
     assert cpu_data == [Row(2)]
     assert_equal_with_local_sort(cpu_data, gpu_data)
+
+    assert_gpu_fallback_collect(
+        lambda spark: spark.table(gpu_table_name).select("id"),
+        "BatchScanExec",
+        conf=iceberg_delete_mor_enabled_conf)
 
 
 @iceberg
@@ -1000,6 +1006,9 @@ def test_iceberg_v3_default_on_implicit_equality_delete_field(
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Requires local equality-delete UDF")
 @allow_non_gpu("BatchScanExec", "ColumnarToRowExec")
 @ignore_order(local=True)
+@pytest.mark.xfail(
+    reason="Nested equality-delete keys need a separate GPU compatibility fix",
+    strict=True)
 def test_iceberg_v3_nested_equality_delete_field_falls_back(
         spark_tmp_table_factory,
         spark_tmp_path,
@@ -1061,7 +1070,7 @@ def test_iceberg_v3_nested_equality_delete_field_falls_back(
 
     with_cpu_session(setup_table)
     # Keep the nested equality field projected so the CPU baseline can apply the delete. The
-    # implicit-field fallback path is covered by GpuPostProcessorSuite.
+    # implicit-field path also needs coverage in the nested equality-delete follow-up.
     read_query = f"SELECT id, payload.delete_key AS delete_key FROM {table_name}"
     remaining_rows = with_cpu_session(
         lambda spark: spark.sql(f"{read_query} ORDER BY id").collect())

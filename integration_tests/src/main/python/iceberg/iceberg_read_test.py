@@ -427,7 +427,7 @@ def test_iceberg_schema_evolution_read(
 
 
 
-def _setup_iceberg_v3_defaults_table(table_name):
+def _setup_iceberg_v3_defaults_table(table_name, unsupported_column=None):
     props = _build_tblprops({"format-version": "3"})
     props_sql = ", ".join(f"'{key}' = '{value}'" for key, value in props.items())
 
@@ -474,18 +474,18 @@ def _setup_iceberg_v3_defaults_table(table_name):
             "decimal_added", types.DecimalType.of(9, 2),
             jvm.java.math.BigDecimal("12345.67"))
 
-        # These types are representable by Iceberg/Spark but are not supported by the GPU
-        # default-materialization path and must cause scan fallback when projected.
-        add_default(
-            "timestamp_ntz_added",
-            types.TimestampType.withoutZone(),
-            "2024-01-02T03:04:05")
-        add_default(
-            "uuid_added", types.UUIDType.get(),
-            "123e4567-e89b-12d3-a456-426614174000")
-        add_default(
-            "fixed_added", types.FixedType.ofLength(3),
-            jvm.java.nio.ByteBuffer.wrap(bytearray([4, 5, 6])))
+        # Add one unsupported default at a time so each fallback case is independent.
+        if unsupported_column == "timestamp_ntz_added":
+            add_default(
+                unsupported_column, types.TimestampType.withoutZone(), "2024-01-02T03:04:05")
+        elif unsupported_column == "uuid_added":
+            add_default(
+                unsupported_column, types.UUIDType.get(),
+                "123e4567-e89b-12d3-a456-426614174000")
+        elif unsupported_column == "fixed_added":
+            add_default(
+                unsupported_column, types.FixedType.ofLength(3),
+                jvm.java.nio.ByteBuffer.wrap(bytearray([4, 5, 6])))
         update.commit()
         spark.sql(f"REFRESH TABLE {table_name}")
 
@@ -646,17 +646,18 @@ def test_iceberg_v3_defaulted_collection_paths(spark_tmp_table_factory, reader_t
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @allow_non_gpu("BatchScanExec", "ColumnarToRowExec")
 @ignore_order(local=True)
-def test_iceberg_v3_unsupported_initial_defaults_fallback(spark_tmp_table_factory):
+@pytest.mark.parametrize(
+    "unsupported_column", ["timestamp_ntz_added", "uuid_added", "fixed_added"])
+@pytest.mark.parametrize("project_default", [False, True], ids=["unprojected", "projected"])
+def test_iceberg_v3_unsupported_initial_defaults_fallback(
+        spark_tmp_table_factory, unsupported_column, project_default):
     table_name = get_full_table_name(spark_tmp_table_factory)
-    _setup_iceberg_v3_defaults_table(table_name)
-    v3_conf = {"spark.rapids.sql.format.iceberg.v3.enabled": "true"}
-
-    for unsupported_column in ["timestamp_ntz_added", "uuid_added", "fixed_added"]:
-        assert_gpu_fallback_collect(
-            lambda spark, column=unsupported_column: spark.sql(
-                f"SELECT id, {column} FROM {table_name}"),
-            "BatchScanExec",
-            conf=v3_conf)
+    _setup_iceberg_v3_defaults_table(table_name, unsupported_column)
+    columns = f"id, {unsupported_column}" if project_default else "id"
+    assert_gpu_fallback_collect(
+        lambda spark: spark.sql(f"SELECT {columns} FROM {table_name}"),
+        "BatchScanExec",
+        conf={"spark.rapids.sql.format.iceberg.v3.enabled": "true"})
 
 
 def _check_default_rows(expected):

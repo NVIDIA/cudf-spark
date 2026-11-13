@@ -22,7 +22,7 @@ import scala.collection.JavaConverters._
 
 import com.nvidia.spark.rapids.{RapidsConf, RapidsMeta}
 import org.apache.iceberg.{Schema, Table, TableProperties}
-import org.apache.iceberg.types.{Type, Types, TypeUtil}
+import org.apache.iceberg.types.{Type, Types}
 
 import org.apache.spark.sql.execution.SparkPlan
 
@@ -42,8 +42,8 @@ object IcebergFormatVersionSupport {
 
   /**
    * Tag unsupported table versions and, when v3 is enabled, initial defaults in schemaToCheck.
-   * Callers select the schema relevant to the operation, such as a scan's required fields or a
-   * write's output fields. Unsupported cases are recorded on meta for CPU fallback.
+   * Callers select the schema relevant to the operation, such as the full table schema for scans
+   * or a write's output fields. Unsupported cases are recorded on meta for CPU fallback.
    */
   def tagForFormatVersion(
       table: Table,
@@ -97,45 +97,6 @@ object IcebergFormatVersionSupport {
       }.map { field =>
         schema.findColumnName(field.fieldId()) -> field.`type`().toString
       }
-  }
-
-  /**
-   * Extend an expected schema with top-level fields required by equality deletes, so their
-   * defaults are included in planning checks even when the query does not project them. Already
-   * projected fields are not duplicated. Throws if a required field ID is missing from the table
-   * schema or identifies a nested field, which the GPU delete filter cannot currently handle.
-   */
-  def withRequiredFields(
-      tableSchema: Schema,
-      expectedSchema: Schema,
-      requiredFieldIds: Seq[Int]): Schema = {
-    val projectedIds = TypeUtil.getProjectedIds(expectedSchema).asScala.map(_.toInt).toSet
-    val requiredFields = requiredFieldIds.distinct.map { fieldId =>
-      val field = Option(tableSchema.findField(fieldId)).getOrElse {
-        throw new IllegalArgumentException(s"Cannot find required field for ID $fieldId")
-      }
-
-      // Iceberg permits an equality-delete field to be a primitive nested in a struct. However,
-      // GpuDeleteFilter builds both its equality-delete schema and its probe expressions from the
-      // top-level columns in the table and required schemas. Adding a nested leaf as a top-level
-      // column here would make the planning check pass, but GpuDeleteFilter would later fail to
-      // resolve the field ID or bind it to the wrong input column. Validate every equality field,
-      // including fields already projected by the query, and fall back until GpuDeleteFilter can
-      // preserve and extract the complete nested path.
-      if (tableSchema.asStruct().field(fieldId) == null) {
-        throw new UnsupportedOperationException(
-          s"Nested equality-delete field '${field.name()}' with ID $fieldId is not supported " +
-            "on GPU")
-      }
-      field
-    }
-    val missingFields = requiredFields.filterNot(field => projectedIds.contains(field.fieldId()))
-
-    if (missingFields.isEmpty) {
-      expectedSchema
-    } else {
-      new Schema((expectedSchema.columns().asScala ++ missingFields).asJava)
-    }
   }
 
   private def tagMergeRowsAncestor(

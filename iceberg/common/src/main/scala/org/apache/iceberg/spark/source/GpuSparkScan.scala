@@ -22,7 +22,7 @@ import scala.util.{Failure, Success, Try}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.iceberg.{IcebergEncryptionSupport, IcebergFormatVersionSupport, ShimUtils}
 import com.nvidia.spark.rapids.parquet.GpuParquetScan
-import org.apache.iceberg.{FileContent, ScanTask, ScanTaskGroup}
+import org.apache.iceberg.ScanTaskGroup
 import org.apache.iceberg.spark.GpuSparkReadConf
 import org.apache.iceberg.types.Types
 
@@ -105,29 +105,8 @@ object GpuSparkScan {
     }
 
     Try {
-      val table = GpuSparkScanAccess.table(meta.wrapped)
-      val expectedSchema = GpuSparkScanAccess.expectedSchema(meta.wrapped)
-      val schemaToCheck =
-        if (ShimUtils.formatVersion(table) >
-            IcebergFormatVersionSupport.MaxSupportedFormatVersion && meta.conf.isIcebergV3Enabled) {
-          val equalityDeleteFieldIds = GpuSparkScanAccess.taskGroups(meta.wrapped)
-            .asScala
-            .flatMap(_.tasks().asScala)
-            .map(_.asInstanceOf[ScanTask])
-            .flatMap(_.asFileScanTask().deletes().asScala)
-            .filter(_.content() == FileContent.EQUALITY_DELETES)
-            .flatMap(_.equalityFieldIds().asScala)
-            .map(_.toInt)
-            .toSeq
-          IcebergFormatVersionSupport.withRequiredFields(
-            table.schema(), expectedSchema, equalityDeleteFieldIds)
-        } else {
-          expectedSchema
-        }
       IcebergFormatVersionSupport.tagForFormatVersion(
-        table,
-        schemaToCheck,
-        meta)
+        GpuSparkScanAccess.table(meta.wrapped), meta)
     } match {
       case Failure(e) => meta.willNotWorkOnGpu(s"error examining Iceberg table version: $e")
       case _ =>
