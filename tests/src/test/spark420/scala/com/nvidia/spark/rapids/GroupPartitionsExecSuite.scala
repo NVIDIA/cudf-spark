@@ -173,6 +173,9 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
           enableSortedMerge = false))
 
       assert(groupPartitions.allMetrics.keySet == Set(GpuMetric.OP_TIME_NEW))
+      assert(GpuMetric.unwrap(groupPartitions.allMetrics).keySet == Set(
+        GpuMetric.OP_TIME_NEW,
+        s"${GpuMetric.OP_TIME_NEW}_exSemWait"))
       assert(groupPartitions.getOpTimeNewMetric.nonEmpty)
       assert(groupPartitions.executeColumnar().partitions.isEmpty)
     }
