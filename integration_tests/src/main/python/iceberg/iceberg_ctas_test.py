@@ -204,6 +204,7 @@ def test_ctas_gpu_timestamp_uses_iceberg_micros_and_has_metrics(
     with_cpu_session(assert_timestamp_file_metadata, conf=conf)
 
 
+@iceberg_fast_test
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)

@@ -100,6 +100,7 @@ def test_iceberg_v3_row_lineage_append(spark_tmp_table_factory):
             f"SELECT id, _pos, _row_id, _last_updated_sequence_number FROM {table}"))
 
 
+@iceberg_fast_test
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)

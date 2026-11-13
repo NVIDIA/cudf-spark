@@ -97,6 +97,7 @@ def test_insert_overwrite_unpartitioned_table(format_version, spark_tmp_table_fa
         lambda table_name: create_iceberg_table(table_name, table_prop=table_prop))
 
 
+@iceberg_fast_test
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)
