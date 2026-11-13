@@ -166,7 +166,9 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
         afterStats
       } else {
         NvtxRegistry.HYBRID_SCAN_FILTER_DICT {
-          filterRowGroupsWithDictionaries(reader, afterStats, split.source.fetch(_))
+          // Released after the compare: the column chunk fetch to host memory comes next.
+          filterRowGroupsWithDictionaries(reader, afterStats, split.source.fetch(_),
+            releaseSemaphore = true)
         }
       }
     }
@@ -205,7 +207,8 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
   private def filterRowGroupsWithDictionaries(
       reader: HybridScanReader,
       rowGroups: Array[Int],
-      getDictPages: Array[ByteRange] => Array[HostMemoryBuffer]): Array[Int] = {
+      getDictPages: Array[ByteRange] => Array[HostMemoryBuffer],
+      releaseSemaphore: Boolean): Array[Int] = {
     val dictRanges = reader.dictionaryPagesByteRanges(rowGroups)
     // The reader reports one range per filter column per row group and an empty range for a chunk
     // it will not prune with, so a list of nothing but empty ranges means there is nothing to do.
@@ -217,7 +220,7 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       rowGroups
     } else {
       val afterDict = withResource(getDictPages(dictRanges)) { hostPages =>
-        compareDictionaryPages(reader, rowGroups, hostPages)
+        compareDictionaryPages(reader, rowGroups, hostPages, releaseSemaphore)
       }
       logDebug(s"HybridScan dictionary pruning: ${rowGroups.length} -> ${afterDict.length} " +
         "row groups")
@@ -243,8 +246,10 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       val survivors = closeOnExcept(fetched) { f =>
         ast.foreach(reader.setFilter)
         NvtxRegistry.HYBRID_SCAN_FILTER_DICT {
+          // Kept after the compare: the chunks are already fetched, so the decode comes next.
           filterRowGroupsWithDictionaries(reader, f.rowGroups,
-            sliceDictPagesFromChunks(reader, f.rowGroups, f.hostChunks, _))
+            sliceDictPagesFromChunks(reader, f.rowGroups, f.hostChunks, _),
+            releaseSemaphore = false)
         }
       }
       if (survivors.length == fetched.rowGroups.length) {
@@ -303,11 +308,16 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       keptChunks.safeMap(c => c.slice(0, c.getLength)))
   }
 
-  /** Compare the dictionary pages against the filter and return the row groups that survive. */
+  /**
+   * Compare the dictionary pages against the filter and return the row groups that survive.
+   * `releaseSemaphore` only when a column chunk fetch follows; a task decoding already-fetched
+   * chunks keeps it for the decode.
+   */
   private def compareDictionaryPages(
       reader: HybridScanReader,
       rowGroups: Array[Int],
-      hostPages: Array[HostMemoryBuffer]): Array[Int] = {
+      hostPages: Array[HostMemoryBuffer],
+      releaseSemaphore: Boolean): Array[Int] = {
     // Dictionary pages are compared on the GPU, so the semaphore is held from the copy over until
     // they are freed. They are small: a writer caps a dictionary page at 1MB and gives up on
     // dictionary encoding the chunk rather than exceed it, and only the filter columns have pages
@@ -319,9 +329,11 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
         reader.filterRowGroupsWithDictionaryPages(dictPages, rowGroups)
       }
     }
-    // Leaving the GPU for a while: what survives the pruning is a host-side list of row group
-    // indexes, and reading the column chunks it selects is the longest IO of the read.
-    GpuSemaphore.releaseIfNecessary(TaskContext.get())
+    if (releaseSemaphore) {
+      // Leaving the GPU for a while: what survives the pruning is a host-side list of row group
+      // indexes, and reading the column chunks it selects is the longest IO of the read.
+      GpuSemaphore.releaseIfNecessary(TaskContext.get())
+    }
     kept
   }
 
