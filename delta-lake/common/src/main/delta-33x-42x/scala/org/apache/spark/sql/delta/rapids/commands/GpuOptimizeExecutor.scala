@@ -92,7 +92,7 @@ class GpuOptimizeExecutor(
   private val optimizeStrategy =
     OptimizeTableStrategy(sparkSession, snapshot, optimizeContext, zOrderByColumns)
 
-  /** Timestamp to use in [[FileAction]] */
+  /** Timestamp to use in `FileAction` */
   private val operationTimestamp = new SystemClock().getTimeMillis()
 
   private val isClusteredTable = ClusteredTableUtils.isSupported(snapshot.protocol)
@@ -183,7 +183,7 @@ class GpuOptimizeExecutor(
 
   /**
    * Helper method to prune the list of selected files based on fileSize and ratio of
-   * deleted rows according to the deletion vector in [[AddFile]].
+   * deleted rows according to the deletion vector in `AddFile`.
    */
   private def filterCandidateFileList(
       minFileSize: Long, maxDeletedRowsRatio: Double, files: Seq[AddFile]): Seq[AddFile] = {
@@ -321,8 +321,8 @@ class GpuOptimizeExecutor(
   /**
    * Utility method to run a Spark job to compact the files in given bin
    *
-   * @param txn [[OptimisticTransaction]] instance in use to commit the changes to DeltaLog.
-   * @param partition Partition values of the partition that files in [[bin]] belongs to.
+   * @param txn `OptimisticTransaction` instance in use to commit the changes to DeltaLog.
+   * @param partition Partition values of the partition that files in `bin` belongs to.
    * @param bin List of files to compact into one large file.
    * @param maxFileSize Targeted output file size in bytes
    */
@@ -380,7 +380,7 @@ class GpuOptimizeExecutor(
    * detection logic to indicate it is safe to try again, by returning `true`.
    *
    * This function will continue to try to commit to the log as long as `f` returns `true`,
-   * otherwise throws a subclass of [[ConcurrentModificationException]].
+   * otherwise throws a subclass of `ConcurrentModificationException`.
    */
   private def commitAndRetry(
       txn: GpuOptimisticTransactionBase,
@@ -406,7 +406,7 @@ class GpuOptimizeExecutor(
     }
   }
 
-  /** Create the appropriate [[Operation]] object for txn commit history */
+  /** Create the appropriate `Operation` object for txn commit history */
   private def getOperation(): Operation = {
     if (optimizeContext.reorg.nonEmpty) {
       DeltaOperations.Reorg(partitionPredicate)

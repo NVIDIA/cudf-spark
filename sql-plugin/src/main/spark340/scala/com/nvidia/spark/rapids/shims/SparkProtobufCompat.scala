@@ -15,11 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark":"340"}
-{"spark":"341"}
-{"spark":"342"}
-{"spark":"343"}
-{"spark":"344"}
+{"spark":["340"],"carryForward":"sameMinor"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
@@ -32,6 +28,9 @@ import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.rapids.protobuf.ProtobufDescriptorSource
 
 private[shims] object SparkProtobufCompat extends SparkProtobufCompatBase {
+  // Spark 3.4 ProtobufOptions has no enums.as.ints, so the CPU always decodes enums as strings.
+  override protected def honorsEnumsAsInts: Boolean = false
+
   override protected def reflectDescriptorSource(
       e: Expression): Either[String, ProtobufDescriptorSource] =
     Try(ProtobufReflection.invoke0[Option[String]](e, "descFilePath"))

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,15 +32,15 @@ object GpuHiveTextFileUtils {
    * Checks whether the specified data type is supported for Hive delimited text tables.
    *
    * Note: This is used to check the schema of a Hive *Table*, either when reading
-   * delimited text tables (i.e. [[GpuHiveTableScanExec]]), or writing them
+   * delimited text tables (i.e. `GpuHiveTableScanExec`), or writing them
    * (i.e. GpuHiveTextFileFormat).
    *
-   * This is separate from the checks in [[com.nvidia.spark.rapids.FileFormatChecks]],
+   * This is separate from the checks in `com.nvidia.spark.rapids.FileFormatChecks`,
    * which check the data types in the read/write *schemas*, per file format (including
    * for Hive delimited text).
    *
    * When the supported types are modified here, they must similarly be modified
-   * in [[com.nvidia.spark.rapids.GpuOverrides.fileFormats]].
+   * in `com.nvidia.spark.rapids.GpuOverrides.fileFormats`.
    *
    * @param dataType The data-type being checked for compatibility in Hive text.
    * @return true if the type is supported for Hive text, false otherwise

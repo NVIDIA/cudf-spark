@@ -34,7 +34,7 @@ from pyspark.sql.types import StringType, IntegerType
 from asserts import assert_gpu_and_cpu_writes_are_equal_collect
 from conftest import is_databricks_runtime
 from data_gen import unary_op_df, int_gen, copy_and_update, SetValuesGen, string_gen, long_gen, \
-    gen_df, append_unique_int_col_to_df
+    gen_df, append_unique_int_col_to_df, DEFAULT_DATA_GEN_LENGTH
 from delta_lake_delete_test import delta_delete_enabled_conf
 from delta_lake_merge_test import delta_merge_enabled_conf
 from delta_lake_update_test import delta_update_enabled_conf
@@ -43,7 +43,8 @@ from delta_lake_utils import delta_meta_allow, delta_rtas_truncate_skip, \
 from marks import allow_non_gpu, delta_lake, ignore_order, disable_ansi_mode, \
     allow_non_gpu_conditional, allow_non_gpu_delta_write_if
 from spark_session import is_spark_353_or_later, \
-    is_before_spark_353, with_cpu_session, is_spark_400_or_later, is_databricks173_or_later
+    is_before_spark_353, with_cpu_session, is_spark_400_or_later, is_databricks173_or_later, \
+    is_databricks_version
 
 
 def assert_liquid_clustering_delta_logs_equivalent(data_path):
@@ -120,13 +121,13 @@ def create_clustered_table_sql(spark, table_name, path, enable_deletion_vectors=
         """)
 
 
-def gen_df_and_replace_view(spark, view_name):
+def gen_df_and_replace_view(spark, view_name, length=DEFAULT_DATA_GEN_LENGTH):
     gen_list = [("a", int_gen),
                 ("b", SetValuesGen(StringType(), ["x"])),
                 ("c", string_gen),
                 ("d", SetValuesGen(IntegerType(), [1, 2, 3])),
                 ("e", long_gen)]
-    df = gen_df(spark, gen_list)
+    df = gen_df(spark, gen_list, length=length)
     df = append_unique_int_col_to_df(spark, df)
     df.coalesce(1).createOrReplaceTempView(view_name)
 
@@ -236,6 +237,47 @@ def test_delta_append_sql_liquid_clustering(spark_tmp_path, spark_tmp_table_fact
         conf=delta_writes_enabled_conf
     )
     assert_liquid_clustering_delta_logs_equivalent(data_path)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_databricks_version(18, 3),
+                    reason="DBR 18.3 clustered append transaction hooks")
+def test_delta_db183_non_eager_clustered_append_uses_gpu_writer(
+        spark_tmp_path, spark_tmp_table_factory):
+    data_path = spark_tmp_path + "/DELTA_CLUSTERED_APPEND"
+    view_name = spark_tmp_table_factory.get()
+    conf = copy_and_update(delta_writes_enabled_conf, {
+        # Non-file inputs otherwise enable native late-stage eager clustering, a CPU fallback.
+        "spark.databricks.delta.liquid.eagerClustering.enabled": "false",
+        "spark.databricks.delta.autoCompact.enabled": "false",
+        "spark.databricks.delta.optimizeWrite.enabled": "false"})
+
+    def setup(spark):
+        for run in ["CPU", "GPU"]:
+            create_clustered_table_sql(
+                spark, spark_tmp_table_factory.get(), data_path + "/" + run,
+                enable_deletion_vectors=False)
+        gen_df_and_replace_view(spark, view_name, length=32)
+
+    # Keep table creation outside capture so only the append can satisfy GPU write assertions.
+    with_cpu_session(setup, conf=conf)
+
+    def append(spark, path):
+        spark.sql(f"INSERT INTO {delta_path_identifier(path)} "
+                  f"SELECT * FROM {view_name}").collect()
+
+    def read_and_check(spark, path):
+        df = spark.read.format("delta").load(path)
+        assert df.count() == 32, f"Expected the clustered append to write 32 rows to {path}"
+        return df
+
+    # The transaction writes through GpuFileFormatWriter directly, without a WriteFilesExec.
+    # Capture only the INSERT and require its GPU transaction writer, as in the AQE write tests.
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        append, read_and_check, data_path, conf=conf,
+        expected_command="GpuRapidsDeltaWriteExec")
 
 
 @allow_non_gpu(*delta_meta_allow, "CreateTableExec")

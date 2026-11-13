@@ -16,7 +16,8 @@ from typing import Callable, Any
 import pytest
 from pyspark.sql import functions as F
 
-from asserts import assert_equal_with_local_sort, assert_gpu_fallback_collect
+from asserts import (assert_equal_with_local_sort, assert_gpu_fallback_collect,
+                     assert_gpu_fallback_write_sql)
 from conftest import is_iceberg_remote_catalog
 from data_gen import DEFAULT_DATA_GEN_LENGTH, StringGen, copy_and_update, gen_df
 from iceberg import (
@@ -27,7 +28,7 @@ from iceberg import (
     ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance,
     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, iceberg_table_properties_sql,
     row_lineage_df)
-from marks import iceberg, ignore_order, allow_non_gpu, datagen_overrides
+from marks import iceberg, ignore_order, allow_non_gpu, datagen_overrides, iceberg_fast_test
 from spark_session import with_gpu_session, with_cpu_session
 
 pytestmark = iceberg_unsupported_mark
@@ -83,6 +84,7 @@ def do_test_insert_overwrite_table_sql(spark_tmp_table_factory,
     assert_equal_with_local_sort(cpu_data, gpu_data)
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.parametrize("format_version", iceberg_format_versions)
@@ -95,6 +97,30 @@ def test_insert_overwrite_unpartitioned_table(format_version, spark_tmp_table_fa
         lambda table_name: create_iceberg_table(table_name, table_prop=table_prop))
 
 
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@ignore_order(local=True)
+@allow_non_gpu('OverwriteByExpressionExec')
+def test_insert_overwrite_encryption_fallback(spark_tmp_table_factory):
+    base_table_name = get_full_table_name(spark_tmp_table_factory)
+    for suffix in ("_cpu", "_gpu"):
+        table = base_table_name + suffix
+        create_iceberg_table(
+            table, table_prop={"format-version": "3", "encryption.key-id": "test-key"},
+            df_gen=lambda spark: row_lineage_df(spark, length=128))
+        with_cpu_session(lambda spark: row_lineage_df(spark, length=128).writeTo(table).append())
+
+    def overwrite_data(spark, table):
+        view = spark_tmp_table_factory.get()
+        row_lineage_df(spark, start=128, length=32).createOrReplaceTempView(view)
+        spark.sql(f"INSERT OVERWRITE TABLE {table} SELECT * FROM {view}")
+
+    assert_gpu_fallback_write_sql(
+        overwrite_data, lambda spark, table: spark.table(table),
+        base_table_name, ["OverwriteByExpressionExec"], conf=iceberg_static_overwrite_conf)
+
+
+@iceberg_fast_test
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)
@@ -121,6 +147,7 @@ def test_insert_overwrite_v3_table_fallback(spark_tmp_table_factory):
             {"spark.rapids.sql.format.iceberg.v3.enabled": "false"}))
 
 
+@iceberg_fast_test
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(
@@ -213,6 +240,7 @@ def _do_test_insert_overwrite_partitioned_table(
         create_table_and_set_write_order)
 
 
+@iceberg_fast_test
 @iceberg
 @datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids-jni/issues/4016')
 @ignore_order(local=True)

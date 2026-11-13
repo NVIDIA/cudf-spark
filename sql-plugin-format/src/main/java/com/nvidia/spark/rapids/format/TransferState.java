@@ -12,8 +12,12 @@ public final class TransferState {
    * Data has been compressed and requires meta update
    */
   public static final byte BUFFER_META_UPDATED = 1;
+  /**
+   * The server will not send this buffer. The response's error says why.
+   */
+  public static final byte FAILED = 2;
 
-  public static final String[] names = { "STARTED", "BUFFER_META_UPDATED", };
+  public static final String[] names = { "STARTED", "BUFFER_META_UPDATED", "FAILED", };
 
   public static String name(int e) { return names[e]; }
 }

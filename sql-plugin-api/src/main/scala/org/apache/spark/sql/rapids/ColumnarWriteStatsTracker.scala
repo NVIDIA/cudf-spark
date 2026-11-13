@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,7 +22,7 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
  * A trait for classes that are capable of collecting statistics on columnar data that's being
- * processed by a single write task in [[GpuFileFormatDataWriter]] - i.e. there should be one
+ * processed by a single write task in `GpuFileFormatDataWriter` - i.e. there should be one
  * instance per executor.
  *
  * newPartition event is only triggered if the relation to be written out is partitioned.

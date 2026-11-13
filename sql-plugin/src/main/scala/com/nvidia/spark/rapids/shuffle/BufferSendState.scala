@@ -31,36 +31,56 @@ import org.apache.spark.shuffle.rapids.{RapidsShuffleSendPrepareException,
   ShuffleOutputGoneException}
 
 /**
- * A helper case class to maintain the server side state in response to a transfer
+ * A helper class to maintain the server side state in response to a transfer
  * request initiated by a peer.
  *
- * The class implements the Iterator interface.
- *
- * On next(), a set of RapidsBuffer are copied onto a bounce buffer, and a
+ * On `getBufferToSend()`, a set of buffers are copied onto a bounce buffer, and a
  * `MemoryBuffer` slice of the bounce buffer is returned. Buffers are copied to the bounce
  * buffer in `TransferRequest` order. The receiver has the same conventions.
  *
  * Synchronization with `serverStream` is outside of this class. It is assumed that the caller
- * has several `BufferSendState` iterators and on calling next on this collection, it will
- * perform a sync on `serverStream` before handing it off to the transport.
+ * has several `BufferSendState` instances and on calling `getBufferToSend()` on each, it will
+ * perform a sync on `serverStream` before handing the slices off to the transport.
  *
  * It also is AutoCloseable. close() should be called to free bounce buffers.
  *
- * In terms of the lifecycle of this object, it begins with the client asking for transfers to
- * start, it lasts through all buffers being transmitted, and ultimately finishes when a
- * TransferResponse is sent back to the client.
+ * A live request prepares and sends windows until one Outcome ends it. A lookup failure can
+ * get an error reply before a state exists.
+ * {{{
+ * request arrival -- lookup succeeds --> [live] -- success reply queues --> [Completed]
+ *                                         | ^
+ *                                         +-+ prepare failure retried
+ *                                         |
+ *     +-----------------------------------+
+ *     +-- output gone ------> [MissingOutput] -+
+ *     +-- OOM at deadline --> [OomExpired] ----+--> error reply eligible
+ *     +-- other failure ----> [Failed] --------+
+ *     |
+ *     +-- data send fails --> [SendFailed] ----+
+ *     +-- server stops -----> [ServerClosed] --+--> no error reply
+ *     +-- close ------------> [Closed] --------+
+ * }}}
+ *
+ * The first finish wins. An in-flight data send leaves completion to its callback until the
+ * transport stops. Failed in the final data callback gets no error reply.
+ * Error replies require an open server and no loop-ending failure. The materialization OOM
+ * deadline starts at request arrival and never resets when a window succeeds.
+ * A prepare failure other than an OOM, gone output or loop-ending failure can be retried too,
+ * but only if another state of its server batch prepared a window.
  *
  * @param transaction a request transaction
  * @param sendBounceBuffers - an object that contains a device and potentially a host
  *                          buffer also
  * @param requestHandler - impl of trait that interfaces to the catalog
  * @param serverStream - CUDA stream to use for copies.
+ * @param requestArrivalNanos when the request arrived, on the server's clock
  */
 class BufferSendState(
     transaction: Transaction,
     sendBounceBuffers: SendBounceBuffers,
     requestHandler: RapidsShuffleRequestHandler,
-    serverStream: Cuda.Stream = Cuda.DEFAULT_STREAM)
+    serverStream: Cuda.Stream = Cuda.DEFAULT_STREAM,
+    requestArrivalNanos: Long = System.nanoTime())
     extends AutoCloseable with Logging {
 
   class SendBlock(val tableId: Int, val bufferHandle: RapidsShuffleHandle) extends BlockWithSize {
@@ -91,12 +111,20 @@ class BufferSendState(
       val bufferMetas = new Array[BufferMeta](transferRequest.requestsLength())
 
       val btr = new BufferTransferRequest() // for reuse
-      val blocksToSend = (0 until transferRequest.requestsLength()).map { ix =>
-        val bufferTransferRequest = transferRequest.requests(btr, ix)
-        val tableId = bufferTransferRequest.bufferId()
-        val handle = requestHandler.getShuffleHandle(tableId)
-        bufferMetas(ix) = handle.tableMeta.bufferMeta()
-        new SendBlock(tableId, handle)
+      val blocksToSend = try {
+        (0 until transferRequest.requestsLength()).map { ix =>
+          val bufferTransferRequest = transferRequest.requests(btr, ix)
+          val tableId = bufferTransferRequest.bufferId()
+          val handle = requestHandler.getShuffleHandle(tableId)
+          bufferMetas(ix) = handle.tableMeta.bufferMeta()
+          new SendBlock(tableId, handle)
+        }
+      } catch {
+        case NonFatal(t) =>
+          // the request is released once this block ends, so its ids are read here
+          throw new BufferLookupException((0 until transferRequest.requestsLength()).map {
+            ix => transferRequest.requests(btr, ix).bufferId()
+          }, t)
       }
       (peerBufferReceiveHeader, bufferMetas, blocksToSend)
     }
@@ -125,21 +153,30 @@ class BufferSendState(
 
   private[this] var acquiredBuffs: Seq[RangeBuffer] = Seq.empty
 
-  // A retry window belongs to this transfer request. Its first materialization OOM starts an
-  // episode, and only a successful preparation by this state resets the episode. Results from
-  // other BufferSendState instances that happen to share a server batch do not affect it.
-  private[this] var oomRetryStartNanos: Option[Long] = None
+  // How many requested blocks, in order, the prepared windows cover completely, and how many the
+  // issued windows do. An error reply leaves out the blocks the issued windows cover completely.
+  // The requester gets each issued window, or that send fails and no error reply follows.
+  private[this] var blocksPrepared = 0
+  private[this] var blocksIssued = 0
+
+  // Retry attempts for this request's materialization OOMs since this state last prepared a
+  // window. The backoff before a retry depends on this count. The retries end `retryNanos` after
+  // the request arrived, however many of its windows were sent. That deadline lets the error
+  // reply reach a reader that started waiting shortly before the request was sent. Other states
+  // in the same server batch change neither the count nor the deadline.
   private[this] var oomRetryAttempts: Int = 0
 
+  /**
+   * Records a materialization OOM of this state's current window.
+   * @param retryNanos how long after the request arrived its OOMs are retried
+   * @return the attempt that retries it, counted from the last successful preparation, or
+   *         None if the request is past its retries
+   */
   private[shuffle] def recordOomAndGetRetryAttempt(
       nowNanos: Long,
-      timeoutNanos: Long): Option[Int] =
+      retryNanos: Long): Option[Int] =
     synchronized {
-      val startNanos = oomRetryStartNanos.getOrElse {
-        oomRetryStartNanos = Some(nowNanos)
-        nowNanos
-      }
-      if (nowNanos - startNanos < timeoutNanos) {
+      if (nowNanos - requestArrivalNanos < retryNanos) {
         oomRetryAttempts += 1
         Some(oomRetryAttempts)
       } else {
@@ -147,11 +184,8 @@ class BufferSendState(
       }
     }
 
-  private[shuffle] def resetOomRetryWindow(): Unit = synchronized {
-    if (oomRetryStartNanos.isDefined) {
-      oomRetryStartNanos = None
-      oomRetryAttempts = 0
-    }
+  private[shuffle] def resetOomRetryAttempts(): Unit = synchronized {
+    oomRetryAttempts = 0
   }
 
   def getRequestTransaction: Transaction = synchronized {
@@ -167,6 +201,21 @@ class BufferSendState(
   def getTransferResponse(): RefCountedDirectByteBuffer = synchronized {
     new RefCountedDirectByteBuffer(
       ShuffleMetadata.buildBufferTransferResponse(bufferMetas))
+  }
+
+  /** Records that the transport took the window that `getBufferToSend` prepared last. */
+  def windowIssued(): Unit = synchronized {
+    blocksIssued = blocksPrepared
+  }
+
+  /**
+   * The error reply to this state's requester: the requested buffers that it will not get, and
+   * why.
+   * @param reason why the request failed, for the requester's error message
+   */
+  def getErrorResponse(reason: String): RefCountedDirectByteBuffer = synchronized {
+    new RefCountedDirectByteBuffer(ShuffleMetadata.buildTransferErrorResponse(
+      blocksToSend.drop(blocksIssued).map(_.tableId), reason))
   }
 
   /** Whether this state has ended. An ended state never becomes live again. */
@@ -189,9 +238,13 @@ class BufferSendState(
    * While a send of this state is in flight only that send's callback may call this, or the
    * server's sweep once the transport has stopped, because the transport can still read the
    * bounce buffer until then.
+   * @param errorReply the error reply to answer the requester with before the request
+   *                   transaction closes, or None to send no reply
    * @return true if this call ended the state
    */
-  def finish(result: BufferSendState.Outcome): Boolean = {
+  def finish(
+      result: BufferSendState.Outcome,
+      errorReply: Option[BufferSendState.ErrorReply] = None): Boolean = {
     val first = synchronized {
       val isFirst = outcome == null
       if (isFirst) {
@@ -213,7 +266,13 @@ class BufferSendState(
       }
       release(releaseAcquiredToCatalog())
       release(freeBounceBuffers())
-      // outside this state's monitor, since closing a transaction is a call into the transport
+      // No reply follows a release failure that ends the send loop, since the requester hears of
+      // the failure when its connection closes. Replying and closing the transaction are calls
+      // into the transport, so they run outside this state's monitor.
+      if (error == null || !BufferSendState.endsSendLoop(error)) {
+        errorReply.foreach(reply => BufferSendState.sendErrorReply(transaction, reply.gate,
+          getErrorResponse(reply.reason)))
+      }
       release(transaction.close())
       if (error != null) {
         if (BufferSendState.endsSendLoop(error)) {
@@ -240,8 +299,7 @@ class BufferSendState(
    * Prepares and returns a `MemoryBuffer` that can be used in a send.
    * @return - a memory buffer slice backed by either a host or device bounce buffer, depending on
    *         the tier location for buffers we are sending.
-   * @throws org.apache.spark.shuffle.rapids.RapidsShuffleSendPrepareException when copies to the
-   *                                                                    bounce buffer fail.
+   * @note throws `RapidsShuffleSendPrepareException` when copies to the bounce buffer fail.
    */
   def getBufferToSend(): MemoryBuffer = synchronized {
     require(acquiredBuffs.isEmpty,
@@ -328,6 +386,7 @@ class BufferSendState(
         }
 
         val buffSlice = bounceBuffToUse.slice(0, buffOffset)
+        blocksPrepared += blockRanges.count(_.isComplete())
 
         if (windowedBlockIterator.hasNext) {
           blockRanges = windowedBlockIterator.next()
@@ -346,7 +405,7 @@ class BufferSendState(
         s" [peer_executor_id=${transaction.peerExecutorId()}]")
 
     // Preparing this state's next send ends its continuous materialization-OOM episode.
-    resetOomRetryWindow()
+    resetOomRetryAttempts()
     buffsToSend
   }
 
@@ -362,7 +421,72 @@ class BufferSendState(
   }
 }
 
-object BufferSendState {
+/**
+ * A transfer request whose buffers could not all be looked up, with the id of every buffer it
+ * asked for, which cannot be read from the request once it is released.
+ */
+private[shuffle] class BufferLookupException(val tableIds: Seq[Int], cause: Throwable)
+    extends RuntimeException(cause.getMessage, cause)
+
+object BufferSendState extends Logging {
+  /**
+   * Lets a server queue its error replies and transfer responses only while it is open.
+   * The server shuts it before the transport closes, then waits until every reply it let through
+   * is queued. UCX's progress thread runs no task queued after the transport's close, so a reply
+   * queued later would never be sent or released.
+   */
+  private[shuffle] trait ReplyGate {
+    /** Runs `queue`, which queues a reply, if the server is open, and returns whether it ran. */
+    def queueIfOpen(queue: => Unit): Boolean
+  }
+
+  /** An error reply: why the request failed, and the gate of the server that answers it. */
+  private[shuffle] case class ErrorReply(reason: String, gate: ReplyGate)
+
+  /**
+   * Answers a failed request with an error reply, through `gate`. The send's callback
+   * releases the reply, whatever the send's status. This method releases it when the send cannot
+   * start or the gate is shut. A reply that cannot be built or sent leaves its requester waiting
+   * until it times out, as with no reply. The connection logs a failed send, and this method logs
+   * any other failure.
+   */
+  private[shuffle] def sendErrorReply(
+      request: Transaction,
+      gate: ReplyGate,
+      reply: => RefCountedDirectByteBuffer): Unit = {
+    try {
+      val response = try {
+        reply
+      } catch {
+        // Building the reply allocates, a direct buffer included. Running out of memory there,
+        // heap or direct, leaves the request unanswered and the calling thread serving, since
+        // nothing has been sent yet.
+        case oom: OutOfMemoryError =>
+          throw new IllegalStateException("No memory to build the error reply", oom)
+      }
+      val queued = try {
+        gate.queueIfOpen {
+          request.respond(response.acquire(), withResource(_) { _ =>
+            response.close()
+          })
+        }
+      } catch {
+        // A respond that throws queued nothing, so its callback will not release the reply. A
+        // fatal error can come after the send was queued, and then the reply is left alone.
+        case NonFatal(t) =>
+          response.safeClose(t)
+          throw t
+      }
+      if (!queued) {
+        logDebug(s"Not sending an error reply to $request: the server closed")
+        response.close()
+      }
+    } catch {
+      case NonFatal(t) => logError("Unable to send an error reply, so the requester will " +
+          "wait until it times out", t)
+    }
+  }
+
   /**
    * Whether `error`, one of its causes or one of their suppressed errors must end the send loop
    * rather than be contained: a fatal CUDA error, after which the GPU is unusable, or an
@@ -396,7 +520,7 @@ object BufferSendState {
   /** A requested buffer is gone: the catalog no longer holds it, as after an unregister. */
   case object MissingOutput extends Outcome
 
-  /** Materialization kept running out of memory past the retry window. */
+  /** Materialization ran out of memory once the request's OOM retry deadline had passed. */
   case object OomExpired extends Outcome
 
   /** The transport completed a data send with a status other than success. */

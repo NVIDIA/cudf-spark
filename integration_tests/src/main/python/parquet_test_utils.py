@@ -46,8 +46,9 @@ def assert_parquet_files_use_codec(spark, dataframe, expected_codec):
     jvm = spark.sparkContext._jvm
     hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
     for file_path in file_paths:
+        # input_file_name() returns a URL-encoded URI string; decode it via URI
         reader = jvm.org.apache.parquet.hadoop.ParquetFileReader.open(
-            hadoop_conf, jvm.org.apache.hadoop.fs.Path(file_path))
+            hadoop_conf, jvm.org.apache.hadoop.fs.Path(jvm.java.net.URI(file_path)))
         try:
             row_groups = reader.getFooter().getBlocks()
             assert row_groups.size() > 0, f"Parquet file {file_path} has no row groups"

@@ -173,8 +173,7 @@ def main():
     print("Copying script")
     ci_supervision = os.environ.get("DATABRICKS_CI_TEST_SUPERVISION") == "1"
     transfer_timeout = 120 if ci_supervision else None
-    ssh_args = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-                "-p", "2200", "-i", params.private_key_file]
+    ssh_args = ClusterUtils.get_ssh_options(params.private_key_file)
     if ci_supervision:
         ssh_args += ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
                      "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3"]

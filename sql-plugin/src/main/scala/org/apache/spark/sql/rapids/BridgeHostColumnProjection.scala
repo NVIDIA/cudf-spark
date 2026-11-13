@@ -258,7 +258,7 @@ object BridgeHostColumnProjection
  * Code generator for [[BridgeHostColumnProjection]]. Adapted from Spark's
  * `GenerateUnsafeProjection`: instead of packing each row into an `UnsafeRow`, it generates code
  * that evaluates the expressions and appends each result directly into a per-column
- * [[RapidsHostColumnBuilder]], so the output can be moved straight to the GPU.
+ * `RapidsHostColumnBuilder`, so the output can be moved straight to the GPU.
  *
  * Because this mirrors Spark's generator, keep it aligned with the Spark version being built
  * against when touching the codegen template or supported-type checks.

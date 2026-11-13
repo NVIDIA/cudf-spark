@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,13 +16,14 @@
 
 package com.nvidia.spark.rapids.shuffle
 
-import com.nvidia.spark.rapids.RapidsShuffleHandle
+import com.nvidia.spark.rapids.{RapidsShuffleHandle, ShuffleMetadata}
 import com.nvidia.spark.rapids.jni.RmmSpark
 import com.nvidia.spark.rapids.spill.SpillableDeviceBufferHandle
 import org.mockito.ArgumentCaptor
 import org.mockito.ArgumentMatchers._
 import org.mockito.Mockito._
 
+import org.apache.spark.FetchFailed
 import org.apache.spark.shuffle.rapids.{RapidsShuffleFetchFailedException, RapidsShuffleTimeoutException}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -91,6 +92,34 @@ class RapidsShuffleIteratorSuite extends RapidsShuffleTestHelper {
     doTestErrorOrCancelledRaisesFetchFailure(TransactionStatus.Cancelled)
   }
 
+  test("a metadata error names the block whose lookup failed, or else the request's first") {
+    // the iterator asks for three blocks, at map indices 1, 2 and 3
+    Seq(1 -> 2, -1 -> 1, 3 -> 1).foreach { case (failedBlock, mapIndex) =>
+      val taskId = 1
+      try {
+        RmmSpark.currentThreadIsDedicatedToTask(taskId)
+        val cl =
+          RapidsShuffleTestHelper.makeIterator(
+            mockConf, mockTransport, testMetricsUpdater, taskId, mockCatalog)
+
+        val ac = ArgumentCaptor.forClass(classOf[RapidsShuffleFetchHandler])
+        when(mockTransport.makeClient(any())).thenReturn(client)
+        doNothing().when(client).doFetch(any(), ac.capture())
+        cl.start()
+
+        val handler = ac.getValue
+        handler.metadataError("Test", failedBlock)
+
+        val failure = intercept[RapidsShuffleFetchFailedException](cl.next())
+          .toTaskFailedReason.asInstanceOf[FetchFailed]
+        assertResult(mapIndex, s"for failed block $failedBlock")(failure.mapIndex)
+        verify(mockTransport, times(1)).cancelPending(handler)
+      } finally {
+        RmmSpark.taskDone(taskId)
+      }
+    }
+  }
+
   test("a transport exception raises a fetch failure with the cause exception") {
     val taskId = 1
     try {
@@ -133,7 +162,29 @@ class RapidsShuffleIteratorSuite extends RapidsShuffleTestHelper {
     }
   }
 
-  test("a timeout while waiting for batches raises a fetch failure") {
+  test("a metadata response with no tables raises a fetch failure") {
+    val taskId = 1
+    try {
+      RmmSpark.currentThreadIsDedicatedToTask(taskId)
+      when(mockTransaction.getStatus).thenReturn(TransactionStatus.Success)
+      // what a requester that does not read the response's error sees in an error reply
+      when(mockTransaction.releaseMessage()).thenReturn(new MetadataTransportBuffer(
+        new RefCountedDirectByteBuffer(ShuffleMetadata.buildMetaResponse(Seq.empty))))
+      when(mockTransport.makeClient(any())).thenReturn(client)
+      val cl =
+        RapidsShuffleTestHelper.makeIterator(
+          mockConf, mockTransport, testMetricsUpdater, taskId, mockCatalog)
+
+      assert(cl.hasNext)
+      val failure = intercept[RapidsShuffleFetchFailedException](cl.next())
+      assert(failure.getCause.getMessage.contains("0 expected batches"))
+      verify(mockTransport, never()).queuePending(any())
+    } finally {
+      RmmSpark.taskDone(taskId)
+    }
+  }
+
+  test("a timeout while waiting for batches throws RapidsShuffleTimeoutException") {
     val taskId = 1
     try {
       RmmSpark.currentThreadIsDedicatedToTask(taskId)

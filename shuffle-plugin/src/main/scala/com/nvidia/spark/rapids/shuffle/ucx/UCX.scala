@@ -23,11 +23,11 @@ import java.util.concurrent.{ConcurrentHashMap, ConcurrentLinkedQueue, Executors
 import java.util.concurrent.atomic.AtomicLong
 
 import scala.collection.mutable.ArrayBuffer
-import scala.util.control.NonFatal
+import scala.util.control.{ControlThrowable, NonFatal}
 
 import ai.rapids.cudf.{BaseDeviceMemoryBuffer, MemoryBuffer, NvtxColor, NvtxRange}
 import com.nvidia.spark.rapids.{GpuDeviceManager, RapidsConf}
-import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.ThreadFactoryBuilder
 import com.nvidia.spark.rapids.jni.RmmSpark
@@ -89,7 +89,9 @@ class UCX(transport: UCXShuffleTransport, executor: BlockManagerId, rapidsConf: 
   // this object implements the transport-friendly interface for UCX
   private[this] val serverConnection = new UCXServerConnection(this, transport)
 
-  // monotonically increasing counter that holds the txId (for debug purposes, at this stage)
+  // Executor-wide ids. Each transaction takes one, and a request takes another for each retired
+  // header it skips. A client request's response header holds the low 32 bits of one. Every
+  // peer shares each response registration, so one counter keeps headers apart until it wraps.
   private[this] val txId = new AtomicLong(0L)
 
   private var worker: UcpWorker = _
@@ -115,6 +117,14 @@ class UCX(transport: UCXShuffleTransport, executor: BlockManagerId, rapidsConf: 
   // The pending queues are used to enqueue [[PendingReceive]] or [[PendingSend]], from executor
   // task threads and [[progressThread]] will hand them to the UcpWorker thread.
   private val workerTasks = new ConcurrentLinkedQueue[() => Unit]()
+
+  // wakes the worker for a queued task, taking up the worker object lock to protect against
+  // another `.close`
+  private[this] val signalWorker: () => Unit = () => synchronized {
+    if (worker != null) {
+      worker.signal()
+    }
+  }
 
   // holds memory registered against UCX that should be de-register on exit (used for bounce
   // buffers)
@@ -249,6 +259,11 @@ class UCX(transport: UCXShuffleTransport, executor: BlockManagerId, rapidsConf: 
    *   - Each response received at the response activeMessageId, will be demuxed using the header:
    *   responseActiveMessageId1 -> [callbackForHeader1, callbackForHeader2, ..., callbackForHeaderN]
    *
+   *   - A withdrawn request's header holds the marker `UCX.RetiredResponse` until its reply
+   *   arrives, or until its send fails without leaving the executor. The receive handler drops
+   *   a reply whose header holds the marker or nothing. `ResponseActiveMessageRegistration`
+   *   shows a header's life.
+   *
    *   - useRndv: is set to false. We expect UCX to be able to use eager protocols or rndv
    *   at its leasure.
    *
@@ -298,29 +313,85 @@ class UCX(transport: UCXShuffleTransport, executor: BlockManagerId, rapidsConf: 
     override def useRndv: Boolean = false
   }
 
+  /**
+   * The callbacks that wait for replies on one response active message id, by header. A
+   * withdrawn request's header stays retired until its reply arrives, or until its send fails
+   * without leaving the executor, so that the reply cannot reach a newer request whose
+   * transaction id wraps to the same header.
+   * {{{
+   * [free] -- register --> [waiting] -- reply takes the callback ----------------> [free]
+   *                          |   |
+   *                          |   +-- send fails: transfer, control, or ----------> [free]
+   *                          |       a metadata send that never left
+   *                          |
+   *    metadata request: reader done, or a send that may have left fails
+   *                          v
+   *                      [retired] -- reply takes the marker and is dropped -----> [free]
+   *                       | ^  |
+   *                       | |  +-- its send fails without leaving ---------------> [free]
+   *                       +-+ newer request skips it, a later withdrawal or removal keeps it
+   * [free] -- reply --> dropped
+   * }}}
+   *
+   * A reply and a withdrawal act on one map entry, so exactly one of them takes the callback.
+   * Registering a header that a waiting request holds fails. Every retired header holds the
+   * same marker, `UCX.RetiredResponse`. Only its reply frees it, since that reply can come over
+   * a second endpoint after the request's endpoint failed. The one exception is a send that
+   * fails without leaving the executor, after which no reply can come. A reply that never comes
+   * keeps its header retired for the executor's life.
+   */
   class ResponseActiveMessageRegistration(override val activeMessageId: Int)
       extends ActiveMessageRegistration {
 
     private[this] val responseCallbacks = new ConcurrentHashMap[Long, UCXAmCallback]()
 
-    def getCallback(header: Long): UCXAmCallback = {
-      val cb = responseCallbacks.remove(header) // 1 callback per header
-      require (cb != null,
-        s"Failed to get a response Active Message callback for " +
-          s"${UCX.formatAmIdAndHeader(activeMessageId, header)}")
-      cb
-    }
+    /**
+     * Takes what `header` holds: a request's callback, `UCX.RetiredResponse` for a withdrawn
+     * request, or null when nothing waits for a reply with this header. One reply per request
+     * frees its header.
+     */
+    def getCallback(header: Long): UCXAmCallback =
+      responseCallbacks.remove(header) // 1 callback per header
 
+    /**
+     * Registers `responseCallback` for `header`, unless a withdrawn request still holds the
+     * header, since its reply may yet come.
+     * @return true when the header is retired, so nothing was registered
+     */
     def addResponseActiveMessageHandler(
-        header: Long, responseCallback: UCXAmCallback): Unit = {
+        header: Long, responseCallback: UCXAmCallback): Boolean = {
       val prior = responseCallbacks.putIfAbsent(header, responseCallback)
-      require(prior == null,
+      require(prior == null || (prior eq UCX.RetiredResponse),
         s"Invalid Active Message re-registration of response handler for " +
           s"${UCX.formatAmIdAndHeader(activeMessageId, header)}")
+      prior != null
     }
 
+    /** Frees `header`, unless it holds a withdrawn request's marker. */
     def removeResponseActiveMessageHandler(header: Long): Unit = {
-      responseCallbacks.remove(header)
+      responseCallbacks.computeIfPresent(header,
+        (_, cb) => if (cb eq UCX.RetiredResponse) cb else null)
+    }
+
+    /**
+     * Withdraws the request that waits on `header` with `responseCallback`. The header holds
+     * `UCX.RetiredResponse` until the request's reply arrives, so that no newer request can take
+     * the header and be handed that reply. A send that never left the executor frees it instead,
+     * through `release`.
+     * @return whether the request still waited, so that no reply took its callback
+     */
+    def retire(header: Long, responseCallback: UCXAmCallback): Boolean =
+      responseCallbacks.replace(header, responseCallback, UCX.RetiredResponse)
+
+    /**
+     * Frees `header` for a request whose send never left the executor, since no reply can
+     * come. It removes the request's callback, or the marker that the request's withdrawal left,
+     * and leaves another request's callback.
+     */
+    def release(header: Long, responseCallback: UCXAmCallback): Unit = {
+      if (!responseCallbacks.remove(header, responseCallback)) {
+        responseCallbacks.remove(header, UCX.RetiredResponse)
+      }
     }
 
     override def useRndv: Boolean = false
@@ -332,8 +403,9 @@ class UCX(transport: UCXShuffleTransport, executor: BlockManagerId, rapidsConf: 
    * @note This function will be called for each client, with the same `am.activeMessageId`
    * @param am UCXActiveMessage (id and header) to register a one time response for
    * @param responseCallback callback to handle a particular response
+   * @return true when a withdrawn request still holds `am.header`, so nothing was registered
    */
-  def registerResponseHandler(am: UCXActiveMessage, responseCallback: UCXAmCallback): Unit = {
+  def registerResponseHandler(am: UCXActiveMessage, responseCallback: UCXAmCallback): Boolean = {
     logDebug(s"Register Active Message $am response handler") 
 
     amRegistrations.computeIfAbsent(am.activeMessageId,
@@ -351,9 +423,11 @@ class UCX(transport: UCXShuffleTransport, executor: BlockManagerId, rapidsConf: 
   }
 
   /**
-   * Unregister an active message handler (given by `am.header`). This is invoked
-   * from request error handlers. On request failure (which is terminal for the transaction),
-   * the response will never arrive, so this cleans up the response handler.
+   * Unregister an active message handler (given by `am.header`), after the request's send
+   * failed. A reply can still come if the peer received the request, and is dropped when nothing
+   * holds its header. A header that a withdrawn request holds stays retired. Metadata requests
+   * call `retireResponseHandler` instead, so that their late reply cannot reach a newer request,
+   * or `releaseResponseHandler` when their send never left the executor.
    *
    * @param am active message (id, header) that for the response handler to remove
    */
@@ -370,6 +444,34 @@ class UCX(transport: UCXShuffleTransport, executor: BlockManagerId, rapidsConf: 
         }
       })
   }
+
+  /**
+   * Withdraws a request whose reader is done, or whose send failed after it may have left the
+   * executor, if `responseCallback` still waits for `am`. Its header stays taken until the
+   * request's reply arrives, or until `releaseResponseHandler` frees it.
+   *
+   * @param am active message (id, header) of the response to withdraw
+   * @param responseCallback the callback that the request registered for `am`
+   * @return whether the callback still waited, so that no reply will reach it
+   */
+  def retireResponseHandler(am: UCXActiveMessage, responseCallback: UCXAmCallback): Boolean =
+    amRegistrations.get(am.activeMessageId) match {
+      case reg: ResponseActiveMessageRegistration => reg.retire(am.header, responseCallback)
+      case _ => false
+    }
+
+  /**
+   * Frees the header of a request whose send never left the executor, since no reply can come,
+   * whether `responseCallback` still waits for `am` or a withdrawal retired it.
+   *
+   * @param am active message (id, header) of the response to free
+   * @param responseCallback the callback that the request registered for `am`
+   */
+  def releaseResponseHandler(am: UCXActiveMessage, responseCallback: UCXAmCallback): Unit =
+    amRegistrations.get(am.activeMessageId) match {
+      case reg: ResponseActiveMessageRegistration => reg.release(am.header, responseCallback)
+      case _ =>
+    }
 
   /**
    * Register a request handler (the server will use this)
@@ -434,7 +536,15 @@ class UCX(transport: UCXShuffleTransport, executor: BlockManagerId, rapidsConf: 
               logDebug(s"Active Message received: $am")
               val cb = reg.getCallback(header)
 
-              if (amData.isDataValid) {
+              // UCS_OK with no receive releases eager data, and drops rendezvous data. Closing
+              // `amData` here would release eager data that UCX releases again.
+              if (cb eq UCX.RetiredResponse) {
+                logDebug(s"Dropping a reply to a withdrawn request: $am")
+                UcsConstants.STATUS.UCS_OK
+              } else if (cb == null) {
+                logWarning(s"Dropping a reply that nothing waits for: $am")
+                UcsConstants.STATUS.UCS_OK
+              } else if (amData.isDataValid) {
                 require(!reg.useRndv,
                   s"Handling an eager Active Message, but expected rndv for: " +
                     s"amId ${TransportUtils.toHex(reg.activeMessageId)}")
@@ -550,28 +660,28 @@ class UCX(transport: UCXShuffleTransport, executor: BlockManagerId, rapidsConf: 
 
   private def sendActiveMessage(executorId: Long, am: UCXActiveMessage,
       dataAddress: Long, dataSize: Long, cb: UcxCallback, isGpu: Boolean): Unit = {
-    onWorkerThreadAsync(() => {
+    // Built on the sender's thread, where a throw means the send never started, so that the task
+    // allocates nothing on the progress thread outside the try that reports its failure.
+    val send: UCX.SendCompletion => Unit = completion => {
       val endpoint = endpointManager.getEndpointByExecutorId(executorId)
       if (endpoint == null) {
-        cb.onError(-200,
+        completion.onError(UCX.NO_ENDPOINT,
           s"Trying to send a message to an executor that doesn't exist $executorId")
       } else {
-        sendActiveMessage(endpoint, am, dataAddress, dataSize, cb, isGpu)
+        sendOnEndpoint(endpoint, am, dataAddress, dataSize, completion, isGpu)
       }
-    })
+    }
+    onWorkerThreadAsync(() => UCX.sendOrReport(cb)(send))
   }
 
   private def sendActiveMessage(ep: UcpEndpoint, am: UCXActiveMessage,
                                 dataAddress: Long, dataSize: Long,
                                 cb: UcxCallback, isGpu: Boolean): Unit = {
-    // This isn't coming from the pool right now because it would be a bit of a
-    // waste to get a larger hard-partitioned buffer just for 8 bytes.
-    // TODO: since we no longer have metadata limits, the pool can be managed using the
-    //   address-space allocator, so we should obtain this direct buffer from that pool
-    val header = ByteBuffer.allocateDirect(UCX.ACTIVE_MESSAGE_HEADER_SIZE.toInt)
-    header.putLong(am.header)
-    header.rewind()
+    UCX.sendOrReport(cb)(sendOnEndpoint(ep, am, dataAddress, dataSize, _, isGpu))
+  }
 
+  private def sendOnEndpoint(ep: UcpEndpoint, am: UCXActiveMessage,
+      dataAddress: Long, dataSize: Long, completion: UCX.SendCompletion, isGpu: Boolean): Unit = {
     val flags = if (am.forceRndv) {
       UcpConstants.UCP_AM_SEND_FLAG_RNDV
     } else {
@@ -584,25 +694,18 @@ class UCX(transport: UCXShuffleTransport, executor: BlockManagerId, rapidsConf: 
       UcsConstants.MEMORY_TYPE.UCS_MEMORY_TYPE_HOST
     }
 
-    withResource(new NvtxRange("AM Send", NvtxColor.GREEN)) { _ =>
-      ep.sendAmNonBlocking(
-        am.activeMessageId,
-        TransportUtils.getAddress(header),
-        UCX.ACTIVE_MESSAGE_HEADER_SIZE,
-        dataAddress,
-        dataSize,
-        flags,
-        new UcxCallback {
-          override def onSuccess(request: UcpRequest): Unit = {
-            cb.onSuccess(request)
-            RapidsStorageUtils.dispose(header)
-          }
-
-          override def onError(ucsStatus: Int, errorMsg: String): Unit = {
-            cb.onError(ucsStatus, errorMsg)
-            RapidsStorageUtils.dispose(header)
-          }
-        }, memType)
+    UCX.sendTaskInRange(new NvtxRange("AM Send", NvtxColor.GREEN), am.header, completion,
+        () => new UcpRequestParams().setMemoryType(memType)) {
+      (headerAddress, params, completion) =>
+        ep.sendAmNonBlocking(
+          am.activeMessageId,
+          headerAddress,
+          UCX.ACTIVE_MESSAGE_HEADER_SIZE,
+          dataAddress,
+          dataSize,
+          flags,
+          completion,
+          params)
     }
   }
 
@@ -634,27 +737,12 @@ class UCX(transport: UCXShuffleTransport, executor: BlockManagerId, rapidsConf: 
     endpointManager.getConnection(peerExecutorId, peerMgmtHost, peerMgmtPort)
   }
 
-  def onWorkerThreadAsync(task: () => Unit): Unit = {
-    workerTasks.add(task)
-    if (rapidsConf.shuffleUcxUseWakeup) {
-      // The task is queued, and the progress thread runs it on its next pass, so a failure to
-      // wake the worker must not reach callers: they treat a throw from here as a task that was
-      // never queued and will never call back.
-      try {
-        withResource(new NvtxRange("UCX Signal", NvtxColor.RED)) { _ =>
-          // take up the worker object lock to protect against another `.close`
-          synchronized {
-            if (worker != null) {
-              worker.signal()
-            }
-          }
-        }
-      } catch {
-        // runs after the monitor is released
-        case NonFatal(t) => logWarning("Unable to signal the UCX worker", t)
-      }
-    }
-  }
+  /**
+   * Queues `task` for the progress thread. Callers treat a throw from here as a task never
+   * queued, and `UCX.queueTask` keeps that true except for a fatal error after the queueing.
+   */
+  def onWorkerThreadAsync(task: () => Unit): Unit =
+    UCX.queueTask(workerTasks, task, rapidsConf.shuffleUcxUseWakeup, signalWorker)
 
   /** Whether the progress thread has terminated, after which no callback can run. */
   def isProgressThreadTerminated: Boolean = progressThread.isTerminated
@@ -842,7 +930,8 @@ class UCX(transport: UCXShuffleTransport, executor: BlockManagerId, rapidsConf: 
       logInfo(s"Created ConnectionRequest endpoint $ep " +
         s"for ${connectionRequest.getClientAddress}")
 
-      // Register a `Control` active message for a handshake response
+      // Register a `Control` active message for a handshake response. Its result is ignored,
+      // since nothing retires a control response.
       val responseAm = UCXActiveMessage(
         UCXConnection.composeResponseAmId(MessageType.Control), ep.getNativeId, false)
 
@@ -1064,7 +1153,6 @@ class UCX(transport: UCXShuffleTransport, executor: BlockManagerId, rapidsConf: 
               RapidsStorageUtils.dispose(handshakeMsg)
 
               // we cleanup the response active message handler, since the request errored
-              // and we don't expect a response from the peer
               unregisterResponseHandler(responseAm)
             }
 
@@ -1115,7 +1203,7 @@ class UCX(transport: UCXShuffleTransport, executor: BlockManagerId, rapidsConf: 
 
 }
 
-object UCX {
+object UCX extends Logging {
   // This is used to distinguish a cancelled request vs. other errors
   // as the callback is the same (onError)
   // from https://github.com/openucx/ucx/blob/master/src/ucs/type/status.h
@@ -1123,6 +1211,273 @@ object UCX {
 
   // We include a header with this size in our active messages
   private val ACTIVE_MESSAGE_HEADER_SIZE = 8L
+
+  /**
+   * What the response header of a withdrawn request holds until the request's reply arrives, or
+   * until its send fails without leaving the executor, in place of the request's callback. One
+   * marker serves every header, and nothing calls it, so each of its methods throws.
+   */
+  private[ucx] val RetiredResponse: UCXAmCallback = new UCXAmCallback {
+    private def misused: Nothing =
+      throw new IllegalStateException("A withdrawn request's response has no callback")
+    override def onError(am: UCXActiveMessage, error: UCXError): Unit = misused
+    override def onMessageStarted(receiveAm: UcpRequest): Unit = misused
+    override def onSuccess(am: UCXActiveMessage, buff: TransportBuffer): Unit = misused
+    override def onCancel(am: UCXActiveMessage): Unit = misused
+    override def onMessageReceived(size: Long, header: Long,
+        finalizeCb: TransportBuffer => Unit): Unit = misused
+  }
+
+  // The status a send reports when this executor has no endpoint to the peer, so it sends
+  // nothing. UCS statuses end at -100.
+  private[shuffle] val NO_ENDPOINT = -200
+
+  // The status a send task reports when it throws before UCX takes the send. UCS statuses end
+  // at -100, and NO_ENDPOINT is -200. A literal, since UcsConstants loads the natives.
+  private[shuffle] val SEND_TASK_FAILED = -201
+
+  /**
+   * Whether a send that failed with `status` never left this executor, so no reply can come.
+   * For `SEND_TASK_FAILED` that holds while JUCX's native send can throw only a JVM error once
+   * UCX takes a send, since `reportThrow` does not report one.
+   */
+  private[shuffle] def neverSent(status: Int): Boolean =
+    status == NO_ENDPOINT || status == SEND_TASK_FAILED
+
+  // What a send task reports when it cannot build its completion or describe its error,
+  // and the prefix of its report otherwise. Fixed text allocates nothing and cannot throw.
+  private val SEND_TASK_FAILED_TEXT = "The send could not be handed to UCX"
+
+  /**
+   * The callback of one send: it passes the send's outcome to the sender's callback at most
+   * once, and frees the send's header, which UCX may read until it calls back. It is used on the
+   * progress thread only.
+   */
+  private[shuffle] final class SendCompletion(cb: UcxCallback) extends UcxCallback {
+    private[ucx] var header: ByteBuffer = _
+    private[this] var ended = false
+    private[this] var handedOff = false
+    private[this] var taken = false
+
+    /** Marks the point after which UCX may own the send, just before the send enters JUCX. */
+    private[shuffle] def handOff(): Unit = {
+      handedOff = true
+    }
+
+    /** Marks that JUCX returned with the send, which UCX now owns and ends through this. */
+    private[shuffle] def tookSend(): Unit = {
+      taken = true
+    }
+
+    override def onSuccess(request: UcpRequest): Unit = {
+      val first = !ended
+      ended = true
+      try {
+        if (first) {
+          cb.onSuccess(request)
+        }
+      } finally {
+        RapidsStorageUtils.dispose(header)
+      }
+    }
+
+    override def onError(ucsStatus: Int, errorMsg: String): Unit = {
+      val first = !ended
+      ended = true
+      try {
+        if (first) {
+          cb.onError(ucsStatus, errorMsg)
+        }
+      } finally {
+        RapidsStorageUtils.dispose(header)
+      }
+    }
+
+    /**
+     * Reports what the send task threw as the send's failure, unless one of these holds:
+     *  - The sender already heard how the send ended, as after an immediate UCX error, which
+     *    JUCX reports before it throws.
+     *  - JUCX returned with the send, so UCX ends it through this callback.
+     *  - The error is a JVM error after the hand-off. JUCX can run out of heap after UCX took
+     *    the send, and UCX then calls back itself and may read the send's buffers until it does.
+     * The header is left to the collector, since UCX may still read it.
+     */
+    private[ucx] def reportThrow(error: Throwable): Unit = {
+      if (!ended && !taken && !(handedOff && error.isInstanceOf[VirtualMachineError])) {
+        val text = try {
+          s"$SEND_TASK_FAILED_TEXT: $error"
+        } catch {
+          // the heap ran out again, as it may have for the error itself, or the error cannot
+          // describe itself: the error is rethrown either way
+          case NonFatal(_) | _: OutOfMemoryError => SEND_TASK_FAILED_TEXT
+        }
+        ended = true
+        val status = error match {
+          case e: UcxException if e.getStatus < 0 => e.getStatus
+          case _ => SEND_TASK_FAILED
+        }
+        cb.onError(status, text)
+      }
+    }
+  }
+
+  /**
+   * Hands one send to JUCX. Its `apply` takes the header's address as a `Long`, since a
+   * `Function3` would box it, and nothing may allocate after the hand-off.
+   */
+  private[shuffle] trait SendToJucx[P] {
+    def apply(headerAddress: Long, prepared: P, completion: SendCompletion): Unit
+  }
+
+  /**
+   * The task of one send, run inside `sendOrReport`: it allocates the send's header, then hands
+   * the send to JUCX through `send`, with the header's address, what `prepare` built and the
+   * completion to give JUCX.
+   * @param header the active message's header value
+   * @param completion the send's completion, from `sendOrReport`
+   * @param prepare builds what the send needs besides its header, such as its request
+   *                parameters
+   * @param allocate allocates the header, and a test stands in for the direct allocation
+   * @param addressOf gets a direct buffer's native address, and a test stands in for the lookup
+   */
+  private[shuffle] def sendTask[P](
+      header: Long,
+      completion: SendCompletion,
+      prepare: () => P,
+      allocate: Int => ByteBuffer = ByteBuffer.allocateDirect,
+      addressOf: ByteBuffer => Long = TransportUtils.getAddress)(
+      send: SendToJucx[P]): Unit = {
+    // This isn't coming from the pool right now because it would be a bit of a
+    // waste to get a larger hard-partitioned buffer just for 8 bytes.
+    // TODO: since we no longer have metadata limits, the pool can be managed using the
+    //   address-space allocator, so we should obtain this direct buffer from that pool
+    val buffer = allocate(ACTIVE_MESSAGE_HEADER_SIZE.toInt)
+    completion.header = buffer
+    buffer.putLong(header)
+    buffer.rewind()
+    // everything that can fail before JUCX is called comes before the hand-off, so that its
+    // failure is reported. addressOf boxes the address, and nothing after the hand-off allocates.
+    val address = addressOf(buffer)
+    val prepared = prepare()
+    completion.handOff()
+    send(address, prepared, completion)
+    // the caller's cleanup, such as closing its NVTX range, still runs inside sendOrReport's
+    // try, whose catch must not report a send that UCX now owns
+    completion.tookSend()
+  }
+
+  /**
+   * Runs the task of one send, as `sendTask` does, inside the send's NVTX range. If the task
+   * throws, closeOnExcept adds a failure to close the range to its error as suppressed, since
+   * that error's type decides whether the send's failure is reported.
+   */
+  private[shuffle] def sendTaskInRange[P](
+      range: NvtxRange,
+      header: Long,
+      completion: SendCompletion,
+      prepare: () => P)(
+      send: SendToJucx[P]): Unit = {
+    closeOnExcept(range) { _ =>
+      sendTask(header, completion, prepare)(send)
+    }
+    range.close()
+  }
+
+  // builds the completion of each send, and a test stands in for it
+  private val newCompletion: UcxCallback => SendCompletion = new SendCompletion(_)
+
+  /**
+   * Runs the task of one send, which allocates its header and hands the send to JUCX with the
+   * given completion. The catch attempts failure reporting before rethrowing the error for
+   * the progress thread to log. The real case is an `OutOfMemoryError` allocating the header,
+   * hence the catch of `Throwable`. The completion is built inside the `try`, so that nothing
+   * allocates before it. A failure to build the completion is reported through `cb`.
+   *
+   * The send task moves from the worker queue to JUCX. SendCompletion forwards its result at
+   * most once, whether failure reporting here or a UCX callback completes it.
+   * {{{
+   * [queued] --> [sendOrReport] --> [handOff] -- JUCX returns --> [tookSend]
+   *                   |               |                            |
+   *              setup throws    ordinary throw                UCX callback
+   *                   |               |                            v
+   *                   v               |                         [ended]
+   *              [failure reported] <-+
+   * [handOff] -- immediate callback ---------------------------> [ended]
+   * [handOff] -- VM error --> [UCX may own] -- UCX callback -----> [ended]
+   * }}}
+   *
+   * Keep header and parameter allocation before handOff. A VirtualMachineError after handOff
+   * leaves completion to UCX, as does any throw after tookSend. ControlThrowable bypasses
+   * failure reporting.
+   *
+   * @param completionOf builds the send's completion
+   */
+  private[shuffle] def sendOrReport(
+      cb: UcxCallback,
+      completionOf: UcxCallback => SendCompletion = newCompletion)(
+      send: SendCompletion => Unit): Unit = {
+    var completion: SendCompletion = null
+    try {
+      completion = completionOf(cb)
+      send(completion)
+    } catch {
+      case c: ControlThrowable => throw c
+      case t: Throwable =>
+        try {
+          if (completion != null) {
+            completion.reportThrow(t)
+          } else {
+            // JUCX never had this send, so nothing else reports it
+            cb.onError(SEND_TASK_FAILED, SEND_TASK_FAILED_TEXT)
+          }
+        } catch {
+          case e: Throwable if e ne t =>
+            if (e.isInstanceOf[InterruptedException]) {
+              Thread.currentThread().interrupt()
+            }
+            t.addSuppressed(e)
+        }
+        throw t
+    }
+  }
+
+  // builds the NVTX range of each worker signal, and a test stands in for it
+  private val newSignalRange: () => NvtxRange = () => new NvtxRange("UCX Signal", NvtxColor.RED)
+
+  /**
+   * Queues `task` for the progress thread, then wakes the worker through `signal` if `wakeup`.
+   * Callers treat a throw from here as a task never queued, which will never call back, and may
+   * free what it uses. So all that allocates comes before the task is queued, and an ordinary
+   * failure to wake the worker after it is only logged, since the task stays queued and runs
+   * when the worker next wakes.
+   * @param newRange builds the signal's NVTX range
+   */
+  private[shuffle] def queueTask(
+      tasks: ConcurrentLinkedQueue[() => Unit],
+      task: () => Unit,
+      wakeup: Boolean,
+      signal: () => Unit,
+      newRange: () => NvtxRange = newSignalRange): Unit = {
+    val range = if (wakeup) newRange() else null
+    try {
+      tasks.add(task)
+    } catch {
+      case t: Throwable =>
+        range.safeClose(t)
+        throw t
+    }
+    if (range != null) {
+      try {
+        try {
+          signal()
+        } finally {
+          range.close()
+        }
+      } catch {
+        case NonFatal(t) => logWarning("Unable to signal the UCX worker", t)
+      }
+    }
+  }
 
   def formatAmIdAndHeader(activeMessageId: Int, header: Long) =
     s"[amId=${TransportUtils.toHex(activeMessageId)}, hdr=${TransportUtils.toHex(header)}]"

@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids.iceberg.parquet
 
 import java.util.{Map => JMap}
 import java.util.concurrent.{ConcurrentHashMap, ConcurrentMap}
+import java.util.concurrent.atomic.AtomicLong
 
 import scala.collection.JavaConverters._
 
@@ -28,7 +29,7 @@ import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
 import com.nvidia.spark.rapids.iceberg.IcebergDeletionVector
 import com.nvidia.spark.rapids.iceberg.data.GpuDeleteFilter
 import com.nvidia.spark.rapids.parquet.{CpuCompressionConfig, HostMemoryBuffersWithMetaData,
-  MultiFileCloudParquetPartitionReader, ParquetDataBlock}
+  HostMemoryEmptyMetaData, MultiFileCloudParquetPartitionReader, ParquetDataBlock}
 
 import org.apache.spark.TaskContext
 import org.apache.spark.sql.execution.datasources.PartitionedFile
@@ -47,10 +48,13 @@ class GpuMultiThreadIcebergParquetReader(
   = new ConcurrentHashMap[IcebergPartitionedFile, GpuParquetReaderPostProcessor](files.size)
   private val deletionVectors: ConcurrentMap[IcebergPartitionedFile, IcebergDeletionVector] =
     new ConcurrentHashMap[IcebergPartitionedFile, IcebergDeletionVector](files.size)
-
+  // Shared SQL metrics are not thread-safe. Reader threads accumulate elapsed times atomically
+  // here so that only the task thread updates the published metrics.
+  private val pendingTimers = new ConcurrentHashMap[String, AtomicLong]()
 
   private var inited = false
-  private lazy val reader = createParquetReader()
+  // Visible for testing
+  private[iceberg] lazy val reader = createParquetReader()
 
   override def close(): Unit = {
     try {
@@ -58,13 +62,35 @@ class GpuMultiThreadIcebergParquetReader(
         withResource(reader) { _ => }
       }
     } finally {
+      flushTimeMetrics()
       deletionVectors.values().asScala.toSeq.safeClose()
     }
   }
 
-  override def hasNext: Boolean = reader.next()
+  override def hasNext: Boolean = {
+    try {
+      reader.next()
+    } finally {
+      flushTimeMetrics()
+    }
+  }
 
   override def next(): ColumnarBatch = reader.get()
+
+  override protected def addTimeByMetric(metricName: String, value: Long): Unit = {
+    pendingTimers.computeIfAbsent(metricName, _ => new AtomicLong()).addAndGet(value)
+  }
+
+  // Publish completed file timings on the task thread, including files with no surviving rows.
+  private def flushTimeMetrics(): Unit = {
+    pendingTimers.asScala.foreach { case (metricName, time) =>
+      // Atomically take the current total; later additions remain for the next flush.
+      val value = time.getAndSet(0L)
+      if (value != 0L) {
+        super.addTimeByMetric(metricName, value)
+      }
+    }
+  }
 
   private def findIcebergFile(f: PartitionedFile): IcebergPartitionedFile = {
     val path = f.filePath.toString()
@@ -110,9 +136,18 @@ class GpuMultiThreadIcebergParquetReader(
           next: HostMemoryBuffersWithMetaData): Boolean = {
         if (current.partitionedFile.filePath == next.partitionedFile.filePath) return false
         if (super.checkIfNeedToSplit(current, next)) return true
-        if (multiThreadConf.disableCombining) return true
-        val curFile = findIcebergFile(current.partitionedFile)
-        val nextFile = findIcebergFile(next.partitionedFile)
+        checkIfNeedToSplitIcebergFiles(current.partitionedFile, next.partitionedFile)
+      }
+
+      override protected def checkIfNeedToSplitEmpty(current: HostMemoryEmptyMetaData,
+          next: HostMemoryEmptyMetaData): Boolean = {
+        checkIfNeedToSplitIcebergFiles(current.partitionedFile, next.partitionedFile)
+      }
+
+      private def checkIfNeedToSplitIcebergFiles(current: PartitionedFile,
+          next: PartitionedFile): Boolean = {
+        val curFile = findIcebergFile(current)
+        val nextFile = findIcebergFile(next)
         val curProcessor = postProcessors.get(curFile)
         val nextProcessor = postProcessors.get(nextFile)
         if (curProcessor == null || nextProcessor == null) return true

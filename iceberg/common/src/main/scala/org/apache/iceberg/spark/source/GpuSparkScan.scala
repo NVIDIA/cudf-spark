@@ -20,7 +20,7 @@ import scala.collection.JavaConverters._
 import scala.util.{Failure, Success, Try}
 
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.iceberg.{IcebergFormatVersionSupport, ShimUtils}
+import com.nvidia.spark.rapids.iceberg.{IcebergEncryptionSupport, IcebergFormatVersionSupport, ShimUtils}
 import org.apache.iceberg.ScanTaskGroup
 import org.apache.iceberg.spark.GpuSparkReadConf
 import org.apache.iceberg.types.Types
@@ -122,7 +122,7 @@ object GpuSparkScan {
 
     gpuScan match {
       case Success(_) =>
-        // Nested types (map, list, struct) are now supported
+        IcebergEncryptionSupport.tagForScan(meta.wrapped, meta)
       case Failure(e) => meta.willNotWorkOnGpu(s"conversion to GPU scan failed: ${e.getMessage}")
     }
   }

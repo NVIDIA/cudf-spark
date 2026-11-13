@@ -100,7 +100,10 @@ abstract class DeltaProviderBase extends DeltaIOProvider {
   override def tagSupportForGpuFileSourceScan(meta: SparkPlanMeta[FileSourceScanExec]): Unit = {
     val format = meta.wrapped.relation.fileFormat
     if (format.getClass == classOf[DeltaParquetFileFormat]) {
-      GpuReadParquetFileFormat.tagSupport(meta)
+      val deltaFormat = format.asInstanceOf[DeltaParquetFileFormat]
+      val mayContainShreddedVariant =
+        DeltaRuntimeShim.mayContainShreddedVariant(deltaFormat.protocol)
+      GpuReadParquetFileFormat.tagSupport(meta, Some(mayContainShreddedVariant))
     } else {
       meta.willNotWorkOnGpu(s"format ${format.getClass} is not supported")
     }
@@ -175,7 +178,7 @@ abstract class DeltaProviderBase extends DeltaIOProvider {
       // Data and partition columns precede metadata columns in the scan output.
       val dataAndPartitionOutput = scan.originalOutput.take(
         scan.requiredSchema.length + scan.relation.partitionSchema.length)
-      project.copy(projectList = project.projectList.filterNot(_.name == "_metadata"))
+      project.withProjectList(project.projectList.filterNot(_.name == "_metadata"))
         .withNewChildren(Seq(
           scan.copy(
             // Drop the temporary row index along with the unused metadata struct.
@@ -183,7 +186,7 @@ abstract class DeltaProviderBase extends DeltaIOProvider {
               dataAndPartitionOutput.filterNot(_.name == "_tmp_metadata_row_index"),
             requiredSchema = StructType(
               scan.requiredSchema.filterNot(_.name == "_tmp_metadata_row_index")
-            ))(scan.rapidsConf)))
+            ))(scan.rapidsConf, scan.partitionPlanningScan)))
     }
 
     // Liquid clustering can insert unary projections and transitions between the output
@@ -330,7 +333,7 @@ object DVPredicatePushdown extends ShimPredicateHelper {
       plan.transformUp {
         case project @ GpuProjectExec(projectList, _, _) =>
           val newProjList = projectList.filterNot(isRowDeletedColumnRef(_))
-          project.copy(projectList = newProjList)
+          project.withProjectList(newProjList)
         case fsse: GpuFileSourceScanExec =>
           fsse.copy(originalOutput = fsse.originalOutput.filterNot(
             _.name == IS_ROW_DELETED_COLUMN_NAME),
@@ -341,20 +344,21 @@ object DVPredicatePushdown extends ShimPredicateHelper {
             // It will not reuse the stage of the scan otherwise. Since we are removing
             // the IS_ROW_DELETED_COLUMN_NAME column from scan's output, we should
             // remove the DV condition as well from the dataFilters.
-            dataFilters = fsse.dataFilters.filterNot(isDVCondition(_)))(fsse.rapidsConf)
+            dataFilters = fsse.dataFilters.filterNot(isDVCondition(_)))(
+            fsse.rapidsConf, fsse.partitionPlanningScan)
       }
     }
 
     /**
      * Removes DV predicates from the filter condition and, when safe, prunes the
-     * [[IS_ROW_DELETED_COLUMN_NAME]] column from the child plan.
+     * `IS_ROW_DELETED_COLUMN_NAME` column from the child plan.
      *
      * DV predicates are dropped from the returned predicate list only when the filter child
      * contains a native deletion-vector GPU scan. Pruning the column from the child is safe
-     * only when no other predicate in the condition also reads [[IS_ROW_DELETED_COLUMN_NAME]].
+     * only when no other predicate in the condition also reads `IS_ROW_DELETED_COLUMN_NAME`.
      *
      * Returns a pair of:
-     *   - `Some(newChild)` with [[IS_ROW_DELETED_COLUMN_NAME]] pruned from the subtree, or
+     *   - `Some(newChild)` with `IS_ROW_DELETED_COLUMN_NAME` pruned from the subtree, or
      *     `None` if column pruning is not safe (the caller should use the original child)
      *   - the remaining predicates that the caller should re-attach as a new filter
      *     (empty if the entire condition consisted of pushed deletion-vector predicates)
@@ -426,7 +430,8 @@ object DVPredicatePushdown extends ShimPredicateHelper {
         // identical projections: merging over an alias-computing child would drop the
         // alias's only producer ("Couldn't find <attr>"). Merge only pure pass-throughs.
         if (projSet1 == projSet2 && projList2.forall(_.isInstanceOf[AttributeReference])) {
-          GpuProjectExec(projList1, child, enablePreSplit1 && enablePreSplit2)
+          p.withProjectList(projList1, newChild = child,
+            preSplit = enablePreSplit1 && enablePreSplit2)
         } else {
           p
         }

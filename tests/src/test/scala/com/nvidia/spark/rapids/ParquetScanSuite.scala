@@ -16,12 +16,56 @@
 
 package com.nvidia.spark.rapids
 
+import com.nvidia.spark.rapids.spill.SpillFramework
+
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.functions.col
+import org.apache.spark.sql.rapids.GpuFileSourceScanExec
 import org.apache.spark.sql.types.{IntegerType, LongType, StringType, StructField, StructType}
 
 class ParquetScanSuite extends SparkQueryCompareTestSuite {
   private val fileSplitsParquet = frameFromParquet("file-splits.parquet")
+
+  test("early close of a combining multithreaded Parquet reader releases deferred files") {
+    withTempPath { dir =>
+      val path = dir.getCanonicalPath
+      withCpuSparkSession { spark =>
+        // Both files have physical data, but their different clipped schemas prevent combining.
+        spark.range(0, 1000, 1, 1).toDF("a").write.parquet(s"$path/key=0")
+        spark.range(0, 10, 1, 1).selectExpr("id AS a", "id AS b")
+          .write.parquet(s"$path/key=1")
+      }
+      val conf = new SparkConf()
+        .set(RapidsConf.PARQUET_READER_TYPE.key, "MULTITHREADED")
+        .set(RapidsConf.READER_MULTITHREADED_COMBINE_THRESHOLD.key, "64m")
+        .set(RapidsConf.READER_MULTITHREADED_READ_KEEP_ORDER.key, "true")
+        .set("spark.sql.sources.useV1SourceList", "parquet")
+        .set("spark.sql.files.maxPartitionBytes", "1g")
+        .set("spark.sql.files.minPartitionNum", "1")
+        .set("spark.rapids.sql.exec.CollectLimitExec", "false")
+        .set(RapidsConf.TEST_ALLOWED_NONGPU.key, "CollectLimitExec")
+      withGpuSparkSession({ spark =>
+        val hostHandlesBefore = SpillFramework.stores.hostStore.numHandles
+        val df = spark.read.option("mergeSchema", "true").parquet(path).limit(1)
+        val scans = df.queryExecution.executedPlan.collect {
+          case scan: GpuFileSourceScanExec => scan
+        }
+        assert(scans.size == 1, "Expected one GPU Parquet scan")
+        assert(df.inputFiles.length == 2)
+        assert(scans.head.inputRDD.getNumPartitions == 1)
+        scans.head.readerFactory match {
+          case factory: MultiFilePartitionReaderFactoryBase =>
+            assert(factory.useMultiThread(Array(path)))
+          case other => fail(s"Expected a multithreaded reader factory, got $other")
+        }
+        assert(df.collect().length == 1)
+        // Ordered combining reads both files before decoding. LIMIT consumes only the first
+        // group, so closing the reader must release the other file's deferred host buffer.
+        assert(scans.head.metrics(GpuMetric.NUM_OUTPUT_BATCHES).value == 1)
+        assert(SpillFramework.stores.hostStore.numHandles == hostHandlesBefore)
+      }, conf)
+    }
+  }
 
   testSparkResultsAreEqual("Test Parquet with row chunks", fileSplitsParquet,
     conf = new SparkConf().set(RapidsConf.MAX_READER_BATCH_SIZE_ROWS.key, "100")) {

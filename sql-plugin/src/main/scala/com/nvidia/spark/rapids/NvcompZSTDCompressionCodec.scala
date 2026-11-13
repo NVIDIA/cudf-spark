@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -85,8 +85,10 @@ class BatchedNvcompZSTDDecompressor(maxBatchMemory: Long,
         DeviceBuffersUtils.allocateBuffers(bufMetas.map(_.uncompressedSize()))
       }
     }
-    batchDecompressor.decompressAsync(compressedBufs,
-      outputBufs.asInstanceOf[Array[BaseDeviceMemoryBuffer]], stream)
+    closeOnExcept(outputBufs) { _ =>
+      batchDecompressor.decompressAsync(compressedBufs,
+        outputBufs.asInstanceOf[Array[BaseDeviceMemoryBuffer]], stream)
+    }
     outputBufs
   }
 }

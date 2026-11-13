@@ -22,7 +22,7 @@ from spark_session import is_before_spark_320, is_databricks122_or_later, \
     is_databricks_version_or_later, is_spark_321cdh, is_spark_340_or_later, \
     is_spark_400_or_later, is_spark_420_or_later, is_spark_cdh, with_cpu_session, \
     with_gpu_session
-from conftest import is_apache_runtime, is_databricks_runtime, is_utc
+from conftest import is_apache_runtime, is_databricks_runtime
 from datetime import date, datetime, timezone
 from data_gen import *
 from marks import *
@@ -108,7 +108,7 @@ timestamp_1590_to_1970_param = pytest.param(
 timestamp_1590_to_1970_direct_param = pytest.param(
         timestamp_1590_to_1970_gens,
         marks=validate_execs_in_gpu_plan('GpuWriteFilesExec')
-        if is_utc() and (is_spark_340_or_later() or is_databricks122_or_later()) else [],
+        if is_spark_340_or_later() or is_databricks122_or_later() else [],
         id='1590-to-1970-timestamp-direct')
 
 orc_write_gens_list = [
@@ -130,15 +130,6 @@ orc_write_empty_gens_list = [
 orc_date_writer_allow = ['DataWritingCommandExec', 'ExecutedCommandExec', 'WriteFilesExec']
 orc_date_write_allow = list(dict.fromkeys([*orc_date_writer_allow, *non_utc_allow]))
 
-def assert_gpu_and_cpu_orc_writes_are_equal_collect(
-        orc_gens, write_func, read_func, base_path, conf):
-    if not is_utc() and orc_gens is timestamp_1590_to_1970_gens:
-        assert_gpu_fallback_write(
-            write_func, read_func, base_path, 'DataWritingCommandExec', conf=conf)
-    else:
-        assert_gpu_and_cpu_writes_are_equal_collect(
-            write_func, read_func, base_path, conf=conf)
-
 bool_gen = [BooleanGen(nullable=True), BooleanGen(nullable=False)]
 @pytest.mark.parametrize('orc_gens', orc_write_direct_gens_list, ids=idfn)
 @pytest.mark.parametrize('orc_impl', ["native", "hive"])
@@ -146,8 +137,7 @@ bool_gen = [BooleanGen(nullable=True), BooleanGen(nullable=False)]
 def test_write_round_trip(spark_tmp_path, orc_gens, orc_impl):
     gen_list = [('_c' + str(i), gen) for i, gen in enumerate(orc_gens)]
     data_path = spark_tmp_path + '/ORC_DATA'
-    assert_gpu_and_cpu_orc_writes_are_equal_collect(
-            orc_gens,
+    assert_gpu_and_cpu_writes_are_equal_collect(
             lambda spark, path: gen_df(spark, gen_list).coalesce(1).write.orc(path),
             lambda spark, path: spark.read.orc(path),
             data_path,
@@ -203,8 +193,7 @@ def test_write_round_trip_two_stripes(spark_tmp_path, orc_gens, orc_impl):
     # The minimum `orc_stripe_size_rows` that can be set is 512.
     # See the documentation for the config `spark.rapids.sql.test.orc.write.stripeSizeRows`.
     stripe_size_rows = 512
-    assert_gpu_and_cpu_orc_writes_are_equal_collect(
-            orc_gens,
+    assert_gpu_and_cpu_writes_are_equal_collect(
             # Use only one partition to avoid splitting the data
             lambda spark, path: gen_df(spark, gen_list, stripe_size_rows + 1, num_slices=1).write.orc(path),
             lambda spark, path: spark.read.orc(path),
@@ -488,8 +477,7 @@ def test_write_empty_orc_round_trip(spark_tmp_path, orc_gens):
         gen_list = [('_c' + str(i), gen) for i, gen in enumerate(orc_gens)]
         return gen_df(spark, gen_list, length=0).write.orc(path)
     data_path = spark_tmp_path + '/ORC_DATA'
-    assert_gpu_and_cpu_orc_writes_are_equal_collect(
-        orc_gens,
+    assert_gpu_and_cpu_writes_are_equal_collect(
         create_empty_df,
         lambda spark, path: spark.read.orc(path),
         data_path,
@@ -575,9 +563,9 @@ def test_orc_write_column_name_with_dots(spark_tmp_path):
 def test_orc_do_not_lowercase_columns(spark_tmp_path):
     data_path = spark_tmp_path + "/ORC_DATA"
 
-    # The wording of the `is not exists` error message in Spark 4.x is unfortunate, but accurate:
+    # Spark 4.2 and DBR 18.3 correct the `is not exists` wording used by earlier Spark 4.x:
     # https://github.com/apache/spark/blob/4501285a49e4c0429c9cf2c105f044e1c8a93d21/python/pyspark/errors/error-conditions.json#L487
-    if is_spark_420_or_later():
+    if is_spark_420_or_later() or is_databricks_version_or_later(18, 3):
         expected_error_message = "Key `acol` does not exist."
     elif is_spark_400_or_later() or is_databricks_version_or_later(14, 3):
         expected_error_message = "Key `acol` is not exists."

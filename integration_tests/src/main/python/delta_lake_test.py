@@ -172,6 +172,52 @@ def do_test_delta_deletion_vector_read(data_path, use_cdf, conf, test_sql, post_
     _assert_delta_dv_read_sql(test_sql, conf)
 
 
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order(local=True)
+@pytest.mark.parametrize('keep_order', [True, False])
+@pytest.mark.skipif(not gpu_supports_delta_dv_scan(),
+                    reason="GPU Delta deletion vector scan support is required")
+def test_delta_deletion_vector_combine_files_missing_all_requested_cols(
+        spark_tmp_path, keep_order):
+    data_path = spark_tmp_path + '/DELTA_DATA'
+    conf = {
+        'spark.databricks.delta.delete.deletionVectors.persistent': 'true',
+        'spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled': 'true',
+        'spark.rapids.sql.format.parquet.reader.type': 'MULTITHREADED',
+        'spark.rapids.sql.reader.multithreaded.combine.sizeBytes': '1M',
+        'spark.rapids.sql.reader.multithreaded.combine.waitTime': '10000',
+        'spark.rapids.sql.reader.multithreaded.read.keepOrder': str(keep_order),
+        'spark.sql.files.maxPartitionBytes': '1G',
+        'spark.sql.files.openCostInBytes': '1',
+        'spark.sql.files.minPartitionNum': '1',
+    }
+
+    def setup_tables(spark):
+        setup_delta_dest_table(
+            spark, data_path,
+            dest_table_func=lambda spark: spark.range(0, 20, 1, 1)
+                .selectExpr('CAST(id AS INT) AS a', 'CAST(id DIV 10 AS INT) AS key'),
+            use_cdf=False, enable_deletion_vectors=True, partition_columns=['key'])
+        spark.sql(f'DELETE FROM delta.`{data_path}` WHERE a % 5 = 0').collect()
+        metrics = _latest_delta_history(spark, data_path)['operationMetrics']
+        assert int(metrics.get('numDeletionVectorsAdded', '0')) == 2
+
+        spark.range(20, 40, 1, 1) \
+            .selectExpr('CAST(id AS INT) AS a', 'CAST(id * 10 AS INT) AS b', '2 AS key') \
+            .write.format('delta').mode('append').option('mergeSchema', 'true').save(data_path)
+        spark.sql(f'DELETE FROM delta.`{data_path}` WHERE a >= 20 AND a % 5 = 0').collect()
+        metrics = _latest_delta_history(spark, data_path)['operationMetrics']
+        assert int(metrics.get('numDeletionVectorsAdded', '0')) == 1
+        assert len(spark.read.format('delta').load(data_path).inputFiles()) == 3
+
+    with_cpu_session(setup_tables, conf=conf)
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.read.format('delta').load(data_path).select('b', 'key'),
+        exist_classes=r"Gpu(FileSourceScanExec|FileGpuScan)",
+        conf=conf)
+
+
 @allow_non_gpu("FileSourceScanExec", "ColumnarToRowExec", *delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,10 +13,11 @@
 # limitations under the License.
 import os
 
-from spark_session import with_cpu_session, with_gpu_session
+from spark_session import is_databricks_version, with_cpu_session, with_gpu_session
 import pytest
 
-from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_row_counts_equal
+from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_row_counts_equal, \
+    assert_spark_exception
 from data_gen import *
 from marks import *
 
@@ -131,12 +132,26 @@ def test_avro_read_with_corrupt_files(spark_tmp_path, reader_type, v1_enabled_li
     with_cpu_session(lambda spark : spark.range(2, 3).toDF("a").write.json(third_dpath))
 
     all_confs = copy_and_update(_enable_all_types_conf, {
+        'spark.rapids.sql.format.avro.reader.type': reader_type,
         'spark.sql.files.ignoreCorruptFiles': "true",
         'spark.sql.sources.useV1SourceList': v1_enabled_list})
 
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : spark.read.format("avro").load([first_dpath, second_dpath, third_dpath]),
-            conf=all_confs)
+    # Keep schema inference separate from the corrupt-file behavior under test.
+    def read_avro(spark):
+        return spark.read.schema("a LONG").format("avro") \
+            .load([first_dpath, second_dpath, third_dpath])
+
+    if is_databricks_version(18, 3) and v1_enabled_list == "avro":
+        # DBR 18.3 likely has a bug where Avro V1 does not honor ignoreCorruptFiles.
+        # Later DBR releases should fix this, so apply the special CPU assertion only to 18.3
+        # before verifying that the GPU reader skips the corrupt file.
+        assert_spark_exception(
+            lambda: with_cpu_session(lambda spark: read_avro(spark).collect(), conf=all_confs),
+            "Not an Avro data file")
+        gpu_rows = with_gpu_session(lambda spark: read_avro(spark).collect(), conf=all_confs)
+        assert sorted(row.a for row in gpu_rows) == [0, 1]
+    else:
+        assert_gpu_and_cpu_are_equal_collect(read_avro, conf=all_confs)
 
 
 # 10 rows is a small batch size for multi-batch read test, 2147483647 is the default value

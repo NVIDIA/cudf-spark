@@ -21,11 +21,11 @@
 
     <parent>
         <groupId>com.nvidia</groupId>
-        <artifactId>rapids-4-spark-shim-deps-parent_2.13</artifactId>
+        <artifactId>cudf-spark-shim-deps-parent_2.13</artifactId>
         <version>26.12.0-SNAPSHOT</version>
         <relativePath>../shim-deps/pom.xml</relativePath>
     </parent>
-    <artifactId>rapids-4-spark-sql_2.13</artifactId>
+    <artifactId>cudf-spark-sql_2.13</artifactId>
     <name>RAPIDS Accelerator for Apache Spark SQL Plugin</name>
     <description>The RAPIDS SQL plugin for Apache Spark</description>
     <version>26.12.0-SNAPSHOT</version>
@@ -35,9 +35,16 @@
         <rapids.compressed.artifact>false</rapids.compressed.artifact>
         <rapids.default.jar.excludePattern>**/*</rapids.default.jar.excludePattern>
         <rapids.shim.jar.phase>package</rapids.shim.jar.phase>
+        <rapids.license.resources.phase>generate-resources</rapids.license.resources.phase>
     </properties>
 
     <dependencies>
+        <dependency>
+            <groupId>com.nvidia</groupId>
+            <artifactId>cudf-spark-history-metrics-local</artifactId>
+            <version>${history-metrics.version}</version>
+            <scope>runtime</scope>
+        </dependency>
         <dependency>
             <groupId>me.bechberger</groupId>
             <artifactId>ap-loader-all</artifactId>
@@ -56,31 +63,31 @@
         </dependency>
         <dependency>
             <groupId>com.nvidia</groupId>
-            <artifactId>rapids-4-spark-sql-plugin-format_${scala.binary.version}</artifactId>
+            <artifactId>cudf-spark-sql-plugin-format_${scala.binary.version}</artifactId>
             <version>${project.version}</version>
             <classifier>${spark.version.classifier}</classifier>
         </dependency>
         <dependency>
             <groupId>com.nvidia</groupId>
-            <artifactId>rapids-4-spark-sql-plugin-fileio_${scala.binary.version}</artifactId>
+            <artifactId>cudf-spark-sql-plugin-fileio_${scala.binary.version}</artifactId>
             <version>${project.version}</version>
             <classifier>${spark.version.classifier}</classifier>
         </dependency>
         <dependency>
             <groupId>com.nvidia</groupId>
-            <artifactId>rapids-4-spark-sql-plugin-columnar_${scala.binary.version}</artifactId>
+            <artifactId>cudf-spark-sql-plugin-columnar_${scala.binary.version}</artifactId>
             <version>${project.version}</version>
             <classifier>${spark.version.classifier}</classifier>
         </dependency>
         <dependency>
             <groupId>com.nvidia</groupId>
-            <artifactId>rapids-4-spark-sql-plugin-api_${scala.binary.version}</artifactId>
+            <artifactId>cudf-spark-sql-plugin-api_${scala.binary.version}</artifactId>
             <version>${project.version}</version>
             <classifier>${spark.version.classifier}</classifier>
         </dependency>
         <dependency>
             <groupId>com.nvidia</groupId>
-            <artifactId>rapids-4-spark-sql-shims_${scala.binary.version}</artifactId>
+            <artifactId>cudf-spark-sql-shims_${scala.binary.version}</artifactId>
             <version>${project.version}</version>
             <classifier>${spark.version.classifier}</classifier>
             <scope>provided</scope>
@@ -138,35 +145,6 @@
           </resource>
         </resources>
         <plugins>
-            <plugin>
-                <groupId>org.codehaus.mojo</groupId>
-                <artifactId>build-helper-maven-plugin</artifactId>
-                <executions>
-                    <execution>
-                        <id>add-license-notice-resources</id>
-                        <phase>generate-resources</phase>
-                        <goals>
-                            <goal>add-resource</goal>
-                        </goals>
-                        <configuration>
-                            <resources>
-                                <resource>
-                                    <directory>${spark.rapids.source.basedir}</directory>
-                                    <targetPath>META-INF</targetPath>
-                                    <includes>
-                                        <!-- The NOTICE will be taken care of by the antrun task below -->
-                                        <include>LICENSE</include>
-                                        <include>NOTICE</include>
-                                    </includes>
-                                </resource>
-                                <resource>
-                                    <directory>${spark.rapids.source.basedir}/python</directory>
-                                </resource>
-                            </resources>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
             <plugin>
               <artifactId>maven-antrun-plugin</artifactId>
               <executions>
@@ -250,7 +228,7 @@
                         </goals>
                         <configuration>
                             <includeGroupIds>com.nvidia</includeGroupIds>
-                            <includeArtifactIds>rapids-4-spark-sql-shims_${scala.binary.version}</includeArtifactIds>
+                            <includeArtifactIds>cudf-spark-sql-shims_${scala.binary.version}</includeArtifactIds>
                             <excludeTransitive>true</excludeTransitive>
                             <includes>**/*.class</includes>
                             <outputDirectory>${project.build.outputDirectory}</outputDirectory>

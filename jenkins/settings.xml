@@ -63,6 +63,14 @@
       <password>${env.SONATYPE_PSW}</password>
     </server>
   </servers>
+  <mirrors>
+    <mirror>
+      <id>central</id>
+      <name>sw-spark-maven</name>
+      <url>${env.ART_URL}</url>
+      <mirrorOf>google-maven-central</mirrorOf>
+    </mirror>
+  </mirrors>
   <profiles>
     <profile>
       <id>artifactory</id>
