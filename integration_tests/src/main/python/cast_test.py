@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
+from decimal import Decimal
+
 import pytest
 
 from asserts import *
@@ -605,6 +608,154 @@ def test_cast_string_to_negative_scale_decimal_overflow(ansi_on):
     else:
         assert_gpu_and_cpu_are_equal_collect(test_overflow,
                                              conf=ansi_disabled_conf)
+
+
+def _decimal_scale_cast_conf(ansi_on):
+    return {
+        'spark.rapids.sql.expression.cpuBridge.enabled': 'true',
+        'spark.sql.ansi.enabled': str(ansi_on).lower(),
+        'spark.sql.legacy.allowNegativeScaleOfDecimal': 'true'
+    }
+
+
+_large_scale_decimal_type = DecimalType(1, -37)
+_int_overflow_decimal_type = DecimalType(1, -2147483647)
+_parsed_exponent_overflow_decimal_type = DecimalType(1, -2147483000)
+_regular_decimal_type = DecimalType(10, 2)
+
+
+@allow_non_gpu('Cast')
+@validate_execs_in_gpu_plan('GpuProjectExec')
+@pytest.mark.parametrize('ansi_on', [True, False], ids=idfn)
+@pytest.mark.parametrize('value', [
+    pytest.param('0e37', id='zero'),
+    pytest.param('1e37', id='nonzero')
+])
+def test_cast_large_decimal_scale_change_cpu_bridge(ansi_on, value):
+    def do_cast(spark):
+        return spark.createDataFrame([(value,)], 'a string').select(
+            f.col('a').cast(_large_scale_decimal_type)
+                .cast(_regular_decimal_type)
+                .alias('result')).collect()
+
+    assert_gpu_and_cpu_same_data_or_error(
+        do_cast, conf=_decimal_scale_cast_conf(ansi_on),
+        error_message=re.compile('(?i)(decimal|underflow|overflow)'))
+
+
+@allow_non_gpu('Cast')
+@validate_execs_in_gpu_plan('GpuProjectExec')
+@pytest.mark.parametrize('data, schema, to_type', [
+    pytest.param(
+        [([Decimal('0E+37')],)],
+        StructType([StructField('a', ArrayType(_large_scale_decimal_type))]),
+        ArrayType(_regular_decimal_type),
+        id='array'),
+    pytest.param(
+        [({Decimal('0E+37'): 'value'},)],
+        StructType([StructField(
+            'a', MapType(_large_scale_decimal_type, StringType()))]),
+        MapType(_regular_decimal_type, StringType()),
+        id='map_key'),
+    pytest.param(
+        [({'key': Decimal('0E+37')},)],
+        StructType([StructField(
+            'a', MapType(StringType(), _large_scale_decimal_type))]),
+        MapType(StringType(), _regular_decimal_type),
+        id='map_value'),
+    pytest.param(
+        [((Decimal('0E+37'),),)],
+        StructType([StructField(
+            'a', StructType([StructField('x', _large_scale_decimal_type)]))]),
+        StructType([StructField('x', _regular_decimal_type)]),
+        id='struct')
+])
+def test_cast_nested_large_decimal_scale_change_cpu_bridge(data, schema, to_type):
+    def do_cast(spark):
+        return spark.createDataFrame(data, schema).select(
+            f.col('a').cast(to_type).alias('result'))
+
+    assert_gpu_fallback_collect(
+        do_cast, 'Cast', conf=_decimal_scale_cast_conf(True))
+
+
+@allow_non_gpu('Cast')
+@validate_execs_in_gpu_plan('GpuProjectExec')
+def test_cast_string_to_extreme_decimal_scale_cpu_bridge():
+    def do_cast(spark):
+        return spark.createDataFrame([('1e-1000',)], 'a string').select(
+            f.col('a').cast(_parsed_exponent_overflow_decimal_type)
+                .isNull()
+                .alias('result'))
+
+    assert_gpu_fallback_collect(
+        do_cast, 'Cast', conf=_decimal_scale_cast_conf(False))
+
+
+@allow_non_gpu('ProjectExec', 'Cast')
+@pytest.mark.parametrize('ansi_on', [True, False], ids=idfn)
+def test_cast_int_overflow_decimal_scale_fallback(ansi_on):
+    def do_cast(spark):
+        return spark.createDataFrame(
+            [('0e2147483647',), (None,)], 'a string').select(
+            f.col('a').cast(_int_overflow_decimal_type)
+                .cast(_regular_decimal_type)
+                .alias('result'))
+
+    assert_gpu_fallback_collect(
+        do_cast, 'ProjectExec', conf=_decimal_scale_cast_conf(ansi_on))
+
+
+@allow_non_gpu('ProjectExec', 'Cast')
+@pytest.mark.parametrize('ansi_on', [True, False], ids=idfn)
+def test_cast_int_overflow_decimal_scale_nonzero(ansi_on):
+    def do_cast(spark):
+        return spark.createDataFrame([('1e2147483647',)], 'a string').select(
+            f.col('a').cast(_int_overflow_decimal_type)
+                .cast(_regular_decimal_type)
+                .alias('result')).collect()
+
+    assert_gpu_and_cpu_same_data_or_error(
+        do_cast, conf=_decimal_scale_cast_conf(ansi_on),
+        error_message=re.compile('(?i)(decimal|underflow|overflow)'))
+
+
+@allow_non_gpu('ProjectExec', 'Cast')
+@pytest.mark.parametrize('data, schema, from_type, to_type', [
+    pytest.param(
+        [(['0e2147483647'],)],
+        'a array<string>',
+        ArrayType(_int_overflow_decimal_type),
+        ArrayType(_regular_decimal_type),
+        id='array'),
+    pytest.param(
+        [({'0e2147483647': 'value'},)],
+        'a map<string,string>',
+        MapType(_int_overflow_decimal_type, StringType()),
+        MapType(_regular_decimal_type, StringType()),
+        id='map_key'),
+    pytest.param(
+        [({'key': '0e2147483647'},)],
+        'a map<string,string>',
+        MapType(StringType(), _int_overflow_decimal_type),
+        MapType(StringType(), _regular_decimal_type),
+        id='map_value'),
+    pytest.param(
+        [(('0e2147483647',),)],
+        'a struct<x:string>',
+        StructType([StructField('x', _int_overflow_decimal_type)]),
+        StructType([StructField('x', _regular_decimal_type)]),
+        id='struct')
+])
+def test_cast_nested_int_overflow_decimal_scale_fallback(
+        data, schema, from_type, to_type):
+    def do_cast(spark):
+        return spark.createDataFrame(data, schema).select(
+            f.col('a').cast(from_type).cast(to_type).alias('result'))
+
+    # Spark permits string-to-decimal map-key casts only in ANSI mode.
+    assert_gpu_fallback_collect(
+        do_cast, 'ProjectExec', conf=_decimal_scale_cast_conf(True))
 
 
 @pytest.mark.parametrize('type', [DoubleType(), FloatType()], ids=idfn)
