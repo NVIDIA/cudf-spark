@@ -283,64 +283,94 @@ class ServerSidePlannedScanSuite extends AnyFunSuite {
     }
   }
 
-  test("non-Parquet files keep Delta's partitions while Parquet files are packed") {
-    withSpark("spark.sql.files.minPartitionNum" -> "1") { spark =>
-      val files = Seq(ScanFile("file:/t/a.parquet", 1, "parquet"),
-        ScanFile("file:/t/b.parquet", 1, "PARQUET"), ScanFile("file:/t/c.orc", 1, "orc"))
-      val cpu = new ServerSidePlannedScan(spark, "db", "table", schema,
-        new Client(ScanPlan(files)), Array.empty, schema, None)
-      val gpu = GpuServerSidePlannedScan(cpu, new ServerSidePlannedScanAccess(cpu),
-        new RapidsConf(Map.empty[String, String]))
-      val partitions = gpu.planInputPartitions()
-      assert(partitions.length == 2)
-      assert(partitions(0).asInstanceOf[FilePartition].files.length == 2)
-      assert(partitions(1) == ServerSidePlannedFileInputPartition("file:/t/c.orc", 1, "orc"))
-    }
+  private def planPartitions(spark: SparkSession, files: Seq[ScanFile],
+      limit: Option[Int] = None): Seq[InputPartition] = {
+    val cpu = new ServerSidePlannedScan(spark, "db", "table", schema,
+      new Client(ScanPlan(files)), Array.empty, schema, limit)
+    GpuServerSidePlannedScan(cpu, new ServerSidePlannedScanAccess(cpu),
+      new RapidsConf(Map.empty[String, String])).planInputPartitions().toSeq
   }
 
-  test("a pushed limit keeps one whole file per partition") {
+  private def ranges(partition: InputPartition): Seq[(String, Long, Long)] =
+    partition.asInstanceOf[FilePartition].files.map(f => (f.filePath.urlEncoded, f.start, f.length))
+      .toSeq
+
+  test("a manifest with non-Parquet files keeps Delta's partitions and order") {
     withSpark("spark.sql.files.maxPartitionBytes" -> "100",
         "spark.sql.files.openCostInBytes" -> "10",
         "spark.sql.files.minPartitionNum" -> "1") { spark =>
-      val files = Seq(ScanFile("file:/t/big.parquet", 250, "parquet"),
-        ScanFile("file:/t/a.parquet", 30, "parquet"), ScanFile("file:/t/b.parquet", 30, "parquet"))
-      val cpu = new ServerSidePlannedScan(spark, "db", "table", schema,
-        new Client(ScanPlan(files)), Array.empty, schema, Some(10))
-      val gpu = GpuServerSidePlannedScan(cpu, new ServerSidePlannedScanAccess(cpu),
-        new RapidsConf(Map.empty[String, String]))
-      val partitions = gpu.planInputPartitions().map(_.asInstanceOf[FilePartition])
-      assert(partitions.map(_.files.map(f => (f.start, f.length)).toSeq).toSeq ==
-        Seq(Seq((0L, 250L)), Seq((0L, 30L)), Seq((0L, 30L))))
+      // Executing only some partitions (take, tail) must reach the ORC file as it does on the CPU,
+      // so the ORC partition keeps its place and each Parquet file stays whole, even a big one.
+      val partitions = planPartitions(spark, Seq(
+        ScanFile("file:/t/c.orc", 1, "orc"),
+        ScanFile("file:/t/a.parquet", 30, "parquet"),
+        ScanFile("file:/t/big.parquet", 250, "PARQUET"),
+        ScanFile("file:/t/d.orc", 1, "orc")))
+      assert(partitions.head == ServerSidePlannedFileInputPartition("file:/t/c.orc", 1, "orc"))
+      assert(partitions.map {
+        case p: FilePartition => ranges(p)
+        case _ => Seq.empty
+      } == Seq(Seq.empty, Seq(("file:/t/a.parquet", 0L, 30L)),
+        Seq(("file:/t/big.parquet", 0L, 250L)), Seq.empty))
+      assert(partitions.last == ServerSidePlannedFileInputPartition("file:/t/d.orc", 1, "orc"))
     }
   }
 
-  test("a zero open cost with a tiny input plans without stalling") {
+  test("a pushed limit keeps the server's order with one whole file per partition") {
+    withSpark("spark.sql.files.maxPartitionBytes" -> "100",
+        "spark.sql.files.openCostInBytes" -> "10",
+        "spark.sql.files.minPartitionNum" -> "1") { spark =>
+      // Listed smallest first, so sorting largest first or splitting the big file would show.
+      val partitions = planPartitions(spark, Seq(
+        ScanFile("file:/t/a.parquet", 30, "parquet"),
+        ScanFile("file:/t/b.parquet", 30, "parquet"),
+        ScanFile("file:/t/big.parquet", 250, "parquet")), Some(10))
+      assert(partitions.map(p => ranges(p).map(r => (r._2, r._3))) ==
+        Seq(Seq((0L, 30L)), Seq((0L, 30L)), Seq((0L, 250L))))
+      assert(partitions.map(ranges(_).head._1) ==
+        Seq("file:/t/a.parquet", "file:/t/b.parquet", "file:/t/big.parquet"))
+    }
+  }
+
+  test("a tiny derived split size does not split a small file") {
     // 5 bytes over 100 partitions gives Spark a split size of 0.
     withSpark("spark.sql.files.openCostInBytes" -> "0",
         "spark.sql.files.minPartitionNum" -> "100") { spark =>
-      val cpu = new ServerSidePlannedScan(spark, "db", "table", schema,
-        new Client(ScanPlan(Seq(ScanFile("file:/t/tiny.parquet", 5, "parquet")))), Array.empty,
-        schema, None)
-      val gpu = GpuServerSidePlannedScan(cpu, new ServerSidePlannedScanAccess(cpu),
-        new RapidsConf(Map.empty[String, String]))
-      val ranges = gpu.planInputPartitions().flatMap(_.asInstanceOf[FilePartition].files)
-      assert(ranges.map(r => (r.start, r.length)).toSeq == Seq((0L, 5L)))
+      val partitions = planPartitions(spark, Seq(ScanFile("file:/t/tiny.parquet", 5, "parquet")))
+      assert(partitions.flatMap(ranges(_).map(r => (r._2, r._3))) == Seq((0L, 5L)))
     }
   }
 
   test("parallelism shrinks packing but not the file ranges") {
-    // The split size Spark derives is 10 bytes, far below the 100 byte maximum.
+    // Spark derives a split size of 25 bytes (250 / 10), far below the 100 byte maximum.
     withSpark("spark.sql.files.maxPartitionBytes" -> "100",
         "spark.sql.files.openCostInBytes" -> "0",
         "spark.sql.files.minPartitionNum" -> "10") { spark =>
-      val cpu = new ServerSidePlannedScan(spark, "db", "table", schema,
-        new Client(ScanPlan(Seq(ScanFile("file:/t/big.parquet", 250, "parquet")))), Array.empty,
-        schema, None)
-      val gpu = GpuServerSidePlannedScan(cpu, new ServerSidePlannedScanAccess(cpu),
-        new RapidsConf(Map.empty[String, String]))
-      val ranges = gpu.planInputPartitions().flatMap(_.asInstanceOf[FilePartition].files)
-      assert(ranges.map(r => (r.start, r.length)).sorted.toSeq ==
+      val big = planPartitions(spark, Seq(ScanFile("file:/t/big.parquet", 250, "parquet")))
+      assert(big.flatMap(ranges(_).map(r => (r._2, r._3))).sorted ==
         Seq((0L, 100L), (100L, 100L), (200L, 50L)))
+    }
+    // Eight 10 byte files over 4 partitions pack two per partition, not all into one.
+    withSpark("spark.sql.files.maxPartitionBytes" -> "100",
+        "spark.sql.files.openCostInBytes" -> "0",
+        "spark.sql.files.minPartitionNum" -> "4") { spark =>
+      val small = planPartitions(spark,
+        (1 to 8).map(i => ScanFile(s"file:/t/$i.parquet", 10, "parquet")))
+      assert(small.map(ranges(_).size) == Seq(2, 2, 2, 2))
+    }
+  }
+
+  test("ranges keep a 128 MiB floor when maxPartitionBytes is raised") {
+    val mib = 1024L * 1024
+    // Spark derives a 40 MiB split size (400 / 10) below the 512 MiB maximum.
+    withSpark("spark.sql.files.maxPartitionBytes" -> (512 * mib).toString,
+        "spark.sql.files.openCostInBytes" -> "0",
+        "spark.sql.files.minPartitionNum" -> "10") { spark =>
+      val partitions = planPartitions(spark,
+        Seq(ScanFile("file:/t/big.parquet", 400 * mib, "parquet")))
+      assert(partitions.flatMap(ranges(_).map(r => (r._2, r._3))).sorted ==
+        Seq((0L, 128 * mib), (128 * mib, 128 * mib), (256 * mib, 128 * mib),
+          (384 * mib, 16 * mib)))
     }
   }
 

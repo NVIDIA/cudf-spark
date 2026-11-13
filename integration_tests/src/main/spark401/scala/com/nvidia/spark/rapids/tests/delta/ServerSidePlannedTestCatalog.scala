@@ -74,10 +74,12 @@ class ServerSidePlannedTestCatalog extends TableCatalog {
 
     val files = ident.name() match {
       case "empty" => List.empty[AnyRef]
-      case "missing" | "corrupt" =>
+      case "missing" | "corrupt" | "zero" =>
+        // "zero" is an empty file, which Delta's reader rejects as not Parquet.
+        val length = if (ident.name() == "zero") 0L else 16L
         List(fileClass.getConstructor(classOf[String], java.lang.Long.TYPE, classOf[String])
           .newInstance(new Path(root, ident.name() + ".parquet").toString,
-            Long.box(16), "parquet").asInstanceOf[AnyRef])
+            Long.box(length), "parquet").asInstanceOf[AnyRef])
       case _ => scanFiles(selected)
     }
     val plan = scanPlan(files)
@@ -118,7 +120,7 @@ class ServerSidePlannedTestCatalog extends TableCatalog {
   }
 
   override def listTables(namespace: Array[String]): Array[Identifier] =
-    Array("table", "empty", "pushed", "required", "missing", "corrupt")
+    Array("table", "empty", "pushed", "required", "missing", "corrupt", "zero")
       .map(Identifier.of(namespace, _))
 
   override def createTable(ident: Identifier, schema: StructType, partitions: Array[Transform],
