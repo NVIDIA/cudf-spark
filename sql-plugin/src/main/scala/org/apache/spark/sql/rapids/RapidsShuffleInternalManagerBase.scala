@@ -153,6 +153,15 @@ object RapidsShuffleInternalManagerBase extends Logging {
     case other => other
   }
 
+  /**
+   * Whether the shuffle's writers and readers use the shuffle buffer catalog: a GPU shuffle
+   * whose writers do not fall back to Spark's sort shuffle.
+   */
+  def usesShuffleBufferCatalog(handle: ShuffleHandle): Boolean = handle match {
+    case gpu: GpuShuffleHandle[_, _] => !gpu.dependency.checksumFallback
+    case _ => false
+  }
+
   // this is set by the executor on startup, when the MULTITHREADED
   // shuffle mode is utilized, as per these configs:
   //   spark.rapids.shuffle.multiThreaded.writer.threads
@@ -2016,10 +2025,11 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
       context: TaskContext,
       metricsReporter: ShuffleWriteMetricsReporter): ShuffleWriter[K, V] = {
     handle match {
-      case gpu: GpuShuffleHandle[_, _] if gpu.dependency.checksumFallback =>
+      case gpu: GpuShuffleHandle[_, _]
+          if !RapidsShuffleInternalManagerBase.usesShuffleBufferCatalog(gpu) =>
         wrapped.getWriter(gpu.wrapped, mapId, context, metricsReporter)
       case gpu: GpuShuffleHandle[_, _] =>
-        registerGpuShuffle(handle.shuffleId)
+        registerGpuShuffle(handle.shuffleId, context.taskAttemptId())
         new RapidsCachingWriter(
           env.blockManager,
           gpu.asInstanceOf[GpuShuffleHandle[K, V]],
@@ -2037,7 +2047,7 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
             // use the threaded writer if the number of threads specified is 1 or above,
             // with 0 threads we fallback to the Spark-provided writer.
             // Register shuffle with MultithreadedShuffleBufferCatalog
-            registerGpuShuffle(handle.shuffleId)
+            registerGpuShuffle(handle.shuffleId, context.taskAttemptId())
             val handleWithMetrics = new ShuffleHandleWithMetrics(
               handle.shuffleId,
               gpuDep.metrics,
@@ -2076,7 +2086,8 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
       context: TaskContext,
       metrics: ShuffleReadMetricsReporter): ShuffleReader[K, C] = {
     handle match {
-      case gpuHandle: GpuShuffleHandle[_, _] if gpuHandle.dependency.checksumFallback =>
+      case gpuHandle: GpuShuffleHandle[_, _]
+          if !RapidsShuffleInternalManagerBase.usesShuffleBufferCatalog(gpuHandle) =>
         ShuffleManagerShims.getReader(wrapped, gpuHandle.wrapped, startMapIndex, endMapIndex,
           startPartition, endPartition, context, metrics)
       case gpuHandle: GpuShuffleHandle[_, _] =>
@@ -2156,12 +2167,17 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
     }
   }
 
-  def registerGpuShuffle(shuffleId: Int): Unit = {
+  /**
+   * Registers a shuffle for a writer task.
+   *
+   * @param writerTaskId the writer's task attempt id, which a reclaim's watermark is compared to
+   */
+  def registerGpuShuffle(shuffleId: Int, writerTaskId: Long): Unit = {
     val catalog = GpuShuffleEnv.getCatalog
     if (catalog != null) {
       // Note that in local mode this can be called multiple times.
       logInfo(s"Registering shuffle $shuffleId")
-      catalog.registerShuffle(shuffleId)
+      catalog.registerShuffle(shuffleId, writerTaskId)
     }
     // Also register with MultithreadedShuffleBufferCatalog if available
     GpuShuffleEnv.getMultithreadedCatalog.foreach { mtCatalog =>
@@ -2214,6 +2230,9 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
   }
 
   override def unregisterShuffle(shuffleId: Int): Boolean = {
+    // Kept out of the catalog path that a reclaim shares, which in local mode runs in this JVM:
+    // a reclaimed shuffle stays a candidate until Spark itself removes it.
+    GpuShuffleRegistry.remove(shuffleId)
     var unregistered = false
     Utils.tryWithSafeFinally {
       unregisterGpuShuffle(shuffleId)

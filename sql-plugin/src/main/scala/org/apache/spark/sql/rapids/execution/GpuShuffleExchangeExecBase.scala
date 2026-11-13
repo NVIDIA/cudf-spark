@@ -288,7 +288,7 @@ abstract class GpuShuffleExchangeExecBase(
     val shuffleOutputPartitioning =
       gpuOutputPartitioningForShuffle(inputBatchRDD.getNumPartitions)
     
-    GpuShuffleExchangeExecBase.prepareBatchShuffleDependency(
+    val dependency = GpuShuffleExchangeExecBase.prepareBatchShuffleDependency(
       inputBatchRDD,
       child.output,
       shuffleOutputPartitioning,
@@ -304,6 +304,8 @@ abstract class GpuShuffleExchangeExecBase(
       descendantOpTimeMetrics,
       enableOpTimeTrackingRdd,
       rangeBoundaryPlan)
+    UcxShuffleReclaimAdmission.admit(this, dependency)
+    dependency
   }
 
   /**
