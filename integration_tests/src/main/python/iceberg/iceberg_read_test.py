@@ -1307,8 +1307,13 @@ def test_iceberg_legacy_list_initial_defaults(
     tuple(int(part) for part in runtime_iceberg_version.split('.')[:2]) < (1, 11),
     reason='Iceberg VARIANT writes require Spark 4.x and Iceberg 1.11 or later')
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.parametrize('project_variant', [
+    False,
+    pytest.param(True, marks=pytest.mark.skipif(
+        not is_spark_411_or_later(), reason='GPU Iceberg Variant reads require Spark 4.1.1+'))])
 @ignore_order(local=True)
-def test_iceberg_v3_default_with_unprojected_variant(spark_tmp_table_factory, reader_type):
+@incompat
+def test_iceberg_v3_default_with_variant(spark_tmp_table_factory, reader_type, project_variant):
     table_name = get_full_table_name(spark_tmp_table_factory)
 
     def setup(spark):
@@ -1336,12 +1341,17 @@ def test_iceberg_v3_default_with_unprojected_variant(spark_tmp_table_factory, re
     def read(spark):
         spark.conf.set('spark.sql.optimizer.nestedSchemaPruning.enabled',
                        spark.conf.get('spark.rapids.sql.enabled') == 'true')
-        return spark.sql(f'SELECT id, s.added FROM {table_name}')
+        projection = "id, s.added"
+        if project_variant:
+            projection += ", try_variant_get(s.present, '$.a', 'int') AS a"
+        return spark.sql(f'SELECT {projection} FROM {table_name}')
 
+    conf = {'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
+            'spark.rapids.sql.format.parquet.reader.type': reader_type,
+            'spark.sql.iceberg.vectorization.enabled': 'false'}
+    if project_variant:
+        conf = copy_and_update(conf, iceberg_variant_read_conf)
+    expected = ([(0, None, None), (1, 11, None), (2, 11, None), (3, 11, 1)]
+                if project_variant else [(0, None), (1, 11), (2, 11), (3, 11)])
     assert_gpu_and_cpu_are_equal_collect(
-        read,
-        conf={'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
-              'spark.rapids.sql.format.parquet.reader.type': reader_type,
-              'spark.sql.iceberg.vectorization.enabled': 'false'},
-        result_canonicalize_func_before_compare=_check_default_rows([
-            (0, None), (1, 11), (2, 11), (3, 11)]))
+        read, conf=conf, result_canonicalize_func_before_compare=_check_default_rows(expected))
