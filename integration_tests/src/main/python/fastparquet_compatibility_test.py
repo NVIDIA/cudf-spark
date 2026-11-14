@@ -327,16 +327,8 @@ def test_reading_file_written_with_gpu(spark_tmp_path, column_gen):
     DoubleGen(nullable=True),
     DecimalGen(nullable=False),
     DecimalGen(nullable=True),
-    pytest.param(
-        StringGen(nullable=False),
-        marks=pytest.mark.xfail(reason="String columns written with fastparquet are read differently between "
-                                       "Apache Spark, and the Spark RAPIDS plugin. "
-                                       "See https://github.com/NVIDIA/spark-rapids/issues/9387.")),
-    pytest.param(
-        StringGen(nullable=True),
-        marks=pytest.mark.xfail(reason="String columns written with fastparquet are read differently between "
-                                       "Apache Spark, and the Spark RAPIDS plugin. "
-                                       "See https://github.com/NVIDIA/spark-rapids/issues/9387.")),
+    StringGen(nullable=False),
+    StringGen(nullable=True),
     pytest.param(
         DateGen(nullable=False,
                 start=pandas_min_date,
@@ -359,17 +351,14 @@ def test_reading_file_written_with_gpu(spark_tmp_path, column_gen):
                                        "\"TypeError: Casting to unit-less dtype 'datetime64' is not supported. "
                                        "Pass e.g. 'datetime64[ns]' instead.\" This test has a workaround in "
                                        "test_reading_file_rewritten_with_fastparquet.")),
-    pytest.param(
-        ArrayGen(IntegerGen(nullable=False), nullable=False),
-        marks=pytest.mark.xfail(reason="spark.toPandas() problem: toPandas() converts Array columns into String. "
-                                       "The test then fails with the same problem as with String columns. "
-                                       "See https://github.com/NVIDIA/spark-rapids/issues/9387."
-                                       "This test has a workaround in test_reading_file_rewritten_with_fastparquet.")),
+    ArrayGen(IntegerGen(nullable=False), nullable=False),
 ], ids=idfn)
 def test_reading_file_written_with_fastparquet(column_gen, spark_tmp_path):
     """
     This test writes data-gen output with fastparquet, and checks that both Apache Spark and the RAPIDS plugin
     read the written data correctly.
+    Fastparquet serializes array inputs as JSON byte arrays, so those cases compare the resulting
+    string values rather than native Parquet arrays.
     """
     suffix = "/FASTPARQUET_WRITE_PATH"
     data_path = spark_tmp_path + suffix
@@ -381,7 +370,16 @@ def test_reading_file_written_with_fastparquet(column_gen, spark_tmp_path):
         #  TODO: (future) Compression settings?
         dataframe = gen_df(spark, data_gen, 2048)
         os.makedirs(name=local_base_path, exist_ok=True)
-        fastparquet.write(local_data_path, dataframe.toPandas())
+        pandas_df = dataframe.toPandas()
+        if isinstance(column_gen, StringGen):
+            # Fastparquet 2024.5.0 does not recognize pandas 3's inferred str dtype.
+            pandas_df['a'] = pandas_df['a'].astype(object)
+        elif isinstance(column_gen, ArrayGen):
+            # Arrow-backed toPandas returns ndarrays, while Fastparquet's JSON encoder
+            # accepts Python lists. Preserve the array values across either conversion path.
+            pandas_df['a'] = pandas_df['a'].map(
+                lambda value: value.tolist() if isinstance(value, np.ndarray) else value)
+        fastparquet.write(local_data_path, pandas_df)
         try:
             # Copy out to cluster's filesystem (possibly HDFS).
             copy_from_local(spark=spark, local_source=local_data_path, hdfs_target=data_path)

@@ -1803,7 +1803,8 @@ def test_delta_insert_by_name_schema_evolution_disabled(spark_tmp_path):
 @ignore_order(local=True)
 @pytest.mark.skipif(is_before_spark_340() and not is_databricks_runtime(), reason="Schema evolution fixed in later releases")
 @pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
-                            enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
+                            enabled_xfail_reason=None if is_databricks173_or_later() else
+                            'https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_overwrite_schema_evolution_arrays(spark_tmp_path, enable_deletion_vectors):
     data_path = spark_tmp_path + "/DELTA_DATA"
     src_path = data_path + "/SRC"
@@ -2816,7 +2817,8 @@ if is_databricks_runtime():
 @delta_lake
 @ignore_order
 @pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
-                            enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
+                            enabled_xfail_reason=None if is_databricks173_or_later() else
+                            'https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_compaction(spark_tmp_path, enable_deletion_vectors):
     from delta.tables import DeltaTable
     def do_write(spark,  path):

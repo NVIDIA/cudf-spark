@@ -20,7 +20,7 @@ from asserts import (assert_cpu_and_gpu_are_equal_collect_with_capture,
                      assert_gpu_and_cpu_same_data_or_error, assert_gpu_fallback_collect,
                      run_with_cpu_and_gpu)
 from data_gen import *
-from conftest import is_databricks_runtime
+from conftest import is_apache_runtime, is_databricks_runtime
 from marks import incompat, allow_non_gpu, disable_ansi_mode, validate_execs_in_gpu_plan
 from spark_session import *
 from pyspark.sql.types import *
@@ -1129,7 +1129,12 @@ def test_array_distinct_no_neg_zero(data_gen):
         lambda spark: unary_op_df(spark, data_gen).selectExpr('array_distinct(a)')
     )
 
-@pytest.mark.xfail
+# These releases have compatible normalization in different places: the GPU output on
+# Spark 4.0.5 and Catalyst inputs on Spark 4.2.0. Other runtimes retain the quarantine.
+@pytest.mark.xfail(
+    condition=not (is_apache_runtime() and spark_version() in ('4.0.5', '4.2.0')),
+    reason="Array distinct floating-point normalization differs on this Spark runtime; "
+           "see https://github.com/NVIDIA/cudf-spark/issues/16763")
 @pytest.mark.parametrize('data_gen', [ArrayGen(sub_gen) for sub_gen in [float_gen, double_gen]], ids=idfn)
 def test_array_distinct_neg_zero(data_gen):
     # separate -0.0 case, because Spark itself is inconsistent, see https://issues.apache.org/jira/browse/SPARK-51475
