@@ -2813,7 +2813,9 @@ def test_delta_write_column_name_mapping(spark_tmp_path, mapping, optimized_writ
             .save(path),
         lambda spark, path: spark.read.format("delta").load(path),
         data_path,
-        conf=confs)
+        conf=confs,
+        plan_assertion=lambda callback, plans:
+            assert_delta_optimized_write(callback, plans, enabled=optimized_write))
 
 # Hash aggregate can be used in a metadata query for compaction which completely falls back
 compaction_allow = "HashAggregateExec"

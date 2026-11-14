@@ -21,7 +21,7 @@ from spark_session import is_databricks122_or_later, supports_delta_lake_deletio
     is_databricks143, is_databricks173_or_later, is_spark_353_or_later, is_spark_356_or_later, \
     is_spark_400_or_later, is_spark_local_mode, \
     with_cpu_session, with_gpu_session
-from asserts import assert_equal
+from asserts import assert_equal, collect_plan_nodes
 from conftest import get_non_gpu_allowed, is_databricks_runtime, spark_jvm
 
 delta_meta_allow = [
@@ -637,10 +637,33 @@ def _assert_oss_delta_dv_metadata_broadcasts(callback, captured_plans):
                 f"Could not inspect all {class_to_check} nodes in captured Delta plan"
 
 
+def assert_delta_optimized_write(callback, plans, enabled):
+    """Check GPU optimized-write presence, CPU fallback, and executed partition metrics."""
+    # Optimized-write exchanges are added after QueryExecution prepares the write stub.
+    # Inspect the final writer tree, not an unrelated shuffle in an input/metadata query.
+    writer_plans = [plan for plan in plans
+                    if callback.contains(plan, "GpuRapidsDeltaWriteExec")]
+    assert writer_plans, "No GPU Delta writer plan was captured"
+    optimized_exchanges = [node for plan in writer_plans
+                           for node in collect_plan_nodes(plan)
+                           if node.getClass().getSimpleName() ==
+                           "GpuOptimizeWriteExchangeExec"]
+    assert bool(optimized_exchanges) == enabled, \
+        "Delta write did not use the requested GPU optimized-write plan"
+    for plan in writer_plans:
+        for cls in ("DeltaOptimizedWriterExec", "OptimizeWriteExchangeExec"):
+            assert not callback.didFallBack(plan, cls), \
+                f"Delta optimized write used CPU {cls}"
+    for exchange in optimized_exchanges:
+        assert exchange.metrics().apply("numPartitions").value() > 0, \
+            "GPU optimized-write exchange did not execute any partitions"
+
+
 def assert_rapids_delta_write(
         do_test, conf, required_gpu_classes=delta_write, require_same_plan=False,
         forbidden_cpu_fallback_classes=None, require_non_empty=False,
-        expected_command=None, expected_classes=None, captured_plans_out=None):
+        expected_command=None, expected_classes=None, captured_plans_out=None,
+        plan_assertion=None):
     """
     Validates that a Delta write operation executed on the GPU produces the expected execution plans.
     This function starts a plan capture mechanism using the Spark JVM's ExecutionPlanCaptureCallback,
@@ -669,6 +692,9 @@ def assert_rapids_delta_write(
         Additional GPU plan classes that must be present in a captured plan.
     captured_plans_out : list, optional
         Append captured plans to this list for inspection of executed SQL metrics.
+    plan_assertion : callable, optional
+        Additional assertion called as plan_assertion(callback, captured_plans) after the
+        standard checks. Supplying it also enables capture of final writer plans.
 
     Returns
     -------
@@ -677,7 +703,10 @@ def assert_rapids_delta_write(
     """
     jvm = spark_jvm()
     callback = jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
-    callback.startCapture()
+    if plan_assertion is None:
+        callback.startCapture()
+    else:
+        callback.startCaptureWithWritePlans()
     try:
         result = with_gpu_session(do_test, conf=conf)
         captured_plans = callback.getResultsWithTimeout(10000)
@@ -719,6 +748,8 @@ def assert_rapids_delta_write(
             for cls in forbidden_cpu_fallback_classes or []:
                 assert not callback.didFallBack(plan, cls), \
                     f"Captured Delta write plan fell back to CPU {cls}"
+        if plan_assertion is not None:
+            plan_assertion(callback, captured_plans)
         return result
     finally:
         callback.endCapture()

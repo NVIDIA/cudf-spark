@@ -510,7 +510,9 @@ def test_delta_update_optimized_column_mapping_cdf(spark_tmp_path, mapping, aqe_
     assert_gpu_and_cpu_writes_are_equal_collect(
         lambda spark, path: spark.sql(
             f"UPDATE delta.`{path}` SET c = 42 WHERE a % 2 = 0").collect(),
-        read_delta_path, data_path, conf=conf, expected_command="GpuUpdateCommand")
+        read_delta_path, data_path, conf=conf, expected_command="GpuUpdateCommand",
+        plan_assertion=lambda callback, plans:
+            assert_delta_optimized_write(callback, plans, enabled=True))
 
     def check_cdf(spark):
         results = []
