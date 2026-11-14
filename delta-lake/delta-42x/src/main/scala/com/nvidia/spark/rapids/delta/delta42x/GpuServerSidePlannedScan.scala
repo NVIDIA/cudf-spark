@@ -23,6 +23,8 @@ import scala.util.control.NonFatal
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.parquet.{GpuParquetMultiFilePartitionReaderFactory,
   GpuParquetPartitionReaderFactory, GpuParquetScan}
+import com.nvidia.spark.rapids.shims.PartitionedFileUtilsShim
+import org.apache.hadoop.fs.FileStatus
 
 import org.apache.spark.paths.SparkPath
 import org.apache.spark.sql.SparkSession
@@ -31,7 +33,8 @@ import org.apache.spark.sql.connector.read._
 import org.apache.spark.sql.delta.serverSidePlanning.{ScanPlan, ServerSidePlannedFileInputPartition,
   ServerSidePlannedScan}
 import org.apache.spark.sql.execution.SparkPlan
-import org.apache.spark.sql.execution.datasources.{FilePartition, PartitionedFile}
+import org.apache.spark.sql.execution.datasources.{FilePartition, FileStatusWithMetadata,
+  PartitionedFile}
 import org.apache.spark.sql.execution.exchange.{BroadcastExchangeLike, ShuffleExchangeLike}
 import org.apache.spark.sql.types.{ArrayType, DataType, MapType, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -47,6 +50,7 @@ private[delta42x] class ServerSidePlannedScanAccess(scan: ServerSidePlannedScan)
 
   val spark: SparkSession = field("spark").get(scan).asInstanceOf[SparkSession]
   val tableSchema: StructType = field("tableSchema").get(scan).asInstanceOf[StructType]
+  val limit: Option[Int] = field("limit").get(scan).asInstanceOf[Option[Int]]
   private val planMethod = classOf[ServerSidePlannedScan].getDeclaredMethod("scanPlan")
   planMethod.setAccessible(true)
 
@@ -120,7 +124,10 @@ class ServerSidePlannedScanMeta(
     GpuServerSidePlannedScan(scan, access.get, conf)
 }
 
-/** Preserve Delta's planning and partition boundaries; substitute only the Parquet reader. */
+/**
+ * Preserve Delta's planning and authoritative file list; substitute the Parquet reader and
+ * pack the files into [[FilePartition]]s the way Spark's file scans do.
+ */
 private[delta42x] case class GpuServerSidePlannedScan(
     cpuScan: ServerSidePlannedScan,
     access: ServerSidePlannedScanAccess,
@@ -131,7 +138,64 @@ private[delta42x] case class GpuServerSidePlannedScan(
   override def toBatch: Batch = this
   override def columnarSupportMode(): Scan.ColumnarSupportMode =
     Scan.ColumnarSupportMode.SUPPORTED
-  override def planInputPartitions(): Array[InputPartition] = cpuScan.planInputPartitions()
+
+  // About one typical Parquet row group, which no range is worth splitting below.
+  private val MIN_RANGE_BYTES = 128L * 1024 * 1024
+
+  private def parquetFile(p: InputPartition): Option[ServerSidePlannedFileInputPartition] =
+    p match {
+      case f: ServerSidePlannedFileInputPartition if f.fileFormat.equalsIgnoreCase("parquet") =>
+        Some(f)
+      case _ => None
+    }
+
+  private def wholeFile(f: ServerSidePlannedFileInputPartition): PartitionedFile =
+    PartitionedFile(InternalRow.empty, SparkPath.fromPathString(f.filePath), 0, f.fileSizeInBytes)
+
+  override def planInputPartitions(): Array[InputPartition] = {
+    val planned = cpuScan.planInputPartitions()
+    val files = planned.flatMap(parquetFile)
+    // Which partitions run, and so whether a non-Parquet one fails, depends on their order and on
+    // a limit, because Spark's executeTake and executeTail run only some of them. A pushed limit
+    // also needs partition 0 to hold data: split ranges with no row group would force extra
+    // jobs. In either case keep Delta's partitions and order, with each Parquet file whole.
+    if (access.limit.isDefined || files.length != planned.length) {
+      planned.zipWithIndex.map { case (p, i) =>
+        parquetFile(p).map(f => FilePartition(i, Array(wholeFile(f)))).getOrElse(p): InputPartition
+      }
+    } else {
+      packFiles(files)
+    }
+  }
+
+  private def packFiles(
+      files: Array[ServerSidePlannedFileInputPartition]): Array[InputPartition] = {
+    val spark = access.spark
+    val conf = spark.sessionState.conf
+    val maxSplitBytes = FilePartition.maxSplitBytes(
+      spark, files.map(_.fileSizeInBytes + conf.filesOpenCostInBytes).sum)
+    // Only packing shrinks with parallelism. Smaller ranges of a file with few, large row groups
+    // hold no row group yet each still opens the file, so ranges are not sized by the derived
+    // split size. They keep at least one typical row group (capped by maxPartitionBytes), so a
+    // raised maxPartitionBytes still splits large files. This intentionally differs from the
+    // file scan, which splits by maxSplitBytes.
+    val rangeBytes = math.max(1L, math.max(maxSplitBytes,
+      math.min(conf.filesMaxPartitionBytes, MIN_RANGE_BYTES)))
+    // Parquet row groups are read by the split holding their midpoint, so ranges are safe.
+    val splitFiles = files.flatMap { f =>
+      if (f.fileSizeInBytes == 0) {
+        // Spark's splitter drops empty files; keep them so the reader reports them as Delta does.
+        Seq(wholeFile(f))
+      } else {
+        val status = FileStatusWithMetadata(new FileStatus(
+          f.fileSizeInBytes, false, 1, 0, 0, SparkPath.fromPathString(f.filePath).toPath))
+        PartitionedFileUtilsShim.splitFiles(
+          spark, status, isSplitable = true, rangeBytes, InternalRow.empty)
+      }
+    }.sortBy(-_.length)
+    FilePartition.getFilePartitions(spark, splitFiles.toSeq, maxSplitBytes).toArray
+  }
+
   override def withInputFile(): GpuScan = this
 
   override def equals(other: Any): Boolean = other match {
@@ -169,16 +233,11 @@ private[delta42x] class ServerSidePlannedGpuReaderFactory(val reader: PartitionR
     throw new IllegalStateException("GPU Parquet scan cannot read rows")
 
   override def createColumnarReader(partition: InputPartition): PartitionReader[ColumnarBatch] = {
-    val file = partition.asInstanceOf[ServerSidePlannedFileInputPartition]
-    if (!file.fileFormat.equalsIgnoreCase("parquet")) {
-      throw new UnsupportedOperationException(
-        s"File format '${file.fileFormat}' is not supported. Only Parquet is supported.")
+    partition match {
+      case files: FilePartition => reader.createColumnarReader(files)
+      case file: ServerSidePlannedFileInputPartition =>
+        throw new UnsupportedOperationException(
+          s"File format '${file.fileFormat}' is not supported. Only Parquet is supported.")
     }
-    val partitionedFile = PartitionedFile(
-      partitionValues = InternalRow.empty,
-      filePath = SparkPath.fromPathString(file.filePath),
-      start = 0,
-      length = file.fileSizeInBytes)
-    reader.createColumnarReader(FilePartition(0, Array(partitionedFile)))
   }
 }
