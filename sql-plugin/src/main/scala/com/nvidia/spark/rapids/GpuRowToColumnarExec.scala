@@ -790,7 +790,7 @@ class RowToColumnarIterator(
         val sampleRows = GpuBatchUtils.VALIDITY_BUFFER_BOUNDARY_ROWS
         val sampleBytes = GpuBatchUtils.estimateGpuMemory(localSchema, sampleRows)
         targetRows = GpuBatchUtils.estimateRowCount(targetSizeBytes, sampleBytes, sampleRows)
-        initialRows = GpuBatchUtils.estimateRowCount(batchSizeBytes, sampleBytes, sampleRows)
+        initialRows = RowToColumnarIterator.initialRows(batchSizeBytes, sampleBytes, sampleRows)
       }
     }
   }
@@ -865,6 +865,34 @@ class RowToColumnarIterator(
   private val splitHostBatchInHalf
       : HostColumnarBatchWithRowRange => Seq[HostColumnarBatchWithRowRange] = {
     (batch: HostColumnarBatchWithRowRange) => HostColumnarBatchWithRowRange.splitInHalf(batch)
+  }
+}
+
+object RowToColumnarIterator {
+  // The builders reserve host memory for a batch's rows on its first row, and nothing can
+  // reclaim it until the batch ends, so each batch starts with room for a batch of at most this
+  // much, as estimated from the schema, and grows by doubling beyond it.
+  private val MAX_INITIAL_BATCH_BYTES = 128L * 1024 * 1024
+
+  /**
+   * The rows the builders reserve when a batch starts. They are a full batch's rows divided
+   * by a power of two and rounded up, rather than estimated for the bound, so that doubling
+   * reaches a full batch instead of doubling once more for its last few rows. Only a single
+   * row estimated above the bound is reserved above it.
+   */
+  private[rapids] def initialRows(
+      batchSizeBytes: Long,
+      sampleBytes: Long,
+      sampleRows: Long): Int = {
+    val batchRows = GpuBatchUtils.estimateRowCount(batchSizeBytes, sampleBytes, sampleRows)
+    // estimateRowCount keeps all the sampled rows when they are larger than a batch, so those
+    // rows, not batchSizeBytes, are what the reservation divides.
+    val batchBytes = if (sampleBytes > batchSizeBytes) sampleBytes else batchSizeBytes
+    var fraction = 1L
+    while (batchBytes.toDouble / fraction > MAX_INITIAL_BATCH_BYTES) {
+      fraction *= 2
+    }
+    ((batchRows + fraction - 1) / fraction).toInt
   }
 }
 

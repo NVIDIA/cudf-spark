@@ -965,10 +965,6 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
   // 10 MiB below 2 GiB however large batchSizeBytes is. The CPU writer keeps its own budget.
   private val maxGpuBytesAllowedPerBatch = 2L * 1024 * 1024 * 1024 - 10L * 1024 * 1024
 
-  // The row entry sets no batch size target, so its builders' first allocation would otherwise
-  // follow batchSizeBytes, which can be set far above what any column can hold.
-  private val maxInitialBuilderBytes = 1024L * 1024 * 1024
-
   private def getGpuBytesAllowedPerBatch(conf: SQLConf): Long =
     math.min(getBytesAllowedPerBatch(conf), maxGpuBytesAllowedPerBatch)
 
@@ -1364,8 +1360,7 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
         val converters = new GpuRowToColumnConverter(structSchema)
         // This only sizes each batch's builders. The goal sets no size target: a partition stays
         // one batch unless the iterator has to split it, as at a column's size limit.
-        val initialBuilderBytes = math.min(rapidsConf.gpuTargetBatchSizeBytes,
-          maxInitialBuilderBytes)
+        val initialBuilderBytes = rapidsConf.gpuTargetBatchSizeBytes
         val enableR2cRetry = rapidsConf.isR2cRetryEnabled
         val columnarBatchRdd = input.mapPartitions(iter => {
           new RowToColumnarIterator(iter, structSchema, TargetSize(Long.MaxValue),
