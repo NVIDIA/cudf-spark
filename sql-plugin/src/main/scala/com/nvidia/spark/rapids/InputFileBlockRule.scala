@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -91,6 +91,16 @@ object InputFileBlockRule {
     case _: GpuInputFileBlockStart => true
     case _: GpuInputFileBlockLength => true
     case e => e.children.exists(hasInputFileExpression)
+  }
+
+  private def hasInputFileNameExpression(expr: Expression): Boolean = expr match {
+    case _: InputFileName | _: GpuInputFileName => true
+    case e => e.children.exists(hasInputFileNameExpression)
+  }
+
+  /** Whether a plan has an InputFileName expression, which builds a string column. */
+  def hasInputFileNameExpression(plan: SparkPlan): Boolean = {
+    plan.expressions.exists(hasInputFileNameExpression)
   }
 
   /** Whether a plan has any InputFile{Name, BlockStart, BlockLength} expression. */

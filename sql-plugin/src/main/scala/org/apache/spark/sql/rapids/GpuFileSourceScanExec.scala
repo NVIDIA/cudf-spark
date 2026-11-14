@@ -25,7 +25,7 @@ import com.nvidia.spark.rapids.filecache.FileCacheLocalityManager
 import com.nvidia.spark.rapids.shims.{GpuDataSourceRDD, PartitionedFileUtilsShim, SparkShimImpl, StaticPartitionShims}
 import org.apache.hadoop.fs.Path
 
-import org.apache.spark.rdd.RDD
+import org.apache.spark.rdd.{InputFileBlockHolder, RDD}
 import org.apache.spark.sql.catalyst.{InternalRow, TableIdentifier}
 import org.apache.spark.sql.catalyst.catalog.BucketSpec
 import org.apache.spark.sql.catalyst.expressions.{And, Ascending, Attribute, AttributeReference, BoundReference, DynamicPruningExpression, Expression, Literal, PlanExpression, Predicate, SortOrder}
@@ -63,6 +63,8 @@ import org.apache.spark.util.collection.BitSet
  *                               off in GpuTransitionOverrides if InputFileName,
  *                               InputFileBlockStart, or InputFileBlockLength are used
  * @param disableBucketedScan Disable bucketed scan based on physical query plan.
+ * @param queryUsesInputFileName True when InputFileName specifically is used, which needs
+ *                               row * path bytes of string data and so may need batch slicing.
  */
 case class GpuFileSourceScanExec(
     @transient relation: HadoopFsRelation,
@@ -75,7 +77,8 @@ case class GpuFileSourceScanExec(
     tableIdentifier: Option[TableIdentifier],
     disableBucketedScan: Boolean = false,
     queryUsesInputFile: Boolean = false,
-    requiredPartitionSchema: Option[StructType] = None)(
+    requiredPartitionSchema: Option[StructType] = None,
+    queryUsesInputFileName: Boolean = false)(
     @transient val rapidsConf: RapidsConf,
     @transient val partitionPlanningScan: Option[FileSourceScanExec] = None)
     extends GpuDataSourceScanExec with GpuExec {
@@ -481,7 +484,17 @@ case class GpuFileSourceScanExec(
   override protected def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
     val numOutputRows = gpuLongMetric(NUM_OUTPUT_ROWS)
     val scanTime = gpuLongMetric(SCAN_TIME)
-    inputRDD.asInstanceOf[RDD[ColumnarBatch]].mapPartitionsInternal { batches =>
+    val sliceForInputFileName = queryUsesInputFileName
+    val maxStringBytes = rapidsConf.inputFileNameMaxStringBytes
+    inputRDD.asInstanceOf[RDD[ColumnarBatch]].mapPartitionsInternal { rawBatches =>
+      // input_file_name() builds numRows * pathBytes of string data, which cudf caps at 2 GiB,
+      // so oversized batches are sliced before the projection sees them.
+      val batches = if (sliceForInputFileName) {
+        new InputFileNameSlicingIterator(rawBatches,
+          () => InputFileBlockHolder.getInputFilePath.numBytes(), maxStringBytes)
+      } else {
+        rawBatches
+      }
       new Iterator[ColumnarBatch] {
 
         override def hasNext: Boolean = {
