@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids
 
 import java.util.concurrent.{ExecutionException, Future, LinkedBlockingQueue, TimeoutException, TimeUnit}
 
-import ai.rapids.cudf.{DefaultHostMemoryAllocator, HostMemoryBuffer, PageableMemoryPool, PinnedMemoryPool, Rmm, RmmAllocationMode}
+import ai.rapids.cudf.{Cuda, DefaultHostMemoryAllocator, DeviceMemoryBuffer, HostMemoryBuffer, PageableMemoryPool, PinnedMemoryPool, Rmm, RmmAllocationMode}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.jni.{RmmSpark, RmmSparkThreadState, TaskPriority, ThreadStateRegistry}
 import com.nvidia.spark.rapids.spill._
@@ -430,6 +430,70 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
       }
     }
     assert(HostAlloc.getUsageRatio() == 0.0)
+  }
+
+  for (stagingEnabled <- Seq(false, true)) {
+    test(s"D2H allocator accounts pooled/raw buffers and preserves pinned capacity: " +
+        s"staging=$stagingEnabled") {
+      val properties = Map(
+        "ai.rapids.cudf.pageable.staged.copy.enabled" -> stagingEnabled.toString,
+        "ai.rapids.cudf.pageable.staged.copy.disabled" -> "false",
+        "ai.rapids.cudf.pageable.staged.copy.h2d.disabled" -> "false",
+        "ai.rapids.cudf.pageable.staged.copy.d2h.disabled" -> "false",
+        "ai.rapids.cudf.pageable.staged.copy.threads" -> "1",
+        "ai.rapids.cudf.pageable.staged.copy.chunk.bytes" -> "4096",
+        "ai.rapids.cudf.pageable.staged.copy.registered.buffers" -> "true")
+      val previous = properties.keys.map(key => key -> Option(System.getProperty(key))).toMap
+      properties.foreach { case (key, value) => System.setProperty(key, value) }
+      try {
+        PinnedMemoryPool.initialize(4096)
+        PageableMemoryPool.initialize(8192, 1)
+        HostAlloc.initialize(4096)
+        assert(PageableMemoryPool.isDeviceToHostStagingEnabled == stagingEnabled)
+        assert(PageableMemoryPool.isHostToDeviceStagingEnabled == stagingEnabled)
+        val pattern = Array.tabulate[Byte](4096)(i => (i * 31 + 7).toByte)
+        withResource(HostMemoryBuffer.allocateRaw(pattern.length)) { input =>
+          input.setBytes(0, pattern, 0, pattern.length)
+          withResource(DeviceMemoryBuffer.allocate(pattern.length)) { device =>
+            device.copyFromHostBuffer(input)
+            withResource(HostAlloc.allocPageableForDeviceToHost(8192)) { pooled =>
+              assert(PageableMemoryPool.isPageablePoolBuffer(pooled))
+              assert(HostAlloc.getUsageRatio() == 0.5)
+              withResource(HostAlloc.allocPageableForDeviceToHost(4096)) { raw =>
+                assert(!PageableMemoryPool.isPageablePoolBuffer(raw))
+                assert(HostAlloc.getUsageRatio() == 0.75)
+                // Exhausted pageable/raw budgets must not borrow available pinned capacity.
+                assert(HostAlloc.tryAllocPageableForDeviceToHost(1).isEmpty)
+                withResource(PinnedMemoryPool.tryAllocate(4096)) { pinned =>
+                  assert(pinned != null)
+                }
+                for (destination <- Seq(pooled, raw)) {
+                  destination.copyFromDeviceBufferAsync(device, Cuda.DEFAULT_STREAM)
+                  Cuda.DEFAULT_STREAM.sync()
+                  val actual = new Array[Byte](pattern.length)
+                  destination.getBytes(actual, 0, 0, actual.length)
+                  assert(actual.sameElements(pattern))
+                }
+              }
+              assert(HostAlloc.getUsageRatio() == 0.5)
+            }
+          }
+        }
+        assert(HostAlloc.getUsageRatio() == 0.0)
+        HostAlloc.initialize(0)
+        withResource(HostAlloc.allocPageableForDeviceToHost(8192)) { pooled =>
+          assert(PageableMemoryPool.isPageablePoolBuffer(pooled))
+          assert(HostAlloc.getUsageRatio() == 8192.0 / 12288)
+        }
+        assert(HostAlloc.tryAllocPageableForDeviceToHost(8193).isEmpty)
+      } finally {
+        PageableMemoryPool.shutdown()
+        previous.foreach {
+          case (key, Some(value)) => System.setProperty(key, value)
+          case (key, None) => System.clearProperty(key)
+        }
+      }
+    }
   }
 
   test("simple pinned tryAlloc") {

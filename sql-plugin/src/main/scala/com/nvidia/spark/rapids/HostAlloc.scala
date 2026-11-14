@@ -142,17 +142,26 @@ private abstract class HostAlloc(nonPinnedLimit: Long, protected val pageableLim
     bookkeepHostMemoryFree(ptr, amount)
   }
 
-  protected def tryAllocNonPinned(amount: Long): Option[HostMemoryBuffer] = {
+  protected def tryAllocNonPinned(
+      amount: Long, stageDeviceToHost: Boolean = false): Option[HostMemoryBuffer] = {
     val ret = if (isUnlimited) {
       synchronized {
         currentNonPinnedAllocated += amount
       }
-      Some(HostMemoryBuffer.allocateRaw(amount))
+      Some(if (stageDeviceToHost) {
+        PageableMemoryPool.allocateRawForDeviceToHost(amount)
+      } else {
+        HostMemoryBuffer.allocateRaw(amount)
+      })
     } else {
       synchronized {
         if ((currentNonPinnedAllocated + amount) <= nonPinnedLimit) {
           currentNonPinnedAllocated += amount
-          Some(HostMemoryBuffer.allocateRaw(amount))
+          Some(if (stageDeviceToHost) {
+            PageableMemoryPool.allocateRawForDeviceToHost(amount)
+          } else {
+            HostMemoryBuffer.allocateRaw(amount)
+          })
         } else {
           None
         }
@@ -217,7 +226,8 @@ private abstract class HostAlloc(nonPinnedLimit: Long, protected val pageableLim
 
   private def tryAllocInternal(amount: Long,
       preferPinned: Boolean,
-      blocking: Boolean): (Option[HostMemoryBuffer], Boolean) = {
+      blocking: Boolean,
+      pageableOnly: Boolean = false): (Option[HostMemoryBuffer], Boolean) = {
     var retryCount = 0L
     var ret = Option.empty[HostAllocResult]
     var shouldRetry = false
@@ -226,16 +236,20 @@ private abstract class HostAlloc(nonPinnedLimit: Long, protected val pageableLim
     var allocAttemptFinishedWithoutException = false
     try {
       do {
-        ret = (
-          if (preferPinned) {
+        ret = if (pageableOnly) {
+          tryAllocNonPinned(amount, stageDeviceToHost = true)
+            .map(HostAllocResult(_, isPinned = false))
+        } else {
+          (if (preferPinned) {
             tryAllocPinned(amount).map(HostAllocResult(_, isPinned = true))
           } else {
             tryAllocNonPinned(amount).map(HostAllocResult(_, isPinned = false))
           }).orElse {
-          if (preferPinned) {
-            tryAllocNonPinned(amount).map(HostAllocResult(_, isPinned = false))
-          } else {
-            tryAllocPinned(amount).map(HostAllocResult(_, isPinned = true))
+            if (preferPinned) {
+              tryAllocNonPinned(amount).map(HostAllocResult(_, isPinned = false))
+            } else {
+              tryAllocPinned(amount).map(HostAllocResult(_, isPinned = true))
+            }
           }
         }
         if (ret.isEmpty) {
@@ -282,6 +296,38 @@ private abstract class HostAlloc(nonPinnedLimit: Long, protected val pageableLim
     ret
   }
 
+  // Staged destinations must not consume pinned memory when pageable/raw budgets are full.
+  def tryAllocPageableForDeviceToHost(amount: Long): Option[HostMemoryBuffer] = {
+    if (!isUnlimited && amount > pageableLimit && amount > nonPinnedLimit) {
+      None
+    } else {
+      var shouldRetry = true
+      var ret = Option.empty[HostMemoryBuffer]
+      while (shouldRetry) {
+        val (buffer, retry) = tryAllocInternal(amount, preferPinned = false,
+          blocking = false, pageableOnly = true)
+        ret = buffer
+        shouldRetry = retry
+      }
+      ret
+    }
+  }
+
+  def allocPageableForDeviceToHost(amount: Long): HostMemoryBuffer = {
+    require(isUnlimited || amount <= pageableLimit || amount <= nonPinnedLimit,
+      s"Device-to-host allocation $amount exceeds both pageable pool and raw limits")
+    var ret = Option.empty[HostMemoryBuffer]
+    var count = 0
+    while (ret.isEmpty && count < 1000) {
+      val (buffer, _) = tryAllocInternal(amount, preferPinned = false,
+        blocking = true, pageableOnly = true)
+      ret = buffer
+      count += 1
+    }
+    ret.getOrElse(throw new CpuRetryOOM(
+      "Could not allocate pageable device-to-host buffer after 1000 retries"))
+  }
+
   def alloc(amount: Long, preferPinned: Boolean = true): HostMemoryBuffer = {
     checkSize(amount, preferPinned)
     var ret = Option.empty[HostMemoryBuffer]
@@ -323,14 +369,19 @@ private class PooledHostAlloc(nonPinnedLimit: Long, poolLimit: Long)
     }
   }
 
-  override protected def tryAllocNonPinned(amount: Long): Option[HostMemoryBuffer] = {
+  override protected def tryAllocNonPinned(
+      amount: Long, stageDeviceToHost: Boolean): Option[HostMemoryBuffer] = {
     // Pool sub-allocations use the reserved pool budget, not the raw budget.
-    val pooled = Option(PageableMemoryPool.tryAllocate(amount))
+    val pooled = Option(if (stageDeviceToHost) {
+      PageableMemoryPool.tryAllocateForDeviceToHost(amount)
+    } else {
+      PageableMemoryPool.tryAllocate(amount)
+    })
     pooled.foreach { b =>
       trackPageableAllocation(amount)
       HostAlloc.addEventHandler(b, new OnPooledCloseCallback(b.getAddress, amount))
     }
-    pooled.orElse(super.tryAllocNonPinned(amount))
+    pooled.orElse(super.tryAllocNonPinned(amount, stageDeviceToHost))
   }
 }
 
@@ -339,6 +390,20 @@ private class PooledHostAlloc(nonPinnedLimit: Long, poolLimit: Long)
  */
 object HostAlloc extends Logging {
   private var singleton: HostAlloc = new RawHostAlloc(-1)
+
+  val pageableDeviceToHostAllocator: HostMemoryAllocator = new HostMemoryAllocator {
+    override def allocate(amount: Long): HostMemoryBuffer =
+      allocPageableForDeviceToHost(amount)
+
+    override def allocate(amount: Long, preferPinned: Boolean): HostMemoryBuffer =
+      allocPageableForDeviceToHost(amount)
+  }
+
+  def tryAllocPageableForDeviceToHost(amount: Long): Option[HostMemoryBuffer] =
+    getSingleton.tryAllocPageableForDeviceToHost(amount)
+
+  def allocPageableForDeviceToHost(amount: Long): HostMemoryBuffer =
+    getSingleton.allocPageableForDeviceToHost(amount)
 
   private def getSingleton: HostAlloc = synchronized {
     singleton
