@@ -20,9 +20,15 @@ import scala.util.Try
 
 import com.nvidia.spark.rapids.delta.DeltaWriteUtils.toBooleanOption
 
-import org.apache.spark.sql.delta.DeltaOperations
-import org.apache.spark.sql.delta.commands.WriteIntoDelta
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.catalyst.expressions.{And, Expression, Literal}
+import org.apache.spark.sql.catalyst.plans.logical.DeleteFromTable
+import org.apache.spark.sql.classic.{SparkSession => ClassicSparkSession}
+import org.apache.spark.sql.delta.{DeltaErrors, DeltaOperations, OptimisticTransaction}
+import org.apache.spark.sql.delta.commands.{DeleteCommand, DeleteMetric, WriteIntoDelta}
 import org.apache.spark.sql.delta.rapids.{GpuDeltaLog, GpuWriteIntoDeltaBase, GpuWriteIntoDeltaLike}
+import org.apache.spark.sql.delta.schema.InvariantViolationException
+import org.apache.spark.sql.delta.sources.DeltaSQLConf
 
 /**
  * GPU version of Delta 4.3's WriteIntoDelta.
@@ -36,6 +42,80 @@ case class GpuWriteIntoDelta43x(
     override val cpuWrite: WriteIntoDelta)
   extends GpuWriteIntoDeltaBase(gpuDeltaLog, cpuWrite)
     with GpuWriteIntoDeltaLike {
+
+  override protected def isInsertAtomicReplaceOp: Boolean =
+    cpuWrite.options.isInsertAtomicReplaceOp
+
+  override protected def isReplaceOnOrUsing: Boolean =
+    cpuWrite.options.isReplaceOnOrUsingDefined
+
+  override protected def validateAtomicReplaceOptions(): Unit = {
+    if (isReplaceOnOrUsing) {
+      validateReplaceOnOrUsingOptionCombinations(cpuWrite.options, isOverwriteOperation)
+    }
+  }
+
+  override protected def getAtomicReplaceExpressions(
+      spark: SparkSession,
+      txn: OptimisticTransaction,
+      replaceOnDataColsEnabled: Boolean): (Option[Seq[Expression]], Boolean) = {
+    val replaceWhere = getReplaceWhereExprsAndDataFilterPresenceInExprs(
+      spark, txn, cpuWrite.options, replaceOnDataColsEnabled, cpuWrite.mode)
+    val replaceOnOrUsing = if (isReplaceOnOrUsing && isOverwriteOperation) {
+      Some(Seq(getReplaceOnOrUsingExprOpt(
+        spark, txn, cpuWrite.options, cpuWrite.isInsertReplaceUsingByName)))
+    } else {
+      None
+    }
+    (replaceOnOrUsing.orElse(replaceWhere.maybeAliasedReplaceWhereExprsOpt),
+      if (cpuWrite.options.replaceWhere.isDefined) replaceWhere.containsDataFilters
+      else isReplaceOnOrUsing)
+  }
+
+  override protected def constraintPredicates(
+      spark: SparkSession,
+      condition: Seq[Expression]): Seq[Expression] = {
+    stripTargetAliasIfExists(spark, condition, cpuWrite.options.targetAlias)
+  }
+
+  override protected def constraintViolation(e: InvariantViolationException): Throwable = {
+    if (isReplaceOnOrUsing) {
+      DeltaErrors.replaceOnOrUsingConstraintViolationException(
+        cpuWrite.options.replaceOn.orElse(cpuWrite.options.replaceUsing).get, e)
+    } else {
+      super.constraintViolation(e)
+    }
+  }
+
+  override protected def observeCommit[T](body: => T): T =
+    insertAtomicReplaceExecutionObserver.commit(body)
+
+  override protected def observeDelete[T](body: => T): T =
+    insertAtomicReplaceExecutionObserver.delete(body)
+
+  override protected def observeInsert[T](body: => T): T =
+    insertAtomicReplaceExecutionObserver.insert(body)
+
+  override protected def recordDeleteMetrics(deleteMetrics: DeleteMetric): Unit = {
+    recordDeltaEvent(deltaLog, "delta.dml.write.removeFiles.stats",
+      data = deleteMetrics.copy(isWriteCommand = true))
+  }
+
+  override protected def prepareDeleteCommand(
+      spark: ClassicSparkSession,
+      txn: OptimisticTransaction,
+      condition: Seq[Expression]): (ClassicSparkSession, DeleteCommand) = {
+    val relation = createTableRelation(txn, cpuWrite.options.targetAlias)
+    // Match upstream's scoped DELETE analysis: enable EXISTS for the internal atomic
+    // replacement predicate without changing the session's ordinary DELETE validation.
+    val deleteSpark = spark.cloneSession()
+    deleteSpark.conf.set(DeltaSQLConf.ALLOW_EXISTS_SUBQUERY_IN_DELETE.key,
+      isReplaceOnOrUsing.toString)
+    val command = deleteSpark.sessionState.analyzer.execute(
+      DeleteFromTable(relation, condition.reduceOption(And).getOrElse(Literal.TrueLiteral)))
+    deleteSpark.sessionState.analyzer.checkAnalysis(command)
+    (deleteSpark, command.asInstanceOf[DeleteCommand])
+  }
 
   override protected def getFilesToRemoveForOverwrite(
       txn: org.apache.spark.sql.delta.OptimisticTransaction,
@@ -75,7 +155,8 @@ case class GpuWriteIntoDelta43x(
         sparkSession.conf.get(
           org.apache.spark.sql.delta.sources.DeltaSQLConf.REPLACEWHERE_METRICS_ENABLED)
     val shouldRecordInsertReplaceOpMetrics =
-      shouldRecordReplaceWhereOpMetrics || cpuWrite.options.isReplaceOnOrUsingDefined
+      shouldRecordReplaceWhereOpMetrics ||
+        (isOverwriteOperation && cpuWrite.options.isReplaceOnOrUsingDefined)
     if (shouldRecordInsertReplaceOpMetrics) {
       registerInsertReplaceMetrics(sparkSession, txn, newFiles, deletedFiles)
     } else if (cpuWrite.mode == org.apache.spark.sql.SaveMode.Overwrite &&
@@ -93,7 +174,9 @@ case class GpuWriteIntoDelta43x(
       cpuWrite.options.userMetadata,
       toBooleanOption(Try(cpuWrite.options.isDynamicPartitionOverwriteMode).getOrElse(false)),
       toBooleanOption(cpuWrite.options.canOverwriteSchema),
-      toBooleanOption(cpuWrite.options.canMergeSchema))
+      toBooleanOption(cpuWrite.options.canMergeSchema),
+      replaceOnCond = cpuWrite.options.replaceOn,
+      replaceUsingCols = cpuWrite.options.replaceUsing)
   }
 
   override def withNewWriterConfiguration(

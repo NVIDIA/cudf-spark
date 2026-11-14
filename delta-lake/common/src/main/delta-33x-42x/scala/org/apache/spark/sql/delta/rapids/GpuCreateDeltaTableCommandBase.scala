@@ -752,6 +752,9 @@ abstract class GpuCreateDeltaTableCommandBase(
     }
   }
 
+  protected def isInsertAtomicReplaceOp(options: DeltaOptions): Boolean =
+    options.replaceWhere.isDefined
+
   /**
    * Based on the table creation operation, and parameters, we can resolve to different operations.
    * A lot of this is needed for legacy reasons in Databricks Runtime.
@@ -785,7 +788,7 @@ abstract class GpuCreateDeltaTableCommandBase(
         isV1SaveAsTableOverwrite)
 
     // Legacy saveAsTable with Overwrite mode
-    case TableCreationModes.CreateOrReplace if options.exists(_.replaceWhere.isDefined) =>
+    case TableCreationModes.CreateOrReplace if options.exists(isInsertAtomicReplaceOp) =>
       DeltaRuntimeShim.buildWriteOperation(mode, table.partitionColumnNames, options.get)
 
     // New DataSourceV2 saveAsTable with overwrite mode behavior
@@ -876,6 +879,8 @@ abstract class GpuCreateDeltaTableCommandBase(
    * metadata of the table should be replaced. If overwriteSchema=false is provided with these
    * methods, then we will verify that the metadata match exactly.
    */
+  protected def validateOptionsForMetadataReplacement(options: DeltaOptions): Unit = {}
+
   private def replaceMetadataIfNecessary(
      txn: GpuOptimisticTransactionBase,
      tableDesc: CatalogTable,
@@ -888,6 +893,7 @@ abstract class GpuCreateDeltaTableCommandBase(
     if (isReplace && dontOverwriteSchema) {
       throw DeltaErrors.illegalUsageException(DeltaOptions.OVERWRITE_SCHEMA_OPTION, "replacing")
     }
+    validateOptionsForMetadataReplacement(options)
     if (txn.readVersion > -1L && isReplace && !dontOverwriteSchema) {
       // When a table already exists, and we're using the DataFrameWriterV2 API to replace
       // or createOrReplace a table, we blindly overwrite the metadata.

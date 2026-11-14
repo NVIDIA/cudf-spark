@@ -30,12 +30,6 @@ object Delta43xConfigChecker extends DeltaConfigChecker {
       sqlConf: SQLConf,
       options: Map[String, String]): Unit = {
     val deltaOptions = new DeltaOptions(options, sqlConf)
-    if (deltaOptions.isReplaceOnOrUsingDefined) {
-      meta.willNotWorkOnGpu("Delta 4.3 replaceOn and replaceUsing writes are not supported on GPU")
-    }
-    if (deltaOptions.targetAlias.isDefined) {
-      meta.willNotWorkOnGpu("Delta 4.3 targetAlias writes are not supported on GPU")
-    }
     if (deltaOptions.useNullIntolerantEqualityWithDPO.isDefined) {
       meta.willNotWorkOnGpu(
         "Delta 4.3 null-intolerant dynamic partition overwrite is not supported on GPU")

@@ -27,7 +27,7 @@ import org.apache.spark.sql.{SaveMode, SparkSession}
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
-import org.apache.spark.sql.delta.{CatalogOwnedTableFeature, DeltaErrors, Snapshot, UniversalFormat}
+import org.apache.spark.sql.delta.{CatalogOwnedTableFeature, DeltaErrors, DeltaOptions, Snapshot, UniversalFormat}
 import org.apache.spark.sql.delta.actions.{Metadata, Protocol, TableFeatureProtocolUtils}
 import org.apache.spark.sql.delta.commands.TableCreationModes
 import org.apache.spark.sql.delta.coordinatedcommits.CatalogOwnedTableUtils
@@ -47,6 +47,15 @@ case class GpuCreateDeltaTableCommand(
   extends GpuCreateDeltaTableCommand40x42xBase(
     table, existingTableOpt, mode, query, operation, tableByPath, output, protocol,
     createTableFunc, rapidsConf) {
+
+  override protected def isInsertAtomicReplaceOp(options: DeltaOptions): Boolean =
+    options.isInsertAtomicReplaceOp
+
+  override protected def validateOptionsForMetadataReplacement(options: DeltaOptions): Unit = {
+    if (options.isReplaceOnOrUsingDefined) {
+      throw DeltaErrors.dfv2CreateReplaceIncompatibleReplaceOnOrUsingError()
+    }
+  }
 
   override protected def enforceDependenciesInConfiguration(
       sparkSession: SparkSession,
