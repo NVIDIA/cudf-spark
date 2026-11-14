@@ -434,6 +434,7 @@ case class GpuFileSourceScanExec(
           // Track the actual data size read from the file system, excluding data being pruned
           // by meta-level pruning.
           bf += "readBufferSize" -> createSizeMetric(DEBUG_LEVEL, "size of read buffer")
+          bf ++= createParquetRowGroupMetrics()
         }
         if (ExternalSource.isSupportedFormat(relation.fileFormat.getClass)) {
           // This metric is used to post the time spent in generating the `skip_row` column

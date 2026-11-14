@@ -569,6 +569,7 @@ abstract class GpuDeltaParquetFileFormatNativeDVBase(
       metrics.get(FILTER_TIME).foreach {
         _ += (System.nanoTime() - startTime)
       }
+      metrics.get(ROW_GROUPS_READ).foreach(_ += singleFileInfo.numRowGroups)
       new DeltaParquetPartitionReader(fileIO, conf, file, singleFileInfo.filePath,
         singleFileInfo.blocks, singleFileInfo.schema, isCaseSensitive, readDataSchema,
         partitionSchema, debugDumpPrefix, debugDumpAlways, maxReadBatchSizeRows,

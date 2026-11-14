@@ -23,8 +23,10 @@ import pytest
 
 from datetime import date, datetime, timezone
 
-from asserts import assert_gpu_and_cpu_are_equal_collect, assert_spark_exception
-from conftest import is_not_utc
+from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
+    assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error, \
+    assert_gpu_and_cpu_row_counts_equal, assert_spark_exception, collect_plan_nodes, plan_metric
+from conftest import is_databricks_runtime, is_not_utc
 from data_gen import *
 from marks import inject_oom
 from parquet_test import hybrid_fallback_parquet_file_reader_conf, hybrid_parquet_file_reader_conf, \
@@ -110,6 +112,191 @@ def test_hybrid_scan_pruning_extremes(spark_tmp_path, where):
         conf=hybrid_conf())
 
 
+_rows_per_row_group = 1000
+
+
+def _pruning_b(a):
+    """The `b` that write_pruning_data writes for row `a`."""
+    n = _rows_per_row_group
+    return {0: 0, 1: 1000}.get(a % n, 100 * (a // n + 1) + a % 5)
+
+
+def write_pruning_data(spark, path):
+    """One file meant to hold 4 row groups, laid out so each filter below rules out known ones.
+    Returns each row group's (min a, max a, min b, max b) from the footer, for the tests to
+    derive their expected counts: not every writer honors the options that pin the row groups.
+
+    Row group i holds `a` from 1000 * i to 1000 * i + 999. Every row group's `b` spans 0 to 1000,
+    so statistics never rule one out on `b`, but in between it holds only 100 * (i + 1) to
+    100 * (i + 1) + 4, so its dictionary does.
+
+    parquet-mr checks the row group size every `row.check` rows, and a 1-byte limit makes every
+    check flush, which pins each row group to that many rows.
+    """
+    n = _rows_per_row_group
+    spark.range(0, 4 * n, 1, 1).selectExpr(
+        'CAST(id AS INT) AS a',
+        f'CAST(CASE id % {n} WHEN 0 THEN 0 WHEN 1 THEN 1000 '
+        f'ELSE 100 * (FLOOR(id / {n}) + 1) + id % 5 END AS INT) AS b'
+    ).write.options(**{
+        'parquet.block.size': 1,
+        'parquet.page.size.row.check.min': n,
+        'parquet.page.size.row.check.max': n,
+    }).parquet(path)
+    conf = spark.sparkContext._jsc.hadoopConfiguration()
+    dir_path = spark._jvm.org.apache.hadoop.fs.Path(path)
+    files = [status.getPath() for status in dir_path.getFileSystem(conf).listStatus(dir_path)
+             if status.getPath().getName().endswith('.parquet')]
+    assert len(files) == 1, files
+    footer = spark._jvm.org.apache.parquet.hadoop.ParquetFileReader.readFooter(conf, files[0])
+    stats = [[c.getStatistics() for c in block.getColumns()] for block in footer.getBlocks()]
+    return [(a.genericGetMin(), a.genericGetMax(), b.genericGetMin(), b.genericGetMax())
+            for a, b in stats]
+
+
+def _dictionary_pruned(row_groups, value):
+    """The row groups whose `b` statistics admit `value` but whose rows do not hold it."""
+    return sum(1 for min_a, max_a, min_b, max_b in row_groups
+               if min_b <= value <= max_b
+               and all(_pruning_b(a) != value for a in range(min_a, max_a + 1)))
+
+
+# AQE off: collect_plan_nodes does not descend into AdaptiveSparkPlanExec. The pruning metrics
+# are DEBUG.
+_pruning_metrics_conf = {'spark.sql.adaptive.enabled': False,
+                         'spark.rapids.sql.metrics.level': 'DEBUG'}
+
+
+def _assert_row_groups(in_input, pruned_by_stats, pruned_by_dict, read, min_splits=1):
+    def check(cpu_plan, gpu_plan):
+        scan_classes = ('GpuFileSourceScanExec', 'GpuBatchScanExec')
+        scans = [node for node in collect_plan_nodes(gpu_plan)
+                 if node.getClass().getSimpleName() in scan_classes]
+        assert len(scans) == 1, 'Expected one GPU Parquet scan in:\n{}'.format(gpu_plan)
+        actual = {name: plan_metric(scans[0], name) for name in
+                  ['rowGroupsInInput', 'rowGroupsPrunedByStats', 'rowGroupsPrunedByDict',
+                   'rowGroupsRead']}
+        expected = {'rowGroupsInInput': in_input, 'rowGroupsPrunedByStats': pruned_by_stats,
+                    'rowGroupsPrunedByDict': pruned_by_dict, 'rowGroupsRead': read}
+        assert actual == expected
+        bytes_read = plan_metric(scans[0], 'hybridScanBytesRead')
+        assert (bytes_read > 0) == (read > 0), \
+            'Read {} row groups but {} bytes'.format(read, bytes_read)
+        splits = plan_metric(scans[0], 'hybridScanSplits')
+        assert splits >= min_splits, \
+            'Expected at least {} splits, got {}'.format(min_splits, splits)
+    return check
+
+
+@pytest.mark.parametrize('v1_enabled_list', ['parquet', ''], ids=['v1', 'v2'])
+@pytest.mark.parametrize('where,is_pruned', [
+    ('a >= 2500', lambda min_a, max_a: max_a < 2500),
+    ('a < 0', lambda min_a, max_a: min_a >= 0),
+    ('a >= 0', lambda min_a, max_a: max_a < 0),
+], ids=['some', 'all', 'none'])
+def test_hybrid_scan_stats_pruning(spark_tmp_path, v1_enabled_list, where, is_pruned):
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    row_groups = with_cpu_session(lambda spark: write_pruning_data(spark, data_path))
+    pruned = sum(1 for min_a, max_a, _, _ in row_groups if is_pruned(min_a, max_a))
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.read.parquet(data_path).filter(where),
+        conf=hybrid_conf(**_pruning_metrics_conf,
+                         **{'spark.sql.sources.useV1SourceList': v1_enabled_list}),
+        gpu_plan_assertion=_assert_row_groups(len(row_groups), pruned, 0,
+                                              len(row_groups) - pruned))
+
+
+def test_hybrid_scan_stage_timings(spark_tmp_path):
+    def check(cpu_plan, gpu_plan):
+        scan = [node for node in collect_plan_nodes(gpu_plan)
+                if node.getClass().getSimpleName() == 'GpuFileSourceScanExec'][0]
+        for name in ['filterTime', 'bufferTime', 'gpuDecodeTime', 'hybridScanFooterParseTime',
+                     'hybridScanOutputFilterTime']:
+            assert plan_metric(scan, name) > 0, '{} was not recorded'.format(name)
+
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(lambda spark: write_pruning_data(spark, data_path))
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.read.parquet(data_path).filter('a >= 2500'),
+        conf=hybrid_conf(**_pruning_metrics_conf),
+        gpu_plan_assertion=check)
+
+
+def test_hybrid_scan_reader_runs(spark_tmp_path):
+    """failOnFallback only fails a read the eligibility check rejects, so this checks that the
+    reader built for an eligible read is the hybrid one: only it counts hybridScanSplits."""
+    def check(cpu_plan, gpu_plan):
+        scan = [node for node in collect_plan_nodes(gpu_plan)
+                if node.getClass().getSimpleName() == 'GpuFileSourceScanExec'][0]
+        assert plan_metric(scan, 'hybridScanSplits') > 0, 'the hybrid reader did not run'
+
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(lambda spark: write_pruning_data(spark, data_path))
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.read.parquet(data_path).filter('a >= 2500'),
+        conf=hybrid_conf(**_pruning_metrics_conf),
+        gpu_plan_assertion=check)
+
+
+def test_hybrid_scan_dictionary_pruning(spark_tmp_path):
+    """302 is inside every row group's `b` range, but only row group 2's dictionary holds it."""
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    row_groups = with_cpu_session(lambda spark: write_pruning_data(spark, data_path))
+    by_stats = sum(1 for _, _, min_b, max_b in row_groups if not min_b <= 302 <= max_b)
+    by_dict = _dictionary_pruned(row_groups, 302)
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.read.parquet(data_path).filter('b = 302'),
+        conf=hybrid_conf(**_pruning_metrics_conf),
+        gpu_plan_assertion=_assert_row_groups(len(row_groups), by_stats, by_dict,
+                                              len(row_groups) - by_stats - by_dict))
+
+
+def test_hybrid_scan_pruning_off_with_filter_pushdown(spark_tmp_path):
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    row_groups = with_cpu_session(lambda spark: write_pruning_data(spark, data_path))
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.read.parquet(data_path).filter('a >= 2500'),
+        conf=hybrid_conf(**_pruning_metrics_conf,
+                         **{'spark.sql.parquet.filterPushdown': False}),
+        gpu_plan_assertion=_assert_row_groups(len(row_groups), 0, 0, len(row_groups)))
+
+
+def test_hybrid_scan_pruning_with_file_split_across_tasks(spark_tmp_path):
+    """Summed over the splits, each row group is in exactly one split's input."""
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    row_groups = with_cpu_session(lambda spark: write_pruning_data(spark, data_path))
+    if len(row_groups) < 2:
+        pytest.skip('the writer put every row in one row group')
+    pruned = sum(1 for _, max_a, _, _ in row_groups if max_a < 2500)
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.read.parquet(data_path).filter('a >= 2500'),
+        conf=hybrid_conf(**_pruning_metrics_conf, **{
+            'spark.sql.files.maxPartitionBytes': '4k',
+            'spark.sql.files.openCostInBytes': '0',
+        }),
+        gpu_plan_assertion=_assert_row_groups(len(row_groups), pruned, 0,
+                                              len(row_groups) - pruned, min_splits=2))
+
+
+@pytest.mark.parametrize('footer_reader', ['NATIVE', 'JAVA'])
+def test_parquet_scan_row_groups_read_without_columns(spark_tmp_path, footer_reader):
+    """A count reads no columns, so the hybrid reader falls back, and the native footer reader
+    merges the row groups into one block; the metric must still count every one."""
+    def check(cpu_plan, gpu_plan):
+        scans = [node for node in collect_plan_nodes(gpu_plan)
+                 if node.getClass().getSimpleName() == 'GpuFileSourceScanExec']
+        assert len(scans) == 1, 'Expected one GPU Parquet scan in:\n{}'.format(gpu_plan)
+        assert plan_metric(scans[0], 'rowGroupsRead') == len(row_groups)
+
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    row_groups = with_cpu_session(lambda spark: write_pruning_data(spark, data_path))
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.read.parquet(data_path).selectExpr('COUNT(*)'),
+        conf=fallback_conf(**_pruning_metrics_conf, **{
+            'spark.rapids.sql.format.parquet.reader.footer.type': footer_reader}),
+        gpu_plan_assertion=check)
+
+
 @pytest.mark.parametrize('columns', [
     ['sorted_int'],                                 # the projection is only the filter column
     ['payload_str'],                                # the filter column is not projected
@@ -184,6 +371,30 @@ def test_hybrid_scan_retry_oom_in_reader(spark_tmp_path):
         conf=hybrid_conf())
 
 
+@inject_oom('num_ooms=1,type=GPU')
+def test_hybrid_scan_retry_oom_in_stats_pruning(spark_tmp_path):
+    """An OOM while statistics pruning evaluates the filter on the GPU is retried.
+
+    The injection arms an OOM in each retry block. Statistics rule out every row group, so the
+    statistics retry is the only one the read runs.
+    """
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(lambda spark: write_test_data(spark, data_path))
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(data_path).filter('sorted_int < 0'),
+        conf=hybrid_conf())
+
+
+@inject_oom('num_ooms=1,type=CPU')
+def test_hybrid_scan_retry_cpu_oom(spark_tmp_path):
+    """A host OOM while fetching the column chunks is retried rather than failing the task."""
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(lambda spark: write_test_data(spark, data_path))
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(data_path).filter('filter_int = 7'),
+        conf=hybrid_conf())
+
+
 @pytest.mark.skipif(is_not_utc(), reason="LEGACY datetime rebase mode is only supported for UTC timezone")
 def test_hybrid_scan_legacy_old_date_filter_throws(spark_tmp_path):
     """A LEGACY file stores pre-1582 dates in another calendar, which the reader cannot tell.
@@ -213,6 +424,38 @@ def test_hybrid_scan_file_split_across_tasks(spark_tmp_path):
     })
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.parquet(data_path).filter('sorted_int >= 0'), conf=conf)
+
+
+# Packs every file into one task, so one task opens and closes a reader per file.
+_one_task_conf = {
+    'spark.sql.files.maxPartitionBytes': '1g',
+    'spark.sql.files.minPartitionNum': '1',
+    'spark.sql.files.openCostInBytes': '0',
+}
+
+
+@pytest.mark.parametrize('where', ['filter_int = 7', "filter_str = 'key_500'", 'sorted_int < 3000'],
+                         ids=['dict_keeps_some', 'dict_keeps_none', 'stats_keep_first_files'])
+def test_hybrid_scan_many_files_in_one_task(spark_tmp_path, where):
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(lambda spark: write_test_data(spark, data_path, files=16))
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(data_path).filter(where),
+        conf=hybrid_conf(**_one_task_conf))
+
+
+def test_hybrid_scan_early_limit(spark_tmp_path):
+    """A limit stops the task partway through its files, so readers are closed unconsumed.
+
+    The filter coalesces its output up to batchSizeBytes, so a 1-byte batch size hands the limit
+    each batch as it is read rather than after every file. Which row the limit keeps is not
+    fixed, so only the count is compared.
+    """
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(lambda spark: write_test_data(spark, data_path, files=16))
+    assert_gpu_and_cpu_row_counts_equal(
+        lambda spark: spark.read.parquet(data_path).filter('filter_int = 7').limit(1),
+        conf=hybrid_conf(**_one_task_conf, **{'spark.rapids.sql.batchSizeBytes': '1'}))
 
 
 _supported_type_gens = [
@@ -247,10 +490,10 @@ def test_hybrid_scan_supported_types(spark_tmp_path):
 
 @pytest.mark.parametrize('overrides', [
     {'spark.rapids.sql.reader.chunked': 'true'},
-    {'spark.sql.parquet.fieldId.read.enabled': 'true'},
     {'spark.rapids.sql.format.parquet.reader.type': 'MULTITHREADED'},
     {'spark.rapids.sql.format.parquet.reader.type': 'COALESCING'},
-], ids=['chunked', 'field_id', 'multithreaded', 'coalescing'])
+    {'spark.rapids.sql.format.parquet.decompressCpu': 'true'},
+], ids=['chunked', 'multithreaded', 'coalescing', 'decompress_cpu'])
 def test_hybrid_scan_ineligible_reads_are_still_correct(spark_tmp_path, overrides):
     """Anything the hybrid path does not take has to come back from parquet-mr unchanged."""
     data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
@@ -258,6 +501,33 @@ def test_hybrid_scan_ineligible_reads_are_still_correct(spark_tmp_path, override
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.parquet(data_path).filter('sorted_int < 500'),
         conf=fallback_conf(**overrides))
+
+
+def test_hybrid_scan_field_id_read_schema_falls_back(spark_tmp_path):
+    """The read schema renames the columns and finds them by field ID; only parquet-mr does that."""
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    write_schema = StructType([
+        StructField('sorted_int', IntegerType(), metadata={'parquet.field.id': 1}),
+        StructField('payload_long', LongType(), metadata={'parquet.field.id': 2})])
+    read_schema = StructType([
+        StructField('a', IntegerType(), metadata={'parquet.field.id': 1}),
+        StructField('b', LongType(), metadata={'parquet.field.id': 2})])
+    with_cpu_session(
+        lambda spark: spark.createDataFrame([(i, i * 2) for i in range(1000)], write_schema)
+            .repartition(1).write.parquet(data_path),
+        conf=enable_parquet_field_id_write)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(read_schema).parquet(data_path).filter('a < 500'),
+        conf=fallback_conf(**enable_parquet_field_id_read))
+
+
+def test_hybrid_scan_field_id_read_enabled_without_field_ids(spark_tmp_path):
+    """Field ID reads are on by default on Databricks; a schema with no field IDs stays hybrid."""
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(lambda spark: write_test_data(spark, data_path))
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(data_path).filter('sorted_int < 500'),
+        conf=hybrid_conf(**enable_parquet_field_id_read))
 
 
 def test_hybrid_scan_nested_column_read_is_still_correct(spark_tmp_path):
@@ -295,7 +565,7 @@ def test_hybrid_scan_filter_on_missing_column(spark_tmp_path):
         lambda: with_gpu_session(
             lambda spark: spark.read.schema(_missing_col_schema).parquet(data_path)
                 .filter('sorted_int < 500').collect(),
-            conf=fallback_conf(**{'spark.sql.parquet.fieldId.read.enabled': False})),
+            conf=fallback_conf()),
         error_message='a column is missing from the file')
 
 
@@ -307,3 +577,71 @@ def test_hybrid_scan_ignore_corrupt_files_keeps_readable_file(spark_tmp_path):
         lambda spark: spark.read.schema(_missing_col_schema).parquet(data_path)
             .filter('sorted_int < 500'),
         conf=fallback_conf(**{'spark.sql.files.ignoreCorruptFiles': 'true'}))
+
+
+@pytest.mark.skipif(is_databricks_runtime(), reason="Databricks handles missing files differently")
+@pytest.mark.parametrize('ignore_missing', [True, False], ids=['ignored', 'raised'])
+def test_hybrid_scan_missing_file(spark_tmp_path, ignore_missing):
+    """A file deleted after planning is skipped when ignoreMissingFiles is set, else it fails.
+
+    A path that is missing at planning fails or is dropped by the file listing and never reaches
+    the reader, so each run lists its own copy of the data and then deletes one file. The CPU and
+    GPU runs each take a copy.
+    """
+    copies = [spark_tmp_path + '/HYBRID_SCAN_DATA_' + str(i) for i in range(2)]
+    for copy in copies:
+        with_cpu_session(lambda spark: write_test_data(spark, copy, files=2))
+
+    def read_then_delete(spark):
+        df = spark.read.parquet(copies.pop(0))
+        path = spark._jvm.org.apache.hadoop.fs.Path(sorted(df.inputFiles())[0])
+        assert path.getFileSystem(spark.sparkContext._jsc.hadoopConfiguration()).delete(path, False)
+        return df
+
+    conf = hybrid_conf(**{'spark.sql.files.ignoreMissingFiles': str(ignore_missing).lower()})
+    if ignore_missing:
+        assert_gpu_and_cpu_are_equal_collect(read_then_delete, conf=conf)
+    else:
+        assert_gpu_and_cpu_error(lambda spark: read_then_delete(spark).collect(), conf,
+                                 'FileNotFoundException')
+
+
+def truncate_one_file(spark, data_path):
+    """Overwrite one file with its first half, so its leading bytes are valid but its footer is
+    gone."""
+    path = spark._jvm.org.apache.hadoop.fs.Path(
+        sorted(spark.read.parquet(data_path).inputFiles())[0])
+    fs = path.getFileSystem(spark.sparkContext._jsc.hadoopConfiguration())
+    stream = fs.open(path)
+    try:
+        data = spark._jvm.org.apache.commons.io.IOUtils.toByteArray(
+            stream, fs.getFileStatus(path).getLen() // 2)
+    finally:
+        stream.close()
+    out = fs.create(path, True)
+    try:
+        out.write(data)
+    finally:
+        out.close()
+
+
+@pytest.mark.skipif(is_databricks_runtime(), reason="Databricks does not support ignoreCorruptFiles")
+@pytest.mark.parametrize('ignore_corrupt', [True, False], ids=['ignored', 'raised'])
+def test_hybrid_scan_corrupt_file(spark_tmp_path, ignore_corrupt):
+    """A truncated file is skipped when ignoreCorruptFiles is set, else it fails the read.
+
+    Neither reader can read the file, so a fallback is allowed. The schema is given so schema
+    inference does not read the truncated footer on the driver.
+    """
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(lambda spark: write_test_data(spark, data_path, files=2))
+    with_cpu_session(lambda spark: truncate_one_file(spark, data_path))
+    conf = fallback_conf(**{'spark.sql.files.ignoreCorruptFiles': str(ignore_corrupt).lower()})
+
+    def read(spark):
+        return spark.read.schema('sorted_int INT, filter_int INT').parquet(data_path) \
+            .filter('sorted_int < 15000')
+    if ignore_corrupt:
+        assert_gpu_and_cpu_are_equal_collect(read, conf=conf)
+    else:
+        assert_gpu_and_cpu_error(lambda spark: read(spark).collect(), conf, 'SparkException')

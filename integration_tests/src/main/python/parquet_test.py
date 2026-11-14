@@ -151,9 +151,6 @@ hybrid_fallback_parquet_file_reader_conf = {'spark.rapids.sql.format.parquet.rea
 # datetime column in EXCEPTION rebase mode, which Spark 4 does not default to.
 hybrid_parquet_file_reader_conf = copy_and_update(hybrid_fallback_parquet_file_reader_conf, {
         hybrid_fail_on_fallback_key: True,
-        # Temporary workaround for https://github.com/NVIDIA/cudf-spark/issues/16771:
-        # the hybrid reader currently rejects reads whenever field ID matching is enabled.
-        'spark.sql.parquet.fieldId.read.enabled': False,
         datetimeRebaseModeInReadKey: 'EXCEPTION',
         int96RebaseModeInReadKey: 'EXCEPTION'})
 reader_opt_confs_with_hybrid = reader_opt_confs + [
