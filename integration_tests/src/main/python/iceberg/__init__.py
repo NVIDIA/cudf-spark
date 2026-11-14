@@ -54,12 +54,38 @@ iceberg_format_versions = [
     pytest.param("3", marks=_v3_unsupported_mark, id="v3")]
 iceberg_read_format_versions = [pytest.param("1", id="v1"), *iceberg_format_versions]
 iceberg_read_enabled_conf = {"spark.rapids.sql.format.iceberg.v3.enabled": "true"}
+iceberg_variant_read_conf = {
+    "spark.rapids.sql.format.iceberg.v3.enabled": "true",
+    "spark.sql.adaptive.enabled": "false",
+    "spark.sql.variant.allowReadingShredded": "false",
+}
 iceberg_mor_format_versions = [
     pytest.param("2", id="v2"),
     pytest.param("3", marks=_v3_unsupported_mark, id="v3")]
 iceberg_cow_format_versions = [
     pytest.param("2", id="v2"),
     pytest.param("3", marks=[_v3_unsupported_mark, _v3_cow_scan_mark], id="v3")]
+
+
+def setup_iceberg_variant_table(spark, table):
+    spark.sql(
+        f"CREATE TABLE {table} (id INT, v VARIANT) USING ICEBERG "
+        "TBLPROPERTIES ('format-version' = '3', 'write.parquet.shred-variants' = 'false')")
+    spark.sql(f"""
+        INSERT INTO {table}
+        SELECT id, parse_json(json)
+        FROM VALUES
+          (0, '{{"x":7,"s":"hi","b":true,"d":2.5,"empty_array":[],"empty_object":{{}}}}'),
+          (1, '[1,{{"x":2}}]'),
+          (2, '"scalar"'),
+          (3, '3.5'),
+          (4, 'true'),
+          (5, 'null'),
+          (6, NULL),
+          (7, '{{}}'),
+          (8, '[]')
+        AS source(id, json)
+        """)
 
 
 def with_iceberg_format_versions(parameters):

@@ -308,6 +308,33 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .integerConf
     .createWithDefault(32)
 
+  val SHUFFLE_UCX_CLEANUP_ON_QUERY_END_ENABLED =
+    conf("spark.rapids.shuffle.ucx.cleanupOnQueryEnd.enabled")
+    .doc("When set to true, the RAPIDS Shuffle Manager in UCX mode reclaims each GPU shuffle " +
+      "once the SQL query that wrote it has ended: the executors free the shuffle's buffers, " +
+      "and the driver clears its map outputs and keeps the shuffle registered. It takes " +
+      "effect only when spark.rapids.shuffle.mode is UCX, the RAPIDS Shuffle Manager is " +
+      "configured and spark.rapids.sql.mode is executeOnGPU, and never on Databricks. Any " +
+      "other setup, CACHE_ONLY mode included, logs one warning and reclaims nothing. Enable " +
+      "it only when queries run one at a time, share no DataFrame and return no results " +
+      "through toLocalIterator, as in a power test that runs independent queries one after " +
+      "another. A shuffle waits for Spark's own cleanup, as it does when this is false, when " +
+      "Spark marks its map stage indeterminate, as for repartition(n) without columns, when " +
+      "Delta Lake's optimized write builds it, or when its query computes it from a " +
+      "nondeterministic expression such as rand() or uuid(), a sample, a limit, or an RDD. " +
+      "A later action that reuses a DataFrame reruns the map stage of each reclaimed shuffle " +
+      "it reads. The driver clears a shuffle's map outputs shortly after its query ends, and " +
+      "an action that judged the shuffle available before that clear can read part of its old " +
+      "output and rerun the rest. Such an action can be a second action on the same DataFrame, " +
+      "a concurrent query that shares it, or toLocalIterator, whose jobs run after its query " +
+      "ends. That action then returns duplicated or missing rows if the shuffle depends on " +
+      "input order, as first(), last() or row_number() over ties can. Its fetch failure can " +
+      "also make Spark drop every map output on that executor, so a concurrent query that reads " +
+      "a GPU round-robin shuffle there can fail. Keep this key off for such workloads.")
+    .startupOnly()
+    .booleanConf
+    .createWithDefault(false)
+
   val SHUFFLE_MAX_CLIENT_THREADS = conf("spark.rapids.shuffle.maxClientThreads")
     .doc("The maximum number of threads that the shuffle client should be allowed to start")
     .internal()
@@ -544,7 +571,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
 
   val ALLOW_MULTIPLE_JARS = conf("spark.rapids.sql.allowMultipleJars")
     .startupOnly()
-    .doc("Allow multiple rapids-4-spark, cudf-spark-jni, and cudf jars on the classpath. " +
+    .doc("Allow multiple cudf-spark, cudf-spark-jni, and cudf jars on the classpath. " +
       "Spark will take the first one it finds, so the version may not be expected. Possible " +
       "values are ALWAYS: allow all jars, SAME_REVISION: only allow jars with the same " +
       "revision, NEVER: do not allow multiple jars at all.")
