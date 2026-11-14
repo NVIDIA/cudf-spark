@@ -1,0 +1,46 @@
+{
+  "skill_name": "udf-optimize-cudf",
+  "evals": [
+    {
+      "id": "udf-optimize-cudf__array-segment-sum",
+      "prompt": "Profile and optimize the GPU performance of the cuDF RapidsUDF at input/array-segment-sum/ArraySegmentSumRapidsUDF.scala while keeping its output identical to the CPU UDF at input/array-segment-sum/ArraySegmentSumUDF.scala. A passing unit test is provided at input/array-segment-sum/UnitTest.scala.",
+      "expected_skill": "udf-optimize-cudf",
+      "expected_script": null,
+      "files": [
+        "evals/files/array-segment-sum/ArraySegmentSumUDF.scala",
+        "evals/files/array-segment-sum/UnitTest.scala",
+        "evals/files/array-segment-sum/ArraySegmentSumRapidsUDF.scala"
+      ],
+      "expected_output": "A cuDF RapidsUDF whose output still matches the CPU UDF in schema and values (no correctness regression); it either improves the GPU runtime or, after exhausting optimization attempts, keeps the best correct version and reports that no improvement was found.",
+      "assertions": [
+        "Loads the udf-optimize-cudf skill",
+        "Profiles the existing RapidsUDF to identify GPU bottlenecks",
+        "Applies one or more optimization attempts",
+        "Re-runs the comparison test and confirms the GPU output still matches the CPU UDF in schema and values (no correctness regression)",
+        "Improves the measured GPU runtime, or reports no improvement while preserving the best correct version (never regressing correctness)"
+      ]
+    },
+    {
+      "id": "udf-optimize-cudf__negative-config",
+      "prompt": "Recommend an AWS GPU instance type for running Spark.",
+      "expected_skill": null,
+      "expected_script": null,
+      "files": [],
+      "expected_output": "Infrastructure/sizing question; not a request to optimize an existing RapidsUDF, so udf-optimize-cudf should not activate.",
+      "assertions": [
+        "Does not load the udf-optimize-cudf skill"
+      ]
+    },
+    {
+      "id": "udf-optimize-cudf__negative-unrelated",
+      "prompt": "How do I write a DataFrame to CSV in Spark?",
+      "expected_skill": null,
+      "expected_script": null,
+      "files": [],
+      "expected_output": "Basic Spark I/O question, unrelated to optimizing a cuDF RapidsUDF; no UDF skill should activate.",
+      "assertions": [
+        "Does not load the udf-optimize-cudf skill"
+      ]
+    }
+  ]
+}
