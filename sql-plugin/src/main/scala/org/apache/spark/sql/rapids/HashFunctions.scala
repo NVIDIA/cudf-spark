@@ -197,13 +197,27 @@ object GpuMurmur3Hash {
   def compute(batch: ColumnarBatch,
       boundExpr: Seq[Expression],
       seed: Int = 42): ColumnVector = {
+    computeWithHash(batch, boundExpr, columns => Hash.murmurHash32(seed, columns))
+  }
+
+  def computePartitionIds(batch: ColumnarBatch,
+      boundExpr: Seq[Expression],
+      seed: Int,
+      numPartitions: Int): ColumnVector = {
+    computeWithHash(batch, boundExpr,
+      columns => Hash.murmurHash32Pmod(seed, numPartitions, columns))
+  }
+
+  private def computeWithHash(batch: ColumnarBatch,
+      boundExpr: Seq[Expression],
+      hash: Array[ColumnView] => ColumnVector): ColumnVector = {
     withResource(GpuProjectExec.project(batch, boundExpr)) { args =>
       val bases = GpuColumnVector.extractBases(args)
       val normalized = bases.safeMap { cv =>
         HashUtils.normalizeInput(cv).asInstanceOf[ColumnView]
       }
       withResource(normalized) { _ =>
-        Hash.murmurHash32(seed, normalized)
+        hash(normalized)
       }
     }
   }
