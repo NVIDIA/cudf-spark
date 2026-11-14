@@ -15,7 +15,7 @@
 import pytest
 
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error, assert_gpu_fallback_collect, collect_plan_nodes, plan_metric
-from spark_session import is_before_spark_320, with_cpu_session
+from spark_session import is_before_spark_320, is_spark_500_or_later, with_cpu_session
 from conftest import is_not_utc
 from data_gen import *
 from marks import ignore_order, allow_non_gpu, shuffle_test
@@ -441,3 +441,77 @@ def test_hash_partition_zero_column_literal_key(num_parts, by_partition):
         do_it,
         conf = _zero_column_exchange_conf,
         gpu_plan_assertion = _assert_zero_column_exchange('GpuHashPartitioning'))
+
+
+@pytest.mark.skipif(not is_spark_500_or_later(),
+                    reason="SPARK-58317 PartitioningCollection intersection is Spark 5.0+ only")
+@ignore_order(local=True)
+def test_union_partitioning_collection_intersection():
+    def doit(spark):
+        spark.sql("CREATE OR REPLACE TEMPORARY VIEW t1 AS "
+                  "SELECT * FROM VALUES (1, 2, 4), (1, 3, 5), (2, 2, 3) AS t1(c1, c2, c3)")
+        spark.sql("CREATE OR REPLACE TEMPORARY VIEW t2 AS "
+                  "SELECT * FROM VALUES (1, 9), (2, 9) AS t2(c1, x)")
+        spark.sql("CREATE OR REPLACE TEMPORARY VIEW t3 AS "
+                  "SELECT * FROM VALUES (1, 2, 4), (2, 4, 5), (3, 6, 7) AS t3(c1, c2, c3)")
+        spark.sql("CREATE OR REPLACE TEMPORARY VIEW t4 AS "
+                  "SELECT * FROM VALUES (1, 9), (3, 9) AS t4(c1, y)")
+        return spark.sql("""
+            SELECT c1, c2, c3, k, count(*) FROM (
+              SELECT /*+ SHUFFLE_HASH(t2) */ t1.c1, t1.c2, t1.c3, t2.c1 AS k
+              FROM t1 JOIN t2 ON t1.c1 = t2.c1
+              UNION ALL
+              SELECT /*+ SHUFFLE_HASH(t4) */ t3.c1, t3.c2, t3.c3, t4.c1 AS k
+              FROM t3 LEFT JOIN t4 ON t3.c1 = t4.c1
+            ) GROUP BY c1, c2, c3, k
+        """)
+    conf = {
+        "spark.sql.unionOutputPartitioning": "true",
+        "spark.sql.autoBroadcastJoinThreshold": "-1",
+        "spark.sql.join.preferSortMergeJoin": "false",
+        "spark.sql.adaptive.enabled": "false"
+    }
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        doit,
+        exist_classes = 'GpuUnionExec',
+        conf = conf)
+
+
+@pytest.mark.skipif(not is_spark_500_or_later(),
+                    reason="SPARK-58819 attribute normalization is Spark 5.0+ only")
+@ignore_order(local=True)
+def test_union_attribute_normalization():
+    def doit(spark):
+        # t1 and t2 include nulls to ensure nullable input columns
+        spark.sql("CREATE OR REPLACE TEMPORARY VIEW t1 AS "
+                  "SELECT * FROM VALUES (1, 10), (2, 20), (cast(null as int), 30), (4, 40) AS t1(id, v)")
+        spark.sql("CREATE OR REPLACE TEMPORARY VIEW t2 AS "
+                  "SELECT * FROM VALUES (1, 30), (3, 40), (cast(null as int), 50), (4, 60) AS t2(id, v)")
+        # Child 1: IS NOT NULL narrows id nullability to non-nullable; repartitioned by id
+        # Child 2: preserves nullable id with nulls; repartitioned by id
+        return spark.sql("""
+            SELECT id, sum(v) FROM (
+              SELECT /*+ REPARTITION(4, id) */ t1.id, t1.v FROM t1 WHERE t1.id IS NOT NULL
+              UNION ALL
+              SELECT /*+ REPARTITION(4, id) */ t2.id, t2.v FROM t2
+            ) GROUP BY id
+        """)
+    conf = {
+        "spark.sql.unionOutputPartitioning": "true",
+        "spark.sql.adaptive.enabled": "false"
+    }
+
+    def _assert_union_preserves_hash_partitioning(cpu_plan, gpu_plan):
+        union_nodes = [node for node in collect_plan_nodes(gpu_plan)
+                       if node.getClass().getSimpleName() == "GpuUnionExec"]
+        assert len(union_nodes) == 1, f"Expected 1 GpuUnionExec, got {len(union_nodes)}"
+        union_node = union_nodes[0]
+        partitioning = union_node.outputPartitioning()
+        assert partitioning.getClass().getSimpleName() == "HashPartitioning",             f"Expected HashPartitioning, got {partitioning.getClass().getSimpleName()}"
+        assert partitioning.numPartitions() == 4
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        doit,
+        exist_classes = 'GpuUnionExec',
+        conf = conf,
+        gpu_plan_assertion = _assert_union_preserves_hash_partitioning)
