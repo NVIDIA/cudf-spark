@@ -478,6 +478,58 @@ def test_delta_update_disabled_fallback(spark_tmp_path, disable_conf, enable_del
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
+@pytest.mark.skipif(not is_databricks_runtime() and is_before_spark_353(),
+                    reason="Delta Lake optimized writes require Spark 3.5.3 or later")
+@pytest.mark.parametrize("mapping", ["name", "id"])
+@pytest.mark.parametrize("aqe_enabled", [False, True], ids=idfn)
+def test_delta_update_optimized_column_mapping_cdf(spark_tmp_path, mapping, aqe_enabled):
+    # Include the synthetic __is_cdc partition column.
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    conf = copy_and_update(delta_update_enabled_conf, {
+        "spark.databricks.delta.properties.defaults.columnMapping.mode": mapping,
+        "spark.databricks.delta.properties.defaults.minReaderVersion": "2",
+        "spark.databricks.delta.properties.defaults.minWriterVersion": "5",
+        "spark.sql.parquet.fieldId.read.enabled": "true",
+        "spark.databricks.delta.optimizeWrite.enabled": "true",
+        "spark.sql.adaptive.enabled": str(aqe_enabled).lower(),
+        "spark.sql.shuffle.partitions": "4"
+    })
+
+    def generate_dest_data(spark):
+        return three_col_df(spark,
+                            SetValuesGen(IntegerType(), range(8)),
+                            SetValuesGen(StringType(), ["x", "y", "z"]),
+                            int_gen, length=128, num_slices=4)
+
+    # Isolate the CDC write: table setup must not depend on optimized-write planning.
+    setup_conf = copy_and_update(conf, {"spark.databricks.delta.optimizeWrite.enabled": "false"})
+    with_cpu_session(lambda spark: setup_delta_dest_tables(
+        spark, data_path, generate_dest_data, use_cdf=True,
+        enable_deletion_vectors=False, partition_columns=["b"]), conf=setup_conf)
+
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        lambda spark, path: spark.sql(
+            f"UPDATE delta.`{path}` SET c = 42 WHERE a % 2 = 0").collect(),
+        read_delta_path, data_path, conf=conf, expected_command="GpuUpdateCommand",
+        plan_assertion=lambda callback, plans:
+            assert_delta_optimized_write(callback, plans, enabled=True))
+
+    def check_cdf(spark):
+        results = []
+        for suffix in ["CPU", "GPU"]:
+            cdf = read_delta_path_with_cdf(spark, data_path + "/" + suffix)
+            rows = cdf.sort(cdf.columns).collect()
+            assert {row._change_type for row in rows} == {
+                "insert", "update_preimage", "update_postimage"}
+            results.append(rows)
+        assert_equal(*results)
+
+    with_cpu_session(check_cdf, conf=conf)
+
+
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
 @pytest.mark.parametrize("partition_columns", [None, ["a"]], ids=idfn)
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")

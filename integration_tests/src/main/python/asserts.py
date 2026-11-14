@@ -285,7 +285,8 @@ def _assert_gpu_and_cpu_writes_are_equal(
         mode,
         conf={},
         expected_command=None,
-        required_gpu_classes=None):
+        required_gpu_classes=None,
+        plan_assertion=None):
     conf = _prep_incompat_conf(conf)
 
     print('### CPU RUN ###')
@@ -304,6 +305,7 @@ def _assert_gpu_and_cpu_writes_are_equal(
         gpu_result = assert_rapids_delta_write(
             lambda spark: write_func(spark, gpu_path), conf=conf,
             expected_command=expected_command,
+            plan_assertion=plan_assertion,
             required_gpu_classes=(delta_write if required_gpu_classes is None
                                   else required_gpu_classes))
     else:
@@ -327,7 +329,7 @@ def _assert_gpu_and_cpu_writes_are_equal(
 
 def assert_gpu_and_cpu_writes_are_equal_collect(
         write_func, read_func, base_path, conf={}, expected_command=None,
-        required_gpu_classes=None):
+        required_gpu_classes=None, plan_assertion=None):
     """
     Assert when running write_func on both the CPU and the GPU and reading using read_func
     on the CPU that the results are equal.
@@ -337,10 +339,13 @@ def assert_gpu_and_cpu_writes_are_equal_collect(
     required_gpu_classes overrides the default RapidsDeltaWrite requirement, for example
     when a persistent-DV DELETE scans on the GPU without writing replacement Parquet data.
     An empty list requires no data-writing operator; expected_command is still checked.
+    For Delta writes, plan_assertion(callback, plans) additionally checks captured plans,
+    including final writer plans, after the standard checks.
     """
     _assert_gpu_and_cpu_writes_are_equal(
         write_func, read_func, base_path, 'COLLECT', conf=conf,
-        expected_command=expected_command, required_gpu_classes=required_gpu_classes)
+        expected_command=expected_command, required_gpu_classes=required_gpu_classes,
+        plan_assertion=plan_assertion)
 
 def assert_gpu_and_cpu_writes_are_equal_iterator(write_func, read_func, base_path, conf={}):
     """

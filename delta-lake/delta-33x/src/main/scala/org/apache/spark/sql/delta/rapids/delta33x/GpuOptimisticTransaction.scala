@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * This file was derived from OptimisticTransaction.scala and TransactionalWrite.scala
  * in the Delta Lake project at https://github.com/delta-io/delta.
@@ -43,7 +43,7 @@ import org.apache.spark.sql.delta.sources.DeltaSQLConf
 import org.apache.spark.sql.execution.SQLExecution
 import org.apache.spark.sql.execution.datasources.{BasicWriteJobStatsTracker, FileFormatWriter}
 import org.apache.spark.sql.functions.to_json
-import org.apache.spark.sql.rapids.{BasicColumnarWriteJobStatsTracker, ColumnarWriteJobStatsTracker, GpuWriteJobStatsTracker}
+import org.apache.spark.sql.rapids.{BasicColumnarWriteJobStatsTracker, ColumnarWriteJobStatsTracker, ExecutionPlanCaptureCallback, GpuWriteJobStatsTracker}
 import org.apache.spark.sql.rapids.delta.GpuIdentityColumn
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -248,6 +248,9 @@ class GpuOptimisticTransaction(deltaLog: DeltaLog,
       }
 
       try {
+        if (rapidsConf.isTestEnabled) {
+          ExecutionPlanCaptureCallback.captureIfNeeded(physicalPlan)
+        }
         GpuDeltaFileFormatWriter.write(
           sparkSession = spark,
           plan = physicalPlan,
