@@ -482,4 +482,102 @@ class GpuRoundRobinShuffleSuite extends SparkQueryCompareTestSuite {
       }, conf(sortBefore))
     }
   }
+
+  test("round-robin repartition distributes rows-only batches across partitions") {
+    withGpuSparkSession({ spark =>
+      GpuShuffleEnv.init(new RapidsConf(spark.sparkContext.getConf))
+
+      class FixedStartRoundRobinPartitioning(numPartitions: Int, start: Int)
+          extends GpuRoundRobinPartitioning(numPartitions) {
+        override protected def getStartPartition: Int = start
+      }
+
+      // Case A: 7 rows across 5 partitions, start at partition 2
+      // baseCount = 1, remainder = 2 -> partitions 2 and 3 get 2 rows; 0, 1, 4 get 1 row
+      val fixedPartA = new FixedStartRoundRobinPartitioning(5, 2)
+      val batchA = new ColumnarBatch(Array.empty, 7)
+      val resA = fixedPartA.columnarEvalAny(batchA).asInstanceOf[Array[(ColumnarBatch, Int)]]
+      try {
+        val countsA = resA.map(p => p._2 -> p._1.numRows()).toMap
+        assert(countsA === Map(0 -> 1, 1 -> 1, 2 -> 2, 3 -> 2, 4 -> 1))
+        assert(resA.forall(_._1.numCols() == 0))
+      } finally {
+        resA.foreach(_._1.close())
+      }
+
+      // Case B: 7 rows across 5 partitions with remainder wrap-around, start at partition 4
+      // baseCount = 1, remainder = 2 -> partitions 4 and 0 get 2 rows; 1, 2, 3 get 1 row
+      val fixedPartB = new FixedStartRoundRobinPartitioning(5, 4)
+      val batchB = new ColumnarBatch(Array.empty, 7)
+      val resB = fixedPartB.columnarEvalAny(batchB).asInstanceOf[Array[(ColumnarBatch, Int)]]
+      try {
+        val countsB = resB.map(p => p._2 -> p._1.numRows()).toMap
+        assert(countsB === Map(0 -> 2, 1 -> 1, 2 -> 1, 3 -> 1, 4 -> 2))
+        assert(resB.forall(_._1.numCols() == 0))
+      } finally {
+        resB.foreach(_._1.close())
+      }
+
+      // Case C: Fewer rows than partitions (2 rows across 5 partitions, start at partition 3)
+      // baseCount = 0, remainder = 2 -> partitions 3 and 4 get 1 row; 0, 1, 2 get 0 rows (omitted)
+      val fixedPartC = new FixedStartRoundRobinPartitioning(5, 3)
+      val batchC = new ColumnarBatch(Array.empty, 2)
+      val resC = fixedPartC.columnarEvalAny(batchC).asInstanceOf[Array[(ColumnarBatch, Int)]]
+      try {
+        val countsC = resC.map(p => p._2 -> p._1.numRows()).toMap
+        assert(countsC === Map(3 -> 1, 4 -> 1))
+        assert(resC.forall(_._1.numCols() == 0))
+      } finally {
+        resC.foreach(_._1.close())
+      }
+
+      // Case D: Divisible row count (8 rows across 4 partitions, start at partition 1)
+      val fixedPartD = new FixedStartRoundRobinPartitioning(4, 1)
+      val batchD = new ColumnarBatch(Array.empty, 8)
+      val resD = fixedPartD.columnarEvalAny(batchD).asInstanceOf[Array[(ColumnarBatch, Int)]]
+      try {
+        val countsD = resD.map(p => p._2 -> p._1.numRows()).toMap
+        assert(countsD === Map(0 -> 2, 1 -> 2, 2 -> 2, 3 -> 2))
+        assert(resD.forall(_._1.numCols() == 0))
+      } finally {
+        resD.foreach(_._1.close())
+      }
+
+      // Case E: Standard GpuRoundRobinPartitioning without fixed start
+      val numPartitions = 4
+      val partitioning = GpuRoundRobinPartitioning(numPartitions)
+      val batch = new ColumnarBatch(Array.empty, 10)
+      val result = partitioning.columnarEvalAny(batch)
+        .asInstanceOf[Array[(ColumnarBatch, Int)]]
+      try {
+        assert(result.map(_._1.numRows()).sum === 10)
+        assert(result.map(_._2).distinct.length === 4)
+        assert(result.forall(p => p._1.numRows() == 2 || p._1.numRows() == 3))
+        assert(result.count(_._1.numRows() == 3) === 2)
+        assert(result.count(_._1.numRows() == 2) === 2)
+        assert(result.forall(_._1.numCols() == 0))
+      } finally {
+        result.foreach(_._1.close())
+      }
+
+      // Case F: Empty rows-only batch
+      val emptyBatch = new ColumnarBatch(Array.empty, 0)
+      val emptyResult = partitioning.columnarEvalAny(emptyBatch)
+        .asInstanceOf[Array[(ColumnarBatch, Int)]]
+      assert(emptyResult.isEmpty)
+
+      // Case G: Single-partition rows-only batch
+      val singlePart = GpuRoundRobinPartitioning(1)
+      val singleBatch = new ColumnarBatch(Array.empty, 5)
+      val singleResult = singlePart.columnarEvalAny(singleBatch)
+        .asInstanceOf[Array[(ColumnarBatch, Int)]]
+      try {
+        assert(singleResult.length === 1)
+        assert(singleResult.head._2 === 0)
+        assert(singleResult.head._1.numRows() === 5)
+      } finally {
+        singleResult.foreach(_._1.close())
+      }
+    }, conf(sortBefore = false))
+  }
 }

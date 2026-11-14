@@ -441,3 +441,19 @@ def test_hash_partition_zero_column_literal_key(num_parts, by_partition):
         do_it,
         conf = _zero_column_exchange_conf,
         gpu_plan_assertion = _assert_zero_column_exchange('GpuHashPartitioning'))
+
+
+@shuffle_test
+@pytest.mark.parametrize('num_parts', [3, 7, 8])
+@pytest.mark.parametrize('num_rows', [10, 4001])
+def test_round_robin_partition_zero_column(num_parts, num_rows):
+    def do_it(spark):
+        # Range with no output columns selected -> zero-column child under repartition
+        # Using non-divisible row counts ensures remainder destinations across partitions are tested.
+        df = spark.range(0, num_rows, 1, 4).select().repartition(num_parts)
+        return df.groupBy(f.spark_partition_id().alias('part')).count().orderBy('part')
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it,
+        conf = _zero_column_exchange_conf,
+        gpu_plan_assertion = _assert_zero_column_exchange('GpuRoundRobinPartitioning'))
