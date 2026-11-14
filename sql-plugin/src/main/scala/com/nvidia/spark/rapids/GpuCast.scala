@@ -21,7 +21,7 @@ import java.util.Optional
 
 import scala.collection.mutable.ArrayBuffer
 
-import ai.rapids.cudf.{BinaryOp, CaptureGroups, ColumnVector, ColumnView, DType, RegexProgram, Scalar}
+import ai.rapids.cudf.{ast, BinaryOp, CaptureGroups, ColumnVector, ColumnView, DType, RegexProgram, Scalar}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.jni.{Arithmetic, CastException, CastStrings, DecimalUtils, GpuTimeZoneDB, RoundMode}
@@ -1710,6 +1710,29 @@ case class GpuCast(
     // converting back to SQL query string.
     case _: ArrayType | _: MapType | _: StructType => child.sql
     case _ => s"CAST(${child.sql} AS ${dataType.sql})"
+  }
+
+  // Integral widening is exact and cannot fail, so AST JIT can keep it inside a consumer's kernel
+  // instead of materializing the widened column.
+  private def astJitCastOperator: Option[ast.JitOperator] = (child.dataType, dataType) match {
+    case (ByteType, ShortType) => Some(ast.JitOperator.CAST_TO_INT16)
+    case (ByteType | ShortType, IntegerType) => Some(ast.JitOperator.CAST_TO_INT32)
+    case (ByteType | ShortType | IntegerType, LongType) => Some(ast.JitOperator.CAST_TO_INT64)
+    case _ => None
+  }
+
+  override def selfSupportsAstJit: Boolean = astJitCastOperator.isDefined
+
+  override def selfIsAstJitOperator: Boolean = selfSupportsAstJit
+
+  // A cast alone is not worth compiling.
+  override def selfTriggersAstJit: Boolean = false
+
+  override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
+    val jitOp = astJitCastOperator.getOrElse(
+      throw new IllegalStateException(s"$this is not supported by AST"))
+    new ast.JitOperation(jitOp,
+      child.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns))
   }
 
   override def doColumnar(input: GpuColumnVector): ColumnVector = {
