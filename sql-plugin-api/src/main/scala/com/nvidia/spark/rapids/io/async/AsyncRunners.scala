@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids.io.async
 
-import java.util.concurrent.Callable
+import java.util.concurrent.{Callable, CancellationException, Future}
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantLock
 import java.util.function.LongUnaryOperator
@@ -195,6 +195,9 @@ trait AsyncRunner[T] extends Callable[AsyncResult[T]] {
     val startTime = System.nanoTime()
     val resultData = try {
       beforeExecuteHooks.foreach { hook => hook() }
+      if (isCancelled) {
+        throw new CancellationException(s"AsyncRunner $this was cancelled ahead of execution")
+      }
       callImpl()
     } catch {
       case NonFatal(error) => throw failureTransformer(error)
@@ -203,7 +206,26 @@ trait AsyncRunner[T] extends Callable[AsyncResult[T]] {
     }
     metricsBuilder.setExecutionTimeMs(System.nanoTime() - startTime)
 
-    result = Some(buildResult(resultData, metricsBuilder.build()))
+    val builtResult = buildResult(resultData, metricsBuilder.build())
+    withStateLock { _ =>
+      if (isCancelled) {
+        try {
+          resultData match {
+            case c: AutoCloseable => c.close()
+            case _ =>
+          }
+        } finally {
+          try {
+            builtResult.close()
+          } finally {
+            result = None
+          }
+        }
+        throw new CancellationException(s"AsyncRunner $this was cancelled")
+      } else {
+        result = Some(builtResult)
+      }
+    }
     result.get
   }
 
@@ -250,6 +272,70 @@ trait AsyncRunner[T] extends Callable[AsyncResult[T]] {
   //    specifically, to help with handling resource release in `RapidsFutureTask.releaseResource`.
   private[async] var result: Option[AsyncResult[T]] = None
 
+  @volatile private var attachedFuture: Option[Future[_]] = None
+  @volatile private var isCancelledFlag = false
+
+  /** Attach the future executing this runner so cancellation can be observed. */
+  def attachFuture(future: Future[_]): Unit = {
+    this.attachedFuture = Some(future)
+  }
+
+  /**
+   * Cancel the async runner. If execution has already produced a result that has not
+   * yet been consumed, or if execution produces a result after cancellation, the result
+   * is automatically closed and released to prevent leaks. Cancellation is recorded
+   * immediately without blocking on running worker threads.
+   */
+  def cancel(): Unit = {
+    isCancelledFlag = true
+    if (stateLock.isHeldByCurrentThread) {
+      setState(Cancelled)
+      cleanUpResult()
+    } else if (stateLock.tryLock()) {
+      try {
+        setState(Cancelled)
+        cleanUpResult()
+      } finally {
+        stateLock.unlock()
+      }
+    }
+  }
+
+  def isCancelled: Boolean =
+    isCancelledFlag || (state == Cancelled) || attachedFuture.exists(_.isCancelled)
+
+  /**
+   * Release and close any allocated result data if the runner was cancelled.
+   */
+  def cleanUpResult(): Unit = {
+    def doClean(): Unit = {
+      result.foreach { r =>
+        try {
+          r.data match {
+            case c: AutoCloseable => c.close()
+            case _ =>
+          }
+        } finally {
+          try {
+            r.close()
+          } finally {
+            result = None
+          }
+        }
+      }
+    }
+
+    if (stateLock.isHeldByCurrentThread) {
+      doClean()
+    } else if (stateLock.tryLock()) {
+      try {
+        doClean()
+      } finally {
+        stateLock.unlock()
+      }
+    }
+  }
+
   protected[async] var releaseResourceCallback: () => Unit = () => {}
 
   private[async] lazy val metricsBuilder = new AsyncMetricsBuilder
@@ -293,12 +379,15 @@ trait AsyncRunner[T] extends Callable[AsyncResult[T]] {
    * no other thread can modify the state of the AsyncRunner during the execution.
    */
   def withStateLock[R](fn: AsyncRunner[T] => R): R = {
-    require(!stateLock.isHeldByCurrentThread, "withStateLock should not be called recursively")
-    stateLock.lock()
-    try {
+    if (stateLock.isHeldByCurrentThread) {
       fn(this)
-    } finally {
-      stateLock.unlock()
+    } else {
+      stateLock.lock()
+      try {
+        fn(this)
+      } finally {
+        stateLock.unlock()
+      }
     }
   }
 
