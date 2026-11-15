@@ -19,7 +19,7 @@ package com.nvidia.spark.rapids
 import java.io.{File, FileNotFoundException, IOException}
 import java.net.{URI, URISyntaxException}
 import java.util.concurrent.{CompletionService, ConcurrentLinkedQueue, ExecutorCompletionService}
-import java.util.concurrent.{Future, ThreadPoolExecutor, TimeUnit, TimeoutException}
+import java.util.concurrent.{Future, ThreadPoolExecutor, TimeoutException, TimeUnit}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 
 import scala.annotation.tailrec
