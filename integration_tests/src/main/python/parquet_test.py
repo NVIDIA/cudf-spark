@@ -801,6 +801,26 @@ def test_parquet_read_buffer_allocation_empty_blocks(spark_tmp_path, v1_enabled_
             conf=all_confs)
 
 
+@pytest.mark.parametrize('keep_order', [
+    True,
+    pytest.param(False, marks=pytest.mark.ignore_order(local=True))])
+def test_parquet_multithreaded_read_max_num_files_parallel(spark_tmp_path, keep_order):
+    gen_list = [('id', int_gen), ('s', string_gen)]
+    data_path = spark_tmp_path + '/PARQUET_SMALL'
+    with_cpu_session(
+        lambda spark: gen_df(spark, gen_list).repartition(10).write.parquet(data_path))
+    conf = {
+        'spark.rapids.sql.format.parquet.reader.type': 'MULTITHREADED',
+        'spark.rapids.sql.format.parquet.multiThreadedRead.maxNumFilesParallel': '1',
+        'spark.rapids.sql.reader.multithreaded.combine.sizeBytes': '64m',
+        'spark.rapids.sql.reader.multithreaded.read.keepOrder': keep_order,
+        'spark.sql.files.maxPartitionBytes': '1g',
+        'spark.sql.files.openCostInBytes': '1'
+    }
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(data_path), conf=conf)
+
+
 # The file-name queries read no data columns, which the hybrid reader does not take.
 @pytest.mark.parametrize('reader_confs', reader_opt_confs_with_hybrid_fallback)
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])

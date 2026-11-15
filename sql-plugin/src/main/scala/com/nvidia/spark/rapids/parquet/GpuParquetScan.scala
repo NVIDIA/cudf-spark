@@ -3022,11 +3022,6 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
     keepReadsInOrder, combineConf)
   with ParquetPartitionReaderBase {
 
-  // TODO: replace the config maxNumFileProcessed with the dynamic resource bounded controller,
-  // after the ResourceBoundedThreadPool are supported for all readers.
-  require(files.length <= maxNumFileProcessed,
-    "maxNumFileProcessed should be NOT applied for MultiFileCloudParquetPartitionReader")
-
   def checkIfNeedToSplit(current: HostMemoryBuffersWithMetaData,
       next: HostMemoryBuffersWithMetaData): Boolean = {
 
