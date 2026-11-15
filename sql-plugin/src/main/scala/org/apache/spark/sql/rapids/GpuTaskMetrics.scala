@@ -97,6 +97,8 @@ class GpuTaskMetrics extends Serializable with Logging {
 
   def getMaxHostBytesAllocated: Long = maxHostBytesAllocated
 
+  def getGpuMaxHostMemoryBytes: Long = maxHostMemoryBytes.value.value
+
   def incHostBytesAllocated(bytes: Long, isPinned: Boolean): Unit = {
     GpuTaskMetrics.incHostBytesAllocated(bytes, isPinned)
     maxHostBytesAllocated = maxHostBytesAllocated.max(GpuTaskMetrics.hostBytesAllocated.get())
@@ -432,6 +434,11 @@ object GpuTaskMetrics extends Logging {
       val metrics = taskLevelMetrics.get(tc.taskAttemptId())
       if (metrics == null) 0L else metrics.getSemWaitTime()
     }
+  }
+
+  /** Exposed for testing to simulate task cleanup callback running before other callbacks. */
+  def cleanUpTaskMetrics(taskAttemptId: Long): Unit = {
+    taskLevelMetrics.remove(taskAttemptId)
   }
 
   def get: GpuTaskMetrics = {
