@@ -16,6 +16,8 @@
 
 package com.nvidia.spark.rapids.parquet
 
+import scala.collection.mutable.ArrayBuffer
+
 import ai.rapids.cudf.{ByteRange, DeviceMemoryBuffer, DType, HostMemoryBuffer, HybridScanReader, ParquetOptions, Table}
 import ai.rapids.cudf.ast.{AstExpression, CompiledExpression}
 import com.nvidia.spark.rapids._
@@ -23,6 +25,7 @@ import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
+import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile.CopyRange
 
 import org.apache.spark.TaskContext
 import org.apache.spark.internal.Logging
@@ -457,6 +460,96 @@ object HybridScanPipeline extends Logging {
       ranges: Array[ByteRange]): Array[HostMemoryBuffer] = {
     val layout = hostBufferLayout(ranges)
     ranges.indices.toArray.safeMap(i => buffer.slice(layout.offsets(i), ranges(i).size()))
+  }
+
+  /**
+   * cuFile's alignment for a direct read: 4 KiB. A read goes straight from storage to device
+   * memory only when its file offset, its size and its device address are all multiples of this.
+   * If any of the three is not, the read still succeeds, but cuFile reads the whole of it into its
+   * own GPU bounce buffers and copies it from there, which adds a device copy and loses much of
+   * the benefit of GPUDirect Storage.
+   *
+   * Meeting it costs reading up to one block of unneeded bytes on each side of every span of
+   * ranges, which is small next to the column chunks a hybrid scan reads.
+   */
+  private[parquet] val GDS_ALIGNMENT = 4096L
+
+  private[parquet] def alignDown(value: Long): Long = value - value % GDS_ALIGNMENT
+
+  private[parquet] def alignUp(value: Long): Long = alignDown(value + GDS_ALIGNMENT - 1)
+
+  /**
+   * Where a set of byte ranges lands in a device buffer that starts on a [[GDS_ALIGNMENT]]
+   * boundary.
+   *
+   * @param reads     the reads to issue, at their offsets in the buffer
+   * @param offsets   where each range starts in the buffer, indexed as the ranges are
+   * @param totalSize how large the buffer has to be
+   */
+  private[parquet] case class DeviceBufferLayout(
+      reads: Seq[CopyRange],
+      offsets: Array[Long],
+      totalSize: Long)
+
+  /**
+   * Lay the ranges out in file order, like [[hostBufferLayout]], but read whole aligned blocks of
+   * the file into spans of the buffer that start on a [[GDS_ALIGNMENT]] boundary. Ranges whose
+   * blocks overlap or touch share a span, so bytes that two ranges share, or a block they both
+   * touch, are read once. Each range is sliced from its span at its file offset's position within
+   * the span's blocks.
+   *
+   * Every read's file offset, size and buffer offset are multiples of [[GDS_ALIGNMENT]], except
+   * where a span runs into the end of a file whose size is not a whole number of blocks. A read
+   * cannot go past the end of the file, so its size there cannot be a multiple of the block. That
+   * last partial block is made a read of its own, so that only it goes through cuFile's bounce
+   * buffers and the rest of the span is still read directly.
+   */
+  private[parquet] def deviceBufferLayout(
+      ranges: Array[ByteRange],
+      fileSize: Long): DeviceBufferLayout = {
+    // The reads stop at the end of the file, so a range past it would slice unread memory. An
+    // empty range is never read, so it may be anywhere.
+    ranges.foreach { r =>
+      require(r.size() == 0 ||
+          (r.offset() >= 0 && r.size() > 0 && r.size() <= fileSize - r.offset()),
+        s"range at ${r.offset()} of ${r.size()} bytes is not within the file of $fileSize bytes")
+    }
+    val offsets = new Array[Long](ranges.length)
+    val reads = new ArrayBuffer[CopyRange]()
+    var totalSize = 0L
+    var spanStart = 0L
+    var blocksStart = -1L
+    var blocksEnd = -1L
+
+    def endSpan(): Unit = {
+      if (blocksStart >= 0) {
+        val readEnd = math.min(blocksEnd, fileSize)
+        val alignedEnd = alignDown(readEnd)
+        if (alignedEnd > blocksStart) {
+          reads += new CopyRange(blocksStart, alignedEnd - blocksStart, spanStart)
+        }
+        if (readEnd > alignedEnd) {
+          reads += new CopyRange(alignedEnd, readEnd - alignedEnd,
+            spanStart + alignedEnd - blocksStart)
+        }
+        totalSize = spanStart + blocksEnd - blocksStart
+      }
+    }
+
+    // An empty range has nothing to read and keeps offset 0, which any buffer can slice.
+    ranges.indices.filter(i => ranges(i).size() > 0).sortBy(i => ranges(i).offset()).foreach { i =>
+      val offset = ranges(i).offset()
+      if (alignDown(offset) > blocksEnd) {
+        endSpan()
+        spanStart = totalSize
+        blocksStart = alignDown(offset)
+      }
+      // A range nested in an earlier one ends before it, so the span keeps the furthest end.
+      blocksEnd = math.max(blocksEnd, alignUp(offset + ranges(i).size()))
+      offsets(i) = spanStart + offset - blocksStart
+    }
+    endSpan()
+    DeviceBufferLayout(reads.toSeq, offsets, totalSize)
   }
 
   /**
