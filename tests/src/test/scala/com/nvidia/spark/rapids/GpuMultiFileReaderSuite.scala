@@ -500,8 +500,10 @@ class GpuMultiFileReaderSuite extends AnyFunSuite with RmmSparkRetrySuiteBase {
         PartitionedFileUtilsShim.newPartitionedFile(
           InternalRow.empty, s"file:///tmp/file$i.dat", 0, 100)
       }.toArray
-      val blockerLatch = new CountDownLatch(1)
-      val runnersSubmitted = new AtomicInteger(0)
+      val file2Blocker = new CountDownLatch(1)
+      val file3Started = new CountDownLatch(1)
+      val file4Started = new CountDownLatch(1)
+      val tasksStarted = new AtomicInteger(0)
 
       val reader = new MultiFileCloudPartitionReaderBase(
         new Configuration(false), files,
@@ -523,10 +525,14 @@ class GpuMultiFileReaderSuite extends AnyFunSuite with RmmSparkRetrySuiteBase {
 
         override def getBatchRunner(tc: TaskContext, file: PartitionedFile,
             conf: Configuration, filters: Array[Filter]): AsyncRunner[BufferInfo] = {
-          runnersSubmitted.incrementAndGet()
           AsyncRunner.newUnboundedTask[BufferInfo](() => {
+            tasksStarted.incrementAndGet()
             if (file.filePath.toString.contains("file2")) {
-              blockerLatch.await()
+              file2Blocker.await()
+            } else if (file.filePath.toString.contains("file3")) {
+              file3Started.countDown()
+            } else if (file.filePath.toString.contains("file4")) {
+              file4Started.countDown()
             }
             new HostMemoryBuffersWithMetaDataBase {
               override def partitionedFile: PartitionedFile = file
@@ -546,18 +552,22 @@ class GpuMultiFileReaderSuite extends AnyFunSuite with RmmSparkRetrySuiteBase {
       }
 
       withResource(reader) { r =>
-        assert(runnersSubmitted.get() == 3)
+        // Batch 1: file0 and file1 complete, file2 is blocked.
         assert(r.next())
         withResource(r.get()) { batch =>
           assert(batch.numRows() == 2)
         }
-        blockerLatch.countDown()
+        // At this point, 2 slots were freed. Unblock file2.
+        file2Blocker.countDown()
+        // Batch 2 triggers refill: BOTH freed slots (file3 and file4) must be submitted and started
         assert(r.next())
-        assert(runnersSubmitted.get() >= 5)
+        assert(file3Started.await(10, java.util.concurrent.TimeUnit.SECONDS))
+        assert(file4Started.await(10, java.util.concurrent.TimeUnit.SECONDS))
+        assert(tasksStarted.get() >= 5)
         while (r.next()) {
           withResource(r.get()) { _ => }
         }
-        assert(runnersSubmitted.get() == 6)
+        assert(tasksStarted.get() == 6)
       }
     } finally {
       TrampolineUtil.unsetTaskContext()
