@@ -36,6 +36,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.apache.spark.TaskContext
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.execution.datasources.PartitionedFile
+import org.apache.spark.sql.rapids.execution.TrampolineUtil
+import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -404,5 +406,87 @@ class GpuMultiFileReaderSuite extends AnyFunSuite with RmmSparkRetrySuiteBase {
         }
       }
     }
+  }
+
+  private class MultiFileParallelLimitReader(
+      inputFiles: Array[PartitionedFile],
+      ordered: Boolean,
+      maxParallel: Int)
+    extends MultiFileCloudPartitionReaderBase(
+      new Configuration(false), inputFiles,
+      new ThreadPoolConfBuilder(4, true, 1L << 20, 10000L, false).build(),
+      maxParallel, Array.empty, Map.empty, 1000, 1L << 20,
+      keepReadsInOrder = ordered, combineConf = CombineConf(1L << 20, 200)) {
+
+    override def canUseCombine: Boolean = true
+
+    override def combineHMBs(input: Array[HostMemoryBuffersWithMetaDataBase])
+        : HostMemoryBuffersWithMetaDataBase = {
+      val allBuffers = input.flatMap(_.memBuffersAndSizes)
+      new HostMemoryBuffersWithMetaDataBase {
+        override def partitionedFile: PartitionedFile = input.head.partitionedFile
+        override def memBuffersAndSizes: Array[SingleHMBAndMeta] = allBuffers
+        override def bytesRead: Long = input.map(_.bytesRead).sum
+      }
+    }
+
+    override def getBatchRunner(tc: TaskContext, file: PartitionedFile,
+        conf: Configuration, filters: Array[Filter]): AsyncRunner[BufferInfo] = {
+      AsyncRunner.newUnboundedTask[BufferInfo](() => {
+        new HostMemoryBuffersWithMetaDataBase {
+          override def partitionedFile: PartitionedFile = file
+          override def memBuffersAndSizes: Array[SingleHMBAndMeta] =
+            Array(SingleHMBAndMeta.empty(1))
+          override def bytesRead: Long = 100
+        }
+      })
+    }
+
+    override def readBatches(meta: BufferInfo): Iterator[ColumnarBatch] = {
+      val rows = meta.memBuffersAndSizes.map(_.numRows.toInt).sum
+      Iterator(new ColumnarBatch(Array.empty, rows))
+    }
+
+    override def getFileFormatShortName: String = "test"
+  }
+
+  for (ordered <- Seq(true, false)) {
+    test(s"maxNumFilesParallel below number of files does not fail (ordered=$ordered)") {
+      val context = new MockTaskContext(taskAttemptId = 1L, partitionId = 0)
+      TrampolineUtil.setTaskContext(context)
+      try {
+        val files = (1 to 5).map { i =>
+          PartitionedFileUtilsShim.newPartitionedFile(
+            InternalRow.empty, s"file:///tmp/file$i.dat", 0, 100)
+        }.toArray
+        val reader = new MultiFileParallelLimitReader(files, ordered = ordered, maxParallel = 1)
+        withResource(reader) { r =>
+          var totalRows = 0
+          while (r.next()) {
+            withResource(r.get()) { batch =>
+              totalRows += batch.numRows()
+            }
+          }
+          assert(totalRows == 5)
+        }
+      } finally {
+        TrampolineUtil.unsetTaskContext()
+      }
+    }
+  }
+
+  test("MultiFileCloudParquetPartitionReader permits files.length > maxNumFileProcessed") {
+    val files = (1 to 3).map { i =>
+      PartitionedFileUtilsShim.newPartitionedFile(
+        InternalRow.empty, s"file:///tmp/file$i.parquet", 0, 100)
+    }.toArray
+    val reader = new MultiFileCloudParquetPartitionReader(
+      null, new Configuration(false), files,
+      _ => throw new UnsupportedOperationException("test"),
+      true, None, false, 1000, 1L << 20, 1L << 20, 1L << 20, false, 0,
+      false, CpuCompressionConfig.disabled(), Map.empty, new StructType(),
+      new ThreadPoolConfBuilder(1, true, 1L << 20, 10000L, false).build(),
+      1, false, true, false, false, true, CombineConf(1L << 20, 0))
+    reader.close()
   }
 }
