@@ -220,8 +220,8 @@ class GpuSemaphoreSuite extends AnyFunSuite
     val taskAttemptId = 42L
     val context = new MockTaskContext(taskAttemptId = taskAttemptId, partitionId = 0)
     TrampolineUtil.setTaskContext(context)
+    val taskMetrics = new GpuTaskMetrics
     try {
-      val taskMetrics = new GpuTaskMetrics
       GpuTaskMetrics.registerOnTask(taskMetrics)
 
       // Acquire semaphore so SemaphoreTaskInfo is registered and captures taskMetrics
@@ -235,21 +235,27 @@ class GpuSemaphoreSuite extends AnyFunSuite
       assert(taskMetrics.getSemaphoreHoldingTime > 0,
         "holding time should be recorded on the task's GpuTaskMetrics")
 
-      // Trigger GpuTaskMetrics completion callback first, removing it from taskLevelMetrics
-      // while GpuSemaphore.completeTask has not yet executed.
-      context.markTaskComplete()
+      // Simulate GpuTaskMetrics completion callback running first and removing it
+      // from taskLevelMetrics while GpuSemaphore task completion has not yet executed.
+      GpuTaskMetrics.cleanUpTaskMetrics(taskAttemptId)
 
-      // Calling GpuTaskMetrics.get now returns a throwaway instance
+      // Calling GpuTaskMetrics.get now returns a fresh fallback instance
       assert(GpuTaskMetrics.get ne taskMetrics,
         "GpuTaskMetrics.get after task completion callback should return a fresh fallback instance")
 
-      // Now complete the task in GpuSemaphore: it must update the retained taskMetrics instance,
-      // not the throwaway GpuTaskMetrics.get fallback.
-      GpuSemaphore.completeTask(context)
+      // Prior to task completion, gpuMaxHostMemoryBytes accumulator on taskMetrics
+      // is not yet updated
+      assertResult(0L)(taskMetrics.getGpuMaxHostMemoryBytes)
 
-      assertResult(1024L)(taskMetrics.getMaxHostBytesAllocated)
+      // Trigger task completion via TaskContext. GpuSemaphore.completeTask will run
+      // and must update the retained taskMetrics instance, not the throwaway GpuTaskMetrics.get.
+      context.markTaskComplete()
+
+      assertResult(1024L)(taskMetrics.getGpuMaxHostMemoryBytes)
     } finally {
+      taskMetrics.decHostBytesAllocated(1024L, isPinned = false)
       GpuSemaphore.releaseIfNecessary(context)
+      GpuTaskMetrics.cleanUpTaskMetrics(taskAttemptId)
       TaskRegistryTracker.clearRegistry()
       TrampolineUtil.unsetTaskContext()
       ScalableTaskCompletion.reset()
