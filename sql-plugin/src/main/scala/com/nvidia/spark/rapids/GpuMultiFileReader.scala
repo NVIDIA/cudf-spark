@@ -777,6 +777,7 @@ abstract class MultiFileCloudPartitionReaderBase(
             val hmbAndMeta = convertAsyncResult(taskResult)
             results.append(hmbAndMeta)
             currSize += hmbAndMeta.memBuffersAndSizes.map(_.bytes).sum
+            currNumRows += hmbAndMeta.memBuffersAndSizes.map(_.numRows).sum
             filesToRead -= 1
           }
         } else {
