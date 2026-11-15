@@ -30,6 +30,8 @@ import org.scalatestplus.mockito.MockitoSugar
 import org.apache.spark.TaskContext
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.execution.vectorized.OnHeapColumnVector
+import org.apache.spark.sql.rapids.GpuTaskMetrics
+import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.types.{IntegerType, StructField, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -211,6 +213,47 @@ class GpuSemaphoreSuite extends AnyFunSuite
       GpuSemaphore.releaseIfNecessary(context2)
       TaskRegistryTracker.clearRegistry()
       produced.foreach(_.close())
+    }
+  }
+
+  test("SemaphoreTaskInfo retains task GpuTaskMetrics even when cleanup callback runs first") {
+    GpuDeviceManager.setRmmTaskInitEnabled(false)
+    val taskAttemptId = 42L
+    val context = new MockTaskContext(taskAttemptId = taskAttemptId, partitionId = 0)
+    TrampolineUtil.setTaskContext(context)
+    try {
+      val taskMetrics = new GpuTaskMetrics
+      GpuTaskMetrics.registerOnTask(taskMetrics)
+
+      // Acquire semaphore so SemaphoreTaskInfo is registered and captures taskMetrics
+      GpuSemaphore.acquireIfNecessary(context)
+
+      // Allocate mock host memory tracked by taskMetrics
+      taskMetrics.incHostBytesAllocated(1024L, isPinned = false)
+
+      // Release semaphore to record semaphore holding time
+      GpuSemaphore.releaseIfNecessary(context)
+      assert(taskMetrics.getSemaphoreHoldingTime > 0,
+        "holding time should be recorded on the task's GpuTaskMetrics")
+
+      // Trigger GpuTaskMetrics completion callback first, removing it from taskLevelMetrics
+      // while GpuSemaphore.completeTask has not yet executed.
+      context.markTaskComplete()
+
+      // Calling GpuTaskMetrics.get now returns a throwaway instance
+      assert(GpuTaskMetrics.get ne taskMetrics,
+        "GpuTaskMetrics.get after task completion callback should return a fresh fallback instance")
+
+      // Now complete the task in GpuSemaphore: it must update the retained taskMetrics instance,
+      // not the throwaway GpuTaskMetrics.get fallback.
+      GpuSemaphore.completeTask(context)
+
+      assertResult(1024L)(taskMetrics.getMaxHostBytesAllocated)
+    } finally {
+      GpuSemaphore.releaseIfNecessary(context)
+      TaskRegistryTracker.clearRegistry()
+      TrampolineUtil.unsetTaskContext()
+      ScalableTaskCompletion.reset()
     }
   }
 }
