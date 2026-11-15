@@ -251,6 +251,9 @@ def test_delta_delete_with_deletion_vectors_hybrid_scan_falls_back(spark_tmp_pat
         "spark.databricks.delta.delete.deletionVectors.persistent": "true",
         "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true",
         "spark.rapids.sql.format.parquet.reader.type": "MULTITHREADED",
+        # The chunked reader makes every scan ineligible, which would hide a Delta read that
+        # took the hybrid scan.
+        "spark.rapids.sql.reader.chunked": "false",
         "spark.rapids.sql.format.parquet.hybridScan.enabled": "true",
         "spark.rapids.sql.test.format.parquet.hybridScan.failOnFallback": "false"})
     assert_delta_sql_delete_collect(

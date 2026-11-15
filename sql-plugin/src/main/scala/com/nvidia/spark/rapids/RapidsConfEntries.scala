@@ -70,7 +70,8 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
   val TEST_PARQUET_HYBRID_SCAN_FAIL_ON_FALLBACK =
     conf("spark.rapids.sql.test.format.parquet.hybridScan.failOnFallback")
       .doc("Only to be used in tests. When true and the hybrid scan reader is enabled, fail a " +
-        "PERFILE Parquet scan that would fall back to the parquet-mr path instead of reading it.")
+        "Parquet read that the hybrid scan reader declines instead of reading it on the " +
+        "parquet-mr path.")
       .internal()
       .booleanConf
       .createWithDefault(false)

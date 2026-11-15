@@ -252,10 +252,12 @@ def test_hybrid_scan_retry_oom_in_reader(spark_tmp_path, reader_confs):
 @inject_oom('num_ooms=1,type=GPU')
 @pytest.mark.parametrize('reader_confs', hybrid_reader_confs)
 def test_hybrid_scan_retry_oom_in_stats_pruning(spark_tmp_path, reader_confs):
-    """An OOM while statistics pruning evaluates the filter on the GPU is retried.
+    """An OOM while statistics pruning evaluates the filter on the GPU is retried and the read
+    still succeeds.
 
-    The injection arms an OOM in each retry block. Statistics rule out every row group, so the
-    statistics retry is the only one the read runs.
+    The injection only arms inside retry blocks, so this shows the retry recovers, not that it is
+    there. Statistics rule out every row group, so after compiling the filter, the statistics
+    retry is the only one the read runs.
     """
     data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
     with_cpu_session(lambda spark: write_test_data(spark, data_path))
@@ -440,11 +442,13 @@ def test_hybrid_scan_partitioned_read(spark_tmp_path, reader_confs):
 _missing_col_schema = 'added_int INT, sorted_int INT, filter_int INT'
 
 
-def test_hybrid_scan_filter_on_missing_column(spark_tmp_path):
+@pytest.mark.parametrize('reader_confs', fallback_reader_confs)
+def test_hybrid_scan_filter_on_missing_column(spark_tmp_path, reader_confs):
     """The file lacks `added_int`, so the reader must fail loudly rather than return wrong rows.
 
     The filter is only on `sorted_int`, so statistics pruning succeeds and the read reaches the
-    decoded-schema check.
+    decoded-schema check. parquet-mr would return nulls instead, so this also shows that each
+    reader type really ran the hybrid scan.
     """
     data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
     with_cpu_session(lambda spark: write_test_data(spark, data_path))
@@ -452,7 +456,7 @@ def test_hybrid_scan_filter_on_missing_column(spark_tmp_path):
         lambda: with_gpu_session(
             lambda spark: spark.read.schema(_missing_col_schema).parquet(data_path)
                 .filter('sorted_int < 500').collect(),
-            conf=fallback_conf(**{'spark.sql.parquet.fieldId.read.enabled': False})),
+            conf=copy_and_update(reader_confs, {'spark.sql.parquet.fieldId.read.enabled': False})),
         error_message='a column is missing from the file')
 
 
