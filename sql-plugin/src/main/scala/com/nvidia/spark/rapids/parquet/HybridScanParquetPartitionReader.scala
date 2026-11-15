@@ -449,6 +449,17 @@ object HybridScanPipeline extends Logging {
   }
 
   /**
+   * One slice per range of a buffer laid out by [[hostBufferLayout]], in the order requested.
+   * Each slice holds a reference to the buffer, which stays the caller's to close.
+   */
+  private[parquet] def sliceRanges(
+      buffer: HostMemoryBuffer,
+      ranges: Array[ByteRange]): Array[HostMemoryBuffer] = {
+    val layout = hostBufferLayout(ranges)
+    ranges.indices.toArray.safeMap(i => buffer.slice(layout.offsets(i), ranges(i).size()))
+  }
+
+  /**
    * Whether this scan's reads can go through the hybrid scan reader, reporting why not when they
    * cannot. Reported rather than left silent: the hybrid path is off by default and needs several
    * settings to line up, so a scan that quietly stays on parquet-mr is otherwise hard to tell
@@ -628,11 +639,16 @@ private[parquet] class HybridScanPerFileParquetPartitionReader(
   override def get(): ColumnarBatch = batchIter.next()
 
   override def close(): Unit = {
-    if (batchIter != null) {
-      batchIter.close()
-      batchIter = null
+    withResource(split.source) { _ =>
+      try {
+        if (batchIter != null) {
+          batchIter.close()
+          batchIter = null
+        }
+      } finally {
+        closeFooter()
+      }
     }
-    closeFooter()
   }
 
   private def closeFooter(): Unit = {
