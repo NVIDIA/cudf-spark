@@ -17,7 +17,7 @@
 package com.nvidia.spark.rapids.parquet
 
 import ai.rapids.cudf.ByteRange
-import com.nvidia.spark.rapids.parquet.HybridScanPipeline.{deviceBufferLayout, DeviceBufferLayout, GDS_ALIGNMENT, hostBufferLayout, HostBufferLayout}
+import com.nvidia.spark.rapids.parquet.HybridScanPipeline.{deviceBufferLayout, hostBufferLayout, DeviceBufferLayout, GDS_ALIGNMENT, HostBufferLayout}
 import org.scalatest.funsuite.AnyFunSuite
 
 /**
