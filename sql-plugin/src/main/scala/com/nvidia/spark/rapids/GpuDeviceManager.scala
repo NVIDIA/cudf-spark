@@ -214,6 +214,7 @@ object GpuDeviceManager extends Logging {
       Rmm.clearEventHandler()
       GpuShuffleEnv.shutdown()
 
+      PageableMemoryPool.shutdown()
       Rmm.shutdown()
       singletonMemoryInitialized = Uninitialized
     }
@@ -494,7 +495,7 @@ object GpuDeviceManager extends Logging {
 
   private def initializePinnedPoolAndOffHeapLimits(gpuId: Int, conf: RapidsConf,
                                                    sparkConf: SparkConf): Unit = {
-    val (pinnedSize, nonPinnedLimit) = getPinnedPoolAndOffHeapLimits(
+    val (pinnedSize, pageableSize, nonPinnedLimit) = getHostPoolAndOffHeapLimits(
       conf, sparkConf, Cuda.getDeviceCount)
     // disable the cuDF provided default pinned pool for now
     if (!PinnedMemoryPool.configureDefaultCudfPinnedPoolSize(0L)) {
@@ -511,6 +512,11 @@ object GpuDeviceManager extends Logging {
       logInfo(s"Initializing pinned memory pool (${pinnedSize / 1024 / 1024.0} MiB)${logDetails}")
       PinnedMemoryPool.initialize(pinnedSize, gpuId, conf.pinnedPoolCuioDefault, initThreads)
     }
+    if (!PageableMemoryPool.isInitialized && pageableSize > 0) {
+      logInfo(s"Initializing pre-touched pageable memory pool " +
+        s"(${pageableSize / 1024 / 1024.0} MiB, ${conf.pageablePoolPretouchThreads} threads)")
+      PageableMemoryPool.initialize(pageableSize, conf.pageablePoolPretouchThreads)
+    }
     // Host memory limits must be set after the pinned memory pool is initialized
     HostAlloc.initialize(nonPinnedLimit)
     // Fill the MULTITHREAD_READ_MEMORY_LIMIT_SIZE with 90% of the total off-heap memory
@@ -518,7 +524,7 @@ object GpuDeviceManager extends Logging {
     // falls back to a hardware-derived estimate via computeEffectiveOffHeapLimit.
     if (conf.multiThreadReadMemoryLimit == 0) {
       sparkConf.set(RapidsConf.MULTITHREAD_READ_MEMORY_LIMIT_SIZE.key,
-        computeMtReadLimit(pinnedSize, nonPinnedLimit, conf, sparkConf,
+        computeMtReadLimit(pinnedSize + pageableSize, nonPinnedLimit, conf, sparkConf,
           Cuda.getDeviceCount).toString)
     }
   }
@@ -675,6 +681,33 @@ object GpuDeviceManager extends Logging {
 
     } else {
       (confPinnedSize, -1L)
+    }
+  }
+
+  // visible for testing
+  def getHostPoolAndOffHeapLimits(conf: RapidsConf, sparkConf: SparkConf, deviceCount: Int,
+      memCheck: MemoryChecker = MemoryCheckerImpl): (Long, Long, Long) = {
+    val (pinnedSize, nonPinnedBeforePageable) =
+      getPinnedPoolAndOffHeapLimits(conf, sparkConf, deviceCount, memCheck)
+    val configuredPageableSize = conf.pageablePoolSize
+
+    if (nonPinnedBeforePageable < 0) {
+      // Off-heap tracking is disabled, so neither pool is deducted from an allocation limit.
+      (pinnedSize, configuredPageableSize, nonPinnedBeforePageable)
+    } else {
+      val pageableSize = math.min(configuredPageableSize, nonPinnedBeforePageable)
+      if (pageableSize < configuredPageableSize) {
+        logWarning(s"The configured pageable memory " +
+          s"${configuredPageableSize / 1024 / 1024.0} MiB is larger than the remaining " +
+          s"off-heap limit ${nonPinnedBeforePageable / 1024 / 1024.0} MiB; dropping pageable " +
+          s"memory to ${pageableSize / 1024 / 1024.0} MiB")
+      }
+      val nonPinnedLimit = nonPinnedBeforePageable - pageableSize
+      logWarning(s"Off Heap Host Memory after pageable reservation: " +
+        s"${pinnedSize / 1024 / 1024.0} MiB pinned, " +
+        s"${pageableSize / 1024 / 1024.0} MiB pageable, and " +
+        s"${nonPinnedLimit / 1024 / 1024.0} MiB dynamically allocated non-pinned memory.")
+      (pinnedSize, pageableSize, nonPinnedLimit)
     }
   }
 

@@ -21,6 +21,7 @@ import scala.util.{Failure, Success, Try}
 
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.iceberg.{IcebergEncryptionSupport, IcebergFormatVersionSupport, ShimUtils}
+import com.nvidia.spark.rapids.parquet.GpuParquetScan
 import org.apache.iceberg.ScanTaskGroup
 import org.apache.iceberg.spark.GpuSparkReadConf
 import org.apache.iceberg.types.Types
@@ -28,6 +29,7 @@ import org.apache.iceberg.types.Types
 import org.apache.spark.sql.connector.metric.{CustomMetric, CustomTaskMetric}
 import org.apache.spark.sql.connector.read.{Batch, Scan, Statistics, SupportsReportStatistics}
 import org.apache.spark.sql.connector.read.streaming.MicroBatchStream
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.StructType
 
 
@@ -110,7 +112,9 @@ object GpuSparkScan {
       case _ =>
     }
 
-    FileFormatChecks.tag(meta, meta.wrapped.readSchema(), IcebergFormatType, ReadFileOp)
+    val readSchema = meta.wrapped.readSchema()
+    GpuParquetScan.tagVariantSupport(readSchema, meta, SQLConf.get)
+    FileFormatChecks.tag(meta, readSchema, IcebergFormatType, ReadFileOp)
 
     Try {
       GpuSparkScan.isMetadataScan(meta.wrapped)

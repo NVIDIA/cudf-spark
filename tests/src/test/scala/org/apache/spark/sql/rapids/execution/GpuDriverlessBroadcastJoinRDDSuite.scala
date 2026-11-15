@@ -17,7 +17,7 @@ package org.apache.spark.sql.rapids.execution
 
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 
-import com.nvidia.spark.rapids.{GpuMetric, GpuOpTimeTrackingRDD}
+import com.nvidia.spark.rapids.{GpuMetric, GpuOpTimeTrackingRDD, RapidsConf}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuite
@@ -25,8 +25,10 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.apache.spark.{FetchFailed, HashPartitioner, NarrowDependency, ShuffleDependency, SparkConf, SparkContext, SparkEnv, SparkException, TaskContext}
 import org.apache.spark.scheduler.{SparkListener, SparkListenerTaskEnd}
 import org.apache.spark.shuffle.FetchFailedException
-import org.apache.spark.sql.execution.metric.SQLMetrics
+import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 import org.apache.spark.sql.rapids.ShuffleReadSnapshot
+import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.vectorized.ColumnarBatch
 
 private object BroadcastReplicaRetryState {
   @volatile var firstBuilt = new CountDownLatch(1)
@@ -59,6 +61,44 @@ class GpuDriverlessBroadcastJoinRDDSuite extends AnyFunSuite with BeforeAndAfter
     } finally {
       super.afterAll()
     }
+  }
+
+  private def materializedBuildWithLocation(): DriverlessBroadcastBuildRDD = {
+    val shuffled = context.parallelize(Seq(0 -> (null: ColumnarBatch)), 1)
+      .partitionBy(new HashPartitioner(1))
+    assert(shuffled.count() == 1)
+    val dependency = shuffled.dependencies.head
+      .asInstanceOf[ShuffleDependency[Int, ColumnarBatch, ColumnarBatch]]
+    val metrics = Map.empty[String, SQLMetric]
+    val ordinaryShuffle = new ShuffledBatchRDD(dependency, metrics)
+    assert(ordinaryShuffle.preferredLocations(ordinaryShuffle.partitions(0)).nonEmpty,
+      "The materialized ordinary shuffle must expose a real producer location")
+    new DriverlessBroadcastBuildRDD(dependency, metrics, StructType(Nil), Nil, Map.empty,
+      new RapidsConf(Map("spark.rapids.shuffle.compression.codec" -> "none")))
+  }
+
+  test("broadcast build locality does not place consumers on its producer") {
+    val stream = context.parallelize(Seq(1, 2), 2)
+    val build = materializedBuildWithLocation()
+    val joined = new GpuDriverlessBroadcastJoinRDD[Int, ColumnarBatch, Int](stream, build,
+      (input, _) => input)
+    assert(joined.preferredLocations(joined.partitions(0)).isEmpty)
+    for (partition <- joined.partitions.indices) {
+      assert(context.getPreferredLocs(joined, partition).isEmpty,
+        "Scheduler dependency traversal must not inherit the broadcast producer location")
+    }
+    assert(joined.dependencies(1).rdd eq build)
+    assert(joined.dependencies(1).asInstanceOf[NarrowDependency[ColumnarBatch]]
+      .getParents(1) == Seq(0))
+  }
+
+  test("broadcast consumers retain valid stream locality") {
+    val streamHost = "stream-host"
+    val stream = context.makeRDD(Seq(1 -> Seq(streamHost)))
+    val build = materializedBuildWithLocation()
+    val joined = new GpuDriverlessBroadcastJoinRDD[Int, ColumnarBatch, Int](stream, build,
+      (input, _) => input)
+    assert(context.getPreferredLocs(joined, 0).map(_.host) == Seq(streamHost))
   }
 
   test("the scheduler materializes the build shuffle before running its consumers") {

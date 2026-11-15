@@ -19,7 +19,7 @@ from conftest import is_dataproc_serverless_runtime
 from data_gen import *
 from marks import approximate_float, datagen_overrides, ignore_order, disable_ansi_mode
 from spark_session import with_cpu_session, is_databricks_version, is_spark_359, \
-    is_spark_403_or_404, is_spark_412_or_later, is_spark_420_or_later
+    is_spark_403_through_405, is_spark_412_or_later, is_spark_420_or_later
 import pyspark.sql.functions as f
 
 # Each descriptor contains a list of data generators and a corresponding boolean
@@ -63,10 +63,10 @@ ast_descrs = [
 ast_boolean_descr = [(boolean_gen, True)]
 ast_double_descr = [(double_gen, True)]
 # AST is not expressive enough to support the ACOSH Spark emulation expression in Spark 3.5.9,
-# Spark 4.0.3, Spark 4.0.4, DBR 18.3, and Spark 4.1.2+.
+# Spark 4.0.3 through Spark 4.0.5, DBR 18.3, and Spark 4.1.2+.
 ast_acosh_descr = [(
     double_gen,
-    not (is_spark_359() or is_spark_403_or_404() or is_databricks_version(18, 3) or
+    not (is_spark_359() or is_spark_403_through_405() or is_databricks_version(18, 3) or
          is_spark_412_or_later()))]
 
 _project_ast_enabled_conf = {"spark.rapids.sql.projectAstEnabled": "true"}
