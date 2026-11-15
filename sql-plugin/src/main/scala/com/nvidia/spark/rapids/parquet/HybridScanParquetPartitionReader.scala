@@ -452,13 +452,14 @@ object HybridScanPipeline extends Logging {
   }
 
   /**
-   * One slice per range of a buffer laid out by [[hostBufferLayout]], in the order requested.
-   * Each slice holds a reference to the buffer, which stays the caller's to close.
+   * One slice per range of a buffer laid out as `layout`, which [[hostBufferLayout]] computed for
+   * `ranges`, in the order requested. Each slice holds a reference to the buffer, which stays the
+   * caller's to close.
    */
   private[parquet] def sliceRanges(
       buffer: HostMemoryBuffer,
-      ranges: Array[ByteRange]): Array[HostMemoryBuffer] = {
-    val layout = hostBufferLayout(ranges)
+      ranges: Array[ByteRange],
+      layout: HostBufferLayout): Array[HostMemoryBuffer] = {
     ranges.indices.toArray.safeMap(i => buffer.slice(layout.offsets(i), ranges(i).size()))
   }
 

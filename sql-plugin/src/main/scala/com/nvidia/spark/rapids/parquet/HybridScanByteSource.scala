@@ -38,10 +38,10 @@ import org.apache.hadoop.fs.Path
  */
 private[parquet] trait HybridScanByteSource extends AutoCloseable {
   /**
-   * Fetch `ranges` into one host buffer laid out by [[HybridScanPipeline.hostBufferLayout]]. The
-   * caller owns the buffer.
+   * Fetch `ranges` into one host buffer laid out as `layout`, which
+   * [[HybridScanPipeline.hostBufferLayout]] computed for them. The caller owns the buffer.
    */
-  def fetchToHostBuffer(ranges: Array[ByteRange]): HostMemoryBuffer
+  def fetchToHostBuffer(ranges: Array[ByteRange], layout: HostBufferLayout): HostMemoryBuffer
 
   /**
    * Fetch `ranges` into host memory, returning one buffer per range in the order requested. An
@@ -52,7 +52,10 @@ private[parquet] trait HybridScanByteSource extends AutoCloseable {
     if (ranges.isEmpty) {
       Array.empty
     } else {
-      withResource(fetchToHostBuffer(ranges))(HybridScanPipeline.sliceRanges(_, ranges))
+      val layout = HybridScanPipeline.hostBufferLayout(ranges)
+      withResource(fetchToHostBuffer(ranges, layout)) { buffer =>
+        HybridScanPipeline.sliceRanges(buffer, ranges, layout)
+      }
     }
   }
 
@@ -91,8 +94,9 @@ private[parquet] class HybridScanFileByteSource(
   def this(fileIO: RapidsFileIO, filePath: Path, execMetrics: Map[String, GpuMetric]) =
     this(fileIO, filePath, execMetrics, new RapidsFileIORangeReader(execMetrics))
 
-  override def fetchToHostBuffer(ranges: Array[ByteRange]): HostMemoryBuffer = {
-    val layout = HybridScanPipeline.hostBufferLayout(ranges)
+  override def fetchToHostBuffer(
+      ranges: Array[ByteRange],
+      layout: HostBufferLayout): HostMemoryBuffer = {
     val buffer = withRetryNoSplit[HostMemoryBuffer] {
       HostMemoryBuffer.allocate(layout.totalSize)
     }
