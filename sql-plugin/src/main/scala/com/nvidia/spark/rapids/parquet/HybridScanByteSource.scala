@@ -165,10 +165,12 @@ private[parquet] class HybridScanFileByteSource(
     } else {
       import HybridScanFileByteSource._
       val layout = deviceBufferLayout(ranges, rangeReader.fileSize)
-      // RMM aligns an allocation to only 256 bytes, so the slack lets the layout start on an
-      // aligned address. Each slice holds a reference to the allocation, so closing it here
-      // leaves the slices valid and releases the memory, slack included, once the last one is
-      // closed.
+      // cuFile reads directly only to a device address that is a multiple of GDS_ALIGNMENT. The
+      // layout's reads land at aligned offsets in the buffer, so the buffer itself must start on
+      // an aligned address, which RMM does not guarantee: it aligns an allocation to only 256
+      // bytes. The slack lets the buffer start at the first aligned address in the allocation.
+      // Each slice holds a reference to the allocation, so closing it here leaves the slices
+      // valid and releases the memory, slack included, once the last one is closed.
       withResource(DeviceMemoryBuffer.allocate(layout.totalSize + GDS_ALIGNMENT - 1)) { alloc =>
         val start = alignUp(alloc.getAddress) - alloc.getAddress
         withResource(alloc.slice(start, layout.totalSize)) { buffer =>
@@ -188,9 +190,14 @@ private[parquet] class HybridScanFileByteSource(
 
 private[parquet] object HybridScanFileByteSource {
   /**
-   * cuFile reads straight to the device only when the file offset, the size and the device
-   * address of a read are all multiples of this. Otherwise it stages the whole read through its
-   * own GPU bounce buffers.
+   * cuFile's alignment for a direct read: 4 KiB. A read goes straight from storage to device
+   * memory only when its file offset, its size and its device address are all multiples of this.
+   * If any of the three is not, the read still succeeds, but cuFile reads the whole of it into its
+   * own GPU bounce buffers and copies it from there, which adds a device copy and loses much of
+   * the benefit of GPUDirect Storage.
+   *
+   * Meeting it costs reading up to one block of unneeded bytes on each side of every span of
+   * ranges, which is small next to the column chunks a hybrid scan reads.
    */
   val GDS_ALIGNMENT = 4096L
 
@@ -215,9 +222,11 @@ private[parquet] object HybridScanFileByteSource {
    * or a block they both touch, are read once. Each range is sliced from its span at its file
    * offset's position within the span's blocks.
    *
-   * Every read is aligned except where a span runs into the end of a file whose size is not a
-   * whole number of blocks: that last partial block is a read of its own, so that only it is
-   * unaligned.
+   * Every read's file offset, size and buffer offset are multiples of [[GDS_ALIGNMENT]], except
+   * where a span runs into the end of a file whose size is not a whole number of blocks. A read
+   * cannot go past the end of the file, so its size there cannot be a multiple of the block. That
+   * last partial block is made a read of its own, so that only it goes through cuFile's bounce
+   * buffers and the rest of the span is still read directly.
    */
   def deviceBufferLayout(ranges: Array[ByteRange], fileSize: Long): DeviceBufferLayout = {
     // The reads stop at the end of the file, so a range past it would slice unread memory. An
