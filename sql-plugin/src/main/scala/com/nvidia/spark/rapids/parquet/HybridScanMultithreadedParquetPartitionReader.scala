@@ -289,8 +289,13 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
       val parsed = closeOnExcept(fetched)(_ => HybridScanPipeline.openReader(footer,
         parquetOptions))
       withResource(parsed) { reader =>
-        pipeline.pruneFetchedWithDictionaries(reader, ast, fetched)
+        val table = pipeline.pruneFetchedWithDictionaries(reader, ast, fetched)
           .flatMap(pipeline.materializeFetched(reader, ast, _))
+        if (table.isEmpty) {
+          // Nothing goes downstream, so don't hold the GPU while the next file is fetched.
+          GpuSemaphore.releaseIfNecessary(TaskContext.get())
+        }
+        table
       }
     }
   }
