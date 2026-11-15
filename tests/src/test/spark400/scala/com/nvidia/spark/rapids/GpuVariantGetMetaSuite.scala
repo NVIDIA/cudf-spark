@@ -210,6 +210,21 @@ class GpuVariantGetMetaSuite extends AnyFunSuite {
     }
   }
 
+  test("decimal support metadata reports the nonnegative-scale restriction") {
+    val rule = GpuOverrides.expressions(classOf[VariantGet])
+    val checks = rule.getChecks.get.asInstanceOf[ExprChecks]
+    val support = checks.support(TypeEnum.DECIMAL)(ProjectExprContext)("result")
+    assert(support.text == "PS")
+    support match {
+      case partial: PartiallySupported =>
+        assert(partial.note.exists(_.contains("nonnegative")))
+      case other => fail(s"Expected partial decimal support, got ${other.text}")
+    }
+    val notes = rule.notes().getOrElse(fail("Missing VariantGet support notes"))
+    assert(notes.contains("nonnegative scales. This is not 100% compatible"))
+    assert(rule.incompatDoc.isDefined)
+  }
+
   test("legacy negative decimal scales fall back during planning") {
     val sqlConf = new SQLConf
     sqlConf.setConfString("spark.sql.legacy.allowNegativeScaleOfDecimal", "true")
