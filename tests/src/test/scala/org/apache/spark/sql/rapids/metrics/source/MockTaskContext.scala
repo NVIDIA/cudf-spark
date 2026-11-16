@@ -33,6 +33,7 @@ import org.apache.spark.util.{AccumulatorV2, TaskCompletionListener, TaskFailure
 abstract class MockTaskContextBase(taskAttemptId: Long, partitionId: Int) extends TaskContext {
 
   val listeners = new ListBuffer[TaskCompletionListener]
+  private val preCompletionListeners = new ListBuffer[TaskCompletionListener]
   private val metrics = new TaskMetrics
 
   override def isCompleted(): Boolean = false
@@ -96,6 +97,10 @@ abstract class MockTaskContextBase(taskAttemptId: Long, partitionId: Int) extend
    * This is exposed to invoke the listeners onTaskCompletion
    */
   def markTaskComplete(): Unit = {
+    while (preCompletionListeners.nonEmpty) {
+      val listener = preCompletionListeners.remove(preCompletionListeners.length - 1)
+      listener.onTaskCompletion(this)
+    }
     listeners.foreach(_.onTaskCompletion(this))
   }
 
@@ -116,5 +121,19 @@ abstract class MockTaskContextBase(taskAttemptId: Long, partitionId: Int) extend
 
   private[spark] def createResourceUninterruptibly[T <: Closeable](
       resourceBuilder: => T): T = resourceBuilder
+
+  /**
+   * Introduced in Spark 5.0 (SPARK-60113). Defined without the override keyword so
+   * MockTaskContextBase compiles across all Spark versions.
+   */
+  private[spark] def addTaskPreCompletionListener(
+      listener: TaskCompletionListener): TaskContext = {
+    if (isCompleted()) {
+      addTaskCompletionListener(listener)
+    } else {
+      preCompletionListeners += listener
+    }
+    this
+  }
 
 }
