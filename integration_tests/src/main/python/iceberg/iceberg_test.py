@@ -57,6 +57,93 @@ _NO_FANOUT = _BASE_TBLPROPS_SQL
 pytestmark = iceberg_unsupported_mark
 
 
+def _create_metadata_only_table(spark_tmp_table_factory, format_version):
+    table = get_full_table_name(spark_tmp_table_factory)
+    create_iceberg_table(table, partition_col_sql='p', format_version=format_version,
+                        df_gen=lambda spark: spark.createDataFrame([], 'id long, p string'))
+
+    def populate(spark):
+        spark.sql(f"ALTER TABLE {table} SET TBLPROPERTIES ("
+                  "'read.split.open-file-cost' = '0', 'read.split.target-size' = '268435456')")
+        for value in ['alpha', 'beta', None, 'alpha']:
+            spark.createDataFrame([(i, value) for i in range(7)], 'id long, p string') \
+                .coalesce(1).writeTo(table).append()
+
+    with_cpu_session(populate)
+    return table
+
+
+def _metadata_only_conf(reader_type):
+    return {**iceberg_read_enabled_conf,
+            'spark.sql.iceberg.aggregate-push-down.enabled': 'false',
+            'spark.rapids.sql.format.parquet.reader.type': reader_type,
+            'spark.rapids.sql.reader.batchSizeRows': '5'}
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.parametrize('format_version', iceberg_read_format_versions)
+def test_iceberg_metadata_only_materialize_and_combine(
+        spark_tmp_table_factory, format_version, reader_type):
+    table = _create_metadata_only_table(spark_tmp_table_factory, format_version)
+    conf = _metadata_only_conf(reader_type)
+    for projection in ['p, _spec_id, _partition, _file', 'count(*)', 'p, count(*)']:
+        group_by = ' GROUP BY p' if projection == 'p, count(*)' else ''
+        assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: spark.sql(f"SELECT {projection} FROM {table}{group_by}"), conf=conf)
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.skipif(is_iceberg_remote_catalog() or is_databricks_runtime(),
+                   reason="Temporarily moves data files in a local Hadoop catalog")
+def test_iceberg_metadata_only_does_not_open_data_files(spark_tmp_table_factory, reader_type):
+    table = _create_metadata_only_table(spark_tmp_table_factory, '2')
+    query = f"SELECT p, _spec_id, _partition, _file FROM {table}"
+    conf = _metadata_only_conf(reader_type)
+    expected = with_cpu_session(lambda spark: spark.sql(query).collect(), conf=conf)
+    files = with_cpu_session(
+        lambda spark: spark.sql(f"SELECT file_path FROM {table}.data_files").collect())
+
+    def check_without_files(spark):
+        moved = []
+        try:
+            for row in files:
+                path = spark._jvm.org.apache.hadoop.fs.Path(row.file_path)
+                backup = spark._jvm.org.apache.hadoop.fs.Path(row.file_path + '.metadata-test')
+                fs = path.getFileSystem(spark._jsc.hadoopConfiguration())
+                assert fs.rename(path, backup)
+                moved.append((fs, path, backup))
+            return spark.sql(query).collect()
+        finally:
+            for fs, path, backup in moved:
+                assert fs.rename(backup, path)
+
+    actual = with_gpu_session(check_without_files, conf=conf)
+    assert_equal_with_local_sort(expected, actual)
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.parametrize('format_version', iceberg_format_versions)
+def test_iceberg_metadata_only_with_deletes(spark_tmp_table_factory, format_version, reader_type):
+    table = _create_metadata_only_table(spark_tmp_table_factory, format_version)
+
+    def delete_rows(spark):
+        spark.sql(f"ALTER TABLE {table} SET TBLPROPERTIES ('write.delete.mode' = 'merge-on-read')")
+        spark.sql(f"DELETE FROM {table} WHERE id IN (1, 4)")
+        assert spark.sql(f"SELECT count(*) FROM {table}.delete_files").first()[0] > 0
+
+    with_cpu_session(delete_rows)
+    for projection in ['p, _spec_id, _partition', 'count(*)']:
+        assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: spark.sql(f"SELECT {projection} FROM {table}"),
+            conf=_metadata_only_conf(reader_type))
+
+
 def _is_spark_patch_at_least(version, minimum):
     patch = version.split(".")[2].split("-", 1)[0]
     return int(patch) >= minimum

@@ -38,6 +38,7 @@ class GpuIcebergPartitionReader(
     private val task: GpuSparkInputPartition,
     private val threadConf: ThreadConf,
     private val metrics: Map[String, GpuMetric],
+    private val queryUsesInputFile: Boolean = false,
 ) extends PartitionReader[ColumnarBatch] {
   private var inited = false
   
@@ -45,6 +46,8 @@ class GpuIcebergPartitionReader(
   private lazy val fileIO = table.io()
   private lazy val rapidsFileIO = new IcebergFileIO(fileIO)
   private lazy val conf = newConf()
+  private lazy val scanTasks = GpuSparkScanAccess.taskGroup(task.cpuPartition)
+    .tasks().asScala.map(_.asFileScanTask()).toSeq
   private lazy val (inputFiles, tasks) = collectFiles()
   private lazy val deleteInfoMap =
     tasks.map { case (file, scanTask) =>
@@ -69,7 +72,7 @@ class GpuIcebergPartitionReader(
         }
         file -> filter
     }
-  private lazy val reader: GpuIcebergParquetReader = createDataFileParquetReader()
+  private lazy val reader: GpuIcebergParquetReader = createReader()
 
 
   override def close(): Unit = {
@@ -84,6 +87,21 @@ class GpuIcebergPartitionReader(
 
   override def get(): ColumnarBatch = {
     reader.next()
+  }
+
+  private def createReader(): GpuIcebergParquetReader = {
+    val metadataTasks = if (queryUsesInputFile) {
+      None
+    } else {
+      GpuIcebergMetadataReader.plan(scanTasks, conf.expectedSchema,
+        scanTask => ShimUtils.constantsMap(scanTask, conf.expectedSchema, table))
+    }
+    metadataTasks match {
+      case Some(files) =>
+        inited = true
+        new GpuIcebergMetadataReader(files, conf)
+      case None => createDataFileParquetReader()
+    }
   }
 
   private def createDataFileParquetReader() = {
@@ -108,12 +126,7 @@ class GpuIcebergPartitionReader(
   }
 
   private def collectFiles() = {
-    val tasks: Seq[FileScanTask] = GpuSparkScanAccess
-      .taskGroup(task.cpuPartition)
-      .tasks()
-      .asScala
-      .map(t => t.asFileScanTask())
-      .toSeq
+    val tasks = scanTasks
 
     val inputFiles = tasks.flatMap(t => Seq(t.file()) ++ t.deletes().asScala)
       .map(f => locationOf(f) -> rapidsFileIO.newInputFile(locationOf(f)))
