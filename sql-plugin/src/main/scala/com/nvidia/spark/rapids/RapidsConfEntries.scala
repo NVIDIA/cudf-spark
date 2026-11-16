@@ -51,6 +51,15 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .booleanConf
     .createWithDefault(false)
 
+  val TEST_INPUT_FILE_NAME_MAX_STRING_BYTES =
+    conf("spark.rapids.sql.test.inputFileName.maxStringBytes")
+      .doc("Only to be used in tests. The most string bytes a single batch may need for the " +
+        "input_file_name() column before the scan slices it. Lower it to exercise slicing " +
+        "with small data. The default is the cudf string column limit.")
+      .internal()
+      .longConf
+      .createWithDefault(Int.MaxValue.toLong)
+
   val TEST_CONF = conf("spark.rapids.sql.test.enabled")
     .doc("Intended to be used by unit tests, if enabled all operations must run on the " +
       "GPU or an error happens.")
