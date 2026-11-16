@@ -10,7 +10,7 @@ description: This site serves as a collection of documentation about the NVIDIA 
 for your Spark workloads, please go to our User Guide for more information: [link](https://docs.nvidia.com/spark-rapids/user-guide/latest/index.html).**
 
 The cuDF plugin leverages GPUs to accelerate processing via the
-[RAPIDS libraries](http://rapids.ai).
+[RAPIDS libraries](https://docs.nvidia.com/datascience/).
 
 As data scientists shift from using traditional analytics to leveraging AI(DL/ML) applications that 
 better model complex market demands, traditional CPU-based processing can no longer keep up without 
