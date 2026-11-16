@@ -45,8 +45,9 @@ abstract class HistoryHeuristic(store: () => MetricStore) extends Logging {
   def name: String
 
   /**
-   * Whether this heuristic's own `spark.rapids.sql.history.<name>.enabled` switch is on. Read once
-   * at driver plugin init, and only consulted when a history provider is requested.
+   * Whether this heuristic is switched on in `conf`. By convention each heuristic has its own
+   * `spark.rapids.sql.history.<name>.enabled` setting, but nothing enforces that name. Read once at
+   * driver plugin init, and only consulted when a history provider is requested.
    */
   def enabled(conf: RapidsConf): Boolean
 
