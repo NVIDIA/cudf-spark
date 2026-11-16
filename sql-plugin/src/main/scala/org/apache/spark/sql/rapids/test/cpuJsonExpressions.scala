@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.
+ * Copyright (c) 2024-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -269,9 +269,11 @@ object CpuGetJsonObject {
           while (currRow < dataCv.getRowCount.toInt &&
               diffRowsNum < saveRowsForVerify
           ) {
-            val str = dataHCV.getJavaString(currRow)
-            val cpuStr = if (fromCpuHCV.isNull(currRow)) null else fromCpuHCV.getJavaString(currRow)
-            val gpuStr = if (fromGpuHCV.isNull(currRow)) null else fromGpuHCV.getJavaString(currRow)
+            val str = if (dataHCV.isNull(currRow)) null else dataHCV.getJavaString(currRow)
+            val cpuStr =
+              if (fromCpuHCV.isNull(currRow)) null else fromCpuHCV.getJavaString(currRow)
+            val gpuStr =
+              if (fromGpuHCV.isNull(currRow)) null else fromGpuHCV.getJavaString(currRow)
             if (!Objects.equals(cpuStr, gpuStr)) { // if have diff
               diffRowsNum += 1
               // mask customer data
@@ -297,7 +299,9 @@ object CpuGetJsonObject {
         resultBuilder =>
           val pathLiteral = Literal.create(path, StringType)
           for (i <- 0 until dataHCV.getRowCount.toInt) {
-            val json = dataHCV.getUTF8String(i)
+            // A null json input row must yield null (Spark semantic); reading a
+            // null row via getUTF8String trips cudf's non-null assert.
+            val json = if (dataHCV.isNullAt(i)) null else dataHCV.getUTF8String(i)
             // In order to use `GetJsonObject` directly,
             // here use a literal json and a literal path
             val jsonLiteral = Literal.create(json, StringType)
