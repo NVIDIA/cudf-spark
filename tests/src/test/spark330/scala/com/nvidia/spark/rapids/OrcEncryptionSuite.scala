@@ -15,9 +15,8 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark":["330","350"],"carryForward":"all"}
-{"spark":["350db143","400","401","402","403","411"],"carryForward":"none"}
-{"spark":["404"],"carryForward":"sameMinor"}
+{"spark":["330","350","400","420"],"carryForward":"all"}
+{"spark":["350db143"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids
@@ -53,9 +52,11 @@ class OrcEncryptionSuite extends SparkQueryCompareTestSuite {
     frame =>
       // ORC encryption is only allowed in 3.2+
       val isValidTestForSparkVersion = ShimLoader.getShimVersion match {
-        case SparkShimVersion(major, minor, _) => major == 3 && minor != 1
-        case DatabricksShimVersion(major, minor, _, _) => major == 3 && minor != 1
-        case ClouderaShimVersion(major, minor, _, _) => major == 3 && minor != 1
+        case SparkShimVersion(major, minor, _) => major > 3 || (major == 3 && minor >= 2)
+        case DatabricksShimVersion(major, minor, _, _) =>
+          major > 3 || (major == 3 && minor >= 2)
+        case ClouderaShimVersion(major, minor, _, _) =>
+          major > 3 || (major == 3 && minor >= 2)
         case _ => true
       }
       assume(isValidTestForSparkVersion)

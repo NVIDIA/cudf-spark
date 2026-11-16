@@ -177,7 +177,7 @@ object RapidsConf extends Logging with RapidsConfEntries {
         |On startup use: `--conf [conf key]=[conf value]`. For example:
         |
         |```
-        |${SPARK_HOME}/bin/spark-shell --jars rapids-4-spark_2.12-26.12.0-SNAPSHOT-cuda12.jar \
+        |${SPARK_HOME}/bin/spark-shell --jars cudf-spark_2.12-26.12.0-SNAPSHOT-cuda12.jar \
         |--conf spark.plugins=com.nvidia.spark.SQLPlugin \
         |--conf spark.rapids.sql.concurrentGpuTasks=2
         |```
@@ -454,6 +454,10 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val pinnedPoolSize: Long = get(PINNED_POOL_SIZE)
 
+  lazy val pageablePoolSize: Long = get(PAGEABLE_POOL_SIZE)
+
+  lazy val pageablePoolPretouchThreads: Int = get(PAGEABLE_POOL_PRETOUCH_THREADS)
+
   lazy val pinnedPoolCuioDefault: Boolean = get(PINNED_POOL_SET_CUIO_DEFAULT)
 
   lazy val pinnedPoolParallelInitThreads: String = get(PINNED_POOL_PARALLEL_INIT_THREADS)
@@ -561,6 +565,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val needDecimalGuarantees: Boolean = get(NEED_DECIMAL_OVERFLOW_GUARANTEES)
 
   lazy val gpuTargetBatchSizeBytes: Long = get(GPU_BATCH_SIZE_BYTES)
+
+  lazy val historyMetricsProvider: String = get(HISTORY_METRICS_PROVIDER)
 
   lazy val isWindowCollectListEnabled: Boolean = get(ENABLE_WINDOW_COLLECT_LIST)
 
@@ -897,6 +903,9 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val shuffleUcxHostBounceBuffersCount: Int = get(SHUFFLE_UCX_BOUNCE_BUFFERS_HOST_COUNT)
 
+  lazy val shuffleUcxCleanupOnQueryEndEnabled: Boolean =
+    get(SHUFFLE_UCX_CLEANUP_ON_QUERY_END_ENABLED)
+
   lazy val shuffleMaxClientThreads: Int = get(SHUFFLE_MAX_CLIENT_THREADS)
 
   lazy val shuffleMaxClientTasks: Int = get(SHUFFLE_MAX_CLIENT_TASKS)
@@ -908,6 +917,10 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val shuffleMaxMetadataSize: Long = get(SHUFFLE_MAX_METADATA_SIZE)
 
   lazy val shuffleCompressionCodec: String = get(SHUFFLE_COMPRESSION_CODEC)
+
+  lazy val driverlessBroadcastMaxExecutors: Int = get(DRIVERLESS_BROADCAST_MAX_EXECUTORS)
+
+  lazy val isDriverlessBroadcastEnabled: Boolean = get(DRIVERLESS_BROADCAST_ENABLED)
 
   lazy val shuffleCompressionLz4ChunkSize: Long = get(SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE)
 
@@ -1016,6 +1029,9 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val allowDisableEntirePlan: Boolean = get(ALLOW_DISABLE_ENTIRE_PLAN)
 
   lazy val useArrowCopyOptimization: Boolean = get(USE_ARROW_OPT)
+
+  lazy val hostColumnarToGpuReleaseSemaphore: Boolean =
+    get(HOST_COLUMNAR_TO_GPU_RELEASE_SEMAPHORE)
 
   lazy val getCloudSchemes: Seq[String] =
     DEFAULT_CLOUD_SCHEMES ++ get(CLOUD_SCHEMES).getOrElse(Seq.empty)

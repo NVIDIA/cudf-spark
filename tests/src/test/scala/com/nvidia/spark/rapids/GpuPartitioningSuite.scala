@@ -34,7 +34,7 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.{SparkConf, TaskContext}
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.{ExprId, Expression, Literal, Murmur3Hash, Pmod}
+import org.apache.spark.sql.catalyst.expressions.{Expression, ExprId, Literal, Murmur3Hash, Pmod}
 import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, RangePartitioning}
 import org.apache.spark.sql.functions.{col, count, lit}
 import org.apache.spark.sql.rapids.GpuShuffleEnv
