@@ -62,8 +62,8 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
     maxNumFileProcessed: Int,
     ignoreMissingFiles: Boolean,
     keepReadsInOrder: Boolean)
-  extends MultiFileCloudPartitionReaderBase(conf, files, poolConf, maxNumFileProcessed, null,
-    context.execMetrics, maxReadBatchSizeRows, maxReadBatchSizeBytes,
+  extends MultiFileCloudPartitionReaderBase(conf, files, poolConf, maxNumFileProcessed,
+    /* filters */ null, context.execMetrics, maxReadBatchSizeRows, maxReadBatchSizeBytes,
     keepReadsInOrder = keepReadsInOrder)
   with MultiFileReaderFunctions {
 
@@ -87,6 +87,9 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
       override val memBuffersAndSizes: Array[SingleHMBAndMeta],
       override val bytesRead: Long)
     extends HostMemoryBuffersWithMetaDataBase {
+    /** The single spillable buffer holding every column chunk. */
+    def chunkBuffer: SpillableHostBuffer = memBuffersAndSizes.head.hmbs.head
+
     // SpillableHostBuffer.close is idempotent, so this stays idempotent like the base close.
     override def close(): Unit = {
       footer.close()
@@ -241,9 +244,10 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
         buffer.incRefCount()
         closeOnExcept(SpillableHostBuffer(buffer, buffer.getLength,
             SpillPriorities.ACTIVE_BATCHING_PRIORITY)) { spillBuffer =>
-          val meta = SingleHMBAndMeta(Array(spillBuffer), buffer.getLength, numRows, Seq.empty)
+          val bufferAndMeta =
+            SingleHMBAndMeta(Array(spillBuffer), buffer.getLength, numRows, Seq.empty)
           HybridFileResult(file, spillFooter, fetched.rowGroups, chunkOffsets, chunkSizes,
-            Array(meta), bytesRead)
+            Array(bufferAndMeta), bytesRead)
         }
       }
     }
@@ -251,7 +255,7 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
 
   /** Decode a pool thread's result on the task thread. The result stays the caller's to close. */
   private def decodeResult(result: HybridFileResult): Option[Table] = {
-    val spillBuffer = result.memBuffersAndSizes.head.hmbs.head
+    val spillBuffer = result.chunkBuffer
     // While waiting for the task, the footer and chunks may have been moved to disk to free host
     // memory. Reading them back allocates host memory again, which can fail while it is still
     // short, so retry: a failed attempt frees what it read back and waits for memory.

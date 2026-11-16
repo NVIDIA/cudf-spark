@@ -1516,7 +1516,7 @@ abstract class AbstractGpuParquetMultiFilePartitionReaderFactory(
     hybridScanConfig.foreach { _ =>
       HybridScanPipeline.reportFallback(hybridScanFailOnFallback,
         "the hybrid scan does not support the COALESCING reader, which the AUTO reader type " +
-          "chose because the files are not in the cloud")
+          "chose because none of these files use a cloud scheme")
     }
     val poolConf = poolConfBuilder.build()
     val clippedBlocks = ArrayBuffer[ParquetSingleDataBlockMeta]()
