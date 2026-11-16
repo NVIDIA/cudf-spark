@@ -22,7 +22,7 @@ import java.util.Locale
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
-import com.nvidia.spark.history.{HistoryMetricCatalog, MetricStore, MetricStores}
+import com.nvidia.spark.history.{DimValue, HistoryMetricCatalog, MetricStore, MetricStores}
 import com.nvidia.spark.rapids.{HistoryMetricsManager, RapidsConf}
 
 import org.apache.spark.SparkContext
@@ -71,8 +71,11 @@ abstract class HistoryHeuristic(store: () => MetricStore) extends Logging {
     histories.values.foreach(_.declare(policy))
   }
 
-  /** Dimension value for `ctx` in `metric`. */
-  protected def keyFor(metric: HistoryMetric, ctx: Ctx): String
+  /**
+   * The value of each of `metric`'s dimensions, by name, for `ctx`. Evaluated inside the history
+   * call, so a value the API rejects is contained there and the decision stays static.
+   */
+  protected def keyFor(metric: HistoryMetric, ctx: Ctx): Map[String, DimValue]
 
   /** The decision without history. */
   protected def staticDecision(ctx: Ctx): Decision

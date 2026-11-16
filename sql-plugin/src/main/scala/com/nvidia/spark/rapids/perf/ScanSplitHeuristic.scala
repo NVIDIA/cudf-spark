@@ -22,7 +22,7 @@ import java.security.MessageDigest
 import java.time.Duration
 import java.util.Locale
 
-import com.nvidia.spark.history.{DimValue, MetricStore, MetricStores, Retention}
+import com.nvidia.spark.history.{DimensionSpec, DimValue, MetricStore, MetricStores, Retention}
 import com.nvidia.spark.rapids.{GpuMetric, NoopMetric, RapidsConf, ScanWithMetrics}
 import org.apache.hadoop.fs.Path
 
@@ -58,7 +58,11 @@ object ScanExpansionRatio extends HistoryMetric {
 
   override val version: Int = 1
 
-  override val dimension: String = "table"
+  /** The name of its one dimension, a STRING. */
+  val dimension: String = "table"
+
+  override val dimensions: Seq[DimensionSpec] =
+    Seq(new DimensionSpec(dimension, DimValue.Kind.STRING))
 
   override val retention: Retention = new Retention(Duration.ofDays(7), Duration.ofDays(14))
 }
@@ -137,8 +141,8 @@ class ScanSplitHeuristic(store: () => MetricStore) extends HistoryHeuristic(stor
   def metrics: Seq[HistoryMetric] = Seq(ScanExpansionRatio)
 
   /** Keyed by table. */
-  protected def keyFor(metric: HistoryMetric, ctx: ScanContext): String =
-    ScanSplitHeuristic.capped(ctx.table)
+  protected def keyFor(metric: HistoryMetric, ctx: ScanContext): Map[String, DimValue] =
+    Map(ScanExpansionRatio.dimension -> DimValue.of(ScanSplitHeuristic.capped(ctx.table)))
 
   override protected def planningMaxAge(ctx: ScanContext): Option[Duration] =
     Some(ctx.limits.maxAge)

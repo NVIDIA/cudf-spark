@@ -58,16 +58,18 @@ final class MetricHistory(val family: HistoryMetric, store: () => MetricStore) e
   /**
    * Latest value for `key` within the planning age, or None (untrackable, no data, error).
    *
+   * @param key a value for each of the family's dimensions; evaluated here, so a value the API
+   *            rejects is contained as an untrackable key
    * @param maxAge how old a value may be; defaults to the family's declared planning age. It is
    *               a lookup window only, never declared, and never longer than the storage
    *               retention, past which the store no longer holds values.
    */
   def latest(
-      key: String,
+      key: => Map[String, DimValue],
       nowMs: Long,
       policy: HistoryPolicy,
       maxAge: Option[Duration] = None): Option[Double] = {
-    dimValue(key).flatMap { dim =>
+    boundKey(key).flatMap { dims =>
       val current = store()
       if (!declaredIn(current, policy)) {
         None
@@ -77,7 +79,7 @@ final class MetricHistory(val family: HistoryMetric, store: () => MetricStore) e
             maxAge.getOrElse(family.retention.planningMaxAge()).toMillis,
             family.retention.storageRetention().toMillis)
           val request = SummaryRequest.builder(family.metric)
-            .bind(family.dimension, dim)
+            .bound(dims.asJava)
             .window(nowMs - ageMs, nowMs + 1)
             .limit(1)
             .build()
@@ -93,14 +95,17 @@ final class MetricHistory(val family: HistoryMetric, store: () => MetricStore) e
   }
 
   /** Fire-and-forget; the store may drop it. */
-  def record(key: String, value: Double, atMs: Long, policy: HistoryPolicy): Unit = {
+  def record(
+      key: => Map[String, DimValue],
+      value: Double,
+      atMs: Long,
+      policy: HistoryPolicy): Unit = {
     if (MetricHistory.isUsable(value)) {
-      dimValue(key).foreach { dim =>
+      boundKey(key).foreach { dims =>
         val current = store()
         if (declaredIn(current, policy)) {
           try {
-            current.record(new Observation(family.metric,
-              Collections.singletonMap(family.dimension, dim), value, atMs))
+            current.record(new Observation(family.metric, dims.asJava, value, atMs))
           } catch {
             case t: Throwable if MetricHistory.isContained(t) =>
               abstain(s"record-${t.getClass.getName}", s"record failed (${t.getClass.getName})")
@@ -176,20 +181,31 @@ final class MetricHistory(val family: HistoryMetric, store: () => MetricStore) e
     }
   }
 
-  /** None for keys over the size cap or not valid UTF-16. */
-  private def dimValue(key: String): Option[DimValue] = {
-    if (key == null || key.isEmpty) {
-      None
-    } else {
-      try {
-        Some(DimValue.of(key))
-      } catch {
-        case _: IllegalArgumentException =>
-          report("untrackable-key", s"History metric ${family.name} v${family.version}: keys " +
-            s"over ${DimValue.MAX_CANONICAL_BYTES - 3} UTF-8 bytes or with malformed characters " +
-            "are not tracked; their decisions stay static")
-          None
+  /**
+   * The key's values, or None for a key the family cannot track: a value over the size cap or
+   * with malformed characters (reported), values that are not the family's dimensions in name and
+   * kind (reported), or an empty string, which names nothing.
+   */
+  private def boundKey(key: => Map[String, DimValue]): Option[Map[String, DimValue]] = {
+    try {
+      val dims = key
+      val declared = family.dimensions.map(d => d.name() -> d.kind()).toMap
+      if (dims.map { case (name, value) => name -> value.kind() } != declared) {
+        report("key-mismatch", s"History metric ${family.name} v${family.version}: the key does " +
+          "not match the declared dimensions; its decisions stay static")
+        None
+      } else if (dims.values.exists(v => v.kind() == DimValue.Kind.STRING &&
+          v.stringValue().isEmpty)) {
+        None
+      } else {
+        Some(dims)
       }
+    } catch {
+      case _: IllegalArgumentException =>
+        report("untrackable-key", s"History metric ${family.name} v${family.version}: keys " +
+          s"over ${DimValue.MAX_CANONICAL_BYTES - 3} UTF-8 bytes or with malformed characters " +
+          "are not tracked; their decisions stay static")
+        None
     }
   }
 

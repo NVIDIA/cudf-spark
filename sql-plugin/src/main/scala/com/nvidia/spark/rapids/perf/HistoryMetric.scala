@@ -16,18 +16,14 @@
 
 package com.nvidia.spark.rapids.perf
 
-import java.util.Collections
-
 import scala.collection.JavaConverters._
 
-import com.nvidia.spark.history.{DimensionSpec, DimValue, HistoryMetricCatalog, MetricSchema,
+import com.nvidia.spark.history.{DimensionSpec, HistoryMetricCatalog, MetricSchema,
   MetricVersionId, Retention}
 
 /**
- * Contract of one history metric family at one version: id, name, single dimension and
- * retention. No store access.
- *
- * Exactly one STRING dimension.
+ * Contract of one history metric family at one version: id, name, dimensions and retention. No
+ * store access.
  */
 trait HistoryMetric {
 
@@ -43,7 +39,12 @@ trait HistoryMetric {
   /** Any change in meaning needs a new version. */
   def version: Int
 
-  def dimension: String
+  /**
+   * The named, typed dimensions of the key, up to `MetricSchema.MAX_DIMENSIONS`; the history API
+   * rejects more, or a repeated name. A key holds one value for each of them. Adding or changing
+   * one is a change in meaning, so it needs a new version.
+   */
+  def dimensions: Seq[DimensionSpec]
 
   /**
    * Fixed by the first accepted declaration. Its planning age bounds lookups.
@@ -52,10 +53,7 @@ trait HistoryMetric {
 
   final lazy val metric: MetricVersionId = new MetricVersionId(id, version)
 
-  final lazy val schema: MetricSchema = new MetricSchema(
-    metric,
-    Collections.singletonList(new DimensionSpec(dimension, DimValue.Kind.STRING)),
-    retention)
+  final lazy val schema: MetricSchema = new MetricSchema(metric, dimensions.asJava, retention)
 }
 
 object HistoryMetric {
