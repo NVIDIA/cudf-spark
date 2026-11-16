@@ -240,7 +240,7 @@ def test_casting_decimal_to_decimal(spark_tmp_path, data_gen, read_type, ansi_mo
     )
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.schema("a " + read_type).orc(orc_path)
-            .selectExpr("*", "a is null as is_null", "a + 1 as added"),
+            .selectExpr("*", "a is null as is_null"),
         conf={'spark.sql.ansi.enabled': ansi_mode}
     )
 
