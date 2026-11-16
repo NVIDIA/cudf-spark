@@ -698,7 +698,9 @@ abstract class MultiFileCloudPartitionReaderBase(
   }
 
   // Unwrap RunnerResult to facilitate the combination of file buffers.
-  private def convertAsyncResult(taskRet: RunnerResult): BufferInfo = {
+  // `countRowGroups` is false for a result that is only freed, never decoded.
+  private def convertAsyncResult(taskRet: RunnerResult,
+      countRowGroups: Boolean = true): BufferInfo = {
     taskRet.releaseHook.foreach { callback =>
       taskRet.data match {
         // If the task result is empty, call the release callback ASAP.
@@ -710,7 +712,9 @@ abstract class MultiFileCloudPartitionReaderBase(
       }
     }
     taskRet.data.setScheduleTime(taskRet.metrics.scheduleTimeMs)
-    metrics.get(ROW_GROUPS_READ).foreach(_ += taskRet.data.getRowGroupsRead)
+    if (countRowGroups) {
+      metrics.get(ROW_GROUPS_READ).foreach(_ += taskRet.data.getRowGroupsRead)
+    }
     taskRet.data
   }
 
@@ -992,12 +996,12 @@ abstract class MultiFileCloudPartitionReaderBase(
           task match {
             case t if t.isCancelled => // Do nothing if already cancelled
             case t if t.isDone => // Close all produced hmbs
-              needToClose += convertAsyncResult(t.get())
+              needToClose += convertAsyncResult(t.get(), countRowGroups = false)
             case t =>
               // Let running reads observe isDone without interrupting file system operations.
               // If completion wins the cancellation race, we still own the result.
               if (!t.cancel(false) && !t.isCancelled) {
-                needToClose += convertAsyncResult(t.get())
+                needToClose += convertAsyncResult(t.get(), countRowGroups = false)
               }
           }
         } catch {
