@@ -209,7 +209,9 @@ object SchemaUtils {
             col
           }
           val typeIdMap = buildTypeIdMapFromSchema(colSt, isCaseSensitive)
-          val newViews = toSt.safeMap { f =>
+          // The outer toClose buffer owns all child views and cast results, including on
+          // failure. Do not give a second cleanup owner to partially evolved struct fields.
+          val newViews = toSt.map { f =>
             if (typeIdMap.contains(f.name)) {
               val typeAndId = typeIdMap(f.name)
               val cv = addToClose(actualCol.getChildColumnView(typeAndId._2))
