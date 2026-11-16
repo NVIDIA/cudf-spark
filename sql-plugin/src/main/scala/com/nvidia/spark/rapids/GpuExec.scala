@@ -206,8 +206,8 @@ trait GpuExec extends SparkPlan with Logging {
         // threshold of 1 the pushed filter runs during decode and is timed there.
         HYBRID_SCAN_OUTPUT_FILTER_TIME -> createNanoTimingMetric(DEBUG_LEVEL,
           DESCRIPTION_HYBRID_SCAN_OUTPUT_FILTER_TIME),
-        HYBRID_SCAN_BYTES_READ -> createSizeMetric(MODERATE_LEVEL,
-          DESCRIPTION_HYBRID_SCAN_BYTES_READ))
+        HYBRID_SCAN_BYTES_REQUESTED -> createSizeMetric(MODERATE_LEVEL,
+          DESCRIPTION_HYBRID_SCAN_BYTES_REQUESTED))
     } else {
       rowGroupsRead
     }

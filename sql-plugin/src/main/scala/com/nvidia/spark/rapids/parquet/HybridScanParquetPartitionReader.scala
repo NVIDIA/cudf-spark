@@ -116,7 +116,7 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       val ranges = NvtxRegistry.HYBRID_SCAN_GET_BYTE_RANGES {
         reader.allColumnChunksByteRanges(rowGroups)
       }
-      addToMetric(HYBRID_SCAN_BYTES_READ, totalBytes(ranges))
+      addToMetric(HYBRID_SCAN_BYTES_REQUESTED, totalBytes(ranges))
       val buffer = NvtxIdWithMetrics(NvtxRegistry.HYBRID_SCAN_READ_DATA, metric(BUFFER_TIME)) {
         split.source.fetchToBuffer(ranges)
       }
@@ -179,7 +179,7 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
         NvtxRegistry.HYBRID_SCAN_FILTER_DICT {
           // Released after the compare: the column chunk fetch to host memory comes next.
           filterRowGroupsWithDictionaries(reader, afterStats, { dictRanges =>
-            addToMetric(HYBRID_SCAN_BYTES_READ, totalBytes(dictRanges))
+            addToMetric(HYBRID_SCAN_BYTES_REQUESTED, totalBytes(dictRanges))
             split.source.fetch(dictRanges)
           }, releaseSemaphore = true)
         }

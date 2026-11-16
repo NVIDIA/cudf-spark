@@ -57,6 +57,7 @@ trait GpuBatchScanExecMetrics extends GpuExec {
 
   lazy val fileCacheMetrics: Map[String, GpuMetric] = createFileCacheMetrics()
 
+  // Delta V2 and Iceberg scans don't register these yet, so their row group counts are dropped.
   private lazy val parquetRowGroupMetrics: Map[String, GpuMetric] = scan match {
     case _: GpuParquetScan => createParquetRowGroupMetrics()
     case _ => Map.empty

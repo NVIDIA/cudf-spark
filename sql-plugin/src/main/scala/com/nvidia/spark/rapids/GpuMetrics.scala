@@ -148,7 +148,7 @@ object GpuMetric extends Logging {
   val ROW_GROUPS_READ = "rowGroupsRead"
   val HYBRID_SCAN_FOOTER_PARSE_TIME = "hybridScanFooterParseTime"
   val HYBRID_SCAN_OUTPUT_FILTER_TIME = "hybridScanOutputFilterTime"
-  val HYBRID_SCAN_BYTES_READ = "hybridScanBytesRead"
+  val HYBRID_SCAN_BYTES_REQUESTED = "hybridScanBytesRequested"
   val DELETION_VECTOR_SCATTER_TIME = "deletionVectorScatterTime"
   val DELETION_VECTOR_SIZE = "deletionVectorSize"
   val CPU_BRIDGE_PROCESSING_TIME = "cpuBridgeProcessingTime"
@@ -218,12 +218,12 @@ object GpuMetric extends Logging {
   val DESCRIPTION_ROW_GROUPS_IN_INPUT = "hybrid scan row groups in input"
   val DESCRIPTION_ROW_GROUPS_PRUNED_BY_STATS = "hybrid scan row groups pruned by statistics"
   val DESCRIPTION_ROW_GROUPS_PRUNED_BY_DICT = "hybrid scan row groups pruned by dictionary"
-  val DESCRIPTION_ROW_GROUPS_READ = "row groups read"
+  val DESCRIPTION_ROW_GROUPS_READ = "row groups read (Delta V2 and Iceberg not supported)"
   val DESCRIPTION_HYBRID_SCAN_FOOTER_PARSE_TIME = "hybrid scan footer parse time"
   val DESCRIPTION_HYBRID_SCAN_OUTPUT_FILTER_TIME =
     "hybrid scan output filter time (pushed filters only)"
-  val DESCRIPTION_HYBRID_SCAN_BYTES_READ = "hybrid scan bytes read, counting a dictionary " +
-    "page fetched for pruning again with its column chunk"
+  val DESCRIPTION_HYBRID_SCAN_BYTES_REQUESTED = "hybrid scan data bytes requested, counting a " +
+    "dictionary page fetched for pruning again with its column chunk"
   val DESCRIPTION_DELETION_VECTOR_SCATTER_TIME = "deletion vector scatter time"
   val DESCRIPTION_DELETION_VECTOR_SIZE = "deletion vector size"
   val DESCRIPTION_GPU_OUTPUT_BATCH_BYTES = "decoded batch bytes"

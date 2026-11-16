@@ -205,9 +205,9 @@ def _assert_row_groups(in_input, pruned_by_stats, pruned_by_dict, read, min_spli
         expected = {'rowGroupsInInput': in_input, 'rowGroupsPrunedByStats': pruned_by_stats,
                     'rowGroupsPrunedByDict': pruned_by_dict, 'rowGroupsRead': read}
         assert actual == expected
-        bytes_read = plan_metric(scans[0], 'hybridScanBytesRead')
-        assert (bytes_read > 0) == (read > 0), \
-            'Read {} row groups but {} bytes'.format(read, bytes_read)
+        bytes_requested = plan_metric(scans[0], 'hybridScanBytesRequested')
+        assert (bytes_requested > 0) == (read > 0), \
+            'Read {} row groups but requested {} bytes'.format(read, bytes_requested)
         splits = plan_metric(scans[0], 'hybridScanSplits')
         assert splits >= min_splits, \
             'Expected at least {} splits, got {}'.format(min_splits, splits)
@@ -320,6 +320,27 @@ def test_parquet_scan_row_groups_read_without_columns(spark_tmp_path, footer_rea
         lambda spark: spark.read.parquet(data_path).selectExpr('COUNT(*)'),
         conf=fallback_conf(**_pruning_metrics_conf, **{
             'spark.rapids.sql.format.parquet.reader.footer.type': footer_reader}),
+        gpu_plan_assertion=check)
+
+
+def test_parquet_scan_row_groups_read_from_pool_threads(spark_tmp_path):
+    """The multithreaded reader filters the files on pool threads, so each file must still count
+    once."""
+    files = 64
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(lambda spark: spark.range(0, files, 1, files)
+                     .selectExpr('CAST(id AS INT) AS a').write.parquet(data_path))
+
+    def check(cpu_plan, gpu_plan):
+        scans = [node for node in collect_plan_nodes(gpu_plan)
+                 if node.getClass().getSimpleName() == 'GpuFileSourceScanExec']
+        assert len(scans) == 1, 'Expected one GPU Parquet scan in:\n{}'.format(gpu_plan)
+        assert plan_metric(scans[0], 'rowGroupsRead') == files
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.read.parquet(data_path),
+        conf=copy_and_update(_pruning_metrics_conf, _one_task_conf, {
+            'spark.rapids.sql.format.parquet.reader.type': 'MULTITHREADED'}),
         gpu_plan_assertion=check)
 
 
