@@ -15,9 +15,9 @@
 import pytest
 
 from asserts import assert_gpu_and_cpu_are_equal_collect
-from data_gen import DecimalGen, IntegerGen, StructGen, gen_df
+from data_gen import ArrayGen, DecimalGen, IntegerGen, MapGen, StringGen, StructGen, gen_df
 from marks import ignore_order
-from pyspark.sql.types import IntegerType, StructField, StructType
+from pyspark.sql.types import DecimalType, IntegerType, StructField, StructType
 from spark_session import with_cpu_session
 
 # Exercise each footer implementation independently of the file-reader strategy.
@@ -67,6 +67,7 @@ def test_dotted_column_collides_with_struct_field(
         ["a.b AS nested_b", "`a.b` AS flat_b", "c"],
     ]
     for projection in projections:
+        print("Checking projection:", projection)
         assert_gpu_and_cpu_are_equal_collect(
             lambda spark: spark.read.format(file_format).load(path).selectExpr(*projection),
             conf=conf)
@@ -119,10 +120,13 @@ def test_dotted_column_renamed_by_parquet_field_id(spark_tmp_path, footer):
 @ignore_order(local=True)
 @pytest.mark.parametrize("file_format", ["parquet", "orc"])
 @pytest.mark.parametrize("chunked", [False, True])
-def test_dotted_decimal_column_collides_with_struct_field(spark_tmp_path, file_format, chunked):
+@pytest.mark.parametrize("nested_precision", [7, 15])
+@pytest.mark.parametrize("reader", ["PERFILE", "MULTITHREADED", "COALESCING"])
+def test_dotted_decimal_column_collides_with_struct_field(
+        spark_tmp_path, file_format, chunked, nested_precision, reader):
     path = spark_tmp_path + "/decimal_collision"
     gens = [
-        ("a", StructGen([("b", DecimalGen(precision=7, scale=2)),
+        ("a", StructGen([("b", DecimalGen(precision=nested_precision, scale=2)),
                          ("z", IntegerGen())])),
         ("a.b", DecimalGen(precision=25, scale=2)),
         ("c", IntegerGen()),
@@ -130,6 +134,53 @@ def test_dotted_decimal_column_collides_with_struct_field(spark_tmp_path, file_f
     with_cpu_session(lambda spark: gen_df(spark, gens, length=64, num_slices=2)
                      .write.format(file_format).save(path))
     conf = {"spark.rapids.sql.reader.chunked": str(chunked).lower(),
+            "spark.rapids.sql.format." + file_format + ".reader.type": reader,
             "spark.rapids.sql.format.parquet.reader.footer.type": "JAVA"}
+    # Keep the complete struct: a flat-only projection discards the mis-sized decimal.
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.format(file_format).load(path), conf=conf)
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize("chunked", [False, True])
+@pytest.mark.parametrize("reader", ["PERFILE", "MULTITHREADED", "COALESCING"])
+@pytest.mark.parametrize("container", ["struct", "array", "map"])
+def test_orc_nested_dotted_decimal_collision(spark_tmp_path, chunked, reader, container):
+    path = spark_tmp_path + "/nested_decimal_collision"
+    collision = StructGen([
+        ("a", StructGen([("b", DecimalGen(precision=15, scale=2))])),
+        ("a.b", DecimalGen(precision=25, scale=2)),
+    ])
+    if container == "array":
+        collision = ArrayGen(collision, min_length=1, max_length=3)
+    elif container == "map":
+        collision = MapGen(StringGen("[a-z]{2}", nullable=False), collision,
+                           min_length=1, max_length=3)
+    with_cpu_session(lambda spark: gen_df(spark, [("s", collision)], length=64, num_slices=2)
+                     .write.orc(path))
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.orc(path),
+        conf={"spark.rapids.sql.reader.chunked": str(chunked).lower(),
+              "spark.rapids.sql.format.orc.reader.type": reader})
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize("chunked", [False, True])
+@pytest.mark.parametrize("reader", ["PERFILE", "MULTITHREADED", "COALESCING"])
+def test_orc_dotted_decimal_schema_widening(spark_tmp_path, chunked, reader):
+    path = spark_tmp_path + "/decimal_widening"
+    gens = [
+        ("a", StructGen([("b", DecimalGen(precision=15, scale=2))])),
+        ("a.b", DecimalGen(precision=25, scale=2)),
+    ]
+    with_cpu_session(lambda spark: gen_df(spark, gens, length=64, num_slices=2)
+                     .write.orc(path))
+    read_schema = StructType([
+        StructField("a.b", DecimalType(25, 2)),
+        StructField("a", StructType([StructField("b", DecimalType(25, 2))])),
+        StructField("missing", IntegerType()),
+    ])
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(read_schema).orc(path),
+        conf={"spark.rapids.sql.reader.chunked": str(chunked).lower(),
+              "spark.rapids.sql.format.orc.reader.type": reader})

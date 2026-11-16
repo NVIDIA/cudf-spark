@@ -1055,6 +1055,17 @@ trait OrcCommonFunctions extends OrcCodecWritingHelper { self: FilePartitionRead
     buffer.toArray
   }
 
+  private def hasDottedFieldName(schema: TypeDescription): Boolean = {
+    schema.getCategory match {
+      case TypeDescription.Category.STRUCT =>
+        schema.getFieldNames.asScala.exists(_.contains(".")) ||
+          schema.getChildren.asScala.exists(hasDottedFieldName)
+      case TypeDescription.Category.LIST | TypeDescription.Category.MAP =>
+        schema.getChildren.asScala.exists(hasDottedFieldName)
+      case _ => false
+    }
+  }
+
   def getORCOptionsAndSchema(
       memFileSchema: TypeDescription,
       requestedMapping: Option[Array[Int]],
@@ -1065,11 +1076,16 @@ trait OrcCommonFunctions extends OrcCodecWritingHelper { self: FilePartitionRead
     val builder = ORCOptions.builder()
       .withTimeUnit(DType.TIMESTAMP_MICROSECONDS)
       .withNumPyTypes(false)
-      .decimal128Column(decimal128Fields: _*)
       // Read timestamps as UTC, ignoring the writer timezone in stripe footers.
       // Date/time rebase is done externally via GpuOrcTimezoneUtils.rebaseOrcDateTime,
       // which handles legacy dates and both same-TZ and cross-TZ timestamps, including DST.
       .ignoreTimezoneInStripeFooter()
+    // Decimal overrides also use flattened paths, so a literal dot can widen an unrelated
+    // decimal (e.g. a.b at precision 15 beside "a.b" at precision 25). Let cuDF infer widths
+    // from the prepared footer in that case; schema evolution still handles requested casts.
+    if (decimal128Fields.nonEmpty && !hasDottedFieldName(tableSchema)) {
+      builder.decimal128Column(decimal128Fields: _*)
+    }
     // The in-memory footer already has tableSchema's columns in the required order.
     // Avoid cuDF's ambiguous dotted-path name selector for literal dotted root names.
     if (!includedColumns.exists(_.contains("."))) {
