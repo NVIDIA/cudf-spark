@@ -17,7 +17,7 @@ import pytest
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error
 from conftest import get_test_tz, is_not_utc
 from data_gen import *
-from marks import (allow_non_gpu, datagen_overrides, tz_sensitive_test,
+from marks import (allow_non_gpu, datagen_overrides, ignore_order, tz_sensitive_test,
                    validate_execs_in_gpu_plan)
 from pyspark.sql.types import *
 from spark_session import with_cpu_session
@@ -222,7 +222,10 @@ def test_casting_from_overflow_double_to_timestamp(spark_tmp_path, overflow_valu
 @pytest.mark.parametrize('data_gen', [DecimalGen(precision=9, scale=2),
                                       DecimalGen(precision=18, scale=4),
                                       DecimalGen(precision=38, scale=6)])
-@pytest.mark.parametrize('read_type', ["DECIMAL(9,2)",
+@pytest.mark.parametrize('read_type', ["DECIMAL(7,2)",
+                                       "DECIMAL(10,2)",
+                                       "DECIMAL(20,2)",
+                                       "DECIMAL(9,2)",
                                        "DECIMAL(18,4)",
                                        "DECIMAL(38,6)"])
 @pytest.mark.parametrize('ansi_mode', ["false", "true"])
@@ -236,6 +239,53 @@ def test_casting_decimal_to_decimal(spark_tmp_path, data_gen, read_type, ansi_mo
         lambda spark: unary_op_df(spark, data_gen).write.orc(orc_path)
     )
     assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.read.schema("a " + read_type).orc(orc_path),
+        lambda spark: spark.read.schema("a " + read_type).orc(orc_path)
+            .selectExpr("*", "a is null as is_null", "a + 1 as added"),
         conf={'spark.sql.ansi.enabled': ansi_mode}
     )
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader', ['PERFILE', 'MULTITHREADED', 'COALESCING'])
+@pytest.mark.parametrize('v1_enabled_list', ["", "orc"])
+@pytest.mark.parametrize('ansi_enabled', ['false', 'true'])
+@pytest.mark.parametrize('file_precision, file_scale, read_precision, read_scale', [
+    (9, 2, 7, 2), (18, 2, 10, 2), (34, 2, 20, 2),
+    # More precision can still leave fewer digits for the whole-number part.
+    (9, 2, 10, 4),
+    # Rounding can carry into a whole-number digit outside the requested precision.
+    (9, 3, 8, 2)])
+def test_orc_decimal_precision_narrowing(spark_tmp_path, reader, v1_enabled_list,
+        ansi_enabled, file_precision, file_scale, read_precision, read_scale):
+    data_path = spark_tmp_path + '/ORC_DECIMAL_NARROWING'
+    decimal_type = DecimalType(file_precision, file_scale)
+    # Include both signs of the exact read bound and the first value beyond it.
+    max_value = '9' * (read_precision - read_scale) + '.' + '9' * min(file_scale, read_scale)
+    overflow = '1' + '0' * (read_precision - read_scale) + '.00'
+    inputs = [max_value, '-' + max_value, overflow, '-' + overflow, '0.00', '0.01']
+    if file_scale > read_scale:
+        inputs += [max_value + '4', max_value + '5', '-' + max_value + '4', '-' + max_value + '5']
+    values = [Decimal(v) for v in inputs] + [None]
+    with_cpu_session(lambda spark: gen_df(spark,
+        [('id', RepeatSeqGen(list(range(len(values))), data_type=IntegerType())),
+         ('d', RepeatSeqGen(values, data_type=decimal_type))], length=len(values))
+        .selectExpr('id', 'd', 'named_struct("d", d) as s', 'array(d) as a', 'map(1, d) as m')
+        .repartition(2).write.orc(data_path))
+
+    target = f'decimal({read_precision},{read_scale})'
+    schema = f'id int, d {target}, s struct<d:{target}>, a array<{target}>, m map<int,{target}>'
+    conf = {
+        'spark.rapids.sql.format.orc.reader.type': reader,
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        'spark.sql.ansi.enabled': ansi_enabled}
+
+    # Decimal128 row conversion can hide overflow by turning it into null on the host.
+    # Evaluate null checks on the GPU too, including every nested decimal leaf.
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(schema).orc(data_path).selectExpr('*',
+            'd is null as d_is_null', 's.d is null as struct_is_null',
+            'a[0] is null as array_is_null', 'm[1] is null as map_is_null', 'd + 1 as added'),
+        conf=conf)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(schema).orc(data_path)
+            .filter(f'd > {max_value} OR d < -{max_value}').select('id'), conf=conf)
