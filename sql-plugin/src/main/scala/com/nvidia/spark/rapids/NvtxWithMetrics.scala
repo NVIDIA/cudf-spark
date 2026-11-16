@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,17 +39,16 @@ class NvtxWithMetrics(name: String, color: NvtxColor, val metrics: Seq[GpuMetric
   def this(name: String, color: NvtxColor, metrics: GpuMetric*) =
     this(name, color, metrics.toSeq)
 
-  val needTracks = metrics.map(_.tryActivateTimer(excludeMetric))
-  private val start = System.nanoTime()
+  private val metricRange = new MetricRange(metrics, excludeMetric)
+
+  def needTracks: Seq[Boolean] = metricRange.needTracks
 
   override def close(): Unit = {
-    val time = System.nanoTime() - start
-    metrics.toSeq.zip(needTracks).foreach { pair =>
-      if (pair._2) {
-        pair._1.deactivateTimer(time, excludeMetric)
-      }
+    try {
+      metricRange.close()
+    } finally {
+      super.close()
     }
-    super.close()
   }
 }
 
@@ -59,19 +58,15 @@ class NvtxWithMetrics(name: String, color: NvtxColor, val metrics: Seq[GpuMetric
  */
 object NvtxIdWithMetrics {
 
-  def apply[V](nvtxId: NvtxId, metrics: GpuMetric*)(block: => V): V = {
-    val needTracks = metrics.map(_.tryActivateTimer(Seq.empty))
-    val start = System.nanoTime()
-
-    try {
+  def apply[V](nvtxId: NvtxId, metric: GpuMetric)(block: => V): V = {
+    metric.ns {
       nvtxId.apply(block)
-    } finally {
-      val time = System.nanoTime() - start
-      metrics.toSeq.zip(needTracks).foreach { pair =>
-        if (pair._2) {
-          pair._1.deactivateTimer(time, Seq.empty)
-        }
-      }
+    }
+  }
+
+  def apply[V](nvtxId: NvtxId, metrics: GpuMetric*)(block: => V): V = {
+    GpuMetric.ns(metrics, Seq.empty) {
+      nvtxId.apply(block)
     }
   }
 }
@@ -82,14 +77,56 @@ class MetricRange(val metrics: Seq[GpuMetric], val excludeMetric: Seq[GpuMetric]
   // add a convenient constructor
   def this(metrics: GpuMetric*) = this(metrics.toSeq)
 
-  val needTracks = metrics.map(_.tryActivateTimer(excludeMetric))
-  private val start = System.nanoTime()
+  private val metricCount = metrics.length
+  private val singleMetric = if (metricCount == 1) metrics.head else null
+  private val singleActive = singleMetric != null && singleMetric.tryActivateTimer(excludeMetric)
+  // Allocate tracking flags only when a multiple-metric range activates at least one timer.
+  private val multipleTracks: Array[Boolean] = {
+    var tracks: Array[Boolean] = null
+    if (metricCount > 1) {
+      val iterator = metrics.iterator
+      var index = 0
+      while (iterator.hasNext) {
+        if (iterator.next().tryActivateTimer(excludeMetric)) {
+          if (tracks == null) {
+            tracks = new Array[Boolean](metricCount)
+          }
+          tracks(index) = true
+        }
+        index += 1
+      }
+    }
+    tracks
+  }
+  private val hasActiveTimer = singleActive || multipleTracks != null
+  private val start = if (hasActiveTimer) System.nanoTime() else 0L
+
+  // Preserve the existing accessor without allocating a Boolean collection on the timing path.
+  def needTracks: Seq[Boolean] = {
+    if (metricCount == 1) {
+      Seq(singleActive)
+    } else if (multipleTracks == null) {
+      Seq.fill(metricCount)(false)
+    } else {
+      multipleTracks.toSeq
+    }
+  }
 
   override def close(): Unit = {
-    val time = System.nanoTime() - start
-    metrics.toSeq.zip(needTracks).foreach { pair =>
-      if (pair._2) {
-        pair._1.deactivateTimer(time, excludeMetric)
+    if (hasActiveTimer) {
+      val time = System.nanoTime() - start
+      if (singleActive) {
+        singleMetric.deactivateTimer(time, excludeMetric)
+      } else {
+        val iterator = metrics.iterator
+        var index = 0
+        while (iterator.hasNext) {
+          val metric = iterator.next()
+          if (multipleTracks(index)) {
+            metric.deactivateTimer(time, excludeMetric)
+          }
+          index += 1
+        }
       }
     }
   }
