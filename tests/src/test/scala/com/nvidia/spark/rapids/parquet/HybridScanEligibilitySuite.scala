@@ -96,6 +96,12 @@ class HybridScanEligibilitySuite extends AnyFunSuite {
     assert(!isEligible(schema = array))
   }
 
+  test("a literal dotted column name uses the pruned-footer reader") {
+    val schema = StructType(Seq(StructField("a.b", IntegerType)))
+    assert(ineligibleReason(schema = schema, filters = Array.empty)
+      .exists(_.contains("column a.b contains a literal dot")))
+  }
+
   test("primitive types the reader passes straight through are eligible") {
     val types = Seq(BooleanType, ByteType, ShortType, IntegerType, LongType, FloatType,
       DoubleType, StringType, DecimalType(10, 2))

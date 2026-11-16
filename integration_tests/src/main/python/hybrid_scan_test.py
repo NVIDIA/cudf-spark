@@ -307,3 +307,53 @@ def test_hybrid_scan_ignore_corrupt_files_keeps_readable_file(spark_tmp_path):
         lambda spark: spark.read.schema(_missing_col_schema).parquet(data_path)
             .filter('sorted_int < 500'),
         conf=fallback_conf(**{'spark.sql.files.ignoreCorruptFiles': 'true'}))
+
+
+@pytest.mark.parametrize("flat_first", [False, True], ids=["struct-first", "flat-first"])
+@pytest.mark.parametrize("use_v1", [False, True], ids=["v2", "v1"])
+@pytest.mark.parametrize("projection", [
+    ["`a.b`"],
+    ["`a.b`", "c"],
+    ["c", "`a.b`"],
+], ids=["dotted-only", "dotted-first", "dotted-last"])
+def test_hybrid_scan_dotted_column_collision(
+        spark_tmp_path, flat_first, use_v1, projection):
+    path = spark_tmp_path + "/dotted_collision"
+    gens = [
+        ("a", StructGen([("b", IntegerGen(min_val=5, max_val=6, nullable=False))],
+                        nullable=False)),
+        ("a.b", IntegerGen(min_val=1000, max_val=2000, nullable=False)),
+        ("c", IntegerGen(min_val=100, max_val=200, nullable=False)),
+    ]
+    if flat_first:
+        gens = [gens[1], gens[0], gens[2]]
+    with_cpu_session(lambda spark: gen_df(spark, gens, length=16, num_slices=2)
+                     .write.parquet(path))
+    # Projecting the literal dotted field leaves a flat read schema, although the file also
+    # contains a struct whose leaf has the same flattened path.
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(path).selectExpr(*projection),
+        conf=fallback_conf(**{
+            "spark.sql.sources.useV1SourceList": "parquet" if use_v1 else "",
+            "spark.sql.parquet.fieldId.read.enabled": False,
+        }))
+    assert_spark_exception(
+        lambda: with_gpu_session(
+            lambda spark: spark.read.parquet(path).selectExpr(*projection).collect(),
+            conf=hybrid_conf(**{
+                "spark.sql.sources.useV1SourceList": "parquet" if use_v1 else "",
+            })),
+        error_message="column a.b contains a literal dot")
+    # The same file still takes the hybrid reader when the dotted root is not requested.
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(path).select("c"),
+        conf=hybrid_conf(**{
+            "spark.sql.sources.useV1SourceList": "parquet" if use_v1 else "",
+        }))
+    # A dotted predicate remains necessary even when only an ordinary column is projected.
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(path).filter("`a.b` >= 1500").select("c"),
+        conf=fallback_conf(**{
+            "spark.sql.sources.useV1SourceList": "parquet" if use_v1 else "",
+            "spark.sql.parquet.fieldId.read.enabled": False,
+        }))
