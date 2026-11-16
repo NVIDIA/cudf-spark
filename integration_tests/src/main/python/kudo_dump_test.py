@@ -25,10 +25,12 @@ import pyspark.sql.functions as f
 @ignore_order(local=True)
 @pytest.mark.skipif(not is_apache_runtime() and not is_databricks_runtime(), reason="only test on local file system")
 def test_kudo_serializer_debug_dump(spark_tmp_path):
+    # When the plugin picks the RAPIDS shuffle manager itself, it sets spark.shuffle.manager too.
     startup = get_spark_i_know_what_i_am_doing().sparkContext.getConf()
-    if startup.get('spark.rapids.shuffle.enabled', 'true').lower() == 'true' and \
-            startup.get('spark.rapids.shuffle.mode', 'MULTITHREADED').upper() in ('UCX', 'CACHE_ONLY'):
-        pytest.skip('The UCX and CACHE_ONLY shuffles move GPU buffers and never serialize with Kudo')
+    if startup.get('spark.shuffle.manager', '').endswith('RapidsShuffleManager') and \
+            startup.get('spark.rapids.shuffle.enabled', 'true').lower() == 'true' and \
+            startup.get('spark.rapids.shuffle.mode', 'MULTITHREADED').upper() == 'UCX':
+        pytest.skip('The UCX shuffle moves GPU buffers and never serializes with Kudo')
     dump_prefix = spark_tmp_path + "/kudo_dump/"
     conf = {
         "spark.rapids.shuffle.kudo.serializer.enabled": "true",
