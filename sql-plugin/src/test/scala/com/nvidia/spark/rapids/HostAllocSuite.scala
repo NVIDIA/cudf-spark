@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids
 
 import java.util.concurrent.{ExecutionException, Future, LinkedBlockingQueue, TimeoutException, TimeUnit}
 
-import ai.rapids.cudf.{HostMemoryBuffer, PinnedMemoryPool, Rmm, RmmAllocationMode}
+import ai.rapids.cudf.{DefaultHostMemoryAllocator, HostMemoryBuffer, PageableMemoryPool, PinnedMemoryPool, Rmm, RmmAllocationMode}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.jni.{RmmSpark, RmmSparkThreadState, TaskPriority, ThreadStateRegistry}
 import com.nvidia.spark.rapids.spill._
@@ -327,6 +327,7 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
     SparkSession.getActiveSession.foreach(_.stop())
     SparkSession.clearActiveSession()
     SpillFramework.shutdown()
+    PageableMemoryPool.shutdown()
     if (Rmm.isInitialized) {
       rmmWasInitialized = true
       Rmm.shutdown()
@@ -349,6 +350,7 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
   override def afterAll(): Unit = {
     try {
       SpillFramework.shutdown()
+      PageableMemoryPool.shutdown()
       PinnedMemoryPool.shutdown()
       Rmm.shutdown()
       RmmSpark.clearEventHandler()
@@ -368,6 +370,66 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
         t.printStackTrace(System.err)
         throw t
     }
+  }
+
+  test("allocator implementation follows pageable pool configuration") {
+    HostAlloc.initialize(4096)
+    assert(DefaultHostMemoryAllocator.get().getClass.getSimpleName == "RawHostAlloc")
+
+    PageableMemoryPool.initialize(8192, 1)
+    HostAlloc.initialize(4096)
+    assert(DefaultHostMemoryAllocator.get().getClass.getSimpleName == "PooledHostAlloc")
+  }
+
+  test("pageable pool serves non-pinned allocations before raw fallback") {
+    PinnedMemoryPool.initialize(4096)
+    PageableMemoryPool.initialize(8192, 1)
+    HostAlloc.initialize(4096)
+
+    withResource(HostAlloc.alloc(4096, preferPinned = true)) { pinned =>
+      assert(pinned.getLength == 4096)
+      withResource(HostAlloc.alloc(8192, preferPinned = false)) { pooled =>
+        // This exceeds the raw budget, so it must come from the pageable pool.
+        assert(pooled.getLength == 8192)
+        assert(HostAlloc.getUsageRatio() == 0.75)
+        withResource(HostAlloc.alloc(4096, preferPinned = false)) { raw =>
+          // The pool is full, so this allocation uses the remaining raw budget.
+          assert(raw.getLength == 4096)
+          assert(HostAlloc.getUsageRatio() == 1.0)
+          assert(HostAlloc.tryAlloc(1, preferPinned = false).isEmpty)
+        }
+      }
+    }
+    assert(HostAlloc.getUsageRatio() == 0.0)
+
+    // A zero raw budget must still allow allocations from the reserved pool.
+    HostAlloc.initialize(0)
+    withResource(HostAlloc.alloc(8192, preferPinned = false)) { pooled =>
+      assert(pooled.getLength == 8192)
+    }
+  }
+
+  test("cuDF host allocations preserve data across pooled and raw fallback paths") {
+    PinnedMemoryPool.initialize(0)
+    PageableMemoryPool.initialize(8192, 1)
+    HostAlloc.initialize(4096)
+
+    val pooledBytes = Array.tabulate[Byte](8192)(i => (i % 251).toByte)
+    val rawBytes = Array.tabulate[Byte](4096)(i => (i % 239).toByte)
+    withResource(HostMemoryBuffer.allocate(8192, false)) { pooled =>
+      pooled.setBytes(0, pooledBytes, 0, pooledBytes.length)
+      withResource(HostMemoryBuffer.allocate(4096, false)) { raw =>
+        raw.setBytes(0, rawBytes, 0, rawBytes.length)
+        assert(HostAlloc.getUsageRatio() == 1.0)
+        val pooledActual = new Array[Byte](pooledBytes.length)
+        pooled.asByteBuffer.get(pooledActual)
+        assert(pooledActual.sameElements(pooledBytes))
+        val rawActual = new Array[Byte](rawBytes.length)
+        raw.asByteBuffer.get(rawActual)
+        assert(rawActual.sameElements(rawBytes))
+      }
+    }
+    assert(HostAlloc.getUsageRatio() == 0.0)
   }
 
   test("simple pinned tryAlloc") {
@@ -531,6 +593,35 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
     }
   }
 
+  test("pageable pool blocking alloc resumes when another task closes its buffer") {
+    PinnedMemoryPool.initialize(0)
+    PageableMemoryPool.initialize(4 * 1024, 1)
+    HostAlloc.initialize(0)
+
+    failAfter(Span(10, Seconds)) {
+      val thread1 = new TaskThread("thread1", 1)
+      thread1.initialize()
+      val thread2 = new TaskThread("thread2", 2)
+      thread2.initialize()
+
+      try {
+        withResource(new AllocOnAnotherThread(thread1, 4 * 1024, preferPinned = false)) { held =>
+          held.waitForAlloc()
+          withResource(new AllocOnAnotherThread(thread2, 1, preferPinned = false)) { waiting =>
+            thread2.waitForBlockedOnAlloc()
+            held.freeOnThread()
+            waiting.waitForAlloc()
+            waiting.assertAllocSize(1)
+            waiting.freeAndWait()
+          }
+        }
+      } finally {
+        thread1.done.get(1, TimeUnit.SECONDS)
+        thread2.done.get(1, TimeUnit.SECONDS)
+      }
+    }
+  }
+
   test("simple mixed blocking alloc") {
     PinnedMemoryPool.initialize(4 * 1024)
     HostAlloc.initialize(4 * 1024)
@@ -635,6 +726,37 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
 
             a.freeOnThread()
             a2.freeAndWait()
+          }
+        }
+      } finally {
+        thread1.done.get(1, TimeUnit.SECONDS)
+        thread2.done.get(1, TimeUnit.SECONDS)
+      }
+    }
+  }
+
+  test("pageable pool blocking alloc spills another task's buffer") {
+    PinnedMemoryPool.initialize(0)
+    PageableMemoryPool.initialize(4 * 1024, 1)
+    HostAlloc.initialize(0)
+
+    failAfter(Span(10, Seconds)) {
+      val thread1 = new TaskThread("thread1", 1)
+      thread1.initialize()
+      val thread2 = new TaskThread("thread2", 2)
+      thread2.initialize()
+
+      try {
+        withResource(new AllocOnAnotherThread(thread1, 4 * 1024, preferPinned = false)) { held =>
+          held.waitForAlloc()
+          held.makeSpillableOnThread()
+          held.waitForSpillable()
+
+          withResource(new AllocOnAnotherThread(thread2, 1, preferPinned = false)) { next =>
+            next.waitForAlloc()
+            next.assertAllocSize(1)
+            held.freeOnThread()
+            next.freeAndWait()
           }
         }
       } finally {

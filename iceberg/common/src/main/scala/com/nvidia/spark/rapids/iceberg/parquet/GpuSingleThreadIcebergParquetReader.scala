@@ -33,7 +33,7 @@ import org.apache.parquet.hadoop.metadata.BlockMetaData
 
 import org.apache.spark.TaskContext
 import org.apache.spark.sql.rapids.InputFileUtils
-import org.apache.spark.sql.types.{DataType, LongType}
+import org.apache.spark.sql.types.{DataType, LongType, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class GpuSingleThreadIcebergParquetReader(
@@ -148,6 +148,7 @@ private class SingleFileReader(
       filteredParquet.schema,
       true, // Iceberg has already resolved the physical schema by field ID.
       filteredParquet.readSchema,
+      StructType(Nil), // partition values are not added by this reader
       conf.parquetDebugDumpPrefix,
       conf.parquetDebugDumpAlways,
       conf.maxBatchSizeRows,
