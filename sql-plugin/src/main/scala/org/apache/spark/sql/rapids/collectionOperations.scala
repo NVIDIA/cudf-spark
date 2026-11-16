@@ -27,8 +27,8 @@ import com.nvidia.spark.rapids.BoolUtils.isAllValidTrue
 import com.nvidia.spark.rapids.GpuListUtils
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.jni.{GpuListSliceUtils, MapUtils, StringUtils}
-import com.nvidia.spark.rapids.shims.{GetSequenceSize, NullIntolerantShim, ShimExpression,
-  SparkShimImpl}
+import com.nvidia.spark.rapids.shims.{ArraySetOpsShims, GetSequenceSize, NullIntolerantShim,
+  ShimExpression, SparkShimImpl}
 
 import org.apache.spark.sql.catalyst.analysis.{TypeCheckResult, TypeCoercion}
 import org.apache.spark.sql.catalyst.expressions.{ArraySort, ElementAt, ExpectsInputTypes, Expression,
@@ -1355,6 +1355,23 @@ case class GpuArraysZip(children: Seq[Expression]) extends GpuExpression with Sh
   }
 }
 
+private object GpuArraySetOps {
+  def normalizeFloatingPointOutputIfNeeded(
+      result: ColumnVector,
+      dataType: DataType): ColumnVector = {
+    if (ArraySetOpsShims.shouldNormalizeFloatingPointOutput) {
+      withResource(result) { result =>
+        ColumnCastUtil.deepTransform(result, Some(dataType)) {
+          case (cv, Some(FloatType | DoubleType)) =>
+            cv.normalizeNANsAndZeros()
+        }
+      }
+    } else {
+      result
+    }
+  }
+}
+
 // Base class for GpuArrayExcept, GpuArrayUnion, GpuArrayIntersect
 trait GpuArrayBinaryLike extends GpuComplexTypeMergingExpression with NullIntolerantShim {
   val left: Expression
@@ -1409,7 +1426,9 @@ case class GpuArrayExcept(left: Expression, right: Expression)
   override def nullable: Boolean = true
 
   override def doColumnar(lhs: GpuColumnVector, rhs: GpuColumnVector): ColumnVector = {
-    ColumnView.listsDifferenceDistinct(lhs.getBase, rhs.getBase)
+    GpuArraySetOps.normalizeFloatingPointOutputIfNeeded(
+      ColumnView.listsDifferenceDistinct(lhs.getBase, rhs.getBase),
+      dataType)
   }
 
   override def doColumnar(lhs: GpuScalar, rhs: GpuColumnVector): ColumnVector = {
@@ -1454,7 +1473,9 @@ case class GpuArrayIntersect(left: Expression, right: Expression)
   override def nullable: Boolean = true
 
   override def doColumnar(lhs: GpuColumnVector, rhs: GpuColumnVector): ColumnVector = {
-    ColumnView.listsIntersectDistinct(lhs.getBase, rhs.getBase)
+    GpuArraySetOps.normalizeFloatingPointOutputIfNeeded(
+      ColumnView.listsIntersectDistinct(lhs.getBase, rhs.getBase),
+      dataType)
   }
 
   override def doColumnar(lhs: GpuScalar, rhs: GpuColumnVector): ColumnVector = {
@@ -1499,7 +1520,9 @@ case class GpuArrayUnion(left: Expression, right: Expression)
   override def nullable: Boolean = true
 
   override def doColumnar(lhs: GpuColumnVector, rhs: GpuColumnVector): ColumnVector = {
-    ColumnView.listsUnionDistinct(lhs.getBase, rhs.getBase)
+    GpuArraySetOps.normalizeFloatingPointOutputIfNeeded(
+      ColumnView.listsUnionDistinct(lhs.getBase, rhs.getBase),
+      dataType)
   }
 
   override def doColumnar(lhs: GpuScalar, rhs: GpuColumnVector): ColumnVector = {
@@ -1861,7 +1884,9 @@ case class GpuArrayDistinct(child: Expression) extends GpuUnaryExpression with N
   override def dataType: DataType = child.dataType
 
   override def doColumnar(input: GpuColumnVector): ColumnVector = {
-    input.getBase.dropListDuplicates(DuplicateKeepOption.KEEP_FIRST)
+    GpuArraySetOps.normalizeFloatingPointOutputIfNeeded(
+      input.getBase.dropListDuplicates(DuplicateKeepOption.KEEP_FIRST),
+      dataType)
   }
 }
 

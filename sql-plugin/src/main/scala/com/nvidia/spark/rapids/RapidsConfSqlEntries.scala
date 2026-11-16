@@ -546,8 +546,10 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
           "reader while it is under development; it is not yet supported in production. When " +
           "true, the reader bypasses parquet-mr: it parses only the footer, prunes row groups " +
           "with the hybrid scan reader, and reads only the column chunk byte ranges the read " +
-          "needs. It applies only to non-chunked PERFILE reads of a schema it handles; any " +
-          "other read falls back to the parquet-mr path.")
+          "needs. It applies only to non-chunked reads of a schema it handles from Spark's " +
+          "Parquet source, not Delta, with the PERFILE or MULTITHREADED reader type, or AUTO " +
+          "when it picks MULTITHREADED for cloud files; any other read falls back to the " +
+          "parquet-mr path.")
       .internal()
       .booleanConf
       .createWithDefault(false)

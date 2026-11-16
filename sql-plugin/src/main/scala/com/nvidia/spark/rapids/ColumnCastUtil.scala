@@ -111,8 +111,13 @@ object ColumnCastUtil {
                   }
                   if (childrenUpdated) {
                     withResource(cv.getValid) { valid =>
-                      val ret = new ColumnView(DType.STRUCT, cv.getRowCount,
-                        Optional.empty[java.lang.Long](), valid, null, newChildren.toArray)
+                      val ret = closeOnExcept(
+                          new ColumnView(DType.STRUCT, cv.getRowCount,
+                            Optional.empty[java.lang.Long](), valid, null,
+                            newChildren.toArray)) { ret =>
+                        needsClosing += ret
+                        ret
+                      }
                       (Some(ret), needsClosing.toSeq)
                     }
                   } else {
@@ -141,18 +146,23 @@ object ColumnCastUtil {
                     }
                   }
               }
-              val (updatedData, needsClosingData) = transformedResult.getOrElse {
+              val updatedData = transformedResult.map {
+                case (updatedData, needsClosingData) =>
+                  needsClosing ++= needsClosingData
+                  updatedData
+              }.getOrElse {
                 withResource(cv.getChildColumnView(0)) { child =>
-                  val (ud, nc) = deepTransformView(child, childDt, nestedMismatchHandler)(convert)
-                  ud match {
-                    case Some(updated) =>
-                      (Some(GpuListUtils.replaceListDataColumnAsView(cv, updated)), nc)
-                    case None =>
-                      (None, nc)
+                  val (updatedChild, needsClosingChild) =
+                    deepTransformView(child, childDt, nestedMismatchHandler)(convert)
+                  needsClosing ++= needsClosingChild
+                  updatedChild.map { updated =>
+                    closeOnExcept(GpuListUtils.replaceListDataColumnAsView(cv, updated)) { ret =>
+                      needsClosing += ret
+                      ret
+                    }
                   }
                 }
               }
-              needsClosing ++= needsClosingData
               (updatedData, needsClosing.toSeq)
             case _ =>
               (None, needsClosing.toSeq)

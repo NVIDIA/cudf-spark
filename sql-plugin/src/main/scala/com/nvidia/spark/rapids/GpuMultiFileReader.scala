@@ -50,7 +50,7 @@ import org.apache.spark.sql.rapids.{GpuTaskMetrics, InputFileUtils}
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkVector}
+import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.util.SerializableConfiguration
 
 /**
@@ -130,6 +130,13 @@ trait HostMemoryBuffersWithMetaDataBase extends AutoCloseable {
 
   def setRowGroupsRead(count: Int): Unit = _rowGroupsRead = count
   def getRowGroupsRead: Int = _rowGroupsRead
+
+  /**
+   * Add what the runner counted to the scan's metrics. Called on the task thread, since pool
+   * threads reading the task's other files would race on the same metrics.
+   */
+  def addRunnerMetrics(metrics: Map[String, GpuMetric]): Unit =
+    metrics.get(ROW_GROUPS_READ).foreach(_ += _rowGroupsRead)
 
   def getBufferTime: Long = _bufferTime
   def getFilterTime: Long = _filterTime
@@ -644,9 +651,6 @@ abstract class MultiFileCloudPartitionReaderBase(
    */
   def readBatches(fileBufsAndMeta: HostMemoryBuffersWithMetaDataBase): Iterator[ColumnarBatch]
 
-  /** Validate format limits that must fail even when corrupt files are ignored. */
-  protected def validateHostBuffers(fileHostBuffers: HostMemoryBuffersWithMetaDataBase): Unit = {}
-
   /**
    * File format short name used for logging and other things to uniquely identity
    * which file format is being used.
@@ -661,8 +665,6 @@ abstract class MultiFileCloudPartitionReaderBase(
    */
   private def readBuffersToBatch(fileHostBuffers: HostMemoryBuffersWithMetaDataBase,
       addTaskIfNeeded: Boolean): Unit = {
-    // Unsupported input must not be mistaken for corruption and silently skipped.
-    closeOnExcept(fileHostBuffers) { _ => validateHostBuffers(fileHostBuffers) }
     if (getNumRowsInHostBuffers(fileHostBuffers) == 0) {
       // Close the currentFileHostBuffers on the deck if it is the fileHostBuffers being passed
       // in, otherwise close the fileHostBuffers passed in. It assumes that we will always handle
@@ -713,7 +715,7 @@ abstract class MultiFileCloudPartitionReaderBase(
     }
     taskRet.data.setScheduleTime(taskRet.metrics.scheduleTimeMs)
     if (countRowGroups) {
-      metrics.get(ROW_GROUPS_READ).foreach(_ += taskRet.data.getRowGroupsRead)
+      taskRet.data.addRunnerMetrics(metrics)
     }
     taskRet.data
   }
@@ -1048,6 +1050,7 @@ abstract class MultiFileCloudPartitionReaderBase(
  * @param maxReadBatchSizeRows  soft limit on the maximum number of rows the reader reads per batch
  * @param maxReadBatchSizeBytes soft limit on the maximum number of bytes the reader reads per batch
  * @param maxGpuColumnSizeBytes maximum number of bytes for a GPU column
+ * @param targetBatchSizeBytes  the target size of a batch
  * @param skipReadEstimate      whether to ignore the schema based GPU memory estimate for a batch
  * @param poolConf              the thread pool configuration
  * @param execMetrics           metrics
@@ -1058,6 +1061,7 @@ abstract class MultiFileCoalescingPartitionReaderBase(
     partitionSchema: StructType,
     maxReadBatchSizeRows: Integer,
     maxReadBatchSizeBytes: Long,
+    targetBatchSizeBytes: Long,
     maxGpuColumnSizeBytes: Long,
     skipReadEstimate: Boolean,
     poolConf: ThreadPoolConf,
@@ -1369,18 +1373,11 @@ abstract class MultiFileCoalescingPartitionReaderBase(
       // Compute effective row count.
       val effectiveRowsPerPartition = getRowsPerPartition(
         decodeMeta.rowsPerPartition, decodeMeta.allPartValues, decodeMeta.extraInfo)
-      val totalRows = effectiveRowsPerPartition.sum.toInt
       val iter = try {
-        if (totalRows == 0) {
-          EmptyGpuColumnarBatchIterator
-        } else {
-          // Someone is going to process this data, even if it is just a row count
-          GpuSemaphore.acquireIfNecessary(TaskContext.get())
-          val nullColumns = decodeMeta.readSchema.safeMap(f =>
-            GpuColumnVector.fromNull(totalRows, f.dataType).asInstanceOf[SparkVector])
-          val emptyBatch = new ColumnarBatch(nullColumns.toArray, totalRows)
-          new SingleGpuColumnarBatchIterator(emptyBatch)
-        }
+        // Cap each batch like a decoded one. Partition columns are added to every batch later.
+        val outputSchema = StructType(decodeMeta.readSchema.fields ++ partitionSchema.fields)
+        GpuNullBatchIterator(decodeMeta.readSchema, effectiveRowsPerPartition.sum,
+          GpuNullBatchIterator.maxRows(outputSchema, maxReadBatchSizeRows, targetBatchSizeBytes))
       } finally {
         // No decode phase in the empty-schema path, so close extraInfo resources directly.
         decodeMeta.extraInfo.close()

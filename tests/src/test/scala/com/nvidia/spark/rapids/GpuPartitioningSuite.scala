@@ -18,19 +18,23 @@ package com.nvidia.spark.rapids
 
 import java.math.RoundingMode
 
+import scala.collection.mutable.ArrayBuffer
+
 import ai.rapids.cudf.{ColumnVector, Cuda, DType, HostMemoryAllocator, HostMemoryBuffer, Scalar,
   Table}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.CudfTestHelper.withHostAllocator
 import com.nvidia.spark.rapids.RapidsConf.ShuffleKudoMode
-import com.nvidia.spark.rapids.jni.RmmSpark
+import com.nvidia.spark.rapids.jni.{Hash, RmmSpark}
 import com.nvidia.spark.rapids.shims.GpuHashPartitioning
+import org.mockito.Mockito.mockStatic
+import org.mockito.invocation.InvocationOnMock
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.{SparkConf, TaskContext}
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.{Expression, Literal, Murmur3Hash, Pmod}
+import org.apache.spark.sql.catalyst.expressions.{Expression, ExprId, Literal, Murmur3Hash, Pmod}
 import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, RangePartitioning}
 import org.apache.spark.sql.functions.{col, count, lit}
 import org.apache.spark.sql.rapids.GpuShuffleEnv
@@ -359,6 +363,38 @@ class GpuPartitioningSuite extends AnyFunSuite with BeforeAndAfterEach {
   /** The partition the CPU sends a row to when every key is a literal. */
   private def cpuHashPartition(keys: Seq[Literal], numPartitions: Int): Int =
     Pmod(new Murmur3Hash(keys), Literal(numPartitions)).eval(InternalRow.empty).asInstanceOf[Int]
+
+  test("hash partitioning invokes fused Murmur3 partition IDs") {
+    TrampolineUtil.cleanupAnyExistingSession()
+    val conf = new SparkConf()
+    TestUtils.withGpuSparkSession(conf) { _ =>
+      GpuShuffleEnv.init(new RapidsConf(conf))
+      val fusedCalls = ArrayBuffer.empty[(Int, Int)]
+      var rawHashCalls = 0
+      withResource(mockStatic(classOf[Hash], (invocation: InvocationOnMock) => {
+        invocation.getMethod.getName match {
+          case "murmurHash32Pmod" =>
+            fusedCalls += ((invocation.getArgument[Int](0), invocation.getArgument[Int](1)))
+          case "murmurHash32" => rawHashCalls += 1
+          case _ =>
+        }
+        invocation.callRealMethod()
+      })) { _ =>
+        val key = GpuBoundReference(0, IntegerType, nullable = true)(ExprId(0), "key")
+        Seq(100, 200).foreach { numPartitions =>
+          val partitioning = GpuHashPartitioning(Seq(key), numPartitions)
+          val (offsets, columns) = partitioning.partitionInternalAndClose(buildBatch())
+          withResource(columns) { _ =>
+            assertResult(numPartitions)(offsets.length)
+            assertResult(4)(columns.length)
+            columns.foreach(column => assertResult(10L)(column.getBase.getRowCount))
+          }
+        }
+        assertResult(Seq((42, 100), (42, 200)))(fusedCalls.toSeq)
+        assertResult(0)(rawHashCalls)
+      }
+    }
+  }
 
   test("hash partitioning sends every row of a rows-only batch to the CPU's partition") {
     val kudoGpuWriteConf = new SparkConf().set(RapidsConf.SHUFFLE_KUDO_WRITE_MODE.key, "GPU")

@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright (c) 2020-2022, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ function print_ver(){
     SERVER_ID=$5
 
     # Collect snapshot dependency info only in Jenkins build
-    # In dev build, print 'SNAPSHOT' tag without time stamp, e.g.: rapids-4-spark-<version>-SNAPSHOT.jar
+    # In dev build, print 'SNAPSHOT' tag without time stamp, e.g.: cudf-spark-<version>-SNAPSHOT.jar
     if [[ "$VERSION" == *"-SNAPSHOT" && -n "$JENKINS_URL" ]]; then
         PREFIX=${VERSION%-SNAPSHOT}
         # List the latest SNAPSHOT jar file in the maven repo
