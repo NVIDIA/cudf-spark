@@ -40,6 +40,10 @@ private[execution] class DriverlessBroadcastBuildRDD(
   private val maxDecompressBatchMemory = conf.shuffleCompressionMaxBatchMemory
   private val shuffleId = buildDependency.shuffleId
 
+  // Consumers build executor-local replicas, so the shuffle producer must not attract
+  // their tasks when the scheduler follows the join's narrow build dependency.
+  override def getPreferredLocations(split: Partition): Seq[String] = Nil
+
   override def compute(split: Partition, context: TaskContext): Iterator[ColumnarBatch] = {
     // Defer metadata lookup and cache acquisition until the join consumes this iterator.
     new Iterator[ColumnarBatch] {

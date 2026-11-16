@@ -309,9 +309,9 @@ case class GpuAvroMultiFilePartitionReaderFactory(
     }
     val poolConf = poolConfBuilder.build()
     new GpuMultiFileAvroPartitionReader(conf, files, clippedBlocks.toSeq, readDataSchema,
-      partitionSchema, maxReadBatchSizeRows, maxReadBatchSizeBytes, maxGpuColumnSizeBytes,
-      skipReadEstimate, poolConf, debugDumpPrefix, debugDumpAlways, metrics,
-      mapPathHeader.toMap)
+      partitionSchema, maxReadBatchSizeRows, maxReadBatchSizeBytes, targetBatchSizeBytes,
+      maxGpuColumnSizeBytes, skipReadEstimate, poolConf, debugDumpPrefix, debugDumpAlways,
+      metrics, mapPathHeader.toMap)
   }
 
 }
@@ -922,6 +922,7 @@ class GpuMultiFileAvroPartitionReader(
     partitionSchema: StructType,
     maxReadBatchSizeRows: Integer,
     maxReadBatchSizeBytes: Long,
+    targetBatchSizeBytes: Long,
     maxGpuColumnSizeBytes: Long,
     skipReadEstimate: Boolean,
     poolConf: ThreadPoolConf,
@@ -930,8 +931,8 @@ class GpuMultiFileAvroPartitionReader(
     execMetrics: Map[String, GpuMetric],
     mapPathHeader: Map[Path, Header])
   extends MultiFileCoalescingPartitionReaderBase(conf, clippedBlocks,
-    partitionSchema, maxReadBatchSizeRows, maxReadBatchSizeBytes, maxGpuColumnSizeBytes,
-    skipReadEstimate, poolConf, execMetrics) with GpuAvroReaderBase {
+    partitionSchema, maxReadBatchSizeRows, maxReadBatchSizeBytes, targetBatchSizeBytes,
+    maxGpuColumnSizeBytes, skipReadEstimate, poolConf, execMetrics) with GpuAvroReaderBase {
 
   override def checkIfNeedToSplitDataBlock(
       currentBlockInfo: SingleDataBlockInfo,

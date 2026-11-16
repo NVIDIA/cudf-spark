@@ -361,7 +361,7 @@ case class InsertIntoHadoopFsRelationCommandMeta(
     val format = fileFormat.getOrElse(
       throw new IllegalStateException("fileFormat missing, tagSelfForGpu not called?"))
 
-    GpuInsertIntoHadoopFsRelationCommand(
+    val gpuCommand = GpuInsertIntoHadoopFsRelationCommand(
       cmd.outputPath,
       cmd.staticPartitions,
       cmd.ifPartitionNotExists,
@@ -377,6 +377,8 @@ case class InsertIntoHadoopFsRelationCommandMeta(
       conf.stableSort,
       conf.concurrentWriterPartitionFlushSize,
       conf.outputDebugDumpPrefix)
+    GpuFileWriteJobShim.copyBeforeWriteJob(cmd, gpuCommand)
+    gpuCommand
   }
 }
 
@@ -875,7 +877,8 @@ object GpuOverrides extends Logging {
     (IcebergFormatType, FileFormatChecks(
       cudfRead = (TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.STRUCT + TypeSig.BINARY +
           TypeSig.ARRAY + TypeSig.MAP +
-          GpuTypeShims.additionalParquetCommonSupportedTypes).nested(),
+          GpuTypeShims.additionalParquetCommonSupportedTypes +
+          ParquetVariantShims.additionalIcebergReadSupportedTypes).nested(),
       cudfWrite = (TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.STRUCT +
           TypeSig.ARRAY + TypeSig.MAP + TypeSig.BINARY +
           GpuTypeShims.additionalParquetCommonSupportedTypes).nested(),
