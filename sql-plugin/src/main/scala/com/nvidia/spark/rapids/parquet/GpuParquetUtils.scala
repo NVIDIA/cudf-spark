@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids.parquet
 
-import java.util.Locale
+import java.util.{Arrays, Locale}
 
 import scala.collection.JavaConverters._
 
@@ -44,20 +44,22 @@ object GpuParquetUtils extends Logging {
       readSchema: MessageType,
       blocks: java.util.List[BlockMetaData],
       isCaseSensitive: Boolean): Seq[BlockMetaData] = {
-    val columnPaths = readSchema.getPaths.asScala.map(x => ColumnPath.get(x: _*))
-    val pathSet = if (isCaseSensitive) {
-      columnPaths.map(cp => cp.toDotString).toSet
+    val columnPaths = readSchema.getPaths.asScala.map(path => ColumnPath.get(path: _*))
+    // Keep path components distinct: a flat column "a.b" is not the struct field a.b.
+    val matchesPath: ColumnPath => Boolean = if (isCaseSensitive) {
+      val pathSet = columnPaths.toSet
+      pathSet.contains
     } else {
-      columnPaths.map(cp => cp.toDotString.toLowerCase(Locale.ROOT)).toSet
+      def normalizePath(path: ColumnPath): java.util.List[String] = {
+        // Value keys avoid interning a new ColumnPath for every normalized chunk path.
+        Arrays.asList(path.toArray.map(_.toLowerCase(Locale.ROOT)): _*)
+      }
+      val pathSet = columnPaths.map(normalizePath).toSet
+      path => pathSet.contains(normalizePath(path))
     }
     blocks.asScala.toSeq.map { oldBlock =>
       //noinspection ScalaDeprecation
-      val newColumns = if (isCaseSensitive) {
-        oldBlock.getColumns.asScala.filter(c => pathSet.contains(c.getPath.toDotString))
-      } else {
-        oldBlock.getColumns.asScala.filter(c =>
-          pathSet.contains(c.getPath.toDotString.toLowerCase(Locale.ROOT)))
-      }
+      val newColumns = oldBlock.getColumns.asScala.filter(c => matchesPath(c.getPath))
       newBlockMeta(oldBlock, newColumns.toSeq)
     }
   }

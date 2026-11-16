@@ -1062,17 +1062,20 @@ trait OrcCommonFunctions extends OrcCodecWritingHelper { self: FilePartitionRead
     val tableSchema = buildReaderSchema(memFileSchema, requestedMapping)
     val includedColumns = tableSchema.getFieldNames.asScala.toSeq
     val decimal128Fields = filterDecimal128Fields(includedColumns.toArray, readDataSchema)
-    val parseOpts = ORCOptions.builder()
+    val builder = ORCOptions.builder()
       .withTimeUnit(DType.TIMESTAMP_MICROSECONDS)
       .withNumPyTypes(false)
-      .includeColumn(includedColumns: _*)
       .decimal128Column(decimal128Fields: _*)
       // Read timestamps as UTC, ignoring the writer timezone in stripe footers.
       // Date/time rebase is done externally via GpuOrcTimezoneUtils.rebaseOrcDateTime,
       // which handles legacy dates and both same-TZ and cross-TZ timestamps, including DST.
       .ignoreTimezoneInStripeFooter()
-      .build()
-    (parseOpts, tableSchema)
+    // The in-memory footer already has tableSchema's columns in the required order.
+    // Avoid cuDF's ambiguous dotted-path name selector for literal dotted root names.
+    if (!includedColumns.exists(_.contains("."))) {
+      builder.includeColumn(includedColumns: _*)
+    }
+    (builder.build(), tableSchema)
   }
 
   protected final def isNeedToSplitDataBlock(

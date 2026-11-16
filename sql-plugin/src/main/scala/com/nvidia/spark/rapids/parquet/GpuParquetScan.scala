@@ -2551,10 +2551,15 @@ trait ParquetPartitionReaderBase extends Logging with ScanWithMetrics
       useFieldId: Boolean): ParquetOptions = {
     val includeColumns = toCudfColumnNames(readDataSchema, clippedSchema,
       isSchemaCaseSensitive, useFieldId)
-    ParquetOptions.builder()
-        .withTimeUnit(DType.TIMESTAMP_MICROSECONDS)
-        .includeColumn(includeColumns : _*)
-        .build()
+    val builder = ParquetOptions.builder()
+      .withTimeUnit(DType.TIMESTAMP_MICROSECONDS)
+    // cuDF's name selector cannot distinguish a flat "a.b" from the struct field a.b.
+    // The in-memory footer is already clipped in read-schema order, so read all its
+    // columns when a top-level name contains a dot.
+    if (!clippedSchema.getFields.asScala.exists(_.getName.contains("."))) {
+      builder.includeColumn(includeColumns: _*)
+    }
+    builder.build()
   }
 
   /** conversions used by multithreaded reader and coalescing reader */
