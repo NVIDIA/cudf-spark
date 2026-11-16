@@ -26,10 +26,12 @@ import scala.collection.JavaConverters._
 
 import com.nvidia.spark.rapids.{GpuOrcTimezoneUtils, RapidsConf, RapidsReaderType,
   SparkQueryCompareTestSuite}
+import com.nvidia.spark.rapids.Arm.withResource
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
-import org.apache.orc.{CompressionKind, OrcFile, TypeDescription}
+import org.apache.orc.{CompressionKind, OrcFile, OrcProto, TypeDescription}
 import org.apache.orc.impl.{RecordReaderImpl, WriterImpl}
+import org.apache.orc.impl.ReaderImpl.StripeInformationImpl
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.{DataFrame, SparkSession}
@@ -256,6 +258,103 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
         .toSeq
     } finally {
       rows.close()
+    }
+  }
+
+  private def rewriteEmptyWriterTimezone(
+      conf: Configuration,
+      sourceFile: File,
+      outputFile: File,
+      explicitEmpty: Boolean): Unit = {
+    val sourcePath = new Path(sourceFile.getCanonicalPath)
+    withResource(OrcFile.createReader(sourcePath, OrcFile.readerOptions(conf))) { reader =>
+      assert(reader.getCompressionKind === CompressionKind.NONE)
+      withResource(reader.rows().asInstanceOf[RecordReaderImpl]) { rows =>
+        withResource(OrcFile.createWriter(new Path(outputFile.getCanonicalPath),
+            OrcFile.writerOptions(conf).setSchema(reader.getSchema)
+              .compress(CompressionKind.NONE)).asInstanceOf[WriterImpl]) { writer =>
+          withResource(sourcePath.getFileSystem(conf).open(sourcePath)) { in =>
+            reader.getStripes.asScala.zip(reader.getStripeStatistics.asScala)
+              .foreach { case (stripe, stats) =>
+                val footer = rows.readStripeFooter(stripe).toBuilder
+                if (explicitEmpty) {
+                  footer.setWriterTimezone("")
+                } else {
+                  footer.clearWriterTimezone()
+                }
+                val footerBytes = footer.build().toByteArray
+                val dataLength = Math.toIntExact(stripe.getIndexLength + stripe.getDataLength)
+                val stripeBytes = new Array[Byte](dataLength + footerBytes.length)
+                in.readFully(stripe.getOffset, stripeBytes, 0, dataLength)
+                System.arraycopy(footerBytes, 0, stripeBytes, dataLength, footerBytes.length)
+                val stripeInfo = OrcProto.StripeInformation.newBuilder()
+                  .setOffset(stripe.getOffset)
+                  .setIndexLength(stripe.getIndexLength)
+                  .setDataLength(stripe.getDataLength)
+                  .setFooterLength(footerBytes.length)
+                  .setNumberOfRows(stripe.getNumberOfRows)
+                  .build()
+                writer.appendStripe(stripeBytes, 0, stripeBytes.length,
+                  new StripeInformationImpl(stripeInfo, stripe.getStripeId,
+                    stripe.getEncryptionStripeId, stripe.getEncryptedLocalKeys), Array(stats))
+              }
+          }
+        }
+      }
+    }
+    withResource(OrcFile.createReader(new Path(outputFile.getCanonicalPath),
+        OrcFile.readerOptions(conf))) { reader =>
+      withResource(reader.rows().asInstanceOf[RecordReaderImpl]) { rows =>
+        assert(!reader.getStripes.isEmpty)
+        reader.getStripes.asScala.foreach { stripe =>
+          val footer = rows.readStripeFooter(stripe)
+          assert(footer.hasWriterTimezone === explicitEmpty)
+          assert(footer.getWriterTimezone.isEmpty)
+        }
+      }
+    }
+  }
+
+  for {
+    explicitEmpty <- Seq(false, true)
+    timezone <- Seq("UTC", "Asia/Shanghai")
+    readerType <- Seq(
+      RapidsReaderType.PERFILE,
+      RapidsReaderType.COALESCING,
+      RapidsReaderType.MULTITHREADED)
+  } {
+    test(s"default writer timezone: empty=$explicitEmpty timezone=$timezone reader=$readerType") {
+      val originalTimeZone = TimeZone.getDefault
+      val conf = baseConf("orc")
+        .set(RapidsConf.ORC_READER_TYPE.key, readerType.toString)
+      try {
+        withTempPath { root =>
+          val sourceDir = new File(root, "source")
+          val rewrittenFile = new File(root, "empty-writer-timezone.orc")
+          val expected = withCpuSparkSession(spark => {
+            setSessionTimeZone(spark, timezone)
+            timestampDataFrame(spark, Seq(-1L, 1421323200000000L, 1435752000123456L))
+              .coalesce(1).write.option("compression", "none").orc(sourceDir.getCanonicalPath)
+            rewriteEmptyWriterTimezone(spark.sparkContext.hadoopConfiguration,
+              getOrcFile(sourceDir), rewrittenFile, explicitEmpty)
+            spark.read.orc(sourceDir.getCanonicalPath).orderBy("id").collect()
+          }, conf = conf)
+          val (fromCpu, fromGpu) = runOnCpuAndGpu(
+            spark => {
+              setSessionTimeZone(spark, timezone)
+              spark.read.orc(rewrittenFile.getCanonicalPath)
+            },
+            _.orderBy("id"),
+            conf = conf,
+            repart = 0,
+            skipCanonicalizationCheck = true,
+            existClasses = "GpuFileSourceScanExec")
+          compareResults(false, 0.0, expected, fromCpu)
+          compareResults(false, 0.0, expected, fromGpu)
+        }
+      } finally {
+        TimeZone.setDefault(originalTimeZone)
+      }
     }
   }
 

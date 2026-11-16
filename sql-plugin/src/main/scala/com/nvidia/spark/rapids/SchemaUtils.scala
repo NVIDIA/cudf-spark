@@ -26,6 +26,7 @@ import ai.rapids.cudf._
 import ai.rapids.cudf.ColumnWriterOptions._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingSeq
+import com.nvidia.spark.rapids.shims.OrcSchemaTypeShims
 import org.apache.orc.TypeDescription
 
 import org.apache.spark.sql.catalyst.parser.CatalystSqlParser
@@ -66,7 +67,9 @@ object SchemaUtils {
       case TypeDescription.Category.MAP =>
         val Seq(keyType, valueType) = orcType.getChildren.asScala.toSeq
         MapType(toCatalystType(keyType), toCatalystType(valueType))
-      case _ => CatalystSqlParser.parseDataType(orcType.toString)
+      case _ =>
+        OrcSchemaTypeShims.catalystTypeOverride(orcType)
+          .getOrElse(CatalystSqlParser.parseDataType(orcType.toString))
     }
 
     def toStructType(orcType: TypeDescription): StructType = {

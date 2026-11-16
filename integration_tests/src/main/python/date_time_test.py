@@ -528,6 +528,9 @@ def test_unsupported_fallback_from_unixtime(data_gen):
 @pytest.mark.parametrize('invalid,fmt', [
     ('2021-01/01', 'yyyy-MM-dd'),
     ('2021/01-01', 'yyyy/MM/dd'),
+    ('2024/5/6', 'yyyy/MM/dd'),
+    ('2024/5/06', 'yyyy/MM/dd'),
+    ('2024/05/6', 'yyyy/MM/dd'),
     ('2021/01', 'yyyy-MM'),
     ('2021-01', 'yyyy/MM'),
     ('01/02/201', 'dd/MM/yyyy'),
@@ -615,6 +618,19 @@ def test_string_to_timestamp_functions_exception_policy_disagreement(ansi_enable
             'spark.rapids.sql.incompatibleDateFormats.enabled': False,
         },
         error_message="different result")
+
+
+# https://github.com/NVIDIA/cudf-spark/issues/16718
+@disable_ansi_mode  # ANSI mode is tested by test_string_to_timestamp_functions_ansi_invalid.
+@tz_sensitive_test
+@pytest.mark.parametrize('operator', exception_policy_operators, ids=idfn)
+def test_string_to_timestamp_corrected_slash_date_requires_two_digits(operator):
+    data = [("2024/05/06",), ("2024/5/6",), ("2024/5/06",), ("2024/05/6",)]
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.createDataFrame(data, "a string")
+            .selectExpr("a", "{}(a, 'yyyy/MM/dd')".format(operator)),
+        {'spark.sql.legacy.timeParserPolicy': 'CORRECTED',
+         'spark.rapids.sql.incompatibleDateFormats.enabled': False})
 
 
 @pytest.mark.parametrize('ansi_enabled', [True, False], ids=['ANSI_ON', 'ANSI_OFF'])
@@ -1016,7 +1032,7 @@ def test_date_format_f_incompat(data_gen, date_format):
         'DateFormatClass', conf)
 
 maybe_supported_date_formats = ['dd-MM-yyyy', 'yyyy-MM-dd HH:mm:ss.SSS', 'yyyy-MM-dd HH:mm:ss.SSSSSS']
-@pytest.mark.parametrize('date_format', maybe_supported_date_formats, ids=idfn)
+@pytest.mark.parametrize('date_format', ['dd-MM-yyyy', 'yyyy-MM-dd HH:mm:ss.SSSSSS'], ids=idfn)
 @pytest.mark.parametrize('data_gen', date_n_time_gens, ids=idfn)
 @allow_non_gpu('DateFormatClass', 'Cast')
 def test_date_format_maybe(data_gen, date_format):

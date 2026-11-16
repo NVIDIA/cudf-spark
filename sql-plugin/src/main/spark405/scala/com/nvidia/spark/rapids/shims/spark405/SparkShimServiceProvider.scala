@@ -15,23 +15,23 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark":["400db173","410db183"],"carryForward":"none"}
+{"spark":["405"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
-package org.apache.spark.sql.execution.datasources.parquet
 
-import org.apache.spark.memory.MemoryMode
-import org.apache.spark.sql.execution.vectorized.WritableColumnVector
+package com.nvidia.spark.rapids.shims.spark405
 
-object ShimParquetColumnVector {
-  def apply(
-    column: ParquetColumn,
-    vector: WritableColumnVector,
-    capacity: Int,
-    memoryMode: MemoryMode,
-    missingColumns: java.util.Set[ParquetColumn],
-    isTopLevel: Boolean,
-    defaultValue: Any): ParquetColumnVector = {
-    new ParquetColumnVector(column, vector, capacity, missingColumns, isTopLevel,
-      defaultValue, "")
+import com.nvidia.spark.rapids.SparkShimVersion
+
+object SparkShimServiceProvider {
+  val VERSION = SparkShimVersion(4, 0, 5)
+  val VERSIONNAMES = Seq(s"$VERSION")
+}
+
+class SparkShimServiceProvider extends com.nvidia.spark.rapids.SparkShimServiceProvider {
+
+  override def getShimVersion: SparkShimVersion = SparkShimServiceProvider.VERSION
+
+  override def matchesVersion(version: String): Boolean = {
+    SparkShimServiceProvider.VERSIONNAMES.contains(version)
   }
 }
