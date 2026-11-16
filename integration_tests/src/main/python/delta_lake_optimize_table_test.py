@@ -1000,12 +1000,19 @@ def test_delta_optimize_zorder_row_tracking_preserves_row_ids(spark_tmp_path):
     data_path = spark_tmp_path + "/DELTA_OPTIMIZE"
     cpu_path, gpu_path = data_path + "/CPU", data_path + "/GPU"
     _setup_tables(False, cpu_path, gpu_path, None, None, _zorder_conf, write_func=write)
-    before = with_cpu_session(lambda s: rows(s, cpu_path), conf=_zorder_conf)
+    # The two tables are written independently, so Delta may assign them different base row IDs.
+    # Compare each table with its own snapshot, and compare only the data across engines.
+    cpu_before = with_cpu_session(lambda s: rows(s, cpu_path), conf=_zorder_conf)
+    gpu_before = with_cpu_session(lambda s: rows(s, gpu_path), conf=_zorder_conf)
     with_cpu_session(lambda s: sql(s, cpu_path), conf=_zorder_conf)
     with_gpu_session(lambda s: sql(s, gpu_path), conf=_zorder_conf)
+    cpu_after = with_cpu_session(lambda s: rows(s, cpu_path), conf=_zorder_conf)
+    gpu_after = with_cpu_session(lambda s: rows(s, gpu_path), conf=_zorder_conf)
     # Row IDs must survive the rewrite on both engines.
-    assert_equal(before, with_cpu_session(lambda s: rows(s, cpu_path), conf=_zorder_conf))
-    assert_equal(before, with_cpu_session(lambda s: rows(s, gpu_path), conf=_zorder_conf))
+    assert_equal(cpu_before, cpu_after)
+    assert_equal(gpu_before, gpu_after)
+    data = lambda rs: sorted(((r.a is None, r.a), (r.b is None, r.b)) for r in rs)
+    assert_equal(data(cpu_after), data(gpu_after))
 
 
 @allow_non_gpu(*delta_meta_allow)
@@ -1327,14 +1334,20 @@ def test_delta_optimize_zorder_row_tracking_after_changes(spark_tmp_path, cdf):
     cpu_path, gpu_path = data_path + "/CPU", data_path + "/GPU"
     _setup_tables(False, cpu_path, gpu_path, ["p"], None, conf,
                   write_func=_zorder_writer(properties), post_setup_func=mutate)
-    before = with_cpu_session(lambda s: rows(s, gpu_path), conf=conf)
+    # The two tables are written independently, so Delta may assign them different base row IDs.
+    # Compare each table with its own snapshot, and compare only the data across engines.
+    cpu_before = with_cpu_session(lambda s: rows(s, cpu_path), conf=conf)
+    gpu_before = with_cpu_session(lambda s: rows(s, gpu_path), conf=conf)
     sql = lambda s, path: s.sql(f"OPTIMIZE delta.`{path}` ZORDER BY (a, c)").collect()
     with_cpu_session(lambda s: sql(s, cpu_path), conf=conf)
     with_gpu_session(lambda s: sql(s, gpu_path), conf=conf)
     cpu_after = with_cpu_session(lambda s: rows(s, cpu_path), conf=conf)
     gpu_after = with_cpu_session(lambda s: rows(s, gpu_path), conf=conf)
-    assert_equal(cpu_after, gpu_after)
-    assert_equal([r.row_id for r in before], [r.row_id for r in gpu_after])
+    assert_equal(cpu_before, cpu_after)
+    assert_equal(gpu_before, gpu_after)
+    data = lambda rs: sorted(
+        ((r.a is None, r.a), (r.b is None, r.b), (r.c is None, r.c)) for r in rs)
+    assert_equal(data(cpu_after), data(gpu_after))
 
 
 @_zorder_test
