@@ -401,8 +401,9 @@ object HybridScanPipeline extends Logging {
 
   /** Close every copy event. Called at executor shutdown, once no task can copy. */
   def shutdown(): Unit = {
-    allCopyEvents.forEach { event => event.close() }
+    val events = allCopyEvents.toArray(Array.empty[Cuda.Event])
     allCopyEvents.clear()
+    events.safeClose()
   }
 
   /** Parse the footer into a reader. The caller owns and closes both the reader and the footer. */
@@ -433,7 +434,15 @@ object HybridScanPipeline extends Logging {
           "GPU OutOfMemory: work on the staged buffers cannot be split")
       }
       // The split OOM came from the copy: retry with half the pack size, down to minPackSize.
-      splitTargetSizeInHalfGpu(target)
+      if (target.targetSize > target.minSize) {
+        // Clamped, since halving can step past the floor, which may still fit.
+        val half = math.min(target.targetSize, target.dataSize) / 2
+        Seq(AutoCloseableTargetSize(math.max(half, target.minSize), target.minSize,
+          target.dataSize))
+      } else {
+        // Throws: already at the floor.
+        splitTargetSizeInHalfGpu(target)
+      }
     }
     val packSize = AutoCloseableTargetSize(maxPackSize, minPackSize, chunks.map(_.getLength).sum)
     // The copy and fn share one retry block. A retry OOM from either frees the device buffers,

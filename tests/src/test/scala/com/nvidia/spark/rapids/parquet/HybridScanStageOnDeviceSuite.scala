@@ -41,6 +41,18 @@ class HybridScanStageOnDeviceSuite extends RmmSparkRetrySuiteBase {
     RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
       RmmSpark.OomInjectionType.GPU.ordinal, 0)
 
+  private def assertStaged(chunks: Array[HostMemoryBuffer],
+      device: Array[DeviceMemoryBuffer]): Unit = {
+    assert(device.length == chunks.length)
+    chunks.zip(device).foreach { case (expected, actual) =>
+      assert(actual.getLength == CHUNK)
+      withResource(HostMemoryBuffer.allocate(CHUNK)) { back =>
+        back.copyFromDeviceBuffer(actual)
+        (0L until CHUNK).foreach(i => assert(back.getByte(i) == expected.getByte(i)))
+      }
+    }
+  }
+
   test("a split OOM while staging retries with half the pack size") {
     withResource(new Cuda.Event()) { event =>
       withResource(filledChunks(2)) { chunks =>
@@ -48,14 +60,21 @@ class HybridScanStageOnDeviceSuite extends RmmSparkRetrySuiteBase {
         injectSplitOnNextGpuAlloc()
         HybridScanPipeline.withStagedOnDevice(chunks, 2 * CHUNK, CHUNK, event) { device =>
           assert(RmmSpark.getAndResetNumSplitRetryThrow(/*taskId*/ 1) > 0)
-          assert(device.length == chunks.length)
-          chunks.zip(device).foreach { case (expected, actual) =>
-            assert(actual.getLength == CHUNK)
-            withResource(HostMemoryBuffer.allocate(CHUNK)) { back =>
-              back.copyFromDeviceBuffer(actual)
-              (0L until CHUNK).foreach(i => assert(back.getByte(i) == expected.getByte(i)))
-            }
-          }
+          assertStaged(chunks, device)
+        }
+      }
+    }
+  }
+
+  test("a split OOM while staging retries at the minimum when half would be below it") {
+    withResource(new Cuda.Event()) { event =>
+      withResource(filledChunks(3)) { chunks =>
+        RmmSpark.getAndResetNumSplitRetryThrow(/*taskId*/ 1)
+        injectSplitOnNextGpuAlloc()
+        // Half of the 3 * CHUNK bytes is below the 2 * CHUNK floor, so the retry uses the floor.
+        HybridScanPipeline.withStagedOnDevice(chunks, 8 * CHUNK, 2 * CHUNK, event) { device =>
+          assert(RmmSpark.getAndResetNumSplitRetryThrow(/*taskId*/ 1) > 0)
+          assertStaged(chunks, device)
         }
       }
     }
