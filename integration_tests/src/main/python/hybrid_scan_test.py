@@ -27,7 +27,7 @@ from urllib.parse import urlparse
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_spark_exception
 from conftest import is_databricks_runtime, is_not_utc
 from data_gen import *
-from marks import allow_non_gpu, inject_oom
+from marks import allow_non_gpu, ignore_order, inject_oom
 from parquet_test import hybrid_fallback_parquet_file_reader_conf, hybrid_parquet_file_reader_conf, \
     rebase_write_legacy_conf
 from spark_session import with_cpu_session, with_gpu_session
@@ -470,8 +470,9 @@ def test_hybrid_scan_ignore_corrupt_files_keeps_readable_file(spark_tmp_path, re
             .filter('sorted_int < 500'),
         conf=copy_and_update(reader_confs, {'spark.sql.files.ignoreCorruptFiles': 'true'}))
 
-@pytest.mark.parametrize("reader_mode", ["PERFILE", "MULTITHREADED"])
 
+@ignore_order(local=True)
+@pytest.mark.parametrize("reader_mode", ["PERFILE", "MULTITHREADED"])
 @pytest.mark.parametrize("flat_first", [False, True], ids=["struct-first", "flat-first"])
 @pytest.mark.parametrize("use_v1", [False, True], ids=["v2", "v1"])
 @pytest.mark.parametrize("projection", [
@@ -506,7 +507,7 @@ def test_hybrid_scan_dotted_column_collision(
             lambda spark: spark.read.parquet(path).selectExpr(*projection).collect(),
             conf=hybrid_conf(**{
                 "spark.sql.sources.useV1SourceList": "parquet" if use_v1 else "",
-            "spark.rapids.sql.format.parquet.reader.type": reader_mode,
+                "spark.rapids.sql.format.parquet.reader.type": reader_mode,
             })),
         error_message="column a.b contains a literal dot")
     # The same file still takes the hybrid reader when the dotted root is not requested.
