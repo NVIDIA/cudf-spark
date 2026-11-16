@@ -53,7 +53,7 @@ class HistorySizedFileScanSuite extends AnyFunSuite {
     val registration = MetricStores.install(new FakeMetricStore)
     HistoryObservations.start()
     if (historyOn) {
-      ScanSplitHeuristic.enable(policy)
+      ScanSplitHeuristic.instance.enable(policy)
     }
     try {
       val out = new Path(dir.toUri.toString, "t")
@@ -64,7 +64,7 @@ class HistorySizedFileScanSuite extends AnyFunSuite {
       scan.planInputPartitions() // the exec's inputRDD plans the partitions first
       body(spark, scan)
     } finally {
-      ScanSplitHeuristic.disable()
+      ScanSplitHeuristic.instance.disable()
       HistoryObservations.shutdown()
       registration.close()
       spark.stop()

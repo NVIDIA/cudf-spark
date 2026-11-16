@@ -287,7 +287,7 @@ private[perf] class HistoryLifecycle(
 object HistoryHeuristics {
 
   private val lifecycle = new HistoryLifecycle(
-    heuristics = Seq(ScanSplitHeuristic),
+    heuristics = Seq(ScanSplitHeuristic.instance),
     currentStore = () => MetricStores.current())
 
   /** At driver plugin init. */

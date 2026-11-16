@@ -29,6 +29,7 @@ import com.nvidia.spark.rapids.{GpuMetric, NoopMetric, RapidsConf, ScanWithMetri
 import org.apache.hadoop.fs.Path
 
 import org.apache.spark.SparkContext
+import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.AttributeReference
@@ -207,7 +208,10 @@ class ScanSplitHeuristic(store: () => MetricStore) extends HistoryHeuristic(stor
     ctx.table != null && ctx.table.nonEmpty && ctx.plannedSplits > 0
 }
 
-object ScanSplitHeuristic extends ScanSplitHeuristic(() => MetricStores.current()) {
+object ScanSplitHeuristic extends Logging {
+
+  /** The production heuristic: reads and writes the installed history store. */
+  val instance: ScanSplitHeuristic = new ScanSplitHeuristic(() => MetricStores.current())
 
   /** Largest key the history API takes, in UTF-8 bytes. */
   val MAX_KEY_BYTES: Int = DimValue.MAX_CANONICAL_BYTES - 3
@@ -336,7 +340,7 @@ object ScanSplitHeuristic extends ScanSplitHeuristic(() => MetricStores.current(
   /** `scanKey` while history is on; logs why a scan has no usable key. */
   def historyKey(table: Option[String], roots: => Seq[Path]): Option[String] = {
     lazy val rootPaths = roots
-    if (!isEnabled) {
+    if (!instance.isEnabled) {
       None
     } else {
       scanKey(table, rootPaths) match {
@@ -355,7 +359,7 @@ object ScanSplitHeuristic extends ScanSplitHeuristic(() => MetricStores.current(
       spark: SparkSession,
       listedBytes: => Long,
       sparkMaxSplitBytes: Long): Long =
-    fileSourceSplit(key, sparkMaxSplitBytes, name => {
+    instance.fileSourceSplit(key, sparkMaxSplitBytes, name => {
       val rapidsConf = new RapidsConf(spark.sessionState.conf)
       ScanContext(
         table = name,
@@ -373,7 +377,7 @@ object ScanSplitHeuristic extends ScanSplitHeuristic(() => MetricStores.current(
       acc: Option[CollectionAccumulator[(Int, Long, Long)]],
       sc: SparkContext): Unit =
     for (name <- key; splits <- acc) {
-      register(HistoryObservations.currentExecutionId(sc),
+      instance.register(HistoryObservations.currentExecutionId(sc),
         ScanContext.forObservation(name, listed.length, () => drainSplits(splits).map {
           case (i, decoded, _) => (i, decoded, listed.lift(i).getOrElse(0L))
         }))
