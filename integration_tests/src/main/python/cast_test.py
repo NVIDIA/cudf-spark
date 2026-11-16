@@ -686,10 +686,11 @@ def test_cast_string_to_extreme_decimal_scale_cpu_bridge():
         return spark.createDataFrame([('1e-1000',)], 'a string').select(
             f.col('a').cast(_parsed_exponent_overflow_decimal_type)
                 .isNull()
-                .alias('result'))
+                .alias('result')).collect()
 
-    assert_gpu_fallback_collect(
-        do_cast, 'Cast', conf=_decimal_scale_cast_conf(False))
+    assert_gpu_and_cpu_same_data_or_error(
+        do_cast, conf=_decimal_scale_cast_conf(False),
+        error_message=re.compile('(?i)(decimal|underflow|overflow)'))
 
 
 @allow_non_gpu('Cast')
@@ -719,11 +720,12 @@ def test_cast_string_to_extreme_decimal_scale_cpu_bridge():
 def test_cast_nested_string_to_extreme_decimal_scale_cpu_bridge(data, schema, to_type):
     def do_cast(spark):
         return spark.createDataFrame(data, schema).select(
-            f.col('a').cast(to_type).alias('result'))
+            f.col('a').cast(to_type).alias('result')).collect()
 
     # Spark permits string-to-decimal map-key casts only in ANSI mode.
-    assert_gpu_fallback_collect(
-        do_cast, 'Cast', conf=_decimal_scale_cast_conf(True))
+    assert_gpu_and_cpu_same_data_or_error(
+        do_cast, conf=_decimal_scale_cast_conf(True),
+        error_message=re.compile('(?i)(decimal|underflow|overflow)'))
 
 
 @allow_non_gpu('ProjectExec', 'Cast')
