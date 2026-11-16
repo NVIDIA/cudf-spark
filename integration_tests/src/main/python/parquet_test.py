@@ -1939,6 +1939,10 @@ def test_parquet_nested_column_missing(spark_tmp_path, reader_confs, v1_enabled_
     (DecimalGen(20, 17), DecimalGen(5, 2)),
     # Narrowing precision
     (DecimalGen(20, 0), DecimalGen(10, 0)),
+    # Narrowing precision at the same scale and storage width
+    (DecimalGen(9, 2), DecimalGen(7, 2)),
+    (DecimalGen(18, 2), DecimalGen(10, 2)),
+    (DecimalGen(34, 2), DecimalGen(20, 2)),
     # Increasing precision and decreasing scale
     (DecimalGen(5, 4), DecimalGen(7, 2)),
     (DecimalGen(10, 6), DecimalGen(12, 4)),
@@ -1977,6 +1981,47 @@ def test_parquet_decimal_precision_scale_change(spark_tmp_path, from_decimal_gen
 
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.schema(read_schema).parquet(data_path), conf=spark_conf)
+
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_confs', [original_parquet_file_reader_conf,
+    multithreaded_parquet_file_reader_conf, coalesce_parquet_file_reader_conf])
+@pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
+@pytest.mark.parametrize('legacy_format', ['false', 'true'])
+@pytest.mark.parametrize('ansi_enabled', ['false', 'true'])
+@pytest.mark.parametrize('file_precision, read_precision', [(9, 7), (18, 10), (34, 20)])
+def test_parquet_decimal_precision_narrowing(spark_tmp_path, reader_confs, v1_enabled_list,
+        legacy_format, ansi_enabled, file_precision, read_precision):
+    data_path = spark_tmp_path + '/PARQUET_DECIMAL_NARROWING'
+    decimal_type = DecimalType(file_precision, 2)
+    # Include both signs of the exact read bound and the first value beyond it.
+    max_value = '9' * (read_precision - 2) + '.99'
+    overflow = '1' + '0' * (read_precision - 2) + '.00'
+    values = [Decimal(v) for v in [max_value, '-' + max_value, overflow, '-' + overflow,
+        '0.00', '0.01']] + [None]
+    with_cpu_session(lambda spark: gen_df(spark,
+        [('id', RepeatSeqGen(list(range(len(values))), data_type=IntegerType())),
+         ('d', RepeatSeqGen(values, data_type=decimal_type))], length=len(values))
+        .selectExpr('id', 'd', 'named_struct("d", d) as s', 'array(d) as a', 'map(1, d) as m')
+        .repartition(2).write.parquet(data_path),
+        conf={'spark.sql.parquet.writeLegacyFormat': legacy_format})
+
+    target = f'decimal({read_precision},2)'
+    schema = f'id int, d {target}, s struct<d:{target}>, a array<{target}>, m map<int,{target}>'
+    conf = copy_and_update(reader_confs, {
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        'spark.sql.parquet.enableVectorizedReader': 'false',
+        'spark.sql.ansi.enabled': ansi_enabled})
+
+    # Decimal128 row conversion can hide overflow by turning it into null on the host.
+    # Evaluate null checks on the GPU too, including every nested decimal leaf.
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(schema).parquet(data_path).selectExpr('*',
+            'd is null as d_is_null', 's.d is null as struct_is_null',
+            'a[0] is null as array_is_null', 'm[1] is null as map_is_null', 'd + 1 as added'),
+        conf=conf)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(schema).parquet(data_path)
+            .filter(f'd > {max_value} OR d < -{max_value}').select('id'), conf=conf)
 
 # These are based on tests from https://issues.apache.org/jira/browse/SPARK-40876
 # Plus more

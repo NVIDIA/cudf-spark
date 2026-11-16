@@ -273,6 +273,12 @@ object SchemaUtils {
       case (fromDec: DecimalType, toDec: DecimalType) if fromDec == toDec &&
           !GpuColumnVector.getNonNestedRapidsType(fromDec).equals(col.getType) =>
         col.castTo(DecimalUtil.createCudfDecimal(fromDec))
+      case (fromDec: DecimalType, toDec: DecimalType) if fromDec.precision > toDec.precision =>
+        // cuDF types do not carry precision, so narrowing can require bounds checks even
+        // when the storage width and scale are unchanged. Keep casting format-specific.
+        castFunc.map(f => f(col, targetType, colType))
+          .getOrElse(throw new QueryExecutionException("Casting function is missing for " +
+            s"type conversion from $colType to $targetType"))
       case (fromChar: CharType, StringType) =>
         castFunc.map(f => f(col, StringType, fromChar))
           .getOrElse(throw new QueryExecutionException("Casting function is missing for " +

@@ -780,12 +780,18 @@ object ParquetSchemaUtils {
     )
   }
 
-  private def needDecimalCast(cv: ColumnView, dt: DataType): Boolean = {
+  private def needDecimalCast(
+      cv: ColumnView, dt: DataType, originalFromDt: DataType): Boolean = {
+    val narrowsPrecision = (originalFromDt, dt) match {
+      case (from: DecimalType, to: DecimalType) => from.precision > to.precision
+      case _ => false
+    }
     // UINT64 is casted to Decimal(20,0) by Spark to accommodate
     // the largest possible values this type can take. Other Unsigned data types are converted to
     // basic types like LongType, this is analogous to that except we spill over to large
     // decimal/ints.
-    cv.getType.isDecimalType && !GpuColumnVector.getNonNestedRapidsType(dt).equals(cv.getType()) ||
+    cv.getType.isDecimalType &&
+        (!GpuColumnVector.getNonNestedRapidsType(dt).equals(cv.getType) || narrowsPrecision) ||
         cv.getType.equals(DType.UINT64)
   }
 
@@ -836,7 +842,7 @@ object ParquetSchemaUtils {
     // This code needs to be kept in sync with
     // GpuParquetFileFilterHandler.checkSchemaCompat or more specifically
     // GpuParquetFileFilterHandler.checkPrimitiveCompat
-    if (needDecimalCast(cv, dt)) {
+    if (needDecimalCast(cv, dt, originalFromDt)) {
       val fromDecimal = originalFromDt.asInstanceOf[DecimalType]
       val toDecimal = dt.asInstanceOf[DecimalType]
       val ansiMode = CastOptions.DEFAULT_CAST_OPTIONS.isAnsiMode
