@@ -25,7 +25,8 @@
 # - build for DB10.4/Spark 3.2.1:
 #       `BASE_SPARK_VERSION=3.2.1 ./jenkins/databricks/build.sh`
 # The Databricks runtime jars are not installed into the local Maven repository. Instead,
-# build/gen-spark-home-deps.py renders shim-deps/databricks/pom.xml.template into a BOM that references
+# thirdparty/spark-rapids-common/spark-home-deps/gen-spark-home-deps.py renders
+# shim-deps/databricks/pom.xml.template into a BOM that references
 # every jar under /databricks/jars as a system-scoped dependency.
 
 set -ex
@@ -135,8 +136,10 @@ initialize()
 
     # Now, we can set the WORKSPACE
     export WORKSPACE=$PWD
-    # set the retry count for mvn commands
-    MVN_CMD="mvn -Dmaven.wagon.http.retryHandler.count=3"
+    # Limit HTTP 429 backoff to 5 + 10 + 20 seconds before repository fallback.
+    MVN_CMD="mvn -s jenkins/databricks/maven-settings.xml \
+        -Dmaven.wagon.http.retryHandler.count=3 \
+        -Dmaven.wagon.httpconnectionManager.maxBackoffSeconds=30"
 
     # Determine which pom to use based on Scala version
     if [[ "$SCALA_BINARY_VER" == "2.13" ]]; then
@@ -149,7 +152,7 @@ initialize()
     SPARK_PLUGIN_JAR_VERSION=$($MVN_CMD help:evaluate -q -f $POM_FILE -pl dist -Dexpression=project.version -DforceStdout)
     SCALA_VERSION=$($MVN_CMD help:evaluate -q -f $POM_FILE -pl dist -Dexpression=scala.binary.version -DforceStdout)
     CUDA_VERSION=$($MVN_CMD help:evaluate -q -f $POM_FILE -pl dist -Dexpression=cuda.version -DforceStdout)
-    RAPIDS_BUILT_JAR=rapids-4-spark_$SCALA_VERSION-$SPARK_PLUGIN_JAR_VERSION.jar
+    RAPIDS_BUILT_JAR=cudf-spark_$SCALA_VERSION-$SPARK_PLUGIN_JAR_VERSION.jar
     # whether to build a two-shim jar with the lowest supported upstream Spark version
     WITH_DEFAULT_UPSTREAM_SHIM=${WITH_DEFAULT_UPSTREAM_SHIM:-1}
 
@@ -175,12 +178,14 @@ initialize()
 generate_dependencies()
 {
     local pomDir=$(dirname $POM_FILE)
-    python build/gen-spark-home-deps.py \
-        --output-pom "$pomDir/shim-deps/databricks/pom.xml" \
+    local generatedPom="$pomDir/shim-deps/databricks/pom.xml"
+    python thirdparty/spark-rapids-common/spark-home-deps/gen-spark-home-deps.py \
+        --output-pom "$generatedPom" \
         --project-pom "$POM_FILE" \
         --scala-binary-version "$SCALA_VERSION" \
         --jar-dir "$JARDIR" \
         shim-deps/databricks/pom.xml.template
+    sed -i "s|<!--DATABRICKS_BUILDVER_PROPERTY-->|<rapids.audit.databricks.buildver>${BUILDVER}</rapids.audit.databricks.buildver>|" "$generatedPom"
 }
 
 ##########################
@@ -192,6 +197,7 @@ if [ -n "$EXTRA_ENVS" ]; then
 fi
 
 initialize
+./build/prepare-common-submodule.sh
 generate_dependencies
 
 if [[ "$WITH_BLOOP" == "1" ]]; then

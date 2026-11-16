@@ -326,6 +326,9 @@ case class InsertIntoHadoopFsRelationCommandMeta(
 
   private var fileFormat: Option[ColumnarFileFormat] = None
 
+  override def checkTimeZone(): Boolean =
+    !GpuOrcFileFormat.isSparkOrcFormat(cmd.fileFormat.getClass)
+
   override def tagSelfForGpuInternal(): Unit = {
     if (BucketingUtilsShim.isHiveHashBucketing(cmd.options)) {
       BucketingUtilsShim.tagForHiveBucketingWrite(this, cmd.bucketSpec, cmd.outputColumns,
@@ -358,7 +361,7 @@ case class InsertIntoHadoopFsRelationCommandMeta(
     val format = fileFormat.getOrElse(
       throw new IllegalStateException("fileFormat missing, tagSelfForGpu not called?"))
 
-    GpuInsertIntoHadoopFsRelationCommand(
+    val gpuCommand = GpuInsertIntoHadoopFsRelationCommand(
       cmd.outputPath,
       cmd.staticPartitions,
       cmd.ifPartitionNotExists,
@@ -374,6 +377,8 @@ case class InsertIntoHadoopFsRelationCommandMeta(
       conf.stableSort,
       conf.concurrentWriterPartitionFlushSize,
       conf.outputDebugDumpPrefix)
+    GpuFileWriteJobShim.copyBeforeWriteJob(cmd, gpuCommand)
+    gpuCommand
   }
 }
 
@@ -404,40 +409,6 @@ trait GpuOverridesListener {
       plan: SparkPlanMeta[SparkPlan],
       sparkPlan: SparkPlan,
       costOptimizations: Seq[Optimization]): Unit
-}
-
-sealed trait FileFormatType
-object CsvFormatType extends FileFormatType {
-  override def toString = "CSV"
-}
-object HiveDelimitedTextFormatType extends FileFormatType {
-  override def toString = "HiveText"
-}
-object ParquetFormatType extends FileFormatType {
-  override def toString = "Parquet"
-}
-object OrcFormatType extends FileFormatType {
-  override def toString = "ORC"
-}
-object JsonFormatType extends FileFormatType {
-  override def toString = "JSON"
-}
-object AvroFormatType extends FileFormatType {
-  override def toString = "Avro"
-}
-object IcebergFormatType extends FileFormatType {
-  override def toString = "Iceberg"
-}
-object DeltaFormatType extends FileFormatType {
-  override def toString = "Delta"
-}
-
-sealed trait FileFormatOp
-object ReadFileOp extends FileFormatOp {
-  override def toString = "read"
-}
-object WriteFileOp extends FileFormatOp {
-  override def toString = "write"
 }
 
 object GpuOverrides extends Logging {
@@ -906,7 +877,8 @@ object GpuOverrides extends Logging {
     (IcebergFormatType, FileFormatChecks(
       cudfRead = (TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.STRUCT + TypeSig.BINARY +
           TypeSig.ARRAY + TypeSig.MAP +
-          GpuTypeShims.additionalParquetCommonSupportedTypes).nested(),
+          GpuTypeShims.additionalParquetCommonSupportedTypes +
+          ParquetVariantShims.additionalIcebergReadSupportedTypes).nested(),
       cudfWrite = (TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.STRUCT +
           TypeSig.ARRAY + TypeSig.MAP + TypeSig.BINARY +
           GpuTypeShims.additionalParquetCommonSupportedTypes).nested(),
@@ -1167,8 +1139,7 @@ object GpuOverrides extends Logging {
     } else {
       wrap.runAfterTagRules()
       wrap.tagForExplain()
-      val shouldExplainAll = explain.equalsIgnoreCase("ALL")
-      wrap.explain(shouldExplainAll)
+      wrap.explain(RapidsConf.shouldExplainAll(explain))
     }
   }
 
@@ -1275,7 +1246,8 @@ case class GpuQueryStagePrepOverrides(sparkSession: SparkSession)
       GpuTransitionOverrides.tagAqeQueryStageExchanges(plan)
       // Note that we disregard the GPU plan returned here and instead rely on side effects of
       // tagging the underlying SparkPlan.
-      GpuOverrides().applyWithContext(plan, Some("AQE Query Stage Prep"))
+      val converted = GpuOverrides().applyWithContext(plan, Some("AQE Query Stage Prep"))
+      DriverlessBroadcastStage.tagEligibleBuilds(plan, converted)
       // return the original plan which is now modified as a side-effect of invoking GpuOverrides
       plan
     }(sparkPlan)

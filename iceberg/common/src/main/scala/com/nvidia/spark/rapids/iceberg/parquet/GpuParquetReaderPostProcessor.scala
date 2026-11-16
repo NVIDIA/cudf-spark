@@ -376,7 +376,7 @@ private[iceberg] case class ProcessStruct(
 
 /**
  * Helper object for building column actions when field is missing from file schema.
- * Shared between ActionBuildingVisitor and GpuParquetReaderPostProcessor.
+ * Shared between BaseActionBuildingVisitor and GpuParquetReaderPostProcessor.
  */
 private[iceberg] object MissingFieldActionBuilder {
   /**
@@ -425,9 +425,9 @@ private[iceberg] object MissingFieldActionBuilder {
 /**
  * Visitor to build column action tree by comparing expected schema with file schema.
  * Uses SchemaWithPartnerVisitor where partner is the corresponding file schema type.
- * Tracks current field context to handle missing primitives properly.
+ * Tracks current field context to handle missing leaf fields and containers.
  */
-private class ActionBuildingVisitor(
+private[iceberg] class BaseActionBuildingVisitor(
     idToConstant: JMap[Integer, _]
 ) extends SchemaWithPartnerVisitor[Type, ColumnAction] {
 
@@ -576,10 +576,9 @@ private class ActionBuildingVisitor(
     }
   }
 
-  override def primitive(
-      primitive: Type.PrimitiveType,
-      partner: Type): ColumnAction = {
-    val expectedType = SparkSchemaUtil.convert(primitive)
+  /** Builds an action for a primitive or a logical leaf supplied by a version-specific visitor. */
+  protected def buildLeafAction(expectedType: Type, partner: Type): ColumnAction = {
+    val expectedSparkType = SparkSchemaUtil.convert(expectedType)
     val fieldId = currentField.fieldId()
 
     // Lineage columns may be physically present but contain nulls that must inherit
@@ -593,22 +592,28 @@ private class ActionBuildingVisitor(
 
     if (partner != null) {
       // Partner exists - check for type promotion
-      val fileType = SparkSchemaUtil.convert(partner.asPrimitiveType())
-      if (DataType.equalsStructurally(expectedType, fileType)) {
+      val fileSparkType = SparkSchemaUtil.convert(partner)
+      if (DataType.equalsStructurally(expectedSparkType, fileSparkType)) {
         PassThrough
       } else {
-        UpCast(fileType, expectedType)
+        UpCast(fileSparkType, expectedSparkType)
       }
     } else if (isInsideConstantStruct || isInsideMissingContainer) {
       // Children of a missing container — see struct() for rationale.
-      FillNull(expectedType)
+      FillNull(expectedSparkType)
     } else {
       MissingFieldActionBuilder.buildAction(
         currentField.fieldId(),
-        expectedType,
+        expectedSparkType,
         currentField.isOptional,
         idToConstant)
     }
+  }
+
+  override def primitive(
+      primitive: Type.PrimitiveType,
+      partner: Type): ColumnAction = {
+    buildLeafAction(primitive, partner)
   }
 }
 
@@ -756,7 +761,7 @@ class GpuParquetReaderPostProcessor(
 
   // Pre-compute action tree by visiting expected schema with file schema as partner
   private lazy val rootAction: ColumnAction = buildActionTimeMetric.ns {
-    val visitor = new ActionBuildingVisitor(idToConstant)
+    val visitor = ShimUtils.newActionBuildingVisitor(idToConstant)
     val accessors = new FileSchemaAccessors()
     SchemaWithPartnerVisitor.visit(
       expectedSchema.asStruct(),

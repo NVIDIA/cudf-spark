@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,11 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "330"}
-{"spark": "331"}
-{"spark": "332"}
-{"spark": "333"}
-{"spark": "334"}
+{"spark":["330"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.execution.datasources.parquet
 
@@ -37,7 +33,9 @@ object ParquetCVShims {
       capacity: Int,
       memoryMode: MemoryMode,
       missingColumns: java.util.Set[ParquetColumn],
-      isTopLevel: Boolean): ParquetColumnVector = {
-    new ParquetColumnVector(column, vector, capacity, memoryMode, missingColumns)
+      isTopLevel: Boolean): AnyRef = {
+    ParquetColumnVectorBridge330.newParquetColumnVector(
+      column, vector, capacity, memoryMode, missingColumns,
+      isTopLevel, null)
   }
 }

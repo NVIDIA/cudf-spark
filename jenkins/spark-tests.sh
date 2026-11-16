@@ -29,7 +29,7 @@ SHUFFLE_SPARK_SHIM=$(get_shuffle_shim)
 WORKSPACE=${WORKSPACE:-`pwd`}
 
 ARTF_ROOT="$WORKSPACE/jars"
-WGET_CMD="wget -q -P $ARTF_ROOT -t 3"
+WGET_CMD="${WGET_CMD:-wget -q -P $ARTF_ROOT -t 3}"
 PROJECT_REPO_HOST=$(sed -E 's#^(.*://)?([^/@]*@)?([^/:]+).*#\3#' <<< "$PROJECT_REPO")
 
 download_maven_jars() {
@@ -104,28 +104,28 @@ EOF
 }
 
 rm -rf $ARTF_ROOT && mkdir -p $ARTF_ROOT
-$WGET_CMD $PROJECT_TEST_REPO/com/nvidia/rapids-4-spark-integration-tests_$SCALA_BINARY_VER/$PROJECT_TEST_VER/rapids-4-spark-integration-tests_$SCALA_BINARY_VER-$PROJECT_TEST_VER-${SHUFFLE_SPARK_SHIM}.jar
+$WGET_CMD $PROJECT_TEST_REPO/com/nvidia/cudf-spark-integration-tests_$SCALA_BINARY_VER/$PROJECT_TEST_VER/cudf-spark-integration-tests_$SCALA_BINARY_VER-$PROJECT_TEST_VER-${SHUFFLE_SPARK_SHIM}.jar
 
 CLASSIFIER=${CLASSIFIER:-"$CUDA_CLASSIFIER"} # default as CUDA_CLASSIFIER for compatibility
 if [ "$CLASSIFIER"x == x ];then
-    $WGET_CMD $PROJECT_REPO/com/nvidia/rapids-4-spark_$SCALA_BINARY_VER/$PROJECT_VER/rapids-4-spark_$SCALA_BINARY_VER-${PROJECT_VER}.jar
-    export RAPIDS_PLUGIN_JAR=$ARTF_ROOT/rapids-4-spark_${SCALA_BINARY_VER}-${PROJECT_VER}.jar
+    $WGET_CMD $PROJECT_REPO/com/nvidia/cudf-spark_$SCALA_BINARY_VER/$PROJECT_VER/cudf-spark_$SCALA_BINARY_VER-${PROJECT_VER}.jar
+    export RAPIDS_PLUGIN_JAR=$ARTF_ROOT/cudf-spark_${SCALA_BINARY_VER}-${PROJECT_VER}.jar
 else
-    $WGET_CMD $PROJECT_REPO/com/nvidia/rapids-4-spark_$SCALA_BINARY_VER/$PROJECT_VER/rapids-4-spark_$SCALA_BINARY_VER-$PROJECT_VER-${CLASSIFIER}.jar
-    export RAPIDS_PLUGIN_JAR="$ARTF_ROOT/rapids-4-spark_${SCALA_BINARY_VER}-$PROJECT_VER-${CLASSIFIER}.jar"
+    $WGET_CMD $PROJECT_REPO/com/nvidia/cudf-spark_$SCALA_BINARY_VER/$PROJECT_VER/cudf-spark_$SCALA_BINARY_VER-$PROJECT_VER-${CLASSIFIER}.jar
+    export RAPIDS_PLUGIN_JAR="$ARTF_ROOT/cudf-spark_${SCALA_BINARY_VER}-$PROJECT_VER-${CLASSIFIER}.jar"
 fi
-RAPIDS_TEST_JAR="$ARTF_ROOT/rapids-4-spark-integration-tests_${SCALA_BINARY_VER}-$PROJECT_TEST_VER-$SHUFFLE_SPARK_SHIM.jar"
+RAPIDS_TEST_JAR="$ARTF_ROOT/cudf-spark-integration-tests_${SCALA_BINARY_VER}-$PROJECT_TEST_VER-$SHUFFLE_SPARK_SHIM.jar"
 
 export INCLUDE_SPARK_AVRO_JAR=${INCLUDE_SPARK_AVRO_JAR:-"true"}
 if [[ "${INCLUDE_SPARK_AVRO_JAR}" == "true" ]]; then
   $WGET_CMD $SPARK_REPO/org/apache/spark/spark-avro_$SCALA_BINARY_VER/$SPARK_VER/spark-avro_$SCALA_BINARY_VER-${SPARK_VER}.jar
 fi
 
-$WGET_CMD $PROJECT_TEST_REPO/com/nvidia/rapids-4-spark-integration-tests_$SCALA_BINARY_VER/$PROJECT_TEST_VER/rapids-4-spark-integration-tests_$SCALA_BINARY_VER-$PROJECT_TEST_VER-pytest.tar.gz
+$WGET_CMD $PROJECT_TEST_REPO/com/nvidia/cudf-spark-integration-tests_$SCALA_BINARY_VER/$PROJECT_TEST_VER/cudf-spark-integration-tests_$SCALA_BINARY_VER-$PROJECT_TEST_VER-pytest.tar.gz
 
 RAPIDS_INT_TESTS_HOME="$ARTF_ROOT/integration_tests/"
 # The version of pytest.tar.gz that is uploaded is the one built against spark330 but its being pushed without classifier for now
-RAPIDS_INT_TESTS_TGZ="$ARTF_ROOT/rapids-4-spark-integration-tests_${SCALA_BINARY_VER}-$PROJECT_TEST_VER-pytest.tar.gz"
+RAPIDS_INT_TESTS_TGZ="$ARTF_ROOT/cudf-spark-integration-tests_${SCALA_BINARY_VER}-$PROJECT_TEST_VER-pytest.tar.gz"
 
 tmp_info=${TMP_INFO_FILE:-'/tmp/artifacts-build.info'}
 rm -rf "$tmp_info"
@@ -146,11 +146,11 @@ getRevision() {
 
 set +x
 echo -e "\n==================== ARTIFACTS BUILD INFO ====================\n" >> "$tmp_info"
-echo "-------------------- rapids-4-spark BUILD INFO --------------------" >> "$tmp_info"
+echo "-------------------- cudf-spark BUILD INFO --------------------" >> "$tmp_info"
 p_ver=$(getRevision $RAPIDS_PLUGIN_JAR rapids4spark-version-info.properties)
-echo "-------------------- rapids-4-spark-integration-tests BUILD INFO --------------------" >> "$tmp_info"
+echo "-------------------- cudf-spark-integration-tests BUILD INFO --------------------" >> "$tmp_info"
 it_ver=$(getRevision $RAPIDS_TEST_JAR rapids4spark-version-info.properties)
-echo "-------------------- rapids-4-spark-integration-tests pytest BUILD INFO --------------------" >> "$tmp_info"
+echo "-------------------- cudf-spark-integration-tests pytest BUILD INFO --------------------" >> "$tmp_info"
 pt_ver=$(getRevision $RAPIDS_INT_TESTS_TGZ integration_tests/rapids4spark-version-info.properties)
 echo -e "\n==================== ARTIFACTS BUILD INFO ====================\n" >> "$tmp_info"
 set -x
@@ -166,7 +166,8 @@ fi
 tar xzf "$RAPIDS_INT_TESTS_TGZ" -C $ARTF_ROOT && rm -f "$RAPIDS_INT_TESTS_TGZ"
 
 . jenkins/hadoop-def.sh $SPARK_VER ${SCALA_BINARY_VER}
-$WGET_CMD $SPARK_REPO/org/apache/spark/$SPARK_VER/spark-$SPARK_VER-$BIN_HADOOP_VER.tgz
+SPARK_DIST_URL="${SPARK_DIST_URL:-$SPARK_REPO/org/apache/spark/$SPARK_VER}"
+$WGET_CMD "$SPARK_DIST_URL/spark-$SPARK_VER-$BIN_HADOOP_VER.tgz"
 
 export SPARK_HOME="$ARTF_ROOT/spark-$SPARK_VER-$BIN_HADOOP_VER"
 export PATH="$SPARK_HOME/bin:$SPARK_HOME/sbin:$PATH"
@@ -278,11 +279,11 @@ mkdir -p $TARGET_DIR
 run_delta_lake_tests() {
   echo "run_delta_lake_tests SPARK_VER = $SPARK_VER, SCALA_BINARY_VER = $SCALA_BINARY_VER"
   DELTA_LAKE_VERSIONS=""
-  SPARK_32X_PATTERN="(3\.2\.[0-9])"
-  SPARK_33X_PATTERN="(3\.3\.[0-9])"
-  SPARK_34X_PATTERN="(3\.4\.[0-9])"
-  SPARK_35X_PATTERN="(3\.5\.[3-9])"
-  SPARK_40X_PATTERN="(4\.0\.[0-9])"
+  SPARK_32X_PATTERN="(3\.2\.[0-9]+)"
+  SPARK_33X_PATTERN="(3\.3\.[0-9]+)"
+  SPARK_34X_PATTERN="(3\.4\.[0-9]+)"
+  SPARK_35X_PATTERN="(3\.5\.([3-9]|[1-9][0-9]+))"
+  SPARK_40X_PATTERN="(4\.0\.[0-9]+)"
   # Delta 4.1.0 is binary-incompatible with Spark 4.1.2+ after Spark changed internal
   # Catalyst and Parquet APIs. Keep coverage on the compatible Spark patch releases.
   SPARK_41_0_1_PATTERN="^(4\.1\.[0-1])$"
@@ -439,11 +440,16 @@ run_delta_lake_uc_tests() {
       ./run_pyspark_from_build.sh -m unity_catalog --delta_lake --unity_catalog
 }
 
+# Pipeline jobs supply ICEBERG_VERSIONS and ICEBERG_FAST_TEST (1=fast, 0=full,
+# unset defaults to 0) to choose their runtime(s) and suite. Other flag values
+# are rejected. TEST_TAGS adds a marker filter.
+# A single requested version runs only that version; this function does not add
+# or schedule other versions. Without overrides, run every JSON-selected version
+# with the full Iceberg suite. An unmatched marker filter
+# retains pytest's failure status (5); it is not a successful matrix skip.
 run_iceberg_tests() {
   # get the major/minor version of Spark
   ICEBERG_SPARK_VER=$(echo "$SPARK_VER" | cut -d. -f1,2)
-  # get the patch version of Spark
-  SPARK_PATCH_VER=$(echo "$SPARK_VER" | cut -d. -f3)
 
   # Spark 3.5 validates every optimizer rule's output when the spark.testing JVM property is
   # present. Iceberg V3 COW rewrites temporarily produce an unresolved ReplaceData plan while
@@ -460,66 +466,53 @@ run_iceberg_tests() {
     export SPARK_TESTING_ENABLED
   fi
 
-  if [[ "$ICEBERG_SPARK_VER" != "3.5" && "$ICEBERG_SPARK_VER" != "4.0" \
-        && "$ICEBERG_SPARK_VER" != "4.1" ]]; then
-    echo "!!!! Skipping Iceberg tests. GPU acceleration of Iceberg is not supported on $ICEBERG_SPARK_VER"
+  local test_type=${1:-'default'}
+  local iceberg_test_tags="iceberg"
+  if [[ -n "${TEST_TAGS:-}" ]]; then
+    iceberg_test_tags="iceberg and ($TEST_TAGS)"
+  fi
+  case "${ICEBERG_FAST_TEST-0}" in
+    0)
+      echo "Selected full Iceberg suite (TEST_TAGS=$iceberg_test_tags)"
+      ;;
+    1)
+      iceberg_test_tags="$iceberg_test_tags and iceberg_fast_test"
+      echo "Selected fast Iceberg suite (TEST_TAGS=$iceberg_test_tags)"
+      ;;
+    *)
+      echo "Invalid ICEBERG_FAST_TEST='$ICEBERG_FAST_TEST': expected 0, 1, or unset" >&2
+      return 1
+      ;;
+  esac
+
+  if [[ "$ICEBERG_SPARK_VER" == "4.0" || "$ICEBERG_SPARK_VER" == "4.1" ]]; then
+    if [[ "$SCALA_BINARY_VER" != "2.13" ]]; then
+      echo "!!!! Skipping Iceberg tests. Spark $ICEBERG_SPARK_VER Iceberg tests require Scala 2.13"
+      return 0
+    fi
+  fi
+
+  local matrix_reader="$WORKSPACE/scripts/get_iceberg_versions.py"
+  local iceberg_versions
+  # Runtime queries read only JSON; Maven packaging is checked once in premerge.
+  if [[ -n "${ICEBERG_VERSIONS:-}" ]]; then
+    iceberg_versions=$(
+      python "$matrix_reader" validate-requested \
+        --spark-version "$SPARK_VER" --requested-versions "$ICEBERG_VERSIONS"
+    ) || return 1
+    echo "Using user-specified ICEBERG_VERSIONS=$ICEBERG_VERSIONS"
+  else
+    iceberg_versions=$(
+      python "$matrix_reader" list --spark-version "$SPARK_VER"
+    ) || return 1
+  fi
+  if [[ -z "$iceberg_versions" ]]; then
+    # Profiles without a packaged Iceberg runtime have an empty selection.
+    echo "!!!! Skipping Iceberg tests. No supported Iceberg version found for Spark $SPARK_VER"
     return 0
   fi
 
-  # Supported Iceberg versions per Spark patch version:
-  # Spark 3.5.0-3.5.3 -> Iceberg 1.6.1
-  # Spark 3.5.4+       -> Iceberg 1.9.2, 1.10.1
-  # Spark 4.0.0-4.0.1 -> Iceberg 1.10.1
-  # Spark 4.0.2+       -> Iceberg 1.10.1, 1.11.0
-  # Spark 4.1.x        -> Iceberg 1.11.0
-  local supported_versions
-  if [[ "$ICEBERG_SPARK_VER" == "4.1" ]]; then
-    if [[ "$SCALA_BINARY_VER" != "2.13" ]]; then
-      echo "!!!! Skipping Iceberg tests. Spark 4.1 Iceberg tests require Scala 2.13"
-      return 0
-    fi
-    supported_versions="1.11.0"
-  elif [[ "$ICEBERG_SPARK_VER" == "4.0" ]]; then
-    if [[ "$SCALA_BINARY_VER" != "2.13" ]]; then
-      echo "!!!! Skipping Iceberg tests. Spark 4.0 Iceberg tests require Scala 2.13"
-      return 0
-    fi
-    if [[ "$SPARK_PATCH_VER" -ge 2 ]]; then
-      supported_versions="1.10.1 1.11.0"
-    else
-      supported_versions="1.10.1"
-    fi
-  elif [[ "$SPARK_PATCH_VER" -le 3 ]]; then
-    supported_versions="1.6.1"
-  else
-    supported_versions="1.9.2 1.10.1"
-  fi
-
-  local test_type=${1:-'default'}
-
-  if [[ -n "$ICEBERG_VERSIONS" ]]; then
-    for ver in $ICEBERG_VERSIONS; do
-      if ! echo "$supported_versions" | grep -qw "$ver"; then
-        echo "!!!! Error: Iceberg version $ver is not supported on Spark $SPARK_VER (supported: $supported_versions)"
-        return 1
-      fi
-    done
-    echo "Using user-specified ICEBERG_VERSIONS=$ICEBERG_VERSIONS"
-  else
-    # Default: test one representative version per Spark patch range
-    if [[ "$ICEBERG_SPARK_VER" == "4.1" ]]; then
-      ICEBERG_VERSIONS="1.11.0"
-    elif [[ "$ICEBERG_SPARK_VER" == "4.0" ]]; then
-      ICEBERG_VERSIONS="1.10.1"
-    elif [[ "$SPARK_PATCH_VER" -le 3 ]]; then
-      ICEBERG_VERSIONS="1.6.1"
-    elif [[ "$SPARK_PATCH_VER" -le 6 ]]; then
-      ICEBERG_VERSIONS="1.9.2"
-    else
-      ICEBERG_VERSIONS="1.10.1"
-    fi
-  fi
-  for ICEBERG_VERSION in $ICEBERG_VERSIONS; do
+  for ICEBERG_VERSION in $iceberg_versions; do
     echo "Running Iceberg tests for Iceberg version $ICEBERG_VERSION"
     if [[ "$test_type" == "default" ]]; then
       echo "!!! Running iceberg tests"
@@ -534,7 +527,7 @@ run_iceberg_tests() {
         PYSP_TEST_spark_sql_catalog_spark__catalog="org.apache.iceberg.spark.SparkSessionCatalog" \
         PYSP_TEST_spark_sql_catalog_spark__catalog_type="hadoop" \
         PYSP_TEST_spark_sql_catalog_spark__catalog_warehouse="/tmp/spark-warehouse-$RANDOM" \
-        ./run_pyspark_from_build.sh -m iceberg --iceberg
+        TEST_TAGS="$iceberg_test_tags" ./run_pyspark_from_build.sh --iceberg
     elif [[ "$test_type" == "rest" ]]; then
       echo "!!! Running iceberg tests with rest catalog"
       ICEBERG_REST_JARS="org.apache.iceberg:iceberg-spark-runtime-${ICEBERG_SPARK_VER}_${SCALA_BINARY_VER}:${ICEBERG_VERSION},\
@@ -560,7 +553,7 @@ org.apache.iceberg:iceberg-aws-bundle:${ICEBERG_VERSION}"
             "PYSP_TEST_spark_sql_catalog_spark__catalog_oauth2-server-uri=${ICEBERG_REST_OAUTH2_SERVER_URI:-http://localhost:8080/realms/iceberg/protocol/openid-connect/token}" \
             PYSP_TEST_spark_sql_catalog_spark__catalog_scope="${ICEBERG_REST_SCOPE:-lakekeeper}" \
             PYSP_TEST_spark_sql_catalog_spark__catalog_warehouse="${ICEBERG_REST_WAREHOUSE:-demo}" \
-            ./run_pyspark_from_build.sh -m iceberg --iceberg
+            TEST_TAGS="$iceberg_test_tags" ./run_pyspark_from_build.sh --iceberg
     elif [[ "$test_type" == "s3tables" ]]; then
       echo "!!! Running iceberg tests with s3tables"
       # AWS deps versions for Spark 3.5.x and 4.0.x
@@ -613,7 +606,7 @@ com.amazonaws:aws-java-sdk-bundle:${AWS_SDK_BUNDLE_VERSION}"
         PYSP_TEST_spark_sql_catalog_spark__catalog="org.apache.iceberg.spark.SparkSessionCatalog" \
         "PYSP_TEST_spark_sql_catalog_spark__catalog_catalog-impl=software.amazon.s3tables.iceberg.S3TablesCatalog" \
         PYSP_TEST_spark_sql_catalog_spark__catalog_warehouse="${S3TABLES_BUCKET_ARN}" \
-        ./run_pyspark_from_build.sh -s -m iceberg --iceberg
+        TEST_TAGS="$iceberg_test_tags" ./run_pyspark_from_build.sh -s --iceberg
     fi
   done
 }
@@ -704,7 +697,7 @@ if [[ $TEST_MODE == "DEFAULT" ]]; then
     # Add the ivysettings.xml file to support --packages downloads from Artifactory using credentials
     # Set the HOST_NAME variable for ivysettings.xml (e.g., from https://usr:psw@HOST_NAME/path/to/repo)
     SPARK_SHELL_SMOKE_TEST=1 HOST_NAME=$PROJECT_REPO_HOST \
-    PYSP_TEST_spark_jars_packages=com.nvidia:rapids-4-spark_${SCALA_BINARY_VER}:${PROJECT_VER} \
+    PYSP_TEST_spark_jars_packages=com.nvidia:cudf-spark_${SCALA_BINARY_VER}:${PROJECT_VER} \
     PYSP_TEST_spark_jars_repositories=${PROJECT_REPO} \
     PYSP_TEST_spark_jars_ivySettings=${WORKSPACE}/jenkins/ivysettings.xml \
       ./run_pyspark_from_build.sh
@@ -781,7 +774,7 @@ if [[ "$TEST_MODE" == "CUDF_UDF_ONLY" ]]; then
   # Create a separate conda env for cudf-udf tests to avoid affecting the base env (python 3.10)
   CUDF_UDF_ENV="cudf_udf_$(date +"%Y%m%d")"
   CUDF_UDF_PYTHON_VER="3.12"  # since 26.04, python 3.12+ is required for cudf-py
-  CUDF_VER=$(echo "${PROJECT_VER}" | cut -d '.' -f 1,2)
+  CUDF_VER=${CUDF_VER:-$(echo "${PROJECT_VER}" | cut -d '.' -f 1,2)}
   CUDA_VER_FOR_CUDF=${CUDA_VER_FOR_CUDF:-'12.9'}
 
   conda create -y -n ${CUDF_UDF_ENV} -c rapidsai-nightly -c conda-forge -c nvidia -c defaults \

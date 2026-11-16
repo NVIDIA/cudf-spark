@@ -21,4 +21,10 @@
 
 package com.nvidia.spark.rapids.delta
 
-object DeltaSpark400DB173Provider extends DatabricksDeltaProvider173183Base
+object DeltaSpark400DB173Provider extends DatabricksDeltaProvider173183Base {
+  private val NATIVE_STAGED_DELTA_TABLE_CLASS_NAME =
+    "com.databricks.sql.transaction.tahoe.catalog.DeltaCatalog$StagedDeltaTableV2"
+
+  override protected def isNativeStagedDeltaTable(tableClass: Class[_]): Boolean =
+    tableClass.getName == NATIVE_STAGED_DELTA_TABLE_CLASS_NAME
+}

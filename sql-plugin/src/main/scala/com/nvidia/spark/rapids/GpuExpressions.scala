@@ -197,6 +197,32 @@ trait GpuExpression extends Expression {
   def convertToAst(numFirstTableColumns: Int): ast.AstExpression =
     throw new IllegalStateException(s"Cannot convert ${this.getClass.getSimpleName} to AST")
 
+  /**
+   * Whether this node supports AST JIT for its current semantics and types, excluding its
+   * children. Returning true requires `convertToAst` to work for the same execution modes and
+   * input/output types.
+   */
+  def selfSupportsAstJit: Boolean = false
+
+  /**
+   * Whether this node is an operation, rather than an AST-compatible leaf. Literals and references
+   * leave this false so they do not trigger compilation without useful work to JIT.
+   */
+  def selfIsAstJitOperator: Boolean = false
+
+  /** Whether this node and its complete expression subtree support AST JIT. */
+  final def supportsAstJit: Boolean = selfSupportsAstJit && children.forall {
+    case child: GpuExpression => child.supportsAstJit
+    case _: AttributeReference => true
+    case _ => false
+  }
+
+  /** Whether this expression subtree contains an operation that makes AST JIT useful. */
+  final def containsAstJitOperator: Boolean = selfIsAstJitOperator || children.exists {
+    case child: GpuExpression => child.containsAstJitOperator
+    case _ => false
+  }
+
   /** Could evaluating this expression cause side-effects, such as throwing an exception? */
   def hasSideEffects: Boolean =
     children.exists {
@@ -321,6 +347,14 @@ object CudfUnaryExpression {
 trait CudfUnaryExpression extends GpuUnaryExpression {
   def unaryOp: UnaryOp
 
+  override final def selfSupportsAstJit: Boolean =
+    CudfUnaryExpression.opToAstMap.contains(unaryOp) && astJitCompatible
+
+  /** Whether this operator's execution modes and types work with AST JIT. */
+  protected def astJitCompatible: Boolean = false
+
+  override final def selfIsAstJitOperator: Boolean = selfSupportsAstJit
+
   override def doColumnar(input: GpuColumnVector): ColumnVector = input.getBase.unaryOp(unaryOp)
 
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
@@ -390,6 +424,13 @@ trait CudfBinaryExpression extends GpuBinaryExpression {
   def outputTypeOverride: DType = null
   def castOutputAtEnd: Boolean = false
   def astOperator: Option[ast.BinaryOperator] = None
+
+  override final def selfSupportsAstJit: Boolean = astOperator.isDefined && astJitCompatible
+
+  /** Whether this operator's execution modes and types work with AST JIT. */
+  protected def astJitCompatible: Boolean = false
+
+  override final def selfIsAstJitOperator: Boolean = selfSupportsAstJit
 
   def outputType(l: BinaryOperable, r: BinaryOperable): DType = {
     val over = outputTypeOverride

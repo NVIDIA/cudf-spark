@@ -15,7 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "420"}
+{"spark":["420"],"carryForward":"sameMinor"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
@@ -168,7 +168,8 @@ case class GpuBatchScanExec(
       runtimeFilters = QueryPlan.normalizePredicates(
         runtimeFilters.filterNot(_ == DynamicPruningExpression(Literal.TrueLiteral)),
         output),
-      keyGroupedPartitioning = keyGroupedPartitioning.map(QueryPlan.normalizePredicates(_, output)))
+      keyGroupedPartitioning =
+        BatchScanCanonicalizeShims.normalizeKeyGroupedPartitioning(keyGroupedPartitioning, output))
   }
 
   override def simpleString(maxFields: Int): String = {

@@ -246,7 +246,7 @@ For example, `spark.sql.catalog.spark_catalog` is represented by the environment
 
 We also have a large number of integration tests that currently run as a part of the unit tests
 using scala test. Those are in the `src/test/scala` sub-directory and depend on the testing
-framework from the `rapids-4-spark-tests_2.x` test jar.
+framework from the `cudf-spark-tests_2.x` test jar.
 
 You can run these tests against a cluster similar to how you can run `pytests` against an
 existing cluster. To do this you need to launch a cluster with the plugin jars on the
@@ -265,7 +265,7 @@ individually, so you don't risk running unit tests along with the integration te
 http://www.scalatest.org/user_guide/using_the_scalatest_shell
 
 ```shell
-spark-shell --jars rapids-4-spark-tests_2.12-26.12.0-SNAPSHOT-tests.jar,rapids-4-spark-integration-tests_2.12-26.12.0-SNAPSHOT-tests.jar,scalatest_2.12-3.0.5.jar,scalactic_2.12-3.0.5.jar
+spark-shell --jars cudf-spark-tests_2.12-26.12.0-SNAPSHOT-tests.jar,cudf-spark-integration-tests_2.12-26.12.0-SNAPSHOT-tests.jar,scalatest_2.12-3.0.5.jar,scalactic_2.12-3.0.5.jar
 ```
 
 First you import the `scalatest_shell` and tell the tests where they can find the test files you
@@ -284,11 +284,11 @@ durations.run(new com.nvidia.spark.rapids.JoinsSuite)
 
 Most clusters probably will not have the RAPIDS plugin installed in the cluster yet.
 If you just want to verify the SQL replacement is working you will need to add the
-`rapids-4-spark` jar to your `spark-submit` command. Note the following example
+`cudf-spark` jar to your `spark-submit` command. Note the following example
 assumes CUDA 12 is being used and the Spark distribution is built with Scala 2.12.
 
 ```
-$SPARK_HOME/bin/spark-submit --jars "rapids-4-spark_2.12-26.12.0-SNAPSHOT-cuda12.jar" ./runtests.py
+$SPARK_HOME/bin/spark-submit --jars "cudf-spark_2.12-26.12.0-SNAPSHOT-cuda12.jar" ./runtests.py
 ```
 
 You don't have to enable the plugin for this to work, the test framework will do that for you.
@@ -479,7 +479,7 @@ SPARK_HISTORY_OPTS="-Dspark.history.fs.logDirectory=integration_tests/target/run
   ${SPARK_HOME}/bin/spark-class org.apache.spark.deploy.history.HistoryServer
 ```
 
-By default, integration tests write event logs using [Zstandard](https://facebook.github.io/zstd/)
+By default, integration tests write event logs using [Zstandard](https://meta.github.io/zstd/)
 (`zstd`) compression codec. It can be changed by setting the environment variable `PYSP_TEST_spark_eventLog_compression_codec` to one of
 the SHS supported values for the config key
 [`spark.eventLog.compression.codec`](https://spark.apache.org/docs/latest/configuration.html#spark-ui)
@@ -521,7 +521,7 @@ To run cudf_udf tests, need following configuration changes:
 As an example, here is the `spark-submit` command with the cudf_udf parameter on CUDA 12:
 
 ```
-$SPARK_HOME/bin/spark-submit --jars "rapids-4-spark_2.12-26.12.0-SNAPSHOT-cuda12.jar,rapids-4-spark-tests_2.12-26.12.0-SNAPSHOT.jar" --conf spark.rapids.memory.gpu.allocFraction=0.3 --conf spark.rapids.python.memory.gpu.allocFraction=0.3 --conf spark.rapids.python.concurrentPythonWorkers=2 --py-files "rapids-4-spark_2.12-26.12.0-SNAPSHOT-cuda12.jar" --conf spark.executorEnv.PYTHONPATH="rapids-4-spark_2.12-26.12.0-SNAPSHOT-cuda12.jar" ./runtests.py --cudf_udf
+$SPARK_HOME/bin/spark-submit --jars "cudf-spark_2.12-26.12.0-SNAPSHOT-cuda12.jar,cudf-spark-tests_2.12-26.12.0-SNAPSHOT.jar" --conf spark.rapids.memory.gpu.allocFraction=0.3 --conf spark.rapids.python.memory.gpu.allocFraction=0.3 --conf spark.rapids.python.concurrentPythonWorkers=2 --py-files "cudf-spark_2.12-26.12.0-SNAPSHOT-cuda12.jar" --conf spark.executorEnv.PYTHONPATH="cudf-spark_2.12-26.12.0-SNAPSHOT-cuda12.jar" ./runtests.py --cudf_udf
 ```
 
 ### Enabling fuzz tests
@@ -541,6 +541,46 @@ If Spark has been configured to support Iceberg then these tests can be enabled 
 `--iceberg` option to the command.
 Set `EXPECTED_ICEBERG_VERSION` to the exact Iceberg runtime version whenever `--iceberg` is used;
 pytest reports a configuration error when it is missing.
+
+Select the fast matrix suite with `-m 'iceberg and iceberg_fast_test' --iceberg`.
+Only tests explicitly decorated with `@iceberg_fast_test` from `marks` are included.
+Add `@iceberg_fast_test` only when selecting representative coverage for the fast suite.
+New unmarked tests remain in the full suite unless explicitly selected.
+For example, with Iceberg configured:
+
+```shell
+EXPECTED_ICEBERG_VERSION=1.10.1 \
+  ./integration_tests/run_pyspark_from_build.sh -m 'iceberg and iceberg_fast_test' --iceberg
+```
+
+Nightly pipelines using `jenkins/spark-tests.sh` control version and suite selection through
+`ICEBERG_VERSIONS` and `ICEBERG_FAST_TEST`. Set `ICEBERG_FAST_TEST=1` to append the
+`iceberg_fast_test` marker for local, REST, or S3 Tables tests. It defaults to `0`, which leaves
+the full Iceberg suite selected. For example, `ICEBERG_VERSIONS=1.10.1 ICEBERG_FAST_TEST=1` runs
+only that runtime with the fast suite; use `ICEBERG_FAST_TEST=0` or omit it for the full suite.
+Only `0`, `1`, or an unset variable is accepted; empty strings and other values fail before tests
+start. The job logs the selected suite and the combined marker expression.
+Multiple requested versions run in the supplied order. Without `ICEBERG_VERSIONS`, the job runs
+every JSON-selected version. The caller does not schedule full versus fast runs automatically.
+`TEST_TAGS` optionally adds a marker expression, combined with the Iceberg and fast-suite selectors
+using `and`; for example, `ICEBERG_FAST_TEST=1 TEST_TAGS='not slow'` further filters the fast suite.
+Direct invocations of `run_pyspark_from_build.sh` select the fast suite with `-m` as shown above.
+Catalog and version restrictions still apply. A marker filter matching no tests retains pytest's
+failure status; it is distinct from a successful skip for an empty version selection.
+
+Runtime version queries accept exact `major.minor.patch` releases and read only
+`scripts/iceberg-versions.json`; snapshot selection is not implemented. The dedicated premerge validation
+job checks the complete matrix against Maven using the canonical Scala 2.13 POM, which includes the
+Spark 4 profiles absent from the Scala 2.12 reactor.
+
+Validation requires the enabled JSON combinations to match Maven packaging exactly.
+Spark 3.5.0 with Iceberg 1.6.1, Spark 3.5.4 with Iceberg 1.9.2, and Spark 3.5.4/3.5.5 with
+Iceberg 1.10.1 remain enabled for compatibility with the existing implementation. Each has a
+`comment` in the JSON explaining its exception to the minimum test baselines in
+[issue #15875](https://github.com/NVIDIA/cudf-spark/issues/15875). New Iceberg versions must satisfy
+those baselines and cannot inherit these exceptions. Explicit `ICEBERG_VERSIONS` requests must
+have enabled matrix entries. Profiles with no packaged runtime, such as the Spark 4.2.0 stub,
+select no versions and log a successful skip.
 
 When testing Iceberg package-private access paths, load the local Iceberg runtime jar with
 `ICEBERG_EXTRA_CLASSPATH` instead of `PYSP_TEST_spark_jars` or

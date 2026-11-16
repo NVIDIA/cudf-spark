@@ -27,7 +27,7 @@ import pyspark.sql.utils
 import pyspark.sql.functions as f
 from spark_session import with_cpu_session, with_gpu_session, is_databricks104_or_later, \
     is_databricks_version_or_later, is_before_spark_320, is_spark_400_or_later, \
-    is_before_spark_340, spark_version
+    is_before_spark_340, spark_version_tuple
 
 _regexp_conf = { 'spark.rapids.sql.regexp.enabled': 'true' }
 
@@ -1202,11 +1202,11 @@ def test_multi_contains_conditional(ansi):
 # SPARK-57507 / #15383: reverse must clamp truncated trailing UTF-8 to the row boundary.
 # Neighbor sentinel rows make an over-read observable.
 def _cpu_reverse_has_spark_57507():
-    version = spark_version()
+    v = spark_version_tuple()
     # The fix was backported to the 4.0.4, 4.1.3, and 4.2.0 release lines.
-    return ('4.0.4' <= version < '4.1.0'
-            or '4.1.3' <= version < '4.2.0'
-            or version >= '4.2.0')
+    return ((4, 0, 4) <= v < (4, 1, 0)
+            or (4, 1, 3) <= v < (4, 2, 0)
+            or v >= (4, 2, 0))
 
 
 @ignore_order(local=True)

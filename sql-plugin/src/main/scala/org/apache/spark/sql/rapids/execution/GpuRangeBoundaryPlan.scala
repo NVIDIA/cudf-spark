@@ -76,7 +76,7 @@ private[rapids] object GpuRangeBoundaryPlan {
           val keyOnly = if (selected.length == pruned.output.length) {
             pruned
           } else {
-            GpuProjectExec(selected.toList, pruned)
+            GpuProjectExec(selected.toList, pruned)()
           }
           Some(GpuRangeBoundaryExec(keyOnly))
         }
@@ -146,7 +146,7 @@ private[rapids] object GpuRangeBoundaryPlan {
         val childRequired = referencedExprIds(selected) -- localOutputIds
         val childDeterministicRequired = referencedExprIds(deterministicSelected) -- localOutputIds
         prune(project.child, childRequired, childDeterministicRequired).map { child =>
-          project.copy(projectList = selected.toList, child = child)
+          project.withProjectList(selected.toList, newChild = child)
         }
       }
 

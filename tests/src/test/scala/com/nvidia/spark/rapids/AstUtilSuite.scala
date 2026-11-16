@@ -27,6 +27,22 @@ import org.apache.spark.sql.types.{BooleanType, DataType, FloatType, IntegerType
 
 class AstUtilSuite extends GpuUnitTests {
 
+  test("forceNonAst only disables AST in test mode and retains GPU support") {
+    for (testEnabled <- Seq(false, true)) {
+      val attr = AttributeReference("a", IntegerType, nullable = false)()
+      val meta = GpuOverrides.wrapExpr(EqualTo(attr, Literal(1)), new RapidsConf(Map(
+        RapidsConf.TEST_CONF.key -> testEnabled.toString,
+        RapidsConf.TEST_FORCE_NON_AST.key -> "EqualTo")), None)
+      meta.tagForGpu()
+      assert(meta.canThisBeReplaced)
+      assert(meta.canThisBeAst == !testEnabled)
+      assert(meta.childExprs.forall(_.canThisBeAst))
+      if (testEnabled) {
+        assert(meta.explainAst(all = false).contains("AST disabled by test configuration"))
+      }
+    }
+  }
+
   private def floatComparisonAliasMeta(): BaseExprMeta[_] = {
     val attr = AttributeReference("a", FloatType, nullable = false)()
     val expr = Alias(EqualTo(attr, Literal(1.0f)), "result")()
