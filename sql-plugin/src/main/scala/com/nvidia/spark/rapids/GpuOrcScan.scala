@@ -1497,6 +1497,7 @@ private case class GpuOrcFileFilterHandler(
     isOrcFloatTypesToStringEnable: Boolean) {
 
   private[rapids] val isCaseSensitive = sqlConf.caseSensitiveAnalysis
+  private val orcFilterPushDown = sqlConf.orcFilterPushDown
 
   def filterStripes(
       partFile: PartitionedFile,
@@ -1568,9 +1569,11 @@ private case class GpuOrcFileFilterHandler(
       fullSchema: StructType): Reader.Options = {
     val readerOpts = OrcInputFormat.buildOptions(
       conf, orcReader, partFile.start, partFile.length)
-    // create the search argument if we have pushed filters
-    OrcFiltersWrapper.createFilter(fullSchema, pushedFilters).foreach { f =>
-      readerOpts.searchArgument(f, fullSchema.fieldNames)
+    // Spark can pass pushed filters even when ORC predicate pushdown is disabled.
+    if (orcFilterPushDown) {
+      OrcFiltersWrapper.createFilter(fullSchema, pushedFilters).foreach { f =>
+        readerOpts.searchArgument(f, fullSchema.fieldNames)
+      }
     }
     readerOpts
   }
