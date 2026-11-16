@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,8 @@
 
 package org.apache.spark.sql.rapids
 
+import org.apache.spark.{MapOutputTrackerMaster, SparkEnv}
+import org.apache.spark.scheduler.StageInfo
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims._
 
@@ -25,4 +27,20 @@ object TestTrampolineUtil {
   def toDataFrame(spark: SparkSession, plan: LogicalPlan): DataFrame = {
     createDataFrame(spark, plan)
   }
+
+  /**
+   * How many map outputs of a shuffle the driver holds as available, or None when the driver
+   * holds no status for the shuffle.
+   */
+  def availableMapOutputs(shuffleId: Int): Option[Int] = {
+    val tracker = SparkEnv.get.mapOutputTracker.asInstanceOf[MapOutputTrackerMaster]
+    if (tracker.containsShuffle(shuffleId)) {
+      Some(tracker.getNumAvailableOutputs(shuffleId))
+    } else {
+      None
+    }
+  }
+
+  /** The shuffle that a stage writes, or None for a result stage. */
+  def shuffleDepId(stageInfo: StageInfo): Option[Int] = stageInfo.shuffleDepId
 }
