@@ -2792,6 +2792,14 @@ def _dpo_value_kind(value):
             return kind
     return "string"
 
+def _dpo_parse_instant(value):
+    """Parse a UTC instant with a fraction of any length. datetime.fromisoformat accepts only 3 or
+    6 fraction digits before Python 3.11."""
+    match = re.match(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?Z$", value)
+    micros = int((match.group(2) or "0").ljust(6, "0")[:6])
+    return _datetime.strptime(match.group(1), "%Y-%m-%dT%H:%M:%S").replace(
+        microsecond=micros, tzinfo=pytz.utc)
+
 def _dpo_timestamp_session_local(instant, session_time_zone):
     """Wall clock time of `instant` in the session time zone, with an explicit offset only when
     the zone-less string would be ambiguous (the repeated hour at the end of DST)."""
@@ -2851,7 +2859,7 @@ def _respell_dpo_partition_value(value, rank, spellings, session_time_zone):
     if name == "mixed":
         name = sorted(names)[rank % len(names)]
     if kind == "timestamp":
-        instant = _datetime.fromisoformat(value.replace("Z", "+00:00"))
+        instant = _dpo_parse_instant(value)
         return names[name](instant, session_time_zone)
     if kind == "decimal":
         return names[name](value)
@@ -3153,6 +3161,15 @@ def _unparseable_dpo_test(spark_tmp_path, confs):
         _respell_dpo_partition_value(value, rank, {"timestamp": "utc_offset"}, "UTC")), conf=confs)
     return data_path, replacement
 
+def _dpo_error_identity(error):
+    """What must match between CPU and GPU: the Python type and the error condition of a
+    SparkThrowable (PySpark converts those, so they have no java_exception), or the Java class
+    of a raw Py4JJavaError."""
+    get_condition = getattr(error, "getCondition", None)
+    java_exception = getattr(error, "java_exception", None)
+    return (type(error), get_condition() if get_condition else None,
+            java_exception.getClass().getName() if java_exception else None)
+
 def _unparseable_overwrite(spark, path, replacement):
     _dpo_overwrite(spark, path, _dpo_df(spark, replacement, "timestamp", "p").coalesce(1),
                    "p", "writer_option")
@@ -3199,15 +3216,25 @@ def test_delta_dpo_unparseable_partition_value_fails_when_configured(spark_tmp_p
         "spark.databricks.delta.failOnPartitionValueParsingError": "true"})
     data_path, replacement = _unparseable_dpo_test(spark_tmp_path, confs)
     versions = {side: _latest_delta_version(data_path, side) for side in ("CPU", "GPU")}
-    errors = {}
-    for side, run in (("CPU", with_cpu_session), ("GPU", with_gpu_session)):
+    def failed_overwrite(side, run):
         with pytest.raises(Exception) as error:
             run(lambda spark: _unparseable_overwrite(spark, "{}/{}".format(data_path, side),
                                                     replacement), conf=confs)
         assert "not-a-timestamp" in str(error.value)
-        java_exception = getattr(error.value, "java_exception", None)
-        errors[side] = (type(error.value),
-                        java_exception.getClass().getName() if java_exception else None)
+        return _dpo_error_identity(error.value)
+
+    errors = {"CPU": failed_overwrite("CPU", with_cpu_session)}
+    # Capture the plans around the expected exception: assert_rapids_delta_write would skip its GPU
+    # checks when the write raises.
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        errors["GPU"] = failed_overwrite("GPU", with_gpu_session)
+        plans = callback.getResultsWithTimeout(10000)
+        assert any(callback.contains(plan, "RapidsDeltaWrite") for plan in plans), \
+            "the failing Delta write did not run on the GPU"
+    finally:
+        callback.endCapture()
     assert errors["CPU"] == errors["GPU"]
     # The failed overwrite commits nothing.
     for side in ("CPU", "GPU"):
