@@ -22,7 +22,7 @@ import scala.collection.mutable.HashMap
 
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.filecache.FileCacheLocalityManager
-import com.nvidia.spark.rapids.perf.ScanSplitHeuristic
+import com.nvidia.spark.rapids.perf.{ScanSplitHeuristic, SplitTotals}
 import com.nvidia.spark.rapids.shims.{GpuDataSourceRDD, PartitionedFileUtilsShim, SparkShimImpl, StaticPartitionShims}
 import org.apache.hadoop.fs.Path
 
@@ -44,7 +44,7 @@ import org.apache.spark.sql.execution.rapids.shims.FilePartitionShims
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
-import org.apache.spark.util.{CollectionAccumulator, SerializableConfiguration}
+import org.apache.spark.util.SerializableConfiguration
 import org.apache.spark.util.collection.BitSet
 
 /**
@@ -491,10 +491,12 @@ case class GpuFileSourceScanExec(
     val rdd = inputRDD.asInstanceOf[RDD[ColumnarBatch]]
     val splits = splitBytes
     // Per execution: a re-run plan reuses `inputRDD`.
-    ScanSplitHeuristic.registerFileScan(historyKey, plannedListed, splits, sparkContext)
+    ScanSplitHeuristic.registerFileScan(historyKey, plannedListed.length, splits, sparkContext)
+    // A local copy, so the task closure holds the array and not this scan.
+    val listedByPartition = plannedListed
     rdd.mapPartitionsWithIndexInternal { (index, rawBatches) =>
-      val record = splits.map(
-        ScanSplitHeuristic.recordSplitOnExhaustion(index, 0L, decoded, _))
+      val listed = listedByPartition.lift(index).getOrElse(0L)
+      val record = splits.map(ScanSplitHeuristic.recordSplitOnExhaustion(listed, decoded, _))
       // input_file_name() builds numRows * pathBytes of string data, which cudf caps at 2 GiB,
       // so oversized batches are sliced before the projection sees them.
       val batches = if (sliceForInputFileName) {
@@ -610,9 +612,9 @@ case class GpuFileSourceScanExec(
   @transient private lazy val historyKey: Option[String] = ScanSplitHeuristic.historyKey(
     tableIdentifier.map(_.unquotedString), relation.location.rootPaths)
 
-  /** (partition, decoded, listed) per partition read; keyed scans only. */
-  @transient private lazy val splitBytes: Option[CollectionAccumulator[(Int, Long, Long)]] =
-    historyKey.map(_ => sparkContext.collectionAccumulator[(Int, Long, Long)])
+  /** Decoded bytes and partitions read; keyed scans only. */
+  @transient private lazy val splitBytes: Option[SplitTotals] =
+    historyKey.map(_ => SplitTotals.create(sparkContext))
 
   /** Listed bytes of each planned partition; RDD partition i reads partition i. */
   @transient private var plannedListed: Array[Long] = Array.empty

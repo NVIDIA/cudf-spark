@@ -22,8 +22,6 @@ import java.security.MessageDigest
 import java.time.Duration
 import java.util.Locale
 
-import scala.collection.JavaConverters._
-
 import com.nvidia.spark.history.{DimValue, MetricStore, MetricStores, Retention}
 import com.nvidia.spark.rapids.{GpuMetric, NoopMetric, RapidsConf, ScanWithMetrics}
 import org.apache.hadoop.fs.Path
@@ -42,7 +40,7 @@ import org.apache.spark.sql.execution.datasources.v2.FileScan
 import org.apache.spark.sql.execution.rapids.shims.FilePartitionShims
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.vectorized.ColumnarBatch
-import org.apache.spark.util.CollectionAccumulator
+import org.apache.spark.util.LongAccumulator
 
 /**
  * Decode expansion: GPU output batch bytes / on-disk bytes of the scan's planned files. One
@@ -91,7 +89,7 @@ object ScanSplitLimits {
  * @param maxSplitBytes the static split, which is Spark's own value
  * @param limits the bounds of a learned split and the maximum age of a reading
  * @param plannedSplits number of splits planned, for the recording
- * @param drainSplits returns and clears the (split, decoded, listed) reads
+ * @param drainReads returns and clears what the tasks read
  * @param isCurrent false once the scan was re-planned; only the current planning is recorded
  */
 final case class ScanContext(
@@ -102,7 +100,7 @@ final case class ScanContext(
     maxSplitBytes: Long,
     limits: ScanSplitLimits,
     plannedSplits: Int = 0,
-    drainSplits: () => Seq[(Int, Long, Long)] = () => Seq.empty,
+    drainReads: () => ReadTotals = () => ReadTotals(0L, 0L, 0L),
     isCurrent: () => Boolean = () => true)
 
 object ScanContext {
@@ -114,7 +112,7 @@ object ScanContext {
   def forObservation(
       table: String,
       plannedSplits: Int,
-      drainSplits: () => Seq[(Int, Long, Long)]): ScanContext =
+      drainReads: () => ReadTotals): ScanContext =
     ScanContext(
       table = table,
       listedBytes = 0L,
@@ -123,7 +121,7 @@ object ScanContext {
       maxSplitBytes = 0L,
       limits = ScanSplitLimits(0L, 0L, Duration.ZERO),
       plannedSplits = plannedSplits,
-      drainSplits = drainSplits)
+      drainReads = drainReads)
 }
 
 /** Sizes a scan's split from its table's last decode-expansion ratio. */
@@ -189,11 +187,11 @@ class ScanSplitHeuristic(store: () => MetricStore) extends HistoryHeuristic(stor
       logDebug(s"scan.split: table=${ctx.table} not recorded: superseded planning")
       Map.empty
     } else {
-      val entries = ctx.drainSplits()
-      val result = if (entries.isEmpty) {
+      val reads = ctx.drainReads()
+      val result = if (reads.splitsRead == 0L) {
         Left("planned but not executed in this query")
       } else {
-        ScanSplitHeuristic.ratioFromSplits(ctx.plannedSplits, entries)
+        ScanSplitHeuristic.ratioFromReads(ctx.plannedSplits, reads)
       }
       result match {
         case Right(ratio) => Map(ScanExpansionRatio -> ratio)
@@ -208,6 +206,43 @@ class ScanSplitHeuristic(store: () => MetricStore) extends HistoryHeuristic(stor
     ctx.table != null && ctx.table.nonEmpty && ctx.plannedSplits > 0
 }
 
+/**
+ * What a scan's tasks read, over every read to the end: the decoded bytes, the on-disk bytes of
+ * the splits read, and how many splits that is.
+ */
+final case class ReadTotals(decodedBytes: Long, listedBytes: Long, splitsRead: Long)
+
+/**
+ * Running totals of a scan's tasks in Spark's own accumulators, so the size does not grow with
+ * the number of tasks.
+ */
+final class SplitTotals(
+    decoded: LongAccumulator,
+    listed: LongAccumulator,
+    finished: LongAccumulator) extends Serializable {
+
+  /** Counts one split read to the end: `listedBytes` on disk, `decodedBytes` decoded. */
+  def add(decodedBytes: Long, listedBytes: Long): Unit = {
+    decoded.add(decodedBytes)
+    listed.add(listedBytes)
+    finished.add(1L)
+  }
+
+  /** Returns and clears the totals atomically. */
+  def drain(): ReadTotals = synchronized {
+    val totals = ReadTotals(decoded.sum, listed.sum, finished.sum)
+    decoded.reset()
+    listed.reset()
+    finished.reset()
+    totals
+  }
+}
+
+object SplitTotals {
+  def create(sc: SparkContext): SplitTotals =
+    new SplitTotals(sc.longAccumulator, sc.longAccumulator, sc.longAccumulator)
+}
+
 object ScanSplitHeuristic extends Logging {
 
   /** The production heuristic: reads and writes the installed history store. */
@@ -217,29 +252,32 @@ object ScanSplitHeuristic extends Logging {
   val MAX_KEY_BYTES: Int = DimValue.MAX_CANONICAL_BYTES - 3
 
   /**
-   * Created when a split's reader opens; on exhaustion adds (split, growth of `decoded`, listed).
-   * A task reads splits sequentially, so the growth is this split's. Metrics may start at -1.
+   * Created when a split's reader opens; on exhaustion adds the growth of `decoded` and the split's
+   * `listed` bytes to `totals`, and counts the split, once. A task reads its split sequentially,
+   * so the growth is the split's. Metrics may start at -1.
    */
   def recordSplitOnExhaustion(
-      split: Int,
       listed: Long,
       decoded: GpuMetric,
-      acc: CollectionAccumulator[(Int, Long, Long)]): Boolean => Boolean = {
+      totals: SplitTotals): Boolean => Boolean = {
     val start = decoded.value.max(0L)
+    var recorded = false // `hasNext` is called again after the data ends
     hasMore => {
-      if (!hasMore) acc.add((split, decoded.value.max(0L) - start, listed))
+      if (!hasMore && !recorded) {
+        recorded = true
+        totals.add(decoded.value.max(0L) - start, listed)
+      }
       hasMore
     }
   }
 
-  /** Wraps `reader` to record its split's decoded bytes when it is exhausted. */
+  /** Wraps `reader` to record its split's decoded and listed bytes when it is exhausted. */
   def observeReader(
       reader: PartitionReader[ColumnarBatch],
-      split: Int,
       listed: Long,
       decoded: GpuMetric,
-      acc: CollectionAccumulator[(Int, Long, Long)]): PartitionReader[ColumnarBatch] = {
-    val record = recordSplitOnExhaustion(split, listed, decoded, acc)
+      totals: SplitTotals): PartitionReader[ColumnarBatch] = {
+    val record = recordSplitOnExhaustion(listed, decoded, totals)
     new PartitionReader[ColumnarBatch] {
       override def next(): Boolean = record(reader.next())
       override def get(): ColumnarBatch = reader.get()
@@ -248,34 +286,28 @@ object ScanSplitHeuristic extends Logging {
     }
   }
 
-  /** Returns and clears `acc` atomically. */
-  def drainSplits(acc: CollectionAccumulator[(Int, Long, Long)]): Seq[(Int, Long, Long)] =
-    acc.synchronized {
-      val entries = acc.value.asScala.toList
-      acc.reset()
-      entries
-    }
-
-  /** sum(decoded) / sum(listed) over each split's first read if exactly 0..planned-1 were read. */
-  def ratioFromSplits(
-      planned: Int,
-      entries: Seq[(Int, Long, Long)]): Either[String, Double] = {
-    val firstReads = entries.groupBy(_._1).map { case (split, reads) => split -> reads.head }
-    val decoded = firstReads.values.map(_._2).sum
-    val listed = firstReads.values.map(_._3).sum
-    val inRange = firstReads.keySet.count(split => split >= 0 && split < planned)
+  /**
+   * sum(decoded) / sum(listed) over the splits read to the end, if at least `planned` were read.
+   * Fewer means part of the scan never ran, so there is no ratio.
+   *
+   * More reads than planned are fine: every read adds its own decoded and listed bytes, so a
+   * range partitioner's sampling pass, which reads every split before the real stage does, or a
+   * retried or speculative task that reads a split again, is counted for what it read.
+   *
+   * The totals do not say which splits were read, so a split read twice that stands in for one
+   * never read is not caught.
+   */
+  def ratioFromReads(planned: Int, reads: ReadTotals): Either[String, Double] = {
     if (planned <= 0) {
       Left("nothing planned")
-    } else if (inRange < firstReads.size) {
-      Left(s"read split indices outside 0..${planned - 1}")
-    } else if (inRange < planned) {
-      Left(s"read $inRange of $planned planned splits to the end")
-    } else if (listed <= 0L) {
+    } else if (reads.splitsRead < planned) {
+      Left(s"read ${reads.splitsRead} of $planned planned splits to the end")
+    } else if (reads.listedBytes <= 0L) {
       Left("no listed bytes in the splits read")
-    } else if (decoded <= 0L) {
+    } else if (reads.decodedBytes <= 0L) {
       Left("no decoded bytes (decoded-bytes metric off or zero)")
     } else {
-      Right(decoded.toDouble / listed.toDouble)
+      Right(reads.decodedBytes.toDouble / reads.listedBytes.toDouble)
     }
   }
 
@@ -370,17 +402,15 @@ object ScanSplitHeuristic extends Logging {
         limits = ScanSplitLimits(rapidsConf))
     }, System.currentTimeMillis())
 
-  /** Queues a file scan for recording at query end; its split i lists `listed(i)` bytes. */
+  /** Queues a file scan of `planned` splits for recording at query end. */
   def registerFileScan(
       key: Option[String],
-      listed: Array[Long],
-      acc: Option[CollectionAccumulator[(Int, Long, Long)]],
+      planned: Int,
+      totals: Option[SplitTotals],
       sc: SparkContext): Unit =
-    for (name <- key; splits <- acc) {
+    for (name <- key; read <- totals) {
       instance.register(HistoryObservations.currentExecutionId(sc),
-        ScanContext.forObservation(name, listed.length, () => drainSplits(splits).map {
-          case (i, decoded, _) => (i, decoded, listed.lift(i).getOrElse(0L))
-        }))
+        ScanContext.forObservation(name, planned, () => read.drain()))
     }
 
   /**
@@ -407,9 +437,9 @@ trait HistorySizedFileScan extends FileScan with ScanWithMetrics {
   @transient private lazy val historyKey: Option[String] = ScanSplitHeuristic.historyKey(
     None, fileIndex.rootPaths)
 
-  /** (split, decoded, listed) per split read; None while history is off. */
-  @transient private lazy val splitReads: Option[CollectionAccumulator[(Int, Long, Long)]] =
-    historyKey.map(_ => sparkSession.sparkContext.collectionAccumulator[(Int, Long, Long)])
+  /** Decoded bytes and splits read; None while history is off. */
+  @transient private lazy val splitReads: Option[SplitTotals] =
+    historyKey.map(_ => SplitTotals.create(sparkSession.sparkContext))
 
   /** Listed bytes per split of the latest planning. */
   @transient @volatile private var plannedListed: Array[Long] = Array.empty
@@ -469,9 +499,9 @@ trait HistorySizedFileScan extends FileScan with ScanWithMetrics {
 
   /** Wrap `createReaderFactory`'s result so that each split's decoded bytes are observed. */
   protected def observed(factory: PartitionReaderFactory): PartitionReaderFactory =
-    splitReads.fold(factory) { acc =>
+    splitReads.fold(factory) { totals =>
       new SplitObservingReaderFactory(
-        factory, metrics.getOrElse(GpuMetric.GPU_OUTPUT_BATCH_BYTES, NoopMetric), acc)
+        factory, metrics.getOrElse(GpuMetric.GPU_OUTPUT_BATCH_BYTES, NoopMetric), totals)
     }
 
   /**
@@ -481,7 +511,7 @@ trait HistorySizedFileScan extends FileScan with ScanWithMetrics {
    * factory was built outside any SQL execution.
    */
   def registerForExecution(sc: SparkContext): Unit =
-    ScanSplitHeuristic.registerFileScan(historyKey, plannedListed, splitReads, sc)
+    ScanSplitHeuristic.registerFileScan(historyKey, plannedListed.length, splitReads, sc)
 }
 
 object HistorySizedFileScan {
@@ -493,11 +523,11 @@ object HistorySizedFileScan {
   }
 }
 
-/** Records each file split's decoded bytes; listed bytes are filled in on the driver. */
+/** Records each file split's decoded and listed bytes when it is read to the end. */
 class SplitObservingReaderFactory(
     factory: PartitionReaderFactory,
     decoded: GpuMetric,
-    acc: CollectionAccumulator[(Int, Long, Long)]) extends PartitionReaderFactory {
+    totals: SplitTotals) extends PartitionReaderFactory {
 
   override def createReader(p: InputPartition): PartitionReader[InternalRow] =
     factory.createReader(p)
@@ -505,8 +535,9 @@ class SplitObservingReaderFactory(
   override def createColumnarReader(p: InputPartition): PartitionReader[ColumnarBatch] =
     p match {
       case fp: FilePartition =>
-        ScanSplitHeuristic.observeReader(factory.createColumnarReader(p), fp.index, 0L, decoded,
-          acc)
+        // The same sum the scan's planning takes for this partition's listed bytes.
+        val listed = FilePartitionShims.getFiles(fp).map(_.length).sum
+        ScanSplitHeuristic.observeReader(factory.createColumnarReader(p), listed, decoded, totals)
       case _ => factory.createColumnarReader(p)
     }
 

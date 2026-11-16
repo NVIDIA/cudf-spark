@@ -28,7 +28,7 @@ import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingSeq
 import com.nvidia.spark.rapids.jni.CastStrings
-import com.nvidia.spark.rapids.perf.ScanSplitHeuristic
+import com.nvidia.spark.rapids.perf.{ScanSplitHeuristic, SplitTotals}
 import com.nvidia.spark.rapids.shims.{ShimFilePartitionReaderFactory, ShimSparkPlan, SparkShimImpl}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileStatus, Path}
@@ -53,7 +53,7 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.SparkSession
 import org.apache.spark.sql.types.{BooleanType, DataType, DecimalType, StructField, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
-import org.apache.spark.util.{CollectionAccumulator, SerializableConfiguration}
+import org.apache.spark.util.SerializableConfiguration
 
 /**
  * RAPIDS replacement for the `org.apache.spark.sql.hive.execution.HiveTableScanExec`,
@@ -341,9 +341,9 @@ case class GpuHiveTableScanExec(requestedAttributes: Seq[Attribute],
   @transient private lazy val historyKey: Option[String] = ScanSplitHeuristic.historyKey(
     Some(hiveTableRelation.tableMeta.identifier.unquotedString), Nil)
 
-  /** (partition, decoded, listed) per partition read. */
-  @transient private lazy val splitBytes: Option[CollectionAccumulator[(Int, Long, Long)]] =
-    historyKey.map(_ => sparkContext.collectionAccumulator[(Int, Long, Long)])
+  /** Decoded bytes and partitions read. */
+  @transient private lazy val splitBytes: Option[SplitTotals] =
+    historyKey.map(_ => SplitTotals.create(sparkContext))
 
   /** Listed bytes of each planned partition; RDD partition i reads partition i. */
   @transient private var plannedListed: Array[Long] = Array.empty
@@ -388,9 +388,12 @@ case class GpuHiveTableScanExec(requestedAttributes: Seq[Attribute],
     val rdd = inputRDD
     val splits = splitBytes
     // Per execution: a re-run plan reuses `inputRDD`.
-    ScanSplitHeuristic.registerFileScan(historyKey, plannedListed, splits, sparkContext)
+    ScanSplitHeuristic.registerFileScan(historyKey, plannedListed.length, splits, sparkContext)
+    // A local copy, so the task closure holds the array and not this scan.
+    val listedByPartition = plannedListed
     rdd.mapPartitionsWithIndexInternal { (index, batches) =>
-      val record = splits.map(ScanSplitHeuristic.recordSplitOnExhaustion(index, 0L, decoded, _))
+      val listed = listedByPartition.lift(index).getOrElse(0L)
+      val record = splits.map(ScanSplitHeuristic.recordSplitOnExhaustion(listed, decoded, _))
       new Iterator[ColumnarBatch] {
 
         override def hasNext: Boolean = {

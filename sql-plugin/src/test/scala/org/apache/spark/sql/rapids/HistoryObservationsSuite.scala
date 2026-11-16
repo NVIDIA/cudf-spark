@@ -19,7 +19,7 @@ package org.apache.spark.sql.rapids
 import java.time.Duration
 
 import com.nvidia.spark.rapids.perf.{FakeMetricStore, HistoryObservations, HistoryPolicy,
-  ScanContext, ScanSplitHeuristic}
+  ReadTotals, ScanContext, ScanSplitHeuristic}
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -44,7 +44,7 @@ class HistoryObservationsSuite extends AnyFunSuite with BeforeAndAfterEach {
 
   /** A one-split scan of `cat.ns.events` that decoded 4x its 100 MiB on disk. */
   private def scan: ScanContext =
-    ScanContext.forObservation("cat.ns.events", 1, () => Seq((0, 400 * MiB, 100 * MiB)))
+    ScanContext.forObservation("cat.ns.events", 1, () => ReadTotals(400 * MiB, 100 * MiB, 1L))
 
   test("records when the execution ends, once") {
     heuristic.register(Some(41L), scan)

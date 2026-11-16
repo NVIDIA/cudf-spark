@@ -24,13 +24,13 @@ import scala.collection.JavaConverters._
 
 import com.nvidia.spark.history.{DimValue, MetricStore, MetricStores, Observation, SchemaStatus,
   Status, SummaryResponse}
-import com.nvidia.spark.rapids.{GpuMetric, LocalGpuMetric}
+import com.nvidia.spark.rapids.LocalGpuMetric
 import org.apache.hadoop.fs.Path
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.connector.read.PartitionReader
 import org.apache.spark.sql.vectorized.ColumnarBatch
-import org.apache.spark.util.CollectionAccumulator
+import org.apache.spark.util.LongAccumulator
 
 /** Decide and observe against an in-memory store. Nothing here starts Spark. */
 class ScanSplitHeuristicSuite extends AnyFunSuite {
@@ -76,7 +76,7 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
 
   /** A one-split scan of `table` whose split decoded `decoded` of its `listed` bytes. */
   private def scanContext(decoded: Long, listed: Long = 100 * MiB): ScanContext =
-    ScanContext.forObservation(table, 1, () => Seq((0, decoded, listed)))
+    ScanContext.forObservation(table, 1, () => ReadTotals(decoded, listed, 1L))
 
   test("the metric's id and name are permanent, and are in the catalog the plugin supplies") {
     // Stored observations are keyed by the id, so changing either value is a breaking change.
@@ -300,7 +300,7 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
 
   test("observeReader records the split's decoded bytes once the reader is exhausted") {
     val metric = new LocalGpuMetric
-    val acc = new CollectionAccumulator[(Int, Long, Long)]
+    val totals = newTotals()
     var closed = false
     val inner = new PartitionReader[ColumnarBatch] {
       private var left = 2
@@ -312,13 +312,13 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
       override def get(): ColumnarBatch = null
       override def close(): Unit = closed = true
     }
-    val reader = ScanSplitHeuristic.observeReader(inner, 3, 7L, metric, acc)
+    val reader = ScanSplitHeuristic.observeReader(inner, 7L, metric, totals)
     assert(reader.next() && reader.next())
-    assert(acc.value.isEmpty)
+    assert(totals.drain() == ReadTotals(0L, 0L, 0L))
     assert(!reader.next())
     reader.close()
     assert(closed)
-    assert(acc.value.asScala == Seq((3, 10L, 7L)))
+    assert(totals.drain() == ReadTotals(10L, 7L, 1L))
   }
 
   test("observe records decoded / listed under the table") {
@@ -334,41 +334,38 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
     assert(decide(h, table, o.timestampMs() + 1) == 256 * MiB)
   }
 
-  test("ratio of a complete scan: decoded over listed, summed over its splits") {
-    val entries = Seq((0, 100 * MiB, 25 * MiB), (1, 200 * MiB, 50 * MiB), (2, 100 * MiB, 25 * MiB))
-    assert(ScanSplitHeuristic.ratioFromSplits(3, entries) == Right(4.0))
+  test("ratio of a complete scan: decoded over listed, over all its splits") {
+    assert(ScanSplitHeuristic.ratioFromReads(3, ReadTotals(400 * MiB, 100 * MiB, 3L)) ==
+      Right(4.0))
   }
 
-  test("the ratio uses the listed bytes of the splits that ran, whatever was registered") {
-    val entries = Seq((0, 30 * MiB, 10 * MiB), (1, 90 * MiB, 30 * MiB))
-    assert(ScanSplitHeuristic.ratioFromSplits(2, entries) == Right(3.0))
-  }
-
-  test("a split read twice counts once, with its first value") {
+  test("a scan read in two passes has the ratio of one pass") {
     // A range partitioner's sampling job reads every split before the real stage does.
-    val once = Seq((0, 100 * MiB, 50 * MiB), (1, 300 * MiB, 50 * MiB))
-    assert(ScanSplitHeuristic.ratioFromSplits(2, once ++ once) == Right(4.0))
-    val retried = once :+ ((1, 900 * MiB, 50 * MiB))
-    assert(ScanSplitHeuristic.ratioFromSplits(2, retried) == Right(4.0))
+    assert(ScanSplitHeuristic.ratioFromReads(3, ReadTotals(800 * MiB, 200 * MiB, 6L)) ==
+      Right(4.0))
   }
 
-  test("no ratio unless exactly the planned splits were read, and why") {
-    def reason(planned: Int, entries: (Int, Long, Long)*): Either[String, Double] =
-      ScanSplitHeuristic.ratioFromSplits(planned, entries)
-    assert(reason(3, (0, MiB, MiB), (2, MiB, MiB)) ==
-      Left("read 2 of 3 planned splits to the end"))
-    assert(reason(3, (0, MiB, MiB), (1, MiB, MiB), (3, MiB, MiB)) ==
-      Left("read split indices outside 0..2"))
-    assert(reason(0) == Left("nothing planned"))
-    assert(reason(1, (0, MiB, 0L)) == Left("no listed bytes in the splits read"))
-    assert(reason(1, (0, 0L, MiB)) == Left("no decoded bytes (decoded-bytes metric off or zero)"))
+  test("a split read again counts for what it read, in decoded and in listed bytes") {
+    // Splits of 20, 30 and 50 MiB decode at 2x, 4x and 6x (40, 120 and 300 MiB). A retried or
+    // speculative task reads the 50 MiB split again: 760 MiB decoded over 150 MiB listed.
+    assert(ScanSplitHeuristic.ratioFromReads(3, ReadTotals(760 * MiB, 150 * MiB, 4L)) ==
+      Right(760.0 / 150.0))
+  }
+
+  test("no ratio unless every planned split was read, and why") {
+    def reason(planned: Int, listed: Long, decoded: Long, read: Long): Either[String, Double] =
+      ScanSplitHeuristic.ratioFromReads(planned, ReadTotals(decoded, listed, read))
+    assert(reason(3, MiB, MiB, 2L) == Left("read 2 of 3 planned splits to the end"))
+    assert(reason(0, MiB, MiB, 1L) == Left("nothing planned"))
+    assert(reason(1, 0L, MiB, 1L) == Left("no listed bytes in the splits read"))
+    assert(reason(1, MiB, 0L, 1L) == Left("no decoded bytes (decoded-bytes metric off or zero)"))
   }
 
   test("an earlier planning of a scan is never evaluated") {
     val store = new FakeMetricStore
     val h = heuristic(store)
     val earlier = scanContext(decoded = 400 * MiB)
-      .copy(isCurrent = () => false, drainSplits = () => fail("an earlier planning was read"))
+      .copy(isCurrent = () => false, drainReads = () => fail("an earlier planning was read"))
     h.recordAll(earlier)
     assert(store.offered.isEmpty)
     h.recordAll(scanContext(decoded = 200 * MiB))
@@ -379,56 +376,53 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
     val store = new FakeMetricStore
     val h = heuristic(store)
     h.recordAll(scanContext(decoded = 400 * MiB).copy(plannedSplits = 2))
-    h.recordAll(scanContext(decoded = 400 * MiB).copy(drainSplits = () => Seq.empty))
+    h.recordAll(scanContext(decoded = 400 * MiB).copy(drainReads = () => ReadTotals(0L, 0L, 0L)))
     assert(store.offered.isEmpty)
   }
 
-  private def splitOf(metric: GpuMetric, acc: CollectionAccumulator[(Int, Long, Long)]) =
-    ScanSplitHeuristic.recordSplitOnExhaustion(7, 21L, metric, acc)
+  private def newTotals(): SplitTotals =
+    new SplitTotals(new LongAccumulator, new LongAccumulator, new LongAccumulator)
 
-  test("split bytes: recorded at exhaustion, excluding bytes before open; repeats don't count") {
+  test("split bytes: recorded at exhaustion, excluding bytes before open; once per split") {
     val metric = new LocalGpuMetric
     metric += 100L // an earlier split of the scan in the same task
-    val acc = new CollectionAccumulator[(Int, Long, Long)]
-    val record = splitOf(metric, acc)
+    val totals = newTotals()
+    val record = ScanSplitHeuristic.recordSplitOnExhaustion(21L, metric, totals)
     metric += 40L
     assert(record(true))
     metric += 2L
     assert(!record(false))
-    assert(!record(false)) // asked again after the end: same value again
-    assert(acc.value.asScala == Seq((7, 42L, 21L), (7, 42L, 21L)))
-    // The driver counts split 7 once: splits 0-6 empty, 42 bytes over 21 listed.
-    val entries = (0 until 7).map(i => (i, 0L, 0L)) ++ acc.value.asScala
-    assert(ScanSplitHeuristic.ratioFromSplits(8, entries) == Right(2.0))
+    assert(!record(false)) // asked again after the end: not counted again
+    assert(totals.drain() == ReadTotals(42L, 21L, 1L))
   }
 
   test("split bytes: nothing for a split closed early or failing; an empty split records 0") {
     val metric = new LocalGpuMetric
-    val acc = new CollectionAccumulator[(Int, Long, Long)]
-    val abandoned = splitOf(metric, acc)
+    val totals = newTotals()
+    val abandoned = ScanSplitHeuristic.recordSplitOnExhaustion(21L, metric, totals)
     metric += 10L
     abandoned(true) // then closed, or the next read threw: no exhaustion
-    assert(acc.value.isEmpty)
-    splitOf(metric, acc)(false)
-    assert(acc.value.asScala == Seq((7, 0L, 21L)))
+    assert(totals.drain() == ReadTotals(0L, 0L, 0L))
+    ScanSplitHeuristic.recordSplitOnExhaustion(21L, metric, totals)(false)
+    assert(totals.drain() == ReadTotals(0L, 21L, 1L))
   }
 
   test("split bytes: a size metric still at its -1 start counts as 0") {
     val metric = new LocalGpuMetric
     metric.set(-1L)
-    val acc = new CollectionAccumulator[(Int, Long, Long)]
-    val record = splitOf(metric, acc)
+    val totals = newTotals()
+    val record = ScanSplitHeuristic.recordSplitOnExhaustion(21L, metric, totals)
     metric.set(5L) // the first add moves -1 to 0 before adding
     record(false)
-    assert(acc.value.asScala == Seq((7, 5L, 21L)))
+    assert(totals.drain() == ReadTotals(5L, 21L, 1L))
   }
 
-  test("draining returns the entries and leaves the accumulator empty") {
-    val acc = new CollectionAccumulator[(Int, Long, Long)]
-    acc.add((0, 1L, 3L))
-    acc.add((0, 2L, 3L))
-    assert(ScanSplitHeuristic.drainSplits(acc) == Seq((0, 1L, 3L), (0, 2L, 3L)))
-    assert(acc.value.isEmpty)
+  test("totals add up over splits, and draining returns them and leaves nothing") {
+    val totals = newTotals()
+    totals.add(30L, 20L)
+    totals.add(12L, 10L)
+    assert(totals.drain() == ReadTotals(42L, 30L, 2L))
+    assert(totals.drain() == ReadTotals(0L, 0L, 0L))
   }
 
   test("file-source hook: catalog tables only, and only while enabled") {
