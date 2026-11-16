@@ -1458,6 +1458,45 @@ def test_orc_gpu_write_cpu_read_timestamp_filter(spark_tmp_path, timestamp):
     assert_gpu_and_cpu_writes_are_equal_collect(write_func, read_func, data_path)
 
 
+@tz_sensitive_test
+@pytest.mark.parametrize('reader_type', ['PERFILE', 'COALESCING', 'MULTITHREADED'])
+@pytest.mark.parametrize('v1_sources', ['', 'orc'])
+@pytest.mark.parametrize('dst_fallback,pushdown', [(True, False), (False, False), (False, True)])
+def test_orc_timestamp_filter_pushdown(spark_tmp_path, reader_type, v1_sources,
+                                     dst_fallback, pushdown):
+    if dst_fallback and spark_jvm().java.util.TimeZone.getDefault().getID() != 'America/New_York':
+        pytest.skip('The DST pruning reproducer requires TZ=America/New_York')
+    # The first two instants are in EDT, and the last is in EST. Their local order differs
+    # from their UTC order, exposing incorrect ORC statistics pruning (issue #16804).
+    month, day = (11, 1) if dst_fallback else (1, 15)
+    values = [datetime(2020, month, day, 5, 0, tzinfo=timezone.utc),
+              datetime(2020, month, day, 5, 59, tzinfo=timezone.utc),
+              datetime(2020, month, day, 6, 20, tzinfo=timezone.utc)]
+    target = values[1]
+    expected_seconds = int(target.timestamp())
+    conf = {'spark.sql.orc.impl': 'native',
+            'spark.sql.session.timeZone': 'America/New_York',
+            'spark.sql.sources.useV1SourceList': v1_sources,
+            'spark.sql.orc.filterPushdown': str(pushdown).lower(),
+            'spark.rapids.sql.format.orc.reader.type': reader_type}
+    data_path = spark_tmp_path + '/ORC_TIMESTAMP_FILTER_PUSHDOWN'
+    # Use the CPU writer so that the regression is independent of GPU ORC encoding.
+    with_cpu_session(lambda spark: spark.createDataFrame([(v,) for v in values], 'ts timestamp')
+                     .coalesce(1).write.option('orc.row.index.stride', 10000).orc(data_path),
+                     conf=conf)
+
+    def check_target(cpu, gpu):
+        # Equality alone could accept two empty results. Require exactly the matching row.
+        assert [row[0] for row in cpu] == [expected_seconds]
+        assert [row[0] for row in gpu] == [expected_seconds]
+        return cpu, gpu
+
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.orc(data_path).where(f.col('ts') == f.lit(target))
+            .selectExpr('CAST(ts AS BIGINT)'),
+        conf=conf, result_canonicalize_func_before_compare=check_target)
+
+
 @pytest.mark.parametrize("reader_confs", reader_opt_confs, ids=idfn)
 @pytest.mark.parametrize('v1_enabled_list', ["", "orc"])
 @pytest.mark.parametrize("timezone_pair", [("UTC", "Asia/Shanghai"), ("Asia/Shanghai", "UTC"), ("Asia/Shanghai", "America/Los_Angeles")], ids=idfn)
