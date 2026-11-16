@@ -80,8 +80,6 @@ class GpuPythonWriterRegistrationSuite extends RmmSparkRetrySuiteBase
   // Every wait that should end does so long before this.
   private val boundMs = 20000L
   private val bound = Span(20, Seconds)
-  // Ten periods of RmmSpark's watchdog, for a wait that should not end by itself.
-  private val quietMs = 1000L
 
   private val schema = StructType(Seq(StructField("a", IntegerType)))
   private val mib = 1024L * 1024
@@ -433,9 +431,9 @@ class GpuPythonWriterRegistrationSuite extends RmmSparkRetrySuiteBase
 
   /**
    * Starts a Python writer for `task` whose input allocates `bytes`, and kills the task once the
-   * writer waits inside that allocation. Checks that the writer keeps waiting, then runs
-   * `release` and checks that the writer ends, and that it removed its own registration before
-   * the task's cleanup ran.
+   * writer waits inside that allocation. Checks that the writer still waits once the kill has
+   * interrupted it, then runs `release` and checks that the writer ends, and that it removed its
+   * own registration before the task's cleanup ran.
    */
   private def checkKilledWhileAllocating(task: Task[KillableTaskContext], bytes: Long)(
       release: => Unit): Unit = {
@@ -450,9 +448,12 @@ class GpuPythonWriterRegistrationSuite extends RmmSparkRetrySuiteBase
         assertResult(RmmSparkThreadState.THREAD_BLOCKED)(RmmSpark.getStateOf(input.threadId.get))
       }
       completer = killTask(task.ctx)
-      // RmmSpark finds nothing stuck while other work runs, and an interrupt does not end the
-      // wait, so the writer keeps waiting.
-      Thread.sleep(quietMs)
+      // Spark's listener interrupts the writer, then joins it. An interrupt does not end a wait
+      // inside RmmSpark, so the writer still waits while the join does.
+      eventually(timeout(bound)) {
+        assert(writer.thread.isInterrupted, "the kill did not interrupt the writer")
+        assertResult(Thread.State.WAITING)(completer.getState)
+      }
       assert(writer.thread.isAlive)
       assertResult(RmmSparkThreadState.THREAD_BLOCKED)(RmmSpark.getStateOf(input.threadId.get))
     } finally {
@@ -585,6 +586,7 @@ class GpuPythonWriterRegistrationSuite extends RmmSparkRetrySuiteBase
       val taskThread = new Holder(ctx, 6 * mib)
       val receiveId = new AtomicLong(-1)
       val retryOom = new AtomicReference[Throwable]()
+      val retryOomAfterFetch = new AtomicBoolean(false)
       val handler = new AtomicReference[RapidsShuffleFetchHandler]()
       val fetching = new CountDownLatch(1)
       val receiveFailure = new AtomicReference[Throwable]()
@@ -597,6 +599,8 @@ class GpuPythonWriterRegistrationSuite extends RmmSparkRetrySuiteBase
             withResource(DeviceMemoryBuffer.allocate(6 * mib))(_ => ())
           } catch {
             case oom @ (_: GpuRetryOOM | _: GpuSplitAndRetryOOM) =>
+              // The writer's fetch counts `fetching` down before the writer waits for the batch.
+              retryOomAfterFetch.set(fetching.getCount == 0)
               retryOom.set(oom)
               if (fetching.await(boundMs, TimeUnit.MILLISECONDS)) {
                 handler.get.transferError("the receive could not allocate", oom)
@@ -614,11 +618,6 @@ class GpuPythonWriterRegistrationSuite extends RmmSparkRetrySuiteBase
         eventually(timeout(bound)) {
           assertResult(RmmSparkThreadState.THREAD_BLOCKED)(RmmSpark.getStateOf(receiveId.get))
         }
-        // While the task thread runs and no thread of the task waits, the task is not stuck.
-        Thread.sleep(quietMs)
-        assertResult(RmmSparkThreadState.THREAD_BLOCKED)(RmmSpark.getStateOf(receiveId.get))
-        assert(retryOom.get == null)
-
         TrampolineUtil.setTaskContext(ctx)
         writer = Ordinary.writer(remoteShuffle(taskId, new TestShuffleMetricsUpdater) { h =>
           handler.set(h)
@@ -628,6 +627,7 @@ class GpuPythonWriterRegistrationSuite extends RmmSparkRetrySuiteBase
         eventually(timeout(bound)) {
           assert(retryOom.get != null, "the blocked receive got no retry OOM")
         }
+        assert(retryOomAfterFetch.get, "the receive got its retry OOM before the writer fetched")
         assertEnds(writer.thread)
         writer.exception match {
           case Some(e: RapidsShuffleFetchFailedException) => assert(e.getCause eq retryOom.get)
