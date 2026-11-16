@@ -190,6 +190,42 @@ class OrcScanSuite extends SparkQueryCompareTestSuite {
     assertResult(cpuResult)(gpuResult)
   }
 
+  test("ORC coalescing reader caps batches when no requested column is in the files") {
+    val schema = new StructType().add("b", LongType).add("c", LongType)
+    val conf = new SparkConf()
+      .set(SQLConf.USE_V1_SOURCE_LIST.key, "orc")
+      .set(RapidsConf.ORC_READER_TYPE.key, RapidsReaderType.COALESCING.toString)
+      .set(RapidsConf.GPU_BATCH_SIZE_BYTES.key, "2000")
+      .set("spark.sql.adaptive.enabled", "false")
+      .set("spark.sql.files.maxPartitionBytes", "1g")
+      .set("spark.sql.files.minPartitionNum", "1")
+    withTempPath { dir =>
+      val paths = (0 until 3).map(i => s"${dir.getCanonicalPath}/f$i")
+      withCpuSparkSession { spark =>
+        paths.foreach { p =>
+          spark.range(0, 3000, 1, 1).selectExpr("CAST(0 AS INT) AS a").write.orc(p)
+        }
+      }
+      val expected = withCpuSparkSession(
+        _.read.schema(schema).orc(paths: _*).collect().map(_.toString).toSeq, conf)
+      withGpuSparkSession({ spark =>
+        val df = spark.read.schema(schema).orc(paths: _*)
+        val scan = df.queryExecution.executedPlan.collect {
+          case scan: GpuFileSourceScanExec => scan
+        }.head
+        val batchRows = scan.executeColumnar().mapPartitions(
+          _.map { b => try b.numRows() finally b.close() }).collect()
+        val rapidsConf = new RapidsConf(spark.sessionState.conf)
+        val cap = GpuNullBatchIterator.maxRows(schema, rapidsConf.maxReadBatchSizeRows,
+          rapidsConf.gpuTargetBatchSizeBytes)
+        assert(cap < 3000, s"the test needs a cap below the file size, got $cap")
+        assert(batchRows.sum == 9000L)
+        assert(batchRows.forall(_ <= cap), s"batches over the cap of $cap: ${batchRows.toSeq}")
+        assert(df.collect().map(_.toString).toSeq == expected)
+      }, conf)
+    }
+  }
+
   private def causedByFileNotFound(t: Throwable): Boolean =
     Iterator.iterate(t)(_.getCause).takeWhile(_ != null)
       .exists(_.isInstanceOf[FileNotFoundException])

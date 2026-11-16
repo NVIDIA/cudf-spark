@@ -51,6 +51,15 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .booleanConf
     .createWithDefault(false)
 
+  val TEST_INPUT_FILE_NAME_MAX_STRING_BYTES =
+    conf("spark.rapids.sql.test.inputFileName.maxStringBytes")
+      .doc("Only to be used in tests. The most string bytes a single batch may need for the " +
+        "input_file_name() column before the scan slices it. Lower it to exercise slicing " +
+        "with small data. The default is the cudf string column limit.")
+      .internal()
+      .longConf
+      .createWithDefault(Int.MaxValue.toLong)
+
   val TEST_CONF = conf("spark.rapids.sql.test.enabled")
     .doc("Intended to be used by unit tests, if enabled all operations must run on the " +
       "GPU or an error happens.")
@@ -307,6 +316,33 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .startupOnly()
     .integerConf
     .createWithDefault(32)
+
+  val SHUFFLE_UCX_CLEANUP_ON_QUERY_END_ENABLED =
+    conf("spark.rapids.shuffle.ucx.cleanupOnQueryEnd.enabled")
+    .doc("When set to true, the RAPIDS Shuffle Manager in UCX mode reclaims each GPU shuffle " +
+      "once the SQL query that wrote it has ended: the executors free the shuffle's buffers, " +
+      "and the driver clears its map outputs and keeps the shuffle registered. It takes " +
+      "effect only when spark.rapids.shuffle.mode is UCX, the RAPIDS Shuffle Manager is " +
+      "configured and spark.rapids.sql.mode is executeOnGPU, and never on Databricks. Any " +
+      "other setup, CACHE_ONLY mode included, logs one warning and reclaims nothing. Enable " +
+      "it only when queries run one at a time, share no DataFrame and return no results " +
+      "through toLocalIterator, as in a power test that runs independent queries one after " +
+      "another. A shuffle waits for Spark's own cleanup, as it does when this is false, when " +
+      "Spark marks its map stage indeterminate, as for repartition(n) without columns, when " +
+      "Delta Lake's optimized write builds it, or when its query computes it from a " +
+      "nondeterministic expression such as rand() or uuid(), a sample, a limit, or an RDD. " +
+      "A later action that reuses a DataFrame reruns the map stage of each reclaimed shuffle " +
+      "it reads. The driver clears a shuffle's map outputs shortly after its query ends, and " +
+      "an action that judged the shuffle available before that clear can read part of its old " +
+      "output and rerun the rest. Such an action can be a second action on the same DataFrame, " +
+      "a concurrent query that shares it, or toLocalIterator, whose jobs run after its query " +
+      "ends. That action then returns duplicated or missing rows if the shuffle depends on " +
+      "input order, as first(), last() or row_number() over ties can. Its fetch failure can " +
+      "also make Spark drop every map output on that executor, so a concurrent query that reads " +
+      "a GPU round-robin shuffle there can fail. Keep this key off for such workloads.")
+    .startupOnly()
+    .booleanConf
+    .createWithDefault(false)
 
   val SHUFFLE_MAX_CLIENT_THREADS = conf("spark.rapids.shuffle.maxClientThreads")
     .doc("The maximum number of threads that the shuffle client should be allowed to start")
