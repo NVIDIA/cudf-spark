@@ -69,6 +69,7 @@ class HistoryMetricsManagerSuite extends AnyFunSuite {
       initialize(manager, "LOCAL")
 
       assert(provider.openCalls == 1)
+      assert(provider.catalog != null && provider.catalog.entries().isEmpty)
       assert(provider.configuration ne configuration)
       assert(provider.configuration.get("spark.test.key") == "value")
       intercept[UnsupportedOperationException] {
@@ -325,6 +326,7 @@ class HistoryMetricsManagerSuite extends AnyFunSuite {
     var openCalls = 0
     var shutdownCalls = 0
     var shutdownTimeout: Duration = _
+    var catalog: HistoryMetricCatalog = _
     var configuration: util.Map[String, String] = _
     var applicationId: String = _
     var applicationAttemptId: String = _
