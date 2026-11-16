@@ -2808,7 +2808,7 @@ def test_delta_write_column_name_mapping(spark_tmp_path, mapping, optimized_writ
     })
     # Multiple input partitions exercise the optimized-write shuffle with physical column names.
     assert_gpu_and_cpu_writes_are_equal_collect(
-        lambda spark, path: gen_df(spark, gen_list).repartition(4).write.format("delta") \
+        lambda spark, path: gen_df(spark, gen_list, num_slices=4).write.format("delta") \
             .partitionBy("b", "d") \
             .save(path),
         lambda spark, path: spark.read.format("delta").load(path),
