@@ -18,12 +18,9 @@ package com.nvidia.spark.rapids.parquet
 
 import ai.rapids.cudf.{Cuda, DeviceMemoryBuffer, HostMemoryBuffer}
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.RapidsConf
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmSparkRetrySuiteBase
 import com.nvidia.spark.rapids.jni.{GpuSplitAndRetryOOM, RmmSpark}
-
-import org.apache.spark.sql.internal.SQLConf
 
 class HybridScanStageOnDeviceSuite extends RmmSparkRetrySuiteBase {
   // Each buffer is its own host allocation, so a pack of CHUNK bytes holds exactly one of them.
@@ -92,18 +89,15 @@ class HybridScanStageOnDeviceSuite extends RmmSparkRetrySuiteBase {
   }
 
   test("an injected OOM reaches the work on the staged buffers") {
-    val sqlConf = new SQLConf()
-    // Skip the one pack allocation, so the OOM hits the allocation in the work.
-    sqlConf.setConfString(RapidsConf.TEST_RETRY_OOM_INJECTION_MODE.key,
-      "num_ooms=1,skip=1,type=GPU")
     withResource(new Cuda.Event()) { event =>
       withResource(filledChunks(2)) { chunks =>
         var calls = 0
-        SQLConf.withExistingConf(sqlConf) {
-          HybridScanPipeline.withStagedOnDevice(chunks, 2 * CHUNK, CHUNK, event) { _ =>
-            calls += 1
-            withResource(DeviceMemoryBuffer.allocate(1))(_ => ())
-          }
+        // Skip the one pack allocation, so the OOM hits the allocation in the work.
+        RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
+          RmmSpark.OomInjectionType.GPU.ordinal, 1)
+        HybridScanPipeline.withStagedOnDevice(chunks, 2 * CHUNK, CHUNK, event) { _ =>
+          calls += 1
+          withResource(DeviceMemoryBuffer.allocate(1))(_ => ())
         }
         assert(calls == 2)
       }
