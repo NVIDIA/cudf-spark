@@ -692,6 +692,40 @@ def test_cast_string_to_extreme_decimal_scale_cpu_bridge():
         do_cast, 'Cast', conf=_decimal_scale_cast_conf(False))
 
 
+@allow_non_gpu('Cast')
+@validate_execs_in_gpu_plan('GpuProjectExec')
+@pytest.mark.parametrize('data, schema, to_type', [
+    pytest.param(
+        [(['1e-1000'],)],
+        'a array<string>',
+        ArrayType(_parsed_exponent_overflow_decimal_type),
+        id='array'),
+    pytest.param(
+        [({'1e-1000': 'value'},)],
+        'a map<string,string>',
+        MapType(_parsed_exponent_overflow_decimal_type, StringType()),
+        id='map_key'),
+    pytest.param(
+        [({'key': '1e-1000'},)],
+        'a map<string,string>',
+        MapType(StringType(), _parsed_exponent_overflow_decimal_type),
+        id='map_value'),
+    pytest.param(
+        [(('1e-1000',),)],
+        'a struct<x:string>',
+        StructType([StructField('x', _parsed_exponent_overflow_decimal_type)]),
+        id='struct')
+])
+def test_cast_nested_string_to_extreme_decimal_scale_cpu_bridge(data, schema, to_type):
+    def do_cast(spark):
+        return spark.createDataFrame(data, schema).select(
+            f.col('a').cast(to_type).alias('result'))
+
+    # Spark permits string-to-decimal map-key casts only in ANSI mode.
+    assert_gpu_fallback_collect(
+        do_cast, 'Cast', conf=_decimal_scale_cast_conf(True))
+
+
 @allow_non_gpu('ProjectExec', 'Cast')
 @pytest.mark.parametrize('ansi_on', [True, False], ids=idfn)
 def test_cast_int_overflow_decimal_scale_fallback(ansi_on):
