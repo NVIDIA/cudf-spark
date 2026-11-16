@@ -35,6 +35,7 @@ import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 import com.nvidia.spark.rapids.filecache.{FileCache, FileCacheLocalityManager, FileCacheLocalityMsg}
 import com.nvidia.spark.rapids.io.async.TrafficController
 import com.nvidia.spark.rapids.jni.{GpuTimeZoneDB, Hash, JSONUtils, RmmSpark, TaskPriority}
+import com.nvidia.spark.rapids.parquet.HybridScanPipeline
 import com.nvidia.spark.rapids.python.PythonWorkerSemaphore
 import com.nvidia.spark.rapids.shims.ShuffleManagerShimUtils
 import org.apache.commons.lang3.exception.ExceptionUtils
@@ -844,6 +845,7 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
         () => GpuTimeZoneDB.shutdown(),
         () => GpuSemaphore.shutdown(),
         () => PythonWorkerSemaphore.shutdown(),
+        () => HybridScanPipeline.shutdown(),
         () => GpuDeviceManager.shutdown(),
         () => ProfilerOnExecutor.shutdown(),
         () => if (isAsyncProfilerEnabled) {

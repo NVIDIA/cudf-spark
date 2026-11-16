@@ -16,11 +16,14 @@
 
 package com.nvidia.spark.rapids.parquet
 
-import ai.rapids.cudf.HostMemoryBuffer
+import ai.rapids.cudf.{Cuda, DeviceMemoryBuffer, HostMemoryBuffer}
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.RapidsConf
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmSparkRetrySuiteBase
 import com.nvidia.spark.rapids.jni.{GpuSplitAndRetryOOM, RmmSpark}
+
+import org.apache.spark.sql.internal.SQLConf
 
 class HybridScanStageOnDeviceSuite extends RmmSparkRetrySuiteBase {
   // Each buffer is its own host allocation, so a pack of CHUNK bytes holds exactly one of them.
@@ -39,18 +42,19 @@ class HybridScanStageOnDeviceSuite extends RmmSparkRetrySuiteBase {
       RmmSpark.OomInjectionType.GPU.ordinal, 0)
 
   test("a split OOM while staging retries with half the pack size") {
-    withResource(filledChunks(2)) { chunks =>
-      RmmSpark.getAndResetNumSplitRetryThrow(/*taskId*/ 1)
-      injectSplitOnNextGpuAlloc()
-      withResource(HybridScanPipeline.stageOnDevice(chunks, 2 * CHUNK, CHUNK)) { staged =>
-        assert(RmmSpark.getAndResetNumSplitRetryThrow(/*taskId*/ 1) > 0)
-        val device = staged.getBuffers()
-        assert(device.length == chunks.length)
-        chunks.zip(device).foreach { case (expected, actual) =>
-          assert(actual.getLength == CHUNK)
-          withResource(HostMemoryBuffer.allocate(CHUNK)) { back =>
-            back.copyFromDeviceBuffer(actual)
-            (0L until CHUNK).foreach(i => assert(back.getByte(i) == expected.getByte(i)))
+    withResource(new Cuda.Event()) { event =>
+      withResource(filledChunks(2)) { chunks =>
+        RmmSpark.getAndResetNumSplitRetryThrow(/*taskId*/ 1)
+        injectSplitOnNextGpuAlloc()
+        HybridScanPipeline.withStagedOnDevice(chunks, 2 * CHUNK, CHUNK, event) { device =>
+          assert(RmmSpark.getAndResetNumSplitRetryThrow(/*taskId*/ 1) > 0)
+          assert(device.length == chunks.length)
+          chunks.zip(device).foreach { case (expected, actual) =>
+            assert(actual.getLength == CHUNK)
+            withResource(HostMemoryBuffer.allocate(CHUNK)) { back =>
+              back.copyFromDeviceBuffer(actual)
+              (0L until CHUNK).foreach(i => assert(back.getByte(i) == expected.getByte(i)))
+            }
           }
         }
       }
@@ -58,10 +62,47 @@ class HybridScanStageOnDeviceSuite extends RmmSparkRetrySuiteBase {
   }
 
   test("a split OOM while staging at the minimum pack size fails") {
-    withResource(filledChunks(2)) { chunks =>
-      injectSplitOnNextGpuAlloc()
-      assertThrows[GpuSplitAndRetryOOM] {
-        HybridScanPipeline.stageOnDevice(chunks, CHUNK, CHUNK).close()
+    withResource(new Cuda.Event()) { event =>
+      withResource(filledChunks(2)) { chunks =>
+        injectSplitOnNextGpuAlloc()
+        assertThrows[GpuSplitAndRetryOOM] {
+          HybridScanPipeline.withStagedOnDevice(chunks, CHUNK, CHUNK, event)(_ => ())
+        }
+      }
+    }
+  }
+
+  test("an injected OOM reaches the work on the staged buffers") {
+    val sqlConf = new SQLConf()
+    // Skip the one pack allocation, so the OOM hits the allocation in the work.
+    sqlConf.setConfString(RapidsConf.TEST_RETRY_OOM_INJECTION_MODE.key,
+      "num_ooms=1,skip=1,type=GPU")
+    withResource(new Cuda.Event()) { event =>
+      withResource(filledChunks(2)) { chunks =>
+        var calls = 0
+        SQLConf.withExistingConf(sqlConf) {
+          HybridScanPipeline.withStagedOnDevice(chunks, 2 * CHUNK, CHUNK, event) { _ =>
+            calls += 1
+            withResource(DeviceMemoryBuffer.allocate(1))(_ => ())
+          }
+        }
+        assert(calls == 2)
+      }
+    }
+  }
+
+  test("a split OOM in the work on the staged buffers fails without shrinking the pack") {
+    withResource(new Cuda.Event()) { event =>
+      withResource(filledChunks(2)) { chunks =>
+        var calls = 0
+        assertThrows[GpuSplitAndRetryOOM] {
+          HybridScanPipeline.withStagedOnDevice(chunks, 2 * CHUNK, CHUNK, event) { _ =>
+            calls += 1
+            injectSplitOnNextGpuAlloc()
+            withResource(DeviceMemoryBuffer.allocate(1))(_ => ())
+          }
+        }
+        assert(calls == 1)
       }
     }
   }

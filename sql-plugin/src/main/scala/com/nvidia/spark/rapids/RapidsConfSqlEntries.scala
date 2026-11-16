@@ -585,8 +585,8 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
   val PARQUET_HYBRID_SCAN_MIN_H2D_PACK_SIZE =
     conf("spark.rapids.sql.format.parquet.hybridScan.minH2DPackSize")
       .doc("Smallest pack size a hybrid scan read's host-to-device copy is retried with after " +
-          s"failing to allocate; see ${PARQUET_HYBRID_SCAN_MAX_H2D_PACK_SIZE.key}. Halving it " +
-          "further fails the read instead. " +
+          s"failing to allocate; see ${PARQUET_HYBRID_SCAN_MAX_H2D_PACK_SIZE.key}, which it must " +
+          "not exceed. Halving it further fails the read instead. " +
           s"Only used when ${PARQUET_HYBRID_SCAN_ENABLED.key} is true.")
       .internal()
       .bytesConf(ByteUnit.BYTE)
