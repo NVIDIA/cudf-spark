@@ -432,13 +432,15 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .createWithDefault(5000)
 
   val HISTORY_SCAN_SPLIT_ENABLED = conf("spark.rapids.sql.history.scanSplit.enabled")
-    .doc("When a history metrics provider is set, sizes scan splits from the decode-expansion " +
-      "ratio recorded by earlier runs. When false, scan splits keep their static size and no " +
-      "ratio is recorded.")
+    .doc("When a history metrics provider is set and this is true, sizes scan splits from the " +
+      "decode-expansion ratio recorded by earlier runs. Off by default: the ratio is recorded " +
+      "per table, so it does not account for the columns a scan reads, the filters it pushes " +
+      "down or dynamic partition pruning. When false, scan splits keep their static size and " +
+      "no ratio is recorded.")
     .sinceVersion(ConfVersionInfo.UNRELEASED_VERSION)
     .startupOnly()
     .booleanConf
-    .createWithDefault(true)
+    .createWithDefault(false)
 
   val HISTORY_SCAN_SPLIT_MAX_AGE_DAYS = conf("spark.rapids.sql.history.scanSplit.maxAgeDays")
     .doc("How old, in days, the last recorded decode-expansion ratio of a table may be and " +
