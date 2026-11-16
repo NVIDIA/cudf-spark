@@ -242,6 +242,11 @@ case class GpuUnaryMinus(child: Expression, failOnError: Boolean) extends GpuUna
     }
   }
 
+  override def selfConvertsToAst: Boolean = dataType match {
+    case LongType | FloatType | DoubleType | IntegerType => true
+    case _ => false
+  }
+
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     val literalZero = dataType match {
       case LongType => ast.Literal.ofLong(0)
@@ -265,6 +270,8 @@ case class GpuUnaryPositive(child: Expression) extends GpuUnaryExpression
   override def sql: String = s"(+ ${child.sql})"
 
   override def doColumnar(input: GpuColumnVector) : ColumnVector = input.getBase.incRefCount()
+
+  override def selfConvertsToAst: Boolean = true
 
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     child.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns)
