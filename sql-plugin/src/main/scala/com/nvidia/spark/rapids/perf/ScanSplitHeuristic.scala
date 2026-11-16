@@ -129,39 +129,73 @@ object ScanContext {
 }
 
 /** Sizes a scan's split from its table's last decode-expansion ratio. */
-class ScanSplitHeuristic(store: () => MetricStore) extends HistoryHeuristic(store) {
-
-  type Ctx = ScanContext
-  type Decision = Long
+class ScanSplitHeuristic(store: () => MetricStore) extends Logging {
 
   def name: String = "scan.split"
 
+  /**
+   * Whether this is switched on in `conf`. Read once at driver plugin init, and only consulted
+   * when a history provider is requested.
+   */
   def enabled(conf: RapidsConf): Boolean = conf.historyScanSplitEnabled
 
+  /** The families this reads and writes. */
   def metrics: Seq[HistoryMetric] = Seq(ScanExpansionRatio)
 
+  private val history = new MetricHistory(ScanExpansionRatio, store)
+
+  /** Set while history-backed planning is on; otherwise the static split stands. */
+  @volatile private var active: Option[HistoryPolicy] = None
+
+  def enable(policy: HistoryPolicy): Unit = active = Some(policy)
+
+  def disable(): Unit = active = None
+
+  def isEnabled: Boolean = active.isDefined
+
+  /** Declares the family up front. */
+  def declare(): Unit = active.foreach(policy => history.declare(policy))
+
+  /** For tests. */
+  private[perf] def historyOf: MetricHistory = history
+
   /** Keyed by table. */
-  protected def keyFor(metric: HistoryMetric, ctx: ScanContext): Map[String, DimValue] =
+  private def key(ctx: ScanContext): Map[String, DimValue] =
     Map(ScanExpansionRatio.dimension -> DimValue.of(ScanSplitHeuristic.capped(ctx.table)))
 
-  override protected def planningMaxAge(ctx: ScanContext): Option[Duration] =
-    Some(ctx.limits.maxAge)
-
-  protected def staticDecision(ctx: ScanContext): Long = ctx.maxSplitBytes
-
-  protected def decideFrom(observed: Map[HistoryMetric, Double], ctx: ScanContext): Long =
-    observed.get(ScanExpansionRatio)
-      .map { ratio =>
-        val raw = ScanSplitSizer.rawSplit(ratio, ctx.batchSizeBytes)
-        logInfo(s"scan.split: table=${ctx.table} ratio=$ratio " +
-          s"targetBatch=${ctx.batchSizeBytes} rawSplit=$raw")
-        raw
+  /**
+   * History-based or static, never a blend: the static split is `ctx.maxSplitBytes`, which is
+   * Spark's own.
+   */
+  def decide(ctx: ScanContext, nowMs: Long): Long = active match {
+    case None => ctx.maxSplitBytes
+    case Some(policy) =>
+      history.latest(key(ctx), nowMs, policy, Some(ctx.limits.maxAge)) match {
+        case Some(ratio) =>
+          val raw = ScanSplitSizer.rawSplit(ratio, ctx.batchSizeBytes)
+          logInfo(s"scan.split: table=${ctx.table} ratio=$ratio " +
+            s"targetBatch=${ctx.batchSizeBytes} rawSplit=$raw")
+          ScanSplitSizer.bound(raw, ctx.listedBytes, ctx.minPartitionNum, ctx.maxSplitBytes,
+            ctx.limits.minBytes, ctx.limits.maxBytes)
+        case None => ctx.maxSplitBytes
       }
-      .getOrElse(0L)
+  }
 
-  override protected def constrain(raw: Long, ctx: ScanContext): Long =
-    ScanSplitSizer.bound(raw, ctx.listedBytes, ctx.minPartitionNum, ctx.maxSplitBytes,
-      ctx.limits.minBytes, ctx.limits.maxBytes)
+  /** Queues `ctx` for observation at execution end; untracked outside a SQL execution. */
+  def register(executionId: Option[Long], ctx: ScanContext): Unit = {
+    if (isEnabled && shouldObserve(ctx)) {
+      executionId match {
+        case None => logDebug(s"$name planned outside a SQL execution; not tracked for history")
+        case Some(id) => HistoryObservations.register(id, () => recordAll(ctx))
+      }
+    }
+  }
+
+  /** Records what `ctx` observed; called at execution end. */
+  private[perf] def recordAll(ctx: ScanContext): Unit = active.foreach { policy =>
+    val atMs = System.currentTimeMillis()
+    observe(ctx).foreach(ratio => history.record(key(ctx), ratio, atMs, policy))
+  }
 
   /**
    * File-source split; `sparkMaxSplitBytes` for scans without a key or while history is off.
@@ -186,10 +220,10 @@ class ScanSplitHeuristic(store: () => MetricStore) extends HistoryHeuristic(stor
   }
 
   /** The current planning's ratio, or logs why not. */
-  protected def observe(ctx: ScanContext): Map[HistoryMetric, Double] = {
+  private def observe(ctx: ScanContext): Option[Double] = {
     if (!ctx.isCurrent()) {
       logDebug(s"scan.split: table=${ctx.table} not recorded: superseded planning")
-      Map.empty
+      None
     } else {
       val reads = ctx.drainReads()
       val result = if (reads.splitsRead == 0L) {
@@ -198,15 +232,15 @@ class ScanSplitHeuristic(store: () => MetricStore) extends HistoryHeuristic(stor
         ScanSplitHeuristic.ratioFromReads(ctx.plannedSplits, reads)
       }
       result match {
-        case Right(ratio) => Map(ScanExpansionRatio -> ratio)
+        case Right(ratio) => Some(ratio)
         case Left(reason) =>
           logInfo(s"scan.split: table=${ctx.table} not recorded: $reason")
-          Map.empty
+          None
       }
     }
   }
 
-  override protected def shouldObserve(ctx: ScanContext): Boolean =
+  private def shouldObserve(ctx: ScanContext): Boolean =
     ctx.table != null && ctx.table.nonEmpty && ctx.plannedSplits > 0
 }
 

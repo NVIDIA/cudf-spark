@@ -70,14 +70,20 @@ Store errors are logged once per JVM per reason and the decision falls back to s
 ## Adding a heuristic
 
 Code layers: `HistoryMetric` (family contract) -> `MetricHistory` (store access, `HistoryPolicy`)
--> `HistoryHeuristic` (decide/observe cycle, lifecycle) -> `ScanSplitHeuristic`.
+-> `ScanSplitHeuristic` (decide/observe cycle), driven by `HistoryObservations` (records when a
+query ends) and `HistoryLifecycle` (start, activate, stop).
 
-1. Define the family: `object X extends HistoryMetric`, with a permanent `id` and `name`. The
+There is one heuristic, so there is no shared base class yet. A second one is the point to
+extract what the two have in common, rather than to guess it now.
+
+1. Define the family: `object X extends HistoryMetric`, with a permanent `id` and `name` and its
+   `dimensions`, up to eight named, typed ones, with a value for each in the key. The
    plugin gives every registered family to the history provider as its catalog
    (`HistoryHeuristics.catalog`), which admits only those ids. An id or name is never reused or
    changed, because stored observations are keyed by the id. A clash between two families makes
    building the catalog fail, which leaves history off.
-2. Extend `HistoryHeuristic` (key, static decision, formula, bounds, observation, and `enabled`,
-   which reads its own `spark.rapids.sql.history.<name>.enabled` switch) as a singleton over
-   `MetricStores.current()`, and add it to the list in `HistoryHeuristics`.
+2. Write the heuristic as `ScanSplitHeuristic` is written (key, static decision, formula, bounds,
+   observation, and `enabled`, which reads its own `spark.rapids.sql.history.<name>.enabled`
+   switch) as a singleton over `MetricStores.current()`, and add it to the list in
+   `HistoryHeuristics`, whose lifecycle is typed to `ScanSplitHeuristic` today.
 3. Call `decide` and `register` from the planning site.

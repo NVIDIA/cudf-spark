@@ -173,7 +173,7 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
     val h = heuristic(noop)
     assert(decide(h) == Static)
     assert(decide(h) == Static)
-    assert(h.historyOf(ScanExpansionRatio).reportedReasons == Set("lookup-UNAVAILABLE"))
+    assert(h.historyOf.reportedReasons == Set("lookup-UNAVAILABLE"))
   }
 
   test("rejected declaration: no lookup, no record, one log line per code") {
@@ -188,7 +188,7 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
       assert(store.declareCalls.size == 1, s"$code: declared once and cached")
       assert(store.summarizeCalls.isEmpty, code)
       assert(store.offered.isEmpty, code)
-      assert(h.historyOf(ScanExpansionRatio).reportedReasons == Set(s"declare-$code"))
+      assert(h.historyOf.reportedReasons == Set(s"declare-$code"))
     }
   }
 
@@ -197,7 +197,7 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
     store.declareReason = "first effective retention remains unchanged"
     val h = heuristic(store)
     assert(decide(h) == 256 * MiB)
-    assert(h.historyOf(ScanExpansionRatio).reportedReasons == Set("declare-ACCEPTED"))
+    assert(h.historyOf.reportedReasons == Set("declare-ACCEPTED"))
   }
 
   test("summarize errors and timeouts: no decision, one log line per code") {
@@ -208,7 +208,7 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
       val h = heuristic(store)
       assert(decide(h) == Static, code)
       assert(decide(h) == Static, code)
-      assert(h.historyOf(ScanExpansionRatio).reportedReasons == Set(s"lookup-$code"))
+      assert(h.historyOf.reportedReasons == Set(s"lookup-$code"))
     }
   }
 
@@ -222,13 +222,13 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
       store.summarizeRaw = Some(responses)
       val h = heuristic(store)
       assert(decide(h) == Static)
-      assert(h.historyOf(ScanExpansionRatio).reportedReasons == Set("lookup-malformed"))
+      assert(h.historyOf.reportedReasons == Set("lookup-malformed"))
     }
     val store = storeWith(4.0 -> (now - 1000))
     store.summarizeThrows = Some(new IllegalStateException("boom"))
     val h = heuristic(store)
     assert(decide(h) == Static)
-    assert(h.historyOf(ScanExpansionRatio).reportedReasons ==
+    assert(h.historyOf.reportedReasons ==
       Set("lookup-java.lang.IllegalStateException"))
   }
 
@@ -239,7 +239,7 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
     assert(decide(h, badUtf16) == Static)
     h.recordAll(scanContext(400 * MiB).copy(table = badUtf16))
     assert(store.summarizeCalls.isEmpty && store.offered.isEmpty)
-    assert(h.historyOf(ScanExpansionRatio).reportedReasons == Set("untrackable-key"))
+    assert(h.historyOf.reportedReasons == Set("untrackable-key"))
   }
 
   test("over-long table names are tracked under their capped key") {

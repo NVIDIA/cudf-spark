@@ -22,7 +22,7 @@ import java.util.Locale
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
-import com.nvidia.spark.history.{DimValue, HistoryMetricCatalog, MetricStore, MetricStores}
+import com.nvidia.spark.history.{HistoryMetricCatalog, MetricStore, MetricStores}
 import com.nvidia.spark.rapids.{HistoryMetricsManager, RapidsConf}
 
 import org.apache.spark.SparkContext
@@ -32,114 +32,8 @@ import org.apache.spark.sql.execution.SQLExecution
 import org.apache.spark.sql.execution.ui.SparkListenerSQLExecutionEnd
 
 /**
- * A planning decision that reads history at planning time and records what the query did when
- * it ends.
- *
- * @param store the installed store; `MetricStores.current()` in production
- */
-abstract class HistoryHeuristic(store: () => MetricStore) extends Logging {
-
-  type Ctx
-  type Decision
-
-  def name: String
-
-  /**
-   * Whether this heuristic is switched on in `conf`. By convention each heuristic has its own
-   * `spark.rapids.sql.history.<name>.enabled` setting, but nothing enforces that name. Read once at
-   * driver plugin init, and only consulted when a history provider is requested.
-   */
-  def enabled(conf: RapidsConf): Boolean
-
-  /** Families this heuristic reads and writes. */
-  def metrics: Seq[HistoryMetric]
-
-  private lazy val histories: Map[HistoryMetric, MetricHistory] =
-    metrics.map(m => m -> new MetricHistory(m, store)).toMap
-
-  /** Set while history-backed planning is on; otherwise the static decision stands. */
-  @volatile private var active: Option[HistoryPolicy] = None
-
-  final def enable(policy: HistoryPolicy): Unit = active = Some(policy)
-
-  final def disable(): Unit = active = None
-
-  final def isEnabled: Boolean = active.isDefined
-
-  /** Declares every family up front. */
-  final def declare(): Unit = active.foreach { policy =>
-    histories.values.foreach(_.declare(policy))
-  }
-
-  /**
-   * The value of each of `metric`'s dimensions, by name, for `ctx`. Evaluated inside the history
-   * call, so a value the API rejects is contained there and the decision stays static.
-   */
-  protected def keyFor(metric: HistoryMetric, ctx: Ctx): Map[String, DimValue]
-
-  /** The decision without history. */
-  protected def staticDecision(ctx: Ctx): Decision
-
-  /** Called only when `sufficient` holds. */
-  protected def decideFrom(observed: Map[HistoryMetric, Double], ctx: Ctx): Decision
-
-  protected def constrain(raw: Decision, ctx: Ctx): Decision = raw
-
-  /** What the query did; called after it ends. */
-  protected def observe(ctx: Ctx): Map[HistoryMetric, Double]
-
-  /** Default: every family answered. */
-  protected def sufficient(observed: Map[HistoryMetric, Double]): Boolean =
-    observed.size == metrics.size
-
-  protected def shouldObserve(ctx: Ctx): Boolean = true
-
-  /**
-   * How old a reading may be for this decision; None keeps each family's declared planning age.
-   * A lookup window only: it never changes what is declared to the store.
-   */
-  protected def planningMaxAge(ctx: Ctx): Option[Duration] = None
-
-  /**
-   * History-based or static, never a blend. Abstaining families are absent from `observed`;
-   * `sufficient` decides whether the rest is enough.
-   */
-  final def decide(ctx: Ctx, nowMs: Long): Decision = active match {
-    case None => staticDecision(ctx)
-    case Some(policy) =>
-      val observed = metrics.flatMap { m =>
-        histories(m).latest(keyFor(m, ctx), nowMs, policy, planningMaxAge(ctx))
-          .map(value => m -> value)
-      }.toMap
-      if (sufficient(observed)) constrain(decideFrom(observed, ctx), ctx)
-      else staticDecision(ctx)
-  }
-
-  /** Queues `ctx` for observation at execution end; untracked outside a SQL execution. */
-  final def register(executionId: Option[Long], ctx: Ctx): Unit = {
-    if (isEnabled && shouldObserve(ctx)) {
-      executionId match {
-        case None => logDebug(s"$name planned outside a SQL execution; not tracked for history")
-        case Some(id) => HistoryObservations.register(id, () => recordAll(ctx))
-      }
-    }
-  }
-
-  /** Records what `ctx` observed; called at execution end. */
-  private[perf] final def recordAll(ctx: Ctx): Unit = active.foreach { policy =>
-    val atMs = System.currentTimeMillis()
-    observe(ctx).foreach { case (m, value) =>
-      histories(m).record(keyFor(m, ctx), value, atMs, policy)
-    }
-  }
-
-  /** For tests. */
-  private[perf] final def historyOf(metric: HistoryMetric): MetricHistory = histories(metric)
-}
-
-/**
  * Holds planned contexts per SQL execution id and records them when the execution ends, once
- * accumulators are merged. Shared by all heuristics.
+ * accumulators are merged.
  */
 object HistoryObservations extends Logging {
 
@@ -214,13 +108,13 @@ object HistoryObservations extends Logging {
  * @param currentStore the installed store; `MetricStores.current()` in production
  */
 private[perf] class HistoryLifecycle(
-    heuristics: Seq[HistoryHeuristic],
+    heuristics: Seq[ScanSplitHeuristic],
     currentStore: () => MetricStore) extends Logging {
 
   /** Store at `start`; None while stopped. */
   private var storeAtStart: Option[MetricStore] = None
   /** Heuristics enabled at `start`. */
-  private var started: Seq[HistoryHeuristic] = Nil
+  private var started: Seq[ScanSplitHeuristic] = Nil
 
   /**
    * Every family these heuristics record, whether or not a heuristic is enabled, so the ids a
@@ -235,7 +129,7 @@ private[perf] class HistoryLifecycle(
    * @return whether any heuristic is enabled
    */
   def start(provider: String, policy: HistoryPolicy, addListener: SparkListener => Unit,
-      isOn: HistoryHeuristic => Boolean = _ => true): Boolean = synchronized {
+      isOn: ScanSplitHeuristic => Boolean = _ => true): Boolean = synchronized {
     stop()
     val requested = Option(provider).map(_.trim.toLowerCase(Locale.ROOT)).getOrElse("")
     started = heuristics.filter(isOn)
