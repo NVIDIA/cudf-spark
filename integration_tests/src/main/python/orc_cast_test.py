@@ -262,7 +262,9 @@ def test_orc_decimal_precision_narrowing(spark_tmp_path, reader, v1_enabled_list
     # Include both signs of the exact read bound and the first value beyond it.
     max_value = '9' * (read_precision - read_scale) + '.' + '9' * min(file_scale, read_scale)
     overflow = '1' + '0' * (read_precision - read_scale) + '.00'
-    inputs = [max_value, '-' + max_value, overflow, '-' + overflow, '0.00', '0.01']
+    inputs = [max_value, '-' + max_value, '0.00', '0.01']
+    if file_precision - file_scale > read_precision - read_scale:
+        inputs += [overflow, '-' + overflow]
     if file_scale > read_scale:
         inputs += [max_value + '4', max_value + '5', '-' + max_value + '4', '-' + max_value + '5']
     values = [Decimal(v) for v in inputs] + [None]
