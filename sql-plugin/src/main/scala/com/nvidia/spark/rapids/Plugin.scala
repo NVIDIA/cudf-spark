@@ -47,7 +47,8 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.internal.StaticSQLConf
-import org.apache.spark.sql.rapids.{GpuShuffleEnv, ShuffleCleanupListener, XxHash64Utils}
+import org.apache.spark.sql.rapids.{GpuShuffleEnv, GpuShuffleRegistry, ShuffleCleanupListener,
+  UcxSqlEndListener, XxHash64Utils}
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 
 class PluginException(msg: String) extends RuntimeException(msg)
@@ -479,6 +480,7 @@ object RapidsPluginUtils extends Logging {
 class RapidsDriverPlugin extends DriverPlugin with Logging {
   var rapidsShuffleHeartbeatManager: RapidsShuffleHeartbeatManager = null
   var shuffleCleanupListener: ShuffleCleanupListener = null
+  var ucxReclaimListener: UcxSqlEndListener = null
   private val historyMetricsManager = new HistoryMetricsManager
   private var historyMetricsSparkContext: SparkContext = _
   private var historyMetricsConfiguration: JavaMap[String, String] = _
@@ -519,6 +521,10 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
           manager.handleStats(executorId, stats)
         }
         null // No response needed for stats report
+      case m: RapidsShuffleReclaimPollMsg => UcxShuffleReclaimDriver.handlePoll(m)
+      case m: RapidsShuffleReclaimResultMsg =>
+        UcxShuffleReclaimDriver.handleResult(m)
+        null // No response needed for reclaim results
       case m => throw new IllegalStateException(s"Unknown message $m")
     }
   }
@@ -558,6 +564,8 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
       logWarning("ShuffleCleanupManager disabled - off-heap memory limits are disabled. " +
         "Set spark.rapids.memory.host.offHeapLimit.enabled=true to use skipMerge feature.")
     }
+
+    ucxReclaimListener = UcxShuffleReclaimDriver.start(sc, conf, sparkConf).orNull
 
     if (GpuShuffleEnv.isRapidsShuffleAvailable(conf)) {
       GpuShuffleEnv.initShuffleManager()
@@ -630,7 +638,9 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
           () => FileCacheLocalityManager.shutdown(),
           // Shutdown listener first to trigger cleanup for any remaining jobs
           () => Option(shuffleCleanupListener).foreach(_.shutdown()),
-          () => ShuffleCleanupManager.shutdown()))
+          () => Option(ucxReclaimListener).foreach(_.shutdown()),
+          () => ShuffleCleanupManager.shutdown(),
+          () => GpuShuffleRegistry.shutdown()))
   }
 }
 
@@ -666,6 +676,7 @@ case class ActiveTaskMetrics(
 class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
   var rapidsShuffleHeartbeatEndpoint: RapidsShuffleHeartbeatEndpoint = null
   var shuffleCleanupEndpoint: ShuffleCleanupEndpoint = null
+  var ucxReclaimEndpoint: ShuffleCleanupEndpoint = null
   private lazy val extraExecutorPlugins =
     RapidsPluginUtils.extraPlugins.map(_.executorPlugin()).filterNot(_ == null)
 
@@ -741,6 +752,7 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
           rapidsShuffleHeartbeatEndpoint = new RapidsShuffleHeartbeatEndpoint(pluginContext, conf)
           rapidsShuffleHeartbeatEndpoint.registerShuffleHeartbeat()
         }
+        ucxReclaimEndpoint = UcxShuffleReclaimExecutor.start(pluginContext, conf, sparkConf).orNull
         if (GpuShuffleEnv.isRapidsShuffleAvailable(conf)) {
           // Initialize ShuffleCleanupEndpoint for MULTITHREADED mode when
           // MultithreadedShuffleBufferCatalog is enabled (skipMerge=true, ESS disabled,
@@ -844,6 +856,9 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
         () => GpuTimeZoneDB.shutdown(),
         () => GpuSemaphore.shutdown(),
         () => PythonWorkerSemaphore.shutdown(),
+        // Closed before the device teardown, so no reclaim starts during it, and the one in
+        // flight stops at its next free, which close() waits for.
+        () => Option(ucxReclaimEndpoint).foreach(_.close()),
         () => GpuDeviceManager.shutdown(),
         () => ProfilerOnExecutor.shutdown(),
         () => if (isAsyncProfilerEnabled) {

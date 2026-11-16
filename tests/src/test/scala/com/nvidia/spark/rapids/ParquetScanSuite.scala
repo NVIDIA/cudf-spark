@@ -67,6 +67,112 @@ class ParquetScanSuite extends SparkQueryCompareTestSuite {
     }
   }
 
+  private val missingColsSchema = new StructType()
+    .add("b", LongType).add("c", LongType).add("key", IntegerType)
+
+  // None of the requested data columns exist in these files, so nothing is decoded and the
+  // reader builds null batches, which must still be capped like decoded batches.
+  private def withMissingColsData(f: String => Unit): Unit = withTempPath { dir =>
+    val path = dir.getCanonicalPath
+    withCpuSparkSession { spark =>
+      (0 until 3).foreach { key =>
+        spark.range(0, 3000, 1, 1).selectExpr("CAST(0 AS INT) AS a")
+          .write.parquet(s"$path/key=$key")
+      }
+    }
+    f(path)
+  }
+
+  private def missingColsConf(readerType: String, extra: (String, String)*): SparkConf = {
+    val conf = new SparkConf()
+      .set(RapidsConf.PARQUET_READER_TYPE.key, readerType)
+      .set("spark.sql.sources.useV1SourceList", "parquet")
+      .set("spark.sql.adaptive.enabled", "false")
+      .set("spark.sql.files.maxPartitionBytes", "1g")
+      .set("spark.sql.files.minPartitionNum", "1")
+      .set(RapidsConf.READER_MULTITHREADED_READ_KEEP_ORDER.key, "true")
+      .set(RapidsConf.READER_MULTITHREADED_COMBINE_THRESHOLD.key, "64m")
+      .set(RapidsConf.GPU_BATCH_SIZE_BYTES.key, "2000")
+    extra.foreach { case (k, v) => conf.set(k, v) }
+    conf
+  }
+
+  for (readerType <- Seq("PERFILE", "COALESCING", "MULTITHREADED");
+      (name, extra) <- Seq(
+        "byte target" -> Seq.empty[(String, String)],
+        // A byte target large enough that the row limit, not the bytes, sets the cap
+        "row limit" -> Seq(RapidsConf.MAX_READER_BATCH_SIZE_ROWS.key -> "700",
+          RapidsConf.GPU_BATCH_SIZE_BYTES.key -> "1g"),
+        "OOM injection" -> Seq(RapidsConf.TEST_RETRY_OOM_INJECTION_MODE.key -> "type=GPU"))) {
+    test(s"metadata-only Parquet reads are capped, $readerType, $name") {
+      withMissingColsData { path =>
+        val conf = missingColsConf(readerType, extra: _*)
+        val expected = withCpuSparkSession(
+          _.read.schema(missingColsSchema).parquet(path).collect(), conf)
+        withGpuSparkSession({ spark =>
+          val df = spark.read.schema(missingColsSchema).parquet(path)
+          val scan = df.queryExecution.executedPlan.collect {
+            case scan: GpuFileSourceScanExec => scan
+          }.head
+          val rows = df.collect()
+          assert(rows.length == 9000)
+          assert(rows.forall(r => r.isNullAt(0) && r.isNullAt(1)))
+          assert(rows.groupBy(_.getInt(2)).mapValues(_.length).toMap ==
+            Map(0 -> 3000, 1 -> 3000, 2 -> 3000))
+          assert(rows.map(_.toString).sorted.toSeq == expected.map(_.toString).sorted.toSeq)
+
+          val rapidsConf = new RapidsConf(spark.sessionState.conf)
+          val cap = GpuNullBatchIterator.maxRows(missingColsSchema,
+            rapidsConf.maxReadBatchSizeRows, rapidsConf.gpuTargetBatchSizeBytes)
+          assert(cap < 3000, s"the test needs a cap below the file size, got $cap")
+          if (name == "row limit") {
+            assert(cap == 700, s"the row limit should set the cap, got $cap")
+          }
+          // Before the fix this was one batch per file, or one for everything.
+          val batchRows = scan.executeColumnar().mapPartitions(
+            _.map { b => try b.numRows() finally b.close() }).collect()
+          assert(batchRows.sum == 9000L)
+          assert(batchRows.forall(_ <= cap), s"batches over the cap of $cap: ${batchRows.toSeq}")
+        }, conf)
+      }
+    }
+  }
+
+  for (readerType <- Seq("PERFILE", "COALESCING", "MULTITHREADED")) {
+    // No data column is read at all, so the batches only get partition columns on the GPU
+    test(s"partition-only Parquet reads work without data columns, $readerType") {
+      withMissingColsData { path =>
+        val conf = missingColsConf(readerType)
+        val run = (spark: org.apache.spark.sql.SparkSession) =>
+          spark.read.schema(missingColsSchema).parquet(path).select("key")
+            .groupBy("key").count().collect().map(_.toString).sorted.toSeq
+        assert(withGpuSparkSession(run, conf) == withCpuSparkSession(run, conf))
+      }
+    }
+
+    test(s"LIMIT on a metadata-only Parquet read stops early, $readerType") {
+      withMissingColsData { path =>
+        withGpuSparkSession({ spark =>
+          val df = spark.read.schema(missingColsSchema).parquet(path).limit(1)
+          val plan = df.queryExecution.executedPlan
+          val scans = plan.collect { case scan: GpuFileSourceScanExec => scan }
+          assert(scans.length == 1, plan.toString)
+          assert(scans.head.inputRDD.getNumPartitions == 1, plan.toString)
+          val rapidsConf = new RapidsConf(spark.sessionState.conf)
+          val cap = GpuNullBatchIterator.maxRows(missingColsSchema,
+            rapidsConf.maxReadBatchSizeRows, rapidsConf.gpuTargetBatchSizeBytes)
+          assert(cap < 9000, s"the test needs a cap below the row count, got $cap")
+          assert(df.collect().length == 1)
+          // The scan has 9000 rows, but LIMIT 1 only needed the first capped batch
+          val rows = scans.head.metrics(GpuMetric.NUM_OUTPUT_ROWS).value
+          assert(rows >= 1 && rows <= cap, s"$rows rows produced for LIMIT 1 with a cap of $cap")
+        }, missingColsConf(readerType)
+          .set("spark.rapids.sql.exec.CollectLimitExec", "false")
+          .set(RapidsConf.TEST_ALLOWED_NONGPU.key, "CollectLimitExec"))
+      }
+    }
+  }
+
   testSparkResultsAreEqual("Test Parquet with row chunks", fileSplitsParquet,
     conf = new SparkConf().set(RapidsConf.MAX_READER_BATCH_SIZE_ROWS.key, "100")) {
     frame => frame.select(col("*"))

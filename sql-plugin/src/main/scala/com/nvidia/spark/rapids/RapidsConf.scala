@@ -454,6 +454,10 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val pinnedPoolSize: Long = get(PINNED_POOL_SIZE)
 
+  lazy val pageablePoolSize: Long = get(PAGEABLE_POOL_SIZE)
+
+  lazy val pageablePoolPretouchThreads: Int = get(PAGEABLE_POOL_PRETOUCH_THREADS)
+
   lazy val pinnedPoolCuioDefault: Boolean = get(PINNED_POOL_SET_CUIO_DEFAULT)
 
   lazy val pinnedPoolParallelInitThreads: String = get(PINNED_POOL_PARALLEL_INIT_THREADS)
@@ -898,6 +902,9 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val shuffleUcxDeviceBounceBuffersCount: Int = get(SHUFFLE_UCX_BOUNCE_BUFFERS_DEVICE_COUNT)
 
   lazy val shuffleUcxHostBounceBuffersCount: Int = get(SHUFFLE_UCX_BOUNCE_BUFFERS_HOST_COUNT)
+
+  lazy val shuffleUcxCleanupOnQueryEndEnabled: Boolean =
+    get(SHUFFLE_UCX_CLEANUP_ON_QUERY_END_ENABLED)
 
   lazy val shuffleMaxClientThreads: Int = get(SHUFFLE_MAX_CLIENT_THREADS)
 
