@@ -20,12 +20,16 @@ from marks import ignore_order
 from pyspark.sql.types import DecimalType, IntegerType, StructField, StructType
 from spark_session import with_cpu_session
 
-# Exercise each footer implementation independently of the file-reader strategy.
+# Both source APIs share the decoder paths. Cover every reader/footer with V2, and
+# exercise the V1 factory with PERFILE/JAVA for each format. Physical order and
+# chunked decoding remain crossed with every reader/footer combination.
 _readers = [
-    pytest.param(fmt, reader, footer, id="-".join((fmt, reader, footer)))
+    pytest.param(fmt, reader, footer, use_v1,
+                 id="-".join((fmt, reader, footer, "v1" if use_v1 else "v2")))
     for fmt, footers in [("parquet", ["JAVA", "NATIVE"]), ("orc", ["JAVA"])]
     for reader in ["PERFILE", "MULTITHREADED", "COALESCING"]
     for footer in footers
+    for use_v1 in ([False, True] if reader == "PERFILE" and footer == "JAVA" else [False])
 ]
 
 _collision_gens = [
@@ -38,9 +42,8 @@ _collision_gens = [
 
 
 @ignore_order(local=True)
-@pytest.mark.parametrize("file_format,reader,footer", _readers)
+@pytest.mark.parametrize("file_format,reader,footer,use_v1", _readers)
 @pytest.mark.parametrize("flat_first", [False, True], ids=["struct-first", "flat-first"])
-@pytest.mark.parametrize("use_v1", [False, True], ids=["v2", "v1"])
 @pytest.mark.parametrize("chunked", [False, True], ids=["unchunked", "chunked"])
 def test_dotted_column_collides_with_struct_field(
         spark_tmp_path, file_format, reader, footer, flat_first, use_v1, chunked):
@@ -53,9 +56,10 @@ def test_dotted_column_collides_with_struct_field(
     conf = {
         "spark.sql.sources.useV1SourceList": file_format if use_v1 else "",
         "spark.rapids.sql.format." + file_format + ".reader.type": reader,
-        "spark.rapids.sql.format.parquet.reader.footer.type": footer,
         "spark.rapids.sql.reader.chunked": str(chunked).lower(),
     }
+    if file_format == "parquet":
+        conf["spark.rapids.sql.format.parquet.reader.footer.type"] = footer
     projections = [
         ["`a.b`", "c"],
         ["c", "`a.b`"],
@@ -134,8 +138,9 @@ def test_dotted_decimal_column_collides_with_struct_field(
     with_cpu_session(lambda spark: gen_df(spark, gens, length=64, num_slices=2)
                      .write.format(file_format).save(path))
     conf = {"spark.rapids.sql.reader.chunked": str(chunked).lower(),
-            "spark.rapids.sql.format." + file_format + ".reader.type": reader,
-            "spark.rapids.sql.format.parquet.reader.footer.type": "JAVA"}
+            "spark.rapids.sql.format." + file_format + ".reader.type": reader}
+    if file_format == "parquet":
+        conf["spark.rapids.sql.format.parquet.reader.footer.type"] = "JAVA"
     # Keep the complete struct: a flat-only projection discards the mis-sized decimal.
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.format(file_format).load(path), conf=conf)

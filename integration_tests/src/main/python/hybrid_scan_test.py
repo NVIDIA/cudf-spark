@@ -468,7 +468,7 @@ def test_hybrid_scan_filter_on_missing_column(spark_tmp_path, reader_confs):
         lambda: with_gpu_session(
             lambda spark: spark.read.schema(_missing_col_schema).parquet(data_path)
                 .filter('sorted_int < 500').collect(),
-            conf=copy_and_update(reader_confs, {'spark.sql.parquet.fieldId.read.enabled': False})),
+            conf=copy_and_update(reader_confs, {'spark.sql.parquet.fieldId.read.enabled': 'false'})),
         error_message='a column is missing from the file')
 
 
@@ -512,7 +512,7 @@ def test_hybrid_scan_dotted_column_collision(
         conf=fallback_conf(**{
             "spark.sql.sources.useV1SourceList": "parquet" if use_v1 else "",
             "spark.rapids.sql.format.parquet.reader.type": reader_mode,
-            "spark.sql.parquet.fieldId.read.enabled": False,
+            "spark.sql.parquet.fieldId.read.enabled": "false",
         }))
     assert_spark_exception(
         lambda: with_gpu_session(
@@ -535,5 +535,31 @@ def test_hybrid_scan_dotted_column_collision(
         conf=fallback_conf(**{
             "spark.sql.sources.useV1SourceList": "parquet" if use_v1 else "",
             "spark.rapids.sql.format.parquet.reader.type": reader_mode,
-            "spark.sql.parquet.fieldId.read.enabled": False,
+            "spark.sql.parquet.fieldId.read.enabled": "false",
         }))
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize("reader_mode", ["PERFILE", "MULTITHREADED"])
+@pytest.mark.parametrize("nested", [False, True], ids=["flat", "nested"])
+def test_hybrid_scan_noncolliding_dotted_column(spark_tmp_path, reader_mode, nested):
+    path = spark_tmp_path + "/noncolliding_dotted"
+    value_gen = IntegerGen(min_val=1000, max_val=2000, nullable=False)
+    gens = ([("s", StructGen([("a.b", value_gen)], nullable=False))] if nested
+            else [("a.b", value_gen)])
+    gens.append(("c", IntegerGen(nullable=False)))
+    with_cpu_session(lambda spark: gen_df(spark, gens, length=16, num_slices=2)
+                     .write.parquet(path))
+    column = "s.`a.b`" if nested else "`a.b`"
+    conf = fallback_conf(**{
+        "spark.rapids.sql.format.parquet.reader.type": reader_mode,
+        "spark.sql.parquet.fieldId.read.enabled": "false",
+    })
+    # Hybrid cannot safely select a literal dotted root before it knows the physical file
+    # schema, and nested types already use parquet-mr. Both cases preserve GPU execution.
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(path).selectExpr(column), conf=conf)
+    # A field used only by a predicate must also preserve its literal name.
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(path).filter(column + " >= 1500").select("c"),
+        conf=conf)
