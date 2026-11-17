@@ -89,12 +89,13 @@ private[rapids] object GpuVariantDecimal {
       extraction: VariantOperationResult,
       guard: ColumnView,
       intermediate: DecimalType): Boolean = {
-    withResource(sourcePrecisions(extraction.getValue)) { precision =>
+    withResource(withResource(sourcePrecisions(extraction.getValue)) { precision =>
       withResource(sourceScales(extraction.getValue)) { scale =>
-        withResource(validSource(guard, precision, scale, intermediate.scale)) { sourceValid =>
-          decimalRowsValid(guard, sourceValid, extraction.getStatus, intermediate)
-        }
+        validSource(guard, precision, scale, intermediate.scale)
       }
+    }) { sourceValid =>
+      // Release the INT32 precision/scale columns before the final validation allocations.
+      decimalRowsValid(guard, sourceValid, extraction.getStatus, intermediate)
     }
   }
 
