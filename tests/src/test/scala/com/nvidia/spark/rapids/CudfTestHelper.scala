@@ -159,15 +159,21 @@ object CudfTestHelper {
     def allClosed: Boolean = synchronized(buffers.forall(_.getRefCount == 0))
   }
 
-  /** Runs `body` with cuDF's default host allocator wrapped in a recorder. */
-  def withRecordedHostAllocations[T](body: RecordingHostAllocator => T): T = {
+  /** Runs `body` with cuDF's default host allocator wrapped. */
+  def withHostAllocator[A <: HostMemoryAllocator, T](wrap: HostMemoryAllocator => A)(
+      body: A => T): T = {
     val previous = DefaultHostMemoryAllocator.get()
-    val recorder = new RecordingHostAllocator(previous)
-    DefaultHostMemoryAllocator.set(recorder)
+    val allocator = wrap(previous)
+    DefaultHostMemoryAllocator.set(allocator)
     try {
-      body(recorder)
+      body(allocator)
     } finally {
       DefaultHostMemoryAllocator.set(previous)
     }
+  }
+
+  /** Runs `body` with cuDF's default host allocator wrapped in a recorder. */
+  def withRecordedHostAllocations[T](body: RecordingHostAllocator => T): T = {
+    withHostAllocator(new RecordingHostAllocator(_))(body)
   }
 }

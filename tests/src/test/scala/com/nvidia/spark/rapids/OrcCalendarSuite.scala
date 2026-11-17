@@ -130,7 +130,7 @@ class OrcCalendarSuite extends SparkQueryCompareTestSuite {
       withResource(ColumnVector.daysFromInts(0)) { dateColumn =>
         withResource(ColumnVector.makeStruct(dateColumn)) { structColumn =>
           withResource(GpuOrcTimezoneUtils.rebaseOrcDateTime(
-            new Table(structColumn), ZoneId.systemDefault(),
+            new Table(structColumn), ZoneId.systemDefault().getId,
             writerUsedProlepticGregorian = true)) { result =>
             assert(result.getColumn(0) eq structColumn)
           }
