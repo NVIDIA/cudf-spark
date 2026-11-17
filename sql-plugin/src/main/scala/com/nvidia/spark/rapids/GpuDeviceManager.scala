@@ -191,7 +191,9 @@ object GpuDeviceManager extends Logging {
       // If Spark didn't provide the address we just use the default GPU.
       val addr = initializeGpu(resources, conf)
       initializeMemory(addr)
-      HybridScanPipeline.init(numCores)
+      if (conf.isParquetHybridScanEnabled) {
+        HybridScanPipeline.init(numCores)
+      }
     }
   }
 

@@ -504,7 +504,8 @@ object HybridScanPipeline extends Logging {
   /**
    * The events host-to-device copies record, one per executor core: an event can't be shared by
    * two copies open at once, only task threads copy, and no more tasks than cores run at once.
-   * Created at executor startup so that no task creates one while holding the GPU semaphore.
+   * Created at executor startup when the scan is enabled, so that no task creates one while
+   * holding the GPU semaphore.
    */
   private val freeCopyEvents = new LinkedBlockingQueue[Cuda.Event]()
   @volatile private var copyEventsCreated = false
@@ -523,8 +524,10 @@ object HybridScanPipeline extends Logging {
    * again when it goes back.
    */
   private[parquet] def withCopyEvent[T](fn: Cuda.Event => T): T = {
-    // Fails rather than waiting forever on a pool that was never filled.
-    require(copyEventsCreated, "hybrid scan copy events were not created at GPU initialization")
+    if (!copyEventsCreated) {
+      // The scan was enabled by a session after startup, which skipped creating the events.
+      init(math.max(GpuDeviceManager.getNumCores, 1))
+    }
     val event = freeCopyEvents.take()
     try {
       fn(event)
