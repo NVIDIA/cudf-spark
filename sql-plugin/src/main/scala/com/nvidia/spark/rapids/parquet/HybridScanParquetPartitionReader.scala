@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids.parquet
 
-import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.LinkedBlockingQueue
 
 import ai.rapids.cudf.{ByteRange, Cuda, DeviceMemoryBuffer, DType, HostMemoryBuffer, HybridScanReader, ParquetOptions, Table}
 import ai.rapids.cudf.ast.{AstExpression, CompiledExpression}
@@ -89,8 +89,9 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
 
   private def withStagedOnDevice[T](chunks: Array[HostMemoryBuffer])(
       fn: Array[DeviceMemoryBuffer] => T): T =
-    HybridScanPipeline.withStagedOnDevice(chunks, maxH2DPackSize, minH2DPackSize,
-      HybridScanPipeline.copyEvent.get())(fn)
+    HybridScanPipeline.withCopyEvent { event =>
+      HybridScanPipeline.withStagedOnDevice(chunks, maxH2DPackSize, minH2DPackSize, event)(fn)
+    }
 
   private def totalBytes(ranges: Array[ByteRange]): Long = ranges.map(_.size()).sum
 
@@ -501,22 +502,42 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
 object HybridScanPipeline extends Logging {
 
   /**
-   * The event each host-to-device copy records. One per task thread, since an event can't be
-   * shared by two copies open at once, and only the task thread copies. Spark retires idle task
-   * threads, so every event is also kept in `allCopyEvents` and closed at executor shutdown
-   * rather than left to GC cleanup.
+   * The events host-to-device copies record, one per executor core: an event can't be shared by
+   * two copies open at once, only task threads copy, and no more tasks than cores run at once.
+   * Created at executor startup so that no task creates one while holding the GPU semaphore.
    */
-  private val allCopyEvents = new ConcurrentLinkedQueue[Cuda.Event]()
-  private val copyEvent = ThreadLocal.withInitial[Cuda.Event] { () =>
-    val event = new Cuda.Event()
-    allCopyEvents.add(event)
-    event
+  private val freeCopyEvents = new LinkedBlockingQueue[Cuda.Event]()
+  @volatile private var copyEventsCreated = false
+
+  /** Create the copy events. Called with the GPU memory setup. */
+  def init(numCores: Int): Unit = synchronized {
+    require(numCores > 0, s"hybrid scan copy events need a positive core count, got $numCores")
+    if (!copyEventsCreated) {
+      (0 until numCores).foreach(_ => freeCopyEvents.add(new Cuda.Event()))
+      copyEventsCreated = true
+    }
+  }
+
+  /**
+   * Run `fn` with a copy event from the pool. The copy's close syncs the event, so it is idle
+   * again when it goes back.
+   */
+  private[parquet] def withCopyEvent[T](fn: Cuda.Event => T): T = {
+    // Fails rather than waiting forever on a pool that was never filled.
+    require(copyEventsCreated, "hybrid scan copy events were not created at GPU initialization")
+    val event = freeCopyEvents.take()
+    try {
+      fn(event)
+    } finally {
+      freeCopyEvents.add(event)
+    }
   }
 
   /** Close every copy event. Called at executor shutdown, once no task can copy. */
-  def shutdown(): Unit = {
-    val events = allCopyEvents.toArray(Array.empty[Cuda.Event])
-    allCopyEvents.clear()
+  def shutdown(): Unit = synchronized {
+    val events = freeCopyEvents.toArray(Array.empty[Cuda.Event])
+    freeCopyEvents.clear()
+    copyEventsCreated = false
     events.safeClose()
   }
 

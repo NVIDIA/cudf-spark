@@ -24,6 +24,7 @@ import scala.util.control.NonFatal
 import ai.rapids.cudf._
 import com.nvidia.spark.rapids.jni.DeviceAttr
 import com.nvidia.spark.rapids.jni.RmmSpark
+import com.nvidia.spark.rapids.parquet.HybridScanPipeline
 import com.nvidia.spark.rapids.spill.SpillFramework
 
 import org.apache.spark.{SparkConf, SparkEnv, TaskContext}
@@ -190,6 +191,7 @@ object GpuDeviceManager extends Logging {
       // If Spark didn't provide the address we just use the default GPU.
       val addr = initializeGpu(resources, conf)
       initializeMemory(addr)
+      HybridScanPipeline.init(numCores)
     }
   }
 
