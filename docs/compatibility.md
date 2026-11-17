@@ -417,6 +417,13 @@ The plugin supports reading and writing `uncompressed`, `snappy`, `gzip` and `zs
 At this point, the plugin cannot fall back to the CPU when reading an unsupported compression
 format, and will error out in that case.
 
+## Delta Lake selective replacement
+
+Delta Lake 4.3 `replaceOn` and `replaceUsing` writes support GPU acceleration,
+including targets with persistent deletion vectors. See
+[Delta Lake selective replacement](additional-functionality/delta-lake-selective-replacement.md)
+for supported versions, configuration, examples, and limitations.
+
 ## Delta Lake low shuffle merge on Databricks Runtime 17.3
 
 Low shuffle merge is disabled by default because Delta Lake 2.4 does not support it

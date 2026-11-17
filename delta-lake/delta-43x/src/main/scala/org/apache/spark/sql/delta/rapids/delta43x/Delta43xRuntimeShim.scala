@@ -205,6 +205,7 @@ class Delta43xRuntimeShim extends DeltaRuntimeShimBase
   override def createGpuWrite(
       gpuDeltaLog: GpuDeltaLog,
       cpuWrite: WriteIntoDelta): GpuWriteIntoDeltaLike = {
+    validateWriterFeatureFlags(cpuWrite)
     GpuWriteIntoDelta43x(gpuDeltaLog, cpuWrite)
   }
 
@@ -212,16 +213,7 @@ class Delta43xRuntimeShim extends DeltaRuntimeShimBase
       gpuDeltaLog: GpuDeltaLog,
       cpuWrite: WriteIntoDelta,
       origin: DeltaWriteOrigin): GpuWriteIntoDeltaLike = {
-    if (cpuWrite.options.isReplaceOnOrUsingDefined) {
-      val sqlConf = cpuWrite.data.sparkSession.sessionState.conf
-      if (cpuWrite.options.replaceOn.isDefined &&
-          !sqlConf.getConf(DeltaSQLConf.REPLACE_ON_OPTION_IN_DATAFRAME_WRITER_ENABLED)) {
-        throw DeltaErrors.operationNotSupportedException("replaceOn")
-      } else if (cpuWrite.options.replaceUsing.isDefined &&
-          !sqlConf.getConf(DeltaSQLConf.REPLACE_USING_OPTION_IN_DATAFRAME_WRITER_ENABLED)) {
-        throw DeltaErrors.operationNotSupportedException("replaceUsing")
-      }
-    }
+    validateWriterFeatureFlags(cpuWrite)
     if (cpuWrite.options.isReplaceOnOrUsingDefined) {
       val apiOrigin = origin match {
         case DeltaWriteOrigin.V1Save => InsertReplaceOnOrUsingAPIOrigin.DFv1Save
@@ -235,6 +227,19 @@ class Delta43xRuntimeShim extends DeltaRuntimeShimBase
       GpuInsertReplaceOnOrUsingCommand(gpuDeltaLog, command)
     } else {
       GpuWriteIntoDelta43x(gpuDeltaLog, cpuWrite)
+    }
+  }
+
+  private def validateWriterFeatureFlags(cpuWrite: WriteIntoDelta): Unit = {
+    if (cpuWrite.options.isReplaceOnOrUsingDefined) {
+      val sqlConf = cpuWrite.data.sparkSession.sessionState.conf
+      if (cpuWrite.options.replaceOn.isDefined &&
+          !sqlConf.getConf(DeltaSQLConf.REPLACE_ON_OPTION_IN_DATAFRAME_WRITER_ENABLED)) {
+        throw DeltaErrors.operationNotSupportedException("replaceOn")
+      } else if (cpuWrite.options.replaceUsing.isDefined &&
+          !sqlConf.getConf(DeltaSQLConf.REPLACE_USING_OPTION_IN_DATAFRAME_WRITER_ENABLED)) {
+        throw DeltaErrors.operationNotSupportedException("replaceUsing")
+      }
     }
   }
 

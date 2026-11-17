@@ -3251,6 +3251,100 @@ def test_delta_selective_replace_materialized_shuffle_error_is_atomic(
     with_cpu_session(verify_unchanged, conf=_delta_confs)
 
 
+@allow_non_gpu(*delta_meta_allow, delta_write_fallback_allow, "RDDScanExec",
+               "BroadcastHashJoinExec", "BroadcastExchangeExec")
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 command fallback")
+@pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
+def test_delta_selective_replace_command_fallback(spark_tmp_path, spark_tmp_table_factory, option_name):
+    data_path = spark_tmp_path + "/SELECTIVE_REPLACE_COMMAND_FALLBACK"
+
+    tables = {suffix: spark_tmp_table_factory.get() for suffix in ["CPU", "GPU"]}
+
+    def setup(spark):
+        for suffix, table in tables.items():
+            (spark.range(8).write.format("delta").option("path", data_path + "/" + suffix)
+             .saveAsTable(table))
+    with_cpu_session(setup, conf=_delta_confs)
+
+    def overwrite(spark, path):
+        condition = "target.id = source.id" if option_name == "replaceOn" else "id"
+        (spark.range(2, 4).alias("source").write.format("delta").mode("overwrite")
+         .option("targetAlias", "target").option(option_name, condition)
+         .insertInto(tables[path.rsplit("/", 1)[1]]))
+
+    conf = copy_and_update(_delta_confs, {"spark.rapids.sql.format.delta.write.enabled": "false"})
+    with_cpu_session(lambda spark: overwrite(spark, data_path + "/CPU"), conf=conf)
+    plans = []
+    assert_rapids_delta_write(lambda spark: overwrite(spark, data_path + "/GPU"), conf=conf,
+                             required_gpu_classes=[], require_non_empty=True,
+                             captured_plans_out=plans)
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    assert any(callback.didFallBack(plan, "ExecutedCommandExec") and
+               callback.contains(plan, "DeltaInsertReplaceOnOrUsingCommand") for plan in plans)
+    assert not any(callback.contains(plan, "GpuInsertReplaceOnOrUsingCommand") for plan in plans)
+    assert not any(callback.contains(plan, "GpuRapidsDeltaWriteExec") for plan in plans)
+    cpu_rows = with_cpu_session(lambda spark: read_delta_path(spark, data_path + "/CPU").collect())
+    gpu_rows = with_cpu_session(lambda spark: read_delta_path(spark, data_path + "/GPU").collect())
+    assert_equal(sorted(cpu_rows), sorted(gpu_rows))
+    with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+
+
+# Only the matching join is disabled; the prepared command and replacement writes stay on GPU.
+@allow_non_gpu(*delta_meta_allow, "RDDScanExec", "BroadcastHashJoinExec", "BroadcastExchangeExec")
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 internal DELETE fallback")
+@pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
+@pytest.mark.parametrize("enable_deletion_vectors", [False, True])
+def test_delta_selective_replace_matching_fallback(spark_tmp_path, spark_tmp_table_factory,
+                                                   option_name, enable_deletion_vectors):
+    data_path = spark_tmp_path + "/SELECTIVE_REPLACE_MATCHING_FALLBACK"
+
+    tables = {suffix: spark_tmp_table_factory.get() for suffix in ["CPU", "GPU"]}
+
+    def setup(spark):
+        for suffix, table in tables.items():
+            (spark.range(8).write.format("delta")
+             .option("delta.enableDeletionVectors", str(enable_deletion_vectors).lower())
+             .option("delta.enableChangeDataFeed", "true")
+             .option("path", data_path + "/" + suffix).saveAsTable(table))
+    with_cpu_session(setup, conf=_delta_confs)
+
+    def overwrite(spark, path):
+        condition = "target.id = source.id" if option_name == "replaceOn" else "id"
+        (spark.range(2, 4).alias("source").write.format("delta").mode("overwrite")
+         .option("targetAlias", "target").option(option_name, condition)
+         .insertInto(tables[path.rsplit("/", 1)[1]]))
+
+    conf = copy_and_update(_delta_confs, {
+        "spark.sql.adaptive.enabled": "false",
+        "spark.rapids.sql.exec.BroadcastHashJoinExec": "false"})
+    with_cpu_session(lambda spark: overwrite(spark, data_path + "/CPU"), conf=conf)
+    plans = []
+    assert_rapids_delta_write(lambda spark: overwrite(spark, data_path + "/GPU"), conf=conf,
+                             expected_command="GpuInsertReplaceOnOrUsingCommand",
+                             expected_classes=["GpuFileSourceScanExec", "GpuRapidsDeltaWriteExec"],
+                             forbidden_cpu_fallback_classes=["RapidsDeltaWriteExec"],
+                             require_non_empty=True,
+                             captured_plans_out=plans)
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    # Check LeftSemi/LeftAnti: the metadata broadcast is an inner join and cannot satisfy this.
+    assert any(callback.didFallBack(plan, "BroadcastHashJoinExec") and
+               ("LeftSemi" in str(plan) or "LeftAnti" in str(plan)) for plan in plans), \
+        "No CPU matching join was captured inside the replacement DELETE"
+    cpu_rows = with_cpu_session(lambda spark: read_delta_path_with_cdf(
+        spark, data_path + "/CPU").collect())
+    gpu_rows = with_cpu_session(lambda spark: read_delta_path_with_cdf(
+        spark, data_path + "/GPU").collect())
+    assert_equal(sorted(cpu_rows, key=repr), sorted(gpu_rows, key=repr))
+    cpu_current = with_cpu_session(lambda spark: read_delta_path(spark, data_path + "/CPU").collect())
+    gpu_current = with_cpu_session(lambda spark: read_delta_path(spark, data_path + "/GPU").collect())
+    assert_equal(sorted(cpu_current), sorted(gpu_current))
+    with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+
+
 def _selective_replace_matching_classes(option_name, condition, empty_source=False,
                                        enable_deletion_vectors=False, aqe_enabled=False):
     # Empty sources and false/null constants can eliminate target matching altogether.
@@ -3486,19 +3580,36 @@ def test_delta_selective_replace_where_alias(spark_tmp_path, data_columns_enable
 @delta_lake
 @pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 writer feature gates")
 @pytest.mark.parametrize("option_name", ["replaceOn", "replaceUsing"])
-def test_delta_selective_replace_disabled_option(spark_tmp_path, option_name):
+@pytest.mark.parametrize("api", ["save", "v2_overwrite", "v2_append", "v2_dpo"])
+def test_delta_selective_replace_disabled_option(spark_tmp_path, option_name, api):
     data_path = spark_tmp_path + "/SELECTIVE_REPLACE_DISABLED"
-    with_cpu_session(lambda spark: spark.range(4).write.format("delta").save(data_path),
-                     conf=_delta_confs)
+    with_cpu_session(lambda spark: spark.range(4).selectExpr("id", "id % 2 AS p")
+                     .write.format("delta").partitionBy("p").save(data_path), conf=_delta_confs)
 
     def overwrite(spark):
         condition = "target.id = source.id" if option_name == "replaceOn" else "id"
-        (spark.range(2, 6).alias("source").write.format("delta").mode("overwrite")
-         .option("targetAlias", "target").option(option_name, condition).save(data_path))
+        source = spark.range(2, 6).selectExpr("id", "id % 2 AS p").alias("source")
+        if api == "save":
+            (source.write.format("delta").mode("overwrite").option("targetAlias", "target")
+             .option(option_name, condition).save(data_path))
+        else:
+            writer = source.writeTo(f"delta.`{data_path}`").option(option_name, condition)
+            if api == "v2_overwrite":
+                writer.overwrite(f.lit(True))
+            elif api == "v2_append":
+                writer.append()
+            else:
+                writer.overwritePartitions()
 
     conf = copy_and_update(_delta_confs, {
         f"spark.databricks.delta.{option_name}.dataframe.writer.enabled": "false"})
     assert_gpu_and_cpu_error(overwrite, conf, "DELTA_OPERATION_NOT_ALLOWED")
+
+    def unchanged(spark):
+        assert [row.id for row in read_delta_path(spark, data_path).orderBy("id").collect()] \
+            == list(range(4))
+        assert spark.sql(f"DESCRIBE HISTORY delta.`{data_path}`").count() == 1
+    with_cpu_session(unchanged, conf=_delta_confs)
 
 
 @allow_non_gpu(*delta_meta_allow)

@@ -32,7 +32,7 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{Dataset, Row, SaveMode}
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Literal}
 import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
-import org.apache.spark.sql.delta.{DeltaLog, DeltaOptions, NumRecordsStats}
+import org.apache.spark.sql.delta.{DeltaAnalysisException, DeltaLog, DeltaOptions, NumRecordsStats}
 import org.apache.spark.sql.delta.commands.{WriteIntoDelta, WriteIntoDeltaLike}
 import org.apache.spark.sql.delta.schema.ImplicitMetadataOperation
 import org.apache.spark.sql.execution.command.LeafRunnableCommand
@@ -152,17 +152,19 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
 
   test("Delta 4.3 schema overwrite eligibility matches the upstream writer") {
     assume(io.delta.VERSION == "4.3.0")
-    val deltaLog = mock[DeltaLog]
-    Seq(Map.empty[String, String], Map("replaceWhere" -> "id = 1"),
-      Map("replaceOn" -> "target.id = source.id"), Map("replaceUsing" -> "id")).foreach {
-      options =>
-        val cpuWrite = WriteIntoDelta(deltaLog, SaveMode.Overwrite,
-          new DeltaOptions(options + ("overwriteSchema" -> "true"), new SQLConf),
-          Nil, Map.empty, mock[Dataset[Row]])
-        val gpuWrite = DeltaRuntimeShim.createGpuWrite(
-          new GpuDeltaLog(deltaLog, new RapidsConf(Map.empty[String, String])), cpuWrite)
-        val expected = cpuWrite.getClass.getMethod("canOverwriteSchema").invoke(cpuWrite)
-        assert(gpuWrite.getClass.getMethod("canOverwriteSchema").invoke(gpuWrite) == expected)
+    withCpuSparkSession { spark =>
+      val deltaLog = mock[DeltaLog]
+      Seq(Map.empty[String, String], Map("replaceWhere" -> "id = 1"),
+        Map("replaceOn" -> "target.id = source.id"), Map("replaceUsing" -> "id")).foreach {
+        options =>
+          val cpuWrite = WriteIntoDelta(deltaLog, SaveMode.Overwrite,
+            new DeltaOptions(options + ("overwriteSchema" -> "true"), new SQLConf),
+            Nil, Map.empty, spark.range(3).toDF())
+          val gpuWrite = DeltaRuntimeShim.createGpuWrite(
+            new GpuDeltaLog(deltaLog, new RapidsConf(Map.empty[String, String])), cpuWrite)
+          val expected = cpuWrite.getClass.getMethod("canOverwriteSchema").invoke(cpuWrite)
+          assert(gpuWrite.getClass.getMethod("canOverwriteSchema").invoke(gpuWrite) == expected)
+      }
     }
   }
 
@@ -208,6 +210,35 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
       assert(configured.getClass == adapterClass)
       assert(configured.data eq materializedData)
       assert(configured.configuration == Map("updated" -> "true"))
+    }
+  }
+
+  test("Delta 4.3 writer feature flags apply to plain and V1 factories") {
+    assume(io.delta.VERSION == "4.3.0")
+    Seq("replaceOn", "replaceUsing").foreach { option =>
+      val conf = new SparkConf().set(
+        s"spark.databricks.delta.$option.dataframe.writer.enabled", "false")
+      withCpuSparkSession({ spark =>
+        withTempPath { tablePath =>
+          val deltaLog = DeltaLog.forTable(spark, tablePath.getAbsolutePath)
+          val gpuLog = new GpuDeltaLog(deltaLog, new RapidsConf(Map.empty[String, String]))
+          val value = if (option == "replaceOn") "true" else "id"
+          for (mode <- Seq(SaveMode.Append, SaveMode.Overwrite);
+               origin <- Seq(None, Some(DeltaWriteOrigin.V1Save),
+                 Some(DeltaWriteOrigin.V1SaveAsTable))) {
+            val cpuWrite = WriteIntoDelta(deltaLog, mode,
+              new DeltaOptions(Map(option -> value), spark.sessionState.conf),
+              Nil, Map.empty, spark.range(3).toDF())
+            val error = intercept[DeltaAnalysisException] {
+              origin match {
+                case Some(api) => DeltaRuntimeShim.createGpuWrite(gpuLog, cpuWrite, api)
+                case None => DeltaRuntimeShim.createGpuWrite(gpuLog, cpuWrite)
+              }
+            }
+            assert(error.getMessage.contains("DELTA_OPERATION_NOT_ALLOWED"))
+          }
+        }
+      }, conf)
     }
   }
 
