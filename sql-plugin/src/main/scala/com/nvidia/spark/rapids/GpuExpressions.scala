@@ -224,8 +224,8 @@ trait GpuExpression extends Expression {
   }
 
   /** Whether this expression subtree contains an operation that makes AST JIT useful. */
-  final def containsAstJitOperator: Boolean = selfTriggersAstJit || children.exists {
-    case child: GpuExpression => child.containsAstJitOperator
+  final def containsAstJitTrigger: Boolean = selfTriggersAstJit || children.exists {
+    case child: GpuExpression => child.containsAstJitTrigger
     case _ => false
   }
 
