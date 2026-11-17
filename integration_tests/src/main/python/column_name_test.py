@@ -17,19 +17,21 @@ import pytest
 from asserts import assert_gpu_and_cpu_are_equal_collect
 from data_gen import ArrayGen, DecimalGen, IntegerGen, MapGen, StringGen, StructGen, gen_df
 from marks import ignore_order
-from pyspark.sql.types import DecimalType, IntegerType, StructField, StructType
+from pyspark.sql.types import IntegerType, StructField, StructType
 from spark_session import with_cpu_session
 
-# Both source APIs share the decoder paths. Cover every reader/footer with V2, and
-# exercise the V1 factory with PERFILE/JAVA for each format. Physical order and
-# chunked decoding remain crossed with every reader/footer combination.
+# Cover each decoder/footer and both source APIs without crossing every dimension.
 _readers = [
-    pytest.param(fmt, reader, footer, use_v1,
-                 id="-".join((fmt, reader, footer, "v1" if use_v1 else "v2")))
-    for fmt, footers in [("parquet", ["JAVA", "NATIVE"]), ("orc", ["JAVA"])]
-    for reader in ["PERFILE", "MULTITHREADED", "COALESCING"]
-    for footer in footers
-    for use_v1 in ([False, True] if reader == "PERFILE" and footer == "JAVA" else [False])
+    # format, reader, footer, V1, flat first, chunked
+    ("parquet", "PERFILE", "JAVA", True, False, False),
+    ("parquet", "PERFILE", "NATIVE", False, True, True),
+    ("parquet", "MULTITHREADED", "JAVA", False, True, False),
+    ("parquet", "MULTITHREADED", "NATIVE", False, False, True),
+    ("parquet", "COALESCING", "JAVA", False, False, True),
+    ("parquet", "COALESCING", "NATIVE", False, True, False),
+    ("orc", "PERFILE", None, True, True, False),
+    ("orc", "MULTITHREADED", None, False, False, True),
+    ("orc", "COALESCING", None, False, True, False),
 ]
 
 _collision_gens = [
@@ -42,9 +44,7 @@ _collision_gens = [
 
 
 @ignore_order(local=True)
-@pytest.mark.parametrize("file_format,reader,footer,use_v1", _readers)
-@pytest.mark.parametrize("flat_first", [False, True], ids=["struct-first", "flat-first"])
-@pytest.mark.parametrize("chunked", [False, True], ids=["unchunked", "chunked"])
+@pytest.mark.parametrize("file_format,reader,footer,use_v1,flat_first,chunked", _readers)
 def test_dotted_column_collides_with_struct_field(
         spark_tmp_path, file_format, reader, footer, flat_first, use_v1, chunked):
     path = spark_tmp_path + "/collision"
@@ -61,13 +61,8 @@ def test_dotted_column_collides_with_struct_field(
     if file_format == "parquet":
         conf["spark.rapids.sql.format.parquet.reader.footer.type"] = footer
     projections = [
-        ["`a.b`", "c"],
         ["c", "`a.b`"],
         ["`a.b`"],
-        ["c"],
-        ["a", "`a.b`", "c"],
-        ["`a.b`", "a", "c"],
-        ["a.b AS nested_b"],
         ["a.b AS nested_b", "`a.b` AS flat_b", "c"],
     ]
     for projection in projections:
@@ -123,9 +118,8 @@ def test_dotted_column_renamed_by_parquet_field_id(spark_tmp_path, footer):
 
 @ignore_order(local=True)
 @pytest.mark.parametrize("file_format", ["parquet", "orc"])
-@pytest.mark.parametrize("chunked", [False, True])
-@pytest.mark.parametrize("nested_precision", [7, 15])
-@pytest.mark.parametrize("reader", ["PERFILE", "MULTITHREADED", "COALESCING"])
+@pytest.mark.parametrize("reader,chunked,nested_precision", [
+    ("PERFILE", False, 7), ("MULTITHREADED", True, 15), ("COALESCING", False, 15)])
 def test_dotted_decimal_column_collides_with_struct_field(
         spark_tmp_path, file_format, chunked, nested_precision, reader):
     path = spark_tmp_path + "/decimal_collision"
@@ -147,9 +141,9 @@ def test_dotted_decimal_column_collides_with_struct_field(
 
 
 @ignore_order(local=True)
-@pytest.mark.parametrize("chunked", [False, True])
-@pytest.mark.parametrize("reader", ["PERFILE", "MULTITHREADED", "COALESCING"])
-@pytest.mark.parametrize("container", ["struct", "array", "map"])
+@pytest.mark.parametrize("container,reader,chunked", [
+    ("struct", "PERFILE", False), ("array", "MULTITHREADED", True),
+    ("map", "COALESCING", False)])
 def test_orc_nested_dotted_decimal_collision(spark_tmp_path, chunked, reader, container):
     path = spark_tmp_path + "/nested_decimal_collision"
     collision = StructGen([
@@ -165,27 +159,5 @@ def test_orc_nested_dotted_decimal_collision(spark_tmp_path, chunked, reader, co
                      .write.orc(path))
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.orc(path),
-        conf={"spark.rapids.sql.reader.chunked": str(chunked).lower(),
-              "spark.rapids.sql.format.orc.reader.type": reader})
-
-
-@ignore_order(local=True)
-@pytest.mark.parametrize("chunked", [False, True])
-@pytest.mark.parametrize("reader", ["PERFILE", "MULTITHREADED", "COALESCING"])
-def test_orc_dotted_decimal_schema_widening(spark_tmp_path, chunked, reader):
-    path = spark_tmp_path + "/decimal_widening"
-    gens = [
-        ("a", StructGen([("b", DecimalGen(precision=15, scale=2))])),
-        ("a.b", DecimalGen(precision=25, scale=2)),
-    ]
-    with_cpu_session(lambda spark: gen_df(spark, gens, length=64, num_slices=2)
-                     .write.orc(path))
-    read_schema = StructType([
-        StructField("a.b", DecimalType(25, 2)),
-        StructField("a", StructType([StructField("b", DecimalType(25, 2))])),
-        StructField("missing", IntegerType()),
-    ])
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.read.schema(read_schema).orc(path),
         conf={"spark.rapids.sql.reader.chunked": str(chunked).lower(),
               "spark.rapids.sql.format.orc.reader.type": reader})

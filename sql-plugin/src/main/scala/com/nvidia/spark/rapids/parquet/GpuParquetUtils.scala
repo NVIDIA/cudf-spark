@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids.parquet
 
-import java.util.{Arrays, HashMap, Locale}
+import java.util.{Arrays, Locale}
 
 import scala.collection.JavaConverters._
 
@@ -27,9 +27,6 @@ import org.apache.parquet.schema.MessageType
 import org.apache.spark.internal.Logging
 
 object GpuParquetUtils extends Logging {
-  // Below this, cache setup can cost more than normalizing the repeated paths.
-  private val MinRowGroupsForPathCache = 4
-
   /**
    * Trim block metadata to contain only the column chunks that occur in the specified schema.
    * The column chunks that are returned are preserved verbatim
@@ -58,24 +55,7 @@ object GpuParquetUtils extends Logging {
         Arrays.asList(path.toArray.map(_.toLowerCase(Locale.ROOT)): _*)
       }
       val pathSet = columnPaths.map(normalizePath).toSet
-      val matches: ColumnPath => Boolean = path => pathSet.contains(normalizePath(path))
-      if (blocks.size() >= MinRowGroupsForPathCache) {
-        // Row groups normally reuse column paths. Cache only within this clipping call to
-        // avoid normalizing every repeated chunk without retaining paths globally.
-        val matchesByPath = new HashMap[ColumnPath, java.lang.Boolean]()
-        path => {
-          val cached = matchesByPath.get(path)
-          if (cached != null) {
-            cached.booleanValue()
-          } else {
-            val matched = matches(path)
-            matchesByPath.put(path, java.lang.Boolean.valueOf(matched))
-            matched
-          }
-        }
-      } else {
-        matches
-      }
+      path => pathSet.contains(normalizePath(path))
     }
     blocks.asScala.toSeq.map { oldBlock =>
       //noinspection ScalaDeprecation

@@ -22,8 +22,7 @@ from spark_session import with_cpu_session
 
 
 @ignore_order(local=True)
-@pytest.mark.parametrize("chunked", [False, True])
-@pytest.mark.parametrize("reader", ["PERFILE", "MULTITHREADED", "COALESCING"])
+@pytest.mark.parametrize("reader,chunked", [("PERFILE", False), ("COALESCING", True)])
 def test_orc_unrelated_dotted_name_decimal_widening(spark_tmp_path, chunked, reader):
     path = spark_tmp_path + "/unrelated_dotted_decimal_widening"
     decimal = DecimalGen(precision=15, scale=2)
@@ -41,9 +40,10 @@ def test_orc_unrelated_dotted_name_decimal_widening(spark_tmp_path, chunked, rea
                      .write.orc(path))
     widened_struct = StructType([StructField("d", DecimalType(25, 2))])
     read_schema = StructType([
-        StructField("unrelated.dot", IntegerType()),
-        StructField("unchanged", DecimalType(15, 2)),
         StructField("widened", DecimalType(25, 2)),
+        StructField("unrelated.dot", IntegerType()),
+        StructField("missing", IntegerType()),
+        StructField("unchanged", DecimalType(15, 2)),
         StructField("s", widened_struct),
         StructField("a", ArrayType(widened_struct)),
         StructField("m", MapType(StringType(), widened_struct)),

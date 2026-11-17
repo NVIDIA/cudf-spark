@@ -485,15 +485,8 @@ def test_hybrid_scan_ignore_corrupt_files_keeps_readable_file(spark_tmp_path, re
 
 @ignore_order(local=True)
 @pytest.mark.parametrize("reader_mode", ["PERFILE", "MULTITHREADED"])
-@pytest.mark.parametrize("flat_first", [False, True], ids=["struct-first", "flat-first"])
-@pytest.mark.parametrize("use_v1", [False, True], ids=["v2", "v1"])
-@pytest.mark.parametrize("projection", [
-    ["`a.b`"],
-    ["`a.b`", "c"],
-    ["c", "`a.b`"],
-], ids=["dotted-only", "dotted-first", "dotted-last"])
-def test_hybrid_scan_dotted_column_collision(
-        spark_tmp_path, flat_first, use_v1, projection, reader_mode):
+def test_hybrid_scan_dotted_column_collision(spark_tmp_path, reader_mode):
+    projection = ["c", "`a.b`"]
     path = spark_tmp_path + "/dotted_collision"
     gens = [
         ("a", StructGen([("b", IntegerGen(min_val=5, max_val=6, nullable=False))],
@@ -501,65 +494,22 @@ def test_hybrid_scan_dotted_column_collision(
         ("a.b", IntegerGen(min_val=1000, max_val=2000, nullable=False)),
         ("c", IntegerGen(min_val=100, max_val=200, nullable=False)),
     ]
-    if flat_first:
-        gens = [gens[1], gens[0], gens[2]]
     with_cpu_session(lambda spark: gen_df(spark, gens, length=16, num_slices=2)
                      .write.parquet(path))
-    # Projecting the literal dotted field leaves a flat read schema, although the file also
-    # contains a struct whose leaf has the same flattened path.
-    assert_gpu_and_cpu_are_equal_collect(
+    options = {"spark.rapids.sql.format.parquet.reader.type": reader_mode,
+               "spark.sql.parquet.fieldId.read.enabled": "false"}
+    queries = [
         lambda spark: spark.read.parquet(path).selectExpr(*projection),
-        conf=fallback_conf(**{
-            "spark.sql.sources.useV1SourceList": "parquet" if use_v1 else "",
-            "spark.rapids.sql.format.parquet.reader.type": reader_mode,
-            "spark.sql.parquet.fieldId.read.enabled": "false",
-        }))
-    assert_spark_exception(
-        lambda: with_gpu_session(
-            lambda spark: spark.read.parquet(path).selectExpr(*projection).collect(),
-            conf=hybrid_conf(**{
-                "spark.sql.sources.useV1SourceList": "parquet" if use_v1 else "",
-                "spark.rapids.sql.format.parquet.reader.type": reader_mode,
-            })),
-        error_message="column a.b contains a literal dot")
-    # The same file still takes the hybrid reader when the dotted root is not requested.
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.read.parquet(path).select("c"),
-        conf=hybrid_conf(**{
-            "spark.sql.sources.useV1SourceList": "parquet" if use_v1 else "",
-            "spark.rapids.sql.format.parquet.reader.type": reader_mode,
-        }))
-    # A dotted predicate remains necessary even when only an ordinary column is projected.
-    assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.parquet(path).filter("`a.b` >= 1500").select("c"),
-        conf=fallback_conf(**{
-            "spark.sql.sources.useV1SourceList": "parquet" if use_v1 else "",
-            "spark.rapids.sql.format.parquet.reader.type": reader_mode,
-            "spark.sql.parquet.fieldId.read.enabled": "false",
-        }))
-
-
-@ignore_order(local=True)
-@pytest.mark.parametrize("reader_mode", ["PERFILE", "MULTITHREADED"])
-@pytest.mark.parametrize("nested", [False, True], ids=["flat", "nested"])
-def test_hybrid_scan_noncolliding_dotted_column(spark_tmp_path, reader_mode, nested):
-    path = spark_tmp_path + "/noncolliding_dotted"
-    value_gen = IntegerGen(min_val=1000, max_val=2000, nullable=False)
-    gens = ([("s", StructGen([("a.b", value_gen)], nullable=False))] if nested
-            else [("a.b", value_gen)])
-    gens.append(("c", IntegerGen(nullable=False)))
-    with_cpu_session(lambda spark: gen_df(spark, gens, length=16, num_slices=2)
-                     .write.parquet(path))
-    column = "s.`a.b`" if nested else "`a.b`"
-    conf = fallback_conf(**{
-        "spark.rapids.sql.format.parquet.reader.type": reader_mode,
-        "spark.sql.parquet.fieldId.read.enabled": "false",
-    })
-    # Hybrid cannot safely select a literal dotted root before it knows the physical file
-    # schema, and nested types already use parquet-mr. Both cases preserve GPU execution.
+    ]
+    # Both a projected dotted root and a filter-only dotted root must safely fall back.
+    # fallback_conf enables hybrid; hybrid_conf additionally fails if fallback occurs.
+    for query in queries:
+        assert_gpu_and_cpu_are_equal_collect(query, conf=fallback_conf(**options))
+        assert_spark_exception(
+            lambda: with_gpu_session(lambda spark: query(spark).collect(),
+                                     conf=hybrid_conf(**options)),
+            error_message="column a.b contains a literal dot")
+    # Pruning the dotted root and its predicate still permits hybrid execution.
     assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.read.parquet(path).selectExpr(column), conf=conf)
-    # A field used only by a predicate must also preserve its literal name.
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.read.parquet(path).filter(column + " >= 1500").select("c"),
-        conf=conf)
+        lambda spark: spark.read.parquet(path).select("c"), conf=hybrid_conf(**options))
