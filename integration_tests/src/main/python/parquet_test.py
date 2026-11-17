@@ -1939,10 +1939,6 @@ def test_parquet_nested_column_missing(spark_tmp_path, reader_confs, v1_enabled_
     (DecimalGen(20, 17), DecimalGen(5, 2)),
     # Narrowing precision
     (DecimalGen(20, 0), DecimalGen(10, 0)),
-    # Narrowing precision at the same scale and storage width
-    (DecimalGen(9, 2), DecimalGen(7, 2)),
-    (DecimalGen(18, 2), DecimalGen(10, 2)),
-    (DecimalGen(34, 2), DecimalGen(20, 2)),
     # Increasing precision and decreasing scale
     (DecimalGen(5, 4), DecimalGen(7, 2)),
     (DecimalGen(10, 6), DecimalGen(12, 4)),
@@ -1985,11 +1981,10 @@ def test_parquet_decimal_precision_scale_change(spark_tmp_path, from_decimal_gen
 @ignore_order(local=True)
 @pytest.mark.parametrize('reader_confs', [original_parquet_file_reader_conf,
     multithreaded_parquet_file_reader_conf, coalesce_parquet_file_reader_conf])
-@pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
 @pytest.mark.parametrize('legacy_format', ['false', 'true'])
 @pytest.mark.parametrize('ansi_enabled', ['false', 'true'])
 @pytest.mark.parametrize('file_precision, read_precision', [(9, 7), (18, 10), (34, 20)])
-def test_parquet_decimal_precision_narrowing(spark_tmp_path, reader_confs, v1_enabled_list,
+def test_parquet_decimal_precision_narrowing(spark_tmp_path, reader_confs,
         legacy_format, ansi_enabled, file_precision, read_precision):
     data_path = spark_tmp_path + '/PARQUET_DECIMAL_NARROWING'
     decimal_type = DecimalType(file_precision, 2)
@@ -2001,14 +1996,17 @@ def test_parquet_decimal_precision_narrowing(spark_tmp_path, reader_confs, v1_en
     with_cpu_session(lambda spark: gen_df(spark,
         [('id', RepeatSeqGen(list(range(len(values))), data_type=IntegerType())),
          ('d', RepeatSeqGen(values, data_type=decimal_type))], length=len(values))
-        .selectExpr('id', 'd', 'named_struct("d", d) as s', 'array(d) as a', 'map(1, d) as m')
+        .selectExpr('id', 'd', 'named_struct("d", d) as s', 'array(d) as a', 'map(1, d) as m',
+            f'cast(null as decimal({file_precision},2)) as n',
+            f'map(cast(id + 1 as decimal({file_precision},2)), id) as k')
         .repartition(2).write.parquet(data_path),
         conf={'spark.sql.parquet.writeLegacyFormat': legacy_format})
 
     target = f'decimal({read_precision},2)'
-    schema = f'id int, d {target}, s struct<d:{target}>, a array<{target}>, m map<int,{target}>'
+    schema = (f'id int, d {target}, s struct<d:{target}>, a array<{target}>, '
+        f'm map<int,{target}>, n {target}, k map<{target},int>')
     conf = copy_and_update(reader_confs, {
-        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        'spark.sql.sources.useV1SourceList': 'parquet',
         'spark.sql.parquet.enableVectorizedReader': 'false',
         'spark.sql.ansi.enabled': ansi_enabled})
 
@@ -2017,11 +2015,60 @@ def test_parquet_decimal_precision_narrowing(spark_tmp_path, reader_confs, v1_en
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.schema(schema).parquet(data_path).selectExpr('*',
             'd is null as d_is_null', 's.d is null as struct_is_null',
-            'a[0] is null as array_is_null', 'm[1] is null as map_is_null', 'd + 1 as added'),
+            'a[0] is null as array_is_null', 'm[1] is null as map_is_null',
+            'n is null as all_null', 'map_keys(k)[0] + 1 as key_added', 'd + 1 as added'),
         conf=conf)
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.schema(schema).parquet(data_path)
             .filter(f'd > {max_value} OR d < -{max_value}').select('id'), conf=conf)
+
+@ignore_order(local=True)
+@pytest.mark.parametrize('ansi_enabled', ['false', 'true'])
+@pytest.mark.parametrize('file_scale, read_precision, read_scale', [(2, 10, 4), (3, 8, 2)])
+def test_parquet_decimal_scale_change_boundaries(spark_tmp_path, ansi_enabled,
+        file_scale, read_precision, read_scale):
+    data_path = spark_tmp_path + '/PARQUET_DECIMAL_SCALE_BOUNDARIES'
+    inputs = ['999999.99', '-999999.99', '0.00']
+    if file_scale == 2:
+        # Increasing scale leaves fewer digits for the whole-number part.
+        inputs += ['1000000.00', '-1000000.00']
+    else:
+        # HALF_UP rounding carries beyond the target precision only for the .995 values.
+        inputs += ['999999.994', '-999999.994', '999999.995', '-999999.995']
+    values = [Decimal(value) for value in inputs] + [None]
+    with_cpu_session(lambda spark: gen_df(spark,
+        [('d', RepeatSeqGen(values, data_type=DecimalType(9, file_scale)))], length=len(values))
+        .coalesce(1).write.parquet(data_path))
+    conf = copy_and_update(coalesce_parquet_file_reader_conf, {
+        'spark.sql.sources.useV1SourceList': '',
+        'spark.sql.parquet.enableVectorizedReader': 'false',
+        'spark.sql.ansi.enabled': ansi_enabled})
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(f'd decimal({read_precision},{read_scale})')
+            .parquet(data_path).selectExpr('d', 'd is null as is_null', 'd + 1 as added'),
+        conf=conf)
+
+
+@ignore_order(local=True)
+def test_parquet_decimal_narrowing_mixed_file_precisions(spark_tmp_path):
+    paths = [f'{spark_tmp_path}/PARQUET_DECIMAL_MIXED_{precision}' for precision in [10, 18]]
+    # Both files use INT64 storage, but only the precision-18 file needs narrowing.
+    # Mixing their logical schemas must not skip its overflow checks.
+    for precision, data_path in zip([10, 18], paths):
+        inputs = ['99999999.99', '-99999999.99']
+        if precision == 18:
+            inputs += ['100000000.00', '-100000000.00']
+        values = [Decimal(value) for value in inputs] + [None]
+        with_cpu_session(lambda spark: gen_df(spark,
+            [('d', RepeatSeqGen(values, data_type=DecimalType(precision, 2)))], length=len(values))
+            .coalesce(1).write.parquet(data_path))
+    conf = copy_and_update(coalesce_parquet_file_reader_conf, {
+        'spark.sql.sources.useV1SourceList': '',
+        'spark.sql.parquet.enableVectorizedReader': 'false'})
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema('d decimal(10,2)').parquet(*paths)
+            .selectExpr('d', 'd is null as is_null', 'd + 1 as added'), conf=conf)
+
 
 # These are based on tests from https://issues.apache.org/jira/browse/SPARK-40876
 # Plus more

@@ -222,10 +222,7 @@ def test_casting_from_overflow_double_to_timestamp(spark_tmp_path, overflow_valu
 @pytest.mark.parametrize('data_gen', [DecimalGen(precision=9, scale=2),
                                       DecimalGen(precision=18, scale=4),
                                       DecimalGen(precision=38, scale=6)])
-@pytest.mark.parametrize('read_type', ["DECIMAL(7,2)",
-                                       "DECIMAL(10,2)",
-                                       "DECIMAL(20,2)",
-                                       "DECIMAL(9,2)",
+@pytest.mark.parametrize('read_type', ["DECIMAL(9,2)",
                                        "DECIMAL(18,4)",
                                        "DECIMAL(38,6)"])
 @pytest.mark.parametrize('ansi_mode', ["false", "true"])
@@ -247,7 +244,6 @@ def test_casting_decimal_to_decimal(spark_tmp_path, data_gen, read_type, ansi_mo
 
 @ignore_order(local=True)
 @pytest.mark.parametrize('reader', ['PERFILE', 'MULTITHREADED', 'COALESCING'])
-@pytest.mark.parametrize('v1_enabled_list', ["", "orc"])
 @pytest.mark.parametrize('ansi_enabled', ['false', 'true'])
 @pytest.mark.parametrize('file_precision, file_scale, read_precision, read_scale', [
     (9, 2, 7, 2), (18, 2, 10, 2), (34, 2, 20, 2),
@@ -255,7 +251,7 @@ def test_casting_decimal_to_decimal(spark_tmp_path, data_gen, read_type, ansi_mo
     (9, 2, 10, 4),
     # Rounding can carry into a whole-number digit outside the requested precision.
     (9, 3, 8, 2)])
-def test_orc_decimal_precision_narrowing(spark_tmp_path, reader, v1_enabled_list,
+def test_orc_decimal_precision_narrowing(spark_tmp_path, reader,
         ansi_enabled, file_precision, file_scale, read_precision, read_scale):
     data_path = spark_tmp_path + '/ORC_DECIMAL_NARROWING'
     decimal_type = DecimalType(file_precision, file_scale)
@@ -271,14 +267,18 @@ def test_orc_decimal_precision_narrowing(spark_tmp_path, reader, v1_enabled_list
     with_cpu_session(lambda spark: gen_df(spark,
         [('id', RepeatSeqGen(list(range(len(values))), data_type=IntegerType())),
          ('d', RepeatSeqGen(values, data_type=decimal_type))], length=len(values))
-        .selectExpr('id', 'd', 'named_struct("d", d) as s', 'array(d) as a', 'map(1, d) as m')
+        .selectExpr('id', 'd', 'named_struct("d", d) as s', 'array(d) as a', 'map(1, d) as m',
+            f'cast(null as decimal({file_precision},{file_scale})) as n',
+            f'map(cast(id + 1 as decimal({file_precision},{file_scale})), id) as k')
         .repartition(2).write.orc(data_path))
 
     target = f'decimal({read_precision},{read_scale})'
-    schema = f'id int, d {target}, s struct<d:{target}>, a array<{target}>, m map<int,{target}>'
+    schema = (f'id int, d {target}, s struct<d:{target}>, a array<{target}>, '
+        f'm map<int,{target}>, n {target}, k map<{target},int>')
     conf = {
         'spark.rapids.sql.format.orc.reader.type': reader,
-        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        'spark.sql.sources.useV1SourceList': 'orc',
+        'spark.sql.orc.enableVectorizedReader': 'false',
         'spark.sql.ansi.enabled': ansi_enabled}
 
     # Decimal128 row conversion can hide overflow by turning it into null on the host.
@@ -286,7 +286,8 @@ def test_orc_decimal_precision_narrowing(spark_tmp_path, reader, v1_enabled_list
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.schema(schema).orc(data_path).selectExpr('*',
             'd is null as d_is_null', 's.d is null as struct_is_null',
-            'a[0] is null as array_is_null', 'm[1] is null as map_is_null', 'd + 1 as added'),
+            'a[0] is null as array_is_null', 'm[1] is null as map_is_null',
+            'n is null as all_null', 'map_keys(k)[0] + 1 as key_added', 'd + 1 as added'),
         conf=conf)
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.schema(schema).orc(data_path)

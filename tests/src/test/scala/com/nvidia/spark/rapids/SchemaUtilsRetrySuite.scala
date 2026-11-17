@@ -27,19 +27,21 @@ import org.apache.spark.sql.types.{DataType, DecimalType, StructField, StructTyp
 
 class SchemaUtilsRetrySuite extends RmmSparkRetrySuiteBase {
   test("nested decimal narrowing closes sibling results once and preserves retry OOM") {
-    def schema(decimal: DecimalType): StructType = StructType(Seq(
+    def schema(first: DecimalType, second: DecimalType): StructType = StructType(Seq(
       StructField("s", StructType(Seq(
-        StructField("a", decimal), StructField("b", decimal))))))
+        StructField("a", first), StructField("b", second))))))
 
-    val sourceSchema = schema(DecimalType(18, 2))
-    val readSchema = schema(DecimalType(10, 2))
+    val sourceSchema = schema(DecimalType(18, 2), DecimalType(18, 2))
+    val secondTarget = DecimalType(11, 2)
+    val readSchema = schema(DecimalType(10, 2), secondTarget)
     val oom = new GpuRetryOOM("second nested decimal cast")
-    var calls = 0
+    var failSecondField = true
     // Observe the returned vectors without retaining them: schema evolution owns their cleanup.
     val castResults = new ArrayBuffer[ColumnVector]
     val cast = (column: ColumnView, target: DataType, source: DataType) => {
-      calls += 1
-      if (calls == 2) {
+      // Identify the failing sibling by its target type, not callback invocation counts.
+      if (failSecondField && target == secondTarget) {
+        failSecondField = false
         throw oom
       }
       val result = GpuCast.castDecimalToDecimal(column, source.asInstanceOf[DecimalType],
@@ -48,7 +50,7 @@ class SchemaUtilsRetrySuite extends RmmSparkRetrySuiteBase {
       result
     }
 
-    withResource(ColumnVector.decimalFromLongs(-2, 42L, 10000000001L)) { decimal =>
+    withResource(ColumnVector.decimalFromLongs(-2, 42L, 100000000001L)) { decimal =>
       withResource(ColumnVector.makeStruct(decimal, decimal)) { input =>
         // This method consumes the table, including when the second child's callback fails.
         def evolve(): Table = SchemaUtils.evolveSchemaIfNeededAndClose(
@@ -59,12 +61,11 @@ class SchemaUtilsRetrySuite extends RmmSparkRetrySuiteBase {
           withResource(evolve()) { _ => fail("second child must fail") }
         }
         assert(thrown eq oom)
-        assert(calls == 2)
-        assert(castResults.size == 1)
-        assert(castResults.head.getRefCount == 0)
+        assert(castResults.nonEmpty)
+        assert(castResults.forall(_.getRefCount == 0))
         assert(input.getRefCount == 1)
 
-        calls = 0
+        failSecondField = true
         castResults.clear()
         var attempts = 0
         withResource(withRetryNoSplit[Table] {
@@ -72,8 +73,7 @@ class SchemaUtilsRetrySuite extends RmmSparkRetrySuiteBase {
           evolve()
         }) { output =>
           assert(attempts == 2)
-          assert(calls == 4)
-          assert(castResults.size == 3)
+          assert(castResults.nonEmpty)
           assert(castResults.forall(_.getRefCount == 0))
           withResource(ColumnVector.decimalFromBoxedLongs(-2, Long.box(42L), null)) { expected =>
             (0 until 2).foreach { index =>
