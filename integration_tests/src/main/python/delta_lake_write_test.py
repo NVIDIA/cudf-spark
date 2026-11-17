@@ -1518,6 +1518,22 @@ def test_is_spark_356_or_later(version, expected, monkeypatch):
     assert is_spark_356_or_later() == expected
 
 
+@pytest.mark.parametrize("version, expected", [
+    ("4.0.10", False),
+    ("4.1.1", False),
+    ("4.1.2", True),
+    ("4.1.9", True),
+    ("4.1.10", True),
+    ("4.1.1-SNAPSHOT", False),
+    ("4.1.2-SNAPSHOT", True),
+    ("4.1.10-amzn-0", True),
+    ("4.2.0", True),
+])
+def test_is_spark_412_or_later(version, expected, monkeypatch):
+    monkeypatch.setattr("spark_session.spark_version", lambda: version)
+    assert is_spark_412_or_later() == expected
+
+
 @allow_non_gpu('DataWritingCommandExec', 'WriteFilesExec', *delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)

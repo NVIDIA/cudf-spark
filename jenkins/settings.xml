@@ -63,6 +63,21 @@
       <password>${env.SONATYPE_PSW}</password>
     </server>
   </servers>
+  <mirrors>
+    <mirror>
+      <id>central</id>
+      <name>sw-spark-maven</name>
+      <url>${env.ART_URL}</url>
+      <mirrorOf>google-maven-central</mirrorOf>
+    </mirror>
+    <!-- Also route transitive plugin dependencies through the internal snapshot repository. -->
+    <mirror>
+      <id>snapshots</id>
+      <name>sw-spark-maven</name>
+      <url>${env.ART_URL}</url>
+      <mirrorOf>snapshots-repo</mirrorOf>
+    </mirror>
+  </mirrors>
   <profiles>
     <profile>
       <id>artifactory</id>

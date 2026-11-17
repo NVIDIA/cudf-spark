@@ -41,6 +41,7 @@ import org.apache.spark.sql.execution.exchange.{BroadcastExchangeLike, ENSURE_RE
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec}
 import org.apache.spark.sql.rapids.{GpuDataSourceScanExec, GpuFileSourceScanExec, GpuShuffleEnv, GpuTaskMetrics}
 import org.apache.spark.sql.rapids.execution.{ExchangeMappingCache, GpuBroadcastExchangeExec, GpuBroadcastExchangeExecBase, GpuBroadcastToRowExec, GpuCustomShuffleReaderExec, GpuHashJoin, GpuShuffleExchangeExecBase, GpuSubqueryBroadcastExec}
+import org.apache.spark.sql.rapids.execution.GpuDriverlessBroadcastHashJoinExec
 import org.apache.spark.sql.types.StructType
 
 /**
@@ -415,7 +416,8 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
   // InputFileBlockStart, or InputFileBlockLength when we use a Parquet read because
   // we can't support the coalesce file reader optimization when this is used.
   private def updateScansForInputAndOrder(plan: SparkPlan,
-      disableUntilInput: Boolean = false): SparkPlan = {
+      disableUntilInput: Boolean = false,
+      nameUntilInput: Boolean = false): SparkPlan = {
     plan match {
       case batchScan: GpuBatchScanExec =>
         if (disableUntilInput || disableScanUntilInput(batchScan)) {
@@ -430,15 +432,22 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
         }
       case fileSourceScan: GpuFileSourceScanExec =>
         if ((disableUntilInput || disableScanUntilInput(fileSourceScan))) {
-          fileSourceScan.copy(queryUsesInputFile = true)(
+          // Only input_file_name() builds a string column that can overflow, so only it
+          // needs the scan to slice big batches.
+          val usesName = nameUntilInput ||
+            InputFileBlockRule.hasInputFileNameExpression(fileSourceScan)
+          fileSourceScan.copy(queryUsesInputFile = true, queryUsesInputFileName = usesName)(
             fileSourceScan.rapidsConf, fileSourceScan.partitionPlanningScan)
         } else {
           fileSourceScan
         }
       case p =>
-        val planDisableUntilInput = disableScanUntilInput(p) && hasDirectLineToInput(p)
+        val directLine = hasDirectLineToInput(p)
+        val planDisableUntilInput = disableScanUntilInput(p) && directLine
+        val planNameUntilInput = InputFileBlockRule.hasInputFileNameExpression(p) && directLine
         p.withNewChildren(p.children.map(c => {
-          updateScansForInputAndOrder(c, planDisableUntilInput || disableUntilInput)
+          updateScansForInputAndOrder(c, planDisableUntilInput || disableUntilInput,
+            planNameUntilInput || nameUntilInput)
         }))
     }
   }
@@ -722,6 +731,12 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
     }
     val isAdaptiveEnabled = plan.conf.adaptiveExecutionEnabled
     plan match {
+      case reused: ReusedExchangeExec if conf.isDriverlessBroadcastEnabled =>
+        // Reuse is a leaf wrapper; validate the actual exchange and its subtree.
+        assertIsOnTheGpu(reused.child, conf)
+      case _: WholeStageCodegenExec | _: InputAdapter if conf.isDriverlessBroadcastEnabled =>
+        // Materialized reused stages can wrap permitted CPU nodes in codegen containers.
+        // Their children still undergo the GPU and allowed-CPU checks below.
       case _: BroadcastExchangeLike if isAdaptiveEnabled =>
         // broadcasts are left on CPU for now when AQE is enabled
       case _: BroadcastHashJoinExec | _: BroadcastNestedLoopJoinExec
@@ -978,6 +993,7 @@ class GpuTransitionOverrides(sparkSession: SparkSession = null) extends Rule[Spa
         if (rapidsConf.shuffledHashJoinOptimizeShuffle || rapidsConf.useShuffledSymmetricHashJoin) {
           updatedPlan = shuffledHashJoinOptimizeShuffle(updatedPlan)
         }
+        updatedPlan = GpuDriverlessBroadcastHashJoinExec.rewrite(updatedPlan, rapidsConf)
         if (rapidsConf.exportColumnarRdd) {
           updatedPlan = detectAndTagFinalColumnarOutput(updatedPlan)
         }

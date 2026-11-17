@@ -200,6 +200,32 @@ class SpillFrameworkSuite extends SpillUnitTestBase with BeforeAndAfterAll {
     }
   }
 
+  test("a materialized compressed SpillableColumnarBatch closes once per reference") {
+    // GpuCompressionAwareCoalesceIterator.concatBatches materializes a compressed input and
+    // closes it
+    val batch = buildCompressedBatch(0, 1000)
+    val buffer = batch.column(0).asInstanceOf[GpuCompressedColumnVector].getTableBuffer
+    val spillable = SpillableColumnarBatch(batch, -1)
+    val materialized = spillable.getColumnarBatch()
+    val afterMaterialize = buffer.getRefCount
+    materialized.close()
+    val afterConsumerClose = buffer.getRefCount
+    spillable.close()
+    assertResult((2, 1, 0), "(references after materialize, after the consumer's close, after " +
+      "the spillable's close)")((afterMaterialize, afterConsumerClose, buffer.getRefCount))
+  }
+
+  test("spilling a compressed batch handle releases its device buffer") {
+    val batch = buildCompressedBatch(0, 1000)
+    val buffer = batch.column(0).asInstanceOf[GpuCompressedColumnVector].getTableBuffer
+    val (spilled, afterSpill) =
+      withResource(SpillableCompressedColumnarBatchHandle(batch)) { handle =>
+        (SpillFramework.stores.deviceStore.spill(handle.approxSizeInBytes), buffer.getRefCount)
+      }
+    assert(spilled > 0)
+    assertResult(0)(afterSpill)
+  }
+
 
   test("a second handle prevents buffer to be spilled") {
     val buffer = DeviceMemoryBuffer.allocate(123)

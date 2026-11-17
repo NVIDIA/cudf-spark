@@ -83,6 +83,9 @@ class AcceleratedColumnarToRowIterator(
       .map(_._2)
 
   private val outputRow = new CudfUnsafeRow(packMap.map(schema(_)), unpackMap)
+  // Spark type for a column of JCUDF rows, a list of bytes per row. No byte is null: a null
+  // field is a bit in the row's validity bytes. The type only lets the rows be spillable.
+  private val rowsType = ArrayType(ByteType, containsNull = false)
   private var baseDataAddress: Long = -1
   private var at: Int = 0
   private var total: Int = 0
@@ -144,7 +147,7 @@ class AcceleratedColumnarToRowIterator(
     if (scb.numRows() > 0) {
       NvtxIdWithMetrics(NvtxRegistry.COLUMNAR_TO_ROW_BATCH, opTime) {
         val it = RmmRapidsRetryIterator.withRetry(scb, splitSpillableInHalfByRows) { attempt =>
-          withResource(attempt.getColumnarBatch()) { attemptCb =>
+          val rowsCvs = withResource(attempt.getColumnarBatch()) { attemptCb =>
             withResource(rearrangeRows(attemptCb)) { table =>
               // The fixed-width-optimized kernel beats the generic transpose for narrow
               // (< 100 cols) all-fixed-width schemas, but rejects STRING/BINARY and any row
@@ -162,13 +165,35 @@ class AcceleratedColumnarToRowIterator(
               }
             }
           }
+          // Keep the rows spillable on the GPU, so that a host OOM while copying them to the
+          // host retries or splits only the copy, not the conversion.
+          withResource(rowsCvs) { _ =>
+            rowsCvs.safeMap { rowsCv =>
+              closeOnExcept(
+                new ColumnarBatch(Array(GpuColumnVector.from(rowsCv.incRefCount(), rowsType)),
+                  rowsCv.getRowCount.toInt)) { rowsCb =>
+                SpillableColumnarBatch(rowsCb, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+              }
+            }
+          }
         }
         assertInTests(
           it.hasNext, "Got an unexpected empty iterator after setting up batch with retry")
-        it.foreach { rowsCvList =>
-          withResource(rowsCvList) { _ =>
-            rowsCvList.foreach { rowsCv =>
-              pendingCvs += rowsCv.copyToHost()
+        it.foreach { rowsBatches =>
+          // withRetry owns rowsBatches(i) once called, so only the batches after it are left
+          // to close on a failure. The suffix is built only then, not once per batch.
+          var i = 0
+          closeOnExcept(new AutoCloseable {
+            override def close(): Unit = rowsBatches.drop(i + 1).safeClose()
+          }) { _ =>
+            while (i < rowsBatches.length) {
+              RmmRapidsRetryIterator.withRetry(rowsBatches(i), splitSpillableInHalfByRows) {
+                attempt =>
+                  withResource(attempt.getColumnarBatch()) { rowsCb =>
+                    GpuColumnVector.extractBases(rowsCb).head.copyToHost()
+                  }
+              }.foreach(pendingCvs += _)
+              i += 1
             }
           }
         }

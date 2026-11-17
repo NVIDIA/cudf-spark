@@ -51,6 +51,15 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .booleanConf
     .createWithDefault(false)
 
+  val TEST_INPUT_FILE_NAME_MAX_STRING_BYTES =
+    conf("spark.rapids.sql.test.inputFileName.maxStringBytes")
+      .doc("Only to be used in tests. The most string bytes a single batch may need for the " +
+        "input_file_name() column before the scan slices it. Lower it to exercise slicing " +
+        "with small data. The default is the cudf string column limit.")
+      .internal()
+      .longConf
+      .createWithDefault(Int.MaxValue.toLong)
+
   val TEST_CONF = conf("spark.rapids.sql.test.enabled")
     .doc("Intended to be used by unit tests, if enabled all operations must run on the " +
       "GPU or an error happens.")
@@ -63,6 +72,15 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
       .doc("Only for tests on Databricks Runtime 17.3. When true and " +
         s"${TEST_CONF.key} is enabled, fail if low shuffle merge falls back to the classic " +
         "GPU merge executor.")
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
+
+  val TEST_PARQUET_HYBRID_SCAN_FAIL_ON_FALLBACK =
+    conf("spark.rapids.sql.test.format.parquet.hybridScan.failOnFallback")
+      .doc("Only to be used in tests. When true and the hybrid scan reader is enabled, fail a " +
+        "Parquet read that the hybrid scan reader declines instead of reading it on the " +
+        "parquet-mr path.")
       .internal()
       .booleanConf
       .createWithDefault(false)
@@ -300,6 +318,33 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .integerConf
     .createWithDefault(32)
 
+  val SHUFFLE_UCX_CLEANUP_ON_QUERY_END_ENABLED =
+    conf("spark.rapids.shuffle.ucx.cleanupOnQueryEnd.enabled")
+    .doc("When set to true, the RAPIDS Shuffle Manager in UCX mode reclaims each GPU shuffle " +
+      "once the SQL query that wrote it has ended: the executors free the shuffle's buffers, " +
+      "and the driver clears its map outputs and keeps the shuffle registered. It takes " +
+      "effect only when spark.rapids.shuffle.mode is UCX, the RAPIDS Shuffle Manager is " +
+      "configured and spark.rapids.sql.mode is executeOnGPU, and never on Databricks. Any " +
+      "other setup, CACHE_ONLY mode included, logs one warning and reclaims nothing. Enable " +
+      "it only when queries run one at a time, share no DataFrame and return no results " +
+      "through toLocalIterator, as in a power test that runs independent queries one after " +
+      "another. A shuffle waits for Spark's own cleanup, as it does when this is false, when " +
+      "Spark marks its map stage indeterminate, as for repartition(n) without columns, when " +
+      "Delta Lake's optimized write builds it, or when its query computes it from a " +
+      "nondeterministic expression such as rand() or uuid(), a sample, a limit, or an RDD. " +
+      "A later action that reuses a DataFrame reruns the map stage of each reclaimed shuffle " +
+      "it reads. The driver clears a shuffle's map outputs shortly after its query ends, and " +
+      "an action that judged the shuffle available before that clear can read part of its old " +
+      "output and rerun the rest. Such an action can be a second action on the same DataFrame, " +
+      "a concurrent query that shares it, or toLocalIterator, whose jobs run after its query " +
+      "ends. That action then returns duplicated or missing rows if the shuffle depends on " +
+      "input order, as first(), last() or row_number() over ties can. Its fetch failure can " +
+      "also make Spark drop every map output on that executor, so a concurrent query that reads " +
+      "a GPU round-robin shuffle there can fail. Keep this key off for such workloads.")
+    .startupOnly()
+    .booleanConf
+    .createWithDefault(false)
+
   val SHUFFLE_MAX_CLIENT_THREADS = conf("spark.rapids.shuffle.maxClientThreads")
     .doc("The maximum number of threads that the shuffle client should be allowed to start")
     .internal()
@@ -536,7 +581,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
 
   val ALLOW_MULTIPLE_JARS = conf("spark.rapids.sql.allowMultipleJars")
     .startupOnly()
-    .doc("Allow multiple rapids-4-spark, cudf-spark-jni, and cudf jars on the classpath. " +
+    .doc("Allow multiple cudf-spark, cudf-spark-jni, and cudf jars on the classpath. " +
       "Spark will take the first one it finds, so the version may not be expected. Possible " +
       "values are ALWAYS: allow all jars, SAME_REVISION: only allow jars with the same " +
       "revision, NEVER: do not allow multiple jars at all.")
@@ -642,6 +687,18 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .internal()
     .booleanConf
     .createWithDefault(true)
+
+  val HOST_COLUMNAR_TO_GPU_RELEASE_SEMAPHORE =
+    conf("spark.rapids.sql.hostColumnarToGpu.releaseSemaphore.enabled")
+      .doc("When true, HostColumnarToGpu releases the GPU semaphore while it pulls the host " +
+        "batches of the next GPU batch from its CPU child, and acquires it again before " +
+        "copying them to the GPU. This helps when the child does heavy CPU work, such as " +
+        "decoding in a CPU data source, and each task produces several GPU batches. The " +
+        "task still holds its device memory while released, so more tasks can have data on " +
+        "the GPU at once than the GPU concurrency allows.")
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
 
   val SPARK_GPU_RESOURCE_NAME = conf("spark.rapids.gpu.resourceName")
     .doc("The name of the Spark resource that represents a GPU that you want the plugin to use " +
