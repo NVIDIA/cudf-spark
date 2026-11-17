@@ -362,7 +362,7 @@ function refresh_fast_aggregator_jar() {
   [[ "$UNSHIM_FAST" == "1" ]] || return 0
   local BUILD_VER=$1
   local agg_dir="$MVN_BASE_DIR/aggregator/target/spark$BUILD_VER"
-  local agg_base="rapids-4-spark-aggregator_${RAPIDS_SCALA_BINARY_VERSION}-${RAPIDS_PROJECT_VERSION}"
+  local agg_base="cudf-spark-aggregator_${RAPIDS_SCALA_BINARY_VERSION}-${RAPIDS_PROJECT_VERSION}"
   local shaded_jar="$agg_dir/${agg_base}-shaded.jar"
   local downstream_jar="$agg_dir/${agg_base}-spark$BUILD_VER.jar"
   if [[ ! -f "$shaded_jar" ]]; then
@@ -379,8 +379,8 @@ export -f refresh_fast_aggregator_jar
 function verify_reusable_unshim_artifacts() {
   local BUILD_VER=$1
   local classifier="spark$BUILD_VER"
-  local api_base="rapids-4-spark-sql-plugin-api_${RAPIDS_SCALA_BINARY_VERSION}-${RAPIDS_PROJECT_VERSION}"
-  local agg_base="rapids-4-spark-aggregator_${RAPIDS_SCALA_BINARY_VERSION}-${RAPIDS_PROJECT_VERSION}"
+  local api_base="cudf-spark-sql-plugin-api_${RAPIDS_SCALA_BINARY_VERSION}-${RAPIDS_PROJECT_VERSION}"
+  local agg_base="cudf-spark-aggregator_${RAPIDS_SCALA_BINARY_VERSION}-${RAPIDS_PROJECT_VERSION}"
   local api_jar="$MVN_BASE_DIR/sql-plugin-api/target/$classifier/${api_base}-$classifier.jar"
   local agg_shaded_jar="$MVN_BASE_DIR/aggregator/target/$classifier/${agg_base}-shaded.jar"
   local jar_path

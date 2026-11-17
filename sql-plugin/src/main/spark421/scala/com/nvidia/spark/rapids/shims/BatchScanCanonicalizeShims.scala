@@ -15,23 +15,18 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark":["400db173","410db183"],"carryForward":"none"}
+{"spark":["421"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
-package org.apache.spark.sql.execution.datasources.parquet
+package com.nvidia.spark.rapids.shims
 
-import org.apache.spark.memory.MemoryMode
-import org.apache.spark.sql.execution.vectorized.WritableColumnVector
+import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Expression}
+import org.apache.spark.sql.catalyst.plans.QueryPlan
 
-object ShimParquetColumnVector {
-  def apply(
-    column: ParquetColumn,
-    vector: WritableColumnVector,
-    capacity: Int,
-    memoryMode: MemoryMode,
-    missingColumns: java.util.Set[ParquetColumn],
-    isTopLevel: Boolean,
-    defaultValue: Any): ParquetColumnVector = {
-    new ParquetColumnVector(column, vector, capacity, missingColumns, isTopLevel,
-      defaultValue, "")
+object BatchScanCanonicalizeShims {
+  // SPARK-58120: normalizeExpressions preserves key order; normalizePredicates can reorder.
+  def normalizeKeyGroupedPartitioning(
+      keyGroupedPartitioning: Option[Seq[Expression]],
+      output: Seq[AttributeReference]): Option[Seq[Expression]] = {
+    keyGroupedPartitioning.map(_.map(QueryPlan.normalizeExpressions(_, output)))
   }
 }

@@ -35,6 +35,23 @@ private[rapids] trait RapidsConfResourceEntries {
     .bytesConf(ByteUnit.BYTE)
     .createWithDefault(0)
 
+  val PAGEABLE_POOL_SIZE = conf("spark.rapids.memory.pageablePool.size")
+    .doc("Size in bytes of a pre-touched pageable host memory pool used for non-pinned " +
+      "allocations and when the pinned pool is exhausted. Set to 0 to disable; allocations " +
+      "then use raw host memory.")
+    .startupOnly()
+    .internal()
+    .bytesConf(ByteUnit.BYTE)
+    .checkValue(_ >= 0, "Pageable pool size must be non-negative")
+    .createWithDefault(0)
+
+  val PAGEABLE_POOL_PRETOUCH_THREADS = conf("spark.rapids.memory.pageablePool.pretouchThreads")
+    .doc("Number of worker threads used to pre-touch the pageable pool at startup.")
+    .startupOnly()
+    .internal()
+    .integerConf
+    .createWithDefault(16)
+
   val PINNED_POOL_SET_CUIO_DEFAULT = conf("spark.rapids.memory.pinnedPool.setCuioDefault")
     .doc("If set to true, the pinned pool configured for the plugin will be shared with " +
       "cuIO for small pinned allocations.")
@@ -385,6 +402,16 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .bytesConf(ByteUnit.BYTE)
     .checkValue(v => v > 0, "Batch size must be positive")
     .createWithDefault(1 * 1024 * 1024 * 1024) // 1 GiB is the default
+
+  val HISTORY_METRICS_PROVIDER = conf("spark.rapids.sql.history.metrics.provider")
+    .doc("Selects the driver-side history metrics provider by name. The default 'none' uses " +
+      "the built-in no-op store. The local SQLite provider is bundled; other providers " +
+      "must be present on the driver classpath.")
+    .sinceVersion(ConfVersionInfo.UNRELEASED_VERSION)
+    .startupOnly()
+    .stringConf
+    .checkValue(v => v.trim.nonEmpty, "History metrics provider name must not be empty")
+    .createWithDefault("none")
 
   val CHUNKED_READER = conf("spark.rapids.sql.reader.chunked")
     .doc("Enable a chunked reader where possible. A chunked reader allows " +
