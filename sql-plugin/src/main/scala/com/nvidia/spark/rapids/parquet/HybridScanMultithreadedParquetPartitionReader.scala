@@ -74,7 +74,7 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
   private val filterTime = context.execMetrics.getOrElse(FILTER_TIME, NoopMetric)
   private val bufferTime = context.execMetrics.getOrElse(BUFFER_TIME, NoopMetric)
 
-  /** A pool thread's result, with what the pool thread counted for the task thread to add. */
+  /** A pool thread's result, with its partial metric counts for the task thread to add. */
   private trait HybridResult extends HostMemoryBuffersWithMetaDataBase {
     var runnerCounts: Map[String, Long] = Map.empty
 
@@ -329,6 +329,7 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
       context.scanFilters.ast.map(HybridScanPipeline.compileFilter)
     }
     withResource(ast) { _ =>
+      // A second parse of this footer, added to the pool thread's parse time.
       val parsed = closeOnExcept(fetched)(_ => HybridScanPipeline.openReader(footer,
         parquetOptions,
         context.execMetrics.getOrElse(HYBRID_SCAN_FOOTER_PARSE_TIME, NoopMetric)))

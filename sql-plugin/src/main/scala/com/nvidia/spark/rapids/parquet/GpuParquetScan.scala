@@ -1518,7 +1518,7 @@ abstract class AbstractGpuParquetMultiFilePartitionReaderFactory(
           hadoopConf, filters, readDataSchema)
       }
     }
-    metrics.get(ROW_GROUPS_READ).foreach(_ += metas.map(_.meta.numRowGroups).sum)
+    metrics.get(ROW_GROUPS_FETCHED).foreach(_ += metas.map(_.meta.numRowGroups).sum)
     metas
   }
 
@@ -1789,7 +1789,7 @@ case class GpuParquetPartitionReaderFactory(
     metrics.get(FILTER_TIME).foreach {
       _ += (System.nanoTime() - startTime)
     }
-    metrics.get(ROW_GROUPS_READ).foreach(_ += singleFileInfo.numRowGroups)
+    metrics.get(ROW_GROUPS_FETCHED).foreach(_ += singleFileInfo.numRowGroups)
     new ParquetPartitionReader(fileIO, conf, file, singleFileInfo.filePath, singleFileInfo.blocks,
       singleFileInfo.schema, isCaseSensitive, readDataSchema, partitionSchema, debugDumpPrefix,
       debugDumpAlways, maxReadBatchSizeRows, maxReadBatchSizeBytes, targetSizeBytes,
@@ -3381,12 +3381,12 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
       val hostBuffers = new ArrayBuffer[SingleHMBAndMeta]
       var filterTime = 0L
       var bufferStartTime = 0L
-      var rowGroupsRead = 0
+      var rowGroupsFetched = 0
       val result = try {
         val filterStartTime = System.nanoTime()
         val fileBlockMeta = filterFunc(file)
         filterTime = System.nanoTime() - filterStartTime
-        rowGroupsRead = fileBlockMeta.numRowGroups
+        rowGroupsFetched = fileBlockMeta.numRowGroups
         bufferStartTime = System.nanoTime()
         if (fileBlockMeta.blocks.isEmpty) {
           val bytesRead = fileSystemBytesRead() - startingBytesRead
@@ -3446,7 +3446,7 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
       }
       val bufferTime = System.nanoTime() - bufferStartTime
       result.setExecutionTime(filterTime, bufferTime)
-      result.setRowGroupsRead(rowGroupsRead)
+      result.setRowGroupsFetched(rowGroupsFetched)
       result
     }
   }

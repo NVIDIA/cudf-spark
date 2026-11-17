@@ -111,7 +111,7 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
     if (rowGroups.isEmpty || reader.totalRowsInRowGroups(rowGroups) == 0) {
       None
     } else {
-      addToMetric(ROW_GROUPS_READ, rowGroups.length)
+      addToMetric(ROW_GROUPS_FETCHED, rowGroups.length)
       setDecodeFilter(reader, ast)
       val ranges = NvtxRegistry.HYBRID_SCAN_GET_BYTE_RANGES {
         reader.allColumnChunksByteRanges(rowGroups)

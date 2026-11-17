@@ -145,7 +145,7 @@ object GpuMetric extends Logging {
   val ROW_GROUPS_IN_INPUT = "rowGroupsInInput"
   val ROW_GROUPS_PRUNED_BY_STATS = "rowGroupsPrunedByStats"
   val ROW_GROUPS_PRUNED_BY_DICT = "rowGroupsPrunedByDict"
-  val ROW_GROUPS_READ = "rowGroupsRead"
+  val ROW_GROUPS_FETCHED = "rowGroupsFetched"
   val HYBRID_SCAN_FOOTER_PARSE_TIME = "hybridScanFooterParseTime"
   val HYBRID_SCAN_OUTPUT_FILTER_TIME = "hybridScanOutputFilterTime"
   val HYBRID_SCAN_BYTES_REQUESTED = "hybridScanBytesRequested"
@@ -218,8 +218,8 @@ object GpuMetric extends Logging {
   val DESCRIPTION_ROW_GROUPS_IN_INPUT = "hybrid scan row groups in input"
   val DESCRIPTION_ROW_GROUPS_PRUNED_BY_STATS = "hybrid scan row groups pruned by statistics"
   val DESCRIPTION_ROW_GROUPS_PRUNED_BY_DICT = "hybrid scan row groups pruned by dictionary"
-  val DESCRIPTION_ROW_GROUPS_READ = "row groups read (Delta V2 and Iceberg not supported)"
-  val DESCRIPTION_HYBRID_SCAN_FOOTER_PARSE_TIME = "hybrid scan footer parse time"
+  val DESCRIPTION_ROW_GROUPS_FETCHED = "row groups fetched (Delta V2 and Iceberg not supported)"
+  val DESCRIPTION_HYBRID_SCAN_FOOTER_PARSE_TIME = "hybrid scan total footer (re-)parse time"
   val DESCRIPTION_HYBRID_SCAN_OUTPUT_FILTER_TIME =
     "hybrid scan output filter time (pushed filters only)"
   val DESCRIPTION_HYBRID_SCAN_BYTES_REQUESTED = "hybrid scan data bytes requested, counting a " +

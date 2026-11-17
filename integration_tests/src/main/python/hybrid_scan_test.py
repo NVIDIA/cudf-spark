@@ -192,6 +192,15 @@ def _dictionary_pruned(row_groups, value):
 _pruning_metrics_conf = {'spark.sql.adaptive.enabled': False,
                          'spark.rapids.sql.metrics.level': 'DEBUG'}
 
+# Both readers count on different threads, so each metric test runs on both.
+_metric_reader_modes = pytest.mark.parametrize('reader_mode', ['PERFILE', 'MULTITHREADED'])
+
+
+def _metrics_conf(reader_mode, **overrides):
+    return hybrid_conf(**_pruning_metrics_conf,
+                       **{'spark.rapids.sql.format.parquet.reader.type': reader_mode},
+                       **overrides)
+
 
 def _assert_row_groups(in_input, pruned_by_stats, pruned_by_dict, read, min_splits=1):
     def check(cpu_plan, gpu_plan):
@@ -201,9 +210,9 @@ def _assert_row_groups(in_input, pruned_by_stats, pruned_by_dict, read, min_spli
         assert len(scans) == 1, 'Expected one GPU Parquet scan in:\n{}'.format(gpu_plan)
         actual = {name: plan_metric(scans[0], name) for name in
                   ['rowGroupsInInput', 'rowGroupsPrunedByStats', 'rowGroupsPrunedByDict',
-                   'rowGroupsRead']}
+                   'rowGroupsFetched']}
         expected = {'rowGroupsInInput': in_input, 'rowGroupsPrunedByStats': pruned_by_stats,
-                    'rowGroupsPrunedByDict': pruned_by_dict, 'rowGroupsRead': read}
+                    'rowGroupsPrunedByDict': pruned_by_dict, 'rowGroupsFetched': read}
         assert actual == expected
         bytes_requested = plan_metric(scans[0], 'hybridScanBytesRequested')
         assert (bytes_requested > 0) == (read > 0), \
@@ -220,19 +229,22 @@ def _assert_row_groups(in_input, pruned_by_stats, pruned_by_dict, read, min_spli
     ('a < 0', lambda min_a, max_a: min_a >= 0),
     ('a >= 0', lambda min_a, max_a: max_a < 0),
 ], ids=['some', 'all', 'none'])
-def test_hybrid_scan_stats_pruning(spark_tmp_path, v1_enabled_list, where, is_pruned):
+@_metric_reader_modes
+def test_hybrid_scan_stats_pruning(spark_tmp_path, v1_enabled_list, where, is_pruned,
+                                   reader_mode):
     data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
     row_groups = with_cpu_session(lambda spark: write_pruning_data(spark, data_path))
     pruned = sum(1 for min_a, max_a, _, _ in row_groups if is_pruned(min_a, max_a))
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.read.parquet(data_path).filter(where),
-        conf=hybrid_conf(**_pruning_metrics_conf,
-                         **{'spark.sql.sources.useV1SourceList': v1_enabled_list}),
+        conf=_metrics_conf(reader_mode,
+                           **{'spark.sql.sources.useV1SourceList': v1_enabled_list}),
         gpu_plan_assertion=_assert_row_groups(len(row_groups), pruned, 0,
                                               len(row_groups) - pruned))
 
 
-def test_hybrid_scan_stage_timings(spark_tmp_path):
+@_metric_reader_modes
+def test_hybrid_scan_stage_timings(spark_tmp_path, reader_mode):
     def check(cpu_plan, gpu_plan):
         scan = [node for node in collect_plan_nodes(gpu_plan)
                 if node.getClass().getSimpleName() == 'GpuFileSourceScanExec'][0]
@@ -244,11 +256,12 @@ def test_hybrid_scan_stage_timings(spark_tmp_path):
     with_cpu_session(lambda spark: write_pruning_data(spark, data_path))
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.read.parquet(data_path).filter('a >= 2500'),
-        conf=hybrid_conf(**_pruning_metrics_conf),
+        conf=_metrics_conf(reader_mode),
         gpu_plan_assertion=check)
 
 
-def test_hybrid_scan_reader_runs(spark_tmp_path):
+@_metric_reader_modes
+def test_hybrid_scan_reader_runs(spark_tmp_path, reader_mode):
     """failOnFallback only fails a read the eligibility check rejects, so this checks that the
     reader built for an eligible read is the hybrid one: only it counts hybridScanSplits."""
     def check(cpu_plan, gpu_plan):
@@ -260,34 +273,40 @@ def test_hybrid_scan_reader_runs(spark_tmp_path):
     with_cpu_session(lambda spark: write_pruning_data(spark, data_path))
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.read.parquet(data_path).filter('a >= 2500'),
-        conf=hybrid_conf(**_pruning_metrics_conf),
+        conf=_metrics_conf(reader_mode),
         gpu_plan_assertion=check)
 
 
-def test_hybrid_scan_dictionary_pruning(spark_tmp_path):
-    """302 is inside every row group's `b` range, but only row group 2's dictionary holds it."""
+@_metric_reader_modes
+def test_hybrid_scan_dictionary_pruning(spark_tmp_path, reader_mode):
+    """302 is inside every row group's `b` range, but only row group 2's dictionary holds it.
+    MULTITHREADED prunes with dictionaries after the fetch, so its pruned row groups are still
+    read."""
     data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
     row_groups = with_cpu_session(lambda spark: write_pruning_data(spark, data_path))
     by_stats = sum(1 for _, _, min_b, max_b in row_groups if not min_b <= 302 <= max_b)
     by_dict = _dictionary_pruned(row_groups, 302)
+    read = len(row_groups) - by_stats
+    if reader_mode == 'PERFILE':
+        read -= by_dict
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.read.parquet(data_path).filter('b = 302'),
-        conf=hybrid_conf(**_pruning_metrics_conf),
-        gpu_plan_assertion=_assert_row_groups(len(row_groups), by_stats, by_dict,
-                                              len(row_groups) - by_stats - by_dict))
+        conf=_metrics_conf(reader_mode),
+        gpu_plan_assertion=_assert_row_groups(len(row_groups), by_stats, by_dict, read))
 
 
-def test_hybrid_scan_pruning_off_with_filter_pushdown(spark_tmp_path):
+@_metric_reader_modes
+def test_hybrid_scan_pruning_off_with_filter_pushdown(spark_tmp_path, reader_mode):
     data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
     row_groups = with_cpu_session(lambda spark: write_pruning_data(spark, data_path))
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.read.parquet(data_path).filter('a >= 2500'),
-        conf=hybrid_conf(**_pruning_metrics_conf,
-                         **{'spark.sql.parquet.filterPushdown': False}),
+        conf=_metrics_conf(reader_mode, **{'spark.sql.parquet.filterPushdown': False}),
         gpu_plan_assertion=_assert_row_groups(len(row_groups), 0, 0, len(row_groups)))
 
 
-def test_hybrid_scan_pruning_with_file_split_across_tasks(spark_tmp_path):
+@_metric_reader_modes
+def test_hybrid_scan_pruning_with_file_split_across_tasks(spark_tmp_path, reader_mode):
     """Summed over the splits, each row group is in exactly one split's input."""
     data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
     row_groups = with_cpu_session(lambda spark: write_pruning_data(spark, data_path))
@@ -296,7 +315,7 @@ def test_hybrid_scan_pruning_with_file_split_across_tasks(spark_tmp_path):
     pruned = sum(1 for _, max_a, _, _ in row_groups if max_a < 2500)
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.read.parquet(data_path).filter('a >= 2500'),
-        conf=hybrid_conf(**_pruning_metrics_conf, **{
+        conf=_metrics_conf(reader_mode, **{
             'spark.sql.files.maxPartitionBytes': '4k',
             'spark.sql.files.openCostInBytes': '0',
         }),
@@ -305,14 +324,14 @@ def test_hybrid_scan_pruning_with_file_split_across_tasks(spark_tmp_path):
 
 
 @pytest.mark.parametrize('footer_reader', ['NATIVE', 'JAVA'])
-def test_parquet_scan_row_groups_read_without_columns(spark_tmp_path, footer_reader):
+def test_parquet_scan_row_groups_fetched_without_columns(spark_tmp_path, footer_reader):
     """A count reads no columns, so the hybrid reader falls back, and the native footer reader
     merges the row groups into one block; the metric must still count every one."""
     def check(cpu_plan, gpu_plan):
         scans = [node for node in collect_plan_nodes(gpu_plan)
                  if node.getClass().getSimpleName() == 'GpuFileSourceScanExec']
         assert len(scans) == 1, 'Expected one GPU Parquet scan in:\n{}'.format(gpu_plan)
-        assert plan_metric(scans[0], 'rowGroupsRead') == len(row_groups)
+        assert plan_metric(scans[0], 'rowGroupsFetched') == len(row_groups)
 
     data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
     row_groups = with_cpu_session(lambda spark: write_pruning_data(spark, data_path))
@@ -323,9 +342,15 @@ def test_parquet_scan_row_groups_read_without_columns(spark_tmp_path, footer_rea
         gpu_plan_assertion=check)
 
 
-def test_parquet_scan_row_groups_read_from_pool_threads(spark_tmp_path):
-    """The multithreaded reader filters the files on pool threads, so each file must still count
-    once."""
+@pytest.mark.parametrize('reader_conf', [
+    pytest.param(hybrid_mt_conf(), id='hybrid'),
+    pytest.param({'spark.rapids.sql.format.parquet.reader.type': 'MULTITHREADED'},
+                 id='parquet_mr'),
+])
+def test_parquet_scan_row_groups_fetched_from_pool_threads(spark_tmp_path, reader_conf):
+    """Both multithreaded readers count each file on a pool thread and add it on the task thread,
+    so each file must still count once. `parquet_mr` sets no hybrid conf, so the plain reader
+    runs."""
     files = 64
     data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
     with_cpu_session(lambda spark: spark.range(0, files, 1, files)
@@ -335,12 +360,11 @@ def test_parquet_scan_row_groups_read_from_pool_threads(spark_tmp_path):
         scans = [node for node in collect_plan_nodes(gpu_plan)
                  if node.getClass().getSimpleName() == 'GpuFileSourceScanExec']
         assert len(scans) == 1, 'Expected one GPU Parquet scan in:\n{}'.format(gpu_plan)
-        assert plan_metric(scans[0], 'rowGroupsRead') == files
+        assert plan_metric(scans[0], 'rowGroupsFetched') == files
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.read.parquet(data_path),
-        conf=copy_and_update(_pruning_metrics_conf, _one_task_conf, {
-            'spark.rapids.sql.format.parquet.reader.type': 'MULTITHREADED'}),
+        conf=copy_and_update(_pruning_metrics_conf, _one_task_conf, reader_conf),
         gpu_plan_assertion=check)
 
 
