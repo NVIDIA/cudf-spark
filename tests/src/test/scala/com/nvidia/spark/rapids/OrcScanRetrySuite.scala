@@ -125,6 +125,28 @@ class OrcScanRetrySuite extends RmmSparkRetrySuiteBase {
     assertGpuRetryOccurred()
   }
 
+  test("ORC decimal precision narrowing is retried on OOM") {
+    val table = withResource(ColumnVector.decimalFromLongs(
+        -2, 9999999999L, 10000000000L, -10000000000L)) { decimal =>
+      new Table(decimal)
+    }
+    val tableSchema = StructType(Seq(StructField("a", DecimalType(18, 2))))
+    val readSchema = StructType(Seq(StructField("a", DecimalType(10, 2))))
+
+    injectGpuRetryOom()
+    withResource(GpuOrcScan.rebaseAndEvolveSchemaWithRetryAndClose(
+        table, tableSchema, readSchema, isSchemaCaseSensitive = true,
+        writerTimezone = ZoneId.of("UTC").getId, writerUsedProlepticGregorian = true)) { result =>
+      assertResult(DType.create(DType.DTypeEnum.DECIMAL64, -2))(result.getColumn(0).getType)
+      withResource(result.getColumn(0).copyToHost()) { host =>
+        assertResult(new java.math.BigDecimal("99999999.99"))(host.getBigDecimal(0))
+        assert(host.isNull(1))
+        assert(host.isNull(2))
+      }
+    }
+    assertGpuRetryOccurred()
+  }
+
   test("ORC CHAR and VARCHAR schema evolution uses STRING for retry") {
     val table = withResource(ColumnVector.fromStrings("abc   ")) { charColumn =>
       withResource(ColumnVector.fromStrings("abc")) { varcharColumn =>
