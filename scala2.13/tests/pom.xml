@@ -359,6 +359,58 @@
             </build>
         </profile>
         <profile>
+            <id>release420</id>
+            <activation>
+                <property>
+                    <name>buildver</name>
+                    <value>420</value>
+                </property>
+            </activation>
+            <properties>
+                <parallelSparkConfs>
+                    spark.sql.ansi.enabled=false;spark.sql.ansi.enabled=true
+                </parallelSparkConfs>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.scalatest</groupId>
+                        <artifactId>scalatest-maven-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>test</id>
+                                <phase>none</phase>
+                            </execution>
+                            <execution>
+                                <id>test-ansi-off</id>
+                                <configuration>
+                                    <reportsDirectory>${project.build.directory}/surefire-reports/ansi-off</reportsDirectory>
+                                    <environmentVariables>
+                                        <SPARK_CONF>spark.sql.ansi.enabled=false</SPARK_CONF>
+                                    </environmentVariables>
+                                </configuration>
+                                <goals>
+                                    <goal>test</goal>
+                                </goals>
+                            </execution>
+                            <execution>
+                                <id>test-ansi-on</id>
+                                <configuration>
+                                    <reportsDirectory>${project.build.directory}/surefire-reports/ansi-on</reportsDirectory>
+                                    <environmentVariables>
+                                        <SPARK_CONF>spark.sql.ansi.enabled=true</SPARK_CONF>
+                                    </environmentVariables>
+                                </configuration>
+                                <goals>
+                                    <goal>test</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
             <id>release411</id>
             <activation>
                 <property>

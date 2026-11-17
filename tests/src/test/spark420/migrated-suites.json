@@ -1,0 +1,30 @@
+{
+  "suites": {
+    "org.apache.spark.sql.rapids.suites.RapidsConditionalExpressionSuite": {
+      "selected": [
+        "if",
+        "case when",
+        "if/case when - null flags of non-primitive types",
+        "case key when",
+        "case key when - internal pattern matching expects a List while apply takes a Seq",
+        "SPARK-22705: case when should use less global variables",
+        "SPARK-27551: informative error message of mismatched types for case when",
+        "SPARK-27917 test semantic equals of CaseWhen",
+        "SPARK-49396 accurate nullability check"
+      ],
+      "ignored": []
+    },
+    "org.apache.spark.sql.rapids.suites.RapidsDataFrameTungstenSuite": {
+      "selected": [
+        "test simple types",
+        "test struct type",
+        "test nested struct type",
+        "primitive data type accesses in persist data",
+        "access cache multiple times",
+        "access only some column of the all of columns",
+        "Rapids - Spark 4.2 SQL framework executes GPU operators"
+      ],
+      "ignored": []
+    }
+  }
+}

@@ -83,6 +83,40 @@ Apache Spark 3.3.0 on Scala 2.13 artifacts, issue:
 mvn package -f scala2.13 -pl tests -am -Dbuildver=330 -Dsuffixes='.*CastOpSuite' -Dtests=decimal
 ```
 
+### Spark 4.2.0 Migrated Suites
+
+Spark 4.2.0 (`buildver=420`, Scala 2.13) runs unit tests with ANSI disabled and enabled.
+Register inherited Spark suites in the Spark 420 `RapidsTestSettings` and keep
+[`src/test/spark420/migrated-suites.json`](src/test/spark420/migrated-suites.json) in sync with
+the registry and upstream test cases. Each suite lists its exact `selected` and `ignored`
+test names; selected tests must execute successfully, and only explicitly ignored tests
+may be skipped. Spark 330 retains its own registry and suites.
+
+The Scala 2.13 premerge stage runs 350, 401 and 420. After the clean 420 run, it checks
+each expected migration suite's JUnit XML in both ANSI modes using
+[`check_migrated_ut_reports.py`](../build/check_migrated_ut_reports.py). Each suite must
+have the complete selected and ignored case sets, no failures or errors, and a report
+newer than the run's start marker. Missing suites or cases, unexpected cases, duplicate
+reports or case names, and skipped selected tests fail the gate. An executed suite
+under `org.apache.spark.sql.rapids.suites` that is absent
+from the manifest also fails, so new migrations cannot silently bypass these checks.
+ScalaTest XML represents ignored, pending and canceled tests with the same
+`skipped` element; none counts as an executed test.
+
+Parallel reports are under `surefire-reports/wave-1` and `wave-2`; serial reports are
+under `surefire-reports/ansi-off` and `ansi-on`, so the second mode cannot overwrite
+the first. To check a local clean run, create a marker with `mktemp` before Maven
+starts, outside `target/`, then run:
+
+```bash
+python3 build/check_migrated_ut_reports.py \
+  --reports-dir scala2.13/tests/target/spark420/surefire-reports \
+  --expected-suites tests/src/test/spark420/migrated-suites.json \
+  --started-after /path/to/start-marker --mode serial
+```
+
+Use `--mode parallel` for a run with `-Drapids.parallelUnitTests=true`.
+
 ### Large Host Memory Tests
 
 Some tests build host columns up to the 2 GiB limit of a cuDF column. They need a GPU and, per

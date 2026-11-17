@@ -15,7 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark":["330"],"carryForward":"none"}
+{"spark":["330","420"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.utils
 
@@ -200,6 +200,12 @@ object RapidsSQLTestsBaseTrait extends Logging {
       .set("spark.rapids.sql.hasExtendedYearValues", "false")
       .setAppName("rapids spark plugin running Vanilla Spark UT")
 
-    conf
+    Seq("allocFraction", "maxAllocFraction", "minAllocFraction").foreach { name =>
+      Option(System.getProperty(s"rapids.test.gpu.$name")).foreach { value =>
+        conf.set(s"spark.rapids.memory.gpu.$name", value)
+      }
+    }
+
+    RapidsTestConf.applyCommandLineConf(conf)
   }
 }

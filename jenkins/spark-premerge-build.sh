@@ -272,8 +272,23 @@ ci_scala213() {
     for version in "${SPARK_SHIM_VERSIONS_PREMERGE_SCALA213[@]}"
     do
         echo "Spark version (Scala 2.13): $version"
+        local migration_marker=""
+        if [[ "$version" == "420" ]]; then
+            migration_marker=$(mktemp)
+        fi
         env -u SPARK_HOME \
             $MVN -f scala2.13/ -U -B $MVN_URM_MIRROR -Dbuildver=$version clean install $MVN_BUILD_ARGS -Dpytest.TEST_TAGS=''
+        if [[ "$version" == "420" ]]; then
+            local migration_mode="serial"
+            if [[ "$PARALLEL_UT" == "true" ]]; then
+                migration_mode="parallel"
+            fi
+            python3 build/check_migrated_ut_reports.py \
+                --reports-dir scala2.13/tests/target/spark420/surefire-reports \
+                --expected-suites tests/src/test/spark420/migrated-suites.json \
+                --started-after "$migration_marker" --mode "$migration_mode"
+            rm "$migration_marker"
+        fi
         # Run filecache tests
         env -u SPARK_HOME SPARK_CONF=spark.rapids.filecache.enabled=true \
             $MVN -f scala2.13/ -B $MVN_URM_MIRROR -Dbuildver=$version test -rf tests $MVN_BUILD_ARGS -Dpytest.TEST_TAGS='' \

@@ -15,7 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark":["330"],"carryForward":"none"}
+{"spark":["330","420"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.utils
 
@@ -31,7 +31,6 @@ import org.scalatest.Assertions
 import org.apache.spark.sql.{AnalysisException, DataFrame, QueryTest, Row}
 import org.apache.spark.sql.catalyst.plans.logical
 import org.apache.spark.sql.catalyst.util.{sideBySide, stackTraceToString}
-import org.apache.spark.sql.execution.SQLExecution
 
 
 /** Basic trait for Rapids SQL test cases. */
@@ -51,6 +50,7 @@ trait RapidsSQLTestsTrait extends QueryTest with RapidsSQLTestsBaseTrait {
   override def beforeAll(): Unit = {
     prepareWorkDir()
     super.beforeAll()
+    RapidsTestConf.verifyAnsiMode(spark)
     spark.sparkContext.setLogLevel("WARN")
   }
 
@@ -63,7 +63,7 @@ trait RapidsSQLTestsTrait extends QueryTest with RapidsSQLTestsBaseTrait {
       try df
       catch {
         case ae: AnalysisException =>
-          val plan = ae.plan
+          val plan = RapidsTestShims.analysisPlan(ae)
           if (plan.isDefined) {
             fail(s"""
                     |Failed to analyze query: $ae
@@ -117,9 +117,9 @@ object RapidsQueryTestUtil extends Assertions {
       df: DataFrame,
       expectedAnswer: Seq[Row],
       checkToRDD: Boolean = true): Option[String] = {
-    val isSorted = df.logicalPlan.collect { case s: logical.Sort => s }.nonEmpty
+    val isSorted = RapidsTestShims.logicalPlan(df).collect { case s: logical.Sort => s }.nonEmpty
     if (checkToRDD) {
-      SQLExecution.withSQLConfPropagated(df.sparkSession) {
+      RapidsTestShims.withSQLConfPropagated(df) {
         df.rdd.count() // Also attempt to deserialize as an RDD [SPARK-15791]
       }
     }
