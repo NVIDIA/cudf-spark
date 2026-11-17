@@ -60,8 +60,8 @@ private[rapids] object GpuVariantDecimal {
         extraction.getValue, nativeType, extraction.getStatus)) { decoded =>
       if (!GpuVariantExtraction.allRowsCovered(extraction.getStatus, decoded.getStatus) ||
           !isValidDecimal(extraction, decoded.getValue, intermediate)) {
-        // This is not final target overflow: the temporary scale may have overflowed even
-        // though Spark can return a valid result. Preserve Spark errors/coercions as well.
+        // The guard scale may have overflowed even though Spark can return a valid result.
+        // Fall back to preserve Spark coercions and decimal-payload errors.
         None
       } else if (guardScale == target.scale) {
         // Do not rely on castDecimalToDecimal's same-type shortcut to enforce precision.
