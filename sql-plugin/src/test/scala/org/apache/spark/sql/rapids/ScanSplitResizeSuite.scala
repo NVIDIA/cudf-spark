@@ -86,7 +86,8 @@ class ScanSplitResizeSuite extends AnyFunSuite {
   test("with history on but nothing recorded the partitions are Spark's own") {
     withScans() { (spark, out, schema) =>
       val registration = MetricStores.install(new FakeMetricStore)
-      ScanSplitHeuristic.instance.enable(HistoryPolicy(Duration.ofMillis(100), Duration.ofSeconds(5)))
+      ScanSplitHeuristic.instance.enable(
+        HistoryPolicy(Duration.ofMillis(100), Duration.ofSeconds(5)))
       try {
         val sparkPlan = plan(newSparkScan(spark, out, schema))
         val ours = plan(new HistoryParquetScan(spark, newIndex(spark, out), schema))
@@ -117,7 +118,8 @@ class ScanSplitResizeSuite extends AnyFunSuite {
       val a = StructField("a", IntegerType)
       val b = StructField("b", StringType)
       val registration = MetricStores.install(new FakeMetricStore)
-      ScanSplitHeuristic.instance.enable(HistoryPolicy(Duration.ofMillis(100), Duration.ofSeconds(5)))
+      ScanSplitHeuristic.instance.enable(
+        HistoryPolicy(Duration.ofMillis(100), Duration.ofSeconds(5)))
       try {
         // One column, and two in the opposite order to the table's own.
         Seq(StructType(Seq(a)), StructType(Seq(b, a))).foreach { read =>
@@ -144,7 +146,8 @@ class ScanSplitResizeSuite extends AnyFunSuite {
         Collections.singletonMap(ScanExpansionRatio.dimension, DimValue.of(key)), 1e7,
         System.currentTimeMillis() - 1000))
       val registration = MetricStores.install(store)
-      ScanSplitHeuristic.instance.enable(HistoryPolicy(Duration.ofMillis(100), Duration.ofSeconds(5)))
+      ScanSplitHeuristic.instance.enable(
+        HistoryPolicy(Duration.ofMillis(100), Duration.ofSeconds(5)))
       try {
         val sparkPlan = plan(newSparkScan(spark, out, schema))
         val ours = plan(new HistoryParquetScan(spark, index, schema))
