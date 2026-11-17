@@ -21,7 +21,7 @@ import org.apache.hadoop.conf.Configuration
 import org.apache.orc.TypeDescription
 import org.scalatest.funsuite.AnyFunSuite
 
-import org.apache.spark.sql.types.{DecimalType, StructField, StructType}
+import org.apache.spark.sql.types.{ArrayType, DecimalType, MapType, StringType, StructField, StructType}
 
 class OrcReaderOptionsSuite extends AnyFunSuite {
   private val reader = new FilePartitionReaderBase(new Configuration(), Map.empty)
@@ -82,7 +82,14 @@ class OrcReaderOptionsSuite extends AnyFunSuite {
       }
       val fileSchema = TypeDescription.createStruct().addField("s", child)
         .addField("wide", TypeDescription.createDecimal().withPrecision(25).withScale(2))
-      val readSchema = StructType(Seq(StructField("wide", DecimalType(25, 2))))
+      val dottedReadType = StructType(Seq(StructField("a.b", DecimalType(25, 2))))
+      val childReadType = container match {
+        case "array" => ArrayType(dottedReadType)
+        case "map" => MapType(StringType, dottedReadType)
+        case _ => dottedReadType
+      }
+      val readSchema = StructType(Seq(
+        StructField("s", childReadType), StructField("wide", DecimalType(25, 2))))
       val (options, prepared) = reader.getORCOptionsAndSchema(fileSchema, None, readSchema)
       assert(prepared == fileSchema)
       assert(included(options) == Seq("s", "wide"))
