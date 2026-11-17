@@ -449,10 +449,12 @@ CPU conversion.
 Native decimal decoding truncates during rescaling, so GPU conversion uses a decimal128
 intermediate with precision 38 and scale `min(targetScale + 1, 38)` to preserve rounding.
 Values outside that intermediate range fall back even if the final target could hold them;
-for example, `5e37` into `decimal(38,0)` needs CPU conversion. Width-specific decimal payload
-precision and scale are checked, but these checks do not validate the entire Variant path.
-As with legacy scalar extraction, malformed or noncanonical object/metadata encodings may
-therefore differ from Spark; incompatible-operation gating remains in place.
+for example, a decimal value of 5 × 10³⁷ into `decimal(38,0)` needs CPU conversion.
+Width-specific decimal payload precision and scale are checked, but these checks do not
+validate the entire Variant path.
+As with boolean, integer, floating-point, and string extraction, malformed or noncanonical
+object/metadata encodings may therefore differ from Spark; incompatible-operation gating
+remains in place.
 
 ## Parquet
 

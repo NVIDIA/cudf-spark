@@ -816,6 +816,9 @@ _decimal_target_cases = [
                  ['1234567890123456.78', '9.95', '-9.95', '999999999.95'], id='p10-s1'),
     pytest.param(18, 0, 18, 2,
                  ['1234567890123456.78', '0.50', '-0.50', '9999999999999999.99'], id='p18-s0'),
+    pytest.param(38, 0, 38, 1,
+                 ['9' * 37 + '.4', '9' * 37 + '.5', '-' + '9' * 37 + '.5', '2.5', '-2.5'],
+                 id='p38-s0-native-rounding'),
     pytest.param(19, 18, 38, 20,
                  ['0.12345678901234567895', '-0.12345678901234567895',
                   '9.99999999999999999995'], id='p19-s18'),
@@ -910,6 +913,39 @@ def test_parquet_variant_try_get_decimal_nested_gpu_decode(spark_tmp_path, v1_en
 @incompat
 @pytest.mark.parametrize('v1_enabled_list', ['parquet', ''], ids=['v1', 'v2'])
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_parquet_variant_try_get_decimal_guard_overflow(spark_tmp_path, v1_enabled_list):
+    data_path = spark_tmp_path + '/VARIANT_DECIMAL_GUARD_OVERFLOW_PARQUET'
+
+    def write(spark):
+        # Decimal payloads, not JSON exponent literals (which parse_json encodes as doubles).
+        # Both signs fit the final decimal(38,0), but not its scale1 rounding intermediate.
+        spark.sql("""
+          SELECT id, to_variant_object(named_struct(
+            'x', CAST(value AS DECIMAL(38,0)))) AS v
+          FROM VALUES
+            (0, '50000000000000000000000000000000000000'),
+            (1, '-50000000000000000000000000000000000000')
+          AS source(id, value)
+          UNION ALL SELECT 2, CAST(NULL AS VARIANT)
+        """).write.mode('overwrite').parquet(data_path)
+
+    _with_cpu_variant_session(write)
+
+    def do_it(spark):
+        return spark.read.parquet(data_path).selectExpr(
+            'id', "try_variant_get(v, '$.x', 'decimal(38,0)') AS x").orderBy('id')
+
+    conf = dict(_variant_parquet_conf)
+    conf['spark.sql.sources.useV1SourceList'] = v1_enabled_list
+    conf['spark.rapids.sql.metrics.level'] = 'DEBUG'
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it, exist_classes='GpuProjectExec,GpuVariantGet', conf=conf, require_non_empty=True,
+        gpu_plan_assertion=lambda cpu, gpu: _assert_decimal_bridge(gpu, True))
+
+
+@incompat
+@pytest.mark.parametrize('v1_enabled_list', ['parquet', ''], ids=['v1', 'v2'])
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
 def test_parquet_variant_try_get_decimal_mixed_nested_coercions(spark_tmp_path, v1_enabled_list):
     from pyspark.sql.types import DecimalType
 
@@ -978,7 +1014,9 @@ def test_variant_try_get_decimal_encoded_widths(scale):
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         do_it, exist_classes='GpuRowToColumnarExec,GpuProjectExec,GpuVariantGet',
-        conf={'spark.sql.adaptive.enabled': 'false'}, require_non_empty=True)
+        conf={'spark.sql.adaptive.enabled': 'false',
+              'spark.rapids.sql.metrics.level': 'DEBUG'}, require_non_empty=True,
+        gpu_plan_assertion=lambda cpu, gpu: _assert_decimal_bridge(gpu, False))
 
 
 @incompat

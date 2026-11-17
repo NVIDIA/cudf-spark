@@ -54,7 +54,11 @@ private[rapids] object GpuVariantExtraction {
     }
   }
 
-  /** The callback borrows both result columns. Retain returned columns before this scope closes. */
+  /**
+   * Returns the decoder's owning column, or invokes fallback after extraction temporaries close.
+   * The decoder borrows the extraction result; Some must contain an owning column. Retain any
+   * borrowed extraction column before returning it. Newly created owning columns need no retain.
+   */
   def extractOrElse(
       variantStruct: ColumnView,
       path: String)(decode: VariantOperationResult => Option[ColumnVector])

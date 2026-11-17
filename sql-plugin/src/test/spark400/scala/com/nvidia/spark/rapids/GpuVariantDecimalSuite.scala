@@ -22,15 +22,14 @@ package com.nvidia.spark.rapids
 
 import java.util.{Arrays, Optional}
 
-import scala.util.{Failure, Success, Try}
-
 import ai.rapids.cudf.{ColumnVector, ColumnView, DType, HostColumnVector,
   VariantOperationStatus, VariantUtils}
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.spill.SpillFramework
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.{BoundReference, Literal}
+import org.apache.spark.sql.catalyst.expressions.{BoundReference, Literal, NamedExpression}
 import org.apache.spark.sql.catalyst.expressions.variant.VariantGet
 import org.apache.spark.sql.types.{BooleanType, ByteType, Decimal, DecimalType, DoubleType,
   FloatType, IntegerType, LongType, ShortType, StringType, VariantType}
@@ -82,10 +81,14 @@ class GpuVariantDecimalSuite extends AnyFunSuite {
     }
   }
 
-  private def resultColumn(values: Seq[String], target: DecimalType): ColumnVector =
-    withResource(ColumnVector.fromStrings(values: _*)) { strings =>
-      strings.castTo(DecimalUtil.createCudfDecimal(target))
+  private def assertDecoderFallback(rows: Seq[Array[Byte]], target: DecimalType): Unit = {
+    withVariant(rows) { variant =>
+      GpuVariantExtraction.withRawExtraction(variant, "$.id") { raw =>
+        val decoded = GpuVariantDecimal.decode(raw, target)
+        withResource(decoded)(_ => assert(decoded.isEmpty))
+      }
     }
+  }
 
   private def assertValues(result: ColumnVector, target: DecimalType,
       expected: Seq[String]): Unit = {
@@ -173,7 +176,7 @@ class GpuVariantDecimalSuite extends AnyFunSuite {
         "0." + "9" * 38, "-0." + "9" * 38, "0." + "0" * 38))
   }
 
-  test("temporary overflow and 39-digit guards fallback once using original Spark values") {
+  test("temporary overflow and 39-digit guards request CPU conversion") {
     val max = BigInt(10).pow(38) - 1
     Seq((decimal(max, 0, 16), DecimalType(38, 0), max.toString),
       (decimal(-max, 0, 16), DecimalType(38, 0), (-max).toString),
@@ -183,18 +186,7 @@ class GpuVariantDecimalSuite extends AnyFunSuite {
         val rows = Seq(obj(decimal(BigInt(0), 0, 4)), obj(payload))
         val values = cpuValues(rows, target)
         assert(values.last == expected)
-        withVariant(rows) { variant =>
-          var calls = 0
-          GpuVariantExtraction.withRawExtraction(variant, "$.id") { raw =>
-            withResource(GpuVariantDecimal.decode(raw, target).getOrElse {
-              calls += 1
-              resultColumn(cpuValues(rows, target), target)
-            }) { result =>
-              assert(calls == 1)
-              assertValues(result, target, values)
-            }
-          }
-        }
+        assertDecoderFallback(rows, target)
     }
   }
 
@@ -202,21 +194,8 @@ class GpuVariantDecimalSuite extends AnyFunSuite {
     Seq(-(BigInt(1) << 127), (BigInt(1) << 127) - 1).foreach { coefficient =>
       val rows = Seq(obj(decimal(coefficient, 38, 16)))
       val target = DecimalType(38, 38)
-      val expected = intercept[Exception](cpuValues(rows, target))
-      withVariant(rows) { variant =>
-        var calls = 0
-        val actual = intercept[Exception] {
-          GpuVariantExtraction.withRawExtraction(variant, "$.id") { raw =>
-            withResource(GpuVariantDecimal.decode(raw, target).getOrElse {
-              calls += 1
-              resultColumn(cpuValues(rows, target), target)
-            })(_ => fail("int128 extrema are malformed Spark decimals"))
-          }
-        }
-        assert(calls == 1)
-        assert(actual.getClass == expected.getClass)
-        assert(actual.getMessage == expected.getMessage)
-      }
+      intercept[Exception](cpuValues(rows, target))
+      assertDecoderFallback(rows, target)
     }
   }
 
@@ -231,21 +210,8 @@ class GpuVariantDecimalSuite extends AnyFunSuite {
       malformed.foreach { payload =>
         val rows = Seq(obj(decimal(BigInt(125), 2, 4)), obj(payload))
         val target = DecimalType(5, 1)
-        val expected = intercept[Exception](cpuValues(rows, target))
-        withVariant(rows) { variant =>
-          var calls = 0
-          val actual = intercept[Exception] {
-            GpuVariantExtraction.withRawExtraction(variant, "$.id") { raw =>
-              withResource(GpuVariantDecimal.decode(raw, target).getOrElse {
-                calls += 1
-                resultColumn(cpuValues(rows, target), target)
-              })(_ => fail("malformed decimal must reach Spark's error"))
-            }
-          }
-          assert(calls == 1)
-          assert(actual.getClass == expected.getClass)
-          assert(actual.getMessage == expected.getMessage)
-        }
+        intercept[Exception](cpuValues(rows, target))
+        assertDecoderFallback(rows, target)
       }
       // The neighboring legal coefficient must not be rejected by an inclusive bound.
       assertGpu(Seq(decimal(bound - 1, precision, width),
@@ -253,7 +219,7 @@ class GpuVariantDecimalSuite extends AnyFunSuite {
     }
   }
 
-  test("nondecimal coercions fallback once and use Spark's source-specific casts") {
+  test("nondecimal coercions request CPU conversion") {
     val string = Array[Byte](17, '1'.toByte, '.'.toByte, '2'.toByte, '5'.toByte)
     val integer = Array[Byte](12, 7)
     val bool = Array[Byte](4)
@@ -262,19 +228,7 @@ class GpuVariantDecimalSuite extends AnyFunSuite {
     Seq(string, integer, bool, float, double, Array[Byte](0)).foreach { payload =>
       val rows = Seq(obj(decimal(BigInt(125), 2, 4)), obj(payload))
       val target = DecimalType(4, 1)
-      val expected = cpuValues(rows, target)
-      withVariant(rows) { variant =>
-        var calls = 0
-        GpuVariantExtraction.withRawExtraction(variant, "$.id") { raw =>
-          withResource(GpuVariantDecimal.decode(raw, target).getOrElse {
-            calls += 1
-            resultColumn(cpuValues(rows, target), target)
-          }) { result =>
-            assert(calls == 1)
-            assertValues(result, target, expected)
-          }
-        }
-      }
+      assertDecoderFallback(rows, target)
     }
   }
 
@@ -360,14 +314,8 @@ class GpuVariantDecimalSuite extends AnyFunSuite {
     withVariant(mixed) { variant =>
       GpuVariantExtraction.withRawExtraction(variant, "$.id") { raw =>
         (0 until 2).foreach { _ =>
-          var calls = 0
-          withResource(GpuVariantDecimal.decode(raw, target).getOrElse {
-            calls += 1
-            resultColumn(cpuValues(mixed, target), target)
-          }) { out =>
-            assert(calls == 1)
-            assertValues(out, target, Seq("1.3", "7.0"))
-          }
+          val decoded = GpuVariantDecimal.decode(raw, target)
+          withResource(decoded)(_ => assert(decoded.isEmpty))
           withResource(raw.getStatus.copyToHost()) { host =>
             assert(host.getByte(0) == VariantOperationStatus.SUCCESS.getNativeId)
             assert(host.getByte(1) == VariantOperationStatus.SUCCESS.getNativeId)
@@ -468,9 +416,8 @@ class GpuVariantDecimalSuite extends AnyFunSuite {
         assert(value.getRefCount == 0)
         assert(status.getRefCount == 0)
         GpuVariantExtraction.withRawExtraction(variant, "$.id") { raw =>
-          withResource(GpuVariantDecimal.decode(raw, target).getOrElse {
-            resultColumn(cpuValues(rows, target), target)
-          })(out => assertValues(out, target, Seq("1.3")))
+          val decoded = GpuVariantDecimal.decode(raw, target)
+          withResource(decoded)(_ => assert(decoded.isEmpty))
         }
       }
     }
@@ -493,42 +440,18 @@ class GpuVariantDecimalSuite extends AnyFunSuite {
     }
   }
 
-  test("decimal missing and encoded-null rows fallback once on the complete input") {
+  test("decimal missing and encoded-null rows request CPU conversion of the complete input") {
     val target = DecimalType(4, 1)
     val rows = Seq(obj(decimal(BigInt(125), 2, 4)), Array[Byte](2, 0, 0), obj(Array[Byte](0)))
     assert(cpuValues(rows, target) == Seq("1.3", null, null))
-    withVariant(rows) { variant =>
-      var calls = 0
-      GpuVariantExtraction.withRawExtraction(variant, "$.id") { raw =>
-        withResource(GpuVariantDecimal.decode(raw, target).getOrElse {
-          calls += 1
-          resultColumn(cpuValues(rows, target), target)
-        }) { result =>
-          assert(calls == 1)
-          assertValues(result, target, Seq("1.3", null, null))
-        }
-      }
-    }
+    assertDecoderFallback(rows, target)
   }
 
   test("an empty encoded value is not an empty batch or SQL-null input") {
     val target = DecimalType(4, 1)
     val rows = Seq(Array.emptyByteArray)
-    val expected = intercept[Exception](cpuValues(rows, target))
-    withVariant(rows) { variant =>
-      var calls = 0
-      val actual = intercept[Exception] {
-        GpuVariantExtraction.withRawExtraction(variant, "$.id") { raw =>
-          withResource(GpuVariantDecimal.decode(raw, target).getOrElse {
-            calls += 1
-            resultColumn(cpuValues(rows, target), target)
-          })(_ => fail("Spark must reject an empty encoded Variant"))
-        }
-      }
-      assert(calls == 1)
-      assert(actual.getClass == expected.getClass)
-      assert(actual.getMessage == expected.getMessage)
-    }
+    intercept[Exception](cpuValues(rows, target))
+    assertDecoderFallback(rows, target)
   }
 
   test("nested object and array decimals decode on GPU without constructing a CPU bridge") {
@@ -548,23 +471,52 @@ class GpuVariantDecimalSuite extends AnyFunSuite {
     }
   }
 
-  test("successive healthy and coercion batches select GPU CPU GPU without sticky fallback") {
+  test("one expression alternates GPU and CPU batches without sticky fallback or stale results") {
+    // The real CPU bridge uses spillable columnar-to-row conversion, even for a one-row batch.
+    SpillFramework.initialize(new RapidsConf(Map(
+      RapidsConf.CHUNKED_PACK_BOUNCE_BUFFER_SIZE.key -> "1MB",
+      RapidsConf.CHUNKED_PACK_BOUNCE_BUFFER_COUNT.key -> "1",
+      RapidsConf.SPILL_TO_DISK_BOUNCE_BUFFER_SIZE.key -> "1MB",
+      RapidsConf.SPILL_TO_DISK_BOUNCE_BUFFER_COUNT.key -> "1")))
+    try {
+      checkExpressionReuse()
+    } finally {
+      SpillFramework.shutdown()
+    }
+  }
+
+  private def checkExpressionReuse(): Unit = {
     val target = DecimalType(4, 1)
-    val healthy = Seq(obj(decimal(BigInt(125), 2, 4)))
-    val coercion = Seq(obj(Array[Byte](17, '1'.toByte, '.'.toByte, '2'.toByte, '5'.toByte)))
-    var calls = 0
-    Seq(healthy, coercion, healthy).foreach { rows =>
+    val child = GpuBoundReference(0, VariantType, nullable = true)(NamedExpression.newExprId, "v")
+    val expression = GpuVariantGet(child, "$.id", target, cpu(target))
+    val processing = new LocalGpuMetric
+    val waiting = new LocalGpuMetric
+    expression.injectMetrics(Map(GpuMetric.CPU_BRIDGE_PROCESSING_TIME -> processing,
+      GpuMetric.CPU_BRIDGE_WAIT_TIME -> waiting))
+    val batches = Seq(
+      (Seq(obj(decimal(BigInt(125), 2, 4))), "1.3", false),
+      (Seq(obj(Array[Byte](17, '3'.toByte, '.'.toByte, '4'.toByte, '5'.toByte))), "3.5", true),
+      (Seq(obj(decimal(BigInt(275), 2, 4))), "2.8", false),
+      (Seq(obj(Array[Byte](17, '6'.toByte, '.'.toByte, '2'.toByte, '5'.toByte))), "6.3", true),
+      (Seq(obj(decimal(BigInt(-375), 2, 4))), "-3.8", false))
+    batches.foreach { case (rows, expected, fallback) =>
+      val previousProcessing = processing.value
+      val previousWaiting = waiting.value
       withVariant(rows) { variant =>
-        val decoded = GpuVariantExtraction.withRawExtraction(variant, "$.id") { raw =>
-          GpuVariantDecimal.decode(raw, target)
+        withResource(new GpuColumnVector(VariantType, variant.incRefCount())) { input =>
+          withResource(expression.doColumnar(input)) { result =>
+            assertValues(result, target, Seq(expected))
+          }
         }
-        withResource(decoded.getOrElse {
-          calls += 1
-          resultColumn(cpuValues(rows, target), target)
-        })(result => assertValues(result, target, Seq("1.3")))
+      }
+      if (fallback) {
+        assert(processing.value > previousProcessing)
+        assert(waiting.value > previousWaiting)
+      } else {
+        assert(processing.value == previousProcessing)
+        assert(waiting.value == previousWaiting)
       }
     }
-    assert(calls == 1)
   }
 
   test("missing and encoded-null statuses do not hide malformed object field IDs") {
@@ -579,11 +531,11 @@ class GpuVariantDecimalSuite extends AnyFunSuite {
         Option(expression.eval(InternalRow(new VariantVal(row, metadata))))
           .map(_.asInstanceOf[Decimal].toJavaBigDecimal.toPlainString).orNull
       }
-      val expected = Try(cpuValue)
       if (!ShimLoader.getShimVersion.isInstanceOf[DatabricksShimVersion]) {
         // The concrete counterexample relies on OSS's small-object linear traversal.
-        // A vendor runtime may use a different lookup order; fallback must follow its CPU.
-        assert(expected.isFailure)
+        // A vendor runtime may use a different lookup order.
+        val error = intercept[Exception](cpuValue)
+        assert(error.getMessage.contains("MALFORMED_VARIANT"))
       }
       withVariant(Seq(row)) { variant =>
         val decoded = GpuVariantExtraction.withRawExtraction(variant, path) { raw =>
@@ -593,25 +545,6 @@ class GpuVariantDecimalSuite extends AnyFunSuite {
           GpuVariantDecimal.decode(raw, target)
         }
         withResource(decoded)(_ => assert(decoded.isEmpty))
-        var calls = 0
-        val actual = Try {
-          decoded.getOrElse {
-            calls += 1
-            resultColumn(Seq(cpuValue), target)
-          }
-        }
-        assert(calls == 1)
-        (expected, actual) match {
-          case (Failure(error), Failure(caught)) =>
-            assert(caught.getClass == error.getClass)
-            assert(caught.getMessage == error.getMessage)
-          case (Success(value), Success(result)) =>
-            withResource(result)(out => assertValues(out, target, Seq(value)))
-          case (Failure(error), Success(result)) =>
-            withResource(result)(_ => fail(s"Expected CPU error: $error"))
-          case (Success(value), Failure(error)) =>
-            fail(s"Expected CPU value $value", error)
-        }
       }
     }
   }

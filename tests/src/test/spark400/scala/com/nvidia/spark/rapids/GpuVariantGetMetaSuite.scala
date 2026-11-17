@@ -120,14 +120,13 @@ class GpuVariantGetMetaSuite extends AnyFunSuite {
     }
   }
 
-  test("production capability routing preserves distinct provider and legacy context probes") {
+  test("production decimal capability routing is independent of the context loader") {
     val thread = Thread.currentThread()
     val original = thread.getContextClassLoader
     try {
       thread.setContextClassLoader(new ClassLoader(null) {})
       // This exercises the public wrapper's real supplier wiring, not only its injected router.
-      // The context loader cannot see legacy APIs, but the decimal provider loader still can.
-      assert(!GpuVariantGet.isVariantCudfAvailable(IntegerType))
+      // Decimal availability must not depend on this unrelated context loader.
       assert(GpuVariantGet.isVariantCudfAvailable(DecimalType(10, 2)))
     } finally {
       thread.setContextClassLoader(original)

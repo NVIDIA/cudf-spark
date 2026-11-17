@@ -61,10 +61,9 @@ trait Spark400PlusDBShims extends Spark341PlusDBShims {
           ("variant", TypeSig.VARIANT, TypeSig.VARIANT),
           ("path", TypeSig.lit(TypeEnum.STRING), TypeSig.STRING)),
         GpuVariantGetMeta)
-        .incompat("legacy scalar targets decode exact physical types and may differ from " +
-          "Spark casts. Decimal conversion uses Spark rounding with whole-batch CPU fallback " +
-          "for unsupported values. Malformed or noncanonical Variant encodings may differ " +
-          "from Spark")
+        .incompat("Boolean, integer, floating-point, and string targets decode exact physical " +
+          "types and may differ from Spark casts. Malformed or noncanonical Variant encodings " +
+          "may differ from Spark")
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
     super.getExprs ++ shimExprs
   }
