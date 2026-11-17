@@ -106,13 +106,13 @@ mvn_verify() {
     # build base shim version for following test step with PREMERGE_PROFILES
     $MVN_INSTALL_CMD -DskipTests -Dbuildver=$SPARK_BASE_SHIM_VERSION
 
-    # enable UTF-8 for regular expression tests
+    # enable UTF-8 for regular expression tests and for tests that use multi-byte file names
     for version in "${SPARK_SHIM_VERSIONS_PREMERGE_UTF8[@]}"
     do
         echo "Spark version (regex): $version"
         env -u SPARK_HOME LC_ALL="en_US.UTF-8" $MVN $MVN_URM_MIRROR -Dbuildver=$version package $MVN_BUILD_ARGS \
           -Dpytest.TEST_TAGS='' \
-          -DwildcardSuites=com.nvidia.spark.rapids.ConditionalsSuite,com.nvidia.spark.rapids.RegularExpressionSuite,com.nvidia.spark.rapids.RegularExpressionTranspilerSuite
+          -DwildcardSuites=com.nvidia.spark.rapids.ConditionalsSuite,com.nvidia.spark.rapids.RegularExpressionSuite,com.nvidia.spark.rapids.RegularExpressionTranspilerSuite,com.nvidia.spark.rapids.InputFileNameLongPathSuite
     done
 
     # Here run Python integration tests tagged with 'premerge_ci_1' only, that would help balance test duration and memory

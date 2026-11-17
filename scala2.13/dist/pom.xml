@@ -355,6 +355,7 @@
                                         <available file="${project.build.directory}/parallel-world/com/nvidia/spark/history/backend/BackendMetricSupport.class"/>
                                         <available file="${project.build.directory}/parallel-world/com/nvidia/spark/history/relational/RelationalJdbcSupport.class"/>
                                         <available file="${project.build.directory}/parallel-world/com/nvidia/spark/history/local/LocalHistoryMetricsProvider.class"/>
+                                        <available file="${project.build.directory}/parallel-world/com/nvidia/spark/history/runtime/BackendLifecycle.class"/>
                                         <available file="${project.build.directory}/parallel-world/org/sqlite/JDBC.class"/>
                                         <available file="${project.build.directory}/parallel-world/org/sqlite/native" type="dir"/>
                                         <available file="${project.build.directory}/parallel-world/META-INF/services/com.nvidia.spark.history.HistoryMetricsProvider"/>
@@ -618,7 +619,7 @@ self.log("... OK")
                         </goals>
                         <configuration>
                             <includeGroupIds>com.nvidia,org.xerial</includeGroupIds>
-                            <includeArtifactIds>cudf-spark-history-metrics-api,cudf-spark-history-metrics-backend-core,cudf-spark-history-metrics-relational-core,cudf-spark-history-metrics-local,sqlite-jdbc</includeArtifactIds>
+                            <includeArtifactIds>cudf-spark-history-metrics-api,cudf-spark-history-metrics-backend-core,cudf-spark-history-metrics-provider-runtime,cudf-spark-history-metrics-relational-core,cudf-spark-history-metrics-local,sqlite-jdbc</includeArtifactIds>
                             <includes>com/nvidia/spark/history/**,org/sqlite/**,META-INF/versions/*/org/sqlite/**,META-INF/native-image/org.xerial/sqlite-jdbc/**,META-INF/services/com.nvidia.spark.history.HistoryMetricsProvider,META-INF/services/java.sql.Driver,META-INF/maven/org.xerial/sqlite-jdbc/**</includes>
                             <outputDirectory>${project.build.directory}/parallel-world</outputDirectory>
                             <markersDirectory>${project.build.directory}/history-metrics-unpack-markers</markersDirectory>
