@@ -51,6 +51,15 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .booleanConf
     .createWithDefault(false)
 
+  val TEST_INPUT_FILE_NAME_MAX_STRING_BYTES =
+    conf("spark.rapids.sql.test.inputFileName.maxStringBytes")
+      .doc("Only to be used in tests. The most string bytes a single batch may need for the " +
+        "input_file_name() column before the scan slices it. Lower it to exercise slicing " +
+        "with small data. The default is the cudf string column limit.")
+      .internal()
+      .longConf
+      .createWithDefault(Int.MaxValue.toLong)
+
   val TEST_CONF = conf("spark.rapids.sql.test.enabled")
     .doc("Intended to be used by unit tests, if enabled all operations must run on the " +
       "GPU or an error happens.")
@@ -70,7 +79,8 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
   val TEST_PARQUET_HYBRID_SCAN_FAIL_ON_FALLBACK =
     conf("spark.rapids.sql.test.format.parquet.hybridScan.failOnFallback")
       .doc("Only to be used in tests. When true and the hybrid scan reader is enabled, fail a " +
-        "PERFILE Parquet scan that would fall back to the parquet-mr path instead of reading it.")
+        "Parquet read that the hybrid scan reader declines instead of reading it on the " +
+        "parquet-mr path.")
       .internal()
       .booleanConf
       .createWithDefault(false)
