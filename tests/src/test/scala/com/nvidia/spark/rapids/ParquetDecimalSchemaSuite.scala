@@ -56,6 +56,7 @@ class ParquetDecimalSchemaSuite extends RmmSparkRetrySuiteBase {
         }
         withResource(ColumnVector.decimalFromBigInt(-2, values: _*)) { wide =>
           withResource(wide.castTo(DecimalUtil.createCudfDecimal(from))) { input =>
+            val originalRefCount = input.getRefCount
             withResource(evolve(input, from, to)) { result =>
               assert(result.getColumn(0).getType == DecimalUtil.createCudfDecimal(to))
               if (narrows) {
@@ -66,10 +67,14 @@ class ParquetDecimalSchemaSuite extends RmmSparkRetrySuiteBase {
                   }
                 }
               } else {
-                CudfTestHelper.assertColumnsAreEqual(input, result.getColumn(0))
+                withResource(result.getColumn(0).copyToHost()) { host =>
+                  values.zipWithIndex.foreach { case (value, index) =>
+                    assert(host.getBigDecimal(index) == new java.math.BigDecimal(value, 2))
+                  }
+                }
               }
             }
-            assert(input.getRefCount == 1)
+            assert(input.getRefCount == originalRefCount)
           }
         }
       }
