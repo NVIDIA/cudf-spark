@@ -130,7 +130,18 @@ class WithRetrySuite
   }
 
   override def afterEach(): Unit = {
-    resetRetryTestState()
+  override def afterEach(): Unit = {
+    try {
+      resetRetryTestState()
+    } finally {
+      SpillFramework.shutdown()
+      RmmSpark.removeAllCurrentThreadAssociation()
+      RmmSpark.clearEventHandler()
+      if (rmmWasInitialized) {
+        Rmm.shutdown()
+      }
+    }
+  }
     SpillFramework.shutdown()
     RmmSpark.removeAllCurrentThreadAssociation()
     RmmSpark.clearEventHandler()
