@@ -109,6 +109,11 @@ class WithRetrySuite
 
   private var rmmWasInitialized = false
 
+  private def resetRetryTestState(): Unit = {
+    ScalableTaskCompletion.reset()
+    TaskRegistryTracker.clearRegistry()
+  }
+
   override def beforeEach(): Unit = {
     SparkSession.getActiveSession.foreach(_.stop())
     SparkSession.clearActiveSession()
@@ -116,6 +121,8 @@ class WithRetrySuite
       rmmWasInitialized = true
       Rmm.initialize(RmmAllocationMode.CUDA_DEFAULT, null, 512 * 1024 * 1024)
     }
+    // Parallel test workers reuse their JVM, task IDs, and native thread IDs across suites.
+    resetRetryTestState()
     SpillFramework.initialize(new RapidsConf(new SparkConf))
     val mockEventHandler = new BaseRmmEventHandler()
     RmmSpark.setEventHandler(mockEventHandler)
@@ -123,6 +130,7 @@ class WithRetrySuite
   }
 
   override def afterEach(): Unit = {
+    resetRetryTestState()
     SpillFramework.shutdown()
     RmmSpark.removeAllCurrentThreadAssociation()
     RmmSpark.clearEventHandler()
