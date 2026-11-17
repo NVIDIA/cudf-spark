@@ -23,7 +23,6 @@ import org.apache.spark.sql.rapids.suites.RapidsConditionalExpressionSuite
 import org.apache.spark.sql.rapids.suites.RapidsDataFrameTungstenSuite
 
 class RapidsTestSettings extends BackendTestSettings {
-  // Keep tests/src/test/spark420/migrated-suites.json in sync with this registry.
   enableSuite[RapidsConditionalExpressionSuite]
   enableSuite[RapidsDataFrameTungstenSuite]
 }

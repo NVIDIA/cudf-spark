@@ -384,7 +384,6 @@
                             <execution>
                                 <id>test-ansi-off</id>
                                 <configuration>
-                                    <reportsDirectory>${project.build.directory}/surefire-reports/ansi-off</reportsDirectory>
                                     <environmentVariables>
                                         <SPARK_CONF>spark.sql.ansi.enabled=false</SPARK_CONF>
                                     </environmentVariables>
@@ -396,7 +395,6 @@
                             <execution>
                                 <id>test-ansi-on</id>
                                 <configuration>
-                                    <reportsDirectory>${project.build.directory}/surefire-reports/ansi-on</reportsDirectory>
                                     <environmentVariables>
                                         <SPARK_CONF>spark.sql.ansi.enabled=true</SPARK_CONF>
                                     </environmentVariables>
