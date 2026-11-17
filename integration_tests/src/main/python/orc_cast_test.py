@@ -14,7 +14,8 @@
 
 import pytest
 
-from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error
+from asserts import (assert_cpu_and_gpu_are_equal_collect_with_capture,
+                     assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error)
 from conftest import get_test_tz, is_not_utc
 from data_gen import *
 from marks import (allow_non_gpu, datagen_overrides, ignore_order, tz_sensitive_test,
@@ -22,6 +23,7 @@ from marks import (allow_non_gpu, datagen_overrides, ignore_order, tz_sensitive_
 from pyspark.sql.types import *
 from spark_session import with_cpu_session
 from orc_test import reader_opt_confs
+from parquet_test import _scan_output_batches
 
 
 def create_orc(data_gen_list, data_path):
@@ -321,3 +323,46 @@ def test_orc_decimal_narrowing_map_key_overflow(spark_tmp_path,
         lambda spark: spark.read.schema('k map<decimal(10,2),int>').orc(data_path)
             .selectExpr('map_keys(k)[0] as key', 'map_keys(k)[0] is null as key_is_null'),
         conf=conf)
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize('v1_enabled_list', ['', 'orc'])
+@pytest.mark.parametrize('ansi_enabled', ['false', 'true'])
+@pytest.mark.parametrize('file_precisions', [(10, 10), (10, 18)], ids=['same-schema', 'mixed-schema'])
+def test_orc_decimal_narrowing_mixed_file_precisions(spark_tmp_path,
+        v1_enabled_list, ansi_enabled, file_precisions):
+    paths = [f'{spark_tmp_path}/ORC_DECIMAL_MIXED_{index}' for index in range(2)]
+    for index, (precision, data_path) in enumerate(zip(file_precisions, paths)):
+        inputs = ['99999999.99', '-99999999.99']
+        if precision == 18:
+            inputs += ['100000000.00', '-100000000.00']
+        values = [(index * 10 + row, Decimal(value) if value is not None else None)
+            for row, value in enumerate(inputs + [None])]
+        with_cpu_session(lambda spark: spark.createDataFrame(values,
+            f'id int, d decimal({precision},2)').coalesce(1).write.orc(data_path))
+
+    conf = {
+        'spark.rapids.sql.format.orc.reader.type': 'COALESCING',
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        'spark.sql.orc.enableVectorizedReader': 'false',
+        'spark.sql.ansi.enabled': ansi_enabled,
+        'spark.sql.adaptive.enabled': 'false',
+        'spark.sql.files.minPartitionNum': '1',
+        'spark.sql.files.openCostInBytes': '0',
+        'spark.rapids.sql.metrics.level': 'DEBUG'}
+
+    def read(spark):
+        df = spark.read.schema('id int, d decimal(10,2)').orc(paths)
+        assert len(df.inputFiles()) == 2
+        return df.selectExpr('id', 'd', 'd is null as is_null', 'd + 1 as added')
+
+    def check_batches(cpu_plan, gpu_plan):
+        # Rule out separate Spark partitions as the reason for separate output batches.
+        assert gpu_plan.execute().getNumPartitions() == 1
+        # Both precisions decode to DECIMAL64, but their TypeDescriptions differ.
+        # The mixed case must split so each cast receives its own tableSchema precision.
+        expected_batches = 1 if file_precisions[0] == file_precisions[1] else 2
+        assert _scan_output_batches(gpu_plan) == expected_batches
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(read, conf=conf,
+        gpu_plan_assertion=check_batches)
