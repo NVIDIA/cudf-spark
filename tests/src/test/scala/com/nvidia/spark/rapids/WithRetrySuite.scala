@@ -112,8 +112,6 @@ class WithRetrySuite
   override def beforeEach(): Unit = {
     SparkSession.getActiveSession.foreach(_.stop())
     SparkSession.clearActiveSession()
-    ScalableTaskCompletion.reset()
-    TaskRegistryTracker.clearRegistry()
     if (!Rmm.isInitialized) {
       rmmWasInitialized = true
       Rmm.initialize(RmmAllocationMode.CUDA_DEFAULT, null, 512 * 1024 * 1024)
@@ -125,16 +123,11 @@ class WithRetrySuite
   }
 
   override def afterEach(): Unit = {
-    try {
-      ScalableTaskCompletion.reset()
-      TaskRegistryTracker.clearRegistry()
-    } finally {
-      SpillFramework.shutdown()
-      RmmSpark.removeAllCurrentThreadAssociation()
-      RmmSpark.clearEventHandler()
-      if (rmmWasInitialized) {
-        Rmm.shutdown()
-      }
+    SpillFramework.shutdown()
+    RmmSpark.removeAllCurrentThreadAssociation()
+    RmmSpark.clearEventHandler()
+    if (rmmWasInitialized) {
+      Rmm.shutdown()
     }
   }
 
