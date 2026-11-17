@@ -345,12 +345,35 @@ _zorder_stable_metric_names = [
     "numBins", "numBatches", "totalConsideredFiles", "totalFilesSkipped", "deletionVectorStats"]
 
 
-def _assert_zorder_metrics_equal(cpu_metrics, gpu_metrics):
+_zorder_size_metric_names = {"min", "max", "avg", "totalSize", "size"}
+
+
+def _assert_metric_equal(cpu, gpu, path, ignored_names=frozenset()):
+    # assert_equal does not compare dicts (it sorts the items in place and compares None), so
+    # walk them here.
+    if isinstance(cpu, dict):
+        assert isinstance(gpu, dict) and cpu.keys() == gpu.keys(), \
+            f"CPU ({cpu}) and GPU ({gpu}) metrics have different fields at {path}"
+        for key in cpu.keys() - ignored_names:
+            _assert_metric_equal(cpu[key], gpu[key], path + [key], ignored_names)
+    else:
+        assert cpu == gpu, f"CPU ({cpu}) and GPU ({gpu}) metrics are different at {path}"
+
+
+def _assert_zorder_metrics_equal(cpu_metrics, gpu_metrics, ignore_input_sizes=False):
+    """Compare the metrics that do not depend on the layout of the output files.
+
+    The sizes of the added files always depend on which engine wrote them. The sizes of the
+    removed (input) files are the same when both tables start from identical files, but not when
+    OPTIMIZE runs again on its own output, so a caller can ignore them with ignore_input_sizes.
+    """
     cpu_dict = cpu_metrics.asDict(recursive=True)
     gpu_dict = gpu_metrics.asDict(recursive=True)
     for name in _zorder_stable_metric_names:
         if name in cpu_dict:
-            assert_equal(cpu_dict[name], gpu_dict[name])
+            ignored = _zorder_size_metric_names if name == "numFilesAdded" or ignore_input_sizes \
+                else frozenset()
+            _assert_metric_equal(cpu_dict[name], gpu_dict[name], [name], ignored)
     assert cpu_dict["zOrderStats"] is not None, "Expected Z-order stats in the OPTIMIZE metrics"
 
 
@@ -358,13 +381,19 @@ def _assert_optimize_parity(enable_deletion_vectors, spark_tmp_path, partition_c
                             conf=_optimize_conf, write_func=_write_many_small_files,
                             require_gpu_write=True, use_gpu_test_mode=True, check_delta_log=True,
                             zorder_columns=None, post_setup_func=None, require_gpu_clustering=True,
-                            require_gpu_scan=True):
+                            require_gpu_scan=True, snapshot_func=None):
     data_path = spark_tmp_path + "/DELTA_OPTIMIZE"
     cpu_path = data_path + "/CPU"
     gpu_path = data_path + "/GPU"
 
     _setup_tables(enable_deletion_vectors, cpu_path, gpu_path, partition_columns, clustering_columns,
                   conf, post_setup_func=post_setup_func, write_func=write_func)
+    # Per-table state that OPTIMIZE must preserve, such as row tracking ids. The tables are
+    # written independently, so each one is compared only with its own snapshot.
+    snapshots = {}
+    if snapshot_func:
+        for path in [cpu_path, gpu_path]:
+            snapshots[path] = with_cpu_session(lambda s: snapshot_func(s, path), conf=conf)
 
     # Run OPTIMIZE on each table and verify the returned path matches the target
     cpu_result = with_cpu_session(
@@ -394,6 +423,8 @@ def _assert_optimize_parity(enable_deletion_vectors, spark_tmp_path, partition_c
     cpu_data = with_cpu_session(lambda s: _read_sorted(s, cpu_path).collect(), conf=conf)
     gpu_data = with_cpu_session(lambda s: _read_sorted(s, gpu_path).collect(), conf=conf)
     assert_equal(cpu_data, gpu_data)
+    for path, before in snapshots.items():
+        assert_equal(before, with_cpu_session(lambda s: snapshot_func(s, path), conf=conf))
 
     # Validate the optimize has run on both sides.
     cpu_optimize_count = with_cpu_session(lambda s: s.sql(
@@ -961,7 +992,8 @@ def test_delta_optimize_zorder_repeated(spark_tmp_path):
     _assert_zorder_metrics_equal(cpu_first, gpu_first)
     cpu_second = with_cpu_session(lambda s: sql(s, cpu_path), conf=_zorder_conf)
     gpu_second = with_gpu_session(lambda s: sql(s, gpu_path), conf=_zorder_conf)
-    _assert_zorder_metrics_equal(cpu_second, gpu_second)
+    # The second run reads files written by each engine, so their sizes differ.
+    _assert_zorder_metrics_equal(cpu_second, gpu_second, ignore_input_sizes=True)
     cpu_data = with_cpu_session(lambda s: _read_sorted(s, cpu_path).collect(), conf=_zorder_conf)
     gpu_data = with_cpu_session(lambda s: _read_sorted(s, gpu_path).collect(), conf=_zorder_conf)
     assert_equal(cpu_data, gpu_data)
@@ -1253,11 +1285,13 @@ def test_delta_optimize_zorder_repeated_after_changes(spark_tmp_path):
             .write.format("delta").mode("append").save(path)
     def delete(spark, path):
         spark.sql(f"DELETE FROM delta.`{path}` WHERE f % 5 = 0")
-    def optimize(columns):
+    def optimize(columns, ignore_input_sizes=True):
         sql = lambda s, path: s.sql(f"OPTIMIZE delta.`{path}` ZORDER BY ({columns})").collect()[0][1]
         _assert_zorder_metrics_equal(with_cpu_session(lambda s: sql(s, cpu_path), conf=conf),
-                                     with_gpu_session(lambda s: sql(s, gpu_path), conf=conf))
-    optimize("a, c")
+                                     with_gpu_session(lambda s: sql(s, gpu_path), conf=conf),
+                                     ignore_input_sizes)
+    # Only the first run starts from identical files. Later runs read each engine's own output.
+    optimize("a, c", ignore_input_sizes=False)
     mutate(append)
     optimize("a, c")
     mutate(delete)
@@ -1301,12 +1335,17 @@ _zorder_dv_state_cases = [
 @pytest.mark.parametrize("case", _zorder_dv_state_cases, ids=lambda case: case[0])
 def test_delta_optimize_zorder_deletion_vector_states(spark_tmp_path, case):
     _, properties, setup, extra_conf = case
+    def row_tracking_rows(spark, path):
+        return spark.read.format("delta").load(path).selectExpr(
+            "a", "c", "_metadata.row_id AS row_id",
+            "_metadata.row_commit_version AS row_commit_version").orderBy("row_id").collect()
     _assert_optimize_parity(
         True, spark_tmp_path, partition_columns=["p"], write_func=_zorder_writer(properties),
         zorder_columns=["a", "c"], conf=copy_and_update(_zorder_dv_conf, extra_conf),
         post_setup_func=setup, require_gpu_scan="row_tracking" not in case[0],
         # The order in which partitions get their base row ids is not deterministic.
-        check_delta_log="row_tracking" not in case[0])
+        check_delta_log="row_tracking" not in case[0],
+        snapshot_func=row_tracking_rows if "row_tracking" in case[0] else None)
 
 
 @_zorder_test
