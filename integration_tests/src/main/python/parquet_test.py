@@ -2105,10 +2105,27 @@ def test_parquet_decimal_narrowing_mixed_file_precisions(spark_tmp_path):
             .coalesce(1).write.parquet(data_path))
     conf = copy_and_update(coalesce_parquet_file_reader_conf, {
         'spark.sql.sources.useV1SourceList': '',
-        'spark.sql.parquet.enableVectorizedReader': 'false'})
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.read.schema('d decimal(10,2)').parquet(*paths)
-            .selectExpr('d', 'd is null as is_null', 'd + 1 as added'), conf=conf)
+        'spark.sql.parquet.enableVectorizedReader': 'false',
+        'spark.sql.adaptive.enabled': 'false',
+        'spark.sql.files.minPartitionNum': '1',
+        'spark.sql.files.openCostInBytes': '0',
+        'spark.rapids.sql.metrics.level': 'DEBUG'})
+
+    def read(spark):
+        df = spark.read.schema('d decimal(10,2)').parquet(*paths)
+        assert len(df.inputFiles()) == 2
+        return df.selectExpr('d', 'd is null as is_null', 'd + 1 as added')
+
+    def check_batches(cpu_plan, gpu_plan):
+        # DBR can keep files in separate partitions despite these file settings.
+        # Keep CPU/GPU result checks there; assert schema-dependent batching on Apache Spark.
+        if not is_databricks_runtime():
+            # Separate batches must result from the schema boundary, not separate partitions.
+            assert gpu_plan.execute().getNumPartitions() == 1
+            assert _scan_output_batches(gpu_plan) == 2
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(read, conf=conf,
+        gpu_plan_assertion=check_batches)
 
 
 # These are based on tests from https://issues.apache.org/jira/browse/SPARK-40876

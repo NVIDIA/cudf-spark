@@ -22,7 +22,7 @@ import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 
 import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Table}
-import com.nvidia.spark.rapids.{CastOptions, GpuCast, GpuColumnVector, SchemaUtils}
+import com.nvidia.spark.rapids.{CastOptions, DecimalUtil, GpuCast, GpuColumnVector, SchemaUtils}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.shims.parquet.ParquetFieldRequestShims
 import com.nvidia.spark.rapids.shims.parquet.ParquetSchemaClipShims
@@ -782,16 +782,13 @@ object ParquetSchemaUtils {
 
   private def needDecimalCast(
       cv: ColumnView, dt: DataType, originalFromDt: DataType): Boolean = {
-    val narrowsPrecision = (originalFromDt, dt) match {
-      case (from: DecimalType, to: DecimalType) => from.precision > to.precision
-      case _ => false
-    }
     // UINT64 is casted to Decimal(20,0) by Spark to accommodate
     // the largest possible values this type can take. Other Unsigned data types are converted to
     // basic types like LongType, this is analogous to that except we spill over to large
     // decimal/ints.
     cv.getType.isDecimalType &&
-        (!GpuColumnVector.getNonNestedRapidsType(dt).equals(cv.getType) || narrowsPrecision) ||
+        (!GpuColumnVector.getNonNestedRapidsType(dt).equals(cv.getType) ||
+          DecimalUtil.narrowsPrecision(originalFromDt, dt)) ||
         cv.getType.equals(DType.UINT64)
   }
 

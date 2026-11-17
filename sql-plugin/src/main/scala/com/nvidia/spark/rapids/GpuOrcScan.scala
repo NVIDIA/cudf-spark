@@ -290,11 +290,7 @@ object GpuOrcScan {
   : ColumnView = {
     val fromDt = col.getType
     val toDt = GpuColumnVector.getNonNestedRapidsType(targetType)
-    val narrowsDecimalPrecision = (originalFromDt, targetType) match {
-      case (from: DecimalType, to: DecimalType) => from.precision > to.precision
-      case _ => false
-    }
-    if (fromDt == toDt && !narrowsDecimalPrecision &&
+    if (fromDt == toDt && !DecimalUtil.narrowsPrecision(originalFromDt, targetType) &&
        !(targetType == StringType && originalFromDt.isInstanceOf[CharType])) {
       return col
     }

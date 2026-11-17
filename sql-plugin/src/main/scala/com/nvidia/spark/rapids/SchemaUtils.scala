@@ -275,7 +275,7 @@ object SchemaUtils {
       case (fromDec: DecimalType, toDec: DecimalType) if fromDec == toDec &&
           !GpuColumnVector.getNonNestedRapidsType(fromDec).equals(col.getType) =>
         col.castTo(DecimalUtil.createCudfDecimal(fromDec))
-      case (fromDec: DecimalType, toDec: DecimalType) if fromDec.precision > toDec.precision =>
+      case _ if DecimalUtil.narrowsPrecision(colType, targetType) =>
         // cuDF types do not carry precision, so narrowing can require bounds checks even
         // when the storage width and scale are unchanged. Keep casting format-specific.
         castFunc.map(f => f(col, targetType, colType))
