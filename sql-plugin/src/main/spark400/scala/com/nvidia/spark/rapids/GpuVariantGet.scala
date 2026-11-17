@@ -111,7 +111,7 @@ case class GpuVariantGet(
 
   override def doColumnar(input: GpuColumnVector): ColumnVector = {
     GpuVariantExtraction.withRawExtraction(input.getBase, path) { extraction =>
-      GpuVariantGet.decodeVariantField(extraction, dataType) {
+      GpuVariantGet.decodeVariantField(extraction, dataType, input.getBase.getNullCount) {
         GpuVariantGet.evaluateOnCpu(input, fallbackBridge)
       }
     }
@@ -141,22 +141,36 @@ object GpuVariantGet {
     }
   }
 
+  /**
+   * Decodes the extracted field on the GPU, or evaluates the whole batch with `fallback` when any
+   * row needs Spark's CPU semantics.
+   *
+   * The batch stays on the GPU when every row is a SQL-null parent, a missing path, or a value one
+   * of the exact-type decoders accepts. Extraction leaves the raw value null only for ROW_NULL,
+   * MISSING_PATH and MALFORMED_VARIANT, and a decoder leaves a row valid only when it decoded the
+   * row. The integer decoders accept disjoint type IDs, so null counts alone show whether every
+   * non-null raw value decoded. Malformed bytes found during extraction fall back so that Spark
+   * raises its error.
+   *
+   * @param parentNullCount null count of the Variant input, which is exactly the ROW_NULL count
+   */
   private[rapids] def decodeVariantField(
       extraction: VariantOperationResult,
-      dt: DataType)(fallback: => ColumnVector): ColumnVector = {
+      dt: DataType,
+      parentNullCount: Long)(fallback: => ColumnVector): ColumnVector = {
+    def covered(decoded: Seq[ColumnView]) = isCovered(extraction, parentNullCount, decoded)
     dt match {
-      case BooleanType => decodeExactType(extraction, DType.BOOL8)(fallback)
-      case FloatType => decodeExactType(extraction, DType.FLOAT32)(fallback)
-      case DoubleType => decodeExactType(extraction, DType.FLOAT64)(fallback)
-      case StringType => decodeExactType(extraction, DType.STRING)(fallback)
+      case BooleanType => decodeExactType(extraction, DType.BOOL8, covered)(fallback)
+      case FloatType => decodeExactType(extraction, DType.FLOAT32, covered)(fallback)
+      case DoubleType => decodeExactType(extraction, DType.FLOAT64, covered)(fallback)
+      case StringType => decodeExactType(extraction, DType.STRING, covered)(fallback)
       case ByteType | ShortType | IntegerType | LongType =>
         val decoded = Seq(DType.INT8, DType.INT16, DType.INT32, DType.INT64).safeMap {
-          sourceType => VariantUtils.castVariantValueWithStatus(
-            extraction.getValue, sourceType, extraction.getStatus)
+          sourceType => VariantUtils.castVariantValue(extraction.getValue, sourceType)
         }
         withResource(decoded) { decoded =>
-          if (allRowsCovered(extraction.getStatus, decoded.map(_.getStatus))) {
-            withResource(normalizeIntegers(decoded.map(_.getValue))) { logicalLongs =>
+          if (covered(decoded)) {
+            withResource(normalizeIntegers(decoded)) { logicalLongs =>
               narrowInteger(logicalLongs, dt)
             }
           } else {
@@ -170,35 +184,35 @@ object GpuVariantGet {
 
   private def decodeExactType(
       extraction: VariantOperationResult,
-      targetType: DType)(fallback: => ColumnVector): ColumnVector = {
-    withResource(VariantUtils.castVariantValueWithStatus(
-        extraction.getValue, targetType, extraction.getStatus)) { decoded =>
-      if (allRowsCovered(extraction.getStatus, Seq(decoded.getStatus))) {
-        decoded.getValue.incRefCount()
+      targetType: DType,
+      covered: Seq[ColumnView] => Boolean)(fallback: => ColumnVector): ColumnVector = {
+    withResource(VariantUtils.castVariantValue(extraction.getValue, targetType)) { decoded =>
+      if (covered(Seq(decoded))) {
+        decoded.incRefCount()
       } else {
         fallback
       }
     }
   }
 
-  private[rapids] def allRowsCovered(
-      extractionStatus: ColumnView,
-      decodedStatuses: Seq[ColumnView]): Boolean = {
-    // ROW_NULL is the parent struct's SQL-null mask. A null raw value alone can also mean a
-    // missing path or malformed encoding, neither of which proves Spark would return null.
-    withResource(Scalar.fromUnsignedByte(VariantOperationStatus.ROW_NULL.getNativeId.toByte)) {
-      rowNull =>
-        withResource(Scalar.fromUnsignedByte(VariantOperationStatus.SUCCESS.getNativeId.toByte)) {
-          success =>
-            withResource(new CloseableHolder(extractionStatus.equalTo(rowNull))) { covered =>
-              decodedStatuses.foreach { status =>
-                withResource(status.equalTo(success)) { decoded =>
-                  covered.setAndCloseOld(covered.get.or(decoded))
-                }
-              }
-              BoolUtils.isAllValidTrue(covered.get)
-            }
-        }
+  private[rapids] def isCovered(
+      extraction: VariantOperationResult,
+      parentNullCount: Long,
+      decoded: Seq[ColumnView]): Boolean = {
+    val rows = extraction.getValue.getRowCount
+    val rawNulls = extraction.getValue.getNullCount
+    val decodedRows = decoded.map(cv => cv.getRowCount - cv.getNullCount).sum
+    // When every raw null is a SQL-null parent, no row can be malformed at extraction and the
+    // status column need not be read.
+    decodedRows + rawNulls == rows &&
+      (rawNulls == parentNullCount || !hasMalformedExtraction(extraction.getStatus))
+  }
+
+  // Extraction reports only SUCCESS, ROW_NULL, MISSING_PATH, VARIANT_NULL and MALFORMED_VARIANT.
+  private def hasMalformedExtraction(status: ColumnView): Boolean = {
+    withResource(status.max()) { max =>
+      max.isValid &&
+        (max.getByte & 0xFF) >= VariantOperationStatus.MALFORMED_VARIANT.getNativeId
     }
   }
 

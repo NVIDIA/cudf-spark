@@ -40,21 +40,19 @@ public final class VariantApiTestFixtures {
   }
 
   public static class Utils extends ExtractionOnlyUtils {
-    public static Result castVariantValueWithStatus(
-        ColumnView input, DType type, ColumnView prior) {
+    public static ColumnVector castVariantValue(ColumnView input, DType type) {
       return null;
     }
   }
 
   public static class WrongCastReturnUtils extends ExtractionOnlyUtils {
-    public static Object castVariantValueWithStatus(
-        ColumnView input, DType type, ColumnView prior) {
+    public static Object castVariantValue(ColumnView input, DType type) {
       return null;
     }
   }
 
   public static class WrongCastParametersUtils extends ExtractionOnlyUtils {
-    public static Result castVariantValueWithStatus(ColumnView input, DType type) { return null; }
+    public static ColumnVector castVariantValue(ColumnView input) { return null; }
   }
 
   public static class NonOwningResult {
@@ -67,8 +65,9 @@ public final class VariantApiTestFixtures {
     public static NonOwningResult getVariantFieldValueWithStatus(ColumnView input, String path) {
       return null;
     }
-    public static NonOwningResult castVariantValueWithStatus(
-        ColumnView input, DType type, ColumnView prior) { return null; }
+    public static ColumnVector castVariantValue(ColumnView input, DType type) {
+      return null;
+    }
   }
 
   public static class MissingValueResult extends CloseableResult {
@@ -79,8 +78,9 @@ public final class VariantApiTestFixtures {
     public static MissingValueResult getVariantFieldValueWithStatus(ColumnView input, String path) {
       return null;
     }
-    public static MissingValueResult castVariantValueWithStatus(
-        ColumnView input, DType type, ColumnView prior) { return null; }
+    public static ColumnVector castVariantValue(ColumnView input, DType type) {
+      return null;
+    }
   }
 
   public static class WrongValueResult extends CloseableResult {
@@ -92,8 +92,9 @@ public final class VariantApiTestFixtures {
     public static WrongValueResult getVariantFieldValueWithStatus(ColumnView input, String path) {
       return null;
     }
-    public static WrongValueResult castVariantValueWithStatus(
-        ColumnView input, DType type, ColumnView prior) { return null; }
+    public static ColumnVector castVariantValue(ColumnView input, DType type) {
+      return null;
+    }
   }
 
   public static class MissingStatusResult extends CloseableResult {
@@ -105,8 +106,9 @@ public final class VariantApiTestFixtures {
         ColumnView input, String path) {
       return null;
     }
-    public static MissingStatusResult castVariantValueWithStatus(
-        ColumnView input, DType type, ColumnView prior) { return null; }
+    public static ColumnVector castVariantValue(ColumnView input, DType type) {
+      return null;
+    }
   }
 
   public static class WrongStatusResult extends CloseableResult {
@@ -118,8 +120,9 @@ public final class VariantApiTestFixtures {
     public static WrongStatusResult getVariantFieldValueWithStatus(ColumnView input, String path) {
       return null;
     }
-    public static WrongStatusResult castVariantValueWithStatus(
-        ColumnView input, DType type, ColumnView prior) { return null; }
+    public static ColumnVector castVariantValue(ColumnView input, DType type) {
+      return null;
+    }
   }
 
   public static class NativeId {
@@ -127,36 +130,23 @@ public final class VariantApiTestFixtures {
   }
 
   public static class Status extends NativeId {
-    public static final Status SUCCESS = null;
-    public static final Status ROW_NULL = null;
+    public static final Status MALFORMED_VARIANT = null;
   }
 
   public static class MissingNativeIdStatus {
-    public static final MissingNativeIdStatus SUCCESS = null;
-    public static final MissingNativeIdStatus ROW_NULL = null;
+    public static final MissingNativeIdStatus MALFORMED_VARIANT = null;
   }
 
   public static class WrongNativeIdStatus {
-    public static final WrongNativeIdStatus SUCCESS = null;
-    public static final WrongNativeIdStatus ROW_NULL = null;
+    public static final WrongNativeIdStatus MALFORMED_VARIANT = null;
     public long getNativeId() { return 0; }
   }
 
-  public static class MissingSuccessStatus extends NativeId {
-    public static final MissingSuccessStatus ROW_NULL = null;
+  public static class MissingMalformedStatus extends NativeId {
+    public static final MissingMalformedStatus SUCCESS = null;
   }
 
-  public static class WrongSuccessStatus extends NativeId {
-    public static final Object SUCCESS = null;
-    public static final WrongSuccessStatus ROW_NULL = null;
-  }
-
-  public static class MissingRowNullStatus extends NativeId {
-    public static final MissingRowNullStatus SUCCESS = null;
-  }
-
-  public static class WrongRowNullStatus extends NativeId {
-    public static final WrongRowNullStatus SUCCESS = null;
-    public static final Object ROW_NULL = null;
+  public static class WrongMalformedStatus extends NativeId {
+    public static final Object MALFORMED_VARIANT = null;
   }
 }

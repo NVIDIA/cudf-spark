@@ -37,15 +37,14 @@ private[rapids] object GpuVariantExtraction {
       val status = loadClass("ai.rapids.cudf.VariantOperationStatus")
       utils.getMethod("getVariantFieldValueWithStatus", classOf[ColumnView], classOf[String])
           .getReturnType == result &&
-        utils.getMethod("castVariantValueWithStatus",
-          classOf[ColumnView], classOf[DType], classOf[ColumnView]).getReturnType == result &&
+        utils.getMethod("castVariantValue", classOf[ColumnView], classOf[DType])
+          .getReturnType == classOf[ColumnVector] &&
         classOf[AutoCloseable].isAssignableFrom(result) &&
         result.getMethod("getValue").getReturnType == classOf[ColumnVector] &&
         result.getMethod("getStatus").getReturnType == classOf[ColumnVector] &&
         result.getMethod("close").getReturnType == java.lang.Void.TYPE &&
         status.getMethod("getNativeId").getReturnType == java.lang.Integer.TYPE &&
-        status.getField("SUCCESS").getType == status &&
-        status.getField("ROW_NULL").getType == status
+        status.getField("MALFORMED_VARIANT").getType == status
     } catch {
       case _: ClassNotFoundException | _: NoSuchMethodException | _: NoSuchFieldException |
           _: LinkageError => false

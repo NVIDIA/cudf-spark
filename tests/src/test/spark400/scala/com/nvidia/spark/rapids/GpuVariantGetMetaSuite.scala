@@ -73,7 +73,7 @@ class GpuVariantGetMetaSuite extends AnyFunSuite {
     assert(fixtureApis())
   }
 
-  test("status cast must accept the prior status and return the expected result owner") {
+  test("plain cast must accept a value and type and return ColumnVector") {
     Seq(classOf[ExtractionOnlyUtils], classOf[WrongCastParametersUtils],
       classOf[WrongCastReturnUtils]).foreach { utils =>
       withClue(utils.getSimpleName) { assert(!fixtureApis(utils = utils)) }
@@ -107,8 +107,7 @@ class GpuVariantGetMetaSuite extends AnyFunSuite {
   }
 
   test("each required status field must exist and have the status type") {
-    Seq(classOf[MissingSuccessStatus], classOf[WrongSuccessStatus],
-      classOf[MissingRowNullStatus], classOf[WrongRowNullStatus]).foreach { status =>
+    Seq(classOf[MissingMalformedStatus], classOf[WrongMalformedStatus]).foreach { status =>
       withClue(status.getSimpleName) { assert(!fixtureApis(status = status)) }
     }
   }
