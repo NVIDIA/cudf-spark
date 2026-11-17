@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids.delta
 
 import com.nvidia.spark.rapids.RapidsMeta
 
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.delta.DeltaLog
 import org.apache.spark.sql.internal.SQLConf
 
@@ -32,6 +33,17 @@ trait DeltaConfigChecker {
       sqlConf: SQLConf,
       options: Map[String, String]
   ): Unit
+
+  /**
+   * Check the properties of the existing table being written, using the session that planned the
+   * write. The properties are only read when a version needs to check them. Accepts everything
+   * by default.
+   */
+  def checkTableProperties(
+      meta: RapidsMeta[_, _, _],
+      spark: SparkSession,
+      options: Map[String, String],
+      tableProperties: => Map[String, String]): Unit = {}
 }
 
 object AcceptAllConfigChecker extends DeltaConfigChecker {

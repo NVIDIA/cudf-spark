@@ -18,9 +18,13 @@ package com.nvidia.spark.rapids.delta.delta43x
 
 import com.nvidia.spark.rapids.RapidsMeta
 import com.nvidia.spark.rapids.delta.DeltaConfigChecker
+import org.apache.parquet.column.ParquetProperties.WriterVersion
+import org.apache.parquet.hadoop.ParquetOutputFormat
 
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.delta.{DeltaConfigs, DeltaLog, DeltaOptions, IcebergCompat,
   MaterializePartitionColumnsTableFeature}
+import org.apache.spark.sql.delta.util.TableParquetVersionOption
 import org.apache.spark.sql.internal.SQLConf
 
 object Delta43xConfigChecker extends DeltaConfigChecker {
@@ -53,6 +57,43 @@ object Delta43xConfigChecker extends DeltaConfigChecker {
         meta.willNotWorkOnGpu(
           "Delta 4.3 materialized partition column writes are not supported on GPU")
       }
+    }
+  }
+
+  /**
+   * `delta.parquet.format.version` selects the Parquet data page version via the writer version
+   * Delta computes in `TableParquetVersionOption`. The GPU Parquet writer only emits DataPageV1,
+   * so anything other than Parquet v1 must run on the CPU. Invalid values also fall back so the
+   * CPU path raises Delta's own validation error.
+   */
+  override def checkTableProperties(
+      meta: RapidsMeta[_, _, _],
+      spark: SparkSession,
+      options: Map[String, String],
+      tableProperties: => Map[String, String]): Unit = {
+    // Delta matches these keys exactly, but its catalog and commit path normalize their case.
+    val writerVersionKey = ParquetOutputFormat.WRITER_VERSION
+    val tableKey = DeltaConfigs.PARQUET_FORMAT_VERSION.key
+    val normalizedOptions = options.map {
+      case (k, v) if k.equalsIgnoreCase(writerVersionKey) => writerVersionKey -> v
+      case kv => kv
+    }
+    val normalizedProperties = tableProperties.map {
+      case (k, v) if k.equalsIgnoreCase(tableKey) => tableKey -> v
+      case kv => kv
+    }
+    try {
+      val writerOptions = normalizedOptions ++ TableParquetVersionOption.getWriterOptions(
+        spark, normalizedOptions, normalizedProperties)
+      writerOptions.get(writerVersionKey).foreach { version =>
+        if (WriterVersion.fromString(version) != WriterVersion.PARQUET_1_0) {
+          meta.willNotWorkOnGpu(s"Parquet writer version '$version' (DataPageV2) is not " +
+            "supported on GPU, which only writes DataPageV1")
+        }
+      }
+    } catch {
+      case e: IllegalArgumentException =>
+        meta.willNotWorkOnGpu(s"invalid Parquet format version: ${e.getMessage}")
     }
   }
 }

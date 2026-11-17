@@ -38,8 +38,12 @@ object RapidsDeltaUtils {
     } else {
       meta.willNotWorkOnGpu(s"file format $format is not supported")
     }
-    DeltaRuntimeShim.getDeltaConfigChecker
-      .checkIncompatibleConfs(meta, deltaLog, spark.sessionState.conf, options)
+    val configChecker = DeltaRuntimeShim.getDeltaConfigChecker
+    configChecker.checkIncompatibleConfs(meta, deltaLog, spark.sessionState.conf, options)
+    deltaLog.foreach { log =>
+      configChecker.checkTableProperties(meta, spark, options,
+        DeltaRuntimeShim.unsafeVolatileSnapshotFromLog(log).metadata.configuration)
+    }
   }
 
   def getTightBoundColumnOnFileInitDisabled(spark: SparkSession): Boolean = {
