@@ -29,7 +29,8 @@ import scala.collection.mutable.ArrayBuffer
 import com.nvidia.spark.rapids.{GpuColumnVector, RmmSparkRetrySuiteBase}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.iceberg.parquet._
-import com.nvidia.spark.rapids.iceberg.parquet.metadata.{FileMetadata, GpuIcebergMetadataReader}
+import com.nvidia.spark.rapids.iceberg.parquet.metadata.GpuIcebergMetadataReader
+import com.nvidia.spark.rapids.iceberg.parquet.metadata.GpuIcebergMetadataReader.FileMetadata
 import com.nvidia.spark.rapids.jni.RmmSpark
 import org.apache.hadoop.conf.Configuration
 import org.apache.iceberg.{DataFile, DataFiles, DeleteFile, FileFormat, FileScanTask, MetadataColumns,
@@ -75,7 +76,7 @@ class GpuIcebergMetadataReaderSuite extends RmmSparkRetrySuiteBase {
 
   private def eligible(scan: FileScanTask, expected: Schema = schema): Boolean =
     GpuIcebergMetadataReader.plan(Seq(scan).asJava, expected,
-      _ => file("a", 5).constants()).isPresent
+      _ => file("a", 5).getConstants()).isPresent
 
   test("only complete files with exact unfiltered row counts are eligible") {
     assert(eligible(task()))
