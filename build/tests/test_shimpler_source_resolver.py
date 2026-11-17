@@ -360,7 +360,7 @@ class SourceResolverTest(unittest.TestCase):
             '411': suite_names,
             '412': suite_names,
             '413': suite_names,
-            '414': {'IcebergDeletionVectorSuite.scala'},
+            '414': suite_names,
             '420': set(),
             '500': set(),
         }
