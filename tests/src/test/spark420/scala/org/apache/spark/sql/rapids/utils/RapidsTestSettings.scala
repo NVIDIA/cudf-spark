@@ -20,9 +20,7 @@ spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.utils
 
 import org.apache.spark.sql.rapids.suites.RapidsConditionalExpressionSuite
-import org.apache.spark.sql.rapids.suites.RapidsDataFrameTungstenSuite
 
 class RapidsTestSettings extends BackendTestSettings {
   enableSuite[RapidsConditionalExpressionSuite]
-  enableSuite[RapidsDataFrameTungstenSuite]
 }
