@@ -26,6 +26,7 @@ import com.nvidia.spark.rapids.iceberg.ShimUtils.locationOf
 import com.nvidia.spark.rapids.iceberg.data.{DefaultDeleteLoader, GpuDeleteFileInfo,
   GpuDeleteFilter}
 import com.nvidia.spark.rapids.iceberg.parquet._
+import com.nvidia.spark.rapids.iceberg.parquet.metadata.GpuIcebergMetadataReader
 import org.apache.iceberg._
 import org.apache.iceberg.mapping.NameMappingParser
 
@@ -72,7 +73,7 @@ class GpuIcebergPartitionReader(
         }
         file -> filter
     }
-  private lazy val reader: GpuIcebergParquetReader = createReader()
+  private lazy val reader: Iterator[ColumnarBatch] with AutoCloseable = createReader()
 
 
   override def close(): Unit = {
@@ -89,12 +90,12 @@ class GpuIcebergPartitionReader(
     reader.next()
   }
 
-  private def createReader(): GpuIcebergParquetReader = {
+  private def createReader(): Iterator[ColumnarBatch] with AutoCloseable = {
     val metadataTasks = if (queryUsesInputFile) {
       None
     } else {
-      GpuIcebergMetadataReader.plan(scanTasks, conf.expectedSchema,
-        scanTask => ShimUtils.constantsMap(scanTask, conf.expectedSchema, table))
+      Option(GpuIcebergMetadataReader.plan(scanTasks.asJava, conf.expectedSchema,
+        scanTask => ShimUtils.constantsMap(scanTask, conf.expectedSchema, table)).orElse(null))
     }
     metadataTasks match {
       case Some(files) =>
