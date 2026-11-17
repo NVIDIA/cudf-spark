@@ -207,6 +207,31 @@
             </build>
         </profile>
         <profile>
+            <id>hive-spark330-tests</id>
+            <activation>
+                <property>
+                    <name>buildver</name>
+                    <value>330</value>
+                </property>
+            </activation>
+            <dependencies>
+                <dependency>
+                    <groupId>org.apache.spark</groupId>
+                    <artifactId>spark-hive_${scala.binary.version}</artifactId>
+                    <version>${spark.version}</version>
+                    <type>test-jar</type>
+                    <scope>test</scope>
+                </dependency>
+                <dependency>
+                    <groupId>org.apache.spark</groupId>
+                    <artifactId>spark-tags_${scala.binary.version}</artifactId>
+                    <version>${spark.version}</version>
+                    <type>test-jar</type>
+                    <scope>test</scope>
+                </dependency>
+            </dependencies>
+        </profile>
+        <profile>
             <id>release330</id>
             <activation>
                 <property>
@@ -228,20 +253,6 @@
                     <groupId>org.apache.spark</groupId>
                     <artifactId>spark-catalyst_${scala.binary.version}</artifactId>
                     <type>test-jar</type>
-                </dependency>
-                <dependency>
-                    <groupId>org.apache.spark</groupId>
-                    <artifactId>spark-hive_${scala.binary.version}</artifactId>
-                    <version>${spark.version}</version>
-                    <type>test-jar</type>
-                    <scope>test</scope>
-                </dependency>
-                <dependency>
-                    <groupId>org.apache.spark</groupId>
-                    <artifactId>spark-tags_${scala.binary.version}</artifactId>
-                    <version>${spark.version}</version>
-                    <type>test-jar</type>
-                    <scope>test</scope>
                 </dependency>
                 <dependency>
                     <groupId>org.scalatestplus</groupId>
