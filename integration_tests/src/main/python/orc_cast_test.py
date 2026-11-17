@@ -16,7 +16,7 @@ import pytest
 
 from asserts import (assert_cpu_and_gpu_are_equal_collect_with_capture,
                      assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error)
-from conftest import get_test_tz, is_not_utc
+from conftest import get_test_tz, is_databricks_runtime, is_not_utc
 from data_gen import *
 from marks import (allow_non_gpu, datagen_overrides, ignore_order, tz_sensitive_test,
                    validate_execs_in_gpu_plan)
@@ -357,12 +357,15 @@ def test_orc_decimal_narrowing_mixed_file_precisions(spark_tmp_path,
         return df.selectExpr('id', 'd', 'd is null as is_null', 'd + 1 as added')
 
     def check_batches(cpu_plan, gpu_plan):
-        # Rule out separate Spark partitions as the reason for separate output batches.
-        assert gpu_plan.execute().getNumPartitions() == 1
-        # Both precisions decode to DECIMAL64, but their TypeDescriptions differ.
-        # The mixed case must split so each cast receives its own tableSchema precision.
-        expected_batches = 1 if file_precisions[0] == file_precisions[1] else 2
-        assert _scan_output_batches(gpu_plan) == expected_batches
+        # DBR can keep files in separate partitions despite these file settings.
+        # Keep CPU/GPU result checks there; assert schema-dependent batching on Apache Spark.
+        if not is_databricks_runtime():
+            # Rule out separate Spark partitions as the reason for separate output batches.
+            assert gpu_plan.execute().getNumPartitions() == 1
+            # Both precisions decode to DECIMAL64, but their TypeDescriptions differ.
+            # Split the mixed case so each cast receives its own tableSchema precision.
+            expected_batches = 1 if file_precisions[0] == file_precisions[1] else 2
+            assert _scan_output_batches(gpu_plan) == expected_batches
 
     assert_cpu_and_gpu_are_equal_collect_with_capture(read, conf=conf,
         gpu_plan_assertion=check_batches)

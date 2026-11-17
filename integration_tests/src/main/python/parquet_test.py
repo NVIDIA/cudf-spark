@@ -2058,12 +2058,14 @@ def test_parquet_decimal_scale_change_boundaries(spark_tmp_path, ansi_enabled,
         assert len(df.inputFiles()) == 2
         return df.selectExpr('d', 'd is null as is_null', 'd + 1 as added')
 
-    captured = {}
+    def check_batches(cpu_plan, gpu_plan):
+        # DBR can keep files in separate partitions despite these file settings.
+        # Keep CPU/GPU result checks there; assert cross-file coalescing on Apache Spark.
+        if not is_databricks_runtime():
+            assert _scan_output_batches(gpu_plan) == 1
+
     assert_cpu_and_gpu_are_equal_collect_with_capture(read, conf=conf,
-        gpu_plan_assertion=lambda cpu_plan, gpu_plan: captured.update(
-            {'batches': _scan_output_batches(gpu_plan)}))
-    # Prove the two same-schema files were actually decoded as one coalesced batch.
-    assert captured['batches'] == 1
+        gpu_plan_assertion=check_batches)
 
 
 @ignore_order(local=True)
