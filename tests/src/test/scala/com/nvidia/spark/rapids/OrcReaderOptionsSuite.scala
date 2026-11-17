@@ -101,7 +101,8 @@ class OrcReaderOptionsSuite extends AnyFunSuite {
     val fileSchema = TypeDescription.fromString(
       "struct<unused:int,small:decimal(15,2),large:decimal(25,2)>")
     val readSchema = StructType(Seq(
-      StructField("large", DecimalType(25, 2)), StructField("small", DecimalType(25, 2))))
+      StructField("large", DecimalType(25, 2)), StructField("missing", StringType),
+      StructField("small", DecimalType(25, 2))))
     val (options, prepared) = reader.getORCOptionsAndSchema(
       fileSchema, Some(Array(2, -1, 1)), readSchema)
     assert(prepared.getFieldNames.toArray.toSeq == Seq("large", "small"))
