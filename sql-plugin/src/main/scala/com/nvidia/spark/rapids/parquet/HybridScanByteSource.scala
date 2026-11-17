@@ -20,9 +20,8 @@ import scala.collection.mutable.ArrayBuffer
 
 import ai.rapids.cudf.{ByteRange, HostMemoryBuffer}
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric._
-import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.filecache.FileCache
 import com.nvidia.spark.rapids.jni.fileio.{RapidsFileIO, RapidsInputFile}
@@ -38,11 +37,23 @@ import org.apache.hadoop.fs.Path
  */
 private[parquet] trait HybridScanByteSource {
   /**
+   * Fetch `ranges` into one host buffer laid out by [[HybridScanPipeline.hostBufferLayout]]. The
+   * caller owns the buffer.
+   */
+  def fetchToBuffer(ranges: Array[ByteRange]): HostMemoryBuffer
+
+  /**
    * Fetch `ranges` into host memory, returning one buffer per range in the order requested. An
    * empty range yields an empty buffer rather than being dropped, so the result stays aligned
    * with the request. The caller owns the buffers that come back.
    */
-  def fetch(ranges: Array[ByteRange]): Array[HostMemoryBuffer]
+  final def fetch(ranges: Array[ByteRange]): Array[HostMemoryBuffer] = {
+    if (ranges.isEmpty) {
+      Array.empty
+    } else {
+      withResource(fetchToBuffer(ranges))(HybridScanPipeline.sliceRanges(_, ranges))
+    }
+  }
 }
 
 /**
@@ -55,24 +66,15 @@ private[parquet] class HybridScanFileByteSource(
     filePath: Path,
     execMetrics: Map[String, GpuMetric]) extends HybridScanByteSource {
 
-  override def fetch(ranges: Array[ByteRange]): Array[HostMemoryBuffer] = {
-    if (ranges.isEmpty) {
-      Array.empty
-    } else {
-      val layout = HybridScanPipeline.hostBufferLayout(ranges)
-      val buffer = withRetryNoSplit[HostMemoryBuffer] {
-        HostMemoryBuffer.allocate(layout.totalSize)
-      }
-      // Each slice holds a reference to the buffer, so closing it here leaves the slices valid
-      // and releases the memory once the last one is closed.
-      withResource(buffer) { _ =>
-        val inputFile = fileIO.newInputFile(filePath)
-        fillRanges(inputFile, buffer, ranges, layout)
-        ranges.indices.toArray.safeMap { i =>
-          buffer.slice(layout.offsets(i), ranges(i).size())
-        }
-      }
+  override def fetchToBuffer(ranges: Array[ByteRange]): HostMemoryBuffer = {
+    val layout = HybridScanPipeline.hostBufferLayout(ranges)
+    val buffer = withRetryNoSplit[HostMemoryBuffer] {
+      HostMemoryBuffer.allocate(layout.totalSize)
     }
+    closeOnExcept(buffer) { _ =>
+      fillRanges(fileIO.newInputFile(filePath), buffer, ranges, layout)
+    }
+    buffer
   }
 
   private def fillRanges(
