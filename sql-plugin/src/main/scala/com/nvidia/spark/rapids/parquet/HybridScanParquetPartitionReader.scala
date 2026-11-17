@@ -111,6 +111,8 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
     if (rowGroups.isEmpty || reader.totalRowsInRowGroups(rowGroups) == 0) {
       None
     } else {
+      // A MULTITHREADED pool thread can't take the GPU semaphore that dictionary pruning needs, so
+      // it fetches before the task prunes and this can count more row groups than PERFILE does.
       addToMetric(ROW_GROUPS_FETCHED, rowGroups.length)
       setDecodeFilter(reader, ast)
       val ranges = NvtxRegistry.HYBRID_SCAN_GET_BYTE_RANGES {
