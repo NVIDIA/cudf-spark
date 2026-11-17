@@ -512,7 +512,8 @@ def test_delta_update_optimized_column_mapping_cdf(spark_tmp_path, mapping, aqe_
             f"UPDATE delta.`{path}` SET c = 42 WHERE a % 2 = 0").collect(),
         read_delta_path, data_path, conf=conf, expected_command="GpuUpdateCommand",
         plan_assertion=lambda callback, plans:
-            assert_delta_optimized_write(callback, plans, enabled=True))
+            assert_delta_optimized_write(callback, plans, enabled=True,
+                                         expected_partition_keys={"b", "__is_cdc"}))
 
     def check_cdf(spark):
         results = []

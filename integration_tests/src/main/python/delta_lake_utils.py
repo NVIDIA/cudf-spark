@@ -637,8 +637,8 @@ def _assert_oss_delta_dv_metadata_broadcasts(callback, captured_plans):
                 f"Could not inspect all {class_to_check} nodes in captured Delta plan"
 
 
-def assert_delta_optimized_write(callback, plans, enabled):
-    """Check GPU optimized-write presence, CPU fallback, and executed partition metrics."""
+def assert_delta_optimized_write(callback, plans, enabled, expected_partition_keys=None):
+    """Check GPU optimized writes, including hash keys when supplied."""
     # Optimized-write exchanges are added after QueryExecution prepares the write stub.
     # Inspect the final writer tree, not an unrelated shuffle in an input/metadata query.
     writer_plans = [plan for plan in plans
@@ -657,6 +657,17 @@ def assert_delta_optimized_write(callback, plans, enabled):
     for exchange in optimized_exchanges:
         assert exchange.metrics().apply("numPartitions").value() > 0, \
             "GPU optimized-write exchange did not execute any partitions"
+        if expected_partition_keys is not None:
+            partitioning = exchange.partitioning()
+            assert partitioning.getClass().getSimpleName() == "GpuHashPartitioning", \
+                f"Expected GPU hash partitioning, got {partitioning}"
+            keys = partitioning.expressions().iterator()
+            actual_keys = set()
+            while keys.hasNext():
+                actual_keys.add(keys.next().name())
+            assert actual_keys == expected_partition_keys, \
+                f"Expected GPU optimized-write hash keys {sorted(expected_partition_keys)}, " \
+                f"got {sorted(actual_keys)}"
 
 
 def assert_rapids_delta_write(
