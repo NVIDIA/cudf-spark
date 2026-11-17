@@ -158,7 +158,7 @@ class GpuProjectAstPlannerSuite extends AnyFunSuite {
     }
   }
 
-  test("selfConvertsToAst matches what convertToAst can convert") {
+  test("without ANSI, selfConvertsToAst matches what convertToAst can convert") {
     import org.apache.spark.sql.catalyst.expressions._
     import org.apache.spark.sql.types._
     val sqlConf = conf(legacy = true, jit = false)
@@ -199,6 +199,29 @@ class GpuProjectAstPlannerSuite extends AnyFunSuite {
       }
       assert(nodes.exists(_.selfConvertsToAst))
       assert(nodes.exists(!_.selfConvertsToAst))
+    }
+  }
+
+  test("an operator that must raise an ANSI overflow error has no legacy AST form") {
+    import org.apache.spark.sql.catalyst.expressions.UnaryMinus
+    import org.apache.spark.sql.rapids.GpuUnaryMinus
+    import org.apache.spark.sql.types.DoubleType
+    val sqlConf = conf(legacy = true, jit = false, ansi = true)
+    SQLConf.withExistingConf(sqlConf) {
+      val dbl = AttributeReference("dbl", DoubleType)()
+      def convertsToAst(expression: Expression): Boolean =
+        convert(expression, sqlConf).selfConvertsToAst
+      Seq(Add(a, b), Subtract(a, b), Multiply(a, b), UnaryMinus(a), Abs(a)).foreach { e =>
+        assert(!convertsToAst(e), e)
+      }
+      Seq(Add(dbl, dbl), Subtract(dbl, dbl), Multiply(dbl, dbl), UnaryMinus(dbl), Abs(dbl))
+          .foreach(e => assert(convertsToAst(e), e))
+      // A meta that judged a long Abs and rewrote it into an ANSI negation cannot pass it on.
+      val rewritten = GpuUnaryMinus(a, failOnError = true)
+      GpuProjectAstPlanner.tagConvertedLegacySupport(Abs(a), rewritten, supported = true)
+      val wrapped = GpuProjectAstPlanner.wrapProjectOutputs(
+        Seq(GpuAlias(rewritten, "result")()), sqlConf, enableAst = true, enableAstJit = false)
+      assert(GpuProjectAstExpressionBase.extractTopLevel(wrapped.head).isEmpty)
     }
   }
 

@@ -198,8 +198,9 @@ trait GpuExpression extends Expression {
     throw new IllegalStateException(s"Cannot convert ${this.getClass.getSimpleName} to AST")
 
   /**
-   * Whether `convertToAst` can convert this node for its current types, excluding its children.
-   * This is capability only; callers decide whether the node should use AST.
+   * Whether `convertToAst` can convert this node for its current types and execution modes,
+   * excluding its children, without changing its results or errors. Callers decide separately
+   * whether the node should use AST.
    */
   def selfConvertsToAst: Boolean = false
 
