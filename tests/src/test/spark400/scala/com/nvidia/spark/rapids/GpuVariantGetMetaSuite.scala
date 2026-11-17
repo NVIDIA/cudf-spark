@@ -75,27 +75,63 @@ class GpuVariantGetMetaSuite extends AnyFunSuite {
     assert(fixtureApis())
   }
 
-  test("legacy scalar capability does not require any status API") {
-    val legacyOnly: String => Class[_] = {
-      case "ai.rapids.cudf.VariantUtils" => classOf[LegacyUtils]
-      case name => throw new ClassNotFoundException(name)
-    }
+  test("legacy scalar capability does not probe decimal status availability") {
     Seq(BooleanType, ByteType, ShortType, IntegerType, LongType, FloatType, DoubleType,
       StringType).foreach { target =>
-      assert(GpuVariantGet.hasRequiredApisForTarget(target, legacyOnly), target.toString)
+      var calls = 0
+      assert(GpuVariantGet.isVariantCudfAvailable(target, () => {
+        calls += 1
+        true
+      }, () => fail("legacy target must not probe decimal APIs")), target.toString)
+      assert(calls == 1)
+      assert(!GpuVariantGet.isVariantCudfAvailable(target, () => false,
+        () => fail("legacy target must not probe decimal APIs")), target.toString)
     }
-    assert(!GpuVariantGet.hasRequiredApisForTarget(DecimalType(10, 2), legacyOnly))
   }
 
-  test("decimal status capability does not require legacy value-only APIs") {
-    val statusOnly: String => Class[_] = {
-      case "ai.rapids.cudf.VariantUtils" => classOf[Utils]
-      case "ai.rapids.cudf.VariantOperationResult" => classOf[Result]
-      case "ai.rapids.cudf.VariantOperationStatus" => classOf[Status]
-      case name => throw new ClassNotFoundException(name)
+  test("decimal status capability does not probe legacy value-only availability") {
+    Seq(DecimalType(10, 2), DecimalType(38, 38)).foreach { target =>
+      var calls = 0
+      assert(GpuVariantGet.isVariantCudfAvailable(target,
+        () => fail("decimal target must not probe legacy APIs"), () => {
+          calls += 1
+          true
+        }))
+      assert(calls == 1)
+      assert(!GpuVariantGet.isVariantCudfAvailable(target,
+        () => fail("decimal target must not probe legacy APIs"), () => false))
     }
-    assert(GpuVariantGet.hasRequiredApisForTarget(DecimalType(10, 2), statusOnly))
-    assert(!GpuVariantGet.hasRequiredApisForTarget(IntegerType, statusOnly))
+  }
+
+  test("unavailable decimal APIs reject decimal planning without disabling legacy targets") {
+    Seq(DecimalType(10, 2), IntegerType).foreach { target =>
+      val expression = VariantGet(BoundReference(0, VariantType, nullable = true),
+        Literal("$.id"), target, failOnError = false, timeZoneId = Some("UTC"))
+      val conf = new RapidsConf(Map(
+        RapidsConf.ENABLE_CPU_BRIDGE.key -> "true",
+        RapidsConf.INCOMPATIBLE_OPS.key -> "true"))
+      val rule = GpuOverrides.expressions(classOf[VariantGet])
+      val meta = new GpuVariantGetMeta(expression, conf, None, rule) {
+        override protected def isCudfAvailable: Boolean =
+          GpuVariantGet.isVariantCudfAvailable(target, () => true, () => false)
+      }
+      meta.tagForGpu()
+      assert(meta.canThisBeReplaced == (target == IntegerType), target.toString)
+    }
+  }
+
+  test("production capability routing preserves distinct provider and legacy context probes") {
+    val thread = Thread.currentThread()
+    val original = thread.getContextClassLoader
+    try {
+      thread.setContextClassLoader(new ClassLoader(null) {})
+      // This exercises the public wrapper's real supplier wiring, not only its injected router.
+      // The context loader cannot see legacy APIs, but the decimal provider loader still can.
+      assert(!GpuVariantGet.isVariantCudfAvailable(IntegerType))
+      assert(GpuVariantGet.isVariantCudfAvailable(DecimalType(10, 2)))
+    } finally {
+      thread.setContextClassLoader(original)
+    }
   }
 
   test("decimal extraction and cast APIs must be static and return the expected result owner") {
@@ -114,8 +150,6 @@ class GpuVariantGetMetaSuite extends AnyFunSuite {
 
   test("result must implement AutoCloseable even if it declares close") {
     assert(!fixtureApis(utils = classOf[NonOwningUtils], result = classOf[NonOwningResult]))
-    // An AutoCloseable already inherits close():void, so a missing/wrong close return cannot
-    // be isolated with a legal Java fixture after the assignability check succeeds.
   }
 
   test("result value getter must exist and return ColumnVector") {
@@ -220,8 +254,6 @@ class GpuVariantGetMetaSuite extends AnyFunSuite {
         assert(partial.note.exists(_.contains("nonnegative")))
       case other => fail(s"Expected partial decimal support, got ${other.text}")
     }
-    val notes = rule.notes().getOrElse(fail("Missing VariantGet support notes"))
-    assert(notes.contains("nonnegative scales. This is not 100% compatible"))
     assert(rule.incompatDoc.isDefined)
   }
 

@@ -429,6 +429,31 @@ reader. Supported downstream operators may still execute on GPU. Queries that pr
 all Variant columns remain eligible for GPU scans even when the files contain shredded
 Variant data. GPU Variant writes remain unsupported.
 
+### Variant field extraction
+
+GPU `try_variant_get` supports the registered scalar targets, including decimal targets
+with precision up to 38 and nonnegative scale, when incompatible operations and the CPU
+expression bridge are enabled. Strict `variant_get` and negative-scale decimal targets
+remain on the CPU.
+
+For decimal targets, decimal payloads use Spark's HALF_UP rounding and return SQL null for
+final target overflow. SQL-null parent rows do not require runtime CPU fallback.
+Other source representations,
+including integer, string, boolean, and floating-point values, are converted by Spark through
+the CPU bridge. A missing path or encoded Variant null also uses that bridge: the native
+status alone cannot establish Spark's error behavior for malformed paths. Any row requiring
+the bridge sends the entire input batch through CPU evaluation, even when the surrounding
+plan contains `GpuVariantGet`. Temporary extraction and decoding columns are released before
+CPU conversion.
+
+Native decimal decoding truncates during rescaling, so GPU conversion uses a decimal128
+intermediate with precision 38 and scale `min(targetScale + 1, 38)` to preserve rounding.
+Values outside that intermediate range fall back even if the final target could hold them;
+for example, `5e37` into `decimal(38,0)` needs CPU conversion. Width-specific decimal payload
+precision and scale are checked, but these checks do not validate the entire Variant path.
+As with legacy scalar extraction, malformed or noncanonical object/metadata encodings may
+therefore differ from Spark; incompatible-operation gating remains in place.
+
 ## Parquet
 
 The Parquet format has more configs because there are multiple versions with some compatibility

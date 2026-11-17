@@ -32,8 +32,8 @@ import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import org.apache.spark.sql.catalyst.expressions.{BoundReference, Expression, Literal,
   NamedExpression}
 import org.apache.spark.sql.catalyst.expressions.variant.VariantGet
-import org.apache.spark.sql.types.{BooleanType, ByteType, DataType, DecimalType, DoubleType, FloatType,
-  IntegerType, LongType, ShortType, StringType}
+import org.apache.spark.sql.types.{BooleanType, ByteType, DataType, DecimalType, DoubleType,
+  FloatType, IntegerType, LongType, ShortType, StringType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.unsafe.types.UTF8String
 
@@ -45,6 +45,8 @@ case class GpuVariantGetMeta(
   extends BinaryExprMeta[VariantGet](expr, conf, p, rule) {
 
   override def isTimeZoneSupported: Boolean = true
+
+  protected def isCudfAvailable: Boolean = GpuVariantGet.isVariantCudfAvailable(expr.targetType)
 
   override def tagExprForGpu(): Unit = {
     if (!GpuColumnVector.isVariantType(expr.child.dataType)) {
@@ -68,7 +70,7 @@ case class GpuVariantGetMeta(
       willNotWorkOnGpu("strict variant_get is not supported; use try_variant_get")
     }
 
-    if (!GpuVariantGet.isVariantCudfAvailable(expr.targetType)) {
+    if (!isCudfAvailable) {
       willNotWorkOnGpu("cuDF Java was built without the required Variant extraction APIs " +
         s"for ${expr.targetType.simpleString}")
     }
@@ -115,10 +117,11 @@ case class GpuVariantGet(
   override def doColumnar(input: GpuColumnVector): ColumnVector = {
     dataType match {
       case target: DecimalType =>
-        GpuVariantExtraction.withRawExtraction(input.getBase, path) { extraction =>
-          GpuVariantDecimal.decode(extraction, target) {
-            GpuVariantGet.evaluateOnCpu(input, fallbackBridge)
-          }
+        GpuVariantExtraction.extractOrElse(input.getBase, path) { extraction =>
+          GpuVariantDecimal.decode(extraction, target)
+        } {
+          // Release extraction, decoding, and STRING-to-LIST temporaries before CPU conversion.
+          GpuVariantGet.evaluateOnCpu(input, fallbackBridge)
         }
       case _ =>
         val variantStruct = input.getBase
@@ -155,19 +158,21 @@ object GpuVariantGet {
     case _ => false
   }
 
-  def isVariantCudfAvailable(target: DataType): Boolean = target match {
-    case _: DecimalType => GpuVariantExtraction.isAvailable
-    case _ => isVariantCudfAvailable
-  }
+  def isVariantCudfAvailable(target: DataType): Boolean =
+    isVariantCudfAvailable(target, () => isVariantCudfAvailable,
+      () => GpuVariantExtraction.isAvailable)
 
-  def isVariantCudfAvailable: Boolean = hasRequiredApisForTarget(StringType,
+  def isVariantCudfAvailable: Boolean = hasLegacyApis(
     name => Class.forName(name, true, Thread.currentThread().getContextClassLoader))
 
-  private[rapids] def hasRequiredApisForTarget(
+  // The legacy probe intentionally retains its context-loader behavior. The decimal probe
+  // is cached against its provider loader, so a transient context loader cannot poison it.
+  private[rapids] def isVariantCudfAvailable(
       target: DataType,
-      loadClass: String => Class[_]): Boolean = target match {
-    case _: DecimalType => GpuVariantExtraction.hasRequiredApis(loadClass)
-    case _ => hasLegacyApis(loadClass)
+      legacyAvailable: () => Boolean,
+      decimalAvailable: () => Boolean): Boolean = target match {
+    case _: DecimalType => decimalAvailable()
+    case _ => legacyAvailable()
   }
 
   private def hasLegacyApis(loadClass: String => Class[_]): Boolean = {
@@ -286,7 +291,7 @@ object GpuVariantGet {
     withResource(masked)(_.castTo(targetType))
   }
 
-  private[rapids] def evaluateOnCpu(
+  private def evaluateOnCpu(
       input: GpuColumnVector,
       fallbackBridge: GpuCpuBridgeExpression): ColumnVector = {
     val inputColumns = Array[org.apache.spark.sql.vectorized.ColumnVector](input.incRefCount())

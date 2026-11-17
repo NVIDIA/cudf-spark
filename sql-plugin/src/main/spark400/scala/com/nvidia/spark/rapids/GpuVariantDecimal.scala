@@ -30,9 +30,7 @@ import org.apache.spark.sql.types.DecimalType
 
 /** Spark decimal TRY semantics over cuDF's exact decimal payload decoder. */
 private[rapids] object GpuVariantDecimal {
-  // Parquet Variant primitive IDs 8/9/10, shifted past the two basic-type bits, identify the
-  // DECIMAL4/8/16 encodings. Unlike the native decoder, Spark limits each original encoding's
-  // coefficient precision AND scale to 9/18/38. Other headers must not pass validation.
+  // One small lookup/gather avoids multiple full-column header comparison/select pairs.
   private val SourcePrecisions = Array.tabulate(256) {
     case 32 => DType.DECIMAL32_MAX_PRECISION
     case 36 => DType.DECIMAL64_MAX_PRECISION
@@ -48,9 +46,10 @@ private[rapids] object GpuVariantDecimal {
     target.precision >= 1 && target.precision <= DecimalType.MAX_PRECISION &&
       target.scale >= 0 && target.scale <= target.precision
 
+  /** Returns an owning GPU column, or None so the caller can fall back after extraction closes. */
   def decode(
       extraction: VariantOperationResult,
-      target: DecimalType)(fallback: => ColumnVector): ColumnVector = {
+      target: DecimalType): Option[ColumnVector] = {
     require(isSupportedTargetType(target), s"unsupported Variant decimal target: $target")
     // One guard digit preserves HALF_UP despite native truncation. At scale38 every valid
     // source decimal has scale<=38, so decoding at scale38 is exact and needs no guard/round.
@@ -60,55 +59,76 @@ private[rapids] object GpuVariantDecimal {
     withResource(VariantUtils.castVariantValueWithStatus(
         extraction.getValue, nativeType, extraction.getStatus)) { decoded =>
       if (!GpuVariantExtraction.allRowsCovered(extraction.getStatus, decoded.getStatus) ||
-          !fitsIntermediatePrecision(decoded.getValue, intermediate) ||
-          !isValidSource(extraction, decoded.getValue, guardScale)) {
+          !isValidDecimal(extraction, decoded.getValue, intermediate)) {
         // This is not final target overflow: the temporary scale may have overflowed even
         // though Spark can return a valid result. Preserve Spark errors/coercions as well.
-        fallback
+        None
       } else if (guardScale == target.scale) {
         // Do not rely on castDecimalToDecimal's same-type shortcut to enforce precision.
-        withResource(GpuCast.checkNFixDecimalBounds(decoded.getValue, target, ansiMode = false)) {
+        Some(withResource(GpuCast.checkNFixDecimalBounds(
+            decoded.getValue, target, ansiMode = false)) {
           _.castTo(DecimalUtil.createCudfDecimal(target))
-        }
+        })
       } else {
-        GpuCast.castDecimalToDecimal(decoded.getValue, intermediate, target, ansiMode = false)
+        Some(GpuCast.castDecimalToDecimal(decoded.getValue, intermediate, target, ansiMode = false))
       }
     }
   }
 
-  private def fitsIntermediatePrecision(value: ColumnView, intermediate: DecimalType): Boolean = {
+  private def fitsIntermediatePrecision(
+      value: ColumnView,
+      intermediate: DecimalType): ColumnVector = {
     // Native storage accepts 39-digit int128 values. Besides making the declared intermediate
     // truthful, this check prevents overflow inside the existing HALF_UP round helper.
     withResource(DecimalUtil.outOfBounds(value, intermediate)) { outOfBounds =>
-      !BoolUtils.isAnyValidTrue(outOfBounds)
+      outOfBounds.not()
     }
   }
 
-  private def isValidSource(
+  private def isValidDecimal(
       extraction: VariantOperationResult,
       guard: ColumnView,
-      guardScale: Int): Boolean = {
+      intermediate: DecimalType): Boolean = {
     withResource(sourcePrecisions(extraction.getValue)) { precision =>
-      withResource(extraction.getValue.extractListElement(1)) { encodedScale =>
-        withResource(encodedScale.castTo(DType.INT32)) { scale =>
-          if (!sourceScalesValid(scale, precision, extraction.getStatus)) {
-            false
-          } else {
-            withResource(sourceExponents(precision, scale, guardScale)) { exponent =>
-              sourceCoefficientsValid(guard, exponent, guardScale, extraction.getStatus)
-            }
-          }
+      withResource(sourceScales(extraction.getValue)) { scale =>
+        withResource(validSource(guard, precision, scale, intermediate.scale)) { sourceValid =>
+          decimalRowsValid(guard, sourceValid, extraction.getStatus, intermediate)
         }
       }
     }
   }
 
-  private def sourceScalesValid(
-      scale: ColumnView,
+  private def sourceScales(raw: ColumnView): ColumnVector = {
+    withResource(raw.extractListElement(1)) { encodedScale =>
+      encodedScale.castTo(DType.INT32)
+    }
+  }
+
+  private def validSource(
+      guard: ColumnView,
       precision: ColumnView,
-      extractionStatus: ColumnView): Boolean = {
-    withResource(scale.lessOrEqualTo(precision)) { validScale =>
-      allRowsValid(validScale, extractionStatus)
+      scale: ColumnView,
+      guardScale: Int): ColumnVector = {
+    withResource(sourceExponents(precision, scale, guardScale)) { exponent =>
+      withResource(sourceCoefficientsValid(guard, exponent, guardScale)) { coefficientsValid =>
+        withResource(scale.lessOrEqualTo(precision)) { scaleValid =>
+          coefficientsValid.and(scaleValid)
+        }
+      }
+    }
+  }
+
+  private def decimalRowsValid(
+      guard: ColumnView,
+      sourceValid: ColumnView,
+      extractionStatus: ColumnView,
+      intermediate: DecimalType): Boolean = {
+    // Keep status coverage separate so unsupported rows avoid these validation allocations.
+    // Combine the three decimal checks before their single device-to-host reduction.
+    withResource(fitsIntermediatePrecision(guard, intermediate)) { fits =>
+      withResource(sourceValid.and(fits)) { valid =>
+        allRowsValid(valid, extractionStatus)
+      }
     }
   }
 
@@ -124,6 +144,9 @@ private[rapids] object GpuVariantDecimal {
   }
 
   private def sourcePrecisions(raw: ColumnView): ColumnVector = {
+    // Parquet Variant primitive IDs 8/9/10, shifted past the two basic-type bits, identify the
+    // DECIMAL4/8/16 encodings. Spark limits their coefficient precision AND scale to 9/18/38.
+    // All other headers retain the invalid precision.
     withResource(raw.extractListElement(0)) { header =>
       withResource(header.castTo(DType.INT32)) { indexes =>
         withResource(Scalar.fromInt(0)) { zero =>
@@ -148,16 +171,16 @@ private[rapids] object GpuVariantDecimal {
   private def sourceCoefficientsValid(
       guard: ColumnView,
       exponent: ColumnView,
-      guardScale: Int,
-      extractionStatus: ColumnView): Boolean = {
+      guardScale: Int): ColumnVector = {
     // For original coefficient c, scale a, precision p and guard scale g>=1, a<=p implies
     // e=p+g-a>=1. Then |c|<10^p iff |trunc(c*10^(g-a))|<10^e, even when rescaling divides:
     // the threshold is an exact integer multiple of the divisor. Thus native truncation
     // cannot hide malformed source precision. Bounds are coefficients at scale -g, not
-    // numeric powers at scale0. The earlier 38-digit guard check makes clamping e>38 safe.
+    // numeric powers at scale0. The combined 38-digit guard check makes clamping e>38 safe;
+    // invalid source scales are rejected separately, with gather indexes bounded in all cases.
     withResource(boundedExponents(exponent)) { indexes =>
       withResource(sourceBounds(indexes, guardScale)) { bounds =>
-        coefficientsWithinBounds(guard, bounds, extractionStatus)
+        coefficientsWithinBounds(guard, bounds)
       }
     }
   }
@@ -184,14 +207,11 @@ private[rapids] object GpuVariantDecimal {
 
   private def coefficientsWithinBounds(
       guard: ColumnView,
-      bounds: Table,
-      extractionStatus: ColumnView): Boolean = {
+      bounds: Table): ColumnVector = {
     // Signed comparisons deliberately avoid abs(int128_min).
     withResource(guard.lessOrEqualTo(bounds.getColumn(0))) { belowUpper =>
       withResource(guard.greaterOrEqualTo(bounds.getColumn(1))) { aboveLower =>
-        withResource(belowUpper.and(aboveLower)) { valid =>
-          allRowsValid(valid, extractionStatus)
-        }
+        belowUpper.and(aboveLower)
       }
     }
   }

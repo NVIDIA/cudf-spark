@@ -45,7 +45,6 @@ private[rapids] object GpuVariantExtraction {
         classOf[AutoCloseable].isAssignableFrom(result) &&
         result.getMethod("getValue").getReturnType == classOf[ColumnVector] &&
         result.getMethod("getStatus").getReturnType == classOf[ColumnVector] &&
-        result.getMethod("close").getReturnType == java.lang.Void.TYPE &&
         status.getMethod("getNativeId").getReturnType == java.lang.Integer.TYPE &&
         status.getField("SUCCESS").getType == status &&
         status.getField("ROW_NULL").getType == status
@@ -56,12 +55,23 @@ private[rapids] object GpuVariantExtraction {
   }
 
   /** The callback borrows both result columns. Retain returned columns before this scope closes. */
+  def extractOrElse(
+      variantStruct: ColumnView,
+      path: String)(decode: VariantOperationResult => Option[ColumnVector])
+      (fallback: => ColumnVector): ColumnVector = {
+    // Keep this boundary shared by production and lifecycle tests: fallback must not retain
+    // extraction, decoded columns, or physical STRING-to-LIST conversion temporaries.
+    withRawExtraction(variantStruct, path)(decode).getOrElse(fallback)
+  }
+
+  /** The callback borrows both result columns. Retain returned columns before this scope closes. */
   def withRawExtraction[T](
       variantStruct: ColumnView,
       path: String)(f: VariantOperationResult => T): T = {
     require(variantStruct.getType == DType.STRUCT && variantStruct.getNumChildren == 2,
       "expected Variant struct with value and metadata children")
     variantStruct match {
+      // Avoid an unnecessary retain/close pair, including any column close callback.
       case owned: ColumnVector => withNormalizedExtraction(owned, path)(f)
       case _ =>
         // Rebuilding a borrowed parent with unsliced children loses its offset and validity.

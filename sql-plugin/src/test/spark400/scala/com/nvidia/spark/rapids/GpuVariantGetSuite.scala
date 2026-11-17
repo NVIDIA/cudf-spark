@@ -27,8 +27,9 @@ import com.nvidia.spark.rapids.Arm.withResource
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.expressions.{BoundReference, Literal}
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.{BinaryType, BooleanType, ByteType, DataType, DateType,
-  DoubleType, FloatType, IntegerType, LongType, ShortType, StringType, VariantType}
+  DecimalType, DoubleType, FloatType, IntegerType, LongType, ShortType, StringType, VariantType}
 import org.apache.spark.unsafe.types.UTF8String
 
 class GpuVariantGetSuite extends AnyFunSuite {
@@ -105,11 +106,20 @@ class GpuVariantGetSuite extends AnyFunSuite {
 
   test("supported Variant target types") {
     Seq(BooleanType, ByteType, ShortType, IntegerType, LongType, FloatType, DoubleType,
-      StringType).foreach { dataType =>
+      StringType, DecimalType(1, 0), DecimalType(9, 2), DecimalType(38, 38)).foreach { dataType =>
       assert(GpuVariantGet.isSupportedTargetType(dataType))
     }
     Seq(BinaryType, DateType).foreach { dataType =>
       assert(!GpuVariantGet.isSupportedTargetType(dataType))
+    }
+    // OSS's low-level constructor permits precision zero; a vendor may reject it earlier.
+    scala.util.Try(DecimalType(0, 0)).foreach { target =>
+      assert(!GpuVariantGet.isSupportedTargetType(target))
+    }
+    val sqlConf = new SQLConf
+    sqlConf.setConfString("spark.sql.legacy.allowNegativeScaleOfDecimal", "true")
+    SQLConf.withExistingConf(sqlConf) {
+      assert(!GpuVariantGet.isSupportedTargetType(DecimalType(10, -2)))
     }
   }
 

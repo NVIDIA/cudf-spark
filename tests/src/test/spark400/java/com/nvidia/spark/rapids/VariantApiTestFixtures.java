@@ -13,6 +13,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+/*** spark-rapids-shim-json-lines
+{"spark":["400","420"],"carryForward":"all"}
+{"spark":["400db173","410db183"],"carryForward":"none"}
+spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids;
 
 import ai.rapids.cudf.ColumnVector;
@@ -22,11 +27,6 @@ import ai.rapids.cudf.DType;
 /** Reflection-only API shapes; none of these methods allocates or invokes native code. */
 public final class VariantApiTestFixtures {
   private VariantApiTestFixtures() {}
-
-  public static class LegacyUtils {
-    public static ColumnVector getVariantFieldValue(ColumnView input, String path) { return null; }
-    public static ColumnVector castVariantValue(ColumnView input, DType type) { return null; }
-  }
 
   public abstract static class CloseableResult implements AutoCloseable {
     @Override

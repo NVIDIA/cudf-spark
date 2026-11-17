@@ -61,9 +61,10 @@ trait Spark400PlusCommonShims extends Spark350PlusNonDBShims {
           ("variant", TypeSig.VARIANT, TypeSig.VARIANT),
           ("path", TypeSig.lit(TypeEnum.STRING), TypeSig.STRING)),
         GpuVariantGetMeta)
-        .note("Decimal targets require nonnegative scales. ")
-        .incompat("cuDF Variant extraction currently decodes exact physical Variant types; " +
-          "Spark try_variant_get cast semantics can return different values")
+        .incompat("legacy scalar targets decode exact physical types and may differ from " +
+          "Spark casts. Decimal conversion uses Spark rounding with whole-batch CPU fallback " +
+          "for unsupported values. Malformed or noncanonical Variant encodings may differ " +
+          "from Spark")
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
     super.getExprs ++ shimExprs
   }
