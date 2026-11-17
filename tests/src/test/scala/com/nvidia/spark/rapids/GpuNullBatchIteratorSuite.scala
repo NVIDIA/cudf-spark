@@ -31,6 +31,9 @@ class GpuNullBatchIteratorSuite extends AnyFunSuite with BeforeAndAfterEach {
     try {
       TrampolineUtil.unsetTaskContext()
       GpuSemaphore.shutdown()
+      // The semaphore registered the mock tasks, which never complete
+      ScalableTaskCompletion.reset()
+      TaskRegistryTracker.clearRegistry()
       SparkSession.getActiveSession.foreach(_.stop())
       SparkSession.clearActiveSession()
     } finally {
