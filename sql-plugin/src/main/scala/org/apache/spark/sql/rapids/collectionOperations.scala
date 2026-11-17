@@ -125,6 +125,23 @@ case class GpuSlice(x: Expression, start: Expression, length: Expression)
   override def second: Expression = start
   override def third: Expression = length
 
+  // The zero-start and negative-length checks below throw, so this expression must be reported
+  // as having side effects unless both arguments are literals that are known to pass them.
+  // Without this, GpuIf/GpuCaseWhen evaluate the whole batch and fail on rows their predicate
+  // never selects, while Spark on the CPU never evaluates slice for those rows at all.
+  override def hasSideEffects: Boolean =
+    super.hasSideEffects || !(isNonZeroLiteral(start) && isNonNegativeLiteral(length))
+
+  private def isNonZeroLiteral(e: Expression): Boolean = e match {
+    case GpuLiteral(s: Int, _) => s != 0
+    case _ => false
+  }
+
+  private def isNonNegativeLiteral(e: Expression): Boolean = e match {
+    case GpuLiteral(l: Int, _) => l >= 0
+    case _ => false
+  }
+
   override def doColumnar(numRows: Int, listS: GpuScalar, startS: GpuScalar,
       lengthS: GpuScalar): ColumnVector = {
     // When either start or length is null, return all nulls like the CPU does.
@@ -227,18 +244,22 @@ case class GpuSlice(x: Expression, start: Expression, length: Expression)
       val list = listCol.getBase
       val start = startCol.getBase
       val length = lengthS.getValue.asInstanceOf[Int]
-      withResource(Scalar.fromInt(0)) { zero =>
-        if (start.contains(zero)) {
-          throw RapidsErrorUtils.unexpectedValueForStartInFunctionError(prettyName)
+      // null out the start of the rows the CPU never evaluates, so that neither the check
+      // below nor the slice itself sees a start value Spark would have ignored
+      withResource(NullUtilities.mergeNulls(start, list)) { checkedStart =>
+        withResource(Scalar.fromInt(0)) { zero =>
+          if (checkedStart.contains(zero)) {
+            throw RapidsErrorUtils.unexpectedValueForStartInFunctionError(prettyName)
+          }
         }
+        if (length < 0) {
+          // we know not all rows in list/start are nulls since we checked for that at the
+          // beginning of this function, and length is scalar: for _some_ rows we will have
+          // non-null list/start, and a guaranteed negative index.
+          throw RapidsErrorUtils.unexpectedValueForLengthInFunctionError(prettyName, length)
+        }
+        GpuListSliceUtils.listSlice(list, checkedStart, length, false)
       }
-      if (length < 0) {
-        // we know not all rows in list/start are nulls since we checked for that at the
-        // beginning of this function, and length is scalar: for _some_ rows we will have
-        // non-null list/start, and a guaranteed negative index.
-        throw RapidsErrorUtils.unexpectedValueForLengthInFunctionError(prettyName, length)
-      }
-      GpuListSliceUtils.listSlice(list, start, length, false)
     }
   }
 
@@ -252,20 +273,24 @@ case class GpuSlice(x: Expression, start: Expression, length: Expression)
     } else {
       val list = listCol.getBase
       val start = startCol.getBase
-      withResource(Scalar.fromInt(0)) { zero =>
-        if (start.contains(zero)) {
-          throw RapidsErrorUtils.unexpectedValueForStartInFunctionError(prettyName)
-        }
-      }
-      // keep null as original, or null it out if `list[i]` or `start[i]` is null
-      withResource(NullUtilities.mergeNulls(lengthCol.getBase, list, start)) { length =>
-        withResource(length.min()) { minLen =>
-          if (minLen.isValid && minLen.getInt < 0) {
-            throw RapidsErrorUtils.unexpectedValueForLengthInFunctionError(prettyName,
-              minLen.getInt)
+      // null out the start of the rows the CPU never evaluates, so that neither the check
+      // below nor the slice itself sees a start value Spark would have ignored
+      withResource(NullUtilities.mergeNulls(start, list, lengthCol.getBase)) { checkedStart =>
+        withResource(Scalar.fromInt(0)) { zero =>
+          if (checkedStart.contains(zero)) {
+            throw RapidsErrorUtils.unexpectedValueForStartInFunctionError(prettyName)
           }
         }
-        GpuListSliceUtils.listSlice(list, start, length, false)
+        // keep null as original, or null it out if `list[i]` or `start[i]` is null
+        withResource(NullUtilities.mergeNulls(lengthCol.getBase, list, start)) { length =>
+          withResource(length.min()) { minLen =>
+            if (minLen.isValid && minLen.getInt < 0) {
+              throw RapidsErrorUtils.unexpectedValueForLengthInFunctionError(prettyName,
+                minLen.getInt)
+            }
+          }
+          GpuListSliceUtils.listSlice(list, checkedStart, length, false)
+        }
       }
     }
   }
