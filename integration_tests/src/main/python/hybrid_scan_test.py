@@ -525,4 +525,3 @@ def test_hybrid_scan_dotted_column_collision(
             "spark.rapids.sql.format.parquet.reader.type": reader_mode,
             "spark.sql.parquet.fieldId.read.enabled": False,
         }))
-
