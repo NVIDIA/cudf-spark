@@ -19,8 +19,45 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.suites
 
-import org.apache.spark.sql.ApproxCountDistinctForIntervalsQuerySuite
+import java.time.Period
+
+import org.apache.spark.sql.{ApproxCountDistinctForIntervalsQuerySuite, Dataset}
+import org.apache.spark.sql.catalyst.expressions.{Alias, CreateArray, Literal}
+import org.apache.spark.sql.catalyst.expressions.aggregate.ApproxCountDistinctForIntervals
+import org.apache.spark.sql.catalyst.plans.logical.Aggregate
+import org.apache.spark.sql.execution.aggregate.ObjectHashAggregateExec
 import org.apache.spark.sql.rapids.utils.RapidsSQLTestsTrait
 
 class RapidsApproxCountDistinctForIntervalsQuerySuite
-  extends ApproxCountDistinctForIntervalsQuerySuite with RapidsSQLTestsTrait
+  extends ApproxCountDistinctForIntervalsQuerySuite with RapidsSQLTestsTrait {
+  test("RAPIDS interval NDV retains the target CPU aggregate") {
+    import testImplicits._
+
+    withSQLConf("spark.sql.adaptive.enabled" -> "false") {
+      val input = Seq(Period.ofMonths(100), Period.ofMonths(200), Period.ofMonths(300))
+        .toDF("value")
+      def query = {
+        val relation = input.logicalPlan
+        val aggregate = ApproxCountDistinctForIntervals(
+          relation.output.head, CreateArray((0 to 5).map(i => Literal(i / 10))))
+          .toAggregateExpression()
+        Dataset.ofRows(spark, Aggregate(Nil, Seq(Alias(aggregate, "ndv")()), relation))
+      }
+      withSQLConf("spark.rapids.sql.enabled" -> "false") {
+        val cpu = query
+        val expected = cpu.collect().toSeq
+        withSQLConf("spark.rapids.sql.enabled" -> "true") {
+          val gpu = query
+          checkAnswer(gpu, expected)
+          assert(gpu.schema == cpu.schema)
+          val aggregates = gpu.queryExecution.executedPlan.collect {
+            case aggregate: ObjectHashAggregateExec => aggregate
+          }
+          assert(aggregates.exists(_.aggregateExpressions.exists(
+            _.aggregateFunction.isInstanceOf[ApproxCountDistinctForIntervals])),
+            s"Expected interval NDV in a CPU aggregate: ${gpu.queryExecution.executedPlan}")
+        }
+      }
+    }
+  }
+}

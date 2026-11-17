@@ -19,8 +19,33 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.suites
 
+import com.nvidia.spark.rapids.{GpuCpuBridgeExpression, GpuProjectExec}
+
 import org.apache.spark.sql.XPathFunctionsSuite
+import org.apache.spark.sql.catalyst.expressions.xml.XPathString
 import org.apache.spark.sql.rapids.utils.RapidsSQLTestsTrait
 
 class RapidsXPathFunctionsSuite
-  extends XPathFunctionsSuite with RapidsSQLTestsTrait
+  extends XPathFunctionsSuite with RapidsSQLTestsTrait {
+  test("RAPIDS XPath string executes through a CPU bridge") {
+    def query = spark.range(2).selectExpr(
+      "xpath_string(IF(id = 0, '<a><b>x</b></a>', '<a><b>y</b></a>'), '/a/b')")
+    withSQLConf("spark.rapids.sql.enabled" -> "false") {
+      val cpu = query
+      val expected = cpu.collect().toSeq
+      withSQLConf("spark.rapids.sql.enabled" -> "true") {
+        val gpu = query
+        checkAnswer(gpu, expected)
+        assert(gpu.schema == cpu.schema)
+        val projects = gpu.queryExecution.executedPlan.collect {
+          case project: GpuProjectExec => project
+        }
+        assert(projects.exists(_.expressions.exists(_.exists {
+          case bridge: GpuCpuBridgeExpression =>
+            bridge.cpuExpression.exists(_.isInstanceOf[XPathString])
+          case _ => false
+        })), s"Expected XPathString in a GPU CPU bridge: ${gpu.queryExecution.executedPlan}")
+      }
+    }
+  }
+}
