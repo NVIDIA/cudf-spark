@@ -26,19 +26,18 @@ import java.util.Optional;
 import java.util.function.Function;
 
 import scala.collection.AbstractIterator;
-import scala.collection.Iterator;
 import scala.collection.JavaConverters;
 
 import com.nvidia.spark.rapids.ConcatAndConsumeAll;
 import com.nvidia.spark.rapids.DateTimeRebaseCorrected$;
 import com.nvidia.spark.rapids.GpuSemaphore$;
-import com.nvidia.spark.rapids.RmmRapidsRetryIterator;
 import com.nvidia.spark.rapids.SpillPriorities;
 import com.nvidia.spark.rapids.SpillableColumnarBatch;
 import com.nvidia.spark.rapids.iceberg.ShimUtils;
 import com.nvidia.spark.rapids.iceberg.parquet.GpuIcebergParquetReaderConf;
 import com.nvidia.spark.rapids.iceberg.parquet.GpuParquetReaderPostProcessor;
-import com.nvidia.spark.rapids.jni.GpuSplitAndRetryOOM;
+import com.nvidia.spark.rapids.iceberg.parquet.MultiFile;
+import com.nvidia.spark.rapids.iceberg.parquet.MultiThread;
 import com.nvidia.spark.rapids.parquet.ParquetFileInfoWithBlockMeta;
 import com.nvidia.spark.rapids.utils.ResourceUtil;
 
@@ -63,21 +62,29 @@ import org.apache.spark.sql.vectorized.ColumnarBatch;
 import org.apache.spark.unsafe.types.UTF8String;
 
 /**
- * Materialize each file's constants before concatenating its rows with other files.
- * Pending work contains only metadata, so retries can split even a single large file without
- * retaining GPU allocations or reading a Parquet footer.
+ * Reads eligible Iceberg metadata-only scans without opening Parquet data or footer files.
+ *
+ * <p>Iceberg already supplies exact record counts and constants for complete, unfiltered files
+ * without deletes. When those values cover the projection, reading Parquet adds unnecessary I/O.
+ *
+ * <p>Each file produces a lazy sequence of batches sized from its constants and the configured
+ * row, byte, and variable-width column limits before allocation. Optional combining follows the
+ * reader mode and its file-metadata restrictions. Only planned batches that fit the output limits
+ * can combine. Identical projected constants share one materialization; different constants are
+ * materialized separately before concatenation, with completed inputs made spillable. Allocation
+ * retries preserve the planned batch sizes;
+ * OOM-driven splitting is not used to decide how many rows to read.
  */
 public final class GpuIcebergMetadataReader extends AbstractIterator<ColumnarBatch>
     implements AutoCloseable {
   private final MetadataReadContext context;
-  private final MetadataBatchIterator groups;
-  private final Iterator<ColumnarBatch> batches;
+  private final java.util.Iterator<FileMetadata> files;
+  private MetadataFileReader currentFile;
   private boolean closed;
 
   public GpuIcebergMetadataReader(List<FileMetadata> files, GpuIcebergParquetReaderConf conf) {
     context = new MetadataReadContext(conf);
-    groups = new MetadataBatchIterator(files, context);
-    batches = RmmRapidsRetryIterator.withRetry(groups, MetadataBatch::split, this::materialize);
+    this.files = files.iterator();
   }
 
   /** Prove eligibility from Iceberg metadata, without constructing or opening input files. */
@@ -123,26 +130,8 @@ public final class GpuIcebergMetadataReader extends AbstractIterator<ColumnarBat
         task.deletes().isEmpty() && Expressions.alwaysTrue().equals(task.residual());
   }
 
-  private ColumnarBatch materialize(MetadataBatch batch) {
-    GpuSemaphore$.MODULE$.acquireIfNecessary(TaskContext.get());
-    if (context.getSparkTypes().length == 0) {
-      return new ColumnarBatch(new ColumnVector[0], batch.getRows());
-    }
-    if (batch.getParts().length == 1) {
-      return batch.getParts()[0].getFile().getProcessor().process(
-          new ColumnarBatch(new ColumnVector[0], batch.getRows()));
-    }
-    // Spill completed parts while constructing the remaining parts of the output batch.
-    SpillableColumnarBatch[] parts = new SpillableColumnarBatch[batch.getParts().length];
-    Throwable failure = null;
-    try {
-      for (int i = 0; i < parts.length; i++) {
-        MetadataFileRows part = batch.getParts()[i];
-        ColumnarBatch materialized = part.getFile().getProcessor().process(
-            new ColumnarBatch(new ColumnVector[0], part.getRows()));
-        parts[i] = ResourceUtil.closeOnExcept(materialized,
-            cb -> SpillableColumnarBatch.apply(cb, SpillPriorities.ACTIVE_BATCHING_PRIORITY()));
-      }
+  private ColumnarBatch concatenate(SpillableColumnarBatch[] parts) {
+    return ResourceUtil.withRetryNoSplit(() -> {
       ColumnarBatch[] materialized = new ColumnarBatch[parts.length];
       try {
         for (int i = 0; i < parts.length; i++) {
@@ -154,6 +143,92 @@ public final class GpuIcebergMetadataReader extends AbstractIterator<ColumnarBat
       }
       // Concatenation consumes all materialized inputs, including on failure.
       return ConcatAndConsumeAll.buildNonEmptyBatchFromTypes(materialized, context.getSparkTypes());
+    });
+  }
+
+  @Override
+  public boolean hasNext() {
+    if (closed) {
+      return false;
+    }
+    while (currentFile == null || !currentFile.hasNext()) {
+      currentFile = null;
+      if (!files.hasNext()) {
+        return false;
+      }
+      FileMetadata file = files.next();
+      if (file.getRowCount() > 0) {
+        currentFile = new MetadataFileReader(file, context);
+      }
+    }
+    return true;
+  }
+
+  @Override
+  public ColumnarBatch next() {
+    if (!hasNext()) {
+      throw new NoSuchElementException("No more Iceberg metadata batches");
+    }
+    if (context.getCombineThresholdBytes() == 0 ||
+        currentFile.getNextBatchRows() == context.getMaxRows() ||
+        currentFile.getRowBytes() * currentFile.getNextBatchRows() >=
+            context.getCombineThresholdBytes()) {
+      return currentFile.next();
+    }
+
+    List<MetadataFileBatch> parts = new ArrayList<>();
+    int rows = 0;
+    long bytes = 0;
+    long[] leafBytes = new long[currentFile.getLeafSizes().length];
+    while (hasNext()) {
+      int nextRows = currentFile.getNextBatchRows();
+      long nextBytes = currentFile.getRowBytes() * nextRows;
+      long[] leafSizes = currentFile.getLeafSizes();
+      if (!parts.isEmpty()) {
+        boolean fits = nextRows <= context.getMaxRows() - rows &&
+            nextBytes <= context.getMaxBytes() - bytes;
+        for (int i = 0; fits && i < leafBytes.length; i++) {
+          fits = leafSizes[i] * nextRows <= context.getColumnLimit() - leafBytes[i];
+        }
+        if (!fits) {
+          break;
+        }
+      }
+      // Consume a batch already sized for this file; combining never changes its row capacity.
+      currentFile.takeNextBatchRows();
+      int last = parts.size() - 1;
+      if (last >= 0 && parts.get(last).getFile().sameOutput(currentFile)) {
+        MetadataFileBatch previous = parts.get(last);
+        parts.set(last, new MetadataFileBatch(previous.getFile(), previous.getRows() + nextRows));
+      } else {
+        parts.add(new MetadataFileBatch(currentFile, nextRows));
+      }
+      rows += nextRows;
+      bytes += nextBytes;
+      for (int i = 0; i < leafBytes.length; i++) {
+        leafBytes[i] += leafSizes[i] * nextRows;
+      }
+      if (rows == context.getMaxRows() || bytes >= context.getCombineThresholdBytes()) {
+        break;
+      }
+    }
+    return materialize(parts.toArray(new MetadataFileBatch[0]));
+  }
+
+  private ColumnarBatch materialize(MetadataFileBatch[] batches) {
+    if (batches.length == 1) {
+      return batches[0].getFile().materializeRows(batches[0].getRows());
+    }
+    SpillableColumnarBatch[] parts = new SpillableColumnarBatch[batches.length];
+    Throwable failure = null;
+    try {
+      for (int i = 0; i < batches.length; i++) {
+        MetadataFileBatch batch = batches[i];
+        ColumnarBatch materialized = batch.getFile().materializeRows(batch.getRows());
+        parts[i] = ResourceUtil.closeOnExcept(materialized,
+            cb -> SpillableColumnarBatch.apply(cb, SpillPriorities.ACTIVE_BATCHING_PRIORITY()));
+      }
+      return concatenate(parts);
     } catch (Throwable t) {
       failure = t;
       throw t;
@@ -163,24 +238,10 @@ public final class GpuIcebergMetadataReader extends AbstractIterator<ColumnarBat
   }
 
   @Override
-  public boolean hasNext() {
-    return !closed && batches.hasNext();
-  }
-
-  @Override
-  public ColumnarBatch next() {
-    if (!hasNext()) {
-      throw new NoSuchElementException("No more Iceberg metadata batches");
-    }
-    return batches.next();
-  }
-
-  @Override
   public void close() {
-    if (!closed) {
-      closed = true;
-      ResourceUtil.closeAll(null, groups, (AutoCloseable) batches);
-    }
+    closed = true;
+    // A partially consumed file retains only metadata. Returned batches belong to the caller.
+    currentFile = null;
   }
 
   /** File-level metadata sufficient to produce rows without opening a data file. */
@@ -208,7 +269,11 @@ public final class GpuIcebergMetadataReader extends AbstractIterator<ColumnarBat
     }
   }
 
-  /** Schema and batch limits shared by all files in a reader. */
+  /**
+   * Shares schemas and sizing limits across files to avoid repeated schema conversion.
+   * Row capacity is estimated before materialization, including each variable-width leaf, so
+   * a large file is emitted in bounded batches without waiting for an allocation failure.
+   */
   private static final class MetadataReadContext {
     private final GpuIcebergParquetReaderConf conf;
     private final DataType[] sparkTypes;
@@ -217,6 +282,7 @@ public final class GpuIcebergMetadataReader extends AbstractIterator<ColumnarBat
     private final int maxRows;
     private final long maxBytes;
     private final long columnLimit;
+    private final long combineThresholdBytes;
 
     MetadataReadContext(GpuIcebergParquetReaderConf conf) {
       this.conf = conf;
@@ -232,6 +298,46 @@ public final class GpuIcebergMetadataReader extends AbstractIterator<ColumnarBat
       maxBytes = Math.max(1L, Math.min(Integer.MAX_VALUE,
           Math.min(conf.maxBatchSizeBytes(), conf.targetBatchSizeBytes())));
       columnLimit = Math.min(conf.maxGpuColumnSizeBytes(), Integer.MAX_VALUE);
+      combineThresholdBytes = combineThreshold(conf, maxBytes);
+    }
+
+    private static long combineThreshold(GpuIcebergParquetReaderConf conf, long maxBytes) {
+      // Match the data readers' file-boundary restrictions, even for metadata-only projections.
+      if (conf.expectedSchema().findField(MetadataColumns.FILE_PATH.fieldId()) != null) {
+        return 0;
+      }
+      if (conf.threadConf() instanceof MultiThread) {
+        MultiThread multiThread = (MultiThread) conf.threadConf();
+        if (!multiThread.disableCombining() && !multiThread.hasFilePathMetadata() &&
+            !multiThread.hasRowPositionMetadata()) {
+          return Math.max(0, Math.min(maxBytes,
+              multiThread.combineConf().combineThresholdSize()));
+        }
+      } else if (conf.threadConf() instanceof MultiFile) {
+        MultiFile multiFile = (MultiFile) conf.threadConf();
+        if (!multiFile.hasFilePathMetadata() && !multiFile.hasRowPositionMetadata()) {
+          return maxBytes;
+        }
+      }
+      return 0;
+    }
+
+    public int estimateRowsPerBatch(long rowBytes, long[] leafSizes) {
+      long rows = maxRows;
+      if (rowBytes > 0) {
+        // A single row may exceed the soft byte target, as in the data readers.
+        rows = Math.min(rows, Math.max(1, maxBytes / rowBytes));
+      }
+      for (long size : leafSizes) {
+        if (size > 0) {
+          rows = Math.min(rows, columnLimit / size);
+        }
+      }
+      if (rows == 0) {
+        throw new IllegalArgumentException(
+            "Iceberg metadata value exceeds the GPU column size limit");
+      }
+      return (int) rows;
     }
 
     public GpuIcebergParquetReaderConf getConf() {
@@ -261,18 +367,28 @@ public final class GpuIcebergMetadataReader extends AbstractIterator<ColumnarBat
     public long getColumnLimit() {
       return columnLimit;
     }
+
+    public long getCombineThresholdBytes() {
+      return combineThresholdBytes;
+    }
   }
 
-  /** Projected constants, their sizes, and a lazily created materializer for one file. */
-  private static final class MetadataFileState {
+  /**
+   * Emits one file's constants in a lazy sequence of pre-sized batches.
+   * Files may contain more rows than a GPU batch can represent, so only the remaining row count
+   * is retained between calls. Materialization uses the post-processor's non-splitting retry.
+   */
+  private static final class MetadataFileReader extends AbstractIterator<ColumnarBatch> {
     private final FileMetadata file;
     private final long rowBytes;
     private final long[] leafSizes;
     private final MetadataReadContext context;
     private final Object[] values;
+    private final int rowsPerBatch;
+    private long remainingRows;
     private GpuParquetReaderPostProcessor processor;
 
-    MetadataFileState(FileMetadata file, MetadataReadContext context) {
+    MetadataFileReader(FileMetadata file, MetadataReadContext context) {
       this.file = file;
       this.context = context;
       List<Types.NestedField> fields = context.getConf().expectedSchema().columns();
@@ -290,6 +406,8 @@ public final class GpuIcebergMetadataReader extends AbstractIterator<ColumnarBat
       for (int i = 0; i < leafSizes.length; i++) {
         leafSizes[i] = leaves.get(i);
       }
+      rowsPerBatch = context.estimateRowsPerBatch(rowBytes, leafSizes);
+      remainingRows = file.getRowCount();
     }
 
     public long getRowBytes() {
@@ -300,12 +418,47 @@ public final class GpuIcebergMetadataReader extends AbstractIterator<ColumnarBat
       return leafSizes;
     }
 
+    public int getNextBatchRows() {
+      return (int) Math.min(remainingRows, rowsPerBatch);
+    }
+
+    @Override
+    public boolean hasNext() {
+      return remainingRows > 0;
+    }
+
     public Object[] getValues() {
       return values;
     }
 
-    boolean sameOutput(MetadataFileState other) {
+    public boolean sameOutput(MetadataFileReader other) {
       return Arrays.deepEquals(values, other.getValues());
+    }
+
+    public int takeNextBatchRows() {
+      if (!hasNext()) {
+        throw new NoSuchElementException("No more rows in Iceberg metadata file");
+      }
+      int rows = getNextBatchRows();
+      remainingRows -= rows;
+      return rows;
+    }
+
+    @Override
+    public ColumnarBatch next() {
+      return materializeRows(takeNextBatchRows());
+    }
+
+    public ColumnarBatch materializeRows(int rows) {
+      if (rows <= 0 || rows > rowsPerBatch) {
+        throw new IllegalArgumentException("Metadata batch exceeds its estimated row capacity");
+      }
+      GpuSemaphore$.MODULE$.acquireIfNecessary(TaskContext.get());
+      ColumnarBatch batch = new ColumnarBatch(new ColumnVector[0], rows);
+      if (context.getSparkTypes().length > 0) {
+        batch = getProcessor().process(batch);
+      }
+      return batch;
     }
 
     public GpuParquetReaderPostProcessor getProcessor() {
@@ -347,164 +500,22 @@ public final class GpuIcebergMetadataReader extends AbstractIterator<ColumnarBat
     }
   }
 
-  /** A bounded run of rows with identical projected constants. */
-  private static final class MetadataFileRows {
-    private final MetadataFileState file;
+  /** A bounded run of planned file batches whose projected constants can be materialized once. */
+  private static final class MetadataFileBatch {
+    private final MetadataFileReader file;
     private final int rows;
 
-    MetadataFileRows(MetadataFileState file, int rows) {
+    MetadataFileBatch(MetadataFileReader file, int rows) {
       this.file = file;
       this.rows = rows;
     }
 
-    public MetadataFileState getFile() {
+    public MetadataFileReader getFile() {
       return file;
     }
 
     public int getRows() {
       return rows;
-    }
-  }
-
-  /** Pending work owns only metadata, so even a single file can be split on allocation failure. */
-  private static final class MetadataBatch implements AutoCloseable {
-    private final MetadataFileRows[] parts;
-    private final int rows;
-
-    MetadataBatch(MetadataFileRows[] parts) {
-      this.parts = parts;
-      int total = 0;
-      for (MetadataFileRows part : parts) {
-        total += part.getRows();
-      }
-      rows = total;
-    }
-
-    public MetadataFileRows[] getParts() {
-      return parts;
-    }
-
-    public int getRows() {
-      return rows;
-    }
-
-    static scala.collection.immutable.List<MetadataBatch> split(MetadataBatch batch) {
-      if (batch.getRows() <= 1) {
-        throw new GpuSplitAndRetryOOM("Cannot split one metadata row");
-      }
-      int leftRows = batch.getRows() / 2;
-      List<MetadataFileRows> left = new ArrayList<>();
-      List<MetadataFileRows> right = new ArrayList<>();
-      for (MetadataFileRows part : batch.getParts()) {
-        int take = Math.min(leftRows, part.getRows());
-        if (take > 0) {
-          left.add(new MetadataFileRows(part.getFile(), take));
-        }
-        if (take < part.getRows()) {
-          right.add(new MetadataFileRows(part.getFile(), part.getRows() - take));
-        }
-        leftRows -= take;
-      }
-      return JavaConverters.asScalaBufferConverter(Arrays.asList(
-          new MetadataBatch(left.toArray(new MetadataFileRows[0])),
-          new MetadataBatch(right.toArray(new MetadataFileRows[0])))).asScala().toList();
-    }
-
-    @Override
-    public void close() {
-      // No GPU allocations are retained by a pending batch.
-    }
-  }
-
-  /** Combine file metadata into batches bounded by row, byte, and variable-width column limits. */
-  private static final class MetadataBatchIterator extends AbstractIterator<MetadataBatch>
-      implements AutoCloseable {
-    private final java.util.Iterator<FileMetadata> files;
-    private final MetadataReadContext context;
-    private MetadataFileState currentFile;
-    private long remainingRows;
-    private boolean closed;
-
-    MetadataBatchIterator(List<FileMetadata> files, MetadataReadContext context) {
-      this.files = files.iterator();
-      this.context = context;
-    }
-
-    @Override
-    public boolean hasNext() {
-      if (closed) {
-        return false;
-      }
-      while (currentFile == null && files.hasNext()) {
-        FileMetadata file = files.next();
-        if (file.getRowCount() > 0) {
-          currentFile = new MetadataFileState(file, context);
-          remainingRows = file.getRowCount();
-        }
-      }
-      return currentFile != null;
-    }
-
-    @Override
-    public MetadataBatch next() {
-      if (!hasNext()) {
-        throw new NoSuchElementException("No more Iceberg metadata");
-      }
-      List<MetadataFileRows> parts = new ArrayList<>();
-      int rows = 0;
-      long bytes = 0;
-      long[] leafBytes = new long[currentFile.getLeafSizes().length];
-      while (rows < context.getMaxRows() && hasNext()) {
-        MetadataFileState file = currentFile;
-        long byteRows = context.getMaxRows();
-        if (file.getRowBytes() > 0) {
-          byteRows = Math.max(0L, (context.getMaxBytes() - bytes) / file.getRowBytes());
-          // Like the data readers, allow one row larger than the soft batch byte limit.
-          if (rows == 0) {
-            byteRows = Math.max(1L, byteRows);
-          }
-        }
-        long columnRows = context.getMaxRows();
-        for (int i = 0; i < leafBytes.length; i++) {
-          if (file.getLeafSizes()[i] > 0) {
-            columnRows = Math.min(columnRows,
-                (context.getColumnLimit() - leafBytes[i]) / file.getLeafSizes()[i]);
-          }
-        }
-        int take = (int) Math.min(Math.min(remainingRows, context.getMaxRows() - rows),
-            Math.min(byteRows, columnRows));
-        if (take == 0) {
-          if (rows == 0) {
-            throw new IllegalArgumentException(
-                "Iceberg metadata value exceeds the GPU column size limit");
-          }
-          break;
-        }
-        // Identical projected constants share one materialization, including across files.
-        int last = parts.size() - 1;
-        if (last >= 0 && parts.get(last).getFile().sameOutput(file)) {
-          MetadataFileRows previous = parts.get(last);
-          parts.set(last, new MetadataFileRows(previous.getFile(), previous.getRows() + take));
-        } else {
-          parts.add(new MetadataFileRows(file, take));
-        }
-        rows += take;
-        bytes += file.getRowBytes() * take;
-        for (int i = 0; i < leafBytes.length; i++) {
-          leafBytes[i] += file.getLeafSizes()[i] * take;
-        }
-        remainingRows -= take;
-        if (remainingRows == 0) {
-          currentFile = null;
-        }
-      }
-      return new MetadataBatch(parts.toArray(new MetadataFileRows[0]));
-    }
-
-    @Override
-    public void close() {
-      closed = true;
-      currentFile = null;
     }
   }
 }
