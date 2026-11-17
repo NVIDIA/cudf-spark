@@ -243,15 +243,17 @@ def test_casting_decimal_to_decimal(spark_tmp_path, data_gen, read_type, ansi_mo
 
 
 @ignore_order(local=True)
-@pytest.mark.parametrize('reader', ['PERFILE', 'MULTITHREADED', 'COALESCING'])
+# Pair reader and API settings to cover V1/V2 without multiplying every boundary case.
+@pytest.mark.parametrize('reader, v1_enabled_list', [
+    ('PERFILE', 'orc'), ('MULTITHREADED', ''), ('COALESCING', 'orc'), ('COALESCING', '')])
 @pytest.mark.parametrize('ansi_enabled', ['false', 'true'])
 @pytest.mark.parametrize('file_precision, file_scale, read_precision, read_scale', [
-    (9, 2, 7, 2), (18, 2, 10, 2), (34, 2, 20, 2),
+    (9, 2, 7, 2), (18, 2, 10, 2), (34, 2, 20, 2), (34, 2, 18, 2),
     # More precision can still leave fewer digits for the whole-number part.
     (9, 2, 10, 4),
     # Rounding can carry into a whole-number digit outside the requested precision.
     (9, 3, 8, 2)])
-def test_orc_decimal_precision_narrowing(spark_tmp_path, reader,
+def test_orc_decimal_precision_narrowing(spark_tmp_path, reader, v1_enabled_list,
         ansi_enabled, file_precision, file_scale, read_precision, read_scale):
     data_path = spark_tmp_path + '/ORC_DECIMAL_NARROWING'
     decimal_type = DecimalType(file_precision, file_scale)
@@ -277,7 +279,9 @@ def test_orc_decimal_precision_narrowing(spark_tmp_path, reader,
         f'm map<int,{target}>, n {target}, k map<{target},int>')
     conf = {
         'spark.rapids.sql.format.orc.reader.type': reader,
-        'spark.sql.sources.useV1SourceList': 'orc',
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        # Use CPU row-reader overflow semantics for both V1 and V2. This does not
+        # change the GPU reader or select the data-source API.
         'spark.sql.orc.enableVectorizedReader': 'false',
         'spark.sql.ansi.enabled': ansi_enabled}
 
@@ -292,3 +296,28 @@ def test_orc_decimal_precision_narrowing(spark_tmp_path, reader,
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.schema(schema).orc(data_path)
             .filter(f'd > {max_value} OR d < -{max_value}').select('id'), conf=conf)
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize('v1_enabled_list', ['', 'orc'])
+@pytest.mark.parametrize('ansi_enabled', ['false', 'true'])
+def test_orc_decimal_narrowing_map_key_overflow(spark_tmp_path,
+        v1_enabled_list, ansi_enabled):
+    data_path = spark_tmp_path + '/ORC_DECIMAL_MAP_KEYS'
+    values = [(Decimal(value),) for value in
+        ['99999999.99', '-99999999.99', '100000000.00', '-100000000.00']]
+    with_cpu_session(lambda spark: spark.createDataFrame(values, 'd decimal(18,2)')
+        .selectExpr('map(d, 1) as k').coalesce(1).write.orc(data_path))
+    conf = {
+        'spark.rapids.sql.format.orc.reader.type': 'COALESCING',
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        # ORC's CPU row reader inserts evolved keys into a TreeMap, which rejects null.
+        # Its vectorized reader exposes overflowing keys as null for comparison with GPU.
+        'spark.sql.orc.enableVectorizedReader': 'true',
+        'spark.sql.orc.enableNestedColumnVectorizedReader': 'true',
+        'spark.sql.ansi.enabled': ansi_enabled}
+    # Inspect the key on the GPU, before collecting an invalid null-key map to the host.
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema('k map<decimal(10,2),int>').orc(data_path)
+            .selectExpr('map_keys(k)[0] as key', 'map_keys(k)[0] is null as key_is_null'),
+        conf=conf)

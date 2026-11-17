@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids
 
 import java.math.BigInteger
 
-import ai.rapids.cudf.{ColumnVector, Scalar, Table}
+import ai.rapids.cudf.{ColumnVector, ColumnView, Scalar, Table}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.parquet.ParquetSchemaUtils
 import org.apache.parquet.schema.MessageTypeParser
@@ -26,7 +26,8 @@ import org.apache.parquet.schema.MessageTypeParser
 import org.apache.spark.sql.types.{DecimalType, StructField, StructType}
 
 class ParquetDecimalSchemaSuite extends RmmSparkRetrySuiteBase {
-  private def evolve(input: ColumnVector, from: DecimalType, to: DecimalType): Table = {
+  private def evolve(
+      input: ColumnVector, from: DecimalType, to: DecimalType, nested: Boolean = false): Table = {
     val physicalType = if (from.precision <= 9) {
       "int32"
     } else if (from.precision <= 18) {
@@ -34,17 +35,20 @@ class ParquetDecimalSchemaSuite extends RmmSparkRetrySuiteBase {
     } else {
       "fixed_len_byte_array(16)"
     }
+    val field = s"optional $physicalType d (DECIMAL(${from.precision},${from.scale}));"
     val fileSchema = MessageTypeParser.parseMessageType(
-      s"message spark { optional $physicalType d (DECIMAL(${from.precision},${from.scale})); }")
-    val readSchema = StructType(Seq(StructField("d", to)))
+      s"message spark { ${if (nested) s"optional group s { $field }" else field} }")
+    val fields = StructType(Seq(StructField("d", to)))
+    val readSchema = if (nested) StructType(Seq(StructField("s", fields))) else fields
     // Exercise the real Parquet cast predicate through its caller, without injecting OOMs.
     ParquetSchemaUtils.evolveSchemaIfNeededAndClose(new Table(input), fileSchema, readSchema,
       caseSensitive = true, useFieldId = false)
   }
 
-  Seq((9, 7), (20, 10), (7, 9), (10, 18), (9, 9), (20, 20)).foreach {
-    case (fromPrecision, toPrecision) =>
-      test(s"Parquet decimal($fromPrecision,2) to decimal($toPrecision,2) without retry") {
+  Seq((9, 7, false), (18, 10, false), (34, 20, false), (34, 20, true),
+      (20, 10, false), (7, 9, false), (10, 18, false), (9, 9, false), (20, 20, false)).foreach {
+    case (fromPrecision, toPrecision, nested) =>
+      test(s"Parquet decimal($fromPrecision,2) to decimal($toPrecision,2), nested=$nested") {
         val from = DecimalType(fromPrecision, 2)
         val to = DecimalType(toPrecision, 2)
         val narrows = fromPrecision > toPrecision
@@ -57,22 +61,34 @@ class ParquetDecimalSchemaSuite extends RmmSparkRetrySuiteBase {
         withResource(ColumnVector.decimalFromBigInt(-2, values: _*)) { wide =>
           withResource(wide.castTo(DecimalUtil.createCudfDecimal(from))) { input =>
             val originalRefCount = input.getRefCount
-            withResource(evolve(input, from, to)) { result =>
-              assert(result.getColumn(0).getType == DecimalUtil.createCudfDecimal(to))
-              if (narrows) {
-                withResource(ColumnVector.decimalFromBoxedLongs(-2,
-                    Long.box(bound.longValueExact() - 1), null, null, Long.box(42))) { expected =>
-                  withResource(expected.castTo(DecimalUtil.createCudfDecimal(to))) { typed =>
-                    CudfTestHelper.assertColumnsAreEqual(typed, result.getColumn(0))
-                  }
-                }
-              } else {
-                withResource(result.getColumn(0).copyToHost()) { host =>
+            def check(result: Table): Unit = {
+              def checkColumn(actual: ColumnView): Unit = {
+                assert(actual.getType == DecimalUtil.createCudfDecimal(to))
+                // Check the device null mask: host decimal conversion can hide overflow.
+                assert(actual.getNullCount == (if (narrows) 2 else 0))
+                withResource(actual.copyToHost()) { host =>
                   values.zipWithIndex.foreach { case (value, index) =>
-                    assert(host.getBigDecimal(index) == new java.math.BigDecimal(value, 2))
+                    if (narrows && (index == 1 || index == 2)) {
+                      assert(host.isNull(index))
+                    } else {
+                      assert(!host.isNull(index))
+                      assert(host.getBigDecimal(index) == new java.math.BigDecimal(value, 2))
+                    }
                   }
                 }
               }
+              if (nested) {
+                withResource(result.getColumn(0).getChildColumnView(0))(checkColumn)
+              } else {
+                checkColumn(result.getColumn(0))
+              }
+            }
+            if (nested) {
+              withResource(ColumnVector.makeStruct(input)) { struct =>
+                withResource(evolve(struct, from, to, nested = true))(check)
+              }
+            } else {
+              withResource(evolve(input, from, to))(check)
             }
             assert(input.getRefCount == originalRefCount)
           }

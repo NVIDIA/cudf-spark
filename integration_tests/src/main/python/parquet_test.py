@@ -1979,12 +1979,16 @@ def test_parquet_decimal_precision_scale_change(spark_tmp_path, from_decimal_gen
         lambda spark: spark.read.schema(read_schema).parquet(data_path), conf=spark_conf)
 
 @ignore_order(local=True)
-@pytest.mark.parametrize('reader_confs', [original_parquet_file_reader_conf,
-    multithreaded_parquet_file_reader_conf, coalesce_parquet_file_reader_conf])
+# Pair reader and API settings to cover V1/V2 without multiplying every boundary case.
+@pytest.mark.parametrize('reader_confs, v1_enabled_list', [
+    (original_parquet_file_reader_conf, 'parquet'),
+    (multithreaded_parquet_file_reader_conf, ''),
+    (coalesce_parquet_file_reader_conf, 'parquet'),
+    (coalesce_parquet_file_reader_conf, '')])
 @pytest.mark.parametrize('legacy_format', ['false', 'true'])
 @pytest.mark.parametrize('ansi_enabled', ['false', 'true'])
 @pytest.mark.parametrize('file_precision, read_precision', [(9, 7), (18, 10), (34, 20)])
-def test_parquet_decimal_precision_narrowing(spark_tmp_path, reader_confs,
+def test_parquet_decimal_precision_narrowing(spark_tmp_path, reader_confs, v1_enabled_list,
         legacy_format, ansi_enabled, file_precision, read_precision):
     data_path = spark_tmp_path + '/PARQUET_DECIMAL_NARROWING'
     decimal_type = DecimalType(file_precision, 2)
@@ -2006,7 +2010,7 @@ def test_parquet_decimal_precision_narrowing(spark_tmp_path, reader_confs,
     schema = (f'id int, d {target}, s struct<d:{target}>, a array<{target}>, '
         f'm map<int,{target}>, n {target}, k map<{target},int>')
     conf = copy_and_update(reader_confs, {
-        'spark.sql.sources.useV1SourceList': 'parquet',
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
         'spark.sql.parquet.enableVectorizedReader': 'false',
         'spark.sql.ansi.enabled': ansi_enabled})
 
@@ -2038,22 +2042,57 @@ def test_parquet_decimal_scale_change_boundaries(spark_tmp_path, ansi_enabled,
     values = [Decimal(value) for value in inputs] + [None]
     with_cpu_session(lambda spark: gen_df(spark,
         [('d', RepeatSeqGen(values, data_type=DecimalType(9, file_scale)))], length=len(values))
-        .coalesce(1).write.parquet(data_path))
+        # Same-schema files can share a coalesced batch, unlike the mixed-precision test.
+        .repartition(2).write.parquet(data_path))
     conf = copy_and_update(coalesce_parquet_file_reader_conf, {
         'spark.sql.sources.useV1SourceList': '',
         'spark.sql.parquet.enableVectorizedReader': 'false',
+        'spark.sql.ansi.enabled': ansi_enabled,
+        'spark.sql.adaptive.enabled': 'false',
+        'spark.sql.files.minPartitionNum': '1',
+        'spark.sql.files.openCostInBytes': '0',
+        'spark.rapids.sql.metrics.level': 'DEBUG'})
+
+    def read(spark):
+        df = spark.read.schema(f'd decimal({read_precision},{read_scale})').parquet(data_path)
+        assert len(df.inputFiles()) == 2
+        return df.selectExpr('d', 'd is null as is_null', 'd + 1 as added')
+
+    captured = {}
+    assert_cpu_and_gpu_are_equal_collect_with_capture(read, conf=conf,
+        gpu_plan_assertion=lambda cpu_plan, gpu_plan: captured.update(
+            {'batches': _scan_output_batches(gpu_plan)}))
+    # Prove the two same-schema files were actually decoded as one coalesced batch.
+    assert captured['batches'] == 1
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize('v1_enabled_list', ['', 'parquet'])
+@pytest.mark.parametrize('ansi_enabled', ['false', 'true'])
+def test_parquet_decimal_narrowing_map_key_overflow(spark_tmp_path,
+        v1_enabled_list, ansi_enabled):
+    data_path = spark_tmp_path + '/PARQUET_DECIMAL_MAP_KEYS'
+    values = [(Decimal(value),) for value in
+        ['99999999.99', '-99999999.99', '100000000.00', '-100000000.00']]
+    with_cpu_session(lambda spark: spark.createDataFrame(values, 'd decimal(18,2)')
+        .selectExpr('map(d, 1) as k').coalesce(1).write.parquet(data_path))
+    conf = copy_and_update(coalesce_parquet_file_reader_conf, {
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        # The CPU vectorized reader rejects this precision change.
+        'spark.sql.parquet.enableVectorizedReader': 'false',
         'spark.sql.ansi.enabled': ansi_enabled})
+    # Inspect the key on the GPU, before collecting an invalid null-key map to the host.
     assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.read.schema(f'd decimal({read_precision},{read_scale})')
-            .parquet(data_path).selectExpr('d', 'd is null as is_null', 'd + 1 as added'),
+        lambda spark: spark.read.schema('k map<decimal(10,2),int>').parquet(data_path)
+            .selectExpr('map_keys(k)[0] as key', 'map_keys(k)[0] is null as key_is_null'),
         conf=conf)
 
 
 @ignore_order(local=True)
 def test_parquet_decimal_narrowing_mixed_file_precisions(spark_tmp_path):
     paths = [f'{spark_tmp_path}/PARQUET_DECIMAL_MIXED_{precision}' for precision in [10, 18]]
-    # Both files use INT64 storage, but only the precision-18 file needs narrowing.
-    # Mixing their logical schemas must not skip its overflow checks.
+    # The COALESCING reader must split batches at this logical-schema boundary,
+    # even though both files use INT64 storage. Only precision 18 needs narrowing.
     for precision, data_path in zip([10, 18], paths):
         inputs = ['99999999.99', '-99999999.99']
         if precision == 18:
