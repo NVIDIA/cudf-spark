@@ -27,6 +27,7 @@ import org.apache.spark.sql.execution.datasources.v2.GroupPartitionsExec
 // trampoline under org.apache.spark.sql lets the shared Spark 4.2/5.0 suite use Spark's factory
 // without duplicating the suite or assembling the factory's derived planning state.
 object GroupPartitionsExecTestShim {
+  // SPARK-60044 freezes the ordering when the merge is planned.
   val freezesSortedMergeOrdering: Boolean = true
 
   def apply(
