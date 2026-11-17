@@ -74,4 +74,30 @@ class GpuParquetUtilsSuite extends AnyFunSuite {
     assert(GpuParquetUtils.clipBlocksToSchema(uppercaseSchema, blocks, isCaseSensitive = true)
       .head.getColumns.asScala.toSeq == Seq(flat))
   }
+  test("case-insensitive clipping handles repeated and different row-group paths") {
+    val nested = column("A", "B")
+    val flat = column("A.B")
+    val lowerFlat = column("a.b")
+    val unrelated = column("unrelated")
+    val columnsByBlock = Seq(Seq(nested, flat), Seq(flat, nested, unrelated),
+      Seq(lowerFlat, nested), Seq(unrelated, flat, nested))
+    val blocks = columnsByBlock.map { columns =>
+      val block = new BlockMetaData()
+      columns.foreach(block.addColumn)
+      block
+    }
+    val schema = MessageTypeParser.parseMessageType("message root { optional int32 a.b; }")
+    val clipped = GpuParquetUtils.clipBlocksToSchema(
+      schema, blocks.asJava, isCaseSensitive = false)
+    assert(clipped.map(_.getColumns.asScala.toSeq) ==
+      Seq(Seq(flat), Seq(flat), Seq(lowerFlat), Seq(flat)))
+    assert(blocks.map(_.getColumns.asScala.toSeq) == columnsByBlock)
+    // A second call with a different projection must not reuse the preceding decisions.
+    val nestedSchema = MessageTypeParser.parseMessageType(
+      "message root { optional group a { optional int32 b; } }")
+    assert(GpuParquetUtils.clipBlocksToSchema(nestedSchema, blocks.asJava,
+      isCaseSensitive = false).map(_.getColumns.asScala.toSeq) ==
+      Seq.fill(4)(Seq(nested)))
+  }
+
 }
