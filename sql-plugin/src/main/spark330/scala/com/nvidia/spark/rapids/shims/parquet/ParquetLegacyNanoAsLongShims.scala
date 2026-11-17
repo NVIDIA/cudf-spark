@@ -15,8 +15,7 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "330"}
-{"spark": "331"}
+{"spark":["330"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims.parquet
 

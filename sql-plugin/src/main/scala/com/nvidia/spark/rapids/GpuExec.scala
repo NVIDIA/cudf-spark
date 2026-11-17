@@ -355,10 +355,14 @@ trait GpuExec extends SparkPlan with Logging {
     }
   }
 
-  final override def doExecuteColumnar(): RDD[ColumnarBatch] = {
+  final override def doExecuteColumnar(): RDD[ColumnarBatch] =
+    executeColumnarRDD(internalDoExecuteColumnar())
+
+  /** Applies operator timing, LORE, and task-metric registration to a columnar RDD. */
+  protected final def executeColumnarRDD(rdd: => RDD[ColumnarBatch]): RDD[ColumnarBatch] = {
     this.dumpLoreMetaInfo()
     // this is the core of op time new
-    val origin = wrapWithTimeTrackingRDD(internalDoExecuteColumnar())
+    val origin = wrapWithTimeTrackingRDD(rdd)
     val wrappedForLORE = this.dumpLoreRDD(origin)
 
     val metrics = getTaskMetrics

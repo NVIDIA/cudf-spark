@@ -25,6 +25,17 @@ import org.apache.spark.shuffle.ShuffleWriteProcessor
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.types.DataType
 
+/** Driver state shared by a round-robin writer and all readers of its dependency. */
+private[rapids] class GpuRoundRobinShuffleRetry extends Serializable {
+  @transient private var readerSubmitted = false
+
+  def hasSubmittedReader: Boolean = readerSubmitted
+
+  def markReaderSubmitted(): Unit = {
+    readerSubmitted = true
+  }
+}
+
 class GpuShuffleDependency[K: ClassTag, V: ClassTag, C: ClassTag](
     rdd: RDD[_ <: Product2[K, V]],
     partitioner: Partitioner,
@@ -39,6 +50,10 @@ class GpuShuffleDependency[K: ClassTag, V: ClassTag, C: ClassTag](
     val metrics: Map[String, SQLMetric] = Map.empty)
   extends ShuffleDependency[K, V, C](rdd, partitioner, serializer, keyOrdering,
     aggregator, mapSideCombine, shuffleWriterProcessor) {
+
+  // Assigned before this dependency can be submitted. Reader history lives as long as the
+  // dependency: take/toLocalIterator may keep results after an individual job has finished.
+  private[rapids] var roundRobinRetryGuard: Option[GpuRoundRobinShuffleRetry] = None
 
   // Set by RapidsShuffleInternalManagerBase.registerShuffle to record the
   // registration-time checksum fallback decision so writer and reader use

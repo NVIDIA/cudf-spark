@@ -19,15 +19,18 @@
 // In order to have metrics and preferred locations work we need to be in a spark sql package
 package org.apache.spark.sql.rapids.execution
 
+import java.io.ObjectOutputStream
+
 import com.nvidia.spark.rapids.GpuMetric
 
-import org.apache.spark.{Dependency, Partition, Partitioner, ShuffleDependency, TaskContext}
+import org.apache.spark.{Dependency, Partition, Partitioner, ShuffleDependency, SparkContext, SparkEnv, TaskContext}
 import org.apache.spark.rapids.shims.ShuffledBatchRDDUtil
-import org.apache.spark.rdd.RDD
+import org.apache.spark.rdd.{RDD, RDDCheckpointData}
 import org.apache.spark.shuffle.sort.SortShuffleManager
 import org.apache.spark.sql.execution.{CoalescedPartitioner, CoalescedPartitionSpec, ShufflePartitionSpec}
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLShuffleReadMetricsReporter}
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.rapids.GpuShuffleDependency
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 case class ShuffledBatchRDDPartition(index: Int, spec: ShufflePartitionSpec) extends Partition
@@ -66,6 +69,20 @@ class ShuffledBatchRDD(
   dependency.rdd.context.setLocalProperty(
     SortShuffleManager.FETCH_SHUFFLE_BLOCKS_IN_BATCH_ENABLED_KEY,
     SQLConf.get.fetchShuffleBlocksInBatch.toString)
+
+  private def writeObject(out: ObjectOutputStream): Unit = {
+    // DAGScheduler serializes task binaries under this lock. ClosureCleaner checks outside
+    // that path must not count as submitted readers. Mark before a reader can return results.
+    if (Thread.holdsLock(RDDCheckpointData) &&
+        SparkEnv.get.executorId == SparkContext.DRIVER_IDENTIFIER) {
+      dependency match {
+        case gpu: GpuShuffleDependency[_, _, _] =>
+          gpu.roundRobinRetryGuard.foreach(_.markReaderSubmitted())
+        case _ =>
+      }
+    }
+    out.defaultWriteObject()
+  }
 
   override def getDependencies: Seq[Dependency[_]] = List(dependency)
 

@@ -29,7 +29,7 @@ SHUFFLE_SPARK_SHIM=$(get_shuffle_shim)
 WORKSPACE=${WORKSPACE:-`pwd`}
 
 ARTF_ROOT="$WORKSPACE/jars"
-WGET_CMD="wget -q -P $ARTF_ROOT -t 3"
+WGET_CMD="${WGET_CMD:-wget -q -P $ARTF_ROOT -t 3}"
 PROJECT_REPO_HOST=$(sed -E 's#^(.*://)?([^/@]*@)?([^/:]+).*#\3#' <<< "$PROJECT_REPO")
 
 download_maven_jars() {
@@ -104,28 +104,28 @@ EOF
 }
 
 rm -rf $ARTF_ROOT && mkdir -p $ARTF_ROOT
-$WGET_CMD $PROJECT_TEST_REPO/com/nvidia/rapids-4-spark-integration-tests_$SCALA_BINARY_VER/$PROJECT_TEST_VER/rapids-4-spark-integration-tests_$SCALA_BINARY_VER-$PROJECT_TEST_VER-${SHUFFLE_SPARK_SHIM}.jar
+$WGET_CMD $PROJECT_TEST_REPO/com/nvidia/cudf-spark-integration-tests_$SCALA_BINARY_VER/$PROJECT_TEST_VER/cudf-spark-integration-tests_$SCALA_BINARY_VER-$PROJECT_TEST_VER-${SHUFFLE_SPARK_SHIM}.jar
 
 CLASSIFIER=${CLASSIFIER:-"$CUDA_CLASSIFIER"} # default as CUDA_CLASSIFIER for compatibility
 if [ "$CLASSIFIER"x == x ];then
-    $WGET_CMD $PROJECT_REPO/com/nvidia/rapids-4-spark_$SCALA_BINARY_VER/$PROJECT_VER/rapids-4-spark_$SCALA_BINARY_VER-${PROJECT_VER}.jar
-    export RAPIDS_PLUGIN_JAR=$ARTF_ROOT/rapids-4-spark_${SCALA_BINARY_VER}-${PROJECT_VER}.jar
+    $WGET_CMD $PROJECT_REPO/com/nvidia/cudf-spark_$SCALA_BINARY_VER/$PROJECT_VER/cudf-spark_$SCALA_BINARY_VER-${PROJECT_VER}.jar
+    export RAPIDS_PLUGIN_JAR=$ARTF_ROOT/cudf-spark_${SCALA_BINARY_VER}-${PROJECT_VER}.jar
 else
-    $WGET_CMD $PROJECT_REPO/com/nvidia/rapids-4-spark_$SCALA_BINARY_VER/$PROJECT_VER/rapids-4-spark_$SCALA_BINARY_VER-$PROJECT_VER-${CLASSIFIER}.jar
-    export RAPIDS_PLUGIN_JAR="$ARTF_ROOT/rapids-4-spark_${SCALA_BINARY_VER}-$PROJECT_VER-${CLASSIFIER}.jar"
+    $WGET_CMD $PROJECT_REPO/com/nvidia/cudf-spark_$SCALA_BINARY_VER/$PROJECT_VER/cudf-spark_$SCALA_BINARY_VER-$PROJECT_VER-${CLASSIFIER}.jar
+    export RAPIDS_PLUGIN_JAR="$ARTF_ROOT/cudf-spark_${SCALA_BINARY_VER}-$PROJECT_VER-${CLASSIFIER}.jar"
 fi
-RAPIDS_TEST_JAR="$ARTF_ROOT/rapids-4-spark-integration-tests_${SCALA_BINARY_VER}-$PROJECT_TEST_VER-$SHUFFLE_SPARK_SHIM.jar"
+RAPIDS_TEST_JAR="$ARTF_ROOT/cudf-spark-integration-tests_${SCALA_BINARY_VER}-$PROJECT_TEST_VER-$SHUFFLE_SPARK_SHIM.jar"
 
 export INCLUDE_SPARK_AVRO_JAR=${INCLUDE_SPARK_AVRO_JAR:-"true"}
 if [[ "${INCLUDE_SPARK_AVRO_JAR}" == "true" ]]; then
   $WGET_CMD $SPARK_REPO/org/apache/spark/spark-avro_$SCALA_BINARY_VER/$SPARK_VER/spark-avro_$SCALA_BINARY_VER-${SPARK_VER}.jar
 fi
 
-$WGET_CMD $PROJECT_TEST_REPO/com/nvidia/rapids-4-spark-integration-tests_$SCALA_BINARY_VER/$PROJECT_TEST_VER/rapids-4-spark-integration-tests_$SCALA_BINARY_VER-$PROJECT_TEST_VER-pytest.tar.gz
+$WGET_CMD $PROJECT_TEST_REPO/com/nvidia/cudf-spark-integration-tests_$SCALA_BINARY_VER/$PROJECT_TEST_VER/cudf-spark-integration-tests_$SCALA_BINARY_VER-$PROJECT_TEST_VER-pytest.tar.gz
 
 RAPIDS_INT_TESTS_HOME="$ARTF_ROOT/integration_tests/"
 # The version of pytest.tar.gz that is uploaded is the one built against spark330 but its being pushed without classifier for now
-RAPIDS_INT_TESTS_TGZ="$ARTF_ROOT/rapids-4-spark-integration-tests_${SCALA_BINARY_VER}-$PROJECT_TEST_VER-pytest.tar.gz"
+RAPIDS_INT_TESTS_TGZ="$ARTF_ROOT/cudf-spark-integration-tests_${SCALA_BINARY_VER}-$PROJECT_TEST_VER-pytest.tar.gz"
 
 tmp_info=${TMP_INFO_FILE:-'/tmp/artifacts-build.info'}
 rm -rf "$tmp_info"
@@ -146,11 +146,11 @@ getRevision() {
 
 set +x
 echo -e "\n==================== ARTIFACTS BUILD INFO ====================\n" >> "$tmp_info"
-echo "-------------------- rapids-4-spark BUILD INFO --------------------" >> "$tmp_info"
+echo "-------------------- cudf-spark BUILD INFO --------------------" >> "$tmp_info"
 p_ver=$(getRevision $RAPIDS_PLUGIN_JAR rapids4spark-version-info.properties)
-echo "-------------------- rapids-4-spark-integration-tests BUILD INFO --------------------" >> "$tmp_info"
+echo "-------------------- cudf-spark-integration-tests BUILD INFO --------------------" >> "$tmp_info"
 it_ver=$(getRevision $RAPIDS_TEST_JAR rapids4spark-version-info.properties)
-echo "-------------------- rapids-4-spark-integration-tests pytest BUILD INFO --------------------" >> "$tmp_info"
+echo "-------------------- cudf-spark-integration-tests pytest BUILD INFO --------------------" >> "$tmp_info"
 pt_ver=$(getRevision $RAPIDS_INT_TESTS_TGZ integration_tests/rapids4spark-version-info.properties)
 echo -e "\n==================== ARTIFACTS BUILD INFO ====================\n" >> "$tmp_info"
 set -x
@@ -166,7 +166,8 @@ fi
 tar xzf "$RAPIDS_INT_TESTS_TGZ" -C $ARTF_ROOT && rm -f "$RAPIDS_INT_TESTS_TGZ"
 
 . jenkins/hadoop-def.sh $SPARK_VER ${SCALA_BINARY_VER}
-$WGET_CMD $SPARK_REPO/org/apache/spark/$SPARK_VER/spark-$SPARK_VER-$BIN_HADOOP_VER.tgz
+SPARK_DIST_URL="${SPARK_DIST_URL:-$SPARK_REPO/org/apache/spark/$SPARK_VER}"
+$WGET_CMD "$SPARK_DIST_URL/spark-$SPARK_VER-$BIN_HADOOP_VER.tgz"
 
 export SPARK_HOME="$ARTF_ROOT/spark-$SPARK_VER-$BIN_HADOOP_VER"
 export PATH="$SPARK_HOME/bin:$SPARK_HOME/sbin:$PATH"
@@ -278,11 +279,11 @@ mkdir -p $TARGET_DIR
 run_delta_lake_tests() {
   echo "run_delta_lake_tests SPARK_VER = $SPARK_VER, SCALA_BINARY_VER = $SCALA_BINARY_VER"
   DELTA_LAKE_VERSIONS=""
-  SPARK_32X_PATTERN="(3\.2\.[0-9])"
-  SPARK_33X_PATTERN="(3\.3\.[0-9])"
-  SPARK_34X_PATTERN="(3\.4\.[0-9])"
-  SPARK_35X_PATTERN="(3\.5\.[3-9])"
-  SPARK_40X_PATTERN="(4\.0\.[0-9])"
+  SPARK_32X_PATTERN="(3\.2\.[0-9]+)"
+  SPARK_33X_PATTERN="(3\.3\.[0-9]+)"
+  SPARK_34X_PATTERN="(3\.4\.[0-9]+)"
+  SPARK_35X_PATTERN="(3\.5\.([3-9]|[1-9][0-9]+))"
+  SPARK_40X_PATTERN="(4\.0\.[0-9]+)"
   # Delta 4.1.0 is binary-incompatible with Spark 4.1.2+ after Spark changed internal
   # Catalyst and Parquet APIs. Keep coverage on the compatible Spark patch releases.
   SPARK_41_0_1_PATTERN="^(4\.1\.[0-1])$"
@@ -696,7 +697,7 @@ if [[ $TEST_MODE == "DEFAULT" ]]; then
     # Add the ivysettings.xml file to support --packages downloads from Artifactory using credentials
     # Set the HOST_NAME variable for ivysettings.xml (e.g., from https://usr:psw@HOST_NAME/path/to/repo)
     SPARK_SHELL_SMOKE_TEST=1 HOST_NAME=$PROJECT_REPO_HOST \
-    PYSP_TEST_spark_jars_packages=com.nvidia:rapids-4-spark_${SCALA_BINARY_VER}:${PROJECT_VER} \
+    PYSP_TEST_spark_jars_packages=com.nvidia:cudf-spark_${SCALA_BINARY_VER}:${PROJECT_VER} \
     PYSP_TEST_spark_jars_repositories=${PROJECT_REPO} \
     PYSP_TEST_spark_jars_ivySettings=${WORKSPACE}/jenkins/ivysettings.xml \
       ./run_pyspark_from_build.sh
@@ -773,7 +774,7 @@ if [[ "$TEST_MODE" == "CUDF_UDF_ONLY" ]]; then
   # Create a separate conda env for cudf-udf tests to avoid affecting the base env (python 3.10)
   CUDF_UDF_ENV="cudf_udf_$(date +"%Y%m%d")"
   CUDF_UDF_PYTHON_VER="3.12"  # since 26.04, python 3.12+ is required for cudf-py
-  CUDF_VER=$(echo "${PROJECT_VER}" | cut -d '.' -f 1,2)
+  CUDF_VER=${CUDF_VER:-$(echo "${PROJECT_VER}" | cut -d '.' -f 1,2)}
   CUDA_VER_FOR_CUDF=${CUDA_VER_FOR_CUDF:-'12.9'}
 
   conda create -y -n ${CUDF_UDF_ENV} -c rapidsai-nightly -c conda-forge -c nvidia -c defaults \

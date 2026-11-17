@@ -18,17 +18,23 @@ package com.nvidia.spark.rapids
 
 import java.math.RoundingMode
 
-import ai.rapids.cudf.{ColumnVector, Cuda, DType, Scalar, Table}
+import scala.collection.mutable.ArrayBuffer
+
+import ai.rapids.cudf.{ColumnVector, Cuda, DType, HostMemoryAllocator, HostMemoryBuffer, Scalar,
+  Table}
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.CudfTestHelper.withHostAllocator
 import com.nvidia.spark.rapids.RapidsConf.ShuffleKudoMode
-import com.nvidia.spark.rapids.jni.RmmSpark
+import com.nvidia.spark.rapids.jni.{Hash, RmmSpark}
 import com.nvidia.spark.rapids.shims.GpuHashPartitioning
+import org.mockito.Mockito.mockStatic
+import org.mockito.invocation.InvocationOnMock
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.{SparkConf, TaskContext}
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.{Expression, Literal, Murmur3Hash, Pmod}
+import org.apache.spark.sql.catalyst.expressions.{Expression, ExprId, Literal, Murmur3Hash, Pmod}
 import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, RangePartitioning}
 import org.apache.spark.sql.functions.{col, count, lit}
 import org.apache.spark.sql.rapids.GpuShuffleEnv
@@ -215,6 +221,66 @@ class GpuPartitioningSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
+  /** Counts the host allocations made on the creating thread while `metric` is not timing. */
+  private class TimerProbingHostAllocator(delegate: HostMemoryAllocator, metric: GpuMetric)
+      extends HostMemoryAllocator {
+    private val owner = Thread.currentThread()
+    var allocations = 0
+    var untimedAllocations = 0
+
+    override def allocate(amount: Long, preferPinned: Boolean): HostMemoryBuffer = {
+      probe()
+      delegate.allocate(amount, preferPinned)
+    }
+
+    override def allocate(amount: Long): HostMemoryBuffer = {
+      probe()
+      delegate.allocate(amount)
+    }
+
+    private def probe(): Unit = {
+      if (Thread.currentThread() eq owner) {
+        allocations += 1
+        // A timer that is already running refuses to activate. An idle one activates, so it is
+        // stopped again at once, adding no time.
+        if (metric.tryActivateTimer(Seq.empty)) {
+          metric.deactivateTimer(0L, Seq.empty)
+          untimedAllocations += 1
+        }
+      }
+    }
+  }
+
+  Seq("CPU", "GPU").foreach { writeMode =>
+    test(s"$writeMode kudo write mode slicing counts host allocation in the copy time") {
+      TrampolineUtil.cleanupAnyExistingSession()
+      val conf = new SparkConf()
+          .set(RapidsConf.SHUFFLE_COMPRESSION_CODEC.key, "none")
+          .set(RapidsConf.SHUFFLE_KUDO_WRITE_MODE.key, writeMode)
+      TestUtils.withGpuSparkSession(conf) { _ =>
+        GpuShuffleEnv.init(new RapidsConf(conf))
+        val partitionIndices = Array(0, 2, 2)
+        val gp = partitioning(partitionIndices.length)
+        assert(!gp.usesGPUShuffle)
+        assertResult(writeMode == "GPU")(gp.usesKudoGPUSlicing)
+        val copyTime = new LocalGpuMetric
+        gp.setupDebugMetrics(Map(GpuMetric.COPY_TO_HOST_TIME -> copyTime))
+        withResource(buildBatch()) { batch =>
+          GpuColumnVector.incRefCounts(batch)
+          val columns = GpuColumnVector.extractColumns(batch)
+          withHostAllocator(new TimerProbingHostAllocator(_, copyTime)) { allocator =>
+            val parts = gp.sliceInternalGpuOrCpuAndClose(batch.numRows, partitionIndices, columns)
+            withResource(parts.map(_._1)) { _ =>
+              assert(allocator.allocations > 0)
+              assertResult(0)(allocator.untimedAllocations)
+              assert(copyTime.value > 0)
+            }
+          }
+        }
+      }
+    }
+  }
+
   /** Slices a rows-only batch and returns (partition, rows, columns) for each slice. */
   private def sliceRowsOnly(gp: GpuPartitioning, numRows: Int,
       partitionIndices: Array[Int]): Seq[(Int, Int, Int)] = {
@@ -297,6 +363,38 @@ class GpuPartitioningSuite extends AnyFunSuite with BeforeAndAfterEach {
   /** The partition the CPU sends a row to when every key is a literal. */
   private def cpuHashPartition(keys: Seq[Literal], numPartitions: Int): Int =
     Pmod(new Murmur3Hash(keys), Literal(numPartitions)).eval(InternalRow.empty).asInstanceOf[Int]
+
+  test("hash partitioning invokes fused Murmur3 partition IDs") {
+    TrampolineUtil.cleanupAnyExistingSession()
+    val conf = new SparkConf()
+    TestUtils.withGpuSparkSession(conf) { _ =>
+      GpuShuffleEnv.init(new RapidsConf(conf))
+      val fusedCalls = ArrayBuffer.empty[(Int, Int)]
+      var rawHashCalls = 0
+      withResource(mockStatic(classOf[Hash], (invocation: InvocationOnMock) => {
+        invocation.getMethod.getName match {
+          case "murmurHash32Pmod" =>
+            fusedCalls += ((invocation.getArgument[Int](0), invocation.getArgument[Int](1)))
+          case "murmurHash32" => rawHashCalls += 1
+          case _ =>
+        }
+        invocation.callRealMethod()
+      })) { _ =>
+        val key = GpuBoundReference(0, IntegerType, nullable = true)(ExprId(0), "key")
+        Seq(100, 200).foreach { numPartitions =>
+          val partitioning = GpuHashPartitioning(Seq(key), numPartitions)
+          val (offsets, columns) = partitioning.partitionInternalAndClose(buildBatch())
+          withResource(columns) { _ =>
+            assertResult(numPartitions)(offsets.length)
+            assertResult(4)(columns.length)
+            columns.foreach(column => assertResult(10L)(column.getBase.getRowCount))
+          }
+        }
+        assertResult(Seq((42, 100), (42, 200)))(fusedCalls.toSeq)
+        assertResult(0)(rawHashCalls)
+      }
+    }
+  }
 
   test("hash partitioning sends every row of a rows-only batch to the CPU's partition") {
     val kudoGpuWriteConf = new SparkConf().set(RapidsConf.SHUFFLE_KUDO_WRITE_MODE.key, "GPU")

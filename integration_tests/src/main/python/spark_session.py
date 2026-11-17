@@ -165,145 +165,167 @@ def with_gpu_session(func, conf={}):
     copy['spark.rapids.sql.test.validateExecsInGpuPlan'] = ','.join(get_validate_execs_in_gpu_plan())
     return with_spark_session(func, conf=copy)
 
+# Compare numeric parts so multi-digit patches sort correctly ("3.5.10" < "3.5.3" as strings).
+# Qualifiers such as -SNAPSHOT, -amzn-0 or -preview2 are ignored.
+def spark_version_tuple(ver=None):
+    v = spark_version() if ver is None else ver
+    raw = v.split("-", 1)[0].split("+", 1)[0]
+    parts = []
+    for part in raw.split("."):
+        try:
+            parts.append(int(part))
+        except ValueError:
+            break
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts[:3])
+
 def is_before_spark_312():
-    return spark_version() < "3.1.2"
+    return spark_version_tuple() < (3, 1, 2)
 
 def is_before_spark_313():
-    return spark_version() < "3.1.3"
+    return spark_version_tuple() < (3, 1, 3)
 
 def is_before_spark_314():
-    return spark_version() < "3.1.4"
+    return spark_version_tuple() < (3, 1, 4)
 
 def is_before_spark_320():
-    return spark_version() < "3.2.0"
+    return spark_version_tuple() < (3, 2, 0)
 
 def is_before_spark_321():
-    return spark_version() < "3.2.1"
+    return spark_version_tuple() < (3, 2, 1)
 
 def is_before_spark_322():
-    return spark_version() < "3.2.2"
+    return spark_version_tuple() < (3, 2, 2)
 
 def is_before_spark_323():
-    return spark_version() < "3.2.3"
+    return spark_version_tuple() < (3, 2, 3)
 
 def is_before_spark_331():
-    return spark_version() < "3.3.1"
+    return spark_version_tuple() < (3, 3, 1)
 
 def is_before_spark_332():
-    return spark_version() < "3.3.2"
+    return spark_version_tuple() < (3, 3, 2)
 
 def is_before_spark_334():
-    return spark_version() < "3.3.4"
+    return spark_version_tuple() < (3, 3, 4)
 
 def is_before_spark_340():
-    return spark_version() < "3.4.0"
+    return spark_version_tuple() < (3, 4, 0)
 
 def is_before_spark_341():
-    return spark_version() < "3.4.1"
+    return spark_version_tuple() < (3, 4, 1)
 
 def is_before_spark_342():
-    return spark_version() < "3.4.2"
+    return spark_version_tuple() < (3, 4, 2)
 
 def is_before_spark_350():
-    return spark_version() < "3.5.0"
+    return spark_version_tuple() < (3, 5, 0)
 
 def is_before_spark_351():
-    return spark_version() < "3.5.1"
+    return spark_version_tuple() < (3, 5, 1)
 
 def is_before_spark_352():
-    return spark_version() < "3.5.2"
+    return spark_version_tuple() < (3, 5, 2)
 
 def is_before_spark_353():
-    return spark_version() < "3.5.3"
+    return spark_version_tuple() < (3, 5, 3)
 
 def is_spark_350_or_351():
-    return spark_version() >= "3.5.0" and spark_version() <= "3.5.1"
+    return (3, 5, 0) <= spark_version_tuple() <= (3, 5, 1)
 
 def is_before_spark_400():
-    return spark_version() < "4.0.0"
+    return spark_version_tuple() < (4, 0, 0)
 
 def is_spark_320_or_later():
-    return spark_version() >= "3.2.0"
+    return spark_version_tuple() >= (3, 2, 0)
 
 def is_spark_330_or_later():
-    return spark_version() >= "3.3.0"
+    return spark_version_tuple() >= (3, 3, 0)
 
 def is_spark_340_or_later():
-    return spark_version() >= "3.4.0"
+    return spark_version_tuple() >= (3, 4, 0)
 
 def is_spark_341():
-    return spark_version() == "3.4.1"
+    return spark_version_tuple() == (3, 4, 1)
 
 def is_spark_341_or_later():
-    return spark_version() >= "3.4.1"
+    return spark_version_tuple() >= (3, 4, 1)
 
 def is_spark_350_or_later():
-    return spark_version() >= "3.5.0"
+    return spark_version_tuple() >= (3, 5, 0)
 
 def is_spark_353_or_later():
-    return spark_version() >= "3.5.3"
+    return spark_version_tuple() >= (3, 5, 3)
 
 def is_spark_351_or_later():
-    return spark_version() >= "3.5.1"
+    return spark_version_tuple() >= (3, 5, 1)
 
 def is_spark_356_or_later():
-    # Compare numeric parts so multi-digit patches sort correctly; ignore runtime suffixes.
-    parts = spark_version().split("-", 1)[0].split(".")[:3]
-    return tuple(int(part) for part in parts) >= (3, 5, 6)
+    return spark_version_tuple() >= (3, 5, 6)
 
 def is_spark_359():
-    return spark_version() == "3.5.9"
+    return spark_version_tuple() == (3, 5, 9)
 
 def is_spark_35x():
-    return "3.5.0" <= spark_version() < "3.6.0"
+    return (3, 5, 0) <= spark_version_tuple() < (3, 6, 0)
 
 def is_spark_40x():
-    return "4.0.0" <= spark_version() < "4.1.0"
+    return (4, 0, 0) <= spark_version_tuple() < (4, 1, 0)
 
 def is_spark_41x():
-    return "4.1.0" <= spark_version() < "4.2.0"
+    return (4, 1, 0) <= spark_version_tuple() < (4, 2, 0)
+
+def is_spark_42x():
+    return (4, 2, 0) <= spark_version_tuple() < (4, 3, 0)
 
 def is_spark_420_or_later():
-    return spark_version() >= "4.2.0"
+    return spark_version_tuple() >= (4, 2, 0)
+
+def is_spark_421_or_later():
+    return spark_version_tuple() >= (4, 2, 1)
 
 def is_spark_500_or_later():
-    return spark_version() >= "5.0.0"
+    return spark_version_tuple() >= (5, 0, 0)
 
 def is_iceberg_supported_spark():
     return is_spark_35x() or is_spark_40x() or is_spark_41x()
 
 def is_spark_400_or_later():
-    return spark_version() >= "4.0.0"
+    return spark_version_tuple() >= (4, 0, 0)
 
 def is_spark_401_or_later():
-    return spark_version() >= "4.0.1"
+    return spark_version_tuple() >= (4, 0, 1)
 
 def is_spark_403():
-    return spark_version() == "4.0.3"
+    return spark_version_tuple() == (4, 0, 3)
 
 def is_spark_404():
-    return spark_version() == "4.0.4"
+    return spark_version_tuple() == (4, 0, 4)
 
-def is_spark_403_or_404():
-    return is_spark_403() or is_spark_404()
+def is_spark_405():
+    return spark_version_tuple() == (4, 0, 5)
+
+def is_spark_403_through_405():
+    return is_spark_403() or is_spark_404() or is_spark_405()
 
 def is_spark_410_or_later():
-    return spark_version() >= "4.1.0"
+    return spark_version_tuple() >= (4, 1, 0)
 
 def is_spark_411_or_later():
-    return spark_version() >= "4.1.1"
+    return spark_version_tuple() >= (4, 1, 1)
 
 def is_spark_412_or_later():
-    return spark_version() >= "4.1.2"
+    return spark_version_tuple() >= (4, 1, 2)
 
 def is_spark_330():
-    return spark_version() == "3.3.0"
+    return spark_version_tuple() == (3, 3, 0)
 
 def is_spark_350():
-    return spark_version() == "3.5.0"
+    return spark_version_tuple() == (3, 5, 0)
 
 def is_spark_33X():
-    return "3.3.0" <= spark_version() < "3.4.0"
+    return (3, 3, 0) <= spark_version_tuple() < (3, 4, 0)
 
 def is_spark_321cdh():
     return "3.2.1.3.2.717" in spark_version()

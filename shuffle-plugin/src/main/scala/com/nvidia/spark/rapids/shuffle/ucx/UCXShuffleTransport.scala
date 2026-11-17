@@ -531,11 +531,10 @@ class UCXShuffleTransport(shuffleServerId: BlockManagerId, rapidsConf: RapidsCon
 
   override def queuePending(reqs: Seq[PendingTransferRequest]): Unit =
     altList.synchronized {
-      import scala.collection.JavaConverters._
-      validHandlers.add(reqs.head.handler)
-      altList.addAll(reqs.asJava)
-      logDebug(s"THROTTLING ${altList.size} queued requests")
-      altList.notifyAll()
+      if (UCXShuffleTransport.admit(altList, validHandlers, reqs)) {
+        logDebug(s"THROTTLING ${altList.size} queued requests")
+        altList.notifyAll()
+      }
     }
 
   override def cancelPending(handler: RapidsShuffleFetchHandler): Unit = {
@@ -610,6 +609,32 @@ class UCXShuffleTransport(shuffleServerId: BlockManagerId, rapidsConf: RapidsCon
     val client = clients.remove(conn.getPeerExecutorId)
     if (client != null) {
       client.close()
+    }
+  }
+}
+
+object UCXShuffleTransport extends Logging {
+  /**
+   * Queues `reqs` for the throttle, and records their reader as one whose requests may be put
+   * back, unless the reader is done. The caller holds `altList`'s lock, which the reader's
+   * cleaner takes after it marks the reader done. So a done reader's requests are refused here,
+   * or removed by its `cancelPending` unless the throttle took them first. The throttle may
+   * still issue those, and the reader rejects their batches.
+   * @return whether it queued them
+   */
+  private[ucx] def admit(
+      altList: HashedPriorityQueue[PendingTransferRequest],
+      validHandlers: mutable.HashSet[RapidsShuffleFetchHandler],
+      reqs: Seq[PendingTransferRequest]): Boolean = {
+    import scala.collection.JavaConverters._
+    val handler = reqs.head.handler
+    if (handler.isDone) {
+      logDebug(s"Not queueing ${reqs.size} transfer requests of $handler, whose task is done")
+      false
+    } else {
+      validHandlers.add(handler)
+      altList.addAll(reqs.asJava)
+      true
     }
   }
 }
