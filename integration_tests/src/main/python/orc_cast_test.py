@@ -14,14 +14,16 @@
 
 import pytest
 
-from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error
-from conftest import get_test_tz, is_not_utc
+from asserts import (assert_cpu_and_gpu_are_equal_collect_with_capture,
+                     assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error)
+from conftest import get_test_tz, is_databricks_runtime, is_not_utc
 from data_gen import *
-from marks import (allow_non_gpu, datagen_overrides, tz_sensitive_test,
+from marks import (allow_non_gpu, datagen_overrides, ignore_order, tz_sensitive_test,
                    validate_execs_in_gpu_plan)
 from pyspark.sql.types import *
 from spark_session import with_cpu_session
 from orc_test import reader_opt_confs
+from parquet_test import _scan_output_batches
 
 
 def create_orc(data_gen_list, data_path):
@@ -236,6 +238,134 @@ def test_casting_decimal_to_decimal(spark_tmp_path, data_gen, read_type, ansi_mo
         lambda spark: unary_op_df(spark, data_gen).write.orc(orc_path)
     )
     assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.read.schema("a " + read_type).orc(orc_path),
+        lambda spark: spark.read.schema("a " + read_type).orc(orc_path)
+            .selectExpr("*", "a is null as is_null"),
         conf={'spark.sql.ansi.enabled': ansi_mode}
     )
+
+
+@ignore_order(local=True)
+# Pair reader and API settings to cover V1/V2 without multiplying every boundary case.
+@pytest.mark.parametrize('reader, v1_enabled_list', [
+    ('PERFILE', 'orc'), ('MULTITHREADED', ''), ('COALESCING', 'orc'), ('COALESCING', '')])
+@pytest.mark.parametrize('ansi_enabled', ['false', 'true'])
+@pytest.mark.parametrize('file_precision, file_scale, read_precision, read_scale', [
+    (9, 2, 7, 2), (18, 2, 10, 2), (34, 2, 20, 2), (34, 2, 18, 2),
+    # More precision can still leave fewer digits for the whole-number part.
+    (9, 2, 10, 4),
+    # Rounding can carry into a whole-number digit outside the requested precision.
+    (9, 3, 8, 2)])
+def test_orc_decimal_precision_narrowing(spark_tmp_path, reader, v1_enabled_list,
+        ansi_enabled, file_precision, file_scale, read_precision, read_scale):
+    data_path = spark_tmp_path + '/ORC_DECIMAL_NARROWING'
+    decimal_type = DecimalType(file_precision, file_scale)
+    # Include both signs of the exact read bound and the first value beyond it.
+    max_value = '9' * (read_precision - read_scale) + '.' + '9' * min(file_scale, read_scale)
+    overflow = '1' + '0' * (read_precision - read_scale) + '.00'
+    inputs = [max_value, '-' + max_value, '0.00', '0.01']
+    if file_precision - file_scale > read_precision - read_scale:
+        inputs += [overflow, '-' + overflow]
+    if file_scale > read_scale:
+        inputs += [max_value + '4', max_value + '5', '-' + max_value + '4', '-' + max_value + '5']
+    values = [Decimal(v) for v in inputs] + [None]
+    with_cpu_session(lambda spark: gen_df(spark,
+        [('id', RepeatSeqGen(list(range(len(values))), data_type=IntegerType())),
+         ('d', RepeatSeqGen(values, data_type=decimal_type))], length=len(values))
+        .selectExpr('id', 'd', 'named_struct("d", d) as s', 'array(d) as a', 'map(1, d) as m',
+            f'cast(null as decimal({file_precision},{file_scale})) as n',
+            f'map(cast(id + 1 as decimal({file_precision},{file_scale})), id) as k')
+        .repartition(2).write.orc(data_path))
+
+    target = f'decimal({read_precision},{read_scale})'
+    schema = (f'id int, d {target}, s struct<d:{target}>, a array<{target}>, '
+        f'm map<int,{target}>, n {target}, k map<{target},int>')
+    conf = {
+        'spark.rapids.sql.format.orc.reader.type': reader,
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        # Use CPU row-reader overflow semantics for both V1 and V2. This does not
+        # change the GPU reader or select the data-source API.
+        'spark.sql.orc.enableVectorizedReader': 'false',
+        'spark.sql.ansi.enabled': ansi_enabled}
+
+    # Decimal128 row conversion can hide overflow by turning it into null on the host.
+    # Evaluate null checks on the GPU too, including every nested decimal leaf.
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(schema).orc(data_path).selectExpr('*',
+            'd is null as d_is_null', 's.d is null as struct_is_null',
+            'a[0] is null as array_is_null', 'm[1] is null as map_is_null',
+            'n is null as all_null', 'map_keys(k)[0] + 1 as key_added', 'd + 1 as added'),
+        conf=conf)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(schema).orc(data_path)
+            .filter(f'd > {max_value} OR d < -{max_value}').select('id'), conf=conf)
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize('v1_enabled_list', ['', 'orc'])
+@pytest.mark.parametrize('ansi_enabled', ['false', 'true'])
+def test_orc_decimal_narrowing_map_key_overflow(spark_tmp_path,
+        v1_enabled_list, ansi_enabled):
+    data_path = spark_tmp_path + '/ORC_DECIMAL_MAP_KEYS'
+    values = [(Decimal(value),) for value in
+        ['99999999.99', '-99999999.99', '100000000.00', '-100000000.00']]
+    with_cpu_session(lambda spark: spark.createDataFrame(values, 'd decimal(18,2)')
+        .selectExpr('map(d, 1) as k').coalesce(1).write.orc(data_path))
+    conf = {
+        'spark.rapids.sql.format.orc.reader.type': 'COALESCING',
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        # ORC's CPU row reader inserts evolved keys into a TreeMap, which rejects null.
+        # Its vectorized reader exposes overflowing keys as null for comparison with GPU.
+        'spark.sql.orc.enableVectorizedReader': 'true',
+        'spark.sql.orc.enableNestedColumnVectorizedReader': 'true',
+        'spark.sql.ansi.enabled': ansi_enabled}
+    # Inspect the key on the GPU, before collecting an invalid null-key map to the host.
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema('k map<decimal(10,2),int>').orc(data_path)
+            .selectExpr('map_keys(k)[0] as key', 'map_keys(k)[0] is null as key_is_null'),
+        conf=conf)
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize('v1_enabled_list', ['', 'orc'])
+@pytest.mark.parametrize('ansi_enabled', ['false', 'true'])
+@pytest.mark.parametrize('file_precisions', [(10, 10), (10, 18)], ids=['same-schema', 'mixed-schema'])
+def test_orc_decimal_narrowing_mixed_file_precisions(spark_tmp_path,
+        v1_enabled_list, ansi_enabled, file_precisions):
+    paths = [f'{spark_tmp_path}/ORC_DECIMAL_MIXED_{index}' for index in range(2)]
+    for index, (precision, data_path) in enumerate(zip(file_precisions, paths)):
+        inputs = ['99999999.99', '-99999999.99']
+        if precision == 18:
+            inputs += ['100000000.00', '-100000000.00']
+        values = [(index * 10 + row, Decimal(value) if value is not None else None)
+            for row, value in enumerate(inputs + [None])]
+        with_cpu_session(lambda spark: spark.createDataFrame(values,
+            f'id int, d decimal({precision},2)').coalesce(1).write.orc(data_path))
+
+    conf = {
+        'spark.rapids.sql.format.orc.reader.type': 'COALESCING',
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        'spark.sql.orc.enableVectorizedReader': 'false',
+        'spark.sql.ansi.enabled': ansi_enabled,
+        'spark.sql.adaptive.enabled': 'false',
+        'spark.sql.files.minPartitionNum': '1',
+        'spark.sql.files.openCostInBytes': '0',
+        'spark.rapids.sql.metrics.level': 'DEBUG'}
+
+    def read(spark):
+        df = spark.read.schema('id int, d decimal(10,2)').orc(paths)
+        assert len(df.inputFiles()) == 2
+        return df.selectExpr('id', 'd', 'd is null as is_null', 'd + 1 as added')
+
+    def check_batches(cpu_plan, gpu_plan):
+        # DBR can keep files in separate partitions despite these file settings.
+        # Keep CPU/GPU result checks there; assert schema-dependent batching on Apache Spark.
+        if not is_databricks_runtime():
+            # Rule out separate Spark partitions as the reason for separate output batches.
+            assert gpu_plan.execute().getNumPartitions() == 1
+            # Both precisions decode to DECIMAL64, but their TypeDescriptions differ.
+            # Split the mixed case so each cast receives its own tableSchema precision.
+            expected_batches = 1 if file_precisions[0] == file_precisions[1] else 2
+            assert _scan_output_batches(gpu_plan) == expected_batches
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(read, conf=conf,
+        gpu_plan_assertion=check_batches)

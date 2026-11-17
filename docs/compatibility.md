@@ -406,14 +406,24 @@ nested in structs, arrays and maps. Raw Parquet scans fall back to CPU when
 scan. Delta retains its protocol-based checks: shredding or unknown reader features
 keep Variant reads on CPU.
 
-Iceberg Variant reads use the same Spark setting for GPU eligibility. Set
-`spark.sql.variant.allowReadingShredded=false` with the existing Iceberg v3 opt-in.
-Iceberg's CPU reader can read shredded input independently of Spark's Parquet setting,
-so the GPU execution reader also validates every projected Variant leaf against the
-physical-layout predicate used by the Raw Parquet reader. Exactly two children named
-`value` and `metadata`, both `REQUIRED BINARY`, are required. Query planning does not
-open data files to check layouts. Execution reuses the already-loaded schema, without
-additional file opens, including for nested and imported files resolved by field ID.
+Iceberg Variant reads use `spark.sql.variant.allowReadingShredded` as a RAPIDS GPU
+eligibility guard. This Spark setting does not restrict Iceberg's CPU reader. When a
+shredded Variant column is projected and the setting is `false`, the readers behave
+as follows:
+
+| Reader | Result |
+| --- | --- |
+| Spark Raw Parquet CPU | Fails with `INVALID_VARIANT_FROM_PARQUET.WRONG_NUM_FIELDS`. |
+| Iceberg CPU | Reads valid shredded Variant data. |
+| RAPIDS Iceberg GPU | Fails during execution with `UnsupportedOperationException`. |
+
+Set `spark.sql.variant.allowReadingShredded=false` with the Iceberg v3 opt-in only
+when the requested Variant columns are stored in unshredded files. The GPU execution
+reader validates every projected Variant leaf against the physical-layout predicate
+used by the Raw Parquet reader. Exactly two children named `value` and `metadata`,
+both `REQUIRED BINARY`, are required. Query planning does not open data files to
+check layouts. Execution reuses the already-loaded schema, without additional file
+opens, including for nested and imported files resolved by field ID.
 
 If an Iceberg file contains a requested shredded or incompatible Variant layout, the
 reader throws `java.lang.UnsupportedOperationException`:
@@ -423,11 +433,14 @@ GPU Iceberg reader does not support shredded or incompatible Variant input (colu
 ```
 
 Spark may wrap this exception in a task/stage failure or `SparkException`. The query
-fails without an automatic CPU retry. Set
-`spark.rapids.sql.format.iceberg.read.enabled=false` and rerun to use the CPU Iceberg
-reader. Supported downstream operators may still execute on GPU. Queries that prune
-all Variant columns remain eligible for GPU scans even when the files contain shredded
-Variant data. GPU Variant writes remain unsupported.
+fails without an automatic CPU retry. Rerun with
+`spark.sql.variant.allowReadingShredded=true` to keep projected Iceberg Variant scans
+on CPU, or set `spark.rapids.sql.format.iceberg.read.enabled=false` to use the CPU
+reader for all Iceberg scans. Iceberg's CPU reader can read valid shredded Variant
+data with either value of `spark.sql.variant.allowReadingShredded`. Supported
+downstream operators may still execute on GPU. Queries that prune all Variant columns
+remain eligible for GPU scans even when the files contain shredded Variant data. GPU
+Variant writes remain unsupported.
 
 ## Parquet
 
