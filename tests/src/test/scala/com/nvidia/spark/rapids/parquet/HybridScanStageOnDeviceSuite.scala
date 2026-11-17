@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids.parquet
 
-import ai.rapids.cudf.{Cuda, DeviceMemoryBuffer, HostMemoryBuffer}
+import ai.rapids.cudf.{Cuda, DeviceMemoryBuffer, HostMemoryBuffer, Rmm}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmSparkRetrySuiteBase
@@ -38,6 +38,13 @@ class HybridScanStageOnDeviceSuite extends RmmSparkRetrySuiteBase {
     RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
       RmmSpark.OomInjectionType.GPU.ordinal, 0)
 
+  // A leaked pack is freed only when GC finds it, which logs LEAKED without failing.
+  private def assertNoDeviceLeak(body: => Unit): Unit = {
+    val before = Rmm.getTotalBytesAllocated
+    body
+    assert(Rmm.getTotalBytesAllocated == before)
+  }
+
   private def assertStaged(chunks: Array[HostMemoryBuffer],
       device: Array[DeviceMemoryBuffer]): Unit = {
     assert(device.length == chunks.length)
@@ -55,9 +62,11 @@ class HybridScanStageOnDeviceSuite extends RmmSparkRetrySuiteBase {
       withResource(filledChunks(2)) { chunks =>
         RmmSpark.getAndResetNumSplitRetryThrow(/*taskId*/ 1)
         injectSplitOnNextGpuAlloc()
-        HybridScanPipeline.withStagedOnDevice(chunks, 2 * CHUNK, CHUNK, event) { device =>
-          assert(RmmSpark.getAndResetNumSplitRetryThrow(/*taskId*/ 1) > 0)
-          assertStaged(chunks, device)
+        assertNoDeviceLeak {
+          HybridScanPipeline.withStagedOnDevice(chunks, 2 * CHUNK, CHUNK, event) { device =>
+            assert(RmmSpark.getAndResetNumSplitRetryThrow(/*taskId*/ 1) > 0)
+            assertStaged(chunks, device)
+          }
         }
       }
     }
@@ -69,9 +78,16 @@ class HybridScanStageOnDeviceSuite extends RmmSparkRetrySuiteBase {
         RmmSpark.getAndResetNumSplitRetryThrow(/*taskId*/ 1)
         injectSplitOnNextGpuAlloc()
         // Half of the 3 * CHUNK bytes is below the 2 * CHUNK floor, so the retry uses the floor.
-        HybridScanPipeline.withStagedOnDevice(chunks, 8 * CHUNK, 2 * CHUNK, event) { device =>
-          assert(RmmSpark.getAndResetNumSplitRetryThrow(/*taskId*/ 1) > 0)
-          assertStaged(chunks, device)
+        assertNoDeviceLeak {
+          HybridScanPipeline.withStagedOnDevice(chunks, 8 * CHUNK, 2 * CHUNK, event) { device =>
+            assert(RmmSpark.getAndResetNumSplitRetryThrow(/*taskId*/ 1) > 0)
+            assertStaged(chunks, device)
+            // At the floor, chunks 0 and 1 share a pack, so their slices are adjacent. Chunk 2
+            // gets its own pack, and CUDA aligns each allocation to 256 bytes, so that pack
+            // cannot start right after the 128-byte first one.
+            assert(device(1).getAddress == device(0).getAddress + CHUNK)
+            assert(device(2).getAddress != device(1).getAddress + CHUNK)
+          }
         }
       }
     }
@@ -81,8 +97,10 @@ class HybridScanStageOnDeviceSuite extends RmmSparkRetrySuiteBase {
     withResource(new Cuda.Event()) { event =>
       withResource(filledChunks(2)) { chunks =>
         injectSplitOnNextGpuAlloc()
-        assertThrows[GpuSplitAndRetryOOM] {
-          HybridScanPipeline.withStagedOnDevice(chunks, CHUNK, CHUNK, event)(_ => ())
+        assertNoDeviceLeak {
+          assertThrows[GpuSplitAndRetryOOM] {
+            HybridScanPipeline.withStagedOnDevice(chunks, CHUNK, CHUNK, event)(_ => ())
+          }
         }
       }
     }
@@ -95,9 +113,11 @@ class HybridScanStageOnDeviceSuite extends RmmSparkRetrySuiteBase {
         // Skip the one pack allocation, so the OOM hits the allocation in the work.
         RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
           RmmSpark.OomInjectionType.GPU.ordinal, 1)
-        HybridScanPipeline.withStagedOnDevice(chunks, 2 * CHUNK, CHUNK, event) { _ =>
-          calls += 1
-          withResource(DeviceMemoryBuffer.allocate(1))(_ => ())
+        assertNoDeviceLeak {
+          HybridScanPipeline.withStagedOnDevice(chunks, 2 * CHUNK, CHUNK, event) { _ =>
+            calls += 1
+            withResource(DeviceMemoryBuffer.allocate(1))(_ => ())
+          }
         }
         assert(calls == 2)
       }
@@ -108,11 +128,13 @@ class HybridScanStageOnDeviceSuite extends RmmSparkRetrySuiteBase {
     withResource(new Cuda.Event()) { event =>
       withResource(filledChunks(2)) { chunks =>
         var calls = 0
-        assertThrows[GpuSplitAndRetryOOM] {
-          HybridScanPipeline.withStagedOnDevice(chunks, 2 * CHUNK, CHUNK, event) { _ =>
-            calls += 1
-            injectSplitOnNextGpuAlloc()
-            withResource(DeviceMemoryBuffer.allocate(1))(_ => ())
+        assertNoDeviceLeak {
+          assertThrows[GpuSplitAndRetryOOM] {
+            HybridScanPipeline.withStagedOnDevice(chunks, 2 * CHUNK, CHUNK, event) { _ =>
+              calls += 1
+              injectSplitOnNextGpuAlloc()
+              withResource(DeviceMemoryBuffer.allocate(1))(_ => ())
+            }
           }
         }
         assert(calls == 1)
