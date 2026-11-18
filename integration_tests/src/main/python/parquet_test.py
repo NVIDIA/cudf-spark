@@ -1727,8 +1727,9 @@ def test_parquet_read_multiple_field_id_matches(spark_tmp_path, footer_read):
 @pytest.mark.skipif(
     not _spark_has_parquet_field_requested_more_than_once_check(),
     reason='SPARK-60262 requires Spark 4.0.5, 4.1.4, 4.2.1, or later')
+@pytest.mark.parametrize('footer_read', ["JAVA", "NATIVE", "AUTO"], ids=idfn)
 @validate_execs_in_gpu_plan('GpuFileSourceScanExec')
-def test_parquet_read_field_requested_more_than_once(spark_tmp_path):
+def test_parquet_read_field_requested_more_than_once(spark_tmp_path, footer_read):
     data_path = spark_tmp_path + '/PARQUET_DATA'
     write_schema = StructType([
         StructField('A', IntegerType(), metadata=with_id(1)),
@@ -1752,7 +1753,7 @@ def test_parquet_read_field_requested_more_than_once(spark_tmp_path):
         {
             'spark.sql.caseSensitive': False,
             'spark.sql.sources.useV1SourceList': 'parquet',
-            'spark.rapids.sql.format.parquet.reader.footer.type': 'JAVA',
+            'spark.rapids.sql.format.parquet.reader.footer.type': footer_read,
         })
 
     def read(spark):

@@ -326,14 +326,14 @@ _orc_timestamp_ltz_reader_modes = [
             {'spark.rapids.sql.reader.chunked': False}),
         'orc',
         'GpuFileSourceScanExec',
-        id='v1-perfile'),
+        id='v1-perfile-nonchunked'),
     pytest.param(
         copy_and_update(
             __multithreaded_orc_file_reader_conf,
             {'spark.rapids.sql.reader.chunked': True}),
         '',
         'GpuBatchScanExec',
-        id='v2-multithreaded'),
+        id='v2-multithreaded-chunked'),
 ]
 
 
