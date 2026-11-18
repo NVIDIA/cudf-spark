@@ -349,8 +349,9 @@ _zorder_size_metric_names = {"min", "max", "avg", "totalSize", "size"}
 
 
 def _assert_metric_equal(cpu, gpu, path, ignored_names=frozenset()):
+    # Temporary workaround until https://github.com/NVIDIA/cudf-spark/issues/17018 is resolved.
     # assert_equal does not compare dicts (it sorts the items in place and compares None), so
-    # walk them here.
+    # walk them here. Switch back to assert_equal once the issue is fixed.
     if isinstance(cpu, dict):
         assert isinstance(gpu, dict) and cpu.keys() == gpu.keys(), \
             f"CPU ({cpu}) and GPU ({gpu}) metrics have different fields at {path}"
