@@ -19,11 +19,16 @@ package com.nvidia.spark.rapids;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.URL;
+import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
@@ -154,6 +159,45 @@ public class TestSparkRapidsJarTool {
             "amd64/Linux/libconventional.so.chunks.properties"));
       }
     });
+  }
+
+  @Test
+  public void testZstdInitializationPrecedesArchitectureOverride() throws Exception {
+    URL zstdJar = Class.forName(SparkRapidsJarTool.ZSTD_INPUT_STREAM)
+        .getProtectionDomain().getCodeSource().getLocation();
+    String hostArchitecture = System.getProperty("os.arch");
+    String foreignArchitecture = "unsupported-test-arch";
+
+    try (URLClassLoader missing = new URLClassLoader(new URL[0], null)) {
+      String problem = SparkRapidsJarTool.initializeZstd(missing);
+      assertTrue(problem != null && problem.contains("zstd-jni on the classpath"), problem);
+    }
+
+    // Without early initialization, zstd-jni selects its native library for the overridden
+    // architecture and fails, as it would during extraction of a non-host architecture.
+    try (URLClassLoader late = new URLClassLoader(new URL[] {zstdJar}, null)) {
+      System.setProperty("os.arch", foreignArchitecture);
+      String problem;
+      try {
+        problem = SparkRapidsJarTool.initializeZstd(late);
+      } finally {
+        System.setProperty("os.arch", hostArchitecture);
+      }
+      assertTrue(problem != null && problem.contains("could not load its native library"),
+          problem);
+    }
+
+    try (URLClassLoader early = new URLClassLoader(new URL[] {zstdJar}, null)) {
+      assertNull(SparkRapidsJarTool.initializeZstd(early));
+      System.setProperty("os.arch", foreignArchitecture);
+      try {
+        Class<?> stream = Class.forName(SparkRapidsJarTool.ZSTD_INPUT_STREAM, true, early);
+        ((AutoCloseable) stream.getConstructor(InputStream.class)
+            .newInstance(new ByteArrayInputStream(new byte[0]))).close();
+      } finally {
+        System.setProperty("os.arch", hostArchitecture);
+      }
+    }
   }
 
   private static void withTempDir(TestBody testBody) throws IOException {
