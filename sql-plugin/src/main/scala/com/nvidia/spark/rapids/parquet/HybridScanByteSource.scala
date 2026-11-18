@@ -30,7 +30,7 @@ import com.nvidia.spark.rapids.jni.fileio.{RapidsFileIO, RapidsInputFile}
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile.CopyRange
 import com.nvidia.spark.rapids.parquet.HybridScanPipeline.HostBufferLayout
 import com.nvidia.spark.rapids.parquet.ParquetPartitionReader.LocalCopy
-import org.apache.hadoop.fs.Path
+import org.apache.hadoop.fs.{FileSystem, Path, RawLocalFileSystem}
 
 import org.apache.spark.internal.Logging
 
@@ -256,8 +256,9 @@ private[parquet] class NativeFileRangeReader(
       file.readToHost(ranges.map(_.getInputOffset).toArray, ranges.map(_.getLength).toArray,
         buffer, ranges.map(_.getOutputOffset).toArray)
     }
-    execMetrics.getOrElse(HYBRID_SCAN_NATIVE_HOST_BYTES_READ, NoopMetric) +=
-      ranges.map(_.getLength).sum
+    val bytesRead = ranges.map(_.getLength).sum
+    execMetrics.getOrElse(HYBRID_SCAN_NATIVE_HOST_BYTES_READ, NoopMetric) += bytesRead
+    NativeFileRangeReader.countFileSystemBytesRead(bytesRead)
   }
 
   override def close(): Unit = {
@@ -269,6 +270,15 @@ private[parquet] class NativeFileRangeReader(
 }
 
 private[parquet] object NativeFileRangeReader {
+  // Spark takes a task's input bytes from Hadoop's per-thread filesystem statistics, which reads
+  // outside Hadoop do not update, so count them there as Hadoop's local filesystem would.
+  @scala.annotation.nowarn("msg=method getStatistics in class FileSystem is deprecated")
+  private lazy val localFileSystemStatistics =
+    FileSystem.getStatistics("file", classOf[RawLocalFileSystem])
+
+  def countFileSystemBytesRead(bytesRead: Long): Unit =
+    localFileSystemStatistics.incrementBytesRead(bytesRead)
+
   /**
    * Whether `filePath` names a local file. libcudf opens the file by path outside Hadoop, so any
    * other scheme, or a file: path with a host, would open the wrong file. A path with no scheme is

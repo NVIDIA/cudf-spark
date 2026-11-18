@@ -22,7 +22,7 @@ import java.net.URI
 import ai.rapids.cudf.{HostMemoryBuffer, Table}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
-import com.nvidia.spark.rapids.GpuMetric.{BUFFER_TIME, FILTER_TIME, HYBRID_SCAN_FOOTER_PARSE_TIME, HYBRID_SCAN_NATIVE_HOST_BYTES_READ}
+import com.nvidia.spark.rapids.GpuMetric.{BUFFER_TIME, FILTER_TIME, HYBRID_SCAN_FOOTER_PARSE_TIME}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.io.async.{AsyncMetrics, AsyncRunner, DecayReleaseResult, MemoryBoundedAsyncRunner}
@@ -211,9 +211,7 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
       val result: HybridResult = withResource(footer) { _ =>
         // A closed reader discards this result, so neither fetch for it nor hand it buffers.
         val planned = if (isDone) None else planAndFetchForPool(footer, runnerMetrics)
-        // KvikIO reads bypass Hadoop's filesystem statistics.
-        val bytesRead = fileSystemBytesRead() - startingBytesRead +
-          runnerMetrics.get(HYBRID_SCAN_NATIVE_HOST_BYTES_READ).map(_.value).getOrElse(0L)
+        val bytesRead = fileSystemBytesRead() - startingBytesRead
         planned match {
           case None => EmptyHybridFileResult(file, bytesRead)
           case Some((fetched, numRows)) =>
