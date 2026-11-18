@@ -722,8 +722,9 @@ The decomposer also accepts these structural variations:
 - **Commuted operands**: `op(g, acc)` is treated the same as `op(acc, g)`.
 - **Casts around `acc`** can be unwrapped when every step preserves all values of its original type.
   The decomposer accepts same-type casts and exact conversions between primitive numeric types,
-  including `INT → BIGINT → INT`. A chain such as `INT → TINYINT → INT` or `INT → FLOAT → INT`
-  falls back to CPU so Spark applies the cast at each merge step.
+  including `INT → BIGINT → INT`. For non-ANSI integer addition, the GPU also supports
+  `CAST(acc AS narrower_integer) + x` and its commuted form when `x` has the accumulator type.
+  Other value-changing casts, such as `INT → FLOAT → INT`, fall back to CPU.
 - **`If` branches**: `If(cond, op(acc, t_g), op(acc, f_g))` is lifted to
   `op(acc, If(cond, t_g, f_g))`. A bare-acc branch (e.g. `If(cond, acc + 1, acc)`) is treated as
   `op(acc, identity)` and lifted to `op(acc, If(cond, t_g, identity))`. `cond` must not

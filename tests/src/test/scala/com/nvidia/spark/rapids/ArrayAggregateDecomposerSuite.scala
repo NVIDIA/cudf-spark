@@ -195,12 +195,28 @@ class ArrayAggregateDecomposerSuite extends GpuUnitTests {
     assertDecomposes(Add(doubleCastAcc, x), acc, x, SumOp)
   }
 
-  test("Casting acc back to int cannot undo truncation or rounding") {
+  test("Non-ANSI addition can narrow the accumulator before each element") {
+    withSQLConf("spark.sql.ansi.enabled" -> "false") {
+      val acc = lv("acc"); val x = lv("x")
+      val castAcc = Cast(Cast(acc, ByteType), IntegerType)
+      assertDecomposes(Add(castAcc, x), acc, x, NarrowingSumOp(ByteType), Some(x))
+      assertDecomposes(Add(x, castAcc), acc, x, NarrowingSumOp(ByteType), Some(x))
+      assertRejects(merge(Add(castAcc, Add(x, Literal(1))), acc, x), identityFinish(acc),
+        "the last addend must be the input element")
+      assertRejects(merge(Add(x, Cast(Cast(acc, FloatType), IntegerType)), acc, x),
+        identityFinish(acc), "casting through float can round the accumulator")
+    }
+  }
+
+  test("A checked accumulator cast cannot use wrapping arithmetic in a non-ANSI session") {
     val acc = lv("acc"); val x = lv("x")
-    Seq(ByteType, FloatType).foreach { intermediate =>
-      val castAcc = Cast(Cast(acc, intermediate), IntegerType)
-      assertRejects(merge(Add(x, castAcc), acc, x), identityFinish(acc),
-        s"cast through $intermediate can change the accumulator")
+    withSQLConf("spark.sql.ansi.enabled" -> "true") {
+      val checkedCast = Cast(acc, ByteType)
+      withSQLConf("spark.sql.ansi.enabled" -> "false") {
+        val body = Add(Cast(checkedCast, IntegerType), x)
+        assertRejects(merge(body, acc, x), identityFinish(acc),
+          "cast must preserve overflow errors")
+      }
     }
   }
 

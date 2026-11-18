@@ -499,24 +499,42 @@ def test_array_aggregate_long_overflow_wraps():
     assert_gpu_and_cpu_are_equal_collect(do_it)
 
 
-@pytest.mark.parametrize('data, elem_type, zero, merge_sql', [
-    ([127, 1, 0], 'int', '0', 'cast(acc as tinyint) + x'),
-    ([300, 5], 'bigint', '0L', 'greatest(cast(acc as tinyint), x)'),
-], ids=['sum', 'greatest'])
+@pytest.mark.parametrize('wide, narrow, limit', [
+    ('smallint', 'tinyint', 127),
+    ('int', 'tinyint', 127),
+    ('int', 'smallint', 32767),
+    ('bigint', 'tinyint', 127),
+    ('bigint', 'smallint', 32767),
+    ('bigint', 'int', 2147483647),
+])
 @disable_ansi_mode
-@allow_non_gpu('ArrayAggregate', 'LambdaFunction', 'NamedLambdaVariable', 'Add', 'Greatest', 'Cast')
-def test_array_aggregate_narrow_acc_cast_fallback(data, elem_type, zero, merge_sql):
+def test_array_aggregate_narrow_acc_cast_sum(wide, narrow, limit):
+    data = [
+        (0, [limit, 1]), (0, [limit, 1, 0]), (0, [-limit - 1, -1, 0]),
+        (limit + 1, []), (limit + 1, [0]), (None, [1]), (1, None),
+        (1, [None, 1]), (1, [1, None]),
+    ]
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.createDataFrame(data, f'z {wide}, a array<{wide}>').selectExpr(
+            f'aggregate(a, z, (acc, x) -> cast(acc as {narrow}) + x)'),
+        exist_classes='GpuArrayAggregate')
+
+
+@disable_ansi_mode
+@allow_non_gpu('ArrayAggregate', 'LambdaFunction', 'NamedLambdaVariable', 'Greatest', 'Cast')
+def test_array_aggregate_narrow_acc_cast_greatest_fallback():
     assert_gpu_fallback_collect(
-        lambda spark: spark.createDataFrame([(data,)], f'a array<{elem_type}>').selectExpr(
-            f'aggregate(a, {zero}, (acc, x) -> {merge_sql})'),
+        lambda spark: spark.createDataFrame([([300, 5],)], 'a array<bigint>').selectExpr(
+            'aggregate(a, 0L, (acc, x) -> greatest(cast(acc as tinyint), x))'),
         'ArrayAggregate')
 
 
-@allow_non_gpu('ArrayAggregate', 'LambdaFunction', 'NamedLambdaVariable', 'Greatest', 'Cast')
-def test_array_aggregate_narrow_acc_cast_ansi_overflow():
+@pytest.mark.parametrize('merge_sql', ['greatest(cast(acc as tinyint), x)', 'cast(acc as tinyint) + x'])
+@allow_non_gpu('ArrayAggregate', 'LambdaFunction', 'NamedLambdaVariable', 'Add', 'Greatest', 'Cast')
+def test_array_aggregate_narrow_acc_cast_ansi_overflow(merge_sql):
     assert_gpu_and_cpu_error(
         lambda spark: spark.createDataFrame([([300, 5],)], 'a array<bigint>').selectExpr(
-            'aggregate(a, 0L, (acc, x) -> greatest(cast(acc as tinyint), x))').collect(),
+            f'aggregate(a, 0L, (acc, x) -> {merge_sql})').collect(),
         conf=ansi_enabled_conf, error_message='CAST_OVERFLOW')
 
 
