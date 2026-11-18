@@ -223,6 +223,8 @@ case class GpuEqualTo(left: Expression, right: Expression) extends CudfBinaryCom
       Scalar.fromBool(rhs.isNan))
   }
 
+  override def selfConvertsToAst: Boolean = left.dataType == right.dataType
+
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     // Currently AST computeColumn assumes nulls compare true for EQUAL, but NOT_EQUAL will
     // return null for null input.
