@@ -3128,6 +3128,32 @@ def test_delta_43_parquet_format_version_new_table_spellings(
         {"DataPageV1" if version == "1.0.0" else "DataPageV2"}
 
 
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+@pytest.mark.parametrize("mode", ["append", "overwrite"])
+@pytest.mark.parametrize("version", ["1.0.0", "2.12.0"], ids=["v1_gpu", "v2_cpu"])
+def test_delta_43_parquet_format_version_new_path_default(spark_tmp_path, mode, version):
+    """Saving to a path with no table creates it with Delta's table property defaults, which may
+    be the only place the version is requested."""
+    path = spark_tmp_path + "/DELTA_DATA"
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf,
+                           {"spark.databricks.delta.properties.defaults.parquet.format.version":
+                            version})
+    # Delta caches the log of a path with no table, and its empty snapshot keeps the defaults
+    # of the session that first looked, which here had none.
+    with_cpu_session(lambda spark: spark._jvm.org.apache.spark.sql.delta.DeltaLog.forTable(
+        spark._jsparkSession, path) and None, conf=delta_writes_enabled_conf)
+
+    def write(spark):
+        with _hadoop_writer_version(spark, version == "2.12.0"):
+            spark.sql(_parquet_format_version_query).write.format("delta").mode(mode).save(path)
+    assert _wrote_on_gpu(write, conf) == (version == "1.0.0")
+    assert with_cpu_session(lambda spark: _data_page_types(spark, f"delta.`{path}`"), conf=conf) \
+        == {"DataPageV1" if version == "1.0.0" else "DataPageV2"}
+
+
 _parquet_format_version_options = [
     # (table property, write option, session conf, expected to write on the GPU)
     ("1.0.0", None, "v2", True),    # the table property beats the session conf
@@ -3219,21 +3245,25 @@ def test_delta_43_parquet_format_version_mixed_table_and_checkpoint(spark_tmp_pa
         lambda spark: spark.read.format("delta").load(path).orderBy("id", "s"), conf=conf)
 
 
-# Operations on an existing table partitioned by `p`. Each one is (statement, expect_gpu_for_v1):
-# a v1 table must run it on the GPU, except where the operation has no GPU write to begin with.
+# Operations on an existing table partitioned by `p`. Each one is (statement, expect_gpu_for_v1,
+# prepare): a v1 table must run it on the GPU, except where the operation has no GPU write to begin
+# with, and `prepare` statements run first on the table so that the operation has files to rewrite.
 _parquet_format_version_dml = {
-    "update": ("UPDATE {table} SET s = 'u' WHERE id % 2 = 0", True),
-    "delete": ("DELETE FROM {table} WHERE id % 2 = 0", True),
+    "update": ("UPDATE {table} SET s = 'u' WHERE id % 2 = 0", True, []),
+    "delete": ("DELETE FROM {table} WHERE id % 2 = 0", True, []),
     "merge": ("MERGE INTO {table} t USING (SELECT id, 'm' AS s, CAST(id % 4 AS INT) AS p "
               "FROM range(0, 64, 2)) src ON t.id = src.id "
-              "WHEN MATCHED THEN UPDATE SET s = src.s", True),
-    "optimize": ("OPTIMIZE {table}", True),
-    "optimize_zorder": ("OPTIMIZE {table} ZORDER BY (id)", None),
-    "reorg_purge": ("REORG TABLE {table} APPLY (PURGE)", None),
+              "WHEN MATCHED THEN UPDATE SET s = src.s", True, []),
+    "optimize": ("OPTIMIZE {table}", True, []),
+    "optimize_zorder": ("OPTIMIZE {table} ZORDER BY (id)", None, []),
+    # Soft-deleted rows leave deletion vectors, which is what a purge rewrites the files for.
+    "reorg_purge": ("REORG TABLE {table} APPLY (PURGE)", None, [
+        "ALTER TABLE {table} SET TBLPROPERTIES ('delta.enableDeletionVectors' = 'true')",
+        "DELETE FROM {table} WHERE id % 8 = 0"]),
     "insert_overwrite": ("INSERT OVERWRITE TABLE {table} "
-                         "SELECT id, 'o' AS s, CAST(id % 4 AS INT) AS p FROM range(64)", True),
+                         "SELECT id, 'o' AS s, CAST(id % 4 AS INT) AS p FROM range(64)", True, []),
     "insert_replace_where": ("INSERT INTO {table} REPLACE WHERE p = 0 "
-                             "SELECT id, 'r' AS s, 0 AS p FROM range(0, 64, 4)", True),
+                             "SELECT id, 'r' AS s, 0 AS p FROM range(0, 64, 4)", True, []),
 }
 
 # DataFrameWriter variants, applied to the table at `path` (or `table` by name).
@@ -3262,17 +3292,33 @@ def _create_parquet_format_version_dml_tables(spark, base_table, path_prefix, ve
                           f"PARTITIONED BY (p) "
                           f"TBLPROPERTIES ('delta.parquet.format.version' = '{version}')")
                 for start in range(0, 64, 16):
+                    # One task per insert keeps several rows in each file, so a DELETE of some
+                    # rows leaves deletion vectors instead of dropping whole files.
                     spark.sql(f"INSERT INTO {table} SELECT id, CAST(id AS STRING), "
-                              f"CAST(id % 4 AS INT) FROM range({start}, {start + 16})")
+                              f"CAST(id % 4 AS INT) FROM range({start}, {start + 16}, 1, 1)")
 
 
 def _check_parquet_format_version_dml(base_table, path_prefix, version, conf, operation,
-                                      expect_gpu_for_v1):
+                                      expect_gpu_for_v1, prepare=()):
     """Runs `operation(spark, suffix)` on the CPU and GPU tables. A v1 table writes on the GPU,
-    a v2 table on the CPU, and both tables end with the same rows and page versions."""
+    a v2 table on the CPU, and both tables end with the same rows and page versions. The
+    operation must have written files to the table, or the checks above would say nothing."""
     v2_pages = version != "1.0.0"
-    with_cpu_session(lambda spark: _create_parquet_format_version_dml_tables(
-        spark, base_table, path_prefix, version, v2_pages), conf=conf)
+    def create_and_prepare(spark):
+        _create_parquet_format_version_dml_tables(spark, base_table, path_prefix, version, v2_pages)
+        for suffix in ("cpu", "gpu"):
+            for statement in prepare:
+                spark.sql(statement.format(table=f"delta.`{path_prefix}_{suffix}`")).collect()
+    with_cpu_session(create_and_prepare, conf=copy_and_update(
+        conf, {"spark.databricks.delta.delete.deletionVectors.persistent": "true"}
+        if prepare else {}))
+
+    def data_files(suffix):
+        # The operation targets the table by name or by path.
+        return with_cpu_session(lambda spark: frozenset(
+            file for table in (f"{base_table}_{suffix}", f"delta.`{path_prefix}_{suffix}`")
+            for file in spark.table(table).inputFiles()), conf=conf)
+    files_before = {suffix: data_files(suffix) for suffix in ("cpu", "gpu")}
 
     def run(suffix):
         def func(spark):
@@ -3285,6 +3331,9 @@ def _check_parquet_format_version_dml(base_table, path_prefix, version, conf, op
         assert not wrote_on_gpu, "a DataPageV2 table must not be written by the GPU"
     elif expect_gpu_for_v1:
         assert wrote_on_gpu, "a DataPageV1 table is expected to be written by the GPU"
+    for suffix in ("cpu", "gpu"):
+        assert data_files(suffix) != files_before[suffix], \
+            f"the operation wrote no data files to the {suffix} table"
 
     def snapshot(spark, table):
         return spark.table(table).orderBy("id", "s").collect()
@@ -3308,7 +3357,7 @@ def test_delta_43_parquet_format_version_dml(
         spark_tmp_table_factory, spark_tmp_path, name, version):
     """UPDATE, DELETE, MERGE, OPTIMIZE, REORG and overwrites write files too: they run on the GPU
     for a v1 table and on the CPU for a table asking for DataPageV2."""
-    statement, expect_gpu_for_v1 = _parquet_format_version_dml[name]
+    statement, expect_gpu_for_v1, prepare = _parquet_format_version_dml[name]
     conf = copy_and_update(writer_confs, delta_writes_enabled_conf, {
         "spark.rapids.sql.command.OptimizeTableCommand": "true",
         "spark.databricks.delta.autoCompact.enabled": "false"})
@@ -3318,7 +3367,7 @@ def test_delta_43_parquet_format_version_dml(
         spark.sql(statement.format(table=table)).collect()
     _check_parquet_format_version_dml(
         spark_tmp_table_factory.get(), spark_tmp_path + "/DELTA", version, conf, operation,
-        expect_gpu_for_v1)
+        expect_gpu_for_v1, prepare)
 
 
 @allow_non_gpu(*_parquet_format_version_allow)

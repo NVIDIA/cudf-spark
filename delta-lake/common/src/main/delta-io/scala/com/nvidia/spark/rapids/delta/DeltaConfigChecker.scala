@@ -19,7 +19,7 @@ package com.nvidia.spark.rapids.delta
 import com.nvidia.spark.rapids.RapidsMeta
 
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.delta.DeltaLog
+import org.apache.spark.sql.delta.{DeltaLog, Snapshot}
 import org.apache.spark.sql.internal.SQLConf
 
 trait DeltaConfigChecker {
@@ -35,15 +35,16 @@ trait DeltaConfigChecker {
   ): Unit
 
   /**
-   * Check the properties of the existing table being written, using the session that planned the
-   * write. The properties are only read when a version needs to check them. Accepts everything
-   * by default.
+   * Check the table being written, using the session that planned the write. The snapshot is
+   * only read when a version needs to check it. A snapshot of a table that does not exist yet has
+   * a negative version, and Delta creates that table with the session's table property defaults.
+   * Accepts everything by default.
    */
   def checkTableProperties(
       meta: RapidsMeta[_, _, _],
       spark: SparkSession,
       options: Map[String, String],
-      tableProperties: => Map[String, String]): Unit = {}
+      snapshot: => Snapshot): Unit = {}
 }
 
 object AcceptAllConfigChecker extends DeltaConfigChecker {

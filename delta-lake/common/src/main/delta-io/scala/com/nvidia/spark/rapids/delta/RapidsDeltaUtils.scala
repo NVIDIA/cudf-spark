@@ -42,7 +42,7 @@ object RapidsDeltaUtils {
     configChecker.checkIncompatibleConfs(meta, deltaLog, spark.sessionState.conf, options)
     deltaLog.foreach { log =>
       configChecker.checkTableProperties(meta, spark, options,
-        DeltaRuntimeShim.unsafeVolatileSnapshotFromLog(log).metadata.configuration)
+        DeltaRuntimeShim.unsafeVolatileSnapshotFromLog(log))
     }
   }
 

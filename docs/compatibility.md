@@ -408,10 +408,12 @@ format, and will error out in that case.
 
 OSS Delta Lake 4.3 lets a table choose the Parquet data page version of the files Delta writes
 through the `delta.parquet.format.version` table property, or the `parquet.writer.version`
-Spark configuration when the property is unset. The GPU Parquet writer only writes `DataPageV1`
-pages. A write whose requested version resolves to `1.0.0`, or that does not request one, stays on
-the GPU. A write that resolves to a newer version, which would produce `DataPageV2` pages, falls
-back to the CPU for append, overwrite, CTAS, RTAS, UPDATE, DELETE, MERGE, and OPTIMIZE. Delta 4.3
+Spark configuration when the property is unset. The plugin's GPU Parquet writer only writes
+`DataPageV1` pages: libcudf can write version 2 page headers, but the cuDF Java API does not
+expose that option yet. A write whose requested version resolves to `1.0.0`, or that does not
+request one, stays on the GPU. A write that resolves to a newer version, which would produce
+`DataPageV2` pages, falls back to the CPU for append, overwrite, CTAS, RTAS, UPDATE, DELETE,
+MERGE, OPTIMIZE, REORG, `replaceWhere` and dynamic partition overwrite. Delta 4.3
 knows the versions `1.0.0` and `2.12.0` and picks the highest known one that is at or below the
 requested value, so `2.0.0` through `2.11.x` resolve to `1.0.0` and stay on the GPU. An
 invalid value falls back so that the CPU raises Delta's own error. A table can hold files of both

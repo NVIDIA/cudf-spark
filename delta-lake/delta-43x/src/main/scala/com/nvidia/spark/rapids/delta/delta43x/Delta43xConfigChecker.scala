@@ -23,7 +23,7 @@ import org.apache.parquet.hadoop.ParquetOutputFormat
 
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.delta.{DeltaConfigs, DeltaLog, DeltaOptions, IcebergCompat,
-  MaterializePartitionColumnsTableFeature}
+  MaterializePartitionColumnsTableFeature, Snapshot}
 import org.apache.spark.sql.delta.util.TableParquetVersionOption
 import org.apache.spark.sql.internal.SQLConf
 
@@ -60,17 +60,29 @@ object Delta43xConfigChecker extends DeltaConfigChecker {
     }
   }
 
-  /**
-   * `delta.parquet.format.version` selects the Parquet data page version via the writer version
-   * Delta computes in `TableParquetVersionOption`. The GPU Parquet writer only emits DataPageV1,
-   * so anything other than Parquet v1 must run on the CPU. Invalid values also fall back so the
-   * CPU path raises Delta's own validation error.
-   */
   override def checkTableProperties(
       meta: RapidsMeta[_, _, _],
       spark: SparkSession,
       options: Map[String, String],
-      tableProperties: => Map[String, String]): Unit = {
+      snapshot: => Snapshot): Unit = {
+    val current = snapshot
+    tagParquetFormatVersion(meta, spark, options, current.metadata.configuration,
+      isNewTable = current.version < 0)
+  }
+
+  /**
+   * `delta.parquet.format.version` selects the Parquet data page version via the writer version
+   * Delta computes in `TableParquetVersionOption`. The GPU Parquet writer only emits DataPageV1,
+   * so anything other than Parquet v1 must run on the CPU. Invalid values also fall back so the
+   * CPU path raises Delta's own validation error. A table that is being created also gets the
+   * session's table property defaults, which Delta merges in when it creates the table.
+   */
+  def tagParquetFormatVersion(
+      meta: RapidsMeta[_, _, _],
+      spark: SparkSession,
+      options: Map[String, String],
+      tableProperties: Map[String, String],
+      isNewTable: Boolean): Unit = {
     // Delta matches these keys exactly, but its catalog and commit path normalize their case.
     val writerVersionKey = ParquetOutputFormat.WRITER_VERSION
     val tableKey = DeltaConfigs.PARQUET_FORMAT_VERSION.key
@@ -78,7 +90,12 @@ object Delta43xConfigChecker extends DeltaConfigChecker {
       case (k, v) if k.equalsIgnoreCase(writerVersionKey) => writerVersionKey -> v
       case kv => kv
     }
-    val normalizedProperties = tableProperties.map {
+    val effectiveProperties = if (isNewTable) {
+      DeltaConfigs.mergeGlobalConfigs(spark.sessionState.conf, tableProperties)
+    } else {
+      tableProperties
+    }
+    val normalizedProperties = effectiveProperties.map {
       case (k, v) if k.equalsIgnoreCase(tableKey) => tableKey -> v
       case kv => kv
     }
