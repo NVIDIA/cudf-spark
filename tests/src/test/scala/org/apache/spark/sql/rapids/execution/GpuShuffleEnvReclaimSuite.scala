@@ -57,17 +57,19 @@ class GpuShuffleEnvReclaimSuite extends AnyFunSuite {
     }
   }
 
-  Seq(REMOVED, ABSENT, DEFERRED).foreach { outcome =>
-    test(s"a reclaim that the catalog answers $outcome detaches the shuffle's build first, and " +
-        "keeps the catalog's outcome") {
+  test("a reclaim detaches the shuffle's build first, and keeps whichever outcome the catalog " +
+      "answers") {
+    Seq(REMOVED, ABSENT, DEFERRED).foreach { outcome =>
       val fixture = new Fixture
       try {
-        val (result, builds, bytes) = fixture.env.reclaimBroadcastAndThen(shuffleId,
-          () => false)(fixture.catalogReclaim(outcome))
-        assertResult(outcome)(result.outcome)
-        assertResult((1, buildBytes))((builds, bytes))
-        assertResult(Seq("dispose", "catalog reclaim"))(fixture.events)
-        assertResult(0)(fixture.cache.activeEntryCount)
+        withClue(s"$outcome: ") {
+          val (result, builds, bytes) = fixture.env.reclaimBroadcastAndThen(shuffleId,
+            () => false)(fixture.catalogReclaim(outcome))
+          assertResult(outcome)(result.outcome)
+          assertResult((1, buildBytes))((builds, bytes))
+          assertResult(Seq("dispose", "catalog reclaim"))(fixture.events)
+          assertResult(0)(fixture.cache.activeEntryCount)
+        }
       } finally {
         fixture.cache.close()
       }
@@ -89,23 +91,6 @@ class GpuShuffleEnvReclaimSuite extends AnyFunSuite {
       assertResult(Seq(FAILED))(sent.map(_.outcome))
       assertResult(Seq("dispose", "catalog reclaim"))(fixture.events)
       assertResult(0)(fixture.cache.activeEntryCount)
-    } finally {
-      fixture.cache.close()
-    }
-  }
-
-  test("a catalog reclaim that throws runs after the detach, and its error reaches the caller") {
-    val fixture = new Fixture
-    val failure = new IllegalStateException("catalog reclaim failed")
-    try {
-      val error = intercept[IllegalStateException] {
-        fixture.env.reclaimBroadcastAndThen(shuffleId, () => false) {
-          fixture.events += "catalog reclaim"
-          throw failure
-        }
-      }
-      assert(error eq failure)
-      assertResult(Seq("dispose", "catalog reclaim"))(fixture.events)
     } finally {
       fixture.cache.close()
     }

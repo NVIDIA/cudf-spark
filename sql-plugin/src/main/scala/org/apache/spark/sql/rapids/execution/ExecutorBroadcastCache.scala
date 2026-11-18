@@ -56,7 +56,8 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
 
   /**
    * `beforeWait` releases task resources; `checkCancelled` throws for a cancelled task.
-   * `releaseBorrowed` releases a borrowed result if invalidation fails before it can be returned.
+   * `releaseBorrowed` releases a borrowed result if the owner's disposal fails before it can be
+   * returned.
    */
   def getOrBuild[B](
       id: Int,
@@ -209,7 +210,7 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
           if (failure != null) {
             suppress(failure, cleanup)
           } else {
-            // Ownership has not reached the caller when invalidation fails.
+            // Ownership has not reached the caller when the owner's disposal fails.
             result.foreach { borrowed =>
               try releaseBorrowed(borrowed) catch {
                 case secondary: Throwable => suppress(cleanup, secondary)
@@ -255,11 +256,7 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
 
   private def invalidateEntry(id: Int, entry: Entry): Option[T] = entry.synchronized {
     entry.invalidated = true
-    val owned = if (entry.borrowers == 0) {
-      val value = entry.value
-      entry.value = None
-      value
-    } else None
+    val owned = takeReleased(entry)
     // Only an in-flight builder has waiters that need an exception notification.
     if (!entry.ready.isDone) {
       entry.ready.completeExceptionally(removed(id))

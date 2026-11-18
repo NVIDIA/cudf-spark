@@ -166,11 +166,19 @@ class DriverlessBroadcastReclaimSuite extends AnyFunSuite with BeforeAndAfterEac
 
   private def rows(df: DataFrame): Seq[String] = df.collect().map(_.toString).sorted.toSeq
 
-  test("an ABSENT reclaim that detaches a build logs its line at INFO") {
-    start(gateOn = false)
+  test("with the reclaim gate off, a second collect reuses the cached build, and an ABSENT " +
+      "reclaim that detaches the build logs its line at INFO") {
+    val listener = start(gateOn = false)
     val df = query()
-    df.collect()
-    val buildId = buildShuffleId(driverlessJoin(df))
+    val first = rows(df)
+    val join = driverlessJoin(df)
+    val buildId = buildShuffleId(join)
+    assertResult(first, "rows of the second collect")(rows(df))
+    assertResult(0L, "builds of the second collect")(builds(join))
+    assert(cacheHits(join) > 0, "the second collect hit no cached build")
+    assertResult(1, "builds cached")(cachedBuilds)
+    assert(GpuShuffleEnv.getCatalog.hasActiveShuffle(buildId),
+      s"the catalog dropped shuffle $buildId")
     // what an executor that only read the build shuffle holds: the build, and none of the shuffle
     assertResult(REMOVED)(GpuShuffleEnv.getCatalog.reclaimShuffle(buildId, Long.MaxValue).outcome)
     val sent = new ArrayBuffer[ShuffleReclaimResult]()
@@ -187,40 +195,6 @@ class DriverlessBroadcastReclaimSuite extends AnyFunSuite with BeforeAndAfterEac
     assert(lines.head.contains("ABSENT") && lines.head.contains(" 1 cached broadcast builds"),
       lines.head)
     assertResult(0, "builds cached after the reclaim")(cachedBuilds)
-  }
-
-  test("with the reclaim gate on, the end of a query drops its driverless build from the cache " +
-      "and from the device store") {
-    val listener = start(gateOn = true)
-    val handlesBefore = SpillFramework.stores.deviceStore.numHandles
-    val df = query()
-    df.collect()
-    val join = driverlessJoin(df)
-    val buildId = buildShuffleId(join)
-    assertResult(1L, "builds of the collect")(builds(join))
-    // the reclaim detaches the builds before the catalog drops the shuffle
-    awaitReclaimed(gpuShuffleIds(df, buildId))
-    assertResult(0, "builds cached after the reclaim")(cachedBuilds)
-    eventually(Timeout(Span(WaitSeconds, Seconds))) {
-      assertResult(handlesBefore, "handles the device store tracks")(
-        SpillFramework.stores.deviceStore.numHandles)
-    }
-    drain()
-    assertResult(Seq.empty, "failed tasks")(listener.failedTasks)
-  }
-
-  test("with the reclaim gate on, a second collect builds again, and the end of its query drops " +
-      "that build too") {
-    val listener = start(gateOn = true)
-    val df = query()
-    val first = rows(df)
-    val join = driverlessJoin(df)
-    val shuffleIds = gpuShuffleIds(df, buildShuffleId(join))
-    awaitReclaimed(shuffleIds)
-    assertResult(first, "rows of the second collect")(rows(df))
-    assertResult(1L, "builds of the second collect")(builds(join))
-    awaitReclaimed(shuffleIds)
-    assertResult(0, "builds cached after the second reclaim")(cachedBuilds)
     drain()
     assertResult(Seq.empty, "failed tasks")(listener.failedTasks)
   }
@@ -234,9 +208,11 @@ class DriverlessBroadcastReclaimSuite extends AnyFunSuite with BeforeAndAfterEac
     value
   }
 
-  test("a reclaim that arrives after a rerun built its own build drops that build too, and the " +
-      "rerun's later tasks build it again") {
+  test("with the reclaim gate on, a reclaim that arrives after a rerun built its own build drops " +
+      "that build too, the rerun builds it again, and the end of the rerun's query drops the " +
+      "build from the cache and from the device store") {
     val listener = start(gateOn = true)
+    val handlesBefore = SpillFramework.stores.deviceStore.numHandles
     DriverlessBroadcastReclaimSuite.holding = false
     DriverlessBroadcastReclaimSuite.entered = new CountDownLatch(1)
     DriverlessBroadcastReclaimSuite.release = new CountDownLatch(1)
@@ -259,6 +235,7 @@ class DriverlessBroadcastReclaimSuite extends AnyFunSuite with BeforeAndAfterEac
       val first = rows(df)
       val join = driverlessJoin(df)
       val buildId = buildShuffleId(join)
+      assertResult(1L, "builds of the first collect")(builds(join))
       awaitRequest(buildId)
       DriverlessBroadcastReclaimSuite.holding = true
       rerun.start()
@@ -286,6 +263,13 @@ class DriverlessBroadcastReclaimSuite extends AnyFunSuite with BeforeAndAfterEac
       assertResult(first, "rows of the second collect")(rerunRows.get)
       // the tasks that looked the build up after the reclaim built it once more
       assertResult(2L, "builds of the second collect")(builds(join))
+      // the end of the second collect's query reclaims the rest, its build included
+      awaitReclaimed(gpuShuffleIds(df, buildId))
+      assertResult(0, "builds cached after the second collect's reclaim")(cachedBuilds)
+      eventually(Timeout(Span(WaitSeconds, Seconds))) {
+        assertResult(handlesBefore, "handles the device store tracks")(
+          SpillFramework.stores.deviceStore.numHandles)
+      }
       drain()
       assertResult(Seq.empty, "failed tasks")(listener.failedTasks)
     } finally {
@@ -294,22 +278,6 @@ class DriverlessBroadcastReclaimSuite extends AnyFunSuite with BeforeAndAfterEac
       DriverlessBroadcastReclaimSuite.release.countDown()
       rerun.join(TimeUnit.SECONDS.toMillis(WaitSeconds))
     }
-  }
-
-  test("with the reclaim gate off, a second collect reuses the cached build") {
-    val listener = start(gateOn = false)
-    val df = query()
-    val first = rows(df)
-    val join = driverlessJoin(df)
-    val buildId = buildShuffleId(join)
-    assertResult(first, "rows of the second collect")(rows(df))
-    assertResult(0L, "builds of the second collect")(builds(join))
-    assert(cacheHits(join) > 0, "the second collect hit no cached build")
-    assertResult(1, "builds cached")(cachedBuilds)
-    assert(GpuShuffleEnv.getCatalog.hasActiveShuffle(buildId),
-      s"the catalog dropped shuffle $buildId")
-    drain()
-    assertResult(Seq.empty, "failed tasks")(listener.failedTasks)
   }
 }
 

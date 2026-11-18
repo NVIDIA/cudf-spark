@@ -68,7 +68,7 @@ class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
   }
 
   private[rapids] def reclaimBroadcastAndThen(id: Int, isStopped: () => Boolean)(
-      reclaim: => ShuffleReclaimResult): (ShuffleReclaimResult, Int, Long) = {
+      catalogReclaim: => ShuffleReclaimResult): (ShuffleReclaimResult, Int, Long) = {
     val cache = synchronized { initializedBroadcastCache }
     var detached = (0, 0L)
     var result: ShuffleReclaimResult = null
@@ -82,7 +82,7 @@ class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
             "reclaiming it", e)
       }
     } {
-      result = reclaim
+      result = catalogReclaim
     }
     (result, detached._1, detached._2)
   }
@@ -305,17 +305,16 @@ object GpuShuffleEnv extends Logging {
   }
 
   /**
-   * Detaches the cached builds of `shuffleId`, then runs `reclaim`, the catalog's reclaim,
-   * whatever the detach did. A disposal failure is logged, and a fatal one is thrown once
-   * `reclaim` has run.
+   * Detaches the cached builds of `shuffleId`, then runs `catalogReclaim`, whatever the detach
+   * did. A disposal failure is logged, and a fatal one is thrown once `catalogReclaim` has run.
    *
-   * @return what `reclaim` returned, how many builds were detached, and their bytes
+   * @return what `catalogReclaim` returned, how many builds were detached, and their bytes
    */
   def reclaimBroadcastAndThen(shuffleId: Int, isStopped: () => Boolean)(
-      reclaim: => ShuffleReclaimResult): (ShuffleReclaimResult, Int, Long) = {
+      catalogReclaim: => ShuffleReclaimResult): (ShuffleReclaimResult, Int, Long) = {
     Option(env) match {
-      case Some(current) => current.reclaimBroadcastAndThen(shuffleId, isStopped)(reclaim)
-      case None => (reclaim, 0, 0L)
+      case Some(current) => current.reclaimBroadcastAndThen(shuffleId, isStopped)(catalogReclaim)
+      case None => (catalogReclaim, 0, 0L)
     }
   }
 
