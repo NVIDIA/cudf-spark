@@ -77,35 +77,37 @@ class MetricRange(val metrics: Seq[GpuMetric], val excludeMetric: Seq[GpuMetric]
   private val metricCount = metrics.length
   private val singleMetric = if (metricCount == 1) metrics.head else null
   private val singleActive = singleMetric != null && singleMetric.tryActivateTimer(excludeMetric)
-  // Allocate tracking flags only when a multiple-metric range activates at least one timer.
-  private val multipleTracks: Array[Boolean] = {
-    var tracks: Array[Boolean] = null
+  // Retain only timers activated by this range, at their original positions for needTracks.
+  // Closing must not depend on the caller preserving the input sequence during the body.
+  private val activatedMetrics: Array[GpuMetric] = {
+    var activated: Array[GpuMetric] = null
     if (metricCount > 1) {
       val iterator = metrics.iterator
       var index = 0
       while (iterator.hasNext) {
-        if (iterator.next().tryActivateTimer(excludeMetric)) {
-          if (tracks == null) {
-            tracks = new Array[Boolean](metricCount)
+        val metric = iterator.next()
+        if (metric.tryActivateTimer(excludeMetric)) {
+          if (activated == null) {
+            activated = new Array[GpuMetric](metricCount)
           }
-          tracks(index) = true
+          activated(index) = metric
         }
         index += 1
       }
     }
-    tracks
+    activated
   }
-  private val hasActiveTimer = singleActive || multipleTracks != null
+  private val hasActiveTimer = singleActive || activatedMetrics != null
   private val start = if (hasActiveTimer) System.nanoTime() else 0L
 
   // Preserve the existing accessor without allocating a Boolean collection on the timing path.
   def needTracks: Seq[Boolean] = {
     if (metricCount == 1) {
       Seq(singleActive)
-    } else if (multipleTracks == null) {
+    } else if (activatedMetrics == null) {
       Seq.fill(metricCount)(false)
     } else {
-      multipleTracks.toSeq
+      activatedMetrics.map(_ != null).toSeq
     }
   }
 
@@ -115,11 +117,10 @@ class MetricRange(val metrics: Seq[GpuMetric], val excludeMetric: Seq[GpuMetric]
       if (singleActive) {
         singleMetric.deactivateTimer(time, excludeMetric)
       } else {
-        val iterator = metrics.iterator
         var index = 0
-        while (iterator.hasNext) {
-          val metric = iterator.next()
-          if (multipleTracks(index)) {
+        while (index < activatedMetrics.length) {
+          val metric = activatedMetrics(index)
+          if (metric != null) {
             metric.deactivateTimer(time, excludeMetric)
           }
           index += 1
