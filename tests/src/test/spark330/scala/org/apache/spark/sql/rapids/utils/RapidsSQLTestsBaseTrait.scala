@@ -200,6 +200,6 @@ object RapidsSQLTestsBaseTrait extends Logging {
       .set("spark.rapids.sql.hasExtendedYearValues", "false")
       .setAppName("rapids spark plugin running Vanilla Spark UT")
 
-    RapidsTestConf.applyGpuMemoryConf(conf)
+    RapidsTestConf(conf)
   }
 }

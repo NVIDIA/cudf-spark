@@ -138,7 +138,7 @@ trait RapidsTestsTrait extends RapidsTestsCommonTrait {
 
       _spark = sparkBuilder
         .config("spark.unsafe.exceptionOnMemoryLeak", "true")
-        .config(RapidsTestConf.applyGpuMemoryConf(new SparkConf(false)))
+        .config(RapidsTestConf(new SparkConf(false)))
         .getOrCreate()
     }
   }

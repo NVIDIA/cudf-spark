@@ -22,7 +22,15 @@ package org.apache.spark.sql.rapids.utils
 import org.apache.spark.SparkConf
 
 object RapidsTestConf {
-  def applyGpuMemoryConf(conf: SparkConf): SparkConf = {
+  def apply(conf: SparkConf): SparkConf = {
+    Option(System.getenv("SPARK_CONF")).foreach { settings =>
+      settings.split(",").filter(_.nonEmpty).foreach { setting =>
+        val keyValue = setting.split("=", 2)
+        require(keyValue.length == 2 && keyValue(0).nonEmpty,
+          "SPARK_CONF entries must have a nonempty key followed by '='")
+        conf.set(keyValue(0), keyValue(1))
+      }
+    }
     Seq("allocFraction" -> "1", "maxAllocFraction" -> "1", "minAllocFraction" -> "0.25")
       .foreach { case (name, default) =>
         val key = s"spark.rapids.memory.gpu.$name"
