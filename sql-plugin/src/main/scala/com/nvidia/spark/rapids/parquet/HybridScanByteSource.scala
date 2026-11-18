@@ -146,23 +146,10 @@ private[parquet] class HybridScanFileByteSource(
     }
   }
 
-  /**
-   * A device fetch bypasses the file cache, so a fetch with any range in the cache is left to
-   * the host path, which reads the cached ranges from there and the rest from the file.
-   */
   override def isDeviceReadDirect(ranges: Array[ByteRange]): Boolean =
-    rangeReader.isDeviceReadDirect(ranges) && !anyRangeCached(ranges)
+    rangeReader.isDeviceReadDirect(ranges)
 
-  private def anyRangeCached(ranges: Array[ByteRange]): Boolean = {
-    lazy val inputFile = fileIO.newInputFile(filePath)
-    ranges.exists { range =>
-      range.size() > 0 &&
-        FileCache.get.getDataRangeChannel(inputFile, range.offset(), range.size())
-          .exists(withResource(_)(_ => true))
-    }
-  }
-
-  /** Bypasses the file cache. */
+  /** Bypasses the file cache: it neither reads cached ranges nor adds to the cache. */
   override def fetchToDevice(ranges: Array[ByteRange]): Array[DeviceMemoryBuffer] = {
     if (ranges.isEmpty) {
       Array.empty
