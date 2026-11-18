@@ -291,7 +291,7 @@ object GpuOrcScan {
   : ColumnView = {
     val fromDt = col.getType
     val toDt = GpuColumnVector.getNonNestedRapidsType(targetType)
-    if (fromDt == toDt &&
+    if (fromDt == toDt && !DecimalUtil.narrowsPrecision(originalFromDt, targetType) &&
        !(targetType == StringType && originalFromDt.isInstanceOf[CharType])) {
       return col
     }
@@ -442,9 +442,10 @@ object GpuOrcScan {
         }
 
       case (f: DType, t: DType) if f.isDecimalType && t.isDecimalType =>
+        // ORC can decode into a wider type than the file schema specifies. Keep the
+        // physical source type, but use the requested precision for overflow checks.
         val fromDataType = DecimalType(f.getDecimalMaxPrecision, -f.getScale)
-        val toDataType = DecimalType(t.getDecimalMaxPrecision, -t.getScale)
-        GpuCast.doCast(col, fromDataType, toDataType)
+        GpuCast.doCast(col, fromDataType, targetType)
 
       case (DType.STRING, DType.STRING) if originalFromDt.isInstanceOf[CharType] =>
         // Trim trailing whitespace off of output strings, to match CPU output.

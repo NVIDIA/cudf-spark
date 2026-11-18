@@ -1084,7 +1084,7 @@
             </activation>
             <properties>
                 <buildver>500</buildver>
-                <shim.source.inherits>420</shim.source.inherits>
+                <shim.source.inherits>421</shim.source.inherits>
                 <spark.version>${spark500.version}</spark.version>
                 <cudf-spark-private.artifactId>cudf-spark-private_${scala.binary.version}-spark-master</cudf-spark-private.artifactId>
                 <parquet.hadoop.version>1.15.2</parquet.hadoop.version>
@@ -1450,6 +1450,12 @@
               <artifactId>${cudf-spark-jni.artifactId}</artifactId>
               <version>${cudf-spark-jni.version}</version>
               <classifier>${jni.classifier}</classifier>
+              <exclusions>
+                <exclusion>
+                  <groupId>com.github.luben</groupId>
+                  <artifactId>zstd-jni</artifactId>
+                </exclusion>
+              </exclusions>
             </dependency>
             <dependency>
                 <groupId>org.openucx</groupId>

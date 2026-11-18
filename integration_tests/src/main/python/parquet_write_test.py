@@ -98,7 +98,7 @@ def _spark_has_save_as_table_overwrite_fix():
     version = spark_version_tuple()
     return ((is_spark_40x() and version >= (4, 0, 5))
             or (is_spark_41x() and version >= (4, 1, 4))
-            or ((4, 2, 1) <= version < (4, 3, 0)))
+            or version >= (4, 2, 1))
 
 
 @pytest.mark.skipif(not _spark_has_save_as_table_overwrite_fix(),
