@@ -20,7 +20,7 @@ from asserts import (assert_cpu_and_gpu_are_equal_collect_with_capture,
                      assert_gpu_and_cpu_same_data_or_error, assert_gpu_fallback_collect,
                      run_with_cpu_and_gpu)
 from data_gen import *
-from conftest import is_apache_runtime, is_databricks_runtime
+from conftest import is_databricks_runtime
 from marks import incompat, allow_non_gpu, disable_ansi_mode, validate_execs_in_gpu_plan
 from spark_session import *
 from pyspark.sql.types import *
@@ -1002,7 +1002,13 @@ def test_arrays_overlap_before_spark313(data_gen):
             'arrays_overlap(array(), array(1, 2))')
     )
 
-@pytest.mark.skipif(not (is_spark_405() or spark_version_tuple() == (4, 2, 0)),
+def _has_compatible_array_set_ops_fp_semantics():
+    version = spark_version_tuple()
+    return ((4, 0, 5) <= version < (4, 1, 0) or
+            (4, 2, 0) <= version < (4, 3, 0))
+
+
+@pytest.mark.skipif(not _has_compatible_array_set_ops_fp_semantics(),
                     reason="This Spark version does not normalize array set operations")
 @pytest.mark.parametrize('element_type', ['float', 'double'])
 @validate_execs_in_gpu_plan('GpuProjectExec')
@@ -1024,7 +1030,7 @@ def test_array_set_ops_float_normalization(element_type):
         'COLLECT')
     assert_equal_with_signed_zero(cpu, gpu)
 
-@pytest.mark.skipif(not (is_spark_405() or spark_version_tuple() == (4, 2, 0)),
+@pytest.mark.skipif(not _has_compatible_array_set_ops_fp_semantics(),
                     reason="This Spark version does not normalize array set operations")
 @pytest.mark.parametrize('element_type', ['float', 'double'])
 @validate_execs_in_gpu_plan('GpuProjectExec')
@@ -1037,7 +1043,7 @@ def test_array_distinct_nested_float_normalization(element_type):
         'COLLECT')
     assert_equal_with_signed_zero(cpu, gpu)
 
-@pytest.mark.skipif(not (is_spark_405() or spark_version_tuple() == (4, 2, 0)),
+@pytest.mark.skipif(not _has_compatible_array_set_ops_fp_semantics(),
                     reason="This Spark version does not normalize array set operations")
 @pytest.mark.parametrize('element_type', ['float', 'double'])
 @validate_execs_in_gpu_plan('GpuProjectExec')
@@ -1054,7 +1060,7 @@ def test_array_distinct_struct_float_normalization(element_type):
         'COLLECT')
     assert_equal_with_signed_zero(cpu, gpu)
 
-@pytest.mark.skipif(not (is_spark_405() or spark_version_tuple() == (4, 2, 0)),
+@pytest.mark.skipif(not _has_compatible_array_set_ops_fp_semantics(),
                     reason="This Spark version does not normalize array set operations")
 @allow_non_gpu('ArrayUnion')
 def test_array_union_nested_float_fallback():
@@ -1129,18 +1135,19 @@ def test_array_distinct_no_neg_zero(data_gen):
         lambda spark: unary_op_df(spark, data_gen).selectExpr('array_distinct(a)')
     )
 
-# These releases have compatible normalization in different places: the GPU output on
-# Spark 4.0.5 and Catalyst inputs on Spark 4.2.0. Other runtimes retain the quarantine.
+# These shim families have compatible floating-point normalization. Other runtimes
+# retain the quarantine for the behavior described in SPARK-51475.
 @pytest.mark.xfail(
-    condition=not (is_apache_runtime() and spark_version() in ('4.0.5', '4.2.0')),
+    condition=not _has_compatible_array_set_ops_fp_semantics(),
     reason="Array distinct floating-point normalization differs on this Spark runtime; "
-           "see https://github.com/NVIDIA/cudf-spark/issues/16763")
+           "see https://issues.apache.org/jira/browse/SPARK-51475")
 @pytest.mark.parametrize('data_gen', [ArrayGen(sub_gen) for sub_gen in [float_gen, double_gen]], ids=idfn)
 def test_array_distinct_neg_zero(data_gen):
     # separate -0.0 case, because Spark itself is inconsistent, see https://issues.apache.org/jira/browse/SPARK-51475
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: unary_op_df(spark, data_gen).selectExpr('array_distinct(a)')
-    )
+    cpu, gpu = run_with_cpu_and_gpu(
+        lambda spark: unary_op_df(spark, data_gen).selectExpr('array_distinct(a)'),
+        'COLLECT')
+    assert_equal_with_signed_zero(cpu, gpu)
 
 
 # No NULL keys are allowed
