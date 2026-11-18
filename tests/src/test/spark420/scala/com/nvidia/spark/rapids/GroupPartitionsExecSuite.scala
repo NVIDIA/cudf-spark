@@ -33,7 +33,7 @@ import org.apache.spark.{SparkConf, SparkException}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, AttributeReference,
-  CurrentDatabase, Descending, NullsLast, SortOrder}
+  CurrentDatabase, Descending, NullsFirst, NullsLast, SortOrder}
 import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, KeyedPartitioning,
   Partitioning, UnknownPartitioning}
 import org.apache.spark.sql.connector.catalog.{Column, Identifier, InMemoryCatalog}
@@ -57,14 +57,20 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
     .set(SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key, "-1")
     .set(SQLConf.ADAPTIVE_EXECUTION_ENABLED.key, "false")
 
+  // The child reports the planned ordering too, so Spark 4.2.0, which merges by the child's
+  // ordering, plans the same merge. childOrdering overrides it to make the two differ.
   private def newCpuGroupPartitions(
       output: Seq[Attribute],
-      enableSortedMerge: Boolean): GroupPartitionsExec = {
+      sortedMergeOrdering: Option[Seq[SortOrder]],
+      childOrdering: Option[Seq[SortOrder]] = None,
+      partitionKeys: Seq[InternalRow] = Seq(InternalRow(0))): GroupPartitionsExec = {
     val key = output.headOption.getOrElse(AttributeReference("key", IntegerType)())
     val child = spy(LocalTableScanExec(if (output.nonEmpty) output else Seq(key), Nil, None))
-    doReturn(KeyedPartitioning(Seq(key), Seq(InternalRow(0))))
+    doReturn(KeyedPartitioning(Seq(key), partitionKeys))
       .when(child).outputPartitioning
-    GroupPartitionsExecTestShim(child, enableSortedMerge)
+    doReturn(childOrdering.orElse(sortedMergeOrdering).getOrElse(Seq.empty))
+      .when(child).outputOrdering
+    GroupPartitionsExecTestShim(child, sortedMergeOrdering)
   }
 
   override protected def filterCapturedPlans(plans: Array[SparkPlan]): Array[SparkPlan] = {
@@ -133,7 +139,7 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
 
       val plannedCpu = GroupPartitionsExecTestShim(
         originalChild,
-        enableSortedMerge = false)
+        sortedMergeOrdering = None)
       val groupInfo = GpuGroupPartitionsExecInfo(plannedCpu, Seq.empty)
       assume(groupInfo.plannedChildPartitioning.nonEmpty,
         "SPARK-59289 child partitioning is only available in Spark 5")
@@ -296,7 +302,7 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
       attr.metadata)(attr.exprId, attr.qualifier)
     val groupPartitions = newCpuGroupPartitions(
       Seq(attr),
-      enableSortedMerge = false)
+      sortedMergeOrdering = None)
     val originalMeta = new GpuGroupPartitionsExecMeta(
       groupPartitions,
       new RapidsConf(Map.empty[String, String]),
@@ -314,10 +320,34 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
     assert(meta.outputAttributes == Seq(convertedAttr))
   }
 
+  private def wrapGroupPartitions(groupPartitions: GroupPartitionsExec) =
+    GpuOverrides.wrapAndTagPlan(
+      groupPartitions,
+      new RapidsConf(Map.empty[String, String]))
+      .asInstanceOf[GpuGroupPartitionsExecMeta]
+
+  test("GroupPartitionsExec without a planned merge ignores the live child ordering") {
+    val groupPartitions = newCpuGroupPartitions(
+      Nil,
+      sortedMergeOrdering = None,
+      childOrdering = Some(Seq(SortOrder(CurrentDatabase(), Ascending))))
+    val meta = wrapGroupPartitions(groupPartitions)
+
+    assert(meta.childExprs.isEmpty)
+    assert(meta.canThisBeReplaced)
+    val gpuPlan = meta.convertToGpu().asInstanceOf[GpuGroupPartitionsExec]
+    assert(gpuPlan.groupInfo.gpuOutputOrdering.isEmpty)
+  }
+
   test("Unsupported sorted-merge ordering keeps the original CPU subtree") {
-    val groupPartitions = spy(newCpuGroupPartitions(Nil, enableSortedMerge = true))
-    doReturn(Seq(SortOrder(CurrentDatabase(), Ascending)))
-      .when(groupPartitions).outputOrdering
+    val attr = AttributeReference("id", IntegerType, nullable = false)()
+    // Where Spark freezes the merge ordering, keep the live child ordering supported so that only
+    // the frozen ordering can cause the fallback.
+    val groupPartitions = newCpuGroupPartitions(
+      Seq(attr),
+      sortedMergeOrdering = Some(Seq(SortOrder(CurrentDatabase(), Ascending))),
+      childOrdering = Option.when(GroupPartitionsExecTestShim.freezesSortedMergeOrdering)(
+        Seq(SortOrder(attr, Ascending))))
     val meta = GpuOverrides.wrapAndTagPlan(
       groupPartitions,
       new RapidsConf(Map.empty[String, String]))
@@ -330,12 +360,11 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
 
   test("Sorted-merge GPU ordering drops planner-only sameOrderExpressions") {
     val attr = AttributeReference("id", IntegerType, nullable = false)()
-    val outputOrdering = Seq(SortOrder(
+    val plannedOrdering = Seq(SortOrder(
       attr,
       Ascending,
       sameOrderExpressions = Seq(CurrentDatabase())))
-    val groupPartitions = spy(newCpuGroupPartitions(Seq(attr), enableSortedMerge = true))
-    doReturn(outputOrdering).when(groupPartitions).outputOrdering
+    val groupPartitions = spy(newCpuGroupPartitions(Seq(attr), Some(plannedOrdering)))
     doReturn(Seq.empty[(InternalRow, Seq[Int])]).when(groupPartitions).groupedPartitions
     val meta = GpuOverrides.wrapAndTagPlan(
       groupPartitions,
@@ -344,9 +373,63 @@ class GroupPartitionsExecSuite extends SparkQueryCompareTestSuite {
 
     assert(meta.canThisBeReplaced)
     val gpuPlan = meta.convertToGpu().asInstanceOf[GpuGroupPartitionsExec]
-    assert(gpuPlan.groupInfo.outputOrdering == outputOrdering)
+    assert(gpuPlan.groupInfo.outputOrdering == plannedOrdering)
     assert(gpuPlan.groupInfo.gpuOutputOrdering.map(_.child) == Seq(attr))
     assert(gpuPlan.groupInfo.gpuOutputOrdering.forall(_.sameOrderExpressions.isEmpty))
+  }
+
+  test("Unsupported live child ordering does not block a supported frozen merge ordering") {
+    assume(GroupPartitionsExecTestShim.freezesSortedMergeOrdering,
+      "SPARK-60044 freezes the sorted-merge ordering since Spark 4.2.1")
+    val attr = AttributeReference("id", IntegerType, nullable = false)()
+    val groupPartitions = newCpuGroupPartitions(
+      Seq(attr),
+      Some(Seq(SortOrder(attr, Ascending))),
+      childOrdering = Some(Seq(SortOrder(CurrentDatabase(), Ascending))))
+    val meta = wrapGroupPartitions(groupPartitions)
+
+    assert(meta.canThisBeReplaced)
+    val gpuPlan = meta.convertToGpu().asInstanceOf[GpuGroupPartitionsExec]
+    assert(gpuPlan.groupInfo.gpuOutputOrdering.map(_.child) == Seq(attr))
+  }
+
+  test("Sorted-merge GPU execution uses the frozen planned ordering") {
+    assume(GroupPartitionsExecTestShim.freezesSortedMergeOrdering,
+      "SPARK-60044 freezes the sorted-merge ordering since Spark 4.2.1")
+    withGpuSparkSession { _ =>
+      val attr = AttributeReference("id", IntegerType, nullable = true)()
+      // Nulls first is not the default null ordering for Descending.
+      val plannedOrdering = Seq(SortOrder(attr, Descending, NullsFirst, Seq.empty))
+      val liveOrdering = Seq(SortOrder(attr, Ascending))
+      val groupPartitions = newCpuGroupPartitions(
+        Seq(attr),
+        Some(plannedOrdering),
+        childOrdering = Some(liveOrdering),
+        partitionKeys = Seq(InternalRow(0), InternalRow(0)))
+      assert(groupPartitions.groupedPartitions.map(_._2) == Seq(Seq(0, 1)))
+      // Merging by the live ordering, or by none, would not produce the expected rows.
+      assert(groupPartitions.outputOrdering != plannedOrdering)
+      val meta = wrapGroupPartitions(groupPartitions)
+      assert(meta.canThisBeReplaced)
+      val gpuPlan = meta.convertToGpu().asInstanceOf[GpuGroupPartitionsExec]
+
+      // Each input partition is sorted by the frozen ordering while the child reports the live
+      // one. The test leaf replaces the planned child, so skip the Spark 5 partitioning check.
+      val child = GroupPartitionsTestGpuLeaf(
+        Seq(attr),
+        Seq(Seq[Integer](null, 7, 5, 3, 1), Seq[Integer](null, 6, 4, 2, 0)),
+        liveOrdering)
+      val merged = GpuGroupPartitionsExec(
+        child,
+        gpuPlan.groupInfo.copy(plannedChildPartitioning = None))
+      val actual = GpuColumnarToRowExec(merged)
+        .executeCollect()
+        .map { row =>
+          if (row.isNullAt(0)) None else Some(row.getInt(0))
+        }
+        .toSeq
+      assert(actual == Seq(None, None) ++ (0 until 8).reverse.map(Some(_)))
+    }
   }
 
   Seq(

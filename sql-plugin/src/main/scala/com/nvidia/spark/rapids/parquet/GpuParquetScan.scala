@@ -1624,7 +1624,8 @@ case class GpuParquetMultiFilePartitionReaderFactory(
         }
       }
       new HybridScanMultithreadedParquetPartitionReader(fileIO, conf, files,
-        HybridScanContext(readDataSchema, config.filters, config.filterKeepThreshold, execMetrics),
+        HybridScanContext(readDataSchema, config.filters, config.filterKeepThreshold,
+          config.maxH2DPackSize, config.minH2DPackSize, execMetrics),
         readFooter,
         maxReadBatchSizeRows = maxReadBatchSizeRows,
         maxReadBatchSizeBytes = maxReadBatchSizeBytes,
@@ -1769,7 +1770,8 @@ case class GpuParquetPartitionReaderFactory(
       val options = HybridScanPipeline.parquetOptions(readDataSchema.fieldNames)
       new HybridScanPerFileParquetPartitionReader(
         HybridScanSplit(byteSource, file.start, file.length), footer, options,
-        HybridScanContext(readDataSchema, config.filters, config.filterKeepThreshold, metrics))
+        HybridScanContext(readDataSchema, config.filters, config.filterKeepThreshold,
+          config.maxH2DPackSize, config.minH2DPackSize, metrics))
     }
   }
 

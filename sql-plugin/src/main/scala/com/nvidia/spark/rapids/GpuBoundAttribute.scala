@@ -323,6 +323,8 @@ case class GpuBoundReference(ordinal: Int, dataType: DataType, nullable: Boolean
     }
   }
 
+  override def selfConvertsToAst: Boolean = true
+
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     // Spark treats all inputs as a single sequence of columns. For example, a join will put all
     // the columns of the left table followed by all the columns of the right table. cudf AST

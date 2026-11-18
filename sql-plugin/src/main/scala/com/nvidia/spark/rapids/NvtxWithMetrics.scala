@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -43,13 +43,16 @@ class NvtxWithMetrics(name: String, color: NvtxColor, val metrics: Seq[GpuMetric
   private val start = System.nanoTime()
 
   override def close(): Unit = {
-    val time = System.nanoTime() - start
-    metrics.toSeq.zip(needTracks).foreach { pair =>
-      if (pair._2) {
-        pair._1.deactivateTimer(time, excludeMetric)
+    try {
+      val time = System.nanoTime() - start
+      metrics.toSeq.zip(needTracks).foreach { pair =>
+        if (pair._2) {
+          pair._1.deactivateTimer(time, excludeMetric)
+        }
       }
+    } finally {
+      super.close()
     }
-    super.close()
   }
 }
 
