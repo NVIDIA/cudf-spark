@@ -25,6 +25,8 @@ import com.nvidia.spark.rapids.{FQSuiteName, GpuRowToColumnarExec, RapidsConf, T
 import com.nvidia.spark.rapids.shims.GpuMergeRowsKeepShims
 import org.scalatest.funsuite.AnyFunSuite
 
+import org.apache.spark.{ShuffleDependency, SparkEnv, TaskContext}
+import org.apache.spark.shuffle.FetchFailedException
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Literal}
 import org.apache.spark.sql.catalyst.plans.logical.MergeRows.{Copy, Delete, Insert, Keep, Update}
@@ -156,6 +158,36 @@ class GpuV2WriteSummarySuite extends AnyFunSuite with FQSuiteName {
       assert(recorder.summaryCommitCount === 1)
       assert(recorder.plainCommitCount === 0)
       assertAllMergeSummaryFields(recorder.lastSummary.get.asInstanceOf[MergeSummary])
+    }
+  }
+
+  test("MERGE commit counts rows once when the shuffle map stage is retried") {
+    assume(org.apache.spark.SPARK_VERSION.startsWith("4.2."), "SPARK-56743 starts in Spark 4.2")
+    withSparkSession { spark =>
+      val child = spark.range(1).queryExecution.executedPlan
+      val merge = GpuMergeRowsExec(
+        Literal(true, BooleanType), Literal(true, BooleanType), Nil, Nil, Nil,
+        checkCardinality = false, child.output, child)
+      val metric = merge.metrics(GpuMergeRowsExec.NUM_TARGET_ROWS_INSERTED)
+      // Put the MERGE counter upstream of the shuffle so fetch failure repeats its updates.
+      val rows = spark.sparkContext.parallelize(1 to 4, 1).map { i =>
+        metric.add(1L)
+        (0, i)
+      }
+      val shuffled = rows.reduceByKey(_ + _, 1)
+      val shuffleId = shuffled.dependencies.head.asInstanceOf[ShuffleDependency[_, _, _]].shuffleId
+      val result = shuffled.mapPartitions { iter =>
+        if (TaskContext.get().stageAttemptNumber() == 0) {
+          throw new FetchFailedException(SparkEnv.get.blockManager.blockManagerId,
+            shuffleId, 0L, 0, 0, "Retry the stage that counted the MERGE rows")
+        }
+        iter
+      }
+      assert(result.collect().toSeq === Seq(0 -> 10))
+      assert(metric.value === 8L)
+      val recorder = new RecordingBatchWrite
+      GpuV2WriteCommitShims.commit(recorder, Array.empty, merge)
+      assert(recorder.lastSummary.get.asInstanceOf[MergeSummary].numTargetRowsInserted === 4L)
     }
   }
 
