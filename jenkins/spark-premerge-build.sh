@@ -106,13 +106,13 @@ mvn_verify() {
     # build base shim version for following test step with PREMERGE_PROFILES
     $MVN_INSTALL_CMD -DskipTests -Dbuildver=$SPARK_BASE_SHIM_VERSION
 
-    # enable UTF-8 for regular expression tests
+    # enable UTF-8 for regular expression tests and for tests that use multi-byte file names
     for version in "${SPARK_SHIM_VERSIONS_PREMERGE_UTF8[@]}"
     do
         echo "Spark version (regex): $version"
         env -u SPARK_HOME LC_ALL="en_US.UTF-8" $MVN $MVN_URM_MIRROR -Dbuildver=$version package $MVN_BUILD_ARGS \
           -Dpytest.TEST_TAGS='' \
-          -DwildcardSuites=com.nvidia.spark.rapids.ConditionalsSuite,com.nvidia.spark.rapids.RegularExpressionSuite,com.nvidia.spark.rapids.RegularExpressionTranspilerSuite
+          -DwildcardSuites=com.nvidia.spark.rapids.ConditionalsSuite,com.nvidia.spark.rapids.RegularExpressionSuite,com.nvidia.spark.rapids.RegularExpressionTranspilerSuite,com.nvidia.spark.rapids.InputFileNameLongPathSuite
     done
 
     # Here run Python integration tests tagged with 'premerge_ci_1' only, that would help balance test duration and memory
@@ -126,8 +126,8 @@ mvn_verify() {
     # things we care about
     SPK_VER=${JACOCO_SPARK_VER:-"330"}
     mkdir -p target/jacoco_classes/
-    FILE=$(ls dist/target/rapids-4-spark_2.12-*.jar | grep -v test | xargs readlink -f)
-    UDF_JAR=$(ls ./udf-compiler/target/spark${SPK_VER}/rapids-4-spark-udf_2.12-*-spark${SPK_VER}.jar | grep -v test | xargs readlink -f)
+    FILE=$(ls dist/target/cudf-spark_2.12-*.jar | grep -v test | xargs readlink -f)
+    UDF_JAR=$(ls ./udf-compiler/target/spark${SPK_VER}/cudf-spark-udf_2.12-*-spark${SPK_VER}.jar | grep -v test | xargs readlink -f)
     pushd target/jacoco_classes/
     jar xf $FILE com org rapids spark-shared "spark${JACOCO_SPARK_VER:-330}/"
     # extract the .class files in udf jar and replace the existing ones in spark3xx-ommon and spark$SPK_VER

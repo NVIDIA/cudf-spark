@@ -1002,13 +1002,14 @@ def test_arrays_overlap_before_spark313(data_gen):
             'arrays_overlap(array(), array(1, 2))')
     )
 
-def _has_compatible_array_set_ops_fp_semantics():
+def _spark_has_array_set_ops_float_normalization():
     version = spark_version_tuple()
-    return ((4, 0, 5) <= version < (4, 1, 0) or
-            (4, 2, 0) <= version < (4, 3, 0))
+    return ((is_spark_40x() and version >= (4, 0, 5))
+            or (is_spark_41x() and version >= (4, 1, 4))
+            or version >= (4, 2, 0))
 
 
-@pytest.mark.skipif(not _has_compatible_array_set_ops_fp_semantics(),
+@pytest.mark.skipif(not _spark_has_array_set_ops_float_normalization(),
                     reason="This Spark version does not normalize array set operations")
 @pytest.mark.parametrize('element_type', ['float', 'double'])
 @validate_execs_in_gpu_plan('GpuProjectExec')
@@ -1030,7 +1031,7 @@ def test_array_set_ops_float_normalization(element_type):
         'COLLECT')
     assert_equal_with_signed_zero(cpu, gpu)
 
-@pytest.mark.skipif(not _has_compatible_array_set_ops_fp_semantics(),
+@pytest.mark.skipif(not _spark_has_array_set_ops_float_normalization(),
                     reason="This Spark version does not normalize array set operations")
 @pytest.mark.parametrize('element_type', ['float', 'double'])
 @validate_execs_in_gpu_plan('GpuProjectExec')
@@ -1043,7 +1044,7 @@ def test_array_distinct_nested_float_normalization(element_type):
         'COLLECT')
     assert_equal_with_signed_zero(cpu, gpu)
 
-@pytest.mark.skipif(not _has_compatible_array_set_ops_fp_semantics(),
+@pytest.mark.skipif(not _spark_has_array_set_ops_float_normalization(),
                     reason="This Spark version does not normalize array set operations")
 @pytest.mark.parametrize('element_type', ['float', 'double'])
 @validate_execs_in_gpu_plan('GpuProjectExec')
@@ -1060,7 +1061,7 @@ def test_array_distinct_struct_float_normalization(element_type):
         'COLLECT')
     assert_equal_with_signed_zero(cpu, gpu)
 
-@pytest.mark.skipif(not _has_compatible_array_set_ops_fp_semantics(),
+@pytest.mark.skipif(not _spark_has_array_set_ops_float_normalization(),
                     reason="This Spark version does not normalize array set operations")
 @allow_non_gpu('ArrayUnion')
 def test_array_union_nested_float_fallback():
@@ -1135,10 +1136,10 @@ def test_array_distinct_no_neg_zero(data_gen):
         lambda spark: unary_op_df(spark, data_gen).selectExpr('array_distinct(a)')
     )
 
-# These shim families have compatible floating-point normalization. Other runtimes
+# These Spark versions have compatible floating-point normalization. Other runtimes
 # retain the quarantine for the behavior described in SPARK-51475.
 @pytest.mark.xfail(
-    condition=not _has_compatible_array_set_ops_fp_semantics(),
+    condition=not _spark_has_array_set_ops_float_normalization(),
     reason="Array distinct floating-point normalization differs on this Spark runtime; "
            "see https://issues.apache.org/jira/browse/SPARK-51475")
 @pytest.mark.parametrize('data_gen', [ArrayGen(sub_gen) for sub_gen in [float_gen, double_gen]], ids=idfn)

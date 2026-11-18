@@ -16,12 +16,12 @@
 
 package org.apache.spark.sql.rapids.testing
 
-import com.nvidia.spark.rapids.Arm.withResource
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.execution.metric.SQLMetrics
 import org.apache.spark.sql.rapids.shims.TrampolineUtilShim
+import org.apache.spark.util.Utils
 
 class ExecutorBroadcastFaultSupportSuite extends AnyFunSuite {
   test("cancellation readiness accepts a completed build or a completed cache borrower") {
@@ -35,7 +35,8 @@ class ExecutorBroadcastFaultSupportSuite extends AnyFunSuite {
       .getOrCreate()
     try {
       session.withActive {
-        withResource(ExecutorBroadcastFaultSupport.cancellationProbe(session)) { probe =>
+        val probe = ExecutorBroadcastFaultSupport.cancellationProbe(session)
+        Utils.tryWithSafeFinally {
           val builds = SQLMetrics.createMetric(session.sparkContext, "builds")
           val hits = SQLMetrics.createMetric(session.sparkContext, "hits")
           assert(!probe.awaitBuildMetric(builds, hits, 0))
@@ -46,6 +47,8 @@ class ExecutorBroadcastFaultSupportSuite extends AnyFunSuite {
           assert(probe.awaitBuildMetric(builds, hits, 0))
           builds.set(0)
           assert(!probe.awaitBuildMetric(builds, hits, 0))
+        } {
+          probe.close()
         }
       }
     } finally {

@@ -149,6 +149,7 @@ def test_iceberg_update_unpartitioned_table_single_column(format_version, spark_
     )
 
 
+@iceberg_fast_test
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)

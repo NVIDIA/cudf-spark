@@ -20,17 +20,19 @@ import pytest
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
     assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect, \
     assert_gpu_and_cpu_row_counts_equal, assert_gpu_fallback_collect, assert_spark_exception
-from conftest import is_iceberg_remote_catalog, is_iceberg_rest_catalog
+from conftest import is_iceberg_remote_catalog, is_iceberg_rest_catalog, is_not_utc
 from data_gen import *
 from iceberg import (
     iceberg_format_versions, iceberg_read_enabled_conf, iceberg_read_format_versions,
     iceberg_table_properties_sql, get_full_table_name, iceberg_unsupported_mark, _build_tblprops,
     _BASE_TBLPROPS_SQL, create_iceberg_table, iceberg_write_enabled_conf, supports_iceberg_v3,
     ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance,
-    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df)
-from marks import allow_non_gpu, iceberg, ignore_order, iceberg_fast_test
+    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df,
+    iceberg_variant_read_conf, setup_iceberg_variant_table)
+from marks import allow_non_gpu, allow_non_gpu_conditional, iceberg, ignore_order, iceberg_fast_test, incompat
 from spark_session import is_databricks_runtime, is_spark_35x, is_spark_400_or_later, \
-    is_spark_40x, is_spark_41x, spark_version, with_cpu_session, with_gpu_session
+    is_spark_40x, is_spark_41x, is_spark_411_or_later, spark_version, with_cpu_session, \
+    with_gpu_session
 
 iceberg_map_gens = [MapGen(f(nullable=False), f()) for f in [
     BooleanGen, ByteGen, ShortGen, IntegerGen, LongGen, FloatGen, DoubleGen, DateGen, TimestampGen ]] + \
@@ -823,6 +825,153 @@ def test_iceberg_v3_read_fallback(spark_tmp_table_factory):
     assert_gpu_fallback_collect(
         lambda spark: spark.sql(f"SELECT * FROM {table_name}"),
         "BatchScanExec")
+
+
+@iceberg_fast_test
+@iceberg
+@ignore_order(local=True)
+@incompat
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.skipif(not is_spark_411_or_later(),
+                    reason="Iceberg Variant requires Spark 4.1.1+")
+def test_iceberg_v3_top_level_variant_read(spark_tmp_table_factory):
+    table = get_full_table_name(spark_tmp_table_factory)
+
+    with_cpu_session(
+        lambda spark: setup_iceberg_variant_table(spark, table),
+        conf=iceberg_variant_read_conf)
+
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: _read_iceberg_variant_table(spark, table),
+        conf=iceberg_variant_read_conf)
+
+
+@iceberg
+@ignore_order(local=True)
+@incompat
+@allow_non_gpu('BatchScanExec', 'ColumnarToRowExec', 'ProjectExec', 'VariantGet')
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.skipif(not is_spark_411_or_later(),
+                   reason="Iceberg Variant requires Spark 4.1.1+")
+def test_iceberg_v3_variant_encryption_read_fallback(spark_tmp_table_factory):
+    table = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_table(spark):
+        setup_iceberg_variant_table(spark, table)
+        spark.sql(f"ALTER TABLE {table} SET TBLPROPERTIES ('encryption.key-id'='test-key')")
+
+    with_cpu_session(setup_table, conf=iceberg_variant_read_conf)
+    assert_gpu_fallback_collect(
+        lambda spark: _read_iceberg_variant_table(spark, table),
+        "BatchScanExec", conf=iceberg_variant_read_conf)
+
+
+def _read_iceberg_variant_table(spark, table):
+    return spark.sql(f"""
+        SELECT id,
+          try_variant_get(v, '$.x', 'int') AS object_x,
+          try_variant_get(v, '$.s', 'string') AS object_s,
+          try_variant_get(v, '$.b', 'boolean') AS object_b,
+          try_variant_get(v, '$.d', 'double') AS object_d,
+          try_variant_get(v, '$[0]', 'int') AS array_first,
+          try_variant_get(v, '$[1].x', 'int') AS array_object_x
+        FROM {table}
+        """)
+
+
+@iceberg
+@ignore_order(local=True)
+@incompat
+@allow_non_gpu('BatchScanExec', 'ColumnarToRowExec', 'ProjectExec', 'VariantGet')
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.skipif(not is_spark_411_or_later(),
+                    reason="Iceberg Variant requires Spark 4.1.1+")
+def test_iceberg_v3_shredded_variant_read_fallback(spark_tmp_table_factory):
+    table = get_full_table_name(spark_tmp_table_factory)
+    conf = copy_and_update(
+        iceberg_variant_read_conf,
+        {"spark.sql.variant.allowReadingShredded": "true"})
+
+    def setup_table(spark):
+        spark.sql(
+            f"CREATE TABLE {table} (id INT, v VARIANT) USING ICEBERG "
+            "TBLPROPERTIES ('format-version' = '3', "
+            "'write.parquet.shred-variants' = 'true', "
+            "'write.parquet.variant-inference-buffer-size' = '2')")
+        spark.sql(f"""
+            INSERT INTO {table}
+            SELECT id, parse_json(json)
+            FROM VALUES (0, '{{"x":7}}'), (1, '{{"x":8}}'), (2, '{{"x":9}}')
+            AS source(id, json)
+            """)
+        jvm = spark._jvm
+        iceberg_table = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
+            spark._jsparkSession, table)
+        files = spark.sql(f"SELECT file_path FROM {table}.files").collect()
+        assert files, "Expected shredded data files"
+        for row in files:
+            input_file = iceberg_table.io().newInputFile(row.file_path)
+            reader = jvm.org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader.open(
+                jvm.org.apache.iceberg.parquet.GpuParquetIOAccess.file(input_file))
+            try:
+                variant = reader.getFileMetaData().getSchema().getType("v").asGroupType()
+                assert variant.containsField("typed_value"), "Fixture must contain shredded Variant"
+            finally:
+                reader.close()
+        # Existing shredded files remain readable by the CPU after new shredded writes are disabled.
+        spark.sql(f"ALTER TABLE {table} SET TBLPROPERTIES ('write.parquet.shred-variants'='false')")
+
+    with_cpu_session(setup_table, conf=conf)
+
+    assert_gpu_fallback_collect(
+        lambda spark: _read_iceberg_variant_table(spark, table),
+        "BatchScanExec", conf=conf)
+
+
+@iceberg
+@ignore_order(local=True)
+@incompat
+@allow_non_gpu_conditional(is_not_utc(), "ProjectExec", "VariantGet")
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.skipif(not is_spark_411_or_later(),
+                    reason="Iceberg Variant requires Spark 4.1.1+")
+def test_iceberg_v3_nested_variant_read(spark_tmp_table_factory):
+    table = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_table(spark):
+        spark.sql(
+            f"CREATE TABLE {table} (id INT, payload STRUCT<v: VARIANT>, "
+            "items ARRAY<VARIANT>, attributes MAP<STRING, VARIANT>) USING ICEBERG "
+            "TBLPROPERTIES ('format-version' = '3', 'write.parquet.shred-variants' = 'false')")
+        spark.sql(f"""
+            INSERT INTO {table}
+            SELECT id,
+              named_struct('v', parse_json(payload_json)),
+              array(parse_json(item_object_json), parse_json(item_array_json)),
+              map('object', parse_json(attribute_object_json),
+                  'array', parse_json(attribute_array_json))
+            FROM VALUES
+              (0, '{{"x":1}}', '{{"x":10}}', '[20]', '{{"x":30}}', '[40]'),
+              (1, '{{}}', 'null', '[]', '{{}}', '[]'),
+              (2, NULL, NULL, 'null', NULL, 'null')
+            AS source(id, payload_json, item_object_json, item_array_json,
+                      attribute_object_json, attribute_array_json)
+            """)
+
+    with_cpu_session(setup_table, conf=iceberg_variant_read_conf)
+
+    def read_table(spark):
+        return spark.sql(f"""
+            SELECT id,
+              try_variant_get(payload.v, '$.x', 'int') AS struct_x,
+              try_variant_get(items[0], '$.x', 'int') AS array_object_x,
+              try_variant_get(items[1], '$[0]', 'int') AS array_value,
+              try_variant_get(attributes['object'], '$.x', 'int') AS map_object_x,
+              try_variant_get(attributes['array'], '$[0]', 'int') AS map_array_value
+            FROM {table}
+            """)
+
+    assert_gpu_and_cpu_are_equal_collect(read_table, conf=iceberg_variant_read_conf)
 
 
 @iceberg_fast_test
