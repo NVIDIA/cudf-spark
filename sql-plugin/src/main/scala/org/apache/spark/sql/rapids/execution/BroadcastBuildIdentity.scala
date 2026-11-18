@@ -17,9 +17,15 @@ package org.apache.spark.sql.rapids.execution
 
 import org.apache.spark.storage.BlockManagerId
 
-/** Identifies source outputs independently of consumers and metadata enumeration order. */
+/**
+ * Identifies source outputs independently of consumers and metadata enumeration order.
+ *
+ * @param maxMapId the largest map id of the outputs, which a reclaim compares with its
+ *                 watermark, or `Long.MinValue` when there is no output
+ */
 private[rapids] final class BroadcastBuildIdentity private (
-    val outputs: Vector[BroadcastBuildIdentity.MapOutput]) {
+    val outputs: Vector[BroadcastBuildIdentity.MapOutput],
+    val maxMapId: Long) {
   override def equals(other: Any): Boolean = other match {
     case identity: BroadcastBuildIdentity => outputs == identity.outputs
     case _ => false
@@ -35,7 +41,8 @@ private[rapids] object BroadcastBuildIdentity {
     val ordered = outputs.sortBy(_.mapIndex).toVector
     require(ordered.map(_.mapIndex).distinct.size == ordered.size,
       "A driverless build must select exactly one output per mapper")
-    new BroadcastBuildIdentity(ordered)
+    new BroadcastBuildIdentity(ordered,
+      ordered.foldLeft(Long.MinValue)((max, output) => math.max(max, output.mapId)))
   }
 
   val empty: BroadcastBuildIdentity = apply(Seq.empty)

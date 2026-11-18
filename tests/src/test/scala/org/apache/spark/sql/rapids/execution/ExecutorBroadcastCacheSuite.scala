@@ -581,4 +581,446 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
     assert(cache.activeEntryCount == 0)
   }
 
+  private val buildBytes = 64L
+
+  /** An identity with one output per map index, which carries the map id given for it. */
+  private def outputs(mapIds: Long*): BroadcastBuildIdentity = {
+    val address = BlockManagerId("a", "host-a", 1000)
+    BroadcastBuildIdentity(mapIds.zipWithIndex.map { case (mapId, mapIndex) =>
+      BroadcastBuildIdentity.MapOutput(mapIndex, mapId, address)
+    })
+  }
+
+  /** Publishes a build, which the cache's reference then holds alone. */
+  private def publish(
+      cache: ExecutorBroadcastCache[Value],
+      id: Int,
+      identity: BroadcastBuildIdentity,
+      value: Value): Unit =
+    cache.getOrBuild[Value](id, () => value, noAction, noAction, identity = identity)(
+      _.retain(), _.release()).release()
+
+  private def reclaim(
+      cache: ExecutorBroadcastCache[Value],
+      id: Int,
+      watermark: Long,
+      isStopped: () => Boolean = () => false): (Int, Long) =
+    cache.reclaimUpTo(id, watermark, isStopped, _ => buildBytes)
+
+  private def countingCache(disposals: AtomicInteger): ExecutorBroadcastCache[Value] =
+    new ExecutorBroadcastCache[Value](owned => {
+      disposals.incrementAndGet()
+      owned.release()
+    })
+
+  test("a reclaim detaches each published build whose map outputs are all at or below its " +
+      "watermark, and keeps every other build") {
+    val cache = new ExecutorBroadcastCache[Value](_.release())
+    val watermark = 100L
+    val atWatermark = new Value
+    val kept = Seq.fill(3)(new Value)
+    try {
+      publish(cache, 1, outputs(watermark - 1, watermark), atWatermark)
+      publish(cache, 1, outputs(watermark + 1), kept(0))
+      publish(cache, 1, outputs(watermark, watermark + 1), kept(1))
+      publish(cache, 2, outputs(1L), kept(2))
+      assertResult((1, buildBytes))(reclaim(cache, 1, watermark))
+      assertResult(0)(atWatermark.references)
+      assertResult(Seq(1, 1, 1))(kept.map(_.references))
+      assertResult(3)(cache.activeEntryCount)
+    } finally {
+      cache.close()
+    }
+    assertResult(Seq(0, 0, 0))(kept.map(_.references))
+  }
+
+  test("a reclaim at any watermark detaches the build of the empty identity") {
+    val cache = new ExecutorBroadcastCache[Value](_.release())
+    val value = new Value
+    try {
+      publish(cache, 3, BroadcastBuildIdentity.empty, value)
+      assertResult((1, buildBytes))(reclaim(cache, 3, Long.MinValue))
+      assertResult(0)(value.references)
+      assertResult(0)(cache.activeEntryCount)
+    } finally {
+      cache.close()
+    }
+  }
+
+  test("a reclaim keeps a build in flight, which then publishes to its waiter") {
+    val cache = new ExecutorBroadcastCache[Value](_.release())
+    val pool = Executors.newFixedThreadPool(2)
+    val building = new CountDownLatch(1)
+    val waiting = new CountDownLatch(1)
+    val finish = new CountDownLatch(1)
+    val value = new Value
+    try {
+      val builder = pool.submit(new Callable[Value] {
+        override def call(): Value = cache.getOrBuild[Value](4, () => {
+          building.countDown()
+          assert(finish.await(10, TimeUnit.SECONDS))
+          value
+        }, noAction, noAction)(_.retain(), _.release())
+      })
+      assert(building.await(10, TimeUnit.SECONDS))
+      val waiter = pool.submit(new Callable[Value] {
+        override def call(): Value = cache.getOrBuild[Value](4,
+          () => fail("A waiter must not build"),
+          () => waiting.countDown(), noAction)(_.retain(), _.release())
+      })
+      assert(waiting.await(10, TimeUnit.SECONDS))
+      assertResult((0, 0L))(reclaim(cache, 4, Long.MaxValue))
+      finish.countDown()
+      val borrowed = Seq(builder.get(10, TimeUnit.SECONDS), waiter.get(10, TimeUnit.SECONDS))
+      assert(borrowed.forall(_ eq value))
+      borrowed.foreach(_.release())
+      assertResult(1)(cache.activeEntryCount)
+      assertResult(1)(value.references)
+    } finally {
+      finish.countDown()
+      pool.shutdownNow()
+      cache.close()
+    }
+    assertResult(0)(value.references)
+  }
+
+  test("a builder that a reclaim meets after its publish borrows its own build, built once") {
+    val disposals = new AtomicInteger()
+    val cache = countingCache(disposals)
+    val pool = Executors.newSingleThreadExecutor()
+    val published = new CountDownLatch(1)
+    val proceed = new CountDownLatch(1)
+    val builds = new AtomicInteger()
+    val value = new Value
+    try {
+      val builder = pool.submit(new Callable[Value] {
+        override def call(): Value = cache.getOrBuild[Value](5, () => {
+          builds.incrementAndGet()
+          value
+        }, noAction, noAction, beforeBorrow = () => {
+          published.countDown()
+          assert(proceed.await(10, TimeUnit.SECONDS))
+        })(_.retain(), _.release())
+      })
+      assert(published.await(10, TimeUnit.SECONDS))
+      assertResult((1, buildBytes))(reclaim(cache, 5, Long.MaxValue))
+      assertResult(0)(cache.activeEntryCount)
+      assertResult((0, 1))((disposals.get, value.references))
+      proceed.countDown()
+      val borrowed = builder.get(10, TimeUnit.SECONDS)
+      assert(borrowed eq value)
+      assertResult(1)(builds.get)
+      // the builder let go last, so it disposed of the cache's reference
+      assertResult((1, 1))((disposals.get, value.references))
+      borrowed.release()
+    } finally {
+      proceed.countDown()
+      pool.shutdownNow()
+      cache.close()
+    }
+    assertResult(0)(value.references)
+  }
+
+  test("a reader that looked a build up before a reclaim borrows it, and the build is disposed " +
+      "once, when the reader lets go") {
+    val disposals = new AtomicInteger()
+    val cache = countingCache(disposals)
+    val pool = Executors.newSingleThreadExecutor()
+    val waiting = new CountDownLatch(1)
+    val proceed = new CountDownLatch(1)
+    val value = new Value
+    try {
+      publish(cache, 6, BroadcastBuildIdentity.empty, value)
+      val reader = pool.submit(new Callable[Value] {
+        override def call(): Value = cache.getOrBuild[Value](6,
+          () => fail("The build is published"), noAction, noAction, beforeBorrow = () => {
+            waiting.countDown()
+            assert(proceed.await(10, TimeUnit.SECONDS))
+          })(_.retain(), _.release())
+      })
+      assert(waiting.await(10, TimeUnit.SECONDS))
+      assertResult((1, buildBytes))(reclaim(cache, 6, Long.MaxValue))
+      assertResult((0, 1))((disposals.get, value.references))
+      proceed.countDown()
+      val borrowed = reader.get(10, TimeUnit.SECONDS)
+      assert(borrowed eq value)
+      assertResult((1, 1))((disposals.get, value.references))
+      borrowed.release()
+    } finally {
+      proceed.countDown()
+      pool.shutdownNow()
+      cache.close()
+    }
+    assertResult(0)(value.references)
+  }
+
+  test("a borrower inside borrow when a reclaim lands keeps the build until it returns, and the " +
+      "build is disposed once after") {
+    val disposals = new AtomicInteger()
+    val cache = countingCache(disposals)
+    val pool = Executors.newSingleThreadExecutor()
+    val reading = new CountDownLatch(1)
+    val finish = new CountDownLatch(1)
+    val value = new Value
+    try {
+      val borrower = pool.submit(new Callable[Value] {
+        override def call(): Value = cache.getOrBuild[Value](7, () => value,
+          noAction, noAction)({ owned =>
+          reading.countDown()
+          assert(finish.await(10, TimeUnit.SECONDS))
+          owned.retain()
+        }, _.release())
+      })
+      assert(reading.await(10, TimeUnit.SECONDS))
+      assertResult((1, buildBytes))(reclaim(cache, 7, Long.MaxValue))
+      assertResult((0, 1))((disposals.get, value.references))
+      finish.countDown()
+      val borrowed = borrower.get(10, TimeUnit.SECONDS)
+      assertResult((1, 1))((disposals.get, value.references))
+      borrowed.release()
+    } finally {
+      finish.countDown()
+      pool.shutdownNow()
+      cache.close()
+    }
+    assertResult(0)(value.references)
+  }
+
+  test("a failed build and its waiter's failure leave no hold on the next build, which a " +
+      "reclaim disposes once") {
+    val disposals = new AtomicInteger()
+    val cache = countingCache(disposals)
+    val pool = Executors.newFixedThreadPool(2)
+    val building = new CountDownLatch(1)
+    val waiting = new CountDownLatch(1)
+    val failBuild = new CountDownLatch(1)
+    val expected = new IllegalStateException("build failed")
+    val value = new Value
+    try {
+      val builder = pool.submit(new Callable[Value] {
+        override def call(): Value = cache.getOrBuild[Value](8, () => {
+          building.countDown()
+          assert(failBuild.await(10, TimeUnit.SECONDS))
+          throw expected
+        }, noAction, noAction)(_.retain(), _.release())
+      })
+      assert(building.await(10, TimeUnit.SECONDS))
+      val waiter = pool.submit(new Callable[Value] {
+        override def call(): Value = cache.getOrBuild[Value](8,
+          () => fail("A waiter must not build"),
+          () => waiting.countDown(), noAction)(_.retain(), _.release())
+      })
+      assert(waiting.await(10, TimeUnit.SECONDS))
+      failBuild.countDown()
+      Seq(builder, waiter).foreach { task =>
+        assert(intercept[ExecutionException](task.get(10, TimeUnit.SECONDS)).getCause eq expected)
+      }
+      publish(cache, 8, BroadcastBuildIdentity.empty, value)
+      assertResult((1, buildBytes))(reclaim(cache, 8, Long.MaxValue))
+      assertResult((1, 0))((disposals.get, value.references))
+    } finally {
+      failBuild.countDown()
+      pool.shutdownNow()
+      cache.close()
+    }
+  }
+
+  test("a waiter cancelled before the publish leaves no hold on the build, which a reclaim " +
+      "disposes once") {
+    val disposals = new AtomicInteger()
+    val cache = countingCache(disposals)
+    val pool = Executors.newSingleThreadExecutor()
+    val started = new CountDownLatch(1)
+    val finish = new CountDownLatch(1)
+    val released = new AtomicInteger()
+    val value = new Value
+    try {
+      val builder = pool.submit(new Callable[Value] {
+        override def call(): Value = cache.getOrBuild[Value](9, () => {
+          started.countDown()
+          assert(finish.await(10, TimeUnit.SECONDS))
+          value
+        }, noAction, noAction)(_.retain(), _.release())
+      })
+      assert(started.await(10, TimeUnit.SECONDS))
+      intercept[InterruptedException] {
+        cache.getOrBuild[Value](9, () => fail("A waiter must not build"),
+          () => { released.incrementAndGet(); () },
+          () => if (released.get() > 0) throw new InterruptedException)(_.retain(), _.release())
+      }
+      finish.countDown()
+      builder.get(10, TimeUnit.SECONDS).release()
+      assertResult((1, buildBytes))(reclaim(cache, 9, Long.MaxValue))
+      assertResult((1, 0))((disposals.get, value.references))
+    } finally {
+      finish.countDown()
+      pool.shutdownNow()
+      cache.close()
+    }
+  }
+
+  test("a reader cancelled after its lookup lets go of its pin, so a reclaim's build is " +
+      "disposed once") {
+    val disposals = new AtomicInteger()
+    val cache = countingCache(disposals)
+    val pool = Executors.newSingleThreadExecutor()
+    val looked = new CountDownLatch(1)
+    val proceed = new CountDownLatch(1)
+    val checks = new AtomicInteger()
+    val value = new Value
+    try {
+      publish(cache, 10, BroadcastBuildIdentity.empty, value)
+      val reader = pool.submit(new Callable[Value] {
+        // the first check precedes the lookup, and the next one throws while the pin is held
+        override def call(): Value = cache.getOrBuild[Value](10,
+          () => fail("The build is published"), noAction, () => if (checks.incrementAndGet() > 1) {
+            looked.countDown()
+            assert(proceed.await(10, TimeUnit.SECONDS))
+            throw new TaskKilledException("reader cancelled")
+          })(_.retain(), _.release())
+      })
+      assert(looked.await(10, TimeUnit.SECONDS))
+      assertResult((1, buildBytes))(reclaim(cache, 10, Long.MaxValue))
+      assertResult((0, 1))((disposals.get, value.references))
+      proceed.countDown()
+      assert(intercept[ExecutionException](reader.get(10, TimeUnit.SECONDS))
+        .getCause.isInstanceOf[TaskKilledException])
+      assertResult((1, 0))((disposals.get, value.references))
+    } finally {
+      proceed.countDown()
+      pool.shutdownNow()
+      cache.close()
+    }
+  }
+
+  test("a builder whose beforeBorrow throws after its publish lets go of its pin, so a " +
+      "reclaim's build is disposed once") {
+    val disposals = new AtomicInteger()
+    val cache = countingCache(disposals)
+    val pool = Executors.newSingleThreadExecutor()
+    val published = new CountDownLatch(1)
+    val proceed = new CountDownLatch(1)
+    val acquireFailure = new IllegalStateException("semaphore acquire failed")
+    val value = new Value
+    try {
+      val builder = pool.submit(new Callable[Value] {
+        override def call(): Value = cache.getOrBuild[Value](11, () => value, noAction, noAction,
+          beforeBorrow = () => {
+            published.countDown()
+            assert(proceed.await(10, TimeUnit.SECONDS))
+            throw acquireFailure
+          })(_.retain(), _.release())
+      })
+      assert(published.await(10, TimeUnit.SECONDS))
+      assertResult((1, buildBytes))(reclaim(cache, 11, Long.MaxValue))
+      assertResult((0, 1))((disposals.get, value.references))
+      proceed.countDown()
+      assert(intercept[ExecutionException](builder.get(10, TimeUnit.SECONDS))
+        .getCause eq acquireFailure)
+      assertResult((1, 0))((disposals.get, value.references))
+    } finally {
+      proceed.countDown()
+      pool.shutdownNow()
+      cache.close()
+    }
+  }
+
+  Seq[(String, ExecutorBroadcastCache[Value] => Unit)](
+    ("invalidation", (target: ExecutorBroadcastCache[Value]) => target.invalidate(12)),
+    ("close", (target: ExecutorBroadcastCache[Value]) => target.close())
+  ).foreach { case (removal, remove) =>
+    test(s"$removal disposes a build at zero borrowers though a reader holds a pin, and the " +
+        "reader throws") {
+      val disposals = new AtomicInteger()
+      val cache = countingCache(disposals)
+      val pool = Executors.newSingleThreadExecutor()
+      val waiting = new CountDownLatch(1)
+      val proceed = new CountDownLatch(1)
+      val value = new Value
+      try {
+        publish(cache, 12, BroadcastBuildIdentity.empty, value)
+        val reader = pool.submit(new Callable[Value] {
+          override def call(): Value = cache.getOrBuild[Value](12,
+            () => fail("The build is published"), noAction, noAction, beforeBorrow = () => {
+              waiting.countDown()
+              assert(proceed.await(10, TimeUnit.SECONDS))
+            })(_.retain(), _.release())
+        })
+        assert(waiting.await(10, TimeUnit.SECONDS))
+        remove(cache)
+        assertResult((1, 0))((disposals.get, value.references))
+        proceed.countDown()
+        assert(intercept[ExecutionException](reader.get(10, TimeUnit.SECONDS))
+          .getCause.isInstanceOf[IllegalStateException])
+        assertResult(1)(disposals.get)
+      } finally {
+        proceed.countDown()
+        pool.shutdownNow()
+        cache.close()
+      }
+    }
+  }
+
+  test("a second reclaim at the same watermark finds nothing, and a reclaim after close does " +
+      "nothing") {
+    val cache = new ExecutorBroadcastCache[Value](_.release())
+    val reclaimed = new Value
+    val closed = new Value
+    publish(cache, 13, outputs(5L), reclaimed)
+    publish(cache, 14, outputs(5L), closed)
+    assertResult((1, buildBytes))(reclaim(cache, 13, 5L))
+    assertResult((0, 0L))(reclaim(cache, 13, 5L))
+    cache.close()
+    assertResult(0)(closed.references)
+    assertResult((0, 0L))(reclaim(cache, 14, 5L))
+    assertResult(0)(reclaimed.references)
+  }
+
+  test("a reclaim whose stop check reads true detaches nothing") {
+    val cache = new ExecutorBroadcastCache[Value](_.release())
+    val value = new Value
+    try {
+      publish(cache, 15, outputs(5L), value)
+      assertResult((0, 0L))(reclaim(cache, 15, 5L, () => true))
+      assertResult(1)(cache.activeEntryCount)
+      assertResult(1)(value.references)
+    } finally {
+      cache.close()
+    }
+    assertResult(0)(value.references)
+  }
+
+  test("a reclaim whose stop check turns true after a disposal disposes no further build") {
+    val disposals = new AtomicInteger()
+    val cache = countingCache(disposals)
+    val values = Seq(new Value, new Value)
+    try {
+      publish(cache, 16, outputs(1L), values(0))
+      publish(cache, 16, outputs(2L), values(1))
+      assertResult((2, 2 * buildBytes))(reclaim(cache, 16, 5L, () => disposals.get > 0))
+      assertResult(0)(cache.activeEntryCount)
+      assertResult(1)(disposals.get)
+      assertResult(Seq(0, 1))(values.map(_.references).sorted)
+    } finally {
+      cache.close()
+    }
+  }
+
+  test("a reclaim's disposal failure is thrown after every other disposal ran") {
+    val values = Seq(new Value, new Value)
+    val cache = new ExecutorBroadcastCache[Value](owned => {
+      owned.release()
+      throw new IllegalArgumentException("owner disposal failed")
+    })
+    try {
+      publish(cache, 17, outputs(1L), values(0))
+      publish(cache, 17, outputs(2L), values(1))
+      val error = intercept[IllegalArgumentException](reclaim(cache, 17, 5L))
+      assertResult(1)(error.getSuppressed.length)
+      assertResult(Seq(0, 0))(values.map(_.references))
+      assertResult(0)(cache.activeEntryCount)
+    } finally {
+      cache.close()
+    }
+  }
 }
