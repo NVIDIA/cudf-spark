@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * This file was derived from DeltaShufflePartitionUtil.scala
  * in the Delta Lake project at https://github.com/delta-io/delta
@@ -25,12 +25,12 @@ package org.apache.spark.sql.rapids.delta
 import scala.collection.mutable.ArrayBuffer
 
 import org.apache.spark.{MapOutputTrackerMaster, SparkEnv}
+import org.apache.spark.sql.catalyst.analysis.caseInsensitiveResolution
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, Partitioning, RoundRobinPartitioning}
 import org.apache.spark.sql.execution.{CoalesceExec, PartialReducerPartitionSpec, SparkPlan}
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec
 import org.apache.spark.sql.execution.exchange.{ENSURE_REQUIREMENTS, ShuffleExchangeExec}
-import org.apache.spark.sql.types.StructType
 
 /**
  * Utility functions to rebalance shuffle partitions for OptimizeWrite.
@@ -190,15 +190,19 @@ object DeltaShufflePartitionsUtil {
 
   def partitioningForRebalance(
       outputColumns: Seq[Attribute],
-      partitionSchema: StructType,
+      logicalPartitionColumns: Seq[String],
       numShufflePartitions: Int): Partitioning = {
-    if (partitionSchema.fields.isEmpty) {
+    if (logicalPartitionColumns.isEmpty) {
       // Non-partitioned data.
       RoundRobinPartitioning(numShufflePartitions)
     } else {
       // Partitioned data.
-      val partitionColumnsExpr = partitionSchema.fields.map { f =>
-        outputColumns.find(c => c.name.equals(f.name)).get
+      val partitionColumnsExpr = logicalPartitionColumns.map { name =>
+        outputColumns.find(c => caseInsensitiveResolution(c.name, name)).getOrElse {
+          throw new IllegalStateException(
+            s"Could not find partition column '$name' in optimized-write output: " +
+              outputColumns.map(_.name).mkString(", "))
+        }
       }
       HashPartitioning(partitionColumnsExpr, numShufflePartitions)
     }

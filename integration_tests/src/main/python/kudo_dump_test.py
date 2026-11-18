@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.
+# Copyright (c) 2025-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,11 +19,18 @@ from asserts import assert_gpu_and_cpu_are_equal_collect
 from conftest import is_apache_runtime, is_databricks_runtime
 from data_gen import *
 from marks import *
+from spark_init_internal import get_spark_i_know_what_i_am_doing
 import pyspark.sql.functions as f
 
 @ignore_order(local=True)
 @pytest.mark.skipif(not is_apache_runtime() and not is_databricks_runtime(), reason="only test on local file system")
 def test_kudo_serializer_debug_dump(spark_tmp_path):
+    # When the plugin picks the RAPIDS shuffle manager itself, it sets spark.shuffle.manager too.
+    startup = get_spark_i_know_what_i_am_doing().sparkContext.getConf()
+    if startup.get('spark.shuffle.manager', '').endswith('RapidsShuffleManager') and \
+            startup.get('spark.rapids.shuffle.enabled', 'true').lower() == 'true' and \
+            startup.get('spark.rapids.shuffle.mode', 'MULTITHREADED').upper() == 'UCX':
+        pytest.skip('The UCX shuffle moves GPU buffers and never serializes with Kudo')
     dump_prefix = spark_tmp_path + "/kudo_dump/"
     conf = {
         "spark.rapids.shuffle.kudo.serializer.enabled": "true",
