@@ -20,8 +20,9 @@ match, and no chunk entry may exist without a manifest.
 """
 
 import os
+import re
 
-from java.io import File, InputStream
+from java.io import File, InputStream, IOException
 from java.lang import Class
 from java.net import URL, URLClassLoader
 from java.util import Properties
@@ -34,6 +35,7 @@ MANIFEST_SUFFIX = ".chunks.properties"
 CHUNK_DIRECTORY_SUFFIX = ".chunks/"
 EMPTY_INCLUDE_PATTERN = "__no_native_chunks__"
 ZSTD_INPUT_STREAM = "com.github.luben.zstd.ZstdInputStreamNoFinalizer"
+CRC32_RE = re.compile(r"^[0-9a-fA-F]{8}$")
 
 
 def read_lines(path):
@@ -81,11 +83,11 @@ def verify_chunk(archive, chunk_entry, chunk_name, expected_size, expected_crc,
             "Native chunk %s has size %d, expected %d"
             % (chunk_name, chunk_entry.getSize(), expected_size))
     chunk_input = archive.getInputStream(chunk_entry)
-    if compression == "zstd":
-        chunk_input = zstd.open(chunk_input)
     chunk_bytes = 0
     chunk_crc = CRC32()
     try:
+        if compression == "zstd":
+            chunk_input = zstd.open(chunk_input)
         while True:
             count = chunk_input.read(buffer)
             if count < 0:
@@ -93,6 +95,8 @@ def verify_chunk(archive, chunk_entry, chunk_name, expected_size, expected_crc,
             if count:
                 chunk_crc.update(buffer, 0, count)
                 chunk_bytes += count
+    except IOException, error:
+        raise RuntimeError("Cannot decompress native chunk %s: %s" % (chunk_name, error))
     finally:
         chunk_input.close()
     if chunk_bytes != expected_size:
@@ -148,7 +152,7 @@ try:
         library_size = long(require_property(properties, "library.size", manifest_name))
         chunk_size = long(require_property(properties, "chunk.size", manifest_name))
         chunk_count = int(require_property(properties, "chunk.count", manifest_name))
-        compression = (properties.getProperty("chunk.compression") or "none").strip()
+        compression = properties.getProperty("chunk.compression", "none").strip()
         if compression not in ("none", "zstd"):
             raise RuntimeError(
                 "Unsupported chunk.compression %s in %s" % (compression, manifest_name))
@@ -172,8 +176,11 @@ try:
             chunk_entry = archive.getEntry(chunk_name)
             if chunk_entry is None:
                 raise RuntimeError("Missing native chunk %s" % chunk_name)
-            expected_crc = long(require_property(
-                properties, "chunk.%05d.crc32" % index, manifest_name), 16)
+            crc_key = "chunk.%05d.crc32" % index
+            crc_value = require_property(properties, crc_key, manifest_name)
+            if not CRC32_RE.match(crc_value):
+                raise RuntimeError("Invalid %s in %s" % (crc_key, manifest_name))
+            expected_crc = long(crc_value, 16)
             expected_size = (
                 chunk_size if index < chunk_count - 1
                 else library_size - chunk_size * index)

@@ -43,11 +43,13 @@ java -cp "<dist.jar>:<zstd-jni.jar>" com.nvidia.spark.rapids.SparkRapidsJarTool 
 
 On Windows, use `;` instead of `:` as the classpath separator.
 
-The plugin also decompresses its zstd-chunked native libraries with Spark's `zstd-jni` when
-it starts on the driver and executors. `zstd-jni` must therefore be able to load its own
-native library on every node, even when Spark is configured with a different compression
-codec. By default it extracts that library into `java.io.tmpdir`, which must allow
-executing files.
+The plugin also decompresses its zstd-chunked native libraries with Spark's `zstd-jni` the
+first time it loads cuDF native code on the driver or an executor. `zstd-jni` must
+therefore be able to load its own native library on every node, even when Spark is
+configured with a different compression codec. By default it extracts that library into
+`java.io.tmpdir`. If that directory does not allow executing files, set `java.io.tmpdir` to
+one that does, or pass `-DZstdNativePath=<path-to-libzstd-jni>` through
+`spark.driver.extraJavaOptions` and `spark.executor.extraJavaOptions`.
 
 Running the JAR without arguments lists the native library names and architectures packaged
 for the current operating system. Extraction uses the host architecture when available, or

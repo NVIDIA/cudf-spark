@@ -445,6 +445,14 @@
                                     <attribute name="metadata_dir"/>
                                     <attribute name="zstd_jar"/>
                                 </scriptdef>
+                                <java classname="org.python.util.jython"
+                                      classpathref="maven.plugin.classpath"
+                                      fork="true" failonerror="true"
+                                      dir="${spark.rapids.source.basedir}">
+                                    <arg value="-B"/>
+                                    <arg value="${spark.rapids.source.basedir}/${rapids.module}/scripts/tests/test_verify_native_library_chunks.py"/>
+                                    <arg value="${project.build.directory}/jni-archive/zstd-jni.jar"/>
+                                </java>
                                 <verifyNativeLibraryChunks
                                     jar_path="${dist.jar.name}"
                                     metadata_dir="${dist.native.chunking.metadata.dir}"
