@@ -113,7 +113,8 @@
 359,413,400db173,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/GpuIntervalUtils.scala	sql-plugin/src/main/spark350/scala/com/nvidia/spark/rapids/shims/GpuIntervalUtils.scala
 359,413,350db143,400db173,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/GpuKnownNullable.scala	sql-plugin/src/main/spark340/scala/com/nvidia/spark/rapids/shims/GpuKnownNullable.scala
 359	src/main/scala/com/nvidia/spark/rapids/shims/GpuMergeRowMetricsShims.scala	sql-plugin/src/main/spark350/scala/com/nvidia/spark/rapids/shims/GpuMergeRowMetricsShims.scala
-413,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/GpuMergeRowMetricsShims.scala	sql-plugin/src/main/spark410db183/scala/com/nvidia/spark/rapids/shims/GpuMergeRowMetricsShims.scala
+413,410db183	src/main/scala/com/nvidia/spark/rapids/shims/GpuMergeRowMetricsShims.scala	sql-plugin/src/main/spark410db183/scala/com/nvidia/spark/rapids/shims/GpuMergeRowMetricsShims.scala
+500	src/main/scala/com/nvidia/spark/rapids/shims/GpuMergeRowMetricsShims.scala	sql-plugin/src/main/spark420/scala/com/nvidia/spark/rapids/shims/GpuMergeRowMetricsShims.scala
 359	src/main/scala/com/nvidia/spark/rapids/shims/GpuMergeRowsKeepShims.scala	sql-plugin/src/main/spark350/scala/com/nvidia/spark/rapids/shims/GpuMergeRowsKeepShims.scala
 413,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/GpuMergeRowsKeepShims.scala	sql-plugin/src/main/spark410db183/scala/com/nvidia/spark/rapids/shims/GpuMergeRowsKeepShims.scala
 413,400db173,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/GpuOneRowRelationExec.scala	sql-plugin/src/main/spark400db173/scala/com/nvidia/spark/rapids/shims/GpuOneRowRelationExec.scala
