@@ -252,6 +252,15 @@ private abstract class HostAlloc(nonPinnedLimit: Long, protected val pageableLim
         case Some(HostAllocResult(buffer: HostMemoryBuffer, isPinned: Boolean)) =>
           val metrics = GpuTaskMetrics.get
           metrics.incHostBytesAllocated(amount, isPinned)
+          if (TaskContext.get() != null) {
+            // Capture the allocating task: final release can occur on another thread.
+            metrics.recordOwnedHost(amount, isPinned)
+            HostAlloc.addEventHandler(buffer, new MemoryBuffer.EventHandler {
+              override def onClosed(refCount: Int): Unit = {
+                if (refCount == 0) metrics.recordOwnedHost(-amount, isPinned)
+              }
+            })
+          }
           if (BOOKKEEP_MEMORY) {
             HostAlloc.bookkeepHostMemoryAlloc(buffer.getAddress, amount)
           }

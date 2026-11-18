@@ -67,6 +67,36 @@ class GpuTaskMetrics extends Serializable with Logging {
 
   private val maxGpuFootprint = new SizeInBytesAccumulator
 
+  // Allocation ownership, unlike the existing executor-wide host high-water samples.
+  // These cover allocations with task context; background allocations may be unattributed.
+  private val ownedHostNames = Seq("All", "Pinned", "NonPinned")
+  private val ownedHostPeaks = ownedHostNames.map(_ => new MaxLongAccumulator).toArray
+  private val ownedHostLive = Array.fill[Long](ownedHostNames.size)(0L)
+  private val ownedHostAllocated = new SizeInBytesAccumulator
+  private val hostBatchMetrics = Seq("RowToColumnar", "ColumnarToRow").map { name =>
+    name -> ((new SizeInBytesAccumulator, new MaxLongAccumulator,
+      new LongAccumulator, new MaxLongAccumulator))
+  }.toMap
+
+  def recordOwnedHost(delta: Long, isPinned: Boolean): Unit = synchronized {
+    Seq(0, if (isPinned) 1 else 2).foreach { i =>
+      ownedHostLive(i) += delta
+      ownedHostPeaks(i).add(ownedHostLive(i))
+    }
+    if (delta > 0) ownedHostAllocated.add(delta)
+  }
+
+  private[rapids] def ownedHostCurrent: Long = synchronized { ownedHostLive(0) }
+  private[rapids] def ownedHostPeak: Long = synchronized { ownedHostPeaks(0).value }
+
+  def recordHostBatch(direction: String, bytes: Long, rows: Long): Unit = synchronized {
+    val (totalBytes, maxBytes, totalRows, maxRows) = hostBatchMetrics(direction)
+    totalBytes.add(bytes)
+    maxBytes.add(bytes)
+    totalRows.add(rows)
+    maxRows.add(rows)
+  }
+
   // Disk write savings from SpillablePartialFileHandle
   private val diskWriteSavedBytes = new LongAccumulator
 
@@ -123,6 +153,7 @@ class GpuTaskMetrics extends Serializable with Logging {
   }
 
   private val metrics = Map[String, AccumulatorV2[_, _]](
+    "gpuOwnedHostAllocatedBytes" -> ownedHostAllocated,
     "gpuTime" -> semaphoreHoldingTime,
     "gpuSemaphoreWait" -> semWaitTimeNs,
     "gpuRetryCount" -> retryCount,
@@ -158,7 +189,15 @@ class GpuTaskMetrics extends Serializable with Logging {
   )
 
   def register(sc: SparkContext): Unit = {
-    metrics.foreach { case (k, m) =>
+    val ownershipMetrics = ownedHostNames.zip(ownedHostPeaks).map { case (name, metric) =>
+      s"gpuOwnedHost${name}PeakBytes" -> metric
+    }
+    val batchMetrics = hostBatchMetrics.toSeq.flatMap { case (name, (bytes, max, rows, maxRows)) =>
+      Seq[(String, AccumulatorV2[_, _])](
+        s"gpuHost${name}BatchBytes" -> bytes, s"gpuHost${name}MaxBatchBytes" -> max,
+        s"gpuHost${name}BatchRows" -> rows, s"gpuHost${name}MaxBatchRows" -> maxRows)
+    }
+    (metrics.toSeq ++ ownershipMetrics ++ batchMetrics).foreach { case (k, m) =>
       // This is not a public API, but the only way to get failed task
       // If we run into problems we can use use sc.register(m, k), but
       // it would not allow us to collect metrics for failed tasks.

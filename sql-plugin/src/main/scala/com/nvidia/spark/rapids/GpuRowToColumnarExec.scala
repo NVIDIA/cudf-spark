@@ -827,6 +827,8 @@ class RowToColumnarIterator(
             builders.buildHostColumns()
           }
           val hostBatch = withResource(hostColumns) { _ =>
+            org.apache.spark.sql.rapids.GpuTaskMetrics.get.recordHostBatch("RowToColumnar",
+              hostColumns.map(_.getHostMemorySize).sum, rowCount)
             HostColumnarBatchWithRowRange(hostColumns, rowCount, dataTypes)
           }
 

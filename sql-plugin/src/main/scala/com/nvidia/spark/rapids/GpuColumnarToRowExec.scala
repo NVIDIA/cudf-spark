@@ -190,7 +190,12 @@ class AcceleratedColumnarToRowIterator(
               RmmRapidsRetryIterator.withRetry(rowsBatches(i), splitSpillableInHalfByRows) {
                 attempt =>
                   withResource(attempt.getColumnarBatch()) { rowsCb =>
-                    GpuColumnVector.extractBases(rowsCb).head.copyToHost()
+                    val hostRows = GpuColumnVector.extractBases(rowsCb).head.copyToHost()
+                    closeOnExcept(hostRows) { _ =>
+                      org.apache.spark.sql.rapids.GpuTaskMetrics.get.recordHostBatch(
+                        "ColumnarToRow", hostRows.getHostMemorySize, hostRows.getRowCount)
+                      hostRows
+                    }
                   }
               }.foreach(pendingCvs += _)
               i += 1
