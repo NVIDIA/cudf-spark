@@ -29,6 +29,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.execution.datasources.{FilePartition, InMemoryFileIndex}
 import org.apache.spark.sql.execution.datasources.v2.parquet.ParquetScan
+import org.apache.spark.sql.execution.rapids.shims.FilePartitionShims
 import org.apache.spark.sql.types.{IntegerType, LongType, StringType, StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
@@ -51,7 +52,7 @@ class ScanSplitResizeSuite extends AnyFunSuite {
     : Seq[(Int, Seq[(String, Long, Long, Seq[Any])])] =
     scan.planInputPartitions().toSeq.map { p =>
       val fp = p.asInstanceOf[FilePartition]
-      (fp.index, fp.files.toSeq.map { f =>
+      (fp.index, FilePartitionShims.getFiles(fp).toSeq.map { f =>
         (f.filePath.toString, f.start, f.length, f.partitionValues.toSeq(partitionColumns))
       })
     }
