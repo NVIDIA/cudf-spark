@@ -478,6 +478,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val isTestEnabled: Boolean = get(TEST_CONF)
 
+  lazy val inputFileNameMaxStringBytes: Long = get(TEST_INPUT_FILE_NAME_MAX_STRING_BYTES)
+
   lazy val testingForceNonAst: Set[String] = get(TEST_FORCE_NON_AST).toSet
 
   lazy val isRetryContextCheckEnabled: Boolean = get(TEST_RETRY_CONTEXT_CHECK_ENABLED)
@@ -749,6 +751,10 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val hybridScanSingleStageFilterKeepThreshold: Double =
     get(PARQUET_HYBRID_SCAN_SINGLE_STAGE_FILTER_KEEP_THRESHOLD)
+
+  lazy val hybridScanMaxH2DPackSize: Long = get(PARQUET_HYBRID_SCAN_MAX_H2D_PACK_SIZE)
+
+  lazy val hybridScanMinH2DPackSize: Long = get(PARQUET_HYBRID_SCAN_MIN_H2D_PACK_SIZE)
 
   lazy val isParquetPerFileReadEnabled: Boolean =
     RapidsReaderType.withName(get(PARQUET_READER_TYPE)) == RapidsReaderType.PERFILE

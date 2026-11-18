@@ -23,7 +23,7 @@ import java.util.{ServiceConfigurationError, ServiceLoader}
 import scala.collection.JavaConverters._
 import scala.util.control.NonFatal
 
-import com.nvidia.spark.history.{HistoryMetricsProvider, MetricStores}
+import com.nvidia.spark.history.{HistoryMetricCatalog, HistoryMetricsProvider, MetricStores}
 import org.slf4j.LoggerFactory
 
 /**
@@ -178,7 +178,7 @@ private[rapids] class HistoryMetricsManager(
       applicationAttemptId: String,
       producerVersion: String): Unit = {
     try {
-      val store = provider.open(
+      val store = provider.open(HistoryMetricCatalog.of(Collections.emptyList()),
         configuration, applicationId, applicationAttemptId, producerVersion)
       val newRegistration = MetricStores.install(store)
       activeProvider = provider

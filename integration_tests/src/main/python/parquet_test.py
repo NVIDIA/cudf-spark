@@ -976,6 +976,45 @@ def test_parquet_input_meta(spark_tmp_path, v1_enabled_list, reader_confs):
                         'input_file_block_length()'),
             conf=all_confs)
 
+# input_file_name() needs rows * path bytes of string data in one batch, which cudf caps at 2 GiB.
+# The internal conf lowers that cap (to ~6 MiB of string data, ~40K rows for these paths) so a
+# single large row group has to be sliced without needing gigabytes of GPU memory.
+# The scan settings put both files in one task, so the reader moves from a sliced file to another
+# file with a different path inside the same task. Whether slicing actually happens is checked by
+# the batch counts in InputFileNameLongPathSuite; this test checks results end to end.
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+def test_parquet_input_file_name_sliced_large_batch(spark_tmp_path, reader_confs):
+    paths = [spark_tmp_path + '/PARQUET_DATA/' + 'a' * 150 + '/f1',
+             spark_tmp_path + '/PARQUET_DATA/b/f2']
+    num_rows = 200000
+    for path in paths:
+        with_cpu_session(lambda spark: spark.range(num_rows).coalesce(1).write.parquet(path))
+    conf = copy_and_update(reader_confs, {
+        'spark.sql.sources.useV1SourceList': 'parquet',
+        'spark.sql.files.maxPartitionBytes': '1g',
+        'spark.sql.files.openCostInBytes': str(4 << 20),
+        'spark.sql.files.minPartitionNum': '1',
+        'spark.rapids.sql.test.inputFileName.maxStringBytes': str((1 << 20) + 6000000)})
+    # Both files must be in the one task, otherwise the move from a sliced file to a file with a
+    # different path is not exercised. This checks the file partitioning of the CPU session, not
+    # the plugin. Apache Spark puts both files in one partition with the settings above, but
+    # Databricks gives every file its own partition: on DBR 18.3 the two files stayed in two
+    # partitions (and 8 tiny files in 8) with these settings and with openCostInBytes 0 or 1g,
+    # maxPartitionBytes 8g, maxPartitionNum 1, leafNodeDefaultParallelism 1, the disk cache on or
+    # off, partitionReorder off and prorateMaxPartitionBytes.ubound changed. So the check is
+    # skipped there. On Databricks the test still compares GPU and CPU results, and the
+    # same-task case is covered by InputFileNameLongPathSuite.
+    if not is_databricks_runtime():
+        assert with_cpu_session(
+            lambda spark: spark.read.parquet(*paths).rdd.getNumPartitions(), conf=conf) == 1
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: spark.read.parquet(*paths)
+                .select('id', input_file_name().alias('f'))
+                .groupBy('f').agg(count('*').alias('c'), sum('id').alias('s'),
+                                  min('id').alias('lo'), max('id').alias('hi')),
+            conf=conf)
+
 @allow_non_gpu('ProjectExec', 'Alias', 'InputFileName', 'InputFileBlockStart', 'InputFileBlockLength',
                'FilterExec', 'And', 'IsNotNull', 'GreaterThan', 'Literal',
                'FileSourceScanExec', 'ColumnarToRowExec',
@@ -1938,6 +1977,156 @@ def test_parquet_decimal_precision_scale_change(spark_tmp_path, from_decimal_gen
 
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.schema(read_schema).parquet(data_path), conf=spark_conf)
+
+@ignore_order(local=True)
+# Pair reader and API settings to cover V1/V2 without multiplying every boundary case.
+@pytest.mark.parametrize('reader_confs, v1_enabled_list', [
+    (original_parquet_file_reader_conf, 'parquet'),
+    (multithreaded_parquet_file_reader_conf, ''),
+    (coalesce_parquet_file_reader_conf, 'parquet'),
+    (coalesce_parquet_file_reader_conf, '')])
+@pytest.mark.parametrize('legacy_format', ['false', 'true'])
+@pytest.mark.parametrize('ansi_enabled', ['false', 'true'])
+@pytest.mark.parametrize('file_precision, read_precision', [(9, 7), (18, 10), (34, 20)])
+def test_parquet_decimal_precision_narrowing(spark_tmp_path, reader_confs, v1_enabled_list,
+        legacy_format, ansi_enabled, file_precision, read_precision):
+    data_path = spark_tmp_path + '/PARQUET_DECIMAL_NARROWING'
+    decimal_type = DecimalType(file_precision, 2)
+    # Include both signs of the exact read bound and the first value beyond it.
+    max_value = '9' * (read_precision - 2) + '.99'
+    overflow = '1' + '0' * (read_precision - 2) + '.00'
+    values = [Decimal(v) for v in [max_value, '-' + max_value, overflow, '-' + overflow,
+        '0.00', '0.01']] + [None]
+    with_cpu_session(lambda spark: gen_df(spark,
+        [('id', RepeatSeqGen(list(range(len(values))), data_type=IntegerType())),
+         ('d', RepeatSeqGen(values, data_type=decimal_type))], length=len(values))
+        .selectExpr('id', 'd', 'named_struct("d", d) as s', 'array(d) as a', 'map(1, d) as m',
+            f'cast(null as decimal({file_precision},2)) as n',
+            f'map(cast(id + 1 as decimal({file_precision},2)), id) as k')
+        .repartition(2).write.parquet(data_path),
+        conf={'spark.sql.parquet.writeLegacyFormat': legacy_format})
+
+    target = f'decimal({read_precision},2)'
+    schema = (f'id int, d {target}, s struct<d:{target}>, a array<{target}>, '
+        f'm map<int,{target}>, n {target}, k map<{target},int>')
+    conf = copy_and_update(reader_confs, {
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        'spark.sql.parquet.enableVectorizedReader': 'false',
+        'spark.sql.ansi.enabled': ansi_enabled})
+
+    # Decimal128 row conversion can hide overflow by turning it into null on the host.
+    # Evaluate null checks on the GPU too, including every nested decimal leaf.
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(schema).parquet(data_path).selectExpr('*',
+            'd is null as d_is_null', 's.d is null as struct_is_null',
+            'a[0] is null as array_is_null', 'm[1] is null as map_is_null',
+            'n is null as all_null', 'map_keys(k)[0] + 1 as key_added', 'd + 1 as added'),
+        conf=conf)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(schema).parquet(data_path)
+            .filter(f'd > {max_value} OR d < -{max_value}').select('id'), conf=conf)
+
+@ignore_order(local=True)
+@pytest.mark.parametrize('ansi_enabled', ['false', 'true'])
+@pytest.mark.parametrize('file_scale, read_precision, read_scale', [(2, 10, 4), (3, 8, 2)])
+def test_parquet_decimal_scale_change_boundaries(spark_tmp_path, ansi_enabled,
+        file_scale, read_precision, read_scale):
+    data_path = spark_tmp_path + '/PARQUET_DECIMAL_SCALE_BOUNDARIES'
+    inputs = ['999999.99', '-999999.99', '0.00']
+    if file_scale == 2:
+        # Increasing scale leaves fewer digits for the whole-number part.
+        inputs += ['1000000.00', '-1000000.00']
+    else:
+        # HALF_UP rounding carries beyond the target precision only for the .995 values.
+        inputs += ['999999.994', '-999999.994', '999999.995', '-999999.995']
+    values = [Decimal(value) for value in inputs] + [None]
+    with_cpu_session(lambda spark: gen_df(spark,
+        [('d', RepeatSeqGen(values, data_type=DecimalType(9, file_scale)))], length=len(values))
+        # Same-schema files can share a coalesced batch, unlike the mixed-precision test.
+        .repartition(2).write.parquet(data_path))
+    conf = copy_and_update(coalesce_parquet_file_reader_conf, {
+        'spark.sql.sources.useV1SourceList': '',
+        'spark.sql.parquet.enableVectorizedReader': 'false',
+        'spark.sql.ansi.enabled': ansi_enabled,
+        'spark.sql.adaptive.enabled': 'false',
+        'spark.sql.files.minPartitionNum': '1',
+        'spark.sql.files.openCostInBytes': '0',
+        'spark.rapids.sql.metrics.level': 'DEBUG'})
+
+    def read(spark):
+        df = spark.read.schema(f'd decimal({read_precision},{read_scale})').parquet(data_path)
+        assert len(df.inputFiles()) == 2
+        return df.selectExpr('d', 'd is null as is_null', 'd + 1 as added')
+
+    def check_batches(cpu_plan, gpu_plan):
+        # DBR can keep files in separate partitions despite these file settings.
+        # Keep CPU/GPU result checks there; assert cross-file coalescing on Apache Spark.
+        if not is_databricks_runtime():
+            assert _scan_output_batches(gpu_plan) == 1
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(read, conf=conf,
+        gpu_plan_assertion=check_batches)
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize('v1_enabled_list', ['', 'parquet'])
+@pytest.mark.parametrize('ansi_enabled', ['false', 'true'])
+def test_parquet_decimal_narrowing_map_key_overflow(spark_tmp_path,
+        v1_enabled_list, ansi_enabled):
+    data_path = spark_tmp_path + '/PARQUET_DECIMAL_MAP_KEYS'
+    values = [(Decimal(value),) for value in
+        ['99999999.99', '-99999999.99', '100000000.00', '-100000000.00']]
+    with_cpu_session(lambda spark: spark.createDataFrame(values, 'd decimal(18,2)')
+        .selectExpr('map(d, 1) as k').coalesce(1).write.parquet(data_path))
+    conf = copy_and_update(coalesce_parquet_file_reader_conf, {
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        # The CPU vectorized reader rejects this precision change.
+        'spark.sql.parquet.enableVectorizedReader': 'false',
+        'spark.sql.ansi.enabled': ansi_enabled})
+    # Inspect the key on the GPU, before collecting an invalid null-key map to the host.
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema('k map<decimal(10,2),int>').parquet(data_path)
+            .selectExpr('map_keys(k)[0] as key', 'map_keys(k)[0] is null as key_is_null'),
+        conf=conf)
+
+
+@ignore_order(local=True)
+def test_parquet_decimal_narrowing_mixed_file_precisions(spark_tmp_path):
+    paths = [f'{spark_tmp_path}/PARQUET_DECIMAL_MIXED_{precision}' for precision in [10, 18]]
+    # The COALESCING reader must split batches at this logical-schema boundary,
+    # even though both files use INT64 storage. Only precision 18 needs narrowing.
+    for precision, data_path in zip([10, 18], paths):
+        inputs = ['99999999.99', '-99999999.99']
+        if precision == 18:
+            inputs += ['100000000.00', '-100000000.00']
+        values = [Decimal(value) for value in inputs] + [None]
+        with_cpu_session(lambda spark: gen_df(spark,
+            [('d', RepeatSeqGen(values, data_type=DecimalType(precision, 2)))], length=len(values))
+            .coalesce(1).write.parquet(data_path))
+    conf = copy_and_update(coalesce_parquet_file_reader_conf, {
+        'spark.sql.sources.useV1SourceList': '',
+        'spark.sql.parquet.enableVectorizedReader': 'false',
+        'spark.sql.adaptive.enabled': 'false',
+        'spark.sql.files.minPartitionNum': '1',
+        'spark.sql.files.openCostInBytes': '0',
+        'spark.rapids.sql.metrics.level': 'DEBUG'})
+
+    def read(spark):
+        df = spark.read.schema('d decimal(10,2)').parquet(*paths)
+        assert len(df.inputFiles()) == 2
+        return df.selectExpr('d', 'd is null as is_null', 'd + 1 as added')
+
+    def check_batches(cpu_plan, gpu_plan):
+        # DBR can keep files in separate partitions despite these file settings.
+        # Keep CPU/GPU result checks there; assert schema-dependent batching on Apache Spark.
+        if not is_databricks_runtime():
+            # Separate batches must result from the schema boundary, not separate partitions.
+            assert gpu_plan.execute().getNumPartitions() == 1
+            assert _scan_output_batches(gpu_plan) == 2
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(read, conf=conf,
+        gpu_plan_assertion=check_batches)
+
 
 # These are based on tests from https://issues.apache.org/jira/browse/SPARK-40876
 # Plus more
