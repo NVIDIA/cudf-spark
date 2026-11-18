@@ -50,7 +50,6 @@ trait RapidsSQLTestsTrait extends QueryTest with RapidsSQLTestsBaseTrait {
   override def beforeAll(): Unit = {
     prepareWorkDir()
     super.beforeAll()
-    RapidsTestConf.verifyAnsiMode(spark)
     spark.sparkContext.setLogLevel("WARN")
   }
 

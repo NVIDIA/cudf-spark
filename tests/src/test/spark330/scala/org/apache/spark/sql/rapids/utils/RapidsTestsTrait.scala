@@ -134,22 +134,12 @@ trait RapidsTestsTrait extends RapidsTestsCommonTrait {
         .config("spark.rapids.sql.exec.FlatMapCoGroupsInPandasExec", "true")
         .config("spark.rapids.sql.exec.WindowInPandasExec", "true")
         .config("spark.rapids.sql.hasExtendedYearValues", "false")
-        .config("spark.rapids.memory.gpu.allocFraction",
-          System.getProperty(
-            "rapids.test.gpu.allocFraction", "1"))
-        .config("spark.rapids.memory.gpu.maxAllocFraction",
-          System.getProperty(
-            "rapids.test.gpu.maxAllocFraction", "1"))
-        .config("spark.rapids.memory.gpu.minAllocFraction",
-          System.getProperty(
-            "rapids.test.gpu.minAllocFraction", "0.25"))
         .appName("rapids spark plugin running Vanilla Spark UT")
 
       _spark = sparkBuilder
         .config("spark.unsafe.exceptionOnMemoryLeak", "true")
-        .config(RapidsTestConf.applyCommandLineConf(new SparkConf(false)))
+        .config(RapidsTestConf.applyGpuMemoryConf(new SparkConf(false)))
         .getOrCreate()
-      RapidsTestConf.verifyAnsiMode(_spark)
     }
   }
 

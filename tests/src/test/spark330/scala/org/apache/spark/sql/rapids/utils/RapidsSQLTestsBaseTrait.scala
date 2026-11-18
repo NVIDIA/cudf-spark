@@ -200,12 +200,6 @@ object RapidsSQLTestsBaseTrait extends Logging {
       .set("spark.rapids.sql.hasExtendedYearValues", "false")
       .setAppName("rapids spark plugin running Vanilla Spark UT")
 
-    Seq("allocFraction", "maxAllocFraction", "minAllocFraction").foreach { name =>
-      Option(System.getProperty(s"rapids.test.gpu.$name")).foreach { value =>
-        conf.set(s"spark.rapids.memory.gpu.$name", value)
-      }
-    }
-
-    RapidsTestConf.applyCommandLineConf(conf)
+    RapidsTestConf.applyGpuMemoryConf(conf)
   }
 }

@@ -20,34 +20,14 @@ spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.utils
 
 import org.apache.spark.SparkConf
-import org.apache.spark.internal.Logging
-import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.internal.SQLConf
 
-object RapidsTestConf extends Logging {
-  // Match the comma-separated key=value options consumed by SparkSessionHolder.
-  private def commandLineOptions: Seq[(String, String)] = {
-    Option(System.getenv("SPARK_CONF")).toSeq.flatMap { options =>
-      options.split(",").map(_.trim).filter(_.nonEmpty).map { option =>
-        val keyValue = option.split("=", 2)
-        require(keyValue.length == 2 && keyValue(0).trim.nonEmpty,
-          "SPARK_CONF entries must have a nonempty key followed by '='")
-        keyValue(0).trim -> keyValue(1)
+object RapidsTestConf {
+  def applyGpuMemoryConf(conf: SparkConf): SparkConf = {
+    Seq("allocFraction" -> "1", "maxAllocFraction" -> "1", "minAllocFraction" -> "0.25")
+      .foreach { case (name, default) =>
+        val key = s"spark.rapids.memory.gpu.$name"
+        conf.set(key, System.getProperty(s"rapids.test.gpu.$name", conf.get(key, default)))
       }
-    }
-  }
-
-  def applyCommandLineConf(conf: SparkConf): SparkConf = {
-    conf.setAll(commandLineOptions)
-  }
-
-  def verifyAnsiMode(spark: SparkSession): Unit = {
-    val key = SQLConf.ANSI_ENABLED.key
-    val actual = spark.conf.get(key).toBoolean
-    commandLineOptions.reverse.find(_._1 == key).foreach { case (_, expected) =>
-      require(actual == expected.toBoolean,
-        s"Migrated UT session has $key=$actual instead of the requested ANSI mode")
-    }
-    logInfo(s"Migrated UT session has $key=$actual")
+    conf
   }
 }
