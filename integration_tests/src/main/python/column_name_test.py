@@ -92,6 +92,31 @@ def test_dotted_column_reordered_schema_with_missing_column(
 
 
 @ignore_order(local=True)
+@pytest.mark.parametrize("reader,footer,use_v1,chunked", [
+    (reader, footer, use_v1, chunked)
+    for fmt, reader, footer, use_v1, _, chunked in _readers if fmt == "parquet"
+])
+def test_parquet_missing_dotted_column(spark_tmp_path, reader, footer, use_v1, chunked):
+    path = spark_tmp_path + "/missing_dotted"
+    with_cpu_session(lambda spark: gen_df(
+        spark, [_collision_gens[0], _collision_gens[2]], length=16, num_slices=2)
+        .write.parquet(path))
+    schema = StructType([
+        StructField("a", StructType([
+            StructField("b", IntegerType()), StructField("z", IntegerType())])),
+        StructField("a.b", IntegerType()),
+        StructField("c", IntegerType()),
+    ])
+    # The missing literal root must become null without selecting a/b and dropping a/z.
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(schema).parquet(path),
+        conf={"spark.sql.sources.useV1SourceList": "parquet" if use_v1 else "",
+              "spark.rapids.sql.format.parquet.reader.type": reader,
+              "spark.rapids.sql.format.parquet.reader.footer.type": footer,
+              "spark.rapids.sql.reader.chunked": str(chunked).lower()})
+
+
+@ignore_order(local=True)
 @pytest.mark.parametrize("footer", ["JAVA", "NATIVE"])
 def test_parquet_nested_dotted_names(spark_tmp_path, footer):
     path = spark_tmp_path + "/nested_names"

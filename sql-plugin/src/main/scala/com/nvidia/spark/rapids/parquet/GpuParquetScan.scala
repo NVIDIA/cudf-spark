@@ -2578,9 +2578,12 @@ trait ParquetPartitionReaderBase extends Logging with ScanWithMetrics
     val builder = ParquetOptions.builder()
       .withTimeUnit(DType.TIMESTAMP_MICROSECONDS)
     // cuDF's name selector cannot distinguish a flat "a.b" from the struct field a.b.
+    // Missing requested columns can still appear in includeColumns after footer clipping.
     // The in-memory footer is already clipped in read-schema order, so read all its
-    // columns when a top-level name contains a dot.
-    if (!clippedSchema.getFields.asScala.exists(_.getName.contains("."))) {
+    // columns when either a selector or a physical root name contains a dot.
+    val hasDottedName = includeColumns.exists(_.contains(".")) ||
+      clippedSchema.getFields.asScala.exists(_.getName.contains("."))
+    if (!hasDottedName) {
       builder.includeColumn(includeColumns: _*)
     }
     builder.build()
