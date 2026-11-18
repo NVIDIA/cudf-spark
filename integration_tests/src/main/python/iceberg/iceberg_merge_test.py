@@ -219,6 +219,7 @@ def test_iceberg_merge(format_version, spark_tmp_table_factory, partition_col_sq
     _do_test_iceberg_merge(spark_tmp_table_factory, partition_col_sql, merge_mode, format_version=format_version)
 
 
+@iceberg_fast_test
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)

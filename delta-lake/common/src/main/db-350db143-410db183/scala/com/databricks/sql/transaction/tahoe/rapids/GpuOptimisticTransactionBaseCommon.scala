@@ -22,6 +22,7 @@
 package com.databricks.sql.transaction.tahoe.rapids
 
 import com.databricks.sql.transaction.tahoe._
+import com.databricks.sql.transaction.tahoe.commands.cdc.CDCReader.CDC_PARTITION_COL
 import com.databricks.sql.transaction.tahoe.constraints.{Constraint, DeltaInvariantCheckerExec}
 import com.databricks.sql.transaction.tahoe.metering.DeltaLogging
 import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
@@ -147,8 +148,12 @@ abstract class GpuOptimisticTransactionBaseCommon
     if (optimizeWriteEnabled) {
       val planWithoutTopRepartition =
         DeltaShufflePartitionsUtil.removeTopRepartition(physicalPlan)
+      // The plan uses logical names, whereas partitionSchema uses physical column-mapping names.
+      // Preserve the synthetic CDC partition column when this write includes change records.
+      val logicalPartitionColumns = partitionSchema.fieldNames
+        .filter(_ == CDC_PARTITION_COL).toSeq ++ metadata.partitionColumns
       val partitioning = DeltaShufflePartitionsUtil.partitioningForRebalance(
-        physicalPlan.output, partitionSchema, spark.sessionState.conf.numShufflePartitions)
+        physicalPlan.output, logicalPartitionColumns, spark.sessionState.conf.numShufflePartitions)
       planWithoutTopRepartition match {
         case p: GpuExec =>
           val partMeta = GpuOverrides.wrapPart(partitioning, rapidsConf, None)

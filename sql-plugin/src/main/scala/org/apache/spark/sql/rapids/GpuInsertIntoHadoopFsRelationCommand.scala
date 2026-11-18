@@ -34,7 +34,7 @@ import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.command.{AlterTableAddPartitionCommand, AlterTableDropPartitionCommand, CommandUtils}
 import org.apache.spark.sql.execution.datasources.{FileFormatWriter, FileIndex, PartitioningUtils}
 import org.apache.spark.sql.internal.SQLConf.PartitionOverwriteMode
-import org.apache.spark.sql.rapids.shims.{RapidsErrorUtils, SchemaUtilsShims}
+import org.apache.spark.sql.rapids.shims.{PartitioningUtilsShims, RapidsErrorUtils, SchemaUtilsShims}
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.SparkSession
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -211,8 +211,8 @@ case class GpuInsertIntoHadoopFsRelationCommand(
       if (updatedPartitionPaths.isEmpty && staticPartitions.nonEmpty
         && partitionColumns.length == staticPartitions.size) {
         // Avoid empty static partition can't loaded to datasource table.
-        val staticPathFragment =
-          PartitioningUtils.getPathFragment(staticPartitions, partitionColumns)
+        val staticPathFragment = PartitioningUtilsShims.getPathFragment(
+          staticPartitions, partitionColumns, conf.validatePartitionColumns)
         refreshUpdatedPartitions(Set(staticPathFragment))
       } else {
         refreshUpdatedPartitions(updatedPartitionPaths)
@@ -281,9 +281,11 @@ case class GpuInsertIntoHadoopFsRelationCommand(
       table: CatalogTable,
       qualifiedOutputPath: Path,
       partitions: Seq[CatalogTablePartition]): Map[TablePartitionSpec, String] = {
+    val validatePartitionColumns = conf.validatePartitionColumns
     partitions.flatMap { p =>
       val defaultLocation = qualifiedOutputPath.suffix(
-        "/" + PartitioningUtils.getPathFragment(p.spec, table.partitionSchema)).toString
+        "/" + PartitioningUtilsShims.getPathFragment(
+          p.spec, table.partitionSchema, validatePartitionColumns)).toString
       val catalogLocation = new Path(p.location).makeQualified(
         fs.getUri, fs.getWorkingDirectory).toString
       if (catalogLocation != defaultLocation) {

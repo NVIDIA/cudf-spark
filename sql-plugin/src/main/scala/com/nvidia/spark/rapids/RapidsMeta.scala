@@ -1423,7 +1423,7 @@ abstract class BaseExprMeta[INPUT <: Expression](
       CurrentOrigin.withOrigin(wrapped.origin) {
         val converted = convertToGpuImpl()
         if (conf.isProjectAstEnabled) {
-          GpuProjectAstPlanner.tagLegacySupport(converted, canSelfBeAst)
+          GpuProjectAstPlanner.tagConvertedLegacySupport(wrapped, converted, canSelfBeAst)
         }
         converted
       }

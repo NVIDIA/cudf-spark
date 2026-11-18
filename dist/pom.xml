@@ -21,18 +21,18 @@
 
     <parent>
         <groupId>com.nvidia</groupId>
-        <artifactId>rapids-4-spark-parent_2.12</artifactId>
+        <artifactId>cudf-spark-parent_2.12</artifactId>
         <version>26.12.0-SNAPSHOT</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
-    <artifactId>rapids-4-spark_2.12</artifactId>
+    <artifactId>cudf-spark_2.12</artifactId>
     <name>RAPIDS Accelerator for Apache Spark Distribution</name>
     <description>Creates the distribution package of the RAPIDS plugin for Apache Spark</description>
     <version>26.12.0-SNAPSHOT</version>
     <dependencies>
         <dependency>
             <groupId>com.nvidia</groupId>
-            <artifactId>rapids-4-spark-aggregator_${scala.binary.version}</artifactId>
+            <artifactId>cudf-spark-aggregator_${scala.binary.version}</artifactId>
             <version>${project.version}</version>
             <classifier>${spark.version.classifier}</classifier>
             <scope>compile</scope>
@@ -307,6 +307,7 @@
                         <id>clean-any-prior-output</id>
                         <configuration>
                             <target>
+                                <taskdef resource="net/sf/antcontrib/antcontrib.properties"/>
                                 <delete dir="${project.build.directory}/parallel-world"
                                         includeemptydirs="true"/>
                                 <delete dir="${project.build.directory}/history-metrics-unpack-markers"
@@ -316,6 +317,15 @@
                                 </delete>
                                 <delete dir="${project.build.directory}/deps" includeemptydirs="true"/>
                                 <delete dir="${dist.native.chunking.metadata.dir}" includeemptydirs="true"/>
+                                <ac:if xmlns:ac="antlib:net.sf.antcontrib">
+                                    <not><istrue value="${rapids.jni.unpack.skip}"/></not>
+                                    <then>
+                                        <delete dir="${project.build.directory}/jni-deps" includeemptydirs="true"/>
+                                        <delete dir="${project.build.directory}/jni-archive" includeemptydirs="true"/>
+                                        <delete dir="${project.build.directory}/dependency-maven-plugin-markers"
+                                                includeemptydirs="true"/>
+                                    </then>
+                                </ac:if>
                                 <mkdir dir="${project.build.directory}/deps"/>
                             </target>
                         </configuration>
@@ -355,6 +365,7 @@
                                         <available file="${project.build.directory}/parallel-world/com/nvidia/spark/history/backend/BackendMetricSupport.class"/>
                                         <available file="${project.build.directory}/parallel-world/com/nvidia/spark/history/relational/RelationalJdbcSupport.class"/>
                                         <available file="${project.build.directory}/parallel-world/com/nvidia/spark/history/local/LocalHistoryMetricsProvider.class"/>
+                                        <available file="${project.build.directory}/parallel-world/com/nvidia/spark/history/runtime/BackendLifecycle.class"/>
                                         <available file="${project.build.directory}/parallel-world/org/sqlite/JDBC.class"/>
                                         <available file="${project.build.directory}/parallel-world/org/sqlite/native" type="dir"/>
                                         <available file="${project.build.directory}/parallel-world/META-INF/services/com.nvidia.spark.history.HistoryMetricsProvider"/>
@@ -370,7 +381,7 @@
                     </execution>
                     <execution>
                         <id>copy-jni-and-ucx-classes</id>
-                        <!-- after optional unpack -->
+                        <!-- after optional JNI and UCX unpack -->
                         <phase>process-resources</phase>
                         <goals><goal>run</goal></goals>
                         <configuration>
@@ -380,7 +391,8 @@
                                     <available file="${project.build.directory}/jni-deps" type="dir"/>
                                     <then>
                                         <copy todir="${project.build.directory}/parallel-world">
-                                            <fileset dir="${project.build.directory}/jni-deps"/>
+                                            <fileset dir="${project.build.directory}/jni-deps"
+                                                     excludes="**/*.chunks/**"/>
                                         </copy>
                                     </then>
                                     <else>
@@ -439,6 +451,38 @@
                                             jar_path="${dist.jar.name}"
                                             metadata_dir="${dist.native.chunking.metadata.dir}"/>
                                     </then>
+                                </ac:if>
+                            </target>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>copy-jni-native-chunks</id>
+                        <phase>package</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <taskdef resource="net/sf/antcontrib/antcontrib.properties"/>
+                                <ac:if xmlns:ac="antlib:net.sf.antcontrib">
+                                    <available file="${project.build.directory}/jni-archive/spark-rapids-jni-native.jar"/>
+                                    <then>
+                                        <scriptdef name="copyNativeChunks" language="jython"
+                                                   src="${spark.rapids.source.basedir}/${rapids.module}/build/copy-native-chunks.py">
+                                            <attribute name="jar_path"/>
+                                            <attribute name="archive_path"/>
+                                        </scriptdef>
+                                        <copyNativeChunks jar_path="${dist.jar.name}"
+                                            archive_path="${project.build.directory}/jni-archive/spark-rapids-jni-native.jar"/>
+                                    </then>
+                                    <else>
+                                        <fail message="JNI chunk archive is missing; re-execute with -Drapids.jni.unpack.skip=false">
+                                            <condition>
+                                                <resourcecount when="greater" count="0">
+                                                    <fileset dir="${project.build.directory}/jni-deps"
+                                                             includes="**/*.chunks.properties"/>
+                                                </resourcecount>
+                                            </condition>
+                                        </fail>
+                                    </else>
                                 </ac:if>
                             </target>
                         </configuration>
@@ -509,6 +553,14 @@
                                         </not>
                                     </condition>
                                 </fail>
+                                <fail message="Distribution JAR must use Spark's zstd-jni dependency instead of bundling it">
+                                    <condition>
+                                        <resourcecount when="greater" count="0">
+                                            <zipfileset src="${dist.jar.name}"
+                                                        includes="com/github/luben/zstd/**,**/libzstd-jni-*"/>
+                                        </resourcecount>
+                                    </condition>
+                                </fail>
                                 <taskdef resource="net/sf/antcontrib/antcontrib.properties"/>
                                 <ac:trycatch xmlns:ac="antlib:net.sf.antcontrib">
                                     <ac:try>
@@ -518,7 +570,12 @@
                                             <arg value="cudfjni"/>
                                             <arg value="${project.build.directory}/native-extraction-smoke/cudfjni"/>
                                         </java>
-                                        <java jar="${dist.jar.name}" fork="true" failonerror="true">
+                                        <java classname="com.nvidia.spark.rapids.SparkRapidsJarTool"
+                                              fork="true" failonerror="true">
+                                            <classpath>
+                                                <pathelement location="${dist.jar.name}"/>
+                                                <pathelement location="${project.build.directory}/jni-archive/zstd-jni.jar"/>
+                                            </classpath>
                                             <arg value="extract"/>
                                             <arg value="cudf"/>
                                             <arg value="${project.build.directory}/native-extraction-smoke/cudf"/>
@@ -577,7 +634,7 @@ self.log("... OK")
                 <dependencies>
                     <dependency>
                         <groupId>com.nvidia</groupId>
-                        <artifactId>rapids-4-spark-aggregator_${scala.binary.version}</artifactId>
+                        <artifactId>cudf-spark-aggregator_${scala.binary.version}</artifactId>
                         <version>${project.version}</version>
                         <classifier>${spark.version.classifier}</classifier>
                     </dependency>
@@ -585,6 +642,11 @@ self.log("... OK")
                         <groupId>org.javassist</groupId>
                         <artifactId>javassist</artifactId>
                         <version>3.30.2-GA</version>
+                    </dependency>
+                    <dependency>
+                        <groupId>org.apache.commons</groupId>
+                        <artifactId>commons-compress</artifactId>
+                        <version>1.21</version>
                     </dependency>
                 </dependencies>
             </plugin>
@@ -603,12 +665,36 @@ self.log("... OK")
             <plugin>
                 <!-- The dependency scopes of spark-rapids-jni and jucx are `provided` in aggregator submodule,
                  this will skip the dedupe processing in `create-parallel-world`.
-                 Unpack spark-rapids-jni and jucx jars to `parallel-world` directory after `create-parallel-world`,
+                 Unpack spark-rapids-jni and jucx jars to `parallel-world` after `create-parallel-world`,
                  then `parallel-world` will be packaged.
                  Note all Shims use the same version of spark-rapids-jni and jucx -->
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-dependency-plugin</artifactId>
                 <executions>
+                    <execution>
+                        <id>copy-spark-rapids-jni-archive</id>
+                        <phase>generate-resources</phase>
+                        <goals><goal>copy</goal></goals>
+                        <configuration>
+                            <skip>${rapids.jni.unpack.skip}</skip>
+                            <artifactItems>
+                                <artifactItem>
+                                    <groupId>com.nvidia</groupId>
+                                    <artifactId>${cudf-spark-jni.artifactId}</artifactId>
+                                    <classifier>${jni.classifier}</classifier>
+                                    <outputDirectory>${project.build.directory}/jni-archive</outputDirectory>
+                                    <destFileName>spark-rapids-jni-native.jar</destFileName>
+                                </artifactItem>
+                                <artifactItem>
+                                    <groupId>com.github.luben</groupId>
+                                    <artifactId>zstd-jni</artifactId>
+                                    <version>1.5.6-6</version>
+                                    <outputDirectory>${project.build.directory}/jni-archive</outputDirectory>
+                                    <destFileName>zstd-jni.jar</destFileName>
+                                </artifactItem>
+                            </artifactItems>
+                        </configuration>
+                    </execution>
                     <execution>
                         <id>unpack-history-metrics-at-root</id>
                         <!-- Resolve versions through the SQL plugin's transitive runtime dependencies. -->
@@ -618,7 +704,7 @@ self.log("... OK")
                         </goals>
                         <configuration>
                             <includeGroupIds>com.nvidia,org.xerial</includeGroupIds>
-                            <includeArtifactIds>cudf-spark-history-metrics-api,cudf-spark-history-metrics-backend-core,cudf-spark-history-metrics-relational-core,cudf-spark-history-metrics-local,sqlite-jdbc</includeArtifactIds>
+                            <includeArtifactIds>cudf-spark-history-metrics-api,cudf-spark-history-metrics-backend-core,cudf-spark-history-metrics-provider-runtime,cudf-spark-history-metrics-relational-core,cudf-spark-history-metrics-local,sqlite-jdbc</includeArtifactIds>
                             <includes>com/nvidia/spark/history/**,org/sqlite/**,META-INF/versions/*/org/sqlite/**,META-INF/native-image/org.xerial/sqlite-jdbc/**,META-INF/services/com.nvidia.spark.history.HistoryMetricsProvider,META-INF/services/java.sql.Driver,META-INF/maven/org.xerial/sqlite-jdbc/**</includes>
                             <outputDirectory>${project.build.directory}/parallel-world</outputDirectory>
                             <markersDirectory>${project.build.directory}/history-metrics-unpack-markers</markersDirectory>
@@ -639,7 +725,7 @@ self.log("... OK")
                                     <groupId>com.nvidia</groupId>
                                     <artifactId>${cudf-spark-jni.artifactId}</artifactId>
                                     <classifier>${jni.classifier}</classifier>
-                                    <excludes>META-INF/**</excludes>
+                                    <excludes>META-INF/**,**/*.chunks/**,com/github/luben/zstd/**,**/libzstd-jni-*</excludes>
                                     <outputDirectory>${project.build.directory}/jni-deps</outputDirectory>
                                 </artifactItem>
                                 <artifactItem>

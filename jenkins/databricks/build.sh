@@ -152,7 +152,7 @@ initialize()
     SPARK_PLUGIN_JAR_VERSION=$($MVN_CMD help:evaluate -q -f $POM_FILE -pl dist -Dexpression=project.version -DforceStdout)
     SCALA_VERSION=$($MVN_CMD help:evaluate -q -f $POM_FILE -pl dist -Dexpression=scala.binary.version -DforceStdout)
     CUDA_VERSION=$($MVN_CMD help:evaluate -q -f $POM_FILE -pl dist -Dexpression=cuda.version -DforceStdout)
-    RAPIDS_BUILT_JAR=rapids-4-spark_$SCALA_VERSION-$SPARK_PLUGIN_JAR_VERSION.jar
+    RAPIDS_BUILT_JAR=cudf-spark_$SCALA_VERSION-$SPARK_PLUGIN_JAR_VERSION.jar
     # whether to build a two-shim jar with the lowest supported upstream Spark version
     WITH_DEFAULT_UPSTREAM_SHIM=${WITH_DEFAULT_UPSTREAM_SHIM:-1}
 
@@ -238,7 +238,7 @@ if [[ "$SCALA_BINARY_VER" == "2.13" ]]; then
 else
     DIST_TARGET="dist/target"
 fi
-rm -rf $DIST_TARGET/jni-deps/
+rm -rf $DIST_TARGET/jni-deps/ $DIST_TARGET/jni-archive/
 find $DIST_TARGET/parallel-world/ -mindepth 1 -maxdepth 1 ! -name META-INF -exec rm -rf {} +
 
 cd /home/ubuntu
