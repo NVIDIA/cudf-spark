@@ -234,8 +234,8 @@ class DriverlessBroadcastReclaimSuite extends AnyFunSuite with BeforeAndAfterEac
     value
   }
 
-  test("a reclaim that arrives after a rerun built its own build keeps that build, and drops " +
-      "the stale one") {
+  test("a reclaim that arrives after a rerun built its own build drops that build too, and the " +
+      "rerun's later tasks build it again") {
     val listener = start(gateOn = true)
     DriverlessBroadcastReclaimSuite.holding = false
     DriverlessBroadcastReclaimSuite.entered = new CountDownLatch(1)
@@ -252,25 +252,30 @@ class DriverlessBroadcastReclaimSuite extends AnyFunSuite with BeforeAndAfterEac
       }
     }, "driverless-reclaim-rerun")
     rerun.setDaemon(true)
+    var held = false
     try {
       ShuffleCleanupManagerTestUtils.holdReclaimPolls()
-      val (first, join, buildId) = try {
-        val first = rows(df)
-        val join = driverlessJoin(df)
-        val buildId = buildShuffleId(join)
-        awaitRequest(buildId)
-        DriverlessBroadcastReclaimSuite.holding = true
-        rerun.start()
-        assert(DriverlessBroadcastReclaimSuite.entered.await(WaitSeconds, TimeUnit.SECONDS),
-          "no task of the second collect reached the UDF")
-        assertResult(2, "builds cached before the reclaim")(cachedBuilds)
-        (first, join, buildId)
-      } finally {
+      held = true
+      val first = rows(df)
+      val join = driverlessJoin(df)
+      val buildId = buildShuffleId(join)
+      awaitRequest(buildId)
+      DriverlessBroadcastReclaimSuite.holding = true
+      rerun.start()
+      assert(DriverlessBroadcastReclaimSuite.entered.await(WaitSeconds, TimeUnit.SECONDS),
+        "no task of the second collect reached the UDF")
+      assertResult(2, "builds cached before the reclaim")(cachedBuilds)
+      val lines = LogCaptureUtils.captureLogsFrom(
+          Seq(classOf[RapidsShuffleInternalManagerBase].getName), "INFO") {
         ShuffleCleanupManagerTestUtils.releaseReclaimPolls()
-      }
-      awaitAnswered(buildId)
-      assertResult(1, "builds cached after the reclaim")(cachedBuilds)
-      // the rerun's writers are above the watermark, so the catalog kept their output
+        held = false
+        awaitAnswered(buildId)
+      }.filter(_.startsWith(s"Reclaimed shuffle $buildId "))
+      assertResult(1, lines.toSeq)(lines.length)
+      // the rerun's writers registered above the watermark, so the catalog kept their output,
+      // and the reclaim dropped both the stale build and the rerun's
+      assert(lines.head.contains("DEFERRED") && lines.head.contains(" 2 cached broadcast builds"),
+        lines.head)
       assert(GpuShuffleEnv.getCatalog.hasActiveShuffle(buildId),
         s"the reclaim freed the rerun's output of shuffle $buildId")
       DriverlessBroadcastReclaimSuite.holding = false
@@ -279,11 +284,12 @@ class DriverlessBroadcastReclaimSuite extends AnyFunSuite with BeforeAndAfterEac
       assert(!rerun.isAlive, "the second collect never ended")
       Option(rerunError.get).foreach(e => fail("the second collect failed", e))
       assertResult(first, "rows of the second collect")(rerunRows.get)
-      // the tasks that ran after the reclaim found the rerun's build still cached
-      assertResult(1L, "builds of the second collect")(builds(join))
+      // the tasks that looked the build up after the reclaim built it once more
+      assertResult(2L, "builds of the second collect")(builds(join))
       drain()
       assertResult(Seq.empty, "failed tasks")(listener.failedTasks)
     } finally {
+      if (held) ShuffleCleanupManagerTestUtils.releaseReclaimPolls()
       DriverlessBroadcastReclaimSuite.holding = false
       DriverlessBroadcastReclaimSuite.release.countDown()
       rerun.join(TimeUnit.SECONDS.toMillis(WaitSeconds))

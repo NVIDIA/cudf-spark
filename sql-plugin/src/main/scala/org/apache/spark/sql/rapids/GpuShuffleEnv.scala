@@ -67,22 +67,19 @@ class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
     }
   }
 
-  private[rapids] def reclaimBroadcastAndThen(
-      id: Int,
-      watermark: Long,
-      isStopped: () => Boolean)(
+  private[rapids] def reclaimBroadcastAndThen(id: Int, isStopped: () => Boolean)(
       reclaim: => ShuffleReclaimResult): (ShuffleReclaimResult, Int, Long) = {
     val cache = synchronized { initializedBroadcastCache }
     var detached = (0, 0L)
     var result: ShuffleReclaimResult = null
     Utils.tryWithSafeFinally {
       try {
-        cache.foreach { c => detached = c.reclaimUpTo(id, watermark, isStopped, _.sizeInBytes) }
+        cache.foreach { c => detached = c.reclaim(id, isStopped, _.sizeInBytes) }
       } catch {
         // Thrown on, it would report the reclaim FAILED for a catalog that freed its buffers.
         case NonFatal(e) =>
           logWarning(s"Failed to dispose a cached broadcast build of shuffle $id while " +
-            s"reclaiming it up to task $watermark", e)
+            "reclaiming it", e)
       }
     } {
       result = reclaim
@@ -308,17 +305,16 @@ object GpuShuffleEnv extends Logging {
   }
 
   /**
-   * Detaches the cached builds that a reclaim of `shuffleId` up to `watermark` makes stale, then
-   * runs `reclaim`, the catalog's reclaim, whatever the detach did. A disposal failure is logged,
-   * and a fatal one is thrown once `reclaim` has run.
+   * Detaches the cached builds of `shuffleId`, then runs `reclaim`, the catalog's reclaim,
+   * whatever the detach did. A disposal failure is logged, and a fatal one is thrown once
+   * `reclaim` has run.
    *
    * @return what `reclaim` returned, how many builds were detached, and their bytes
    */
-  def reclaimBroadcastAndThen(shuffleId: Int, watermark: Long, isStopped: () => Boolean)(
+  def reclaimBroadcastAndThen(shuffleId: Int, isStopped: () => Boolean)(
       reclaim: => ShuffleReclaimResult): (ShuffleReclaimResult, Int, Long) = {
     Option(env) match {
-      case Some(current) =>
-        current.reclaimBroadcastAndThen(shuffleId, watermark, isStopped)(reclaim)
+      case Some(current) => current.reclaimBroadcastAndThen(shuffleId, isStopped)(reclaim)
       case None => (reclaim, 0, 0L)
     }
   }

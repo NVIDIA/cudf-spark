@@ -25,8 +25,8 @@ import org.apache.spark.shuffle.FetchFailedException
 /**
  * Owns one build per source-output identity in an executor. Consumers retain independent
  * references. Invalidation detaches existing entries; a later reader may rebuild the shuffle.
- * A reclaim detaches the published builds whose outputs it freed. A task that looked one up
- * first still borrows it.
+ * A reclaim of a shuffle detaches its published builds. A task that looked one up first still
+ * borrows it.
  */
 private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends AutoCloseable {
   private class BuildFailure(val original: Throwable, val fetch: Option[FetchFailed])
@@ -297,28 +297,24 @@ private[rapids] class ExecutorBroadcastCache[T](dispose: T => Unit) extends Auto
   }
 
   /**
-   * Detaches each published build of shuffle `id` whose every map output is at or below
-   * `watermark`, since a reclaim up to it freed those outputs, and disposes each build no task
-   * holds. The last task to let go of a build disposes it. A build in flight stays. Once
-   * `isStopped` reads true, this detaches nothing and disposes no further build, and the spill
-   * framework's shutdown closes what it left.
+   * Detaches every published build of shuffle `id`, a rerun's included, and disposes each build
+   * no task holds. A rerun's later tasks build again from the outputs the catalog keeps for it.
+   * The last task to let go of a build disposes it. A build in flight stays. Once `isStopped`
+   * reads true, this detaches nothing and disposes no further build, and the spill framework's
+   * shutdown closes what it left.
    *
    * @param sizeOf the bytes a build holds
    * @return how many builds this detached, and their bytes
    */
-  def reclaimUpTo(
-      id: Int,
-      watermark: Long,
-      isStopped: () => Boolean,
-      sizeOf: T => Long): (Int, Long) = {
+  def reclaim(id: Int, isStopped: () => Boolean, sizeOf: T => Long): (Int, Long) = {
     var builds = 0
     var bytes = 0L
     val owned = mutable.ArrayBuffer.empty[T]
     entries.synchronized {
       if (!closed && !isStopped()) {
         entries.get(id).foreach { identities =>
-          // The check reads only the immutable identity, so it takes no entry lock.
-          identities.toList.filter(_._1.maxMapId <= watermark).foreach { case (identity, entry) =>
+          // A snapshot, since the loop removes from the map.
+          identities.toList.foreach { case (identity, entry) =>
             entry.synchronized {
               // A build in flight keeps its entry for its builder and its waiters.
               if (entry.ready.isDone) {

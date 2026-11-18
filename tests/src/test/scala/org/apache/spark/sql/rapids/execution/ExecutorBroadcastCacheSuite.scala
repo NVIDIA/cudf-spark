@@ -603,9 +603,8 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
   private def reclaim(
       cache: ExecutorBroadcastCache[Value],
       id: Int,
-      watermark: Long,
       isStopped: () => Boolean = () => false): (Int, Long) =
-    cache.reclaimUpTo(id, watermark, isStopped, _ => buildBytes)
+    cache.reclaim(id, isStopped, _ => buildBytes)
 
   private def countingCache(disposals: AtomicInteger): ExecutorBroadcastCache[Value] =
     new ExecutorBroadcastCache[Value](owned => {
@@ -613,38 +612,24 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
       owned.release()
     })
 
-  test("a reclaim detaches each published build whose map outputs are all at or below its " +
-      "watermark, and keeps every other build") {
+  test("a reclaim detaches every published build of its shuffle, a rerun's included, and keeps " +
+      "every other shuffle's builds") {
     val cache = new ExecutorBroadcastCache[Value](_.release())
-    val watermark = 100L
-    val atWatermark = new Value
-    val kept = Seq.fill(3)(new Value)
+    val detached = Seq.fill(3)(new Value)
+    val otherShuffle = new Value
     try {
-      publish(cache, 1, outputs(watermark - 1, watermark), atWatermark)
-      publish(cache, 1, outputs(watermark + 1), kept(0))
-      publish(cache, 1, outputs(watermark, watermark + 1), kept(1))
-      publish(cache, 2, outputs(1L), kept(2))
-      assertResult((1, buildBytes))(reclaim(cache, 1, watermark))
-      assertResult(0)(atWatermark.references)
-      assertResult(Seq(1, 1, 1))(kept.map(_.references))
-      assertResult(3)(cache.activeEntryCount)
+      publish(cache, 1, outputs(99L, 100L), detached(0))
+      publish(cache, 1, outputs(101L), detached(1))
+      publish(cache, 1, BroadcastBuildIdentity.empty, detached(2))
+      publish(cache, 2, outputs(1L), otherShuffle)
+      assertResult((3, 3 * buildBytes))(reclaim(cache, 1))
+      assertResult(Seq(0, 0, 0))(detached.map(_.references))
+      assertResult(1)(otherShuffle.references)
+      assertResult(1)(cache.activeEntryCount)
     } finally {
       cache.close()
     }
-    assertResult(Seq(0, 0, 0))(kept.map(_.references))
-  }
-
-  test("a reclaim at any watermark detaches the build of the empty identity") {
-    val cache = new ExecutorBroadcastCache[Value](_.release())
-    val value = new Value
-    try {
-      publish(cache, 3, BroadcastBuildIdentity.empty, value)
-      assertResult((1, buildBytes))(reclaim(cache, 3, Long.MinValue))
-      assertResult(0)(value.references)
-      assertResult(0)(cache.activeEntryCount)
-    } finally {
-      cache.close()
-    }
+    assertResult(0)(otherShuffle.references)
   }
 
   test("a reclaim keeps a build in flight, which then publishes to its waiter") {
@@ -669,7 +654,7 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
           () => waiting.countDown(), noAction)(_.retain(), _.release())
       })
       assert(waiting.await(10, TimeUnit.SECONDS))
-      assertResult((0, 0L))(reclaim(cache, 4, Long.MaxValue))
+      assertResult((0, 0L))(reclaim(cache, 4))
       finish.countDown()
       val borrowed = Seq(builder.get(10, TimeUnit.SECONDS), waiter.get(10, TimeUnit.SECONDS))
       assert(borrowed.forall(_ eq value))
@@ -703,7 +688,7 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
         })(_.retain(), _.release())
       })
       assert(published.await(10, TimeUnit.SECONDS))
-      assertResult((1, buildBytes))(reclaim(cache, 5, Long.MaxValue))
+      assertResult((1, buildBytes))(reclaim(cache, 5))
       assertResult(0)(cache.activeEntryCount)
       assertResult((0, 1))((disposals.get, value.references))
       proceed.countDown()
@@ -739,7 +724,7 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
           })(_.retain(), _.release())
       })
       assert(waiting.await(10, TimeUnit.SECONDS))
-      assertResult((1, buildBytes))(reclaim(cache, 6, Long.MaxValue))
+      assertResult((1, buildBytes))(reclaim(cache, 6))
       assertResult((0, 1))((disposals.get, value.references))
       proceed.countDown()
       val borrowed = reader.get(10, TimeUnit.SECONDS)
@@ -772,7 +757,7 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
         }, _.release())
       })
       assert(reading.await(10, TimeUnit.SECONDS))
-      assertResult((1, buildBytes))(reclaim(cache, 7, Long.MaxValue))
+      assertResult((1, buildBytes))(reclaim(cache, 7))
       assertResult((0, 1))((disposals.get, value.references))
       finish.countDown()
       val borrowed = borrower.get(10, TimeUnit.SECONDS)
@@ -816,7 +801,7 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
         assert(intercept[ExecutionException](task.get(10, TimeUnit.SECONDS)).getCause eq expected)
       }
       publish(cache, 8, BroadcastBuildIdentity.empty, value)
-      assertResult((1, buildBytes))(reclaim(cache, 8, Long.MaxValue))
+      assertResult((1, buildBytes))(reclaim(cache, 8))
       assertResult((1, 0))((disposals.get, value.references))
     } finally {
       failBuild.countDown()
@@ -850,7 +835,7 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
       }
       finish.countDown()
       builder.get(10, TimeUnit.SECONDS).release()
-      assertResult((1, buildBytes))(reclaim(cache, 9, Long.MaxValue))
+      assertResult((1, buildBytes))(reclaim(cache, 9))
       assertResult((1, 0))((disposals.get, value.references))
     } finally {
       finish.countDown()
@@ -880,7 +865,7 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
           })(_.retain(), _.release())
       })
       assert(looked.await(10, TimeUnit.SECONDS))
-      assertResult((1, buildBytes))(reclaim(cache, 10, Long.MaxValue))
+      assertResult((1, buildBytes))(reclaim(cache, 10))
       assertResult((0, 1))((disposals.get, value.references))
       proceed.countDown()
       assert(intercept[ExecutionException](reader.get(10, TimeUnit.SECONDS))
@@ -912,7 +897,7 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
           })(_.retain(), _.release())
       })
       assert(published.await(10, TimeUnit.SECONDS))
-      assertResult((1, buildBytes))(reclaim(cache, 11, Long.MaxValue))
+      assertResult((1, buildBytes))(reclaim(cache, 11))
       assertResult((0, 1))((disposals.get, value.references))
       proceed.countDown()
       assert(intercept[ExecutionException](builder.get(10, TimeUnit.SECONDS))
@@ -961,18 +946,17 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
     }
   }
 
-  test("a second reclaim at the same watermark finds nothing, and a reclaim after close does " +
-      "nothing") {
+  test("a second reclaim finds nothing, and a reclaim after close does nothing") {
     val cache = new ExecutorBroadcastCache[Value](_.release())
     val reclaimed = new Value
     val closed = new Value
     publish(cache, 13, outputs(5L), reclaimed)
     publish(cache, 14, outputs(5L), closed)
-    assertResult((1, buildBytes))(reclaim(cache, 13, 5L))
-    assertResult((0, 0L))(reclaim(cache, 13, 5L))
+    assertResult((1, buildBytes))(reclaim(cache, 13))
+    assertResult((0, 0L))(reclaim(cache, 13))
     cache.close()
     assertResult(0)(closed.references)
-    assertResult((0, 0L))(reclaim(cache, 14, 5L))
+    assertResult((0, 0L))(reclaim(cache, 14))
     assertResult(0)(reclaimed.references)
   }
 
@@ -981,7 +965,7 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
     val value = new Value
     try {
       publish(cache, 15, outputs(5L), value)
-      assertResult((0, 0L))(reclaim(cache, 15, 5L, () => true))
+      assertResult((0, 0L))(reclaim(cache, 15, () => true))
       assertResult(1)(cache.activeEntryCount)
       assertResult(1)(value.references)
     } finally {
@@ -997,7 +981,7 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
     try {
       publish(cache, 16, outputs(1L), values(0))
       publish(cache, 16, outputs(2L), values(1))
-      assertResult((2, 2 * buildBytes))(reclaim(cache, 16, 5L, () => disposals.get > 0))
+      assertResult((2, 2 * buildBytes))(reclaim(cache, 16, () => disposals.get > 0))
       assertResult(0)(cache.activeEntryCount)
       assertResult(1)(disposals.get)
       assertResult(Seq(0, 1))(values.map(_.references).sorted)
@@ -1015,7 +999,7 @@ class ExecutorBroadcastCacheSuite extends AnyFunSuite {
     try {
       publish(cache, 17, outputs(1L), values(0))
       publish(cache, 17, outputs(2L), values(1))
-      val error = intercept[IllegalArgumentException](reclaim(cache, 17, 5L))
+      val error = intercept[IllegalArgumentException](reclaim(cache, 17))
       assertResult(1)(error.getSuppressed.length)
       assertResult(Seq(0, 0))(values.map(_.references))
       assertResult(0)(cache.activeEntryCount)

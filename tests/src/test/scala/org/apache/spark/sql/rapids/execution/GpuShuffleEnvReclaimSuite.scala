@@ -22,7 +22,6 @@ import com.nvidia.spark.rapids.ShuffleReclaimOutcome.{ABSENT, DEFERRED, FAILED, 
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.rapids.GpuShuffleEnv
-import org.apache.spark.storage.BlockManagerId
 
 /** The reclaim of a shuffle's cached broadcast builds around its catalog reclaim, with no GPU. */
 class GpuShuffleEnvReclaimSuite extends AnyFunSuite {
@@ -31,33 +30,25 @@ class GpuShuffleEnvReclaimSuite extends AnyFunSuite {
   private val buildBytes = 64L
 
   /**
-   * A shuffle environment whose cache holds two builds of the shuffle: a stale one, whose output
-   * is at the watermark, and a rerun's, whose output is above it. `events` records each disposal
-   * and each catalog reclaim in the order they ran.
+   * A shuffle environment whose cache holds one build of the shuffle. `events` records each
+   * disposal and each catalog reclaim in the order they ran.
    *
-   * @param disposalFailure what each disposal throws, if anything
+   * @param disposalFailure what the disposal throws, if anything
    */
   private class Fixture(disposalFailure: Option[Throwable] = None) {
     val events = new ArrayBuffer[String]()
     val cache = new ExecutorBroadcastCache[SpillableColumnarBatch](owned => {
       owned.close()
-      events += s"dispose ${owned.numRows()} rows"
+      events += "dispose"
       disposalFailure.foreach(failure => throw failure)
     })
     val env = new GpuShuffleEnv(new RapidsConf(Map.empty[String, String])) {
       override protected def createBroadcastCache():
           ExecutorBroadcastCache[SpillableColumnarBatch] = cache
     }
-    cacheBuild(mapId = watermark, rows = 1)
-    cacheBuild(mapId = watermark + 1, rows = 2)
-
-    private def cacheBuild(mapId: Long, rows: Int): Unit = {
-      val identity = BroadcastBuildIdentity(Seq(
-        BroadcastBuildIdentity.MapOutput(0, mapId, BlockManagerId("a", "host-a", 1000))))
-      env.broadcastCache.getOrBuild[Unit](shuffleId, () => new JustRowsColumnarBatch(rows) {
-        override val sizeInBytes: Long = buildBytes
-      }, () => (), () => (), identity = identity)(_ => (), _ => ())
-    }
+    env.broadcastCache.getOrBuild[Unit](shuffleId, () => new JustRowsColumnarBatch(1) {
+      override val sizeInBytes: Long = buildBytes
+    }, () => (), () => ())(_ => (), _ => ())
 
     /** A catalog reclaim that records itself and answers with `outcome`. */
     def catalogReclaim(outcome: ShuffleReclaimOutcome): ShuffleReclaimResult = {
@@ -67,27 +58,27 @@ class GpuShuffleEnvReclaimSuite extends AnyFunSuite {
   }
 
   Seq(REMOVED, ABSENT, DEFERRED).foreach { outcome =>
-    test(s"a reclaim that the catalog answers $outcome detaches the stale build first, and " +
+    test(s"a reclaim that the catalog answers $outcome detaches the shuffle's build first, and " +
         "keeps the catalog's outcome") {
       val fixture = new Fixture
       try {
-        val (result, builds, bytes) = fixture.env.reclaimBroadcastAndThen(shuffleId, watermark,
+        val (result, builds, bytes) = fixture.env.reclaimBroadcastAndThen(shuffleId,
           () => false)(fixture.catalogReclaim(outcome))
         assertResult(outcome)(result.outcome)
         assertResult((1, buildBytes))((builds, bytes))
-        assertResult(Seq("dispose 1 rows", "catalog reclaim"))(fixture.events)
-        assertResult(1)(fixture.cache.activeEntryCount)
+        assertResult(Seq("dispose", "catalog reclaim"))(fixture.events)
+        assertResult(0)(fixture.cache.activeEntryCount)
       } finally {
         fixture.cache.close()
       }
     }
   }
 
-  test("a FAILED reclaim, whose catalog reclaim throws, detaches the stale build first") {
+  test("a FAILED reclaim, whose catalog reclaim throws, detaches the shuffle's build first") {
     val fixture = new Fixture
     val sent = new ArrayBuffer[ShuffleReclaimResult]()
-    val reclaimer = new UcxCatalogReclaimer((id, w, isStopped) =>
-      fixture.env.reclaimBroadcastAndThen(id, w, isStopped) {
+    val reclaimer = new UcxCatalogReclaimer((id, _, isStopped) =>
+      fixture.env.reclaimBroadcastAndThen(id, isStopped) {
         fixture.events += "catalog reclaim"
         throw new IllegalStateException("catalog reclaim failed")
       }._1,
@@ -96,8 +87,8 @@ class GpuShuffleEnvReclaimSuite extends AnyFunSuite {
       reclaimer.poll("1", _ => RapidsShuffleReclaimResponseMsg(
         Array(ShuffleReclaimRequest(shuffleId, watermark))), () => false)
       assertResult(Seq(FAILED))(sent.map(_.outcome))
-      assertResult(Seq("dispose 1 rows", "catalog reclaim"))(fixture.events)
-      assertResult(1)(fixture.cache.activeEntryCount)
+      assertResult(Seq("dispose", "catalog reclaim"))(fixture.events)
+      assertResult(0)(fixture.cache.activeEntryCount)
     } finally {
       fixture.cache.close()
     }
@@ -108,44 +99,45 @@ class GpuShuffleEnvReclaimSuite extends AnyFunSuite {
     val failure = new IllegalStateException("catalog reclaim failed")
     try {
       val error = intercept[IllegalStateException] {
-        fixture.env.reclaimBroadcastAndThen(shuffleId, watermark, () => false) {
+        fixture.env.reclaimBroadcastAndThen(shuffleId, () => false) {
           fixture.events += "catalog reclaim"
           throw failure
         }
       }
       assert(error eq failure)
-      assertResult(Seq("dispose 1 rows", "catalog reclaim"))(fixture.events)
+      assertResult(Seq("dispose", "catalog reclaim"))(fixture.events)
     } finally {
       fixture.cache.close()
     }
   }
 
-  // In the two tests below every disposal throws, so the cache stays open with the rerun's build.
-
   test("a fatal disposal failure still runs the catalog reclaim, and then reaches the caller") {
     val fixture = new Fixture(Some(new InterruptedException("disposal interrupted")))
     try {
       intercept[InterruptedException] {
-        fixture.env.reclaimBroadcastAndThen(shuffleId, watermark, () => false)(
+        fixture.env.reclaimBroadcastAndThen(shuffleId, () => false)(
           fixture.catalogReclaim(REMOVED))
       }
-      assertResult(Seq("dispose 1 rows", "catalog reclaim"))(fixture.events)
+      assertResult(Seq("dispose", "catalog reclaim"))(fixture.events)
     } finally {
-      // clears the interrupt that a suppressed second failure would restore
-      Thread.interrupted()
+      fixture.cache.close()
     }
   }
 
   test("a disposal failure logs a warning, and the reclaim keeps the catalog's outcome") {
     val fixture = new Fixture(Some(new IllegalStateException("disposal failed")))
-    var outcome: Option[ShuffleReclaimOutcome] = None
-    val warnings = LogCaptureUtils.captureLogsFrom(Seq(fixture.env.getClass.getName), "WARN") {
-      outcome = Some(fixture.env.reclaimBroadcastAndThen(shuffleId, watermark, () => false)(
-        fixture.catalogReclaim(REMOVED))._1.outcome)
+    try {
+      var outcome: Option[ShuffleReclaimOutcome] = None
+      val warnings = LogCaptureUtils.captureLogsFrom(Seq(fixture.env.getClass.getName), "WARN") {
+        outcome = Some(fixture.env.reclaimBroadcastAndThen(shuffleId, () => false)(
+          fixture.catalogReclaim(REMOVED))._1.outcome)
+      }
+      assertResult(Some(REMOVED))(outcome)
+      assertResult(Seq("dispose", "catalog reclaim"))(fixture.events)
+      assert(warnings.exists(_.startsWith(
+        s"Failed to dispose a cached broadcast build of shuffle $shuffleId")), warnings.toSeq)
+    } finally {
+      fixture.cache.close()
     }
-    assertResult(Some(REMOVED))(outcome)
-    assertResult(Seq("dispose 1 rows", "catalog reclaim"))(fixture.events)
-    assert(warnings.exists(_.startsWith(
-      s"Failed to dispose a cached broadcast build of shuffle $shuffleId")), warnings.toSeq)
   }
 }
