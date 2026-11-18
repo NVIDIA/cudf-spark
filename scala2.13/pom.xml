@@ -1450,6 +1450,12 @@
               <artifactId>${cudf-spark-jni.artifactId}</artifactId>
               <version>${cudf-spark-jni.version}</version>
               <classifier>${jni.classifier}</classifier>
+              <exclusions>
+                <exclusion>
+                  <groupId>com.github.luben</groupId>
+                  <artifactId>zstd-jni</artifactId>
+                </exclusion>
+              </exclusions>
             </dependency>
             <dependency>
                 <groupId>org.openucx</groupId>
