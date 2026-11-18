@@ -70,8 +70,8 @@ Store errors are logged once per JVM per reason and the decision falls back to s
 ## Adding a heuristic
 
 Code layers: `HistoryMetric` (family contract) -> `MetricHistory` (store access, `HistoryPolicy`)
--> `ScanSplitHeuristic` (decide/observe cycle), driven by `HistoryObservations` (records when a
-query ends) and `HistoryLifecycle` (start, activate, stop).
+-> `ScanSplitHeuristic` (decide/observe cycle), driven by `ExecutionEndCallbacks` (runs the
+callbacks of a query when it ends) and `HistoryLifecycle` (start, activate, stop).
 
 There is one heuristic, so there is no shared base class yet. A second one is the point to
 extract what the two have in common, rather than to guess it now.

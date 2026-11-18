@@ -32,10 +32,11 @@ import org.apache.spark.sql.execution.SQLExecution
 import org.apache.spark.sql.execution.ui.SparkListenerSQLExecutionEnd
 
 /**
- * Holds planned contexts per SQL execution id and records them when the execution ends, once
- * accumulators are merged.
+ * Runs the callbacks registered for a SQL execution once it ends, when its accumulators have been
+ * merged. A callback registered for an execution that already ended is dropped. It knows nothing
+ * about metrics: what a callback does is up to whoever registered it.
  */
-object HistoryObservations extends Logging {
+object ExecutionEndCallbacks extends Logging {
 
   /** Ended execution ids remembered, so late registrations are dropped. */
   private val ENDED_MEMORY = 1024
@@ -56,7 +57,7 @@ object HistoryObservations extends Logging {
     ended.clear()
   }
 
-  def listener: SparkListener = new ObservationListener
+  def listener: SparkListener = new ExecutionEndListener
 
   /** Executions holding callbacks, for tests. */
   private[perf] def trackedCount: Int = synchronized(executions.size)
@@ -94,7 +95,7 @@ object HistoryObservations extends Logging {
     }
   }
 
-  private class ObservationListener extends SparkListener {
+  private class ExecutionEndListener extends SparkListener {
     override def onOtherEvent(event: SparkListenerEvent): Unit = event match {
       case e: SparkListenerSQLExecutionEnd => executionEnded(e.executionId)
       case _ =>
@@ -138,9 +139,9 @@ private[perf] class HistoryLifecycle(
     } else {
       try {
         storeAtStart = Some(currentStore())
-        HistoryObservations.start()
+        ExecutionEndCallbacks.start()
         // SparkContext-level: sees every session and streaming micro-batch.
-        addListener(HistoryObservations.listener)
+        addListener(ExecutionEndCallbacks.listener)
         started.foreach(_.enable(policy))
         logInfo(s"History-backed planning requested for ${started.map(_.name)}; it activates " +
           "once a history metrics provider is installed")
@@ -174,7 +175,7 @@ private[perf] class HistoryLifecycle(
 
   def stop(): Unit = synchronized {
     heuristics.foreach(_.disable())
-    HistoryObservations.shutdown()
+    ExecutionEndCallbacks.shutdown()
     storeAtStart = None
     started = Nil
   }

@@ -186,7 +186,7 @@ class ScanSplitHeuristic(store: () => MetricStore) extends Logging {
     if (isEnabled && shouldObserve(ctx)) {
       executionId match {
         case None => logDebug(s"$name planned outside a SQL execution; not tracked for history")
-        case Some(id) => HistoryObservations.register(id, () => recordAll(ctx))
+        case Some(id) => ExecutionEndCallbacks.register(id, () => recordAll(ctx))
       }
     }
   }
@@ -447,7 +447,7 @@ object ScanSplitHeuristic extends Logging {
       totals: Option[SplitTotals],
       sc: SparkContext): Unit =
     for (name <- key; read <- totals) {
-      instance.register(HistoryObservations.currentExecutionId(sc),
+      instance.register(ExecutionEndCallbacks.currentExecutionId(sc),
         ScanContext.forObservation(name, planned, () => read.drain()))
     }
 

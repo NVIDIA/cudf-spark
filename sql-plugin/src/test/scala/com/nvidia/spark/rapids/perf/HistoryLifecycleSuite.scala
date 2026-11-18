@@ -90,22 +90,22 @@ class HistoryLifecycleSuite extends AnyFunSuite with BeforeAndAfterEach {
 
   test("a restart resets everything an earlier start left") {
     assert(start("local"))
-    HistoryObservations.register(5L, () => ())
-    assert(HistoryObservations.trackedCount == 1)
+    ExecutionEndCallbacks.register(5L, () => ())
+    assert(ExecutionEndCallbacks.trackedCount == 1)
     assert(!start("none"))
     assert(!heuristic.isEnabled)
-    assert(HistoryObservations.trackedCount == 0)
+    assert(ExecutionEndCallbacks.trackedCount == 0)
     assert(start("local"))
     assert(heuristic.isEnabled && listeners.size == 2)
   }
 
   test("the registry forgets an execution at its end and drops late registrations") {
     assert(start("local"))
-    HistoryObservations.register(9L, () => ())
-    assert(HistoryObservations.trackedCount == 1)
+    ExecutionEndCallbacks.register(9L, () => ())
+    assert(ExecutionEndCallbacks.trackedCount == 1)
     listeners.head.onOtherEvent(SparkListenerSQLExecutionEnd(9L, 0L))
-    assert(HistoryObservations.trackedCount == 0)
-    HistoryObservations.register(9L, () => ())
-    assert(HistoryObservations.trackedCount == 0)
+    assert(ExecutionEndCallbacks.trackedCount == 0)
+    ExecutionEndCallbacks.register(9L, () => ())
+    assert(ExecutionEndCallbacks.trackedCount == 0)
   }
 }

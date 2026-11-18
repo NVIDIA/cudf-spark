@@ -18,18 +18,18 @@ package org.apache.spark.sql.rapids
 
 import java.time.Duration
 
-import com.nvidia.spark.rapids.perf.{FakeMetricStore, HistoryObservations, HistoryPolicy,
+import com.nvidia.spark.rapids.perf.{ExecutionEndCallbacks, FakeMetricStore, HistoryPolicy,
   ReadTotals, ScanContext, ScanSplitHeuristic}
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.execution.ui.SparkListenerSQLExecutionEnd
 
-/** Observations drain on SQL execution end, driven by hand-built listener events. */
-class HistoryObservationsSuite extends AnyFunSuite with BeforeAndAfterEach {
+/** Callbacks run on SQL execution end, driven by hand-built listener events. */
+class ExecutionEndCallbacksSuite extends AnyFunSuite with BeforeAndAfterEach {
 
   private val MiB = 1024L * 1024
-  private val listener = HistoryObservations.listener
+  private val listener = ExecutionEndCallbacks.listener
   private var store: FakeMetricStore = _
   private var heuristic: ScanSplitHeuristic = _
 
@@ -37,10 +37,10 @@ class HistoryObservationsSuite extends AnyFunSuite with BeforeAndAfterEach {
     store = new FakeMetricStore
     heuristic = new ScanSplitHeuristic(() => store)
     heuristic.enable(HistoryPolicy(Duration.ofMillis(100), Duration.ofSeconds(5)))
-    HistoryObservations.start()
+    ExecutionEndCallbacks.start()
   }
 
-  override def afterEach(): Unit = HistoryObservations.shutdown()
+  override def afterEach(): Unit = ExecutionEndCallbacks.shutdown()
 
   /** A one-split scan of `cat.ns.events` that decoded 4x its 100 MiB on disk. */
   private def scan: ScanContext =
@@ -56,10 +56,10 @@ class HistoryObservationsSuite extends AnyFunSuite with BeforeAndAfterEach {
     assert(store.stored.size == 1)
   }
 
-  test("nothing is held while observations are stopped") {
-    HistoryObservations.shutdown()
+  test("nothing is held while the callbacks are stopped") {
+    ExecutionEndCallbacks.shutdown()
     heuristic.register(Some(45L), scan)
-    HistoryObservations.start()
+    ExecutionEndCallbacks.start()
     listener.onOtherEvent(SparkListenerSQLExecutionEnd(45L, 0L))
     assert(store.offered.isEmpty)
   }

@@ -51,7 +51,7 @@ class HistorySizedFileScanSuite extends AnyFunSuite {
     val spark = SparkSession.builder().master("local[1]").getOrCreate()
     val dir = Files.createTempDirectory("history-sized-scan")
     val registration = MetricStores.install(new FakeMetricStore)
-    HistoryObservations.start()
+    ExecutionEndCallbacks.start()
     if (historyOn) {
       ScanSplitHeuristic.instance.enable(policy)
     }
@@ -65,7 +65,7 @@ class HistorySizedFileScanSuite extends AnyFunSuite {
       body(spark, scan)
     } finally {
       ScanSplitHeuristic.instance.disable()
-      HistoryObservations.shutdown()
+      ExecutionEndCallbacks.shutdown()
       registration.close()
       spark.stop()
     }
@@ -85,21 +85,21 @@ class HistorySizedFileScanSuite extends AnyFunSuite {
       inExecution(spark, 7L) {
         scan.registerForExecution(spark.sparkContext)
       }
-      assert(HistoryObservations.trackedCount == 1)
-      HistoryObservations.listener.onOtherEvent(SparkListenerSQLExecutionEnd(7L, 0L))
-      assert(HistoryObservations.trackedCount == 0, "the ended execution is drained")
+      assert(ExecutionEndCallbacks.trackedCount == 1)
+      ExecutionEndCallbacks.listener.onOtherEvent(SparkListenerSQLExecutionEnd(7L, 0L))
+      assert(ExecutionEndCallbacks.trackedCount == 0, "the ended execution is drained")
       // The same plan runs again in a later execution: it is queued again.
       inExecution(spark, 8L) {
         scan.registerForExecution(spark.sparkContext)
       }
-      assert(HistoryObservations.trackedCount == 1)
+      assert(ExecutionEndCallbacks.trackedCount == 1)
     }
   }
 
   test("a scan registered outside any SQL execution is not tracked") {
     withScan() { (spark, scan) =>
       scan.registerForExecution(spark.sparkContext)
-      assert(HistoryObservations.trackedCount == 0)
+      assert(ExecutionEndCallbacks.trackedCount == 0)
     }
   }
 
@@ -108,7 +108,7 @@ class HistorySizedFileScanSuite extends AnyFunSuite {
       inExecution(spark, 9L) {
         scan.registerForExecution(spark.sparkContext)
       }
-      assert(HistoryObservations.trackedCount == 0)
+      assert(ExecutionEndCallbacks.trackedCount == 0)
     }
   }
 
@@ -117,7 +117,7 @@ class HistorySizedFileScanSuite extends AnyFunSuite {
       inExecution(spark, 10L) {
         HistorySizedFileScan.registerForExecution("not a history scan", spark.sparkContext)
       }
-      assert(HistoryObservations.trackedCount == 0)
+      assert(ExecutionEndCallbacks.trackedCount == 0)
     }
   }
 }
