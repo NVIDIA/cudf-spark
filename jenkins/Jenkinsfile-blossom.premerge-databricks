@@ -177,7 +177,7 @@ void databricksBuild(String clusterId) {
     def SPARK_MAJOR = BASE_SPARK_VERSION_TO_INSTALL_DATABRICKS_JARS.replace('.', '')
     stage("Build against $SPARK_MAJOR DB") {
         sh "rm -rf spark-rapids-ci.tgz"
-        sh "tar -zcf spark-rapids-ci.tgz * .git"
+        sh "tar --exclude='*/target/jni-archive' -zcf spark-rapids-ci.tgz * .git"
         withCredentials([file(credentialsId: 'SPARK_DATABRICKS_PRIVKEY', variable: 'DATABRICKS_PRIVKEY')]) {
             def BUILD_PARAMS = DbUtils.getParameters(this, 'BUILD', "-c $clusterId")
             sh "python3 ./jenkins/databricks/run-build.py $BUILD_PARAMS"
