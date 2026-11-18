@@ -443,15 +443,12 @@
                                            src="${spark.rapids.source.basedir}/${rapids.module}/build/verify-native-library-chunks.py">
                                     <attribute name="jar_path"/>
                                     <attribute name="metadata_dir"/>
+                                    <attribute name="zstd_jar"/>
                                 </scriptdef>
-                                <ac:if xmlns:ac="antlib:net.sf.antcontrib">
-                                    <available file="${dist.native.chunking.metadata.dir}/enabled"/>
-                                    <then>
-                                        <verifyNativeLibraryChunks
-                                            jar_path="${dist.jar.name}"
-                                            metadata_dir="${dist.native.chunking.metadata.dir}"/>
-                                    </then>
-                                </ac:if>
+                                <verifyNativeLibraryChunks
+                                    jar_path="${dist.jar.name}"
+                                    metadata_dir="${dist.native.chunking.metadata.dir}"
+                                    zstd_jar="${project.build.directory}/jni-archive/zstd-jni.jar"/>
                             </target>
                         </configuration>
                     </execution>
@@ -688,7 +685,7 @@ self.log("... OK")
                                 <artifactItem>
                                     <groupId>com.github.luben</groupId>
                                     <artifactId>zstd-jni</artifactId>
-                                    <version>1.5.6-6</version>
+                                    <version>${zstd-jni.version}</version>
                                     <outputDirectory>${project.build.directory}/jni-archive</outputDirectory>
                                     <destFileName>zstd-jni.jar</destFileName>
                                 </artifactItem>
