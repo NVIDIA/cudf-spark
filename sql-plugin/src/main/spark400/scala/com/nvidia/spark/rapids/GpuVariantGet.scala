@@ -111,7 +111,7 @@ case class GpuVariantGet(
 
   override def doColumnar(input: GpuColumnVector): ColumnVector = {
     GpuVariantExtraction.withRawExtraction(input.getBase, path) { extraction =>
-      GpuVariantGet.decodeVariantField(extraction, dataType, input.getBase.getNullCount) {
+      GpuVariantGet.decodeVariantField(extraction, dataType, input.getBase, path) {
         GpuVariantGet.evaluateOnCpu(input, fallbackBridge)
       }
     }
@@ -145,20 +145,23 @@ object GpuVariantGet {
    * Decodes the extracted field on the GPU, or evaluates the whole batch with `fallback` when any
    * row needs Spark's CPU semantics.
    *
-   * The batch stays on the GPU when every row is a SQL-null parent, a missing path, or a value one
-   * of the exact-type decoders accepts. Extraction leaves the raw value null only for ROW_NULL,
-   * MISSING_PATH and MALFORMED_VARIANT, and a decoder leaves a row valid only when it decoded the
-   * row. The integer decoders accept disjoint type IDs, so null counts alone show whether every
-   * non-null raw value decoded. Malformed bytes found during extraction fall back so that Spark
-   * raises its error.
+   * The batch stays on the GPU when every row is a SQL-null parent, a missing path, a Variant
+   * null, or a value one of the exact-type decoders accepts. Spark returns NULL for a Variant null
+   * whatever the target type, and no decoder accepts one. Extraction leaves the raw value null
+   * only for ROW_NULL, MISSING_PATH and MALFORMED_VARIANT, and a decoder leaves a row valid only
+   * when it decoded the row. Malformed bytes found during extraction, and rows that Spark's
+   * Variant constructor rejects, fall back so that Spark raises its error.
    *
-   * @param parentNullCount null count of the Variant input, which is exactly the ROW_NULL count
+   * @param input the Variant input the extraction was computed from
+   * @param path the extraction path, which decides whether cuDF validated the metadata
    */
   private[rapids] def decodeVariantField(
       extraction: VariantOperationResult,
       dt: DataType,
-      parentNullCount: Long)(fallback: => ColumnVector): ColumnVector = {
-    def covered(decoded: Seq[ColumnView]) = isCovered(extraction, parentNullCount, decoded)
+      input: ColumnView,
+      path: String)(fallback: => ColumnVector): ColumnVector = {
+    def covered(decoded: ColumnView) = isCovered(extraction, input.getNullCount, decoded,
+      GpuVariantExtraction.failsVariantConstructor(input, skipsMetadataValidation(path)))
     dt match {
       case BooleanType => decodeExactType(extraction, DType.BOOL8, covered)(fallback)
       case FloatType => decodeExactType(extraction, DType.FLOAT32, covered)(fallback)
@@ -168,14 +171,9 @@ object GpuVariantGet {
         val decoded = Seq(DType.INT8, DType.INT16, DType.INT32, DType.INT64).safeMap {
           sourceType => VariantUtils.castVariantValue(extraction.getValue, sourceType)
         }
-        withResource(decoded) { decoded =>
-          if (covered(decoded)) {
-            withResource(normalizeIntegers(decoded)) { logicalLongs =>
-              narrowInteger(logicalLongs, dt)
-            }
-          } else {
-            fallback
-          }
+        // Coverage uses the combined column, so a row two decoders accept is counted once.
+        withResource(withResource(decoded)(normalizeIntegers)) { logicalLongs =>
+          if (covered(logicalLongs)) narrowInteger(logicalLongs, dt) else fallback
         }
       case other =>
         throw new IllegalArgumentException(s"unsupported variant target type: $other")
@@ -185,9 +183,9 @@ object GpuVariantGet {
   private def decodeExactType(
       extraction: VariantOperationResult,
       targetType: DType,
-      covered: Seq[ColumnView] => Boolean)(fallback: => ColumnVector): ColumnVector = {
+      covered: ColumnView => Boolean)(fallback: => ColumnVector): ColumnVector = {
     withResource(VariantUtils.castVariantValue(extraction.getValue, targetType)) { decoded =>
-      if (covered(Seq(decoded))) {
+      if (covered(decoded)) {
         decoded.incRefCount()
       } else {
         fallback
@@ -195,24 +193,43 @@ object GpuVariantGet {
     }
   }
 
-  private[rapids] def isCovered(
+  // cuDF validates the metadata when it resolves an object-key step. A path that starts with an
+  // array index can return before reaching one.
+  private def skipsMetadataValidation(path: String): Boolean = path.startsWith("$[")
+
+  private def isCovered(
       extraction: VariantOperationResult,
       parentNullCount: Long,
-      decoded: Seq[ColumnView]): Boolean = {
+      decoded: ColumnView,
+      failsConstructor: => Boolean): Boolean = {
     val rows = extraction.getValue.getRowCount
     val rawNulls = extraction.getValue.getNullCount
-    val decodedRows = decoded.map(cv => cv.getRowCount - cv.getNullCount).sum
-    // When every raw null is a SQL-null parent, no row can be malformed at extraction and the
-    // status column need not be read.
-    decodedRows + rawNulls == rows &&
-      (rawNulls == parentNullCount || !hasMalformedExtraction(extraction.getStatus))
+    val undecoded = rows - rawNulls - (decoded.getRowCount - decoded.getNullCount)
+    val status = extraction.getStatus
+    // The status reductions run only when the null counts leave a question open. When every raw
+    // null is a SQL-null parent, no row can be missing or malformed at extraction.
+    (undecoded == 0 || undecoded == countStatus(status, VariantOperationStatus.VARIANT_NULL)) &&
+      (rawNulls == parentNullCount ||
+        !containsStatus(status, VariantOperationStatus.MALFORMED_VARIANT)) &&
+      (parentNullCount == rows || !failsConstructor)
   }
 
-  // Extraction reports only SUCCESS, ROW_NULL, MISSING_PATH, VARIANT_NULL and MALFORMED_VARIANT.
-  private def hasMalformedExtraction(status: ColumnView): Boolean = {
-    withResource(status.max()) { max =>
-      max.isValid &&
-        (max.getByte & 0xFF) >= VariantOperationStatus.MALFORMED_VARIANT.getNativeId
+  // The status column is non-nullable UINT8. If cuDF changes that, contains fails the query
+  // rather than reading the wrong width.
+  private def statusScalar(status: VariantOperationStatus): Scalar =
+    Scalar.fromUnsignedByte(status.getNativeId.toByte)
+
+  private def containsStatus(statuses: ColumnView, status: VariantOperationStatus): Boolean = {
+    withResource(statusScalar(status))(needle => statuses.contains(needle))
+  }
+
+  private def countStatus(statuses: ColumnView, status: VariantOperationStatus): Long = {
+    withResource(statusScalar(status)) { needle =>
+      withResource(statuses.equalTo(needle)) { matches =>
+        withResource(matches.sum(DType.INT64)) { count =>
+          if (count.isValid) count.getLong else 0L
+        }
+      }
     }
   }
 

@@ -130,23 +130,36 @@ public final class VariantApiTestFixtures {
   }
 
   public static class Status extends NativeId {
+    public static final Status VARIANT_NULL = null;
     public static final Status MALFORMED_VARIANT = null;
   }
 
   public static class MissingNativeIdStatus {
+    public static final MissingNativeIdStatus VARIANT_NULL = null;
     public static final MissingNativeIdStatus MALFORMED_VARIANT = null;
   }
 
   public static class WrongNativeIdStatus {
+    public static final WrongNativeIdStatus VARIANT_NULL = null;
     public static final WrongNativeIdStatus MALFORMED_VARIANT = null;
     public long getNativeId() { return 0; }
   }
 
+  public static class MissingVariantNullStatus extends NativeId {
+    public static final MissingVariantNullStatus MALFORMED_VARIANT = null;
+  }
+
+  public static class WrongVariantNullStatus extends NativeId {
+    public static final Object VARIANT_NULL = null;
+    public static final WrongVariantNullStatus MALFORMED_VARIANT = null;
+  }
+
   public static class MissingMalformedStatus extends NativeId {
-    public static final MissingMalformedStatus SUCCESS = null;
+    public static final MissingMalformedStatus VARIANT_NULL = null;
   }
 
   public static class WrongMalformedStatus extends NativeId {
+    public static final WrongMalformedStatus VARIANT_NULL = null;
     public static final Object MALFORMED_VARIANT = null;
   }
 }

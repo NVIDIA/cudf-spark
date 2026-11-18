@@ -104,9 +104,12 @@ class GpuVariantGetSuite extends AnyFunSuite {
 
   private def noFallback: ColumnVector = fail("unexpected CPU fallback")
 
-  private def decode(raw: VariantOperationResult, input: ColumnView, dt: DataType)(
-      fallback: => ColumnVector): ColumnVector =
-    GpuVariantGet.decodeVariantField(raw, dt, input.getNullCount)(fallback)
+  private def decode(
+      raw: VariantOperationResult,
+      input: ColumnView,
+      dt: DataType,
+      path: String = "$.id")(fallback: => ColumnVector): ColumnVector =
+    GpuVariantGet.decodeVariantField(raw, dt, input, path)(fallback)
 
   private def withParentNulls[T](variant: ColumnView, nullRows: Set[Int])(
       f: ColumnView => T): T = {
@@ -130,7 +133,7 @@ class GpuVariantGetSuite extends AnyFunSuite {
       check: HostColumnVector => Unit): Option[Unit] = {
     GpuVariantExtraction.withRawExtraction(variant, path) { raw =>
       var calls = 0
-      withResource(decode(raw, variant, dt) {
+      withResource(decode(raw, variant, dt, path) {
         calls += 1
         ColumnVector.fromBoxedInts(Seq.fill(variant.getRowCount.toInt)(
           null.asInstanceOf[java.lang.Integer]): _*)
@@ -141,6 +144,7 @@ class GpuVariantGetSuite extends AnyFunSuite {
   }
 
   private val emptyObject = Array[Byte](2, 0, 0)
+  private val variantNull = Array[Byte](2, 1, 0, 0, 1, 0)
   private val stringId = Array[Byte](2, 1, 0, 0, 2, 5, 'x'.toByte)
 
   test("SQL-null parents, missing paths and decoded values stay on the GPU") {
@@ -166,18 +170,18 @@ class GpuVariantGetSuite extends AnyFunSuite {
     }
   }
 
-  test("malformed extraction, Variant null and type mismatches invoke the CPU fallback") {
-    val variantNull = Array[Byte](2, 1, 0, 0, 1, 0)
+  test("malformed extraction and type mismatches invoke the CPU fallback") {
     Seq(
       "malformed" -> Seq(encodedValue, Array.emptyByteArray),
       "malformed with missing" -> Seq(encodedValue, emptyObject, Array.emptyByteArray),
-      "Variant null" -> Seq(encodedValue, variantNull),
-      "type mismatch" -> Seq(encodedValue, stringId)).foreach { case (name, rows) =>
-      withClue(name) {
-        withVariant(rows) { variant =>
-          assert(decodeOrFallback(variant, IntegerType)(_ => ()).isEmpty)
+      "type mismatch" -> Seq(encodedValue, stringId),
+      "type mismatch with Variant null" -> Seq(variantNull, stringId)).foreach {
+      case (name, rows) =>
+        withClue(name) {
+          withVariant(rows) { variant =>
+            assert(decodeOrFallback(variant, IntegerType)(_ => ()).isEmpty)
+          }
         }
-      }
     }
     // A malformed row under a SQL-null parent is hidden, so the batch stays on the GPU.
     withVariant(Seq(encodedValue, Array.emptyByteArray, emptyObject)) { variant =>
@@ -237,10 +241,10 @@ class GpuVariantGetSuite extends AnyFunSuite {
                 withResource(raw.getStatus.copyToHost()) { host =>
                   assert(host.getByte(0) == VariantOperationStatus.ROW_NULL.getNativeId)
                 }
-                withResource(decode(raw, nullable, IntegerType)(noFallback)) {
+                withResource(decode(raw, nullable, IntegerType, "$[0]")(noFallback)) {
                   result => assert(result.getNullCount == 1)
                 }
-                withResource(decode(raw, nullable, StringType)(noFallback)) {
+                withResource(decode(raw, nullable, StringType, "$[0]")(noFallback)) {
                   result =>
                     assert(result.getType == DType.STRING)
                     assert(result.getNullCount == 1)
@@ -253,7 +257,7 @@ class GpuVariantGetSuite extends AnyFunSuite {
     }
   }
 
-  test("missing paths stay on the GPU and Variant null invokes the whole-batch fallback once") {
+  test("missing paths stay on the GPU and a type mismatch invokes the whole-batch fallback once") {
     withVariant(Seq(encodedValue, encodedValue)) { variant =>
       GpuVariantExtraction.withRawExtraction(variant, "$.missing") { raw =>
         withResource(raw.getStatus.copyToHost()) { host =>
@@ -265,27 +269,138 @@ class GpuVariantGetSuite extends AnyFunSuite {
         }
       }
     }
-    Seq((Array[Byte](2, 1, 0, 0, 1, 0), "$.id", VariantOperationStatus.VARIANT_NULL))
-      .foreach { case (bytes, path, status) =>
-      withVariant(Seq(bytes, bytes)) { variant =>
-        var calls = 0
-        GpuVariantExtraction.withRawExtraction(variant, path) { raw =>
-          withResource(raw.getStatus.copyToHost()) { host =>
-            assert(host.getByte(0) == status.getNativeId)
-            assert(host.getByte(1) == status.getNativeId)
-          }
-          withResource(decode(raw, variant, IntegerType) {
-            calls += 1
-            ColumnVector.fromInts(71, 83)
-          }) { result =>
-            assert(calls == 1)
-            withResource(result.copyToHost()) { host =>
-              assert(host.getInt(0) == 71)
-              assert(host.getInt(1) == 83)
-            }
+    withVariant(Seq(variantNull, stringId)) { variant =>
+      var calls = 0
+      GpuVariantExtraction.withRawExtraction(variant, "$.id") { raw =>
+        withResource(decode(raw, variant, IntegerType) {
+          calls += 1
+          ColumnVector.fromInts(71, 83)
+        }) { result =>
+          assert(calls == 1)
+          withResource(result.copyToHost()) { host =>
+            assert(host.getInt(0) == 71)
+            assert(host.getInt(1) == 83)
           }
         }
       }
+    }
+  }
+
+  test("Variant nulls stay on the GPU as NULL for every target type") {
+    Seq(BooleanType, ByteType, ShortType, IntegerType, LongType, FloatType, DoubleType,
+      StringType).foreach { dt =>
+      withClue(dt) {
+        val cpu = VariantGet(BoundReference(0, VariantType, nullable = true), Literal("$.id"),
+          dt, failOnError = false, timeZoneId = Some("UTC"))
+        assert(cpu.eval(InternalRow(new VariantVal(variantNull, encodedMetadata))) == null)
+        withVariant(Seq(variantNull, emptyObject, variantNull)) { variant =>
+          GpuVariantExtraction.withRawExtraction(variant, "$.id") { raw =>
+            withResource(raw.getStatus.copyToHost()) { host =>
+              assert(host.getByte(0) == VariantOperationStatus.VARIANT_NULL.getNativeId)
+            }
+          }
+          assert(decodeOrFallback(variant, dt) { host =>
+            (0 until 3).foreach(i => assert(host.isNull(i)))
+          }.isDefined)
+        }
+      }
+    }
+    withVariant(Seq(encodedValue, variantNull)) { variant =>
+      assert(decodeOrFallback(variant, IntegerType) { host =>
+        assert(host.getInt(0) == 1)
+        assert(host.isNull(1))
+      }.isDefined)
+    }
+  }
+
+  test("metadata that Spark rejects falls back when the path starts with an array index") {
+    // cuDF validates the metadata only when it resolves an object key, while Spark's Variant
+    // constructor rejects bad metadata before it reads the path.
+    val values = Seq(
+      "missing" -> (Array[Byte](12, 1), None),
+      "decoded" -> (Array[Byte](3, 1, 0, 2, 12, 1), Some(1)),
+      "Variant null" -> (Array[Byte](3, 1, 0, 1, 0), None))
+    val badMetadata = Seq(Array[Byte](2, 0, 0), Array[Byte](0), Array.emptyByteArray)
+    for ((name, (bytes, expected)) <- values; asString <- Seq(false, true)) {
+      withClue(s"$name string=$asString") {
+        for (metadata <- badMetadata; path <- Seq("$[0]", "$[0].id")) {
+          withClue(s"${metadata.mkString("[", ",", "]")} $path") {
+            val cpu = VariantGet(BoundReference(0, VariantType, nullable = true),
+              Literal(path), IntegerType, failOnError = false, timeZoneId = Some("UTC"))
+            val error = intercept[Exception] {
+              cpu.eval(InternalRow(new VariantVal(bytes, metadata)))
+            }
+            assert(error.getMessage.contains("[MALFORMED_VARIANT]"))
+            withVariant(Seq(bytes), metadata, metadataAsString = asString) { variant =>
+              assert(decodeOrFallback(variant, IntegerType, path)(_ => ()).isEmpty)
+            }
+          }
+        }
+        withVariant(Seq(bytes), emptyMetadata, metadataAsString = asString) { variant =>
+          assert(decodeOrFallback(variant, IntegerType, "$[0]") { host =>
+            expected match {
+              case Some(value) => assert(host.getInt(0) == value)
+              case None => assert(host.isNull(0))
+            }
+          }.isDefined)
+        }
+      }
+    }
+    // A SQL-null parent hides its bad metadata.
+    val array = Array[Byte](3, 1, 0, 2, 12, 1)
+    withResource(binaryRows(Seq(array, array), asString = false)) { values =>
+      withResource(binaryRows(Seq(emptyMetadata, Array[Byte](2, 0, 0)), asString = false)) {
+        metadata =>
+          withResource(ColumnVector.makeStruct(2, values, metadata)) { variant =>
+            assert(decodeOrFallback(variant, IntegerType, "$[0]")(_ => ()).isEmpty)
+            withParentNulls(variant, Set(1)) { nullable =>
+              assert(decodeOrFallback(nullable, IntegerType, "$[0]") { host =>
+                assert(host.getInt(0) == 1)
+                assert(host.isNull(1))
+              }.isDefined)
+            }
+          }
+      }
+    }
+  }
+
+  test("cuDF rejects bad metadata when the path starts with an object key") {
+    // decodeVariantField skips the metadata check for these paths, whatever the root holds.
+    val roots = Seq(encodedValue, Array[Byte](3, 1, 0, 2, 12, 1), Array[Byte](12, 1),
+      Array[Byte](0))
+    val badMetadata = Seq(Array[Byte](2, 0, 0), Array[Byte](0), Array.emptyByteArray)
+    for (bytes <- roots; metadata <- badMetadata; path <- Seq("$.id", "$.id[0]")) {
+      withClue(s"${bytes.mkString("[", ",", "]")} ${metadata.mkString("[", ",", "]")} $path") {
+        withVariant(Seq(bytes), metadata) { variant =>
+          GpuVariantExtraction.withRawExtraction(variant, path) { raw =>
+            withResource(raw.getStatus.copyToHost()) { host =>
+              assert(host.getByte(0) == VariantOperationStatus.MALFORMED_VARIANT.getNativeId)
+            }
+          }
+          assert(decodeOrFallback(variant, IntegerType, path)(_ => ()).isEmpty)
+        }
+      }
+    }
+  }
+
+  test("rows longer than the Variant size limit fail the constructor check") {
+    def fails(variant: ColumnView, limit: Long = 4): Boolean =
+      GpuVariantExtraction.failsVariantConstructor(variant, checkMetadataHeader = false, limit)
+    val small = Array[Byte](12, 1)
+    val large = Array[Byte](3, 1, 0, 2, 12, 1)
+    Seq(false, true).foreach { asString =>
+      withClue(s"string=$asString") {
+        def variant[T](rows: Seq[Array[Byte]], metadata: Array[Byte])(f: ColumnView => T): T =
+          withVariant(rows, metadata, valueAsString = asString, metadataAsString = asString)(f)
+        // Each child holds more bytes than the limit in total, but no single row does.
+        variant(Seq(small, small, small), emptyMetadata)(v => assert(!fails(v)))
+        variant(Seq(small, large), emptyMetadata)(v => assert(fails(v)))
+        variant(Seq(small), encodedMetadata)(v => assert(fails(v)))
+        variant(Seq(large), encodedMetadata)(v => assert(!fails(v, limit = 6)))
+      }
+    }
+    withVariant(Seq(large)) { variant =>
+      assert(!GpuVariantExtraction.failsVariantConstructor(variant, checkMetadataHeader = true))
     }
   }
 
@@ -305,7 +420,7 @@ class GpuVariantGetSuite extends AnyFunSuite {
           withResource(raw.getStatus.copyToHost()) { host =>
             assert(host.getByte(0) == VariantOperationStatus.VARIANT_NULL.getNativeId)
           }
-          decode(raw, variant, IntegerType) {
+          decode(raw, variant, IntegerType, "$[0]") {
             calls += 1
             cpu.eval(input)
             fail("Spark must reject invalid metadata even for Variant null")
@@ -339,21 +454,59 @@ class GpuVariantGetSuite extends AnyFunSuite {
     }
   }
 
-  test("known gap: an unrecognized root reported as a missing path returns NULL as on main") {
-    // cuDF reports MISSING_PATH when an array path meets an unrecognized root type ID, while
-    // Spark rejects the value. Missing paths stay on the GPU, so this returns NULL until cuDF
-    // reports MALFORMED_VARIANT for it. Spark, Delta and parse_json never write these bytes.
+  test("known gap: an unrecognized type ID reported as a missing path returns NULL as on main") {
+    // cuDF reports MISSING_PATH when an object or array step meets a primitive with an
+    // unrecognized type ID, while Spark rejects the value. Missing paths stay on the GPU, so this
+    // returns NULL until cuDF reports MALFORMED_VARIANT for it. Spark, Delta and parse_json never
+    // write these bytes.
     val bytes = Array[Byte](0xfc.toByte)
-    val cpu = VariantGet(BoundReference(0, VariantType, nullable = true), Literal("$[0]"),
-      IntegerType, failOnError = false, timeZoneId = Some("UTC"))
-    intercept[Exception](cpu.eval(InternalRow(new VariantVal(bytes, emptyMetadata))))
-    withVariant(Seq(bytes), metadata = emptyMetadata) { variant =>
-      GpuVariantExtraction.withRawExtraction(variant, "$[0]") { raw =>
-        withResource(raw.getStatus.copyToHost()) { host =>
-          assert(host.getByte(0) == VariantOperationStatus.MISSING_PATH.getNativeId)
+    Seq("$[0]", "$.id").foreach { path =>
+      withClue(path) {
+        val cpu = VariantGet(BoundReference(0, VariantType, nullable = true), Literal(path),
+          IntegerType, failOnError = false, timeZoneId = Some("UTC"))
+        val error = intercept[Exception] {
+          cpu.eval(InternalRow(new VariantVal(bytes, emptyMetadata)))
         }
-        withResource(decode(raw, variant, IntegerType)(noFallback)) {
-          result => assert(result.getNullCount == 1)
+        assert(error.getMessage.contains("[UNKNOWN_PRIMITIVE_TYPE_IN_VARIANT]"))
+        withVariant(Seq(bytes), metadata = emptyMetadata) { variant =>
+          GpuVariantExtraction.withRawExtraction(variant, path) { raw =>
+            withResource(raw.getStatus.copyToHost()) { host =>
+              assert(host.getByte(0) == VariantOperationStatus.MISSING_PATH.getNativeId)
+            }
+            withResource(decode(raw, variant, IntegerType, path)(noFallback)) {
+              result => assert(result.getNullCount == 1)
+            }
+          }
+        }
+      }
+    }
+  }
+
+  test("known gap: unsorted or out-of-range object field ids read as missing paths") {
+    // cuDF binary-searches the field ids, while Spark scans small objects linearly. Spark returns
+    // the value for unsorted ids and rejects an id outside the dictionary; cuDF reports
+    // MISSING_PATH for both. Spark and parse_json never write such objects.
+    val ab = Array[Byte](1, 2, 0, 1, 2, 'a'.toByte, 'b'.toByte)
+    val b = Array[Byte](1, 1, 0, 1, 'b'.toByte)
+    Seq(
+      ("unsorted ids", ab, Array[Byte](2, 2, 1, 0, 0, 2, 4, 12, 1, 12, 2), "$.b", true),
+      ("id outside the dictionary", b, Array[Byte](2, 2, 5, 0, 0, 2, 4, 12, 1, 12, 2), "$.c",
+        false)).foreach { case (name, metadata, bytes, path, sparkReturnsValue) =>
+      withClue(name) {
+        val cpu = VariantGet(BoundReference(0, VariantType, nullable = true), Literal(path),
+          IntegerType, failOnError = false, timeZoneId = Some("UTC"))
+        val spark = scala.util.Try(cpu.eval(InternalRow(new VariantVal(bytes, metadata))))
+        assert(spark.isSuccess == sparkReturnsValue)
+        if (sparkReturnsValue) assert(spark.get == 1)
+        withVariant(Seq(bytes), metadata) { variant =>
+          GpuVariantExtraction.withRawExtraction(variant, path) { raw =>
+            withResource(raw.getStatus.copyToHost()) { host =>
+              assert(host.getByte(0) == VariantOperationStatus.MISSING_PATH.getNativeId)
+            }
+            withResource(decode(raw, variant, IntegerType, path)(noFallback)) {
+              result => assert(result.getNullCount == 1)
+            }
+          }
         }
       }
     }

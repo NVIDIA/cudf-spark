@@ -73,15 +73,25 @@ class GpuVariantGetMetaSuite extends AnyFunSuite {
     assert(fixtureApis())
   }
 
+  // Each rejected fixture differs from the accepted one in one member. Checking the accepted
+  // fixtures in the same call shows that the rejection is not a failure to load the fixtures.
+  private def assertFixtureRejected(
+      utils: Class[_] = classOf[Utils],
+      result: Class[_] = classOf[Result],
+      status: Class[_] = classOf[Status]): Unit = {
+    assert(fixtureApis())
+    assert(!fixtureApis(utils, result, status))
+  }
+
   test("plain cast must accept a value and type and return ColumnVector") {
     Seq(classOf[ExtractionOnlyUtils], classOf[WrongCastParametersUtils],
       classOf[WrongCastReturnUtils]).foreach { utils =>
-      withClue(utils.getSimpleName) { assert(!fixtureApis(utils = utils)) }
+      withClue(utils.getSimpleName) { assertFixtureRejected(utils = utils) }
     }
   }
 
   test("result must implement AutoCloseable even if it declares close") {
-    assert(!fixtureApis(utils = classOf[NonOwningUtils], result = classOf[NonOwningResult]))
+    assertFixtureRejected(utils = classOf[NonOwningUtils], result = classOf[NonOwningResult])
     // An AutoCloseable already inherits close():void, so a missing/wrong close return cannot
     // be isolated with a legal Java fixture after the assignability check succeeds.
   }
@@ -89,26 +99,27 @@ class GpuVariantGetMetaSuite extends AnyFunSuite {
   test("result value getter must exist and return ColumnVector") {
     Seq((classOf[MissingValueUtils], classOf[MissingValueResult]),
       (classOf[WrongValueUtils], classOf[WrongValueResult])).foreach { case (utils, result) =>
-      withClue(result.getSimpleName) { assert(!fixtureApis(utils = utils, result = result)) }
+      withClue(result.getSimpleName) { assertFixtureRejected(utils = utils, result = result) }
     }
   }
 
   test("result status getter must exist and return ColumnVector") {
     Seq((classOf[MissingStatusUtils], classOf[MissingStatusResult]),
       (classOf[WrongStatusUtils], classOf[WrongStatusResult])).foreach { case (utils, result) =>
-      withClue(result.getSimpleName) { assert(!fixtureApis(utils = utils, result = result)) }
+      withClue(result.getSimpleName) { assertFixtureRejected(utils = utils, result = result) }
     }
   }
 
   test("status native ID must exist and return primitive int") {
     Seq(classOf[MissingNativeIdStatus], classOf[WrongNativeIdStatus]).foreach { status =>
-      withClue(status.getSimpleName) { assert(!fixtureApis(status = status)) }
+      withClue(status.getSimpleName) { assertFixtureRejected(status = status) }
     }
   }
 
   test("each required status field must exist and have the status type") {
-    Seq(classOf[MissingMalformedStatus], classOf[WrongMalformedStatus]).foreach { status =>
-      withClue(status.getSimpleName) { assert(!fixtureApis(status = status)) }
+    Seq(classOf[MissingVariantNullStatus], classOf[WrongVariantNullStatus],
+      classOf[MissingMalformedStatus], classOf[WrongMalformedStatus]).foreach { status =>
+      withClue(status.getSimpleName) { assertFixtureRejected(status = status) }
     }
   }
 

@@ -187,24 +187,28 @@ def test_variant_cpu_rows_convert_to_gpu():
 @incompat
 @allow_non_gpu('RDDScanExec')
 @validate_execs_in_gpu_plan('GpuProjectExec')
-@pytest.mark.parametrize('value,error', [
-    pytest.param(b'', 'MALFORMED_VARIANT', id='empty-value'),
-    # cuDF reports MISSING_PATH for an unrecognized root type ID and missing paths stay on the
-    # GPU, so the GPU returns NULL here, as main does. Remove the mark once cuDF reports
-    # MALFORMED_VARIANT for this case.
-    pytest.param(b'\xfc', 'UNKNOWN_PRIMITIVE_TYPE_IN_VARIANT', id='unknown-primitive',
+@pytest.mark.parametrize('value,metadata,error', [
+    pytest.param(b'', b'\x01\x00\x00', 'MALFORMED_VARIANT', id='empty-value'),
+    # cuDF checks the metadata only for object keys. Spark rejects version 2 for any path.
+    pytest.param(b'\x03\x01\x00\x02\x0c\x01', b'\x02\x00\x00', 'MALFORMED_VARIANT',
+                 id='bad-metadata-version'),
+    # cuDF reports MISSING_PATH when a path step meets an unrecognized type ID, and missing
+    # paths stay on the GPU, so the GPU returns NULL here, as main does. Remove the mark once
+    # cuDF reports MALFORMED_VARIANT for this case.
+    pytest.param(b'\xfc', b'\x01\x00\x00', 'UNKNOWN_PRIMITIVE_TYPE_IN_VARIANT',
+                 id='unknown-primitive',
                  marks=pytest.mark.xfail(
-                     strict=True, reason='cuDF reports MISSING_PATH for an unrecognized root')),
+                     strict=True, reason='cuDF reports MISSING_PATH for an unrecognized type ID')),
 ])
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
-def test_variant_try_get_malformed_input_preserves_error(value, error):
+def test_variant_try_get_malformed_input_preserves_error(value, metadata, error):
     from pyspark.sql.types import VariantVal
 
     def do_it(spark, require_gpu=False):
         # Local rows preserve the encoded bytes without a Parquet writer validating them.
         # Spark throws for malformed bytes even in try_variant_get.
         df = spark.createDataFrame(
-            [(VariantVal(value, b'\x01\x00\x00'),)], 'v variant').selectExpr(
+            [(VariantVal(value, metadata),)], 'v variant').selectExpr(
                 "try_variant_get(v, '$[0]', 'bigint') AS x")
         if require_gpu:
             # The validate_execs marker checks plan nodes only; this helper also checks
