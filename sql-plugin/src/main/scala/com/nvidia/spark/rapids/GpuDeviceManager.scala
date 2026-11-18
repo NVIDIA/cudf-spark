@@ -23,6 +23,7 @@ import scala.util.control.NonFatal
 
 import ai.rapids.cudf._
 import com.nvidia.spark.rapids.jni.DeviceAttr
+import com.nvidia.spark.rapids.jni.NativeFileSource
 import com.nvidia.spark.rapids.jni.RmmSpark
 import com.nvidia.spark.rapids.parquet.HybridScanPipeline
 import com.nvidia.spark.rapids.spill.SpillFramework
@@ -737,6 +738,9 @@ object GpuDeviceManager extends Logging {
           val conf = rapidsConf.getOrElse(new RapidsConf(sparkConf))
           initializePinnedPoolAndOffHeapLimits(gpu, conf, sparkConf)
           initializeRmmGpuPool(gpu, conf)
+          if (conf.isParquetHybridScanEnabled) {
+            initializeKvikio(conf)
+          }
           // we want to initialize this last because we want to take advantage
           // of pinned memory if it is configured
           initializeSpillAndMemoryEvents(conf)
@@ -745,6 +749,18 @@ object GpuDeviceManager extends Logging {
         }
       }
     }
+  }
+
+  /**
+   * Set KvikIO's compatibility mode and thread count, which libcudf takes only once per process,
+   * so this must run before the first libcudf file read. Compatibility mode ON reads with POSIX
+   * rather than cuFile.
+   */
+  private def initializeKvikio(conf: RapidsConf): Unit = {
+    val compatMode = NativeFileSource.CompatMode.ON
+    logInfo(s"KvikIO reads with compatibility mode $compatMode and " +
+      s"${conf.readerKvikioNumThreads} threads")
+    NativeFileSource.setUpKvikio(compatMode, conf.readerKvikioNumThreads)
   }
 
   /** Wrap a thread factory with one that will set the GPU device on each thread created. */

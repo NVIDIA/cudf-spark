@@ -278,6 +278,32 @@ def test_hybrid_scan_reader_runs(spark_tmp_path, reader_mode):
 
 
 @_metric_reader_modes
+def test_hybrid_scan_native_host_reads(spark_tmp_path, reader_mode):
+    """A local file's bytes are all read with KvikIO, and any other file's with none."""
+    def check(cpu_plan, gpu_plan):
+        scan = [node for node in collect_plan_nodes(gpu_plan)
+                if node.getClass().getSimpleName() == 'GpuFileSourceScanExec'][0]
+        bytes_requested = plan_metric(scan, 'hybridScanBytesRequested')
+        assert bytes_requested > 0, 'no column chunks were requested'
+        native_bytes = plan_metric(scan, 'hybridScanNativeHostBytesRead')
+        if is_local:
+            assert native_bytes == bytes_requested, \
+                'requested {} bytes, read {} with KvikIO'.format(bytes_requested, native_bytes)
+        else:
+            assert native_bytes in (-1, 0), 'read {} bytes of a remote file with KvikIO'.format(
+                native_bytes)
+
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(lambda spark: write_test_data(spark, data_path, files=4))
+    is_local = with_cpu_session(lambda spark: all(
+        urlparse(f).scheme == 'file' for f in spark.read.parquet(data_path).inputFiles()))
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.read.parquet(data_path).filter('filter_int = 7'),
+        conf=_metrics_conf(reader_mode),
+        gpu_plan_assertion=check)
+
+
+@_metric_reader_modes
 def test_hybrid_scan_dictionary_pruning(spark_tmp_path, reader_mode):
     """302 is inside every row group's `b` range, but only row group 2's dictionary holds it.
     MULTITHREADED prunes with dictionaries after the fetch, so its pruned row groups are still
