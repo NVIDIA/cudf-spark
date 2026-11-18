@@ -16,10 +16,16 @@
 
 package com.nvidia.spark.rapids
 
+import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 
-import com.nvidia.spark.rapids.ShuffleReclaimOutcome.{FAILED, REMOVED}
+import com.nvidia.spark.rapids.ShuffleReclaimOutcome.{ABSENT, FAILED, REMOVED}
+import org.mockito.ArgumentCaptor
+import org.mockito.Mockito.{times, verify, when}
 import org.scalatest.funsuite.AnyFunSuite
+import org.scalatestplus.mockito.MockitoSugar.mock
+
+import org.apache.spark.api.plugin.PluginContext
 
 class UcxCatalogReclaimerSuite extends AnyFunSuite {
   private val watermark = 100L
@@ -66,5 +72,67 @@ class UcxCatalogReclaimerSuite extends AnyFunSuite {
       (failed.outcome, failed.watermark, failed.buffers, failed.bytes))
     assertResult(Some("java.lang.IllegalStateException: the catalog is gone"))(failed.error)
     assertResult(REMOVED)(sent(1).outcome)
+  }
+
+  test("a reclaim that throws an interrupt or a fatal error propagates it and sends no result") {
+    Seq[Throwable](new InterruptedException("injected"), new LinkageError("injected")).foreach {
+      error =>
+        val sent = new ArrayBuffer[ShuffleReclaimResult]()
+        val reclaimer = new UcxCatalogReclaimer((_, _, _) => throw error, result => sent += result)
+        val thrown = intercept[Throwable](reclaimer.reclaimRequests(requests(1), () => false))
+        assert(thrown eq error, thrown)
+        assert(sent.isEmpty, sent)
+    }
+  }
+
+  test("sendTo sends each result in a message of its own, with the executor id it read once") {
+    val ctx = mock[PluginContext]
+    when(ctx.executorID()).thenReturn("7")
+    val send = UcxCatalogReclaimer.sendTo(ctx)
+    val results = Seq(removed(1, watermark), removed(2, watermark))
+    results.foreach(send)
+    verify(ctx, times(1)).executorID()
+    val messages = ArgumentCaptor.forClass(classOf[AnyRef])
+    verify(ctx, times(2)).send(messages.capture())
+    assertResult(results.map(r => ("7", Seq(r))))(messages.getAllValues.asScala.map {
+      case RapidsShuffleReclaimResultMsg(executorId, sentResults) =>
+        (executorId, sentResults.toSeq)
+      case other => fail(s"sendTo sent $other")
+    })
+  }
+
+  test("a closed reclaimer's poll asks the driver nothing") {
+    val asked = new ArrayBuffer[AnyRef]()
+    val sent = new ArrayBuffer[ShuffleReclaimResult]()
+    val reclaimer = new UcxCatalogReclaimer((id, w, _) => removed(id, w), result => sent += result)
+    reclaimer.poll("1", message => {
+      asked += message
+      RapidsShuffleReclaimResponseMsg(requests(1))
+    }, () => true)
+    assert(asked.isEmpty, asked)
+    assert(sent.isEmpty, sent)
+  }
+
+  test("a poll given an empty reply or an unexpected one reclaims nothing and sends nothing") {
+    val reclaimed = new ArrayBuffer[Int]()
+    val sent = new ArrayBuffer[ShuffleReclaimResult]()
+    val reclaimer = new UcxCatalogReclaimer((id, w, _) => {
+      reclaimed += id
+      removed(id, w)
+    }, result => sent += result)
+    Seq[AnyRef](RapidsShuffleReclaimResponseMsg(Array.empty),
+        RapidsShuffleCleanupResponseMsg(Array.empty), null).foreach { reply =>
+      reclaimer.poll("1", _ => reply, () => false)
+    }
+    assert(reclaimed.isEmpty, reclaimed)
+    assert(sent.isEmpty, sent)
+  }
+
+  test("the default reclaim answers ABSENT for a shuffle that this executor never held") {
+    // another suite in this JVM may leave a SparkEnv, so the shuffle id is one no suite uses
+    val sent = new ArrayBuffer[ShuffleReclaimResult]()
+    new UcxCatalogReclaimer(send = result => sent += result)
+      .reclaimRequests(requests(Int.MaxValue), () => false)
+    assertResult(Seq((Int.MaxValue, ABSENT)))(sent.map(r => (r.shuffleId, r.outcome)))
   }
 }

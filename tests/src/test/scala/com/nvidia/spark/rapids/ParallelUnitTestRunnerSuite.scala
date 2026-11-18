@@ -30,6 +30,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+import org.apache.spark.sql.rapids.execution.TrampolineUtil
+import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 
 class ParallelUnitTestRunnerSuite extends AnyFunSuite {
   private val fixtureSuiteName = classOf[ParallelUnitTestRunnerExpectedFailureFixtureSuite].getName
@@ -527,6 +529,43 @@ class ParallelUnitTestRunnerSuite extends AnyFunSuite {
       SparkSession.clearActiveSession()
       SparkSession.clearDefaultSession()
       FileUtil.fullyDelete(tmpDir.toFile)
+    }
+  }
+
+  test("worker cleanup clears retry task state that a suite left behind") {
+    val tmpDir = Files.createTempDirectory("retry-state-regression")
+    // Like a suite that sets a mock task context itself instead of using
+    // TestUtils.withTaskContext, which resets the callbacks: the task never completes.
+    val leaked = new MockTaskContext(taskAttemptId = 1, partitionId = 0)
+    var leakedCallbackRan = false
+    try {
+      TrampolineUtil.setTaskContext(leaked)
+      try {
+        TaskRegistryTracker.registerDedicatedThreadForRetry()
+        ScalableTaskCompletion.onTaskCompletion(leaked) {
+          leakedCallbackRan = true
+        }
+      } finally {
+        TrampolineUtil.unsetTaskContext()
+      }
+      ParallelUnitTestRunner.cleanupWorkerState(tmpDir)
+      assert(leakedCallbackRan)
+
+      // A later task with the same id on the same thread registers and completes on its own
+      val next = new MockTaskContext(taskAttemptId = 1, partitionId = 0)
+      TrampolineUtil.setTaskContext(next)
+      try {
+        TaskRegistryTracker.registerDedicatedThreadForRetry()
+        assert(TaskRegistryTracker.isCurrentThreadRegisteredAsDedicatedTaskThread)
+        next.markTaskComplete()
+        assert(!TaskRegistryTracker.isCurrentThreadRegisteredAsDedicatedTaskThread)
+      } finally {
+        TrampolineUtil.unsetTaskContext()
+      }
+    } finally {
+      try ParallelUnitTestRunner.cleanupWorkerState(tmpDir) finally {
+        FileUtil.fullyDelete(tmpDir.toFile)
+      }
     }
   }
 

@@ -23,6 +23,7 @@ import com.nvidia.spark.rapids.delta.DeltaWriteUtils
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.delta.{DeltaLog, DeltaOptions, Snapshot}
+import org.apache.spark.sql.delta.commands.cdc.CDCReader.CDC_PARTITION_COL
 import org.apache.spark.sql.delta.perf.DeltaOptimizedWriterExec
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.rapids.GpuShuffleEnv
@@ -50,8 +51,12 @@ abstract class GpuOptimisticTransactionBase(
     if (optimizeWriteEnabled) {
       val planWithoutTopRepartition =
         DeltaShufflePartitionsUtil.removeTopRepartition(physicalPlan)
+      // The plan uses logical names, whereas partitionSchema uses physical column-mapping names.
+      // Preserve the synthetic CDC partition column when this write includes change records.
+      val logicalPartitionColumns = partitionSchema.fieldNames
+        .filter(_ == CDC_PARTITION_COL).toSeq ++ metadata.partitionColumns
       val partitioning = DeltaShufflePartitionsUtil.partitioningForRebalance(
-        physicalPlan.output, partitionSchema, spark.sessionState.conf.numShufflePartitions)
+        physicalPlan.output, logicalPartitionColumns, spark.sessionState.conf.numShufflePartitions)
       planWithoutTopRepartition match {
         case p: GpuExec =>
           val partMeta = GpuOverrides.wrapPart(partitioning, rapidsConf, None)

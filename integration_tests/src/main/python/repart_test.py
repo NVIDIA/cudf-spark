@@ -308,6 +308,30 @@ def test_hash_repartition_exact(gen, num_parts):
         conf = {'spark.sql.adaptive.enabled': 'false'})
 
 
+@ignore_order(local=True)
+@pytest.mark.parametrize('num_parts', [100, 200], ids=idfn)
+@pytest.mark.parametrize('empty', [False, True], ids=idfn)
+def test_hash_repartition_fused_partition_ids(num_parts, empty):
+    # Verify actual shuffle destinations as well as row contents. Computed and nested keys
+    # exercise projection, normalization of signed zero/NaN, and Spark's null hashing rules.
+    rows = [(0, 0.0, '', []),
+            (1, -0.0, 'a\x00b', [1, None]),
+            (-1, float('nan'), '中🌍', None),
+            (None, None, None, [None]),
+            (-(1 << 31), float('-inf'), 'negative', [-1, 0]),
+            ((1 << 31) - 1, float('inf'), 'positive', [1, 2])]
+
+    def repartition(spark):
+        df = spark.createDataFrame([] if empty else rows * 1024,
+                                   'a int, b double, c string, d array<int>')
+        keys = [f.col('a').cast('long') + 3, f.col('b'), f.col('c'), f.col('d')]
+        return df.repartition(num_parts, *keys).withColumn('partition_id', f.spark_partition_id())
+
+    assert_gpu_and_cpu_are_equal_collect(repartition,
+        conf={'spark.sql.adaptive.enabled': 'false',
+              'spark.rapids.sql.partitioning.hashFunction.enabled': 'false'})
+
+
 @ignore_order(local=True)  # To avoid extra data shuffle by 'sort on Spark' for this repartition test.
 @pytest.mark.parametrize('num_parts', [1, 2, 10, 17, 19, 32], ids=idfn)
 @pytest.mark.parametrize('is_ansi_mode', [False, True], ids=idfn)
