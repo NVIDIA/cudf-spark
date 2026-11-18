@@ -99,7 +99,54 @@ object TaskRegistryTracker {
   }
 
   /**
-   * Returns true only when the current thread was registered as Spark's dedicated task thread.
+   * Runs `body` with the current thread registered as dedicated to its task. Use it for a thread
+   * that works for one task and can end before the task does, such as Spark 3.x's Python writer.
+   *
+   * Deregisters the thread when `body` ends, including after a partial registration, because
+   * RmmSpark keys threads by native thread ID. The C library can give that ID to a new thread as
+   * soon as this thread ends, whether or not RmmSpark still holds it. If the registration stayed
+   * until the task completed, it would apply to that new thread.
+   *
+   * A deregistration failure is added as suppressed to a failure of `body` or of the
+   * registration. With no such failure, it is thrown.
+   */
+  def withDedicatedThreadForRetry[T](body: => T): T = {
+    var failure: Throwable = null
+    try {
+      registerThreadForRetry(addDedicatedThread = true)
+      body
+    } catch {
+      case t: Throwable =>
+        failure = t
+        throw t
+    } finally {
+      try {
+        removeCurrentThread()
+      } catch {
+        case t: Throwable if failure != null && (failure ne t) =>
+          failure.addSuppressed(t)
+      }
+    }
+  }
+
+  // Clears the tracker before RmmSpark because, if the RmmSpark removal then fails, the next
+  // thread with this ID is new to the tracker, so it registers with RmmSpark, which replaces the
+  // stale entry.
+  private def removeCurrentThread(): Unit = synchronized {
+    val tc = TaskContext.get()
+    if (tc != null) {
+      val threadId = RmmSpark.getCurrentThreadId
+      val taskId = tc.taskAttemptId()
+      registeredThreads.remove(threadId)
+      Option(taskToThread.get(taskId)).foreach(_ -= threadId)
+      if (dedicatedTaskThreads.remove(threadId)) {
+        RmmSpark.removeCurrentDedicatedThreadAssociation(taskId)
+      }
+    }
+  }
+
+  /**
+   * Returns true only when the current thread is registered as dedicated to its task.
    */
   def isCurrentThreadRegisteredAsDedicatedTaskThread: Boolean = synchronized {
     dedicatedTaskThreads.contains(RmmSpark.getCurrentThreadId)

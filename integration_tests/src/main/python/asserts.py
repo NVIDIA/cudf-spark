@@ -285,7 +285,8 @@ def _assert_gpu_and_cpu_writes_are_equal(
         mode,
         conf={},
         expected_command=None,
-        required_gpu_classes=None):
+        required_gpu_classes=None,
+        plan_assertion=None):
     conf = _prep_incompat_conf(conf)
 
     print('### CPU RUN ###')
@@ -304,6 +305,7 @@ def _assert_gpu_and_cpu_writes_are_equal(
         gpu_result = assert_rapids_delta_write(
             lambda spark: write_func(spark, gpu_path), conf=conf,
             expected_command=expected_command,
+            plan_assertion=plan_assertion,
             required_gpu_classes=(delta_write if required_gpu_classes is None
                                   else required_gpu_classes))
     else:
@@ -327,7 +329,7 @@ def _assert_gpu_and_cpu_writes_are_equal(
 
 def assert_gpu_and_cpu_writes_are_equal_collect(
         write_func, read_func, base_path, conf={}, expected_command=None,
-        required_gpu_classes=None):
+        required_gpu_classes=None, plan_assertion=None):
     """
     Assert when running write_func on both the CPU and the GPU and reading using read_func
     on the CPU that the results are equal.
@@ -337,10 +339,13 @@ def assert_gpu_and_cpu_writes_are_equal_collect(
     required_gpu_classes overrides the default RapidsDeltaWrite requirement, for example
     when a persistent-DV DELETE scans on the GPU without writing replacement Parquet data.
     An empty list requires no data-writing operator; expected_command is still checked.
+    For Delta writes, plan_assertion(callback, plans) additionally checks captured plans,
+    including final writer plans, after the standard checks.
     """
     _assert_gpu_and_cpu_writes_are_equal(
         write_func, read_func, base_path, 'COLLECT', conf=conf,
-        expected_command=expected_command, required_gpu_classes=required_gpu_classes)
+        expected_command=expected_command, required_gpu_classes=required_gpu_classes,
+        plan_assertion=plan_assertion)
 
 def assert_gpu_and_cpu_writes_are_equal_iterator(write_func, read_func, base_path, conf={}):
     """
@@ -548,19 +553,38 @@ def assert_gpu_fallback_write_sql(write_func,
         jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.endCapture()
 
 
-def collect_plan_nodes(plan):
-    """Flatten a JVM SparkPlan into a list of nodes, parents before children.
+def collect_plan_nodes(plan, include_wrapped=False, deduplicate=False):
+    """Flatten a JVM SparkPlan, parents before children.
 
-    Intended for the gpu_plan_assertion callback of
-    assert_cpu_and_gpu_are_equal_collect_with_capture. This does not descend into
-    AdaptiveSparkPlanExec or QueryStageExec, so a caller that needs the whole tree should
-    disable AQE.
+    include_wrapped follows final adaptive plans, query stages and reused exchanges.
+    By default a shared producer is visited once per consumer; deduplicate visits
+    each (node class, plan ID) once. Existing callers retain plain children traversal.
     """
-    nodes = [plan]
-    children = plan.children().iterator()
-    while children.hasNext():
-        nodes.extend(collect_plan_nodes(children.next()))
+    nodes = []
+    seen = set()
+
+    def visit(node):
+        name = node.getClass().getSimpleName()
+        if deduplicate:
+            identity = (node.getClass().getName(), node.id())
+            if identity in seen:
+                return
+            seen.add(identity)
+        nodes.append(node)
+        if include_wrapped and name == 'AdaptiveSparkPlanExec':
+            visit(node.executedPlan())
+        elif include_wrapped and name.endswith('QueryStageExec'):
+            visit(node.plan())
+        elif include_wrapped and name == 'ReusedExchangeExec':
+            visit(node.child())
+        else:
+            children = node.children().iterator()
+            while children.hasNext():
+                visit(children.next())
+
+    visit(plan)
     return nodes
+
 
 def plan_metric(node, name):
     """Value of a named metric on a JVM plan node, or None if the node has no such metric.
@@ -573,6 +597,13 @@ def plan_metric(node, name):
     if not metrics.contains(name):
         return None
     return metrics.apply(name).value()
+
+
+def assert_metric_unset_or_zero(node, name):
+    """Require a registered metric containing Spark's -1 initial value or zero."""
+    value = plan_metric(node, name)
+    assert value in (-1, 0), f'Expected no recorded {name}, got {value}'
+
 
 def assert_cpu_and_gpu_are_equal_collect_with_capture(func,
         exist_classes='',

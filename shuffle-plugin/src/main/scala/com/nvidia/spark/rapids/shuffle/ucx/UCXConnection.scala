@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -159,10 +159,6 @@ class UCXClientConnection(peerExecutorId: Long, ucx: UCX, transport: UCXShuffleT
     val tx = createTransaction
     tx.start(UCXTransactionType.Request, 1, cb)
 
-    // this header is unique, so we can send it with the request
-    // expecting it to be echoed back in the response
-    val requestHeader = UCXConnection.composeRequestHeader(ucx.localExecutorId, tx.txId)
-
     // This is the response active message handler, when the response shows up
     // we'll create a transaction, and set header/message and complete it.
     val amCallback = new UCXAmCallback {
@@ -188,16 +184,23 @@ class UCXClientConnection(peerExecutorId: Long, ucx: UCX, transport: UCXShuffleT
       }
     }
 
-    // Register the active message response handler. Note that the `requestHeader`
-    // is expected to come back with the response, and is used to find the
-    // correct callback (this is an implementation detail in UCX.scala)
-    val responseAm = UCXActiveMessage(
-      UCXConnection.composeResponseAmId(messageType), requestHeader, false)
-    ucx.registerResponseHandler(responseAm, amCallback)
+    // Register the response's callback under the request's header, which the server echoes in
+    // its reply. The header holds the low 32 bits of the transaction's id, or of a later id
+    // when a withdrawn request still holds that header. The transaction keeps its own id as its
+    // key in `pendingTransactions`.
+    var response = UCXActiveMessage(UCXConnection.composeResponseAmId(messageType),
+      UCXConnection.composeRequestHeader(ucx.localExecutorId, tx.txId), false)
+    while (ucx.registerResponseHandler(response, amCallback)) {
+      response = response.copy(header =
+        UCXConnection.composeRequestHeader(ucx.localExecutorId, ucx.getNextTransactionId))
+    }
+    val responseAm = response
+    tx.responseAm = responseAm
+    tx.responseCallback = amCallback
 
     // kick-off the request
     val requestAm = UCXActiveMessage(
-      UCXConnection.composeRequestAmId(messageType), requestHeader, false)
+      UCXConnection.composeRequestAmId(messageType), responseAm.header, false)
 
     logDebug(s"Performing a ${messageType} request of size ${request.remaining()} " +
       s"with tx ${tx}. Active messages: request $requestAm")
@@ -207,9 +210,18 @@ class UCXClientConnection(peerExecutorId: Long, ucx: UCX, transport: UCXShuffleT
         override def onError(ucsStatus: Int, errorMsg: String): Unit = {
           tx.completeWithError(errorMsg)
 
-          // we cleanup the response active message handler, since the request errored
-          // and we don't expect a response from the peer
-          ucx.unregisterResponseHandler(responseAm)
+          // The request failed, but its reply can still come if the peer received it. A
+          // metadata request keeps its header retired until that reply, which may never come,
+          // so that the reply cannot reach a newer request. A metadata send that never left the
+          // executor frees its header, as other requests do.
+          messageType match {
+            case MessageType.MetadataRequest if UCX.neverSent(ucsStatus) =>
+              ucx.releaseResponseHandler(responseAm, amCallback)
+            case MessageType.MetadataRequest =>
+              ucx.retireResponseHandler(responseAm, amCallback)
+            case _ =>
+              ucx.unregisterResponseHandler(responseAm)
+          }
         }
 
         // we don't handle `onSuccess` here, because we want the response
@@ -217,6 +229,18 @@ class UCXClientConnection(peerExecutorId: Long, ucx: UCX, transport: UCXShuffleT
       })
 
     tx
+  }
+
+  /**
+   * Retires the response of `tx` if its callback still waits, and then drops the transaction,
+   * which no reply will complete. A reply or a failed send that took the callback first
+   * completes and closes the transaction itself.
+   */
+  override def cancelRequest(tx: Transaction): Unit = tx match {
+    case request: UCXTransaction =>
+      if (ucx.retireResponseHandler(request.responseAm, request.responseCallback)) {
+        removeTransaction(request)
+      }
   }
 
   override def registerReceiveHandler(receiveType: MessageType.Value): Unit = {
@@ -345,8 +369,9 @@ object UCXConnection extends Logging {
       throw new IllegalArgumentException(
         s"Invalid header, upperBits would alias: ${TransportUtils.toHex(upperBits)}")
     }
-    // the lower 32bits aliasing is not a big deal, we expect it with msg rollover
-    // so we don't check for it
+    // The lower 32 bits wrap with their counter, so they are not checked here. Registering a
+    // response skips a request header that a withdrawn request still holds, and fails on one
+    // that a waiting request holds.
     upperBits | (lowerBits & lowerBitsMask)
   }
 

@@ -29,14 +29,14 @@ private[rapids] object GpuTimestampRebaseUtils {
     case _ => input.copyToColumnVector()
   }
 
-  private def isModernOrAllNull(input: ColumnView): Boolean = {
+  private def isModernOrAllNull(input: ColumnView, lastSwitchTs: Long): Boolean = {
     withResource(input.min()) { minValue =>
-      !minValue.isValid || minValue.getLong >= RebaseDateTimeBridge.lastSwitchJulianTs
+      !minValue.isValid || minValue.getLong >= lastSwitchTs
     }
   }
 
-  final class JulianToGregorianMicrosContext(
-      timeZoneId: String,
+  private final class MicrosContext(
+      rebaseValue: Long => Long,
       switches: Option[Table],
       paddedDiffs: Option[Table]) extends AutoCloseable {
 
@@ -49,8 +49,7 @@ private[rapids] object GpuTimestampRebaseUtils {
             if (hostInput.isNull(row)) {
               builder.appendNull()
             } else {
-              builder.append(RebaseDateTimeBridge.rebaseJulianToGregorianMicros(
-                timeZoneId, hostInput.getLong(row)))
+              builder.append(rebaseValue(hostInput.getLong(row)))
             }
             row += 1
           }
@@ -83,17 +82,7 @@ private[rapids] object GpuTimestampRebaseUtils {
       }
     }
 
-    def rebase(input: ColumnView): ColumnVector = {
-      require(input.getType == DType.TIMESTAMP_MICROSECONDS,
-        s"expected TIMESTAMP_MICROSECONDS but found ${input.getType}")
-      if (input.getRowCount == 0 || isModernOrAllNull(input)) {
-        retainOrCopy(input)
-      } else {
-        rebaseLegacy(input)
-      }
-    }
-
-    private[rapids] def rebaseLegacy(input: ColumnView): ColumnVector = {
+    def rebaseLegacy(input: ColumnView): ColumnVector = {
       if (switches.isEmpty) {
         // Spark's bundled map can lag valid IDs added by newer JDK timezone databases.
         rebaseOnHost(input)
@@ -118,20 +107,39 @@ private[rapids] object GpuTimestampRebaseUtils {
     }
   }
 
-  final class LazyJulianToGregorianMicrosContext(timeZoneId: String) extends AutoCloseable {
-    private var delegate: JulianToGregorianMicrosContext = _
+  final class LazyJulianToGregorianMicrosContext(timeZoneId: String)
+      extends LazyMicrosContext(timeZoneId, toGregorian = true)
+
+  final class LazyGregorianToJulianMicrosContext(timeZoneId: String)
+      extends LazyMicrosContext(timeZoneId, toGregorian = false)
+
+  class LazyMicrosContext(timeZoneId: String, toGregorian: Boolean) extends AutoCloseable {
+    private val lastSwitchTs = if (toGregorian) {
+      RebaseDateTimeBridge.lastSwitchJulianTs
+    } else {
+      RebaseDateTimeBridge.lastSwitchGregorianTs
+    }
+    private var delegate: MicrosContext = _
+
+    def isRebaseNeeded(input: ColumnView): Boolean = {
+      input.getRowCount != 0 && !isModernOrAllNull(input, lastSwitchTs)
+    }
 
     def rebase(input: ColumnView): ColumnVector = {
       require(input.getType == DType.TIMESTAMP_MICROSECONDS,
         s"expected TIMESTAMP_MICROSECONDS but found ${input.getType}")
-      if (input.getRowCount == 0 || isModernOrAllNull(input)) {
-        retainOrCopy(input)
+      if (isRebaseNeeded(input)) {
+        rebaseLegacy(input)
       } else {
-        if (delegate == null) {
-          delegate = createJulianToGregorianMicrosContext(timeZoneId)
-        }
-        delegate.rebaseLegacy(input)
+        retainOrCopy(input)
       }
+    }
+
+    def rebaseLegacy(input: ColumnView): ColumnVector = {
+      if (delegate == null) {
+        delegate = createMicrosContext(timeZoneId, toGregorian)
+      }
+      delegate.rebaseLegacy(input)
     }
 
     override def close(): Unit = if (delegate != null) {
@@ -140,9 +148,20 @@ private[rapids] object GpuTimestampRebaseUtils {
     }
   }
 
-  def createJulianToGregorianMicrosContext(
-      timeZoneId: String): JulianToGregorianMicrosContext = {
-    RebaseDateTimeBridge.getJulianToGregorianMicros(timeZoneId).map { info =>
+  private def createMicrosContext(
+      timeZoneId: String,
+      toGregorian: Boolean): MicrosContext = {
+    val records = if (toGregorian) {
+      RebaseDateTimeBridge.getJulianToGregorianMicros(timeZoneId)
+    } else {
+      RebaseDateTimeBridge.getGregorianToJulianMicros(timeZoneId)
+    }
+    val rebaseValue: Long => Long = if (toGregorian) {
+      micros => RebaseDateTimeBridge.rebaseJulianToGregorianMicros(timeZoneId, micros)
+    } else {
+      micros => RebaseDateTimeBridge.rebaseGregorianToJulianMicros(timeZoneId, micros)
+    }
+    records.map { info =>
       require(info.switches.nonEmpty, s"empty Spark timestamp rebase map for '$timeZoneId'")
       require(info.switches.length == info.diffs.length,
         s"invalid Spark timestamp rebase map for '$timeZoneId'")
@@ -160,11 +179,11 @@ private[rapids] object GpuTimestampRebaseUtils {
           ColumnVector.durationMicroSecondsFromLongs(padded: _*)) { diffColumn =>
           new Table(diffColumn)
         }
-        new JulianToGregorianMicrosContext(
-          timeZoneId, Some(switchTable), Some(diffTable))
+        new MicrosContext(
+          rebaseValue, Some(switchTable), Some(diffTable))
       }
     }.getOrElse {
-      new JulianToGregorianMicrosContext(timeZoneId, None, None)
+      new MicrosContext(rebaseValue, None, None)
     }
   }
 }

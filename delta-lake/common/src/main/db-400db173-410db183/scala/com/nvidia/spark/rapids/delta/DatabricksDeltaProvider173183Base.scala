@@ -101,6 +101,7 @@ abstract class DatabricksDeltaProvider173183Base extends DatabricksDeltaProvider
   override def getExprs: Map[Class[_ <: Expression], ExprRule[_ <: Expression]] = {
     val rules: Seq[ExprRule[_ <: Expression]] = Seq(
       GpuCheckOverflowInTableWrite.exprRule,
+      GpuChecksumExpression.exprRule,
       GpuIncrementMetric.exprRule,
       GpuConditionalIncrementMetric.exprRule)
     super.getExprs ++ rules.map(r => (r.getClassFor.asSubclass(classOf[Expression]), r))
