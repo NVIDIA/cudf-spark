@@ -22,6 +22,7 @@ import java.net.URI
 import ai.rapids.cudf.{HostMemoryBuffer, Table}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.GpuMetric.{BUFFER_TIME, FILTER_TIME, HYBRID_SCAN_FOOTER_PARSE_TIME}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.io.async.{AsyncMetrics, AsyncRunner, DecayReleaseResult, MemoryBoundedAsyncRunner}
@@ -70,6 +71,18 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
   private val parquetOptions =
     HybridScanPipeline.parquetOptions(context.readDataSchema.fieldNames)
   private val pipeline = new HybridScanPipeline(context)
+  private val filterTime = context.execMetrics.getOrElse(FILTER_TIME, NoopMetric)
+  private val bufferTime = context.execMetrics.getOrElse(BUFFER_TIME, NoopMetric)
+
+  /** A pool thread's result, with its partial metric counts for the task thread to add. */
+  private trait HybridResult extends HostMemoryBuffersWithMetaDataBase {
+    var runnerCounts: Map[String, Long] = Map.empty
+
+    override def addRunnerMetrics(metrics: Map[String, GpuMetric]): Unit = {
+      super.addRunnerMetrics(metrics)
+      runnerCounts.foreach { case (name, count) => metrics.get(name).foreach(_ += count) }
+    }
+  }
 
   /**
    * A file's fetched column chunks and its footer, handed from the pool thread to the task thread,
@@ -86,7 +99,7 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
       chunkSizes: Array[Long],
       override val memBuffersAndSizes: Array[SingleHMBAndMeta],
       override val bytesRead: Long)
-    extends HostMemoryBuffersWithMetaDataBase {
+    extends HybridResult {
     /** The single spillable buffer holding every column chunk. */
     def chunkBuffer: SpillableHostBuffer = memBuffersAndSizes.head.hmbs.head
 
@@ -101,7 +114,7 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
   private case class EmptyHybridFileResult(
       override val partitionedFile: PartitionedFile,
       override val bytesRead: Long)
-    extends HostMemoryBuffersWithMetaDataBase {
+    extends HybridResult {
     override val memBuffersAndSizes: Array[SingleHMBAndMeta] = Array(SingleHMBAndMeta.empty())
   }
 
@@ -133,9 +146,11 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
     case _ => throw new RuntimeException("Wrong HostMemoryBuffersWithMetaData")
   }
 
-  private def hybridSplit(file: PartitionedFile): HybridScanSplit = {
+  private def hybridSplit(
+      file: PartitionedFile,
+      metrics: Map[String, GpuMetric]): HybridScanSplit = {
     val filePath = new Path(new URI(file.filePath.toString()))
-    HybridScanSplit(new HybridScanFileByteSource(fileIO, filePath, context.execMetrics),
+    HybridScanSplit(new HybridScanFileByteSource(fileIO, filePath, metrics),
       file.start, file.length)
   }
 
@@ -183,11 +198,18 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
       val startingBytesRead = fileSystemBytesRead()
       val filterStartTime = System.nanoTime()
       val footer = readFooter(file, conf)
-      val filterTime = System.nanoTime() - filterStartTime
+      val footerTime = System.nanoTime() - filterStartTime
       val bufferStartTime = System.nanoTime()
-      val result = withResource(footer) { _ =>
+      // Counted locally and added on the task thread, since the pool threads reading the task's
+      // other files would race on the scan's metrics.
+      val runnerMetrics: Map[String, GpuMetric] =
+        (context.execMetrics.keySet + FILTER_TIME).map(_ -> new LocalGpuMetric).toMap
+      // The footer parse and row group selection are filter work although they run inside the
+      // fetch, so the base reader splits the task's wait the way it does for parquet-mr.
+      val selectTime = runnerMetrics(FILTER_TIME)
+      val result: HybridResult = withResource(footer) { _ =>
         // A closed reader discards this result, so neither fetch for it nor hand it buffers.
-        val planned = if (isDone) None else planAndFetchForPool(footer)
+        val planned = if (isDone) None else planAndFetchForPool(footer, runnerMetrics)
         val bytesRead = fileSystemBytesRead() - startingBytesRead
         planned match {
           case None => EmptyHybridFileResult(file, bytesRead)
@@ -201,7 +223,13 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
             }
         }
       }
-      result.setExecutionTime(filterTime, System.nanoTime() - bufferStartTime)
+      result.setExecutionTime(footerTime + selectTime.value,
+        System.nanoTime() - bufferStartTime - selectTime.value)
+      // The base reader times filter and buffer from the task's wait instead.
+      result.runnerCounts = runnerMetrics.collect {
+        case (name, metric) if name != FILTER_TIME && name != BUFFER_TIME && metric.value != 0 =>
+          name -> metric.value
+      }
       result
     }
 
@@ -209,13 +237,21 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
      * Prune the split's row groups on statistics with the pushed filter and fetch the surviving
      * column chunks. Returns them with the surviving row count, taken while the reader is open,
      * or None when nothing survived. The pushed filter and the dictionary compare may still drop
-     * rows at decode, so the count is an upper bound.
+     * rows at decode, so the count is an upper bound. Everything is counted into `metrics`, the
+     * footer parse and row group selection both as `FILTER_TIME`.
      */
     private def planAndFetchForPool(
-        footer: HostMemoryBuffer): Option[(FetchedColumnChunks, Long)] = {
-      withResource(HybridScanPipeline.openReader(footer, parquetOptions)) { reader =>
+        footer: HostMemoryBuffer,
+        metrics: Map[String, GpuMetric]): Option[(FetchedColumnChunks, Long)] = {
+      val filePipeline = new HybridScanPipeline(context.copy(execMetrics = metrics))
+      val parsed = metrics(FILTER_TIME).ns {
+        HybridScanPipeline.openReader(footer, parquetOptions,
+          metrics.getOrElse(HYBRID_SCAN_FOOTER_PARSE_TIME, NoopMetric))
+      }
+      withResource(parsed) { reader =>
         withResource(context.scanFilters.ast.map(HybridScanPipeline.compileFilter)) { ast =>
-          pipeline.planAndFetch(hybridSplit(file), reader, ast, allowDictionaryPruning = false)
+          filePipeline.planAndFetch(hybridSplit(file, metrics), reader, ast,
+            allowDictionaryPruning = false)
             .map { fetched =>
               closeOnExcept(fetched)(f => (f, reader.totalRowsInRowGroups(f.rowGroups)))
             }
@@ -258,10 +294,13 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
     val spillBuffer = result.chunkBuffer
     // While waiting for the task, the footer and chunks may have been moved to disk to free host
     // memory. Reading them back allocates host memory again, which can fail while it is still
-    // short, so retry: a failed attempt frees what it read back and waits for memory.
-    val (footer, buffer) = withRetryNoSplit {
-      closeOnExcept(result.footer.getDataHostBuffer()) { f =>
-        (f, spillBuffer.getDataHostBuffer())
+    // short, so retry: a failed attempt frees what it read back and waits for memory. Timed as
+    // buffer time, which the base reader's wait did not cover.
+    val (footer, buffer) = bufferTime.ns {
+      withRetryNoSplit {
+        closeOnExcept(result.footer.getDataHostBuffer()) { f =>
+          (f, spillBuffer.getDataHostBuffer())
+        }
       }
     }
     withResource(footer) { _ =>
@@ -290,11 +329,16 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
       context.scanFilters.ast.map(HybridScanPipeline.compileFilter)
     }
     withResource(ast) { _ =>
+      // A second parse of this footer, added to the pool thread's parse time.
       val parsed = closeOnExcept(fetched)(_ => HybridScanPipeline.openReader(footer,
-        parquetOptions))
+        parquetOptions,
+        context.execMetrics.getOrElse(HYBRID_SCAN_FOOTER_PARSE_TIME, NoopMetric)))
       withResource(parsed) { reader =>
-        val table = pipeline.pruneFetchedWithDictionaries(reader, ast, fetched)
-          .flatMap(pipeline.materializeFetched(reader, ast, _))
+        // After the wait the base reader times, so this is filter time it never counted.
+        val pruned = filterTime.ns {
+          pipeline.pruneFetchedWithDictionaries(reader, ast, fetched)
+        }
+        val table = pruned.flatMap(pipeline.materializeFetched(reader, ast, _))
         if (table.isEmpty) {
           // Nothing goes downstream, so don't hold the GPU while the next file is fetched.
           GpuSemaphore.releaseIfNecessary(TaskContext.get())
