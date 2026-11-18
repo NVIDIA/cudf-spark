@@ -1467,8 +1467,8 @@ object ArrayAggregateDecomposer {
       accId: ExprId,
       op: AggOp): Option[ExtractedG] = {
     op.matchBinary(unwrapDecimalPatternWrappers(e)).flatMap { case (l, r) =>
-      if (isAccRef(l, accId) && !containsAccRef(r, accId)) Some(ExtractedG(r, false))
-      else if (isAccRef(r, accId) && !containsAccRef(l, accId)) Some(ExtractedG(l, false))
+      if (accRef(l, accId).isDefined && !containsAccRef(r, accId)) Some(ExtractedG(r, false))
+      else if (accRef(r, accId).isDefined && !containsAccRef(l, accId)) Some(ExtractedG(l, false))
       else None
     }
   }
@@ -1484,7 +1484,7 @@ object ArrayAggregateDecomposer {
       accId: ExprId,
       op: AggOp,
       accType: DataType): Option[ExtractedG] = {
-    if (isAccRef(branch, accId)) {
+    if (accRef(branch, accId).isDefined) {
       Some(ExtractedG(op.identityLiteral(accType), true))
     } else {
       extractG(branch, accId, op, accType)
@@ -1528,13 +1528,24 @@ object ArrayAggregateDecomposer {
     case _ => false
   }
 
-  private def isAccRef(e: Expression, id: ExprId): Boolean = e match {
-    case v: NamedLambdaVariable => v.exprId == id
-    case c: Cast => isAccRef(c.child, id)
+  private def accRef(e: Expression, id: ExprId): Option[NamedLambdaVariable] = e match {
+    case v: NamedLambdaVariable if v.exprId == id => Some(v)
+    case c: Cast => accRef(c.child, id).filter(v => preservesAccValue(v.dataType, c.dataType))
     case other if isDecimalPatternWrapper(other) && other.children.length == 1 =>
-      isAccRef(other.children.head, id)
-    case _ => false
+      accRef(other.children.head, id)
+    case _ => None
   }
+
+  // Every intermediate type must represent all values of the original accumulator. For example,
+  // int -> long -> int preserves the accumulator, while int -> float -> int can round it.
+  private def preservesAccValue(accType: DataType, target: DataType): Boolean =
+    (accType, target) match {
+      case (ByteType, ShortType | IntegerType | LongType | FloatType | DoubleType) => true
+      case (ShortType, IntegerType | LongType | FloatType | DoubleType) => true
+      case (IntegerType, LongType | DoubleType) => true
+      case (FloatType, DoubleType) => true
+      case _ => accType == target
+    }
 
   private def unwrapDecimalPatternWrappers(e: Expression): Expression = {
     if (isDecimalPatternWrapper(e) && e.children.length == 1) {

@@ -17,7 +17,8 @@ import struct
 import pytest
 
 from asserts import (assert_cpu_and_gpu_are_equal_collect_with_capture,
-                     assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect)
+                     assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error,
+                     assert_gpu_fallback_collect)
 from data_gen import *
 from marks import allow_non_gpu, allow_non_gpu_conditional, disable_ansi_mode, ignore_order
 from spark_session import is_before_spark_340, is_databricks_runtime
@@ -496,6 +497,27 @@ def test_array_aggregate_long_overflow_wraps():
         return unary_op_df(spark, ArrayGen(big, min_length=5, max_length=15)).selectExpr(
             'aggregate(a, 0L, (acc, x) -> acc + x) as wrapped_sum')
     assert_gpu_and_cpu_are_equal_collect(do_it)
+
+
+@pytest.mark.parametrize('data, elem_type, zero, merge_sql', [
+    ([127, 1, 0], 'int', '0', 'cast(acc as tinyint) + x'),
+    ([300, 5], 'bigint', '0L', 'greatest(cast(acc as tinyint), x)'),
+], ids=['sum', 'greatest'])
+@disable_ansi_mode
+@allow_non_gpu('ArrayAggregate', 'LambdaFunction', 'NamedLambdaVariable', 'Add', 'Greatest', 'Cast')
+def test_array_aggregate_narrow_acc_cast_fallback(data, elem_type, zero, merge_sql):
+    assert_gpu_fallback_collect(
+        lambda spark: spark.createDataFrame([(data,)], f'a array<{elem_type}>').selectExpr(
+            f'aggregate(a, {zero}, (acc, x) -> {merge_sql})'),
+        'ArrayAggregate')
+
+
+@allow_non_gpu('ArrayAggregate', 'LambdaFunction', 'NamedLambdaVariable', 'Greatest', 'Cast')
+def test_array_aggregate_narrow_acc_cast_ansi_overflow():
+    assert_gpu_and_cpu_error(
+        lambda spark: spark.createDataFrame([([300, 5],)], 'a array<bigint>').selectExpr(
+            'aggregate(a, 0L, (acc, x) -> greatest(cast(acc as tinyint), x))').collect(),
+        conf=ansi_enabled_conf, error_message='CAST_OVERFLOW')
 
 
 @disable_ansi_mode

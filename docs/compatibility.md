@@ -720,8 +720,10 @@ each:
 The decomposer also accepts these structural variations:
 
 - **Commuted operands**: `op(g, acc)` is treated the same as `op(acc, g)`.
-- **`Cast` around the acc side**: `Add(Cast(acc, t), g)` and chained casts on the acc side are
-  unwrapped (g must still not reference acc).
+- **Casts around `acc`** can be unwrapped when every step preserves all values of its original type.
+  The decomposer accepts same-type casts and exact conversions between primitive numeric types,
+  including `INT → BIGINT → INT`. A chain such as `INT → TINYINT → INT` or `INT → FLOAT → INT`
+  falls back to CPU so Spark applies the cast at each merge step.
 - **`If` branches**: `If(cond, op(acc, t_g), op(acc, f_g))` is lifted to
   `op(acc, If(cond, t_g, f_g))`. A bare-acc branch (e.g. `If(cond, acc + 1, acc)`) is treated as
   `op(acc, identity)` and lifted to `op(acc, If(cond, t_g, identity))`. `cond` must not
