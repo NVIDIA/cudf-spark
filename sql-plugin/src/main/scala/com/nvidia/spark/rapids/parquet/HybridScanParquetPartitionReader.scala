@@ -27,6 +27,7 @@ import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitTargetSizeInHalfGpu, withRetry, withRetryNoSplit}
 import com.nvidia.spark.rapids.jni.{GpuSplitAndRetryOOM, PackedHostToDeviceCopy}
 import com.nvidia.spark.rapids.shims.SparkShimImpl
+import com.nvidia.spark.rapids.shims.parquet.ParquetSchemaClipShims
 import org.apache.hadoop.conf.Configuration
 
 import org.apache.spark.TaskContext
@@ -95,6 +96,11 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
 
   private def totalBytes(ranges: Array[ByteRange]): Long = ranges.map(_.size()).sum
 
+  private def addToMetric(name: String, value: Long): Unit =
+    execMetrics.get(name).foreach(_ += value)
+
+  private def metric(name: String): GpuMetric = execMetrics.getOrElse(name, NoopMetric)
+
   /**
    * The plan phase: prune the split's row groups with the pushed filter, and if anything survives
    * fetch its column chunks into host memory, off the GPU semaphore so the read does not hold the
@@ -110,15 +116,22 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       reader: HybridScanReader,
       ast: Option[CompiledExpression],
       allowDictionaryPruning: Boolean): Option[FetchedColumnChunks] = {
-    val rowGroups = selectRowGroups(split, reader, ast, allowDictionaryPruning)
+    addToMetric(HYBRID_SCAN_SPLITS, 1)
+    val rowGroups = metric(FILTER_TIME).ns {
+      selectRowGroups(split, reader, ast, allowDictionaryPruning)
+    }
     if (rowGroups.isEmpty || reader.totalRowsInRowGroups(rowGroups) == 0) {
       None
     } else {
+      // A MULTITHREADED pool thread can't take the GPU semaphore that dictionary pruning needs, so
+      // it fetches before the task prunes and this can count more row groups than PERFILE does.
+      addToMetric(ROW_GROUPS_FETCHED, rowGroups.length)
       setDecodeFilter(reader, ast)
       val ranges = NvtxRegistry.HYBRID_SCAN_GET_BYTE_RANGES {
         reader.allColumnChunksByteRanges(rowGroups)
       }
-      val buffer = NvtxRegistry.HYBRID_SCAN_READ_DATA {
+      addToMetric(HYBRID_SCAN_BYTES_REQUESTED, totalBytes(ranges))
+      val buffer = NvtxIdWithMetrics(NvtxRegistry.HYBRID_SCAN_READ_DATA, metric(BUFFER_TIME)) {
         split.source.fetchToBuffer(ranges)
       }
       closeOnExcept(buffer) { _ =>
@@ -156,19 +169,19 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       allowDictionaryPruning: Boolean): Array[Int] = {
     ast.foreach(reader.setFilter)
     val inSplit = rowGroupsInScope(split, reader, reader.allRowGroups())
+    addToMetric(ROW_GROUPS_IN_INPUT, inSplit.length)
     if (inSplit.isEmpty || ast.isEmpty) {
       inSplit
     } else {
       // Runs on the GPU without the semaphore, as it exists to bound large allocations. This
-      // only allocates a few bytes per row group and frees them before returning. 
+      // only allocates a few bytes per row group and frees them before returning.
       // The retry covers an OOM when other tasks have filled the GPU.
       val afterStats = NvtxRegistry.HYBRID_SCAN_FILTER_STATS {
         withRetryNoSplit[Array[Int]] {
           reader.filterRowGroupsWithStats(inSplit)
         }
       }
-      logDebug(s"HybridScan statistics pruning: ${inSplit.length} -> ${afterStats.length} " +
-        "row groups")
+      addToMetric(ROW_GROUPS_PRUNED_BY_STATS, inSplit.length - afterStats.length)
       if (afterStats.isEmpty) {
         afterStats
       } else if (!allowDictionaryPruning ||
@@ -179,8 +192,10 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       } else {
         NvtxRegistry.HYBRID_SCAN_FILTER_DICT {
           // Released after the compare: the column chunk fetch to host memory comes next.
-          filterRowGroupsWithDictionaries(reader, afterStats, split.source.fetch(_),
-            releaseSemaphore = true)
+          filterRowGroupsWithDictionaries(reader, afterStats, { dictRanges =>
+            addToMetric(HYBRID_SCAN_BYTES_REQUESTED, totalBytes(dictRanges))
+            split.source.fetch(dictRanges)
+          }, releaseSemaphore = true)
         }
       }
     }
@@ -234,8 +249,7 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       val afterDict = withResource(getDictPages(dictRanges)) { hostPages =>
         compareDictionaryPages(reader, rowGroups, hostPages, releaseSemaphore)
       }
-      logDebug(s"HybridScan dictionary pruning: ${rowGroups.length} -> ${afterDict.length} " +
-        "row groups")
+      addToMetric(ROW_GROUPS_PRUNED_BY_DICT, rowGroups.length - afterDict.length)
       afterDict
     }
   }
@@ -369,9 +383,10 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       // Before the output filter, which references columns by index.
       checkDecodedSchema(t)
       outputAst.flatMap { compiled =>
-        NvtxRegistry.HYBRID_SCAN_OUTPUT_FILTER {
-          // The decoded table outlives each attempt, so a retry filters it again.
-          withRetryNoSplit[Option[Table]] {
+        // The decoded table outlives each attempt, so a retry filters it again.
+        withRetryNoSplit[Option[Table]] {
+          NvtxIdWithMetrics(NvtxRegistry.HYBRID_SCAN_OUTPUT_FILTER,
+              metric(HYBRID_SCAN_OUTPUT_FILTER_TIME)) {
             applyOutputFilter(t, compiled)
           }
         }
@@ -406,8 +421,9 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       reader: HybridScanReader,
       fetched: FetchedColumnChunks): Table = {
     GpuSemaphore.acquireIfNecessary(TaskContext.get())
-    NvtxRegistry.HYBRID_SCAN_MATERIALIZE {
-      withStagedOnDevice(fetched.hostChunks) { chunks =>
+    // Timed inside the staging, so the decode time leaves out the copies and retry waits.
+    withStagedOnDevice(fetched.hostChunks) { chunks =>
+      NvtxIdWithMetrics(NvtxRegistry.HYBRID_SCAN_MATERIALIZE, metric(GPU_DECODE_TIME)) {
         reader.materializeAllColumns(fetched.rowGroups, chunks)
       }
     }
@@ -547,8 +563,9 @@ object HybridScanPipeline extends Logging {
   /** Parse the footer into a reader. The caller owns and closes both the reader and the footer. */
   private[parquet] def openReader(
       footer: HostMemoryBuffer,
-      parquetOptions: ParquetOptions): HybridScanReader = {
-    NvtxRegistry.HYBRID_SCAN_PARSE_FOOTER {
+      parquetOptions: ParquetOptions,
+      parseTime: GpuMetric): HybridScanReader = {
+    NvtxIdWithMetrics(NvtxRegistry.HYBRID_SCAN_PARSE_FOOTER, parseTime) {
       new HybridScanReader(footer, parquetOptions)
     }
   }
@@ -708,7 +725,8 @@ object HybridScanPipeline extends Logging {
         new HybridScanFilters(readDataSchema, sqlConf.caseSensitiveAnalysis, pushedFilters))
       val eligible = isEligible(hybridScanEnabled = true, failOnFallback, readDataSchema,
         config.filters, useChunkedReader,
-        compressCfg.decompressSnappyCpu || compressCfg.decompressZstdCpu, useFieldId,
+        compressCfg.decompressSnappyCpu || compressCfg.decompressZstdCpu,
+        useFieldId && ParquetSchemaClipShims.hasFieldIds(readDataSchema),
         sqlConf.ignoreCorruptFiles, GpuParquetFileFilterHandler.isDecryptionConfigured(hadoopConf),
         DateTimeRebaseMode.fromName(SparkShimImpl.parquetRebaseRead(sqlConf)),
         DateTimeRebaseMode.fromName(SparkShimImpl.int96ParquetRebaseRead(sqlConf)))
@@ -740,7 +758,8 @@ object HybridScanPipeline extends Logging {
    * @param scanFilters       the data filters Spark pushed to the scan
    * @param useChunkedReader  whether the read may be split into several batches
    * @param decompressAnyCpu  whether any codec is set to decompress on the CPU
-   * @param useFieldId        whether columns are matched by Parquet field ID
+   * @param useFieldId        whether columns are matched by Parquet field ID: field ID reads are
+   *                          enabled and the read schema carries field IDs
    * @param ignoreCorruptFiles whether a file that fails to read is skipped rather than failing
    *                          the query
    * @param decryptionConfigured whether the Hadoop configuration sets up Parquet decryption
@@ -867,17 +886,22 @@ private[parquet] class HybridScanPerFileParquetPartitionReader(
   private val pipeline = new HybridScanPipeline(context)
   private var batchIter: GpuColumnarBatchIterator = _
   private var footerClosed = false
+  // Set before the read starts, so a read that threw or a closed reader never runs it again
+  // against the freed footer.
+  private var isDone = false
 
   override def next(): Boolean = {
-    if (batchIter == null) {
+    if (batchIter == null && !isDone) {
+      isDone = true
       batchIter = readBatch()
     }
-    batchIter.hasNext
+    batchIter != null && batchIter.hasNext
   }
 
   override def get(): ColumnarBatch = batchIter.next()
 
   override def close(): Unit = {
+    isDone = true
     if (batchIter != null) {
       batchIter.close()
       batchIter = null
@@ -909,7 +933,8 @@ private[parquet] class HybridScanPerFileParquetPartitionReader(
   private def readTable(): Option[Table] = {
     NvtxRegistry.PARQUET_READ_BATCH {
       withResource(context.scanFilters.ast.map(HybridScanPipeline.compileFilter)) { ast =>
-        withResource(openReader(footer, parquetOptions)) { reader =>
+        withResource(openReader(footer, parquetOptions,
+            context.execMetrics.getOrElse(HYBRID_SCAN_FOOTER_PARSE_TIME, NoopMetric))) { reader =>
           // The footer bytes are only read while the reader is being constructed.
           closeFooter()
           pipeline.planAndFetch(split, reader, ast, allowDictionaryPruning = true)

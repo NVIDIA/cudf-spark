@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -115,6 +115,8 @@ case class GpuAlias(child: Expression, name: String)(
 
   override def doColumnar(input: GpuColumnVector): ColumnVector =
     throw new IllegalStateException("GpuAlias should never have doColumnar called")
+
+  override def selfConvertsToAst: Boolean = child.isInstanceOf[GpuExpression]
 
   override def convertToAst(numLeftTableColumns: Int): ast.AstExpression = child match {
     case e: GpuExpression => e.convertToAst(numLeftTableColumns)
