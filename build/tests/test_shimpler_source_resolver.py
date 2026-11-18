@@ -251,6 +251,58 @@ class SourceResolverTest(unittest.TestCase):
         for target, expected in expected_paths.items():
             self.assertEqual(set(selections[target]) & baselined_paths, expected, target)
 
+    def test_spark_421_maintenance_fixes_carry_to_future_lines(self):
+        root_graph = load_source_graph(str(ROOT / 'pom.xml'))
+        graph = dict(load_source_graph(str(ROOT / 'scala2.13' / 'pom.xml')))
+        graph.update({'430': '421', '440': '430'})
+        targets = set(root_graph) | set(graph)
+        cases = (
+            ('sql-plugin', 'src/main/scala/com/nvidia/spark/rapids/shims/'
+             'ArraySetOpsShims.scala', 'spark405'),
+            ('sql-plugin', 'src/main/scala/com/nvidia/spark/rapids/shims/'
+             'BatchScanCanonicalizeShims.scala', 'spark421'),
+            ('sql-plugin', 'src/main/scala/com/nvidia/spark/rapids/shims/'
+             'GetSequenceSize.scala', 'spark405'),
+            ('sql-plugin', 'src/main/scala/com/nvidia/spark/rapids/shims/'
+             'GpuFileWriteJobShim.scala', 'spark405'),
+            ('sql-plugin', 'src/main/scala/com/nvidia/spark/rapids/shims/'
+             'OrcSchemaTypeShims.scala', 'spark405'),
+            ('sql-plugin', 'src/main/scala/com/nvidia/spark/rapids/shims/parquet/'
+             'ParquetFieldRequestShims.scala', 'spark405'),
+            ('sql-plugin', 'src/main/scala/org/apache/spark/sql/errors/'
+             'ParquetFieldRequestShimsImpl.scala', 'spark405'),
+            ('sql-plugin', 'src/main/scala/org/apache/spark/sql/rapids/shims/'
+             'PartitioningUtilsShims.scala', 'spark421'),
+            ('sql-plugin', 'src/main/scala/org/apache/spark/sql/rapids/shims/'
+             'QueryExecutionShims.scala', 'spark405'),
+            ('sql-plugin', 'src/test/scala/com/nvidia/spark/rapids/'
+             'OrcSchemaTypeShims405Suite.scala', 'spark405'),
+            ('sql-plugin', 'src/test/scala/com/nvidia/spark/rapids/parquet/'
+             'ParquetSchemaUtils405Suite.scala', 'spark405'),
+            ('tests', 'src/test/scala/com/nvidia/spark/rapids/'
+             'GetSequenceSizeSuite.scala', 'spark405'),
+            ('tests', 'src/test/scala/com/nvidia/spark/rapids/'
+             'GpuFileFormatWriter405Suite.scala', 'spark405'),
+            ('tests', 'src/test/scala/com/nvidia/spark/rapids/shims/'
+             'GpuBatchScanExecCanonicalizeSuite.scala', 'spark421'),
+        )
+        selections = {}
+        for module in set(case[0] for case in cases):
+            variants, _ = scan_module_sources(str(ROOT / module), targets,
+                                              EXTERNAL_EXACT_TARGETS)
+            selections[module] = {
+                target: resolve_sources(graph, variants, target)
+                for target in ('430', '440')
+            }
+
+        for module, logical, owner in cases:
+            for target in ('430', '440'):
+                with self.subTest(module=module, logical=logical, target=target):
+                    selected = selections[module][target][logical]
+                    self.assertIn('/src/%s/%s/' % (
+                        'test' if module == 'tests' else logical.split('/')[1], owner),
+                        selected.physical_path)
+
     def test_other_changed_selectors_keep_their_targets(self):
         graphs = (load_source_graph(str(ROOT / 'pom.xml')),
                   load_source_graph(str(ROOT / 'scala2.13' / 'pom.xml')))
@@ -263,6 +315,10 @@ class SourceResolverTest(unittest.TestCase):
             ('tests', 'src/test/scala/com/nvidia/spark/rapids/WindowGroupLimitExecSuite.scala',
              'spark350', ('400', '401', '402', '403', '404'),
              ('400', '401', '402', '403', '404', '411')),
+            ('tests', 'src/test/scala/com/nvidia/spark/rapids/GetSequenceSizeSuite.scala',
+             'spark405', ('421', '500'), ('420', '421', '500')),
+            ('tests', 'src/test/scala/com/nvidia/spark/rapids/GpuFileFormatWriter405Suite.scala',
+             'spark405', ('421', '500'), ('420', '421', '500')),
             ('tests', 'src/test/scala/com/nvidia/spark/rapids/shims/'
              'Spark40GpuDataSourceCustomMetricsSuite.scala', 'spark350db143',
              ('350db143', '400', '400db173', '401', '402', '403', '404',
@@ -286,6 +342,34 @@ class SourceResolverTest(unittest.TestCase):
                         self.assertNotIn('/src/%s/%s/' % (
                             'test' if module == 'tests' else 'main', owner),
                             selected.physical_path)
+
+    def test_iceberg_suites_stop_at_stub_profiles(self):
+        graphs = (load_source_graph(str(ROOT / 'pom.xml')),
+                  load_source_graph(str(ROOT / 'scala2.13' / 'pom.xml')))
+        variants, _ = scan_module_sources(str(ROOT / 'tests'),
+                                          set().union(*graphs), EXTERNAL_EXACT_TARGETS)
+        suite_names = {
+            'GpuIcebergVariantPostProcessorSuite.scala',
+            'GpuIcebergVariantSchemaSuite.scala',
+            'GpuMultiThreadIcebergParquetReaderSuite.scala',
+            'GpuPostProcessorSuite.scala',
+            'IcebergDeletionVectorSuite.scala',
+            'IcebergS3InputFileSuite.scala',
+        }
+        expected = {
+            '411': suite_names,
+            '412': suite_names,
+            '413': suite_names,
+            '414': {'IcebergDeletionVectorSuite.scala'},
+            '420': set(),
+            '500': set(),
+        }
+        for target, expected_suites in expected.items():
+            graph = next(graph for graph in graphs if target in graph)
+            selected = resolve_sources(graph, variants, target)
+            found = {Path(logical).name for logical in selected
+                     if Path(logical).name in suite_names}
+            self.assertEqual(found, expected_suites, target)
 
     def test_interval_and_writer_suites_cover_later_spark4(self):
         graphs = (load_source_graph(str(ROOT / 'pom.xml')),
