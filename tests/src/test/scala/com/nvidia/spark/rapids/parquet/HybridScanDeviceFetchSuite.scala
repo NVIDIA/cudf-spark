@@ -121,8 +121,11 @@ class HybridScanDeviceFetchSuite extends RmmSparkRetrySuiteBase {
     val ranges = Array(new ByteRange(FILE_SIZE - 10, 10), new ByteRange(100, 50),
       new ByteRange(GDS_ALIGNMENT + 10, 10))
     val reader = new InMemoryDeviceReader(FILE_SIZE)
-    assertDeviceFetchHoldsRanges(reader, newMetrics(), ranges)
+    val metrics = newMetrics()
+    assertDeviceFetchHoldsRanges(reader, metrics, ranges)
     assert(reader.reads.map { case (offset, length, _) => offset + length }.max == FILE_SIZE)
+    assert(metrics(GpuMetric.HYBRID_SCAN_DEVICE_BYTES_READ).value ==
+      reader.reads.map { case (_, length, _) => length }.sum)
   }
 
   test("an empty device fetch reads nothing") {
