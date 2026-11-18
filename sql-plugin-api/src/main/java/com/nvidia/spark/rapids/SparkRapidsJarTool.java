@@ -65,6 +65,10 @@ public final class SparkRapidsJarTool {
       "ai/rapids/cudf/NativeDepUtil.class";
   private static final Pattern SPARK_SHIM = Pattern.compile("spark(\\d)(\\d)(\\d)(.*)");
   private static final int COPY_BUFFER_SIZE = 128 * 1024;
+  static final String ZSTD_INPUT_STREAM = "com.github.luben.zstd.ZstdInputStreamNoFinalizer";
+  private static final String EXTRACT_COMMAND =
+      "java -cp \"<dist.jar>" + File.pathSeparator + "<zstd-jni.jar>\" " +
+          "com.nvidia.spark.rapids.SparkRapidsJarTool extract <library-name> <destination>";
 
   private SparkRapidsJarTool() {
   }
@@ -100,8 +104,7 @@ public final class SparkRapidsJarTool {
       return 0;
     }
     if (args.length == 3 && "extract".equals(args[0])) {
-      extractNativeDependency(args);
-      return 0;
+      return extractNativeDependency(args, err);
     }
 
     err.println("Invalid arguments");
@@ -109,13 +112,22 @@ public final class SparkRapidsJarTool {
     return 2;
   }
 
-  private static void extractNativeDependency(String[] args) throws IOException {
+  private static int extractNativeDependency(String[] args, PrintStream err) throws IOException {
     String os = System.getProperty("os.name");
     String hostArchitecture = System.getProperty("os.arch");
     String packagedArchitecture;
     try (JarFile jar = new JarFile(getJarPath())) {
       packagedArchitecture = selectNativeArchitecture(
           nativeLibrariesByArchitecture(jar, os), args[1], hostArchitecture);
+      String manifest = packagedArchitecture + "/" + os + "/" +
+          System.mapLibraryName(args[1]) + CHUNK_MANIFEST_SUFFIX;
+      if (requiresZstd(jar, manifest)) {
+        String problem = initializeZstd(SparkRapidsJarTool.class.getClassLoader());
+        if (problem != null) {
+          err.println(problem);
+          return 1;
+        }
+      }
     }
     if (hostArchitecture.equals(packagedArchitecture)) {
       NativeDepUtil.main(args);
@@ -126,6 +138,37 @@ public final class SparkRapidsJarTool {
       } finally {
         System.setProperty("os.arch", hostArchitecture);
       }
+    }
+    return 0;
+  }
+
+  static boolean requiresZstd(JarFile jar, String manifest) throws IOException {
+    JarEntry entry = jar.getJarEntry(manifest);
+    if (entry == null) {
+      return false;
+    }
+    Properties properties = new Properties();
+    try (InputStream in = jar.getInputStream(entry)) {
+      properties.load(in);
+    }
+    return "zstd".equals(properties.getProperty("chunk.compression", "none").trim());
+  }
+
+  /**
+   * Load zstd-jni's native library for the host before extraction may override os.arch,
+   * which zstd-jni uses to select that library.
+   *
+   * @return null when zstd-jni is ready, otherwise a message explaining why it is not
+   */
+  static String initializeZstd(ClassLoader loader) {
+    try {
+      Class.forName(ZSTD_INPUT_STREAM, true, loader);
+      return null;
+    } catch (ClassNotFoundException e) {
+      return "Zstd native extraction needs zstd-jni on the classpath. Run:" +
+          System.lineSeparator() + "  " + EXTRACT_COMMAND;
+    } catch (LinkageError e) {
+      return "zstd-jni could not load its native library: " + e;
     }
   }
 
@@ -410,7 +453,7 @@ public final class SparkRapidsJarTool {
     }
     if (extractionAvailable) {
       out.println("Extract one with:");
-      out.println("  java -jar <dist.jar> extract <library-name> <destination>");
+      out.println("  " + EXTRACT_COMMAND);
     } else {
       out.println("Native extraction unavailable: missing " + NATIVE_DEP_UTIL);
     }
@@ -450,7 +493,7 @@ public final class SparkRapidsJarTool {
     out.println("  java -jar <dist.jar> [info]");
     out.println("  java -jar <dist.jar> checksum");
     if (extractionAvailable) {
-      out.println("  java -jar <dist.jar> extract <library-name> <destination>");
+      out.println("  " + EXTRACT_COMMAND);
     }
     out.println("  java -jar <dist.jar> help");
   }

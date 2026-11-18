@@ -741,6 +741,12 @@ case class GpuLiteral (value: Any, dataType: DataType) extends GpuLeafExpression
     GpuExpressionsUtils.resolveColumnVector(columnarEvalAny(batch), batch.numRows())
   }
 
+  override def selfConvertsToAst: Boolean = dataType match {
+    case BooleanType | ByteType | ShortType | IntegerType | LongType | FloatType | DoubleType |
+         StringType | TimestampType | DateType => true
+    case _ => false
+  }
+
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     dataType match {
       case BooleanType => ast.Literal.ofBoolean(value.asInstanceOf[java.lang.Boolean])

@@ -134,6 +134,8 @@ case class GpuIsNull(child: Expression) extends GpuUnaryExpression with Predicat
   override def doColumnar(input: GpuColumnVector): ColumnVector =
     input.getBase.isNull
 
+  override def selfConvertsToAst: Boolean = true
+
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     new ast.UnaryOperation(ast.UnaryOperator.IS_NULL,
       child.asInstanceOf[GpuExpression].convertToAst(numFirstTableColumns))
@@ -147,6 +149,8 @@ case class GpuIsNotNull(child: Expression) extends GpuUnaryExpression with Predi
 
   override def doColumnar(input: GpuColumnVector): ColumnVector =
     input.getBase.isNotNull
+
+  override def selfConvertsToAst: Boolean = true
 
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     new ast.UnaryOperation(ast.UnaryOperator.NOT,
