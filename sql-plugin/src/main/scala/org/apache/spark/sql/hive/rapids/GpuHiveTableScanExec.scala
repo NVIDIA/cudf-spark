@@ -388,9 +388,11 @@ case class GpuHiveTableScanExec(requestedAttributes: Seq[Attribute],
   override protected def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
     val numOutputRows = gpuLongMetric(NUM_OUTPUT_ROWS)
     val scanTime = gpuLongMetric(SCAN_TIME)
+    // `inputRDD` sets `plannedSplits`, so it is built before the registration reads it.
+    val rdd = inputRDD
     // Per execution: a re-run plan reuses `inputRDD`.
     ScanSplitHeuristic.registerFileScan(historyKey, plannedSplits, splitBytes, sparkContext)
-    inputRDD.mapPartitionsInternal { batches =>
+    rdd.mapPartitionsInternal { batches =>
       new Iterator[ColumnarBatch] {
 
         override def hasNext: Boolean = {

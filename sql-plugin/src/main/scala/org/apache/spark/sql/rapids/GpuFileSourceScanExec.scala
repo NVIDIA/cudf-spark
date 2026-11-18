@@ -489,9 +489,11 @@ case class GpuFileSourceScanExec(
     val scanTime = gpuLongMetric(SCAN_TIME)
     val sliceForInputFileName = queryUsesInputFileName
     val maxStringBytes = rapidsConf.inputFileNameMaxStringBytes
+    // `inputRDD` sets `plannedSplits`, so it is built before the registration reads it.
+    val rdd = inputRDD.asInstanceOf[RDD[ColumnarBatch]]
     // Per execution: a re-run plan reuses `inputRDD`.
     ScanSplitHeuristic.registerFileScan(historyKey, plannedSplits, splitBytes, sparkContext)
-    inputRDD.asInstanceOf[RDD[ColumnarBatch]].mapPartitionsInternal { rawBatches =>
+    rdd.mapPartitionsInternal { rawBatches =>
       // input_file_name() builds numRows * pathBytes of string data, which cudf caps at 2 GiB,
       // so oversized batches are sliced before the projection sees them.
       val batches = if (sliceForInputFileName) {
