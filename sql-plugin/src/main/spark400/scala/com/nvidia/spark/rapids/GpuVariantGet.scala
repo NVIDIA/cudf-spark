@@ -22,8 +22,8 @@ package com.nvidia.spark.rapids
 
 import scala.util.Try
 
-import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Scalar, VariantOperationResult,
-  VariantOperationStatus, VariantUtils}
+import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Scalar, VariantOperationStatus,
+  VariantUtils}
 import com.nvidia.spark.Retryable
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
@@ -110,9 +110,13 @@ case class GpuVariantGet(
   }
 
   override def doColumnar(input: GpuColumnVector): ColumnVector = {
-    GpuVariantExtraction.withRawExtraction(input.getBase, path) { extraction =>
-      GpuVariantGet.decodeVariantField(extraction, dataType, input.getBase, path) {
-        GpuVariantGet.evaluateOnCpu(input, fallbackBridge)
+    if (!GpuVariantExtraction.supportsLayout(input.getBase)) {
+      GpuVariantGet.evaluateOnCpu(input, fallbackBridge)
+    } else {
+      GpuVariantExtraction.withRawExtraction(input.getBase, path) { extraction =>
+        GpuVariantGet.decodeVariantField(extraction, dataType) {
+          GpuVariantGet.evaluateOnCpu(input, fallbackBridge)
+        }
       }
     }
   }
@@ -135,10 +139,16 @@ object GpuVariantGet {
 
   // The defining loader also resolves this expression's cuDF classes. Cache against that stable
   // loader rather than the tagging thread's potentially different context loader.
-  lazy val isVariantCudfAvailable: Boolean = {
-    GpuVariantExtraction.hasRequiredApis { name =>
+  // Only a positive answer is cached. A negative one is recomputed on each tagging pass, which
+  // costs a few reflective lookups, so it never outlives a change to the visible classes.
+  @volatile private var variantCudfAvailable = false
+
+  def isVariantCudfAvailable: Boolean = variantCudfAvailable || {
+    val available = GpuVariantExtraction.hasRequiredApis { name =>
       Class.forName(name, false, getClass.getClassLoader)
     }
+    variantCudfAvailable = available
+    available
   }
 
   /**
@@ -150,18 +160,13 @@ object GpuVariantGet {
    * whatever the target type, and no decoder accepts one. Extraction leaves the raw value null
    * only for ROW_NULL, MISSING_PATH and MALFORMED_VARIANT, and a decoder leaves a row valid only
    * when it decoded the row. Malformed bytes found during extraction, and rows that Spark's
-   * Variant constructor rejects, fall back so that Spark raises its error.
-   *
-   * @param input the Variant input the extraction was computed from
-   * @param path the extraction path, which decides whether cuDF validated the metadata
+   * Variant constructor rejects, fall back so that Spark raises its error. So do missing paths
+   * where a step met a primitive type ID that Spark does not recognize.
    */
   private[rapids] def decodeVariantField(
-      extraction: VariantOperationResult,
-      dt: DataType,
-      input: ColumnView,
-      path: String)(fallback: => ColumnVector): ColumnVector = {
-    def covered(decoded: ColumnView) = isCovered(extraction, input.getNullCount, decoded,
-      GpuVariantExtraction.failsVariantConstructor(input, skipsMetadataValidation(path)))
+      extraction: GpuVariantExtraction.Extraction,
+      dt: DataType)(fallback: => ColumnVector): ColumnVector = {
+    def covered(decoded: ColumnView) = isCovered(extraction, decoded)
     dt match {
       case BooleanType => decodeExactType(extraction, DType.BOOL8, covered)(fallback)
       case FloatType => decodeExactType(extraction, DType.FLOAT32, covered)(fallback)
@@ -181,7 +186,7 @@ object GpuVariantGet {
   }
 
   private def decodeExactType(
-      extraction: VariantOperationResult,
+      extraction: GpuVariantExtraction.Extraction,
       targetType: DType,
       covered: ColumnView => Boolean)(fallback: => ColumnVector): ColumnVector = {
     withResource(VariantUtils.castVariantValue(extraction.getValue, targetType)) { decoded =>
@@ -193,25 +198,21 @@ object GpuVariantGet {
     }
   }
 
-  // cuDF validates the metadata when it resolves an object-key step. A path that starts with an
-  // array index can return before reaching one.
-  private def skipsMetadataValidation(path: String): Boolean = path.startsWith("$[")
-
   private def isCovered(
-      extraction: VariantOperationResult,
-      parentNullCount: Long,
-      decoded: ColumnView,
-      failsConstructor: => Boolean): Boolean = {
-    val rows = extraction.getValue.getRowCount
+      extraction: GpuVariantExtraction.Extraction,
+      decoded: ColumnView): Boolean = {
+    val rows = extraction.rowCount
+    val parentNullCount = extraction.parentNullCount
     val rawNulls = extraction.getValue.getNullCount
     val undecoded = rows - rawNulls - (decoded.getRowCount - decoded.getNullCount)
     val status = extraction.getStatus
-    // The status reductions run only when the null counts leave a question open. When every raw
-    // null is a SQL-null parent, no row can be missing or malformed at extraction.
+    // The status reductions and byte checks run only when the null counts leave a question open.
+    // When every raw null is a SQL-null parent, no row is missing or malformed at extraction.
     (undecoded == 0 || undecoded == countStatus(status, VariantOperationStatus.VARIANT_NULL)) &&
       (rawNulls == parentNullCount ||
-        !containsStatus(status, VariantOperationStatus.MALFORMED_VARIANT)) &&
-      (parentNullCount == rows || !failsConstructor)
+        (!containsStatus(status, VariantOperationStatus.MALFORMED_VARIANT) &&
+          !extraction.hasUnrecognizedPrimitiveStep)) &&
+      (parentNullCount == rows || !extraction.failsVariantConstructor())
   }
 
   // The status column is non-nullable UINT8. If cuDF changes that, contains fails the query

@@ -192,13 +192,12 @@ def test_variant_cpu_rows_convert_to_gpu():
     # cuDF checks the metadata only for object keys. Spark rejects version 2 for any path.
     pytest.param(b'\x03\x01\x00\x02\x0c\x01', b'\x02\x00\x00', 'MALFORMED_VARIANT',
                  id='bad-metadata-version'),
-    # cuDF reports MISSING_PATH when a path step meets an unrecognized type ID, and missing
-    # paths stay on the GPU, so the GPU returns NULL here, as main does. Remove the mark once
-    # cuDF reports MALFORMED_VARIANT for this case.
+    # cuDF reports MISSING_PATH when a path step meets a type ID that Spark does not recognize.
+    # The GPU checks the root and path prefixes of missing rows for such headers and falls back.
     pytest.param(b'\xfc', b'\x01\x00\x00', 'UNKNOWN_PRIMITIVE_TYPE_IN_VARIANT',
-                 id='unknown-primitive',
-                 marks=pytest.mark.xfail(
-                     strict=True, reason='cuDF reports MISSING_PATH for an unrecognized type ID')),
+                 id='unknown-primitive'),
+    pytest.param(b'\x44' + b'\x00' * 8, b'\x01\x00\x00', 'UNKNOWN_PRIMITIVE_TYPE_IN_VARIANT',
+                 id='unknown-primitive-17'),
 ])
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
 def test_variant_try_get_malformed_input_preserves_error(value, metadata, error):
