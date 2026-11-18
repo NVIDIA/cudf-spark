@@ -93,6 +93,34 @@ def test_dotted_column_reordered_schema_with_missing_column(
 
 @ignore_order(local=True)
 @pytest.mark.parametrize("footer", ["JAVA", "NATIVE"])
+def test_parquet_nested_dotted_names(spark_tmp_path, footer):
+    path = spark_tmp_path + "/nested_names"
+    gens = [("c", IntegerGen(min_val=100, max_val=200, nullable=False)),
+            ("s", StructGen(_collision_gens, nullable=False)),
+            ("x.y", IntegerGen(min_val=3000, max_val=4000, nullable=False)),
+            ("extra", IntegerGen())]
+    with_cpu_session(lambda spark: gen_df(spark, gens, length=16, num_slices=1)
+                     .write.parquet(path))
+    # Reverse roots and nested children, pruning extra fields at both levels.
+    schema = StructType([
+        StructField("x.y", IntegerType()),
+        StructField("s", StructType([
+            StructField("a.b", IntegerType()),
+            StructField("a", StructType([StructField("b", IntegerType())])),
+        ])),
+        StructField("c", IntegerType()),
+        StructField("missing", IntegerType()),
+    ])
+    # Selecting s uses includeColumn on its ordinary root. Adding x.y skips the
+    # ambiguous selector and relies on the same pruned, ordered footer.
+    for projection in [["s", "c", "missing"], ["`x.y`", "s", "c", "missing"]]:
+        assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: spark.read.schema(schema).parquet(path).selectExpr(*projection),
+            conf={"spark.rapids.sql.format.parquet.reader.footer.type": footer})
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize("footer", ["JAVA", "NATIVE"])
 def test_dotted_column_renamed_by_parquet_field_id(spark_tmp_path, footer):
     path = spark_tmp_path + "/field_ids"
     schema = StructType([
