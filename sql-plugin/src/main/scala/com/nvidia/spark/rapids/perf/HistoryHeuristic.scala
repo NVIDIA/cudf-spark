@@ -32,9 +32,8 @@ import org.apache.spark.sql.execution.SQLExecution
 import org.apache.spark.sql.execution.ui.SparkListenerSQLExecutionEnd
 
 /**
- * Runs the callbacks registered for a SQL execution once it ends, when its accumulators have been
- * merged. A callback registered for an execution that already ended is dropped. It knows nothing
- * about metrics: what a callback does is up to whoever registered it.
+ * Runs the callbacks registered for a SQL execution when it ends, once its accumulators are
+ * merged. A callback registered after its execution ended is dropped.
  */
 object ExecutionEndCallbacks extends Logging {
 
