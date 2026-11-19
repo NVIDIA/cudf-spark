@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import pytest
 
 from asserts import assert_gpu_and_cpu_writes_are_equal_collect, assert_gpu_fallback_write, \
@@ -1002,3 +1003,50 @@ def test_delta_delete_deletion_vector_multi_file_file_name_conditions(
         conf=conf,
         expected_num_affected_rows=29,
         assert_gpu_delete_command=True)
+
+
+def delete_stats_events(spark_jvm_, func):
+    """
+    Runs `func` while collecting Delta's usage events and returns (func result, the payloads of
+    the delta.dml.delete.stats events as dicts). Mirrors Log4jUsageLogger.track from Delta,
+    which is not callable with a Python function.
+    """
+    logger = getattr(getattr(spark_jvm_.com.databricks.spark.util, "Log4jUsageLogger$"), "MODULE$")
+    getattr(logger, "usageTracker_$eq")(spark_jvm_.scala.collection.mutable.ArrayBuffer())
+    try:
+        result = func()
+        records = [logger.usageTracker().apply(i)
+                   for i in range(logger.usageTracker().size())]
+    finally:
+        getattr(logger, "usageTracker_$eq")(None)
+    return result, [json.loads(r.blob()) for r in records
+                    if "delta.dml.delete.stats" in r.toString()]
+
+
+@allow_non_gpu("ExecutedCommandExec", *delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="Delta 4.3 DELETE zero-metric stats event coverage")
+@pytest.mark.parametrize("always_report, expected", [
+    (False, None),
+    (True, 0),
+], ids=["flag_off", "flag_on"])
+def test_delta_delete_43_no_match_stats_event_honors_always_report_zero_metrics(
+        spark_tmp_path, always_report, expected):
+    """GpuDeleteCommand must report a no-match DELETE's row counts as Some(0) only when
+    metrics.alwaysReportSomeZeroMetrics is set, as Delta's DeleteCommand does."""
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    with_cpu_session(lambda spark: setup_delta_dest_tables(
+        spark, data_path, two_part_int_data, use_cdf=False,
+        enable_deletion_vectors=False))
+    conf = copy_and_update(delta_delete_enabled_conf, {
+        "spark.databricks.delta.metrics.alwaysReportSomeZeroMetrics": str(always_report).lower()})
+    jvm = spark_jvm()
+    _, events = assert_rapids_delta_write(
+        lambda spark: delete_stats_events(
+            jvm, lambda: spark.sql(
+                "DELETE FROM delta.`{}/GPU` WHERE id = 999".format(data_path)).collect()),
+        conf=conf, required_gpu_classes=[], expected_command="GpuDeleteCommand")
+    assert len(events) == 1, f"Expected one delta.dml.delete.stats event, got {events}"
+    assert events[0].get("numDeletedRows") == expected
+    assert events[0].get("numCopiedRows") == expected
