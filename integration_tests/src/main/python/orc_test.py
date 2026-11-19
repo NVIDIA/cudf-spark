@@ -1541,12 +1541,16 @@ def test_orc_not_support_timestamp_ltz(std_input_path):
         ----------^^^
     """
     data_path = f"{std_input_path}/timestamp_ltz.orc"
-    cpu_supports_type = is_spark_420_or_later() or is_databricks_version_or_later(18, 3)
-    expected_error_message = "timestamp with local time zone" if cpu_supports_type \
+    cpu_supports_orc_timestamp_ltz = \
+        is_spark_420_or_later() or is_databricks_version_or_later(18, 3)
+    expected_error_message = "timestamp with local time zone" \
+        if cpu_supports_orc_timestamp_ltz \
         else "ParseException"
     read = lambda spark: spark.read.orc(data_path).collect()
-    if cpu_supports_type:
+    if cpu_supports_orc_timestamp_ltz:
         with_cpu_session(read, conf={})
+        # TODO(https://github.com/NVIDIA/cudf-spark/issues/17042):
+        # GPU should support this ORC type or fall back to the CPU reader.
         assert_spark_exception(
             lambda: with_gpu_session(read, conf={}), expected_error_message)
     else:
