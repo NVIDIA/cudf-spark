@@ -20,9 +20,10 @@ import com.nvidia.spark.rapids.TestUtils.findOperator
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.catalyst.plans.Inner
+import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
 import org.apache.spark.sql.functions.{broadcast, col}
-import org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+import org.apache.spark.sql.rapids.GpuScalarSubquery
 import org.apache.spark.sql.rapids.execution.{GpuBroadcastHashJoinExec, GpuHashJoin}
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.{DataFrame, SparkSession}
 
@@ -59,16 +60,31 @@ class BroadcastHashJoinSuite extends SparkQueryCompareTestSuite {
             val df = spark.sql(query)
             val actual = df.collect().sortBy(_.getLong(0))
             assert(actual.toSeq == expected.toSeq)
-            val plan = df.queryExecution.executedPlan.toString
-            assert(plan.contains("GpuBroadcastHashJoin"), plan)
-            assert(plan.contains("GpuProject"), plan)
-            ExecutionPlanCaptureCallback.assertContains(df, "GpuScalarSubquery")
+            val plan = df.queryExecution.executedPlan
+            val joinWithScalarSubquery = findOperator(plan, {
+              case join: GpuBroadcastHashJoinExec =>
+                val build = join.buildSide match {
+                  case GpuBuildLeft => join.left
+                  case GpuBuildRight => join.right
+                }
+                buildProjectHasScalarSubquery(build)
+              case _ => false
+            })
+            assert(joinWithScalarSubquery.nonEmpty,
+              s"Expected a scalar subquery in a broadcast build-side projection:\n$plan")
           } finally {
             spark.catalog.dropTempView("source")
           }
         }, conf)
       }
     }
+  }
+
+  private def buildProjectHasScalarSubquery(plan: SparkPlan): Boolean = plan match {
+    case project: GpuProjectExec =>
+      project.projectList.exists(_.exists(_.isInstanceOf[GpuScalarSubquery])) ||
+        buildProjectHasScalarSubquery(project.child)
+    case _ => false
   }
 
   private def broadcastReuseConf: SparkConf = new SparkConf()
