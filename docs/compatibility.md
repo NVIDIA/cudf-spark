@@ -442,6 +442,33 @@ downstream operators may still execute on GPU. Queries that prune all Variant co
 remain eligible for GPU scans even when the files contain shredded Variant data. GPU
 Variant writes remain unsupported.
 
+### Variant field extraction
+
+GPU `try_variant_get` supports the registered scalar targets, including decimal targets
+with precision up to 38 and nonnegative scale, when incompatible operations and the CPU
+expression bridge are enabled. Strict `variant_get` and negative-scale decimal targets
+remain on the CPU.
+
+For decimal targets, decimal payloads use Spark's HALF_UP rounding and return SQL null for
+final target overflow. SQL-null parent rows do not require runtime CPU fallback.
+Other source representations,
+including integer, string, boolean, and floating-point values, are converted by Spark through
+the CPU bridge. A missing path or encoded Variant null also uses that bridge: the native
+status alone cannot establish Spark's error behavior for malformed paths. Any row requiring
+the bridge sends the entire input batch through CPU evaluation, even when the surrounding
+plan contains `GpuVariantGet`. Temporary extraction and decoding columns are released before
+CPU conversion.
+
+Native decimal decoding truncates during rescaling, so GPU conversion uses a decimal128
+intermediate with precision 38 and scale `min(targetScale + 1, 38)` to preserve rounding.
+Values outside that intermediate range fall back even if the final target could hold them;
+for example, a decimal value of 5 × 10³⁷ into `decimal(38,0)` needs CPU conversion.
+Width-specific decimal payload precision and scale are checked, but these checks do not
+validate the entire Variant path.
+As with boolean, integer, floating-point, and string extraction, malformed or noncanonical
+object/metadata encodings may therefore differ from Spark; incompatible-operation gating
+remains in place.
+
 ## Parquet
 
 The Parquet format has more configs because there are multiple versions with some compatibility
@@ -460,6 +487,13 @@ When writing `spark.sql.legacy.parquet.datetimeRebaseModeInWrite` is currently i
 The plugin supports reading and writing `uncompressed`, `snappy`, `gzip` and `zstd` Parquet files.
 At this point, the plugin cannot fall back to the CPU when reading an unsupported compression
 format, and will error out in that case.
+
+## Delta Lake selective replacement
+
+Delta Lake 4.3 `replaceOn` and `replaceUsing` writes support GPU acceleration,
+including targets with persistent deletion vectors. See
+[Delta Lake selective replacement](additional-functionality/delta-lake-selective-replacement.md)
+for supported versions, configuration, examples, and limitations.
 
 ## Delta Lake low shuffle merge on Databricks Runtime 17.3
 

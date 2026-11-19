@@ -385,6 +385,29 @@
                 </dependency>
             </dependencies>
         </profile>
+        <profile>
+            <id>delta43-tests</id>
+            <properties>
+                <delta.test.spark.artifactId>${delta43x.spark.artifactId}</delta.test.spark.artifactId>
+                <delta.test.version>${delta43x.version}</delta.test.version>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.scalatest</groupId>
+                        <artifactId>scalatest-maven-plugin</artifactId>
+                        <configuration>
+                            <systemProperties>
+                                <rapids.test.delta43>true</rapids.test.delta43>
+                            </systemProperties>
+                            <environmentVariables>
+                                <SPARK_CONF>spark.plugins= ,spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension,spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog</SPARK_CONF>
+                            </environmentVariables>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
         <!-- #endif scala-2.13 -->
 
     </profiles>

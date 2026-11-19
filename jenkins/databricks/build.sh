@@ -238,7 +238,7 @@ if [[ "$SCALA_BINARY_VER" == "2.13" ]]; then
 else
     DIST_TARGET="dist/target"
 fi
-rm -rf $DIST_TARGET/jni-deps/
+rm -rf $DIST_TARGET/jni-deps/ $DIST_TARGET/jni-archive/
 find $DIST_TARGET/parallel-world/ -mindepth 1 -maxdepth 1 ! -name META-INF -exec rm -rf {} +
 
 cd /home/ubuntu
