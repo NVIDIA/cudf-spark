@@ -25,6 +25,8 @@ import org.apache.parquet.schema.MessageTypeParser
 import org.mockito.Mockito.{mock, when}
 import org.scalatest.funsuite.AnyFunSuite
 
+import org.apache.spark.sql.types.{IntegerType, MetadataBuilder, StructField, StructType}
+
 class GpuParquetUtilsSuite extends AnyFunSuite {
   @scala.annotation.nowarn("msg=method getPath in class ColumnChunkMetaData is deprecated")
   private def column(path: String*): ColumnChunkMetaData = {
@@ -34,13 +36,12 @@ class GpuParquetUtilsSuite extends AnyFunSuite {
     result
   }
 
-  for (caseSensitive <- Seq(false, true);
-      (schema, selected) <- Seq(
+  for ((schema, selected) <- Seq(
         ("optional int32 a.b;", Seq(1)),
         ("optional group a { optional int32 b; }", Seq(0)),
         ("optional group a.b { optional int32 c; }", Seq(2)),
         ("optional group a { optional int32 b.c; }", Seq(3)))) {
-    test(s"clip dotted path components: $schema, caseSensitive=$caseSensitive") {
+    test(s"clip dotted path components: $schema") {
       val columns = Seq(column("a", "b"), column("a.b"),
         column("a.b", "c"), column("a", "b.c"), column("unrelated"))
       val block = new BlockMetaData()
@@ -48,7 +49,7 @@ class GpuParquetUtilsSuite extends AnyFunSuite {
       columns.foreach(block.addColumn)
       val readSchema = MessageTypeParser.parseMessageType(s"message root { $schema }")
       val clipped = GpuParquetUtils.clipBlocksToSchema(
-        readSchema, Collections.singletonList(block), caseSensitive)
+        readSchema, Collections.singletonList(block))
       assert(clipped.length == 1)
       assert(clipped.head.getRowCount == 13L)
       assert(clipped.head.getColumns.asScala.toSeq == selected.map(columns))
@@ -57,21 +58,26 @@ class GpuParquetUtilsSuite extends AnyFunSuite {
     }
   }
 
-  test("case-insensitive clipping normalizes each component without changing column metadata") {
-    val nested = column("A", "B")
-    val flat = column("A.B")
-    val block = new BlockMetaData()
-    block.addColumn(nested)
-    block.addColumn(flat)
-    val readSchema = MessageTypeParser.parseMessageType("message root { optional int32 a.b; }")
-    val blocks = Collections.singletonList(block)
-    assert(GpuParquetUtils.clipBlocksToSchema(readSchema, blocks, isCaseSensitive = false)
-      .head.getColumns.asScala.toSeq == Seq(flat))
-    assert(GpuParquetUtils.clipBlocksToSchema(readSchema, blocks, isCaseSensitive = true)
-      .head.getColumns.isEmpty)
-    val uppercaseSchema = MessageTypeParser.parseMessageType(
-      "message root { optional int32 A.B; }")
-    assert(GpuParquetUtils.clipBlocksToSchema(uppercaseSchema, blocks, isCaseSensitive = true)
-      .head.getColumns.asScala.toSeq == Seq(flat))
+  for (nested <- Seq(false, true)) {
+    test(s"field-ID clipping excludes case-distinct physical siblings: nested=$nested") {
+      val id = new MetadataBuilder().putLong("parquet.field.id", 1).build()
+      val fields = "optional int32 A = 5; optional int32 a = 1;"
+      val physicalFields = if (nested) s"optional group s { $fields }" else fields
+      val fileSchema = MessageTypeParser.parseMessageType(s"message root { $physicalFields }")
+      val requested = StructType(Seq(StructField("x", IntegerType, metadata = id)))
+      val readSchema = if (nested) StructType(Seq(StructField("s", requested))) else requested
+      val clippedSchema = ParquetSchemaUtils.clipParquetSchema(
+        fileSchema, readSchema, caseSensitive = false, useFieldId = true)
+      val columns = fileSchema.getPaths.asScala.map(path => column(path: _*)).toSeq
+      val block = new BlockMetaData()
+      block.setRowCount(2L)
+      columns.foreach(block.addColumn)
+      val clipped = GpuParquetUtils.clipBlocksToSchema(
+        clippedSchema, Collections.singletonList(block))
+      assert(clipped.head.getColumns.asScala.toSeq == Seq(columns(1)))
+      assert(clipped.head.getRowCount == 2L)
+      assert(clipped.head.getTotalByteSize == 32L)
+      assert(block.getColumns.asScala.toSeq == columns)
+    }
   }
 }

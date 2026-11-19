@@ -214,3 +214,55 @@ def test_orc_nested_dotted_decimal_collision(spark_tmp_path, chunked, reader, co
         lambda spark: spark.read.orc(path),
         conf={"spark.rapids.sql.reader.chunked": str(chunked).lower(),
               "spark.rapids.sql.format.orc.reader.type": reader})
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize("reader", ["PERFILE", "MULTITHREADED", "COALESCING"])
+@pytest.mark.parametrize("nested", [False, True], ids=["root", "nested"])
+def test_parquet_field_id_case_collision(spark_tmp_path, reader, nested):
+    path = spark_tmp_path + "/field_id_case"
+    physical = StructType([
+        StructField("A", IntegerType(), metadata={"parquet.field.id": 5}),
+        StructField("a", IntegerType(), metadata={"parquet.field.id": 1}),
+    ])
+    requested = StructType([
+        StructField("x", IntegerType(), metadata={"parquet.field.id": 1})])
+    rows = [(10, 1), (20, 2)]
+    if nested:
+        physical = StructType([StructField(
+            "s", physical, metadata={"parquet.field.id": 20})])
+        requested = StructType([StructField(
+            "s", requested, metadata={"parquet.field.id": 20})])
+        rows = [(row,) for row in rows]
+    with_cpu_session(
+        lambda spark: spark.createDataFrame(rows, physical).coalesce(1).write.parquet(path),
+        conf={"spark.sql.caseSensitive": "true",
+              "spark.sql.parquet.fieldId.write.enabled": "true"})
+    # Field IDs select physical a, excluding the distinct A chunk before decoding.
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(requested).parquet(path),
+        conf={"spark.sql.caseSensitive": "false",
+              "spark.sql.parquet.fieldId.read.enabled": "true",
+              "spark.rapids.sql.format.parquet.reader.type": reader})
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize("footer", ["JAVA", "NATIVE"])
+@pytest.mark.parametrize("nested", [False, True], ids=["root", "nested"])
+def test_parquet_case_insensitive_physical_names(spark_tmp_path, footer, nested):
+    path = spark_tmp_path + "/physical_case"
+    physical = StructType([StructField("A", IntegerType())])
+    requested = StructType([StructField("a", IntegerType())])
+    rows = [(1,), (2,)]
+    if nested:
+        physical = StructType([StructField("S", physical)])
+        requested = StructType([StructField("s", requested)])
+        rows = [(row,) for row in rows]
+    with_cpu_session(
+        lambda spark: spark.createDataFrame(rows, physical).coalesce(1).write.parquet(path),
+        conf={"spark.sql.caseSensitive": "true"})
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema(requested).parquet(path),
+        conf={"spark.sql.caseSensitive": "false",
+              "spark.sql.parquet.fieldId.read.enabled": "false",
+              "spark.rapids.sql.format.parquet.reader.footer.type": footer})

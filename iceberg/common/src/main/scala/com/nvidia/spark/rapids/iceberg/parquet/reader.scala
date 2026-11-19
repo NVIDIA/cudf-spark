@@ -266,8 +266,7 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
       blocks: Seq[ShadedBlockMetaData]): Seq[BlockMetaData] = {
     val unshader = ShimUtils.getParquetUnshader()
     GpuParquetUtils.clipBlocksToSchema(fileReadSchema,
-      blocks.map(unshader.unshade).asJava,
-      isCaseSensitive = true)
+      blocks.map(unshader.unshade).asJava)
   }
 
   def filterParquetBlocks(file: IcebergPartitionedFile,

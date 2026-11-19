@@ -954,7 +954,7 @@ protected case class GpuParquetFileFilterHandler(
           checkSchemaCompat(clippedSchema, readDataSchema,
             (t: Type, d: DataType) => throwTypeIncompatibleError(t, d, file.filePath.toString()),
             isCaseSensitive, readUseFieldId)
-          val clipped = GpuParquetUtils.clipBlocksToSchema(clippedSchema, blocks, isCaseSensitive)
+          val clipped = GpuParquetUtils.clipBlocksToSchema(clippedSchema, blocks)
           (clipped, clippedSchema)
         }
       val hasDateTimeInReadSchema = DataTypeUtils.hasDateOrTimestampType(readDataSchema)
