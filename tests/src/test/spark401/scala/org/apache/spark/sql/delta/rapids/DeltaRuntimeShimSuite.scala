@@ -36,6 +36,15 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.{IntegerType, StructField, StructType, VariantType}
 
 class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
+  private def isDelta43: Boolean = io.delta.VERSION.startsWith("4.3.")
+
+  test("Delta 4.3 test profile selects the required runtime") {
+    sys.props.get("rapids.test.delta43.version").foreach { expectedVersion =>
+      assert(isDelta43, s"delta43-tests must run against Delta 4.3.x, found ${io.delta.VERSION}")
+      assert(io.delta.VERSION == expectedVersion)
+    }
+  }
+
   test("delta provider resolves from the installed Delta Lake version") {
     val provider = DeltaProvider()
     assert(provider ne NoDeltaProvider)
@@ -43,7 +52,7 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
       case "4.0.0" | "4.0.1" => "Delta40xProvider"
       case "4.1.0" => "Delta41xProvider"
       case "4.2.0" => "Delta42xProvider"
-      case "4.3.0" => "Delta43xProvider"
+      case _ if isDelta43 => "Delta43xProvider"
       case _ => fail(s"Unexpected Delta Lake version: ${io.delta.VERSION}")
     }
     assert(provider.getClass.getSimpleName == s"$expectedProvider$$")
@@ -73,8 +82,11 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
   }
 
   test("Delta 4.3 runtime shim selection covers supported Spark versions") {
-    Seq("4.0.1", "4.1.1").foreach { sparkVersion =>
-      val shimClassName = DeltaRuntimeShim.getDelta43ShimClassName("4.3.0", sparkVersion)
+    for {
+      sparkVersion <- Seq("4.0.1", "4.1.1")
+      deltaVersion <- Seq("4.3.0", "4.3.1", "4.3.2", "4.3.2.2")
+    } {
+      val shimClassName = DeltaRuntimeShim.getDelta43ShimClassName(deltaVersion, sparkVersion)
       assert(shimClassName.exists(_.contains("delta43x")))
     }
   }
@@ -84,7 +96,7 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
       ("4.3.0", "4.0.0"),
       ("4.3.0", "4.1.0"),
       ("4.3.0", "4.1.2"),
-      ("4.3.1", "4.0.1"))
+      ("4.3.2.2", "4.1.2"))
 
     unsupported.foreach { case (deltaVersion, sparkVersion) =>
       val error = intercept[IllegalStateException] {
@@ -102,6 +114,7 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
     }
     assert(DeltaRuntimeShim.getDelta42ShimClassName("4.3.0", "4.0.1").isEmpty)
     assert(DeltaRuntimeShim.getDelta43ShimClassName("4.2.0", "4.0.1").isEmpty)
+    assert(DeltaRuntimeShim.getDelta43ShimClassName("4.4.0", "4.0.1").isEmpty)
   }
 
   test("GPU write factory has no default implementation") {
@@ -111,7 +124,7 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
   }
 
   test("Delta 4.2 and 4.3 GPU writes use the runtime-specific GPU implementation") {
-    assume(Seq("4.2.0", "4.3.0").contains(io.delta.VERSION))
+    assume(io.delta.VERSION == "4.2.0" || isDelta43)
     val deltaLog = mock[DeltaLog]
     val cpuWrite = WriteIntoDelta(
       deltaLog,
@@ -125,7 +138,7 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
 
     val expectedClass = io.delta.VERSION match {
       case "4.2.0" => "GpuWriteIntoDelta42x"
-      case "4.3.0" => "GpuWriteIntoDelta43x"
+      case _ if isDelta43 => "GpuWriteIntoDelta43x"
       case version => fail(s"Unexpected Delta Lake version: $version")
     }
     assert(gpuWrite.getClass.getSimpleName == expectedClass)
@@ -141,7 +154,7 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
   }
 
   test("Delta 4.3 DELETE and UPDATE validate mismatched record counts") {
-    assume(io.delta.VERSION == "4.3.0")
+    assume(isDelta43)
     val deltaLog = mock[DeltaLog]
     val mismatchStats = NumRecordsStats(
       numLogicalRecordsAddedPartial = 2L,
@@ -168,7 +181,7 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
   }
 
   test("Delta 4.3 GPU transactions use the 4.3 writer behavior") {
-    assume(io.delta.VERSION == "4.3.0")
+    assume(isDelta43)
     val parquetOutputTimestampType = "spark.sql.parquet.outputTimestampType"
     val parquetWriterVersion = "parquet.writer.version"
 

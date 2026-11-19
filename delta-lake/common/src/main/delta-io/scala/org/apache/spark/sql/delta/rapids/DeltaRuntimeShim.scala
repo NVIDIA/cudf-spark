@@ -137,9 +137,8 @@ object DeltaRuntimeShim {
       deltaVersion: String,
       sparkVersion: String): Option[String] = {
     if (deltaVersion.startsWith("4.3.")) {
-      val parsedSparkVersion = parseSparkVersion(sparkVersion)
-      (deltaVersion, parsedSparkVersion) match {
-        case ("4.3.0", (4, 0, 1) | (4, 1, 1)) =>
+      parseSparkVersion(sparkVersion) match {
+        case (4, 0, 1) | (4, 1, 1) =>
           Some("org.apache.spark.sql.delta.rapids.delta43x.Delta43xRuntimeShim")
         case _ =>
           throw new IllegalStateException(

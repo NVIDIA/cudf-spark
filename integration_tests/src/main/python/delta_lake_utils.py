@@ -138,30 +138,27 @@ def is_oss_delta_lake_41_or_42():
 
 
 def is_oss_delta_lake_42_or_43():
-    return (not is_databricks_runtime()
-            and _loaded_delta_lake_version() in ("4.2.0", "4.3.0"))
+    return is_oss_delta_lake_42() or is_oss_delta_lake_43()
 
 
 def is_oss_delta_lake_43():
     return (not is_databricks_runtime()
-            and _loaded_delta_lake_version() == "4.3.0")
+            and (_loaded_delta_lake_version() or "").startswith("4.3."))
 
 
 def is_oss_delta_lake_40_to_43():
-    return (not is_databricks_runtime()
-            and _loaded_delta_lake_version() in ("4.0.0", "4.0.1", "4.1.0", "4.2.0", "4.3.0"))
+    return is_oss_delta_lake_40() or is_oss_delta_lake_41_to_43()
 
 
 def is_oss_delta_lake_41_to_43():
-    return (not is_databricks_runtime()
-            and _loaded_delta_lake_version() in ("4.1.0", "4.2.0", "4.3.0"))
+    return is_oss_delta_lake_41_or_42() or is_oss_delta_lake_43()
 
 
 delta_reorg_xfail = pytest.mark.xfail(
     not is_databricks_runtime()
-    and _loaded_delta_lake_version() in ("4.0.1", "4.1.0", "4.2.0", "4.3.0")
-    and not is_spark_local_mode(),
-    reason="Delta Lake REORG in 4.0.1, 4.1.0, 4.2.0 and 4.3.0 calls SparkSession.active on "
+    and not is_spark_local_mode()
+    and (_loaded_delta_lake_version() in ("4.0.1", "4.1.0", "4.2.0") or is_oss_delta_lake_43()),
+    reason="Delta Lake REORG in 4.0.1, 4.1.0, 4.2.0 and 4.3.x calls SparkSession.active on "
            "executors in distributed mode: "
            "https://github.com/delta-io/delta/issues/7776")
 
