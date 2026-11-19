@@ -55,7 +55,8 @@ def prepare_jacoco(master_addr, ssh_args, rsync_ssh):
             raise ValueError("EXTRA_ENVS already sets _JAVA_OPTIONS; leaving it unchanged")
         local_exec = Path(output)
         local_exec.parent.mkdir(parents=True, exist_ok=True)
-        remote_dir = str(Path(params.script_dest).parent)
+        # Relative rsync destinations start in the remote ubuntu user's home.
+        remote_dir = str(Path("/home/ubuntu", params.script_dest).parent)
         remote_agent = remote_dir + "/jacocoagent.jar"
         remote_exec = remote_dir + "/jacoco.exec"
         ssh = ["ssh"] + ssh_args + ["ubuntu@" + master_addr]
