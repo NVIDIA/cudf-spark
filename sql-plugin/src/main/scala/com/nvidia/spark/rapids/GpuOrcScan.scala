@@ -1010,6 +1010,7 @@ trait OrcCommonFunctions extends OrcCodecWritingHelper { self: FilePartitionRead
     val postscript = OrcProto.PostScript.newBuilder(ctx.fileTail.getPostscript)
       .setFooterLength(footerLen)
       .setMetadataLength(0)
+      // Stripe statistics are not copied into the synthetic file.
       .setStripeStatisticsLength(0)
       .build()
     postscript.writeTo(outStream)
