@@ -19,9 +19,13 @@ package com.nvidia.spark.rapids
 import com.nvidia.spark.rapids.spill.SpillFramework
 
 import org.apache.spark.SparkConf
+import org.apache.spark.sql.execution.datasources.parquet.ParquetFileFormat
 import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.rapids.GpuFileSourceScanExec
 import org.apache.spark.sql.types.{IntegerType, LongType, StringType, StructField, StructType}
+
+/** Stands in for a ParquetFileFormat subclass, such as Delta's, that no provider claims. */
+class UnclaimedParquetFileFormat extends ParquetFileFormat
 
 class ParquetScanSuite extends SparkQueryCompareTestSuite {
   private val fileSplitsParquet = frameFromParquet("file-splits.parquet")
@@ -274,5 +278,16 @@ class ParquetScanSuite extends SparkQueryCompareTestSuite {
       val minBytes = rows.length.toLong * bytesPerRow
       assert(scan.get.metrics(GpuMetric.GPU_OUTPUT_BATCH_BYTES).value >= minBytes)
     })
+  }
+
+  // Databricks shims apply their own scan rules for their ParquetFileFormat subclasses.
+  if (!VersionUtils.isDataBricks) {
+    testGpuFallback("unclaimed ParquetFileFormat subclass scan falls back to CPU",
+      "FileSourceScanExec",
+      spark => spark.read.format(classOf[UnclaimedParquetFileFormat].getName)
+        .load(TestResourceFinder.getResourcePath("file-splits.parquet")),
+      execsAllowedNonGpu = Seq("FileSourceScanExec")) {
+      frame => frame
+    }
   }
 }
