@@ -23,11 +23,10 @@ package com.nvidia.spark.rapids
 import java.util.Optional
 
 import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Scalar, Table, VariantOperationResult,
-  VariantOperationStatus, VariantUtils}
+  VariantUtils}
 import ai.rapids.cudf.ast.{AstExpression, BinaryOperation, BinaryOperator, ColumnReference,
   Literal}
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.RapidsPluginImplicits._
 
 /**
  * Adapts Spark's physical Variant layout to cuDF and scopes ownership of raw extraction results.
@@ -86,24 +85,42 @@ private[rapids] object GpuVariantExtraction {
     /**
      * Returns true when a row may have reported MISSING_PATH because a path step met a primitive
      * with a type ID that Spark does not recognize. Spark raises an error for such a row, while
-     * cuDF reports the step as missing. Checks the root value under a MISSING_PATH status, and
-     * the value at every proper prefix of the path: a prefix that resolves to such a primitive
+     * cuDF reports the step as missing. Checks the root value of every row with a non-null parent,
+     * and the value at every proper prefix of the path: a prefix that resolves to such a primitive
      * leaves the next step missing. A leaf with such a type ID is rejected by every decoder, so
      * it is not checked here.
      */
     def hasUnrecognizedPrimitiveStep: Boolean = {
-      val root = withResource(cudfVariant.getChildColumnView(1)) { value =>
-        withResource(value.extractListElement(0)) { header =>
-          anyUnrecognizedPrimitive(header, Some(getStatus))
-        }
-      }
-      root || pathPrefixes(path).exists { prefix =>
-        withResource(VariantUtils.getVariantFieldValueWithStatus(cudfVariant, prefix)) { step =>
-          withResource(step.getValue.extractListElement(0)) { header =>
-            anyUnrecognizedPrimitive(header, None)
+      hasUnrecognizedPrimitiveStep(GpuVariantGet.UnrecognizedPrimitiveTypeIds)
+    }
+
+    private[rapids] def hasUnrecognizedPrimitiveStep(unrecognizedIds: Seq[Int]): Boolean = {
+      // Rows under a SQL-null parent can carry any bytes, so the root is read through a view
+      // with the parent's validity. Every other row reaches the root: a decoded value, a Variant
+      // null or a missing step under an object or array root cannot have such a root, and the
+      // caller has already ruled out malformed rows.
+      def root = withResource(cudfVariant.getChildColumnView(1)) { value =>
+        withResource(value.getChildColumnView(0)) { bytes =>
+          withResource(new ColumnView(DType.LIST, cudfVariant.getRowCount,
+              Optional.of[java.lang.Long](cudfVariant.getNullCount), cudfVariant.getValid,
+              value.getOffsets, Array(bytes))) { parentValue =>
+            withResource(parentValue.extractListElement(0)) { header =>
+              anyUnrecognizedPrimitive(header, unrecognizedIds)
+            }
           }
         }
       }
+      def atPrefix(prefix: String) =
+        withResource(VariantUtils.getVariantFieldValueWithStatus(cudfVariant, prefix)) { step =>
+          withResource(step.getValue.extractListElement(0)) { header =>
+            anyUnrecognizedPrimitive(header, unrecognizedIds)
+          }
+        }
+      unrecognizedIds.nonEmpty && (pathPrefixes(path) match {
+        // A path the shared parser cannot split falls back rather than skipping the prefixes.
+        case None => true
+        case Some(prefixes) => root || prefixes.exists(atPrefix)
+      })
     }
   }
 
@@ -151,39 +168,43 @@ private[rapids] object GpuVariantExtraction {
   private val VersionMask: Byte = 0x0F
   private val MetadataVersion: Byte = 1
 
-  private val PathStep = """\.[A-Za-z_][A-Za-z0-9_]*|\[[0-9]+\]""".r
-
-  /** The proper prefixes of a supported path with at least one step: `$.a.b[0]` gives `$.a` and
-   * `$.a.b`. */
-  private[rapids] def pathPrefixes(path: String): Seq[String] = {
-    val steps = PathStep.findAllIn(path).toSeq
-    (1 until steps.length).map(n => "$" + steps.take(n).mkString)
+  /**
+   * The proper prefixes of a path, from the same parser that accepted it: `$.a.b[0]` gives `$.a`
+   * and `$.a.b`. None for a path that parser does not accept.
+   */
+  private[rapids] def pathPrefixes(path: String): Option[Seq[String]] = {
+    GpuVariantGet.supportedPathSteps(path).map { steps =>
+      (1 until steps.length).map(n => "$" + steps.take(n).mkString)
+    }
   }
 
-  // A primitive (basic type 0) has its type ID in the upper six bits of the header byte. Spark
-  // 4.0 and 4.1 recognize IDs 0 to 16 and 20, so the unrecognized headers are 0x44 to 0x4C and
-  // 0x54 and up, both with the low two bits clear.
-  private def anyUnrecognizedPrimitive(
-      header: ColumnView,
-      status: Option[ColumnView]): Boolean = {
+  /** Groups sorted IDs into inclusive runs: 17, 18, 19, 21, 22 gives (17, 19) and (21, 22). */
+  private[rapids] def idRanges(ids: Seq[Int]): Seq[(Int, Int)] = {
+    ids.sorted.foldLeft(List.empty[(Int, Int)]) {
+      case ((lo, hi) :: rest, id) if id == hi + 1 => (lo, id) :: rest
+      case (acc, id) => (id, id) :: acc
+    }.reverse
+  }
+
+  // A primitive (basic type 0) has its type ID in the upper six bits of the header byte, so a run
+  // of IDs is a range of header values with the low two bits clear.
+  // The AST is compiled per call: a CompiledExpression kept for the JVM's lifetime is reported
+  // as leaked, and compiling costs about 0.1 ms.
+  private def anyUnrecognizedPrimitive(header: ColumnView, unrecognizedIds: Seq[Int]): Boolean = {
     val h = new ColumnReference(0)
+    val inRange = idRanges(unrecognizedIds).map { case (lo, hi) =>
+      new BinaryOperation(BinaryOperator.NULL_LOGICAL_AND,
+        new BinaryOperation(BinaryOperator.GREATER_EQUAL, h, Literal.ofInt(lo << 2)),
+        new BinaryOperation(BinaryOperator.LESS_EQUAL, h, Literal.ofInt(hi << 2)))
+    }.reduce[AstExpression](new BinaryOperation(BinaryOperator.NULL_LOGICAL_OR, _, _))
     val unrecognized = new BinaryOperation(BinaryOperator.NULL_LOGICAL_AND,
       new BinaryOperation(BinaryOperator.EQUAL,
         new BinaryOperation(BinaryOperator.BITWISE_AND, h, Literal.ofInt(3)), Literal.ofInt(0)),
-      new BinaryOperation(BinaryOperator.NULL_LOGICAL_AND,
-        new BinaryOperation(BinaryOperator.GREATER_EQUAL, h, Literal.ofInt(0x44)),
-        new BinaryOperation(BinaryOperator.NOT_EQUAL, h, Literal.ofInt(0x50))))
-    // ROW_NULL rows can carry any bytes, so the root is checked only where the path is missing.
-    val expression = status.fold[AstExpression](unrecognized) { _ =>
-      new BinaryOperation(BinaryOperator.NULL_LOGICAL_AND, unrecognized,
-        new BinaryOperation(BinaryOperator.EQUAL, new ColumnReference(1),
-          Literal.ofInt(VariantOperationStatus.MISSING_PATH.getNativeId)))
-    }
-    // AST literals are signed, so the UINT8 inputs are widened first.
-    val columns = (Seq(header) ++ status).safeMap(_.castTo(DType.INT32))
-    val flags = withResource(columns) { _ =>
-      withResource(new Table(columns: _*)) { table =>
-        withResource(expression.compile())(_.computeColumn(table))
+      inRange)
+    // AST literals are signed, so the UINT8 header is widened first.
+    val flags = withResource(header.castTo(DType.INT32)) { widened =>
+      withResource(new Table(widened)) { table =>
+        withResource(unrecognized.compile())(_.computeColumn(table))
       }
     }
     withResource(flags) { f =>

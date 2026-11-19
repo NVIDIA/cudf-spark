@@ -28,13 +28,14 @@ import com.nvidia.spark.Retryable
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{BoundReference, Expression, Literal,
   NamedExpression}
 import org.apache.spark.sql.catalyst.expressions.variant.VariantGet
 import org.apache.spark.sql.types.{BooleanType, ByteType, DataType, DoubleType, FloatType,
-  IntegerType, LongType, ShortType, StringType}
+  IntegerType, LongType, ShortType, StringType, VariantType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
-import org.apache.spark.unsafe.types.UTF8String
+import org.apache.spark.unsafe.types.{UTF8String, VariantVal}
 
 case class GpuVariantGetMeta(
     expr: VariantGet,
@@ -127,8 +128,10 @@ case class GpuVariantGet(
 }
 
 object GpuVariantGet {
-  private val SupportedPath =
-    """^\$(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[0-9]+\])+$""".r
+  // One grammar for both validating a path and splitting it into steps.
+  private val PathStepPattern = """\.[A-Za-z_][A-Za-z0-9_]*|\[[0-9]+\]"""
+  private val SupportedPath = ("^\\$(?:" + PathStepPattern + ")+$").r
+  private val PathStep = PathStepPattern.r
   private val ArrayIndex = """\[([0-9]+)\]""".r
 
   def isSupportedTargetType(dt: DataType): Boolean = dt match {
@@ -290,6 +293,32 @@ object GpuVariantGet {
     withResource(new ColumnarBatch(inputColumns, input.getBase.getRowCount.toInt)) { batch =>
       withResource(fallbackBridge.columnarEval(batch)) { result =>
         result.getBase.incRefCount()
+      }
+    }
+  }
+
+  /** The steps of a supported path, so `$.a[0]` gives `.a` and `[0]`; None for other paths. */
+  def supportedPathSteps(path: String): Option[Seq[String]] =
+    parseSupportedPath(path).map(p => PathStep.findAllIn(p.substring(1)).toSeq)
+
+  /**
+   * The primitive type IDs (0 to 63) that this JVM's Spark rejects, found by evaluating Spark's own
+   * `try_variant_get` once per ID on a one-byte primitive at the root. A path step that meets a
+   * primitive reads only its type, so Spark throws exactly for the IDs it does not recognize.
+   * Spark 4.0 to 4.2 recognize 0 to 16 and 20. Asking Spark keeps the GPU in step with any build,
+   * including Databricks, that recognizes a different set.
+   */
+  private[rapids] lazy val UnrecognizedPrimitiveTypeIds: Seq[Int] = {
+    val probe = VariantGet(BoundReference(0, VariantType, nullable = true), Literal("$[0]"),
+      IntegerType, failOnError = false, timeZoneId = Some("UTC"))
+    val metadata = Array[Byte](1, 0, 0)
+    // Any failure, including a LinkageError, counts as unrecognized, which only costs a fallback.
+    (0 until 64).filter { id =>
+      try {
+        probe.eval(InternalRow(new VariantVal(Array((id << 2).toByte), metadata)))
+        false
+      } catch {
+        case _: Exception | _: LinkageError => true
       }
     }
   }

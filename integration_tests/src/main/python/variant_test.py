@@ -592,6 +592,34 @@ def test_parquet_variant_try_get_null_and_missing_fields(spark_tmp_path):
 
 @incompat
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_parquet_variant_try_get_with_non_ascii_keys(spark_tmp_path):
+    # Spark sorts object keys in UTF-16 order and cuDF searches them in UTF-8 byte order. The two
+    # orders differ only among non-ASCII keys, and every ASCII key sorts before them in both, so a
+    # lookup by a supported (ASCII) path finds the same field as Spark.
+    data_path = spark_tmp_path + '/VARIANT_NON_ASCII_KEYS_PARQUET'
+
+    def write_data(spark):
+        spark.sql("""
+          SELECT parse_json(json) AS v
+          FROM VALUES
+            ('{"\\uFF21":2,"\\uD83D\\uDE00":1,"id":3,"z":{"\\uFFFD":0,"\\uD800\\uDC00":1,"id":4}}'),
+            ('{"\\uD83D\\uDE00":1,"\\uFF21":2}'),
+            ('{"id":5,"\\uFF49\\uFF44":6,"z":{"\\uD83D\\uDE00":7}}')
+          AS source(json)
+        """).write.mode('overwrite').parquet(data_path)
+
+    _with_cpu_variant_session(write_data)
+
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(data_path).selectExpr(
+            "try_variant_get(v, '$.id', 'bigint') AS id",
+            "try_variant_get(v, '$.z.id', 'int') AS nested_id",
+            "try_variant_get(v, '$.missing', 'string') AS missing"),
+        conf=_variant_parquet_conf)
+
+
+@incompat
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
 def test_parquet_variant_try_get_integral_boundaries(spark_tmp_path):
     data_path = spark_tmp_path + '/VARIANT_INTEGRAL_BOUNDARIES_PARQUET'
 

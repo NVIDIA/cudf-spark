@@ -497,6 +497,62 @@ class GpuVariantGetSuite extends AnyFunSuite {
     }
   }
 
+  test("the unrecognized type IDs come from Spark and drive the header check") {
+    // Spark 4.0 to 4.2 recognize primitive type IDs 0 to 16 and 20. Check only what every build
+    // must agree on, so a runtime that recognizes a different set of newer IDs still passes.
+    val unrecognized = GpuVariantGet.UnrecognizedPrimitiveTypeIds
+    assert((0 to 16).forall(id => !unrecognized.contains(id)))
+    assert((21 to 63).forall(unrecognized.contains))
+    assert(GpuVariantExtraction.idRanges(Seq(21, 17, 19, 18, 22, 63)) ==
+      Seq((17, 19), (21, 22), (63, 63)))
+    val uuid = Array[Byte](0x50) ++ new Array[Byte](16)
+    withVariant(Seq(encodedValue, uuid)) { variant =>
+      GpuVariantExtraction.withRawExtraction(variant, "$.id") { raw =>
+        // A build that does not recognize UUID (20) must fall back where this Spark does not.
+        assert(!raw.hasUnrecognizedPrimitiveStep)
+        assert(raw.hasUnrecognizedPrimitiveStep(Seq(20)))
+        assert(!raw.hasUnrecognizedPrimitiveStep(Seq(16, 21)))
+        assert(!raw.hasUnrecognizedPrimitiveStep(Seq.empty))
+      }
+    }
+  }
+
+  test("path prefixes come from the parser that accepts the path") {
+    Seq(
+      "$.a" -> Seq(),
+      "$[0]" -> Seq(),
+      "$.a.b" -> Seq("$.a"),
+      "$.a[0].b_1" -> Seq("$.a", "$.a[0]"),
+      "$[1][2].c[3]" -> Seq("$[1]", "$[1][2]", "$[1][2].c")).foreach { case (path, prefixes) =>
+      withClue(path) {
+        assert(GpuVariantExtraction.pathPrefixes(path).contains(prefixes))
+        assert(GpuVariantGet.supportedPathSteps(path).map(_.mkString("$", "", "")).contains(path))
+      }
+    }
+    Seq("$", "$.", "$['a']", "$.a.*", "$[99999999999]", "a").foreach { path =>
+      withClue(path)(assert(GpuVariantExtraction.pathPrefixes(path).isEmpty))
+    }
+  }
+
+  test("ASCII keys are found among non-ASCII keys sorted in Spark's UTF-16 order") {
+    // Spark sorts object keys by UTF-16 code units, so it writes "id" < U+1F600 < U+FF21, while
+    // UTF-8 byte order puts U+FF21 before U+1F600. ASCII keys sort first in both orders, so
+    // cuDF's byte-order binary search still finds them.
+    val keys = Seq("\uFF21", "\uD83D\uDE00", "id").map(_.getBytes("UTF-8"))
+    val offsets = keys.scanLeft(0)(_ + _.length).map(_.toByte)
+    val metadata = Array[Byte](1, 3) ++ offsets ++ keys.flatten
+    val bytes = Array[Byte](2, 3, 2, 1, 0, 0, 2, 4, 6, 12, 3, 12, 1, 12, 2)
+    val cpu = VariantGet(BoundReference(0, VariantType, nullable = true), Literal("$.id"),
+      IntegerType, failOnError = false, timeZoneId = Some("UTC"))
+    assert(cpu.eval(InternalRow(new VariantVal(bytes, metadata))) == 3)
+    withVariant(Seq(bytes, emptyObject), metadata) { variant =>
+      assert(decodeOrFallback(variant, IntegerType, "$.id") { host =>
+        assert(host.getInt(0) == 3)
+        assert(host.isNull(1))
+      }.isDefined)
+    }
+  }
+
   test("known gap: unsorted or out-of-range object field ids read as missing paths") {
     // cuDF binary-searches the field ids, while Spark scans objects with fewer than 32 fields
     // linearly and probes larger ones in a different order. Spark returns

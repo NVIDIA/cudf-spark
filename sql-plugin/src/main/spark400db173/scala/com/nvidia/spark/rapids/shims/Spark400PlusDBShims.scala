@@ -61,7 +61,9 @@ trait Spark400PlusDBShims extends Spark341PlusDBShims {
           ("path", TypeSig.lit(TypeEnum.STRING), TypeSig.STRING)),
         GpuVariantGetMeta)
         .incompat("cuDF Variant extraction currently decodes exact physical Variant types; " +
-          "Spark try_variant_get cast semantics can return different values")
+          "Spark try_variant_get cast semantics can return different values; object field ids " +
+          "that are unsorted or outside the metadata dictionary (which the Variant spec " +
+          "forbids) can return NULL where Spark returns a value or raises an error")
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
     super.getExprs ++ shimExprs
   }
