@@ -16,6 +16,8 @@
 
 package com.nvidia.spark.rapids
 
+import com.nvidia.spark.rapids.parquet.GpuParquetScan
+
 import org.apache.spark.sql.connector.read.Scan
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 
@@ -51,9 +53,15 @@ trait GpuBatchScanExecMetrics extends GpuExec {
       createMetric(MODERATE_LEVEL, DESCRIPTION_ICEBERG_DV_POSITIONS),
     ICEBERG_DV_LOAD_TIME ->
       createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_ICEBERG_DV_LOAD_TIME),
-  ) ++ fileCacheMetrics ++ scanCustomMetrics
+  ) ++ fileCacheMetrics ++ parquetRowGroupMetrics ++ scanCustomMetrics
 
   lazy val fileCacheMetrics: Map[String, GpuMetric] = createFileCacheMetrics()
+
+  // Delta V2 and Iceberg scans don't register these yet, so their row group counts are dropped.
+  private lazy val parquetRowGroupMetrics: Map[String, GpuMetric] = scan match {
+    case _: GpuParquetScan => createParquetRowGroupMetrics()
+    case _ => Map.empty
+  }
 
   private lazy val scanCustomMetrics: Map[String, GpuMetric] = {
     scan.supportedCustomMetrics().map { metric =>

@@ -348,19 +348,26 @@ class SourceResolverTest(unittest.TestCase):
                   load_source_graph(str(ROOT / 'scala2.13' / 'pom.xml')))
         variants, _ = scan_module_sources(str(ROOT / 'tests'),
                                           set().union(*graphs), EXTERNAL_EXACT_TARGETS)
-        suite_names = {
-            'GpuIcebergVariantPostProcessorSuite.scala',
-            'GpuIcebergVariantSchemaSuite.scala',
+        common_suite_names = {
             'GpuMultiThreadIcebergParquetReaderSuite.scala',
             'GpuPostProcessorSuite.scala',
             'IcebergDeletionVectorSuite.scala',
             'IcebergS3InputFileSuite.scala',
         }
+        spark40_suite_names = common_suite_names | {
+            'GpuIcebergVariantActionBuildingSuite.scala',
+        }
+        spark41_suite_names = common_suite_names | {
+            'GpuIcebergVariantPostProcessorSuite.scala',
+            'GpuIcebergVariantSchemaSuite.scala',
+        }
+        suite_names = spark40_suite_names | spark41_suite_names
         expected = {
-            '411': suite_names,
-            '412': suite_names,
-            '413': suite_names,
-            '414': {'IcebergDeletionVectorSuite.scala'},
+            '405': spark40_suite_names,
+            '411': spark41_suite_names,
+            '412': spark41_suite_names,
+            '413': spark41_suite_names,
+            '414': spark41_suite_names,
             '420': set(),
             '500': set(),
         }

@@ -115,12 +115,14 @@ class GpuNullBatchIteratorSuite extends AnyFunSuite with BeforeAndAfterEach {
     GpuSemaphore.initialize(1)
     GpuDeviceManager.setRmmTaskInitEnabled(false)
     val other = new MockTaskContext(2, 0)
-    TrampolineUtil.setTaskContext(new MockTaskContext(1, 0))
-    // A partitioned count(*) reads no columns, but partition columns are added on the GPU
-    val iter = GpuNullBatchIterator(new StructType(), 10, 10)
-    assert(GpuSemaphore.tryAcquire(other) == SemaphoreAcquired)
-    GpuSemaphore.releaseIfNecessary(other)
-    iter.next().close()
-    assert(GpuSemaphore.tryAcquire(other).isInstanceOf[AcquireFailed])
+    // The mock tasks never complete, so their retry state is reset when the context is unset
+    TestUtils.withTaskContext(new MockTaskContext(1, 0)) {
+      // A partitioned count(*) reads no columns, but partition columns are added on the GPU
+      val iter = GpuNullBatchIterator(new StructType(), 10, 10)
+      assert(GpuSemaphore.tryAcquire(other) == SemaphoreAcquired)
+      GpuSemaphore.releaseIfNecessary(other)
+      iter.next().close()
+      assert(GpuSemaphore.tryAcquire(other).isInstanceOf[AcquireFailed])
+    }
   }
 }

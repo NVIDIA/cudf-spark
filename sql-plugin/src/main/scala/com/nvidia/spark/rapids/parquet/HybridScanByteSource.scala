@@ -18,10 +18,11 @@ package com.nvidia.spark.rapids.parquet
 
 import scala.collection.mutable.ArrayBuffer
 
-import ai.rapids.cudf.{ByteRange, HostMemoryBuffer}
+import ai.rapids.cudf.{ByteRange, DeviceMemoryBuffer, HostMemoryBuffer}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric._
+import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.filecache.FileCache
 import com.nvidia.spark.rapids.jni.fileio.{RapidsFileIO, RapidsInputFile}
@@ -35,12 +36,12 @@ import org.apache.hadoop.fs.Path
  *
  * The reader plans a read as byte ranges of a Parquet file and asks for their contents.
  */
-private[parquet] trait HybridScanByteSource {
+private[parquet] trait HybridScanByteSource extends AutoCloseable {
   /**
-   * Fetch `ranges` into one host buffer laid out by [[HybridScanPipeline.hostBufferLayout]]. The
-   * caller owns the buffer.
+   * Fetch `ranges` into one host buffer laid out as `layout`, which
+   * [[HybridScanPipeline.hostBufferLayout]] computed for them. The caller owns the buffer.
    */
-  def fetchToBuffer(ranges: Array[ByteRange]): HostMemoryBuffer
+  def fetchToHostBuffer(ranges: Array[ByteRange], layout: HostBufferLayout): HostMemoryBuffer
 
   /**
    * Fetch `ranges` into host memory, returning one buffer per range in the order requested. An
@@ -51,23 +52,51 @@ private[parquet] trait HybridScanByteSource {
     if (ranges.isEmpty) {
       Array.empty
     } else {
-      withResource(fetchToBuffer(ranges))(HybridScanPipeline.sliceRanges(_, ranges))
+      val layout = HybridScanPipeline.hostBufferLayout(ranges)
+      withResource(fetchToHostBuffer(ranges, layout)) { buffer =>
+        HybridScanPipeline.sliceRanges(buffer, ranges, layout)
+      }
     }
   }
+
+  /**
+   * Whether a fetch of `ranges` can go straight to device memory with [[fetchToDevice]],
+   * without this source staging it in host memory. cuFile may still stage it internally if it falls
+   * back to its own compatibility mode. Such a fetch writes to the device, so it needs the GPU
+   * semaphore.
+   */
+  def isDeviceReadDirect(ranges: Array[ByteRange]): Boolean = false
+
+  /**
+   * Fetch `ranges` into device memory, one buffer per range as [[fetch]] returns them. Only for
+   * a fetch [[isDeviceReadDirect]] accepts. The caller owns the buffers that come back.
+   *
+   * The device allocation is not retried here: call this inside a retry block, which must fetch
+   * again, since the buffers do not outlive an attempt.
+   */
+  def fetchToDevice(ranges: Array[ByteRange]): Array[DeviceMemoryBuffer] =
+    throw new UnsupportedOperationException("this source cannot read to the device")
+
+  override def close(): Unit = {}
 }
 
 /**
  * Ranges of a Parquet file, read from that file. Ranges already in the local file cache are
- * copied from there and the rest are read from the file, coalesced into as few requests as the
- * layout allows.
+ * copied from there and the rest are read from the file by `rangeReader`, coalesced into as few
+ * requests as the layout allows. Closing the source closes `rangeReader`.
  */
 private[parquet] class HybridScanFileByteSource(
     fileIO: RapidsFileIO,
     filePath: Path,
-    execMetrics: Map[String, GpuMetric]) extends HybridScanByteSource {
+    execMetrics: Map[String, GpuMetric],
+    rangeReader: HybridScanRangeReader) extends HybridScanByteSource {
 
-  override def fetchToBuffer(ranges: Array[ByteRange]): HostMemoryBuffer = {
-    val layout = HybridScanPipeline.hostBufferLayout(ranges)
+  def this(fileIO: RapidsFileIO, filePath: Path, execMetrics: Map[String, GpuMetric]) =
+    this(fileIO, filePath, execMetrics, new RapidsFileIORangeReader(execMetrics))
+
+  override def fetchToHostBuffer(
+      ranges: Array[ByteRange],
+      layout: HostBufferLayout): HostMemoryBuffer = {
     val buffer = withRetryNoSplit[HostMemoryBuffer] {
       HostMemoryBuffer.allocate(layout.totalSize)
     }
@@ -107,8 +136,7 @@ private[parquet] class HybridScanFileByteSource(
       }
     }
     if (remoteRanges.nonEmpty) {
-      val coalesced = GpuParquetScan.coalesceReads(remoteRanges.toSeq)
-      GpuParquetScan.readRangesToHostMemory(inputFile, buffer, coalesced, execMetrics)
+      rangeReader.readToHost(inputFile, buffer, GpuParquetScan.coalesceReads(remoteRanges.toSeq))
       remoteRanges.foreach { range =>
         execMetrics.getOrElse(FILECACHE_DATA_RANGE_MISSES, NoopMetric) += 1
         execMetrics.getOrElse(FILECACHE_DATA_RANGE_MISSES_SIZE, NoopMetric) += range.getLength
@@ -116,5 +144,71 @@ private[parquet] class HybridScanFileByteSource(
             .foreach(_.complete(buffer.slice(range.getOutputOffset, range.getLength)))
       }
     }
+  }
+
+  override def isDeviceReadDirect(ranges: Array[ByteRange]): Boolean =
+    rangeReader.isDeviceReadDirect(ranges)
+
+  /** Bypasses the file cache: it neither reads cached ranges nor adds to the cache. */
+  override def fetchToDevice(ranges: Array[ByteRange]): Array[DeviceMemoryBuffer] = {
+    if (ranges.isEmpty) {
+      Array.empty
+    } else {
+      import HybridScanPipeline.{alignUp, deviceBufferLayout, GDS_ALIGNMENT}
+      val layout = deviceBufferLayout(ranges, rangeReader.fileSize)
+      // cuFile reads directly only to a device address that is a multiple of GDS_ALIGNMENT. The
+      // layout's reads land at aligned offsets in the buffer, so the buffer itself must start on
+      // an aligned address, which RMM does not guarantee: it aligns an allocation to only 256
+      // bytes. The slack lets the buffer start at the first aligned address in the allocation.
+      // Each slice holds a reference to the allocation, so closing it here leaves the slices
+      // valid and releases the memory, slack included, once the last one is closed.
+      withResource(DeviceMemoryBuffer.allocate(layout.totalSize + GDS_ALIGNMENT - 1)) { alloc =>
+        val start = alignUp(alloc.getAddress) - alloc.getAddress
+        withResource(alloc.slice(start, layout.totalSize)) { buffer =>
+          rangeReader.readToDevice(buffer, layout.reads)
+          execMetrics.getOrElse(HYBRID_SCAN_DEVICE_BYTES_READ, NoopMetric) +=
+            layout.reads.map(_.getLength).sum
+          ranges.indices.toArray.safeMap { i =>
+            buffer.slice(layout.offsets(i), ranges(i).size())
+          }
+        }
+      }
+    }
+  }
+
+  override def close(): Unit = rangeReader.close()
+}
+
+/** How a [[HybridScanFileByteSource]] reads the ranges of its file that it does not have. */
+private[parquet] trait HybridScanRangeReader extends AutoCloseable {
+  /** Read `ranges` of `inputFile` into `buffer` at their output offsets. */
+  def readToHost(
+      inputFile: RapidsInputFile,
+      buffer: HostMemoryBuffer,
+      ranges: Seq[CopyRange]): Unit
+
+  /** See [[HybridScanByteSource.isDeviceReadDirect]]. */
+  def isDeviceReadDirect(ranges: Array[ByteRange]): Boolean = false
+
+  /** Read `ranges` of the file into `buffer` at their output offsets. */
+  def readToDevice(buffer: DeviceMemoryBuffer, ranges: Seq[CopyRange]): Unit =
+    throw new UnsupportedOperationException("this reader cannot read to the device")
+
+  /** The size of the file, which a device read's aligned blocks must not run past. */
+  def fileSize: Long =
+    throw new UnsupportedOperationException("this reader cannot read to the device")
+
+  override def close(): Unit = {}
+}
+
+/** Reads through [[RapidsFileIO]], so from any filesystem or object store it supports. */
+private[parquet] class RapidsFileIORangeReader(execMetrics: Map[String, GpuMetric])
+  extends HybridScanRangeReader {
+
+  override def readToHost(
+      inputFile: RapidsInputFile,
+      buffer: HostMemoryBuffer,
+      ranges: Seq[CopyRange]): Unit = {
+    GpuParquetScan.readRangesToHostMemory(inputFile, buffer, ranges, execMetrics)
   }
 }

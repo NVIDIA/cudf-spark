@@ -471,11 +471,15 @@ case class ParquetFileInfoWithBlockMeta(filePath: Path, blocks: collection.Seq[B
     hasInt96Timestamps: Boolean,
     // Row number of the first row in each block considering all rows in blocks.
     // If non-empty, its size should be the same as blocks.size
-    blocksFirstRowIndices: Seq[Long] = Seq.empty) {
+    blocksFirstRowIndices: Seq[Long] = Seq.empty,
+    // The row groups `blocks` stands for, when it merges them into one block
+    mergedRowGroups: Option[Int] = None) {
   if (blocksFirstRowIndices.nonEmpty) {
     require(blocks.length == blocksFirstRowIndices.length, s"Blocks length ${blocks.length} not " +
       s"matching first row length ${blocksFirstRowIndices.length}")
   }
+
+  def numRowGroups: Int = mergedRowGroups.getOrElse(blocks.size)
 }
 
 private[rapids] case class BlockMetaWithPartFile(
@@ -868,9 +872,10 @@ protected case class GpuParquetFileFilterHandler(
                     Seq.empty
                   }
                   val schema = new MessageType("root")
+                  // One offset per selected row group; the synthetic block merges them.
                   return ParquetFileInfoWithBlockMeta(filePath, blocks, file.partitionValues,
                     schema, readDataSchema, DateTimeRebaseLegacy, DateTimeRebaseLegacy,
-                    hasInt96Timestamps = false)
+                    hasInt96Timestamps = false, mergedRowGroups = Some(offsets.length))
                 }
 
                 (tableFooter.serializeThriftFile(), tableFooter.getRowIndexOffsets)
@@ -1490,7 +1495,7 @@ abstract class AbstractGpuParquetMultiFilePartitionReaderFactory(
       files: Array[PartitionedFile],
       conf: Configuration,
       poolConf: ThreadPoolConf): Array[BlockMetaWithPartFile] = {
-    if (numFilesFilterParallel > 0) {
+    val metas = if (numFilesFilterParallel > 0) {
       val tc = TaskContext.get()
       val threadPool = MultiFileReaderThreadPool.getOrCreateThreadPool(poolConf)
       files.grouped(numFilesFilterParallel).map { fileGroup =>
@@ -1513,6 +1518,8 @@ abstract class AbstractGpuParquetMultiFilePartitionReaderFactory(
           hadoopConf, filters, readDataSchema)
       }
     }
+    metrics.get(ROW_GROUPS_FETCHED).foreach(_ += metas.map(_.meta.numRowGroups).sum)
+    metas
   }
 
   /**
@@ -1624,7 +1631,8 @@ case class GpuParquetMultiFilePartitionReaderFactory(
         }
       }
       new HybridScanMultithreadedParquetPartitionReader(fileIO, conf, files,
-        HybridScanContext(readDataSchema, config.filters, config.filterKeepThreshold, execMetrics),
+        HybridScanContext(readDataSchema, config.filters, config.filterKeepThreshold,
+          config.maxH2DPackSize, config.minH2DPackSize, execMetrics),
         readFooter,
         maxReadBatchSizeRows = maxReadBatchSizeRows,
         maxReadBatchSizeBytes = maxReadBatchSizeBytes,
@@ -1769,7 +1777,8 @@ case class GpuParquetPartitionReaderFactory(
       val options = HybridScanPipeline.parquetOptions(readDataSchema.fieldNames)
       new HybridScanPerFileParquetPartitionReader(
         HybridScanSplit(byteSource, file.start, file.length), footer, options,
-        HybridScanContext(readDataSchema, config.filters, config.filterKeepThreshold, metrics))
+        HybridScanContext(readDataSchema, config.filters, config.filterKeepThreshold,
+          config.maxH2DPackSize, config.minH2DPackSize, metrics))
     }
   }
 
@@ -1782,6 +1791,7 @@ case class GpuParquetPartitionReaderFactory(
     metrics.get(FILTER_TIME).foreach {
       _ += (System.nanoTime() - startTime)
     }
+    metrics.get(ROW_GROUPS_FETCHED).foreach(_ += singleFileInfo.numRowGroups)
     new ParquetPartitionReader(fileIO, conf, file, singleFileInfo.filePath, singleFileInfo.blocks,
       singleFileInfo.schema, isCaseSensitive, readDataSchema, partitionSchema, debugDumpPrefix,
       debugDumpAlways, maxReadBatchSizeRows, maxReadBatchSizeBytes, targetSizeBytes,
@@ -3373,10 +3383,12 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
       val hostBuffers = new ArrayBuffer[SingleHMBAndMeta]
       var filterTime = 0L
       var bufferStartTime = 0L
+      var rowGroupsFetched = 0
       val result = try {
         val filterStartTime = System.nanoTime()
         val fileBlockMeta = filterFunc(file)
         filterTime = System.nanoTime() - filterStartTime
+        rowGroupsFetched = fileBlockMeta.numRowGroups
         bufferStartTime = System.nanoTime()
         if (fileBlockMeta.blocks.isEmpty) {
           val bytesRead = fileSystemBytesRead() - startingBytesRead
@@ -3436,6 +3448,7 @@ abstract class AbstractMultiFileCloudParquetPartitionReader(
       }
       val bufferTime = System.nanoTime() - bufferStartTime
       result.setExecutionTime(filterTime, bufferTime)
+      result.setRowGroupsFetched(rowGroupsFetched)
       result
     }
   }
