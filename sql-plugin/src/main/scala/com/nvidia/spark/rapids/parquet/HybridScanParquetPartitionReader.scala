@@ -113,16 +113,16 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
 
   /**
    * Whether to read `ranges` from `source` straight to the device rather than through host
-   * memory, which only a source that can read them direct does. ALWAYS then waits for the GPU
-   * semaphore in the materialize phase. WHEN_SEMAPHORE_FREE takes the semaphore here if that needs
-   * no wait; if the GPU is busy it reads through host memory instead, and counts the bytes.
+   * memory, which only a source that can read them direct does. WAIT_IF_GPU_BUSY then waits for
+   * the GPU semaphore in the materialize phase. HOST_IF_GPU_BUSY takes the semaphore here if that
+   * needs no wait; if the GPU is busy it reads through host memory instead, and counts the bytes.
    */
   private def useDeviceRead(source: HybridScanByteSource, ranges: Array[ByteRange]): Boolean =
     gdsMode match {
       case RapidsConf.GpuDirectStorageMode.OFF => false
       case _ if !source.isDeviceReadDirect(ranges) => false
-      case RapidsConf.GpuDirectStorageMode.ALWAYS => true
-      case RapidsConf.GpuDirectStorageMode.WHEN_SEMAPHORE_FREE =>
+      case RapidsConf.GpuDirectStorageMode.WAIT_IF_GPU_BUSY => true
+      case RapidsConf.GpuDirectStorageMode.HOST_IF_GPU_BUSY =>
         val acquired = GpuSemaphore.tryAcquire(TaskContext.get()) == SemaphoreAcquired
         if (!acquired) {
           addToMetric(HYBRID_SCAN_GPU_BUSY_HOST_BYTES_READ, totalBytes(ranges))
@@ -139,7 +139,7 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
    * may do, so a `MULTITHREADED` pool thread passes `allowDictionaryPruning = false` and the task
    * prunes the fetched chunks instead ([[pruneFetchedWithDictionaries]]). A fetch the source can
    * read straight to the device is left for the materialize phase, which reads it under the
-   * semaphore; in WHEN_SEMAPHORE_FREE mode only if the semaphore is free, which takes it here.
+   * semaphore; in HOST_IF_GPU_BUSY mode only if the semaphore is free, which takes it here.
    */
   def planAndFetch(
       split: HybridScanSplit,

@@ -170,7 +170,7 @@ class HybridScanDeviceReadSuite extends SparkQueryCompareTestSuite {
     FilterCase("a filter no dictionary matches", EqualTo("filter_str", "key_500"),
       deviceReads = 0, hostReads = 1))
 
-  // With no task holding the semaphore, WHEN_SEMAPHORE_FREE reads the same as ALWAYS.
+  // With no task holding the semaphore, HOST_IF_GPU_BUSY reads the same as WAIT_IF_GPU_BUSY.
   for (filterCase <- filterCases; gdsMode <- GpuDirectStorageMode.values.toSeq;
        direct <- Seq(true, false)) {
     val file = if (direct) "a device-direct file" else "a file not readable to the device"
