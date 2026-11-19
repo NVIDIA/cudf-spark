@@ -250,11 +250,13 @@ private[parquet] class HybridScanMultithreadedParquetPartitionReader(
       }
       withResource(parsed) { reader =>
         withResource(context.scanFilters.ast.map(HybridScanPipeline.compileFilter)) { ast =>
-          filePipeline.planAndFetch(hybridSplit(file, metrics), reader, ast,
-            allowDictionaryPruning = false)
-            .map { fetched =>
-              closeOnExcept(fetched)(f => (f, reader.totalRowsInRowGroups(f.rowGroups)))
-            }
+          val split = hybridSplit(file, metrics)
+          withResource(split.source) { _ =>
+            filePipeline.planAndFetch(split, reader, ast, allowDictionaryPruning = false)
+              .map { fetched =>
+                closeOnExcept(fetched)(f => (f, reader.totalRowsInRowGroups(f.rowGroups)))
+              }
+          }
         }
       }
     }
