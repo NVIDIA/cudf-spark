@@ -84,13 +84,13 @@ class SerializeConcatHostBuffersDeserializeBatch(
   @transient private var hashBuildCacheInternal: HashBuildCache = null
   // Serializes building the GPU batch. GPU work must not hold this object's monitor, because
   // `doWriteObject` needs the monitor while Spark holds its memory manager lock.
-  // Lock order: `materializeLock`, then this object's monitor. `closeInternal` holds both while
-  // it waits for hash builders, so builders must not call `batch`.
+  // Lock order: `materializeLock`, then this object's monitor.
   @transient private lazy val materializeLock = new Object
 
   private def maybeGpuBatch: Option[SpillableColumnarBatch] = Option(batchInternal)
 
-  private def hashBuildCache: HashBuildCache = this.synchronized {
+  // Visible to tests in this package.
+  private[execution] def hashBuildCache: HashBuildCache = this.synchronized {
     if (hashBuildCacheInternal == null) {
       hashBuildCacheInternal = new HashBuildCache
     }
@@ -181,8 +181,7 @@ class SerializeConcatHostBuffersDeserializeBatch(
       filterOutNulls: Boolean,
       prepareBatch: Option[ColumnarBatch => ColumnarBatch],
       metrics: HashBuildMetrics): HashBackendProvider = {
-    // Resolve the broadcast batch before capturing it in the build closure. closeInternal holds
-    // the locks while waiting for builders, so the build must not call batch or hostBatch.
+    // Resolve the broadcast batch before capturing it in the build closure.
     val buildBatch = batch
     val key = HashBuildKey.fromExpressions(
       sourceProjection, boundBuiltKeys, compareNullsEqual, filterOutNulls)
@@ -289,13 +288,19 @@ class SerializeConcatHostBuffersDeserializeBatch(
    *
    * Public for tests.
    */
-  def closeInternal(): Unit = materializeLock.synchronized {
-    this.synchronized {
-      Seq(hashBuildCacheInternal, data, batchInternal).safeClose()
-      data = null
-      batchInternal = null
-      hashBuildCacheInternal = null
+  def closeInternal(): Unit = {
+    // Detach the fields under both locks, then close them without the locks: closing the hash
+    // build cache waits for builds in flight, which must not stall `batch` or `doWriteObject`.
+    val detached = materializeLock.synchronized {
+      this.synchronized {
+        val held = Seq(hashBuildCacheInternal, data, batchInternal)
+        data = null
+        batchInternal = null
+        hashBuildCacheInternal = null
+        held
+      }
     }
+    detached.safeClose()
   }
 
   @scala.annotation.nowarn("msg=method finalize in class Object is deprecated")

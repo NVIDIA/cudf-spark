@@ -17,11 +17,12 @@
 package org.apache.spark.sql.rapids.execution
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream, ObjectInputStream,
-  ObjectOutputStream}
-import java.util.concurrent.{Callable, CountDownLatch, Executors, ExecutorService, Future,
-  TimeoutException, TimeUnit}
+  ObjectOutputStream, OutputStream}
+import java.util.concurrent.{Callable, CountDownLatch, ExecutionException, Executors,
+  ExecutorService, Future, TimeoutException, TimeUnit}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 
-import ai.rapids.cudf.{Rmm, RmmAllocationMode, Table}
+import ai.rapids.cudf.{ColumnVector => CudfColumnVector, Rmm, RmmAllocationMode, Scalar, Table}
 import com.nvidia.spark.rapids.{GpuColumnVector, GpuDeviceManager, GpuSemaphore, NoopMetric,
   SpillableColumnarBatch, TestUtils}
 import com.nvidia.spark.rapids.Arm.withResource
@@ -82,6 +83,18 @@ class BroadcastEvictionSuite extends SpillUnitTestBase {
         .column(5.0, 2.0, 3.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
         .build()) { table =>
       GpuColumnVector.from(table, Array(IntegerType, StringType, DoubleType))
+    }
+  }
+
+  /** A batch whose host data is much larger than `ObjectOutputStream`'s 1 KiB block buffer. */
+  private def buildLargeBatch(): ColumnarBatch = {
+    val rows = 1 << 20
+    withResource(Scalar.fromInt(0)) { zero =>
+      withResource(CudfColumnVector.sequence(zero, rows)) { column =>
+        withResource(new Table(column)) { table =>
+          GpuColumnVector.from(table, Array(IntegerType))
+        }
+      }
     }
   }
 
@@ -176,8 +189,10 @@ class BroadcastEvictionSuite extends SpillUnitTestBase {
       })
       awaitOrFail(evictor, failure)
     } finally {
-      // Interrupt a stuck eviction so that it releases the memory manager lock
-      try stop(pool) finally evictorContext.markTaskComplete()
+      // Interrupt a stuck eviction so that it releases the memory manager lock. Do not wait for
+      // it: one blocked on a monitor stops only once the test releases the paused task, and
+      // waiting would replace the deadlock failure.
+      try pool.shutdownNow() finally evictorContext.markTaskComplete()
     }
   }
 
@@ -273,7 +288,8 @@ class BroadcastEvictionSuite extends SpillUnitTestBase {
         new SerializeConcatHostBuffersDeserializeBatch(null, Seq.empty, 0, 0L) {
           override protected def buildGpuBatch(): SpillableColumnarBatch = {
             building.countDown()
-            assert(mayBuild.await(30, TimeUnit.SECONDS))
+            // Without a timeout, so it outlasts `evict`'s; the test releases it in `finally`
+            mayBuild.await()
             super.buildGpuBatch()
           }
         })
@@ -293,6 +309,101 @@ class BroadcastEvictionSuite extends SpillUnitTestBase {
         } finally {
           mayBuild.countDown()
           stop(pool)
+        }
+      }
+    }
+  }
+
+  test("closing a broadcast while eviction writes it keeps the host data until the write ends") {
+    withResource(buildLargeBatch()) { expected =>
+      withBroadcast(makeBroadcastBatch(expected)) { broadcast =>
+        broadcast.batch
+        val writing = new CountDownLatch(1)
+        val mayWrite = new CountDownLatch(1)
+        val pauseNextWrite = new AtomicBoolean(false)
+        val written = new ByteArrayOutputStream()
+        // Pauses the eviction at its first write after the stream header, with most of the host
+        // data still to be copied
+        val pausing = new OutputStream {
+          override def write(b: Int): Unit = write(Array(b.toByte), 0, 1)
+          override def write(b: Array[Byte], off: Int, len: Int): Unit = {
+            if (pauseNextWrite.compareAndSet(true, false)) {
+              writing.countDown()
+              assert(mayWrite.await(30, TimeUnit.SECONDS))
+            }
+            written.write(b, off, len)
+          }
+        }
+        val pool = Executors.newSingleThreadExecutor()
+        try {
+          val writer = pool.submit(new Callable[Unit] {
+            override def call(): Unit = withResource(new ObjectOutputStream(pausing)) { oos =>
+              pauseNextWrite.set(true)
+              broadcast.doWriteObject(oos)
+            }
+          })
+          assert(writing.await(30, TimeUnit.SECONDS))
+          broadcast.closeInternal()
+          mayWrite.countDown()
+          awaitOrFail(writer, "the eviction did not finish writing")
+          withBroadcast(read(written.toByteArray))(assertSameData(expected, _))
+        } finally {
+          mayWrite.countDown()
+          stop(pool)
+        }
+      }
+    }
+  }
+
+  test("closing a broadcast does not block eviction while a hash build is in flight") {
+    withResource(buildBatch()) { expected =>
+      withBroadcast(makeBroadcastBatch(expected)) { broadcast =>
+        broadcast.batch
+        val building = new CountDownLatch(1)
+        val mayBuild = new CountDownLatch(1)
+        val builderContext = new MockTaskContext(taskAttemptId = 3, partitionId = 2)
+        val closerThread = new AtomicReference[Thread]()
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+          // A task pauses while building a hash table from the broadcast, then fails
+          val builder = pool.submit(new Callable[Unit] {
+            override def call(): Unit = {
+              TrampolineUtil.setTaskContext(builderContext)
+              try {
+                val key = HashBuildKey(Seq.empty, Seq.empty, compareNullsEqual = false,
+                  filterOutNulls = false)
+                broadcast.hashBuildCache.getOrBuild(key, HashBuildMetrics()) {
+                  building.countDown()
+                  // Without a timeout, so it outlasts `evict`'s; the test releases it in `finally`
+                  mayBuild.await()
+                  throw new IllegalStateException("test hash build")
+                }
+              } finally {
+                TrampolineUtil.unsetTaskContext()
+              }
+            }
+          })
+          assert(building.await(30, TimeUnit.SECONDS))
+          val closer = pool.submit(new Callable[Unit] {
+            override def call(): Unit = {
+              closerThread.set(Thread.currentThread())
+              broadcast.closeInternal()
+            }
+          })
+          // Wait until closeInternal waits for the hash build
+          val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
+          while (Option(closerThread.get()).forall(_.getState != Thread.State.WAITING)) {
+            assert(System.nanoTime() < deadline, "closeInternal did not wait for the hash build")
+            Thread.sleep(10)
+          }
+          evict("deadlock: closing the broadcast holds its locks while waiting for a hash build")(
+            write(broadcast))
+          mayBuild.countDown()
+          awaitOrFail(closer, "closeInternal did not finish")
+          intercept[ExecutionException](builder.get(30, TimeUnit.SECONDS))
+        } finally {
+          mayBuild.countDown()
+          try stop(pool) finally builderContext.markTaskComplete()
         }
       }
     }
