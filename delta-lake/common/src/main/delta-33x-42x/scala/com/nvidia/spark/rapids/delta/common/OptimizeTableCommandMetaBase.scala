@@ -45,15 +45,12 @@ abstract class OptimizeTableCommandMetaBase(
 
     val deltaLog = getDeltaLogForOptimize()
 
-    // DV write unsupported on GPU
-    if (DeletionVectorUtils.deletionVectorsWritable(deltaLog.unsafeVolatileSnapshot) &&
+    // DV write unsupported on GPU. Z-ORDER reads the live rows through the deletion vectors and
+    // rewrites them into files without DVs, so only compaction needs the fallback.
+    if (cmd.zOrderBy.isEmpty &&
+        DeletionVectorUtils.deletionVectorsWritable(deltaLog.unsafeVolatileSnapshot) &&
         cmd.conf.getConf(DeltaSQLConf.DELETE_USE_PERSISTENT_DELETION_VECTORS)) {
       willNotWorkOnGpu("Deletion vectors are not supported on GPU")
-    }
-
-    // Z-Order unsupported
-    if (cmd.zOrderBy.nonEmpty) {
-      willNotWorkOnGpu("Z-Order optimize is not supported on GPU")
     }
 
     // Ensure write path generally OK
