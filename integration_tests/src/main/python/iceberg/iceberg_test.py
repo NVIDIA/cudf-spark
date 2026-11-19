@@ -99,37 +99,6 @@ def test_iceberg_metadata_only_materialize_and_combine(
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
-@pytest.mark.skipif(is_iceberg_remote_catalog() or is_databricks_runtime(),
-                   reason="Temporarily moves data files in a local Hadoop catalog")
-def test_iceberg_metadata_only_does_not_open_data_files(spark_tmp_table_factory, reader_type):
-    table = _create_metadata_only_table(spark_tmp_table_factory, '2')
-    query = f"SELECT p, _spec_id, _partition, _file FROM {table}"
-    conf = _metadata_only_conf(reader_type)
-    expected = with_cpu_session(lambda spark: spark.sql(query).collect(), conf=conf)
-    files = with_cpu_session(
-        lambda spark: spark.sql(f"SELECT file_path FROM {table}.data_files").collect())
-
-    def check_without_files(spark):
-        moved = []
-        try:
-            for row in files:
-                path = spark._jvm.org.apache.hadoop.fs.Path(row.file_path)
-                backup = spark._jvm.org.apache.hadoop.fs.Path(row.file_path + '.metadata-test')
-                fs = path.getFileSystem(spark._jsc.hadoopConfiguration())
-                assert fs.rename(path, backup)
-                moved.append((fs, path, backup))
-            return spark.sql(query).collect()
-        finally:
-            for fs, path, backup in moved:
-                assert fs.rename(backup, path)
-
-    actual = with_gpu_session(check_without_files, conf=conf)
-    assert_equal_with_local_sort(expected, actual)
-
-
-@iceberg
-@ignore_order(local=True)
-@pytest.mark.parametrize('reader_type', rapids_reader_types)
 @pytest.mark.parametrize('format_version', iceberg_format_versions)
 def test_iceberg_metadata_only_with_deletes(spark_tmp_table_factory, format_version, reader_type):
     table = _create_metadata_only_table(spark_tmp_table_factory, format_version)

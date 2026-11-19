@@ -17,29 +17,27 @@
 package com.nvidia.spark.rapids.iceberg.parquet.metadata;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Function;
 
+import scala.Option;
 import scala.collection.AbstractIterator;
-import scala.collection.JavaConverters;
+import scala.collection.Iterator;
+import scala.collection.immutable.List$;
 
-import com.nvidia.spark.rapids.ConcatAndConsumeAll;
 import com.nvidia.spark.rapids.DateTimeRebaseCorrected$;
-import com.nvidia.spark.rapids.GpuSemaphore$;
-import com.nvidia.spark.rapids.SpillPriorities;
-import com.nvidia.spark.rapids.SpillableColumnarBatch;
+import com.nvidia.spark.rapids.GpuNullBatchIterator;
 import com.nvidia.spark.rapids.iceberg.ShimUtils;
 import com.nvidia.spark.rapids.iceberg.parquet.GpuIcebergParquetReaderConf;
 import com.nvidia.spark.rapids.iceberg.parquet.GpuParquetReaderPostProcessor;
 import com.nvidia.spark.rapids.iceberg.parquet.MultiFile;
 import com.nvidia.spark.rapids.iceberg.parquet.MultiThread;
 import com.nvidia.spark.rapids.parquet.ParquetFileInfoWithBlockMeta;
-import com.nvidia.spark.rapids.utils.ResourceUtil;
 
 import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.DataFile;
@@ -50,14 +48,13 @@ import org.apache.iceberg.Schema;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.shaded.org.apache.parquet.schema.MessageType;
 import org.apache.iceberg.spark.SparkSchemaUtil;
+import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.Types;
-import org.apache.spark.TaskContext;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
-import org.apache.spark.sql.vectorized.ColumnVector;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
 import org.apache.spark.unsafe.types.UTF8String;
 
@@ -67,19 +64,16 @@ import org.apache.spark.unsafe.types.UTF8String;
  * <p>Iceberg already supplies exact record counts and constants for complete, unfiltered files
  * without deletes. When those values cover the projection, reading Parquet adds unnecessary I/O.
  *
- * <p>Each file produces a lazy sequence of batches sized from its constants and the configured
- * row, byte, and variable-width column limits before allocation. Optional combining follows the
- * reader mode and its file-metadata restrictions. Only planned batches that fit the output limits
- * can combine. Identical projected constants share one materialization; different constants are
- * materialized separately before concatenation, with completed inputs made spillable. Allocation
- * retries preserve the planned batch sizes;
- * OOM-driven splitting is not used to decide how many rows to read.
+ * <p>The planner combines the row counts into one file descriptor when the reader allows it
+ * and every file has the same projected constants. Otherwise it keeps each file's descriptor.
+ * The reader streams each descriptor in batches sized from the expected schema and configured
+ * limits, and uses its path and constants to materialize the projected columns.
  */
 public final class GpuIcebergMetadataReader extends AbstractIterator<ColumnarBatch>
     implements AutoCloseable {
   private final MetadataReadContext context;
   private final java.util.Iterator<FileMetadata> files;
-  private MetadataFileReader currentFile;
+  private Iterator<ColumnarBatch> batches;
   private boolean closed;
 
   public GpuIcebergMetadataReader(List<FileMetadata> files, GpuIcebergParquetReaderConf conf) {
@@ -87,9 +81,10 @@ public final class GpuIcebergMetadataReader extends AbstractIterator<ColumnarBat
     this.files = files.iterator();
   }
 
-  /** Prove eligibility from Iceberg metadata, without constructing or opening input files. */
-  public static Optional<List<FileMetadata>> plan(List<FileScanTask> tasks, Schema schema,
-      Function<FileScanTask, Map<Integer, ?>> constants) {
+  /** Plan metadata-only reads for a task group before opening any of its files. */
+  public static Optional<List<FileMetadata>> plan(List<FileScanTask> tasks,
+      GpuIcebergParquetReaderConf conf, Function<FileScanTask, Map<Integer, ?>> constants) {
+    Schema schema = conf.expectedSchema();
     for (Types.NestedField field : schema.columns()) {
       int id = field.fieldId();
       if (id == MetadataColumns.ROW_POSITION.fieldId() ||
@@ -115,7 +110,45 @@ public final class GpuIcebergMetadataReader extends AbstractIterator<ColumnarBat
       files.add(new FileMetadata(ShimUtils.locationOf(task.file()),
           task.file().recordCount(), values));
     }
-    return Optional.of(files);
+    return Optional.of(combineFiles(files, conf));
+  }
+
+  private static List<FileMetadata> combineFiles(List<FileMetadata> files,
+      GpuIcebergParquetReaderConf conf) {
+    if (files.size() < 2 || !canCombineFiles(conf)) {
+      return files;
+    }
+    FileMetadata first = files.get(0);
+    long rows = first.getRowCount();
+    for (int i = 1; i < files.size(); i++) {
+      FileMetadata file = files.get(i);
+      // One descriptor must represent both the total row count and every projected value.
+      if (file.getRowCount() > Long.MAX_VALUE - rows ||
+          !first.hasSameProjectedConstants(file, conf.expectedSchema())) {
+        return files;
+      }
+      rows += file.getRowCount();
+    }
+    return Collections.singletonList(new FileMetadata(first.getPath(), rows, first.getConstants()));
+  }
+
+  private static boolean canCombineFiles(GpuIcebergParquetReaderConf conf) {
+    if (conf.expectedSchema().findField(MetadataColumns.FILE_PATH.fieldId()) != null) {
+      return false;
+    }
+    if (conf.threadConf() instanceof MultiThread) {
+      MultiThread multiThread = (MultiThread) conf.threadConf();
+      // A positive threshold enables combining. Only metadata is combined here, so the
+      // whole group can share a descriptor even when its rows span many output batches.
+      return !multiThread.disableCombining() &&
+          multiThread.combineConf().combineThresholdSize() > 0 &&
+          !multiThread.hasFilePathMetadata() && !multiThread.hasRowPositionMetadata();
+    }
+    if (conf.threadConf() instanceof MultiFile) {
+      MultiFile multiFile = (MultiFile) conf.threadConf();
+      return !multiFile.hasFilePathMetadata() && !multiFile.hasRowPositionMetadata();
+    }
+    return false;
   }
 
   private static boolean canUseRecordCount(FileScanTask task) {
@@ -130,35 +163,18 @@ public final class GpuIcebergMetadataReader extends AbstractIterator<ColumnarBat
         task.deletes().isEmpty() && Expressions.alwaysTrue().equals(task.residual());
   }
 
-  private ColumnarBatch concatenate(SpillableColumnarBatch[] parts) {
-    return ResourceUtil.withRetryNoSplit(() -> {
-      ColumnarBatch[] materialized = new ColumnarBatch[parts.length];
-      try {
-        for (int i = 0; i < parts.length; i++) {
-          materialized[i] = parts[i].getColumnarBatch();
-        }
-      } catch (Throwable t) {
-        ResourceUtil.closeAll(t, materialized);
-        throw t;
-      }
-      // Concatenation consumes all materialized inputs, including on failure.
-      return ConcatAndConsumeAll.buildNonEmptyBatchFromTypes(materialized, context.getSparkTypes());
-    });
-  }
-
   @Override
   public boolean hasNext() {
     if (closed) {
       return false;
     }
-    while (currentFile == null || !currentFile.hasNext()) {
-      currentFile = null;
+    while (batches == null || !batches.hasNext()) {
       if (!files.hasNext()) {
         return false;
       }
       FileMetadata file = files.next();
       if (file.getRowCount() > 0) {
-        currentFile = new MetadataFileReader(file, context);
+        batches = context.batchesFor(file);
       }
     }
     return true;
@@ -169,79 +185,13 @@ public final class GpuIcebergMetadataReader extends AbstractIterator<ColumnarBat
     if (!hasNext()) {
       throw new NoSuchElementException("No more Iceberg metadata batches");
     }
-    if (context.getCombineThresholdBytes() == 0 ||
-        currentFile.getNextBatchRows() == context.getMaxRows() ||
-        currentFile.getRowBytes() * currentFile.getNextBatchRows() >=
-            context.getCombineThresholdBytes()) {
-      return currentFile.next();
-    }
-
-    List<MetadataFileBatch> parts = new ArrayList<>();
-    int rows = 0;
-    long bytes = 0;
-    long[] leafBytes = new long[currentFile.getLeafSizes().length];
-    while (hasNext()) {
-      int nextRows = currentFile.getNextBatchRows();
-      long nextBytes = currentFile.getRowBytes() * nextRows;
-      long[] leafSizes = currentFile.getLeafSizes();
-      if (!parts.isEmpty()) {
-        boolean fits = nextRows <= context.getMaxRows() - rows &&
-            nextBytes <= context.getMaxBytes() - bytes;
-        for (int i = 0; fits && i < leafBytes.length; i++) {
-          fits = leafSizes[i] * nextRows <= context.getColumnLimit() - leafBytes[i];
-        }
-        if (!fits) {
-          break;
-        }
-      }
-      // Consume a batch already sized for this file; combining never changes its row capacity.
-      currentFile.takeNextBatchRows();
-      int last = parts.size() - 1;
-      if (last >= 0 && parts.get(last).getFile().sameOutput(currentFile)) {
-        MetadataFileBatch previous = parts.get(last);
-        parts.set(last, new MetadataFileBatch(previous.getFile(), previous.getRows() + nextRows));
-      } else {
-        parts.add(new MetadataFileBatch(currentFile, nextRows));
-      }
-      rows += nextRows;
-      bytes += nextBytes;
-      for (int i = 0; i < leafBytes.length; i++) {
-        leafBytes[i] += leafSizes[i] * nextRows;
-      }
-      if (rows == context.getMaxRows() || bytes >= context.getCombineThresholdBytes()) {
-        break;
-      }
-    }
-    return materialize(parts.toArray(new MetadataFileBatch[0]));
-  }
-
-  private ColumnarBatch materialize(MetadataFileBatch[] batches) {
-    if (batches.length == 1) {
-      return batches[0].getFile().materializeRows(batches[0].getRows());
-    }
-    SpillableColumnarBatch[] parts = new SpillableColumnarBatch[batches.length];
-    Throwable failure = null;
-    try {
-      for (int i = 0; i < batches.length; i++) {
-        MetadataFileBatch batch = batches[i];
-        ColumnarBatch materialized = batch.getFile().materializeRows(batch.getRows());
-        parts[i] = ResourceUtil.closeOnExcept(materialized,
-            cb -> SpillableColumnarBatch.apply(cb, SpillPriorities.ACTIVE_BATCHING_PRIORITY()));
-      }
-      return concatenate(parts);
-    } catch (Throwable t) {
-      failure = t;
-      throw t;
-    } finally {
-      ResourceUtil.closeAll(failure, parts);
-    }
+    return batches.next();
   }
 
   @Override
   public void close() {
     closed = true;
-    // A partially consumed file retains only metadata. Returned batches belong to the caller.
-    currentFile = null;
+    batches = null;
   }
 
   /** File-level metadata sufficient to produce rows without opening a data file. */
@@ -267,68 +217,103 @@ public final class GpuIcebergMetadataReader extends AbstractIterator<ColumnarBat
     public Map<Integer, ?> getConstants() {
       return constants;
     }
+
+    private boolean hasSameProjectedConstants(FileMetadata other, Schema schema) {
+      for (Types.NestedField field : schema.columns()) {
+        int id = field.fieldId();
+        if (!sameConstant(field.type(), constants.get(id), other.getConstants().get(id))) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    private static boolean sameConstant(Type type, Object left, Object right) {
+      if (left == right) {
+        return true;
+      }
+      if (left == null || right == null) {
+        return false;
+      }
+      // Compare struct children as stored. Spark row equality treats -0.0 and +0.0 as equal,
+      // but substituting one partition value for the other is observable in the projection.
+      if (type.isStructType()) {
+        List<Types.NestedField> children = type.asStructType().fields();
+        for (int i = 0; i < children.size(); i++) {
+          Type child = children.get(i).type();
+          DataType sparkType = SparkSchemaUtil.convert(child);
+          if (!sameConstant(child, ((InternalRow) left).get(i, sparkType),
+              ((InternalRow) right).get(i, sparkType))) {
+            return false;
+          }
+        }
+        return true;
+      }
+      if (left instanceof Float) {
+        return Float.floatToRawIntBits((Float) left) == Float.floatToRawIntBits((Float) right);
+      }
+      if (left instanceof Double) {
+        return Double.doubleToRawLongBits((Double) left) ==
+            Double.doubleToRawLongBits((Double) right);
+      }
+      return Objects.deepEquals(left, right);
+    }
   }
 
-  /**
-   * Shares schemas and sizing limits across files to avoid repeated schema conversion.
-   * Row capacity is estimated before materialization, including each variable-width leaf, so
-   * a large file is emitted in bounded batches without waiting for an allocation failure.
-   */
+  /** Shares the expected schema's row estimate and the empty Parquet schema across files. */
   private static final class MetadataReadContext {
     private final GpuIcebergParquetReaderConf conf;
-    private final DataType[] sparkTypes;
-    private final MessageType emptyParquetSchema;
+    private final StructType sparkSchema;
+    private final StructType emptySparkSchema = new StructType();
+    private final MessageType emptyParquetSchema =
+        new MessageType("metadata", Collections.emptyList());
     private final org.apache.parquet.schema.MessageType unshadedParquetSchema;
-    private final int maxRows;
     private final long maxBytes;
-    private final long columnLimit;
-    private final long combineThresholdBytes;
+    private final int maxRows;
 
     MetadataReadContext(GpuIcebergParquetReaderConf conf) {
       this.conf = conf;
-      StructField[] fields = SparkSchemaUtil.convert(conf.expectedSchema()).fields();
-      sparkTypes = new DataType[fields.length];
-      for (int i = 0; i < fields.length; i++) {
-        sparkTypes[i] = fields[i].dataType();
-      }
-      emptyParquetSchema = new MessageType("metadata", Collections.emptyList());
+      sparkSchema = SparkSchemaUtil.convert(conf.expectedSchema());
       unshadedParquetSchema = ShimUtils.unshadeParquetSchema(emptyParquetSchema);
-      maxRows = Math.max(1, conf.maxBatchSizeRows());
-      // The total byte bound also keeps string/binary offsets below cuDF's row limit.
       maxBytes = Math.max(1L, Math.min(Integer.MAX_VALUE,
           Math.min(conf.maxBatchSizeBytes(), conf.targetBatchSizeBytes())));
-      columnLimit = Math.min(conf.maxGpuColumnSizeBytes(), Integer.MAX_VALUE);
-      combineThresholdBytes = combineThreshold(conf, maxBytes);
+      maxRows = GpuNullBatchIterator.maxRows(sparkSchema, conf.maxBatchSizeRows(), maxBytes);
     }
 
-    private static long combineThreshold(GpuIcebergParquetReaderConf conf, long maxBytes) {
-      // Match the data readers' file-boundary restrictions, even for metadata-only projections.
-      if (conf.expectedSchema().findField(MetadataColumns.FILE_PATH.fieldId()) != null) {
-        return 0;
+    public Iterator<ColumnarBatch> batchesFor(FileMetadata file) {
+      Iterator<ColumnarBatch> batches = GpuNullBatchIterator.apply(emptySparkSchema,
+          file.getRowCount(), rowsPerBatch(file));
+      if (sparkSchema.isEmpty()) {
+        return batches;
       }
-      if (conf.threadConf() instanceof MultiThread) {
-        MultiThread multiThread = (MultiThread) conf.threadConf();
-        if (!multiThread.disableCombining() && !multiThread.hasFilePathMetadata() &&
-            !multiThread.hasRowPositionMetadata()) {
-          return Math.max(0, Math.min(maxBytes,
-              multiThread.combineConf().combineThresholdSize()));
-        }
-      } else if (conf.threadConf() instanceof MultiFile) {
-        MultiFile multiFile = (MultiFile) conf.threadConf();
-        if (!multiFile.hasFilePathMetadata() && !multiFile.hasRowPositionMetadata()) {
-          return maxBytes;
-        }
-      }
-      return 0;
+      ParquetFileInfoWithBlockMeta info = new ParquetFileInfoWithBlockMeta(
+          new Path(file.getPath()), List$.MODULE$.empty(), InternalRow.empty(),
+          unshadedParquetSchema, emptySparkSchema,
+          DateTimeRebaseCorrected$.MODULE$, DateTimeRebaseCorrected$.MODULE$, false,
+          List$.MODULE$.empty(), Option.empty());
+      GpuParquetReaderPostProcessor processor = new GpuParquetReaderPostProcessor(info,
+          file.getConstants(), conf.expectedSchema(), emptyParquetSchema, conf.metrics());
+      return batches.map(processor::process);
     }
 
-    public int estimateRowsPerBatch(long rowBytes, long[] leafSizes) {
-      long rows = maxRows;
-      if (rowBytes > 0) {
-        // A single row may exceed the soft byte target, as in the data readers.
-        rows = Math.min(rows, Math.max(1, maxBytes / rowBytes));
+    // Variable-width constants can be larger than the schema estimate, including inside structs.
+    private int rowsPerBatch(FileMetadata file) {
+      List<Types.NestedField> fields = conf.expectedSchema().columns();
+      List<Long> leaves = new ArrayList<>();
+      long rowBytes = 0;
+      for (int i = 0; i < fields.size(); i++) {
+        int id = fields.get(i).fieldId();
+        Object value = file.getConstants().containsKey(id) ? file.getConstants().get(id) :
+            UTF8String.fromString(new Path(file.getPath()).toString());
+        rowBytes += rowSize(value, sparkSchema.fields()[i].dataType(), leaves);
       }
-      for (long size : leafSizes) {
+
+      if (leaves.isEmpty()) {
+        return maxRows;
+      }
+      long rows = Math.min(maxRows, Math.max(1L, maxBytes / rowBytes));
+      long columnLimit = Math.min(conf.maxGpuColumnSizeBytes(), Integer.MAX_VALUE);
+      for (long size : leaves) {
         if (size > 0) {
           rows = Math.min(rows, columnLimit / size);
         }
@@ -338,143 +323,6 @@ public final class GpuIcebergMetadataReader extends AbstractIterator<ColumnarBat
             "Iceberg metadata value exceeds the GPU column size limit");
       }
       return (int) rows;
-    }
-
-    public GpuIcebergParquetReaderConf getConf() {
-      return conf;
-    }
-
-    public DataType[] getSparkTypes() {
-      return sparkTypes;
-    }
-
-    public MessageType getEmptyParquetSchema() {
-      return emptyParquetSchema;
-    }
-
-    public org.apache.parquet.schema.MessageType getUnshadedParquetSchema() {
-      return unshadedParquetSchema;
-    }
-
-    public int getMaxRows() {
-      return maxRows;
-    }
-
-    public long getMaxBytes() {
-      return maxBytes;
-    }
-
-    public long getColumnLimit() {
-      return columnLimit;
-    }
-
-    public long getCombineThresholdBytes() {
-      return combineThresholdBytes;
-    }
-  }
-
-  /**
-   * Emits one file's constants in a lazy sequence of pre-sized batches.
-   * Files may contain more rows than a GPU batch can represent, so only the remaining row count
-   * is retained between calls. Materialization uses the post-processor's non-splitting retry.
-   */
-  private static final class MetadataFileReader extends AbstractIterator<ColumnarBatch> {
-    private final FileMetadata file;
-    private final long rowBytes;
-    private final long[] leafSizes;
-    private final MetadataReadContext context;
-    private final Object[] values;
-    private final int rowsPerBatch;
-    private long remainingRows;
-    private GpuParquetReaderPostProcessor processor;
-
-    MetadataFileReader(FileMetadata file, MetadataReadContext context) {
-      this.file = file;
-      this.context = context;
-      List<Types.NestedField> fields = context.getConf().expectedSchema().columns();
-      values = new Object[fields.size()];
-      List<Long> leaves = new ArrayList<>();
-      long bytes = 0;
-      for (int i = 0; i < fields.size(); i++) {
-        int id = fields.get(i).fieldId();
-        values[i] = file.getConstants().containsKey(id) ? file.getConstants().get(id) :
-            UTF8String.fromString(new Path(file.getPath()).toString());
-        bytes += rowSize(values[i], context.getSparkTypes()[i], leaves);
-      }
-      rowBytes = bytes;
-      leafSizes = new long[leaves.size()];
-      for (int i = 0; i < leafSizes.length; i++) {
-        leafSizes[i] = leaves.get(i);
-      }
-      rowsPerBatch = context.estimateRowsPerBatch(rowBytes, leafSizes);
-      remainingRows = file.getRowCount();
-    }
-
-    public long getRowBytes() {
-      return rowBytes;
-    }
-
-    public long[] getLeafSizes() {
-      return leafSizes;
-    }
-
-    public int getNextBatchRows() {
-      return (int) Math.min(remainingRows, rowsPerBatch);
-    }
-
-    @Override
-    public boolean hasNext() {
-      return remainingRows > 0;
-    }
-
-    public Object[] getValues() {
-      return values;
-    }
-
-    public boolean sameOutput(MetadataFileReader other) {
-      return Arrays.deepEquals(values, other.getValues());
-    }
-
-    public int takeNextBatchRows() {
-      if (!hasNext()) {
-        throw new NoSuchElementException("No more rows in Iceberg metadata file");
-      }
-      int rows = getNextBatchRows();
-      remainingRows -= rows;
-      return rows;
-    }
-
-    @Override
-    public ColumnarBatch next() {
-      return materializeRows(takeNextBatchRows());
-    }
-
-    public ColumnarBatch materializeRows(int rows) {
-      if (rows <= 0 || rows > rowsPerBatch) {
-        throw new IllegalArgumentException("Metadata batch exceeds its estimated row capacity");
-      }
-      GpuSemaphore$.MODULE$.acquireIfNecessary(TaskContext.get());
-      ColumnarBatch batch = new ColumnarBatch(new ColumnVector[0], rows);
-      if (context.getSparkTypes().length > 0) {
-        batch = getProcessor().process(batch);
-      }
-      return batch;
-    }
-
-    public GpuParquetReaderPostProcessor getProcessor() {
-      if (processor == null) {
-        ParquetFileInfoWithBlockMeta info = new ParquetFileInfoWithBlockMeta(
-            new Path(file.getPath()),
-            JavaConverters.asScalaBufferConverter(Collections
-                .<org.apache.parquet.hadoop.metadata.BlockMetaData>emptyList()).asScala().toList(),
-            InternalRow.empty(), context.getUnshadedParquetSchema(), new StructType(),
-            DateTimeRebaseCorrected$.MODULE$, DateTimeRebaseCorrected$.MODULE$, false,
-            JavaConverters.asScalaBufferConverter(Collections.emptyList()).asScala().toList());
-        processor = new GpuParquetReaderPostProcessor(info, file.getConstants(),
-            context.getConf().expectedSchema(), context.getEmptyParquetSchema(),
-            context.getConf().metrics());
-      }
-      return processor;
     }
 
     // A conservative batch-size estimate. Keep variable-width leaves separate so a short value
@@ -497,25 +345,6 @@ public final class GpuIcebergMetadataReader extends AbstractIterator<ColumnarBat
         return bytes;
       }
       return (long) type.defaultSize() + 1;
-    }
-  }
-
-  /** A bounded run of planned file batches whose projected constants can be materialized once. */
-  private static final class MetadataFileBatch {
-    private final MetadataFileReader file;
-    private final int rows;
-
-    MetadataFileBatch(MetadataFileReader file, int rows) {
-      this.file = file;
-      this.rows = rows;
-    }
-
-    public MetadataFileReader getFile() {
-      return file;
-    }
-
-    public int getRows() {
-      return rows;
     }
   }
 }

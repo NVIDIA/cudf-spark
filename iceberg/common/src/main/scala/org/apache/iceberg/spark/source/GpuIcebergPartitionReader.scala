@@ -94,7 +94,7 @@ class GpuIcebergPartitionReader(
     val metadataTasks = if (queryUsesInputFile) {
       None
     } else {
-      Option(GpuIcebergMetadataReader.plan(scanTasks.asJava, conf.expectedSchema,
+      Option(GpuIcebergMetadataReader.plan(scanTasks.asJava, conf,
         scanTask => ShimUtils.constantsMap(scanTask, conf.expectedSchema, table)).orElse(null))
     }
     metadataTasks match {

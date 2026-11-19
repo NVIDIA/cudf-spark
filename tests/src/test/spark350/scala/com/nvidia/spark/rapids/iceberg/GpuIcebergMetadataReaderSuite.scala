@@ -16,8 +16,7 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark":["350"],"carryForward":"sameMinor"}
-{"spark":["400","401","402","403","404"],"carryForward":"none"}
-{"spark":["411","412","413"],"carryForward":"none"}
+{"spark":["400","411"],"carryForward":"sameMinor"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.iceberg
 
@@ -62,8 +61,15 @@ class GpuIcebergMetadataReaderSuite extends RmmSparkRetrySuiteBase {
       false, 0, false, None, false, Map.empty, threadConf, expected, None, false)
   }
 
+  private def plan(files: Seq[FileMetadata], readerConf: GpuIcebergParquetReaderConf)
+      : java.util.List[FileMetadata] = {
+    val tasks = files.map(f => task(path = f.getPath(), rows = f.getRowCount()))
+    val metadata = tasks.zip(files).toMap
+    GpuIcebergMetadataReader.plan(tasks.asJava, readerConf, t => metadata(t).getConstants()).get()
+  }
+
   private def newReader(files: Seq[FileMetadata], readerConf: GpuIcebergParquetReaderConf)
-      : GpuIcebergMetadataReader = new GpuIcebergMetadataReader(files.asJava, readerConf)
+      : GpuIcebergMetadataReader = new GpuIcebergMetadataReader(plan(files, readerConf), readerConf)
 
   private def file(value: String, rows: Long, path: String = "/does-not-exist.parquet")
       : FileMetadata = {
@@ -72,9 +78,10 @@ class GpuIcebergMetadataReaderSuite extends RmmSparkRetrySuiteBase {
     new FileMetadata(path, rows, constants)
   }
 
-  private def task(start: Long = 0, length: Long = 100): FileScanTask = {
+  private def task(start: Long = 0, length: Long = 100, path: String = "/does-not-exist.parquet",
+      rows: Long = 5): FileScanTask = {
     val data: DataFile = spy[DataFile](DataFiles.builder(PartitionSpec.unpartitioned())
-      .withPath("/does-not-exist.parquet").withFileSizeInBytes(100).withRecordCount(5)
+      .withFormat(FileFormat.PARQUET).withPath(path).withFileSizeInBytes(100).withRecordCount(rows)
       .withSplitOffsets(Seq[java.lang.Long](4L, 50L).asJava).build())
     val scan = mock(classOf[FileScanTask])
     when(scan.file()).thenReturn(data)
@@ -86,7 +93,7 @@ class GpuIcebergMetadataReaderSuite extends RmmSparkRetrySuiteBase {
   }
 
   private def eligible(scan: FileScanTask, expected: Schema = schema): Boolean =
-    GpuIcebergMetadataReader.plan(Seq(scan).asJava, expected,
+    GpuIcebergMetadataReader.plan(Seq(scan).asJava, conf(expected),
       _ => file("a", 5).getConstants()).isPresent
 
   test("only complete files with exact unfiltered row counts are eligible") {
@@ -121,30 +128,45 @@ class GpuIcebergMetadataReaderSuite extends RmmSparkRetrySuiteBase {
     assert(eligible(task(), new Schema(MetadataColumns.FILE_PATH)))
   }
 
-  test("different constants combine after materialization without opening data files") {
-    val files = Seq(file("a", 2), file("unused", 0), file("b", 3), file(null, 1), file("a", 1))
+  test("a late constant mismatch keeps every file separate and preserves nulls") {
+    val files = Seq(file("a", 2), file("a", 1), file("unused", 0), file("b", 3), file(null, 1))
     withResource(newReader(files, conf(threadConf = multiThread()))) { reader =>
       assert(reader.hasNext)
       assert(reader.hasNext)
-      withResource(reader.next()) { batch =>
-        assert(batch.numRows() == 7)
-        withResource(batch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { host =>
-          val values = (0 until batch.numRows()).map { i =>
-            if (host.isNullAt(i)) null else host.getUTF8String(i).toString
+      val values = ArrayBuffer.empty[String]
+      val sizes = reader.map { batch =>
+        withResource(batch) { cb =>
+          withResource(cb.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { host =>
+            (0 until cb.numRows()).foreach { i =>
+              values += (if (host.isNullAt(i)) null else host.getUTF8String(i).toString)
+            }
           }
-          assert(values == Seq("a", "a", "b", "b", "b", null, "a"))
+          cb.numRows()
         }
-      }
-      assert(!reader.hasNext)
+      }.toList
+      assert(sizes == List(2, 1, 3, 1))
+      assert(values.toSeq == Seq("a", "a", "a", "b", "b", "b", null))
       intercept[NoSuchElementException](reader.next())
     }
   }
 
-  test("combining respects row limits across file boundaries") {
-    withResource(newReader(Seq(file("a", 6), file("b", 2)),
-        conf(rows = 4, threadConf = multiThread()))) { reader =>
-      val sizes = reader.map { batch => withResource(batch)(_.numRows()) }.toList
-      assert(sizes == List(4, 4))
+  for ((mode, threadConf) <- Seq("multithreaded" -> multiThread(threshold = 1),
+      "coalescing" -> coalescing())) {
+    test(s"$mode planning sums all compatible files using the first path and constants") {
+      val first = file("a", 3, "/first")
+      val constants = new JHashMap[Integer, Any]()
+      constants.put(1, UTF8String.fromString("a"))
+      constants.put(99, "unprojected")
+      val files = Seq(first, new FileMetadata("/second", 2, constants), file("a", 2, "/third"))
+      val readerConf = conf(rows = 4, threadConf = threadConf)
+      val planned = plan(files, readerConf)
+      assert(planned.size() == 1)
+      assert(planned.get(0).getRowCount() == 7)
+      assert(planned.get(0).getPath() == first.getPath())
+      assert(planned.get(0).getConstants() eq first.getConstants())
+      withResource(new GpuIcebergMetadataReader(planned, readerConf)) { reader =>
+        assert(reader.map(batch => withResource(batch)(_.numRows())).toList == List(4, 3))
+      }
     }
   }
 
@@ -169,28 +191,40 @@ class GpuIcebergMetadataReaderSuite extends RmmSparkRetrySuiteBase {
     }
   }
 
-  test("a count-only file with more than Int.MaxValue rows is capped before allocation") {
-    withResource(newReader(
-        Seq(file("a", Int.MaxValue.toLong + 7), file("b", 9)),
-        conf(new Schema(), rows = Int.MaxValue))) { reader =>
-      val sizes = reader.map { batch =>
-        withResource(batch) { cb =>
-          assert(cb.numCols() == 0)
-          cb.numRows()
-        }
-      }.toList
-      assert(sizes == List(Int.MaxValue, 7, 9))
+  for ((mode, threadConf, sizes) <- Seq(
+      ("per-file", SingleFile, List(Int.MaxValue, 7, 9)),
+      ("combined", multiThread(), List(Int.MaxValue, 16)))) {
+    test(s"$mode count-only reads support more than Int.MaxValue rows") {
+      val files = Seq(file("a", Int.MaxValue.toLong + 7), file("b", 9))
+      withResource(newReader(files,
+          conf(new Schema(), rows = Int.MaxValue, threadConf = threadConf))) { reader =>
+        val actual = reader.map { batch =>
+          withResource(batch) { cb =>
+            assert(cb.numCols() == 0)
+            cb.numRows()
+          }
+        }.toList
+        assert(actual == sizes)
+      }
     }
+  }
+
+  test("keep per-file counts when their sum would overflow a descriptor") {
+    val files = Seq(file("a", Long.MaxValue), file("a", 1))
+    val planned = plan(files, conf(threadConf = multiThread()))
+    assert(planned.asScala.map(_.getRowCount()).toList == List(Long.MaxValue, 1L))
   }
 
   test("nested strings and binary constants obey column limits after combining") {
     val nested = new Schema(Types.NestedField.optional(1, "partition", Types.StructType.of(
       Types.NestedField.optional(2, "s", Types.StringType.get()),
       Types.NestedField.optional(3, "b", Types.BinaryType.get()))))
-    val constants = new JHashMap[Integer, Any]()
-    constants.put(1, InternalRow(UTF8String.fromString("éé"), Array[Byte](1, 2, 3)))
-    val files = Seq(new FileMetadata("/absent-a", 2, constants),
-      new FileMetadata("/absent-b", 3, constants))
+    def nestedFile(path: String, rows: Long): FileMetadata = {
+      val constants = new JHashMap[Integer, Any]()
+      constants.put(1, InternalRow(UTF8String.fromString("éé"), Array[Byte](1, 2, 3)))
+      new FileMetadata(path, rows, constants)
+    }
+    val files = Seq(nestedFile("/first", 2), nestedFile("/second", 3))
     withResource(newReader(files,
         conf(nested, columnBytes = 12, threadConf = multiThread()))) { reader =>
       val sizes = reader.map { batch =>
@@ -205,43 +239,49 @@ class GpuIcebergMetadataReaderSuite extends RmmSparkRetrySuiteBase {
           cb.numRows()
         }
       }.toList
-      assert(sizes == List(2, 3))
+      assert(sizes == List(3, 2))
     }
   }
 
-  test("the estimated batch byte limit bounds materialization and concatenation") {
-    withResource(newReader(Seq(file("abcd", 2), file("efgh", 3)),
-        conf(bytes = 18, threadConf = multiThread()))) { reader =>
-      assert(reader.map(batch => withResource(batch)(_.numRows())).toList == List(2, 2, 1))
+  test("different signed zeros in partition structs cannot use the first file's constant") {
+    val nested = new Schema(Types.NestedField.optional(1, "partition", Types.StructType.of(
+      Types.NestedField.optional(2, "d", Types.DoubleType.get()))))
+    def partition(value: Double): FileMetadata = {
+      val constants = new JHashMap[Integer, Any]()
+      constants.put(1, InternalRow(value))
+      new FileMetadata("/partition", 1, constants)
     }
+    val planned = plan(Seq(partition(-0.0), partition(0.0)),
+      conf(nested, threadConf = multiThread()))
+    assert(planned.size() == 2)
   }
 
-  for (skipAllocations <- Seq(0, 2, 4)) {
-    test(s"retry preserves planned batch sizes after $skipAllocations allocations") {
-      withResource(newReader(Seq(file("a", 3), file("b", 3)),
-          conf(threadConf = multiThread()))) { reader =>
-        RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
-          RmmSpark.OomInjectionType.GPU.ordinal, skipAllocations)
-        val values = ArrayBuffer.empty[String]
-        val sizes = ArrayBuffer.empty[Int]
-        reader.foreach { batch =>
-          withResource(batch) { cb =>
-            sizes += cb.numRows()
-            withResource(cb.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { host =>
-              (0 until cb.numRows()).foreach(i => values += host.getUTF8String(i).toString)
-            }
-          }
+  test("materialization retries without changing the planned batch size") {
+    withResource(newReader(Seq(file("a", 3), file("a", 3)),
+        conf(threadConf = multiThread()))) { reader =>
+      RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
+        RmmSpark.OomInjectionType.GPU.ordinal, 0)
+      withResource(reader.next()) { cb =>
+        assert(cb.numRows() == 6)
+        withResource(cb.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { host =>
+          assert((0 until cb.numRows()).forall(i => host.getUTF8String(i).toString == "a"))
         }
-        assert(values.toSeq == Seq("a", "a", "a", "b", "b", "b"))
-        assert(sizes.toSeq == Seq(6))
-        assert(RmmSpark.getAndResetNumRetryThrow(1) == 1)
-        assert(RmmSpark.getAndResetNumSplitRetryThrow(1) == 0)
       }
+      assert(!reader.hasNext)
+      assert(RmmSpark.getAndResetNumRetryThrow(1) == 1)
+      assert(RmmSpark.getAndResetNumSplitRetryThrow(1) == 0)
     }
   }
 
-  test("one file emits batches capped by its estimated row width") {
-    withResource(newReader(Seq(file("abcd", 7)), conf(bytes = 18))) { reader =>
+  test("the expected schema limits batch rows even for a short constant") {
+    // Two nullable strings use an estimated 40 bytes of data, 12 of offsets and 64 of validity.
+    withResource(newReader(Seq(file("a", 7)), conf(bytes = 116))) { reader =>
+      assert(reader.map(batch => withResource(batch)(_.numRows())).toList == List(2, 2, 2, 1))
+    }
+  }
+
+  test("long constants further limit the estimated batch rows") {
+    withResource(newReader(Seq(file("a" * 100, 7)), conf(bytes = 250))) { reader =>
       assert(reader.map(batch => withResource(batch)(_.numRows())).toList == List(2, 2, 2, 1))
     }
   }
@@ -261,44 +301,10 @@ class GpuIcebergMetadataReaderSuite extends RmmSparkRetrySuiteBase {
       "coalescing file-path flag" -> coalescing(filePath = true),
       "coalescing row-position flag" -> coalescing(rowPosition = true))) {
     test(s"combining respects $mode") {
-      withResource(newReader(Seq(file("a", 2), file("b", 2)),
+      withResource(newReader(Seq(file("a", 2), file("a", 2)),
           conf(threadConf = threadConf))) { reader =>
         assert(reader.map(batch => withResource(batch)(_.numRows())).toList == List(2, 2))
       }
-    }
-  }
-
-  for {
-    (mode, threadConf) <- Seq("multithreaded" -> multiThread(), "coalescing" -> coalescing())
-    sameConstants <- Seq(false, true)
-  } {
-    test(s"file batches combine in $mode mode with sameConstants=$sameConstants") {
-      val second = if (sameConstants) "a" else "b"
-      withResource(newReader(Seq(file("a", 2), file(second, 2)),
-          conf(threadConf = threadConf))) { reader =>
-        withResource(reader.next()) { batch =>
-          assert(batch.numRows() == 4)
-          withResource(batch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { host =>
-            assert((0 until 4).map(i => host.getUTF8String(i).toString) ==
-              Seq("a", "a", second, second))
-          }
-        }
-        assert(!reader.hasNext)
-      }
-    }
-  }
-
-  test("combining stops at the configured byte threshold") {
-    withResource(newReader(Seq(file("a", 2), file("b", 2)),
-        conf(threadConf = multiThread(threshold = 12)))) { reader =>
-      assert(reader.map(batch => withResource(batch)(_.numRows())).toList == List(2, 2))
-    }
-  }
-
-  test("combining different row widths respects the output byte bound") {
-    withResource(newReader(Seq(file("a", 2), file("b" * 7, 1)),
-        conf(bytes = 18, threadConf = multiThread()))) { reader =>
-      assert(reader.map(batch => withResource(batch)(_.numRows())).toList == List(2, 1))
     }
   }
 
@@ -309,19 +315,18 @@ class GpuIcebergMetadataReaderSuite extends RmmSparkRetrySuiteBase {
     }
   }
 
-  test("an unsplittable allocation failure releases already materialized files") {
-    withResource(newReader(Seq(file("a", 3), file("b", 3)),
-        conf(threadConf = multiThread()))) { reader =>
+  test("a split-and-retry failure propagates from materialization") {
+    withResource(newReader(Seq(file("a", 3)), conf())) { reader =>
       RmmSpark.forceSplitAndRetryOOM(RmmSpark.getCurrentThreadId, 1,
-        RmmSpark.OomInjectionType.GPU.ordinal, 4)
+        RmmSpark.OomInjectionType.GPU.ordinal, 0)
       intercept[GpuSplitAndRetryOOM](reader.next())
       assert(RmmSpark.getAndResetNumSplitRetryThrow(1) == 1)
     }
   }
 
-  test("a single row over the soft byte limit cannot make the next file's row budget negative") {
-    withResource(newReader(Seq(file("a" * 100, 1), file("b", 2)),
-        conf(bytes = 18, threadConf = multiThread()))) { reader =>
+  test("a single row over the soft byte limit still makes progress") {
+    withResource(newReader(Seq(file("a" * 200, 1), file("b", 2)),
+        conf(bytes = 116, threadConf = multiThread()))) { reader =>
       assert(reader.map(batch => withResource(batch)(_.numRows())).toList == List(1, 2))
     }
   }
