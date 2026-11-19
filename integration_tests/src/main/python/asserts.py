@@ -969,8 +969,10 @@ def assert_consistent_gpu_cpu_behavior(df_fun, conf, error_message, only_if_cpu_
     :return: Assertion failure if GPU and CPU behaviors are inconsistent (different errors or 
              different results when both succeed)
     """
+    expect_cpu_exception = None if only_if_cpu_fails else True
     (cpu_failed, from_cpu) = collect_data_or_exception(
-        lambda: with_cpu_session(df_fun, conf), error_message)
+        lambda: with_cpu_session(df_fun, conf), error_message,
+        expect_exception=expect_cpu_exception)
     (gpu_failed, from_gpu) = collect_data_or_exception(
         lambda: with_gpu_session(df_fun, conf), error_message, 
         expect_exception=cpu_failed or not only_if_cpu_fails)
