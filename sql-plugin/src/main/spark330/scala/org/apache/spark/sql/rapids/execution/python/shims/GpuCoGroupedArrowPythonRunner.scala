@@ -52,7 +52,8 @@ class GpuCoGroupedArrowPythonRunner(
     udfLogLevel: String = "WARNING",
     jobArtifactUUID: Option[String] = None)
   extends GpuBasePythonRunner[(ColumnarBatch, ColumnarBatch)](funcs.map(_._1), evalType,
-    argOffsets, jobArtifactUUID) with GpuArrowPythonOutput with GpuPythonRunnerCommon {
+    argOffsets, jobArtifactUUID) with GpuArrowPythonOutput with GpuPythonRunnerCommon
+    with GpuDedicatedWriterThread[(ColumnarBatch, ColumnarBatch)] {
 
   protected override def newWriterThread(
       env: SparkEnv,
@@ -60,7 +61,7 @@ class GpuCoGroupedArrowPythonRunner(
       inputIterator: Iterator[(ColumnarBatch, ColumnarBatch)],
       partitionIndex: Int,
       context: TaskContext): WriterThread = {
-    new WriterThread(env, worker, inputIterator, partitionIndex, context) {
+    new DedicatedWriterThread(env, worker, inputIterator, partitionIndex, context) {
 
       protected override def writeCommand(dataOut: DataOutputStream): Unit = {
         dataOut.writeInt(conf.size)
@@ -72,7 +73,7 @@ class GpuCoGroupedArrowPythonRunner(
           udfLogMaxEntries = udfLogMaxEntries, udfLogLevel = udfLogLevel)
       }
 
-      protected override def writeIteratorToStream(dataOut: DataOutputStream): Unit = {
+      protected override def writeInput(dataOut: DataOutputStream): Unit = {
         // For each we first send the number of dataframes in each group then send
         // first df, then send second df.  End of data is marked by sending 0.
         while (inputIterator.hasNext) {

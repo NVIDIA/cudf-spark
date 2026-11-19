@@ -15,8 +15,6 @@
  */
 package com.nvidia.spark.rapids
 
-import com.nvidia.spark.rapids.jni.kudo.DumpOption
-
 import org.apache.spark.network.util.ByteUnit
 
 private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
@@ -51,6 +49,15 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .booleanConf
     .createWithDefault(false)
 
+  val TEST_INPUT_FILE_NAME_MAX_STRING_BYTES =
+    conf("spark.rapids.sql.test.inputFileName.maxStringBytes")
+      .doc("Only to be used in tests. The most string bytes a single batch may need for the " +
+        "input_file_name() column before the scan slices it. Lower it to exercise slicing " +
+        "with small data. The default is the cudf string column limit.")
+      .internal()
+      .longConf
+      .createWithDefault(Int.MaxValue.toLong)
+
   val TEST_CONF = conf("spark.rapids.sql.test.enabled")
     .doc("Intended to be used by unit tests, if enabled all operations must run on the " +
       "GPU or an error happens.")
@@ -70,7 +77,8 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
   val TEST_PARQUET_HYBRID_SCAN_FAIL_ON_FALLBACK =
     conf("spark.rapids.sql.test.format.parquet.hybridScan.failOnFallback")
       .doc("Only to be used in tests. When true and the hybrid scan reader is enabled, fail a " +
-        "PERFILE Parquet scan that would fall back to the parquet-mr path instead of reading it.")
+        "Parquet read that the hybrid scan reader declines instead of reading it on the " +
+        "parquet-mr path.")
       .internal()
       .booleanConf
       .createWithDefault(false)
@@ -497,30 +505,6 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .startupOnly()
     .booleanConf
     .createWithDefault(false)
-
-  // ["NEVER", "ALWAYS", "ONFAILURE"]
-  private val KudoDebugModes =
-    DumpOption.values.map(_.toString.toUpperCase(java.util.Locale.ROOT)).toSet
-
-  val SHUFFLE_KUDO_SERIALIZER_DEBUG_MODE = conf("spark.rapids.shuffle.kudo.serializer.debug.mode")
-    .doc("Debug mode for Kudo serializer for the shuffle. If Always, it will dump the " +
-      "kudo tables to a file in spark.rapids.shuffle.kudo.serializer.debug.dump.path.prefix. " +
-      "If Never, it will not dump the kudo tables data. If OnFailure, it will only dump the " +
-      "kudo tables data when the shuffle fails.")
-    .internal()
-    .startupOnly()
-    .stringConf
-    .transform(_.toUpperCase(java.util.Locale.ROOT))
-    .checkValues(KudoDebugModes)
-    .createWithDefault("NEVER")
-
-  val SHUFFLE_KUDO_SERIALIZER_DEBUG_DUMP_PREFIX =
-    conf("spark.rapids.shuffle.kudo.serializer.debug.dump.path.prefix")
-    .doc("The path prefix to use for the kudo tables when using Kudo serializer for the shuffle.")
-    .internal()
-    .startupOnly()
-    .stringConf
-    .createOptional
 
   // USER FACING DEBUG CONFIGS
 

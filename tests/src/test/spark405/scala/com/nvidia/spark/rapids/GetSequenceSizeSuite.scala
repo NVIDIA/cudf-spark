@@ -15,7 +15,8 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark":["405","414","421"],"carryForward":"sameMinor"}
+{"spark":["405","414"],"carryForward":"sameMinor"}
+{"spark":["421"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids

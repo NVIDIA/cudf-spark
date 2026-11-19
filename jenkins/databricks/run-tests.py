@@ -15,6 +15,9 @@
 
 DATABRICKS_CI_TEST_SUPERVISION=1 opts CI into process cleanup and bounded SSH/transfers.
 Leave it unset for the existing manual execution behavior.
+
+JACOCO_AGENT_JAR and JACOCO_EXEC_FILE optionally specify the local agent to upload
+and the local destination for collected coverage. Leave both unset to disable it.
 """
 
 import json
@@ -30,9 +33,62 @@ from clusterutils import ClusterUtils
 import params
 
 
+JACOCO_TIMEOUT_SECONDS = 60
+
+
 def shell_join(args):
     """Return shell-escaped command arguments."""
     return ' '.join(shlex.quote(arg) for arg in args)
+
+
+def prepare_jacoco(master_addr, ssh_args, rsync_ssh):
+    agent = os.environ.get("JACOCO_AGENT_JAR")
+    output = os.environ.get("JACOCO_EXEC_FILE")
+    if not agent and not output:
+        return None
+    try:
+        if output:
+            Path(output).unlink(missing_ok=True)
+        if not agent or not output or not Path(agent).is_file():
+            raise ValueError("coverage requires a local agent JAR and EXEC destination")
+        if any(entry.strip().startswith("_JAVA_OPTIONS=") for entry in params.extra_envs.split(',')):
+            raise ValueError("EXTRA_ENVS already sets _JAVA_OPTIONS; leaving it unchanged")
+        local_exec = Path(output)
+        local_exec.parent.mkdir(parents=True, exist_ok=True)
+        # Relative rsync destinations start in the remote ubuntu user's home.
+        remote_dir = str(Path("/home/ubuntu", params.script_dest).parent)
+        remote_agent = remote_dir + "/jacocoagent.jar"
+        remote_exec = remote_dir + "/jacoco.exec"
+        ssh = ["ssh"] + ssh_args + ["ubuntu@" + master_addr]
+        subprocess.check_call(["rsync", "-I", "-Pave", rsync_ssh, "--", agent,
+                               "ubuntu@%s:%s" % (master_addr, remote_agent)],
+                              timeout=JACOCO_TIMEOUT_SECONDS)
+        java_opts = "-javaagent:%s=destfile=%s" % (remote_agent, remote_exec)
+        # Check the same _JAVA_OPTIONS that the test JVMs will inherit.
+        java_env = 'export _JAVA_OPTIONS="${_JAVA_OPTIONS:+$_JAVA_OPTIONS }"%s; ' % shlex.quote(java_opts)
+        subprocess.check_call(ssh + [java_env + "java -version && " + shell_join(["rm", "-f", remote_exec])],
+                              timeout=JACOCO_TIMEOUT_SECONDS)
+        return dict(java_env=java_env, remote_exec=remote_exec, local_exec=local_exec)
+    except Exception as error:
+        print("WARNING: JaCoCo preparation failed; running without coverage: %s" % error)
+        return None
+
+
+def collect_jacoco(coverage, master_addr, rsync_ssh):
+    if coverage is None:
+        return
+    # Only publish the local EXEC after a complete transfer and basic validation.
+    temporary = coverage["local_exec"].with_name(coverage["local_exec"].name + ".part")
+    try:
+        subprocess.check_call(["rsync", "-I", "-Pave", rsync_ssh, "--",
+                               "ubuntu@%s:%s" % (master_addr, coverage["remote_exec"]), str(temporary)],
+                              timeout=JACOCO_TIMEOUT_SECONDS)
+        with temporary.open('rb') as source:
+            if source.read(5) != bytes.fromhex('01c0c01007') or temporary.stat().st_size <= 5:
+                raise ValueError("collected EXEC is empty or invalid")
+        temporary.replace(coverage["local_exec"])
+    except Exception as error:
+        print("WARNING: JaCoCo collection failed; preserving the test result: %s" % error)
 
 
 def get_test_report_path_prefix():
@@ -182,6 +238,7 @@ def main():
                      "ubuntu@%s:%s" % (master_addr, params.script_dest)]
     print("rsync command: %s" % shell_join(rsync_command))
     subprocess.check_call(rsync_command, timeout=transfer_timeout)
+    coverage = prepare_jacoco(master_addr, ssh_args, rsync_ssh)
 
     test_command = [
         "env",
@@ -202,6 +259,8 @@ def main():
         remote_command = shell_join(["bash", remote_runner] + test_command)
     else:
         remote_command = "%s 2>&1 | tee testout; exit ${PIPESTATUS[0]}" % shell_join(test_command)
+    if coverage is not None:
+        remote_command = coverage["java_env"] + remote_command
     ssh_command = ["ssh"] + ssh_args + ["ubuntu@%s" % master_addr,
                                          "bash -c %s" % shlex.quote(remote_command)]
     print("ssh command: %s" % shell_join(ssh_command))
@@ -265,6 +324,7 @@ def main():
                 # The CI wrapper reprints this after classification and cleanup. Manual
                 # callers get the same console footer without requiring a state file.
                 report_test_failure(summary, status)
+            collect_jacoco(coverage, master_addr, rsync_ssh)
 
 
 if __name__ == '__main__':

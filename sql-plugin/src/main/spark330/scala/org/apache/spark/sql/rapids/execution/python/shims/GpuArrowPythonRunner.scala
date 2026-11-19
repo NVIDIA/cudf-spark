@@ -49,7 +49,8 @@ class GpuArrowPythonRunner(
     udfLogLevel: String = "WARNING",
     jobArtifactUUID: Option[String] = None)
   extends GpuBasePythonRunner[ColumnarBatch](funcs.map(_._1), evalType, argOffsets,
-    jobArtifactUUID) with GpuArrowPythonOutput with GpuPythonRunnerCommon {
+    jobArtifactUUID) with GpuArrowPythonOutput with GpuPythonRunnerCommon
+    with GpuDedicatedWriterThread[ColumnarBatch] {
 
   protected override def newWriterThread(
       env: SparkEnv,
@@ -57,7 +58,7 @@ class GpuArrowPythonRunner(
       inputIterator: Iterator[ColumnarBatch],
       partitionIndex: Int,
       context: TaskContext): WriterThread = {
-    new WriterThread(env, worker, inputIterator, partitionIndex, context) {
+    new DedicatedWriterThread(env, worker, inputIterator, partitionIndex, context) {
 
       val arrowWriter = new GpuArrowPythonWriter(pythonInSchema, maxBatchSize) {
         override protected def writeUDFs(dataOut: DataOutputStream): Unit = {
@@ -72,7 +73,7 @@ class GpuArrowPythonRunner(
         arrowWriter.writeCommand(dataOut, conf)
       }
 
-      protected override def writeIteratorToStream(dataOut: DataOutputStream): Unit = {
+      protected override def writeInput(dataOut: DataOutputStream): Unit = {
         if (isInputNonEmpty) {
           arrowWriter.start(dataOut)
           Utils.tryWithSafeFinally {

@@ -290,7 +290,7 @@ object GpuOrcScan {
   : ColumnView = {
     val fromDt = col.getType
     val toDt = GpuColumnVector.getNonNestedRapidsType(targetType)
-    if (fromDt == toDt &&
+    if (fromDt == toDt && !DecimalUtil.narrowsPrecision(originalFromDt, targetType) &&
        !(targetType == StringType && originalFromDt.isInstanceOf[CharType])) {
       return col
     }
@@ -441,9 +441,10 @@ object GpuOrcScan {
         }
 
       case (f: DType, t: DType) if f.isDecimalType && t.isDecimalType =>
+        // ORC can decode into a wider type than the file schema specifies. Keep the
+        // physical source type, but use the requested precision for overflow checks.
         val fromDataType = DecimalType(f.getDecimalMaxPrecision, -f.getScale)
-        val toDataType = DecimalType(t.getDecimalMaxPrecision, -t.getScale)
-        GpuCast.doCast(col, fromDataType, toDataType)
+        GpuCast.doCast(col, fromDataType, targetType)
 
       case (DType.STRING, DType.STRING) if originalFromDt.isInstanceOf[CharType] =>
         // Trim trailing whitespace off of output strings, to match CPU output.
@@ -1497,6 +1498,7 @@ private case class GpuOrcFileFilterHandler(
     isOrcFloatTypesToStringEnable: Boolean) {
 
   private[rapids] val isCaseSensitive = sqlConf.caseSensitiveAnalysis
+  private val orcFilterPushDown = sqlConf.orcFilterPushDown
 
   def filterStripes(
       partFile: PartitionedFile,
@@ -1568,9 +1570,11 @@ private case class GpuOrcFileFilterHandler(
       fullSchema: StructType): Reader.Options = {
     val readerOpts = OrcInputFormat.buildOptions(
       conf, orcReader, partFile.start, partFile.length)
-    // create the search argument if we have pushed filters
-    OrcFiltersWrapper.createFilter(fullSchema, pushedFilters).foreach { f =>
-      readerOpts.searchArgument(f, fullSchema.fieldNames)
+    // Spark can pass pushed filters even when ORC predicate pushdown is disabled.
+    if (orcFilterPushDown) {
+      OrcFiltersWrapper.createFilter(fullSchema, pushedFilters).foreach { f =>
+        readerOpts.searchArgument(f, fullSchema.fieldNames)
+      }
     }
     readerOpts
   }

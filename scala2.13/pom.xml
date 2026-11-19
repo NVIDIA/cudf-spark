@@ -769,11 +769,14 @@
                 <rapids.delta.artifactId1>cudf-spark-delta-stub</rapids.delta.artifactId1>
                 <iceberg.artifact.suffix>${spark40x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.110x.version}</iceberg.runtime.version>
+                <rapids.iceberg.artifactId>cudf-spark-iceberg-1-10-x</rapids.iceberg.artifactId>
+                <rapids.iceberg.artifactId2>cudf-spark-iceberg-1-11-x</rapids.iceberg.artifactId2>
                 <slf4j.version>2.0.7</slf4j.version>
             </properties>
             <modules>
                 <module>delta-lake/delta-stub</module>
-                <module>iceberg/iceberg-stub</module>
+                <module>iceberg/iceberg-1-10-x</module>
+                <module>iceberg/iceberg-1-11-x</module>
             </modules>
         </profile>
         <profile>
@@ -965,12 +968,13 @@
                 <rapids.delta.artifactId1>cudf-spark-delta-stub</rapids.delta.artifactId1>
                 <iceberg.artifact.suffix>${spark41x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.111x.version}</iceberg.runtime.version>
+                <rapids.iceberg.artifactId>cudf-spark-iceberg-1-11-x</rapids.iceberg.artifactId>
                 <slf4j.version>2.0.7</slf4j.version>
                 <scala.javac.args>-Xlint:all,-serial,-path,-try,-processing,-options|-Werror</scala.javac.args>
             </properties>
             <modules>
                 <module>delta-lake/delta-stub</module>
-                <module>iceberg/iceberg-stub</module>
+                <module>iceberg/iceberg-1-11-x</module>
             </modules>
             <build>
                 <pluginManagement>
@@ -1084,7 +1088,7 @@
             </activation>
             <properties>
                 <buildver>500</buildver>
-                <shim.source.inherits>420</shim.source.inherits>
+                <shim.source.inherits>421</shim.source.inherits>
                 <spark.version>${spark500.version}</spark.version>
                 <cudf-spark-private.artifactId>cudf-spark-private_${scala.binary.version}-spark-master</cudf-spark-private.artifactId>
                 <parquet.hadoop.version>1.15.2</parquet.hadoop.version>
@@ -1450,6 +1454,12 @@
               <artifactId>${cudf-spark-jni.artifactId}</artifactId>
               <version>${cudf-spark-jni.version}</version>
               <classifier>${jni.classifier}</classifier>
+              <exclusions>
+                <exclusion>
+                  <groupId>com.github.luben</groupId>
+                  <artifactId>zstd-jni</artifactId>
+                </exclusion>
+              </exclusions>
             </dependency>
             <dependency>
                 <groupId>org.openucx</groupId>

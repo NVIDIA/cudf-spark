@@ -23,7 +23,6 @@ import scala.collection.mutable.ListBuffer
 
 import ai.rapids.cudf.Cuda
 import com.nvidia.spark.rapids.jni.RmmSpark.OomInjectionType
-import com.nvidia.spark.rapids.jni.kudo.DumpOption
 import com.nvidia.spark.rapids.lore.{LoreId, OutputLoreId}
 
 import org.apache.spark.SparkConf
@@ -478,6 +477,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val isTestEnabled: Boolean = get(TEST_CONF)
 
+  lazy val inputFileNameMaxStringBytes: Long = get(TEST_INPUT_FILE_NAME_MAX_STRING_BYTES)
+
   lazy val testingForceNonAst: Set[String] = get(TEST_FORCE_NON_AST).toSet
 
   lazy val isRetryContextCheckEnabled: Boolean = get(TEST_RETRY_CONTEXT_CHECK_ENABLED)
@@ -750,6 +751,10 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val hybridScanSingleStageFilterKeepThreshold: Double =
     get(PARQUET_HYBRID_SCAN_SINGLE_STAGE_FILTER_KEEP_THRESHOLD)
 
+  lazy val hybridScanMaxH2DPackSize: Long = get(PARQUET_HYBRID_SCAN_MAX_H2D_PACK_SIZE)
+
+  lazy val hybridScanMinH2DPackSize: Long = get(PARQUET_HYBRID_SCAN_MIN_H2D_PACK_SIZE)
+
   lazy val isParquetPerFileReadEnabled: Boolean =
     RapidsReaderType.withName(get(PARQUET_READER_TYPE)) == RapidsReaderType.PERFILE
 
@@ -949,45 +954,6 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
     get(SHUFFLE_KUDO_SERIALIZER_MEASURE_BUFFER_COPY_ENABLED)
 
   lazy val shuffleAsyncReadEnabled: Boolean = get(SHUFFLE_ASYNC_READ_ENABLED)
-
-  lazy val shuffleKudoSerializerDebugMode: DumpOption = {
-    val mode = get(SHUFFLE_KUDO_SERIALIZER_DEBUG_MODE)
-    mode match {
-      case "NEVER" => DumpOption.Never
-      case "ALWAYS" => DumpOption.Always
-      case "ONFAILURE" => DumpOption.OnFailure
-      case _ => {
-        logWarning(s"Invalid value for ${SHUFFLE_KUDO_SERIALIZER_DEBUG_MODE.key}: $mode. " +
-          "Using default value: Never")
-        DumpOption.Never
-      }
-    }
-  }
-
-  lazy val shuffleKudoSerializerDebugDumpPrefix: Option[String] = {
-    val prefix = get(SHUFFLE_KUDO_SERIALIZER_DEBUG_DUMP_PREFIX)
-    shuffleKudoSerializerDebugMode match {
-      case DumpOption.Never => prefix
-      case _ => {
-        prefix match {
-          case None => {
-            logWarning("spark.rapids.shuffle.kudo.serializer.debug.dump.path.prefix is not set, " +
-              "so Kudo serializer debug will not be enabled")
-            None
-          }
-          case Some(p) => {
-            if (p.isEmpty) {
-              logWarning("spark.rapids.shuffle.kudo.serializer.debug.dump.path.prefix is empty, " +
-                "so Kudo serializer debug will not be enabled")
-              Some("")
-            } else {
-              Some(p)
-            }
-          }
-        }
-      }
-    }
-  }
 
   def isUCXShuffleManagerMode: Boolean =
     RapidsShuffleManagerMode

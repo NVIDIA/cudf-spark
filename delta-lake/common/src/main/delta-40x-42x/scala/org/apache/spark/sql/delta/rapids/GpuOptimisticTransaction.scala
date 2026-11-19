@@ -45,7 +45,7 @@ import org.apache.spark.sql.execution.SQLExecution
 import org.apache.spark.sql.execution.datasources.{BasicWriteJobStatsTracker, FileFormatWriter}
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.functions.to_json
-import org.apache.spark.sql.rapids.{BasicColumnarWriteJobStatsTracker, ColumnarWriteJobStatsTracker, GpuWriteJobStatsTracker}
+import org.apache.spark.sql.rapids.{BasicColumnarWriteJobStatsTracker, ColumnarWriteJobStatsTracker, ExecutionPlanCaptureCallback, GpuWriteJobStatsTracker}
 import org.apache.spark.sql.rapids.delta.GpuIdentityColumn
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.SparkSession
 import org.apache.spark.sql.types.StructType
@@ -248,6 +248,9 @@ class GpuOptimisticTransaction(deltaLog: DeltaLog,
       }
 
       try {
+        if (rapidsConf.isTestEnabled) {
+          ExecutionPlanCaptureCallback.captureIfNeeded(physicalPlan)
+        }
         GpuDeltaFileFormatWriter.write(
           sparkSession = spark,
           plan = physicalPlan,
