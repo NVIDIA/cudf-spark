@@ -48,14 +48,12 @@ class GpuGroupPartitionsExecMeta(
   override val availableRuntimeDataTransition: Boolean =
     childPlans.head.availableRuntimeDataTransition
 
+  // Merge by the ordering Spark planned the merge with. Where Spark freezes that ordering, the
+  // live outputOrdering can differ.
   private val sortedMergeOrdering: Seq[BaseExprMeta[SortOrder]] =
-    if (groupPartitions.enableSortedMerge) {
-      groupPartitions.outputOrdering
-        .map(_.copy(sameOrderExpressions = Seq.empty))
-        .map(GpuOverrides.wrapExpr(_, conf, Some(this)))
-    } else {
-      Seq.empty
-    }
+    GpuGroupPartitionsShims.plannedMergeOrdering(groupPartitions).getOrElse(Seq.empty)
+      .map(_.copy(sameOrderExpressions = Seq.empty))
+      .map(GpuOverrides.wrapExpr(_, conf, Some(this)))
 
   override val childExprs: Seq[BaseExprMeta[_]] = sortedMergeOrdering
 

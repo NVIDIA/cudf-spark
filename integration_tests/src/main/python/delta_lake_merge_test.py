@@ -2479,6 +2479,9 @@ def test_delta_merge_dataframe_api(spark_tmp_path, use_cdf, num_slices, enable_d
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
+@pytest.mark.skipif(not is_databricks_runtime() and is_before_spark_353(),
+                    reason="MERGE does not run on the GPU for OSS Delta before Spark 3.5.3, "
+                           "https://github.com/NVIDIA/spark-rapids/issues/7573")
 def test_delta_merge_input_file_name_sliced_large_batch(spark_tmp_path):
     from delta.tables import DeltaTable
     num_rows = 200000

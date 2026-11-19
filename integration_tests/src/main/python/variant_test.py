@@ -16,15 +16,21 @@ import pytest
 
 from asserts import (assert_cpu_and_gpu_are_equal_collect_with_capture,
                      assert_equal_with_signed_zero,
+                     assert_metric_unset_or_zero,
                      assert_gpu_and_cpu_are_equal_collect,
+                     assert_spark_exception,
                      assert_gpu_fallback_write,
                      assert_gpu_fallback_collect,
+                     collect_plan_nodes,
+                     plan_metric,
                      run_with_cpu_and_gpu)
 from conftest import is_databricks_runtime, is_not_utc, spark_jvm
 from data_gen import idfn
-from marks import allow_non_gpu, allow_non_gpu_conditional, ignore_order, incompat
+from marks import (allow_non_gpu, allow_non_gpu_conditional, ignore_order, incompat,
+                   validate_execs_in_gpu_plan)
 from spark_session import (is_before_spark_400, is_databricks173_or_later, is_spark_40x,
-                           is_spark_410_or_later, is_spark_411_or_later, with_cpu_session)
+                           is_spark_410_or_later, is_spark_411_or_later, with_cpu_session,
+                           with_gpu_session)
 
 pytestmark = pytest.mark.skipif(
     is_databricks_runtime() and not is_databricks173_or_later(),
@@ -756,14 +762,15 @@ def test_variant_try_get_quoted_path_falls_back(spark_tmp_path):
 
 @allow_non_gpu('ProjectExec', 'VariantGet')
 @incompat
+@pytest.mark.parametrize('target_type', ['int', 'decimal(9,2)'])
 @pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
-def test_variant_get_strict_mode_falls_back(spark_tmp_path):
+def test_variant_get_strict_mode_falls_back(spark_tmp_path, target_type):
     data_path = spark_tmp_path + '/VARIANT_STRICT_MODE_FALLBACK_PARQUET'
     _with_cpu_variant_session(lambda spark: _write_variant_parquet(spark, data_path))
 
     def do_it(spark):
         return spark.read.parquet(data_path).selectExpr(
-            "variant_get(v, '$.x', 'int') AS x")
+            f"variant_get(v, '$.x', '{target_type}') AS x")
 
     assert_gpu_fallback_collect(do_it, 'VariantGet', conf=_variant_parquet_conf)
 
@@ -777,7 +784,7 @@ def test_variant_try_get_unsupported_target_type_falls_back(spark_tmp_path):
 
     def do_it(spark):
         return spark.read.parquet(data_path).selectExpr(
-            "try_variant_get(v, '$.x', 'decimal(10, 2)') AS decimal_value")
+            "try_variant_get(v, '$.x', 'date') AS date_value")
 
     assert_gpu_fallback_collect(do_it, 'VariantGet', conf=_variant_parquet_conf)
 
@@ -796,3 +803,294 @@ def test_variant_try_get_cpu_bridge_disabled_falls_back(spark_tmp_path):
     conf = dict(_variant_parquet_conf)
     conf['spark.rapids.sql.expression.cpuBridge.enabled'] = 'false'
     assert_gpu_fallback_collect(do_it, 'VariantGet', conf=conf)
+
+
+# Deliberately cover both physical output-width boundaries and the guard-scale boundary.
+# The source decimals include enough significant digits to exercise decimal4/8/16 encodings;
+# raw-width and internal no-bridge assertions live in GpuVariantDecimalSuite.
+_decimal_target_cases = [
+    pytest.param(1, 0, 9, 2, ['0.49', '0.50', '-0.50', '9.50'], id='p1-s0'),
+    pytest.param(9, 2, 9, 3, ['123456.789', '9.995', '-9.995', '999999.999'], id='p9-s2'),
+    pytest.param(9, 6, 9, 2, ['1.25', '-1.25', '123.45', '0.01'], id='upscale-s2-to-s6'),
+    pytest.param(10, 1, 18, 2,
+                 ['1234567890123456.78', '9.95', '-9.95', '999999999.95'], id='p10-s1'),
+    pytest.param(18, 0, 18, 2,
+                 ['1234567890123456.78', '0.50', '-0.50', '9999999999999999.99'], id='p18-s0'),
+    pytest.param(38, 0, 38, 1,
+                 ['9' * 37 + '.4', '9' * 37 + '.5', '-' + '9' * 37 + '.5', '2.5', '-2.5'],
+                 id='p38-s0-native-rounding'),
+    pytest.param(19, 18, 38, 20,
+                 ['0.12345678901234567895', '-0.12345678901234567895',
+                  '9.99999999999999999995'], id='p19-s18'),
+    pytest.param(38, 37, 38, 38,
+                 ['0.' + '9' * 38, '-0.' + '9' * 38, '0.' + '0' * 37 + '5'], id='p38-s37'),
+    pytest.param(38, 38, 38, 38,
+                 ['0.' + '9' * 38, '-0.' + '9' * 38, '0.' + '0' * 37 + '1'], id='p38-s38'),
+]
+
+
+def _assert_decimal_bridge(gpu_plan, expected_fallback):
+    projects = [node for node in collect_plan_nodes(gpu_plan, include_wrapped=True,
+                                                   deduplicate=True)
+                if node.getClass().getSimpleName() == 'GpuProjectExec']
+    assert projects, 'Expected a GPU project evaluating the decimal expression'
+    processing = [plan_metric(node, 'cpuBridgeProcessingTime') for node in projects]
+    assert all(value is not None for value in processing), 'Missing DEBUG CPU bridge metrics'
+    if expected_fallback:
+        assert any(value > 0 for value in processing), 'Expected decimal CPU bridge execution'
+    else:
+        for node in projects:
+            assert_metric_unset_or_zero(node, 'cpuBridgeProcessingTime')
+            assert_metric_unset_or_zero(node, 'cpuBridgeWaitTime')
+
+
+@incompat
+@pytest.mark.parametrize('v1_enabled_list', ['parquet', ''], ids=['v1', 'v2'])
+@pytest.mark.parametrize('precision,scale,source_precision,source_scale,values', _decimal_target_cases)
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_parquet_variant_try_get_decimal_targets(
+        spark_tmp_path, v1_enabled_list, precision, scale, source_precision, source_scale, values):
+    from pyspark.sql.types import DecimalType
+
+    data_path = spark_tmp_path + '/VARIANT_DECIMAL_TARGET_PARQUET'
+    literals = ','.join(f"({i}, '{value}')" for i, value in enumerate(values))
+
+    def write(spark):
+        spark.sql(f"""
+          SELECT id, to_variant_object(named_struct(
+            'x', CAST(value AS DECIMAL({source_precision},{source_scale})))) AS v
+          FROM VALUES {literals} AS source(id, value)
+          UNION ALL SELECT {len(values)}, CAST(NULL AS VARIANT)
+        """).write.mode('overwrite').parquet(data_path)
+
+    _with_cpu_variant_session(write)
+
+    def do_it(spark):
+        df = spark.read.parquet(data_path).selectExpr(
+            'id', f"try_variant_get(v, '$.x', 'decimal({precision},{scale})') AS x")
+        assert df.schema['x'].dataType == DecimalType(precision, scale)
+        return df.orderBy('id')
+
+    conf = dict(_variant_parquet_conf)
+    conf['spark.sql.sources.useV1SourceList'] = v1_enabled_list
+    conf['spark.rapids.sql.metrics.level'] = 'DEBUG'
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it, exist_classes='GpuProjectExec,GpuVariantGet', conf=conf, require_non_empty=True,
+        gpu_plan_assertion=lambda cpu, gpu: _assert_decimal_bridge(gpu, False))
+
+
+@incompat
+@pytest.mark.parametrize('v1_enabled_list', ['parquet', ''], ids=['v1', 'v2'])
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_parquet_variant_try_get_decimal_nested_gpu_decode(spark_tmp_path, v1_enabled_list):
+    data_path = spark_tmp_path + '/VARIANT_DECIMAL_NESTED_GPU_PARQUET'
+
+    def write(spark):
+        spark.sql("""
+          SELECT id, parse_json(json) AS v FROM VALUES
+            (0, '{"items":[{"x":9.995}],"a":{"b":1.25}}'),
+            (1, '{"items":[{"x":-9.995}],"a":{"b":-1.25}}'),
+            (2, '{"items":[{"x":12.345}],"a":{"b":123.45}}'),
+            (3, NULL)
+          AS source(id, json)
+        """).write.mode('overwrite').parquet(data_path)
+
+    _with_cpu_variant_session(write)
+
+    def do_it(spark):
+        return spark.read.parquet(data_path).selectExpr(
+            'id', "try_variant_get(v, '$.items[0].x', 'decimal(9,2)') AS rounded",
+            "try_variant_get(v, '$.a.b', 'decimal(9,6)') AS upscaled").orderBy('id')
+
+    conf = dict(_variant_parquet_conf)
+    conf['spark.sql.sources.useV1SourceList'] = v1_enabled_list
+    conf['spark.rapids.sql.metrics.level'] = 'DEBUG'
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it, exist_classes='GpuProjectExec,GpuVariantGet', conf=conf, require_non_empty=True,
+        gpu_plan_assertion=lambda cpu, gpu: _assert_decimal_bridge(gpu, False))
+
+
+@incompat
+@pytest.mark.parametrize('v1_enabled_list', ['parquet', ''], ids=['v1', 'v2'])
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_parquet_variant_try_get_decimal_guard_overflow(spark_tmp_path, v1_enabled_list):
+    data_path = spark_tmp_path + '/VARIANT_DECIMAL_GUARD_OVERFLOW_PARQUET'
+
+    def write(spark):
+        # Decimal payloads, not JSON exponent literals (which parse_json encodes as doubles).
+        # Both signs fit the final decimal(38,0), but not its scale1 rounding intermediate.
+        spark.sql("""
+          SELECT id, to_variant_object(named_struct(
+            'x', CAST(value AS DECIMAL(38,0)))) AS v
+          FROM VALUES
+            (0, '50000000000000000000000000000000000000'),
+            (1, '-50000000000000000000000000000000000000')
+          AS source(id, value)
+          UNION ALL SELECT 2, CAST(NULL AS VARIANT)
+        """).write.mode('overwrite').parquet(data_path)
+
+    _with_cpu_variant_session(write)
+
+    def do_it(spark):
+        return spark.read.parquet(data_path).selectExpr(
+            'id', "try_variant_get(v, '$.x', 'decimal(38,0)') AS x").orderBy('id')
+
+    conf = dict(_variant_parquet_conf)
+    conf['spark.sql.sources.useV1SourceList'] = v1_enabled_list
+    conf['spark.rapids.sql.metrics.level'] = 'DEBUG'
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it, exist_classes='GpuProjectExec,GpuVariantGet', conf=conf, require_non_empty=True,
+        gpu_plan_assertion=lambda cpu, gpu: _assert_decimal_bridge(gpu, True))
+
+
+@incompat
+@pytest.mark.parametrize('v1_enabled_list', ['parquet', ''], ids=['v1', 'v2'])
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_parquet_variant_try_get_decimal_mixed_nested_coercions(spark_tmp_path, v1_enabled_list):
+    from pyspark.sql.types import DecimalType
+
+    data_path = spark_tmp_path + '/VARIANT_DECIMAL_MIXED_PARQUET'
+
+    def write(spark):
+        spark.sql("""
+          SELECT id, parse_json(json) AS v FROM VALUES
+            (0, '{"items":[{"x":9.995}]}'),
+            (1, '{"items":[{"x":-9.995}]}'),
+            (2, '{"items":[{"x":"12.345"}]}'),
+            (3, '{"items":[{"x":12}]}'),
+            (4, '{"items":[{"x":true}]}'),
+            (5, '{"items":[{"x":"bad"}]}'),
+            (6, '{"items":[{"x":null}]}'),
+            (7, '{"items":[{}]}'),
+            (8, '{"items":[]}'),
+            (9, '{"items":[{"x":1e100}]}'),
+            (10, 'null'), (11, NULL)
+          AS source(id, json)
+        """).write.mode('overwrite').parquet(data_path)
+
+    _with_cpu_variant_session(write)
+
+    def do_it(spark):
+        df = spark.read.parquet(data_path).selectExpr(
+            'id', "try_variant_get(v, '$.items[0].x', 'decimal(3,2)') AS narrow",
+            "try_variant_get(v, '$.items[0].x', 'decimal(19,2)') AS wide")
+        assert df.schema['narrow'].dataType == DecimalType(3, 2)
+        assert df.schema['wide'].dataType == DecimalType(19, 2)
+        return df.orderBy('id')
+
+    conf = dict(_variant_parquet_conf)
+    conf['spark.sql.sources.useV1SourceList'] = v1_enabled_list
+    conf['spark.rapids.sql.metrics.level'] = 'DEBUG'
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it, exist_classes='GpuProjectExec,GpuVariantGet', conf=conf, require_non_empty=True,
+        gpu_plan_assertion=lambda cpu, gpu: _assert_decimal_bridge(gpu, True))
+
+
+def _decimal_array_bytes(width, scale, coefficient):
+    # Primitive decimal4/8/16 headers, followed by unsigned scale and little-endian coefficient.
+    payload = bytes([{4: 32, 8: 36, 16: 40}[width], scale]) + coefficient.to_bytes(
+        width, byteorder='little', signed=True)
+    return bytes([3, 1, 0, len(payload)]) + payload
+
+
+@incompat
+@allow_non_gpu('RDDScanExec')
+@pytest.mark.parametrize('scale', [2, 38])
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_variant_try_get_decimal_encoded_widths(scale):
+    from pyspark.sql.types import DecimalType, VariantVal
+
+    # Explicit bytes guarantee each source width independently of Spark builder minimization.
+    values = [(4, 9, 123456789), (8, 18, 123456789012345678),
+              (16, 38, 10 ** 38 - 1), (16, 38, -(10 ** 38 - 1)), (16, 37, 10 ** 36)]
+    rows = [(i, VariantVal(_decimal_array_bytes(*value), b'\x01\x00\x00'))
+            for i, value in enumerate(values)] + [(len(values), None)]
+
+    def do_it(spark):
+        df = spark.createDataFrame(rows, 'id int, v variant').selectExpr(
+            'id', f"try_variant_get(v, '$[0]', 'decimal(38,{scale})') AS x")
+        assert df.schema['x'].dataType == DecimalType(38, scale)
+        return df.orderBy('id')
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it, exist_classes='GpuRowToColumnarExec,GpuProjectExec,GpuVariantGet',
+        conf={'spark.sql.adaptive.enabled': 'false',
+              'spark.rapids.sql.metrics.level': 'DEBUG'}, require_non_empty=True,
+        gpu_plan_assertion=lambda cpu, gpu: _assert_decimal_bridge(gpu, False))
+
+
+@incompat
+@allow_non_gpu('RDDScanExec')
+@validate_execs_in_gpu_plan('GpuProjectExec')
+@pytest.mark.parametrize('value', [
+    pytest.param(_decimal_array_bytes(4, 9, 10 ** 9), id='decimal4-invalid-precision'),
+    pytest.param(_decimal_array_bytes(4, 9, -(10 ** 9)), id='decimal4-negative-invalid-precision'),
+    pytest.param(_decimal_array_bytes(8, 18, 10 ** 18), id='decimal8-invalid-precision'),
+    pytest.param(_decimal_array_bytes(16, 38, 10 ** 38), id='decimal16-invalid-precision'),
+    pytest.param(_decimal_array_bytes(4, 10, 0), id='decimal4-invalid-scale-zero'),
+    pytest.param(_decimal_array_bytes(8, 19, 0), id='decimal8-invalid-scale-zero'),
+    pytest.param(_decimal_array_bytes(16, 255, 0), id='unsigned-invalid-scale'),
+    pytest.param(bytes([3, 1, 0, 2, 32, 0]), id='truncated-decimal-body'),
+])
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_variant_try_get_malformed_decimal_preserves_error(value):
+    from pyspark.sql.types import VariantVal
+
+    def do_it(spark, require_gpu_variant=False):
+        # RDDScanExec is required only to inject bytes that a Parquet writer may validate.
+        df = spark.createDataFrame(
+            [(VariantVal(value, b'\x01\x00\x00'),)], 'v variant').selectExpr(
+                "try_variant_get(v, '$[0]', 'decimal(9,0)') AS x")
+        if require_gpu_variant:
+            # Check expression selection before execution raises the expected malformed error.
+            spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.assertContains(
+                df._jdf, 'GpuVariantGet')
+        return df.collect()
+
+    conf = {'spark.sql.adaptive.enabled': 'false',
+            'spark.rapids.sql.incompatibleOps.enabled': 'true'}
+    assert_spark_exception(lambda: with_cpu_session(do_it, conf=conf), 'MALFORMED_VARIANT')
+    assert_spark_exception(
+        lambda: with_gpu_session(lambda spark: do_it(spark, True), conf=conf), 'MALFORMED_VARIANT')
+
+
+@incompat
+@pytest.mark.parametrize('v1_enabled_list', ['parquet', ''], ids=['v1', 'v2'])
+@pytest.mark.skipif(is_before_spark_400(), reason='VariantType is available in Spark 4.0+')
+def test_parquet_variant_decimal_and_legacy_scalar_projection(spark_tmp_path, v1_enabled_list):
+    # This is mixed-projection parity coverage, not proof that every expression avoids the
+    # CPU bridge. The decimal-only cases above assert runtime GPU decoding separately.
+    data_path = spark_tmp_path + '/VARIANT_DECIMAL_AND_SCALARS_PARQUET'
+
+    def write(spark):
+        spark.sql("""
+          SELECT id, to_variant_object(named_struct(
+            'd', CAST(value AS DECIMAL(9,3)), 'i', id, 'b', id = 0,
+            'f', CAST(id + 0.25 AS FLOAT), 'g', CAST(id - 0.5 AS DOUBLE),
+            's', CAST(id AS STRING))) AS v
+          FROM VALUES (0, '1.255'), (1, '-9.995') AS source(id, value)
+          UNION ALL SELECT 2, parse_json(
+            '{"d":"12.345","i":"42","b":true,"f":1.25,"g":-2.5,"s":"mixed"}')
+          UNION ALL SELECT 3, parse_json('{"d":null}')
+          UNION ALL SELECT 4, parse_json('{}')
+          UNION ALL SELECT 5, CAST(NULL AS VARIANT)
+        """).write.mode('overwrite').parquet(data_path)
+
+    _with_cpu_variant_session(write)
+
+    def do_it(spark):
+        return spark.read.parquet(data_path).selectExpr(
+            'id', "try_variant_get(v, '$.d', 'decimal(9,2)') AS d",
+            "try_variant_get(v, '$.i', 'tinyint') AS byte_value",
+            "try_variant_get(v, '$.i', 'smallint') AS short_value",
+            "try_variant_get(v, '$.i', 'int') AS int_value",
+            "try_variant_get(v, '$.i', 'bigint') AS long_value",
+            "try_variant_get(v, '$.b', 'boolean') AS b",
+            "try_variant_get(v, '$.f', 'float') AS f",
+            "try_variant_get(v, '$.g', 'double') AS g",
+            "try_variant_get(v, '$.s', 'string') AS s").orderBy('id')
+
+    conf = dict(_variant_parquet_conf)
+    conf['spark.sql.sources.useV1SourceList'] = v1_enabled_list
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        do_it, exist_classes='GpuProjectExec,GpuVariantGet', conf=conf, require_non_empty=True)

@@ -16,14 +16,21 @@
 
 package com.nvidia.spark.rapids.parquet
 
-import ai.rapids.cudf.{ByteRange, DeviceMemoryBuffer, DType, HostMemoryBuffer, HybridScanReader, ParquetOptions, Table}
+import java.util.concurrent.LinkedBlockingQueue
+
+import scala.collection.mutable.ArrayBuffer
+
+import ai.rapids.cudf.{ByteRange, Cuda, DeviceMemoryBuffer, DType, HostMemoryBuffer, HybridScanReader, ParquetOptions, Table}
 import ai.rapids.cudf.ast.{AstExpression, CompiledExpression}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
-import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
+import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitTargetSizeInHalfGpu, withRetry, withRetryNoSplit}
+import com.nvidia.spark.rapids.jni.{GpuSplitAndRetryOOM, PackedHostToDeviceCopy}
+import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile.CopyRange
 import com.nvidia.spark.rapids.shims.SparkShimImpl
+import com.nvidia.spark.rapids.shims.parquet.ParquetSchemaClipShims
 import org.apache.hadoop.conf.Configuration
 
 import org.apache.spark.TaskContext
@@ -62,6 +69,8 @@ private[parquet] case class HybridScanContext(
     readDataSchema: StructType,
     scanFilters: HybridScanFilters,
     filterKeepThreshold: Double,
+    maxH2DPackSize: Long,
+    minH2DPackSize: Long,
     execMetrics: Map[String, GpuMetric])
 
 /** The part of one file a hybrid read owns: its row groups whose first byte is in the range. */
@@ -79,9 +88,21 @@ private[parquet] case class HybridScanSplit(
  * per-read state, so pool threads may share it.
  */
 private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Logging {
-  import context.{execMetrics, filterKeepThreshold, readDataSchema, scanFilters}
+  import context.{execMetrics, filterKeepThreshold, maxH2DPackSize, minH2DPackSize,
+    readDataSchema, scanFilters}
+
+  private def withStagedOnDevice[T](chunks: Array[HostMemoryBuffer])(
+      fn: Array[DeviceMemoryBuffer] => T): T =
+    HybridScanPipeline.withCopyEvent { event =>
+      HybridScanPipeline.withStagedOnDevice(chunks, maxH2DPackSize, minH2DPackSize, event)(fn)
+    }
 
   private def totalBytes(ranges: Array[ByteRange]): Long = ranges.map(_.size()).sum
+
+  private def addToMetric(name: String, value: Long): Unit =
+    execMetrics.get(name).foreach(_ += value)
+
+  private def metric(name: String): GpuMetric = execMetrics.getOrElse(name, NoopMetric)
 
   /**
    * The plan phase: prune the split's row groups with the pushed filter, and if anything survives
@@ -98,19 +119,27 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       reader: HybridScanReader,
       ast: Option[CompiledExpression],
       allowDictionaryPruning: Boolean): Option[FetchedColumnChunks] = {
-    val rowGroups = selectRowGroups(split, reader, ast, allowDictionaryPruning)
+    addToMetric(HYBRID_SCAN_SPLITS, 1)
+    val rowGroups = metric(FILTER_TIME).ns {
+      selectRowGroups(split, reader, ast, allowDictionaryPruning)
+    }
     if (rowGroups.isEmpty || reader.totalRowsInRowGroups(rowGroups) == 0) {
       None
     } else {
+      // A MULTITHREADED pool thread can't take the GPU semaphore that dictionary pruning needs, so
+      // it fetches before the task prunes and this can count more row groups than PERFILE does.
+      addToMetric(ROW_GROUPS_FETCHED, rowGroups.length)
       setDecodeFilter(reader, ast)
       val ranges = NvtxRegistry.HYBRID_SCAN_GET_BYTE_RANGES {
         reader.allColumnChunksByteRanges(rowGroups)
       }
-      val buffer = NvtxRegistry.HYBRID_SCAN_READ_DATA {
-        split.source.fetchToBuffer(ranges)
+      addToMetric(HYBRID_SCAN_BYTES_REQUESTED, totalBytes(ranges))
+      val layout = HybridScanPipeline.hostBufferLayout(ranges)
+      val buffer = NvtxIdWithMetrics(NvtxRegistry.HYBRID_SCAN_READ_DATA, metric(BUFFER_TIME)) {
+        split.source.fetchToHostBuffer(ranges, layout)
       }
       closeOnExcept(buffer) { _ =>
-        val hostChunks = HybridScanPipeline.sliceRanges(buffer, ranges)
+        val hostChunks = HybridScanPipeline.sliceRanges(buffer, ranges, layout)
         Some(new FetchedColumnChunks(rowGroups, hostChunks, Some(buffer)))
       }
     }
@@ -144,19 +173,19 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       allowDictionaryPruning: Boolean): Array[Int] = {
     ast.foreach(reader.setFilter)
     val inSplit = rowGroupsInScope(split, reader, reader.allRowGroups())
+    addToMetric(ROW_GROUPS_IN_INPUT, inSplit.length)
     if (inSplit.isEmpty || ast.isEmpty) {
       inSplit
     } else {
       // Runs on the GPU without the semaphore, as it exists to bound large allocations. This
-      // only allocates a few bytes per row group and frees them before returning. 
+      // only allocates a few bytes per row group and frees them before returning.
       // The retry covers an OOM when other tasks have filled the GPU.
       val afterStats = NvtxRegistry.HYBRID_SCAN_FILTER_STATS {
         withRetryNoSplit[Array[Int]] {
           reader.filterRowGroupsWithStats(inSplit)
         }
       }
-      logDebug(s"HybridScan statistics pruning: ${inSplit.length} -> ${afterStats.length} " +
-        "row groups")
+      addToMetric(ROW_GROUPS_PRUNED_BY_STATS, inSplit.length - afterStats.length)
       if (afterStats.isEmpty) {
         afterStats
       } else if (!allowDictionaryPruning ||
@@ -167,8 +196,10 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       } else {
         NvtxRegistry.HYBRID_SCAN_FILTER_DICT {
           // Released after the compare: the column chunk fetch to host memory comes next.
-          filterRowGroupsWithDictionaries(reader, afterStats, split.source.fetch(_),
-            releaseSemaphore = true)
+          filterRowGroupsWithDictionaries(reader, afterStats, { dictRanges =>
+            addToMetric(HYBRID_SCAN_BYTES_REQUESTED, totalBytes(dictRanges))
+            split.source.fetch(dictRanges)
+          }, releaseSemaphore = true)
         }
       }
     }
@@ -222,8 +253,7 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       val afterDict = withResource(getDictPages(dictRanges)) { hostPages =>
         compareDictionaryPages(reader, rowGroups, hostPages, releaseSemaphore)
       }
-      logDebug(s"HybridScan dictionary pruning: ${rowGroups.length} -> ${afterDict.length} " +
-        "row groups")
+      addToMetric(ROW_GROUPS_PRUNED_BY_DICT, rowGroups.length - afterDict.length)
       afterDict
     }
   }
@@ -323,11 +353,8 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
     // dictionary encoding the chunk rather than exceed it, and only the filter columns have pages
     // here.
     GpuSemaphore.acquireIfNecessary(TaskContext.get())
-    // The host pages outlive each attempt, so a retry copies them again.
-    val kept = withRetryNoSplit[Array[Int]] {
-      withResource(copyToDevice(hostPages)) { dictPages =>
-        reader.filterRowGroupsWithDictionaryPages(dictPages, rowGroups)
-      }
+    val kept = withStagedOnDevice(hostPages) { pages =>
+      reader.filterRowGroupsWithDictionaryPages(pages, rowGroups)
     }
     if (releaseSemaphore) {
       // Leaving the GPU for a while: what survives the pruning is a host-side list of row group
@@ -360,9 +387,10 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       // Before the output filter, which references columns by index.
       checkDecodedSchema(t)
       outputAst.flatMap { compiled =>
-        NvtxRegistry.HYBRID_SCAN_OUTPUT_FILTER {
-          // The decoded table outlives each attempt, so a retry filters it again.
-          withRetryNoSplit[Option[Table]] {
+        // The decoded table outlives each attempt, so a retry filters it again.
+        withRetryNoSplit[Option[Table]] {
+          NvtxIdWithMetrics(NvtxRegistry.HYBRID_SCAN_OUTPUT_FILTER,
+              metric(HYBRID_SCAN_OUTPUT_FILTER_TIME)) {
             applyOutputFilter(t, compiled)
           }
         }
@@ -397,12 +425,10 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       reader: HybridScanReader,
       fetched: FetchedColumnChunks): Table = {
     GpuSemaphore.acquireIfNecessary(TaskContext.get())
-    NvtxRegistry.HYBRID_SCAN_MATERIALIZE {
-      // The host chunks outlive each attempt, so a retry copies them again.
-      withRetryNoSplit[Table] {
-        withResource(copyToDevice(fetched.hostChunks)) { deviceChunks =>
-          reader.materializeAllColumns(fetched.rowGroups, deviceChunks)
-        }
+    // Timed inside the staging, so the decode time leaves out the copies and retry waits.
+    withStagedOnDevice(fetched.hostChunks) { chunks =>
+      NvtxIdWithMetrics(NvtxRegistry.HYBRID_SCAN_MATERIALIZE, metric(GPU_DECODE_TIME)) {
+        reader.materializeAllColumns(fetched.rowGroups, chunks)
       }
     }
   }
@@ -490,37 +516,60 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
    */
   private def setDecodeFilter(reader: HybridScanReader, ast: Option[CompiledExpression]): Unit =
     if (filtersOnOutput(ast.isDefined)) reader.setFilter(null) else ast.foreach(reader.setFilter)
-
-  /**
-   * Copy each host buffer to the device, one buffer for one. An empty chunk stays in place as an
-   * empty device buffer rather than being dropped, so the result stays aligned with the request.
-   */
-  private def copyToDevice(hostChunks: Array[HostMemoryBuffer]): Array[DeviceMemoryBuffer] = {
-    hostChunks.safeMap { hostChunk =>
-      val length = hostChunk.getLength
-      closeOnExcept(DeviceMemoryBuffer.allocate(length)) { deviceChunk =>
-        if (length > 0) {
-          deviceChunk.copyFromHostBuffer(0, hostChunk, 0, length)
-        }
-        deviceChunk
-      }
-    }
-  }
 }
 
-/**
- * The parts of the hybrid scan that take no per-scan state, so they are called without
- * constructing a `HybridScanPipeline`: parsing the footer, choosing the columns the reader
- * decodes, laying out byte ranges, and deciding on the driver whether a scan may take the hybrid
- * path at all.
- */
+/** The hybrid scan logic that does not need a pipeline instance. */
 object HybridScanPipeline extends Logging {
+
+  /**
+   * The events host-to-device copies record, one per executor core: an event can't be shared by
+   * two copies open at once, only task threads copy, and no more tasks than cores run at once.
+   * Created at executor startup when the scan is enabled, so that no task creates one while
+   * holding the GPU semaphore.
+   */
+  private val freeCopyEvents = new LinkedBlockingQueue[Cuda.Event]()
+  @volatile private var copyEventsCreated = false
+
+  /** Create the copy events. Called with the GPU memory setup. */
+  def init(numCores: Int): Unit = synchronized {
+    require(numCores > 0, s"hybrid scan copy events need a positive core count, got $numCores")
+    if (!copyEventsCreated) {
+      (0 until numCores).foreach(_ => freeCopyEvents.add(new Cuda.Event()))
+      copyEventsCreated = true
+    }
+  }
+
+  /**
+   * Run `fn` with a copy event from the pool. The copy's close syncs the event, so it is idle
+   * again when it goes back.
+   */
+  private[parquet] def withCopyEvent[T](fn: Cuda.Event => T): T = {
+    if (!copyEventsCreated) {
+      // The scan was enabled by a session after startup, which skipped creating the events.
+      init(math.max(GpuDeviceManager.getNumCores, 1))
+    }
+    val event = freeCopyEvents.take()
+    try {
+      fn(event)
+    } finally {
+      freeCopyEvents.add(event)
+    }
+  }
+
+  /** Close every copy event. Called at executor shutdown, once no task can copy. */
+  def shutdown(): Unit = synchronized {
+    val events = freeCopyEvents.toArray(Array.empty[Cuda.Event])
+    freeCopyEvents.clear()
+    copyEventsCreated = false
+    events.safeClose()
+  }
 
   /** Parse the footer into a reader. The caller owns and closes both the reader and the footer. */
   private[parquet] def openReader(
       footer: HostMemoryBuffer,
-      parquetOptions: ParquetOptions): HybridScanReader = {
-    NvtxRegistry.HYBRID_SCAN_PARSE_FOOTER {
+      parquetOptions: ParquetOptions,
+      parseTime: GpuMetric): HybridScanReader = {
+    NvtxIdWithMetrics(NvtxRegistry.HYBRID_SCAN_PARSE_FOOTER, parseTime) {
       new HybridScanReader(footer, parquetOptions)
     }
   }
@@ -528,6 +577,48 @@ object HybridScanPipeline extends Logging {
   /** Compile a filter. Each literal allocates a GPU scalar, so an OOM here is retried. */
   private[parquet] def compileFilter(expr: AstExpression): CompiledExpression =
     withRetryNoSplit[CompiledExpression](expr.compile())
+
+  /**
+   * Copy `chunks` to the device in packs of at most `maxPackSize` bytes and run `fn` on the device
+   * buffers, which are freed when it returns. `fn` is queued on the copy's stream, so it is
+   * ordered after the copy. `event` must stay open until the copy is closed and must not be
+   * shared with another open copy.
+   */
+  private[parquet] def withStagedOnDevice[T](
+      chunks: Array[HostMemoryBuffer],
+      maxPackSize: Long,
+      minPackSize: Long,
+      event: Cuda.Event)(fn: Array[DeviceMemoryBuffer] => T): T = {
+    var copied = false
+    val splitCopy = (target: AutoCloseableTargetSize) => {
+      if (copied) {
+        // The split OOM came from fn: smaller packs don't shrink what it allocates.
+        throw new GpuSplitAndRetryOOM(
+          "GPU OutOfMemory: work on the staged buffers cannot be split")
+      }
+      // The split OOM came from the copy: retry with half the pack size, down to minPackSize.
+      if (target.targetSize > target.minSize) {
+        // Clamped, since halving can step past the floor, which may still fit.
+        val half = math.min(target.targetSize, target.dataSize) / 2
+        Seq(AutoCloseableTargetSize(math.max(half, target.minSize), target.minSize,
+          target.dataSize))
+      } else {
+        // Throws: already at the floor.
+        splitTargetSizeInHalfGpu(target)
+      }
+    }
+    val packSize = AutoCloseableTargetSize(maxPackSize, minPackSize, chunks.map(_.getLength).sum)
+    // The copy and fn share one retry block. A retry OOM from either frees the device buffers,
+    // waits, then copies again and reruns fn; the host chunks outlive each attempt.
+    withRetry(packSize, splitCopy) { attempt =>
+      copied = false
+      withResource(PackedHostToDeviceCopy.copyAsync(chunks, Cuda.DEFAULT_STREAM,
+          attempt.targetSize, event)) { staged =>
+        copied = true
+        fn(staged.getBuffers())
+      }
+    }.next()
+  }
 
   /**
    * The reader's column selection. Only the projected columns are decoded, as microsecond
@@ -569,14 +660,105 @@ object HybridScanPipeline extends Logging {
   }
 
   /**
-   * One slice per range of a buffer laid out by [[hostBufferLayout]], in the order requested.
-   * Each slice holds a reference to the buffer, which stays the caller's to close.
+   * One slice per range of a buffer laid out as `layout`, which [[hostBufferLayout]] computed for
+   * `ranges`, in the order requested. Each slice holds a reference to the buffer, which stays the
+   * caller's to close.
    */
   private[parquet] def sliceRanges(
       buffer: HostMemoryBuffer,
-      ranges: Array[ByteRange]): Array[HostMemoryBuffer] = {
-    val layout = hostBufferLayout(ranges)
+      ranges: Array[ByteRange],
+      layout: HostBufferLayout): Array[HostMemoryBuffer] = {
     ranges.indices.toArray.safeMap(i => buffer.slice(layout.offsets(i), ranges(i).size()))
+  }
+
+  /**
+   * cuFile's alignment for a direct read: 4 KiB. A read goes straight from storage to device
+   * memory only when its file offset, its size and its device address are all multiples of this.
+   * If any of the three is not, the read still succeeds, but cuFile reads the whole of it into its
+   * own GPU bounce buffers and copies it from there, which adds a device copy and loses much of
+   * the benefit of GPUDirect Storage.
+   *
+   * Meeting it costs reading up to one block of unneeded bytes on each side of every span of
+   * ranges, which is small next to the column chunks a hybrid scan reads.
+   */
+  private[parquet] val GDS_ALIGNMENT = 4096L
+
+  private[parquet] def alignDown(value: Long): Long = value - value % GDS_ALIGNMENT
+
+  private[parquet] def alignUp(value: Long): Long = alignDown(value + GDS_ALIGNMENT - 1)
+
+  /**
+   * Where a set of byte ranges lands in a device buffer that starts on a [[GDS_ALIGNMENT]]
+   * boundary.
+   *
+   * @param reads     the reads to issue, at their offsets in the buffer
+   * @param offsets   where each range starts in the buffer, indexed as the ranges are
+   * @param totalSize how large the buffer has to be
+   */
+  private[parquet] case class DeviceBufferLayout(
+      reads: Seq[CopyRange],
+      offsets: Array[Long],
+      totalSize: Long)
+
+  /**
+   * Lay the ranges out in file order, like [[hostBufferLayout]], but read whole aligned blocks of
+   * the file into spans of the buffer that start on a [[GDS_ALIGNMENT]] boundary. Ranges whose
+   * blocks overlap or touch share a span, so bytes that two ranges share, or a block they both
+   * touch, are read once. Each range is sliced from its span at its file offset's position within
+   * the span's blocks.
+   *
+   * Every read's file offset, size and buffer offset are multiples of [[GDS_ALIGNMENT]], except
+   * where a span runs into the end of a file whose size is not a whole number of blocks. A read
+   * cannot go past the end of the file, so its size there cannot be a multiple of the block. That
+   * last partial block is made a read of its own, so that only it goes through cuFile's bounce
+   * buffers and the rest of the span is still read directly.
+   */
+  private[parquet] def deviceBufferLayout(
+      ranges: Array[ByteRange],
+      fileSize: Long): DeviceBufferLayout = {
+    // The reads stop at the end of the file, so a range past it would slice unread memory. An
+    // empty range is never read, so it may be anywhere.
+    ranges.foreach { r =>
+      require(r.size() == 0 ||
+          (r.offset() >= 0 && r.size() > 0 && r.size() <= fileSize - r.offset()),
+        s"range at ${r.offset()} of ${r.size()} bytes is not within the file of $fileSize bytes")
+    }
+    val offsets = new Array[Long](ranges.length)
+    val reads = new ArrayBuffer[CopyRange]()
+    var totalSize = 0L
+    var spanStart = 0L
+    var blocksStart = -1L
+    var blocksEnd = -1L
+
+    def endSpan(): Unit = {
+      if (blocksStart >= 0) {
+        val readEnd = math.min(blocksEnd, fileSize)
+        val alignedEnd = alignDown(readEnd)
+        if (alignedEnd > blocksStart) {
+          reads += new CopyRange(blocksStart, alignedEnd - blocksStart, spanStart)
+        }
+        if (readEnd > alignedEnd) {
+          reads += new CopyRange(alignedEnd, readEnd - alignedEnd,
+            spanStart + alignedEnd - blocksStart)
+        }
+        totalSize = spanStart + blocksEnd - blocksStart
+      }
+    }
+
+    // An empty range has nothing to read and keeps offset 0, which any buffer can slice.
+    ranges.indices.filter(i => ranges(i).size() > 0).sortBy(i => ranges(i).offset()).foreach { i =>
+      val offset = ranges(i).offset()
+      if (alignDown(offset) > blocksEnd) {
+        endSpan()
+        spanStart = totalSize
+        blocksStart = alignDown(offset)
+      }
+      // A range nested in an earlier one ends before it, so the span keeps the furthest end.
+      blocksEnd = math.max(blocksEnd, alignUp(offset + ranges(i).size()))
+      offsets(i) = spanStart + offset - blocksStart
+    }
+    endSpan()
+    DeviceBufferLayout(reads.toSeq, offsets, totalSize)
   }
 
   /**
@@ -638,7 +820,8 @@ object HybridScanPipeline extends Logging {
         new HybridScanFilters(readDataSchema, sqlConf.caseSensitiveAnalysis, pushedFilters))
       val eligible = isEligible(hybridScanEnabled = true, failOnFallback, readDataSchema,
         config.filters, useChunkedReader,
-        compressCfg.decompressSnappyCpu || compressCfg.decompressZstdCpu, useFieldId,
+        compressCfg.decompressSnappyCpu || compressCfg.decompressZstdCpu,
+        useFieldId && ParquetSchemaClipShims.hasFieldIds(readDataSchema),
         sqlConf.ignoreCorruptFiles, GpuParquetFileFilterHandler.isDecryptionConfigured(hadoopConf),
         DateTimeRebaseMode.fromName(SparkShimImpl.parquetRebaseRead(sqlConf)),
         DateTimeRebaseMode.fromName(SparkShimImpl.int96ParquetRebaseRead(sqlConf)))
@@ -670,7 +853,8 @@ object HybridScanPipeline extends Logging {
    * @param scanFilters       the data filters Spark pushed to the scan
    * @param useChunkedReader  whether the read may be split into several batches
    * @param decompressAnyCpu  whether any codec is set to decompress on the CPU
-   * @param useFieldId        whether columns are matched by Parquet field ID
+   * @param useFieldId        whether columns are matched by Parquet field ID: field ID reads are
+   *                          enabled and the read schema carries field IDs
    * @param ignoreCorruptFiles whether a file that fails to read is skipped rather than failing
    *                          the query
    * @param decryptionConfigured whether the Hadoop configuration sets up Parquet decryption
@@ -792,22 +976,32 @@ private[parquet] class HybridScanPerFileParquetPartitionReader(
   private val pipeline = new HybridScanPipeline(context)
   private var batchIter: GpuColumnarBatchIterator = _
   private var footerClosed = false
+  // Set before the read starts, so a read that threw or a closed reader never runs it again
+  // against the freed footer.
+  private var isDone = false
 
   override def next(): Boolean = {
-    if (batchIter == null) {
+    if (batchIter == null && !isDone) {
+      isDone = true
       batchIter = readBatch()
     }
-    batchIter.hasNext
+    batchIter != null && batchIter.hasNext
   }
 
   override def get(): ColumnarBatch = batchIter.next()
 
   override def close(): Unit = {
-    if (batchIter != null) {
-      batchIter.close()
-      batchIter = null
+    isDone = true
+    withResource(split.source) { _ =>
+      try {
+        if (batchIter != null) {
+          batchIter.close()
+          batchIter = null
+        }
+      } finally {
+        closeFooter()
+      }
     }
-    closeFooter()
   }
 
   private def closeFooter(): Unit = {
@@ -834,7 +1028,8 @@ private[parquet] class HybridScanPerFileParquetPartitionReader(
   private def readTable(): Option[Table] = {
     NvtxRegistry.PARQUET_READ_BATCH {
       withResource(context.scanFilters.ast.map(HybridScanPipeline.compileFilter)) { ast =>
-        withResource(openReader(footer, parquetOptions)) { reader =>
+        withResource(openReader(footer, parquetOptions,
+            context.execMetrics.getOrElse(HYBRID_SCAN_FOOTER_PARSE_TIME, NoopMetric))) { reader =>
           // The footer bytes are only read while the reader is being constructed.
           closeFooter()
           pipeline.planAndFetch(split, reader, ast, allowDictionaryPruning = true)
@@ -851,11 +1046,19 @@ private[parquet] class HybridScanPerFileParquetPartitionReader(
  */
 case class HybridScanConfig(
     filters: HybridScanFilters,
-    filterKeepThreshold: Double)
+    filterKeepThreshold: Double,
+    maxH2DPackSize: Long,
+    minH2DPackSize: Long)
 
 object HybridScanConfig {
   def apply(rapidsConf: RapidsConf, filters: HybridScanFilters): HybridScanConfig = {
-    HybridScanConfig(filters, rapidsConf.hybridScanSingleStageFilterKeepThreshold)
+    val maxPackSize = rapidsConf.hybridScanMaxH2DPackSize
+    val minPackSize = rapidsConf.hybridScanMinH2DPackSize
+    require(minPackSize <= maxPackSize,
+      s"${RapidsConf.PARQUET_HYBRID_SCAN_MIN_H2D_PACK_SIZE.key} ($minPackSize) must be at most " +
+        s"${RapidsConf.PARQUET_HYBRID_SCAN_MAX_H2D_PACK_SIZE.key} ($maxPackSize)")
+    HybridScanConfig(filters, rapidsConf.hybridScanSingleStageFilterKeepThreshold,
+      maxPackSize, minPackSize)
   }
 }
 
