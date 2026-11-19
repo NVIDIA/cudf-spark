@@ -519,6 +519,86 @@ def test_delta_deletion_vector_read(spark_tmp_path, reader_type, condition):
               # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
               "spark.sql.adaptive.enabled": "false"})
 
+@allow_non_gpu("ExecutedCommandExec", *delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not supports_delta_lake_deletion_vectors() or is_before_spark_353(),
+    reason="Persistent-DV command acceleration requires Delta Lake DV support and Spark 3.5.3+")
+@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
+                    reason="Persistent-DV command acceleration requires DBR 17.3+")
+@pytest.mark.parametrize("command", ["DELETE", "UPDATE", "MERGE_DELETE", "MERGE_UPSERT"])
+def test_delta_dml_many_packed_dv_files(spark_tmp_path, command):
+    """One reduce task persists many packed DV files. A packing target of one byte puts every
+    deletion vector in its own file and a single shuffle partition puts all of them in one task.
+    The table is partitioned by values that need path escaping. The first statement touches only
+    a few files, so the second finds files both with and without a DV, and the third merges
+    existing DVs. This checks the wiring from the command to the DV writer and the results; that
+    the files are written concurrently is covered by GpuDeletionVectorWriterSuite. On Databricks
+    this runs the Databricks implementation, which does not use that writer."""
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    num_files = 40
+    num_rows = num_files * 10
+    conf = copy_and_update(delta_delete_enabled_conf, {
+        "spark.rapids.sql.command.UpdateCommand": "true",
+        "spark.rapids.sql.command.UpdateCommandEdge": "true",
+        "spark.rapids.sql.command.MergeIntoCommand": "true",
+        "spark.rapids.sql.command.MergeIntoCommandEdge": "true",
+        "spark.rapids.sql.delta.lowShuffleMerge.enabled": "false",
+        "spark.databricks.delta.delete.deletionVectors.persistent": "true",
+        "spark.databricks.delta.update.deletionVectors.persistent": "true",
+        "spark.databricks.delta.merge.deletionVectors.persistent": "true",
+        "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
+        "spark.databricks.delta.deletionVectors.packing.targetSize": "1",
+        # One reduce task builds and persists all the deletion vectors.
+        "spark.sql.shuffle.partitions": "1",
+        # AQE is on: with it off the plan fails on Delta's own file lookup join, with or without
+        # the concurrent DV writer.
+        "spark.sql.adaptive.enabled": "true"})
+    partition_expr = "IF(id % 2 = 0, 'x y', 'p%q')"
+    def setup(spark):
+        for path in [data_path + "/CPU", data_path + "/GPU"]:
+            spark.range(num_rows).selectExpr("id AS a", "id % 7 AS b", partition_expr + " AS p") \
+                .repartition(num_files, "a").write.format("delta").partitionBy("p") \
+                .option("delta.enableDeletionVectors", "true").save(path)
+    with_cpu_session(setup, conf=conf)
+
+    def source(condition):
+        # Rows 0..num_rows-1 exist in the table, the extra ones only matter for the upsert.
+        extra = 20 if command == "MERGE_UPSERT" else 0
+        return ("(SELECT * FROM (SELECT id AS a, id % 7 AS b, {} AS p FROM range({})) "
+                "WHERE {})").format(partition_expr, num_rows + extra, condition)
+    def statement(path, condition):
+        if command == "DELETE":
+            return "DELETE FROM delta.`{}` WHERE {}".format(path, condition)
+        if command == "UPDATE":
+            return "UPDATE delta.`{}` SET b = -1 WHERE {}".format(path, condition)
+        merge = "MERGE INTO delta.`{}` t USING {} s ON t.a = s.a ".format(path, source(condition))
+        if command == "MERGE_DELETE":
+            return merge + "WHEN MATCHED THEN DELETE"
+        return merge + ("WHEN MATCHED THEN UPDATE SET t.b = -1 "
+                        "WHEN NOT MATCHED THEN INSERT (a, b, p) VALUES (s.a, s.b, s.p)")
+    expected_command = "GpuMergeIntoCommand" if command.startswith("MERGE") \
+        else "Gpu{}Command".format(command.capitalize())
+    def dv_file_count(path):
+        return len(glob.glob(path + "/deletion_vector_*.bin"))
+    def read_table(path):
+        return with_cpu_session(lambda spark: spark.sql(
+            "SELECT * FROM delta.`{}`".format(path)).sort("a").collect(), conf=conf)
+
+    # A few files, then all files (some with a DV, most without), then all files again (all with).
+    for step, condition in enumerate(["a < 5", "b = 3", "b = 5"]):
+        with_cpu_session(lambda spark: spark.sql(
+            statement(data_path + "/CPU", condition)).collect(), conf=conf)
+        assert_rapids_delta_write(
+            lambda spark: spark.sql(statement(data_path + "/GPU", condition)).collect(),
+            conf=conf, expected_command=expected_command)
+        cpu_dvs = dv_file_count(data_path + "/CPU")
+        assert cpu_dvs >= 1
+        if step > 0:
+            assert cpu_dvs > 5, "Expected the CPU statement to persist many DV files"
+        assert dv_file_count(data_path + "/GPU") == cpu_dvs
+        assert_equal(read_table(data_path + "/CPU"), read_table(data_path + "/GPU"))
+
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order
