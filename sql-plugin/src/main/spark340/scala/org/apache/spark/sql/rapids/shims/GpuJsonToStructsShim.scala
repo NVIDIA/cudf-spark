@@ -31,7 +31,7 @@ import org.apache.spark.sql.rapids.ExceptionTimeParserPolicy
 
 object GpuJsonToStructsShim {
   def tagDateFormatSupport(meta: RapidsMeta[_, _, _], dateFormat: Option[String]): Unit = {
-    // Date format support is checked via GpuJsonUtils without extra tagging here.
+    // Date format support is checked by GpuTextBasedDateUtils.tagCudfFormat; no extra checks.
   }
 
   def castJsonStringToDate(input: ColumnView, options: JSONOptions): ColumnVector = {
