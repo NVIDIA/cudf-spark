@@ -453,7 +453,9 @@ For decimal targets, decimal payloads use Spark's HALF_UP rounding and return SQ
 final target overflow. Other source representations, including integer, string, boolean, and
 floating-point values, are converted by Spark through the CPU bridge.
 
-For every target, SQL-null parents, missing paths, and encoded Variant nulls stay on the GPU.
+SQL-null parents stay on the GPU for every target, and missing paths and encoded Variant
+nulls do for every target except decimal. For decimal targets, a missing path or encoded
+Variant null uses the bridge, so that malformed object field ids raise Spark's error.
 Malformed bytes that extraction reports, rows that Spark's Variant constructor rejects, and
 path steps that meet a primitive type ID Spark does not recognize use the bridge so that Spark
 raises its error. Any row requiring the bridge sends the entire input batch through CPU
@@ -465,9 +467,11 @@ intermediate with precision 38 and scale `min(targetScale + 1, 38)` to preserve 
 Values outside that intermediate range fall back even if the final target could hold them;
 for example, a decimal value of 5 × 10³⁷ into `decimal(38,0)` needs CPU conversion.
 Width-specific decimal payload precision and scale are checked, but these checks do not
-validate the entire Variant path. Object field ids that are unsorted or outside the metadata
-dictionary, which the Variant spec forbids, can return SQL null where Spark returns a value or
-raises an error; incompatible-operation gating remains in place.
+validate the entire Variant path. For targets other than decimal, object field ids that are
+unsorted or outside the metadata dictionary, which the Variant spec forbids, can return SQL
+null where Spark returns a value or raises an error. Malformed or noncanonical object and
+metadata encodings may also differ from Spark for any target; incompatible-operation gating
+remains in place.
 
 ## Parquet
 

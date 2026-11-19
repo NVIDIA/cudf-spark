@@ -71,7 +71,12 @@ case class GpuVariantGetMeta(
     }
 
     if (!GpuVariantGet.isVariantCudfAvailable) {
-      willNotWorkOnGpu("cuDF Java was built without Variant status extraction APIs")
+      willNotWorkOnGpu("cuDF Java lacks the Variant status extraction APIs " +
+        "(VariantUtils.getVariantFieldValueWithStatus and castVariantValue)")
+    } else if (expr.targetType.isInstanceOf[DecimalType] &&
+        !GpuVariantGet.isVariantDecimalCudfAvailable) {
+      willNotWorkOnGpu("decimal targets need VariantUtils.castVariantValueWithStatus, " +
+        "which this cuDF Java lacks")
     }
 
     if (!conf.isCpuBridgeEnabled) {
@@ -149,12 +154,20 @@ object GpuVariantGet extends Logging {
   // classes, rather than the tagging thread's context loader. Only a positive answer is cached; a
   // negative one is recomputed on each tagging pass, which costs a few reflective lookups.
   @volatile private var variantCudfAvailable = false
+  @volatile private var variantDecimalCudfAvailable = false
+
+  private def loadCudfClass(name: String): Class[_] =
+    Class.forName(name, false, getClass.getClassLoader)
 
   def isVariantCudfAvailable: Boolean = variantCudfAvailable || {
-    val available = GpuVariantExtraction.hasRequiredApis { name =>
-      Class.forName(name, false, getClass.getClassLoader)
-    }
+    val available = GpuVariantExtraction.hasRequiredApis(loadCudfClass)
     variantCudfAvailable = available
+    available
+  }
+
+  def isVariantDecimalCudfAvailable: Boolean = variantDecimalCudfAvailable || {
+    val available = GpuVariantExtraction.hasDecimalApis(loadCudfClass)
+    variantDecimalCudfAvailable = available
     available
   }
 
@@ -162,13 +175,14 @@ object GpuVariantGet extends Logging {
    * Decodes the extracted field on the GPU into an owning column, or returns None when any row
    * needs Spark's CPU semantics, so that the caller evaluates the whole batch on the CPU.
    *
-   * The batch stays on the GPU when every row is a SQL-null parent, a missing path, a Variant
-   * null, or a value one of the exact-type decoders accepts. Spark returns NULL for a Variant null
-   * whatever the target type, and no decoder accepts one. Extraction leaves the raw value null
-   * only for ROW_NULL, MISSING_PATH and MALFORMED_VARIANT, and a decoder leaves a row valid only
-   * when it decoded the row. Malformed bytes found during extraction, and rows that Spark's
-   * Variant constructor rejects, fall back so that Spark raises its error. So do missing paths
-   * where a step met a primitive type ID that Spark does not recognize.
+   * The batch stays on the GPU when every row is a SQL-null parent, a missing path, a Variant null,
+   * or a value one of the exact-type decoders accepts. Decimal targets are stricter: a missing path
+   * or Variant null also falls back (see `GpuVariantDecimal.decode`). Spark returns NULL for a
+   * Variant null whatever the target type, and no decoder accepts one. Extraction leaves the raw
+   * value null only for ROW_NULL, MISSING_PATH and MALFORMED_VARIANT, and a decoder leaves a row
+   * valid only when it decoded the row. Malformed bytes found during extraction, and rows that
+   * Spark's Variant constructor rejects, fall back so that Spark raises its error. So do missing
+   * paths where a step met a primitive type ID that Spark does not recognize.
    */
   private[rapids] def decodeVariantField(
       extraction: GpuVariantExtraction.Extraction,

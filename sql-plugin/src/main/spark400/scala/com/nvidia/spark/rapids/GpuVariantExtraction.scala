@@ -34,7 +34,15 @@ import com.nvidia.spark.rapids.Arm.withResource
  * This is not a validator for the complete Variant encoding or an implementation of Spark casts.
  */
 private[rapids] object GpuVariantExtraction {
-  def hasRequiredApis(loadClass: String => Class[_]): Boolean = {
+  /** Extraction and the exact-type cast, which every target needs. */
+  def hasRequiredApis(loadClass: String => Class[_]): Boolean =
+    hasApis(loadClass, statusCastRequired = false)
+
+  /** The APIs above plus the status-aware cast, which only decimal targets decode through. */
+  def hasDecimalApis(loadClass: String => Class[_]): Boolean =
+    hasApis(loadClass, statusCastRequired = true)
+
+  private def hasApis(loadClass: String => Class[_], statusCastRequired: Boolean): Boolean = {
     try {
       val utils = loadClass("ai.rapids.cudf.VariantUtils")
       val result = loadClass("ai.rapids.cudf.VariantOperationResult")
@@ -42,13 +50,16 @@ private[rapids] object GpuVariantExtraction {
       val extract = utils.getMethod("getVariantFieldValueWithStatus", classOf[ColumnView],
         classOf[String])
       val cast = utils.getMethod("castVariantValue", classOf[ColumnView], classOf[DType])
-      // Decimal targets decode through the status-aware cast.
-      val statusCast = utils.getMethod("castVariantValueWithStatus", classOf[ColumnView],
-        classOf[DType], classOf[ColumnView])
+      val statusCast = if (statusCastRequired) {
+        Seq(utils.getMethod("castVariantValueWithStatus", classOf[ColumnView], classOf[DType],
+          classOf[ColumnView]))
+      } else {
+        Seq.empty
+      }
       extract.getReturnType == result &&
         cast.getReturnType == classOf[ColumnVector] &&
-        statusCast.getReturnType == result &&
-        Seq(extract, cast, statusCast).forall(m => Modifier.isStatic(m.getModifiers)) &&
+        statusCast.forall(_.getReturnType == result) &&
+        (Seq(extract, cast) ++ statusCast).forall(m => Modifier.isStatic(m.getModifiers)) &&
         classOf[AutoCloseable].isAssignableFrom(result) &&
         result.getMethod("getValue").getReturnType == classOf[ColumnVector] &&
         result.getMethod("getStatus").getReturnType == classOf[ColumnVector] &&

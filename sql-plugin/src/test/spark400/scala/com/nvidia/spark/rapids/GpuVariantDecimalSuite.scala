@@ -225,8 +225,7 @@ class GpuVariantDecimalSuite extends AnyFunSuite {
     val bool = Array[Byte](4)
     val float = Array[Byte](56, 0, 0, -96, 63)
     val double = Array[Byte](28, 0, 0, 0, 0, 0, 0, -12, 63)
-    // A Variant null payload stays on the GPU; see the missing and encoded-null test.
-    Seq(string, integer, bool, float, double).foreach { payload =>
+    Seq(string, integer, bool, float, double, Array[Byte](0)).foreach { payload =>
       val rows = Seq(obj(decimal(BigInt(125), 2, 4)), obj(payload))
       val target = DecimalType(4, 1)
       assertDecoderFallback(rows, target)
@@ -441,17 +440,11 @@ class GpuVariantDecimalSuite extends AnyFunSuite {
     }
   }
 
-  test("decimal missing and encoded-null rows stay on the GPU") {
+  test("decimal missing and encoded-null rows request CPU conversion of the complete input") {
     val target = DecimalType(4, 1)
     val rows = Seq(obj(decimal(BigInt(125), 2, 4)), Array[Byte](2, 0, 0), obj(Array[Byte](0)))
     assert(cpuValues(rows, target) == Seq("1.3", null, null))
-    withVariant(rows) { variant =>
-      GpuVariantExtraction.withRawExtraction(variant, "$.id") { raw =>
-        withResource(GpuVariantDecimal.decode(raw, target).getOrElse(noFallback)) { result =>
-          assertValues(result, target, Seq("1.3", null, null))
-        }
-      }
-    }
+    assertDecoderFallback(rows, target)
   }
 
   test("an empty encoded value is not an empty batch or SQL-null input") {
@@ -526,12 +519,9 @@ class GpuVariantDecimalSuite extends AnyFunSuite {
     }
   }
 
-  test("out-of-range object field IDs are the documented gap for decimal too") {
+  test("missing and encoded-null statuses do not hide malformed object field IDs") {
     // Native binary lookup can visit valid id0 first, while Spark's small-object linear
     // traversal first sees invalid id1. The metadata dictionary contains only id0 = "id".
-    // The Variant spec forbids such ids. Like the other targets, decimal keeps missing and
-    // Variant-null rows on the GPU, so this returns NULL where Spark throws; the incompat
-    // note documents it.
     val row = Array[Byte](2, 2, 1, 0, 0, 0, 1, 0)
     val target = DecimalType(4, 1)
     Seq(("$.missing", VariantOperationStatus.MISSING_PATH),
@@ -554,9 +544,7 @@ class GpuVariantDecimalSuite extends AnyFunSuite {
           }
           GpuVariantDecimal.decode(raw, target)
         }
-        withResource(decoded.getOrElse(noFallback)) { result =>
-          assertValues(result, target, Seq(null))
-        }
+        withResource(decoded)(_ => assert(decoded.isEmpty))
       }
     }
   }

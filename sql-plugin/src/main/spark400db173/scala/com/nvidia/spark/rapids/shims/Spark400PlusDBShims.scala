@@ -62,9 +62,9 @@ trait Spark400PlusDBShims extends Spark341PlusDBShims {
           ("path", TypeSig.lit(TypeEnum.STRING), TypeSig.STRING)),
         GpuVariantGetMeta)
         .incompat("Boolean, integer, floating-point, and string targets decode exact physical " +
-          "types and may differ from Spark casts. Object field ids that are unsorted or outside " +
-          "the metadata dictionary, which the Variant spec forbids, can return NULL where " +
-          "Spark returns a value or raises an error")
+          "types and may differ from Spark casts. For those targets, object field ids that are " +
+          "unsorted or outside the metadata dictionary, which the Variant spec forbids, can " +
+          "return NULL where Spark returns a value or raises an error")
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
     super.getExprs ++ shimExprs
   }

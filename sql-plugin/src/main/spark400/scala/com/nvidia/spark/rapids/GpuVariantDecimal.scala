@@ -22,7 +22,8 @@ package com.nvidia.spark.rapids
 
 import java.math.BigInteger
 
-import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Scalar, Table, VariantUtils}
+import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Scalar, Table, VariantOperationStatus,
+  VariantUtils}
 import com.nvidia.spark.rapids.Arm.withResource
 
 import org.apache.spark.sql.types.DecimalType
@@ -57,9 +58,12 @@ private[rapids] object GpuVariantDecimal {
     val nativeType = DType.create(DType.DTypeEnum.DECIMAL128, -guardScale)
     withResource(VariantUtils.castVariantValueWithStatus(
         extraction.getValue, nativeType, extraction.getStatus)) { decoded =>
-      // Coverage is shared with the other targets: SQL-null parents, missing paths and Variant
-      // nulls stay on the GPU, subject to the same malformed-byte and constructor checks.
-      if (!GpuVariantGet.isCovered(extraction, decoded.getValue) ||
+      // Unlike the other targets, every row with a non-null parent must decode. A missing path
+      // or an encoded Variant null falls back, so that an object with unsorted or out-of-range
+      // field ids raises Spark's error instead of returning NULL. The shared coverage check
+      // then adds the Variant constructor check.
+      if (decoded.getValue.getNullCount != extraction.parentNullCount ||
+          !GpuVariantGet.isCovered(extraction, decoded.getValue) ||
           !isValidDecimal(extraction, decoded.getValue, intermediate)) {
         // The guard scale may have overflowed even though Spark can return a valid result.
         // Fall back to preserve Spark coercions and decimal-payload errors.
@@ -96,7 +100,7 @@ private[rapids] object GpuVariantDecimal {
       }
     }) { sourceValid =>
       // Release the INT32 precision/scale columns before the final validation allocations.
-      decimalRowsValid(guard, sourceValid, intermediate)
+      decimalRowsValid(guard, sourceValid, extraction.getStatus, intermediate)
     }
   }
 
@@ -123,12 +127,13 @@ private[rapids] object GpuVariantDecimal {
   private def decimalRowsValid(
       guard: ColumnView,
       sourceValid: ColumnView,
+      extractionStatus: ColumnView,
       intermediate: DecimalType): Boolean = {
     // Keep status coverage separate so unsupported rows avoid these validation allocations.
     // Combine the three decimal checks before their single device-to-host reduction.
     withResource(fitsIntermediatePrecision(guard, intermediate)) { fits =>
       withResource(sourceValid.and(fits)) { valid =>
-        allRowsValid(valid, guard)
+        allRowsValid(valid, extractionStatus)
       }
     }
   }
@@ -217,16 +222,24 @@ private[rapids] object GpuVariantDecimal {
     }
   }
 
-  // Only decoded rows are checked. Coverage has already accepted every row the decoder left null.
-  private def allRowsValid(valid: ColumnView, guard: ColumnView): Boolean = {
+  // True when every row passed the decimal checks or has a SQL-null parent. This does not rely
+  // on the caller's coverage check: any other row the decoder left null counts as invalid.
+  private def allRowsValid(valid: ColumnView, extractionStatus: ColumnView): Boolean = {
     withResource(Scalar.fromBool(false)) { invalid =>
       withResource(valid.replaceNulls(invalid)) { nonNullValid =>
-        withResource(guard.isNull) { undecoded =>
-          withResource(nonNullValid.or(undecoded)) { covered =>
-            BoolUtils.isAllValidTrue(covered)
-          }
+        withResource(validOrSqlNull(nonNullValid, extractionStatus)) { covered =>
+          BoolUtils.isAllValidTrue(covered)
         }
       }
+    }
+  }
+
+  private def validOrSqlNull(valid: ColumnView, extractionStatus: ColumnView): ColumnVector = {
+    withResource(Scalar.fromUnsignedByte(VariantOperationStatus.ROW_NULL.getNativeId.toByte)) {
+      sqlNull =>
+        withResource(extractionStatus.equalTo(sqlNull)) { rowNull =>
+          valid.or(rowNull)
+        }
     }
   }
 }

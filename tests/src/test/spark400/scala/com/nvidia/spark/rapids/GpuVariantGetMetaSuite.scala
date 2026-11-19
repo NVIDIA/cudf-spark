@@ -51,8 +51,11 @@ class GpuVariantGetMetaSuite extends AnyFunSuite {
     try {
       thread.setContextClassLoader(new ClassLoader(null) {})
       val module = moduleClass.getField("MODULE$").get(null)
-      val available = moduleClass.getMethod("isVariantCudfAvailable").invoke(module)
-      assert(available == java.lang.Boolean.TRUE)
+      Seq("isVariantCudfAvailable", "isVariantDecimalCudfAvailable").foreach { probe =>
+        withClue(probe) {
+          assert(moduleClass.getMethod(probe).invoke(module) == java.lang.Boolean.TRUE)
+        }
+      }
     } finally {
       thread.setContextClassLoader(original)
     }
@@ -61,8 +64,9 @@ class GpuVariantGetMetaSuite extends AnyFunSuite {
   private def fixtureApis(
       utils: Class[_] = classOf[Utils],
       result: Class[_] = classOf[Result],
-      status: Class[_] = classOf[Status]): Boolean = {
-    GpuVariantExtraction.hasRequiredApis {
+      status: Class[_] = classOf[Status],
+      check: (String => Class[_]) => Boolean = GpuVariantExtraction.hasDecimalApis): Boolean = {
+    check {
       case "ai.rapids.cudf.VariantUtils" => utils
       case "ai.rapids.cudf.VariantOperationResult" => result
       case "ai.rapids.cudf.VariantOperationStatus" => status
@@ -72,6 +76,7 @@ class GpuVariantGetMetaSuite extends AnyFunSuite {
 
   test("coordinated reflection fixtures satisfy every required API") {
     assert(fixtureApis())
+    assert(fixtureApis(check = GpuVariantExtraction.hasRequiredApis))
   }
 
   // Each rejected fixture differs from the accepted one in one member. Checking the accepted
@@ -82,6 +87,7 @@ class GpuVariantGetMetaSuite extends AnyFunSuite {
       status: Class[_] = classOf[Status]): Unit = {
     assert(fixtureApis())
     assert(!fixtureApis(utils, result, status))
+    assert(!fixtureApis(utils, result, status, GpuVariantExtraction.hasRequiredApis))
   }
 
   test("plain cast must be static, accept a value and type, and return ColumnVector") {
@@ -91,10 +97,15 @@ class GpuVariantGetMetaSuite extends AnyFunSuite {
     }
   }
 
-  test("status cast must be static, accept the prior status, and return the result owner") {
+  test("only decimal needs a static status cast that takes the prior status") {
+    // A cuDF without a usable status cast keeps every other target on the GPU.
     Seq(classOf[PlainCastUtils], classOf[WrongStatusCastParametersUtils],
       classOf[WrongStatusCastReturnUtils], classOf[NonStaticStatusCastUtils]).foreach { utils =>
-      withClue(utils.getSimpleName) { assertFixtureRejected(utils = utils) }
+      withClue(utils.getSimpleName) {
+        assert(fixtureApis())
+        assert(!fixtureApis(utils = utils))
+        assert(fixtureApis(utils = utils, check = GpuVariantExtraction.hasRequiredApis))
+      }
     }
   }
 
