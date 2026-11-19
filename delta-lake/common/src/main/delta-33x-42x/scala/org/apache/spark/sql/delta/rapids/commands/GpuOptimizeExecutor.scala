@@ -71,9 +71,11 @@ class GpuOptimizeExecutor(
   private def ensureDeletionVectorDisabled(): Unit = {
     val dvFeatureEnabled = DeletionVectorUtils.deletionVectorsWritable(snapshot)
 
-    // Ordinary OPTIMIZE must fall back when deletion vectors are enabled. REORG PURGE is
-    // different: it reads existing deletion vectors and writes replacement files without them.
-    if (dvFeatureEnabled && optimizeContext.reorg.isEmpty) {
+    // Compaction must fall back when deletion vectors are enabled. REORG PURGE and Z-ORDER
+    // are different: they read existing deletion vectors and rewrite the live rows into
+    // replacement files without them.
+    val rewritesLiveRows = optimizeContext.reorg.nonEmpty || zOrderByColumns.nonEmpty
+    if (dvFeatureEnabled && !rewritesLiveRows) {
       throw new IllegalStateException("Deletion vector not supported in gpu, we should have " +
         "fallback to cpu in GpuOptimizeExecutor")
     }
