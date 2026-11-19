@@ -681,9 +681,8 @@ def run_delete_on_cpu_and_gpu(spark_tmp_path, generate_dest_data, delete_sql, co
         assert gpu_metrics is None
     else:
         assert gpu_metrics is not None
-        assert set(cpu_metrics) == set(gpu_metrics), \
-            f"Reported DELETE metrics differ: CPU {sorted(cpu_metrics)} GPU {sorted(gpu_metrics)}"
-        assert row_count_metrics(cpu_metrics) == row_count_metrics(gpu_metrics)
+        assert cpu_metrics == gpu_metrics, \
+            f"Reported DELETE metrics differ: CPU {cpu_metrics} GPU {gpu_metrics}"
     return gpu_result[0][0], cpu_metrics, gpu_metrics
 
 

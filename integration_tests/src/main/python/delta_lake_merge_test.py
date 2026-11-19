@@ -211,8 +211,10 @@ def _target_path(spark, spark_tmp_path):
     """Separate target table per run so the CPU and GPU runs of one test don't share state."""
     gpu_enabled = str(spark.conf.get("spark.rapids.sql.enabled", "false")).lower() == "true"
     path = spark_tmp_path + ("/GPU" if gpu_enabled else "/CPU")
-    # Collapse repeated slashes (Delta rejects them as ambiguous paths) but keep "scheme://".
-    return re.sub(r"(?<!:)/{2,}", "/", path)
+    # Collapse repeated slashes in the path (Delta rejects them as ambiguous paths), keeping any
+    # "scheme:" or "scheme://authority" prefix intact; the authority may be empty ("hdfs:///x").
+    prefix, rest = re.match(r"((?:[A-Za-z][A-Za-z0-9+.-]*:(?://[^/]*)?)?)(.*)", path, re.S).groups()
+    return prefix + re.sub(r"/{2,}", "/", rest)
 
 
 def _create_empty_schema_target(spark, path):
@@ -272,6 +274,9 @@ def _assert_merge_error_before_gpu_command(
         captured_plans = callback.getResultsWithTimeout(10000)
     finally:
         callback.endCapture()
+    # The target's creation is planned before the failing MERGE, so an empty capture means the
+    # listener never saw anything and the checks below would pass vacuously.
+    assert len(captured_plans) > 0, "No plans were captured, so the MERGE check proves nothing"
     for plan in captured_plans:
         for command in _GPU_MERGE_COMMANDS + ("MergeIntoCommand",):
             assert not callback.contains(plan, command), \
