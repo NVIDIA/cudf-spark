@@ -18,6 +18,8 @@ package org.apache.spark.sql.rapids
 
 import java.util.Locale
 
+import scala.util.control.NonFatal
+
 import ai.rapids.cudf.Cuda
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.RowBasedShuffleChecksumConf
@@ -63,6 +65,26 @@ class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
     } {
       cleanup
     }
+  }
+
+  private[rapids] def reclaimBroadcastAndThen(id: Int, isStopped: () => Boolean)(
+      catalogReclaim: => ShuffleReclaimResult): (ShuffleReclaimResult, Int, Long) = {
+    val cache = synchronized { initializedBroadcastCache }
+    var detached = (0, 0L)
+    var result: ShuffleReclaimResult = null
+    Utils.tryWithSafeFinally {
+      try {
+        cache.foreach { c => detached = c.reclaim(id, isStopped, _.sizeInBytes) }
+      } catch {
+        // Thrown on, it would report the reclaim FAILED for a catalog that freed its buffers.
+        case NonFatal(e) =>
+          logWarning(s"Failed to dispose a cached broadcast build of shuffle $id while " +
+            "reclaiming it", e)
+      }
+    } {
+      result = catalogReclaim
+    }
+    (result, detached._1, detached._2)
   }
 
   private[rapids] def closeBroadcastCacheAndThen(cleanup: => Unit): Unit = {
@@ -279,6 +301,20 @@ object GpuShuffleEnv extends Logging {
     Option(env) match {
       case Some(current) => current.invalidateBroadcastAndThen(shuffleId)(cleanup)
       case None => cleanup
+    }
+  }
+
+  /**
+   * Detaches the cached builds of `shuffleId`, then runs `catalogReclaim`, whatever the detach
+   * did. A disposal failure is logged, and a fatal one is thrown once `catalogReclaim` has run.
+   *
+   * @return what `catalogReclaim` returned, how many builds were detached, and their bytes
+   */
+  def reclaimBroadcastAndThen(shuffleId: Int, isStopped: () => Boolean)(
+      catalogReclaim: => ShuffleReclaimResult): (ShuffleReclaimResult, Int, Long) = {
+    Option(env) match {
+      case Some(current) => current.reclaimBroadcastAndThen(shuffleId, isStopped)(catalogReclaim)
+      case None => (catalogReclaim, 0, 0L)
     }
   }
 
