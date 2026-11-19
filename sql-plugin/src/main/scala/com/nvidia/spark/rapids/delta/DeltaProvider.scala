@@ -64,6 +64,9 @@ trait DeltaProvider {
 
   def isSupportedFormat(format: Class[_ <: FileFormat]): Boolean
 
+  /** Reason to retain native Delta writes when the GPU implementation cannot link. */
+  def deltaWriteIncompatibility: Option[String] = None
+
   def isSupportedWrite(write: Class[_ <: SupportsWrite]): Boolean
 
   def tagSupportForGpuFileSourceScan(meta: SparkPlanMeta[FileSourceScanExec]): Unit

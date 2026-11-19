@@ -25,7 +25,7 @@ import com.databricks.sql.execution.metric.IncrementMetric
 import com.databricks.sql.transaction.tahoe.{DeltaConfigs, DeltaOptions}
 import com.databricks.sql.transaction.tahoe.DeltaParquetFileFormat
 import com.databricks.sql.transaction.tahoe.commands.{OptimizeTableCommand,
-  OptimizeTableCommandEdge, WriteIntoDeltaCommand, WriteIntoDeltaEdge}
+  OptimizeTableCommandEdge, WriteIntoDeltaCommand}
 import com.databricks.sql.transaction.tahoe.coordinatedcommits.{
   CatalogOwnedTableUtils,
   CoordinatedCommitsUtils
@@ -41,7 +41,7 @@ import com.databricks.sql.transaction.tahoe.rapids.{
 }
 import com.databricks.sql.transaction.tahoe.sources.DeltaSQLConf
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.delta.shims.DeltaLogShim
+import com.nvidia.spark.rapids.delta.shims.{DeltaLogShim, WriteIntoDeltaEdgeShim}
 import com.nvidia.spark.rapids.shims.ShimPredicateHelper
 
 import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
@@ -279,6 +279,9 @@ object DeltaSpark400DB173Provider extends DatabricksDeltaProviderBase {
     name == DeltaParquetFileFormat.IS_ROW_DELETED_COLUMN_NAME ||
       name == GpuDeltaParquetFileFormat.EDGE_COMPUTED_COLUMN_SKIP_ROW
 
+  override def deltaWriteIncompatibility: Option[String] =
+    WriteIntoDeltaEdgeShim.incompatibility
+
   override protected def toGpuWrite(
      writeConfig: DeltaWriteV1Config,
      rapidsConf: RapidsConf): V1Write = new GpuDeltaV1Write {
@@ -290,7 +293,7 @@ object DeltaSpark400DB173Provider extends DatabricksDeltaProviderBase {
 
           // The V1 write adapter does not carry DB-17.3 transaction metadata options.
           // Seed WriteIntoDeltaEdge from the current snapshot, matching existing DB shims.
-          val cpuWrite = WriteIntoDeltaEdge(
+          val cpuWrite = WriteIntoDeltaEdgeShim.create(
             deltaLog,
             if (writeConfig.forceOverwrite) SaveMode.Overwrite else SaveMode.Append,
             new DeltaOptions(writeConfig.options.toMap, session.sessionState.conf),

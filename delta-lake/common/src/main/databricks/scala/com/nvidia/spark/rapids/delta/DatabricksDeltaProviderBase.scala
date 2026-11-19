@@ -233,7 +233,8 @@ trait DatabricksDeltaProviderBase extends DeltaProviderImplBase {
         s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
     }
     cpuExec.write match {
-      case _: GpuDeltaV1Write => // write is already using GPU, nothing more to do
+      case _: GpuDeltaV1Write =>
+        deltaWriteIncompatibility.foreach(meta.willNotWorkOnGpu)
       case write =>
         val deltaTable = cpuExec.table.asInstanceOf[DeltaTableV2]
         val tablePath = if (deltaTable.catalogTable.isDefined) {

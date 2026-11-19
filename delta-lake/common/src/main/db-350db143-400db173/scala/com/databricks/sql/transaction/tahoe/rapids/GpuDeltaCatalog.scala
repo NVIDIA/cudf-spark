@@ -22,8 +22,8 @@
 package com.databricks.sql.transaction.tahoe.rapids
 
 import com.databricks.sql.transaction.tahoe.{DeltaLog, DeltaOptions}
-import com.databricks.sql.transaction.tahoe.commands.WriteIntoDeltaEdge
 import com.nvidia.spark.rapids.RapidsConf
+import com.nvidia.spark.rapids.delta.shims.WriteIntoDeltaEdgeShim
 import org.apache.hadoop.fs.Path
 
 import org.apache.spark.sql.{DataFrame, SaveMode}
@@ -45,14 +45,14 @@ class GpuDeltaCatalog(
       saveMode: SaveMode,
       catalogTable: CatalogTable): Option[LogicalPlan] = {
     sourceQuery.map { df =>
-      WriteIntoDeltaEdge(
+      WriteIntoDeltaEdgeShim.create(
         DeltaLog.forTable(spark, path),
         saveMode,
         new DeltaOptions(catalogTable.storage.properties, spark.sessionState.conf),
         catalogTable.partitionColumnNames,
         catalogTable.properties ++ comment.map("comment" -> _),
         df,
-        schemaInCatalog = schema)
+        schemaInCatalogOverride = Some(schema))
     }
   }
 }
