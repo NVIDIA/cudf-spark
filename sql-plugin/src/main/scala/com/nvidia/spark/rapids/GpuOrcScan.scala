@@ -725,10 +725,11 @@ case class GpuOrcMultiFilePartitionReaderFactory(
    */
   override def buildBaseColumnarReaderForCoalescing(files: Array[PartitionedFile],
       conf: Configuration): PartitionReader[ColumnarBatch] = {
-    // Coalescing reading can't coalesce orc files with different compression kind, which means
-    // we must split the different compress files into different ColumnarBatch.
-    // So here try the best to group the same compression files together before hand.
-    val compressionAndStripes = LinkedHashMap[CompressionKind, ArrayBuffer[OrcSingleStripeMeta]]()
+    // Coalescing reading can't coalesce ORC files with different compression settings, which
+    // means we must split them into different ColumnarBatches. Try to group files with the same
+    // compression kind and block size together beforehand.
+    val compressionAndStripes =
+      LinkedHashMap[(CompressionKind, Int), ArrayBuffer[OrcSingleStripeMeta]]()
 
     metrics.getOrElse(FILTER_TIME, NoopMetric).ns {
       metrics.getOrElse(SCAN_TIME, NoopMetric).ns {
@@ -739,7 +740,9 @@ case class GpuOrcMultiFilePartitionReaderFactory(
             // filterStripes returns null for an empty ORC file; it has no stripes to
             // contribute, so skip it (the single-file path uses an EmptyPartitionReader).
             if (orcPartitionReaderContext != null) {
-              compressionAndStripes.getOrElseUpdate(orcPartitionReaderContext.compressionKind,
+              val compressionKey = (orcPartitionReaderContext.compressionKind,
+                orcPartitionReaderContext.compressionSize)
+              compressionAndStripes.getOrElseUpdate(compressionKey,
                 new ArrayBuffer[OrcSingleStripeMeta]) ++=
                 orcPartitionReaderContext.blockIterator.map(block =>
                   OrcSingleStripeMeta(
@@ -890,6 +893,7 @@ case class OrcBlockMetaForSplitCheck(
     filePath: Path,
     typeDescription: TypeDescription,
     compressionKind: CompressionKind,
+    compressionSize: Int,
     requestedMapping: Option[Array[Int]],
     writerTimezone: String,
     writerUsedProlepticGregorian: Boolean) {
@@ -901,6 +905,7 @@ object OrcBlockMetaForSplitCheck {
       singleBlockMeta.filePath,
       singleBlockMeta.schema.schema,
       singleBlockMeta.dataBlock.stripeMeta.ctx.compressionKind,
+      singleBlockMeta.dataBlock.stripeMeta.ctx.compressionSize,
       singleBlockMeta.extraInfo.requestedMapping,
       singleBlockMeta.extraInfo.writerTimezone,
       singleBlockMeta.extraInfo.writerUsedProlepticGregorian)
@@ -908,11 +913,13 @@ object OrcBlockMetaForSplitCheck {
 
   def apply(filePathStr: String, typeDescription: TypeDescription,
       compressionKind: CompressionKind,
+      compressionSize: Int,
       requestedMapping: Option[Array[Int]],
       writerTimezone: String,
       writerUsedProlepticGregorian: Boolean): OrcBlockMetaForSplitCheck = {
     OrcBlockMetaForSplitCheck(new Path(new URI(filePathStr)), typeDescription,
-      compressionKind, requestedMapping, writerTimezone, writerUsedProlepticGregorian)
+      compressionKind, compressionSize, requestedMapping, writerTimezone,
+      writerUsedProlepticGregorian)
   }
 }
 
@@ -1003,6 +1010,7 @@ trait OrcCommonFunctions extends OrcCodecWritingHelper { self: FilePartitionRead
     val postscript = OrcProto.PostScript.newBuilder(ctx.fileTail.getPostscript)
       .setFooterLength(footerLen)
       .setMetadataLength(0)
+      .setStripeStatisticsLength(0)
       .build()
     postscript.writeTo(outStream)
     val postScriptLength = outStream.getPos - posBeforeFooter - footerLen
@@ -1089,6 +1097,13 @@ trait OrcCommonFunctions extends OrcCodecWritingHelper { self: FilePartitionRead
     if (nextMeta.compressionKind != curMeta.compressionKind) {
       logInfo(s"ORC File compression for the next file ${nextMeta.filePath}" +
         s" doesn't match current ${curMeta.filePath}, splitting it into another batch!")
+      return true
+    }
+
+    if (nextMeta.compressionSize != curMeta.compressionSize) {
+      logInfo(s"ORC compression block size for the next file ${nextMeta.filePath} " +
+        s"(${nextMeta.compressionSize}) doesn't match current ${curMeta.filePath} " +
+        s"(${curMeta.compressionSize}), splitting it into another batch!")
       return true
     }
 
@@ -2347,6 +2362,7 @@ class MultiFileCloudOrcPartitionReader(
       override val bytesRead: Long,
       updatedReadSchema: TypeDescription,
       compressionKind: CompressionKind,
+      compressionSize: Int,
       requestedMapping: Option[Array[Int]],
       writerTimezone: String,
       writerUsedProlepticGregorian: Boolean,
@@ -2430,8 +2446,8 @@ class MultiFileCloudOrcPartitionReader(
                 HostMemoryEmptyMetaData(partFile, 0, bytesRead, readDataSchema)
               } else {
                 HostMemoryBuffersWithMetaData(partFile, hostBuffers.toArray, bytesRead,
-                  ctx.updatedReadSchema, ctx.compressionKind, ctx.requestedMapping,
-                  ctx.writerTimezone, ctx.writerUsedProlepticGregorian)
+                  ctx.updatedReadSchema, ctx.compressionKind, ctx.compressionSize,
+                  ctx.requestedMapping, ctx.writerTimezone, ctx.writerUsedProlepticGregorian)
               }
             }
           }
@@ -2713,11 +2729,12 @@ class MultiFileCloudOrcPartitionReader(
       nextMeta: HostMemoryBuffersWithMetaData): Boolean = {
     isNeedToSplitDataBlock(
       OrcBlockMetaForSplitCheck(curMeta.partitionedFile.filePath.toString(),
-        curMeta.updatedReadSchema, curMeta.compressionKind, curMeta.requestedMapping,
-        curMeta.writerTimezone, curMeta.writerUsedProlepticGregorian),
+        curMeta.updatedReadSchema, curMeta.compressionKind, curMeta.compressionSize,
+        curMeta.requestedMapping, curMeta.writerTimezone, curMeta.writerUsedProlepticGregorian),
       OrcBlockMetaForSplitCheck(nextMeta.partitionedFile.filePath.toString(),
-        nextMeta.updatedReadSchema, nextMeta.compressionKind, nextMeta.requestedMapping,
-        nextMeta.writerTimezone, nextMeta.writerUsedProlepticGregorian))
+        nextMeta.updatedReadSchema, nextMeta.compressionKind, nextMeta.compressionSize,
+        nextMeta.requestedMapping, nextMeta.writerTimezone,
+        nextMeta.writerUsedProlepticGregorian))
   }
 
   private def computeCombinedHmbMeta(
