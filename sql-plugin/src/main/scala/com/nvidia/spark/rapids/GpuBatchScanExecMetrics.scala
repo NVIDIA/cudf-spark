@@ -59,7 +59,7 @@ trait GpuBatchScanExecMetrics extends GpuExec {
 
   // Delta V2 and Iceberg scans don't register these yet, so their row group counts are dropped.
   private lazy val parquetRowGroupMetrics: Map[String, GpuMetric] = scan match {
-    case _: GpuParquetScan => createParquetRowGroupMetrics()
+    case _: GpuParquetScan => createParquetRowGroupMetrics() ++ createHybridScanGdsMetrics()
     case _ => Map.empty
   }
 

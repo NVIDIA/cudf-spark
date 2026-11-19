@@ -45,13 +45,16 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 /**
  * What the plan phase hands the materialize phase: the row groups the read kept and the
  * column-chunk bytes fetched for them, one host buffer per planned range in request order.
- * `backing` is the one buffer the chunks slice, when they came straight from a fetch. The host
- * buffers are this object's to close, and closing it again does nothing.
+ * `backing` is the one buffer the chunks slice, when they came straight from a fetch. A source
+ * that reads straight to the device leaves the chunks unread in `deviceFetch` instead, for the
+ * materialize phase to read under the GPU semaphore. The host buffers are this object's to close,
+ * and closing it again does nothing.
  */
 private[parquet] class FetchedColumnChunks(
     val rowGroups: Array[Int],
     val hostChunks: Array[HostMemoryBuffer],
-    val backing: Option[HostMemoryBuffer] = None) extends AutoCloseable {
+    val backing: Option[HostMemoryBuffer] = None,
+    val deviceFetch: Option[DeviceFetch] = None) extends AutoCloseable {
   private var closed = false
 
   def isClosed: Boolean = closed
@@ -64,6 +67,9 @@ private[parquet] class FetchedColumnChunks(
   }
 }
 
+/** Column-chunk ranges left for the materialize phase to read from `source` to the device. */
+private[parquet] case class DeviceFetch(source: HybridScanByteSource, ranges: Array[ByteRange])
+
 /** What a hybrid read takes from its scan, the same for every file the scan reads. */
 private[parquet] case class HybridScanContext(
     readDataSchema: StructType,
@@ -71,7 +77,8 @@ private[parquet] case class HybridScanContext(
     filterKeepThreshold: Double,
     maxH2DPackSize: Long,
     minH2DPackSize: Long,
-    execMetrics: Map[String, GpuMetric])
+    execMetrics: Map[String, GpuMetric],
+    gdsMode: RapidsConf.GpuDirectStorageMode.Value)
 
 /** The part of one file a hybrid read owns: its row groups whose first byte is in the range. */
 private[parquet] case class HybridScanSplit(
@@ -88,7 +95,7 @@ private[parquet] case class HybridScanSplit(
  * per-read state, so pool threads may share it.
  */
 private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Logging {
-  import context.{execMetrics, filterKeepThreshold, maxH2DPackSize, minH2DPackSize,
+  import context.{execMetrics, filterKeepThreshold, gdsMode, maxH2DPackSize, minH2DPackSize,
     readDataSchema, scanFilters}
 
   private def withStagedOnDevice[T](chunks: Array[HostMemoryBuffer])(
@@ -105,14 +112,34 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
   private def metric(name: String): GpuMetric = execMetrics.getOrElse(name, NoopMetric)
 
   /**
+   * Whether to read `ranges` from `source` straight to the device rather than through host
+   * memory, which only a source that can read them direct does. ALWAYS then waits for the GPU
+   * semaphore in the materialize phase. WHEN_SEMAPHORE_FREE takes the semaphore here if that needs
+   * no wait; if the GPU is busy it reads through host memory instead, and counts the bytes.
+   */
+  private def useDeviceRead(source: HybridScanByteSource, ranges: Array[ByteRange]): Boolean =
+    gdsMode match {
+      case RapidsConf.GpuDirectStorageMode.OFF => false
+      case _ if !source.isDeviceReadDirect(ranges) => false
+      case RapidsConf.GpuDirectStorageMode.ALWAYS => true
+      case RapidsConf.GpuDirectStorageMode.WHEN_SEMAPHORE_FREE =>
+        val acquired = GpuSemaphore.tryAcquire(TaskContext.get()) == SemaphoreAcquired
+        if (!acquired) {
+          addToMetric(HYBRID_SCAN_GPU_BUSY_HOST_BYTES_READ, totalBytes(ranges))
+        }
+        acquired
+    }
+
+  /**
    * The plan phase: prune the split's row groups with the pushed filter, and if anything survives
    * fetch its column chunks into host memory, off the GPU semaphore so the read does not hold the
    * GPU from another task. None when the split owns no surviving rows. The result is the caller's.
    *
    * Dictionary pruning copies pages to the device under the semaphore, which only a task thread
    * may do, so a `MULTITHREADED` pool thread passes `allowDictionaryPruning = false` and the task
-   * prunes the fetched chunks instead ([[pruneFetchedWithDictionaries]]). A direct-to-device
-   * (GDS) source would instead acquire the semaphore and fetch straight to the device.
+   * prunes the fetched chunks instead ([[pruneFetchedWithDictionaries]]). A fetch the source can
+   * read straight to the device is left for the materialize phase, which reads it under the
+   * semaphore; in WHEN_SEMAPHORE_FREE mode only if the semaphore is free, which takes it here.
    */
   def planAndFetch(
       split: HybridScanSplit,
@@ -134,13 +161,18 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
         reader.allColumnChunksByteRanges(rowGroups)
       }
       addToMetric(HYBRID_SCAN_BYTES_REQUESTED, totalBytes(ranges))
-      val layout = HybridScanPipeline.hostBufferLayout(ranges)
-      val buffer = NvtxIdWithMetrics(NvtxRegistry.HYBRID_SCAN_READ_DATA, metric(BUFFER_TIME)) {
-        split.source.fetchToHostBuffer(ranges, layout)
-      }
-      closeOnExcept(buffer) { _ =>
-        val hostChunks = HybridScanPipeline.sliceRanges(buffer, ranges, layout)
-        Some(new FetchedColumnChunks(rowGroups, hostChunks, Some(buffer)))
+      if (useDeviceRead(split.source, ranges)) {
+        Some(new FetchedColumnChunks(rowGroups, Array.empty,
+          deviceFetch = Some(DeviceFetch(split.source, ranges))))
+      } else {
+        val layout = HybridScanPipeline.hostBufferLayout(ranges)
+        val buffer = NvtxIdWithMetrics(NvtxRegistry.HYBRID_SCAN_READ_DATA, metric(BUFFER_TIME)) {
+          split.source.fetchToHostBuffer(ranges, layout)
+        }
+        closeOnExcept(buffer) { _ =>
+          val hostChunks = HybridScanPipeline.sliceRanges(buffer, ranges, layout)
+          Some(new FetchedColumnChunks(rowGroups, hostChunks, Some(buffer)))
+        }
       }
     }
   }
@@ -365,10 +397,10 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
   }
 
   /**
-   * Under the GPU semaphore, copy the already-fetched host buffers to the device and decode them,
-   * then check the decoded schema, apply the output filter and the rebase check. The semaphore is
-   * taken only now, after the host read, which is what keeps the fetch off the GPU. None when no
-   * row survives the filter.
+   * Under the GPU semaphore, copy the already-fetched host buffers to the device, or read chunks
+   * the plan phase left unread straight to it, and decode them, then check the decoded schema,
+   * apply the output filter and the rebase check. The semaphore is taken only now, after any host
+   * read, which is what keeps the fetch off the GPU. None when no row survives the filter.
    *
    * The reader's decode-time filter is set here too, since a reader other than the one that
    * planned may decode. Takes `fetched` and closes it as soon as it is decoded, before the output
@@ -381,7 +413,10 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
       outputAst: Option[CompiledExpression]): Option[Table] = {
     val table = withResource(fetched) { f =>
       setDecodeFilter(reader, ast)
-      materializeFromHostBuffers(reader, f)
+      f.deviceFetch match {
+        case Some(deviceFetch) => materializeFromDevice(reader, f.rowGroups, deviceFetch)
+        case None => materializeFromHostBuffers(reader, f)
+      }
     }
     val filtered = closeOnExcept(table) { t =>
       // Before the output filter, which references columns by index.
@@ -429,6 +464,29 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
     withStagedOnDevice(fetched.hostChunks) { chunks =>
       NvtxIdWithMetrics(NvtxRegistry.HYBRID_SCAN_MATERIALIZE, metric(GPU_DECODE_TIME)) {
         reader.materializeAllColumns(fetched.rowGroups, chunks)
+      }
+    }
+  }
+
+  /**
+   * Read the column chunks straight to the device and decode them. The read writes to device
+   * memory, so unlike the host path the semaphore is taken before it.
+   */
+  private def materializeFromDevice(
+      reader: HybridScanReader,
+      rowGroups: Array[Int],
+      deviceFetch: DeviceFetch): Table = {
+    GpuSemaphore.acquireIfNecessary(TaskContext.get())
+    // The device chunks do not outlive an attempt, so a retry reads them from the file again.
+    withRetryNoSplit[Table] {
+      val deviceChunks =
+        NvtxIdWithMetrics(NvtxRegistry.HYBRID_SCAN_READ_DATA, metric(BUFFER_TIME)) {
+          deviceFetch.source.fetchToDevice(deviceFetch.ranges)
+        }
+      withResource(deviceChunks) { chunks =>
+        NvtxIdWithMetrics(NvtxRegistry.HYBRID_SCAN_MATERIALIZE, metric(GPU_DECODE_TIME)) {
+          reader.materializeAllColumns(rowGroups, chunks)
+        }
       }
     }
   }
@@ -1048,7 +1106,8 @@ case class HybridScanConfig(
     filters: HybridScanFilters,
     filterKeepThreshold: Double,
     maxH2DPackSize: Long,
-    minH2DPackSize: Long)
+    minH2DPackSize: Long,
+    gdsMode: RapidsConf.GpuDirectStorageMode.Value)
 
 object HybridScanConfig {
   def apply(rapidsConf: RapidsConf, filters: HybridScanFilters): HybridScanConfig = {
@@ -1058,7 +1117,7 @@ object HybridScanConfig {
       s"${RapidsConf.PARQUET_HYBRID_SCAN_MIN_H2D_PACK_SIZE.key} ($minPackSize) must be at most " +
         s"${RapidsConf.PARQUET_HYBRID_SCAN_MAX_H2D_PACK_SIZE.key} ($maxPackSize)")
     HybridScanConfig(filters, rapidsConf.hybridScanSingleStageFilterKeepThreshold,
-      maxPackSize, minPackSize)
+      maxPackSize, minPackSize, rapidsConf.readerGdsMode)
   }
 }
 

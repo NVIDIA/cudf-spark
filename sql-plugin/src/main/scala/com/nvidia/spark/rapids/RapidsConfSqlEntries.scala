@@ -569,6 +569,22 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
       .checkValue(v => v > 0 && v <= 1, "The keep threshold must be in the range (0, 1].")
       .createWithDefault(0.9)
 
+  val READER_GPU_DIRECT_STORAGE_MODE =
+    conf("spark.rapids.sql.reader.gpuDirectStorage.mode")
+      .doc("How the Parquet hybrid scan reader " +
+          s"(${PARQUET_HYBRID_SCAN_ENABLED.key}) uses GPUDirect Storage. OFF reads through " +
+          "host memory. ALWAYS reads straight to device memory where it can, waiting for the " +
+          "GPU semaphore first, since the read writes to the device. WHEN_SEMAPHORE_FREE does " +
+          "the same when the task holds the semaphore or can take it without waiting, and " +
+          "otherwise reads through host memory while it waits. The MULTITHREADED reader type " +
+          "reads through host memory in every mode. No file is read with GPUDirect Storage " +
+          "yet, so every mode reads through host memory.")
+      .internal()
+      .stringConf
+      .transform(_.toUpperCase(java.util.Locale.ROOT))
+      .checkValues(Set("OFF", "ALWAYS", "WHEN_SEMAPHORE_FREE"))
+      .createWithDefault("OFF")
+
   val PARQUET_HYBRID_SCAN_MAX_H2D_PACK_SIZE =
     conf("spark.rapids.sql.format.parquet.hybridScan.maxH2DPackSize")
       .doc("Most bytes of column chunks a hybrid scan read packs into one device allocation when " +
