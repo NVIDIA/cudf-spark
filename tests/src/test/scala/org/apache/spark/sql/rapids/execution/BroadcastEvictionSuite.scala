@@ -20,7 +20,7 @@ import java.io.{ByteArrayInputStream, ByteArrayOutputStream, ObjectInputStream,
   ObjectOutputStream, OutputStream}
 import java.util.concurrent.{Callable, CountDownLatch, ExecutionException, Executors,
   ExecutorService, Future, TimeoutException, TimeUnit}
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReference}
 
 import ai.rapids.cudf.{ColumnVector => CudfColumnVector, Rmm, RmmAllocationMode, Scalar, Table}
 import com.nvidia.spark.rapids.{GpuColumnVector, GpuDeviceManager, GpuSemaphore, NoopMetric,
@@ -29,6 +29,8 @@ import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.spill.{SpillFramework, SpillUnitTestBase}
 import org.apache.commons.lang3.SerializationUtils
+import org.scalatest.concurrent.Eventually
+import org.scalatest.time.{Seconds, Span}
 
 import org.apache.spark.SparkEnv
 import org.apache.spark.sql.SparkSession
@@ -44,7 +46,7 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
  * therefore not wait for the GPU semaphore (https://github.com/NVIDIA/cudf-spark/issues/16460).
  * The broadcast keeps its host data after loading it onto the GPU, and writes that.
  */
-class BroadcastEvictionSuite extends SpillUnitTestBase {
+class BroadcastEvictionSuite extends SpillUnitTestBase with Eventually {
   private var rmmWasInitialized = false
 
   override def beforeEach(): Unit = {
@@ -86,7 +88,7 @@ class BroadcastEvictionSuite extends SpillUnitTestBase {
     }
   }
 
-  /** A batch whose host data is much larger than `ObjectOutputStream`'s 1 KiB block buffer. */
+  /** A 4 MiB batch, much larger than the chunks cudf copies host data to a stream in. */
   private def buildLargeBatch(): ColumnarBatch = {
     val rows = 1 << 20
     withResource(Scalar.fromInt(0)) { zero =>
@@ -215,6 +217,47 @@ class BroadcastEvictionSuite extends SpillUnitTestBase {
     }
   }
 
+  /** Wait until the thread in `thread` is in `state` with a stack frame matching `inStack`. */
+  private def awaitThread(thread: AtomicReference[Thread], state: Thread.State, failure: String)
+      (inStack: StackTraceElement => Boolean = _ => true): Unit = {
+    eventually(timeout(Span(30, Seconds))) {
+      val t = Option(thread.get())
+      val waiting = t.exists(t => t.getState == state && t.getStackTrace.exists(inStack))
+      assert(waiting, s"$failure (thread state: ${t.map(_.getState)})")
+    }
+  }
+
+  /** Run `body` on a `pool` thread, recording that thread in `thread`. */
+  private def submitRecorded[T](pool: ExecutorService, thread: AtomicReference[Thread])
+      (body: => T): Future[T] = {
+    pool.submit(new Callable[T] {
+      override def call(): T = {
+        thread.set(Thread.currentThread())
+        body
+      }
+    })
+  }
+
+  /**
+   * A broadcast read from `bytes` whose GPU build pauses until `mayBuild` is released, as a task
+   * would while waiting for device memory.
+   */
+  private class PausedBuild(bytes: Array[Byte]) {
+    val building = new CountDownLatch(1)
+    val mayBuild = new CountDownLatch(1)
+    val builds = new AtomicInteger(0)
+    val broadcast: SerializeConcatHostBuffersDeserializeBatch = read(bytes,
+      new SerializeConcatHostBuffersDeserializeBatch(null, Seq.empty, 0, 0L) {
+        override protected def buildGpuBatch(): SpillableColumnarBatch = {
+          builds.incrementAndGet()
+          building.countDown()
+          // Without a timeout, so it outlasts `evict`'s; the test releases it in `finally`
+          mayBuild.await()
+          super.buildGpuBatch()
+        }
+      })
+  }
+
   Seq(("on the device", (1, 0, 0)), ("in host memory", (0, 1, 0)), ("on disk", (0, 0, 1))).foreach {
     case (location, expectedResidency) =>
       test(s"evicting a broadcast whose GPU batch is $location does not wait for the GPU") {
@@ -265,14 +308,15 @@ class BroadcastEvictionSuite extends SpillUnitTestBase {
       withBroadcast(makeBroadcastBatch(expected)) { broadcast =>
         broadcast.batch
         spillGpuBatch(broadcast, toDisk = true)
-        val actual = whileGpuIsBusy(evict("hostBatch waits for the GPU")(broadcast.hostBatch))
-        // hostBatch leaves the GPU batch on disk
-        assert(residency == ((0, 0, 1)))
-        val expectedHost = new ColumnarBatch(
-          GpuColumnVector.extractColumns(expected).safeMap(_.copyToHost(): ColumnVector),
-          expected.numRows())
-        withResource(Seq(expectedHost, actual)) { _ =>
-          TestUtils.compareBatches(expectedHost, actual)
+        withResource(whileGpuIsBusy(evict("hostBatch waits for the GPU")(broadcast.hostBatch))) {
+          actual =>
+            // hostBatch leaves the GPU batch on disk
+            assert(residency == ((0, 0, 1)))
+            withResource(new ColumnarBatch(
+              GpuColumnVector.extractColumns(expected).safeMap(_.copyToHost(): ColumnVector),
+              expected.numRows())) { expectedHost =>
+              TestUtils.compareBatches(expectedHost, actual)
+            }
         }
       }
     }
@@ -280,34 +324,57 @@ class BroadcastEvictionSuite extends SpillUnitTestBase {
 
   test("evicting a broadcast does not wait for a task building its GPU batch") {
     withResource(buildBatch()) { expected =>
-      val bytes = withBroadcast(makeBroadcastBatch(expected))(write)
-      val building = new CountDownLatch(1)
-      val mayBuild = new CountDownLatch(1)
-      // A task pauses while building the GPU batch, as it would while waiting for device memory
-      val broadcast = read(bytes,
-        new SerializeConcatHostBuffersDeserializeBatch(null, Seq.empty, 0, 0L) {
-          override protected def buildGpuBatch(): SpillableColumnarBatch = {
-            building.countDown()
-            // Without a timeout, so it outlasts `evict`'s; the test releases it in `finally`
-            mayBuild.await()
-            super.buildGpuBatch()
-          }
-        })
+      val paused = new PausedBuild(withBroadcast(makeBroadcastBatch(expected))(write))
+      val broadcast = paused.broadcast
       withBroadcast(broadcast) { _ =>
-        val pool = Executors.newSingleThreadExecutor()
+        val pool = Executors.newFixedThreadPool(2)
         try {
           val materializer = pool.submit(new Callable[SpillableColumnarBatch] {
             override def call(): SpillableColumnarBatch = broadcast.batch
           })
-          assert(building.await(30, TimeUnit.SECONDS))
+          assert(paused.building.await(30, TimeUnit.SECONDS))
+          // A second task waits for that build instead of building again
+          val waiterThread = new AtomicReference[Thread]()
+          val waiter = submitRecorded(pool, waiterThread)(broadcast.batch)
+          awaitThread(waiterThread, Thread.State.BLOCKED, "the second task did not wait")()
           val evicted = evict("deadlock: eviction waits for a task building the GPU batch")(
             write(broadcast))
-          mayBuild.countDown()
-          awaitOrFail(materializer, "the task did not build the GPU batch")
+          paused.mayBuild.countDown()
+          val built = awaitOrFail(materializer, "the task did not build the GPU batch")
+          assert(awaitOrFail(waiter, "the second task did not get the GPU batch") eq built)
+          assert(paused.builds.get == 1)
           withBroadcast(read(evicted))(assertSameData(expected, _))
           assertSameData(expected, broadcast)
         } finally {
-          mayBuild.countDown()
+          paused.mayBuild.countDown()
+          stop(pool)
+        }
+      }
+    }
+  }
+
+  test("closing a broadcast waits for a task building its GPU batch, then closes it") {
+    withResource(buildBatch()) { expected =>
+      val paused = new PausedBuild(withBroadcast(makeBroadcastBatch(expected))(write))
+      val broadcast = paused.broadcast
+      withBroadcast(broadcast) { _ =>
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+          val materializer = pool.submit(new Callable[SpillableColumnarBatch] {
+            override def call(): SpillableColumnarBatch = broadcast.batch
+          })
+          assert(paused.building.await(30, TimeUnit.SECONDS))
+          val closerThread = new AtomicReference[Thread]()
+          val closer = submitRecorded(pool, closerThread)(broadcast.closeInternal())
+          awaitThread(closerThread, Thread.State.BLOCKED,
+            "closeInternal did not wait for the build")(_.getMethodName == "closeInternal")
+          paused.mayBuild.countDown()
+          awaitOrFail(materializer, "the task did not build the GPU batch")
+          awaitOrFail(closer, "closeInternal did not finish")
+          // closeInternal closed the GPU batch that the task built
+          assert(residency == ((0, 0, 0)))
+        } finally {
+          paused.mayBuild.countDown()
           stop(pool)
         }
       }
@@ -322,8 +389,9 @@ class BroadcastEvictionSuite extends SpillUnitTestBase {
         val mayWrite = new CountDownLatch(1)
         val pauseNextWrite = new AtomicBoolean(false)
         val written = new ByteArrayOutputStream()
-        // Pauses the eviction at its first write after the stream header, with most of the host
-        // data still to be copied
+        val hostBuffer = broadcast.data.getHostBuffer
+        // Pauses the eviction at its first write after the `ObjectOutputStream` header, with most
+        // of the host data still to be copied
         val pausing = new OutputStream {
           override def write(b: Int): Unit = write(Array(b.toByte), 0, 1)
           override def write(b: Array[Byte], off: Int, len: Int): Unit = {
@@ -344,8 +412,10 @@ class BroadcastEvictionSuite extends SpillUnitTestBase {
           })
           assert(writing.await(30, TimeUnit.SECONDS))
           broadcast.closeInternal()
+          assert(hostBuffer.getRefCount == 1, "the eviction does not hold the host buffer")
           mayWrite.countDown()
           awaitOrFail(writer, "the eviction did not finish writing")
+          assert(hostBuffer.getRefCount == 0, "the eviction did not release the host buffer")
           withBroadcast(read(written.toByteArray))(assertSameData(expected, _))
         } finally {
           mayWrite.countDown()
@@ -384,18 +454,10 @@ class BroadcastEvictionSuite extends SpillUnitTestBase {
             }
           })
           assert(building.await(30, TimeUnit.SECONDS))
-          val closer = pool.submit(new Callable[Unit] {
-            override def call(): Unit = {
-              closerThread.set(Thread.currentThread())
-              broadcast.closeInternal()
-            }
-          })
-          // Wait until closeInternal waits for the hash build
-          val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
-          while (Option(closerThread.get()).forall(_.getState != Thread.State.WAITING)) {
-            assert(System.nanoTime() < deadline, "closeInternal did not wait for the hash build")
-            Thread.sleep(10)
-          }
+          val closer = submitRecorded(pool, closerThread)(broadcast.closeInternal())
+          awaitThread(closerThread, Thread.State.WAITING,
+            "closeInternal did not wait for the hash build")(
+            _.getClassName == classOf[HashBuildCache].getName)
           evict("deadlock: closing the broadcast holds its locks while waiting for a hash build")(
             write(broadcast))
           mayBuild.countDown()

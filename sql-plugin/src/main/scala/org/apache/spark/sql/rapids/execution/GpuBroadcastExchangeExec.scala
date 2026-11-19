@@ -268,7 +268,10 @@ class SerializeConcatHostBuffersDeserializeBatch(
           numRows = header.getNumRows
           dataLen = header.getDataLen
           data = if (!rowsOnly) {
-            JCudfSerialization.concatToHostBuffer(Array(header), Array(buffer))
+            val result = JCudfSerialization.concatToHostBuffer(Array(header), Array(buffer))
+            // kept until GC finalizes this object, so we mark it as such
+            result.getHostBuffer.noWarnLeakExpected()
+            result
           } else {
             null
           }
