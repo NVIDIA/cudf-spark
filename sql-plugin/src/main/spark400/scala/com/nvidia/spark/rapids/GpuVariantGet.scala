@@ -34,8 +34,8 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{BoundReference, Expression, Literal,
   NamedExpression}
 import org.apache.spark.sql.catalyst.expressions.variant.VariantGet
-import org.apache.spark.sql.types.{BooleanType, ByteType, DataType, DoubleType, FloatType,
-  IntegerType, LongType, ShortType, StringType, VariantType}
+import org.apache.spark.sql.types.{BooleanType, ByteType, DataType, DecimalType, DoubleType,
+  FloatType, IntegerType, LongType, ShortType, StringType, VariantType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.unsafe.types.{UTF8String, VariantVal}
 
@@ -55,7 +55,8 @@ case class GpuVariantGetMeta(
 
     if (!GpuVariantGet.isSupportedTargetType(expr.targetType)) {
       willNotWorkOnGpu(s"target type ${expr.targetType.simpleString} is not supported; " +
-        "supported types are boolean, tinyint, smallint, int, bigint, float, double, and string")
+        "supported types are boolean, tinyint, smallint, int, bigint, float, double, string, " +
+        "and decimal with nonnegative scale")
     }
 
     GpuVariantGet.parseSupportedPath(expr.path) match {
@@ -116,10 +117,11 @@ case class GpuVariantGet(
     if (!GpuVariantExtraction.supportsLayout(input.getBase)) {
       GpuVariantGet.evaluateOnCpu(input, fallbackBridge)
     } else {
-      GpuVariantExtraction.withRawExtraction(input.getBase, path) { extraction =>
-        GpuVariantGet.decodeVariantField(extraction, dataType) {
-          GpuVariantGet.evaluateOnCpu(input, fallbackBridge)
-        }
+      GpuVariantExtraction.extractOrElse(input.getBase, path) { extraction =>
+        GpuVariantGet.decodeVariantField(extraction, dataType)
+      } {
+        // Extraction and decoding temporaries are released before CPU conversion starts.
+        GpuVariantGet.evaluateOnCpu(input, fallbackBridge)
       }
     }
   }
@@ -139,6 +141,7 @@ object GpuVariantGet extends Logging {
   def isSupportedTargetType(dt: DataType): Boolean = dt match {
     case BooleanType | ByteType | ShortType | IntegerType | LongType | FloatType |
         DoubleType | StringType => true
+    case target: DecimalType => GpuVariantDecimal.isSupportedTargetType(target)
     case _ => false
   }
 
@@ -156,8 +159,8 @@ object GpuVariantGet extends Logging {
   }
 
   /**
-   * Decodes the extracted field on the GPU, or evaluates the whole batch with `fallback` when any
-   * row needs Spark's CPU semantics.
+   * Decodes the extracted field on the GPU into an owning column, or returns None when any row
+   * needs Spark's CPU semantics, so that the caller evaluates the whole batch on the CPU.
    *
    * The batch stays on the GPU when every row is a SQL-null parent, a missing path, a Variant
    * null, or a value one of the exact-type decoders accepts. Spark returns NULL for a Variant null
@@ -169,20 +172,21 @@ object GpuVariantGet extends Logging {
    */
   private[rapids] def decodeVariantField(
       extraction: GpuVariantExtraction.Extraction,
-      dt: DataType)(fallback: => ColumnVector): ColumnVector = {
+      dt: DataType): Option[ColumnVector] = {
     def covered(decoded: ColumnView) = isCovered(extraction, decoded)
     dt match {
-      case BooleanType => decodeExactType(extraction, DType.BOOL8, covered)(fallback)
-      case FloatType => decodeExactType(extraction, DType.FLOAT32, covered)(fallback)
-      case DoubleType => decodeExactType(extraction, DType.FLOAT64, covered)(fallback)
-      case StringType => decodeExactType(extraction, DType.STRING, covered)(fallback)
+      case BooleanType => decodeExactType(extraction, DType.BOOL8, covered)
+      case FloatType => decodeExactType(extraction, DType.FLOAT32, covered)
+      case DoubleType => decodeExactType(extraction, DType.FLOAT64, covered)
+      case StringType => decodeExactType(extraction, DType.STRING, covered)
+      case target: DecimalType => GpuVariantDecimal.decode(extraction, target)
       case ByteType | ShortType | IntegerType | LongType =>
         val decoded = Seq(DType.INT8, DType.INT16, DType.INT32, DType.INT64).safeMap {
           sourceType => VariantUtils.castVariantValue(extraction.getValue, sourceType)
         }
         // Coverage uses the combined column, so a row two decoders accept is counted once.
         withResource(withResource(decoded)(normalizeIntegers)) { logicalLongs =>
-          if (covered(logicalLongs)) narrowInteger(logicalLongs, dt) else fallback
+          if (covered(logicalLongs)) Some(narrowInteger(logicalLongs, dt)) else None
         }
       case other =>
         throw new IllegalArgumentException(s"unsupported variant target type: $other")
@@ -192,17 +196,13 @@ object GpuVariantGet extends Logging {
   private def decodeExactType(
       extraction: GpuVariantExtraction.Extraction,
       targetType: DType,
-      covered: ColumnView => Boolean)(fallback: => ColumnVector): ColumnVector = {
+      covered: ColumnView => Boolean): Option[ColumnVector] = {
     withResource(VariantUtils.castVariantValue(extraction.getValue, targetType)) { decoded =>
-      if (covered(decoded)) {
-        decoded.incRefCount()
-      } else {
-        fallback
-      }
+      if (covered(decoded)) Some(decoded.incRefCount()) else None
     }
   }
 
-  private def isCovered(
+  private[rapids] def isCovered(
       extraction: GpuVariantExtraction.Extraction,
       decoded: ColumnView): Boolean = {
     val rows = extraction.rowCount

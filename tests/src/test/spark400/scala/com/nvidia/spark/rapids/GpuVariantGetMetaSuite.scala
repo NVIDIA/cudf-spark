@@ -27,6 +27,7 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.catalyst.expressions.{BoundReference, Literal}
 import org.apache.spark.sql.catalyst.expressions.variant.VariantGet
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.{DataType, DecimalType, IntegerType, TimestampNTZType,
   TimestampType, VariantType}
 
@@ -83,9 +84,22 @@ class GpuVariantGetMetaSuite extends AnyFunSuite {
     assert(!fixtureApis(utils, result, status))
   }
 
-  test("plain cast must accept a value and type and return ColumnVector") {
-    Seq(classOf[ExtractionOnlyUtils], classOf[WrongCastParametersUtils],
-      classOf[WrongCastReturnUtils]).foreach { utils =>
+  test("plain cast must be static, accept a value and type, and return ColumnVector") {
+    Seq(classOf[StatusCastOnlyUtils], classOf[WrongCastParametersUtils],
+      classOf[WrongCastReturnUtils], classOf[NonStaticCastUtils]).foreach { utils =>
+      withClue(utils.getSimpleName) { assertFixtureRejected(utils = utils) }
+    }
+  }
+
+  test("status cast must be static, accept the prior status, and return the result owner") {
+    Seq(classOf[PlainCastUtils], classOf[WrongStatusCastParametersUtils],
+      classOf[WrongStatusCastReturnUtils], classOf[NonStaticStatusCastUtils]).foreach { utils =>
+      withClue(utils.getSimpleName) { assertFixtureRejected(utils = utils) }
+    }
+  }
+
+  test("extraction must be static and return the result owner") {
+    Seq(classOf[WrongExtractionReturnUtils], classOf[NonStaticExtractionUtils]).foreach { utils =>
       withClue(utils.getSimpleName) { assertFixtureRejected(utils = utils) }
     }
   }
@@ -146,7 +160,7 @@ class GpuVariantGetMetaSuite extends AnyFunSuite {
   }
 
   private def assertRejected(
-      targetType: DataType = IntegerType,
+      targetType: DataType,
       strict: Boolean = false,
       bridge: Boolean = true,
       incompatible: Boolean = true): Unit = {
@@ -160,13 +174,53 @@ class GpuVariantGetMetaSuite extends AnyFunSuite {
     assert(!meta.canThisBeReplaced)
   }
 
-  test("status APIs do not enable new target types, strict mode, or bypass existing gates") {
-    Seq(DecimalType(10, 2), TimestampType, TimestampNTZType).foreach { target =>
+  test("timestamps, strict mode, and disabled gates stay on the CPU") {
+    Seq(TimestampType, TimestampNTZType).foreach { target =>
       assertRejected(targetType = target)
     }
-    assertRejected(strict = true)
-    assertRejected(bridge = false)
-    assertRejected(incompatible = false)
+    Seq(IntegerType, DecimalType(10, 2), DecimalType(38, 38)).foreach { target =>
+      assertRejected(targetType = target, strict = true)
+      assertRejected(targetType = target, bridge = false)
+      assertRejected(targetType = target, incompatible = false)
+    }
+  }
+
+  test("decimal target registration preserves precision and scale through GPU conversion") {
+    Seq(DecimalType(1, 0), DecimalType(9, 2), DecimalType(10, 1), DecimalType(18, 0),
+      DecimalType(19, 18), DecimalType(38, 37), DecimalType(38, 38)).foreach { target =>
+      val expression = VariantGet(BoundReference(0, VariantType, nullable = true),
+        Literal("$.id"), target, failOnError = false, timeZoneId = Some("UTC"))
+      val conf = new RapidsConf(Map(
+        RapidsConf.ENABLE_CPU_BRIDGE.key -> "true",
+        RapidsConf.INCOMPATIBLE_OPS.key -> "true"))
+      val meta = GpuOverrides.wrapExpr(expression, conf, None)
+      meta.tagForGpu()
+      assert(meta.canThisBeReplaced, s"decimal registration rejected $target")
+      val gpu = meta.convertToGpu().asInstanceOf[GpuVariantGet]
+      assert(gpu.dataType == target)
+      assert(gpu.cpuFallback.targetType == target)
+    }
+  }
+
+  test("decimal support metadata reports the nonnegative-scale restriction") {
+    val rule = GpuOverrides.expressions(classOf[VariantGet])
+    val checks = rule.getChecks.get.asInstanceOf[ExprChecks]
+    val support = checks.support(TypeEnum.DECIMAL)(ProjectExprContext)("result")
+    assert(support.text == "PS")
+    support match {
+      case partial: PartiallySupported =>
+        assert(partial.note.exists(_.contains("nonnegative")))
+      case other => fail(s"Expected partial decimal support, got ${other.text}")
+    }
+    assert(rule.incompatDoc.isDefined)
+  }
+
+  test("legacy negative decimal scales fall back during planning") {
+    val sqlConf = new SQLConf
+    sqlConf.setConfString("spark.sql.legacy.allowNegativeScaleOfDecimal", "true")
+    SQLConf.withExistingConf(sqlConf) {
+      assertRejected(targetType = DecimalType(10, -2))
+    }
   }
 
   test("Variant extraction is supported outside UTC") {

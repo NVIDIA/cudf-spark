@@ -20,6 +20,7 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids
 
+import java.lang.reflect.Modifier
 import java.util.Optional
 
 import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Scalar, Table, VariantOperationResult,
@@ -38,10 +39,16 @@ private[rapids] object GpuVariantExtraction {
       val utils = loadClass("ai.rapids.cudf.VariantUtils")
       val result = loadClass("ai.rapids.cudf.VariantOperationResult")
       val status = loadClass("ai.rapids.cudf.VariantOperationStatus")
-      utils.getMethod("getVariantFieldValueWithStatus", classOf[ColumnView], classOf[String])
-          .getReturnType == result &&
-        utils.getMethod("castVariantValue", classOf[ColumnView], classOf[DType])
-          .getReturnType == classOf[ColumnVector] &&
+      val extract = utils.getMethod("getVariantFieldValueWithStatus", classOf[ColumnView],
+        classOf[String])
+      val cast = utils.getMethod("castVariantValue", classOf[ColumnView], classOf[DType])
+      // Decimal targets decode through the status-aware cast.
+      val statusCast = utils.getMethod("castVariantValueWithStatus", classOf[ColumnView],
+        classOf[DType], classOf[ColumnView])
+      extract.getReturnType == result &&
+        cast.getReturnType == classOf[ColumnVector] &&
+        statusCast.getReturnType == result &&
+        Seq(extract, cast, statusCast).forall(m => Modifier.isStatic(m.getModifiers)) &&
         classOf[AutoCloseable].isAssignableFrom(result) &&
         result.getMethod("getValue").getReturnType == classOf[ColumnVector] &&
         result.getMethod("getStatus").getReturnType == classOf[ColumnVector] &&
@@ -135,6 +142,18 @@ private[rapids] object GpuVariantExtraction {
         child.getType != DType.STRING || dataLength(child) < Int.MaxValue
       }
     }
+  }
+
+  /**
+   * Returns the decoder's owning column, or invokes fallback after extraction temporaries close.
+   * Production and lifecycle tests share this boundary, so fallback never runs while extraction,
+   * decoded columns, or STRING-to-LIST views are still held. Callers check `supportsLayout` first.
+   */
+  def extractOrElse(
+      variantStruct: ColumnView,
+      path: String)(decode: Extraction => Option[ColumnVector])
+      (fallback: => ColumnVector): ColumnVector = {
+    withRawExtraction(variantStruct, path)(decode).getOrElse(fallback)
   }
 
   /**
