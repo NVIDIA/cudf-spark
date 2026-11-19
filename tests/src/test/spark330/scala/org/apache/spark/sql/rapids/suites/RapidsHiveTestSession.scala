@@ -20,6 +20,7 @@ spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.suites
 
 import org.apache.spark.SparkConf
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.hive.test.TestHive
 import org.apache.spark.sql.rapids.utils.RapidsSQLTestsBaseTrait
 
@@ -31,12 +32,6 @@ private[suites] object RapidsHiveTestSession {
     // TestHive creates and manages its own warehouse directory.
     val conf = RapidsSQLTestsBaseTrait.nativeSparkConf(new SparkConf(false), "")
       .remove("spark.sql.warehouse.dir")
-      .set("spark.rapids.memory.gpu.allocFraction",
-        System.getProperty("rapids.test.gpu.allocFraction", "0.3"))
-      .set("spark.rapids.memory.gpu.maxAllocFraction",
-        System.getProperty("rapids.test.gpu.maxAllocFraction", "0.3"))
-      .set("spark.rapids.memory.gpu.minAllocFraction",
-        System.getProperty("rapids.test.gpu.minAllocFraction", "0"))
     val saved = conf.getAll.map { case (key, _) => key -> Option(System.getProperty(key)) }
     try {
       conf.getAll.foreach { case (key, value) => System.setProperty(key, value) }
@@ -49,5 +44,13 @@ private[suites] object RapidsHiveTestSession {
         case (key, None) => System.clearProperty(key)
       }
     }
+  }
+
+  def verify(spark: SparkSession): Unit = {
+    require(spark.conf.get("spark.rapids.sql.enabled").toBoolean,
+      "The shared TestHive SparkSession must enable RAPIDS SQL")
+    val listeners = spark.conf.get("spark.sql.queryExecutionListeners").split(",").map(_.trim)
+    require(listeners.contains("org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback"),
+      "The shared TestHive SparkSession must configure the plan capture listener")
   }
 }

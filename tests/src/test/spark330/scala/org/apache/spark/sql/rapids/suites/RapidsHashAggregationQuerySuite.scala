@@ -35,21 +35,9 @@ class RapidsHashAggregationQuerySuite extends {
   with RapidsTestsCommonTrait {
   override def afterAll(): Unit = super.afterAll()
 
-  // Configuration checks alone do not establish native GPU execution. Keep the original
-  // TestHiveSingleton lifecycle and QueryTest assertions; retain the original assertions.
   override def beforeAll(): Unit = {
     SparkSession.setActiveSession(spark)
     super.beforeAll()
-    val actualConf = spark.sparkContext.getConf
-    val plugins = actualConf.get("spark.plugins", "")
-    val enabled = spark.conf.get("spark.rapids.sql.enabled", "false")
-    val listeners = spark.conf.get("spark.sql.queryExecutionListeners", "")
-    require(plugins.split(",").map(_.trim).contains("com.nvidia.spark.SQLPlugin"),
-      "The original TestHive SparkContext must load SQLPlugin before suite construction")
-    require(enabled.equalsIgnoreCase("true"),
-      "The original TestHive SparkSession must enable RAPIDS SQL")
-    require(listeners.split(",").map(_.trim)
-      .contains("org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback"),
-      "The original TestHive SparkSession must configure the plan capture listener")
+    RapidsHiveTestSession.verify(spark)
   }
 }

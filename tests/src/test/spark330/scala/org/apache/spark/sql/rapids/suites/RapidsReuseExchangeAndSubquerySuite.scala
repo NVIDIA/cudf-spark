@@ -21,7 +21,6 @@ package org.apache.spark.sql.rapids.suites
 
 import com.nvidia.spark.rapids.GpuExec
 
-import org.apache.spark.SparkConf
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.execution.ReuseExchangeAndSubquerySuite
 import org.apache.spark.sql.execution.exchange.{Exchange, ReusedExchangeExec}
@@ -30,15 +29,6 @@ import org.apache.spark.sql.rapids.utils.RapidsSQLTestsBaseTrait
 
 class RapidsReuseExchangeAndSubquerySuite
   extends ReuseExchangeAndSubquerySuite with RapidsSQLTestsBaseTrait {
-
-  override def sparkConf: SparkConf =
-    super.sparkConf
-      .set("spark.rapids.memory.gpu.allocFraction",
-        System.getProperty("rapids.test.gpu.allocFraction", "0.3"))
-      .set("spark.rapids.memory.gpu.maxAllocFraction",
-        System.getProperty("rapids.test.gpu.maxAllocFraction", "0.3"))
-      .set("spark.rapids.memory.gpu.minAllocFraction",
-        System.getProperty("rapids.test.gpu.minAllocFraction", "0"))
 
   // The inherited tests inspect plans without collecting the queries. Exercise both
   // original query shapes and require nonempty GPU reuse as well as the ID contract.

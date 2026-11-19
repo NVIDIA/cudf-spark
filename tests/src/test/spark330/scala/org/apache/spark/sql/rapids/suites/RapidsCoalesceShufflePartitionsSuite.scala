@@ -28,7 +28,7 @@ import org.apache.spark.internal.config.UI.UI_ENABLED
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.execution.CoalesceShufflePartitionsSuite
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.utils.RapidsTestsBaseTrait
+import org.apache.spark.sql.rapids.utils.{RapidsSQLTestsBaseTrait, RapidsTestsBaseTrait}
 
 class RapidsCoalesceShufflePartitionsSuite
   extends CoalesceShufflePartitionsSuite with RapidsTestsBaseTrait {
@@ -47,8 +47,9 @@ class RapidsCoalesceShufflePartitionsSuite
       targetPostShuffleInputSize: Int,
       minNumPostShufflePartitions: Option[Int],
       enableIOEncryption: Boolean = false): Unit = {
+    // The upstream suite creates a fresh session for each set of AQE parameters.
     val sparkConf =
-      new SparkConf(false)
+      RapidsSQLTestsBaseTrait.nativeSparkConf(new SparkConf(false), warehouse)
         .setMaster("local[*]")
         .setAppName("test")
         .set(UI_ENABLED, false)
@@ -61,17 +62,6 @@ class RapidsCoalesceShufflePartitionsSuite
         .set(
           SQLConf.ADVISORY_PARTITION_SIZE_IN_BYTES.key,
           targetPostShuffleInputSize.toString)
-        .set("spark.rapids.sql.enabled", "true")
-        .set("spark.plugins", "com.nvidia.spark.SQLPlugin")
-        .set("spark.sql.queryExecutionListeners",
-          "org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback")
-        .set("spark.rapids.sql.explain", "ALL")
-        .set("spark.rapids.memory.gpu.allocFraction",
-          System.getProperty("rapids.test.gpu.allocFraction", "0.3"))
-        .set("spark.rapids.memory.gpu.maxAllocFraction",
-          System.getProperty("rapids.test.gpu.maxAllocFraction", "0.3"))
-        .set("spark.rapids.memory.gpu.minAllocFraction",
-          System.getProperty("rapids.test.gpu.minAllocFraction", "0"))
     minNumPostShufflePartitions match {
       case Some(numPartitions) =>
         sparkConf.set(SQLConf.COALESCE_PARTITIONS_MIN_PARTITION_NUM.key, numPartitions.toString)
