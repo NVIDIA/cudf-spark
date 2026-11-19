@@ -168,7 +168,9 @@ def _effective_pom(pom_path: Path, profile: Optional[str] = None,
         command.extend(["-P", profile, "-pl", ",".join([".", *modules])])
     with tempfile.TemporaryDirectory() as directory:
         output = Path(directory) / "effective-pom.xml"
-        command.extend(["help:effective-pom", f"-Doutput={output}"])
+        # Pin the goal because Maven Help Plugin 3.6.0 writes duplicate XML declarations (#16998).
+        command.extend(["org.apache.maven.plugins:maven-help-plugin:3.5.2:effective-pom",
+                        f"-Doutput={output}"])
         try:
             subprocess.run(command, check=True, stdout=subprocess.PIPE,
                            stderr=subprocess.STDOUT, text=True)

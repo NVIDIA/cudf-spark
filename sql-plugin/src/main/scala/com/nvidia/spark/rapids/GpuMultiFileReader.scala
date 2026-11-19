@@ -105,6 +105,8 @@ trait HostMemoryBuffersWithMetaDataBase extends AutoCloseable {
   private var _bufferTime: Long = 0L
   // Time spent on waiting for (virtual) resource
   private var _scheduleTime: Long = 0L
+  // Parquet row groups fetched, added to the metric on the task thread
+  private var _rowGroupsFetched: Int = 0
 
   /**
    * When it is present, it indicates the partition values stored as an array of
@@ -125,6 +127,16 @@ trait HostMemoryBuffersWithMetaDataBase extends AutoCloseable {
   }
 
   def setScheduleTime(time: Long): Unit = _scheduleTime = time
+
+  def setRowGroupsFetched(count: Int): Unit = _rowGroupsFetched = count
+  def getRowGroupsFetched: Int = _rowGroupsFetched
+
+  /**
+   * Add what the runner counted to the scan's metrics. Called on the task thread, since pool
+   * threads reading the task's other files would race on the same metrics.
+   */
+  def addRunnerMetrics(metrics: Map[String, GpuMetric]): Unit =
+    metrics.get(ROW_GROUPS_FETCHED).foreach(_ += _rowGroupsFetched)
 
   def getBufferTime: Long = _bufferTime
   def getFilterTime: Long = _filterTime
@@ -700,6 +712,8 @@ abstract class MultiFileCloudPartitionReaderBase(
       }
     }
     taskRet.data.setScheduleTime(taskRet.metrics.scheduleTimeMs)
+    // A result that is only freed still counts, since its IO was done.
+    taskRet.data.addRunnerMetrics(metrics)
     taskRet.data
   }
 

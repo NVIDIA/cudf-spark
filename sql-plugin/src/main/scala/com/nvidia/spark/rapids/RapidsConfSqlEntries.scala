@@ -543,13 +543,13 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
   val PARQUET_HYBRID_SCAN_ENABLED =
     conf("spark.rapids.sql.format.parquet.hybridScan.enabled")
       .doc("Internal temporary configuration to let Parquet reads use the libcudf hybrid scan " +
-          "reader while it is under development. It does not have the checks needed to be " +
-          "correct on every file and must not be used in production. When true, the reader " +
-          "bypasses parquet-mr: it parses only the footer, prunes row groups with the hybrid " +
-          "scan reader, and reads only the column chunk byte ranges the read needs. It applies " +
-          "only to non-chunked reads of Spark's Parquet source, not Delta, with the PERFILE or " +
-          "MULTITHREADED reader type, or AUTO when it picks MULTITHREADED for cloud files; any " +
-          "other read falls back to the parquet-mr path.")
+          "reader while it is under development; it is not yet supported in production. When " +
+          "true, the reader bypasses parquet-mr: it parses only the footer, prunes row groups " +
+          "with the hybrid scan reader, and reads only the column chunk byte ranges the read " +
+          "needs. It applies only to non-chunked reads of a schema it handles from Spark's " +
+          "Parquet source, not Delta, with the PERFILE or MULTITHREADED reader type, or AUTO " +
+          "when it picks MULTITHREADED for cloud files; any other read falls back to the " +
+          "parquet-mr path.")
       .internal()
       .booleanConf
       .createWithDefault(false)
@@ -568,6 +568,31 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
       .doubleConf
       .checkValue(v => v > 0 && v <= 1, "The keep threshold must be in the range (0, 1].")
       .createWithDefault(0.9)
+
+  val PARQUET_HYBRID_SCAN_MAX_H2D_PACK_SIZE =
+    conf("spark.rapids.sql.format.parquet.hybridScan.maxH2DPackSize")
+      .doc("Most bytes of column chunks a hybrid scan read packs into one device allocation when " +
+          "copying them to the device. Packing many chunks into one allocation saves allocations " +
+          "and copies, but past some size it saves nothing more while needing an ever larger " +
+          "contiguous block of free device memory; a chunk larger than this gets an allocation " +
+          "of its own. If an allocation fails, the copy is retried with half this size, down to " +
+          "spark.rapids.sql.format.parquet.hybridScan.minH2DPackSize. " +
+          s"Only used when ${PARQUET_HYBRID_SCAN_ENABLED.key} is true.")
+      .internal()
+      .bytesConf(ByteUnit.BYTE)
+      .checkValue(v => v > 0, "The maximum H2D pack size must be positive")
+      .createWithDefault(32L * 1024 * 1024)
+
+  val PARQUET_HYBRID_SCAN_MIN_H2D_PACK_SIZE =
+    conf("spark.rapids.sql.format.parquet.hybridScan.minH2DPackSize")
+      .doc("Smallest pack size a hybrid scan read's host-to-device copy is retried with after " +
+          s"failing to allocate; see ${PARQUET_HYBRID_SCAN_MAX_H2D_PACK_SIZE.key}, which it must " +
+          "not exceed. Halving it further fails the read instead. " +
+          s"Only used when ${PARQUET_HYBRID_SCAN_ENABLED.key} is true.")
+      .internal()
+      .bytesConf(ByteUnit.BYTE)
+      .checkValue(v => v > 0, "The minimum H2D pack size must be positive")
+      .createWithDefault(1024 * 1024)
 
   val PARQUET_DECOMPRESS_CPU =
     conf("spark.rapids.sql.format.parquet.decompressCpu")
