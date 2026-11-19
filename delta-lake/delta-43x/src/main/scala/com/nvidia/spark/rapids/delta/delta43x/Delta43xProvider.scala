@@ -199,10 +199,10 @@ object Delta43xProvider extends DeltaProviderBase with Logging {
       writeOptions: Map[String, String],
       hasPartitionColumns: Boolean,
       spark: SparkSession): Unit = {
-    val effectiveProperties = DeltaConfigs.mergeGlobalConfigs(
-      spark.sessionState.conf, properties)
+    val effectiveProperties = Delta43xConfigChecker.creationProperties(
+      spark, properties, Map.empty)
     Delta43xConfigChecker.tagParquetFormatVersion(
-      meta, spark, writeOptions, properties, isNewTable = true)
+      meta, spark, writeOptions, effectiveProperties)
     if (DeltaConfigs.ENABLE_VARIANT_SHREDDING.fromMap(effectiveProperties)) {
       meta.willNotWorkOnGpu("Delta 4.3 variant shredding writes are not supported on GPU")
     }
