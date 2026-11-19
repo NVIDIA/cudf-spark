@@ -260,6 +260,124 @@ def _write_orc_timestamp_calendar(spark, path, values, proleptic):
         reader.close()
 
 
+def _spark_has_orc_timestamp_ltz_inference_fix():
+    version = spark_version_tuple()
+    return ((is_spark_40x() and version >= (4, 0, 5))
+            or (is_spark_41x() and version >= (4, 1, 4))
+            or version >= (4, 2, 1))
+
+
+def _write_orc_timestamp_ltz_fixture(spark, path):
+    jvm = spark._jvm
+    orc = jvm.org.apache.orc
+    hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+    path = jvm.org.apache.hadoop.fs.Path(path)
+    schema = orc.TypeDescription.fromString(
+        "struct<id:int,ts:timestamp,nested:struct<ts:timestamp>,"
+        "timestamps:array<timestamp>,timestamp_map:map<int,timestamp>>")
+    writer = orc.OrcFile.createWriter(
+        path, orc.OrcFile.writerOptions(hadoop_conf).setSchema(schema))
+
+    def set_timestamp(vector, row, micros):
+        value = jvm.java.sql.Timestamp(micros // 1000)
+        value.setNanos((micros % 1000000) * 1000)
+        vector.set(row, value)
+
+    try:
+        values = [123456, 1000000]
+        batch = schema.createRowBatch()
+        columns = get_field(batch, 'cols')
+        nested_ts = get_field(columns[2], 'fields')[0]
+        timestamps = columns[3]
+        array_ts = get_field(timestamps, 'child')
+        timestamp_map = columns[4]
+        map_keys = get_field(timestamp_map, 'keys')
+        map_values = get_field(timestamp_map, 'values')
+        array_ts.ensureSize(len(values), False)
+        map_keys.ensureSize(len(values), False)
+        map_values.ensureSize(len(values), False)
+
+        for row, micros in enumerate(values):
+            get_field(columns[0], 'vector')[row] = row
+            set_timestamp(columns[1], row, micros)
+            set_timestamp(nested_ts, row, micros)
+
+            get_field(timestamps, 'offsets')[row] = row
+            get_field(timestamps, 'lengths')[row] = 1
+            set_timestamp(array_ts, row, micros)
+
+            get_field(timestamp_map, 'offsets')[row] = row
+            get_field(timestamp_map, 'lengths')[row] = 1
+            get_field(map_keys, 'vector')[row] = row + 10
+            set_timestamp(map_values, row, micros)
+
+        set_field(timestamps, 'childCount', len(values))
+        set_field(timestamp_map, 'childCount', len(values))
+        set_field(batch, 'size', len(values))
+        writer.addRowBatch(batch)
+    finally:
+        writer.close()
+
+
+_orc_timestamp_ltz_reader_modes = [
+    pytest.param(
+        copy_and_update(
+            __original_orc_file_reader_conf,
+            {'spark.rapids.sql.reader.chunked': False}),
+        'orc',
+        'GpuFileSourceScanExec',
+        id='v1-perfile-nonchunked'),
+    pytest.param(
+        copy_and_update(
+            __multithreaded_orc_file_reader_conf,
+            {'spark.rapids.sql.reader.chunked': True}),
+        '',
+        'GpuBatchScanExec',
+        id='v2-multithreaded-chunked'),
+]
+
+
+@pytest.mark.skipif(
+    not _spark_has_orc_timestamp_ltz_inference_fix(),
+    reason='SPARK-60400 requires Spark 4.0.5, 4.1.4, 4.2.1, or later')
+@pytest.mark.parametrize(
+    'reader_confs,v1_enabled_list,gpu_scan',
+    _orc_timestamp_ltz_reader_modes)
+def test_orc_timestamp_ltz_inference_under_timestamp_ntz(
+        spark_tmp_path, reader_confs, v1_enabled_list, gpu_scan):
+    data_path = spark_tmp_path + '/SPARK_60400.orc'
+    conf = copy_and_update(reader_confs, {
+        'spark.sql.timestampType': 'TIMESTAMP_NTZ',
+        'spark.sql.session.timeZone': 'UTC',
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        'spark.sql.orc.impl': 'native',
+    })
+    with_cpu_session(
+        lambda spark: _write_orc_timestamp_ltz_fixture(spark, data_path),
+        conf=conf)
+
+    def read(spark):
+        return spark.read.orc(data_path).orderBy('id')
+
+    (cpu_rows, cpu_df), (gpu_rows, gpu_df) = run_with_cpu_and_gpu(
+        read, 'COLLECT_WITH_DATAFRAME', conf=conf)
+    expected_schema = StructType([
+        StructField('id', IntegerType()),
+        StructField('ts', TimestampType()),
+        StructField('nested', StructType([
+            StructField('ts', TimestampType()),
+        ])),
+        StructField('timestamps', ArrayType(TimestampType())),
+        StructField('timestamp_map', MapType(IntegerType(), TimestampType())),
+    ])
+
+    assert cpu_df.schema == gpu_df.schema == expected_schema
+    assert len(cpu_rows) == 2
+    assert_equal(cpu_rows, gpu_rows)
+    spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback \
+        .assertContains(gpu_df._jdf, gpu_scan)
+
+
 def _read_orc_timestamp_micros(spark, path, reader_zone, gpu_scan=None):
     # The harness configures the reader JVM timezone for both driver and executors.
     assert spark._jvm.java.util.TimeZone.getDefault().getID() == reader_zone

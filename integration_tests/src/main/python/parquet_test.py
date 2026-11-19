@@ -1608,6 +1608,14 @@ def test_parquet_read_with_corrupt_files(spark_tmp_path, reader_confs, v1_enable
 def with_id(i):
     return {'parquet.field.id': i}
 
+
+def _spark_has_parquet_field_requested_more_than_once_check():
+    version = spark_version_tuple()
+    return ((is_spark_40x() and version >= (4, 0, 5))
+            or (is_spark_41x() and version >= (4, 1, 4))
+            or version >= (4, 2, 1))
+
+
 # Field ID test cases were re-written from:
 # https://github.com/apache/spark/blob/v3.3.0-rc3/sql/core/src/test/scala/org/apache/spark/sql/execution/datasources/parquet/ParquetFieldIdIOSuite.scala
 @pytest.mark.parametrize('footer_read', ["JAVA", "NATIVE", "AUTO"], ids=idfn)
@@ -1711,6 +1719,47 @@ def test_parquet_read_multiple_field_id_matches(spark_tmp_path, footer_read):
         lambda spark: spark.read.schema(read_schema).parquet(data_path).collect(),
         conf=conf,
         error_message="Found duplicate field(s)")
+
+
+@pytest.mark.skipif(
+    not _spark_has_parquet_field_requested_more_than_once_check(),
+    reason='SPARK-60262 requires Spark 4.0.5, 4.1.4, 4.2.1, or later')
+@pytest.mark.parametrize('footer_read', ["JAVA", "NATIVE", "AUTO"], ids=idfn)
+@validate_execs_in_gpu_plan('GpuFileSourceScanExec')
+def test_parquet_read_field_requested_more_than_once(spark_tmp_path, footer_read):
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+    write_schema = StructType([
+        StructField('A', IntegerType(), metadata=with_id(1)),
+        StructField('B', IntegerType(), metadata=with_id(2)),
+    ])
+    with_cpu_session(
+        lambda spark: spark.createDataFrame(
+            [(1, 10), (2, 20), (3, 30)], write_schema)
+            .coalesce(1).write.mode('overwrite').parquet(data_path),
+        conf=enable_parquet_field_id_write)
+
+    # The first requested field selects physical field A by ID, while the second
+    # independently selects the same field by its case-insensitive name.
+    read_schema = StructType([
+        StructField('x', IntegerType(), metadata=with_id(1)),
+        StructField('a', IntegerType()),
+    ])
+    conf = copy_and_update(
+        original_parquet_file_reader_conf,
+        enable_parquet_field_id_read,
+        {
+            'spark.sql.caseSensitive': False,
+            'spark.sql.sources.useV1SourceList': 'parquet',
+            'spark.rapids.sql.format.parquet.reader.footer.type': footer_read,
+        })
+
+    def read(spark):
+        return spark.read.schema(read_schema).parquet(data_path).collect()
+
+    error = 'PARQUET_FIELD_REQUESTED_MORE_THAN_ONCE'
+    assert_spark_exception(lambda: with_cpu_session(read, conf), error)
+    assert_spark_exception(lambda: with_gpu_session(read, conf), error)
+
 
 @pytest.mark.parametrize('footer_read', ["JAVA", "NATIVE", "AUTO"], ids=idfn)
 def test_parquet_read_without_field_id(spark_tmp_path, footer_read):
