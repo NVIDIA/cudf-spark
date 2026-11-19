@@ -25,7 +25,6 @@ import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsConf.ShuffleKudoMode
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.jni.RmmSpark
-import com.nvidia.spark.rapids.jni.kudo.DumpOption
 import com.nvidia.spark.rapids.shims.GpuHashPartitioning
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
@@ -133,8 +132,6 @@ object GpuKudoWritePartitioningSuite {
     val readOption = com.nvidia.spark.rapids.CoalesceReadOption(
       kudoEnabled = true,
       kudoMode = ShuffleKudoMode.GPU,
-      kudoDebugMode = DumpOption.Never,
-      kudoDebugDumpPrefix = None,
       useAsync = false
     )
 
