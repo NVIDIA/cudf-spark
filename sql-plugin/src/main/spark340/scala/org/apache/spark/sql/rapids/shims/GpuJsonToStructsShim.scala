@@ -31,6 +31,7 @@ import org.apache.spark.sql.rapids.ExceptionTimeParserPolicy
 
 object GpuJsonToStructsShim {
   def tagDateFormatSupport(meta: RapidsMeta[_, _, _], dateFormat: Option[String]): Unit = {
+    // Date format support is checked via GpuJsonUtils without extra tagging here.
   }
 
   def castJsonStringToDate(input: ColumnView, options: JSONOptions): ColumnVector = {
@@ -49,6 +50,7 @@ object GpuJsonToStructsShim {
   }
 
   def tagDateFormatSupportFromScan(meta: RapidsMeta[_, _, _], dateFormat: Option[String]): Unit = {
+    // All scan dateFormat values are handled without extra tagging in Spark 3.4+.
   }
 
   def castJsonStringToDateFromScan(input: ColumnView, dt: DType,

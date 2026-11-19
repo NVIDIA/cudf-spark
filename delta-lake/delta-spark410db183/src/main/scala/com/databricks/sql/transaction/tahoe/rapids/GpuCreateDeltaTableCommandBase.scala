@@ -73,7 +73,9 @@ abstract class GpuCreateDeltaTableCommandBase(
 
   override def otherCopyArgs: Seq[AnyRef] = Seq(rapidsConf)
 
-  protected def validateQueryPlan(plan: LogicalPlan): Unit = {}
+  protected def validateQueryPlan(plan: LogicalPlan): Unit = {
+    // Overridden by subclasses that require query-plan validation.
+  }
 
   override def run(sparkSession: SparkSession): Seq[Row] = {
     assert(table.tableType != CatalogTableType.VIEW)

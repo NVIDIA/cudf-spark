@@ -462,7 +462,7 @@ object RmmRapidsRetryIterator extends Logging {
       res
     }
 
-    override def close(): Unit = {}
+    override def close(): Unit = { /* Caller owns the input resources */ }
   }
 
   /**

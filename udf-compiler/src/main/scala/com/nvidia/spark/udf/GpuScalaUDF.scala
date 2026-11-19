@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2022, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,6 +31,7 @@ case class GpuScalaUDFLogical(udf: ScalaUDF) extends ShimExpression with Logging
   override def nullable: Boolean = udf.nullable
 
   override def eval(input: InternalRow): Any = {
+    // Logical placeholder replaced during planning; not row-evaluated.
   }
 
   override protected def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {

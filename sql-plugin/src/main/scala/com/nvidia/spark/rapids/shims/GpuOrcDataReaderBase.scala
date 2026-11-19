@@ -307,7 +307,7 @@ abstract class GpuOrcDataReaderBase(
     }
   }
 
-  override def close(): Unit = {}
+  override def close(): Unit = { /* Streams are opened and closed per read */ }
 
   private def getMetric(metricName: String): GpuMetric = metrics.getOrElse(metricName, NoopMetric)
 

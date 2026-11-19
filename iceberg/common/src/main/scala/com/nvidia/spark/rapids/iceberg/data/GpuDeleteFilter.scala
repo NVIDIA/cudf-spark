@@ -421,6 +421,7 @@ class GpuDeleteFilter(
   }
 
   override def close(): Unit = {
+    // Per-task buffers are closed by DeleteFilterContext when filtering finishes.
   }
 }
 

@@ -160,6 +160,7 @@ class DeviceMemoryEventHandler(
   override def getDeallocThresholds: Array[Long] = null
 
   override def onAllocThreshold(totalAllocated: Long): Unit = {
+    // Threshold callbacks are unused because getAllocThresholds returns null.
   }
 
   /**
@@ -171,6 +172,7 @@ class DeviceMemoryEventHandler(
   }
 
   override def onDeallocThreshold(totalAllocated: Long): Unit = {
+    // Threshold callbacks are unused because getDeallocThresholds returns null.
   }
 
   private def heapDump(dumpDir: String): Unit = {

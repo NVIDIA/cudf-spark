@@ -346,7 +346,7 @@ case class RowCountOnlyMergeResult(rowCount: Int) extends CoalescedHostResult {
 
   override def getDataSize: Long = 0
 
-  override def close(): Unit = {}
+  override def close(): Unit = { /* Holds only a row count; no buffers to close */ }
 }
 
 class KudoTableOperator(kudo: Option[KudoSerializer], readOption: CoalesceReadOption,

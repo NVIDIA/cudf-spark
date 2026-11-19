@@ -1147,7 +1147,7 @@ abstract class BaseHashJoinIterator(
    * For regular hash joins no state is required. Outer joins that preserve the build side
    * need to mark all the build-side rows as unmatched so that the finalization emits them.
    */
-  protected def onEmptyStream(): Unit = {}
+  protected def onEmptyStream(): Unit = { /* No state needed for regular hash joins */ }
 
   // We can cache the stats within an iterator because the build side is not changing
   protected lazy val buildStats: JoinBuildSideStats = buildStatsOpt

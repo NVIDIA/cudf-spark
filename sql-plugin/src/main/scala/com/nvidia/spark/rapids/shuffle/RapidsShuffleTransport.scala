@@ -160,7 +160,7 @@ trait ClientConnection {
    * which can wait on that lock. A connection that cannot withdraw a request leaves it waiting.
    * @param tx a transaction that `request` returned
    */
-  def cancelRequest(tx: Transaction): Unit = {}
+  def cancelRequest(tx: Transaction): Unit = { /* Default no-op when withdrawal is unsupported */ }
 }
 
 object TransactionStatus extends Enumeration {
