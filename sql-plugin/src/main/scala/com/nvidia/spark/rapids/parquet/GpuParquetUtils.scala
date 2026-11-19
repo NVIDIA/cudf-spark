@@ -16,17 +16,63 @@
 
 package com.nvidia.spark.rapids.parquet
 
+import java.io.OutputStream
 import java.util.Locale
 
 import scala.collection.JavaConverters._
 
 import com.nvidia.spark.rapids.shims.parquet.GpuParquetUtilsShims
-import org.apache.parquet.hadoop.metadata.{BlockMetaData, ColumnChunkMetaData, ColumnPath}
+import org.apache.parquet.format.converter.ParquetMetadataConverter
+import org.apache.parquet.hadoop.metadata.{BlockMetaData, ColumnChunkMetaData, ColumnPath, FileMetaData, ParquetMetadata}
 import org.apache.parquet.schema.MessageType
 
 import org.apache.spark.internal.Logging
 
 object GpuParquetUtils extends Logging {
+  def writeFooter(
+      out: OutputStream,
+      fileMetadata: FileMetaData,
+      blocks: Seq[BlockMetaData]): Unit = {
+    val footer = new ParquetMetadata(fileMetadata, blocks.asJava)
+    val metadata = new ParquetMetadataConverter()
+      .toParquetMetadata(ParquetPartitionReader.PARQUET_VERSION, footer)
+    org.apache.parquet.format.Util.writeFileMetaData(metadata, out)
+  }
+
+  /**
+   * Relocate encoded column chunks packed consecutively from outputStart. Only page bytes are
+   * copied, so column/offset indexes and bloom filters from the original file are not retained.
+   */
+  @scala.annotation.nowarn("msg=method getPath in class ColumnChunkMetaData is deprecated")
+  def relocateBlock(block: BlockMetaData, outputStart: Long): BlockMetaData = {
+    var position = outputStart
+    val columns = block.getColumns.asScala.map { column =>
+      val adjustment = Math.subtractExact(position, column.getStartingPos)
+      val dictionaryOffset = if (column.getDictionaryPageOffset > 0) {
+        Math.addExact(column.getDictionaryPageOffset, adjustment)
+      } else {
+        0L
+      }
+      val rewritten = ColumnChunkMetaData.get(
+        column.getPath,
+        column.getPrimitiveType,
+        column.getCodec,
+        column.getEncodingStats,
+        column.getEncodings,
+        column.getStatistics,
+        // Keep the dictionary page inside the read range even when parquet-mr drops its
+        // offset because the source file has no encoding statistics.
+        Math.addExact(column.getStartingPos, adjustment),
+        dictionaryOffset,
+        column.getValueCount,
+        column.getTotalSize,
+        column.getTotalUncompressedSize)
+      position = Math.addExact(position, column.getTotalSize)
+      rewritten
+    }
+    newBlockMeta(block, columns.toSeq)
+  }
+
   /**
    * Trim block metadata to contain only the column chunks that occur in the specified schema.
    * The column chunks that are returned are preserved verbatim
