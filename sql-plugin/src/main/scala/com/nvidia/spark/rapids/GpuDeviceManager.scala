@@ -751,16 +751,28 @@ object GpuDeviceManager extends Logging {
     }
   }
 
+  @volatile private var kvikioInitialized = false
+
   /**
    * Set KvikIO's compatibility mode and thread count, which libcudf takes only once per process,
-   * so this must run before the first libcudf file read. Compatibility mode ON reads with POSIX
-   * rather than cuFile.
+   * so this must run before the first libcudf file read: at startup if hybrid scan is enabled,
+   * else before the first native read of a session that enables it. Compatibility mode ON reads
+   * with POSIX rather than cuFile.
    */
-  private def initializeKvikio(conf: RapidsConf): Unit = {
-    val compatMode = NativeFileSource.CompatMode.ON
-    logInfo(s"KvikIO reads with compatibility mode $compatMode and " +
-      s"${conf.readerKvikioNumThreads} threads")
-    NativeFileSource.setUpKvikio(compatMode, conf.readerKvikioNumThreads)
+  private[rapids] def isKvikioInitialized: Boolean = kvikioInitialized
+
+  private[rapids] def initializeKvikio(conf: RapidsConf): Unit = {
+    if (!kvikioInitialized) {
+      synchronized {
+        if (!kvikioInitialized) {
+          val numThreads = conf.readerKvikioNumThreads
+          val compatMode = NativeFileSource.CompatMode.ON
+          logInfo(s"KvikIO reads with compatibility mode $compatMode and $numThreads threads")
+          NativeFileSource.setUpKvikio(compatMode, numThreads)
+          kvikioInitialized = true
+        }
+      }
+    }
   }
 
   /** Wrap a thread factory with one that will set the GPU device on each thread created. */
