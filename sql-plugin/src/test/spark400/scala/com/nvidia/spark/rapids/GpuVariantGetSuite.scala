@@ -27,6 +27,7 @@ import ai.rapids.cudf.{ColumnVector, ColumnView, DType, HostColumnVector,
 import com.nvidia.spark.rapids.Arm.withResource
 import org.scalatest.funsuite.AnyFunSuite
 
+import org.apache.spark.SparkThrowable
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{BoundReference, Literal}
 import org.apache.spark.sql.catalyst.expressions.variant.VariantGet
@@ -515,6 +516,27 @@ class GpuVariantGetSuite extends AnyFunSuite {
         assert(!raw.hasUnrecognizedPrimitiveStep(Seq.empty))
       }
     }
+  }
+
+  test("only Spark's unknown-primitive error marks a type ID as unrecognized") {
+    // Spark's own exception class is private[spark], so stand in for it.
+    class ConditionError(condition: String) extends RuntimeException(condition)
+        with SparkThrowable {
+      override def getCondition: String = condition
+    }
+    // Unrelated failures are logged and treated as unrecognized, the conservative choice.
+    val ids = GpuVariantGet.probeUnrecognizedIds { id =>
+      if (id == 30) {
+        throw new IllegalStateException("unrelated")
+      } else if (id == 31) {
+        throw new NoClassDefFoundError("unrelated")
+      } else if (id == 32) {
+        throw new ConditionError("MALFORMED_VARIANT")
+      } else if (id > 40) {
+        throw new ConditionError("UNKNOWN_PRIMITIVE_TYPE_IN_VARIANT")
+      }
+    }
+    assert(ids == Seq(30, 31, 32) ++ (41 to 63))
   }
 
   test("path prefixes come from the parser that accepts the path") {

@@ -28,6 +28,8 @@ import com.nvidia.spark.Retryable
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 
+import org.apache.spark.SparkThrowable
+import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{BoundReference, Expression, Literal,
   NamedExpression}
@@ -127,7 +129,7 @@ case class GpuVariantGet(
   override def restore(): Unit = ()
 }
 
-object GpuVariantGet {
+object GpuVariantGet extends Logging {
   // One grammar for both validating a path and splitting it into steps.
   private val PathStepPattern = """\.[A-Za-z_][A-Za-z0-9_]*|\[[0-9]+\]"""
   private val SupportedPath = ("^\\$(?:" + PathStepPattern + ")+$").r
@@ -140,10 +142,9 @@ object GpuVariantGet {
     case _ => false
   }
 
-  // The defining loader also resolves this expression's cuDF classes. Cache against that stable
-  // loader rather than the tagging thread's potentially different context loader.
-  // Only a positive answer is cached. A negative one is recomputed on each tagging pass, which
-  // costs a few reflective lookups, so it never outlives a change to the visible classes.
+  // Checked against this class's defining loader, which also resolves the expression's cuDF
+  // classes, rather than the tagging thread's context loader. Only a positive answer is cached; a
+  // negative one is recomputed on each tagging pass, which costs a few reflective lookups.
   @volatile private var variantCudfAvailable = false
 
   def isVariantCudfAvailable: Boolean = variantCudfAvailable || {
@@ -312,15 +313,38 @@ object GpuVariantGet {
     val probe = VariantGet(BoundReference(0, VariantType, nullable = true), Literal("$[0]"),
       IntegerType, failOnError = false, timeZoneId = Some("UTC"))
     val metadata = Array[Byte](1, 0, 0)
-    // Any failure, including a LinkageError, counts as unrecognized, which only costs a fallback.
-    (0 until 64).filter { id =>
+    probeUnrecognizedIds { id =>
+      probe.eval(InternalRow(new VariantVal(Array((id << 2).toByte), metadata)))
+    }
+  }
+
+  private val UnknownPrimitiveCondition = "UNKNOWN_PRIMITIVE_TYPE_IN_VARIANT"
+
+  /**
+   * The IDs for which `eval` throws Spark's unknown-primitive error. Any other failure says nothing
+   * about the ID, so it is logged and the ID is treated as unrecognized: that costs a CPU fallback
+   * for batches with missing rows but never returns NULL where Spark would throw.
+   */
+  private[rapids] def probeUnrecognizedIds(eval: Int => Unit): Seq[Int] = {
+    val unexpected = scala.collection.mutable.ArrayBuffer[(Int, Throwable)]()
+    val ids = (0 until 64).filter { id =>
       try {
-        probe.eval(InternalRow(new VariantVal(Array((id << 2).toByte), metadata)))
+        eval(id)
         false
       } catch {
-        case _: Exception | _: LinkageError => true
+        case e: SparkThrowable if e.getCondition == UnknownPrimitiveCondition => true
+        case e @ (_: Exception | _: LinkageError) =>
+          unexpected += id -> e
+          true
       }
     }
+    unexpected.headOption.foreach { case (id, e) =>
+      logWarning("Probing Spark's Variant primitive type IDs failed unexpectedly for " +
+        s"${unexpected.size} of 64 IDs (${unexpected.map(_._1).mkString(", ")}). " +
+        "try_variant_get batches with missing paths fall back to the CPU when they meet those " +
+        s"IDs. First failure, for ID $id:", e)
+    }
+    ids
   }
 
   def parseSupportedPath(pathExpr: Expression): Option[String] = pathExpr match {
