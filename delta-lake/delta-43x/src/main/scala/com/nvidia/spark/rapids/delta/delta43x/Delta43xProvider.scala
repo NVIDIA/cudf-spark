@@ -39,9 +39,10 @@ import org.apache.spark.sql.delta.{CatalogOwnedTableFeature, DeltaConfigs,
   IcebergCompat, MaterializePartitionColumnsTableFeature}
 import org.apache.spark.sql.delta.actions.TableFeatureProtocolUtils
 import org.apache.spark.sql.delta.catalog.{DeltaCatalog, DeltaCatalogRestApiShim, DeltaTableV2}
-import org.apache.spark.sql.delta.commands.{DeleteCommand, MergeIntoCommand, OptimizeTableCommand,
-  UpdateCommand, WriteIntoDelta}
+import org.apache.spark.sql.delta.commands.{DeleteCommand, DeltaInsertReplaceOnOrUsingCommand,
+  MergeIntoCommand, OptimizeTableCommand, UpdateCommand, WriteIntoDelta}
 import org.apache.spark.sql.delta.coordinatedcommits.CatalogOwnedTableUtils
+import org.apache.spark.sql.delta.rapids.delta43x.InsertReplaceOnOrUsingCommandMeta
 import org.apache.spark.sql.delta.serverSidePlanning.ServerSidePlannedTable
 import org.apache.spark.sql.execution.command.RunnableCommand
 import org.apache.spark.sql.execution.datasources.FileFormat
@@ -56,6 +57,13 @@ object Delta43xProvider extends DeltaProviderBase with Logging {
     p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
     r: com.nvidia.spark.rapids.DataFromReplacementRule) =
     new DeleteCommandMeta(a, conf, p, r)
+
+  private def createInsertReplaceOnOrUsingCommandMeta(
+    a: DeltaInsertReplaceOnOrUsingCommand,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new InsertReplaceOnOrUsingCommandMeta(a, conf, p, r)
 
   private def createUpdateCommandMeta(
     a: UpdateCommand,
@@ -327,6 +335,9 @@ object Delta43xProvider extends DeltaProviderBase with Logging {
       GpuOverrides.runnableCmd[DeleteCommand](
           "Delete rows from a Delta Lake table",
           createDeleteCommandMeta),
+      GpuOverrides.runnableCmd[DeltaInsertReplaceOnOrUsingCommand](
+          "Atomically replace matching rows in a Delta Lake table",
+          createInsertReplaceOnOrUsingCommandMeta),
       GpuOverrides.runnableCmd[UpdateCommand](
           "Update rows from a Delta Lake table",
           createUpdateCommandMeta),
@@ -345,6 +356,8 @@ object Delta43xProvider extends DeltaProviderBase with Logging {
 
   override protected def toGpuParquetFileFormat(conf: RapidsConf, fmt: DeltaParquetFileFormat)
   : FileFormat = {
+    // Internal DV matching scans need generated physical row indexes even before the
+    // target has any DVs. Match the reader selection used by the other Delta providers.
     val needsGeneratedRowIndex = !fmt.optimizationsEnabled && !fmt.hasTablePath
     if (isPushDVPredicateDownEnabled(conf) && !needsGeneratedRowIndex) {
       GpuDeltaParquetFileFormat2(

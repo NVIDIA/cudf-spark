@@ -23,6 +23,38 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
 
   // ENABLE/DISABLE PROCESSING
 
+  val DRIVERLESS_BROADCAST_ENABLED = conf("spark.rapids.sql.driverlessBroadcast.enabled")
+    .doc("Use executor-to-executor GPU shuffle reads for eligible broadcast hash joins. " +
+      "Databricks retains its existing broadcast path even when this setting is true. " +
+      "Can be enabled or disabled per query. Cached replicas are shared while source map " +
+      "outputs remain unchanged; recomputed outputs use a new replica. " +
+      "The old fetch protocol (spark.shuffle.useOldFetchProtocol=true) is unsupported and " +
+      "causes a planning error for an otherwise eligible driverless join. " +
+      "Uses UCX GPU shuffle; the build decoder accepts uncompressed and compressed batches. " +
+      "Hash-table reuse must be disabled. Null-aware anti joins, skew-optimized joins, " +
+      "and joins containing subqueries retain the standard path. Eligible GPU joins can " +
+      "share a build shuffle with or without AQE. Builds shared with standard broadcast " +
+      "consumers retain standard broadcast before materialization. Deterministic flat schemas " +
+      "are eligible. Opaque RDD sources retain standard broadcast. " +
+      "Dynamic allocation is unsupported. Compressed-batch decoding is supported, but " +
+      "compressed UCX transport requires independent lifetime and platform qualification.")
+    .internal()
+    .booleanConf
+    .createWithDefault(false)
+
+  val DRIVERLESS_BROADCAST_MAX_EXECUTORS = conf("spark.rapids.sql.driverlessBroadcast.maxExecutors")
+    .doc("Maximum registered executors, excluding the driver, for driverless broadcast. " +
+      "The driver retains standard broadcast when this limit is exceeded. Executors check " +
+      "the limit before fetching a build; growth beyond the limit after planning fails " +
+      "that execution. Dynamic allocation is unsupported. Values above 32 require " +
+      "scale qualification and improvements such as hierarchical or peer-forwarded " +
+      "distribution; raising this setting does not change the fan-out algorithm. " +
+      "Executors on the same host count separately because each can fetch a full build replica.")
+    .internal()
+    .integerConf
+    .checkValue(_ > 0, "must be positive")
+    .createWithDefault(32)
+
   val SQL_ENABLED = conf("spark.rapids.sql.enabled")
     .doc("Enable (true) or disable (false) sql operations on the GPU")
     .commonlyUsed()
@@ -507,6 +539,60 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
     .transform(_.toUpperCase(java.util.Locale.ROOT))
     .checkValues(RapidsReaderType.values.map(_.toString))
     .createWithDefault(RapidsReaderType.AUTO.toString)
+
+  val PARQUET_HYBRID_SCAN_ENABLED =
+    conf("spark.rapids.sql.format.parquet.hybridScan.enabled")
+      .doc("Internal temporary configuration to let Parquet reads use the libcudf hybrid scan " +
+          "reader while it is under development; it is not yet supported in production. When " +
+          "true, the reader bypasses parquet-mr: it parses only the footer, prunes row groups " +
+          "with the hybrid scan reader, and reads only the column chunk byte ranges the read " +
+          "needs. It applies only to non-chunked reads of a schema it handles from Spark's " +
+          "Parquet source, not Delta, with the PERFILE or MULTITHREADED reader type, or AUTO " +
+          "when it picks MULTITHREADED for cloud files; any other read falls back to the " +
+          "parquet-mr path.")
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
+
+  val PARQUET_HYBRID_SCAN_SINGLE_STAGE_FILTER_KEEP_THRESHOLD =
+    conf("spark.rapids.sql.format.parquet.hybridScan.singleStage.filterKeepThreshold")
+      .doc("Largest fraction of rows the pushed filter may keep for a single-stage hybrid scan " +
+          "read to still apply it. A single-stage read decodes every projected column whatever " +
+          "the filter says, so applying it cannot save any decoding; it only shrinks the batch " +
+          "leaving the scan, at the cost of evaluating the filter and copying the rows that " +
+          "survive. A filter that rejects almost nothing therefore costs more than the smaller " +
+          "batch saves. Above this fraction the rows are all returned and Spark's own filter " +
+          "above the scan removes the rest, which it does regardless. 1 always applies the " +
+          s"filter. Only used when ${PARQUET_HYBRID_SCAN_ENABLED.key} is true.")
+      .internal()
+      .doubleConf
+      .checkValue(v => v > 0 && v <= 1, "The keep threshold must be in the range (0, 1].")
+      .createWithDefault(0.9)
+
+  val PARQUET_HYBRID_SCAN_MAX_H2D_PACK_SIZE =
+    conf("spark.rapids.sql.format.parquet.hybridScan.maxH2DPackSize")
+      .doc("Most bytes of column chunks a hybrid scan read packs into one device allocation when " +
+          "copying them to the device. Packing many chunks into one allocation saves allocations " +
+          "and copies, but past some size it saves nothing more while needing an ever larger " +
+          "contiguous block of free device memory; a chunk larger than this gets an allocation " +
+          "of its own. If an allocation fails, the copy is retried with half this size, down to " +
+          "spark.rapids.sql.format.parquet.hybridScan.minH2DPackSize. " +
+          s"Only used when ${PARQUET_HYBRID_SCAN_ENABLED.key} is true.")
+      .internal()
+      .bytesConf(ByteUnit.BYTE)
+      .checkValue(v => v > 0, "The maximum H2D pack size must be positive")
+      .createWithDefault(32L * 1024 * 1024)
+
+  val PARQUET_HYBRID_SCAN_MIN_H2D_PACK_SIZE =
+    conf("spark.rapids.sql.format.parquet.hybridScan.minH2DPackSize")
+      .doc("Smallest pack size a hybrid scan read's host-to-device copy is retried with after " +
+          s"failing to allocate; see ${PARQUET_HYBRID_SCAN_MAX_H2D_PACK_SIZE.key}, which it must " +
+          "not exceed. Halving it further fails the read instead. " +
+          s"Only used when ${PARQUET_HYBRID_SCAN_ENABLED.key} is true.")
+      .internal()
+      .bytesConf(ByteUnit.BYTE)
+      .checkValue(v => v > 0, "The minimum H2D pack size must be positive")
+      .createWithDefault(1024 * 1024)
 
   val PARQUET_DECOMPRESS_CPU =
     conf("spark.rapids.sql.format.parquet.decompressCpu")

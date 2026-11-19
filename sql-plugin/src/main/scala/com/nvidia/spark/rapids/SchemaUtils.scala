@@ -26,6 +26,7 @@ import ai.rapids.cudf._
 import ai.rapids.cudf.ColumnWriterOptions._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingSeq
+import com.nvidia.spark.rapids.shims.OrcSchemaTypeShims
 import org.apache.orc.TypeDescription
 
 import org.apache.spark.sql.catalyst.parser.CatalystSqlParser
@@ -66,7 +67,9 @@ object SchemaUtils {
       case TypeDescription.Category.MAP =>
         val Seq(keyType, valueType) = orcType.getChildren.asScala.toSeq
         MapType(toCatalystType(keyType), toCatalystType(valueType))
-      case _ => CatalystSqlParser.parseDataType(orcType.toString)
+      case _ =>
+        OrcSchemaTypeShims.catalystTypeOverride(orcType)
+          .getOrElse(CatalystSqlParser.parseDataType(orcType.toString))
     }
 
     def toStructType(orcType: TypeDescription): StructType = {
@@ -206,7 +209,9 @@ object SchemaUtils {
             col
           }
           val typeIdMap = buildTypeIdMapFromSchema(colSt, isCaseSensitive)
-          val newViews = toSt.safeMap { f =>
+          // The outer toClose buffer owns all child views and cast results, including on
+          // failure. Do not give a second cleanup owner to partially evolved struct fields.
+          val newViews = toSt.map { f =>
             if (typeIdMap.contains(f.name)) {
               val typeAndId = typeIdMap(f.name)
               val cv = addToClose(actualCol.getChildColumnView(typeAndId._2))
@@ -270,6 +275,12 @@ object SchemaUtils {
       case (fromDec: DecimalType, toDec: DecimalType) if fromDec == toDec &&
           !GpuColumnVector.getNonNestedRapidsType(fromDec).equals(col.getType) =>
         col.castTo(DecimalUtil.createCudfDecimal(fromDec))
+      case _ if DecimalUtil.narrowsPrecision(colType, targetType) =>
+        // cuDF types do not carry precision, so narrowing can require bounds checks even
+        // when the storage width and scale are unchanged. Keep casting format-specific.
+        castFunc.map(f => f(col, targetType, colType))
+          .getOrElse(throw new QueryExecutionException("Casting function is missing for " +
+            s"type conversion from $colType to $targetType"))
       case (fromChar: CharType, StringType) =>
         castFunc.map(f => f(col, StringType, fromChar))
           .getOrElse(throw new QueryExecutionException("Casting function is missing for " +

@@ -137,6 +137,8 @@ case class GpuAcoshCompat(child: Expression) extends GpuUnaryMathExpression("ACO
     }
   }
 
+  override def selfConvertsToAst: Boolean = true
+
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     // Typically we would just use UnaryOp.ARCCOSH, but there are corner cases where cudf
     // produces a better result (it does not overflow) than spark does, but our goal is
@@ -480,6 +482,8 @@ case class GpuCot(child: Expression) extends GpuUnaryMathExpression("COT") {
     }
   }
 
+  override def selfConvertsToAst: Boolean = true
+
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     new ast.BinaryOperation(ast.BinaryOperator.DIV, ast.Literal.ofDouble(1),
       new ast.UnaryOperation(ast.UnaryOperator.TAN,
@@ -623,6 +627,14 @@ abstract class CudfBinaryMathExpression(name: String) extends CudfBinaryExpressi
   override def toString: String = s"$name($left, $right)"
   override def prettyName: String = name
   override def dataType: DataType = DoubleType
+}
+
+object GpuRoundBase {
+  // At scale zero the rounding boundaries are exactly representable half-integers.
+  // Decimal conversion cannot move a round-tripping value across one of these boundaries;
+  // larger floating-point values are already integral. Only signed zero needs normalization.
+  def isZeroScale(scale: Expression): Boolean =
+    GpuOverrides.extractLit(scale).exists(_.value == 0)
 }
 
 // Due to SPARK-39226, the dataType of round-like functions differs by Spark versions.
@@ -797,7 +809,15 @@ abstract class GpuRoundBase(
       scale: Int,
       lhs: ColumnVector): ColumnVector = {
     val maxDigits = if (dataType == FloatType) 39 else 309
-    if (-scale >= maxDigits) {
+    if (scale == 0) {
+      // Spark rounds via BigDecimal, which loses the sign of zero. IEEE rounding retains it.
+      // Adding positive zero normalizes either zero sign without changing other rounded values.
+      withResource(Arithmetic.round(lhs, scale, roundMode)) { rounded =>
+        withResource(zeroFn()) { zero =>
+          rounded.add(zero)
+        }
+      }
+    } else if (-scale >= maxDigits) {
       // replaces common values (!Null AND !Nan AND !Inf And !-Inf) with zero, while keeps
       // all the special values unchanged
       withResource(Seq(zeroFn(), infFn(), negInfFn())) { case Seq(zero, inf, negInf) =>

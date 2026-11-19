@@ -14,19 +14,8 @@
  * limitations under the License.
  */
 /*** spark-rapids-shim-json-lines
-{"spark": "350"}
-{"spark": "351"}
-{"spark": "352"}
-{"spark": "353"}
-{"spark": "354"}
-{"spark": "355"}
-{"spark": "356"}
-{"spark": "357"}
-{"spark": "358"}
-{"spark": "400"}
-{"spark": "401"}
-{"spark": "402"}
-{"spark": "411"}
+{"spark":["350","400"],"carryForward":"all"}
+{"spark":["402","411"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids.shims
@@ -40,6 +29,20 @@ object KeyGroupedPartitioningShim {
       partitionValues: Seq[InternalRow],
       isPartiallyClustered: Boolean): KeyGroupedPartitioning = {
     p.copy(numPartitions = partitionValues.length, partitionValues = partitionValues)
+  }
+
+  def copyForOutputPartitioning(
+      p: KeyGroupedPartitioning,
+      joinKeyPositions: Option[Seq[Int]],
+      partitionValues: Seq[InternalRow],
+      isPartiallyClustered: Boolean): KeyGroupedPartitioning = {
+    val expressions = joinKeyPositions
+      .map(_.map(p.expressions(_)))
+      .getOrElse(p.expressions)
+    p.copy(
+      expressions = expressions,
+      numPartitions = partitionValues.length,
+      partitionValues = partitionValues)
   }
 
   def getUniquePartitions(p: KeyGroupedPartitioning): Seq[InternalRow] = {

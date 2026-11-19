@@ -1,5 +1,5 @@
 # Change log
-Generated on 2026-10-30
+Generated on 2026-11-03
 
 ## Release 26.10
 
@@ -40,6 +40,7 @@ Generated on 2026-10-30
 ### Bugs Fixed
 |||
 |:---|:---|
+|[#16704](https://github.com/NVIDIA/cudf-spark/issues/16704)|[BUG] recordPerfioGCSBackendOnce() throws IllegalStateException on unregistered accumulator, causing lost task on ORC GCS reads|
 |[#16644](https://github.com/NVIDIA/cudf-spark/issues/16644)|[BUG][26.10] Delta 4.1 MERGE release tests fail on CPU BroadcastHashJoinExec|
 |[#16473](https://github.com/NVIDIA/cudf-spark/issues/16473)|[BUG] Iceberg metadata-only file combining can produce incorrect partition values|
 |[#16396](https://github.com/NVIDIA/cudf-spark/issues/16396)|[BUG] Multithreaded reader leaks host buffers of deferred combine files when closed early|
@@ -178,6 +179,10 @@ Generated on 2026-10-30
 ### PRs
 |||
 |:---|:---|
+|[#16710](https://github.com/NVIDIA/cudf-spark/pull/16710)|[DOC] remove Dataproc Serverless 2.3 support [skip ci]|
+|[#16705](https://github.com/NVIDIA/cudf-spark/pull/16705)|Ignore unregistered accumulator in recordPerfioGCSBackendOnce|
+|[#16692](https://github.com/NVIDIA/cudf-spark/pull/16692)|Mark distributed Delta 4.2/4.3 REORG failures as expected [skip ci]|
+|[#16671](https://github.com/NVIDIA/cudf-spark/pull/16671)|Update CHANGELOG for the v26.10.0 release [skip ci]|
 |[#16647](https://github.com/NVIDIA/cudf-spark/pull/16647)|Preserve Delta 4.3 partitioning on saveAsTable overwrite|
 |[#16646](https://github.com/NVIDIA/cudf-spark/pull/16646)|Fix Delta 4.x DV MERGE metadata assertions|
 |[#16215](https://github.com/NVIDIA/cudf-spark/pull/16215)|Update changelog for the v26.10 release [skip ci]|
