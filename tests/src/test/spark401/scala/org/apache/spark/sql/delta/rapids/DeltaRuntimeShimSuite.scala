@@ -28,6 +28,7 @@ import org.scalatestplus.mockito.MockitoSugar.mock
 
 import org.apache.spark.sql.{Dataset, Row, SaveMode}
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Literal}
+import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.delta.{DeltaLog, DeltaOptions, NumRecordsStats}
 import org.apache.spark.sql.delta.commands.{WriteIntoDelta, WriteIntoDeltaLike}
 import org.apache.spark.sql.delta.schema.ImplicitMetadataOperation
@@ -205,7 +206,8 @@ class DeltaRuntimeShimSuite extends SparkQueryCompareTestSuite {
         val resolvedOptions = getWriterOptions.invoke(txn, Some(writeOptions))
           .asInstanceOf[Map[String, String]]
 
-        assert(resolvedOptions(parquetOutputTimestampType) == "TIMESTAMP_MICROS")
+        assert(CaseInsensitiveMap(resolvedOptions)(parquetOutputTimestampType) ==
+          "TIMESTAMP_MICROS")
         assert(resolvedOptions(parquetWriterVersion) == "v1")
 
         val encodeVariantStatsIfNeeded = txn.getClass.getDeclaredMethods
