@@ -40,7 +40,7 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference,
 import org.apache.spark.sql.columnar.CachedBatch
 import org.apache.spark.sql.execution.WholeStageCodegenExec
 import org.apache.spark.sql.execution.columnar.DefaultCachedBatchSerializer
-import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.internal.{SQLConf, StaticSQLConf}
 import org.apache.spark.sql.rapids.{PCBSSchemaHelper, TestPrimitiveUDT}
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
@@ -171,7 +171,7 @@ class CachedBatchWriterSuite extends SparkQueryCompareTestSuite {
       }
     }
     val ordinarySchema = Seq[DataType](BooleanType, ByteType, ShortType, IntegerType, LongType,
-      FloatType, DoubleType, DateType, TimestampType, StringType, BinaryType, NullType,
+      FloatType, DoubleType, DateType, TimestampType, StringType, BinaryType,
       DecimalType(12, 2), DayTimeIntervalType(), YearMonthIntervalType(),
       ArrayType(StructType(Seq(StructField("value", IntegerType)))),
       MapType(StringType, ArrayType(LongType))).zipWithIndex.map { case (dataType, index) =>
@@ -179,6 +179,29 @@ class CachedBatchWriterSuite extends SparkQueryCompareTestSuite {
     }
     assert(ser.supportsColumnarInput(ordinarySchema))
     assert(ser.supportsColumnarInput(Seq.empty))
+  }
+
+  test("PCBS NullType columnar input requires the SQL extension") {
+    val ser = new ParquetCachedBatchSerializer
+    val sqlExtension = classOf[SQLExecPlugin].getName
+    val nullTypes = Seq(NullType, ArrayType(NullType), MapType(IntegerType, NullType),
+      MapType(NullType, IntegerType), StructType(Seq(StructField("value", NullType))),
+      ArrayType(StructType(Seq(StructField("value", MapType(StringType, NullType))))))
+    Seq[(Option[String], Boolean)]((None, false), (Some(""), false),
+      (Some("other.Extension"), false), (Some(sqlExtension), true),
+      (Some(s"other.Extension, $sqlExtension"), true)).foreach { case (extensions, expected) =>
+      val conf = new SQLConf
+      extensions.foreach(conf.setConfString(StaticSQLConf.SPARK_SESSION_EXTENSIONS.key, _))
+      SQLConf.withExistingConf(conf) {
+        nullTypes.foreach { dataType =>
+          val schema = Seq(AttributeReference("value", dataType)())
+          assert(ser.supportsColumnarInput(schema) == expected,
+            s"Unexpected columnar support for $dataType with extensions '$extensions'")
+        }
+        assert(ser.supportsColumnarInput(Seq(AttributeReference("value", IntegerType)())))
+        assert(ser.supportsColumnarInput(Seq.empty))
+      }
+    }
   }
 
   test("PCBS schema conversion supports nested UDTs") {

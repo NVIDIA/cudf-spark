@@ -78,7 +78,7 @@ object PCBSNullSafeRowToColumnarExec {
     case _ => dataType
   }
 
-  private def containsNullType(dataType: DataType): Boolean = dataType match {
+  def containsNullType(dataType: DataType): Boolean = dataType match {
     case NullType => true
     case ArrayType(elementType, _) => containsNullType(elementType)
     case MapType(keyType, valueType, _) => containsNullType(keyType) || containsNullType(valueType)

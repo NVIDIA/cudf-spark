@@ -17,18 +17,62 @@
 package org.apache.spark.sql.rapids.execution
 
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.GpuTransitionOverrides
 import org.scalatest.funsuite.AnyFunSuite
 
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference}
 import org.apache.spark.sql.catalyst.util.{ArrayBasedMapData, GenericArrayData}
-import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.execution.{LeafExecNode, RowToColumnarExec}
+import org.apache.spark.sql.internal.{SQLConf, StaticSQLConf}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.ArrowUtils
 import org.apache.spark.unsafe.types.UTF8String
 
+object PCBSNullSafeRowToColumnarSuite {
+  case class EmptyRows(override val output: Seq[Attribute]) extends LeafExecNode {
+    override protected def doExecute(): RDD[InternalRow] =
+      throw new UnsupportedOperationException("This plan is only used for transition checks")
+  }
+}
+
 class PCBSNullSafeRowToColumnarSuite extends AnyFunSuite {
+  import PCBSNullSafeRowToColumnarSuite.EmptyRows
+
   private val schema = StructType(Seq(
     StructField("id", IntegerType, nullable = false), StructField("n", NullType)))
+
+  test("GPU transition rule replaces only a PCBS NullType CPU root transition") {
+    val pcbs = "com.nvidia.spark.ParquetCachedBatchSerializer"
+    val defaultSerializer = "org.apache.spark.sql.execution.columnar.DefaultCachedBatchSerializer"
+    for {
+      (enabled, mode) <- Seq(("false", "executeOnGPU"), ("true", "explainOnly"))
+      serializer <- Seq(pcbs, defaultSerializer)
+      dataType <- Seq(NullType, ArrayType(NullType),
+        StructType(Seq(StructField("value", NullType))), MapType(IntegerType, NullType),
+        IntegerType)
+    } {
+      val conf = new SQLConf
+      conf.setConfString("spark.rapids.sql.enabled", enabled)
+      conf.setConfString("spark.rapids.sql.mode", mode)
+      conf.setConfString("spark.rapids.sql.test.enabled", "true")
+      conf.setConfString(StaticSQLConf.SPARK_CACHE_SERIALIZER.key, serializer)
+      SQLConf.withExistingConf(conf) {
+        val child = EmptyRows(Seq(AttributeReference("value", dataType)()))
+        val transition = RowToColumnarExec(child)
+        val rule = new GpuTransitionOverrides
+        val result = rule(transition)
+        if (serializer == pcbs && dataType != IntegerType) {
+          assert(result.isInstanceOf[PCBSNullSafeRowToColumnarExec])
+          assert(result.children.head eq child)
+        } else {
+          assert(result eq transition)
+        }
+        assert(rule(child) eq child)
+      }
+    }
+  }
 
   test("empty input does not allocate a batch") {
     withResource(ArrowUtils.rootAllocator.newChildAllocator(

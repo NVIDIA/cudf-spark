@@ -26,7 +26,7 @@ import scala.collection.mutable.ListBuffer
 import ai.rapids.cudf._
 import ai.rapids.cudf.ParquetWriterOptions.StatisticsFrequency
 import com.nvidia.spark.GpuCachedBatchSerializer
-import com.nvidia.spark.rapids.{ByteBufferInputStream, ColumnCastUtil, DecimalUtil, GpuColumnVector, GpuRowToColumnConverter, GpuSemaphore, RapidsConf, RowToColumnarIterator, SchemaUtils, TargetSize}
+import com.nvidia.spark.rapids.{ByteBufferInputStream, ColumnCastUtil, DecimalUtil, GpuColumnVector, GpuRowToColumnConverter, GpuSemaphore, RapidsConf, RowToColumnarIterator, SchemaUtils, SQLExecPlugin, TargetSize}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.GpuColumnVector.GpuColumnarBatchBuilder
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
@@ -56,8 +56,9 @@ import org.apache.spark.sql.catalyst.util.{ArrayBasedMapData, ArrayData, Generic
 import org.apache.spark.sql.columnar.CachedBatch
 import org.apache.spark.sql.execution.datasources.parquet.{ParquetCVShims, ParquetReadSupport, ParquetToSparkSchemaConverter, ParquetWriteSupport, RapidsVectorizedColumnReader, ShimCurrentBatchIterator}
 import org.apache.spark.sql.execution.datasources.parquet.rapids.ParquetRecordMaterializer
-import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.internal.{SQLConf, StaticSQLConf}
 import org.apache.spark.sql.rapids.PCBSSchemaHelper
+import org.apache.spark.sql.rapids.execution.PCBSNullSafeRowToColumnarExec
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.storage.StorageLevel
@@ -216,7 +217,13 @@ class ParquetCachedBatchSerializer extends GpuCachedBatchSerializer {
   override def supportsColumnarInput(schema: Seq[Attribute]): Boolean = {
     // Cached AQE plans can insert a row-to-columnar transition. Only accept schemas the GPU
     // converter can materialize, including nested types; use the row cache path otherwise.
-    schema.forall(attribute => GpuRowToColumnConverter.supportsType(attribute.dataType))
+    schema.forall(attribute => GpuRowToColumnConverter.supportsType(attribute.dataType)) &&
+      // Without the SQL extension, Spark cannot install the NullType-safe CPU transition.
+      // Keep columnar input when it is installed so GPU NullType caching stays unchanged.
+      (!schema.exists(attribute =>
+        PCBSNullSafeRowToColumnarExec.containsNullType(attribute.dataType)) ||
+        SQLConf.get.getConfString(StaticSQLConf.SPARK_SESSION_EXTENSIONS.key, "")
+          .split(",").map(_.trim).contains(classOf[SQLExecPlugin].getName))
   }
 
   override def supportsColumnarOutput(schema: StructType): Boolean = schema.fields.forall { f =>
