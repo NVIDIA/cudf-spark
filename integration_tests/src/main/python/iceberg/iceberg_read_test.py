@@ -20,12 +20,13 @@ import pytest
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
     assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect, assert_spark_exception
 from conftest import is_iceberg_remote_catalog, spark_jvm
-from data_gen import copy_and_update, LongGen, StructGen, UniqueLongGen, \
+from data_gen import copy_and_update, DecimalGen, IntegerGen, LongGen, StringGen, \
+    StructGen, TimestampGen, UniqueLongGen, gen_scalar_value, \
     disable_parquet_field_id_write, gen_df
 from iceberg import _build_tblprops, get_full_table_name, iceberg_unsupported_mark, \
     rapids_reader_types, runtime_iceberg_version, supports_iceberg_v3, \
     ICEBERG_V3_UNSUPPORTED_REASON, iceberg_variant_read_conf
-from marks import allow_non_gpu, iceberg, ignore_order, incompat
+from marks import allow_non_gpu, iceberg, iceberg_fast_test, ignore_order, incompat
 from spark_session import is_spark_400_or_later, is_spark_411_or_later, \
     with_cpu_session, with_gpu_session
 
@@ -426,7 +427,6 @@ def test_iceberg_schema_evolution_read(
         assert_gpu_and_cpu_are_equal_collect(lambda spark: spark.sql(query), conf=conf)
 
 
-
 def _setup_iceberg_v3_defaults_table(table_name, unsupported_column=None):
     props = _build_tblprops({"format-version": "3"})
     props_sql = ", ".join(f"'{key}' = '{value}'" for key, value in props.items())
@@ -495,10 +495,13 @@ def _setup_iceberg_v3_defaults_table(table_name, unsupported_column=None):
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)
-def test_iceberg_v3_initial_defaults_all_types(spark_tmp_table_factory):
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@iceberg_fast_test
+def test_iceberg_v3_initial_defaults_all_types(spark_tmp_table_factory, reader_type):
     table_name = get_full_table_name(spark_tmp_table_factory)
     _setup_iceberg_v3_defaults_table(table_name)
-    v3_conf = {"spark.rapids.sql.format.iceberg.v3.enabled": "true"}
+    v3_conf = {"spark.rapids.sql.format.iceberg.v3.enabled": "true",
+               "spark.rapids.sql.format.parquet.reader.type": reader_type}
     query = (
         f"SELECT id, s.present, s.nested_added, required_added, optional_added, "
         "boolean_added, long_added, float_added, double_added, date_added, "
@@ -513,91 +516,44 @@ def test_iceberg_v3_initial_defaults_all_types(spark_tmp_table_factory):
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
-@ignore_order(local=True)
-def test_iceberg_v3_project_only_defaulted_struct_child(spark_tmp_table_factory, reader_type):
-    table_name = get_full_table_name(spark_tmp_table_factory)
-    props_sql = ", ".join(
-        f"'{key}' = '{value}'" for key, value in _build_tblprops({"format-version": "3"}).items())
-
-    def setup_table(spark):
-        spark.sql(
-            f"CREATE TABLE {table_name} "
-            "(id BIGINT, s STRUCT<present: BIGINT>) USING ICEBERG "
-            f"TBLPROPERTIES ({props_sql})")
-        # A null physical leaf must still distinguish a non-null struct from a null parent.
-        spark.createDataFrame(
-            [(0, None), (1, (None,)), (2, (7,))],
-            "id BIGINT, s STRUCT<present: BIGINT>"
-        ).coalesce(1).writeTo(table_name).append()
-
-        jvm = spark_jvm()
-        table = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
-            spark._jsparkSession, table_name)
-        table.updateSchema().addColumn(
-            "s", "nested_added", jvm.org.apache.iceberg.types.Types.IntegerType.get(),
-            jvm.org.apache.iceberg.expressions.Literal.of(11)).commit()
-        spark.sql(f"REFRESH TABLE {table_name}")
-
-    with_cpu_session(setup_table)
-
-    def check_defaults(cpu_rows, gpu_rows):
-        for rows in (cpu_rows, gpu_rows):
-            assert sorted((row.id, row.nested_added) for row in rows) == [
-                (0, None), (1, 11), (2, 11)]
-        return cpu_rows, gpu_rows
-
-    def read_defaults(spark):
-        # Iceberg's CPU nested pruning loses parent validity for this projection. Use an
-        # unpruned CPU reference while keeping GPU pruning enabled to exercise the regression.
-        gpu_enabled = spark.conf.get("spark.rapids.sql.enabled") == "true"
-        spark.conf.set("spark.sql.optimizer.nestedSchemaPruning.enabled", gpu_enabled)
-        return spark.sql(f"SELECT id, s.nested_added FROM {table_name}")
-
-    assert_gpu_and_cpu_are_equal_collect(
-        read_defaults,
-        conf={
-            "spark.rapids.sql.format.iceberg.v3.enabled": "true",
-            "spark.rapids.sql.format.parquet.reader.type": reader_type},
-        result_canonicalize_func_before_compare=check_defaults)
-
-
-@iceberg
-@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
-@pytest.mark.parametrize('reader_type', rapids_reader_types)
 @pytest.mark.parametrize('shape', ['list', 'map', 'multiple'])
 @ignore_order(local=True)
 def test_iceberg_v3_defaulted_collection_paths(spark_tmp_table_factory, reader_type, shape):
     table_name = get_full_table_name(spark_tmp_table_factory)
+    present = gen_scalar_value(LongGen(nullable=False))
+    current_value = gen_scalar_value(IntegerGen(nullable=False, min_val=100, max_val=10000,
+        special_cases=[]))
+    current_other = current_value + 1
     old_element, new_element = 'STRUCT<present: BIGINT>', 'STRUCT<present: BIGINT, added: INT>'
     if shape == 'multiple':
         old_fields = f'b ARRAY<{old_element}>, c MAP<STRING, {old_element}>'
         new_fields = f'b ARRAY<{new_element}>, c MAP<STRING, {new_element}>'
-        old = [(0, None), (1, (1, None, {'x': (7,)})), (2, (2, [], None)),
+        old = [(0, None), (1, (1, None, {'x': (present,)})), (2, (2, [], None)),
                (3, (3, [None], {})),
-               (4, (4, [(None,), (7,), None], {'a': (None,), 'b': None}))]
-        current = [(5, (5, [(9, 99), (None, None), None],
-                        {'x': (8, 77), 'y': (None, None), 'z': None}))]
+               (4, (4, [(None,), (present,), None], {'a': (None,), 'b': None}))]
+        current_rows = [(5, (5, [(present, current_value), (None, None), None],
+                        {'x': (8, current_other), 'y': (None, None), 'z': None}))]
         defaults = [('s.b.element', 11), ('s.c.value', 22)]
         expressions = ['s.b.added', 'map_values(s.c).added']
         map_columns = [2]
         expected = [(0, None, None), (1, None, [22]), (2, [], None), (3, [None], []),
                     (4, [11, 11, None], [22, None]),
-                    (5, [99, None, None], [77, None, None])]
+                    (5, [current_value, None, None], [current_other, None, None])]
     else:
         is_map = shape == 'map'
         old_fields = f'b MAP<STRING, {old_element}>' if is_map else f'b ARRAY<{old_element}>'
         new_fields = f'b MAP<STRING, {new_element}>' if is_map else f'b ARRAY<{new_element}>'
-        values = [None, {}, {'a': None}, {'a': (None,), 'b': (7,), 'c': None}] if is_map else \
-            [None, [], [None], [(None,), (7,), None]]
+        values = [None, {}, {'a': None}, {'a': (None,), 'b': (present,), 'c': None}] if is_map else \
+            [None, [], [None], [(None,), (present,), None]]
         old = [(0, None)] + [(i, (i, value)) for i, value in enumerate(values, start=1)]
-        current_value = {'a': (9, 99), 'b': (None, None), 'c': None} if is_map else \
-            [(9, 99), (None, None), None]
-        current = [(5, (5, current_value))]
+        physical_container = {'a': (present, current_value), 'b': (None, None), 'c': None} if is_map else \
+            [(present, current_value), (None, None), None]
+        current_rows = [(5, (5, physical_container))]
         defaults = [('s.b.value' if is_map else 's.b.element', 11)]
         expressions = ['map_values(s.b).added' if is_map else 's.b.added']
         map_columns = [1] if is_map else []
         expected = [(0, None), (1, None), (2, []), (3, [None]),
-                    (4, [11, 11, None]), (5, [99, None, None])]
+                    (4, [11, 11, None]), (5, [current_value, None, None])]
 
     def setup(spark):
         spark.sql(f'CREATE TABLE {table_name} '
@@ -614,7 +570,7 @@ def test_iceberg_v3_defaulted_collection_paths(spark_tmp_table_factory, reader_t
                              jvm.org.apache.iceberg.expressions.Literal.of(value))
         update.commit()
         spark.sql(f'REFRESH TABLE {table_name}')
-        spark.createDataFrame(current, f'id BIGINT, s STRUCT<unrelated: BIGINT, {new_fields}>') \
+        spark.createDataFrame(current_rows, f'id BIGINT, s STRUCT<unrelated: BIGINT, {new_fields}>') \
             .coalesce(1).writeTo(table_name).append()
 
     with_cpu_session(setup)
@@ -649,15 +605,18 @@ def test_iceberg_v3_defaulted_collection_paths(spark_tmp_table_factory, reader_t
 @pytest.mark.parametrize(
     "unsupported_column", ["timestamp_ntz_added", "uuid_added", "fixed_added"])
 @pytest.mark.parametrize("project_default", [False, True], ids=["unprojected", "projected"])
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@iceberg_fast_test
 def test_iceberg_v3_unsupported_initial_defaults_fallback(
-        spark_tmp_table_factory, unsupported_column, project_default):
+        spark_tmp_table_factory, unsupported_column, project_default, reader_type):
     table_name = get_full_table_name(spark_tmp_table_factory)
     _setup_iceberg_v3_defaults_table(table_name, unsupported_column)
     columns = f"id, {unsupported_column}" if project_default else "id"
     assert_gpu_fallback_collect(
         lambda spark: spark.sql(f"SELECT {columns} FROM {table_name}"),
         "BatchScanExec",
-        conf={"spark.rapids.sql.format.iceberg.v3.enabled": "true"})
+        conf={"spark.rapids.sql.format.iceberg.v3.enabled": "true",
+              "spark.rapids.sql.format.parquet.reader.type": reader_type})
 
 
 def _check_default_rows(expected):
@@ -673,9 +632,13 @@ def _check_default_rows(expected):
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @pytest.mark.parametrize('project_default', [False, True], ids=['implicit', 'projected'])
 @ignore_order(local=True)
+@iceberg_fast_test
 def test_iceberg_v3_defaults_with_predicates(
         spark_tmp_table_factory, reader_type, project_default):
     table_name = get_full_table_name(spark_tmp_table_factory)
+    initial = gen_scalar_value(IntegerGen(nullable=False, min_val=1, max_val=1000,
+        special_cases=[]))
+    lower, upper, current, absent = initial - 1, initial + 1, initial + 12, initial + 100
 
     def setup(spark):
         spark.sql(f"CREATE TABLE {table_name} (id BIGINT) USING ICEBERG "
@@ -686,28 +649,28 @@ def test_iceberg_v3_defaults_with_predicates(
             spark._jsparkSession, table_name)
         table.updateSchema().addColumn(
             'added', jvm.org.apache.iceberg.types.Types.IntegerType.get(),
-            jvm.org.apache.iceberg.expressions.Literal.of(11)).commit()
+            jvm.org.apache.iceberg.expressions.Literal.of(initial)).commit()
         spark.sql(f"REFRESH TABLE {table_name}")
-        spark.createDataFrame([(2, None), (3, 23)], 'id BIGINT, added INT') \
+        spark.createDataFrame([(2, None), (3, current)], 'id BIGINT, added INT') \
             .coalesce(1).writeTo(table_name).append()
         frame = spark.table(table_name)
         return frame.collect(), frame.schema
 
     reference_rows, reference_schema = with_cpu_session(setup)
     assert sorted(tuple(row) for row in reference_rows) == [
-        (0, 11), (1, 11), (2, None), (3, 23)]
+        (0, initial), (1, initial), (2, None), (3, current)]
     predicates = [
-        ('added = 11', [0, 1]),
-        ('added > 10', [0, 1, 3]),
-        ('added < 12', [0, 1]),
-        ('added IN (11, 23)', [0, 1, 3]),
+        (f'added = {initial}', [0, 1]),
+        (f'added > {lower}', [0, 1, 3]),
+        (f'added < {upper}', [0, 1]),
+        (f'added IN ({initial}, {current})', [0, 1, 3]),
         ('added IS NULL', [2]),
         ('added IS NOT NULL', [0, 1, 3]),
-        ('added != 23', [0, 1]),
-        ('added = 11 AND id = 1', [1]),
-        ('added = 11 OR id = 2', [0, 1, 2]),
-        ('NOT (added = 23 OR id = 0)', [1]),
-        ('added = 99', [])]
+        (f'added != {current}', [0, 1]),
+        (f'added = {initial} AND id = 1', [1]),
+        (f'added = {initial} OR id = 2', [0, 1, 2]),
+        (f'NOT (added = {current} OR id = 0)', [1]),
+        (f'added = {absent}', [])]
     columns = ['id', 'added'] if project_default else ['id']
     for predicate, expected_ids in predicates:
         def read(spark):
@@ -732,31 +695,35 @@ def test_iceberg_v3_defaults_with_predicates(
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @pytest.mark.parametrize('shape', ['struct', 'list', 'map'])
 @ignore_order(local=True)
+@iceberg_fast_test
 def test_iceberg_v3_nested_defaults_mixed_files(spark_tmp_table_factory, reader_type, shape):
     table_name = get_full_table_name(spark_tmp_table_factory)
+    present = gen_scalar_value(LongGen(nullable=False))
+    current_value = gen_scalar_value(IntegerGen(nullable=False, min_val=100, max_val=10000,
+        special_cases=[]))
     if shape == 'struct':
         old_type, new_type = 'STRUCT<present: BIGINT>', 'STRUCT<present: BIGINT, added: INT>'
-        old = [(0, None), (1, (None,)), (2, (7,))]
-        current = [(4, None), (5, (None, None)), (6, (9, 99))]
+        old = [(0, None), (1, (None,)), (2, (present,))]
+        current_rows = [(4, None), (5, (None, None)), (6, (present, current_value))]
         parent, expression = 'c', 'c.added'
-        expected = [(0, None), (1, 11), (2, 11), (4, None), (5, None), (6, 99)]
+        expected = [(0, None), (1, 11), (2, 11), (4, None), (5, None), (6, current_value)]
     elif shape == 'list':
         old_type = 'ARRAY<STRUCT<present: BIGINT>>'
         new_type = 'ARRAY<STRUCT<present: BIGINT, added: INT>>'
-        old = [(0, None), (1, []), (2, [None]), (3, [(None,), (7,), None])]
-        current = [(4, None), (5, []), (6, [None, (None, None), (9, 99)])]
+        old = [(0, None), (1, []), (2, [None]), (3, [(None,), (present,), None])]
+        current_rows = [(4, None), (5, []), (6, [None, (None, None), (present, current_value)])]
         parent, expression = 'c.element', 'c.added'
         expected = [(0, None), (1, []), (2, [None]), (3, [11, 11, None]),
-                    (4, None), (5, []), (6, [None, None, 99])]
+                    (4, None), (5, []), (6, [None, None, current_value])]
     else:
         old_type = 'MAP<STRING, STRUCT<present: BIGINT>>'
         new_type = 'MAP<STRING, STRUCT<present: BIGINT, added: INT>>'
         old = [(0, None), (1, {}), (2, {'a': None}),
-               (3, {'a': (None,), 'b': (7,), 'c': None})]
-        current = [(4, None), (5, {}), (6, {'a': None, 'b': (None, None), 'c': (9, 99)})]
+               (3, {'a': (None,), 'b': (present,), 'c': None})]
+        current_rows = [(4, None), (5, {}), (6, {'a': None, 'b': (None, None), 'c': (present, current_value)})]
         parent, expression = 'c.value', 'map_values(c).added'
         expected = [(0, None), (1, []), (2, [None]), (3, [11, 11, None]),
-                    (4, None), (5, []), (6, [None, None, 99])]
+                    (4, None), (5, []), (6, [None, None, current_value])]
 
     expected = [(-1, None)] + expected
 
@@ -777,7 +744,7 @@ def test_iceberg_v3_nested_defaults_mixed_files(spark_tmp_table_factory, reader_
             parent, 'added', jvm.org.apache.iceberg.types.Types.IntegerType.get(),
             jvm.org.apache.iceberg.expressions.Literal.of(11)).commit()
         spark.sql(f"REFRESH TABLE {table_name}")
-        for rows in (current[:2], current[2:]):
+        for rows in (current_rows[:2], current_rows[2:]):
             spark.createDataFrame(rows, f'id BIGINT, c {new_type}') \
                 .coalesce(1).writeTo(table_name).append()
 
@@ -843,8 +810,10 @@ def test_iceberg_v3_nested_defaults_mixed_files(spark_tmp_table_factory, reader_
 @ignore_order(local=True)
 def test_iceberg_v3_defaults_combining_and_type_evolution(spark_tmp_table_factory, reader_type):
     table_name = get_full_table_name(spark_tmp_table_factory)
-    defaults = (Decimal('1.25'), Decimal('1234567890.25'), Decimal('12345678901234567890.25'))
-    physical = (Decimal('2.50'), Decimal('2345678901.25'), Decimal('-22345678901234567890.25'))
+    defaults = tuple(gen_scalar_value(DecimalGen(p, 2, nullable=False)) for p in (9, 18, 38))
+    # Scalar generators restart from the test seed. Derive distinct physical values so
+    # replacing a physical value with its default always changes the expected result.
+    physical = tuple(value.copy_negate() if value else Decimal('1.00') for value in defaults)
     expected = [(11, i, *defaults) for i in range(6)] + [
         (None, 6, None, None, None), (7, 7, *physical), (5000000000, 8, *defaults)]
     file_count = 0
@@ -951,6 +920,7 @@ def test_iceberg_v3_defaults_combining_and_type_evolution(spark_tmp_table_factor
 @ignore_order(local=True)
 def test_iceberg_v3_nested_defaults_name_mapping(spark_tmp_table_factory, reader_type):
     table_name = get_full_table_name(spark_tmp_table_factory)
+    present = gen_scalar_value(LongGen(nullable=False))
     source_name = get_full_table_name(spark_tmp_table_factory)
 
     def setup(spark):
@@ -959,7 +929,7 @@ def test_iceberg_v3_nested_defaults_name_mapping(spark_tmp_table_factory, reader
         spark.sql(f'ALTER TABLE {table_name} DROP COLUMN unused')
         spark.sql(f'CREATE TABLE {source_name} '
                   '(id BIGINT, s STRUCT<present: BIGINT>) USING PARQUET')
-        spark.createDataFrame([(0, None), (1, (None,)), (2, (7,))],
+        spark.createDataFrame([(0, None), (1, (None,)), (2, (present,))],
             'id BIGINT, s STRUCT<present: BIGINT>').coalesce(1).write.insertInto(source_name)
         spark.sql(f"CALL spark_catalog.system.add_files(table => '{table_name}', "
                   f"source_table => '{source_name}')")
@@ -995,12 +965,15 @@ def test_iceberg_v3_nested_defaults_name_mapping(spark_tmp_table_factory, reader
 def test_iceberg_v3_default_with_unprojected_timestamp_ntz(spark_tmp_table_factory, reader_type):
     table_name = get_full_table_name(spark_tmp_table_factory)
 
+    present = gen_scalar_value(TimestampGen(nullable=False, tzinfo=None))
+
     def setup(spark):
         spark.sql(f'CREATE TABLE {table_name} (id BIGINT, s STRUCT<legacy: TIMESTAMP_NTZ>) '
                   "USING ICEBERG TBLPROPERTIES ('format-version'='3')")
-        spark.sql(f"INSERT INTO {table_name} VALUES (0, NULL), (1, named_struct('legacy', "
-                  "CAST(NULL AS TIMESTAMP_NTZ))), (2, named_struct('legacy', "
-                  "CAST('2024-01-02 03:04:05' AS TIMESTAMP_NTZ)))")
+        spark.createDataFrame(
+            [(0, None), (1, (None,)), (2, (present,))],
+            'id BIGINT, s STRUCT<legacy: TIMESTAMP_NTZ>') \
+            .coalesce(1).writeTo(table_name).append()
         jvm = spark_jvm()
         table = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
             spark._jsparkSession, table_name)
@@ -1073,7 +1046,9 @@ def test_iceberg_missing_nested_field_with_unprojected_uuid(
         null_leaf = records.create(old_struct.asStructType())
         uuid_leaf = records.create(old_struct.asStructType())
         uuid_leaf.setField('legacy', jvm.java.util.UUID.fromString(
-            '123e4567-e89b-12d3-a456-426614174000'))
+            gen_scalar_value(StringGen(
+                pattern='[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}',
+                nullable=False))))
         if shape == 'list':
             empty, null_element, elements = [jvm.java.util.ArrayList() for _ in range(3)]
             null_element.add(None)
@@ -1171,9 +1146,15 @@ def _append_external_parquet(spark, table, path, row_count):
     not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON))])
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @ignore_order(local=True)
+@iceberg_fast_test
 def test_iceberg_unmapped_validity_helper_id(
         spark_tmp_table_factory, spark_tmp_path, format_version, reader_type):
     table_name = get_full_table_name(spark_tmp_table_factory)
+    present = gen_scalar_value(LongGen(nullable=False))
+    # Keep helper values distinct from the default 11 so accidental binding is observable.
+    untracked = gen_scalar_value(LongGen(nullable=False, min_val=100, max_val=10000,
+                                         special_cases=[]))
+    untracked_other = untracked + 1
 
     def setup(spark):
         fields = [
@@ -1190,7 +1171,7 @@ def test_iceberg_unmapped_validity_helper_id(
             update.deleteColumn(f'unused_{i}')
         update.commit()
         source = spark_tmp_path + '/unmapped'
-        spark.createDataFrame([(0, None), (1, (99, 7)), (2, (100, None))],
+        spark.createDataFrame([(0, None), (1, (untracked, present)), (2, (untracked_other, None))],
             'id INT, s STRUCT<untracked: BIGINT, present: BIGINT>') \
             .coalesce(1).write.parquet(source)
         jvm = spark_jvm()
@@ -1235,6 +1216,10 @@ def test_iceberg_unmapped_validity_helper_id(
 def test_iceberg_legacy_list_initial_defaults(
         spark_tmp_table_factory, spark_tmp_path, format_version, reader_type):
     table_name = get_full_table_name(spark_tmp_table_factory)
+    # Stay outside INT32 so Py4J selects the INT64 append overload.
+    present_a = gen_scalar_value(LongGen(nullable=False, min_val=5000000000,
+                                         max_val=6000000000, special_cases=[]))
+    present_b = present_a + 1
     path = spark_tmp_path + '/legacy-list.parquet'
 
     def setup(spark):
@@ -1262,7 +1247,7 @@ def test_iceberg_legacy_list_initial_defaults(
                     if i == 2:
                         items.addGroup('element')
                         # Values outside INT32 force Py4J to use the INT64 append overload.
-                        items.addGroup('element').append('a', 5000000000).append('b', 6000000000)
+                        items.addGroup('element').append('a', present_a).append('b', present_b)
                 writer.write(row)
         finally:
             writer.close()
@@ -1293,7 +1278,7 @@ def test_iceberg_legacy_list_initial_defaults(
             columns += [f'transform(items, x -> CAST({literal} AS INT)) AS added']
             return spark.read.parquet(path).selectExpr(*columns)
 
-        expected = ([(0, None, None), (1, [], []), (2, [None, 6000000000], [default, default])]
+        expected = ([(0, None, None), (1, [], []), (2, [None, present_b], [default, default])]
                     if project_sibling else [(0, None), (1, []), (2, [default, default])])
         assert_gpu_and_cpu_are_equal_collect(
             read,
@@ -1317,6 +1302,8 @@ def test_iceberg_legacy_list_initial_defaults(
 def test_iceberg_v3_default_with_variant(spark_tmp_table_factory, reader_type, project_variant):
     table_name = get_full_table_name(spark_tmp_table_factory)
 
+    value = gen_scalar_value(IntegerGen(nullable=False))
+
     def setup(spark):
         props = _build_tblprops({'format-version': '3'})
         props_sql = ', '.join(f"'{key}' = '{value}'" for key, value in props.items())
@@ -1327,7 +1314,7 @@ def test_iceberg_v3_default_with_variant(spark_tmp_table_factory, reader_type, p
             'SELECT id, CASE WHEN id = 0 THEN NULL ELSE '
             "named_struct('present', parse_json(text)) END AS s "
             "FROM VALUES (0, 'null'), (1, CAST(NULL AS STRING)), "
-            "(2, 'null'), (3, '{\"a\":1}') AS v(id, text)") \
+            f"(2, 'null'), (3, '{{\"a\":{value}}}') AS v(id, text)") \
             .coalesce(1).writeTo(table_name).append()
         jvm = spark_jvm()
         table = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
@@ -1352,7 +1339,7 @@ def test_iceberg_v3_default_with_variant(spark_tmp_table_factory, reader_type, p
             'spark.sql.iceberg.vectorization.enabled': 'false'}
     if project_variant:
         conf = copy_and_update(conf, iceberg_variant_read_conf)
-    expected = ([(0, None, None), (1, 11, None), (2, 11, None), (3, 11, 1)]
+    expected = ([(0, None, None), (1, 11, None), (2, 11, None), (3, 11, value)]
                 if project_variant else [(0, None), (1, 11), (2, 11), (3, 11)])
     assert_gpu_and_cpu_are_equal_collect(
         read, conf=conf, result_canonicalize_func_before_compare=_check_default_rows(expected))
