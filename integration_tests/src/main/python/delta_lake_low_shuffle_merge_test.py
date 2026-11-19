@@ -208,6 +208,53 @@ def test_delta_merge_standard_upsert(spark_tmp_path, spark_tmp_table_factory, us
                                         assert_func=_assert_collect_with_counters)
 
 
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not supports_databricks_delta_low_shuffle_merge(),
+                    reason="DBR 17.3/18.3 low-shuffle second source scan regression")
+@pytest.mark.parametrize("use_cdf", [False, True], ids=idfn)
+@pytest.mark.parametrize("reader_type", ["PERFILE", "MULTITHREADED", "COALESCING", "AUTO"], ids=idfn)
+def test_delta_low_shuffle_merge_counts_second_source_scan(
+        spark_tmp_path, spark_tmp_table_factory, use_cdf, reader_type):
+    conf = copy_and_update(_delta_merge_conf(reader_type), {
+        "spark.databricks.delta.merge.failIfSourceChanged": "true",
+        "spark.databricks.delta.optimizeWrite.enabled": "false",
+        "spark.databricks.delta.autoCompact.enabled": "false"})
+    source_path = spark_tmp_path + "/SOURCE"
+
+    def setup_source(spark):
+        gen_df(spark, [("id", RepeatSeqGen(list(range(128)), data_type=LongType()))],
+               length=128, num_slices=2).withColumn("v", f.col("id").cast("string")) \
+            .write.format("delta").save(source_path)
+
+    with_cpu_session(setup_source, conf=conf)
+
+    def src_table_func(spark):
+        return read_delta_path(spark, source_path)
+
+    def dest_table_func(spark):
+        # Each matching source row updates two target rows. Other source rows are unmatched,
+        # so counting after the left outer join would overcount source rows.
+        return gen_df(spark, [("skey", RepeatSeqGen(list(range(128)), data_type=LongType()))],
+                      length=128, num_slices=1) \
+            .withColumn("id", (f.floor(f.col("skey") / 2) * 4).cast("long")) \
+            .withColumn("v", f.lit("old"))
+
+    merge_sql = ("MERGE INTO {dest_table} t USING {src_table} s ON t.id <=> s.id "
+                 "WHEN MATCHED THEN UPDATE SET t.v = s.v "
+                 "WHEN NOT MATCHED THEN INSERT (skey, id, v) VALUES (s.id, s.id, s.v)")
+
+    # Without NOT MATCHED BY SOURCE, the non-nullable source marker can be pruned.
+    # failIfSourceChanged makes a pruned or miscounted second scan fail the merge.
+    assert_delta_sql_merge_collect(
+        spark_tmp_path, spark_tmp_table_factory,
+        use_cdf=use_cdf, enable_deletion_vectors=False,
+        src_table_func=src_table_func, dest_table_func=dest_table_func,
+        merge_sql=merge_sql, compare_logs=False,
+        conf=conf, assert_func=_assert_collect_with_counters)
+
+
 @allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
 @delta_lake
 @ignore_order

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 
 package org.apache.spark.sql.rapids.zorder
 
-import ai.rapids.cudf.ColumnVector
+import ai.rapids.cudf.{ColumnVector, Scalar}
 import com.nvidia.spark.rapids.{GpuColumnVector, GpuRangePartitioner, GpuUnaryExpression, NvtxRegistry}
 import com.nvidia.spark.rapids.Arm.withResource
 
@@ -32,10 +32,19 @@ case class GpuPartitionerExpr(child: Expression, partitioner: GpuRangePartitione
   override def nullable: Boolean = false
 
   override protected def doColumnar(input: GpuColumnVector): ColumnVector = {
-    NvtxRegistry.GPU_PARTITIONER {
-      withResource(new ColumnarBatch(Array(input.incRefCount()))) { cb =>
-        cb.setNumRows(input.getRowCount.toInt)
-        partitioner.computePartitionIndexes(cb)
+    if (partitioner.rangeBounds.isEmpty) {
+      // A single partition has no boundaries to search, and cudf cannot search an empty table.
+      // This happens when the sampled keys of the data being clustered have at most one
+      // distinct value, such as a one-row table or a small table partition.
+      withResource(Scalar.fromInt(0)) { zero =>
+        ColumnVector.fromScalar(zero, input.getRowCount.toInt)
+      }
+    } else {
+      NvtxRegistry.GPU_PARTITIONER {
+        withResource(new ColumnarBatch(Array(input.incRefCount()))) { cb =>
+          cb.setNumRows(input.getRowCount.toInt)
+          partitioner.computePartitionIndexes(cb)
+        }
       }
     }
   }

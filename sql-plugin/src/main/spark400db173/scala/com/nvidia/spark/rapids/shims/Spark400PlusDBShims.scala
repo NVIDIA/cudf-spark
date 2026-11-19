@@ -55,13 +55,15 @@ trait Spark400PlusDBShims extends Spark341PlusDBShims {
       GpuOverrides.expr[VariantGet](
         "Extracts a field from a Variant value by path",
         ExprChecks.binaryProject(
-          TypeSig.integral + TypeSig.fp + TypeSig.BOOLEAN + TypeSig.STRING,
-          TypeSig.integral + TypeSig.fp + TypeSig.BOOLEAN + TypeSig.STRING,
+          (TypeSig.integral + TypeSig.fp + TypeSig.BOOLEAN + TypeSig.STRING + TypeSig.DECIMAL_128)
+            .withPsNote(TypeEnum.DECIMAL, "Only nonnegative scales are supported"),
+          TypeSig.integral + TypeSig.fp + TypeSig.BOOLEAN + TypeSig.STRING + TypeSig.DECIMAL_128,
           ("variant", TypeSig.VARIANT, TypeSig.VARIANT),
           ("path", TypeSig.lit(TypeEnum.STRING), TypeSig.STRING)),
         GpuVariantGetMeta)
-        .incompat("cuDF Variant extraction currently decodes exact physical Variant types; " +
-          "Spark try_variant_get cast semantics can return different values")
+        .incompat("Boolean, integer, floating-point, and string targets decode exact physical " +
+          "types and may differ from Spark casts. Malformed or noncanonical Variant encodings " +
+          "may differ from Spark")
     ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
     super.getExprs ++ shimExprs
   }

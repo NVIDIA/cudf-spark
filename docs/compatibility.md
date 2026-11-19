@@ -398,6 +398,77 @@ ORC file, they will be read properly by both the CPU and the GPU.
 To take advantage of the aggregate query optimization, where only the ORC metadata is read to
 satisfy the query, the ORC read falls back to the CPU as it is a metadata-only query.
 
+## Variant Reads
+
+GPU Variant reads support unshredded physical layouts only, including Variant values
+nested in structs, arrays and maps. Raw Parquet scans fall back to CPU when
+`spark.sql.variant.allowReadingShredded=true` or Variant extraction is pushed into the
+scan. Delta retains its protocol-based checks: shredding or unknown reader features
+keep Variant reads on CPU.
+
+Iceberg Variant reads use `spark.sql.variant.allowReadingShredded` as a RAPIDS GPU
+eligibility guard. This Spark setting does not restrict Iceberg's CPU reader. When a
+shredded Variant column is projected and the setting is `false`, the readers behave
+as follows:
+
+| Reader | Result |
+| --- | --- |
+| Spark Raw Parquet CPU | Fails with `INVALID_VARIANT_FROM_PARQUET.WRONG_NUM_FIELDS`. |
+| Iceberg CPU | Reads valid shredded Variant data. |
+| RAPIDS Iceberg GPU | Fails during execution with `UnsupportedOperationException`. |
+
+Set `spark.sql.variant.allowReadingShredded=false` with the Iceberg v3 opt-in only
+when the requested Variant columns are stored in unshredded files. The GPU execution
+reader validates every projected Variant leaf against the physical-layout predicate
+used by the Raw Parquet reader. Exactly two children named `value` and `metadata`,
+both `REQUIRED BINARY`, are required. Query planning does not open data files to
+check layouts. Execution reuses the already-loaded schema, without additional file
+opens, including for nested and imported files resolved by field ID.
+
+If an Iceberg file contains a requested shredded or incompatible Variant layout, the
+reader throws `java.lang.UnsupportedOperationException`:
+
+```text
+GPU Iceberg reader does not support shredded or incompatible Variant input (column: <column>). Expected exactly two REQUIRED BINARY fields named value and metadata. Set spark.rapids.sql.format.iceberg.read.enabled=false and rerun the query to read Variant with the CPU reader.
+```
+
+Spark may wrap this exception in a task/stage failure or `SparkException`. The query
+fails without an automatic CPU retry. Rerun with
+`spark.sql.variant.allowReadingShredded=true` to keep projected Iceberg Variant scans
+on CPU, or set `spark.rapids.sql.format.iceberg.read.enabled=false` to use the CPU
+reader for all Iceberg scans. Iceberg's CPU reader can read valid shredded Variant
+data with either value of `spark.sql.variant.allowReadingShredded`. Supported
+downstream operators may still execute on GPU. Queries that prune all Variant columns
+remain eligible for GPU scans even when the files contain shredded Variant data. GPU
+Variant writes remain unsupported.
+
+### Variant field extraction
+
+GPU `try_variant_get` supports the registered scalar targets, including decimal targets
+with precision up to 38 and nonnegative scale, when incompatible operations and the CPU
+expression bridge are enabled. Strict `variant_get` and negative-scale decimal targets
+remain on the CPU.
+
+For decimal targets, decimal payloads use Spark's HALF_UP rounding and return SQL null for
+final target overflow. SQL-null parent rows do not require runtime CPU fallback.
+Other source representations,
+including integer, string, boolean, and floating-point values, are converted by Spark through
+the CPU bridge. A missing path or encoded Variant null also uses that bridge: the native
+status alone cannot establish Spark's error behavior for malformed paths. Any row requiring
+the bridge sends the entire input batch through CPU evaluation, even when the surrounding
+plan contains `GpuVariantGet`. Temporary extraction and decoding columns are released before
+CPU conversion.
+
+Native decimal decoding truncates during rescaling, so GPU conversion uses a decimal128
+intermediate with precision 38 and scale `min(targetScale + 1, 38)` to preserve rounding.
+Values outside that intermediate range fall back even if the final target could hold them;
+for example, a decimal value of 5 × 10³⁷ into `decimal(38,0)` needs CPU conversion.
+Width-specific decimal payload precision and scale are checked, but these checks do not
+validate the entire Variant path.
+As with boolean, integer, floating-point, and string extraction, malformed or noncanonical
+object/metadata encodings may therefore differ from Spark; incompatible-operation gating
+remains in place.
+
 ## Parquet
 
 The Parquet format has more configs because there are multiple versions with some compatibility
@@ -416,6 +487,13 @@ When writing `spark.sql.legacy.parquet.datetimeRebaseModeInWrite` is currently i
 The plugin supports reading and writing `uncompressed`, `snappy`, `gzip` and `zstd` Parquet files.
 At this point, the plugin cannot fall back to the CPU when reading an unsupported compression
 format, and will error out in that case.
+
+## Delta Lake selective replacement
+
+Delta Lake 4.3 `replaceOn` and `replaceUsing` writes support GPU acceleration,
+including targets with persistent deletion vectors. See
+[Delta Lake selective replacement](additional-functionality/delta-lake-selective-replacement.md)
+for supported versions, configuration, examples, and limitations.
 
 ## Delta Lake low shuffle merge on Databricks Runtime 17.3
 
