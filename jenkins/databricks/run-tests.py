@@ -64,11 +64,11 @@ def prepare_jacoco(master_addr, ssh_args, rsync_ssh):
                                "ubuntu@%s:%s" % (master_addr, remote_agent)],
                               timeout=JACOCO_TIMEOUT_SECONDS)
         java_opts = "-javaagent:%s=destfile=%s" % (remote_agent, remote_exec)
-        # Check the uploaded agent before enabling it for the actual tests.
-        subprocess.check_call(ssh + [shell_join(["java", java_opts, "-version"]) +
-                                    " && " + shell_join(["rm", "-f", remote_exec])],
+        # Check the same _JAVA_OPTIONS that the test JVMs will inherit.
+        java_env = 'export _JAVA_OPTIONS="${_JAVA_OPTIONS:+$_JAVA_OPTIONS }"%s; ' % shlex.quote(java_opts)
+        subprocess.check_call(ssh + [java_env + "java -version && " + shell_join(["rm", "-f", remote_exec])],
                               timeout=JACOCO_TIMEOUT_SECONDS)
-        return dict(java_opts=java_opts, remote_exec=remote_exec, local_exec=local_exec)
+        return dict(java_env=java_env, remote_exec=remote_exec, local_exec=local_exec)
     except Exception as error:
         print("WARNING: JaCoCo preparation failed; running without coverage: %s" % error)
         return None
@@ -260,9 +260,7 @@ def main():
     else:
         remote_command = "%s 2>&1 | tee testout; exit ${PIPESTATUS[0]}" % shell_join(test_command)
     if coverage is not None:
-        # Keep existing remote JVM options and scope the agent to this test command.
-        remote_command = 'export _JAVA_OPTIONS="${_JAVA_OPTIONS:+$_JAVA_OPTIONS }%s"; %s' % (
-            coverage["java_opts"], remote_command)
+        remote_command = coverage["java_env"] + remote_command
     ssh_command = ["ssh"] + ssh_args + ["ubuntu@%s" % master_addr,
                                          "bash -c %s" % shlex.quote(remote_command)]
     print("ssh command: %s" % shell_join(ssh_command))
