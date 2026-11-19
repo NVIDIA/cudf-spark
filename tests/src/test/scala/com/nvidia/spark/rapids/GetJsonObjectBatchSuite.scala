@@ -65,6 +65,7 @@ class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
     "spark.sql.ansi.enabled",
     "spark.rapids.sql.batchSizeBytes",
     "spark.sql.files.maxPartitionBytes",
+    "spark.rapids.sql.batchFusion.enabled",
     "spark.rapids.sql.expression.GetJsonObject.debugPath")
 
   private def clearPerTestConfs(): Unit = perTestConfKeys.foreach { key =>
@@ -416,5 +417,23 @@ class GetJsonObjectBatchSuite extends AnyFunSuite with BeforeAndAfterAll {
     assert(withGpuDelta(sql) == ((1L, 3L, 0L)),
       s"the none-path member must stay in the fired group via nullIndexes, " +
         s"got ${withGpuDelta(sql)}")
+  }
+
+  // ---- (p) runtime kill switch: spark.rapids.sql.batchFusion.enabled -------
+
+  test("kill switch default ON: batch fusion fires without an explicit conf") {
+    val sql = s"SELECT ${extracts(60, "jsonA")} FROM t"
+    assertCpuGpuParity(sql)
+    assert(withGpuDelta(sql) == ((1L, 60L, 0L)),
+      s"default-on must batch the 60 shared-input siblings, got ${withGpuDelta(sql)}")
+  }
+
+  test("kill switch OFF: per-column parity and zero batch-fusion activity") {
+    val sql = s"SELECT ${extracts(60, "jsonA")} FROM t"
+    val confs = Map("spark.rapids.sql.batchFusion.enabled" -> "false")
+    // Per-column fallback: results stay CPU-parity and no group ever fires.
+    assertCpuGpuParity(sql, confs)
+    assert(withGpuDelta(sql, confs) == ((0L, 0L, 0L)),
+      s"disabled conf must not fire any batch-fusion group, got ${withGpuDelta(sql, confs)}")
   }
 }

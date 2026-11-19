@@ -24,6 +24,7 @@ import ai.rapids.cudf.ColumnVector
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions.Expression
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
@@ -162,6 +163,11 @@ object GpuBatchFusion extends Logging {
       boundExprs: Seq[Expression],
       evalColumn: Expression => org.apache.spark.sql.vectorized.ColumnVector)
     : Option[ColumnarBatch] = {
+    if (!RapidsConf.ENABLE_BATCH_FUSION.get(SQLConf.get)) {
+      // Kill switch: fall through to per-column evaluation (basicPhysicalOperators
+      // .orElse chain) so the runtime toggle covers all batch-fusion groups.
+      return None
+    }
     val groups = findGroups(boundExprs)
     if (groups.isEmpty) {
       None
