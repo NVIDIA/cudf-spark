@@ -24,11 +24,12 @@ import org.apache.spark.SparkConf
 object RapidsTestConf {
   def apply(conf: SparkConf): SparkConf = {
     Option(System.getenv("SPARK_CONF")).foreach { settings =>
-      settings.split(",").filter(_.nonEmpty).foreach { setting =>
+      settings.split(",").filter(_.trim.nonEmpty).foreach { setting =>
         val keyValue = setting.split("=", 2)
-        require(keyValue.length == 2 && keyValue(0).nonEmpty,
+        val key = keyValue(0).trim
+        require(keyValue.length == 2 && key.nonEmpty,
           "SPARK_CONF entries must have a nonempty key followed by '='")
-        conf.set(keyValue(0), keyValue(1))
+        conf.set(key, keyValue(1))
       }
     }
     Seq("allocFraction" -> "1", "maxAllocFraction" -> "1", "minAllocFraction" -> "0.25")
