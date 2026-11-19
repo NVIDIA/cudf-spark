@@ -23,17 +23,19 @@ import org.apache.spark.SparkConf
 import org.apache.spark.serializer.JavaSerializer
 import org.apache.spark.sql.catalyst.expressions.{Abs, Add, Alias, And, AttributeReference,
   BoundReference, EqualTo, Expression, GreaterThan, GreaterThanOrEqual, Greatest, LessThan,
-  Literal, Multiply, Or, Subtract}
+  Literal, Multiply, Or, StringInstr, Subtract}
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.{GpuAdd, GpuAnd, GpuGreatest, GpuMultiply, GpuOr, GpuSubtract}
-import org.apache.spark.sql.types.{FloatType, LongType}
+import org.apache.spark.sql.rapids.{GpuAdd, GpuAnd, GpuContains, GpuEqualTo, GpuGreatest,
+  GpuMultiply, GpuOr, GpuSubtract}
+import org.apache.spark.sql.types.{FloatType, LongType, StringType}
 
 class GpuProjectAstPlannerSuite extends AnyFunSuite {
   private val a = AttributeReference("a", LongType)()
   private val b = AttributeReference("b", LongType)()
   private val c = AttributeReference("c", LongType)()
   private val d = AttributeReference("d", LongType)()
-  private val inputs = Seq(a, b, c, d)
+  private val str = AttributeReference("str", StringType)()
+  private val inputs = Seq(a, b, c, d, str)
 
   private def conf(
       legacy: Boolean,
@@ -97,6 +99,143 @@ class GpuProjectAstPlannerSuite extends AnyFunSuite {
       val expression = convert(Alias(EqualTo(a, b), "result")(), sqlConf)
       val tiers = bind(Seq(expression), sqlConf).exprTiers
       assertResult(1)(collectExpressions[GpuProjectAstExpression](tiers.flatten).size)
+    }
+  }
+
+  test("legacy AST skips a comparison rewritten into an operator without an AST form") {
+    val sqlConf = conf(legacy = true, jit = false)
+    SQLConf.withExistingConf(sqlConf) {
+      val expression = convert(
+        Alias(GreaterThan(StringInstr(str, Literal("b")), Literal(0)), "result")(), sqlConf)
+      // The GreaterThan meta converts instr(str, 'b') > 0 into contains(str, 'b').
+      assertResult(1)(collectExpressions[GpuContains](Seq(expression)).size)
+      val wrapped = GpuProjectAstPlanner.wrapProjectOutputs(
+        Seq(expression), sqlConf, enableAst = true, enableAstJit = false)
+      assert(GpuProjectAstExpressionBase.extractTopLevel(wrapped.head).isEmpty)
+      val tiers = bind(Seq(expression), sqlConf).exprTiers
+      assert(collectExpressions[GpuProjectAstExpression](tiers.flatten).isEmpty)
+    }
+  }
+
+  test("a meta's legacy AST eligibility needs matching types and an AST form") {
+    val sqlConf = conf(legacy = true, jit = false)
+    SQLConf.withExistingConf(sqlConf) {
+      val search = convert(Literal("b"), sqlConf)
+      // Simulates a meta that judged `vetted` and converted it into `converted`.
+      def wrapsAfterTagging(vetted: Expression, converted: GpuExpression): Boolean = {
+        GpuProjectAstPlanner.tagConvertedLegacySupport(vetted, converted, supported = true)
+        val wrapped = GpuProjectAstPlanner.wrapProjectOutputs(
+          Seq(GpuAlias(converted, "result")()), sqlConf, enableAst = true, enableAstJit = false)
+        GpuProjectAstExpressionBase.extractTopLevel(wrapped.head).isDefined
+      }
+      assert(wrapsAfterTagging(EqualTo(str, Literal("b")), GpuEqualTo(str, search)))
+      // An operator with an AST form, but over types the meta did not judge.
+      assert(!wrapsAfterTagging(EqualTo(a, b), GpuEqualTo(str, search)))
+      // The judged types, but an operator without an AST form.
+      assert(!wrapsAfterTagging(EqualTo(str, Literal("b")), GpuContains(str, search)))
+    }
+  }
+
+  test("binding a legacy AST wrapper keeps only nodes with an AST form") {
+    val sqlConf = conf(legacy = true, jit = false)
+    SQLConf.withExistingConf(sqlConf) {
+      def astOutputs(expression: Expression): Int =
+        collectExpressions[GpuProjectAstExpression](
+          bind(Seq(expression), sqlConf).exprTiers.flatten).size
+      // Tagged during conversion, as GpuProjectExec binds its planning-time wrapper.
+      val planned = GpuProjectAstPlanner.wrapProjectOutputs(
+        Seq(convert(Alias(Subtract(Add(a, b), c), "result")(), sqlConf)), sqlConf,
+        enableAst = true, enableAstJit = false).head
+      assert(GpuProjectAstExpressionBase.extractTopLevel(planned).isDefined)
+      assertResult(1)(astOutputs(planned))
+      // A hand-built wrapper does not certify a node without an AST form.
+      val handBuilt = GpuAlias(GpuProjectAstExpression(GpuSubtract(
+        GpuAdd(a, b, failOnError = false)(), c, failOnError = false)()), "result")()
+      assertResult(1)(astOutputs(handBuilt))
+      val withoutAstForm = GpuAlias(
+        GpuProjectAstExpression(GpuContains(str, convert(Literal("b"), sqlConf))), "result")()
+      assertResult(0)(astOutputs(withoutAstForm))
+    }
+  }
+
+  test("without ANSI, selfConvertsToAst matches what convertToAst can convert") {
+    import org.apache.spark.sql.catalyst.expressions._
+    import org.apache.spark.sql.types._
+    val sqlConf = conf(legacy = true, jit = false)
+    SQLConf.withExistingConf(sqlConf) {
+      val dbl = AttributeReference("dbl", DoubleType)()
+      val bool = AttributeReference("bool", BooleanType)()
+      val int = AttributeReference("int", IntegerType)()
+      val byte = AttributeReference("byte", ByteType)()
+      val cpuExpressions = Seq(
+        Abs(a), Acos(dbl), Acosh(dbl), Add(a, b), And(bool, bool), Asin(dbl), Asinh(dbl),
+        Atan(dbl), Atanh(dbl), BitwiseAnd(a, b), BitwiseNot(a), BitwiseOr(a, b),
+        BitwiseXor(a, b), Cbrt(dbl), Cos(dbl), Cosh(dbl), Cot(dbl), EqualTo(a, b),
+        EqualTo(str, Literal("b")), Exp(dbl), Expm1(dbl), GreaterThan(a, b),
+        GreaterThanOrEqual(a, b), IsNotNull(a), IsNull(a), LessThan(a, b),
+        LessThanOrEqual(a, b), Multiply(a, b), Not(bool), Not(EqualTo(a, b)), Or(bool, bool),
+        Pow(dbl, dbl), Rint(dbl), Sin(dbl), Sinh(dbl), Sqrt(dbl), Subtract(a, b), Tan(dbl),
+        Tanh(dbl), UnaryMinus(a), UnaryMinus(int), UnaryMinus(byte), UnaryPositive(a),
+        Literal(true), Literal(1.toByte), Literal(1.toShort), Literal(1), Literal(1L),
+        Literal(1.0f), Literal(1.0), Literal("b"), Literal(java.sql.Date.valueOf("2020-01-01")),
+        Literal(java.sql.Timestamp.valueOf("2020-01-01 00:00:00")),
+        // Operators without an AST form.
+        GreaterThan(StringInstr(str, Literal("b")), Literal(0)), Greatest(Seq(a, b)),
+        Remainder(a, b), Literal(Decimal(1), DecimalType(10, 0)))
+      // The probe the planner used before this capability existed; tests keep the two in sync.
+      def convertsWithBoundChildren(expression: GpuExpression): Boolean = {
+        val references = expression.children.zipWithIndex.map { case (child, ordinal) =>
+          GpuBoundReference(ordinal, child.dataType, child.nullable)(NamedExpression.newExprId, "")
+        }
+        scala.util.Try(expression.withNewChildren(references).asInstanceOf[GpuExpression]
+            .convertToAst(Int.MaxValue)).isSuccess
+      }
+      val nodes = cpuExpressions.flatMap(e => convert(e, sqlConf).collect {
+        case gpu: GpuExpression => gpu
+      })
+      nodes.foreach { node =>
+        assertResult(convertsWithBoundChildren(node), node.getClass.getSimpleName)(
+          node.selfConvertsToAst)
+      }
+      assert(nodes.exists(_.selfConvertsToAst))
+      assert(nodes.exists(!_.selfConvertsToAst))
+    }
+  }
+
+  test("an operator that must raise an ANSI overflow error has no legacy AST form") {
+    import org.apache.spark.sql.catalyst.expressions.UnaryMinus
+    import org.apache.spark.sql.rapids.GpuUnaryMinus
+    import org.apache.spark.sql.types.DoubleType
+    val sqlConf = conf(legacy = true, jit = false, ansi = true)
+    SQLConf.withExistingConf(sqlConf) {
+      val dbl = AttributeReference("dbl", DoubleType)()
+      def convertsToAst(expression: Expression): Boolean =
+        convert(expression, sqlConf).selfConvertsToAst
+      Seq(Add(a, b), Subtract(a, b), Multiply(a, b), UnaryMinus(a), Abs(a)).foreach { e =>
+        assert(!convertsToAst(e), e)
+      }
+      Seq(Add(dbl, dbl), Subtract(dbl, dbl), Multiply(dbl, dbl), UnaryMinus(dbl), Abs(dbl))
+          .foreach(e => assert(convertsToAst(e), e))
+      // A meta that judged a long Abs and rewrote it into an ANSI negation cannot pass it on.
+      val rewritten = GpuUnaryMinus(a, failOnError = true)
+      GpuProjectAstPlanner.tagConvertedLegacySupport(Abs(a), rewritten, supported = true)
+      val wrapped = GpuProjectAstPlanner.wrapProjectOutputs(
+        Seq(GpuAlias(rewritten, "result")()), sqlConf, enableAst = true, enableAstJit = false)
+      assert(GpuProjectAstExpressionBase.extractTopLevel(wrapped.head).isEmpty)
+    }
+  }
+
+  test("legacy AST region reads a rewritten non-AST operand from an earlier tier") {
+    val sqlConf = conf(legacy = true, jit = false)
+    SQLConf.withExistingConf(sqlConf) {
+      val expression = convert(Alias(And(
+        GreaterThan(StringInstr(str, Literal("b")), Literal(0)),
+        GreaterThan(a, Literal(0L))), "result")(), sqlConf)
+      val tiers = bind(Seq(expression), sqlConf).exprTiers
+      val astExpressions = collectExpressions[GpuProjectAstExpression](tiers.flatten)
+      assertResult(1)(astExpressions.size)
+      assert(collectExpressions[GpuContains](astExpressions).isEmpty)
+      assertResult(1)(collectExpressions[GpuContains](tiers.flatten).size)
     }
   }
 

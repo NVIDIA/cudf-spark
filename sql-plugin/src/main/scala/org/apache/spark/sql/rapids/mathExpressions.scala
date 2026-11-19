@@ -137,6 +137,8 @@ case class GpuAcoshCompat(child: Expression) extends GpuUnaryMathExpression("ACO
     }
   }
 
+  override def selfConvertsToAst: Boolean = true
+
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     // Typically we would just use UnaryOp.ARCCOSH, but there are corner cases where cudf
     // produces a better result (it does not overflow) than spark does, but our goal is
@@ -479,6 +481,8 @@ case class GpuCot(child: Expression) extends GpuUnaryMathExpression("COT") {
       }
     }
   }
+
+  override def selfConvertsToAst: Boolean = true
 
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     new ast.BinaryOperation(ast.BinaryOperator.DIV, ast.Literal.ofDouble(1),
