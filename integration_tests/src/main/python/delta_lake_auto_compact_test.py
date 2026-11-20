@@ -228,13 +228,17 @@ def test_auto_compact_mixed_timestamp_partition_forms(
                         .groupBy("ts").agg(count_distinct("f")).orderBy("ts").collect()]
         return (len(table.inputFiles()), len(raw_partitions), files_per_ts,
                 sorted(tuple(r) for r in optimize),
-                sorted(r[0] for r in table.select("id").collect()))
+                sorted((r[0], r[1]) for r in table.selectExpr(
+                    "id", "CAST(ts AS LONG)").collect()))
 
     cpu = with_cpu_session(lambda spark: summarize(spark, cpu_path), conf)
     gpu = with_cpu_session(lambda spark: summarize(spark, gpu_path), conf)
     assert cpu == gpu, f"CPU and GPU differ: {cpu} vs {gpu}"
-    num_files, num_raw_partitions, files_per_ts, optimize_ops, ids = cpu
-    assert ids == [0, 1, 2, 3]
+    num_files, num_raw_partitions, files_per_ts, optimize_ops, rows = cpu
+    # Epoch seconds of 2000-01-01 12:00:00 UTC for ids 0, 1 and 3, and 13:00:00 UTC for id 2.
+    utc_12, utc_13 = 946728000, 946731600
+    assert rows == [(0, utc_12), (1, utc_12), (2, utc_13), (3, utc_12)], \
+        f"Unexpected (id, ts) rows: {rows}"
     for class_name in delta_write:
         assert any(plan_callback.contains(plan, class_name) for plan in captured_plans), \
             f"Expected a {class_name} plan for the GPU insert"
