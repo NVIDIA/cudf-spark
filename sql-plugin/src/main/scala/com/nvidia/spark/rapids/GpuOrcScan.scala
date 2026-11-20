@@ -176,7 +176,7 @@ object GpuOrcScan {
     val hasRequestedEncryptedColumns = orcReader.getColumnEncryptionKeys.exists { key =>
       key.getEncryptionRoots.exists { variant =>
         val root = variant.getRoot
-        (root.getId to root.getMaximumId).exists(fileIncluded)
+        (math.max(1, root.getId) to root.getMaximumId).exists(fileIncluded)
       } && key.isAvailable
     }
     if (hasRequestedEncryptedColumns) {

@@ -38,6 +38,7 @@ import org.mockito.Mockito.when
 import org.scalatestplus.mockito.MockitoSugar
 
 import org.apache.spark.{SparkConf, SparkException}
+import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.SparkSession
 
 class OrcEncryptionSuite extends SparkQueryCompareTestSuite with MockitoSugar {
 
@@ -64,6 +65,19 @@ class OrcEncryptionSuite extends SparkQueryCompareTestSuite with MockitoSugar {
       current = current.getCause
     }
     messages.toString()
+  }
+
+  private def mockEncryptedReader(
+      encryptedRoot: TypeDescription,
+      keyAvailable: Boolean): Reader = {
+    val variant = mock[EncryptionVariant]
+    when(variant.getRoot).thenReturn(encryptedRoot)
+    val key = mock[EncryptionKey]
+    when(key.getEncryptionRoots).thenReturn(Array(variant))
+    when(key.isAvailable).thenReturn(keyAvailable)
+    val reader = mock[Reader]
+    when(reader.getColumnEncryptionKeys).thenReturn(Array(key))
+    reader
   }
 
   testGpuWriteFallback(
@@ -96,19 +110,46 @@ class OrcEncryptionSuite extends SparkQueryCompareTestSuite with MockitoSugar {
     val included = new Array[Boolean](fileSchema.getMaximumId + 1)
     included(encryptedRoot.getId) = true
 
-    val variant = mock[EncryptionVariant]
-    when(variant.getRoot).thenReturn(encryptedRoot)
-    val key = mock[EncryptionKey]
-    when(key.getEncryptionRoots).thenReturn(Array(variant))
-    when(key.isAvailable).thenReturn(false)
-    val reader = mock[Reader]
-    when(reader.getColumnEncryptionKeys).thenReturn(Array(key))
+    GpuOrcScan.failIfRequestedColumnsAreEncrypted(
+      mockEncryptedReader(encryptedRoot, keyAvailable = false), included)
+  }
 
-    GpuOrcScan.failIfRequestedColumnsAreEncrypted(reader, included)
+  test("Encrypted ORC read guard allows count-only scans with root encryption") {
+    val fileSchema = TypeDescription.createStruct()
+      .addField("encrypted", TypeDescription.createInt())
+    val included = new Array[Boolean](fileSchema.getMaximumId + 1)
+    included(fileSchema.getId) = true
+
+    GpuOrcScan.failIfRequestedColumnsAreEncrypted(
+      mockEncryptedReader(fileSchema, keyAvailable = true), included)
+  }
+
+  test("Encrypted ORC reads return masked values when keys are unavailable") {
+    withTempPath { path =>
+      withCpuSparkSession { spark =>
+        intsDf(spark).write.options(Map(
+          "orc.key.provider" -> "memory",
+          "orc.encrypt" -> "pii:ints",
+          "orc.mask" -> "nullify:ints"))
+          .mode("overwrite")
+          .orc(path.getAbsolutePath)
+      }
+
+      val conf = new SparkConf()
+        .set(RapidsConf.ORC_READER_TYPE.key, RapidsReaderType.MULTITHREADED.toString)
+      val read = (spark: SparkSession) =>
+        spark.read.orc(path.getAbsolutePath).select("ints")
+      val (fromCpu, fromGpu) = runOnCpuAndGpu(read, df => df, conf, repart = 0)
+
+      assert(fromCpu.length == 8)
+      assert(fromCpu.forall(_.isNullAt(0)))
+      assert(fromGpu.toSeq == fromCpu.toSeq)
+    }
   }
 
   Seq(
     (RapidsReaderType.PERFILE, false),
+    (RapidsReaderType.PERFILE, true),
     (RapidsReaderType.COALESCING, false),
     (RapidsReaderType.MULTITHREADED, false),
     (RapidsReaderType.MULTITHREADED, true)).foreach {
@@ -128,9 +169,8 @@ class OrcEncryptionSuite extends SparkQueryCompareTestSuite with MockitoSugar {
             val conf = new SparkConf()
               .set(RapidsConf.ORC_READER_TYPE.key, readerType.toString)
               .set("spark.sql.files.ignoreCorruptFiles", ignoreCorruptFiles.toString)
+              .set("orc.key.provider", "memory")
             withGpuSparkSession({ spark =>
-              spark.sparkContext.hadoopConfiguration.set("orc.key.provider", "memory")
-
               assert(spark.read.orc(path.getAbsolutePath).count() == 8)
 
               val unencryptedValues = spark.read.orc(path.getAbsolutePath)
