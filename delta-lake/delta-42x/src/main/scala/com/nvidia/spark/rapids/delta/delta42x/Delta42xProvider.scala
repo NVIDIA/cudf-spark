@@ -44,11 +44,53 @@ import org.apache.spark.sql.execution.datasources.v2.rapids.{GpuAtomicCreateTabl
   GpuAtomicReplaceTableAsSelectExec}
 
 object Delta42xProvider extends DeltaProviderBase with Logging {
+  private def createServerSidePlannedScanMeta(
+    scan: ServerSidePlannedScan,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new ServerSidePlannedScanMeta(scan, conf, parent, r)
+
+  private def createDeleteCommandMeta(
+    a: DeleteCommand,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new DeleteCommandMeta(a, conf, p, r)
+
+  private def createUpdateCommandMeta(
+    a: UpdateCommand,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new UpdateCommandMeta(a, conf, p, r)
+
+  private def createMergeIntoCommandMeta(
+    a: MergeIntoCommand,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new MergeIntoCommandMeta(a, conf, p, r)
+
+  private def createOptimizeTableCommandMeta(
+    a: OptimizeTableCommand,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new OptimizeTableCommandMeta(a, conf, p, r)
+
+  private def createDeltaDynamicPartitionOverwriteCommandMeta(
+    a: DeltaDynamicPartitionOverwriteCommand,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    p: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    r: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new DeltaDynamicPartitionOverwriteCommandMeta(a, conf, p, r)
+
 
   override def getScans: Map[Class[_ <: Scan], ScanRule[_ <: Scan]] = {
     val rule = GpuOverrides.scan[ServerSidePlannedScan](
       "Delta server-side planned Parquet scan",
-      (scan, conf, parent, r) => new ServerSidePlannedScanMeta(scan, conf, parent, r))
+      createServerSidePlannedScanMeta)
     DeltaV2ScanRule.rules + (classOf[ServerSidePlannedScan] -> rule)
   }
 
@@ -163,19 +205,19 @@ object Delta42xProvider extends DeltaProviderBase with Logging {
     Seq(
       GpuOverrides.runnableCmd[DeleteCommand](
           "Delete rows from a Delta Lake table",
-          (a, conf, p, r) => new DeleteCommandMeta(a, conf, p, r)),
+          createDeleteCommandMeta),
       GpuOverrides.runnableCmd[UpdateCommand](
           "Update rows from a Delta Lake table",
-          (a, conf, p, r) => new UpdateCommandMeta(a, conf, p, r)),
+          createUpdateCommandMeta),
       GpuOverrides.runnableCmd[MergeIntoCommand](
           "Merge of a source query/table into a Delta Lake table",
-          (a, conf, p, r) => new MergeIntoCommandMeta(a, conf, p, r)),
+          createMergeIntoCommandMeta),
       GpuOverrides.runnableCmd[OptimizeTableCommand](
           "Optimize a Delta Lake table",
-          (a, conf, p, r) => new OptimizeTableCommandMeta(a, conf, p, r)),
+          createOptimizeTableCommandMeta),
       GpuOverrides.runnableCmd[DeltaDynamicPartitionOverwriteCommand](
         "Dynamic partition overwrite to a Delta Lake table",
-        (a, conf, p, r) => new DeltaDynamicPartitionOverwriteCommandMeta(a, conf, p, r)),
+        createDeltaDynamicPartitionOverwriteCommandMeta),
       DeltaReorgTableCommandMeta.rule
     ).map(r => (r.getClassFor.asSubclass(classOf[RunnableCommand]), r)).toMap
   }

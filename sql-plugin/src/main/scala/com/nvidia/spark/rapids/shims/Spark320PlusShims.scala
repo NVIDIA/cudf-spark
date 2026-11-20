@@ -54,11 +54,132 @@ trait Spark320PlusShims extends SparkShims with RebaseShims
     with WindowInPandasShims with Logging {
 
 
+  private def createAqeShuffleReaderMeta(
+      exec: AQEShuffleReadExec,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) = new GpuCustomShuffleReaderMeta(exec, conf, p, r)
+
+  private def createCastMeta(
+      cast: Cast,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) = {
+        new CastExprMeta[Cast](cast,
+          AnsiCastShim.getEvalMode(cast), conf, p, r,
+          doFloatToIntCheck = true, stringToAnsiDate = true)
+      }
+
+  private class AverageMetaImpl(
+      a: Average,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) extends AggExprMeta[Average](a, conf, p, r) {
+        private val ansiEnabled = SQLConf.get.ansiEnabled
+
+        override def tagAggForGpu(): Unit = {
+          GpuOverrides.checkAndTagFloatAgg(a.child.dataType, this.conf, this)
+
+          // Check if this Average expression is in TRY mode context
+          if (TryModeShim.isTryMode(a)) {
+            willNotWorkOnGpu("try_avg is not supported on GPU")
+          }
+        }
+
+        override def convertToGpu(childExprs: Seq[Expression]): GpuExpression =
+          GpuAverage(childExprs.head, ansiEnabled)
+
+        override def needsAnsiCheck: Boolean = false
+      }
+
+  private def createAverageMeta(
+      a: Average,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) = new AverageMetaImpl(a, conf, p, r)
+
+  private class AbsMetaImpl(
+      a: Abs,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) extends UnaryAstExprMeta[Abs](a, conf, p, r) {
+        val ansiEnabled = SQLConf.get.ansiEnabled
+
+        override def tagSelfForAst(): Unit = {
+          if (ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType)) {
+            willNotWorkInAst("AST unary minus does not support ANSI mode.")
+          }
+        }
+
+        // ANSI support for ABS was added in 3.2.0 SPARK-33275
+        override def convertToGpu(child: Expression): GpuExpression = GpuAbs(child, ansiEnabled)
+      }
+
+  private def createAbsMeta(
+      a: Abs,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) = new AbsMetaImpl(a, conf, p, r)
+
+  private def createSpecifiedWindowFrameMeta(
+      windowFrame: SpecifiedWindowFrame,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) = new GpuSpecifiedWindowFrameMeta(windowFrame, conf, p, r)
+
+  private def createWindowExpressionMeta(
+      windowExpression: WindowExpression,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) = new GpuWindowExpressionMeta(windowExpression, conf, p, r)
+
+  private def createAppendDataExecV1Meta(
+      p: AppendDataExecV1,
+      conf: RapidsConf,
+      parent: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) = new AppendDataExecV1Meta(p, conf, parent, r)
+
+  private def createAtomicCreateTableAsSelectMeta(
+      e: AtomicCreateTableAsSelectExec,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) = new AtomicCreateTableAsSelectExecMeta(e, conf, p, r)
+
+  private def createAtomicReplaceTableAsSelectMeta(
+      e: AtomicReplaceTableAsSelectExec,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) = new AtomicReplaceTableAsSelectExecMeta(e, conf, p, r)
+
+  private def createOverwriteByExpressionExecV1Meta(
+      p: OverwriteByExpressionExecV1,
+      conf: RapidsConf,
+      parent: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) = new OverwriteByExpressionExecV1Meta(p, conf, parent, r)
+
+  private def createParquetScanMeta(
+      a: ParquetScan,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) = new RapidsParquetScanMeta(a, conf, p, r)
+
+  private def createOrcScanMeta(
+      a: OrcScan,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) = new RapidsOrcScanMeta(a, conf, p, r)
+
+  private def createCsvScanMeta(
+      a: CSVScan,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) = new RapidsCsvScanMeta(a, conf, p, r)
+
   override final def aqeShuffleReaderExec: ExecRule[_ <: SparkPlan] = exec[AQEShuffleReadExec](
     "A wrapper of shuffle query stage",
     ExecChecks((TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.ARRAY +
       TypeSig.STRUCT + TypeSig.MAP + TypeSig.BINARY).nested(), TypeSig.all),
-    (exec, conf, p, r) => new GpuCustomShuffleReaderMeta(exec, conf, p, r))
+    createAqeShuffleReaderMeta)
 
   override def isEmptyRelation(relation: Any): Boolean = relation match {
     case EmptyHashedRelation => true
@@ -124,11 +245,7 @@ trait Spark320PlusShims extends SparkShims with RebaseShims
     GpuOverrides.expr[Cast](
       "Convert a column of one type of data into another type",
       new CastChecks(),
-      (cast, conf, p, r) => {
-        new CastExprMeta[Cast](cast,
-          AnsiCastShim.getEvalMode(cast), conf, p, r,
-          doFloatToIntCheck = true, stringToAnsiDate = true)
-      }),
+      createCastMeta),
     GpuOverrides.expr[Average](
       "Average aggregate operator",
       ExprChecks.fullAgg(
@@ -139,40 +256,13 @@ trait Spark320PlusShims extends SparkShims with RebaseShims
         Seq(ParamCheck("input",
           TypeSig.integral + TypeSig.fp + TypeSig.DECIMAL_128 + TypeSig.NULL,
           TypeSig.numericAndInterval + TypeSig.NULL))),
-      (a, conf, p, r) => new AggExprMeta[Average](a, conf, p, r) {
-        private val ansiEnabled = SQLConf.get.ansiEnabled
-
-        override def tagAggForGpu(): Unit = {
-          GpuOverrides.checkAndTagFloatAgg(a.child.dataType, this.conf, this)
-
-          // Check if this Average expression is in TRY mode context
-          if (TryModeShim.isTryMode(a)) {
-            willNotWorkOnGpu("try_avg is not supported on GPU")
-          }
-        }
-
-        override def convertToGpu(childExprs: Seq[Expression]): GpuExpression =
-          GpuAverage(childExprs.head, ansiEnabled)
-
-        override def needsAnsiCheck: Boolean = false
-      }),
+      createAverageMeta),
     GpuOverrides.expr[Abs](
       "Absolute value",
       ExprChecks.unaryProjectAndAstInputMatchesOutput(
         TypeSig.implicitCastsAstTypes, TypeSig.gpuNumeric,
         TypeSig.cpuNumeric),
-      (a, conf, p, r) => new UnaryAstExprMeta[Abs](a, conf, p, r) {
-        val ansiEnabled = SQLConf.get.ansiEnabled
-
-        override def tagSelfForAst(): Unit = {
-          if (ansiEnabled && GpuAnsi.needBasicOpOverflowCheck(a.dataType)) {
-            willNotWorkInAst("AST unary minus does not support ANSI mode.")
-          }
-        }
-
-        // ANSI support for ABS was added in 3.2.0 SPARK-33275
-        override def convertToGpu(child: Expression): GpuExpression = GpuAbs(child, ansiEnabled)
-      })
+      createAbsMeta)
     // TimeAdd moved to TimeAddShims to handle version differences
   ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r))
     .toMap[Class[_ <: Expression], ExprRule[_ <: Expression]] ++
@@ -192,7 +282,7 @@ trait Spark320PlusShims extends SparkShims with RebaseShims
             TypeSig.CALENDAR + TypeSig.NULL + TypeSig.integral + TypeSig.DAYTIME
               + TypeSig.DECIMAL_128 + TypeSig.FLOAT + TypeSig.DOUBLE,
             TypeSig.numericAndInterval))),
-      (windowFrame, conf, p, r) => new GpuSpecifiedWindowFrameMeta(windowFrame, conf, p, r)),
+      createSpecifiedWindowFrameMeta),
     GpuOverrides.expr[WindowExpression](
       "Calculates a return value for every input row of a table based on a group (or " +
         "\"window\") of rows",
@@ -203,7 +293,7 @@ trait Spark320PlusShims extends SparkShims with RebaseShims
           ParamCheck("windowSpec",
             TypeSig.CALENDAR + TypeSig.NULL + TypeSig.integral + TypeSig.DECIMAL_64 +
               TypeSig.DAYTIME, TypeSig.numericAndInterval))),
-      (windowExpression, conf, p, r) => new GpuWindowExpressionMeta(windowExpression, conf, p, r))
+      createWindowExpressionMeta)
   ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r))
     .toMap[Class[_ <: Expression], ExprRule[_ <: Expression]]
 
@@ -215,28 +305,28 @@ trait Spark320PlusShims extends SparkShims with RebaseShims
           TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
           GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
           TypeSig.all),
-        (p, conf, parent, r) => new AppendDataExecV1Meta(p, conf, parent, r)),
+        createAppendDataExecV1Meta),
       exec[AtomicCreateTableAsSelectExec](
         "Create table as select for datasource V2 tables that support staging table creation",
         ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.STRUCT +
           TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
           GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
           TypeSig.all),
-        (e, conf, p, r) => new AtomicCreateTableAsSelectExecMeta(e, conf, p, r)),
+        createAtomicCreateTableAsSelectMeta),
       exec[AtomicReplaceTableAsSelectExec](
         "Replace table as select for datasource V2 tables that support staging table creation",
         ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.STRUCT +
           TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
           GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
           TypeSig.all),
-        (e, conf, p, r) => new AtomicReplaceTableAsSelectExecMeta(e, conf, p, r)),
+        createAtomicReplaceTableAsSelectMeta),
       exec[OverwriteByExpressionExecV1](
         "Overwrite into a datasource V2 table using the V1 write interface",
         ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
           TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
           GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
           TypeSig.all),
-        (p, conf, parent, r) => new OverwriteByExpressionExecV1Meta(p, conf, parent, r))
+        createOverwriteByExpressionExecV1Meta)
       // WindowInPandasExec moved to WindowInPandasExecShims to handle version differences
     ).map(r => (r.getClassFor.asSubclass(classOf[SparkPlan]), r)).toMap
     maps ++ ScanExecShims.execs ++ WindowInPandasExecShims.execs
@@ -245,13 +335,13 @@ trait Spark320PlusShims extends SparkShims with RebaseShims
   override def getScans: Map[Class[_ <: Scan], ScanRule[_ <: Scan]] = Seq(
     GpuOverrides.scan[ParquetScan](
       "Parquet parsing",
-      (a, conf, p, r) => new RapidsParquetScanMeta(a, conf, p, r)),
+      createParquetScanMeta),
     GpuOverrides.scan[OrcScan](
       "ORC parsing",
-      (a, conf, p, r) => new RapidsOrcScanMeta(a, conf, p, r)),
+      createOrcScanMeta),
     GpuOverrides.scan[CSVScan](
       "CSV parsing",
-      (a, conf, p, r) => new RapidsCsvScanMeta(a, conf, p, r))
+      createCsvScanMeta)
   ).map(r => (r.getClassFor.asSubclass(classOf[Scan]), r)).toMap
 
   /** dropped by SPARK-34234 */

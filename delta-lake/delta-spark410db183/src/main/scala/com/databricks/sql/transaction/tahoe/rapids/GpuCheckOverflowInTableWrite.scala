@@ -58,26 +58,39 @@ case class GpuCheckOverflowInTableWrite(
 }
 
 object GpuCheckOverflowInTableWrite {
+  private class CheckOverflowInTableWriteMetaImpl(
+    check: CheckOverflowInTableWrite,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    rule: com.nvidia.spark.rapids.DataFromReplacementRule)
+    extends UnaryExprMeta[CheckOverflowInTableWrite](check, conf, parent, rule) {
+      override def convertToGpu(child: Expression): GpuExpression = child match {
+        case gpuChild: GpuExpression =>
+          // Native DBR only replaces overflow errors for a cast or a proxy around a cast.
+          val sourceType = check.child match {
+            case cast: Cast => Some(cast.child.dataType)
+            case proxy: ExpressionProxy => proxy.child match {
+              case cast: Cast => Some(cast.child.dataType)
+              case _ => None
+            }
+            case _ => None
+          }
+          GpuCheckOverflowInTableWrite(gpuChild, check.columnName, sourceType)
+        case _ =>
+          throw new IllegalStateException("Expression child cannot run on the GPU")
+      }
+    }
+
+  private def createCheckOverflowInTableWriteMeta(
+    check: CheckOverflowInTableWrite,
+    conf: com.nvidia.spark.rapids.RapidsConf,
+    parent: Option[com.nvidia.spark.rapids.RapidsMeta[_, _, _]],
+    rule: com.nvidia.spark.rapids.DataFromReplacementRule) =
+    new CheckOverflowInTableWriteMetaImpl(check, conf, parent, rule)
+
   val exprRule: ExprRule[CheckOverflowInTableWrite] =
     GpuOverrides.expr[CheckOverflowInTableWrite](
       "Casting a numeric value as another numeric type in a Delta table write",
       ExprChecks.unaryProjectInputMatchesOutput(TypeSig.all, TypeSig.all),
-      (check, conf, parent, rule) =>
-        new UnaryExprMeta[CheckOverflowInTableWrite](check, conf, parent, rule) {
-          override def convertToGpu(child: Expression): GpuExpression = child match {
-            case gpuChild: GpuExpression =>
-              // Native DBR only replaces overflow errors for a cast or a proxy around a cast.
-              val sourceType = check.child match {
-                case cast: Cast => Some(cast.child.dataType)
-                case proxy: ExpressionProxy => proxy.child match {
-                  case cast: Cast => Some(cast.child.dataType)
-                  case _ => None
-                }
-                case _ => None
-              }
-              GpuCheckOverflowInTableWrite(gpuChild, check.columnName, sourceType)
-            case _ =>
-              throw new IllegalStateException("Expression child cannot run on the GPU")
-          }
-        })
+      createCheckOverflowInTableWriteMeta)
 }
