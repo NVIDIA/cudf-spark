@@ -302,7 +302,6 @@ def test_iceberg_merge_v3_table_fallback(
 
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
-@pytest.mark.skipif(not is_spark_400_or_later(), reason="Write defaults require Spark 4.0 or later")
 @pytest.mark.parametrize("merge_mode", ["copy-on-write", "merge-on-read"])
 @allow_non_gpu("LocalTableScanExec")
 def test_iceberg_merge_write_defaults(spark_tmp_table_factory, merge_mode):
@@ -329,7 +328,6 @@ def test_iceberg_merge_write_defaults(spark_tmp_table_factory, merge_mode):
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
-@pytest.mark.skipif(not is_spark_400_or_later(), reason="Write defaults require Spark 4.0 or later")
 @pytest.mark.parametrize("merge_mode,fallback_exec", [
     pytest.param("copy-on-write", "ReplaceDataExec", id="cow"),
     pytest.param("merge-on-read", "WriteDeltaExec", id="mor")])

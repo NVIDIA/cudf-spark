@@ -30,7 +30,7 @@ from iceberg import (
     setup_iceberg_write_default_tables, assert_iceberg_write_default_result,
     assert_iceberg_write_only_default_fallback)
 from marks import iceberg, ignore_order, allow_non_gpu, datagen_overrides, iceberg_fast_test, incompat
-from spark_session import is_spark_35x, with_gpu_session, with_cpu_session, is_spark_411_or_later
+from spark_session import with_gpu_session, with_cpu_session, is_spark_411_or_later
 
 pytestmark = iceberg_unsupported_mark
 
@@ -153,8 +153,6 @@ def test_insert_into_v3_table_fallback(spark_tmp_table_factory):
 
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
-@pytest.mark.skipif(
-    is_spark_35x(), reason="Write-default INSERT coverage requires Spark 4.0 or later")
 @allow_non_gpu("LocalTableScanExec")
 def test_iceberg_v3_write_default_gpu_write_cpu_read(spark_tmp_table_factory):
     cpu_table, gpu_table, catalog_has_default = setup_iceberg_write_default_tables(
