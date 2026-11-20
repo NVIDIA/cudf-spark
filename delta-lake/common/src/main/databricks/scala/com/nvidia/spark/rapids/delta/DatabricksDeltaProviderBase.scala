@@ -234,7 +234,7 @@ trait DatabricksDeltaProviderBase extends DeltaProviderImplBase {
     }
     cpuExec.write match {
       case _: GpuDeltaV1Write =>
-        deltaWriteIncompatibility.foreach(meta.willNotWorkOnGpu)
+        deltaWriteIncompatibility(meta.conf).foreach(meta.willNotWorkOnGpu)
       case write =>
         val deltaTable = cpuExec.table.asInstanceOf[DeltaTableV2]
         val tablePath = if (deltaTable.catalogTable.isDefined) {

@@ -1481,6 +1481,60 @@ def test_delta_append_data_exec_v1(spark_tmp_path, use_cdf, enable_deletion_vect
         conf=copy_and_update(writer_confs, delta_writes_enabled_conf))
     with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
 
+
+@allow_non_gpu("AppendDataExecV1", "WriteIntoDeltaCommand",
+               delta_write_fallback_allow, *delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_databricks_version(17, 3), reason="DBR 17.3 write compatibility")
+@pytest.mark.parametrize("force_unknown_revision", [False, True], ids=["runtime", "unknown"])
+def test_delta_db173_append_patch_compatibility(spark_tmp_path, force_unknown_revision):
+    path = spark_tmp_path + "/PATCH_COMPATIBILITY"
+    table = f"delta.`{path}`"
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf, {
+        "spark.sql.adaptive.enabled": "false",
+        "spark.databricks.delta.optimizeWrite.enabled": "false",
+        "spark.databricks.delta.autoCompact.enabled": "false",
+    })
+
+    known_revisions = {
+        "74719ffead181613a6858637ae9d6771bb243479",  # 17.3.24
+        "2c6d9e667780c1deb163769ed814a3b4509e3d39",  # 17.3.25
+    }
+    revision = spark_jvm().com.databricks.BuildInfo.gitHash()
+    expect_gpu = revision in known_revisions and not force_unknown_revision
+    if force_unknown_revision:
+        conf["spark.rapids.sql.test.delta.write.buildRevision"] = "unsupported-test-build"
+
+    def latest_version(spark):
+        return spark.sql(f"DESCRIBE HISTORY {table} LIMIT 1").first().version
+
+    def setup(spark):
+        _create_table(spark, path, "id BIGINT")
+        return latest_version(spark)
+
+    initial_version = with_cpu_session(setup, conf=conf)
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        def append(spark):
+            assert spark.conf.get("spark.rapids.sql.format.delta.write.enabled") == "true"
+            assert spark.conf.get("spark.rapids.sql.test.enabled") == "true"
+            spark.range(32).write.format("delta").mode("append").saveAsTable(table)
+
+        with_gpu_session(append, conf=conf)
+        plans = callback.getResultsWithTimeout(10000)
+        used_gpu = any(callback.contains(plan, "GpuAppendDataExecV1") for plan in plans)
+        assert used_gpu == expect_gpu
+        if not expect_gpu:
+            assert any(callback.didFallBack(plan, "AppendDataExecV1") for plan in plans)
+    finally:
+        callback.endCapture()
+
+    rows = with_cpu_session(lambda spark: spark.table(table).orderBy("id").collect(), conf=conf)
+    assert [row.id for row in rows] == list(range(32))
+    assert with_cpu_session(latest_version, conf=conf) == initial_version + 1
+
+
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @ignore_order(local=True)

@@ -32,7 +32,7 @@ object RapidsDeltaUtils {
       deltaLog: Option[DeltaLog],
       options: Map[String, String],
       spark: SparkSession): Unit = {
-    DeltaProvider().deltaWriteIncompatibility.foreach(meta.willNotWorkOnGpu)
+    DeltaProvider().deltaWriteIncompatibility(meta.conf).foreach(meta.willNotWorkOnGpu)
     FileFormatChecks.tag(meta, schema, DeltaFormatType, WriteFileOp)
     val format = deltaLog.map(log => DeltaLogShim.fileFormat(log).getClass)
       .getOrElse(classOf[DeltaParquetFileFormat])

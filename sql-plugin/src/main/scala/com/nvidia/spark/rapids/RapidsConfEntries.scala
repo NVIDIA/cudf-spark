@@ -58,6 +58,13 @@ private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
     .booleanConf
     .createWithDefault(false)
 
+  val TEST_DELTA_WRITE_BUILD_REVISION = conf("spark.rapids.sql.test.delta.write.buildRevision")
+    .doc("Only for DBR 17.3 tests. When test mode is enabled, an incompatible revision " +
+      "can force planning to retain the native CPU writer.")
+    .internal()
+    .stringConf
+    .createOptional
+
   val TEST_DELTA_LOW_SHUFFLE_MERGE_FAIL_ON_FALLBACK =
     conf("spark.rapids.sql.test.delta.lowShuffleMerge.failOnFallback")
       .doc("Only for tests on Databricks Runtime 17.3. When true and " +

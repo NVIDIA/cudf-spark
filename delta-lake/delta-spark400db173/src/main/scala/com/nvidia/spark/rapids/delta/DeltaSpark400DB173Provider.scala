@@ -279,8 +279,8 @@ object DeltaSpark400DB173Provider extends DatabricksDeltaProviderBase {
     name == DeltaParquetFileFormat.IS_ROW_DELETED_COLUMN_NAME ||
       name == GpuDeltaParquetFileFormat.EDGE_COMPUTED_COLUMN_SKIP_ROW
 
-  override def deltaWriteIncompatibility: Option[String] =
-    WriteIntoDeltaEdgeShim.incompatibility
+  override def deltaWriteIncompatibility(conf: RapidsConf): Option[String] =
+    WriteIntoDeltaEdgeShim.incompatibility(conf)
 
   override protected def toGpuWrite(
      writeConfig: DeltaWriteV1Config,

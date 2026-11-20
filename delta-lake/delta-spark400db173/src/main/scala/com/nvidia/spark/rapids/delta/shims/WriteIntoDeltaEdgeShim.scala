@@ -20,6 +20,7 @@ import java.lang.reflect.{Constructor, InvocationTargetException, Method}
 
 import com.databricks.sql.transaction.tahoe.{DeltaLog, DeltaOptions}
 import com.databricks.sql.transaction.tahoe.commands.WriteIntoDeltaEdge
+import com.nvidia.spark.rapids.RapidsConf
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.{DataFrame, Dataset, SaveMode}
@@ -33,10 +34,23 @@ object WriteIntoDeltaEdgeShim extends Logging {
   private val optionType = classOf[Option[_]]
 
   private case class Layout(patch: String, argumentCount: Int, schemaPosition: Int)
-  private case class Binding(
-      layout: Layout,
-      constructor: Constructor[WriteIntoDeltaEdge],
-      defaults: Seq[Method])
+  private[shims] final class Binding[T](
+      schemaPosition: Int,
+      constructor: Constructor[T],
+      companion: AnyRef,
+      defaults: Seq[Method]) {
+
+    def newWrite(
+        explicit: Seq[AnyRef],
+        schemaInCatalogOverride: Option[Option[StructType]]): T = {
+      val options: Seq[AnyRef] = defaults.zipWithIndex.map { case (getter, index) =>
+        val position = explicit.size + 1 + index
+        schemaInCatalogOverride.filter(_ => position == schemaPosition)
+          .getOrElse(invoke(getter.invoke(companion)))
+      }
+      invoke(constructor.newInstance((explicit ++ options): _*))
+    }
+  }
 
   // The DBR version exposed to Spark identifies the 17.3 family. The Databricks
   // build revision distinguishes these two tested patch images.
@@ -46,21 +60,27 @@ object WriteIntoDeltaEdgeShim extends Logging {
     case _ => None
   }
 
-  private lazy val binding: Either[String, Binding] = {
+  private lazy val binding =
+    resolve(com.databricks.BuildInfo.gitHash, classOf[WriteIntoDeltaEdge], WriteIntoDeltaEdge)
+
+  private[shims] def resolve[T](
+      buildRevision: => String,
+      commandClass: => Class[T],
+      defaultsCompanion: => AnyRef): Either[String, Binding[T]] = {
     try {
-      val revision = com.databricks.BuildInfo.gitHash
+      val revision = buildRevision
       layoutFor(revision).toRight(s"unrecognized Databricks build $revision").map { layout =>
         val parameterTypes = explicitTypes ++
           Seq.fill(layout.argumentCount - explicitTypes.size)(optionType)
-        val ctor = classOf[WriteIntoDeltaEdge].getConstructor(parameterTypes: _*)
-        val companion = WriteIntoDeltaEdge.getClass
+        val ctor = commandClass.getConstructor(parameterTypes: _*)
+        val companion = defaultsCompanion
         val defaults = (explicitTypes.size + 1 to layout.argumentCount).map { position =>
-          val getter = companion.getMethod(s"apply$$default$$$position")
+          val getter = companion.getClass.getMethod(s"apply$$default$$$position")
           require(getter.getReturnType == optionType, s"unexpected return type for $getter")
           getter
         }
         logInfo(s"Selected WriteIntoDeltaEdge layout for DBR ${layout.patch}")
-        Binding(layout, ctor, defaults)
+        new Binding(layout.schemaPosition, ctor, companion, defaults)
       }
     } catch {
       case e: LinkageError => Left(e.toString)
@@ -70,8 +90,21 @@ object WriteIntoDeltaEdgeShim extends Logging {
     }
   }
 
-  def incompatibility: Option[String] = binding.left.toOption.map { reason =>
-    s"GPU Delta writes cannot use WriteIntoDeltaEdge on this DBR patch: $reason"
+  def incompatibility(conf: RapidsConf): Option[String] = {
+    val rejected = binding.left.toOption.orElse {
+      // A test may reject an otherwise compatible runtime. It cannot enable
+      // GPU writes on an unsupported image or change the binding used to write.
+      if (conf.isTestEnabled) {
+        conf.get(RapidsConf.TEST_DELTA_WRITE_BUILD_REVISION).flatMap { revision =>
+          resolve(revision, classOf[WriteIntoDeltaEdge], WriteIntoDeltaEdge).left.toOption
+        }
+      } else {
+        None
+      }
+    }
+    rejected.map { reason =>
+      s"GPU Delta writes cannot use WriteIntoDeltaEdge on this DBR patch: $reason"
+    }
   }
 
   def create(
@@ -84,12 +117,7 @@ object WriteIntoDeltaEdgeShim extends Logging {
       schemaInCatalogOverride: Option[Option[StructType]] = None): WriteIntoDeltaEdge = {
     val resolved = binding.fold(reason => throw new IllegalStateException(reason), identity)
     val explicit = Seq[AnyRef](deltaLog, mode, options, partitionColumns, configuration, data)
-    val defaults: Seq[AnyRef] = resolved.defaults.zipWithIndex.map { case (getter, index) =>
-      val position = explicit.size + 1 + index
-      schemaInCatalogOverride.filter(_ => position == resolved.layout.schemaPosition)
-        .getOrElse(invoke(getter.invoke(WriteIntoDeltaEdge)))
-    }
-    invoke(resolved.constructor.newInstance((explicit ++ defaults): _*))
+    resolved.newWrite(explicit, schemaInCatalogOverride)
   }
 
   private def invoke[T](call: => T): T = {
