@@ -557,5 +557,41 @@ class RapidsTestSettings extends BackendTestSettings {
   enableSuite[RapidsPersistedViewTestSuite]
   enableSuite[RapidsRowDataSourceStrategySuite]
   enableSuite[RapidsConfigBehaviorSuite]
+  // P1 recovery: restore each case after its linked issue is fixed and CPU/GPU pass.
+  enableSuite[RapidsHigherOrderFunctionsSuite]
+    .exclude("MapZipWith", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/16858"))
+  enableSuite[RapidsLiteralExpressionSuite]
+  enableSuite[RapidsNondeterministicSuite]
+  // P1 recovery: restore each case after its linked issue is fixed and CPU/GPU pass.
+  enableSuite[RapidsTryCastSuite]
+    .exclude("SPARK-35711: cast timestamp without time zone to timestamp with local time zone", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/16971"))
+    .exclude("SPARK-35719: cast timestamp with local time zone to timestamp without timezone", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/16971"))
+  // P1 recovery: restore each case after its linked issue is fixed and CPU/GPU pass.
+  enableSuite[RapidsAnsiCastSuiteWithAnsiModeOn]
+    .exclude("ANSI mode: Throw exception on casting out-of-range value to int type", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/16856"))
+    .exclude("cast from array III", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/16857"))
+    .exclude("cast from map III", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/16857"))
+    .exclude("cast from struct III", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/16857"))
+    .exclude("SPARK-35711: cast timestamp without time zone to timestamp with local time zone", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/16971"))
+    .exclude("SPARK-35719: cast timestamp with local time zone to timestamp without timezone", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/16971"))
+  // P1 recovery: restore each case after its linked issue is fixed and CPU/GPU pass.
+  enableSuite[RapidsCoalesceShufflePartitionsSuite]
+    .exclude("determining the number of reducers: aggregate operator", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/16970"))
+    .exclude("determining the number of reducers: join operator", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/16970"))
+    .exclude("determining the number of reducers: complex query 1", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/16970"))
+    .exclude("determining the number of reducers: complex query 2", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/16970"))
+    .exclude("SPARK-24705 adaptive query execution works correctly when exchange reuse enabled", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/16970"))
+    .exclude("Union two datasets with different pre-shuffle partition number", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/16970"))
+    .exclude("SPARK-34790: enable IO encryption in AQE partition coalescing", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/16970"))
+  enableSuite[RapidsReuseExchangeAndSubquerySuite]
+  enableSuite[RapidsHashAggregationQuerySuite]
+  enableSuite[RapidsApproxCountDistinctForIntervalsQuerySuite]
+    .exclude("SPARK-37138: Support Ansi Interval type in ApproxCountDistinctForIntervals",
+      ADJUST_UT("Replaced by testRapids coverage of both interval types, nonempty buckets, and GPU-to-CPU aggregate fallback. See https://github.com/NVIDIA/cudf-spark/pull/16972#discussion_r4626137888."))
+  enableSuite[RapidsHashUDAQuerySuite]
+  // P1 recovery: restore each case after its linked issue is fixed and CPU/GPU pass.
+  enableSuite[RapidsHiveUDAFSuite]
+    .exclude("SPARK-24935: customized Hive UDAF with two aggregation buffers", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/16859"))
+
 }
 // scalastyle:on line.size.limit
