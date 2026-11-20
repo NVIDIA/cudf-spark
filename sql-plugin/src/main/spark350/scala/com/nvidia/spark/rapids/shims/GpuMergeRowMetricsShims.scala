@@ -19,10 +19,9 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
-import com.nvidia.spark.rapids.GpuMetric
+import com.nvidia.spark.rapids.{GpuMetric, NoopMetric}
 
 import org.apache.spark.SparkContext
-import org.apache.spark.sql.execution.metric.SQLMetrics
 
 /**
  * Spark < 4.1 has no DSv2 WriteSummary commit API, so MERGE row accounting used for
@@ -31,6 +30,5 @@ import org.apache.spark.sql.execution.metric.SQLMetrics
 object GpuMergeRowMetricsShims {
   val writeSummaryEnabled: Boolean = false
 
-  def createMetric(sc: SparkContext, name: String): GpuMetric =
-    GpuMetric.wrap(SQLMetrics.createMetric(sc, name))
+  def createMetric(sc: SparkContext, name: String): GpuMetric = NoopMetric
 }
