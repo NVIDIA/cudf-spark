@@ -63,6 +63,10 @@ class GpuMetricTimingSuite extends AnyFunSuite with BeforeAndAfterEach {
       assert(GpuTaskMetrics.getCurrentSemWaitTime == 0L)
       TrampolineUtil.setTaskContext(context)
       assert(GpuTaskMetrics.getCurrentSemWaitTime == 175L)
+
+      // Verify completion dispatch before teardown can run pending callbacks.
+      context.markTaskComplete()
+      assert(GpuTaskMetrics.getCurrentSemWaitTime == 0L)
     }
     assert(GpuTaskMetrics.getCurrentSemWaitTime == 0L)
     // Reusing a task ID after completion must not expose a stale registry entry.
