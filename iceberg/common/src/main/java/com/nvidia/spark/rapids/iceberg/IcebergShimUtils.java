@@ -20,6 +20,10 @@ import com.nvidia.spark.rapids.GpuMetric;
 import com.nvidia.spark.rapids.NoopMetric$;
 import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
+import com.nvidia.spark.rapids.iceberg.parquet.BaseActionBuildingVisitor;
+import com.nvidia.spark.rapids.iceberg.parquet.ColumnAction;
+import com.nvidia.spark.rapids.iceberg.parquet.ParquetReadUtils;
+import com.nvidia.spark.rapids.iceberg.parquet.converter.ParquetUnshader;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.ContentFile;
@@ -29,6 +33,7 @@ import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.deletes.PositionDelete;
+import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.io.DataWriteResult;
 import org.apache.iceberg.io.DeleteWriteResult;
 import org.apache.iceberg.io.FileIO;
@@ -36,9 +41,13 @@ import org.apache.iceberg.io.OutputFileFactory;
 import org.apache.iceberg.io.PartitioningWriter;
 import org.apache.iceberg.io.WriteResult;
 import org.apache.iceberg.parquet.GpuParquetIO;
+import org.apache.iceberg.schema.SchemaWithPartnerVisitor;
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions;
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader;
+import org.apache.iceberg.shaded.org.apache.parquet.schema.MessageType;
 import org.apache.iceberg.spark.source.GpuSparkScan;
+import org.apache.iceberg.types.Type;
+import org.apache.iceberg.types.Types;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.connector.write.DeltaBatchWrite;
@@ -47,6 +56,7 @@ import scala.Option;
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.Map;
+import java.util.function.IntPredicate;
 
 /**
  * Version-specific Iceberg API adapter.
@@ -57,8 +67,48 @@ import java.util.Map;
  * {@link ShimUtils} based on the detected Iceberg version.
  */
 public interface IcebergShimUtils {
+    /**
+     * Returns the converter for shaded Parquet schemas and footer metadata.
+     * Implementations override only conversions specific to the selected library versions.
+     */
+    ParquetUnshader getParquetUnshader();
+
     /** Returns the Iceberg table format version from the table's current metadata. */
     int formatVersion(Table table);
+
+    /** Returns whether this field has an Iceberg v3 initial default. */
+    default boolean hasInitialDefault(Types.NestedField field) {
+        return false;
+    }
+
+    /** Converts an Iceberg v3 initial default to Spark's internal value representation. */
+    default Object initialDefaultToSpark(Types.NestedField field) {
+        throw new UnsupportedOperationException("Iceberg initial defaults are not supported");
+    }
+
+    /**
+     * Prunes a Parquet schema while preserving the validity of default-only containers.
+     *
+     * <p>Runtimes before Iceberg 1.12 need the compatibility projection. A later shim can
+     * override this method when its native projection preserves the required physical leaves.
+     */
+    default MessageType pruneColumns(
+            MessageType fileSchema, Schema requiredSchema, boolean useFallbackIds) {
+        return ParquetReadUtils.pruneColumns(fileSchema, requiredSchema, useFallbackIds);
+    }
+
+    /**
+     * Creates a filter over row-group indexes, borrowing the reader for the predicate's lifetime.
+     *
+     * <p>Runtimes before Iceberg 1.12 need to retain groups when a filter references a missing
+     * field with an initial default. Later shims can use their default-aware native filters.
+     */
+    default IntPredicate rowGroupFilter(
+            ParquetFileReader reader, Schema requiredSchema, MessageType fileSchema,
+            Expression filter, boolean caseSensitive, GpuMetric dictFilterTime) {
+        return ParquetReadUtils.rowGroupFilter(
+                reader, requiredSchema, fileSchema, filter, caseSensitive, dictFilterTime);
+    }
 
     /**
      * Returns the fully qualified location URI of an Iceberg {@link ContentFile},
@@ -183,4 +233,14 @@ public interface IcebergShimUtils {
             Scan cpuScan,
             RapidsConf rapidsConf,
             boolean queryUsesInputFile);
+
+    /**
+     * Creates the visitor used to reconcile requested and file schemas.
+     * The common visitor avoids Variant APIs absent from Iceberg 1.6.x;
+     * Variant-enabled shims supply the additional callback.
+     */
+    default SchemaWithPartnerVisitor<Type, ColumnAction> newActionBuildingVisitor(
+            Map<Integer, ?> idToConstant) {
+        return new BaseActionBuildingVisitor(idToConstant);
+    }
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 #
-# Copyright (c) 2019-2024, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2019-2026, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,11 +19,16 @@
 # This script generates the build info.
 # Arguments:
 #   rapids4spark_version - The current version of spark plugin
+#   cudf_version - The cuDF Java version
+#   scala_library_version - The Scala library version
+#   java_bytecode_target - The Java bytecode target
 set -e
 
 echo_build_properties() {
   echo version=$1
   echo cudf_version=$2
+  echo scala_library_version=$3
+  echo java_bytecode_target=$4
   echo user=$(whoami)
   echo revision=$(git rev-parse HEAD)
   echo branch=$(git rev-parse --abbrev-ref HEAD)
@@ -31,4 +36,4 @@ echo_build_properties() {
   echo url=$(git config --get remote.origin.url)
 }
 
-echo_build_properties $1 $2
+echo_build_properties "$1" "$2" "$3" "$4"

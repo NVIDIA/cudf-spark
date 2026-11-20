@@ -437,6 +437,25 @@ jobs:
           }
           done
 
+  validate-iceberg-matrix:
+    name: Validate Iceberg matrix
+    needs: cache-dependencies-scala213
+    runs-on: ubuntu-latest
+    steps:
+      - uses: NVIDIA/spark-rapids-common/checkout@main
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Cache local Maven repository
+        continue-on-error: true
+        uses: actions/cache@v5
+        with:
+          path: ~/.m2
+          key: ${{ needs.cache-dependencies-scala213.outputs.scala213dailyCacheKey }}
+      - name: Check JSON against canonical Scala 2.13 packaging
+        run: python3 -B scripts/get_iceberg_versions.py validate
+
   with-resource-nesting-audit:
     name: withResource nesting audit
     runs-on: ubuntu-latest

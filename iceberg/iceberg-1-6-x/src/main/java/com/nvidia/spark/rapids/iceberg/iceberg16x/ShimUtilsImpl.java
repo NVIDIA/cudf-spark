@@ -19,6 +19,7 @@ package com.nvidia.spark.rapids.iceberg.iceberg16x;
 import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.iceberg.IcebergDeletionVector;
 import com.nvidia.spark.rapids.iceberg.IcebergShimUtils;
+import com.nvidia.spark.rapids.iceberg.parquet.converter.ParquetUnshader;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import org.apache.iceberg.*;
 import org.apache.iceberg.deletes.PositionDelete;
@@ -44,6 +45,13 @@ import java.util.Map;
 
 /** Iceberg 1.6.x shim: uses {@code ContentFile.path()} and {@code GpuBaseReader::convertConstant}. */
 public class ShimUtilsImpl implements IcebergShimUtils {
+    private static final ParquetUnshader PARQUET_UNSHADER = new ParquetUnshaderImpl();
+
+    @Override
+    public ParquetUnshader getParquetUnshader() {
+        return PARQUET_UNSHADER;
+    }
+
     @Override
     public int formatVersion(Table table) {
         Preconditions.checkArgument(null != table, "Invalid table: null");

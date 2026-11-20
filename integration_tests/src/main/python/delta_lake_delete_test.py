@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import pytest
 
 from asserts import assert_gpu_and_cpu_writes_are_equal_collect, assert_gpu_fallback_write, \
     assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect, assert_equal, \
-    assert_spark_exception
+    assert_spark_exception, collect_plan_nodes, plan_metric
 from data_gen import *
 from delta_lake_utils import *
 from marks import *
@@ -29,7 +30,11 @@ from spark_session import is_before_spark_320, is_databricks_runtime, supports_d
 
 delta_delete_enabled_conf = copy_and_update(delta_writes_enabled_conf,
                                             {"spark.rapids.sql.command.DeleteCommand": "true",
-                                             "spark.rapids.sql.command.DeleteCommandEdge": "true"})
+                                             "spark.rapids.sql.command.DeleteCommandEdge": "true",
+                                             # Background compaction adds commits to one side only.
+                                             "spark.databricks.delta.autoCompact.enabled": "false",
+                                             "spark.databricks.delta.properties.defaults.autoOptimize.autoCompact": "false",
+                                             "spark.databricks.delta.delete.enableForceBackgroundAutoCompact": "false"})
 
 
 @allow_non_gpu(*delta_meta_allow)
@@ -118,7 +123,8 @@ def assert_delta_sql_delete_collect(spark_tmp_path, use_cdf, dest_table_func, de
                                     skip_sql_result_check=False, expect_write=True,
                                     expected_num_affected_rows=None,
                                     assert_gpu_delete_command=False,
-                                    expected_cpu_fallback_class=None):
+                                    expected_cpu_fallback_class=None,
+                                    captured_gpu_plans=None):
     def read_data(spark, path):
         read_func = read_delta_path_with_cdf if use_cdf else read_delta_path
         df = read_func(spark, path)
@@ -150,7 +156,8 @@ def assert_delta_sql_delete_collect(spark_tmp_path, use_cdf, dest_table_func, de
                     expected_command = "GpuDeleteCommand" if assert_gpu_delete_command else None
                     gpu_result = assert_rapids_delta_write(
                         lambda spark: do_delete(spark, gpu_path).collect(), conf=conf,
-                        expected_command=expected_command)
+                        expected_command=expected_command,
+                        captured_plans_out=captured_gpu_plans)
             elif assert_gpu_delete_command:
                 gpu_result = assert_rapids_gpu_delete_ran(
                     lambda spark: do_delete(spark, gpu_path).collect(), conf=conf)
@@ -204,11 +211,14 @@ def test_delta_delete_disabled_fallback(spark_tmp_path, disable_conf, enable_del
 @delta_lake
 @ignore_order
 @pytest.mark.parametrize("use_cdf", [True, False], ids=idfn)
-@pytest.mark.parametrize("use_metadata_row_index", [True, False], ids=idfn)
-@pytest.mark.skipif(is_databricks_runtime(),
-                    reason="Persistent DV command acceleration is OSS Delta only")
+@pytest.mark.parametrize(
+    "use_metadata_row_index",
+    [True] if is_databricks_runtime() else [True, False],
+    ids=idfn)
 @pytest.mark.skipif(not supports_delta_lake_deletion_vectors(), \
     reason="Deletion vectors new in Delta Lake 2.4 / Apache Spark 3.4")
+@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
+                    reason="Persistent-DV command acceleration requires DBR 17.3+")
 def test_delta_delete_with_deletion_vectors(
         spark_tmp_path, use_cdf, use_metadata_row_index):
     expect_cpu_fallback = is_oss_delta_lake_24()
@@ -216,7 +226,8 @@ def test_delta_delete_with_deletion_vectors(
         delta_delete_enabled_conf,
         {"spark.databricks.delta.delete.deletionVectors.persistent": "true",
          "spark.databricks.delta.deletionVectors.useMetadataRowIndex":
-             str(use_metadata_row_index).lower()})
+             str(use_metadata_row_index).lower(),
+         "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true"})
     assert_delta_sql_delete_collect(
         spark_tmp_path,
         use_cdf=use_cdf,
@@ -226,6 +237,85 @@ def test_delta_delete_with_deletion_vectors(
         conf=conf,
         assert_gpu_delete_command=not expect_cpu_fallback,
         expected_cpu_fallback_class="ExecutedCommandExec" if expect_cpu_fallback else None)
+
+@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not supports_delta_lake_deletion_vectors() or is_oss_delta_lake_24() or
+                    is_databricks_runtime(),
+                    reason="Delta 2.4 runs this DELETE on the CPU, and Databricks reads deletion "
+                           "vectors through its own factory")
+def test_delta_delete_with_deletion_vectors_hybrid_scan_falls_back(spark_tmp_path):
+    """Delta reads do not take the hybrid scan: a DELETE that writes the table's first deletion
+    vector stays on parquet-mr, and a read of the table reports the fallback."""
+    conf = copy_and_update(delta_delete_enabled_conf, {
+        "spark.databricks.delta.delete.deletionVectors.persistent": "true",
+        "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true",
+        "spark.rapids.sql.format.parquet.reader.type": "MULTITHREADED",
+        # The chunked reader makes every scan ineligible, which would hide a Delta read that
+        # took the hybrid scan.
+        "spark.rapids.sql.reader.chunked": "false",
+        "spark.rapids.sql.format.parquet.hybridScan.enabled": "true",
+        "spark.rapids.sql.test.format.parquet.hybridScan.failOnFallback": "false"})
+    assert_delta_sql_delete_collect(
+        spark_tmp_path,
+        use_cdf=False,
+        dest_table_func=lambda spark: unary_op_df(spark, int_gen),
+        delete_sql="DELETE FROM delta.`{path}` WHERE a = 0",
+        enable_deletion_vectors=True,
+        conf=conf,
+        assert_gpu_delete_command=True)
+
+    gpu_path = spark_tmp_path + "/DELTA_DATA/GPU"
+    fail_conf = copy_and_update(conf,
+        {"spark.rapids.sql.test.format.parquet.hybridScan.failOnFallback": "true"})
+    assert_spark_exception(
+        lambda: with_gpu_session(
+            lambda spark: spark.read.format("delta").load(gpu_path).collect(), conf=fail_conf),
+        error_message="the hybrid scan is not supported for this read in this configuration")
+
+@allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="Persistent-DV command acceleration requires DBR 17.3+")
+def test_delta_delete_deletion_vector_full_file_data_predicate(spark_tmp_path):
+    captured_plans = []
+    conf = copy_and_update(
+        delta_delete_enabled_conf,
+        {"spark.databricks.delta.delete.deletionVectors.persistent": "true",
+         "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
+         "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true",
+         "spark.databricks.delta.autoCompact.enabled": "false",
+         "spark.databricks.delta.delete.enableForceBackgroundAutoCompact": "false"})
+    assert_delta_sql_delete_collect(
+        spark_tmp_path,
+        use_cdf=False,
+        dest_table_func=lambda spark: spark.createDataFrame(
+            [(1, "a", 0), (2, "b", 1)], "id INT, v STRING, p INT").coalesce(1),
+        delete_sql="DELETE FROM delta.`{path}` WHERE id >= 0",
+        enable_deletion_vectors=True,
+        partition_columns=["p"],
+        conf=conf,
+        expected_num_affected_rows=2,
+        assert_gpu_delete_command=True,
+        captured_gpu_plans=captured_plans)
+
+    def history_metrics(spark):
+        path = spark_tmp_path + "/DELTA_DATA/GPU"
+        row = spark.sql(f"DESCRIBE HISTORY delta.`{path}`") \
+            .where("operation = 'DELETE'").orderBy("version", ascending=False).first()
+        return row["operationMetrics"]
+
+    metrics = with_cpu_session(history_metrics, conf=conf)
+    assert int(metrics["numRemovedFiles"]) == 2
+    assert int(metrics["numRemovedBytes"]) > 0
+    command_plans = [node for plan in captured_plans for node in collect_plan_nodes(plan)
+                     if node.nodeName().startswith("GpuExecute GpuDeleteCommand")]
+    assert command_plans, "GPU DELETE command was not captured"
+    assert plan_metric(command_plans[-1], "numPartitionsRemovedFrom") == 2
+    assert plan_metric(command_plans[-1], "numPartitionsAddedTo") == 0
+
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
@@ -315,7 +405,7 @@ def test_delta_delete_dv_user_row_deleted_column(
             return metadata.getString(key) if metadata.contains(key) else name
         # spark_tmp_path may use Hadoop storage that PyArrow cannot access directly.
         hadoop_path = jvm.org.apache.hadoop.fs.Path
-        parquet_path = hadoop_path(hadoop_path(path), add.path())
+        parquet_path = hadoop_path(hadoop_path(path), hadoop_path(jvm.java.net.URI(add.path())))
         local_parquet_path = os.path.join(local_tmp_path, "data.parquet")
         parquet_path.getFileSystem(spark.sparkContext._jsc.hadoopConfiguration()) \
             .copyToLocalFile(parquet_path, hadoop_path(local_parquet_path))
@@ -573,65 +663,131 @@ def test_delta_delete_metadata_only_reports_row_count(spark_tmp_path):
         enable_deletion_vectors=False, partition_columns=["a"], conf=conf, expect_write=False,
         expected_num_affected_rows=2, assert_gpu_delete_command=True)
 
-@allow_non_gpu(*delta_meta_allow)
+# DELETE history metrics that vary between CPU and GPU runs (timing, file sizes).
+_volatile_delete_metric_markers = ("TimeMs", "Bytes")
+
+
+def latest_delete_operation_metrics(spark, path):
+    """Non-volatile operationMetrics of the latest DELETE in the table history, or None if the
+    table has no DELETE commit."""
+    history = spark.sql(f"DESCRIBE HISTORY delta.`{path}`") \
+        .where("operation = 'DELETE'").orderBy("version", ascending=False).first()
+    if history is None:
+        return None
+    return {name: value for name, value in history["operationMetrics"].items()
+            if not any(marker in name for marker in _volatile_delete_metric_markers)}
+
+
+def row_count_metrics(operation_metrics):
+    """The numCopiedRows/numDeletedRows entries (those present) as ints."""
+    return {name: int(operation_metrics[name])
+            for name in ("numCopiedRows", "numDeletedRows") if name in operation_metrics}
+
+
+def run_delete_on_cpu_and_gpu(spark_tmp_path, generate_dest_data, delete_sql, conf,
+                              enable_deletion_vectors=False, partition_columns=None,
+                              expected_command="GpuDeleteCommand"):
+    """
+    Runs the same DELETE on identical CPU and GPU tables, asserting the GPU command ran and
+    that the results, remaining data and the full set of reported history metrics (ignoring
+    timing and size metrics) match. Returns (num_affected_rows, cpu_metrics, gpu_metrics).
+    """
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    with_cpu_session(lambda spark: setup_delta_dest_tables(
+        spark, data_path, generate_dest_data, use_cdf=False,
+        enable_deletion_vectors=enable_deletion_vectors,
+        partition_columns=partition_columns))
+    cpu_path = data_path + "/CPU"
+    gpu_path = data_path + "/GPU"
+    cpu_result = with_cpu_session(
+        lambda spark: spark.sql(delete_sql.format(path=cpu_path)).collect(), conf=conf)
+    gpu_result = assert_rapids_delta_write(
+        lambda spark: spark.sql(delete_sql.format(path=gpu_path)).collect(),
+        conf=conf, required_gpu_classes=[], expected_command=expected_command)
+    assert_equal(cpu_result, gpu_result)
+
+    def read_table_and_metrics(path):
+        return with_cpu_session(lambda spark: (
+            spark.read.format("delta").load(path).sort("id").collect(),
+            latest_delete_operation_metrics(spark, path)), conf=conf)
+
+    cpu_data, cpu_metrics = read_table_and_metrics(cpu_path)
+    gpu_data, gpu_metrics = read_table_and_metrics(gpu_path)
+    assert_equal(cpu_data, gpu_data)
+    # Partitioned tables have no guaranteed task layout, so their commits can legitimately differ.
+    if not partition_columns:
+        with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+    if cpu_metrics is None:
+        assert gpu_metrics is None
+    else:
+        assert gpu_metrics is not None
+        assert cpu_metrics == gpu_metrics, \
+            f"Reported DELETE metrics differ: CPU {cpu_metrics} GPU {gpu_metrics}"
+    return gpu_result[0][0], cpu_metrics, gpu_metrics
+
+
+def two_part_int_data(spark):
+    # One file per partition, so the rows a DELETE rewrites don't depend on data layout.
+    return spark.createDataFrame([(i, i % 2) for i in range(10)], "id INT, part INT").coalesce(1)
+
+
+@allow_non_gpu("ExecutedCommandExec", "EmptyRelationExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not is_oss_delta_lake_43(),
                     reason="Delta 4.3 DELETE zero-metric history regression coverage")
-@pytest.mark.parametrize("predicate, expected_metrics", [
-    ("id = 999", None),
-    ("part = 1", {"numCopiedRows": 0, "numDeletedRows": 2}),
-], ids=["no_match", "metadata_only"])
+@pytest.mark.parametrize("predicate, metrics_from_metadata, expected_metrics, expected_num_rows", [
+    # No commit is made when nothing matches, so there is no history entry; the row count is 0.
+    ("id = 999", True, None, 0),
+    ("id = 999", False, None, 0),
+    # Stats can't prune any file here, so the data is scanned and still nothing matches.
+    ("id % 100 = 99", True, None, 0),
+    ("part = 1", True, {"numCopiedRows": 0, "numDeletedRows": 5}, 5),
+    # Without row-level metadata metrics a partition-only DELETE records no row-count history
+    # metrics and reports -1 rows, as on CPU.
+    ("part = 1", False, {}, -1),
+], ids=["no_match", "no_match_no_row_metrics", "no_match_scanned", "metadata_only",
+        "metadata_only_no_row_metrics"])
 def test_delta_delete_43_reports_zero_row_count_metrics(
-        spark_tmp_path, predicate, expected_metrics):
-    data_path = spark_tmp_path + "/DELTA_DATA"
+        spark_tmp_path, predicate, metrics_from_metadata, expected_metrics, expected_num_rows):
+    conf = copy_and_update(delta_delete_enabled_conf, {
+        "spark.databricks.delta.dmlMetricsFromMetadata.enabled": str(metrics_from_metadata).lower()})
+    num_rows, _, gpu_metrics = run_delete_on_cpu_and_gpu(
+        spark_tmp_path, two_part_int_data, "DELETE FROM delta.`{path}` WHERE " + predicate,
+        conf, partition_columns=["part"])
+    assert num_rows == expected_num_rows
+    assert (None if gpu_metrics is None else row_count_metrics(gpu_metrics)) == expected_metrics
 
-    def generate_dest_data(spark):
-        return spark.createDataFrame(
-            [(1, 0), (2, 0), (3, 1), (4, 1)],
-            "id INT, part INT")
 
-    with_cpu_session(lambda spark: setup_delta_dest_tables(
-        spark, data_path, generate_dest_data, use_cdf=False,
-        enable_deletion_vectors=False, partition_columns=["part"]))
-
-    cpu_path = data_path + "/CPU"
-    gpu_path = data_path + "/GPU"
-    delete_sql = "DELETE FROM delta.`{path}` WHERE " + predicate
-    cpu_result = with_cpu_session(
-        lambda spark: spark.sql(delete_sql.format(path=cpu_path)).collect(),
-        conf=delta_delete_enabled_conf)
-    gpu_result = assert_rapids_gpu_delete_ran(
-        lambda spark: spark.sql(delete_sql.format(path=gpu_path)).collect(),
-        conf=delta_delete_enabled_conf)
-    assert_equal(cpu_result, gpu_result)
-
-    metric_names = ("numCopiedRows", "numDeletedRows")
-
-    def latest_delete_row_count_metrics(spark, path):
-        history = spark.sql(f"DESCRIBE HISTORY delta.`{path}`") \
-            .where("operation = 'DELETE'").orderBy("version", ascending=False).first()
-        if history is None:
-            return None
-        operation_metrics = history["operationMetrics"]
-        return {name: int(operation_metrics[name]) for name in metric_names}
-
-    cpu_metrics = with_cpu_session(
-        lambda spark: latest_delete_row_count_metrics(spark, cpu_path),
-        conf=delta_delete_enabled_conf)
-    gpu_metrics = with_cpu_session(
-        lambda spark: latest_delete_row_count_metrics(spark, gpu_path),
-        conf=delta_delete_enabled_conf)
-    assert cpu_metrics == expected_metrics
-    assert gpu_metrics == expected_metrics
-
-    cpu_data = with_cpu_session(
-        lambda spark: spark.read.format("delta").load(cpu_path).sort("id").collect(),
-        conf=delta_delete_enabled_conf)
-    gpu_data = with_cpu_session(
-        lambda spark: spark.read.format("delta").load(gpu_path).sort("id").collect(),
-        conf=delta_delete_enabled_conf)
-    assert_equal(cpu_data, gpu_data)
+@allow_non_gpu("ExecutedCommandExec", "EmptyRelationExec", *delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="Delta 4.3 DELETE zero-metric history regression coverage")
+@pytest.mark.parametrize("predicate, expected_deleted, expected_copied", [
+    ("id = 3", 1, 9),
+    # Every row of every touched file is deleted, so nothing is copied.
+    ("id < 100", 10, 0),
+    # Nothing matches: no commit, hence no history entry.
+    ("id = 999", None, None),
+    # Stats can't prune any file here, so the data is scanned and still nothing matches.
+    ("id % 100 = 99", None, None),
+], ids=["some_rows", "all_rows", "no_match", "no_match_scanned"])
+def test_delta_delete_43_rewrite_row_count_metrics(
+        spark_tmp_path, predicate, expected_deleted, expected_copied):
+    # The history metrics come from the command's SQL metrics, so they don't depend on
+    # metrics.alwaysReportSomeZeroMetrics (which only shapes the delta.dml.delete.stats event,
+    # covered by test_delta_delete_43_stats_event_honors_always_report_zero_metrics).
+    num_rows, _, gpu_metrics = run_delete_on_cpu_and_gpu(
+        spark_tmp_path, two_part_int_data, "DELETE FROM delta.`{path}` WHERE " + predicate,
+        delta_delete_enabled_conf)
+    assert num_rows == (expected_deleted or 0)
+    if expected_deleted is None:
+        assert gpu_metrics is None
+    else:
+        # The rewrite path always knows both counts.
+        assert row_count_metrics(gpu_metrics) == {
+            "numCopiedRows": expected_copied, "numDeletedRows": expected_deleted}
 
 
 @delta_lake
@@ -664,6 +820,34 @@ def test_delta_delete_43_zero_metric_runtime_shim(always_report, expected):
     with_cpu_session(assert_zero_metric_conversion, conf=conf)
 
 
+@allow_non_gpu("ExecutedCommandExec", "EmptyRelationExec", *delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="Delta 4.3 DELETE zero-metric history regression coverage")
+@pytest.mark.parametrize("partition_columns", [None, ["part"]], ids=["unpartitioned", "partitioned"])
+@pytest.mark.parametrize("predicate, expected_deleted", [
+    ("id = 3", 1),
+    # Nothing matches: no commit, hence no history entry.
+    ("id = 999", None),
+    ("id % 100 = 99", None),
+], ids=["match", "no_match", "no_match_scanned"])
+def test_delta_delete_43_deletion_vector_row_count_metrics(
+        spark_tmp_path, partition_columns, predicate, expected_deleted):
+    # A DV DELETE never copies rows, so numCopiedRows is 0 in the history.
+    conf = copy_and_update(delta_delete_enabled_conf, {
+        "spark.databricks.delta.delete.deletionVectors.persistent": "true"})
+    num_rows, _, gpu_metrics = run_delete_on_cpu_and_gpu(
+        spark_tmp_path, two_part_int_data, "DELETE FROM delta.`{path}` WHERE " + predicate, conf,
+        enable_deletion_vectors=True, partition_columns=partition_columns)
+    assert num_rows == (expected_deleted or 0)
+    if expected_deleted is None:
+        assert gpu_metrics is None
+    else:
+        assert row_count_metrics(gpu_metrics) == {
+            "numCopiedRows": 0, "numDeletedRows": expected_deleted}
+
+
 @allow_non_gpu("ColumnarToRowExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
@@ -678,10 +862,10 @@ def test_delta_delete_preserves_row_tracking(spark_tmp_path):
 @delta_lake
 @inject_oom
 @pytest.mark.parametrize("use_chunked_reader", [True, False], ids=idfn)
-@pytest.mark.skipif(is_databricks_runtime(),
-                    reason="Persistent DV command acceleration is OSS Delta only")
 @pytest.mark.skipif(not supports_delta_lake_deletion_vectors() or is_before_spark_353(),
     reason="Deletion vectors new in Delta Lake 2.4 / Apache Spark 3.4")
+@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
+                    reason="Persistent-DV command acceleration requires DBR 17.3+")
 def test_delta_delete_twice_with_dv(spark_tmp_path, use_chunked_reader):
     """Regression test for https://github.com/NVIDIA/spark-rapids/issues/14442.
     The second DELETE on a DV-enabled table accesses _metadata.file_path and _metadata.row_index
@@ -694,6 +878,8 @@ def test_delta_delete_twice_with_dv(spark_tmp_path, use_chunked_reader):
                           IntegerGen(special_cases=[200]))
     conf = copy_and_update(delta_delete_enabled_conf,
         {"spark.databricks.delta.delete.deletionVectors.persistent": "true",
+         "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
+         "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true",
          "spark.rapids.sql.reader.chunked": str(use_chunked_reader).lower()})
     # Setup identical tables for CPU and GPU
     with_cpu_session(lambda spark: setup_delta_dest_tables(spark, data_path,
@@ -810,3 +996,133 @@ def test_delta_delete_cpu_command_increment_metric_db173(spark_tmp_path):
 
     delta_sql_delete_test(spark_tmp_path, use_cdf=False, dest_table_func=dest_table_func,
                           delete_sql=delete_sql, check_func=checker, enable_deletion_vectors=False)
+
+
+@allow_non_gpu("ColumnarToRowExec", "ArrowEvalPythonExec", "PythonUDF", "BroadcastHashJoinExec",
+               "BroadcastExchangeExec", "SortMergeJoinExec", "AggregateExec",
+               "HashAggregateExec", *delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_databricks173_or_later(),
+                    reason="Persistent-DV command acceleration requires DBR 17.3+")
+@pytest.mark.parametrize("condition_kind", ["python_udf", "in_subquery"])
+def test_delta_delete_deletion_vector_multi_file_file_name_conditions(
+        spark_tmp_path, condition_kind):
+    """Conditions that cannot be pushed into the scan must still tag rows with their own file.
+
+    A Python UDF may merge batches from several files and an IN subquery may plan as a shuffled
+    join, so input_file_name() must be attached before such a condition is evaluated.
+    """
+    conf = copy_and_update(
+        delta_delete_enabled_conf,
+        {"spark.databricks.delta.delete.deletionVectors.persistent": "true",
+         "spark.databricks.delta.deletionVectors.useMetadataRowIndex": "true",
+         "spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": "true",
+         "spark.sql.execution.arrow.pyspark.enabled": "true",
+         "spark.sql.autoBroadcastJoinThreshold": "-1",
+         "spark.databricks.delta.autoCompact.enabled": "false",
+         "spark.databricks.delta.delete.enableForceBackgroundAutoCompact": "false"})
+
+    def dest_table(spark):
+        import pandas as pd
+        from pyspark.sql.functions import pandas_udf
+
+        @pandas_udf("boolean")
+        def divisible_by_seven(values: pd.Series) -> pd.Series:
+            return values % 7 == 0
+
+        spark.udf.register("divisible_by_seven", divisible_by_seven)
+        return spark.range(200).selectExpr("id", "CAST(id AS STRING) AS payload") \
+            .repartition(4)
+
+    if condition_kind == "python_udf":
+        condition = "divisible_by_seven(id)"
+    else:
+        condition = "id IN (SELECT id FROM range(200) WHERE id % 7 = 0)"
+    assert_delta_sql_delete_collect(
+        spark_tmp_path,
+        use_cdf=False,
+        dest_table_func=dest_table,
+        delete_sql="DELETE FROM delta.`{path}` WHERE " + condition,
+        enable_deletion_vectors=True,
+        conf=conf,
+        expected_num_affected_rows=29,
+        assert_gpu_delete_command=True)
+
+
+def delete_stats_events(spark_jvm_, func):
+    """
+    Runs `func` while collecting Delta's usage events and returns (func result, the payloads of
+    the delta.dml.delete.stats events as dicts). Mirrors Log4jUsageLogger.track from Delta,
+    which is not callable with a Python function.
+    """
+    logger = getattr(getattr(spark_jvm_.com.databricks.spark.util, "Log4jUsageLogger$"), "MODULE$")
+    getattr(logger, "usageTracker_$eq")(spark_jvm_.scala.collection.mutable.ArrayBuffer())
+    try:
+        result = func()
+        records = [logger.usageTracker().apply(i)
+                   for i in range(logger.usageTracker().size())]
+    finally:
+        getattr(logger, "usageTracker_$eq")(None)
+    return result, [json.loads(r.blob()) for r in records
+                    if "delta.dml.delete.stats" in r.toString()]
+
+
+_volatile_event_fields = ("condition", "TimeMs", "Bytes")
+
+
+def stable_event_fields(event):
+    """The event without its table path (in the condition), timing and size fields."""
+    return {name: value for name, value in event.items()
+            if not any(marker in name for marker in _volatile_event_fields)}
+
+
+@allow_non_gpu("ExecutedCommandExec", "EmptyRelationExec", *delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="Delta 4.3 DELETE zero-metric stats event coverage")
+@pytest.mark.parametrize("always_report", [False, True], ids=["flag_off", "flag_on"])
+@pytest.mark.parametrize("predicate, partition_columns, deletion_vectors, metrics_from_metadata,"
+                         " no_match", [
+    ("id = 999", None, False, True, True),
+    # Stats can't prune any file here, so the data is scanned and still nothing matches.
+    ("id % 100 = 99", None, False, True, True),
+    ("part = 1", ["part"], False, True, False),
+    ("part = 1", ["part"], False, False, False),
+    ("id = 3", None, True, True, False),
+    ("id = 999", None, True, True, True),
+], ids=["no_match", "no_match_scanned", "metadata_only", "metadata_only_no_row_metrics",
+        "dv_match", "dv_no_match"])
+def test_delta_delete_43_stats_event_honors_always_report_zero_metrics(
+        spark_tmp_path, always_report, predicate, partition_columns, deletion_vectors,
+        metrics_from_metadata, no_match):
+    """The GPU delta.dml.delete.stats event matches the CPU one, so GpuDeleteCommand applies
+    metrics.alwaysReportSomeZeroMetrics the way Delta's DeleteCommand does. Whether the DV and
+    metadata-only paths report their row counts as None or Some(0) depends on that flag."""
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    with_cpu_session(lambda spark: setup_delta_dest_tables(
+        spark, data_path, two_part_int_data, use_cdf=False,
+        enable_deletion_vectors=deletion_vectors, partition_columns=partition_columns))
+    conf = copy_and_update(delta_delete_enabled_conf, {
+        "spark.databricks.delta.metrics.alwaysReportSomeZeroMetrics": str(always_report).lower(),
+        "spark.databricks.delta.dmlMetricsFromMetadata.enabled": str(metrics_from_metadata).lower(),
+        "spark.databricks.delta.delete.deletionVectors.persistent": str(deletion_vectors).lower()})
+    jvm = spark_jvm()
+
+    def delete_and_capture_event(table):
+        delete_sql = "DELETE FROM delta.`{}/{}` WHERE {}".format(data_path, table, predicate)
+        return lambda spark: delete_stats_events(jvm, lambda: spark.sql(delete_sql).collect())
+
+    _, cpu_events = with_cpu_session(delete_and_capture_event("CPU"), conf=conf)
+    _, gpu_events = assert_rapids_delta_write(
+        delete_and_capture_event("GPU"), conf=conf, required_gpu_classes=[],
+        expected_command="GpuDeleteCommand")
+    assert len(cpu_events) == 1, f"Expected one CPU delta.dml.delete.stats event: {cpu_events}"
+    assert len(gpu_events) == 1, f"Expected one GPU delta.dml.delete.stats event: {gpu_events}"
+    assert stable_event_fields(gpu_events[0]) == stable_event_fields(cpu_events[0])
+    if no_match:
+        # Pinned explicitly so a change of both CPU and GPU behavior can't go unnoticed.
+        expected = 0 if always_report else None
+        assert gpu_events[0].get("numDeletedRows") == expected
+        assert gpu_events[0].get("numCopiedRows") == expected

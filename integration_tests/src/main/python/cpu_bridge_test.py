@@ -46,6 +46,12 @@ def create_cpu_bridge_fallback_conf(disabled_gpu_expressions, disallowed_bridge_
 def with_columnar_source(df):
     return df.filter(f.monotonically_increasing_id() >= f.lit(0))
 
+# Dataproc Serverless 2.2 ships an R550 driver, which rejects the occupancy query that librtcx
+# runs for every AST JIT kernel (https://github.com/rapidsai/librtcx/issues/23).
+_xfail_ast_jit_on_dataproc_serverless = pytest.mark.xfail(
+    condition=is_dataproc_serverless_runtime(),
+    reason='https://github.com/NVIDIA/cudf-spark/issues/16778')
+
 # Allow only Add to fall back so this test isolates the CPU bridge path.
 @allow_non_gpu('Add')
 def test_cpu_bridge_add_fallback():
@@ -58,6 +64,50 @@ def test_cpu_bridge_add_fallback():
     # Force Add to fall back to CPU bridge
     conf = create_cpu_bridge_fallback_conf(['Add'])
     assert_gpu_and_cpu_are_equal_collect(test_func, conf=conf)
+
+
+@allow_non_gpu('Subtract')
+@pytest.mark.parametrize('data_gen', [int_gen, long_gen], ids=idfn)
+@pytest.mark.parametrize('tiered', ['true', 'false'])
+@pytest.mark.parametrize('multi_output', ['true', 'false'])
+@pytest.mark.parametrize('backend', [
+    'legacy',
+    pytest.param('jit', marks=_xfail_ast_jit_on_dataproc_serverless),
+    pytest.param('both', marks=_xfail_ast_jit_on_dataproc_serverless)])
+def test_cpu_bridge_with_ast_backends(data_gen, tiered, multi_output, backend):
+    def test_func(spark):
+        return binary_op_df(spark, data_gen).selectExpr(
+            "(a + b) * b as jit", "((a + b) * b) - b as bridged",
+            "(((a + b) * b) - b) * a + b as result")
+
+    conf = copy_and_update(create_cpu_bridge_fallback_conf(
+        ['Subtract'], ['org.apache.spark.sql.catalyst.expressions.Add']), {
+        'spark.rapids.sql.projectAstJitEnabled': str(backend != 'legacy').lower(),
+        'spark.rapids.sql.projectAstEnabled': str(backend != 'jit').lower(),
+        'spark.rapids.sql.tiered.project.enabled': tiered,
+        'spark.rapids.sql.projectAstJitMultiOutputEnabled': multi_output,
+    })
+    ast_pattern = r'AST\(' if backend == 'legacy' else 'AST_JIT'
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        test_func, exist_classes=rf'GpuProject.*{ast_pattern},GpuCpuBridgeExpression',
+        non_exist_classes='AST_JIT' if backend == 'legacy' else '', conf=conf)
+
+
+@allow_non_gpu('Cast')
+@pytest.mark.parametrize('backend', ['legacy', 'jit', 'both'])
+def test_cpu_bridge_short_circuit_with_ast_backends(backend):
+    # The bridged ANSI cast fails only on the first row, where AND skips it.
+    data = [(9, 'abc'), (-1, '5')]
+    def test_func(spark):
+        df = spark.createDataFrame(spark.sparkContext.parallelize(data), 'a long, s string')
+        return df.selectExpr('(a < 0) AND (CAST(s AS INT) > 0) AS result')
+
+    conf = copy_and_update(create_cpu_bridge_fallback_conf(['Cast']), ansi_enabled_conf, {
+        'spark.rapids.sql.projectAstJitEnabled': str(backend != 'legacy').lower(),
+        'spark.rapids.sql.projectAstEnabled': str(backend != 'jit').lower(),
+    })
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        test_func, exist_classes='GpuCpuBridgeExpression', conf=conf)
 
 
 # MIN_ROWS_PER_SUBBATCH is 500,000: these values exercise one and two sub-batch results.

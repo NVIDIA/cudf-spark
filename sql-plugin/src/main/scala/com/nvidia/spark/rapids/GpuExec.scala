@@ -20,6 +20,7 @@ import com.nvidia.spark.rapids.RapidsConf.LORE_SKIP_DUMPING_PLAN
 import com.nvidia.spark.rapids.filecache.FileCacheConf
 import com.nvidia.spark.rapids.lore.{GpuLore, GpuLoreDumpRDD}
 import com.nvidia.spark.rapids.lore.GpuLore.{loreIdOf, LORE_DUMP_PATH_TAG, LORE_DUMP_RDD_TAG}
+import com.nvidia.spark.rapids.shims.SparkShimImpl
 import org.apache.hadoop.fs.Path
 
 import org.apache.spark.{Partition, TaskContext}
@@ -188,6 +189,32 @@ trait GpuExec extends SparkPlan with Logging {
     }
   }
 
+  protected def createParquetRowGroupMetrics(): Map[String, GpuMetric] = {
+    val rowGroupsFetched = Map(
+      ROW_GROUPS_FETCHED -> createMetric(MODERATE_LEVEL, DESCRIPTION_ROW_GROUPS_FETCHED))
+    if (RapidsConf.PARQUET_HYBRID_SCAN_ENABLED.get(conf)) {
+      rowGroupsFetched ++ Map(
+        HYBRID_SCAN_SPLITS -> createMetric(MODERATE_LEVEL, DESCRIPTION_HYBRID_SCAN_SPLITS),
+        ROW_GROUPS_IN_INPUT -> createMetric(DEBUG_LEVEL, DESCRIPTION_ROW_GROUPS_IN_INPUT),
+        ROW_GROUPS_PRUNED_BY_STATS -> createMetric(DEBUG_LEVEL,
+          DESCRIPTION_ROW_GROUPS_PRUNED_BY_STATS),
+        ROW_GROUPS_PRUNED_BY_DICT -> createMetric(DEBUG_LEVEL,
+          DESCRIPTION_ROW_GROUPS_PRUNED_BY_DICT),
+        HYBRID_SCAN_FOOTER_PARSE_TIME -> createNanoTimingMetric(DEBUG_LEVEL,
+          DESCRIPTION_HYBRID_SCAN_FOOTER_PARSE_TIME),
+        // Filters that were not pushed are timed by the filter above the scan, and with a keep
+        // threshold of 1 the pushed filter runs during decode and is timed there.
+        HYBRID_SCAN_OUTPUT_FILTER_TIME -> createNanoTimingMetric(DEBUG_LEVEL,
+          DESCRIPTION_HYBRID_SCAN_OUTPUT_FILTER_TIME),
+        HYBRID_SCAN_BYTES_REQUESTED -> createSizeMetric(MODERATE_LEVEL,
+          DESCRIPTION_HYBRID_SCAN_BYTES_REQUESTED),
+        HYBRID_SCAN_DEVICE_BYTES_READ -> createSizeMetric(MODERATE_LEVEL,
+          DESCRIPTION_HYBRID_SCAN_DEVICE_BYTES_READ))
+    } else {
+      rowGroupsFetched
+    }
+  }
+
   override def supportsColumnar = true
 
   protected val outputRowsLevel: MetricsLevel = DEBUG_LEVEL
@@ -301,6 +328,12 @@ trait GpuExec extends SparkPlan with Logging {
           case r: ReusedExchangeExec =>
             // A reused exchange similarly hides the real exchange behind a leaf node.
             collectChildOpTimeMetricsRecursive(r.child, newVisited)
+          case t if SparkShimImpl.getTableCacheNonQueryStagePlan(t).nonEmpty =>
+            // AQE wraps a cached-relation scan in a TableCacheQueryStageExec, a leaf node
+            // whose children are empty. Descend into the wrapped plan so the scan's op time
+            // is excluded from the consumers in this stage.
+            collectChildOpTimeMetricsRecursive(
+              SparkShimImpl.getTableCacheNonQueryStagePlan(t).get, newVisited)
           case other =>
             if (other.isInstanceOf[Exchange]) {
               // Do not recurse into Exchange children
@@ -348,10 +381,14 @@ trait GpuExec extends SparkPlan with Logging {
     }
   }
 
-  final override def doExecuteColumnar(): RDD[ColumnarBatch] = {
+  final override def doExecuteColumnar(): RDD[ColumnarBatch] =
+    executeColumnarRDD(internalDoExecuteColumnar())
+
+  /** Applies operator timing, LORE, and task-metric registration to a columnar RDD. */
+  protected final def executeColumnarRDD(rdd: => RDD[ColumnarBatch]): RDD[ColumnarBatch] = {
     this.dumpLoreMetaInfo()
     // this is the core of op time new
-    val origin = wrapWithTimeTrackingRDD(internalDoExecuteColumnar())
+    val origin = wrapWithTimeTrackingRDD(rdd)
     val wrappedForLORE = this.dumpLoreRDD(origin)
 
     val metrics = getTaskMetrics

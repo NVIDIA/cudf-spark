@@ -59,7 +59,7 @@ abstract class GpuColumnarBatchIterator(closeWithTask: Boolean)
 object EmptyGpuColumnarBatchIterator extends GpuColumnarBatchIterator(false) {
   override def hasNext: Boolean = false
   override def next(): ColumnarBatch = throw new NoSuchElementException()
-  override def doClose(): Unit = {}
+  override def doClose(): Unit = { /* Nothing to close */ }
 }
 
 class SingleGpuColumnarBatchIterator(private var batch: ColumnarBatch)

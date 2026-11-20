@@ -178,18 +178,6 @@ sealed abstract class CoalesceSizeGoal extends CoalesceGoal {
 }
 
 /**
- * Trait used for pattern matching for single batch coalesce goals.
- */
-trait RequireSingleBatchLike
-
-/**
- * Trait used for pattern matching for goals that could be split, as they
- * only specify that batches won't be too much bigger than a maximum target
- * size in bytes.
- */
-trait SplittableGoal
-
-/**
  * A single batch is required as the input to a node in the SparkPlan. This means
  * all of the data for a given task is in a single batch. This should be avoided
  * as much as possible because it can result in running out of memory or run into

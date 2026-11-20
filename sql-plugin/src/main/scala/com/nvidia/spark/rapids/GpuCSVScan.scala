@@ -27,6 +27,7 @@ import ai.rapids.cudf.{ColumnVector, DType, HostMemoryBuffer, Scalar, Schema, Ta
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.jni.{CastStrings, GpuSplitAndRetryOOM}
+import com.nvidia.spark.rapids.perf.HistorySizedFileScan
 import com.nvidia.spark.rapids.shims.{ColumnDefaultValuesShims, ShimFilePartitionReaderFactory}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
@@ -211,6 +212,22 @@ object GpuCSVScan extends Logging {
     // parsedOptions.maxColumns was originally a performance optimization but is not used any more
 
     val types = readSchema.map(_.dataType).toSet
+    if (supportsCorrectedDateParsing(parsedOptions)) {
+      // Empty projections still decode the smallest data field to obtain the row count.
+      val fields = if (readSchema.isEmpty && dataSchema != null && dataSchema.nonEmpty) {
+        Array(dataSchema.min(Ordering.by[StructField, Integer](_.dataType.defaultSize)))
+      } else {
+        readSchema.fields
+      }
+      fields.filter(_.dataType == DateType).foreach { field =>
+        GpuCsvUtils.dateFormatInRead(parsedOptions, field.metadata).foreach { format =>
+          if (!correctedDateFormats.contains(format)) {
+            meta.willNotWorkOnGpu(
+                s"CSV date format '$format' for column '${field.name}' is not supported")
+          }
+        }
+      }
+    }
     if (GpuOverrides.getTimeParserPolicy == LegacyTimeParserPolicy &&
         (types.contains(DateType) ||
         types.contains(TimestampType))) {
@@ -221,8 +238,19 @@ object GpuCSVScan extends Logging {
     }
 
     if (types.contains(DateType)) {
-      GpuTextBasedDateUtils.tagCudfFormat(meta,
-        GpuCsvUtils.dateFormatInRead(parsedOptions), parseString = true)
+      if (!supportsCorrectedDateParsing(parsedOptions)) {
+        GpuTextBasedDateUtils.tagCudfFormat(meta,
+          GpuCsvUtils.dateFormatInRead(parsedOptions), parseString = true)
+      }
+
+      if (supportsCorrectedDateParsing(parsedOptions) &&
+          (parsedOptions.ignoreLeadingWhiteSpaceInRead ||
+            parsedOptions.ignoreTrailingWhiteSpaceInRead)) {
+        // Univocity trims only unquoted fields. cuDF returns the same string for quoted
+        // and unquoted whitespace, so the date parser cannot recover that distinction.
+        meta.willNotWorkOnGpu("GPU CSV date parsing does not support " +
+          "ignoreLeadingWhiteSpace or ignoreTrailingWhiteSpace")
+      }
 
       // For date type, whether the timezone needs to be checked depends on the time parser policy.
       //
@@ -255,7 +283,8 @@ object GpuCSVScan extends Logging {
     // TODO parsedOptions.emptyValueInRead
 
     if (GpuCsvUtils.enableDateTimeParsingFallback(parsedOptions) &&
-        (types.contains(DateType) || types.contains(TimestampType))) {
+        (types.contains(TimestampType) ||
+          (types.contains(DateType) && !supportsCorrectedDateParsing(parsedOptions)))) {
       meta.willNotWorkOnGpu(s"GpuCSVScan does not support enableDateTimeParsingFallback")
     }
 
@@ -284,6 +313,29 @@ object GpuCSVScan extends Logging {
 
     FileFormatChecks.tag(meta, readSchema, CsvFormatType, ReadFileOp)
   }
+
+  // CSV formats require independent validation. Adding an expression format must not
+  // implicitly enable it for CSV date parsing.
+  private val correctedDateFormats: Set[String] = Set(
+    "yyyy-MM-dd",
+    "yyyy/MM/dd",
+    "yyyy-MM",
+    "yyyy/MM",
+    "dd/MM/yyyy",
+    "yyyy-MM-dd HH:mm:ss",
+    "MM-dd",
+    "MM/dd",
+    "dd-MM",
+    "dd/MM",
+    "MM/yyyy",
+    "MM-yyyy",
+    "MM/dd/yyyy",
+    "MM-dd-yyyy",
+    "MMyyyy")
+
+  def supportsCorrectedDateParsing(options: CSVOptions): Boolean =
+    GpuOverrides.getTimeParserPolicy == CorrectedTimeParserPolicy &&
+      options.dateFormatInRead.forall(correctedDateFormats.contains)
 }
 
 case class GpuCSVScan(
@@ -298,7 +350,7 @@ case class GpuCSVScan(
     maxReaderBatchSizeRows: Integer,
     maxReaderBatchSizeBytes: Long,
     maxGpuColumnSizeBytes: Long)
-  extends TextBasedFileScan(sparkSession, options) with GpuScan {
+  extends TextBasedFileScan(sparkSession, options) with GpuScan with HistorySizedFileScan {
 
   private lazy val parsedOptions: CSVOptions = new CSVOptions(
     options.asScala.toMap,
@@ -319,7 +371,7 @@ case class GpuCSVScan(
     }
   }
 
-  override def createReaderFactory(): PartitionReaderFactory = {
+  override def createReaderFactory(): PartitionReaderFactory = observed {
     val caseSensitiveMap = options.asCaseSensitiveMap.asScala.toMap
     // Hadoop Configurations are case sensitive.
     val hadoopConf = sparkSession.sessionState.newHadoopConfWithOptions(caseSensitiveMap)
@@ -470,6 +522,20 @@ abstract class CSVPartitionReaderBase[BUFF <: LineBufferer, FACT <: LineBufferer
 
   override def dateFormat: Option[String] = Some(GpuCsvUtils.dateFormatInRead(parsedOptions))
   override def timestampFormat: String = GpuCsvUtils.timestampFormatInRead(parsedOptions)
+
+  private lazy val enableDateParsingFallback = GpuCsvUtils.enableDateParsingFallback(parsedOptions)
+
+  override def castStringToDate(input: ColumnVector, dt: DType,
+      field: StructField): ColumnVector = {
+    if (GpuCSVScan.supportsCorrectedDateParsing(parsedOptions)) {
+      CastStrings.parseCsvDate(
+          input, GpuCsvUtils.dateFormatInRead(parsedOptions, field.metadata).orNull,
+          enableDateParsingFallback,
+          GpuTextBasedDateUtils.dateParsingTrimsControls)
+    } else {
+      super.castStringToDate(input, dt)
+    }
+  }
 }
 
 

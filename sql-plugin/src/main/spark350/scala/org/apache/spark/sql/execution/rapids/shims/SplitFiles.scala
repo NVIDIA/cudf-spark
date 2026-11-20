@@ -16,29 +16,8 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "350"}
-{"spark": "350db143"}
-{"spark": "351"}
-{"spark": "352"}
-{"spark": "353"}
-{"spark": "354"}
-{"spark": "355"}
-{"spark": "356"}
-{"spark": "357"}
-{"spark": "358"}
-{"spark": "359"}
-{"spark": "400"}
-{"spark": "400db173"}
-{"spark": "401"}
-{"spark": "402"}
-{"spark": "403"}
-{"spark": "404"}
-{"spark": "410db183"}
-{"spark": "411"}
-{"spark": "412"}
-{"spark": "413"}
-{"spark": "420"}
-{"spark": "500"}
+{"spark":["350","400","420"],"carryForward":"all"}
+{"spark":["350db143","400db173","410db183"],"carryForward":"none"}
 spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.execution.rapids.shims
@@ -49,9 +28,33 @@ import org.apache.hadoop.fs.Path
 import org.apache.hadoop.io.compress.{CompressionCodecFactory, SplittableCompressionCodec}
 
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.execution.datasources.{HadoopFsRelation, PartitionDirectory, PartitionedFile}
 
 trait SplitFiles {
+
+  /**
+   * Cuts every file at `maxSplitBytes` the way Spark's DSv2 `FileScan.partitions` does: per
+   * partition directory, largest file chunk first.
+   */
+  def splitFilesBy(sparkSession: SparkSession,
+      selectedPartitions: Seq[PartitionDirectory],
+      isSplitable: Path => Boolean,
+      maxSplitBytes: Long,
+      partitionValues: PartitionDirectory => InternalRow): Seq[PartitionedFile] = {
+    selectedPartitions.flatMap { partition =>
+      val values = partitionValues(partition)
+      partition.files.flatMap { file =>
+        PartitionedFileUtilsShim.splitFiles(
+          sparkSession,
+          file,
+          isSplitable = isSplitable(file.getPath),
+          maxSplitBytes,
+          values)
+      }.sortBy(_.length)(implicitly[Ordering[Long]].reverse)
+    }
+  }
+
   def splitFiles(sparkSession: SparkSession,
       hadoopConf: Configuration,
       selectedPartitions: Array[PartitionDirectory],

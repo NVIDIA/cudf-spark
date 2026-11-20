@@ -135,7 +135,9 @@ abstract class GpuOptimisticTransactionWriteBase(
   protected def handlePostWriteAutoCompact(
       spark: SparkSession,
       isOptimize: Boolean,
-      fileActions: Seq[FileAction]): Unit = {}
+      fileActions: Seq[FileAction]): Unit = {
+    // Overridden by shims that run post-write auto compaction.
+  }
 
   private def getGpuStatsColExpr(
       statsDataSchema: Seq[Attribute],

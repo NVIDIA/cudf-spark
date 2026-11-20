@@ -22,37 +22,181 @@ import java.nio.file.Files
 import ai.rapids.cudf.Table
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.ProjectAstTestUtils.{collectExpressions, tierReferences}
 import com.nvidia.spark.rapids.jni.RmmSpark
 import org.mockito.Mockito.{never, spy, verify}
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.catalyst.expressions.{
-  AttributeReference, Expression, Literal, NamedExpression}
+  Add, Alias, Ascending, AttributeReference, Descending, Literal, NamedExpression,
+  NullsFirst, NullsLast, SortOrder}
+import org.apache.spark.sql.catalyst.plans.physical.{
+  HashPartitioning, PartitioningCollection, RangePartitioning}
+import org.apache.spark.sql.execution.{ProjectExec, SortExec}
+import org.apache.spark.sql.execution.exchange.ShuffleExchangeExec
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.execution.TrampolineUtil
-import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.rapids.shims.TrampolineConnectShims._
 import org.apache.spark.sql.tests.datagen.DataGenExprShims
 import org.apache.spark.sql.types._
+import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class ProjectExprSuite extends SparkQueryCompareTestSuite {
-  private def astExpressions(expressions: Seq[Expression]): Seq[GpuProjectAstExpression] = {
-    expressions.flatMap(_.collect {
-      case astExpression: GpuProjectAstExpression => astExpression
-    })
-  }
-
-  private def tierReferences(expression: Expression): Seq[GpuBoundReference] = {
-    expression.collect {
-      case reference: GpuBoundReference if reference.name.startsWith("tiered_input_") => reference
-    }
-  }
-
   def forceHostColumnarToGpu(): SparkConf = {
     // turns off BatchScanExec, so we get a CPU BatchScanExec together with a HostColumnarToGpu
     new SparkConf().set("spark.rapids.sql.exec.BatchScanExec", "false")
+  }
+
+  test("project metadata matches Spark for aliases and ordering prefixes") {
+    val id = AttributeReference("id", LongType, nullable = false)()
+    val range = GpuRangeExec(0L, 100L, 1L, 16, Seq(id), 1024L * 1024)
+    val key = GpuAlias(GpuRemainder(id, GpuLiteral(10L), failOnError = false), "k")()
+    val value = GpuAlias(id, "v")()
+    val other = GpuAlias(id, "other")()
+    val cpuAlias = Alias(id, "cpu_alias")()
+    def cpuAliasOf(alias: GpuAlias): Alias =
+      Alias(alias.child, alias.name)(alias.exprId, alias.qualifier, Some(alias.metadata))
+    val projections = Seq(
+      List[NamedExpression](id),
+      List[NamedExpression](value),
+      List[NamedExpression](cpuAlias),
+      List[NamedExpression](key, value),
+      List[NamedExpression](value, key),
+      List[NamedExpression](value, other, id),
+      List[NamedExpression](key))
+    projections.foreach { expressions =>
+      val cpuExpressions = expressions.map {
+        case alias: GpuAlias => cpuAliasOf(alias)
+        case expression => expression
+      }
+      val project = GpuProjectExec(expressions, range)()
+      val expected = ProjectExec(cpuExpressions, range)
+      assert(project.outputPartitioning == expected.outputPartitioning)
+      assert(project.outputOrdering == expected.outputOrdering)
+    }
+    // Modulo cannot claim the range's partitioning; a direct alias in the second position can.
+    assert(GpuProjectExec(List(key, value), range)().outputPartitioning ==
+      RangePartitioning(Seq(SortOrder(value.toAttribute, Ascending)), 16))
+
+    val first = value.toAttribute
+    val second = key.toAttribute
+    val equivalent = other.toAttribute
+    val child = GpuProjectExec(List(value, key, other), range)()
+    val ordering = Seq(SortOrder(first, Ascending, NullsLast, Seq(equivalent)),
+      SortOrder(second, Descending, NullsFirst, Seq.empty))
+    val sorted = GpuSortExec(ordering, false, child, OutOfCoreSort)(ordering)
+    val aliasedFirst = GpuAlias(first, "aliased_first")()
+    val aliasedSecond = Alias(second, "aliased_second")()
+    Seq(
+      List[NamedExpression](second),
+      List[NamedExpression](first),
+      List[NamedExpression](second, first),
+      List[NamedExpression](aliasedSecond, aliasedFirst),
+      List[NamedExpression](equivalent, second),
+      List[NamedExpression](first, equivalent, second)).foreach { expressions =>
+      val cpuExpressions = expressions.map {
+        case alias: GpuAlias => cpuAliasOf(alias)
+        case expression => expression
+      }
+      val project = GpuProjectExec(expressions, sorted)()
+      val expected = ProjectExec(cpuExpressions, sorted)
+      // Spark 3.3 retains ordering differently; use the installed version as the contract.
+      assert(project.outputPartitioning == expected.outputPartitioning)
+      assert(project.outputOrdering == expected.outputOrdering)
+    }
+  }
+
+  test("project metadata matches Spark for computed expressions and alias candidate limits") {
+    val limits = if (isSpark340OrLater) Seq(1, 2) else Seq(100)
+    limits.foreach { limit =>
+      withSQLConf("spark.sql.optimizer.expressionProjectionCandidateLimit" -> limit.toString) {
+        val id = AttributeReference("id", LongType, nullable = false)()
+        val range = GpuRangeExec(0L, 100L, 1L, 16, Seq(id), 1024L * 1024)
+        val cpuExpression = Add(id, Literal(1L))
+        val gpuExpression = GpuAdd(id, GpuLiteral(1L), failOnError = false)()
+        val first = GpuAlias(gpuExpression, "first")()
+        val second = GpuAlias(gpuExpression, "second")()
+        val cpuFirst = Alias(cpuExpression, first.name)(first.exprId)
+        val cpuSecond = Alias(cpuExpression, second.name)(second.exprId)
+        val shuffled = ShuffleExchangeExec(HashPartitioning(Seq(cpuExpression), 16), range)
+        val ordering = Seq(SortOrder(cpuExpression, Ascending, NullsLast, Seq.empty),
+          SortOrder(id, Descending, NullsFirst, Seq.empty))
+        val sorted = SortExec(ordering, false, shuffled)
+        Seq(false, true).foreach { retainOriginal =>
+          val gpuExpressions = List[NamedExpression](first, second) ++
+            (if (retainOriginal) List(id) else Nil)
+          val cpuExpressions = List[NamedExpression](cpuFirst, cpuSecond) ++
+            (if (retainOriginal) List(id) else Nil)
+          val project = GpuProjectExec(gpuExpressions, sorted)(Some(cpuExpressions))
+          val expected = ProjectExec(cpuExpressions, sorted)
+          assert(project.expressions == gpuExpressions)
+          assert(project.outputPartitioning == expected.outputPartitioning)
+          assert(project.outputOrdering == expected.outputOrdering)
+          val aggregate = GpuHashAggregateExec(
+            requiredChildDistributionExpressions = None,
+            groupingExpressions = Seq(id),
+            aggregateExpressions = Seq.empty,
+            aggregateAttributes = Seq.empty,
+            resultExpressions = gpuExpressions,
+            child = sorted,
+            configuredTargetBatchSize = 1024L * 1024,
+            estimatedPreProcessGrowth = 1.0,
+            forceSinglePassAgg = false,
+            allowSinglePassAgg = true,
+            allowNonFullyAggregatedOutput = false,
+            skipAggPassReductionRatio = 1.0)(Some(cpuExpressions))
+          assert(aggregate.outputPartitioning == expected.outputPartitioning)
+          assert(aggregate.outputOrdering.isEmpty)
+          assert(aggregate.gpuExpressions == Seq(id) ++ gpuExpressions)
+          assert(aggregate.expressions == aggregate.gpuExpressions)
+          assert(aggregate.withNewChildren(Seq(range)).asInstanceOf[GpuHashAggregateExec]
+            .cpuResultExpressions == aggregate.cpuResultExpressions)
+          if (isSpark340OrLater) {
+            val candidates = project.outputPartitioning match {
+              case PartitioningCollection(partitionings) => partitionings
+              case partitioning => Seq(partitioning)
+            }
+            assert(candidates.size == limit)
+            assert(candidates.head == HashPartitioning(Seq(second.toAttribute), 16))
+            assert(project.outputOrdering.head.child == second.toAttribute)
+            assert(project.outputOrdering.head.sameOrderExpressions.size == limit - 1)
+            assert(project.outputOrdering.head.nullOrdering == NullsLast)
+          }
+        }
+      }
+    }
+  }
+
+  test("project rewrites retain CPU metadata only for unchanged GPU expressions") {
+    val id = AttributeReference("id", LongType, nullable = false)()
+    val range = GpuRangeExec(0L, 100L, 1L, 16, Seq(id), 1024L * 1024)
+    val cpuExpression = Add(id, Literal(1L))
+    val first = GpuAlias(GpuAdd(id, GpuLiteral(1L), failOnError = false)(), "first")()
+    val second = GpuAlias(id, "second")()
+    val cpuFirst = Alias(cpuExpression, first.name)(first.exprId)
+    val cpuSecond = Alias(id, second.name)(second.exprId)
+    val project = GpuProjectExec(List(first, second), range)(Some(List(cpuFirst, cpuSecond)))
+    val shuffled = ShuffleExchangeExec(HashPartitioning(Seq(cpuExpression), 16), range)
+    val reordered = project.withProjectList(List(second, first),
+      newChild = shuffled, preSplit = false)
+    assert(reordered.cpuProjectList.contains(List(cpuSecond, cpuFirst)))
+    assert(!reordered.enablePreSplit)
+    assert(reordered.child == shuffled)
+    assert(project.withNewChildren(Seq(shuffled)).asInstanceOf[GpuProjectExec]
+      .cpuProjectList == project.cpuProjectList)
+    val expected = ProjectExec(List(cpuSecond, cpuFirst), shuffled)
+    assert(reordered.outputPartitioning == expected.outputPartitioning)
+    assert(reordered.outputOrdering == expected.outputOrdering)
+
+    val changed = GpuAlias(id, first.name)(first.exprId)
+    val replaced = project.withProjectList(List(changed))
+    val cpuChanged = Alias(id, changed.name)(changed.exprId)
+    assert(replaced.cpuProjectList.exists(_.size == 1))
+    assert(replaced.cpuProjectList.get.head.asInstanceOf[Alias].child == id)
+    val changedExpected = ProjectExec(List(cpuChanged), range)
+    assert(replaced.outputPartitioning == changedExpected.outputPartitioning)
+    assert(replaced.outputOrdering == changedExpected.outputOrdering)
   }
 
   test("rand is okay") {
@@ -187,7 +331,7 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
     }
   }
 
-  test("tiered project preserves AST across multi-level shared expressions") {
+  test("tiered project preserves multi-level CSE with simple regular arithmetic") {
     val a = AttributeReference("a", LongType)()
     val b = AttributeReference("b", LongType)()
     val c = AttributeReference("c", LongType)()
@@ -208,17 +352,22 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
       GpuAlias(GpuGreatest(Seq(shared, f)), "regular")())
 
     val tiered = GpuBindReferences.bindGpuReferencesTieredNoMetrics(
-      expressions, Seq(a, b, c, d, e, f), new SQLConf())
+      expressions, Seq(a, b, c, d, e, f), new SQLConf(), enableAst = true)
 
     // After CSE:
-    // tier 0: [AST(a+b) AS t1]
-    // tier 1: [AST(t1*c) AS t2]
-    // tier 2: [AST(t2+d) AS first, AST(t2+e) AS second,
+    // tier 0: [a+b AS t1]
+    // tier 1: [t1*c AS t2]
+    // tier 2: [t2+d AS first, t2+e AS second,
     //          t1 AS shared_first, t1 AS shared_second, greatest(t1, f) AS regular]
-    assertResult(Seq(1, 1, 2))(tiered.exprTiers.map(astExpressions(_).size))
-    assert(astExpressions(tiered.exprTiers.head).head.child.isInstanceOf[GpuAdd])
-    assert(astExpressions(tiered.exprTiers(1)).head.child.isInstanceOf[GpuMultiply])
-    assertResult(1)(tierReferences(astExpressions(tiered.exprTiers(1)).head).size)
+    val astExpressionTiers = tiered.exprTiers.map(
+      collectExpressions[GpuProjectAstExpression])
+    assertResult(3)(tiered.exprTiers.size)
+    assert(astExpressionTiers.flatten.isEmpty)
+    assertResult(1)(collectExpressions[GpuAdd](tiered.exprTiers.head).size)
+    val products = collectExpressions[GpuMultiply](tiered.exprTiers(1))
+    assertResult(1)(products.size)
+    assertResult(1)(tierReferences(products.head).size)
+    assertResult(2)(collectExpressions[GpuAdd](tiered.exprTiers.last).size)
     // Final references: [t2, t2, t1, t1, t1] (distinct: {t2, t1}).
     val finalReferences = tiered.exprTiers.last.flatMap(tierReferences)
     assertResult(5)(finalReferences.size)
@@ -226,25 +375,72 @@ class ProjectExprSuite extends SparkQueryCompareTestSuite {
   }
 
   test("AST compiled expression closes at task completion") {
-    val context = new MockTaskContext(taskAttemptId = 1, partitionId = 0)
     val astExpression = spy(GpuProjectAstExpression(GpuAdd(
       GpuBoundReference(0, LongType, true)(NamedExpression.newExprId, "a"),
       GpuBoundReference(1, LongType, true)(NamedExpression.newExprId, "b"), false)()))
-    TrampolineUtil.setTaskContext(context)
     try {
-      withResource(buildProjectBatch()) { spillableBatch =>
-        withResource(spillableBatch.getColumnarBatch()) { inputBatch =>
-          withResource(GpuProjectExec.project(
-            inputBatch, Seq(GpuAlias(astExpression, "sum")()))) { _ => }
+      TestUtils.withMockTaskContext(completesTask = true) {
+        withResource(buildProjectBatch()) { spillableBatch =>
+          withResource(spillableBatch.getColumnarBatch()) { inputBatch =>
+            withResource(GpuProjectExec.project(
+              inputBatch, Seq(GpuAlias(astExpression, "sum")()))) { _ => }
+          }
         }
+        verify(astExpression, never()).close()
       }
-      verify(astExpression, never()).close()
-      context.markTaskComplete()
       verify(astExpression).close()
     } finally {
-      TrampolineUtil.unsetTaskContext()
-      ScalableTaskCompletion.reset()
       astExpression.close()
+    }
+  }
+
+  test("multiple multi-output AST JIT groups retry and preserve output order and nulls") {
+    val left = GpuBoundReference(0, LongType, nullable = true)(
+      NamedExpression.newExprId, "a")
+    val right = GpuBoundReference(1, LongType, nullable = true)(
+      NamedExpression.newExprId, "b")
+    def shared = GpuAdd(left, GpuLiteral(1L, LongType), failOnError = false)()
+    def shiftedRight = GpuAdd(right, GpuLiteral(1L, LongType), failOnError = false)()
+    val jitExpressions = Seq(
+      GpuAstJitExpression(GpuMultiply(shared, right, failOnError = false)(), groupId = 0),
+      GpuAstJitExpression(GpuMultiply(shiftedRight, left, failOnError = false)(), groupId = 1),
+      GpuAstJitExpression(GpuMultiply(shared, left, failOnError = false)(), groupId = 0),
+      GpuAstJitExpression(GpuMultiply(shiftedRight, right, failOnError = false)(), groupId = 1))
+    val expressions = Seq(
+      GpuAlias(jitExpressions.head, "right_product")(),
+      GpuAlias(jitExpressions(1), "shifted_right_times_left")(),
+      GpuAlias(jitExpressions(2), "left_product")(),
+      GpuAlias(jitExpressions(3), "shifted_right_times_right")())
+
+    def assertColumn(result: ColumnarBatch, index: Int, expected: Seq[Option[Long]]): Unit = {
+      val column = result.column(index).asInstanceOf[GpuColumnVector]
+      withResource(column.getBase.copyToHost()) { hostColumn =>
+        expected.zipWithIndex.foreach {
+          case (None, row) => assert(hostColumn.isNull(row))
+          case (Some(value), row) => assertResult(value)(hostColumn.getLong(row))
+        }
+      }
+    }
+
+    RmmSpark.currentThreadIsDedicatedToTask(0)
+    try {
+      withResource(jitExpressions) { _ =>
+        TestUtils.withMockTaskContext(completesTask = true) {
+          val spillableBatch = buildProjectBatch()
+          RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
+            RmmSpark.OomInjectionType.GPU.ordinal, 0)
+          withResource(GpuProjectExec.projectAndCloseWithRetrySingleBatch(
+              spillableBatch, expressions)) { result =>
+            assertResult(4)(result.numCols())
+            assertColumn(result, 0, Seq(Some(36L), None, Some(32L), Some(18L)))
+            assertColumn(result, 1, Seq(Some(35L), None, Some(27L), Some(10L)))
+            assertColumn(result, 2, Seq(Some(30L), None, Some(12L), Some(2L)))
+            assertColumn(result, 3, Seq(Some(42L), Some(56L), Some(72L), Some(90L)))
+          }
+        }
+      }
+    } finally {
+      RmmSpark.removeCurrentDedicatedThreadAssociation(0)
     }
   }
 

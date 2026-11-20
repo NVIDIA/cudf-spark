@@ -23,7 +23,6 @@ import scala.collection.mutable.ListBuffer
 
 import ai.rapids.cudf.Cuda
 import com.nvidia.spark.rapids.jni.RmmSpark.OomInjectionType
-import com.nvidia.spark.rapids.jni.kudo.DumpOption
 import com.nvidia.spark.rapids.lore.{LoreId, OutputLoreId}
 
 import org.apache.spark.SparkConf
@@ -31,11 +30,6 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.RapidsPrivateUtil
 import org.apache.spark.sql.rapids.execution.{JoinBuildSideSelection, JoinOptions, JoinStrategy}
-
-object RapidsReaderType extends Enumeration {
-  type RapidsReaderType = Value
-  val AUTO, COALESCING, MULTITHREADED, PERFILE = Value
-}
 
 object RapidsConf extends Logging with RapidsConfEntries {
   object RapidsShuffleManagerMode extends Enumeration {
@@ -63,6 +57,12 @@ object RapidsConf extends Logging with RapidsConfEntries {
   def conf(key: String): ConfBuilder = {
     new ConfBuilder(key, register)
   }
+
+  private[rapids] def shouldExplain(explain: String): Boolean =
+    !explain.equalsIgnoreCase("NONE")
+
+  private[rapids] def shouldExplainAll(explain: String): Boolean =
+    explain.equalsIgnoreCase("ALL")
 
   // default value for the OOM injection logic (no injection, for regular operation)
   private val noInjection = OomInjectionConf(
@@ -176,7 +176,7 @@ object RapidsConf extends Logging with RapidsConfEntries {
         |On startup use: `--conf [conf key]=[conf value]`. For example:
         |
         |```
-        |${SPARK_HOME}/bin/spark-shell --jars rapids-4-spark_2.12-26.12.0-SNAPSHOT-cuda12.jar \
+        |${SPARK_HOME}/bin/spark-shell --jars cudf-spark_2.12-26.12.0-SNAPSHOT-cuda12.jar \
         |--conf spark.plugins=com.nvidia.spark.SQLPlugin \
         |--conf spark.rapids.sql.concurrentGpuTasks=2
         |```
@@ -453,6 +453,10 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val pinnedPoolSize: Long = get(PINNED_POOL_SIZE)
 
+  lazy val pageablePoolSize: Long = get(PAGEABLE_POOL_SIZE)
+
+  lazy val pageablePoolPretouchThreads: Int = get(PAGEABLE_POOL_PRETOUCH_THREADS)
+
   lazy val pinnedPoolCuioDefault: Boolean = get(PINNED_POOL_SET_CUIO_DEFAULT)
 
   lazy val pinnedPoolParallelInitThreads: String = get(PINNED_POOL_PARALLEL_INIT_THREADS)
@@ -472,6 +476,10 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val maxConcurrentGpuTasks: Integer = get(MAX_CONCURRENT_GPU_TASKS)
 
   lazy val isTestEnabled: Boolean = get(TEST_CONF)
+
+  lazy val inputFileNameMaxStringBytes: Long = get(TEST_INPUT_FILE_NAME_MAX_STRING_BYTES)
+
+  lazy val testingForceNonAst: Set[String] = get(TEST_FORCE_NON_AST).toSet
 
   lazy val isRetryContextCheckEnabled: Boolean = get(TEST_RETRY_CONTEXT_CHECK_ENABLED)
 
@@ -559,6 +567,21 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val gpuTargetBatchSizeBytes: Long = get(GPU_BATCH_SIZE_BYTES)
 
+  lazy val historyMetricsProvider: String = get(HISTORY_METRICS_PROVIDER)
+
+  lazy val historyPlanningTimeoutMs: Int = get(HISTORY_PLANNING_TIMEOUT_MS)
+
+  lazy val historyDeclareTimeoutMs: Int = get(HISTORY_DECLARE_TIMEOUT_MS)
+
+  lazy val historyScanSplitEnabled: Boolean = get(HISTORY_SCAN_SPLIT_ENABLED)
+
+  lazy val historyScanSplitMaxAge: java.time.Duration =
+    java.time.Duration.ofDays(get(HISTORY_SCAN_SPLIT_MAX_AGE_DAYS).toLong)
+
+  lazy val historyScanSplitMaxBytes: Long = get(HISTORY_SCAN_SPLIT_MAX_BYTES)
+
+  lazy val historyScanSplitMinBytes: Long = get(HISTORY_SCAN_SPLIT_MIN_BYTES)
+
   lazy val isWindowCollectListEnabled: Boolean = get(ENABLE_WINDOW_COLLECT_LIST)
 
   lazy val isWindowCollectSetEnabled: Boolean = get(ENABLE_WINDOW_COLLECT_SET)
@@ -571,9 +594,9 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val explain: String = get(EXPLAIN)
 
-  lazy val shouldExplain: Boolean = !explain.equalsIgnoreCase("NONE")
+  lazy val shouldExplain: Boolean = RapidsConf.shouldExplain(explain)
 
-  lazy val shouldExplainAll: Boolean = explain.equalsIgnoreCase("ALL")
+  lazy val shouldExplainAll: Boolean = RapidsConf.shouldExplainAll(explain)
 
   lazy val chunkedReaderEnabled: Boolean = get(CHUNKED_READER)
 
@@ -671,6 +694,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val isProjectAstEnabled: Boolean = get(ENABLE_PROJECT_AST)
 
+  lazy val isProjectAstJitEnabled: Boolean = get(ENABLE_PROJECT_AST_JIT)
+
   lazy val isTieredProjectEnabled: Boolean = get(ENABLE_TIERED_PROJECT)
 
   lazy val isCombinedExpressionsEnabled: Boolean = get(ENABLE_COMBINED_EXPRESSIONS)
@@ -730,6 +755,18 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
             s"${PARQUET_READER_FOOTER_TYPE.key}")
     }
   }
+
+  lazy val isParquetHybridScanEnabled: Boolean = get(PARQUET_HYBRID_SCAN_ENABLED)
+
+  lazy val testParquetHybridScanFailOnFallback: Boolean =
+    get(TEST_PARQUET_HYBRID_SCAN_FAIL_ON_FALLBACK)
+
+  lazy val hybridScanSingleStageFilterKeepThreshold: Double =
+    get(PARQUET_HYBRID_SCAN_SINGLE_STAGE_FILTER_KEEP_THRESHOLD)
+
+  lazy val hybridScanMaxH2DPackSize: Long = get(PARQUET_HYBRID_SCAN_MAX_H2D_PACK_SIZE)
+
+  lazy val hybridScanMinH2DPackSize: Long = get(PARQUET_HYBRID_SCAN_MIN_H2D_PACK_SIZE)
 
   lazy val isParquetPerFileReadEnabled: Boolean =
     RapidsReaderType.withName(get(PARQUET_READER_TYPE)) == RapidsReaderType.PERFILE
@@ -884,6 +921,9 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val shuffleUcxHostBounceBuffersCount: Int = get(SHUFFLE_UCX_BOUNCE_BUFFERS_HOST_COUNT)
 
+  lazy val shuffleUcxCleanupOnQueryEndEnabled: Boolean =
+    get(SHUFFLE_UCX_CLEANUP_ON_QUERY_END_ENABLED)
+
   lazy val shuffleMaxClientThreads: Int = get(SHUFFLE_MAX_CLIENT_THREADS)
 
   lazy val shuffleMaxClientTasks: Int = get(SHUFFLE_MAX_CLIENT_TASKS)
@@ -895,6 +935,10 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val shuffleMaxMetadataSize: Long = get(SHUFFLE_MAX_METADATA_SIZE)
 
   lazy val shuffleCompressionCodec: String = get(SHUFFLE_COMPRESSION_CODEC)
+
+  lazy val driverlessBroadcastMaxExecutors: Int = get(DRIVERLESS_BROADCAST_MAX_EXECUTORS)
+
+  lazy val isDriverlessBroadcastEnabled: Boolean = get(DRIVERLESS_BROADCAST_ENABLED)
 
   lazy val shuffleCompressionLz4ChunkSize: Long = get(SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE)
 
@@ -923,45 +967,6 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
     get(SHUFFLE_KUDO_SERIALIZER_MEASURE_BUFFER_COPY_ENABLED)
 
   lazy val shuffleAsyncReadEnabled: Boolean = get(SHUFFLE_ASYNC_READ_ENABLED)
-
-  lazy val shuffleKudoSerializerDebugMode: DumpOption = {
-    val mode = get(SHUFFLE_KUDO_SERIALIZER_DEBUG_MODE)
-    mode match {
-      case "NEVER" => DumpOption.Never
-      case "ALWAYS" => DumpOption.Always
-      case "ONFAILURE" => DumpOption.OnFailure
-      case _ => {
-        logWarning(s"Invalid value for ${SHUFFLE_KUDO_SERIALIZER_DEBUG_MODE.key}: $mode. " +
-          "Using default value: Never")
-        DumpOption.Never
-      }
-    }
-  }
-
-  lazy val shuffleKudoSerializerDebugDumpPrefix: Option[String] = {
-    val prefix = get(SHUFFLE_KUDO_SERIALIZER_DEBUG_DUMP_PREFIX)
-    shuffleKudoSerializerDebugMode match {
-      case DumpOption.Never => prefix
-      case _ => {
-        prefix match {
-          case None => {
-            logWarning("spark.rapids.shuffle.kudo.serializer.debug.dump.path.prefix is not set, " +
-              "so Kudo serializer debug will not be enabled")
-            None
-          }
-          case Some(p) => {
-            if (p.isEmpty) {
-              logWarning("spark.rapids.shuffle.kudo.serializer.debug.dump.path.prefix is empty, " +
-                "so Kudo serializer debug will not be enabled")
-              Some("")
-            } else {
-              Some(p)
-            }
-          }
-        }
-      }
-    }
-  }
 
   def isUCXShuffleManagerMode: Boolean =
     RapidsShuffleManagerMode
@@ -1003,6 +1008,9 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val allowDisableEntirePlan: Boolean = get(ALLOW_DISABLE_ENTIRE_PLAN)
 
   lazy val useArrowCopyOptimization: Boolean = get(USE_ARROW_OPT)
+
+  lazy val hostColumnarToGpuReleaseSemaphore: Boolean =
+    get(HOST_COLUMNAR_TO_GPU_RELEASE_SEMAPHORE)
 
   lazy val getCloudSchemes: Seq[String] =
     DEFAULT_CLOUD_SCHEMES ++ get(CLOUD_SCHEMES).getOrElse(Seq.empty)

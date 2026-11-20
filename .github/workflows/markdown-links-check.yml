@@ -18,6 +18,9 @@ name: Check Markdown links
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+  # Saves the result cache on the default branch, where every PR can restore it.
+  schedule:
+    - cron: '17 5 * * *'
 
 permissions:
   contents: read
@@ -27,14 +30,30 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-    - name: work around permission issue
-      run: git config --global --add safe.directory /github/workspace
     - uses: NVIDIA/spark-rapids-common/checkout@main
-    - uses: gaurav-nelson/github-action-markdown-link-check@v1
+    - name: Restore Lychee cache
+      # A reused result keeps the age of its first check, so the scheduled
+      # run starts cold and saves results that stay fresh for a day.
+      if: github.event_name != 'schedule'
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
-        max-depth: -1
-        use-verbose-mode: 'yes'
-        config-file: '.github/workflows/markdown-links-check/markdown-links-check-config.json'
-        base-branch: 'gh-pages'
-        
-        
+        path: .lycheecache
+        key: lychee-v0.24.2-${{ runner.os }}-${{ hashFiles('.github/workflows/markdown-links-check/lychee.toml') }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          lychee-v0.24.2-${{ runner.os }}-${{ hashFiles('.github/workflows/markdown-links-check/lychee.toml') }}-
+    - name: Check Markdown links
+      uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+      with:
+        lycheeVersion: v0.24.2
+        args: >-
+          --config .github/workflows/markdown-links-check/lychee.toml
+          --root-dir "${{ github.workspace }}"
+          './**/*.md'
+    - name: Save Lychee cache
+      # Lychee never caches a failed link, so a failing run still saves the
+      # links that passed.
+      if: ${{ !cancelled() }}
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      with:
+        path: .lycheecache
+        key: lychee-v0.24.2-${{ runner.os }}-${{ hashFiles('.github/workflows/markdown-links-check/lychee.toml') }}-${{ github.run_id }}-${{ github.run_attempt }}

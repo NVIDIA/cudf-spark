@@ -649,6 +649,8 @@ object GpuLiteral {
  */
 case class GpuLiteral (value: Any, dataType: DataType) extends GpuLeafExpression {
 
+  override def selfSupportsAstJit: Boolean = true
+
   // Assume this came from Spark Literal and no need to call Literal.validateLiteralValue here.
 
   override def foldable: Boolean = true
@@ -737,6 +739,12 @@ case class GpuLiteral (value: Any, dataType: DataType) extends GpuLeafExpression
 
   override def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
     GpuExpressionsUtils.resolveColumnVector(columnarEvalAny(batch), batch.numRows())
+  }
+
+  override def selfConvertsToAst: Boolean = dataType match {
+    case BooleanType | ByteType | ShortType | IntegerType | LongType | FloatType | DoubleType |
+         StringType | TimestampType | DateType => true
+    case _ => false
   }
 
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {

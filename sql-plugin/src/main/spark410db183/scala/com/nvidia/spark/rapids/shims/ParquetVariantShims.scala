@@ -15,15 +15,12 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "410db183"}
-{"spark": "411"}
-{"spark": "412"}
-{"spark": "413"}
-{"spark": "420"}
-{"spark": "500"}
+{"spark":["410db183"],"carryForward":"none"}
+{"spark":["411","420"],"carryForward":"all"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
+import com.nvidia.spark.rapids.TypeSig
 import org.apache.hadoop.conf.Configuration
 
 import org.apache.spark.sql.execution.datasources.VariantMetadata
@@ -35,6 +32,8 @@ import org.apache.spark.sql.types.{DataType, VariantType}
  * Applies PARQUET_ANNOTATE_VARIANT_LOGICAL_TYPE without replacing a Spark 4.2+ per-write option.
  */
 object ParquetVariantShims {
+  def additionalIcebergReadSupportedTypes: TypeSig = TypeSig.VARIANT
+
   def setupParquetVariantConfig(conf: Configuration, sqlConf: SQLConf): Unit = {
     // SparkToParquetSchemaConverter requires this value in the Hadoop configuration.
     FileWriteOptionsShims.setConfWithWriteOptionPrecedence(

@@ -40,16 +40,19 @@ object LogCaptureUtils {
    * Capture log messages from specific loggers during operation execution.
    * 
    * @param loggerNames Names of loggers to capture messages from
+   * @param level The lowest level captured, as a Log4j level name, which the loggers are set to
+   *              during the operation
    * @param operation The operation to execute while capturing logs
    * @return Array of captured log messages
    */
-  def captureLogsFrom(loggerNames: Seq[String])(operation: => Unit): Array[String] = {
+  def captureLogsFrom(loggerNames: Seq[String], level: String = "DEBUG")(
+      operation: => Unit): Array[String] = {
     val logMessages = new ArrayBuffer[String]()
     
     val capturer = if (isLog4j2) {
-      new Log4j2Capturer(loggerNames, logMessages)
+      new Log4j2Capturer(loggerNames, logMessages, level)
     } else {
-      new Log4j1Capturer(loggerNames, logMessages)
+      new Log4j1Capturer(loggerNames, logMessages, level)
     }
     
     try {
@@ -76,11 +79,12 @@ private trait LogCapturer {
  */
 private class Log4j1Capturer(
     loggerNames: Seq[String],
-    logMessages: ArrayBuffer[String]) extends LogCapturer {
+    logMessages: ArrayBuffer[String],
+    level: String) extends LogCapturer {
   
   private val loggerClass = Class.forName("org.apache.log4j.Logger")
   private val levelClass = Class.forName("org.apache.log4j.Level")
-  private val debugLevel = levelClass.getField("DEBUG").get(null)
+  private val captureLevel = levelClass.getField(level).get(null)
   
   private val getLoggerMethod = loggerClass.getMethod("getLogger", classOf[String])
   private val getRootLoggerMethod = loggerClass.getMethod("getRootLogger")
@@ -129,7 +133,7 @@ private class Log4j1Capturer(
   )
   
   override def setup(): Unit = {
-    loggers.foreach(logger => setLevelMethod.invoke(logger, debugLevel))
+    loggers.foreach(logger => setLevelMethod.invoke(logger, captureLevel))
     val addAppenderMethod = rootLogger.getClass.getMethod(
       "addAppender", appenderClass)
     addAppenderMethod.invoke(rootLogger, appender)
@@ -153,7 +157,8 @@ private class Log4j1Capturer(
  */
 private class Log4j2Capturer(
     loggerNames: Seq[String],
-    logMessages: ArrayBuffer[String]) extends LogCapturer {
+    logMessages: ArrayBuffer[String],
+    level: String) extends LogCapturer {
   
   private val logManagerClass = Class.forName("org.apache.logging.log4j.LogManager")
   private val getContextMethod = logManagerClass.getMethod(
@@ -164,7 +169,7 @@ private class Log4j2Capturer(
   private val config = getConfigurationMethod.invoke(context)
   
   private val levelClass = Class.forName("org.apache.logging.log4j.Level")
-  private val debugLevel = levelClass.getField("DEBUG").get(null)
+  private val captureLevel = levelClass.getField(level).get(null)
   
   private val appenderClass = Class.forName(
     "org.apache.logging.log4j.core.Appender")
@@ -221,12 +226,12 @@ private class Log4j2Capturer(
       val loggerConfig = getLoggerConfigMethod.invoke(config, name)
       val setLevelMethod = loggerConfig.getClass.getMethod(
         "setLevel", levelClass)
-      setLevelMethod.invoke(loggerConfig, debugLevel)
+      setLevelMethod.invoke(loggerConfig, captureLevel)
       
       val addAppenderMethod = loggerConfig.getClass.getMethod(
         "addAppender", appenderClass, levelClass, 
         Class.forName("org.apache.logging.log4j.core.Filter"))
-      addAppenderMethod.invoke(loggerConfig, appender, debugLevel, null)
+      addAppenderMethod.invoke(loggerConfig, appender, captureLevel, null)
     }
     
     val updateLoggersMethod = context.getClass.getMethod("updateLoggers")

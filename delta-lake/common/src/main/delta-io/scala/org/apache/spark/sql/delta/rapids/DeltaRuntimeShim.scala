@@ -37,6 +37,14 @@ import org.apache.spark.util.Clock
 case class StartTransactionArg(log: DeltaLog, conf: RapidsConf, clock: Clock,
     catalogTable: Option[CatalogTable] = None, snapshot: Option[Snapshot] = None)
 
+/** The V1 entry points that prepare an upstream selective replacement command. */
+sealed trait DeltaWriteOrigin
+
+object DeltaWriteOrigin {
+  case object V1Save extends DeltaWriteOrigin
+  case object V1SaveAsTable extends DeltaWriteOrigin
+}
+
 trait DeltaRuntimeShim {
   def getDeltaConfigChecker: DeltaConfigChecker
   def getDeltaProvider: DeltaProvider
@@ -55,6 +63,11 @@ trait DeltaRuntimeShim {
   def createGpuWrite(
       gpuDeltaLog: GpuDeltaLog,
       cpuWrite: WriteIntoDelta): GpuWriteIntoDeltaLike
+
+  def createGpuWrite(
+      gpuDeltaLog: GpuDeltaLog,
+      cpuWrite: WriteIntoDelta,
+      origin: DeltaWriteOrigin): GpuWriteIntoDeltaLike = createGpuWrite(gpuDeltaLog, cpuWrite)
 
   def createCpuWrite(
       deltaLog: DeltaLog,
@@ -122,7 +135,7 @@ object DeltaRuntimeShim {
     if (deltaVersion.startsWith("4.2.")) {
       val parsedSparkVersion = parseSparkVersion(sparkVersion)
       (deltaVersion, parsedSparkVersion) match {
-        case ("4.2.0", (4, 0, 1) | (4, 1, 1)) =>
+        case ("4.2.0", (4, 0, 1) | (4, 0, 5) | (4, 1, 1) | (4, 1, 4)) =>
           Some("org.apache.spark.sql.delta.rapids.delta42x.Delta42xRuntimeShim")
         case _ =>
           throw new IllegalStateException(
@@ -139,7 +152,7 @@ object DeltaRuntimeShim {
     if (deltaVersion.startsWith("4.3.")) {
       val parsedSparkVersion = parseSparkVersion(sparkVersion)
       (deltaVersion, parsedSparkVersion) match {
-        case ("4.3.0", (4, 0, 1) | (4, 1, 1)) =>
+        case ("4.3.0", (4, 0, 1) | (4, 0, 5) | (4, 1, 1) | (4, 1, 4)) =>
           Some("org.apache.spark.sql.delta.rapids.delta43x.Delta43xRuntimeShim")
         case _ =>
           throw new IllegalStateException(
@@ -224,6 +237,13 @@ object DeltaRuntimeShim {
       gpuDeltaLog: GpuDeltaLog,
       cpuWrite: WriteIntoDelta): GpuWriteIntoDeltaLike = {
     shimInstance.createGpuWrite(gpuDeltaLog, cpuWrite)
+  }
+
+  def createGpuWrite(
+      gpuDeltaLog: GpuDeltaLog,
+      cpuWrite: WriteIntoDelta,
+      origin: DeltaWriteOrigin): GpuWriteIntoDeltaLike = {
+    shimInstance.createGpuWrite(gpuDeltaLog, cpuWrite, origin)
   }
 
   def createCpuWrite(

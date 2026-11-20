@@ -126,6 +126,8 @@ trait ProtobufMessageDescriptor {
   def javaStringCheckUtf8: Boolean = false
   /** Looks up the protobuf field name, returning None when absent. */
   def findField(name: String): Option[ProtobufFieldDescriptor]
+  /** Declaration names of all fields, including ones Spark omits from its schema. */
+  def fieldNames: Seq[String]
 }
 
 /** Field metadata; optional nested metadata is absent for unrelated field types. */

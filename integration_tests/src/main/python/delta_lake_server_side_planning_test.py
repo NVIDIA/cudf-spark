@@ -1,0 +1,321 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import uuid
+
+import pytest
+
+from asserts import (assert_cpu_and_gpu_are_equal_collect_with_capture,
+                     assert_gpu_and_cpu_error, assert_gpu_fallback_collect)
+from conftest import spark_jvm
+from delta_lake_utils import is_oss_delta_lake_42_or_43
+from marks import allow_non_gpu, delta_lake, ignore_order
+from spark_session import with_cpu_session
+
+
+pytestmark = [delta_lake, pytest.mark.skipif(
+    not is_oss_delta_lake_42_or_43(), reason="Server-side planning requires OSS Delta Lake 4.2 or 4.3")]
+
+
+@pytest.fixture
+def planned_scan_conf(spark_tmp_path, request):
+    pushed = getattr(request, "param", None) == "pushed"
+
+    def write(spark):
+        ranges = [(0, 10, "selected"), (10, 20, "matching")] if pushed else \
+            [(0, 30, "selected")]
+        for start, end, directory in ranges:
+            spark.range(start, end).selectExpr(
+                "id", "cast(id / 10.0 as decimal(12, 2)) amount",
+                "named_struct('a.b', cast(id as string)) nested") \
+                .repartition(2).write.parquet(spark_tmp_path + "/" + directory)
+        if not pushed:
+            # Valid Parquet data outside the authoritative manifest must never be scanned.
+            spark.range(100, 110).write.parquet(spark_tmp_path + "/unplanned")
+        for name, content in (("corrupt", "not parquet data"), ("zero", "")):
+            path = spark._jvm.org.apache.hadoop.fs.Path(spark_tmp_path + "/" + name + ".parquet")
+            stream = path.getFileSystem(spark._jsc.hadoopConfiguration()).create(path)
+            try:
+                stream.writeBytes(content)
+            finally:
+                stream.close()
+
+    with_cpu_session(write)
+    # Spark caches catalog instances across test sessions; each fixture needs its own options.
+    catalog = "planned_" + uuid.uuid4().hex
+    return catalog, {
+        "spark.sql.catalog." + catalog:
+            "com.nvidia.spark.rapids.tests.delta.ServerSidePlannedTestCatalog",
+        "spark.sql.catalog." + catalog + ".path": spark_tmp_path,
+        "spark.sql.adaptive.enabled": "false",
+    }
+
+
+@ignore_order
+@pytest.mark.parametrize("reader", ["PERFILE", "MULTITHREADED", "COALESCING"])
+@pytest.mark.parametrize("query", [
+    "SELECT * FROM planned.db.table",
+    "SELECT id, amount FROM planned.db.table WHERE id >= 13",
+    "SELECT nested.`a.b` FROM planned.db.table",
+    "SELECT id FROM planned.db.table ORDER BY id LIMIT 3",
+    "SELECT count(*), sum(amount) FROM planned.db.table",
+    "SELECT * FROM planned.db.empty",
+])
+def test_server_side_planned_scan(planned_scan_conf, reader, query):
+    catalog, settings = planned_scan_conf
+    conf = dict(settings, **{"spark.rapids.sql.format.parquet.reader.type": reader})
+
+    def check_results(spark):
+        df = spark.sql(query.replace("planned.", catalog + "."))
+        if query == "SELECT * FROM planned.db.table":
+            assert sorted(row.id for row in df.collect()) == list(range(30))
+        return df
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        check_results, exist_classes="GpuBatchScanExec", conf=conf)
+
+
+@ignore_order
+@pytest.mark.parametrize("reader", ["PERFILE", "MULTITHREADED", "COALESCING"])
+@pytest.mark.parametrize("planned_scan_conf", ["pushed"], indirect=True)
+def test_server_side_planned_scan_pushed_filter(planned_scan_conf, reader):
+    catalog, settings = planned_scan_conf
+    conf = dict(settings, **{"spark.rapids.sql.format.parquet.reader.type": reader})
+
+    def read(spark):
+        # Project out id so correctness depends on the service's selective manifest,
+        # rather than a reader or Spark filter evaluating id after the scan.
+        df = spark.sql("SELECT amount, nested.`a.b` AS label FROM " + catalog +
+                       ".db.pushed WHERE id >= 10")
+        assert sorted(int(row.label) for row in df.collect()) == list(range(10, 20))
+        return df
+
+    def assert_no_residual_filter(cpu_plan, gpu_plan):
+        callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+        for plan in (cpu_plan, gpu_plan):
+            assert not callback.contains(plan, "FilterExec"), plan.toString()
+            assert not callback.contains(plan, "GpuFilterExec"), plan.toString()
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        read, exist_classes="GpuBatchScanExec", require_non_empty=True,
+        gpu_plan_assertion=assert_no_residual_filter, conf=conf)
+
+
+@ignore_order
+@allow_non_gpu("BatchScanExec")
+@pytest.mark.parametrize("reader", ["PERFILE", "MULTITHREADED", "COALESCING"])
+def test_server_side_planned_scan_disabled(planned_scan_conf, reader):
+    catalog, settings = planned_scan_conf
+    conf = dict(settings, **{"spark.rapids.sql.format.parquet.reader.type": reader})
+    conf["spark.rapids.sql.input.ServerSidePlannedScan"] = "false"
+    assert_gpu_fallback_collect(
+        lambda spark: spark.sql("SELECT id FROM " + catalog + ".db.table"),
+        "BatchScanExec", conf=conf)
+
+
+@ignore_order
+@allow_non_gpu("BatchScanExec", "ProjectExec", "Alias", "InputFileName",
+               "InputFileBlockStart", "InputFileBlockLength")
+@pytest.mark.parametrize("reader", ["PERFILE", "MULTITHREADED", "COALESCING"])
+def test_server_side_planned_scan_input_file_fallback(planned_scan_conf, reader):
+    catalog, settings = planned_scan_conf
+    conf = dict(settings, **{"spark.rapids.sql.format.parquet.reader.type": reader})
+    query = ("SELECT id, input_file_name(), input_file_block_start(), "
+             "input_file_block_length() FROM " + catalog + ".db.table")
+    assert_gpu_fallback_collect(
+        lambda spark: spark.sql(query), "BatchScanExec", conf=conf)
+
+
+@ignore_order
+@allow_non_gpu("BatchScanExec")
+@pytest.mark.parametrize("reader", ["PERFILE", "MULTITHREADED", "COALESCING"])
+@pytest.mark.parametrize("setting", ["ignoreMissingFiles", "ignoreCorruptFiles"])
+def test_server_side_planned_scan_file_skipping_fallback(planned_scan_conf, reader, setting):
+    catalog, settings = planned_scan_conf
+    conf = dict(settings, **{"spark.rapids.sql.format.parquet.reader.type": reader,
+                            "spark.sql.files." + setting: "true"})
+    assert_gpu_fallback_collect(
+        lambda spark: spark.sql("SELECT id FROM " + catalog + ".db.table"),
+        "BatchScanExec", conf=conf)
+
+
+@allow_non_gpu("BatchScanExec")
+@pytest.mark.parametrize("reader", ["PERFILE", "MULTITHREADED", "COALESCING"])
+@pytest.mark.parametrize("table,setting,error", [
+    ("missing", "ignoreMissingFiles", "does not exist"),
+    ("corrupt", "ignoreCorruptFiles", "is not a Parquet file"),
+])
+def test_server_side_planned_scan_file_errors(planned_scan_conf, reader, table, setting, error):
+    catalog, settings = planned_scan_conf
+    conf = dict(settings, **{"spark.rapids.sql.format.parquet.reader.type": reader,
+                            "spark.sql.files." + setting: "true"})
+    assert_gpu_and_cpu_error(
+        lambda spark: spark.sql("SELECT id FROM " + catalog + ".db." + table).collect(),
+        conf=conf, error_message=error)
+
+
+@pytest.mark.parametrize("reader", ["PERFILE", "MULTITHREADED", "COALESCING"])
+def test_server_side_planned_scan_zero_length_file(planned_scan_conf, reader):
+    catalog, settings = planned_scan_conf
+    conf = dict(settings, **{"spark.rapids.sql.format.parquet.reader.type": reader})
+    # Spark's file splitter drops a zero length file, which would turn Delta's error into an
+    # empty result, so the scan must keep the file and let the reader reject it.
+    assert_gpu_and_cpu_error(
+        lambda spark: spark.sql("SELECT count(*) FROM " + catalog + ".db.zero").collect(),
+        conf=conf, error_message="is not a Parquet file")
+
+
+@allow_non_gpu("BatchScanExec")
+@pytest.mark.parametrize("reader", ["PERFILE", "MULTITHREADED", "COALESCING"])
+def test_server_side_planned_scan_missing_required_column(planned_scan_conf, reader):
+    catalog, settings = planned_scan_conf
+    conf = dict(settings, **{"spark.rapids.sql.format.parquet.reader.type": reader})
+    assert_gpu_and_cpu_error(
+        lambda spark: spark.sql("SELECT absent FROM " + catalog + ".db.required").collect(),
+        conf=conf, error_message="Required column is missing")
+
+
+def _gpu_scan_partitions(spark, df, check):
+    # Only the GPU run plans packed partitions; the CPU run keeps one partition per file.
+    if spark.conf.get("spark.rapids.sql.enabled") == "true":
+        # Count on the scan node: the root RDD of a limit plan has a single partition.
+        pending = [df._jdf.queryExecution().executedPlan()]
+        while pending:
+            node = pending.pop()
+            if node.getClass().getSimpleName() == "GpuBatchScanExec":
+                partitions = node.executeColumnar().getNumPartitions()
+                assert check(partitions), partitions
+                return
+            children = node.children()
+            pending.extend(children.apply(i) for i in range(children.size()))
+        assert False, "no GpuBatchScanExec in the plan"
+
+
+@ignore_order
+@pytest.mark.parametrize("reader", ["PERFILE", "MULTITHREADED", "COALESCING"])
+def test_server_side_planned_scan_file_partitioning(planned_scan_conf, reader):
+    catalog, settings = planned_scan_conf
+    # Both files fit one partition only with a small open cost and no minimum partition count.
+    conf = dict(settings, **{"spark.sql.files.maxPartitionBytes": "134217728",
+                            "spark.sql.files.openCostInBytes": "1024",
+                            "spark.sql.files.minPartitionNum": "1",
+                            "spark.rapids.sql.format.parquet.reader.type": reader})
+
+    def read(spark):
+        df = spark.sql("SELECT id, amount, nested FROM " + catalog + ".db.table")
+        assert sorted(row.id for row in df.collect()) == list(range(30))
+        _gpu_scan_partitions(spark, df, lambda n: n == 1)
+        return df
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        read, exist_classes="GpuBatchScanExec", conf=conf)
+
+
+@ignore_order
+# GPU CollectLimit is off by default, so the limit runs on Spark's executeTake path.
+@allow_non_gpu("CollectLimitExec")
+@pytest.mark.parametrize("reader", ["PERFILE", "MULTITHREADED", "COALESCING"])
+def test_server_side_planned_scan_pushed_limit_keeps_files_whole(planned_scan_conf, reader):
+    catalog, settings = planned_scan_conf
+    # Without the limit both files would be packed into one partition.
+    conf = dict(settings, **{"spark.sql.files.openCostInBytes": "1024",
+                            "spark.sql.files.minPartitionNum": "1",
+                            "spark.rapids.sql.format.parquet.reader.type": reader})
+    limited = "SELECT id FROM " + catalog + ".db.table LIMIT 5"
+
+    def read(spark):
+        assert len(spark.sql(limited).collect()) == 5
+        _gpu_scan_partitions(spark, spark.sql(limited), lambda n: n == 2)
+        return spark.sql("SELECT count(*) FROM (" + limited + ")")
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        read, exist_classes="GpuBatchScanExec", conf=conf)
+
+
+@ignore_order
+@pytest.mark.parametrize("reader", ["PERFILE", "MULTITHREADED", "COALESCING"])
+def test_server_side_planned_scan_many_files_one_partition(spark_tmp_path, reader):
+    def write(spark):
+        spark.range(0, 3200).repartition(16).write.parquet(spark_tmp_path + "/selected")
+
+    with_cpu_session(write)
+    catalog = "planned_" + uuid.uuid4().hex
+    conf = {
+        "spark.sql.catalog." + catalog:
+            "com.nvidia.spark.rapids.tests.delta.ServerSidePlannedTestCatalog",
+        "spark.sql.catalog." + catalog + ".path": spark_tmp_path,
+        "spark.sql.adaptive.enabled": "false",
+        "spark.sql.files.minPartitionNum": "1",
+        "spark.sql.files.openCostInBytes": "1024",
+        "spark.rapids.sql.format.parquet.reader.type": reader,
+    }
+
+    def read(spark):
+        df = spark.sql("SELECT sum(id), count(*) FROM " + catalog + ".db.table")
+        assert df.collect()[0][1] == 3200
+        # Sixteen files with rows are packed into one multi-file partition.
+        _gpu_scan_partitions(spark, spark.sql("SELECT id FROM " + catalog + ".db.table"),
+                             lambda n: n == 1)
+        return df
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        read, exist_classes="GpuBatchScanExec", conf=conf)
+
+
+@ignore_order
+@pytest.mark.parametrize("reader", ["PERFILE", "MULTITHREADED", "COALESCING"])
+@pytest.mark.parametrize("small_row_groups", [True, False],
+                         ids=["many_row_groups", "one_row_group"])
+def test_server_side_planned_scan_row_group_ranges(spark_tmp_path, reader, small_row_groups):
+    range_bytes = 64 * 1024
+
+    def write(spark):
+        writer = spark.range(0, 200000).selectExpr(
+            "id", "concat('k', cast(id % 1000 as string)) s").repartition(2).write
+        if small_row_groups:
+            # Small row groups so that a byte range holds some row groups but not others.
+            writer = writer.option("parquet.block.size", range_bytes)
+        writer.parquet(spark_tmp_path + "/selected")
+
+    with_cpu_session(write)
+    catalog = "planned_" + uuid.uuid4().hex
+    conf = {
+        "spark.sql.catalog." + catalog:
+            "com.nvidia.spark.rapids.tests.delta.ServerSidePlannedTestCatalog",
+        "spark.sql.catalog." + catalog + ".path": spark_tmp_path,
+        "spark.sql.adaptive.enabled": "false",
+        "spark.sql.files.maxPartitionBytes": str(range_bytes),
+        "spark.sql.files.openCostInBytes": "0",
+        # A tiny derived split size: ranges must still follow maxPartitionBytes, and each range
+        # stays in its own partition.
+        "spark.sql.files.minPartitionNum": "100000",
+        "spark.rapids.sql.format.parquet.reader.type": reader,
+    }
+    sizes = with_cpu_session(lambda spark: [
+        row.length for row in spark.read.format("binaryFile")
+        .option("pathGlobFilter", "*.parquet").load(spark_tmp_path + "/selected")
+        .select("length").collect()])
+    expected_ranges = sum(-(-size // range_bytes) for size in sizes)
+
+    def read(spark):
+        df = spark.sql("SELECT count(*), count(DISTINCT id), sum(id) FROM " + catalog +
+                       ".db.table")
+        assert df.collect()[0][0] == 200000  # no row group is dropped or read twice
+        # With one row group per file most ranges hold none and only read the footer.
+        _gpu_scan_partitions(spark, spark.sql("SELECT id FROM " + catalog + ".db.table"),
+                             lambda n: n == expected_ranges)
+        return df
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        read, exist_classes="GpuBatchScanExec", conf=conf)

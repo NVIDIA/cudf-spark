@@ -20,6 +20,8 @@ import com.nvidia.spark.rapids.GpuMetric;
 import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.ShimLoader;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
+import com.nvidia.spark.rapids.iceberg.parquet.ColumnAction;
+import com.nvidia.spark.rapids.iceberg.parquet.converter.ParquetUnshader;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 
 import org.apache.hadoop.fs.Path;
@@ -30,21 +32,27 @@ import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.deletes.PositionDelete;
+import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.io.DataWriteResult;
 import org.apache.iceberg.io.DeleteWriteResult;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.OutputFileFactory;
 import org.apache.iceberg.io.PartitioningWriter;
 import org.apache.iceberg.io.WriteResult;
+import org.apache.iceberg.schema.SchemaWithPartnerVisitor;
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions;
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader;
+import org.apache.iceberg.shaded.org.apache.parquet.schema.MessageType;
 import org.apache.iceberg.spark.source.GpuSparkScan;
+import org.apache.iceberg.types.Type;
+import org.apache.iceberg.types.Types;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.connector.write.DeltaBatchWrite;
 
 import java.io.IOException;
 import java.util.Map;
+import java.util.function.IntPredicate;
 
 /**
  * Dispatches to the correct version-specific Iceberg shim utilities based on the
@@ -74,8 +82,36 @@ public class ShimUtils {
         return IMPL.locationOf(f);
     }
 
+    public static ParquetUnshader getParquetUnshader() {
+        return IMPL.getParquetUnshader();
+    }
+
+    /** Retains the schema conversion entry point used by dependent readers. */
+    public static org.apache.parquet.schema.MessageType unshadeParquetSchema(MessageType schema) {
+        return getParquetUnshader().unshade(schema);
+    }
+
     public static int formatVersion(Table table) {
         return IMPL.formatVersion(table);
+    }
+
+    public static boolean hasInitialDefault(Types.NestedField field) {
+        return IMPL.hasInitialDefault(field);
+    }
+
+    public static Object initialDefaultToSpark(Types.NestedField field) {
+        return IMPL.initialDefaultToSpark(field);
+    }
+
+    public static MessageType pruneColumns(
+            MessageType fileSchema, Schema requiredSchema, boolean useFallbackIds) {
+        return IMPL.pruneColumns(fileSchema, requiredSchema, useFallbackIds);
+    }
+
+    public static IntPredicate rowGroupFilter(
+            ParquetFileReader reader, Schema requiredSchema, MessageType fileSchema,
+            Expression filter, boolean caseSensitive, GpuMetric dictFilterTime) {
+        return IMPL.rowGroupFilter(reader, requiredSchema, fileSchema, filter, caseSensitive, dictFilterTime);
     }
 
     public static int rowIdFieldId() {
@@ -145,5 +181,10 @@ public class ShimUtils {
             RapidsConf rapidsConf,
             boolean queryUsesInputFile) {
         return IMPL.newCopyOnWriteScan(cpuScan, rapidsConf, queryUsesInputFile);
+    }
+
+    public static SchemaWithPartnerVisitor<Type, ColumnAction> newActionBuildingVisitor(
+            Map<Integer, ?> idToConstant) {
+        return IMPL.newActionBuildingVisitor(idToConstant);
     }
 }

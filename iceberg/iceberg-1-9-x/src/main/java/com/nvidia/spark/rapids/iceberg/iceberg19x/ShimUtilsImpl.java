@@ -19,6 +19,7 @@ package com.nvidia.spark.rapids.iceberg.iceberg19x;
 import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.iceberg.IcebergDeletionVector;
 import com.nvidia.spark.rapids.iceberg.Iceberg19PlusShimUtils;
+import com.nvidia.spark.rapids.iceberg.parquet.converter.ParquetUnshader;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import org.apache.iceberg.*;
 import org.apache.iceberg.io.*;
@@ -38,6 +39,13 @@ import java.util.Map;
 
 /** Iceberg 1.9.x shim: uses {@code SparkUtil::internalToSpark}. */
 public class ShimUtilsImpl extends Iceberg19PlusShimUtils {
+    private static final ParquetUnshader PARQUET_UNSHADER = new ParquetUnshaderImpl();
+
+    @Override
+    public ParquetUnshader getParquetUnshader() {
+        return PARQUET_UNSHADER;
+    }
+
     @Override
     public int formatVersion(Table table) {
         return TableUtil.formatVersion(table);

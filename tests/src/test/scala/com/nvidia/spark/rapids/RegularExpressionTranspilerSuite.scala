@@ -364,17 +364,38 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
       "Only the case-insensitive '(?i)' inline flag is supported")
   }
 
-  test("cuDF does not support inline flags that precede a choice alternative") {
-    // a flag whose Java scope would cross '|' into a following alternative cannot be represented
-    // when branches are rewritten independently
-    assertUnsupported("(?i)a|b", RegexFindMode,
-      "Inline flags followed by a choice ('|') alternative are not supported")
-    assertUnsupported("a|(?i)b|c", RegexFindMode,
-      "Inline flags followed by a choice ('|') alternative are not supported")
-    // the toggle may appear mid-branch and still leak past '|': in Java `a(?i)b|c` makes both `b`
-    // and `c` case-insensitive (equivalent to `a[bB]|[cC]`), which we cannot fold branch by branch
-    assertUnsupported("a(?i)b|c", RegexFindMode,
-      "Inline flags followed by a choice ('|') alternative are not supported")
+  test("transpile inline flags that precede a choice alternative") {
+    // in Java a bare flag applies to the end of the enclosing group, crossing '|'
+    doTranspileTest("(?i)a|b", "[aA]|[bB]")
+    doTranspileTest("a|(?i)b|c", "a|[bB]|[cC]")
+    doTranspileTest("a(?i)b|c", "a[bB]|[cC]")
+    doTranspileTest("a|b(?i)|c", "a|b|[cC]")
+    doTranspileTest("(?i)a(?-i)b|c", "[aA]b|c")
+    doTranspileTest("(?i)a|(?-i)b|c", "[aA]|b|c")
+    doTranspileTest("a(?i)b|x|c(?-i)d", "a[bB]|[xX]|[cC]d")
+    // a group restores the outer flag state when it closes, so a flag inside it does not leak
+    doTranspileTest("(x|(?i)y)|z", "(x|[yY])|z")
+    doTranspileTest("(?i)(a|b(?-i))|c", "([aA]|[bB])|[cC]")
+    doTranspileTest("a(?i:b)|c", "a(?:[bB])|c")
+    for (mode <- Seq(RegexReplaceMode, RegexSplitMode)) {
+      doTranspileTest("(?i)a|b", "[aA]|[bB]", mode)
+    }
+    doTranspileTest("(?i)(a)|(b)", "(?:[aA])|([bB])", 2)
+  }
+
+  test("compare CPU and GPU: inline flags that precede a choice alternative") {
+    val patterns = Seq("(?i)a|b", "a|(?i)b|c", "a(?i)b|c", "(a(?i)b|c)d", "(?i)a(?-i)b|c",
+      "(x|(?i)y)|z", "((?i)a)|b", "a(?i:b)|c", "(?i)a+|b", "(?i)a|b|c", "a|b(?i)|c", "(?-i)a|b",
+      "(?i)a|(?-i)b|c", "(?i)(a|b(?-i))|c", "(?i)(?:a|(?-i)b|c)|d", "(a|(?i)b)|c",
+      "(?i)ab|cd|ef", "x(?i)(y|z)|w", "a(?i)b|c(?-i)d", "a(?i)b|x|c(?-i)d", "a(?i)b|cd|b(?-i)a",
+      raw"(?i)\w+=false\||[|]*\w+=false")
+    val inputs = Seq("", "a", "A", "b", "B", "c", "C", "d", "D", "x", "X", "y", "Y", "z", "Z",
+      "w", "W", "AB", "Ab", "aB", "cd", "Cd", "cD", "CD", "bd", "Bd", "BD", "ad", "Ad", "ba", "Ba",
+      "bA", "BA", "ABC", "abcdef", "ABCDEF", "xY", "XY", "xZ", "aaAA", "x=false|",
+      "X=FALSE|y=False", "|x=FALSE", "||Q=False", "q=true|")
+    assertCpuGpuMatchesRegexpFind(patterns, inputs)
+    assertCpuGpuMatchesRegexpReplace(patterns, inputs)
+    doStringSplitTest(patterns.toSet, inputs, -1)
   }
 
   test("transpile scoped inline flags") {
@@ -801,6 +822,39 @@ class RegularExpressionTranspilerSuite extends AnyFunSuite {
         Seq(raw"\D+", raw"\W+", raw"\D{2,3}", raw"\W{2,3}", raw"(\D+)", raw"(\W+)")
     assertCpuGpuMatchesRegexpFind(findPatterns, inputs)
     assertCpuGpuMatchesRegexpReplace(replacePatterns, inputs)
+  }
+
+  test("quantified escaped literals") {
+    // see https://github.com/NVIDIA/cudf-spark/issues/16157
+    // escaped metacharacters stay escaped
+    Seq(raw"\|*", raw"\.+", raw"\*?", raw"\\{2}", "\\$+", raw"\^{2,}", raw"\(+", raw"\)+",
+        raw"\[+", raw"\]+", raw"\{+", raw"\}+", raw"\?+", raw"\++",
+        raw"(\.\|)+", raw"(\.|\|)+").foreach { pattern =>
+      doTranspileTest(pattern, pattern)
+    }
+    // other escaped punctuation is emitted unescaped
+    doTranspileTest(raw"\@*", "@*")
+    doTranspileTest(raw"\-+", "-+")
+    doTranspileTest(raw"\/{2}", "/{2}")
+    doTranspileTest(raw"(\~\#)+", "(~#)+")
+    // the original report: regexp_extract(col, '\\|*', 0)
+    doTranspileTest(raw"\|*", raw"\|*", 0)
+
+    // anchors, boundaries, and linebreaks are still not quantifiable
+    Seq(raw"a\A*", raw"a\Z?", raw"a\z+", raw"a\b+", raw"a\B{2}", raw"a\R+").foreach { pattern =>
+      assertUnsupported(pattern, RegexFindMode, "Preceding token cannot be quantified")
+    }
+
+    val inputs = Seq("", "a", "ab", "|", "a||b", "a|b|", "..", "a.b..c", "**", "\\\\", "$$",
+        "^^", "(())", "[[]]", "{{}}", "??", "++", "@@", "--", "//", "~#~#", ".|.|", "a\n|\r\n.")
+    val findPatterns = Seq(raw"a\|*b", raw"\|+", raw"\.{2,}", raw"\*+", raw"\\+", "\\$+",
+        raw"\^{2}", raw"\(+\)+", raw"\[+\]+", raw"\{+\}+", raw"\?+", raw"\++", raw"\@+",
+        raw"\-{2}", raw"\/+", raw"(\~\#)+", raw"(\.|\|)+", raw"(\|+)")
+    val replacePatterns = Seq(raw"\|*", raw"\.?", raw"\|+", raw"\.{2,3}", raw"\\+", "\\$+",
+        raw"\(+\)+", raw"\@+", raw"(\.|\|)+", raw"(\|+)")
+    assertCpuGpuMatchesRegexpFind(findPatterns, inputs)
+    assertCpuGpuMatchesRegexpReplace(replacePatterns, inputs)
+    doStringSplitTest(Set(raw"\|+", raw"\.{2}", raw"\@+"), inputs, limit = -1)
   }
 
   test("dot matches CR on GPU but not on CPU") {

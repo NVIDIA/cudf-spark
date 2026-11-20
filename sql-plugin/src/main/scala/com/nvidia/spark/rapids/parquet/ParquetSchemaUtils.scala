@@ -19,10 +19,12 @@ package com.nvidia.spark.rapids.parquet
 import java.util.{Locale, Optional}
 
 import scala.collection.JavaConverters._
+import scala.collection.mutable.ArrayBuffer
 
 import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Table}
-import com.nvidia.spark.rapids.{CastOptions, GpuCast, GpuColumnVector, SchemaUtils}
+import com.nvidia.spark.rapids.{CastOptions, DecimalUtil, GpuCast, GpuColumnVector, SchemaUtils}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.shims.parquet.ParquetFieldRequestShims
 import com.nvidia.spark.rapids.shims.parquet.ParquetSchemaClipShims
 import com.nvidia.spark.rapids.shims.parquet.ParquetUnknownTypeAnnotationShims
 import org.apache.parquet.schema._
@@ -418,7 +420,10 @@ object ParquetSchemaUtils {
     lazy val idToParquetFieldMap =
       parquetRecord.getFields.asScala.filter(_.getId != null).groupBy(f => f.getId.intValue())
 
+    val matchedFields = new ArrayBuffer[(StructField, Type)]
+
     def clipMatchedField(parquetType: Type, sparkField: StructField): Option[Type] = {
+      matchedFields += sparkField -> parquetType
       if (returnNullStructIfAllFieldsMissing && sparkField.dataType.isInstanceOf[StructType]) {
         var hasPhysicalLeaf = false
         val clipped = clipParquetType(parquetType, sparkField.dataType, caseSensitive, useFieldId,
@@ -481,15 +486,18 @@ object ParquetSchemaUtils {
     }
 
     val shouldMatchById = useFieldId && ParquetSchemaClipShims.hasFieldIds(structType)
-    structType.flatMap { f =>
-      if (shouldMatchById && ParquetSchemaClipShims.hasFieldId(f)) {
-        matchIdField(f)
+    val clippedFields = structType.flatMap { field =>
+      val clippedField = if (shouldMatchById && ParquetSchemaClipShims.hasFieldId(field)) {
+        matchIdField(field)
       } else if (caseSensitive) {
-        matchCaseSensitiveField(f)
+        matchCaseSensitiveField(field)
       } else {
-        matchCaseInsensitiveField(f)
+        matchCaseInsensitiveField(field)
       }
+      clippedField.map(field -> _)
     }
+    ParquetFieldRequestShims.checkNoFieldRequestedMoreThanOnce(matchedFields.toSeq)
+    clippedFields.map(_._2)
   }
 
   /**
@@ -772,12 +780,15 @@ object ParquetSchemaUtils {
     )
   }
 
-  private def needDecimalCast(cv: ColumnView, dt: DataType): Boolean = {
+  private def needDecimalCast(
+      cv: ColumnView, dt: DataType, originalFromDt: DataType): Boolean = {
     // UINT64 is casted to Decimal(20,0) by Spark to accommodate
     // the largest possible values this type can take. Other Unsigned data types are converted to
     // basic types like LongType, this is analogous to that except we spill over to large
     // decimal/ints.
-    cv.getType.isDecimalType && !GpuColumnVector.getNonNestedRapidsType(dt).equals(cv.getType()) ||
+    cv.getType.isDecimalType &&
+        (!GpuColumnVector.getNonNestedRapidsType(dt).equals(cv.getType) ||
+          DecimalUtil.narrowsPrecision(originalFromDt, dt)) ||
         cv.getType.equals(DType.UINT64)
   }
 
@@ -828,7 +839,7 @@ object ParquetSchemaUtils {
     // This code needs to be kept in sync with
     // GpuParquetFileFilterHandler.checkSchemaCompat or more specifically
     // GpuParquetFileFilterHandler.checkPrimitiveCompat
-    if (needDecimalCast(cv, dt)) {
+    if (needDecimalCast(cv, dt, originalFromDt)) {
       val fromDecimal = originalFromDt.asInstanceOf[DecimalType]
       val toDecimal = dt.asInstanceOf[DecimalType]
       val ansiMode = CastOptions.DEFAULT_CAST_OPTIONS.isAnsiMode

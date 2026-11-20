@@ -1,0 +1,46 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Delta 4.3 unit tests
+on:
+  pull_request:
+    paths:
+      - 'delta-lake/**'
+      - 'tests/**'
+      - 'pom.xml'
+      - 'scala2.13/**/pom.xml'
+      - '.github/workflows/delta43-unit-tests.yml'
+
+concurrency:
+  group: delta43-unit-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  delta43-lifecycle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: NVIDIA/spark-rapids-common/checkout@main
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Build Spark 4.1.1 test dependencies with Delta 4.3
+        run: >-
+          mvn -B -f scala2.13/pom.xml -pl tests -am
+          -Dbuildver=411 -Pdelta43-tests -DskipTests install
+      - name: Run Delta 4.3 factory and materialization lifecycle tests
+        run: >-
+          mvn -B -f scala2.13/pom.xml -pl tests
+          -Dbuildver=411 -Pdelta43-tests
+          -Dsuites=org.apache.spark.sql.delta.rapids.DeltaRuntimeShimSuite test

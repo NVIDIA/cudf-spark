@@ -15,16 +15,8 @@
  */
 
 /*** spark-rapids-shim-json-lines
-{"spark": "350"}
-{"spark": "351"}
-{"spark": "352"}
-{"spark": "353"}
-{"spark": "354"}
-{"spark": "355"}
-{"spark": "356"}
-{"spark": "357"}
-{"spark": "358"}
-{"spark": "359"}
+{"spark":["350"],"carryForward":"sameMinor"}
+{"spark":["400","411"],"carryForward":"sameMinor"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.iceberg
 
@@ -36,7 +28,6 @@ import ai.rapids.cudf.{ColumnVector => CudfColumnVector}
 import com.nvidia.spark.rapids.{GpuColumnVector, RapidsConf}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.iceberg.parquet._
-import com.nvidia.spark.rapids.iceberg.parquet.converter.FromIcebergShaded.unshade
 import com.nvidia.spark.rapids.parquet.ParquetFileInfoWithBlockMeta
 import com.nvidia.spark.rapids.spill.SpillFramework
 import org.apache.hadoop.fs.Path
@@ -65,6 +56,7 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
  * ColumnAction tree is built based on schema comparison.
  */
 class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
+  import IcebergDefaultTestUtils.fieldWithDefaults
 
   private lazy val supportsRowLineageInheritance = {
     val majorMinor = IcebergProvider.detectedVersion.split("\\.").take(2).mkString(".")
@@ -98,7 +90,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       filePath = new Path("/test/file.parquet"),
       blocks = Seq(block),
       partValues = InternalRow.empty,
-      schema = unshade(shadedSchema),
+      schema = ShimUtils.getParquetUnshader().unshade(shadedSchema),
       readSchema = StructType(Seq.empty),
       dateRebaseMode = null,
       timestampRebaseMode = null,
@@ -126,7 +118,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       filePath = new Path("/test/file.parquet"),
       blocks = blocks,
       partValues = InternalRow.empty,
-      schema = unshade(shadedSchema),
+      schema = ShimUtils.getParquetUnshader().unshade(shadedSchema),
       readSchema = StructType(Seq.empty),
       dateRebaseMode = null,
       timestampRebaseMode = null,
@@ -382,7 +374,10 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       arrayOfStructType, structWithArrayType, mapType, mixedStructType).asJava)
 
     // Build expected Iceberg schema
-    val expectedSchema = new Schema(
+    val defaultField = fieldWithDefaults(
+      500, "default_col", Types.IntegerType.get(), required = true,
+      initialDefault = Some(Int.box(7)))
+    val baseSchema = new Schema(
       // Passthrough primitive columns
       Types.NestedField.optional(ptLongId, "pt_long", Types.LongType.get()),
       Types.NestedField.optional(ptDoubleId, "pt_double", Types.DoubleType.get()),
@@ -431,6 +426,9 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
           Types.NestedField.optional(msFieldBId, "b", Types.LongType.get())
         ))
     )
+
+    val expectedSchema = new Schema(
+      (baseSchema.columns().asScala ++ defaultField).asJava)
 
     val idToConstant = new JHashMap[Integer, Any]()
     idToConstant.put(constColId, 42L)
@@ -498,7 +496,25 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
         |      field[1] (input[1]):
         |        UpCast(int -> bigint)""".stripMargin
 
-    assert(processor.displayActionPlan() == expected)
+    val defaultPlan = defaultField.map(_ =>
+      "\n  default_col (generated):\n    FillDefault(fieldId=500, int)").getOrElse("")
+    assert(processor.displayActionPlan() == expected + defaultPlan)
+
+    // Exercise FillDefault as well as planning it. Older runtimes still run the other actions.
+    defaultField.foreach { field =>
+      val emptySchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
+      val (info, shaded) = createParquetInfo(emptySchema)
+      val defaultProcessor = new GpuParquetReaderPostProcessor(
+        info, new JHashMap[Integer, Any](), new Schema(field), shaded, Map.empty)
+      withResource(defaultProcessor.process(new ColumnarBatch(
+          Array.empty[org.apache.spark.sql.vectorized.ColumnVector], 3))) { output =>
+        assert(output.numRows() == 3)
+        assert(output.numCols() == 1)
+        withResource(output.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { host =>
+          (0 until output.numRows()).foreach(row => assert(host.getBase.getInt(row) == 7))
+        }
+      }
+    }
   }
 
   /**
@@ -908,6 +924,47 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
         }
       }
     }
+  }
+
+  test("Present struct children take precedence over defaults for missing children") {
+    val structId = 1
+    val presentId = 2
+    val defaultId = 3
+    val defaultField = fieldWithDefaults(
+      defaultId,
+      "added",
+      Types.IntegerType.get(),
+      required = true,
+      initialDefault = Some(Int.box(11))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+
+    val presentParquetField =
+      ShadedTypes.primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+        .id(presentId).named("present")
+    val parquetStruct = ShadedTypes.optionalGroup().addField(presentParquetField)
+      .id(structId).named("s")
+    val parquetSchema = new ShadedMessageType("test", Seq[ShadedType](parquetStruct).asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(structId, "s", Types.StructType.of(
+        Types.NestedField.optional(presentId, "present", Types.LongType.get()),
+        defaultField)))
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo,
+      new JHashMap[Integer, Any](),
+      expectedSchema,
+      shadedSchema,
+      Map.empty)
+
+    assert(processor.displayActionPlan() ==
+      s"""ProcessStruct
+         |  s (input[0]):
+         |    ProcessStruct
+         |      field[0] (input[0]):
+         |        PassThrough
+         |      field[1] (generated):
+         |        FillDefault(fieldId=$defaultId, int)""".stripMargin)
   }
 
   test("Whole-struct constants build a FetchConstant action") {
@@ -1422,6 +1479,28 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
 
     assertBatch(numRows = 2, firstPosition = 500L)
     assertBatch(numRows = 4, firstPosition = 502L)
+  }
+
+  test("Metadata-only partition constants prevent incompatible file combining") {
+    val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(1, "a", Types.LongType.get()))
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema)
+
+    def processor(value: Long): GpuParquetReaderPostProcessor = {
+      val constants = new JHashMap[Integer, Any]()
+      constants.put(1, value)
+      new GpuParquetReaderPostProcessor(
+        parquetInfo, constants, expectedSchema, shadedSchema, Map.empty)
+    }
+
+    val first = processor(10L)
+    val same = processor(10L)
+    val different = processor(20L)
+    assert(first.compatibleForCombining(same))
+    assert(same.compatibleForCombining(first))
+    assert(!first.compatibleForCombining(different))
+    assert(!different.compatibleForCombining(first))
   }
 
   test("Physical lineage constants prevent incompatible file combining") {

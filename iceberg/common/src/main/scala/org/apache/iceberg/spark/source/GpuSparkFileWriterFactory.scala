@@ -67,7 +67,7 @@ class GpuSparkFileWriterFactory(val table: Table,
       location,
       partitionSpec,
       partition,
-      file.keyMetadata(),
+      null, // GPU writes are plaintext; encrypted tables fall back during planning.
       dataSortOrder)
   }
 
@@ -92,8 +92,7 @@ class GpuSparkFileWriterFactory(val table: Table,
       deleteFileFormat,
       location,
       spec,
-      partition,
-      Option(file.keyMetadata()).map(_.buffer()).orNull)
+      partition)
   }
 
 

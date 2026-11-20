@@ -21,9 +21,6 @@ import com.nvidia.spark.rapids.jni.Protobuf._
 import org.apache.spark.sql.types._
 
 object ProtobufSchemaValidator {
-  // Keep planner rejection aligned with JNI so unsupported schemas fall back before execution.
-  val MAX_REPEATED_FIELDS_PER_MESSAGE: Int = 32
-
   private final case class JniDefaultValues(
       defaultInt: Long,
       defaultFloat: Double,
@@ -76,36 +73,6 @@ object ProtobufSchemaValidator {
           }
         }
     }
-  }
-
-  /**
-   * Checks top-level placement, repeated-field capacity and enum-string array sizes.
-   * This does not replace ProtobufSchemaDescriptor's constructor validation.
-   */
-  def validateFlattenedSchema(flatFields: Seq[FlattenedFieldDescriptor]): Either[String, Unit] = {
-    var repeatedCount = 0
-    flatFields.zipWithIndex.foreach { case (field, idx) =>
-      if (field.parentIdx != -1 || field.depth != 0) {
-        return Left(s"Only top-level protobuf fields are supported at position $idx")
-      }
-      if (field.isRepeated) {
-        repeatedCount += 1
-        if (repeatedCount > MAX_REPEATED_FIELDS_PER_MESSAGE) {
-          return Left(
-            s"Protobuf schema exceeds maximum supported repeated fields per message " +
-              s"($MAX_REPEATED_FIELDS_PER_MESSAGE) at parent index ${field.parentIdx}")
-        }
-      }
-      if (field.encoding == ENC_ENUM_STRING) {
-        if (field.enumValidValues == null || field.enumNames == null) {
-          return Left(s"Enum-string field at position $idx is missing enum metadata")
-        }
-        if (field.enumValidValues.length != field.enumNames.length) {
-          return Left(s"Enum-string field at position $idx has mismatched enum metadata")
-        }
-      }
-    }
-    Right(())
   }
 
   /**
