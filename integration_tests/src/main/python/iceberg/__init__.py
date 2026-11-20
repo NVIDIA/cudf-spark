@@ -460,34 +460,35 @@ def check_default_rows(expected):
     return check
 
 
-def assert_iceberg_write_default_result(cpu_table, gpu_table, expected_rows, conf):
-    """Check DML results and the Spark schema persisted in the newly written GPU data files."""
+def assert_iceberg_write_defaults(cpu_table, gpu_table, write, expected, conf):
+    """Compare independent writes, then check the GPU data and its persisted default on CPU."""
     from pyarrow import BufferReader
     from pyarrow.parquet import read_metadata
     from pyspark.sql.types import StructType
 
-    def read(spark, table):
-        return spark.sql(f"SELECT id, p, optional_added FROM {table} ORDER BY id")
+    def write_and_read(spark):
+        table = gpu_table if spark.conf.get("spark.rapids.sql.enabled") == "true" else cpu_table
+        write(spark, table)
+        return spark.table(table).orderBy("id")
 
-    def check(spark):
-        assert read(spark, cpu_table).collect() == expected_rows
-        # Rows 1 and 2 predate schema evolution. Inspect files containing newly inserted rows.
+    assert_gpu_and_cpu_are_equal_collect(write_and_read, conf=conf)
+
+    def check_files(spark):
+        for name in (cpu_table, gpu_table):
+            assert spark.table(name).orderBy("id").collect() == expected
+        # Only IDs above 2 were inserted after schema evolution.
         files = spark.sql(f"SELECT DISTINCT _file FROM {gpu_table} WHERE id > 2").collect()
         assert files
         table = spark_jvm().org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
             spark._jsparkSession, gpu_table)
         for path, in files:
-            # These small fixture files must be opened through the catalog's FileIO.
             with closing(table.io().newInputFile(path).newStream()) as stream:
                 metadata = read_metadata(BufferReader(stream.readAllBytes())).metadata
-            spark_schema = metadata[b"org.apache.spark.sql.parquet.row.metadata"]
-            schema = StructType.fromJson(json.loads(spark_schema))
+            schema_json = metadata[b"org.apache.spark.sql.parquet.row.metadata"]
+            schema = StructType.fromJson(json.loads(schema_json))
             assert schema["optional_added"].metadata.get("CURRENT_DEFAULT") == "'current'", path
 
-    with_cpu_session(check, conf=conf)
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: read(spark, gpu_table), conf=conf,
-        result_canonicalize_func_before_compare=check_default_rows(expected_rows))
+    with_cpu_session(check_files, conf=conf)
 
 
 def setup_iceberg_fixed_default_table(spark, name, *, initial_only, table_properties=None):
@@ -510,7 +511,7 @@ def setup_iceberg_fixed_default_table(spark, name, *, initial_only, table_proper
 
 
 def assert_iceberg_write_only_default_fallback(
-        spark_tmp_table_factory, write, fallback_exec, table_properties=None):
+        spark_tmp_table_factory, sql, fallback_exec, table_properties=None):
     base = get_full_table_name(spark_tmp_table_factory)
 
     def setup(spark):
@@ -520,7 +521,8 @@ def assert_iceberg_write_only_default_fallback(
 
     with_cpu_session(setup)
     assert_gpu_fallback_write_sql(
-        write, lambda spark, table: spark.table(table), base, [fallback_exec],
+        lambda spark, table: spark.sql(sql.format(table=table)).collect(),
+        lambda spark, table: spark.table(table), base, [fallback_exec],
         conf=copy_and_update(iceberg_write_enabled_conf, {"spark.sql.adaptive.enabled": "false"}))
 
 

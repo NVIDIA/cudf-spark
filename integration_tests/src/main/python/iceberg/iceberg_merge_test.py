@@ -27,7 +27,7 @@ from iceberg import (
     supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance,
     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, iceberg_table_properties_sql,
     row_lineage_df, rapids_reader_types, setup_iceberg_write_default_tables,
-    assert_iceberg_write_default_result, assert_iceberg_write_only_default_fallback)
+    assert_iceberg_write_defaults, assert_iceberg_write_only_default_fallback)
 from marks import allow_non_gpu, allow_non_gpu_conditional, iceberg, ignore_order, datagen_overrides, iceberg_fast_test
 from spark_session import is_spark_400_or_later, with_gpu_session, with_cpu_session
 
@@ -313,16 +313,13 @@ def test_iceberg_merge_write_defaults(spark_tmp_table_factory, merge_mode):
     def merge(spark, table):
         spark.sql(
             f"MERGE INTO {table} t USING "
-            "(SELECT * FROM VALUES (1L, 0), (3L, 0), (4L, 1) AS v(id, p)) s "
+            "(SELECT * FROM VALUES (1L, 1), (3L, 0), (4L, 1) AS v(id, p)) s "
             "ON t.id = s.id WHEN MATCHED THEN UPDATE SET p = s.p "
             "WHEN NOT MATCHED THEN INSERT (id, p) VALUES (s.id, s.p)").collect()
 
-    with_cpu_session(lambda spark: merge(spark, cpu_table), conf=conf)
-    with_iceberg_dml_session(
-        lambda spark: merge(spark, gpu_table), "3", merge_mode, conf=conf)
     inserted = "current" if catalog_has_default else None
-    assert_iceberg_write_default_result(cpu_table, gpu_table, [
-        (1, 0, "legacy"), (2, 1, "legacy"), (3, 0, inserted), (4, 1, inserted)], conf)
+    assert_iceberg_write_defaults(cpu_table, gpu_table, merge, [
+        (1, 1, "legacy"), (2, 1, "legacy"), (3, 0, inserted), (4, 1, inserted)], conf)
 
 
 @iceberg
@@ -336,15 +333,11 @@ def test_iceberg_merge_write_defaults(spark_tmp_table_factory, merge_mode):
     "ColumnarToRowExec", "ShuffleExchangeExec", "SortExec", "ProjectExec")
 def test_iceberg_merge_write_only_default_fallback(
         spark_tmp_table_factory, merge_mode, fallback_exec):
-    def write(spark, table_name):
-        spark.sql(
-            f"MERGE INTO {table_name} t USING "
-            "(SELECT * FROM VALUES (1L), (2L) AS v(id)) s ON t.id = s.id "
-            "WHEN MATCHED THEN UPDATE SET id = s.id "
-            "WHEN NOT MATCHED THEN INSERT (id) VALUES (s.id)").collect()
-
     assert_iceberg_write_only_default_fallback(
-        spark_tmp_table_factory, write, fallback_exec, {"write.merge.mode": merge_mode})
+        spark_tmp_table_factory,
+        "MERGE INTO {table} t USING (SELECT * FROM VALUES (1L), (2L) AS v(id)) s ON t.id = s.id "
+        "WHEN MATCHED THEN UPDATE SET id = s.id WHEN NOT MATCHED THEN INSERT (id) VALUES (s.id)",
+        fallback_exec, {"write.merge.mode": merge_mode})
 
 
 @iceberg_fast_test

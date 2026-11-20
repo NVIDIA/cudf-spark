@@ -21,9 +21,9 @@ spark-rapids-shim-json-lines ***/
 package org.apache.iceberg.spark.source
 
 import com.nvidia.spark.rapids.iceberg.IcebergDefaultTestUtils.fieldWithWriteDefault
-import org.apache.iceberg.{FileFormat, Schema, TableProperties}
-import org.apache.iceberg.deletes.DeleteGranularity
+import org.apache.iceberg.{Schema, TableProperties}
 import org.apache.iceberg.types.Types
+import org.mockito.Mockito.{mock, when}
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.sql.connector.write.RowLevelOperation.Command
@@ -42,20 +42,8 @@ class GpuSparkWriteSuite extends AnyFunSuite {
       val schema = new Schema(Types.NestedField.optional(
         1, "payload", Types.StructType.of(
           Types.NestedField.optional(2, "value", Types.IntegerType.get()))))
-      val context = GpuWriteContext(
-        dataSchema = schema,
-        dataSparkType = StructType(Nil),
-        dataFileFormat = FileFormat.PARQUET,
-        targetDataFileSize = 1024L,
-        deleteSparkType = GpuWriteContext.positionDeleteSparkType,
-        metadataSparkType = StructType(Nil),
-        deleteFileFormat = FileFormat.PARQUET,
-        targetDeleteFileSize = 1024L,
-        deleteGranularity = DeleteGranularity.FILE,
-        queryId = "write-default-schema",
-        useFanoutWriter = false,
-        inputOrdered = false,
-        useDVs = false)
+      val context = mock(classOf[GpuWriteContext])
+      when(context.dataSchema).thenReturn(schema)
 
       val schemas = Seq(GpuSparkWrite.dataWriterSparkTypeFor(schema, tableSchema)) ++
         Seq(Command.UPDATE, Command.MERGE).map { command =>
