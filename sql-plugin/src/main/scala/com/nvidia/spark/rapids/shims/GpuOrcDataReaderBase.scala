@@ -26,10 +26,8 @@ import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.{GpuMetric, HostMemoryOutputStream, NoopMetric}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.filecache.FileCache
-import com.nvidia.spark.rapids.fileio.hadoop.HadoopFileIO
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile.CopyRange
-import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.hive.common.io.DiskRangeList
 import org.apache.orc.{DataReader, OrcProto, StripeInformation}
 import org.apache.orc.impl.DataReaderProperties
@@ -38,11 +36,9 @@ import org.apache.spark.sql.rapids.GpuTaskMetrics
 
 abstract class GpuOrcDataReaderBase(
     props: DataReaderProperties,
-    conf: Configuration,
+    protected val inputFile: RapidsInputFile,
     metrics: Map[String, GpuMetric]) extends DataReader {
   protected val filePathString = props.getPath.toString
-  protected lazy val fileIO = new HadoopFileIO(conf)
-  protected lazy val inputFile: RapidsInputFile = fileIO.newInputFile(filePathString)
   protected def fileCache: FileCache = FileCache.get
   protected val compression = props.getCompression
   private val hitMetric = getMetric(GpuMetric.FILECACHE_DATA_RANGE_HITS)

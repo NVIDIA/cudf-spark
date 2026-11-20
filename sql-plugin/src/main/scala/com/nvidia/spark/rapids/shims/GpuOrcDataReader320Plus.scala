@@ -22,15 +22,15 @@ import java.nio.channels.SeekableByteChannel
 import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.Arm.closeOnExcept
 import com.nvidia.spark.rapids.GpuMetric
-import org.apache.hadoop.conf.Configuration
+import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile
 import org.apache.hadoop.hive.common.io.DiskRangeList
 import org.apache.orc.OrcProto
 import org.apache.orc.impl.{BufferChunk, BufferChunkList, DataReaderProperties, InStream, OrcCodecPool}
 
 abstract class GpuOrcDataReader320Plus(
     props: DataReaderProperties,
-    conf: Configuration,
-    metrics: Map[String, GpuMetric]) extends GpuOrcDataReaderBase(props, conf, metrics) {
+    inputFile: RapidsInputFile,
+    metrics: Map[String, GpuMetric]) extends GpuOrcDataReaderBase(props, inputFile, metrics) {
 
   private class BufferChunkLoader(useDirect: Boolean) extends BlockLoader {
     override def loadRemoteBlocks(

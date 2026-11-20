@@ -27,6 +27,7 @@ import java.util.{Date, UUID}
 
 import com.nvidia.spark.TimingUtils
 import com.nvidia.spark.rapids._
+import com.nvidia.spark.rapids.fileio.FileIOConfig
 import com.nvidia.spark.rapids.AssertUtils.assertInTests
 import com.nvidia.spark.rapids.shims.{BucketingUtilsShim, FileWriteOptionsShims, RapidsFileSourceMetaUtils}
 import org.apache.hadoop.conf.Configuration
@@ -130,6 +131,7 @@ trait GpuFileFormatWriterBase extends Serializable with Logging {
     val description = new GpuWriteJobDescription(
       uuid = UUID.randomUUID.toString,
       serializableHadoopConf = new SerializableConfiguration(job.getConfiguration),
+      fileIOConfig = FileIOConfig.from(sparkSession.sessionState.conf),
       outputWriterFactory = outputWriterFactory,
       allColumns = finalOutputSpec.outputColumns,
       dataColumns = dataColumns,
