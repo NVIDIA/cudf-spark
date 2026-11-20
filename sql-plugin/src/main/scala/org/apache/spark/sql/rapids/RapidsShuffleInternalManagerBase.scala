@@ -2189,7 +2189,8 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
   /**
    * Frees what the shuffle buffer catalog holds of a shuffle for writers at or below
    * `watermark`, and frees no further buffer once `isStopped` reads true. A catalog that is not
-   * initialized yet holds nothing.
+   * initialized yet holds nothing. The shuffle's cached broadcast builds go first, whatever the
+   * catalog holds.
    */
   def reclaimGpuShuffle(
       shuffleId: Int,
@@ -2197,12 +2198,21 @@ class RapidsShuffleInternalManagerBase(conf: SparkConf, val isDriver: Boolean)
       isStopped: () => Boolean): ShuffleReclaimResult = {
     val catalog = GpuShuffleEnv.getCatalog
     if (catalog != null) {
-      val result = catalog.reclaimShuffle(shuffleId, watermark, isStopped)
+      val (result, builds, buildBytes) =
+        GpuShuffleEnv.reclaimBroadcastAndThen(shuffleId, isStopped) {
+          catalog.reclaimShuffle(shuffleId, watermark, isStopped)
+        }
       def line = s"Reclaimed shuffle $shuffleId up to task $watermark from shuffle buffer " +
         s"catalog: ${result.outcome}, ${result.buffers} buffers, ${result.bytes} bytes in " +
-        s"${TimeUnit.NANOSECONDS.toMillis(result.elapsedNanos)} ms"
-      // every executor is asked to reclaim every shuffle, so most hold none of it
-      if (result.outcome == ShuffleReclaimOutcome.ABSENT) logDebug(line) else logInfo(line)
+        s"${TimeUnit.NANOSECONDS.toMillis(result.elapsedNanos)} ms, and $builds cached " +
+        s"broadcast builds, $buildBytes bytes"
+      // every executor is asked to reclaim every shuffle, so most hold none of it, and one that
+      // only read it holds its builds alone
+      if (result.outcome == ShuffleReclaimOutcome.ABSENT && builds == 0) {
+        logDebug(line)
+      } else {
+        logInfo(line)
+      }
       result
     } else {
       ShuffleReclaimResult.absent(shuffleId, watermark)

@@ -37,10 +37,12 @@ class HistoryMetricsManagerSuite extends AnyFunSuite {
   private val applicationId = "application-1"
   private val applicationAttemptId = "attempt-2"
   private val producerVersion = "26.10.0-test"
+  private val catalog = HistoryMetricCatalog.of(util.Collections.singletonList(
+    new HistoryMetricCatalog.MetricDefinition(7, "test.metric", false)))
 
   private def initialize(manager: HistoryMetricsManager, providerName: String): Unit = {
     manager.initialize(
-      configuration, applicationId, applicationAttemptId, producerVersion, providerName)
+      configuration, applicationId, applicationAttemptId, producerVersion, providerName, catalog)
   }
 
   test("none keeps the no-op store without discovering providers") {
@@ -67,7 +69,6 @@ class HistoryMetricsManagerSuite extends AnyFunSuite {
       initialize(manager, "LOCAL")
 
       assert(provider.openCalls == 1)
-      assert(provider.catalog != null && provider.catalog.entries().isEmpty)
       assert(provider.configuration ne configuration)
       assert(provider.configuration.get("spark.test.key") == "value")
       intercept[UnsupportedOperationException] {
@@ -76,6 +77,7 @@ class HistoryMetricsManagerSuite extends AnyFunSuite {
       assert(provider.applicationId == applicationId)
       assert(provider.applicationAttemptId == applicationAttemptId)
       assert(provider.producerVersion == producerVersion)
+      assert(provider.catalog eq catalog, "the provider is opened with the plugin's catalog")
       assert(MetricStores.current() eq provider.store)
     } finally {
       manager.shutdown()
@@ -83,6 +85,34 @@ class HistoryMetricsManagerSuite extends AnyFunSuite {
     assert(provider.shutdownCalls == 1)
     assert(provider.shutdownTimeout == HistoryMetricsManager.PROVIDER_SHUTDOWN_TIMEOUT)
     assert(MetricStores.current() eq initial)
+  }
+
+  test("a provider that only implements the original open is still opened") {
+    val initial = MetricStores.current()
+    val store = new DelegatingStore(initial)
+    var opens = 0
+    val provider = new HistoryMetricsProvider {
+      override def name(): String = "old"
+      override def open(
+          configuration: util.Map[String, String],
+          applicationId: String,
+          applicationAttemptId: String,
+          producerVersion: String): MetricStore = {
+        opens += 1
+        store
+      }
+      override def shutdown(timeout: Duration): Boolean = true
+    }
+    val manager = new HistoryMetricsManager(() => Seq(provider))
+
+    try {
+      initialize(manager, "old")
+
+      assert(opens == 1)
+      assert(MetricStores.current() eq store)
+    } finally {
+      manager.shutdown()
+    }
   }
 
   test("shutdown waits for an in-flight Spark listener before removing the store") {

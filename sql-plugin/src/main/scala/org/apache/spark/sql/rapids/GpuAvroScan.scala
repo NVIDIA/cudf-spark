@@ -32,6 +32,7 @@ import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.io.async.{AsyncRunner, UnboundedAsyncRunner}
 import com.nvidia.spark.rapids.jni.RmmSpark
+import com.nvidia.spark.rapids.perf.HistorySizedFileScan
 import com.nvidia.spark.rapids.shims.ShimFilePartitionReaderFactory
 import org.apache.avro.Schema
 import org.apache.avro.file.DataFileConstants.SYNC_SIZE
@@ -106,10 +107,10 @@ case class GpuAvroScan(
     rapidsConf: RapidsConf,
     partitionFilters: Seq[Expression] = Seq.empty,
     dataFilters: Seq[Expression] = Seq.empty,
-    queryUsesInputFile: Boolean = false) extends FileScan with GpuScan {
+    queryUsesInputFile: Boolean = false) extends FileScan with GpuScan with HistorySizedFileScan {
   override def isSplitable(path: Path): Boolean = true
 
-  override def createReaderFactory(): PartitionReaderFactory = {
+  override def createReaderFactory(): PartitionReaderFactory = observed {
     val caseSensitiveMap = options.asCaseSensitiveMap.asScala.toMap
     // Hadoop Configurations are case sensitive.
     val hadoopConf = sparkSession.sessionState.newHadoopConfWithOptions(caseSensitiveMap)
