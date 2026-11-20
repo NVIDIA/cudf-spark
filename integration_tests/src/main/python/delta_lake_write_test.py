@@ -4480,7 +4480,9 @@ def _wrote_on_gpu(func, conf):
     try:
         with_gpu_session(func, conf=conf)
         plans = callback.getResultsWithTimeout(10000)
-        return any(callback.contains(plan, "RapidsDeltaWrite") for plan in plans)
+        # The CPU RapidsDeltaWriteExec matches a looser name, so a fallback would look like a
+        # GPU write.
+        return any(callback.contains(plan, "GpuRapidsDeltaWriteExec") for plan in plans)
     finally:
         callback.endCapture()
 
@@ -4745,6 +4747,59 @@ def test_delta_43_parquet_writer_version_option_ctas_rtas(
         {"DataPageV1" if version == "v1" else "DataPageV2"}
 
 
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+@pytest.mark.parametrize("write_mode", ["ctas", "rtas"])
+@pytest.mark.parametrize("version", ["1.0.0", "2.12.0"], ids=["v1_gpu", "v2_cpu"])
+def test_delta_43_parquet_format_version_property_option_dataframe_writer_v2(
+        spark_tmp_table_factory, write_mode, version):
+    """DataFrameWriterV2 keeps `delta.parquet.format.version` in the write options, and Delta
+    persists it as a table property when the write creates the table."""
+    table = spark_tmp_table_factory.get()
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+    if write_mode == "rtas":
+        with_cpu_session(lambda spark: spark.sql(
+            f"CREATE TABLE {table} (id BIGINT, s STRING) USING DELTA").collect(), conf=conf)
+
+    def write(spark):
+        with _hadoop_writer_version(spark, version == "2.12.0"):
+            writer = spark.sql(_parquet_format_version_query).writeTo(table) \
+                .using("delta").option("delta.parquet.format.version", version)
+            writer.create() if write_mode == "ctas" else writer.createOrReplace()
+    assert _wrote_on_gpu(write, conf) == (version == "1.0.0")
+    assert with_cpu_session(lambda spark: _data_page_types(spark, table), conf=conf) == \
+        {"DataPageV1" if version == "1.0.0" else "DataPageV2"}
+
+
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+@pytest.mark.parametrize("api", ["sql_insert", "dataframe_append"])
+def test_delta_43_parquet_format_version_existing_table_ignores_creation_default(
+        spark_tmp_path, api):
+    """Table property defaults apply when a table is created, not to a table that exists. A
+    propertyless table at version 0 is written on the GPU with DataPageV1 under a v2 default."""
+    path = spark_tmp_path + "/DELTA_DATA"
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
+    with_cpu_session(lambda spark: spark.sql(
+        f"CREATE TABLE delta.`{path}` (id BIGINT, s STRING) USING DELTA").collect(), conf=conf)
+    v2_default_conf = copy_and_update(
+        conf, {"spark.databricks.delta.properties.defaults.parquet.format.version": "2.12.0"})
+
+    def write(spark):
+        if api == "sql_insert":
+            spark.sql(f"INSERT INTO delta.`{path}` {_parquet_format_version_query}").collect()
+        else:
+            spark.sql(_parquet_format_version_query).write.format("delta").mode("append") \
+                .save(path)
+    assert _wrote_on_gpu(write, v2_default_conf)
+    assert with_cpu_session(lambda spark: _data_page_types(spark, f"delta.`{path}`"),
+                            conf=conf) == {"DataPageV1"}
+
+
 _parquet_format_version_options = [
     # (table property, write option, session conf, expected to write on the GPU)
     ("1.0.0", None, "v2", True),    # the table property beats the session conf
@@ -4783,16 +4838,31 @@ def test_delta_43_parquet_format_version_precedence(spark_tmp_path, case, option
     assert _wrote_on_gpu(write, conf) == expect_gpu
 
 
-def _gpu_write_error(func, conf):
-    """Runs `func` in a GPU session, which must fail. Returns the error and the captured plans."""
+def _gpu_plans(func, conf, fails):
+    """Runs `func` in a GPU session, which must fail when `fails`. Returns the error text, or None
+    if it succeeded, and the captured plans."""
     callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
     callback.startCapture()
     try:
-        with pytest.raises(Exception) as error:
+        if fails:
+            with pytest.raises(Exception) as error:
+                with_gpu_session(func, conf=conf)
+            error_text = str(error.value)
+        else:
             with_gpu_session(func, conf=conf)
-        return str(error.value), callback.getResultsWithTimeout(10000)
+            error_text = None
+        return error_text, callback.getResultsWithTimeout(10000)
     finally:
         callback.endCapture()
+
+
+def _assert_cpu_write_plan(plans, cpu_exec):
+    """The captured plans hold the CPU write `cpu_exec` and no GPU Delta write."""
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    assert plans, "no plan was captured"
+    assert any(callback.contains(plan, cpu_exec) for plan in plans), \
+        f"the write did not fall back to {cpu_exec}: {[p.treeString() for p in plans]}"
+    assert not any(callback.contains(plan, "GpuRapidsDeltaWriteExec") for plan in plans)
 
 
 @allow_non_gpu(*_parquet_format_version_allow)
@@ -4802,17 +4872,20 @@ def _gpu_write_error(func, conf):
 @pytest.mark.parametrize("source", ["property", "option"])
 @pytest.mark.parametrize("version", ["invalid", "v3", "0.9.0"])
 def test_delta_43_parquet_format_version_invalid(spark_tmp_path, source, version):
-    """An invalid version is never written by the GPU: it falls back, so the CPU decides. Where
-    the CPU rejects the value the GPU run fails with the CPU's own error, which means its plan
-    holds the CPU write and no GPU write, not an error raised while planning."""
+    """An invalid version is never written by the GPU: it falls back to the CPU write, which
+    decides. Where the CPU rejects the value the GPU run fails with the CPU's own error."""
     conf = copy_and_update(writer_confs, delta_writes_enabled_conf)
     path = spark_tmp_path + "/DELTA_DATA"
     if source == "property":
+        cpu_exec = "AtomicCreateTableAsSelectExec"
+
         def write(spark):
             spark.sql(f"CREATE TABLE delta.`{path}` USING DELTA "
                       f"TBLPROPERTIES ('delta.parquet.format.version' = '{version}') "
                       f"AS {_parquet_format_version_query}").collect()
     else:
+        # A DataFrameWriter save to a path runs as a SaveIntoDataSourceCommand.
+        cpu_exec = "ExecutedCommandExec"
         with_cpu_session(lambda spark: spark.sql(
             f"CREATE TABLE delta.`{path}` (id BIGINT, s STRING) USING DELTA").collect(),
             conf=conf)
@@ -4827,15 +4900,10 @@ def test_delta_43_parquet_format_version_invalid(spark_tmp_path, source, version
         cpu_error = str(e)
     if source == "property":
         assert cpu_error is not None, "Delta must reject an invalid table property"
-    if cpu_error is None:
-        # Spark before 4.2 drops the Delta write option, so the CPU accepts the value. The GPU
-        # still must not write it.
-        assert not _wrote_on_gpu(write, conf)
-    else:
-        gpu_error, plans = _gpu_write_error(write, conf)
-        assert plans, "no plan was captured for the failed GPU write"
-        assert not any(spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
-                       .contains(plan, "RapidsDeltaWrite") for plan in plans)
+    # Spark before 4.2 drops the Delta write option, so there the CPU accepts the value.
+    gpu_error, plans = _gpu_plans(write, conf, fails=cpu_error is not None)
+    _assert_cpu_write_plan(plans, cpu_exec)
+    if cpu_error is not None:
         assert version in gpu_error and version in cpu_error
 
 
@@ -4879,6 +4947,48 @@ def test_delta_43_parquet_format_version_mixed_table_and_checkpoint(spark_tmp_pa
         lambda spark: spark.read.format("delta").load(path).orderBy("id", "s"), conf=conf)
 
 
+@allow_non_gpu(*_parquet_format_version_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="delta.parquet.format.version is supported by OSS Delta 4.3")
+def test_delta_43_parquet_format_version_metadata_changed_after_planning(spark_tmp_path):
+    """A write planned on the GPU from a v1 snapshot fails, instead of committing DataPageV1 files
+    to the table, when its transaction refreshes to metadata that asks for DataPageV2."""
+    path = spark_tmp_path + "/DELTA_DATA"
+    # A long staleness limit keeps the cached snapshot used for planning, however the table
+    # changes underneath it.
+    conf = copy_and_update(writer_confs, delta_writes_enabled_conf,
+                           {"spark.databricks.delta.stalenessLimit": "1h"})
+
+    def create(spark):
+        spark.sql(f"CREATE TABLE delta.`{path}` (id BIGINT, s STRING) USING DELTA").collect()
+        spark.sql(f"INSERT INTO delta.`{path}` {_parquet_format_version_query}").collect()
+    with_cpu_session(create, conf=conf)
+
+    def commit_v2_metadata(spark):
+        # A commit by another writer, which this JVM's cached DeltaLog does not know about.
+        hadoop_path = spark._jvm.org.apache.hadoop.fs.Path
+        log = hadoop_path(path + "/_delta_log")
+        fs = log.getFileSystem(spark.sparkContext._jsc.hadoopConfiguration())
+        first = spark.read.text(path + "/_delta_log/00000000000000000000.json").collect()
+        metadata = next(json.loads(row.value) for row in first if '"metaData"' in row.value)
+        metadata["metaData"].setdefault("configuration", {})[
+            "delta.parquet.format.version"] = "2.12.0"
+        versions = [int(status.getPath().getName()[:20]) for status in fs.listStatus(log)
+                    if status.getPath().getName().endswith(".json")]
+        out = fs.create(hadoop_path(f"{path}/_delta_log/{max(versions) + 1:020d}.json"))
+        out.write(bytearray(json.dumps(metadata).encode("utf-8") + b"\n"))
+        out.close()
+    with_cpu_session(commit_v2_metadata, conf=conf)
+
+    def append(spark):
+        spark.sql(_parquet_format_version_query).write.format("delta").mode("append").save(path)
+    error, _ = _gpu_plans(append, conf, fails=True)
+    assert "DataPageV2" in error and "Retry the write" in error, error
+    assert with_cpu_session(lambda spark: _data_page_types(spark, f"delta.`{path}`"),
+                            conf=conf) == {"DataPageV1"}
+
+
 # Operations on an existing table partitioned by `p`. Each one is (statement, expect_gpu_for_v1,
 # prepare): a v1 table must run it on the GPU, except where the operation has no GPU write to begin
 # with, and `prepare` statements run first on the table so that the operation has files to rewrite.
@@ -4915,13 +5025,21 @@ _parquet_format_version_writers = {
 }
 
 
-def _create_parquet_format_version_dml_tables(spark, base_table, path_prefix, version, v2_pages):
-    """Creates identical partitioned CPU and GPU tables, by name and by path, with several
-    small files in each."""
+def _parquet_format_version_dml_tables(base_table, path_prefix, suffix, targets):
+    """The tables of the `suffix` side that a case uses: by `name`, by `path`, or both."""
+    return [table for kind, table in (("name", f"{base_table}_{suffix}"),
+                                      ("path", f"delta.`{path_prefix}_{suffix}`"))
+            if kind in targets]
+
+
+def _create_parquet_format_version_dml_tables(spark, base_table, path_prefix, version, v2_pages,
+                                              targets):
+    """Creates identical partitioned CPU and GPU tables, with several small files in each, only
+    in the forms (`name`, `path`) the case operates on."""
     with _hadoop_writer_version(spark, v2_pages):
         for suffix in ("cpu", "gpu"):
-            location = f"delta.`{path_prefix}_{suffix}`"
-            for table in (f"{base_table}_{suffix}", location):
+            for table in _parquet_format_version_dml_tables(
+                    base_table, path_prefix, suffix, targets):
                 spark.sql(f"CREATE TABLE {table} (id BIGINT, s STRING, p INT) USING DELTA "
                           f"PARTITIONED BY (p) "
                           f"TBLPROPERTIES ('delta.parquet.format.version' = '{version}')")
@@ -4933,13 +5051,14 @@ def _create_parquet_format_version_dml_tables(spark, base_table, path_prefix, ve
 
 
 def _check_parquet_format_version_dml(base_table, path_prefix, version, conf, operation,
-                                      expect_gpu_for_v1, prepare=()):
+                                      expect_gpu_for_v1, prepare=(), targets=("path",)):
     """Runs `operation(spark, suffix)` on the CPU and GPU tables. A v1 table writes on the GPU,
     a v2 table on the CPU, and both tables end with the same rows and page versions. The
     operation must have written files to the table, or the checks above would say nothing."""
     v2_pages = version != "1.0.0"
     def create_and_prepare(spark):
-        _create_parquet_format_version_dml_tables(spark, base_table, path_prefix, version, v2_pages)
+        _create_parquet_format_version_dml_tables(
+            spark, base_table, path_prefix, version, v2_pages, targets)
         for suffix in ("cpu", "gpu"):
             for statement in prepare:
                 spark.sql(statement.format(table=f"delta.`{path_prefix}_{suffix}`")).collect()
@@ -4948,9 +5067,9 @@ def _check_parquet_format_version_dml(base_table, path_prefix, version, conf, op
         if prepare else {}))
 
     def data_files(suffix):
-        # The operation targets the table by name or by path.
         return with_cpu_session(lambda spark: frozenset(
-            file for table in (f"{base_table}_{suffix}", f"delta.`{path_prefix}_{suffix}`")
+            file for table in _parquet_format_version_dml_tables(
+                base_table, path_prefix, suffix, targets)
             for file in spark.table(table).inputFiles()), conf=conf)
     files_before = {suffix: data_files(suffix) for suffix in ("cpu", "gpu")}
 
@@ -4971,8 +5090,8 @@ def _check_parquet_format_version_dml(base_table, path_prefix, version, conf, op
 
     def snapshot(spark, table):
         return spark.table(table).orderBy("id", "s").collect()
-    for table_of in (lambda suffix: f"{base_table}_{suffix}",
-                     lambda suffix: f"delta.`{path_prefix}_{suffix}`"):
+    for table_of in [lambda suffix, kind=kind: _parquet_format_version_dml_tables(
+            base_table, path_prefix, suffix, (kind,))[0] for kind in targets]:
         assert_equal(
             with_cpu_session(lambda spark: snapshot(spark, table_of("cpu")), conf=conf),
             with_cpu_session(lambda spark: snapshot(spark, table_of("gpu")), conf=conf))
@@ -5024,4 +5143,5 @@ def test_delta_43_parquet_format_version_dataframe_writer(
         df = spark.range(64).selectExpr("id", "CAST(id AS STRING) AS s", "CAST(id % 4 AS INT) AS p")
         write(df, f"{spark_tmp_path}/DELTA_{suffix}", f"{base_table}_{suffix}")
     _check_parquet_format_version_dml(
-        base_table, spark_tmp_path + "/DELTA", version, conf, operation, True)
+        base_table, spark_tmp_path + "/DELTA", version, conf, operation, True,
+        targets=("name",) if name == "save_as_table_append" else ("path",))

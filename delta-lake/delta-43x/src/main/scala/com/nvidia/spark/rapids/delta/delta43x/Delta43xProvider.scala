@@ -200,7 +200,7 @@ object Delta43xProvider extends DeltaProviderBase with Logging {
       hasPartitionColumns: Boolean,
       spark: SparkSession): Unit = {
     val effectiveProperties = Delta43xConfigChecker.creationProperties(
-      spark, properties, Map.empty)
+      spark, properties, writeOptions)
     Delta43xConfigChecker.tagParquetFormatVersion(
       meta, spark, writeOptions, effectiveProperties)
     if (DeltaConfigs.ENABLE_VARIANT_SHREDDING.fromMap(effectiveProperties)) {

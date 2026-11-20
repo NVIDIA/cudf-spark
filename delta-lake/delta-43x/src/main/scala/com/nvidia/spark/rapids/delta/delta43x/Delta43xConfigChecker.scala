@@ -97,6 +97,15 @@ object Delta43xConfigChecker extends DeltaConfigChecker {
   }
 
   /**
+   * The Parquet writer version requested by resolved writer options, when it is one the GPU
+   * cannot write: the GPU Parquet writer only emits DataPageV1. Throws IllegalArgumentException
+   * for a value that is not a Parquet writer version at all.
+   */
+  def unsupportedWriterVersion(writerOptions: Map[String, String]): Option[String] =
+    writerOptions.get(ParquetOutputFormat.WRITER_VERSION)
+      .filter(WriterVersion.fromString(_) != WriterVersion.PARQUET_1_0)
+
+  /**
    * `delta.parquet.format.version` selects the Parquet data page version via the writer version
    * Delta computes in `TableParquetVersionOption`. The GPU Parquet writer only emits DataPageV1,
    * so anything other than Parquet v1 must run on the CPU. Invalid values also fall back so the
@@ -116,11 +125,9 @@ object Delta43xConfigChecker extends DeltaConfigChecker {
     try {
       val writerOptions = normalizedOptions ++ TableParquetVersionOption.getWriterOptions(
         spark, normalizedOptions, normalizedProperties)
-      writerOptions.get(writerVersionKey).foreach { version =>
-        if (WriterVersion.fromString(version) != WriterVersion.PARQUET_1_0) {
-          meta.willNotWorkOnGpu(s"Parquet writer version '$version' (DataPageV2) is not " +
-            "supported on GPU, which only writes DataPageV1")
-        }
+      unsupportedWriterVersion(writerOptions).foreach { version =>
+        meta.willNotWorkOnGpu(s"Parquet writer version '$version' (DataPageV2) is not " +
+          "supported on GPU, which only writes DataPageV1")
       }
     } catch {
       case e: IllegalArgumentException =>
