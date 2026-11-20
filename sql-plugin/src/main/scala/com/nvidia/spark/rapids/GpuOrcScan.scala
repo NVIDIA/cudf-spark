@@ -180,9 +180,10 @@ object GpuOrcScan {
       } && key.isAvailable
     }
     if (hasRequestedEncryptedColumns) {
-      throw new RuntimeException("The GPU does not support decrypting encrypted ORC columns. " +
-        "To read ORC files with available encryption keys, disable the GPU ORC reader via " +
-        s"${RapidsConf.ENABLE_ORC_READ.key}.")
+      throw new QueryExecutionException(
+        "The GPU does not support decrypting encrypted ORC columns. " +
+          "To read ORC files with available encryption keys, disable the GPU ORC reader via " +
+          s"${RapidsConf.ENABLE_ORC_READ.key}.")
     }
   }
 

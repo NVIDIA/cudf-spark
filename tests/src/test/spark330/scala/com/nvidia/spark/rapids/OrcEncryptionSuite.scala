@@ -107,43 +107,46 @@ class OrcEncryptionSuite extends SparkQueryCompareTestSuite with MockitoSugar {
   }
 
   Seq(
-    RapidsReaderType.PERFILE,
-    RapidsReaderType.COALESCING,
-    RapidsReaderType.MULTITHREADED).foreach { readerType =>
-    test(s"Encrypted ORC reads fail only when a requested column uses an available key - " +
-      readerType) {
-      withTempPath { path =>
-        withCpuSparkSession { spark =>
-          intsDf(spark).write.options(Map(
-            "orc.key.provider" -> "memory",
-            "orc.encrypt" -> "pii:ints",
-            "orc.mask" -> "nullify:ints"))
-            .mode("overwrite")
-            .orc(path.getAbsolutePath)
-        }
+    (RapidsReaderType.PERFILE, false),
+    (RapidsReaderType.COALESCING, false),
+    (RapidsReaderType.MULTITHREADED, false),
+    (RapidsReaderType.MULTITHREADED, true)).foreach {
+      case (readerType, ignoreCorruptFiles) =>
+        test(s"Encrypted ORC reads fail only when a requested column uses an available key - " +
+          s"$readerType, ignoreCorruptFiles=$ignoreCorruptFiles") {
+          withTempPath { path =>
+            withCpuSparkSession { spark =>
+              intsDf(spark).write.options(Map(
+                "orc.key.provider" -> "memory",
+                "orc.encrypt" -> "pii:ints",
+                "orc.mask" -> "nullify:ints"))
+                .mode("overwrite")
+                .orc(path.getAbsolutePath)
+            }
 
-        val conf = new SparkConf()
-          .set(RapidsConf.ORC_READER_TYPE.key, readerType.toString)
-        withGpuSparkSession({ spark =>
-          spark.sparkContext.hadoopConfiguration.set("orc.key.provider", "memory")
+            val conf = new SparkConf()
+              .set(RapidsConf.ORC_READER_TYPE.key, readerType.toString)
+              .set("spark.sql.files.ignoreCorruptFiles", ignoreCorruptFiles.toString)
+            withGpuSparkSession({ spark =>
+              spark.sparkContext.hadoopConfiguration.set("orc.key.provider", "memory")
 
-          assert(spark.read.orc(path.getAbsolutePath).count() == 8)
+              assert(spark.read.orc(path.getAbsolutePath).count() == 8)
 
-          val unencryptedValues = spark.read.orc(path.getAbsolutePath)
-            .select("more_ints")
-            .collect()
-            .map(_.getInt(0))
-            .toSet
-          assert(unencryptedValues == Set(1, 2, 3, 4, 5, 6, 7))
+              val unencryptedValues = spark.read.orc(path.getAbsolutePath)
+                .select("more_ints")
+                .collect()
+                .map(_.getInt(0))
+                .toSet
+              assert(unencryptedValues == Set(1, 2, 3, 4, 5, 6, 7))
 
-          val error = intercept[SparkException] {
-            spark.read.orc(path.getAbsolutePath).select("ints").collect()
+              val error = intercept[SparkException] {
+                spark.read.orc(path.getAbsolutePath).select("ints").collect()
+              }
+              assert(exceptionMessages(error).contains(
+                "The GPU does not support decrypting encrypted ORC columns"))
+              assert(exceptionMessages(error).contains(RapidsConf.ENABLE_ORC_READ.key))
+            }, conf)
           }
-          assert(exceptionMessages(error).contains(
-            "The GPU does not support decrypting encrypted ORC columns"))
-          assert(exceptionMessages(error).contains(RapidsConf.ENABLE_ORC_READ.key))
-        }, conf)
-      }
-    }
+        }
   }
 }
