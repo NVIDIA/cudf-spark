@@ -46,11 +46,11 @@ abstract class GpuSubqueryBroadcastMetaDBBase(s: SubqueryBroadcastExec,
     // sends the underlying plan into the plugin in advance via the PlanSubqueries rule.
     // Here, we have the full non-GPU subquery plan, so we convert the whole
     // thing.
-    case ex @ BroadcastExchangeExec(_, child) =>
-      val exMeta = new GpuBroadcastMeta(ex.copy(child = child), conf, p, r)
+    case ex: BroadcastExchangeExec =>
+      val exMeta = new GpuBroadcastMeta(ex, conf, p, r)
       exMeta.tagForGpu()
       if (exMeta.canThisBeReplaced) {
-        broadcastBuilder = () => exMeta.convertToGpu()
+        broadcastBuilder = () => exMeta.convertIfNeeded()
       } else {
         willNotWorkOnGpu("underlying BroadcastExchange can not run in the GPU.")
       }
@@ -67,7 +67,7 @@ abstract class GpuSubqueryBroadcastMetaDBBase(s: SubqueryBroadcastExec,
           val exMeta = new GpuBroadcastMeta(ex, conf, p, r)
           exMeta.tagForGpu()
           if (exMeta.canThisBeReplaced) {
-            broadcastBuilder = () => exMeta.convertToGpu()
+            broadcastBuilder = () => exMeta.convertIfNeeded()
           } else {
             willNotWorkOnGpu("underlying BroadcastExchange can not run in the GPU.")
           }
