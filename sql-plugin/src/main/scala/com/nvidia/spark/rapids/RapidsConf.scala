@@ -752,7 +752,7 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val hybridScanSingleStageFilterKeepThreshold: Double =
     get(PARQUET_HYBRID_SCAN_SINGLE_STAGE_FILTER_KEEP_THRESHOLD)
 
-  lazy val readerKvikioNumThreads: Option[Int] = get(READER_KVIKIO_NUM_THREADS)
+  lazy val readerKvikioNumThreads: Option[Int] = get(READER_KVIKIO_NUM_THREADS).map(_.toInt)
 
   lazy val hybridScanMaxH2DPackSize: Long = get(PARQUET_HYBRID_SCAN_MAX_H2D_PACK_SIZE)
 
