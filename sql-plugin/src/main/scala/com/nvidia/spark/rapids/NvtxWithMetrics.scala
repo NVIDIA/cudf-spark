@@ -59,8 +59,19 @@ class NvtxWithMetrics(name: String, color: NvtxColor, val metrics: Seq[GpuMetric
 object NvtxIdWithMetrics {
 
   def apply[V](nvtxId: NvtxId, metric: GpuMetric)(block: => V): V = {
-    metric.ns {
-      nvtxId.apply(block)
+    val activated = metric.tryActivateTimer(Seq.empty)
+    val start = if (activated) System.nanoTime() else 0L
+    try {
+      try {
+        nvtxId.push()
+        block
+      } finally {
+        nvtxId.pop()
+      }
+    } finally {
+      if (activated) {
+        metric.deactivateTimer(System.nanoTime() - start, Seq.empty)
+      }
     }
   }
 

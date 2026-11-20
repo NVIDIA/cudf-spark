@@ -62,6 +62,36 @@ class GpuMetricNvtxSuite extends AnyFunSuite {
     }
   }
 
+  test("singleton NVTX timing preserves the enclosing range and releases its timer") {
+    withDebugNvtx { id =>
+      val stack = RangeDebugger.threadLocalStack.get()
+      val metric = new LocalGpuMetric
+      val failure = new IllegalStateException("singleton NVTX body failed")
+      assert(stack.isEmpty)
+      id {
+        assert(NvtxIdWithMetrics(id, metric) {
+          assert(stack.size == 2 && stack.top == id)
+          assert(!metric.tryActivateTimer(Seq.empty))
+          42
+        } == 42)
+        assert(stack.size == 1 && stack.top == id)
+        assert(metric.tryActivateTimer(Seq.empty))
+        metric.deactivateTimer(0L, Seq.empty)
+        assert(intercept[IllegalStateException] {
+          NvtxIdWithMetrics(id, metric) {
+            assert(stack.size == 2 && stack.top == id)
+            assert(!metric.tryActivateTimer(Seq.empty))
+            throw failure
+          }
+        } eq failure)
+        assert(stack.size == 1 && stack.top == id)
+        assert(metric.tryActivateTimer(Seq.empty))
+        metric.deactivateTimer(0L, Seq.empty)
+      }
+      assert(stack.isEmpty)
+    }
+  }
+
   test("NVTX closes its nested range when a disabled-metric body throws") {
     withDebugNvtx { id =>
       val stack = RangeDebugger.threadLocalStack.get()

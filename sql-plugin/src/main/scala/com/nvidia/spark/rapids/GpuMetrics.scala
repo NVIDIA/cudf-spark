@@ -562,7 +562,16 @@ sealed abstract class GpuMetric extends Serializable {
   }
 
   final def ns[T](f: => T): T = {
-    ns(Seq.empty)(f)
+    if (tryActivateTimer(Seq.empty)) {
+      val start = System.nanoTime()
+      try {
+        f
+      } finally {
+        deactivateTimer(System.nanoTime() - start, Seq.empty)
+      }
+    } else {
+      f
+    }
   }
 
   final def ns[T](excludeMetrics: Seq[GpuMetric])(f: => T): T = {

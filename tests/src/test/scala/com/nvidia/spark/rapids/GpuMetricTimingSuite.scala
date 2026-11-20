@@ -220,7 +220,10 @@ class GpuMetricTimingSuite extends AnyFunSuite with BeforeAndAfterEach {
     assert(GpuMetric.ns(NoopMetric) { calls += 1; 43 } == 43)
     assert(GpuMetric.ns(Seq.empty, Seq.empty) { calls += 1; 44 } == 44)
     assert(GpuMetric.ns(Seq(NoopMetric, NoopMetric), Seq.empty) { calls += 1; 45 } == 45)
-    assert(calls == 4)
+    assert(inner.ns { calls += 1; 46 } == 46)
+    assert(GpuMetric.ns(inner) { calls += 1; 47 } == 47)
+    assert(NoopMetric.ns { calls += 1; 48 } == 48)
+    assert(calls == 7)
   }
 
   test("metric ranges handle empty, single, duplicate and already active timers") {
@@ -270,6 +273,8 @@ class GpuMetricTimingSuite extends AnyFunSuite with BeforeAndAfterEach {
     val nvtxId = NvtxId("metrics regression", NvtxColor.BLUE, "Test timer ownership")
     assert(outer.tryActivateTimer(Seq.empty))
     val actions: Seq[(() => Unit) => Unit] = Seq(
+      body => inner.ns(body()),
+      body => GpuMetric.ns(inner)(body()),
       body => GpuMetric.ns(Seq(outer, inner, inner), Seq.empty)(body()),
       body => withResource(new MetricRange(Seq(outer, inner)))(_ => body()),
       body => withResource(new NvtxWithMetrics("metrics regression", NvtxColor.BLUE,
