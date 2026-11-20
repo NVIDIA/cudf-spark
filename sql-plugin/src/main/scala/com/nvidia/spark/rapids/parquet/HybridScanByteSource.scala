@@ -16,6 +16,8 @@
 
 package com.nvidia.spark.rapids.parquet
 
+import java.io.{File, FileNotFoundException}
+
 import scala.collection.mutable.ArrayBuffer
 
 import ai.rapids.cudf.{ByteRange, DeviceMemoryBuffer, HostMemoryBuffer}
@@ -25,11 +27,15 @@ import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.filecache.FileCache
+import com.nvidia.spark.rapids.jni.NativeFileSource
 import com.nvidia.spark.rapids.jni.fileio.{RapidsFileIO, RapidsInputFile}
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile.CopyRange
 import com.nvidia.spark.rapids.parquet.HybridScanPipeline.HostBufferLayout
 import com.nvidia.spark.rapids.parquet.ParquetPartitionReader.LocalCopy
-import org.apache.hadoop.fs.Path
+import org.apache.hadoop.fs.{FileSystem, Path, RawLocalFileSystem}
+
+import org.apache.spark.{SparkConf, SparkEnv}
+import org.apache.spark.internal.Logging
 
 /**
  * Where a hybrid scan read's bytes come from.
@@ -90,9 +96,6 @@ private[parquet] class HybridScanFileByteSource(
     filePath: Path,
     execMetrics: Map[String, GpuMetric],
     rangeReader: HybridScanRangeReader) extends HybridScanByteSource {
-
-  def this(fileIO: RapidsFileIO, filePath: Path, execMetrics: Map[String, GpuMetric]) =
-    this(fileIO, filePath, execMetrics, new RapidsFileIORangeReader(execMetrics))
 
   override def fetchToHostBuffer(
       ranges: Array[ByteRange],
@@ -179,6 +182,21 @@ private[parquet] class HybridScanFileByteSource(
   override def close(): Unit = rangeReader.close()
 }
 
+private[parquet] object HybridScanFileByteSource extends Logging {
+  /** The range reader for `filePath`: native if it is a local file, Hadoop if not. */
+  def createRangeReader(
+      filePath: Path,
+      execMetrics: Map[String, GpuMetric]): HybridScanRangeReader = {
+    if (NativeFileRangeReader.canRead(filePath)) {
+      logDebug(s"Hybrid scan reads $filePath with KvikIO")
+      new NativeFileRangeReader(filePath, execMetrics)
+    } else {
+      logDebug(s"Hybrid scan reads $filePath through Hadoop")
+      new RapidsFileIORangeReader(execMetrics)
+    }
+  }
+}
+
 /** How a [[HybridScanFileByteSource]] reads the ranges of its file that it does not have. */
 private[parquet] trait HybridScanRangeReader extends AutoCloseable {
   /** Read `ranges` of `inputFile` into `buffer` at their output offsets. */
@@ -210,5 +228,98 @@ private[parquet] class RapidsFileIORangeReader(execMetrics: Map[String, GpuMetri
       buffer: HostMemoryBuffer,
       ranges: Seq[CopyRange]): Unit = {
     GpuParquetScan.readRangesToHostMemory(inputFile, buffer, ranges, execMetrics)
+  }
+}
+
+/**
+ * A local file read through libcudf's datasource, which reads it with KvikIO. Reads go straight
+ * into the host buffer, split across KvikIO's thread pool, rather than through a Java copy
+ * buffer.
+ *
+ * The file is opened through libcudf the first time a read asks.
+ */
+private[parquet] class NativeFileRangeReader(
+    filePath: Path,
+    execMetrics: Map[String, GpuMetric]) extends HybridScanRangeReader {
+
+  private var nativeFile: NativeFileSource = _
+
+  private def file: NativeFileSource = {
+    if (nativeFile == null) {
+      nativeFile = NativeFileRangeReader.open(filePath)
+    }
+    nativeFile
+  }
+
+  override def readToHost(
+      inputFile: RapidsInputFile,
+      buffer: HostMemoryBuffer,
+      ranges: Seq[CopyRange]): Unit = {
+    execMetrics.getOrElse(READ_FS_TIME, NoopMetric).ns {
+      file.readToHost(ranges.map(_.getInputOffset).toArray, ranges.map(_.getLength).toArray,
+        buffer, ranges.map(_.getOutputOffset).toArray)
+    }
+    val bytesRead = ranges.map(_.getLength).sum
+    execMetrics.getOrElse(HYBRID_SCAN_NATIVE_HOST_BYTES_READ, NoopMetric) += bytesRead
+    NativeFileRangeReader.countFileSystemBytesRead(bytesRead)
+  }
+
+  override def close(): Unit = {
+    if (nativeFile != null) {
+      nativeFile.close()
+      nativeFile = null
+    }
+  }
+}
+
+private[parquet] object NativeFileRangeReader {
+  // Spark takes a task's input bytes from Hadoop's per-thread filesystem statistics, which reads
+  // outside Hadoop do not update, so count them there as Hadoop's local filesystem would.
+  @scala.annotation.nowarn("msg=method getStatistics in class FileSystem is deprecated")
+  private lazy val localFileSystemStatistics =
+    FileSystem.getStatistics("file", classOf[RawLocalFileSystem])
+
+  def countFileSystemBytesRead(bytesRead: Long): Unit =
+    localFileSystemStatistics.incrementBytesRead(bytesRead)
+
+  /**
+   * Open `filePath` through libcudf. A missing file fails as FileNotFoundException, as it does
+   * through Hadoop, so ignoreMissingFiles can skip it; libcudf gives it no type of its own.
+   */
+  def open(filePath: Path): NativeFileSource = {
+    // Startup skips the setup if a session enables hybrid scan later, so do it at the first open.
+    if (!GpuDeviceManager.isKvikioInitialized) {
+      GpuDeviceManager.initializeKvikio(
+        new RapidsConf(Option(SparkEnv.get).map(_.conf).getOrElse(new SparkConf())))
+    }
+    val localPath = filePath.toUri.getPath
+    try {
+      NativeFileSource.open(localPath)
+    } catch {
+      case e: RuntimeException if !new File(localPath).exists() =>
+        val missing = new FileNotFoundException(s"File $filePath does not exist")
+        missing.initCause(e)
+        throw missing
+    }
+  }
+
+  /**
+   * Whether `filePath` names a local file with no Hadoop checksum file. libcudf opens the file by
+   * path outside Hadoop, so any other scheme, or a file: path with a host, would open the wrong
+   * file. A path with no scheme is not known to be local: Hadoop resolves it against
+   * fs.defaultFS. A file Hadoop's LocalFileSystem wrote has a `.crc` sidecar, which Hadoop
+   * verifies on read and libcudf does not, so it is left to Hadoop.
+   */
+  def canRead(filePath: Path): Boolean = {
+    val uri = filePath.toUri
+    "file".equalsIgnoreCase(uri.getScheme) &&
+      (uri.getAuthority == null || uri.getAuthority.isEmpty) &&
+      !checksumFile(uri.getPath).exists()
+  }
+
+  /** The sidecar where Hadoop's ChecksumFileSystem keeps `localPath`'s checksums. */
+  def checksumFile(localPath: String): File = {
+    val file = new File(localPath)
+    new File(file.getParentFile, s".${file.getName}.crc")
   }
 }

@@ -569,6 +569,19 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
       .checkValue(v => v > 0 && v <= 1, "The keep threshold must be in the range (0, 1].")
       .createWithDefault(0.9)
 
+  val READER_KVIKIO_NUM_THREADS =
+    conf("spark.rapids.sql.reader.kvikio.numThreads")
+      .doc("The number of threads in each executor's KvikIO thread pool, which the Parquet " +
+          s"hybrid scan reader (${PARQUET_HYBRID_SCAN_ENABLED.key}) splits each read of a " +
+          "local file across. Set once per executor at startup. If unset, KvikIO's own " +
+          "KVIKIO_NTHREADS or KVIKIO_NUM_THREADS environment variable applies if set, else " +
+          s"${MULTITHREAD_READ_NUM_THREADS.key}.")
+      .startupOnly()
+      .internal()
+      .integerConf
+      .checkValue(v => v > 0, "KvikIO needs at least 1 thread.")
+      .createOptional
+
   val PARQUET_HYBRID_SCAN_MAX_H2D_PACK_SIZE =
     conf("spark.rapids.sql.format.parquet.hybridScan.maxH2DPackSize")
       .doc("Most bytes of column chunks a hybrid scan read packs into one device allocation when " +
