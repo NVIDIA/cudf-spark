@@ -145,8 +145,7 @@ def test_parquet_nested_dotted_names(spark_tmp_path, footer):
 
 
 @ignore_order(local=True)
-@pytest.mark.parametrize("footer", ["JAVA", "NATIVE"])
-def test_dotted_column_renamed_by_parquet_field_id(spark_tmp_path, footer):
+def test_dotted_column_renamed_by_parquet_field_id(spark_tmp_path):
     path = spark_tmp_path + "/field_ids"
     schema = StructType([
         StructField("a", StructType([StructField("b", IntegerType()),
@@ -163,10 +162,11 @@ def test_dotted_column_renamed_by_parquet_field_id(spark_tmp_path, footer):
         StructField("other", IntegerType(), metadata={"parquet.field.id": 2}),
         StructField("renamed", IntegerType(), metadata={"parquet.field.id": 1}),
     ])
+    # Field-ID reads always use the JAVA footer; NATIVE falls back to JAVA.
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.schema(read_schema).parquet(path),
         conf={"spark.sql.parquet.fieldId.read.enabled": "true",
-              "spark.rapids.sql.format.parquet.reader.footer.type": footer})
+              "spark.rapids.sql.format.parquet.reader.footer.type": "JAVA"})
 
 
 @ignore_order(local=True)
