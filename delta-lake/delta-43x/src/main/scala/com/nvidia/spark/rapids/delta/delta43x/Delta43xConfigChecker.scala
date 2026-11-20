@@ -16,11 +16,17 @@
 
 package com.nvidia.spark.rapids.delta.delta43x
 
+import java.util.Locale
+
 import com.nvidia.spark.rapids.RapidsMeta
 import com.nvidia.spark.rapids.delta.DeltaConfigChecker
+import org.apache.parquet.column.ParquetProperties.WriterVersion
+import org.apache.parquet.hadoop.ParquetOutputFormat
 
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.delta.{DeltaConfigs, DeltaLog, DeltaOptions, IcebergCompat,
-  MaterializePartitionColumnsTableFeature}
+  MaterializePartitionColumnsTableFeature, Snapshot}
+import org.apache.spark.sql.delta.util.TableParquetVersionOption
 import org.apache.spark.sql.internal.SQLConf
 
 object Delta43xConfigChecker extends DeltaConfigChecker {
@@ -47,6 +53,85 @@ object Delta43xConfigChecker extends DeltaConfigChecker {
         meta.willNotWorkOnGpu(
           "Delta 4.3 materialized partition column writes are not supported on GPU")
       }
+    }
+  }
+
+  override def checkTableProperties(
+      meta: RapidsMeta[_, _, _],
+      spark: SparkSession,
+      options: Map[String, String],
+      snapshot: => Snapshot): Unit = {
+    val current = snapshot
+    val properties = if (current.version < 0) {
+      // No table exists yet, so Delta creates it with these options and the session defaults.
+      creationProperties(spark, current.metadata.configuration, options)
+    } else {
+      current.metadata.configuration
+    }
+    tagParquetFormatVersion(meta, spark, options, properties)
+  }
+
+  private def normalizeKey(properties: Map[String, String], key: String): Map[String, String] =
+    properties.map {
+      case (k, v) if k.equalsIgnoreCase(key) => key -> v
+      case kv => kv
+    }
+
+  /**
+   * The table properties a new table is created with: the explicit properties, the `delta.*`
+   * write options that Delta persists as properties when a write creates the table, and the
+   * session's table property defaults for whatever is still unset. Delta normalizes the case of
+   * `delta.*` keys on its own, so the Parquet format version key is normalized before the
+   * defaults are merged, or an explicit value would not replace a default spelled differently.
+   */
+  def creationProperties(
+      spark: SparkSession,
+      properties: Map[String, String],
+      writeOptions: Map[String, String]): Map[String, String] = {
+    val deltaOptions = writeOptions.filter { case (k, _) =>
+      k.toLowerCase(Locale.ROOT).startsWith("delta.")
+    }
+    val explicit = normalizeKey(properties, DeltaConfigs.PARQUET_FORMAT_VERSION.key) ++
+      normalizeKey(deltaOptions, DeltaConfigs.PARQUET_FORMAT_VERSION.key)
+    DeltaConfigs.mergeGlobalConfigs(spark.sessionState.conf, explicit)
+  }
+
+  /**
+   * The Parquet writer version requested by resolved writer options, when it is one the GPU
+   * cannot write: the GPU Parquet writer only emits DataPageV1. Throws IllegalArgumentException
+   * for a value that is not a Parquet writer version at all.
+   */
+  def unsupportedWriterVersion(writerOptions: Map[String, String]): Option[String] =
+    writerOptions.get(ParquetOutputFormat.WRITER_VERSION)
+      .filter(WriterVersion.fromString(_) != WriterVersion.PARQUET_1_0)
+
+  /**
+   * `delta.parquet.format.version` selects the Parquet data page version via the writer version
+   * Delta computes in `TableParquetVersionOption`. The GPU Parquet writer only emits DataPageV1,
+   * so anything other than Parquet v1 must run on the CPU. Invalid values also fall back so the
+   * CPU path raises Delta's own validation error. `effectiveProperties` are the properties of the
+   * table being written, or for a table being created the result of [[creationProperties]].
+   */
+  def tagParquetFormatVersion(
+      meta: RapidsMeta[_, _, _],
+      spark: SparkSession,
+      options: Map[String, String],
+      effectiveProperties: Map[String, String]): Unit = {
+    // Delta matches these keys exactly, but its catalog and commit path normalize their case.
+    val writerVersionKey = ParquetOutputFormat.WRITER_VERSION
+    val normalizedOptions = normalizeKey(options, writerVersionKey)
+    val normalizedProperties =
+      normalizeKey(effectiveProperties, DeltaConfigs.PARQUET_FORMAT_VERSION.key)
+    try {
+      val writerOptions = normalizedOptions ++ TableParquetVersionOption.getWriterOptions(
+        spark, normalizedOptions, normalizedProperties)
+      unsupportedWriterVersion(writerOptions).foreach { version =>
+        meta.willNotWorkOnGpu(s"Parquet writer version '$version' (DataPageV2) is not " +
+          "supported on GPU, which only writes DataPageV1")
+      }
+    } catch {
+      case e: IllegalArgumentException =>
+        meta.willNotWorkOnGpu(s"invalid Parquet format version: ${e.getMessage}")
     }
   }
 }

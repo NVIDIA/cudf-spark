@@ -196,10 +196,13 @@ object Delta43xProvider extends DeltaProviderBase with Logging {
   private def tagIfUnsupportedWriterFeatures(
       meta: RapidsMeta[_, _, _],
       properties: Map[String, String],
+      writeOptions: Map[String, String],
       hasPartitionColumns: Boolean,
       spark: SparkSession): Unit = {
-    val effectiveProperties = DeltaConfigs.mergeGlobalConfigs(
-      spark.sessionState.conf, properties)
+    val effectiveProperties = Delta43xConfigChecker.creationProperties(
+      spark, properties, writeOptions)
+    Delta43xConfigChecker.tagParquetFormatVersion(
+      meta, spark, writeOptions, effectiveProperties)
     if (DeltaConfigs.ENABLE_VARIANT_SHREDDING.fromMap(effectiveProperties)) {
       meta.willNotWorkOnGpu("Delta 4.3 variant shredding writes are not supported on GPU")
     }
@@ -234,8 +237,8 @@ object Delta43xProvider extends DeltaProviderBase with Logging {
         cpuExec.ident,
         cpuExec.properties)
     }
-    tagIfUnsupportedWriterFeatures(
-      meta, cpuExec.properties, cpuExec.partitioning.nonEmpty, cpuExec.session)
+    tagIfUnsupportedWriterFeatures(meta, cpuExec.properties, cpuExec.writeOptions,
+      cpuExec.partitioning.nonEmpty, cpuExec.session)
   }
 
   override def tagForGpu(
@@ -253,8 +256,8 @@ object Delta43xProvider extends DeltaProviderBase with Logging {
         tagIfTargetTableUnsupported(meta, cpuExec)
       }
     }
-    tagIfUnsupportedWriterFeatures(
-      meta, cpuExec.properties, cpuExec.partitioning.nonEmpty, cpuExec.session)
+    tagIfUnsupportedWriterFeatures(meta, cpuExec.properties, cpuExec.writeOptions,
+      cpuExec.partitioning.nonEmpty, cpuExec.session)
   }
 
   override def tagForGpu(

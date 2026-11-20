@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -38,8 +38,12 @@ object RapidsDeltaUtils {
     } else {
       meta.willNotWorkOnGpu(s"file format $format is not supported")
     }
-    DeltaRuntimeShim.getDeltaConfigChecker
-      .checkIncompatibleConfs(meta, deltaLog, spark.sessionState.conf, options)
+    val configChecker = DeltaRuntimeShim.getDeltaConfigChecker
+    configChecker.checkIncompatibleConfs(meta, deltaLog, spark.sessionState.conf, options)
+    deltaLog.foreach { log =>
+      configChecker.checkTableProperties(meta, spark, options,
+        DeltaRuntimeShim.unsafeVolatileSnapshotFromLog(log))
+    }
   }
 
   def getTightBoundColumnOnFileInitDisabled(spark: SparkSession): Boolean = {
