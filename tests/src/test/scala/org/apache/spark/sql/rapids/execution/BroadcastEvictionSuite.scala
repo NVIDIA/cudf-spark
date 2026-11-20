@@ -166,14 +166,15 @@ class BroadcastEvictionSuite extends SpillUnitTestBase with Eventually {
 
   /**
    * Run `body` like a `MemoryStore` eviction, on a task thread that holds the memory manager
-   * lock, and check that it does not allocate device memory.
+   * lock, and check that it does not allocate device memory. `release` unblocks the paused task
+   * that a stuck eviction may wait for.
    */
-  private def evict[T](failure: String)(body: => T): T = {
-    val evictorContext = new MockTaskContext(taskAttemptId = 2, partitionId = 1)
+  private def evict[T](failure: String, release: () => Unit = () => ())(body: => T): T = {
     val pool = Executors.newSingleThreadExecutor()
     try {
       val evictor = pool.submit(new Callable[T] {
         override def call(): T = {
+          val evictorContext = new MockTaskContext(taskAttemptId = 2, partitionId = 1)
           TrampolineUtil.setTaskContext(evictorContext)
           try {
             SparkEnv.get.memoryManager.synchronized {
@@ -185,16 +186,17 @@ class BroadcastEvictionSuite extends SpillUnitTestBase with Eventually {
               result
             }
           } finally {
-            TrampolineUtil.unsetTaskContext()
+            try evictorContext.markTaskComplete() finally TrampolineUtil.unsetTaskContext()
           }
         }
       })
       awaitOrFail(evictor, failure)
     } finally {
-      // Interrupt a stuck eviction so that it releases the memory manager lock. Do not wait for
-      // it: one blocked on a monitor stops only once the test releases the paused task, and
-      // waiting would replace the deadlock failure.
-      try pool.shutdownNow() finally evictorContext.markTaskComplete()
+      // Interrupt a stuck eviction so that it releases the memory manager lock, release the paused
+      // task that one blocked on a monitor waits for, and join the eviction so that it does not
+      // outlive the test. Ignore the join's result to keep the deadlock failure.
+      pool.shutdownNow()
+      try release() finally pool.awaitTermination(30, TimeUnit.SECONDS)
     }
   }
 
@@ -251,7 +253,7 @@ class BroadcastEvictionSuite extends SpillUnitTestBase with Eventually {
         override protected def buildGpuBatch(): SpillableColumnarBatch = {
           builds.incrementAndGet()
           building.countDown()
-          // Without a timeout, so it outlasts `evict`'s; the test releases it in `finally`
+          // Without a timeout, so it outlasts `evict`'s; `evict` or the test releases it
           mayBuild.await()
           super.buildGpuBatch()
         }
@@ -337,8 +339,8 @@ class BroadcastEvictionSuite extends SpillUnitTestBase with Eventually {
           val waiterThread = new AtomicReference[Thread]()
           val waiter = submitRecorded(pool, waiterThread)(broadcast.batch)
           awaitThread(waiterThread, Thread.State.BLOCKED, "the second task did not wait")()
-          val evicted = evict("deadlock: eviction waits for a task building the GPU batch")(
-            write(broadcast))
+          val evicted = evict("deadlock: eviction waits for a task building the GPU batch",
+            () => paused.mayBuild.countDown())(write(broadcast))
           paused.mayBuild.countDown()
           val built = awaitOrFail(materializer, "the task did not build the GPU batch")
           assert(awaitOrFail(waiter, "the second task did not get the GPU batch") eq built)
@@ -418,7 +420,7 @@ class BroadcastEvictionSuite extends SpillUnitTestBase with Eventually {
           assert(hostBuffer.getRefCount == 0, "the eviction did not release the host buffer")
           withBroadcast(read(written.toByteArray))(assertSameData(expected, _))
         } finally {
-          mayWrite.countDown()
+          // On failure, interrupt the paused writer rather than let it write a closed buffer
           stop(pool)
         }
       }
@@ -444,7 +446,7 @@ class BroadcastEvictionSuite extends SpillUnitTestBase with Eventually {
                   filterOutNulls = false)
                 broadcast.hashBuildCache.getOrBuild(key, HashBuildMetrics()) {
                   building.countDown()
-                  // Without a timeout, so it outlasts `evict`'s; the test releases it in `finally`
+                  // Without a timeout, so it outlasts `evict`'s; `evict` or the test releases it
                   mayBuild.await()
                   throw new IllegalStateException("test hash build")
                 }
@@ -458,8 +460,8 @@ class BroadcastEvictionSuite extends SpillUnitTestBase with Eventually {
           awaitThread(closerThread, Thread.State.WAITING,
             "closeInternal did not wait for the hash build")(
             _.getClassName == classOf[HashBuildCache].getName)
-          evict("deadlock: closing the broadcast holds its locks while waiting for a hash build")(
-            write(broadcast))
+          evict("deadlock: closing the broadcast holds its locks while waiting for a hash build",
+            () => mayBuild.countDown())(write(broadcast))
           mayBuild.countDown()
           awaitOrFail(closer, "closeInternal did not finish")
           intercept[ExecutionException](builder.get(30, TimeUnit.SECONDS))
