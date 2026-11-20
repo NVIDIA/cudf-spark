@@ -22,6 +22,7 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 
 import scala.collection.mutable.ArrayBuffer
 
+import com.nvidia.spark.rapids.RapidsConf
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 import org.apache.hadoop.security.UserGroupInformation
@@ -43,16 +44,8 @@ import org.apache.spark.util.{SerializableConfiguration, ThreadUtils, Utils => S
  */
 private[rapids] object GpuDeletionVectorWriter extends Logging {
   /**
-   * Packed files a single task may have in flight (and so buffered) at once. This is a count, not
-   * a size: each file is buffered up to `packing.targetSize`, so a task buffers up to this many
-   * times that, and an executor up to that times its concurrently running tasks. The value comes
-   * from measurements on S3, where the time of a task writing many files kept falling up to this
-   * value.
-   */
-  private[rapids] val MaxFilesInFlightPerTask = 32
-
-  /**
-   * Upper bound on writer threads shared by all concurrently running tasks of an executor. Bins
+   * Upper bound on writer threads shared by all concurrently running tasks of an executor, however
+   * high `maxFilesInFlightPerTask` is set. Bins
    * beyond it queue for a thread, which is safe, as writers never wait for each other: with many
    * DV-writing tasks, each task's files just take longer. Queued bins still hold their data, so
    * the limit bounds threads, not buffered bins. It was not tuned for that case.
@@ -72,6 +65,12 @@ private[rapids] object GpuDeletionVectorWriter extends Logging {
     // hadoop.fs.Path is not Serializable, so close over its string representation.
     val tablePathString = DeletionVectorStore.pathToEscapedString(table)
     val packingTargetSize = spark.conf.get(DeltaSQLConf.DELETION_VECTOR_PACKING_TARGET_SIZE)
+    // Packed files a task writes at once. This is a count, not a size: each file is buffered up to
+    // the packing target, so a task buffers up to this many times that, and an executor up to that
+    // times its concurrently running tasks. The default comes from S3 measurements, where more
+    // files in flight kept helping but cost memory in proportion.
+    val maxFilesInFlight =
+      new RapidsConf(spark.sessionState.conf).deltaDvWriteMaxFilesInFlightPerTask
 
     rows => {
       val dvStore = DeletionVectorStore.createInstance(broadcastHadoopConf.value.value)
@@ -95,7 +94,8 @@ private[rapids] object GpuDeletionVectorWriter extends Logging {
         })
       }
 
-      writeBins(new BinPackingIterator(rows, packingTargetSize), writeBin)
+      writeBins(new BinPackingIterator(rows, packingTargetSize), writeBin,
+        maxInFlight = maxFilesInFlight)
     }
   }
 
@@ -106,8 +106,8 @@ private[rapids] object GpuDeletionVectorWriter extends Logging {
   private[rapids] def writeBins[I, O](
       bins: Iterator[Seq[I]],
       writeBin: Seq[I] => Seq[O],
-      pool: => ExecutorService = writerPool,
-      maxInFlight: Int = MaxFilesInFlightPerTask): Iterator[O] = {
+      maxInFlight: Int,
+      pool: => ExecutorService = writerPool): Iterator[O] = {
     if (!bins.hasNext) {
       Iterator.empty
     } else {

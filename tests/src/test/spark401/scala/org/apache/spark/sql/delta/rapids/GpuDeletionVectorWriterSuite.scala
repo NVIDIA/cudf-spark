@@ -64,8 +64,8 @@ class GpuDeletionVectorWriterSuite extends SparkQueryCompareTestSuite {
   }
 
   test("no bins produce no results") {
-    assert(GpuDeletionVectorWriter.writeBins(Iterator.empty[Seq[Int]], (b: Seq[Int]) => b)
-      .isEmpty)
+    assert(GpuDeletionVectorWriter.writeBins(Iterator.empty[Seq[Int]], (b: Seq[Int]) => b,
+      maxInFlight = 4).isEmpty)
   }
 
   test("a single bin is written on the calling thread") {
@@ -74,6 +74,7 @@ class GpuDeletionVectorWriterSuite extends SparkQueryCompareTestSuite {
     val results = GpuDeletionVectorWriter.writeBins(
       Iterator(Seq(1, 2)),
       (bin: Seq[Int]) => { writers.add(Thread.currentThread()); bin },
+      maxInFlight = 4,
       pool = fail("a single bin must not use the pool")).toSeq
     assert(results == Seq(1, 2))
     assert(writers.toArray.toSeq == Seq(caller))
@@ -90,6 +91,7 @@ class GpuDeletionVectorWriterSuite extends SparkQueryCompareTestSuite {
           assert(allStarted.await(30, TimeUnit.SECONDS), "bins were written serially")
           bin
         },
+        maxInFlight = 4,
         pool = pool).toSeq
       assert(results == Seq(0, 10, 1, 11, 2, 12, 3, 13))
     }
@@ -238,6 +240,7 @@ class GpuDeletionVectorWriterSuite extends SparkQueryCompareTestSuite {
                 running.decrementAndGet()
               }
             },
+            maxInFlight = 2,
             pool = pool).toSeq
         } catch {
           case _: InterruptedException => // the interrupt of the wait is reported as is
