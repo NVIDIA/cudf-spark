@@ -27,6 +27,7 @@ import ai.rapids.cudf.{ColumnVector, DType, HostMemoryBuffer, Scalar, Schema, Ta
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.jni.{CastStrings, GpuSplitAndRetryOOM}
+import com.nvidia.spark.rapids.perf.HistorySizedFileScan
 import com.nvidia.spark.rapids.shims.{ColumnDefaultValuesShims, ShimFilePartitionReaderFactory}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
@@ -349,7 +350,7 @@ case class GpuCSVScan(
     maxReaderBatchSizeRows: Integer,
     maxReaderBatchSizeBytes: Long,
     maxGpuColumnSizeBytes: Long)
-  extends TextBasedFileScan(sparkSession, options) with GpuScan {
+  extends TextBasedFileScan(sparkSession, options) with GpuScan with HistorySizedFileScan {
 
   private lazy val parsedOptions: CSVOptions = new CSVOptions(
     options.asScala.toMap,
@@ -370,7 +371,7 @@ case class GpuCSVScan(
     }
   }
 
-  override def createReaderFactory(): PartitionReaderFactory = {
+  override def createReaderFactory(): PartitionReaderFactory = observed {
     val caseSensitiveMap = options.asCaseSensitiveMap.asScala.toMap
     // Hadoop Configurations are case sensitive.
     val hadoopConf = sparkSession.sessionState.newHadoopConfWithOptions(caseSensitiveMap)

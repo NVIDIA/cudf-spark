@@ -90,14 +90,15 @@ and cannot be detected reliably. Such mounts are unsupported; the deployer is re
 selecting local or block storage. New database files use owner-only permissions where the filesystem
 supports them, but the database is not encrypted.
 
-The current production catalog is empty. Before using the local provider to record observations,
-add a governed metric family as described below. Enabling the provider alone does not collect metrics
-or change planning decisions.
+The provider admits only the metric families the RAPIDS plugin gives it as its catalog, described
+below. Enabling the provider alone does not collect metrics or change planning decisions.
 
 ## Govern the metric before integrating it
 
-Production metric families come from the source-controlled `HistoryMetricCatalog`, not from
-runtime registration. The catalog contains one permanent ID/name/tombstone entry per family, never
+The RAPIDS plugin's metric families are declared in its source (`HistoryMetric` in
+`sql-plugin`), reviewed with the plugin's own changes, and given to the provider as its
+`HistoryMetricCatalog` when the plugin opens it; they are not registered by heuristics at runtime.
+The catalog contains one permanent ID/name/tombstone entry per family, never
 one entry per version. Every family-scoped contract version reuses that ID/name; the same name under
 a different ID is invalid. Exact versioned requests use `MetricVersionId`. The metric owner should
 review, together:
