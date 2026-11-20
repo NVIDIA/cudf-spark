@@ -741,7 +741,9 @@ case class GpuOrcMultiFilePartitionReaderFactory(
             // contribute, so skip it (the single-file path uses an EmptyPartitionReader).
             if (orcPartitionReaderContext != null) {
               val compressionKey = (orcPartitionReaderContext.compressionKind,
-                orcPartitionReaderContext.compressionSize)
+                OrcCommonFunctions.compressionSizeForCombining(
+                  orcPartitionReaderContext.compressionKind,
+                  orcPartitionReaderContext.compressionSize))
               compressionAndStripes.getOrElseUpdate(compressionKey,
                 new ArrayBuffer[OrcSingleStripeMeta]) ++=
                 orcPartitionReaderContext.blockIterator.map(block =>
@@ -923,6 +925,25 @@ object OrcBlockMetaForSplitCheck {
   }
 }
 
+private[rapids] object OrcCommonFunctions {
+  def compressionSizeForCombining(
+      compressionKind: CompressionKind,
+      compressionSize: Int): Int = {
+    if (compressionKind == CompressionKind.NONE) 0 else compressionSize
+  }
+
+  def buildPostscript(
+      sourcePostscript: OrcProto.PostScript,
+      footerLength: Long): OrcProto.PostScript = {
+    OrcProto.PostScript.newBuilder(sourcePostscript)
+      .setFooterLength(footerLength)
+      .setMetadataLength(0)
+      // Stripe statistics are not copied into the synthetic file.
+      .clearStripeStatisticsLength()
+      .build()
+  }
+}
+
 /** Collections of some common functions for ORC */
 trait OrcCommonFunctions extends OrcCodecWritingHelper { self: FilePartitionReaderBase =>
   /** Whether debug dumping is enabled and the path prefix where to dump */
@@ -1007,12 +1028,8 @@ trait OrcCommonFunctions extends OrcCodecWritingHelper { self: FilePartitionRead
 
     // 2) Write the PostScript (uncompressed)
     val footerLen = outStream.getPos - posBeforeFooter
-    val postscript = OrcProto.PostScript.newBuilder(ctx.fileTail.getPostscript)
-      .setFooterLength(footerLen)
-      .setMetadataLength(0)
-      // Stripe statistics are not copied into the synthetic file.
-      .setStripeStatisticsLength(0)
-      .build()
+    val postscript =
+      OrcCommonFunctions.buildPostscript(ctx.fileTail.getPostscript, footerLen)
     postscript.writeTo(outStream)
     val postScriptLength = outStream.getPos - posBeforeFooter - footerLen
     if (postScriptLength > 255) {
@@ -1101,7 +1118,11 @@ trait OrcCommonFunctions extends OrcCodecWritingHelper { self: FilePartitionRead
       return true
     }
 
-    if (nextMeta.compressionSize != curMeta.compressionSize) {
+    val currentCompressionSize = OrcCommonFunctions.compressionSizeForCombining(
+      curMeta.compressionKind, curMeta.compressionSize)
+    val nextCompressionSize = OrcCommonFunctions.compressionSizeForCombining(
+      nextMeta.compressionKind, nextMeta.compressionSize)
+    if (nextCompressionSize != currentCompressionSize) {
       logInfo(s"ORC compression block size for the next file ${nextMeta.filePath} " +
         s"(${nextMeta.compressionSize}) doesn't match current ${curMeta.filePath} " +
         s"(${curMeta.compressionSize}), splitting it into another batch!")
