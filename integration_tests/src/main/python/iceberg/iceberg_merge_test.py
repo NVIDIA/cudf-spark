@@ -27,7 +27,7 @@ from iceberg import (
     supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance,
     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, iceberg_table_properties_sql,
     row_lineage_df, rapids_reader_types, setup_iceberg_write_default_tables,
-    assert_iceberg_write_default_result, setup_iceberg_fixed_default_table)
+    assert_iceberg_write_default_result, assert_iceberg_write_only_default_fallback)
 from marks import allow_non_gpu, allow_non_gpu_conditional, iceberg, ignore_order, datagen_overrides, iceberg_fast_test
 from spark_session import is_spark_400_or_later, with_gpu_session, with_cpu_session
 
@@ -330,31 +330,24 @@ def test_iceberg_merge_write_defaults(spark_tmp_table_factory, merge_mode):
 @ignore_order(local=True)
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @pytest.mark.skipif(not is_spark_400_or_later(), reason="Write defaults require Spark 4.0 or later")
+@pytest.mark.parametrize("merge_mode,fallback_exec", [
+    pytest.param("copy-on-write", "ReplaceDataExec", id="cow"),
+    pytest.param("merge-on-read", "WriteDeltaExec", id="mor")])
 @allow_non_gpu(
-    "LocalTableScanExec", "WriteDeltaExec", "MergeRowsExec", "BatchScanExec",
+    "LocalTableScanExec", "ReplaceDataExec", "WriteDeltaExec", "MergeRowsExec", "BatchScanExec",
     "ColumnarToRowExec", "ShuffleExchangeExec", "SortExec", "ProjectExec")
-def test_iceberg_merge_write_only_default_fallback(spark_tmp_table_factory):
-    base = get_full_table_name(spark_tmp_table_factory)
-
-    def setup(spark):
-        for mode in ("cpu", "gpu"):
-            setup_iceberg_fixed_default_table(spark, f"{base}_{mode}", initial_only=False,
-                                              table_properties={"write.merge.mode": "merge-on-read"})
-
-    with_cpu_session(setup)
-
+def test_iceberg_merge_write_only_default_fallback(
+        spark_tmp_table_factory, merge_mode, fallback_exec):
     def write(spark, table_name):
-        df = spark.sql(
+        spark.sql(
             f"MERGE INTO {table_name} t USING "
             "(SELECT * FROM VALUES (1L), (2L) AS v(id)) s ON t.id = s.id "
             "WHEN MATCHED THEN UPDATE SET id = s.id "
-            "WHEN NOT MATCHED THEN INSERT (id) VALUES (s.id)")
-        df.collect()
+            "WHEN NOT MATCHED THEN INSERT (id) VALUES (s.id)").collect()
 
-    assert_gpu_fallback_write_sql(
-        write, lambda spark, table: spark.table(table),
-        base, ["WriteDeltaExec"],
-        conf=copy_and_update(iceberg_merge_v3_enabled_conf, {"spark.sql.adaptive.enabled": "false"}))
+    assert_iceberg_write_only_default_fallback(
+        spark_tmp_table_factory, write, fallback_exec, {"write.merge.mode": merge_mode})
+
 
 @iceberg_fast_test
 @iceberg

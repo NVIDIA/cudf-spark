@@ -25,7 +25,8 @@ from pyspark.sql.types import FloatType, DoubleType, BinaryType
 
 import pytest
 
-from asserts import assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect
+from asserts import (assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect,
+                     assert_gpu_fallback_write_sql)
 from conftest import is_iceberg_rest_catalog, spark_jvm
 from data_gen import *
 from spark_session import is_iceberg_supported_spark, with_cpu_session, with_gpu_session
@@ -506,6 +507,21 @@ def setup_iceberg_fixed_default_table(spark, name, *, initial_only, table_proper
         update.addColumn("payload", fixed).commit()
     table.updateSchema().updateColumnDefault("payload", None if initial_only else value).commit()
     spark.sql(f"REFRESH TABLE {name}")
+
+
+def assert_iceberg_write_only_default_fallback(
+        spark_tmp_table_factory, write, fallback_exec, table_properties=None):
+    base = get_full_table_name(spark_tmp_table_factory)
+
+    def setup(spark):
+        for suffix in ("cpu", "gpu"):
+            setup_iceberg_fixed_default_table(
+                spark, f"{base}_{suffix}", initial_only=False, table_properties=table_properties)
+
+    with_cpu_session(setup)
+    assert_gpu_fallback_write_sql(
+        write, lambda spark, table: spark.table(table), base, [fallback_exec],
+        conf=copy_and_update(iceberg_write_enabled_conf, {"spark.sql.adaptive.enabled": "false"}))
 
 
 def assert_gpu_and_cpu_lineage_writes_are_equal(
