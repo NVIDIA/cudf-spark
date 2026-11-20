@@ -192,8 +192,14 @@ object GpuSparkPositionDeltaWrite {
     val table: Table = tableOf(deltaWrite)
     val partitionSpec = table.spec()
 
-    IcebergFormatVersionSupport.tagForFormatVersion(
-      table, dataWriterSchemaFor(command, context), meta)
+    // The CPU write context can strip defaults; validate the authoritative table schema.
+    // DELETE writes only file/position metadata, so table data defaults do not apply.
+    val defaultsSchema = if (command == Command.DELETE) {
+      GpuWriteContext.positionDeleteSchema
+    } else {
+      table.schema()
+    }
+    IcebergFormatVersionSupport.tagForWriteSchema(table, defaultsSchema, meta)
     IcebergEncryptionSupport.tagForWrite(table, meta)
 
     // Iceberg's delta write is similar to normal write, but will write position deletes
@@ -926,7 +932,8 @@ case class GpuWriteContext(
 }
 
 object GpuWriteContext {
-  val positionDeleteSparkType: StructType = toSparkType(DeleteSchemaUtil.pathPosSchema())
+  private[source] val positionDeleteSchema: Schema = DeleteSchemaUtil.pathPosSchema()
+  val positionDeleteSparkType: StructType = toSparkType(positionDeleteSchema)
 
   private[iceberg] val positionDeleteDataTypes = positionDeleteSparkType.fields.map(_.dataType)
   private[iceberg] val emptyPartitionData: PartitionData =

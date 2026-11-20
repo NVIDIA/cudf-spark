@@ -289,7 +289,7 @@ object GpuSparkWrite {
     val table: Table = GpuSparkWriteAccess.table(cpuWrite)
     val partitionSpec = table.spec()
 
-    IcebergFormatVersionSupport.tagForFormatVersion(table, meta)
+    IcebergFormatVersionSupport.tagForWriteSchema(table, table.schema(), meta)
     IcebergEncryptionSupport.tagForWrite(table, meta)
 
     val dsSchema = GpuSparkWriteAccess.dsSchema(cpuWrite)
