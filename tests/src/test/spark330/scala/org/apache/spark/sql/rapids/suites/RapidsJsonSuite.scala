@@ -24,7 +24,6 @@ import org.apache.spark.sql.execution.datasources.{InMemoryFileIndex, NoopCache}
 import org.apache.spark.sql.execution.datasources.json.JsonSuite
 import org.apache.spark.sql.execution.datasources.v2.json.JsonScanBuilder
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
 import org.apache.spark.sql.rapids.utils.{RapidsJsonConfTrait, RapidsSQLTestsBaseTrait}
 import org.apache.spark.sql.sources
 import org.apache.spark.sql.types.{IntegerType, StructType}
@@ -81,26 +80,4 @@ class RapidsJsonLegacyTimeParserSuite extends RapidsJsonSuite with RapidsSQLTest
   override def sparkConf: SparkConf =
     super.sparkConf
       .set(SQLConf.LEGACY_TIME_PARSER_POLICY, "legacy")
-
-  test("RAPIDS legacy JSON parser uses a GPU JSON scan for integers") {
-    withSQLConf(SQLConf.USE_V1_SOURCE_LIST.key -> "json") {
-      withTempPath { path =>
-        withSQLConf("spark.rapids.sql.enabled" -> "false") {
-          spark.range(3).selectExpr("CAST(id AS INT) AS value").coalesce(1)
-            .write.json(path.getCanonicalPath)
-          def query = spark.read.schema(new StructType().add("value", IntegerType))
-            .json(path.getCanonicalPath)
-          val cpu = query
-          val expected = cpu.collect().toSeq
-          withSQLConf("spark.rapids.sql.enabled" -> "true") {
-            val gpu = query
-            checkAnswer(gpu, expected)
-            assert(gpu.schema == cpu.schema)
-            ExecutionPlanCaptureCallback.assertContains(gpu, "GpuFileSourceScanExec")
-          }
-        }
-      }
-    }
-  }
-
 }

@@ -27,7 +27,7 @@ import org.apache.spark.sql.rapids.utils.RapidsSQLTestsTrait
 
 class RapidsXPathFunctionsSuite
   extends XPathFunctionsSuite with RapidsSQLTestsTrait {
-  test("RAPIDS XPath string executes through a CPU bridge") {
+  testRapids("XPath string executes through a CPU bridge") {
     def query = spark.range(2).selectExpr(
       "xpath_string(IF(id = 0, '<a><b>x</b></a>', '<a><b>y</b></a>'), '/a/b')")
     withSQLConf("spark.rapids.sql.enabled" -> "false") {
