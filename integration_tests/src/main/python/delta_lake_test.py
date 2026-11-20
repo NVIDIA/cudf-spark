@@ -947,6 +947,8 @@ def do_test_scan_split(spark_tmp_path, enable_deletion_vectors, expected_num_par
             return df.rdd.getNumPartitions()
         num_partitions = with_gpu_session(get_num_partitions, conf=read_conf)
         assert num_partitions == expected_num_partitions, f"Expected {expected_num_partitions} partitions for split read"
+        assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: _db_delta_sql_with_gpu_scan_assert(spark, read_sql), conf=read_conf)
 
 
 @allow_non_gpu(*delta_meta_allow)
@@ -959,8 +961,8 @@ def test_delta_scan_split_with_no_dv(spark_tmp_path):
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
-@pytest.mark.skipif(is_databricks_runtime(),
-                    reason="Deletion vector scan is not supported on Databricks")
+@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
+                    reason="Deletion vector scan is not supported on Databricks before 17.3")
 @pytest.mark.skipif(is_before_spark_353(),
                     reason="Spark-RAPIDS supports scan with deletion vectors starting in Spark 3.5.3")
 def test_delta_scan_split_with_DV_enabled_with_no_DV(spark_tmp_path):
@@ -978,6 +980,8 @@ def test_delta_scan_split_with_DV_enabled_with_DVs(spark_tmp_path, pushdown_dv_p
     def do_delete(spark, data_path):
         num_deleted = spark.sql(f"DELETE FROM delta.`{data_path}` WHERE a = 0").collect()[0][0]
         assert num_deleted > 0, "Expected some rows to be deleted"
+        metrics = _latest_delta_history(spark, data_path)["operationMetrics"]
+        assert int(metrics.get("numDeletionVectorsAdded", "0")) > 0, metrics
     # The cuDF-based reader supports file splits. On DBR 17.3, disabling native DV
     # predicate pushdown falls back to CPU rather than using the old materialized GPU reader.
     expected_fallback = is_databricks173_or_later() and not pushdown_dv_predicate
@@ -992,28 +996,33 @@ def test_delta_scan_split_with_DV_enabled_with_DVs(spark_tmp_path, pushdown_dv_p
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
 @pytest.mark.parametrize("pushdown_dv_predicate", [True, False], ids=idfn)
-@pytest.mark.skipif(is_databricks_runtime(),
-                    reason="Deletion vector scan is not supported on Databricks")
+@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
+                    reason="Deletion vector scan is not supported on Databricks before 17.3")
 @pytest.mark.skipif(is_before_spark_353(),
                     reason="Spark-RAPIDS supports scan with deletion vectors starting in Spark 3.5.3")
 def test_delta_scan_split_with_DV_disabled_with_DVs(spark_tmp_path, pushdown_dv_predicate):
     def do_delete_and_disable_DV(spark, data_path):
         num_deleted = spark.sql(f"DELETE FROM delta.`{data_path}` WHERE a = 0").collect()[0][0]
         assert num_deleted > 0, "Expected some rows to be deleted"
+        metrics = _latest_delta_history(spark, data_path)["operationMetrics"]
+        assert int(metrics.get("numDeletionVectorsAdded", "0")) > 0, metrics
         spark.sql(f"ALTER TABLE delta.`{data_path}` SET TBLPROPERTIES " +
                   "('delta.enableDeletionVectors' = 'false')")
-    # The cuDF-based reader (GpuDeltaParquetFileFormat2), which is used when dv_predicate_pushdown is True, supports the file split,
-    # whereas the scala reader (GpuDeltaParquetFileFormat) does not support it.
-    # So we expect 2 partitions when dv_predicate_pushdown is True, and 1 partition when it is False.
-    expected_num_partitions = 2 if pushdown_dv_predicate else 1
+    # Existing files retain their deletion vectors after the table property is disabled.
+    # DBR 17.3 needs native DV predicate pushdown for a GPU scan, as in the enabled-table test.
+    expected_fallback = is_databricks173_or_later() and not pushdown_dv_predicate
+    expected_num_partitions = 2 if pushdown_dv_predicate or expected_fallback else 1
     conf = {"spark.rapids.sql.delta.deletionVectors.predicatePushdown.enabled": f"{pushdown_dv_predicate}"}
-    do_test_scan_split(spark_tmp_path, enable_deletion_vectors=True, expected_num_partitions=expected_num_partitions, post_setup_table_func=do_delete_and_disable_DV, conf=conf)
+    do_test_scan_split(spark_tmp_path, enable_deletion_vectors=True,
+                       expected_num_partitions=expected_num_partitions,
+                       post_setup_table_func=do_delete_and_disable_DV, conf=conf,
+                       expected_fallback=expected_fallback)
 
 
 @allow_non_gpu(*delta_meta_allow)
 @delta_lake
-@pytest.mark.skipif(is_databricks_runtime(),
-                    reason="Deletion vector scan is not supported on Databricks")
+@pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
+                    reason="Deletion vector scan is not supported on Databricks before 17.3")
 @pytest.mark.skipif(is_before_spark_353(),
                     reason="Spark-RAPIDS supports scan with deletion vectors starting in Spark 3.5.3")
 @delta_reorg_xfail
@@ -1021,6 +1030,8 @@ def test_delta_scan_split_with_DV_enabled_after_DVs_materialized(spark_tmp_path)
     def do_delete_and_reorg(spark, data_path):
         num_deleted = spark.sql(f"DELETE FROM delta.`{data_path}` WHERE a = 0").collect()[0][0]
         assert num_deleted > 0, "Expected some rows to be deleted"
+        metrics = _latest_delta_history(spark, data_path)["operationMetrics"]
+        assert int(metrics.get("numDeletionVectorsAdded", "0")) > 0, metrics
         spark.sql(f"REORG table delta.`{data_path}` APPLY (PURGE)") # will rewrite files to purge soft-deleted data
     do_test_scan_split(spark_tmp_path, enable_deletion_vectors=True, expected_num_partitions=2, post_setup_table_func=do_delete_and_reorg)
 
@@ -1037,7 +1048,8 @@ if is_spark_340_or_later() or is_databricks_runtime():
 @pytest.mark.parametrize("reader_confs", reader_opt_confs_no_native, ids=idfn)
 @pytest.mark.parametrize("mapping", column_mappings, ids=idfn)
 @pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
-                            enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
+                            enabled_xfail_reason=None if is_databricks173_or_later() else
+                            'https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
 def test_delta_read_column_mapping(spark_tmp_path, reader_confs, mapping, enable_deletion_vectors):
     data_path = spark_tmp_path + "/DELTA_DATA"
     gen_list = [("a", int_gen),
@@ -1058,8 +1070,9 @@ def test_delta_read_column_mapping(spark_tmp_path, reader_confs, mapping, enable
         df.partitionBy("b", "d") \
         .save(data_path)
     with_cpu_session(create_delta, conf=confs)
-    assert_gpu_and_cpu_are_equal_collect(lambda spark: spark.read.format("delta").load(data_path),
-                                         conf=confs)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: _assert_db173_gpu_delta_scan_if_enabled(
+            spark, spark.read.format("delta").load(data_path)), conf=confs)
 
 
 @allow_non_gpu(*delta_meta_allow)
@@ -1188,9 +1201,7 @@ def test_delta_column_mapping_predicate_pushdown_with_deletion_vector(spark_tmp_
     reason="Delta Lake 4.1.0 incompatible with Spark 4.1.2+ - ParquetToSparkSchemaConverter API changed")
 @pytest.mark.skipif(not (is_databricks_runtime() or is_spark_340_or_later()), \
                     reason="ParquetToSparkSchemaConverter changes not compatible with Delta Lake")
-@pytest.mark.parametrize("enable_deletion_vectors", deletion_vector_values_with_xfail_reasons(
-                            enabled_xfail_reason='https://github.com/NVIDIA/spark-rapids/issues/12042'), ids=idfn)
-def test_delta_name_column_mapping_no_field_ids(spark_tmp_path, enable_deletion_vectors):
+def test_delta_name_column_mapping_no_field_ids(spark_tmp_path):
     data_path = spark_tmp_path + "/DELTA_DATA"
     def setup_parquet_table(spark):
         spark.range(10).coalesce(1).write.parquet(data_path)
@@ -1200,9 +1211,12 @@ def test_delta_name_column_mapping_no_field_ids(spark_tmp_path, enable_deletion_
             "('delta.minReaderVersion' = '2', " +
             "'delta.minWriterVersion' = '5', " +
             "'delta.columnMapping.mode' = 'name')")
-    with_cpu_session(setup_parquet_table, {"spark.sql.parquet.fieldId.write.enabled": str(enable_deletion_vectors).lower()})
+    # The source schema has no field-ID metadata; conversion disables DVs.
+    with_cpu_session(setup_parquet_table, {"spark.sql.parquet.fieldId.write.enabled": "false"})
     with_cpu_session(convert_and_setup_name_mapping, conf={"spark.databricks.delta.properties.defaults.enableDeletionVectors": "false"})
-    assert_gpu_and_cpu_are_equal_collect(lambda spark: spark.read.format("delta").load(data_path))
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: _assert_db173_gpu_delta_scan_if_enabled(
+            spark, spark.read.format("delta").load(data_path)))
 
 @allow_non_gpu("FileSourceScanExec", "ColumnarToRowExec", *delta_meta_allow)
 @delta_lake

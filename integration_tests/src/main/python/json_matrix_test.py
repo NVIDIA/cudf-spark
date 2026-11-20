@@ -626,7 +626,6 @@ def test_json_tuple_dec_locale(std_input_path):
 ####################################################################
 
 # US is the default locale so we kind of what it to work
-@pytest.mark.xfail(reason = 'https://github.com/NVIDIA/spark-rapids/issues/10532')
 @pytest.mark.parametrize('read_func', [read_json_df]) # We don't need both they are always the same
 def test_scan_json_dec_locale_US_non_aribic(std_input_path, read_func, spark_tmp_table_factory):
     assert_gpu_and_cpu_are_equal_collect(
@@ -648,7 +647,6 @@ def test_scan_json_dec_locale_non_aribic(std_input_path, read_func, spark_tmp_ta
         'FileSourceScanExec',
         conf=_enable_all_types_json_scan_conf)
 
-@pytest.mark.xfail(reason = 'https://github.com/NVIDIA/spark-rapids/issues/10532')
 @allow_non_gpu(TEXT_INPUT_EXEC, *non_utc_allow) # https://github.com/NVIDIA/spark-rapids/issues/10453
 def test_from_json_dec_locale_US_non_aribic(std_input_path):
     schema = WITH_DEC_LOCALE_SCHEMA

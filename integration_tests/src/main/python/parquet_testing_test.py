@@ -22,7 +22,8 @@ from data_gen import copy_and_update, non_utc_allow
 from marks import allow_non_gpu
 from pathlib import Path
 import pytest
-from spark_session import is_before_spark_340, is_spark_350_or_later, is_spark_411_or_later
+from spark_session import (
+    is_before_spark_340, is_databricks143, is_spark_350_or_later, is_spark_411_or_later)
 import warnings
 
 _rebase_confs = {
@@ -61,13 +62,14 @@ if is_before_spark_340():
     _xfail_files["delta_length_byte_array.parquet"] = (
         "https://issues.apache.org/jira/browse/SPARK-40128")
 
-# Spark 3.5.0 adds support for lz4_raw compression codec, but we do not support that on GPU yet
-if is_spark_350_or_later():
-    _xfail_files["lz4_raw_compressed.parquet"] = "https://github.com/NVIDIA/spark-rapids/issues/9156"
-    _xfail_files["lz4_raw_compressed_larger.parquet"] = "https://github.com/NVIDIA/spark-rapids/issues/9156"
-else:
+# Apache Spark's CPU reader supports LZ4_RAW starting in Spark 3.5.0.
+if not is_spark_350_or_later():
     _error_files["lz4_raw_compressed.parquet"] = "Exception"
     _error_files["lz4_raw_compressed_larger.parquet"] = "Exception"
+elif is_databricks143():
+    # DBR 14.3 still uses Parquet 1.12, which does not define the LZ4_RAW codec.
+    _xfail_files["lz4_raw_compressed.parquet"] = "DBR 14.3's CPU reader does not support LZ4_RAW"
+    _xfail_files["lz4_raw_compressed_larger.parquet"] = "DBR 14.3's CPU reader does not support LZ4_RAW"
 
 if is_spark_411_or_later():
     # XFAIL null_list.parquet for Spark 4.1.0+ due to https://github.com/NVIDIA/spark-rapids/issues/14242
