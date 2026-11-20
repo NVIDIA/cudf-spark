@@ -19,6 +19,7 @@ parquet-mr path and still returns the right answer, so `hybrid_conf` makes a fal
 query instead; a test that is meant to fall back uses `fallback_conf`.
 """
 
+import os
 import pytest
 
 from datetime import date, datetime, timezone
@@ -277,9 +278,22 @@ def test_hybrid_scan_reader_runs(spark_tmp_path, reader_mode):
         gpu_plan_assertion=check)
 
 
+def _local_paths(spark, data_path):
+    """The local paths of the Parquet files under `data_path`, or None if any is not local."""
+    files = [urlparse(f) for f in spark.read.parquet(data_path).inputFiles()]
+    return sorted(f.path for f in files) if all(f.scheme == 'file' for f in files) else None
+
+
+def _checksum_file(local_path):
+    """The `.crc` sidecar Hadoop's local filesystem writes beside each file."""
+    head, tail = os.path.split(local_path)
+    return os.path.join(head, '.' + tail + '.crc')
+
+
 @_metric_reader_modes
 def test_hybrid_scan_native_host_reads(spark_tmp_path, reader_mode):
-    """A local file's bytes are all read with KvikIO, and any other file's with none."""
+    """A local file's bytes are all read with KvikIO, and any other file's with none. The local
+    files' checksum sidecars are removed, since a file with one is read through Hadoop."""
     def check(cpu_plan, gpu_plan):
         scan = [node for node in collect_plan_nodes(gpu_plan)
                 if node.getClass().getSimpleName() == 'GpuFileSourceScanExec'][0]
@@ -295,12 +309,34 @@ def test_hybrid_scan_native_host_reads(spark_tmp_path, reader_mode):
 
     data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
     with_cpu_session(lambda spark: write_test_data(spark, data_path, files=4))
-    is_local = with_cpu_session(lambda spark: all(
-        urlparse(f).scheme == 'file' for f in spark.read.parquet(data_path).inputFiles()))
+    local_paths = with_cpu_session(lambda spark: _local_paths(spark, data_path))
+    is_local = local_paths is not None
+    for path in local_paths or []:
+        if os.path.exists(_checksum_file(path)):
+            os.remove(_checksum_file(path))
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.read.parquet(data_path).filter('filter_int = 7'),
         conf=_metrics_conf(reader_mode),
         gpu_plan_assertion=check)
+
+
+@_metric_reader_modes
+def test_hybrid_scan_local_checksum(spark_tmp_path, reader_mode):
+    """A local file changed after Spark wrote it fails the read on its checksum, as it does
+    through Hadoop, rather than returning the changed data."""
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(lambda spark: write_test_data(spark, data_path, files=2))
+    local_paths = with_cpu_session(lambda spark: _local_paths(spark, data_path))
+    if local_paths is None:
+        pytest.skip('only local files have checksum sidecars')
+    # Flip a byte of the first column chunk, which starts after the 4-byte magic.
+    with open(local_paths[0], 'r+b') as f:
+        f.seek(4)
+        changed = bytes([f.read(1)[0] ^ 0xFF])
+        f.seek(4)
+        f.write(changed)
+    assert_gpu_and_cpu_error(lambda spark: spark.read.parquet(data_path).collect(),
+                             _metrics_conf(reader_mode), 'ChecksumException')
 
 
 @_metric_reader_modes

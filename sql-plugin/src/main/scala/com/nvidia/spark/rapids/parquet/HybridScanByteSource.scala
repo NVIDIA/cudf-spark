@@ -304,13 +304,22 @@ private[parquet] object NativeFileRangeReader {
   }
 
   /**
-   * Whether `filePath` names a local file. libcudf opens the file by path outside Hadoop, so any
-   * other scheme, or a file: path with a host, would open the wrong file. A path with no scheme is
-   * not known to be local: Hadoop resolves it against fs.defaultFS.
+   * Whether `filePath` names a local file with no Hadoop checksum file. libcudf opens the file by
+   * path outside Hadoop, so any other scheme, or a file: path with a host, would open the wrong
+   * file. A path with no scheme is not known to be local: Hadoop resolves it against
+   * fs.defaultFS. A file Hadoop's LocalFileSystem wrote has a `.crc` sidecar, which Hadoop
+   * verifies on read and libcudf does not, so it is left to Hadoop.
    */
   def canRead(filePath: Path): Boolean = {
     val uri = filePath.toUri
     "file".equalsIgnoreCase(uri.getScheme) &&
-      (uri.getAuthority == null || uri.getAuthority.isEmpty)
+      (uri.getAuthority == null || uri.getAuthority.isEmpty) &&
+      !checksumFile(uri.getPath).exists()
+  }
+
+  /** The sidecar where Hadoop's ChecksumFileSystem keeps `localPath`'s checksums. */
+  def checksumFile(localPath: String): File = {
+    val file = new File(localPath)
+    new File(file.getParentFile, s".${file.getName}.crc")
   }
 }

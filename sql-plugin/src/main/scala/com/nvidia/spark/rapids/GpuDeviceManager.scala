@@ -19,6 +19,7 @@ package com.nvidia.spark.rapids
 import java.util.concurrent.ThreadFactory
 
 import scala.collection.mutable.ArrayBuffer
+import scala.util.Try
 import scala.util.control.NonFatal
 
 import ai.rapids.cudf._
@@ -765,13 +766,33 @@ object GpuDeviceManager extends Logging {
     if (!kvikioInitialized) {
       synchronized {
         if (!kvikioInitialized) {
-          val numThreads = conf.readerKvikioNumThreads
+          val numThreads = kvikioNumThreads(conf)
           val compatMode = NativeFileSource.CompatMode.ON
           logInfo(s"KvikIO reads with compatibility mode $compatMode and $numThreads threads")
           NativeFileSource.setUpKvikio(compatMode, numThreads)
           kvikioInitialized = true
         }
       }
+    }
+  }
+
+  /**
+   * KvikIO's thread count: the config if set, else KvikIO's own environment variable, which the
+   * explicit count passed to libcudf would otherwise override, else the multithreaded reader's
+   * thread count, since each native read blocks its calling thread.
+   */
+  private def kvikioNumThreads(conf: RapidsConf): Int = {
+    // KvikIO fails its setup if these aliases are both set and disagree, so either one will do.
+    val envName = Seq("KVIKIO_NTHREADS", "KVIKIO_NUM_THREADS").find(sys.env.contains)
+    val fromEnv = envName.flatMap(name => Try(sys.env(name).trim.toInt).toOption.filter(_ > 0))
+    conf.readerKvikioNumThreads match {
+      case Some(threads) =>
+        envName.filterNot(_ => fromEnv.contains(threads)).foreach { name =>
+          logWarning(s"KvikIO uses ${RapidsConf.READER_KVIKIO_NUM_THREADS.key}=$threads " +
+            s"threads rather than $name=${sys.env(name)}")
+        }
+        threads
+      case None => fromEnv.getOrElse(conf.multiThreadReadNumThreads)
     }
   }
 
