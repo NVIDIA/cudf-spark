@@ -769,6 +769,10 @@ object GpuDeviceManager extends Logging {
           val numThreads = kvikioNumThreads(conf)
           val compatMode = NativeFileSource.CompatMode.ON
           logInfo(s"KvikIO reads with compatibility mode $compatMode and $numThreads threads")
+          // TODO: this has no effect if another libcudf file read set KvikIO up first, and
+          // nothing detects that. The plugin's other readers and writers use host buffers, not
+          // libcudf file sources, so it is unlikely; a cuDF change reporting whether KvikIO was
+          // already set up would let this warn.
           NativeFileSource.setUpKvikio(compatMode, numThreads)
           kvikioInitialized = true
         }
