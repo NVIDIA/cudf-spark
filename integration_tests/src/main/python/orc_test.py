@@ -1299,6 +1299,60 @@ def test_read_round_trip_for_multithreaded_combining(spark_tmp_path, gens, keep_
         lambda spark: spark.read.orc(data_path), conf=all_confs)
 
 
+@pytest.mark.parametrize('reader_type,keep_order', [
+    ('COALESCING', True),
+    ('MULTITHREADED', True),
+    ('MULTITHREADED', False)])
+@ignore_order(local=True)
+def test_read_combined_orc_files_with_different_compression_sizes(
+        spark_tmp_path, reader_type, keep_order):
+    data_path = spark_tmp_path + '/ORC_DATA'
+
+    def write_data(spark):
+        write_specs = [
+            ('small-first', 10000, '4096'),
+            ('large', 7500, '262144'),
+            ('small-last', 5000, '4096')]
+        for part, row_count, compression_size in write_specs:
+            (spark.range(row_count).selectExpr(
+                "id", "sha2(concat(cast(id as string), '{}'), 512) AS s".format(part))
+                .coalesce(1).write.option('orc.compress.size', compression_size)
+                .orc(data_path + '/part=' + part))
+
+        hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+        file_details = []
+        for file_path in spark.read.orc(data_path).inputFiles():
+            path = spark._jvm.org.apache.hadoop.fs.Path(file_path)
+            reader = spark._jvm.org.apache.orc.OrcFile.createReader(
+                path,
+                spark._jvm.org.apache.orc.OrcFile.readerOptions(hadoop_conf))
+            try:
+                file_size = path.getFileSystem(hadoop_conf).getFileStatus(path).getLen()
+                file_details.append((file_size, reader.getCompressionSize()))
+            finally:
+                reader.close()
+        assert sorted(size for _, size in file_details) == [4096, 4096, 262144]
+        compression_sizes_by_file_size = [
+            size for _, size in sorted(file_details, reverse=True)]
+        assert compression_sizes_by_file_size == [4096, 262144, 4096]
+
+    with_cpu_session(write_data)
+
+    all_confs = {
+        'spark.rapids.sql.format.orc.reader.type': reader_type,
+        'spark.rapids.sql.reader.multithreaded.combine.sizeBytes': '64m',
+        'spark.rapids.sql.reader.multithreaded.read.keepOrder': keep_order,
+        'spark.rapids.sql.reader.multithreaded.combine.waitTime': '10000',
+        'spark.sql.files.maxPartitionBytes': '1g',
+        'spark.sql.files.openCostInBytes': '1',
+        'spark.sql.files.minPartitionNum': '1'}
+
+    def read_data(spark):
+        return spark.read.orc(data_path).select('part', 'id', 's')
+
+    assert_gpu_and_cpu_are_equal_collect(read_data, conf=all_confs)
+
+
 @pytest.mark.parametrize('keep_order', [True, pytest.param(False, marks=pytest.mark.ignore_order(local=True))])
 def test_simple_partitioned_read_for_multithreaded_combining(spark_tmp_path, keep_order):
     # Use every type except boolean, see https://github.com/NVIDIA/spark-rapids/issues/11762 and
