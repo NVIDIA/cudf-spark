@@ -902,7 +902,12 @@ object HybridScanPipeline extends Logging {
       readDataSchema: StructType,
       dateRebaseMode: DateTimeRebaseMode,
       int96RebaseMode: DateTimeRebaseMode): Option[String] = {
-    readDataSchema.fields.find(field => !isSupportedType(field.dataType)) match {
+    readDataSchema.fields.find(field =>
+        field.name.contains(".") || !isSupportedType(field.dataType)) match {
+      case Some(field) if field.name.contains(".") =>
+        // Hybrid reads keep the complete file footer, so cuDF's flattened name selection can
+        // resolve a literal dotted name to an unprojected struct. Use the pruned-footer reader.
+        Some(s"column ${field.name} contains a literal dot")
       case Some(field) =>
         Some(s"column ${field.name} has type ${field.dataType.simpleString}")
       case None if !rebaseCheckable(readDataSchema, dateRebaseMode, int96RebaseMode) =>
