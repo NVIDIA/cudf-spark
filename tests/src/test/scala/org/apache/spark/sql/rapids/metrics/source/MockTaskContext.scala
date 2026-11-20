@@ -100,7 +100,8 @@ abstract class MockTaskContextBase(taskAttemptId: Long, partitionId: Int) extend
   def markTaskComplete(): Unit = {
     val listenerFailures = new ArrayBuffer[Throwable]()
 
-    while (true) {
+    var draining = true
+    while (draining) {
       val listenerOpt = synchronized {
         if (preCompletionListeners.nonEmpty) {
           Some(preCompletionListeners.remove(preCompletionListeners.length - 1))
@@ -119,6 +120,7 @@ abstract class MockTaskContextBase(taskAttemptId: Long, partitionId: Int) extend
               listenerFailures += e
           }
         case None =>
+          draining = false
           listeners.foreach { listener =>
             try {
               listener.onTaskCompletion(this)
@@ -127,18 +129,17 @@ abstract class MockTaskContextBase(taskAttemptId: Long, partitionId: Int) extend
                 listenerFailures += e
             }
           }
-
-          if (listenerFailures.nonEmpty) {
-            val firstException = listenerFailures.head
-            listenerFailures.tail.foreach { e =>
-              if (e ne firstException) {
-                firstException.addSuppressed(e)
-              }
-            }
-            throw firstException
-          }
-          return
       }
+    }
+
+    if (listenerFailures.nonEmpty) {
+      val firstException = listenerFailures.head
+      listenerFailures.tail.foreach { e =>
+        if (e ne firstException) {
+          firstException.addSuppressed(e)
+        }
+      }
+      throw firstException
     }
   }
 
