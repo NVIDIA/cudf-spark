@@ -23,7 +23,7 @@ import os
 import pytest
 
 from datetime import date, datetime, timezone
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
     assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error, \
@@ -281,7 +281,9 @@ def test_hybrid_scan_reader_runs(spark_tmp_path, reader_mode):
 def _local_paths(spark, data_path):
     """The local paths of the Parquet files under `data_path`, or None if any is not local."""
     files = [urlparse(f) for f in spark.read.parquet(data_path).inputFiles()]
-    return sorted(f.path for f in files) if all(f.scheme == 'file' for f in files) else None
+    if not all(f.scheme == 'file' for f in files):
+        return None
+    return sorted(unquote(f.path) for f in files)
 
 
 def _checksum_file(local_path):
