@@ -167,18 +167,27 @@ def _lambda_body_end(tokens, start):
         "case", "do", "else", "extends", "finally", "forSome", "match", "new",
         "return", "then", "throw", "try", "with", "yield",
     }
+    condition_keywords = {"for", "if", "while"}
+    condition_open = None
+    condition_close = None
     for index in range(start, len(tokens)):
         value = tokens[index].value
         if index > start and not stack and tokens[index].line > tokens[index - 1].line:
             previous = tokens[index - 1].value
+            # The `)` closing an if/while/for header does not end the statement:
+            # the controlled body may start on the next line.
             previous_ends_expression = (
-                previous in CLOSE_TO_OPEN or previous == LITERAL or
+                (previous in CLOSE_TO_OPEN and index - 1 != condition_close) or
+                previous == LITERAL or
                 (previous[0].isalnum() or previous[0] in "_$") and
                 previous not in continuation_keywords)
             if value in statement_starters or (
                     value in expression_starters and previous_ends_expression):
                 return index
         if value in OPEN_TO_CLOSE:
+            if (value == "(" and not stack and index > start and
+                    tokens[index - 1].value in condition_keywords):
+                condition_open = index
             stack.append(OPEN_TO_CLOSE[value])
         elif value in CLOSE_TO_OPEN:
             if not stack:
@@ -186,6 +195,9 @@ def _lambda_body_end(tokens, start):
             if value != stack[-1]:
                 return index
             stack.pop()
+            if not stack and condition_open is not None:
+                condition_close = index
+                condition_open = None
         elif value in (",", ";") and not stack:
             return index
     return len(tokens)

@@ -147,6 +147,28 @@ class ReplacementRuleMetaLambdaLintSuite(unittest.TestCase):
           })
         """, [("ExampleMeta",)])
 
+    def test_condition_header_line_break_keeps_conditional_constructor(self):
+        self.assert_factories("""
+          rule((a, conf, p, r) => if (enabled)
+            new ExampleMeta(a, conf, p, r)
+          else named(a, conf, p, r))
+        """, [("ExampleMeta",)])
+
+    def test_loop_header_line_break_keeps_body_attached(self):
+        self.assert_factories("""
+          rule((a, conf, p, r) => while (pending)
+            new LoopMeta(a, conf, p, r))
+        """, [("LoopMeta",)])
+
+    def test_statement_after_conditional_helper_is_still_checked(self):
+        self.assert_factories("""
+          rule((a, conf, p, r) => {
+            val helper = (x: Int) => if (x > 0)
+              x else 0
+            new ExampleMeta(a, conf, p, r)
+          })
+        """, [("ExampleMeta",)])
+
     def test_main_requires_zero_violations(self):
         root = tempfile.mkdtemp()
         try:
