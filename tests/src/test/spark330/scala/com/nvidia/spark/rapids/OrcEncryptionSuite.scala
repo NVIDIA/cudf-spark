@@ -25,10 +25,20 @@ import java.io.File
 import java.security.SecureRandom
 
 import org.apache.hadoop.conf.Configuration
-import org.apache.orc.{EncryptionAlgorithm, InMemoryKeystore}
+import org.apache.orc.{
+  EncryptionAlgorithm,
+  EncryptionKey,
+  EncryptionVariant,
+  InMemoryKeystore,
+  Reader,
+  TypeDescription
+}
 import org.apache.orc.impl.CryptoUtils
+import org.apache.spark.{SparkConf, SparkException}
+import org.mockito.Mockito.when
+import org.scalatestplus.mockito.MockitoSugar
 
-class OrcEncryptionSuite extends SparkQueryCompareTestSuite {
+class OrcEncryptionSuite extends SparkQueryCompareTestSuite with MockitoSugar {
 
   // Create an InMemoryKeystore provider and addKey `pii` to it.
   // CryptoUtils caches it so it can be used later by the test
@@ -43,6 +53,17 @@ class OrcEncryptionSuite extends SparkQueryCompareTestSuite {
   random.nextBytes(piiKey)
   random.nextBytes(topSecretKey)
   keystore.addKey("pii", algorithm, piiKey).addKey("top_secret", algorithm, topSecretKey)
+
+  private def exceptionMessages(error: Throwable): String = {
+    val messages = new StringBuilder
+    var current = error
+    while (current != null) {
+      messages.append(current.toString)
+      messages.append('\n')
+      current = current.getCause
+    }
+    messages.toString()
+  }
 
   testGpuWriteFallback(
     "Write encrypted ORC fallback",
@@ -65,5 +86,64 @@ class OrcEncryptionSuite extends SparkQueryCompareTestSuite {
       frame.write.options(Map("orc.key.provider" -> "memory",
         "orc.encrypt" -> "pii:ints,more_ints",
         "orc.mask" -> "sha256:ints,more_ints")).mode("overwrite").orc(tempFile.getAbsolutePath)
+  }
+
+  test("Encrypted ORC read guard allows requested columns without available keys") {
+    val fileSchema = TypeDescription.createStruct()
+      .addField("encrypted", TypeDescription.createInt())
+    val encryptedRoot = fileSchema.getChildren.get(0)
+    val included = new Array[Boolean](fileSchema.getMaximumId + 1)
+    included(encryptedRoot.getId) = true
+
+    val variant = mock[EncryptionVariant]
+    when(variant.getRoot).thenReturn(encryptedRoot)
+    val key = mock[EncryptionKey]
+    when(key.getEncryptionRoots).thenReturn(Array(variant))
+    when(key.isAvailable).thenReturn(false)
+    val reader = mock[Reader]
+    when(reader.getColumnEncryptionKeys).thenReturn(Array(key))
+
+    GpuOrcScan.failIfRequestedColumnsAreEncrypted(reader, included)
+  }
+
+  Seq(
+    RapidsReaderType.PERFILE,
+    RapidsReaderType.COALESCING,
+    RapidsReaderType.MULTITHREADED).foreach { readerType =>
+    test(s"Encrypted ORC reads fail only when a requested column uses an available key - " +
+      readerType) {
+      withTempPath { path =>
+        withCpuSparkSession { spark =>
+          intsDf(spark).write.options(Map(
+            "orc.key.provider" -> "memory",
+            "orc.encrypt" -> "pii:ints",
+            "orc.mask" -> "nullify:ints"))
+            .mode("overwrite")
+            .orc(path.getAbsolutePath)
+        }
+
+        val conf = new SparkConf()
+          .set(RapidsConf.ORC_READER_TYPE.key, readerType.toString)
+        withGpuSparkSession({ spark =>
+          spark.sparkContext.hadoopConfiguration.set("orc.key.provider", "memory")
+
+          assert(spark.read.orc(path.getAbsolutePath).count() == 8)
+
+          val unencryptedValues = spark.read.orc(path.getAbsolutePath)
+            .select("more_ints")
+            .collect()
+            .map(_.getInt(0))
+            .toSet
+          assert(unencryptedValues == Set(1, 2, 3, 4, 5, 6, 7))
+
+          val error = intercept[SparkException] {
+            spark.read.orc(path.getAbsolutePath).select("ints").collect()
+          }
+          assert(exceptionMessages(error).contains(
+            "The GPU does not support decrypting encrypted ORC columns"))
+          assert(exceptionMessages(error).contains(RapidsConf.ENABLE_ORC_READ.key))
+        }, conf)
+      }
+    }
   }
 }
