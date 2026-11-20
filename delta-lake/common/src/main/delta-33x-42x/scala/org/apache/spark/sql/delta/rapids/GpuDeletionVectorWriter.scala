@@ -43,16 +43,19 @@ import org.apache.spark.util.{SerializableConfiguration, ThreadUtils, Utils => S
  */
 private[rapids] object GpuDeletionVectorWriter extends Logging {
   /**
-   * Packed files a single task may have in flight (and so buffered) at once. Each is buffered up
-   * to `packing.targetSize`, so a task buffers up to this many times that. The value comes from
-   * measurements on S3, where the time of a task writing many files kept falling up to this value.
+   * Packed files a single task may have in flight (and so buffered) at once. This is a count, not
+   * a size: each file is buffered up to `packing.targetSize`, so a task buffers up to this many
+   * times that, and an executor up to that times its concurrently running tasks. The value comes
+   * from measurements on S3, where the time of a task writing many files kept falling up to this
+   * value.
    */
   private[rapids] val MaxFilesInFlightPerTask = 32
 
   /**
    * Upper bound on writer threads shared by all concurrently running tasks of an executor. Bins
-   * beyond it queue for a thread, which is safe, as writers never wait for each other. Queued bins
-   * still hold their data, so the limit bounds threads, not buffered bins.
+   * beyond it queue for a thread, which is safe, as writers never wait for each other: with many
+   * DV-writing tasks, each task's files just take longer. Queued bins still hold their data, so
+   * the limit bounds threads, not buffered bins. It was not tuned for that case.
    */
   private val MaxWriterThreads = 64
 
@@ -165,8 +168,8 @@ private[rapids] object GpuDeletionVectorWriter extends Logging {
       case t: Throwable =>
         aborted.set(true)
         // Wait for running writers so none still writes after the task has failed or was killed.
-        // A killed task therefore exits only after its in-flight files are done, which is bounded
-        // by one file write each.
+        // A killed task therefore exits only after its in-flight files are done. Like a serial
+        // write, that is bounded by the storage client's own timeouts, not by this code.
         val primary = unwrap(t)
         var interrupted = t.isInstanceOf[InterruptedException]
         futures.foreach { f =>

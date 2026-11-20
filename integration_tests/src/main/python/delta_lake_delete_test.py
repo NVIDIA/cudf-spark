@@ -527,14 +527,17 @@ def test_delta_deletion_vector_read(spark_tmp_path, reader_type, condition):
 @pytest.mark.skipif(is_databricks_runtime() and not is_databricks173_or_later(),
                     reason="Persistent-DV command acceleration requires DBR 17.3+")
 @pytest.mark.parametrize("command", ["DELETE", "UPDATE", "MERGE_DELETE", "MERGE_UPSERT"])
-def test_delta_dml_many_packed_dv_files(spark_tmp_path, command):
+@pytest.mark.parametrize("random_prefixes", [False, True], ids=["plain", "random_prefixes"])
+def test_delta_dml_many_packed_dv_files(spark_tmp_path, command, random_prefixes):
     """One reduce task persists many packed DV files. A packing target of one byte puts every
     deletion vector in its own file and a single shuffle partition puts all of them in one task.
     The table is partitioned by values that need path escaping. The first statement touches only
     a few files, so the second finds files both with and without a DV, and the third merges
     existing DVs. This checks the wiring from the command to the DV writer and the results; that
-    the files are written concurrently is covered by GpuDeletionVectorWriterSuite. On Databricks
-    this runs the Databricks implementation, which does not use that writer."""
+    that the writer overlaps its files is covered by GpuDeletionVectorWriterSuite. On a local table
+    the GPU statements also run with a file system that records the thread writing each DV file,
+    to check that the command uses the concurrent writer. On Databricks this runs the Databricks
+    implementation, which does not use that writer."""
     data_path = spark_tmp_path + "/DELTA_DATA"
     num_files = 40
     num_rows = num_files * 10
@@ -559,7 +562,8 @@ def test_delta_dml_many_packed_dv_files(spark_tmp_path, command):
         for path in [data_path + "/CPU", data_path + "/GPU"]:
             spark.range(num_rows).selectExpr("id AS a", "id % 7 AS b", partition_expr + " AS p") \
                 .repartition(num_files, "a").write.format("delta").partitionBy("p") \
-                .option("delta.enableDeletionVectors", "true").save(path)
+                .option("delta.enableDeletionVectors", "true") \
+                .option("delta.randomizeFilePrefixes", str(random_prefixes).lower()).save(path)
     with_cpu_session(setup, conf=conf)
 
     def source(condition):
@@ -579,8 +583,27 @@ def test_delta_dml_many_packed_dv_files(spark_tmp_path, command):
                         "WHEN NOT MATCHED THEN INSERT (a, b, p) VALUES (s.a, s.b, s.p)")
     expected_command = "GpuMergeIntoCommand" if command.startswith("MERGE") \
         else "Gpu{}Command".format(command.capitalize())
+    # The recording file system replaces the local one, so it only sees local tables. Session
+    # configs reach the Hadoop configuration that Delta passes to the DV writer.
+    is_local = "://" not in data_path or data_path.startswith("file:")
+    recorder = "com.nvidia.spark.rapids.tests.delta.DvWriterThreadRecordingFileSystem"
+    gpu_conf = copy_and_update(conf, {"fs.file.impl": recorder,
+                                      "fs.file.impl.disable.cache": "true"}) \
+        if is_local else conf
+    def dv_file_names(path):
+        # spark_tmp_path may be a Hadoop path that the Python process cannot list directly.
+        # Random prefixes put the files in subdirectories.
+        def names(spark):
+            jpath = spark._jvm.org.apache.hadoop.fs.Path(path)
+            fs = jpath.getFileSystem(spark._jsc.hadoopConfiguration())
+            it = fs.listFiles(jpath, True)
+            found = []
+            while it.hasNext():
+                found.append(it.next().getPath().getName())
+            return found
+        return with_cpu_session(names, conf=conf)
     def dv_file_count(path):
-        return len(glob.glob(path + "/deletion_vector_*.bin"))
+        return len([n for n in dv_file_names(path) if n.startswith("deletion_vector_")])
     def read_table(path):
         return with_cpu_session(lambda spark: spark.sql(
             "SELECT * FROM delta.`{}`".format(path)).sort("a").collect(), conf=conf)
@@ -591,12 +614,17 @@ def test_delta_dml_many_packed_dv_files(spark_tmp_path, command):
             statement(data_path + "/CPU", condition)).collect(), conf=conf)
         assert_rapids_delta_write(
             lambda spark: spark.sql(statement(data_path + "/GPU", condition)).collect(),
-            conf=conf, expected_command=expected_command)
+            conf=gpu_conf, expected_command=expected_command)
         cpu_dvs = dv_file_count(data_path + "/CPU")
         assert cpu_dvs >= 1
         if step > 0:
             assert cpu_dvs > 5, "Expected the CPU statement to persist many DV files"
         assert dv_file_count(data_path + "/GPU") == cpu_dvs
+        if is_local and step > 0:
+            # Many files in one task are written by the concurrent writer's threads.
+            writers = [n for n in dv_file_names(data_path + "/GPU")
+                       if n.startswith("_dv_writer_gpu-delta-dv-writer")]
+            assert writers, "No DV file was written by the concurrent DV writer"
         assert_equal(read_table(data_path + "/CPU"), read_table(data_path + "/GPU"))
 
 @allow_non_gpu(*delta_meta_allow)

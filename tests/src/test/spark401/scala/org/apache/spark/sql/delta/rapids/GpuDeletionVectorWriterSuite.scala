@@ -99,20 +99,22 @@ class GpuDeletionVectorWriterSuite extends SparkQueryCompareTestSuite {
     withPool(8) { pool =>
       val inFlight = new AtomicInteger(0)
       val maxSeen = new AtomicInteger(0)
+      val limitReached = new CountDownLatch(3)
       val results = GpuDeletionVectorWriter.writeBins(
         (0 until 20).iterator.map(i => Seq(i)),
         (bin: Seq[Int]) => {
           val now = inFlight.incrementAndGet()
           maxSeen.updateAndGet(m => math.max(m, now))
-          Thread.sleep(10)
+          // The first bins only finish once the limit is reached, so it is reached on any schedule.
+          limitReached.countDown()
+          assert(limitReached.await(30, TimeUnit.SECONDS), "the bins did not overlap")
           inFlight.decrementAndGet()
           bin
         },
         pool = pool,
         maxInFlight = 3).toSeq
       assert(results == (0 until 20))
-      assert(maxSeen.get() <= 3)
-      assert(maxSeen.get() >= 2, "expected the bins to overlap")
+      assert(maxSeen.get() == 3)
     }
   }
 
@@ -120,6 +122,9 @@ class GpuDeletionVectorWriterSuite extends SparkQueryCompareTestSuite {
     withPool(4) { pool =>
       val started = new AtomicInteger(0)
       val running = new AtomicInteger(0)
+      val completed = new AtomicInteger(0)
+      val failed = new CountDownLatch(1)
+      val allStarted = new CountDownLatch(4)
       val ex = intercept[IllegalStateException] {
         GpuDeletionVectorWriter.writeBins(
           (0 until 100).iterator.map(i => Seq(i)),
@@ -127,10 +132,16 @@ class GpuDeletionVectorWriterSuite extends SparkQueryCompareTestSuite {
             started.incrementAndGet()
             running.incrementAndGet()
             try {
+              allStarted.countDown()
               if (bin.head == 1) {
+                // Fail only once the other bins are running, as later ones would be skipped.
+                assert(allStarted.await(30, TimeUnit.SECONDS))
+                failed.countDown()
                 throw new IllegalStateException("boom")
               }
-              Thread.sleep(20)
+              // The other bins are running when the failure happens.
+              assert(failed.await(30, TimeUnit.SECONDS))
+              completed.incrementAndGet()
               bin
             } finally {
               running.decrementAndGet()
@@ -142,6 +153,7 @@ class GpuDeletionVectorWriterSuite extends SparkQueryCompareTestSuite {
       assert(ex.getMessage == "boom")
       // No writer may still be running once the failure is reported.
       assert(running.get() == 0)
+      assert(completed.get() == 3, "running bins were not waited for")
       assert(started.get() < 100)
     }
   }
@@ -149,8 +161,16 @@ class GpuDeletionVectorWriterSuite extends SparkQueryCompareTestSuite {
   test("an input iterator that fails mid-stream fails the task after running bins finish") {
     withPool(4) { pool =>
       val running = new AtomicInteger(0)
-      val bins = (0 until 6).iterator.map { i =>
-        if (i == 5) throw new IllegalStateException("bad input")
+      val completed = new AtomicInteger(0)
+      val inputFailed = new CountDownLatch(1)
+      val allStarted = new CountDownLatch(4)
+      val bins = (0 until 5).iterator.map { i =>
+        if (i == 4) {
+          // Fail only once all bins are running, as later ones would be skipped.
+          assert(allStarted.await(30, TimeUnit.SECONDS))
+          inputFailed.countDown()
+          throw new IllegalStateException("bad input")
+        }
         Seq(i)
       }
       val ex = intercept[IllegalStateException] {
@@ -158,13 +178,22 @@ class GpuDeletionVectorWriterSuite extends SparkQueryCompareTestSuite {
           bins,
           (bin: Seq[Int]) => {
             running.incrementAndGet()
-            try { Thread.sleep(50); bin } finally { running.decrementAndGet() }
+            try {
+              allStarted.countDown()
+              // The bins are still running when the input fails.
+              assert(inputFailed.await(30, TimeUnit.SECONDS))
+              completed.incrementAndGet()
+              bin
+            } finally {
+              running.decrementAndGet()
+            }
           },
           pool = pool,
           maxInFlight = 4).toSeq
       }
       assert(ex.getMessage == "bad input")
       assert(running.get() == 0)
+      assert(completed.get() == 4, "running bins were not waited for")
     }
   }
 
@@ -191,6 +220,7 @@ class GpuDeletionVectorWriterSuite extends SparkQueryCompareTestSuite {
     withPool(4) { pool =>
       val running = new AtomicInteger(0)
       val inWriters = new CountDownLatch(2)
+      val release = new CountDownLatch(1)
       var runningOnExit = -1
       var flagOnExit = false
       val task = new Thread(() => {
@@ -200,7 +230,12 @@ class GpuDeletionVectorWriterSuite extends SparkQueryCompareTestSuite {
             (bin: Seq[Int]) => {
               running.incrementAndGet()
               inWriters.countDown()
-              try { Thread.sleep(300); bin } finally { running.decrementAndGet() }
+              try {
+                assert(release.await(30, TimeUnit.SECONDS))
+                bin
+              } finally {
+                running.decrementAndGet()
+              }
             },
             pool = pool).toSeq
         } catch {
@@ -212,6 +247,7 @@ class GpuDeletionVectorWriterSuite extends SparkQueryCompareTestSuite {
       task.start()
       assert(inWriters.await(30, TimeUnit.SECONDS))
       task.interrupt()
+      release.countDown()
       task.join(30000)
       assert(runningOnExit == 0, "writers were still running when the task exited")
       assert(flagOnExit, "the interrupt flag was lost")
@@ -318,6 +354,28 @@ class GpuDeletionVectorWriterSuite extends SparkQueryCompareTestSuite {
       }
     } finally {
       org.apache.commons.io.FileUtils.deleteQuietly(dir)
+    }
+  }
+
+  test("a row whose file path was not matched fails the task") {
+    // The left outer join that attaches existing DVs yields a null path for an unmatched file.
+    // Persisting must fail on it, here on a writer pool thread, not drop the delete.
+    val table = Files.createTempDirectory("gpu-dv-writer-null").toFile
+    try {
+      withCpuSparkSession { spark =>
+        spark.conf.set(DeltaSQLConf.DELETION_VECTOR_PACKING_TARGET_SIZE.key, "1")
+        val rows = (0 until 5).map { i =>
+          val (bytes, cardinality) = newBitmap(i)
+          DeletionVectorData(if (i == 3) null else s"file-$i.parquet", bytes, cardinality)
+        }
+        // Delta's writer asserts that the path is set.
+        intercept[AssertionError] {
+          GpuDeletionVectorWriter.createMapper(spark, spark.sessionState.newHadoopConf(),
+            new Path(table.getAbsolutePath), prefixLength = 0)(rows.iterator).toSeq
+        }
+      }
+    } finally {
+      org.apache.commons.io.FileUtils.deleteQuietly(table)
     }
   }
 
