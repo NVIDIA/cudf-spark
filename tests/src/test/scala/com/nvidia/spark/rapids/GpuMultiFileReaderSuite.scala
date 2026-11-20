@@ -596,6 +596,11 @@ class GpuMultiFileReaderSuite extends AnyFunSuite with RmmSparkRetrySuiteBase {
         PartitionedFileUtilsShim.newPartitionedFile(
           InternalRow.empty, s"file:///tmp/file$i.dat", 0, 100)
       }.toArray
+      val file0Finished = new CountDownLatch(1)
+      val file1Release = new CountDownLatch(1)
+      val file1Entered = new CountDownLatch(1)
+      val file1TimedSuccess = new AtomicBoolean(false)
+
       val reader = new MultiFileCloudPartitionReaderBase(
         new Configuration(false), files,
         new ThreadPoolConfBuilder(4, true, 1L << 20, 10000L, false).build(),
@@ -618,6 +623,13 @@ class GpuMultiFileReaderSuite extends AnyFunSuite with RmmSparkRetrySuiteBase {
         override def getBatchRunner(tc: TaskContext, file: PartitionedFile,
             conf: Configuration, filters: Array[Filter]): AsyncRunner[BufferInfo] = {
           AsyncRunner.newUnboundedTask[BufferInfo](() => {
+            if (file.filePath.toString.contains("file0")) {
+              file0Finished.countDown()
+            } else if (file.filePath.toString.contains("file1")) {
+              file1Entered.countDown()
+              file1Release.await()
+              file1TimedSuccess.set(true)
+            }
             new HostMemoryBuffersWithMetaDataBase {
               override def partitionedFile: PartitionedFile = file
               override def memBuffersAndSizes: Array[SingleHMBAndMeta] =
@@ -635,18 +647,36 @@ class GpuMultiFileReaderSuite extends AnyFunSuite with RmmSparkRetrySuiteBase {
         override def getFileFormatShortName: String = "test"
       }
 
-      withResource(reader) { r =>
-        var batchCount = 0
-        var totalRows = 0
-        while (r.next()) {
-          withResource(r.get()) { batch =>
-            assert(batch.numRows() <= 2)
-            totalRows += batch.numRows()
-            batchCount += 1
+      try {
+        // Ensure file0 completes while file1 is actively held in progress
+        assert(file0Finished.await(10, java.util.concurrent.TimeUnit.SECONDS))
+        assert(file1Entered.await(10, java.util.concurrent.TimeUnit.SECONDS))
+
+        // In a background thread after a short delay, release file1 while readReadyFiles
+        // is waiting inside head.get(combineWaitTime)
+        val releaser = new Thread(() => {
+          Thread.sleep(100)
+          file1Release.countDown()
+        })
+        releaser.start()
+
+        withResource(reader) { r =>
+          var batchCount = 0
+          var totalRows = 0
+          while (r.next()) {
+            withResource(r.get()) { batch =>
+              assert(batch.numRows() <= 2)
+              totalRows += batch.numRows()
+              batchCount += 1
+            }
           }
+          assert(totalRows == 4)
+          assert(batchCount >= 2)
+          assert(file1TimedSuccess.get())
         }
-        assert(totalRows == 4)
-        assert(batchCount >= 2)
+        releaser.join(5000)
+      } finally {
+        file1Release.countDown()
       }
     } finally {
       TrampolineUtil.unsetTaskContext()
