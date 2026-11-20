@@ -678,6 +678,9 @@ def run_delete_on_cpu_and_gpu(spark_tmp_path, generate_dest_data, delete_sql, co
     cpu_data, cpu_metrics = read_table_and_metrics(cpu_path)
     gpu_data, gpu_metrics = read_table_and_metrics(gpu_path)
     assert_equal(cpu_data, gpu_data)
+    # Partitioned tables have no guaranteed task layout, so their commits can legitimately differ.
+    if not partition_columns:
+        with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
     if cpu_metrics is None:
         assert gpu_metrics is None
     else:
@@ -692,7 +695,7 @@ def two_part_int_data(spark):
     return spark.createDataFrame([(i, i % 2) for i in range(10)], "id INT, part INT").coalesce(1)
 
 
-@allow_non_gpu("ExecutedCommandExec", *delta_meta_allow)
+@allow_non_gpu("ExecutedCommandExec", "EmptyRelationExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not is_oss_delta_lake_43(),
@@ -701,11 +704,14 @@ def two_part_int_data(spark):
     # No commit is made when nothing matches, so there is no history entry; the row count is 0.
     ("id = 999", True, None, 0),
     ("id = 999", False, None, 0),
+    # Stats can't prune any file here, so the data is scanned and still nothing matches.
+    ("id % 100 = 99", True, None, 0),
     ("part = 1", True, {"numCopiedRows": 0, "numDeletedRows": 5}, 5),
     # Without row-level metadata metrics a partition-only DELETE records no row-count history
     # metrics and reports -1 rows, as on CPU.
     ("part = 1", False, {}, -1),
-], ids=["no_match", "no_match_no_row_metrics", "metadata_only", "metadata_only_no_row_metrics"])
+], ids=["no_match", "no_match_no_row_metrics", "no_match_scanned", "metadata_only",
+        "metadata_only_no_row_metrics"])
 def test_delta_delete_43_reports_zero_row_count_metrics(
         spark_tmp_path, predicate, metrics_from_metadata, expected_metrics, expected_num_rows):
     conf = copy_and_update(delta_delete_enabled_conf, {
@@ -717,7 +723,7 @@ def test_delta_delete_43_reports_zero_row_count_metrics(
     assert (None if gpu_metrics is None else row_count_metrics(gpu_metrics)) == expected_metrics
 
 
-@allow_non_gpu("ExecutedCommandExec", *delta_meta_allow)
+@allow_non_gpu("ExecutedCommandExec", "EmptyRelationExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
 @pytest.mark.skipif(not is_oss_delta_lake_43(),
@@ -728,12 +734,14 @@ def test_delta_delete_43_reports_zero_row_count_metrics(
     ("id < 100", 10, 0),
     # Nothing matches: no commit, hence no history entry.
     ("id = 999", None, None),
-], ids=["some_rows", "all_rows", "no_match"])
+    # Stats can't prune any file here, so the data is scanned and still nothing matches.
+    ("id % 100 = 99", None, None),
+], ids=["some_rows", "all_rows", "no_match", "no_match_scanned"])
 def test_delta_delete_43_rewrite_row_count_metrics(
         spark_tmp_path, predicate, expected_deleted, expected_copied):
     # The history metrics come from the command's SQL metrics, so they don't depend on
     # metrics.alwaysReportSomeZeroMetrics (which only shapes the delta.dml.delete.stats event,
-    # covered by test_delta_delete_43_zero_metric_runtime_shim).
+    # covered by test_delta_delete_43_stats_event_honors_always_report_zero_metrics).
     num_rows, _, gpu_metrics = run_delete_on_cpu_and_gpu(
         spark_tmp_path, two_part_int_data, "DELETE FROM delta.`{path}` WHERE " + predicate,
         delta_delete_enabled_conf)
@@ -786,7 +794,8 @@ def test_delta_delete_43_zero_metric_runtime_shim(always_report, expected):
     ("id = 3", 1),
     # Nothing matches: no commit, hence no history entry.
     ("id = 999", None),
-], ids=["match", "no_match"])
+    ("id % 100 = 99", None),
+], ids=["match", "no_match", "no_match_scanned"])
 def test_delta_delete_43_deletion_vector_row_count_metrics(
         spark_tmp_path, partition_columns, predicate, expected_deleted):
     # A DV DELETE never copies rows, so numCopiedRows is 0 in the history.
@@ -1023,30 +1032,61 @@ def delete_stats_events(spark_jvm_, func):
                     if "delta.dml.delete.stats" in r.toString()]
 
 
-@allow_non_gpu("ExecutedCommandExec", *delta_meta_allow)
+_volatile_event_fields = ("condition", "TimeMs", "Bytes")
+
+
+def stable_event_fields(event):
+    """The event without its table path (in the condition), timing and size fields."""
+    return {name: value for name, value in event.items()
+            if not any(marker in name for marker in _volatile_event_fields)}
+
+
+@allow_non_gpu("ExecutedCommandExec", "EmptyRelationExec", *delta_meta_allow)
 @delta_lake
+@ignore_order
 @pytest.mark.skipif(not is_oss_delta_lake_43(),
                     reason="Delta 4.3 DELETE zero-metric stats event coverage")
-@pytest.mark.parametrize("always_report, expected", [
-    (False, None),
-    (True, 0),
-], ids=["flag_off", "flag_on"])
-def test_delta_delete_43_no_match_stats_event_honors_always_report_zero_metrics(
-        spark_tmp_path, always_report, expected):
-    """GpuDeleteCommand must report a no-match DELETE's row counts as Some(0) only when
-    metrics.alwaysReportSomeZeroMetrics is set, as Delta's DeleteCommand does."""
+@pytest.mark.parametrize("always_report", [False, True], ids=["flag_off", "flag_on"])
+@pytest.mark.parametrize("predicate, partition_columns, deletion_vectors, metrics_from_metadata,"
+                         " no_match", [
+    ("id = 999", None, False, True, True),
+    # Stats can't prune any file here, so the data is scanned and still nothing matches.
+    ("id % 100 = 99", None, False, True, True),
+    ("part = 1", ["part"], False, True, False),
+    ("part = 1", ["part"], False, False, False),
+    ("id = 3", None, True, True, False),
+    ("id = 999", None, True, True, True),
+], ids=["no_match", "no_match_scanned", "metadata_only", "metadata_only_no_row_metrics",
+        "dv_match", "dv_no_match"])
+def test_delta_delete_43_stats_event_honors_always_report_zero_metrics(
+        spark_tmp_path, always_report, predicate, partition_columns, deletion_vectors,
+        metrics_from_metadata, no_match):
+    """The GPU delta.dml.delete.stats event matches the CPU one, so GpuDeleteCommand applies
+    metrics.alwaysReportSomeZeroMetrics the way Delta's DeleteCommand does. Whether the DV and
+    metadata-only paths report their row counts as None or Some(0) depends on that flag."""
     data_path = spark_tmp_path + "/DELTA_DATA"
     with_cpu_session(lambda spark: setup_delta_dest_tables(
         spark, data_path, two_part_int_data, use_cdf=False,
-        enable_deletion_vectors=False))
+        enable_deletion_vectors=deletion_vectors, partition_columns=partition_columns))
     conf = copy_and_update(delta_delete_enabled_conf, {
-        "spark.databricks.delta.metrics.alwaysReportSomeZeroMetrics": str(always_report).lower()})
+        "spark.databricks.delta.metrics.alwaysReportSomeZeroMetrics": str(always_report).lower(),
+        "spark.databricks.delta.dmlMetricsFromMetadata.enabled": str(metrics_from_metadata).lower(),
+        "spark.databricks.delta.delete.deletionVectors.persistent": str(deletion_vectors).lower()})
     jvm = spark_jvm()
-    _, events = assert_rapids_delta_write(
-        lambda spark: delete_stats_events(
-            jvm, lambda: spark.sql(
-                "DELETE FROM delta.`{}/GPU` WHERE id = 999".format(data_path)).collect()),
-        conf=conf, required_gpu_classes=[], expected_command="GpuDeleteCommand")
-    assert len(events) == 1, f"Expected one delta.dml.delete.stats event, got {events}"
-    assert events[0].get("numDeletedRows") == expected
-    assert events[0].get("numCopiedRows") == expected
+
+    def delete_and_capture_event(table):
+        delete_sql = "DELETE FROM delta.`{}/{}` WHERE {}".format(data_path, table, predicate)
+        return lambda spark: delete_stats_events(jvm, lambda: spark.sql(delete_sql).collect())
+
+    _, cpu_events = with_cpu_session(delete_and_capture_event("CPU"), conf=conf)
+    _, gpu_events = assert_rapids_delta_write(
+        delete_and_capture_event("GPU"), conf=conf, required_gpu_classes=[],
+        expected_command="GpuDeleteCommand")
+    assert len(cpu_events) == 1, f"Expected one CPU delta.dml.delete.stats event: {cpu_events}"
+    assert len(gpu_events) == 1, f"Expected one GPU delta.dml.delete.stats event: {gpu_events}"
+    assert stable_event_fields(gpu_events[0]) == stable_event_fields(cpu_events[0])
+    if no_match:
+        # Pinned explicitly so a change of both CPU and GPU behavior can't go unnoticed.
+        expected = 0 if always_report else None
+        assert gpu_events[0].get("numDeletedRows") == expected
+        assert gpu_events[0].get("numCopiedRows") == expected

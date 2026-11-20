@@ -207,14 +207,18 @@ def test_delta_merge_num_records_validation(spark_tmp_path, spark_tmp_table_fact
         error_message="DELTA_NUM_RECORDS_MISMATCH")
 
 
+def _normalize_table_path(spark, path):
+    """Normalizes `path` the way Spark qualifies a table location (through a Hadoop Path).
+
+    Delta rejects a table whose location doesn't end with the path in its identifier
+    (DELTA_AMBIGUOUS_PATHS_IN_CREATE_TABLE), so the identifier must already be in this form."""
+    return spark._jvm.org.apache.hadoop.fs.Path(path).toString()
+
+
 def _target_path(spark, spark_tmp_path):
     """Separate target table per run so the CPU and GPU runs of one test don't share state."""
     gpu_enabled = str(spark.conf.get("spark.rapids.sql.enabled", "false")).lower() == "true"
-    path = spark_tmp_path + ("/GPU" if gpu_enabled else "/CPU")
-    # Collapse repeated slashes in the path (Delta rejects them as ambiguous paths), keeping any
-    # "scheme:" or "scheme://authority" prefix intact; the authority may be empty ("hdfs:///x").
-    prefix, rest = re.match(r"((?:[A-Za-z][A-Za-z0-9+.-]*:(?://[^/]*)?)?)(.*)", path, re.S).groups()
-    return prefix + re.sub(r"/{2,}", "/", rest)
+    return _normalize_table_path(spark, spark_tmp_path + ("/GPU" if gpu_enabled else "/CPU"))
 
 
 def _create_empty_schema_target(spark, path):
@@ -292,6 +296,21 @@ def _assert_merge_succeeds_on_gpu_like_cpu(
         run, conf, expected_command=_GPU_MERGE_COMMANDS[0])
     assert cpu_schema == gpu_schema
     assert_equal_with_local_sort(cpu_rows, gpu_rows)
+
+
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 MERGE test helper coverage")
+@pytest.mark.parametrize("path, expected", [
+    ("/tmp//warehouse//GPU", "/tmp/warehouse/GPU"),
+    ("file:///tmp//warehouse//GPU", "file:/tmp/warehouse/GPU"),
+    ("hdfs:///warehouse//GPU", "hdfs:/warehouse/GPU"),
+    ("hdfs://host:9000//warehouse//GPU", "hdfs://host:9000/warehouse/GPU"),
+    ("s3a://bucket//warehouse//GPU", "s3a://bucket/warehouse/GPU"),
+], ids=["local", "file_no_authority", "hdfs_no_authority", "hdfs_host_port", "s3a"])
+def test_delta_merge_target_path_normalization(path, expected):
+    """The target path helper keeps the scheme and authority and collapses repeated slashes, so
+    the table identifier and the location Spark qualifies for it stay identical."""
+    assert with_cpu_session(lambda spark: _normalize_table_path(spark, path)) == expected
 
 
 empty_schema_error_merge_sqls = [
