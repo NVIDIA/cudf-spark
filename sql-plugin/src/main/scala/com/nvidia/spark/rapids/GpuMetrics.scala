@@ -228,7 +228,8 @@ object GpuMetric extends Logging {
     "hybrid scan bytes read to host instead of with GDS while the GPU was busy"
   val DESCRIPTION_HYBRID_SCAN_BYTES_REQUESTED = "hybrid scan data bytes requested, counting a " +
     "dictionary page fetched for pruning again with its column chunk"
-  val DESCRIPTION_HYBRID_SCAN_DEVICE_BYTES_READ = "hybrid scan bytes read to device with GDS"
+  val DESCRIPTION_HYBRID_SCAN_DEVICE_BYTES_READ =
+    "hybrid scan bytes read to device with GDS, including alignment padding"
   val DESCRIPTION_DELETION_VECTOR_SCATTER_TIME = "deletion vector scatter time"
   val DESCRIPTION_DELETION_VECTOR_SIZE = "deletion vector size"
   val DESCRIPTION_GPU_OUTPUT_BATCH_BYTES = "decoded batch bytes"

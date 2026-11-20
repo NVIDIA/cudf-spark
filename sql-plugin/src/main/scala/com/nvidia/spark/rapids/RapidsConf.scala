@@ -50,7 +50,7 @@ object RapidsConf extends Logging with RapidsConfEntries {
   }
 
   object GpuDirectStorageMode extends Enumeration {
-    val OFF, WAIT_IF_GPU_BUSY, HOST_IF_GPU_BUSY = Value
+    val OFF, ON, AUTO = Value
   }
 
   private lazy val registeredConfs = new ListBuffer[ConfEntry[_]]()
