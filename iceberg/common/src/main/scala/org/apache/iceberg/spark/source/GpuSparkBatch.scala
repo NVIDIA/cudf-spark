@@ -18,7 +18,6 @@ package org.apache.iceberg.spark.source
 
 import java.util.Objects
 
-import com.nvidia.spark.rapids.iceberg.parquet.metadata.GpuIcebergMetadataReader
 import org.apache.iceberg.SchemaParser
 
 import org.apache.spark.SparkContext
@@ -39,9 +38,6 @@ class GpuSparkBatch(
   override def planInputPartitions(): Array[InputPartition] = {
     val expectedSchema = GpuSparkScanAccess.expectedSchema(cpuBatch)
     val expectedSchemaString = SchemaParser.toJson(expectedSchema)
-    val conf = parentScan.rapidsConf
-    val metadataRowsPerBatch = GpuIcebergMetadataReader.estimateRowsPerBatch(expectedSchema,
-      conf.maxReadBatchSizeRows, conf.maxReadBatchSizeBytes, conf.gpuTargetBatchSizeBytes)
 
     // Spark can plan a scan from a background thread where the thread-local active
     // SparkSession is not set. The application SparkContext is not thread-local.
@@ -51,10 +47,9 @@ class GpuSparkBatch(
 
     cpuBatch.planInputPartitions().map { partition =>
       new GpuSparkInputPartition(partition,
-        conf,
+        parentScan.rapidsConf,
         hadoopConf,
-        expectedSchemaString,
-        metadataRowsPerBatch)
+        expectedSchemaString)
     }
   }
 

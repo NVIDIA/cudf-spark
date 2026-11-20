@@ -26,7 +26,6 @@ import com.nvidia.spark.rapids.iceberg.ShimUtils.locationOf
 import com.nvidia.spark.rapids.iceberg.data.{DefaultDeleteLoader, GpuDeleteFileInfo,
   GpuDeleteFilter}
 import com.nvidia.spark.rapids.iceberg.parquet._
-import com.nvidia.spark.rapids.iceberg.parquet.metadata.GpuIcebergMetadataReader
 import org.apache.iceberg._
 import org.apache.iceberg.mapping.NameMappingParser
 
@@ -39,7 +38,6 @@ class GpuIcebergPartitionReader(
     private val task: GpuSparkInputPartition,
     private val threadConf: ThreadConf,
     private val metrics: Map[String, GpuMetric],
-    private val queryUsesInputFile: Boolean = false,
 ) extends PartitionReader[ColumnarBatch] {
   private var inited = false
   
@@ -47,8 +45,6 @@ class GpuIcebergPartitionReader(
   private lazy val fileIO = table.io()
   private lazy val rapidsFileIO = new IcebergFileIO(fileIO)
   private lazy val conf = newConf()
-  private lazy val scanTasks = GpuSparkScanAccess.taskGroup(task.cpuPartition)
-    .tasks().asScala.map(_.asFileScanTask()).toSeq
   private lazy val (inputFiles, tasks) = collectFiles()
   private lazy val deleteInfoMap =
     tasks.map { case (file, scanTask) =>
@@ -73,7 +69,7 @@ class GpuIcebergPartitionReader(
         }
         file -> filter
     }
-  private lazy val reader: Iterator[ColumnarBatch] with AutoCloseable = createReader()
+  private lazy val reader: GpuIcebergParquetReader = createDataFileParquetReader()
 
 
   override def close(): Unit = {
@@ -88,21 +84,6 @@ class GpuIcebergPartitionReader(
 
   override def get(): ColumnarBatch = {
     reader.next()
-  }
-
-  private def createReader(): Iterator[ColumnarBatch] with AutoCloseable = {
-    val metadataPlan = if (queryUsesInputFile) {
-      None
-    } else {
-      Option(GpuIcebergMetadataReader.plan(scanTasks.asJava, conf, task.metadataRowsPerBatch,
-        scanTask => ShimUtils.constantsMap(scanTask, conf.expectedSchema, table)).orElse(null))
-    }
-    metadataPlan match {
-      case Some(plan) =>
-        inited = true
-        new GpuIcebergMetadataReader(plan.getFiles, plan.getRowsPerBatch, conf)
-      case None => createDataFileParquetReader()
-    }
   }
 
   private def createDataFileParquetReader() = {
@@ -127,7 +108,12 @@ class GpuIcebergPartitionReader(
   }
 
   private def collectFiles() = {
-    val tasks = scanTasks
+    val tasks: Seq[FileScanTask] = GpuSparkScanAccess
+      .taskGroup(task.cpuPartition)
+      .tasks()
+      .asScala
+      .map(t => t.asFileScanTask())
+      .toSeq
 
     val inputFiles = tasks.flatMap(t => Seq(t.file()) ++ t.deletes().asScala)
       .map(f => locationOf(f) -> rapidsFileIO.newInputFile(locationOf(f)))

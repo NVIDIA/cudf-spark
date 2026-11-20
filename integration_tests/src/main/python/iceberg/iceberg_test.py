@@ -67,8 +67,8 @@ def _create_metadata_only_table(spark_tmp_table_factory, format_version):
     def populate(spark):
         spark.sql(f"ALTER TABLE {table} SET TBLPROPERTIES ("
                   "'read.split.open-file-cost' = '0', 'read.split.target-size' = '268435456')")
-        for value in ['alpha', 'beta', None, 'alpha']:
-            spark.createDataFrame([(i, value) for i in range(7)], 'id long, p string') \
+        for value, rows in [('alpha', 2), ('beta', 3), (None, 1), ('alpha', 7)]:
+            spark.createDataFrame([(i, value) for i in range(rows)], 'id long, p string') \
                 .coalesce(1).writeTo(table).append()
 
     with_cpu_session(populate)
@@ -79,6 +79,7 @@ def _metadata_only_conf(reader_type):
     return {**iceberg_read_enabled_conf,
             'spark.sql.iceberg.aggregate-push-down.enabled': 'false',
             'spark.rapids.sql.format.parquet.reader.type': reader_type,
+            'spark.rapids.sql.reader.multithreaded.combine.sizeBytes': '64m',
             'spark.rapids.sql.reader.batchSizeRows': '5'}
 
 
@@ -90,7 +91,8 @@ def test_iceberg_metadata_only_materialize_and_combine(
         spark_tmp_table_factory, format_version, reader_type):
     table = _create_metadata_only_table(spark_tmp_table_factory, format_version)
     conf = _metadata_only_conf(reader_type)
-    for projection in ['p, _spec_id, _partition, _file', 'count(*)', 'p, count(*)']:
+    for projection in ['_spec_id, _partition', 'p, _spec_id, _partition, _file',
+                       'count(*)', 'p, count(*)']:
         group_by = ' GROUP BY p' if projection == 'p, count(*)' else ''
         assert_gpu_and_cpu_are_equal_collect(
             lambda spark: spark.sql(f"SELECT {projection} FROM {table}{group_by}"), conf=conf)
