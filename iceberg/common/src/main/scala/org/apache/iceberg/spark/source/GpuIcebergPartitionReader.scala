@@ -91,16 +91,16 @@ class GpuIcebergPartitionReader(
   }
 
   private def createReader(): Iterator[ColumnarBatch] with AutoCloseable = {
-    val metadataTasks = if (queryUsesInputFile) {
+    val metadataPlan = if (queryUsesInputFile) {
       None
     } else {
-      Option(GpuIcebergMetadataReader.plan(scanTasks.asJava, conf,
+      Option(GpuIcebergMetadataReader.plan(scanTasks.asJava, conf, task.metadataRowsPerBatch,
         scanTask => ShimUtils.constantsMap(scanTask, conf.expectedSchema, table)).orElse(null))
     }
-    metadataTasks match {
-      case Some(files) =>
+    metadataPlan match {
+      case Some(plan) =>
         inited = true
-        new GpuIcebergMetadataReader(files, conf)
+        new GpuIcebergMetadataReader(plan.getFiles, plan.getRowsPerBatch, conf)
       case None => createDataFileParquetReader()
     }
   }

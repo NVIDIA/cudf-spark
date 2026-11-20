@@ -27,7 +27,8 @@ import org.apache.spark.util.SerializableConfiguration
 class GpuSparkInputPartition(val cpuPartition: InputPartition,
     rapidsConf: RapidsConf,
     val hadoopConf: Broadcast[SerializableConfiguration],
-    val expectedSchemaStr: String) extends
+    val expectedSchemaStr: String,
+    val metadataRowsPerBatch: Int) extends
   InputPartition with HasPartitionKey with Serializable {
 
   private val cpuPartitionWithKey: HasPartitionKey = cpuPartition match {

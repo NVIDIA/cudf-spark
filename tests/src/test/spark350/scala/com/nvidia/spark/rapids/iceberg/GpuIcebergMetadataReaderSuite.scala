@@ -30,7 +30,8 @@ import com.nvidia.spark.rapids.{CombineConf, GpuColumnVector, RmmSparkRetrySuite
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.iceberg.parquet._
 import com.nvidia.spark.rapids.iceberg.parquet.metadata.GpuIcebergMetadataReader
-import com.nvidia.spark.rapids.iceberg.parquet.metadata.GpuIcebergMetadataReader.FileMetadata
+import com.nvidia.spark.rapids.iceberg.parquet.metadata.GpuIcebergMetadataReader.{
+  FileMetadata, ReadPlan}
 import com.nvidia.spark.rapids.jni.{GpuSplitAndRetryOOM, RmmSpark}
 import org.apache.hadoop.conf.Configuration
 import org.apache.iceberg.{DataFile, DataFiles, DeleteFile, FileFormat, FileScanTask, MetadataColumns,
@@ -61,15 +62,22 @@ class GpuIcebergMetadataReaderSuite extends RmmSparkRetrySuiteBase {
       false, 0, false, None, false, Map.empty, threadConf, expected, None, false)
   }
 
-  private def plan(files: Seq[FileMetadata], readerConf: GpuIcebergParquetReaderConf)
-      : java.util.List[FileMetadata] = {
+  private def estimate(readerConf: GpuIcebergParquetReaderConf): Int =
+    GpuIcebergMetadataReader.estimateRowsPerBatch(readerConf.expectedSchema,
+      readerConf.maxBatchSizeRows, readerConf.maxBatchSizeBytes, readerConf.targetBatchSizeBytes)
+
+  private def plan(files: Seq[FileMetadata], readerConf: GpuIcebergParquetReaderConf): ReadPlan = {
     val tasks = files.map(f => task(path = f.getPath(), rows = f.getRowCount()))
     val metadata = tasks.zip(files).toMap
-    GpuIcebergMetadataReader.plan(tasks.asJava, readerConf, t => metadata(t).getConstants()).get()
+    GpuIcebergMetadataReader.plan(tasks.asJava, readerConf, estimate(readerConf),
+      t => metadata(t).getConstants()).get()
   }
 
   private def newReader(files: Seq[FileMetadata], readerConf: GpuIcebergParquetReaderConf)
-      : GpuIcebergMetadataReader = new GpuIcebergMetadataReader(plan(files, readerConf), readerConf)
+      : GpuIcebergMetadataReader = {
+    val planned = plan(files, readerConf)
+    new GpuIcebergMetadataReader(planned.getFiles, planned.getRowsPerBatch, readerConf)
+  }
 
   private def file(value: String, rows: Long, path: String = "/does-not-exist.parquet")
       : FileMetadata = {
@@ -92,9 +100,11 @@ class GpuIcebergMetadataReaderSuite extends RmmSparkRetrySuiteBase {
     scan
   }
 
-  private def eligible(scan: FileScanTask, expected: Schema = schema): Boolean =
-    GpuIcebergMetadataReader.plan(Seq(scan).asJava, conf(expected),
+  private def eligible(scan: FileScanTask, expected: Schema = schema): Boolean = {
+    val readerConf = conf(expected)
+    GpuIcebergMetadataReader.plan(Seq(scan).asJava, readerConf, estimate(readerConf),
       _ => file("a", 5).getConstants()).isPresent
+  }
 
   test("only complete files with exact unfiltered row counts are eligible") {
     assert(eligible(task()))
@@ -160,11 +170,14 @@ class GpuIcebergMetadataReaderSuite extends RmmSparkRetrySuiteBase {
       val files = Seq(first, new FileMetadata("/second", 2, constants), file("a", 2, "/third"))
       val readerConf = conf(rows = 4, threadConf = threadConf)
       val planned = plan(files, readerConf)
-      assert(planned.size() == 1)
-      assert(planned.get(0).getRowCount() == 7)
-      assert(planned.get(0).getPath() == first.getPath())
-      assert(planned.get(0).getConstants() eq first.getConstants())
-      withResource(new GpuIcebergMetadataReader(planned, readerConf)) { reader =>
+      assert(planned.getFiles.size() == 1)
+      val combined = planned.getFiles.get(0)
+      assert(combined.getRowCount() == 7)
+      assert(combined.getPath() == first.getPath())
+      assert(combined.getConstants() eq first.getConstants())
+      assert(planned.getRowsPerBatch == 4)
+      withResource(new GpuIcebergMetadataReader(planned.getFiles, planned.getRowsPerBatch,
+          readerConf)) { reader =>
         assert(reader.map(batch => withResource(batch)(_.numRows())).toList == List(4, 3))
       }
     }
@@ -212,7 +225,7 @@ class GpuIcebergMetadataReaderSuite extends RmmSparkRetrySuiteBase {
   test("keep per-file counts when their sum would overflow a descriptor") {
     val files = Seq(file("a", Long.MaxValue), file("a", 1))
     val planned = plan(files, conf(threadConf = multiThread()))
-    assert(planned.asScala.map(_.getRowCount()).toList == List(Long.MaxValue, 1L))
+    assert(planned.getFiles.asScala.map(_.getRowCount()).toList == List(Long.MaxValue, 1L))
   }
 
   test("nested strings and binary constants obey column limits after combining") {
@@ -253,7 +266,7 @@ class GpuIcebergMetadataReaderSuite extends RmmSparkRetrySuiteBase {
     }
     val planned = plan(Seq(partition(-0.0), partition(0.0)),
       conf(nested, threadConf = multiThread()))
-    assert(planned.size() == 2)
+    assert(planned.getFiles.size() == 2)
   }
 
   test("materialization retries without changing the planned batch size") {
@@ -273,23 +286,37 @@ class GpuIcebergMetadataReaderSuite extends RmmSparkRetrySuiteBase {
     }
   }
 
-  test("the expected schema limits batch rows even for a short constant") {
-    // Two nullable strings use an estimated 40 bytes of data, 12 of offsets and 64 of validity.
-    withResource(newReader(Seq(file("a", 7)), conf(bytes = 116))) { reader =>
-      assert(reader.map(batch => withResource(batch)(_.numRows())).toList == List(2, 2, 2, 1))
+  test("the scan estimate respects the row limit and both byte targets") {
+    // Two rows use an estimated 40 bytes of string data, 12 of offsets and 64 of validity.
+    assert(GpuIcebergMetadataReader.estimateRowsPerBatch(schema, 100, 116, 1024) == 2)
+    assert(GpuIcebergMetadataReader.estimateRowsPerBatch(schema, 100, 1024, 116) == 2)
+    assert(GpuIcebergMetadataReader.estimateRowsPerBatch(schema, 1, 1024, 1024) == 1)
+  }
+
+  test("short and long constants use the same schema-based row estimate") {
+    val readerConf = conf(bytes = 116)
+    val files = Seq(file("a", 5), file("b" * 200, 5))
+    withResource(newReader(files, readerConf)) { reader =>
+      assert(reader.map(batch => withResource(batch)(_.numRows())).toList ==
+        List(2, 2, 1, 2, 2, 1))
     }
   }
 
-  test("long constants further limit the estimated batch rows") {
-    withResource(newReader(Seq(file("a" * 100, 7)), conf(bytes = 250))) { reader =>
-      assert(reader.map(batch => withResource(batch)(_.numRows())).toList == List(2, 2, 2, 1))
+  test("a later file's hard column limit caps the whole plan before any batch is read") {
+    val files = Seq(file("a", 4), file("éé", 8), file("unused wide constant", 0))
+    val readerConf = conf(columnBytes = 12, threadConf = multiThread())
+    val planned = plan(files, readerConf)
+    assert(planned.getRowsPerBatch == 3)
+    withResource(new GpuIcebergMetadataReader(planned.getFiles, planned.getRowsPerBatch,
+        readerConf)) { reader =>
+      assert(reader.map(batch => withResource(batch)(_.numRows())).toList == List(3, 1, 3, 3, 2))
     }
   }
 
-  test("one file's variable-width limit bounds batches before materialization") {
-    withResource(newReader(Seq(file("éé", 8)), conf(columnBytes = 12))) { reader =>
-      assert(reader.map(batch => withResource(batch)(_.numRows())).toList == List(3, 3, 2))
-    }
+  test("the hard limit includes projected UTF-8 file paths") {
+    val expected = new Schema(MetadataColumns.FILE_PATH)
+    val files = Seq(file("unused", 4, "/a"), file("unused", 4, "/éé"))
+    assert(plan(files, conf(expected, columnBytes = 10)).getRowsPerBatch == 2)
   }
 
   for ((mode, threadConf) <- Seq(
@@ -308,11 +335,11 @@ class GpuIcebergMetadataReaderSuite extends RmmSparkRetrySuiteBase {
     }
   }
 
-  test("a value over the hard column limit is rejected before materialization") {
-    withResource(newReader(Seq(file("abcd", 1)), conf(columnBytes = 3))) { reader =>
-      val error = intercept[IllegalArgumentException](reader.next())
-      assert(error.getMessage.contains("GPU column size limit"))
+  test("planning rejects a single value over the hard column limit") {
+    val error = intercept[IllegalArgumentException] {
+      plan(Seq(file("a", 2), file("abcd", 1)), conf(columnBytes = 3))
     }
+    assert(error.getMessage.contains("GPU column size limit"))
   }
 
   test("a split-and-retry failure propagates from materialization") {
