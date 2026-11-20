@@ -12,30 +12,49 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Exercise shared CI readiness selection without installing or starting Spark."""
+"""Exercise Databricks CI test selection without installing or starting Spark."""
 
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
 
 class ReadinessSelectionTest(unittest.TestCase):
     def run_script(self, version="18.3.", mode="CI_PART1", hook=True,
-                   override=None, extra_envs="", upstream="1", hook_exit=0, delta_exit=0):
+                   override=None, extra_envs="", upstream="1", hook_exit=0, delta_exit=0,
+                   jar_path="", delta_report="<testcase name='test_delta_scan_read'/>"):
         script = Path(__file__).resolve().parents[1] / "test.sh"
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            db_dir = root / "jenkins/databricks"
+            run_root = root / jar_path if jar_path else root
+            db_dir = run_root / "jenkins/databricks"
             db_dir.mkdir(parents=True)
             (db_dir / "setup.sh").write_text(":\n")
             (db_dir / "common_vars.sh").write_text(":\n")
-            integration_dir = root / "integration_tests"
+            integration_dir = run_root / "integration_tests"
             integration_dir.mkdir()
             (integration_dir / "run_pyspark_from_build.sh").write_text(
                 'echo "PRODUCT_TEST $*"\necho "TEST_FILES ${TESTS:-}"\n'
-                f'if [[ " $* " == *" --delta_lake "* ]]; then exit {delta_exit}; fi\n')
+                'if [[ " $* " == *" --delta_lake "* ]]; then\n'
+                f'  if [[ {delta_exit} != 0 ]]; then exit {delta_exit}; fi\n'
+                '  if [[ -n "$LOCAL_JAR_PATH" ]]; then\n'
+                '    [[ "$LOCAL_JAR_PATH" == "$PWD" && "$DRIVER_MEMORY" == 4g &&\n'
+                '       "$RUN_DIR" == "$PWD"/integration_tests/target/run_dir-* ]] || exit 2\n'
+                '    if [[ -n "$DELTA_REPORT" ]]; then\n'
+                '      printf "<testsuite>%s</testsuite>\\n" "$DELTA_REPORT" '
+                '> "$RUN_DIR/TEST-pytest-delta.xml"\n'
+                '    fi\n'
+                '  fi\n'
+                'fi\n')
+            if jar_path:
+                # A passing report from another pass must not satisfy the Delta pass.
+                other_run = integration_dir / "target/run_dir-other"
+                other_run.mkdir(parents=True)
+                (other_run / "TEST-pytest-other.xml").write_text(
+                    '<testsuite><testcase name="test_unrelated"/></testsuite>\n')
             startup = root / "startup.sh"
             startup.write_text(f'echo "READINESS $1"\nexit {hook_exit}\n')
             # Keep the actual control flow, with external setup/Spark calls stubbed.
@@ -44,16 +63,17 @@ class ReadinessSelectionTest(unittest.TestCase):
             (root / "spark-3.3.0-bin-hadoop3").mkdir()
             env = {key: value for key, value in os.environ.items()
                    if key in {"PATH", "LANG"}}
-            env.update(HOME=str(root), LOCAL_JAR_PATH=str(root),
+            env.update(HOME=str(root), LOCAL_JAR_PATH=jar_path, DELTA_REPORT=delta_report,
                        BASE_SPARK_VERSION="3.3.0", TEST_MODE=mode,
                        EXTRA_ENVS=extra_envs, WITH_DEFAULT_UPSTREAM_SHIM=upstream,
+                       TEST_TYPE="nightly", PYSPARK_PYTHON=sys.executable,
                        PYSP_TEST_spark_databricks_clusterUsageTags_sparkVersion=version)
             if hook:
                 env["SPARK_STARTUP_CHECK"] = str(startup)
             if override is not None:
                 env["SPARK_READINESS_ONLY"] = override
             return subprocess.run(["bash", str(root / "test.sh")], env=env,
-                                  text=True, capture_output=True, check=False)
+                                  cwd=root, text=True, capture_output=True, check=False)
 
     def test_ci_runs_integration_tests_for_dbr_183(self):
         for mode in ("DEFAULT", "CI_PART1", "CI_PART2"):
@@ -150,6 +170,51 @@ class ReadinessSelectionTest(unittest.TestCase):
                 result = self.run_script(mode=mode)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("PRODUCT_TEST", result.stdout)
+
+    def test_prebuilt_default_and_split_modes(self):
+        for mode in ("DEFAULT", "CI_PART1", "CI_PART2"):
+            with self.subTest(mode=mode):
+                result = self.run_script(mode=mode, jar_path="./prebuilt jars", upstream="0")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for args in ("-m delta_lake --delta_lake", "-k cache_test",
+                             "-m shuffle_test", "-m pyarrow_test --pyarrow_test"):
+                    self.assertEqual(args in result.stdout, mode != "CI_PART1")
+                self.assertEqual("TEST_FILES json_test.py" in result.stdout, mode == "CI_PART2")
+
+    def test_prebuilt_specialized_modes_launch_only_the_requested_suite(self):
+        for mode, args in (("DELTA_LAKE_ONLY", "-m delta_lake --delta_lake"),
+                           ("MULTITHREADED_SHUFFLE", "-m shuffle_test"),
+                           ("PYARROW_ONLY", "-m pyarrow_test --pyarrow_test")):
+            with self.subTest(mode=mode):
+                result = self.run_script(mode=mode, jar_path="./prebuilt jars")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                launches = [line for line in result.stdout.splitlines()
+                            if line.startswith("PRODUCT_TEST ")]
+                self.assertEqual(len(launches), 1, result.stdout)
+                self.assertIn(args, launches[0])
+
+    def test_prebuilt_delta_requires_a_passing_result_from_this_run(self):
+        for report in ("", "<testcase name='test_delta_scan_read'><skipped/></testcase>"):
+            with self.subTest(report=report):
+                result = self.run_script(mode="DELTA_LAKE_ONLY", jar_path="./prebuilt jars",
+                                         delta_report=report)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("No passing Delta Lake tests found", result.stderr)
+
+    def test_prebuilt_delta_failure_preserves_pytest_exit_status(self):
+        result = self.run_script(mode="DELTA_LAKE_ONLY", jar_path="./prebuilt jars", delta_exit=7)
+        self.assertEqual(result.returncode, 7, result.stderr)
+
+    def test_invalid_mode_and_missing_prebuilt_path_fail(self):
+        result = self.run_script(mode="UNSUPPORTED", jar_path="./prebuilt jars")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Unsupported TEST_MODE=UNSUPPORTED", result.stderr)
+        self.assertNotIn("PRODUCT_TEST", result.stdout)
+
+        result = self.run_script(extra_envs="LOCAL_JAR_PATH=missing")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Prebuilt jar directory does not exist: missing", result.stderr)
+        self.assertNotIn("PRODUCT_TEST", result.stdout)
 
 
 if __name__ == "__main__":
