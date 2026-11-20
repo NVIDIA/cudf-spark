@@ -856,9 +856,13 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
 
   private def longs(values: java.lang.Long*): Seq[java.lang.Long] = values
 
-  /** Builds a table that owns `columns`. */
-  private def gpuTable(columns: ColumnVector*): Table =
-    withResource(columns) { _ => new Table(columns: _*) }
+  /** Builds a table that owns its columns. */
+  private def gpuTable(first: => ColumnVector, second: => ColumnVector): Table =
+    withResource(first) { c0 =>
+      withResource(second) { c1 =>
+        new Table(c0, c1)
+      }
+    }
 
   private def collectLongs(column: ai.rapids.cudf.ColumnView): Seq[java.lang.Long] =
     withResource(column.copyToHost()) { host =>
@@ -877,16 +881,12 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
     }
 
   /** Runs only the JIT program for the expressions and collects its outputs. */
-  private def jitOnly(expressions: Seq[GpuExpression], table: Table): Seq[Seq[java.lang.Long]] = {
-    val roots = expressions.map(GpuAstJitExpression(_))
-    try {
+  private def jitOnly(expressions: Seq[GpuExpression], table: Table): Seq[Seq[java.lang.Long]] =
+    withResource(expressions.map(GpuAstJitExpression(_))) { roots =>
       withResource(roots.head.getJitProgram(roots, table).computeTable(table)) { result =>
         (0 until result.getNumberOfColumns).map(i => collectLongs(result.getColumn(i)))
       }
-    } finally {
-      roots.foreach(_.close())
     }
-  }
 
   test("non-ANSI AST JIT wraps like the regular GPU path") {
     val values = Seq(Long.MinValue, -1L, 0L, Long.MaxValue)
