@@ -141,8 +141,8 @@ case "$DELTA_VERSION" in
   *) die "Unity Catalog tests support Delta Lake 4.2.0 and 4.3.0, found $DELTA_VERSION" ;;
 esac
 case "$SPARK_VER" in
-  4.0.1|4.1.1) ;;
-  *) die "Delta Lake $DELTA_VERSION is only tested against Spark 4.0.1 and 4.1.1, found $SPARK_VER" ;;
+  4.0.1|4.0.5|4.1.1|4.1.4) ;;
+  *) die "Delta Lake $DELTA_VERSION is not tested against Spark $SPARK_VER" ;;
 esac
 # The implementation relies on the UCSingleCatalog 0.6.0 staging shape. Keep the test dependency
 # pinned so a connector refactor cannot silently turn compatibility fallback coverage into an

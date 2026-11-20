@@ -303,7 +303,7 @@ ci_scala213() {
 
     # Exercise one catalog-managed Delta 4.2 operation in the actual Blossom premerge entrypoint.
     # TEST_MODE=DELTA_LAKE_UC_ONLY exposes the full operation/failure matrix for external jobs
-    # that must be scheduled separately for Spark 4.0.1 and 4.1.1.
+    # that must be scheduled separately for Spark 4.0.1, 4.0.5, 4.1.1, and 4.1.4.
     MVN="$MVN" SPARK_VER="$SPARK_VER" SCALA_BINARY_VER=2.13 \
         SPARK_HOME=$SPARK_HOME PYTHONPATH=$PYTHONPATH \
         TESTS=delta_lake_catalog_managed_test.py \
