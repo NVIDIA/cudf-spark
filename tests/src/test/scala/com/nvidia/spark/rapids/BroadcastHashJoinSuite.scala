@@ -20,8 +20,10 @@ import com.nvidia.spark.rapids.TestUtils.findOperator
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.catalyst.plans.Inner
+import org.apache.spark.sql.catalyst.plans.physical.BroadcastDistribution
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
+import org.apache.spark.sql.execution.joins.HashedRelationBroadcastMode
 import org.apache.spark.sql.functions.{broadcast, col}
 import org.apache.spark.sql.rapids.GpuScalarSubquery
 import org.apache.spark.sql.rapids.execution.{GpuBroadcastHashJoinExec, GpuHashJoin}
@@ -35,6 +37,8 @@ class BroadcastHashJoinSuite extends SparkQueryCompareTestSuite {
         .set("spark.sql.shuffle.partitions", "8")
         .set("spark.sql.ansi.enabled", "false")
         .set("spark.rapids.sql.join.hashTable.reuse", reuse.toString)
+        .set("spark.rapids.sql.join.buildSide", "FIXED")
+        .set("spark.rapids.sql.metrics.level", "DEBUG")
       withTempPath { path =>
         val query = """
           |WITH s AS (SELECT id, sum(value) AS total FROM source GROUP BY id)
@@ -72,6 +76,16 @@ class BroadcastHashJoinSuite extends SparkQueryCompareTestSuite {
             })
             assert(joinWithScalarSubquery.nonEmpty,
               s"Expected a scalar subquery in a broadcast build-side projection:\n$plan")
+            val join = joinWithScalarSubquery.get
+            // Databricks executor broadcast uses a different broadcast mode.
+            val standardBroadcast = join.requiredChildDistribution.exists {
+              case BroadcastDistribution(_: HashedRelationBroadcastMode) => true
+              case _ => false
+            }
+            if (reuse && standardBroadcast) {
+              assert(join.metrics("hashTableBuilds").value > 0L,
+                s"Expected a cached hash table build for the broadcast join:\n$plan")
+            }
           } finally {
             spark.catalog.dropTempView("source")
           }
