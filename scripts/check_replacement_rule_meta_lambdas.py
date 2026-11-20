@@ -30,6 +30,7 @@ import sys
 IDENTIFIER = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
 Token = collections.namedtuple("Token", "value start end line")
 Violation = collections.namedtuple("Violation", "path line factories")
+LITERAL = "<literal>"  # placeholder token for string and character literals
 
 
 def _is_identifier(value):
@@ -85,6 +86,7 @@ def tokenize(source):
             offset = end
         elif source[offset] in "\"'":
             end = _consume_quoted(source, offset)
+            tokens.append(Token(LITERAL, offset, end, line))
             line += source.count("\n", offset, end)
             offset = end
         elif source[offset].isspace():
@@ -157,11 +159,25 @@ def _lambda_body_end(tokens, start):
         "class", "def", "enum", "export", "given", "import", "object", "package",
         "trait", "type", "val", "var",
     }
+    # Expression-leading keywords start a statement only after a line break that
+    # follows a token that can end an expression; after an operator or a
+    # continuation keyword the line break does not separate statements.
+    expression_starters = {"for", "if", "new", "return", "throw", "try", "while"}
+    continuation_keywords = {
+        "case", "do", "else", "extends", "finally", "forSome", "match", "new",
+        "return", "then", "throw", "try", "with", "yield",
+    }
     for index in range(start, len(tokens)):
         value = tokens[index].value
-        if (index > start and not stack and tokens[index].line > tokens[index - 1].line and
-                value in statement_starters):
-            return index
+        if index > start and not stack and tokens[index].line > tokens[index - 1].line:
+            previous = tokens[index - 1].value
+            previous_ends_expression = (
+                previous in CLOSE_TO_OPEN or previous == LITERAL or
+                (previous[0].isalnum() or previous[0] in "_$") and
+                previous not in continuation_keywords)
+            if value in statement_starters or (
+                    value in expression_starters and previous_ends_expression):
+                return index
         if value in OPEN_TO_CLOSE:
             stack.append(OPEN_TO_CLOSE[value])
         elif value in CLOSE_TO_OPEN:

@@ -113,6 +113,40 @@ class ReplacementRuleMetaLambdaLintSuite(unittest.TestCase):
           val unrelated = new UnrelatedMeta(a, b, c, d)
         """, [])
 
+    def test_nested_unbraced_helper_does_not_hide_outer_constructor(self):
+        self.assert_factories("""
+          rule((a, conf, p, r) => {
+            val helper = (x: Int) => x + 1
+            new ExampleMeta(a, conf, p, r)
+          })
+        """, [("ExampleMeta",)])
+
+    def test_nested_helper_before_conditional_constructor(self):
+        self.assert_factories("""
+          rule((a, conf, p, r) => {
+            val helper = (x: Int) => helper2(x)
+            if (enabled) new EnabledMeta(a, conf, p, r)
+            else new DisabledMeta(a, conf, p, r)
+          })
+        """, [("EnabledMeta", "DisabledMeta")])
+
+    def test_line_break_after_operator_continues_nested_helper_body(self):
+        self.assert_factories("""
+          rule((a, conf, p, r) => {
+            val helper = (x: Int) => x +
+              new Offset(x)
+            helper
+          })
+        """, [])
+
+    def test_string_literal_ends_nested_helper_body_at_line_break(self):
+        self.assert_factories("""
+          rule((a, conf, p, r) => {
+            val helper = (x: String) => x + "suffix"
+            new ExampleMeta(a, conf, p, r)
+          })
+        """, [("ExampleMeta",)])
+
     def test_main_requires_zero_violations(self):
         root = tempfile.mkdtemp()
         try:
