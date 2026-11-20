@@ -23,9 +23,9 @@ from conftest import is_iceberg_remote_catalog, spark_jvm
 from data_gen import copy_and_update, DecimalGen, IntegerGen, LongGen, StringGen, \
     StructGen, TimestampGen, UniqueLongGen, gen_scalar_value, \
     disable_parquet_field_id_write, gen_df
-from iceberg import _build_tblprops, get_full_table_name, iceberg_unsupported_mark, \
+from iceberg import _build_tblprops, check_default_rows, get_full_table_name, iceberg_unsupported_mark, \
     rapids_reader_types, runtime_iceberg_version, supports_iceberg_v3, \
-    ICEBERG_V3_UNSUPPORTED_REASON, iceberg_variant_read_conf
+    ICEBERG_V3_UNSUPPORTED_REASON, iceberg_variant_read_conf, setup_iceberg_fixed_default_table
 from marks import allow_non_gpu, iceberg, iceberg_fast_test, ignore_order, incompat
 from spark_session import is_spark_400_or_later, is_spark_411_or_later, \
     with_cpu_session, with_gpu_session
@@ -588,7 +588,7 @@ def test_iceberg_v3_defaulted_collection_paths(spark_tmp_table_factory, reader_t
 
     def check(cpu_rows, gpu_rows):
         normalized_cpu, normalized_gpu = normalize(cpu_rows), normalize(gpu_rows)
-        _check_default_rows(normalize(expected))(normalized_cpu, normalized_gpu)
+        check_default_rows(normalize(expected))(normalized_cpu, normalized_gpu)
         return normalized_cpu, normalized_gpu
 
     assert_gpu_and_cpu_are_equal_collect(
@@ -619,12 +619,27 @@ def test_iceberg_v3_unsupported_initial_defaults_fallback(
               "spark.rapids.sql.format.parquet.reader.type": reader_type})
 
 
-def _check_default_rows(expected):
-    def check(cpu_rows, gpu_rows):
-        for rows in (cpu_rows, gpu_rows):
-            assert sorted([tuple(row) for row in rows], key=repr) == sorted(expected, key=repr)
-        return cpu_rows, gpu_rows
-    return check
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.parametrize("initial_only", [
+    pytest.param(True, marks=allow_non_gpu("BatchScanExec", "ColumnarToRowExec"), id="initial-only"),
+    pytest.param(False, id="write-only")])
+def test_iceberg_v3_scan_checks_only_initial_defaults(spark_tmp_table_factory, initial_only):
+    table = get_full_table_name(spark_tmp_table_factory)
+    with_cpu_session(lambda spark: setup_iceberg_fixed_default_table(
+        spark, table, initial_only=initial_only))
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.sql(f"SELECT id, payload FROM {table}"),
+        exist_classes="BatchScanExec" if initial_only else "GpuBatchScanExec",
+        non_exist_classes="GpuBatchScanExec" if initial_only else "BatchScanExec",
+        conf={"spark.rapids.sql.format.iceberg.v3.enabled": "true"}, require_non_empty=True)
+
+
+def _assert_default_rows(read, reader_type, expected):
+    assert_gpu_and_cpu_are_equal_collect(
+        read,
+        conf={'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
+              'spark.rapids.sql.format.parquet.reader.type': reader_type},
+        result_canonicalize_func_before_compare=check_default_rows(expected))
 
 
 @iceberg
@@ -683,11 +698,7 @@ def test_iceberg_v3_defaults_with_predicates(
 
         expected = [tuple(row) if project_default else (row.id,)
                     for row in reference_rows if row.id in expected_ids]
-        assert_gpu_and_cpu_are_equal_collect(
-            read,
-            conf={'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
-                  'spark.rapids.sql.format.parquet.reader.type': reader_type},
-            result_canonicalize_func_before_compare=_check_default_rows(expected))
+        _assert_default_rows(read, reader_type, expected)
 
 
 @iceberg
@@ -757,13 +768,13 @@ def test_iceberg_v3_nested_defaults_mixed_files(spark_tmp_table_factory, reader_
 
     def check(cpu_rows, gpu_rows):
         if shape != 'map':
-            return _check_default_rows(expected)(cpu_rows, gpu_rows)
+            return check_default_rows(expected)(cpu_rows, gpu_rows)
         # The order of map_values is unspecified; array-element order remains checked above.
         def normalize(rows):
             return [(row[0], None if row[1] is None else sorted(row[1], key=repr)) for row in rows]
         normalized_expected = normalize(expected)
         normalized_cpu, normalized_gpu = normalize(cpu_rows), normalize(gpu_rows)
-        _check_default_rows(normalized_expected)(normalized_cpu, normalized_gpu)
+        check_default_rows(normalized_expected)(normalized_cpu, normalized_gpu)
         return normalized_cpu, normalized_gpu
 
     assert_gpu_and_cpu_are_equal_collect(
@@ -795,7 +806,7 @@ def test_iceberg_v3_nested_defaults_mixed_files(spark_tmp_table_factory, reader_
             wanted = [(row[0], sorted(row[1], key=repr)) for row in filtered_expected]
         else:
             wanted = filtered_expected
-        return _check_default_rows(wanted)(cpu_rows, gpu_rows)
+        return check_default_rows(wanted)(cpu_rows, gpu_rows)
 
     assert_gpu_and_cpu_are_equal_collect(
         read_filtered,
@@ -877,7 +888,7 @@ def test_iceberg_v3_defaults_combining_and_type_evolution(spark_tmp_table_factor
               'spark.rapids.sql.format.parquet.reader.type': reader_type,
               'spark.rapids.sql.reader.multithreaded.combine.sizeBytes': '64m',
               'spark.sql.adaptive.enabled': 'false'},
-        result_canonicalize_func_before_compare=_check_default_rows(expected))
+        result_canonicalize_func_before_compare=check_default_rows(expected))
     if reader_type == 'COALESCING':
         nodes = [gpu_frame[0]._jdf.queryExecution().executedPlan()]
         while nodes:
@@ -909,8 +920,17 @@ def test_iceberg_v3_defaults_combining_and_type_evolution(spark_tmp_table_factor
         read_filtered,
         conf={'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
               'spark.rapids.sql.format.parquet.reader.type': reader_type},
-        result_canonicalize_func_before_compare=_check_default_rows(
+        result_canonicalize_func_before_compare=check_default_rows(
             [row for row in expected if row[1] < 6 or row[1] == 7]))
+
+
+def _assert_pruned_default_rows(query, reader_type, expected):
+    def read(spark):
+        spark.conf.set('spark.sql.optimizer.nestedSchemaPruning.enabled',
+                       spark.conf.get('spark.rapids.sql.enabled') == 'true')
+        return spark.sql(query)
+
+    _assert_default_rows(read, reader_type, expected)
 
 
 @iceberg
@@ -946,16 +966,8 @@ def test_iceberg_v3_nested_defaults_name_mapping(spark_tmp_table_factory, reader
 
     with_cpu_session(setup, conf=disable_parquet_field_id_write)
 
-    def read(spark):
-        spark.conf.set('spark.sql.optimizer.nestedSchemaPruning.enabled',
-                       spark.conf.get('spark.rapids.sql.enabled') == 'true')
-        return spark.sql(f'SELECT id, renamed.added FROM {table_name}')
-
-    assert_gpu_and_cpu_are_equal_collect(
-        read,
-        conf={'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
-              'spark.rapids.sql.format.parquet.reader.type': reader_type},
-        result_canonicalize_func_before_compare=_check_default_rows([(0, None), (1, 11), (2, 11)]))
+    _assert_pruned_default_rows(f'SELECT id, renamed.added FROM {table_name}', reader_type,
+                                [(0, None), (1, 11), (2, 11)])
 
 
 @iceberg
@@ -984,16 +996,8 @@ def test_iceberg_v3_default_with_unprojected_timestamp_ntz(spark_tmp_table_facto
 
     with_cpu_session(setup)
 
-    def read(spark):
-        spark.conf.set('spark.sql.optimizer.nestedSchemaPruning.enabled',
-                       spark.conf.get('spark.rapids.sql.enabled') == 'true')
-        return spark.sql(f'SELECT id, s.added FROM {table_name}')
-
-    assert_gpu_and_cpu_are_equal_collect(
-        read,
-        conf={'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
-              'spark.rapids.sql.format.parquet.reader.type': reader_type},
-        result_canonicalize_func_before_compare=_check_default_rows([(0, None), (1, 11), (2, 11)]))
+    _assert_pruned_default_rows(f'SELECT id, s.added FROM {table_name}', reader_type,
+                                [(0, None), (1, 11), (2, 11)])
 
 
 @iceberg
@@ -1105,7 +1109,7 @@ def test_iceberg_missing_nested_field_with_unprojected_uuid(
                 return [(row[0], None if row[1] is None else sorted(row[1], key=repr))
                         for row in rows]
             cpu_rows, gpu_rows = normalize(cpu_rows), normalize(gpu_rows)
-        return _check_default_rows(expected)(cpu_rows, gpu_rows)
+        return check_default_rows(expected)(cpu_rows, gpu_rows)
 
     assert_gpu_and_cpu_are_equal_collect(
         read,
@@ -1204,7 +1208,7 @@ def test_iceberg_unmapped_validity_helper_id(
         conf={'spark.rapids.sql.format.iceberg.v3.enabled': str(format_version == '3').lower(),
               'spark.rapids.sql.format.parquet.reader.type': reader_type,
               'spark.sql.iceberg.vectorization.enabled': 'false'},
-        result_canonicalize_func_before_compare=_check_default_rows([
+        result_canonicalize_func_before_compare=check_default_rows([
             (0, None), (1, default), (2, default)]))
 
 
@@ -1284,7 +1288,7 @@ def test_iceberg_legacy_list_initial_defaults(
             read,
             conf={'spark.rapids.sql.format.iceberg.v3.enabled': str(format_version == '3').lower(),
                   'spark.rapids.sql.format.parquet.reader.type': reader_type},
-            result_canonicalize_func_before_compare=_check_default_rows(expected))
+            result_canonicalize_func_before_compare=check_default_rows(expected))
 
 
 @iceberg
@@ -1342,4 +1346,4 @@ def test_iceberg_v3_default_with_variant(spark_tmp_table_factory, reader_type, p
     expected = ([(0, None, None), (1, 11, None), (2, 11, None), (3, 11, value)]
                 if project_variant else [(0, None), (1, 11), (2, 11), (3, 11)])
     assert_gpu_and_cpu_are_equal_collect(
-        read, conf=conf, result_canonicalize_func_before_compare=_check_default_rows(expected))
+        read, conf=conf, result_canonicalize_func_before_compare=check_default_rows(expected))

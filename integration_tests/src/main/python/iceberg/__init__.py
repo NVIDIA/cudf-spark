@@ -15,6 +15,8 @@
 import os
 import tempfile
 import logging
+from contextlib import closing
+import json
 from types import MappingProxyType
 from typing import Callable, List, Dict, Optional
 
@@ -23,7 +25,7 @@ from pyspark.sql.types import FloatType, DoubleType, BinaryType
 
 import pytest
 
-from asserts import assert_equal_with_local_sort
+from asserts import assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect
 from conftest import is_iceberg_rest_catalog, spark_jvm
 from data_gen import *
 from spark_session import is_iceberg_supported_spark, with_cpu_session, with_gpu_session
@@ -423,6 +425,87 @@ _ROW_LINEAGE_WRITE_CONF = {
     **iceberg_write_enabled_conf,
     "spark.rapids.sql.format.iceberg.v3.enabled": "true"
 }
+
+
+def setup_iceberg_write_default_tables(spark_tmp_table_factory, table_properties=None):
+    """Create identical CPU/GPU tables and report whether the catalog exposes the SQL default."""
+    base = get_full_table_name(spark_tmp_table_factory)
+    cpu_table, gpu_table = f"{base}_cpu", f"{base}_gpu"
+    props = iceberg_table_properties_sql("3", table_properties)
+
+    def setup(spark):
+        iceberg = spark_jvm().org.apache.iceberg
+        for name in (cpu_table, gpu_table):
+            spark.sql(f"CREATE TABLE {name} (id BIGINT, p INT) USING ICEBERG "
+                      f"PARTITIONED BY (p) {props}")
+            spark.sql(f"INSERT INTO {name} VALUES (1, 0), (2, 1)")
+            table = iceberg.spark.Spark3Util.loadIcebergTable(spark._jsparkSession, name)
+            table.updateSchema().addColumn(
+                "optional_added", iceberg.types.Types.StringType.get(),
+                iceberg.expressions.Literal.of("legacy")).commit()
+            table.updateSchema().updateColumnDefault(
+                "optional_added", iceberg.expressions.Literal.of("current")).commit()
+            spark.sql(f"REFRESH TABLE {name}")
+        return "CURRENT_DEFAULT" in spark.table(cpu_table).schema["optional_added"].metadata
+
+    return cpu_table, gpu_table, with_cpu_session(setup)
+
+
+def check_default_rows(expected):
+    def check(cpu_rows, gpu_rows):
+        for rows in (cpu_rows, gpu_rows):
+            assert sorted([tuple(row) for row in rows], key=repr) == sorted(expected, key=repr)
+        return cpu_rows, gpu_rows
+    return check
+
+
+def assert_iceberg_write_default_result(cpu_table, gpu_table, expected_rows, conf):
+    """Check DML results and the Spark schema persisted in the newly written GPU data files."""
+    from pyarrow import BufferReader
+    from pyarrow.parquet import read_metadata
+    from pyspark.sql.types import StructType
+
+    def read(spark, table):
+        return spark.sql(f"SELECT id, p, optional_added FROM {table} ORDER BY id")
+
+    def check(spark):
+        assert read(spark, cpu_table).collect() == expected_rows
+        # Rows 1 and 2 predate schema evolution. Inspect files containing newly inserted rows.
+        files = spark.sql(f"SELECT DISTINCT _file FROM {gpu_table} WHERE id > 2").collect()
+        assert files
+        table = spark_jvm().org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
+            spark._jsparkSession, gpu_table)
+        for path, in files:
+            # These small fixture files must be opened through the catalog's FileIO.
+            with closing(table.io().newInputFile(path).newStream()) as stream:
+                metadata = read_metadata(BufferReader(stream.readAllBytes())).metadata
+            spark_schema = metadata[b"org.apache.spark.sql.parquet.row.metadata"]
+            schema = StructType.fromJson(json.loads(spark_schema))
+            assert schema["optional_added"].metadata.get("CURRENT_DEFAULT") == "'current'", path
+
+    with_cpu_session(check, conf=conf)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: read(spark, gpu_table), conf=conf,
+        result_canonicalize_func_before_compare=check_default_rows(expected_rows))
+
+
+def setup_iceberg_fixed_default_table(spark, name, *, initial_only, table_properties=None):
+    """Add fixed[2] after the first write, with only one of the two Iceberg defaults set."""
+    props = iceberg_table_properties_sql("3", table_properties)
+    spark.sql(f"CREATE TABLE {name} (id BIGINT) USING ICEBERG {props}")
+    spark.sql(f"INSERT INTO {name} VALUES (1)")
+    jvm = spark_jvm()
+    iceberg = jvm.org.apache.iceberg
+    table = iceberg.spark.Spark3Util.loadIcebergTable(spark._jsparkSession, name)
+    fixed = iceberg.types.Types.FixedType.ofLength(2)
+    value = iceberg.expressions.Literal.of(jvm.java.nio.ByteBuffer.wrap(bytearray([1, 2]))).to(fixed)
+    update = table.updateSchema()
+    if initial_only:
+        update.addColumn("payload", fixed, value).commit()
+    else:
+        update.addColumn("payload", fixed).commit()
+    table.updateSchema().updateColumnDefault("payload", None if initial_only else value).commit()
+    spark.sql(f"REFRESH TABLE {name}")
 
 
 def assert_gpu_and_cpu_lineage_writes_are_equal(

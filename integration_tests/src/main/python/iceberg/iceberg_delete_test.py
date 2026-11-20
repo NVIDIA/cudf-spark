@@ -20,7 +20,7 @@ from asserts import (assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_
 from conftest import is_iceberg_remote_catalog, spark_jvm
 from data_gen import *
 from iceberg import (
-    _add_eq_deletes_from_df,
+    _add_eq_deletes_from_df, check_default_rows,
     iceberg_cow_format_versions, iceberg_mor_format_versions, with_iceberg_dml_session,
     with_iceberg_format_versions, create_iceberg_table, get_full_table_name,
     iceberg_write_enabled_conf, iceberg_base_table_cols, iceberg_gens_list,
@@ -1104,14 +1104,6 @@ def _add_supported_delete_defaults(spark, table_name):
     spark.sql(f'REFRESH TABLE {table_name}')
 
 
-def _assert_delete_rows(expected):
-    def check(cpu_rows, gpu_rows):
-        for rows in (cpu_rows, gpu_rows):
-            assert sorted([tuple(row) for row in rows], key=repr) == sorted(expected, key=repr)
-        return cpu_rows, gpu_rows
-    return check
-
-
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason='Requires local equality-delete UDF')
@@ -1152,7 +1144,7 @@ def test_iceberg_v3_supported_defaults_with_equality_deletes(
         lambda spark: spark.sql(f'SELECT {columns} FROM {table_name}'),
         conf={'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
               'spark.rapids.sql.format.parquet.reader.type': reader_type},
-        result_canonicalize_func_before_compare=_assert_delete_rows(expected))
+        result_canonicalize_func_before_compare=check_default_rows(expected))
 
 
 @iceberg
@@ -1214,7 +1206,7 @@ def test_iceberg_v3_defaults_with_position_and_mixed_deletes(
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: read(spark, 'delete_key, string_key'),
         conf=conf,
-        result_canonicalize_func_before_compare=_assert_delete_rows([row[1:] for row in expected]))
+        result_canonicalize_func_before_compare=check_default_rows([row[1:] for row in expected]))
 
     def check_metadata(cpu_rows, gpu_rows):
         for rows in (cpu_rows, gpu_rows):
@@ -1229,4 +1221,4 @@ def test_iceberg_v3_defaults_with_position_and_mixed_deletes(
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: read(spark, 'count(*)'),
         conf=conf,
-        result_canonicalize_func_before_compare=_assert_delete_rows([(len(expected),)]))
+        result_canonicalize_func_before_compare=check_default_rows([(len(expected),)]))
