@@ -1530,7 +1530,8 @@ def test_orc_version_V_0_11_and_V_0_12(std_input_path):
 
 def test_orc_not_support_timestamp_ltz(std_input_path):
     """
-    Test both CPU and GPU does not support ORC type: timestamp with local time zone.
+    Test GPU does not support ORC type: timestamp with local time zone.
+    Spark 4.2+ and DBR 18.3+ support it on CPU, while older runtimes reject it.
     The meta of `timestamp_ltz.orc` is: Type: struct<ts:timestamp with local time zone>
     Refer to ORC types: https://orc.apache.org/docs/types.html
     The error message is like:
@@ -1540,12 +1541,20 @@ def test_orc_not_support_timestamp_ltz(std_input_path):
         ----------^^^
     """
     data_path = f"{std_input_path}/timestamp_ltz.orc"
+    cpu_supports_orc_timestamp_ltz = \
+        is_spark_420_or_later() or is_databricks_version_or_later(18, 3)
     expected_error_message = "timestamp with local time zone" \
-        if is_spark_420_or_later() or is_databricks_version_or_later(18, 3) \
+        if cpu_supports_orc_timestamp_ltz \
         else "ParseException"
-    assert_gpu_and_cpu_error(lambda spark: spark.read.orc(data_path).collect(),
-                             conf={},
-                             error_message=expected_error_message)
+    read = lambda spark: spark.read.orc(data_path).collect()
+    if cpu_supports_orc_timestamp_ltz:
+        with_cpu_session(read, conf={})
+        # TODO(https://github.com/NVIDIA/cudf-spark/issues/17042):
+        # GPU should support this ORC type or fall back to the CPU reader.
+        assert_spark_exception(
+            lambda: with_gpu_session(read, conf={}), expected_error_message)
+    else:
+        assert_gpu_and_cpu_error(read, conf={}, error_message=expected_error_message)
 
 # Timestamp writes must use the JVM writer timezone and stay compatible with CPU ORC readers.
 # The `tz_sensitive_test` mark runs this in both UTC and non-UTC JVM timezones.
