@@ -44,15 +44,24 @@ class ParquetDictFilterPrefetchSuite extends AnyFunSuite with BeforeAndAfterAll 
   private val dir = Files.createTempDirectory("dict-filter-prefetch").toFile
   private val file = new File(dir, "test.parquet")
   private val path = new Path(file.toURI)
+  // the same rows, plain encoded with a bloom filter on s (parquet-mr skips bloom filters of
+  // fully dictionary encoded chunks), which parquet-mr writes after all row groups
+  private val bloomFile = new File(dir, "bloom.parquet")
+  private val bloomPath = new Path(bloomFile.toURI)
+
+  override def beforeAll(): Unit = {
+    write(path, bloom = false)
+    write(bloomPath, bloom = true)
+  }
 
   // withRowGroupSize(Int) is deprecated in newer parquet-mr but the only option in older ones
   @scala.annotation.nowarn("msg=deprecated")
-  override def beforeAll(): Unit = {
+  private def write(p: Path, bloom: Boolean): Unit = {
     val conf = new Configuration(false)
     GroupWriteSupport.setSchema(schema, conf)
-    val writer = ExampleParquetWriter.builder(path).withConf(conf)
+    val writer = ExampleParquetWriter.builder(p).withConf(conf)
       .withRowGroupSize(8 * 1024).withPageSize(1024).withDictionaryPageSize(64 * 1024)
-      .withDictionaryEncoding(true).build()
+      .withDictionaryEncoding(!bloom).withBloomFilterEnabled("s", bloom).build()
     val groups = new SimpleGroupFactory(schema)
     try {
       // every group of rows has s in {"a", "c"} plus one group-specific value, and i in a
@@ -75,11 +84,13 @@ class ParquetDictFilterPrefetchSuite extends AnyFunSuite with BeforeAndAfterAll 
   override def afterAll(): Unit = {
     file.delete()
     new File(dir, ".test.parquet.crc").delete()
+    bloomFile.delete()
+    new File(dir, ".bloom.parquet.crc").delete()
     dir.delete()
   }
 
-  private def footerFile(): Array[Byte] = {
-    val raf = new RandomAccessFile(file, "r")
+  private def footerFile(f: File = file): Array[Byte] = {
+    val raf = new RandomAccessFile(f, "r")
     try {
       val len = raf.length()
       val trailer = new Array[Byte](8)
@@ -95,14 +106,14 @@ class ParquetDictFilterPrefetchSuite extends AnyFunSuite with BeforeAndAfterAll 
     }
   }
 
-  private class LocalReader extends ParquetDictFilterPrefetch.RangeReader {
+  private class LocalReader(f: File = file) extends ParquetDictFilterPrefetch.RangeReader {
     var calls = 0
     var bytes = 0L
 
     override def apply(ranges: Seq[(Long, Int)]): Seq[Array[Byte]] = {
       calls += 1
       bytes += ranges.map(_._2.toLong).sum
-      val raf = new RandomAccessFile(file, "r")
+      val raf = new RandomAccessFile(f, "r")
       try {
         ranges.map { case (offset, length) =>
           val b = new Array[Byte](length)
@@ -117,15 +128,16 @@ class ParquetDictFilterPrefetchSuite extends AnyFunSuite with BeforeAndAfterAll 
   }
 
   @scala.annotation.nowarn("msg=deprecated")
-  private def footer(range: Option[(Long, Long)]): ParquetMetadata = {
+  private def footer(range: Option[(Long, Long)], p: Path = path): ParquetMetadata = {
     val filter = range.map { case (s, e) => ParquetMetadataConverter.range(s, e) }
       .getOrElse(ParquetMetadataConverter.NO_FILTER)
-    ParquetFileReader.readFooter(new Configuration(false), path, filter)
+    ParquetFileReader.readFooter(new Configuration(false), p, filter)
   }
 
   @scala.annotation.nowarn("msg=deprecated")
-  private def pathBased(conf: Configuration, f: ParquetMetadata): java.util.List[BlockMetaData] = {
-    val reader = new ParquetFileReader(conf, f.getFileMetaData, path, f.getBlocks,
+  private def pathBased(conf: Configuration, f: ParquetMetadata,
+      p: Path = path): java.util.List[BlockMetaData] = {
+    val reader = new ParquetFileReader(conf, f.getFileMetaData, p, f.getBlocks,
       Collections.emptyList[ColumnDescriptor])
     try reader.getRowGroups finally reader.close()
   }
@@ -140,6 +152,7 @@ class ParquetDictFilterPrefetchSuite extends AnyFunSuite with BeforeAndAfterAll 
   private val s = FilterApi.binaryColumn("s")
   private val i = FilterApi.intColumn("i")
   private def str(v: String) = Binary.fromString(v)
+  private val fileLen = () => file.length
 
   private val predicates: Seq[(String, FilterPredicate, Set[String])] = Seq(
     ("s = b3", FilterApi.eq(s, str("b3")), Set("s")),
@@ -165,7 +178,7 @@ class ParquetDictFilterPrefetchSuite extends AnyFunSuite with BeforeAndAfterAll 
       val f = footer(range)
       val expected = pathBased(conf(p), f)
       val reader = new LocalReader
-      val kept = ParquetDictFilterPrefetch.rowGroups(conf(p), path, footerFile(), range,
+      val kept = ParquetDictFilterPrefetch.rowGroups(conf(p), path, footerFile(), fileLen, range,
         f.getBlocks, p, columns, reader, () => fail("prefetch path fell back"))
       assertResult(expected.asScala.map(_.getStartingPos))(kept.asScala.map(_.getStartingPos))
       // the caller's block objects are returned
@@ -185,7 +198,7 @@ class ParquetDictFilterPrefetchSuite extends AnyFunSuite with BeforeAndAfterAll 
     val f = footer(None)
     val reader = new LocalReader
     val kept = ParquetDictFilterPrefetch.rowGroups(conf(p, dictionary = false), path,
-      footerFile(), None, f.getBlocks, p, Set("s"), reader, () => fail("fell back"))
+      footerFile(), fileLen, None, f.getBlocks, p, Set("s"), reader, () => fail("fell back"))
     assert(reader.calls == 0)
     assertResult(pathBased(conf(p, dictionary = false), f).size)(kept.size)
   }
@@ -194,7 +207,7 @@ class ParquetDictFilterPrefetchSuite extends AnyFunSuite with BeforeAndAfterAll 
     val p = FilterApi.eq(s, str("b"))
     val f = footer(None)
     val reader = new LocalReader
-    val kept = ParquetDictFilterPrefetch.rowGroups(conf(p), path, footerFile(), None,
+    val kept = ParquetDictFilterPrefetch.rowGroups(conf(p), path, footerFile(), fileLen, None,
       f.getBlocks, p, Set.empty, reader, () => fail("fell back"))
     assert(reader.calls >= 1, "dictionary pages are read on demand")
     assertResult(pathBased(conf(p), f).asScala.map(_.getStartingPos))(
@@ -205,7 +218,7 @@ class ParquetDictFilterPrefetchSuite extends AnyFunSuite with BeforeAndAfterAll 
     val p = FilterApi.and(FilterApi.notEq(s, null: Binary), FilterApi.notEq(i, null: Integer))
     val f = footer(None)
     val reader = new LocalReader
-    val kept = ParquetDictFilterPrefetch.rowGroups(conf(p), path, footerFile(), None,
+    val kept = ParquetDictFilterPrefetch.rowGroups(conf(p), path, footerFile(), fileLen, None,
       f.getBlocks, p, Set("s", "i"), reader, () => fail("fell back"))
     assert(reader.calls == 0)
     assertResult(pathBased(conf(p), f).asScala.map(_.getStartingPos))(
@@ -226,8 +239,25 @@ class ParquetDictFilterPrefetchSuite extends AnyFunSuite with BeforeAndAfterAll 
     val p = FilterApi.eq(s, str("b"))
     val f = footer(None)
     val expected = pathBased(conf(p), f)
-    val kept = ParquetDictFilterPrefetch.rowGroups(conf(p), path, Array[Byte](1, 2, 3), None,
-      f.getBlocks, p, Set("s"), new LocalReader, () => expected)
+    val kept = ParquetDictFilterPrefetch.rowGroups(conf(p), path, Array[Byte](1, 2, 3), fileLen,
+      None, f.getBlocks, p, Set("s"), new LocalReader, () => expected)
     assert(kept eq expected)
+  }
+
+  test("bloom filters after all row groups are read from the file") {
+    // b3 lies inside the statistics of every row group and dictionary filtering is off, so only
+    // the bloom filters, written after all row groups, can drop row groups
+    val p = FilterApi.eq(s, str("b3"))
+    for (range <- Seq(None, Some((0L, bloomFile.length / 2)), Some((0L, bloomFile.length / 4)))) {
+      val c = conf(p, dictionary = false)
+      val f = footer(range, bloomPath)
+      val expected = pathBased(c, f, bloomPath)
+      assert(expected.size < f.getBlocks.size, s"bloom filters prune row groups, range $range")
+      val kept = ParquetDictFilterPrefetch.rowGroups(c, bloomPath, footerFile(bloomFile),
+        () => bloomFile.length, range, f.getBlocks, p, Set("s"), new LocalReader(bloomFile),
+        () => fail("prefetch path fell back"))
+      assertResult(expected.asScala.map(_.getStartingPos), s"range $range")(
+        kept.asScala.map(_.getStartingPos))
+    }
   }
 }

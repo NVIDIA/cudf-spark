@@ -66,6 +66,8 @@ object ParquetDictFilterPrefetch extends Logging {
    * enabled in `conf`, as the same BlockMetaData objects. Falls back to `legacy` on any failure.
    *
    * @param footerFile the footer as a minimal parquet file: MAGIC + footer + length + MAGIC
+   * @param fileLength length of the file; called only when parquet-mr reads past the row groups
+   *                   of `blocks`, e.g. for bloom filters
    * @param range split range to apply when `footerFile` holds all row groups of the file,
    *              None when it holds exactly `blocks`
    * @param filterColumns lower case top level names of the columns the filters reference; their
@@ -76,6 +78,7 @@ object ParquetDictFilterPrefetch extends Logging {
       conf: Configuration,
       filePath: Path,
       footerFile: Array[Byte],
+      fileLength: () => Long,
       range: Option[(Long, Long)],
       blocks: util.List[BlockMetaData],
       predicate: FilterPredicate,
@@ -83,7 +86,7 @@ object ParquetDictFilterPrefetch extends Logging {
       read: RangeReader,
       legacy: () => util.List[BlockMetaData]): util.List[BlockMetaData] = {
     try {
-      filter(conf, footerFile, range, blocks, predicate, filterColumns, read)
+      filter(conf, footerFile, fileLength, range, blocks, predicate, filterColumns, read)
     } catch {
       case NonFatal(e) =>
         if (failures.incrementAndGet() <= 10) {
@@ -96,6 +99,7 @@ object ParquetDictFilterPrefetch extends Logging {
   private[parquet] def filter(
       conf: Configuration,
       footerFile: Array[Byte],
+      fileLength: () => Long,
       range: Option[(Long, Long)],
       blocks: util.List[BlockMetaData],
       predicate: FilterPredicate,
@@ -107,11 +111,12 @@ object ParquetDictFilterPrefetch extends Logging {
       val ranges = dictionaryRanges(conf, blocks, predicate, filterColumns)
       val data = if (ranges.isEmpty) Seq.empty else read(ranges)
       require(data.length == ranges.length, s"read ${data.length} of ${ranges.length} ranges")
-      // The footer goes right after the last column chunk of `blocks`; every offset parquet-mr
-      // reads for these row groups lies below that, so the virtual file needs no real length.
+      // Dictionary pages of these row groups lie below dataEnd; other offsets parquet-mr takes
+      // from the footer, such as bloom filters after all row groups, are read from the file.
       val dataEnd = blocks.asScala.flatMap(_.getColumns.asScala)
         .map(c => c.getStartingPos + c.getTotalSize).max
-      val inputFile = new PrefetchedInputFile(dataEnd, footerFile, ranges, data, read, MISS_WINDOW)
+      val inputFile = new PrefetchedInputFile(dataEnd, fileLength, footerFile, ranges, data, read,
+        MISS_WINDOW)
       val builder = HadoopReadOptions.builder(conf)
       range.foreach { case (start, end) => builder.withRange(start, end) }
       val kept = withResource(new ParquetFileReader(inputFile, builder.build())) { reader =>
@@ -222,13 +227,21 @@ object ParquetDictFilterPrefetch extends Logging {
   }
 }
 
+private object PrefetchedInputFile {
+  // Virtual offset of the footer, past the end of any real file: every offset parquet-mr takes
+  // from the footer (dictionary pages, bloom filters after the row groups) is below it.
+  val FOOTER_OFFSET: Long = Long.MaxValue / 2
+}
+
 /**
  * Virtual parquet file for ParquetDictFilterPrefetch: offsets below `dataEnd` come from the
- * prefetched ranges, or are read on demand in windows when not prefetched, and the footer
- * (`footerFile` without its leading MAGIC) sits at `dataEnd`.
+ * prefetched ranges, other offsets of the real file (e.g. bloom filters, which follow all row
+ * groups) are read on demand in windows, and the footer (`footerFile` without its leading MAGIC)
+ * sits at FOOTER_OFFSET. `fileLength` is asked only for reads at or past `dataEnd`.
  */
 private class PrefetchedInputFile(
     dataEnd: Long,
+    fileLength: () => Long,
     footerFile: Array[Byte],
     ranges: Seq[(Long, Int)],
     data: Seq[Array[Byte]],
@@ -237,13 +250,14 @@ private class PrefetchedInputFile(
   require(footerFile.length >= 2 * MAGIC.length + Integer.BYTES &&
     util.Arrays.equals(footerFile.take(MAGIC.length), MAGIC), "not a parquet footer file")
   private val tailLength = footerFile.length - MAGIC.length
+  private lazy val realLength = fileLength()
   private val starts = ranges.map(_._1).toArray
   private val ends = ranges.map(r => r._1 + r._2).toArray
   private val bytes = data.toArray
   private var window: Array[Byte] = Array.emptyByteArray
   private var windowStart = 0L
 
-  override def getLength: Long = dataEnd + tailLength
+  override def getLength: Long = PrefetchedInputFile.FOOTER_OFFSET + tailLength
 
   override def newStream(): ParquetSeekableInputStream = new PrefetchedSeekableInputStream(this)
 
@@ -253,8 +267,9 @@ private class PrefetchedInputFile(
       0
     } else if (pos < 0 || pos >= getLength) {
       -1
-    } else if (pos >= dataEnd) {
-      copy(footerFile, MAGIC.length + (pos - dataEnd), getLength - pos, b, off, len)
+    } else if (pos >= PrefetchedInputFile.FOOTER_OFFSET) {
+      val footerPos = pos - PrefetchedInputFile.FOOTER_OFFSET
+      copy(footerFile, MAGIC.length + footerPos, getLength - pos, b, off, len)
     } else {
       // last range starting at or before pos
       var lo = 0
@@ -266,12 +281,18 @@ private class PrefetchedInputFile(
       if (hi >= 0 && pos < ends(hi)) {
         copy(bytes(hi), pos - starts(hi), ends(hi) - pos, b, off, len)
       } else {
-        if (pos < windowStart || pos >= windowStart + window.length) {
-          val n = math.min(missWindow.toLong, dataEnd - pos).toInt
-          window = read(Seq((pos, n))).head
-          windowStart = pos
+        // dictionary pages lie below dataEnd; bloom filters follow all row groups of the file
+        val end = if (pos < dataEnd) dataEnd else realLength
+        if (pos >= end) {
+          -1
+        } else {
+          if (pos < windowStart || pos >= windowStart + window.length) {
+            val n = math.min(missWindow.toLong, end - pos).toInt
+            window = read(Seq((pos, n))).head
+            windowStart = pos
+          }
+          copy(window, pos - windowStart, window.length - (pos - windowStart), b, off, len)
         }
-        copy(window, pos - windowStart, window.length - (pos - windowStart), b, off, len)
       }
     }
   }

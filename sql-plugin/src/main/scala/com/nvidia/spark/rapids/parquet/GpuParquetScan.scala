@@ -982,7 +982,8 @@ protected case class GpuParquetFileFilterHandler(
             val range = if (useNativeFooter) None else Some((file.start, file.start + file.length))
             val filterColumns = filters.flatMap(_.references)
               .map(_.replace("`", "").split('.').head.toLowerCase(Locale.ROOT)).toSet
-            ParquetDictFilterPrefetch.rowGroups(conf, filePath, footerFile, range,
+            ParquetDictFilterPrefetch.rowGroups(conf, filePath, footerFile,
+              () => fileIO.newInputFile(filePath).getLength, range,
               footer.getBlocks, pushedFilters.get, filterColumns, rangeReader(fileIO, filePath),
               pathBasedFilter)
           } else {
