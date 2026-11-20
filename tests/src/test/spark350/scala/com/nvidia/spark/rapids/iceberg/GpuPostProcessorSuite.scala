@@ -16,8 +16,7 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark":["350"],"carryForward":"sameMinor"}
-{"spark":["400","401","402","403","404"],"carryForward":"none"}
-{"spark":["411","412","413"],"carryForward":"none"}
+{"spark":["400","411"],"carryForward":"sameMinor"}
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.iceberg
 
@@ -57,6 +56,7 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
  * ColumnAction tree is built based on schema comparison.
  */
 class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
+  import IcebergDefaultTestUtils.fieldWithDefaults
 
   private lazy val supportsRowLineageInheritance = {
     val majorMinor = IcebergProvider.detectedVersion.split("\\.").take(2).mkString(".")
@@ -374,7 +374,10 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       arrayOfStructType, structWithArrayType, mapType, mixedStructType).asJava)
 
     // Build expected Iceberg schema
-    val expectedSchema = new Schema(
+    val defaultField = fieldWithDefaults(
+      500, "default_col", Types.IntegerType.get(), required = true,
+      initialDefault = Some(Int.box(7)))
+    val baseSchema = new Schema(
       // Passthrough primitive columns
       Types.NestedField.optional(ptLongId, "pt_long", Types.LongType.get()),
       Types.NestedField.optional(ptDoubleId, "pt_double", Types.DoubleType.get()),
@@ -423,6 +426,9 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
           Types.NestedField.optional(msFieldBId, "b", Types.LongType.get())
         ))
     )
+
+    val expectedSchema = new Schema(
+      (baseSchema.columns().asScala ++ defaultField).asJava)
 
     val idToConstant = new JHashMap[Integer, Any]()
     idToConstant.put(constColId, 42L)
@@ -490,7 +496,25 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
         |      field[1] (input[1]):
         |        UpCast(int -> bigint)""".stripMargin
 
-    assert(processor.displayActionPlan() == expected)
+    val defaultPlan = defaultField.map(_ =>
+      "\n  default_col (generated):\n    FillDefault(fieldId=500, int)").getOrElse("")
+    assert(processor.displayActionPlan() == expected + defaultPlan)
+
+    // Exercise FillDefault as well as planning it. Older runtimes still run the other actions.
+    defaultField.foreach { field =>
+      val emptySchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
+      val (info, shaded) = createParquetInfo(emptySchema)
+      val defaultProcessor = new GpuParquetReaderPostProcessor(
+        info, new JHashMap[Integer, Any](), new Schema(field), shaded, Map.empty)
+      withResource(defaultProcessor.process(new ColumnarBatch(
+          Array.empty[org.apache.spark.sql.vectorized.ColumnVector], 3))) { output =>
+        assert(output.numRows() == 3)
+        assert(output.numCols() == 1)
+        withResource(output.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { host =>
+          (0 until output.numRows()).foreach(row => assert(host.getBase.getInt(row) == 7))
+        }
+      }
+    }
   }
 
   /**
@@ -900,6 +924,47 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
         }
       }
     }
+  }
+
+  test("Present struct children take precedence over defaults for missing children") {
+    val structId = 1
+    val presentId = 2
+    val defaultId = 3
+    val defaultField = fieldWithDefaults(
+      defaultId,
+      "added",
+      Types.IntegerType.get(),
+      required = true,
+      initialDefault = Some(Int.box(11))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+
+    val presentParquetField =
+      ShadedTypes.primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+        .id(presentId).named("present")
+    val parquetStruct = ShadedTypes.optionalGroup().addField(presentParquetField)
+      .id(structId).named("s")
+    val parquetSchema = new ShadedMessageType("test", Seq[ShadedType](parquetStruct).asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(structId, "s", Types.StructType.of(
+        Types.NestedField.optional(presentId, "present", Types.LongType.get()),
+        defaultField)))
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo,
+      new JHashMap[Integer, Any](),
+      expectedSchema,
+      shadedSchema,
+      Map.empty)
+
+    assert(processor.displayActionPlan() ==
+      s"""ProcessStruct
+         |  s (input[0]):
+         |    ProcessStruct
+         |      field[0] (input[0]):
+         |        PassThrough
+         |      field[1] (generated):
+         |        FillDefault(fieldId=$defaultId, int)""".stripMargin)
   }
 
   test("Whole-struct constants build a FetchConstant action") {

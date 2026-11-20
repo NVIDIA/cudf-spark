@@ -474,7 +474,6 @@ class RapidsTestSettings extends BackendTestSettings {
     .exclude("SPARK-36594: ORC vectorized reader should properly check maximal number of fields", WONT_FIX_ISSUE("CPU ORC vectorized-reader limit assertion; GPU does not expose Spark CPU ORC vectorized-reader flag."))
   enableSuite[RapidsOrcV1AggregatePushDownSuite]
   enableSuite[RapidsOrcV2AggregatePushDownSuite]
-    .exclude("nested column: Count(top level column) push down", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/15186"))
 
   enableSuite[RapidsOrcV1SchemaPruningSuite]
   enableSuite[RapidsOrcV2SchemaPruningSuite]
