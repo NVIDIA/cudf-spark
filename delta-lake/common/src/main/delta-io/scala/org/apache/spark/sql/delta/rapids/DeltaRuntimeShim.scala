@@ -111,19 +111,18 @@ trait DeltaRuntimeShim {
 object DeltaRuntimeShim {
   private val SparkVersion = """^(\d+)\.(\d+)\.(\d+).*""".r
 
-  private[rapids] def getShimClassName(
+  private def isDelta42Plus(deltaVersion: String): Boolean =
+    deltaVersion.startsWith("4.2.") || deltaVersion.startsWith("4.3.")
+
+  private[rapids] def getDelta42PlusShimClassName(
       deltaVersion: String,
       sparkVersion: String): Option[String] = {
-    if (deltaVersion.startsWith("4.2.") || deltaVersion.startsWith("4.3.")) {
-      (deltaVersion, sparkVersion) match {
-        case ("4.2.0", SparkVersion("4", "0", "1") | SparkVersion("4", "1", "1")) =>
-          Some("org.apache.spark.sql.delta.rapids.delta42x.Delta42xRuntimeShim")
-        case ("4.3.0", SparkVersion("4", "0", "1") | SparkVersion("4", "1", "1")) =>
-          Some("org.apache.spark.sql.delta.rapids.delta43x.Delta43xRuntimeShim")
-        case _ => None
-      }
-    } else {
-      getPreDelta42ShimClassName(deltaVersion)
+    (deltaVersion, sparkVersion) match {
+      case ("4.2.0", SparkVersion("4", "0", "1") | SparkVersion("4", "1", "1")) =>
+        Some("org.apache.spark.sql.delta.rapids.delta42x.Delta42xRuntimeShim")
+      case ("4.3.0", SparkVersion("4", "0", "1") | SparkVersion("4", "1", "1")) =>
+        Some("org.apache.spark.sql.delta.rapids.delta43x.Delta43xRuntimeShim")
+      case _ => None
     }
   }
 
@@ -171,7 +170,16 @@ object DeltaRuntimeShim {
     }
   }
 
-  private lazy val optionalShim = getShimClassName(io.delta.VERSION, SPARK_VERSION).map { name =>
+  private[rapids] def getShimClassName(
+      deltaVersion: String = io.delta.VERSION): Option[String] = {
+    if (isDelta42Plus(deltaVersion)) {
+      getDelta42PlusShimClassName(deltaVersion, SPARK_VERSION)
+    } else {
+      getPreDelta42ShimClassName(deltaVersion)
+    }
+  }
+
+  private lazy val optionalShim = getShimClassName().map { name =>
     val cls = ShimReflectionUtils.loadClass(name)
     cls.getConstructor().newInstance().asInstanceOf[DeltaRuntimeShim]
   }

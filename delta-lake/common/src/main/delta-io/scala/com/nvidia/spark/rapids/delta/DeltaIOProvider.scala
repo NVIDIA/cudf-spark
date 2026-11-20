@@ -350,10 +350,14 @@ object DeltaProbeImpl extends Logging {
       provider: => Option[DeltaProvider],
       deltaVersion: => String = _root_.io.delta.VERSION): DeltaProvider = {
     try {
-      provider.getOrElse {
-        logWarning(s"Disabling GPU acceleration for Delta Lake $deltaVersion on Spark " +
-          s"$SPARK_VERSION because no runtime shim supports this combination")
-        NoDeltaProvider
+      provider match {
+        case Some(p) =>
+          validateForPlanning(p)
+          p
+        case None =>
+          logWarning(s"Disabling GPU acceleration for Delta Lake $deltaVersion on Spark " +
+            s"$SPARK_VERSION because no runtime shim supports this combination")
+          NoDeltaProvider
       }
     } catch {
       case e: Throwable if isRecoverable(e) =>
@@ -363,6 +367,20 @@ object DeltaProbeImpl extends Logging {
         logWarning(s"Disabling GPU acceleration for Delta Lake $version on Spark $SPARK_VERSION", e)
         NoDeltaProvider
     }
+  }
+
+  // Non-Delta queries touch these shared registration and probe hooks during planning, so link
+  // them up front while failures can still fall back to NoDeltaProvider.
+  private def validateForPlanning(provider: DeltaProvider): Unit = {
+    provider.getCreatableRelationRules
+    provider.getExecRules
+    provider.getRunnableCommandRules
+    provider.getDataWritingCommandRules
+    provider.getStrategyRules
+    provider.getExprs
+    provider.isSupportedFormat(classOf[FileFormat])
+    provider.isSupportedWrite(classOf[SupportsWrite])
+    provider.isSupportedCatalog(classOf[StagingTableCatalog])
   }
 
   // The shim is created reflectively, which wraps anything its constructor throws, including

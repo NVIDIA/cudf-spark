@@ -22,8 +22,11 @@ package com.nvidia.spark.rapids.delta
 
 import java.lang.reflect.InvocationTargetException
 
+import org.mockito.Mockito.when
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatestplus.mockito.MockitoSugar.mock
+
+import org.apache.spark.sql.execution.datasources.FileFormat
 
 class DeltaProbeImplSuite extends AnyFunSuite {
   test("an unusable Delta runtime shim disables only Delta acceleration") {
@@ -45,6 +48,24 @@ class DeltaProbeImplSuite extends AnyFunSuite {
   test("a usable Delta runtime shim provider is returned unchanged") {
     val provider = mock[DeltaProvider]
     assert(DeltaProbeImpl.providerOrNoDelta(Some(provider)) eq provider)
+  }
+
+  test("planning-hook linkage failures after shim construction fall back to NoDeltaProvider") {
+    val brokenExecRules = mock[DeltaProvider]
+    when(brokenExecRules.getExecRules).thenThrow(
+      new NoClassDefFoundError("org/apache/spark/sql/delta/commands/DeleteCommand"))
+    assert(DeltaProbeImpl.providerOrNoDelta(Some(brokenExecRules)) eq NoDeltaProvider)
+
+    val brokenFormatCheck = mock[DeltaProvider]
+    when(brokenFormatCheck.isSupportedFormat(classOf[FileFormat])).thenThrow(
+      new NoClassDefFoundError("org/apache/spark/sql/delta/DeltaParquetFileFormat"))
+    assert(DeltaProbeImpl.providerOrNoDelta(Some(brokenFormatCheck)) eq NoDeltaProvider)
+
+    val fatalHook = mock[DeltaProvider]
+    when(fatalHook.getStrategyRules).thenThrow(new OutOfMemoryError("test"))
+    intercept[OutOfMemoryError] {
+      DeltaProbeImpl.providerOrNoDelta(Some(fatalHook))
+    }
   }
 
   test("fatal errors are not swallowed") {

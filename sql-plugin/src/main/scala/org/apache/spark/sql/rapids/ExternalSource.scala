@@ -156,7 +156,7 @@ trait ExternalSourceBase extends Logging {
     }
   }
 
-  private lazy val deltaProvider = DeltaProvider()
+  protected lazy val deltaProvider: DeltaProvider = DeltaProvider()
 
   private lazy val creatableRelations = deltaProvider.getCreatableRelationRules
 

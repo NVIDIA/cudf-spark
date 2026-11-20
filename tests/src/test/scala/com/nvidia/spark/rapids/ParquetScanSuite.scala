@@ -16,12 +16,16 @@
 
 package com.nvidia.spark.rapids
 
+import com.nvidia.spark.rapids.delta.{DeltaProvider, NoDeltaProvider}
 import com.nvidia.spark.rapids.spill.SpillFramework
+import org.mockito.Mockito.when
+import org.scalatestplus.mockito.MockitoSugar.mock
 
 import org.apache.spark.SparkConf
+import org.apache.spark.sql.execution.FileSourceScanExec
 import org.apache.spark.sql.execution.datasources.parquet.ParquetFileFormat
 import org.apache.spark.sql.functions.col
-import org.apache.spark.sql.rapids.GpuFileSourceScanExec
+import org.apache.spark.sql.rapids.{ExternalSourceBase, GpuFileSourceScanExec}
 import org.apache.spark.sql.types.{IntegerType, LongType, StringType, StructField, StructType}
 
 /** Stands in for a ParquetFileFormat subclass, such as Delta's, that no provider claims. */
@@ -288,6 +292,40 @@ class ParquetScanSuite extends SparkQueryCompareTestSuite {
         .load(TestResourceFinder.getResourcePath("file-splits.parquet")),
       execsAllowedNonGpu = Seq("FileSourceScanExec")) {
       frame => frame
+    }
+
+    test("claimed ParquetFileFormat subclass is not rejected by tagUnclaimedParquetSubclass") {
+      withCpuSparkSession { spark =>
+        val df = spark.read.format(classOf[UnclaimedParquetFileFormat].getName)
+          .load(TestResourceFinder.getResourcePath("file-splits.parquet"))
+        val scan = df.queryExecution.sparkPlan.collectFirst {
+          case s: FileSourceScanExec => s
+        }.getOrElse(fail("Expected FileSourceScanExec"))
+        val conf = new RapidsConf(spark.sessionState.conf)
+
+        val claimingProvider = mock[DeltaProvider]
+        when(claimingProvider.isSupportedFormat(classOf[UnclaimedParquetFileFormat]))
+          .thenReturn(true)
+        val claimingSource = new ExternalSourceBase {
+          override protected lazy val deltaProvider: DeltaProvider = claimingProvider
+          override lazy val hasSparkAvroJar: Boolean = false
+        }
+        val claimedMeta = GpuOverrides.wrapPlan(scan, conf, None)
+          .asInstanceOf[SparkPlanMeta[FileSourceScanExec]]
+        claimedMeta.initReasons()
+        claimingSource.tagUnclaimedParquetSubclass(claimedMeta)
+        assert(claimedMeta.canThisBeReplaced)
+
+        val unclaimedSource = new ExternalSourceBase {
+          override protected lazy val deltaProvider: DeltaProvider = NoDeltaProvider
+          override lazy val hasSparkAvroJar: Boolean = false
+        }
+        val unclaimedMeta = GpuOverrides.wrapPlan(scan, conf, None)
+          .asInstanceOf[SparkPlanMeta[FileSourceScanExec]]
+        unclaimedMeta.initReasons()
+        unclaimedSource.tagUnclaimedParquetSubclass(unclaimedMeta)
+        assert(!unclaimedMeta.canThisBeReplaced)
+      }
     }
   }
 }
