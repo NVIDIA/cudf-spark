@@ -17,8 +17,10 @@
 package com.nvidia.spark.rapids
 
 import java.io.{FileNotFoundException, IOException}
-import java.util.concurrent.{CompletableFuture, ConcurrentLinkedQueue, ExecutionException, Executor, ExecutorCompletionService, Future, LinkedBlockingQueue}
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.{CompletableFuture, ConcurrentLinkedQueue, CountDownLatch}
+import java.util.concurrent.{ExecutionException, Executor, ExecutorCompletionService}
+import java.util.concurrent.{Future, LinkedBlockingQueue}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 
 import scala.collection.mutable.ArrayBuffer
 
@@ -36,6 +38,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.apache.spark.TaskContext
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.execution.datasources.PartitionedFile
+import org.apache.spark.sql.rapids.execution.TrampolineUtil
+import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -403,6 +407,279 @@ class GpuMultiFileReaderSuite extends AnyFunSuite with RmmSparkRetrySuiteBase {
           assert(reader.hostBuffers.forall(_.getRefCount == 0))
         }
       }
+    }
+  }
+
+  private class MultiFileParallelLimitReader(
+      inputFiles: Array[PartitionedFile],
+      ordered: Boolean,
+      maxParallel: Int)
+    extends MultiFileCloudPartitionReaderBase(
+      new Configuration(false), inputFiles,
+      new ThreadPoolConfBuilder(4, true, 1L << 20, 10000L, false).build(),
+      maxParallel, Array.empty, Map.empty, 1000, 1L << 20,
+      keepReadsInOrder = ordered, combineConf = CombineConf(1L << 20, 200)) {
+
+    override def canUseCombine: Boolean = true
+
+    override def combineHMBs(input: Array[HostMemoryBuffersWithMetaDataBase])
+        : HostMemoryBuffersWithMetaDataBase = {
+      val allBuffers = input.flatMap(_.memBuffersAndSizes)
+      new HostMemoryBuffersWithMetaDataBase {
+        override def partitionedFile: PartitionedFile = input.head.partitionedFile
+        override def memBuffersAndSizes: Array[SingleHMBAndMeta] = allBuffers
+        override def bytesRead: Long = input.map(_.bytesRead).sum
+      }
+    }
+
+    override def getBatchRunner(tc: TaskContext, file: PartitionedFile,
+        conf: Configuration, filters: Array[Filter]): AsyncRunner[BufferInfo] = {
+      AsyncRunner.newUnboundedTask[BufferInfo](() => {
+        new HostMemoryBuffersWithMetaDataBase {
+          override def partitionedFile: PartitionedFile = file
+          override def memBuffersAndSizes: Array[SingleHMBAndMeta] =
+            Array(SingleHMBAndMeta.empty(1))
+          override def bytesRead: Long = 100
+        }
+      })
+    }
+
+    override def readBatches(meta: BufferInfo): Iterator[ColumnarBatch] = {
+      val rows = meta.memBuffersAndSizes.map(_.numRows.toInt).sum
+      Iterator(new ColumnarBatch(Array.empty, rows))
+    }
+
+    override def getFileFormatShortName: String = "test"
+  }
+
+  for (ordered <- Seq(true, false)) {
+    test(s"maxNumFilesParallel below number of files does not fail (ordered=$ordered)") {
+      val context = new MockTaskContext(taskAttemptId = 1L, partitionId = 0)
+      TrampolineUtil.setTaskContext(context)
+      try {
+        val files = (1 to 5).map { i =>
+          PartitionedFileUtilsShim.newPartitionedFile(
+            InternalRow.empty, s"file:///tmp/file$i.dat", 0, 100)
+        }.toArray
+        val reader = new MultiFileParallelLimitReader(files, ordered = ordered, maxParallel = 1)
+        withResource(reader) { r =>
+          var totalRows = 0
+          while (r.next()) {
+            withResource(r.get()) { batch =>
+              totalRows += batch.numRows()
+            }
+          }
+          assert(totalRows == 5)
+        }
+      } finally {
+        TrampolineUtil.unsetTaskContext()
+      }
+    }
+  }
+
+  test("MultiFileCloudParquetPartitionReader permits files.length > maxNumFileProcessed") {
+    val files = (1 to 3).map { i =>
+      PartitionedFileUtilsShim.newPartitionedFile(
+        InternalRow.empty, s"file:///tmp/file$i.parquet", 0, 100)
+    }.toArray
+    val reader = new MultiFileCloudParquetPartitionReader(
+      null, new Configuration(false), files,
+      _ => throw new UnsupportedOperationException("test"),
+      true, None, false, 1000, 1L << 20, 1L << 20, 1L << 20, false, 0,
+      false, CpuCompressionConfig.disabled(), Map.empty, new StructType(),
+      new ThreadPoolConfBuilder(1, true, 1L << 20, 10000L, false).build(),
+      1, false, true, false, false, true, CombineConf(1L << 20, 0))
+    reader.close()
+  }
+
+  test("multi-slot refill replenishes all free slots after combined reads") {
+    val context = new MockTaskContext(taskAttemptId = 1L, partitionId = 0)
+    TrampolineUtil.setTaskContext(context)
+    try {
+      val files = (0 until 6).map { i =>
+        PartitionedFileUtilsShim.newPartitionedFile(
+          InternalRow.empty, s"file:///tmp/file$i.dat", 0, 100)
+      }.toArray
+      val file0Finished = new CountDownLatch(1)
+      val file1Finished = new CountDownLatch(1)
+      val file2Blocker = new CountDownLatch(1)
+      val file3Started = new CountDownLatch(1)
+      val file4Started = new CountDownLatch(1)
+      val tasksStarted = new AtomicInteger(0)
+
+      val reader = new MultiFileCloudPartitionReaderBase(
+        new Configuration(false), files,
+        new ThreadPoolConfBuilder(4, true, 1L << 20, 10000L, false).build(),
+        maxNumFileProcessed = 3, Array.empty, Map.empty, 1000, 1L << 20,
+        keepReadsInOrder = true, combineConf = CombineConf(1L << 20, 0)) {
+
+        override def canUseCombine: Boolean = true
+
+        override def combineHMBs(input: Array[HostMemoryBuffersWithMetaDataBase])
+            : HostMemoryBuffersWithMetaDataBase = {
+          val allBuffers = input.flatMap(_.memBuffersAndSizes)
+          new HostMemoryBuffersWithMetaDataBase {
+            override def partitionedFile: PartitionedFile = input.head.partitionedFile
+            override def memBuffersAndSizes: Array[SingleHMBAndMeta] = allBuffers
+            override def bytesRead: Long = input.map(_.bytesRead).sum
+          }
+        }
+
+        override def getBatchRunner(tc: TaskContext, file: PartitionedFile,
+            conf: Configuration, filters: Array[Filter]): AsyncRunner[BufferInfo] = {
+          AsyncRunner.newUnboundedTask[BufferInfo](() => {
+            tasksStarted.incrementAndGet()
+            if (file.filePath.toString.contains("file0")) {
+              file0Finished.countDown()
+            } else if (file.filePath.toString.contains("file1")) {
+              file1Finished.countDown()
+            } else if (file.filePath.toString.contains("file2")) {
+              file2Blocker.await()
+            } else if (file.filePath.toString.contains("file3")) {
+              file3Started.countDown()
+            } else if (file.filePath.toString.contains("file4")) {
+              file4Started.countDown()
+            }
+            new HostMemoryBuffersWithMetaDataBase {
+              override def partitionedFile: PartitionedFile = file
+              override def memBuffersAndSizes: Array[SingleHMBAndMeta] =
+                Array(SingleHMBAndMeta.empty(1))
+              override def bytesRead: Long = 100
+            }
+          })
+        }
+
+        override def readBatches(meta: BufferInfo): Iterator[ColumnarBatch] = {
+          val rows = meta.memBuffersAndSizes.map(_.numRows.toInt).sum
+          Iterator(new ColumnarBatch(Array.empty, rows))
+        }
+
+        override def getFileFormatShortName: String = "test"
+      }
+
+      try {
+        withResource(reader) { r =>
+          // Ensure file0 and file1 have finished before consuming batch 1
+          assert(file0Finished.await(10, java.util.concurrent.TimeUnit.SECONDS))
+          assert(file1Finished.await(10, java.util.concurrent.TimeUnit.SECONDS))
+          // Batch 1: file0 and file1 complete, file2 is blocked.
+          assert(r.next())
+          withResource(r.get()) { batch =>
+            assert(batch.numRows() == 2)
+          }
+          // At this point, 2 slots were freed. Unblock file2.
+          file2Blocker.countDown()
+          // Batch 2 triggers refill: BOTH freed slots (file3 and file4) must be
+          // submitted and started
+          assert(r.next())
+          assert(file3Started.await(10, java.util.concurrent.TimeUnit.SECONDS))
+          assert(file4Started.await(10, java.util.concurrent.TimeUnit.SECONDS))
+          assert(tasksStarted.get() >= 5)
+          while (r.next()) {
+            withResource(r.get()) { _ => }
+          }
+          assert(tasksStarted.get() == 6)
+        }
+      } finally {
+        file2Blocker.countDown()
+      }
+    } finally {
+      TrampolineUtil.unsetTaskContext()
+    }
+  }
+
+  test("readReadyFiles respects row threshold during timed wait") {
+    val context = new MockTaskContext(taskAttemptId = 1L, partitionId = 0)
+    TrampolineUtil.setTaskContext(context)
+    try {
+      val files = (0 until 4).map { i =>
+        PartitionedFileUtilsShim.newPartitionedFile(
+          InternalRow.empty, s"file:///tmp/file$i.dat", 0, 100)
+      }.toArray
+      val file0Finished = new CountDownLatch(1)
+      val file1Release = new CountDownLatch(1)
+      val file1Entered = new CountDownLatch(1)
+      val file1TimedSuccess = new AtomicBoolean(false)
+
+      val reader = new MultiFileCloudPartitionReaderBase(
+        new Configuration(false), files,
+        new ThreadPoolConfBuilder(4, true, 1L << 20, 10000L, false).build(),
+        maxNumFileProcessed = 4, Array.empty, Map.empty,
+        maxReadBatchSizeRows = 2, maxReadBatchSizeBytes = 1L << 20,
+        keepReadsInOrder = true, combineConf = CombineConf(1L << 20, 5000)) {
+
+        override def canUseCombine: Boolean = true
+
+        override def combineHMBs(input: Array[HostMemoryBuffersWithMetaDataBase])
+            : HostMemoryBuffersWithMetaDataBase = {
+          val allBuffers = input.flatMap(_.memBuffersAndSizes)
+          new HostMemoryBuffersWithMetaDataBase {
+            override def partitionedFile: PartitionedFile = input.head.partitionedFile
+            override def memBuffersAndSizes: Array[SingleHMBAndMeta] = allBuffers
+            override def bytesRead: Long = input.map(_.bytesRead).sum
+          }
+        }
+
+        override def getBatchRunner(tc: TaskContext, file: PartitionedFile,
+            conf: Configuration, filters: Array[Filter]): AsyncRunner[BufferInfo] = {
+          AsyncRunner.newUnboundedTask[BufferInfo](() => {
+            if (file.filePath.toString.contains("file0")) {
+              file0Finished.countDown()
+            } else if (file.filePath.toString.contains("file1")) {
+              file1Entered.countDown()
+              file1Release.await()
+              file1TimedSuccess.set(true)
+            }
+            new HostMemoryBuffersWithMetaDataBase {
+              override def partitionedFile: PartitionedFile = file
+              override def memBuffersAndSizes: Array[SingleHMBAndMeta] =
+                Array(SingleHMBAndMeta.empty(1))
+              override def bytesRead: Long = 100
+            }
+          })
+        }
+
+        override def readBatches(meta: BufferInfo): Iterator[ColumnarBatch] = {
+          val rows = meta.memBuffersAndSizes.map(_.numRows.toInt).sum
+          Iterator(new ColumnarBatch(Array.empty, rows))
+        }
+
+        override def getFileFormatShortName: String = "test"
+      }
+
+      try {
+        // Ensure file0 completes while file1 is actively held in progress
+        assert(file0Finished.await(10, java.util.concurrent.TimeUnit.SECONDS))
+        assert(file1Entered.await(10, java.util.concurrent.TimeUnit.SECONDS))
+
+        // In a background thread after a short delay, release file1 while readReadyFiles
+        // is waiting inside head.get(combineWaitTime)
+        val releaser = new Thread(() => {
+          Thread.sleep(100)
+          file1Release.countDown()
+        })
+        releaser.start()
+
+        withResource(reader) { r =>
+          var batchCount = 0
+          var totalRows = 0
+          while (r.next()) {
+            withResource(r.get()) { batch =>
+              assert(batch.numRows() <= 2)
+              totalRows += batch.numRows()
+              batchCount += 1
+            }
+          }
+          assert(totalRows == 4)
+          assert(batchCount >= 2)
+          assert(file1TimedSuccess.get())
+        }
+        releaser.join(5000)
+      } finally {
+        file1Release.countDown()
+      }
+    } finally {
+      TrampolineUtil.unsetTaskContext()
     }
   }
 }
