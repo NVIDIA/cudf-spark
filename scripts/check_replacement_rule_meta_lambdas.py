@@ -111,6 +111,49 @@ def tokenize(source):
 OPEN_TO_CLOSE = {"(": ")", "[": "]", "{": "}"}
 CLOSE_TO_OPEN = {value: key for key, value in OPEN_TO_CLOSE.items()}
 
+# Scala infers a statement separator at a line break, outside brackets, when the
+# previous token can end a statement and the next token can begin one.
+# Declarations always begin a new statement.
+DECLARATION_KEYWORDS = frozenset([
+    "class", "def", "enum", "export", "given", "import", "object", "package",
+    "trait", "type", "val", "var",
+])
+# Reserved words that cannot end a statement. `return` and `type` can end one in
+# Scala, but are kept here so the lint keeps scanning the following line.
+NON_TERMINAL_KEYWORDS = frozenset([
+    "abstract", "case", "catch", "class", "def", "do", "else", "extends", "final",
+    "finally", "for", "forSome", "if", "implicit", "import", "lazy", "macro",
+    "match", "new", "object", "override", "package", "private", "protected",
+    "return", "sealed", "super", "then", "throw", "trait", "try", "type", "val",
+    "var", "while", "with", "yield",
+])
+# Reserved words that continue the previous line instead of beginning a statement.
+CONTINUATION_KEYWORDS = frozenset([
+    "catch", "else", "extends", "finally", "forSome", "match", "then", "with",
+    "yield",
+])
+CONDITION_KEYWORDS = frozenset(["for", "if", "while"])
+
+
+def _is_word(value):
+    return value[0].isalnum() or value[0] in "_$"
+
+
+def _can_end_statement(value):
+    # A backtick closes a quoted identifier; operators and other punctuation
+    # leave the expression open.
+    if value in (")", "]", "}", "`", LITERAL):
+        return True
+    return _is_word(value) and value not in NON_TERMINAL_KEYWORDS
+
+
+def _can_begin_statement(value):
+    # Leading operators, `.`, `=`, `=>`, `:` and closing brackets continue the
+    # previous line.
+    if value in ("(", "{", "`", LITERAL):
+        return True
+    return _is_word(value) and value not in CONTINUATION_KEYWORDS
+
 
 def _matching_token(tokens, start):
     expected = OPEN_TO_CLOSE[tokens[start].value]
@@ -155,39 +198,22 @@ def _lambda_body_end(tokens, start):
         return len(tokens) if close is None else close + 1
 
     stack = []
-    statement_starters = {
-        "class", "def", "enum", "export", "given", "import", "object", "package",
-        "trait", "type", "val", "var",
-    }
-    # Expression-leading keywords start a statement only after a line break that
-    # follows a token that can end an expression; after an operator or a
-    # continuation keyword the line break does not separate statements.
-    expression_starters = {"for", "if", "new", "return", "throw", "try", "while"}
-    continuation_keywords = {
-        "case", "do", "else", "extends", "finally", "forSome", "match", "new",
-        "return", "then", "throw", "try", "with", "yield",
-    }
-    condition_keywords = {"for", "if", "while"}
-    condition_open = None
+    # The `)` or `}` closing an if/while/for header does not end the statement:
+    # the controlled body may start on the next line.
     condition_close = None
     for index in range(start, len(tokens)):
         value = tokens[index].value
         if index > start and not stack and tokens[index].line > tokens[index - 1].line:
-            previous = tokens[index - 1].value
-            # The `)` closing an if/while/for header does not end the statement:
-            # the controlled body may start on the next line.
-            previous_ends_expression = (
-                (previous in CLOSE_TO_OPEN and index - 1 != condition_close) or
-                previous == LITERAL or
-                (previous[0].isalnum() or previous[0] in "_$") and
-                previous not in continuation_keywords)
-            if value in statement_starters or (
-                    value in expression_starters and previous_ends_expression):
+            if value in DECLARATION_KEYWORDS:
+                return index
+            if (index - 1 != condition_close and
+                    _can_end_statement(tokens[index - 1].value) and
+                    _can_begin_statement(value)):
                 return index
         if value in OPEN_TO_CLOSE:
-            if (value == "(" and not stack and index > start and
-                    tokens[index - 1].value in condition_keywords):
-                condition_open = index
+            if (not stack and index > start and
+                    tokens[index - 1].value in CONDITION_KEYWORDS):
+                condition_close = _matching_token(tokens, index)
             stack.append(OPEN_TO_CLOSE[value])
         elif value in CLOSE_TO_OPEN:
             if not stack:
@@ -195,9 +221,6 @@ def _lambda_body_end(tokens, start):
             if value != stack[-1]:
                 return index
             stack.pop()
-            if not stack and condition_open is not None:
-                condition_close = index
-                condition_open = None
         elif value in (",", ";") and not stack:
             return index
     return len(tokens)

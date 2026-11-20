@@ -134,7 +134,7 @@ class ReplacementRuleMetaLambdaLintSuite(unittest.TestCase):
         self.assert_factories("""
           rule((a, conf, p, r) => {
             val helper = (x: Int) => x +
-              new Offset(x)
+              new OffsetMeta(x)
             helper
           })
         """, [])
@@ -168,6 +168,34 @@ class ReplacementRuleMetaLambdaLintSuite(unittest.TestCase):
             new ExampleMeta(a, conf, p, r)
           })
         """, [("ExampleMeta",)])
+
+    def test_statements_not_led_by_keywords_end_nested_helper_body(self):
+        self.assert_factories("""
+          rule((a, conf, p, r) => {
+            val helper = (x: Int) => x + 1
+            wrap(new CallMeta(a, conf, p, r))
+          })
+          rule((a, conf, p, r) => {
+            val helper = x => x + 1
+            (new ParenMeta(a, conf, p, r))
+          })
+          rule((a, conf, p, r) => {
+            val helper = (x: Int) => x.`type`
+            { new BlockMeta(a, conf, p, r) }
+          })
+        """, [("CallMeta",), ("ParenMeta",), ("BlockMeta",)])
+
+    def test_brace_for_header_line_break_keeps_body_attached(self):
+        self.assert_factories("""
+          rule((a, conf, p, r) => for { x <- xs }
+            new LoopMeta(a, conf, p, r))
+        """, [("LoopMeta",)])
+
+    def test_continuation_keyword_line_keeps_else_branch(self):
+        self.assert_factories("""
+          rule((a, conf, p, r) => if (enabled) named(a, conf, p, r)
+          else new DisabledMeta(a, conf, p, r))
+        """, [("DisabledMeta",)])
 
     def test_main_requires_zero_violations(self):
         root = tempfile.mkdtemp()
