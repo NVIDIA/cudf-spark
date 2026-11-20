@@ -584,6 +584,9 @@ class RapidsTestSettings extends BackendTestSettings {
     .exclude("SPARK-34790: enable IO encryption in AQE partition coalescing", KNOWN_ISSUE("https://github.com/NVIDIA/cudf-spark/issues/16970"))
   enableSuite[RapidsReuseExchangeAndSubquerySuite]
   enableSuite[RapidsHashAggregationQuerySuite]
+  enableSuite[RapidsApproxCountDistinctForIntervalsQuerySuite]
+    .exclude("SPARK-37138: Support Ansi Interval type in ApproxCountDistinctForIntervals",
+      ADJUST_UT("Replaced by testRapids coverage of both interval types, nonempty buckets, and GPU-to-CPU aggregate fallback. See https://github.com/NVIDIA/cudf-spark/pull/16972#discussion_r4626137888."))
   enableSuite[RapidsHashUDAQuerySuite]
   // P1 recovery: restore each case after its linked issue is fixed and CPU/GPU pass.
   enableSuite[RapidsHiveUDAFSuite]
