@@ -25,20 +25,21 @@ from urllib.parse import urlparse
 import pytest
 
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture
-from conftest import is_databricks_runtime, spark_jvm
+from conftest import spark_jvm
 from delta_lake_catalog_managed_test import (
     _assert_catalog_commit_state, _catalog_conf, _catalog_identity_state, _drop_table,
     _error_class, _new_table_name, _normalize_catalog_properties, _preserved_table_state,
     _table_rows,
     unity_catalog_server)
-from delta_lake_utils import _loaded_delta_lake_version, assert_rapids_delta_write, delta_meta_allow
+from delta_lake_utils import (assert_rapids_delta_write, delta_meta_allow,
+                              is_oss_delta_lake_43)
 from marks import allow_non_gpu, delta_lake, unity_catalog
 from spark_session import with_cpu_session, with_gpu_session
 
 
 pytestmark = pytest.mark.skipif(
-    is_databricks_runtime() or _loaded_delta_lake_version() != "4.3.0",
-    reason="Unity Catalog Delta REST API routing requires OSS Delta Lake 4.3.0")
+    not is_oss_delta_lake_43(),
+    reason="Unity Catalog Delta REST API routing requires OSS Delta Lake 4.3.x")
 
 _SERVER_REJECTION_MESSAGE = "Injected server-side Delta commit rejection"
 

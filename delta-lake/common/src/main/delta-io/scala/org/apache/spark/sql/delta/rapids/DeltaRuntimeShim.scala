@@ -98,6 +98,8 @@ trait DeltaRuntimeShim {
 
   def getGpuDeltaCatalog(cpuCatalog: DeltaCatalog, rapidsConf: RapidsConf): StagingTableCatalog
 
+  def filterIsManagedLocationProperty: Boolean = false
+
   /**
    * Detect a DataFrameWriter V1 mode("overwrite").saveAsTable operation so it retains the
    * existing table metadata. Delta versions before 4.1 require stack-trace inspection.
@@ -110,10 +112,16 @@ trait DeltaRuntimeShim {
 
 object DeltaRuntimeShim {
   private val SparkVersion = """^(\d+)\.(\d+)\.(\d+).*""".r
+  private val Delta43Version = """^4\.3\.(\d+)(?:[^0-9].*)?$""".r
 
   private def parseSparkVersion(sparkVersion: String): (Int, Int, Int) = sparkVersion match {
     case SparkVersion(major, minor, patch) => (major.toInt, minor.toInt, patch.toInt)
     case _ => throw new IllegalStateException(s"Unable to parse Spark version $sparkVersion")
+  }
+
+  private[rapids] def isDelta431OrLater(deltaVersion: String): Boolean = deltaVersion match {
+    case Delta43Version(patch) => patch.toInt >= 1
+    case _ => false
   }
 
   private[rapids] def getDelta42ShimClassName(
@@ -267,4 +275,7 @@ object DeltaRuntimeShim {
   def getGpuDeltaCatalog(cpuCatalog: DeltaCatalog, rapidsConf: RapidsConf): StagingTableCatalog = {
     shimInstance.getGpuDeltaCatalog(cpuCatalog, rapidsConf)
   }
+
+  def filterIsManagedLocationProperty: Boolean =
+    shimInstance.filterIsManagedLocationProperty
 }
