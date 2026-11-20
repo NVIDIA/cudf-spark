@@ -187,8 +187,9 @@ spark-rapids-shim-json-lines ***/
 ```
 
 **Key rules:**
-- The annotation controls which build profiles include the file.
-  Files **without** the annotation compile for **all** versions.
+- Shared sources outside versioned shim directories can omit the selector.
+  Scala and Java files under `src/main/sparkNNN` or `src/test/sparkNNN` must
+  declare a selector block. This includes suffixed directories like `spark400db173`.
 - `carryForward` is required: `none` names exact targets, `sameMinor` includes
   descendants in the same Spark major/minor line, and `all` includes every
   descendant. A nearer source variant wins.

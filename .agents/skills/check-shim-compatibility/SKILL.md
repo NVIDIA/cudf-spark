@@ -14,9 +14,11 @@ this skill does not authorize comments, pushes, PR updates, or merges.
 
 Fetch the intended upstream target branch after verifying the remote repository.
 Record the target SHA and PR head SHA, and inspect the complete diff, including
-removed or renamed files. If earlier CI evidence is used, identify the exact
-head, target revision, and profiles that run covered. A green check for an older
-target does not establish compatibility with changes merged afterward.
+removed or renamed files. When citing CI, use the job logs to identify the
+exact checkout SHA, the profiles built, and the checks actually run. For a merge
+checkout, verify the target and PR-head parents of that commit. For a head-only
+checkout, limit the evidence to that head. Check later target changes separately
+when reusing evidence from an older target.
 
 Review versioned implementations, shared callers, Spark/Databricks profiles,
 dependencies, and source-selection tools. For unrelated changes, explain why
@@ -27,12 +29,18 @@ this specialized review does not apply and follow the normal validation workflow
 Read the affected module's sources, root `pom.xml` and `scala2.13/pom.xml`.
 Use the current build implementation as the source of truth:
 
-- `build/get_buildvers.py` enumerates supported build versions and exclusions.
-- `build/shimpler_source_graph.py` defines profile inheritance.
+- `build/get_buildvers.py` builds the `all.buildvers` list from `release*`
+  profiles and applies build exclusions.
+- `build/shimpler_source_graph.py` reads all source targets and their inheritance
+  from each Scala POM.
 - `build/shimpler_source_selectors.py` and `build/shimpler_source_resolver.py`
   define selector membership and which variant wins.
 - `build/shimpler_source_generator.py` and `build/shim_source_task.py` generate
   the sources consumed by Maven.
+
+Use the graph and resolver to identify affected targets, including targets that
+inherit a changed variant. For source-selection changes, compare the variants
+selected before and after the change.
 
 Trace each changed shim API to its callers and sibling implementations across
 applicable profiles and Scala versions. Inspect wildcard imports, fully qualified
