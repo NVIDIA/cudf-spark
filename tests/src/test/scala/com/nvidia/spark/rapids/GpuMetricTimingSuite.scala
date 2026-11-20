@@ -19,9 +19,12 @@ package com.nvidia.spark.rapids
 import ai.rapids.cudf.NvtxColor
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.TestUtils.withTaskContext
+import org.mockito.Mockito.mock
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
 
+import org.apache.spark.{Partition, SparkContext, TaskContext}
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.rapids.GpuTaskMetrics
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
@@ -186,6 +189,82 @@ class GpuMetricTimingSuite extends AnyFunSuite with BeforeAndAfterEach {
       assert(companion.value == expectedCompanion)
     }
     assert(independent.value == sizes.length * 80L - sizes.sum * 10L)
+  }
+
+  test("RDD iterators reuse descendant snapshots across hasNext, next and changing counts") {
+    val context = new MockTaskContext(taskAttemptId = 8104L, partitionId = 0)
+    withTaskContext(context, completesTask = true) {
+      val taskMetrics = new TaskMetrics
+      GpuTaskMetrics.registerOnTask(taskMetrics)
+      val parent = new LocalGpuMetric
+      val companion = new LocalGpuMetric
+      parent.companionGpuMetric = Some(companion)
+      parent.add(17L)
+      companion.add(23L)
+      val children = List.tabulate(3) { index =>
+        val child = new LocalGpuMetric
+        val childCompanion = new LocalGpuMetric
+        child.add(100L * (index + 1))
+        childCompanion.add(40L * (index + 1))
+        child.companionGpuMetric = Some(childCompanion)
+        child
+      }
+      val partition = new Partition {
+        override def index: Int = 0
+      }
+      val sparkContext = mock(classOf[SparkContext])
+      val source = new RDD[Int](sparkContext, Seq.empty) {
+        override def getPartitions: Array[Partition] = Array(partition)
+
+        override def compute(split: Partition, taskContext: TaskContext): Iterator[Int] = {
+          val values = Iterator(11, 22)
+          def recordChildWork(): Unit = {
+            // Update the tail even when the smaller descendant list does not exclude it.
+            children.zipWithIndex.foreach { case (child, index) =>
+              child.add(30L + index * 7L)
+              child.companionGpuMetric.get.add(10L + index * 3L)
+            }
+            taskMetrics.waitTime += 7L
+          }
+          new Iterator[Int] {
+            override def hasNext: Boolean = {
+              recordChildWork()
+              values.hasNext
+            }
+
+            override def next(): Int = {
+              recordChildWork()
+              values.next()
+            }
+          }
+        }
+      }
+      for (size <- Seq(3, 1, 3)) {
+        val rdd = new GpuOpTimeTrackingRDD(source, parent, children.take(size))
+        val iterator = rdd.compute(partition, context)
+        def checkCall[T](body: => T): T = {
+          val rawBefore = parent.value
+          val companionBefore = companion.value
+          val readsBefore = taskMetrics.reads
+          val result = body
+          val rawDelta = parent.value - rawBefore
+          val companionDelta = companion.value - companionBefore
+          // Both metrics share the wall duration. Cancel it to check exact accounting.
+          val excludedDifference = (0 until size).map(index => 20L + index * 4L).sum
+          assert(companionDelta - rawDelta == excludedDifference - 7L)
+          assert(taskMetrics.reads == readsBefore + 2)
+          result
+        }
+        for (expected <- Seq(11, 22)) {
+          assert(checkCall(iterator.hasNext))
+          assert(checkCall(iterator.hasNext))
+          assert(checkCall(iterator.next()) == expected)
+        }
+        assert(!checkCall(iterator.hasNext))
+      }
+      assert(parent.tryActivateTimer(Seq.empty))
+      parent.deactivateTimer(0L, Seq.empty)
+    }
   }
 
   test("mismatched descendant count fails without leaving the timer active") {
