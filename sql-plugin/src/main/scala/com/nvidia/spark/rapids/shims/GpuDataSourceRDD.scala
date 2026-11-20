@@ -44,11 +44,11 @@ private[rapids] abstract class GpuDataSourceCustomMetricsFactory extends Seriali
 }
 
 private object NoopGpuDataSourceCustomMetrics extends GpuDataSourceCustomMetrics {
-  override def readerOpened(reader: PartitionReader[ColumnarBatch]): Unit = {}
+  override def readerOpened(reader: PartitionReader[ColumnarBatch]): Unit = { /* No-op */ }
 
-  override def readerProgress(reader: PartitionReader[ColumnarBatch]): Unit = {}
+  override def readerProgress(reader: PartitionReader[ColumnarBatch]): Unit = { /* No-op */ }
 
-  override def readerFinished(reader: PartitionReader[ColumnarBatch]): Unit = {}
+  override def readerFinished(reader: PartitionReader[ColumnarBatch]): Unit = { /* No-op */ }
 }
 
 private object NoopGpuDataSourceCustomMetricsFactory

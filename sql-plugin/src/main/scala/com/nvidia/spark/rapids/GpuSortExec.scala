@@ -680,7 +680,7 @@ case class GpuOutOfCoreSortIterator(
   }
 
   /** Callbacks designed for unit tests only. Don't do any heavy things inside. */
-  protected def onFirstPassSplit(): Unit = {}
-  protected def onMergeSortSplit(): Unit = {}
-  protected def onConcatOutput(): Unit = {}
+  protected def onFirstPassSplit(): Unit = { /* Test hook; no-op in production */ }
+  protected def onMergeSortSplit(): Unit = { /* Test hook; no-op in production */ }
+  protected def onConcatOutput(): Unit = { /* Test hook; no-op in production */ }
 }

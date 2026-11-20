@@ -38,7 +38,7 @@ abstract class BridgeHostColumnProjection {
   def apply(rows: Iterator[InternalRow],
             builders: Array[RapidsHostColumnBuilder]): Unit
 
-  def initialize(partitionIndex: Int): Unit = {}
+  def initialize(partitionIndex: Int): Unit = { /* Default no-op for stateless projections */ }
 }
 
 /**

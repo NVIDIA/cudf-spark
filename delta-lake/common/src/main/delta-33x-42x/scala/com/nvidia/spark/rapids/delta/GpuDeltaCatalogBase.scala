@@ -484,7 +484,9 @@ abstract class GpuDeltaCatalogBase(
   }
 
   /** Applies version-specific normalization before staged properties are committed. */
-  protected def normalizeStagedTableProperties(props: util.Map[String, String]): Unit = {}
+  protected def normalizeStagedTableProperties(props: util.Map[String, String]): Unit = {
+    // Default no-op; overridden where normalization is needed.
+  }
 
   override def tableExists(ident: Identifier): Boolean = cpuCatalog.tableExists(ident)
 
@@ -537,7 +539,9 @@ abstract class GpuDeltaCatalogBase(
 
     override def name(): String = ident.name()
 
-    override def abortStagedChanges(): Unit = {}
+    override def abortStagedChanges(): Unit = {
+      // Staged changes are only materialized in commitStagedChanges.
+    }
 
     override def capabilities(): util.Set[TableCapability] = {
       Set(V1_BATCH_WRITE, TRUNCATE).asJava
