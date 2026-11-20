@@ -260,26 +260,31 @@ private[rapids] object GpuVariantExtraction {
   // under a non-null Variant, and such a row is read through its offsets.
   private def hasInvalidMetadataHeader(cudfVariant: ColumnView): Boolean = {
     val expected = cudfVariant.getRowCount - cudfVariant.getNullCount
-    expected > 0 && expected != withResource(cudfVariant.getChildColumnView(0)) { metadata =>
+    expected > 0 && expected != withResource(metadataHeaders(cudfVariant))(countVersionOne)
+  }
+
+  /** The first metadata byte of each row; null under a SQL-null parent or for empty metadata. */
+  private def metadataHeaders(cudfVariant: ColumnView): ColumnVector = {
+    withResource(cudfVariant.getChildColumnView(0)) { metadata =>
       withResource(metadata.getChildColumnView(0)) { bytes =>
         withResource(new ColumnView(DType.LIST, cudfVariant.getRowCount,
             Optional.of[java.lang.Long](cudfVariant.getNullCount), cudfVariant.getValid,
             metadata.getOffsets, Array(bytes))) { parentMetadata =>
-          withResource(parentMetadata.extractListElement(0)) { header =>
-            withResource(Scalar.fromUnsignedByte(VersionMask)) { mask =>
-              withResource(header.bitAnd(mask)) { version =>
-                withResource(Scalar.fromUnsignedByte(MetadataVersion)) { one =>
-                  withResource(version.equalTo(one)) { matches =>
-                    withResource(matches.sum(DType.INT64)) { count =>
-                      if (count.isValid) count.getLong else 0L
-                    }
-                  }
-                }
-              }
-            }
-          }
+          parentMetadata.extractListElement(0)
         }
       }
+    }
+  }
+
+  private def countVersionOne(header: ColumnView): Long = {
+    val version = withResource(Scalar.fromUnsignedByte(VersionMask)) { mask =>
+      header.bitAnd(mask)
+    }
+    val matches = withResource(version) { v =>
+      withResource(Scalar.fromUnsignedByte(MetadataVersion))(one => v.equalTo(one))
+    }
+    withResource(matches) { m =>
+      withResource(m.sum(DType.INT64)) { count => if (count.isValid) count.getLong else 0L }
     }
   }
 
