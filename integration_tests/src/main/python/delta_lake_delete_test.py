@@ -533,10 +533,10 @@ def test_delta_dml_many_packed_dv_files(spark_tmp_path, command, random_prefixes
     deletion vector in its own file and a single shuffle partition puts all of them in one task.
     The table is partitioned by values that need path escaping. The first statement touches only
     a few files, so the second finds files both with and without a DV, and the third merges
-    existing DVs. This checks the wiring from the command to the DV writer and the results; that
-    that the writer overlaps its files is covered by GpuDeletionVectorWriterSuite. On a local table
-    the GPU statements also run with a file system that records the thread writing each DV file,
-    to check that the command uses the concurrent writer. On Databricks this runs the Databricks
+    existing DVs. This checks the wiring from the command to the DV writer and the results. That
+    the writer overlaps its files is covered by GpuDeletionVectorWriterSuite. On a local table the
+    GPU statements also run with a file system that records the thread writing each DV file, to
+    check that the command uses the concurrent writer. On Databricks this runs the Databricks
     implementation, which does not use that writer."""
     data_path = spark_tmp_path + "/DELTA_DATA"
     num_files = 40
@@ -620,8 +620,9 @@ def test_delta_dml_many_packed_dv_files(spark_tmp_path, command, random_prefixes
         if step > 0:
             assert cpu_dvs > 5, "Expected the CPU statement to persist many DV files"
         assert dv_file_count(data_path + "/GPU") == cpu_dvs
-        if is_local and step > 0:
-            # Many files in one task are written by the concurrent writer's threads.
+        if is_local and not is_databricks_runtime() and step > 0:
+            # Many files in one task are written by the concurrent writer's threads. Databricks
+            # runs its own writer, so only the file counts and the rows are checked there.
             writers = [n for n in dv_file_names(data_path + "/GPU")
                        if n.startswith("_dv_writer_gpu-delta-dv-writer")]
             assert writers, "No DV file was written by the concurrent DV writer"

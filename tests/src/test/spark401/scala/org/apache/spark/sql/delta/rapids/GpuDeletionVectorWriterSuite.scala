@@ -153,7 +153,8 @@ class GpuDeletionVectorWriterSuite extends SparkQueryCompareTestSuite {
       assert(ex.getMessage == "boom")
       // No writer may still be running once the failure is reported.
       assert(running.get() == 0)
-      assert(completed.get() == 3, "running bins were not waited for")
+      // Bins 0, 2 and 3 were running; a later bin may also start before the abort is seen.
+      assert(completed.get() >= 3, "running bins were not waited for")
       assert(started.get() < 100)
     }
   }
@@ -247,6 +248,9 @@ class GpuDeletionVectorWriterSuite extends SparkQueryCompareTestSuite {
       task.start()
       assert(inWriters.await(30, TimeUnit.SECONDS))
       task.interrupt()
+      // The writers are blocked, so the task must still be waiting for them after the interrupt.
+      task.join(500)
+      assert(task.isAlive, "the task exited without waiting for the running writers")
       release.countDown()
       task.join(30000)
       assert(runningOnExit == 0, "writers were still running when the task exited")

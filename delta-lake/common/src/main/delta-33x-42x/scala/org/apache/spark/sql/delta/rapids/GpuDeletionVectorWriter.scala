@@ -168,8 +168,9 @@ private[rapids] object GpuDeletionVectorWriter extends Logging {
       case t: Throwable =>
         aborted.set(true)
         // Wait for running writers so none still writes after the task has failed or was killed.
-        // A killed task therefore exits only after its in-flight files are done. Like a serial
-        // write, that is bounded by the storage client's own timeouts, not by this code.
+        // A killed task therefore exits only after its in-flight files are done. The kill does not
+        // interrupt the writer threads, which a serial write on the task thread would have been.
+        // The wait is bounded by the storage client's own timeouts, not by this code.
         val primary = unwrap(t)
         var interrupted = t.isInstanceOf[InterruptedException]
         futures.foreach { f =>
