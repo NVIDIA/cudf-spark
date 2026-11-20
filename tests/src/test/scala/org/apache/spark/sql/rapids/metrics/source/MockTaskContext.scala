@@ -20,7 +20,7 @@ import java.util
 import java.util.Properties
 
 import scala.collection.JavaConverters._
-import scala.collection.mutable.ListBuffer
+import scala.collection.mutable.{ArrayBuffer, ListBuffer}
 
 import org.apache.spark.TaskContext
 import org.apache.spark.executor.TaskMetrics
@@ -33,10 +33,11 @@ import org.apache.spark.util.{AccumulatorV2, TaskCompletionListener, TaskFailure
 abstract class MockTaskContextBase(taskAttemptId: Long, partitionId: Int) extends TaskContext {
 
   val listeners = new ListBuffer[TaskCompletionListener]
-  private val preCompletionListeners = new ListBuffer[TaskCompletionListener]
+  private val preCompletionListeners = new ArrayBuffer[TaskCompletionListener]
   private val metrics = new TaskMetrics
+  @volatile private var completed: Boolean = false
 
-  override def isCompleted(): Boolean = false
+  override def isCompleted(): Boolean = completed
 
   override def isInterrupted(): Boolean = false
 
@@ -97,11 +98,48 @@ abstract class MockTaskContextBase(taskAttemptId: Long, partitionId: Int) extend
    * This is exposed to invoke the listeners onTaskCompletion
    */
   def markTaskComplete(): Unit = {
-    while (preCompletionListeners.nonEmpty) {
-      val listener = preCompletionListeners.remove(preCompletionListeners.length - 1)
-      listener.onTaskCompletion(this)
+    val listenerFailures = new ArrayBuffer[Throwable]()
+
+    while (true) {
+      val listenerOpt = synchronized {
+        if (preCompletionListeners.nonEmpty) {
+          Some(preCompletionListeners.remove(preCompletionListeners.length - 1))
+        } else {
+          completed = true
+          None
+        }
+      }
+
+      listenerOpt match {
+        case Some(listener) =>
+          try {
+            listener.onTaskCompletion(this)
+          } catch {
+            case e: Throwable =>
+              listenerFailures += e
+          }
+        case None =>
+          listeners.foreach { listener =>
+            try {
+              listener.onTaskCompletion(this)
+            } catch {
+              case e: Throwable =>
+                listenerFailures += e
+            }
+          }
+
+          if (listenerFailures.nonEmpty) {
+            val firstException = listenerFailures.head
+            listenerFailures.tail.foreach { e =>
+              if (e ne firstException) {
+                firstException.addSuppressed(e)
+              }
+            }
+            throw firstException
+          }
+          return
+      }
     }
-    listeners.foreach(_.onTaskCompletion(this))
   }
 
   /**
@@ -128,10 +166,16 @@ abstract class MockTaskContextBase(taskAttemptId: Long, partitionId: Int) extend
    */
   private[spark] def addTaskPreCompletionListener(
       listener: TaskCompletionListener): TaskContext = {
-    if (isCompleted()) {
+    val delegateToCompletion = synchronized {
+      if (completed) {
+        true
+      } else {
+        preCompletionListeners += listener
+        false
+      }
+    }
+    if (delegateToCompletion) {
       addTaskCompletionListener(listener)
-    } else {
-      preCompletionListeners += listener
     }
     this
   }

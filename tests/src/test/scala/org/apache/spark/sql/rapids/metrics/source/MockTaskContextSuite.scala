@@ -65,18 +65,10 @@ class MockTaskContextSuite extends AnyFunSuite {
   test("pre-completion listener registered after task completion delegates to completion " +
       "listener") {
     val events = new ArrayBuffer[String]()
-    var completed = false
     val context = new MockTaskContext(taskAttemptId = 2L, partitionId = 0) {
-      override def isCompleted(): Boolean = completed
-
       override def addTaskCompletionListener(listener: TaskCompletionListener): TaskContext = {
         events += "registered-completion"
         super.addTaskCompletionListener(listener)
-      }
-
-      override def markTaskComplete(): Unit = {
-        completed = true
-        super.markTaskComplete()
       }
     }
 
@@ -89,18 +81,55 @@ class MockTaskContextSuite extends AnyFunSuite {
     assertResult(List.empty)(events.toList)
 
     context.markTaskComplete()
+    assert(context.isCompleted())
     assertResult(List(
       "pre-before-complete",
-      "registered-completion",
       "pre-during-complete"
     ))(events.toList)
 
     events.clear()
-    context.addTaskPreCompletionListener(makeListener {
+    val lateListener = makeListener {
       events += "pre-after-complete"
-    })
+    }
+    context.addTaskPreCompletionListener(lateListener)
     assertResult(List("registered-completion"))(events.toList)
-    assertResult(2)(context.listeners.size)
+    assert(context.listeners.last eq lateListener)
+    context.listeners.last.onTaskCompletion(context)
+    assertResult(List("registered-completion", "pre-after-complete"))(events.toList)
+  }
+
+  test("throwing pre-completion listener does not prevent remaining pre-completion and " +
+      "completion listeners from running") {
+    val events = new ArrayBuffer[String]()
+    val context = new MockTaskContext(taskAttemptId = 4L, partitionId = 0)
+    val failure1 = new RuntimeException("pre-completion listener 2 failed")
+    val failure2 = new RuntimeException("completion listener 1 failed")
+
+    context.addTaskCompletionListener(makeListener {
+      events += "completion-1"
+      throw failure2
+    })
+    context.addTaskCompletionListener(makeListener {
+      events += "completion-2"
+    })
+    context.addTaskPreCompletionListener(makeListener {
+      events += "pre-1"
+    })
+    context.addTaskPreCompletionListener(makeListener {
+      events += "pre-2"
+      throw failure1
+    })
+
+    val thrown = intercept[RuntimeException](context.markTaskComplete())
+    assert(thrown eq failure1)
+    assertResult(Seq(failure2))(thrown.getSuppressed.toSeq)
+    assert(context.isCompleted())
+    assertResult(List(
+      "pre-2",
+      "pre-1",
+      "completion-1",
+      "completion-2"
+    ))(events.toList)
   }
 
   test("anonymous MockTaskContext subclass overrides work with pre-completion listeners") {
