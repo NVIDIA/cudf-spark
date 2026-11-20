@@ -157,7 +157,7 @@ class GpuMetricTimingSuite extends AnyFunSuite with BeforeAndAfterEach {
     val companion = new LocalGpuMetric
     parent.companionGpuMetric = Some(companion)
     val independent = new LocalGpuMetric
-    val children = Vector.fill(4)(new LocalGpuMetric)
+    val children = Vector.fill(8)(new LocalGpuMetric)
     children.zipWithIndex.foreach { case (child, index) =>
       child.add(100L + index)
       if (index % 2 == 0) {
@@ -168,7 +168,8 @@ class GpuMetricTimingSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
     var expectedRaw = 0L
     var expectedCompanion = 0L
-    for (size <- Seq(0, 1, 4, 2, 0, 3)) {
+    val sizes = Seq(0, 1, 4, 2, 0, 3, 8, 1, 8)
+    for (size <- sizes) {
       val descendants = children.take(size).toList
       assert(parent.tryActivateTimer(descendants))
       assert(independent.tryActivateTimer(descendants))
@@ -184,7 +185,7 @@ class GpuMetricTimingSuite extends AnyFunSuite with BeforeAndAfterEach {
       assert(parent.value == expectedRaw)
       assert(companion.value == expectedCompanion)
     }
-    assert(independent.value == 6 * 80L - Seq(0, 1, 4, 2, 0, 3).sum * 10L)
+    assert(independent.value == sizes.length * 80L - sizes.sum * 10L)
   }
 
   test("mismatched descendant count fails without leaving the timer active") {
@@ -198,6 +199,32 @@ class GpuMetricTimingSuite extends AnyFunSuite with BeforeAndAfterEach {
     assert(metric.tryActivateTimer(Seq.empty))
     metric.deactivateTimer(20L, Seq.empty)
     assert(metric.value == 20L)
+  }
+
+  test("extra descendants fail before updating raw or companion metrics and allow reactivation") {
+    for (size <- Seq(3, 5)) {
+      val metric = new LocalGpuMetric
+      val companion = new LocalGpuMetric
+      metric.companionGpuMetric = Some(companion)
+      metric.add(7L)
+      companion.add(11L)
+      val children = List.fill(size)(new LocalGpuMetric)
+      children.foreach(_.add(10L))
+      assert(metric.tryActivateTimer(children.take(1)))
+      children.foreach(_.add(4L))
+      val error = intercept[IllegalStateException] {
+        metric.deactivateTimer(100L, children)
+      }
+      assert(error.getMessage ==
+        s"the excludeMetrics size $size does not match excludeMetricsWhenActivated size 1")
+      assert(metric.value == 7L)
+      assert(companion.value == 11L)
+      assert(metric.tryActivateTimer(children.take(1)))
+      children.head.add(2L)
+      metric.deactivateTimer(20L, children.take(1))
+      assert(metric.value == 25L)
+      assert(companion.value == 31L)
+    }
   }
 
   test("multiple and single timer entry points execute once and retain outer ownership") {

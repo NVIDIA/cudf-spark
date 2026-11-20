@@ -16,6 +16,8 @@
 
 package com.nvidia.spark.rapids
 
+import java.util.Arrays
+
 import scala.collection.immutable.TreeMap
 
 import ai.rapids.cudf.Table
@@ -486,28 +488,33 @@ sealed abstract class GpuMetric extends Serializable {
   private var excludeCompanionMetricsWhenActivated = Array.emptyLongArray
   private var excludeCompanionMetricCount = 0
 
+  private def growSnapshotArray(snapshot: Array[Long]): Array[Long] = {
+    // Start with room for four descendants, then double without overflowing the capacity.
+    val capacity = math.max(4L, math.min(Int.MaxValue.toLong, snapshot.length.toLong * 2)).toInt
+    Arrays.copyOf(snapshot, capacity)
+  }
+
   def tryActivateTimer(excludeMetrics: Seq[GpuMetric]): Boolean = {
     if (!isTimerActive) {
       isTimerActive = true
-      excludeMetricCount = excludeMetrics.length
-      if (excludeMetricsWhenActivated.length < excludeMetricCount) {
-        excludeMetricsWhenActivated = new Array[Long](excludeMetricCount)
-      }
       val withCompanion = companionGpuMetric.isDefined
-      excludeCompanionMetricCount = if (withCompanion) excludeMetricCount else 0
       if (withCompanion) {
         semWaitTimeWhenActivated = GpuTaskMetrics.getCurrentSemWaitTime
-        if (excludeCompanionMetricsWhenActivated.length < excludeMetricCount) {
-          excludeCompanionMetricsWhenActivated = new Array[Long](excludeMetricCount)
-        }
       }
       // Reuse primitive snapshots owned by this task's metric. Never retain descendant references.
       var index = 0
       val descendants = excludeMetrics.iterator
       while (descendants.hasNext) {
         val metric = descendants.next()
+        if (index == excludeMetricsWhenActivated.length) {
+          excludeMetricsWhenActivated = growSnapshotArray(excludeMetricsWhenActivated)
+        }
         excludeMetricsWhenActivated(index) = metric.value
         if (withCompanion) {
+          if (index == excludeCompanionMetricsWhenActivated.length) {
+            excludeCompanionMetricsWhenActivated =
+              growSnapshotArray(excludeCompanionMetricsWhenActivated)
+          }
           excludeCompanionMetricsWhenActivated(index) = metric.companionGpuMetric match {
             case Some(companion) => companion.value
             case None => 0L
@@ -515,6 +522,8 @@ sealed abstract class GpuMetric extends Serializable {
         }
         index += 1
       }
+      excludeMetricCount = index
+      excludeCompanionMetricCount = if (withCompanion) index else 0
       true
     } else {
       false
@@ -525,11 +534,6 @@ sealed abstract class GpuMetric extends Serializable {
     if (isTimerActive) {
       isTimerActive = false
 
-      if (excludeMetrics.length != excludeMetricCount) {
-        throw new IllegalStateException(
-          s"the excludeMetrics size ${excludeMetrics.length} does not match " +
-            s"excludeMetricsWhenActivated size $excludeMetricCount")
-      }
       var totalExcludeTime = 0L
       var totalCompanionExcludeTime = 0L
       val withCompanion = companionGpuMetric.isDefined
@@ -537,7 +541,9 @@ sealed abstract class GpuMetric extends Serializable {
       val descendants = excludeMetrics.iterator
       while (descendants.hasNext) {
         val metric = descendants.next()
-        totalExcludeTime += metric.value - excludeMetricsWhenActivated(index)
+        if (index < excludeMetricCount) {
+          totalExcludeTime += metric.value - excludeMetricsWhenActivated(index)
+        }
         if (withCompanion && index < excludeCompanionMetricCount) {
           metric.companionGpuMetric match {
             case Some(companion) =>
@@ -547,6 +553,11 @@ sealed abstract class GpuMetric extends Serializable {
           }
         }
         index += 1
+      }
+      if (index != excludeMetricCount) {
+        throw new IllegalStateException(
+          s"the excludeMetrics size $index does not match " +
+            s"excludeMetricsWhenActivated size $excludeMetricCount")
       }
       companionGpuMetric.foreach { companion =>
         // Use companion deltas so descendant semaphore wait is not subtracted twice.
