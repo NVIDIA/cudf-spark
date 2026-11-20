@@ -34,9 +34,10 @@ import org.apache.orc.{
   TypeDescription
 }
 import org.apache.orc.impl.CryptoUtils
-import org.apache.spark.{SparkConf, SparkException}
 import org.mockito.Mockito.when
 import org.scalatestplus.mockito.MockitoSugar
+
+import org.apache.spark.{SparkConf, SparkException}
 
 class OrcEncryptionSuite extends SparkQueryCompareTestSuite with MockitoSugar {
 
