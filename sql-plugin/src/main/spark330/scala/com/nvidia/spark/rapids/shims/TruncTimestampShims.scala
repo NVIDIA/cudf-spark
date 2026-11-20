@@ -24,10 +24,10 @@ import ai.rapids.cudf.{ColumnVector, Scalar}
 
 object TruncTimestampShims {
   def checkOverflow(datetimeCol: ColumnVector, truncated: ColumnVector): Unit = {
-    // Overflow checking is not performed on these Databricks runtimes.
+    // Preserve truncation behavior on Spark versions without checked subtraction.
   }
 
   def checkOverflow(datetime: Scalar, truncated: ColumnVector): Unit = {
-    // Overflow checking is not performed on these Databricks runtimes.
+    // Preserve truncation behavior on Spark versions without checked subtraction.
   }
 }
