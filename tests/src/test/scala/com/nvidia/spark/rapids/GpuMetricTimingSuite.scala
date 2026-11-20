@@ -244,13 +244,9 @@ class GpuMetricTimingSuite extends AnyFunSuite with BeforeAndAfterEach {
   }
 
   test("active singleton metric ranges subtract only the child delta on close") {
-    var durationOnClose = 0L
-    val parent = new LocalGpuMetric {
-      override def deactivateTimer(duration: Long, excludeMetrics: Seq[GpuMetric]): Unit = {
-        durationOnClose = duration
-        super.deactivateTimer(duration, excludeMetrics)
-      }
-    }
+    val parent = new LocalGpuMetric
+    val companion = new LocalGpuMetric
+    parent.companionGpuMetric = Some(companion)
     val child = new LocalGpuMetric
     parent.add(7L)
     child.add(10L)
@@ -260,7 +256,8 @@ class GpuMetricTimingSuite extends AnyFunSuite with BeforeAndAfterEach {
       assert(parent.value == 7L)
       assert(!parent.tryActivateTimer(Seq.empty))
     }
-    assert(parent.value == 7L + durationOnClose - 40L)
+    // Without task wait or child companions, the companion records the full range duration.
+    assert(parent.value == 7L + companion.value - 40L)
     assert(child.value == 50L)
     assert(parent.tryActivateTimer(Seq.empty))
     parent.deactivateTimer(0L, Seq.empty)
