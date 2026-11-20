@@ -37,9 +37,9 @@ import org.apache.spark.sql.delta.catalog.DeltaCatalog
 import org.apache.spark.sql.delta.commands.{CreateDeltaTableLikeShims, DeltaReorgOperation,
   DMLWithDeletionVectorsHelper, TouchedFileWithDV, UpdateCommand, WriteIntoDelta}
 import org.apache.spark.sql.delta.hooks.GpuAutoCompact43x
-import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShimBase, DeltaVariantShreddingShim,
-  DMLWithDeletionVectorsRuntimeShim, GpuDeltaLog, GpuOptimisticTransactionBase,
-  GpuWriteIntoDeltaLike, StartTransactionArg}
+import org.apache.spark.sql.delta.rapids.{DeltaRuntimeShim, DeltaRuntimeShimBase,
+  DeltaVariantShreddingShim, DMLWithDeletionVectorsRuntimeShim, GpuDeltaLog,
+  GpuOptimisticTransactionBase, GpuWriteIntoDeltaLike, StartTransactionArg}
 import org.apache.spark.sql.delta.sources.DeltaSQLConf
 import org.apache.spark.sql.delta.stats.StatsCollectionUtils
 import org.apache.spark.sql.types.StructType
@@ -173,6 +173,9 @@ class Delta43xRuntimeShim extends DeltaRuntimeShimBase
       rapidsConf: RapidsConf): StagingTableCatalog = {
     new GpuDeltaCatalog(cpuCatalog, rapidsConf)
   }
+
+  override def filterIsManagedLocationProperty: Boolean =
+    DeltaRuntimeShim.isDelta431OrLater(io.delta.VERSION)
 
   override protected def constructOptimisticTransaction(
       arg: StartTransactionArg): GpuOptimisticTransactionBase =
