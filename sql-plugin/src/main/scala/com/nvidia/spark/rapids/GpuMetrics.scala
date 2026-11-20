@@ -468,7 +468,9 @@ sealed abstract class GpuMetric extends Serializable {
   private var isTimerActive = false
 
   // For timing GpuMetrics, we additionally create a companion GpuMetric to track elapsed time
-  // excluding semaphore wait time
+  // excluding semaphore wait time. Configure it before timer activation and keep it unchanged
+  // until deactivation (range close). Companions of excluded metrics must also remain unchanged
+  // during that interval: semaphore-wait and child-companion baselines are captured at activation.
   var companionGpuMetric: Option[GpuMetric] = None
   private var semWaitTimeWhenActivated = 0L
   private var excludeMetricsWhenActivated = Array.emptyLongArray
