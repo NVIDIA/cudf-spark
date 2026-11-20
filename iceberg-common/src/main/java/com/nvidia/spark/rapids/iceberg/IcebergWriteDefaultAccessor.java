@@ -17,6 +17,7 @@
 package com.nvidia.spark.rapids.iceberg;
 
 import org.apache.iceberg.types.Types;
+import org.apache.spark.sql.types.StructField;
 
 /**
  * Root-safe bridge for accessing Iceberg write defaults.
@@ -25,8 +26,7 @@ import org.apache.iceberg.types.Types;
  * version-specific Iceberg shim modules. Keeping this interface at the JAR root lets shared
  * schema-conversion code use the selected implementation without reflective API access.
  */
+@FunctionalInterface
 public interface IcebergWriteDefaultAccessor {
-  boolean hasWriteDefault(Types.NestedField field);
-
-  Object writeDefaultToSpark(Types.NestedField field);
+  StructField withWriteDefault(Types.NestedField field, StructField sparkField);
 }

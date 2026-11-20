@@ -51,6 +51,7 @@ import org.apache.iceberg.types.Types;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.connector.write.DeltaBatchWrite;
+import org.apache.spark.sql.types.StructField;
 import scala.Option;
 
 import java.io.IOException;
@@ -87,15 +88,14 @@ public interface IcebergShimUtils extends IcebergWriteDefaultAccessor {
     }
 
     /** Returns whether this field has an Iceberg v3 write default. */
-    @Override
     default boolean hasWriteDefault(Types.NestedField field) {
         return false;
     }
 
-    /** Converts an Iceberg v3 write default to Spark's internal value representation. */
+    /** Adds a write default to the Spark field when the Iceberg runtime supports it. */
     @Override
-    default Object writeDefaultToSpark(Types.NestedField field) {
-        throw new UnsupportedOperationException("Iceberg write defaults are not supported");
+    default StructField withWriteDefault(Types.NestedField field, StructField sparkField) {
+        return sparkField;
     }
 
     /**

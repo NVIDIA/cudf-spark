@@ -34,13 +34,15 @@ import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.DeleteFileSet;
 import org.apache.spark.broadcast.Broadcast;
 import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.catalyst.expressions.Literal;
 import org.apache.spark.sql.connector.write.DeltaBatchWrite;
+import org.apache.spark.sql.types.StructField;
 
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
 
-/** Shared initial-default and deletion-vector shim implementations for Iceberg 1.9 and later. */
+/** Shared default-value and deletion-vector shim implementations for Iceberg 1.9 and later. */
 public abstract class Iceberg19PlusShimUtils implements IcebergShimUtils {
     @Override
     public boolean hasInitialDefault(Types.NestedField field) {
@@ -50,6 +52,20 @@ public abstract class Iceberg19PlusShimUtils implements IcebergShimUtils {
     @Override
     public Object initialDefaultToSpark(Types.NestedField field) {
         return SparkUtil.internalToSpark(field.type(), field.initialDefault());
+    }
+
+    @Override
+    public boolean hasWriteDefault(Types.NestedField field) {
+        return field.writeDefaultLiteral() != null;
+    }
+
+    @Override
+    public StructField withWriteDefault(Types.NestedField field, StructField sparkField) {
+        if (!hasWriteDefault(field)) {
+            return sparkField;
+        }
+        Object value = SparkUtil.internalToSpark(field.type(), field.writeDefault());
+        return sparkField.withCurrentDefaultValue(Literal.create(value, sparkField.dataType()).sql());
     }
 
     @Override

@@ -16,13 +16,63 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark":["350"],"carryForward":"all"}
+{"spark":["400","411"],"carryForward":"sameMinor"}
 spark-rapids-shim-json-lines ***/
 package org.apache.iceberg.spark.source
 
-import org.apache.iceberg.TableProperties
+import com.nvidia.spark.rapids.iceberg.IcebergDefaultTestUtils.fieldWithWriteDefault
+import org.apache.iceberg.{FileFormat, Schema, TableProperties}
+import org.apache.iceberg.deletes.DeleteGranularity
+import org.apache.iceberg.types.Types
 import org.scalatest.funsuite.AnyFunSuite
 
+import org.apache.spark.sql.connector.write.RowLevelOperation.Command
+import org.apache.spark.sql.execution.datasources.parquet.ParquetUtils.FIELD_ID_METADATA_KEY
+import org.apache.spark.sql.types.StructType
+
 class GpuSparkWriteSuite extends AnyFunSuite {
+
+  for (value <- Seq(9, 23)) {
+    test(s"append and row-level writer schemas preserve write default $value and field IDs") {
+      val field = fieldWithWriteDefault(2, "value", Types.IntegerType.get(), Int.box(value),
+        initialDefault = Some(Int.box(2)))
+      val tableSchema = new Schema(Types.NestedField.optional(
+        1, "payload", Types.StructType.of(field)))
+      // Iceberg derives this from Spark's query schema and does not retain field defaults.
+      val schema = new Schema(Types.NestedField.optional(
+        1, "payload", Types.StructType.of(
+          Types.NestedField.optional(2, "value", Types.IntegerType.get()))))
+      val context = GpuWriteContext(
+        dataSchema = schema,
+        dataSparkType = StructType(Nil),
+        dataFileFormat = FileFormat.PARQUET,
+        targetDataFileSize = 1024L,
+        deleteSparkType = GpuWriteContext.positionDeleteSparkType,
+        metadataSparkType = StructType(Nil),
+        deleteFileFormat = FileFormat.PARQUET,
+        targetDeleteFileSize = 1024L,
+        deleteGranularity = DeleteGranularity.FILE,
+        queryId = "write-default-schema",
+        useFanoutWriter = false,
+        inputOrdered = false,
+        useDVs = false)
+
+      val schemas = Seq(GpuSparkWrite.dataWriterSparkTypeFor(schema, tableSchema)) ++
+        Seq(Command.UPDATE, Command.MERGE).map { command =>
+          GpuSparkPositionDeltaWrite.dataWriterSparkTypeFor(command, context, tableSchema)
+        }
+      schemas.foreach { sparkSchema =>
+        assert(sparkSchema("payload").metadata.getLong(FIELD_ID_METADATA_KEY) == 1L)
+        val child = sparkSchema("payload").dataType.asInstanceOf[StructType]("value")
+        assert(child.metadata.getLong(FIELD_ID_METADATA_KEY) == 2L)
+        assert(child.getCurrentDefaultValue().contains(value.toString))
+      }
+      val deleteSchema = GpuSparkPositionDeltaWrite.dataWriterSparkTypeFor(
+        Command.DELETE, context, tableSchema)
+      assert(deleteSchema == GpuWriteContext.positionDeleteSparkType)
+      assert(deleteSchema.fields.forall(_.getCurrentDefaultValue().isEmpty))
+    }
+  }
 
   test("translateIcebergWriteProperties: adds 'compression' when only Iceberg key is present") {
     val writeProps = Map(TableProperties.PARQUET_COMPRESSION -> "zstd")

@@ -118,12 +118,12 @@ public class ShimUtils {
         return IMPL.hasWriteDefault(field);
     }
 
-    public static Object writeDefaultToSpark(Types.NestedField field) {
-        return IMPL.writeDefaultToSpark(field);
-    }
-
-    public static IcebergWriteDefaultAccessor writeDefaultAccessor() {
-        return IMPL;
+    /** Resolve defaults by field ID because Iceberg's write schema may omit them. */
+    public static IcebergWriteDefaultAccessor writeDefaultAccessor(Schema tableSchema) {
+        return (field, sparkField) -> {
+            Types.NestedField original = tableSchema.findField(field.fieldId());
+            return IMPL.withWriteDefault(original != null ? original : field, sparkField);
+        };
     }
 
     public static int rowIdFieldId() {

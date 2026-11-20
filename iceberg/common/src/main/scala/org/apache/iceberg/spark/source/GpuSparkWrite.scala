@@ -114,7 +114,7 @@ class GpuSparkWrite(cpu: Write) extends GpuWrite with RequiresDistributionAndOrd
     // StructType metadata. Without them, Iceberg's ParquetMetrics cannot extract file-level
     // statistics, causing StrictMetricsEvaluator to fail during overwrite validation.
     val dsSchema =
-      GpuTypeToSparkType.toSparkType(writeSchema, ShimUtils.writeDefaultAccessor())
+      GpuSparkWrite.dataWriterSparkTypeFor(writeSchema, table.schema())
     val useFanout = GpuSparkWriteAccess.useFanoutWriter(cpu)
     val writeProps = GpuSparkWriteAccess.writeProperties(cpu)
 
@@ -168,6 +168,13 @@ class GpuSparkWrite(cpu: Write) extends GpuWrite with RequiresDistributionAndOrd
 }
 
 object GpuSparkWrite {
+  /** Build the Spark schema embedded in GPU Parquet footers after Spark has resolved the input. */
+  private[source] def dataWriterSparkTypeFor(
+      writeSchema: Schema,
+      tableSchema: Schema): StructType = {
+    GpuTypeToSparkType.toSparkType(writeSchema, ShimUtils.writeDefaultAccessor(tableSchema))
+  }
+
   def supports(cpuClass: Class[_ <: Write]): Boolean = {
     GpuSparkWriteAccess.supports(cpuClass)
   }
