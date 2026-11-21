@@ -1115,6 +1115,9 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val isDeltaLowShuffleMergeEnabled: Boolean = get(ENABLE_DELTA_LOW_SHUFFLE_MERGE)
 
+  lazy val deltaDvWriteMaxFilesInFlightPerTask: Int =
+    get(DELTA_DV_WRITE_MAX_FILES_IN_FLIGHT_PER_TASK)
+
   lazy val testDeltaLowShuffleMergeFailOnFallback: Boolean =
     get(TEST_DELTA_LOW_SHUFFLE_MERGE_FAIL_ON_FALLBACK)
 

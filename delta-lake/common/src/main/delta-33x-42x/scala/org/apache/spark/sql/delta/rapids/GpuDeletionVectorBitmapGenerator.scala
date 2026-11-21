@@ -16,10 +16,18 @@
 
 package org.apache.spark.sql.delta.rapids
 
+import org.apache.hadoop.fs.Path
+
+import org.apache.spark.paths.SparkPath
 import org.apache.spark.sql.{Column, DataFrame, SparkSession}
+import org.apache.spark.sql.catalyst.expressions.aggregation.BitmapAggregator
 import org.apache.spark.sql.delta.actions.AddFile
 import org.apache.spark.sql.delta.commands.{DeletionVectorBitmapGenerator,
-  DMLWithDeletionVectorsHelper, TouchedFileWithDV}
+  DeletionVectorData, DeletionVectorResult, DMLWithDeletionVectorsHelper, FileToDvDescriptor,
+  TouchedFileWithDV}
+import org.apache.spark.sql.delta.deletionvectors.RoaringBitmapArrayFormat
+import org.apache.spark.sql.delta.util.{DeltaFileOperations, Utils => DeltaUtils}
+import org.apache.spark.sql.functions.{col, lit}
 import org.apache.spark.sql.nvidia.DFUDFShims
 
 private[rapids] case class GpuTargetScan(
@@ -59,17 +67,98 @@ private[rapids] object GpuDeletionVectorBitmapGenerator {
         spark, targetScan.dataFrame)
       val candidatesHaveDVs =
         hasReadableDVs && candidateFiles.exists(_.deletionVector != null)
-      val storedResults = DeletionVectorBitmapGenerator.buildRowIndexSetsForFilesMatchingCondition(
+      val matchedRows = matchedRowsWithDVs(
         spark,
-        txn,
+        txn.deltaLog.dataPath,
         candidatesHaveDVs,
         gpuTargetDf,
         candidateFiles,
-        DFUDFShims.columnToExpr(condition),
-        Some(targetScan.filePathColumn),
-        Some(targetScan.rowIndexColumn))
+        condition,
+        targetScan)
+      val storedResults = persistDeletionVectors(
+        spark,
+        matchedRows,
+        txn.deltaLog.newDeltaHadoopConf(),
+        txn.deltaLog.dataPath,
+        DeltaUtils.getRandomPrefixLength(txn.metadata))
 
       DMLWithDeletionVectorsHelper.findFilesWithMatchingRows(txn, nameToAddFileMap, storedResults)
     }
   }
+
+  /**
+   * The rows matching `condition` with their file path, row index and the file's existing
+   * deletion vector (if any). Mirrors the first half of Delta's
+   * `buildRowIndexSetsForFilesMatchingCondition` in Delta 3.3 through 4.2. It is kept here
+   * because only Delta 4.1+ exposes this step apart from the DV persistence, so compare it with
+   * Delta's when moving to a new version.
+   */
+  private def matchedRowsWithDVs(
+      spark: SparkSession,
+      tablePath: Path,
+      tableHasDVs: Boolean,
+      targetDf: DataFrame,
+      candidateFiles: Seq[AddFile],
+      condition: Column,
+      targetScan: GpuTargetScan): DataFrame = {
+    // The scan always supplies the file path and row index columns, see GpuTargetScan.
+    val matchedRows = targetDf
+      .withColumn(FileNameCol, targetScan.filePathColumn)
+      // Filter after getting the file name as the filter might introduce a join.
+      .filter(condition)
+      .withColumn(RowIndexCol, targetScan.rowIndexColumn)
+    if (tableHasDVs) {
+      // Attach each matched file's existing deletion vector. Metadata paths are canonicalized,
+      // so the lookup paths must be too.
+      val filePathToDV = candidateFiles.map { add =>
+        FileToDvDescriptor(
+          SparkPath.fromPath(DeltaFileOperations.absolutePath(tablePath.toString, add.path))
+            .urlEncoded,
+          Option(add.deletionVector).map(_.serializeToBase64()))
+      }
+      val lookup = spark.createDataset(filePathToDV)(FileToDvDescriptor.encoder)
+        .withColumnRenamed("path", LookupPathCol)
+      // A left outer join keeps rows whose path was not matched, so that the bitmap
+      // persistence fails on them instead of silently dropping deletes.
+      matchedRows.join(lookup, lookup(LookupPathCol) === matchedRows(FileNameCol), "leftOuter")
+        .drop(FileNameCol)
+        .withColumnRenamed(LookupPathCol, FileNameCol)
+    } else {
+      matchedRows.withColumn(DvIdCol, lit(null))
+    }
+  }
+
+  /**
+   * Builds one bitmap per file with Delta's `BitmapAggregator`, then persists the packed
+   * deletion vector files with [[GpuDeletionVectorWriter]]. Mirrors Delta's
+   * `DeletionVectorSet.computeResult`, with the same column names and result encoders.
+   */
+  private def persistDeletionVectors(
+      spark: SparkSession,
+      matchedRows: DataFrame,
+      hadoopConf: org.apache.hadoop.conf.Configuration,
+      tablePath: Path,
+      prefixLength: Int): Seq[DeletionVectorResult] = {
+    val bitmaps = matchedRows
+      .groupBy(col(FileNameCol), col(DvIdCol))
+      .agg(DFUDFShims.exprToColumn(new BitmapAggregator(
+        DFUDFShims.columnToExpr(col(RowIndexCol)), RoaringBitmapArrayFormat.Portable)
+        .toAggregateExpression(isDistinct = false)).as(BitmapStruct))
+      .select(
+        col(FileNameCol),
+        col(DvIdCol),
+        col(s"$BitmapStruct.bitmap").as(DeletionVectorBitmapGenerator.DELETED_ROW_INDEX_BITMAP),
+        col(s"$BitmapStruct.cardinality")
+          .as(DeletionVectorBitmapGenerator.DELETED_ROW_INDEX_COUNT))
+    val mapper = GpuDeletionVectorWriter.createMapper(spark, hadoopConf, tablePath, prefixLength)
+    bitmaps.as[DeletionVectorData](DeletionVectorData.encoder)
+      .mapPartitions(mapper)(DeletionVectorResult.encoder)
+      .collect().toSeq
+  }
+
+  private val FileNameCol = DeletionVectorBitmapGenerator.FILE_NAME_COL
+  private val DvIdCol = DeletionVectorBitmapGenerator.FILE_DV_ID_COL
+  private val RowIndexCol = DeletionVectorBitmapGenerator.ROW_INDEX_COL
+  private val LookupPathCol = "dvFilePath"
+  private val BitmapStruct = "CardinalityAndBitmapStruct"
 }
