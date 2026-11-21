@@ -648,33 +648,36 @@ class GpuMultiFileReaderSuite extends AnyFunSuite with RmmSparkRetrySuiteBase {
       }
 
       try {
-        // Ensure file0 completes while file1 is actively held in progress
-        assert(file0Finished.await(10, java.util.concurrent.TimeUnit.SECONDS))
-        assert(file1Entered.await(10, java.util.concurrent.TimeUnit.SECONDS))
-
-        // In a background thread after a short delay, release file1 while readReadyFiles
-        // is waiting inside head.get(combineWaitTime)
-        val releaser = new Thread(() => {
-          Thread.sleep(100)
-          file1Release.countDown()
-        })
-        releaser.start()
-
         withResource(reader) { r =>
-          var batchCount = 0
-          var totalRows = 0
-          while (r.next()) {
-            withResource(r.get()) { batch =>
-              assert(batch.numRows() <= 2)
-              totalRows += batch.numRows()
-              batchCount += 1
+          val batches = new ArrayBuffer[Int]()
+          val consumer = new Thread(() => {
+            while (r.next()) {
+              withResource(r.get()) { batch =>
+                batches.synchronized {
+                  batches.append(batch.numRows())
+                }
+              }
             }
-          }
-          assert(totalRows == 4)
-          assert(batchCount >= 2)
+          })
+          consumer.start()
+
+          // Ensure file0 completes while file1 is actively held in progress
+          assert(file0Finished.await(10, java.util.concurrent.TimeUnit.SECONDS))
+          assert(file1Entered.await(10, java.util.concurrent.TimeUnit.SECONDS))
+
+          // Release file1 while readReadyFiles is waiting inside head.get(combineWaitTime)
+          file1Release.countDown()
+
+          consumer.join(10000)
+          assert(!consumer.isAlive, "Consumer thread timed out")
+
           assert(file1TimedSuccess.get())
+          batches.synchronized {
+            assert(batches.sum == 4)
+            assert(batches.length >= 2)
+            assert(batches.forall(_ <= 2))
+          }
         }
-        releaser.join(5000)
       } finally {
         file1Release.countDown()
       }
