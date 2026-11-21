@@ -19,10 +19,16 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
+import com.nvidia.spark.rapids.{GpuMetric, NoopMetric}
+
+import org.apache.spark.SparkContext
+
 /**
  * Spark < 4.1 has no DSv2 WriteSummary commit API, so MERGE row accounting used for
  * MergeSummary is unused and should be skipped.
  */
 object GpuMergeRowMetricsShims {
   val writeSummaryEnabled: Boolean = false
+
+  def createMetric(sc: SparkContext, name: String): GpuMetric = NoopMetric
 }
