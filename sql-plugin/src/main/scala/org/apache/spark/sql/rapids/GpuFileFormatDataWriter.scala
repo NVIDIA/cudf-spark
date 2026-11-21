@@ -26,7 +26,8 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
-import com.nvidia.spark.rapids.fileio.hadoop.HadoopFileIO
+import com.nvidia.spark.rapids.fileio.FileIOConfig
+import com.nvidia.spark.rapids.jni.fileio.RapidsFileIO
 import com.nvidia.spark.rapids.shims.GpuFileFormatDataWriterShim
 import org.apache.hadoop.fs.{FileAlreadyExistsException, Path}
 import org.apache.hadoop.mapreduce.TaskAttemptContext
@@ -993,6 +994,7 @@ case class GpuWriterBucketSpec(
 class GpuWriteJobDescription(
     val uuid: String, // prevent collision between different (appending) write jobs
     val serializableHadoopConf: SerializableConfiguration,
+    fileIOConfig: FileIOConfig,
     val outputWriterFactory: ColumnarOutputWriterFactory,
     val allColumns: Seq[Attribute],
     val dataColumns: Seq[Attribute],
@@ -1006,7 +1008,7 @@ class GpuWriteJobDescription(
     val concurrentWriterPartitionFlushSize: Long)
   extends Serializable {
 
-  lazy val fileIO: HadoopFileIO = new HadoopFileIO(serializableHadoopConf.value)
+  @transient lazy val fileIO: RapidsFileIO = fileIOConfig.load(serializableHadoopConf.value)
 
   assert(AttributeSet(allColumns) == AttributeSet(partitionColumns ++ dataColumns),
     s"""

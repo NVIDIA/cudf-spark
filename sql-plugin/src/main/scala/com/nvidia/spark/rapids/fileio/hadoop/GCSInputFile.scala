@@ -37,9 +37,9 @@ import org.apache.spark.sql.rapids.GpuTaskMetrics
  */
 class GCSInputFile private (
     delegate: HadoopInputFile,
-    fileUri: URI,
-    hadoopConf: Configuration)
-  extends RapidsInputFile {
+    uri: URI,
+    conf: Configuration)
+  extends PerfIOInputFile(uri, conf) {
 
   override def path(): String = delegate.path()
 

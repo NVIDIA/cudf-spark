@@ -38,7 +38,8 @@ import com.nvidia.spark.rapids.RapidsConf.ParquetFooterReaderType
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.filecache.FileCache
-import com.nvidia.spark.rapids.fileio.hadoop.HadoopFileIO
+import com.nvidia.spark.rapids.fileio.FileIOConfig
+import com.nvidia.spark.rapids.fileio.hadoop.{HadoopFileIO, HadoopInputFile, PerfIOInputFile}
 import com.nvidia.spark.rapids.io.async._
 import com.nvidia.spark.rapids.jni.{DateTimeRebase, ParquetFooter, RmmSpark}
 import com.nvidia.spark.rapids.jni.fileio.{RapidsFileIO, RapidsInputFile}
@@ -52,6 +53,7 @@ import org.apache.commons.io.output.{CountingOutputStream, NullOutputStream}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 import org.apache.hadoop.io.IOUtils
+import org.apache.parquet.HadoopReadOptions
 import org.apache.parquet.bytes.BytesUtils
 import org.apache.parquet.column.ColumnDescriptor
 import org.apache.parquet.filter2.predicate.FilterApi
@@ -61,7 +63,8 @@ import org.apache.parquet.hadoop.{CodecFactory, ParquetFileReader, ParquetInputF
   ParquetOutputFormat, ParquetWriter}
 import org.apache.parquet.hadoop.ParquetFileWriter.MAGIC
 import org.apache.parquet.hadoop.metadata._
-import org.apache.parquet.io.{InputFile, SeekableInputStream => ParquetSeekableInputStream}
+import org.apache.parquet.io.{DelegatingSeekableInputStream, InputFile,
+  SeekableInputStream => ParquetSeekableInputStream}
 import org.apache.parquet.schema.{DecimalMetadata, GroupType, LogicalTypeAnnotation, MessageType, OriginalType, PrimitiveType, Type}
 import org.apache.parquet.schema.LogicalTypeAnnotation.{DateLogicalTypeAnnotation, IntLogicalTypeAnnotation, TimestampLogicalTypeAnnotation}
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
@@ -597,6 +600,18 @@ class HMBSeekableInputStream(
   }
 }
 
+private class RapidsParquetInputFile(input: RapidsInputFile) extends InputFile {
+  override def getLength: Long = input.getLength
+
+  override def newStream(): ParquetSeekableInputStream = {
+    val stream = input.open()
+    new DelegatingSeekableInputStream(stream) {
+      override def getPos: Long = stream.getPos
+      override def seek(pos: Long): Unit = stream.seek(pos)
+    }
+  }
+}
+
 class HMBInputFile(buffer: HostMemoryBuffer) extends InputFile {
 
   override def getLength: Long = buffer.getLength
@@ -684,13 +699,11 @@ protected case class GpuParquetFileFilterHandler(
   }
 
   private def getFooterBuffer(
-      fileIO: RapidsFileIO,
+      inputFile: RapidsInputFile,
       filePath: Path,
-      conf: Configuration,
       metrics: Map[String, GpuMetric]): HostMemoryBuffer = {
-    val inputFile = fileIO.newInputFile(filePath)
     withResource(ParquetFooterUtils.getFooterBuffer(inputFile, metrics,
-        readFooterBuffer(fileIO, filePath, conf))) { hmb =>
+        readFooterBuffer(inputFile, filePath))) { hmb =>
       // buffer includes header and trailing length and magic, stripped here
       hmb.slice(MAGIC.length, hmb.getLength - Integer.BYTES - MAGIC.length)
     }
@@ -701,13 +714,10 @@ protected case class GpuParquetFileFilterHandler(
    * or the trailing footer length and magic that readFooterBuffer returns. This is what the
    * hybrid scan reader takes.
    */
-  def readThriftFooter(
-      fileIO: RapidsFileIO,
-      filePath: Path,
-      conf: Configuration): HostMemoryBuffer = {
+  def readThriftFooter(fileIO: RapidsFileIO, filePath: Path): HostMemoryBuffer = {
     val inputFile = fileIO.newInputFile(filePath)
     withResource(ParquetFooterUtils.getFooterBuffer(inputFile, metrics,
-        readFooterBuffer(fileIO, filePath, conf))) { buf =>
+        readFooterBuffer(inputFile, filePath))) { buf =>
       // Drop the leading magic, and the trailing footer length and magic, to leave the thrift
       // metadata the hybrid scan reader expects.
       val thriftFooterLength = buf.getLength - MAGIC.length - FOOTER_LENGTH_SIZE - MAGIC.length
@@ -715,33 +725,22 @@ protected case class GpuParquetFileFilterHandler(
     }
   }
 
-  private def readFooterBuffer(
-      fileIO: RapidsFileIO,
-      filePath: Path,
-      conf: Configuration): HostMemoryBuffer = {
-    if (fileIO.isInstanceOf[HadoopFileIO]) {
-      // We should remove this after https://github.com/NVIDIA/spark-rapids/issues/13306 is
-      // implemented.
-      val taskMetrics = GpuTaskMetrics.get
-      val result = PerfIO.readParquetFooterBuffer(
-        filePath,
-        conf,
-        verifyParquetMagic,
-        taskMetrics.perfioS3RequestLimiterMetricsRecorder)
-      val scheme = filePath.toUri.getScheme
-      if (scheme != null && scheme.startsWith("s3")) {
-        taskMetrics.recordPerfioS3BackendOnce()
-      } else if (result.isDefined && (scheme == "gs" || scheme == "gcs")) {
-        taskMetrics.recordPerfioGCSBackendOnce()
-      }
-      result.getOrElse(readFooterBufUsingHadoop(fileIO, filePath))
-    } else {
-      readFooterBufUsingHadoop(fileIO, filePath)
+  private def readFooterBuffer(inputFile: RapidsInputFile, filePath: Path): HostMemoryBuffer = {
+    val optimized = inputFile match {
+      case file: PerfIOInputFile => file.readParquetFooter(verifyParquetMagic)
+      case _ => None
     }
+    val scheme = filePath.toUri.getScheme
+    if (scheme != null && scheme.startsWith("s3") &&
+        (optimized.isDefined || inputFile.isInstanceOf[HadoopInputFile])) {
+      GpuTaskMetrics.get.recordPerfioS3BackendOnce()
+    } else if (optimized.isDefined && (scheme == "gs" || scheme == "gcs")) {
+      GpuTaskMetrics.get.recordPerfioGCSBackendOnce()
+    }
+    optimized.getOrElse(readFooterBytes(inputFile, filePath))
   }
 
-  private def readFooterBufUsingHadoop(fileIO: RapidsFileIO, filePath: Path): HostMemoryBuffer = {
-    val inputFile = fileIO.newInputFile(filePath)
+  private def readFooterBytes(inputFile: RapidsInputFile, filePath: Path): HostMemoryBuffer = {
     // Much of this code came from the parquet_mr projects ParquetFileReader, and was modified
     // to match our needs.
     val fileLen = inputFile.getLength
@@ -794,13 +793,12 @@ protected case class GpuParquetFileFilterHandler(
   }
 
   private def readAndFilterFooter(
-      fileIO: RapidsFileIO,
+      inputFile: RapidsInputFile,
       file: PartitionedFile,
-      conf : Configuration,
       readDataSchema: StructType,
       filePath: Path): ParquetFooter = {
     val footerSchema = convertToFooterSchema(readDataSchema)
-    val footerBuffer = getFooterBuffer(fileIO, filePath, conf, metrics)
+    val footerBuffer = getFooterBuffer(inputFile, filePath, metrics)
     withResource(footerBuffer) { footerBuffer =>
       NvtxRegistry.PARQUET_PARSE_FILTER_FOOTER {
         // In the future, if we know we're going to read the entire file,
@@ -819,15 +817,13 @@ protected case class GpuParquetFileFilterHandler(
     "msg=method readFooter in class ParquetFileReader is deprecated"
   )
   private def readAndSimpleFilterFooter(
-      fileIO: RapidsFileIO,
+      inputFile: RapidsInputFile,
       file: PartitionedFile,
-      conf : Configuration,
       filePath: Path): ParquetMetadata = {
     //noinspection ScalaDeprecation
     NvtxRegistry.PARQUET_READ_FOOTER {
-      val inputFile = fileIO.newInputFile(filePath)
       withResource(ParquetFooterUtils.getFooterBuffer(inputFile, metrics,
-          readFooterBuffer(fileIO, filePath, conf))) { hmb =>
+          readFooterBuffer(inputFile, filePath))) { hmb =>
         ParquetFileReader.readFooter(new HMBInputFile(hmb),
           ParquetMetadataConverter.range(file.start, file.start + file.length))
       }
@@ -852,12 +848,13 @@ protected case class GpuParquetFileFilterHandler(
           conf.unset(encryptConf)
         }
       }
+      val inputFile = fileIO.newInputFile(filePath)
       val footer: ParquetMetadata = try {
         footerReader match {
           case reader
               if GpuParquetFileFilterHandler.useNativeFooterReader(reader, readDataSchema) =>
-            val (serialized, rowIndexOffsets) = withResource(readAndFilterFooter(fileIO, file,
-              conf, readDataSchema, filePath)) { tableFooter =>
+            val (serialized, rowIndexOffsets) = withResource(readAndFilterFooter(inputFile, file,
+              readDataSchema, filePath)) { tableFooter =>
                 if (tableFooter.getNumColumns <= 0) {
                   // Special case because java parquet reader does not like having 0 columns.
                   val offsets = tableFooter.getRowIndexOffsets
@@ -908,7 +905,7 @@ protected case class GpuParquetFileFilterHandler(
             }
             footer
           case _ =>
-            readAndSimpleFilterFooter(fileIO, file, conf, filePath)
+            readAndSimpleFilterFooter(inputFile, file, filePath)
         }
       } catch {
         case e if GpuParquetCrypto.isColumnarCryptoException(e) =>
@@ -936,11 +933,16 @@ protected case class GpuParquetFileFilterHandler(
         NvtxRegistry.PARQUET_GET_BLOCKS_WITH_FILTER {
           // Use the ParquetFileReader to perform dictionary-level filtering
           ParquetInputFormat.setFilterPredicate(conf, pushedFilters.get)
-          //noinspection ScalaDeprecation
-          withResource(new ParquetFileReader(conf, footer.getFileMetaData, filePath,
-            footer.getBlocks, Collections.emptyList[ColumnDescriptor])) { parquetReader =>
-            parquetReader.getRowGroups
+          val reader = if (fileIO.getClass == classOf[HadoopFileIO]) {
+            // This constructor reuses the parsed footer, but opens the path through Hadoop.
+            new ParquetFileReader(conf, footer.getFileMetaData, filePath,
+              footer.getBlocks, Collections.emptyList[ColumnDescriptor])
+          } else {
+            val options = HadoopReadOptions.builder(conf, filePath)
+              .withRange(file.start, file.start + file.length).build()
+            ParquetFileReader.open(new RapidsParquetInputFile(inputFile), options)
           }
+          withResource(reader)(_.getRowGroups)
         }
       } else {
         footer.getBlocks
@@ -1314,7 +1316,9 @@ abstract class AbstractGpuParquetMultiFilePartitionReaderFactory(
   // from a task when we need to create the fileIO instance. This stops a regression
   // when we materialize the hadoop conf eagerly, see:
   // https://github.com/NVIDIA/spark-rapids/issues/13353
-  @transient protected lazy val fileIO = new HadoopFileIO(broadcastedConf.value.value)
+  private val fileIOConfig = FileIOConfig.from(sqlConf)
+  @transient protected lazy val fileIO: RapidsFileIO =
+    fileIOConfig.load(broadcastedConf.value.value)
   protected val isCaseSensitive = sqlConf.caseSensitiveAnalysis
   protected val debugDumpPrefix = rapidsConf.parquetDebugDumpPrefix
   protected val debugDumpAlways = rapidsConf.parquetDebugDumpAlways
@@ -1625,10 +1629,10 @@ case class GpuParquetMultiFilePartitionReaderFactory(
     // None for Delta's factories, which do not opt in to the hybrid scan.
     case Some(config) =>
       // The footer read needs the filter handler only the factory has.
-      val readFooter = (file: PartitionedFile, fileConf: Configuration) => {
+      val readFooter = (file: PartitionedFile, _: Configuration) => {
         val filePath = new Path(new URI(file.filePath.toString()))
         NvtxRegistry.HYBRID_SCAN_READ_FOOTER {
-          filterHandler.readThriftFooter(fileIO, filePath, fileConf)
+          filterHandler.readThriftFooter(fileIO, filePath)
         }
       }
       // GPUDirect Storage is not supported here yet, so every mode reads through host memory.
@@ -1689,7 +1693,9 @@ abstract class GpuParquetPartitionReaderFactoryBase(
   // from a task when we need to create the fileIO instance. This stops a regression
   // when we materialize the hadoop conf eagerly, see:
   // https://github.com/NVIDIA/spark-rapids/issues/13353
-  @transient protected lazy val fileIO = new HadoopFileIO(broadcastedConf.value.value)
+  private val fileIOConfig = FileIOConfig.from(sqlConf)
+  @transient protected lazy val fileIO: RapidsFileIO =
+    fileIOConfig.load(broadcastedConf.value.value)
   protected val isCaseSensitive = sqlConf.caseSensitiveAnalysis
   protected val debugDumpPrefix = rapidsConf.parquetDebugDumpPrefix
   protected val debugDumpAlways = rapidsConf.parquetDebugDumpAlways
@@ -1770,7 +1776,7 @@ case class GpuParquetPartitionReaderFactory(
     val filePath = new Path(new URI(file.filePath.toString()))
     val startTime = System.nanoTime()
     val footer = NvtxRegistry.HYBRID_SCAN_READ_FOOTER {
-      filterHandler.readThriftFooter(fileIO, filePath, conf)
+      filterHandler.readThriftFooter(fileIO, filePath)
     }
     metrics.get(FILTER_TIME).foreach {
       _ += (System.nanoTime() - startTime)

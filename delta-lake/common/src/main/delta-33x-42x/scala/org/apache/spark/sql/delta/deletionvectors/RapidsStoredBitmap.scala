@@ -40,7 +40,7 @@ case class RapidsDeletionVectorStoredBitmap(
       RapidsInMemoryDeletionVectorStore.load(dvDescriptor.inlineData)
     } else {
       require(isOnDisk)
-      val dvStore = RapidsDeletionVectorStore.createInstance(fileIO)
+      val dvStore = new RapidsDeletionVectorStore(fileIO)
       dvStore.load(onDiskPath, dvDescriptor.offset.getOrElse(0), dvDescriptor.sizeInBytes)
     }
 

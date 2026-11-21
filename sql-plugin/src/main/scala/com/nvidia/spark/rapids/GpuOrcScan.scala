@@ -39,7 +39,7 @@ import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.SchemaUtils._
 import com.nvidia.spark.rapids.filecache.FileCache
-import com.nvidia.spark.rapids.fileio.hadoop.HadoopFileIO
+import com.nvidia.spark.rapids.fileio.FileIOConfig
 import com.nvidia.spark.rapids.io.async._
 import com.nvidia.spark.rapids.jni.{CastStrings, GpuTimeZoneDB, RmmSpark}
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile
@@ -879,6 +879,7 @@ case class OrcOutputStripe(
  */
 case class OrcPartitionReaderContext(
     filePath: Path,
+    inputFile: RapidsInputFile,
     conf: Configuration,
     fileSchema: TypeDescription,
     updatedReadSchema: TypeDescription,
@@ -1487,7 +1488,7 @@ private object OrcTools {
       metrics: Map[String, GpuMetric]): GpuOrcDataReader = {
     val fs = ctx.filePath.getFileSystem(ctx.conf)
     buildDataReader(ctx.compressionSize, ctx.compressionKind, ctx.fileSchema, ctx.readerOpts,
-      ctx.filePath, fs, ctx.conf, metrics)
+      ctx.filePath, ctx.inputFile, fs, ctx.conf, metrics)
   }
 
   /** Build a GPU ORC data reader */
@@ -1497,6 +1498,7 @@ private object OrcTools {
       fileSchema: TypeDescription,
       readerOpts: Reader.Options,
       filePath: Path,
+      inputFile: RapidsInputFile,
       fs: FileSystem,
       conf: Configuration,
       metrics: Map[String, GpuMetric]): GpuOrcDataReader = {
@@ -1516,7 +1518,7 @@ private object OrcTools {
           .withPath(filePath)
           .withZeroCopy(zeroCopy)
           .withMaxDiskRangeChunkLimit(maxDiskRangeChunkLimit)
-          .build(), conf, metrics)
+          .build(), inputFile, metrics)
     reader.open()
     reader
   }
@@ -1556,6 +1558,8 @@ private case class GpuOrcFileFilterHandler(
 
   private[rapids] val isCaseSensitive = sqlConf.caseSensitiveAnalysis
   private val orcFilterPushDown = sqlConf.orcFilterPushDown
+  private val fileIOConfig = FileIOConfig.from(sqlConf)
+  @transient private lazy val fileIO = fileIOConfig.load(broadcastedConf.value.value)
 
   def filterStripes(
       partFile: PartitionedFile,
@@ -1568,9 +1572,10 @@ private case class GpuOrcFileFilterHandler(
 
     val filePath = new Path(new URI(partFile.filePath.toString()))
     val fs = filePath.getFileSystem(conf)
+    val inputFile = fileIO.newInputFile(filePath)
     val orcFileReaderOpts = OrcFile.readerOptions(conf)
         .filesystem(fs)
-        .orcTail(GpuOrcFileFilterHandler.getOrcTail(filePath, fs, conf,  metrics))
+        .orcTail(GpuOrcFileFilterHandler.getOrcTail(filePath, inputFile, metrics))
 
     // After getting the necessary information from ORC reader, we must close the ORC reader
     OrcShims.withReader(OrcFile.createReader(filePath, orcFileReaderOpts)) { orcReader =>
@@ -1608,11 +1613,11 @@ private case class GpuOrcFileFilterHandler(
         val readerOpts = buildOrcReaderOpts(taskConf, orcReader, partFile, fullSchema)
 
         withResource(OrcTools.buildDataReader(orcReader.getCompressionSize,
-          orcReader.getCompressionKind, orcReader.getSchema, readerOpts, filePath, fs, taskConf,
-          metrics)) {
+          orcReader.getCompressionKind, orcReader.getSchema, readerOpts, filePath, inputFile, fs,
+          taskConf, metrics)) {
           dataReader =>
-            new GpuOrcPartitionReaderUtils(filePath, taskConf, partFile, orcFileReaderOpts,
-              orcReader, readerOpts, dataReader, requestedMapping,
+            new GpuOrcPartitionReaderUtils(filePath, inputFile, taskConf, partFile,
+              orcFileReaderOpts, orcReader, readerOpts, dataReader, requestedMapping,
               readDataSchema.exists(f =>
                 GpuOverrides.isOrContainsTimestamp(f.dataType))).getOrcPartitionReaderContext
         }
@@ -1641,6 +1646,7 @@ private case class GpuOrcFileFilterHandler(
    */
   private class GpuOrcPartitionReaderUtils(
       filePath: Path,
+      inputFile: RapidsInputFile,
       conf: Configuration,
       partFile: PartitionedFile,
       orcFileReaderOpts: OrcFile.ReaderOptions,
@@ -1675,10 +1681,10 @@ private case class GpuOrcFileFilterHandler(
         sargApp, sargColumns, OrcConf.IGNORE_NON_UTF8_BLOOM_FILTERS.getBoolean(conf),
         orcReader.getWriterVersion, updatedReadSchema,
         resolveMemFileIncluded(fileIncluded, requestedMapping))
-      OrcPartitionReaderContext(filePath, conf, orcReader.getSchema, updatedReadSchema, evolution,
-        orcReader.getFileTail, orcReader.getCompressionSize, orcReader.getCompressionKind,
-        readerOpts, stripes.iterator.buffered, requestedMapping, writerTz,
-        writerUsedProlepticGregorian)
+      OrcPartitionReaderContext(filePath, inputFile, conf, orcReader.getSchema, updatedReadSchema,
+        evolution, orcReader.getFileTail, orcReader.getCompressionSize,
+        orcReader.getCompressionKind, readerOpts, stripes.iterator.buffered, requestedMapping,
+        writerTz, writerUsedProlepticGregorian)
     }
 
     /**
@@ -2100,11 +2106,8 @@ private object GpuOrcFileFilterHandler {
 
   private def getOrcTail(
       filePath: Path,
-      fs: FileSystem,
-      conf: Configuration,
+      inputFile: RapidsInputFile,
       metrics: Map[String, GpuMetric]): OrcTail = {
-    val fileIO = new HadoopFileIO(conf)
-    val inputFile = fileIO.newInputFile(filePath)
     val cachedFooter = FileCache.get.getFooter(inputFile)
     val bb = cachedFooter.map { hmb =>
       // ORC can only deal with on-heap buffers

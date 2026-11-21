@@ -350,6 +350,16 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
       .createWithDefault(true)
 
   // FILE FORMATS
+  val FILE_IO_IMPL = conf("spark.sql.rapids.fileio.impl")
+    .doc("RapidsFileIO implementation for GPU file reads and writes. Supply a class with a " +
+      "public java.util.Map constructor, or ResolvingRapidsFileIO for per-scheme selection. " +
+      "Each implementation receives the string options under its own prefix. " +
+      "The default is HadoopFileIO. See the " +
+      "[configuration examples](../design/configurable_rapids_fileio.md).")
+    .sinceVersion(ConfVersionInfo.UNRELEASED_VERSION)
+    .stringConf
+    .createOptional
+
   val MULTITHREAD_READ_NUM_THREADS = conf("spark.rapids.sql.multiThreadedRead.numThreads")
       .doc("The maximum number of threads on each executor to use for reading small " +
         "files in parallel. This can not be changed at runtime after the executor has " +

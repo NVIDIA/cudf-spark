@@ -187,9 +187,7 @@ class OrcPerfIOReadSuite extends AnyFunSuite with Matchers with MockitoSugar {
       props: DataReaderProperties,
       testInputFile: RapidsInputFile,
       testFileCache: FileCache)
-    extends GpuOrcDataReader320Plus(props, new Configuration(false), Map.empty) {
-
-    override protected lazy val inputFile: RapidsInputFile = testInputFile
+    extends GpuOrcDataReader320Plus(props, testInputFile, Map.empty) {
 
     val inputFileForTest: RecordingInputFile = testInputFile.asInstanceOf[RecordingInputFile]
 

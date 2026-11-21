@@ -19,7 +19,6 @@ package org.apache.spark.sql.delta.deletionvectors
 import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.ByteBufferInputStream
-import com.nvidia.spark.rapids.fileio.hadoop.HadoopFileIO
 import com.nvidia.spark.rapids.jni.Hash
 import com.nvidia.spark.rapids.jni.fileio.RapidsFileIO
 import java.io.{DataInputStream, IOException}
@@ -34,29 +33,9 @@ import org.apache.spark.sql.delta.DeltaErrors
  * RAPIDS version of `DeletionVectorStore`. It is simplified to only include the APIs needed
  * to load serialized deletion vectors into host memory.
  */
-trait RapidsDeletionVectorStore {
-
-  /**
-   * Loads a serialized deletion vector from the given path and offset into a HostMemoryBuffer.
-   */
-  def load(path: Path, offset: Int, size: Int): HostMemoryBuffer
-}
-
-object RapidsDeletionVectorStore {
-  def createInstance(fileIO: RapidsFileIO): RapidsDeletionVectorStore = {
-    fileIO match {
-      case hadoopFileIO: HadoopFileIO =>
-        new RapidsHadoopDVStore(hadoopFileIO)
-      case other =>
-        throw new UnsupportedOperationException(
-          s"Unsupported RapidsFileIO type for deletion vector store: ${other.getClass.getName}")
-    }
-  }
-}
-
-class RapidsHadoopDVStore(fileIO: HadoopFileIO) extends RapidsDeletionVectorStore {
-
-  override def load(path: Path, offset: Int, size: Int): HostMemoryBuffer = {
+class RapidsDeletionVectorStore(fileIO: RapidsFileIO) {
+  /** Loads a serialized deletion vector into host memory. */
+  def load(path: Path, offset: Int, size: Int): HostMemoryBuffer = {
     val file = fileIO.newInputFile(path)
     withResource(file.open()) { fin =>
       fin.seek(offset)
