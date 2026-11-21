@@ -22,7 +22,7 @@ import java.nio.ByteBuffer
 import scala.collection.mutable.ArrayBuffer
 import scala.reflect.ClassTag
 
-import ai.rapids.cudf.{Cuda, HostColumnVector, HostMemoryBuffer, JCudfSerialization, PageableMemoryPool}
+import ai.rapids.cudf.{Cuda, HostColumnVector, HostMemoryBuffer, JCudfSerialization}
 import ai.rapids.cudf.JCudfSerialization.SerializedTableHeader
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.KudoSerializedTableColumn.SER_CHECK_SCHEMA
@@ -433,12 +433,7 @@ private class KudoSerializerInstance(
             for (i <- 0 until numColumns) {
               batch.column(i) match {
                 case gpu: GpuColumnVector =>
-                  val cpu = if (PageableMemoryPool.isDeviceToHostStagingEnabled) {
-                    new RapidsHostColumnVector(gpu.dataType,
-                      StagedHostCopy.copyToHost(gpu.getBase, Cuda.DEFAULT_STREAM))
-                  } else {
-                    gpu.copyToHostAsync(Cuda.DEFAULT_STREAM)
-                  }
+                  val cpu = CopyPipeline.copyToHostAsync(gpu, Cuda.DEFAULT_STREAM)
                   toClose += cpu
                   columns(i) = cpu.getBase
                 case cpu: RapidsHostColumnVector =>

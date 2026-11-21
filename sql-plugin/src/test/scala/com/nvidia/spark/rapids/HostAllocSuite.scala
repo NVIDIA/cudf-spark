@@ -468,16 +468,39 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
                   assert(pinned != null)
                 }
                 for (destination <- Seq(pooled, raw)) {
-                  if (stagingEnabled) {
-                    PageableMemoryPool.copyDeviceToPageableHost(destination, 0, device, 0,
-                      pattern.length, Cuda.DEFAULT_STREAM)
-                  } else {
-                    destination.copyFromDeviceBufferAsync(device, Cuda.DEFAULT_STREAM)
-                  }
+                  CopyPipeline.copyToHostAsync(destination, 0, device, 0,
+                    pattern.length, Cuda.DEFAULT_STREAM)
                   Cuda.DEFAULT_STREAM.sync()
                   val actual = new Array[Byte](pattern.length)
                   destination.getBytes(actual, 0, 0, actual.length)
                   assert(actual.sameElements(pattern))
+                  // Offset copies on a non-default stream exercise ordering and completion
+                  // for sync/async, staged/direct, and pooled/raw H2D eligibility.
+                  withResource(new Cuda.Stream(true)) { stream =>
+                    val length = pattern.length - 32
+                    for (async <- Seq(false, true)) {
+                      destination.setBytes(0, pattern, 0, pattern.length)
+                      if (async) {
+                        CopyPipeline.copyToDeviceAsync(device, 7, destination, 11, length, stream)
+                      } else {
+                        CopyPipeline.copyToDevice(device, 7, destination, 11, length, stream)
+                      }
+                      // Queue the D2H consumer behind the producer on the same stream.
+                      if (async) {
+                        CopyPipeline.copyToHostAsync(input, 13, device, 7, length, stream)
+                        stream.sync()
+                      } else {
+                        CopyPipeline.copyToHost(input, 13, device, 7, length, stream)
+                      }
+                      val copied = new Array[Byte](length)
+                      input.getBytes(copied, 0, 13, length)
+                      assert(copied.sameElements(pattern.slice(11, 11 + length)))
+                    }
+                  }
+                  // Restore the source before testing the next destination.
+                  input.setBytes(0, pattern, 0, pattern.length)
+                  device.copyFromHostBuffer(input)
+
                 }
               }
               assert(HostAlloc.getUsageRatio() == 0.5)

@@ -28,8 +28,8 @@ import scala.annotation.tailrec
 import scala.collection.mutable
 
 import ai.rapids.cudf._
-import com.nvidia.spark.rapids.{GpuColumnVector, GpuColumnVectorFromBuffer,
-  GpuCompressedColumnVector, GpuDeviceManager, GpuSemaphore, HashedPriorityQueue, HostAlloc,
+import com.nvidia.spark.rapids.{CopyPipeline, GpuColumnVector, GpuColumnVectorFromBuffer,
+  GpuCompressedColumnVector, GpuDeviceManager, GpuSemaphore, HashedPriorityQueue,
   HostMemoryOutputStream, MemoryBufferToHostByteBufferIterator, NvtxId, NvtxRegistry,
   RapidsConf, RapidsExecutorPlugin, RapidsHostColumnVector, SpillPriorities, TaskRegistryTracker}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
@@ -936,17 +936,8 @@ class SpillableHostBufferHandle private (
     if (hostBuffer != null) {
       GpuTaskMetrics.get.readSpillFromHostTime {
         withResource(hostBuffer) { _ =>
-          if (PageableMemoryPool.isHostToDeviceStagingEnabled &&
-              PageableMemoryPool.isPageablePoolBuffer(hostBuffer)) {
-            PageableMemoryPool.copyPageableHostToDevice(dmb, 0, hostBuffer, 0,
-              hostBuffer.getLength, Cuda.DEFAULT_STREAM)
-          } else {
-            dmb.copyFromHostBuffer(
-              /*dstOffset*/ 0,
-              /*src*/ hostBuffer,
-              /*srcOffset*/ 0,
-              /*length*/ hostBuffer.getLength)
-          }
+          CopyPipeline.copyToDevice(dmb, 0, hostBuffer, 0,
+            hostBuffer.getLength, Cuda.DEFAULT_STREAM)
         }
       }
     } else {
@@ -2029,11 +2020,7 @@ class SpillableHostStore(val maxSize: Option[Long] = None)
   def makeBuilder(handle: SpillableHostBufferHandle): SpillableHostBufferHandleBuilder = {
     var builder: Option[SpillableHostBufferHandleBuilder] = None
     if (handle.sizeInBytes <= maxSize.getOrElse(Long.MaxValue)) {
-      val hostBuffer = if (PageableMemoryPool.isDeviceToHostStagingEnabled) {
-        HostAlloc.tryAllocPageableForDeviceToHost(handle.sizeInBytes)
-      } else {
-        HostAlloc.tryAlloc(handle.sizeInBytes)
-      }
+      val hostBuffer = CopyPipeline.tryAllocateHostDestination(handle.sizeInBytes)
       hostBuffer.foreach { hmb =>
         withResource(hmb) { _ =>
           if (trackInternal(handle)) {
@@ -2082,12 +2069,7 @@ class SpillableHostStore(val maxSize: Option[Long] = None)
     private var copied = 0L
 
     override def copyNext(mb: DeviceMemoryBuffer, len: Long, stream: Cuda.Stream): Unit = {
-      // Both pool and raw destinations from the D2H allocator must use staging.
-      if (PageableMemoryPool.isDeviceToHostStagingEnabled) {
-        PageableMemoryPool.copyDeviceToPageableHost(singleShotBuffer, copied, mb, 0, len, stream)
-      } else {
-        singleShotBuffer.copyFromMemoryBuffer(copied, mb, 0, len, stream)
-      }
+      CopyPipeline.copyToHost(singleShotBuffer, copied, mb, 0, len, stream)
       copied += len
     }
 

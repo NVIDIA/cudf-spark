@@ -23,7 +23,7 @@ import scala.collection.mutable.ArrayBuffer
 import scala.reflect.ClassTag
 
 import ai.rapids.cudf.{Cuda, DeviceMemoryBuffer, HostMemoryBuffer, JCudfSerialization,
-  MemoryBuffer, NvtxColor, NvtxRange, PageableMemoryPool}
+  MemoryBuffer, NvtxColor, NvtxRange}
 import ai.rapids.cudf.JCudfSerialization.HostConcatResult
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.FileUtils.createTempFile
@@ -418,12 +418,7 @@ class KudoGpuTableOperator(dataTypes: Array[DataType])
         acc + skt.header.getTotalDataLen + skt.header.getSerializedSize
       }
       val offsetsBufSize = 8L * (spillables.length + 1)
-      val stagedH2d = PageableMemoryPool.isHostToDeviceStagingEnabled
-      val dataHostBuf = if (stagedH2d && dataBufSize > 0) {
-        HostAlloc.alloc(dataBufSize, preferPinned = false)
-      } else {
-        HostMemoryBuffer.allocate(dataBufSize)
-      }
+      val dataHostBuf = CopyPipeline.allocateHostSource(dataBufSize)
       val hostBuffers = closeOnExcept(dataHostBuf) { _ =>
         KudoBuffers(dataHostBuf, HostMemoryBuffer.allocate(offsetsBufSize))
       }
@@ -442,12 +437,8 @@ class KudoGpuTableOperator(dataTypes: Array[DataType])
           KudoBuffers(dataDevBuf, DeviceMemoryBuffer.allocate(offsetsHost.getLength))
         }
         withResource(devBuffers) { case KudoBuffers(dataDev, offsetsDev) =>
-          if (stagedH2d && PageableMemoryPool.isPageablePoolBuffer(dataHost)) {
-            PageableMemoryPool.copyPageableHostToDevice(dataDev, 0, dataHost, 0,
-              dataHost.getLength, Cuda.DEFAULT_STREAM)
-          } else {
-            dataDev.copyFromHostBuffer(dataHost)
-          }
+          CopyPipeline.copyToDevice(dataDev, 0, dataHost, 0,
+            dataHost.getLength, Cuda.DEFAULT_STREAM)
           offsetsDev.copyFromHostBuffer(offsetsHost)
 
           val schema = GpuColumnVector.from(dataTypes)
