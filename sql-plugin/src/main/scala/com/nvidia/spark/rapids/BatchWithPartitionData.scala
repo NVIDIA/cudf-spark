@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2024, NVIDIA CORPORATION.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,8 +25,10 @@ import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetry
 import com.nvidia.spark.rapids.jni.GpuSplitAndRetryOOM
 
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.types.{StringType, StructType}
+import org.apache.spark.sql.catalyst.expressions.GenericInternalRow
+import org.apache.spark.sql.types.{BinaryType, DataType, StringType, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
+import org.apache.spark.unsafe.types.UTF8String
 
 /**
  * Wrapper class that specifies how many rows to replicate
@@ -256,84 +258,60 @@ object BatchWithPartitionDataUtils {
       maxGpuColumnSizeBytes: Long): Array[Array[PartitionRowData]] = {
     val resultBatches = ArrayBuffer[Array[PartitionRowData]]()
     val currentBatch = ArrayBuffer[PartitionRowData]()
-    val sizeOfBatch = Array.fill(partSchema.length)(0L)
-    var partIndex = 0
-    var splitOccurred = false
-    var rowsInPartition = 0
-    var processNextPartition = true
-    while (partIndex < partitionRowData.length) {
-      if (processNextPartition) {
-        rowsInPartition = partitionRowData(partIndex).rowNum
-      }
-      val valuesInPartition = partitionRowData(partIndex).rowValue
-      // Calculate the maximum number of rows that can fit in current batch.
-      val maxRows = calculateMaxRows(rowsInPartition, valuesInPartition, partSchema,
-        sizeOfBatch, maxGpuColumnSizeBytes)
-      // Splitting occurs if for any column, maximum rows we can fit is less than rows in partition.
-      splitOccurred = maxRows < rowsInPartition
-      if (splitOccurred) {
-        currentBatch.append(PartitionRowData(valuesInPartition, maxRows))
-        resultBatches.append(currentBatch.toArray)
-        currentBatch.clear()
-        java.util.Arrays.fill(sizeOfBatch, 0)
-        rowsInPartition -= maxRows
-      } else {
-        // If there was no split, all rows can fit in current batch.
-        currentBatch.append(PartitionRowData(valuesInPartition, rowsInPartition))
-        val partitionSizes = calculatePartitionSizes(rowsInPartition, valuesInPartition, partSchema)
-        sizeOfBatch.indices.foreach(i => sizeOfBatch(i) += partitionSizes(i))
-      }
-      // If there was no split or there are no rows to process, get next partition
-      // else process remaining rows in current partition.
-      processNextPartition = !splitOccurred || rowsInPartition == 0
-      if(processNextPartition) {
-        // Process next partition
-        partIndex += 1
+    val sizeOfBatch = Array.fill(variableWidthSizes(null, partSchema).length)(0L)
+    partitionRowData.foreach { part =>
+      var remaining = part.rowNum
+      if (remaining > 0) {
+        val widths = variableWidthSizes(part.rowValue, partSchema)
+        widths.foreach { width =>
+          require(width <= maxGpuColumnSizeBytes,
+            s"Partition value of $width bytes exceeds the GPU column limit of " +
+              s"$maxGpuColumnSizeBytes bytes")
+        }
+        while (remaining > 0) {
+          val count = widths.indices.foldLeft(remaining) { (rows, i) =>
+            val width = widths(i)
+            if (width == 0) rows else {
+              math.min(rows.toLong, (maxGpuColumnSizeBytes - sizeOfBatch(i)) / width).toInt
+            }
+          }
+          if (count > 0) {
+            currentBatch += PartitionRowData(part.rowValue, count)
+            widths.indices.foreach(i => sizeOfBatch(i) += widths(i) * count.toLong)
+            remaining -= count
+          }
+          if (remaining > 0) {
+            resultBatches += currentBatch.toArray
+            currentBatch.clear()
+            java.util.Arrays.fill(sizeOfBatch, 0L)
+          }
+        }
       }
     }
-    // Add the last remaining batch to resultBatches
     if (currentBatch.nonEmpty) {
-      resultBatches.append(currentBatch.toArray)
+      resultBatches += currentBatch.toArray
+    } else if (resultBatches.isEmpty) {
+      // Preserve a zero-row input batch without reading any zero-row file's values.
+      resultBatches += Array(PartitionRowData(new GenericInternalRow(partSchema.length), 0))
     }
     resultBatches.toArray
   }
 
-  /**
-   * Calculates the partition size for each column as 'size of single value * number of rows'
-   */
-  private def calculatePartitionSizes(rowNum: Int, values: InternalRow,
-      partSchema: StructType): Seq[Long] = {
-    partSchema.zipWithIndex.map {
-      case (field, colIndex) if field.dataType == StringType
-        && !values.isNullAt(colIndex) =>
-        // Assumption: Columns of other data type would not have fit already. Do nothing.
-        val sizeOfSingleValue = values.getUTF8String(colIndex).numBytes
-        rowNum * sizeOfSingleValue
-      case _ => 0L
-    }
-  }
-
-  /**
-   * Calculate the maximum number of rows that can fit into a batch without exceeding limit.
-   * This value is capped at row numbers in the partition.
-   */
-  private def calculateMaxRows(rowNum: Int, values: InternalRow, partSchema: StructType,
-      sizeOfBatch: Array[Long], maxGpuColumnSizeBytes: Long): Int = {
-    partSchema.zipWithIndex.map {
-      case (field, colIndex) if field.dataType == StringType
-        && !values.isNullAt(colIndex) =>
-        val sizeOfSingleValue = values.getUTF8String(colIndex).numBytes
-        if (sizeOfSingleValue == 0) {
-          // All rows can fit
-          rowNum
-        } else {
-          val availableSpace = maxGpuColumnSizeBytes - sizeOfBatch(colIndex)
-          val maxRows = (availableSpace / sizeOfSingleValue).toInt
-          // Cap it at rowNum to ensure it doesn't exceed the available rows in the partition
-          Math.min(maxRows, rowNum)
+  // Each variable-width child, including children of Iceberg's _partition, has its own limit.
+  // Null structs contribute a zero for each such child so indices align across files.
+  private def variableWidthSizes(value: Any, dataType: DataType): Seq[Long] = dataType match {
+    case StringType =>
+      Seq(if (value == null) 0L else value.asInstanceOf[UTF8String].numBytes.toLong)
+    case BinaryType =>
+      Seq(if (value == null) 0L else value.asInstanceOf[Array[Byte]].length.toLong)
+    case struct: StructType =>
+      struct.fields.zipWithIndex.toSeq.flatMap { case (field, index) =>
+        val child = if (value == null) null else {
+          value.asInstanceOf[InternalRow].get(index, field.dataType)
         }
-      case _ => rowNum
-    }.min
+        variableWidthSizes(child, field.dataType)
+      }
+    case _ => Seq.empty
   }
 
   /**

@@ -21,6 +21,7 @@ import java.util.concurrent.{ConcurrentHashMap, ConcurrentMap}
 import java.util.concurrent.atomic.AtomicLong
 
 import scala.collection.JavaConverters._
+import scala.collection.mutable.ArrayBuffer
 
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
@@ -30,8 +31,11 @@ import com.nvidia.spark.rapids.iceberg.IcebergDeletionVector
 import com.nvidia.spark.rapids.iceberg.data.GpuDeleteFilter
 import com.nvidia.spark.rapids.parquet.{CpuCompressionConfig, HostMemoryBuffersWithMetaData,
   HostMemoryEmptyMetaData, MultiFileCloudParquetPartitionReader, ParquetDataBlock}
+import org.apache.iceberg.spark.SparkSchemaUtil
 
 import org.apache.spark.TaskContext
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.expressions.UnsafeProjection
 import org.apache.spark.sql.execution.datasources.PartitionedFile
 import org.apache.spark.sql.types.{LongType, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -103,6 +107,7 @@ class GpuMultiThreadIcebergParquetReader(
   private def createParquetReader() = {
     val sparkPartitionedFiles = files.map(_.sparkPartitionedFile).toArray
     val multiThreadConf = conf.threadConf.asInstanceOf[MultiThread]
+    val readerConf = conf
 
     inited = true
     new MultiFileCloudParquetPartitionReader(
@@ -132,6 +137,25 @@ class GpuMultiThreadIcebergParquetReader(
       multiThreadConf.disableCombining,
       multiThreadConf.combineConf) {
 
+      private lazy val outputSchema = SparkSchemaUtil.convert(readerConf.expectedSchema)
+      private lazy val copyOutputRow = UnsafeProjection.create(outputSchema)
+      private lazy val metadataBatchRows = GpuNullBatchIterator.maxRows(outputSchema,
+        readerConf.maxBatchSizeRows, math.min(readerConf.maxBatchSizeBytes,
+          readerConf.targetBatchSizeBytes))
+      private val combineMetadata = !multiThreadConf.disableCombining &&
+        multiThreadConf.combineConf.combineThresholdSize > 0
+
+      private def metadataRow(meta: HostMemoryEmptyMetaData): Option[InternalRow] = {
+        if (!combineMetadata || meta.numRows == 0) {
+          None
+        } else {
+          val file = findIcebergFile(meta.partitionedFile)
+          Option(postProcessors.get(file))
+            .filter(_ => !deletionVectors.containsKey(file) && deleteFilterProvider(file).isEmpty)
+            .flatMap(_.metadataOnlyOutputRow)
+        }
+      }
+
       override def checkIfNeedToSplit(current: HostMemoryBuffersWithMetaData,
           next: HostMemoryBuffersWithMetaData): Boolean = {
         if (current.partitionedFile.filePath == next.partitionedFile.filePath) return false
@@ -141,7 +165,36 @@ class GpuMultiThreadIcebergParquetReader(
 
       override protected def checkIfNeedToSplitEmpty(current: HostMemoryEmptyMetaData,
           next: HostMemoryEmptyMetaData): Boolean = {
-        checkIfNeedToSplitIcebergFiles(current.partitionedFile, next.partitionedFile)
+        (metadataRow(current), metadataRow(next)) match {
+          case (Some(_), Some(_)) => false
+          case (None, None) => checkIfNeedToSplitIcebergFiles(current.partitionedFile,
+            next.partitionedFile)
+          case _ => true
+        }
+      }
+
+      override protected def newCombinedHMEmptyMetadata(empty: CombinedEmptyMeta,
+          selected: CombinedMeta): HostMemoryEmptyMetaData = {
+        if (metadataRow(empty.metaForEmpty).isEmpty) {
+          super.newCombinedHMEmptyMetadata(empty, selected)
+        } else {
+          // Every positive-row split passed checkIfNeedToSplitEmpty. Save its exact footer
+          // count and its projected values in the same order as the selected splits.
+          val runs = ArrayBuffer.empty[(Long, InternalRow)]
+          empty.emptyMetas.iterator.filter(_.numRows > 0).foreach { meta =>
+            val row = copyOutputRow(metadataRow(meta).get)
+            // UnsafeRow compares the encoded values, including the sign bit of nested floats.
+            if (runs.nonEmpty && runs.last._2 == row) {
+              runs(runs.length - 1) = (runs.last._1 + meta.numRows, runs.last._2)
+            } else {
+              runs += ((meta.numRows, row.copy()))
+            }
+          }
+          if (runs.length > 1) {
+            readerConf.metrics.get(GpuMetric.NUM_MIXED_CONSTANT_METADATA_GROUPS).foreach(_ += 1)
+          }
+          super.newCombinedHMEmptyMetadata(empty, selected.copy(allPartValues = runs.toArray))
+        }
       }
 
       private def checkIfNeedToSplitIcebergFiles(current: PartitionedFile,
@@ -199,14 +252,26 @@ class GpuMultiThreadIcebergParquetReader(
         require(postProcessor != null,
           s"Iceberg parquet partition file post processor does not exist for $icebergFile")
 
-        val postProcessed = super.readBatches(fileBufsAndMeta).map { batch =>
-          // Empty row-count batches are materialized with the Parquet read schema, so they still
-          // need Iceberg post-processing to match the expected output schema.
-          postProcessor.process(batch)
+        fileBufsAndMeta match {
+          case empty: HostMemoryEmptyMetaData if metadataRow(empty).isDefined =>
+            withResource(empty) { _ =>
+              val (rows, values) = empty.allPartValues.getOrElse(
+                Array((empty.numRows, postProcessor.metadataOnlyOutputRow.get))).unzip
+              val counts = GpuNullBatchIterator(new StructType, empty.numRows, metadataBatchRows)
+              val batches = new GpuColumnarBatchWithPartitionValuesIterator(counts, values,
+                rows, outputSchema, readerConf.maxGpuColumnSizeBytes)
+              new Iterator[ColumnarBatch] {
+                override def hasNext: Boolean = batches.hasNext
+                override def next(): ColumnarBatch =
+                  postProcessor.materializeMetadataOnlyBatch(batches.next())
+              }
+            }
+          case _ =>
+            val postProcessed = super.readBatches(fileBufsAndMeta).map(postProcessor.process)
+            deleteFilterProvider(icebergFile)
+              .map(_.filterAndDelete(postProcessed))
+              .getOrElse(postProcessed)
         }
-        deleteFilterProvider(icebergFile)
-          .map(_.filterAndDelete(postProcessed))
-          .getOrElse(postProcessed)
       }
     }
   }
