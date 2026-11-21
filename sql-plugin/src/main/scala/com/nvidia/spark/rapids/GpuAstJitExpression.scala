@@ -74,7 +74,7 @@ object GpuAstJitExpression {
   private[rapids] def canUseAstJit(expression: Expression): Boolean = expression match {
     case gpuExpression: GpuExpression =>
       GpuBatchUtils.isFixedWidth(expression.dataType) &&
-        gpuExpression.supportsAstJit && gpuExpression.containsAstJitOperator
+        gpuExpression.supportsAstJit && gpuExpression.containsAstJitTrigger
     case _ => false
   }
 
@@ -153,7 +153,7 @@ object GpuAstJitExpression {
 
   private def hasJitCandidate(expression: Expression): Boolean = expression.find {
     case gpuExpression: GpuExpression =>
-      gpuExpression.supportsAstJit && gpuExpression.containsAstJitOperator
+      gpuExpression.supportsAstJit && gpuExpression.containsAstJitTrigger
     case _ => false
   }.isDefined
 
