@@ -450,6 +450,7 @@ object ConfVersionInfo {
     "spark.rapids.sql.format.orc.read.enabled" -> "v21.06.0",
     "spark.rapids.sql.format.orc.reader.type" -> "v21.08.0",
     "spark.rapids.sql.format.orc.write.enabled" -> "v21.06.0",
+    "spark.rapids.sql.format.parquet.dictionaryFilterPrefetch.enabled" -> "Unreleased",
     "spark.rapids.sql.format.parquet.enabled" -> "v21.06.0",
     "spark.rapids.sql.format.parquet.multiThreadedRead.maxNumFilesParallel" -> "v21.06.0",
     "spark.rapids.sql.format.parquet.multiThreadedRead.numThreads" -> "v21.06.0",
