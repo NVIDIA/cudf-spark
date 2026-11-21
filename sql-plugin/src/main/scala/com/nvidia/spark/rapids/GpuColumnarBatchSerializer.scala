@@ -434,8 +434,8 @@ private class KudoSerializerInstance(
               batch.column(i) match {
                 case gpu: GpuColumnVector =>
                   val cpu = if (PageableMemoryPool.isDeviceToHostStagingEnabled) {
-                    gpu.copyToHostAsync(Cuda.DEFAULT_STREAM,
-                      HostAlloc.pageableDeviceToHostAllocator)
+                    new RapidsHostColumnVector(gpu.dataType,
+                      StagedHostCopy.copyToHost(gpu.getBase, Cuda.DEFAULT_STREAM))
                   } else {
                     gpu.copyToHostAsync(Cuda.DEFAULT_STREAM)
                   }

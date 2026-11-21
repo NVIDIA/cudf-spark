@@ -140,8 +140,8 @@ trait GpuPartitioning extends Partitioning {
         withRetryNoSplit {
           partitionColumns.safeMap { column =>
             if (PageableMemoryPool.isDeviceToHostStagingEnabled) {
-              column.copyToHostAsync(Cuda.DEFAULT_STREAM,
-                HostAlloc.pageableDeviceToHostAllocator)
+              new RapidsHostColumnVector(column.dataType,
+                StagedHostCopy.copyToHost(column.getBase, Cuda.DEFAULT_STREAM))
             } else {
               column.copyToHostAsync(Cuda.DEFAULT_STREAM)
             }

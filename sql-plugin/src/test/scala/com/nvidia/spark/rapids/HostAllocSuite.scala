@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids
 
 import java.util.concurrent.{ExecutionException, Future, LinkedBlockingQueue, TimeoutException, TimeUnit}
 
-import ai.rapids.cudf.{Cuda, DefaultHostMemoryAllocator, DeviceMemoryBuffer, HostMemoryBuffer, PageableMemoryPool, PinnedMemoryPool, Rmm, RmmAllocationMode}
+import ai.rapids.cudf.{Cuda, DefaultHostMemoryAllocator, DeviceMemoryBuffer, DType, HostColumnVector, HostMemoryBuffer, PageableMemoryPool, PinnedMemoryPool, Rmm, RmmAllocationMode}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.jni.{RmmSpark, RmmSparkThreadState, TaskPriority, ThreadStateRegistry}
 import com.nvidia.spark.rapids.spill._
@@ -468,7 +468,12 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
                   assert(pinned != null)
                 }
                 for (destination <- Seq(pooled, raw)) {
-                  destination.copyFromDeviceBufferAsync(device, Cuda.DEFAULT_STREAM)
+                  if (stagingEnabled) {
+                    PageableMemoryPool.copyDeviceToPageableHost(destination, 0, device, 0,
+                      pattern.length, Cuda.DEFAULT_STREAM)
+                  } else {
+                    destination.copyFromDeviceBufferAsync(device, Cuda.DEFAULT_STREAM)
+                  }
                   Cuda.DEFAULT_STREAM.sync()
                   val actual = new Array[Byte](pattern.length)
                   destination.getBytes(actual, 0, 0, actual.length)
@@ -486,6 +491,58 @@ class HostAllocSuite extends AnyFunSuite with BeforeAndAfterEach with
           assert(HostAlloc.getUsageRatio() == 8192.0 / 12288)
         }
         assert(HostAlloc.tryAllocPageableForDeviceToHost(8193).isEmpty)
+        // Exercise explicit column materialization, including nested buffers and nulls.
+        HostAlloc.initialize(1024 * 1024)
+        val stringType = new HostColumnVector.BasicType(true, DType.STRING)
+        val listType = new HostColumnVector.ListType(true, stringType)
+        val values = java.util.Arrays.asList("first", null, "")
+        withResource(HostColumnVector.fromLists(listType, values, null,
+            java.util.Collections.emptyList[String]())) { input =>
+          withResource(input.copyToDevice()) { device =>
+            if (stagingEnabled) {
+              withResource(StagedHostCopy.copyToHost(device, Cuda.DEFAULT_STREAM)) { actual =>
+                assert(actual.getList(0) == values)
+                assert(actual.isNull(1))
+                assert(actual.getList(2).isEmpty)
+              }
+            } else {
+              intercept[IllegalStateException] {
+                withResource(StagedHostCopy.copyToHost(device, Cuda.DEFAULT_STREAM)) { _ => () }
+              }
+            }
+          }
+        }
+        assert(HostAlloc.getUsageRatio() == 0.0)
+        if (stagingEnabled) {
+          val structType = new HostColumnVector.StructType(true, stringType, listType)
+          withResource(HostColumnVector.fromStructs(structType,
+              new HostColumnVector.StructData("row", values),
+              null.asInstanceOf[HostColumnVector.StructData])) { input =>
+            withResource(input.copyToDevice()) { device =>
+              withResource(StagedHostCopy.copyToHost(device, Cuda.DEFAULT_STREAM)) { actual =>
+                assert(actual.getStruct(0).getField(0) == "row")
+                assert(actual.getStruct(0).getField(1) == values)
+                assert(actual.isNull(1))
+              }
+            }
+          }
+          for (strings <- Seq(Array.empty[String], Array[String](null, null),
+              Array("", "text", null))) {
+            withResource(HostColumnVector.fromStrings(strings: _*)) { input =>
+              withResource(input.copyToDevice()) { device =>
+                withResource(StagedHostCopy.copyToHost(device, Cuda.DEFAULT_STREAM)) { actual =>
+                  assert(actual.getRowCount == strings.length)
+                  strings.indices.foreach { i =>
+                    if (strings(i) == null) assert(actual.isNull(i))
+                    else assert(actual.getJavaString(i) == strings(i))
+                  }
+                }
+              }
+            }
+          }
+          assert(HostAlloc.getUsageRatio() == 0.0)
+        }
+
       } finally {
         PageableMemoryPool.shutdown()
         previous.foreach {

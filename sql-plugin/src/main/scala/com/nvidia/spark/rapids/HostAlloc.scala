@@ -142,26 +142,17 @@ private abstract class HostAlloc(nonPinnedLimit: Long, protected val pageableLim
     bookkeepHostMemoryFree(ptr, amount)
   }
 
-  protected def tryAllocNonPinned(
-      amount: Long, stageDeviceToHost: Boolean = false): Option[HostMemoryBuffer] = {
+  protected def tryAllocNonPinned(amount: Long): Option[HostMemoryBuffer] = {
     val ret = if (isUnlimited) {
       synchronized {
         currentNonPinnedAllocated += amount
       }
-      Some(if (stageDeviceToHost) {
-        PageableMemoryPool.allocateRawForDeviceToHost(amount)
-      } else {
-        HostMemoryBuffer.allocateRaw(amount)
-      })
+      Some(HostMemoryBuffer.allocateRaw(amount))
     } else {
       synchronized {
         if ((currentNonPinnedAllocated + amount) <= nonPinnedLimit) {
           currentNonPinnedAllocated += amount
-          Some(if (stageDeviceToHost) {
-            PageableMemoryPool.allocateRawForDeviceToHost(amount)
-          } else {
-            HostMemoryBuffer.allocateRaw(amount)
-          })
+          Some(HostMemoryBuffer.allocateRaw(amount))
         } else {
           None
         }
@@ -237,7 +228,7 @@ private abstract class HostAlloc(nonPinnedLimit: Long, protected val pageableLim
     try {
       do {
         ret = if (pageableOnly) {
-          tryAllocNonPinned(amount, stageDeviceToHost = true)
+          tryAllocNonPinned(amount)
             .map(HostAllocResult(_, isPinned = false))
         } else {
           (if (preferPinned) {
@@ -369,19 +360,14 @@ private class PooledHostAlloc(nonPinnedLimit: Long, poolLimit: Long)
     }
   }
 
-  override protected def tryAllocNonPinned(
-      amount: Long, stageDeviceToHost: Boolean): Option[HostMemoryBuffer] = {
+  override protected def tryAllocNonPinned(amount: Long): Option[HostMemoryBuffer] = {
     // Pool sub-allocations use the reserved pool budget, not the raw budget.
-    val pooled = Option(if (stageDeviceToHost) {
-      PageableMemoryPool.tryAllocateForDeviceToHost(amount)
-    } else {
-      PageableMemoryPool.tryAllocate(amount)
-    })
+    val pooled = Option(PageableMemoryPool.tryAllocate(amount))
     pooled.foreach { b =>
       trackPageableAllocation(amount)
       HostAlloc.addEventHandler(b, new OnPooledCloseCallback(b.getAddress, amount))
     }
-    pooled.orElse(super.tryAllocNonPinned(amount, stageDeviceToHost))
+    pooled.orElse(super.tryAllocNonPinned(amount))
   }
 }
 
@@ -390,14 +376,6 @@ private class PooledHostAlloc(nonPinnedLimit: Long, poolLimit: Long)
  */
 object HostAlloc extends Logging {
   private var singleton: HostAlloc = new RawHostAlloc(-1)
-
-  val pageableDeviceToHostAllocator: HostMemoryAllocator = new HostMemoryAllocator {
-    override def allocate(amount: Long): HostMemoryBuffer =
-      allocPageableForDeviceToHost(amount)
-
-    override def allocate(amount: Long, preferPinned: Boolean): HostMemoryBuffer =
-      allocPageableForDeviceToHost(amount)
-  }
 
   def tryAllocPageableForDeviceToHost(amount: Long): Option[HostMemoryBuffer] =
     getSingleton.tryAllocPageableForDeviceToHost(amount)
