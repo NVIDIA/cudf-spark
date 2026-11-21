@@ -16,10 +16,15 @@
 
 package com.nvidia.spark.rapids
 
+import scala.collection.mutable.ArrayBuffer
+
+import ai.rapids.cudf.JCudfSerialization
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuColumnVector.GpuColumnarBatchBuilder
+import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.jni.{CpuRetryOOM, CpuSplitAndRetryOOM, GpuRetryOOM, GpuSplitAndRetryOOM}
 import com.nvidia.spark.rapids.shims.{CudfUnsafeRow, GpuTypeShims, ShimUnaryExecNode}
+import com.nvidia.spark.rapids.spill.{DiskHandle, DiskHandleStore}
 
 import org.apache.spark.TaskContext
 import org.apache.spark.broadcast.Broadcast
@@ -30,7 +35,7 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, BoundReference, Sor
 import org.apache.spark.sql.catalyst.expressions.codegen.{CodeAndComment, CodeFormatter, CodegenContext, CodeGenerator, GenerateUnsafeProjection}
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.SparkPlan
-import org.apache.spark.sql.rapids.execution.TrampolineUtil
+import org.apache.spark.sql.rapids.execution.{SerializedHostTableUtils, TrampolineUtil}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -585,6 +590,73 @@ object GpuRowToColumnConverter {
   }
 }
 
+/** Host upload input: spillable while queued, disk-backed after splitting. */
+private[rapids] class SpillableHostUpload(
+    val rows: Int,
+    types: Array[DataType],
+    host: Option[SpillableColumnarBatch],
+    disk: Option[DiskHandle]) extends AutoCloseable {
+  private def withBatch[T](fn: ColumnarBatch => T): T = {
+    host match {
+      case Some(h) => withResource(h.getColumnarBatch())(fn)
+      case None =>
+        // Match SpillableHostColumnarBatchHandle.materialize: restoring spill data
+        // must be allowed while the retry state machine is arranging a split.
+        com.nvidia.spark.rapids.jni.RmmSpark.spillRangeStart()
+        val cb = try {
+          disk.get.withInputWrappedStream { in =>
+            val (header, buffer) = SerializedHostTableUtils.readTableHeaderAndBuffer(in)
+            val cols = withResource(buffer) { _ =>
+              SerializedHostTableUtils.buildHostColumns(header, buffer, types)
+            }
+            new ColumnarBatch(cols.toArray, rows)
+          }
+        } finally {
+          com.nvidia.spark.rapids.jni.RmmSpark.spillRangeDone()
+        }
+        withResource(cb)(fn)
+    }
+  }
+
+  def upload(): ColumnarBatch = {
+    // Row conversion can emit a partial batch with a pending retry wait. Complete that wait
+    // before materializing the input: the extra references would prevent it from spilling.
+    com.nvidia.spark.rapids.jni.RmmSpark.blockThreadUntilReady()
+    withBatch { cb =>
+      val bases = RapidsHostColumnVector.extractBases(cb)
+      val columns = bases.indices.toArray.safeMap { i =>
+        GpuColumnVector.from(bases(i).copyToDevice(), types(i))
+      }
+      new ColumnarBatch(columns.map(c => c: org.apache.spark.sql.vectorized.ColumnVector), rows)
+    }
+  }
+
+  def split(): Seq[SpillableHostUpload] = withResource(this) { _ =>
+    if (rows <= 1) {
+      throw new CpuSplitAndRetryOOM("Cannot split a single host row for upload")
+    }
+    withBatch { cb =>
+      val columns = RapidsHostColumnVector.extractBases(cb)
+      closeOnExcept(new ArrayBuffer[SpillableHostUpload]) { parts =>
+        val mid = rows / 2
+        Seq((0, mid), (mid, rows - mid)).foreach { case (offset, count) =>
+          withResource(DiskHandleStore.makeBuilder) { builder =>
+            JCudfSerialization.writeToStream(columns, builder.getDataOutputStream, offset, count)
+            val taskId = Option(TaskContext.get()).map(_.taskAttemptId()).getOrElse(0L)
+            val handle = builder.build(taskId)
+            parts += new SpillableHostUpload(count, types, None, Some(handle))
+          }
+        }
+        parts.toSeq
+      }
+    }
+  }
+
+  override def close(): Unit = {
+    try { host.foreach(_.close()) } finally { disk.foreach(_.close()) }
+  }
+}
+
 class RowToColumnarIterator(
     rowIter: Iterator[InternalRow],
     localSchema: StructType,
@@ -609,10 +681,20 @@ class RowToColumnarIterator(
   // its conversion.
   private var pendingRow: InternalRow = _
 
-  // Data types needed to split the host-to-GPU transfer with HostColumnarBatchWithRowRange.
+  // Data types needed to restore and upload split host batches.
   private val dataTypes: Array[DataType] = localSchema.fields.map(_.dataType)
   // Holds the remaining splits of a host-to-GPU transfer that was split on OOM.
   private var pendingBatchIter: Iterator[ColumnarBatch] = Iterator.empty
+  private var pendingUpload: AutoCloseable = _
+
+  Option(TaskContext.get()).foreach { tc =>
+    ScalableTaskCompletion.onTaskCompletion(tc) {
+      if (pendingUpload != null) {
+        pendingUpload.close()
+        pendingUpload = null
+      }
+    }
+  }
 
   override def hasNext: Boolean = {
     if (pendingBatchIter.hasNext) {
@@ -790,7 +872,10 @@ class RowToColumnarIterator(
         val sampleRows = GpuBatchUtils.VALIDITY_BUFFER_BOUNDARY_ROWS
         val sampleBytes = GpuBatchUtils.estimateGpuMemory(localSchema, sampleRows)
         targetRows = GpuBatchUtils.estimateRowCount(targetSizeBytes, sampleBytes, sampleRows)
-        initialRows = GpuBatchUtils.estimateRowCount(batchSizeBytes, sampleBytes, sampleRows)
+        // Start with a small reservation even when the output goal is large. Builders
+        // grow as rows arrive; the output batch target is unchanged.
+        initialRows = math.min(1024,
+          GpuBatchUtils.estimateRowCount(batchSizeBytes, sampleBytes, sampleRows))
       }
     }
   }
@@ -819,36 +904,24 @@ class RowToColumnarIterator(
             .foreach(ctx => GpuSemaphore.acquireIfNecessary(ctx))
 
         val ret = NvtxIdWithMetrics(NvtxRegistry.ROW_TO_COLUMNAR, opTime) {
-          // Build host columns and wrap in HostColumnarBatchWithRowRange for split retry.
-          // A split can also be requested for host memory pressure. Splitting lets the task go
-          // on instead of failing, but frees no host memory: the host batch stays until its
-          // last piece is on the GPU.
           val hostColumns = RmmRapidsRetryIterator.withRetryNoSplit {
             builders.buildHostColumns()
           }
-          val hostBatch = withResource(hostColumns) { _ =>
-            HostColumnarBatchWithRowRange(hostColumns, rowCount, dataTypes)
+          val hostBatch = closeOnExcept(hostColumns) { cols =>
+            new ColumnarBatch(cols.indices.map(i =>
+              new RapidsHostColumnVector(dataTypes(i), cols(i))).toArray, rowCount)
           }
-
-          localGoal match {
-            case _: RequireSingleBatchLike =>
-              // Cannot split when a single batch is required
-              RmmRapidsRetryIterator.withRetryNoSplit(hostBatch) { batch =>
-                batch.copyToGpu()
-              }
-            case _ =>
-              val it = RmmRapidsRetryIterator.withRetry(
-                hostBatch,
-                splitHostBatchInHalf
-              ) { batch =>
-                batch.copyToGpu()
-              }
-              // Return the first batch now and keep the iterator for subsequent output batches.
-              // This ensures we only transfer one split at a time.
-              closeOnExcept(it.next()) { first =>
-                pendingBatchIter = it
-                first
-              }
+          val spillable = SpillableHostColumnarBatch(
+            hostBatch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
+          val input = new SpillableHostUpload(rowCount, dataTypes, Some(spillable), None)
+          val splitPolicy: SpillableHostUpload => Seq[SpillableHostUpload] =
+            if (localGoal.isInstanceOf[RequireSingleBatchLike]) null else _.split()
+          val it = RmmRapidsRetryIterator.withRetry(input, splitPolicy)(_.upload())
+          closeOnExcept(it) { _ =>
+            val first = it.next()
+            pendingUpload = it
+            pendingBatchIter = it
+            first
           }
         }
         numInputRows += rowCount
@@ -858,14 +931,6 @@ class RowToColumnarIterator(
     }
   }
 
-  /**
-   * Split policy for HostColumnarBatchWithRowRange.
-   * When the host-to-GPU transfer is asked to split, split the batch in half by rows.
-   */
-  private val splitHostBatchInHalf
-      : HostColumnarBatchWithRowRange => Seq[HostColumnarBatchWithRowRange] = {
-    (batch: HostColumnarBatchWithRowRange) => HostColumnarBatchWithRowRange.splitInHalf(batch)
-  }
 }
 
 object GeneratedInternalRowToCudfRowIterator extends Logging {
