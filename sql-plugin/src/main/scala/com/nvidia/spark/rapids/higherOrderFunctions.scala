@@ -24,7 +24,7 @@ import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.{AutoCloseableProducingArray,
   ReallyAGpuExpression}
 import com.nvidia.spark.rapids.jni.GpuMapZipWithUtils
-import com.nvidia.spark.rapids.shims.ShimExpression
+import com.nvidia.spark.rapids.shims.{AnsiCastShim, ShimExpression}
 
 import org.apache.spark.sql.catalyst.analysis.TypeCoercion
 import org.apache.spark.sql.catalyst.expressions.{Add, And, ArrayAggregate, Attribute, AttributeReference, AttributeSeq, CaseWhen, Cast, Expression, ExprId, Greatest, If, LambdaFunction, Least, Literal, Multiply, NamedExpression, NamedLambdaVariable, Or}
@@ -1159,7 +1159,7 @@ sealed trait AggOp {
   def supportsType(sparkType: DataType): Boolean
 }
 
-case object SumOp extends AggOp {
+sealed abstract class ArraySumOp extends AggOp {
   val name = "SUM"
   def cudfAgg: cudf.SegmentedReductionAggregation = cudf.SegmentedReductionAggregation.sum()
   // INCLUDE: Spark iteratively computes `acc + x` and null poisons the accumulator, so
@@ -1203,6 +1203,25 @@ case object SumOp extends AggOp {
   def supportsType(t: DataType): Boolean = t match {
     case _: NumericType => !t.isInstanceOf[DecimalType]
     case _ => false
+  }
+}
+
+case object SumOp extends ArraySumOp
+
+case class NarrowingSumOp(narrowType: DataType) extends ArraySumOp {
+  def finish(total: cudf.ColumnVector, lists: cudf.ColumnView): cudf.ColumnVector = {
+    withResource(lists.extractListElement(-1)) { last =>
+      // All additions before the last keep only the low bits of the accumulator. The final
+      // addition returns the wide result, which may itself be outside the narrow type's range.
+      val narrow = GpuColumnVector.getNonNestedRapidsType(narrowType)
+      val result = withResource(total.sub(last, narrow)) { prefix =>
+        prefix.add(last, total.getType)
+      }
+      withResource(result) { result =>
+        // An empty list keeps the original zero. A null last element already made total null.
+        withResource(last.isNull) { mask => mask.ifElse(total, result) }
+      }
+    }
   }
 }
 
@@ -1404,7 +1423,9 @@ object ArrayAggregateDecomposer {
     val accId = accVar.exprId
     val matched = allOps.view.flatMap { op =>
       extractG(body, accId, op, zeroType).map { extracted => (op, extracted) }
-    }.headOption
+    }.headOption.orElse {
+      matchNarrowingSum(body, accVar, elemVar).map(op => (op, ExtractedG(elemVar, false)))
+    }
 
     val (op, extracted) = matched.getOrElse {
       return Left("merge body does not match (acc, x) -> op(acc, g(x)) for any registered " +
@@ -1467,8 +1488,8 @@ object ArrayAggregateDecomposer {
       accId: ExprId,
       op: AggOp): Option[ExtractedG] = {
     op.matchBinary(unwrapDecimalPatternWrappers(e)).flatMap { case (l, r) =>
-      if (isAccRef(l, accId) && !containsAccRef(r, accId)) Some(ExtractedG(r, false))
-      else if (isAccRef(r, accId) && !containsAccRef(l, accId)) Some(ExtractedG(l, false))
+      if (accRef(l, accId).isDefined && !containsAccRef(r, accId)) Some(ExtractedG(r, false))
+      else if (accRef(r, accId).isDefined && !containsAccRef(l, accId)) Some(ExtractedG(l, false))
       else None
     }
   }
@@ -1484,7 +1505,7 @@ object ArrayAggregateDecomposer {
       accId: ExprId,
       op: AggOp,
       accType: DataType): Option[ExtractedG] = {
-    if (isAccRef(branch, accId)) {
+    if (accRef(branch, accId).isDefined) {
       Some(ExtractedG(op.identityLiteral(accType), true))
     } else {
       extractG(branch, accId, op, accType)
@@ -1528,13 +1549,48 @@ object ArrayAggregateDecomposer {
     case _ => false
   }
 
-  private def isAccRef(e: Expression, id: ExprId): Boolean = e match {
-    case v: NamedLambdaVariable => v.exprId == id
-    case c: Cast => isAccRef(c.child, id)
-    case other if isDecimalPatternWrapper(other) && other.children.length == 1 =>
-      isAccRef(other.children.head, id)
-    case _ => false
+  private def matchNarrowingSum(
+      body: Expression,
+      acc: NamedLambdaVariable,
+      elem: NamedLambdaVariable): Option[NarrowingSumOp] = body match {
+    // A default Add in non-ANSI mode wraps on overflow. Comparing to it also rules out an
+    // explicitly checked or TRY addition across Spark versions with different mode fields.
+    case add: Add if !SQLConf.get.ansiEnabled && add == Add(add.left, add.right) &&
+        elem.dataType == acc.dataType && TypeSig.integral.isSupportedByPlugin(acc.dataType) =>
+      // Require a bare element so finish() can read the last addend from the input list.
+      val castSide = (add.left, add.right) match {
+        case (c: Cast, v: NamedLambdaVariable) if v.exprId == elem.exprId => Some(c)
+        case (v: NamedLambdaVariable, c: Cast) if v.exprId == elem.exprId => Some(c)
+        case _ => None
+      }
+      castSide.filter(_.dataType == acc.dataType).map(_.child).collect {
+        case c: Cast if c.child.dataType == acc.dataType && accRef(c.child, acc.exprId).isDefined &&
+            TypeSig.integral.isSupportedByPlugin(c.dataType) &&
+            c.dataType.defaultSize < acc.dataType.defaultSize &&
+            AnsiCastShim.getEvalMode(c) == GpuEvalMode.LEGACY =>
+          NarrowingSumOp(c.dataType)
+      }
+    case _ => None
   }
+
+  private def accRef(e: Expression, id: ExprId): Option[NamedLambdaVariable] = e match {
+    case v: NamedLambdaVariable if v.exprId == id => Some(v)
+    case c: Cast => accRef(c.child, id).filter(v => preservesAccValue(v.dataType, c.dataType))
+    case other if isDecimalPatternWrapper(other) && other.children.length == 1 =>
+      accRef(other.children.head, id)
+    case _ => None
+  }
+
+  // Every intermediate type must represent all values of the original accumulator. For example,
+  // int -> long -> int preserves the accumulator, while int -> float -> int can round it.
+  private def preservesAccValue(accType: DataType, target: DataType): Boolean =
+    (accType, target) match {
+      case (ByteType, ShortType | IntegerType | LongType | FloatType | DoubleType) => true
+      case (ShortType, IntegerType | LongType | FloatType | DoubleType) => true
+      case (IntegerType, LongType | DoubleType) => true
+      case (FloatType, DoubleType) => true
+      case _ => accType == target
+    }
 
   private def unwrapDecimalPatternWrappers(e: Expression): Expression = {
     if (isDecimalPatternWrapper(e) && e.children.length == 1) {
@@ -1654,15 +1710,20 @@ case class GpuArrayAggregate(
       }
     }
 
+    val result = op match {
+      case sum: NarrowingSumOp => withResource(combined) { total => sum.finish(total, arg.getBase) }
+      case _ => combined
+    }
+
     // Step 4: restore null on rows where the input list itself was null. cuDF NULL_MAX /
     // NULL_MIN / LOGICAL_AND / LOGICAL_OR don't propagate null the way Spark's 3VL would,
     // so the combine step alone can't preserve it. Skip outright when the list has no nulls.
     if (arg.getBase.getNullCount > 0) {
-      withResource(combined) { combined =>
-        GpuColumnVector.from(NullUtilities.mergeNulls(combined, arg.getBase), dataType)
+      withResource(result) { result =>
+        GpuColumnVector.from(NullUtilities.mergeNulls(result, arg.getBase), dataType)
       }
     } else {
-      GpuColumnVector.from(combined, dataType)
+      GpuColumnVector.from(result, dataType)
     }
   }
 
