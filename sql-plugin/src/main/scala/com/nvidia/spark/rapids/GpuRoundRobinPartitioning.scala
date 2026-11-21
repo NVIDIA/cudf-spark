@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,8 @@
 package com.nvidia.spark.rapids
 
 import java.util.Random
+
+import scala.collection.mutable.ArrayBuffer
 
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.shims.ShimExpression
@@ -72,28 +74,71 @@ case class GpuRoundRobinPartitioning(numPartitions: Int)
     }
   }
 
-  override def columnarEvalAny(batch: ColumnarBatch): Any = {
-    if (batch.numCols() <= 0) {
-      return Array(batch).zipWithIndex
-    }
-    NvtxRegistry.ROUND_ROBIN_PARTITION.push()
-    try {
+  private def partitionRowsOnlyWithClose(
+      batch: ColumnarBatch): Array[(ColumnarBatch, Int)] = {
+    withResource(batch) { _ =>
       val numRows = batch.numRows
-      val (partitionIndexes, partitionColumns) = {
-        NvtxRegistry.ROUND_ROBIN_PARTITION_SLICE.push()
-        try {
-          partitionInternalWithClose(batch)
-        } finally {
-          NvtxRegistry.ROUND_ROBIN_PARTITION_SLICE.pop()
-        }
+      val startPartition = getStartPartition
+      val baseCount = numRows / numPartitions
+      val remainder = numRows % numPartitions
+
+      val partitionCounts = new Array[Int](numPartitions)
+      if (baseCount > 0) {
+        java.util.Arrays.fill(partitionCounts, baseCount)
       }
-      sliceInternalGpuOrCpuAndClose(numRows, partitionIndexes, partitionColumns)
-    } finally {
-      NvtxRegistry.ROUND_ROBIN_PARTITION.pop()
+      var r = 0
+      while (r < remainder) {
+        partitionCounts((startPartition + r) % numPartitions) += 1
+        r += 1
+      }
+
+      // Leaving the GPU for a while
+      GpuSemaphore.releaseIfNecessary(TaskContext.get())
+
+      val ret = new ArrayBuffer[(ColumnarBatch, Int)](numPartitions)
+      var p = 0
+      while (p < numPartitions) {
+        val count = partitionCounts(p)
+        if (count > 0) {
+          ret += ((new ColumnarBatch(Array.empty, count), p))
+        }
+        p += 1
+      }
+      ret.toArray
     }
   }
 
-  private def getStartPartition: Int = {
+  override def columnarEvalAny(batch: ColumnarBatch): Any = {
+    if (batch.numCols() <= 0) {
+      if (1 == numPartitions) {
+        return Array(batch).zipWithIndex
+      }
+      NvtxRegistry.ROUND_ROBIN_PARTITION.push()
+      try {
+        partitionRowsOnlyWithClose(batch)
+      } finally {
+        NvtxRegistry.ROUND_ROBIN_PARTITION.pop()
+      }
+    } else {
+      NvtxRegistry.ROUND_ROBIN_PARTITION.push()
+      try {
+        val numRows = batch.numRows
+        val (partitionIndexes, partitionColumns) = {
+          NvtxRegistry.ROUND_ROBIN_PARTITION_SLICE.push()
+          try {
+            partitionInternalWithClose(batch)
+          } finally {
+            NvtxRegistry.ROUND_ROBIN_PARTITION_SLICE.pop()
+          }
+        }
+        sliceInternalGpuOrCpuAndClose(numRows, partitionIndexes, partitionColumns)
+      } finally {
+        NvtxRegistry.ROUND_ROBIN_PARTITION.pop()
+      }
+    }
+  }
+
+  protected def getStartPartition: Int = {
     // Follow Spark's way of getting the randomized position to pass to the round robin,
     // which starts at randomNumber + 1 and we do the same here to maintain compatibility.
     // See ShuffleExchangeExec.getPartitionKeyExtractor for reference.
