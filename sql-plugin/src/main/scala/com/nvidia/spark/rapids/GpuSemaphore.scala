@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -318,7 +318,9 @@ object GpuSemaphore {
  */
 private final class SemaphoreTaskInfo(val stageId: Int, val taskAttemptId: Long,
                                       memoryEstimator: GpuStageMemoryEstimator,
-                                      bubbleTimerMgr: GpuBubbleTimerManager) extends Logging {
+                                      bubbleTimerMgr: GpuBubbleTimerManager,
+                                      val taskMetrics: GpuTaskMetrics = GpuTaskMetrics.get)
+    extends Logging {
   /**
    * This holds threads that are not on the GPU yet. Most of the time they are
    * blocked waiting for the semaphore to let them on, but it may hold one
@@ -496,7 +498,7 @@ private final class SemaphoreTaskInfo(val stageId: Int, val taskAttemptId: Long,
       semaphore.release(permitsUsed)
       hasSemaphore = false
       lastReleased = System.nanoTime()
-      GpuTaskMetrics.get.addSemaphoreHoldingTime(lastReleased - lastAcquired)
+      taskMetrics.addSemaphoreHoldingTime(lastReleased - lastAcquired)
       nvtxRange.foreach(_.close())
       nvtxRange = None
     }
@@ -600,9 +602,10 @@ private final class GpuSemaphore(val maxConcurrentGpuTasksLimit: Int) extends Lo
   def releaseIfNecessary(context: TaskContext): Unit = {
     NvtxRegistry.RELEASE_GPU {
       val taskAttemptId = context.taskAttemptId()
-      GpuTaskMetrics.get.updateRetry(taskAttemptId)
-      GpuTaskMetrics.get.updateFootprint(taskAttemptId)
       val taskInfo = tasks.get(taskAttemptId)
+      val metrics = if (taskInfo != null) taskInfo.taskMetrics else GpuTaskMetrics.get
+      metrics.updateRetry(taskAttemptId)
+      metrics.updateFootprint(taskAttemptId)
       if (taskInfo != null) {
         taskInfo.releaseSemaphore(semaphore)
       }
@@ -611,13 +614,13 @@ private final class GpuSemaphore(val maxConcurrentGpuTasksLimit: Int) extends Lo
 
   def completeTask(context: TaskContext): Unit = {
     val taskAttemptId = context.taskAttemptId()
-    GpuTaskMetrics.get.updateRetry(taskAttemptId)
-    GpuTaskMetrics.get.updateMaxMemory(taskAttemptId)
-    GpuTaskMetrics.get.updateFootprint(taskAttemptId)
     val refs = tasks.remove(taskAttemptId)
     if (refs == null) {
       throw new IllegalStateException(s"Completion of unknown task $taskAttemptId")
     }
+    refs.taskMetrics.updateRetry(taskAttemptId)
+    refs.taskMetrics.updateMaxMemory(taskAttemptId)
+    refs.taskMetrics.updateFootprint(taskAttemptId)
     refs.releaseSemaphore(semaphore)
     val estimator = stageEstimators.get(refs.stageId)
     if (estimator != null) {
