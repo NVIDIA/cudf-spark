@@ -1007,19 +1007,6 @@ object RmmRapidsRetryIterator extends Logging {
 }
 
 /**
- * This is a wrapper that turns a target size into an autocloseable to allow it to be used
- * in withRetry blocks.  It is intended to be used to help with cases where the split calculation
- * happens inside the retry block, and depends on the target size.  On a `GpuSplitAndRetryOOM` or
- * `CpuSplitAndRetryOOM`, a split policy like `splitTargetSizeInHalfGpu` or
- * `splitTargetSizeInHalfCpu` can be used to retry the block with a smaller target size.
- */
-case class AutoCloseableTargetSize(targetSize: Long, minSize: Long,
-    dataSize: Long = 0) extends AutoCloseable {
-  def this(targetSize: Long, minSize: Long) = this(targetSize, minSize, 0)
-  override def close(): Unit = ()
-}
-
-/**
  * This leverages a ThreadLocal of boolean to track if a task thread is currently
  * executing a retry. And the boolean state will be used by all the
  * `GpuExpressionRetryable`s to determine if the context is safe to retry the evaluation.
@@ -1080,9 +1067,4 @@ object RetryStateTracker {
       }
     }
   }
-}
-
-object SplitReason extends Enumeration {
-  type SplitReason = Value
-  val GPU_OOM, CPU_OOM, CUDF_OVERFLOW, NONE = Value
 }
