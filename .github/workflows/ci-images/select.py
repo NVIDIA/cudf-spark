@@ -102,7 +102,7 @@ def configurations(name, entry, tracked, branch_tag, line, publish, has_publishe
                 distro = "rockylinux" + variant["ROCKY_VER"]
             else:
                 raise ValueError(f"{name}: expected one Ubuntu or Rocky version, got {variant}")
-            suffix = f"-cuda{args['CUDA_VER']}-{distro}"
+            suffix = f"-{distro}"
         if suffix in seen:
             raise ValueError(f"{name}: duplicate variant {suffix}")
         seen.add(suffix)

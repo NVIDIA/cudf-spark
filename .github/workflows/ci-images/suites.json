@@ -32,6 +32,7 @@
         {"UBUNTU_VER": "22.04"},
         {"UBUNTU_VER": "24.04"}
       ],
+      "platform-args": {"amd64": {}, "arm64": {}},
       "recipe-inputs": [
         "integration_tests/requirements.txt"
       ],
@@ -48,6 +49,7 @@
         {"ROCKY_VER": "8"},
         {"ROCKY_VER": "9"}
       ],
+      "platform-args": {"amd64": {}, "arm64": {}},
       "recipe-inputs": [
         "integration_tests/requirements.txt"
       ],

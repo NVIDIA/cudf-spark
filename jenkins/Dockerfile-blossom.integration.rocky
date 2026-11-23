@@ -42,7 +42,7 @@ RUN wget ${ART_URL}/org/apache/maven/apache-maven/3.8.1/apache-maven-3.8.1-bin.t
     tar xzvf $MAVEN_HOME-bin.tar.gz -C /usr/local && \
     rm -f $MAVEN_HOME-bin.tar.gz
 
-RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda.sh && \
+RUN wget --quiet "https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-$(uname -m).sh" -O ~/miniconda.sh && \
     /bin/bash ~/miniconda.sh -b -p /opt/conda && \
     rm -f ~/miniconda.sh
 ENV PATH="/opt/conda/bin:$MAVEN_HOME/bin:${PATH}"

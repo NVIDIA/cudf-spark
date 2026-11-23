@@ -21,8 +21,10 @@ on main and release branch pushes and refreshes main on a schedule.
 See the `ci-toolchains` entries in [suites.json](suites.json) for image names,
 platforms, and build arguments. Each image is smoke-tested before its tag moves.
 
-Spark and integration tags include the branch or release prefix, CUDA version,
-and OS variant. Main seeds the release tag from the root POM until the matching
+Spark and integration tags include the branch or release prefix and OS, not the
+CUDA version or architecture. For example, `docker pull ghcr.io/nvidia/cudf-spark/integration-ubuntu:main-ubuntu22.04`
+selects the native Linux AMD64 or ARM64 image.
+Main seeds the release tag from the root POM until the matching
 release branch exists. After the branch is cut, it owns that release tag.
 Skills uses the branch prefix alone.
 

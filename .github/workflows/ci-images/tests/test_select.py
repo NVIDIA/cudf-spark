@@ -21,11 +21,11 @@ SPARK = "jenkins/Dockerfile-blossom.ubuntu"
 EXAMPLE = "docs/additional-functionality/shuffle-docker-examples/Dockerfile.ubuntu_rdma"
 # Each row specifies the published tag suffix and the Dockerfile arguments it promises.
 VARIANTS = [
-    ("spark-build", "cuda12.0.1-ubuntu22.04", "12.0.1", "UBUNTU_VER", "22.04"),
-    ("integration-ubuntu", "cuda12.8.0-ubuntu22.04", "12.8.0", "UBUNTU_VER", "22.04"),
-    ("integration-ubuntu", "cuda12.8.0-ubuntu24.04", "12.8.0", "UBUNTU_VER", "24.04"),
-    ("integration-rocky", "cuda12.8.0-rockylinux8", "12.8.0", "ROCKY_VER", "8"),
-    ("integration-rocky", "cuda12.8.0-rockylinux9", "12.8.0", "ROCKY_VER", "9"),
+    ("spark-build", "ubuntu22.04", "12.0.1", "UBUNTU_VER", "22.04"),
+    ("integration-ubuntu", "ubuntu22.04", "12.8.0", "UBUNTU_VER", "22.04"),
+    ("integration-ubuntu", "ubuntu24.04", "12.8.0", "UBUNTU_VER", "24.04"),
+    ("integration-rocky", "rockylinux8", "12.8.0", "ROCKY_VER", "8"),
+    ("integration-rocky", "rockylinux9", "12.8.0", "ROCKY_VER", "9"),
 ]
 
 
@@ -94,16 +94,17 @@ class ImageSelectorTest(unittest.TestCase):
     def assert_versioned_images(self, configs, prefix, alias_prefix=None):
         self.assertCountEqual([(c["image"], c["tag"]) for c in configs],
                               [(name, f"{prefix}-{suffix}") for name, suffix, *_ in VARIANTS])
-        by_tag = {c["tag"]: c for c in configs}
+        by_ref = {(c["image"], c["tag"]): c for c in configs}
         ids = set()
         scopes = set()
         for name, suffix, cuda, distro_arg, distro_version in VARIANTS:
-            config = by_tag[f"{prefix}-{suffix}"]
+            config = by_ref[name, f"{prefix}-{suffix}"]
             self.assertEqual(config["release_tag"], f"{alias_prefix}-{suffix}" if alias_prefix else "")
             self.assertNotIn(config["id"], ids)
             ids.add(config["id"])
-            arches = ["amd64", "arm64"] if name == "spark-build" else ["amd64"]
-            self.assertCountEqual([w["arch"] for w in config["workers"]], arches)
+            self.assertTrue(config["multi"])
+            self.assertCountEqual([(w["arch"], w["platform"]) for w in config["workers"]],
+                                  [("amd64", "linux/amd64"), ("arm64", "linux/arm64")])
             for worker in config["workers"]:
                 self.assertEqual(worker["build-args"]["CUDA_VER"], cuda)
                 self.assertEqual(worker["build-args"][distro_arg], distro_version)
@@ -150,7 +151,7 @@ class ImageSelectorTest(unittest.TestCase):
         published = self.invoke(event="workflow_dispatch")["publish"]
         expected = {(c["id"], w["arch"]): cache_scope(w["cache-to"][0])
                     for c in published for w in c["workers"]}
-        self.assertEqual(len(expected), 7)
+        self.assertEqual(len(expected), 2 * len(VARIANTS) + 1)  # Versioned pairs plus Skills AMD64.
         restored = {}
         pr_only = []
         for config in pr["validate"]:
@@ -168,6 +169,22 @@ class ImageSelectorTest(unittest.TestCase):
         self.assertCountEqual(pr_only, ["shuffle-ubuntu-no-rdma", "shuffle-ubuntu-rdma",
                                        "shuffle-rocky-no-rdma", "shuffle-rocky-rdma",
                                        "udf-cuda-template"])
+
+    def test_cuda_bump_rebuilds_existing_tags_for_both_architectures(self):
+        before = self.git("rev-parse", "HEAD")
+        path = CI_IMAGES / "suites.json"
+        catalog = json.loads((self.repo / path).read_text())
+        catalog["ci-toolchains"]["integration-ubuntu"]["build-args"]["CUDA_VER"] = "99.0.0"
+        self.write(path, json.dumps(catalog))
+        self.commit("Update the Ubuntu integration base image")
+        jobs = self.invoke(payload={"created": False, "before": before})
+        self.assertCountEqual([(c["image"], c["tag"], c["release_tag"]) for c in jobs["publish"]],
+                              [("integration-ubuntu", f"main-{distro}", f"{RELEASE_LINE}-{distro}")
+                               for distro in ("ubuntu22.04", "ubuntu24.04")])
+        for config in jobs["publish"]:
+            self.assertTrue(config["multi"])
+            self.assertCountEqual([(w["arch"], w["build-args"]["CUDA_VER"]) for w in config["workers"]],
+                                  [("amd64", "99.0.0"), ("arm64", "99.0.0")])
 
     def test_unrelated_pr_and_push_emit_empty_matrices(self):
         before = self.git("rev-parse", "HEAD")
@@ -218,8 +235,9 @@ class ImageSelectorTest(unittest.TestCase):
         self.write("ci/promote-example.sh", "# changed\n")
         self.commit("Change the configured promotion input")
         jobs = self.invoke(payload={"created": False, "before": before})
-        self.assertEqual([job["image"] for job in jobs["publish"]], ["spark-build"])
-        self.assertFalse(self.invoke("--current", "spark-build", checkout=worker)["current"])
+        self.assert_versioned_images(jobs["publish"], "main", alias_prefix=RELEASE_LINE)
+        for image in {job["image"] for job in jobs["publish"]}:
+            self.assertFalse(self.invoke("--current", image, checkout=worker)["current"])
         self.assertTrue(self.invoke("--current", "skills-build", checkout=worker)["current"])
 
     def test_moving_the_configured_version_file_supersedes_old_checkouts(self):

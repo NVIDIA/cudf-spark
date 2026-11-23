@@ -33,15 +33,17 @@ ARG UBUNTU_VER
 
 # https://forums.developer.nvidia.com/t/notice-cuda-linux-repository-key-rotation/212771
 RUN UB_VER=$(echo ${UBUNTU_VER} | tr -d '.') && \
-    apt-key adv --fetch-keys https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${UB_VER}/x86_64/3bf863cc.pub || true
+    apt-key adv --fetch-keys "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${UB_VER}/${NVARCH:-x86_64}/3bf863cc.pub" || true
 
 # ubuntu22
 RUN sed -i -e 's|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
            -e 's|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' \
+           -e 's|http://ports.ubuntu.com/ubuntu-ports|https://ports.ubuntu.com/ubuntu-ports|g' \
            /etc/apt/sources.list
 # ubuntu24+
 RUN find /etc/apt/sources.list.d/ -name '*.sources' -exec sed -i \
            -e "s|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g" \
+           -e "s|http://ports.ubuntu.com/ubuntu-ports|https://ports.ubuntu.com/ubuntu-ports|g" \
            -e "s|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g" {} +
 # Install jdk-8, jdk-11, jdk-17, docker image
 RUN apt-get update -y && \
@@ -66,9 +68,9 @@ RUN wget "$MAVEN_URL" -O "/tmp/${MAVEN_TGZ}" && \
     ln -sf "/usr/local/apache-maven-${MAVEN_VERSION}/bin/mvn" /usr/bin/mvn
 
 # Set default jdk as 1.8.0
-RUN update-java-alternatives --set /usr/lib/jvm/java-1.8.0-openjdk-amd64
+RUN update-java-alternatives --set "/usr/lib/jvm/java-1.8.0-openjdk-$(dpkg --print-architecture)"
 
-RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda.sh && \
+RUN wget --quiet "https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-$(uname -m).sh" -O ~/miniconda.sh && \
     /bin/bash ~/miniconda.sh -b -p /opt/conda && \
     rm -f ~/miniconda.sh
 ENV PATH="/opt/conda/bin:$MAVEN_HOME/bin:${PATH}"

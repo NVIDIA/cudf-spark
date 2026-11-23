@@ -6,14 +6,20 @@
 set -euo pipefail
 image=${1:?Image reference required}
 platform=${2:?Platform required}
-if [[ "$platform" != linux/amd64 ]]; then
-  echo "Unsupported smoke platform: $platform (expected linux/amd64)" >&2
-  exit 1
-fi
+case "$platform" in
+  linux/amd64) python_platform=linux-x86_64 ;;
+  linux/arm64) python_platform=linux-aarch64 ;;
+  *) echo "Unsupported smoke platform: $platform" >&2; exit 1 ;;
+esac
 
 docker run --rm -i --pull=never --platform "$platform" --network none \
-  --entrypoint /bin/bash "$image" -s <<'SMOKE'
+  --entrypoint /bin/bash "$image" -s -- "$python_platform" <<'SMOKE'
 set -euo pipefail
+installed=$(python -c 'import sysconfig; print(sysconfig.get_platform())')
+if [[ "$installed" != "$1" ]]; then
+  echo "Expected a $1 Python runtime, found $installed" >&2
+  exit 1
+fi
 for jdk21 in /usr/lib/jvm/java-21-openjdk /usr/lib/jvm/java-21-openjdk-*; do
   [[ -x "$jdk21/bin/javac" ]] && break
 done
