@@ -75,7 +75,9 @@ abstract class GpuWriteIntoDeltaBase(
 
   protected def isReplaceOnOrUsing: Boolean = false
 
-  protected def validateAtomicReplaceOptions(): Unit = {}
+  protected def validateAtomicReplaceOptions(): Unit = {
+    // Default no-op; overridden in versions with extra atomic-replace checks.
+  }
 
   protected def getAtomicReplaceExpressions(
       spark: SqlSparkSession,

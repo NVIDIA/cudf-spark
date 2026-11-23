@@ -25,10 +25,13 @@ import scala.collection.JavaConverters._
 import com.nvidia.spark.history.{DimValue, MetricStore, MetricStores, Observation, SchemaStatus,
   Status, SummaryResponse}
 import com.nvidia.spark.rapids.LocalGpuMetric
+import com.nvidia.spark.rapids.shims.PartitionedFileUtilsShim
 import org.apache.hadoop.fs.Path
 import org.scalatest.funsuite.AnyFunSuite
 
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read.PartitionReader
+import org.apache.spark.sql.execution.datasources.PartitionedFile
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.util.LongAccumulator
 
@@ -415,6 +418,70 @@ class ScanSplitHeuristicSuite extends AnyFunSuite {
     metric.set(5L) // the first add moves -1 to 0 before adding
     record(false)
     assert(totals.drain() == ReadTotals(5L, 21L, 1L))
+  }
+
+  private def file(length: Long): PartitionedFile =
+    PartitionedFileUtilsShim.newPartitionedFile(
+      InternalRow.empty, s"file:/tmp/f-$length", 0L, length)
+
+  /** Reads `rows` rows from a file, each decoding 5 bytes; the rows are 0 until `rows`. */
+  private def reading(metric: LocalGpuMetric)(rows: PartitionedFile => Int)
+    : PartitionedFile => Iterator[Int] =
+    f => Iterator.range(0, rows(f)).map { i =>
+      metric += 5L
+      i
+    }
+
+  test("a per-file read records each file's own length and its decoded bytes at its end") {
+    val metric = new LocalGpuMetric
+    val totals = newTotals()
+    val read = reading(metric)(f => if (f.length == 100L) 2 else 1)
+    val wrapped = ScanSplitHeuristic.observeFileRead(read, Some(totals), metric)
+    // The rows come through unchanged.
+    assert(wrapped(file(100L)).toList == List(0, 1))
+    assert(wrapped(file(40L)).toList == List(0))
+    assert(totals.drain() == ReadTotals(15L, 140L, 2L))
+  }
+
+  test("a file read again is recorded again, for what it read") {
+    val metric = new LocalGpuMetric
+    val totals = newTotals()
+    val wrapped = ScanSplitHeuristic.observeFileRead(reading(metric)(_ => 1), Some(totals), metric)
+    wrapped(file(100L)).toList
+    wrapped(file(100L)).toList
+    assert(totals.drain() == ReadTotals(10L, 200L, 2L))
+  }
+
+  test("a per-file read records nothing for a file that is not read to the end") {
+    val metric = new LocalGpuMetric
+    val totals = newTotals()
+    val wrapped = ScanSplitHeuristic.observeFileRead(reading(metric)(_ => 3), Some(totals), metric)
+    val rows = wrapped(file(100L))
+    assert(rows.next() == 0)
+    assert(totals.drain() == ReadTotals(0L, 0L, 0L))
+  }
+
+  test("a per-file read counts an empty file, and counts a file once however often it is asked") {
+    val metric = new LocalGpuMetric
+    val totals = newTotals()
+    val wrapped = ScanSplitHeuristic.observeFileRead(reading(metric)(_ => 0), Some(totals), metric)
+    val rows = wrapped(file(100L))
+    assert(!rows.hasNext && !rows.hasNext)
+    assert(totals.drain() == ReadTotals(0L, 100L, 1L))
+  }
+
+  test("a per-file read excludes bytes decoded before the file was opened") {
+    val metric = new LocalGpuMetric
+    metric += 100L // an earlier file of the same task
+    val totals = newTotals()
+    val wrapped = ScanSplitHeuristic.observeFileRead(reading(metric)(_ => 2), Some(totals), metric)
+    wrapped(file(100L)).toList
+    assert(totals.drain() == ReadTotals(10L, 100L, 1L))
+  }
+
+  test("with no totals the read function is returned as it is, and the metric is not looked up") {
+    val read: PartitionedFile => Iterator[Int] = _ => Iterator.empty
+    assert(ScanSplitHeuristic.observeFileRead(read, None, fail("the metric was evaluated")) eq read)
   }
 
   test("totals add up over splits, and draining returns them and leaves nothing") {

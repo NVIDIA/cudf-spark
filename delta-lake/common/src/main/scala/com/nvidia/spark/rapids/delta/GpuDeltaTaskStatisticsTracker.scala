@@ -139,9 +139,13 @@ class GpuDeltaTaskStatisticsTracker(
     submittedFiles.remove(filePath)
   }
 
-  override def newPartition(partitionValues: InternalRow): Unit = { }
+  override def newPartition(partitionValues: InternalRow): Unit = {
+    // Statistics are tracked per file rather than per partition.
+  }
 
-  override def writersNumber(numWriters: Int): Unit = { }
+  override def writersNumber(numWriters: Int): Unit = {
+    // Writer count is not needed for per-file statistics.
+  }
 
   protected def initializeAggBuf(buffer: SpecificInternalRow): InternalRow =
     initializeStats.target(buffer).apply(EmptyRow)

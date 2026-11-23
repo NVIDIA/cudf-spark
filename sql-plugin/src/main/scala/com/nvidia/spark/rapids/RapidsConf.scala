@@ -48,6 +48,10 @@ object RapidsConf extends Logging with RapidsConfEntries {
     val JAVA, NATIVE, AUTO = Value
   }
 
+  object GpuDirectStorageMode extends Enumeration {
+    val OFF, ON, AUTO = Value
+  }
+
   private lazy val registeredConfs = new ListBuffer[ConfEntry[_]]()
 
   private def register(entry: ConfEntry[_]): Unit = {
@@ -763,6 +767,9 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val hybridScanSingleStageFilterKeepThreshold: Double =
     get(PARQUET_HYBRID_SCAN_SINGLE_STAGE_FILTER_KEEP_THRESHOLD)
+
+  lazy val readerGdsMode: GpuDirectStorageMode.Value =
+    GpuDirectStorageMode.withName(get(READER_GPU_DIRECT_STORAGE_MODE))
 
   lazy val hybridScanMaxH2DPackSize: Long = get(PARQUET_HYBRID_SCAN_MAX_H2D_PACK_SIZE)
 

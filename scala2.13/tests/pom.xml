@@ -306,6 +306,33 @@
             </dependencies>
         </profile>
         <profile>
+            <id>release405</id>
+            <activation>
+                <property>
+                    <name>buildver</name>
+                    <value>405</value>
+                </property>
+            </activation>
+            <properties>
+                <delta.test.spark.artifactId>${delta42x.spark.artifactId}</delta.test.spark.artifactId>
+                <delta.test.version>${delta42x.version}</delta.test.version>
+            </properties>
+            <dependencies>
+                <dependency>
+                    <groupId>io.delta</groupId>
+                    <artifactId>${delta.test.spark.artifactId}</artifactId>
+                    <version>${delta.test.version}</version>
+                    <scope>test</scope>
+                    <exclusions>
+                        <exclusion>
+                            <groupId>io.unitycatalog</groupId>
+                            <artifactId>unitycatalog-client</artifactId>
+                        </exclusion>
+                    </exclusions>
+                </dependency>
+            </dependencies>
+        </profile>
+        <profile>
             <id>release400</id>
             <activation>
                 <property>
@@ -369,6 +396,33 @@
             <properties>
                 <delta.test.spark.artifactId>${delta41x.spark.artifactId}</delta.test.spark.artifactId>
                 <delta.test.version>${delta41x.version}</delta.test.version>
+            </properties>
+            <dependencies>
+                <dependency>
+                    <groupId>io.delta</groupId>
+                    <artifactId>${delta.test.spark.artifactId}</artifactId>
+                    <version>${delta.test.version}</version>
+                    <scope>test</scope>
+                    <exclusions>
+                        <exclusion>
+                            <groupId>io.unitycatalog</groupId>
+                            <artifactId>unitycatalog-client</artifactId>
+                        </exclusion>
+                    </exclusions>
+                </dependency>
+            </dependencies>
+        </profile>
+        <profile>
+            <id>release414</id>
+            <activation>
+                <property>
+                    <name>buildver</name>
+                    <value>414</value>
+                </property>
+            </activation>
+            <properties>
+                <delta.test.spark.artifactId>${delta42x.spark.artifactId}</delta.test.spark.artifactId>
+                <delta.test.version>${delta42x.version}</delta.test.version>
             </properties>
             <dependencies>
                 <dependency>

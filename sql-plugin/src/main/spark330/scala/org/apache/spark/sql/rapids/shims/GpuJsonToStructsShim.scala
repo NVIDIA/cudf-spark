@@ -41,6 +41,7 @@ object GpuJsonToStructsShim {
   }
 
   def tagDateFormatSupportFromScan(meta: RapidsMeta[_, _, _], dateFormat: Option[String]): Unit = {
+    // GpuJsonScan checks date format support before calling this hook.
   }
 
   def castJsonStringToDateFromScan(input: ColumnView, dt: DType,

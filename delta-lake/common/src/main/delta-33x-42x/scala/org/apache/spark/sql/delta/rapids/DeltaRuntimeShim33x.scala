@@ -81,12 +81,16 @@ trait DeltaRuntimeShim33x extends DeltaRuntimeShim {
   def validateDeleteNumRecords(
       spark: SparkSession,
       deltaLog: DeltaLog,
-      numRecordsStats: NumRecordsStats): Unit = {}
+      numRecordsStats: NumRecordsStats): Unit = {
+    // Overridden in Delta versions that validate delete record counts.
+  }
 
   def validateUpdateNumRecords(
       spark: SparkSession,
       deltaLog: DeltaLog,
-      numRecordsStats: NumRecordsStats): Unit = {}
+      numRecordsStats: NumRecordsStats): Unit = {
+    // Overridden in Delta versions that validate update record counts.
+  }
 }
 
 object DeltaRuntimeShim33x {

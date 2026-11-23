@@ -127,7 +127,9 @@ abstract class GpuCreateDeltaTableCommandBase(
    *
    * @param sparkSession the session used to read the default catalog-managed-table setting
    */
-  protected def validateCatalogManagedTable(sparkSession: SparkSession): Unit = {}
+  protected def validateCatalogManagedTable(sparkSession: SparkSession): Unit = {
+    // Default no-op for Delta versions without catalog-managed tables.
+  }
 
   /**
    * Validates catalog-managed table properties supplied by a create or replace operation against
@@ -146,7 +148,9 @@ abstract class GpuCreateDeltaTableCommandBase(
   protected def validateCatalogManagedTableProperties(
       sparkSession: SparkSession,
       gpuDeltaLog: GpuDeltaLog,
-      tableWithLocation: CatalogTable): Unit = {}
+      tableWithLocation: CatalogTable): Unit = {
+    // Default no-op for Delta versions without catalog-managed tables.
+  }
 
   /**
    * Adjusts the metadata that will replace an existing table's metadata.
@@ -879,7 +883,9 @@ abstract class GpuCreateDeltaTableCommandBase(
    * metadata of the table should be replaced. If overwriteSchema=false is provided with these
    * methods, then we will verify that the metadata match exactly.
    */
-  protected def validateOptionsForMetadataReplacement(options: DeltaOptions): Unit = {}
+  protected def validateOptionsForMetadataReplacement(options: DeltaOptions): Unit = {
+    // Default no-op; overridden in versions with extra replacement checks.
+  }
 
   private def replaceMetadataIfNecessary(
      txn: GpuOptimisticTransactionBase,

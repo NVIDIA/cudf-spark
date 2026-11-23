@@ -346,7 +346,9 @@ trait GpuDeltaCatalogBase extends StagingTableCatalog {
 
     override def name(): String = ident.name()
 
-    override def abortStagedChanges(): Unit = {}
+    override def abortStagedChanges(): Unit = {
+      // Staged changes are only materialized in commitStagedChanges.
+    }
 
     override def capabilities(): util.Set[TableCapability] = Set(V1_BATCH_WRITE).asJava
 
