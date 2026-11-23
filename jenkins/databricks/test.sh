@@ -148,7 +148,14 @@ run_delta_tests() {
     if [[ -n "$LOCAL_JAR_PATH" ]]; then
         # Isolate this pass from other pytest reports and keep it discoverable by Jenkins.
         mkdir -p integration_tests/target
-        delta_run_dir=$(mktemp -d "$PWD/integration_tests/target/run_dir-delta-XXXXXX")
+        while true; do
+            delta_run_dir=$(mktemp -d "$PWD/integration_tests/target/run_dir-delta-XXXXXX")
+            # Match the pytest launcher's directory-name guard for SPARK-44242.
+            if [[ ! "${delta_run_dir##*/}" =~ [xX][mM][xXsS] ]]; then
+                break
+            fi
+            rmdir "$delta_run_dir"
+        done
         delta_env+=("RUN_DIR=$delta_run_dir")
     fi
 

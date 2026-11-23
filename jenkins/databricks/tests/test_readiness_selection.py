@@ -25,7 +25,8 @@ import unittest
 class ReadinessSelectionTest(unittest.TestCase):
     def run_script(self, version="18.3.", mode="CI_PART1", hook=True,
                    override=None, extra_envs="", upstream="1", hook_exit=0, delta_exit=0,
-                   jar_path="", delta_report="<testcase name='test_delta_scan_read'/>"):
+                   jar_path="", delta_report="<testcase name='test_delta_scan_read'/>",
+                   unsafe_delta_directory=False):
         script = Path(__file__).resolve().parents[1] / "test.sh"
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -43,6 +44,7 @@ class ReadinessSelectionTest(unittest.TestCase):
                 '  if [[ -n "$LOCAL_JAR_PATH" ]]; then\n'
                 '    [[ "$LOCAL_JAR_PATH" == "$PWD" && "$DRIVER_MEMORY" == 4g &&\n'
                 '       "$RUN_DIR" == "$PWD"/integration_tests/target/run_dir-* ]] || exit 2\n'
+                '    echo "DELTA_RUN_DIR $RUN_DIR"\n'
                 '    if [[ -n "$DELTA_REPORT" ]]; then\n'
                 '      printf "<testsuite>%s</testsuite>\\n" "$DELTA_REPORT" '
                 '> "$RUN_DIR/TEST-pytest-delta.xml"\n'
@@ -68,6 +70,22 @@ class ReadinessSelectionTest(unittest.TestCase):
                        EXTRA_ENVS=extra_envs, WITH_DEFAULT_UPSTREAM_SHIM=upstream,
                        TEST_TYPE="nightly", PYSPARK_PYTHON=sys.executable,
                        PYSP_TEST_spark_databricks_clusterUsageTags_sparkVersion=version)
+            if unsafe_delta_directory:
+                mock_bin = root / "bin"
+                mock_bin.mkdir()
+                mktemp = mock_bin / "mktemp"
+                mktemp.write_text(
+                    '#!/bin/bash\n'
+                    'if [[ ! -f "$HOME/unsafe_name_attempted" ]]; then\n'
+                    '    touch "$HOME/unsafe_name_attempted"\n'
+                    '    dir=${2%XXXXXX}XmxABC\n'
+                    'else\n'
+                    '    [[ ! -e "${2%XXXXXX}XmxABC" ]] || exit 1\n'
+                    '    dir=${2%XXXXXX}abcdef\n'
+                    'fi\n'
+                    'mkdir "$dir" && printf "%s\\n" "$dir"\n')
+                mktemp.chmod(0o755)
+                env["PATH"] = str(mock_bin) + os.pathsep + env["PATH"]
             if hook:
                 env["SPARK_STARTUP_CHECK"] = str(startup)
             if override is not None:
@@ -204,6 +222,12 @@ class ReadinessSelectionTest(unittest.TestCase):
     def test_prebuilt_delta_failure_preserves_pytest_exit_status(self):
         result = self.run_script(mode="DELTA_LAKE_ONLY", jar_path="./prebuilt jars", delta_exit=7)
         self.assertEqual(result.returncode, 7, result.stderr)
+
+    def test_prebuilt_delta_retries_unsafe_report_directory_name(self):
+        result = self.run_script(mode="DELTA_LAKE_ONLY", jar_path="./prebuilt jars",
+                                 unsafe_delta_directory=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("run_dir-delta-abcdef", result.stdout)
 
     def test_invalid_mode_and_missing_prebuilt_path_fail(self):
         result = self.run_script(mode="UNSUPPORTED", jar_path="./prebuilt jars")
