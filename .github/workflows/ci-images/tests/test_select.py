@@ -146,7 +146,7 @@ class ImageSelectorTest(unittest.TestCase):
         published = self.invoke(event="workflow_dispatch")["publish"]
         expected = {(c["id"], w["arch"]): cache_scope(w["cache-to"][0])
                     for c in published for w in c["workers"]}
-        self.assertEqual(len(expected), 7)  # Four integration, two Spark and one Skills worker.
+        self.assertEqual(len(expected), 7)
         restored = {}
         pr_only = []
         for config in pr["validate"]:

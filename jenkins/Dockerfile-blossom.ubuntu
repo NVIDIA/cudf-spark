@@ -14,25 +14,12 @@
 # limitations under the License.
 #
 
-###
-#
-# Build the image for rapids-plugin development environment
-#
-# Arguments:
-#       CUDA_VER=[12.X.Y,13.X.Y]
-#       UBUNTU_VER=[22.04,24.04]
-#       UCX_VER=1.22.0
-#       TARGETPLATFORM=[linux/amd64,linux/arm64]
-#       ARCH=[amd64,arm64]
-#       UCX_ARCH=[x86_64,aarch64]
-###
+# Build the Spark plugin development image.
 
 ARG CUDA_VER=13.0.1
 ARG UBUNTU_VER=22.04
 ARG UCX_VER=1.22.0
 ARG TARGETPLATFORM=linux/amd64
-# multi-platform build with: docker buildx build --platform linux/arm64,linux/amd64 <ARGS> on either amd64 or arm64 host
-# check available official arm-based docker images at https://hub.docker.com/r/nvidia/cuda/tags (OS/ARCH)
 FROM --platform=$TARGETPLATFORM nvidia/cuda:${CUDA_VER}-runtime-ubuntu${UBUNTU_VER}
 ARG CUDA_VER
 ARG UBUNTU_VER
@@ -40,11 +27,10 @@ ARG UCX_VER
 ARG ARCH=amd64
 ARG UCX_ARCH=x86_64
 
-# ubuntu22
+# Use HTTPS in legacy and deb822 APT source files.
 RUN sed -i -e 's|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
            -e 's|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' \
            /etc/apt/sources.list
-# ubuntu24+
 RUN find /etc/apt/sources.list.d/ -name '*.sources' -exec sed -i \
            -e "s|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g" \
            -e "s|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g" {} +
@@ -68,7 +54,7 @@ RUN wget "${MAVEN_BASE_URL}/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSI
     rm -f /tmp/apache-maven.tar.gz && \
     ln -sf "/usr/local/apache-maven-${MAVEN_VERSION}/bin/mvn" /usr/bin/mvn
 
-# avoid global environment conflicts since python 3.12+
+# Isolate pip packages from the system Python environment.
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install requests pre-commit pytest-order
@@ -76,7 +62,7 @@ RUN pip install requests pre-commit pytest-order
 COPY integration_tests/requirements.txt /tmp/requirements.txt
 RUN pip install -r /tmp/requirements.txt
 
-# Set default jdk as 1.8.0
+# Keep the default JDK used by existing build jobs.
 RUN update-java-alternatives --set /usr/lib/jvm/java-1.8.0-openjdk-${ARCH}
 
 RUN UCX_CUDA_VER=`echo ${CUDA_VER} | cut -d '.' -f1` && \

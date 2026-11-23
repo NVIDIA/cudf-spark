@@ -1,7 +1,7 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Publish CI toolchains to GHCR from main and release branches, and refresh main daily.
+# Publish verified CI toolchain images to GHCR on branch updates and scheduled refreshes.
 name: Docker image CI
 
 on:
