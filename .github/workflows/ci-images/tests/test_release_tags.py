@@ -11,12 +11,14 @@ import subprocess
 import tempfile
 import unittest
 
+from release_fixture import RELEASE_BRANCH, RELEASE_LINE
+
 
 CI_IMAGES = Path(".github/workflows/ci-images")
 SOURCE = Path(__file__).resolve().parents[1]
 DIGEST = "sha256:" + "f" * 64
 PACKAGE = "integration-ubuntu"
-SUFFIX = "-cuda12.8.0-ubuntu22.04"
+SUFFIX = "-test-toolchain"
 
 
 class ReleaseTagTest(unittest.TestCase):
@@ -59,22 +61,22 @@ metadata.write_text(json.dumps({"containerimage.descriptor": {"digest": digest}}
         program.write_text(script)
         program.chmod(0o755)
 
-    def seed(self, release_tag="26.12" + SUFFIX):
+    def seed(self, release_tag=RELEASE_LINE + SUFFIX):
         return subprocess.run(["bash", str(SOURCE / "seed-release-tag.sh"), PACKAGE,
                                "main" + SUFFIX, release_tag, DIGEST],
                               cwd=self.worker, env=self.env, text=True, capture_output=True)
 
     def test_same_digest_pre_cut_and_release_ownership_after_cut(self):
-        self.git("branch", "release/26.12-rc")
+        self.git("branch", f"{RELEASE_BRANCH}-rc")
         result = self.seed()
         self.assertEqual(result.returncode, 0, result.stderr)
         args = json.loads(self.calls.read_text())
         self.assertEqual(args[:4], ["buildx", "imagetools", "create", "--prefer-index=false"])
         image = "ghcr.io/nvidia/cudf-spark/integration-ubuntu"
-        self.assertEqual(args[-3:], ["--tag", image + ":26.12" + SUFFIX, image + "@" + DIGEST])
+        self.assertEqual(args[-3:], ["--tag", f"{image}:{RELEASE_LINE}{SUFFIX}", image + "@" + DIGEST])
 
         self.calls.unlink()
-        self.git("branch", "release/26.12")
+        self.git("branch", RELEASE_BRANCH)
         result = self.seed()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.calls.exists())
@@ -98,7 +100,7 @@ metadata.write_text(json.dumps({"containerimage.descriptor": {"digest": digest}}
         self.assertFalse(self.calls.exists())
 
     def test_mismatched_toolchain_and_wrong_returned_digest(self):
-        result = self.seed("26.12-cuda12.8.0-ubuntu24.04")
+        result = self.seed(f"{RELEASE_LINE}-other-toolchain")
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.calls.exists())
         self.env["RETURN_DIGEST"] = "sha256:" + "0" * 64

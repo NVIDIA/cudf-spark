@@ -15,6 +15,7 @@ summary of its purpose. Link to configuration for versions, platforms, and limit
 PRs validate images. Branch publishers own
 GHCR tags, and publication and cleanup share a per-package lock.
 
+Use synthetic release lines in test fixtures so a project version bump needs no test edits.
 From the repository root, run `python3 -m unittest discover -s .github/workflows/ci-images/tests -v`.
 Check the selected variants and smoke results in **CPU CI**. Before switching
 a consumer, verify its tag and platform in the first post-merge publication.

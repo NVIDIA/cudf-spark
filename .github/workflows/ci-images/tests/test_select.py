@@ -11,6 +11,8 @@ import sys
 import tempfile
 import unittest
 
+from release_fixture import NEXT_RELEASE_BRANCH, NEXT_RELEASE_LINE, RELEASE_BRANCH, RELEASE_LINE
+
 
 CI_IMAGES = Path(".github/workflows/ci-images")
 SOURCE = Path(__file__).resolve().parents[1]
@@ -43,7 +45,7 @@ class ImageSelectorTest(unittest.TestCase):
                         GIT_AUTHOR_EMAIL="ci@example.invalid", GIT_COMMITTER_NAME="CI",
                         GIT_COMMITTER_EMAIL="ci@example.invalid")
         self.git("init", "-q", "-b", "main")
-        self.write_pom("26.12.0-SNAPSHOT")
+        self.write_pom(f"{RELEASE_LINE}.0-SNAPSHOT")
         catalog = (SOURCE / "suites.json").read_text()
         self.write(CI_IMAGES / "suites.json", catalog)
         for entries in json.loads(catalog).values():
@@ -133,7 +135,7 @@ class ImageSelectorTest(unittest.TestCase):
         self.commit("Finish the same push with an unrelated change")
         jobs = self.invoke(payload={"created": False, "before": before})
         self.assertEqual(jobs["validate"], [])
-        self.assert_versioned_images(jobs["publish"], "main", alias_prefix="26.12")
+        self.assert_versioned_images(jobs["publish"], "main", alias_prefix=RELEASE_LINE)
 
     def test_pr_cache_imports_match_publication_for_each_variant_and_arch(self):
         self.git("switch", "-qc", "topic")
@@ -173,32 +175,34 @@ class ImageSelectorTest(unittest.TestCase):
                          {"validate": [], "publish": []})
 
     def test_new_release_bootstraps_toolchains_only(self):
-        self.git("switch", "-qc", "release/26.12")
-        jobs = self.invoke(ref="release/26.12", payload={"created": True, "before": "0" * 40})
+        self.git("switch", "-qc", RELEASE_BRANCH)
+        jobs = self.invoke(ref=RELEASE_BRANCH, payload={"created": True, "before": "0" * 40})
         self.assertEqual(jobs["validate"], [])
         skills = [c for c in jobs["publish"] if c["image"] == "skills-build"]
-        self.assertEqual([(c["tag"], c["release_tag"]) for c in skills], [("26.12", "")])
+        self.assertEqual([(c["tag"], c["release_tag"]) for c in skills], [(RELEASE_LINE, "")])
         self.assert_versioned_images([c for c in jobs["publish"] if c["image"] != "skills-build"],
-                                     "26.12")
+                                     RELEASE_LINE)
 
     def test_new_release_branch_must_match_project_version(self):
-        self.git("switch", "-qc", "release/27.02")
+        self.git("switch", "-qc", NEXT_RELEASE_BRANCH)
         with self.assertRaises(subprocess.CalledProcessError) as caught:
-            self.invoke(ref="release/27.02", payload={"created": True, "before": "0" * 40})
-        self.assertIn("release/27.02", caught.exception.stderr)
-        self.assertIn("26.12", caught.exception.stderr)
+            self.invoke(ref=NEXT_RELEASE_BRANCH, payload={"created": True, "before": "0" * 40})
+        self.assertIn(NEXT_RELEASE_BRANCH, caught.exception.stderr)
+        self.assertIn(RELEASE_LINE, caught.exception.stderr)
 
     def test_release_pr_validates_the_target_line_before_publication(self):
         self.git("switch", "-qc", "topic")
-        self.write_pom("27.02.0-SNAPSHOT")
+        self.write_pom(f"{NEXT_RELEASE_LINE}.0-SNAPSHOT")
         self.commit("Move to the next release line")
         self.git("switch", "-q", "main")
         self.git("merge", "--no-ff", "-qm", "Synthetic PR merge", "topic")
         with self.assertRaises(subprocess.CalledProcessError) as caught:
-            self.invoke(event="pull_request", ref="17/merge", base_ref="release/26.12")
-        self.assertIn("Branch release/26.12 does not match root pom.xml release line 27.02",
-                      caught.exception.stderr)
-        for target in ["main", "release/27.02"]:
+            self.invoke(event="pull_request", ref="17/merge", base_ref=RELEASE_BRANCH)
+        self.assertIn(
+            f"Branch {RELEASE_BRANCH} does not match root pom.xml release line {NEXT_RELEASE_LINE}",
+            caught.exception.stderr,
+        )
+        for target in ["main", NEXT_RELEASE_BRANCH]:
             with self.subTest(target=target):
                 jobs = self.invoke(event="pull_request", ref="17/merge", base_ref=target)
                 self.assertEqual(len(jobs["validate"]), len(VARIANTS))
@@ -207,7 +211,10 @@ class ImageSelectorTest(unittest.TestCase):
     def test_main_pom_rollover_selects_only_versioned_images_and_invalidates_old_publisher(self):
         worker = self.root / "worker"
         self.git("clone", "-q", "--depth=1", self.repo.as_uri(), str(worker))
-        for version, description in [("26.12.0-SNAPSHOT", "new description"), ("26.12.1", "CI")]:
+        for version, description in [
+            (f"{RELEASE_LINE}.0-SNAPSHOT", "new description"),
+            (f"{RELEASE_LINE}.1", "CI"),
+        ]:
             with self.subTest(version=version):
                 before = self.git("rev-parse", "HEAD")
                 self.write_pom(version, description)
@@ -218,11 +225,11 @@ class ImageSelectorTest(unittest.TestCase):
                               True)
 
         before = self.git("rev-parse", "HEAD")
-        self.write_pom("27.02.0-SNAPSHOT")
+        self.write_pom(f"{NEXT_RELEASE_LINE}.0-SNAPSHOT")
         self.commit("Advance the release line without changing any image recipes")
         jobs = self.invoke(payload={"created": False, "before": before})
         self.assertEqual(jobs["validate"], [])
-        self.assert_versioned_images(jobs["publish"], "main", alias_prefix="27.02")
+        self.assert_versioned_images(jobs["publish"], "main", alias_prefix=NEXT_RELEASE_LINE)
         self.assertIs(self.invoke("--current", "integration-ubuntu", checkout=worker)["current"], False)
         self.assertIs(self.invoke("--current", "skills-build", checkout=worker)["current"], True)
 

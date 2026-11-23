@@ -10,10 +10,12 @@ import subprocess
 import tempfile
 import unittest
 
+from release_fixture import RELEASE_LINE
+
 
 PROMOTE = Path(__file__).resolve().parents[1] / "promote-platforms.sh"
 IMAGE = "ghcr.io/nvidia/cudf-spark/spark-build"
-TAG = "26.12-cuda12.0.1-ubuntu22.04"
+TAG = f"{RELEASE_LINE}-test-toolchain"
 INDEX_DIGEST = "sha256:" + "f" * 64
 
 
