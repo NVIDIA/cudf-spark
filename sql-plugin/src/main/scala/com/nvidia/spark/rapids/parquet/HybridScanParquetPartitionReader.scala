@@ -72,8 +72,8 @@ private[parquet] case class DeviceFetch(source: HybridScanByteSource, ranges: Ar
 
 /**
  * The row groups that survive pruning. `releaseSemaphoreBeforeHostFetch` when pruning took the GPU
- * semaphore only to compare dictionary pages from host memory, so the semaphore is released if the
- * column chunks then go to host memory too, and kept if they are read straight to the device.
+ * semaphore to compare dictionary pages, so the semaphore is released if the column chunks then go
+ * to host memory, and kept if they are read straight to the device.
  */
 private[parquet] case class SelectedRowGroups(
     rowGroups: Array[Int],
@@ -277,8 +277,9 @@ private[parquet] class HybridScanPipeline(context: HybridScanContext) extends Lo
           reader.filterRowGroupsWithDictionaryPages(dictPages, rowGroups)
         }
       }
-      // Keep the GPU semaphore: the chunks are usually large enough to be read to the device too.
-      SelectedRowGroups(afterDict, releaseSemaphoreBeforeHostFetch = false)
+      // Pruning can leave only chunks too small to read to the device, so these may still go
+      // to host memory. If not we won't release because it won't be a host fetch anyway. 
+      SelectedRowGroups(afterDict, releaseSemaphoreBeforeHostFetch = true)
     } else {
       val afterDict = withResource(source.fetch(dictRanges)) { hostPages =>
         compareDictionaryPages(reader, rowGroups, hostPages)
