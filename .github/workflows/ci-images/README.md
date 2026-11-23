@@ -18,6 +18,9 @@ selected builds to pass; no Docker build is required for an unrelated change.
 
 The standard Ubuntu Spark image builds on native AMD64 and ARM64 runners; the
 branch tag contains both smoke-tested platforms. Other recipes target AMD64.
+The standard Spark and integration toolchains include JDK 21 for Spark 5.0
+alongside their existing JDKs. Jobs opt in by setting `JAVA_HOME` and using
+`$JAVA_HOME/bin`; the default JDK does not change.
 Each recipe and architecture has its own best-effort Docker layer cache.
 A trusted publish builds fresh and exports layers for later validation. Only CI
 toolchains publish to `ghcr.io/nvidia/cudf-spark/<image>`: main owns `:main`

@@ -43,14 +43,14 @@ RUN sed -i -e 's|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubu
 RUN find /etc/apt/sources.list.d/ -name '*.sources' -exec sed -i \
            -e "s|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g" \
            -e "s|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g" {} +
-# Install jdk-8, jdk-11, jdk-17, docker image
+# Install Spark's supported JDKs side by side.
 RUN apt-get update -y && \
     apt-get install -y software-properties-common rsync zip unzip
 
 RUN add-apt-repository ppa:deadsnakes/ppa && \
     apt-get update -y && \
     DEBIAN_FRONTEND="noninteractive" apt-get install -y \
-    openjdk-8-jdk openjdk-11-jdk openjdk-17-jdk tzdata git wget
+    openjdk-8-jdk openjdk-11-jdk openjdk-17-jdk openjdk-21-jdk tzdata git wget
 
 # Install maven 3.8+ to be compatible with JDK17 on Ubuntu
 # maintain also specific version in the internal artifactory to accelerate the build

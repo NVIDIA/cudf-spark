@@ -14,6 +14,19 @@ docker run --rm -i --pull=never --platform "$platform" --network none \
   --entrypoint /bin/bash "$image" -s <<'SMOKE'
 set -euo pipefail
 javac -version
+for jdk21 in /usr/lib/jvm/java-21-openjdk /usr/lib/jvm/java-21-openjdk-*; do
+  [[ -x "$jdk21/bin/javac" ]] && break
+done
+cd "$(mktemp -d)"
+cat > Probe.java <<'JAVA'
+class Probe {
+  public static void main(String[] args) {
+    if (Runtime.version().feature() != 21) throw new AssertionError(Runtime.version());
+  }
+}
+JAVA
+"$jdk21/bin/javac" --release 21 Probe.java
+"$jdk21/bin/java" -cp . Probe
 mvn --version
 python -c 'import pandas, pyarrow, pytest, sre_yield, xdist'
 SMOKE

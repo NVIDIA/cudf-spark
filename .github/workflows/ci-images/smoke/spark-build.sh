@@ -29,10 +29,22 @@ if [[ "$arch" != "$1" ]]; then
   echo "Expected a $1 image, found $arch" >&2
   exit 1
 fi
-java -version
+[[ "$JAVA_HOME" == "/usr/lib/jvm/java-8-openjdk-$arch" ]]
+java -version 2>&1 | grep '^openjdk version "1\.8\.'
 for jdk in 8 11 17; do
   "/usr/lib/jvm/java-${jdk}-openjdk-${arch}/bin/javac" -version
 done
+jdk21="/usr/lib/jvm/java-21-openjdk-$arch/bin"
+cd "$(mktemp -d)"
+cat > JdkSmoke.java <<'JAVA'
+class JdkSmoke {
+  public static void main(String[] args) {
+    System.out.println(java.util.List.of("Java 21 OK").getFirst());
+  }
+}
+JAVA
+"$jdk21/javac" --release 21 JdkSmoke.java
+"$jdk21/java" JdkSmoke
 mvn --version
 python3 -c 'import pytest, pandas, pyarrow, sre_yield'
 ucx_info -v
