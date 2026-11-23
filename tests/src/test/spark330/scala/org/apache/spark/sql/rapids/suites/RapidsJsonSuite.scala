@@ -19,9 +19,18 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.suites
 
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.sql.{Date, Timestamp}
+import java.time.Instant
+
+import com.nvidia.spark.rapids.GpuProjectExec
+
 import org.apache.spark.SparkConf
+import org.apache.spark.sql.Row
+import org.apache.spark.sql.execution.FileSourceScanExec
 import org.apache.spark.sql.execution.datasources.{InMemoryFileIndex, NoopCache}
-import org.apache.spark.sql.execution.datasources.json.JsonSuite
+import org.apache.spark.sql.execution.datasources.json.{JsonFileFormat, JsonSuite}
 import org.apache.spark.sql.execution.datasources.v2.json.JsonScanBuilder
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.utils.{RapidsJsonConfTrait, RapidsSQLTestsBaseTrait}
@@ -31,6 +40,50 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 class RapidsJsonSuite
   extends JsonSuite with RapidsSQLTestsBaseTrait with RapidsJsonConfTrait {
+
+  testRapids("SPARK-30960, SPARK-31641: LEGACY JSON datetime scan falls back to CPU") {
+    // Use the lenient date from SPARK-30960 and the policy-sensitive timestamp offset
+    // from JsonSuite's "exception mode for parsing date/timestamp string" test.
+    val input = "{'t': '2020-01-27T20:06:11.847-08000', 'd': '2020-1-12 T'}"
+    val schema = StructType.fromDDL("t timestamp, d date")
+    withSQLConf(
+      SQLConf.LEGACY_TIME_PARSER_POLICY.key -> "LEGACY",
+      SQLConf.SESSION_LOCAL_TIMEZONE.key -> "America/Los_Angeles",
+      SQLConf.USE_V1_SOURCE_LIST.key -> "json",
+      "spark.rapids.sql.json.read.datetime.enabled" -> "false") {
+      withTempPath { path =>
+        Files.write(path.toPath, input.getBytes(StandardCharsets.UTF_8))
+        def query = spark.read.schema(schema)
+          .option("timestampFormat", "yyyy-MM-dd'T'HH:mm:ss.SSSz")
+          .json(path.getCanonicalPath)
+          .selectExpr("t", "d", "date_add(d, 1) AS next_day")
+        withSQLConf("spark.rapids.sql.enabled" -> "false") {
+          val cpu = query
+          val expected = cpu.collect().toSeq
+          assert(expected == Seq(Row(Timestamp.from(Instant.parse("2020-01-28T04:06:11.847Z")),
+            Date.valueOf("2020-01-12"), Date.valueOf("2020-01-13"))))
+          withSQLConf("spark.rapids.sql.enabled" -> "true") {
+            val gpu = query
+            checkAnswer(gpu, expected)
+            assert(gpu.schema == cpu.schema)
+            val projects = getExecutedPlan(gpu).collect { case project: GpuProjectExec => project }
+            assert(projects.exists(_.exists {
+              case scan: FileSourceScanExec =>
+                scan.relation.fileFormat.isInstanceOf[JsonFileFormat] &&
+                  scan.requiredSchema == schema
+              case _ => false
+            }), s"Expected a GPU project above a CPU JSON datetime scan: " +
+              s"${gpu.queryExecution.executedPlan}")
+          }
+        }
+        withSQLConf(
+          "spark.rapids.sql.enabled" -> "false",
+          SQLConf.LEGACY_TIME_PARSER_POLICY.key -> "CORRECTED") {
+          checkAnswer(query.select("t"), Row(null))
+        }
+      }
+    }
+  }
 }
 
 class RapidsJsonV1Suite extends RapidsJsonSuite with RapidsSQLTestsBaseTrait {
