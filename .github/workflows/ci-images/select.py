@@ -8,11 +8,14 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from xml.etree import ElementTree
 
 HERE = Path(".github/workflows/ci-images")
 CATALOG = HERE / "suites.json"
-SHARED = {str(HERE / "select.py"), ".github/workflows/docker-images.yml",
-          ".github/workflows/build-docker-image.yml"}
+SHARED = {
+    str(HERE / "select.py"),
+    ".github/workflows/build-docker-image.yml",
+}
 
 
 def git(*args):
@@ -49,21 +52,81 @@ def inputs_for(entry):
     return str(context), str(smoke), ignores
 
 
-def affected(entry, changed):
+def affected(entry, changed, *, publish):
     _, smoke, ignores = inputs_for(entry)
     watched = SHARED | {entry["dockerfile"], smoke, *ignores, *entry.get("recipe-inputs", [])}
-    if len(entry.get("platform-args", {})) > 1:
-        watched.add(str(HERE / "promote-platforms.sh"))
+    if publish:
+        watched.update({".github/workflows/docker-images.yml", str(HERE / "seed-release-tag.sh")})
+        if len(entry.get("platform-args", {})) > 1:
+            watched.add(str(HERE / "promote-platforms.sh"))
+    else:
+        watched.add(".github/workflows/cpu-ci.yml")
     return bool(changed & watched)
+
+
+def release_line(revision):
+    pom = ElementTree.fromstring(git("show", f"{revision}:pom.xml"))
+    version = pom.findtext("{*}version", default="").strip()
+    match = re.fullmatch(r"(\d{2}\.\d{2})\.\d+(?:-[A-Za-z0-9.-]+)?", version)
+    if not match:
+        raise ValueError(f"Cannot determine release line from root pom.xml version {version!r} at {revision}")
+    return match.group(1)
 
 
 def still_current(name):
     # Called under the package lock: an old rerun must not roll a newer tag back.
     git("fetch", "--no-tags", "--depth=1", "origin", os.environ["GITHUB_REF"])
     recipe = at_revision("HEAD")[name]
-    return (at_revision("FETCH_HEAD").get(name) == recipe and
-            not affected(recipe[1], paths("diff", "--no-renames", "--name-only", "-z",
-                                           "HEAD", "FETCH_HEAD")))
+    if at_revision("FETCH_HEAD").get(name) != recipe:
+        return False
+    changed = paths("diff", "--no-renames", "--name-only", "-z", "HEAD", "FETCH_HEAD")
+    if "variants" in recipe[1] and "pom.xml" in changed:
+        if release_line("HEAD") != release_line("FETCH_HEAD"):
+            return False
+    return not affected(recipe[1], changed, publish=True)
+
+
+def configurations(name, entry, tracked, branch_tag, line, publish):
+    context, smoke, ignores = inputs_for(entry)
+    inputs = entry.get("recipe-inputs", []) + [p for p in ignores if p in tracked]
+    variants = entry.get("variants", [{}])
+    if not variants:
+        raise ValueError(f"{name}: missing image variants")
+
+    seen = set()
+    for variant in variants:
+        args = entry.get("build-args", {}) | variant
+        suffix = ""
+        if "variants" in entry:
+            if set(variant) == {"UBUNTU_VER"}:
+                distro = "ubuntu" + variant["UBUNTU_VER"]
+            elif set(variant) == {"ROCKY_VER"}:
+                distro = "rockylinux" + variant["ROCKY_VER"]
+            else:
+                raise ValueError(f"{name}: expected one Ubuntu or Rocky version, got {variant}")
+            suffix = f"-cuda{args['CUDA_VER']}-{distro}"
+        if suffix in seen:
+            raise ValueError(f"{name}: duplicate variant {suffix}")
+        seen.add(suffix)
+
+        identifier = name + suffix
+        workers = []
+        for arch, overrides in entry.get("platform-args", {"amd64": {}}).items():
+            if arch not in ("amd64", "arm64"):
+                raise ValueError(f"Unsupported runner architecture: {arch}")
+            cache = f"type=gha,version=2,scope={identifier}-{arch},timeout=2m"
+            workers.append({
+                "platform": f"linux/{arch}", "arch": arch, "build-args": args | overrides,
+                "cache-from": [] if publish else [cache],
+                "cache-to": [cache + ",mode=max,ignore-error=true"],
+            })
+        yield {
+            "id": identifier, "image": name, "context": context, "dockerfile": entry["dockerfile"],
+            "tag": branch_tag + suffix if publish else "validate",
+            "release_tag": line + suffix if publish and suffix and branch_tag == "main" else "",
+            "smoke-test": smoke, "smoke-args": entry.get("smoke-args", []), "recipe-inputs": inputs,
+            "workers": workers, "multi": len(workers) > 1,
+        }
 
 
 def select():
@@ -100,34 +163,29 @@ def select():
     if str(CATALOG) in changed:
         previous = at_revision(base)
 
+    line = release_line("HEAD")
+    if ref.startswith("release/") and event != "pull_request" and tag != line:
+        raise ValueError(f"Branch {ref} does not match root pom.xml release line {line}")
+    line_changed = "pom.xml" in changed and release_line(base) != line
+
     jobs = {"validate": [], "publish": []}
     for name, (suite, entry) in images.items():
         ci = suite == "ci-toolchains"
-        context, smoke, ignores = inputs_for(entry)
+        _, smoke, _ = inputs_for(entry)
         inputs = entry.get("recipe-inputs", [])
         if not all(p in tracked for p in [smoke, *inputs]):
             raise ValueError(f"{name}: missing tracked smoke script or recipe input")
         if not ci and event != "pull_request":
             # Examples and templates are checked before merge; they are never published.
             continue
-        if base:
-            if not (affected(entry, changed) or previous.get(name) != (suite, entry)):
-                continue
         publish = ci and event != "pull_request"
-        workers = []
-        for arch, overrides in entry.get("platform-args", {"amd64": {}}).items():
-            if arch not in ("amd64", "arm64"):
-                raise ValueError(f"Unsupported runner architecture: {arch}")
-            cache = f"type=gha,version=2,scope={name}-{arch},timeout=2m"
-            workers.append({"platform": f"linux/{arch}", "arch": arch,
-                            "build-args": entry.get("build-args", {}) | overrides,
-                            "cache-from": [] if publish else [cache],
-                            "cache-to": [cache + ",mode=max,ignore-error=true"]})
-        config = {"image": name, "context": context, "dockerfile": entry["dockerfile"],
-                  "tag": tag, "smoke-test": smoke, "smoke-args": entry.get("smoke-args", []),
-                  "recipe-inputs": inputs + [p for p in ignores if p in tracked],
-                  "workers": workers, "multi": len(workers) > 1}
-        jobs["publish" if publish else "validate"].append(config)
+        rollover = "variants" in entry and line_changed
+        if base and not (rollover or affected(entry, changed, publish=publish)
+                         or previous.get(name) != (suite, entry)):
+            continue
+        jobs["publish" if publish else "validate"].extend(
+            configurations(name, entry, tracked, tag, line, publish)
+        )
     return jobs
 
 
@@ -143,4 +201,4 @@ if __name__ == "__main__":
     with open(os.environ["GITHUB_OUTPUT"], "a") as output:
         for operation, matrix in jobs.items():
             print(f"{operation}=" + json.dumps(matrix, separators=(",", ":")), file=output)
-            print(f"{operation}: " + (", ".join(c["image"] for c in matrix) or "none"))
+            print(f"{operation}: " + (", ".join(c["id"] for c in matrix) or "none"))

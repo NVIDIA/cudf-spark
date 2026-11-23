@@ -4,8 +4,6 @@
 name: Docker image CI
 
 on:
-  pull_request:
-    branches: [main, 'release/[0-9][0-9].[0-9][0-9]']
   push:
     branches: [main, 'release/[0-9][0-9].[0-9][0-9]']
   schedule:
@@ -16,58 +14,30 @@ permissions:
   contents: read
 
 concurrency:
-  group: docker-ci-${{ github.event.pull_request.number || github.run_id }}-${{ github.event_name }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: docker-ci-${{ github.run_id }}-${{ github.event_name }}
+  cancel-in-progress: false
 
 jobs:
   select:
     name: Select Dockerfiles
     if: >-
-      github.event_name == 'pull_request' ||
-      (github.repository == 'NVIDIA/cudf-spark' && !github.event.deleted &&
-       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')))
+      github.repository == 'NVIDIA/cudf-spark' && !github.event.deleted &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
     runs-on: ubuntu-latest
     outputs:
-      validate: ${{ steps.recipes.outputs.validate }}
       publish: ${{ steps.recipes.outputs.publish }}
     steps:
       - uses: NVIDIA/spark-rapids-common/checkout@main
         with:
           fetch-depth: 2
           persist-credentials: false
-      - name: Test image selection
-        if: github.event_name == 'pull_request'
-        run: python3 -m unittest discover -s .github/workflows/ci-images/tests -v
       - id: recipes
         run: python3 .github/workflows/ci-images/select.py
 
-  validate:
-    name: Validate ${{ matrix.image.image }}
-    needs: select
-    if: needs.select.outputs.validate != '[]'
-    strategy:
-      fail-fast: false
-      matrix:
-        image: ${{ fromJSON(needs.select.outputs.validate) }}
-    uses: ./.github/workflows/build-docker-image.yml
-    with:
-      config: ${{ toJSON(matrix.image) }}
-
-  result:
-    name: CPU CI gate
-    if: always() && github.event_name == 'pull_request'
-    needs: [select, validate]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: NVIDIA/spark-rapids-common/workflow-result-gate@main
-        with:
-          needs: ${{ toJSON(needs) }}
-          required-jobs: ${{ needs.select.outputs.validate == '[]' && '["select"]' || '["select","validate"]' }}
-
   publish:
-    name: Publish ${{ matrix.image.image }}
+    name: Publish ${{ matrix.image.id }}
     needs: select
-    if: github.event_name != 'pull_request' && needs.select.outputs.publish != '[]'
+    if: needs.select.outputs.publish != '[]'
     permissions:
       actions: read
       contents: read

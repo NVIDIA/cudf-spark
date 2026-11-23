@@ -10,7 +10,8 @@ tag=$2
 records=$3
 : "${GITHUB_REPOSITORY:?}" "${GITHUB_SHA:?}" "${GITHUB_RUN_ID:?}" "${GITHUB_RUN_ATTEMPT:?}" "${GITHUB_STEP_SUMMARY:?}"
 [[ $base =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || die 'invalid image basename'
-[[ $tag == main || $tag =~ ^[0-9]{2}\.[0-9]{2}$ ]] || die 'expected main or YY.MM'
+[[ $tag =~ ^(main|[0-9]{2}\.[0-9]{2})(-[a-z0-9][a-z0-9.-]*)?$ ]] ||
+  die 'expected a main or YY.MM tag with an optional toolchain suffix'
 [[ $GITHUB_SHA =~ ^[0-9a-f]{40}$ && $GITHUB_RUN_ID =~ ^[0-9]+$ && $GITHUB_RUN_ATTEMPT =~ ^[0-9]+$ ]] ||
   die 'invalid workflow source or run identity'
 # A rerun can reuse old native records even after another run published the same source SHA.
@@ -61,5 +62,8 @@ jq -e --slurpfile planned "$scratch/index.json" '(.manifests | sort_by(.digest))
   die "published platform or attestation descriptors differ from the verified inputs: $reference"
 
 docker buildx imagetools create --prefer-index=false --tag "$image:$tag" "$reference"
+if [[ -n ${GITHUB_OUTPUT:-} ]]; then
+  printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+fi
 printf 'Published %s:%s\nDigest: %s\nSource: %s\nVerified platforms: linux/amd64, linux/arm64\n' \
   "$image" "$tag" "$digest" "$GITHUB_SHA" | tee -a "$GITHUB_STEP_SUMMARY"

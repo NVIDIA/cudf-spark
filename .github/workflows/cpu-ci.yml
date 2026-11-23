@@ -1,0 +1,54 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: CPU CI
+
+on:
+  pull_request:
+    branches: [main, 'release/[0-9][0-9].[0-9][0-9]']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cpu-ci-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  select:
+    name: Select Dockerfiles
+    runs-on: ubuntu-latest
+    outputs:
+      validate: ${{ steps.recipes.outputs.validate }}
+    steps:
+      - uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Test image selection
+        run: python3 -m unittest discover -s .github/workflows/ci-images/tests -v
+      - id: recipes
+        run: python3 .github/workflows/ci-images/select.py
+
+  validate:
+    name: Validate ${{ matrix.image.id }}
+    needs: select
+    if: needs.select.outputs.validate != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.select.outputs.validate) }}
+    uses: ./.github/workflows/build-docker-image.yml
+    with:
+      config: ${{ toJSON(matrix.image) }}
+
+  result:
+    name: CPU CI gate
+    if: always()
+    needs: [select, validate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: NVIDIA/spark-rapids-common/workflow-result-gate@main
+        with:
+          needs: ${{ toJSON(needs) }}
+          required-jobs: ${{ needs.select.outputs.validate == '[]' && '["select"]' || '["select","validate"]' }}
