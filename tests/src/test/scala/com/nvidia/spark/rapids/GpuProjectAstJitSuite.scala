@@ -966,5 +966,44 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
 
   }
 
+  test("post-CSE Project backend summary counts mixed backends and honors explain modes") {
+    val left = reference(0, IntegerType)
+    val right = reference(1, IntegerType)
+    val third = reference(2, IntegerType)
+    val fourth = reference(3, IntegerType)
+    val shared = GpuAdd(left, right, failOnError = false)()
+    val expressions = Seq(
+      alias(GpuGreatest(Seq(shared, third)), "first"),
+      alias(GpuGreatest(Seq(shared, fourth)), "second"))
 
+    val conf = projectConf()
+    val tiered = bindProject(expressions, Seq(left, right, third, fourth), conf)
+    // Tier 0 has 1 shared JIT expression (+ forwarded refs); tier 1 has 2 regular outputs.
+    assertResult(GpuAstJitExpression.BackendCounts(jit = 1, legacyAst = 0, regular = 2))(
+      GpuAstJitExpression.countFinalBackends(tiered.exprTiers))
+
+    conf.setConfString(RapidsConf.EXPLAIN.key, "NONE")
+    assertResult("")(
+      GpuBindReferences.formatFinalProjectAstExplanation(tiered, conf, enableAstJit = true))
+
+    conf.setConfString(RapidsConf.EXPLAIN.key, "NOT_ON_GPU")
+    val notOnGpu = GpuBindReferences.formatFinalProjectAstExplanation(
+      tiered, conf, enableAstJit = true)
+    assertResult("  SUMMARY ast_jit=1 legacy_ast=0 regular=2\n")(notOnGpu)
+
+    conf.setConfString(RapidsConf.EXPLAIN.key, "ALL")
+    val all = GpuBindReferences.formatFinalProjectAstExplanation(tiered, conf, enableAstJit = true)
+    assert(all.startsWith("  SUMMARY ast_jit=1 legacy_ast=0 regular=2\n"), all)
+    assert(all.contains("TIER 0"), all)
+    assert(all.contains("TIER 1"), all)
+
+    // Mixed JIT, legacy AST, and regular GPU in a single tier.
+    val jitNode = wrapOutputs(Seq(alias(GpuAdd(left, right, failOnError = false)(), "j"))).head
+    val legacyNode = GpuProjectAstExpression.wrap(
+      alias(GpuSubtract(GpuAdd(left, right, failOnError = false)(), third,
+        failOnError = false)(), "l"))
+    val regularNode = alias(GpuGreatest(Seq(left, right)), "r")
+    assertResult(GpuAstJitExpression.BackendCounts(jit = 1, legacyAst = 1, regular = 1))(
+      GpuAstJitExpression.countFinalBackends(Seq(Seq(jitNode, legacyNode, regularNode))))
+  }
 }

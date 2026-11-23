@@ -165,12 +165,45 @@ object GpuAstJitExpression {
     }
   }
 
+  private[rapids] final case class BackendCounts(jit: Int, legacyAst: Int, regular: Int) {
+    def hasAstOrJit: Boolean = jit > 0 || legacyAst > 0
+  }
+
+  private def isForwardedPassThrough(expression: Expression): Boolean = expression match {
+    case alias: GpuAlias => isForwardedPassThrough(alias.child)
+    case _: GpuBoundReference => true
+    case _ => false
+  }
+
+  private[rapids] def countFinalBackends(expressionTiers: Seq[Seq[Expression]]): BackendCounts = {
+    var jit = 0
+    var legacyAst = 0
+    var regular = 0
+    expressionTiers.zipWithIndex.foreach { case (expressions, tier) =>
+      val isFinalTier = tier + 1 == expressionTiers.size
+      expressions.foreach { expression =>
+        if (isFinalTier || !isForwardedPassThrough(expression)) {
+          GpuProjectAstExpressionBase.extractTopLevel(expression) match {
+            case Some(_: GpuAstJitExpression) => jit += 1
+            case Some(_: GpuProjectAstExpression) => legacyAst += 1
+            case _ => regular += 1
+          }
+        }
+      }
+    }
+    BackendCounts(jit, legacyAst, regular)
+  }
+
+  private[rapids] def formatBackendSummary(counts: BackendCounts): String =
+    s"  SUMMARY ast_jit=${counts.jit} legacy_ast=${counts.legacyAst} regular=${counts.regular}\n"
+
   private[rapids] def explainFinalSelections(
       expressionTiers: Seq[Seq[Expression]],
       all: Boolean,
       multiOutputEnabled: Boolean = true,
-      astJitEnabled: Boolean = true): String = {
-    expressionTiers.zipWithIndex.flatMap { case (expressions, tier) =>
+      astJitEnabled: Boolean = true,
+      includeSummary: Boolean = false): String = {
+    val tierDetails = expressionTiers.zipWithIndex.flatMap { case (expressions, tier) =>
       val explanations = expressions.iterator.zipWithIndex.collect {
         case (expression, index) if all || (astJitEnabled &&
             extractTopLevel(expression).isEmpty && hasJitCandidate(expression)) =>
@@ -198,20 +231,16 @@ object GpuAstJitExpression {
             s"    JIT GROUP $index inputs=$inputs outputs=$outputs " +
               s"plugin_unique_ops=$uniqueOps plugin_shared_ops=$sharedOps\n"
           }.mkString
-          def forwarded(expression: Expression): Boolean = expression match {
-            case alias: GpuAlias => forwarded(alias.child)
-            case _: GpuBoundReference => true
-            case _ => false
-          }
           val materialized = if (tier + 1 < expressionTiers.size) {
-            expressions.indices.filterNot(i => forwarded(expressions(i)))
+            expressions.indices.filterNot(i => isForwardedPassThrough(expressions(i)))
           } else {
             Seq.empty
           }
           val inputs = expressions.flatMap(_.collect {
             case reference: GpuBoundReference => reference.ordinal
           }).distinct.sorted.mkString("[", ",", "]")
-          val forwardedOutputs = expressions.indices.filter(i => forwarded(expressions(i)))
+          val forwardedOutputs = expressions.indices
+              .filter(i => isForwardedPassThrough(expressions(i)))
               .mkString("[", ",", "]")
           s"    inputs=$inputs outputs=${expressions.size} forwarded_outputs=$forwardedOutputs " +
             s"materialized_outputs_to_next_tier=${materialized.mkString("[", ",", "]")}\n" +
@@ -224,6 +253,16 @@ object GpuAstJitExpression {
         None
       }
     }.mkString
+    if (includeSummary) {
+      val counts = countFinalBackends(expressionTiers)
+      if (all || counts.hasAstOrJit || tierDetails.nonEmpty) {
+        formatBackendSummary(counts) + tierDetails
+      } else {
+        ""
+      }
+    } else {
+      tierDetails
+    }
   }
 }
 

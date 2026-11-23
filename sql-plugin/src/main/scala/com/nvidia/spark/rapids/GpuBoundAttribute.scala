@@ -42,18 +42,28 @@ trait GpuBind {
 
 object GpuBindReferences extends Logging {
 
+  private[rapids] def formatFinalProjectAstExplanation(
+      tieredProject: GpuTieredProject,
+      conf: SQLConf,
+      enableAstJit: Boolean): String = {
+    val explain = RapidsConf.EXPLAIN.get(conf)
+    if (RapidsConf.shouldExplain(explain)) {
+      GpuAstJitExpression.explainFinalSelections(
+        tieredProject.exprTiers, RapidsConf.shouldExplainAll(explain),
+        RapidsConf.ENABLE_PROJECT_AST_JIT_MULTI_OUTPUT.get(conf), enableAstJit,
+        includeSummary = true)
+    } else {
+      ""
+    }
+  }
+
   private def explainFinalProjectAstSelection(
       tieredProject: GpuTieredProject,
       conf: SQLConf,
       enableAstJit: Boolean): Unit = {
-    val explain = RapidsConf.EXPLAIN.get(conf)
-    if (RapidsConf.shouldExplain(explain)) {
-      val explanation = GpuAstJitExpression.explainFinalSelections(
-        tieredProject.exprTiers, RapidsConf.shouldExplainAll(explain),
-        RapidsConf.ENABLE_PROJECT_AST_JIT_MULTI_OUTPUT.get(conf), enableAstJit)
-      if (explanation.nonEmpty) {
-        logWarning(s"FINAL PROJECT AST SELECTION\n$explanation")
-      }
+    val explanation = formatFinalProjectAstExplanation(tieredProject, conf, enableAstJit)
+    if (explanation.nonEmpty) {
+      logWarning(s"FINAL PROJECT AST SELECTION\n$explanation")
     }
   }
 
