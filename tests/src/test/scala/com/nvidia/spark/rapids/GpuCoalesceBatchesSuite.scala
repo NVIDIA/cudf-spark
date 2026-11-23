@@ -337,6 +337,10 @@ class GpuCoalesceBatchesSuite extends SparkQueryCompareTestSuite {
 
       withResource(coalesceIter.next()) { output =>
         assertResult(2)(output.numRows())
+        withResource(GpuColumnVector.extractBases(output).head.copyToHost()) { host =>
+          assertResult(10)(host.getInt(0))
+          assertResult(20)(host.getInt(1))
+        }
       }
       vector match {
         case onHeap: OnHeapColumnVector =>
