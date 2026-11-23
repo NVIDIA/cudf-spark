@@ -30,13 +30,19 @@ object GpuFileWriteJobShim {
 
   def setBeforeWriteJob(
       command: InsertIntoHadoopFsRelationCommand,
-      callback: () => Unit): Unit = {}
+      callback: () => Unit): Unit = {
+    // Delayed overwrite deletion is not supported in these Spark versions.
+  }
 
   def copyBeforeWriteJob(
       from: InsertIntoHadoopFsRelationCommand,
-      to: GpuInsertIntoHadoopFsRelationCommand): Unit = {}
+      to: GpuInsertIntoHadoopFsRelationCommand): Unit = {
+    // Delayed overwrite deletion is not supported in these Spark versions.
+  }
 
-  def runBeforeWriteJob(command: GpuInsertIntoHadoopFsRelationCommand): Unit = {}
+  def runBeforeWriteJob(command: GpuInsertIntoHadoopFsRelationCommand): Unit = {
+    // Delayed overwrite deletion is not supported in these Spark versions.
+  }
 
   def executeWriteCommand(
       sparkSession: SparkSession,

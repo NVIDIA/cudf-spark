@@ -23,7 +23,11 @@ package com.nvidia.spark.rapids.shims
 import ai.rapids.cudf.{ColumnVector, Scalar}
 
 object TruncTimestampShims {
-  def checkOverflow(datetimeCol: ColumnVector, truncated: ColumnVector): Unit = {}
+  def checkOverflow(datetimeCol: ColumnVector, truncated: ColumnVector): Unit = {
+    // Preserve truncation behavior on Spark versions without checked subtraction.
+  }
 
-  def checkOverflow(datetime: Scalar, truncated: ColumnVector): Unit = {}
+  def checkOverflow(datetime: Scalar, truncated: ColumnVector): Unit = {
+    // Preserve truncation behavior on Spark versions without checked subtraction.
+  }
 }

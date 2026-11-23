@@ -15,8 +15,6 @@
  */
 package com.nvidia.spark.rapids
 
-import com.nvidia.spark.rapids.jni.kudo.DumpOption
-
 import org.apache.spark.network.util.ByteUnit
 
 private[rapids] trait RapidsConfEntries extends RapidsConfSqlEntries {
@@ -507,30 +505,6 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     .startupOnly()
     .booleanConf
     .createWithDefault(false)
-
-  // ["NEVER", "ALWAYS", "ONFAILURE"]
-  private val KudoDebugModes =
-    DumpOption.values.map(_.toString.toUpperCase(java.util.Locale.ROOT)).toSet
-
-  val SHUFFLE_KUDO_SERIALIZER_DEBUG_MODE = conf("spark.rapids.shuffle.kudo.serializer.debug.mode")
-    .doc("Debug mode for Kudo serializer for the shuffle. If Always, it will dump the " +
-      "kudo tables to a file in spark.rapids.shuffle.kudo.serializer.debug.dump.path.prefix. " +
-      "If Never, it will not dump the kudo tables data. If OnFailure, it will only dump the " +
-      "kudo tables data when the shuffle fails.")
-    .internal()
-    .startupOnly()
-    .stringConf
-    .transform(_.toUpperCase(java.util.Locale.ROOT))
-    .checkValues(KudoDebugModes)
-    .createWithDefault("NEVER")
-
-  val SHUFFLE_KUDO_SERIALIZER_DEBUG_DUMP_PREFIX =
-    conf("spark.rapids.shuffle.kudo.serializer.debug.dump.path.prefix")
-    .doc("The path prefix to use for the kudo tables when using Kudo serializer for the shuffle.")
-    .internal()
-    .startupOnly()
-    .stringConf
-    .createOptional
 
   // USER FACING DEBUG CONFIGS
 

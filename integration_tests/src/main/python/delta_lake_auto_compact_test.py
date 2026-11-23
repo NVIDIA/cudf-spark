@@ -19,7 +19,7 @@ from delta_lake_utils import *
 from marks import allow_non_gpu, delta_lake, ignore_order
 from pyspark.sql.functions import *
 from spark_session import is_spark_353_or_later, is_databricks_runtime, \
-    is_databricks104_or_later, is_databricks173_or_later, supports_delta_lake_deletion_vectors
+    is_databricks173_or_later, supports_delta_lake_deletion_vectors
 
 _conf = {'spark.rapids.sql.explain': 'ALL',
          'spark.databricks.delta.autoCompact.minNumFiles': 3}  # Num files before compaction.
@@ -118,9 +118,6 @@ def test_auto_compact_dbr173_inline_uses_gpu(spark_tmp_path):
 @pytest.mark.skipif(not is_databricks_runtime() and not is_spark_353_or_later(),
                     reason="Auto compaction of Delta Lake tables is only supported "
                            "on Apache Spark 3.5.3+")
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks104_or_later(),
-                    reason="Auto compaction of Delta Lake tables is only supported "
-                           "on Databricks 10.4+")
 @pytest.mark.parametrize("auto_compact_conf",
                          ["spark.databricks.delta.autoCompact.enabled",
                           "spark.databricks.delta.properties.defaults.autoOptimize.autoCompact"])
@@ -170,9 +167,6 @@ def test_auto_compact_basic(spark_tmp_path, auto_compact_conf, enable_deletion_v
 @pytest.mark.skipif(not is_databricks_runtime() and not is_spark_353_or_later(),
                     reason="Auto compaction of Delta Lake tables is only supported "
                            "on Apache Spark 3.5.3+")
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks104_or_later(),
-                    reason="Auto compaction of Delta Lake tables is only supported "
-                           "on Databricks 10.4+")
 @pytest.mark.parametrize("auto_compact_conf",
                          ["spark.databricks.delta.autoCompact.enabled",
                           "spark.databricks.delta.properties.defaults.autoOptimize.autoCompact"])
@@ -225,9 +219,6 @@ def test_auto_compact_partitioned(spark_tmp_path, auto_compact_conf, enable_dele
 @pytest.mark.skipif(not is_databricks_runtime() and not is_spark_353_or_later(),
                     reason="Auto compaction of Delta Lake tables is only supported "
                            "on Apache Spark 3.5.3+")
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks104_or_later(),
-                    reason="Auto compaction of Delta Lake tables is only supported "
-                           "on Databricks 10.4+")
 @pytest.mark.parametrize("auto_compact_conf",
                          ["spark.databricks.delta.autoCompact.enabled",
                           "spark.databricks.delta.properties.defaults.autoOptimize.autoCompact"])
@@ -267,9 +258,6 @@ def test_auto_compact_disabled(spark_tmp_path, auto_compact_conf, enable_deletio
 @pytest.mark.skipif(not is_databricks_runtime() and not is_spark_353_or_later(),
                     reason="Auto compaction of Delta Lake tables is only supported "
                            "on Apache Spark 3.5.3+")
-@pytest.mark.skipif(is_databricks_runtime() and not is_databricks104_or_later(),
-                    reason="Auto compaction of Delta Lake tables is only supported "
-                           "on Databricks 10.4+")
 @pytest.mark.parametrize("enable_deletion_vectors",
                          _auto_compact_min_files_deletion_vector_values,
                          ids=idfn)

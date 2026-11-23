@@ -16,19 +16,50 @@
 
 package com.nvidia.spark.rapids.iceberg
 
+import java.util.EnumSet
+
+import scala.collection.JavaConverters._
+
 import com.nvidia.spark.rapids.{RapidsConf, RapidsMeta}
-import org.apache.iceberg.{Table, TableProperties}
+import org.apache.iceberg.{Schema, Table, TableProperties}
+import org.apache.iceberg.types.{Type, Types}
 
 import org.apache.spark.sql.execution.SparkPlan
 
 /** Common planning gate for Iceberg table format versions. */
 object IcebergFormatVersionSupport {
-  private val MaxSupportedFormatVersion = 2
+  /** Maximum table format version supported without enabling v3 support. */
+  val MaxSupportedFormatVersion = 2
+  private val SupportedDefaultTypeIds = EnumSet.of(
+    Type.TypeID.BOOLEAN, Type.TypeID.INTEGER, Type.TypeID.LONG, Type.TypeID.FLOAT,
+    Type.TypeID.DOUBLE, Type.TypeID.DATE, Type.TypeID.TIMESTAMP, Type.TypeID.STRING,
+    Type.TypeID.BINARY, Type.TypeID.DECIMAL)
 
+  /** Tag unsupported table versions and initial defaults in the full table schema. */
   def tagForFormatVersion(table: Table, meta: RapidsMeta[_, _, _]): Unit = {
-    tagForFormatVersion(ShimUtils.formatVersion(table), meta)
+    tagForFormatVersion(table, table.schema(), meta)
   }
 
+  /**
+   * Tag unsupported table versions and, when v3 is enabled, initial defaults in schemaToCheck.
+   * Callers select the schema relevant to the operation, such as the full table schema for scans
+   * or a write's output fields. Unsupported cases are recorded on meta for CPU fallback.
+   */
+  def tagForFormatVersion(
+      table: Table,
+      schemaToCheck: Schema,
+      meta: RapidsMeta[_, _, _]): Unit = {
+    val formatVersion = ShimUtils.formatVersion(table)
+    tagForFormatVersion(formatVersion, meta)
+    if (formatVersion > MaxSupportedFormatVersion && meta.conf.isIcebergV3Enabled) {
+      unsupportedDefault(schemaToCheck).foreach { case (path, typeName) =>
+        meta.willNotWorkOnGpu(
+          s"Iceberg default for field '$path' with type $typeName is not supported on GPU")
+      }
+    }
+  }
+
+  /** Tag unsupported format versions from table properties, defaulting to v2 when absent. */
   def tagForFormatVersion(
       properties: Map[String, String],
       meta: RapidsMeta[_, _, _]): Unit = {
@@ -48,6 +79,24 @@ object IcebergFormatVersionSupport {
       // separate passes.
       tagMergeRowsAncestor(meta.parent, reason)
     }
+  }
+
+  private[iceberg] def unsupportedDefault(schema: Schema): Option[(String, String)] = {
+    schema.idToName().keySet().asScala.iterator
+      .map(id => schema.findField(id.intValue()))
+      .find { field =>
+        val fieldType = field.`type`()
+        ShimUtils.hasInitialDefault(field) && {
+          if (fieldType.isPrimitiveType) {
+            !SupportedDefaultTypeIds.contains(fieldType.typeId()) ||
+              fieldType == Types.TimestampType.withoutZone()
+          } else {
+            !fieldType.isStructType
+          }
+        }
+      }.map { field =>
+        schema.findColumnName(field.fieldId()) -> field.`type`().toString
+      }
   }
 
   private def tagMergeRowsAncestor(

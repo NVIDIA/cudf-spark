@@ -33,7 +33,9 @@ import org.apache.spark.sql.internal.SQLConf
 object FileWriteOptionsShims {
   def mergeWriteOptionsIntoHadoopConf(
       options: Map[String, String],
-      conf: Configuration): Unit = {}
+      conf: Configuration): Unit = {
+    // Pre-4.2 Spark versions do not merge write options into Hadoop conf here.
+  }
 
   def setConfWithWriteOptionPrecedence(
       conf: Configuration,
@@ -50,5 +52,7 @@ object FileWriteOptionsShims {
     defaultValue
   }
 
-  def setupLegacyParquetNanosAsLong(conf: Configuration, sqlConf: SQLConf): Unit = {}
+  def setupLegacyParquetNanosAsLong(conf: Configuration, sqlConf: SQLConf): Unit = {
+    // Only applicable to Spark 4.2+.
+  }
 }
