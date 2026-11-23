@@ -28,6 +28,7 @@ import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.internal.config.Tests.IS_TESTING
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.hive.test.{TestHive, TestHiveSingleton}
+import org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.rapids.utils.{RapidsSQLTestsBaseTrait, RapidsTestsBaseTrait}
 
@@ -117,7 +118,37 @@ private[suites] trait RapidsHiveQuerySuite extends TestHiveSingleton with Rapids
   override protected def test(testName: String, testTags: Tag*)(testFun: => Any)(implicit
       pos: Position): Unit = {
     if (shouldRun(testName)) {
-      super.test(testName, testTags: _*)(testFun)
+      super.test(testName, testTags: _*) {
+        val expectedAggregate = testName match {
+          case "test count" => Some("GpuHashAggregateExec")
+          case "udaf" => Some("HashAggregateExec")
+          case "aggregators" => Some("ObjectHashAggregateExec")
+          case _ => None
+        }
+        expectedAggregate match {
+          case Some(operator) =>
+            // Preserve Spark's expected rows on both backends for these representative queries.
+            val enabled = spark.conf.get("spark.rapids.sql.enabled")
+            try {
+              spark.conf.set("spark.rapids.sql.enabled", false)
+              testFun
+              spark.conf.set("spark.rapids.sql.enabled", true)
+              ExecutionPlanCaptureCallback.startCapture()
+              try {
+                testFun
+                val plans = ExecutionPlanCaptureCallback.getResultsWithTimeout()
+                assert(plans.exists(ExecutionPlanCaptureCallback.contains(_, operator)),
+                  s"Expected $operator in executed Hive plans:\n${plans.mkString("\n")}")
+                info(s"Executed Hive aggregation verified for $testName: $operator")
+              } finally {
+                ExecutionPlanCaptureCallback.endCapture()
+              }
+            } finally {
+              spark.conf.set("spark.rapids.sql.enabled", enabled)
+            }
+          case None => testFun
+        }
+      }
     } else {
       super.ignore(testName, testTags: _*)(testFun)
     }

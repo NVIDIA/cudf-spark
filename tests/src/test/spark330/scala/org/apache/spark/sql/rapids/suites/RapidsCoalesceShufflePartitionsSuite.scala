@@ -172,7 +172,7 @@ class RapidsCoalesceShufflePartitionsSuite
 
   private def isFinalAdaptivePlan(plan: AdaptiveSparkPlanExec): Boolean = {
     // Spark 3.3 exposes its private isFinalPlan flag in the plan's first line.
-    plan.toString.startsWith("AdaptiveSparkPlan isFinalPlan=true")
+    plan.simpleString(1).startsWith("AdaptiveSparkPlan isFinalPlan=true")
   }
 
   private def coalescedReaders(plan: SparkPlan): Seq[SparkPlan] = {

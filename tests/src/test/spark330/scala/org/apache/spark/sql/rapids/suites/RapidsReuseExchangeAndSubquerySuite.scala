@@ -22,7 +22,7 @@ package org.apache.spark.sql.rapids.suites
 import com.nvidia.spark.rapids.GpuExec
 
 import org.apache.spark.sql.Row
-import org.apache.spark.sql.execution.ReuseExchangeAndSubquerySuite
+import org.apache.spark.sql.execution.{ReusedSubqueryExec, ReuseExchangeAndSubquerySuite}
 import org.apache.spark.sql.execution.exchange.{Exchange, ReusedExchangeExec}
 import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.rapids.utils.RapidsSQLTestsBaseTrait
@@ -75,6 +75,11 @@ class RapidsReuseExchangeAndSubquerySuite
             }
             val reused = plan.collectWithSubqueries {
               case exchange: ReusedExchangeExec => exchange
+            }
+            if (withUnion) {
+              assert(plan.collectWithSubqueries {
+                case subquery: ReusedSubqueryExec => subquery
+              }.nonEmpty, s"Expected reused subquery in UNION plan:\n$plan")
             }
             val gpuExchanges = exchanges.filter(_.isInstanceOf[GpuExec])
             val gpuReused = reused.filter(_.child.isInstanceOf[GpuExec])

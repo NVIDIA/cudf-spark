@@ -31,7 +31,9 @@ import org.apache.spark.tags.SlowHiveTest
 class RapidsHiveAggregationSuite extends Suite {
   override def run(testName: Option[String], args: Args): Status = {
     if (args.filter.excludeNestedSuites ||
-        args.filter.tagsToExclude.contains(classOf[SlowHiveTest].getName)) {
+        args.filter.tagsToExclude.contains(classOf[SlowHiveTest].getName) ||
+        args.filter.tagsToInclude.exists(tags =>
+          !tags.contains(classOf[SlowHiveTest].getName))) {
       SucceededStatus
     } else {
       RapidsHiveTestSession.withContext {
