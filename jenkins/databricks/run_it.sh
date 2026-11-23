@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright (c) 2022-2026, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2022-2023, NVIDIA CORPORATION. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -30,18 +30,12 @@ db_script_path="$( cd "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
 # Init common variables like SPARK_HOME, spark configs
 source $db_script_path/common_vars.sh
 
-ci_pyspark_tests=integration_tests/run_ci_pyspark_tests.sh
-# The uploaded entry script can run against an older pytest archive.
-if [[ -f integration_tests/rapids4spark-version-info.properties && ! -f "$ci_pyspark_tests" ]]; then
-    ci_pyspark_tests=integration_tests/run_pyspark_from_build.sh
-fi
-
 # Disable parallel test as multiple tests would be executed by leveraging external parallelism, e.g. Jenkins parallelism
 export TEST_PARALLEL=${TEST_PARALLEL:-0}
 
 set +e
 # Run integration testing
-"$ci_pyspark_tests" --runtime_env='databricks' --test_type=$TEST_TYPE
+./integration_tests/run_pyspark_from_build.sh --runtime_env='databricks' --test_type=$TEST_TYPE
 ret=$?
 set -e
 if [ "$ret" = 5 ]; then

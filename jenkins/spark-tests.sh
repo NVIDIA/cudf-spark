@@ -205,11 +205,6 @@ fi
 
 echo "----------------------------START TEST------------------------------------"
 pushd $RAPIDS_INT_TESTS_HOME
-# A pinned pytest archive can predate the CI launcher.
-ci_pyspark_tests=./run_ci_pyspark_tests.sh
-if [[ ! -f "$ci_pyspark_tests" ]]; then
-  ci_pyspark_tests=./run_pyspark_from_build.sh
-fi
 export TEST_TYPE="nightly"
 export LOCAL_JAR_PATH=$ARTF_ROOT
 
@@ -394,7 +389,7 @@ run_delta_lake_tests() {
           TESTS=delta_lake_test.py::test_delta_bitmap_serialization_java_compatibility \
           ./run_pyspark_from_build.sh -m delta_lake --delta_lake || return 1
       fi
-      "${delta_test_env[@]}" "$ci_pyspark_tests" -m delta_lake --delta_lake
+      "${delta_test_env[@]}" ./run_pyspark_from_build.sh -m delta_lake --delta_lake
     done
   fi
 }
@@ -543,7 +538,7 @@ run_iceberg_tests() {
         PYSP_TEST_spark_sql_catalog_spark__catalog="org.apache.iceberg.spark.SparkSessionCatalog" \
         PYSP_TEST_spark_sql_catalog_spark__catalog_type="hadoop" \
         PYSP_TEST_spark_sql_catalog_spark__catalog_warehouse="/tmp/spark-warehouse-$RANDOM" \
-        TEST_TAGS="$iceberg_test_tags" "$ci_pyspark_tests" --iceberg
+        TEST_TAGS="$iceberg_test_tags" ./run_pyspark_from_build.sh --iceberg
     elif [[ "$test_type" == "rest" ]]; then
       echo "!!! Running iceberg tests with rest catalog"
       ICEBERG_REST_JARS="org.apache.iceberg:iceberg-spark-runtime-${ICEBERG_SPARK_VER}_${SCALA_BINARY_VER}:${ICEBERG_VERSION},\
@@ -569,7 +564,7 @@ org.apache.iceberg:iceberg-aws-bundle:${ICEBERG_VERSION}"
             "PYSP_TEST_spark_sql_catalog_spark__catalog_oauth2-server-uri=${ICEBERG_REST_OAUTH2_SERVER_URI:-http://localhost:8080/realms/iceberg/protocol/openid-connect/token}" \
             PYSP_TEST_spark_sql_catalog_spark__catalog_scope="${ICEBERG_REST_SCOPE:-lakekeeper}" \
             PYSP_TEST_spark_sql_catalog_spark__catalog_warehouse="${ICEBERG_REST_WAREHOUSE:-demo}" \
-            TEST_TAGS="$iceberg_test_tags" "$ci_pyspark_tests" --iceberg
+            TEST_TAGS="$iceberg_test_tags" ./run_pyspark_from_build.sh --iceberg
     elif [[ "$test_type" == "s3tables" ]]; then
       echo "!!! Running iceberg tests with s3tables"
       # AWS deps versions for Spark 3.5.x and 4.0.x
@@ -622,7 +617,7 @@ com.amazonaws:aws-java-sdk-bundle:${AWS_SDK_BUNDLE_VERSION}"
         PYSP_TEST_spark_sql_catalog_spark__catalog="org.apache.iceberg.spark.SparkSessionCatalog" \
         "PYSP_TEST_spark_sql_catalog_spark__catalog_catalog-impl=software.amazon.s3tables.iceberg.S3TablesCatalog" \
         PYSP_TEST_spark_sql_catalog_spark__catalog_warehouse="${S3TABLES_BUCKET_ARN}" \
-        TEST_TAGS="$iceberg_test_tags" "$ci_pyspark_tests" -s --iceberg
+        TEST_TAGS="$iceberg_test_tags" ./run_pyspark_from_build.sh -s --iceberg
     fi
   done
 }
@@ -638,7 +633,7 @@ run_avro_tests() {
     PYSP_TEST_spark_jars_packages="org.apache.spark:spark-avro_${SCALA_BINARY_VER}:${SPARK_VER}" \
     PYSP_TEST_spark_jars_repositories="https://repository.apache.org/snapshots" \
     PYSP_TEST_spark_jars_ivySettings="${WORKSPACE}/jenkins/ivysettings.xml" \
-    "$ci_pyspark_tests" -k avro
+    ./run_pyspark_from_build.sh -k avro
 }
 
 run_pyarrow_tests() {
@@ -669,7 +664,7 @@ run_non_utc_time_zone_tests() {
   echo "Run Non-UTC tests, time zone is ${time_zone}"
 
   # run tests
-  TZ=${time_zone} "$ci_pyspark_tests"
+  TZ=${time_zone} ./run_pyspark_from_build.sh
 }
 
 # TEST_MODE
@@ -686,7 +681,7 @@ run_non_utc_time_zone_tests() {
 # - NON_UTC_TZ: test all tests in a non-UTC time zone which is selected according to current day of week.
 TEST_MODE=${TEST_MODE:-'DEFAULT'}
 if [[ $TEST_MODE == "DEFAULT" ]]; then
-  "$ci_pyspark_tests"
+  ./run_pyspark_from_build.sh
 
   SPARK_SHELL_SMOKE_TEST=1 \
   PYSP_TEST_spark_shuffle_manager=com.nvidia.spark.rapids.${SHUFFLE_SPARK_SHIM}.RapidsShuffleManager \

@@ -35,11 +35,6 @@
             <outputDirectory>integration_tests</outputDirectory>
         </file>
         <file>
-            <source>${spark.rapids.source.basedir}/integration_tests/run_ci_pyspark_tests.sh</source>
-            <outputDirectory>integration_tests</outputDirectory>
-            <fileMode>0755</fileMode>
-        </file>
-        <file>
             <source>${spark.rapids.source.basedir}/integration_tests/run_unity_catalog_server.sh</source>
             <outputDirectory>integration_tests</outputDirectory>
         </file>

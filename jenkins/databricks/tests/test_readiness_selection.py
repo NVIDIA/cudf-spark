@@ -23,8 +23,7 @@ import unittest
 
 class ReadinessSelectionTest(unittest.TestCase):
     def run_script(self, version="18.3.", mode="CI_PART1", hook=True,
-                   override=None, extra_envs="", upstream="1", hook_exit=0, delta_exit=0,
-                   legacy_pytest_archive=False):
+                   override=None, extra_envs="", upstream="1", hook_exit=0, delta_exit=0):
         script = Path(__file__).resolve().parents[1] / "test.sh"
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -37,10 +36,6 @@ class ReadinessSelectionTest(unittest.TestCase):
             (integration_dir / "run_pyspark_from_build.sh").write_text(
                 'echo "PRODUCT_TEST $*"\necho "TEST_FILES ${TESTS:-}"\n'
                 f'if [[ " $* " == *" --delta_lake "* ]]; then exit {delta_exit}; fi\n')
-            if legacy_pytest_archive:
-                (integration_dir / "rapids4spark-version-info.properties").touch()
-            else:
-                (integration_dir / "run_ci_pyspark_tests.sh").symlink_to("run_pyspark_from_build.sh")
             startup = root / "startup.sh"
             startup.write_text(f'echo "READINESS $1"\nexit {hook_exit}\n')
             # Keep the actual control flow, with external setup/Spark calls stubbed.
@@ -59,11 +54,6 @@ class ReadinessSelectionTest(unittest.TestCase):
                 env["SPARK_READINESS_ONLY"] = override
             return subprocess.run(["bash", str(root / "test.sh")], env=env,
                                   text=True, capture_output=True, check=False)
-
-    def test_uploaded_script_runs_with_older_pytest_archive(self):
-        result = self.run_script(mode="CI_PART1", upstream="0", legacy_pytest_archive=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("PRODUCT_TEST", result.stdout)
 
     def test_ci_runs_integration_tests_for_dbr_183(self):
         for mode in ("DEFAULT", "CI_PART1", "CI_PART2"):

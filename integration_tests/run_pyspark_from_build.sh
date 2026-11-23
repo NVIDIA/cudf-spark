@@ -207,6 +207,16 @@ then
     >&2 echo "SPARK_HOME IS NOT SET CANNOT RUN PYTHON INTEGRATION TESTS..."
 else
     echo "WILL RUN TESTS WITH SPARK_HOME: ${SPARK_HOME}"
+    # Spark's driver and executor JVMs need a UTF-8 locale to open Unicode filenames.
+    if [[ $(locale charmap) != UTF-8 ]]; then
+        export LC_ALL=C.UTF-8
+        if [[ $(locale charmap) != UTF-8 ]]; then
+            echo "Set LC_ALL to an installed UTF-8 locale before running integration tests." >&2
+            exit 1
+        fi
+    fi
+    export PYSP_TEST_spark_executorEnv_LC_ALL=${PYSP_TEST_spark_executorEnv_LC_ALL:-${LC_ALL:-${LC_CTYPE:-$LANG}}}
+
     [[ ! -x "$(command -v zip)" ]] && { echo "fail to find zip command in $PATH"; exit 1; }
     PY4J_TMP=("${SPARK_HOME}"/python/lib/py4j-*-src.zip)
     PY4J_FILE=${PY4J_TMP[0]}

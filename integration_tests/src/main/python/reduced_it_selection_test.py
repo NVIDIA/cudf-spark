@@ -284,41 +284,6 @@ def test_reduced_it_activation(monkeypatch, precommit, reduced_it, expected_path
     assert selected_paths == [expected_path]
 
 
-def test_ci_utf8_split_preserves_selected_items_and_ooms(request, monkeypatch, tmp_path):
-    import conftest
-    from unittest.mock import Mock
-
-    config = Mock()
-    config.getoption.return_value = 'random'
-    config.pluginmanager.get_plugin.return_value = None
-    monkeypatch.setattr(conftest, 'is_precommit_run', lambda: False)
-    monkeypatch.setattr(conftest, '_random_select_config',
-                        {'mode': 'count', 'target': 8, 'seed': 0, 'raw': '8'})
-    monkeypatch.setattr(conftest, 'oom_random_injection_seed', 1)
-
-    def selected():
-        items = []
-        for n in range(12):
-            item = pytest.Function.from_parent(request.node.parent, name=f'case_{n}',
-                                              callobj=lambda: None)
-            if n % 2:
-                item.add_marker('requires_utf8')
-            items.append(item)
-        conftest.pytest_collection_modifyitems(config, items)
-        return {i.name: (bool(i.get_closest_marker('requires_utf8')),
-                         bool(i.get_closest_marker('inject_oom'))) for i in items}
-
-    monkeypatch.delenv('RAPIDS_TEST_UTF8_PENDING', raising=False)
-    monkeypatch.delenv('RAPIDS_TEST_UTF8_ONLY', raising=False)
-    baseline = selected()
-    flag = tmp_path / 'utf8-pending'
-    monkeypatch.setenv('RAPIDS_TEST_UTF8_PENDING', str(flag))
-    assert selected() == {name: attrs for name, attrs in baseline.items() if not attrs[0]}
-    assert flag.is_file()
-    monkeypatch.setenv('RAPIDS_TEST_UTF8_ONLY', '1')
-    assert selected() == {name: attrs for name, attrs in baseline.items() if attrs[0]}
-
-
 def test_reduced_it_each_choice_selection():
     """Run the isolated collection self-test in a subprocess and require success."""
     # Clear PYTEST_ADDOPTS so a caller's global pytest options (extra plugins,

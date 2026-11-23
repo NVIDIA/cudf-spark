@@ -12,19 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-
-import pytest
-
-
-def pytest_sessionfinish(session, exitstatus):
-    pending = os.environ.get('RAPIDS_TEST_UTF8_PENDING')
-    if (exitstatus == pytest.ExitCode.NO_TESTS_COLLECTED and pending
-            and os.environ.get('RAPIDS_TEST_UTF8_ONLY') != '1' and os.path.isfile(pending)):
-        # Every selected item was deferred to the UTF-8 pass.
-        session.exitstatus = pytest.ExitCode.OK
-
-
 def pytest_addoption(parser):
     """Pytest hook to define command line options for pytest"""
     parser.addoption(

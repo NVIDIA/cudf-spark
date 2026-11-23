@@ -18,7 +18,6 @@ import pytest
 import random
 import shutil
 import tempfile
-from pathlib import Path
 import warnings
 
 # TODO redo _spark stuff using fixtures
@@ -699,19 +698,6 @@ def pytest_collection_modifyitems(config, items):
         if extras:
             # This is not ideal because we are reaching into an internal value
             item._nodeid = item.nodeid + '[' + ', '.join(extras) + ']'
-
-    # Both CI passes sample and annotate the identical collection before splitting it.
-    pending = os.environ.get('RAPIDS_TEST_UTF8_PENDING')
-    if pending and items:
-        utf8_only = os.environ.get('RAPIDS_TEST_UTF8_ONLY') == '1'
-        deselected = [item for item in items
-                      if bool(item.get_closest_marker('requires_utf8')) != utf8_only]
-        if deselected:
-            if not utf8_only:
-                Path(pending).touch()
-            removed = set(deselected)
-            items[:] = [item for item in items if item not in removed]
-            config.hook.pytest_deselected(items=deselected)
 
 @pytest.fixture(scope="session")
 def std_input_path(request):

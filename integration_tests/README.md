@@ -75,13 +75,6 @@ work. Default local/DBFS temporary paths exercise Hadoop, not S3/GCS PerfIO. Pre
 separate Avro invocation selects `avro_test.py`, so it does not add the twelve Avro
 path-character cases; nightly jobs with Avro enabled can discover them.
 
-For a mixed selection, `integration_tests/run_ci_pyspark_tests.sh` takes the same
-options as `run_pyspark_from_build.sh`. It runs ordinary tests with the caller's
-locale and starts a separate Spark application for the selected Unicode path tests.
-That application sets both the driver locale (`LC_ALL=C.UTF-8`) and the executor
-locale (`spark.executorEnv.LC_ALL=C.UTF-8`), including on standalone Workers
-that were already running. The dedicated backend runner below sets both as well.
-
 For ordinary remote reads, auto mode requires an explicit startup
 `spark.rapids.perfio.s3.enabled=true/false` or
 `spark.rapids.perfio.gcs.enabled=true/false`, or an explicit `--path_backend`.
