@@ -140,7 +140,7 @@ mvn_verify() {
     popd
 
     # Triggering here until we change the jenkins file
-    rapids_shuffle_smoke_test
+    standalone_smoke_tests
 
     # Test a portion of cases for non-UTC time zone because of limited GPU resources.
     # Here testing: parquet scan, orc scan, csv scan, cast, TimeZoneAwareExpression, FromUTCTimestamp
@@ -153,24 +153,33 @@ mvn_verify() {
 
 }
 
-rapids_shuffle_smoke_test() {
+standalone_smoke_tests() {
     local SPARK_VER=${1:-${SPARK_VER}}
-    echo "Run rapids_shuffle_smoke_test for Spark version: $SPARK_VER..."
+    echo "Run standalone smoke tests for Spark version: $SPARK_VER..."
 
     # basic ucx check
     ucx_info -d
 
     # run in standalone mode
     export SPARK_MASTER_HOST=localhost
-    export SPARK_MASTER=spark://$SPARK_MASTER_HOST:7077
+    local master_url="spark://$SPARK_MASTER_HOST:7077"
     $SPARK_HOME/sbin/start-master.sh -h $SPARK_MASTER_HOST
-    $SPARK_HOME/sbin/spark-daemon.sh start org.apache.spark.deploy.worker.Worker 1 $SPARK_MASTER
+    # Give the Worker a different locale so the Unicode write exercises executorEnv forwarding.
+    LC_ALL=C "$SPARK_HOME/sbin/spark-daemon.sh" start org.apache.spark.deploy.worker.Worker 1 "$master_url"
+
+    if [[ "$SPARK_VER" == 4.* ]]; then
+        LC_ALL=C.UTF-8 PYSP_TEST_spark_master="$master_url" PYSP_TEST_spark_cores_max=1 \
+            TEST_PARALLEL=0 TESTS='path_character_test.py::test_path_characters[base-v1-parquet-PERFILE]' \
+            ./integration_tests/run_pyspark_from_build.sh
+    fi
 
     # using UCX shuffle
-    invoke_shuffle_integration_test UCX ./integration_tests/run_pyspark_from_build.sh premerge $SPARK_VER
+    SPARK_MASTER="$master_url" invoke_shuffle_integration_test UCX \
+        ./integration_tests/run_pyspark_from_build.sh premerge "$SPARK_VER"
 
     # using MULTITHREADED shuffle
-    invoke_shuffle_integration_test MULTITHREADED ./integration_tests/run_pyspark_from_build.sh premerge $SPARK_VER
+    SPARK_MASTER="$master_url" invoke_shuffle_integration_test MULTITHREADED \
+        ./integration_tests/run_pyspark_from_build.sh premerge "$SPARK_VER"
 
     $SPARK_HOME/sbin/spark-daemon.sh stop org.apache.spark.deploy.worker.Worker 1
     $SPARK_HOME/sbin/stop-master.sh
@@ -325,8 +334,7 @@ ci_scala213() {
           ./integration_tests/run_pyspark_from_build.sh \
             -m unity_catalog --delta_lake --unity_catalog
 
-    # Trigger the RapidsShuffleManager tests for scala 2.13
-    rapids_shuffle_smoke_test $SPARK_VER
+    standalone_smoke_tests "$SPARK_VER"
 
     # Iceberg version detection (requires JDK 17, available in this stage).
     # Moved out of spark-tests.sh DEFAULT mode where JDK 8 causes
