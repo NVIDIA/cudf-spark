@@ -4,6 +4,7 @@ This document provides context for AI coding agents (Claude Code, GitHub Copilot
 
 ## Repository Policy
 
+- For Dockerfiles, image build inputs, or image CI workflows, follow the [Docker image maintenance guide](.github/workflows/ci-images/AGENTS.md).
 - These rules translate the agent-actionable requirements from [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`CODE_REVIEW_GUIDELINES.md`](CODE_REVIEW_GUIDELINES.md). Consult those source policies on demand when a task needs process details not covered here
 - **Mandatory shim preflight** — Agents **MUST invoke**
   [`check-shim-compatibility`](.agents/skills/check-shim-compatibility/SKILL.md)
