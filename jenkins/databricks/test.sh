@@ -63,6 +63,12 @@ source jenkins/databricks/setup.sh
 # Init common variables like SPARK_HOME, spark configs
 source jenkins/databricks/common_vars.sh
 
+ci_pyspark_tests=integration_tests/run_ci_pyspark_tests.sh
+# The uploaded entry script can run against an older pytest archive.
+if [[ -f integration_tests/rapids4spark-version-info.properties && ! -f "$ci_pyspark_tests" ]]; then
+    ci_pyspark_tests=integration_tests/run_pyspark_from_build.sh
+fi
+
 SPARK_READINESS_ONLY=${SPARK_READINESS_ONLY:-0}
 if [[ "$SPARK_READINESS_ONLY" == "1" ]]; then
     if [[ -z "${SPARK_STARTUP_CHECK:-}" ]]; then
@@ -201,10 +207,10 @@ if [[ $TEST_MODE == "DEFAULT" || $TEST_MODE == "CI_PART1" ]]; then
             bash integration_tests/run_pyspark_from_build.sh
     fi
     if [[ "$TEST_MODE" == "CI_PART1" ]]; then
-        bash integration_tests/run_pyspark_from_build.sh --runtime_env="databricks" \
+        bash "$ci_pyspark_tests" --runtime_env="databricks" \
             --test_type=$TEST_TYPE -k "not ($CI_PART2_BALANCED_TEST_EXPR)"
     else
-        bash integration_tests/run_pyspark_from_build.sh --runtime_env="databricks" --test_type=$TEST_TYPE
+        bash "$ci_pyspark_tests" --runtime_env="databricks" --test_type=$TEST_TYPE
     fi
 fi
 
@@ -226,7 +232,7 @@ if [[ "$(pwd)" == "$SOURCE_PATH" ]]; then
     if [[ "$TEST_MODE" == "DEFAULT" || $TEST_MODE == "CI_PART2" || "$TEST_MODE" == "DELTA_LAKE_ONLY" ]]; then
         ## Run Delta Lake tests
         DRIVER_MEMORY="4g" \
-            bash integration_tests/run_pyspark_from_build.sh --runtime_env="databricks" \
+            bash "$ci_pyspark_tests" --runtime_env="databricks" \
                 -m "delta_lake" --delta_lake --test_type=$TEST_TYPE
     fi
 

@@ -30,6 +30,7 @@ _readers = [(fmt, reader) for fmt in ('parquet', 'orc', 'avro')
 _readers += [('csv', 'PERFILE'), ('json', 'PERFILE')]
 
 
+@pytest.mark.requires_utf8
 @ignore_order(local=True)
 @pytest.mark.parametrize('file_format,reader', [
     pytest.param(fmt, reader, id=fmt + '-' + reader, marks=(
@@ -55,6 +56,7 @@ def test_path_characters(path_character_data, file_format, reader, v1, layout, r
         perfio_backends=BACKEND_METRICS if file_format in ('parquet', 'orc') else ())
 
 
+@pytest.mark.requires_utf8
 @delta_lake
 @allow_non_gpu(*delta_meta_allow)
 @ignore_order(local=True)

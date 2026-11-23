@@ -25,6 +25,7 @@ from spark_session import with_cpu_session
 pytestmark = iceberg_unsupported_mark
 
 
+@pytest.mark.requires_utf8
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.parametrize('format_version', iceberg_read_format_versions)

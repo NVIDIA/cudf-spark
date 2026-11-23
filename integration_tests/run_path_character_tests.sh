@@ -66,5 +66,5 @@ for selected_test in "${selected_tests[@]}"; do
     esac
 done
 script_dir=$(cd "$(dirname "$0")" && pwd)
-exec bash "$script_dir/run_pyspark_from_build.sh" \
+exec bash "$script_dir/run_ci_pyspark_tests.sh" \
     --path_backend="$backend" --tmp_path="$tmp_path" "${pytest_options[@]}"
