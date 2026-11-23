@@ -68,8 +68,8 @@ def test_iceberg_v3_write_only_default_position_delete(spark_tmp_table_factory):
         spark.sql(f"DELETE FROM {table} WHERE id = 1").collect()
 
     with_cpu_session(lambda spark: delete(spark, cpu_table), conf=iceberg_write_enabled_conf)
-    with_iceberg_dml_session(lambda spark: delete(spark, gpu_table),
-                            "3", "merge-on-read", conf=iceberg_write_enabled_conf)
+    with_iceberg_dml_session(lambda spark: delete(spark, gpu_table), "3", "merge-on-read",
+                             conf=iceberg_write_enabled_conf, gpu_writers=("GpuWriteDeltaExec",))
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.table(gpu_table if spark.conf.get("spark.rapids.sql.enabled") == "true"
                                   else cpu_table), conf=iceberg_write_enabled_conf)

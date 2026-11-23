@@ -119,7 +119,8 @@ def with_iceberg_format_versions(parameters):
     return result
 
 
-def with_iceberg_dml_session(func, format_version, mode, conf):
+def with_iceberg_dml_session(func, format_version, mode, conf,
+                             gpu_writers=("GpuWriteDeltaExec", "GpuAppendDataExec")):
     """Require GPU deletion-vector writes for v3 MOR operations."""
     if format_version != "3" or mode != "merge-on-read":
         return with_gpu_session(func, conf=conf)
@@ -131,10 +132,8 @@ def with_iceberg_dml_session(func, format_version, mode, conf):
         # Spark rewrites insert-only MERGE to append even on a MOR table.
         assert not any(callback.didFallBack(plan, "WriteDeltaExec") for plan in plans), \
             "Unexpected v3 MOR CPU delta write:\n" + "\n".join(str(plan) for plan in plans)
-        assert any(callback.contains(plan, "GpuWriteDeltaExec") or
-                   callback.contains(plan, "GpuAppendDataExec") for plan in plans), \
-            "Expected GPU delta write or GPU append for insert-only MERGE:\n" + \
-            "\n".join(str(plan) for plan in plans)
+        assert any(callback.contains(plan, writer) for plan in plans for writer in gpu_writers), \
+            f"Expected {' or '.join(gpu_writers)}:\n" + "\n".join(str(plan) for plan in plans)
         return result
     finally:
         callback.endCapture()
@@ -529,14 +528,6 @@ def assert_iceberg_default_file_parity(spark, cpu_table, gpu_table):
     gpu = iceberg_default_file_snapshot(spark, gpu_table)
     assert cpu["records"] == gpu["records"], (cpu["records"], gpu["records"])
     assert cpu["defaults"] == gpu["defaults"], (cpu["defaults"], gpu["defaults"])
-
-
-def update_iceberg_write_default(spark, name, value):
-    iceberg = spark_jvm().org.apache.iceberg
-    table = iceberg.spark.Spark3Util.loadIcebergTable(spark._jsparkSession, name)
-    table.updateSchema().updateColumnDefault(
-        "optional_added", iceberg.expressions.Literal.of(value)).commit()
-    spark.catalog.refreshTable(name)
 
 
 def setup_iceberg_fixed_default_table(
