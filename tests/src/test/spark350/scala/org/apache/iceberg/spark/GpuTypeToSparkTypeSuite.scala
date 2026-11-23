@@ -49,7 +49,7 @@ class GpuTypeToSparkTypeSuite extends AnyFunSuite {
     val schema = new Schema(field)
 
     val sparkField = GpuTypeToSparkType
-      .toSparkType(schema, ShimUtils.writeDefaultAccessor(schema))(field.name())
+      .toSparkType(schema, ShimUtils.newWriteDefaultAccessor(schema))(field.name())
     assert(sparkField.metadata.getLong(FIELD_ID_METADATA_KEY) == 1L)
     assert(sparkField.getCurrentDefaultValue().contains("9"))
     assert(GpuTypeToSparkType.toSparkType(schema)(field.name()).getCurrentDefaultValue().isEmpty)

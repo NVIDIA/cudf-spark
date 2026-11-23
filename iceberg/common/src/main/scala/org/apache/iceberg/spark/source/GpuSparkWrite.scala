@@ -172,7 +172,7 @@ object GpuSparkWrite {
   private[source] def dataWriterSparkTypeFor(
       writeSchema: Schema,
       tableSchema: Schema): StructType = {
-    GpuTypeToSparkType.toSparkType(writeSchema, ShimUtils.writeDefaultAccessor(tableSchema))
+    GpuTypeToSparkType.toSparkType(writeSchema, ShimUtils.newWriteDefaultAccessor(tableSchema))
   }
 
   def supports(cpuClass: Class[_ <: Write]): Boolean = {

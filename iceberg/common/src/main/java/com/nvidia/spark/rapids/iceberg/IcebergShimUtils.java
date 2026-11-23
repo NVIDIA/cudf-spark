@@ -51,7 +51,6 @@ import org.apache.iceberg.types.Types;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.read.Scan;
 import org.apache.spark.sql.connector.write.DeltaBatchWrite;
-import org.apache.spark.sql.types.StructField;
 import scala.Option;
 
 import java.io.IOException;
@@ -67,7 +66,7 @@ import java.util.function.IntPredicate;
  * this interface. The correct implementation is selected at runtime by
  * {@link ShimUtils} based on the detected Iceberg version.
  */
-public interface IcebergShimUtils extends IcebergWriteDefaultAccessor {
+public interface IcebergShimUtils {
     /**
      * Returns the converter for shaded Parquet schemas and footer metadata.
      * Implementations override only conversions specific to the selected library versions.
@@ -92,10 +91,9 @@ public interface IcebergShimUtils extends IcebergWriteDefaultAccessor {
         return false;
     }
 
-    /** Adds a write default to the Spark field when the Iceberg runtime supports it. */
-    @Override
-    default StructField withWriteDefault(Types.NestedField field, StructField sparkField) {
-        return sparkField;
+    /** Creates an accessor for write defaults in the table schema. */
+    default IcebergWriteDefaultAccessor newWriteDefaultAccessor(Schema tableSchema) {
+        return (field, sparkField) -> sparkField;
     }
 
     /**

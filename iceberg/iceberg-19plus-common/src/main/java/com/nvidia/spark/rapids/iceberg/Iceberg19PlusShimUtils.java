@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids.iceberg;
 
 import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.FileFormat;
+import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.data.BaseDeleteLoader;
 import org.apache.iceberg.deletes.PositionDelete;
@@ -60,12 +61,29 @@ public abstract class Iceberg19PlusShimUtils implements IcebergShimUtils {
     }
 
     @Override
-    public StructField withWriteDefault(Types.NestedField field, StructField sparkField) {
-        if (!hasWriteDefault(field)) {
-            return sparkField;
+    public IcebergWriteDefaultAccessor newWriteDefaultAccessor(Schema tableSchema) {
+        return new WriteDefaultAccessor(tableSchema);
+    }
+
+    private static final class WriteDefaultAccessor implements IcebergWriteDefaultAccessor {
+        private final Schema tableSchema;
+
+        private WriteDefaultAccessor(Schema tableSchema) {
+            this.tableSchema = tableSchema;
         }
-        Object value = SparkUtil.internalToSpark(field.type(), field.writeDefault());
-        return sparkField.withCurrentDefaultValue(Literal.create(value, sparkField.dataType()).sql());
+
+        @Override
+        public StructField withWriteDefault(Types.NestedField field, StructField sparkField) {
+            // Iceberg's write schema may omit defaults; resolve them by field ID.
+            Types.NestedField original = tableSchema.findField(field.fieldId());
+            Types.NestedField source = original != null ? original : field;
+            if (source.writeDefaultLiteral() == null) {
+                return sparkField;
+            }
+            Object value = SparkUtil.internalToSpark(source.type(), source.writeDefault());
+            return sparkField.withCurrentDefaultValue(
+                    Literal.create(value, sparkField.dataType()).sql());
+        }
     }
 
     @Override
