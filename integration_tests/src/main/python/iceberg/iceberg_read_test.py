@@ -427,7 +427,7 @@ def test_iceberg_schema_evolution_read(
         assert_gpu_and_cpu_are_equal_collect(lambda spark: spark.sql(query), conf=conf)
 
 
-_skip_rest_binary_defaults = pytest.mark.skipif(
+_skip_rest_binary_and_fixed_defaults = pytest.mark.skipif(
     is_iceberg_rest_catalog(),
     reason="Lakekeeper 0.13.1 can return HTTP 500 (Service panicked) on binary or fixed "
            "initial defaults. See https://github.com/NVIDIA/cudf-spark/issues/17078.")
@@ -505,7 +505,7 @@ def _setup_iceberg_v3_defaults_table(table_name, unsupported_column=None, *, inc
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @pytest.mark.parametrize('include_binary', [
     pytest.param(False, id='common'),
-    pytest.param(True, id='binary_added', marks=_skip_rest_binary_defaults)])
+    pytest.param(True, id='binary_added', marks=_skip_rest_binary_and_fixed_defaults)])
 @iceberg_fast_test
 def test_iceberg_v3_initial_defaults_all_types(spark_tmp_table_factory, reader_type, include_binary):
     table_name = get_full_table_name(spark_tmp_table_factory)
@@ -615,7 +615,7 @@ def test_iceberg_v3_defaulted_collection_paths(spark_tmp_table_factory, reader_t
 @ignore_order(local=True)
 @pytest.mark.parametrize(
     "unsupported_column", ["timestamp_ntz_added", "uuid_added",
-                           pytest.param("fixed_added", marks=_skip_rest_binary_defaults)])
+                           pytest.param("fixed_added", marks=_skip_rest_binary_and_fixed_defaults)])
 @pytest.mark.parametrize("project_default", [False, True], ids=["unprojected", "projected"])
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @iceberg_fast_test
