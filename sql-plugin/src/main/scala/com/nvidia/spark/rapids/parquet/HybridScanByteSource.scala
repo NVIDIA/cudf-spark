@@ -67,10 +67,11 @@ private[parquet] trait HybridScanByteSource extends AutoCloseable {
   }
 
   /**
-   * Whether a fetch of `ranges` can go straight to device memory with [[fetchToDevice]],
-   * without this source staging it in host memory. cuFile may still stage it internally if it falls
-   * back to its own compatibility mode. Such a fetch writes to the device, so it needs the GPU
-   * semaphore.
+   * Whether a [[fetchToDevice]] of `ranges` would read any of them straight to device memory, so
+   * is worth taking the GPU semaphore for. cuFile may still stage such a read internally if it
+   * falls back to its own compatibility mode. The fetch's other reads are still correct: KvikIO
+   * stages them through host memory itself, under the semaphore the fetch holds. When none would go
+   * direct, a device fetch gains nothing, so the caller fetches to host memory off the semaphore.
    */
   def isDeviceReadDirect(ranges: Array[ByteRange]): Boolean = false
 
