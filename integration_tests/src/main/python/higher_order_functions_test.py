@@ -499,20 +499,20 @@ def test_array_aggregate_long_overflow_wraps():
     assert_gpu_and_cpu_are_equal_collect(do_it)
 
 
-@pytest.mark.parametrize('wide, narrow, limit', [
-    ('smallint', 'tinyint', 127),
-    ('int', 'tinyint', 127),
-    ('int', 'smallint', 32767),
-    ('bigint', 'tinyint', 127),
-    ('bigint', 'smallint', 32767),
-    ('bigint', 'int', 2147483647),
+@pytest.mark.parametrize('wide, narrow, wide_limit, narrow_limit', [
+    ('smallint', 'tinyint', 32767, 127),
+    ('int', 'tinyint', 2147483647, 127),
+    ('int', 'smallint', 2147483647, 32767),
+    ('bigint', 'tinyint', 9223372036854775807, 127),
+    ('bigint', 'smallint', 9223372036854775807, 32767),
+    ('bigint', 'int', 9223372036854775807, 2147483647),
 ])
 @disable_ansi_mode
-def test_array_aggregate_narrow_acc_cast_sum(wide, narrow, limit):
+def test_array_aggregate_narrow_acc_cast_sum(wide, narrow, wide_limit, narrow_limit):
     data = [
-        (0, [limit, 1]), (0, [limit, 1, 0]), (0, [-limit - 1, -1, 0]),
-        (limit + 1, []), (limit + 1, [0]), (None, [1]), (1, None),
-        (1, [None, 1]), (1, [1, None]),
+        (0, [narrow_limit, 1]), (0, [narrow_limit, 1, 0]), (0, [-narrow_limit - 1, -1, 0]),
+        (0, [wide_limit, 2]), (narrow_limit + 1, []), (narrow_limit + 1, [0]),
+        (None, [1]), (1, None), (1, [None, 1]), (1, [1, None]),
     ]
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.createDataFrame(data, f'z {wide}, a array<{wide}>').selectExpr(
@@ -526,6 +526,22 @@ def test_array_aggregate_narrow_acc_cast_greatest_fallback():
     assert_gpu_fallback_collect(
         lambda spark: spark.createDataFrame([([300, 5],)], 'a array<bigint>').selectExpr(
             'aggregate(a, 0L, (acc, x) -> greatest(cast(acc as tinyint), x))'),
+        'ArrayAggregate')
+
+
+@pytest.mark.parametrize('data, zero, merge_sql', [
+    ([127, 1, 0], '0', 'try_cast(acc as tinyint) + x'),
+    ([2147483647, 1], '0', 'try_add(acc, x)'),
+    ([2147483647, 2], '1', 'try_multiply(acc, x)'),
+], ids=['try-cast', 'try-add', 'try-multiply'])
+@disable_ansi_mode
+@allow_non_gpu_conditional(is_before_spark_340() and not is_databricks_runtime(), 'ProjectExec')
+@allow_non_gpu('ArrayAggregate', 'LambdaFunction', 'NamedLambdaVariable', 'Add', 'Multiply',
+               'Cast', 'TryCast', 'TryEval')
+def test_array_aggregate_try_mode_fallback(data, zero, merge_sql):
+    assert_gpu_fallback_collect(
+        lambda spark: spark.createDataFrame([(data,)], 'a array<int>').selectExpr(
+            f'aggregate(a, {zero}, (acc, x) -> {merge_sql})'),
         'ArrayAggregate')
 
 

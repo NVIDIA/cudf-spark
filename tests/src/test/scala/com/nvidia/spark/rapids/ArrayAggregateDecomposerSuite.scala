@@ -203,19 +203,50 @@ class ArrayAggregateDecomposerSuite extends GpuUnitTests {
       assertDecomposes(Add(x, castAcc), acc, x, NarrowingSumOp(ByteType), Some(x))
       assertRejects(merge(Add(castAcc, Add(x, Literal(1))), acc, x), identityFinish(acc),
         "the last addend must be the input element")
+      assertRejects(merge(Greatest(Seq(castAcc, x)), acc, x), identityFinish(acc),
+        "narrowing cast is only supported for non-ANSI integer addition")
       assertRejects(merge(Add(x, Cast(Cast(acc, FloatType), IntegerType)), acc, x),
         identityFinish(acc), "casting through float can round the accumulator")
+      val longAcc = lv("acc", LongType); val longX = lv("x", LongType)
+      assertRejects(
+        merge(Add(longX, Cast(Cast(longAcc, DoubleType), LongType)), longAcc, longX),
+        identityFinish(longAcc), "casting long through double can round the accumulator",
+        zeroType = LongType)
     }
   }
 
-  test("A checked accumulator cast cannot use wrapping arithmetic in a non-ANSI session") {
+  test("Checked cast and arithmetic cannot use wrapping reduction in a non-ANSI session") {
     val acc = lv("acc"); val x = lv("x")
     withSQLConf("spark.sql.ansi.enabled" -> "true") {
       val checkedCast = Cast(acc, ByteType)
+      val checkedAdd = Add(acc, x)
+      val checkedMul = Multiply(acc, x)
       withSQLConf("spark.sql.ansi.enabled" -> "false") {
         val body = Add(Cast(checkedCast, IntegerType), x)
         assertRejects(merge(body, acc, x), identityFinish(acc),
           "cast must preserve overflow errors")
+        assertRejects(merge(checkedAdd, acc, x), identityFinish(acc),
+          "addition must preserve overflow errors")
+        assertRejects(merge(checkedMul, acc, x), identityFinish(acc),
+          "multiplication must preserve overflow errors")
+      }
+    }
+  }
+
+  test("TRY-mode cast and arithmetic in merge lambda are rejected") {
+    withCpuSparkSession { spark =>
+      withSQLConf("spark.sql.ansi.enabled" -> "false") {
+        val base = spark.sql("SELECT array(127, 1, 0) AS a").repartition(1)
+        Seq(
+          "aggregate(a, 0, (acc, x) -> try_cast(acc as tinyint) + x)",
+          "aggregate(a, 0, (acc, x) -> try_add(acc, x))",
+          "aggregate(a, 1, (acc, x) -> try_multiply(acc, x))"
+        ).foreach { exprSql =>
+          val plan = base.selectExpr(exprSql).queryExecution.optimizedPlan
+          val agg = plan.expressions.flatMap(_.collect { case a: ArrayAggregate => a }).head
+          assert(decompose(agg.merge, agg.finish, agg.argument.dataType, agg.zero.dataType,
+            agg.zero.nullable).isLeft, s"expected Left for $exprSql")
+        }
       }
     }
   }

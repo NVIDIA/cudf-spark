@@ -24,7 +24,7 @@ import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.{AutoCloseableProducingArray,
   ReallyAGpuExpression}
 import com.nvidia.spark.rapids.jni.GpuMapZipWithUtils
-import com.nvidia.spark.rapids.shims.{AnsiCastShim, ShimExpression}
+import com.nvidia.spark.rapids.shims.{AnsiCastShim, ShimExpression, TryModeShim}
 
 import org.apache.spark.sql.catalyst.analysis.TypeCoercion
 import org.apache.spark.sql.catalyst.expressions.{Add, And, ArrayAggregate, Attribute, AttributeReference, AttributeSeq, CaseWhen, Cast, Expression, ExprId, Greatest, If, LambdaFunction, Least, Literal, Multiply, NamedExpression, NamedLambdaVariable, Or}
@@ -1189,7 +1189,9 @@ sealed abstract class ArraySumOp extends AggOp {
   }
   def combineWithZero(r: cudf.ColumnVector, z: cudf.BinaryOperable, out: DType) = r.add(z, out)
   def matchBinary(e: Expression): Option[(Expression, Expression)] = e match {
-    case a: Add => Some((a.left, a.right))
+    // Reject TRY mode and checked arithmetic retained from an ANSI view in a non-ANSI session.
+    case a: Add if !TryModeShim.isTryMode(a) && a == Add(a.left, a.right) =>
+      Some((a.left, a.right))
     case _ => None
   }
   // Float/Double are gated behind `spark.rapids.sql.variableFloatAgg.enabled` (same conf
@@ -1251,7 +1253,8 @@ case object ProductOp extends AggOp {
   }
   def combineWithZero(r: cudf.ColumnVector, z: cudf.BinaryOperable, out: DType) = r.mul(z, out)
   def matchBinary(e: Expression): Option[(Expression, Expression)] = e match {
-    case m: Multiply => Some((m.left, m.right))
+    case m: Multiply if !TryModeShim.isTryMode(m) && m == Multiply(m.left, m.right) =>
+      Some((m.left, m.right))
     case _ => None
   }
   // Float/Double gated by variableFloatAgg.enabled (see SumOp). Decimal would also need
@@ -1759,7 +1762,7 @@ class GpuArrayAggregateMeta(
       expr.zero.nullable) match {
       case Left(reason) => willNotWorkOnGpu(reason)
       case Right(d) =>
-        if (d.op == SumOp || d.op == ProductOp) {
+        if (d.op.isInstanceOf[ArraySumOp] || d.op == ProductOp) {
           // SUM/PRODUCT on Float/Double diverge between cuDF's parallel tree-reduction
           // and Spark's sequential left-fold. Same conf gate as GpuSum / GpuAverage —
           // willNotWorkOnGpu when variableFloatAgg.enabled=false.
