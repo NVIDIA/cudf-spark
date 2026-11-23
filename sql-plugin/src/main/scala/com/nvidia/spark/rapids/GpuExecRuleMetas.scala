@@ -28,6 +28,7 @@ import org.apache.spark.sql.execution.datasources.v2._
 import org.apache.spark.sql.execution.exchange._
 import org.apache.spark.sql.execution.joins._
 import org.apache.spark.sql.execution.python._
+import org.apache.spark.sql.execution.rapids.shims.UnionExecShims
 import org.apache.spark.sql.execution.window.WindowExec
 import org.apache.spark.sql.rapids._
 import org.apache.spark.sql.rapids.execution._
@@ -96,7 +97,9 @@ case class UnionExecRuleMeta(
     r: DataFromReplacementRule)
   extends SparkPlanMeta[UnionExec](union, conf, p, r) {
   override def convertToGpu(): GpuExec =
-    GpuUnionExec(childPlans.map(_.convertIfNeeded()))
+    GpuUnionExec(
+      childPlans.map(_.convertIfNeeded()),
+      UnionExecShims.isPlainUnion(union))
 }
 
 case class CartesianProductExecRuleMeta(
