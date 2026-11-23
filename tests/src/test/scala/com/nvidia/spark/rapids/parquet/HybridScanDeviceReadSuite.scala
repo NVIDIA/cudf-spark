@@ -20,7 +20,7 @@ import java.io.{File, RandomAccessFile}
 import java.nio.{ByteBuffer, ByteOrder}
 
 import ai.rapids.cudf.{ByteRange, DeviceMemoryBuffer, HostMemoryBuffer}
-import com.nvidia.spark.rapids.{GpuMetric, LocalGpuMetric, NoopMetric, RapidsConf, SparkQueryCompareTestSuite, TestUtils}
+import com.nvidia.spark.rapids.{GpuColumnVector, GpuMetric, LocalGpuMetric, NoopMetric, RapidsConf, SparkQueryCompareTestSuite, TestUtils}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsConf.GpuDirectStorageMode
 import com.nvidia.spark.rapids.fileio.hadoop.HadoopFileIO
@@ -122,6 +122,56 @@ class HybridScanDeviceReadSuite extends SparkQueryCompareTestSuite {
     }
   }
 
+  private def newContext(
+      filters: HybridScanFilters,
+      gdsMode: GpuDirectStorageMode.Value): HybridScanContext =
+    HybridScanContext(readSchema, filters, 1.0,
+      RapidsConf.PARQUET_HYBRID_SCAN_MAX_H2D_PACK_SIZE.defaultValue,
+      RapidsConf.PARQUET_HYBRID_SCAN_MIN_H2D_PACK_SIZE.defaultValue, newMetrics(), gdsMode)
+
+  /**
+   * Read the whole file the way a MULTITHREADED read does: a pool thread's plan, without
+   * dictionary pruning, then the task's prune and decode with a reader of its own. None when no
+   * row survives. The MULTITHREADED reader opens its own sources, so it can't be given one
+   * that forces device reads; this calls the same pipeline steps with the given source instead.
+   */
+  private def readMultithreaded[T](
+      source: HybridScanByteSource,
+      path: Path,
+      filter: Filter,
+      gdsMode: GpuDirectStorageMode.Value)(
+      body: Option[ColumnarBatch] => T): T = {
+    val filters = new HybridScanFilters(readSchema, true, Array(filter))
+    val pipeline = new HybridScanPipeline(newContext(filters, gdsMode))
+    val options = HybridScanPipeline.parquetOptions(readSchema.fieldNames)
+    val split = HybridScanSplit(source, 0, new File(path.toUri.getPath).length())
+    withResource(source) { _ =>
+      withResource(thriftFooter(path)) { footer =>
+        withResource(filters.ast.map(HybridScanPipeline.compileFilter)) { ast =>
+          val planned = withResource(HybridScanPipeline.openReader(footer, options, NoopMetric)) {
+            pipeline.planAndFetch(split, _, ast, allowDictionaryPruning = false)
+          }
+          val table = planned.flatMap { fetched =>
+            closeOnExcept(fetched) { _ =>
+              withResource(HybridScanPipeline.openReader(footer, options, NoopMetric)) { reader =>
+                pipeline.pruneFetchedWithDictionaries(reader, ast, fetched)
+                  .flatMap(pipeline.materializeFetched(reader, ast, _))
+              }
+            }
+          }
+          table match {
+            case Some(t) => withResource(t) { _ =>
+              withResource(GpuColumnVector.from(t, readSchema.fields.map(_.dataType))) { batch =>
+                body(Some(batch))
+              }
+            }
+            case None => body(None)
+          }
+        }
+      }
+    }
+  }
+
   /** Read the whole file through `source` with `filter` pushed; None when no batch comes back. */
   private def read[T](
       source: HybridScanByteSource,
@@ -130,14 +180,11 @@ class HybridScanDeviceReadSuite extends SparkQueryCompareTestSuite {
       gdsMode: GpuDirectStorageMode.Value)(
       body: Option[ColumnarBatch] => T): T = {
     val filters = new HybridScanFilters(readSchema, true, Array(filter))
-    val context = HybridScanContext(readSchema, filters, 1.0,
-      RapidsConf.PARQUET_HYBRID_SCAN_MAX_H2D_PACK_SIZE.defaultValue,
-      RapidsConf.PARQUET_HYBRID_SCAN_MIN_H2D_PACK_SIZE.defaultValue, newMetrics(), gdsMode)
     val split = HybridScanSplit(source, 0, new File(path.toUri.getPath).length())
     val reader = closeOnExcept(source) { _ =>
       closeOnExcept(thriftFooter(path)) { footer =>
         new HybridScanPerFileParquetPartitionReader(split, footer,
-          HybridScanPipeline.parquetOptions(readSchema.fieldNames), context)
+          HybridScanPipeline.parquetOptions(readSchema.fieldNames), newContext(filters, gdsMode))
       }
     }
     withResource(reader) { r =>
@@ -154,42 +201,78 @@ class HybridScanDeviceReadSuite extends SparkQueryCompareTestSuite {
     new HybridScanFileByteSource(fileIO, path, metrics, new RapidsFileIORangeReader(metrics))
   }
 
+  /** A reader type and GPUDirect Storage mode to read with. */
+  private case class ReadMode(multithreaded: Boolean, gdsMode: GpuDirectStorageMode.Value) {
+    override def toString: String =
+      s"${if (multithreaded) "MULTITHREADED" else "PERFILE"} $gdsMode"
+  }
+
+  private def readIn[T](
+      mode: ReadMode,
+      source: HybridScanByteSource,
+      path: Path,
+      filter: Filter)(
+      body: Option[ColumnarBatch] => T): T = {
+    if (mode.multithreaded) {
+      readMultithreaded(source, path, filter, mode.gdsMode)(body)
+    } else {
+      read(source, path, filter, mode.gdsMode)(body)
+    }
+  }
+
+  // Without a TaskContext the semaphore is always free, so AUTO reads the same as ON.
+  private val readModes = Seq(
+    ReadMode(multithreaded = false, GpuDirectStorageMode.OFF),
+    ReadMode(multithreaded = false, GpuDirectStorageMode.ON),
+    ReadMode(multithreaded = true, GpuDirectStorageMode.OFF),
+    ReadMode(multithreaded = true, GpuDirectStorageMode.ON))
+
   /**
-   * A pushed filter and the reads it takes when the file goes to the device: the dictionary pages,
-   * if it prunes with them, are read to host memory, and the surviving column chunks, if any, to
-   * the device.
+   * A pushed filter and the reads it takes when the file goes to the device. A single-threaded
+   * read fetches the dictionary pages, if it prunes with them, to host memory, and the surviving
+   * column chunks, if any, to the device. A MULTITHREADED task reads both to the device.
    */
-  private case class FilterCase(name: String, filter: Filter, deviceReads: Int, hostReads: Int)
+  private case class FilterCase(
+      name: String,
+      filter: Filter,
+      deviceReads: Int,
+      hostReads: Int,
+      multithreadedDeviceReads: Int)
 
   private val filterCases = Seq(
     FilterCase("a statistics filter", LessThan("sorted_int", 500), deviceReads = 1,
-      hostReads = 0),
-    FilterCase("a dictionary filter", EqualTo("filter_int", 7), deviceReads = 1, hostReads = 1),
+      hostReads = 0, multithreadedDeviceReads = 1),
+    FilterCase("a dictionary filter", EqualTo("filter_int", 7), deviceReads = 1, hostReads = 1,
+      multithreadedDeviceReads = 2),
     // 'key_500' sorts inside every row group's range of strings, so statistics keep them all,
     // but no dictionary holds it, so only the dictionary pages are read.
     FilterCase("a filter no dictionary matches", EqualTo("filter_str", "key_500"),
-      deviceReads = 0, hostReads = 1))
+      deviceReads = 0, hostReads = 1, multithreadedDeviceReads = 1))
 
-  // Without a TaskContext the semaphore is always free, so AUTO reads the same as ON.
-  for (filterCase <- filterCases; gdsMode <- GpuDirectStorageMode.values.toSeq;
-       direct <- Seq(true, false)) {
+  for (filterCase <- filterCases; mode <- readModes; direct <- Seq(true, false)
+       if direct || mode.gdsMode != GpuDirectStorageMode.OFF) {
     val file = if (direct) "a device-direct file" else "a file not readable to the device"
-    test(s"${filterCase.name} on $file in $gdsMode decodes the same rows as a host read") {
+    test(s"${filterCase.name} on $file in $mode decodes the same rows as a host read") {
       withParquetFile { path =>
         val metrics = newMetrics()
         val rangeReader = new CountingReader(path, metrics, direct)
-        read(new HybridScanFileByteSource(fileIO, path, metrics, rangeReader), path,
-            filterCase.filter, gdsMode) { batch =>
+        readIn(mode, new HybridScanFileByteSource(fileIO, path, metrics, rangeReader), path,
+            filterCase.filter) { batch =>
           read(hostSource(path), path, filterCase.filter, GpuDirectStorageMode.OFF) { hostBatch =>
             assert(batch.isDefined == hostBatch.isDefined)
             batch.foreach(TestUtils.compareBatches(hostBatch.get, _))
           }
         }
         val deviceBytes = metrics(GpuMetric.HYBRID_SCAN_DEVICE_BYTES_READ).value
-        if (direct && gdsMode != GpuDirectStorageMode.OFF) {
-          assert(rangeReader.deviceReads == filterCase.deviceReads)
-          assert(rangeReader.hostReads == filterCase.hostReads)
-          assert((deviceBytes > 0) == (filterCase.deviceReads > 0))
+        if (direct && mode.gdsMode != GpuDirectStorageMode.OFF) {
+          val (deviceReads, hostReads) = if (mode.multithreaded) {
+            (filterCase.multithreadedDeviceReads, 0)
+          } else {
+            (filterCase.deviceReads, filterCase.hostReads)
+          }
+          assert(rangeReader.deviceReads == deviceReads)
+          assert(rangeReader.hostReads == hostReads)
+          assert((deviceBytes > 0) == (deviceReads > 0))
         } else {
           assert(rangeReader.deviceReads == 0)
           assert(rangeReader.hostReads > 0)

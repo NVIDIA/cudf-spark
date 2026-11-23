@@ -1631,11 +1631,15 @@ case class GpuParquetMultiFilePartitionReaderFactory(
           filterHandler.readThriftFooter(fileIO, filePath, fileConf)
         }
       }
-      // GPUDirect Storage is not supported here yet, so every mode reads through host memory.
+      // AUTO is not supported yet, so it reads through host memory.
+      val gdsMode = if (config.gdsMode == RapidsConf.GpuDirectStorageMode.ON) {
+        RapidsConf.GpuDirectStorageMode.ON
+      } else {
+        RapidsConf.GpuDirectStorageMode.OFF
+      }
       new HybridScanMultithreadedParquetPartitionReader(fileIO, conf, files,
         HybridScanContext(readDataSchema, config.filters, config.filterKeepThreshold,
-          config.maxH2DPackSize, config.minH2DPackSize, execMetrics,
-          RapidsConf.GpuDirectStorageMode.OFF),
+          config.maxH2DPackSize, config.minH2DPackSize, execMetrics, gdsMode),
         readFooter,
         maxReadBatchSizeRows = maxReadBatchSizeRows,
         maxReadBatchSizeBytes = maxReadBatchSizeBytes,

@@ -128,8 +128,8 @@ class HybridScanNativeFileSuite extends RmmSparkRetrySuiteBase {
     }
   }
 
-  // The MULTITHREADED reader's pool threads each open a source, so KvikIO serves several files
-  // at once.
+  // The MULTITHREADED reader's pool threads each open a source this way, so KvikIO serves
+  // several files at once.
   test("pool threads read local files natively, to host memory, at the same time") {
     withLocalFile { path =>
       val pool = ExecutionContext.fromExecutorService(Executors.newFixedThreadPool(4))
@@ -146,7 +146,12 @@ class HybridScanNativeFileSuite extends RmmSparkRetrySuiteBase {
     RmmSpark.poolThreadWorkingOnTask(1)
     try {
       val metrics = newMetrics()
-      withResource(nativeSource(path, metrics)) { source =>
+      val fileIO = new HadoopFileIO(new Configuration())
+      val source = HybridScanMultithreadedParquetPartitionReader.createFileSource(fileIO, path,
+        metrics)
+      withResource(source) { _ =>
+        assert(source.rangeReader.isInstanceOf[NativeFileRangeReader])
+        assert(!source.isDeviceReadDirect(ranges))
         withResource(source.fetch(ranges)) { buffers =>
           ranges.zip(buffers).foreach { case (range, buffer) => assertHoldsRange(buffer, range) }
         }
