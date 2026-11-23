@@ -154,6 +154,7 @@ object GpuMetric extends Logging {
   val HYBRID_SCAN_GPU_BUSY_HOST_BYTES_READ = "hybridScanGpuBusyHostBytesRead"
   val HYBRID_SCAN_BYTES_REQUESTED = "hybridScanBytesRequested"
   val HYBRID_SCAN_DEVICE_BYTES_READ = "hybridScanDeviceBytesRead"
+  val HYBRID_SCAN_NATIVE_HOST_BYTES_READ = "hybridScanNativeHostBytesRead"
   val DELETION_VECTOR_SCATTER_TIME = "deletionVectorScatterTime"
   val DELETION_VECTOR_SIZE = "deletionVectorSize"
   val CPU_BRIDGE_PROCESSING_TIME = "cpuBridgeProcessingTime"
@@ -233,6 +234,7 @@ object GpuMetric extends Logging {
     "dictionary page fetched for pruning again with its column chunk"
   val DESCRIPTION_HYBRID_SCAN_DEVICE_BYTES_READ =
     "hybrid scan bytes read to device with GDS, including alignment padding"
+  val DESCRIPTION_HYBRID_SCAN_NATIVE_HOST_BYTES_READ = "hybrid scan bytes read to host with KvikIO"
   val DESCRIPTION_DELETION_VECTOR_SCATTER_TIME = "deletion vector scatter time"
   val DESCRIPTION_DELETION_VECTOR_SIZE = "deletion vector size"
   val DESCRIPTION_GPU_OUTPUT_BATCH_BYTES = "decoded batch bytes"
