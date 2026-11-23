@@ -602,7 +602,9 @@ com.amazonaws:aws-java-sdk-bundle:${AWS_SDK_BUNDLE_VERSION}"
       # Requires to setup s3 buckets and namespaces to run iceberg s3tables tests.
       # These steps are included in the test pipeline.
       # Please refer to integration_tests/README.md#run-apache-iceberg-s3tables-tests
-      # Set the file cache and S3 PerfIO at startup so path tests can verify the S3 reader.
+      # filecache.enabled is a startup-only config, so it must be set here via
+      # PYSP_TEST_ env var rather than as a session-level Spark config, because
+      # FileCacheManager is initialized at executor startup time.
       env \
         HOST_NAME=$PROJECT_REPO_HOST \
         EXPECTED_ICEBERG_VERSION=${ICEBERG_VERSION} \
@@ -611,7 +613,6 @@ com.amazonaws:aws-java-sdk-bundle:${AWS_SDK_BUNDLE_VERSION}"
         PYSP_TEST_spark_driver_memory=1G \
         PYSP_TEST_spark_executor_memory=2G \
         PYSP_TEST_spark_rapids_filecache_enabled=true \
-        PYSP_TEST_spark_rapids_perfio_s3_enabled=true \
         PYSP_TEST_spark_sql_extensions="org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions" \
         PYSP_TEST_spark_sql_catalog_spark__catalog="org.apache.iceberg.spark.SparkSessionCatalog" \
         "PYSP_TEST_spark_sql_catalog_spark__catalog_catalog-impl=software.amazon.s3tables.iceberg.S3TablesCatalog" \

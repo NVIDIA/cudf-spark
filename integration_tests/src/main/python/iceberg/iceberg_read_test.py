@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from contextlib import closing
 from decimal import Decimal
 import json
 
@@ -1132,15 +1131,10 @@ def _create_iceberg_table_from_schema(spark, table_name, fields, format_version)
 def _append_external_parquet(spark, table, path, row_count):
     jvm = spark_jvm()
     hpath = jvm.org.apache.hadoop.fs.Path(path)
-    conf = spark._jsc.hadoopConfiguration()
-    # The catalog's FileIO may only read its own storage (e.g. S3 Tables).
-    location = table.locationProvider().newDataLocation(hpath.getName())
-    output = table.io().newOutputFile(location)
-    with closing(hpath.getFileSystem(conf).open(hpath)) as src, closing(output.create()) as dst:
-        jvm.org.apache.hadoop.io.IOUtils.copyBytes(src, dst, conf, False)
-    data_file = (jvm.org.apache.iceberg.DataFiles.builder(table.spec())
-                 .withInputFile(output.toInputFile()).withFormat('PARQUET')
-                 .withRecordCount(row_count).build())
+    size = hpath.getFileSystem(spark._jsc.hadoopConfiguration()).getFileStatus(hpath).getLen()
+    data_file = jvm.org.apache.iceberg.DataFiles.builder(table.spec()).withPath(path) \
+        .withFormat(jvm.org.apache.iceberg.FileFormat.PARQUET) \
+        .withFileSizeInBytes(size).withRecordCount(row_count).build()
     mapping = jvm.org.apache.iceberg.mapping.MappingUtil.create(table.schema())
     table.updateProperties().set('schema.name-mapping.default',
         jvm.org.apache.iceberg.mapping.NameMappingParser.toJson(mapping)).commit()
@@ -1153,6 +1147,7 @@ def _append_external_parquet(spark, table, path, row_count):
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @ignore_order(local=True)
 @iceberg_fast_test
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="External Parquet files require a local catalog")
 def test_iceberg_unmapped_validity_helper_id(
         spark_tmp_table_factory, spark_tmp_path, format_version, reader_type):
     table_name = get_full_table_name(spark_tmp_table_factory)
@@ -1219,6 +1214,7 @@ def test_iceberg_unmapped_validity_helper_id(
     not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON))])
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @ignore_order(local=True)
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="External Parquet files require a local catalog")
 def test_iceberg_legacy_list_initial_defaults(
         spark_tmp_table_factory, spark_tmp_path, format_version, reader_type):
     table_name = get_full_table_name(spark_tmp_table_factory)
