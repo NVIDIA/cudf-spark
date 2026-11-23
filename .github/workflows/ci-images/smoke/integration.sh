@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Check the integration image's Python dependencies, Maven, and alternate JDK.
+# Check the integration image's Python dependencies, Maven, and Java 8 toolchain.
 set -euo pipefail
 image=${1:?Image reference required}
 platform=${2:?Platform required}
@@ -20,30 +20,22 @@ if [[ "$installed" != "$1" ]]; then
   echo "Expected a $1 Python runtime, found $installed" >&2
   exit 1
 fi
-for jdk21 in /usr/lib/jvm/java-21-openjdk /usr/lib/jvm/java-21-openjdk-*; do
-  [[ -x "$jdk21/bin/javac" ]] && break
-done
-for tool in java javac; do
-  "$tool" -version
-  if [[ $(readlink -f "$(command -v "$tool")") == "$(readlink -f "$jdk21/bin/$tool")" ]]; then
-    echo "JDK 21 must be opt-in, but $tool on PATH selects it" >&2
-    exit 1
-  fi
-done
-if [[ -n ${JAVA_HOME:-} && $(readlink -f "$JAVA_HOME/bin/java") == "$(readlink -f "$jdk21/bin/java")" ]]; then
-  echo "JDK 21 must be opt-in, but JAVA_HOME selects it" >&2
-  exit 1
+# Rocky 9 exposes Java 17 on PATH, but Maven uses Java 8 from JAVA_HOME.
+java -version 2>&1 | grep -E '^openjdk version "(1\.8|17)\.'
+javac -version 2>&1 | grep -E '^javac (1\.8|17)\.'
+if [[ -n ${JAVA_HOME:-} ]]; then
+  export PATH="$JAVA_HOME/bin:$PATH"
 fi
 cd "$(mktemp -d)"
 cat > Probe.java <<'JAVA'
 class Probe {
   public static void main(String[] args) {
-    if (Runtime.version().feature() != 21) throw new AssertionError(Runtime.version());
+    System.out.println("Java " + System.getProperty("java.version") + " OK");
   }
 }
 JAVA
-"$jdk21/bin/javac" --release 21 Probe.java
-"$jdk21/bin/java" -cp . Probe
+javac Probe.java
+java -cp . Probe | grep '^Java 1\.8\.'
 mvn --version
 python -c 'import pandas, pyarrow, pytest, sre_yield, xdist'
 SMOKE
