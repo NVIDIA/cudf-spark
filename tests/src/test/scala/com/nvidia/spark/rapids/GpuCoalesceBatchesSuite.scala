@@ -41,8 +41,11 @@ import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType}
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.catalyst.expressions.ExprId
 import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.execution.columnar.{DefaultCachedBatchSerializer, InMemoryRelation,
+  InMemoryTableScanExec}
 import org.apache.spark.sql.execution.metric.SQLMetric
-import org.apache.spark.sql.execution.vectorized.OnHeapColumnVector
+import org.apache.spark.sql.execution.vectorized.{OffHeapColumnVector, OnHeapColumnVector,
+  WritableColumnVector}
 import org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
 import org.apache.spark.sql.types._
@@ -304,6 +307,79 @@ class GpuCoalesceBatchesSuite extends SparkQueryCompareTestSuite {
       withResource(batch) { _ =>
         assertResult(1)(batch.numCols())
         assertResult(2)(batch.numRows())
+      }
+    }
+  }
+
+  test("host coalesce can close Spark cache vectors after copying") {
+    Seq[WritableColumnVector](
+      new OnHeapColumnVector(2, IntegerType),
+      new OffHeapColumnVector(2, IntegerType)
+    ).foreach { vector =>
+      vector.putInt(0, 10)
+      vector.putInt(1, 20)
+      val input = new ColumnarBatch(Array(vector), 2)
+      val coalesceIter = new HostToGpuCoalesceIterator(
+        Iterator.single(input),
+        TargetSize(1000),
+        new StructType().add("ints", IntegerType),
+        numInputRows = NoopMetric,
+        numInputBatches = NoopMetric,
+        numOutputRows = NoopMetric,
+        numOutputBatches = NoopMetric,
+        streamTime = NoopMetric,
+        concatTime = NoopMetric,
+        copyBufTime = NoopMetric,
+        opTime = NoopMetric,
+        opName = "cache vector close test",
+        useArrowCopyOpt = false,
+        inputBatchCleanup = HostBatchCleanupPolicy.CloseAfterCopy)
+
+      withResource(coalesceIter.next()) { output =>
+        assertResult(2)(output.numRows())
+      }
+      vector match {
+        case onHeap: OnHeapColumnVector =>
+          intercept[NullPointerException](onHeap.getInt(0))
+        case offHeap: OffHeapColumnVector =>
+          assertResult(0L)(offHeap.valuesNativeAddress())
+        case other =>
+          fail(s"Unexpected vector type: ${other.getClass.getName}")
+      }
+
+      // DefaultCachedBatchSerializer closes the batch again at task completion.
+      input.close()
+    }
+  }
+
+  test("only the exact default cache serializer selects close-after-copy") {
+    withGpuSparkSession { spark =>
+      val cached = spark.range(2).cache()
+      try {
+        val relation = cached.queryExecution.withCachedData.collectFirst {
+          case r: InMemoryRelation => r
+        }.getOrElse(fail("Expected an InMemoryRelation"))
+
+        def scanWithSerializer(serializer: DefaultCachedBatchSerializer): InMemoryTableScanExec = {
+          val updatedRelation = relation.copy(
+            cacheBuilder = relation.cacheBuilder.copy(serializer = serializer))
+          InMemoryTableScanExec(updatedRelation.output, Seq.empty, updatedRelation)
+        }
+
+        val defaultScan = scanWithSerializer(new DefaultCachedBatchSerializer)
+        assertResult(HostBatchCleanupPolicy.CloseAfterCopy) {
+          GpuTransitionOverrides.hostBatchCleanupFor(defaultScan)
+        }
+
+        val customSerializerScan = scanWithSerializer(new DefaultCachedBatchSerializer {})
+        assertResult(HostBatchCleanupPolicy.ProducerCloses) {
+          GpuTransitionOverrides.hostBatchCleanupFor(customSerializerScan)
+        }
+        assertResult(HostBatchCleanupPolicy.ProducerCloses) {
+          GpuTransitionOverrides.hostBatchCleanupFor(relation.cachedPlan)
+        }
+      } finally {
+        cached.unpersist(blocking = true)
       }
     }
   }

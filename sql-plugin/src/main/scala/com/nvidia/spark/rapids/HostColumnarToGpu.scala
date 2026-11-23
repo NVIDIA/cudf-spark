@@ -209,6 +209,13 @@ object HostColumnarToGpu extends Logging {
   }
 }
 
+sealed trait HostBatchCleanupPolicy extends Serializable
+
+object HostBatchCleanupPolicy {
+  case object ProducerCloses extends HostBatchCleanupPolicy
+  case object CloseAfterCopy extends HostBatchCleanupPolicy
+}
+
 /**
  * This iterator builds GPU batches from host batches. The host batches potentially use Spark's
  * UnsafeRow so it is not safe to cache these batches. Rows must be read and immediately written
@@ -227,7 +234,8 @@ class HostToGpuCoalesceIterator(iter: Iterator[ColumnarBatch],
     opTime: GpuMetric,
     opName: String,
     useArrowCopyOpt: Boolean,
-    releaseSemaphoreWhilePulling: Boolean = false)
+    releaseSemaphoreWhilePulling: Boolean = false,
+    inputBatchCleanup: HostBatchCleanupPolicy = HostBatchCleanupPolicy.ProducerCloses)
   extends AbstractGpuCoalesceIterator(iter,
     goal,
     numInputRows,
@@ -289,12 +297,7 @@ class HostToGpuCoalesceIterator(iter: Iterator[ColumnarBatch],
   }
 
 
-  /**
-   * addBatchToConcat for HostToGpuCoalesceIterator does not need to close `batch`
-   * because the batch is closed by the producer iterator.
-   * See: https://github.com/NVIDIA/spark-rapids/issues/6995
-   * @param batch the batch to add in.
-   */
+  /** Copy `batch` into the GPU batch builder, then apply its configured cleanup policy. */
   override def addBatchToConcat(batch: ColumnarBatch): Unit = {
     withResource(new MetricRange(copyBufTime)) { _ =>
       val rows = batch.numRows()
@@ -307,6 +310,7 @@ class HostToGpuCoalesceIterator(iter: Iterator[ColumnarBatch],
         batchRowLimit = GpuBatchUtils.estimateRowCount(goal.targetSizeBytes, bytesCopied, rows)
       }
     }
+    cleanupInputBatch(batch)
   }
 
   override def getBatchDataSize(batch: ColumnarBatch): Long = {
@@ -371,14 +375,23 @@ class HostToGpuCoalesceIterator(iter: Iterator[ColumnarBatch],
     ret
   }
   override protected def cleanupInputBatch(batch: ColumnarBatch): Unit = {
-    // Host batches are closed by the producer not the consumer, so nothing to do.
+    inputBatchCleanup match {
+      case HostBatchCleanupPolicy.ProducerCloses =>
+        // Host batches are normally closed by the producer, not the consumer.
+        // See: https://github.com/NVIDIA/spark-rapids/issues/6995
+      case HostBatchCleanupPolicy.CloseAfterCopy =>
+        batch.close()
+    }
   }
 }
 
 /**
  * Put columnar formatted data on the GPU.
  */
-case class HostColumnarToGpu(child: SparkPlan, goal: CoalesceSizeGoal)
+case class HostColumnarToGpu(
+    child: SparkPlan,
+    goal: CoalesceSizeGoal,
+    inputBatchCleanup: HostBatchCleanupPolicy = HostBatchCleanupPolicy.ProducerCloses)
   extends ShimUnaryExecNode
   with GpuExec {
   import GpuMetric._
@@ -425,6 +438,7 @@ case class HostColumnarToGpu(child: SparkPlan, goal: CoalesceSizeGoal)
 
     // cache in a local to avoid serializing the plan
     val outputSchema = schema
+    val cleanupPolicy = inputBatchCleanup
 
     val batches = child.executeColumnar()
 
@@ -435,7 +449,7 @@ case class HostColumnarToGpu(child: SparkPlan, goal: CoalesceSizeGoal)
       new HostToGpuCoalesceIterator(iter, goal, outputSchema,
         numInputRows, numInputBatches, numOutputRows, numOutputBatches,
         streamTime, concatTime, copyBufTime, opTime,
-        "HostColumnarToGpu", confUseArrow, releaseSemaphore)
+        "HostColumnarToGpu", confUseArrow, releaseSemaphore, cleanupPolicy)
     }
   }
 }
