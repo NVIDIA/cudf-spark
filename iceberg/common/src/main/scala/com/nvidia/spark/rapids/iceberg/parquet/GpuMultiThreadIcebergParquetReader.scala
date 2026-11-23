@@ -142,8 +142,8 @@ class GpuMultiThreadIcebergParquetReader(
       private lazy val metadataBatchRows = GpuNullBatchIterator.maxRows(outputSchema,
         readerConf.maxBatchSizeRows, math.min(readerConf.maxBatchSizeBytes,
           readerConf.targetBatchSizeBytes))
-      private val combineMetadata = !multiThreadConf.disableCombining &&
-        multiThreadConf.combineConf.combineThresholdSize > 0
+      // GpuReaderFactory disables combining for the entire task if any split has delete files.
+      private val combineMetadata = canUseCombine
       private val mixedConstantGroups =
         readerConf.metrics.getOrElse("numMixedConstantMetadataGroups", NoopMetric)
 
@@ -151,10 +151,8 @@ class GpuMultiThreadIcebergParquetReader(
         if (!combineMetadata || meta.numRows == 0) {
           false
         } else {
-          val file = findIcebergFile(meta.partitionedFile)
-          val processor = postProcessors.get(file)
-          processor != null && !deletionVectors.containsKey(file) &&
-            deleteFilterProvider(file).isEmpty && processor.canMaterializeMetadataOnly
+          val processor = postProcessors.get(findIcebergFile(meta.partitionedFile))
+          processor != null && processor.canMaterializeMetadataOnly
         }
       }
 

@@ -23,6 +23,7 @@ package com.nvidia.spark.rapids.iceberg
 import java.nio.file.Files
 import java.util.{HashMap => JHashMap}
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.atomic.AtomicInteger
 
 import com.nvidia.spark.rapids.{CombineConf, GpuColumnVector, LocalGpuMetric, PerfIO,
   PerfIOConf, RmmSparkRetrySuiteBase, ThreadPoolConfBuilder}
@@ -134,6 +135,7 @@ class GpuMultiThreadIcebergParquetReaderSuite
             new Schema(Types.NestedField.optional(partitionFieldId, "a", Types.LongType.get()))
           }
           val mixedConstantGroups = new LocalGpuMetric
+          val deleteFilterCalls = new AtomicInteger()
           val conf = GpuIcebergParquetReaderConf(
             caseSensitive = true,
             hadoopConf,
@@ -171,7 +173,10 @@ class GpuMultiThreadIcebergParquetReaderSuite
                   values.put(partitionFieldId, constants(file))
                 }
                 values
-              }, _ => None, _ => None, conf)) { icebergReader =>
+              }, _ => {
+                deleteFilterCalls.incrementAndGet()
+                None
+              }, _ => None, conf)) { icebergReader =>
             val reader = icebergReader.reader
             def readFile(index: Int) = {
               val runner = reader.getBatchRunner(taskContext,
@@ -194,6 +199,7 @@ class GpuMultiThreadIcebergParquetReaderSuite
                     assert(secondMeta.isInstanceOf[HostMemoryEmptyMetaData])
                     assert(firstMeta.memBuffersAndSizes.map(_.numRows).sum == firstRows)
                     assert(secondMeta.memBuffersAndSizes.map(_.numRows).sum == secondRows)
+                    val callsBeforeCombining = deleteFilterCalls.get()
                     withResource(reader.combineHMBs(Array(firstMeta, secondMeta))) { combined =>
                       assert(combined.memBuffersAndSizes.map(_.numRows).sum ==
                         firstRows + secondRows)
@@ -243,6 +249,7 @@ class GpuMultiThreadIcebergParquetReaderSuite
                       }
                       assert(batchSizes.toSeq == expectedBatchSizes)
                       assert(mixedConstantGroups.value == (if (sameConstants) 0L else 1L))
+                      assert(deleteFilterCalls.get() == callsBeforeCombining)
                     }
                   }
                 }
