@@ -170,6 +170,23 @@ object GpuOrcScan {
     FileFormatChecks.tag(meta, schema, OrcFormatType, ReadFileOp)
   }
 
+  private[rapids] def failIfRequestedColumnsAreEncrypted(
+      orcReader: Reader,
+      fileIncluded: Array[Boolean]): Unit = {
+    val hasRequestedEncryptedColumns = orcReader.getColumnEncryptionKeys.exists { key =>
+      key.getEncryptionRoots.exists { variant =>
+        val root = variant.getRoot
+        (math.max(1, root.getId) to root.getMaximumId).exists(fileIncluded)
+      } && key.isAvailable
+    }
+    if (hasRequestedEncryptedColumns) {
+      throw new QueryExecutionException(
+        "The GPU does not support decrypting encrypted ORC columns. " +
+          "To read ORC files with available encryption keys, disable the GPU ORC reader via " +
+          s"${RapidsConf.ENABLE_ORC_READ.key}.")
+    }
+  }
+
   private lazy val numericLevels = Seq(
     DType.DTypeEnum.BOOL8,
     DType.DTypeEnum.INT8,
@@ -1660,6 +1677,8 @@ private case class GpuOrcFileFilterHandler(
 
       val (updatedReadSchema, fileIncluded) = checkSchemaCompatibility(orcReader.getSchema,
         readerOpts.getSchema, isCaseSensitive, isOrcFloatTypesToStringEnable)
+      val memFileIncluded = resolveMemFileIncluded(fileIncluded, requestedMapping)
+      GpuOrcScan.failIfRequestedColumnsAreEncrypted(orcReader, memFileIncluded)
       // GPU has its own read schema, so unset the reader include to read all the columns
       // specified by its read schema.
       readerOpts.include(null)
@@ -1673,8 +1692,7 @@ private case class GpuOrcFileFilterHandler(
         s.getOffset >= partFile.start && s.getOffset < partFile.start + partFile.length)
       val (stripes, writerTz) = buildOutputStripes(splitStripes.toSeq, evolution,
         sargApp, sargColumns, OrcConf.IGNORE_NON_UTF8_BLOOM_FILTERS.getBoolean(conf),
-        orcReader.getWriterVersion, updatedReadSchema,
-        resolveMemFileIncluded(fileIncluded, requestedMapping))
+        orcReader.getWriterVersion, updatedReadSchema, memFileIncluded)
       OrcPartitionReaderContext(filePath, conf, orcReader.getSchema, updatedReadSchema, evolution,
         orcReader.getFileTail, orcReader.getCompressionSize, orcReader.getCompressionKind,
         readerOpts, stripes.iterator.buffered, requestedMapping, writerTz,
