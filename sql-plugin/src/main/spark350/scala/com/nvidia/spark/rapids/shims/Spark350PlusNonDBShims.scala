@@ -78,6 +78,30 @@ class TableCacheQueryStageExecMeta(
 
 trait Spark350PlusNonDBShims extends Spark340PlusNonDBShims {
 
+  private class ToPrettyStringMetaImpl(
+      toPrettyString: ToPrettyString,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule)
+    extends CastExprMetaBase[ToPrettyString](toPrettyString, conf, p, r) {
+
+    override def needTimeZoneCheck: Boolean =
+      castNeedsTimeZone(toPrettyString.child.dataType, StringType)
+
+    override val toType: StringType.type = StringType
+
+    override def convertToGpu(child: Expression): GpuExpression = {
+      GpuToPrettyString(child)
+    }
+  }
+
+  private def createToPrettyStringMeta(
+      toPrettyString: ToPrettyString,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) =
+    new ToPrettyStringMetaImpl(toPrettyString, conf, p, r)
+
   private class PythonUDAFMetaImpl(
       a: PythonUDAF,
       conf: com.nvidia.spark.rapids.RapidsConf,
@@ -173,19 +197,7 @@ trait Spark350PlusNonDBShims extends Spark340PlusNonDBShims {
       GpuOverrides.expr[ToPrettyString]("An internal expressions which is used to " +
         "generate pretty string for all kinds of values",
         new ToPrettyStringChecks(),
-        (toPrettyString, conf, p, r) => {
-          new CastExprMetaBase[ToPrettyString](toPrettyString, conf, p, r) {
-
-            override def needTimeZoneCheck: Boolean = 
-              castNeedsTimeZone(toPrettyString.child.dataType, StringType)
-
-            override val toType: StringType.type = StringType
-
-            override def convertToGpu(child: Expression): GpuExpression = {
-              GpuToPrettyString(child)
-            }
-          }
-      }), 
+        createToPrettyStringMeta),
       GpuOverrides.expr[PythonUDAF](
         "UDF run in an external python process. Does not actually run on the GPU, but " +
           "the transfer of data to/from it can be accelerated",

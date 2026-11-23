@@ -22,193 +22,140 @@ import tempfile
 import unittest
 
 
-SCRIPT = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                       "check_replacement_rule_meta_lambdas.py")
 LINT = imp.load_source("check_replacement_rule_meta_lambdas", SCRIPT)
 
+# Registry helpers shaped like GpuOverrides.expr, the ExprRule constructor and ReplacementRule.wrap.
+HELPERS = u"""
+object GpuOverrides {
+  def expr[INPUT <: Expression](
+      desc: String,
+      pluginChecks: ExprChecks,
+      doWrap: (INPUT, RapidsConf, Option[RapidsMeta[_, _, _]], DataFromReplacementRule)
+          => BaseExprMeta[INPUT])
+      (implicit tag: ClassTag[INPUT]): ExprRule[INPUT] = ???
+}
+class ExprRule[INPUT <: Expression](
+    protected var doWrap: (
+        INPUT,
+        RapidsConf,
+        Option[RapidsMeta[_, _, _]],
+        DataFromReplacementRule) => BaseExprMeta[INPUT],
+    desc: String)
+abstract class ReplacementRule {
+  final def wrap(func: (INPUT, RapidsConf, Option[RapidsMeta[_, _, _]],
+      DataFromReplacementRule) => WRAP_TYPE): this.type = this
+}
+"""
+SCALA_HELPERS = LINT.find_helpers([LINT.tokenize(HELPERS)])
 
-class ReplacementRuleMetaLambdaLintSuite(unittest.TestCase):
-    def assert_factories(self, source, expected):
-        violations = LINT.scan_source("src/main/scala/Test.scala", source)
-        self.assertEqual(expected, [item.factories for item in violations])
 
-    def test_parameter_names_and_enclosing_object_do_not_bypass_check(self):
-        self.assert_factories("""
-          object AnyProvider {
-            rule((value, settings, owner, replacement) =>
-              new ExampleMeta(value, settings, owner, replacement))
+class ReplacementRuleMetaFactoryLintSuite(unittest.TestCase):
+    def assert_violations(self, source, expected):
+        violations = LINT.scan_source("Rules.scala", source, SCALA_HELPERS)
+        self.assertEqual(expected, [(item.line, item.helper) for item in violations])
+
+    def test_discovers_factory_parameters(self):
+        self.assertEqual(
+            {"expr": set([LINT.FactoryParam(0, 2, "doWrap")]),
+             "ExprRule": set([LINT.FactoryParam(0, 0, "doWrap")]),
+             "wrap": set([LINT.FactoryParam(0, 0, "func")])},
+            SCALA_HELPERS)
+
+    def test_rejects_lambdas_in_core_shim_and_provider_registries(self):
+        # Parameter names and enclosing objects do not matter.
+        self.assert_violations(u"""
+          object GpuStringOverrides {
+            expr[Conv]("conv", checks, (conv, conf, p, dataFromReplacementRule) =>
+              new GpuConvMeta(conv, conf, p, dataFromReplacementRule))
           }
-        """, [("ExampleMeta",)])
+          trait Spark400PlusCommonShims {
+            GpuOverrides.expr[VariantGet]("variant", checks,
+              (a, b, c, d) => new GpuVariantGetMeta(a, b, c, d))
+          }
+          class DeltaProviderBase {
+            new ExprRule[IncrementMetric]((i, c, p, r) => GpuIncrementMetricMeta(i, c, p, r), "d")
+            rule.wrap((e, c, p, r) => new WrappedMeta(e, c, p, r))
+          }
+        """, [(3, "expr"), (8, "expr"), (11, "ExprRule"), (12, "wrap")])
 
-    def test_checks_shim_and_external_provider_shapes(self):
-        for source in (
-                "shim((exec, conf, parent, rule) => new ShimExecMeta(exec, conf, parent, rule))",
-                "provider((scan, conf, parent, rule) => new ProviderScanMeta(scan, conf, parent, rule))"):
-            self.assertEqual(1, len(LINT.scan_source("src/main/scala/Test.scala", source)))
-
-    def test_checks_block_and_line_break_before_constructor(self):
-        self.assert_factories("""
-          rule((a, b, c, d) => {
-            new BlockMeta(
-              a, b, c, d)
+    def test_rejects_any_function_literal_body(self):
+        self.assert_violations(u"""
+          expr[A]("block", checks, (a, conf, p, r) => {
+            new BlockMeta(a, conf, p, r)
           })
-        """, [("BlockMeta",)])
-
-    def test_checks_conditional_factory_once(self):
-        self.assert_factories("""
-          rule((a, b, c, d) => if (enabled) {
-            new EnabledMeta(a, b, c, d)
-          } else {
-            new DisabledMeta(a, b, c, d)
+          expr[A]("line break", checks, (a, conf, p, r) =>
+            new LineBreakMeta(a, conf, p, r))
+          expr[A]("anonymous base", checks, (a, conf, p, r) =>
+            new CastExprMetaBase[A](a, conf, p, r) { override val toType = StringType })
+          expr[A]("brace lambda", checks, { (a, conf, p, r) =>
+            log(a)
+            new FooMeta(a, conf, p, r)
           })
-        """, [("EnabledMeta", "DisabledMeta")])
+          expr[A]("partial function", checks, { case (a, c, p, r) => new FooMeta(a, c, p, r) })
+          expr[A]("conditional", checks, (a, conf, p, r) =>
+            if (enabled) createFooMeta(a, conf, p, r) else createBarMeta(a, conf, p, r))
+        """, [(2, "expr"), (5, "expr"), (7, "expr"), (9, "expr"), (13, "expr"), (14, "expr")])
 
-    def test_checks_match_arms_without_skipping_nested_lambdas(self):
-        self.assert_factories("""
-          rule((a, conf, p, r) => a match {
-            case value => new ExampleMeta(value, conf, p, r)
-            case other if enabled(other) =>
-              new GuardedMetaImpl(other, conf, p, r)
-            case nested => helper(x => new NestedMeta(x, conf, p, r))
-          })
-        """, [("ExampleMeta", "GuardedMetaImpl")])
+    def test_rejects_placeholder_factories_and_named_arguments(self):
+        self.assert_violations(u"""
+          expr[A]("placeholder", checks, new FooMeta(_, _, _, _))
+          expr[A]("typed", checks, GpuFooMeta(_: A, _: RapidsConf, _, _))
+          expr[A]("named", checks, doWrap = (a, conf, p, r) => new FooMeta(a, conf, p, r))
+          expr[A](doWrap = createFooMeta, pluginChecks = checks, desc = "reordered")
+        """, [(2, "expr"), (3, "expr"), (4, "expr")])
 
-    def test_checks_extracted_metadata_implementation(self):
-        self.assert_factories(
-            "rule((a, conf, p, r) => new AbsMetaImpl(a, conf, p, r))",
-            [("AbsMetaImpl",)])
-
-    def test_nested_lambda_constructor_is_only_attributed_to_nested_lambda(self):
-        self.assert_factories("""
-          outer((a, b, c, d) =>
-            inner((e, f, g, h) => new InnerMeta(e, f, g, h)))
-        """, [("InnerMeta",)])
-
-    def test_checks_qualified_generic_and_anonymous_constructor(self):
-        self.assert_factories("""
-          rule((a: A[X, Y], b, c, d) =>
-            new pkg.GenericMeta[X, Y](a, b, c, d) { override def value = a })
-        """, [("pkg.GenericMeta",)])
-
-    def test_ignores_named_factory_comments_and_literals(self):
-        self.assert_factories("""
-          rule((a, b, c, d) => NamedRuleMeta)
-          // (a, b, c, d) => new CommentMeta(a, b, c, d)
-          val example = "(a, b, c, d) => new StringMeta(a, b, c, d)"
+    def test_accepts_named_factories(self):
+        self.assert_violations(u"""
+          expr[A]("method", checks, createFooMeta)
+          expr[A]("companion", checks, GpuFooMeta)
+          expr[A]("curried", checks, createElementAtMeta(nullOnInvalidAccess))
+          expr[A]("eta", checks, createFooMeta _)
+          new ExprRule[A](createFooMeta, "constructor")
+          rule.wrap(createWrappedMeta)
         """, [])
 
-    def test_requires_four_parameters(self):
-        self.assert_factories(
-            "rule((a, b, c) => new ThreeArgumentMeta(a, b, c))", [])
-
-    def test_semicolon_ends_unbraced_lambda_body(self):
-        self.assert_factories("""
-          val factory = (a, b, c, d) => named(a, b, c, d);
-          val unrelated = new UnrelatedMeta(a, b, c, d)
+    def test_only_checks_factory_arguments_of_helper_calls(self):
+        self.assert_violations(u"""
+          expr[A]("other arguments", ExprChecks(types.map(t => t.nested())), createFooMeta)
+          expr[A]("non-factory literal", (a, b, c, d) => checks, createFooMeta)
+          expr[A]("nested placeholder", checks, createFooMeta(types.map(_.nested())))
+          rows.scan(0)(_ + _)
+          ByteBuffer.wrap(bytes)
+          metrics.map(m => (m, conf, p, r) => new FooMeta(m, conf, p, r))
+          def expr(desc: String): Unit = ()
         """, [])
 
-    def test_inferred_semicolon_ends_unbraced_lambda_body(self):
-        self.assert_factories("""
-          val factory = (a, b, c, d) => named(a, b, c, d)
-          val unrelated = new UnrelatedMeta(a, b, c, d)
-        """, [])
+    def test_ignores_comments_and_literals(self):
+        self.assert_violations(u"""
+          // expr[A]("comment", checks, (a, c, p, r) => new FooMeta(a, c, p, r))
+          /* expr[A]("block", checks, (a, c, p, r) => new FooMeta(a, c, p, r)) */
+          val doc = \"\"\"say "hi\"\"\"\"; expr[A](desc, c, (a, b, c, d) => x)
+          expr[A](s"${"("}", c, (a, b, c, d) => new FooMeta(a, b, c, d))
+          expr[A]('d, checks, (a, c, p, r) => new FooMeta(a, c, p, r))
+          expr[A]("after literals", checks, (a, c, p, r) \u21d2 new FooMeta(a, c, p, r))
+        """, [(4, "expr"), (5, "expr"), (6, "expr"), (7, "expr")])
 
-    def test_nested_unbraced_helper_does_not_hide_outer_constructor(self):
-        self.assert_factories("""
-          rule((a, conf, p, r) => {
-            val helper = (x: Int) => x + 1
-            new ExampleMeta(a, conf, p, r)
-          })
-        """, [("ExampleMeta",)])
-
-    def test_nested_helper_before_conditional_constructor(self):
-        self.assert_factories("""
-          rule((a, conf, p, r) => {
-            val helper = (x: Int) => helper2(x)
-            if (enabled) new EnabledMeta(a, conf, p, r)
-            else new DisabledMeta(a, conf, p, r)
-          })
-        """, [("EnabledMeta", "DisabledMeta")])
-
-    def test_line_break_after_operator_continues_nested_helper_body(self):
-        self.assert_factories("""
-          rule((a, conf, p, r) => {
-            val helper = (x: Int) => x +
-              new OffsetMeta(x)
-            helper
-          })
-        """, [])
-
-    def test_string_literal_ends_nested_helper_body_at_line_break(self):
-        self.assert_factories("""
-          rule((a, conf, p, r) => {
-            val helper = (x: String) => x + "suffix"
-            new ExampleMeta(a, conf, p, r)
-          })
-        """, [("ExampleMeta",)])
-
-    def test_condition_header_line_break_keeps_conditional_constructor(self):
-        self.assert_factories("""
-          rule((a, conf, p, r) => if (enabled)
-            new ExampleMeta(a, conf, p, r)
-          else named(a, conf, p, r))
-        """, [("ExampleMeta",)])
-
-    def test_loop_header_line_break_keeps_body_attached(self):
-        self.assert_factories("""
-          rule((a, conf, p, r) => while (pending)
-            new LoopMeta(a, conf, p, r))
-        """, [("LoopMeta",)])
-
-    def test_statement_after_conditional_helper_is_still_checked(self):
-        self.assert_factories("""
-          rule((a, conf, p, r) => {
-            val helper = (x: Int) => if (x > 0)
-              x else 0
-            new ExampleMeta(a, conf, p, r)
-          })
-        """, [("ExampleMeta",)])
-
-    def test_statements_not_led_by_keywords_end_nested_helper_body(self):
-        self.assert_factories("""
-          rule((a, conf, p, r) => {
-            val helper = (x: Int) => x + 1
-            wrap(new CallMeta(a, conf, p, r))
-          })
-          rule((a, conf, p, r) => {
-            val helper = x => x + 1
-            (new ParenMeta(a, conf, p, r))
-          })
-          rule((a, conf, p, r) => {
-            val helper = (x: Int) => x.`type`
-            { new BlockMeta(a, conf, p, r) }
-          })
-        """, [("CallMeta",), ("ParenMeta",), ("BlockMeta",)])
-
-    def test_brace_for_header_line_break_keeps_body_attached(self):
-        self.assert_factories("""
-          rule((a, conf, p, r) => for { x <- xs }
-            new LoopMeta(a, conf, p, r))
-        """, [("LoopMeta",)])
-
-    def test_continuation_keyword_line_keeps_else_branch(self):
-        self.assert_factories("""
-          rule((a, conf, p, r) => if (enabled) named(a, conf, p, r)
-          else new DisabledMeta(a, conf, p, r))
-        """, [("DisabledMeta",)])
-
-    def test_main_requires_zero_violations(self):
+    def test_main_scans_production_sources_with_cross_file_helpers(self):
         root = tempfile.mkdtemp()
         try:
-            source_dir = os.path.join(root, "module", "src", "main", "scala")
-            os.makedirs(source_dir)
-            source = os.path.join(source_dir, "Rules.scala")
-            with io.open(source, "w", encoding="utf-8") as source_file:
-                source_file.write(u"rule((a, b, c, d) => new ExampleMeta(a, b, c, d))")
-            self.assertEqual(1, LINT.main(["--root", root]))
-            with io.open(source, "w", encoding="utf-8") as source_file:
-                source_file.write(u"rule(ExampleMeta)")
+            def write(relative, text):
+                path = os.path.join(root, *relative.split("/"))
+                if not os.path.isdir(os.path.dirname(path)):
+                    os.makedirs(os.path.dirname(path))
+                with io.open(path, "w", encoding="utf-8") as source_file:
+                    source_file.write(text)
+
+            self.assertEqual(2, LINT.main(["--root", root]))
+            write("sql-plugin/src/main/scala/GpuOverrides.scala", HELPERS)
+            write("tests/src/test/scala/Suite.scala",
+                  u'expr[A]("test", c, (a, b, c, d) => new TestMeta(a, b, c, d))')
+            write("delta-lake/src/main/scala/Provider.scala", u'expr[A]("ok", c, createMeta)')
             self.assertEqual(0, LINT.main(["--root", root]))
+            write("delta-lake/src/main/scala/Provider.scala",
+                  u'expr[A]("bad", c, (a, b, c, d) => new BadMeta(a, b, c, d))')
+            self.assertEqual(1, LINT.main(["--root", root]))
         finally:
             shutil.rmtree(root)
 

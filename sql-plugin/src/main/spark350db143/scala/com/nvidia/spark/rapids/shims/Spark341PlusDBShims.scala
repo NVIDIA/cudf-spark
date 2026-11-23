@@ -37,6 +37,30 @@ import org.apache.spark.sql.types.StringType
 
 trait Spark341PlusDBShims extends Spark332PlusDBShims {
 
+  private class ToPrettyStringMetaImpl(
+      toPrettyString: ToPrettyString,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule)
+    extends CastExprMetaBase[ToPrettyString](toPrettyString, conf, p, r) {
+
+    override def needTimeZoneCheck: Boolean =
+      castNeedsTimeZone(toPrettyString.child.dataType, StringType)
+
+    override val toType: StringType.type = StringType
+
+    override def convertToGpu(child: Expression): GpuExpression = {
+      GpuToPrettyString(child)
+    }
+  }
+
+  private def createToPrettyStringMeta(
+      toPrettyString: ToPrettyString,
+      conf: RapidsConf,
+      p: Option[RapidsMeta[_, _, _]],
+      r: DataFromReplacementRule) =
+    new ToPrettyStringMetaImpl(toPrettyString, conf, p, r)
+
   private class Empty2NullMetaImpl(
       a: Empty2Null,
       conf: com.nvidia.spark.rapids.RapidsConf,
@@ -180,19 +204,7 @@ trait Spark341PlusDBShims extends Spark332PlusDBShims {
       GpuOverrides.expr[ToPrettyString]("An internal expressions which is used to " +
         "generate pretty string for all kinds of values",
         new ToPrettyStringChecks(),
-        (toPrettyString, conf, p, r) => {
-          new CastExprMetaBase[ToPrettyString](toPrettyString, conf, p, r) {
-
-            override def needTimeZoneCheck: Boolean = 
-              castNeedsTimeZone(toPrettyString.child.dataType, StringType)
-
-            override val toType: StringType.type = StringType
-
-            override def convertToGpu(child: Expression): GpuExpression = {
-              GpuToPrettyString(child)
-            }
-          }
-        }),
+        createToPrettyStringMeta),
       // Empty2Null is pulled out of FileFormatWriter by default since Spark 3.4.0,
       // so it is visible in the overriding stage.
       GpuOverrides.expr[Empty2Null](

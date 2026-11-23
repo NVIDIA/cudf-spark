@@ -100,7 +100,7 @@ abstract class DeltaProviderBase extends DeltaIOProvider {
     GpuOverrides.expr[IncrementMetric](
       "IncrementMetric",
       ExprChecks.unaryProject(TypeSig.all, TypeSig.all, TypeSig.all, TypeSig.all),
-      (cpuInc, conf, p, r) => GpuIncrementMetricMeta(cpuInc, conf, p, r)
+      GpuIncrementMetricMeta
     )
   ).map(r => (r.getClassFor.asSubclass(classOf[Expression]), r)).toMap
 
