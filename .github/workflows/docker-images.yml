@@ -1,0 +1,84 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Docker image CI
+
+on:
+  pull_request:
+    branches: [main, 'release/[0-9][0-9].[0-9][0-9]']
+  push:
+    branches: [main, 'release/[0-9][0-9].[0-9][0-9]']
+  schedule:
+    - cron: '27 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-ci-${{ github.event.pull_request.number || github.run_id }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  select:
+    name: Select Dockerfiles
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.repository == 'NVIDIA/cudf-spark' && !github.event.deleted &&
+       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')))
+    runs-on: ubuntu-latest
+    outputs:
+      validate: ${{ steps.recipes.outputs.validate }}
+      publish: ${{ steps.recipes.outputs.publish }}
+    steps:
+      - uses: NVIDIA/spark-rapids-common/checkout@main
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - id: recipes
+        run: python3 .github/workflows/ci-images/select.py
+
+  validate:
+    name: Validate ${{ matrix.image.image }}
+    needs: select
+    if: needs.select.outputs.validate != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.select.outputs.validate) }}
+    uses: ./.github/workflows/build-docker-image.yml
+    with:
+      config: ${{ toJSON(matrix.image) }}
+
+  result:
+    name: Docker image validation
+    if: always() && github.event_name == 'pull_request'
+    needs: [select, validate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: NVIDIA/spark-rapids-common/workflow-result-gate@main
+        with:
+          needs: ${{ toJSON(needs) }}
+          required-jobs: ${{ needs.select.outputs.validate == '[]' && '["select"]' || '["select","validate"]' }}
+
+  publish:
+    name: Publish ${{ matrix.image.image }}
+    needs: select
+    if: github.event_name != 'pull_request' && needs.select.outputs.publish != '[]'
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+    concurrency:
+      # Serialize promotion and cleanup of each package; never drop a pending release update.
+      group: docker-maintenance-${{ matrix.image.image }}
+      cancel-in-progress: false
+      queue: max
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.select.outputs.publish) }}
+    uses: ./.github/workflows/build-docker-image.yml
+    with:
+      config: ${{ toJSON(matrix.image) }}
+      publish: true
