@@ -7,8 +7,8 @@ editing one shuffle Dockerfile builds that example only; editing
 Markdown changes do not build images. Register new Dockerfiles in the catalog;
 when adding a local `COPY` or `ADD`, list its source in `recipe-inputs` so a
 later input-only change selects the right build and changes its recipe fingerprint.
-The `Docker image validation` PR check requires selection to succeed and all
-selected builds to pass; no Docker build is required for an unrelated change.
+The `CPU CI gate` passes when image selection succeeds and every selected build
+and smoke test passes. For an unrelated change, only selection needs to succeed.
 
 | Suite | On a pull request | On a matching branch push |
 | --- | --- | --- |

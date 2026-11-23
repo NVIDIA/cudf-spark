@@ -35,6 +35,9 @@ jobs:
         with:
           fetch-depth: 2
           persist-credentials: false
+      - name: Test image selection
+        if: github.event_name == 'pull_request'
+        run: python3 -m unittest discover -s .github/workflows/ci-images/tests -v
       - id: recipes
         run: python3 .github/workflows/ci-images/select.py
 
@@ -51,7 +54,7 @@ jobs:
       config: ${{ toJSON(matrix.image) }}
 
   result:
-    name: Docker image validation
+    name: CPU CI gate
     if: always() && github.event_name == 'pull_request'
     needs: [select, validate]
     runs-on: ubuntu-latest

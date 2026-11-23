@@ -13,10 +13,20 @@ fi
 docker run --rm -i --pull=never --platform "$platform" --network none \
   --entrypoint /bin/bash "$image" -s <<'SMOKE'
 set -euo pipefail
-javac -version
 for jdk21 in /usr/lib/jvm/java-21-openjdk /usr/lib/jvm/java-21-openjdk-*; do
   [[ -x "$jdk21/bin/javac" ]] && break
 done
+for tool in java javac; do
+  "$tool" -version
+  if [[ $(readlink -f "$(command -v "$tool")") == "$(readlink -f "$jdk21/bin/$tool")" ]]; then
+    echo "JDK 21 must be opt-in, but $tool on PATH selects it" >&2
+    exit 1
+  fi
+done
+if [[ -n ${JAVA_HOME:-} && $(readlink -f "$JAVA_HOME/bin/java") == "$(readlink -f "$jdk21/bin/java")" ]]; then
+  echo "JDK 21 must be opt-in, but JAVA_HOME selects it" >&2
+  exit 1
+fi
 cd "$(mktemp -d)"
 cat > Probe.java <<'JAVA'
 class Probe {
