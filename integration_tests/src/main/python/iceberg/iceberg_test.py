@@ -93,8 +93,9 @@ def _assert_metadata_only_reads(table, reader_type, format_version):
             'spark.rapids.sql.reader.batchSizeRows': '5'}
 
     constant_columns = '_spec_id, _partition'
-    # Iceberg 1.10 also exposes the v3 lineage columns as null on v1 and v2 tables.
-    if int(format_version) >= 3 or (runtime_iceberg_version or '').startswith('1.10.'):
+    # Iceberg 1.10 on Spark 3.5 also exposes the sequence number as null on v1 and v2 tables.
+    if int(format_version) >= 3 or (
+            is_spark_35x() and (runtime_iceberg_version or '').startswith('1.10.')):
         constant_columns += ', _last_updated_sequence_number'
     for query in [f"SELECT {constant_columns} FROM {table}",
                   f"SELECT count(*) FROM {table}", f"SELECT p, count(*) FROM {table} GROUP BY p"]:
