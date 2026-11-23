@@ -292,6 +292,16 @@ def _checksum_file(local_path):
     return os.path.join(head, '.' + tail + '.crc')
 
 
+def _remove_checksum_files(data_path):
+    """Remove the `.crc` sidecars of the local files under `data_path`, since a file with one is
+    read through Hadoop rather than KvikIO. Returns the local paths, or None if any is not local."""
+    local_paths = with_cpu_session(lambda spark: _local_paths(spark, data_path))
+    for path in local_paths or []:
+        if os.path.exists(_checksum_file(path)):
+            os.remove(_checksum_file(path))
+    return local_paths
+
+
 @_metric_reader_modes
 def test_hybrid_scan_native_host_reads(spark_tmp_path, reader_mode):
     """A local file's bytes are all read with KvikIO, and any other file's with none. The local
@@ -311,11 +321,7 @@ def test_hybrid_scan_native_host_reads(spark_tmp_path, reader_mode):
 
     data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
     with_cpu_session(lambda spark: write_test_data(spark, data_path, files=4))
-    local_paths = with_cpu_session(lambda spark: _local_paths(spark, data_path))
-    is_local = local_paths is not None
-    for path in local_paths or []:
-        if os.path.exists(_checksum_file(path)):
-            os.remove(_checksum_file(path))
+    is_local = _remove_checksum_files(data_path) is not None
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.read.parquet(data_path).filter('filter_int = 7'),
         conf=_metrics_conf(reader_mode),
@@ -603,6 +609,24 @@ def test_hybrid_scan_legacy_old_date_filter_throws(spark_tmp_path, reader_confs)
             lambda spark: spark.read.parquet(data_path).filter("d = DATE'1000-01-01'").collect(),
             conf=reader_confs),
         'SparkUpgradeException')
+
+
+@pytest.mark.parametrize('where', [
+    'sorted_int < 500',
+    'filter_int = 7',
+    "filter_str = 'key_500'",
+], ids=['stats', 'dict', 'none_survive_dict'])
+@pytest.mark.parametrize('gds_mode', ['OFF', 'ON', 'AUTO'])
+def test_hybrid_scan_gds_mode(spark_tmp_path, where, gds_mode):
+    """With GPUDirect Storage off, a local file is read to host memory through KvikIO. With it on,
+    a file is read to the device where KvikIO can, and through host memory where it cannot, the
+    path is not local, or the GPU is busy. The answer is the same either way."""
+    data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
+    with_cpu_session(lambda spark: write_test_data(spark, data_path))
+    _remove_checksum_files(data_path)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(data_path).filter(where),
+        conf=hybrid_conf(**{'spark.rapids.sql.reader.gpuDirectStorage.mode': gds_mode}))
 
 
 @pytest.mark.parametrize('reader_mode', ['PERFILE', 'MULTITHREADED'])

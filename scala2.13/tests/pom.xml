@@ -41,6 +41,8 @@
         <!-- Default for the parallel runner's exec execution: unlike the scalatest plugin,
              exec:exec does not honor -DskipTests on its own, so it is wired up explicitly. -->
         <skipTests>false</skipTests>
+        <!-- Set to true on machines with GDS to fail HybridScanGdsSuite when cuFile is not used. -->
+        <gds.required>false</gds.required>
     </properties>
 
     <dependencies>
@@ -123,6 +125,23 @@
             <plugin>
                 <groupId>org.scalatest</groupId>
                 <artifactId>scalatest-maven-plugin</artifactId>
+                <executions>
+                    <!-- HybridScanGdsSuite sets KvikIO's mode, which libcudf fixes at the first
+                         cuDF IO in a JVM, so it runs in a JVM of its own. -->
+                    <execution>
+                        <id>hybrid-scan-gds-test</id>
+                        <goals>
+                            <goal>test</goal>
+                        </goals>
+                        <configuration>
+                            <suites>com.nvidia.spark.rapids.parquet.HybridScanGdsSuite</suites>
+                            <systemProperties>
+                                <rapids.test.hybridScanGdsJvm>true</rapids.test.hybridScanGdsJvm>
+                                <gds.required>${gds.required}</gds.required>
+                            </systemProperties>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
             <plugin>
                 <groupId>org.apache.rat</groupId>

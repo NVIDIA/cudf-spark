@@ -1776,7 +1776,8 @@ case class GpuParquetPartitionReaderFactory(
       _ += (System.nanoTime() - startTime)
     }
     closeOnExcept(footer) { _ =>
-      val rangeReader = HybridScanFileByteSource.createRangeReader(filePath, metrics)
+      val rangeReader =
+        HybridScanFileByteSource.createRangeReader(filePath, metrics, config.gdsEnabled)
       val byteSource = new HybridScanFileByteSource(fileIO, filePath, metrics, rangeReader)
       val options = HybridScanPipeline.parquetOptions(readDataSchema.fieldNames)
       new HybridScanPerFileParquetPartitionReader(

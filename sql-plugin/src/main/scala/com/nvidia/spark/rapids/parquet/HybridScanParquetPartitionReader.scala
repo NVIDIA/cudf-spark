@@ -886,6 +886,12 @@ object HybridScanPipeline extends Logging {
       useFieldId: Boolean): Option[HybridScanConfig] = {
     val failOnFallback = rapidsConf.testParquetHybridScanFailOnFallback
     if (!rapidsConf.isParquetHybridScanEnabled) {
+      if (rapidsConf.isReaderGdsEnabled) {
+        logWarning(s"${RapidsConf.READER_GPU_DIRECT_STORAGE_MODE.key} is " +
+          s"${rapidsConf.readerGdsMode} but the hybrid scan reader, the only reader that uses " +
+          s"GPUDirect Storage, is disabled (${RapidsConf.PARQUET_HYBRID_SCAN_ENABLED.key}), so " +
+          "this read does not use it.")
+      }
       None
     } else if (!hybridScanAllowed) {
       reportFallback(failOnFallback, "the hybrid scan is not supported for this read in this " +
@@ -1131,7 +1137,9 @@ case class HybridScanConfig(
     filterKeepThreshold: Double,
     maxH2DPackSize: Long,
     minH2DPackSize: Long,
-    gdsMode: RapidsConf.GpuDirectStorageMode.Value)
+    gdsMode: RapidsConf.GpuDirectStorageMode.Value) {
+  def gdsEnabled: Boolean = gdsMode != RapidsConf.GpuDirectStorageMode.OFF
+}
 
 object HybridScanConfig {
   def apply(rapidsConf: RapidsConf, filters: HybridScanFilters): HybridScanConfig = {

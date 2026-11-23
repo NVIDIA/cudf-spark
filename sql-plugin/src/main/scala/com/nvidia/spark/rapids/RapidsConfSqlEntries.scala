@@ -571,15 +571,27 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
 
   val READER_GPU_DIRECT_STORAGE_MODE =
     conf("spark.rapids.sql.reader.gpuDirectStorage.mode")
-      .doc("How the Parquet hybrid scan reader " +
-          s"(${PARQUET_HYBRID_SCAN_ENABLED.key}) uses GPUDirect Storage. OFF reads through " +
-          "host memory. ON reads straight to device memory where it can. AUTO does the same " +
-          "when the task holds the GPU semaphore or can take it without waiting, and otherwise " +
-          "reads through host memory. Only the PERFILE reader type, set explicitly, reads to " +
-          "the device: MULTITHREADED reads through host memory, and the AUTO reader type picks " +
-          "MULTITHREADED for cloud files and COALESCING, which falls back to parquet-mr, for " +
-          "local ones. No file is read with GPUDirect Storage yet, so every mode reads through " +
-          "host memory.")
+      .doc("How readers of local files use GPUDirect Storage. OFF reads through host memory. " +
+          "ON reads straight to device memory where GPUDirect Storage can open the file. " +
+          "AUTO does the same when the task holds the GPU semaphore or can take it without " +
+          "waiting, and otherwise reads through host memory while it waits. Files " +
+          "GPUDirect Storage cannot open are read through host memory in either mode. Reads " +
+          "straight to device memory skip the file cache (spark.rapids.filecache.enabled), " +
+          "neither reading from it nor adding to it; reads through host memory use it as " +
+          "usual. cuFile may still stage reads through host memory if it falls back to its own " +
+          "compatibility mode, unreported, unless the executors set " +
+          "CUFILE_ALLOW_COMPAT_MODE=false (e.g. with " +
+          "spark.executorEnv.CUFILE_ALLOW_COMPAT_MODE=false). For details of how cuFile did " +
+          "the reads, set CUFILE_STATS_LEVEL=3 on the executors and see cuFile's gds_stats " +
+          "tool. Only the Parquet hybrid scan " +
+          s"reader (${PARQUET_HYBRID_SCAN_ENABLED.key}) supports it so far, and only with the " +
+          "PERFILE reader type, set explicitly: MULTITHREADED reads through host memory, and " +
+          "the AUTO reader type picks MULTITHREADED for cloud files and COALESCING, which " +
+          "falls back to parquet-mr, for local ones. Whether it is OFF is read once per " +
+          "executor, when KvikIO is first set up (at startup if the hybrid scan is enabled " +
+          "then), in place of the KVIKIO_COMPAT_MODE environment variable, so turning it on " +
+          "after that reads through host memory; the choice between ON and AUTO can change " +
+          "per session.")
       .internal()
       .stringConf
       .transform(_.toUpperCase(java.util.Locale.ROOT))
