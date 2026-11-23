@@ -118,6 +118,9 @@ case class GpuAlias(child: Expression, name: String)(
 
   override def selfConvertsToAst: Boolean = child.isInstanceOf[GpuExpression]
 
+  override def selfSupportsAstJit: Boolean =
+    child.isInstanceOf[GpuExpression] && GpuAstJitExpression.isSupportedDataType(dataType)
+
   override def convertToAst(numLeftTableColumns: Int): ast.AstExpression = child match {
     case e: GpuExpression => e.convertToAst(numLeftTableColumns)
     case e => throw new IllegalStateException(s"Attempt to convert $e to AST")

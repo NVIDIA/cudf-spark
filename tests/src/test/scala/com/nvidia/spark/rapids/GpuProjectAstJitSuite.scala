@@ -29,10 +29,11 @@ import org.apache.spark.sql.catalyst.expressions.{Abs, Attribute, AttributeRefer
   Expression, NamedExpression}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.{GpuAbs, GpuAdd, GpuBitwiseAnd, GpuGreatest, GpuMultiply,
-  GpuSubtract, GpuUnaryMinus}
+  GpuSubtract, GpuUnaryMinus, GpuUnaryPositive}
 import org.apache.spark.sql.rapids.metrics.source.MockTaskContext
-import org.apache.spark.sql.types.{ByteType, DataType, DoubleType, FloatType, IntegerType,
-  LongType, ShortType}
+import org.apache.spark.sql.types.{ArrayType, BinaryType, ByteType, DataType, DateType,
+  Decimal, DecimalType, DoubleType, FloatType, IntegerType, LongType, ShortType, StringType,
+  TimestampType}
 import org.apache.spark.util.TaskCompletionListener
 
 class GpuProjectAstJitSuite extends AnyFunSuite {
@@ -963,8 +964,35 @@ class GpuProjectAstJitSuite extends AnyFunSuite {
         }
       }
     }
-
   }
 
+  test("AST JIT guards unsupported leaf types and converts null string and decimal literals") {
+    assert(!GpuBoundReference(0, BinaryType, nullable = true)(
+      AttributeReference("b", BinaryType)().exprId, "b").selfSupportsAstJit)
+    assert(!GpuBoundReference(0, ArrayType(IntegerType), nullable = true)(
+      AttributeReference("a", ArrayType(IntegerType))().exprId, "a").selfSupportsAstJit)
+    assert(!GpuLiteral(null, BinaryType).selfSupportsAstJit)
+    assert(GpuLiteral(null, StringType).selfSupportsAstJit)
+    assert(GpuLiteral(null, DecimalType(10, 2)).selfSupportsAstJit)
 
+    // Verify AST conversion does not NPE on null string/decimal/date/timestamp literals
+    withResource(GpuLiteral(null, StringType).convertToAst(Int.MaxValue).compileJit()) { _ => }
+    withResource(GpuLiteral(null, DecimalType(10, 2)).convertToAst(Int.MaxValue).compileJit()) {
+      _ =>
+    }
+    withResource(GpuLiteral(Decimal(12345, 10, 2), DecimalType(10, 2))
+        .convertToAst(Int.MaxValue).compileJit()) { _ => }
+    withResource(GpuLiteral(null, DateType).convertToAst(Int.MaxValue).compileJit()) { _ => }
+    withResource(GpuLiteral(null, TimestampType).convertToAst(Int.MaxValue).compileJit()) { _ => }
+
+    // Transparent wrappers pass through AST JIT
+    withResource(gpuTable(
+        ColumnVector.fromBoxedInts(1, null, -5),
+        ColumnVector.fromBoxedInts(0, 0, 0))) { input =>
+      val wrapped = GpuKnownNotNull(GpuUnaryPositive(
+        GpuAdd(boundRef(0, IntegerType), GpuLiteral(2, IntegerType), failOnError = false)()))
+      assert(GpuAstJitExpression.canUseAstJit(wrapped))
+      assertResult(Seq(longs(3L, null, -3L)))(jitOnly(Seq(wrapped), input))
+    }
+  }
 }
