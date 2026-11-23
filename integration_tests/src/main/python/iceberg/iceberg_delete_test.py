@@ -27,7 +27,8 @@ from iceberg import (
     iceberg_nested_write_gens_list, iceberg_unsupported_mark,
     delete_partition_transforms_distributed, _build_tblprops, assert_iceberg_files_use_codec,
     supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance,
-    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df, rapids_reader_types)
+    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df, rapids_reader_types,
+    setup_iceberg_fixed_default_table, assert_iceberg_default_file_parity)
 from marks import allow_non_gpu, allow_non_gpu_conditional, iceberg, ignore_order, datagen_overrides, iceberg_fast_test
 from spark_session import is_spark_400_or_later, with_cpu_session, with_gpu_session
 
@@ -47,6 +48,39 @@ iceberg_delete_mor_enabled_conf = copy_and_update(iceberg_write_enabled_conf, {}
 # would be DeleteFromTableExec.
 DELETE_TEST_SEED = 42
 DELETE_TEST_SEED_OVERRIDE_REASON = "Ensure reproducible test data for DELETE operations"
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+def test_iceberg_v3_write_only_default_position_delete(spark_tmp_table_factory):
+    base = get_full_table_name(spark_tmp_table_factory)
+    cpu_table, gpu_table = f"{base}_cpu", f"{base}_gpu"
+    props = {"write.delete.mode": "merge-on-read"}
+
+    def setup(spark):
+        for table in (cpu_table, gpu_table):
+            setup_iceberg_fixed_default_table(
+                spark, table, initial_only=False, table_properties=props, initial_rows=2)
+
+    with_cpu_session(setup)
+
+    def delete(spark, table):
+        spark.sql(f"DELETE FROM {table} WHERE id = 1").collect()
+
+    with_cpu_session(lambda spark: delete(spark, cpu_table), conf=iceberg_write_enabled_conf)
+    with_iceberg_dml_session(lambda spark: delete(spark, gpu_table),
+                            "3", "merge-on-read", conf=iceberg_write_enabled_conf)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.table(gpu_table if spark.conf.get("spark.rapids.sql.enabled") == "true"
+                                  else cpu_table), conf=iceberg_write_enabled_conf)
+
+    def check(spark):
+        for table in (cpu_table, gpu_table):
+            assert spark.table(table).collect() == [Row(id=2, payload=None)]
+        assert_iceberg_default_file_parity(spark, cpu_table, gpu_table)
+
+    with_cpu_session(check, conf=iceberg_write_enabled_conf)
+
 
 def create_iceberg_table_with_data(table_name: str, 
                                    partition_col_sql=None,

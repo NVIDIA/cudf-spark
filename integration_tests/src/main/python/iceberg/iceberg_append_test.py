@@ -15,7 +15,7 @@ from typing import Callable, Any
 
 import pytest
 
-from asserts import assert_equal_with_local_sort, assert_spark_exception, \
+from asserts import assert_equal_with_local_sort, collect_data_or_exception, \
     assert_gpu_fallback_collect, assert_gpu_fallback_write_sql
 from conftest import is_iceberg_remote_catalog
 from data_gen import DEFAULT_DATA_GEN_LENGTH, gen_df, copy_and_update
@@ -28,7 +28,8 @@ from iceberg import (
     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, iceberg_table_properties_sql,
     row_lineage_df, iceberg_variant_read_conf, setup_iceberg_variant_table,
     setup_iceberg_write_default_tables, assert_iceberg_write_defaults,
-    assert_iceberg_write_only_default_fallback)
+    assert_iceberg_write_only_default_fallback, iceberg_default_file_snapshot,
+    update_iceberg_write_default)
 from marks import iceberg, ignore_order, allow_non_gpu, datagen_overrides, iceberg_fast_test, incompat
 from spark_session import with_gpu_session, with_cpu_session, is_spark_411_or_later
 
@@ -151,28 +152,82 @@ def test_insert_into_v3_table_fallback(spark_tmp_table_factory):
         conf=copy_and_update(iceberg_write_enabled_conf, {"spark.rapids.sql.format.iceberg.v3.enabled": "false"}))
 
 
+def _insert_omitting_default(spark, table, row_id):
+    before = iceberg_default_file_snapshot(spark, table)["files"]
+    failed, _ = collect_data_or_exception(
+        lambda: spark.sql(f"INSERT INTO {table} (id, p) VALUES ({row_id}, 0)").collect(),
+        "INCOMPATIBLE_DATA_FOR_TABLE.CANNOT_FIND_DATA")
+    if failed:
+        assert iceberg_default_file_snapshot(spark, table)["files"] == before
+    return not failed
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.parametrize("value_mode", ["omitted", "explicit", "null"])
+@allow_non_gpu("LocalTableScanExec")
+def test_iceberg_v3_write_default_gpu_write_cpu_read(spark_tmp_table_factory, value_mode):
+    cpu_table, gpu_table, _ = setup_iceberg_write_default_tables(spark_tmp_table_factory)
+    conf = copy_and_update(iceberg_write_enabled_conf, {"spark.sql.adaptive.enabled": "false"})
+    expected = [(1, 0, "legacy"), (2, 1, "legacy")]
+
+    def write(spark, table):
+        if value_mode == "omitted":
+            if _insert_omitting_default(spark, table, 3) and table == cpu_table:
+                expected.append((3, 0, "current"))
+        else:
+            value = "'explicit'" if value_mode == "explicit" else "NULL"
+            spark.sql(f"INSERT INTO {table} VALUES (3, 0, {value})")
+            if table == cpu_table:
+                expected.append((3, 0, "explicit" if value_mode == "explicit" else None))
+
+    assert_iceberg_write_defaults(cpu_table, gpu_table, write, expected, conf)
+
+
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @allow_non_gpu("LocalTableScanExec")
-def test_iceberg_v3_write_default_gpu_write_cpu_read(spark_tmp_table_factory):
-    cpu_table, gpu_table, catalog_has_default = setup_iceberg_write_default_tables(
-        spark_tmp_table_factory)
+def test_iceberg_v3_write_default_evolution(spark_tmp_table_factory):
+    cpu_table, gpu_table, _ = setup_iceberg_write_default_tables(spark_tmp_table_factory)
     conf = copy_and_update(iceberg_write_enabled_conf, {"spark.sql.adaptive.enabled": "false"})
+    expected = [(1, 0, "legacy"), (2, 1, "legacy")]
 
     def write(spark, table):
-        omitted = f"INSERT INTO {table} (id, p) VALUES (3, 0), (4, 1)"
-        if catalog_has_default:
-            spark.sql(omitted)
-        else:
-            assert_spark_exception(
-                lambda: spark.sql(omitted), "INCOMPATIBLE_DATA_FOR_TABLE.CANNOT_FIND_DATA")
-        spark.sql(f"INSERT INTO {table} VALUES (5, 0, NULL), (6, 1, 'explicit')")
+        for row_id, value in ((3, "current"), (4, "next")):
+            if row_id == 4:
+                update_iceberg_write_default(spark, table, value)
+            if _insert_omitting_default(spark, table, row_id) and table == cpu_table:
+                expected.append((row_id, 0, value))
+            # Exercise both file generations even where CPU rejects an omitted column.
+            spark.sql(f"INSERT INTO {table} VALUES ({row_id + 2}, 1, '{value}')")
+            if row_id == 3:
+                previous = iceberg_default_file_snapshot(spark, table)["files"]
+        current = iceberg_default_file_snapshot(spark, table)["files"]
+        assert previous.items() <= current.items()
+        if table == cpu_table:
+            expected.extend([(5, 1, "current"), (6, 1, "next")])
 
-    expected = [(1, 0, "legacy"), (2, 1, "legacy")]
-    if catalog_has_default:
-        expected.extend([(3, 0, "current"), (4, 1, "current")])
-    expected.extend([(5, 0, None), (6, 1, "explicit")])
     assert_iceberg_write_defaults(cpu_table, gpu_table, write, expected, conf)
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+def test_iceberg_v3_write_default_metadata_only(spark_tmp_table_factory):
+    cpu_table, gpu_table, _ = setup_iceberg_write_default_tables(spark_tmp_table_factory)
+
+    def update(spark, table):
+        before = iceberg_default_file_snapshot(spark, table)
+        update_iceberg_write_default(spark, table, "next")
+        assert iceberg_default_file_snapshot(spark, table) == before
+        iceberg = spark._jvm.org.apache.iceberg
+        schema = iceberg.spark.Spark3Util.loadIcebergTable(
+            spark._jsparkSession, table).schema()
+        assert schema.findField("optional_added").writeDefault() == "next"
+        assert schema.findField("optional_added").initialDefault() == "legacy"
+
+    assert_iceberg_write_defaults(cpu_table, gpu_table, update,
+                                 [(1, 0, "legacy"), (2, 1, "legacy")],
+                                 iceberg_write_enabled_conf)
 
 
 @iceberg

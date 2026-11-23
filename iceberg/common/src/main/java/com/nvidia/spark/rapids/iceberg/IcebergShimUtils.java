@@ -91,8 +91,8 @@ public interface IcebergShimUtils {
         return false;
     }
 
-    /** Creates an accessor for write defaults in the table schema. */
-    default IcebergWriteDefaultAccessor newWriteDefaultAccessor(Schema tableSchema) {
+    /** Creates an accessor for defaults present in the data writer schema. */
+    default IcebergWriteDefaultAccessor newWriteDefaultAccessor() {
         return (field, sparkField) -> sparkField;
     }
 

@@ -124,7 +124,7 @@ class GpuSparkPositionDeltaWrite(cpu: DeltaWrite)
     }
 
     val dataSparkTypeWithFieldIds = GpuSparkPositionDeltaWrite.dataWriterSparkTypeFor(
-      command, context, table.schema())
+      command, context)
 
     // Iceberg's Parquet writers always encode timestamps as INT64 microseconds and preserve
     // proleptic-Gregorian values; they do not inherit Spark's Parquet timestamp or rebase settings.
@@ -162,14 +162,13 @@ class GpuSparkPositionDeltaWrite(cpu: DeltaWrite)
 object GpuSparkPositionDeltaWrite {
   private[source] def dataWriterSparkTypeFor(
       command: Command,
-      context: GpuWriteContext,
-      tableSchema: Schema): StructType = {
+      context: GpuWriteContext): StructType = {
     if (command == Command.DELETE) {
       positionDeleteSparkType
     } else {
       val dataSchema = Option(context.dataSchema).getOrElse(
         throw new IllegalStateException(s"Missing data schema for delta command: $command"))
-      GpuSparkWrite.dataWriterSparkTypeFor(dataSchema, tableSchema)
+      GpuSparkWrite.dataWriterSparkTypeFor(dataSchema)
     }
   }
 

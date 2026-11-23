@@ -32,34 +32,35 @@ import org.apache.spark.sql.types.StructType
 
 class GpuSparkWriteSuite extends AnyFunSuite {
 
-  for (value <- Seq(9, 23)) {
-    test(s"append and row-level writer schemas preserve write default $value and field IDs") {
-      val field = fieldWithWriteDefault(2, "value", Types.IntegerType.get(), Int.box(value),
-        initialDefault = Some(Int.box(2)))
-      val tableSchema = new Schema(Types.NestedField.optional(
-        1, "payload", Types.StructType.of(field)))
-      // Iceberg derives this from Spark's query schema and does not retain field defaults.
-      val schema = new Schema(Types.NestedField.optional(
-        1, "payload", Types.StructType.of(
-          Types.NestedField.optional(2, "value", Types.IntegerType.get()))))
+  for (value <- Seq(None, Some(9), Some(23))) {
+    test(s"data writers preserve the write schema's default $value and nested field IDs") {
+      val intType = Types.IntegerType.get()
+      val field = value.map(v => fieldWithWriteDefault(2, "value", intType, Int.box(v),
+        initialDefault = Some(Int.box(2)))).getOrElse(
+        Types.NestedField.optional(2, "value", intType))
+      val schema = new Schema(Types.NestedField.optional(1, "payload", Types.StructType.of(field)))
       val context = mock(classOf[GpuWriteContext])
       when(context.dataSchema).thenReturn(schema)
 
-      val schemas = Seq(GpuSparkWrite.dataWriterSparkTypeFor(schema, tableSchema)) ++
+      val schemas = Seq(GpuSparkWrite.dataWriterSparkTypeFor(schema)) ++
         Seq(Command.UPDATE, Command.MERGE).map { command =>
-          GpuSparkPositionDeltaWrite.dataWriterSparkTypeFor(command, context, tableSchema)
+          GpuSparkPositionDeltaWrite.dataWriterSparkTypeFor(command, context)
         }
       schemas.foreach { sparkSchema =>
         assert(sparkSchema("payload").metadata.getLong(FIELD_ID_METADATA_KEY) == 1L)
         val child = sparkSchema("payload").dataType.asInstanceOf[StructType]("value")
         assert(child.metadata.getLong(FIELD_ID_METADATA_KEY) == 2L)
-        assert(child.getCurrentDefaultValue().contains(value.toString))
+        assert(child.getCurrentDefaultValue() == value.map(_.toString))
+        assert(child.metadata.contains("EXISTS_DEFAULT") == value.isDefined)
+        value.foreach(_ => assert(child.metadata.getString("EXISTS_DEFAULT") == "2"))
       }
-      val deleteSchema = GpuSparkPositionDeltaWrite.dataWriterSparkTypeFor(
-        Command.DELETE, context, tableSchema)
-      assert(deleteSchema == GpuWriteContext.positionDeleteSparkType)
-      assert(deleteSchema.fields.forall(_.getCurrentDefaultValue().isEmpty))
     }
+  }
+
+  test("a position-only DELETE uses the position-delete schema") {
+    val context = mock(classOf[GpuWriteContext])
+    assert(GpuSparkPositionDeltaWrite.dataWriterSparkTypeFor(Command.DELETE, context) ==
+      GpuWriteContext.positionDeleteSparkType)
   }
 
   test("translateIcebergWriteProperties: adds 'compression' when only Iceberg key is present") {

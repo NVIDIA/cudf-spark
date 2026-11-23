@@ -25,7 +25,9 @@ from data_gen import copy_and_update, DecimalGen, IntegerGen, LongGen, StringGen
     disable_parquet_field_id_write, gen_df
 from iceberg import _build_tblprops, check_default_rows, get_full_table_name, iceberg_unsupported_mark, \
     rapids_reader_types, runtime_iceberg_version, supports_iceberg_v3, \
-    ICEBERG_V3_UNSUPPORTED_REASON, iceberg_variant_read_conf, setup_iceberg_fixed_default_table
+    ICEBERG_V3_UNSUPPORTED_REASON, iceberg_variant_read_conf, setup_iceberg_fixed_default_table, \
+    setup_iceberg_write_default_tables, assert_iceberg_write_defaults, \
+    iceberg_default_file_snapshot, iceberg_write_enabled_conf
 from marks import allow_non_gpu, iceberg, iceberg_fast_test, ignore_order, incompat
 from spark_session import is_spark_400_or_later, is_spark_411_or_later, \
     with_cpu_session, with_gpu_session
@@ -632,6 +634,23 @@ def test_iceberg_v3_scan_checks_only_initial_defaults(spark_tmp_table_factory, i
         exist_classes="BatchScanExec" if initial_only else "GpuBatchScanExec",
         non_exist_classes="GpuBatchScanExec" if initial_only else "BatchScanExec",
         conf={"spark.rapids.sql.format.iceberg.v3.enabled": "true"}, require_non_empty=True)
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+def test_iceberg_v3_write_default_old_file_read(spark_tmp_table_factory):
+    cpu_table, gpu_table, _ = setup_iceberg_write_default_tables(spark_tmp_table_factory)
+
+    def read(spark, table):
+        before = iceberg_default_file_snapshot(spark, table)
+        assert all("optional_added" not in dict(row) for row, _ in before["records"])
+        assert [tuple(row) for row in spark.table(table).orderBy("id").collect()] == [
+            (1, 0, "legacy"), (2, 1, "legacy")]
+        assert iceberg_default_file_snapshot(spark, table) == before
+
+    assert_iceberg_write_defaults(cpu_table, gpu_table, read,
+                                 [(1, 0, "legacy"), (2, 1, "legacy")],
+                                 iceberg_write_enabled_conf)
 
 
 def _assert_default_rows(read, reader_type, expected):

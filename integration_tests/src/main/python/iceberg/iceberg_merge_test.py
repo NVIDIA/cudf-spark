@@ -303,23 +303,35 @@ def test_iceberg_merge_v3_table_fallback(
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @pytest.mark.parametrize("merge_mode", ["copy-on-write", "merge-on-read"])
+@pytest.mark.parametrize("action", ["mixed", "matched-only", "insert-only", "matched-null"])
 @allow_non_gpu("LocalTableScanExec")
-def test_iceberg_merge_write_defaults(spark_tmp_table_factory, merge_mode):
+def test_iceberg_merge_write_defaults(spark_tmp_table_factory, merge_mode, action):
     cpu_table, gpu_table, catalog_has_default = setup_iceberg_write_default_tables(
         spark_tmp_table_factory, {"write.merge.mode": merge_mode})
     conf = copy_and_update(iceberg_merge_v3_enabled_conf, {
         "spark.sql.adaptive.enabled": "false", "spark.sql.shuffle.partitions": "2"})
 
     def merge(spark, table):
-        spark.sql(
-            f"MERGE INTO {table} t USING "
-            "(SELECT * FROM VALUES (1L, 1), (3L, 0), (4L, 1) AS v(id, p)) s "
-            "ON t.id = s.id WHEN MATCHED THEN UPDATE SET p = s.p "
-            "WHEN NOT MATCHED THEN INSERT (id, p) VALUES (s.id, s.p)").collect()
+        source = {"mixed": "(1L, 1), (3L, 0), (4L, 1)", "insert-only": "(3L, 0)"}.get(
+            action, "(1L, 1)")
+        clauses = []
+        if action != "insert-only":
+            assignment = "optional_added = NULL" if action == "matched-null" else "p = s.p"
+            clauses.append(f"WHEN MATCHED THEN UPDATE SET {assignment}")
+        if action in ("mixed", "insert-only"):
+            clauses.append("WHEN NOT MATCHED THEN INSERT (id, p) VALUES (s.id, s.p)")
+        spark.sql(f"MERGE INTO {table} t USING "
+                  f"(SELECT * FROM VALUES {source} AS v(id, p)) s "
+                  f"ON t.id = s.id {' '.join(clauses)}").collect()
 
     inserted = "current" if catalog_has_default else None
-    assert_iceberg_write_defaults(cpu_table, gpu_table, merge, [
-        (1, 1, "legacy"), (2, 1, "legacy"), (3, 0, inserted), (4, 1, inserted)], conf)
+    expected = [(1, 0 if action in ("insert-only", "matched-null") else 1,
+                 None if action == "matched-null" else "legacy"), (2, 1, "legacy")]
+    if action in ("mixed", "insert-only"):
+        expected.append((3, 0, inserted))
+    if action == "mixed":
+        expected.append((4, 1, inserted))
+    assert_iceberg_write_defaults(cpu_table, gpu_table, merge, expected, conf)
 
 
 @iceberg

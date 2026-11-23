@@ -18,7 +18,6 @@ package com.nvidia.spark.rapids.iceberg;
 
 import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.FileFormat;
-import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.data.BaseDeleteLoader;
 import org.apache.iceberg.deletes.PositionDelete;
@@ -32,6 +31,7 @@ import org.apache.iceberg.io.WriteResult;
 import org.apache.iceberg.spark.SparkUtil;
 import org.apache.iceberg.spark.source.GpuSparkPositionDeltaWriteAccess;
 import org.apache.iceberg.types.Types;
+import org.apache.iceberg.util.DateTimeUtil;
 import org.apache.iceberg.util.DeleteFileSet;
 import org.apache.spark.broadcast.Broadcast;
 import org.apache.spark.sql.catalyst.InternalRow;
@@ -61,28 +61,34 @@ public abstract class Iceberg19PlusShimUtils implements IcebergShimUtils {
     }
 
     @Override
-    public IcebergWriteDefaultAccessor newWriteDefaultAccessor(Schema tableSchema) {
-        return new WriteDefaultAccessor(tableSchema);
+    public IcebergWriteDefaultAccessor newWriteDefaultAccessor() {
+        return new WriteDefaultAccessor();
     }
 
     private static final class WriteDefaultAccessor implements IcebergWriteDefaultAccessor {
-        private final Schema tableSchema;
-
-        private WriteDefaultAccessor(Schema tableSchema) {
-            this.tableSchema = tableSchema;
-        }
-
         @Override
         public StructField withWriteDefault(Types.NestedField field, StructField sparkField) {
-            // Iceberg's write schema may omit defaults; resolve them by field ID.
-            Types.NestedField original = tableSchema.findField(field.fieldId());
-            Types.NestedField source = original != null ? original : field;
-            if (source.writeDefaultLiteral() == null) {
-                return sparkField;
+            // CPU Parquet footers describe the write schema Spark supplied to Iceberg.
+            if (field.initialDefaultLiteral() != null) {
+                sparkField = sparkField.withExistenceDefaultValue(
+                        sqlLiteral(field, sparkField, field.initialDefault()));
             }
-            Object value = SparkUtil.internalToSpark(source.type(), source.writeDefault());
-            return sparkField.withCurrentDefaultValue(
-                    Literal.create(value, sparkField.dataType()).sql());
+            if (field.writeDefaultLiteral() != null) {
+                sparkField = sparkField.withCurrentDefaultValue(
+                        sqlLiteral(field, sparkField, field.writeDefault()));
+            }
+            return sparkField;
+        }
+
+        private static String sqlLiteral(Types.NestedField field, StructField sparkField,
+                Object value) {
+            // A session-local literal loses the offset during a daylight-saving overlap.
+            if (field.type().equals(Types.TimestampType.withZone())) {
+                return "TIMESTAMP '" + DateTimeUtil.timestamptzFromMicros((long) value)
+                        .toInstant() + "'";
+            }
+            return Literal.create(SparkUtil.internalToSpark(field.type(), value),
+                    sparkField.dataType()).sql();
         }
     }
 

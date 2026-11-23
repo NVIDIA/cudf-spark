@@ -49,10 +49,19 @@ class GpuTypeToSparkTypeSuite extends AnyFunSuite {
     val schema = new Schema(field)
 
     val sparkField = GpuTypeToSparkType
-      .toSparkType(schema, ShimUtils.newWriteDefaultAccessor(schema))(field.name())
+      .toSparkType(schema, ShimUtils.newWriteDefaultAccessor())(field.name())
     assert(sparkField.metadata.getLong(FIELD_ID_METADATA_KEY) == 1L)
     assert(sparkField.getCurrentDefaultValue().contains("9"))
     assert(GpuTypeToSparkType.toSparkType(schema)(field.name()).getCurrentDefaultValue().isEmpty)
+  }
+
+  test("writer footer preserves both instants of a daylight-saving overlap") {
+    val field = fieldWithWriteDefault(1, "ts", Types.TimestampType.withZone(),
+      "2024-11-03T01:30:00.123456-05:00", Some("2024-11-03T01:30:00.123456-04:00"))
+    val ts = GpuTypeToSparkType
+      .toSparkType(new Schema(field), ShimUtils.newWriteDefaultAccessor())("ts")
+    assert(ts.getCurrentDefaultValue().contains("TIMESTAMP '2024-11-03T06:30:00.123456Z'"))
+    assert(ts.metadata.getString("EXISTS_DEFAULT") == "TIMESTAMP '2024-11-03T05:30:00.123456Z'")
   }
 
   test("toSparkType: flat list records only the element id") {
