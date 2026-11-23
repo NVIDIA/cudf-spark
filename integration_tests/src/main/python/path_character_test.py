@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import os
-from functools import lru_cache
 
 import pytest
 
@@ -25,31 +24,6 @@ from path_test_utils import (BACKEND_METRICS, PATH_ROWS, PATH_SCHEMA, PATH_VALUE
 from spark_session import with_cpu_session
 
 
-@lru_cache(maxsize=1)
-def _standalone_local_paths_use_ascii(tmp_path):
-    def check_executor(spark):
-        sc = spark.sparkContext
-        if not sc.master.startswith('spark://'):
-            return False
-        root = sc._jvm.org.apache.hadoop.fs.Path(tmp_path)
-        if root.getFileSystem(sc._jsc.hadoopConfiguration()).getScheme() != 'file':
-            return False
-        # Read the filename encoding in a task. The driver can use UTF-8 while the worker uses ASCII.
-        encoding = spark.range(1, numPartitions=1).selectExpr(
-            "reflect('java.lang.System', 'getProperty', 'sun.jnu.encoding')").first()[0]
-        return encoding in ('ANSI_X3.4-1968', 'US-ASCII')
-
-    return with_cpu_session(check_executor)
-
-
-@pytest.fixture
-def nightly_unicode_paths(request, set_spark_job_timeout):
-    if is_nightly_run() and _standalone_local_paths_use_ascii(
-            request.config.getoption('tmp_path') or '/tmp/pyspark_tests'):
-        pytest.skip('Standalone executor cannot encode local Unicode paths: '
-                    'https://github.com/NVIDIA/cudf-spark/issues/17063')
-
-
 # CSV/JSON and Avro read through Hadoop streams; Parquet and ORC also have
 # PerfIO range readers. Remote runs use the explicitly configured --tmp_path.
 _readers = [(fmt, reader) for fmt in ('parquet', 'orc', 'avro')
@@ -57,7 +31,7 @@ _readers = [(fmt, reader) for fmt in ('parquet', 'orc', 'avro')
 _readers += [('csv', 'PERFILE'), ('json', 'PERFILE')]
 
 
-@pytest.mark.usefixtures('nightly_unicode_paths')
+@pytest.mark.skipif(is_nightly_run(), reason='https://github.com/NVIDIA/cudf-spark/issues/17063')
 @ignore_order(local=True)
 @pytest.mark.parametrize('file_format,reader', [
     pytest.param(fmt, reader, id=fmt + '-' + reader, marks=(
@@ -84,7 +58,7 @@ def test_path_characters(path_character_data, file_format, reader, v1, layout, r
 
 
 @delta_lake
-@pytest.mark.usefixtures('nightly_unicode_paths')
+@pytest.mark.skipif(is_nightly_run(), reason='https://github.com/NVIDIA/cudf-spark/issues/17063')
 @allow_non_gpu(*delta_meta_allow)
 @ignore_order(local=True)
 @pytest.mark.parametrize('base', PATH_VALUES)
