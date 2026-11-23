@@ -1,6 +1,7 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Remove old temporary and unreferenced GHCR images while preserving published tags and their manifests.
 name: CI image cleanup
 
 on:

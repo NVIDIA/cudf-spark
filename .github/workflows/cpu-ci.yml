@@ -1,6 +1,7 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Run the affected Docker image checks on pull requests and report the CPU CI gate.
 name: CPU CI
 
 on:
