@@ -64,6 +64,7 @@ object NvtxIdWithMetrics {
     val activated = metric.tryActivateTimer(Seq.empty)
     val start = if (activated) System.nanoTime() else 0L
     try {
+      // Mirrors NvtxId.apply; kept separate to avoid a by-name wrapper.
       try {
         nvtxId.push()
         block
