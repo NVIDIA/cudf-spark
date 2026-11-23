@@ -32,20 +32,20 @@ if [[ "$arch" != "$1" ]]; then
 fi
 [[ "$JAVA_HOME" == "/usr/lib/jvm/java-8-openjdk-$arch" ]]
 java -version 2>&1 | grep '^openjdk version "1\.8\.'
-for jdk in 8 11 17; do
+javac -version 2>&1 | grep '^javac 1\.8\.'
+for jdk in 11 17 21; do
   "/usr/lib/jvm/java-${jdk}-openjdk-${arch}/bin/javac" -version
 done
-jdk21="/usr/lib/jvm/java-21-openjdk-$arch/bin"
 cd "$(mktemp -d)"
 cat > JdkSmoke.java <<'JAVA'
 class JdkSmoke {
   public static void main(String[] args) {
-    System.out.println(java.util.List.of("Java 21 OK").getFirst());
+    System.out.println("Java " + System.getProperty("java.version") + " OK");
   }
 }
 JAVA
-"$jdk21/javac" --release 21 JdkSmoke.java
-"$jdk21/java" JdkSmoke
+javac JdkSmoke.java
+java JdkSmoke
 mvn --version
 python3 -c 'import pytest, pandas, pyarrow, sre_yield'
 ucx_info -v

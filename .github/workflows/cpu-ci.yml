@@ -1,7 +1,7 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Run the affected Docker image checks on pull requests and report the CPU CI gate.
+# Run the CPU checks selected for each pull request and report their combined result.
 name: CPU CI
 
 on:
@@ -46,7 +46,7 @@ jobs:
             end' <<< "$pr")
           echo "skip=$skip" >> "$GITHUB_OUTPUT"
           if [[ $skip == true ]]; then
-            echo 'CPU image checks skipped by PR title.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'CPU CI skipped by PR title.' >> "$GITHUB_STEP_SUMMARY"
           fi
       - uses: NVIDIA/spark-rapids-common/checkout@main
         if: steps.title.outputs.skip == 'false'
