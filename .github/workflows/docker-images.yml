@@ -13,10 +13,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: docker-ci-${{ github.run_id }}-${{ github.event_name }}
-  cancel-in-progress: false
-
 jobs:
   select:
     name: Select Dockerfiles

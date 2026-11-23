@@ -12,7 +12,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: cpu-ci-pr-${{ github.event.pull_request.number }}
+  # Reject stale manual reruns in select without cancelling a newer automatic run.
+  group: cpu-ci-pr-${{ github.event.pull_request.number }}-${{ github.run_attempt > 1 && github.run_id || 'auto' }}
   cancel-in-progress: true
 
 jobs:

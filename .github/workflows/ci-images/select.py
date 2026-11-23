@@ -86,7 +86,7 @@ def still_current(name):
     return not affected(recipe[1], changed, publish=True)
 
 
-def configurations(name, entry, tracked, branch_tag, line, publish):
+def configurations(name, entry, tracked, branch_tag, line, publish, has_publisher):
     context, smoke, ignores = inputs_for(entry)
     inputs = entry.get("recipe-inputs", []) + [p for p in ignores if p in tracked]
     variants = entry.get("variants", [{}])
@@ -115,10 +115,16 @@ def configurations(name, entry, tracked, branch_tag, line, publish):
             if arch not in ("amd64", "arm64"):
                 raise ValueError(f"Unsupported runner architecture: {arch}")
             cache = f"type=gha,version=2,scope={identifier}-{arch},timeout=2m"
+            exports = []
+            if publish:
+                exports = [cache + ",mode=max"]
+            elif not has_publisher:
+                # These recipes have no branch publisher to populate a shared cache.
+                exports = [cache + ",mode=min"]
             workers.append({
                 "platform": f"linux/{arch}", "arch": arch, "build-args": args | overrides,
                 "cache-from": [] if publish else [cache],
-                "cache-to": [cache + ",mode=max,ignore-error=true"],
+                "cache-to": exports,
             })
         yield {
             "id": identifier, "image": name, "context": context, "dockerfile": entry["dockerfile"],
@@ -164,8 +170,9 @@ def select():
         previous = at_revision(base)
 
     line = release_line("HEAD")
-    if ref.startswith("release/") and event != "pull_request" and tag != line:
-        raise ValueError(f"Branch {ref} does not match root pom.xml release line {line}")
+    target = os.environ["GITHUB_BASE_REF"] if event == "pull_request" else ref
+    if target.startswith("release/") and target != f"release/{line}":
+        raise ValueError(f"Branch {target} does not match root pom.xml release line {line}")
     line_changed = "pom.xml" in changed and release_line(base) != line
 
     jobs = {"validate": [], "publish": []}
@@ -184,7 +191,7 @@ def select():
                          or previous.get(name) != (suite, entry)):
             continue
         jobs["publish" if publish else "validate"].extend(
-            configurations(name, entry, tracked, tag, line, publish)
+            configurations(name, entry, tracked, tag, line, publish, has_publisher=ci)
         )
     return jobs
 

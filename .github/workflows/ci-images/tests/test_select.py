@@ -72,13 +72,14 @@ class ImageSelectorTest(unittest.TestCase):
                    f'<artifactId>example</artifactId><version>{version}</version>'
                    f'<description>{description}</description></project>\n')
 
-    def invoke(self, *args, event="push", ref="main", payload=None, checkout=None):
+    def invoke(self, *args, event="push", ref="main", base_ref="main", payload=None, checkout=None):
         event_path = self.root / "event.json"
         event_path.write_text(json.dumps(payload or {}))
         output = self.root / "output"
         output.write_text("")
         env = dict(self.env, GITHUB_EVENT_NAME=event, GITHUB_EVENT_PATH=str(event_path),
-                   GITHUB_REF_NAME=ref, GITHUB_REF="refs/heads/" + ref, GITHUB_OUTPUT=str(output))
+                   GITHUB_REF_NAME=ref, GITHUB_BASE_REF=base_ref, GITHUB_REF="refs/heads/" + ref,
+                   GITHUB_OUTPUT=str(output))
         command = [sys.executable, str(SOURCE / "select.py"), *args]
         subprocess.run(command, cwd=checkout or self.repo, env=env, check=True,
                        capture_output=True, text=True)
@@ -134,23 +135,33 @@ class ImageSelectorTest(unittest.TestCase):
 
     def test_pr_cache_imports_match_publication_for_each_variant_and_arch(self):
         self.git("switch", "-qc", "topic")
-        self.write(INPUT, "# updated on the PR\n")
-        self.commit("Validate the toolchains consuming the changed input")
+        self.write(CI_IMAGES / "select.py", "# select all images\n")
+        self.commit("Validate every image")
         self.git("switch", "-q", "main")
         self.git("merge", "--no-ff", "-qm", "Synthetic PR merge", "topic")
         pr = self.invoke(event="pull_request", ref="17/merge")
         self.assertEqual(pr["publish"], [])
         published = self.invoke(event="workflow_dispatch")["publish"]
         expected = {(c["id"], w["arch"]): cache_scope(w["cache-to"][0])
-                    for c in published if c["image"] != "skills-build" for w in c["workers"]}
-        self.assertEqual(len(expected), 6)  # Four integration workers and two Spark workers.
+                    for c in published for w in c["workers"]}
+        self.assertEqual(len(expected), 7)  # Four integration, two Spark and one Skills worker.
         restored = {}
+        pr_only = []
         for config in pr["validate"]:
             self.assertEqual((config["tag"], config["release_tag"]), ("validate", ""))
             for worker in config["workers"]:
                 cache_import, = worker["cache-from"]
-                restored[config["id"], worker["arch"]] = cache_scope(cache_import)
+                key = (config["id"], worker["arch"])
+                if key in expected:
+                    self.assertEqual(worker["cache-to"], [])
+                    restored[key] = cache_scope(cache_import)
+                else:
+                    self.assertEqual(worker["cache-to"], [cache_import + ",mode=min"])
+                    pr_only.append(config["id"])
         self.assertEqual(restored, expected)
+        self.assertCountEqual(pr_only, ["shuffle-ubuntu-no-rdma", "shuffle-ubuntu-rdma",
+                                       "shuffle-rocky-no-rdma", "shuffle-rocky-rdma",
+                                       "udf-cuda-template"])
 
     def test_unrelated_push_selects_nothing(self):
         before = self.git("rev-parse", "HEAD")
@@ -174,6 +185,22 @@ class ImageSelectorTest(unittest.TestCase):
             self.invoke(ref="release/27.02", payload={"created": True, "before": "0" * 40})
         self.assertIn("release/27.02", caught.exception.stderr)
         self.assertIn("26.12", caught.exception.stderr)
+
+    def test_release_pr_validates_the_target_line_before_publication(self):
+        self.git("switch", "-qc", "topic")
+        self.write_pom("27.02.0-SNAPSHOT")
+        self.commit("Move to the next release line")
+        self.git("switch", "-q", "main")
+        self.git("merge", "--no-ff", "-qm", "Synthetic PR merge", "topic")
+        with self.assertRaises(subprocess.CalledProcessError) as caught:
+            self.invoke(event="pull_request", ref="17/merge", base_ref="release/26.12")
+        self.assertIn("Branch release/26.12 does not match root pom.xml release line 27.02",
+                      caught.exception.stderr)
+        for target in ["main", "release/27.02"]:
+            with self.subTest(target=target):
+                jobs = self.invoke(event="pull_request", ref="17/merge", base_ref=target)
+                self.assertEqual(len(jobs["validate"]), len(VARIANTS))
+                self.assertEqual(jobs["publish"], [])
 
     def test_main_pom_rollover_selects_only_versioned_images_and_invalidates_old_publisher(self):
         worker = self.root / "worker"

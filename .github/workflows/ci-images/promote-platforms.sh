@@ -18,7 +18,7 @@ records=$3
 [[ $GITHUB_RUN_ATTEMPT == 1 ]] ||
   die "run $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT cannot promote $base:$tag; dispatch a new 'Docker image CI' run on the target branch"
 
-image="ghcr.io/${GITHUB_REPOSITORY,,}/$base"
+image="ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')/$base"
 sources=()
 for arch in amd64 arm64; do
   digest=$(jq -ser --arg image "$image" --arg tag "$tag" --arg platform "linux/$arch" \

@@ -4,12 +4,14 @@ The **CPU CI** workflow builds and smoke-tests Docker images affected by a pull
 request. Its **CPU CI gate** requires successful selection and every selected
 build. A Markdown-only PR passes after selection. Add `[skip ci]` to a PR title
 to skip image builds and pass the gate. Title and description edits do not start
-CPU CI. Choose **Re-run all jobs** to apply the current title on the same commit.
+CPU CI. Choose **Re-run all jobs** on the latest commit to apply the current title.
 
 Register each Dockerfile in [suites.json](suites.json). List local `COPY` and
 `ADD` inputs in `recipe-inputs` so changes to them trigger the build and update
 its fingerprint. Changing a shuffle Dockerfile selects just that example.
 The four shuffle examples and the UDF template run only on pull requests.
+Toolchain PR builds reuse image caches written by the branch publishers.
+The examples and template cache their final image layers for use within the same PR.
 
 ## Published toolchains
 
