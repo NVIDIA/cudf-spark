@@ -312,13 +312,23 @@ class GpuCoalesceBatchesSuite extends SparkQueryCompareTestSuite {
   }
 
   test("host coalesce can close Spark cache vectors after copying") {
+    class CloseTrackingColumnarBatch(vector: WritableColumnVector)
+        extends ColumnarBatch(Array(vector), 2) {
+      var closeCount: Int = 0
+
+      override def close(): Unit = {
+        closeCount += 1
+        super.close()
+      }
+    }
+
     Seq[WritableColumnVector](
       new OnHeapColumnVector(2, IntegerType),
       new OffHeapColumnVector(2, IntegerType)
     ).foreach { vector =>
       vector.putInt(0, 10)
       vector.putInt(1, 20)
-      val input = new ColumnarBatch(Array(vector), 2)
+      val input = new CloseTrackingColumnarBatch(vector)
       val coalesceIter = new HostToGpuCoalesceIterator(
         Iterator.single(input),
         TargetSize(1000),
@@ -342,17 +352,11 @@ class GpuCoalesceBatchesSuite extends SparkQueryCompareTestSuite {
           assertResult(20)(host.getInt(1))
         }
       }
-      vector match {
-        case onHeap: OnHeapColumnVector =>
-          intercept[NullPointerException](onHeap.getInt(0))
-        case offHeap: OffHeapColumnVector =>
-          assertResult(0L)(offHeap.valuesNativeAddress())
-        case other =>
-          fail(s"Unexpected vector type: ${other.getClass.getName}")
-      }
+      assertResult(1)(input.closeCount)
 
       // DefaultCachedBatchSerializer closes the batch again at task completion.
       input.close()
+      assertResult(2)(input.closeCount)
     }
   }
 
