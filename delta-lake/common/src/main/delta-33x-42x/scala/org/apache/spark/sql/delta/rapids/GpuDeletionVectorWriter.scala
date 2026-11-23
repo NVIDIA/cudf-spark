@@ -87,8 +87,13 @@ private[rapids] object GpuDeletionVectorWriter extends Logging {
               DeletionVectorWriter.createWriter(dvStore, tablePathWithFS, prefix)
             val ctx = DeletionVectorWriter.DeletionVectorMapperContext(
               dvStore, writer, tablePath, fileId, prefix)
-            SparkUtils.tryWithResource(writer) { _ =>
+            // A failing close must fail the task: on object stores close() uploads the file, and
+            // Spark 4.1's tryWithResource would swallow its error (SPARK-53136), committing a
+            // reference to a file that does not exist. Same as Delta 4.4.
+            SparkUtils.tryWithSafeFinally {
               bin.map(DeletionVectorWriter.storeBitmapAndGenerateResult(ctx, _))
+            } {
+              writer.close()
             }
           }
         })
@@ -101,14 +106,17 @@ private[rapids] object GpuDeletionVectorWriter extends Logging {
 
   /**
    * Applies `writeBin` to every bin with up to `maxInFlight` bins in flight. Results keep the bin
-   * order. A single bin, the common case, is written on the task thread.
+   * order. A single bin, the common case, is written on the task thread, and so is every bin when
+   * `maxInFlight` is 1, as in Delta's serial writer.
    */
   private[rapids] def writeBins[I, O](
       bins: Iterator[Seq[I]],
       writeBin: Seq[I] => Seq[O],
       maxInFlight: Int,
       pool: => ExecutorService = writerPool): Iterator[O] = {
-    if (!bins.hasNext) {
+    if (maxInFlight == 1) {
+      bins.flatMap(writeBin)
+    } else if (!bins.hasNext) {
       Iterator.empty
     } else {
       val first = bins.next()

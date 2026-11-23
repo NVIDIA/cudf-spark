@@ -19,14 +19,14 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.delta.rapids
 
-import java.io.File
+import java.io.{File, FilterOutputStream, IOException}
 import java.nio.file.Files
 import java.util.concurrent.{CountDownLatch, Executors, ExecutorService, TimeUnit}
 import java.util.concurrent.atomic.AtomicInteger
 
 import scala.jdk.CollectionConverters._
 
-import com.nvidia.spark.rapids.SparkQueryCompareTestSuite
+import com.nvidia.spark.rapids.{RapidsConf, SparkQueryCompareTestSuite}
 import org.apache.hadoop.fs.{FSDataOutputStream, Path, RawLocalFileSystem}
 import org.apache.hadoop.fs.permission.FsPermission
 import org.apache.hadoop.util.Progressable
@@ -57,6 +57,27 @@ object ThreadRecordingFs {
   val threads = java.util.concurrent.ConcurrentHashMap.newKeySet[String]()
 }
 
+/** A local file system whose files fail on close, like an upload failing on an object store. */
+class FailOnCloseFs extends RawLocalFileSystem {
+  private def failOnClose(stream: FSDataOutputStream): FSDataOutputStream =
+    new FSDataOutputStream(new FilterOutputStream(stream) {
+      override def write(b: Array[Byte], off: Int, len: Int): Unit = stream.write(b, off, len)
+      override def close(): Unit = {
+        stream.close()
+        throw new IOException("upload failed")
+      }
+    }, null)
+
+  override def create(f: Path, overwrite: Boolean, bufferSize: Int, replication: Short,
+      blockSize: Long, progress: Progressable): FSDataOutputStream =
+    failOnClose(super.create(f, overwrite, bufferSize, replication, blockSize, progress))
+
+  override def create(f: Path, permission: FsPermission, overwrite: Boolean, bufferSize: Int,
+      replication: Short, blockSize: Long, progress: Progressable): FSDataOutputStream =
+    failOnClose(
+      super.create(f, permission, overwrite, bufferSize, replication, blockSize, progress))
+}
+
 class GpuDeletionVectorWriterSuite extends SparkQueryCompareTestSuite {
   private def withPool[T](size: Int)(f: ExecutorService => T): T = {
     val pool = Executors.newFixedThreadPool(size)
@@ -78,6 +99,21 @@ class GpuDeletionVectorWriterSuite extends SparkQueryCompareTestSuite {
       pool = fail("a single bin must not use the pool")).toSeq
     assert(results == Seq(1, 2))
     assert(writers.toArray.toSeq == Seq(caller))
+  }
+
+  test("a limit of one writes every bin on the calling thread, one at a time and lazily") {
+    val caller = Thread.currentThread()
+    val writers = new java.util.concurrent.ConcurrentLinkedQueue[Thread]()
+    val results = GpuDeletionVectorWriter.writeBins(
+      (0 until 3).iterator.map(i => Seq(i)),
+      (bin: Seq[Int]) => { writers.add(Thread.currentThread()); bin },
+      maxInFlight = 1,
+      pool = fail("a limit of one must not use the pool"))
+    assert(writers.isEmpty, "bins were written before they were requested")
+    assert(results.next() == 0)
+    assert(writers.size == 1, "more than the requested bin was written")
+    assert(results.toSeq == Seq(1, 2))
+    assert(writers.toArray.toSeq == Seq(caller, caller, caller))
   }
 
   test("bins are written concurrently and results keep the bin order") {
@@ -336,6 +372,60 @@ class GpuDeletionVectorWriterSuite extends SparkQueryCompareTestSuite {
           val loaded = StoredBitmap.create(result.deletionVector, tablePath).load(dvStore)
           assert(loaded.cardinality == 2 && loaded.contains(i.toLong) && loaded.contains(i + 5L))
         }
+      }
+    } finally {
+      org.apache.commons.io.FileUtils.deleteQuietly(table)
+    }
+  }
+
+  test("a failure when closing a DV file fails the task") {
+    // On an object store close() uploads the file. The failure must not be swallowed, whether the
+    // task writes one file or many, or the commit would reference a file that does not exist.
+    Seq("1", "100000000").foreach { packingTarget =>
+      val table = Files.createTempDirectory("gpu-dv-writer-close").toFile
+      try {
+        withCpuSparkSession { spark =>
+          spark.conf.set(DeltaSQLConf.DELETION_VECTOR_PACKING_TARGET_SIZE.key, packingTarget)
+          val hadoopConf = spark.sessionState.newHadoopConf()
+          hadoopConf.set("fs.file.impl", classOf[FailOnCloseFs].getName)
+          hadoopConf.setBoolean("fs.file.impl.disable.cache", true)
+          val rows = (0 until 5).map { i =>
+            val (bytes, cardinality) = newBitmap(i)
+            DeletionVectorData(s"file-$i.parquet", bytes, cardinality)
+          }
+          val ex = intercept[IOException] {
+            GpuDeletionVectorWriter.createMapper(spark, hadoopConf,
+              new Path(table.getAbsolutePath), prefixLength = 0)(rows.iterator).toSeq
+          }
+          assert(ex.getMessage == "upload failed")
+        }
+      } finally {
+        org.apache.commons.io.FileUtils.deleteQuietly(table)
+      }
+    }
+  }
+
+  test("a limit of one writes every file on the calling thread, like Delta") {
+    val table = Files.createTempDirectory("gpu-dv-writer-serial").toFile
+    try {
+      withCpuSparkSession { spark =>
+        spark.conf.set(DeltaSQLConf.DELETION_VECTOR_PACKING_TARGET_SIZE.key, "1")
+        spark.conf.set(RapidsConf.DELTA_DV_WRITE_MAX_FILES_IN_FLIGHT_PER_TASK.key, "1")
+        val hadoopConf = spark.sessionState.newHadoopConf()
+        hadoopConf.set("fs.file.impl", classOf[ThreadRecordingFs].getName)
+        hadoopConf.setBoolean("fs.file.impl.disable.cache", true)
+        ThreadRecordingFs.threads.clear()
+        val numFiles = 10
+        val rows = (0 until numFiles).map { i =>
+          val (bytes, cardinality) = newBitmap(i)
+          DeletionVectorData(s"file-$i.parquet", bytes, cardinality)
+        }
+        val results = GpuDeletionVectorWriter.createMapper(
+          spark, hadoopConf, new Path(table.getAbsolutePath), prefixLength = 0)(rows.iterator)
+          .toSeq
+        assert(results.map(_.filePath) == rows.map(_.filePath))
+        assert(allDvFiles(table).length == numFiles)
+        assert(ThreadRecordingFs.threads.asScala.toSet == Set(Thread.currentThread().getName))
       }
     } finally {
       org.apache.commons.io.FileUtils.deleteQuietly(table)

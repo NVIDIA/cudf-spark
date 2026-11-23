@@ -853,7 +853,8 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
     conf("spark.rapids.sql.delta.deletionVector.write.maxFilesInFlightPerTask")
       .doc("Maximum number of packed deletion vector files a task writes concurrently. Each " +
         "file is buffered up to spark.databricks.delta.deletionVectors.packing.targetSize, so a " +
-        "task buffers up to this many times that. A value of 1 writes the files one at a time.")
+        "task buffers up to this many times that. A value of 1 writes the files one at a time on " +
+        "the task thread, as Delta does.")
       .internal()
       .integerConf
       .checkValue(v => v > 0, "The number of files in flight must be greater than 0.")
