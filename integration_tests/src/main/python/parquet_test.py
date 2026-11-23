@@ -2086,10 +2086,10 @@ def test_parquet_decimal_scale_change_boundaries(spark_tmp_path, ansi_enabled,
         # HALF_UP rounding carries beyond the target precision only for the .995 values.
         inputs += ['999999.994', '-999999.994', '999999.995', '-999999.995']
     values = [Decimal(value) for value in inputs] + [None]
+    # Create two nonempty input partitions so the writer produces two same-schema files.
     with_cpu_session(lambda spark: gen_df(spark,
-        [('d', RepeatSeqGen(values, data_type=DecimalType(9, file_scale)))], length=len(values))
-        # Same-schema files can share a coalesced batch, unlike the mixed-precision test.
-        .repartition(2).write.parquet(data_path))
+        [('d', RepeatSeqGen(values, data_type=DecimalType(9, file_scale)))],
+        length=len(values), num_slices=2).write.parquet(data_path))
     conf = copy_and_update(coalesce_parquet_file_reader_conf, {
         'spark.sql.sources.useV1SourceList': '',
         'spark.sql.parquet.enableVectorizedReader': 'false',
