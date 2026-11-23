@@ -14,12 +14,13 @@
 
 from decimal import Decimal
 import json
+import os
 
 import pytest
 
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
     assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect, assert_spark_exception
-from conftest import is_iceberg_remote_catalog, spark_jvm
+from conftest import is_iceberg_remote_catalog, is_iceberg_rest_catalog, spark_jvm
 from data_gen import copy_and_update, DecimalGen, IntegerGen, LongGen, StringGen, \
     StructGen, TimestampGen, UniqueLongGen, gen_scalar_value, \
     disable_parquet_field_id_write, gen_df
@@ -427,7 +428,13 @@ def test_iceberg_schema_evolution_read(
         assert_gpu_and_cpu_are_equal_collect(lambda spark: spark.sql(query), conf=conf)
 
 
-def _setup_iceberg_v3_defaults_table(table_name, unsupported_column=None):
+_skip_lakekeeper_binary_defaults = pytest.mark.skipif(
+    is_iceberg_rest_catalog() and os.environ.get("ICEBERG_TEST_LAKEKEEPER_VERSION") == "0.13.1",
+    reason="Lakekeeper 0.13.1 does not support binary or fixed initial defaults. "
+           "Schema commits can return HTTP 500 (Service panicked). See #17078.")
+
+
+def _setup_iceberg_v3_defaults_table(table_name, single_column):
     props = _build_tblprops({"format-version": "3"})
     props_sql = ", ".join(f"'{key}' = '{value}'" for key, value in props.items())
 
@@ -452,40 +459,41 @@ def _setup_iceberg_v3_defaults_table(table_name, unsupported_column=None):
         def add_default(name, iceberg_type, value):
             update.addColumn(name, iceberg_type, literals.of(value).to(iceberg_type))
 
-        # Cover every Iceberg 1.9 primitive type that Spark SQL can query. Iceberg TIME is omitted
-        # because Iceberg's Spark adapter rejects it with "Spark does not support time fields".
-        update.addRequiredColumn(
-            "required_added", types.IntegerType.get(), None, literals.of(7))
-        update.addColumn("optional_added", types.StringType.get(), literals.of("legacy"))
-        update.addColumn("s", "nested_added", types.IntegerType.get(), literals.of(11))
-        add_default("boolean_added", types.BooleanType.get(), True)
-        add_default("long_added", types.LongType.get(), jvm.java.lang.Long.valueOf(5000000000))
-        add_default("float_added", types.FloatType.get(), jvm.java.lang.Float.valueOf("1.25"))
-        add_default("double_added", types.DoubleType.get(), 2.5)
-        add_default("date_added", types.DateType.get(), "2024-01-02")
-        add_default(
-            "timestamp_added",
-            types.TimestampType.withZone(),
-            "2024-01-02T03:04:05Z")
-        add_default(
-            "binary_added", types.BinaryType.get(),
-            jvm.java.nio.ByteBuffer.wrap(bytearray([1, 2, 3])))
-        add_default(
-            "decimal_added", types.DecimalType.of(9, 2),
-            jvm.java.math.BigDecimal("12345.67"))
-
-        # Add one unsupported default at a time so each fallback case is independent.
-        if unsupported_column == "timestamp_ntz_added":
+        if single_column is None:
+            # TIME is omitted because Spark's Iceberg adapter rejects it.
+            update.addRequiredColumn(
+                "required_added", types.IntegerType.get(), None, literals.of(7))
+            update.addColumn("optional_added", types.StringType.get(), literals.of("legacy"))
+            update.addColumn("s", "nested_added", types.IntegerType.get(), literals.of(11))
+            add_default("boolean_added", types.BooleanType.get(), True)
+            add_default("long_added", types.LongType.get(), jvm.java.lang.Long.valueOf(5000000000))
+            add_default("float_added", types.FloatType.get(), jvm.java.lang.Float.valueOf("1.25"))
+            add_default("double_added", types.DoubleType.get(), 2.5)
+            add_default("date_added", types.DateType.get(), "2024-01-02")
             add_default(
-                unsupported_column, types.TimestampType.withoutZone(), "2024-01-02T03:04:05")
-        elif unsupported_column == "uuid_added":
+                "timestamp_added",
+                types.TimestampType.withZone(),
+                "2024-01-02T03:04:05Z")
             add_default(
-                unsupported_column, types.UUIDType.get(),
+                "decimal_added", types.DecimalType.of(9, 2),
+                jvm.java.math.BigDecimal("12345.67"))
+        elif single_column == "binary_added":
+            add_default(
+                single_column, types.BinaryType.get(),
+                jvm.java.nio.ByteBuffer.wrap(bytearray([1, 2, 3])))
+        elif single_column == "timestamp_ntz_added":
+            add_default(
+                single_column, types.TimestampType.withoutZone(), "2024-01-02T03:04:05")
+        elif single_column == "uuid_added":
+            add_default(
+                single_column, types.UUIDType.get(),
                 "123e4567-e89b-12d3-a456-426614174000")
-        elif unsupported_column == "fixed_added":
+        elif single_column == "fixed_added":
             add_default(
-                unsupported_column, types.FixedType.ofLength(3),
+                single_column, types.FixedType.ofLength(3),
                 jvm.java.nio.ByteBuffer.wrap(bytearray([4, 5, 6])))
+        else:
+            raise ValueError(f"Unexpected default column: {single_column}")
         update.commit()
         spark.sql(f"REFRESH TABLE {table_name}")
 
@@ -496,17 +504,19 @@ def _setup_iceberg_v3_defaults_table(table_name, unsupported_column=None):
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.parametrize('single_column', [
+    pytest.param(None, id='common'),
+    pytest.param('binary_added', marks=_skip_lakekeeper_binary_defaults)])
 @iceberg_fast_test
-def test_iceberg_v3_initial_defaults_all_types(spark_tmp_table_factory, reader_type):
+def test_iceberg_v3_initial_defaults_all_types(spark_tmp_table_factory, reader_type, single_column):
     table_name = get_full_table_name(spark_tmp_table_factory)
-    _setup_iceberg_v3_defaults_table(table_name)
+    _setup_iceberg_v3_defaults_table(table_name, single_column)
     v3_conf = {"spark.rapids.sql.format.iceberg.v3.enabled": "true",
                "spark.rapids.sql.format.parquet.reader.type": reader_type}
-    query = (
-        f"SELECT id, s.present, s.nested_added, required_added, optional_added, "
-        "boolean_added, long_added, float_added, double_added, date_added, "
-        "timestamp_added, binary_added, decimal_added "
-        f"FROM {table_name} ORDER BY id")
+    columns = single_column or (
+        "s.present, s.nested_added, required_added, optional_added, boolean_added, long_added, "
+        "float_added, double_added, date_added, timestamp_added, decimal_added")
+    query = f"SELECT id, {columns} FROM {table_name} ORDER BY id"
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.sql(query),
         exist_classes="GpuBatchScanExec",
@@ -603,7 +613,8 @@ def test_iceberg_v3_defaulted_collection_paths(spark_tmp_table_factory, reader_t
 @allow_non_gpu("BatchScanExec", "ColumnarToRowExec")
 @ignore_order(local=True)
 @pytest.mark.parametrize(
-    "unsupported_column", ["timestamp_ntz_added", "uuid_added", "fixed_added"])
+    "unsupported_column", ["timestamp_ntz_added", "uuid_added",
+                           pytest.param("fixed_added", marks=_skip_lakekeeper_binary_defaults)])
 @pytest.mark.parametrize("project_default", [False, True], ids=["unprojected", "projected"])
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @iceberg_fast_test
