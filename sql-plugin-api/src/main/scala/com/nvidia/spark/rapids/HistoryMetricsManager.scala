@@ -37,12 +37,16 @@ private[rapids] class HistoryMetricsManager(
   private var activeProvider: HistoryMetricsProvider = _
   private var registration: AutoCloseable = _
 
+  /**
+   * @param catalog the plugin's metric families; the provider admits only these ids
+   */
   def initialize(
       configuration: JavaMap[String, String],
       applicationId: String,
       applicationAttemptId: String,
       producerVersion: String,
-      configuredName: String): Unit = synchronized {
+      configuredName: String,
+      catalog: HistoryMetricCatalog): Unit = synchronized {
     if (activeProvider != null || registration != null) {
       log.warn("History metrics provider initialization was requested more than once; " +
         "keeping the current provider")
@@ -56,7 +60,7 @@ private[rapids] class HistoryMetricsManager(
         log.info("History metrics: requested=none, active=noop, reason=disabled by configuration")
       } else {
         discoverProviders(requested).foreach { providers =>
-          select(requested, providers, providerConfiguration, applicationId,
+          select(requested, providers, catalog, providerConfiguration, applicationId,
             applicationAttemptId, producerVersion)
         }
       }
@@ -151,6 +155,7 @@ private[rapids] class HistoryMetricsManager(
   private def select(
       requested: String,
       providers: Seq[(String, HistoryMetricsProvider)],
+      catalog: HistoryMetricCatalog,
       configuration: JavaMap[String, String],
       applicationId: String,
       applicationAttemptId: String,
@@ -162,7 +167,7 @@ private[rapids] class HistoryMetricsManager(
         fallback(requested,
           s"provider was not found on the driver classpath; available providers: $availableText")
       case Seq(provider) =>
-        open(requested, provider, configuration, applicationId,
+        open(requested, provider, catalog, configuration, applicationId,
           applicationAttemptId, producerVersion)
       case matches =>
         val implementations = matches.map(_.getClass.getName).mkString(", ")
@@ -173,13 +178,14 @@ private[rapids] class HistoryMetricsManager(
   private def open(
       requested: String,
       provider: HistoryMetricsProvider,
+      catalog: HistoryMetricCatalog,
       configuration: JavaMap[String, String],
       applicationId: String,
       applicationAttemptId: String,
       producerVersion: String): Unit = {
     try {
-      val store = provider.open(HistoryMetricCatalog.of(Collections.emptyList()),
-        configuration, applicationId, applicationAttemptId, producerVersion)
+      val store = provider.open(
+        catalog, configuration, applicationId, applicationAttemptId, producerVersion)
       val newRegistration = MetricStores.install(store)
       activeProvider = provider
       registration = newRegistration

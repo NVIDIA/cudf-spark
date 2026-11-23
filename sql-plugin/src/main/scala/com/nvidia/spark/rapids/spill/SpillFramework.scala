@@ -1835,7 +1835,7 @@ trait SpillableStore[T <: SpillableHandle]
     plan
   }
 
-  protected def postSpill(plan: SpillPlan): Unit = {}
+  protected def postSpill(plan: SpillPlan): Unit = { /* Optional post-spill hook */ }
 
   def spill(spillNeeded: Long): Long = {
     if (spillNeeded == 0) {

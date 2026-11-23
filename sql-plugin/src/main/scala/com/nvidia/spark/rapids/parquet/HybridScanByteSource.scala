@@ -83,7 +83,7 @@ private[parquet] trait HybridScanByteSource extends AutoCloseable {
   def fetchToDevice(ranges: Array[ByteRange]): Array[DeviceMemoryBuffer] =
     throw new UnsupportedOperationException("this source cannot read to the device")
 
-  override def close(): Unit = {}
+  override def close(): Unit = { /* Nothing to close by default */ }
 }
 
 /**
@@ -216,7 +216,7 @@ private[parquet] trait HybridScanRangeReader extends AutoCloseable {
   def fileSize: Long =
     throw new UnsupportedOperationException("this reader cannot read to the device")
 
-  override def close(): Unit = {}
+  override def close(): Unit = { /* Nothing to close by default */ }
 }
 
 /** Reads through [[RapidsFileIO]], so from any filesystem or object store it supports. */

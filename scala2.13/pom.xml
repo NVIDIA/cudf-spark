@@ -107,6 +107,20 @@
                     <version>2.1.210</version>
                     <scope>test</scope>
                 </dependency>
+                <dependency>
+                    <groupId>org.apache.spark</groupId>
+                    <artifactId>spark-hive_${scala.binary.version}</artifactId>
+                    <version>${spark.version}</version>
+                    <type>test-jar</type>
+                    <scope>test</scope>
+                </dependency>
+                <dependency>
+                    <groupId>org.apache.spark</groupId>
+                    <artifactId>spark-tags_${scala.binary.version}</artifactId>
+                    <version>${spark.version}</version>
+                    <type>test-jar</type>
+                    <scope>test</scope>
+                </dependency>
             </dependencies>
             <modules>
                 <module>delta-lake/delta-21x</module>
@@ -766,14 +780,23 @@
                 <shim.source.inherits>404</shim.source.inherits>
                 <spark.version>${spark405.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>cudf-spark-delta-stub</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-40x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId2>cudf-spark-delta-42x</rapids.delta.artifactId2>
+                <rapids.delta.artifactId3>cudf-spark-delta-43x</rapids.delta.artifactId3>
+                <delta42x.spark.artifactId>delta-spark_4.0_${scala.binary.version}</delta42x.spark.artifactId>
+                <delta43x.spark.artifactId>delta-spark_4.0_${scala.binary.version}</delta43x.spark.artifactId>
                 <iceberg.artifact.suffix>${spark40x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.110x.version}</iceberg.runtime.version>
+                <rapids.iceberg.artifactId>cudf-spark-iceberg-1-10-x</rapids.iceberg.artifactId>
+                <rapids.iceberg.artifactId2>cudf-spark-iceberg-1-11-x</rapids.iceberg.artifactId2>
                 <slf4j.version>2.0.7</slf4j.version>
             </properties>
             <modules>
-                <module>delta-lake/delta-stub</module>
-                <module>iceberg/iceberg-stub</module>
+                <module>delta-lake/delta-40x</module>
+                <module>delta-lake/delta-42x</module>
+                <module>delta-lake/delta-43x</module>
+                <module>iceberg/iceberg-1-10-x</module>
+                <module>iceberg/iceberg-1-11-x</module>
             </modules>
         </profile>
         <profile>
@@ -962,15 +985,21 @@
                 <shim.source.inherits>413</shim.source.inherits>
                 <spark.version>${spark414.version}</spark.version>
                 <parquet.hadoop.version>1.13.1</parquet.hadoop.version>
-                <rapids.delta.artifactId1>cudf-spark-delta-stub</rapids.delta.artifactId1>
+                <rapids.delta.artifactId1>cudf-spark-delta-42x</rapids.delta.artifactId1>
+                <rapids.delta.artifactId2>cudf-spark-delta-43x</rapids.delta.artifactId2>
+                <rapids.delta.artifactId3>cudf-spark-delta-43x</rapids.delta.artifactId3>
+                <delta42x.spark.artifactId>delta-spark_4.1_${scala.binary.version}</delta42x.spark.artifactId>
+                <delta43x.spark.artifactId>delta-spark_4.1_${scala.binary.version}</delta43x.spark.artifactId>
                 <iceberg.artifact.suffix>${spark41x.iceberg.artifact.suffix}</iceberg.artifact.suffix>
                 <iceberg.runtime.version>${iceberg.111x.version}</iceberg.runtime.version>
+                <rapids.iceberg.artifactId>cudf-spark-iceberg-1-11-x</rapids.iceberg.artifactId>
                 <slf4j.version>2.0.7</slf4j.version>
                 <scala.javac.args>-Xlint:all,-serial,-path,-try,-processing,-options|-Werror</scala.javac.args>
             </properties>
             <modules>
-                <module>delta-lake/delta-stub</module>
-                <module>iceberg/iceberg-stub</module>
+                <module>delta-lake/delta-42x</module>
+                <module>delta-lake/delta-43x</module>
+                <module>iceberg/iceberg-1-11-x</module>
             </modules>
             <build>
                 <pluginManagement>
@@ -1225,6 +1254,8 @@
         <jni.classifier>${cuda.version}</jni.classifier>
         <cudf-spark-jni.version>26.12.0-SNAPSHOT</cudf-spark-jni.version>
         <cudf-spark-jni.artifactId>cudf-spark-jni</cudf-spark-jni.artifactId>
+        <!-- Keep in sync with cudf-spark-jni; only used to verify and extract zstd native chunks. -->
+        <zstd-jni.version>1.5.6-6</zstd-jni.version>
         <cudf-spark-private.version>26.12.0-SNAPSHOT</cudf-spark-private.version>
         <history-metrics.version>26.12.0-SNAPSHOT</history-metrics.version>
         <cudf-spark-private.artifactId>cudf-spark-private_${scala.binary.version}</cudf-spark-private.artifactId>

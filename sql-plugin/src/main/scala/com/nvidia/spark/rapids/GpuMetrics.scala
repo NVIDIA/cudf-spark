@@ -74,6 +74,9 @@ class GpuMetricFactory(metricsConf: MetricsLevel, context: SparkContext) {
   def create(level: MetricsLevel, name: String): GpuMetric =
     createInternal(level, SQLMetrics.createMetric(context, name))
 
+  def create(level: MetricsLevel, metric: => SQLMetric): GpuMetric =
+    createInternal(level, metric)
+
   def createNanoTiming(level: MetricsLevel, name: String): GpuMetric =
     createInternal(level, SQLMetrics.createNanoTimingMetric(context, name))
 
@@ -148,6 +151,7 @@ object GpuMetric extends Logging {
   val ROW_GROUPS_FETCHED = "rowGroupsFetched"
   val HYBRID_SCAN_FOOTER_PARSE_TIME = "hybridScanFooterParseTime"
   val HYBRID_SCAN_OUTPUT_FILTER_TIME = "hybridScanOutputFilterTime"
+  val HYBRID_SCAN_GPU_BUSY_HOST_BYTES_READ = "hybridScanGpuBusyHostBytesRead"
   val HYBRID_SCAN_BYTES_REQUESTED = "hybridScanBytesRequested"
   val HYBRID_SCAN_DEVICE_BYTES_READ = "hybridScanDeviceBytesRead"
   val HYBRID_SCAN_NATIVE_HOST_BYTES_READ = "hybridScanNativeHostBytesRead"
@@ -224,9 +228,12 @@ object GpuMetric extends Logging {
   val DESCRIPTION_HYBRID_SCAN_FOOTER_PARSE_TIME = "hybrid scan total footer (re-)parse time"
   val DESCRIPTION_HYBRID_SCAN_OUTPUT_FILTER_TIME =
     "hybrid scan output filter time (pushed filters only)"
+  val DESCRIPTION_HYBRID_SCAN_GPU_BUSY_HOST_BYTES_READ =
+    "hybrid scan bytes read to host instead of with GDS while the GPU was busy"
   val DESCRIPTION_HYBRID_SCAN_BYTES_REQUESTED = "hybrid scan data bytes requested, counting a " +
     "dictionary page fetched for pruning again with its column chunk"
-  val DESCRIPTION_HYBRID_SCAN_DEVICE_BYTES_READ = "hybrid scan bytes read to device with GDS"
+  val DESCRIPTION_HYBRID_SCAN_DEVICE_BYTES_READ =
+    "hybrid scan bytes read to device with GDS, including alignment padding"
   val DESCRIPTION_HYBRID_SCAN_NATIVE_HOST_BYTES_READ = "hybrid scan bytes read to host with KvikIO"
   val DESCRIPTION_DELETION_VECTOR_SCATTER_TIME = "deletion vector scatter time"
   val DESCRIPTION_DELETION_VECTOR_SIZE = "deletion vector size"

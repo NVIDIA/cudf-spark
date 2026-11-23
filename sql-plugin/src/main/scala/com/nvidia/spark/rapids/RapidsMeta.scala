@@ -355,7 +355,7 @@ abstract class RapidsMeta[INPUT <: BASE, BASE, OUTPUT <: BASE](
 
   // Hook for subclasses to run expression-level optimizations at the appropriate layer.
   // Default no-op so non-plan metas do not run bridge optimization.
-  protected def runChildExprBridgeOptimization(): Unit = {}
+  protected def runChildExprBridgeOptimization(): Unit = { /* Default no-op */ }
 
   /**
    * Do any extra checks and tag yourself if you are compatible or not.  Be aware that this may
@@ -517,7 +517,7 @@ abstract class PartMeta[INPUT <: Partitioning](part: INPUT,
     tagPartForGpu()
   }
 
-  def tagPartForGpu(): Unit = {}
+  def tagPartForGpu(): Unit = { /* Default no-op when generic checks suffice */ }
 
   override protected def runChildExprBridgeOptimization(): Unit = {
     GpuCpuBridgeOptimizer.checkAndOptimizeExpressionMetas(childExprs)
@@ -556,7 +556,7 @@ abstract class ScanMeta[INPUT <: Scan](scan: INPUT,
   override val childParts: Seq[PartMeta[_]] = Seq.empty
   override val childDataWriteCmds: Seq[DataWritingCommandMeta[_]] = Seq.empty
 
-  override def tagSelfForGpu(): Unit = {}
+  override def tagSelfForGpu(): Unit = { /* Default no-op for scans without extra checks */ }
 
   def supportsRuntimeFilters: Boolean = false
 }
@@ -604,7 +604,7 @@ abstract class DataWritingCommandMeta[INPUT <: DataWritingCommand](
     tagSelfForGpuInternal()
   }
 
-  protected def tagSelfForGpuInternal(): Unit = {}
+  protected def tagSelfForGpuInternal(): Unit = { /* Default no-op */ }
 
   // Check whether data type of intput/output contains timestamp type, which
   // is related to time zone.
@@ -870,7 +870,7 @@ abstract class SparkPlanMeta[INPUT <: SparkPlan](plan: INPUT,
    * one of its children please take special care to update the comment inside
    * `tagSelfForGpu` so we don't end up with something that could be cyclical.
    */
-  def tagPlanForGpu(): Unit = {}
+  def tagPlanForGpu(): Unit = { /* Default no-op when generic checks suffice */ }
 
   /**
    * If this is enabled to be converted to a GPU version convert it and return the result, else
@@ -1270,7 +1270,7 @@ abstract class BaseExprMeta[INPUT <: Expression](
    * Called to verify that this expression will work on the GPU. For most expressions without
    * extra checks all of the checks should have already been done.
    */
-  def tagExprForGpu(): Unit = {}
+  def tagExprForGpu(): Unit = { /* Default no-op when generic checks suffice */ }
 
   final def willNotWorkInAst(because: String): Unit = cannotBeAstReasons.add(because)
 
@@ -1813,7 +1813,7 @@ abstract class AggExprMeta[INPUT <: AggregateFunction](
   }
 
   // not all aggs overwrite this
-  def tagAggForGpu(): Unit = {}
+  def tagAggForGpu(): Unit = { /* Default no-op when generic checks suffice */ }
 
   override final def convertToGpuImpl(): GpuExpression =
     convertToGpu(childExprs.map(_.convertToGpu()))

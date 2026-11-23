@@ -942,7 +942,9 @@ class UCX(transport: UCXShuffleTransport, executor: BlockManagerId, rapidsConf: 
           closeEndpointOnWorkerThread(ep)
         }
 
-        override def onMessageStarted(receiveAm: UcpRequest): Unit = {}
+        override def onMessageStarted(receiveAm: UcpRequest): Unit = {
+          // Handshake messages only require handling on completion or error.
+        }
 
         override def onSuccess(am: UCXActiveMessage, buff: TransportBuffer): Unit = {
           withResource(buff) { _ =>
@@ -1096,7 +1098,9 @@ class UCX(transport: UCXShuffleTransport, executor: BlockManagerId, rapidsConf: 
           logWarning(s"Error while receiving handshake request. Ignoring.")
         }
 
-        override def onMessageStarted(receiveAm: UcpRequest): Unit = {}
+        override def onMessageStarted(receiveAm: UcpRequest): Unit = {
+          // Handshake messages only require handling on completion or error.
+        }
 
         override def onSuccess(requestAm: UCXActiveMessage,
                                buff: TransportBuffer): Unit = {

@@ -443,15 +443,20 @@
                                            src="${spark.rapids.source.basedir}/${rapids.module}/build/verify-native-library-chunks.py">
                                     <attribute name="jar_path"/>
                                     <attribute name="metadata_dir"/>
+                                    <attribute name="zstd_jar"/>
                                 </scriptdef>
-                                <ac:if xmlns:ac="antlib:net.sf.antcontrib">
-                                    <available file="${dist.native.chunking.metadata.dir}/enabled"/>
-                                    <then>
-                                        <verifyNativeLibraryChunks
-                                            jar_path="${dist.jar.name}"
-                                            metadata_dir="${dist.native.chunking.metadata.dir}"/>
-                                    </then>
-                                </ac:if>
+                                <java classname="org.python.util.jython"
+                                      classpathref="maven.plugin.classpath"
+                                      fork="true" failonerror="true"
+                                      dir="${spark.rapids.source.basedir}">
+                                    <arg value="-B"/>
+                                    <arg value="${spark.rapids.source.basedir}/${rapids.module}/scripts/tests/test_verify_native_library_chunks.py"/>
+                                    <arg value="${project.build.directory}/jni-archive/zstd-jni.jar"/>
+                                </java>
+                                <verifyNativeLibraryChunks
+                                    jar_path="${dist.jar.name}"
+                                    metadata_dir="${dist.native.chunking.metadata.dir}"
+                                    zstd_jar="${project.build.directory}/jni-archive/zstd-jni.jar"/>
                             </target>
                         </configuration>
                     </execution>
@@ -688,7 +693,7 @@ self.log("... OK")
                                 <artifactItem>
                                     <groupId>com.github.luben</groupId>
                                     <artifactId>zstd-jni</artifactId>
-                                    <version>1.5.6-6</version>
+                                    <version>${zstd-jni.version}</version>
                                     <outputDirectory>${project.build.directory}/jni-archive</outputDirectory>
                                     <destFileName>zstd-jni.jar</destFileName>
                                 </artifactItem>

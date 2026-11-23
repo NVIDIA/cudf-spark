@@ -26,7 +26,9 @@ object GpuParquetUtilsShims {
   /**
    * Sets the given row index offset on the BlockMetaData. No-op for Spark 3.3.x.
    */
-  def setRowIndexOffset(block: BlockMetaData, offset: Long): Unit = {}
+  def setRowIndexOffset(block: BlockMetaData, offset: Long): Unit = {
+    // Row index offsets are not available in Spark 3.3.x.
+  }
 
   /**
    * Gets the row index offset from the BlockMetaData. Not available in Spark 3.3.x.

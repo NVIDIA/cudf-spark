@@ -28,6 +28,7 @@ import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingSeq
 import com.nvidia.spark.rapids.jni.CastStrings
+import com.nvidia.spark.rapids.perf.{ScanSplitHeuristic, SplitTotals}
 import com.nvidia.spark.rapids.shims.{ShimFilePartitionReaderFactory, ShimSparkPlan, SparkShimImpl}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileStatus, Path}
@@ -272,17 +273,25 @@ case class GpuHiveTableScanExec(requestedAttributes: Seq[Attribute],
         PartitionDirectory(partValues, dirContents)
     }.toArray
 
-    val maxSplitBytes      = FilePartition.maxSplitBytes(sparkSession, selectedPartitions)
+    val maxSplitBytes      = ScanSplitHeuristic.learnedFileSplit(historyKey, sparkSession,
+      selectedPartitions.map(_.files.map(_.getLen).sum).sum,
+      FilePartition.maxSplitBytes(sparkSession, selectedPartitions))
 
     val splitFiles = FilePartitionShims.splitFiles(sparkSession, hadoopConf,
       selectedPartitions, maxSplitBytes)
 
     val filePartitions = FilePartition.getFilePartitions(sparkSession, splitFiles, maxSplitBytes)
+    splitBytes.foreach { _ =>
+      plannedSplits = filePartitions.map(p => FilePartitionShims.getFiles(p).length).sum
+    }
 
     // TODO [future]: Handle small-file optimization.
     //                (https://github.com/NVIDIA/spark-rapids/issues/7017)
     //                Currently assuming per-file reading.
-    SparkShimImpl.getFileScanRDD(sparkSession, readFile, filePartitions, readSchema)
+    SparkShimImpl.getFileScanRDD(sparkSession,
+                                 ScanSplitHeuristic.observeFileRead(readFile, splitBytes,
+                                   gpuLongMetric(GPU_OUTPUT_BATCH_BYTES)),
+                                 filePartitions, readSchema)
                  .asInstanceOf[RDD[ColumnarBatch]]
   }
 
@@ -333,6 +342,16 @@ case class GpuHiveTableScanExec(requestedAttributes: Seq[Attribute],
       dirsWithPartValues, readSchema, sparkSession, hadoopConf)
   }
 
+  @transient private lazy val historyKey: Option[String] = ScanSplitHeuristic.historyKey(
+    Some(hiveTableRelation.tableMeta.identifier.unquotedString), Nil)
+
+  /** Decoded bytes and partitions read. */
+  @transient private lazy val splitBytes: Option[SplitTotals] =
+    historyKey.map(_ => SplitTotals.create(sparkContext))
+
+  /** Files planned to be read; 0 while history is off. */
+  @transient private var plannedSplits: Int = 0
+
   lazy val inputRDD: RDD[ColumnarBatch] = {
     // Assume Delimited text.
     val options                   = hiveTableRelation.tableMeta.properties ++
@@ -369,7 +388,11 @@ case class GpuHiveTableScanExec(requestedAttributes: Seq[Attribute],
   override protected def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
     val numOutputRows = gpuLongMetric(NUM_OUTPUT_ROWS)
     val scanTime = gpuLongMetric(SCAN_TIME)
-    inputRDD.mapPartitionsInternal { batches =>
+    // `inputRDD` sets `plannedSplits`, so it is built before the registration reads it.
+    val rdd = inputRDD
+    // Per execution: a re-run plan reuses `inputRDD`.
+    ScanSplitHeuristic.registerFileScan(historyKey, plannedSplits, splitBytes, sparkContext)
+    rdd.mapPartitionsInternal { batches =>
       new Iterator[ColumnarBatch] {
 
         override def hasNext: Boolean = {

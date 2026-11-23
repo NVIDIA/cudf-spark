@@ -202,6 +202,10 @@ case class GpuUnaryMinus(child: Expression, failOnError: Boolean) extends GpuUna
 
   override def sql: String = s"(- ${child.sql})"
 
+  override def selfSupportsAstJit: Boolean = !failOnError && dataType.isInstanceOf[IntegralType]
+
+  override def selfIsAstJitOperator: Boolean = selfSupportsAstJit
+
   override def hasSideEffects: Boolean = super.hasSideEffects ||
     (failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType))
 
@@ -244,12 +248,14 @@ case class GpuUnaryMinus(child: Expression, failOnError: Boolean) extends GpuUna
 
   // AST cannot raise the ANSI overflow error.
   override def selfConvertsToAst: Boolean = (dataType match {
-    case LongType | FloatType | DoubleType | IntegerType => true
+    case ByteType | ShortType | LongType | FloatType | DoubleType | IntegerType => true
     case _ => false
   }) && !(failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType))
 
   override def convertToAst(numFirstTableColumns: Int): ast.AstExpression = {
     val literalZero = dataType match {
+      case ByteType => ast.Literal.ofByte(0.toByte)
+      case ShortType => ast.Literal.ofShort(0.toShort)
       case LongType => ast.Literal.ofLong(0)
       case FloatType => ast.Literal.ofFloat(0)
       case DoubleType => ast.Literal.ofDouble(0)
@@ -293,6 +299,9 @@ case class GpuAbs(child: Expression, failOnError: Boolean) extends CudfUnaryExpr
     !GpuTypeShims.isSupportedDayTimeType(dataType) &&
     !GpuTypeShims.isSupportedYearMonthType(dataType)
 
+  override protected def astJitCompatible: Boolean =
+    !failOnError && dataType.isInstanceOf[IntegralType]
+
   override def hasSideEffects: Boolean = super.hasSideEffects ||
     (failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType))
 
@@ -335,7 +344,7 @@ abstract class GpuAddBase extends CudfBinaryArithmetic with Serializable {
     !GpuTypeShims.isSupportedYearMonthType(dataType) && !dataType.isInstanceOf[DecimalType]
 
   override protected def astJitCompatible: Boolean =
-    !failOnError && (dataType == IntegerType || dataType == LongType)
+    !failOnError && dataType.isInstanceOf[IntegralType]
 
   override def hasSideEffects: Boolean =
     (failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType)) || super.hasSideEffects
@@ -374,6 +383,9 @@ abstract class GpuSubtractBase extends CudfBinaryArithmetic with Serializable {
     !(failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType)) &&
     !GpuTypeShims.isSupportedDayTimeType(dataType) &&
     !GpuTypeShims.isSupportedYearMonthType(dataType) && !dataType.isInstanceOf[DecimalType]
+
+  override protected def astJitCompatible: Boolean =
+    !failOnError && dataType.isInstanceOf[IntegralType]
 
   private[this] def decimalOpOverflowCheck(
       lhs: BinaryOperable,
@@ -745,7 +757,7 @@ case class GpuMultiply(
     !(failOnError && GpuAnsi.needBasicOpOverflowCheck(dataType))
 
   override protected def astJitCompatible: Boolean =
-    !failOnError && (dataType == IntegerType || dataType == LongType)
+    !failOnError && dataType.isInstanceOf[IntegralType]
 
   private def multiplyOverflowError(msg: String): ArithmeticException = {
     RapidsErrorUtils.arithmeticOverflowError(msg, origin)

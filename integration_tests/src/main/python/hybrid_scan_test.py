@@ -30,7 +30,7 @@ from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
     assert_gpu_and_cpu_row_counts_equal, assert_spark_exception, collect_plan_nodes, plan_metric
 from conftest import is_databricks_runtime, is_not_utc
 from data_gen import *
-from marks import allow_non_gpu, inject_oom
+from marks import allow_non_gpu, ignore_order, inject_oom
 from parquet_test import hybrid_fallback_parquet_file_reader_conf, hybrid_parquet_file_reader_conf, \
     rebase_write_legacy_conf
 from spark_session import with_cpu_session, with_gpu_session
@@ -916,3 +916,35 @@ def test_hybrid_scan_corrupt_file(spark_tmp_path, ignore_corrupt):
         assert_gpu_and_cpu_are_equal_collect(read, conf=conf)
     else:
         assert_gpu_and_cpu_error(lambda spark: read(spark).collect(), conf, 'SparkException')
+
+
+@ignore_order(local=True)
+@pytest.mark.parametrize("reader_mode", ["PERFILE", "MULTITHREADED"])
+def test_hybrid_scan_dotted_column_collision(spark_tmp_path, reader_mode):
+    projection = ["c", "`a.b`"]
+    path = spark_tmp_path + "/dotted_collision"
+    gens = [
+        ("a", StructGen([("b", IntegerGen(min_val=5, max_val=6, nullable=False))],
+                        nullable=False)),
+        ("a.b", IntegerGen(min_val=1000, max_val=2000, nullable=False)),
+        ("c", IntegerGen(min_val=100, max_val=200, nullable=False)),
+    ]
+    with_cpu_session(lambda spark: gen_df(spark, gens, length=16, num_slices=2)
+                     .write.parquet(path))
+    options = {"spark.rapids.sql.format.parquet.reader.type": reader_mode,
+               "spark.sql.parquet.fieldId.read.enabled": "false"}
+    queries = [
+        lambda spark: spark.read.parquet(path).selectExpr(*projection),
+        lambda spark: spark.read.parquet(path).filter("`a.b` >= 1500").select("c"),
+    ]
+    # Both a projected dotted root and a filter-only dotted root must safely fall back.
+    # fallback_conf enables hybrid; hybrid_conf additionally fails if fallback occurs.
+    for query in queries:
+        assert_gpu_and_cpu_are_equal_collect(query, conf=fallback_conf(**options))
+        assert_spark_exception(
+            lambda: with_gpu_session(lambda spark: query(spark).collect(),
+                                     conf=hybrid_conf(**options)),
+            error_message="column a.b contains a literal dot")
+    # Pruning the dotted root and its predicate still permits hybrid execution.
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.parquet(path).select("c"), conf=hybrid_conf(**options))

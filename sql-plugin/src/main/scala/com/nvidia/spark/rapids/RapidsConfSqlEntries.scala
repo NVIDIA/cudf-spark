@@ -569,6 +569,23 @@ private[rapids] trait RapidsConfSqlEntries extends RapidsConfResourceEntries {
       .checkValue(v => v > 0 && v <= 1, "The keep threshold must be in the range (0, 1].")
       .createWithDefault(0.9)
 
+  val READER_GPU_DIRECT_STORAGE_MODE =
+    conf("spark.rapids.sql.reader.gpuDirectStorage.mode")
+      .doc("How the Parquet hybrid scan reader " +
+          s"(${PARQUET_HYBRID_SCAN_ENABLED.key}) uses GPUDirect Storage. OFF reads through " +
+          "host memory. ON reads straight to device memory where it can. AUTO does the same " +
+          "when the task holds the GPU semaphore or can take it without waiting, and otherwise " +
+          "reads through host memory. Only the PERFILE reader type, set explicitly, reads to " +
+          "the device: MULTITHREADED reads through host memory, and the AUTO reader type picks " +
+          "MULTITHREADED for cloud files and COALESCING, which falls back to parquet-mr, for " +
+          "local ones. No file is read with GPUDirect Storage yet, so every mode reads through " +
+          "host memory.")
+      .internal()
+      .stringConf
+      .transform(_.toUpperCase(java.util.Locale.ROOT))
+      .checkValues(Set("OFF", "ON", "AUTO"))
+      .createWithDefault("OFF")
+
   val READER_KVIKIO_NUM_THREADS =
     conf("spark.rapids.sql.reader.kvikio.numThreads")
       .doc("The number of threads in each executor's KvikIO thread pool, which the Parquet " +
