@@ -74,7 +74,7 @@ class RapidsCoalesceShufflePartitionsSuite
         f(spark)
         val plans = ExecutionPlanCaptureCallback.getResultsWithTimeout()
         val adaptivePlans = plans.collect {
-            case plan: AdaptiveSparkPlanExec if plan.isFinalPlan => plan.executedPlan
+          case plan: AdaptiveSparkPlanExec if isFinalAdaptivePlan(plan) => plan.executedPlan
         }
         assert(adaptivePlans.exists(_.exists(_.isInstanceOf[GpuExec])),
           s"Did not capture an executed GPU adaptive plan:\n${plans.mkString("\n")}")
@@ -165,9 +165,14 @@ class RapidsCoalesceShufflePartitionsSuite
 
   private def finalAdaptivePlan(df: DataFrame): SparkPlan = {
     df.queryExecution.executedPlan match {
-      case plan: AdaptiveSparkPlanExec if plan.isFinalPlan => plan.executedPlan
+      case plan: AdaptiveSparkPlanExec if isFinalAdaptivePlan(plan) => plan.executedPlan
       case plan => fail(s"Expected a final adaptive plan:\n$plan")
     }
+  }
+
+  private def isFinalAdaptivePlan(plan: AdaptiveSparkPlanExec): Boolean = {
+    // Spark 3.3 exposes its private isFinalPlan flag in the plan's first line.
+    plan.toString.startsWith("AdaptiveSparkPlan isFinalPlan=true")
   }
 
   private def coalescedReaders(plan: SparkPlan): Seq[SparkPlan] = {
