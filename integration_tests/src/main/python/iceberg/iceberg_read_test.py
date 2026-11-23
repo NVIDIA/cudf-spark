@@ -467,7 +467,7 @@ def _setup_iceberg_v3_defaults_table(table_name, unsupported_column=None):
             "timestamp_added",
             types.TimestampType.withZone(),
             "2024-01-02T03:04:05Z")
-        # Lakekeeper 0.13.1 can panic on binary initial defaults (NVIDIA/cudf-spark#17078).
+        # Lakekeeper 0.13.1 throws an error for fixed and binary initial defaults. See https://github.com/NVIDIA/cudf-spark/issues/17078
         if not is_iceberg_rest_catalog():
             add_default(
                 "binary_added", types.BinaryType.get(),
@@ -504,6 +504,7 @@ def test_iceberg_v3_initial_defaults_all_types(spark_tmp_table_factory, reader_t
     _setup_iceberg_v3_defaults_table(table_name)
     v3_conf = {"spark.rapids.sql.format.iceberg.v3.enabled": "true",
                "spark.rapids.sql.format.parquet.reader.type": reader_type}
+    # Lakekeeper 0.13.1 throws an error for fixed and binary initial defaults. See https://github.com/NVIDIA/cudf-spark/issues/17078
     binary_column = "" if is_iceberg_rest_catalog() else "binary_added, "
     query = (
         f"SELECT id, s.present, s.nested_added, required_added, optional_added, "
