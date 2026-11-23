@@ -25,8 +25,8 @@ import java.util.{HashMap => JHashMap}
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.atomic.AtomicInteger
 
-import com.nvidia.spark.rapids.{CombineConf, GpuColumnVector, LocalGpuMetric, PerfIO,
-  PerfIOConf, RmmSparkRetrySuiteBase, ThreadPoolConfBuilder}
+import com.nvidia.spark.rapids.{CombineConf, GpuColumnVector, PerfIO, PerfIOConf,
+  RmmSparkRetrySuiteBase, ThreadPoolConfBuilder}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
 import com.nvidia.spark.rapids.iceberg.parquet._
@@ -134,7 +134,6 @@ class GpuMultiThreadIcebergParquetReaderSuite
           } else {
             new Schema(Types.NestedField.optional(partitionFieldId, "a", Types.LongType.get()))
           }
-          val mixedConstantGroups = new LocalGpuMetric
           val deleteFilterCalls = new AtomicInteger()
           val conf = GpuIcebergParquetReaderConf(
             caseSensitive = true,
@@ -148,7 +147,7 @@ class GpuMultiThreadIcebergParquetReaderSuite
             skipReadEstimate = true,
             parquetDebugDumpPrefix = None,
             parquetDebugDumpAlways = false,
-            metrics = Map("numMixedConstantMetadataGroups" -> mixedConstantGroups),
+            metrics = Map.empty,
             threadConf = MultiThread(
               new ThreadPoolConfBuilder(1, true, 1L << 20, 10000L, false),
               maxNumFilesProcessed = files.size,
@@ -203,6 +202,8 @@ class GpuMultiThreadIcebergParquetReaderSuite
                     withResource(reader.combineHMBs(Array(firstMeta, secondMeta))) { combined =>
                       assert(combined.memBuffersAndSizes.map(_.numRows).sum ==
                         firstRows + secondRows)
+                      val expectedRuns = if (sameConstants) 1 else 2
+                      assert(combined.allPartValues.exists(_.length == expectedRuns))
                       // The retry-suite fixture owns the GPU; the mock task has no SparkEnv.
                       TrampolineUtil.unsetTaskContext()
                       val batchSizes = scala.collection.mutable.ArrayBuffer[Int]()
@@ -248,7 +249,6 @@ class GpuMultiThreadIcebergParquetReaderSuite
                         Seq(firstRows + secondRows)
                       }
                       assert(batchSizes.toSeq == expectedBatchSizes)
-                      assert(mixedConstantGroups.value == (if (sameConstants) 0L else 1L))
                       assert(deleteFilterCalls.get() == callsBeforeCombining)
                     }
                   }

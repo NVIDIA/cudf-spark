@@ -93,13 +93,10 @@ def _assert_metadata_only_reads(table, reader_type, format_version):
             'spark.rapids.sql.reader.batchSizeRows': '5'}
 
     constant_columns = '_spec_id, _partition'
-    metadata_columns = '_spec_id, _partition, _file, _pos'
     # Iceberg 1.10 also exposes the v3 lineage columns as null on v1 and v2 tables.
-    if format_version == '3' or (runtime_iceberg_version or '').startswith('1.10.'):
+    if int(format_version) >= 3 or (runtime_iceberg_version or '').startswith('1.10.'):
         constant_columns += ', _last_updated_sequence_number'
-        metadata_columns += ', _row_id, _last_updated_sequence_number'
     for query in [f"SELECT {constant_columns} FROM {table}",
-                  f"SELECT {metadata_columns} FROM {table}",
                   f"SELECT count(*) FROM {table}", f"SELECT p, count(*) FROM {table} GROUP BY p"]:
         assert_cpu_and_gpu_are_equal_collect_with_capture(
             lambda spark: spark.sql(query), exist_classes='GpuBatchScanExec', conf=conf,

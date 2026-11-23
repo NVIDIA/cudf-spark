@@ -488,12 +488,6 @@ The plugin supports reading and writing `uncompressed`, `snappy`, `gzip` and `zs
 At this point, the plugin cannot fall back to the CPU when reading an unsupported compression
 format, and will error out in that case.
 
-## Iceberg metadata columns
-
-Queries that project Iceberg's `_deleted` metadata column use Iceberg's CPU reader to return
-the deletion status for each row. Scans that apply deletes without projecting `_deleted`
-remain eligible for GPU execution.
-
 ## Delta Lake selective replacement
 
 Delta Lake 4.3 `replaceOn` and `replaceUsing` writes support GPU acceleration,
