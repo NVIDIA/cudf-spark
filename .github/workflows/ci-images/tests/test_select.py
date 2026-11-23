@@ -167,12 +167,24 @@ class ImageSelectorTest(unittest.TestCase):
                                        "shuffle-rocky-no-rdma", "shuffle-rocky-rdma",
                                        "udf-cuda-template"])
 
-    def test_unrelated_push_selects_nothing(self):
+    def test_unrelated_pr_and_push_emit_empty_matrices(self):
         before = self.git("rev-parse", "HEAD")
+        self.git("switch", "-qc", "topic")
         self.write("notes.md", "unrelated\n")
         self.commit("Docs only")
-        self.assertEqual(self.invoke(payload={"created": False, "before": before}),
-                         {"validate": [], "publish": []})
+        self.git("switch", "-q", "main")
+        self.git("merge", "--no-ff", "-qm", "Synthetic PR merge", "topic")
+
+        for event in [
+            {"event": "pull_request", "ref": "17/merge"},
+            {"event": "pull_request", "ref": "17/merge", "base_ref": RELEASE_BRANCH},
+            {"event": "push", "payload": {"created": False, "before": before}},
+        ]:
+            with self.subTest(event=event):
+                self.assertEqual(self.invoke(**event), {"validate": [], "publish": []})
+                # The workflow uses the literal [] output to allow a skipped image job.
+                self.assertCountEqual((self.root / "output").read_text().splitlines(),
+                                      ["validate=[]", "publish=[]"])
 
     def test_new_release_bootstraps_toolchains_only(self):
         self.git("switch", "-qc", RELEASE_BRANCH)
