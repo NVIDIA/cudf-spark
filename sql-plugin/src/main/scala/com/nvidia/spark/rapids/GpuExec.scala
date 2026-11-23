@@ -150,6 +150,9 @@ trait GpuExec extends SparkPlan with Logging {
   def createMetric(level: MetricsLevel, name: String): GpuMetric =
     metricFactory.create(level, name)
 
+  def createMetric(level: MetricsLevel, metric: => SQLMetric): GpuMetric =
+    metricFactory.create(level, metric)
+
   def createNanoTimingMetric(level: MetricsLevel, name: String): GpuMetric =
     metricFactory.createNanoTiming(level, name)
 

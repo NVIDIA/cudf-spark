@@ -97,7 +97,7 @@ case class GpuMergeRowsExec(
     // table metadata. Skip registration before Spark 4.1 where WriteSummary is unused.
     if (GpuMergeRowMetricsShims.writeSummaryEnabled) {
       def mergeMetric(name: String): GpuMetric =
-        GpuMergeRowMetricsShims.createMetric(sparkContext, name)
+        createMetric(ESSENTIAL_LEVEL, GpuMergeRowMetricsShims.createMetric(sparkContext, name))
 
       common ++ Map(
         NUM_TARGET_ROWS_COPIED -> mergeMetric(

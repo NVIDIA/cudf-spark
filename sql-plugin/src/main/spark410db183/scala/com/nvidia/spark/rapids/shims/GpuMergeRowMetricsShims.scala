@@ -20,8 +20,6 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
-import com.nvidia.spark.rapids.GpuMetric
-
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 
@@ -31,8 +29,8 @@ import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 object GpuMergeRowMetricsShims {
   val writeSummaryEnabled: Boolean = true
 
-  def createMetric(sc: SparkContext, name: String): GpuMetric =
-    GpuMetric.wrap(SQLMetrics.createMetric(sc, name))
+  def createMetric(sc: SparkContext, name: String): SQLMetric =
+    SQLMetrics.createMetric(sc, name)
 
   def metricValue(metric: SQLMetric): Long = metric.value
 }
