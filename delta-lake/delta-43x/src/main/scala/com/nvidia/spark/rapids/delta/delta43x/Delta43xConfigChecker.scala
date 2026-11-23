@@ -63,8 +63,10 @@ object Delta43xConfigChecker extends DeltaConfigChecker {
       snapshot: => Snapshot): Unit = {
     val current = snapshot
     val properties = if (current.version < 0) {
-      // No table exists yet, so Delta creates it with these options and the session defaults.
-      creationProperties(spark, current.metadata.configuration, options)
+      // No table exists yet, so Delta creates it with these options and this session's defaults.
+      // The empty snapshot's own configuration is left out: Delta caches it per path with the
+      // defaults of whichever session first looked, which may differ from this session's.
+      creationProperties(spark, Map.empty, options)
     } else {
       current.metadata.configuration
     }
