@@ -52,6 +52,8 @@ class RapidsFileDataSourceV2FallBackSuite
             commands += funcName -> qe.logical
           }
         }
+        // Drain commands from earlier tests before registering this listener.
+        sparkContext.listenerBus.waitUntilEmpty()
         spark.listenerManager.register(listener)
 
         try {

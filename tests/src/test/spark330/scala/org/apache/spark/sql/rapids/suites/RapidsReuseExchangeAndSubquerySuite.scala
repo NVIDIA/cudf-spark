@@ -33,14 +33,14 @@ class RapidsReuseExchangeAndSubquerySuite
   // The inherited tests inspect plans without collecting the queries. Exercise both
   // original query shapes and require nonempty GPU reuse as well as the ID contract.
   Seq(false, true).foreach { withUnion =>
-    test(s"SPARK-32041: executed GPU exchange reuse, union=$withUnion") {
+    testRapids(s"SPARK-32041: executed GPU exchange reuse, union=$withUnion") {
       withSQLConf("spark.sql.adaptive.enabled" -> "false") {
         withTable("df1", "df2") {
           withSQLConf("spark.rapids.sql.enabled" -> "false") {
             spark.range(100).select(col("id"), col("id").as("k"))
-              .write.partitionBy("k").format("parquet").saveAsTable("df1")
+              .write.partitionBy("k").format(tableFormat).mode("overwrite").saveAsTable("df1")
             spark.range(10).select(col("id"), col("id").as("k"))
-              .write.format("parquet").saveAsTable("df2")
+              .write.format(tableFormat).mode("overwrite").saveAsTable("df2")
           }
           val cte = """
             |WITH t AS (

@@ -107,6 +107,20 @@
                     <version>2.1.210</version>
                     <scope>test</scope>
                 </dependency>
+                <dependency>
+                    <groupId>org.apache.spark</groupId>
+                    <artifactId>spark-hive_${scala.binary.version}</artifactId>
+                    <version>${spark.version}</version>
+                    <type>test-jar</type>
+                    <scope>test</scope>
+                </dependency>
+                <dependency>
+                    <groupId>org.apache.spark</groupId>
+                    <artifactId>spark-tags_${scala.binary.version}</artifactId>
+                    <version>${spark.version}</version>
+                    <type>test-jar</type>
+                    <scope>test</scope>
+                </dependency>
             </dependencies>
             <modules>
                 <module>delta-lake/delta-21x</module>

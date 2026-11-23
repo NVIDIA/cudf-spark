@@ -19,31 +19,29 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.suites
 
-import org.scalatest.{Args, Status, Suite, Suites}
+import org.scalatest.{Args, Status, SucceededStatus, Suite, Suites}
 
-import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.hive.test.TestHive
 import org.apache.spark.tags.SlowHiveTest
 
 // Construct the inherited suites only when this group executes. TestHiveSingleton
 // retains a concrete SparkSession val, so constructing it during discovery lets
 // intervening SharedSparkSession suites stop the context before Hive tests run.
-// Keep all three Hive suites consecutive and release their context afterwards.
+// Keep the Hive suites consecutive and release their context afterwards.
 @SlowHiveTest
 class RapidsHiveAggregationSuite extends Suite {
   override def run(testName: Option[String], args: Args): Status = {
-    try {
-      val suites = new Suites(
-        new RapidsHashAggregationQuerySuite,
-        new RapidsHashUDAQuerySuite,
-        new RapidsHiveUDAFSuite)
-      val status = suites.run(testName, args.copy(distributor = None))
-      status.waitUntilCompleted()
-      status
-    } finally {
-      TestHive.sparkContext.stop()
-      SparkSession.clearActiveSession()
-      SparkSession.clearDefaultSession()
+    if (args.filter.excludeNestedSuites ||
+        args.filter.tagsToExclude.contains(classOf[SlowHiveTest].getName)) {
+      SucceededStatus
+    } else {
+      RapidsHiveTestSession.withContext {
+        val suites = new Suites(
+          new RapidsHashAggregationQuerySuite,
+          new RapidsHashUDAQuerySuite)
+        val status = suites.run(testName, args.copy(distributor = None))
+        status.waitUntilCompleted()
+        status
+      }
     }
   }
 }

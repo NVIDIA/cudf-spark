@@ -19,15 +19,37 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.suites
 
-import org.apache.spark.sql.catalyst.expressions.AnsiCastSuiteWithAnsiModeOn
+import scala.reflect.ClassTag
+
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.expressions.{AnsiCastSuiteWithAnsiModeOn, Expression}
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.utils.RapidsTestsTrait
 
 class RapidsAnsiCastSuiteWithAnsiModeOn extends AnsiCastSuiteWithAnsiModeOn
-  with RapidsTestsTrait {
+  with RapidsCastTimezoneTests {
   override def beforeAll(): Unit = {
-    super.beforeAll()
+    // The inherited setup sets ANSI on the current SQLConf before creating _spark.
+    val initialConf = SQLConf.get
+    val ansiKey = SQLConf.ANSI_ENABLED.key
+    val originalAnsi = initialConf.getAllConfs.get(ansiKey)
+    try {
+      super.beforeAll()
+    } finally {
+      originalAnsi match {
+        case Some(value) => initialConf.setConfString(ansiKey, value)
+        case None => initialConf.unsetConf(SQLConf.ANSI_ENABLED)
+      }
+    }
     // Preserve the original suite's ANSI-on contract after the plugin session is created.
-    _spark.conf.set(SQLConf.ANSI_ENABLED.key, "true")
+    _spark.conf.set(ansiKey, true)
+  }
+
+  override def checkExceptionInExpression[T <: Throwable : ClassTag](
+      expression: => Expression,
+      inputRow: InternalRow,
+      expectedErrMsg: String): Unit = {
+    // Spark checks these exception messages using in-process Catalyst evaluation.
+    shouldNotFallback()
+    super.checkExceptionInExpression[T](expression, inputRow, expectedErrMsg)
   }
 }

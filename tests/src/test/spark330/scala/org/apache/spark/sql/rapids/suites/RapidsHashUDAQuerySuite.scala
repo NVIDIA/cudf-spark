@@ -21,9 +21,7 @@ package org.apache.spark.sql.rapids.suites
 
 import org.scalatest.DoNotDiscover
 
-import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.hive.execution.HashUDAQuerySuite
-import org.apache.spark.sql.rapids.utils.RapidsTestsCommonTrait
 import org.apache.spark.tags.SlowHiveTest
 
 // Run through RapidsHiveAggregationSuite to preserve the shared TestHive context.
@@ -31,13 +29,4 @@ import org.apache.spark.tags.SlowHiveTest
 @SlowHiveTest
 class RapidsHashUDAQuerySuite extends {
   private val initializeHive = RapidsHiveTestSession.initialize()
-} with HashUDAQuerySuite
-  with RapidsTestsCommonTrait {
-  override def afterAll(): Unit = super.afterAll()
-
-  override def beforeAll(): Unit = {
-    SparkSession.setActiveSession(spark)
-    super.beforeAll()
-    RapidsHiveTestSession.verify(spark)
-  }
-}
+} with HashUDAQuerySuite with RapidsHiveQuerySuite

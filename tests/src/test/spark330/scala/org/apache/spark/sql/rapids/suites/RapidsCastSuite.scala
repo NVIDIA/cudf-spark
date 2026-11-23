@@ -22,13 +22,15 @@ package org.apache.spark.sql.rapids.suites
 import java.sql.Timestamp
 import java.time.{LocalDateTime, ZoneId}
 
-import org.apache.spark.sql.catalyst.expressions.{Cast, CastBase, CastSuite, Expression, Literal}
+import org.apache.spark.sql.catalyst.CatalystTypeConverters
+import org.apache.spark.sql.catalyst.analysis.ResolveTimeZone
+import org.apache.spark.sql.catalyst.expressions.{Cast, CastBase, CastSuite, CastSuiteBase, Expression, Literal}
 import org.apache.spark.sql.catalyst.util.DateTimeTestUtils._
 import org.apache.spark.sql.catalyst.util.DateTimeUtils.getZoneId
 import org.apache.spark.sql.rapids.utils.RapidsTestsTrait
 import org.apache.spark.sql.types._
 
-class RapidsCastSuite extends CastSuite with RapidsTestsTrait {
+class RapidsCastSuite extends CastSuite with RapidsCastTimezoneTests {
   // example to enhance logging for base suite
   override def cast(v: Any, targetType: DataType, timeZoneId: Option[String] = None): CastBase = {
     v match {
@@ -41,15 +43,18 @@ class RapidsCastSuite extends CastSuite with RapidsTestsTrait {
         Cast(lit, targetType, timeZoneId)
     }
   }
-  
+}
+
+trait RapidsCastTimezoneTests extends CastSuiteBase with RapidsTestsTrait {
+  // SPARK-40851 replaced Vostok and Amsterdam for compatibility with current JDKs.
   private val specialTs = Seq(
-    "0001-01-01T00:00:00", // the fist timestamp of Common Era
+    "0001-01-01T00:00:00", // the first timestamp of Common Era
     "1582-10-15T23:59:59", // the cutover date from Julian to Gregorian calendar
     "1970-01-01T00:00:00", // the epoch timestamp
     "9999-12-31T23:59:59"  // the last supported timestamp according to SQL standard
   )
 
-  val outstandingTimezonesIds: Seq[String] = Seq(
+  private val timezoneIds = Seq(
     "UTC",
     PST.getId,
     CET.getId,
@@ -58,16 +63,22 @@ class RapidsCastSuite extends CastSuite with RapidsTestsTrait {
     "Asia/Urumqi",
     "Asia/Hong_Kong",
     "Europe/Brussels")
-  val outstandingZoneIds: Seq[ZoneId] = outstandingTimezonesIds.map(getZoneId)
+  private val zoneIds: Seq[ZoneId] = timezoneIds.map(getZoneId)
+
+  private def checkTimezoneCast(input: Any, targetType: DataType, expected: Any): Unit = {
+    val cpuCast = ResolveTimeZone.resolveTimeZones(cast(input, targetType))
+    checkEvaluationWithoutCodegen(cpuCast, CatalystTypeConverters.convertToCatalyst(expected))
+    checkEvaluation(cast(input, targetType), expected)
+  }
 
   testRapids("SPARK-35711: cast timestamp without time zone to timestamp with local time zone") {
-    outstandingZoneIds.foreach { zoneId =>
+    zoneIds.foreach { zoneId =>
       withClue(s"zoneId: $zoneId") {
         withDefaultTimeZone(zoneId) {
           specialTs.foreach { s =>
             val input = LocalDateTime.parse(s)
             val expectedTs = Timestamp.valueOf(s.replace("T", " "))
-            checkEvaluation(cast(input, TimestampType), expectedTs)
+            checkTimezoneCast(input, TimestampType, expectedTs)
           }
         }
       }
@@ -75,13 +86,13 @@ class RapidsCastSuite extends CastSuite with RapidsTestsTrait {
   }
 
   testRapids("SPARK-35719: cast timestamp with local time zone to timestamp without timezone") {
-    outstandingZoneIds.foreach { zoneId =>
+    zoneIds.foreach { zoneId =>
       withClue(s"zoneId: $zoneId") {
         withDefaultTimeZone(zoneId) {
           specialTs.foreach { s =>
             val input = Timestamp.valueOf(s.replace("T", " "))
             val expectedTs = LocalDateTime.parse(s)
-            checkEvaluation(cast(input, TimestampNTZType), expectedTs)
+            checkTimezoneCast(input, TimestampNTZType, expectedTs)
           }
         }
       }

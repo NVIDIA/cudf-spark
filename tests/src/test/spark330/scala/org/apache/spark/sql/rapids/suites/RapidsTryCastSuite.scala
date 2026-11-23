@@ -20,7 +20,6 @@ spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.rapids.suites
 
 import org.apache.spark.sql.catalyst.expressions.TryCastSuite
-import org.apache.spark.sql.rapids.utils.RapidsTestsTrait
 
 class RapidsTryCastSuite extends TryCastSuite
-  with RapidsTestsTrait
+  with RapidsCastTimezoneTests
