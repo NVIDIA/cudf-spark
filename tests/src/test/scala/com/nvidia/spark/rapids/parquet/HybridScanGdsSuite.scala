@@ -16,7 +16,7 @@
 
 package com.nvidia.spark.rapids.parquet
 
-import ai.rapids.cudf.{ByteRange, CudfException}
+import ai.rapids.cudf.{ByteRange, CudaException, CudfException}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.GpuMetric
 import com.nvidia.spark.rapids.jni.NativeFileSource
@@ -30,6 +30,7 @@ import org.scalatest.{BeforeAndAfterAll, Canceled, Outcome}
  *    -Dgds.required=true to make it fail instead, on machines that should have GDS.
  *  - libcudf fixes KvikIO's mode at the first cuDF IO in a JVM, so the tests run only in the JVM
  *    tests/pom.xml starts for this suite, and are cancelled in any other.
+ *  - Without a GPU, as on CPU-only CI runners, the tests are cancelled, unless gds.required.
  */
 class HybridScanGdsSuite extends HybridScanNativeFileSuite with BeforeAndAfterAll {
   private val ownJvm = java.lang.Boolean.getBoolean("rapids.test.hybridScanGdsJvm")
@@ -39,19 +40,29 @@ class HybridScanGdsSuite extends HybridScanNativeFileSuite with BeforeAndAfterAl
   // raises it.
   private val LARGE_FILE_SIZE = 9 << 20
 
+  private var kvikioSetUpError: Option[CudaException] = None
+
   override def beforeAll(): Unit = {
     super.beforeAll()
     if (ownJvm) {
-      NativeFileSource.setUpKvikio(NativeFileSource.CompatMode.AUTO, 4)
+      try {
+        NativeFileSource.setUpKvikio(NativeFileSource.CompatMode.AUTO, 4)
+      } catch {
+        case e: CudaException if !gdsRequired => kvikioSetUpError = Some(e)
+      }
     }
   }
 
-  override def withFixture(test: NoArgTest): Outcome = {
-    if (ownJvm) {
-      super.withFixture(test)
-    } else {
+  // The base suite initializes RMM around each test, which needs a GPU too.
+  override def beforeEach(): Unit = if (kvikioSetUpError.isEmpty) super.beforeEach()
+
+  override def afterEach(): Unit = if (kvikioSetUpError.isEmpty) super.afterEach()
+
+  override def withFixture(test: NoArgTest): Outcome = (ownJvm, kvikioSetUpError) match {
+    case (false, _) =>
       Canceled("runs only in the JVM tests/pom.xml starts for HybridScanGdsSuite")
-    }
+    case (true, Some(e)) => Canceled(s"KvikIO could not be set up: ${e.getMessage}")
+    case (true, None) => super.withFixture(test)
   }
 
   // Does not detect cuFile falling back to its own compatibility mode; see gds_stats for that.
