@@ -155,20 +155,18 @@ class HybridScanDeviceReadSuite extends SparkQueryCompareTestSuite {
   }
 
   /**
-   * A pushed filter and the reads it takes when the file goes to the device: the dictionary pages,
-   * if it prunes with them, are read to host memory, and the surviving column chunks, if any, to
-   * the device.
+   * A pushed filter and the device reads it takes when the file goes to the device: one for the
+   * dictionary pages if it prunes with them, and one for the surviving column chunks if any.
    */
-  private case class FilterCase(name: String, filter: Filter, deviceReads: Int, hostReads: Int)
+  private case class FilterCase(name: String, filter: Filter, deviceReads: Int)
 
   private val filterCases = Seq(
-    FilterCase("a statistics filter", LessThan("sorted_int", 500), deviceReads = 1,
-      hostReads = 0),
-    FilterCase("a dictionary filter", EqualTo("filter_int", 7), deviceReads = 1, hostReads = 1),
+    FilterCase("a statistics filter", LessThan("sorted_int", 500), deviceReads = 1),
+    FilterCase("a dictionary filter", EqualTo("filter_int", 7), deviceReads = 2),
     // 'key_500' sorts inside every row group's range of strings, so statistics keep them all,
     // but no dictionary holds it, so only the dictionary pages are read.
     FilterCase("a filter no dictionary matches", EqualTo("filter_str", "key_500"),
-      deviceReads = 0, hostReads = 1))
+      deviceReads = 1))
 
   // Without a TaskContext the semaphore is always free, so AUTO reads the same as ON.
   for (filterCase <- filterCases; gdsMode <- GpuDirectStorageMode.values.toSeq;
@@ -188,8 +186,8 @@ class HybridScanDeviceReadSuite extends SparkQueryCompareTestSuite {
         val deviceBytes = metrics(GpuMetric.HYBRID_SCAN_DEVICE_BYTES_READ).value
         if (direct && gdsMode != GpuDirectStorageMode.OFF) {
           assert(rangeReader.deviceReads == filterCase.deviceReads)
-          assert(rangeReader.hostReads == filterCase.hostReads)
-          assert((deviceBytes > 0) == (filterCase.deviceReads > 0))
+          assert(rangeReader.hostReads == 0)
+          assert(deviceBytes > 0)
         } else {
           assert(rangeReader.deviceReads == 0)
           assert(rangeReader.hostReads > 0)
