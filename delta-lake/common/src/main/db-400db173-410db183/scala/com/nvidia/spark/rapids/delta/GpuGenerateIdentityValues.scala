@@ -86,26 +86,33 @@ case class GpuGenerateIdentityValues(
     ensureInitialized()
     val numRows = batch.numRows()
     val first = nextValue
-    if (numRows > 0) {
-      // Validate the whole batch up front: the CPU also fails once the value after the last
-      // row would overflow.
+    // Validate the whole batch up front: the CPU also fails once the value after the last row
+    // would overflow.
+    val next = if (numRows > 0) {
       val last = Math.addExact(first, Math.multiplyExact(numRows - 1L, increment))
-      nextValue = Math.addExact(last, increment)
+      Math.addExact(last, increment)
+    } else {
+      first
     }
-    withResource(Scalar.fromLong(first)) { init =>
+    val result = withResource(Scalar.fromLong(first)) { init =>
       withResource(Scalar.fromLong(increment)) { inc =>
         GpuColumnVector.from(ColumnVector.sequence(init, inc, numRows), dataType)
       }
     }
+    // Advance only once the column exists, so a failure above leaves the state untouched.
+    nextValue = next
+    result
   }
 }
 
 object GpuGenerateIdentityValues {
   /**
-   * Largest |step| accelerated. A batch spans `rows * numPartitions * |step|` of the Long range,
-   * and both factors are unknown at planning time. With |step| <= 2^20 a batch of up to 2^21
-   * rows overflows only beyond 2^21 partitions, far above any realistic count, so the sequence
-   * for unused rows cannot overflow where the CPU would not.
+   * Largest |step| accelerated. The sequence advances for every row a task evaluates, across
+   * all its batches, so the range it spans is `rowsPerTask * numPartitions * |step|`; neither
+   * factor is known at planning time. The planner also keeps the first value within +-2^62,
+   * leaving 2^62 of headroom. With |step| <= 2^20 that headroom is exhausted only when
+   * `rowsPerTask * numPartitions` reaches 2^42 (about 4.4e12), far above any realistic task, so
+   * generating values for rows the CPU would skip cannot overflow where the CPU would not.
    */
   val MaxAcceleratedStep: Long = 1L << 20
 

@@ -95,6 +95,27 @@ class GpuGenerateIdentityValuesSuite extends RmmSparkRetrySuiteBase {
     assertThrows[ArithmeticException](eval(e, 3))
   }
 
+  test("overflow while initializing raises ArithmeticException") {
+    // The high water mark plus the step overflows.
+    val hwm = gen(step = 1, hwm = Some(Long.MaxValue))
+    assertThrows[ArithmeticException](hwm.initialize(0))
+    // partitionIndex * step overflows.
+    val stride = gen(start = 0, step = Long.MaxValue / 2)
+    assertThrows[ArithmeticException](stride.initialize(3))
+    // The base plus the partition offset overflows.
+    val offset = gen(start = Long.MaxValue, step = 1)
+    assertThrows[ArithmeticException](offset.initialize(1))
+  }
+
+  test("a failed evaluation leaves the state untouched") {
+    val e = gen(start = Long.MaxValue - 1, step = 1)
+    e.initialize(0)
+    assertThrows[ArithmeticException](eval(e, 3))
+    // The failed batch must not have advanced the sequence. One row is the most that fits: the
+    // value after the last row must not overflow either.
+    assert(eval(e, 1) == Seq(Long.MaxValue - 1))
+  }
+
   test("planning guard keeps near-limit starts and large steps on the CPU") {
     val limit = Long.MaxValue / 2
     assert(GpuGenerateIdentityValues.unsafeToAccelerate(1, 1, None).isEmpty)
