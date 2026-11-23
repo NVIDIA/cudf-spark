@@ -403,6 +403,15 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .checkValue(v => v > 0, "Batch size must be positive")
     .createWithDefault(1 * 1024 * 1024 * 1024) // 1 GiB is the default
 
+  val COALESCE_BATCHES_YIELD_BEFORE_LOOKAHEAD =
+    conf("spark.rapids.sql.coalesceBatches.yieldBeforeLookahead")
+      .doc("Allow TargetSize batch coalescers to yield when the accumulated estimated batch " +
+        "size reaches or exceeds the target, without probing the next upstream batch. " +
+        "Final-batch tagging is omitted when EOF is unknown, " +
+        "which may add work for downstream key batching. Other batching goals are unchanged.")
+      .booleanConf
+      .createWithDefault(false)
+
   val HISTORY_METRICS_PROVIDER = conf("spark.rapids.sql.history.metrics.provider")
     .doc("Selects the driver-side history metrics provider by name. The default 'none' uses " +
       "the built-in no-op store. The local SQLite provider is bundled; other providers " +
