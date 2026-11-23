@@ -1631,9 +1631,11 @@ case class GpuParquetMultiFilePartitionReaderFactory(
           filterHandler.readThriftFooter(fileIO, filePath, fileConf)
         }
       }
+      // GPUDirect Storage is not supported here yet, so every mode reads through host memory.
       new HybridScanMultithreadedParquetPartitionReader(fileIO, conf, files,
         HybridScanContext(readDataSchema, config.filters, config.filterKeepThreshold,
-          config.maxH2DPackSize, config.minH2DPackSize, execMetrics),
+          config.maxH2DPackSize, config.minH2DPackSize, execMetrics,
+          RapidsConf.GpuDirectStorageMode.OFF),
         readFooter,
         maxReadBatchSizeRows = maxReadBatchSizeRows,
         maxReadBatchSizeBytes = maxReadBatchSizeBytes,
@@ -1774,12 +1776,13 @@ case class GpuParquetPartitionReaderFactory(
       _ += (System.nanoTime() - startTime)
     }
     closeOnExcept(footer) { _ =>
-      val byteSource = new HybridScanFileByteSource(fileIO, filePath, metrics)
+      val rangeReader = HybridScanFileByteSource.createRangeReader(filePath, metrics)
+      val byteSource = new HybridScanFileByteSource(fileIO, filePath, metrics, rangeReader)
       val options = HybridScanPipeline.parquetOptions(readDataSchema.fieldNames)
       new HybridScanPerFileParquetPartitionReader(
         HybridScanSplit(byteSource, file.start, file.length), footer, options,
         HybridScanContext(readDataSchema, config.filters, config.filterKeepThreshold,
-          config.maxH2DPackSize, config.minH2DPackSize, metrics))
+          config.maxH2DPackSize, config.minH2DPackSize, metrics, config.gdsMode))
     }
   }
 
