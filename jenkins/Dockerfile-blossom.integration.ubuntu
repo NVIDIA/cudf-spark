@@ -14,7 +14,15 @@
 # limitations under the License.
 #
 
-# Build the Ubuntu environment for Spark integration tests.
+###
+#
+# Build the image for rapids-plugin development environment
+#
+# Arguments:
+#    CUDA_VER=12.X.Y
+#    UBUNTU_VER=22.04
+#    CUDF_VER=<cudf-py version>
+###
 
 ARG CUDA_VER=12.8.0
 ARG UBUNTU_VER=22.04
@@ -27,14 +35,15 @@ ARG UBUNTU_VER
 RUN UB_VER=$(echo ${UBUNTU_VER} | tr -d '.') && \
     apt-key adv --fetch-keys https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${UB_VER}/x86_64/3bf863cc.pub || true
 
-# Use HTTPS in legacy and deb822 APT source files.
+# ubuntu22
 RUN sed -i -e 's|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
            -e 's|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' \
            /etc/apt/sources.list
+# ubuntu24+
 RUN find /etc/apt/sources.list.d/ -name '*.sources' -exec sed -i \
            -e "s|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g" \
            -e "s|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g" {} +
-# Install Spark's supported JDKs side by side.
+# Install jdk-8, jdk-11, jdk-17, docker image
 RUN apt-get update -y && \
     apt-get install -y software-properties-common rsync zip unzip
 
@@ -43,7 +52,8 @@ RUN add-apt-repository ppa:deadsnakes/ppa && \
     DEBIAN_FRONTEND="noninteractive" apt-get install -y \
     openjdk-8-jdk openjdk-11-jdk openjdk-17-jdk openjdk-21-jdk tzdata git wget
 
-# Allow CI to supply its Maven distribution mirror.
+# Install maven 3.8+ to be compatible with JDK17 on Ubuntu
+# maintain also specific version in the internal artifactory to accelerate the build
 ARG MAVEN_VERSION=3.8.4
 ARG MAVEN_BASE_URL=https://archive.apache.org/dist/maven/maven-3
 
@@ -55,7 +65,7 @@ RUN wget "$MAVEN_URL" -O "/tmp/${MAVEN_TGZ}" && \
     rm -f "/tmp/${MAVEN_TGZ}" && \
     ln -sf "/usr/local/apache-maven-${MAVEN_VERSION}/bin/mvn" /usr/bin/mvn
 
-# Keep the default JDK used by existing build jobs.
+# Set default jdk as 1.8.0
 RUN update-java-alternatives --set /usr/lib/jvm/java-1.8.0-openjdk-amd64
 
 RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda.sh && \
@@ -65,7 +75,7 @@ ENV PATH="/opt/conda/bin:$MAVEN_HOME/bin:${PATH}"
 ENV CONDA_PLUGINS_AUTO_ACCEPT_TOS="yes"
 RUN conda init && conda config --set channel_priority strict
 
-# Keep Python compatible with the oldest supported Spark runtime.
+# Base python version as 3.10 to keep compatibility with spark330
 RUN conda install -y -c conda-forge -c anaconda -c defaults \
         python=3.10 && \
     conda clean -ay

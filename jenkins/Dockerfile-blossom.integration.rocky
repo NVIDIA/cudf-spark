@@ -14,7 +14,14 @@
 # limitations under the License.
 #
 
-# Build the Rocky Linux environment for Spark integration tests.
+###
+# https://hub.docker.com/r/nvidia/cuda/tags?name=rockylinux
+# Arguments:
+#    CUDA_VER=11.0+
+#    ROCKY_VER=8
+#    CUDF_VER=<cudf-py version>
+#    ART_URL=<maven repo url>
+###
 
 ARG CUDA_VER=11.8.0
 ARG ROCKY_VER=8
@@ -23,13 +30,13 @@ ARG CUDA_VER
 ARG CUDF_VER
 ARG ART_URL
 
-# Install Spark's supported JDKs side by side.
+# Install jdk-8, jdk-11, maven, docker image
 RUN yum update -y && \
     yum install epel-release -y && \
     yum install -y java-1.8.0-openjdk-devel java-11-openjdk-devel java-17-openjdk-devel java-21-openjdk-devel \
         wget expect rsync zip unzip procps git
 
-# Install the Maven distribution used by the Scala Maven plugin.
+# The plugin: net.alchim31.maven requires a higher mvn version.
 ENV MAVEN_HOME "/usr/local/apache-maven-3.8.1"
 RUN wget ${ART_URL}/org/apache/maven/apache-maven/3.8.1/apache-maven-3.8.1-bin.tar.gz -P /usr/local && \
     tar xzvf $MAVEN_HOME-bin.tar.gz -C /usr/local && \
@@ -42,12 +49,12 @@ ENV PATH="/opt/conda/bin:$MAVEN_HOME/bin:${PATH}"
 ENV CONDA_PLUGINS_AUTO_ACCEPT_TOS="yes"
 RUN conda init && conda config --set channel_priority strict
 
-# Keep Python compatible with the oldest supported Spark runtime.
+# Base python version as 3.10 to keep compatibility with spark330
 RUN conda install -y -c conda-forge -c anaconda -c defaults \
         python=3.10 && \
     conda clean -ay
 COPY integration_tests/requirements.txt /tmp/requirements.txt
 RUN pip install -r /tmp/requirements.txt
 
-# Set the default JDK for Maven jobs.
+# Set default java as 1.8.0
 ENV JAVA_HOME "/usr/lib/jvm/java-1.8.0-openjdk"
