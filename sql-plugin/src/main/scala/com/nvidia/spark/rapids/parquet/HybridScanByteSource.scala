@@ -197,7 +197,7 @@ private[parquet] object HybridScanFileByteSource extends Logging {
     } else {
       // GPUDirect Storage was requested but can't read this file, so count it as a fallback.
       if (gdsEnabled) {
-        execMetrics.getOrElse(HYBRID_SCAN_GDS_FALLBACK_FILES, NoopMetric) += 1
+        execMetrics.getOrElse(HYBRID_SCAN_GDS_FALLBACK_SPLITS, NoopMetric) += 1
         NativeFileRangeReader.logFallback(filePath,
           "only local file: paths, without a host, are read with GPUDirect Storage.")
       }
@@ -265,7 +265,7 @@ private[parquet] class NativeFileRangeReader(
       // file itself was opened.
       openedForGds = gdsEnabled && nativeFile.isDeviceReadDirect(Long.MaxValue)
       if (gdsEnabled && !openedForGds) {
-        execMetrics.getOrElse(HYBRID_SCAN_GDS_FALLBACK_FILES, NoopMetric) += 1
+        execMetrics.getOrElse(HYBRID_SCAN_GDS_FALLBACK_SPLITS, NoopMetric) += 1
         NativeFileRangeReader.logFallback(filePath,
           "KvikIO did not open it for GPUDirect Storage and does not report why. Check that " +
             "cuFile is installed and usable on this executor, that the filesystem supports " +
@@ -383,8 +383,8 @@ private[parquet] object NativeFileRangeReader extends Logging {
     val message = s"GPUDirect Storage is enabled but hybrid scan reads $filePath through host " +
       s"memory: $reason"
     if (loggedFallback.compareAndSet(false, true)) {
-      logWarning(s"$message Later files that fall back are logged at debug level and counted " +
-        s"in the ${GpuMetric.HYBRID_SCAN_GDS_FALLBACK_FILES} metric.")
+      logWarning(s"$message Later splits that fall back are logged at debug level and counted " +
+        s"in the ${GpuMetric.HYBRID_SCAN_GDS_FALLBACK_SPLITS} metric.")
     } else {
       logDebug(message)
     }

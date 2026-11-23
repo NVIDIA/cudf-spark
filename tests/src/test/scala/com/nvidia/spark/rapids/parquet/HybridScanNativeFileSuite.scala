@@ -59,7 +59,7 @@ class HybridScanNativeFileSuite extends RmmSparkRetrySuiteBase {
   protected def newMetrics(): Map[String, GpuMetric] = Map(
     GpuMetric.HYBRID_SCAN_DEVICE_BYTES_READ -> new LocalGpuMetric,
     GpuMetric.HYBRID_SCAN_NATIVE_HOST_BYTES_READ -> new LocalGpuMetric,
-    GpuMetric.HYBRID_SCAN_GDS_FALLBACK_FILES -> new LocalGpuMetric)
+    GpuMetric.HYBRID_SCAN_GDS_FALLBACK_SPLITS -> new LocalGpuMetric)
 
   protected def nativeSource(
       path: Path,
@@ -151,7 +151,7 @@ class HybridScanNativeFileSuite extends RmmSparkRetrySuiteBase {
         }
       }
       assert(metrics(GpuMetric.HYBRID_SCAN_NATIVE_HOST_BYTES_READ).value == rangesSize)
-      assert(metrics(GpuMetric.HYBRID_SCAN_GDS_FALLBACK_FILES).value == 0)
+      assert(metrics(GpuMetric.HYBRID_SCAN_GDS_FALLBACK_SPLITS).value == 0)
       assert(metrics(GpuMetric.HYBRID_SCAN_DEVICE_BYTES_READ).value == 0)
     }
   }
@@ -250,7 +250,7 @@ class HybridScanNativeFileSuite extends RmmSparkRetrySuiteBase {
           ranges.zip(buffers).foreach { case (range, buffer) => assertHoldsRange(buffer, range) }
         }
       }
-      assert(metrics(GpuMetric.HYBRID_SCAN_GDS_FALLBACK_FILES).value == 1)
+      assert(metrics(GpuMetric.HYBRID_SCAN_GDS_FALLBACK_SPLITS).value == 1)
       assert(metrics(GpuMetric.HYBRID_SCAN_DEVICE_BYTES_READ).value == 0)
     }
   }

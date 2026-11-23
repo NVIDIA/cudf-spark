@@ -63,7 +63,7 @@ class HybridScanGdsSuite extends HybridScanNativeFileSuite with BeforeAndAfterAl
         // The first query opens the file, and counts a fallback if KvikIO did not open it for
         // cuFile.
         val direct = source.isDeviceReadDirect(large)
-        val openedForCuFile = metrics(GpuMetric.HYBRID_SCAN_GDS_FALLBACK_FILES).value == 0
+        val openedForCuFile = metrics(GpuMetric.HYBRID_SCAN_GDS_FALLBACK_SPLITS).value == 0
         info(s"KvikIO opened $path for cuFile: $openedForCuFile; 5 MiB read direct: $direct")
         val message = s"KvikIO is not reading $path through cuFile"
         if (gdsRequired) {
