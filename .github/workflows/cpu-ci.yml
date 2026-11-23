@@ -6,43 +6,54 @@ name: CPU CI
 on:
   pull_request:
     branches: [main, 'release/[0-9][0-9].[0-9][0-9]']
-    types: [opened, synchronize, reopened, edited]
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
 
 concurrency:
-  # Cosmetic edits must not cancel a run that is validating the same commit.
-  group: >-
-    cpu-ci-pr-${{ github.event.pull_request.number }}-${{
-      (github.event.action != 'edited' || github.event.changes.base.ref ||
-       (github.event.changes.title &&
-        contains(github.event.changes.title.from, '[skip ci]') != contains(github.event.pull_request.title, '[skip ci]')))
-      && 'checks' || github.run_id }}
+  group: cpu-ci-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   select:
     name: Select Dockerfiles
-    if: &check_event >-
-      always() && (github.event.action != 'edited' || github.event.changes.base.ref ||
-      (github.event.changes.title &&
-       contains(github.event.changes.title.from, '[skip ci]') != contains(github.event.pull_request.title, '[skip ci]')))
     runs-on: ubuntu-latest
     outputs:
-      validate: ${{ steps.recipes.outputs.validate }}
+      validate: ${{ steps.title.outputs.skip == 'true' && '[]' || steps.recipes.outputs.validate }}
     steps:
-      - name: Honor the PR title
-        if: contains(github.event.pull_request.title, '[skip ci]')
-        run: echo 'CPU checks skipped by PR title.'
+      - name: Read the current PR title
+        id: title
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          # A manual rerun reuses the original event payload, including its old title.
+          if [[ $GITHUB_RUN_ATTEMPT == 1 ]]; then
+            pr=$(jq -c '.pull_request' "$GITHUB_EVENT_PATH")
+          else
+            pr=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")
+          fi
+          skip=$(jq -er --arg head "$HEAD_SHA" --arg base "$BASE_REF" '
+            if .state == "open" and .head.sha == $head and .base.ref == $base
+            then .title | ascii_downcase | contains("[skip ci]") | tostring
+            else error("PR is closed or its head or base has changed")
+            end' <<< "$pr")
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+          if [[ $skip == true ]]; then
+            echo 'CPU image checks skipped by PR title.' >> "$GITHUB_STEP_SUMMARY"
+          fi
       - uses: NVIDIA/spark-rapids-common/checkout@main
-        if: &run_checks ${{ !contains(github.event.pull_request.title, '[skip ci]') }}
+        if: steps.title.outputs.skip == 'false'
         with:
           fetch-depth: 2
           persist-credentials: false
       - name: Test and select image recipes
-        if: *run_checks
         id: recipes
+        if: steps.title.outputs.skip == 'false'
         run: |
           python3 -m unittest discover -s .github/workflows/ci-images/tests -v
           python3 .github/workflows/ci-images/select.py
@@ -50,7 +61,7 @@ jobs:
   validate:
     name: Validate ${{ matrix.image.id }}
     needs: select
-    if: needs.select.outputs.validate != '' && needs.select.outputs.validate != '[]'
+    if: needs.select.outputs.validate != '[]'
     strategy:
       fail-fast: false
       matrix:
@@ -60,36 +71,12 @@ jobs:
       config: ${{ toJSON(matrix.image) }}
 
   result:
-    # An unrelated same-SHA edit must never replace a required check with a skipped one.
-    name: >-
-      ${{ (github.event.action != 'edited' || github.event.changes.base.ref ||
-           (github.event.changes.title &&
-            contains(github.event.changes.title.from, '[skip ci]') != contains(github.event.pull_request.title, '[skip ci]')))
-          && 'CPU CI gate' || 'PR metadata only' }}
-    if: *check_event
+    name: CPU CI gate
+    if: always()
     needs: [select, validate]
     runs-on: ubuntu-latest
-    permissions:
-      pull-requests: read
     steps:
-      - name: Verify the requested skip against the current PR
-        if: contains(github.event.pull_request.title, '[skip ci]')
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BASE_REF: ${{ github.base_ref }}
-        run: |
-          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" |
-            jq -e --arg head "$HEAD_SHA" --arg base "$BASE_REF" '
-              .state == "open" and .head.sha == $head and .base.ref == $base and
-              (.title | ascii_downcase | contains("[skip ci]"))
-            ' || { echo "::error::Skip request is no longer current or could not be verified."; exit 1; }
-          echo 'Image builds skipped at the request of the PR title.' >> "$GITHUB_STEP_SUMMARY"
       - uses: NVIDIA/spark-rapids-common/workflow-result-gate@main
         with:
           needs: ${{ toJSON(needs) }}
-          required-jobs: >-
-            ${{ (contains(github.event.pull_request.title, '[skip ci]') || needs.select.outputs.validate == '[]')
-                && '["select"]' || '["select","validate"]' }}
+          required-jobs: ${{ needs.select.outputs.validate == '[]' && '["select"]' || '["select","validate"]' }}
