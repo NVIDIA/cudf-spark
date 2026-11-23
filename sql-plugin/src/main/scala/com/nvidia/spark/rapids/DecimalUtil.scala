@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,13 @@ import ai.rapids.cudf.{DecimalUtils, DType}
 import org.apache.spark.sql.types._
 
 object DecimalUtil {
+
+  /** Whether decimal evolution reduces precision, regardless of storage width or scale. */
+  def narrowsPrecision(fromType: DataType, toType: DataType): Boolean =
+    (fromType, toType) match {
+      case (from: DecimalType, to: DecimalType) => from.precision > to.precision
+      case _ => false
+    }
 
   def createCudfDecimal(dt: DecimalType): DType =
     DecimalUtils.createDecimalType(dt.precision, dt.scale)

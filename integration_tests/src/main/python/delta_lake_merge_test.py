@@ -207,6 +207,188 @@ def test_delta_merge_num_records_validation(spark_tmp_path, spark_tmp_table_fact
         error_message="DELTA_NUM_RECORDS_MISMATCH")
 
 
+def _normalize_table_path(spark, path):
+    """Normalizes `path` the way Spark qualifies a table location (through a Hadoop Path).
+
+    Delta rejects a table whose location doesn't end with the path in its identifier
+    (DELTA_AMBIGUOUS_PATHS_IN_CREATE_TABLE), so the identifier must already be in this form."""
+    return spark._jvm.org.apache.hadoop.fs.Path(path).toString()
+
+
+def _target_path(spark, spark_tmp_path):
+    """Separate target table per run so the CPU and GPU runs of one test don't share state."""
+    gpu_enabled = str(spark.conf.get("spark.rapids.sql.enabled", "false")).lower() == "true"
+    return _normalize_table_path(spark, spark_tmp_path + ("/GPU" if gpu_enabled else "/CPU"))
+
+
+def _create_empty_schema_target(spark, path):
+    from delta.tables import DeltaTable
+    DeltaTable.create(spark).location(path).execute()
+
+
+def _create_plain_target(spark, path):
+    """Creates (id, value) with a single row, id = 0."""
+    spark.createDataFrame([(0, "old")], "id BIGINT, value STRING") \
+        .write.format("delta").save(path)
+
+
+def _create_generated_column_target(spark, path, column_kind):
+    """Creates (id, value, gen) where `gen` is a "generated" or an "identity" column."""
+    from delta.tables import DeltaTable, IdentityGenerator
+    generated_always_as = IdentityGenerator() if column_kind == "identity" else "id + 1"
+    DeltaTable.create(spark).location(path) \
+        .addColumn("id", LongType()) \
+        .addColumn("value", StringType()) \
+        .addColumn("gen", LongType(), generatedAlwaysAs=generated_always_as) \
+        .execute()
+
+
+def _generated_column_target_creator(column_kind):
+    return lambda spark, path: _create_generated_column_target(spark, path, column_kind)
+
+
+_GPU_MERGE_COMMANDS = ("GpuMergeIntoCommand43x", "GpuMergeIntoCommand")
+
+
+def _merge_runner(spark_tmp_path, spark_tmp_table_factory, create_target, merge_sql):
+    """Returns `run(spark)`: creates the target, runs the MERGE and returns the final table."""
+    source_view = spark_tmp_table_factory.get()
+
+    def run(spark):
+        target_path = _target_path(spark, spark_tmp_path)
+        create_target(spark, target_path)
+        spark.createDataFrame([(1, "new")], "id INT, value STRING") \
+            .createOrReplaceTempView(source_view)
+        spark.sql(merge_sql.format(path=target_path, source=source_view)).collect()
+        result = spark.read.format("delta").load(target_path)
+        return result.schema.simpleString(), result.collect()
+
+    return run
+
+
+def _assert_merge_error_before_gpu_command(
+        spark_tmp_path, spark_tmp_table_factory, create_target, merge_sql, error_message, conf):
+    """Asserts CPU and GPU fail with the same error for a MERGE the Delta analyzer rejects, and
+    that no MERGE command was planned for execution (the error is analyzer-owned)."""
+    run = _merge_runner(spark_tmp_path, spark_tmp_table_factory, create_target, merge_sql)
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        assert_gpu_and_cpu_error(run, conf=conf, error_message=error_message)
+        captured_plans = callback.getResultsWithTimeout(10000)
+    finally:
+        callback.endCapture()
+    # The target's creation is planned before the failing MERGE, so an empty capture means the
+    # listener never saw anything and the checks below would pass vacuously.
+    assert len(captured_plans) > 0, "No plans were captured, so the MERGE check proves nothing"
+    for plan in captured_plans:
+        for command in _GPU_MERGE_COMMANDS + ("MergeIntoCommand",):
+            assert not callback.contains(plan, command), \
+                f"{command} was planned although the analyzer should have rejected the MERGE"
+
+
+def _assert_merge_succeeds_on_gpu_like_cpu(
+        spark_tmp_path, spark_tmp_table_factory, create_target, merge_sql, conf):
+    """Asserts the GPU MERGE command ran and produced the same schema and rows as the CPU."""
+    run = _merge_runner(spark_tmp_path, spark_tmp_table_factory, create_target, merge_sql)
+    cpu_schema, cpu_rows = with_cpu_session(run, conf=conf)
+    gpu_schema, gpu_rows = assert_rapids_gpu_merge_ran(
+        run, conf, expected_command=_GPU_MERGE_COMMANDS[0])
+    assert cpu_schema == gpu_schema
+    assert_equal_with_local_sort(cpu_rows, gpu_rows)
+
+
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(), reason="Delta 4.3 MERGE test helper coverage")
+@pytest.mark.parametrize("path, expected", [
+    ("/tmp//warehouse//GPU", "/tmp/warehouse/GPU"),
+    ("file:///tmp//warehouse//GPU", "file:/tmp/warehouse/GPU"),
+    ("hdfs:///warehouse//GPU", "hdfs:/warehouse/GPU"),
+    ("hdfs://host:9000//warehouse//GPU", "hdfs://host:9000/warehouse/GPU"),
+    ("s3a://bucket//warehouse//GPU", "s3a://bucket/warehouse/GPU"),
+], ids=["local", "file_no_authority", "hdfs_no_authority", "hdfs_host_port", "s3a"])
+def test_delta_merge_target_path_normalization(path, expected):
+    """The target path helper keeps the scheme and authority and collapses repeated slashes, so
+    the table identifier and the location Spark qualifies for it stay identical."""
+    assert with_cpu_session(lambda spark: _normalize_table_path(spark, path)) == expected
+
+
+empty_schema_error_merge_sqls = [
+    "MERGE INTO delta.`{path}` AS target USING {source} AS source ON target.id = source.id "
+    "WHEN NOT MATCHED THEN INSERT *",
+    "MERGE INTO delta.`{path}` AS target USING {source} AS source ON target.id = source.id "
+    "WHEN NOT MATCHED THEN INSERT (id, value) VALUES (source.id, source.value)",
+    "MERGE INTO delta.`{path}` AS target USING {source} AS source ON target.id = source.id "
+    "WHEN MATCHED THEN UPDATE SET *",
+    "MERGE INTO delta.`{path}` AS target USING {source} AS source ON target.id = source.id "
+    "WHEN MATCHED THEN DELETE",
+]
+
+duplicate_insert_columns_merge_sql = (
+    "MERGE INTO delta.`{path}` AS target USING {source} AS source ON target.id = source.id "
+    "WHEN NOT MATCHED THEN INSERT (id, ID, value) "
+    "VALUES (source.id, source.id, source.value)")
+
+
+@allow_non_gpu("CreateTableExec", *delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="MERGE into an empty-schema target error was added in OSS Delta 4.3")
+@pytest.mark.parametrize("merge_sql", empty_schema_error_merge_sqls,
+                         ids=["not_matched_insert_star", "not_matched_insert_columns",
+                              "matched_update_star", "matched_delete"])
+def test_delta_merge_empty_schema_target_error(
+        spark_tmp_path, spark_tmp_table_factory, merge_sql):
+    # Without schema evolution, MERGE into a target with no columns must fail with a user error.
+    _assert_merge_error_before_gpu_command(
+        spark_tmp_path, spark_tmp_table_factory, _create_empty_schema_target, merge_sql,
+        "DELTA_MERGE_INTO_EMPTY_SCHEMA_TARGET",
+        copy_and_update(delta_merge_no_cpu_bridge_conf, {
+            "spark.databricks.delta.schema.autoMerge.enabled": "false"}))
+
+
+@allow_non_gpu("CreateTableExec", *delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="Case-variant duplicate MERGE column check was added in OSS Delta 4.3")
+@pytest.mark.parametrize("auto_merge", [False, True], ids=["no_schema_evolution", "schema_evolution"])
+@pytest.mark.parametrize("column_kind", ["generated", "identity"])
+def test_delta_merge_case_variant_duplicate_insert_columns_error(
+        spark_tmp_path, spark_tmp_table_factory, column_kind, auto_merge):
+    _assert_merge_error_before_gpu_command(
+        spark_tmp_path, spark_tmp_table_factory, _generated_column_target_creator(column_kind),
+        duplicate_insert_columns_merge_sql, "DELTA_DUPLICATE_COLUMNS_ON_INSERT",
+        copy_and_update(delta_merge_no_cpu_bridge_conf, {
+            "spark.databricks.delta.schema.autoMerge.enabled": str(auto_merge).lower()}))
+
+
+@allow_non_gpu("CreateTableExec", *delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="MERGE into an empty-schema target was changed in OSS Delta 4.3")
+def test_delta_merge_empty_schema_target_with_schema_evolution(
+        spark_tmp_path, spark_tmp_table_factory):
+    # With schema evolution enabled the source schema is adopted instead of raising an error.
+    _assert_merge_succeeds_on_gpu_like_cpu(
+        spark_tmp_path, spark_tmp_table_factory, _create_empty_schema_target,
+        "MERGE INTO delta.`{path}` AS target USING {source} AS source ON 1 = 0 "
+        "WHEN NOT MATCHED THEN INSERT *",
+        copy_and_update(delta_merge_no_cpu_bridge_conf, {
+            "spark.databricks.delta.schema.autoMerge.enabled": "true"}))
+
+
+@allow_non_gpu("CreateTableExec", *delta_meta_allow)
+@delta_lake
+@pytest.mark.skipif(not is_oss_delta_lake_43(),
+                    reason="Case-variant duplicate MERGE column check was added in OSS Delta 4.3")
+def test_delta_merge_case_variant_duplicate_insert_columns_plain_table(
+        spark_tmp_path, spark_tmp_table_factory):
+    # Tables without generated or identity columns keep tolerating case-variant duplicates.
+    _assert_merge_succeeds_on_gpu_like_cpu(
+        spark_tmp_path, spark_tmp_table_factory, _create_plain_target,
+        duplicate_insert_columns_merge_sql, delta_merge_no_cpu_bridge_conf)
+
+
 @allow_non_gpu(delta_write_fallback_allow, *delta_meta_allow)
 @delta_lake
 @ignore_order
@@ -1843,9 +2025,10 @@ def test_delta_merge_cpu_command_checksum_expression_db173(spark_tmp_path, spark
     # A Parquet source is materialized by the Databricks merge command, which filters it with
     # ChecksumExpression. The expression is always true and adds a checksum of the source rows to
     # a metric, so the plugin must keep that Filter on the GPU and leave the merge result alone.
-    # ASSERT mode makes the merge fail if the checksums of the source computed by its jobs differ,
-    # which checks the GPU checksum against the CPU one. The workspace enables the feature on DBR,
-    # but the defaults are OFF and Photon only.
+    # ASSERT mode makes the merge fail if the checksums of the source computed by its jobs differ.
+    # Every checksum Filter is on the GPU here, so this compares GPU jobs with each other; the
+    # comparison with the CPU expression is in test_checksum_expression_metric_matches_cpu_db173.
+    # The workspace enables the feature on DBR, but the defaults are OFF and Photon only.
     conf = copy_and_update(delta_merge_enabled_conf, _checksum_source_conf)
     merge_sql = "MERGE INTO {dest_table} " \
                 "USING {src_table} " \
@@ -1871,12 +2054,7 @@ def test_delta_merge_cpu_command_checksum_expression_db173(spark_tmp_path, spark
             captured_plans = callback.getResultsWithTimeout(10000)
         finally:
             callback.endCapture()
-        plan_strings = [plan.toString() for plan in captured_plans]
-        gpu_filter_lines = [line for s in plan_strings for line in s.split("\n")
-                            if "GpuFilter" in line and "gpu_checksum_expression" in line]
-        assert gpu_filter_lines, \
-            "no GpuFilter with a GPU ChecksumExpression in the captured MERGE plans:\n" + \
-            "\n".join(plan_strings)
+        _assert_checksum_filters_on_gpu([plan.toString() for plan in captured_plans])
 
     delta_sql_merge_test(spark_tmp_path, spark_tmp_table_factory,
                          use_cdf=False, enable_deletion_vectors=False,
@@ -1893,6 +2071,30 @@ _checksum_source_gens = [
     ('b', IntegerGen()), ('c', LongGen()), ('d', StringGen()), ('e', DecimalGen(12, 2)),
     ('f', DoubleGen()), ('g', DateGen()), ('h', TimestampGen()), ('i', BooleanGen()),
     ('j', ShortGen()), ('k', ByteGen()), ('l', FloatGen())]
+
+
+# A CPU Filter (not a GpuFilter) whose condition holds the CPU ChecksumExpression. Depending on the
+# Databricks version it renders as checksum( or checksum_expression(, and a GPU one is prefixed gpu_.
+_CPU_CHECKSUM_FILTER = re.compile(r"(?<![A-Za-z])Filter\b.*(?<![A-Za-z_])checksum(_expression)?\(")
+
+
+def _cpu_checksum_filter_lines(plan_strings):
+    # The captured plans also include the CPU run of the comparison, which has no GPU operator, so
+    # only the plans of the GPU run are searched.
+    return [line for s in plan_strings if "Gpu" in s for line in s.split("\n")
+            if _CPU_CHECKSUM_FILTER.search(line)]
+
+
+def _assert_checksum_filters_on_gpu(plan_strings):
+    # The merge filters its source with ChecksumExpression in more than one step, and every one
+    # of those filters must be on the GPU, or the row/columnar transitions around it come back.
+    gpu_plans = [s for s in plan_strings if "Gpu" in s]
+    all_plans = "\n".join(gpu_plans)
+    assert any("GpuFilter" in line and "gpu_checksum_expression" in line
+               for s in gpu_plans for line in s.split("\n")), \
+        "no GpuFilter with a GPU ChecksumExpression in the captured MERGE plans:\n" + all_plans
+    assert not _cpu_checksum_filter_lines(plan_strings), \
+        "a CPU Filter with ChecksumExpression is left in a GPU MERGE plan:\n" + all_plans
 
 
 @allow_non_gpu("ExecutedCommandExec,BroadcastHashJoinExec,ColumnarToRowExec,BroadcastExchangeExec,DataWritingCommandExec", delta_write_fallback_allow, *delta_meta_allow)
@@ -1938,11 +2140,7 @@ def test_delta_merge_cpu_command_checksum_expression_types_db173(
             captured_plans = callback.getResultsWithTimeout(10000)
         finally:
             callback.endCapture()
-        plan_strings = [plan.toString() for plan in captured_plans]
-        assert any("GpuFilter" in line and "gpu_checksum_expression" in line
-                   for s in plan_strings for line in s.split("\n")), \
-            "no GpuFilter with a GPU ChecksumExpression in the captured MERGE plans:\n" + \
-            "\n".join(plan_strings)
+        _assert_checksum_filters_on_gpu([plan.toString() for plan in captured_plans])
 
     delta_sql_merge_test(spark_tmp_path, spark_tmp_table_factory,
                          use_cdf=False, enable_deletion_vectors=False,
@@ -1955,10 +2153,14 @@ def test_delta_merge_cpu_command_checksum_expression_types_db173(
 @pytest.mark.skipif(not is_databricks173_or_later(),
                     reason="GPU ChecksumExpression coverage for Databricks 17.3+")
 @pytest.mark.parametrize("batch_size_bytes", ["1g", "20000"], ids=["one_batch", "many_batches"])
-def test_checksum_expression_metric_matches_cpu_db173(spark_tmp_path, batch_size_bytes):
+@pytest.mark.parametrize("num_children", [1, 2, None],
+                         ids=["one_child", "two_children", "all_children"])
+def test_checksum_expression_metric_matches_cpu_db173(spark_tmp_path, batch_size_bytes,
+                                                      num_children):
     # Evaluates one ChecksumExpression (same seed, same input) on the CPU and on the GPU and
     # compares the value of the multiplication metric it accumulates, without going through a
     # MERGE. With tiny batches the GPU multiplies the checksums of many batches into the metric.
+    # A single child has nothing to fold, so it is covered separately from several children.
     data_path = spark_tmp_path + "/PARQUET_DATA"
     with_cpu_session(lambda spark: gen_df(spark, _checksum_source_gens, length=3000, seed=3,
                                           num_slices=1).write.parquet(data_path))
@@ -1968,7 +2170,7 @@ def test_checksum_expression_metric_matches_cpu_db173(spark_tmp_path, batch_size
         df = spark.read.parquet(data_path)
         attrs = df._jdf.queryExecution().analyzed().output()
         children = jvm.scala.jdk.javaapi.CollectionConverters.asScala(
-            jvm.java.util.ArrayList([attrs.apply(i) for i in range(attrs.size())])).toSeq()
+            jvm.java.util.ArrayList([attrs.apply(i) for i in range(num_children or attrs.size())])).toSeq()
         metric = jvm.org.apache.spark.sql.execution.metric.SQLLastAttemptMetrics \
             .createMultiplicationMetric(spark.sparkContext._jsc.sc(), "checksum", False)
         initial = metric.value()
@@ -2027,6 +2229,10 @@ def test_delta_merge_cpu_command_checksum_expression_disabled_db173(
         plan_strings = [plan.toString() for plan in captured_plans]
         assert not any("gpu_checksum_expression" in s for s in plan_strings), \
             "the GPU ChecksumExpression ran although its rule is disabled"
+        # The negative check of the GPU tests looks for this CPU Filter, so it must be found
+        # here, or that check would pass on any plan.
+        assert _cpu_checksum_filter_lines(plan_strings), \
+            "no CPU Filter with ChecksumExpression in the GPU plans:\n" + "\n".join(plan_strings)
 
     delta_sql_merge_test(spark_tmp_path, spark_tmp_table_factory,
                          use_cdf=False, enable_deletion_vectors=False,
@@ -2447,6 +2653,34 @@ def test_delta_merge_dataframe_api(spark_tmp_path, use_cdf, num_slices, enable_d
     # Non-deterministic input for each task means we can only reliably compare record counts when using only one task
     if num_slices == 1:
         with_cpu_session(lambda spark: assert_gpu_and_cpu_delta_logs_equivalent(spark, data_path))
+
+
+# MERGE adds input_file_name() itself. The internal conf lowers the string cap so the scan has to
+# slice the one big file batch, which would otherwise need over 2 GiB of string data.
+@allow_non_gpu(*delta_meta_allow)
+@delta_lake
+@ignore_order
+@pytest.mark.skipif(is_before_spark_320(), reason="Delta Lake writes are not supported before Spark 3.2.x")
+@pytest.mark.skipif(not is_databricks_runtime() and is_before_spark_353(),
+                    reason="MERGE does not run on the GPU for OSS Delta before Spark 3.5.3, "
+                           "https://github.com/NVIDIA/spark-rapids/issues/7573")
+def test_delta_merge_input_file_name_sliced_large_batch(spark_tmp_path):
+    from delta.tables import DeltaTable
+    num_rows = 200000
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    dest_table_func = lambda spark: spark.range(num_rows).selectExpr(
+        "cast(id as int) as a", "cast(id as string) as b").coalesce(1)
+    with_cpu_session(lambda spark: setup_delta_dest_tables(spark, data_path, dest_table_func, False, False))
+    def do_merge(spark, path):
+        src_df = spark.range(0, num_rows + 100, 1000).selectExpr(
+            "cast(id as int) as a", "'merged' as b")
+        DeltaTable.forPath(spark, path).alias("dest").merge(src_df.alias("src"), "dest.a == src.a") \
+            .whenMatchedUpdateAll() \
+            .whenNotMatchedInsertAll() \
+            .execute()
+    conf = copy_and_update(delta_merge_enabled_conf, {
+        "spark.rapids.sql.test.inputFileName.maxStringBytes": str((1 << 20) + 6000000)})
+    assert_gpu_and_cpu_writes_are_equal_collect(do_merge, read_delta_path, data_path, conf=conf)
 
 
 @allow_non_gpu(*delta_meta_allow)

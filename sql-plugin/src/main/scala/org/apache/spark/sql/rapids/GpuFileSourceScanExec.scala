@@ -22,10 +22,12 @@ import scala.collection.mutable.HashMap
 
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.filecache.FileCacheLocalityManager
+import com.nvidia.spark.rapids.perf.{ScanSplitHeuristic, SplitObservingReaderFactory,
+  SplitTotals}
 import com.nvidia.spark.rapids.shims.{GpuDataSourceRDD, PartitionedFileUtilsShim, SparkShimImpl, StaticPartitionShims}
 import org.apache.hadoop.fs.Path
 
-import org.apache.spark.rdd.RDD
+import org.apache.spark.rdd.{InputFileBlockHolder, RDD}
 import org.apache.spark.sql.catalyst.{InternalRow, TableIdentifier}
 import org.apache.spark.sql.catalyst.catalog.BucketSpec
 import org.apache.spark.sql.catalyst.expressions.{And, Ascending, Attribute, AttributeReference, BoundReference, DynamicPruningExpression, Expression, Literal, PlanExpression, Predicate, SortOrder}
@@ -63,6 +65,8 @@ import org.apache.spark.util.collection.BitSet
  *                               off in GpuTransitionOverrides if InputFileName,
  *                               InputFileBlockStart, or InputFileBlockLength are used
  * @param disableBucketedScan Disable bucketed scan based on physical query plan.
+ * @param queryUsesInputFileName True when InputFileName specifically is used, which needs
+ *                               row * path bytes of string data and so may need batch slicing.
  */
 case class GpuFileSourceScanExec(
     @transient relation: HadoopFsRelation,
@@ -75,7 +79,8 @@ case class GpuFileSourceScanExec(
     tableIdentifier: Option[TableIdentifier],
     disableBucketedScan: Boolean = false,
     queryUsesInputFile: Boolean = false,
-    requiredPartitionSchema: Option[StructType] = None)(
+    requiredPartitionSchema: Option[StructType] = None,
+    queryUsesInputFileName: Boolean = false)(
     @transient val rapidsConf: RapidsConf,
     @transient val partitionPlanningScan: Option[FileSourceScanExec] = None)
     extends GpuDataSourceScanExec with GpuExec {
@@ -434,6 +439,8 @@ case class GpuFileSourceScanExec(
           // Track the actual data size read from the file system, excluding data being pruned
           // by meta-level pruning.
           bf += "readBufferSize" -> createSizeMetric(DEBUG_LEVEL, "size of read buffer")
+          bf ++= createParquetRowGroupMetrics()
+          bf ++= createHybridScanGdsMetrics()
         }
         if (ExternalSource.isSupportedFormat(relation.fileFormat.getClass)) {
           // This metric is used to post the time spent in generating the `skip_row` column
@@ -481,7 +488,21 @@ case class GpuFileSourceScanExec(
   override protected def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
     val numOutputRows = gpuLongMetric(NUM_OUTPUT_ROWS)
     val scanTime = gpuLongMetric(SCAN_TIME)
-    inputRDD.asInstanceOf[RDD[ColumnarBatch]].mapPartitionsInternal { batches =>
+    val sliceForInputFileName = queryUsesInputFileName
+    val maxStringBytes = rapidsConf.inputFileNameMaxStringBytes
+    // `inputRDD` sets `plannedSplits`, so it is built before the registration reads it.
+    val rdd = inputRDD.asInstanceOf[RDD[ColumnarBatch]]
+    // Per execution: a re-run plan reuses `inputRDD`.
+    ScanSplitHeuristic.registerFileScan(historyKey, plannedSplits, splitBytes, sparkContext)
+    rdd.mapPartitionsInternal { rawBatches =>
+      // input_file_name() builds numRows * pathBytes of string data, which cudf caps at 2 GiB,
+      // so oversized batches are sliced before the projection sees them.
+      val batches = if (sliceForInputFileName) {
+        new InputFileNameSlicingIterator(rawBatches,
+          () => InputFileBlockHolder.getInputFilePath.numBytes(), maxStringBytes)
+      } else {
+        rawBatches
+      }
       new Iterator[ColumnarBatch] {
 
         override def hasNext: Boolean = {
@@ -570,8 +591,9 @@ case class GpuFileSourceScanExec(
       fsRelation: HadoopFsRelation): RDD[InternalRow] = {
     val partitions = StaticPartitionShims.getPartitions(this).getOrElse {
       val openCostInBytes = fsRelation.sparkSession.sessionState.conf.filesOpenCostInBytes
-      val maxSplitBytes =
-        FilePartition.maxSplitBytes(fsRelation.sparkSession, dynamicallySelectedPartitions)
+      val maxSplitBytes = ScanSplitHeuristic.learnedFileSplit(historyKey, fsRelation.sparkSession,
+        dynamicallySelectedPartitions.map(_.files.map(_.getLen).sum).sum,
+        FilePartition.maxSplitBytes(fsRelation.sparkSession, dynamicallySelectedPartitions))
       logInfo(s"Planning scan with bin packing, max size: $maxSplitBytes bytes, " +
         s"open cost is considered as scanning $openCostInBytes bytes.")
 
@@ -582,6 +604,17 @@ case class GpuFileSourceScanExec(
     }
     getFinalRDD(readFile, partitions)
   }
+
+  /** History key: catalog name, else "path:" roots; None while history is off or unusable. */
+  @transient private lazy val historyKey: Option[String] = ScanSplitHeuristic.historyKey(
+    tableIdentifier.map(_.unquotedString), relation.location.rootPaths)
+
+  /** Decoded bytes and partitions read; keyed scans only. */
+  @transient private lazy val splitBytes: Option[SplitTotals] =
+    historyKey.map(_ => SplitTotals.create(sparkContext))
+
+  /** Reads planned, files or partitions by how the scan reads; 0 while history is off. */
+  @transient private var plannedSplits: Int = 0
 
   private def getFinalRDD(
       readFile: Option[(PartitionedFile) => Iterator[InternalRow]],
@@ -617,16 +650,26 @@ case class GpuFileSourceScanExec(
 
     if (isPerFileReadEnabled) {
       logInfo("Using the original per file reader")
-      SparkShimImpl.getFileScanRDD(relation.sparkSession, readFile.get, locatedPartitions,
-        requiredSchema, fileFormat = Some(relation.fileFormat))
+      // A read is a file here, and a partition below.
+      splitBytes.foreach { _ =>
+        plannedSplits = locatedPartitions.map(p => FilePartitionShims.getFiles(p).length).sum
+      }
+      SparkShimImpl.getFileScanRDD(relation.sparkSession,
+        ScanSplitHeuristic.observeFileRead(readFile.get, splitBytes,
+          gpuLongMetric(GPU_OUTPUT_BATCH_BYTES)),
+        locatedPartitions, requiredSchema, fileFormat = Some(relation.fileFormat))
     } else {
       logDebug(s"Using Datasource RDD, files are: " +
         s"${prunedPartitions.flatMap(FilePartitionShims.getFiles).mkString(",")}")
+      splitBytes.foreach(_ => plannedSplits = locatedPartitions.length)
       // note we use the v2 DataSourceRDD instead of FileScanRDD so we don't have to copy more code
       GpuDataSourceRDD(
         relation.sparkSession.sparkContext,
         locatedPartitions,
-        readerFactory,
+        splitBytes.fold(readerFactory) { totals =>
+          new SplitObservingReaderFactory(
+            readerFactory, gpuLongMetric(GPU_OUTPUT_BATCH_BYTES), totals)
+        },
         includeRefreshHint = true)
     }
   }

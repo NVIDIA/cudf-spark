@@ -26,16 +26,13 @@ import ai.rapids.cudf.{DeviceMemoryBuffer, HostMemoryBuffer, JCudfSerialization,
   MemoryBuffer, NvtxColor, NvtxRange}
 import ai.rapids.cudf.JCudfSerialization.HostConcatResult
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
-import com.nvidia.spark.rapids.FileUtils.createTempFile
 import com.nvidia.spark.rapids.GpuMetric.{ASYNC_READ_TIME, SYNC_READ_TIME}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitTargetSizeInHalfGpu, withRetry, withRetryNoSplit}
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 import com.nvidia.spark.rapids.io.async.{ThrottlingExecutor, TrafficController}
-import com.nvidia.spark.rapids.jni.kudo.{DumpOption, KudoGpuSerializer,
-  KudoHostMergeResultWrapper, KudoSerializer, MergeOptions}
+import com.nvidia.spark.rapids.jni.kudo.{KudoGpuSerializer, KudoHostMergeResultWrapper, KudoSerializer}
 import com.nvidia.spark.rapids.shims.ShimUnaryExecNode
-import org.apache.hadoop.conf.Configuration
 
 import org.apache.spark.TaskContext
 import org.apache.spark.internal.Logging
@@ -110,8 +107,7 @@ case class GpuShuffleCoalesceExec(child: SparkPlan, targetBatchByteSize: Long)
 
 /** A case class to pack some options. */
 case class CoalesceReadOption private(
-    kudoEnabled: Boolean, kudoMode: RapidsConf.ShuffleKudoMode.Value, kudoDebugMode: DumpOption,
-    kudoDebugDumpPrefix: Option[String], useAsync: Boolean)
+    kudoEnabled: Boolean, kudoMode: RapidsConf.ShuffleKudoMode.Value, useAsync: Boolean)
 
 object CoalesceReadOption extends Logging {
 
@@ -127,25 +123,18 @@ object CoalesceReadOption extends Logging {
   }
 
   def apply(conf: SQLConf): CoalesceReadOption = {
-    val dumpOption = RapidsConf.SHUFFLE_KUDO_SERIALIZER_DEBUG_MODE.get(conf) match {
-      case "NEVER" => DumpOption.Never
-      case "ALWAYS" => DumpOption.Always
-      case "ONFAILURE" => DumpOption.OnFailure
-    }
     val kudoEnabled = RapidsConf.SHUFFLE_KUDO_SERIALIZER_ENABLED.get(conf)
     val kudoMode = RapidsConf.ShuffleKudoMode.withName(RapidsConf.SHUFFLE_KUDO_READ_MODE.get(conf))
     val useAsync = RapidsConf.SHUFFLE_ASYNC_READ_ENABLED.get(conf)
 
     val finalUseAsync = resolveUseAsync(kudoMode, useAsync)
 
-    CoalesceReadOption(kudoEnabled, kudoMode, dumpOption,
-      RapidsConf.SHUFFLE_KUDO_SERIALIZER_DEBUG_DUMP_PREFIX.get(conf), finalUseAsync)
+    CoalesceReadOption(kudoEnabled, kudoMode, finalUseAsync)
   }
 
   def apply(conf: RapidsConf): CoalesceReadOption = {
     val finalUseAsync = resolveUseAsync(conf.shuffleKudoReadMode, conf.shuffleAsyncReadEnabled)
-    CoalesceReadOption(conf.shuffleKudoSerializerEnabled, conf.shuffleKudoReadMode,
-      conf.shuffleKudoSerializerDebugMode, conf.shuffleKudoSerializerDebugDumpPrefix, finalUseAsync)
+    CoalesceReadOption(conf.shuffleKudoSerializerEnabled, conf.shuffleKudoReadMode, finalUseAsync)
   }
 }
 
@@ -346,11 +335,10 @@ case class RowCountOnlyMergeResult(rowCount: Int) extends CoalescedHostResult {
 
   override def getDataSize: Long = 0
 
-  override def close(): Unit = {}
+  override def close(): Unit = { /* Holds only a row count; no buffers to close */ }
 }
 
-class KudoTableOperator(kudo: Option[KudoSerializer], readOption: CoalesceReadOption,
-    taskIdentifier: String)
+class KudoTableOperator(kudo: Option[KudoSerializer])
   extends SerializedTableOperator[KudoSerializedTableColumn, CoalescedHostResult] {
   require(kudo != null, "kudo serializer should not be null")
 
@@ -362,18 +350,6 @@ class KudoTableOperator(kudo: Option[KudoSerializer], readOption: CoalesceReadOp
     column.spillableKudoTable.header
     .getNumRows
 
-  private def buildMergeOptions(): MergeOptions = {
-    val dumpOption = readOption.kudoDebugMode
-    val dumpPrefix = readOption.kudoDebugDumpPrefix
-    if (dumpOption != DumpOption.Never && dumpPrefix.isDefined) {
-      val updatedPrefix = s"${dumpPrefix.get}_${taskIdentifier}"
-      lazy val (out, path) = createTempFile(new Configuration(), updatedPrefix, ".bin")
-      new MergeOptions(dumpOption, () => out, path.toString)
-    } else {
-      new MergeOptions(dumpOption, null, null)
-    }
-  }
-
   override def concat(columns: Array[KudoSerializedTableColumn]): CoalescedHostResult = {
     require(columns.nonEmpty, "no tables to be concatenated")
     val numCols = columns.head.spillableKudoTable.header.getNumColumns
@@ -383,7 +359,7 @@ class KudoTableOperator(kudo: Option[KudoSerializer], readOption: CoalesceReadOp
     } else {
       // "lock" all input tables in memory before merge
       withResource(columns.safeMap(_.spillableKudoTable.makeKudoTable)) { kudoTables =>
-        val result = kudo.get.mergeOnHost(kudoTables, buildMergeOptions())
+        val result = kudo.get.mergeOnHost(kudoTables)
         KudoHostMergeResultWrapper(result)
       }
     }
@@ -826,19 +802,13 @@ class KudoHostShuffleCoalesceIterator(
     targetBatchSize, concatTimeMetric, inputBatchesMetric, inputRowsMetric,
     readThrottlingMetric, readOption.useAsync, minSplitSize) {
 
-  // Capture TaskContext info during RDD execution when it's available
-  private val taskIdentifier = Option(TaskContext.get()) match {
-    case Some(tc) => s"stage_${tc.stageId()}_task_${tc.taskAttemptId()}"
-    case None => java.util.UUID.randomUUID().toString
-  }
-
   override protected val tableOperator = {
     val kudoSer = if (dataTypes.nonEmpty) {
       Some(new KudoSerializer(GpuColumnVector.from(dataTypes)))
     } else {
       None
     }
-    new KudoTableOperator(kudoSer, readOption, taskIdentifier)
+    new KudoTableOperator(kudoSer)
   }
 
   // Create the byte-size-based split policy after tableOperator is initialized

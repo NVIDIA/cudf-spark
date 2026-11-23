@@ -76,7 +76,7 @@ class EmptyGpuDataProducer[T] extends GpuDataProducer[T] {
 
   override def next: T = throw new NoSuchElementException()
 
-  override def close(): Unit = {}
+  override def close(): Unit = { /* Nothing to close */ }
 }
 
 class SingleGpuDataProducer[T <: AnyRef](private var data: T) extends GpuDataProducer[T] {

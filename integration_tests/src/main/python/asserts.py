@@ -285,7 +285,8 @@ def _assert_gpu_and_cpu_writes_are_equal(
         mode,
         conf={},
         expected_command=None,
-        required_gpu_classes=None):
+        required_gpu_classes=None,
+        plan_assertion=None):
     conf = _prep_incompat_conf(conf)
 
     print('### CPU RUN ###')
@@ -304,6 +305,7 @@ def _assert_gpu_and_cpu_writes_are_equal(
         gpu_result = assert_rapids_delta_write(
             lambda spark: write_func(spark, gpu_path), conf=conf,
             expected_command=expected_command,
+            plan_assertion=plan_assertion,
             required_gpu_classes=(delta_write if required_gpu_classes is None
                                   else required_gpu_classes))
     else:
@@ -327,7 +329,7 @@ def _assert_gpu_and_cpu_writes_are_equal(
 
 def assert_gpu_and_cpu_writes_are_equal_collect(
         write_func, read_func, base_path, conf={}, expected_command=None,
-        required_gpu_classes=None):
+        required_gpu_classes=None, plan_assertion=None):
     """
     Assert when running write_func on both the CPU and the GPU and reading using read_func
     on the CPU that the results are equal.
@@ -337,10 +339,13 @@ def assert_gpu_and_cpu_writes_are_equal_collect(
     required_gpu_classes overrides the default RapidsDeltaWrite requirement, for example
     when a persistent-DV DELETE scans on the GPU without writing replacement Parquet data.
     An empty list requires no data-writing operator; expected_command is still checked.
+    For Delta writes, plan_assertion(callback, plans) additionally checks captured plans,
+    including final writer plans, after the standard checks.
     """
     _assert_gpu_and_cpu_writes_are_equal(
         write_func, read_func, base_path, 'COLLECT', conf=conf,
-        expected_command=expected_command, required_gpu_classes=required_gpu_classes)
+        expected_command=expected_command, required_gpu_classes=required_gpu_classes,
+        plan_assertion=plan_assertion)
 
 def assert_gpu_and_cpu_writes_are_equal_iterator(write_func, read_func, base_path, conf={}):
     """
@@ -953,22 +958,24 @@ def assert_spark_exception(df_fun, error_message):
 
 def assert_consistent_gpu_cpu_behavior(df_fun, conf, error_message, only_if_cpu_fails=False):
     """
-    Assert that GPU and CPU execution behave consistently - either both fail with the same error
-    or both succeed with identical results.
+    Assert CPU and GPU behavior. When only_if_cpu_fails is false, both executions must fail with
+    the expected error. When it is true, both must either fail with the expected error or succeed
+    with identical results.
     
     :param df_fun: a function to be verified
     :param conf: Spark config
     :param error_message: a string such as the one produce by java.lang.Exception.toString
-    :param only_if_cpu_fails: if true, we only expect the GPU job to fail if the CPU job fails,
-           otherwise we expect both CPU and GPU to fail when error_message is provided.
+    :param only_if_cpu_fails: if true, require the GPU job to fail only when the CPU job fails;
+           otherwise require both CPU and GPU jobs to fail.
     :return: Assertion failure if GPU and CPU behaviors are inconsistent (different errors or 
              different results when both succeed)
     """
+    expect_cpu_exception = None if only_if_cpu_fails else True
     (cpu_failed, from_cpu) = collect_data_or_exception(
-        lambda: with_cpu_session(df_fun, conf), error_message)
+        lambda: with_cpu_session(df_fun, conf), error_message,
+        expect_exception=expect_cpu_exception)
     (gpu_failed, from_gpu) = collect_data_or_exception(
-        lambda: with_gpu_session(df_fun, conf), error_message, 
-        expect_exception=cpu_failed or not only_if_cpu_fails)
+        lambda: with_gpu_session(df_fun, conf), error_message, expect_exception=cpu_failed)
 
     if cpu_failed is False and gpu_failed is False:
         assert_equal(from_cpu, from_gpu)

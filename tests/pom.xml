@@ -20,11 +20,11 @@
     <modelVersion>4.0.0</modelVersion>
     <parent>
         <groupId>com.nvidia</groupId>
-        <artifactId>rapids-4-spark-shim-deps-parent_2.12</artifactId>
+        <artifactId>cudf-spark-shim-deps-parent_2.12</artifactId>
         <version>26.12.0-SNAPSHOT</version>
         <relativePath>../shim-deps/pom.xml</relativePath>
     </parent>
-    <artifactId>rapids-4-spark-tests_2.12</artifactId>
+    <artifactId>cudf-spark-tests_2.12</artifactId>
     <name>RAPIDS Accelerator for Apache Spark Tests</name>
     <description>RAPIDS plugin for Apache Spark integration tests</description>
     <version>26.12.0-SNAPSHOT</version>
@@ -75,7 +75,7 @@
         <!-- use aggregator jar because accessing internal classes -->
         <dependency>
             <groupId>com.nvidia</groupId>
-            <artifactId>rapids-4-spark-aggregator_${scala.binary.version}</artifactId>
+            <artifactId>cudf-spark-aggregator_${scala.binary.version}</artifactId>
             <version>${project.version}</version>
             <classifier>${spark.version.classifier}</classifier>
             <scope>test</scope>
@@ -306,6 +306,33 @@
             </dependencies>
         </profile>
         <profile>
+            <id>release405</id>
+            <activation>
+                <property>
+                    <name>buildver</name>
+                    <value>405</value>
+                </property>
+            </activation>
+            <properties>
+                <delta.test.spark.artifactId>${delta42x.spark.artifactId}</delta.test.spark.artifactId>
+                <delta.test.version>${delta42x.version}</delta.test.version>
+            </properties>
+            <dependencies>
+                <dependency>
+                    <groupId>io.delta</groupId>
+                    <artifactId>${delta.test.spark.artifactId}</artifactId>
+                    <version>${delta.test.version}</version>
+                    <scope>test</scope>
+                    <exclusions>
+                        <exclusion>
+                            <groupId>io.unitycatalog</groupId>
+                            <artifactId>unitycatalog-client</artifactId>
+                        </exclusion>
+                    </exclusions>
+                </dependency>
+            </dependencies>
+        </profile>
+        <profile>
             <id>release400</id>
             <activation>
                 <property>
@@ -384,6 +411,56 @@
                     </exclusions>
                 </dependency>
             </dependencies>
+        </profile>
+        <profile>
+            <id>release414</id>
+            <activation>
+                <property>
+                    <name>buildver</name>
+                    <value>414</value>
+                </property>
+            </activation>
+            <properties>
+                <delta.test.spark.artifactId>${delta42x.spark.artifactId}</delta.test.spark.artifactId>
+                <delta.test.version>${delta42x.version}</delta.test.version>
+            </properties>
+            <dependencies>
+                <dependency>
+                    <groupId>io.delta</groupId>
+                    <artifactId>${delta.test.spark.artifactId}</artifactId>
+                    <version>${delta.test.version}</version>
+                    <scope>test</scope>
+                    <exclusions>
+                        <exclusion>
+                            <groupId>io.unitycatalog</groupId>
+                            <artifactId>unitycatalog-client</artifactId>
+                        </exclusion>
+                    </exclusions>
+                </dependency>
+            </dependencies>
+        </profile>
+        <profile>
+            <id>delta43-tests</id>
+            <properties>
+                <delta.test.spark.artifactId>${delta43x.spark.artifactId}</delta.test.spark.artifactId>
+                <delta.test.version>${delta43x.version}</delta.test.version>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.scalatest</groupId>
+                        <artifactId>scalatest-maven-plugin</artifactId>
+                        <configuration>
+                            <systemProperties>
+                                <rapids.test.delta43>true</rapids.test.delta43>
+                            </systemProperties>
+                            <environmentVariables>
+                                <SPARK_CONF>spark.plugins= ,spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension,spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog</SPARK_CONF>
+                            </environmentVariables>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
         </profile>
         --><!-- #endif scala-2.13 -->
 

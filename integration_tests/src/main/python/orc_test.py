@@ -260,6 +260,124 @@ def _write_orc_timestamp_calendar(spark, path, values, proleptic):
         reader.close()
 
 
+def _spark_has_orc_timestamp_ltz_inference_fix():
+    version = spark_version_tuple()
+    return ((is_spark_40x() and version >= (4, 0, 5))
+            or (is_spark_41x() and version >= (4, 1, 4))
+            or version >= (4, 2, 1))
+
+
+def _write_orc_timestamp_ltz_fixture(spark, path):
+    jvm = spark._jvm
+    orc = jvm.org.apache.orc
+    hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+    path = jvm.org.apache.hadoop.fs.Path(path)
+    schema = orc.TypeDescription.fromString(
+        "struct<id:int,ts:timestamp,nested:struct<ts:timestamp>,"
+        "timestamps:array<timestamp>,timestamp_map:map<int,timestamp>>")
+    writer = orc.OrcFile.createWriter(
+        path, orc.OrcFile.writerOptions(hadoop_conf).setSchema(schema))
+
+    def set_timestamp(vector, row, micros):
+        value = jvm.java.sql.Timestamp(micros // 1000)
+        value.setNanos((micros % 1000000) * 1000)
+        vector.set(row, value)
+
+    try:
+        values = [123456, 1000000]
+        batch = schema.createRowBatch()
+        columns = get_field(batch, 'cols')
+        nested_ts = get_field(columns[2], 'fields')[0]
+        timestamps = columns[3]
+        array_ts = get_field(timestamps, 'child')
+        timestamp_map = columns[4]
+        map_keys = get_field(timestamp_map, 'keys')
+        map_values = get_field(timestamp_map, 'values')
+        array_ts.ensureSize(len(values), False)
+        map_keys.ensureSize(len(values), False)
+        map_values.ensureSize(len(values), False)
+
+        for row, micros in enumerate(values):
+            get_field(columns[0], 'vector')[row] = row
+            set_timestamp(columns[1], row, micros)
+            set_timestamp(nested_ts, row, micros)
+
+            get_field(timestamps, 'offsets')[row] = row
+            get_field(timestamps, 'lengths')[row] = 1
+            set_timestamp(array_ts, row, micros)
+
+            get_field(timestamp_map, 'offsets')[row] = row
+            get_field(timestamp_map, 'lengths')[row] = 1
+            get_field(map_keys, 'vector')[row] = row + 10
+            set_timestamp(map_values, row, micros)
+
+        set_field(timestamps, 'childCount', len(values))
+        set_field(timestamp_map, 'childCount', len(values))
+        set_field(batch, 'size', len(values))
+        writer.addRowBatch(batch)
+    finally:
+        writer.close()
+
+
+_orc_timestamp_ltz_reader_modes = [
+    pytest.param(
+        copy_and_update(
+            __original_orc_file_reader_conf,
+            {'spark.rapids.sql.reader.chunked': False}),
+        'orc',
+        'GpuFileSourceScanExec',
+        id='v1-perfile-nonchunked'),
+    pytest.param(
+        copy_and_update(
+            __multithreaded_orc_file_reader_conf,
+            {'spark.rapids.sql.reader.chunked': True}),
+        '',
+        'GpuBatchScanExec',
+        id='v2-multithreaded-chunked'),
+]
+
+
+@pytest.mark.skipif(
+    not _spark_has_orc_timestamp_ltz_inference_fix(),
+    reason='SPARK-60400 requires Spark 4.0.5, 4.1.4, 4.2.1, or later')
+@pytest.mark.parametrize(
+    'reader_confs,v1_enabled_list,gpu_scan',
+    _orc_timestamp_ltz_reader_modes)
+def test_orc_timestamp_ltz_inference_under_timestamp_ntz(
+        spark_tmp_path, reader_confs, v1_enabled_list, gpu_scan):
+    data_path = spark_tmp_path + '/SPARK_60400.orc'
+    conf = copy_and_update(reader_confs, {
+        'spark.sql.timestampType': 'TIMESTAMP_NTZ',
+        'spark.sql.session.timeZone': 'UTC',
+        'spark.sql.sources.useV1SourceList': v1_enabled_list,
+        'spark.sql.orc.impl': 'native',
+    })
+    with_cpu_session(
+        lambda spark: _write_orc_timestamp_ltz_fixture(spark, data_path),
+        conf=conf)
+
+    def read(spark):
+        return spark.read.orc(data_path).orderBy('id')
+
+    (cpu_rows, cpu_df), (gpu_rows, gpu_df) = run_with_cpu_and_gpu(
+        read, 'COLLECT_WITH_DATAFRAME', conf=conf)
+    expected_schema = StructType([
+        StructField('id', IntegerType()),
+        StructField('ts', TimestampType()),
+        StructField('nested', StructType([
+            StructField('ts', TimestampType()),
+        ])),
+        StructField('timestamps', ArrayType(TimestampType())),
+        StructField('timestamp_map', MapType(IntegerType(), TimestampType())),
+    ])
+
+    assert cpu_df.schema == gpu_df.schema == expected_schema
+    assert len(cpu_rows) == 2
+    assert_equal(cpu_rows, gpu_rows)
+    spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback \
+        .assertContains(gpu_df._jdf, gpu_scan)
+
+
 def _read_orc_timestamp_micros(spark, path, reader_zone, gpu_scan=None):
     # The harness configures the reader JVM timezone for both driver and executors.
     assert spark._jvm.java.util.TimeZone.getDefault().getID() == reader_zone
@@ -1181,6 +1299,60 @@ def test_read_round_trip_for_multithreaded_combining(spark_tmp_path, gens, keep_
         lambda spark: spark.read.orc(data_path), conf=all_confs)
 
 
+@pytest.mark.parametrize('reader_type,keep_order', [
+    ('COALESCING', True),
+    ('MULTITHREADED', True),
+    ('MULTITHREADED', False)])
+@ignore_order(local=True)
+def test_read_combined_orc_files_with_different_compression_sizes(
+        spark_tmp_path, reader_type, keep_order):
+    data_path = spark_tmp_path + '/ORC_DATA'
+
+    def write_data(spark):
+        write_specs = [
+            ('small-first', 10000, '4096'),
+            ('large', 7500, '262144'),
+            ('small-last', 5000, '4096')]
+        for part, row_count, compression_size in write_specs:
+            (spark.range(row_count).selectExpr(
+                "id", "sha2(concat(cast(id as string), '{}'), 512) AS s".format(part))
+                .coalesce(1).write.option('orc.compress.size', compression_size)
+                .orc(data_path + '/part=' + part))
+
+        hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+        file_details = []
+        for file_path in spark.read.orc(data_path).inputFiles():
+            path = spark._jvm.org.apache.hadoop.fs.Path(file_path)
+            reader = spark._jvm.org.apache.orc.OrcFile.createReader(
+                path,
+                spark._jvm.org.apache.orc.OrcFile.readerOptions(hadoop_conf))
+            try:
+                file_size = path.getFileSystem(hadoop_conf).getFileStatus(path).getLen()
+                file_details.append((file_size, reader.getCompressionSize()))
+            finally:
+                reader.close()
+        assert sorted(size for _, size in file_details) == [4096, 4096, 262144]
+        compression_sizes_by_file_size = [
+            size for _, size in sorted(file_details, reverse=True)]
+        assert compression_sizes_by_file_size == [4096, 262144, 4096]
+
+    with_cpu_session(write_data)
+
+    all_confs = {
+        'spark.rapids.sql.format.orc.reader.type': reader_type,
+        'spark.rapids.sql.reader.multithreaded.combine.sizeBytes': '64m',
+        'spark.rapids.sql.reader.multithreaded.read.keepOrder': keep_order,
+        'spark.rapids.sql.reader.multithreaded.combine.waitTime': '10000',
+        'spark.sql.files.maxPartitionBytes': '1g',
+        'spark.sql.files.openCostInBytes': '1',
+        'spark.sql.files.minPartitionNum': '1'}
+
+    def read_data(spark):
+        return spark.read.orc(data_path).select('part', 'id', 's')
+
+    assert_gpu_and_cpu_are_equal_collect(read_data, conf=all_confs)
+
+
 @pytest.mark.parametrize('keep_order', [True, pytest.param(False, marks=pytest.mark.ignore_order(local=True))])
 def test_simple_partitioned_read_for_multithreaded_combining(spark_tmp_path, keep_order):
     # Use every type except boolean, see https://github.com/NVIDIA/spark-rapids/issues/11762 and
@@ -1412,7 +1584,8 @@ def test_orc_version_V_0_11_and_V_0_12(std_input_path):
 
 def test_orc_not_support_timestamp_ltz(std_input_path):
     """
-    Test both CPU and GPU does not support ORC type: timestamp with local time zone.
+    Test GPU does not support ORC type: timestamp with local time zone.
+    Spark 4.2+ and DBR 18.3+ support it on CPU, while older runtimes reject it.
     The meta of `timestamp_ltz.orc` is: Type: struct<ts:timestamp with local time zone>
     Refer to ORC types: https://orc.apache.org/docs/types.html
     The error message is like:
@@ -1422,36 +1595,87 @@ def test_orc_not_support_timestamp_ltz(std_input_path):
         ----------^^^
     """
     data_path = f"{std_input_path}/timestamp_ltz.orc"
+    cpu_supports_orc_timestamp_ltz = \
+        is_spark_420_or_later() or is_databricks_version_or_later(18, 3)
     expected_error_message = "timestamp with local time zone" \
-        if is_spark_420_or_later() or is_databricks_version_or_later(18, 3) \
+        if cpu_supports_orc_timestamp_ltz \
         else "ParseException"
-    assert_gpu_and_cpu_error(lambda spark: spark.read.orc(data_path).collect(),
-                             conf={},
-                             error_message=expected_error_message)
+    read = lambda spark: spark.read.orc(data_path).collect()
+    if cpu_supports_orc_timestamp_ltz:
+        with_cpu_session(read, conf={})
+        # TODO(https://github.com/NVIDIA/cudf-spark/issues/17042):
+        # GPU should support this ORC type or fall back to the CPU reader.
+        assert_spark_exception(
+            lambda: with_gpu_session(read, conf={}), expected_error_message)
+    else:
+        assert_gpu_and_cpu_error(read, conf={}, error_message=expected_error_message)
 
-# Timestamp writes: in UTC the GPU writes on the GPU; in a non-UTC JVM the GPU write must fall
-# back to CPU. cuDF's ORC writer always stamps writerTimezone="UTC" in the stripe footer and
-# cannot record the JVM writer timezone (https://github.com/rapidsai/cudf/issues/23422), so a
-# GPU-written non-UTC file would be read back shifted by the zone offset by a CPU ORC reader.
+# Timestamp writes must use the JVM writer timezone and stay compatible with CPU ORC readers.
 # The `tz_sensitive_test` mark runs this in both UTC and non-UTC JVM timezones.
-non_utc_orc_write_allow = ['DataWritingCommandExec', 'WriteFilesExec'] \
-    if is_not_utc() else []
-
 @tz_sensitive_test
 @ignore_order(local=True)
-@allow_non_gpu(*non_utc_orc_write_allow)
-def test_orc_gpu_write_cpu_read_timestamp_in_non_utc_timezone(spark_tmp_path):
+@pytest.mark.parametrize('session_timezone', ['UTC', 'Asia/Shanghai', 'America/New_York'])
+def test_orc_gpu_write_cpu_read_timestamp_in_non_utc_timezone(spark_tmp_path, session_timezone):
     data_path = spark_tmp_path + "/ORC_GPU_WRITE_TZ"
+    rows = [(datetime(2015, 1, 15, 12, tzinfo=timezone.utc),),
+            (datetime(2015, 7, 1, 12, tzinfo=timezone.utc),),
+            (None,)]
     write_func = lambda spark, path: (
-        spark.range(3)
-            .selectExpr("CAST(1593604800 + id AS TIMESTAMP) AS ts")
-            .write.orc(path))
+        spark.createDataFrame(rows, 'ts timestamp').write.orc(path))
     read_func = lambda spark, path: spark.read.orc(path)
-    if is_not_utc():
-        # Non-UTC: the timestamp write must fall back to CPU (DataWritingCommandExec).
-        assert_gpu_fallback_write(write_func, read_func, data_path, 'DataWritingCommandExec')
-    else:
-        assert_gpu_and_cpu_writes_are_equal_collect(write_func, read_func, data_path)
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        write_func, read_func, data_path, conf={'spark.sql.session.timeZone': session_timezone})
+
+
+@tz_sensitive_test
+@pytest.mark.parametrize('timestamp', [datetime(2015, 1, 15, 12, tzinfo=timezone.utc),
+                                       datetime(2015, 7, 1, 12, tzinfo=timezone.utc)])
+def test_orc_gpu_write_cpu_read_timestamp_filter(spark_tmp_path, timestamp):
+    data_path = spark_tmp_path + '/ORC_GPU_WRITE_TIMESTAMP_FILTER'
+    write_func = lambda spark, path: (
+        spark.createDataFrame([(timestamp,)], 'ts timestamp').write.orc(path))
+    read_func = lambda spark, path: (
+        spark.read.orc(path).where(f.col('ts') == f.lit(timestamp)))
+    assert_gpu_and_cpu_writes_are_equal_collect(write_func, read_func, data_path)
+
+
+@tz_sensitive_test
+@pytest.mark.parametrize('reader_type', ['PERFILE', 'COALESCING', 'MULTITHREADED'])
+@pytest.mark.parametrize('v1_sources', ['', 'orc'])
+@pytest.mark.parametrize('dst_fallback,pushdown', [(True, False), (False, False), (False, True)])
+def test_orc_timestamp_filter_pushdown(spark_tmp_path, reader_type, v1_sources,
+                                     dst_fallback, pushdown):
+    if dst_fallback and spark_jvm().java.util.TimeZone.getDefault().getID() != 'America/New_York':
+        pytest.skip('The DST pruning reproducer requires TZ=America/New_York')
+    # The first two instants are in EDT, and the last is in EST. Their local order differs
+    # from their UTC order, exposing incorrect ORC statistics pruning (issue #16804).
+    month, day = (11, 1) if dst_fallback else (1, 15)
+    values = [datetime(2020, month, day, 5, 0, tzinfo=timezone.utc),
+              datetime(2020, month, day, 5, 59, tzinfo=timezone.utc),
+              datetime(2020, month, day, 6, 20, tzinfo=timezone.utc)]
+    target = values[1]
+    expected_seconds = int(target.timestamp())
+    conf = {'spark.sql.orc.impl': 'native',
+            'spark.sql.session.timeZone': 'America/New_York',
+            'spark.sql.sources.useV1SourceList': v1_sources,
+            'spark.sql.orc.filterPushdown': str(pushdown).lower(),
+            'spark.rapids.sql.format.orc.reader.type': reader_type}
+    data_path = spark_tmp_path + '/ORC_TIMESTAMP_FILTER_PUSHDOWN'
+    # Use the CPU writer so that the regression is independent of GPU ORC encoding.
+    with_cpu_session(lambda spark: spark.createDataFrame([(v,) for v in values], 'ts timestamp')
+                     .coalesce(1).write.option('orc.row.index.stride', 10000).orc(data_path),
+                     conf=conf)
+
+    def check_target(cpu, gpu):
+        # Equality alone could accept two empty results. Require exactly the matching row.
+        assert [row[0] for row in cpu] == [expected_seconds]
+        assert [row[0] for row in gpu] == [expected_seconds]
+        return cpu, gpu
+
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.orc(data_path).where(f.col('ts') == f.lit(target))
+            .selectExpr('CAST(ts AS BIGINT)'),
+        conf=conf, result_canonicalize_func_before_compare=check_target)
 
 
 @pytest.mark.parametrize("reader_confs", reader_opt_confs, ids=idfn)
@@ -1485,7 +1709,7 @@ def test_orc_reader_writer_the_same_timezone(reader_confs, spark_tmp_path, v1_en
     # read on GPU and CPU
     assert_gpu_and_cpu_are_equal_collect(read_orc_df(cpu_write_path), conf=read_confs)
 
-@pytest.mark.skipif(is_not_utc(), reason="https://github.com/NVIDIA/cudf-spark/issues/15385")
+@tz_sensitive_test
 @ignore_order(local=True)
 def test_orc_gpu_write_cpu_read_timestamp_before_epoch(spark_tmp_path):
     gpu_write_path = spark_tmp_path + "/ORC_DATA_GPU"
@@ -1499,7 +1723,7 @@ def test_orc_gpu_write_cpu_read_timestamp_before_epoch(spark_tmp_path):
     assert_gpu_and_cpu_are_equal_collect(read_orc_df(gpu_write_path))
 
 
-@pytest.mark.skipif(is_not_utc(), reason="https://github.com/NVIDIA/cudf-spark/issues/15385")
+@tz_sensitive_test
 @ignore_order(local=True)
 def test_orc_gpu_write_cpu_read_timestamp_near_epoch(spark_tmp_path):
     gpu_write_path = spark_tmp_path + "/ORC_DATA_GPU_NEAR_EPOCH"

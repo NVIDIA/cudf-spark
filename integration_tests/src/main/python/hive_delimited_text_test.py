@@ -19,7 +19,7 @@ from data_gen import *
 from enum import Enum
 from marks import *
 from pyspark.sql.types import *
-from spark_session import is_spark_cdh, with_cpu_session
+from spark_session import with_cpu_session
 
 hive_text_enabled_conf = {"spark.rapids.sql.format.hive.text.enabled": True,
                           "spark.rapids.sql.format.hive.text.read.enabled": True}
@@ -141,9 +141,6 @@ def read_hive_text_sql_wrong_case(data_path, schema, spark_tmp_table_factory, op
 
 
 non_utc_allow_for_test_basic_hive_text_read=['HiveTableScanExec', 'DataWritingCommandExec', 'WriteFilesExec'] if is_not_utc() else []
-@pytest.mark.skipif(is_spark_cdh(),
-                    reason="Hive text reads are disabled on CDH, as per "
-                           "https://github.com/NVIDIA/spark-rapids/pull/7628")
 @approximate_float
 @pytest.mark.parametrize('name,schema,options', [
 
@@ -156,22 +153,14 @@ non_utc_allow_for_test_basic_hive_text_read=['HiveTableScanExec', 'DataWritingCo
     ('hive-delim-text/simple-int-values',     make_schema(FloatType()),          {}),
     ('hive-delim-text/simple-int-values',     make_schema(DoubleType()),         {}),
     ('hive-delim-text/simple-int-values',     make_schema(StringType()),         {}),
-    pytest.param('hive-delim-text/simple-int-values', make_schema(DecimalType(10, 2)), {},
-                 marks=pytest.mark.xfail(condition=is_spark_cdh(),
-                                         reason="https://github.com/NVIDIA/spark-rapids/issues/7423")),
-    pytest.param('hive-delim-text/simple-int-values', make_schema(DecimalType(10, 3)),   {},
-                 marks=pytest.mark.xfail(condition=is_spark_cdh(),
-                                         reason="https://github.com/NVIDIA/spark-rapids/issues/7423")),
+    ('hive-delim-text/simple-int-values', make_schema(DecimalType(10, 2)), {}),
+    ('hive-delim-text/simple-int-values', make_schema(DecimalType(10, 3)), {}),
 
     # Floating Point.
     ('hive-delim-text/simple-float-values',   make_schema(FloatType()),          {}),
     ('hive-delim-text/simple-float-values',   make_schema(DoubleType()),         {}),
-    pytest.param('hive-delim-text/simple-float-values', make_schema(DecimalType(10, 3)), {},
-                 marks=pytest.mark.xfail(condition=is_spark_cdh(),
-                                         reason="https://github.com/NVIDIA/spark-rapids/issues/7423")),
-    pytest.param('hive-delim-text/simple-float-values', make_schema(DecimalType(38, 10)), {},
-                 marks=pytest.mark.xfail(condition=is_spark_cdh(),
-                                         reason="https://github.com/NVIDIA/spark-rapids/issues/7423")),
+    ('hive-delim-text/simple-float-values', make_schema(DecimalType(10, 3)), {}),
+    ('hive-delim-text/simple-float-values', make_schema(DecimalType(38, 10)), {}),
     ('hive-delim-text/simple-float-values',   make_schema(IntegerType()),        {}),
     ('hive-delim-text/extended-float-values', make_schema(IntegerType()),        {}),
     ('hive-delim-text/extended-float-values', make_schema(FloatType()),          {}),
@@ -191,12 +180,8 @@ non_utc_allow_for_test_basic_hive_text_read=['HiveTableScanExec', 'DataWritingCo
     ('hive-delim-text/trucks-err', trucks_schema, {}),
 
     # Date/Time
-    pytest.param('hive-delim-text/timestamp', timestamp_schema, {},
-                 marks=pytest.mark.xfail(condition=is_spark_cdh(),
-                                         reason="https://github.com/NVIDIA/spark-rapids/issues/7423")),
-    pytest.param('hive-delim-text/date', date_schema, {},
-                 marks=pytest.mark.xfail(condition=is_spark_cdh(),
-                                         reason="https://github.com/NVIDIA/spark-rapids/issues/7423")),
+    ('hive-delim-text/timestamp', timestamp_schema, {}),
+    ('hive-delim-text/date', date_schema, {}),
 
     # Test that lines beginning with comments ('#') aren't skipped.
     ('hive-delim-text/comments', StructType([StructField("str", StringType()),
@@ -214,7 +199,6 @@ def test_basic_hive_text_read(std_input_path, name, schema, spark_tmp_table_fact
                                          conf=hive_text_enabled_conf)
 
 
-@pytest.mark.skipif(is_spark_cdh(), reason="Hive text reads are disabled on CDH")
 @pytest.mark.parametrize('time_parser_policy', ['CORRECTED', 'EXCEPTION', 'LEGACY'])
 @pytest.mark.parametrize('ansi_enabled', ['true', 'false'])
 @allow_non_gpu(*non_utc_allow_for_test_basic_hive_text_read)
@@ -232,9 +216,6 @@ def test_hive_text_date_parser_policy(std_input_path, spark_tmp_table_factory,
         conf=conf)
 
 
-@pytest.mark.skipif(is_spark_cdh(),
-                    reason="Hive text reads are disabled on CDH, as per "
-                           "https://github.com/NVIDIA/spark-rapids/pull/7628")
 @approximate_float
 @pytest.mark.parametrize('name,schema,options', [
     ('hive-delim-text/simple-boolean-values', make_schema(BooleanType()), {})
@@ -287,9 +268,6 @@ def read_hive_text_table(spark, text_table_name, fields="my_field"):
     return spark.sql("SELECT " + fields + " FROM " + text_table_name)
 
 
-@pytest.mark.skipif(is_spark_cdh(),
-                    reason="Hive text reads are disabled on CDH, as per "
-                           "https://github.com/NVIDIA/spark-rapids/pull/7628")
 @approximate_float
 @pytest.mark.parametrize('data_gen', hive_text_supported_gens, ids=idfn)
 @allow_non_gpu(*non_utc_allow_for_test_basic_hive_text_read)
@@ -330,9 +308,6 @@ def read_hive_text_table_partitions(spark, text_table_name, partition):
     return spark.sql("SELECT my_field FROM %s WHERE %s" % (text_table_name, partition))
 
 
-@pytest.mark.skipif(is_spark_cdh(),
-                    reason="Hive text reads are disabled on CDH, as per "
-                           "https://github.com/NVIDIA/spark-rapids/pull/7628")
 @approximate_float
 @allow_non_gpu("EqualTo", "IsNotNull", *non_utc_allow_for_test_basic_hive_text_read)  # Accounts for partition predicate: `WHERE dt='1'`
 @pytest.mark.parametrize('data_gen', hive_text_supported_gens, ids=idfn)
@@ -348,9 +323,6 @@ def test_hive_text_round_trip_partitioned(spark_tmp_path, data_gen, spark_tmp_ta
         conf=hive_text_enabled_conf)
 
 
-@pytest.mark.skipif(is_spark_cdh(),
-                    reason="Hive text reads are disabled on CDH, as per "
-                           "https://github.com/NVIDIA/spark-rapids/pull/7628")
 @approximate_float
 @allow_non_gpu("EqualTo", "IsNotNull", *non_utc_allow_for_test_basic_hive_text_read)  # Accounts for partition predicate: `WHERE dt='1'`
 @pytest.mark.parametrize('data_gen', [boolean_gen], ids=idfn)
@@ -367,9 +339,6 @@ def test_hive_text_round_trip_partitioned_case_insensitive(spark_tmp_path, data_
         conf=hive_text_enabled_conf)
 
 
-@pytest.mark.skipif(is_spark_cdh(),
-                    reason="Hive text reads are disabled on CDH, as per "
-                           "https://github.com/NVIDIA/spark-rapids/pull/7628")
 @ignore_order(local=True)
 @allow_non_gpu("EqualTo", "IsNotNull", *non_utc_allow_for_test_basic_hive_text_read)
 def test_hive_text_partition_listing_shim_paths(spark_tmp_path, spark_tmp_table_factory):
@@ -405,9 +374,6 @@ def test_hive_text_partition_listing_shim_paths(spark_tmp_path, spark_tmp_table_
                            {"spark.sql.hive.metastorePartitionPruning": "true"})
     assert_gpu_and_cpu_are_equal_collect(read_partitioned_table, conf=conf)
 
-@pytest.mark.skipif(is_spark_cdh(),
-                    reason="Hive text reads are disabled on CDH, as per "
-                           "https://github.com/NVIDIA/spark-rapids/pull/7628")
 @approximate_float
 @allow_non_gpu("EqualTo", "IsNotNull", "Or", *non_utc_allow_for_test_basic_hive_text_read)  # Accounts for partition predicate
 @pytest.mark.parametrize('data_gen', hive_text_supported_gens, ids=idfn)
@@ -436,9 +402,6 @@ hive_text_unsupported_gens = [
 ]
 
 
-@pytest.mark.skipif(is_spark_cdh(),
-                    reason="Hive text reads are disabled on CDH, as per "
-                           "https://github.com/NVIDIA/spark-rapids/pull/7628")
 @allow_non_gpu("org.apache.spark.sql.hive.execution.HiveTableScanExec")
 @pytest.mark.parametrize('unsupported_gen', hive_text_unsupported_gens, ids=idfn)
 def test_hive_text_fallback_for_unsupported_types(spark_tmp_path, unsupported_gen, spark_tmp_table_factory):
@@ -468,9 +431,6 @@ def test_hive_text_fallback_for_unsupported_types(spark_tmp_path, unsupported_ge
         conf=hive_text_enabled_conf)
 
 
-@pytest.mark.skipif(is_spark_cdh(),
-                    reason="Hive text reads are disabled on CDH, as per "
-                           "https://github.com/NVIDIA/spark-rapids/pull/7628")
 @pytest.mark.parametrize('data_gen', [StringGen()], ids=idfn)
 def test_hive_text_default_enabled(spark_tmp_path, data_gen, spark_tmp_table_factory):
     gen = StructGen([('my_field', data_gen)], nullable=False)
@@ -484,9 +444,6 @@ def test_hive_text_default_enabled(spark_tmp_path, data_gen, spark_tmp_table_fac
         conf={})
 
 
-@pytest.mark.skipif(is_spark_cdh(),
-                    reason="Hive text reads are disabled on CDH, as per "
-                           "https://github.com/NVIDIA/spark-rapids/pull/7628")
 @allow_non_gpu("org.apache.spark.sql.hive.execution.HiveTableScanExec")
 @pytest.mark.parametrize('data_gen', [TimestampGen()], ids=idfn)
 def test_custom_timestamp_formats_disabled(spark_tmp_path, data_gen, spark_tmp_table_factory):
@@ -533,9 +490,6 @@ def test_custom_timestamp_formats_disabled(spark_tmp_path, data_gen, spark_tmp_t
         conf=hive_text_enabled_conf)
 
 
-@pytest.mark.skipif(is_spark_cdh(),
-                    reason="Hive text reads are disabled on CDH, as per "
-                           "https://github.com/NVIDIA/spark-rapids/pull/7628")
 @pytest.mark.parametrize('codec', ['BZip2Codec',    # BZ2 compression, i.e. Splittable.
                                    'DefaultCodec',  # DEFLATE, i.e. Gzip, without headers. Unsplittable.
                                    'GzipCodec'])    # Gzip proper. Unsplittable.
@@ -573,9 +527,6 @@ def test_read_compressed_hive_text(spark_tmp_table_factory, codec):
 TableWriteMode = Enum('TableWriteMode', ['CTAS', 'CreateThenWrite'])
 
 
-@pytest.mark.skipif(is_spark_cdh(),
-                    reason="Hive text is disabled on CDH, as per "
-                           "https://github.com/NVIDIA/spark-rapids/pull/7628")
 @approximate_float
 @ignore_order(local=True)
 @pytest.mark.parametrize('mode', [TableWriteMode.CTAS, TableWriteMode.CreateThenWrite])
@@ -588,20 +539,12 @@ TableWriteMode = Enum('TableWriteMode', ['CTAS', 'CreateThenWrite'])
     ('hive-delim-text/simple-int-values',     make_schema(FloatType()),          {}),
     ('hive-delim-text/simple-int-values',     make_schema(DoubleType()),         {}),
     ('hive-delim-text/simple-int-values',     make_schema(StringType()),         {}),
-    pytest.param('hive-delim-text/simple-int-values', make_schema(DecimalType(10, 2)), {},
-                 marks=pytest.mark.xfail(condition=is_spark_cdh(),
-                                         reason="https://github.com/NVIDIA/spark-rapids/issues/7423")),
-    pytest.param('hive-delim-text/simple-int-values', make_schema(DecimalType(10, 3)),   {},
-                 marks=pytest.mark.xfail(condition=is_spark_cdh(),
-                                         reason="https://github.com/NVIDIA/spark-rapids/issues/7423")),
+    ('hive-delim-text/simple-int-values', make_schema(DecimalType(10, 2)), {}),
+    ('hive-delim-text/simple-int-values', make_schema(DecimalType(10, 3)), {}),
     # Floating Point.
     ('hive-delim-text/simple-float-values',   make_schema(FloatType()),          {}),
-    pytest.param('hive-delim-text/simple-float-values', make_schema(DecimalType(10, 3)), {},
-                 marks=pytest.mark.xfail(condition=is_spark_cdh(),
-                                         reason="https://github.com/NVIDIA/spark-rapids/issues/7423")),
-    pytest.param('hive-delim-text/simple-float-values', make_schema(DecimalType(38, 10)), {},
-                 marks=pytest.mark.xfail(condition=is_spark_cdh(),
-                                         reason="https://github.com/NVIDIA/spark-rapids/issues/7423")),
+    ('hive-delim-text/simple-float-values', make_schema(DecimalType(10, 3)), {}),
+    ('hive-delim-text/simple-float-values', make_schema(DecimalType(38, 10)), {}),
     ('hive-delim-text/simple-float-values',   make_schema(IntegerType()),        {}),
     ('hive-delim-text/extended-float-values', make_schema(IntegerType()),        {}),
     ('hive-delim-text/extended-float-values', make_schema(FloatType()),          {}),
@@ -620,12 +563,8 @@ TableWriteMode = Enum('TableWriteMode', ['CTAS', 'CreateThenWrite'])
     ('hive-delim-text/trucks-err', trucks_schema, {}),
 
     # Date/Time
-    pytest.param('hive-delim-text/timestamp', timestamp_schema, {},
-                 marks=pytest.mark.xfail(condition=is_spark_cdh(),
-                                         reason="https://github.com/NVIDIA/spark-rapids/issues/7423")),
-    pytest.param('hive-delim-text/date', date_schema, {},
-                 marks=pytest.mark.xfail(condition=is_spark_cdh(),
-                                         reason="https://github.com/NVIDIA/spark-rapids/issues/7423")),
+    ('hive-delim-text/timestamp', timestamp_schema, {}),
+    ('hive-delim-text/date', date_schema, {}),
 
     # Test that lines beginning with comments ('#') aren't skipped.
     ('hive-delim-text/comments', StructType([StructField("str", StringType()),
@@ -641,9 +580,6 @@ def test_basic_hive_text_write(std_input_path, input_dir, schema, spark_tmp_tabl
     basic_hive_text_write_test_impl(std_input_path, input_dir, schema, spark_tmp_table_factory, mode, options, hive_text_write_enabled_conf)
 
 
-@pytest.mark.skipif(is_spark_cdh(),
-                    reason="Hive text is disabled on CDH, as per "
-                           "https://github.com/NVIDIA/spark-rapids/pull/7628")
 @approximate_float
 @ignore_order(local=True)
 @pytest.mark.parametrize('mode', [TableWriteMode.CTAS, TableWriteMode.CreateThenWrite])
@@ -695,9 +631,6 @@ def basic_hive_text_write_test_impl(std_input_path, input_dir, schema, spark_tmp
 PartitionWriteMode = Enum('PartitionWriteMode', ['Static', 'Dynamic'])
 
 
-@pytest.mark.skipif(is_spark_cdh(),
-                    reason="Hive text is disabled on CDH, as per "
-                           "https://github.com/NVIDIA/spark-rapids/pull/7628")
 @ignore_order(local=True)
 @pytest.mark.parametrize('mode', [PartitionWriteMode.Static, PartitionWriteMode.Dynamic])
 def test_partitioned_hive_text_write(mode, spark_tmp_table_factory):

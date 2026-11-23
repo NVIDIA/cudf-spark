@@ -21,7 +21,6 @@ import java.math.RoundingMode
 import ai.rapids.cudf.{ColumnVector, Cuda, DType, Table}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.jni.RmmSpark
-import com.nvidia.spark.rapids.jni.kudo.DumpOption
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -169,8 +168,6 @@ class GpuShuffleCoalesceSuite extends AnyFunSuite with BeforeAndAfterEach {
     CoalesceReadOption(
       kudoEnabled = true,
       kudoMode = RapidsConf.ShuffleKudoMode.GPU,
-      kudoDebugMode = DumpOption.Never,
-      kudoDebugDumpPrefix = None,
       useAsync = false
     )
   }

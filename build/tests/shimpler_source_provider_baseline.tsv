@@ -38,6 +38,9 @@
 359,413,500	src/main/scala/com/nvidia/spark/rapids/shims/AggregationTagging.scala	sql-plugin/src/main/spark330/scala/com/nvidia/spark/rapids/shims/AggregationTagging.scala
 350db143,400db173,410db183	src/main/scala/com/nvidia/spark/rapids/shims/AggregationTagging.scala	sql-plugin/src/main/spark350db143/scala/com/nvidia/spark/rapids/shims/AggregationTagging.scala
 359,413,350db143,400db173,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/AnsiCastShim.scala	sql-plugin/src/main/spark340/scala/com/nvidia/spark/rapids/shims/AnsiCastShim.scala
+359,413,350db143,400db173,410db183	src/main/scala/com/nvidia/spark/rapids/shims/ArraySetOpsShims.scala	sql-plugin/src/main/spark330/scala/com/nvidia/spark/rapids/shims/ArraySetOpsShims.scala
+500	src/main/scala/com/nvidia/spark/rapids/shims/ArraySetOpsShims.scala	sql-plugin/src/main/spark405/scala/com/nvidia/spark/rapids/shims/ArraySetOpsShims.scala
+500	src/main/scala/com/nvidia/spark/rapids/shims/BatchScanCanonicalizeShims.scala	sql-plugin/src/main/spark421/scala/com/nvidia/spark/rapids/shims/BatchScanCanonicalizeShims.scala
 359	src/main/scala/com/nvidia/spark/rapids/shims/BatchScanExecMeta.scala	sql-plugin/src/main/spark350/scala/com/nvidia/spark/rapids/shims/BatchScanExecMeta.scala
 413,350db143,400db173	src/main/scala/com/nvidia/spark/rapids/shims/BatchScanExecMeta.scala	sql-plugin/src/main/spark350db143/scala/com/nvidia/spark/rapids/shims/BatchScanExecMeta.scala
 410db183	src/main/scala/com/nvidia/spark/rapids/shims/BatchScanExecMeta.scala	sql-plugin/src/main/spark410db183/scala/com/nvidia/spark/rapids/shims/BatchScanExecMeta.scala
@@ -84,7 +87,8 @@
 413,400db173,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/GetJsonObjectShim.scala	sql-plugin/src/main/spark400/scala/com/nvidia/spark/rapids/shims/GetJsonObjectShim.scala
 359,413,350db143,400db173,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/GetMapValueMeta.scala	sql-plugin/src/main/spark340/scala/com/nvidia/spark/rapids/shims/GetMapValueMeta.scala
 350db143	src/main/scala/com/nvidia/spark/rapids/shims/GetSequenceSize.scala	sql-plugin/src/main/spark330/scala/com/nvidia/spark/rapids/shims/GetSequenceSize.scala
-359,413,400db173,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/GetSequenceSize.scala	sql-plugin/src/main/spark334/scala/com/nvidia/spark/rapids/shims/GetSequenceSize.scala
+359,413,400db173,410db183	src/main/scala/com/nvidia/spark/rapids/shims/GetSequenceSize.scala	sql-plugin/src/main/spark334/scala/com/nvidia/spark/rapids/shims/GetSequenceSize.scala
+500	src/main/scala/com/nvidia/spark/rapids/shims/GetSequenceSize.scala	sql-plugin/src/main/spark405/scala/com/nvidia/spark/rapids/shims/GetSequenceSize.scala
 359,413,350db143,400db173,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/GlobalLimitShims.scala	sql-plugin/src/main/spark340/scala/com/nvidia/spark/rapids/shims/GlobalLimitShims.scala
 359,350db143	src/main/scala/com/nvidia/spark/rapids/shims/GpuAggregateInPandasExecMeta.scala	sql-plugin/src/main/spark350/scala/com/nvidia/spark/rapids/shims/GpuAggregateInPandasExecMeta.scala
 359,413,350db143,400db173,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/GpuAliasAwareExecNodeShims.scala	sql-plugin/src/main/spark340/scala/com/nvidia/spark/rapids/shims/GpuAliasAwareExecNodeShims.scala
@@ -98,6 +102,8 @@
 359,413,350db143,400db173,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/GpuCastShims.scala	sql-plugin/src/main/spark340/scala/com/nvidia/spark/rapids/shims/GpuCastShims.scala
 359,413,500	src/main/scala/com/nvidia/spark/rapids/shims/GpuFileFormatDataWriterShim.scala	sql-plugin/src/main/spark330/scala/com/nvidia/spark/rapids/shims/GpuFileFormatDataWriterShim.scala
 350db143,400db173,410db183	src/main/scala/com/nvidia/spark/rapids/shims/GpuFileFormatDataWriterShim.scala	sql-plugin/src/main/spark350db143/scala/com/nvidia/spark/rapids/shims/GpuFileFormatDataWriterShim.scala
+359,413,350db143,400db173,410db183	src/main/scala/com/nvidia/spark/rapids/shims/GpuFileWriteJobShim.scala	sql-plugin/src/main/spark330/scala/com/nvidia/spark/rapids/shims/GpuFileWriteJobShim.scala
+500	src/main/scala/com/nvidia/spark/rapids/shims/GpuFileWriteJobShim.scala	sql-plugin/src/main/spark405/scala/com/nvidia/spark/rapids/shims/GpuFileWriteJobShim.scala
 500	src/main/scala/com/nvidia/spark/rapids/shims/GpuGroupPartitionsExec.scala	sql-plugin/src/main/spark420/scala/com/nvidia/spark/rapids/shims/GpuGroupPartitionsExec.scala
 500	src/main/scala/com/nvidia/spark/rapids/shims/GpuGroupPartitionsShims.scala	sql-plugin/src/main/spark500/scala/com/nvidia/spark/rapids/shims/GpuGroupPartitionsShims.scala
 359,413,350db143,400db173,410db183	src/main/scala/com/nvidia/spark/rapids/shims/GpuHashPartitioning.scala	sql-plugin/src/main/spark330/scala/com/nvidia/spark/rapids/shims/GpuHashPartitioning.scala
@@ -150,6 +156,8 @@
 359,350db143	src/main/scala/com/nvidia/spark/rapids/shims/OperatorsUtilShims.scala	sql-plugin/src/main/spark330/scala/com/nvidia/spark/rapids/shims/OperatorsUtilShims.scala
 413,400db173,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/OperatorsUtilShims.scala	sql-plugin/src/main/spark400/scala/com/nvidia/spark/rapids/shims/OperatorsUtilShims.scala
 359,413,350db143,400db173,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/OrcProtoWriterShim.scala	sql-plugin/src/main/spark340/scala/com/nvidia/spark/rapids/shims/OrcProtoWriterShim.scala
+359,413,350db143,400db173,410db183	src/main/scala/com/nvidia/spark/rapids/shims/OrcSchemaTypeShims.scala	sql-plugin/src/main/spark330/scala/com/nvidia/spark/rapids/shims/OrcSchemaTypeShims.scala
+500	src/main/scala/com/nvidia/spark/rapids/shims/OrcSchemaTypeShims.scala	sql-plugin/src/main/spark405/scala/com/nvidia/spark/rapids/shims/OrcSchemaTypeShims.scala
 359,350db143,400db173	src/main/scala/com/nvidia/spark/rapids/shims/ParquetMissingStructShims.scala	sql-plugin/src/main/spark330/scala/com/nvidia/spark/rapids/shims/ParquetMissingStructShims.scala
 413,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/ParquetMissingStructShims.scala	sql-plugin/src/main/spark410db183/scala/com/nvidia/spark/rapids/shims/ParquetMissingStructShims.scala
 359,350db143	src/main/scala/com/nvidia/spark/rapids/shims/ParquetVariantShims.scala	sql-plugin/src/main/spark330/scala/com/nvidia/spark/rapids/shims/ParquetVariantShims.scala
@@ -250,6 +258,8 @@
 359,413,500	src/main/scala/com/nvidia/spark/rapids/shims/extractValueShims.scala	sql-plugin/src/main/spark330/scala/com/nvidia/spark/rapids/shims/extractValueShims.scala
 359,413,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/mathExpressions.scala	sql-plugin/src/main/spark359/scala/com/nvidia/spark/rapids/shims/mathExpressions.scala
 359,413,350db143,400db173,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/parquet/GpuParquetUtilsShims.scala	sql-plugin/src/main/spark340/scala/com/nvidia/spark/rapids/shims/parquet/GpuParquetUtilsShims.scala
+359,413,350db143,400db173,410db183	src/main/scala/com/nvidia/spark/rapids/shims/parquet/ParquetFieldRequestShims.scala	sql-plugin/src/main/spark330/scala/com/nvidia/spark/rapids/shims/parquet/ParquetFieldRequestShims.scala
+500	src/main/scala/com/nvidia/spark/rapids/shims/parquet/ParquetFieldRequestShims.scala	sql-plugin/src/main/spark405/scala/com/nvidia/spark/rapids/shims/parquet/ParquetFieldRequestShims.scala
 359,413,350db143,400db173,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/parquet/ParquetLegacyNanoAsLongShims.scala	sql-plugin/src/main/spark340/scala/com/nvidia/spark/rapids/shims/parquet/ParquetLegacyNanoAsLongShims.scala
 359,413,350db143,400db173,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/parquet/ParquetStringPredShims.scala	sql-plugin/src/main/spark340/scala/com/nvidia/spark/rapids/shims/parquet/ParquetStringPredShims.scala
 359,413,350db143,400db173,410db183,500	src/main/scala/com/nvidia/spark/rapids/shims/parquet/ParquetTimestampAnnotationShims.scala	sql-plugin/src/main/spark340/scala/com/nvidia/spark/rapids/shims/parquet/ParquetTimestampAnnotationShims.scala
@@ -278,6 +288,7 @@
 350db143,400db173,410db183	src/main/scala/org/apache/spark/sql/catalyst/csv/GpuCsvUtils.scala	sql-plugin/src/main/spark350db143/scala/org/apache/spark/sql/catalyst/csv/GpuCsvUtils.scala
 359,413,350db143,400db173,410db183,500	src/main/scala/org/apache/spark/sql/catalyst/json/GpuJsonUtils.scala	sql-plugin/src/main/spark340/scala/org/apache/spark/sql/catalyst/json/GpuJsonUtils.scala
 359,413,350db143,400db173,410db183,500	src/main/scala/org/apache/spark/sql/errors/ConvUtils.scala	sql-plugin/src/main/spark340/scala/org/apache/spark/sql/errors/ConvUtils.scala
+500	src/main/scala/org/apache/spark/sql/errors/ParquetFieldRequestShimsImpl.scala	sql-plugin/src/main/spark405/scala/org/apache/spark/sql/errors/ParquetFieldRequestShimsImpl.scala
 359,413,350db143,400db173,410db183,500	src/main/scala/org/apache/spark/sql/execution/datasources/GpuWriteFiles.scala	sql-plugin/src/main/spark340/scala/org/apache/spark/sql/execution/datasources/GpuWriteFiles.scala
 359,413,500	src/main/scala/org/apache/spark/sql/execution/datasources/parquet/RapidsVectorizedColumnReader.scala	sql-plugin/src/main/spark330/scala/org/apache/spark/sql/execution/datasources/parquet/RapidsVectorizedColumnReader.scala
 350db143,400db173,410db183	src/main/scala/org/apache/spark/sql/execution/datasources/parquet/RapidsVectorizedColumnReader.scala	sql-plugin/src/main/spark350db143/scala/org/apache/spark/sql/execution/datasources/parquet/RapidsVectorizedColumnReader.scala
@@ -414,6 +425,9 @@
 413,400db173,410db183,500	src/main/scala/org/apache/spark/sql/rapids/shims/InvokeExprMeta.scala	sql-plugin/src/main/spark400/scala/org/apache/spark/sql/rapids/shims/InvokeExprMeta.scala
 359,350db143	src/main/scala/org/apache/spark/sql/rapids/shims/OriginContextShim.scala	sql-plugin/src/main/spark340/scala/org/apache/spark/sql/rapids/shims/OriginContextShim.scala
 413,400db173,410db183,500	src/main/scala/org/apache/spark/sql/rapids/shims/OriginContextShim.scala	sql-plugin/src/main/spark400/scala/org/apache/spark/sql/rapids/shims/OriginContextShim.scala
+359,413,350db143,400db173,410db183	src/main/scala/org/apache/spark/sql/rapids/shims/PartitioningUtilsShims.scala	sql-plugin/src/main/spark330/scala/org/apache/spark/sql/rapids/shims/PartitioningUtilsShims.scala
+500	src/main/scala/org/apache/spark/sql/rapids/shims/PartitioningUtilsShims.scala	sql-plugin/src/main/spark421/scala/org/apache/spark/sql/rapids/shims/PartitioningUtilsShims.scala
+500	src/main/scala/org/apache/spark/sql/rapids/shims/QueryExecutionShims.scala	sql-plugin/src/main/spark405/scala/org/apache/spark/sql/rapids/shims/QueryExecutionShims.scala
 359	src/main/scala/org/apache/spark/sql/rapids/shims/RapidsErrorUtils.scala	sql-plugin/src/main/spark342/scala/org/apache/spark/sql/rapids/shims/RapidsErrorUtils.scala
 350db143,400db173,410db183	src/main/scala/org/apache/spark/sql/rapids/shims/RapidsErrorUtils.scala	sql-plugin/src/main/spark350db143/scala/org/apache/spark/sql/rapids/shims/RapidsErrorUtils.scala
 413	src/main/scala/org/apache/spark/sql/rapids/shims/RapidsErrorUtils.scala	sql-plugin/src/main/spark400/scala/org/apache/spark/sql/rapids/shims/RapidsErrorUtils.scala
@@ -443,7 +457,9 @@
 400db173,410db183	src/main/scala/org/apache/spark/storage/ShuffleClientShims.scala	sql-plugin/src/main/spark400db173/scala/org/apache/spark/storage/ShuffleClientShims.scala
 413,400db173,410db183,500	src/test/scala/com/nvidia/spark/rapids/GpuColumnVectorVariantSuite.scala	sql-plugin/src/test/spark400/scala/com/nvidia/spark/rapids/GpuColumnVectorVariantSuite.scala
 413,400db173,410db183,500	src/test/scala/com/nvidia/spark/rapids/GpuVariantGetSuite.scala	sql-plugin/src/test/spark400/scala/com/nvidia/spark/rapids/GpuVariantGetSuite.scala
+500	src/test/scala/com/nvidia/spark/rapids/OrcSchemaTypeShims405Suite.scala	sql-plugin/src/test/spark405/scala/com/nvidia/spark/rapids/OrcSchemaTypeShims405Suite.scala
 413,400db173,410db183,500	src/test/scala/com/nvidia/spark/rapids/parquet/GpuParquetVariantFooterSuite.scala	sql-plugin/src/test/spark400/scala/com/nvidia/spark/rapids/parquet/GpuParquetVariantFooterSuite.scala
+500	src/test/scala/com/nvidia/spark/rapids/parquet/ParquetSchemaUtils405Suite.scala	sql-plugin/src/test/spark405/scala/com/nvidia/spark/rapids/parquet/ParquetSchemaUtils405Suite.scala
 350db143,400db173	src/test/scala/com/nvidia/spark/rapids/shims/DatabricksProtobufCompatSuite.scala	sql-plugin/src/test/spark350db143/scala/com/nvidia/spark/rapids/shims/DatabricksProtobufCompatSuite.scala
 410db183	src/test/scala/com/nvidia/spark/rapids/shims/GpuBatchScanExecSuite.scala	sql-plugin/src/test/spark410db183/scala/com/nvidia/spark/rapids/shims/GpuBatchScanExecSuite.scala
 359,413	src/test/scala/com/nvidia/spark/rapids/shims/KeyGroupedPartitioningShimSuite.scala	sql-plugin/src/test/spark359/scala/com/nvidia/spark/rapids/shims/KeyGroupedPartitioningShimSuite.scala
