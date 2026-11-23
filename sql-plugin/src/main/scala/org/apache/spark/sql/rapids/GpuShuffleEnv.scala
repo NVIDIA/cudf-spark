@@ -167,16 +167,16 @@ class GpuShuffleEnv(rapidsConf: RapidsConf) extends Logging {
 
 @scala.annotation.nowarn("cat=deprecation&origin=org.apache.spark.SparkEnv.shuffleManager")
 object GpuShuffleEnv extends Logging {
+  private final val SHUFFLE_MANAGER_CONF = "spark.shuffle.manager"
+  private final val MT_SHUFFLE_CATALOG_DISABLED_PREFIX =
+    "MultithreadedShuffleBufferCatalog disabled - "
+
   def isUCXShuffleAndEarlyStart(conf: RapidsConf): Boolean = {
     conf.isUCXShuffleManagerMode &&
       conf.shuffleTransportEarlyStart
   }
 
   val RAPIDS_SHUFFLE_CLASS: String = ShimLoader.getRapidsShuffleManagerClass
-
-  private[rapids] final val SHUFFLE_MANAGER_CONF = "spark.shuffle.manager"
-  private[rapids] final val MT_SHUFFLE_CATALOG_DISABLED_PREFIX =
-    "MultithreadedShuffleBufferCatalog disabled - "
 
   /**
    * Check if the RAPIDS shuffle manager is configured via spark.shuffle.manager

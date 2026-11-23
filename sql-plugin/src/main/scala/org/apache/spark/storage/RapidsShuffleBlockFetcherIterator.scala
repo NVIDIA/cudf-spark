@@ -158,8 +158,6 @@ final class RapidsShuffleBlockFetcherIterator(
    */
   private[this] val deferredFetchRequests = new HashMap[BlockManagerId, Queue[FetchRequest]]()
 
-  private final val REQUESTS_IN_FLIGHT_PREFIX = "Number of requests in flight "
-
   /** Current bytes in flight from our requests */
   private[this] var bytesInFlight = 0L
 
@@ -787,7 +785,7 @@ final class RapidsShuffleBlockFetcherIterator(
           if (isNetworkReqDone) {
             reqsInFlight -= 1
             resetNettyOOMFlagIfPossible(maxReqSizeShuffleToMem)
-            logDebug(REQUESTS_IN_FLIGHT_PREFIX + reqsInFlight)
+            logDebug(RapidsShuffleBlockFetcherIterator.REQUESTS_IN_FLIGHT_PREFIX + reqsInFlight)
           }
 
           if (buf.size == 0) {
@@ -923,7 +921,7 @@ final class RapidsShuffleBlockFetcherIterator(
             numBlocksInFlightPerAddress(address) - request.blocks.size
           bytesInFlight -= request.size
           reqsInFlight -= 1
-          logDebug(REQUESTS_IN_FLIGHT_PREFIX + reqsInFlight)
+          logDebug(RapidsShuffleBlockFetcherIterator.REQUESTS_IN_FLIGHT_PREFIX + reqsInFlight)
           val defReqQueue =
             deferredFetchRequests.getOrElseUpdate(address, new Queue[FetchRequest]())
           defReqQueue.enqueue(request)
@@ -943,7 +941,7 @@ final class RapidsShuffleBlockFetcherIterator(
           }
           if (isNetworkReqDone) {
             reqsInFlight -= 1
-            logDebug(REQUESTS_IN_FLIGHT_PREFIX + reqsInFlight)
+            logDebug(RapidsShuffleBlockFetcherIterator.REQUESTS_IN_FLIGHT_PREFIX + reqsInFlight)
           }
           pushBasedFetchHelper.initiateFallbackFetchForPushMergedBlock(blockId, address)
           // Set result to null to trigger another iteration of the while loop to get either
@@ -1375,6 +1373,7 @@ private class RapidsShuffleFetchCompletionListener(var data: RapidsShuffleBlockF
 }
 
 object RapidsShuffleBlockFetcherIterator {
+  private final val REQUESTS_IN_FLIGHT_PREFIX = "Number of requests in flight "
 
   /**
    * A flag which indicates whether the Netty OOM error has raised during shuffle.

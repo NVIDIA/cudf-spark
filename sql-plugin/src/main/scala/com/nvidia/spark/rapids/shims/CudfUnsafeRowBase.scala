@@ -34,6 +34,8 @@ import org.apache.spark.unsafe.types.UTF8String
 abstract class CudfUnsafeRowBase(
    protected val attributes: Array[Attribute],
    protected val remapping: Array[Int]) extends InternalRow {
+  private final val NOT_IMPLEMENTED_YET = "NOT IMPLEMENTED YET"
+
   protected var address: Long = _
   private var startOffsets: Array[Int] = _
   private var fixedWidthSizeInBytes: Int = _
@@ -190,8 +192,6 @@ abstract class CudfUnsafeRowBase(
   def getGeometry(ordinal: Int) = {
     throw new UnsupportedOperationException("GeometryVal is not supported")
   }
-
-  private final val NOT_IMPLEMENTED_YET = "NOT IMPLEMENTED YET"
 
   override def getInterval(ordinal: Int): CalendarInterval = {
     throw new IllegalArgumentException(NOT_IMPLEMENTED_YET)

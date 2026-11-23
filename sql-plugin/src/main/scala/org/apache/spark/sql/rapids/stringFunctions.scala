@@ -1981,6 +1981,8 @@ case class GpuStringSplit(str: Expression, regex: Expression, limit: Expression,
     pattern: String, isRegExp: Boolean)
   extends GpuTernaryExpression with ImplicitCastInputTypes {
 
+  private final val NOT_SUPPORTED_YET_MSG = "This is not supported yet"
+
   override def dataType: DataType = ArrayType(StringType, containsNull = false)
   override def inputTypes: Seq[DataType] = Seq(StringType, StringType, IntegerType)
   override def first: Expression = str
@@ -2025,8 +2027,6 @@ case class GpuStringSplit(str: Expression, regex: Expression, limit: Expression,
       doColumnar(val0Col, val1, val2)
     }
   }
-
-  private final val NOT_SUPPORTED_YET_MSG = "This is not supported yet"
 
   override def doColumnar(
       str: GpuColumnVector,

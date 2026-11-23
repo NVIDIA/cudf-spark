@@ -38,6 +38,11 @@ import org.apache.spark.sql.execution.datasources.v2.rapids.{GpuAtomicCreateTabl
 import org.apache.spark.sql.types.{DateType, TimestampType}
 
 abstract class IcebergProviderBase extends IcebergProvider {
+  private final val ICEBERG_IO_DISABLED_PREFIX =
+    "Iceberg input and output has been disabled. To enable set "
+  private final val ICEBERG_OUTPUT_DISABLED_PREFIX =
+    "Iceberg output has been disabled. To enable set "
+
   override def getScans: Map[Class[_ <: Scan], ScanRule[_ <: Scan]] = {
     val cpuBatchQueryScanClass = ShimReflectionUtils.loadClass(
       IcebergProvider.cpuBatchQueryScanClassName)
@@ -162,11 +167,6 @@ abstract class IcebergProviderBase extends IcebergProvider {
   override def isSupportedCatalog(catalogClass: Class[_]): Boolean = {
     supportsCatalog(catalogClass)
   }
-
-  private final val ICEBERG_IO_DISABLED_PREFIX =
-    "Iceberg input and output has been disabled. To enable set "
-  private final val ICEBERG_OUTPUT_DISABLED_PREFIX =
-    "Iceberg output has been disabled. To enable set "
 
   private def tagForGpu(
       cpuExec: AtomicCreateTableAsSelectExec,

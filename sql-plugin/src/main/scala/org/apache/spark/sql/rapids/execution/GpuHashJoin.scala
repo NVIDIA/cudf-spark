@@ -729,9 +729,9 @@ object GpuHashJoin {
   private[execution] final val INNER_HASH_WITH_POST_STRATEGY = "INNER_HASH_WITH_POST strategy"
   private[execution] final val INNER_SORT_WITH_POST_STRATEGY = "INNER_SORT_WITH_POST strategy"
   private[execution] final val SORT_JOIN_NESTED_KEYS_FALLBACK_MSG =
-    s"$INNER_SORT_WITH_POST_STRATEGY requested but join keys contain ARRAY or " +
+    INNER_SORT_WITH_POST_STRATEGY + " requested but join keys contain ARRAY or " +
       "STRUCT types which are not supported for sort joins. Falling back to " +
-      s"$INNER_HASH_WITH_POST_STRATEGY."
+      INNER_HASH_WITH_POST_STRATEGY + "."
   /**
    * Captures the normalized join condition and child plans after extracting any non-AST
    * expressions that can be safely computed on one side of the join.

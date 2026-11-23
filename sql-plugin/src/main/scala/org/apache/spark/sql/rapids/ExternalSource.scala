@@ -42,6 +42,8 @@ import org.apache.spark.util.Utils
  * exist at runtime. Details see: https://github.com/NVIDIA/spark-rapids/issues/5648
  */
 trait ExternalSourceBase extends Logging {
+  private final val NO_GPU_CONVERSION_MSG = "No GPU conversion"
+
   val avroScanClassName = "org.apache.spark.sql.v2.avro.AvroScan"
   lazy val hasSparkAvroJar = {
     /** spark-avro is an optional package for Spark, so the RAPIDS Accelerator
@@ -259,8 +261,6 @@ trait ExternalSourceBase extends Logging {
       meta.willNotWorkOnGpu(s"catalog $catalogClass is not supported")
     }
   }
-
-  private final val NO_GPU_CONVERSION_MSG = "No GPU conversion"
 
   def convertToGpu(
       cpuExec: AtomicCreateTableAsSelectExec,

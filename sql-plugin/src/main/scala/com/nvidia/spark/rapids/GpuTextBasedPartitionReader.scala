@@ -797,6 +797,10 @@ abstract class GpuTextBasedPartitionReader[BUFF <: LineBufferer, FACT <: LineBuf
 }
 
 object GpuTextBasedDateUtils {
+  private[rapids] final val OPT_MILLIS_TZ_SUFFIX = "[.SSS][XXX]"
+  private[rapids] final val OPT_MILLIS_SUFFIX = "[.SSS]"
+  private[rapids] final val OPT_MICROS_SUFFIX = "[.SSSSSS]"
+  private[rapids] final val MILLIS_TZ_SUFFIX = ".SSSXXX"
 
   // UTF8String.trimAll changed in patch releases and can be backported independently.
   // Probe the runtime semantics instead of maintaining a Spark version allowlist.
@@ -878,11 +882,6 @@ object GpuTextBasedDateUtils {
       }
     }
   }
-
-  private[rapids] final val OPT_MILLIS_TZ_SUFFIX = "[.SSS][XXX]"
-  private[rapids] final val OPT_MILLIS_SUFFIX = "[.SSS]"
-  private[rapids] final val OPT_MICROS_SUFFIX = "[.SSSSSS]"
-  private[rapids] final val MILLIS_TZ_SUFFIX = ".SSSXXX"
 
   /**
    * Get the list of all cuDF formats that need to be checked for when parsing timestamps. The

@@ -38,6 +38,8 @@ import org.apache.spark.sql.types.StructType
 
 /** Native cuDF Parquet deletion-vector support shared by the Iceberg readers. */
 private[parquet] object GpuIcebergDeletionVector extends Logging {
+  private[parquet] final val PARQUET_SUFFIX = ".parquet"
+
   def rowGroupMetadata(blocks: collection.Seq[BlockMetaData]): (Array[Long], Array[Int]) = {
     val offsets = blocks.map(GpuParquetUtilsShims.getRowIndexOffset)
     require(!offsets.exists(_ < 0), "Found invalid deletion-vector row-group offset")
@@ -169,7 +171,6 @@ private[parquet] object GpuIcebergDeletionVector extends Logging {
     }
   }
 
-  private[parquet] final val PARQUET_SUFFIX = ".parquet"
 }
 
 private class ChunkedDeletionVectorProducer(

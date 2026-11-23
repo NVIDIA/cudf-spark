@@ -48,6 +48,8 @@ case class RapidsDeletionVectorReadInfo(
 object RapidsDeletionVectors extends Logging {
   private val DELTA_BITMAP_MAGIC_NUMBER_BYTE_SIZE = 4
   private val MISSING_ROW_INDEX_FILTER_MESSAGE = "Row index filter not found. file="
+  private final val UNEXPECTED_ROW_INDEX_FILTER_TYPE =
+    "Unexpected row index filter type for Deletion Vectors. "
 
   case class DeletionVectorLookupResult(
       dvDescriptor: Option[DeletionVectorDescriptor],
@@ -305,9 +307,6 @@ object RapidsDeletionVectors extends Logging {
         .getOrElse(serializedEmptyBitmap())
     }
   }
-
-  private final val UNEXPECTED_ROW_INDEX_FILTER_TYPE =
-    "Unexpected row index filter type for Deletion Vectors. "
 
   private def loadDeletionVector(
       conf: Configuration,

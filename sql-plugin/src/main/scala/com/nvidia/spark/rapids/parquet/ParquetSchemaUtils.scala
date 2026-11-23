@@ -38,6 +38,7 @@ import org.apache.spark.sql.types._
 object ParquetSchemaUtils {
   // Copied from Spark
   private val SPARK_PARQUET_SCHEMA_NAME = "spark_schema"
+  private final val INVALID_PARQUET_SCHEMA_PREFIX = "Invalid Parquet schema. "
   // Copied from Spark
   val EMPTY_MESSAGE: MessageType = Types.buildMessage().named(SPARK_PARQUET_SCHEMA_NAME)
 
@@ -229,11 +230,6 @@ object ParquetSchemaUtils {
    * Clips a Parquet GroupType which corresponds to a Catalyst ArrayType.  The element type
    * of the ArrayType should also be a nested type, namely an ArrayType, a MapType, or a
    * StructType.
-   */
-  private final val INVALID_PARQUET_SCHEMA_PREFIX = "Invalid Parquet schema. "
-
-  /**
-   * Recursively clips a Parquet list type.
    */
   @scala.annotation.nowarn("msg=method as in class Builder is deprecated")
   private def clipParquetListType(

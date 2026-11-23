@@ -39,53 +39,54 @@ abstract class GpuSubqueryBroadcastMetaDBBase(s: SubqueryBroadcastExec,
 
   override val childPlans: Seq[SparkPlanMeta[SparkPlan]] = Nil
 
-  override def tagPlanForGpu(): Unit = s.child match {
-    // DPP: For AQE off, in this case, we handle DPP by converting the underlying
-    // BroadcastExchangeExec to GpuBroadcastExchangeExec.
-    // This is slightly different from the Apache Spark case, because Spark
-    // sends the underlying plan into the plugin in advance via the PlanSubqueries rule.
-    // Here, we have the full non-GPU subquery plan, so we convert the whole
-    // thing.
-    case ex @ BroadcastExchangeExec(_, child) =>
-      val exMeta = new GpuBroadcastMeta(ex.copy(child = child), conf, p, r)
-      exMeta.tagForGpu()
-      if (exMeta.canThisBeReplaced) {
-        broadcastBuilder = () => exMeta.convertToGpu()
-      } else {
-        willNotWorkOnGpu(UNDERLYING_BROADCAST_CANNOT_RUN_ON_GPU)
-      }
-    // DPP: For AQE on, we have an almost completely different scenario then before,
-    // Databricks uses a BroadcastQueryStageExec and either:
-    //  1) provide an underlying BroadcastExchangeExec that we will have to convert
-    //     somehow
-    //  2) might already do the reuse work for us. The ReusedExchange is now a
-    //     part of the SubqueryBroadcast, so we send it back here as underlying the
-    //     GpuSubqueryBroadcastExchangeExec
-    case bqse: BroadcastQueryStageExec =>
-      bqse.plan match {
-        case ex: BroadcastExchangeExec =>
-          val exMeta = new GpuBroadcastMeta(ex, conf, p, r)
-          exMeta.tagForGpu()
-          if (exMeta.canThisBeReplaced) {
-            broadcastBuilder = () => exMeta.convertToGpu()
-          } else {
-            willNotWorkOnGpu(UNDERLYING_BROADCAST_CANNOT_RUN_ON_GPU)
-          }
-        case reuse: ReusedExchangeExec =>
-          reuse.child match {
-            case _: GpuBroadcastExchangeExec =>
-              // A BroadcastExchange has already been replaced, so it can run on the GPU
-              broadcastBuilder = () => reuse
-            case _ =>
-              willNotWorkOnGpu(UNDERLYING_BROADCAST_CANNOT_RUN_ON_GPU)
-          }
-      }
-    case _ =>
-      willNotWorkOnGpu("the subquery to broadcast can not entirely run in the GPU.")
+  override def tagPlanForGpu(): Unit = {
+    val underlyingBroadcastCannotRunOnGpu =
+      "underlying BroadcastExchange can not run in the GPU."
+    s.child match {
+      // DPP: For AQE off, in this case, we handle DPP by converting the underlying
+      // BroadcastExchangeExec to GpuBroadcastExchangeExec.
+      // This is slightly different from the Apache Spark case, because Spark
+      // sends the underlying plan into the plugin in advance via the PlanSubqueries rule.
+      // Here, we have the full non-GPU subquery plan, so we convert the whole
+      // thing.
+      case ex @ BroadcastExchangeExec(_, child) =>
+        val exMeta = new GpuBroadcastMeta(ex.copy(child = child), conf, p, r)
+        exMeta.tagForGpu()
+        if (exMeta.canThisBeReplaced) {
+          broadcastBuilder = () => exMeta.convertToGpu()
+        } else {
+          willNotWorkOnGpu(underlyingBroadcastCannotRunOnGpu)
+        }
+      // DPP: For AQE on, we have an almost completely different scenario then before,
+      // Databricks uses a BroadcastQueryStageExec and either:
+      //  1) provide an underlying BroadcastExchangeExec that we will have to convert
+      //     somehow
+      //  2) might already do the reuse work for us. The ReusedExchange is now a
+      //     part of the SubqueryBroadcast, so we send it back here as underlying the
+      //     GpuSubqueryBroadcastExchangeExec
+      case bqse: BroadcastQueryStageExec =>
+        bqse.plan match {
+          case ex: BroadcastExchangeExec =>
+            val exMeta = new GpuBroadcastMeta(ex, conf, p, r)
+            exMeta.tagForGpu()
+            if (exMeta.canThisBeReplaced) {
+              broadcastBuilder = () => exMeta.convertToGpu()
+            } else {
+              willNotWorkOnGpu(underlyingBroadcastCannotRunOnGpu)
+            }
+          case reuse: ReusedExchangeExec =>
+            reuse.child match {
+              case _: GpuBroadcastExchangeExec =>
+                // A BroadcastExchange has already been replaced, so it can run on the GPU
+                broadcastBuilder = () => reuse
+              case _ =>
+                willNotWorkOnGpu(underlyingBroadcastCannotRunOnGpu)
+            }
+        }
+      case _ =>
+        willNotWorkOnGpu("the subquery to broadcast can not entirely run in the GPU.")
+    }
   }
-
-  private final val UNDERLYING_BROADCAST_CANNOT_RUN_ON_GPU =
-    "underlying BroadcastExchange can not run in the GPU."
   /**
    * Simply returns the original plan. Because its only child, BroadcastExchange, doesn't
    * need to change if SubqueryBroadcastExec falls back to the CPU.

@@ -42,6 +42,11 @@ import org.apache.spark.sql.rapids.ExternalSource
 import org.apache.spark.sql.sources.CreatableRelationProvider
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
+private[delta] object DatabricksDeltaProviderBase {
+  final val DELTA_WRITE_DISABLED_PREFIX =
+    "Delta Lake output acceleration has been disabled. To enable set "
+}
+
 /**
  * Common implementation of the DeltaProvider interface for all Databricks versions.
  */
@@ -129,15 +134,12 @@ trait DatabricksDeltaProviderBase extends DeltaProviderImplBase {
     }
   }
 
-  private final val DELTA_WRITE_DISABLED_PREFIX =
-    "Delta Lake output acceleration has been disabled. To enable set "
-
   override def tagForGpu(
       cpuExec: AtomicCreateTableAsSelectExec,
       meta: AtomicCreateTableAsSelectExecMeta): Unit = {
     require(isSupportedCatalog(cpuExec.catalog.getClass))
     if (!meta.conf.isDeltaWriteEnabled) {
-      meta.willNotWorkOnGpu(DELTA_WRITE_DISABLED_PREFIX +
+      meta.willNotWorkOnGpu(DatabricksDeltaProviderBase.DELTA_WRITE_DISABLED_PREFIX +
         s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
     }
     val properties = cpuExec.properties
@@ -162,7 +164,7 @@ trait DatabricksDeltaProviderBase extends DeltaProviderImplBase {
       meta: AtomicReplaceTableAsSelectExecMeta): Unit = {
     require(isSupportedCatalog(cpuExec.catalog.getClass))
     if (!meta.conf.isDeltaWriteEnabled) {
-      meta.willNotWorkOnGpu(DELTA_WRITE_DISABLED_PREFIX +
+      meta.willNotWorkOnGpu(DatabricksDeltaProviderBase.DELTA_WRITE_DISABLED_PREFIX +
         s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
     }
     val properties = cpuExec.properties
@@ -240,7 +242,7 @@ trait DatabricksDeltaProviderBase extends DeltaProviderImplBase {
       meta.willNotWorkOnGpu("Native staged Delta writes require a GPU atomic CTAS/RTAS writer")
     }
     if (!meta.conf.isDeltaWriteEnabled) {
-      meta.willNotWorkOnGpu(DELTA_WRITE_DISABLED_PREFIX +
+      meta.willNotWorkOnGpu(DatabricksDeltaProviderBase.DELTA_WRITE_DISABLED_PREFIX +
         s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
     }
     // DBR 17.3 and 18.3 atomic CTAS/RTAS wrappers retain the native catalog and staged table.
@@ -299,7 +301,7 @@ trait DatabricksDeltaProviderBase extends DeltaProviderImplBase {
         "Delta native staged tables are only supported by AppendDataExecV1")
     } else {
       if (!meta.conf.isDeltaWriteEnabled) {
-        meta.willNotWorkOnGpu(DELTA_WRITE_DISABLED_PREFIX +
+        meta.willNotWorkOnGpu(DatabricksDeltaProviderBase.DELTA_WRITE_DISABLED_PREFIX +
             s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
       }
       val deltaTable = cpuExec.table.asInstanceOf[DeltaTableV2]
@@ -349,7 +351,7 @@ class DeltaCreatableRelationProviderMeta(
 
   override def tagSelfForGpu(): Unit = {
     if (!conf.isDeltaWriteEnabled) {
-      willNotWorkOnGpu(DELTA_WRITE_DISABLED_PREFIX +
+      willNotWorkOnGpu(DatabricksDeltaProviderBase.DELTA_WRITE_DISABLED_PREFIX +
           s"${RapidsConf.ENABLE_DELTA_WRITE} to true")
     }
     val path = saveCmd.options.get("path")

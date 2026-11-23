@@ -126,6 +126,9 @@ object DeltaProvider {
 }
 
 object NoDeltaProvider extends DeltaProvider {
+  private final val CATALOG_NOT_SUPPORTED_MSG = "catalog not supported, should not be called"
+  private final val WRITE_NOT_SUPPORTED_MSG = "write not supported, should not be called"
+
   override def getCreatableRelationRules: Map[Class[_ <: CreatableRelationProvider],
       CreatableRelationProviderRule[_ <: CreatableRelationProvider]] = Map.empty
 
@@ -145,9 +148,6 @@ object NoDeltaProvider extends DeltaProvider {
 
   override def getReadFileFormat(relation: HadoopFsRelation, rapidsConf: RapidsConf): FileFormat =
     throw new IllegalStateException("unsupported format")
-
-  private final val CATALOG_NOT_SUPPORTED_MSG = "catalog not supported, should not be called"
-  private final val WRITE_NOT_SUPPORTED_MSG = "write not supported, should not be called"
 
   override def isSupportedCatalog(catalogClass: Class[_ <: StagingTableCatalog]): Boolean = false
 
