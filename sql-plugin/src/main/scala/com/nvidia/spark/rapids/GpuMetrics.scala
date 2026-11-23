@@ -74,6 +74,9 @@ class GpuMetricFactory(metricsConf: MetricsLevel, context: SparkContext) {
   def create(level: MetricsLevel, name: String): GpuMetric =
     createInternal(level, SQLMetrics.createMetric(context, name))
 
+  def create(level: MetricsLevel, metric: => SQLMetric): GpuMetric =
+    createInternal(level, metric)
+
   def createNanoTiming(level: MetricsLevel, name: String): GpuMetric =
     createInternal(level, SQLMetrics.createNanoTimingMetric(context, name))
 
