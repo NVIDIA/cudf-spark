@@ -523,13 +523,6 @@ run_iceberg_tests() {
     return 0
   fi
 
-  local lakekeeper_version="${ICEBERG_TEST_LAKEKEEPER_VERSION:-}"
-  if [[ "$test_type" == "rest" && -n "${LAKEKEEPER_BOOTSTRAP_SCRIPT:-}" ]]; then
-    # The REST job bootstraps Lakekeeper with this binary in the test container.
-    lakekeeper_version=$("${LAKEKEEPER_BIN:-/opt/lakekeeper/lakekeeper}" --version) || return 1
-    lakekeeper_version=${lakekeeper_version##* }
-  fi
-
   for ICEBERG_VERSION in $iceberg_versions; do
     echo "Running Iceberg tests for Iceberg version $ICEBERG_VERSION"
     if [[ "$test_type" == "default" ]]; then
@@ -558,7 +551,6 @@ org.apache.iceberg:iceberg-aws-bundle:${ICEBERG_VERSION}"
             EXPECTED_ICEBERG_VERSION=${ICEBERG_VERSION} \
             ICEBERG_EXTRA_CLASSPATH="${ICEBERG_REST_EXTRA_CLASSPATH}" \
             ICEBERG_TEST_CATALOG_TYPE="rest" \
-            ICEBERG_TEST_LAKEKEEPER_VERSION="$lakekeeper_version" \
             ICEBERG_TEST_REMOTE_CATALOG=1 \
             PYSP_TEST_spark_driver_memory=1G \
             PYSP_TEST_spark_executor_memory=2G \

@@ -731,12 +731,6 @@ and releases memory between partitions. Dedicated fanout-enabled test cases
 (e.g., `test_*_fanout_enabled`) still exercise the fanout writer path with a single
 partition type to keep memory usage manageable.
 
-#### Lakekeeper version
-
-When running the REST tests against Lakekeeper, set `ICEBERG_TEST_LAKEKEEPER_VERSION` to the
-server version so pytest can skip cases affected by catalog-specific issues. The CI job that
-starts Lakekeeper sets this automatically.
-
 #### Iceberg REST catalog write compression
 
 Older Iceberg REST clients, including 1.6.x, do not apply client-side
