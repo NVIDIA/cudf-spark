@@ -21,12 +21,22 @@ on main and release branch pushes and refreshes main on a schedule.
 See the `ci-toolchains` entries in [suites.json](suites.json) for image names,
 platforms, and build arguments. Each image is smoke-tested before its tag moves.
 
-Spark and integration tags include the branch or release prefix and OS, not the
-CUDA version or architecture. For example, `docker pull ghcr.io/nvidia/cudf-spark/integration-ubuntu:main-ubuntu22.04`
-selects the native Linux AMD64 or ARM64 image.
-Main seeds the release tag from the root POM until the matching
-release branch exists. After the branch is cut, it owns that release tag.
-Skills uses the branch prefix alone.
+Choose the package by job, not by CUDA classifier. Pull from
+`ghcr.io/nvidia/cudf-spark/` with these package and tag names:
+
+| Job | Package and tag |
+| --- | --- |
+| Build the plugin or run its Maven unit tests | `spark-build:<line>-ubuntu22.04` |
+| Run integration tests on Ubuntu | `integration-ubuntu:<line>-ubuntu22.04` or `<line>-ubuntu24.04` |
+| Run integration tests on Rocky | `integration-rocky:<line>-rockylinux8` or `<line>-rockylinux9` |
+| Build or test Skills | `skills-build:<line>` (AMD64 only) |
+
+Use `main` for a main-line job and `YY.MM` for a release-line job, even when
+checking out a commit SHA. Main seeds versioned Spark and integration tags until
+the matching release branch exists; after branch-out that branch owns them.
+For example, both AMD64 and ARM64 workers use
+`docker pull ghcr.io/nvidia/cudf-spark/integration-ubuntu:main-ubuntu22.04`.
+A registry mirror must preserve the multi-platform index, not just one worker's image.
 
 To select an alternate JDK, set `JAVA_HOME` and put its `bin` directory first on
 `PATH`.
