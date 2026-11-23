@@ -1,11 +1,13 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Select affected Docker images and compute their validation or publication settings."""
+"""Select CI images for validation, publication, or use from a source checkout."""
 
+import argparse
 import json
 import os
 import re
+import runpy
 import subprocess
 import sys
 from pathlib import Path
@@ -60,11 +62,13 @@ def affected(entry, changed, rules, *, publish):
 
 
 def release_line(revision, version_file):
-    pom = ElementTree.fromstring(git("show", f"{revision}:{version_file}"))
+    source = git("show", f"{revision}:{version_file}") if revision else Path(version_file).read_bytes()
+    pom = ElementTree.fromstring(source)
     version = pom.findtext("{*}version", default="").strip()
     match = re.fullmatch(r"(\d{2}\.\d{2})\.\d+(?:-[A-Za-z0-9.-]+)?", version)
     if not match:
-        raise ValueError(f"Cannot determine release line from {version_file} version {version!r} at {revision}")
+        raise ValueError(f"Cannot determine release line from {version_file} version {version!r}"
+                         f" at {revision or 'checkout'}")
     return match.group(1)
 
 
@@ -131,6 +135,39 @@ def configurations(name, entry, tracked, branch_tag, line, publish, has_publishe
             "smoke-test": smoke, "smoke-args": entry.get("smoke-args", []), "recipe-inputs": inputs,
             "workers": workers, "multi": len(workers) > 1,
         }
+
+
+def resolve_images(requests, allow_main):
+    """Describe only the requested published images for the shared registry resolver."""
+    line = release_line(None, json.loads(PATH_RULES.read_text())["release-version-file"])
+    available = {}
+    for image, entry in json.loads(CATALOG.read_text())["ci-toolchains"].items():
+        _, _, ignores = inputs_for(entry)
+        present = {path for path in ignores if Path(path).is_file()}
+        for config in configurations(image, entry, present, "main", line, publish=True, has_publisher=True):
+            variant = config["tag"].removeprefix("main").lstrip("-")
+            for worker in config["workers"]:
+                key = "/".join(filter(None, (image, variant, worker["arch"])))
+                available[key] = (config, worker)
+    unknown = set(requests) - available.keys()
+    if unknown:
+        raise ValueError(f"Unknown image selection: {sorted(unknown)}. Available: {sorted(available)}")
+    helper = os.environ.get("CI_IMAGE_METADATA_HELPER")
+    if not helper:
+        raise ValueError("Set CI_IMAGE_METADATA_HELPER to container-image/metadata.py from spark-rapids-common")
+    fingerprint = runpy.run_path(helper)["fingerprint"]
+    result = {}
+    for key in dict.fromkeys(requests):
+        config, worker = available[key]
+        # Match the publisher: the platform and its resolved build arguments override the recipe.
+        recipe = {k: v for k, v in config.items() if k != "workers"} | worker
+        tags = [config["release_tag"] or line]
+        if allow_main:
+            tags.append(config["tag"])
+        result[key] = {"image": "ghcr.io/nvidia/cudf-spark/" + config["image"],
+                       "platform": worker["platform"], "version": fingerprint(recipe, Path.cwd()),
+                       "tags": tags}
+    return result
 
 
 def select():
@@ -206,12 +243,25 @@ def select():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == "--current":
-        current = still_current(sys.argv[2])
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--current", metavar="IMAGE", help="Check whether this publisher is still current")
+    mode.add_argument("--resolve", nargs="+", metavar="PACKAGE/[OS/]ARCH",
+                      help="Print consumer metadata for the named selections at this checkout")
+    parser.add_argument("--allow-main-fallback", action="store_true",
+                        help="Allow a compatible main image after the versioned tag (development only)")
+    args = parser.parse_args()
+    if args.allow_main_fallback and not args.resolve:
+        parser.error("--allow-main-fallback requires --resolve")
+    if args.resolve:
+        print(json.dumps(resolve_images(args.resolve, args.allow_main_fallback)))
+        sys.exit(0)
+    if args.current:
+        current = still_current(args.current)
         with open(os.environ["GITHUB_OUTPUT"], "a") as output:
             print("current=" + str(current).lower(), file=output)
         if not current:
-            print(f"Skipping superseded recipe for {sys.argv[2]}; its branch inputs changed.")
+            print(f"Skipping superseded recipe for {args.current}; its branch inputs changed.")
         sys.exit(0)
     jobs, run_tests = select()
     with open(os.environ["GITHUB_OUTPUT"], "a") as output:

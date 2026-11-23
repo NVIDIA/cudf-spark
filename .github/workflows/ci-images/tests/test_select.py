@@ -91,6 +91,60 @@ class ImageSelectorTest(unittest.TestCase):
         return {key: json.loads(value) for key, value in
                 (line.split("=", 1) for line in output.read_text().splitlines())}
 
+    def resolve(self, *args):
+        helper = self.root / "metadata.py"
+        helper.write_text(
+            "import json\n"
+            "def fingerprint(config, root):\n"
+            "    assert (root / config['dockerfile']).is_file()\n"
+            "    return json.dumps(config, sort_keys=True)\n"
+        )
+        # The nightly resolver has Python but may not have Git on PATH.
+        return json.loads(subprocess.check_output(
+            [sys.executable, str(SOURCE / "select.py"), "--resolve", *args],
+            cwd=self.repo, env=dict(self.env, PATH="", CI_IMAGE_METADATA_HELPER=str(helper)),
+            text=True, stderr=subprocess.PIPE))
+
+    def test_consumer_uses_pom_tags_and_published_worker_recipe(self):
+        ignore = SPARK + ".dockerignore"
+        self.write(ignore, "*.log\n")
+        self.commit("Add a Spark-specific Docker ignore file")
+        self.git("checkout", "--detach", "-q")
+        selections = ["spark-build/ubuntu22.04/amd64", "integration-ubuntu/ubuntu22.04/arm64",
+                      "skills-build/amd64"]
+        strict = self.resolve(*selections)
+        fallback = self.resolve(*selections, "--allow-main-fallback")
+        self.assertEqual(strict.keys(), set(selections))
+        self.assertEqual(fallback.keys(), set(selections))
+        publications = self.invoke(event="workflow_dispatch")["publish"]
+        workers = {(c["image"], c["tag"], w["platform"]): (c, w)
+                   for c in publications for w in c["workers"]}
+        for key in selections:
+            package, *variant, arch = key.split("/")
+            suffix = "-" + variant[0] if variant else ""
+            version = strict[key]["version"]
+            platform = f"linux/{arch}"
+            expected = {"image": f"ghcr.io/nvidia/cudf-spark/{package}", "platform": platform,
+                        "version": version, "tags": [RELEASE_LINE + suffix]}
+            self.assertEqual(strict[key], expected)
+            self.assertEqual(fallback[key], expected | {"tags": [RELEASE_LINE + suffix, "main" + suffix]})
+            recipe = json.loads(version)  # The fixture returns the fingerprint inputs verbatim.
+            config, worker = workers[package, "main" + suffix, platform]
+            for field in ("context", "dockerfile", "recipe-inputs"):
+                self.assertEqual(recipe[field], config[field])
+            self.assertEqual(ignore in recipe["recipe-inputs"], package == "spark-build")
+            self.assertEqual(recipe["platform"], platform)
+            self.assertEqual(recipe["build-args"], worker["build-args"])
+
+    def test_consumer_rejects_unsupported_or_unpublished_selections(self):
+        for key in ("skills-build/arm64", "integration-ubuntu/ubuntu20.04/amd64",
+                    "udf-cuda-template/amd64"):
+            with self.subTest(key=key):
+                with self.assertRaises(subprocess.CalledProcessError) as error:
+                    self.resolve("skills-build/amd64", key)
+                self.assertIn(key, error.exception.stderr)
+                self.assertFalse(error.exception.output.strip())
+
     def assert_versioned_images(self, configs, prefix, alias_prefix=None):
         self.assertCountEqual([(c["image"], c["tag"]) for c in configs],
                               [(name, f"{prefix}-{suffix}") for name, suffix, *_ in VARIANTS])

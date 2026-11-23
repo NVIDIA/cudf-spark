@@ -34,9 +34,28 @@ Choose the package by job, not by CUDA classifier. Pull from
 Use `main` for a main-line job and `YY.MM` for a release-line job, even when
 checking out a commit SHA. Main seeds versioned Spark and integration tags until
 the matching release branch exists; after branch-out that branch owns them.
+Skills gets its versioned tag from the release publisher, not before branch-out.
 For example, both AMD64 and ARM64 workers use
 `docker pull ghcr.io/nvidia/cudf-spark/integration-ubuntu:main-ubuntu22.04`.
 A registry mirror must preserve the multi-platform index, not just one worker's image.
+
+For CI jobs that verify images against the source checkout, use the same recipe
+helper as the publisher. Check the bootstrap job's Python version with
+`python3 --version`, then run the selector from the clean source checkout.
+This mode does not need Git or registry credentials:
+
+```sh
+CI_IMAGE_METADATA_HELPER=/path/to/spark-rapids-common/container-image/metadata.py \
+  python3 .github/workflows/ci-images/select.py --resolve \
+    spark-build/ubuntu22.04/amd64 integration-ubuntu/ubuntu22.04/arm64
+```
+
+Resolve in a bootstrap job before allocating the build or test workers. The
+JSON map gives the image, platform, expected recipe version, and tags for each
+request. The default is the versioned tag from the checked-out POM, including
+on a detached commit. Development jobs can pass `--allow-main-fallback` and
+enable fallback in their registry resolver to try the matching main tag second.
+Use the digest returned after the platform and recipe label match.
 
 To select an alternate JDK, set `JAVA_HOME` and put its `bin` directory first on
 `PATH`.
