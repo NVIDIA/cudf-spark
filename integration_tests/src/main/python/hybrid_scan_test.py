@@ -329,8 +329,8 @@ def test_hybrid_scan_local_checksum(spark_tmp_path, reader_mode):
     data_path = spark_tmp_path + '/HYBRID_SCAN_DATA'
     with_cpu_session(lambda spark: write_test_data(spark, data_path, files=2))
     local_paths = with_cpu_session(lambda spark: _local_paths(spark, data_path))
-    if local_paths is None:
-        pytest.skip('only local files have checksum sidecars')
+    if local_paths is None or not os.path.exists(_checksum_file(local_paths[0])):
+        pytest.skip('only a checksummed local filesystem writes checksum sidecars')
     # Flip a byte of the first column chunk, which starts after the 4-byte magic.
     with open(local_paths[0], 'r+b') as f:
         f.seek(4)
