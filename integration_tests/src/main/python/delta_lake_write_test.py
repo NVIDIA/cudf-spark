@@ -2287,6 +2287,34 @@ def test_delta_write_identity_columns_sql(spark_tmp_path):
 @allow_non_gpu("CreateTableExec", *delta_meta_allow)
 @delta_lake
 @ignore_order
+@pytest.mark.skipif(not is_databricks_runtime(),
+                    reason="Delta Lake identity columns for SQL are currently only supported on Databricks")
+def test_delta_write_identity_columns_column_mapping_sql(spark_tmp_path):
+    """
+    With column mapping the high water mark of an identity column is tracked by physical column
+    name; the second append starts from the high water mark of the first.
+    """
+    data_path = spark_tmp_path + "/DELTA_DATA"
+    def create_data(spark, path):
+        spark.sql("CREATE TABLE delta.`{}` (x BIGINT, id BIGINT GENERATED ALWAYS AS IDENTITY "
+                  "(START WITH 10 INCREMENT BY 3)) USING DELTA "
+                  "TBLPROPERTIES ('delta.columnMapping.mode' = 'name')".format(path))
+        spark.range(2048).selectExpr("id * id AS x").write.format("delta").mode("append").save(path)
+    # Column mapping assigns random physical names, so the Delta logs differ between runs by
+    # design; compare only the table contents, including the second append.
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        create_data, lambda spark, path: spark.read.format("delta").load(path), data_path,
+        conf=delta_writes_enabled_conf)
+    def append_data(spark, path):
+        spark.range(2048).selectExpr("id + 10 as x").write.format("delta").mode("append").save(path)
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        append_data, lambda spark, path: spark.read.format("delta").load(path), data_path,
+        conf=delta_writes_enabled_conf)
+
+
+@allow_non_gpu("CreateTableExec", *delta_meta_allow)
+@delta_lake
+@ignore_order
 @pytest.mark.skipif(is_databricks_runtime(), reason="IdentityGenerator is missing in Databricks python API")
 @pytest.mark.skipif(not is_databricks_runtime() and is_before_spark_350(),
                     reason="Delta Lake identity columns for Dataframe are currently only supported on Apache Spark 3.5+")
