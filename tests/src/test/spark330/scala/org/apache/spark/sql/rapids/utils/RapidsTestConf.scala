@@ -23,6 +23,11 @@ import org.apache.spark.SparkConf
 
 object RapidsTestConf {
   def apply(conf: SparkConf): SparkConf = {
+    Seq("allocFraction" -> "1", "maxAllocFraction" -> "1", "minAllocFraction" -> "0.25")
+      .foreach { case (name, default) =>
+        val key = s"spark.rapids.memory.gpu.$name"
+        conf.set(key, System.getProperty(s"rapids.test.gpu.$name", conf.get(key, default)))
+      }
     Option(System.getenv("SPARK_CONF")).foreach { settings =>
       settings.split(",").filter(_.trim.nonEmpty).foreach { setting =>
         val keyValue = setting.split("=", 2)
@@ -32,11 +37,6 @@ object RapidsTestConf {
         conf.set(key, keyValue(1))
       }
     }
-    Seq("allocFraction" -> "1", "maxAllocFraction" -> "1", "minAllocFraction" -> "0.25")
-      .foreach { case (name, default) =>
-        val key = s"spark.rapids.memory.gpu.$name"
-        conf.set(key, System.getProperty(s"rapids.test.gpu.$name", conf.get(key, default)))
-      }
     conf
   }
 }

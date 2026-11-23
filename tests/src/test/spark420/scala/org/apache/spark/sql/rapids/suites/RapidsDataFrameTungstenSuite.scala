@@ -35,11 +35,14 @@ class RapidsDataFrameTungstenSuite extends DataFrameTungstenSuite with RapidsSQL
       try {
         testFun
         val plans = ExecutionPlanCaptureCallback.getResultsWithTimeout()
+        val plan = plans.lastOption.getOrElse(fail(s"No executed query captured in $testName"))
         val planHelper = ShimLoaderTemp.newAdaptiveSparkPlanHelperShim()
-        val gpuNodes = plans.flatMap { plan =>
-          planHelper.collect(plan) { case gpu: GpuExec => gpu }
+        val gpuNodes = planHelper.collect(plan) { case gpu: GpuExec => gpu }
+        assert(gpuNodes.nonEmpty, s"No GPU execution in $testName:\n$plan")
+        if (testName == "access only some column of the all of columns") {
+          // The last query asserts the filtered count; the earlier count only warms the cache.
+          ExecutionPlanCaptureCallback.assertContains(plan, "GpuFilterExec")
         }
-        assert(gpuNodes.nonEmpty, s"No GPU execution in $testName:\n${plans.mkString("\n")}")
         info(s"GPU execution verified for $testName: " +
           gpuNodes.map(_.getClass.getSimpleName).distinct.mkString(", "))
       } finally {
