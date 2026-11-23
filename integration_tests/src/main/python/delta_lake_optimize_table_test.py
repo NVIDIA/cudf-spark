@@ -166,6 +166,11 @@ def _write_mixed_timestamp_partition_files(
 
     input_files = spark.read.format("delta").load(path).inputFiles()
     assert len(input_files) == 4, f"Expected 4 input files, but got {input_files}"
+    # Without two raw forms in the log the tests below could not tell grouping by raw strings
+    # from grouping by normalized values, e.g. if a runtime ignored the UTC-partition conf.
+    raw_partitions = get_raw_timestamp_partition_values(spark, path)
+    assert len(raw_partitions) == 2, \
+        f"Expected two raw timestamp partition strings, but got {raw_partitions}"
 
 
 def _write_many_small_row_tracking_files(
@@ -610,8 +615,9 @@ def test_delta_optimize_normalized_timestamp_partitions(
         write_func=_write_mixed_timestamp_partition_files,
         check_delta_log=False)
 
-    # Databricks always normalizes partition values when selecting files (confirmed on 17.3 and
-    # 18.3), so both parameter values expect one file there.
+    # Databricks always normalizes partition values when selecting files (observed on 17.3 and
+    # 18.3), so both parameter values expect one file there. The writer asserts that two raw
+    # forms reached the log, which is what makes that 1-file result meaningful.
     expected_file_count = 1 if normalize_partition_values_on_read or is_databricks_runtime() else 2
 
     def assert_compacted_file_count(spark, path):

@@ -921,3 +921,12 @@ def insert_timestamp_partition_row(spark, path, row_id, write_utc_partition_valu
             spark.conf.unset(_UTC_TIMESTAMP_PARTITION_CONF)
         else:
             spark.conf.set(_UTC_TIMESTAMP_PARTITION_CONF, previous_value)
+
+
+def get_raw_timestamp_partition_values(spark, path):
+    """
+    Returns the distinct raw `ts` partition strings of every AddFile in the whole Delta log
+    history, including files that were later removed.
+    """
+    return {r[0] for r in spark.read.json(path + "/_delta_log/*.json")
+            .where("add IS NOT NULL").selectExpr("add.partitionValues.ts").collect()}

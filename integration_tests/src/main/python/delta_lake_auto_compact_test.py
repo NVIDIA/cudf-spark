@@ -176,18 +176,22 @@ def test_auto_compact_mixed_timestamp_partition_forms(
     """
     Logically equal timestamp partition values written in different textual forms are
     compacted into one bin only when `spark.databricks.delta.normalizePartitionValuesOnRead`
-    is true, while a logically different value stays in its own bin. Checks that the GPU
-    write executed (and, when compaction is expected, that inline auto compaction ran on the
-    GPU), and compares CPU and GPU file counts, data and OPTIMIZE metrics. The local form is
-    written in the session time zone, which is the main semantic risk of normalization.
+    is true, while a logically different value stays in its own bin. Auto compaction is
+    enabled only for the last insert, which the test captures, so in both settings exactly one
+    compaction runs inside the capture window and its GPU execution is asserted. Compares CPU
+    and GPU file counts, data and OPTIMIZE metrics. The local form is written in the session
+    time zone, which is the main semantic risk of normalization.
     """
     data_path = spark_tmp_path + "/AUTO_COMPACT_TS_PARTITIONS"
     cpu_path, gpu_path = data_path + "/CPU", data_path + "/GPU"
+    auto_compact_key = "spark.databricks.delta.autoCompact.enabled"
     conf = copy_and_update(_conf, {
-        "spark.databricks.delta.autoCompact.enabled": "true",
+        auto_compact_key: "true",
         "spark.sql.session.timeZone": session_time_zone,
         "spark.databricks.delta.normalizePartitionValuesOnRead":
             str(normalize_partition_values_on_read).lower()})
+    # Delta still records partition stats while auto compaction is off.
+    setup_conf = copy_and_update(conf, {auto_compact_key: "false"})
     # 12:00 UTC written as a local string and as a UTC string, then a different instant (13:00
     # UTC) that must never join the 12:00 bin, then the local 12:00 form again.
     local_12, local_13 = ("2000-01-01 12:00:00", "2000-01-01 13:00:00") \
@@ -201,11 +205,12 @@ def test_auto_compact_mixed_timestamp_partition_forms(
 
     for path in [cpu_path, gpu_path]:
         with_cpu_session(lambda spark: create_timestamp_partitioned_table(spark, path), conf)
-    # Write below the threshold first so the captured insert has exactly one user append and,
-    # if inline auto compaction runs on the GPU, one compaction write.
+    # Auto compaction is off for the setup inserts. Delta's partition stats are keyed by the raw
+    # partition string, so a compaction on an earlier insert would run outside the capture
+    # window and depend on the insert order.
     last = len(inserts) - 1
-    with_cpu_session(lambda spark: insert(spark, cpu_path, 0, last), conf)
-    with_gpu_session(lambda spark: insert(spark, gpu_path, 0, last), conf)
+    with_cpu_session(lambda spark: insert(spark, cpu_path, 0, last), setup_conf)
+    with_gpu_session(lambda spark: insert(spark, gpu_path, 0, last), setup_conf)
     with_cpu_session(lambda spark: insert(spark, cpu_path, last, last + 1), conf)
     plan_callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
     plan_callback.startCapture()
@@ -216,10 +221,7 @@ def test_auto_compact_mixed_timestamp_partition_forms(
         plan_callback.endCapture()
 
     def summarize(spark, path):
-        # Raw strings across the whole log history, including files removed by compaction.
-        raw_partitions = {r[0] for r in spark.read.json(path + "/_delta_log/*.json")
-                          .where("add IS NOT NULL")
-                          .selectExpr("add.partitionValues.ts").collect()}
+        raw_partitions = get_raw_timestamp_partition_values(spark, path)
         history = spark.sql(f"DESCRIBE HISTORY delta.`{path}`")
         optimize = history.where("operation = 'OPTIMIZE'").selectExpr(
             "operationMetrics['numAddedFiles']", "operationMetrics['numRemovedFiles']").collect()
@@ -244,16 +246,16 @@ def test_auto_compact_mixed_timestamp_partition_forms(
             f"Expected a {class_name} plan for the GPU insert"
     assert num_raw_partitions == 3, \
         "Inputs must use three distinct raw partition strings across the log history"
+    # The 12:00 forms are one file only when normalized; 13:00 always keeps its own file.
+    # Exactly one OPTIMIZE ran, in the captured insert, in both settings.
     if normalize_partition_values_on_read:
-        assert optimize_ops, "Expected auto compaction to run"
-        # The 12:00 forms are merged into one file; 13:00 keeps its own file.
-        assert files_per_ts == [1, 1], f"Unexpected files per partition: {files_per_ts}"
-        assert num_files == 2, f"Expected two files, got {num_files}"
-        assert_inline_auto_compaction_used_gpu(captured_plans)
+        expected = ([("1", "3")], [1, 1], 2)
     else:
-        assert not optimize_ops, "Raw-string partitions must not be auto compacted together"
-        assert files_per_ts == [3, 1], f"Unexpected files per partition: {files_per_ts}"
-        assert num_files == 4, f"Expected four uncompacted files, got {num_files}"
+        expected = ([("1", "2")], [2, 1], 3)
+    assert (optimize_ops, files_per_ts, num_files) == expected, \
+        f"Expected (OPTIMIZE metrics, files per partition, files) {expected}, " \
+        f"got {(optimize_ops, files_per_ts, num_files)}"
+    assert_inline_auto_compaction_used_gpu(captured_plans)
 
 
 @delta_lake
